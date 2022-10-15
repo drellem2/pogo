@@ -1,0 +1,24 @@
+////////////////////////////////////////////////////////////////////////////////
+////////// Maintains a list of projects visited by the user. ///////////////////
+////////// Author: drellem    Date: 2022-10-15     	     ///////////////////
+////////////////////////////////////////////////////////////////////////////////
+package pogo
+
+type Project struct {
+    Id int `json:"id"`
+    Path string `json:"path"`
+}
+
+// TODO: serialize/deserialize somewhere
+var projects []Project
+
+func Init() {
+     projects = []Project{
+         Project{Id: 1, Path: "~/dev/pogod"},
+	 Project{Id: 2, Path: "~/dev/auth-service"},
+    }
+}
+
+func Projects() []Project {
+     return projects
+}
