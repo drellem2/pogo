@@ -5,8 +5,10 @@
 package project
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io/ioutil"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -18,9 +20,58 @@ type Project struct {
 	Path string `json:"path"`
 }
 
+type ProjectsSave struct {
+	Projects []Project `json:"projects"`
+}
+
+var projectFile string
+var projects []Project
+
 // For now a noop.
 func Init() {
+	projects = []Project{}
+	home := os.Getenv("POGO_HOME")
+	if home == "" {
+		home = "."
+	}
+	fmt.Printf("POGO_HOME=%s\n", home)
+	projectFile = home + "/projects.json"
+	_, err := os.Lstat(projectFile)
+	skipImport := false
+	if err != nil {
+		skipImport = true
+		if !errors.Is(err, os.ErrNotExist) {
+			fmt.Printf("Error getting file info %v", err)
+		}
+		fmt.Printf("Save file %s does not exist.", projectFile)
+	}
+	if !skipImport {
+		file, err2 := os.Open(projectFile)
+		if err2 != nil {
+			fmt.Printf("Error opening file info")
+			return
+		}
+		defer file.Close()
+		byteValue, _ := ioutil.ReadAll(file)
+		var projectsStruct ProjectsSave
+		json.Unmarshal(byteValue, &projectsStruct)
+		projects = projectsStruct.Projects
+	}
+}
 
+func SaveProjects() {
+	fmt.Printf("Saving projects to %s", projectFile)
+	projectsStruct2 := ProjectsSave{Projects: projects}
+	outBytes, err := json.Marshal(&projectsStruct2)
+	if err != nil {
+		fmt.Printf("Error saving projects: %v", err)
+		return
+	}
+	err2 := os.WriteFile(projectFile, outBytes, 0644)
+	if err2 != nil {
+		fmt.Printf("Error saving projects: %v", err2)
+		return
+	}
 }
 
 const visitResponseRelativePath = "'path' cannot be relative."
@@ -48,9 +99,6 @@ type VisitRequest struct {
 type VisitResponse struct {
 	ParentProject Project `json:"project"`
 }
-
-// TODO: serialize/deserialize somewhere
-var projects []Project
 
 func Projects() []Project {
 	return projects
@@ -128,7 +176,7 @@ func searchAndCreate(path string) (*Project, error) {
 	if err != nil {
 		return nil, err
 	}
-
+	defer file.Close()
 	dirnames, err2 := file.Readdirnames(0)
 	if err2 != nil {
 		return nil, err2

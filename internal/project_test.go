@@ -2,6 +2,7 @@ package project
 
 import (
 	"net/http"
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -19,10 +20,10 @@ func setUp(t *testing.T) (string, error) {
 		return "", err
 	}
 	t.Logf("a-service at: %s", aServiceAbs)
+	Init()
 	projects = []Project{
 		Project{Id: 1, Path: aServiceAbs},
 	}
-	Init()
 	return aServiceAbs, nil
 }
 
@@ -197,4 +198,17 @@ func TestRelativePathReturns400(t *testing.T) {
 	for _, file := range files {
 		testRelativePathReturnsReturns400(file, t)
 	}
+}
+
+func TestSaveProjects(t *testing.T) {
+	setUp(t)
+	projectNum := len(projects)
+	SaveProjects()
+	Init()
+	projectNum2 := len(projects)
+	if projectNum != projectNum2 {
+		t.Errorf("Project number expected %d but found  %d", projectNum, projectNum2)
+	}
+	// Cleanup
+	os.Remove(projectFile)
 }

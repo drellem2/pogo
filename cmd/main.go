@@ -75,6 +75,8 @@ func main() {
 			fmt.Printf("Cannot unlock %q, reason: %v", lock, err)
 		}
 	}()
+
+	defer project.SaveProjects()
 	project.Init()
 	handleRequests()
 }
