@@ -1,3 +1,4 @@
 export GOPATH=$(cd .. && pwd)
 echo "Setting GOPATH to " $GOPATH
-find . -name main.go | xargs go run
+go build -o search/search search/search_impl.go &&  \
+go run cmd/main.go
