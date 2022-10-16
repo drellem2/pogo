@@ -9,10 +9,15 @@ import (
 	"errors"
 	"fmt"
 	"io/ioutil"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/hashicorp/go-plugin"
+
+	pogoPlugin "github.com/marginalia-gaming/pogo/plugin"
 )
 
 type Project struct {
@@ -26,9 +31,11 @@ type ProjectsSave struct {
 
 var projectFile string
 var projects []Project
+var client *plugin.Client
 
 // For now a noop.
-func Init() {
+func Init(client2 *plugin.Client) {
+	client = client2
 	projects = []Project{}
 	home := os.Getenv("POGO_HOME")
 	if home == "" {
@@ -56,6 +63,9 @@ func Init() {
 		var projectsStruct ProjectsSave
 		json.Unmarshal(byteValue, &projectsStruct)
 		projects = projectsStruct.Projects
+		for _, p := range(projects) {
+			addToPlugin(p)
+		}
 	}
 }
 
@@ -102,6 +112,55 @@ type VisitResponse struct {
 
 func Projects() []Project {
 	return projects
+}
+
+func addToPlugin(p Project) {
+	// Connect via RPC
+	rpcClient, err := client.Client()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Request the plugin
+	raw, err := rpcClient.Dispense("basicSearch")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	basicSearch := raw.(pogoPlugin.IPogoPlugin)
+	req := pogoPlugin.ProcessProjectReq{PathVar: p.Path}
+	ireq := pogoPlugin.IProcessProjectReq(req)
+	err = basicSearch.ProcessProject(&ireq)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err != nil {
+		log.Fatal(err)
+	}
+}
+
+func Add(p Project) {
+	if len(projects) == 0 {
+		p.Id = 1
+	} else {
+		p.Id = projects[len(projects)-1].Id + 1
+	}
+	addToPlugin(p)
+	projects = append(projects, p)
+}
+
+func AddAll(ps []Project) {
+	var start int
+	if len(projects) == 0 {
+		start = 1
+	} else {
+		start = projects[len(projects)-1].Id + 1
+	}
+	for i, elem := range ps {
+		elem.Id = start + i
+		addToPlugin(elem)
+	}
+	projects = append(projects, ps...)
 }
 
 // If the path is within an existing project, returns the project. Otherwise
@@ -187,19 +246,11 @@ func searchAndCreate(path string) (*Project, error) {
 	}
 
 	if hasGit(dirnames) {
-		var project Project
-		if len(projects) == 0 {
-			project = Project{
-				Id:   1,
-				Path: path,
-			}
-		} else {
-			project = Project{
-				Id:   projects[len(projects)-1].Id + 1,
-				Path: path,
-			}
+		var project = Project{
+			Id:   0,
+			Path: path,
 		}
-		projects = append(projects, project)
+		Add(project)
 		return &project, nil
 	}
 

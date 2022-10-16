@@ -136,33 +136,9 @@ func main() {
 		SecureConfig:    secureConfig,
 	})
 	defer client.Kill()
-
-	// Connect via RPC
-	rpcClient, err := client.Client()
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	// Request the plugin
-	raw, err := rpcClient.Dispense("basicSearch")
-	if err != nil {
-		log.Fatal(err)
-	}
 	gob.Register(pogoPlugin.ProcessProjectReq{})
 
-	// Example plugin usage
-	// basicSearch := raw.(pogoPlugin.IPogoPlugin)
-	// req := pogoPlugin.ProcessProjectReq{PathVar: "abcdefghjiklmnopqrstuvwxyz"}
-	// ireq := pogoPlugin.IProcessProjectReq(req)
-	// err = basicSearch.ProcessProject(&ireq)
-	// if err != nil {
-	// 	log.Fatal(err)
-	// }
-	// if err != nil {
-	// 	log.Fatal(err)
-	// }
-
 	defer project.SaveProjects()
-	project.Init()
+	project.Init(client)
 	handleRequests()
 }

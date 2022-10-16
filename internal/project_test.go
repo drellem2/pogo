@@ -21,9 +21,10 @@ func setUp(t *testing.T) (string, error) {
 	}
 	t.Logf("a-service at: %s", aServiceAbs)
 	Init()
-	projects = []Project{
-		Project{Id: 1, Path: aServiceAbs},
-	}
+	Add(Project{
+		Id:   0,
+		Path: aServiceAbs,
+	})
 	return aServiceAbs, nil
 }
 
