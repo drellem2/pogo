@@ -19,30 +19,30 @@ func homePage(w http.ResponseWriter, r *http.Request){
 }
 
 func allProjects(w http.ResponseWriter, r *http.Request){
-     fmt.Println("Endpoint Hit: allProjects")
-     json.NewEncoder(w).Encode(pogo.Projects())
+	fmt.Println("Endpoint Hit: allProjects")
+    json.NewEncoder(w).Encode(project.Projects())
 }
 
 func file(w http.ResponseWriter, r *http.Request){
-     switch r.Method {
-     case "POST":
-     	 decoder := json.NewDecoder(r.Body)
-	 var req pogo.VisitRequest
-	 decodeErr := decoder.Decode(&req)
-	 if decodeErr != nil {
-	    http.Error(w, "Bad request", http.StatusBadRequest)
-	    return
-	 }
-         response, err := pogo.Visit(req)
-	 if err != nil {
-	    http.Error(w, err.Message, err.Code)
-	    return
-	 }
-	 json.NewEncoder(w).Encode(response)
-	 return
-     default:
-	http.Error(w, "", http.StatusMethodNotAllowed)
-     }
+	switch r.Method {
+	case "POST":
+		decoder := json.NewDecoder(r.Body)
+		var req project.VisitRequest
+		decodeErr := decoder.Decode(&req)
+		if decodeErr != nil {
+			http.Error(w, "Bad request", http.StatusBadRequest)
+			return
+		}
+		response, err := project.Visit(req)
+		if err != nil {
+			http.Error(w, err.Message, err.Code)
+			return
+		}
+		json.NewEncoder(w).Encode(response)
+		return
+	default:
+		http.Error(w, "", http.StatusMethodNotAllowed)
+	}
 }
 
 func handleRequests() {
@@ -54,6 +54,7 @@ func handleRequests() {
 }
 
 func main() {
-    pogo.Init()
-    handleRequests()
+    project.Init()
+
+	handleRequests()
 }
