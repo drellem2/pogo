@@ -63,7 +63,7 @@ func Init(client2 *plugin.Client) {
 		var projectsStruct ProjectsSave
 		json.Unmarshal(byteValue, &projectsStruct)
 		projects = projectsStruct.Projects
-		for _, p := range(projects) {
+		for _, p := range projects {
 			addToPlugin(p)
 		}
 	}
