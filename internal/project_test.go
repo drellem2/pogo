@@ -51,7 +51,7 @@ func testFileInExistingProjectRecognized(path string, t *testing.T) {
 	}
 	if resp.ParentProject.Path != aServiceAbs {
 		t.Errorf("Wrong Project Path, expected %s but found %s", aServiceAbs, resp.ParentProject.Path)
-		return	
+		return
 	}
 	numProj2 := len(projects)
 	if numProj != numProj2 {
@@ -142,7 +142,7 @@ func testFileInNewProjectAddsProject(path string, t *testing.T) {
 	}
 	if resp.ParentProject.Path != bServiceAbs {
 		t.Errorf("Wrong Project Path, expected %s but found %s", bServiceAbs, resp.ParentProject.Path)
-		return	
+		return
 	}
 	numProj2 := len(projects)
 	if numProj+1 != numProj2 {
@@ -161,7 +161,6 @@ func TestFileInNewProjectAddsProject(t *testing.T) {
 		testFileInNewProjectAddsProject(file, t)
 	}
 }
-
 
 func testRelativePathReturnsReturns400(path string, t *testing.T) {
 	t.Logf("Starting test RelativePathReturns400, path=%s", path)
