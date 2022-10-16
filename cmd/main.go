@@ -55,6 +55,5 @@ func handleRequests() {
 
 func main() {
 	project.Init()
-
 	handleRequests()
 }

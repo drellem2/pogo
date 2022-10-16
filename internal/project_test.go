@@ -1,6 +1,7 @@
 package project
 
 import (
+	"net/http"
 	"path/filepath"
 	"testing"
 )
@@ -158,5 +159,43 @@ func TestFileInNewProjectAddsProject(t *testing.T) {
 	}
 	for _, file := range files {
 		testFileInNewProjectAddsProject(file, t)
+	}
+}
+
+
+func testRelativePathReturnsReturns400(path string, t *testing.T) {
+	t.Logf("Starting test RelativePathReturns400, path=%s", path)
+	_, err := setUp(t)
+	if err != nil {
+		t.Errorf("Failed test set-up %v", err)
+		return
+	}
+	numProj := len(projects)
+	resp, err2 := Visit(VisitRequest{Path: path})
+	if resp != nil {
+		t.Errorf("Response should be nil: %#v", resp)
+		return
+	}
+	if err2 == nil {
+		t.Errorf("Error should not be nil")
+		return
+	}
+	if (*err2).Code != http.StatusBadRequest {
+		t.Errorf("Wrong Error Code, expected %d but found %d", http.StatusBadRequest, (*err2).Code)
+		return
+	}
+	numProj2 := len(projects)
+	if numProj != numProj2 {
+		t.Errorf("Project number should not have changed from %d to %d", numProj, numProj2)
+		return
+	}
+}
+
+func TestRelativePathReturns400(t *testing.T) {
+	files := []string{
+		aService,
+	}
+	for _, file := range files {
+		testRelativePathReturnsReturns400(file, t)
 	}
 }
