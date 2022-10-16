@@ -5,25 +5,25 @@
 package main
 
 import (
-    "encoding/json"
-    "fmt"
-    "log"
-    "net/http"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
 
-    "github.com/marginalia-gaming/pogo/internal"
+	"github.com/marginalia-gaming/pogo/internal"
 )
 
-func homePage(w http.ResponseWriter, r *http.Request){
-    fmt.Fprintf(w, "greetings from pogo daemon")
-    fmt.Println("Endpoint Hit: homePage")
+func homePage(w http.ResponseWriter, r *http.Request) {
+	fmt.Fprintf(w, "greetings from pogo daemon")
+	fmt.Println("Endpoint Hit: homePage")
 }
 
-func allProjects(w http.ResponseWriter, r *http.Request){
+func allProjects(w http.ResponseWriter, r *http.Request) {
 	fmt.Println("Endpoint Hit: allProjects")
-    json.NewEncoder(w).Encode(project.Projects())
+	json.NewEncoder(w).Encode(project.Projects())
 }
 
-func file(w http.ResponseWriter, r *http.Request){
+func file(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case "POST":
 		decoder := json.NewDecoder(r.Body)
@@ -46,15 +46,15 @@ func file(w http.ResponseWriter, r *http.Request){
 }
 
 func handleRequests() {
-    http.HandleFunc("/", homePage)
-    http.HandleFunc("/file", file)
-    http.HandleFunc("/projects", allProjects)
-    fmt.Println("pogod starting")
-    log.Fatal(http.ListenAndServe(":10000", nil))
+	http.HandleFunc("/", homePage)
+	http.HandleFunc("/file", file)
+	http.HandleFunc("/projects", allProjects)
+	fmt.Println("pogod starting")
+	log.Fatal(http.ListenAndServe(":10000", nil))
 }
 
 func main() {
-    project.Init()
+	project.Init()
 
 	handleRequests()
 }
