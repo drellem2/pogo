@@ -9,21 +9,26 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
+
+	"github.com/nightlyone/lockfile"
 
 	"github.com/marginalia-gaming/pogo/internal"
 )
 
 func homePage(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "greetings from pogo daemon")
-	fmt.Println("Endpoint Hit: homePage")
+	fmt.Println("Visited /")
 }
 
 func allProjects(w http.ResponseWriter, r *http.Request) {
-	fmt.Println("Endpoint Hit: allProjects")
+	fmt.Println("Visited /projects")
 	json.NewEncoder(w).Encode(project.Projects())
 }
 
 func file(w http.ResponseWriter, r *http.Request) {
+	fmt.Println("Visited /file")
 	switch r.Method {
 	case "POST":
 		decoder := json.NewDecoder(r.Body)
@@ -54,6 +59,22 @@ func handleRequests() {
 }
 
 func main() {
+	lock, err := lockfile.New(filepath.Join(os.TempDir(), "pogo.pid"))
+	if err != nil {
+		fmt.Printf("Cannot create lock. reason: %v", err)
+		os.Exit(1)
+	}
+
+	if err = lock.TryLock(); err != nil {
+		fmt.Printf("Cannot get lock %q, reason: %v", lock, err)
+		os.Exit(1)
+	}
+
+	defer func() {
+		if err := lock.Unlock(); err != nil {
+			fmt.Printf("Cannot unlock %q, reason: %v", lock, err)
+		}
+	}()
 	project.Init()
 	handleRequests()
 }
