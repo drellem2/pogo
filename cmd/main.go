@@ -98,9 +98,9 @@ func main() {
 			fmt.Printf("Cannot unlock %q, reason: %v", lock, err)
 		}
 	}()
-	
+
 	// Start plugins
-    // Create an hclog.Logger
+	// Create an hclog.Logger
 	logger := hclog.New(&hclog.LoggerOptions{
 		Name:   "plugin",
 		Output: os.Stdout,
@@ -114,7 +114,7 @@ func main() {
 	defer file.Close()
 
 	hash := sha256.New()
-	
+
 	_, err = io.Copy(hash, file)
 	if err != nil {
 		log.Fatal(err)
@@ -151,7 +151,7 @@ func main() {
 	gob.Register(pogoPlugin.ProcessProjectReq{})
 
 	// Example plugin usage
-	// basicSearch := raw.(pogoPlugin.IPogoPlugin)	
+	// basicSearch := raw.(pogoPlugin.IPogoPlugin)
 	// req := pogoPlugin.ProcessProjectReq{PathVar: "abcdefghjiklmnopqrstuvwxyz"}
 	// ireq := pogoPlugin.IProcessProjectReq(req)
 	// err = basicSearch.ProcessProject(&ireq)
@@ -162,7 +162,6 @@ func main() {
 	// 	log.Fatal(err)
 	// }
 
-	
 	defer project.SaveProjects()
 	project.Init()
 	handleRequests()
