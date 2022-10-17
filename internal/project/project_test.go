@@ -5,32 +5,53 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/marginalia-gaming/pogo/internal/driver"
 )
 
-const aService = "../_testdata/a-service" // In initial state
-const bService = "../_testdata/b-service" // Not in initial state
-const zService = "../_testdata/z-service" // Doesn't exist
+const aService = "_testdata/a-service" // In initial state
+const bService = "_testdata/b-service" // Not in initial state
+const zService = "_testdata/z-service" // Doesn't exist
 
 const readme = "/README.md"
 const mainC = "/src/main.c"
 
+func init() {
+	os.Chdir("../..")
+}
+
+// func TestMain(m *testing.M) {
+//     os.Chdir("../..")
+//     code := m.Run()
+//     os.Exit(code)
+// }
+
 func setUp(t *testing.T) (string, error) {
+	d, _ := os.Getwd()
+	t.Logf("Current working directory: %s", d)
 	aServiceAbs, err := filepath.Abs(aService)
 	if err != nil {
 		return "", err
 	}
 	t.Logf("a-service at: %s", aServiceAbs)
-	Init()
-	Add(Project{
+	client := driver.Init()
+	Init(client)
+	p := Project{
 		Id:   0,
 		Path: aServiceAbs,
-	})
+	}
+	Add(&p)
 	return aServiceAbs, nil
+}
+
+func cleanUp() {
+	driver.Kill()
 }
 
 func testFileInExistingProjectRecognized(path string, t *testing.T) {
 	t.Logf("Starting test TestFileInExistingProjectRecognized, path=%s", path)
 	aServiceAbs, err := setUp(t)
+	defer cleanUp()
 	if err != nil {
 		t.Errorf("Failed test set-up %v", err)
 		return
@@ -75,6 +96,7 @@ func TestFileInExistingProjectRecognized(t *testing.T) {
 func testFileMissingReturns404(path string, t *testing.T) {
 	t.Logf("Starting test TestFileMissingReturns404, path=%s", path)
 	_, err := setUp(t)
+	defer cleanUp()
 	if err != nil {
 		t.Errorf("Failed test set-up %v", err)
 		return
@@ -117,6 +139,7 @@ func TestFileMissingReturns404(t *testing.T) {
 func testFileInNewProjectAddsProject(path string, t *testing.T) {
 	t.Logf("Starting test TestFileInNewProjectAddsProject, path=%s", path)
 	_, err := setUp(t)
+	defer cleanUp()
 	if err != nil {
 		t.Errorf("Failed test set-up %v", err)
 		return
@@ -167,6 +190,7 @@ func TestFileInNewProjectAddsProject(t *testing.T) {
 func testRelativePathReturnsReturns400(path string, t *testing.T) {
 	t.Logf("Starting test RelativePathReturns400, path=%s", path)
 	_, err := setUp(t)
+	defer cleanUp()
 	if err != nil {
 		t.Errorf("Failed test set-up %v", err)
 		return
@@ -203,9 +227,10 @@ func TestRelativePathReturns400(t *testing.T) {
 
 func TestSaveProjects(t *testing.T) {
 	setUp(t)
+	defer cleanUp()
 	projectNum := len(projects)
 	SaveProjects()
-	Init()
+	Init(client)
 	projectNum2 := len(projects)
 	if projectNum != projectNum2 {
 		t.Errorf("Project number expected %d but found  %d", projectNum, projectNum2)

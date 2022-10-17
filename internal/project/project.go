@@ -139,14 +139,14 @@ func addToPlugin(p Project) {
 	}
 }
 
-func Add(p Project) {
+func Add(p *Project) {
 	if len(projects) == 0 {
-		p.Id = 1
+		(*p).Id = 1
 	} else {
-		p.Id = projects[len(projects)-1].Id + 1
+		(*p).Id = projects[len(projects)-1].Id + 1
 	}
-	addToPlugin(p)
-	projects = append(projects, p)
+	addToPlugin(*p)
+	projects = append(projects, *p)
 }
 
 func AddAll(ps []Project) {
@@ -250,7 +250,7 @@ func searchAndCreate(path string) (*Project, error) {
 			Id:   0,
 			Path: path,
 		}
-		Add(project)
+		Add(&project)
 		return &project, nil
 	}
 
