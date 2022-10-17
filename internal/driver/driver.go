@@ -7,6 +7,8 @@ package driver
 import (
 	"crypto/sha256"
 	"encoding/gob"
+	"errors"
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -32,18 +34,73 @@ var pluginMap = map[string]plugin.Plugin{
 	"basicSearch": &pogoPlugin.PogoPlugin{},
 }
 
-var client *plugin.Client
+var clients map[string]*plugin.Client
+var Interfaces map[string]*pogoPlugin.IPogoPlugin
 
-func Init() *plugin.Client {
-	// Start plugins
+type PluginManager struct {
+}
+
+func GetPluginManager() pogoPlugin.IPogoPlugin {
+	return &PluginManager{}
+}
+
+func (g *PluginManager) ProcessProject(req *pogoPlugin.IProcessProjectReq) error {
+	var err error
+	hasErr := false
+	for _, raw := range Interfaces {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					fmt.Printf("Caught error: %v", r)
+					hasErr = true
+				}
+			}()
+			basicSearch := pogoPlugin.IPogoPlugin(*raw)
+			err = basicSearch.ProcessProject(req)
+			if err != nil {
+				fmt.Printf("Caught error calling ProcessProject(): %v", err)
+			}
+		}()
+	}
+	if hasErr {
+		return errors.New("Error calling ProcessProject")
+	}
+	return nil
+}
+
+func Init() {
+	gob.Register(pogoPlugin.ProcessProjectReq{})
+	clients = make(map[string]*plugin.Client)
+	Interfaces = make(map[string]*pogoPlugin.IPogoPlugin)
+
+	paths, err := plugin.Discover("pogo*", "/Users/daniel/dev/pogo/bin/plugin")
+	if err != nil {
+		fmt.Printf("Error discovering plugins: %v", err)
+		return
+	}
+	p, _ := os.Getwd()
+	fmt.Printf("Discovered %d plugins in dir %s: %v\n", len(paths), p, paths)
+	for _, path := range paths {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					fmt.Printf("Caught error during plugin creation: %v", r)
+				}
+			}()
+			startPlugin(path)
+		}()
+	}
+}
+
+func startPlugin(path string) {
 	// Create an hclog.Logger
 	logger := hclog.New(&hclog.LoggerOptions{
-		Name:   "plugin",
+		Name:   path,
 		Output: os.Stdout,
 		Level:  hclog.Debug,
 	})
-
-	file, err := os.Open("search/search")
+	// Start plugins
+	file, err := os.Open(path)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -63,20 +120,43 @@ func Init() *plugin.Client {
 		Hash:     sha256.New(),
 	}
 
-	gob.Register(pogoPlugin.ProcessProjectReq{})
-
 	// We're a host! Start by launching the plugin process.
-	client = plugin.NewClient(&plugin.ClientConfig{
+	client := plugin.NewClient(&plugin.ClientConfig{
 		HandshakeConfig: handshakeConfig,
 		Plugins:         pluginMap,
 		Cmd:             exec.Command("./search/search"),
 		Logger:          logger,
 		SecureConfig:    secureConfig,
 	})
-	return client
+	clients[path] = client
+
+	// Connect via RPC
+	rpcClient, err := client.Client()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Request the plugin
+	raw, err := rpcClient.Dispense("basicSearch")
+	if err != nil {
+		log.Fatal(err)
+	}
+	praw := raw.(pogoPlugin.IPogoPlugin)
+	Interfaces[path] = &praw
 }
 
 // Clean up, kills all plugins
 func Kill() {
-	client.Kill()
+	for _, client := range clients {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("Caught error during plugin termination: %v", r)
+				}
+			}()
+			if client != nil {
+				client.Kill()
+			}
+		}()
+	}
 }

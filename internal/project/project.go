@@ -15,8 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/hashicorp/go-plugin"
-
+	"github.com/marginalia-gaming/pogo/internal/driver"
 	pogoPlugin "github.com/marginalia-gaming/pogo/plugin"
 )
 
@@ -31,11 +30,9 @@ type ProjectsSave struct {
 
 var projectFile string
 var projects []Project
-var client *plugin.Client
 
 // For now a noop.
-func Init(client2 *plugin.Client) {
-	client = client2
+func Init() {
 	projects = []Project{}
 	home := os.Getenv("POGO_HOME")
 	if home == "" {
@@ -115,25 +112,9 @@ func Projects() []Project {
 }
 
 func addToPlugin(p Project) {
-	// Connect via RPC
-	rpcClient, err := client.Client()
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	// Request the plugin
-	raw, err := rpcClient.Dispense("basicSearch")
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	basicSearch := raw.(pogoPlugin.IPogoPlugin)
 	req := pogoPlugin.ProcessProjectReq{PathVar: p.Path}
 	ireq := pogoPlugin.IProcessProjectReq(req)
-	err = basicSearch.ProcessProject(&ireq)
-	if err != nil {
-		log.Fatal(err)
-	}
+	err := driver.GetPluginManager().ProcessProject(&ireq)
 	if err != nil {
 		log.Fatal(err)
 	}

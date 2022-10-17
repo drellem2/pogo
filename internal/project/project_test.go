@@ -34,8 +34,8 @@ func setUp(t *testing.T) (string, error) {
 		return "", err
 	}
 	t.Logf("a-service at: %s", aServiceAbs)
-	client := driver.Init()
-	Init(client)
+	driver.Init()
+	Init()
 	p := Project{
 		Id:   0,
 		Path: aServiceAbs,
@@ -230,7 +230,7 @@ func TestSaveProjects(t *testing.T) {
 	defer cleanUp()
 	projectNum := len(projects)
 	SaveProjects()
-	Init(client)
+	Init()
 	projectNum2 := len(projects)
 	if projectNum != projectNum2 {
 		t.Errorf("Project number expected %d but found  %d", projectNum, projectNum2)

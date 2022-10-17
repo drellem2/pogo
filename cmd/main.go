@@ -79,10 +79,10 @@ func main() {
 	}()
 
 	// Start plugins
-	client := driver.Init()
+	driver.Init()
 
 	defer driver.Kill()
 	defer project.SaveProjects()
-	project.Init(client)
+	project.Init()
 	handleRequests()
 }
