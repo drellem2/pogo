@@ -51,6 +51,13 @@ func file(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// TODO: Add new endpoints for retrieving/calling plugin endpoints
+// Maybe schema just returns an api version and the client verifies it?
+// Everything else is just the client writing.
+// Example:
+// - GET /plugins - all plugins
+// - GET /plugin/#{name} plugin api version and any other details
+// - POST /plugin/#{name} submit request to plugin api
 func handleRequests() {
 	http.HandleFunc("/", homePage)
 	http.HandleFunc("/file", file)
