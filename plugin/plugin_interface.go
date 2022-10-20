@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"fmt"
 	"net/rpc"
 
 	"github.com/hashicorp/go-plugin"
@@ -18,8 +19,14 @@ func (r ProcessProjectReq) Path() string {
 	return r.PathVar
 }
 
+type PluginInfoRes struct {
+	Version string `json:"version"`
+}
+
 // The interface that plugins should implement
 type IPogoPlugin interface {
+	Info() *PluginInfoRes
+
 	// Notifies the plugin that a project exists. It is the plugin's responsibility
 	// to decide when and to what extent action should be taken.
 	ProcessProject(req *IProcessProjectReq) error
@@ -27,6 +34,17 @@ type IPogoPlugin interface {
 
 // Here is an implementation that talks over RPC
 type PluginRPC struct{ client *rpc.Client }
+
+func (g *PluginRPC) Info() *PluginInfoRes {
+	var resp *PluginInfoRes
+	err := g.client.Call("Plugin.Info", new(interface{}), &resp)
+	if err != nil {
+		fmt.Printf("Error finding plugin info: %v", err)
+		return nil
+	}
+	return resp
+
+}
 
 func (g *PluginRPC) ProcessProject(req *IProcessProjectReq) error {
 	var resp error
@@ -43,6 +61,11 @@ func (g *PluginRPC) ProcessProject(req *IProcessProjectReq) error {
 type PluginRPCServer struct {
 	// This is the real implementation
 	Impl IPogoPlugin
+}
+
+func (s *PluginRPCServer) Info(args interface{}, resp **PluginInfoRes) error {
+	*resp = s.Impl.Info()
+	return nil
 }
 
 func (s *PluginRPCServer) ProcessProject(args interface{}, resp *error) error {

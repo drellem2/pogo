@@ -40,6 +40,12 @@ var Interfaces map[string]*pogoPlugin.IPogoPlugin
 type PluginManager struct {
 }
 
+type PluginInfoReq struct {
+	Path string `json:"path"`
+}
+
+type empty struct{}
+
 func GetPluginManager() pogoPlugin.IPogoPlugin {
 	return &PluginManager{}
 }
@@ -52,7 +58,16 @@ func GetPluginPaths() []string {
 		i++
 	}
 	return keys
+}
 
+func (g *PluginManager) Info() *pogoPlugin.PluginInfoRes {
+	return &pogoPlugin.PluginInfoRes{Version: ""}
+}
+
+func GetPluginInfo(path string) (*pogoPlugin.PluginInfoRes, error) {
+	var info *pogoPlugin.PluginInfoRes
+	info = (*Interfaces[path]).Info()
+	return info, nil
 }
 
 func (g *PluginManager) ProcessProject(req *pogoPlugin.IProcessProjectReq) error {

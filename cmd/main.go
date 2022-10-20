@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 
@@ -51,14 +52,26 @@ func file(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// func plugin(w http.ResponseWriter, r *http.Request) {
-// 	fmt.Println("Visited /plugins")
-// 	switch r.Method {
-// 	case "GET":
-// 		decoder := json.NewDecoder(r.Body)
+func plugin(w http.ResponseWriter, r *http.Request) {
+	fmt.Println("Visited /plugin")
+	switch r.Method {
+	case "GET":
+		encodedPath := r.URL.Query().Get("path")
+		path, err := url.QueryUnescape(encodedPath)
+		if err != nil {
+			fmt.Printf("Error urledecoding path variable: %v\n", err)
+			return
+		}
+		resp, err := driver.GetPluginInfo(path)
+		if err != nil {
+			http.Error(w, "", http.StatusInternalServerError)
+			return
+		}
+		json.NewEncoder(w).Encode(resp)
+		return
 
-// 	}
-// }
+	}
+}
 
 func plugins(w http.ResponseWriter, r *http.Request) {
 	fmt.Println("Visited /plugins")
@@ -81,6 +94,7 @@ func handleRequests() {
 	http.HandleFunc("/", homePage)
 	http.HandleFunc("/file", file)
 	http.HandleFunc("/projects", allProjects)
+	http.HandleFunc("/plugin", plugin)
 	http.HandleFunc("/plugins", plugins)
 	fmt.Println("pogod starting")
 	log.Fatal(http.ListenAndServe(":10000", nil))

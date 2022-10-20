@@ -14,6 +14,14 @@ type BasicSearch struct {
 	logger hclog.Logger
 }
 
+// API Version for this plugin
+const version = "0.0.1"
+
+func (g *BasicSearch) Info() *pogoPlugin.PluginInfoRes {
+	g.logger.Debug("Returning version %s", version)
+	return &pogoPlugin.PluginInfoRes{Version: version}
+}
+
 func (g *BasicSearch) ProcessProject(req *pogoPlugin.IProcessProjectReq) error {
 	g.logger.Debug("Processing project %s", (*req).Path())
 	return nil
