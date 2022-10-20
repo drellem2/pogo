@@ -44,6 +44,17 @@ func GetPluginManager() pogoPlugin.IPogoPlugin {
 	return &PluginManager{}
 }
 
+func GetPluginPaths() []string {
+	keys := make([]string, len(Interfaces))
+	i := 0
+	for k := range Interfaces {
+		keys[i] = k
+		i++
+	}
+	return keys
+
+}
+
 func (g *PluginManager) ProcessProject(req *pogoPlugin.IProcessProjectReq) error {
 	var err error
 	hasErr := false
@@ -73,7 +84,7 @@ func Init() {
 	clients = make(map[string]*plugin.Client)
 	Interfaces = make(map[string]*pogoPlugin.IPogoPlugin)
 
-	paths, err := plugin.Discover("pogo*", "/Users/daniel/dev/pogo/bin/plugin")
+	paths, err := plugin.Discover("pogo*", "/home/drellem/dev/pogo/bin/plugin")
 	if err != nil {
 		fmt.Printf("Error discovering plugins: %v", err)
 		return
@@ -124,7 +135,7 @@ func startPlugin(path string) {
 	client := plugin.NewClient(&plugin.ClientConfig{
 		HandshakeConfig: handshakeConfig,
 		Plugins:         pluginMap,
-		Cmd:             exec.Command("./search/search"),
+		Cmd:             exec.Command(path),
 		Logger:          logger,
 		SecureConfig:    secureConfig,
 	})

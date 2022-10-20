@@ -47,7 +47,7 @@ func Init() {
 		if !errors.Is(err, os.ErrNotExist) {
 			fmt.Printf("Error getting file info %v", err)
 		}
-		fmt.Printf("Save file %s does not exist.", projectFile)
+		fmt.Printf("Save file %s does not exist.\n", projectFile)
 	}
 	if !skipImport {
 		file, err2 := os.Open(projectFile)
@@ -205,6 +205,10 @@ func Visit(req VisitRequest) (*VisitResponse, *ErrorResponse) {
 		return nil, &internalErrorResponse
 	}
 
+	if proj == nil {
+		return nil, &notFoundErrorResponse
+	}
+
 	return &VisitResponse{
 		ParentProject: *proj,
 	}, nil
@@ -223,6 +227,7 @@ func searchAndCreate(path string) (*Project, error) {
 	}
 
 	if hasPogoStop(dirnames) {
+		fmt.Printf(".pogostop encountered on %s. Stopping\n", path)
 		return nil, nil
 	}
 
@@ -237,6 +242,7 @@ func searchAndCreate(path string) (*Project, error) {
 
 	dirPath := filepath.Dir(path)
 	if dirPath == path {
+		fmt.Printf("Filepath %s is same as %s\n", path, dirPath)
 		return nil, nil
 	}
 

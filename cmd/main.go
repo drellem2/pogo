@@ -51,6 +51,25 @@ func file(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// func plugin(w http.ResponseWriter, r *http.Request) {
+// 	fmt.Println("Visited /plugins")
+// 	switch r.Method {
+// 	case "GET":
+// 		decoder := json.NewDecoder(r.Body)
+
+// 	}
+// }
+
+func plugins(w http.ResponseWriter, r *http.Request) {
+	fmt.Println("Visited /plugins")
+	switch r.Method {
+	case "GET":
+		json.NewEncoder(w).Encode(driver.GetPluginPaths())
+	default:
+		http.Error(w, "", http.StatusMethodNotAllowed)
+	}
+}
+
 // TODO: Add new endpoints for retrieving/calling plugin endpoints
 // Maybe schema just returns an api version and the client verifies it?
 // Everything else is just the client writing.
@@ -62,6 +81,7 @@ func handleRequests() {
 	http.HandleFunc("/", homePage)
 	http.HandleFunc("/file", file)
 	http.HandleFunc("/projects", allProjects)
+	http.HandleFunc("/plugins", plugins)
 	fmt.Println("pogod starting")
 	log.Fatal(http.ListenAndServe(":10000", nil))
 }
