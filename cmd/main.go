@@ -19,6 +19,10 @@ import (
 	"github.com/marginalia-gaming/pogo/internal/project"
 )
 
+type DataObject struct {
+	Value string `json:"value"`
+}
+
 func homePage(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "greetings from pogo daemon")
 	fmt.Println("Visited /")
@@ -59,7 +63,7 @@ func plugin(w http.ResponseWriter, r *http.Request) {
 		encodedPath := r.URL.Query().Get("path")
 		path, err := url.QueryUnescape(encodedPath)
 		if err != nil {
-			fmt.Printf("Error urledecoding path variable: %v\n", err)
+			fmt.Printf("Error urldecoding path variable: %v\n", err)
 			return
 		}
 		resp, err := driver.GetPluginInfo(path)
@@ -69,7 +73,34 @@ func plugin(w http.ResponseWriter, r *http.Request) {
 		}
 		json.NewEncoder(w).Encode(resp)
 		return
-
+	case "POST":
+		encodedPath := r.URL.Query().Get("path")
+		path, err := url.QueryUnescape(encodedPath)
+		if err != nil {
+			fmt.Printf("Error urldecoding path variable: %v\n", err)
+			return
+		}
+		plugin := driver.GetPlugin(path)
+		if plugin == nil {
+			http.Error(w, "", http.StatusNotFound)
+			return
+		}
+		var reqObj DataObject
+		decoder := json.NewDecoder(r.Body)
+		err = decoder.Decode(&reqObj)
+		if err != nil {
+			fmt.Printf("Request could not be parsed.")
+			http.Error(w, "", http.StatusBadRequest)
+			return
+		}
+		fmt.Println("Trying to execute!")
+		respString := (*plugin).Execute(reqObj.Value)
+		fmt.Println("Done executing!")
+		var respObj = DataObject{Value: respString}
+		json.NewEncoder(w).Encode(respObj)
+		return
+	default:
+		http.Error(w, "", http.StatusMethodNotAllowed)
 	}
 }
 

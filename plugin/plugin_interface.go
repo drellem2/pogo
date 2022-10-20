@@ -25,7 +25,11 @@ type PluginInfoRes struct {
 
 // The interface that plugins should implement
 type IPogoPlugin interface {
+	// Returns info about the plugin. Most importantly API version.
 	Info() *PluginInfoRes
+
+	// Executes a url-encoded json string, and returns one.
+	Execute(req string) string
 
 	// Notifies the plugin that a project exists. It is the plugin's responsibility
 	// to decide when and to what extent action should be taken.
@@ -43,7 +47,16 @@ func (g *PluginRPC) Info() *PluginInfoRes {
 		return nil
 	}
 	return resp
+}
 
+func (g *PluginRPC) Execute(req string) string {
+	var resp string
+	err := g.client.Call("Plugin.Execute", req, &resp)
+	if err != nil {
+		fmt.Printf("Error executing plugin call: %v", err)
+		return ""
+	}
+	return resp
 }
 
 func (g *PluginRPC) ProcessProject(req *IProcessProjectReq) error {
@@ -65,6 +78,11 @@ type PluginRPCServer struct {
 
 func (s *PluginRPCServer) Info(args interface{}, resp **PluginInfoRes) error {
 	*resp = s.Impl.Info()
+	return nil
+}
+
+func (s *PluginRPCServer) Execute(req string, resp *string) error {
+	*resp = s.Impl.Execute(req)
 	return nil
 }
 

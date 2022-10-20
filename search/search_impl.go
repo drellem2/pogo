@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/gob"
+	"net/url"
 	"os"
 
 	"github.com/hashicorp/go-hclog"
@@ -22,6 +23,12 @@ func (g *BasicSearch) Info() *pogoPlugin.PluginInfoRes {
 	return &pogoPlugin.PluginInfoRes{Version: version}
 }
 
+// Just a dummy function for now
+func (g *BasicSearch) Execute(req string) string {
+	g.logger.Debug("Executing request.")
+	return url.QueryEscape("{ \"value\": true}")
+}
+
 func (g *BasicSearch) ProcessProject(req *pogoPlugin.IProcessProjectReq) error {
 	g.logger.Debug("Processing project %s", (*req).Path())
 	return nil
@@ -32,7 +39,7 @@ func (g *BasicSearch) ProcessProject(req *pogoPlugin.IProcessProjectReq) error {
 // This prevents users from executing bad plugins or executing a plugin
 // directory. It is a UX feature, not a security feature.
 var handshakeConfig = plugin.HandshakeConfig{
-	ProtocolVersion:  1,
+	ProtocolVersion:  2,
 	MagicCookieKey:   "SEARCH_PLUGIN",
 	MagicCookieValue: "93f6bc9f97c03ed00fa85c904aca15a92752e549",
 }

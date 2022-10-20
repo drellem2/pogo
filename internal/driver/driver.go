@@ -24,7 +24,7 @@ import (
 // This prevents users from executing bad plugins or executing a plugin
 // directory. It is a UX feature, not a security feature.
 var handshakeConfig = plugin.HandshakeConfig{
-	ProtocolVersion:  1,
+	ProtocolVersion:  2,
 	MagicCookieKey:   "SEARCH_PLUGIN",
 	MagicCookieValue: "93f6bc9f97c03ed00fa85c904aca15a92752e549",
 }
@@ -44,10 +44,14 @@ type PluginInfoReq struct {
 	Path string `json:"path"`
 }
 
-type empty struct{}
-
-func GetPluginManager() pogoPlugin.IPogoPlugin {
+func GetPluginManager() *PluginManager {
 	return &PluginManager{}
+}
+
+func GetPluginInfo(path string) (*pogoPlugin.PluginInfoRes, error) {
+	var info *pogoPlugin.PluginInfoRes
+	info = (*Interfaces[path]).Info()
+	return info, nil
 }
 
 func GetPluginPaths() []string {
@@ -64,10 +68,8 @@ func (g *PluginManager) Info() *pogoPlugin.PluginInfoRes {
 	return &pogoPlugin.PluginInfoRes{Version: ""}
 }
 
-func GetPluginInfo(path string) (*pogoPlugin.PluginInfoRes, error) {
-	var info *pogoPlugin.PluginInfoRes
-	info = (*Interfaces[path]).Info()
-	return info, nil
+func GetPlugin(path string) *pogoPlugin.IPogoPlugin {
+	return Interfaces[path]
 }
 
 func (g *PluginManager) ProcessProject(req *pogoPlugin.IProcessProjectReq) error {
