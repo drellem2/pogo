@@ -17,11 +17,9 @@ import (
 
 	"github.com/marginalia-gaming/pogo/internal/driver"
 	"github.com/marginalia-gaming/pogo/internal/project"
-)
 
-type DataObject struct {
-	Value string `json:"value"`
-}
+	pogoPlugin "github.com/marginalia-gaming/pogo/plugin"
+)
 
 func homePage(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "greetings from pogo daemon")
@@ -66,11 +64,12 @@ func plugin(w http.ResponseWriter, r *http.Request) {
 			fmt.Printf("Error urldecoding path variable: %v\n", err)
 			return
 		}
-		resp, err := driver.GetPluginInfo(path)
-		if err != nil {
-			http.Error(w, "", http.StatusInternalServerError)
+		plugin := driver.GetPlugin(path)
+		if plugin == nil {
+			http.Error(w, "", http.StatusNotFound)
 			return
 		}
+		resp := (*plugin).Info()
 		json.NewEncoder(w).Encode(resp)
 		return
 	case "POST":
@@ -85,7 +84,7 @@ func plugin(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "", http.StatusNotFound)
 			return
 		}
-		var reqObj DataObject
+		var reqObj pogoPlugin.DataObject
 		decoder := json.NewDecoder(r.Body)
 		err = decoder.Decode(&reqObj)
 		if err != nil {
@@ -93,10 +92,8 @@ func plugin(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "", http.StatusBadRequest)
 			return
 		}
-		fmt.Println("Trying to execute!")
 		respString := (*plugin).Execute(reqObj.Value)
-		fmt.Println("Done executing!")
-		var respObj = DataObject{Value: respString}
+		var respObj = pogoPlugin.DataObject{Value: respString}
 		json.NewEncoder(w).Encode(respObj)
 		return
 	default:
@@ -114,13 +111,6 @@ func plugins(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// TODO: Add new endpoints for retrieving/calling plugin endpoints
-// Maybe schema just returns an api version and the client verifies it?
-// Everything else is just the client writing.
-// Example:
-// - GET /plugins - all plugins
-// - GET /plugin/#{name} plugin api version and any other details
-// - POST /plugin/#{name} submit request to plugin api
 func handleRequests() {
 	http.HandleFunc("/", homePage)
 	http.HandleFunc("/file", file)

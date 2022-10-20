@@ -48,12 +48,6 @@ func GetPluginManager() *PluginManager {
 	return &PluginManager{}
 }
 
-func GetPluginInfo(path string) (*pogoPlugin.PluginInfoRes, error) {
-	var info *pogoPlugin.PluginInfoRes
-	info = (*Interfaces[path]).Info()
-	return info, nil
-}
-
 func GetPluginPaths() []string {
 	keys := make([]string, len(Interfaces))
 	i := 0

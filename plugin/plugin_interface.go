@@ -7,6 +7,10 @@ import (
 	"github.com/hashicorp/go-plugin"
 )
 
+type DataObject struct {
+	Value string `json:"value"`
+}
+
 type IProcessProjectReq interface {
 	Path() string
 }

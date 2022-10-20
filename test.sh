@@ -6,4 +6,5 @@ mkdir -p _testdata/b-service/.git
 
 echo "Building"
 go build -o bin/plugin/pogo-plugin-search search/search_impl.go &&  \
-go test github.com/marginalia-gaming/pogo/internal/project -coverprofile=coverage-internal.out
+go test github.com/marginalia-gaming/pogo/internal/project -coverprofile=coverage-internal-project.out && \
+go test github.com/marginalia-gaming/pogo/internal/driver -coverprofile=coverage-internal-driver.out

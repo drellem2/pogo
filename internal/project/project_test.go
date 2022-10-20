@@ -20,12 +20,6 @@ func init() {
 	os.Chdir("../..")
 }
 
-// func TestMain(m *testing.M) {
-//     os.Chdir("../..")
-//     code := m.Run()
-//     os.Exit(code)
-// }
-
 func setUp(t *testing.T) (string, error) {
 	d, _ := os.Getwd()
 	t.Logf("Current working directory: %s", d)
