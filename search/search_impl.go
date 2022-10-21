@@ -12,7 +12,8 @@ import (
 )
 
 type BasicSearch struct {
-	logger hclog.Logger
+	logger   hclog.Logger
+	projects map[string]IndexedProject
 }
 
 // API Version for this plugin
@@ -31,10 +32,11 @@ func (g *BasicSearch) Execute(req string) string {
 
 func (g *BasicSearch) ProcessProject(req *pogoPlugin.IProcessProjectReq) error {
 	g.logger.Debug("Processing project %s", (*req).Path())
+	g.Index(req)
 	return nil
 }
 
-// handshakeConfigs are used to just do a basic handshake between
+// handshakeConfigs are used to just do a basic handshake betw1een
 // a plugin and host. If the handshake fails, a user friendly error is shown.
 // This prevents users from executing bad plugins or executing a plugin
 // directory. It is a UX feature, not a security feature.
@@ -53,7 +55,8 @@ func main() {
 	})
 
 	basicSearch := &BasicSearch{
-		logger: logger,
+		logger:   logger,
+		projects: make(map[string]IndexedProject),
 	}
 	// pluginMap is the map of plugins we can dispense.
 	var pluginMap = map[string]plugin.Plugin{
