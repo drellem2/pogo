@@ -106,9 +106,9 @@ func TestPluginExecute(t *testing.T) {
 	}
 	pluginPath := plugins[0]
 	plugin := driver.GetPlugin(pluginPath)
-	req := url.QueryEscape("{}")
+	req := url.QueryEscape("{\"type\": \"files\", \"projectRoot\": \"_testdata/a-service\"}")
 	resp := (*plugin).Execute(req)
-	expectedRes := url.QueryEscape("{ \"value\": true}")
+	expectedRes := "%7B%22index%22%3A%7B%22root%22%3A%22%2Fhome%2Fdrellem%2Fdev%2Fpogo%2F_testdata%2Fa-service%22%2C%22paths%22%3A%5B%22%2Fhome%2Fdrellem%2Fdev%2Fpogo%2F_testdata%2Fa-service%2F.pogo%2Fsearch%2Fsearch_index.json%22%2C%22%2Fhome%2Fdrellem%2Fdev%2Fpogo%2F_testdata%2Fa-service%2FREADME.md%22%5D%7D%2C%22error%22%3A%22%22%7D"
 	if resp != expectedRes {
 		t.Errorf("Unexpected response %s expected %s", resp, expectedRes)
 		return

@@ -1,6 +1,9 @@
 package main
 
 import (
+	"encoding/json"
+	"errors"
+	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -8,6 +11,7 @@ import (
 	pogoPlugin "github.com/marginalia-gaming/pogo/plugin"
 )
 
+const saveFileName = "search_index.json"
 const indexStartCapacity = 50
 
 type IndexedProject struct {
@@ -61,6 +65,55 @@ func (g *BasicSearch) Index(req *pogoPlugin.IProcessProjectReq) {
 			g.logger.Warn(err.Error())
 		}
 		g.projects[path] = proj
+
+		// Serialize index
+		searchDir := makeSearchDir(path)
+		saveFilePath := filepath.Join(searchDir, saveFileName)
+		outBytes, err2 := json.Marshal(&proj)
+		if err2 != nil {
+			g.logger.Error("Error serializing index to json", "index", proj)
+		}
+		err3 := os.WriteFile(saveFilePath, outBytes, 0644)
+		if err3 != nil {
+			g.logger.Error("Error saving index", "save_path", saveFilePath)
+		}
 		g.logger.Info("Indexed " + strconv.Itoa(len(g.projects[path].Paths)) + " files for " + path)
+
 	}()
+}
+
+func (g *BasicSearch) GetFiles(projectRoot string) (*IndexedProject, error) {
+	searchDir := makeSearchDir(projectRoot)
+	saveFilePath := filepath.Join(searchDir, saveFileName)
+	_, err := os.Lstat(saveFilePath)
+	skipImport := false
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			g.logger.Error("Error getting file info", "error", err)
+		}
+		g.logger.Warn("Search index does not exist", "path", saveFilePath)
+		return nil, err
+	}
+
+	if skipImport {
+		projectReq := pogoPlugin.ProcessProjectReq{PathVar: projectRoot}
+		iProjectReq := pogoPlugin.IProcessProjectReq(projectReq)
+		g.Index(&iProjectReq)
+		return nil, nil
+	}
+
+	file, err2 := os.Open(saveFilePath)
+	if err2 != nil {
+		g.logger.Error("Error opening index file.")
+		return nil, err2
+	}
+	defer file.Close()
+	byteValue, _ := ioutil.ReadAll(file)
+	var indexStruct IndexedProject
+	err = json.Unmarshal(byteValue, &indexStruct)
+	if err != nil {
+		g.logger.Error("Error deserializing index file.")
+		return nil, err
+	}
+	return &indexStruct, nil
 }
