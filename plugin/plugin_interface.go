@@ -8,7 +8,8 @@ import (
 )
 
 type DataObject struct {
-	Value string `json:"value"`
+	Plugin string `json:"plugin"`
+	Value  string `json:"value"`
 }
 
 type IProcessProjectReq interface {

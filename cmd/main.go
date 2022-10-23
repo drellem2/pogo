@@ -73,23 +73,20 @@ func plugin(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(resp)
 		return
 	case "POST":
-		encodedPath := r.URL.Query().Get("path")
-		path, err := url.QueryUnescape(encodedPath)
-		if err != nil {
-			fmt.Printf("Error urldecoding path variable: %v\n", err)
-			return
-		}
-		plugin := driver.GetPlugin(path)
-		if plugin == nil {
-			http.Error(w, "", http.StatusNotFound)
-			return
-		}
 		var reqObj pogoPlugin.DataObject
 		decoder := json.NewDecoder(r.Body)
-		err = decoder.Decode(&reqObj)
+		err := decoder.Decode(&reqObj)
 		if err != nil {
 			fmt.Printf("Request could not be parsed.")
 			http.Error(w, "", http.StatusBadRequest)
+			return
+		}
+
+		path := reqObj.Plugin
+		fmt.Printf("Path %s", path)
+		plugin := driver.GetPlugin(path)
+		if plugin == nil {
+			http.Error(w, "", http.StatusNotFound)
 			return
 		}
 		respString := (*plugin).Execute(reqObj.Value)
