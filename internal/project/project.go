@@ -13,7 +13,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/marginalia-gaming/pogo/internal/driver"
 	pogoPlugin "github.com/marginalia-gaming/pogo/plugin"
@@ -169,20 +168,6 @@ func Visit(req VisitRequest) (*VisitResponse, *ErrorResponse) {
 
 	var parentProj *Project
 
-	// Check if in existing project
-	for _, proj := range projects {
-		if strings.HasPrefix(path, proj.Path) {
-			parentProj = &proj
-			break
-		}
-	}
-
-	if parentProj != nil {
-		return &VisitResponse{
-			ParentProject: *parentProj,
-		}, nil
-	}
-
 	// TODO add the .git search up the tree, maybe add `created boolean` to response
 	fileInfo, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -198,6 +183,23 @@ func Visit(req VisitRequest) (*VisitResponse, *ErrorResponse) {
 	if !fileInfo.IsDir() {
 		dirPath = filepath.Dir(path)
 	}
+	
+	dirPath = addSlashToPath(dirPath)
+
+	// Check if in existing project
+	for _, proj := range projects {
+		if dirPath == proj.Path {
+			parentProj = &proj
+		}
+		break
+	}
+
+	if parentProj != nil {
+		return &VisitResponse{
+			ParentProject: *parentProj,
+		}, nil
+	}
+
 
 	proj, err2 := searchAndCreate(dirPath)
 	if err2 != nil {
@@ -212,6 +214,13 @@ func Visit(req VisitRequest) (*VisitResponse, *ErrorResponse) {
 	return &VisitResponse{
 		ParentProject: *proj,
 	}, nil
+}
+
+func addSlashToPath(path string) string {
+	if path[len(path)-1:][0] == filepath.Separator {
+		return path
+	}
+	return path + string(filepath.Separator)
 }
 
 // Searches for git repo in parent
@@ -234,7 +243,7 @@ func searchAndCreate(path string) (*Project, error) {
 	if hasGit(dirnames) {
 		var project = Project{
 			Id:   0,
-			Path: path,
+			Path: addSlashToPath(path),
 		}
 		Add(&project)
 		return &project, nil

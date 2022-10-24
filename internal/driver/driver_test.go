@@ -10,9 +10,9 @@ import (
 	"github.com/marginalia-gaming/pogo/internal/project"
 )
 
-const aService = "_testdata/a-service" // In initial state
-const bService = "_testdata/b-service" // Not in initial state
-const zService = "_testdata/z-service" // Doesn't exist
+const aService = "_testdata/a-service/" // In initial state
+const bService = "_testdata/b-service/" // Not in initial state
+const zService = "_testdata/z-service/" // Doesn't exist
 
 const readme = "/README.md"
 const mainC = "/src/main.c"

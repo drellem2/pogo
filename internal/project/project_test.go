@@ -9,9 +9,9 @@ import (
 	"github.com/marginalia-gaming/pogo/internal/driver"
 )
 
-const aService = "_testdata/a-service" // In initial state
-const bService = "_testdata/b-service" // Not in initial state
-const zService = "_testdata/z-service" // Doesn't exist
+const aService = "_testdata/a-service/" // In initial state
+const bService = "_testdata/b-service/" // Not in initial state
+const zService = "_testdata/z-service/" // Doesn't exist
 
 const readme = "/README.md"
 const mainC = "/src/main.c"
@@ -20,10 +20,25 @@ func init() {
 	os.Chdir("../..")
 }
 
+func absolute(path string) (string, error) {
+	str, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	info, err2 := os.Lstat(path)
+	if err2 != nil {
+		return "", err2
+	}
+	if info.IsDir() {
+		return str+"/", nil
+	}
+	return str, nil
+}
+
 func setUp(t *testing.T) (string, error) {
 	d, _ := os.Getwd()
 	t.Logf("Current working directory: %s", d)
-	aServiceAbs, err := filepath.Abs(aService)
+	aServiceAbs, err := absolute(aService)
 	if err != nil {
 		return "", err
 	}
@@ -51,7 +66,7 @@ func testFileInExistingProjectRecognized(path string, t *testing.T) {
 		return
 	}
 	numProj := len(projects)
-	fileAbs, err2 := filepath.Abs(aService + path)
+	fileAbs, err2 := filepath.Abs(filepath.Join(aService, path))
 	if err2 != nil {
 		t.Errorf("Could not construct absolute path: %v", err2)
 		return
@@ -64,6 +79,7 @@ func testFileInExistingProjectRecognized(path string, t *testing.T) {
 	}
 	if resp.ParentProject.Id != 1 {
 		t.Errorf("Wrong Project Id, expected 1 but found %d", resp.ParentProject.Id)
+		t.Errorf("Project list: %v", projects)
 		return
 	}
 	if resp.ParentProject.Path != aServiceAbs {
@@ -138,13 +154,14 @@ func testFileInNewProjectAddsProject(path string, t *testing.T) {
 		t.Errorf("Failed test set-up %v", err)
 		return
 	}
-	bServiceAbs, err4 := filepath.Abs(bService)
+	bServiceAbs, err4 := absolute(bService)
 	if err4 != nil {
 		t.Errorf("Could not construct absolute path: %v", err4)
 		return
 	}
 	numProj := len(projects)
-	fileAbs, err2 := filepath.Abs(bService + path)
+	fileAbs, err2 := absolute(filepath.Join(bService, path))
+	t.Logf("Visiting %s", fileAbs)
 	if err2 != nil {
 		t.Errorf("Could not construct absolute path: %v", err2)
 		return
