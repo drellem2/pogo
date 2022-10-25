@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strconv"
 
+	"github.com/sabhiram/go-gitignore"
+
 	pogoPlugin "github.com/marginalia-gaming/pogo/plugin"
 )
 
@@ -19,7 +21,7 @@ type IndexedProject struct {
 	Paths []string `json:"paths"`
 }
 
-func (g *BasicSearch) index(proj *IndexedProject, path string) error {
+func (g *BasicSearch) index(proj *IndexedProject, path string, gitIgnore *ignore.GitIgnore) error {
 	file, err := os.Open(path)
 	if err != nil {
 		return err
@@ -40,13 +42,15 @@ func (g *BasicSearch) index(proj *IndexedProject, path string) error {
 			g.logger.Warn(err.Error())
 			continue
 		}
-		if fileInfo.IsDir() {
-			err = g.index(proj, newPath)
-			if err != nil {
-				g.logger.Warn(err.Error())
+		if !gitIgnore.MatchesPath(newPath) && subFile != ".git" {
+			if fileInfo.IsDir() {
+				err = g.index(proj, newPath, gitIgnore)
+				if err != nil {
+					g.logger.Warn(err.Error())
+				}
+			} else {
+				files = append(files, newPath)
 			}
-		} else {
-			files = append(files, newPath)
 		}
 	}
 	proj.Paths = append(proj.Paths, files...)
@@ -60,7 +64,26 @@ func (g *BasicSearch) Index(req *pogoPlugin.IProcessProjectReq) {
 			Root:  path,
 			Paths: make([]string, 0, indexStartCapacity),
 		}
-		err := g.index(&proj, path)
+
+		// Read .gitignore if exists
+		ignorePath := filepath.Join(path, ".gitignore")
+		_, err4 := os.Lstat(ignorePath)
+		var gitIgnore *ignore.GitIgnore
+		if err4 != nil {
+			if !errors.Is(err4, os.ErrNotExist) {
+				g.logger.Error("Error getting file info for gitignore %v", err4)
+			}
+			g.logger.Info(".gitignore does not exist. Skipping.\n")
+			gitIgnore = ignore.CompileIgnoreLines("")
+		} else {
+			gitIgnore, err4 = ignore.CompileIgnoreFile(ignorePath)
+			if err4 != nil {
+				g.logger.Error("Error parsing gitIgnore %v", err4)
+				gitIgnore = ignore.CompileIgnoreLines("")
+			} 
+		}
+		
+		err := g.index(&proj, path, gitIgnore)
 		if err != nil {
 			g.logger.Warn(err.Error())
 		}
