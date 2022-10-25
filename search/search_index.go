@@ -42,7 +42,7 @@ func (g *BasicSearch) index(proj *IndexedProject, path string, gitIgnore *ignore
 			g.logger.Warn(err.Error())
 			continue
 		}
-		if !gitIgnore.MatchesPath(newPath) && subFile != ".git" {
+		if !gitIgnore.MatchesPath(newPath) && subFile != ".git" && subFile != ".pogo" {
 			if fileInfo.IsDir() {
 				err = g.index(proj, newPath, gitIgnore)
 				if err != nil {
