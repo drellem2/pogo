@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/marginalia-gaming/pogo/internal/driver"
 	pogoPlugin "github.com/marginalia-gaming/pogo/plugin"
@@ -29,6 +30,7 @@ type ProjectsSave struct {
 
 var projectFile string
 var projects []Project
+var ProjectFileName string
 
 // For now a noop.
 func Init() {
@@ -38,7 +40,10 @@ func Init() {
 		home = "."
 	}
 	fmt.Printf("POGO_HOME=%s\n", home)
-	projectFile = home + "/projects.json"
+	if ProjectFileName == "" {
+		ProjectFileName = "projects.json"
+	}
+	projectFile = filepath.Join(home, ProjectFileName)
 	_, err := os.Lstat(projectFile)
 	skipImport := false
 	if err != nil {
@@ -127,6 +132,7 @@ func Add(p *Project) {
 	}
 	addToPlugin(*p)
 	projects = append(projects, *p)
+	defer SaveProjects()
 }
 
 func AddAll(ps []Project) {
@@ -188,7 +194,9 @@ func Visit(req VisitRequest) (*VisitResponse, *ErrorResponse) {
 
 	// Check if in existing project
 	for _, proj := range projects {
-		if dirPath == proj.Path {
+		fmt.Printf("Comparing %s and %s", dirPath, proj.Path)
+		if strings.HasPrefix(dirPath, proj.Path) {
+			fmt.Printf("Has prefix")
 			parentProj = &proj
 		}
 		break
@@ -276,4 +284,8 @@ func hasPogoStop(dirnames []string) bool {
 		}
 	}
 	return false
+}
+
+func RemoveSaveFile() {
+	os.Remove(projectFile)
 }

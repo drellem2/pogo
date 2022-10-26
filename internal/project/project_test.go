@@ -36,6 +36,7 @@ func absolute(path string) (string, error) {
 }
 
 func setUp(t *testing.T) (string, error) {
+	ProjectFileName = "projects-test.json"
 	d, _ := os.Getwd()
 	t.Logf("Current working directory: %s", d)
 	aServiceAbs, err := absolute(aService)
@@ -55,6 +56,7 @@ func setUp(t *testing.T) (string, error) {
 
 func cleanUp() {
 	driver.Kill()
+	RemoveSaveFile()
 }
 
 func testFileInExistingProjectRecognized(path string, t *testing.T) {
@@ -246,6 +248,4 @@ func TestSaveProjects(t *testing.T) {
 	if projectNum != projectNum2 {
 		t.Errorf("Project number expected %d but found  %d", projectNum, projectNum2)
 	}
-	// Cleanup
-	os.Remove(projectFile)
 }

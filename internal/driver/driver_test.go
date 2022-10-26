@@ -21,15 +21,31 @@ func init() {
 	os.Chdir("../..")
 }
 
+func absolute(path string) (string, error) {
+	str, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	info, err2 := os.Lstat(path)
+	if err2 != nil {
+		return "", err2
+	}
+	if info.IsDir() {
+		return str+"/", nil
+	}
+	return str, nil
+}
+
 func setUp(t *testing.T) (string, error) {
 	d, _ := os.Getwd()
 	t.Logf("Current working directory: %s", d)
-	aServiceAbs, err := filepath.Abs(aService)
+	aServiceAbs, err := absolute(aService)
 	if err != nil {
 		return "", err
 	}
 	t.Logf("a-service at: %s", aServiceAbs)
 	driver.Init()
+	project.ProjectFileName = "projects-test.json"
 	project.Init()
 	p := project.Project{
 		Id:   0,
@@ -41,6 +57,7 @@ func setUp(t *testing.T) (string, error) {
 
 func cleanUp() {
 	driver.Kill()
+	project.RemoveSaveFile()
 }
 
 func TestPluginsLoad(t *testing.T) {
@@ -108,7 +125,7 @@ func TestPluginExecute(t *testing.T) {
 	plugin := driver.GetPlugin(pluginPath)
 	req := url.QueryEscape("{\"type\": \"files\", \"projectRoot\": \"_testdata/a-service\"}")
 	resp := (*plugin).Execute(req)
-	expectedRes := "%7B%22index%22%3A%7B%22root%22%3A%22%2Fhome%2Fdrellem%2Fdev%2Fpogo%2F_testdata%2Fa-service%22%2C%22paths%22%3A%5B%22%2Fhome%2Fdrellem%2Fdev%2Fpogo%2F_testdata%2Fa-service%2FREADME.md%22%2C%22%2Fhome%2Fdrellem%2Fdev%2Fpogo%2F_testdata%2Fa-service%2F.gitignore%22%5D%7D%2C%22error%22%3A%22%22%7D"
+	expectedRes := "%7B%22index%22%3A%7B%22root%22%3A%22%2Fhome%2Fdrellem%2Fdev%2Fpogo%2F_testdata%2Fa-service%2F%22%2C%22paths%22%3A%5B%22%2Fhome%2Fdrellem%2Fdev%2Fpogo%2F_testdata%2Fa-service%2FREADME.md%22%2C%22%2Fhome%2Fdrellem%2Fdev%2Fpogo%2F_testdata%2Fa-service%2F.gitignore%22%5D%7D%2C%22error%22%3A%22%22%7D"
 	if resp != expectedRes {
 		t.Errorf("Unexpected response %s expected %s", resp, expectedRes)
 		return
