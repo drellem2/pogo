@@ -194,12 +194,10 @@ func Visit(req VisitRequest) (*VisitResponse, *ErrorResponse) {
 
 	// Check if in existing project
 	for _, proj := range projects {
-		fmt.Printf("Comparing %s and %s", dirPath, proj.Path)
 		if strings.HasPrefix(dirPath, proj.Path) {
-			fmt.Printf("Has prefix")
 			parentProj = &proj
+			break
 		}
-		break
 	}
 
 	if parentProj != nil {

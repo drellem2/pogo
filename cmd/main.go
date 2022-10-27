@@ -21,9 +21,14 @@ import (
 	pogoPlugin "github.com/marginalia-gaming/pogo/plugin"
 )
 
+func health(w http.ResponseWriter, r *http.Request) {
+	fmt.Println("Visited /health")
+	fmt.Fprintf(w, "pogo is up and bouncing")
+}
+
 func homePage(w http.ResponseWriter, r *http.Request) {
-	fmt.Fprintf(w, "greetings from pogo daemon")
 	fmt.Println("Visited /")
+	fmt.Fprintf(w, "greetings from pogo daemon")
 }
 
 func allProjects(w http.ResponseWriter, r *http.Request) {
@@ -114,6 +119,7 @@ func handleRequests() {
 	http.HandleFunc("/projects", allProjects)
 	http.HandleFunc("/plugin", plugin)
 	http.HandleFunc("/plugins", plugins)
+	http.HandleFunc("/health", health)
 	fmt.Println("pogod starting")
 	log.Fatal(http.ListenAndServe(":10000", nil))
 }
