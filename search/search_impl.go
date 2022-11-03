@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/fsnotify/fsnotify"
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/go-plugin"
 
@@ -22,6 +23,7 @@ const version = "0.0.1"
 type BasicSearch struct {
 	logger   hclog.Logger
 	projects map[string]IndexedProject
+	watcher  *fsnotify.Watcher
 }
 
 // Input to an "Execute" call should be a serialized SearchRequest
@@ -104,7 +106,7 @@ func (g *BasicSearch) Execute(encodedReq string) string {
 
 func (g *BasicSearch) ProcessProject(req *pogoPlugin.IProcessProjectReq) error {
 	g.logger.Debug("Processing project %s", (*req).Path())
-	g.Index(req)
+	go g.Index(req)
 	return nil
 }
 
@@ -129,24 +131,60 @@ func makeSearchDir(path string) string {
 	return fullSearchDir
 }
 
-func main() {
-	gob.Register(pogoPlugin.ProcessProjectReq{})
+func createBasicSearch() *BasicSearch {
 	logger := hclog.New(&hclog.LoggerOptions{
 		Level:      hclog.Trace,
 		Output:     os.Stderr,
 		JSONFormat: true,
 	})
 
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		logger.Error("Could not create file watcher. Index will run frequently.")
+	}
+
 	basicSearch := &BasicSearch{
 		logger:   logger,
 		projects: make(map[string]IndexedProject),
+		watcher:  watcher,
 	}
+
+	if watcher != nil {
+		go func() {
+			for {
+				select {
+				case event, ok := <-watcher.Events:
+					if !ok {
+						logger.Warn("Not ok")
+						return
+					}
+					if event.Has(fsnotify.Write) || event.Has(fsnotify.Create) || event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename) {
+						logger.Info("File update: ", event)
+						basicSearch.ReIndex(event.Name)
+					}
+				case err, ok := <-watcher.Errors:
+
+					if !ok {
+						return
+					}
+					logger.Error("File watcher error: %v", err)
+				}
+			}
+		}()
+	}
+	return basicSearch
+}
+
+func main() {
+	gob.Register(pogoPlugin.ProcessProjectReq{})
+
+	basicSearch := createBasicSearch()
+	defer basicSearch.watcher.Close()
+
 	// pluginMap is the map of plugins we can dispense.
 	var pluginMap = map[string]plugin.Plugin{
 		"basicSearch": &pogoPlugin.PogoPlugin{Impl: basicSearch},
 	}
-
-	logger.Debug("message from plugin", "foo", "bar")
 
 	plugin.Serve(&plugin.ServeConfig{
 		HandshakeConfig: handshakeConfig,

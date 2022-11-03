@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/sabhiram/go-gitignore"
 
@@ -21,13 +22,33 @@ type IndexedProject struct {
 	Paths []string `json:"paths"`
 }
 
+func absolute(path string) (string, error) {
+	str, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	info, err2 := os.Lstat(path)
+	if err2 != nil {
+		return "", err2
+	}
+	if info.IsDir() {
+		return str + "/", nil
+	}
+	return str, nil
+}
+
 func (g *BasicSearch) index(proj *IndexedProject, path string, gitIgnore *ignore.GitIgnore) error {
+	e := g.watcher.Add(path)
+	if e != nil {
+		g.logger.Error("Error adding file watcher: %v")
+	}
 	file, err := os.Open(path)
 	if err != nil {
 		return err
 	}
 	defer file.Close()
 	dirnames, err2 := file.Readdirnames(0)
+	g.logger.Info("Found dirs: ", dirnames)
 	if err2 != nil {
 		return err2
 	}
@@ -44,6 +65,12 @@ func (g *BasicSearch) index(proj *IndexedProject, path string, gitIgnore *ignore
 		}
 		if !gitIgnore.MatchesPath(newPath) && subFile != ".git" && subFile != ".pogo" {
 			if fileInfo.IsDir() {
+				if g.watcher != nil {
+					err = g.watcher.Add(newPath)
+					if err != nil {
+						g.logger.Error("Error adding file watcher: %v", err)
+					}
+				}
 				err = g.index(proj, newPath, gitIgnore)
 				if err != nil {
 					g.logger.Warn(err.Error())
@@ -57,52 +84,108 @@ func (g *BasicSearch) index(proj *IndexedProject, path string, gitIgnore *ignore
 	return nil
 }
 
-func (g *BasicSearch) Index(req *pogoPlugin.IProcessProjectReq) {
+func (g *BasicSearch) ReIndex(path string) {
+	fileInfo, e := os.Lstat(path)
+	if e != nil {
+		g.logger.Error("Error getting path info: ", e)
+		return
+	}
+	if !fileInfo.IsDir() {
+		path = filepath.Dir(path)
+	}
+	g.logger.Info("Reindexing ", path)
 	go func() {
-		path := (*req).Path()
-		proj := IndexedProject{
-			Root:  path,
-			Paths: make([]string, 0, indexStartCapacity),
-		}
-
-		// Read .gitignore if exists
-		ignorePath := filepath.Join(path, ".gitignore")
-		_, err4 := os.Lstat(ignorePath)
-		var gitIgnore *ignore.GitIgnore
-		if err4 != nil {
-			if !errors.Is(err4, os.ErrNotExist) {
-				g.logger.Error("Error getting file info for gitignore %v", err4)
-			}
-			g.logger.Info(".gitignore does not exist. Skipping.\n")
-			gitIgnore = ignore.CompileIgnoreLines("")
-		} else {
-			gitIgnore, err4 = ignore.CompileIgnoreFile(ignorePath)
-			if err4 != nil {
-				g.logger.Error("Error parsing gitIgnore %v", err4)
-				gitIgnore = ignore.CompileIgnoreLines("")
-			} 
-		}
-		
-		err := g.index(&proj, path, gitIgnore)
-		if err != nil {
-			g.logger.Warn(err.Error())
-		}
-		g.projects[path] = proj
-
-		// Serialize index
-		searchDir := makeSearchDir(path)
-		saveFilePath := filepath.Join(searchDir, saveFileName)
-		outBytes, err2 := json.Marshal(&proj)
+		fullPath, err2 := absolute(path)
 		if err2 != nil {
-			g.logger.Error("Error serializing index to json", "index", proj)
+			g.logger.Error("Error getting absolute path", path)
+			return
 		}
-		err3 := os.WriteFile(saveFilePath, outBytes, 0644)
-		if err3 != nil {
-			g.logger.Error("Error saving index", "save_path", saveFilePath)
-		}
-		g.logger.Info("Indexed " + strconv.Itoa(len(g.projects[path].Paths)) + " files for " + path)
+		for projectRoot, indexed := range g.projects {
+			if strings.HasPrefix(fullPath, projectRoot) {
+				paths := indexed.Paths
+				paths2 := paths
+				paths = paths[:0]
+				for _, p := range paths2 {
+					if !strings.HasPrefix(p, fullPath) {
+						g.logger.Info("No prefix " + p + " " + projectRoot)
+						paths = append(paths, p)
+					} else if g.watcher != nil {
+						g.watcher.Remove(p)
+					}
+				}
+				indexed.Paths = paths
 
+				gitIgnore, err := ParseGitIgnore(projectRoot)
+				if err != nil {
+					g.logger.Error("Error parsing gitignore %v", err)
+				}
+				err = g.index(&indexed, fullPath, gitIgnore)
+				if err != nil {
+					g.logger.Error("Error indexing updated path ", fullPath)
+					g.logger.Error("Error: ", err)
+				}
+				g.projects[projectRoot] = indexed
+				break
+			}
+		}
 	}()
+}
+
+/*
+   Even if this function encounters an error, it will always at least return a
+   GitIgnore that matches nothing.
+*/
+func ParseGitIgnore(path string) (*ignore.GitIgnore, error) {
+	// Read .gitignore if exists
+	ignorePath := filepath.Join(path, ".gitignore")
+	var err error
+	_, err = os.Lstat(ignorePath)
+	var gitIgnore *ignore.GitIgnore
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			err = nil
+		}
+		gitIgnore = ignore.CompileIgnoreLines("")
+	} else {
+		gitIgnore, err = ignore.CompileIgnoreFile(ignorePath)
+		if err != nil {
+			gitIgnore = ignore.CompileIgnoreLines("")
+		}
+	}
+	return gitIgnore, err
+}
+
+func (g *BasicSearch) Index(req *pogoPlugin.IProcessProjectReq) {
+	path := (*req).Path()
+	proj := IndexedProject{
+		Root:  path,
+		Paths: make([]string, 0, indexStartCapacity),
+	}
+
+	gitIgnore, err7 := ParseGitIgnore(path)
+	if err7 != nil {
+		g.logger.Error("Error parsing gitignore", err7)
+	}
+
+	err := g.index(&proj, path, gitIgnore)
+	if err != nil {
+		g.logger.Warn(err.Error())
+	}
+	g.projects[path] = proj
+
+	// Serialize index
+	searchDir := makeSearchDir(path)
+	saveFilePath := filepath.Join(searchDir, saveFileName)
+	outBytes, err2 := json.Marshal(&proj)
+	if err2 != nil {
+		g.logger.Error("Error serializing index to json", "index", proj)
+	}
+	err3 := os.WriteFile(saveFilePath, outBytes, 0644)
+	if err3 != nil {
+		g.logger.Error("Error saving index", "save_path", saveFilePath)
+	}
+	g.logger.Info("Indexed " + strconv.Itoa(len(g.projects[path].Paths)) + " files for " + path)
+
 }
 
 func (g *BasicSearch) GetFiles(projectRoot string) (*IndexedProject, error) {

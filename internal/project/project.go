@@ -189,7 +189,7 @@ func Visit(req VisitRequest) (*VisitResponse, *ErrorResponse) {
 	if !fileInfo.IsDir() {
 		dirPath = filepath.Dir(path)
 	}
-	
+
 	dirPath = addSlashToPath(dirPath)
 
 	// Check if in existing project
@@ -205,7 +205,6 @@ func Visit(req VisitRequest) (*VisitResponse, *ErrorResponse) {
 			ParentProject: *parentProj,
 		}, nil
 	}
-
 
 	proj, err2 := searchAndCreate(dirPath)
 	if err2 != nil {

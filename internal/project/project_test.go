@@ -30,7 +30,7 @@ func absolute(path string) (string, error) {
 		return "", err2
 	}
 	if info.IsDir() {
-		return str+"/", nil
+		return str + "/", nil
 	}
 	return str, nil
 }
