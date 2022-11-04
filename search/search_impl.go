@@ -158,7 +158,7 @@ func createBasicSearch() *BasicSearch {
 						logger.Warn("Not ok")
 						return
 					}
-					if event.Has(fsnotify.Write) || event.Has(fsnotify.Create) || event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename) {
+					if event.Has(fsnotify.Create) || event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename) {
 						logger.Info("File update: ", event)
 						basicSearch.ReIndex(event.Name)
 					}
