@@ -32,7 +32,6 @@ var projectFile string
 var projects []Project
 var ProjectFileName string
 
-// For now a noop.
 func Init() {
 	projects = []Project{}
 	home := os.Getenv("POGO_HOME")
@@ -52,6 +51,14 @@ func Init() {
 			fmt.Printf("Error getting file info %v", err)
 		}
 		fmt.Printf("Save file %s does not exist.\n", projectFile)
+		// Create the file
+		_, err2 := os.Create(projectFile)
+		if err2 != nil {
+			fmt.Printf("Error creating file %v", err2)
+			return
+		}
+
+		
 	}
 	if !skipImport {
 		file, err2 := os.Open(projectFile)

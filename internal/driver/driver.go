@@ -95,13 +95,22 @@ func Init() {
 	clients = make(map[string]*plugin.Client)
 	Interfaces = make(map[string]*pogoPlugin.IPogoPlugin)
 
-	paths, err := plugin.Discover("pogo*", "/home/drellem/dev/pogo/bin/plugin")
+
+	pluginPath := os.Getenv("POGO_PLUGIN_PATH")
+
+	// Test if pluginPath is empty string or whitespace
+
+	if pluginPath == "" {
+		fmt.Printf("POGO_PLUGIN_PATH not set, using current directory\n")
+		pluginPath, _ =  os.Getwd()
+	}
+
+	paths, err := plugin.Discover("pogo*", pluginPath)
 	if err != nil {
 		fmt.Printf("Error discovering plugins: %v", err)
 		return
 	}
-	p, _ := os.Getwd()
-	fmt.Printf("Discovered %d plugins in dir %s: %v\n", len(paths), p, paths)
+	fmt.Printf("Discovered %d plugins in dir %s: %v\n", len(paths), pluginPath, paths)
 	for _, path := range paths {
 		func() {
 			defer func() {
