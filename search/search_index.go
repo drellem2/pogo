@@ -96,7 +96,7 @@ func (g *BasicSearch) ReIndex(path string) {
 	if !fileInfo.IsDir() {
 		path = filepath.Dir(path)
 	}
-	g.logger.Info("Reindexing ", path)
+	g.logger.Debug("Reindexing ", path)
 	go func() {
 		fullPath, err2 := absolute(path)
 		if err2 != nil {

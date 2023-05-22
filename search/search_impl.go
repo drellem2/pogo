@@ -162,7 +162,7 @@ func createBasicSearch() *BasicSearch {
 						return
 					}
 					if event.Has(fsnotify.Create) || event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename) {
-						logger.Info("File update: ", event)
+						logger.Debug("File update: ", event)
 						basicSearch.ReIndex(event.Name)
 					}
 				case err, ok := <-watcher.Errors:
