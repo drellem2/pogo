@@ -1,6 +1,7 @@
 package driver_test
 
 import (
+	"bytes"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -147,12 +148,13 @@ func TestPluginExecute(t *testing.T) {
              },
              "error":""
           }`
+	var buff bytes.Buffer
 	templ := template.Must(template.New("Json Response").Parse(expectedResTemplate))
-	err = templ.Execute(os.Stdout, map[string]interface{}{
+	err = templ.Execute(&buff, map[string]interface{}{
 		"current_dir": d,
 	})
 	if err != nil {
 		t.Errorf("Error executing template %v", err)
 	}
-	jsonassert.New(t).Assertf(resp, expectedRes)
+	jsonassert.New(t).Assertf(resp, buff.String())
 }

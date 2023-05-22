@@ -48,7 +48,7 @@ func (g *BasicSearch) index(proj *IndexedProject, path string, gitIgnore *ignore
 	}
 	defer file.Close()
 	dirnames, err2 := file.Readdirnames(0)
-	g.logger.Info("Found dirs: ", dirnames)
+	g.logger.Debug("Found dirs: ", dirnames)
 	if err2 != nil {
 		return err2
 	}
@@ -63,7 +63,10 @@ func (g *BasicSearch) index(proj *IndexedProject, path string, gitIgnore *ignore
 			g.logger.Warn(err.Error())
 			continue
 		}
-		if !gitIgnore.MatchesPath(newPath) && subFile != ".git" && subFile != ".pogo" {
+		// Remove projectRoot prefix from newPath
+		relativePath := strings.TrimPrefix(newPath, proj.Root)
+		
+		if !gitIgnore.MatchesPath(relativePath) && subFile != ".git" && subFile != ".pogo" {
 			if fileInfo.IsDir() {
 				if g.watcher != nil {
 					err = g.watcher.Add(newPath)
