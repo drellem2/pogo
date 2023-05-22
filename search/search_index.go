@@ -111,7 +111,6 @@ func (g *BasicSearch) ReIndex(path string) {
 				paths = paths[:0]
 				for _, p := range paths2 {
 					if !strings.HasPrefix(p, fullPath) {
-						g.logger.Info("No prefix " + p + " " + projectRoot)
 						paths = append(paths, p)
 					} else if g.watcher != nil {
 						g.watcher.Remove(p)

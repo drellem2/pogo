@@ -136,7 +136,7 @@ func makeSearchDir(path string) string {
 
 func createBasicSearch() *BasicSearch {
 	logger := hclog.New(&hclog.LoggerOptions{
-		Level:      hclog.Trace,
+		Level:      hclog.Info,
 		Output:     os.Stderr,
 		JSONFormat: true,
 	})
