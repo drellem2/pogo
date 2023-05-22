@@ -103,6 +103,7 @@ func (g *BasicSearch) ReIndex(path string) {
 			g.logger.Error("Error getting absolute path", path)
 			return
 		}
+		g.mu.Lock()
 		for projectRoot, indexed := range g.projects {
 			if strings.HasPrefix(fullPath, projectRoot) {
 				paths := indexed.Paths
@@ -131,6 +132,7 @@ func (g *BasicSearch) ReIndex(path string) {
 				break
 			}
 		}
+		g.mu.Unlock()
 	}()
 }
 
@@ -174,7 +176,9 @@ func (g *BasicSearch) Index(req *pogoPlugin.IProcessProjectReq) {
 	if err != nil {
 		g.logger.Warn(err.Error())
 	}
+	g.mu.Lock()
 	g.projects[path] = proj
+	g.mu.Unlock()
 
 	// Serialize index
 	searchDir := makeSearchDir(path)

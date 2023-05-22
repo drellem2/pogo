@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/hashicorp/go-hclog"
@@ -24,6 +25,8 @@ type BasicSearch struct {
 	logger   hclog.Logger
 	projects map[string]IndexedProject
 	watcher  *fsnotify.Watcher
+	// Mutex to prevent concurrent access to projects map
+	mu sync.Mutex
 }
 
 // Input to an "Execute" call should be a serialized SearchRequest
