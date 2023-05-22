@@ -5,6 +5,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"text/template"
+
+	"github.com/kinbiko/jsonassert"
 
 	"github.com/marginalia-gaming/pogo/internal/driver"
 	"github.com/marginalia-gaming/pogo/internal/project"
@@ -124,10 +127,32 @@ func TestPluginExecute(t *testing.T) {
 	pluginPath := plugins[0]
 	plugin := driver.GetPlugin(pluginPath)
 	req := url.QueryEscape("{\"type\": \"files\", \"projectRoot\": \"_testdata/a-service\"}")
-	resp := (*plugin).Execute(req)
-	expectedRes := "%7B%22index%22%3A%7B%22root%22%3A%22%2FUsers%2Fdaniel%2Fdev%2Fpogo%2F_testdata%2Fa-service%2F%22%2C%22paths%22%3A%5B%22%2FUsers%2Fdaniel%2Fdev%2Fpogo%2F_testdata%2Fa-service%2Fsrc%2Fa.c%22%2C%22%2FUsers%2Fdaniel%2Fdev%2Fpogo%2F_testdata%2Fa-service%2FREADME.md%22%2C%22%2FUsers%2Fdaniel%2Fdev%2Fpogo%2F_testdata%2Fa-service%2F.gitignore%22%5D%7D%2C%22error%22%3A%22%22%7D"
-	if resp != expectedRes {
-		t.Errorf("Unexpected response %s expected %s", resp, expectedRes)
-		return
+	encodedResp := (*plugin).Execute(req)
+	resp, err2 := url.QueryUnescape(encodedResp)
+	t.Logf("Response: %s", resp)
+	if err2 != nil {
+		t.Errorf("Error decoding response %v", err2)
 	}
+	// Print current directory
+	d, _ := os.Getwd()
+	expectedResTemplate := `
+          {
+             "index":{
+                "root":"{{ .current_dir }}/_testdata/a-service/",
+                "paths":[
+                   "{{ .current_dir }}/_testdata/a-service/src/a.c",
+                   "{{ .current_dir }}/_testdata/a-service/README.md",
+                   "{{ .current_dir }}/_testdata/a-service/.gitignore"
+                ]
+             },
+             "error":""
+          }`
+	templ := template.Must(template.New("Json Response").Parse(expectedResTemplate))
+	err = templ.Execute(os.Stdout, map[string]interface{}{
+		"current_dir": d,
+	})
+	if err != nil {
+		t.Errorf("Error executing template %v", err)
+	}
+	jsonassert.New(t).Assertf(resp, expectedRes)
 }

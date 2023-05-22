@@ -5,6 +5,7 @@ go 1.17
 require (
 	github.com/hashicorp/go-hclog v1.3.1
 	github.com/hashicorp/go-plugin v1.4.5
+	github.com/kinbiko/jsonassert v1.1.1
 	github.com/nightlyone/lockfile v1.0.0
 )
 
@@ -24,3 +25,4 @@ require (
 	google.golang.org/genproto v0.0.0-20190819201941-24fa4b261c55 // indirect
 	google.golang.org/grpc v1.27.1 // indirect
 )
+

@@ -218,7 +218,7 @@ func (g *BasicSearch) GetFiles(projectRoot string) (*IndexedProject, error) {
 	var indexStruct IndexedProject
 	err = json.Unmarshal(byteValue, &indexStruct)
 	if err != nil {
-		g.logger.Error("Error deserializing index file.")
+		g.logger.Error("Error deserializing index file: %v", err)
 		return nil, err
 	}
 	return &indexStruct, nil
