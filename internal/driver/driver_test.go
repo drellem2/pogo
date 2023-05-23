@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 	"text/template"
+	"time"
 
 	"github.com/kinbiko/jsonassert"
 
@@ -119,6 +120,10 @@ func TestPluginExecute(t *testing.T) {
 		t.Errorf("Failed test set-up %v", err)
 		return
 	}
+	// Initialization causes the search plugin to index the files.
+	// We wait for that goroutine to finish before executing the test.
+	time.Sleep(1 * time.Second)
+
 	plugins := driver.GetPluginPaths()
 	numPlugins := len(plugins)
 	if numPlugins < 1 {

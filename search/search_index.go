@@ -202,9 +202,10 @@ func (g *BasicSearch) GetFiles(projectRoot string) (*IndexedProject, error) {
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
 			g.logger.Error("Error getting file info", "error", err)
+			return nil, err
 		}
 		g.logger.Warn("Search index does not exist", "path", saveFilePath)
-		return nil, err
+		skipImport = true
 	}
 
 	if skipImport {
