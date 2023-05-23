@@ -79,7 +79,7 @@ func (g *BasicSearch) index(proj *IndexedProject, path string, gitIgnore *ignore
 					g.logger.Warn(err.Error())
 				}
 			} else {
-				files = append(files, newPath)
+				files = append(files, relativePath)
 			}
 		}
 	}
@@ -106,11 +106,12 @@ func (g *BasicSearch) ReIndex(path string) {
 		g.mu.Lock()
 		for projectRoot, indexed := range g.projects {
 			if strings.HasPrefix(fullPath, projectRoot) {
+				relativePath := strings.TrimPrefix(fullPath, projectRoot)
 				paths := indexed.Paths
 				paths2 := paths
 				paths = paths[:0]
 				for _, p := range paths2 {
-					if !strings.HasPrefix(p, fullPath) {
+					if !strings.HasPrefix(p, relativePath) {
 						paths = append(paths, p)
 					} else if g.watcher != nil {
 						g.watcher.Remove(p)

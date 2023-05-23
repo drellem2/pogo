@@ -146,9 +146,9 @@ func TestPluginExecute(t *testing.T) {
              "index":{
                 "root":"{{ .current_dir }}/_testdata/a-service/",
                 "paths":[
-                   "{{ .current_dir }}/_testdata/a-service/src/a.c",
-                   "{{ .current_dir }}/_testdata/a-service/README.md",
-                   "{{ .current_dir }}/_testdata/a-service/.gitignore"
+                   "src/a.c",
+                   "README.md",
+                   ".gitignore"
                 ]
              },
              "error":""
