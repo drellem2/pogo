@@ -62,13 +62,34 @@ func (g *PluginManager) Info() *pogoPlugin.PluginInfoRes {
 	return &pogoPlugin.PluginInfoRes{Version: ""}
 }
 
+func GetPluginClient(path string) *plugin.Client {
+	return clients[path]
+}
+
 func GetPlugin(path string) *pogoPlugin.IPogoPlugin {
+	checkAlive(path)
 	return Interfaces[path]
+}
+
+func checkAlive(path string) {
+	if Interfaces[path] == nil {
+		startPlugin(path)
+		return
+	}
+
+	// Check if plugin is alive
+	if clients[path].Exited() {
+		// Plugin is dead, restart
+		startPlugin(path)
+	}	
 }
 
 func (g *PluginManager) ProcessProject(req *pogoPlugin.IProcessProjectReq) error {
 	var err error
 	hasErr := false
+	for path, _ := range Interfaces {
+		checkAlive(path)
+	}
 	for _, raw := range Interfaces {
 		func() {
 			defer func() {

@@ -80,6 +80,44 @@ func TestPluginsLoad(t *testing.T) {
 	}
 }
 
+func TestPluginRestarts(t *testing.T) {
+	t.Logf("Starting test TestPluginRestarts")
+	_, err := setUp(t)
+	defer cleanUp()
+	if err != nil {
+		t.Errorf("Failed test set-up %v", err)
+		return
+	}
+	plugins := driver.GetPluginPaths()
+	numPlugins := len(plugins)
+	if numPlugins < 1 {
+		t.Errorf("Wrong number of plugins, expected at least %d but found %d", 1, numPlugins)
+		return
+	}
+	pluginPath := plugins[0]
+	pluginClient := driver.GetPluginClient(pluginPath)
+	pluginClient.Kill()
+	if !pluginClient.Exited() {
+		t.Errorf("Failed to kill plugin")
+		return
+	}
+	plugin := driver.GetPlugin(pluginPath)
+	if plugin == nil {
+		t.Errorf("Unexpected nil plugin")
+		return
+	}
+	info := (*plugin).Info()
+	if info == nil {
+		t.Errorf("Unexpected nil info")
+		return
+	}
+	version := (*info).Version
+	if version != "0.0.1" {
+		t.Errorf("Unexpected version %s expected %s", version, "0.0.1")
+		return
+	}
+}
+
 func TestPluginInfo(t *testing.T) {
 	t.Logf("Starting test TestPluginInfo")
 	_, err := setUp(t)
