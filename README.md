@@ -7,7 +7,7 @@ Goal: Open a file in emacs, then see its repository automatically imported into 
 
 ## Installation
 - Mac
-`brew install go && chmod +x run.sh && ./run.sh`
+`brew install go && chmod +x build.sh.sh && ./build.sh`
 
 See https://github.com/drellem/pogo-mode for an emacs client.
 
