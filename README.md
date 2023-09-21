@@ -1,7 +1,7 @@
 # pogo
 code intelligence daemon
 
-/Like a language server for project navigation./
+*Like a language server for project navigation.*
 
 Goal: Open a file in emacs, then see its repository automatically imported into your favorite IDE.
 
