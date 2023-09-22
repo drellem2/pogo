@@ -58,7 +58,6 @@ func Init() {
 			return
 		}
 
-		
 	}
 	if !skipImport {
 		file, err2 := os.Open(projectFile)
