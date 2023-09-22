@@ -65,7 +65,7 @@ func (g *BasicSearch) index(proj *IndexedProject, path string, gitIgnore *ignore
 		}
 		// Remove projectRoot prefix from newPath
 		relativePath := strings.TrimPrefix(newPath, proj.Root)
-		
+
 		if !gitIgnore.MatchesPath(relativePath) && subFile != ".git" && subFile != ".pogo" {
 			if fileInfo.IsDir() {
 				if g.watcher != nil {
@@ -137,8 +137,8 @@ func (g *BasicSearch) ReIndex(path string) {
 }
 
 /*
-   Even if this function encounters an error, it will always at least return a
-   GitIgnore that matches nothing.
+Even if this function encounters an error, it will always at least return a
+GitIgnore that matches nothing.
 */
 func ParseGitIgnore(path string) (*ignore.GitIgnore, error) {
 	// Read .gitignore if exists

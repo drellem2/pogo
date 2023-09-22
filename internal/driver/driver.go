@@ -81,7 +81,7 @@ func checkAlive(path string) {
 	if clients[path].Exited() {
 		// Plugin is dead, restart
 		startPlugin(path)
-	}	
+	}
 }
 
 func (g *PluginManager) ProcessProject(req *pogoPlugin.IProcessProjectReq) error {
@@ -116,14 +116,13 @@ func Init() {
 	clients = make(map[string]*plugin.Client)
 	Interfaces = make(map[string]*pogoPlugin.IPogoPlugin)
 
-
 	pluginPath := os.Getenv("POGO_PLUGIN_PATH")
 
 	// Test if pluginPath is empty string or whitespace
 
 	if pluginPath == "" {
 		fmt.Printf("POGO_PLUGIN_PATH not set, using current directory\n")
-		pluginPath, _ =  os.Getwd()
+		pluginPath, _ = os.Getwd()
 	}
 
 	paths, err := plugin.Discover("pogo*", pluginPath)

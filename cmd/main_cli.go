@@ -6,8 +6,8 @@ package main
 
 import (
 	"fmt"
-	"log"
 	"io/ioutil"
+	"log"
 	"net/http"
 	"os/exec"
 	"strings"
@@ -18,7 +18,7 @@ import (
 func main() {
 
 	var cmdVisit = &cobra.Command{
-		Use: "visit [file]",
+		Use:   "visit [file]",
 		Short: "Visit file or directory",
 		Long: `Checks if the file is contained in a repository, and if so indexes the
  repository.`,
@@ -39,10 +39,10 @@ func main() {
 Child commands include start, stop, and status.`,
 	}
 	var cmdServerStart = &cobra.Command{
-		Use: "start",
+		Use:   "start",
 		Short: "Start the pogo server",
-		Long: `Start the pogo server.`,
-		Args: cobra.MinimumNArgs(0),
+		Long:  `Start the pogo server.`,
+		Args:  cobra.MinimumNArgs(0),
 		Run: func(cmd *cobra.Command, args []string) {
 			_, err := http.NewRequest("POST", "http://localhost:10000/health", nil)
 			if err != nil {
@@ -60,12 +60,12 @@ Child commands include start, stop, and status.`,
 	}
 
 	var cmdServerStop = &cobra.Command{
-		Use: "stop",
+		Use:   "stop",
 		Short: "Stop the pogo server",
-		Long: `Stop the pogo server.`,
-		Args: cobra.MinimumNArgs(0),
+		Long:  `Stop the pogo server.`,
+		Args:  cobra.MinimumNArgs(0),
 		Run: func(cmd *cobra.Command, args []string) {
-			// Stop the process "pogod"			
+			// Stop the process "pogod"
 		},
 	}
 
