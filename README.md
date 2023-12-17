@@ -33,7 +33,7 @@ Provides a project navigation interface matching `projectile.el`, but running in
 Goal: Open a file in emacs, then see its repository automatically imported into your favorite IDE.
 
 ### Installation
-- Build the server using the instructions at  https://github.com/drellem/pogo.
+- Build the server using the instructions above.
 - Open `pogo-mode.el` in emacs and run `M-x package-install-from-buffer`. 
 - Add to your `init.el`:
 ```emacs-lisp
