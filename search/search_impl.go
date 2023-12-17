@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 
 	"github.com/fsnotify/fsnotify"
@@ -34,16 +35,53 @@ type SearchRequest struct {
 	// Currently only type is "files"
 	Type        string `json:"type"`
 	ProjectRoot string `json:"projectRoot"`
+	// Command timeout duration - only for 'search'-type requests
+	Duration string `json:"string"`
+	Data string `json:"data"`
 }
 
 type SearchResponse struct {
 	Index IndexedProject `json:"index"`
+	Results SearchResults `json:"results"`
 	Error string         `json:"error"`
 }
 
 type ErrorResponse struct {
 	ErrorCode int    `json:"errorCode"`
 	Error     string `json:"error"`
+}
+
+func printSearchResponse(response SearchResponse) string {
+	// Instead of marshalling the obect, write code to go through all fields
+	// and concatenate them into a string.
+	var str string
+	str += "Index: " + response.Index.Root + "\n"
+	str += "Paths: " + "\n"
+	for _, path := range response.Index.Paths {
+		str += path + "\n"
+	}
+	str += "Results: " + "\n"
+	for _, result := range response.Results.Files {
+		str += "\t" + result.Path + "\n"
+		for _, match := range result.Matches {
+			// Convert match.Content bytes to string
+			var lineStr = strconv.FormatUint(uint64(match.Line), 10)
+			str += "\t\t" + lineStr + "\n"
+			if (match.Content != nil && len(match.Content) > 0) {
+				// str += "\t\t" + string(match.Content) + "\n"
+				// for _, b := range match.Content {
+				// 	// Cast byte to character
+				// 	str += ","
+				// 	str += string(b)
+				// }
+				
+			} else {
+				str += "\t\t" + "No content" + "\n"
+			}
+		}
+	}
+	str += "Error: " + response.Error + "\n"
+	return str
 }
 
 func (g *BasicSearch) errorResponse(code int, message string) string {
@@ -56,22 +94,31 @@ func (g *BasicSearch) errorResponse(code int, message string) string {
 	return url.QueryEscape(string(bytes))
 }
 
-func (g *BasicSearch) searchResponse(index *IndexedProject) string {
+func (g *BasicSearch) searchResponse(index *IndexedProject, results *SearchResults) string {
 	var response SearchResponse
 	if index == nil {
 		indexedProject := IndexedProject{Root: "", Paths: []string{}}
 		response.Index = indexedProject
-		response.Error = "No results. See logs for further details."
 	} else {
 		response.Index = *index
-		response.Error = ""
 	}
+	if results == nil {
+		g.logger.Info("Search response was nil")
+		searchResults := SearchResults{}
+		response.Results = searchResults
+	} else {
+		g.logger.Info("Search response was not nil")
+		response.Results = *results
+	}
+	response.Error = ""
+
+	// g.logger.Info("Search response: " + printSearchResponse(response))
 
 	bytes, err := json.Marshal(&response)
 	if err != nil {
 		g.logger.Error("Error writing search response")
 		return g.errorResponse(500, "Error writing search response")
-	}
+	}(pogo--search "query" nil)
 	return url.QueryEscape(string(bytes))
 }
 
@@ -80,7 +127,7 @@ func (g *BasicSearch) Info() *pogoPlugin.PluginInfoRes {
 	return &pogoPlugin.PluginInfoRes{Version: version}
 }
 
-// Just a dummy function for now
+// Executes a command sent to this plugin.
 func (g *BasicSearch) Execute(encodedReq string) string {
 	g.logger.Debug("Executing request.")
 	req, err2 := url.QueryUnescape(encodedReq)
@@ -94,17 +141,29 @@ func (g *BasicSearch) Execute(encodedReq string) string {
 		g.logger.Info("400 Invalid request.", "error", err)
 		return g.errorResponse(400, "Invalid request.")
 	}
-	if searchRequest.Type != "files" {
+
+	switch reqType := searchRequest.Type; reqType {
+	case "search":
+		results, err := g.Search(searchRequest.ProjectRoot,
+			searchRequest.Data, searchRequest.Duration)
+		if err != nil {
+			g.logger.Error("500 Error executing search.", "error", err)
+			return g.errorResponse(500, "Error executing search.")
+		}
+		return g.searchResponse(nil, results)
+	case "files":
+		proj, err3 := g.GetFiles(searchRequest.ProjectRoot)
+		if err3 != nil {
+			g.logger.Error("500 Error retrieving files.", "error", err3)
+			return g.errorResponse(500, "Error retrieving files.")
+		}
+		return g.searchResponse(proj, nil)
+	default:
 		g.logger.Info("404 Unknown request type.", "type", searchRequest.Type)
 		return g.errorResponse(404, "Unknown request type.")
 	}
-
-	proj, err3 := g.GetFiles(searchRequest.ProjectRoot)
-	if err3 != nil {
-		g.logger.Error("500 Error retrieving files.", "error", err3)
-		return g.errorResponse(500, "Error retrieving files.")
-	}
-	return g.searchResponse(proj)
+	
+	
 }
 
 func (g *BasicSearch) ProcessProject(req *pogoPlugin.IProcessProjectReq) error {

@@ -531,6 +531,16 @@ If PROJECT is not specified acts on the current project."
             (funcall pogo-project-name-function project-root)
           "-"))))
 
+(defun pogo-symbol-or-selection-at-point ()
+  "Get the symbol or selected text at point."
+  (if (use-region-p)
+      (buffer-substring-no-properties (region-beginning) (region-end))
+    (pogo-symbol-at-point)))
+
+(defun pogo-symbol-at-point ()
+  "Get the symbol at point and strip its properties."
+  (substring-no-properties (or (thing-at-point 'symbol) "")))
+
 (defun pogo-prepend-project-name (string)
   "Prepend the current project's name to STRING."
   (format "[%s] %s" (pogo-project-name) string))
@@ -575,6 +585,32 @@ If PROJECT is not specified acts on the current project."
     (if action
         (funcall action res)
       res)))
+
+(defun pogo--read-search-string-with-default (prefix-label)
+  (let* ((prefix-label (pogo-prepend-project-name prefix-label))
+         (default-value (pogo-symbol-or-selection-at-point))
+         (default-label (if (or (not default-value)
+                                (string= default-value ""))
+                            ""
+                          (format " (default %s)" default-value))))
+    (read-string (format "%s%s: " prefix-label default-label) nil nil default-value)))
+
+(defun pogo--search (&optional query arg)
+  "Search a project."
+  (interactive "P")
+  (let* ((project-root (pogo-acquire-root))
+         (search-query (or query (pogo--read-search-string-with-default "Zoekt query:"))))
+    (progn
+      (get-buffer-create "*search*")
+      (with-current-buffer "*search*"
+        (progn
+          (rename-buffer (concat "*search <" project-root ">*"))
+          (let* ((original-resp (pogo-project-search project-root search-query))
+                 (resp (prin1-to-string original-resp)))
+            (progn
+              (pogo-log (concat "Original response is " (if (null resp) "" "not") " nil"))
+              (pogo-log (concat "Response: '" (if (null resp) "nil" resp) "'"))
+              (insert (if (null resp) "nil" resp)))))))))
 
 (defun pogo--find-file (&optional ff-variant)
   "Jump to a project's file using completion.
@@ -693,37 +729,64 @@ An open project is a project with any open buffers."
     (pogo-log "%s %s" msg v)
     v))
 
-(defun pogo-parse-result (resp)
-  (letrec
-      ((rec2 (pogo-print-and-return "resp2" resp))
-       (entry (pogo-print-and-return "entry" (assoc 'value resp)))
-       (last-elem (pogo-print-and-return "last-elem" (cdr entry)))
-       (unhexed (pogo-print-and-return "unhexed" (url-unhex-string last-elem)))
-       (final (pogo-print-and-return "final" (json-read-from-string unhexed))))
-    final))
+;; (defun pogo-parse-result (resp)
+;;   (letrec
+;;       ((rec2 (pogo-print-and-return "resp2" resp))
+;;        (entry (pogo-print-and-return "entry" (assoc 'value resp)))
+;;        (last-elem (pogo-print-and-return "last-elem" (cdr entry)))
+;;        (unhexed (pogo-print-and-return "unhexed" (url-unhex-string last-elem)))
+;;        (final (pogo-print-and-return "final" (json-read-from-string unhexed))))
+;;     final))
+
 
 (defun pogo-nil-or-empty (str)
   (or (not str) (str= "" str)))
 
+(defun to-list (v)
+  (append v nil))
+
 
 (defun pogo-parse-result (resp)
   (letrec
-      ((inner-resp (pogo-print-and-return "inner-resp"
-					  (cdr (assoc 'index (json-read-from-string
-							      (url-unhex-string (cdr (assoc 'value resp))))))))
+      ((decoded (json-read-from-string (url-unhex-string (cdr (assoc 'value resp)))))
+       (inner-resp (pogo-print-and-return "inner-resp"
+					  (cdr (assoc 'index decoded))))
+       (results (pogo-print-and-return "results" (cdr (assoc 'results decoded))))
        (err (cdr (assoc 'error inner-resp)))
-       (paths (cdr (assoc 'paths inner-resp))))
+       (paths (pogo-print-and-return "paths" (cdr (assoc 'paths inner-resp)))))
     (if (not (pogo-nil-or-empty err))
 	(progn
 	  (pogo-log "Error parsing results %s" err)
 	  nil)
-      (append paths '()))))
+      (let ((al '()))
+        (progn
+          (push `(paths . ,paths) al)
+          (push `(results . ,results) al)
+          al)))))
+
+(defun pogo-project-search (path query)
+  (let
+      ((command (url-hexify-string (json-encode `(("type" . "search")
+                                                  ("projectRoot" . ,path)
+                                                  ("duration" . "10s")
+                                                  ("data" . query))))))
+    (to-list (cdr (assoc 'results (pogo-parse-result (request-response-data (request "http://localhost:10000/plugin"
+                                                :sync t
+                                                :type "POST"
+                                                :data (json-encode `(("plugin" . ,(pogo-get-search-plugin-path))
+                                                                     ("value" . ,command)))
+                                                :parser 'json-read
+                                                :success (cl-function (lambda (&key data &allow-other-keys)
+                                                                        (pogo-log "Received: %S" data)))
+                                                :error (cl-function (lambda (&key error-throw &allow-other-keys)
+                                                                      (pogo-log "Error searching project: %s" error-thrown)
+                                                                      (pogo-check-live)))))))))))
 
 (defun pogo-project-files (path)
   (let
       ((command (url-hexify-string (json-encode `(("type" . "files")
-						( "projectRoot" . ,path))))))
-    (pogo-parse-result (request-response-data (request "http://localhost:10000/plugin"
+						  ("projectRoot" . ,path))))))
+    (to-list (cdr (assoc 'paths (pogo-parse-result (request-response-data (request "http://localhost:10000/plugin"
 			     :sync t
 			     :type "POST"
 			     :data (json-encode `(("plugin" . ,(pogo-get-search-plugin-path))
@@ -733,7 +796,7 @@ An open project is a project with any open buffers."
 						     (pogo-log "Received: %S" data)))
 			     :error (cl-function (lambda (&key error-throw &allow-other-keys)
                                                    (pogo-log "Error getting project files: %s" error-thrown)
-						   (pogo-check-live))))))))
+						   (pogo-check-live)))))))))))
 
 (defun pogo-project-root (&optional dir)
   (let ((dir (or dir default-directory)))
@@ -745,6 +808,12 @@ An open project is a project with any open buffers."
 Starts the search for the project with DIR."
   ;; TODO add pogo-project-ensure
   (pogo-ensure-project (pogo-project-root dir)))
+
+;;;###autoload
+(defun pogo-search (&optional)
+  "Search a project by regexp."
+  (interactive)
+  (pogo--search))
 
 ;;;###autoload
 (defun pogo-find-file (&optional)
@@ -853,6 +922,11 @@ is chosen."
 
 (defun pogo-commander-bindings ()
   "Setup the keybindings for the Pogo Commander."
+
+  (def-pogo-commander-method ?g
+       "Search project."
+       (pogo-search))
+  
   (def-pogo-commander-method ?f
     "Find file in project."
     (pogo-find-file))
@@ -923,6 +997,7 @@ When set to nil you'll have always add projects explicitly with
 
 (defvar pogo-command-map
   (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "g") #'pogo-search)
     (define-key map (kbd "f") #'pogo-find-file)
     (define-key map (kbd "b") #'pogo-switch-to-buffer)
     (define-key map (kbd "D") #'pogo-dired)
