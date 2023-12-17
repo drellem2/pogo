@@ -43,5 +43,6 @@ Goal: Open a file in emacs, then see its repository automatically imported into 
         (pogo-mode +1)
         (define-key pogo-mode-map (kbd "C-c p") 'pogo-command-map))
 ```
+- Set the custom variable `request-log-level` to `-1`.
 
 If you use `projectile`, it will work the same but doesn't have all of the features (yet).
