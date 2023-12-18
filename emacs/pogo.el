@@ -607,10 +607,7 @@ If PROJECT is not specified acts on the current project."
           (rename-buffer (concat "*search <" project-root ">*"))
           (let* ((original-resp (pogo-project-search project-root search-query))
                  (resp (prin1-to-string original-resp)))
-            (progn
-              (pogo-log (concat "Original response is " (if (null resp) "" "not") " nil"))
-              (pogo-log (concat "Response: '" (if (null resp) "nil" resp) "'"))
-              (insert (if (null resp) "nil" resp)))))))))
+            (insert (if (null resp) "nil" resp))))))))
 
 (defun pogo--find-file (&optional ff-variant)
   "Jump to a project's file using completion.

@@ -107,7 +107,6 @@ func (g *BasicSearch) searchResponse(index *IndexedProject, results *SearchResul
 		searchResults := SearchResults{}
 		response.Results = searchResults
 	} else {
-		g.logger.Info("Search response was not nil")
 		response.Results = *results
 	}
 	response.Error = ""
@@ -118,7 +117,7 @@ func (g *BasicSearch) searchResponse(index *IndexedProject, results *SearchResul
 	if err != nil {
 		g.logger.Error("Error writing search response")
 		return g.errorResponse(500, "Error writing search response")
-	}(pogo--search "query" nil)
+	}
 	return url.QueryEscape(string(bytes))
 }
 

@@ -358,7 +358,6 @@ func (g *BasicSearch) Search(projectRoot string, data string, duration string) (
 			} else {
 				content = []byte{97}
 			}
-			g.logger.Info("Trying to encode byte slice of length " + strconv.Itoa(len(content)) + " to string")
 			chunkMatches[j] = PogoChunkMatch{
 				Line:   match.ContentStart.LineNumber,
 				Content:  content,
