@@ -181,16 +181,19 @@ func TestPluginExecute(t *testing.T) {
 	d, _ := os.Getwd()
 	expectedResTemplate := `
           {
-             "index":{
-                "root":"{{ .current_dir }}/_testdata/a-service/",
-                "paths":[
-                   "src/a.c",
-                   "README.md",
-                   ".gitignore"
-                ]
-             },
-             "error":""
-          }`
+            "index":{
+               "root":"{{ .current_dir }}/_testdata/a-service/",
+               "paths":[
+                  "src/a.c",
+                  "README.md",
+                  ".gitignore"
+               ]
+            },
+            "results":{
+               "files":null
+            },
+            "error":""
+         }`
 	var buff bytes.Buffer
 	templ := template.Must(template.New("Json Response").Parse(expectedResTemplate))
 	err = templ.Execute(&buff, map[string]interface{}{

@@ -1,11 +1,17 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
+	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
+	"text/template"
 	"time"
 
+	"github.com/kinbiko/jsonassert"
+	
 	"github.com/marginalia-gaming/pogo/plugin"
 )
 
@@ -36,6 +42,96 @@ func destroyFolder(dirPath string, t *testing.T) {
 	if err != nil {
 		t.Errorf("Failed to clean up file: %s", dirPath)
 	}
+}
+
+func TestSearch(t *testing.T) {
+	aServicePath, err2 := absolute(aService)
+	if err2 != nil {
+		t.Errorf("Could not run tests, failed to construct absolute path of %s", aService)
+		return
+	}
+	basicSearch := setUp(t)
+	defer cleanUp(basicSearch, t)
+	
+	req := plugin.IProcessProjectReq(plugin.ProcessProjectReq{PathVar: aServicePath})
+	basicSearch.Index(&req)
+	// Make string to execute
+	searchRequest := SearchRequest{
+		Type: "search",
+		ProjectRoot: aServicePath,
+		Data: "query",
+	}
+	// Serialize searchRequest as json string
+	searchRequestJson, err := json.Marshal(searchRequest)
+	if err != nil {
+		t.Errorf("Could not serialize search request as json")
+		return
+	}
+	// urlEncode searchRequestJson
+	searchRequestJsonUrlEncoded := url.QueryEscape(string(searchRequestJson))
+	
+	resp := basicSearch.Execute(searchRequestJsonUrlEncoded)
+	if err != nil {
+		t.Errorf("Could not execute search request")
+		return
+	}
+	
+	respDecoded, err := url.QueryUnescape(resp)
+	if err != nil {
+		t.Errorf("Could not url decode response")
+		return
+	}
+	// Unmarshal respDecoded into type SearchResponse
+	var searchResponse SearchResponse
+	t.Logf("Search Response: %s", respDecoded)
+	err = json.Unmarshal([]byte(respDecoded), &searchResponse)
+	if err != nil {
+		t.Errorf("Could not unmarshal response")
+		return
+	}
+	// Print current directory
+	d, _ := os.Getwd()
+	expectedResTemplate := `
+          {
+            "index":{
+              "root":"",
+              "paths":[
+                
+              ]
+            },
+            "results":{
+              "files":[
+                {
+                  "path":"{{ .current_dir }}/_testdata/a-service/src/a.c",
+                  "matches":[
+                    {
+                      "line":2
+                    }
+                  ]
+                },
+                {
+                  "path":"{{ .current_dir }}/_testdata/a-service/README.md",
+                  "matches":[
+                    {
+                      "line":3
+                    }
+                  ]
+                }
+              ]
+            },
+            "error":""
+          }`
+	var buff bytes.Buffer
+	templ := template.Must(template.New("Json Response").Parse(expectedResTemplate))
+	err = templ.Execute(&buff, map[string]interface{}{
+		"current_dir": d,
+	})
+	if err != nil {
+		t.Errorf("Could not execute template")
+		return
+	}
+	jsonassert.New(t).Assertf(respDecoded, buff.String())
+	
 }
 
 func TestNewFileCausesReIndex(t *testing.T) {

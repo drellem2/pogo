@@ -32,7 +32,7 @@ type BasicSearch struct {
 
 // Input to an "Execute" call should be a serialized SearchRequest
 type SearchRequest struct {
-	// Currently only type is "files"
+	// Values: "search" or "files"
 	Type        string `json:"type"`
 	ProjectRoot string `json:"projectRoot"`
 	// Command timeout duration - only for 'search'-type requests
