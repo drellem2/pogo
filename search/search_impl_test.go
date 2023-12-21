@@ -210,6 +210,5 @@ func TestNewFileCausesReIndex(t *testing.T) {
 			}
 
 		})
-
 	}
 }

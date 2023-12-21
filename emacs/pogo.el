@@ -39,6 +39,8 @@
 ;;
 ;;; Code:
 
+(require 'cl-lib)
+(require 'org)
 (require 'request)
 (require 'url)
 
@@ -280,7 +282,7 @@ DESCRIPTION is a one-line description of what the key selects.")
 	(get-buffer-create "*pogo-mode-log*"))
       (with-current-buffer "*pogo-mode-log*"
 	(goto-char (point-max))
-	(insert (apply 'format (append (list(concat msg "\n")) args)))))))
+	(insert (apply 'format (append (list (concat msg "\n")) args)))))))
 
 ;;;###autoload
 (defun pogo-version (&optional show-version)
@@ -595,6 +597,20 @@ If PROJECT is not specified acts on the current project."
                           (format " (default %s)" default-value))))
     (read-string (format "%s%s: " prefix-label default-label) nil nil default-value)))
 
+(defun pogo--search-compare (fst snd)
+  "Returns true when fst has more matching lines than snd"
+  (let ((lst (mapcar (lambda (e) (length (cdr (assoc #'matches e)))) (list fst snd))))
+    (> (car lst) (cadr lst))))
+
+(defun pogo--delimit (e l)
+  "Delimits the list l with the element e."
+  (if (or (null l) (null (cdr l)))
+      l
+    (cons (car l)
+          (cons
+           e
+           (pogo--delimit e (cdr l))))))
+
 (defun pogo--search (&optional query arg)
   "Search a project."
   (interactive "P")
@@ -603,11 +619,19 @@ If PROJECT is not specified acts on the current project."
     (progn
       (get-buffer-create "*search*")
       (with-current-buffer "*search*"
-        (progn
-          (rename-buffer (concat "*search <" project-root ">*"))
-          (let* ((original-resp (pogo-project-search project-root search-query))
-                 (resp (prin1-to-string original-resp)))
-            (insert (if (null resp) "nil" resp))))))))
+        (let ((buffer-name (concat "*search <" project-root ":" query ">*")))
+          (progn
+            (rename-buffer buffer-name)
+            (let* ((original-resp (list (car (pogo-project-search project-root search-query))))
+                   (files (cdr (assoc 'files original-resp)))
+                   (sorted-files (to-list (sort files #'pogo--search-compare)))
+                   (file-paths (mapcar (lambda (e) (cdr (assoc 'path e))) sorted-files))
+                   (org-format-files (mapcar (lambda (s) (concat "[[" s "][" s "]]")) file-paths))
+                   (files-with-newlines (pogo--delimit "\n" org-format-files))
+                   (results (reduce #'concat files-with-newlines)))
+              (insert (if (null results) "nil" results)))
+            (org-mode)
+            (switch-to-buffer buffer-name)))))))
 
 (defun pogo--find-file (&optional ff-variant)
   "Jump to a project's file using completion.
