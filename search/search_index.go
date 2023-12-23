@@ -349,14 +349,11 @@ func (g *BasicSearch) Search(projectRoot string, data string, duration string) (
 	fileMatches := make([]PogoFileMatch, len(result.Files))
 
 	for i, file := range result.Files {
+		content := make([]byte, 0)
 		chunkMatches := make([]PogoChunkMatch, len(file.ChunkMatches))
-		// Initialize as just a single byte 'a'
-		var content []byte
 		for j, match := range file.ChunkMatches {
 			if (match.Content != nil && len(match.Content) > 0) {
-				content = match.Content
-			} else {
-				content = []byte{97}
+				copy(content, match.Content)
 			}
 			chunkMatches[j] = PogoChunkMatch{
 				Line:   match.ContentStart.LineNumber,

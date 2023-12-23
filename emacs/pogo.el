@@ -619,14 +619,14 @@ If PROJECT is not specified acts on the current project."
     (progn
       (get-buffer-create "*search*")
       (with-current-buffer "*search*"
-        (let ((buffer-name (concat "*search <" project-root ":" query ">*")))
+        (let ((buffer-name (concat "*search <" project-root ":" search-query ">*")))
           (progn
             (rename-buffer buffer-name)
             (let* ((original-resp (list (car (pogo-project-search project-root search-query))))
                    (files (cdr (assoc 'files original-resp)))
-                   (sorted-files (to-list (sort files #'pogo--search-compare)))
-                   (file-paths (mapcar (lambda (e) (cdr (assoc 'path e))) sorted-files))
-                   (org-format-files (mapcar (lambda (s) (concat "[[" s "][" s "]]")) file-paths))
+                   (sorted-files (pogo-print-and-return "Sorted files: " (to-list (sort files #'pogo--search-compare))))
+                   (file-paths (pogo-print-and-return "file-paths: " (mapcar (lambda (e) (cdr (assoc 'path e))) sorted-files)))
+                   (org-format-files (pogo-print-and-return "org-format-files: " (mapcar (lambda (s) (concat "[[" s "][" s "]]")) file-paths)))
                    (files-with-newlines (pogo--delimit "\n" org-format-files))
                    (results (reduce #'concat files-with-newlines)))
               (insert (if (null results) "nil" results)))
@@ -790,7 +790,7 @@ An open project is a project with any open buffers."
       ((command (url-hexify-string (json-encode `(("type" . "search")
                                                   ("projectRoot" . ,path)
                                                   ("duration" . "10s")
-                                                  ("data" . query))))))
+                                                  ("data" . ,query))))))
     (to-list (cdr (assoc 'results (pogo-parse-result (request-response-data (request "http://localhost:10000/plugin"
                                                 :sync t
                                                 :type "POST"

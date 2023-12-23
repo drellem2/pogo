@@ -51,7 +51,7 @@ type ErrorResponse struct {
 	Error     string `json:"error"`
 }
 
-func printSearchResponse(response SearchResponse) string {
+func (g *BasicSearch) printSearchResponse(response SearchResponse) string {
 	// Instead of marshalling the obect, write code to go through all fields
 	// and concatenate them into a string.
 	var str string
@@ -69,11 +69,12 @@ func printSearchResponse(response SearchResponse) string {
 			str += "\t\t" + lineStr + "\n"
 			if (match.Content != nil && len(match.Content) > 0) {
 				// str += "\t\t" + string(match.Content) + "\n"
-				// for _, b := range match.Content {
-				// 	// Cast byte to character
-				// 	str += ","
-				// 	str += string(b)
-				// }
+				for _, b := range match.Content {
+					// Cast byte to characters
+					// str += ","
+					// str += string(b)
+					g.logger.Info("Byte: " + string(b))
+				}
 				
 			} else {
 				str += "\t\t" + "No content" + "\n"
@@ -111,7 +112,7 @@ func (g *BasicSearch) searchResponse(index *IndexedProject, results *SearchResul
 	}
 	response.Error = ""
 
-	// g.logger.Info("Search response: " + printSearchResponse(response))
+	g.logger.Info("Search response: " + g.printSearchResponse(response))
 
 	bytes, err := json.Marshal(&response)
 	if err != nil {
