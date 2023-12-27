@@ -1,3 +1,4 @@
+echo "Step 2: Testing..."
 export GOPATH=$(cd .. && pwd)
 export POGO_PLUGIN_PATH=$(cd ./bin/plugin && pwd)
 echo "Setting GOPATH to " $GOPATH

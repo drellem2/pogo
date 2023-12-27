@@ -1,3 +1,4 @@
+echo "Step 1: Formatting..."
 export GOPATH=$(cd .. && pwd)
 echo "Setting GOPATH to " $GOPATH
 find search -name "*.go" | xargs go fmt
