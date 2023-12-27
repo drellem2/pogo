@@ -23,16 +23,16 @@ const codeSearchIndexFileName = "code_search_index"
 const indexStartCapacity = 50
 
 type PogoChunkMatch struct {
-	Line uint32    `json:"line"`
+	Line uint32 `json:"line"`
 	// TODO reenable content when I can get it to marshal without segfault
 	Content []byte `json:"-"`
 }
 
 type PogoFileMatch struct {
-	Path string `json:"path"`
+	Path    string           `json:"path"`
 	Matches []PogoChunkMatch `json:"matches"`
 }
-	
+
 type SearchResults struct {
 	Files []PogoFileMatch `json:"files"`
 }
@@ -215,7 +215,7 @@ func (g *BasicSearch) Index(req *pogoPlugin.IProcessProjectReq) {
 		g.logger.Error("Error saving index", "save_path", saveFilePath)
 	}
 	g.logger.Info("Indexed " + strconv.Itoa(len(g.projects[path].Paths)) + " files for " + path)
-		
+
 	// Next create the code search index
 	// TODO - add some useful repository metadata
 	indexer, err4 := zoekt.NewIndexBuilder(nil)
@@ -237,7 +237,7 @@ func (g *BasicSearch) Index(req *pogoPlugin.IProcessProjectReq) {
 			} else {
 				indexer.AddFile(absPath, bytes)
 			}
-		}	
+		}
 	}
 	indexPath := filepath.Join(searchDir, codeSearchIndexFileName)
 	indexFile, err6 := os.OpenFile(indexPath, os.O_CREATE|os.O_WRONLY, 0600)
@@ -318,7 +318,7 @@ func (g *BasicSearch) Search(projectRoot string, data string, duration string) (
 		ctx    context.Context
 		cancel context.CancelFunc
 	)
-	
+
 	timeout, err := time.ParseDuration(duration)
 	if err == nil {
 		// The request has a timeout, so create a context that is
@@ -338,7 +338,7 @@ func (g *BasicSearch) Search(projectRoot string, data string, duration string) (
 	queryOptions := &zoekt.SearchOptions{
 		ChunkMatches: true,
 	}
-	
+
 	result, err := searcher.Search(ctx, query, queryOptions)
 	if err != nil {
 		g.logger.Error("Error searching index")
@@ -352,16 +352,16 @@ func (g *BasicSearch) Search(projectRoot string, data string, duration string) (
 		content := make([]byte, 0)
 		chunkMatches := make([]PogoChunkMatch, len(file.ChunkMatches))
 		for j, match := range file.ChunkMatches {
-			if (match.Content != nil && len(match.Content) > 0) {
+			if match.Content != nil && len(match.Content) > 0 {
 				copy(content, match.Content)
 			}
 			chunkMatches[j] = PogoChunkMatch{
-				Line:   match.ContentStart.LineNumber,
-				Content:  content,
+				Line:    match.ContentStart.LineNumber,
+				Content: content,
 			}
 		}
 		fileMatches[i] = PogoFileMatch{
-			Path: file.FileName,
+			Path:    file.FileName,
 			Matches: chunkMatches,
 		}
 	}
@@ -369,5 +369,3 @@ func (g *BasicSearch) Search(projectRoot string, data string, duration string) (
 		Files: fileMatches,
 	}, nil
 }
-
-

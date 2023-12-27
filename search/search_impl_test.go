@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/kinbiko/jsonassert"
-	
+
 	"github.com/marginalia-gaming/pogo/plugin"
 )
 
@@ -52,14 +52,14 @@ func TestSearch(t *testing.T) {
 	}
 	basicSearch := setUp(t)
 	defer cleanUp(basicSearch, t)
-	
+
 	req := plugin.IProcessProjectReq(plugin.ProcessProjectReq{PathVar: aServicePath})
 	basicSearch.Index(&req)
 	// Make string to execute
 	searchRequest := SearchRequest{
-		Type: "search",
+		Type:        "search",
 		ProjectRoot: aServicePath,
-		Data: "query",
+		Data:        "query",
 	}
 	// Serialize searchRequest as json string
 	searchRequestJson, err := json.Marshal(searchRequest)
@@ -69,13 +69,13 @@ func TestSearch(t *testing.T) {
 	}
 	// urlEncode searchRequestJson
 	searchRequestJsonUrlEncoded := url.QueryEscape(string(searchRequestJson))
-	
+
 	resp := basicSearch.Execute(searchRequestJsonUrlEncoded)
 	if err != nil {
 		t.Errorf("Could not execute search request")
 		return
 	}
-	
+
 	respDecoded, err := url.QueryUnescape(resp)
 	if err != nil {
 		t.Errorf("Could not url decode response")
@@ -131,7 +131,7 @@ func TestSearch(t *testing.T) {
 		return
 	}
 	jsonassert.New(t).Assertf(respDecoded, buff.String())
-	
+
 }
 
 func TestNewFileCausesReIndex(t *testing.T) {

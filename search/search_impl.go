@@ -37,13 +37,13 @@ type SearchRequest struct {
 	ProjectRoot string `json:"projectRoot"`
 	// Command timeout duration - only for 'search'-type requests
 	Duration string `json:"string"`
-	Data string `json:"data"`
+	Data     string `json:"data"`
 }
 
 type SearchResponse struct {
-	Index IndexedProject `json:"index"`
-	Results SearchResults `json:"results"`
-	Error string         `json:"error"`
+	Index   IndexedProject `json:"index"`
+	Results SearchResults  `json:"results"`
+	Error   string         `json:"error"`
 }
 
 type ErrorResponse struct {
@@ -67,7 +67,7 @@ func (g *BasicSearch) printSearchResponse(response SearchResponse) string {
 			// Convert match.Content bytes to string
 			var lineStr = strconv.FormatUint(uint64(match.Line), 10)
 			str += "\t\t" + lineStr + "\n"
-			if (match.Content != nil && len(match.Content) > 0) {
+			if match.Content != nil && len(match.Content) > 0 {
 				// str += "\t\t" + string(match.Content) + "\n"
 				for _, b := range match.Content {
 					// Cast byte to characters
@@ -75,7 +75,7 @@ func (g *BasicSearch) printSearchResponse(response SearchResponse) string {
 					// str += string(b)
 					g.logger.Info("Byte: " + string(b))
 				}
-				
+
 			} else {
 				str += "\t\t" + "No content" + "\n"
 			}
@@ -162,8 +162,7 @@ func (g *BasicSearch) Execute(encodedReq string) string {
 		g.logger.Info("404 Unknown request type.", "type", searchRequest.Type)
 		return g.errorResponse(404, "Unknown request type.")
 	}
-	
-	
+
 }
 
 func (g *BasicSearch) ProcessProject(req *pogoPlugin.IProcessProjectReq) error {
