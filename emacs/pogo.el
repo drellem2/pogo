@@ -7,7 +7,9 @@
 ;; Package-Version: 20221022.0000
 ;; Package-Requires: (
 ;;     (emacs "25.1")
-;;     (request "0.3.2"))
+;;     (request "0.3.2")
+;;     (org "9.6.6")
+;;     (cl-lib "1.0"))
 ;; Package-Commit:
 ;; Keyword: project, convenience, search
 ;; Version: 0.0.1-snapshot
