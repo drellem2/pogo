@@ -7,11 +7,10 @@ package main
 import (
 	"fmt"
 	"log"
-	"net/http"
-	"os/exec"
-	"strings"
 
 	"github.com/spf13/cobra"
+
+	"github.com/marginalia-gaming/pogo/internal/client"
 )
 
 func main() {
@@ -23,8 +22,7 @@ func main() {
  repository.`,
 		Args: cobra.MinimumNArgs(0),
 		Run: func(cmd *cobra.Command, args []string) {
-			_, err := http.Post("http://localhost:10000/file", "application/json",
-				strings.NewReader(fmt.Sprintf(`{"path": "%s"}`, args[0])))
+			err := client.Visit(args[0])
 			if err != nil {
 				log.Fatal(err)
 			}
@@ -43,16 +41,13 @@ Child commands include start, stop, and status.`,
 		Long:  `Start the pogo server.`,
 		Args:  cobra.MinimumNArgs(0),
 		Run: func(cmd *cobra.Command, args []string) {
-			_, err := http.NewRequest("POST", "http://localhost:10000/health", nil)
+			err := client.HealthCheck()
 			if err != nil {
 				fmt.Println("Starting pogo server...")
-				// Store the result of os.exec("pogod") in a variable and describe its type
-				// If the type is a pointer to a process, then the server is running
-				cmd := exec.Command("pogod")
-				if err := cmd.Run(); err != nil {
+				err = client.StartServer()
+				if err != nil {
 					log.Fatal(err)
 				}
-				return
 			}
 			fmt.Println("The server is already running")
 		},

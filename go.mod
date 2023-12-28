@@ -1,6 +1,6 @@
 module github.com/marginalia-gaming/pogo
 
-go 1.17
+go 1.18
 
 require (
 	github.com/hashicorp/go-hclog v1.3.1
