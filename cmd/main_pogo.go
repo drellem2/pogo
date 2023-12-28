@@ -18,11 +18,11 @@ func main() {
 	var cmdVisit = &cobra.Command{
 		Use:   "visit [file]",
 		Short: "Visit file or directory",
-		Long: `Checks if the file is contained in a repository, and if so indexes the
- repository.`,
+		Long: `Checks if the file is contained in a repository, and if
+so indexes the repository.`,
 		Args: cobra.MinimumNArgs(0),
 		Run: func(cmd *cobra.Command, args []string) {
-			err := client.Visit(args[0])
+			_, err := client.Visit(args[0])
 			if err != nil {
 				log.Fatal(err)
 			}
