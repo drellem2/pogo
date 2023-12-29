@@ -53,7 +53,8 @@
 (defvar pogo-search-plugin nil)
 (defvar pogo-search-plugin-name "pogo-plugin-search")
 (defvar pogo-process nil)
-
+(defvar pogo-visit-cache (pcache-repository "pogo-visit-cache"))
+(defvar pogo-visit-cache-seconds (* 60 10))
 ;;; Customization
 (defgroup pogo nil
   "Code intelligence in the background."
@@ -747,30 +748,45 @@ An open project is a project with any open buffers."
 
 (defun pogo-visit (relative-path)
   (let ((path (expand-file-name relative-path)))
-    (progn
-      (pogo-log "Visiting %s" path)
-      (cdr (assoc 'path
-                  (assoc 'project (request-response-data
-                                   (request "http://localhost:10000/file"
-                                     :sync t
-                                     :type "POST"
-                                     :data (json-encode
-                                            `(("path" . ,path)))
-                                     :parser 'json-read
-                                     :success (cl-function
-                                               (lambda
-                                                 (&key data
-                                                       &allow-other-keys)
-                                                 (pogo-log
-                                                  "Received: %S" data)))
-                                     :error (cl-function
-                                             (lambda
-                                               (&key error-thrown
-                                                     &allow-other-keys)
-                                               (pogo-log
-                                                "Error visiting file %s: %s"
-                                                relative-path error-thrown)
-                                               (pogo-check-live)))))))))))
+    (or
+     (pcache-get pogo-visit-cache path)
+     (progn
+       (let* ((nillable-result (pogo-visit-call relative-path))
+             (result (or nillable-result "")))
+         (progn
+           (pcache-put pogo-visit-cache path result pogo-visit-cache-seconds)
+           (pogo-log "Had to place response in cache for %s %s" path result)
+           result))))))
+
+(defun pogo-visit-call (path)
+  "Path must be absolute"
+  (progn
+    (pogo-log "Visiting %s" path)
+    (cdr (assoc 'path
+                (assoc 'project
+                       (request-response-data
+                        (request "http://localhost:10000/file"
+                          :sync t
+                          :type "POST"
+                          :data (json-encode
+                                 `(("path" . ,path)))
+                          :parser 'json-read
+                          :success (cl-function
+                                    (lambda
+                                      (&key data
+                                            &allow-other-keys)
+                                      (pogo-log
+                                       "Received: %S" data)))
+                          :error (cl-function
+                                  (lambda
+                                    (&key error-thrown
+                                          &allow-other-keys)
+                                    (progn
+                                      (pogo-log
+                                     "Error visiting file %s: %s"
+                                     path error-thrown)
+                                      (pogo-check-live)))))))))))
+
 (defun pogo-get-search-plugin-path ()
   (if pogo-search-plugin
       pogo-search-plugin
