@@ -13,6 +13,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 
 	hclog "github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/go-plugin"
@@ -116,7 +117,12 @@ func Init() {
 	clients = make(map[string]*plugin.Client)
 	Interfaces = make(map[string]*pogoPlugin.IPogoPlugin)
 
-	pluginPath := os.Getenv("POGO_PLUGIN_PATH")
+	relativePluginPath := os.Getenv("POGO_PLUGIN_PATH")
+	pluginPath, err := filepath.Abs(relativePluginPath)
+	if err != nil {
+		fmt.Printf("Error getting absolute path for %s: %v", relativePluginPath, err)
+		return
+	}
 
 	// Test if pluginPath is empty string or whitespace
 

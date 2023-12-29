@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"io"
 	"net/http"
 	"net/url"
@@ -34,7 +33,7 @@ func StartServer() error {
 	// Store the result of os.exec("pogod") in a variable and describe its type
 	// If the type is a pointer to a process, then the server is running
 	cmd := exec.Command("pogod")
-	if err := cmd.Run(); err != nil {
+	if err := cmd.Start(); err != nil {
 		return err
 	}
 	return nil
@@ -44,9 +43,7 @@ func StartServer() error {
 func RunWithHealthCheck[T ClientResp](run func() (T, error)) (T, error) {
 	err := HealthCheck()
 	if err != nil {
-		log.Print("Server not running, starting server")
 		err = StartServer()
-		log.Print("Server started")
 		if err != nil {
 			return nil, err
 		}
@@ -56,22 +53,19 @@ func RunWithHealthCheck[T ClientResp](run func() (T, error)) (T, error) {
 		startTime := time.Now()
 		// Inside for loop, check current time against startTime
 		for ;time.Now().Sub(startTime) < 2000*time.Millisecond; {
-			log.Print("Running health check")
 			err = HealthCheck()
 			if err == nil {				
 				fmt.Println("Health check successful")
 				success = true
 				break
 			}
-			log.Print("Health check failed")
 			// Wait 500ms to give the server time to start
 			time.Sleep(500 * time.Millisecond)
-			log.Print("Done sleeping")
 		}
 		if !success {
 			return nil, err
 		}
-	}
+	}	
 	return run()
 }
 
