@@ -53,7 +53,7 @@
 (defvar pogo-search-plugin nil)
 (defvar pogo-search-plugin-name "pogo-plugin-search")
 (defvar pogo-process nil)
-(defvar pogo-visit-cache (pcache-repository "pogo-visit-cache"))
+(defvar pogo-visit-cache )
 (defvar pogo-visit-cache-seconds (* 60 10))
 ;;; Customization
 (defgroup pogo nil
@@ -747,14 +747,15 @@ An open project is a project with any open buffers."
                  (buffer-list)))))
 
 (defun pogo-visit (relative-path)
-  (let ((path (expand-file-name relative-path)))
+  (let* ((path (expand-file-name relative-path))
+        (path-sym (intern path)))
     (or
-     (pcache-get pogo-visit-cache path)
+     (pcache-get (pcache-repository "pogo-visit-cache") path-sym)
      (progn
        (let* ((nillable-result (pogo-visit-call relative-path))
              (result (or nillable-result "")))
          (progn
-           (pcache-put pogo-visit-cache path result pogo-visit-cache-seconds)
+           (pcache-put (pcache-repository "pogo-visit-cache") path-sym result pogo-visit-cache-seconds)
            (pogo-log "Had to place response in cache for %s %s" path result)
            result))))))
 
