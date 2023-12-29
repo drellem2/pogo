@@ -53,8 +53,20 @@
 (defvar pogo-search-plugin nil)
 (defvar pogo-search-plugin-name "pogo-plugin-search")
 (defvar pogo-process nil)
-(defvar pogo-visit-cache (pcache-repository "pogo-visit-cache"))xo
+(defvar pogo-visit-cache (pcache-repository "pogo-visit-cache"))
 (defvar pogo-visit-cache-seconds (* 60 10))
+(defvar pogo-failure-count 0) ;; Number of failures starting pogo server
+(defvar pogo-server-started nil)
+(defvar pogo-commander-methods nil
+  "List of file-selection methods for the `pogo-commander' command.
+Each element is a list (KEY DESCRIPTION FUNCTION).
+DESCRIPTION is a one-line description of what the key selects.")
+
+;;; Set request-message-level
+(when (not (eql -1 request-message-level))
+  (message "Warning: Setting request-message-level to -1")
+  (customize-set-variable 'request-message-level -1))
+
 ;;; Customization
 (defgroup pogo nil
   "Code intelligence in the background."
@@ -260,16 +272,6 @@ When set to nil you'll have always add projects explicitly with
 
 (defconst pogo-version "0.0.1-snapshot"
   "The current version of Pogo.")
-
-;; Number of failures starting pogo server
-(defvar pogo-failure-count 0)
-
-(defvar pogo-server-started nil)
-
-(defvar pogo-commander-methods nil
-  "List of file-selection methods for the `pogo-commander' command.
-Each element is a list (KEY DESCRIPTION FUNCTION).
-DESCRIPTION is a one-line description of what the key selects.")
 
 (defun pogo--pkg-version ()
   "Extract Pogo's package version from its package metadata."
