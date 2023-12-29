@@ -15,8 +15,8 @@ import (
 	"strings"
 	"time"
 
-	pogoPlugin "github.com/marginalia-gaming/pogo/plugin"
-	"github.com/marginalia-gaming/pogo/internal/project"
+	pogoPlugin "github.com/drellem2/pogo/plugin"
+	"github.com/drellem2/pogo/internal/project"
 )
 
 type ClientResp interface {

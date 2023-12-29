@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/marginalia-gaming/pogo/internal/driver"
+	"github.com/drellem2/pogo/internal/driver"
 )
 
 const aService = "_testdata/a-service/" // In initial state

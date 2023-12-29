@@ -12,7 +12,7 @@ import (
 
 	"github.com/kinbiko/jsonassert"
 
-	"github.com/marginalia-gaming/pogo/plugin"
+	"github.com/drellem2/pogo/plugin"
 )
 
 const aService = "_testdata/a-service/"

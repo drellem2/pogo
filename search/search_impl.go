@@ -13,7 +13,7 @@ import (
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/go-plugin"
 
-	pogoPlugin "github.com/marginalia-gaming/pogo/plugin"
+	pogoPlugin "github.com/drellem2/pogo/plugin"
 )
 
 const pogoDir = ".pogo"

@@ -3,7 +3,7 @@
 ;; Copyright © 2022-2032 Daniel Miller <gate46dmiller@gmail.com>
 
 ;; Author: Daniel Miller <gate46dmiller@gmail.com>
-;; URL: https://github.com/marginalia-gaming/pogo-mode
+;; URL: https://github.com/drellem2/pogo
 ;; Package-Version: 20221022.0000
 ;; Package-Requires: (
 ;;     (emacs "25.1")

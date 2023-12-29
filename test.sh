@@ -14,5 +14,5 @@ cd .. && \
 echo "Building search plugin" && \
 find search -name "[a-zA-Z]*.go" | xargs go build -o bin/plugin/pogo-plugin-search  &&  \
 echo "Testing pogo" && \
-go test github.com/marginalia-gaming/pogo/internal/project -coverprofile=coverage-internal-project.out && \
-go test github.com/marginalia-gaming/pogo/internal/driver -coverprofile=coverage-internal-driver.out
+go test github.com/drellem2/pogo/internal/project -coverprofile=coverage-internal-project.out && \
+go test github.com/drellem2/pogo/internal/driver -coverprofile=coverage-internal-driver.out

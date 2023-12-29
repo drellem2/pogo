@@ -15,10 +15,10 @@ import (
 
 	"github.com/nightlyone/lockfile"
 
-	"github.com/marginalia-gaming/pogo/internal/driver"
-	"github.com/marginalia-gaming/pogo/internal/project"
+	"github.com/drellem2/pogo/internal/driver"
+	"github.com/drellem2/pogo/internal/project"
 
-	pogoPlugin "github.com/marginalia-gaming/pogo/plugin"
+	pogoPlugin "github.com/drellem2/pogo/plugin"
 )
 
 func health(w http.ResponseWriter, r *http.Request) {

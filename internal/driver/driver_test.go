@@ -11,8 +11,8 @@ import (
 
 	"github.com/kinbiko/jsonassert"
 
-	"github.com/marginalia-gaming/pogo/internal/driver"
-	"github.com/marginalia-gaming/pogo/internal/project"
+	"github.com/drellem2/pogo/internal/driver"
+	"github.com/drellem2/pogo/internal/project"
 )
 
 const aService = "_testdata/a-service/" // In initial state

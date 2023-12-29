@@ -10,7 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/marginalia-gaming/pogo/internal/client"
+	"github.com/drellem2/pogo/internal/client"
 )
 
 func main() {

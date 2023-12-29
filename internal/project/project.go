@@ -15,8 +15,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/marginalia-gaming/pogo/internal/driver"
-	pogoPlugin "github.com/marginalia-gaming/pogo/plugin"
+	"github.com/drellem2/pogo/internal/driver"
+	pogoPlugin "github.com/drellem2/pogo/plugin"
 )
 
 type Project struct {

@@ -15,9 +15,9 @@ import (
 	"os/exec"
 	"path/filepath"
 
+	pogoPlugin "github.com/drellem2/pogo/plugin"
 	hclog "github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/go-plugin"
-	pogoPlugin "github.com/marginalia-gaming/pogo/plugin"
 )
 
 // handshakeConfigs are used to just do a basic handshake between

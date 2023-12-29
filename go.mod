@@ -1,4 +1,4 @@
-module github.com/marginalia-gaming/pogo
+module github.com/drellem2/pogo
 
 go 1.18
 
