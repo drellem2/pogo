@@ -12,7 +12,7 @@
 ;;     (cl-lib "1.0")
 ;;     (pcache "0.5.1"))
 ;; Package-Commit:
-;; Keyword: project, convenience, search
+;; Keywords: project, convenience, search
 ;; Version: 0.0.1-snapshot
 
 ;; This file is NOT part of GNU Emacs.
