@@ -70,10 +70,10 @@ func (g *BasicSearch) index(proj *IndexedProject, path string, gitIgnore *ignore
 		return err
 	}
 	defer file.Close()
-	dirnames, err2 := file.Readdirnames(0)
+	dirnames, err := file.Readdirnames(0)
 	g.logger.Debug("Found dirs: ", dirnames)
-	if err2 != nil {
-		return err2
+	if err != nil {
+		return err
 	}
 	if len(dirnames) == 0 {
 		return nil
@@ -81,8 +81,8 @@ func (g *BasicSearch) index(proj *IndexedProject, path string, gitIgnore *ignore
 	files := make([]string, 0, len(dirnames)/2)
 	for _, subFile := range dirnames {
 		newPath := filepath.Join(path, subFile)
-		fileInfo, err3 := os.Lstat(newPath)
-		if err3 != nil {
+		fileInfo, err := os.Lstat(newPath)
+		if err != nil {
 			g.logger.Warn(err.Error())
 			continue
 		}
@@ -107,6 +107,41 @@ func (g *BasicSearch) index(proj *IndexedProject, path string, gitIgnore *ignore
 		}
 	}
 	proj.Paths = append(proj.Paths, files...)
+	searchDir := makeSearchDir(proj.Root)
+	// Next create the code search index
+	// TODO - add some useful repository metadata
+	indexer, err := zoekt.NewIndexBuilder(nil)
+	if err != nil {
+		g.logger.Error("Error creating search index")
+		return err
+	}
+	for _, path := range proj.Paths {
+		// Prepend Root to path
+		fullPath := filepath.Join(proj.Root, path)
+		absPath, err := absolute(fullPath)
+		if err != nil {
+			g.logger.Error("Error getting absolute path - file may not exist", path)
+		} else {
+			bytes, err := ioutil.ReadFile(absPath)
+			if err != nil {
+				g.logger.Error("Error reading file ", absPath)
+			} else {
+				indexer.AddFile(absPath, bytes)
+			}
+		}
+	}
+	indexPath := filepath.Join(searchDir, codeSearchIndexFileName)
+	indexFile, err := os.OpenFile(indexPath, os.O_CREATE|os.O_WRONLY, 0600)
+	if err != nil {
+		g.logger.Error("Error opening index file ", path)
+		return err
+	}
+	err = indexer.Write(indexFile)
+	if err != nil {
+		g.logger.Error("Error writing index file ", path)
+		g.logger.Error("Error: ", err.Error())
+		return err
+	}
 	return nil
 }
 
@@ -215,42 +250,6 @@ func (g *BasicSearch) Index(req *pogoPlugin.IProcessProjectReq) {
 		g.logger.Error("Error saving index", "save_path", saveFilePath)
 	}
 	g.logger.Info("Indexed " + strconv.Itoa(len(g.projects[path].Paths)) + " files for " + path)
-
-	// Next create the code search index
-	// TODO - add some useful repository metadata
-	indexer, err4 := zoekt.NewIndexBuilder(nil)
-	if err4 != nil {
-		g.logger.Error("Error creating search index")
-		return
-	}
-	for _, path := range proj.Paths {
-		// Prepend Root to path
-		fullPath := filepath.Join(proj.Root, path)
-		absPath, err := absolute(fullPath)
-		if err != nil {
-			g.logger.Error("Error getting absolute path - file may not exist", path)
-		} else {
-			bytes, err5 := ioutil.ReadFile(absPath)
-			if err5 != nil {
-				g.logger.Error("Error reading file ", absPath)
-				//				g.logger.Error("Error: ", err5.Error())
-			} else {
-				indexer.AddFile(absPath, bytes)
-			}
-		}
-	}
-	indexPath := filepath.Join(searchDir, codeSearchIndexFileName)
-	indexFile, err6 := os.OpenFile(indexPath, os.O_CREATE|os.O_WRONLY, 0600)
-	if err6 != nil {
-		g.logger.Error("Error  index file ", path)
-		return
-	}
-	err8 := indexer.Write(indexFile)
-	if err8 != nil {
-		g.logger.Error("Error writing index file ", path)
-		g.logger.Error("Error: ", err8.Error())
-		return
-	}
 }
 
 func (g *BasicSearch) GetFiles(projectRoot string) (*IndexedProject, error) {
