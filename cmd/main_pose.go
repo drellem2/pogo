@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"sort"
 
 	"github.com/spf13/cobra"
@@ -21,7 +22,12 @@ func main() {
 	rootCmd.Run = func(cobraCmd *cobra.Command, args []string) {
 		var path string
 		if len(args) > 1 {
-			path = args[1]
+			// Expand args[1] to an absolute path
+			fullPath, err := filepath.Abs(args[1])
+			if err != nil {
+				log.Fatal(err)
+			}
+			path = fullPath
 		} else {
 			// Get current working directory
 			cwd, err := os.Getwd()

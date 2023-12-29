@@ -18,6 +18,16 @@ Currently supports zshell and emacs.
 `cat shell/.zshrc >> ~/.zshrc`
 4. Install the emacs client (instructions below).
 
+## Shell Usage
+
+1. Pogo will autodiscover projects as you visit directories in the shell.
+2. Use `lsp` to list projects.
+3. Use `sp` to switch projects.
+4. Use `pose` to search with zoekt.
+
+Zoekt query examples can be found [here](https://github.com/sourcegraph/zoekt/blob/main/web/templates.go#L158).
+e.g. `pose banana` or `pose banana .` will seach the current  directory for `banana`. Currently only files are returned, sorted by relevance.
+
 ## Environment Variables
 
 - `POGO_HOME`: Folder for pogo to store indexes.
