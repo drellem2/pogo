@@ -661,7 +661,7 @@ If PROJECT is not specified acts on the current project."
                                                              "]]"))
                                                    file-paths)))
                    (files-with-newlines (pogo--delimit "\n" org-format-files))
-                   (results (reduce #'concat files-with-newlines)))
+                   (results (cl-reduce #'concat files-with-newlines)))
               (insert (if (null results) "nil" results)))
             (org-mode)
             (switch-to-buffer buffer-name)))))))
