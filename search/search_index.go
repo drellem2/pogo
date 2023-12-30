@@ -107,7 +107,6 @@ func (g *BasicSearch) index(proj *IndexedProject, path string, gitIgnore *ignore
 		}
 	}
 	proj.Paths = append(proj.Paths, files...)
-	g.logger.Info("index Making searchDir at " + proj.Root)
 	searchDir, err := makeSearchDir(proj.Root)
 	if err != nil {
 		g.logger.Error("Error making search dir: ", err)
@@ -244,7 +243,6 @@ func (g *BasicSearch) Index(req *pogoPlugin.IProcessProjectReq) {
 	g.mu.Unlock()
 
 	// Serialize index
-	g.logger.Info("Index Making searchDir at " + path)
 	searchDir, err := makeSearchDir(path)
 	if err != nil {
 		g.logger.Error("Error making search dir: ", err)
@@ -263,7 +261,6 @@ func (g *BasicSearch) Index(req *pogoPlugin.IProcessProjectReq) {
 }
 
 func (g *BasicSearch) GetFiles(projectRoot string) (*IndexedProject, error) {
-	g.logger.Info("GetFiles Making searchDir at " + projectRoot)
 	searchDir, err := makeSearchDir(projectRoot)
 	if err != nil {
 		g.logger.Error("Error making search dir: ", err)
@@ -306,7 +303,6 @@ func (g *BasicSearch) GetFiles(projectRoot string) (*IndexedProject, error) {
 
 func (g *BasicSearch) Search(projectRoot string, data string, duration string) (*SearchResults, error) {
 	// Open index file
-	g.logger.Info("Search Making searchDir at " + projectRoot)
 	searchDir, err := makeSearchDir(projectRoot)
 	if err != nil {
 		g.logger.Error("Error making search dir: ", err)
