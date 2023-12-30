@@ -183,13 +183,13 @@ var handshakeConfig = plugin.HandshakeConfig{
 
 // Ensure's plugin directory exists in project config
 // Returns full path of search dir
-func makeSearchDir(path string) string {
+func makeSearchDir(path string) (string, error) {
 	fullSearchDir := filepath.Join(path, pogoDir, searchDir)
 	err := os.MkdirAll(fullSearchDir, os.ModePerm)
 	if err != nil {
-		panic("Could not create search directory. Exiting.")
+		return "", err
 	}
-	return fullSearchDir
+	return fullSearchDir, nil
 }
 
 func createBasicSearch() *BasicSearch {

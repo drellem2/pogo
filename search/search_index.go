@@ -107,7 +107,12 @@ func (g *BasicSearch) index(proj *IndexedProject, path string, gitIgnore *ignore
 		}
 	}
 	proj.Paths = append(proj.Paths, files...)
-	searchDir := makeSearchDir(proj.Root)
+	g.logger.Info("index Making searchDir at " + proj.Root)
+	searchDir, err := makeSearchDir(proj.Root)
+	if err != nil {
+		g.logger.Error("Error making search dir: ", err)
+		return err
+	}
 	// Next create the code search index
 	// TODO - add some useful repository metadata
 	indexer, err := zoekt.NewIndexBuilder(nil)
@@ -239,7 +244,12 @@ func (g *BasicSearch) Index(req *pogoPlugin.IProcessProjectReq) {
 	g.mu.Unlock()
 
 	// Serialize index
-	searchDir := makeSearchDir(path)
+	g.logger.Info("Index Making searchDir at " + path)
+	searchDir, err := makeSearchDir(path)
+	if err != nil {
+		g.logger.Error("Error making search dir: ", err)
+		return
+	}
 	saveFilePath := filepath.Join(searchDir, saveFileName)
 	outBytes, err2 := json.Marshal(&proj)
 	if err2 != nil {
@@ -253,9 +263,14 @@ func (g *BasicSearch) Index(req *pogoPlugin.IProcessProjectReq) {
 }
 
 func (g *BasicSearch) GetFiles(projectRoot string) (*IndexedProject, error) {
-	searchDir := makeSearchDir(projectRoot)
+	g.logger.Info("GetFiles Making searchDir at " + projectRoot)
+	searchDir, err := makeSearchDir(projectRoot)
+	if err != nil {
+		g.logger.Error("Error making search dir: ", err)
+		return nil, err
+	}
 	saveFilePath := filepath.Join(searchDir, saveFileName)
-	_, err := os.Lstat(saveFilePath)
+	_, err = os.Lstat(saveFilePath)
 	skipImport := false
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
@@ -291,7 +306,12 @@ func (g *BasicSearch) GetFiles(projectRoot string) (*IndexedProject, error) {
 
 func (g *BasicSearch) Search(projectRoot string, data string, duration string) (*SearchResults, error) {
 	// Open index file
-	searchDir := makeSearchDir(projectRoot)
+	g.logger.Info("Search Making searchDir at " + projectRoot)
+	searchDir, err := makeSearchDir(projectRoot)
+	if err != nil {
+		g.logger.Error("Error making search dir: ", err)
+		return nil, err
+	}
 	indexPath := filepath.Join(searchDir, codeSearchIndexFileName)
 	indexFile, err := os.Open(indexPath)
 	if err != nil {
