@@ -107,11 +107,6 @@ func (g *BasicSearch) index(proj *IndexedProject, path string, gitIgnore *ignore
 		}
 	}
 	proj.Paths = append(proj.Paths, files...)
-	searchDir, err := makeSearchDir(proj.Root)
-	if err != nil {
-		g.logger.Error("Error making search dir: ", err)
-		return err
-	}
 	// Next create the code search index
 	// TODO - add some useful repository metadata
 	indexer, err := zoekt.NewIndexBuilder(nil)
@@ -134,12 +129,12 @@ func (g *BasicSearch) index(proj *IndexedProject, path string, gitIgnore *ignore
 			}
 		}
 	}
-	indexPath := filepath.Join(searchDir, codeSearchIndexFileName)
-	indexFile, err := os.OpenFile(indexPath, os.O_CREATE|os.O_WRONLY, 0600)
+	indexFile, err := g.getIndexFile(path)
 	if err != nil {
-		g.logger.Error("Error opening index file ", path)
+		g.logger.Error("Error getting index file ", path)
 		return err
 	}
+	defer indexFile.Close()
 	err = indexer.Write(indexFile)
 	if err != nil {
 		g.logger.Error("Error writing index file ", path)
@@ -158,7 +153,7 @@ func (g *BasicSearch) ReIndex(path string) {
 	if !fileInfo.IsDir() {
 		path = filepath.Dir(path)
 	}
-	g.logger.Debug("Reindexing ", path)
+	g.logger.Info("Reindexing ", path)
 	go func() {
 		fullPath, err2 := absolute(path)
 		if err2 != nil {
@@ -222,19 +217,48 @@ func ParseGitIgnore(path string) (*ignore.GitIgnore, error) {
 	return gitIgnore, err
 }
 
+func (g *BasicSearch) getSearchFile(path string, filename string) (*os.File, error) {
+	searchDir, err := makeSearchDir(path)
+	if err != nil {
+		g.logger.Error("Error making search dir: ", err)
+		return nil, err
+	}
+	indexPath := filepath.Join(searchDir, filename)
+	indexFile, err := os.OpenFile(indexPath, os.O_CREATE|os.O_WRONLY, 0600)
+	if err != nil {
+		g.logger.Error("Error opening index file ", path)
+		return nil, err
+	}
+	return indexFile, nil
+}
+
+func (g *BasicSearch) getIndexFile(path string) (*os.File, error) {
+	return g.getSearchFile(path, codeSearchIndexFileName)
+}
+
 func (g *BasicSearch) Index(req *pogoPlugin.IProcessProjectReq) {
 	path := (*req).Path()
+	_, ok := g.projects[path]
+	if ok {
+		g.logger.Info("Already indexed ", path)
+		return
+	}
+	searchDir, err := makeSearchDir(path)
+	if err != nil {
+		g.logger.Error("Error making search dir: ", err)
+	}
+
 	proj := IndexedProject{
 		Root:  path,
 		Paths: make([]string, 0, indexStartCapacity),
 	}
-
-	gitIgnore, err7 := ParseGitIgnore(path)
-	if err7 != nil {
-		g.logger.Error("Error parsing gitignore", err7)
+	gitIgnore, err := ParseGitIgnore(path)
+	if err != nil {
+		// Non-fatal error
+		g.logger.Error("Error parsing gitignore", err)
 	}
 
-	err := g.index(&proj, path, gitIgnore)
+	err = g.index(&proj, path, gitIgnore)
 	if err != nil {
 		g.logger.Warn(err.Error())
 	}
@@ -242,12 +266,6 @@ func (g *BasicSearch) Index(req *pogoPlugin.IProcessProjectReq) {
 	g.projects[path] = proj
 	g.mu.Unlock()
 
-	// Serialize index
-	searchDir, err := makeSearchDir(path)
-	if err != nil {
-		g.logger.Error("Error making search dir: ", err)
-		return
-	}
 	saveFilePath := filepath.Join(searchDir, saveFileName)
 	outBytes, err2 := json.Marshal(&proj)
 	if err2 != nil {
@@ -281,6 +299,7 @@ func (g *BasicSearch) GetFiles(projectRoot string) (*IndexedProject, error) {
 	if skipImport {
 		projectReq := pogoPlugin.ProcessProjectReq{PathVar: projectRoot}
 		iProjectReq := pogoPlugin.IProcessProjectReq(projectReq)
+		g.logger.Info("Skipping import for " + projectRoot + " because index does not exist.")
 		g.Index(&iProjectReq)
 		return nil, nil
 	}
@@ -323,8 +342,7 @@ func (g *BasicSearch) Search(projectRoot string, data string, duration string) (
 	// Search
 	searcher, err := zoekt.NewSearcher(index)
 	if err != nil {
-		g.logger.Error("Error creating searcher")
-		g.logger.Error(err.Error())
+		g.logger.Error("Error creating searcher", err)
 		return nil, err
 	}
 	defer searcher.Close()

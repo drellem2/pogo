@@ -22,6 +22,8 @@ const searchDir = "search"
 // API Version for this plugin
 const version = "0.0.1"
 
+const UseWatchers = false
+
 type BasicSearch struct {
 	logger   hclog.Logger
 	projects map[string]IndexedProject
@@ -166,7 +168,7 @@ func (g *BasicSearch) Execute(encodedReq string) string {
 }
 
 func (g *BasicSearch) ProcessProject(req *pogoPlugin.IProcessProjectReq) error {
-	g.logger.Debug("Processing project %s", (*req).Path())
+	g.logger.Info("Processing project %s", (*req).Path())
 	go g.Index(req)
 	return nil
 }
@@ -210,17 +212,18 @@ func createBasicSearch() *BasicSearch {
 		watcher:  watcher,
 	}
 
-	if watcher != nil {
+	if UseWatchers && watcher != nil {
 		go func() {
 			for {
 				select {
 				case event, ok := <-watcher.Events:
 					if !ok {
 						logger.Warn("Not ok")
+						logger.Warn(event.String())
 						return
 					}
 					if event.Has(fsnotify.Create) || event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename) {
-						logger.Debug("File update: ", event)
+						logger.Info("File update: ", event)
 						basicSearch.ReIndex(event.Name)
 					}
 				case err, ok := <-watcher.Errors:
