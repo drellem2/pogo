@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	pogoPlugin "github.com/drellem2/pogo/plugin"
 	hclog "github.com/hashicorp/go-hclog"
@@ -138,6 +139,12 @@ func Init() {
 	}
 	fmt.Printf("Discovered %d plugins in dir %s: %v\n", len(paths), pluginPath, paths)
 	for _, path := range paths {
+		// Try Windows workaround
+		// Replace double backslash with single backslash
+		// If windows, replace single backslash with double backslash
+		if os.PathSeparator == '\\' {
+			path = strings.Replace(path, "\\\\", "\\", -1)
+		}
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
