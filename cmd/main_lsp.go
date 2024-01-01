@@ -27,7 +27,6 @@ func main() {
 		sort.Slice(projs, func(i, j int) bool {
 			return projs[i].Path < projs[j].Path
 		})
-		fmt.Println("Finished sorting projs")
 
 		for _, proj := range projs {
 			fmt.Println(proj.Path)
