@@ -170,7 +170,13 @@ func TestPluginExecute(t *testing.T) {
 	}
 	pluginPath := plugins[0]
 	plugin := driver.GetPlugin(pluginPath)
-	req := url.QueryEscape("{\"type\": \"files\", \"projectRoot\": \"_testdata/a-service\"}")
+	aServiceAbs, err := absolute(aService)
+	if err != nil {
+		t.Errorf("Failed to get absolute path for %s", aService)
+		return
+	}
+
+	req := url.QueryEscape("{\"type\": \"files\", \"projectRoot\": \"" + aServiceAbs + "\"}")
 	encodedResp := (*plugin).Execute(req)
 	resp, err2 := url.QueryUnescape(encodedResp)
 	t.Logf("Response: %s", resp)

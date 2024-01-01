@@ -22,7 +22,7 @@ const searchDir = "search"
 // API Version for this plugin
 const version = "0.0.1"
 
-const UseWatchers = false
+const UseWatchers = true
 
 type BasicSearch struct {
 	logger   hclog.Logger
@@ -185,8 +185,8 @@ var handshakeConfig = plugin.HandshakeConfig{
 
 // Ensure's plugin directory exists in project config
 // Returns full path of search dir
-func makeSearchDir(path string) (string, error) {
-	fullSearchDir := filepath.Join(path, pogoDir, searchDir)
+func (p *IndexedProject) makeSearchDir() (string, error) {
+	fullSearchDir := filepath.Join(p.Root, pogoDir, searchDir)
 	err := os.MkdirAll(fullSearchDir, os.ModePerm)
 	if err != nil {
 		return "", err

@@ -129,7 +129,7 @@ func (g *BasicSearch) index(proj *IndexedProject, path string, gitIgnore *ignore
 			}
 		}
 	}
-	indexFile, err := g.getIndexFile(path)
+	indexFile, err := g.getIndexFile(proj)
 	if err != nil {
 		g.logger.Error("Error getting index file ", path)
 		return err
@@ -217,8 +217,9 @@ func ParseGitIgnore(path string) (*ignore.GitIgnore, error) {
 	return gitIgnore, err
 }
 
-func (g *BasicSearch) getSearchFile(path string, filename string) (*os.File, error) {
-	searchDir, err := makeSearchDir(path)
+func (g *BasicSearch) getSearchFile(p *IndexedProject, filename string) (*os.File, error) {
+	path := p.Root
+	searchDir, err := p.makeSearchDir()
 	if err != nil {
 		g.logger.Error("Error making search dir: ", err)
 		return nil, err
@@ -232,8 +233,8 @@ func (g *BasicSearch) getSearchFile(path string, filename string) (*os.File, err
 	return indexFile, nil
 }
 
-func (g *BasicSearch) getIndexFile(path string) (*os.File, error) {
-	return g.getSearchFile(path, codeSearchIndexFileName)
+func (g *BasicSearch) getIndexFile(p *IndexedProject) (*os.File, error) {
+	return g.getSearchFile(p, codeSearchIndexFileName)
 }
 
 func (g *BasicSearch) Index(req *pogoPlugin.IProcessProjectReq) {
@@ -243,15 +244,15 @@ func (g *BasicSearch) Index(req *pogoPlugin.IProcessProjectReq) {
 		g.logger.Info("Already indexed ", path)
 		return
 	}
-	searchDir, err := makeSearchDir(path)
-	if err != nil {
-		g.logger.Error("Error making search dir: ", err)
-	}
-
 	proj := IndexedProject{
 		Root:  path,
 		Paths: make([]string, 0, indexStartCapacity),
 	}
+	searchDir, err := proj.makeSearchDir()
+	if err != nil {
+		g.logger.Error("Error making search dir: ", err)
+	}
+
 	gitIgnore, err := ParseGitIgnore(path)
 	if err != nil {
 		// Non-fatal error
@@ -279,31 +280,17 @@ func (g *BasicSearch) Index(req *pogoPlugin.IProcessProjectReq) {
 }
 
 func (g *BasicSearch) GetFiles(projectRoot string) (*IndexedProject, error) {
-	searchDir, err := makeSearchDir(projectRoot)
+	project, ok := g.projects[projectRoot]
+	if !ok {
+		return nil, errors.New("Project not indexed " + projectRoot)
+	}
+	searchDir, err := project.makeSearchDir()
 	if err != nil {
 		g.logger.Error("Error making search dir: ", err)
 		return nil, err
 	}
 	saveFilePath := filepath.Join(searchDir, saveFileName)
 	_, err = os.Lstat(saveFilePath)
-	skipImport := false
-	if err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
-			g.logger.Error("Error getting file info", "error", err)
-			return nil, err
-		}
-		g.logger.Warn("Search index does not exist", "path", saveFilePath)
-		skipImport = true
-	}
-
-	if skipImport {
-		projectReq := pogoPlugin.ProcessProjectReq{PathVar: projectRoot}
-		iProjectReq := pogoPlugin.IProcessProjectReq(projectReq)
-		g.logger.Info("Skipping import for " + projectRoot + " because index does not exist.")
-		g.Index(&iProjectReq)
-		return nil, nil
-	}
-
 	file, err2 := os.Open(saveFilePath)
 	if err2 != nil {
 		g.logger.Error("Error opening index file.")
@@ -321,8 +308,12 @@ func (g *BasicSearch) GetFiles(projectRoot string) (*IndexedProject, error) {
 }
 
 func (g *BasicSearch) Search(projectRoot string, data string, duration string) (*SearchResults, error) {
+	project, ok := g.projects[projectRoot]
+	if !ok {
+		return nil, errors.New("Unknown project " + projectRoot)
+	}
 	// Open index file
-	searchDir, err := makeSearchDir(projectRoot)
+	searchDir, err := project.makeSearchDir()
 	if err != nil {
 		g.logger.Error("Error making search dir: ", err)
 		return nil, err
