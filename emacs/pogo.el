@@ -740,7 +740,6 @@ would be `find-file-other-window' or `find-file-other-frame'"
                                                   "Error getting projects: %s"
                                                   error-thrown)
                                                  (pogo-check-live)))))))
-    (pogo-log "Final version %s" resp)
     (mapcar (lambda (x) (cdr (assoc 'path x))) resp)))
 
 
@@ -965,7 +964,6 @@ With a prefix ARG invokes `pogo-commander' instead of
 `pogo-switch-project-action.'"
   (interactive "P")
   (let ((projects (pogo-relevant-known-projects)))
-    (pogo-log "Found projects: %s" projects)
     (if projects
         (pogo-completing-read
          "Switch to project: " projects
