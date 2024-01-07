@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"text/template"
 	"time"
@@ -35,6 +36,7 @@ func destroyPath(filePath string, t *testing.T) {
 	err := os.RemoveAll(filePath)
 	if err != nil {
 		t.Errorf("Failed to clean up file: %s", filePath)
+		t.Errorf(err.Error())
 	}
 }
 
@@ -44,6 +46,14 @@ func destroyFolder(dirPath string, t *testing.T) {
 	if err != nil {
 		t.Errorf("Failed to clean up file: %s", dirPath)
 	}
+}
+
+func pathFormat(path string) string {
+	path = strings.Replace(path, "/", string(os.PathSeparator), -1)
+	if os.PathSeparator == '\\' {
+		path = strings.Replace(path, "\\", "\\\\", -1)
+	}
+	return path
 }
 
 func TestSearch(t *testing.T) {
@@ -93,7 +103,10 @@ func TestSearch(t *testing.T) {
 	}
 	// Print current directory
 	d, _ := os.Getwd()
-	expectedResTemplate := `
+	d = pathFormat(d)
+	// Replace forward slash with the os path separator
+
+	expectedResTemplate := pathFormat(`
           {
             "index":{
               "root":"",
@@ -122,7 +135,7 @@ func TestSearch(t *testing.T) {
               ]
             },
             "error":""
-          }`
+          }`)
 	var buff bytes.Buffer
 	templ := template.Must(template.New("Json Response").Parse(expectedResTemplate))
 	err = templ.Execute(&buff, map[string]interface{}{
@@ -192,11 +205,12 @@ func TestNewFileCausesReIndex(t *testing.T) {
 			req := plugin.IProcessProjectReq(plugin.ProcessProjectReq{PathVar: aServicePath})
 			basicSearch.Index(&req)
 			fileCount := len(basicSearch.projects[aServicePath].Paths)
-			_, err = os.Create(fullPath)
+			f, err := os.Create(fullPath)
 			if err != nil {
 				t.Errorf("Could not create file %s", fullPath)
 				return
 			}
+			f.Close()
 			success := false
 			basicSearch.ReIndex(aServicePath)
 			for i := 0; i < 10; i++ {
@@ -208,6 +222,7 @@ func TestNewFileCausesReIndex(t *testing.T) {
 			}
 
 			if !success {
+				t.Errorf("Error executing test %s", tt.name)
 				t.Errorf("Expected %d files in index but found %d", fileCount+1, len(basicSearch.projects[aServicePath].Paths))
 				t.Logf("Watch list: %v", basicSearch.watcher.WatchList())
 				t.Logf("File: %v", basicSearch.projects[aServicePath].Paths)

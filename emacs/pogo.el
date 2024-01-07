@@ -65,7 +65,8 @@ DESCRIPTION is a one-line description of what the key selects.")
 ;;; Set request-message-level
 (when (not (eql -1 request-message-level))
   (message "Warning: Setting request-message-level to -1")
-  (customize-set-variable 'request-message-level -1))
+  (customize-set-variable 'request-message-level -1)
+  (customize-set-variable 'request-backend 'url-retrieve))
 
 ;;; Customization
 (defgroup pogo nil
@@ -682,12 +683,18 @@ would be `find-file-other-window' or `find-file-other-frame'"
 
 ;; External functions
 
+(defvar is-windows
+  (or
+   (eq system-type 'ms-dos)
+   (eq system-type 'windows-nt)
+   (eq system-type 'cygwin)))
+
 (defun pogo-try-start ()
   "Attempt to start the pogo server, run health checks."
   (interactive)
   (setenv "POGO_HOME" (expand-file-name "~"))
   (setenv "POGO_PLUGIN_PATH" (concat
-                              (string-remove-suffix "pogod"
+                              (string-remove-suffix (if is-windows "pogod.exe" "pogod")
                                                     (executable-find "pogod"))
                               "plugin"))
   (when (not pogo-server-started)
