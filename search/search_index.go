@@ -48,7 +48,7 @@ type IndexedProject struct {
 	Contains channels that can be written to in order to update the project.
 */
 type ProjectUpdater struct {
-	c        chan IndexedProject
+	c        chan *IndexedProject
 	addFw    chan string
 	removeFw chan string
 	quit     chan bool
@@ -77,7 +77,7 @@ func absolute(path string) (string, error) {
 */
 func (g *BasicSearch) newProjectUpdater() *ProjectUpdater {
 	u := &ProjectUpdater{
-		c:        make(chan IndexedProject),
+		c:        make(chan *IndexedProject),
 		addFw:    make(chan string),
 		removeFw: make(chan string),
 		quit:     make(chan bool),
@@ -94,8 +94,8 @@ func (g *BasicSearch) write(u *ProjectUpdater) {
 			case proj := <-u.c:
 				g.mu.Lock()
 				defer g.mu.Unlock()
-				g.projects[proj.Root] = proj
-				go g.serializeProjectIndex(&proj)
+				g.projects[proj.Root] = *proj
+				go g.serializeProjectIndex(proj)
 			case p := <-u.addFw:
 				g.mu.Lock()
 				defer g.mu.Unlock()
@@ -243,7 +243,7 @@ func (g *BasicSearch) ReIndex(path string) {
 					g.logger.Error("Error indexing updated path ", fullPath)
 					g.logger.Error("Error: ", err)
 				}
-				u.c <- indexed
+				u.c <- &indexed
 				break
 			}
 		}
@@ -316,7 +316,7 @@ func (g *BasicSearch) Index(req *pogoPlugin.IProcessProjectReq) {
 	if err != nil {
 		g.logger.Warn(err.Error())
 	}
-	u.c <- proj
+	u.c <- &proj
 	
 }
 // Here is the method where we extract the code above
