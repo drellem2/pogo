@@ -57,6 +57,22 @@ func absolute(path string) (string, error) {
 	return str, nil
 }
 
+func (g *BasicSearch) write(c chan IndexedProject) {
+	for {
+		func() {
+			select {
+			case proj, ok := <-c:
+				if !ok {
+					return
+				}
+				g.mu.Lock()
+				defer g.mu.Unlock()
+				g.projects[proj.Root] = proj
+			}
+		}()
+	}
+}
+
 // Try to index all files in the project, then create a code search index.
 // The first is table stakes - so we error on failure. If the second fails, we log it and return.
 func (g *BasicSearch) index(proj *IndexedProject, path string, gitIgnore *ignore.GitIgnore) error {
@@ -155,12 +171,14 @@ func (g *BasicSearch) ReIndex(path string) {
 	}
 	g.logger.Info("Reindexing ", path)
 	go func() {
+		c := make(chan IndexedProject)
+		go g.write(c)
+		defer close(c)
 		fullPath, err2 := absolute(path)
 		if err2 != nil {
 			g.logger.Error("Error getting absolute path", path)
 			return
 		}
-		g.mu.Lock()
 		for projectRoot, indexed := range g.projects {
 			if strings.HasPrefix(fullPath, projectRoot) {
 				relativePath := strings.TrimPrefix(fullPath, projectRoot)
@@ -185,11 +203,10 @@ func (g *BasicSearch) ReIndex(path string) {
 					g.logger.Error("Error indexing updated path ", fullPath)
 					g.logger.Error("Error: ", err)
 				}
-				g.projects[projectRoot] = indexed
+				c <- indexed
 				break
 			}
 		}
-		g.mu.Unlock()
 	}()
 }
 
@@ -263,10 +280,10 @@ func (g *BasicSearch) Index(req *pogoPlugin.IProcessProjectReq) {
 	if err != nil {
 		g.logger.Warn(err.Error())
 	}
-	g.mu.Lock()
-	g.projects[path] = proj
-	g.mu.Unlock()
-
+	c := make(chan IndexedProject)
+	go g.write(c)
+	c <- proj
+	close(c)
 	saveFilePath := filepath.Join(searchDir, saveFileName)
 	outBytes, err2 := json.Marshal(&proj)
 	if err2 != nil {
