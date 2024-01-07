@@ -70,8 +70,7 @@ func absolute(path string) (string, error) {
 	return str, nil
 }
 
-/*
-*
+/**
 
 	Returns some channels that can be written to in order to update the project.
 	Starts a goroutine that will read these channels.
@@ -96,6 +95,7 @@ func (g *BasicSearch) write(u *ProjectUpdater) {
 				g.mu.Lock()
 				defer g.mu.Unlock()
 				g.projects[proj.Root] = proj
+				go g.serializeProjectIndex(&proj)
 			case p := <-u.addFw:
 				g.mu.Lock()
 				defer g.mu.Unlock()
@@ -317,7 +317,6 @@ func (g *BasicSearch) Index(req *pogoPlugin.IProcessProjectReq) {
 		g.logger.Warn(err.Error())
 	}
 	u.c <- proj
-	g.serializeProjectIndex(&proj)
 	
 }
 // Here is the method where we extract the code above
