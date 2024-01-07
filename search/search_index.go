@@ -42,6 +42,17 @@ type IndexedProject struct {
 	Paths []string `json:"paths"`
 }
 
+/**
+  Contains channels that can be written to in order to update the project.
+*/
+type ProjectUpdater struct {
+	c chan IndexedProject
+	addFw chan string
+	removeFw chan string
+	quit chan bool
+	closed bool
+}
+
 func absolute(path string) (string, error) {
 	str, err := filepath.Abs(path)
 	if err != nil {
@@ -57,17 +68,49 @@ func absolute(path string) (string, error) {
 	return str, nil
 }
 
-func (g *BasicSearch) write(c chan IndexedProject) {
-	for {
+/**
+  Returns some channels that can be written to in order to update the project.
+  Starts a goroutine that will read these channels.
+*/
+func (g *BasicSearch) newProjectUpdater() *ProjectUpdater {
+	u := &ProjectUpdater{
+		c: make(chan IndexedProject),
+		addFw: make(chan string),
+		removeFw: make(chan string),
+		quit: make(chan bool),
+		closed: false,
+	}
+	go g.write(u)
+	return u
+}
+
+func (g *BasicSearch) write(u *ProjectUpdater) {
+	for ;!u.closed; {
 		func() {
 			select {
-			case proj, ok := <-c:
-				if !ok {
-					return
-				}
+			case proj := <-u.c:
 				g.mu.Lock()
 				defer g.mu.Unlock()
 				g.projects[proj.Root] = proj
+			case p := <-u.addFw:
+				g.mu.Lock()
+				defer g.mu.Unlock()
+				if g.watcher == nil {
+					g.logger.Warn("watcher is nil")
+				}
+				w := g.watcher.Add(p)
+				if w != nil {
+					g.logger.Error("Error adding file watcher: %v", w)
+				}
+			case p := <-u.removeFw:
+				g.mu.Lock()
+				defer g.mu.Unlock()
+				if g.watcher == nil {
+					g.logger.Warn("watcher is nil")
+				}
+				g.watcher.Remove(p)
+			case <-u.quit:
+				u.closed = true
 			}
 		}()
 	}
@@ -75,12 +118,10 @@ func (g *BasicSearch) write(c chan IndexedProject) {
 
 // Try to index all files in the project, then create a code search index.
 // The first is table stakes - so we error on failure. If the second fails, we log it and return.
-func (g *BasicSearch) index(proj *IndexedProject, path string, gitIgnore *ignore.GitIgnore) error {
+func (g *BasicSearch) index(proj *IndexedProject, path string,
+	gitIgnore *ignore.GitIgnore, u *ProjectUpdater) error {
 	// First index all files in the project
-	e := g.watcher.Add(path)
-	if e != nil {
-		g.logger.Error("Error adding file watcher: %v")
-	}
+	u.addFw <- path
 	file, err := os.Open(path)
 	if err != nil {
 		return err
@@ -107,13 +148,8 @@ func (g *BasicSearch) index(proj *IndexedProject, path string, gitIgnore *ignore
 
 		if !gitIgnore.MatchesPath(relativePath) && subFile != ".git" && subFile != ".pogo" {
 			if fileInfo.IsDir() {
-				if g.watcher != nil {
-					err = g.watcher.Add(newPath)
-					if err != nil {
-						g.logger.Error("Error adding file watcher: %v", err)
-					}
-				}
-				err = g.index(proj, newPath, gitIgnore)
+				u.addFw <- newPath
+				err = g.index(proj, newPath, gitIgnore, u)
 				if err != nil {
 					g.logger.Warn(err.Error())
 				}
@@ -171,9 +207,9 @@ func (g *BasicSearch) ReIndex(path string) {
 	}
 	g.logger.Info("Reindexing ", path)
 	go func() {
-		c := make(chan IndexedProject)
-		go g.write(c)
-		defer close(c)
+		u := g.newProjectUpdater()
+		defer func(){ u.quit <- true }()
+	
 		fullPath, err2 := absolute(path)
 		if err2 != nil {
 			g.logger.Error("Error getting absolute path", path)
@@ -188,8 +224,8 @@ func (g *BasicSearch) ReIndex(path string) {
 				for _, p := range paths2 {
 					if !strings.HasPrefix(p, relativePath) {
 						paths = append(paths, p)
-					} else if g.watcher != nil {
-						g.watcher.Remove(p)
+					} else {
+						u.removeFw <- p
 					}
 				}
 				indexed.Paths = paths
@@ -198,12 +234,12 @@ func (g *BasicSearch) ReIndex(path string) {
 				if err != nil {
 					g.logger.Error("Error parsing gitignore %v", err)
 				}
-				err = g.index(&indexed, fullPath, gitIgnore)
+				err = g.index(&indexed, fullPath, gitIgnore, u)
 				if err != nil {
 					g.logger.Error("Error indexing updated path ", fullPath)
 					g.logger.Error("Error: ", err)
 				}
-				c <- indexed
+				u.c <- indexed
 				break
 			}
 		}
@@ -275,15 +311,13 @@ func (g *BasicSearch) Index(req *pogoPlugin.IProcessProjectReq) {
 		// Non-fatal error
 		g.logger.Error("Error parsing gitignore", err)
 	}
-
-	err = g.index(&proj, path, gitIgnore)
+	u := g.newProjectUpdater()
+	defer func(){ u.quit <- true }()
+	err = g.index(&proj, path, gitIgnore, u)
 	if err != nil {
 		g.logger.Warn(err.Error())
 	}
-	c := make(chan IndexedProject)
-	go g.write(c)
-	c <- proj
-	close(c)
+	u.c <- proj
 	saveFilePath := filepath.Join(searchDir, saveFileName)
 	outBytes, err2 := json.Marshal(&proj)
 	if err2 != nil {
