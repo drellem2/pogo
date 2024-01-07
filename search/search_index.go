@@ -42,15 +42,17 @@ type IndexedProject struct {
 	Paths []string `json:"paths"`
 }
 
-/**
-  Contains channels that can be written to in order to update the project.
+/*
+*
+
+	Contains channels that can be written to in order to update the project.
 */
 type ProjectUpdater struct {
-	c chan IndexedProject
-	addFw chan string
+	c        chan IndexedProject
+	addFw    chan string
 	removeFw chan string
-	quit chan bool
-	closed bool
+	quit     chan bool
+	closed   bool
 }
 
 func absolute(path string) (string, error) {
@@ -68,24 +70,26 @@ func absolute(path string) (string, error) {
 	return str, nil
 }
 
-/**
-  Returns some channels that can be written to in order to update the project.
-  Starts a goroutine that will read these channels.
+/*
+*
+
+	Returns some channels that can be written to in order to update the project.
+	Starts a goroutine that will read these channels.
 */
 func (g *BasicSearch) newProjectUpdater() *ProjectUpdater {
 	u := &ProjectUpdater{
-		c: make(chan IndexedProject),
-		addFw: make(chan string),
+		c:        make(chan IndexedProject),
+		addFw:    make(chan string),
 		removeFw: make(chan string),
-		quit: make(chan bool),
-		closed: false,
+		quit:     make(chan bool),
+		closed:   false,
 	}
 	go g.write(u)
 	return u
 }
 
 func (g *BasicSearch) write(u *ProjectUpdater) {
-	for ;!u.closed; {
+	for !u.closed {
 		func() {
 			select {
 			case proj := <-u.c:
@@ -208,8 +212,8 @@ func (g *BasicSearch) ReIndex(path string) {
 	g.logger.Info("Reindexing ", path)
 	go func() {
 		u := g.newProjectUpdater()
-		defer func(){ u.quit <- true }()
-	
+		defer func() { u.quit <- true }()
+
 		fullPath, err2 := absolute(path)
 		if err2 != nil {
 			g.logger.Error("Error getting absolute path", path)
@@ -301,33 +305,38 @@ func (g *BasicSearch) Index(req *pogoPlugin.IProcessProjectReq) {
 		Root:  path,
 		Paths: make([]string, 0, indexStartCapacity),
 	}
-	searchDir, err := proj.makeSearchDir()
-	if err != nil {
-		g.logger.Error("Error making search dir: ", err)
-	}
-
 	gitIgnore, err := ParseGitIgnore(path)
 	if err != nil {
 		// Non-fatal error
 		g.logger.Error("Error parsing gitignore", err)
 	}
 	u := g.newProjectUpdater()
-	defer func(){ u.quit <- true }()
+	defer func() { u.quit <- true }()
 	err = g.index(&proj, path, gitIgnore, u)
 	if err != nil {
 		g.logger.Warn(err.Error())
 	}
 	u.c <- proj
+	g.serializeProjectIndex(&proj)
+	
+}
+// Here is the method where we extract the code above
+func (g *BasicSearch) serializeProjectIndex(proj *IndexedProject) {
+	searchDir, err := proj.makeSearchDir()
+	if err != nil {
+		g.logger.Error("Error making search dir: ", err)
+		return
+	}
 	saveFilePath := filepath.Join(searchDir, saveFileName)
-	outBytes, err2 := json.Marshal(&proj)
+	outBytes, err2 := json.Marshal(proj)
 	if err2 != nil {
-		g.logger.Error("Error serializing index to json", "index", proj)
+		g.logger.Error("Error serializing index to json", "index", *proj)
 	}
 	err3 := os.WriteFile(saveFilePath, outBytes, 0644)
 	if err3 != nil {
 		g.logger.Error("Error saving index", "save_path", saveFilePath)
 	}
-	g.logger.Info("Indexed " + strconv.Itoa(len(g.projects[path].Paths)) + " files for " + path)
+	g.logger.Info("Indexed " + strconv.Itoa(len(proj.Paths)) + " files for " + proj.Root)
 }
 
 func (g *BasicSearch) GetFiles(projectRoot string) (*IndexedProject, error) {
