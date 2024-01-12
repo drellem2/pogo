@@ -82,6 +82,8 @@ func TestSearch(t *testing.T) {
 	// urlEncode searchRequestJson
 	searchRequestJsonUrlEncoded := url.QueryEscape(string(searchRequestJson))
 
+	// Sleep 500ms to allow the search index to be built
+	time.Sleep(500 * time.Millisecond)
 	resp := basicSearch.Execute(searchRequestJsonUrlEncoded)
 	if err != nil {
 		t.Errorf("Could not execute search request")
