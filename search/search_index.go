@@ -199,6 +199,11 @@ func (g *BasicSearch) ReIndex(path string) {
 		}
 		for projectRoot, indexed := range g.projects {
 			if strings.HasPrefix(fullPath, projectRoot) {
+				/* Below is a golang idiom for removing
+				elements with prefix from the slice. We
+				want to remove all file watchers before
+				reindexing, so we only add back the files
+				that still exist. */
 				relativePath := strings.TrimPrefix(fullPath, projectRoot)
 				paths := indexed.Paths
 				paths2 := paths
