@@ -719,8 +719,7 @@ would be `find-file-other-window' or `find-file-other-frame'"
 
 (defun pogo-check-live ()
   "Make sure the process is still alive."
-  (when (not (process-live-p pogo-process))
-    (pogo-try-start)))
+  (pogo-health-check))
 
 (defun pogo-known-projects ()
   (let ((resp (request-response-data (request "http://localhost:10000/projects"
@@ -741,7 +740,6 @@ would be `find-file-other-window' or `find-file-other-frame'"
                                                   error-thrown)
                                                  (pogo-check-live)))))))
     (mapcar (lambda (x) (cdr (assoc 'path x))) resp)))
-
 
 
 (defun pogo-open-projects ()
