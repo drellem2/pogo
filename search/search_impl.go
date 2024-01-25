@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"sync"
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/hashicorp/go-hclog"
@@ -28,8 +27,7 @@ type BasicSearch struct {
 	logger   hclog.Logger
 	projects map[string]IndexedProject
 	watcher  *fsnotify.Watcher
-	// Mutex to prevent concurrent access to projects map
-	mu sync.Mutex
+	updater  *ProjectUpdater
 }
 
 // Input to an "Execute" call should be a serialized SearchRequest
@@ -210,7 +208,9 @@ func createBasicSearch() *BasicSearch {
 		logger:   logger,
 		projects: make(map[string]IndexedProject),
 		watcher:  watcher,
+		updater:  nil,
 	}
+	basicSearch.updater = basicSearch.newProjectUpdater()
 
 	if UseWatchers && watcher != nil {
 		go func() {

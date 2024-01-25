@@ -93,13 +93,9 @@ func (g *BasicSearch) write(u *ProjectUpdater) {
 		func() {
 			select {
 			case proj := <-u.c:
-				g.mu.Lock()
-				defer g.mu.Unlock()
 				g.projects[proj.Root] = *proj
-				go g.serializeProjectIndex(proj)
+				g.serializeProjectIndex(proj)
 			case p := <-u.addFw:
-				g.mu.Lock()
-				defer g.mu.Unlock()
 				if g.watcher == nil {
 					g.logger.Warn("watcher is nil")
 				}
@@ -108,8 +104,6 @@ func (g *BasicSearch) write(u *ProjectUpdater) {
 					g.logger.Error("Error adding file watcher: %v", w)
 				}
 			case p := <-u.removeFw:
-				g.mu.Lock()
-				defer g.mu.Unlock()
 				if g.watcher == nil {
 					g.logger.Warn("watcher is nil")
 				}
@@ -170,8 +164,7 @@ func (g *BasicSearch) indexRec(proj *IndexedProject, path string,
 func (g *BasicSearch) index(proj *IndexedProject, path string,
 	gitIgnore *ignore.GitIgnore) {
 
-	u := g.newProjectUpdater()
-	defer func() { u.quit <- true }()
+	u := g.updater
 
 	err := g.indexRec(proj, path, gitIgnore, u)
 	if err != nil {
@@ -208,8 +201,7 @@ func (g *BasicSearch) ReIndex(path string) {
 				paths := indexed.Paths
 				paths2 := paths
 				paths = paths[:0]
-				u := g.newProjectUpdater()
-				defer func() { u.quit <- true }()
+				u := g.updater
 				for _, p := range paths2 {
 					if !strings.HasPrefix(p, relativePath) {
 						paths = append(paths, p)
