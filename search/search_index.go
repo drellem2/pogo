@@ -246,6 +246,25 @@ func ParseGitIgnore(path string) (*ignore.GitIgnore, error) {
 	return gitIgnore, err
 }
 
+func (g *BasicSearch) deleteIndexFile(p *IndexedProject) error {
+	searchDir, err := p.makeSearchDir()
+	if err != nil {
+		g.logger.Error("Error making search dir: ", err)
+		return err
+	}
+	indexPath := filepath.Join(searchDir, codeSearchIndexFileName)
+	// First check if indexPath exists
+	_, err = os.Lstat(indexPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		} else {
+			return err
+		}
+	}
+	return os.Remove(indexPath)
+}
+
 func (g *BasicSearch) getSearchFile(p *IndexedProject, filename string) (*os.File, error) {
 	path := p.Root
 	searchDir, err := p.makeSearchDir()
@@ -305,6 +324,9 @@ func (g *BasicSearch) serializeProjectIndex(proj *IndexedProject) {
 
 	// Now serialize zoekt index
 
+	// First delete the old index
+	g.deleteIndexFile(proj)
+
 	indexer, err := zoekt.NewIndexBuilder(nil)
 	if err != nil {
 		g.logger.Error("Error creating search index")
@@ -328,7 +350,6 @@ func (g *BasicSearch) serializeProjectIndex(proj *IndexedProject) {
 			}
 		}
 	}
-
 	indexFile, err := g.getIndexFile(proj)
 	if err != nil {
 		g.logger.Error("Error getting index file ", proj.Root)
