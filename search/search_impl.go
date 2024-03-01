@@ -51,6 +51,15 @@ type ErrorResponse struct {
 	Error     string `json:"error"`
 }
 
+func clean(path string) string {
+	// Append a trailing delimiter if it doesn't exist
+	p := filepath.Clean(path)
+	if p[len(p)-1] != filepath.Separator {
+		p += string(filepath.Separator)
+	}
+	return p
+}
+
 func (g *BasicSearch) printSearchResponse(response SearchResponse) string {
 	// Instead of marshalling the obect, write code to go through all fields
 	// and concatenate them into a string.
@@ -144,6 +153,7 @@ func (g *BasicSearch) Execute(encodedReq string) string {
 
 	switch reqType := searchRequest.Type; reqType {
 	case "search":
+		searchRequest.ProjectRoot = clean(searchRequest.ProjectRoot)
 		results, err := g.Search(searchRequest.ProjectRoot,
 			searchRequest.Data, searchRequest.Duration)
 		if err != nil {
@@ -152,6 +162,7 @@ func (g *BasicSearch) Execute(encodedReq string) string {
 		}
 		return g.searchResponse(nil, results)
 	case "files":
+		searchRequest.ProjectRoot = clean(searchRequest.ProjectRoot)
 		proj, err3 := g.GetFiles(searchRequest.ProjectRoot)
 		if err3 != nil {
 			g.logger.Error("500 Error retrieving files.", "error", err3)

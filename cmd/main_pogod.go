@@ -36,6 +36,15 @@ func allProjects(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(project.Projects())
 }
 
+func clean(path string) string {
+	// Append a trailing delimiter if it doesn't exist
+	p := filepath.Clean(path)
+	if p[len(p)-1] != filepath.Separator {
+		p += string(filepath.Separator)
+	}
+	return p
+}
+
 func file(w http.ResponseWriter, r *http.Request) {
 	fmt.Println("Visited /file")
 	switch r.Method {
@@ -47,6 +56,7 @@ func file(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Bad request", http.StatusBadRequest)
 			return
 		}
+		req.Path = clean(req.Path)
 		response, err := project.Visit(req)
 		if err != nil {
 			http.Error(w, err.Message, err.Code)
@@ -65,6 +75,7 @@ func plugin(w http.ResponseWriter, r *http.Request) {
 	case "GET":
 		encodedPath := r.URL.Query().Get("path")
 		path, err := url.QueryUnescape(encodedPath)
+		path = clean(path)
 		if err != nil {
 			fmt.Printf("Error urldecoding path variable: %v\n", err)
 			return
@@ -88,7 +99,7 @@ func plugin(w http.ResponseWriter, r *http.Request) {
 		}
 
 		path := reqObj.Plugin
-		fmt.Printf("Path %s", path)
+		path = clean(path)
 		plugin := driver.GetPlugin(path)
 		if plugin == nil {
 			http.Error(w, "", http.StatusNotFound)

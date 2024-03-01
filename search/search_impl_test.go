@@ -26,10 +26,14 @@ func setUp(t *testing.T) *BasicSearch {
 	return createBasicSearch()
 }
 
-func cleanUp(basicSearch *BasicSearch, t *testing.T, projectRoot string) {
-	basicSearch.watcher.Close()
+func cleanPogoFolder(t *testing.T, projectRoot string) {
 	pogoFolder := filepath.Join(projectRoot, ".pogo")
 	destroyFolder(pogoFolder, t)
+}
+
+func cleanUp(basicSearch *BasicSearch, t *testing.T, projectRoot string) {
+	basicSearch.watcher.Close()
+	cleanPogoFolder(t, projectRoot)
 }
 
 func destroyPath(filePath string, t *testing.T) {
@@ -62,11 +66,13 @@ func TestSearch(t *testing.T) {
 		t.Errorf("Could not run tests, failed to construct absolute path of %s", aService)
 		return
 	}
+	cleanPogoFolder(t, aServicePath)
 	basicSearch := setUp(t)
 	defer cleanUp(basicSearch, t, aServicePath)
 
 	req := plugin.IProcessProjectReq(plugin.ProcessProjectReq{PathVar: aServicePath})
 	basicSearch.Index(&req)
+	time.Sleep(1 * time.Second)
 	// Make string to execute
 	searchRequest := SearchRequest{
 		Type:        "search",
@@ -189,6 +195,7 @@ func TestNewFileCausesReIndex(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			cleanPogoFolder(t, aServicePath)
 			basicSearch := setUp(t)
 			defer cleanUp(basicSearch, t, aServicePath)
 			// Create directories
@@ -206,6 +213,7 @@ func TestNewFileCausesReIndex(t *testing.T) {
 			}
 			req := plugin.IProcessProjectReq(plugin.ProcessProjectReq{PathVar: aServicePath})
 			basicSearch.Index(&req)
+			time.Sleep(1 * time.Second)
 			fileCount := len(basicSearch.projects[aServicePath].Paths)
 			f, err := os.Create(fullPath)
 			if err != nil {

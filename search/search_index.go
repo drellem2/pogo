@@ -394,8 +394,12 @@ func (g *BasicSearch) GetFiles(projectRoot string) (*IndexedProject, error) {
 
 func (g *BasicSearch) Search(projectRoot string, data string, duration string) (*SearchResults, error) {
 	project, ok := g.projects[projectRoot]
+	var knownProjects string
+	for k := range g.projects {
+		knownProjects += k
+	}
 	if !ok {
-		return nil, errors.New("Unknown project " + projectRoot)
+		return nil, errors.New("Unknown project " + projectRoot + ". Known projects: " + knownProjects)
 	}
 	// Open index file
 	searchDir, err := project.makeSearchDir()

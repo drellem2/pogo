@@ -4,14 +4,16 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/drellem2/pogo/internal/driver"
 )
 
-const aService = "_testdata/a-service/" // In initial state
-const bService = "_testdata/b-service/" // Not in initial state
-const zService = "_testdata/z-service/" // Doesn't exist
+const aService = "_testdata/a-service/"       // In initial state
+const bService = "_testdata/b-service/"       // Not in initial state
+const wService = "_testdata\\\\a-service\\\\" // Windows filepath
+const zService = "_testdata/z-service/"       // Doesn't exist
 
 const readme = "/README.md"
 const mainC = "/src/main.c"
@@ -59,16 +61,32 @@ func cleanUp() {
 	RemoveSaveFile()
 }
 
-func testFileInExistingProjectRecognized(path string, t *testing.T) {
-	t.Logf("Starting test TestFileInExistingProjectRecognized, path=%s", path)
-	aServiceAbs, err := setUp(t)
+func testFileInExistingProjectRecognized(path string, root string, t *testing.T) {
+	t.Logf("Starting test TestFileInExistingProjectRecognized, path=%s, root=%s", path, root)
+	_, err := setUp(t)
 	defer cleanUp()
 	if err != nil {
 		t.Errorf("Failed test set-up %v", err)
 		return
 	}
+	// If contains backslashes, replace with forward slashes
+	windows := false
+	// See if the string root contains backslashes
+	if strings.Index(root, "\\") != -1 {
+		windows = true
+		root = strings.Replace(root, "\\", "/", -1)
+	}
+	rootAbs, err := absolute(root)
+	if err != nil {
+		t.Errorf("Could not construct absolute path: %v", err)
+		return
+	}
+	if windows {
+		rootAbs = strings.Replace(rootAbs, "/", "\\", -1)
+	}
+
 	numProj := len(projects)
-	fileAbs, err2 := filepath.Abs(filepath.Join(aService, path))
+	fileAbs, err2 := filepath.Abs(filepath.Join(root, path))
 	if err2 != nil {
 		t.Errorf("Could not construct absolute path: %v", err2)
 		return
@@ -84,8 +102,8 @@ func testFileInExistingProjectRecognized(path string, t *testing.T) {
 		t.Errorf("Project list: %v", projects)
 		return
 	}
-	if resp.ParentProject.Path != aServiceAbs {
-		t.Errorf("Wrong Project Path, expected %s but found %s", aServiceAbs, resp.ParentProject.Path)
+	if resp.ParentProject.Path != rootAbs && resp.ParentProject.Path != strings.Replace(rootAbs, "\\", "/", -1) {
+		t.Errorf("Wrong Project Path, expected %s but found %s", rootAbs, resp.ParentProject.Path)
 		return
 	}
 	numProj2 := len(projects)
@@ -100,8 +118,14 @@ func TestFileInExistingProjectRecognized(t *testing.T) {
 		"",
 		readme,
 	}
+	roots := []string{
+		aService,
+		wService,
+	}
 	for _, file := range files {
-		testFileInExistingProjectRecognized(file, t)
+		for _, root := range roots {
+			testFileInExistingProjectRecognized(file, root, t)
+		}
 	}
 }
 
