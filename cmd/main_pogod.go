@@ -75,7 +75,6 @@ func plugin(w http.ResponseWriter, r *http.Request) {
 	case "GET":
 		encodedPath := r.URL.Query().Get("path")
 		path, err := url.QueryUnescape(encodedPath)
-		path = clean(path)
 		if err != nil {
 			fmt.Printf("Error urldecoding path variable: %v\n", err)
 			return
@@ -99,7 +98,6 @@ func plugin(w http.ResponseWriter, r *http.Request) {
 		}
 
 		path := reqObj.Plugin
-		path = clean(path)
 		plugin := driver.GetPlugin(path)
 		if plugin == nil {
 			http.Error(w, "", http.StatusNotFound)
