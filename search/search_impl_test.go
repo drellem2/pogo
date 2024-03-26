@@ -125,7 +125,7 @@ func TestSearch(t *testing.T) {
             "results":{
               "files":[
                 {
-                  "path":"{{ .current_dir }}/_testdata/a-service/src/a.c",
+                  "path":"src/a.c",
                   "matches":[
                     {
                       "line":2
@@ -133,7 +133,7 @@ func TestSearch(t *testing.T) {
                   ]
                 },
                 {
-                  "path":"{{ .current_dir }}/_testdata/a-service/README.md",
+                  "path":"README.md",
                   "matches":[
                     {
                       "line":3
@@ -238,7 +238,6 @@ func TestNewFileCausesReIndex(t *testing.T) {
 				t.Logf("File: %v", basicSearch.projects[aServicePath].Paths)
 				return
 			}
-
 		})
 	}
 }

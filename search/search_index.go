@@ -474,7 +474,7 @@ func (g *BasicSearch) Search(projectRoot string, data string, duration string) (
 			}
 		}
 		fileMatches[i] = PogoFileMatch{
-			Path:    file.FileName,
+			Path:    strings.Replace(file.FileName, projectRoot, "", 1),
 			Matches: chunkMatches,
 		}
 	}
