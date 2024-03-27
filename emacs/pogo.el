@@ -634,6 +634,7 @@ If PROJECT is not specified acts on the current project."
          (search-query (or query (pogo--read-search-string-with-default
                                   "Zoekt query:"))))
     (progn
+      (setq default-directory project-root)
       (get-buffer-create "*search*")
       (with-current-buffer "*search*"
         (let ((buffer-name (concat "*search <" project-root ":" search-query
@@ -658,7 +659,7 @@ If PROJECT is not specified acts on the current project."
                    (org-format-files
                     (pogo-print-and-return "org-format-files: "
                                            (mapcar (lambda (s)
-                                                     (concat "[[" s "][" s
+                                                     (concat "[[./" s "][./" s
                                                              "]]"))
                                                    file-paths)))
                    (files-with-newlines (pogo--delimit "\n" org-format-files))
