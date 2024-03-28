@@ -94,7 +94,7 @@ func GetProjects() ([]project.Project, error) {
 
 type PogoChunkMatch struct {
 	Line uint32 `json:"line"`
-	Content []byte `json:"-"`
+	Content string `json:"content"`
 }
 
 type PogoFileMatch struct {
