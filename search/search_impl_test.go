@@ -128,7 +128,8 @@ func TestSearch(t *testing.T) {
                   "path":"src/a.c",
                   "matches":[
                     {
-                      "line":2
+                      "line":2,
+		      "content":"  // Example query"
                     }
                   ]
                 },
@@ -136,7 +137,8 @@ func TestSearch(t *testing.T) {
                   "path":"README.md",
                   "matches":[
                     {
-                      "line":3
+                      "line":3,
+		      "content":"It will contain code to query."
                     }
                   ]
                 }
@@ -154,7 +156,6 @@ func TestSearch(t *testing.T) {
 		return
 	}
 	jsonassert.New(t).Assertf(respDecoded, buff.String())
-
 }
 
 func TestNewFileCausesReIndex(t *testing.T) {

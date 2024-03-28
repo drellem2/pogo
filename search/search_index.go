@@ -25,7 +25,7 @@ const indexStartCapacity = 50
 type PogoChunkMatch struct {
 	Line uint32 `json:"line"`
 	// TODO reenable content when I can get it to marshal without segfault
-	Content []byte `json:"-"`
+	Content string `json:"content"`
 }
 
 type PogoFileMatch struct {
@@ -462,15 +462,14 @@ func (g *BasicSearch) Search(projectRoot string, data string, duration string) (
 	fileMatches := make([]PogoFileMatch, len(result.Files))
 
 	for i, file := range result.Files {
-		content := make([]byte, 0)
 		chunkMatches := make([]PogoChunkMatch, len(file.ChunkMatches))
 		for j, match := range file.ChunkMatches {
-			if match.Content != nil && len(match.Content) > 0 {
-				copy(content, match.Content)
-			}
 			chunkMatches[j] = PogoChunkMatch{
 				Line:    match.ContentStart.LineNumber,
-				Content: content,
+				Content: "",
+			}
+			if len(match.Content) > 0 {
+				chunkMatches[j].Content = string(match.Content)
 			}
 		}
 		fileMatches[i] = PogoFileMatch{

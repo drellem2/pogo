@@ -76,15 +76,9 @@ func (g *BasicSearch) printSearchResponse(response SearchResponse) string {
 			// Convert match.Content bytes to string
 			var lineStr = strconv.FormatUint(uint64(match.Line), 10)
 			str += "\t\t" + lineStr + "\n"
-			if match.Content != nil && len(match.Content) > 0 {
+			if len(match.Content) > 0 {
 				// str += "\t\t" + string(match.Content) + "\n"
-				for _, b := range match.Content {
-					// Cast byte to characters
-					// str += ","
-					// str += string(b)
-					g.logger.Info("Byte: " + string(b))
-				}
-
+				str += "\t\t" + match.Content + "\n"
 			} else {
 				str += "\t\t" + "No content" + "\n"
 			}
@@ -120,8 +114,6 @@ func (g *BasicSearch) searchResponse(index *IndexedProject, results *SearchResul
 		response.Results = *results
 	}
 	response.Error = ""
-
-	g.logger.Info("Search response: " + g.printSearchResponse(response))
 
 	bytes, err := json.Marshal(&response)
 	if err != nil {
