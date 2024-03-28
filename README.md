@@ -26,7 +26,7 @@ Currently supports zshell and emacs.
 4. Use `pose` to search with zoekt.
 
 Zoekt query examples can be found [here](https://github.com/sourcegraph/zoekt/blob/main/web/templates.go#L158).
-e.g. `pose banana` or `pose banana .` will seach the current  directory for `banana`. Currently only files are returned, sorted by relevance.
+e.g. `pose banana` or `pose banana .` will seach the current  directory for `banana`. 
 
 ## Environment Variables
 
