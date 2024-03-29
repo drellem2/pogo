@@ -469,7 +469,7 @@ func (g *BasicSearch) Search(projectRoot string, data string, duration string) (
 				Content: "",
 			}
 			if len(match.Content) > 0 {
-				chunkMatches[j].Content = string(match.Content)
+				chunkMatches[j].Content = strings.TrimSpace(string(match.Content))
 			}
 		}
 		fileMatches[i] = PogoFileMatch{

@@ -129,7 +129,7 @@ func TestSearch(t *testing.T) {
                   "matches":[
                     {
                       "line":2,
-		      "content":"  // Example query"
+		      "content":"// Example query"
                     }
                   ]
                 },
