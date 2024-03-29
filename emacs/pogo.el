@@ -627,6 +627,21 @@ If PROJECT is not specified acts on the current project."
            e
            (pogo--delimit e (cdr l))))))
 
+(defun format-chunk (chunk)
+  "Convert a file match to a string."
+  (let* ((line (cdr (assoc 'line chunk)))
+         (content (cdr (assoc 'content chunk))))
+    (format "%s: ~%s~" line content)))
+
+(defun format-file-match (file-match)
+  "Display file match in org mode."
+  (let* ((path (cdr (assoc 'path file-match)))
+         (matches (cdr (assoc 'matches file-match))))
+    (format "* [[./%s][./%s]]\n%s"
+            path
+            path
+            (mapconcat #'format-chunk matches "\n"))))
+
 (defun pogo--search (&optional query arg)
   "Search a project."
   (interactive "P")
@@ -651,17 +666,9 @@ If PROJECT is not specified acts on the current project."
                                             (sort
                                              files
                                              #'pogo--search-compare))))
-                   (file-paths
-                    (pogo-print-and-return "file-paths: "
-                                           (mapcar (lambda (e)
-                                                     (cdr (assoc 'path e)))
-                                                   sorted-files)))
                    (org-format-files
                     (pogo-print-and-return "org-format-files: "
-                                           (mapcar (lambda (s)
-                                                     (concat "[[./" s "][./" s
-                                                             "]]"))
-                                                   file-paths)))
+                                           (mapcar #'format-file-match sorted-files)))
                    (files-with-newlines (pogo--delimit "\n" org-format-files))
                    (results (cl-reduce #'concat files-with-newlines)))
               (insert (if (null results) "nil" results)))
