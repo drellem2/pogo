@@ -23,6 +23,40 @@ type ClientResp interface {
 	[]project.Project | *project.VisitResponse | *SearchResponse | []string
 }
 
+type PogoChunkMatch struct {
+	Line uint32 `json:"line"`
+	Content string `json:"content"`
+}
+
+type PogoFileMatch struct {
+	Path    string           `json:"path"`
+	Matches []PogoChunkMatch `json:"matches"`
+}
+
+type SearchResults struct {
+	Files []PogoFileMatch `json:"files"`
+}
+
+type IndexedProject struct {
+	Root  string   `json:"root"`
+	Paths []string `json:"paths"`
+}
+
+type SearchResponse struct {
+	Index   IndexedProject `json:"index"`
+	Results SearchResults  `json:"results"`
+	Error   string         `json:"error"`
+}
+
+type SearchRequest struct {
+	// Values: "search" or "files"
+	Type        string `json:"type"`
+	ProjectRoot string `json:"projectRoot"`
+	// Command timeout duration - only for 'search'-type requests
+	Duration string `json:"string"`
+	Data     string `json:"data"`
+}
+
 func HealthCheck() error {
 	_, err := http.Post("http://localhost:10000/health", "application/json",
 		nil)
@@ -90,40 +124,6 @@ func GetProjects() ([]project.Project, error) {
 		return nil, err
 	}
 	return projs, nil
-}
-
-type PogoChunkMatch struct {
-	Line uint32 `json:"line"`
-	Content string `json:"content"`
-}
-
-type PogoFileMatch struct {
-	Path    string           `json:"path"`
-	Matches []PogoChunkMatch `json:"matches"`
-}
-
-type SearchResults struct {
-	Files []PogoFileMatch `json:"files"`
-}
-
-type IndexedProject struct {
-	Root  string   `json:"root"`
-	Paths []string `json:"paths"`
-}
-
-type SearchResponse struct {
-	Index   IndexedProject `json:"index"`
-	Results SearchResults  `json:"results"`
-	Error   string         `json:"error"`
-}
-
-type SearchRequest struct {
-	// Values: "search" or "files"
-	Type        string `json:"type"`
-	ProjectRoot string `json:"projectRoot"`
-	// Command timeout duration - only for 'search'-type requests
-	Duration string `json:"string"`
-	Data     string `json:"data"`
 }
 
 func GetPlugins() ([]string, error) {
