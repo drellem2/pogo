@@ -849,11 +849,14 @@ An open project is a project with any open buffers."
 (defun to-list (v)
   (append v nil))
 
+;; Golang utility encodes spaces as + instead of %20
+(defun fix-spaces (s)
+  (replace-regexp-in-string "\+" "%20" s))
 
 (defun pogo-parse-result (resp)
   (let*
       ((decoded (json-read-from-string
-                 (url-unhex-string (cdr (assoc 'value resp)))))
+                 (url-unhex-string (fix-spaces (cdr (assoc 'value resp))))))
        (inner-resp (cdr (assoc 'index decoded)))
        (results (cdr (assoc 'results decoded)))
        (err (cdr (assoc 'error inner-resp)))
