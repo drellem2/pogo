@@ -1,7 +1,6 @@
-package main
+package search
 
 import (
-	"encoding/gob"
 	"encoding/json"
 	"net/url"
 	"os"
@@ -12,7 +11,7 @@ import (
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/go-plugin"
 
-	pogoPlugin "github.com/drellem2/pogo/plugin"
+	pogoPlugin "github.com/drellem2/pogo/pkg/plugin"
 )
 
 const pogoDir = ".pogo"
@@ -49,6 +48,12 @@ type SearchResponse struct {
 type ErrorResponse struct {
 	ErrorCode int    `json:"errorCode"`
 	Error     string `json:"error"`
+}
+
+func New() func() (interface{}, error) {
+	return func() (interface{}, error) {
+		return createBasicSearch(), nil;
+	}
 }
 
 func clean(path string) string {
@@ -174,6 +179,10 @@ func (g *BasicSearch) ProcessProject(req *pogoPlugin.IProcessProjectReq) error {
 	return nil
 }
 
+func (g *BasicSearch) Close() {
+	g.watcher.Close();
+}
+
 // handshakeConfigs are used to just do a basic handshake betw1een
 // a plugin and host. If the handshake fails, a user friendly error is shown.
 // This prevents users from executing bad plugins or executing a plugin
@@ -242,19 +251,20 @@ func createBasicSearch() *BasicSearch {
 	return basicSearch
 }
 
-func main() {
-	gob.Register(pogoPlugin.ProcessProjectReq{})
+// This is how to serve a plugin remotely
+// func main() {
+// 	gob.Register(pogoPlugin.ProcessProjectReq{})
 
-	basicSearch := createBasicSearch()
-	defer basicSearch.watcher.Close()
+// 	basicSearch := createBasicSearch()
+// 	defer basicSearch.watcher.Close()
 
-	// pluginMap is the map of plugins we can dispense.
-	var pluginMap = map[string]plugin.Plugin{
-		"basicSearch": &pogoPlugin.PogoPlugin{Impl: basicSearch},
-	}
+// 	// pluginMap is the map of plugins we can dispense.
+// 	var pluginMap = map[string]plugin.Plugin{
+// 		"basicSearch": &pogoPlugin.PogoPlugin{Impl: basicSearch},
+// 	}
 
-	plugin.Serve(&plugin.ServeConfig{
-		HandshakeConfig: handshakeConfig,
-		Plugins:         pluginMap,
-	})
-}
+// 	plugin.Serve(&plugin.ServeConfig{
+// 		HandshakeConfig: handshakeConfig,
+// 		Plugins:         pluginMap,
+// 	})
+// }

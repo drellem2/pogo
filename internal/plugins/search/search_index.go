@@ -1,4 +1,4 @@
-package main
+package search
 
 import (
 	"context"
@@ -15,7 +15,7 @@ import (
 	"github.com/sourcegraph/zoekt"
 	"github.com/sourcegraph/zoekt/query"
 
-	pogoPlugin "github.com/drellem2/pogo/plugin"
+	pogoPlugin "github.com/drellem2/pogo/pkg/plugin"
 )
 
 const saveFileName = "search_index.json"

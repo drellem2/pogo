@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	pogoPlugin "github.com/drellem2/pogo/plugin"
+	pogoPlugin "github.com/drellem2/pogo/pkg/plugin"
 	"github.com/drellem2/pogo/internal/project"
 )
 

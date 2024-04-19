@@ -15,10 +15,16 @@ import (
 	"os/exec"
 	"path/filepath"
 
-	pogoPlugin "github.com/drellem2/pogo/plugin"
+	pogoPlugin "github.com/drellem2/pogo/pkg/plugin"
 	hclog "github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/go-plugin"
 )
+
+var logger = hclog.New(&hclog.LoggerOptions{
+		Name:   "driver",
+		Output: os.Stdout,
+		Level:  hclog.Debug,
+})
 
 // handshakeConfigs are used to just do a basic handshake between
 // a plugin and host. If the handshake fails, a user friendly error is shown.
@@ -75,6 +81,11 @@ func GetPlugin(path string) *pogoPlugin.IPogoPlugin {
 func checkAlive(path string) {
 	if Interfaces[path] == nil {
 		startPlugin(path)
+		return
+	}
+
+	// Built-in plugin
+	if clients[path] == nil {
 		return
 	}
 
@@ -153,6 +164,13 @@ func Init() {
 			}()
 			startPlugin(path)
 		}()
+	}
+	for name, plugin := range builtinRegistry {
+		if Interfaces[name] != nil {
+			logger.Debug("Found runtime copy of plugin, skipping builtin", "name", name)
+		} else {
+			Interfaces[name] = plugin
+		}
 	}
 }
 

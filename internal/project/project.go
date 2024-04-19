@@ -16,7 +16,7 @@ import (
 	"strings"
 
 	"github.com/drellem2/pogo/internal/driver"
-	pogoPlugin "github.com/drellem2/pogo/plugin"
+	pogoPlugin "github.com/drellem2/pogo/pkg/plugin"
 )
 
 type Project struct {

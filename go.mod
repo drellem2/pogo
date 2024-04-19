@@ -19,7 +19,6 @@ require (
 	github.com/agnivade/levenshtein v1.1.1 // indirect
 	github.com/bits-and-blooms/bitset v1.8.0 // indirect
 	github.com/cpuguy83/go-md2man/v2 v2.0.2 // indirect
-	github.com/edsrzf/mmap-go v1.1.0 // indirect
 	github.com/fatih/color v1.15.0 // indirect
 	github.com/go-enry/go-enry/v2 v2.8.4 // indirect
 	github.com/go-enry/go-oniguruma v1.2.1 // indirect

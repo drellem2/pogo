@@ -1,4 +1,4 @@
-package main
+package search
 
 import (
 	"bytes"
@@ -13,7 +13,7 @@ import (
 
 	"github.com/kinbiko/jsonassert"
 
-	"github.com/drellem2/pogo/plugin"
+	"github.com/drellem2/pogo/pkg/plugin"
 )
 
 const aService = "_testdata/a-service/"
