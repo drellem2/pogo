@@ -19,7 +19,7 @@ import (
 const aService = "_testdata/a-service/"
 
 func init() {
-	os.Chdir("..")
+	os.Chdir("../../..")
 }
 
 func setUp(t *testing.T) *BasicSearch {

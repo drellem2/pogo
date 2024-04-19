@@ -50,9 +50,9 @@ type ErrorResponse struct {
 	Error     string `json:"error"`
 }
 
-func New() func() (interface{}, error) {
-	return func() (interface{}, error) {
-		return createBasicSearch(), nil;
+func New() func() (pogoPlugin.IPogoPlugin, error) {
+	return func() (pogoPlugin.IPogoPlugin, error) {
+		return createBasicSearch(), nil
 	}
 }
 

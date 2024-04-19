@@ -10,7 +10,7 @@ import (
 	searchPlugin "github.com/drellem2/pogo/internal/plugins/search"
 )
 
-type BuiltinFactory func() (interface{}, error)
+type BuiltinFactory func() (pogoPlugin.IPogoPlugin, error)
 
 var builtinPlugins = map[string]BuiltinFactory{
 	"pogo-plugin-search": searchPlugin.New(),
@@ -25,7 +25,7 @@ func newRegistry() map[string]*pogoPlugin.IPogoPlugin {
 		if err != nil {
 			logger.Error("Could not start plugin", "name", name, "err", err.Error())
 		} else {
-			registry[name] = p.(*pogoPlugin.IPogoPlugin)
+			registry[name] = &p
 		}		
 	}
 	return registry

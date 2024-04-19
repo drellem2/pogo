@@ -10,13 +10,19 @@ Currently supports zshell and emacs.
 ## Installation 
 *(instructions for Mac)*
 
-1. Build the daemon
-`brew install go && chmod +x build.sh.sh && ./build.sh`
-2. Add the generated `bin` file to your path.
-`export PATH=$PATH:/path-to-pogo/bin`
-3. Add the zshell tool to your `.zshrc` file.
+1. Install golang.
+`brew install go`
+2. Clone the repository
+`git clone git@github.com:drellem2/pogo && cd pogo`
+3. Ensure gopath is set.
+`export GOPATH=$(cd ..; pwd)`
+4. Install executables.
+`GO111MODULE=on go install github.com/drellem2/pogo/cmd/...`
+5. Add the gopath `bin` file to your path.
+`export PATH=$PATH:$(cd ../bin; pwd)`
+6. Add the zshell tool to your `.zshrc` file. (You'll want to make some modifications to it first.)
 `cat shell/.zshrc >> ~/.zshrc`
-4. Install the emacs client (instructions below).
+7. Install the emacs client (instructions below).
 
 ## Shell Usage
 
