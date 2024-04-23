@@ -21,10 +21,10 @@ import (
 const saveFileName = "search_index.json"
 const codeSearchIndexFileName = "code_search_index"
 const indexStartCapacity = 50
+const indexCacheMinutes = 24 * 60
 
 type PogoChunkMatch struct {
 	Line uint32 `json:"line"`
-	// TODO reenable content when I can get it to marshal without segfault
 	Content string `json:"content"`
 }
 
@@ -287,8 +287,8 @@ func (g *BasicSearch) getIndexFile(p *IndexedProject) (*os.File, error) {
 
 func (g *BasicSearch) Index(req *pogoPlugin.IProcessProjectReq) {
 	path := (*req).Path()
-	_, ok := g.projects[path]
-	if ok {
+	p, ok := g.projects[path]
+	if ok &&  p.Paths != nil && len(p.Paths) > 0 {
 		g.logger.Info("Already indexed ", path)
 		return
 	}
@@ -364,10 +364,10 @@ func (g *BasicSearch) serializeProjectIndex(proj *IndexedProject) {
 	}
 }
 
-func (g *BasicSearch) GetFiles(projectRoot string) (*IndexedProject, error) {
-	project, ok := g.projects[projectRoot]
-	if !ok {
-		return nil, errors.New("Project not indexed " + projectRoot)
+func (g *BasicSearch) Load(projectRoot string) (*IndexedProject, error) {
+	project := &IndexedProject{
+		Root: projectRoot,
+		Paths: make([]string, 0, indexStartCapacity),
 	}
 	searchDir, err := project.makeSearchDir()
 	if err != nil {
@@ -375,21 +375,44 @@ func (g *BasicSearch) GetFiles(projectRoot string) (*IndexedProject, error) {
 		return nil, err
 	}
 	saveFilePath := filepath.Join(searchDir, saveFileName)
-	_, err = os.Lstat(saveFilePath)
-	file, err2 := os.Open(saveFilePath)
-	if err2 != nil {
+	stat, err := os.Lstat(saveFilePath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			g.projects[projectRoot] = *project
+			// Return empty struct
+			return project, nil
+		}
+		return nil, err
+	}
+	// Check if index is stale
+	if time.Since(stat.ModTime()).Minutes() > indexCacheMinutes {
+		g.logger.Info("Index is stale for " + projectRoot)
+		return project, nil
+	}
+	
+	file, err := os.Open(saveFilePath)
+	if err != nil {
 		g.logger.Error("Error opening index file.")
-		return nil, err2
+		return nil, err
 	}
 	defer file.Close()
 	byteValue, _ := ioutil.ReadAll(file)
-	var indexStruct IndexedProject
-	err = json.Unmarshal(byteValue, &indexStruct)
+	err = json.Unmarshal(byteValue, project)
 	if err != nil {
 		g.logger.Error("Error deserializing index file: %v", err)
 		return nil, err
 	}
-	return &indexStruct, nil
+	g.logger.Info("Loaded " + strconv.Itoa(len(project.Paths)) + " files for " + projectRoot)
+	g.updater.c <- project
+	return project, nil
+}
+
+func (g *BasicSearch) GetFiles(projectRoot string) (*IndexedProject, error) {
+	project, ok := g.projects[projectRoot]
+	if !ok {
+		return nil, errors.New("Project not indexed " + projectRoot)
+	}
+	return &project, nil
 }
 
 func (g *BasicSearch) Search(projectRoot string, data string, duration string) (*SearchResults, error) {

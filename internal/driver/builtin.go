@@ -26,7 +26,7 @@ func newRegistry() map[string]*pogoPlugin.IPogoPlugin {
 			logger.Error("Could not start plugin", "name", name, "err", err.Error())
 		} else {
 			registry[name] = &p
-		}		
+		}
 	}
 	return registry
 }

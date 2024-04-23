@@ -175,7 +175,13 @@ func (g *BasicSearch) Execute(encodedReq string) string {
 
 func (g *BasicSearch) ProcessProject(req *pogoPlugin.IProcessProjectReq) error {
 	g.logger.Info("Processing project %s", (*req).Path())
-	go g.Index(req)
+	proj, err := g.Load((*req).Path())
+	if err != nil {
+		g.logger.Error("Error processing project", "error", err)
+	}
+	if err != nil || len(proj.Paths) == 0 {
+		go g.Index(req)
+	}
 	return nil
 }
 
