@@ -713,7 +713,7 @@ would be `find-file-other-window' or `find-file-other-frame'"
         (setq pogo-process (pogo-start))
         (run-with-timer pogo-health-check-seconds nil 'pogo-health-check)))))
 
-(defun pogo-health-check ()
+(cl-defun pogo-health-check (&optional (retry-count 0) (retry-max 3))
   (request "http://localhost:10000/health"
     :success (cl-function (lambda (&key data &allow-other-keys)
                             (setq pogo-failure-count 0)
@@ -723,7 +723,9 @@ would be `find-file-other-window' or `find-file-other-frame'"
                           (setq pogo-server-started nil)
                           (setq pogo-failure-count (+ pogo-failure-count 1))
                           (pogo-log "Health check failed %s" error-thrown)
-                          (pogo-try-start)))))
+                          (if (>= retry-count retry-max)
+                              (pogo-try-start)
+                            (pogo-health-check (+ retry-count 1) retry-max))))))
 
 (defun pogo-check-live ()
   "Make sure the process is still alive."
