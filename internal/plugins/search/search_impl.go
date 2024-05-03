@@ -186,7 +186,7 @@ func (g *BasicSearch) ProcessProject(req *pogoPlugin.IProcessProjectReq) error {
 }
 
 func (g *BasicSearch) Close() {
-	g.watcher.Close();
+	g.watcher.Close()
 }
 
 // handshakeConfigs are used to just do a basic handshake betw1een

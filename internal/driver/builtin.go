@@ -5,9 +5,8 @@
 package driver
 
 import (
-	
-	pogoPlugin "github.com/drellem2/pogo/pkg/plugin"
 	searchPlugin "github.com/drellem2/pogo/internal/plugins/search"
+	pogoPlugin "github.com/drellem2/pogo/pkg/plugin"
 )
 
 type BuiltinFactory func() (pogoPlugin.IPogoPlugin, error)

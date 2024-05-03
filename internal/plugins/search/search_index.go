@@ -24,7 +24,7 @@ const indexStartCapacity = 50
 const indexCacheMinutes = 24 * 60
 
 type PogoChunkMatch struct {
-	Line uint32 `json:"line"`
+	Line    uint32 `json:"line"`
 	Content string `json:"content"`
 }
 
@@ -288,7 +288,7 @@ func (g *BasicSearch) getIndexFile(p *IndexedProject) (*os.File, error) {
 func (g *BasicSearch) Index(req *pogoPlugin.IProcessProjectReq) {
 	path := (*req).Path()
 	p, ok := g.projects[path]
-	if ok &&  p.Paths != nil && len(p.Paths) > 0 {
+	if ok && p.Paths != nil && len(p.Paths) > 0 {
 		g.logger.Info("Already indexed ", path)
 		return
 	}
@@ -366,7 +366,7 @@ func (g *BasicSearch) serializeProjectIndex(proj *IndexedProject) {
 
 func (g *BasicSearch) Load(projectRoot string) (*IndexedProject, error) {
 	project := &IndexedProject{
-		Root: projectRoot,
+		Root:  projectRoot,
 		Paths: make([]string, 0, indexStartCapacity),
 	}
 	searchDir, err := project.makeSearchDir()
@@ -389,7 +389,7 @@ func (g *BasicSearch) Load(projectRoot string) (*IndexedProject, error) {
 		g.logger.Info("Index is stale for " + projectRoot)
 		return project, nil
 	}
-	
+
 	file, err := os.Open(saveFilePath)
 	if err != nil {
 		g.logger.Error("Error opening index file.")

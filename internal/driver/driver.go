@@ -21,9 +21,9 @@ import (
 )
 
 var logger = hclog.New(&hclog.LoggerOptions{
-		Name:   "driver",
-		Output: os.Stdout,
-		Level:  hclog.Debug,
+	Name:   "driver",
+	Output: os.Stdout,
+	Level:  hclog.Debug,
 })
 
 // handshakeConfigs are used to just do a basic handshake between

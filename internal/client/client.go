@@ -15,8 +15,8 @@ import (
 	"strings"
 	"time"
 
-	pogoPlugin "github.com/drellem2/pogo/pkg/plugin"
 	"github.com/drellem2/pogo/internal/project"
+	pogoPlugin "github.com/drellem2/pogo/pkg/plugin"
 )
 
 type ClientResp interface {
@@ -24,7 +24,7 @@ type ClientResp interface {
 }
 
 type PogoChunkMatch struct {
-	Line uint32 `json:"line"`
+	Line    uint32 `json:"line"`
 	Content string `json:"content"`
 }
 
@@ -86,9 +86,9 @@ func RunWithHealthCheck[T ClientResp](run func() (T, error)) (T, error) {
 		// Get current time
 		startTime := time.Now()
 		// Inside for loop, check current time against startTime
-		for ;time.Now().Sub(startTime) < 2000*time.Millisecond; {
+		for time.Now().Sub(startTime) < 2000*time.Millisecond {
 			err = HealthCheck()
-			if err == nil {				
+			if err == nil {
 				fmt.Println("Health check successful")
 				success = true
 				break
@@ -99,7 +99,7 @@ func RunWithHealthCheck[T ClientResp](run func() (T, error)) (T, error) {
 		if !success {
 			return nil, err
 		}
-	}	
+	}
 	return run()
 }
 
@@ -190,10 +190,10 @@ func Search(query string, dir string) (*SearchResponse, error) {
 	}
 	// urlencode searchRequestJson
 	encodedRequest := url.QueryEscape(string(searchRequestJson))
-	
+
 	results, err := RunWithHealthCheck(func() (*SearchResponse, error) {
 		client := &http.Client{}
-		
+
 		req, err := http.NewRequest("POST", "http://localhost:10000/plugin",
 			strings.NewReader(
 				fmt.Sprintf(`{"plugin": "%s",
@@ -256,7 +256,7 @@ func Visit(path string) (*project.VisitResponse, error) {
 		err = json.Unmarshal(body, &resp)
 		if err != nil {
 			return nil, err
-		}		
+		}
 		return &resp, nil
 	})
 	if err != nil {
