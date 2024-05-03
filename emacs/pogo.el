@@ -691,6 +691,13 @@ would be `find-file-other-window' or `find-file-other-frame'"
 
 ;; External functions
 
+(defvar pogo-json-parser
+  (if (json-available-p)
+      'json-parse-buffer
+    (progn
+      (pogo-log "Using json.el: Upgrade to emacs with libjansson for better performance.")
+      'json-read)))
+
 (defvar is-windows
   (or
    (eq system-type 'ms-dos)
@@ -734,7 +741,7 @@ would be `find-file-other-window' or `find-file-other-frame'"
 (defun pogo-known-projects ()
   (let ((resp (request-response-data (request "http://localhost:10000/projects"
                                        :sync t
-                                       :parser 'json-read
+                                       :parser pogo-json-parser
                                        :success (cl-function
                                                  (lambda
                                                    (&key data
@@ -749,7 +756,10 @@ would be `find-file-other-window' or `find-file-other-frame'"
                                                   "Error getting projects: %s"
                                                   error-thrown)
                                                  (pogo-check-live)))))))
-    (mapcar (lambda (x) (cdr (assoc 'path x))) resp)))
+    
+    (if (eq 'json-parse-buffer pogo-json-parser)
+        (mapcar (lambda (x) (gethash "path" x)) resp)
+      (mapcar (lambda (x) (cdr (assoc 'path x))) resp))))
 
 
 (defun pogo-open-projects ()
@@ -788,7 +798,7 @@ An open project is a project with any open buffers."
                           :type "POST"
                           :data (json-encode
                                  `(("path" . ,path)))
-                          :parser 'json-read
+                          :parser pogo-json-parser
                           :success (cl-function
                                     (lambda
                                       (&key data
@@ -813,7 +823,7 @@ An open project is a project with any open buffers."
           (request-response-data
            (request "http://localhost:10000/plugins"
              :sync t
-             :parser 'json-read
+             :parser pogo-json-parser
              :success (cl-function (lambda (&key data &allow-other-keys)
                                      (pogo-log "Received: %S" data)))
              :error (cl-function
@@ -891,7 +901,7 @@ An open project is a project with any open buffers."
                                         `(("plugin" .
                                            ,(pogo-get-search-plugin-path))
                                           ("value" . ,command)))
-                                 :parser 'json-read
+                                 :parser pogo-json-parser
                                  :success (cl-function
                                            (lambda (&key data
                                                          &allow-other-keys)
@@ -921,7 +931,7 @@ An open project is a project with any open buffers."
            :type "POST"
            :data (json-encode `(("plugin" . ,(pogo-get-search-plugin-path))
                                 ("value" . ,command)))
-           :parser 'json-read
+           :parser pogo-json-parser
            :success (cl-function (lambda (&key data &allow-other-keys)
                                    (pogo-log "Received: %S" data)))
            :error (cl-function
