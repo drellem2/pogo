@@ -786,34 +786,38 @@ An open project is a project with any open buffers."
            (pogo-log "Had to place response in cache for %s %s" path result)
            result))))))
 
+(defun pogo-parse-visit-call (resp)
+  (if (eq 'json-parse-buffer pogo-json-parser)
+      (gethash "path" (gethash "project" resp))
+    (cdr (assoc 'path (assoc 'project resp)))))
+
 (defun pogo-visit-call (path)
   "Path must be absolute"
   (progn
     (pogo-log "Visiting %s" path)
-    (cdr (assoc 'path
-                (assoc 'project
-                       (request-response-data
-                        (request "http://localhost:10000/file"
-                          :sync t
-                          :type "POST"
-                          :data (json-encode
-                                 `(("path" . ,path)))
-                          :parser pogo-json-parser
-                          :success (cl-function
-                                    (lambda
-                                      (&key data
-                                            &allow-other-keys)
-                                      (pogo-log
-                                       "Received: %S" data)))
-                          :error (cl-function
-                                  (lambda
-                                    (&key error-thrown
-                                          &allow-other-keys)
-                                    (progn
-                                      (pogo-log
-                                     "Error visiting file %s: %s"
-                                     path error-thrown)
-                                      (pogo-check-live)))))))))))
+    (pogo-parse-visit-call
+     (request-response-data
+      (request "http://localhost:10000/file"
+        :sync t
+        :type "POST"
+        :data (json-encode
+               `(("path" . ,path)))
+        :parser pogo-json-parser
+        :success (cl-function
+                  (lambda
+                    (&key data
+                          &allow-other-keys)
+                    (pogo-log
+                     "Received: %S" data)))
+        :error (cl-function
+                (lambda
+                  (&key error-thrown
+                        &allow-other-keys)
+                  (progn
+                    (pogo-log
+                     "Error visiting file %s: %s"
+                     path error-thrown)
+                    (pogo-check-live)))))))))
 
 (defun pogo-get-search-plugin-path ()
   (if pogo-search-plugin
@@ -866,22 +870,47 @@ An open project is a project with any open buffers."
   (replace-regexp-in-string "\+" "%20" s))
 
 (defun pogo-parse-result (resp)
-  (let*
-      ((decoded (json-read-from-string
-                 (url-unhex-string (fix-spaces (cdr (assoc 'value resp))))))
-       (inner-resp (cdr (assoc 'index decoded)))
-       (results (cdr (assoc 'results decoded)))
-       (err (cdr (assoc 'error inner-resp)))
-       (paths (cdr (assoc 'paths inner-resp))))
-    (if (not (pogo-nil-or-empty err))
-        (progn
-          (pogo-log "Error parsing results %s" err)
-          nil)
-      (let ((al '()))
-        (progn
-          (push `(paths . ,paths) al)
-          (push `(results . ,results) al)
-          al)))))
+  (if (eq 'json-parse-buffer pogo-json-parser)
+      (let*
+          ((decoded (json-parse-string
+                     (url-unhex-string (fix-spaces (gethash "value" resp)))))
+           (inner-resp (gethash "index" decoded))
+           (results (gethash "results" decoded))
+           (err (gethash "error" inner-resp))
+           (paths (gethash "paths" inner-resp)))
+        (if (not (pogo-nil-or-empty err))
+            (progn
+              (pogo-log "Error parsing results %s" err)
+              nil)
+          (let ((al '()))
+            (progn
+              (push `(paths . ,paths) al)
+              (push `(results . ,results) al)
+              al))))
+      
+      (let*
+          ((decoded (json-read-from-string
+                     (url-unhex-string (fix-spaces (cdr (assoc 'value resp))))))
+           (inner-resp (cdr (assoc 'index decoded)))
+           (results (cdr (assoc 'results decoded)))
+           (err (cdr (assoc 'error inner-resp)))
+           (paths (cdr (assoc 'paths inner-resp))))
+        (if (not (pogo-nil-or-empty err))
+            (progn
+              (pogo-log "Error parsing results %s" err)
+              nil)
+          (let ((al '()))
+            (progn
+              (push `(paths . ,paths) al)
+              (push `(results . ,results) al)
+              al))))))
+
+(defun pogo-parse-plugin-response (resp)
+  
+  (if (eq 'json-parse-buffer pogo-json-parser)
+      (gethash "results" resp)
+      (to-list (cdr (assoc 'results resp))))
+  )
 
 (defun pogo-project-search (path query)
   (let
