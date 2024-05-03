@@ -44,11 +44,6 @@ func main() {
 		}
 		files := results.Results.Files
 
-		// Sort files by number of matching lines
-		sort.Slice(files, func(i, j int) bool {
-			return len(files[i].Matches) > len(files[j].Matches)
-		})
-
 		// Get the value of the -l flag
 		list, err := cobraCmd.Flags().GetBool("list")
 		if err != nil {
@@ -56,14 +51,34 @@ func main() {
 		}
 
 		if list {
+			// Remove duplicates from files
+			uniqueFiles := make(map[string]struct{})
 			for _, file := range files {
-				fmt.Println(file.Path)
+				uniqueFiles[file.Path] = struct{}{}
+			}
+
+			// Sort
+			paths := make([]string, len(uniqueFiles))
+			i := 0
+			for p, _ := range uniqueFiles {
+				paths[i] = p
+				i++
+			}
+			sort.Strings(paths)
+			// iterate over keys of uniqueFiles
+			for _, path := range paths {
+				fmt.Println(path)
 			}
 		} else {
+			// Sort files by number of matching lines
+			sort.Slice(files, func(i, j int) bool {
+				return len(files[i].Matches) > len(files[j].Matches)
+			})
+
 			for _, file := range files {
 				fmt.Printf("%s\n", file.Path)
 				for _, match := range file.Matches {
-					fmt.Printf("%d: %s\n", match.Line, match.Content)
+					fmt.Printf("\t%d:\t%s\n", match.Line, match.Content)
 				}
 			}
 		}

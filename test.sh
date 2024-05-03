@@ -1,7 +1,7 @@
 echo "Step 2: Testing..."
 export GOPATH=$(cd .. && pwd)
-set BIN_PATH=$(cd ../bin && pwd)
-export POGO_PLUGIN_PATH="${$BIN_PATH}/plugin"
+BIN_PATH=$(cd ../bin && pwd)
+export POGO_PLUGIN_PATH="${BIN_PATH}/plugin"
 echo "Setting GOPATH to " $GOPATH
 echo "Setting POGO_PLUGIN_PATH to " $POGO_PLUGIN_PATH
 echo "Making test directories"
