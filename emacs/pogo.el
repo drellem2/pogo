@@ -905,12 +905,6 @@ An open project is a project with any open buffers."
               (push `(results . ,results) al)
               al))))))
 
-(defun pogo-parse-plugin-response (resp)
-  
-  (if (eq 'json-parse-buffer pogo-json-parser)
-      (gethash "results" resp)
-      (to-list (cdr (assoc 'results resp))))
-  )
 
 (defun pogo-project-search (path query)
   (let
