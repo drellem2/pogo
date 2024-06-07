@@ -4,6 +4,7 @@
 
 package main
 
+import _ "net/http/pprof"
 import (
 	"encoding/json"
 	"fmt"
