@@ -891,7 +891,7 @@ An open project is a project with any open buffers."
   (if (eq 'json-parse-buffer pogo-json-parser)
       (let*
           ((decoded (json-parse-string
-                     (url-unhex-string (fix-spaces (gethash "value" resp)))))
+                     (pogo-url-unhex-string (fix-spaces (gethash "value" resp)))))
            (inner-resp (gethash "index" decoded))
            (results (gethash "results" decoded))
            (err (gethash "error" inner-resp))
