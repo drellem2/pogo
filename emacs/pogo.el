@@ -316,6 +316,24 @@ just return nil."
    (lambda (x) (member x list2))
    list1))
 
+;; This is copied from a comment in url-util.el. It performs much better for large strings.
+(defun pogo-url-unhex-string (str &optional allow-newlines)
+  "Remove %XX, embedded spaces, etc in a url.
+If optional second argument ALLOW-NEWLINES is non-nil, then allow the
+decoding of carriage returns and line feeds in the string, which is normally
+forbidden in URL encoding."
+  (setq str (or str ""))
+  (setq str (replace-regexp-in-string "%[[:xdigit:]]\\{2\\}"
+				      (lambda (match)
+					(string (string-to-number
+						 (substring match 1) 16)))
+				      str t t))
+  (if allow-newlines
+      (replace-regexp-in-string "[\n\r]" (lambda (match)
+					   (format "%%%.2X" (aref match 0)))
+				str t t)
+    str))
+
 ;;; Internal functions
 
 ;; Start server
@@ -890,7 +908,7 @@ An open project is a project with any open buffers."
       
       (let*
           ((decoded (json-read-from-string
-                     (url-unhex-string (fix-spaces (cdr (assoc 'value resp))))))
+                     (pogo-url-unhex-string (fix-spaces (cdr (assoc 'value resp))))))
            (inner-resp (cdr (assoc 'index decoded)))
            (results (cdr (assoc 'results decoded)))
            (err (cdr (assoc 'error inner-resp)))
