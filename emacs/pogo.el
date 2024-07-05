@@ -806,7 +806,9 @@ An open project is a project with any open buffers."
 
 (defun pogo-parse-visit-call (resp)
   (if (eq 'json-parse-buffer pogo-json-parser)
-      (gethash "path" (gethash "project" resp))
+      (if resp
+          (gethash "path" (gethash "project" resp))
+        nil)    
     (cdr (assoc 'path (assoc 'project resp)))))
 
 (defun pogo-visit-call (path)
