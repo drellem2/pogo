@@ -5,7 +5,7 @@
 package driver
 
 import (
-	searchPlugin "github.com/drellem2/pogo/internal/plugins/search"
+	searchPlugin "github.com/drellem2/pogo/internal/search"
 	pogoPlugin "github.com/drellem2/pogo/pkg/plugin"
 )
 

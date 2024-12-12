@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 
 	"github.com/nightlyone/lockfile"
 
@@ -123,10 +124,34 @@ func plugins(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func projectById(w http.ResponseWriter, r *http.Request) {
+	fmt.Println("Visited /projects/{projectId}")
+	switch r.Method {
+	case "GET":
+		projectIdStr := r.PathValue("projectId")
+		// generic conversion of string to int
+		projectId, err := strconv.Atoi(projectIdStr)
+		if err != nil {
+			log.Printf("Error converting projectId to int: %v\n", err)
+			http.Error(w, "", http.StatusBadRequest)
+			return
+		}
+		resp := project.GetProject(projectId)
+		if resp == nil {
+			http.Error(w, "", http.StatusNotFound)
+			return
+		}
+		json.NewEncoder(w).Encode(resp)
+	default:
+		http.Error(w, "", http.StatusMethodNotAllowed)
+	}
+}
+
 func handleRequests() {
 	http.HandleFunc("/", homePage)
 	http.HandleFunc("/file", file)
 	http.HandleFunc("/projects", allProjects)
+	http.HandleFunc("/projects/{projectId}", projectById)
 	http.HandleFunc("/plugin", plugin)
 	http.HandleFunc("/plugins", plugins)
 	http.HandleFunc("/health", health)

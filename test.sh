@@ -11,5 +11,5 @@ mkdir -p _testdata/b-service/.git
 echo "Testing pogo" && \
 go test github.com/drellem2/pogo/internal/project && \
 go test github.com/drellem2/pogo/internal/driver && \
-go test github.com/drellem2/pogo/internal/plugins/search
+go test github.com/drellem2/pogo/internal/search
     

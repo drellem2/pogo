@@ -9,13 +9,15 @@ import (
 	"errors"
 	"fmt"
 	"io/ioutil"
-	"log"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/hashicorp/go-hclog"
+
 	"github.com/drellem2/pogo/internal/driver"
+	"github.com/drellem2/pogo/internal/search"
 	pogoPlugin "github.com/drellem2/pogo/pkg/plugin"
 )
 
@@ -31,6 +33,12 @@ type ProjectsSave struct {
 var projectFile string
 var projects []Project
 var ProjectFileName string
+
+var logger = hclog.New(&hclog.LoggerOptions{
+	Level:      hclog.Info,
+	Output:     os.Stderr,
+	JSONFormat: true,
+})
 
 func Init() {
 	projects = []Project{}
@@ -121,12 +129,26 @@ func Projects() []Project {
 	return projects
 }
 
+func GetProject(id int) *search.IndexedProject {
+	for _, p := range projects {
+		if p.Id == id {
+			resp, err := search.SearchService.GetFiles(p.Path)
+			if err != nil {
+				logger.Error("Error finding files in project", err)
+				return nil
+			}
+			return resp
+		}
+	}
+	return nil
+}
+
 func addToPlugin(p Project) {
 	req := pogoPlugin.ProcessProjectReq{PathVar: p.Path}
 	ireq := pogoPlugin.IProcessProjectReq(req)
 	err := driver.GetPluginManager().ProcessProject(&ireq)
 	if err != nil {
-		log.Fatal(err)
+		logger.Error("Error adding project to plugin", err)
 	}
 }
 
