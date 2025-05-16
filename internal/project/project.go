@@ -143,6 +143,15 @@ func GetProject(id int) *search.IndexedProject {
 	return nil
 }
 
+func GetProjectByPath(path string) *Project {
+	for _, p := range projects {
+		if p.Path == path {
+			return &p
+		}
+	}
+	return nil
+}
+
 func addToPlugin(p Project) {
 	req := pogoPlugin.ProcessProjectReq{PathVar: p.Path}
 	ireq := pogoPlugin.IProcessProjectReq(req)

@@ -1,6 +1,6 @@
 module github.com/drellem2/pogo
 
-go 1.21
+go 1.24
 
 require (
 	github.com/99designs/gqlgen v0.17.42

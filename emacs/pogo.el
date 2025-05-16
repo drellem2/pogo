@@ -892,12 +892,10 @@ An open project is a project with any open buffers."
 (defun pogo-parse-result (resp)
   (if (eq 'json-parse-buffer pogo-json-parser)
       (let*
-          ((decoded (json-parse-string
-                     (pogo-url-unhex-string (fix-spaces (gethash "value" resp)))))
-           (inner-resp (gethash "index" decoded))
-           (results (gethash "results" decoded))
-           (err (gethash "error" inner-resp))
-           (paths (gethash "paths" inner-resp)))
+          ((decoded (pogo-print-and-return "Decoded: " resp))
+           (results (pogo-print-and-return "results: " (gethash "results" decoded)))
+           (err (pogo-print-and-return "err: " (gethash "error" decoded)))
+           (paths (pogo-print-and-return "paths: " (gethash "paths" decoded))))
         (if (not (pogo-nil-or-empty err))
             (progn
               (pogo-log "Error parsing results %s" err)
@@ -909,8 +907,7 @@ An open project is a project with any open buffers."
               al))))
       
       (let*
-          ((decoded (json-read-from-string
-                     (pogo-url-unhex-string (fix-spaces (cdr (assoc 'value resp))))))
+          ((decoded resp)
            (inner-resp (cdr (assoc 'index decoded)))
            (results (cdr (assoc 'results decoded)))
            (err (cdr (assoc 'error inner-resp)))
@@ -924,7 +921,6 @@ An open project is a project with any open buffers."
               (push `(paths . ,paths) al)
               (push `(results . ,results) al)
               al))))))
-
 
 (defun pogo-project-search (path query)
   (let
@@ -960,29 +956,24 @@ An open project is a project with any open buffers."
                                            (pogo-check-live)))))))))))
 
 (defun pogo-project-files (path)
-  (let
-      ((command (url-hexify-string (json-encode `(("type" . "files")
-                                                  ("projectRoot" . ,path))))))
-    (to-list
-     (cdr
-      (assoc
-       'paths
-       (pogo-parse-result
-        (request-response-data
-         (request "http://localhost:10000/plugin"
-           :sync t
-           :type "POST"
-           :data (json-encode `(("plugin" . ,(pogo-get-search-plugin-path))
-                                ("value" . ,command)))
-           :parser pogo-json-parser
-           :success (cl-function (lambda (&key data &allow-other-keys)
-                                   (pogo-log "Received: %S" data)))
-           :error (cl-function
-                   (lambda
-                     (&key error-throw
-                           &allow-other-keys)
-                     (pogo-log "Error getting project files: %s" error-thrown)
-                     (pogo-check-live)))))))))))
+  (to-list
+   (cdr
+    (assoc
+     'paths
+     (pogo-parse-result
+      (request-response-data
+       (request (format "http://localhost:10000/projects/file?path=%s" (url-hexify-string path))
+         :sync t
+         :type "GET"
+         :parser pogo-json-parser
+         :success (cl-function (lambda (&key data &allow-other-keys)
+                                 (pogo-log "Received: %S" data)))
+         :error (cl-function
+                 (lambda
+                   (&key error-throw
+                         &allow-other-keys)
+                   (pogo-log "Error getting project files: %s" error-thrown)
+                   (pogo-check-live))))))))))
 
 (defun pogo-project-root (&optional dir)
   (let ((dir (or dir default-directory)))

@@ -129,7 +129,26 @@ func projectById(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case "GET":
 		projectIdStr := r.PathValue("projectId")
-		// generic conversion of string to int
+		// If projectIdStr blank we look at the queryParameter 'path'
+		if projectIdStr == "file" {
+			projectPathStr := r.URL.Query().Get("path")
+			// url decode projectIdStr
+			path, err := url.QueryUnescape(projectPathStr)
+			log.Printf("Path: %s\n", path)
+			if err != nil {
+				log.Printf("Error urldecoding projectIdStr: %v\n", err)
+				http.Error(w, "", http.StatusBadRequest)
+				return
+			}
+			proj := project.GetProjectByPath(path)
+			if proj == nil {
+				http.Error(w, "", http.StatusNotFound)
+				return
+			}
+			resp := project.GetProject(proj.Id)
+			json.NewEncoder(w).Encode(resp)
+			return
+		}
 		projectId, err := strconv.Atoi(projectIdStr)
 		if err != nil {
 			log.Printf("Error converting projectId to int: %v\n", err)
@@ -150,8 +169,8 @@ func projectById(w http.ResponseWriter, r *http.Request) {
 func handleRequests() {
 	http.HandleFunc("/", homePage)
 	http.HandleFunc("/file", file)
-	http.HandleFunc("/projects", allProjects)
 	http.HandleFunc("/projects/{projectId}", projectById)
+	http.HandleFunc("/projects", allProjects)
 	http.HandleFunc("/plugin", plugin)
 	http.HandleFunc("/plugins", plugins)
 	http.HandleFunc("/health", health)

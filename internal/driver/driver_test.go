@@ -210,5 +210,5 @@ func TestPluginExecute(t *testing.T) {
 	if err != nil {
 		t.Errorf("Error executing template %v", err)
 	}
-	jsonassert.New(t).Assertf(resp, buff.String())
+	jsonassert.New(t).Assertf(resp, "%s", buff.String())
 }
