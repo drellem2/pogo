@@ -1299,6 +1299,7 @@ tramp."
     (set-keymap-parent map widget-keymap)
     (define-key map (kbd "q") 'quit-window)
     (define-key map (kbd "C-c C-c") 'pogo-search-ui-execute)
+    (define-key map (kbd "RET") 'pogo-search-ui-action-at-point)
     map)
   "Keymap for pogo-search-ui-mode.")
 
@@ -1307,6 +1308,19 @@ tramp."
 \\{pogo-search-ui-mode-map}"
   (setq truncate-lines t)
   (setq buffer-read-only nil))
+
+(defun pogo-search-ui-action-at-point ()
+  "Perform action at point: activate button or widget."
+  (interactive)
+  (cond
+   ;; If on a button, activate it
+   ((button-at (point))
+    (push-button))
+   ;; If on a widget, activate it (for search button or field)
+   ((widget-at (point))
+    (widget-button-press (point)))
+   ;; Otherwise do nothing
+   (t (message "Nothing to activate here"))))
 
 (defun pogo-search-ui-execute ()
   "Execute the search with the current query."
@@ -1326,26 +1340,60 @@ tramp."
         (goto-char pogo-search-ui-results-marker)
         (delete-region (point) (point-max))))))
 
+(defun pogo-search-ui-insert-file-link (path)
+  "Insert a clickable file link for PATH."
+  (let ((start (point))
+        (display-path (concat "./" path)))
+    (insert display-path)
+    (make-button start (point)
+                 'action (lambda (_button)
+                          (find-file (expand-file-name path pogo-search-ui-project-root)))
+                 'follow-link t
+                 'help-echo (format "Visit %s" path)
+                 'face 'link)))
+
+(defun pogo-search-ui-format-chunk (chunk)
+  "Format a single search match CHUNK."
+  (let ((line (cdr (assoc 'line chunk)))
+        (content (cdr (assoc 'content chunk))))
+    (format "%s: ~%s~" line content)))
+
+(defun pogo-search-ui-format-file-match (file-match)
+  "Format a file match with clickable link."
+  (let* ((path (cdr (assoc 'path file-match)))
+         (matches (cdr (assoc 'matches file-match)))
+         (start (point)))
+    (insert "* ")
+    (pogo-search-ui-insert-file-link path)
+    (insert "\n")
+    (dolist (match matches)
+      (insert (pogo-search-ui-format-chunk match))
+      (insert "\n"))
+    (add-text-properties start (point) '(read-only t))))
+
 (defun pogo-search-ui-display-results (query)
   "Display search results for QUERY in the current buffer."
-  (let ((inhibit-read-only t))
+  (let ((inhibit-read-only t)
+        (results-start (save-excursion
+                         (goto-char pogo-search-ui-results-marker)
+                         (point))))
     (save-excursion
       (goto-char pogo-search-ui-results-marker)
-      (insert (propertize "\n───────────── Results ─────────────\n\n"
-                          'face 'bold))
-      (insert (format "Searching for: %s\n\n" query))
+      (let ((header-start (point)))
+        (insert (propertize "\n───────────── Results ─────────────\n\n"
+                            'face 'bold))
+        (insert (format "Searching for: %s\n\n" query))
+        (add-text-properties header-start (point) '(read-only t)))
       
       ;; Using mock results for now
       (let* ((files (cdr (assoc 'files pogo-search-ui-mock-results)))
-             (sorted-files (sort (copy-sequence files) #'pogo--search-compare))
-             (org-format-files (mapcar #'format-file-match sorted-files))
-             (files-with-newlines (pogo--delimit "\n" org-format-files))
-             (results (cl-reduce #'concat files-with-newlines)))
-        (if results
-            (progn
-              (insert results)
-              (org-mode))
-          (insert "No results found.\n"))))))
+             (sorted-files (sort (copy-sequence files) #'pogo--search-compare)))
+        (if sorted-files
+            (dolist (file sorted-files)
+              (pogo-search-ui-format-file-match file))
+          (let ((start (point)))
+            (insert "No results found.\n")
+            (add-text-properties start (point) '(read-only t))))))))
 
 (defun pogo-search-ui-setup-widgets ()
   "Set up the search input widgets in the current buffer."
