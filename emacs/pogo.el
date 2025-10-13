@@ -1274,6 +1274,26 @@ tramp."
 (defvar-local pogo-search-ui-results-marker nil
   "Marker pointing to where results begin in the search buffer.")
 
+(defvar pogo-search-ui-mock-results
+  '((files . (((path . "cmd/pogod/main.go")
+               (matches . (((line . 45)
+                           (content . "func main() {"))
+                          ((line . 67)
+                           (content . "    log.Printf(\"Starting pogod server on port %d\", port)"))
+                          ((line . 89)
+                           (content . "    http.HandleFunc(\"/search\", handleSearch)")))))
+              ((path . "internal/search/zoekt.go")
+               (matches . (((line . 23)
+                           (content . "func Search(query string) (*SearchResult, error) {"))
+                          ((line . 34)
+                           (content . "    results, err := client.Search(ctx, query, &zoekt.SearchOptions{})")))))
+              ((path . "pkg/api/routes.go")
+               (matches . (((line . 12)
+                           (content . "func RegisterRoutes(r *mux.Router) {"))
+                          ((line . 15)
+                           (content . "    r.HandleFunc(\"/api/search\", SearchHandler).Methods(\"POST\")"))))))))
+  "Mock search results for testing the UI.")
+
 (defvar pogo-search-ui-mode-map
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map widget-keymap)
@@ -1314,7 +1334,18 @@ tramp."
       (insert (propertize "\n───────────── Results ─────────────\n\n"
                           'face 'bold))
       (insert (format "Searching for: %s\n\n" query))
-      (insert "(Search API integration pending...)\n"))))
+      
+      ;; Using mock results for now
+      (let* ((files (cdr (assoc 'files pogo-search-ui-mock-results)))
+             (sorted-files (sort (copy-sequence files) #'pogo--search-compare))
+             (org-format-files (mapcar #'format-file-match sorted-files))
+             (files-with-newlines (pogo--delimit "\n" org-format-files))
+             (results (cl-reduce #'concat files-with-newlines)))
+        (if results
+            (progn
+              (insert results)
+              (org-mode))
+          (insert "No results found.\n"))))))
 
 (defun pogo-search-ui-setup-widgets ()
   "Set up the search input widgets in the current buffer."
