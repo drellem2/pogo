@@ -1260,6 +1260,106 @@ tramp."
     (advice-remove 'compilation-find-file
                    #'compilation-find-file-pogo-find-compilation-buffer))))
 
+;;; Search UI
+
+(require 'widget)
+(require 'wid-edit)
+
+(defvar-local pogo-search-ui-query-widget nil
+  "Widget for the search query input.")
+
+(defvar-local pogo-search-ui-project-root nil
+  "Project root for the current search buffer.")
+
+(defvar-local pogo-search-ui-results-marker nil
+  "Marker pointing to where results begin in the search buffer.")
+
+(defvar pogo-search-ui-mode-map
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map widget-keymap)
+    (define-key map (kbd "q") 'quit-window)
+    (define-key map (kbd "C-c C-c") 'pogo-search-ui-execute)
+    map)
+  "Keymap for pogo-search-ui-mode.")
+
+(define-derived-mode pogo-search-ui-mode nil "Pogo-Search"
+  "Major mode for Pogo search interface.
+\\{pogo-search-ui-mode-map}"
+  (setq truncate-lines t)
+  (setq buffer-read-only nil))
+
+(defun pogo-search-ui-execute ()
+  "Execute the search with the current query."
+  (interactive)
+  (when pogo-search-ui-query-widget
+    (let ((query (widget-value pogo-search-ui-query-widget)))
+      (if (string-empty-p query)
+          (message "Search query is empty")
+        (pogo-search-ui-clear-results)
+        (pogo-search-ui-display-results query)))))
+
+(defun pogo-search-ui-clear-results ()
+  "Clear the results area in the search buffer."
+  (when pogo-search-ui-results-marker
+    (let ((inhibit-read-only t))
+      (save-excursion
+        (goto-char pogo-search-ui-results-marker)
+        (delete-region (point) (point-max))))))
+
+(defun pogo-search-ui-display-results (query)
+  "Display search results for QUERY in the current buffer."
+  (let ((inhibit-read-only t))
+    (save-excursion
+      (goto-char pogo-search-ui-results-marker)
+      (insert (propertize "\n───────────── Results ─────────────\n\n"
+                          'face 'bold))
+      (insert (format "Searching for: %s\n\n" query))
+      (insert "(Search API integration pending...)\n"))))
+
+(defun pogo-search-ui-setup-widgets ()
+  "Set up the search input widgets in the current buffer."
+  (let ((inhibit-read-only t))
+    (erase-buffer)
+    (remove-overlays)
+    
+    (widget-insert (propertize "Pogo Search\n\n" 'face 'bold))
+    
+    (widget-insert "Search: ")
+    (setq pogo-search-ui-query-widget
+          (widget-create 'editable-field
+                         :size 50
+                         :value (or (pogo-symbol-or-selection-at-point) "")
+                         :keymap (let ((map (make-sparse-keymap)))
+                                   (set-keymap-parent map widget-field-keymap)
+                                   (define-key map (kbd "RET") 'pogo-search-ui-execute)
+                                   map)))
+    
+    (widget-insert " ")
+    (widget-create 'push-button
+                   :notify (lambda (&rest _ignore)
+                             (pogo-search-ui-execute))
+                   "Search")
+    
+    (widget-insert "\n")
+    (setq pogo-search-ui-results-marker (point-marker))
+    
+    (widget-setup)
+    (goto-char (widget-get pogo-search-ui-query-widget :from))
+    (widget-forward 1)))
+
+;;;###autoload
+(defun pogo-search-ui ()
+  "Open the Pogo search UI."
+  (interactive)
+  (let* ((project-root (pogo-acquire-root))
+         (buffer-name (format "*pogo-search <%s>*" (pogo-project-name project-root)))
+         (buffer (get-buffer-create buffer-name)))
+    (with-current-buffer buffer
+      (pogo-search-ui-mode)
+      (setq pogo-search-ui-project-root project-root)
+      (pogo-search-ui-setup-widgets))
+    (switch-to-buffer buffer)))
+
 (provide 'pogo)
 
 ;;; pogo.el ends here
