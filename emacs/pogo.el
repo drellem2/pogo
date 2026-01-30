@@ -880,14 +880,50 @@ An open project is a project with any open buffers."
     v))
 
 (defun pogo-nil-or-empty (str)
-  (or (not str) (str= "" str)))
-
+  (or (not str) (string= "" str)))
 (defun to-list (v)
   (append v nil))
 
 ;; Golang utility encodes spaces as + instead of %20
 (defun fix-spaces (s)
   (replace-regexp-in-string "\+" "%20" s))
+
+(defun pogo-parse-plugin-result (data-object-resp)
+  "Parse a plugin response that is wrapped in a DataObject.
+The response has structure: {\"plugin\": \"...\", \"value\": \"<url-encoded-json>\"}"
+  (if (eq 'json-parse-buffer pogo-json-parser)
+      (let* ((encoded-value (gethash "value" data-object-resp))
+             (decoded-json (url-unhex-string encoded-value))
+             (search-resp (json-parse-string decoded-json))
+             (index (gethash "index" search-resp))
+             (results (gethash "results" search-resp))
+             (err (gethash "error" search-resp))
+             (paths (gethash "paths" index)))
+        (if (not (pogo-nil-or-empty err))
+            (progn
+              (pogo-log "Error in search results: %s" err)
+              nil)
+          (let ((al '()))
+            (progn
+              (push `(paths . ,paths) al)
+              (push `(results . ,results) al)
+              al))))
+    (let* ((encoded-value (cdr (assoc 'value data-object-resp)))
+           (decoded-json (url-unhex-string encoded-value))
+           (search-resp (json-read-from-string decoded-json))
+           (index (cdr (assoc 'index search-resp)))
+           (results (cdr (assoc 'results search-resp)))
+           (err (cdr (assoc 'error search-resp)))
+           (paths (cdr (assoc 'paths index))))
+      (if (not (pogo-nil-or-empty err))
+          (progn
+            (pogo-log "Error in search results: %s" err)
+            nil)
+        (let ((al '()))
+          (progn
+            (push `(paths . ,paths) al)
+            (push `(results . ,results) al)
+            al))))))
 
 (defun pogo-parse-result (resp)
   (if (eq 'json-parse-buffer pogo-json-parser)
@@ -928,32 +964,31 @@ An open project is a project with any open buffers."
                                                   ("projectRoot" . ,path)
                                                   ("duration" . "10s")
                                                   ("data" . ,query))))))
-    (to-list
-     (cdr
-      (assoc
-       'results
-       (pogo-parse-result
-        (request-response-data (request "http://localhost:10000/plugin"
-                                 :sync t
-                                 :type "POST"
-                                 :data (json-encode
-                                        `(("plugin" .
-                                           ,(pogo-get-search-plugin-path))
-                                          ("value" . ,command)))
-                                 :parser pogo-json-parser
-                                 :success (cl-function
-                                           (lambda (&key data
-                                                         &allow-other-keys)
-                                             (pogo-log
-                                              "Received: %S" data)))
-                                 :error (cl-function
-                                         (lambda
-                                           (&key error-throw
-                                                 &allow-other-keys)
-                                           (pogo-log
-                                            "Error searching project: %s"
-                                            error-thrown)
-                                           (pogo-check-live)))))))))))
+    (cdr
+     (assoc
+      'results
+      (pogo-parse-plugin-result
+       (request-response-data (request "http://localhost:10000/plugin"
+                                :sync t
+                                :type "POST"
+                                :data (json-encode
+                                       `(("plugin" .
+                                          ,(pogo-get-search-plugin-path))
+                                         ("value" . ,command)))
+                                :parser pogo-json-parser
+                                :success (cl-function
+                                          (lambda (&key data
+                                                        &allow-other-keys)
+                                            (pogo-log
+                                             "Received: %S" data)))
+                                :error (cl-function
+                                        (lambda
+                                          (&key error-throw
+                                                &allow-other-keys)
+                                          (pogo-log
+                                           "Error searching project: %s"
+                                           error-thrown)
+                                          (pogo-check-live))))))))))
 
 (defun pogo-project-files (path)
   (to-list
@@ -1385,9 +1420,14 @@ tramp."
         (insert (format "Searching for: %s\n\n" query))
         (add-text-properties header-start (point) '(read-only t)))
       
-      ;; Using mock results for now
-      (let* ((files (cdr (assoc 'files pogo-search-ui-mock-results)))
-             (sorted-files (sort (copy-sequence files) #'pogo--search-compare)))
+      (let* ((search-resp (pogo-project-search pogo-search-ui-project-root query))
+             (nothing (pogo-log "seacrh-resp: %s" search-resp ))
+             (value (gethash "results" search-resp))
+             (pogo-log "value: %s" value)
+             (results (cdr (assoc 'results (car value))))
+             (files (cdr (assoc 'files results)))
+             (sorted-files (when files
+                             (to-list (sort (copy-sequence files) #'pogo--search-compare)))))
         (if sorted-files
             (dolist (file sorted-files)
               (pogo-search-ui-format-file-match file))
