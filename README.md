@@ -5,7 +5,9 @@ code intelligence daemon
 
 Open a git repository in your terminal, then navigate the project in emacs - no extra effort required.
 
-Currently supports zshell and emacs. 
+Currently supports zshell and emacs.
+
+See [VISION.md](VISION.md) for the design principles and long-term direction.
 
 ## Installation 
 *(instructions for Mac)*
