@@ -1,4 +1,5 @@
 bin
+.beads/
 
 # Gas Town (added by gt)
 .runtime/
