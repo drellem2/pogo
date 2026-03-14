@@ -144,10 +144,10 @@ func GetProject(id int) *search.IndexedProject {
 }
 
 type ProjectStatusResponse struct {
-	Id        int                    `json:"id"`
-	Path      string                 `json:"path"`
-	Status    search.IndexingStatus  `json:"indexing_status"`
-	FileCount int                    `json:"file_count"`
+	Id        int                   `json:"id"`
+	Path      string                `json:"path"`
+	Status    search.IndexingStatus `json:"indexing_status"`
+	FileCount int                   `json:"file_count"`
 }
 
 func GetProjectStatuses() []ProjectStatusResponse {

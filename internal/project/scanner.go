@@ -13,11 +13,11 @@ import (
 // When a project at ~/src/foo is registered, Scanner watches ~/src/.
 // If ~/src/bar appears with a .git directory, it gets auto-registered.
 type Scanner struct {
-	watcher    *fsnotify.Watcher
-	watched    map[string]bool // parent dirs currently watched
-	mu         sync.Mutex
-	quit       chan struct{}
-	done       chan struct{}
+	watcher *fsnotify.Watcher
+	watched map[string]bool // parent dirs currently watched
+	mu      sync.Mutex
+	quit    chan struct{}
+	done    chan struct{}
 }
 
 var scanner *Scanner
