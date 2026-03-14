@@ -6,71 +6,73 @@ package main
 
 import (
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"sort"
 
 	"github.com/spf13/cobra"
 
+	"github.com/drellem2/pogo/internal/cli"
 	"github.com/drellem2/pogo/internal/client"
 )
 
 func main() {
+	var jsonOutput bool
+
 	var rootCmd = &cobra.Command{Use: "pose"}
-	// Add -l flag to the root command
 	rootCmd.Flags().BoolP("list", "l", false, "List all files with matching lines")
-	// The following behavior will be executed when the root command `rootCmd` is used:
+	rootCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSON format")
+
 	rootCmd.Run = func(cobraCmd *cobra.Command, args []string) {
+		if len(args) == 0 {
+			cli.ExitWithError(jsonOutput, "pose requires a query argument", cli.ExitError)
+		}
+
 		var path string
 		if len(args) > 1 {
-			// Expand args[1] to an absolute path
 			fullPath, err := filepath.Abs(args[1])
 			if err != nil {
-				log.Fatal(err)
+				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
 			}
 			path = fullPath
 		} else {
-			// Get current working directory
 			cwd, err := os.Getwd()
 			if err != nil {
-				log.Fatal(err)
+				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
 			}
 			path = cwd
 		}
 		results, err := client.Search(args[0], path)
 		if err != nil {
-			log.Fatal(err)
+			cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
 		}
 		files := results.Results.Files
 
-		// Get the value of the -l flag
+		if jsonOutput {
+			cli.PrintJSON(results)
+			return
+		}
+
 		list, err := cobraCmd.Flags().GetBool("list")
 		if err != nil {
-			log.Fatal(err)
+			cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
 		}
 
 		if list {
-			// Remove duplicates from files
 			uniqueFiles := make(map[string]struct{})
 			for _, file := range files {
 				uniqueFiles[file.Path] = struct{}{}
 			}
 
-			// Sort
-			paths := make([]string, len(uniqueFiles))
-			i := 0
-			for p, _ := range uniqueFiles {
-				paths[i] = p
-				i++
+			paths := make([]string, 0, len(uniqueFiles))
+			for p := range uniqueFiles {
+				paths = append(paths, p)
 			}
 			sort.Strings(paths)
-			// iterate over keys of uniqueFiles
 			for _, path := range paths {
 				fmt.Println(path)
 			}
 		} else {
-			// Sort files by number of matching lines
 			sort.Slice(files, func(i, j int) bool {
 				return len(files[i].Matches) > len(files[j].Matches)
 			})
@@ -82,8 +84,9 @@ func main() {
 				}
 			}
 		}
-
 	}
 
-	rootCmd.Execute()
+	if err := rootCmd.Execute(); err != nil {
+		os.Exit(cli.ExitError)
+	}
 }

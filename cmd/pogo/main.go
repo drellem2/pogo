@@ -6,14 +6,17 @@ package main
 
 import (
 	"fmt"
-	"log"
+	"os"
 
 	"github.com/spf13/cobra"
 
+	"github.com/drellem2/pogo/internal/cli"
 	"github.com/drellem2/pogo/internal/client"
 )
 
 func main() {
+
+	var jsonOutput bool
 
 	var cmdVisit = &cobra.Command{
 		Use:   "visit [file]",
@@ -22,9 +25,20 @@ func main() {
 so indexes the repository.`,
 		Args: cobra.MinimumNArgs(0),
 		Run: func(cmd *cobra.Command, args []string) {
-			_, err := client.Visit(args[0])
+			if len(args) == 0 {
+				cli.ExitWithError(jsonOutput, "visit requires a file argument", cli.ExitError)
+			}
+			resp, err := client.Visit(args[0])
 			if err != nil {
-				log.Fatal(err)
+				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+			}
+			if resp == nil {
+				cli.ExitWithError(jsonOutput, "not found", cli.ExitNotFound)
+			}
+			if jsonOutput {
+				cli.PrintJSON(resp)
+			} else {
+				fmt.Println(resp.ParentProject.Path)
 			}
 		},
 	}
@@ -43,13 +57,33 @@ Child commands include start, stop, and status.`,
 		Run: func(cmd *cobra.Command, args []string) {
 			err := client.HealthCheck()
 			if err != nil {
-				fmt.Println("Starting pogo server...")
+				if jsonOutput {
+					// Not yet running, start it
+				} else {
+					fmt.Println("Starting pogo server...")
+				}
 				err = client.StartServer()
 				if err != nil {
-					log.Fatal(err)
+					cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
 				}
+				if jsonOutput {
+					cli.PrintJSON(map[string]interface{}{
+						"status":  "started",
+						"message": "pogo server started",
+					})
+				} else {
+					fmt.Println("pogo server started")
+				}
+				return
 			}
-			fmt.Println("The server is already running")
+			if jsonOutput {
+				cli.PrintJSON(map[string]interface{}{
+					"status":  "running",
+					"message": "the server is already running",
+				})
+			} else {
+				fmt.Println("The server is already running")
+			}
 		},
 	}
 
@@ -59,20 +93,33 @@ Child commands include start, stop, and status.`,
 		Long:  `Stop the pogo server.`,
 		Args:  cobra.MinimumNArgs(0),
 		Run: func(cmd *cobra.Command, args []string) {
-			fmt.Println("Stopping pogo server...")
+			if !jsonOutput {
+				fmt.Println("Stopping pogo server...")
+			}
 			err := client.StopServer()
 			if err != nil {
-				log.Fatal(err)
+				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
 			}
-			fmt.Println("Server stopped.")
+			if jsonOutput {
+				cli.PrintJSON(map[string]interface{}{
+					"status":  "stopped",
+					"message": "pogo server stopped",
+				})
+			} else {
+				fmt.Println("Server stopped.")
+			}
 		},
 	}
 
 	var rootCmd = &cobra.Command{Use: "pogo"}
 
+	rootCmd.PersistentFlags().BoolVar(&jsonOutput, "json", false, "Output in JSON format")
+
 	rootCmd.AddCommand(cmdVisit)
 	cmdServer.AddCommand(cmdServerStart)
 	cmdServer.AddCommand(cmdServerStop)
 	rootCmd.AddCommand(cmdServer)
-	rootCmd.Execute()
+	if err := rootCmd.Execute(); err != nil {
+		os.Exit(cli.ExitError)
+	}
 }
