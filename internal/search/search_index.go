@@ -37,9 +37,20 @@ type SearchResults struct {
 	Files []PogoFileMatch `json:"files"`
 }
 
+// IndexingStatus represents the state of a project's search index.
+type IndexingStatus string
+
+const (
+	StatusUnindexed IndexingStatus = "unindexed"
+	StatusIndexing  IndexingStatus = "indexing"
+	StatusReady     IndexingStatus = "ready"
+	StatusStale     IndexingStatus = "stale"
+)
+
 type IndexedProject struct {
-	Root  string   `json:"root"`
-	Paths []string `json:"paths"`
+	Root   string         `json:"root"`
+	Paths  []string       `json:"paths"`
+	Status IndexingStatus `json:"indexing_status"`
 }
 
 /*
@@ -293,9 +304,11 @@ func (g *BasicSearch) Index(req *pogoPlugin.IProcessProjectReq) {
 		return
 	}
 	proj := IndexedProject{
-		Root:  path,
-		Paths: make([]string, 0, indexStartCapacity),
+		Root:   path,
+		Paths:  make([]string, 0, indexStartCapacity),
+		Status: StatusIndexing,
 	}
+	g.projects[path] = proj
 	gitIgnore, err := ParseGitIgnore(path)
 	if err != nil {
 		// Non-fatal error
@@ -320,6 +333,8 @@ func (g *BasicSearch) serializeProjectIndex(proj *IndexedProject) {
 	if err3 != nil {
 		g.logger.Error("Error saving index", "save_path", saveFilePath)
 	}
+	proj.Status = StatusReady
+	g.projects[proj.Root] = *proj
 	g.logger.Info("Indexed " + strconv.Itoa(len(proj.Paths)) + " files for " + proj.Root)
 
 	// Now serialize zoekt index
@@ -366,8 +381,9 @@ func (g *BasicSearch) serializeProjectIndex(proj *IndexedProject) {
 
 func (g *BasicSearch) Load(projectRoot string) (*IndexedProject, error) {
 	project := &IndexedProject{
-		Root:  projectRoot,
-		Paths: make([]string, 0, indexStartCapacity),
+		Root:   projectRoot,
+		Paths:  make([]string, 0, indexStartCapacity),
+		Status: StatusUnindexed,
 	}
 	searchDir, err := project.makeSearchDir()
 	if err != nil {
@@ -387,6 +403,8 @@ func (g *BasicSearch) Load(projectRoot string) (*IndexedProject, error) {
 	// Check if index is stale
 	if time.Since(stat.ModTime()).Minutes() > indexCacheMinutes {
 		g.logger.Info("Index is stale for " + projectRoot)
+		project.Status = StatusStale
+		g.projects[projectRoot] = *project
 		return project, nil
 	}
 
@@ -402,6 +420,7 @@ func (g *BasicSearch) Load(projectRoot string) (*IndexedProject, error) {
 		g.logger.Error("Error deserializing index file: %v", err)
 		return nil, err
 	}
+	project.Status = StatusReady
 	g.logger.Info("Loaded " + strconv.Itoa(len(project.Paths)) + " files for " + projectRoot)
 	g.updater.c <- project
 	return project, nil

@@ -111,11 +111,36 @@ Child commands include start, stop, and status.`,
 		},
 	}
 
+	var cmdStatus = &cobra.Command{
+		Use:   "status",
+		Short: "Show indexing status of projects",
+		Long:  `Show the indexing status of all registered projects.`,
+		Args:  cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			statuses, err := client.GetStatus()
+			if err != nil {
+				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+			}
+			if jsonOutput {
+				cli.PrintJSON(statuses)
+			} else {
+				if len(statuses) == 0 {
+					fmt.Println("No projects registered.")
+					return
+				}
+				for _, s := range statuses {
+					fmt.Printf("%-12s %s (%d files)\n", s.Status, s.Path, s.FileCount)
+				}
+			}
+		},
+	}
+
 	var rootCmd = &cobra.Command{Use: "pogo"}
 
 	rootCmd.PersistentFlags().BoolVar(&jsonOutput, "json", false, "Output in JSON format")
 
 	rootCmd.AddCommand(cmdVisit)
+	rootCmd.AddCommand(cmdStatus)
 	cmdServer.AddCommand(cmdServerStart)
 	cmdServer.AddCommand(cmdServerStop)
 	rootCmd.AddCommand(cmdServer)

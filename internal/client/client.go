@@ -24,8 +24,15 @@ import (
 	pogoPlugin "github.com/drellem2/pogo/pkg/plugin"
 )
 
+type ProjectStatusResponse struct {
+	Id        int    `json:"id"`
+	Path      string `json:"path"`
+	Status    string `json:"indexing_status"`
+	FileCount int    `json:"file_count"`
+}
+
 type ClientResp interface {
-	[]project.Project | *project.VisitResponse | *SearchResponse | []string
+	[]project.Project | *project.VisitResponse | *SearchResponse | []string | []ProjectStatusResponse
 }
 
 type PogoChunkMatch struct {
@@ -43,8 +50,9 @@ type SearchResults struct {
 }
 
 type IndexedProject struct {
-	Root  string   `json:"root"`
-	Paths []string `json:"paths"`
+	Root   string `json:"root"`
+	Paths  []string `json:"paths"`
+	Status string `json:"indexing_status"`
 }
 
 type SearchResponse struct {
@@ -271,6 +279,30 @@ func Search(query string, dir string) (*SearchResponse, error) {
 		return nil, err
 	}
 	return results, nil
+}
+
+func GetStatus() ([]ProjectStatusResponse, error) {
+	statuses, err := RunWithHealthCheck(func() ([]ProjectStatusResponse, error) {
+		r, err := http.Get("http://localhost:10000/status")
+		if err != nil {
+			return nil, err
+		}
+		defer r.Body.Close()
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			return nil, err
+		}
+		var statuses []ProjectStatusResponse
+		err = json.Unmarshal(body, &statuses)
+		if err != nil {
+			return nil, err
+		}
+		return statuses, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return statuses, nil
 }
 
 func Visit(path string) (*project.VisitResponse, error) {

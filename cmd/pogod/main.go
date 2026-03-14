@@ -166,6 +166,16 @@ func projectById(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func status(w http.ResponseWriter, r *http.Request) {
+	fmt.Println("Visited /status")
+	switch r.Method {
+	case "GET":
+		json.NewEncoder(w).Encode(project.GetProjectStatuses())
+	default:
+		http.Error(w, "", http.StatusMethodNotAllowed)
+	}
+}
+
 func handleRequests() {
 	http.HandleFunc("/", homePage)
 	http.HandleFunc("/file", file)
@@ -174,6 +184,7 @@ func handleRequests() {
 	http.HandleFunc("/plugin", plugin)
 	http.HandleFunc("/plugins", plugins)
 	http.HandleFunc("/health", health)
+	http.HandleFunc("/status", status)
 	fmt.Println("pogod starting")
 	log.Fatal(http.ListenAndServe(":10000", nil))
 }

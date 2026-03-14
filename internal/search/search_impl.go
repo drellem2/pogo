@@ -187,6 +187,36 @@ func (g *BasicSearch) ProcessProject(req *pogoPlugin.IProcessProjectReq) error {
 	return nil
 }
 
+type ProjectStatus struct {
+	Root      string         `json:"root"`
+	Status    IndexingStatus `json:"indexing_status"`
+	FileCount int            `json:"file_count"`
+}
+
+func (g *BasicSearch) GetAllStatuses() []ProjectStatus {
+	statuses := make([]ProjectStatus, 0, len(g.projects))
+	for _, p := range g.projects {
+		statuses = append(statuses, ProjectStatus{
+			Root:      p.Root,
+			Status:    p.Status,
+			FileCount: len(p.Paths),
+		})
+	}
+	return statuses
+}
+
+func (g *BasicSearch) GetStatus(projectRoot string) *ProjectStatus {
+	p, ok := g.projects[projectRoot]
+	if !ok {
+		return nil
+	}
+	return &ProjectStatus{
+		Root:      p.Root,
+		Status:    p.Status,
+		FileCount: len(p.Paths),
+	}
+}
+
 func (g *BasicSearch) Close() {
 	g.watcher.Close()
 }

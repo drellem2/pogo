@@ -143,6 +143,32 @@ func GetProject(id int) *search.IndexedProject {
 	return nil
 }
 
+type ProjectStatusResponse struct {
+	Id        int                    `json:"id"`
+	Path      string                 `json:"path"`
+	Status    search.IndexingStatus  `json:"indexing_status"`
+	FileCount int                    `json:"file_count"`
+}
+
+func GetProjectStatuses() []ProjectStatusResponse {
+	statuses := make([]ProjectStatusResponse, 0, len(projects))
+	for _, p := range projects {
+		s := search.SearchService.GetStatus(p.Path)
+		status := ProjectStatusResponse{
+			Id:   p.Id,
+			Path: p.Path,
+		}
+		if s != nil {
+			status.Status = s.Status
+			status.FileCount = s.FileCount
+		} else {
+			status.Status = search.StatusUnindexed
+		}
+		statuses = append(statuses, status)
+	}
+	return statuses
+}
+
 func GetProjectByPath(path string) *Project {
 	for _, p := range projects {
 		if p.Path == path {
