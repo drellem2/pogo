@@ -6,7 +6,7 @@
 ;; URL: https://github.com/drellem2/pogo
 ;; Package-Requires: ((emacs "29.1") (request "0.3.2") (pcache "0.5.1"))
 ;; Keywords: project, convenience, search
-;; Version: 0.0.1-snapshot
+;; Version: 0.1.0
 
 ;; This file is NOT part of GNU Emacs.
 
