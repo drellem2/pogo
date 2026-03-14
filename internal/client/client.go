@@ -50,9 +50,9 @@ type SearchResults struct {
 }
 
 type IndexedProject struct {
-	Root   string `json:"root"`
+	Root   string   `json:"root"`
 	Paths  []string `json:"paths"`
-	Status string `json:"indexing_status"`
+	Status string   `json:"indexing_status"`
 }
 
 type SearchResponse struct {
@@ -303,6 +303,86 @@ func GetStatus() ([]ProjectStatusResponse, error) {
 		return nil, err
 	}
 	return statuses, nil
+}
+
+// SearchAll searches across all known projects, returning results for each.
+func SearchAll(query string) ([]*SearchResponse, error) {
+	projs, err := GetProjects()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list projects: %w", err)
+	}
+	if len(projs) == 0 {
+		return nil, errors.New("no projects registered with pogo")
+	}
+
+	searchPluginPath, err := GetSearchPlugin()
+	if err != nil {
+		return nil, err
+	}
+
+	var results []*SearchResponse
+	for _, proj := range projs {
+		req := SearchRequest{
+			Type:        "search",
+			ProjectRoot: proj.Path,
+			Duration:    "10s",
+			Data:        query,
+		}
+		reqJSON, err := json.Marshal(req)
+		if err != nil {
+			return nil, err
+		}
+		encoded := url.QueryEscape(string(reqJSON))
+
+		resp, err := RunWithHealthCheck(func() (*SearchResponse, error) {
+			client := &http.Client{}
+			httpReq, err := http.NewRequest("POST", "http://localhost:10000/plugin",
+				strings.NewReader(
+					fmt.Sprintf(`{"plugin": "%s", "value": "%s"}`,
+						searchPluginPath, encoded)))
+			if err != nil {
+				return nil, err
+			}
+			httpReq.Close = true
+			httpReq.Header.Set("Content-Type", "application/json")
+			r, err := client.Do(httpReq)
+			if err != nil {
+				return nil, err
+			}
+			defer r.Body.Close()
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				return nil, err
+			}
+			var dataObject pogoPlugin.DataObject
+			err = json.Unmarshal(body, &dataObject)
+			if err != nil {
+				return nil, err
+			}
+			respJSON, err := url.QueryUnescape(dataObject.Value)
+			if err != nil {
+				return nil, err
+			}
+			var sr SearchResponse
+			err = json.Unmarshal([]byte(respJSON), &sr)
+			if err != nil {
+				return nil, err
+			}
+			return &sr, nil
+		})
+		if err != nil {
+			// Include the error as a result rather than aborting the whole search
+			results = append(results, &SearchResponse{
+				Index: IndexedProject{Root: proj.Path},
+				Error: err.Error(),
+			})
+			continue
+		}
+		if resp != nil && (len(resp.Results.Files) > 0 || resp.Error != "") {
+			results = append(results, resp)
+		}
+	}
+	return results, nil
 }
 
 func Visit(path string) (*project.VisitResponse, error) {
