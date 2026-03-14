@@ -1,5 +1,6 @@
 bin
 .beads/
+emacs/.test-elpa/
 .pogo/
 _testdata/**/.pogo/
 
