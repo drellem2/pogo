@@ -1,0 +1,79 @@
+{
+  "name": "pogo",
+  "displayName": "Pogo",
+  "description": "Cross-repo project discovery and code search via pogo daemon",
+  "version": "0.1.0",
+  "publisher": "pogo",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "pogo.switchProject",
+        "title": "Pogo: Switch Project"
+      },
+      {
+        "command": "pogo.findFile",
+        "title": "Pogo: Find File in Project"
+      },
+      {
+        "command": "pogo.search",
+        "title": "Pogo: Search Project"
+      },
+      {
+        "command": "pogo.status",
+        "title": "Pogo: Show Project Status"
+      }
+    ],
+    "configuration": {
+      "title": "Pogo",
+      "properties": {
+        "pogo.serverUrl": {
+          "type": "string",
+          "default": "http://localhost:10000",
+          "description": "URL of the pogo daemon"
+        },
+        "pogo.autoRegister": {
+          "type": "boolean",
+          "default": true,
+          "description": "Auto-register projects when opening folders"
+        }
+      }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "pogo",
+          "title": "Pogo",
+          "icon": "$(search)"
+        }
+      ]
+    },
+    "views": {
+      "pogo": [
+        {
+          "id": "pogoProjects",
+          "name": "Projects"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/node": "^18.0.0",
+    "@types/vscode": "^1.75.0",
+    "typescript": "^4.9.5"
+  }
+}
