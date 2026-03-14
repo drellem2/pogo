@@ -57,6 +57,22 @@ type IndexedProject struct {
 	Status     IndexingStatus    `json:"indexing_status"`
 }
 
+// deepCopyProject returns a deep copy of an IndexedProject,
+// ensuring FileHashes and Paths are independent copies.
+func deepCopyProject(p IndexedProject) IndexedProject {
+	cp := IndexedProject{
+		Root:   p.Root,
+		Status: p.Status,
+	}
+	cp.Paths = make([]string, len(p.Paths))
+	copy(cp.Paths, p.Paths)
+	cp.FileHashes = make(map[string]string, len(p.FileHashes))
+	for k, v := range p.FileHashes {
+		cp.FileHashes[k] = v
+	}
+	return cp
+}
+
 // computeFileHash returns the hex-encoded SHA-256 hash of a file's contents.
 func computeFileHash(path string) (string, error) {
 	data, err := os.ReadFile(path)
@@ -118,7 +134,9 @@ func (g *BasicSearch) write(u *ProjectUpdater) {
 		func() {
 			select {
 			case proj := <-u.c:
+				g.mu.Lock()
 				g.projects[proj.Root] = *proj
+				g.mu.Unlock()
 				g.serializeProjectIndex(proj)
 			case p := <-u.addFw:
 				if g.watcher == nil {
@@ -222,36 +240,50 @@ func (g *BasicSearch) ReIndex(path string) {
 			g.logger.Error("Error getting absolute path", path)
 			return
 		}
-		for projectRoot, indexed := range g.projects {
-			if strings.HasPrefix(fullPath, projectRoot) {
-				/* Below is a golang idiom for removing
-				elements with prefix from the slice. We
-				want to remove all file watchers before
-				reindexing, so we only add back the files
-				that still exist. */
-				relativePath := strings.TrimPrefix(fullPath, projectRoot)
-				paths := indexed.Paths
-				paths2 := paths
-				paths = paths[:0]
-				u := g.updater
-				for _, p := range paths2 {
-					if !strings.HasPrefix(p, relativePath) {
-						paths = append(paths, p)
-					} else {
-						u.removeFw <- p
-						delete(indexed.FileHashes, p)
-					}
-				}
-				indexed.Paths = paths
 
-				gitIgnore, err := ParseGitIgnore(projectRoot)
-				if err != nil {
-					g.logger.Error("Error parsing gitignore %v", err)
-				}
-				g.index(&indexed, fullPath, gitIgnore)
+		// Take a deep copy of the matching project under lock,
+		// then release before doing channel sends or I/O.
+		g.mu.RLock()
+		var matchedRoot string
+		var indexed IndexedProject
+		for projectRoot, idx := range g.projects {
+			if strings.HasPrefix(fullPath, projectRoot) {
+				matchedRoot = projectRoot
+				indexed = deepCopyProject(idx)
 				break
 			}
 		}
+		g.mu.RUnlock()
+
+		if matchedRoot == "" {
+			return
+		}
+
+		/* Below is a golang idiom for removing
+		elements with prefix from the slice. We
+		want to remove all file watchers before
+		reindexing, so we only add back the files
+		that still exist. */
+		relativePath := strings.TrimPrefix(fullPath, matchedRoot)
+		paths := indexed.Paths
+		paths2 := paths
+		paths = paths[:0]
+		u := g.updater
+		for _, p := range paths2 {
+			if !strings.HasPrefix(p, relativePath) {
+				paths = append(paths, p)
+			} else {
+				u.removeFw <- p
+				delete(indexed.FileHashes, p)
+			}
+		}
+		indexed.Paths = paths
+
+		gitIgnore, err := ParseGitIgnore(matchedRoot)
+		if err != nil {
+			g.logger.Error("Error parsing gitignore %v", err)
+		}
+		g.index(&indexed, fullPath, gitIgnore)
 	}()
 }
 
@@ -264,76 +296,83 @@ func (g *BasicSearch) ReIndexFile(path string, op fsnotify.Op) {
 		return
 	}
 
-	for projectRoot, indexed := range g.projects {
-		if !strings.HasPrefix(fullPath, projectRoot) {
-			continue
+	// Take a deep copy of the matching project under lock,
+	// then release before doing channel sends or I/O.
+	g.mu.RLock()
+	var matchedRoot string
+	var indexed IndexedProject
+	for projectRoot, idx := range g.projects {
+		if strings.HasPrefix(fullPath, projectRoot) {
+			matchedRoot = projectRoot
+			indexed = deepCopyProject(idx)
+			break
 		}
-		relativePath := strings.TrimPrefix(fullPath, projectRoot)
+	}
+	g.mu.RUnlock()
 
-		if indexed.FileHashes == nil {
-			indexed.FileHashes = make(map[string]string)
+	if matchedRoot == "" {
+		return
+	}
+
+	relativePath := strings.TrimPrefix(fullPath, matchedRoot)
+	u := g.updater
+	changed := false
+
+	if op.Has(fsnotify.Remove) || op.Has(fsnotify.Rename) {
+		// Remove file from index
+		paths := indexed.Paths[:0]
+		for _, p := range indexed.Paths {
+			if p != relativePath {
+				paths = append(paths, p)
+			}
 		}
-
-		u := g.updater
-		changed := false
-
-		if op.Has(fsnotify.Remove) || op.Has(fsnotify.Rename) {
-			// Remove file from index
-			paths := indexed.Paths[:0]
-			for _, p := range indexed.Paths {
-				if p != relativePath {
-					paths = append(paths, p)
-				}
-			}
-			if len(paths) != len(indexed.Paths) {
-				indexed.Paths = paths
-				delete(indexed.FileHashes, relativePath)
-				u.removeFw <- fullPath
-				changed = true
-			}
-		} else if op.Has(fsnotify.Create) || op.Has(fsnotify.Write) {
-			// Check gitignore
-			gitIgnore, _ := ParseGitIgnore(projectRoot)
-			if gitIgnore.MatchesPath(relativePath) {
-				return
-			}
-
-			hash, herr := computeFileHash(fullPath)
-			if herr != nil {
-				g.logger.Error("Error computing file hash: ", herr)
-				return
-			}
-
-			// Skip if content unchanged
-			if oldHash, exists := indexed.FileHashes[relativePath]; exists && oldHash == hash {
-				g.logger.Debug("File unchanged (hash match), skipping reindex: ", relativePath)
-				return
-			}
-
-			indexed.FileHashes[relativePath] = hash
-
-			if op.Has(fsnotify.Create) {
-				// Add to paths if not already present
-				found := false
-				for _, p := range indexed.Paths {
-					if p == relativePath {
-						found = true
-						break
-					}
-				}
-				if !found {
-					indexed.Paths = append(indexed.Paths, relativePath)
-					u.addFw <- fullPath
-				}
-			}
+		if len(paths) != len(indexed.Paths) {
+			indexed.Paths = paths
+			delete(indexed.FileHashes, relativePath)
+			u.removeFw <- fullPath
 			changed = true
 		}
-
-		if changed {
-			g.logger.Info("File changed, reindexing: ", relativePath)
-			u.c <- &indexed
+	} else if op.Has(fsnotify.Create) || op.Has(fsnotify.Write) {
+		// Check gitignore
+		gitIgnore, _ := ParseGitIgnore(matchedRoot)
+		if gitIgnore.MatchesPath(relativePath) {
+			return
 		}
-		break
+
+		hash, herr := computeFileHash(fullPath)
+		if herr != nil {
+			g.logger.Error("Error computing file hash: ", herr)
+			return
+		}
+
+		// Skip if content unchanged
+		if oldHash, exists := indexed.FileHashes[relativePath]; exists && oldHash == hash {
+			g.logger.Debug("File unchanged (hash match), skipping reindex: ", relativePath)
+			return
+		}
+
+		indexed.FileHashes[relativePath] = hash
+
+		if op.Has(fsnotify.Create) {
+			// Add to paths if not already present
+			found := false
+			for _, p := range indexed.Paths {
+				if p == relativePath {
+					found = true
+					break
+				}
+			}
+			if !found {
+				indexed.Paths = append(indexed.Paths, relativePath)
+				u.addFw <- fullPath
+			}
+		}
+		changed = true
+	}
+
+	if changed {
+		g.logger.Info("File changed, reindexing: ", relativePath)
+		u.c <- &indexed
 	}
 }
 
@@ -402,7 +441,9 @@ func (g *BasicSearch) getIndexFile(p *IndexedProject) (*os.File, error) {
 
 func (g *BasicSearch) Index(req *pogoPlugin.IProcessProjectReq) {
 	path := (*req).Path()
+	g.mu.RLock()
 	p, ok := g.projects[path]
+	g.mu.RUnlock()
 	if ok && p.Paths != nil && len(p.Paths) > 0 {
 		g.logger.Info("Already indexed ", path)
 		return
@@ -413,7 +454,9 @@ func (g *BasicSearch) Index(req *pogoPlugin.IProcessProjectReq) {
 		FileHashes: make(map[string]string),
 		Status:     StatusIndexing,
 	}
+	g.mu.Lock()
 	g.projects[path] = proj
+	g.mu.Unlock()
 	gitIgnore, err := ParseGitIgnore(path)
 	if err != nil {
 		// Non-fatal error
@@ -440,7 +483,9 @@ func (g *BasicSearch) serializeProjectIndex(proj *IndexedProject) {
 	}
 	// Check if file content actually changed by comparing hashes with previous index.
 	// If nothing changed and the zoekt index file exists, skip the expensive rebuild.
+	g.mu.RLock()
 	oldProj, exists := g.projects[proj.Root]
+	g.mu.RUnlock()
 	contentChanged := !exists || len(oldProj.FileHashes) != len(proj.FileHashes)
 	if !contentChanged && oldProj.FileHashes != nil {
 		for path, hash := range proj.FileHashes {
@@ -452,7 +497,9 @@ func (g *BasicSearch) serializeProjectIndex(proj *IndexedProject) {
 	}
 
 	proj.Status = StatusReady
+	g.mu.Lock()
 	g.projects[proj.Root] = *proj
+	g.mu.Unlock()
 	g.logger.Info("Indexed " + strconv.Itoa(len(proj.Paths)) + " files for " + proj.Root)
 
 	if !contentChanged {
@@ -522,7 +569,9 @@ func (g *BasicSearch) Load(projectRoot string) (*IndexedProject, error) {
 	stat, err := os.Lstat(saveFilePath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
+			g.mu.Lock()
 			g.projects[projectRoot] = *project
+			g.mu.Unlock()
 			// Return empty struct
 			return project, nil
 		}
@@ -532,7 +581,9 @@ func (g *BasicSearch) Load(projectRoot string) (*IndexedProject, error) {
 	if time.Since(stat.ModTime()).Minutes() > indexCacheMinutes {
 		g.logger.Info("Index is stale for " + projectRoot)
 		project.Status = StatusStale
+		g.mu.Lock()
 		g.projects[projectRoot] = *project
+		g.mu.Unlock()
 		return project, nil
 	}
 
@@ -559,7 +610,9 @@ func (g *BasicSearch) Load(projectRoot string) (*IndexedProject, error) {
 }
 
 func (g *BasicSearch) GetFiles(projectRoot string) (*IndexedProject, error) {
+	g.mu.RLock()
 	project, ok := g.projects[projectRoot]
+	g.mu.RUnlock()
 	if !ok {
 		return nil, errors.New("Project not indexed " + projectRoot)
 	}
@@ -567,11 +620,13 @@ func (g *BasicSearch) GetFiles(projectRoot string) (*IndexedProject, error) {
 }
 
 func (g *BasicSearch) Search(projectRoot string, data string, duration string) (*SearchResults, error) {
+	g.mu.RLock()
 	project, ok := g.projects[projectRoot]
 	var knownProjects string
 	for k := range g.projects {
 		knownProjects += k
 	}
+	g.mu.RUnlock()
 	if !ok {
 		return nil, errors.New("Unknown project " + projectRoot + ". Known projects: " + knownProjects)
 	}

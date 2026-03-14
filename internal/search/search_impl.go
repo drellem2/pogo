@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync"
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/hashicorp/go-hclog"
@@ -25,6 +26,7 @@ const UseWatchers = true
 var SearchService = createBasicSearch()
 
 type BasicSearch struct {
+	mu       sync.RWMutex
 	logger   hclog.Logger
 	projects map[string]IndexedProject
 	watcher  *fsnotify.Watcher
@@ -194,6 +196,8 @@ type ProjectStatus struct {
 }
 
 func (g *BasicSearch) GetAllStatuses() []ProjectStatus {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
 	statuses := make([]ProjectStatus, 0, len(g.projects))
 	for _, p := range g.projects {
 		statuses = append(statuses, ProjectStatus{
@@ -206,7 +210,9 @@ func (g *BasicSearch) GetAllStatuses() []ProjectStatus {
 }
 
 func (g *BasicSearch) GetStatus(projectRoot string) *ProjectStatus {
+	g.mu.RLock()
 	p, ok := g.projects[projectRoot]
+	g.mu.RUnlock()
 	if !ok {
 		return nil
 	}

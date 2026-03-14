@@ -216,7 +216,9 @@ func TestNewFileCausesReIndex(t *testing.T) {
 			req := plugin.IProcessProjectReq(plugin.ProcessProjectReq{PathVar: aServicePath})
 			basicSearch.Index(&req)
 			time.Sleep(1 * time.Second)
+			basicSearch.mu.RLock()
 			fileCount := len(basicSearch.projects[aServicePath].Paths)
+			basicSearch.mu.RUnlock()
 			f, err := os.Create(fullPath)
 			if err != nil {
 				t.Errorf("Could not create file %s", fullPath)
@@ -227,17 +229,24 @@ func TestNewFileCausesReIndex(t *testing.T) {
 			basicSearch.ReIndex(aServicePath)
 			for i := 0; i < 10; i++ {
 				time.Sleep(1 * time.Second)
-				if len(basicSearch.projects[aServicePath].Paths) == fileCount+1 {
+				basicSearch.mu.RLock()
+				currentCount := len(basicSearch.projects[aServicePath].Paths)
+				basicSearch.mu.RUnlock()
+				if currentCount == fileCount+1 {
 					success = true
 					break
 				}
 			}
 
 			if !success {
+				basicSearch.mu.RLock()
+				currentCount := len(basicSearch.projects[aServicePath].Paths)
+				currentPaths := basicSearch.projects[aServicePath].Paths
+				basicSearch.mu.RUnlock()
 				t.Errorf("Error executing test %s", tt.name)
-				t.Errorf("Expected %d files in index but found %d", fileCount+1, len(basicSearch.projects[aServicePath].Paths))
+				t.Errorf("Expected %d files in index but found %d", fileCount+1, currentCount)
 				t.Logf("Watch list: %v", basicSearch.watcher.WatchList())
-				t.Logf("File: %v", basicSearch.projects[aServicePath].Paths)
+				t.Logf("File: %v", currentPaths)
 				return
 			}
 		})
