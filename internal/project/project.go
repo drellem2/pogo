@@ -304,11 +304,6 @@ func searchAndCreate(path string) (*Project, error) {
 		return nil, err2
 	}
 
-	if hasPogoStop(dirnames) {
-		fmt.Printf(".pogostop encountered on %s. Stopping\n", path)
-		return nil, nil
-	}
-
 	if hasGit(dirnames) {
 		var project = Project{
 			Id:   0,
@@ -316,6 +311,10 @@ func searchAndCreate(path string) (*Project, error) {
 		}
 		Add(&project)
 		return &project, nil
+	}
+
+	if hasPogoStop(dirnames) {
+		return nil, nil
 	}
 
 	dirPath := filepath.Dir(path)

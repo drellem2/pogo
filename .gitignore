@@ -1,4 +1,5 @@
 bin
+local_docs/
 .beads/
 emacs/.test-elpa/
 .pogo/
