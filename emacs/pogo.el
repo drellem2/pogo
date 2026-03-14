@@ -29,9 +29,9 @@
 ;;
 ;; This library provides project management and code intelligence
 ;; features via the external process pogod, similar to Language
-;; Server Protocol. pogod can be extended with plugins to provide
-;; navigation, code search, and more. Currently a project is defined
-;; as a git repository with a .git file. See the README for more details.
+;; Server Protocol.  pogod can be extended with plugins to provide
+;; navigation, code search, and more.  Currently a project is defined
+;; as a git repository with a .git file.  See the README for more details.
 ;;
 ;;; Code:
 
@@ -321,13 +321,14 @@ just return nil."
 
 ;;; Misc utility functions
 (defun pogo-difference (list1 list2)
+  "Return elements of LIST1 not present in LIST2."
   (cl-remove-if
    (lambda (x) (member x list2))
    list1))
 
 ;; This is copied from a comment in url-util.el. It performs much better for large strings.
 (defun pogo-url-unhex-string (str &optional allow-newlines)
-  "Remove %XX, embedded spaces, etc in a url.
+  "Remove %XX, embedded spaces, etc in a URL for STR.
 If optional second argument ALLOW-NEWLINES is non-nil, then allow the
 decoding of carriage returns and line feeds in the string, which is normally
 forbidden in URL encoding."
@@ -429,8 +430,8 @@ If the current buffer does not belong to a project, call `previous-buffer'."
 
 (defun pogo-maybe-limit-project-file-buffers ()
   "Limit the opened file buffers for a project.
-   The function simply kills the last buffer, as it's normally called
-   when opening new files."
+The function simply kills the last buffer, as it's normally called
+when opening new files."
   (when pogo-max-file-buffer-count
     (let ((project-buffers (pogo-project-buffer-files)))
       (when (> (length project-buffers) pogo-max-file-buffer-count)
@@ -626,7 +627,9 @@ If PROJECT is not specified acts on the current project."
   (format "[%s] %s" (pogo-project-name) string))
 
 (cl-defun pogo-completing-read (prompt choices &key initial-input action)
-  "Present a project tailored PROMPT with CHOICES."
+  "Present a project tailored PROMPT with CHOICES.
+INITIAL-INPUT is passed to the completion system.
+ACTION, if non-nil, is called on the selected result."
   (let ((prompt (pogo-prepend-project-name prompt))
         res)
     (setq res
@@ -667,6 +670,7 @@ If PROJECT is not specified acts on the current project."
       res)))
 
 (defun pogo--read-search-string-with-default (prefix-label)
+  "Read a search string from the user with PREFIX-LABEL as prompt."
   (let* ((prefix-label (pogo-prepend-project-name prefix-label))
          (default-value (pogo-symbol-or-selection-at-point))
          (default-label (if (or (not default-value)
@@ -698,7 +702,7 @@ If PROJECT is not specified acts on the current project."
     (format "%s: ~%s~" line content)))
 
 (defun pogo--format-file-match (file-match)
-  "Format FILE-MATCH as an org-mode heading with links."
+  "Format FILE-MATCH as an `org-mode' heading with links."
   (let* ((path (cdr (assoc 'path file-match)))
          (matches (cdr (assoc 'matches file-match))))
     (format "* [[./%s][./%s]]\n%s"
@@ -707,7 +711,8 @@ If PROJECT is not specified acts on the current project."
             (mapconcat #'pogo--format-chunk matches "\n"))))
 
 (defun pogo--search (&optional query arg)
-  "Search a project."
+  "Search a project with QUERY.
+ARG is currently unused."
   (interactive "P")
   (let* ((project-root (pogo-acquire-root))
          (search-query (or query (pogo--read-search-string-with-default
@@ -770,7 +775,7 @@ would be `find-file-other-window' or `find-file-other-frame'"
   "Non-nil if running on a Windows-like system.")
 
 (defun pogo-try-start ()
-  "Attempt to start the pogo server, run health checks."
+  "Attempt to start the pogo server and run health check."
   (interactive)
   (setenv "POGO_HOME" (expand-file-name "~"))
   (setenv "POGO_PLUGIN_PATH" (concat
@@ -786,6 +791,8 @@ would be `find-file-other-window' or `find-file-other-frame'"
         (run-with-timer pogo-health-check-seconds nil 'pogo-health-check)))))
 
 (cl-defun pogo-health-check (&optional (retry-count 0) (retry-max 3))
+  "Check pogo server health, retrying up to RETRY-MAX times.
+RETRY-COUNT tracks the current attempt number."
   (request (concat pogo-server-url "/health")
     :success (cl-function (lambda (&key data &allow-other-keys)
                             (setq pogo-failure-count 0)
@@ -822,7 +829,7 @@ would be `find-file-other-window' or `find-file-other-frame'"
                                                   "Error getting projects: %s"
                                                   error-thrown)
                                                  (pogo-check-live)))))))
-    
+
     (if (eq 'json-parse-buffer pogo-json-parser)
         (mapcar (lambda (x) (gethash "path" x)) resp)
       (mapcar (lambda (x) (cdr (assoc 'path x))) resp))))
@@ -858,7 +865,7 @@ An open project is a project with any open buffers."
   (if (eq 'json-parse-buffer pogo-json-parser)
       (if resp
           (gethash "path" (gethash "project" resp))
-        nil)    
+        nil)
     (cdr (assoc 'path (assoc 'project resp)))))
 
 (defun pogo-visit-call (path)
@@ -961,7 +968,7 @@ An open project is a project with any open buffers."
               (push `(paths . ,paths) al)
               (push `(results . ,results) al)
               al))))
-      
+
       (let*
           ((decoded resp)
            (inner-resp (cdr (assoc 'index decoded)))
@@ -1040,7 +1047,7 @@ An open project is a project with any open buffers."
 
 (defun pogo-acquire-root
     (&optional dir)
-  "Find the current project root, and prompts the user for it if that fails.
+  "Find the current project root, and prompt the user for it if that fails.
 Starts the search for the project with DIR."
   ;; TODO add pogo-project-ensure
   (pogo-ensure-project (pogo-project-root dir)))
@@ -1163,11 +1170,11 @@ is chosen."
   (pogo-def-commander-method ?g
     "Search project."
     (pogo-search))
-  
+
   (pogo-def-commander-method ?f
     "Find file in project."
     (pogo-find-file))
-  
+
   (pogo-def-commander-method ?b
     "Switch to project buffer."
     (pogo-switch-to-buffer))
@@ -1175,7 +1182,7 @@ is chosen."
   (pogo-def-commander-method ?D
     "Open project root in dired."
     (pogo-dired))
-  
+
   (pogo-def-commander-method ?s
     "Switch project."
     (pogo-switch-project))
@@ -1241,7 +1248,7 @@ Default bindings mirror Projectile for easy migration.")
       '("Pogo" :visible pogo-show-menu
         ("Find..."
          ["Find file" pogo-find-file]
-         
+
          ;; TODO ["Find file in known projects"
          ;; pogo-find-file-in-known-projects]
          )
