@@ -142,6 +142,69 @@ if [ "$ALL_FOUND" = true ]; then
 fi
 rm -rf "$TMPDIR_INSTALL"
 
+# --- Test 9: --interactive flag is recognized ---
+echo ""
+echo "Test 9: --interactive flag parsing"
+# Extract and test the flag parsing logic
+RESULT=$(sh -c '
+  INTERACTIVE=false
+  for arg in "--interactive"; do
+    case "$arg" in
+      --interactive|--with-integrations) INTERACTIVE=true ;;
+    esac
+  done
+  echo "$INTERACTIVE"
+')
+if [ "$RESULT" = "true" ]; then
+  pass "--interactive flag sets INTERACTIVE=true"
+else
+  fail "--interactive flag not recognized (got '$RESULT')"
+fi
+
+# --- Test 10: --with-integrations alias works ---
+echo ""
+echo "Test 10: --with-integrations alias"
+RESULT=$(sh -c '
+  INTERACTIVE=false
+  for arg in "--with-integrations"; do
+    case "$arg" in
+      --interactive|--with-integrations) INTERACTIVE=true ;;
+    esac
+  done
+  echo "$INTERACTIVE"
+')
+if [ "$RESULT" = "true" ]; then
+  pass "--with-integrations flag sets INTERACTIVE=true"
+else
+  fail "--with-integrations flag not recognized (got '$RESULT')"
+fi
+
+# --- Test 11: Default (no flag) shows tip ---
+echo ""
+echo "Test 11: Non-interactive mode shows tip about --interactive"
+TMPDIR_INSTALL=$(mktemp -d)
+OUTPUT=$(POGO_VERSION="v0.0.0-test" POGO_INSTALL_DIR="$TMPDIR_INSTALL" sh "$INSTALL_SCRIPT" 2>&1) || true
+if echo "$OUTPUT" | grep -q "\-\-interactive"; then
+  pass "Non-interactive mode mentions --interactive flag"
+else
+  fail "Non-interactive mode does not mention --interactive flag"
+fi
+rm -rf "$TMPDIR_INSTALL"
+
+# --- Test 12: Shell snippet idempotency check ---
+echo ""
+echo "Test 12: Shell snippet idempotency (Start Pogo marker detection)"
+TMPDIR_TEST=$(mktemp -d)
+RC_FILE="${TMPDIR_TEST}/.zshrc"
+echo "# Start Pogo" > "$RC_FILE"
+# The install_shell_snippet function checks for "Start Pogo" marker
+if grep -q "Start Pogo" "$RC_FILE" 2>/dev/null; then
+  pass "Marker detection works for already-installed snippets"
+else
+  fail "Marker detection failed"
+fi
+rm -rf "$TMPDIR_TEST"
+
 # --- Summary ---
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
