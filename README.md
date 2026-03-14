@@ -9,7 +9,21 @@ Currently supports zshell and emacs.
 
 See [VISION.md](VISION.md) for the design principles and long-term direction.
 
-## Installation 
+## Installation
+
+### Quick Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/drellem2/pogo/main/install.sh | sh
+```
+
+This detects your OS and architecture, downloads the latest release binaries, and installs them to `/usr/local/bin`. Override the install directory with `POGO_INSTALL_DIR` or pin a version with `POGO_VERSION`:
+
+```sh
+POGO_INSTALL_DIR=~/.local/bin curl -fsSL https://raw.githubusercontent.com/drellem2/pogo/main/install.sh | sh
+```
+
+### Build from Source
 *(instructions for Mac)*
 
 1. Install golang.
