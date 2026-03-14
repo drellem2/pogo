@@ -47,7 +47,7 @@
 (defvar pogo-search-plugin nil)
 (defvar pogo-search-plugin-name "pogo-plugin-search")
 (defvar pogo-process nil)
-(defvar pogo-visit-cache (pcache-repository "pogo-visit-cache"))
+(defvar pogo-visit-cache (pcache-repository :file "pogo-visit-cache"))
 (defvar pogo-visit-cache-seconds (* 60 10))
 (defvar pogo-failure-count 0) ;; Number of failures starting pogo server
 (defvar pogo-server-started nil)
@@ -567,7 +567,7 @@ Regular expressions can be use."
   "Get a list of a project's buffers.
 If PROJECT is not specified the command acts on the current project."
   (let* ((project-root (or project (pogo-acquire-root)))
-         (test-out (pogo-log "project-root is %s" project-root))
+         (_test-out (pogo-log "project-root is %s" project-root))
          (all-buffers (cl-remove-if-not
                        (lambda (buffer)
                          (pogo-project-buffer-p buffer project-root))
@@ -682,7 +682,7 @@ ACTION, if non-nil, is called on the selected result."
 
 (defun pogo--search-compare (fst snd)
   "Return non-nil when FST has more matching lines than SND."
-  (let ((lst (mapcar (lambda (e) (length (cdr (assoc #'matches e))))
+  (let ((lst (mapcar (lambda (e) (length (cdr (assoc 'matches e))))
                      (list fst snd))))
     (> (car lst) (cadr lst))))
 
@@ -710,9 +710,9 @@ ACTION, if non-nil, is called on the selected result."
             path
             (mapconcat #'pogo--format-chunk matches "\n"))))
 
-(defun pogo--search (&optional query arg)
+(defun pogo--search (&optional query _arg)
   "Search a project with QUERY.
-ARG is currently unused."
+_ARG is currently unused."
   (interactive "P")
   (let* ((project-root (pogo-acquire-root))
          (search-query (or query (pogo--read-search-string-with-default
@@ -794,7 +794,7 @@ would be `find-file-other-window' or `find-file-other-frame'"
   "Check pogo server health, retrying up to RETRY-MAX times.
 RETRY-COUNT tracks the current attempt number."
   (request (concat pogo-server-url "/health")
-    :success (cl-function (lambda (&key data &allow-other-keys)
+    :success (cl-function (lambda (&key _data &allow-other-keys)
                             (setq pogo-failure-count 0)
                             (setq pogo-server-started t)
                             (pogo-log "Health check success")))
@@ -1012,7 +1012,7 @@ An open project is a project with any open buffers."
                                               "Received: %S" data)))
                                  :error (cl-function
                                          (lambda
-                                           (&key error-throw
+                                           (&key error-thrown
                                                  &allow-other-keys)
                                            (pogo-log
                                             "Error searching project: %s"
@@ -1035,7 +1035,7 @@ An open project is a project with any open buffers."
                                  (pogo-log "Received: %S" data)))
          :error (cl-function
                  (lambda
-                   (&key error-throw
+                   (&key error-thrown
                          &allow-other-keys)
                    (pogo-log "Error getting project files: %s" error-thrown)
                    (pogo-check-live))))))))))
