@@ -50,21 +50,9 @@ pogo server stop         # Stop the pogo daemon
 Go project. Build and test:
 
 ```bash
-./build.sh       # Build all binaries (runs fmt + test + install)
+./build.sh       # Build all binaries
 ./test.sh        # Run tests
-./fmt.sh         # Format code (go fmt)
+./fmt.sh         # Format code
 ```
 
 Binaries are in `cmd/`: `cmd/pogo`, `cmd/lsp`, `cmd/pose`, `cmd/pogod` (daemon).
-
-### Before committing
-
-Always run `./build.sh` before committing. If it fails, fix the issue before pushing.
-
-Set up the pre-commit hook to enforce this automatically:
-
-```bash
-git config core.hooksPath hooks
-```
-
-The hook runs `gofmt -l` and `go build ./...` on every commit.
