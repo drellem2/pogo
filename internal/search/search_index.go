@@ -2,6 +2,8 @@ package search
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io/ioutil"
@@ -11,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/fsnotify/fsnotify"
 	"github.com/sabhiram/go-gitignore"
 	"github.com/sourcegraph/zoekt"
 	"github.com/sourcegraph/zoekt/query"
@@ -48,9 +51,20 @@ const (
 )
 
 type IndexedProject struct {
-	Root   string         `json:"root"`
-	Paths  []string       `json:"paths"`
-	Status IndexingStatus `json:"indexing_status"`
+	Root       string            `json:"root"`
+	Paths      []string          `json:"paths"`
+	FileHashes map[string]string `json:"file_hashes,omitempty"`
+	Status     IndexingStatus    `json:"indexing_status"`
+}
+
+// computeFileHash returns the hex-encoded SHA-256 hash of a file's contents.
+func computeFileHash(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	h := sha256.Sum256(data)
+	return hex.EncodeToString(h[:]), nil
 }
 
 /*
@@ -163,6 +177,9 @@ func (g *BasicSearch) indexRec(proj *IndexedProject, path string,
 				}
 			} else {
 				files = append(files, relativePath)
+				if hash, herr := computeFileHash(newPath); herr == nil {
+					proj.FileHashes[relativePath] = hash
+				}
 			}
 		}
 	}
@@ -176,6 +193,10 @@ func (g *BasicSearch) index(proj *IndexedProject, path string,
 	gitIgnore *ignore.GitIgnore) {
 
 	u := g.updater
+
+	if proj.FileHashes == nil {
+		proj.FileHashes = make(map[string]string)
+	}
 
 	err := g.indexRec(proj, path, gitIgnore, u)
 	if err != nil {
@@ -218,6 +239,7 @@ func (g *BasicSearch) ReIndex(path string) {
 						paths = append(paths, p)
 					} else {
 						u.removeFw <- p
+						delete(indexed.FileHashes, p)
 					}
 				}
 				indexed.Paths = paths
@@ -231,6 +253,88 @@ func (g *BasicSearch) ReIndex(path string) {
 			}
 		}
 	}()
+}
+
+// ReIndexFile handles a single-file event without walking the directory tree.
+// This avoids a full directory re-walk when only one file changed.
+func (g *BasicSearch) ReIndexFile(path string, op fsnotify.Op) {
+	fullPath, err := filepath.Abs(path)
+	if err != nil {
+		g.logger.Error("Error getting absolute path: ", path)
+		return
+	}
+
+	for projectRoot, indexed := range g.projects {
+		if !strings.HasPrefix(fullPath, projectRoot) {
+			continue
+		}
+		relativePath := strings.TrimPrefix(fullPath, projectRoot)
+
+		if indexed.FileHashes == nil {
+			indexed.FileHashes = make(map[string]string)
+		}
+
+		u := g.updater
+		changed := false
+
+		if op.Has(fsnotify.Remove) || op.Has(fsnotify.Rename) {
+			// Remove file from index
+			paths := indexed.Paths[:0]
+			for _, p := range indexed.Paths {
+				if p != relativePath {
+					paths = append(paths, p)
+				}
+			}
+			if len(paths) != len(indexed.Paths) {
+				indexed.Paths = paths
+				delete(indexed.FileHashes, relativePath)
+				u.removeFw <- fullPath
+				changed = true
+			}
+		} else if op.Has(fsnotify.Create) || op.Has(fsnotify.Write) {
+			// Check gitignore
+			gitIgnore, _ := ParseGitIgnore(projectRoot)
+			if gitIgnore.MatchesPath(relativePath) {
+				return
+			}
+
+			hash, herr := computeFileHash(fullPath)
+			if herr != nil {
+				g.logger.Error("Error computing file hash: ", herr)
+				return
+			}
+
+			// Skip if content unchanged
+			if oldHash, exists := indexed.FileHashes[relativePath]; exists && oldHash == hash {
+				g.logger.Debug("File unchanged (hash match), skipping reindex: ", relativePath)
+				return
+			}
+
+			indexed.FileHashes[relativePath] = hash
+
+			if op.Has(fsnotify.Create) {
+				// Add to paths if not already present
+				found := false
+				for _, p := range indexed.Paths {
+					if p == relativePath {
+						found = true
+						break
+					}
+				}
+				if !found {
+					indexed.Paths = append(indexed.Paths, relativePath)
+					u.addFw <- fullPath
+				}
+			}
+			changed = true
+		}
+
+		if changed {
+			g.logger.Info("File changed, reindexing: ", relativePath)
+			u.c <- &indexed
+		}
+		break
+	}
 }
 
 /*
@@ -304,9 +408,10 @@ func (g *BasicSearch) Index(req *pogoPlugin.IProcessProjectReq) {
 		return
 	}
 	proj := IndexedProject{
-		Root:   path,
-		Paths:  make([]string, 0, indexStartCapacity),
-		Status: StatusIndexing,
+		Root:       path,
+		Paths:      make([]string, 0, indexStartCapacity),
+		FileHashes: make(map[string]string),
+		Status:     StatusIndexing,
 	}
 	g.projects[path] = proj
 	gitIgnore, err := ParseGitIgnore(path)
@@ -333,9 +438,32 @@ func (g *BasicSearch) serializeProjectIndex(proj *IndexedProject) {
 	if err3 != nil {
 		g.logger.Error("Error saving index", "save_path", saveFilePath)
 	}
+	// Check if file content actually changed by comparing hashes with previous index.
+	// If nothing changed and the zoekt index file exists, skip the expensive rebuild.
+	oldProj, exists := g.projects[proj.Root]
+	contentChanged := !exists || len(oldProj.FileHashes) != len(proj.FileHashes)
+	if !contentChanged && oldProj.FileHashes != nil {
+		for path, hash := range proj.FileHashes {
+			if oldHash, ok := oldProj.FileHashes[path]; !ok || oldHash != hash {
+				contentChanged = true
+				break
+			}
+		}
+	}
+
 	proj.Status = StatusReady
 	g.projects[proj.Root] = *proj
 	g.logger.Info("Indexed " + strconv.Itoa(len(proj.Paths)) + " files for " + proj.Root)
+
+	if !contentChanged {
+		// Verify zoekt index file actually exists before skipping rebuild
+		indexPath := filepath.Join(searchDir, codeSearchIndexFileName)
+		if _, err := os.Lstat(indexPath); err == nil {
+			g.logger.Info("No content changes detected, skipping zoekt rebuild for " + proj.Root)
+			return
+		}
+		g.logger.Info("Zoekt index missing, rebuilding for " + proj.Root)
+	}
 
 	// Now serialize zoekt index
 
@@ -419,6 +547,10 @@ func (g *BasicSearch) Load(projectRoot string) (*IndexedProject, error) {
 	if err != nil {
 		g.logger.Error("Error deserializing index file: %v", err)
 		return nil, err
+	}
+	// Initialize FileHashes for backward compatibility with old index files
+	if project.FileHashes == nil {
+		project.FileHashes = make(map[string]string)
 	}
 	project.Status = StatusReady
 	g.logger.Info("Loaded " + strconv.Itoa(len(project.Paths)) + " files for " + projectRoot)

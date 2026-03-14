@@ -196,6 +196,7 @@ func TestPluginExecute(t *testing.T) {
                   "README.md",
                   ".gitignore"
                ],
+               "file_hashes":"<<PRESENCE>>",
                "indexing_status":"ready"
             },
             "results":{

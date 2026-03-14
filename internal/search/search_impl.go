@@ -272,9 +272,17 @@ func createBasicSearch() *BasicSearch {
 						logger.Warn(event.String())
 						return
 					}
-					if event.Has(fsnotify.Create) || event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename) {
+					if event.Has(fsnotify.Create) || event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename) || event.Has(fsnotify.Write) {
 						logger.Info("File update: ", event)
-						basicSearch.ReIndex(event.Name)
+						// Check if this is a file or directory event.
+						// For files, use ReIndexFile to avoid a full directory walk.
+						fileInfo, statErr := os.Lstat(event.Name)
+						isDir := statErr == nil && fileInfo.IsDir()
+						if isDir {
+							basicSearch.ReIndex(event.Name)
+						} else {
+							basicSearch.ReIndexFile(event.Name, event.Op)
+						}
 					}
 				case err, ok := <-watcher.Errors:
 
