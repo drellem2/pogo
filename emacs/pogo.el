@@ -4,7 +4,7 @@
 
 ;; Author: Daniel Miller <gate46dmiller@gmail.com>
 ;; URL: https://github.com/drellem2/pogo
-;; Package-Requires: ((emacs "29.1") (request "0.3.2") (cl-lib "1.0") (pcache "0.5.1"))
+;; Package-Requires: ((emacs "29.1") (request "0.3.2") (pcache "0.5.1"))
 ;; Keywords: project, convenience, search
 ;; Version: 0.0.1-snapshot
 
@@ -82,11 +82,12 @@ Defaults to http://localhost:10000, or uses POGO_PORT env var if set."
   :type 'string
   :package-version '(pogo . "0.0.1"))
 
-(defcustom pogo-keymap-prefix (kbd "C-c p")
+(defcustom pogo-keymap-prefix nil
   "Pogo keymap prefix.
-Defaults to \\`C-c p' for compatibility with Projectile keybindings."
+Set to (kbd \"C-c p\") for compatibility with Projectile keybindings.
+Left unset by default to respect Emacs key binding conventions."
   :group 'pogo
-  :type 'key-sequence)
+  :type '(choice (const :tag "None" nil) key-sequence))
 
 (defcustom pogo-debug-log t
   "Pogo debug logging."
@@ -369,7 +370,7 @@ This is a no-op as pogo manages projects via its server."
              (pogo-project-p))
     (pogo-visit default-directory)))
 
-(defun compilation-find-file-pogo-find-compilation-buffer (orig-fun marker filename directory &rest formats)
+(defun pogo-compilation-find-file (orig-fun marker filename directory &rest formats)
   "Advice around `compilation-find-file' to search in pogo project root.
 ORIG-FUN is the original function.  MARKER, FILENAME, DIRECTORY, and
 FORMATS are passed through."
@@ -1139,7 +1140,7 @@ The buffer are killed according to the value of
 
 ;; Bindings
 
-(defmacro def-pogo-commander-method (key description &rest body)
+(defmacro pogo-def-commander-method (key description &rest body)
   "Define a new `pogo-commander' method.
 
 KEY is the key the user will enter to choose this method.
@@ -1159,35 +1160,35 @@ is chosen."
 (defun pogo-commander-bindings ()
   "Set up the keybindings for the Pogo Commander."
 
-  (def-pogo-commander-method ?g
+  (pogo-def-commander-method ?g
     "Search project."
     (pogo-search))
   
-  (def-pogo-commander-method ?f
+  (pogo-def-commander-method ?f
     "Find file in project."
     (pogo-find-file))
   
-  (def-pogo-commander-method ?b
+  (pogo-def-commander-method ?b
     "Switch to project buffer."
     (pogo-switch-to-buffer))
 
-  (def-pogo-commander-method ?D
+  (pogo-def-commander-method ?D
     "Open project root in dired."
     (pogo-dired))
   
-  (def-pogo-commander-method ?s
+  (pogo-def-commander-method ?s
     "Switch project."
     (pogo-switch-project))
 
-  (def-pogo-commander-method ?k
+  (pogo-def-commander-method ?k
     "Kill all project buffers."
     (pogo-kill-buffers))
 
-  (def-pogo-commander-method ?e
+  (pogo-def-commander-method ?e
     "Find recently visited file in project."
     (pogo-recentf))
 
-  (def-pogo-commander-method ?q
+  (pogo-def-commander-method ?q
     "Switch to an open project."
     (pogo-switch-open-project)))
 
@@ -1292,7 +1293,7 @@ tramp."
     (add-hook 'dired-before-readin-hook
               #'pogo-track-known-projects-find-file-hook t t)
     (advice-add 'compilation-find-file :around
-                #'compilation-find-file-pogo-find-compilation-buffer)
+                #'pogo-compilation-find-file)
     (setq pogo-failure-count 0)
     (setq pogo-server-started nil)
     (pogo-try-start))
@@ -1301,7 +1302,7 @@ tramp."
     (remove-hook 'dired-before-readin-hook
                  #'pogo-track-known-projects-find-file-hook t)
     (advice-remove 'compilation-find-file
-                   #'compilation-find-file-pogo-find-compilation-buffer))))
+                   #'pogo-compilation-find-file))))
 
 (provide 'pogo)
 
