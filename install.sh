@@ -312,5 +312,26 @@ if ! command -v emacs >/dev/null 2>&1 && ! command -v nvim >/dev/null 2>&1 && ! 
 fi
 
 echo ""
+
+###############################################################################
+# Daemon service (auto-start + crash recovery)
+###############################################################################
+
+echo "--- Daemon Service ---"
+echo "Install pogo as a system service so it starts on login and restarts on crash."
+echo ""
+
+if ask_yn "  Install pogo daemon service?"; then
+  if "${INSTALL_DIR}/pogo" service install; then
+    echo "  Service installed successfully."
+  else
+    echo "  Service installation failed. You can install manually later with:"
+    echo "    pogo service install"
+  fi
+else
+  echo "  Skipped. You can install later with: pogo service install"
+fi
+
+echo ""
 echo "=== Setup Complete ==="
 echo "Restart your shell or source your rc file to activate integrations."

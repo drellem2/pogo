@@ -12,6 +12,7 @@ import (
 
 	"github.com/drellem2/pogo/internal/cli"
 	"github.com/drellem2/pogo/internal/client"
+	"github.com/drellem2/pogo/internal/service"
 )
 
 func main() {
@@ -135,6 +136,57 @@ Child commands include start, stop, and status.`,
 		},
 	}
 
+	var cmdService = &cobra.Command{
+		Use:   "service",
+		Short: "Manage the pogo system service",
+		Long:  `Install, uninstall, or check the status of the pogo daemon as a system service (launchd on macOS, systemd on Linux).`,
+	}
+
+	var cmdServiceInstall = &cobra.Command{
+		Use:   "install",
+		Short: "Install pogo as a system service",
+		Long:  `Generate and install a launchd plist (macOS) or systemd unit (Linux) so the pogo daemon starts on login and restarts on crash.`,
+		Args:  cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			if err := service.Install(); err != nil {
+				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+			}
+		},
+	}
+
+	var cmdServiceUninstall = &cobra.Command{
+		Use:   "uninstall",
+		Short: "Remove the pogo system service",
+		Long:  `Stop and remove the pogo daemon system service.`,
+		Args:  cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			if err := service.Uninstall(); err != nil {
+				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+			}
+		},
+	}
+
+	var cmdServiceStatus = &cobra.Command{
+		Use:   "status",
+		Short: "Check if the pogo system service is installed",
+		Args:  cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			installed, path := service.Status()
+			if jsonOutput {
+				cli.PrintJSON(map[string]interface{}{
+					"installed": installed,
+					"path":      path,
+				})
+			} else {
+				if installed {
+					fmt.Printf("Service installed: %s\n", path)
+				} else {
+					fmt.Println("Service not installed.")
+				}
+			}
+		},
+	}
+
 	var rootCmd = &cobra.Command{Use: "pogo"}
 
 	rootCmd.PersistentFlags().BoolVar(&jsonOutput, "json", false, "Output in JSON format")
@@ -144,6 +196,10 @@ Child commands include start, stop, and status.`,
 	cmdServer.AddCommand(cmdServerStart)
 	cmdServer.AddCommand(cmdServerStop)
 	rootCmd.AddCommand(cmdServer)
+	cmdService.AddCommand(cmdServiceInstall)
+	cmdService.AddCommand(cmdServiceUninstall)
+	cmdService.AddCommand(cmdServiceStatus)
+	rootCmd.AddCommand(cmdService)
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(cli.ExitError)
 	}
