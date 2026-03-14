@@ -80,10 +80,11 @@ DESCRIPTION is a one-line description of what the key selects.")
   :type 'string
   :package-version '(pogo . "0.0.1"))
 
-(defcustom pogo-keymap-prefix nil
-  "Pogo keymap prefix."
+(defcustom pogo-keymap-prefix (kbd "C-c p")
+  "Pogo keymap prefix.
+Defaults to \\`C-c p' for compatibility with Projectile keybindings."
   :group 'pogo
-  :type 'string)
+  :type 'key-sequence)
 
 (defcustom pogo-debug-log t
   "Pogo debug logging."
@@ -1182,7 +1183,11 @@ is chosen."
 
   (def-pogo-commander-method ?e
     "Find recently visited file in project."
-    (pogo-recentf)))
+    (pogo-recentf))
+
+  (def-pogo-commander-method ?q
+    "Switch to an open project."
+    (pogo-switch-open-project)))
 
 (defun pogo-update-mode-line ()
   "Update the Pogo mode-line."
@@ -1203,17 +1208,25 @@ is chosen."
 
 (defvar pogo-command-map
   (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "g") #'pogo-search)
+    ;; File navigation
     (define-key map (kbd "f") #'pogo-find-file)
-    (define-key map (kbd "b") #'pogo-switch-to-buffer)
-    (define-key map (kbd "D") #'pogo-dired)
-    (define-key map (kbd "p") #'pogo-switch-project)
-    (define-key map (kbd "k") #'pogo-kill-buffers)
     (define-key map (kbd "e") #'pogo-recentf)
+    (define-key map (kbd "D") #'pogo-dired)
+    ;; Search (projectile uses "s g" for grep, "s s" for generic search)
+    (define-key map (kbd "g") #'pogo-search)
+    (define-key map (kbd "s g") #'pogo-search)
+    (define-key map (kbd "s s") #'pogo-search)
+    ;; Buffers
+    (define-key map (kbd "b") #'pogo-switch-to-buffer)
+    (define-key map (kbd "k") #'pogo-kill-buffers)
     (define-key map (kbd "<left>") #'pogo-previous-project-buffer)
     (define-key map (kbd "<right>") #'pogo-next-project-buffer)
+    ;; Projects
+    (define-key map (kbd "p") #'pogo-switch-project)
+    (define-key map (kbd "q") #'pogo-switch-open-project)
     map)
-  "Keymap for Pogo commands after `pogo-keymap-prefix'.")
+  "Keymap for Pogo commands after `pogo-keymap-prefix'.
+Default bindings mirror Projectile for easy migration.")
 (fset 'pogo-command-map pogo-command-map)
 
 (defvar pogo-mode-map
