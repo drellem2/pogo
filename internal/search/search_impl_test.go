@@ -119,8 +119,9 @@ func TestSearch(t *testing.T) {
             "index":{
               "root":"",
               "paths":[
-                
-              ]
+
+              ],
+              "indexing_status":""
             },
             "results":{
               "files":[

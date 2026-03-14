@@ -195,7 +195,8 @@ func TestPluginExecute(t *testing.T) {
                   "src/a.c",
                   "README.md",
                   ".gitignore"
-               ]
+               ],
+               "indexing_status":"ready"
             },
             "results":{
                "files":null

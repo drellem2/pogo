@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/fsnotify/fsnotify"
 )
@@ -135,9 +136,18 @@ func (s *Scanner) handleCreate(path string) {
 		return
 	}
 
-	// Check if this directory has a .git subdirectory
+	// Check if this directory has a .git subdirectory.
+	// Brief retry: .git may appear shortly after the parent dir is created.
 	gitDir := filepath.Join(path, ".git")
-	if !fileExists(gitDir) {
+	found := false
+	for i := 0; i < 5; i++ {
+		if fileExists(gitDir) {
+			found = true
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !found {
 		return
 	}
 
