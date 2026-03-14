@@ -169,6 +169,7 @@ func Add(p *Project) {
 	}
 	addToPlugin(*p)
 	projects = append(projects, *p)
+	NotifyProjectAdded(p.Path)
 	defer SaveProjects()
 }
 

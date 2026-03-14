@@ -203,5 +203,12 @@ func main() {
 	defer driver.Kill()
 	defer project.SaveProjects()
 	project.Init()
+
+	// Start background repo scanner
+	if err := project.StartScanner(); err != nil {
+		fmt.Printf("Warning: repo scanner failed to start: %v\n", err)
+	}
+	defer project.StopScanner()
+
 	handleRequests()
 }
