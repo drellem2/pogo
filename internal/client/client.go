@@ -11,9 +11,14 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
+
+	"github.com/nightlyone/lockfile"
 
 	"github.com/drellem2/pogo/internal/project"
 	pogoPlugin "github.com/drellem2/pogo/pkg/plugin"
@@ -71,6 +76,36 @@ func StartServer() error {
 		return err
 	}
 	return nil
+}
+
+func StopServer() error {
+	pidPath := filepath.Join(os.TempDir(), "pogo.pid")
+
+	lock, err := lockfile.New(pidPath)
+	if err != nil {
+		return fmt.Errorf("cannot access lockfile: %w", err)
+	}
+
+	proc, err := lock.GetOwner()
+	if err != nil {
+		return fmt.Errorf("server is not running (no valid lockfile): %w", err)
+	}
+
+	if err := proc.Signal(syscall.SIGTERM); err != nil {
+		return fmt.Errorf("failed to send SIGTERM to pid %d: %w", proc.Pid, err)
+	}
+
+	// Wait for clean shutdown by polling for process exit
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := proc.Signal(syscall.Signal(0)); err != nil {
+			// Process is gone — clean shutdown
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	return fmt.Errorf("server pid %d did not stop within 5 seconds", proc.Pid)
 }
 
 // Run closure with health check

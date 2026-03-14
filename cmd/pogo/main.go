@@ -59,7 +59,12 @@ Child commands include start, stop, and status.`,
 		Long:  `Stop the pogo server.`,
 		Args:  cobra.MinimumNArgs(0),
 		Run: func(cmd *cobra.Command, args []string) {
-			// Stop the process "pogod"
+			fmt.Println("Stopping pogo server...")
+			err := client.StopServer()
+			if err != nil {
+				log.Fatal(err)
+			}
+			fmt.Println("Server stopped.")
 		},
 	}
 
