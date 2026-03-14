@@ -4,14 +4,7 @@
 
 ;; Author: Daniel Miller <gate46dmiller@gmail.com>
 ;; URL: https://github.com/drellem2/pogo
-;; Package-Version: 20221022.0000
-;; Package-Requires: (
-;;     (emacs "29.4")
-;;     (request "0.3.2")
-;;     (org "9.6.6")
-;;     (cl-lib "1.0")
-;;     (pcache "0.5.1"))
-;; Package-Commit:
+;; Package-Requires: ((emacs "29.1") (request "0.3.2") (cl-lib "1.0") (pcache "0.5.1"))
 ;; Keywords: project, convenience, search
 ;; Version: 0.0.1-snapshot
 
@@ -43,13 +36,14 @@
 ;;; Code:
 
 (require 'cl-lib)
-(require 'org)
 (require 'request)
 (require 'url)
 (require 'pcache)
 
 ;;; Variables
 
+(defvar pogo-show-menu t
+  "Toggle visibility of the Pogo menu in the menu bar.")
 (defvar pogo-search-plugin nil)
 (defvar pogo-search-plugin-name "pogo-plugin-search")
 (defvar pogo-process nil)
@@ -57,24 +51,34 @@
 (defvar pogo-visit-cache-seconds (* 60 10))
 (defvar pogo-failure-count 0) ;; Number of failures starting pogo server
 (defvar pogo-server-started nil)
+(defvar pogo--mode-line nil
+  "Current Pogo mode-line string.")
 (defvar pogo-commander-methods nil
   "List of file-selection methods for the `pogo-commander' command.
 Each element is a list (KEY DESCRIPTION FUNCTION).
 DESCRIPTION is a one-line description of what the key selects.")
-
-;;; Set request-message-level
-(when (not (eql -1 request-message-level))
-  (message "Warning: Setting request-message-level to -1")
-  (customize-set-variable 'request-message-level -1)
-  (customize-set-variable 'request-backend 'url-retrieve))
+(defvar pogo-find-dir-hook nil
+  "Hook run when Pogo finds a project directory.")
+(defvar pogo-find-file-hook nil
+  "Hook run after `pogo-find-file' opens a file.")
+(defvar pogo-before-switch-project-hook nil
+  "Hook run before switching projects.")
+(defvar pogo-after-switch-project-hook nil
+  "Hook run after switching projects.")
 
 ;;; Customization
 (defgroup pogo nil
   "Code intelligence in the background."
   :group 'tools
   :group 'convenience
-  :link '(url-link :tag "GitHub" "https://github.com/drellem/pogo")
+  :link '(url-link :tag "GitHub" "https://github.com/drellem2/pogo")
   :link '(emacs-commentary-link :tag "Commentary" "pogo"))
+
+(defcustom pogo-server-url "http://localhost:10000"
+  "URL of the pogo server."
+  :group 'pogo
+  :type 'string
+  :package-version '(pogo . "0.0.1"))
 
 (defcustom pogo-keymap-prefix nil
   "Pogo keymap prefix."
@@ -283,6 +287,7 @@ When set to nil you'll have always add projects explicitly with
          (package-get-version))))
 
 (defun pogo-log (msg &rest args)
+  "Log MSG with ARGS to the *pogo-mode-log* buffer when debug logging is enabled."
   (when pogo-debug-log
     (progn
       (when (not (get-buffer "*pogo-mode-log*"))
@@ -334,10 +339,45 @@ forbidden in URL encoding."
 				str t t)
     str))
 
+(defun pogo-expand-root (name)
+  "Expand NAME to an absolute path within the project root."
+  (expand-file-name name (pogo-acquire-root)))
+
+(defun pogo-remove-known-project (_project)
+  "Remove PROJECT from the list of known projects.
+This is a no-op as pogo manages projects via its server."
+  nil)
+
+(defun pogo-project-buffer-files ()
+  "Get a list of project buffers that are visiting files."
+  (cl-remove-if-not #'buffer-file-name (pogo-project-buffers)))
+
+(defun pogo--move-current-project-to-end (projects)
+  "Move the current project to the end of PROJECTS."
+  (if-let ((project (pogo-project-root)))
+      (let ((abbr (abbreviate-file-name project)))
+        (append (pogo-difference projects (list abbr))
+                (when (member abbr projects) (list abbr))))
+    projects))
+
+(defun pogo-track-known-projects-find-file-hook ()
+  "Register the current project with pogo when visiting a file."
+  (when (and pogo-track-known-projects-automatically
+             (pogo-project-p))
+    (pogo-visit default-directory)))
+
+(defun compilation-find-file-pogo-find-compilation-buffer (orig-fun marker filename directory &rest formats)
+  "Advice around `compilation-find-file' to search in pogo project root.
+ORIG-FUN is the original function.  MARKER, FILENAME, DIRECTORY, and
+FORMATS are passed through."
+  (let ((root (ignore-errors (pogo-project-root))))
+    (apply orig-fun marker filename (or directory root) formats)))
+
 ;;; Internal functions
 
 ;; Start server
 (defun pogo-start ()
+  "Start the pogod server process."
   (progn
     (pogo-log "Starting server")
     (when (or (and (not (file-remote-p default-directory))
@@ -367,6 +407,7 @@ forbidden in URL encoding."
             (cl-incf counter))))
     (apply orig-fun args)))
 
+;;;###autoload
 (defun pogo-next-project-buffer ()
   "In selected window switch to the next project buffer.
 
@@ -374,6 +415,7 @@ If the current buffer does not belong to a project, call `next-buffer'."
   (interactive)
   (pogo--repeat-until-project-buffer #'next-buffer))
 
+;;;###autoload
 (defun pogo-previous-project-buffer ()
   "In selected window switch to the previous project buffer.
 
@@ -391,10 +433,10 @@ If the current buffer does not belong to a project, call `previous-buffer'."
         (kill-buffer (car (last project-buffers)))))))
 
 ;;;###autoload
-(defun pogo-discover-projects-in-directory (directory &optional depth)
-  "For now a noop. Eventually we may visit all maximal-depth files in
-   the directory."
-  ())
+(defun pogo-discover-projects-in-directory (_directory &optional _depth)
+  "Discover projects in DIRECTORY up to DEPTH levels deep.
+Currently a no-op; pogo manages project discovery via its server."
+  nil)
 
 ;;;###autoload
 (defun pogo-discover-projects-in-search-path ()
@@ -631,13 +673,13 @@ If PROJECT is not specified acts on the current project."
                  default-value)))
 
 (defun pogo--search-compare (fst snd)
-  "Returns true when fst has more matching lines than snd"
+  "Return non-nil when FST has more matching lines than SND."
   (let ((lst (mapcar (lambda (e) (length (cdr (assoc #'matches e))))
                      (list fst snd))))
     (> (car lst) (cadr lst))))
 
 (defun pogo--delimit (e l)
-  "Delimits the list l with the element e."
+  "Intersperse element E between items of list L."
   (if (or (null l) (null (cdr l)))
       l
     (cons (car l)
@@ -645,20 +687,20 @@ If PROJECT is not specified acts on the current project."
            e
            (pogo--delimit e (cdr l))))))
 
-(defun format-chunk (chunk)
-  "Convert a file match to a string."
+(defun pogo--format-chunk (chunk)
+  "Convert a file match CHUNK to a string."
   (let* ((line (cdr (assoc 'line chunk)))
          (content (cdr (assoc 'content chunk))))
     (format "%s: ~%s~" line content)))
 
-(defun format-file-match (file-match)
-  "Display file match in org mode."
+(defun pogo--format-file-match (file-match)
+  "Format FILE-MATCH as an org-mode heading with links."
   (let* ((path (cdr (assoc 'path file-match)))
          (matches (cdr (assoc 'matches file-match))))
     (format "* [[./%s][./%s]]\n%s"
             path
             path
-            (mapconcat #'format-chunk matches "\n"))))
+            (mapconcat #'pogo--format-chunk matches "\n"))))
 
 (defun pogo--search (&optional query arg)
   "Search a project."
@@ -680,17 +722,17 @@ If PROJECT is not specified acts on the current project."
                    (files (cdr (assoc 'files original-resp)))
                    (sorted-files
                     (pogo-print-and-return "Sorted files: "
-                                           (to-list
+                                           (pogo--to-list
                                             (sort
                                              files
                                              #'pogo--search-compare))))
                    (org-format-files
                     (pogo-print-and-return "org-format-files: "
-                                           (mapcar #'format-file-match sorted-files)))
+                                           (mapcar #'pogo--format-file-match sorted-files)))
                    (files-with-newlines (pogo--delimit "\n" org-format-files))
                    (results (cl-reduce #'concat files-with-newlines)))
               (insert (if (null results) "nil" results)))
-            (org-mode)
+            (when (fboundp 'org-mode) (org-mode))
             (switch-to-buffer buffer-name)))))))
 
 (defun pogo--find-file (&optional ff-variant)
@@ -705,7 +747,7 @@ would be `find-file-other-window' or `find-file-other-frame'"
          (ff (or ff-variant #'find-file)))
     (when file
       (funcall ff (expand-file-name file project-root))
-      (run-hooks 'pogoc-find-file-hook))))
+      (run-hooks 'pogo-find-file-hook))))
 
 ;; External functions
 
@@ -716,18 +758,19 @@ would be `find-file-other-window' or `find-file-other-frame'"
       (pogo-log "Using json.el: Upgrade to emacs with libjansson for better performance.")
       'json-read)))
 
-(defvar is-windows
+(defvar pogo--is-windows
   (or
    (eq system-type 'ms-dos)
    (eq system-type 'windows-nt)
-   (eq system-type 'cygwin)))
+   (eq system-type 'cygwin))
+  "Non-nil if running on a Windows-like system.")
 
 (defun pogo-try-start ()
   "Attempt to start the pogo server, run health checks."
   (interactive)
   (setenv "POGO_HOME" (expand-file-name "~"))
   (setenv "POGO_PLUGIN_PATH" (concat
-                              (string-remove-suffix (if is-windows "pogod.exe" "pogod")
+                              (string-remove-suffix (if pogo--is-windows "pogod.exe" "pogod")
                                                     (executable-find "pogod"))
                               "plugin"))
   (when (not pogo-server-started)
@@ -739,7 +782,7 @@ would be `find-file-other-window' or `find-file-other-frame'"
         (run-with-timer pogo-health-check-seconds nil 'pogo-health-check)))))
 
 (cl-defun pogo-health-check (&optional (retry-count 0) (retry-max 3))
-  (request "http://localhost:10000/health"
+  (request (concat pogo-server-url "/health")
     :success (cl-function (lambda (&key data &allow-other-keys)
                             (setq pogo-failure-count 0)
                             (setq pogo-server-started t)
@@ -757,7 +800,8 @@ would be `find-file-other-window' or `find-file-other-frame'"
   (pogo-health-check))
 
 (defun pogo-known-projects ()
-  (let ((resp (request-response-data (request "http://localhost:10000/projects"
+  "Return a list of known project paths from the pogo server."
+  (let ((resp (request-response-data (request (concat pogo-server-url "/projects")
                                        :sync t
                                        :parser pogo-json-parser
                                        :success (cl-function
@@ -792,6 +836,7 @@ An open project is a project with any open buffers."
                  (buffer-list)))))
 
 (defun pogo-visit (relative-path)
+  "Visit RELATIVE-PATH and return its project root from the pogo server."
   (let* ((path (expand-file-name relative-path))
         (path-sym (intern path)))
     (or
@@ -805,6 +850,7 @@ An open project is a project with any open buffers."
            result))))))
 
 (defun pogo-parse-visit-call (resp)
+  "Parse the project path from a visit API response RESP."
   (if (eq 'json-parse-buffer pogo-json-parser)
       (if resp
           (gethash "path" (gethash "project" resp))
@@ -812,12 +858,12 @@ An open project is a project with any open buffers."
     (cdr (assoc 'path (assoc 'project resp)))))
 
 (defun pogo-visit-call (path)
-  "Path must be absolute"
+  "Call the pogo visit API for PATH, which must be absolute."
   (progn
     (pogo-log "Visiting %s" path)
     (pogo-parse-visit-call
      (request-response-data
-      (request "http://localhost:10000/file"
+      (request (concat pogo-server-url "/file")
         :sync t
         :type "POST"
         :data (json-encode
@@ -840,12 +886,13 @@ An open project is a project with any open buffers."
                     (pogo-check-live)))))))))
 
 (defun pogo-get-search-plugin-path ()
+  "Return the path of the pogo search plugin."
   (if pogo-search-plugin
       pogo-search-plugin
     (letrec
         ((resp
           (request-response-data
-           (request "http://localhost:10000/plugins"
+           (request (concat pogo-server-url "/plugins")
              :sync t
              :parser pogo-json-parser
              :success (cl-function (lambda (&key data &allow-other-keys)
@@ -875,21 +922,26 @@ An open project is a project with any open buffers."
         search-plugin))))
 
 (defun pogo-print-and-return (msg v)
+  "Log MSG with value V and return V."
   (progn
     (pogo-log "%s %s" msg v)
     v))
 
 (defun pogo-nil-or-empty (str)
-  (or (not str) (str= "" str)))
+  "Return non-nil if STR is nil or empty."
+  (or (not str) (string= "" str)))
 
-(defun to-list (v)
+(defun pogo--to-list (v)
+  "Convert vector or sequence V to a list."
   (append v nil))
 
 ;; Golang utility encodes spaces as + instead of %20
-(defun fix-spaces (s)
-  (replace-regexp-in-string "\+" "%20" s))
+(defun pogo--fix-spaces (s)
+  "Replace + with %%20 in string S for URL encoding."
+  (replace-regexp-in-string "\\+" "%20" s))
 
 (defun pogo-parse-result (resp)
+  "Parse a pogo API search/file result from RESP."
   (if (eq 'json-parse-buffer pogo-json-parser)
       (let*
           ((decoded (pogo-print-and-return "Decoded: " resp))
@@ -923,17 +975,18 @@ An open project is a project with any open buffers."
               al))))))
 
 (defun pogo-project-search (path query)
+  "Search for QUERY in the project at PATH via the pogo search plugin."
   (let
       ((command (url-hexify-string (json-encode `(("type" . "search")
                                                   ("projectRoot" . ,path)
                                                   ("duration" . "10s")
                                                   ("data" . ,query))))))
-    (to-list
+    (pogo--to-list
      (cdr
       (assoc
        'results
        (pogo-parse-result
-        (request-response-data (request "http://localhost:10000/plugin"
+        (request-response-data (request (concat pogo-server-url "/plugin")
                                  :sync t
                                  :type "POST"
                                  :data (json-encode
@@ -956,13 +1009,14 @@ An open project is a project with any open buffers."
                                            (pogo-check-live)))))))))))
 
 (defun pogo-project-files (path)
-  (to-list
+  "Return a list of files in the project at PATH."
+  (pogo--to-list
    (cdr
     (assoc
      'paths
      (pogo-parse-result
       (request-response-data
-       (request (format "http://localhost:10000/projects/file?path=%s" (url-hexify-string path))
+       (request (format "%s/projects/file?path=%s" pogo-server-url (url-hexify-string path))
          :sync t
          :type "GET"
          :parser pogo-json-parser
@@ -976,6 +1030,7 @@ An open project is a project with any open buffers."
                    (pogo-check-live))))))))))
 
 (defun pogo-project-root (&optional dir)
+  "Return the project root for DIR, defaulting to `default-directory'."
   (let ((dir (or dir default-directory)))
     (pogo-visit dir)))
 
@@ -987,13 +1042,13 @@ Starts the search for the project with DIR."
   (pogo-ensure-project (pogo-project-root dir)))
 
 ;;;###autoload
-(defun pogo-search (&optional)
+(defun pogo-search ()
   "Search a project by regexp."
   (interactive)
   (pogo--search))
 
 ;;;###autoload
-(defun pogo-find-file (&optional)
+(defun pogo-find-file ()
   "Jump to a project's file using completion."
   (interactive)
   (pogo--find-file))
@@ -1099,7 +1154,7 @@ is chosen."
                     (lambda (a b) (< (car a) (car b)))))))
 
 (defun pogo-commander-bindings ()
-  "Setup the keybindings for the Pogo Commander."
+  "Set up the keybindings for the Pogo Commander."
 
   (def-pogo-commander-method ?g
     "Search project."
@@ -1134,33 +1189,6 @@ is chosen."
   (let ((mode-line (funcall pogo-mode-line-function)))
     (setq pogo--mode-line mode-line))
   (force-mode-line-update))
-
-(defcustom pogo-mode-line-function 'pogo-default-mode-line
-  "The function to use to generate project-specific mode-line.
-The default function adds the project name and type to the mode-line.
-See also `pogo-update-mode-line'."
-  :group 'pogo
-  :type 'function
-  :package-version '(pogo . "0.0.1"))
-
-(defcustom pogo-mode-line-prefix
-  " Pogo"
-  "Mode line lighter prefix for Pogo.
-It's used by `pogo-default-mode-line'
-when using dynamic mode line lighter and is the only
-thing shown in the mode line otherwise."
-  :group 'pogo
-  :type 'string
-  :package-version '(pogo . "0.0.1"))
-
-(defcustom pogo-track-known-projects-automatically t
-  "Controls whether Pogo will automatically register known projects.
-
-When set to nil you'll have always add projects explicitly with
-`pogo-add-known-project'."
-  :group 'pogo
-  :type 'boolean
-  :package-version '(pogo . "0.0.1"))
 
 (defun pogo-default-mode-line ()
   "Report project name and type in the modeline."
