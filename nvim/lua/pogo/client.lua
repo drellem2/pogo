@@ -1,7 +1,10 @@
 -- pogo/client.lua - HTTP client for pogod daemon
 local M = {}
 
-M.base_url = "http://localhost:10000"
+M.base_url = (function()
+  local port = vim.env.POGO_PORT or "10000"
+  return "http://localhost:" .. port
+end)()
 M._search_plugin = nil
 M._server_started = false
 

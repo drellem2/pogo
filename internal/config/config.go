@@ -1,0 +1,126 @@
+package config
+
+import (
+	"bufio"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+)
+
+const (
+	DefaultPort = 10000
+)
+
+// Config holds pogo daemon configuration.
+type Config struct {
+	Port int
+}
+
+// Load reads configuration from (in priority order):
+//  1. POGO_PORT environment variable
+//  2. ~/.config/pogo/config.toml [server] port field
+//  3. Default (10000)
+func Load() *Config {
+	cfg := &Config{Port: DefaultPort}
+
+	// Try config file first (lowest priority, overridden by env)
+	if fileCfg, err := loadConfigFile(); err == nil {
+		if fileCfg.Port != 0 {
+			cfg.Port = fileCfg.Port
+		}
+	}
+
+	// Environment variable overrides config file
+	if portStr := os.Getenv("POGO_PORT"); portStr != "" {
+		if port, err := strconv.Atoi(portStr); err == nil && port > 0 && port <= 65535 {
+			cfg.Port = port
+		}
+	}
+
+	return cfg
+}
+
+// ServerURL returns the base URL for connecting to the pogo daemon.
+func (c *Config) ServerURL() string {
+	return fmt.Sprintf("http://localhost:%d", c.Port)
+}
+
+// ListenAddr returns the address string for the server to listen on.
+func (c *Config) ListenAddr() string {
+	return fmt.Sprintf(":%d", c.Port)
+}
+
+// ConfigDir returns the pogo configuration directory path.
+func ConfigDir() string {
+	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
+		return filepath.Join(xdg, "pogo")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".config", "pogo")
+}
+
+// ConfigFilePath returns the path to the pogo config file.
+func ConfigFilePath() string {
+	dir := ConfigDir()
+	if dir == "" {
+		return ""
+	}
+	return filepath.Join(dir, "config.toml")
+}
+
+// loadConfigFile reads port from the TOML config file.
+// Only parses the minimal subset needed: [server] section with port key.
+func loadConfigFile() (*Config, error) {
+	path := ConfigFilePath()
+	if path == "" {
+		return nil, fmt.Errorf("no config path")
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	cfg := &Config{}
+	inServerSection := false
+	scanner := bufio.NewScanner(f)
+
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+
+		// Skip empty lines and comments
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		// Section headers
+		if strings.HasPrefix(line, "[") {
+			inServerSection = strings.TrimSpace(strings.Trim(line, "[]")) == "server"
+			continue
+		}
+
+		// Key-value pairs in [server] section
+		if inServerSection {
+			parts := strings.SplitN(line, "=", 2)
+			if len(parts) != 2 {
+				continue
+			}
+			key := strings.TrimSpace(parts[0])
+			val := strings.TrimSpace(parts[1])
+
+			if key == "port" {
+				if port, err := strconv.Atoi(val); err == nil && port > 0 && port <= 65535 {
+					cfg.Port = port
+				}
+			}
+		}
+	}
+
+	return cfg, scanner.Err()
+}

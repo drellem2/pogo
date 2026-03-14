@@ -46,9 +46,12 @@ export interface SearchResponse {
 }
 
 function getBaseUrl(): string {
+  const defaultUrl = process.env.POGO_PORT
+    ? `http://localhost:${process.env.POGO_PORT}`
+    : "http://localhost:10000";
   return vscode.workspace
     .getConfiguration("pogo")
-    .get<string>("serverUrl", "http://localhost:10000");
+    .get<string>("serverUrl", defaultUrl);
 }
 
 function request(method: string, path: string, body?: string): Promise<string> {

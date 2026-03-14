@@ -17,6 +17,7 @@ import (
 
 	"github.com/nightlyone/lockfile"
 
+	"github.com/drellem2/pogo/internal/config"
 	"github.com/drellem2/pogo/internal/driver"
 	"github.com/drellem2/pogo/internal/project"
 
@@ -177,6 +178,7 @@ func status(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleRequests() {
+	cfg := config.Load()
 	http.HandleFunc("/", homePage)
 	http.HandleFunc("/file", file)
 	http.HandleFunc("/projects/{projectId}", projectById)
@@ -185,8 +187,9 @@ func handleRequests() {
 	http.HandleFunc("/plugins", plugins)
 	http.HandleFunc("/health", health)
 	http.HandleFunc("/status", status)
-	fmt.Println("pogod starting")
-	log.Fatal(http.ListenAndServe(":10000", nil))
+	addr := cfg.ListenAddr()
+	fmt.Printf("pogod starting on %s\n", addr)
+	log.Fatal(http.ListenAndServe(addr, nil))
 }
 
 func main() {

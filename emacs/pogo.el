@@ -74,8 +74,10 @@ DESCRIPTION is a one-line description of what the key selects.")
   :link '(url-link :tag "GitHub" "https://github.com/drellem2/pogo")
   :link '(emacs-commentary-link :tag "Commentary" "pogo"))
 
-(defcustom pogo-server-url "http://localhost:10000"
-  "URL of the pogo server."
+(defcustom pogo-server-url
+  (format "http://localhost:%s" (or (getenv "POGO_PORT") "10000"))
+  "URL of the pogo server.
+Defaults to http://localhost:10000, or uses POGO_PORT env var if set."
   :group 'pogo
   :type 'string
   :package-version '(pogo . "0.0.1"))

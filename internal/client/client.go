@@ -20,9 +20,12 @@ import (
 
 	"github.com/nightlyone/lockfile"
 
+	"github.com/drellem2/pogo/internal/config"
 	"github.com/drellem2/pogo/internal/project"
 	pogoPlugin "github.com/drellem2/pogo/pkg/plugin"
 )
+
+var serverURL = config.Load().ServerURL()
 
 type ProjectStatusResponse struct {
 	Id        int    `json:"id"`
@@ -71,7 +74,7 @@ type SearchRequest struct {
 }
 
 func HealthCheck() error {
-	_, err := http.Post("http://localhost:10000/health", "application/json",
+	_, err := http.Post(serverURL+"/health", "application/json",
 		nil)
 	return err
 }
@@ -148,7 +151,7 @@ func RunWithHealthCheck[T ClientResp](run func() (T, error)) (T, error) {
 
 func GetProjects() ([]project.Project, error) {
 	projs, err := RunWithHealthCheck(func() ([]project.Project, error) {
-		r, err := http.Get("http://localhost:10000/projects")
+		r, err := http.Get(serverURL + "/projects")
 		if err != nil {
 			return nil, err
 		}
@@ -171,7 +174,7 @@ func GetProjects() ([]project.Project, error) {
 
 func GetPlugins() ([]string, error) {
 	plugins, err := RunWithHealthCheck(func() ([]string, error) {
-		r, err := http.Get("http://localhost:10000/plugins")
+		r, err := http.Get(serverURL + "/plugins")
 		if err != nil {
 			return nil, err
 		}
@@ -237,7 +240,7 @@ func Search(query string, dir string) (*SearchResponse, error) {
 	results, err := RunWithHealthCheck(func() (*SearchResponse, error) {
 		client := &http.Client{}
 
-		req, err := http.NewRequest("POST", "http://localhost:10000/plugin",
+		req, err := http.NewRequest("POST", serverURL+"/plugin",
 			strings.NewReader(
 				fmt.Sprintf(`{"plugin": "%s",
                                               "value": "%s"}`,
@@ -283,7 +286,7 @@ func Search(query string, dir string) (*SearchResponse, error) {
 
 func GetStatus() ([]ProjectStatusResponse, error) {
 	statuses, err := RunWithHealthCheck(func() ([]ProjectStatusResponse, error) {
-		r, err := http.Get("http://localhost:10000/status")
+		r, err := http.Get(serverURL + "/status")
 		if err != nil {
 			return nil, err
 		}
@@ -336,7 +339,7 @@ func SearchAll(query string) ([]*SearchResponse, error) {
 
 		resp, err := RunWithHealthCheck(func() (*SearchResponse, error) {
 			client := &http.Client{}
-			httpReq, err := http.NewRequest("POST", "http://localhost:10000/plugin",
+			httpReq, err := http.NewRequest("POST", serverURL+"/plugin",
 				strings.NewReader(
 					fmt.Sprintf(`{"plugin": "%s", "value": "%s"}`,
 						searchPluginPath, encoded)))
@@ -387,7 +390,7 @@ func SearchAll(query string) ([]*SearchResponse, error) {
 
 func Visit(path string) (*project.VisitResponse, error) {
 	visitResp, err := RunWithHealthCheck(func() (*project.VisitResponse, error) {
-		r, err := http.Post("http://localhost:10000/file",
+		r, err := http.Post(serverURL+"/file",
 			"application/json",
 			strings.NewReader(
 				fmt.Sprintf(`{"path": "%s"}`, path)))
