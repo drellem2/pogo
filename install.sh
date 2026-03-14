@@ -206,29 +206,109 @@ if command -v tmux >/dev/null 2>&1; then
 fi
 
 ###############################################################################
-# Editor integrations (stub — plugins not yet available)
+# Editor integrations
 ###############################################################################
+
+EDITOR_SOURCE_URL="https://raw.githubusercontent.com/${REPO}/main"
 
 echo "--- Editor Integrations ---"
 
-has_editor=false
-for editor in nvim vim emacs code; do
-  if command -v "$editor" >/dev/null 2>&1; then
-    has_editor=true
-    break
-  fi
-done
+# Emacs
+if command -v emacs >/dev/null 2>&1; then
+  emacs_dir="$HOME/.emacs.d/site-lisp"
 
-if [ "$has_editor" = true ]; then
-  echo "Editor plugins for pogo are not yet available."
-  echo "Detected editors:"
-  command -v nvim >/dev/null 2>&1 && echo "  - Neovim"
-  command -v vim  >/dev/null 2>&1 && echo "  - Vim"
-  command -v emacs >/dev/null 2>&1 && echo "  - Emacs"
-  command -v code >/dev/null 2>&1 && echo "  - VS Code"
-  echo "Watch https://github.com/${REPO} for editor plugin releases."
-else
-  echo "No supported editors detected."
+  if [ -f "${emacs_dir}/pogo.el" ]; then
+    echo "  emacs: pogo.el already installed in ${emacs_dir}, skipping."
+  elif ask_yn "  Install Emacs integration (pogo.el) into ${emacs_dir}?"; then
+    mkdir -p "$emacs_dir"
+    if curl -fsSL -o "${emacs_dir}/pogo.el" "${EDITOR_SOURCE_URL}/emacs/pogo.el"; then
+      echo "  emacs: pogo.el installed to ${emacs_dir}"
+      echo ""
+      echo "  Add to your init.el:"
+      echo "    (add-to-list 'load-path \"${emacs_dir}\")"
+      echo "    (require 'pogo)"
+    else
+      echo "  emacs: failed to download pogo.el" >&2
+    fi
+  else
+    echo "  emacs: skipped."
+  fi
+  echo ""
+fi
+
+# Neovim
+if command -v nvim >/dev/null 2>&1; then
+  nvim_data_dir="${XDG_DATA_HOME:-$HOME/.local/share}/nvim/site/pack/pogo/start/pogo"
+
+  if [ -d "$nvim_data_dir" ]; then
+    echo "  neovim: pogo plugin already installed in ${nvim_data_dir}, skipping."
+  elif ask_yn "  Install Neovim integration into ${nvim_data_dir}?"; then
+    mkdir -p "${nvim_data_dir}/lua/pogo"
+    mkdir -p "${nvim_data_dir}/plugin"
+    nvim_ok=true
+    for f in init.lua client.lua telescope.lua; do
+      if ! curl -fsSL -o "${nvim_data_dir}/lua/pogo/${f}" "${EDITOR_SOURCE_URL}/nvim/lua/pogo/${f}"; then
+        echo "  neovim: failed to download ${f}" >&2
+        nvim_ok=false
+      fi
+    done
+    if ! curl -fsSL -o "${nvim_data_dir}/plugin/pogo.lua" "${EDITOR_SOURCE_URL}/nvim/plugin/pogo.lua"; then
+      echo "  neovim: failed to download plugin/pogo.lua" >&2
+      nvim_ok=false
+    fi
+    if [ "$nvim_ok" = true ]; then
+      echo "  neovim: plugin installed to ${nvim_data_dir}"
+      echo ""
+      echo "  The plugin loads automatically. Configure in your init.lua:"
+      echo "    require('pogo').setup({})"
+    fi
+  else
+    echo "  neovim: skipped."
+  fi
+  echo ""
+fi
+
+# VS Code
+if command -v code >/dev/null 2>&1; then
+  if code --list-extensions 2>/dev/null | grep -qi pogo; then
+    echo "  vscode: pogo extension already installed, skipping."
+  elif ask_yn "  Install VS Code extension from source?"; then
+    vscode_tmpdir=$(mktemp -d)
+    echo "  Downloading VS Code extension source..."
+    vscode_ok=true
+    for f in package.json tsconfig.json src/extension.ts src/projects.ts src/client.ts; do
+      target_dir=$(dirname "${vscode_tmpdir}/${f}")
+      mkdir -p "$target_dir"
+      if ! curl -fsSL -o "${vscode_tmpdir}/${f}" "${EDITOR_SOURCE_URL}/vscode/${f}"; then
+        echo "  vscode: failed to download ${f}" >&2
+        vscode_ok=false
+      fi
+    done
+    if [ "$vscode_ok" = true ] && command -v npm >/dev/null 2>&1; then
+      echo "  Building and installing extension..."
+      (cd "$vscode_tmpdir" && npm install --ignore-scripts 2>/dev/null && npx vsce package -o pogo.vsix 2>/dev/null && code --install-extension pogo.vsix 2>/dev/null)
+      if [ $? -eq 0 ]; then
+        echo "  vscode: extension installed successfully."
+      else
+        echo "  vscode: automated install failed."
+        echo ""
+        echo "  To install manually:"
+        echo "    cd ${vscode_tmpdir} && npm install && npx vsce package && code --install-extension pogo.vsix"
+      fi
+    elif [ "$vscode_ok" = true ]; then
+      echo "  vscode: npm not found. To install manually:"
+      echo "    git clone https://github.com/${REPO}.git && cd pogo/vscode"
+      echo "    npm install && npx vsce package && code --install-extension pogo.vsix"
+    fi
+    rm -rf "$vscode_tmpdir"
+  else
+    echo "  vscode: skipped."
+  fi
+  echo ""
+fi
+
+if ! command -v emacs >/dev/null 2>&1 && ! command -v nvim >/dev/null 2>&1 && ! command -v code >/dev/null 2>&1; then
+  echo "No supported editors detected (emacs, neovim, vscode)."
 fi
 
 echo ""
