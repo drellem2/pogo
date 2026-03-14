@@ -61,6 +61,27 @@ jobs:
       - name: Run Emacs Lisp tests
         run: emacs/run-tests.sh
 
+  nvim-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Neovim
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y neovim
+
+      - name: Run Neovim plugin tests
+        run: nvim/test_nvim.sh
+
+  bash-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Bash shell integration tests
+        run: shell/bashrc_test.sh
+
   build:
     runs-on: ubuntu-latest
     strategy:
