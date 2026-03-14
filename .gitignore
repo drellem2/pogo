@@ -1,6 +1,7 @@
 bin
 
 # Gas Town (added by gt)
+.beads/
 .runtime/
 .claude/
 .logs/
