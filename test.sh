@@ -7,3 +7,6 @@ echo "Testing pogo" && \
 go test ./internal/project && \
 go test ./internal/driver && \
 go test ./internal/search
+
+echo "Testing neovim plugin" && \
+bash nvim/test_nvim.sh
