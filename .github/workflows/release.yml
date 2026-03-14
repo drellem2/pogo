@@ -1,0 +1,45 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        goos: [linux, darwin]
+        goarch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+
+      - name: Build binaries
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          mkdir -p dist
+          for cmd in cmd/*/; do
+            name=$(basename "$cmd")
+            output="dist/${name}-${GOOS}-${GOARCH}"
+            echo "Building $output"
+            go build -ldflags="-s -w" -o "$output" "./$cmd"
+          done
+
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for bin in dist/*; do
+            echo "Uploading $bin"
+            gh release upload "${{ github.ref_name }}" "$bin"
+          done
