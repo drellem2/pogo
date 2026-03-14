@@ -1,0 +1,2 @@
+-- pogo.nvim plugin loader
+-- Lazy-loads pogo module; call require("pogo").setup() to activate
