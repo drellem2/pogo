@@ -1,0 +1,24 @@
+#!/bin/sh
+# Pre-commit hook: fast checks before allowing commit
+# Install: ln -sf ../../hooks/pre-commit .git/hooks/pre-commit
+
+set -e
+
+# Check formatting (fast — no writes, just lists violations)
+unformatted=$(gofmt -l . 2>/dev/null | grep -v vendor || true)
+if [ -n "$unformatted" ]; then
+    echo "gofmt: files not formatted:"
+    echo "$unformatted"
+    echo ""
+    echo "Run: gofmt -w . or ./fmt.sh"
+    exit 1
+fi
+
+# Check build (catches compile errors)
+go build ./... 2>&1
+if [ $? -ne 0 ]; then
+    echo "go build failed"
+    exit 1
+fi
+
+echo "pre-commit: ok"
