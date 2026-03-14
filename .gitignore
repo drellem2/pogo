@@ -1,5 +1,7 @@
 bin
 .beads/
+.pogo/
+_testdata/**/.pogo/
 
 # Gas Town (added by gt)
 .runtime/
