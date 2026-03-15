@@ -22,21 +22,20 @@ POGO_INSTALL_DIR=~/.local/bin curl -fsSL https://raw.githubusercontent.com/drell
 ```
 
 ### Build from Source
-*(instructions for Mac)*
 
-1. Install golang.
-`brew install go`
-2. Clone the repository
-`git clone git@github.com:drellem2/pogo && cd pogo`
-3. Ensure gopath is set.
-`export GOPATH=$(cd ..; pwd)`
-4. Install executables.
-`GO111MODULE=on go install github.com/drellem2/pogo/cmd/...`
-5. Add the gopath `bin` file to your path.
-`export PATH=$PATH:$(cd ../bin; pwd)`
-6. Add the zshell tool to your `.zshrc` file. (You'll want to make some modifications to it first.)
-`cat shell/.zshrc >> ~/.zshrc`
-7. Install the emacs client (instructions below).
+Requires [Go](https://go.dev/dl/) 1.21+.
+
+```sh
+git clone https://github.com/drellem2/pogo.git && cd pogo
+./build.sh                    # fmt, test, build
+export PATH="$PWD/bin:$PATH"  # or copy bin/* to ~/.local/bin
+```
+
+Then run the interactive installer to set up shell/editor integrations:
+
+```sh
+./install.sh --interactive
+```
 
 ## Integrations
 
