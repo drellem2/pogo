@@ -83,6 +83,33 @@ Auto-discover projects as you `cd` into directories. All shell integrations prov
 Zoekt query examples can be found [here](https://github.com/sourcegraph/zoekt/blob/main/web/templates.go#L158).
 e.g. `pose banana` or `pose banana .` will search the current directory for `banana`.
 
+## How pogo compares to alternatives
+
+Most project tools are scoped to a single editor or shell. Pogo takes a different approach: a background daemon that discovers and indexes repositories automatically, then exposes them to any integration.
+
+| | pogo | [Projectile](https://github.com/bbatsov/projectile) | [project.el](https://www.gnu.org/software/emacs/manual/html_node/emacs/Projects.html) | [telescope.nvim](https://github.com/nvim-telescope/telescope.nvim) |
+|---|---|---|---|---|
+| **Scope** | All local repos, all editors and shells | Emacs only | Emacs only | Neovim only |
+| **Discovery** | Automatic — daemon watches as you `cd` | Manual (`projectile-add-known-project`) or dir-local | Automatic within VC dirs | Manual (`:Telescope find_files`) |
+| **Code search** | [zoekt](https://github.com/sourcegraph/zoekt) trigram index, searches all repos | `grep`/`rg` per project | `grep`/`xref` per project | `rg`/`fd` per project |
+| **Indexing** | Background, incremental, always ready | On-demand | On-demand | On-demand |
+| **Cross-repo** | Built-in — `pose QUERY` searches everything | No (single project) | No (single project) | No (single project) |
+| **Shell integration** | Bash, Zsh, Fish, tmux | N/A | N/A | N/A |
+
+**What pogo does differently:**
+
+- **Daemon-based auto-discovery.** You never register projects. Open a terminal in a git repo and pogo learns about it. Switch editors and the same project list is there.
+- **Background zoekt indexing.** Code search uses a pre-built trigram index, so results return instantly even in large repos. The index updates in the background as files change.
+- **One tool, many surfaces.** Instead of configuring project navigation separately in each editor and shell, pogo provides a single daemon that all integrations talk to.
+
+**Where alternatives do better:**
+
+- **Projectile** has deep Emacs integration — project-scoped compilation, test runners, and buffer management that pogo's Emacs mode doesn't replicate.
+- **project.el** ships with Emacs and requires zero setup. If you only use Emacs and don't need cross-repo search, it's simpler.
+- **telescope.nvim** has a rich extension ecosystem and tight Neovim integration (live grep, LSP pickers, git status) that goes well beyond project switching.
+
+If you live in one editor and don't need cross-repo search, these tools may be all you need. Pogo is useful when you work across multiple editors, terminals, or repositories and want a single source of truth for project discovery and code search.
+
 ## Environment Variables
 
 - `POGO_HOME`: Folder for pogo to store indexes.
