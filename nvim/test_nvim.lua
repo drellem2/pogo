@@ -152,11 +152,25 @@ vim.json.encode = vim.json.encode or function(val)
 end
 
 vim.json.decode = vim.json.decode or function(str)
-  -- For tests, we'll set up mock responses that return pre-decoded tables
-  -- This is a minimal fallback
+  -- Minimal JSON decoder for tests (handles the subset produced by our encoder)
   if str == "[]" then return {} end
   if str == "{}" then return {} end
-  error("vim.json.decode mock: cannot parse: " .. str)
+  -- Use Lua load to parse JSON-like strings (safe for test data)
+  -- Convert JSON syntax to Lua table syntax
+  local lua_str = str
+  -- Replace JSON null with nil-compatible value
+  lua_str = lua_str:gsub(":null", ":nil")
+  -- Replace JSON true/false (already valid Lua)
+  -- Convert JSON arrays/objects: JSON uses [] for arrays, Lua uses {}
+  lua_str = lua_str:gsub("%[", "{")
+  lua_str = lua_str:gsub("%]", "}")
+  -- Wrap keys in brackets: "key": -> ["key"]=
+  lua_str = lua_str:gsub('"([^"]+)"%s*:', '["%1"]=')
+  local fn, err = load("return " .. lua_str)
+  if not fn then
+    error("vim.json.decode mock: cannot parse: " .. str .. " (" .. (err or "unknown") .. ")")
+  end
+  return fn()
 end
 
 vim.system = function(cmd, opts)
@@ -164,10 +178,11 @@ vim.system = function(cmd, opts)
   -- Find URL in the curl command
   local url = cmd[#cmd]
   local response = nil
+  local best_len = 0
   for suffix, resp in pairs(mock_responses) do
-    if url:find(suffix, 1, true) then
+    if url:find(suffix, 1, true) and #suffix > best_len then
       response = resp
-      break
+      best_len = #suffix
     end
   end
   return {
