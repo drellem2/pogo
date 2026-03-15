@@ -67,7 +67,7 @@ Auto-discover projects as you `cd` into directories. All shell integrations prov
 | Editor | Status | Docs |
 |--------|--------|------|
 | [Emacs](docs/emacs.md) | Supported | Full minor mode with project navigation, code search, and buffer management |
-| [Neovim](docs/neovim.md) | Planned | Lua plugin with Telescope/fzf-lua integration |
+| [Neovim](docs/neovim.md) | Supported | Lua plugin with Telescope/fzf-lua integration |
 | [VS Code](docs/vscode.md) | In development | Extension with command palette and search panel |
 
 > **Emacs**: Install with [straight.el](https://github.com/radian-software/straight.el) or manually from the `.el` file. See [docs/emacs.md](docs/emacs.md) for details.

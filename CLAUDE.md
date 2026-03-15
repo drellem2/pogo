@@ -57,7 +57,7 @@ When working on docs or integration code, verify statuses match reality before w
 | Fish | Supported | `shell/pogo.fish` |
 | tmux | Supported | `tmux/pogo.tmux` |
 | VS Code | In development | `vscode/` |
-| Neovim | Planned | No code yet |
+| Neovim | Supported | `nvim/` |
 
 If you add or advance an integration, update both `README.md` and this table.
 
