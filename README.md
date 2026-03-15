@@ -67,10 +67,10 @@ Auto-discover projects as you `cd` into directories. All shell integrations prov
 | Editor | Status | Docs |
 |--------|--------|------|
 | [Emacs](docs/emacs.md) | Supported | Full minor mode with project navigation, code search, and buffer management |
-| [Neovim](docs/neovim.md) | In development | Lua plugin with Telescope/fzf-lua integration |
-| [VS Code](docs/vscode.md) | Planned | Extension with command palette and search panel |
+| [Neovim](docs/neovim.md) | Planned | Lua plugin with Telescope/fzf-lua integration |
+| [VS Code](docs/vscode.md) | In development | Extension with command palette and search panel |
 
-> **Emacs requires a manual install step**: Open `emacs/pogo.el` in Emacs and run `M-x package-install-from-buffer`, then configure in `init.el`. See [docs/emacs.md](docs/emacs.md) for details.
+> **Emacs**: Install with [straight.el](https://github.com/radian-software/straight.el) or manually from the `.el` file. See [docs/emacs.md](docs/emacs.md) for details.
 
 > **Neovim plugin manager configuration required**: Once available, the Neovim plugin will need to be added to your plugin manager (lazy.nvim, packer, etc.) and configured in your `init.lua`. See [docs/neovim.md](docs/neovim.md) for details.
 

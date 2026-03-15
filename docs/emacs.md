@@ -4,7 +4,32 @@ Pogo provides `pogo-mode`, an Emacs minor mode for project navigation and code i
 
 ## Installation
 
-> **Manual step required**: You must install the package from the `.el` file using `M-x package-install-from-buffer`.
+### straight.el (recommended)
+
+```emacs-lisp
+(straight-use-package
+ '(pogo :type git
+        :host github
+        :repo "drellem2/pogo"
+        :files ("emacs/*.el")))
+
+(require 'pogo)
+(pogo-mode +1)
+(define-key pogo-mode-map (kbd "C-c p") 'pogo-command-map)
+```
+
+Or with `use-package` and straight:
+
+```emacs-lisp
+(use-package pogo
+  :straight (:type git :host github :repo "drellem2/pogo"
+             :files ("emacs/*.el"))
+  :bind-keymap ("C-c p" . pogo-command-map)
+  :config
+  (pogo-mode +1))
+```
+
+### Manual
 
 1. Ensure the pogo server is built and accessible (see main [README](../README.md)).
 2. Open `emacs/pogo.el` in Emacs.

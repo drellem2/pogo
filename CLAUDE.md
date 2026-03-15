@@ -45,6 +45,22 @@ pogo server stop         # Stop the pogo daemon
 - **Finding related code**: `pose` searches all indexed projects at once - faster than grepping repos one by one.
 - **Discovering local repos**: `lsp` shows everything pogo knows about, useful when you're unsure what's cloned locally.
 
+## Integration Status
+
+When working on docs or integration code, verify statuses match reality before writing:
+
+| Integration | Status | Code location |
+|-------------|--------|---------------|
+| Emacs | Supported | `emacs/pogo.el` |
+| Zsh | Supported | `shell/.zshrc` |
+| Bash | Supported | `shell/.bashrc` |
+| Fish | Supported | `shell/pogo.fish` |
+| tmux | Supported | `tmux/pogo.tmux` |
+| VS Code | In development | `vscode/` |
+| Neovim | Planned | No code yet |
+
+If you add or advance an integration, update both `README.md` and this table.
+
 ## Development
 
 Go project. Build and test:
