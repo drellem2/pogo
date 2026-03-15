@@ -7,6 +7,7 @@ package main
 import _ "net/http/pprof"
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
 	"log"
 	"net/http"
@@ -23,6 +24,8 @@ import (
 
 	pogoPlugin "github.com/drellem2/pogo/pkg/plugin"
 )
+
+var bindFlag = flag.String("bind", "", "address to bind the server to (default: 127.0.0.1)")
 
 func health(w http.ResponseWriter, r *http.Request) {
 	fmt.Println("Visited /health")
@@ -179,6 +182,9 @@ func status(w http.ResponseWriter, r *http.Request) {
 
 func handleRequests() {
 	cfg := config.Load()
+	if *bindFlag != "" {
+		cfg.Bind = *bindFlag
+	}
 	http.HandleFunc("/", homePage)
 	http.HandleFunc("/file", file)
 	http.HandleFunc("/projects/{projectId}", projectById)
@@ -193,6 +199,8 @@ func handleRequests() {
 }
 
 func main() {
+	flag.Parse()
+
 	// Acquire lockfile
 	lock, err := lockfile.New(filepath.Join(os.TempDir(), "pogo.pid"))
 	if err != nil {

@@ -11,11 +11,13 @@ import (
 
 const (
 	DefaultPort = 10000
+	DefaultBind = "127.0.0.1"
 )
 
 // Config holds pogo daemon configuration.
 type Config struct {
 	Port int
+	Bind string
 }
 
 // Load reads configuration from (in priority order):
@@ -23,20 +25,26 @@ type Config struct {
 //  2. ~/.config/pogo/config.toml [server] port field
 //  3. Default (10000)
 func Load() *Config {
-	cfg := &Config{Port: DefaultPort}
+	cfg := &Config{Port: DefaultPort, Bind: DefaultBind}
 
 	// Try config file first (lowest priority, overridden by env)
 	if fileCfg, err := loadConfigFile(); err == nil {
 		if fileCfg.Port != 0 {
 			cfg.Port = fileCfg.Port
 		}
+		if fileCfg.Bind != "" {
+			cfg.Bind = fileCfg.Bind
+		}
 	}
 
-	// Environment variable overrides config file
+	// Environment variables override config file
 	if portStr := os.Getenv("POGO_PORT"); portStr != "" {
 		if port, err := strconv.Atoi(portStr); err == nil && port > 0 && port <= 65535 {
 			cfg.Port = port
 		}
+	}
+	if bind := os.Getenv("POGO_BIND"); bind != "" {
+		cfg.Bind = bind
 	}
 
 	return cfg
@@ -49,7 +57,7 @@ func (c *Config) ServerURL() string {
 
 // ListenAddr returns the address string for the server to listen on.
 func (c *Config) ListenAddr() string {
-	return fmt.Sprintf(":%d", c.Port)
+	return fmt.Sprintf("%s:%d", c.Bind, c.Port)
 }
 
 // ConfigDir returns the pogo configuration directory path.
@@ -114,10 +122,13 @@ func loadConfigFile() (*Config, error) {
 			key := strings.TrimSpace(parts[0])
 			val := strings.TrimSpace(parts[1])
 
-			if key == "port" {
+			switch key {
+			case "port":
 				if port, err := strconv.Atoi(val); err == nil && port > 0 && port <= 65535 {
 					cfg.Port = port
 				}
+			case "bind":
+				cfg.Bind = val
 			}
 		}
 	}

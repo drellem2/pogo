@@ -94,8 +94,59 @@ func TestServerURL(t *testing.T) {
 }
 
 func TestListenAddr(t *testing.T) {
-	cfg := &Config{Port: 12345}
-	if got := cfg.ListenAddr(); got != ":12345" {
-		t.Errorf("expected :12345, got %s", got)
+	cfg := &Config{Port: 12345, Bind: "127.0.0.1"}
+	if got := cfg.ListenAddr(); got != "127.0.0.1:12345" {
+		t.Errorf("expected 127.0.0.1:12345, got %s", got)
+	}
+}
+
+func TestDefaultBind(t *testing.T) {
+	os.Unsetenv("POGO_PORT")
+	os.Unsetenv("POGO_BIND")
+	os.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	defer os.Unsetenv("XDG_CONFIG_HOME")
+
+	cfg := Load()
+	if cfg.Bind != DefaultBind {
+		t.Errorf("expected default bind %s, got %s", DefaultBind, cfg.Bind)
+	}
+	if got := cfg.ListenAddr(); got != "127.0.0.1:10000" {
+		t.Errorf("expected 127.0.0.1:10000, got %s", got)
+	}
+}
+
+func TestBindEnvOverride(t *testing.T) {
+	os.Setenv("POGO_BIND", "0.0.0.0")
+	defer os.Unsetenv("POGO_BIND")
+	os.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	defer os.Unsetenv("XDG_CONFIG_HOME")
+
+	cfg := Load()
+	if cfg.Bind != "0.0.0.0" {
+		t.Errorf("expected bind 0.0.0.0, got %s", cfg.Bind)
+	}
+}
+
+func TestBindConfigFile(t *testing.T) {
+	dir := t.TempDir()
+	os.Setenv("XDG_CONFIG_HOME", dir)
+	defer os.Unsetenv("XDG_CONFIG_HOME")
+	os.Unsetenv("POGO_PORT")
+	os.Unsetenv("POGO_BIND")
+
+	pogoDir := filepath.Join(dir, "pogo")
+	os.MkdirAll(pogoDir, 0755)
+	os.WriteFile(filepath.Join(pogoDir, "config.toml"), []byte(`
+[server]
+port = 8080
+bind = 0.0.0.0
+`), 0644)
+
+	cfg := Load()
+	if cfg.Bind != "0.0.0.0" {
+		t.Errorf("expected bind 0.0.0.0 from config file, got %s", cfg.Bind)
+	}
+	if got := cfg.ListenAddr(); got != "0.0.0.0:8080" {
+		t.Errorf("expected 0.0.0.0:8080, got %s", got)
 	}
 }
