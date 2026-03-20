@@ -353,7 +353,10 @@ func (a *Agent) Nudge(message string) error {
 		return fmt.Errorf("agent %q has no PTY", a.Name)
 	}
 
-	_, err := a.master.WriteString(message + "\n")
+	// Use \r (carriage return) — Claude Code's TUI runs in raw terminal mode
+	// where Enter sends \r, not \n. A \n gets treated as a literal newline in
+	// the input editor instead of triggering submission.
+	_, err := a.master.WriteString(message + "\r")
 	if err != nil {
 		return fmt.Errorf("write to PTY: %w", err)
 	}
