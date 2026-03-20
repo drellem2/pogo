@@ -162,9 +162,9 @@ func TestProcessMergeEndToEnd(t *testing.T) {
 		t.Skip("git not found")
 	}
 
-	// Create a bare "origin" repo
+	// Create a bare "origin" repo with explicit main branch
 	originDir := t.TempDir()
-	run(t, originDir, "git", "init", "--bare")
+	run(t, originDir, "git", "init", "--bare", "-b", "main")
 
 	// Create a working clone, make an initial commit
 	workDir := t.TempDir()
@@ -230,9 +230,9 @@ func TestProcessMergeGateFails(t *testing.T) {
 		t.Skip("git not found")
 	}
 
-	// Create a bare "origin" repo
+	// Create a bare "origin" repo with explicit main branch
 	originDir := t.TempDir()
-	run(t, originDir, "git", "init", "--bare")
+	run(t, originDir, "git", "init", "--bare", "-b", "main")
 
 	// Create a working clone, make an initial commit with a failing gate
 	workDir := t.TempDir()
