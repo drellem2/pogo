@@ -480,7 +480,13 @@ func (a *Agent) handleAttach(conn net.Conn) {
 		return
 	}
 
-	// Register for output fanout
+	// Send recent output so the client sees current state
+	recent := a.outputBuf.Last(a.outputBuf.Len())
+	if len(recent) > 0 {
+		conn.Write(recent)
+	}
+
+	// Register for output fanout (after replay, so we don't double-send)
 	a.attachMu.Lock()
 	a.attachConns[conn] = struct{}{}
 	a.attachMu.Unlock()
