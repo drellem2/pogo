@@ -65,7 +65,9 @@ The mayor is a crew agent. There is no special mayor code — just a prompt file
 
 ### The filesystem is the coordination layer
 
-All coordination state lives in macguffin's directory tree (`~/.macguffin/`). Work items are markdown files. Mail is Maildir. Claims are atomic renames. No database, no server, no schema.
+All coordination state lives in a single global macguffin tree (`~/.macguffin/`). Work items are markdown files. Mail is Maildir. Claims are atomic renames. No database, no server, no schema.
+
+macguffin is global, not per-project. A work item references a repo path in its body; pogo resolves it. This keeps the coordination layer simple — agents check one place for work, not N project directories. Pogo already provides the project-awareness layer via `lsp` and `pose`.
 
 Agents interact with state through the `mg` CLI, the same way a human would. There is no internal API for "agent claims work" — the agent runs `mg claim <id>` like anyone else.
 
@@ -322,9 +324,7 @@ pogod allocates a PTY for each agent it spawns. This is the core mechanism that 
 
 ## Open Questions
 
-1. **macguffin scope.** Should macguffin state be global (`~/.macguffin/`) or per-project? The current leaning is global with pogo providing the project-awareness layer. A work item references a repo path; pogo resolves it.
-
-2. **Polecat concurrency limits.** Should pogod enforce a maximum number of concurrent polecats? Or leave this to the mayor's judgment (via prompt)?
+1. **Polecat concurrency limits.** Should pogod enforce a maximum number of concurrent polecats? Or leave this to the mayor's judgment (via prompt)?
 
 3. **Crew restart semantics.** When pogod restarts a crashed crew agent, does it start a fresh session or attempt to restore? Current leaning: fresh session with handoff mail from the previous run's event log.
 
