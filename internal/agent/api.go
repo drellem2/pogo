@@ -351,12 +351,8 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		return
 	}
 
-	// Build command — structured prompt with inline protocol steps kicks off execution
+	// Build command — interactive mode so Claude can actually run commands
 	cmd := []string{"claude", "--dangerously-skip-permissions", "--append-system-prompt", string(expandedContent)}
-	if spawnReq.Task != "" {
-		prompt := buildPolecatPrompt(spawnReq)
-		cmd = append(cmd, "-p", prompt)
-	}
 
 	// Ensure POGO_ROLE is set for mg prime and role detection
 	env := append(spawnReq.Env, "POGO_ROLE=polecat")
@@ -372,6 +368,16 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		os.Remove(promptFile) // Clean up temp file on spawn failure
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
+	}
+
+	// Nudge polecat after a brief delay to kick off execution.
+	// Claude Code interactive mode waits for input — this sends the initial prompt.
+	if spawnReq.Task != "" {
+		go func() {
+			time.Sleep(2 * time.Second)
+			prompt := buildPolecatPrompt(spawnReq)
+			a.Nudge(prompt + "\n")
+		}()
 	}
 
 	w.Header().Set("Content-Type", "application/json")
