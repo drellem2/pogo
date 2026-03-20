@@ -363,7 +363,8 @@ func TestRespawn(t *testing.T) {
 	}
 	<-a.Done()
 
-	// Respawn it
+	// Respawn it with a long-lived command so it's still running when we check
+	a.Command = []string{"sleep", "10"}
 	b, err := reg.Respawn("respawn-test")
 	if err != nil {
 		t.Fatalf("Respawn: %v", err)
