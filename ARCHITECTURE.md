@@ -208,10 +208,12 @@ A deterministic loop inside pogod, not an agent.
 
 The refinery maintains its own git worktrees for testing and merging — it never touches agent or user working directories. This isolates merge operations from active development and avoids dirty-tree conflicts.
 
+The refinery is rigless. It doesn't resolve project references or care how many local clones of a repo exist. Each merge-ready work item carries a repo path; the refinery reads the remote URL from that path and maintains exactly one worktree per remote. Multiple agents can work on different clones of the same repo — the refinery sees one remote and pushes to it.
+
 ```
 ~/.pogo/refinery/
 └── worktrees/
-    └── <repo-name>/       # One worktree per repo, created on demand
+    └── <repo-name>/       # One worktree per remote, created on demand
 ```
 
 ```
