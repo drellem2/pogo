@@ -334,6 +334,18 @@ pogod allocates a PTY for each agent it spawns. This is the core mechanism that 
 
 **Idle detection:** pogod reads agent output from the PTY master. When it sees the Claude Code prompt marker (idle state), it knows the agent is ready to receive nudge input. This prevents nudges from interrupting active tool calls.
 
+### PTY complexity and the libghostty path
+
+There are two levels of PTY usage:
+
+1. **Dumb byte proxying** — pogod holds the master fd, pipes bytes through on attach, writes strings on nudge. No terminal emulation needed. Both the user's terminal and the agent runtime handle their own rendering. pogod is just a wire. This is sufficient for MVP.
+
+2. **Stream-aware management** — pogod inspects the terminal stream for idle detection, output logging, scrollback capture. This requires parsing escape sequences, which means reimplementing terminal emulation — a substantial undertaking done wrong more often than right.
+
+For level 2, [libghostty](https://ghostty.org) (Ghostty's embeddable terminal library) is the right long-term answer. It provides a correct, high-performance terminal emulator as a library, purpose-built for embedding. Rather than hand-rolling ANSI parsing, pogod would embed libghostty to get a real terminal model it can query: cursor position, screen contents, prompt detection.
+
+**Plan:** Start with dumb byte proxying for MVP. Idle detection can use a simple heuristic (output quiescence + known prompt bytes) without full terminal emulation. When libghostty ships its stable embeddable API, adopt it for proper stream-aware management.
+
 ## Open Questions
 
 1. **Crew restart semantics.** When pogod restarts a crashed crew agent, does it start a fresh session or attempt to restore? Current leaning: fresh session with handoff mail from the previous run's event log.
