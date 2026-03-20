@@ -66,8 +66,10 @@ type Agent struct {
 	socketPath string
 	listener   net.Listener
 
-	// done is closed when the agent process exits.
+	// done is closed when the agent process exits and output is drained.
 	done chan struct{}
+	// outputDone is closed when the readOutput goroutine finishes.
+	outputDone chan struct{}
 	// exitErr holds the process exit error (nil on clean exit).
 	exitErr error
 
@@ -169,6 +171,7 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 		outputBuf:  NewRingBuffer(64 * 1024), // 64KB rolling buffer
 		socketPath: filepath.Join(r.socketDir, req.Name+".sock"),
 		done:       make(chan struct{}),
+		outputDone: make(chan struct{}),
 	}
 
 	// Start output reader — reads from master, buffers for monitoring
@@ -308,6 +311,7 @@ func (r *Registry) Respawn(name string) (*Agent, error) {
 		outputBuf:    NewRingBuffer(64 * 1024),
 		socketPath:   filepath.Join(r.socketDir, old.Name+".sock"),
 		done:         make(chan struct{}),
+		outputDone:   make(chan struct{}),
 	}
 
 	go a.readOutput()
@@ -356,6 +360,7 @@ func (a *Agent) ExitErr() error {
 
 // readOutput reads from PTY master and buffers output.
 func (a *Agent) readOutput() {
+	defer close(a.outputDone)
 	buf := make([]byte, 4096)
 	for {
 		n, err := a.master.Read(buf)
@@ -374,6 +379,10 @@ func (a *Agent) readOutput() {
 // waitAndHandle waits for the agent process to exit and fires the onExit callback.
 func (r *Registry) waitAndHandle(a *Agent) {
 	a.exitErr = a.cmd.Wait()
+
+	// Wait for the output reader to drain all remaining PTY output before
+	// signaling done, so callers of Done() see the complete output.
+	<-a.outputDone
 
 	a.mu.Lock()
 	a.Status = StatusExited
