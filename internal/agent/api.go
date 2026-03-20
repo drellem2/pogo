@@ -5,25 +5,40 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"time"
 )
 
 // AgentInfo is the JSON representation of an agent for the API.
 type AgentInfo struct {
-	Name       string    `json:"name"`
-	PID        int       `json:"pid"`
-	Type       AgentType `json:"type"`
-	StartTime  time.Time `json:"start_time"`
-	Command    []string  `json:"command"`
-	SocketPath string    `json:"socket_path"`
+	Name         string      `json:"name"`
+	PID          int         `json:"pid"`
+	Type         AgentType   `json:"type"`
+	StartTime    time.Time   `json:"start_time"`
+	Command      []string    `json:"command"`
+	SocketPath   string      `json:"socket_path"`
+	Status       AgentStatus `json:"status"`
+	ExitCode     int         `json:"exit_code,omitempty"`
+	RestartCount int         `json:"restart_count,omitempty"`
+	PromptFile   string      `json:"prompt_file,omitempty"`
+	ProcessName  string      `json:"process_name"`
+	Uptime       string      `json:"uptime"`
 }
 
 // SpawnAPIRequest is the JSON body for POST /agents.
 type SpawnAPIRequest struct {
-	Name    string    `json:"name"`
-	Type    AgentType `json:"type"`
-	Command []string  `json:"command"`
-	Env     []string  `json:"env,omitempty"`
+	Name       string    `json:"name"`
+	Type       AgentType `json:"type"`
+	Command    []string  `json:"command"`
+	Env        []string  `json:"env,omitempty"`
+	PromptFile string    `json:"prompt_file,omitempty"`
+}
+
+// StartAPIRequest is the JSON body for POST /agents/start.
+// Starts a crew agent by name, looking up the prompt file automatically.
+type StartAPIRequest struct {
+	Name string `json:"name"`
 }
 
 // NudgeAPIRequest is the JSON body for POST /agents/:name/nudge.
@@ -35,19 +50,28 @@ type NudgeAPIRequest struct {
 // ?lines=N or ?bytes=N
 
 func agentInfo(a *Agent) AgentInfo {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	return AgentInfo{
-		Name:       a.Name,
-		PID:        a.PID,
-		Type:       a.Type,
-		StartTime:  a.StartTime,
-		Command:    a.Command,
-		SocketPath: a.SocketPath(),
+		Name:         a.Name,
+		PID:          a.PID,
+		Type:         a.Type,
+		StartTime:    a.StartTime,
+		Command:      a.Command,
+		SocketPath:   a.SocketPath(),
+		Status:       a.Status,
+		ExitCode:     a.ExitCode,
+		RestartCount: a.RestartCount,
+		PromptFile:   a.PromptFile,
+		ProcessName:  ProcessName(a.Type, a.Name),
+		Uptime:       time.Since(a.StartTime).Truncate(time.Second).String(),
 	}
 }
 
 // RegisterHandlers registers agent API endpoints on the given mux.
 func (r *Registry) RegisterHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/agents", r.handleAgents)
+	mux.HandleFunc("/agents/start", r.handleStart)
 	mux.HandleFunc("/agents/{name}", r.handleAgent)
 	mux.HandleFunc("/agents/{name}/nudge", r.handleNudge)
 	mux.HandleFunc("/agents/{name}/output", r.handleOutput)
@@ -70,11 +94,12 @@ func (r *Registry) handleAgents(w http.ResponseWriter, req *http.Request) {
 			http.Error(w, fmt.Sprintf("bad request: %v", err), http.StatusBadRequest)
 			return
 		}
-		agent, err := r.Spawn(SpawnRequest{
-			Name:    spawnReq.Name,
-			Type:    spawnReq.Type,
-			Command: spawnReq.Command,
-			Env:     spawnReq.Env,
+		a, err := r.Spawn(SpawnRequest{
+			Name:       spawnReq.Name,
+			Type:       spawnReq.Type,
+			Command:    spawnReq.Command,
+			Env:        spawnReq.Env,
+			PromptFile: spawnReq.PromptFile,
 		})
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusConflict)
@@ -82,7 +107,7 @@ func (r *Registry) handleAgents(w http.ResponseWriter, req *http.Request) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(agentInfo(agent))
+		json.NewEncoder(w).Encode(agentInfo(a))
 
 	default:
 		http.Error(w, "", http.StatusMethodNotAllowed)
@@ -162,4 +187,52 @@ func (r *Registry) handleOutput(w http.ResponseWriter, req *http.Request) {
 	output := agent.RecentOutput(n)
 	w.Header().Set("Content-Type", "application/octet-stream")
 	io.WriteString(w, string(output))
+}
+
+// CrewPromptDir is the directory where crew agent prompt files live.
+// Default: ~/.pogo/agents/crew/
+func CrewPromptDir() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".pogo", "agents", "crew")
+}
+
+func (r *Registry) handleStart(w http.ResponseWriter, req *http.Request) {
+	if req.Method != "POST" {
+		http.Error(w, "", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var startReq StartAPIRequest
+	if err := json.NewDecoder(req.Body).Decode(&startReq); err != nil {
+		http.Error(w, fmt.Sprintf("bad request: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	if startReq.Name == "" {
+		http.Error(w, "name is required", http.StatusBadRequest)
+		return
+	}
+
+	// Look up prompt file: ~/.pogo/agents/crew/<name>.md
+	promptFile := filepath.Join(CrewPromptDir(), startReq.Name+".md")
+	if _, err := os.Stat(promptFile); os.IsNotExist(err) {
+		http.Error(w, fmt.Sprintf("prompt file not found: %s", promptFile), http.StatusNotFound)
+		return
+	}
+
+	// Start crew agent with claude --prompt-file
+	a, err := r.Spawn(SpawnRequest{
+		Name:       startReq.Name,
+		Type:       TypeCrew,
+		Command:    []string{"claude", "--prompt-file", promptFile},
+		PromptFile: promptFile,
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(agentInfo(a))
 }

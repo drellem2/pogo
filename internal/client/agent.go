@@ -63,6 +63,29 @@ func SpawnAgent(req agent.SpawnAPIRequest) (*agent.AgentInfo, error) {
 	return &info, nil
 }
 
+// StartAgent asks pogod to start a crew agent by name.
+// The prompt file is looked up from ~/.pogo/agents/crew/<name>.md.
+func StartAgent(name string) (*agent.AgentInfo, error) {
+	body, err := json.Marshal(agent.StartAPIRequest{Name: name})
+	if err != nil {
+		return nil, err
+	}
+	r, err := http.Post(serverURL+"/agents/start", "application/json", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	defer r.Body.Close()
+	if r.StatusCode != http.StatusCreated {
+		msg, _ := io.ReadAll(r.Body)
+		return nil, fmt.Errorf("start failed: %s", string(msg))
+	}
+	var info agent.AgentInfo
+	if err := json.NewDecoder(r.Body).Decode(&info); err != nil {
+		return nil, err
+	}
+	return &info, nil
+}
+
 // StopAgent asks pogod to stop an agent.
 func StopAgent(name string) error {
 	req, err := http.NewRequest("DELETE", serverURL+"/agents/"+name, nil)

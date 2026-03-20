@@ -237,6 +237,25 @@ func main() {
 	}
 	defer agentRegistry.StopAll(5 * time.Second)
 
+	// Set up agent lifecycle callbacks
+	agentRegistry.SetOnExit(func(a *agent.Agent, err error) {
+		if a.Type == agent.TypeCrew {
+			// Crew agents: restart on unexpected exit (backoff: 2s)
+			log.Printf("crew agent %s exited unexpectedly, scheduling restart", a.Name)
+			go func() {
+				time.Sleep(2 * time.Second)
+				if _, rerr := agentRegistry.Respawn(a.Name); rerr != nil {
+					log.Printf("crew agent %s: restart failed: %v", a.Name, rerr)
+				}
+			}()
+		} else {
+			// Polecat agents: remove from registry on exit
+			log.Printf("polecat %s exited, cleaning up", a.Name)
+			a.Cleanup()
+			agentRegistry.Remove(a.Name)
+		}
+	})
+
 	// Start plugins
 	driver.Init()
 

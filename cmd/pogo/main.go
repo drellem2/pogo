@@ -196,6 +196,25 @@ Child commands include start, stop, and status.`,
 		Long:  `Commands for spawning, listing, stopping, and attaching to agent processes managed by pogod.`,
 	}
 
+	var cmdAgentStart = &cobra.Command{
+		Use:   "start <name>",
+		Short: "Start a crew agent by name",
+		Long: `Start a crew agent using the prompt file at ~/.pogo/agents/crew/<name>.md.
+The agent runs as a persistent crew process that pogod monitors and restarts on crash.`,
+		Args: cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			info, err := client.StartAgent(args[0])
+			if err != nil {
+				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+			}
+			if jsonOutput {
+				cli.PrintJSON(info)
+			} else {
+				fmt.Printf("Started crew agent %s (pid=%d, prompt=%s)\n", info.Name, info.PID, info.PromptFile)
+			}
+		},
+	}
+
 	var cmdAgentList = &cobra.Command{
 		Use:   "list",
 		Short: "List running agents",
@@ -213,8 +232,8 @@ Child commands include start, stop, and status.`,
 					return
 				}
 				for _, a := range agents {
-					fmt.Printf("%-20s  pid=%-6d  type=%-8s  started=%s\n",
-						a.Name, a.PID, a.Type, a.StartTime.Format("15:04:05"))
+					fmt.Printf("%-20s  pid=%-6d  type=%-8s  status=%-10s  uptime=%s\n",
+						a.Name, a.PID, a.Type, a.Status, a.Uptime)
 				}
 			}
 		},
@@ -304,6 +323,78 @@ Detach with Ctrl-\ (SIGQUIT).`,
 		},
 	}
 
+	var cmdAgentStatus = &cobra.Command{
+		Use:   "status [name]",
+		Short: "Show agent status and details",
+		Long:  `Show detailed status for a specific agent, or a summary of all agents.`,
+		Args:  cobra.MaximumNArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			if len(args) == 1 {
+				info, err := client.GetAgent(args[0])
+				if err != nil {
+					cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+				}
+				if jsonOutput {
+					cli.PrintJSON(info)
+				} else {
+					fmt.Printf("Name:         %s\n", info.Name)
+					fmt.Printf("Process:      %s\n", info.ProcessName)
+					fmt.Printf("PID:          %d\n", info.PID)
+					fmt.Printf("Type:         %s\n", info.Type)
+					fmt.Printf("Status:       %s\n", info.Status)
+					fmt.Printf("Uptime:       %s\n", info.Uptime)
+					if info.PromptFile != "" {
+						fmt.Printf("Prompt:       %s\n", info.PromptFile)
+					}
+					if info.RestartCount > 0 {
+						fmt.Printf("Restarts:     %d\n", info.RestartCount)
+					}
+					if info.Status == "exited" {
+						fmt.Printf("Exit code:    %d\n", info.ExitCode)
+					}
+					fmt.Printf("Command:      %s\n", strings.Join(info.Command, " "))
+					fmt.Printf("Socket:       %s\n", info.SocketPath)
+				}
+			} else {
+				agents, err := client.ListAgents()
+				if err != nil {
+					cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+				}
+				if jsonOutput {
+					cli.PrintJSON(agents)
+				} else {
+					if len(agents) == 0 {
+						fmt.Println("No agents.")
+						return
+					}
+					crew := 0
+					polecats := 0
+					running := 0
+					for _, a := range agents {
+						if a.Type == "crew" {
+							crew++
+						} else {
+							polecats++
+						}
+						if a.Status == "running" {
+							running++
+						}
+					}
+					fmt.Printf("Agents: %d total (%d crew, %d polecat), %d running\n\n",
+						len(agents), crew, polecats, running)
+					for _, a := range agents {
+						restart := ""
+						if a.RestartCount > 0 {
+							restart = fmt.Sprintf("  restarts=%d", a.RestartCount)
+						}
+						fmt.Printf("  %-20s  %-12s  %-8s  pid=%-6d  uptime=%s%s\n",
+							a.Name, a.ProcessName, a.Status, a.PID, a.Uptime, restart)
+					}
+				}
+			}
+		},
+	}
+
 	// Nudge command — top-level for convenience
 	var cmdNudge = &cobra.Command{
 		Use:   "nudge <name> <message>",
@@ -341,9 +432,11 @@ The agent sees it as typed input. Use this for agent-to-agent wakeup or human-to
 	rootCmd.AddCommand(cmdService)
 
 	// Agent commands
+	cmdAgent.AddCommand(cmdAgentStart)
 	cmdAgent.AddCommand(cmdAgentList)
 	cmdAgent.AddCommand(cmdAgentSpawn)
 	cmdAgent.AddCommand(cmdAgentStop)
+	cmdAgent.AddCommand(cmdAgentStatus)
 	cmdAgent.AddCommand(cmdAgentAttach)
 	cmdAgent.AddCommand(cmdAgentOutput)
 	rootCmd.AddCommand(cmdAgent)

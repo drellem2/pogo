@@ -28,13 +28,32 @@ const (
 	TypePolecat AgentType = "polecat"
 )
 
+// AgentStatus represents the current state of an agent.
+type AgentStatus string
+
+const (
+	StatusRunning    AgentStatus = "running"
+	StatusExited     AgentStatus = "exited"
+	StatusRestarting AgentStatus = "restarting"
+)
+
 // Agent represents a running agent process with its PTY.
 type Agent struct {
-	Name      string    `json:"name"`
-	PID       int       `json:"pid"`
-	Type      AgentType `json:"type"`
-	StartTime time.Time `json:"start_time"`
-	Command   []string  `json:"command"`
+	Name      string      `json:"name"`
+	PID       int         `json:"pid"`
+	Type      AgentType   `json:"type"`
+	StartTime time.Time   `json:"start_time"`
+	Command   []string    `json:"command"`
+	Status    AgentStatus `json:"status"`
+
+	// ExitCode is set after the process exits (-1 if signaled).
+	ExitCode int `json:"exit_code,omitempty"`
+
+	// RestartCount tracks how many times a crew agent has been restarted.
+	RestartCount int `json:"restart_count,omitempty"`
+
+	// PromptFile is the path to the agent's prompt file (if any).
+	PromptFile string `json:"prompt_file,omitempty"`
 
 	// master is the PTY master file descriptor. Not exported (held by pogod).
 	master *os.File
@@ -62,6 +81,17 @@ type Registry struct {
 
 	// socketDir is where per-agent unix domain sockets live.
 	socketDir string
+
+	// onExit is called when an agent process exits. Set by the registry owner
+	// (pogod) to handle crew restarts and polecat cleanup.
+	onExit func(a *Agent, err error)
+}
+
+// SetOnExit sets the callback invoked when any agent exits.
+func (r *Registry) SetOnExit(fn func(a *Agent, err error)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.onExit = fn
 }
 
 // NewRegistry creates an agent registry. socketDir is created if needed.
@@ -75,12 +105,22 @@ func NewRegistry(socketDir string) (*Registry, error) {
 	}, nil
 }
 
+// ProcessName returns the pgrep-discoverable process name for an agent.
+// Crew: pogo-crew-<name>, Polecat: pogo-cat-<name>
+func ProcessName(agentType AgentType, name string) string {
+	if agentType == TypeCrew {
+		return "pogo-crew-" + name
+	}
+	return "pogo-cat-" + name
+}
+
 // SpawnRequest contains everything needed to spawn an agent.
 type SpawnRequest struct {
-	Name    string
-	Type    AgentType
-	Command []string // e.g. ["claude", "--prompt-file", "/path/to/prompt.md"]
-	Env     []string // additional env vars
+	Name       string
+	Type       AgentType
+	Command    []string // e.g. ["claude", "--prompt-file", "/path/to/prompt.md"]
+	Env        []string // additional env vars
+	PromptFile string   // path to prompt file (optional)
 }
 
 // Spawn starts a new agent process with a PTY.
@@ -97,7 +137,18 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 	}
 
 	cmd := exec.Command(req.Command[0], req.Command[1:]...)
-	cmd.Env = append(os.Environ(), req.Env...)
+
+	// Inject agent identity env vars
+	procName := ProcessName(req.Type, req.Name)
+	injectedEnv := []string{
+		"POGO_AGENT_NAME=" + req.Name,
+		"POGO_AGENT_TYPE=" + string(req.Type),
+		"POGO_PROCESS_NAME=" + procName,
+	}
+	if req.PromptFile != "" {
+		injectedEnv = append(injectedEnv, "POGO_AGENT_PROMPT="+req.PromptFile)
+	}
+	cmd.Env = append(os.Environ(), append(injectedEnv, req.Env...)...)
 
 	// Start with PTY — master fd returned, slave becomes controlling terminal
 	master, err := pty.Start(cmd)
@@ -105,12 +156,14 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 		return nil, fmt.Errorf("pty start: %w", err)
 	}
 
-	agent := &Agent{
+	a := &Agent{
 		Name:       req.Name,
 		PID:        cmd.Process.Pid,
 		Type:       req.Type,
 		StartTime:  time.Now(),
 		Command:    req.Command,
+		Status:     StatusRunning,
+		PromptFile: req.PromptFile,
 		master:     master,
 		cmd:        cmd,
 		outputBuf:  NewRingBuffer(64 * 1024), // 64KB rolling buffer
@@ -119,20 +172,20 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 	}
 
 	// Start output reader — reads from master, buffers for monitoring
-	go agent.readOutput()
+	go a.readOutput()
 
-	// Start process reaper — waits for exit, cleans up
-	go agent.waitExit()
+	// Start process reaper — waits for exit, fires onExit callback
+	go r.waitAndHandle(a)
 
 	// Start attach listener
-	if err := agent.startListener(); err != nil {
+	if err := a.startListener(); err != nil {
 		// Non-fatal — agent runs fine, just can't attach
 		log.Printf("agent %s: attach listener failed: %v", req.Name, err)
 	}
 
-	r.agents[req.Name] = agent
-	log.Printf("agent %s: spawned pid=%d type=%s", req.Name, agent.PID, req.Type)
-	return agent, nil
+	r.agents[req.Name] = a
+	log.Printf("agent %s: spawned pid=%d type=%s proc=%s", req.Name, a.PID, req.Type, procName)
+	return a, nil
 }
 
 // Get returns an agent by name, or nil if not found.
@@ -181,7 +234,7 @@ func (r *Registry) Stop(name string, timeout time.Duration) error {
 		<-agent.done
 	}
 
-	agent.cleanup()
+	agent.Cleanup()
 	r.Remove(name)
 	log.Printf("agent %s: stopped", name)
 	return nil
@@ -201,6 +254,72 @@ func (r *Registry) StopAll(timeout time.Duration) {
 			log.Printf("agent %s: stop error: %v", name, err)
 		}
 	}
+}
+
+// Respawn restarts a stopped agent in-place, preserving its name and config.
+// Used by crew monitoring to restart crashed agents.
+func (r *Registry) Respawn(name string) (*Agent, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	old := r.agents[name]
+	if old == nil {
+		return nil, fmt.Errorf("agent %q not found", name)
+	}
+
+	old.mu.Lock()
+	if old.Status == StatusRunning {
+		old.mu.Unlock()
+		return nil, fmt.Errorf("agent %q is still running", name)
+	}
+	restartCount := old.RestartCount + 1
+	old.mu.Unlock()
+
+	old.Cleanup()
+
+	cmd := exec.Command(old.Command[0], old.Command[1:]...)
+	procName := ProcessName(old.Type, old.Name)
+	injectedEnv := []string{
+		"POGO_AGENT_NAME=" + old.Name,
+		"POGO_AGENT_TYPE=" + string(old.Type),
+		"POGO_PROCESS_NAME=" + procName,
+	}
+	if old.PromptFile != "" {
+		injectedEnv = append(injectedEnv, "POGO_AGENT_PROMPT="+old.PromptFile)
+	}
+	cmd.Env = append(os.Environ(), injectedEnv...)
+
+	master, err := pty.Start(cmd)
+	if err != nil {
+		return nil, fmt.Errorf("pty start: %w", err)
+	}
+
+	a := &Agent{
+		Name:         old.Name,
+		PID:          cmd.Process.Pid,
+		Type:         old.Type,
+		StartTime:    time.Now(),
+		Command:      old.Command,
+		Status:       StatusRunning,
+		RestartCount: restartCount,
+		PromptFile:   old.PromptFile,
+		master:       master,
+		cmd:          cmd,
+		outputBuf:    NewRingBuffer(64 * 1024),
+		socketPath:   filepath.Join(r.socketDir, old.Name+".sock"),
+		done:         make(chan struct{}),
+	}
+
+	go a.readOutput()
+	go r.waitAndHandle(a)
+
+	if err := a.startListener(); err != nil {
+		log.Printf("agent %s: attach listener failed on respawn: %v", a.Name, err)
+	}
+
+	r.agents[name] = a
+	log.Printf("agent %s: respawned pid=%d restart=%d", name, a.PID, restartCount)
+	return a, nil
 }
 
 // Nudge writes a message to an agent's PTY master fd.
@@ -252,15 +371,33 @@ func (a *Agent) readOutput() {
 	}
 }
 
-// waitExit waits for the agent process to exit.
-func (a *Agent) waitExit() {
+// waitAndHandle waits for the agent process to exit and fires the onExit callback.
+func (r *Registry) waitAndHandle(a *Agent) {
 	a.exitErr = a.cmd.Wait()
+
+	a.mu.Lock()
+	a.Status = StatusExited
+	if a.exitErr != nil {
+		a.ExitCode = -1
+		if exitErr, ok := a.exitErr.(*exec.ExitError); ok {
+			a.ExitCode = exitErr.ExitCode()
+		}
+	}
+	a.mu.Unlock()
+
 	close(a.done)
 	log.Printf("agent %s: exited (err=%v)", a.Name, a.exitErr)
+
+	r.mu.RLock()
+	cb := r.onExit
+	r.mu.RUnlock()
+	if cb != nil {
+		cb(a, a.exitErr)
+	}
 }
 
-// cleanup closes PTY and socket.
-func (a *Agent) cleanup() {
+// Cleanup closes PTY and socket. Exported for use by lifecycle callbacks.
+func (a *Agent) Cleanup() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
