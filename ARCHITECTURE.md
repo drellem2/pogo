@@ -324,9 +324,7 @@ pogod allocates a PTY for each agent it spawns. This is the core mechanism that 
 
 ## Open Questions
 
-1. **Polecat concurrency limits.** Should pogod enforce a maximum number of concurrent polecats? Or leave this to the mayor's judgment (via prompt)?
-
-3. **Crew restart semantics.** When pogod restarts a crashed crew agent, does it start a fresh session or attempt to restore? Current leaning: fresh session with handoff mail from the previous run's event log.
+1. **Crew restart semantics.** When pogod restarts a crashed crew agent, does it start a fresh session or attempt to restore? Current leaning: fresh session with handoff mail from the previous run's event log.
 
 4. **Refinery repo access.** The refinery needs to clone/fetch repos to run quality gates. Should it use pogo's discovered project paths directly, or maintain its own worktrees?
 
