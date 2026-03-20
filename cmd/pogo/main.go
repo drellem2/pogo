@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -805,6 +806,89 @@ Safe to run multiple times — existing files are preserved unless --force is pa
 		},
 	}
 
+	// Project commands
+	var cmdProject = &cobra.Command{
+		Use:   "project",
+		Short: "Manage the project list",
+		Long:  `Commands to add, remove, and list registered projects.`,
+	}
+
+	var cmdProjectAdd = &cobra.Command{
+		Use:   "add <path>",
+		Short: "Register a project directory",
+		Long: `Register a directory (or its parent git repository) as a pogo project.
+The path is resolved to an absolute path and the git root is discovered automatically.`,
+		Args: cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			path := args[0]
+			absPath, err := filepath.Abs(path)
+			if err != nil {
+				cli.ExitWithError(jsonOutput, fmt.Sprintf("invalid path: %v", err), cli.ExitError)
+			}
+			resp, err := client.Visit(absPath)
+			if err != nil {
+				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+			}
+			if resp == nil {
+				cli.ExitWithError(jsonOutput, "no git repository found at or above "+absPath, cli.ExitNotFound)
+			}
+			if jsonOutput {
+				cli.PrintJSON(resp)
+			} else {
+				fmt.Println(resp.ParentProject.Path)
+			}
+		},
+	}
+
+	var cmdProjectRemove = &cobra.Command{
+		Use:   "remove <path>",
+		Short: "Unregister a project directory",
+		Long:  `Remove a project from pogo's tracked list. The project's files are not deleted.`,
+		Args:  cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			path := args[0]
+			absPath, err := filepath.Abs(path)
+			if err != nil {
+				cli.ExitWithError(jsonOutput, fmt.Sprintf("invalid path: %v", err), cli.ExitError)
+			}
+			if err := client.RemoveProject(absPath); err != nil {
+				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+			}
+			if jsonOutput {
+				cli.PrintJSON(map[string]interface{}{
+					"removed": true,
+					"path":    absPath,
+				})
+			} else {
+				fmt.Printf("Removed %s\n", absPath)
+			}
+		},
+	}
+
+	var cmdProjectList = &cobra.Command{
+		Use:   "list",
+		Short: "List registered projects",
+		Long:  `Show all projects that pogo is currently tracking.`,
+		Args:  cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			projs, err := client.GetProjects()
+			if err != nil {
+				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+			}
+			if jsonOutput {
+				cli.PrintJSON(projs)
+			} else {
+				if len(projs) == 0 {
+					fmt.Println("No projects registered.")
+					return
+				}
+				for _, p := range projs {
+					fmt.Println(p.Path)
+				}
+			}
+		},
+	}
+
 	var rootCmd = &cobra.Command{Use: "pogo"}
 
 	rootCmd.PersistentFlags().BoolVar(&jsonOutput, "json", false, "Output in JSON format")
@@ -837,6 +921,12 @@ Safe to run multiple times — existing files are preserved unless --force is pa
 	cmdAgent.AddCommand(cmdAgentPrompt)
 	rootCmd.AddCommand(cmdAgent)
 	rootCmd.AddCommand(cmdNudge)
+
+	// Project commands
+	cmdProject.AddCommand(cmdProjectAdd)
+	cmdProject.AddCommand(cmdProjectRemove)
+	cmdProject.AddCommand(cmdProjectList)
+	rootCmd.AddCommand(cmdProject)
 
 	// Refinery commands
 	var cmdRefinery = &cobra.Command{

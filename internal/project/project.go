@@ -351,6 +351,20 @@ func hasPogoStop(dirnames []string) bool {
 	return false
 }
 
+// Remove removes a project by path and persists the change.
+// Returns true if the project was found and removed.
+func Remove(path string) bool {
+	path = addSlashToPath(path)
+	for i, p := range projects {
+		if p.Path == path {
+			projects = append(projects[:i], projects[i+1:]...)
+			SaveProjects()
+			return true
+		}
+	}
+	return false
+}
+
 func RemoveSaveFile() {
 	os.Remove(projectFile)
 }

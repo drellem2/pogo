@@ -388,6 +388,33 @@ func SearchAll(query string) ([]*SearchResponse, error) {
 	return results, nil
 }
 
+// RemoveProject removes a project from pogod by path.
+func RemoveProject(path string) error {
+	err := HealthCheck()
+	if err != nil {
+		return fmt.Errorf("server is not running: %w", err)
+	}
+	req, err := http.NewRequest("DELETE", serverURL+"/projects",
+		strings.NewReader(fmt.Sprintf(`{"path": "%s"}`, path)))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("project not found: %s", path)
+	}
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("server error: %s", strings.TrimSpace(string(body)))
+	}
+	return nil
+}
+
 func Visit(path string) (*project.VisitResponse, error) {
 	visitResp, err := RunWithHealthCheck(func() (*project.VisitResponse, error) {
 		r, err := http.Post(serverURL+"/file",

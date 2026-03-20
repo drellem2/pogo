@@ -55,7 +55,28 @@ func homePage(w http.ResponseWriter, r *http.Request) {
 
 func allProjects(w http.ResponseWriter, r *http.Request) {
 	fmt.Println("Visited /projects")
-	json.NewEncoder(w).Encode(project.Projects())
+	switch r.Method {
+	case "GET", "":
+		json.NewEncoder(w).Encode(project.Projects())
+	case "DELETE":
+		var req struct {
+			Path string `json:"path"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Path == "" {
+			http.Error(w, "path is required", http.StatusBadRequest)
+			return
+		}
+		if project.Remove(req.Path) {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"removed": true,
+				"path":    req.Path,
+			})
+		} else {
+			http.Error(w, "project not found", http.StatusNotFound)
+		}
+	default:
+		http.Error(w, "", http.StatusMethodNotAllowed)
+	}
 }
 
 func clean(path string) string {
