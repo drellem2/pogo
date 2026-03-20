@@ -62,13 +62,19 @@ func (r *Refinery) processMerge(mr *MergeRequest) error {
 
 // ensureWorktree creates or validates a worktree for the given repo.
 // Uses a clone (not git-worktree) so the refinery is fully independent.
+// The clone's origin remote is set to the original repo's remote URL
+// so that push/fetch operations go to the actual remote (e.g. GitHub),
+// not the local filesystem path.
 func (r *Refinery) ensureWorktree(repoPath string) (string, error) {
 	// Use the repo basename as the worktree directory name
 	repoName := filepath.Base(repoPath)
 	wtDir := filepath.Join(r.cfg.WorktreeDir, repoName)
 
 	if _, err := os.Stat(filepath.Join(wtDir, ".git")); err == nil {
-		// Already cloned — verify the remote matches
+		// Already cloned — ensure origin points at the real remote
+		if err := fixRemoteURL(wtDir, repoPath); err != nil {
+			return "", fmt.Errorf("fix remote url: %w", err)
+		}
 		return wtDir, nil
 	}
 
@@ -84,7 +90,32 @@ func (r *Refinery) ensureWorktree(repoPath string) (string, error) {
 		return "", fmt.Errorf("clone: %w", err)
 	}
 
+	// Fix origin to point at the actual remote, not the local path
+	if err := fixRemoteURL(wtDir, repoPath); err != nil {
+		return "", fmt.Errorf("fix remote url after clone: %w", err)
+	}
+
 	return wtDir, nil
+}
+
+// fixRemoteURL ensures the worktree clone's origin points at the real remote
+// (e.g. GitHub) rather than a local filesystem path. If the source repo has
+// an origin remote configured, that URL is propagated to the worktree clone.
+// If the source repo has no origin (e.g. a bare repo used directly), the
+// worktree's origin is left unchanged.
+func fixRemoteURL(wtDir, repoPath string) error {
+	cmd := exec.Command("git", "-C", repoPath, "remote", "get-url", "origin")
+	out, err := cmd.Output()
+	if err != nil {
+		// Source repo has no origin remote — nothing to fix
+		return nil
+	}
+	remoteURL := strings.TrimSpace(string(out))
+	if remoteURL == "" || remoteURL == repoPath {
+		// Empty or self-referential — nothing to fix
+		return nil
+	}
+	return gitCmd(wtDir, "remote", "set-url", "origin", remoteURL)
 }
 
 // runQualityGates runs the configured quality gates for the repo.
