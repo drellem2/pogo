@@ -366,7 +366,7 @@ For level 2, [libghostty](https://ghostty.org) (Ghostty's embeddable terminal li
 
 ## Open Questions
 
-1. **Crew restart semantics.** When pogod restarts a crashed crew agent, does it start a fresh session or attempt to restore? Current leaning: fresh session with handoff mail from the previous run's event log.
+1. **Crew restart semantics.** `pogo server stop` kills all agents — pogod holds the PTY master fds, so agents can't outlive it. Polecats are ephemeral so this is fine; crew agents losing their session is more painful. Currently the agent registry is in-memory and lost on daemon restart. Future improvement: pogod persists which crew agents were running (e.g. a file in `~/.pogo/crew-roster`), and on `pogo server start` automatically restarts them. Crew agents should send themselves mail before shutdown (via `mg mail send --self`) with context about what they were doing, so the fresh session can pick up where it left off — similar to Gas Town's handoff protocol but using macguffin mail instead of a custom mechanism.
 
 2. **Attach transport.** Unix domain socket per agent vs. single pogod socket with multiplexing? Per-agent is simpler. Single socket is cleaner for the API. Leaning per-agent for MVP.
 
