@@ -26,11 +26,18 @@ func (r *Refinery) processMerge(mr *MergeRequest) error {
 	}
 
 	// Checkout the branch to test
-	if err := gitCmd(wtDir, "checkout", "origin/"+mr.Branch); err != nil {
+	if err := gitCmd(wtDir, "checkout", "-B", mr.Branch, "origin/"+mr.Branch); err != nil {
 		return fmt.Errorf("checkout branch: %w", err)
 	}
 
-	// Run quality gates
+	// Rebase onto latest target so the branch is a direct descendant of main.
+	// Polecat branches fork from main at spawn time and may be behind by the
+	// time they reach the refinery.
+	if err := gitCmd(wtDir, "rebase", "origin/"+mr.TargetRef); err != nil {
+		return fmt.Errorf("rebase onto %s: %w", mr.TargetRef, err)
+	}
+
+	// Run quality gates (on the rebased branch — tests what will actually land)
 	gateOutput, err := r.runQualityGates(wtDir, mr.RepoPath)
 	mr.GateOutput = gateOutput
 	if err != nil {
@@ -47,8 +54,8 @@ func (r *Refinery) processMerge(mr *MergeRequest) error {
 		return fmt.Errorf("pull target: %w", err)
 	}
 
-	// Fast-forward merge only — no merge commits
-	if err := gitCmd(wtDir, "merge", "--ff-only", "origin/"+mr.Branch); err != nil {
+	// Fast-forward merge — guaranteed to work after rebase
+	if err := gitCmd(wtDir, "merge", "--ff-only", mr.Branch); err != nil {
 		return fmt.Errorf("merge (ff-only): %w", err)
 	}
 
