@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -134,23 +135,118 @@ Child commands include start, stop, and status.`,
 
 	var cmdStatus = &cobra.Command{
 		Use:   "status",
-		Short: "Show indexing status of projects",
-		Long:  `Show the indexing status of all registered projects.`,
-		Args:  cobra.NoArgs,
+		Short: "Show unified dashboard of agents, work items, and refinery queue",
+		Long: `Show a unified read-only dashboard aggregating:
+  - Running agents (from pogod)
+  - Work items (from macguffin)
+  - Refinery merge queue (from pogod)`,
+		Args: cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
-			statuses, err := client.GetStatus()
-			if err != nil {
-				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+			type statusReport struct {
+				Agents    []agent.AgentInfo       `json:"agents"`
+				WorkItems string                  `json:"work_items,omitempty"`
+				Refinery  *refinery.Status        `json:"refinery,omitempty"`
+				Queue     []refinery.MergeRequest `json:"refinery_queue,omitempty"`
 			}
+
+			var report statusReport
+
+			// Agents
+			agents, agentErr := client.ListAgents()
+			if agentErr == nil {
+				report.Agents = agents
+			}
+
+			// Work items via mg list
+			mgOut, mgErr := exec.Command("mg", "list").CombinedOutput()
+			if mgErr == nil {
+				report.WorkItems = strings.TrimSpace(string(mgOut))
+			}
+
+			// Refinery
+			refStatus, refErr := client.GetRefineryStatus()
+			if refErr == nil {
+				report.Refinery = refStatus
+			}
+			queue, queueErr := client.GetRefineryQueue()
+			if queueErr == nil {
+				report.Queue = queue
+			}
+
 			if jsonOutput {
-				cli.PrintJSON(statuses)
+				cli.PrintJSON(report)
+				return
+			}
+
+			// --- Text output ---
+
+			// Agents section
+			fmt.Println("=== Agents ===")
+			if agentErr != nil {
+				fmt.Printf("  (unavailable: %s)\n", agentErr)
+			} else if len(agents) == 0 {
+				fmt.Println("  No agents running.")
 			} else {
-				if len(statuses) == 0 {
-					fmt.Println("No projects registered.")
-					return
+				crew := 0
+				polecats := 0
+				running := 0
+				for _, a := range agents {
+					if a.Type == "crew" {
+						crew++
+					} else {
+						polecats++
+					}
+					if a.Status == "running" {
+						running++
+					}
 				}
-				for _, s := range statuses {
-					fmt.Printf("%-12s %s (%d files)\n", s.Status, s.Path, s.FileCount)
+				fmt.Printf("  %d total (%d crew, %d polecat), %d running\n",
+					len(agents), crew, polecats, running)
+				for _, a := range agents {
+					fmt.Printf("  %-20s  %-8s  %-10s  pid=%-6d  uptime=%s\n",
+						a.Name, a.Type, a.Status, a.PID, a.Uptime)
+				}
+			}
+			fmt.Println()
+
+			// Work items section
+			fmt.Println("=== Work Items ===")
+			if mgErr != nil {
+				fmt.Println("  (unavailable: mg not found)")
+			} else if report.WorkItems == "" {
+				fmt.Println("  No work items.")
+			} else {
+				for _, line := range strings.Split(report.WorkItems, "\n") {
+					fmt.Printf("  %s\n", line)
+				}
+			}
+			fmt.Println()
+
+			// Refinery section
+			fmt.Println("=== Refinery ===")
+			if refErr != nil {
+				fmt.Printf("  (unavailable: %s)\n", refErr)
+			} else {
+				state := "stopped"
+				if refStatus.Running {
+					state = "running"
+				}
+				if !refStatus.Enabled {
+					state = "disabled"
+				}
+				fmt.Printf("  Status: %s  |  Queue: %d  |  History: %d  |  Poll: %s\n",
+					state, refStatus.QueueLen, refStatus.HistoryLen, refStatus.PollInterval)
+			}
+			if queueErr == nil && len(queue) > 0 {
+				fmt.Println()
+				for _, mr := range queue {
+					age := time.Since(mr.SubmitTime).Truncate(time.Second)
+					author := mr.Author
+					if author == "" {
+						author = "-"
+					}
+					fmt.Printf("  %-8s  %-20s  branch=%-30s  author=%-15s  age=%s\n",
+						mr.Status, mr.ID, mr.Branch, author, age)
 				}
 			}
 		},

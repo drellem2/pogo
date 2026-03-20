@@ -10,6 +10,34 @@ import (
 	"github.com/drellem2/pogo/internal/refinery"
 )
 
+// GetRefineryStatus returns the refinery status summary.
+func GetRefineryStatus() (*refinery.Status, error) {
+	r, err := http.Get(serverURL + "/refinery/status")
+	if err != nil {
+		return nil, err
+	}
+	defer r.Body.Close()
+	var status refinery.Status
+	if err := json.NewDecoder(r.Body).Decode(&status); err != nil {
+		return nil, err
+	}
+	return &status, nil
+}
+
+// GetRefineryQueue returns all queued merge requests.
+func GetRefineryQueue() ([]refinery.MergeRequest, error) {
+	r, err := http.Get(serverURL + "/refinery/queue")
+	if err != nil {
+		return nil, err
+	}
+	defer r.Body.Close()
+	var queue []refinery.MergeRequest
+	if err := json.NewDecoder(r.Body).Decode(&queue); err != nil {
+		return nil, err
+	}
+	return queue, nil
+}
+
 // SubmitMerge submits a branch to the refinery merge queue.
 func SubmitMerge(req refinery.SubmitRequest) (string, error) {
 	body, err := json.Marshal(req)
