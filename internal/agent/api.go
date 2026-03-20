@@ -407,7 +407,7 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		go func() {
 			time.Sleep(2 * time.Second)
 			prompt := buildPolecatPrompt(spawnReq)
-			a.Nudge(prompt + "\n")
+			a.Nudge(prompt)
 		}()
 	}
 
