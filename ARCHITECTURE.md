@@ -187,14 +187,24 @@ This is enforced by convention in prompt files, not by code. The crew prompt say
 
 A deterministic loop inside pogod, not an agent.
 
+The refinery maintains its own git worktrees for testing and merging — it never touches agent or user working directories. This isolates merge operations from active development and avoids dirty-tree conflicts.
+
+```
+~/.pogo/refinery/
+└── worktrees/
+    └── <repo-name>/       # One worktree per repo, created on demand
+```
+
 ```
 loop (every poll_interval):
   items = mg list --status=available --tag=merge-ready
   for each item:
     branch = item.metadata.branch
     repo = item.metadata.repo
+    worktree = ensure_worktree(repo)
 
-    git fetch origin branch
+    cd worktree
+    git fetch origin
     git checkout branch
     run quality_gate (build.sh / test.sh / .pogo/refinery.toml)
 
@@ -211,7 +221,7 @@ loop (every poll_interval):
       log event: refinery.fail
 ```
 
-**Design rationale:** Gas Town's refinery was also deterministic code (not an agent), and this was explicitly validated as the right call. Merge processing is mechanical — it should never spend tokens on judgment. It needs to work even when all agents are down.
+**Design rationale:** Gas Town's refinery was also deterministic code (not an agent), and this was explicitly validated as the right call. Merge processing is mechanical — it should never spend tokens on judgment. It needs to work even when all agents are down. Own worktrees ensure the refinery never interferes with agent or user checkouts.
 
 **Future:** Batch-then-bisect merging (testing N branches together, binary search on failure) is a known optimization but out of MVP scope.
 
@@ -326,9 +336,19 @@ pogod allocates a PTY for each agent it spawns. This is the core mechanism that 
 
 1. **Crew restart semantics.** When pogod restarts a crashed crew agent, does it start a fresh session or attempt to restore? Current leaning: fresh session with handoff mail from the previous run's event log.
 
-4. **Refinery repo access.** The refinery needs to clone/fetch repos to run quality gates. Should it use pogo's discovered project paths directly, or maintain its own worktrees?
+2. **Attach transport.** Unix domain socket per agent vs. single pogod socket with multiplexing? Per-agent is simpler. Single socket is cleaner for the API. Leaning per-agent for MVP.
 
-5. **Attach transport.** Unix domain socket per agent vs. single pogod socket with multiplexing? Per-agent is simpler. Single socket is cleaner for the API. Leaning per-agent for MVP.
+## Resolved Decisions
+
+These questions came up during design and have been answered. Recorded here so they don't resurface.
+
+1. **macguffin scope: global.** One macguffin tree at `~/.macguffin/`, not per-project. Work items reference repo paths as metadata. Pogo provides project awareness via `lsp` and `pose` — macguffin doesn't need to duplicate it. Agents check one place for work.
+
+2. **Polecat concurrency: no limit in pogod.** The daemon doesn't enforce concurrency limits. The mayor (or human) decides how many polecats to spawn. pogod is substrate, not policy.
+
+3. **Refinery repo access: own worktrees.** The refinery maintains dedicated worktrees under `~/.pogo/refinery/worktrees/`, one per repo. It never touches agent or user working directories. Isolation prevents dirty-tree conflicts and keeps merge operations predictable.
+
+4. **No tmux dependency.** pogod allocates PTYs directly and holds master file descriptors. Interactive access (`pogo agent attach`), input injection (`pogo nudge`), and output monitoring are all consequences of the parent-child process relationship. No terminal multiplexer in the stack.
 
 ## What This Is Not
 
