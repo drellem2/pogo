@@ -257,10 +257,15 @@ func (r *Registry) handleStart(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// Look up prompt file: ~/.pogo/agents/crew/<name>.md
-	promptFile := filepath.Join(CrewPromptDir(), startReq.Name+".md")
+	// Look up prompt file: mayor.md is in PromptDir, crew in CrewPromptDir
+	var promptFile string
+	if startReq.Name == "mayor" {
+		promptFile = filepath.Join(PromptDir(), "mayor.md")
+	} else {
+		promptFile = filepath.Join(CrewPromptDir(), startReq.Name+".md")
+	}
 	if _, err := os.Stat(promptFile); os.IsNotExist(err) {
-		http.Error(w, fmt.Sprintf("prompt file not found: %s", promptFile), http.StatusNotFound)
+		http.Error(w, fmt.Sprintf("prompt file not found: %s (run 'pogo agent prompt install' to install defaults)", promptFile), http.StatusNotFound)
 		return
 	}
 

@@ -462,6 +462,35 @@ Detach with Ctrl-\ (SIGQUIT).`,
 		},
 	}
 
+	var installForce bool
+	var cmdAgentPromptInstall = &cobra.Command{
+		Use:   "install",
+		Short: "Install default prompt files to ~/.pogo/agents/",
+		Long: `Copy the default mayor prompt and polecat template to ~/.pogo/agents/.
+Existing files are not overwritten unless --force is used.`,
+		Args: cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			result, err := agent.InstallPrompts(installForce)
+			if err != nil {
+				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+			}
+			if jsonOutput {
+				cli.PrintJSON(result)
+			} else {
+				for _, f := range result.Installed {
+					fmt.Printf("  installed: %s\n", f)
+				}
+				for _, f := range result.Skipped {
+					fmt.Printf("  skipped (exists): %s\n", f)
+				}
+				if len(result.Installed) == 0 && len(result.Skipped) > 0 {
+					fmt.Println("All prompts already installed. Use --force to overwrite.")
+				}
+			}
+		},
+	}
+	cmdAgentPromptInstall.Flags().BoolVar(&installForce, "force", false, "Overwrite existing prompt files")
+
 	var cmdAgentPromptShow = &cobra.Command{
 		Use:   "show <name>",
 		Short: "Show contents of a prompt file",
@@ -610,6 +639,7 @@ If the agent is not running, falls back to sending the message via gt mail.`,
 	cmdAgent.AddCommand(cmdAgentOutput)
 	cmdAgentPrompt.AddCommand(cmdAgentPromptList)
 	cmdAgentPrompt.AddCommand(cmdAgentPromptInit)
+	cmdAgentPrompt.AddCommand(cmdAgentPromptInstall)
 	cmdAgentPrompt.AddCommand(cmdAgentPromptShow)
 	cmdAgent.AddCommand(cmdAgentPrompt)
 	rootCmd.AddCommand(cmdAgent)

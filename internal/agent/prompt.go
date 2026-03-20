@@ -2,12 +2,17 @@ package agent
 
 import (
 	"bytes"
+	"embed"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"text/template"
 )
+
+//go:embed prompts
+var defaultPrompts embed.FS
 
 // PromptDir returns the root directory for agent prompt files.
 // Default: ~/.pogo/agents/
@@ -185,4 +190,58 @@ func InitPromptDirs() error {
 		}
 	}
 	return nil
+}
+
+// InstallResult describes what happened during prompt installation.
+type InstallResult struct {
+	Installed []string `json:"installed"` // files written
+	Skipped   []string `json:"skipped"`   // files already existing (not overwritten)
+}
+
+// InstallPrompts copies the default prompt files embedded in the binary to
+// ~/.pogo/agents/. Existing files are not overwritten unless force is true.
+func InstallPrompts(force bool) (*InstallResult, error) {
+	if err := InitPromptDirs(); err != nil {
+		return nil, err
+	}
+
+	result := &InstallResult{}
+	destRoot := PromptDir()
+
+	err := fs.WalkDir(defaultPrompts, "prompts", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		// Strip the "prompts" prefix to get the relative path
+		rel, _ := filepath.Rel("prompts", path)
+		if rel == "." {
+			return nil
+		}
+		destPath := filepath.Join(destRoot, rel)
+
+		if d.IsDir() {
+			return os.MkdirAll(destPath, 0755)
+		}
+
+		// Check if destination already exists
+		if !force {
+			if _, err := os.Stat(destPath); err == nil {
+				result.Skipped = append(result.Skipped, rel)
+				return nil
+			}
+		}
+
+		data, err := defaultPrompts.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("read embedded %s: %w", path, err)
+		}
+
+		if err := os.WriteFile(destPath, data, 0644); err != nil {
+			return fmt.Errorf("write %s: %w", destPath, err)
+		}
+		result.Installed = append(result.Installed, rel)
+		return nil
+	})
+
+	return result, err
 }
