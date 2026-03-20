@@ -258,17 +258,23 @@ Nudge is a convenience — not a requirement. Agents should also poll their macg
 
 ### 6. Event Log
 
-All events — work items, agent lifecycle, refinery merges — go to macguffin's log at `~/.macguffin/log/`. macguffin is the single state layer; pogod writes its own events (agent start/stop, refinery merge/fail) there rather than maintaining a separate log.
+All events — work items, agent lifecycle, refinery merges — go to macguffin's event log. macguffin is the single state layer; pogod writes its own events (agent start/stop, refinery merge/fail) via `mg event append` rather than maintaining a separate log.
 
 ```json
-{"ts":"2026-03-20T10:00:00Z","event":"agent.start","agent":"crew-arch","type":"crew"}
-{"ts":"2026-03-20T10:01:00Z","event":"work.claim","agent":"cat-a3f","item":"gt-a3f"}
-{"ts":"2026-03-20T10:05:00Z","event":"work.done","agent":"cat-a3f","item":"gt-a3f"}
-{"ts":"2026-03-20T10:05:01Z","event":"agent.exit","agent":"cat-a3f","code":0}
-{"ts":"2026-03-20T10:06:00Z","event":"refinery.merge","item":"gt-a3f","branch":"pogo-cat-a3f"}
+{"ts":"2026-03-20T10:00:00Z","type":"agent.start","agent":"crew-arch","agent_type":"crew"}
+{"ts":"2026-03-20T10:01:00Z","type":"work.claim","agent":"cat-a3f","item":"gt-a3f"}
+{"ts":"2026-03-20T10:05:00Z","type":"work.done","agent":"cat-a3f","item":"gt-a3f"}
+{"ts":"2026-03-20T10:05:01Z","type":"agent.exit","agent":"cat-a3f","code":"0"}
+{"ts":"2026-03-20T10:06:00Z","type":"refinery.merge","item":"gt-a3f","branch":"pogo-cat-a3f"}
 ```
 
-This may require an `mg log append` command or equivalent so pogod can write events without reaching into macguffin's directory structure directly.
+pogod writes events via the existing `mg event append` command:
+```bash
+mg event append agent.start --agent=crew-arch --agent_type=crew
+mg event append refinery.merge --item=gt-a3f --branch=pogo-cat-a3f
+```
+
+Query with `mg event list --type=agent.start --tail=10`.
 
 Not a coordination mechanism — purely observability. `tail -f` for humans, `jq` for agents, `grep` for debugging.
 
