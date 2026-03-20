@@ -280,7 +280,7 @@ func (r *Registry) handleStart(w http.ResponseWriter, req *http.Request) {
 	a, err := r.Spawn(SpawnRequest{
 		Name:       startReq.Name,
 		Type:       TypeCrew,
-		Command:    []string{"claude", "--append-system-prompt", string(promptContent)},
+		Command:    []string{"claude", "--dangerously-skip-permissions", "--append-system-prompt", string(promptContent)},
 		PromptFile: promptFile,
 	})
 	if err != nil {
@@ -352,7 +352,7 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 	}
 
 	// Build command — structured prompt with inline protocol steps kicks off execution
-	cmd := []string{"claude", "--append-system-prompt", string(expandedContent)}
+	cmd := []string{"claude", "--dangerously-skip-permissions", "--append-system-prompt", string(expandedContent)}
 	if spawnReq.Task != "" {
 		prompt := buildPolecatPrompt(spawnReq)
 		cmd = append(cmd, "-p", prompt)
