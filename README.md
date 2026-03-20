@@ -83,6 +83,117 @@ Auto-discover projects as you `cd` into directories. All shell integrations prov
 Zoekt query examples can be found [here](https://github.com/sourcegraph/zoekt/blob/main/web/templates.go#L158).
 e.g. `pose banana` or `pose banana .` will search the current directory for `banana`.
 
+## Getting Started with Agent Orchestration
+
+Pogo doubles as a minimal agent orchestrator. If you have [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed, you can use pogo to coordinate multiple agents working on a codebase together.
+
+### Prerequisites
+
+- Go 1.21+ (for building pogo)
+- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI installed
+- [macguffin](https://github.com/drellem2/macguffin) (`mg`) CLI installed
+
+### 1. Start the daemon
+
+```sh
+pogo server start
+```
+
+This starts `pogod`, which manages project indexing, agent supervision, and the refinery merge queue.
+
+### 2. Set up macguffin
+
+Macguffin is the shared coordination layer — a filesystem-based work queue that agents use to claim tasks, send mail, and log events.
+
+```sh
+mg init    # Creates ~/.macguffin/ with work/, mail/, log/
+```
+
+### 3. Install the default prompts
+
+Pogo ships embedded prompt files that define agent behavior. Install them to `~/.pogo/agents/`:
+
+```sh
+pogo agent prompt init      # Create the directory structure
+pogo agent prompt install   # Install default prompts (mayor, polecat template)
+```
+
+This creates:
+
+```
+~/.pogo/agents/
+├── mayor.md           # Coordinator prompt
+├── crew/              # Long-running agent prompts
+└── templates/
+    └── polecat.md     # Ephemeral worker template
+```
+
+Edit these files to customize agent behavior. Polecats read the template fresh on each spawn; crew agents pick up changes on their next restart.
+
+### 4. Start the mayor
+
+The mayor is the coordinator agent. It watches for available work and spawns polecats to handle it.
+
+```sh
+pogo agent start mayor
+```
+
+### 5. File work
+
+Create a work item with macguffin:
+
+```sh
+mg new "fix the auth token refresh bug"
+```
+
+The mayor picks it up, spawns a polecat, and the polecat claims the work, makes changes on a feature branch, and submits it to the refinery merge queue. The refinery runs your quality gates and merges to main.
+
+### 6. Watch the flow
+
+```sh
+pogo agent list              # See running agents (mayor + any active polecats)
+pogo agent status mayor      # Mayor's current state
+mg list                      # All work items and their status
+mg list --status=claimed     # In-progress work
+```
+
+### 7. Interact with agents
+
+```sh
+pogo agent attach mayor              # Attach your terminal to the mayor's PTY
+pogo nudge mayor "check for work"    # Send a message to the mayor
+mg mail send mayor --subject="priority change" --body="pause feature work"
+mg mail list mayor                   # Check the mayor's inbox
+```
+
+`pogo agent attach` gives you a live terminal session with the agent. Detach with `Ctrl-B d`. `pogo nudge` injects text into the agent's PTY without attaching — by default it waits for the agent to be idle before sending.
+
+### 8. How the pieces fit together
+
+```
+You                    pogod                     macguffin
+ │                       │                          │
+ │  mg new "task"        │                          │
+ ├──────────────────────►├─────────────────────────►│ work/available/
+ │                       │                          │
+ │                       │  mayor notices            │
+ │                       │◄─────────────────────────┤ mg list --status=available
+ │                       │                          │
+ │                       │  spawn polecat            │
+ │                       ├─────────┐                │
+ │                       │ polecat │  mg claim       │
+ │                       │         ├───────────────►│ work/claimed/
+ │                       │         │  (does work)   │
+ │                       │         │  mg done        │
+ │                       │         ├───────────────►│ work/done/
+ │                       │         │                │
+ │                       │  refinery runs gates      │
+ │                       │  merges to main           │
+ │                       │                          │
+```
+
+Agents are UNIX processes. You can find them with `ps`, send signals with `kill`, and monitor output with `pogo agent output <name>`. All coordination happens through the filesystem via `mg` — no database, no server, no custom protocol.
+
 ## How pogo compares to alternatives
 
 Most project tools are scoped to a single editor or shell. Pogo takes a different approach: a background daemon that discovers and indexes repositories automatically, then exposes them to any integration.
