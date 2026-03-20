@@ -16,8 +16,8 @@ Pogo is an operating system for agent-first development. It combines project dis
 │  │  (merge queue loop)                       │   │
 │  └──────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────┐   │
-│  │            Event Log                      │   │
-│  │  (~/.pogo/events.jsonl)                   │   │
+│  │         Event Log (via macguffin)         │   │
+│  │  (~/.macguffin/log/)                      │   │
 │  └──────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────┘
           │                    │
@@ -233,7 +233,6 @@ loop (every poll_interval):
 
 ```
 ~/.pogo/
-├── events.jsonl           # Append-only event log
 ├── agents/
 │   ├── crew/
 │   │   ├── arch.md        # Crew prompt files
@@ -363,6 +362,8 @@ These questions came up during design and have been answered. Recorded here so t
 3. **Refinery repo access: own worktrees.** The refinery maintains dedicated worktrees under `~/.pogo/refinery/worktrees/`, one per repo. It never touches agent or user working directories. Isolation prevents dirty-tree conflicts and keeps merge operations predictable.
 
 4. **No tmux dependency.** pogod allocates PTYs directly and holds master file descriptors. Interactive access (`pogo agent attach`), input injection (`pogo nudge`), and output monitoring are all consequences of the parent-child process relationship. No terminal multiplexer in the stack.
+
+5. **Single event log in macguffin.** All events — work item transitions, agent lifecycle, refinery merges — write to macguffin's log at `~/.macguffin/log/`. pogod does not maintain a separate event log. macguffin is the single state layer; one place to look, one timeline, one tool (`mg log`) to query.
 
 ## What This Is Not
 
