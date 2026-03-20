@@ -70,21 +70,36 @@ fi
 
 BASE_URL="https://github.com/${REPO}/releases/download/${VERSION}"
 
-for bin in $BINARIES; do
-  url="${BASE_URL}/${bin}-${OS}-${ARCH}"
-  echo "  Downloading ${bin}..."
-  tmpfile=$(mktemp)
-  if curl -fsSL -o "$tmpfile" "$url"; then
-    chmod +x "$tmpfile"
-    $SUDO mv "$tmpfile" "${INSTALL_DIR}/${bin}"
-  else
-    rm -f "$tmpfile"
-    echo "  Warning: failed to download ${bin} (${url})" >&2
-  fi
-done
+# Strip leading 'v' from version for archive name (goreleaser convention)
+ARCHIVE_VERSION=$(echo "$VERSION" | sed 's/^v//')
+ARCHIVE_NAME="pogo_${ARCHIVE_VERSION}_${OS}_${ARCH}.tar.gz"
+ARCHIVE_URL="${BASE_URL}/${ARCHIVE_NAME}"
+
+echo "  Downloading ${ARCHIVE_NAME}..."
+tmpdir=$(mktemp -d)
+tmpfile="${tmpdir}/pogo.tar.gz"
+
+if curl -fsSL -o "$tmpfile" "$ARCHIVE_URL"; then
+  tar xzf "$tmpfile" -C "$tmpdir"
+  for bin in $BINARIES; do
+    if [ -f "${tmpdir}/${bin}" ]; then
+      chmod +x "${tmpdir}/${bin}"
+      $SUDO mv "${tmpdir}/${bin}" "${INSTALL_DIR}/${bin}"
+      echo "  Installed ${bin}"
+    else
+      echo "  Warning: ${bin} not found in archive" >&2
+    fi
+  done
+else
+  echo "  Error: failed to download ${ARCHIVE_URL}" >&2
+  rm -rf "$tmpdir"
+  exit 1
+fi
+
+rm -rf "$tmpdir"
 
 echo "Done! Installed to ${INSTALL_DIR}"
-echo "Run 'pogo server start' to start the daemon."
+echo "Run 'pogo install' to set up agent orchestration."
 
 if [ "$INTERACTIVE" = false ]; then
   echo ""
