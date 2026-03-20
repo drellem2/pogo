@@ -269,11 +269,17 @@ func (r *Registry) handleStart(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// Start crew agent with claude --prompt-file
+	// Read prompt file and pass via --append-system-prompt
+	promptContent, err := os.ReadFile(promptFile)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("failed to read prompt file: %v", err), http.StatusInternalServerError)
+		return
+	}
+
 	a, err := r.Spawn(SpawnRequest{
 		Name:       startReq.Name,
 		Type:       TypeCrew,
-		Command:    []string{"claude", "--prompt-file", promptFile},
+		Command:    []string{"claude", "--append-system-prompt", string(promptContent)},
 		PromptFile: promptFile,
 	})
 	if err != nil {
@@ -329,11 +335,18 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		return
 	}
 
-	// Spawn the polecat with the expanded prompt
+	// Read expanded prompt and pass via --append-system-prompt
+	expandedContent, err := os.ReadFile(promptFile)
+	if err != nil {
+		os.Remove(promptFile)
+		http.Error(w, fmt.Sprintf("failed to read expanded prompt: %v", err), http.StatusInternalServerError)
+		return
+	}
+
 	a, err := r.Spawn(SpawnRequest{
 		Name:       spawnReq.Name,
 		Type:       TypePolecat,
-		Command:    []string{"claude", "--prompt-file", promptFile},
+		Command:    []string{"claude", "--append-system-prompt", string(expandedContent)},
 		Env:        spawnReq.Env,
 		PromptFile: promptFile,
 	})

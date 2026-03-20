@@ -120,7 +120,7 @@ func ProcessName(agentType AgentType, name string) string {
 type SpawnRequest struct {
 	Name       string
 	Type       AgentType
-	Command    []string // e.g. ["claude", "--prompt-file", "/path/to/prompt.md"]
+	Command    []string // e.g. ["claude", "--append-system-prompt", "<prompt content>"]
 	Env        []string // additional env vars
 	PromptFile string   // path to prompt file (optional)
 }
