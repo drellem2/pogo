@@ -66,6 +66,11 @@ type Agent struct {
 	socketPath string
 	listener   net.Listener
 
+	// attachConns tracks active attach connections.
+	// readOutput fans out PTY output to these in addition to the ring buffer.
+	attachConns map[net.Conn]struct{}
+	attachMu    sync.Mutex
+
 	// done is closed when the agent process exits and output is drained.
 	done chan struct{}
 	// outputDone is closed when the readOutput goroutine finishes.
@@ -159,22 +164,24 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 	}
 
 	a := &Agent{
-		Name:       req.Name,
-		PID:        cmd.Process.Pid,
-		Type:       req.Type,
-		StartTime:  time.Now(),
-		Command:    req.Command,
-		Status:     StatusRunning,
-		PromptFile: req.PromptFile,
-		master:     master,
-		cmd:        cmd,
-		outputBuf:  NewRingBuffer(64 * 1024), // 64KB rolling buffer
-		socketPath: filepath.Join(r.socketDir, req.Name+".sock"),
-		done:       make(chan struct{}),
-		outputDone: make(chan struct{}),
+		Name:        req.Name,
+		PID:         cmd.Process.Pid,
+		Type:        req.Type,
+		StartTime:   time.Now(),
+		Command:     req.Command,
+		Status:      StatusRunning,
+		PromptFile:  req.PromptFile,
+		master:      master,
+		cmd:         cmd,
+		outputBuf:   NewRingBuffer(64 * 1024), // 64KB rolling buffer
+		attachConns: make(map[net.Conn]struct{}),
+		socketPath:  filepath.Join(r.socketDir, req.Name+".sock"),
+		done:        make(chan struct{}),
+		outputDone:  make(chan struct{}),
 	}
 
-	// Start output reader — reads from master, buffers for monitoring
+	// Start output reader — sole reader of master fd, fans out to
+	// ring buffer + any active attach connections
 	go a.readOutput()
 
 	// Start process reaper — waits for exit, fires onExit callback
@@ -309,6 +316,7 @@ func (r *Registry) Respawn(name string) (*Agent, error) {
 		master:       master,
 		cmd:          cmd,
 		outputBuf:    NewRingBuffer(64 * 1024),
+		attachConns:  make(map[net.Conn]struct{}),
 		socketPath:   filepath.Join(r.socketDir, old.Name+".sock"),
 		done:         make(chan struct{}),
 		outputDone:   make(chan struct{}),
@@ -358,14 +366,24 @@ func (a *Agent) ExitErr() error {
 	return a.exitErr
 }
 
-// readOutput reads from PTY master and buffers output.
+// readOutput is the sole reader of the PTY master fd.
+// It fans out output to the ring buffer AND any active attach connections.
 func (a *Agent) readOutput() {
 	defer close(a.outputDone)
 	buf := make([]byte, 4096)
 	for {
 		n, err := a.master.Read(buf)
 		if n > 0 {
-			a.outputBuf.Write(buf[:n])
+			data := buf[:n]
+			a.outputBuf.Write(data)
+
+			// Fan out to attached connections
+			a.attachMu.Lock()
+			for conn := range a.attachConns {
+				// Best-effort write — don't block output on slow clients
+				conn.Write(data)
+			}
+			a.attachMu.Unlock()
 		}
 		if err != nil {
 			if err != io.EOF {
@@ -449,7 +467,8 @@ func (a *Agent) acceptLoop() {
 }
 
 // handleAttach bridges a unix socket connection to the PTY master.
-// Data flows bidirectionally: conn ↔ PTY master.
+// Output (master → conn) is handled by readOutput via the attach fanout.
+// This method handles input (conn → master) and lifecycle.
 func (a *Agent) handleAttach(conn net.Conn) {
 	defer conn.Close()
 
@@ -461,22 +480,21 @@ func (a *Agent) handleAttach(conn net.Conn) {
 		return
 	}
 
-	done := make(chan struct{}, 2)
+	// Register for output fanout
+	a.attachMu.Lock()
+	a.attachConns[conn] = struct{}{}
+	a.attachMu.Unlock()
+
+	// Deregister on exit
+	defer func() {
+		a.attachMu.Lock()
+		delete(a.attachConns, conn)
+		a.attachMu.Unlock()
+	}()
 
 	// conn → PTY master (user input → agent)
-	go func() {
-		io.Copy(master, conn)
-		done <- struct{}{}
-	}()
-
-	// PTY master → conn (agent output → user)
-	go func() {
-		io.Copy(conn, master)
-		done <- struct{}{}
-	}()
-
-	// Wait for either direction to close
-	<-done
+	// Blocks until conn closes (user detaches) or master closes (agent exits)
+	io.Copy(master, conn)
 }
 
 // SocketPath returns the unix socket path for attach.
