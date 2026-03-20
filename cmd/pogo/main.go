@@ -7,6 +7,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -614,10 +615,85 @@ If the agent is not running, falls back to sending the message via gt mail.`,
 	cmdNudge.Flags().BoolVarP(&nudgeImmediate, "immediate", "i", false, "Write directly to PTY without waiting for idle")
 	cmdNudge.Flags().IntVarP(&nudgeTimeout, "timeout", "T", 30, "Seconds to wait for agent idle (wait-idle mode)")
 
+	var installForceFlag bool
+	var cmdInstall = &cobra.Command{
+		Use:   "install",
+		Short: "Set up pogo for agent orchestration",
+		Long: `Initialize everything needed for agent orchestration in one step:
+1. Start the pogo daemon (if not already running)
+2. Initialize macguffin workspace (mg init)
+3. Install default agent prompts to ~/.pogo/agents/
+
+Safe to run multiple times — existing files are preserved unless --force is passed.`,
+		Args: cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			// Step 1: Ensure daemon is running
+			err := client.HealthCheck()
+			if err != nil {
+				if !jsonOutput {
+					fmt.Println("Starting pogo server...")
+				}
+				if err := client.StartServer(); err != nil {
+					cli.ExitWithError(jsonOutput, "failed to start server: "+err.Error(), cli.ExitError)
+				}
+				if !jsonOutput {
+					fmt.Println("  ✓ pogo server started")
+				}
+			} else {
+				if !jsonOutput {
+					fmt.Println("  ✓ pogo server already running")
+				}
+			}
+
+			// Step 2: Initialize macguffin
+			mgInit := func() error {
+				c := exec.Command("mg", "init")
+				c.Stdout = os.Stdout
+				c.Stderr = os.Stderr
+				return c.Run()
+			}
+			if err := mgInit(); err != nil {
+				// mg init is idempotent — if it fails, mg might not be installed
+				if !jsonOutput {
+					fmt.Println("  ⚠ mg init failed (is macguffin installed?)")
+				}
+			} else {
+				if !jsonOutput {
+					fmt.Println("  ✓ macguffin initialized")
+				}
+			}
+
+			// Step 3: Install prompts
+			result, err := agent.InstallPrompts(installForceFlag)
+			if err != nil {
+				cli.ExitWithError(jsonOutput, "failed to install prompts: "+err.Error(), cli.ExitError)
+			}
+
+			if jsonOutput {
+				cli.PrintJSON(map[string]interface{}{
+					"status":  "installed",
+					"prompts": result,
+				})
+			} else {
+				if len(result.Installed) > 0 {
+					fmt.Printf("  ✓ installed %d prompt(s)\n", len(result.Installed))
+				}
+				if len(result.Skipped) > 0 {
+					fmt.Printf("  ✓ %d prompt(s) already exist (use --force to overwrite)\n", len(result.Skipped))
+				}
+				fmt.Println("\nReady. Next steps:")
+				fmt.Println("  pogo agent start mayor    # Start the coordinator")
+				fmt.Println("  mg new \"your task here\"   # File work for agents")
+			}
+		},
+	}
+	cmdInstall.Flags().BoolVar(&installForceFlag, "force", false, "Overwrite existing prompt files")
+
 	var rootCmd = &cobra.Command{Use: "pogo"}
 
 	rootCmd.PersistentFlags().BoolVar(&jsonOutput, "json", false, "Output in JSON format")
 
+	rootCmd.AddCommand(cmdInstall)
 	rootCmd.AddCommand(cmdVisit)
 	rootCmd.AddCommand(cmdStatus)
 	cmdServer.AddCommand(cmdServerStart)

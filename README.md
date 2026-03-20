@@ -89,48 +89,33 @@ Pogo doubles as a minimal agent orchestrator. If you have [Claude Code](https://
 
 ### Prerequisites
 
-- Go 1.21+ (for building pogo)
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI installed
 - [macguffin](https://github.com/drellem2/macguffin) (`mg`) CLI installed
 
-### 1. Start the daemon
+### 1. Install
 
 ```sh
-pogo server start
+pogo install
 ```
 
-This starts `pogod`, which manages project indexing, agent supervision, and the refinery merge queue.
+This single command:
+- Starts the pogo daemon (if not already running)
+- Initializes macguffin (`mg init`) for work item coordination
+- Installs default agent prompts to `~/.pogo/agents/`
 
-### 2. Set up macguffin
-
-Macguffin is the shared coordination layer — a filesystem-based work queue that agents use to claim tasks, send mail, and log events.
-
-```sh
-mg init    # Creates ~/.macguffin/ with work/, mail/, log/
-```
-
-### 3. Install the default prompts
-
-Pogo ships embedded prompt files that define agent behavior. Install them to `~/.pogo/agents/`:
-
-```sh
-pogo agent prompt init      # Create the directory structure
-pogo agent prompt install   # Install default prompts (mayor, polecat template)
-```
-
-This creates:
+After install, your agent configuration lives in plain markdown files:
 
 ```
 ~/.pogo/agents/
-├── mayor.md           # Coordinator prompt
-├── crew/              # Long-running agent prompts
+├── mayor.md           # Coordinator prompt — edit to change dispatch strategy
+├── crew/              # Long-running agent prompts — add your own here
 └── templates/
     └── polecat.md     # Ephemeral worker template
 ```
 
-Edit these files to customize agent behavior. Polecats read the template fresh on each spawn; crew agents pick up changes on their next restart.
+Run `pogo install` again at any time — it's idempotent. Existing prompt files are preserved unless you pass `--force`.
 
-### 4. Start the mayor
+### 2. Start the mayor
 
 The mayor is the coordinator agent. It watches for available work and spawns polecats to handle it.
 
@@ -138,9 +123,7 @@ The mayor is the coordinator agent. It watches for available work and spawns pol
 pogo agent start mayor
 ```
 
-### 5. File work
-
-Create a work item with macguffin:
+### 3. File work
 
 ```sh
 mg new "fix the auth token refresh bug"
@@ -148,27 +131,23 @@ mg new "fix the auth token refresh bug"
 
 The mayor picks it up, spawns a polecat, and the polecat claims the work, makes changes on a feature branch, and submits it to the refinery merge queue. The refinery runs your quality gates and merges to main.
 
-### 6. Watch the flow
+### Working with agents
 
 ```sh
-pogo agent list              # See running agents (mayor + any active polecats)
+# See what's running
+pogo agent list              # Running agents (mayor + active polecats)
 pogo agent status mayor      # Mayor's current state
 mg list                      # All work items and their status
-mg list --status=claimed     # In-progress work
-```
 
-### 7. Interact with agents
-
-```sh
-pogo agent attach mayor              # Attach your terminal to the mayor's PTY
-pogo nudge mayor "check for work"    # Send a message to the mayor
+# Talk to agents
+pogo agent attach mayor              # Live terminal session (detach: ~.)
+pogo nudge mayor "check for work"    # Inject text without attaching
 mg mail send mayor --subject="priority change" --body="pause feature work"
-mg mail list mayor                   # Check the mayor's inbox
 ```
 
-`pogo agent attach` gives you a live terminal session with the agent. Detach with `Ctrl-B d`. `pogo nudge` injects text into the agent's PTY without attaching — by default it waits for the agent to be idle before sending.
+`pogo agent attach` connects your terminal to the agent's PTY — you see exactly what the agent sees. `pogo nudge` writes text to the agent's input without attaching, waiting for idle by default.
 
-### 8. How the pieces fit together
+### How the pieces fit together
 
 ```
 You                    pogod                     macguffin
@@ -193,6 +172,23 @@ You                    pogod                     macguffin
 ```
 
 Agents are UNIX processes. You can find them with `ps`, send signals with `kill`, and monitor output with `pogo agent output <name>`. All coordination happens through the filesystem via `mg` — no database, no server, no custom protocol.
+
+### Customization
+
+Agent behavior is defined entirely by prompt files. To change how the mayor dispatches work, edit `~/.pogo/agents/mayor.md`. To add a persistent crew agent:
+
+```sh
+# Create a prompt file
+cat > ~/.pogo/agents/crew/reviewer.md << 'EOF'
+# Reviewer
+You review pull requests for code quality...
+EOF
+
+# Start it
+pogo agent start reviewer
+```
+
+Polecats read `~/.pogo/agents/templates/polecat.md` fresh on each spawn, so template changes take effect immediately.
 
 ## How pogo compares to alternatives
 
