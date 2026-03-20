@@ -17,6 +17,21 @@ import (
 	"github.com/drellem2/pogo/internal/service"
 )
 
+func showPromptFile(path string, jsonOut bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		cli.ExitWithError(jsonOut, err.Error(), cli.ExitError)
+	}
+	if jsonOut {
+		cli.PrintJSON(map[string]string{
+			"path":    path,
+			"content": string(data),
+		})
+	} else {
+		fmt.Print(string(data))
+	}
+}
+
 func main() {
 
 	var jsonOutput bool
@@ -395,6 +410,128 @@ Detach with Ctrl-\ (SIGQUIT).`,
 		},
 	}
 
+	// Prompt subcommands
+	var cmdAgentPrompt = &cobra.Command{
+		Use:   "prompt",
+		Short: "Manage agent prompt files",
+		Long:  `Commands for listing and inspecting prompt files in ~/.pogo/agents/.`,
+	}
+
+	var cmdAgentPromptList = &cobra.Command{
+		Use:   "list",
+		Short: "List available prompt files",
+		Args:  cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			prompts, err := client.ListPrompts()
+			if err != nil {
+				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+			}
+			if jsonOutput {
+				cli.PrintJSON(prompts)
+			} else {
+				if len(prompts) == 0 {
+					fmt.Println("No prompt files found.")
+					fmt.Printf("Create them in %s\n", agent.PromptDir())
+					return
+				}
+				for _, p := range prompts {
+					fmt.Printf("%-12s  %-20s  %s\n", p.Category, p.Name, p.Path)
+				}
+			}
+		},
+	}
+
+	var cmdAgentPromptInit = &cobra.Command{
+		Use:   "init",
+		Short: "Create the ~/.pogo/agents/ directory structure",
+		Args:  cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			if err := agent.InitPromptDirs(); err != nil {
+				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+			}
+			if jsonOutput {
+				cli.PrintJSON(map[string]string{
+					"status": "created",
+					"path":   agent.PromptDir(),
+				})
+			} else {
+				fmt.Printf("Created directory structure at %s\n", agent.PromptDir())
+				fmt.Println("  crew/       — Long-running agent prompts")
+				fmt.Println("  templates/  — Polecat prompt templates (with {{.Variable}} expansion)")
+			}
+		},
+	}
+
+	var cmdAgentPromptShow = &cobra.Command{
+		Use:   "show <name>",
+		Short: "Show contents of a prompt file",
+		Long:  `Show the raw contents of a crew prompt, template, or the mayor prompt.`,
+		Args:  cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			name := args[0]
+			// Try mayor first
+			if name == "mayor" {
+				path, err := agent.ResolveMayorPrompt()
+				if err != nil {
+					cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+				}
+				showPromptFile(path, jsonOutput)
+				return
+			}
+			// Try crew
+			if path, err := agent.ResolveCrewPrompt(name); err == nil {
+				showPromptFile(path, jsonOutput)
+				return
+			}
+			// Try template
+			if path, err := agent.ResolveTemplate(name); err == nil {
+				showPromptFile(path, jsonOutput)
+				return
+			}
+			cli.ExitWithError(jsonOutput, fmt.Sprintf("prompt %q not found (checked crew/, templates/, and mayor.md)", name), cli.ExitError)
+		},
+	}
+
+	// Spawn polecat from template
+	var spawnPolecatTemplate string
+	var spawnPolecatTask string
+	var spawnPolecatBody string
+	var spawnPolecatId string
+	var spawnPolecatRepo string
+	var spawnPolecatEnv []string
+	var cmdAgentSpawnPolecat = &cobra.Command{
+		Use:   "spawn-polecat <name>",
+		Short: "Spawn a polecat from a prompt template",
+		Long: `Spawn an ephemeral polecat agent using a prompt template from ~/.pogo/agents/templates/.
+The template is expanded with the provided variables and used as the agent's prompt file.`,
+		Args: cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			info, err := client.SpawnPolecat(agent.SpawnPolecatAPIRequest{
+				Name:     args[0],
+				Template: spawnPolecatTemplate,
+				Task:     spawnPolecatTask,
+				Body:     spawnPolecatBody,
+				Id:       spawnPolecatId,
+				Repo:     spawnPolecatRepo,
+				Env:      spawnPolecatEnv,
+			})
+			if err != nil {
+				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+			}
+			if jsonOutput {
+				cli.PrintJSON(info)
+			} else {
+				fmt.Printf("Spawned polecat %s (pid=%d, prompt=%s)\n", info.Name, info.PID, info.PromptFile)
+			}
+		},
+	}
+	cmdAgentSpawnPolecat.Flags().StringVar(&spawnPolecatTemplate, "template", "polecat", "Template name (from ~/.pogo/agents/templates/)")
+	cmdAgentSpawnPolecat.Flags().StringVar(&spawnPolecatTask, "task", "", "Work item title ({{.Task}})")
+	cmdAgentSpawnPolecat.Flags().StringVar(&spawnPolecatBody, "body", "", "Work item body ({{.Body}})")
+	cmdAgentSpawnPolecat.Flags().StringVar(&spawnPolecatId, "id", "", "Work item ID ({{.Id}})")
+	cmdAgentSpawnPolecat.Flags().StringVar(&spawnPolecatRepo, "repo", "", "Target repository path ({{.Repo}})")
+	cmdAgentSpawnPolecat.Flags().StringSliceVarP(&spawnPolecatEnv, "env", "e", nil, "Additional environment variables (KEY=VALUE)")
+
 	// Nudge command — top-level for convenience
 	var cmdNudge = &cobra.Command{
 		Use:   "nudge <name> <message>",
@@ -435,10 +572,15 @@ The agent sees it as typed input. Use this for agent-to-agent wakeup or human-to
 	cmdAgent.AddCommand(cmdAgentStart)
 	cmdAgent.AddCommand(cmdAgentList)
 	cmdAgent.AddCommand(cmdAgentSpawn)
+	cmdAgent.AddCommand(cmdAgentSpawnPolecat)
 	cmdAgent.AddCommand(cmdAgentStop)
 	cmdAgent.AddCommand(cmdAgentStatus)
 	cmdAgent.AddCommand(cmdAgentAttach)
 	cmdAgent.AddCommand(cmdAgentOutput)
+	cmdAgentPrompt.AddCommand(cmdAgentPromptList)
+	cmdAgentPrompt.AddCommand(cmdAgentPromptInit)
+	cmdAgentPrompt.AddCommand(cmdAgentPromptShow)
+	cmdAgent.AddCommand(cmdAgentPrompt)
 	rootCmd.AddCommand(cmdAgent)
 	rootCmd.AddCommand(cmdNudge)
 

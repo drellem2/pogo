@@ -41,6 +41,18 @@ type StartAPIRequest struct {
 	Name string `json:"name"`
 }
 
+// SpawnPolecatAPIRequest is the JSON body for POST /agents/spawn-polecat.
+// Spawns a polecat from a template with variable expansion.
+type SpawnPolecatAPIRequest struct {
+	Name     string   `json:"name"`           // Agent name (e.g., short ID)
+	Template string   `json:"template"`       // Template name (default: "polecat")
+	Task     string   `json:"task,omitempty"` // Work item title
+	Body     string   `json:"body,omitempty"` // Work item body
+	Id       string   `json:"id,omitempty"`   // Work item ID
+	Repo     string   `json:"repo,omitempty"` // Target repository path
+	Env      []string `json:"env,omitempty"`  // Additional env vars
+}
+
 // NudgeAPIRequest is the JSON body for POST /agents/:name/nudge.
 type NudgeAPIRequest struct {
 	Message string `json:"message"`
@@ -72,6 +84,8 @@ func agentInfo(a *Agent) AgentInfo {
 func (r *Registry) RegisterHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/agents", r.handleAgents)
 	mux.HandleFunc("/agents/start", r.handleStart)
+	mux.HandleFunc("/agents/spawn-polecat", r.handleSpawnPolecat)
+	mux.HandleFunc("/agents/prompts", r.handlePrompts)
 	mux.HandleFunc("/agents/{name}", r.handleAgent)
 	mux.HandleFunc("/agents/{name}/nudge", r.handleNudge)
 	mux.HandleFunc("/agents/{name}/output", r.handleOutput)
@@ -235,4 +249,82 @@ func (r *Registry) handleStart(w http.ResponseWriter, req *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(agentInfo(a))
+}
+
+func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) {
+	if req.Method != "POST" {
+		http.Error(w, "", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var spawnReq SpawnPolecatAPIRequest
+	if err := json.NewDecoder(req.Body).Decode(&spawnReq); err != nil {
+		http.Error(w, fmt.Sprintf("bad request: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	if spawnReq.Name == "" {
+		http.Error(w, "name is required", http.StatusBadRequest)
+		return
+	}
+
+	// Default template name
+	tmplName := spawnReq.Template
+	if tmplName == "" {
+		tmplName = "polecat"
+	}
+
+	// Resolve template path
+	tmplPath, err := ResolveTemplate(tmplName)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+
+	// Expand template to a temp file
+	vars := TemplateVars{
+		Task: spawnReq.Task,
+		Body: spawnReq.Body,
+		Id:   spawnReq.Id,
+		Repo: spawnReq.Repo,
+	}
+	promptFile, err := ExpandTemplateToFile(tmplPath, vars)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("template expansion failed: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Spawn the polecat with the expanded prompt
+	a, err := r.Spawn(SpawnRequest{
+		Name:       spawnReq.Name,
+		Type:       TypePolecat,
+		Command:    []string{"claude", "--prompt-file", promptFile},
+		Env:        spawnReq.Env,
+		PromptFile: promptFile,
+	})
+	if err != nil {
+		os.Remove(promptFile) // Clean up temp file on spawn failure
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(agentInfo(a))
+}
+
+func (r *Registry) handlePrompts(w http.ResponseWriter, req *http.Request) {
+	if req.Method != "GET" {
+		http.Error(w, "", http.StatusMethodNotAllowed)
+		return
+	}
+
+	prompts, err := ListPrompts()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(prompts)
 }

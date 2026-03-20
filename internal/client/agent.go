@@ -128,6 +128,42 @@ func NudgeAgent(name, message string) error {
 	return nil
 }
 
+// SpawnPolecat asks pogod to spawn a polecat from a template.
+func SpawnPolecat(req agent.SpawnPolecatAPIRequest) (*agent.AgentInfo, error) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, err
+	}
+	r, err := http.Post(serverURL+"/agents/spawn-polecat", "application/json", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	defer r.Body.Close()
+	if r.StatusCode != http.StatusCreated {
+		msg, _ := io.ReadAll(r.Body)
+		return nil, fmt.Errorf("spawn-polecat failed: %s", string(msg))
+	}
+	var info agent.AgentInfo
+	if err := json.NewDecoder(r.Body).Decode(&info); err != nil {
+		return nil, err
+	}
+	return &info, nil
+}
+
+// ListPrompts returns all discovered prompt files from pogod.
+func ListPrompts() ([]agent.PromptInfo, error) {
+	r, err := http.Get(serverURL + "/agents/prompts")
+	if err != nil {
+		return nil, err
+	}
+	defer r.Body.Close()
+	var prompts []agent.PromptInfo
+	if err := json.NewDecoder(r.Body).Decode(&prompts); err != nil {
+		return nil, err
+	}
+	return prompts, nil
+}
+
 // GetAgentOutput returns recent output from an agent.
 func GetAgentOutput(name string) (string, error) {
 	r, err := http.Get(serverURL + "/agents/" + name + "/output")
