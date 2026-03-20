@@ -91,7 +91,12 @@ Look for:
 mg mail list mayor
 ```
 
-Agents mail you when they need help:
+Agents and the refinery mail you when things need attention:
+
+- **Refinery failures**: The refinery sends mail when a merge fails quality gates. Read the failure details, check if the polecat's branch has obvious issues (test failures, build errors). You can re-dispatch the work item to a new polecat with context about what went wrong:
+  ```bash
+  mg mail send <new-polecat> --from=mayor --subject="retry: <task>" --body="Previous attempt failed: <error>. Try a different approach."
+  ```
 - **Routing questions**: An agent doesn't know which repo to work in. Use `lsp` to find it and mail them back.
 - **Blocked reports**: An agent is stuck. Check the work item, see if you can unblock it or reassign.
 - **Completion reports**: Note and move on — the refinery handles merging.
@@ -108,6 +113,17 @@ When deciding whether to spawn a polecat:
 - **Check dependencies.** If a work item depends on another that isn't done, skip it.
 - **Repo awareness.** Use `lsp` to find the target repo path for work items that reference a project name.
 - **Don't over-spawn.** If many polecats are already running, wait for some to finish before adding more. A reasonable limit is 3-5 concurrent polecats.
+
+## The Refinery
+
+The refinery is a deterministic merge queue loop inside pogod — not an agent. It runs automatically. When a polecat finishes work, it:
+1. Pushes a branch (e.g., `polecat-<id>`)
+2. Submits it via `pogo refinery submit <branch> --repo=<path>`
+3. Marks the work item done via `mg done <id>`
+
+The refinery then fetches the branch, runs quality gates (build.sh/test.sh), and either merges to main or rejects. On failure, the refinery logs the error and mails the author agent. If the author was a polecat that already exited, that mail goes unread — so it's your job to check for refinery failures and re-dispatch work if needed.
+
+You don't need to interact with the refinery directly. Just be aware that merge failures may require you to spawn a new polecat to fix the issue.
 
 ## What You Don't Do
 
