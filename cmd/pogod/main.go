@@ -11,6 +11,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -194,11 +195,7 @@ func status(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func handleRequests() {
-	cfg := config.Load()
-	if *bindFlag != "" {
-		cfg.Bind = *bindFlag
-	}
+func registerHandlers() {
 	http.HandleFunc("/", homePage)
 	http.HandleFunc("/file", file)
 	http.HandleFunc("/projects/{projectId}", projectById)
@@ -215,10 +212,6 @@ func handleRequests() {
 	if mergeQueue != nil {
 		mergeQueue.RegisterHandlers(http.DefaultServeMux)
 	}
-
-	addr := cfg.ListenAddr()
-	fmt.Printf("pogod starting on %s\n", addr)
-	log.Fatal(http.ListenAndServe(addr, nil))
 }
 
 func main() {
@@ -276,13 +269,9 @@ func main() {
 
 	defer driver.Kill()
 	defer project.SaveProjects()
-	project.Init()
 
-	// Start background repo scanner
-	if err := project.StartScanner(); err != nil {
-		fmt.Printf("Warning: repo scanner failed to start: %v\n", err)
-	}
-	defer project.StopScanner()
+	// Load project list from disk (fast, no indexing)
+	project.Init()
 
 	// Start refinery merge queue loop
 	cfg := config.Load()
@@ -307,5 +296,33 @@ func main() {
 		}
 	}
 
-	handleRequests()
+	// Register HTTP handlers
+	registerHandlers()
+
+	// Start the HTTP listener BEFORE background indexing so the server
+	// is immediately responsive to API calls (especially agent management).
+	if *bindFlag != "" {
+		cfg.Bind = *bindFlag
+	}
+	addr := cfg.ListenAddr()
+	ln, listenErr := net.Listen("tcp", addr)
+	if listenErr != nil {
+		log.Fatalf("pogod: failed to listen on %s: %v", addr, listenErr)
+	}
+	fmt.Printf("pogod listening on %s\n", addr)
+
+	// Now start background work: indexing and repo scanning.
+	// The server is already accepting connections above.
+	go func() {
+		project.IndexAll()
+		log.Printf("pogod: background project indexing complete")
+	}()
+
+	if err := project.StartScanner(); err != nil {
+		fmt.Printf("Warning: repo scanner failed to start: %v\n", err)
+	}
+	defer project.StopScanner()
+
+	// Serve HTTP (blocks until shutdown)
+	log.Fatal(http.Serve(ln, nil))
 }

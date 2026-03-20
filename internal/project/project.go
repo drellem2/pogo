@@ -78,9 +78,14 @@ func Init() {
 		var projectsStruct ProjectsSave
 		json.Unmarshal(byteValue, &projectsStruct)
 		projects = projectsStruct.Projects
-		for _, p := range projects {
-			addToPlugin(p)
-		}
+	}
+}
+
+// IndexAll processes all loaded projects through plugins in the background.
+// Call this after Init() and after the HTTP server is listening.
+func IndexAll() {
+	for _, p := range projects {
+		addToPlugin(p)
 	}
 }
 
