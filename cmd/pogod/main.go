@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"time"
@@ -279,8 +280,15 @@ func main() {
 				}
 			}()
 		} else {
-			// Polecat agents: remove from registry on exit
+			// Polecat agents: clean up worktree and remove from registry
 			log.Printf("polecat %s exited, cleaning up", a.Name)
+			if a.WorktreeDir != "" {
+				if err := exec.Command("git", "-C", a.SourceRepo, "worktree", "remove", a.WorktreeDir, "--force").Run(); err != nil {
+					log.Printf("polecat %s: worktree removal failed: %v", a.Name, err)
+				} else {
+					log.Printf("polecat %s: removed worktree %s", a.Name, a.WorktreeDir)
+				}
+			}
 			a.Cleanup()
 			agentRegistry.Remove(a.Name)
 		}

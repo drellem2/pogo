@@ -34,10 +34,15 @@ You are an ephemeral polecat agent. You exist to complete a single task, then ex
    git push origin polecat-{{.Id}}
    ```
 
-3. **Submit to the merge queue:**
-   ```bash
-   pogo refinery submit polecat-{{.Id}} --repo={{.Repo}} --author={{.Id}}
-   ```
+### Step 2: Do the work
+Stay focused on the task described above. You are already in your isolated worktree on branch `polecat-{{.Id}}`.
+
+### Step 3: Commit and push your branch
+```bash
+git add <files>
+git commit -m "<type>: <description> ({{.Id}})"
+git push origin polecat-{{.Id}}
+```
 
 LAST COMMAND: Run `mg done {{.Id}}` after pushing your branch.
 

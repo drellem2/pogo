@@ -55,6 +55,11 @@ type Agent struct {
 	// PromptFile is the path to the agent's prompt file (if any).
 	PromptFile string `json:"prompt_file,omitempty"`
 
+	// WorktreeDir is the git worktree path for polecat isolation (cleanup on exit).
+	WorktreeDir string `json:"worktree_dir,omitempty"`
+	// SourceRepo is the original repo path used to create/remove the worktree.
+	SourceRepo string `json:"source_repo,omitempty"`
+
 	// master is the PTY master file descriptor. Not exported (held by pogod).
 	master *os.File
 	cmd    *exec.Cmd
@@ -128,6 +133,7 @@ type SpawnRequest struct {
 	Command    []string // e.g. ["claude", "--append-system-prompt", "<prompt content>"]
 	Env        []string // additional env vars
 	PromptFile string   // path to prompt file (optional)
+	Dir        string   // working directory for the process (optional)
 }
 
 // Spawn starts a new agent process with a PTY.
@@ -144,6 +150,9 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 	}
 
 	cmd := exec.Command(req.Command[0], req.Command[1:]...)
+	if req.Dir != "" {
+		cmd.Dir = req.Dir
+	}
 
 	// Inject agent identity env vars
 	procName := ProcessName(req.Type, req.Name)

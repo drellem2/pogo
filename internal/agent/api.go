@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -357,15 +359,44 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 	// Ensure POGO_ROLE is set for mg prime and role detection
 	env := append(spawnReq.Env, "POGO_ROLE=polecat")
 
+	// Create git worktree for polecat isolation
+	var worktreeDir, sourceRepo string
+	if spawnReq.Repo != "" {
+		home, _ := os.UserHomeDir()
+		worktreeDir = filepath.Join(home, ".pogo", "polecats", spawnReq.Name)
+		sourceRepo = spawnReq.Repo
+		branchName := "polecat-" + spawnReq.Name
+
+		// Ensure parent directory exists
+		if err := os.MkdirAll(filepath.Dir(worktreeDir), 0755); err != nil {
+			os.Remove(promptFile)
+			http.Error(w, fmt.Sprintf("failed to create polecats dir: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		wtCmd := exec.Command("git", "-C", sourceRepo, "worktree", "add", worktreeDir, "-b", branchName)
+		if out, err := wtCmd.CombinedOutput(); err != nil {
+			os.Remove(promptFile)
+			http.Error(w, fmt.Sprintf("worktree creation failed: %v\n%s", err, out), http.StatusInternalServerError)
+			return
+		}
+		log.Printf("polecat %s: created worktree at %s (branch %s)", spawnReq.Name, worktreeDir, branchName)
+	}
+
 	a, err := r.Spawn(SpawnRequest{
 		Name:       spawnReq.Name,
 		Type:       TypePolecat,
 		Command:    cmd,
 		Env:        env,
 		PromptFile: promptFile,
+		Dir:        worktreeDir,
 	})
 	if err != nil {
 		os.Remove(promptFile) // Clean up temp file on spawn failure
+		// Clean up worktree on spawn failure
+		if worktreeDir != "" {
+			exec.Command("git", "-C", sourceRepo, "worktree", "remove", worktreeDir, "--force").Run()
+		}
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
@@ -379,6 +410,10 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 			a.Nudge(prompt + "\n")
 		}()
 	}
+
+	// Store worktree info on the agent for cleanup
+	a.WorktreeDir = worktreeDir
+	a.SourceRepo = sourceRepo
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
@@ -399,8 +434,8 @@ func buildPolecatPrompt(req SpawnPolecatAPIRequest) string {
 	}
 	b.WriteString("## Mandatory Steps (execute in order)\n\n")
 	fmt.Fprintf(&b, "1. **Claim the work item** (prevents duplicate work):\n   ```bash\n   mg claim %s\n   ```\n\n", req.Id)
-	fmt.Fprintf(&b, "2. **Do the work** in the repository at `%s`. Stay focused on the task above.\n\n", req.Repo)
-	fmt.Fprintf(&b, "3. **Commit and push your branch:**\n   ```bash\n   cd %s\n   git checkout -b polecat-%s\n   git add <files>\n   git commit -m \"<type>: <description> (%s)\"\n   git push origin polecat-%s\n   ```\n\n", req.Repo, req.Id, req.Id, req.Id)
+	b.WriteString("2. **Do the work** in your current directory (worktree). Stay focused on the task above.\n\n")
+	fmt.Fprintf(&b, "3. **Commit and push your branch:**\n   ```bash\n   git add <files>\n   git commit -m \"<type>: <description> (%s)\"\n   git push origin polecat-%s\n   ```\n\n", req.Id, req.Id)
 	fmt.Fprintf(&b, "4. **Submit to the merge queue:**\n   ```bash\n   pogo refinery submit polecat-%s --repo=%s --author=%s\n   ```\n\n", req.Id, req.Repo, req.Id)
 	fmt.Fprintf(&b, "5. **Mark done:**\n   ```bash\n   mg done %s --result='{\"branch\": \"polecat-%s\"}'\n   ```\n\n", req.Id, req.Id)
 	b.WriteString("6. **Exit.** The refinery handles testing and merging.\n\n")
