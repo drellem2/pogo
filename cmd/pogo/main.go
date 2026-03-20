@@ -17,6 +17,7 @@ import (
 	"github.com/drellem2/pogo/internal/client"
 	"github.com/drellem2/pogo/internal/refinery"
 	"github.com/drellem2/pogo/internal/service"
+	"github.com/drellem2/pogo/internal/version"
 )
 
 func showPromptFile(path string, jsonOut bool) {
@@ -690,10 +691,29 @@ Safe to run multiple times — existing files are preserved unless --force is pa
 	}
 	cmdInstall.Flags().BoolVar(&installForceFlag, "force", false, "Overwrite existing prompt files")
 
+	var cmdVersion = &cobra.Command{
+		Use:   "version",
+		Short: "Print the pogo version",
+		Args:  cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			if jsonOutput {
+				cli.PrintJSON(map[string]string{
+					"version": version.Version,
+					"build":   version.Build,
+					"commit":  version.Commit,
+					"branch":  version.Branch,
+				})
+			} else {
+				fmt.Printf("pogo %s (build=%s)\n", version.Version, version.Build)
+			}
+		},
+	}
+
 	var rootCmd = &cobra.Command{Use: "pogo"}
 
 	rootCmd.PersistentFlags().BoolVar(&jsonOutput, "json", false, "Output in JSON format")
 
+	rootCmd.AddCommand(cmdVersion)
 	rootCmd.AddCommand(cmdInstall)
 	rootCmd.AddCommand(cmdVisit)
 	rootCmd.AddCommand(cmdStatus)
