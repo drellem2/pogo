@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sync"
 	"time"
@@ -143,6 +144,13 @@ func (r *Refinery) Submit(req MergeRequest) (string, error) {
 	r.byID[req.ID] = &req
 
 	log.Printf("refinery: queued MR %s branch=%s repo=%s author=%s", req.ID, req.Branch, req.RepoPath, req.Author)
+
+	if err := mgEventAppend("refinery.submit",
+		"item="+req.ID, "branch="+req.Branch, "author="+req.Author,
+	); err != nil {
+		log.Printf("refinery: event append failed: %v", err)
+	}
+
 	return req.ID, nil
 }
 
@@ -264,6 +272,21 @@ func (r *Refinery) processNext() {
 	onFailed := r.onFailed
 	r.mu.Unlock()
 
+	// Append mg events
+	if err != nil {
+		if evErr := mgEventAppend("refinery.fail",
+			"item="+mr.ID, "branch="+mr.Branch, "author="+mr.Author, "error="+mr.Error,
+		); evErr != nil {
+			log.Printf("refinery: event append failed: %v", evErr)
+		}
+	} else {
+		if evErr := mgEventAppend("refinery.merge",
+			"item="+mr.ID, "branch="+mr.Branch, "author="+mr.Author,
+		); evErr != nil {
+			log.Printf("refinery: event append failed: %v", evErr)
+		}
+	}
+
 	// Fire callbacks outside the lock
 	if err != nil && onFailed != nil {
 		onFailed(mr)
@@ -284,4 +307,20 @@ func (r *Refinery) dequeue() *MergeRequest {
 	mr := r.queue[0]
 	r.queue = r.queue[1:]
 	return mr
+}
+
+// mgEventAppend appends a structured event to the macguffin event log.
+// eventType is the event type (e.g. "refinery.merge", "refinery.fail").
+// kvs are key=value pairs to include as event fields.
+func mgEventAppend(eventType string, kvs ...string) error {
+	args := []string{"event", "append", eventType}
+	for _, kv := range kvs {
+		args = append(args, "--"+kv)
+	}
+	cmd := exec.Command("mg", args...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("mg event append failed: %s (%w)", string(out), err)
+	}
+	return nil
 }
