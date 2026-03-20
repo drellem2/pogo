@@ -1,0 +1,214 @@
+package refinery
+
+import (
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+)
+
+// processMerge runs the full merge pipeline for a single MR:
+// 1. Ensure worktree exists for the repo
+// 2. Fetch the branch
+// 3. Checkout branch and run quality gates
+// 4. Fast-forward merge to target ref
+// 5. Push
+func (r *Refinery) processMerge(mr *MergeRequest) error {
+	wtDir, err := r.ensureWorktree(mr.RepoPath)
+	if err != nil {
+		return fmt.Errorf("worktree setup: %w", err)
+	}
+
+	// Fetch latest from origin
+	if err := gitCmd(wtDir, "fetch", "origin"); err != nil {
+		return fmt.Errorf("fetch: %w", err)
+	}
+
+	// Checkout the branch to test
+	if err := gitCmd(wtDir, "checkout", "origin/"+mr.Branch); err != nil {
+		return fmt.Errorf("checkout branch: %w", err)
+	}
+
+	// Run quality gates
+	gateOutput, err := r.runQualityGates(wtDir, mr.RepoPath)
+	mr.GateOutput = gateOutput
+	if err != nil {
+		return fmt.Errorf("quality gate: %w", err)
+	}
+
+	// Checkout target ref for merge
+	if err := gitCmd(wtDir, "checkout", mr.TargetRef); err != nil {
+		return fmt.Errorf("checkout target: %w", err)
+	}
+
+	// Pull latest target
+	if err := gitCmd(wtDir, "pull", "--ff-only", "origin", mr.TargetRef); err != nil {
+		return fmt.Errorf("pull target: %w", err)
+	}
+
+	// Fast-forward merge only — no merge commits
+	if err := gitCmd(wtDir, "merge", "--ff-only", "origin/"+mr.Branch); err != nil {
+		return fmt.Errorf("merge (ff-only): %w", err)
+	}
+
+	// Push to origin
+	if err := gitCmd(wtDir, "push", "origin", mr.TargetRef); err != nil {
+		return fmt.Errorf("push: %w", err)
+	}
+
+	return nil
+}
+
+// ensureWorktree creates or validates a worktree for the given repo.
+// Uses a clone (not git-worktree) so the refinery is fully independent.
+func (r *Refinery) ensureWorktree(repoPath string) (string, error) {
+	// Use the repo basename as the worktree directory name
+	repoName := filepath.Base(repoPath)
+	wtDir := filepath.Join(r.cfg.WorktreeDir, repoName)
+
+	if _, err := os.Stat(filepath.Join(wtDir, ".git")); err == nil {
+		// Already cloned — verify the remote matches
+		return wtDir, nil
+	}
+
+	// Clone the repo into the worktree dir
+	if err := os.MkdirAll(r.cfg.WorktreeDir, 0755); err != nil {
+		return "", fmt.Errorf("mkdir: %w", err)
+	}
+
+	cmd := exec.Command("git", "clone", repoPath, wtDir)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("clone: %w", err)
+	}
+
+	return wtDir, nil
+}
+
+// runQualityGates runs the configured quality gates for the repo.
+// Checks for per-repo .pogo/refinery.toml first, then falls back to defaults.
+func (r *Refinery) runQualityGates(wtDir, repoPath string) (string, error) {
+	gates := r.loadGateConfig(wtDir, repoPath)
+	if len(gates) == 0 {
+		// No gates configured — pass by default
+		return "(no quality gates configured)", nil
+	}
+
+	var allOutput strings.Builder
+	for _, gate := range gates {
+		allOutput.WriteString(fmt.Sprintf("=== Running: %s ===\n", gate))
+		output, err := runGate(wtDir, gate)
+		allOutput.WriteString(output)
+		allOutput.WriteString("\n")
+		if err != nil {
+			allOutput.WriteString(fmt.Sprintf("FAILED: %v\n", err))
+			return allOutput.String(), fmt.Errorf("%s failed: %w", gate, err)
+		}
+		allOutput.WriteString("PASSED\n")
+	}
+
+	return allOutput.String(), nil
+}
+
+// loadGateConfig returns the quality gate commands to run.
+// Priority: per-repo .pogo/refinery.toml > default build.sh
+func (r *Refinery) loadGateConfig(wtDir, repoPath string) []string {
+	// Check for per-repo refinery config in the worktree
+	repoConfig := filepath.Join(wtDir, ".pogo", "refinery.toml")
+	if gates := parseRefineryToml(repoConfig); len(gates) > 0 {
+		return gates
+	}
+
+	// Check for per-repo refinery config in the original repo
+	origConfig := filepath.Join(repoPath, ".pogo", "refinery.toml")
+	if gates := parseRefineryToml(origConfig); len(gates) > 0 {
+		return gates
+	}
+
+	// Fall back to common scripts
+	var defaults []string
+	for _, script := range []string{"./build.sh", "./test.sh"} {
+		if _, err := os.Stat(filepath.Join(wtDir, script)); err == nil {
+			defaults = append(defaults, script)
+		}
+	}
+	return defaults
+}
+
+// parseRefineryToml reads a .pogo/refinery.toml and extracts gate commands.
+// Format:
+//
+//	[gates]
+//	commands = ["./build.sh", "./test.sh"]
+//
+// Or simpler:
+//
+//	quality_gate = "./build.sh"
+func parseRefineryToml(path string) []string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+
+	var gates []string
+	inGatesSection := false
+
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		if strings.HasPrefix(line, "[") {
+			section := strings.TrimSpace(strings.Trim(line, "[]"))
+			inGatesSection = section == "gates"
+			continue
+		}
+
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key := strings.TrimSpace(parts[0])
+		val := strings.TrimSpace(parts[1])
+		val = strings.Trim(val, "\"")
+
+		if key == "quality_gate" {
+			gates = append(gates, val)
+		}
+		if inGatesSection && key == "commands" {
+			// Parse simple array: ["./build.sh", "./test.sh"]
+			val = strings.Trim(val, "[]")
+			for _, cmd := range strings.Split(val, ",") {
+				cmd = strings.TrimSpace(cmd)
+				cmd = strings.Trim(cmd, "\"")
+				if cmd != "" {
+					gates = append(gates, cmd)
+				}
+			}
+		}
+	}
+
+	return gates
+}
+
+// runGate executes a single quality gate command in the worktree directory.
+func runGate(wtDir, command string) (string, error) {
+	cmd := exec.Command("sh", "-c", command)
+	cmd.Dir = wtDir
+	cmd.Env = append(os.Environ(), "POGO_REFINERY=1")
+
+	output, err := cmd.CombinedOutput()
+	return string(output), err
+}
+
+// gitCmd runs a git command in the given directory.
+func gitCmd(dir string, args ...string) error {
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}

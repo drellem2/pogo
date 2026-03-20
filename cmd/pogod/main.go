@@ -6,6 +6,7 @@ package main
 
 import _ "net/http/pprof"
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -23,11 +24,13 @@ import (
 	"github.com/drellem2/pogo/internal/config"
 	"github.com/drellem2/pogo/internal/driver"
 	"github.com/drellem2/pogo/internal/project"
+	"github.com/drellem2/pogo/internal/refinery"
 
 	pogoPlugin "github.com/drellem2/pogo/pkg/plugin"
 )
 
 var agentRegistry *agent.Registry
+var mergeQueue *refinery.Refinery
 
 var bindFlag = flag.String("bind", "", "address to bind the server to (default: 127.0.0.1)")
 
@@ -201,6 +204,11 @@ func handleRequests() {
 	// Agent management endpoints
 	agentRegistry.RegisterHandlers(http.DefaultServeMux)
 
+	// Refinery endpoints
+	if mergeQueue != nil {
+		mergeQueue.RegisterHandlers(http.DefaultServeMux)
+	}
+
 	addr := cfg.ListenAddr()
 	fmt.Printf("pogod starting on %s\n", addr)
 	log.Fatal(http.ListenAndServe(addr, nil))
@@ -268,6 +276,29 @@ func main() {
 		fmt.Printf("Warning: repo scanner failed to start: %v\n", err)
 	}
 	defer project.StopScanner()
+
+	// Start refinery merge queue loop
+	cfg := config.Load()
+	if cfg.Refinery.Enabled {
+		refineCfg := refinery.DefaultConfig()
+		if cfg.Refinery.PollInterval > 0 {
+			refineCfg.PollInterval = cfg.Refinery.PollInterval
+		}
+		var refErr error
+		mergeQueue, refErr = refinery.New(refineCfg)
+		if refErr != nil {
+			fmt.Printf("Warning: refinery failed to start: %v\n", refErr)
+		} else {
+			mergeQueue.SetOnMerged(func(mr *refinery.MergeRequest) {
+				log.Printf("refinery: merged %s (branch=%s, author=%s)", mr.ID, mr.Branch, mr.Author)
+			})
+			mergeQueue.SetOnFailed(func(mr *refinery.MergeRequest) {
+				log.Printf("refinery: failed %s (branch=%s, author=%s, error=%s)", mr.ID, mr.Branch, mr.Author, mr.Error)
+			})
+			go mergeQueue.Start(context.Background())
+			defer mergeQueue.Stop()
+		}
+	}
 
 	handleRequests()
 }

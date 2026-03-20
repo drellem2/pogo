@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const (
@@ -16,8 +17,15 @@ const (
 
 // Config holds pogo daemon configuration.
 type Config struct {
-	Port int
-	Bind string
+	Port     int
+	Bind     string
+	Refinery RefineryConfig
+}
+
+// RefineryConfig holds merge queue configuration.
+type RefineryConfig struct {
+	Enabled      bool
+	PollInterval time.Duration
 }
 
 // Load reads configuration from (in priority order):
@@ -25,7 +33,14 @@ type Config struct {
 //  2. ~/.config/pogo/config.toml [server] port field
 //  3. Default (10000)
 func Load() *Config {
-	cfg := &Config{Port: DefaultPort, Bind: DefaultBind}
+	cfg := &Config{
+		Port: DefaultPort,
+		Bind: DefaultBind,
+		Refinery: RefineryConfig{
+			Enabled:      true,
+			PollInterval: 30 * time.Second,
+		},
+	}
 
 	// Try config file first (lowest priority, overridden by env)
 	if fileCfg, err := loadConfigFile(); err == nil {
@@ -96,7 +111,7 @@ func loadConfigFile() (*Config, error) {
 	defer f.Close()
 
 	cfg := &Config{}
-	inServerSection := false
+	currentSection := ""
 	scanner := bufio.NewScanner(f)
 
 	for scanner.Scan() {
@@ -109,19 +124,19 @@ func loadConfigFile() (*Config, error) {
 
 		// Section headers
 		if strings.HasPrefix(line, "[") {
-			inServerSection = strings.TrimSpace(strings.Trim(line, "[]")) == "server"
+			currentSection = strings.TrimSpace(strings.Trim(line, "[]"))
 			continue
 		}
 
-		// Key-value pairs in [server] section
-		if inServerSection {
-			parts := strings.SplitN(line, "=", 2)
-			if len(parts) != 2 {
-				continue
-			}
-			key := strings.TrimSpace(parts[0])
-			val := strings.TrimSpace(parts[1])
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key := strings.TrimSpace(parts[0])
+		val := strings.TrimSpace(parts[1])
 
+		switch currentSection {
+		case "server":
 			switch key {
 			case "port":
 				if port, err := strconv.Atoi(val); err == nil && port > 0 && port <= 65535 {
@@ -129,6 +144,16 @@ func loadConfigFile() (*Config, error) {
 				}
 			case "bind":
 				cfg.Bind = val
+			}
+		case "refinery":
+			switch key {
+			case "enabled":
+				cfg.Refinery.Enabled = val == "true"
+			case "poll_interval":
+				val = strings.Trim(val, "\"")
+				if d, err := time.ParseDuration(val); err == nil {
+					cfg.Refinery.PollInterval = d
+				}
 			}
 		}
 	}
