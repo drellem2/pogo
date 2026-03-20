@@ -15,15 +15,19 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"time"
 
 	"github.com/nightlyone/lockfile"
 
+	"github.com/drellem2/pogo/internal/agent"
 	"github.com/drellem2/pogo/internal/config"
 	"github.com/drellem2/pogo/internal/driver"
 	"github.com/drellem2/pogo/internal/project"
 
 	pogoPlugin "github.com/drellem2/pogo/pkg/plugin"
 )
+
+var agentRegistry *agent.Registry
 
 var bindFlag = flag.String("bind", "", "address to bind the server to (default: 127.0.0.1)")
 
@@ -193,6 +197,10 @@ func handleRequests() {
 	http.HandleFunc("/plugins", plugins)
 	http.HandleFunc("/health", health)
 	http.HandleFunc("/status", status)
+
+	// Agent management endpoints
+	agentRegistry.RegisterHandlers(http.DefaultServeMux)
+
 	addr := cfg.ListenAddr()
 	fmt.Printf("pogod starting on %s\n", addr)
 	log.Fatal(http.ListenAndServe(addr, nil))
@@ -218,6 +226,16 @@ func main() {
 			fmt.Printf("Cannot unlock %q, reason: %v", lock, err)
 		}
 	}()
+
+	// Initialize agent registry
+	socketDir := filepath.Join(os.TempDir(), "pogo-agents")
+	var initErr error
+	agentRegistry, initErr = agent.NewRegistry(socketDir)
+	if initErr != nil {
+		fmt.Printf("Cannot create agent registry: %v\n", initErr)
+		os.Exit(1)
+	}
+	defer agentRegistry.StopAll(5 * time.Second)
 
 	// Start plugins
 	driver.Init()

@@ -7,9 +7,11 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 
+	"github.com/drellem2/pogo/internal/agent"
 	"github.com/drellem2/pogo/internal/cli"
 	"github.com/drellem2/pogo/internal/client"
 	"github.com/drellem2/pogo/internal/service"
@@ -187,6 +189,143 @@ Child commands include start, stop, and status.`,
 		},
 	}
 
+	// Agent commands
+	var cmdAgent = &cobra.Command{
+		Use:   "agent",
+		Short: "Manage agent processes",
+		Long:  `Commands for spawning, listing, stopping, and attaching to agent processes managed by pogod.`,
+	}
+
+	var cmdAgentList = &cobra.Command{
+		Use:   "list",
+		Short: "List running agents",
+		Args:  cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			agents, err := client.ListAgents()
+			if err != nil {
+				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+			}
+			if jsonOutput {
+				cli.PrintJSON(agents)
+			} else {
+				if len(agents) == 0 {
+					fmt.Println("No running agents.")
+					return
+				}
+				for _, a := range agents {
+					fmt.Printf("%-20s  pid=%-6d  type=%-8s  started=%s\n",
+						a.Name, a.PID, a.Type, a.StartTime.Format("15:04:05"))
+				}
+			}
+		},
+	}
+
+	var spawnType string
+	var spawnEnv []string
+	var cmdAgentSpawn = &cobra.Command{
+		Use:   "spawn <name> <command> [args...]",
+		Short: "Spawn a new agent process with a PTY",
+		Long:  `Spawn a new agent process. pogod allocates a PTY and holds the master fd.`,
+		Args:  cobra.MinimumNArgs(2),
+		Run: func(cmd *cobra.Command, args []string) {
+			agentType := agent.AgentType(spawnType)
+			if agentType != agent.TypeCrew && agentType != agent.TypePolecat {
+				cli.ExitWithError(jsonOutput, "type must be 'crew' or 'polecat'", cli.ExitError)
+			}
+			info, err := client.SpawnAgent(agent.SpawnAPIRequest{
+				Name:    args[0],
+				Type:    agentType,
+				Command: args[1:],
+				Env:     spawnEnv,
+			})
+			if err != nil {
+				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+			}
+			if jsonOutput {
+				cli.PrintJSON(info)
+			} else {
+				fmt.Printf("Spawned agent %s (pid=%d, type=%s)\n", info.Name, info.PID, info.Type)
+			}
+		},
+	}
+	cmdAgentSpawn.Flags().StringVarP(&spawnType, "type", "t", "polecat", "Agent type: crew or polecat")
+	cmdAgentSpawn.Flags().StringSliceVarP(&spawnEnv, "env", "e", nil, "Additional environment variables (KEY=VALUE)")
+
+	var cmdAgentStop = &cobra.Command{
+		Use:   "stop <name>",
+		Short: "Stop a running agent",
+		Args:  cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			err := client.StopAgent(args[0])
+			if err != nil {
+				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+			}
+			if jsonOutput {
+				cli.PrintJSON(map[string]string{"status": "stopped", "name": args[0]})
+			} else {
+				fmt.Printf("Agent %s stopped.\n", args[0])
+			}
+		},
+	}
+
+	var cmdAgentAttach = &cobra.Command{
+		Use:   "attach <name>",
+		Short: "Attach terminal to a running agent",
+		Long: `Connect your terminal to a running agent's PTY via its unix domain socket.
+The agent's output streams to your terminal and your input goes to the agent.
+Detach with Ctrl-\ (SIGQUIT).`,
+		Args: cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			info, err := client.GetAgent(args[0])
+			if err != nil {
+				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+			}
+			fmt.Printf("Attaching to agent %s (pid=%d). Detach with Ctrl-\\.\n", info.Name, info.PID)
+			if err := client.AttachAgent(info.SocketPath); err != nil {
+				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+			}
+		},
+	}
+
+	var cmdAgentOutput = &cobra.Command{
+		Use:   "output <name>",
+		Short: "Show recent output from an agent",
+		Args:  cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			output, err := client.GetAgentOutput(args[0])
+			if err != nil {
+				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+			}
+			if jsonOutput {
+				cli.PrintJSON(map[string]string{"output": output})
+			} else {
+				fmt.Print(output)
+			}
+		},
+	}
+
+	// Nudge command — top-level for convenience
+	var cmdNudge = &cobra.Command{
+		Use:   "nudge <name> <message>",
+		Short: "Write a message to an agent's PTY",
+		Long: `Send text to an agent's PTY master fd via pogod.
+The agent sees it as typed input. Use this for agent-to-agent wakeup or human-to-agent messages.`,
+		Args: cobra.MinimumNArgs(2),
+		Run: func(cmd *cobra.Command, args []string) {
+			name := args[0]
+			message := strings.Join(args[1:], " ")
+			err := client.NudgeAgent(name, message)
+			if err != nil {
+				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+			}
+			if jsonOutput {
+				cli.PrintJSON(map[string]string{"status": "delivered", "agent": name})
+			} else {
+				fmt.Printf("Nudged %s.\n", name)
+			}
+		},
+	}
+
 	var rootCmd = &cobra.Command{Use: "pogo"}
 
 	rootCmd.PersistentFlags().BoolVar(&jsonOutput, "json", false, "Output in JSON format")
@@ -200,6 +339,16 @@ Child commands include start, stop, and status.`,
 	cmdService.AddCommand(cmdServiceUninstall)
 	cmdService.AddCommand(cmdServiceStatus)
 	rootCmd.AddCommand(cmdService)
+
+	// Agent commands
+	cmdAgent.AddCommand(cmdAgentList)
+	cmdAgent.AddCommand(cmdAgentSpawn)
+	cmdAgent.AddCommand(cmdAgentStop)
+	cmdAgent.AddCommand(cmdAgentAttach)
+	cmdAgent.AddCommand(cmdAgentOutput)
+	rootCmd.AddCommand(cmdAgent)
+	rootCmd.AddCommand(cmdNudge)
+
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(cli.ExitError)
 	}
