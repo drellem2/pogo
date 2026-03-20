@@ -97,6 +97,23 @@ The pogo daemon provides three categories of service:
 
 The daemon does NOT make decisions. It does not read work items and decide what to do. It starts agents, keeps crew alive, merges tested branches, and logs events. Decision-making lives in prompt files.
 
+## Project References
+
+Projects have a canonical identity (local path) and human-friendly references for CLI and work items.
+
+**Primary key:** The local filesystem path. Always unique, always resolvable, VCS-agnostic. This is what pogod tracks internally (`/Users/daniel/dev/pogo`).
+
+**Human/agent references:** Nobody wants to type full paths. When a CLI command, work item, or prompt refers to a project, pogo resolves the reference using this precedence:
+
+1. **Short name** — last path component: `pogo` → `/Users/daniel/dev/pogo`
+2. **Owner/repo** — parsed from git remote origin: `drellem2/pogo` → `/Users/daniel/dev/pogo`
+3. **Unique substring** — match across all known projects: `macg` → `/Users/daniel/dev/macguffin`
+4. **Ambiguous** — error listing candidates: `"pogo" matches: /Users/daniel/dev/pogo, /Users/daniel/dev/pogod — be more specific`
+
+This is the same pattern as git commit hash prefixes and kubectl resource names. Exact match wins, then unique substring, then error.
+
+The remote-derived `owner/repo` form is a lookup alias, not the identity. Some repos don't have remotes. Some have multiple. The local path is always authoritative. If we ever need to support non-git VCS, the resolution logic just loses the `owner/repo` step — everything else is path-based.
+
 ## Agent Lifecycle
 
 ### Crew Agent
