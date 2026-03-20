@@ -3,10 +3,8 @@ echo "Making test directories"
 mkdir -p _testdata/a-service/.git
 mkdir -p _testdata/b-service/.git
 
-echo "Testing pogo" && \
-go test ./internal/project && \
-go test ./internal/driver && \
-go test ./internal/search
+echo "Testing Go packages" && \
+go test ./...
 
 echo "Testing neovim plugin" && \
 bash nvim/test_nvim.sh
