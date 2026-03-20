@@ -25,7 +25,7 @@ func TestIsIdle(t *testing.T) {
 	}
 
 	// Write something to trigger output
-	a.Nudge("hello\n")
+	a.Nudge("hello")
 	time.Sleep(200 * time.Millisecond)
 
 	// Should NOT be idle immediately after output
@@ -73,7 +73,7 @@ func TestNudgeWithModeImmediate(t *testing.T) {
 	}
 
 	// Immediate nudge should work without waiting
-	err = a.NudgeWithMode("immediate msg\n", NudgeImmediate, 5*time.Second)
+	err = a.NudgeWithMode("immediate msg", NudgeImmediate, 5*time.Second)
 	if err != nil {
 		t.Fatalf("NudgeWithMode(immediate): %v", err)
 	}
@@ -103,12 +103,12 @@ func TestNudgeWithModeWaitIdle(t *testing.T) {
 	}
 
 	// Generate some output first
-	a.Nudge("warmup\n")
+	a.Nudge("warmup")
 	time.Sleep(200 * time.Millisecond)
 
 	// Wait-idle nudge — agent should become idle after output stops
 	start := time.Now()
-	err = a.NudgeWithMode("waited msg\n", NudgeWaitIdle, 10*time.Second)
+	err = a.NudgeWithMode("waited msg", NudgeWaitIdle, 10*time.Second)
 	elapsed := time.Since(start)
 	if err != nil {
 		t.Fatalf("NudgeWithMode(wait-idle): %v", err)
@@ -145,7 +145,7 @@ func TestNudgeExitedAgent(t *testing.T) {
 	<-a.Done()
 
 	// Wait-idle nudge should fail because the agent exited
-	err = a.NudgeWithMode("hello\n", NudgeWaitIdle, 5*time.Second)
+	err = a.NudgeWithMode("hello", NudgeWaitIdle, 5*time.Second)
 	if err == nil {
 		t.Error("expected error nudging exited agent in wait-idle mode")
 	}
