@@ -40,7 +40,14 @@ func health(w http.ResponseWriter, r *http.Request) {
 }
 
 func homePage(w http.ResponseWriter, r *http.Request) {
-	fmt.Println("Visited /")
+	// Only match the exact root path. In Go 1.22+ ServeMux, the "/{$}"
+	// pattern restricts this to "/", but if registered as "/" (catch-all),
+	// we must check manually to avoid swallowing unmatched routes with a
+	// confusing 200 response instead of a proper 404.
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
 	fmt.Fprintf(w, "greetings from pogo daemon")
 }
 

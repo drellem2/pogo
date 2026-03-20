@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"os/exec"
+	"strings"
 
 	"github.com/drellem2/pogo/internal/agent"
 )
@@ -55,7 +56,11 @@ func SpawnAgent(req agent.SpawnAPIRequest) (*agent.AgentInfo, error) {
 	defer r.Body.Close()
 	if r.StatusCode != http.StatusCreated {
 		msg, _ := io.ReadAll(r.Body)
-		return nil, fmt.Errorf("spawn failed: %s", string(msg))
+		body := strings.TrimSpace(string(msg))
+		if r.StatusCode == http.StatusNotFound || body == "greetings from pogo daemon" {
+			return nil, fmt.Errorf("spawn failed: pogod does not support agent endpoints (restart pogod with an updated build)")
+		}
+		return nil, fmt.Errorf("spawn failed: %s", body)
 	}
 	var info agent.AgentInfo
 	if err := json.NewDecoder(r.Body).Decode(&info); err != nil {
@@ -78,7 +83,11 @@ func StartAgent(name string) (*agent.AgentInfo, error) {
 	defer r.Body.Close()
 	if r.StatusCode != http.StatusCreated {
 		msg, _ := io.ReadAll(r.Body)
-		return nil, fmt.Errorf("start failed: %s", string(msg))
+		body := strings.TrimSpace(string(msg))
+		if r.StatusCode == http.StatusNotFound || body == "greetings from pogo daemon" {
+			return nil, fmt.Errorf("start failed: pogod does not support agent endpoints (restart pogod with an updated build)")
+		}
+		return nil, fmt.Errorf("start failed: %s", body)
 	}
 	var info agent.AgentInfo
 	if err := json.NewDecoder(r.Body).Decode(&info); err != nil {
@@ -156,7 +165,11 @@ func SpawnPolecat(req agent.SpawnPolecatAPIRequest) (*agent.AgentInfo, error) {
 	defer r.Body.Close()
 	if r.StatusCode != http.StatusCreated {
 		msg, _ := io.ReadAll(r.Body)
-		return nil, fmt.Errorf("spawn-polecat failed: %s", string(msg))
+		body := strings.TrimSpace(string(msg))
+		if r.StatusCode == http.StatusNotFound || body == "greetings from pogo daemon" {
+			return nil, fmt.Errorf("spawn-polecat failed: pogod does not support agent endpoints (restart pogod with an updated build)")
+		}
+		return nil, fmt.Errorf("spawn-polecat failed: %s", body)
 	}
 	var info agent.AgentInfo
 	if err := json.NewDecoder(r.Body).Decode(&info); err != nil {
