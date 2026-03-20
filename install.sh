@@ -84,6 +84,12 @@ if curl -fsSL -o "$tmpfile" "$ARCHIVE_URL"; then
   for bin in $BINARIES; do
     if [ -f "${tmpdir}/${bin}" ]; then
       chmod +x "${tmpdir}/${bin}"
+      # Remove existing binary first to avoid "Text file busy" errors
+      # when overwriting a running binary (e.g. pogod). Unix unlinks the
+      # file while the running process keeps its file descriptor.
+      if [ -f "${INSTALL_DIR}/${bin}" ]; then
+        $SUDO rm -f "${INSTALL_DIR}/${bin}"
+      fi
       $SUDO mv "${tmpdir}/${bin}" "${INSTALL_DIR}/${bin}"
       echo "  Installed ${bin}"
     else
