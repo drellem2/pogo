@@ -1,0 +1,131 @@
+# GoReleaser configuration for Pogo
+# See https://goreleaser.com for documentation
+
+version: 2
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: pogo
+    main: ./cmd/pogo
+    binary: pogo
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X github.com/drellem2/pogo/internal/version.Version={{.Version}}
+      - -X github.com/drellem2/pogo/internal/version.Build={{.ShortCommit}}
+      - -X github.com/drellem2/pogo/internal/version.Commit={{.Commit}}
+      - -X github.com/drellem2/pogo/internal/version.Branch={{.Branch}}
+
+  - id: pogod
+    main: ./cmd/pogod
+    binary: pogod
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X github.com/drellem2/pogo/internal/version.Version={{.Version}}
+      - -X github.com/drellem2/pogo/internal/version.Build={{.ShortCommit}}
+      - -X github.com/drellem2/pogo/internal/version.Commit={{.Commit}}
+      - -X github.com/drellem2/pogo/internal/version.Branch={{.Branch}}
+
+  - id: lsp
+    main: ./cmd/lsp
+    binary: lsp
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X github.com/drellem2/pogo/internal/version.Version={{.Version}}
+      - -X github.com/drellem2/pogo/internal/version.Build={{.ShortCommit}}
+      - -X github.com/drellem2/pogo/internal/version.Commit={{.Commit}}
+      - -X github.com/drellem2/pogo/internal/version.Branch={{.Branch}}
+
+  - id: pose
+    main: ./cmd/pose
+    binary: pose
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X github.com/drellem2/pogo/internal/version.Version={{.Version}}
+      - -X github.com/drellem2/pogo/internal/version.Build={{.ShortCommit}}
+      - -X github.com/drellem2/pogo/internal/version.Commit={{.Commit}}
+      - -X github.com/drellem2/pogo/internal/version.Branch={{.Branch}}
+
+archives:
+  - id: pogo-archive
+    format: tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "Merge pull request"
+      - "Merge branch"
+  groups:
+    - title: "Features"
+      regexp: '^.*feat(\(\w+\))?:.*$'
+      order: 0
+    - title: "Bug Fixes"
+      regexp: '^.*fix(\(\w+\))?:.*$'
+      order: 1
+    - title: "Others"
+      order: 999
+
+release:
+  github:
+    owner: drellem2
+    name: pogo
+  draft: false
+  prerelease: auto
+  name_template: "v{{.Version}}"
+  header: |
+    ## Pogo v{{.Version}}
+
+    Pre-compiled binaries for Linux and macOS (Intel & Apple Silicon).
+
+    ### Installation
+
+    Download the appropriate binary for your platform below, extract it, and place it in your PATH.

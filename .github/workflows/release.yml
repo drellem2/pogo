@@ -3,43 +3,46 @@ name: Release
 on:
   push:
     tags:
-      - "v*"
+      - 'v*'
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
   contents: write
 
 jobs:
-  release:
+  goreleaser:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        goos: [linux, darwin]
-        goarch: [amd64, arm64]
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
-          go-version: "1.24"
+          fetch-depth: 0
 
-      - name: Build binaries
-        env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-        run: |
-          mkdir -p dist
-          for cmd in cmd/*/; do
-            name=$(basename "$cmd")
-            output="dist/${name}-${GOOS}-${GOARCH}"
-            echo "Building $output"
-            go build -ldflags="-s -w" -o "$output" "./$cmd"
-          done
+      - name: Set up Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
+        with:
+          go-version: '1.24'
 
-      - name: Upload release assets
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Reject replace directives in go.mod
         run: |
-          for bin in dist/*; do
-            echo "Uploading $bin"
-            gh release upload "${{ github.ref_name }}" "$bin"
-          done
+          if grep -qE '^replace\s' go.mod; then
+            echo "ERROR: go.mod contains replace directives — aborting release."
+            echo "Replace directives break 'go install ...@latest'."
+            grep -n '^replace' go.mod
+            exit 1
+          fi
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@ec59f474b9834571250b370d4735c50f8e2d1e29 # v7
+        with:
+          distribution: goreleaser
+          version: '~> v2'
+          args: >
+            release --clean
+            ${{ github.repository != 'drellem2/pogo' && '--skip=publish --skip=announce' || '' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
