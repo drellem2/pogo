@@ -212,7 +212,35 @@ fluency exists, but not the foundation.
 
 ---
 
-## Recommendation
+## Architect Assessment
+
+The analysis above is thorough but over-scoped for where we are. The core problem is polecats not running `mg claim` / `mg done` — the commands are already in the template. Before building context injection infrastructure, fix the simpler causes:
+
+### Root causes (in order of likelihood)
+
+1. **`-p` (print mode) limits tool use.** Polecats spawned with `-p` get one-shot text output, not an interactive session. Claude may describe what it would do rather than actually running commands. Fix: interactive mode + initial nudge.
+
+2. **Prompt gets buried.** A long `--append-system-prompt` string may cause Claude to deprioritize the mg steps vs the actual task. Fix: make mg commands the first and most prominent instructions, with assertive language ("You MUST run these commands").
+
+3. **No CLAUDE.md in discovered repos.** Users won't put agent instructions in every repo, and pogo auto-discovers repos — so we can't rely on CLAUDE.md for mg fluency.
+
+### What to do now
+
+- **Fix spawn mode** — interactive + nudge instead of `-p` for tool-heavy work
+- **Harden the polecat template** — put `mg claim` first, use imperative language
+- **Skip `mg prime`, hooks, settings.json** — all premature. Polecats are ephemeral (no compaction), mayor is one session. If compliance is still poor after fixing spawn + template, then revisit the infrastructure.
+
+### What to do later (only if needed)
+
+- `mg prime` for long-running crew agents that compact and need context recovery
+- Claude Code hooks for mail delivery mid-conversation
+- Settings.json generation at spawn time
+
+The Gas Town lesson: don't solve prompt compliance with infrastructure. Fix the prompt first.
+
+---
+
+## Original Recommendation (preserved for reference)
 
 ### Architecture: Three-Layer Context Injection
 
