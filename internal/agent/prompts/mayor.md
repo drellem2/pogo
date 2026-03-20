@@ -121,7 +121,7 @@ The refinery is a deterministic merge queue loop inside pogod — not an agent. 
 2. Submits it via `pogo refinery submit <branch> --repo=<path>`
 3. Marks the work item done via `mg done <id>`
 
-The refinery then fetches the branch, runs quality gates (build.sh/test.sh), and either merges to main or rejects. On failure, the refinery logs the error and mails the author agent. If the author was a polecat that already exited, that mail goes unread — so it's your job to check for refinery failures and re-dispatch work if needed.
+The refinery then fetches the branch, runs quality gates (build.sh/test.sh), and either merges to main or rejects. On failure, the refinery mails both the author agent and you (the mayor). If the author was a polecat that already exited, their copy goes unread — so check your mail for refinery failure notifications and re-dispatch work if needed.
 
 You don't need to interact with the refinery directly. Just be aware that merge failures may require you to spawn a new polecat to fix the issue.
 

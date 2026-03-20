@@ -209,13 +209,30 @@ func NudgeOrMail(name, message string, opts *NudgeOpts) (fallback bool, err erro
 
 // sendMailFallback sends a nudge message via gt mail send.
 func sendMailFallback(name, message string) error {
-	// Use exec to call gt mail send — the target address is the agent name
-	// interpreted as a rig/role path.
-	cmd := execCommand("gt", "mail", "send", name, "-s", "nudge", "-m", message)
+	return SendMail(name, "nudge", message)
+}
+
+// SendMail sends a mail message to the given address via gt mail send.
+// The address is interpreted as a rig/role path (e.g. "mayor/", "pogo/polecats/chrome").
+func SendMail(address, subject, body string) error {
+	cmd := execCommand("gt", "mail", "send", address, "-s", subject, "-m", body)
 	cmd.Stderr = nil
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("mail fallback failed: %s (%w)", string(out), err)
+		return fmt.Errorf("mail send failed: %s (%w)", string(out), err)
+	}
+	return nil
+}
+
+// SendMGMail sends a mail message via macguffin (mg mail send).
+// Used by non-agent components like the refinery that need to deliver mail
+// to agents reading via mg mail list.
+func SendMGMail(to, from, subject, body string) error {
+	cmd := execCommand("mg", "mail", "send", to, "--from="+from, "--subject="+subject, "--body="+body)
+	cmd.Stderr = nil
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("mg mail send failed: %s (%w)", string(out), err)
 	}
 	return nil
 }

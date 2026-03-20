@@ -22,6 +22,7 @@ import (
 	"github.com/nightlyone/lockfile"
 
 	"github.com/drellem2/pogo/internal/agent"
+	"github.com/drellem2/pogo/internal/client"
 	"github.com/drellem2/pogo/internal/config"
 	"github.com/drellem2/pogo/internal/driver"
 	"github.com/drellem2/pogo/internal/project"
@@ -290,6 +291,21 @@ func main() {
 			})
 			mergeQueue.SetOnFailed(func(mr *refinery.MergeRequest) {
 				log.Printf("refinery: failed %s (branch=%s, author=%s, error=%s)", mr.ID, mr.Branch, mr.Author, mr.Error)
+
+				subject := fmt.Sprintf("MERGE FAILED: %s (branch=%s)", mr.ID, mr.Branch)
+				body := fmt.Sprintf("Merge request %s failed.\nBranch: %s\nAuthor: %s\nError: %s\nGate output: %s", mr.ID, mr.Branch, mr.Author, mr.Error, mr.GateOutput)
+
+				// Mail the author agent so they can fix and resubmit.
+				if mr.Author != "" {
+					if err := client.SendMGMail(mr.Author, "refinery", subject, body); err != nil {
+						log.Printf("refinery: failed to mail author %s: %v", mr.Author, err)
+					}
+				}
+
+				// Mail the mayor so they can re-dispatch if the author exited.
+				if err := client.SendMGMail("mayor", "refinery", subject, body); err != nil {
+					log.Printf("refinery: failed to mail mayor: %v", err)
+				}
 			})
 			go mergeQueue.Start(context.Background())
 			defer mergeQueue.Stop()
