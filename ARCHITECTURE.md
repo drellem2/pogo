@@ -311,7 +311,7 @@ pogod exposes HTTP endpoints. Existing endpoints are unchanged; new endpoints fo
 | `/agents/:name` | DELETE | Stop an agent |
 | `/refinery/queue` | GET | Pending merge items |
 | `/refinery/history` | GET | Recent merge results |
-| `/events` | GET | Query event log |
+| `/events` | GET | Query event log (proxies macguffin) |
 
 CLI commands (`pogo agent *`, `pogo nudge`) are thin wrappers around these endpoints, following the existing pogo CLI pattern.
 
