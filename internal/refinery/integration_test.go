@@ -22,7 +22,7 @@ func TestEndToEndMergeLoop(t *testing.T) {
 
 	// === Set up "origin" bare repo ===
 	originDir := t.TempDir()
-	run(t, originDir, "git", "init", "--bare")
+	run(t, originDir, "git", "init", "--bare", "-b", "main")
 
 	// === Set up a working clone with an initial commit ===
 	workDir := t.TempDir()
@@ -139,7 +139,7 @@ func TestEndToEndMergeRejection(t *testing.T) {
 	}
 
 	originDir := t.TempDir()
-	run(t, originDir, "git", "init", "--bare")
+	run(t, originDir, "git", "init", "--bare", "-b", "main")
 
 	workDir := t.TempDir()
 	run(t, workDir, "git", "clone", originDir, ".")
@@ -212,7 +212,7 @@ func TestMultipleMergeRequests(t *testing.T) {
 	}
 
 	originDir := t.TempDir()
-	run(t, originDir, "git", "init", "--bare")
+	run(t, originDir, "git", "init", "--bare", "-b", "main")
 
 	workDir := t.TempDir()
 	run(t, workDir, "git", "clone", originDir, ".")
