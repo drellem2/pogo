@@ -56,6 +56,10 @@ type SpawnPolecatAPIRequest struct {
 // NudgeAPIRequest is the JSON body for POST /agents/:name/nudge.
 type NudgeAPIRequest struct {
 	Message string `json:"message"`
+	// Mode: "wait-idle" (default) or "immediate".
+	Mode string `json:"mode,omitempty"`
+	// Timeout in seconds for wait-idle mode. Default: 30.
+	Timeout int `json:"timeout,omitempty"`
 }
 
 // OutputAPIRequest query params for GET /agents/:name/output.
@@ -154,6 +158,12 @@ func (r *Registry) handleAgent(w http.ResponseWriter, req *http.Request) {
 	}
 }
 
+// NudgeAPIResponse is returned for wait-idle nudges to report delivery status.
+type NudgeAPIResponse struct {
+	Status string `json:"status"` // "delivered" or "not_running"
+	Agent  string `json:"agent"`
+}
+
 func (r *Registry) handleNudge(w http.ResponseWriter, req *http.Request) {
 	if req.Method != "POST" {
 		http.Error(w, "", http.StatusMethodNotAllowed)
@@ -163,24 +173,44 @@ func (r *Registry) handleNudge(w http.ResponseWriter, req *http.Request) {
 	name := req.PathValue("name")
 	agent := r.Get(name)
 	if agent == nil {
-		http.Error(w, fmt.Sprintf("agent %q not found", name), http.StatusNotFound)
+		// Return 404 with structured response so clients can detect and fall back
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(NudgeAPIResponse{
+			Status: "not_running",
+			Agent:  name,
+		})
 		return
 	}
 
 	var nudgeReq NudgeAPIRequest
 	if err := json.NewDecoder(req.Body).Decode(&nudgeReq); err != nil {
-		// If no JSON body, read raw body as the message
 		req.Body.Close()
 		http.Error(w, "bad request: message required", http.StatusBadRequest)
 		return
 	}
 
-	if err := agent.Nudge(nudgeReq.Message); err != nil {
+	// Determine mode and timeout
+	mode := NudgeWaitIdle
+	if nudgeReq.Mode == string(NudgeImmediate) {
+		mode = NudgeImmediate
+	}
+	timeout := DefaultNudgeTimeout
+	if nudgeReq.Timeout > 0 {
+		timeout = time.Duration(nudgeReq.Timeout) * time.Second
+	}
+
+	if err := agent.NudgeWithMode(nudgeReq.Message, mode, timeout); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	w.WriteHeader(http.StatusNoContent)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(NudgeAPIResponse{
+		Status: "delivered",
+		Agent:  name,
+	})
 }
 
 func (r *Registry) handleOutput(w http.ResponseWriter, req *http.Request) {

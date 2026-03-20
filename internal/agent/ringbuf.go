@@ -1,14 +1,18 @@
 package agent
 
-import "sync"
+import (
+	"sync"
+	"time"
+)
 
 // RingBuffer is a fixed-size circular buffer for agent output.
 // Thread-safe. When full, old data is overwritten.
 type RingBuffer struct {
-	mu   sync.Mutex
-	buf  []byte
-	pos  int
-	full bool
+	mu        sync.Mutex
+	buf       []byte
+	pos       int
+	full      bool
+	lastWrite time.Time
 }
 
 // NewRingBuffer creates a ring buffer of the given size.
@@ -23,6 +27,8 @@ func (r *RingBuffer) Write(p []byte) (int, error) {
 
 	n := len(p)
 	size := len(r.buf)
+
+	r.lastWrite = time.Now()
 
 	if n >= size {
 		// Data larger than buffer — keep only the tail
@@ -46,6 +52,13 @@ func (r *RingBuffer) Write(p []byte) (int, error) {
 		r.full = true
 	}
 	return n, nil
+}
+
+// LastWriteTime returns the time of the most recent write.
+func (r *RingBuffer) LastWriteTime() time.Time {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.lastWrite
 }
 
 // Last returns the most recent n bytes of output.

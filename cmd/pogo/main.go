@@ -533,26 +533,57 @@ The template is expanded with the provided variables and used as the agent's pro
 	cmdAgentSpawnPolecat.Flags().StringSliceVarP(&spawnPolecatEnv, "env", "e", nil, "Additional environment variables (KEY=VALUE)")
 
 	// Nudge command — top-level for convenience
+	var nudgeImmediate bool
+	var nudgeTimeout int
 	var cmdNudge = &cobra.Command{
 		Use:   "nudge <name> <message>",
-		Short: "Write a message to an agent's PTY",
-		Long: `Send text to an agent's PTY master fd via pogod.
-The agent sees it as typed input. Use this for agent-to-agent wakeup or human-to-agent messages.`,
+		Short: "Send a message to an agent via PTY",
+		Long: `Send text to an agent's PTY via pogod.
+
+By default, waits for the agent to be idle (no PTY output for 2s) before
+delivering the message. Use --immediate to write directly without waiting.
+
+If the agent is not running, falls back to sending the message via gt mail.`,
 		Args: cobra.MinimumNArgs(2),
 		Run: func(cmd *cobra.Command, args []string) {
 			name := args[0]
 			message := strings.Join(args[1:], " ")
-			err := client.NudgeAgent(name, message)
+
+			opts := &client.NudgeOpts{
+				Mode:    "wait-idle",
+				Timeout: nudgeTimeout,
+			}
+			if nudgeImmediate {
+				opts.Mode = "immediate"
+			}
+
+			fallback, err := client.NudgeOrMail(name, message, opts)
 			if err != nil {
 				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
 			}
+
 			if jsonOutput {
-				cli.PrintJSON(map[string]string{"status": "delivered", "agent": name})
+				status := "delivered"
+				method := "pty"
+				if fallback {
+					method = "mail"
+				}
+				cli.PrintJSON(map[string]string{
+					"status": status,
+					"agent":  name,
+					"method": method,
+				})
 			} else {
-				fmt.Printf("Nudged %s.\n", name)
+				if fallback {
+					fmt.Printf("Agent %s not running — sent via mail.\n", name)
+				} else {
+					fmt.Printf("Nudged %s.\n", name)
+				}
 			}
 		},
 	}
+	cmdNudge.Flags().BoolVarP(&nudgeImmediate, "immediate", "i", false, "Write directly to PTY without waiting for idle")
+	cmdNudge.Flags().IntVarP(&nudgeTimeout, "timeout", "T", 30, "Seconds to wait for agent idle (wait-idle mode)")
 
 	var rootCmd = &cobra.Command{Use: "pogo"}
 

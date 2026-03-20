@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os/exec"
 
 	"github.com/drellem2/pogo/internal/agent"
 )
@@ -107,9 +108,23 @@ func StopAgent(name string) error {
 	return nil
 }
 
-// NudgeAgent sends a message to an agent's PTY.
-func NudgeAgent(name, message string) error {
-	body, err := json.Marshal(agent.NudgeAPIRequest{Message: message})
+// NudgeOpts configures nudge delivery.
+type NudgeOpts struct {
+	Mode    string // "wait-idle" or "immediate"
+	Timeout int    // seconds, for wait-idle mode
+}
+
+// ErrAgentNotRunning is returned when the target agent is not registered with pogod.
+var ErrAgentNotRunning = fmt.Errorf("agent not running")
+
+// NudgeAgent sends a message to an agent's PTY with the given options.
+func NudgeAgent(name, message string, opts *NudgeOpts) error {
+	req := agent.NudgeAPIRequest{Message: message}
+	if opts != nil {
+		req.Mode = opts.Mode
+		req.Timeout = opts.Timeout
+	}
+	body, err := json.Marshal(req)
 	if err != nil {
 		return err
 	}
@@ -119,9 +134,9 @@ func NudgeAgent(name, message string) error {
 	}
 	defer r.Body.Close()
 	if r.StatusCode == http.StatusNotFound {
-		return fmt.Errorf("agent %q not found", name)
+		return ErrAgentNotRunning
 	}
-	if r.StatusCode != http.StatusNoContent {
+	if r.StatusCode != http.StatusOK {
 		msg, _ := io.ReadAll(r.Body)
 		return fmt.Errorf("nudge failed: %s", string(msg))
 	}
@@ -162,6 +177,41 @@ func ListPrompts() ([]agent.PromptInfo, error) {
 		return nil, err
 	}
 	return prompts, nil
+}
+
+// NudgeOrMail tries to nudge an agent via PTY. If the agent is not running,
+// it falls back to sending a macguffin mail message via the gt CLI.
+func NudgeOrMail(name, message string, opts *NudgeOpts) (fallback bool, err error) {
+	err = NudgeAgent(name, message, opts)
+	if err == nil {
+		return false, nil
+	}
+	if err != ErrAgentNotRunning {
+		return false, err
+	}
+
+	// Fallback: send via gt mail
+	return true, sendMailFallback(name, message)
+}
+
+// sendMailFallback sends a nudge message via gt mail send.
+func sendMailFallback(name, message string) error {
+	// Use exec to call gt mail send — the target address is the agent name
+	// interpreted as a rig/role path.
+	cmd := execCommand("gt", "mail", "send", name, "-s", "nudge", "-m", message)
+	cmd.Stderr = nil
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("mail fallback failed: %s (%w)", string(out), err)
+	}
+	return nil
+}
+
+// execCommand is a variable for testability.
+var execCommand = execCommandFunc
+
+func execCommandFunc(name string, args ...string) *exec.Cmd {
+	return exec.Command(name, args...)
 }
 
 // GetAgentOutput returns recent output from an agent.
