@@ -46,6 +46,9 @@ type Agent struct {
 	Command   []string    `json:"command"`
 	Status    AgentStatus `json:"status"`
 
+	// ExitTime records when the process exited, for accurate uptime on exited agents.
+	ExitTime time.Time `json:"exit_time,omitempty"`
+
 	// ExitCode is set after the process exits (-1 if signaled).
 	ExitCode int `json:"exit_code,omitempty"`
 
@@ -416,6 +419,7 @@ func (r *Registry) waitAndHandle(a *Agent) {
 
 	a.mu.Lock()
 	a.Status = StatusExited
+	a.ExitTime = time.Now()
 	if a.exitErr != nil {
 		a.ExitCode = -1
 		if exitErr, ok := a.exitErr.(*exec.ExitError); ok {

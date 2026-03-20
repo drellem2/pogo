@@ -83,8 +83,18 @@ func agentInfo(a *Agent) AgentInfo {
 		RestartCount: a.RestartCount,
 		PromptFile:   a.PromptFile,
 		ProcessName:  ProcessName(a.Type, a.Name),
-		Uptime:       time.Since(a.StartTime).Truncate(time.Second).String(),
+		Uptime:       agentUptime(a),
 	}
+}
+
+// agentUptime returns the human-readable uptime for an agent.
+// For exited agents, it returns the duration from start to exit rather than
+// continuing to count up from the current time.
+func agentUptime(a *Agent) string {
+	if a.Status == StatusExited && !a.ExitTime.IsZero() {
+		return a.ExitTime.Sub(a.StartTime).Truncate(time.Second).String()
+	}
+	return time.Since(a.StartTime).Truncate(time.Second).String()
 }
 
 // RegisterHandlers registers agent API endpoints on the given mux.
