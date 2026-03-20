@@ -33,13 +33,17 @@ You are an ephemeral polecat agent. You exist to complete a single task, then ex
    git push origin polecat-{{.Id}}
    ```
 
-4. **Mark the work item done:**
+4. **Submit your branch to the refinery merge queue:**
+   ```bash
+   pogo refinery submit polecat-{{.Id}} --repo={{.Repo}} --author={{.Id}}
+   ```
+
+5. **Mark the work item done:**
    ```bash
    mg done {{.Id}} --result='{"branch": "polecat-{{.Id}}"}'
    ```
-   The result JSON tells the refinery which branch to merge.
 
-5. **Exit.** Your job is done. The refinery will merge your branch after tests pass.
+6. **Exit.** Your job is done. The refinery will run quality gates (build, test) and merge your branch to main.
 
 ## Working Principles
 

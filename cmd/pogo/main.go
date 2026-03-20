@@ -15,6 +15,7 @@ import (
 	"github.com/drellem2/pogo/internal/agent"
 	"github.com/drellem2/pogo/internal/cli"
 	"github.com/drellem2/pogo/internal/client"
+	"github.com/drellem2/pogo/internal/refinery"
 	"github.com/drellem2/pogo/internal/service"
 )
 
@@ -720,6 +721,54 @@ Safe to run multiple times — existing files are preserved unless --force is pa
 	cmdAgent.AddCommand(cmdAgentPrompt)
 	rootCmd.AddCommand(cmdAgent)
 	rootCmd.AddCommand(cmdNudge)
+
+	// Refinery commands
+	var cmdRefinery = &cobra.Command{
+		Use:   "refinery",
+		Short: "Interact with the merge queue",
+	}
+
+	var submitRepo string
+	var submitTarget string
+	var submitAuthor string
+	var cmdRefinerySubmit = &cobra.Command{
+		Use:   "submit <branch>",
+		Short: "Submit a branch to the merge queue",
+		Long: `Submit a branch for the refinery to test and merge.
+
+The refinery will fetch the branch, run quality gates (build.sh/test.sh or
+.pogo/refinery.toml), and fast-forward merge to the target ref if they pass.
+
+Example:
+  pogo refinery submit polecat-a3f --repo=/path/to/repo`,
+		Args: cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			branch := args[0]
+			if submitRepo == "" {
+				cli.ExitWithError(jsonOutput, "--repo is required", cli.ExitError)
+			}
+			id, err := client.SubmitMerge(refinery.SubmitRequest{
+				RepoPath:  submitRepo,
+				Branch:    branch,
+				TargetRef: submitTarget,
+				Author:    submitAuthor,
+			})
+			if err != nil {
+				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+			}
+			if jsonOutput {
+				cli.PrintJSON(map[string]string{"id": id, "branch": branch, "status": "queued"})
+			} else {
+				fmt.Printf("Submitted %s to merge queue (id=%s)\n", branch, id)
+			}
+		},
+	}
+	cmdRefinerySubmit.Flags().StringVar(&submitRepo, "repo", "", "Repository path (required)")
+	cmdRefinerySubmit.Flags().StringVar(&submitTarget, "target", "main", "Target ref to merge into")
+	cmdRefinerySubmit.Flags().StringVar(&submitAuthor, "author", "", "Author agent name")
+
+	cmdRefinery.AddCommand(cmdRefinerySubmit)
+	rootCmd.AddCommand(cmdRefinery)
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(cli.ExitError)
