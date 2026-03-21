@@ -255,8 +255,8 @@ func TestAgentStatus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a.Status != StatusRunning {
-		t.Errorf("Status = %q, want %q", a.Status, StatusRunning)
+	if s := a.GetStatus(); s != StatusRunning {
+		t.Errorf("Status = %q, want %q", s, StatusRunning)
 	}
 
 	// Stop it and check exited status
@@ -372,8 +372,8 @@ func TestRespawn(t *testing.T) {
 	if b.RestartCount != 1 {
 		t.Errorf("RestartCount = %d, want 1", b.RestartCount)
 	}
-	if b.Status != StatusRunning {
-		t.Errorf("Status = %q, want %q", b.Status, StatusRunning)
+	if s := b.GetStatus(); s != StatusRunning {
+		t.Errorf("Status = %q, want %q", s, StatusRunning)
 	}
 	if b.PID == a.PID {
 		t.Error("expected new PID after respawn")
