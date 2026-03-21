@@ -180,6 +180,72 @@ func ListPrompts() ([]PromptInfo, error) {
 	return prompts, nil
 }
 
+// DefaultCrewPromptTemplate is the default content for new crew agent prompt files.
+const DefaultCrewPromptTemplate = `# {{.Name}}
+
+You are a crew agent — a long-running assistant managed by pogo. Unlike polecats (ephemeral, single-task agents), you run persistently and pogod restarts you if you crash.
+
+## Your Role
+
+Describe what this agent is responsible for. What domain does it own? What kinds of tasks should be routed to it?
+
+## Your Tools
+
+` + "```bash" + `
+# Common tools available to all agents
+pogo agent list                # See running agents
+pogo agent status <name>       # Check agent status
+mg mail list <your-name>       # Check your inbox
+mg mail read <msg-id>          # Read a message
+mg mail send <agent> --from={{.Name}} --subject="<subj>" --body="<body>"
+` + "```" + `
+
+## Working Principles
+
+- **Stay in your lane.** Handle work within your domain. Route other requests to the appropriate agent.
+- **Be responsive.** Check your mail regularly and reply promptly.
+- **Follow conventions.** Match the existing code style and project norms.
+- **Communicate.** If you're blocked or need help, mail the mayor.
+
+## Identity
+
+Your agent name is ` + "`{{.Name}}`" + `. You were started via ` + "`pogo agent start {{.Name}}`" + `.
+`
+
+// CreateCrewPrompt creates a new crew agent prompt file at ~/.pogo/agents/crew/<name>.md
+// with a default template. Returns the path to the created file.
+// Returns an error if the file already exists (unless force is true).
+func CreateCrewPrompt(name string, force bool) (string, error) {
+	if err := InitPromptDirs(); err != nil {
+		return "", err
+	}
+
+	path := filepath.Join(CrewPromptDir(), name+".md")
+
+	if !force {
+		if _, err := os.Stat(path); err == nil {
+			return "", fmt.Errorf("crew prompt already exists: %s (use --force to overwrite)", path)
+		}
+	}
+
+	// Expand the template with the agent name
+	tmpl, err := template.New("crew").Parse(DefaultCrewPromptTemplate)
+	if err != nil {
+		return "", fmt.Errorf("parse crew template: %w", err)
+	}
+
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, struct{ Name string }{Name: name}); err != nil {
+		return "", fmt.Errorf("execute crew template: %w", err)
+	}
+
+	if err := os.WriteFile(path, buf.Bytes(), 0644); err != nil {
+		return "", fmt.Errorf("write crew prompt: %w", err)
+	}
+
+	return path, nil
+}
+
 // InitPromptDirs creates the ~/.pogo/agents/ directory structure.
 func InitPromptDirs() error {
 	dirs := []string{
