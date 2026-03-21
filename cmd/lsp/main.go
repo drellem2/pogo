@@ -14,12 +14,13 @@ import (
 
 	"github.com/drellem2/pogo/internal/cli"
 	"github.com/drellem2/pogo/internal/client"
+	"github.com/drellem2/pogo/internal/version"
 )
 
 func main() {
 	var jsonOutput bool
 
-	var rootCmd = &cobra.Command{Use: "lsp"}
+	var rootCmd = &cobra.Command{Use: "lsp", Version: version.Version}
 
 	rootCmd.Flags().BoolP("profile", "", false, "Enable CPU profiling")
 	rootCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSON format")

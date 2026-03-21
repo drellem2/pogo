@@ -889,7 +889,7 @@ The path is resolved to an absolute path and the git root is discovered automati
 		},
 	}
 
-	var rootCmd = &cobra.Command{Use: "pogo"}
+	var rootCmd = &cobra.Command{Use: "pogo", Version: version.Version}
 
 	rootCmd.PersistentFlags().BoolVar(&jsonOutput, "json", false, "Output in JSON format")
 
