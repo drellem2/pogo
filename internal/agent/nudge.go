@@ -24,6 +24,10 @@ const DefaultIdleThreshold = 2 * time.Second
 // DefaultNudgeTimeout is how long to wait for idle before giving up.
 const DefaultNudgeTimeout = 30 * time.Second
 
+// DefaultReadyTimeout is how long to wait for an agent to become ready
+// (produce output and then go idle) after spawning.
+const DefaultReadyTimeout = 60 * time.Second
+
 // IsIdle returns true if no output has been written to the agent's PTY
 // for at least the given duration. An agent with no output yet (just spawned)
 // is not considered idle.
@@ -63,6 +67,35 @@ func (a *Agent) WaitIdle(ctx context.Context, quiescence time.Duration) error {
 			}
 		}
 	}
+}
+
+// WaitReady blocks until the agent has produced output and then gone idle,
+// indicating it is ready to accept input. This replaces hardcoded sleep delays
+// for startup nudges — it adapts to actual Claude CLI startup time rather than
+// guessing a fixed duration.
+//
+// The sequence is: wait for any output (agent has started) → wait for idle
+// (agent is waiting for input). Returns an error if the context expires or
+// the agent exits before becoming ready.
+func (a *Agent) WaitReady(ctx context.Context, quiescence time.Duration) error {
+	// Phase 1: wait for the agent to produce any output at all.
+	// This confirms the process has started and is writing to the PTY.
+	pollInterval := 250 * time.Millisecond
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+
+	for a.outputBuf.LastWriteTime().IsZero() {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("timed out waiting for agent %q to produce output: %w", a.Name, ctx.Err())
+		case <-a.done:
+			return fmt.Errorf("agent %q exited before producing output", a.Name)
+		case <-ticker.C:
+		}
+	}
+
+	// Phase 2: wait for the output to go quiet (agent is ready for input).
+	return a.WaitIdle(ctx, quiescence)
 }
 
 // NudgeWithMode delivers a message to the agent's PTY using the specified mode.
