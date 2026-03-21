@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"time"
 )
 
@@ -291,8 +290,8 @@ func (r *Registry) handleStart(w http.ResponseWriter, req *http.Request) {
 	}
 
 	a, err := r.Spawn(SpawnRequest{
-		Name:       startReq.Name,
-		Type:       TypeCrew,
+		Name: startReq.Name,
+		Type: TypeCrew,
 		// DO NOT change --dangerously-skip-permissions. Polecats have regressed this
 		// flag twice. --permission-mode bypassPermissions does NOT work without
 		// additional setup. This flag is required for autonomous agent execution.
@@ -420,8 +419,7 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 	if spawnReq.Task != "" {
 		go func() {
 			time.Sleep(10 * time.Second)
-			prompt := buildPolecatPrompt(spawnReq)
-			a.Nudge(prompt)
+			a.Nudge(fmt.Sprintf("Look at the system prompt and complete the steps for this work item: %s", spawnReq.Id))
 		}()
 	}
 
@@ -432,29 +430,6 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(agentInfo(a))
-}
-
-// buildPolecatPrompt constructs a structured prompt for polecat execution.
-// Instead of passing just the task title (which Claude treats as a coding task
-// and ignores the protocol steps in the system prompt), this embeds the mandatory
-// mg lifecycle steps directly in the prompt so they are treated as first-class
-// instructions.
-func buildPolecatPrompt(req SpawnPolecatAPIRequest) string {
-	var b strings.Builder
-	b.WriteString("Execute this polecat assignment. Follow ALL steps — skipping any step is a failure.\n\n")
-	fmt.Fprintf(&b, "## Assignment: %s\n\n", req.Task)
-	if req.Body != "" {
-		fmt.Fprintf(&b, "### Details\n%s\n\n", req.Body)
-	}
-	b.WriteString("## Mandatory Steps (execute in order)\n\n")
-	fmt.Fprintf(&b, "1. **Claim the work item** (prevents duplicate work):\n   ```bash\n   mg claim %s\n   ```\n\n", req.Id)
-	b.WriteString("2. **Do the work** in your current directory (worktree). Stay focused on the task above.\n\n")
-	fmt.Fprintf(&b, "3. **Commit and push your branch:**\n   ```bash\n   git add <files>\n   git commit -m \"<type>: <description> (%s)\"\n   git push origin polecat-%s\n   ```\n\n", req.Id, req.Id)
-	fmt.Fprintf(&b, "4. **Submit to the merge queue:**\n   ```bash\n   pogo refinery submit polecat-%s --repo=%s --author=%s\n   ```\n\n", req.Id, req.Repo, req.Id)
-	fmt.Fprintf(&b, "5. **Mark done:**\n   ```bash\n   mg done %s --result='{\"branch\": \"polecat-%s\"}'\n   ```\n\n", req.Id, req.Id)
-	b.WriteString("6. **Exit.** The refinery handles testing and merging.\n\n")
-	b.WriteString("CRITICAL: You MUST run `mg claim` before starting work and `mg done` after submitting. These are not optional.\n")
-	return b.String()
 }
 
 func (r *Registry) handlePrompts(w http.ResponseWriter, req *http.Request) {
