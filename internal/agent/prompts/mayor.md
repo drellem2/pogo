@@ -91,6 +91,8 @@ Look for:
 mg mail list mayor
 ```
 
+For each message, read it with `mg mail read mayor <msg-id>` — this marks it as read so you don't re-process it after a restart.
+
 Agents and the refinery mail you when things need attention:
 
 - **Refinery failures**: The refinery sends mail when a merge fails quality gates. Read the failure details, check if the polecat's branch has obvious issues (test failures, build errors). You can re-dispatch the work item to a new polecat with context about what went wrong:
