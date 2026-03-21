@@ -340,6 +340,8 @@ func (r *Registry) Respawn(name string) (*Agent, error) {
 		RestartCount: restartCount,
 		PromptFile:   old.PromptFile,
 		Dir:          old.Dir,
+		WorktreeDir:  old.WorktreeDir,
+		SourceRepo:   old.SourceRepo,
 		master:       master,
 		cmd:          cmd,
 		outputBuf:    NewRingBuffer(64 * 1024),

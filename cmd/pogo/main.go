@@ -311,14 +311,17 @@ Child commands include start, stop, and status.`,
 		Long:  `Commands for spawning, listing, stopping, and attaching to agent processes managed by pogod.`,
 	}
 
+	var agentStartRepo string
 	var cmdAgentStart = &cobra.Command{
 		Use:   "start <name>",
 		Short: "Start a crew agent by name",
 		Long: `Start a crew agent using the prompt file at ~/.pogo/agents/crew/<name>.md.
-The agent runs as a persistent crew process that pogod monitors and restarts on crash.`,
+The agent runs as a persistent crew process that pogod monitors and restarts on crash.
+
+Use --repo to give the agent its own git worktree for isolated file access.`,
 		Args: cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
-			info, err := client.StartAgent(args[0])
+			info, err := client.StartAgent(args[0], agentStartRepo)
 			if err != nil {
 				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
 			}
@@ -329,6 +332,7 @@ The agent runs as a persistent crew process that pogod monitors and restarts on 
 			}
 		},
 	}
+	cmdAgentStart.Flags().StringVar(&agentStartRepo, "repo", "", "Source repo path for worktree isolation")
 
 	var cmdAgentList = &cobra.Command{
 		Use:   "list",

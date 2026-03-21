@@ -41,6 +41,7 @@ type SpawnAPIRequest struct {
 // Starts a crew agent by name, looking up the prompt file automatically.
 type StartAPIRequest struct {
 	Name string `json:"name"`
+	Repo string `json:"repo,omitempty"` // Source repo for worktree isolation
 }
 
 // SpawnPolecatAPIRequest is the JSON body for POST /agents/spawn-polecat.
@@ -289,20 +290,43 @@ func (r *Registry) handleStart(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	// DO NOT change --dangerously-skip-permissions. Polecats have regressed this
+	// flag twice. --permission-mode bypassPermissions does NOT work without
+	// additional setup. This flag is required for autonomous agent execution.
+	cmd := []string{"claude", "--dangerously-skip-permissions", "--append-system-prompt-file", promptFile}
+
+	// If a repo is provided, create an isolated worktree for the crew agent
+	// so it doesn't conflict with the refinery or other agents.
+	var worktreeDir, sourceRepo string
+	dir := agentDir
+	if startReq.Repo != "" {
+		wtDir, wtErr := EnsureCrewWorktree(startReq.Name, startReq.Repo)
+		if wtErr != nil {
+			http.Error(w, fmt.Sprintf("worktree setup failed: %v", wtErr), http.StatusInternalServerError)
+			return
+		}
+		worktreeDir = wtDir
+		sourceRepo = startReq.Repo
+		dir = wtDir
+		cmd = append(cmd, "--add-dir", wtDir)
+		log.Printf("crew %s: using worktree at %s", startReq.Name, wtDir)
+	}
+
 	a, err := r.Spawn(SpawnRequest{
-		Name: startReq.Name,
-		Type: TypeCrew,
-		// DO NOT change --dangerously-skip-permissions. Polecats have regressed this
-		// flag twice. --permission-mode bypassPermissions does NOT work without
-		// additional setup. This flag is required for autonomous agent execution.
-		Command:    []string{"claude", "--dangerously-skip-permissions", "--append-system-prompt-file", promptFile},
+		Name:       startReq.Name,
+		Type:       TypeCrew,
+		Command:    cmd,
 		PromptFile: promptFile,
-		Dir:        agentDir,
+		Dir:        dir,
 	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
+
+	// Store worktree info on the agent for cleanup/respawn
+	a.WorktreeDir = worktreeDir
+	a.SourceRepo = sourceRepo
 
 	// Nudge crew agent after a brief delay to kick off execution.
 	// Claude Code interactive mode waits for input — this sends the first message.

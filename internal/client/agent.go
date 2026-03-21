@@ -71,8 +71,9 @@ func SpawnAgent(req agent.SpawnAPIRequest) (*agent.AgentInfo, error) {
 
 // StartAgent asks pogod to start a crew agent by name.
 // The prompt file is looked up from ~/.pogo/agents/crew/<name>.md.
-func StartAgent(name string) (*agent.AgentInfo, error) {
-	body, err := json.Marshal(agent.StartAPIRequest{Name: name})
+// If repo is non-empty, an isolated git worktree is created for the agent.
+func StartAgent(name, repo string) (*agent.AgentInfo, error) {
+	body, err := json.Marshal(agent.StartAPIRequest{Name: name, Repo: repo})
 	if err != nil {
 		return nil, err
 	}
