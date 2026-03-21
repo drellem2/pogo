@@ -95,7 +95,27 @@ Look for:
   ```
   This reclaims items from dead processes back to available status.
 
-### 4. Read your mail
+### 4. Handle QA for completed work
+
+When a polecat completes a work item, check whether the work item has a `qa` field in its frontmatter (visible via `mg show <id>`). The `qa` field determines what happens after the work is done:
+
+- **`qa: required`** — Create a paired QA work item to verify the polecat's output:
+  ```bash
+  mg create --type=qa --depends=<source-id> --source=<source-id> --title="QA: <original title>"
+  ```
+  This QA item will be dispatched to a new polecat like any other work item. Don't stop the original polecat until QA passes.
+
+- **`qa: auto`** — The polecat can self-verify its own work. No separate QA item is needed. Proceed with normal cleanup.
+
+- **`qa: manual`** — Human review is required. Create a QA work item assigned to the human:
+  ```bash
+  mg create --type=qa --depends=<source-id> --source=<source-id> --assignee=me --title="QA: <original title>"
+  ```
+  This item won't be dispatched to a polecat — it stays assigned to the human.
+
+- **No `qa` field (default)** — No QA step. Proceed with normal cleanup.
+
+### 5. Read your mail
 
 ```bash
 mg mail list mayor
@@ -113,7 +133,7 @@ Agents and the refinery mail you when things need attention:
 - **Blocked reports**: An agent is stuck. Check the work item, see if you can unblock it or reassign.
 - **Completion reports**: Note and move on — the refinery handles merging.
 
-### 5. Repeat
+### 6. Repeat
 
 Wait briefly (30-60 seconds), then start from step 1 again. The system is event-driven through work items and mail — your polling supplements nudge-based wakeups.
 
