@@ -82,6 +82,16 @@ jobs:
       - name: Run Bash shell integration tests
         run: shell/bashrc_test.sh
 
+  version-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check for duplicate version tag
+        run: ./scripts/check-version.sh
+
   build:
     runs-on: ubuntu-latest
     strategy:
