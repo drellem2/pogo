@@ -58,6 +58,9 @@ type Agent struct {
 	// PromptFile is the path to the agent's prompt file (if any).
 	PromptFile string `json:"prompt_file,omitempty"`
 
+	// Dir is the working directory for the agent process.
+	Dir string `json:"dir,omitempty"`
+
 	// WorktreeDir is the git worktree path for polecat isolation (cleanup on exit).
 	WorktreeDir string `json:"worktree_dir,omitempty"`
 	// SourceRepo is the original repo path used to create/remove the worktree.
@@ -183,6 +186,7 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 		Command:     req.Command,
 		Status:      StatusRunning,
 		PromptFile:  req.PromptFile,
+		Dir:         req.Dir,
 		master:      master,
 		cmd:         cmd,
 		outputBuf:   NewRingBuffer(64 * 1024), // 64KB rolling buffer
@@ -300,6 +304,9 @@ func (r *Registry) Respawn(name string) (*Agent, error) {
 	old.Cleanup()
 
 	cmd := exec.Command(old.Command[0], old.Command[1:]...)
+	if old.Dir != "" {
+		cmd.Dir = old.Dir
+	}
 	procName := ProcessName(old.Type, old.Name)
 	injectedEnv := []string{
 		"POGO_AGENT_NAME=" + old.Name,
@@ -325,6 +332,7 @@ func (r *Registry) Respawn(name string) (*Agent, error) {
 		Status:       StatusRunning,
 		RestartCount: restartCount,
 		PromptFile:   old.PromptFile,
+		Dir:          old.Dir,
 		master:       master,
 		cmd:          cmd,
 		outputBuf:    NewRingBuffer(64 * 1024),
