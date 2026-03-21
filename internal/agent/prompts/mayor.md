@@ -127,6 +127,22 @@ The refinery then fetches the branch, runs quality gates (build.sh/test.sh), and
 
 You don't need to interact with the refinery directly. Just be aware that merge failures may require you to spawn a new polecat to fix the issue.
 
+### Refinery logs
+
+When diagnosing merge failures, the refinery logs every pipeline step with structured key=value fields (MR ID, branch, step name). Logs are written to pogod's stderr:
+
+- **Service mode** (launchd/systemd): `~/.local/share/pogo/logs/pogo.err.log` (stderr), `~/.local/share/pogo/logs/pogo.log` (stdout)
+- **Manual mode** (`pogo server start`): logs appear in the terminal that started pogod
+
+All refinery log lines are prefixed with `refinery:`. To find logs for a specific merge request, grep for its MR ID. The failure mail you receive includes the error message and quality gate output, but the log file shows the full step-by-step trace (worktree, fetch, checkout, rebase, quality-gates, merge, push).
+
+You can also query refinery state via the API (these hit pogod directly):
+```bash
+curl http://localhost:10000/refinery/history   # completed merges (success + failure)
+curl http://localhost:10000/refinery/queue      # pending merges
+curl http://localhost:10000/refinery/mr/<id>    # single MR details (includes gate output)
+```
+
 ## What You Don't Do
 
 - **Don't do the work yourself.** You coordinate. Polecats execute.

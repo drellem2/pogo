@@ -2,6 +2,7 @@ package refinery
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,17 +16,20 @@ import (
 // 4. Fast-forward merge to target ref
 // 5. Push
 func (r *Refinery) processMerge(mr *MergeRequest) error {
+	log.Printf("refinery: MR %s step=worktree repo=%s", mr.ID, mr.RepoPath)
 	wtDir, err := r.ensureWorktree(mr.RepoPath)
 	if err != nil {
 		return fmt.Errorf("worktree setup: %w", err)
 	}
 
 	// Fetch latest from origin
+	log.Printf("refinery: MR %s step=fetch", mr.ID)
 	if err := gitCmd(wtDir, "fetch", "origin"); err != nil {
 		return fmt.Errorf("fetch: %w", err)
 	}
 
 	// Checkout the branch to test
+	log.Printf("refinery: MR %s step=checkout branch=%s", mr.ID, mr.Branch)
 	if err := gitCmd(wtDir, "checkout", "-B", mr.Branch, "origin/"+mr.Branch); err != nil {
 		return fmt.Errorf("checkout branch: %w", err)
 	}
@@ -33,11 +37,13 @@ func (r *Refinery) processMerge(mr *MergeRequest) error {
 	// Rebase onto latest target so the branch is a direct descendant of main.
 	// Polecat branches fork from main at spawn time and may be behind by the
 	// time they reach the refinery.
+	log.Printf("refinery: MR %s step=rebase target=%s", mr.ID, mr.TargetRef)
 	if err := gitCmd(wtDir, "rebase", "origin/"+mr.TargetRef); err != nil {
 		return fmt.Errorf("rebase onto %s: %w", mr.TargetRef, err)
 	}
 
 	// Run quality gates (on the rebased branch — tests what will actually land)
+	log.Printf("refinery: MR %s step=quality-gates", mr.ID)
 	gateOutput, err := r.runQualityGates(wtDir, mr.RepoPath)
 	mr.GateOutput = gateOutput
 	if err != nil {
@@ -45,21 +51,25 @@ func (r *Refinery) processMerge(mr *MergeRequest) error {
 	}
 
 	// Checkout target ref for merge
+	log.Printf("refinery: MR %s step=checkout-target ref=%s", mr.ID, mr.TargetRef)
 	if err := gitCmd(wtDir, "checkout", mr.TargetRef); err != nil {
 		return fmt.Errorf("checkout target: %w", err)
 	}
 
 	// Pull latest target
+	log.Printf("refinery: MR %s step=pull-target ref=%s", mr.ID, mr.TargetRef)
 	if err := gitCmd(wtDir, "pull", "--ff-only", "origin", mr.TargetRef); err != nil {
 		return fmt.Errorf("pull target: %w", err)
 	}
 
 	// Fast-forward merge — guaranteed to work after rebase
+	log.Printf("refinery: MR %s step=merge branch=%s -> %s", mr.ID, mr.Branch, mr.TargetRef)
 	if err := gitCmd(wtDir, "merge", "--ff-only", mr.Branch); err != nil {
 		return fmt.Errorf("merge (ff-only): %w", err)
 	}
 
 	// Push to origin
+	log.Printf("refinery: MR %s step=push ref=%s", mr.ID, mr.TargetRef)
 	if err := gitCmd(wtDir, "push", "origin", mr.TargetRef); err != nil {
 		return fmt.Errorf("push: %w", err)
 	}
