@@ -567,7 +567,7 @@ Detach with Ctrl-\ (SIGQUIT).`,
 		Use:   "install",
 		Short: "Install default prompt files to ~/.pogo/agents/",
 		Long: `Copy the default mayor prompt and polecat template to ~/.pogo/agents/.
-Existing files are not overwritten unless --force is used.`,
+Stale files are auto-updated when the embedded version changes. Use --force to overwrite all files.`,
 		Args: cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
 			result, err := agent.InstallPrompts(installForce)
@@ -580,11 +580,14 @@ Existing files are not overwritten unless --force is used.`,
 				for _, f := range result.Installed {
 					fmt.Printf("  installed: %s\n", f)
 				}
-				for _, f := range result.Skipped {
-					fmt.Printf("  skipped (exists): %s\n", f)
+				for _, f := range result.Updated {
+					fmt.Printf("  updated: %s\n", f)
 				}
-				if len(result.Installed) == 0 && len(result.Skipped) > 0 {
-					fmt.Println("All prompts already installed. Use --force to overwrite.")
+				for _, f := range result.Skipped {
+					fmt.Printf("  skipped (up-to-date): %s\n", f)
+				}
+				if len(result.Installed) == 0 && len(result.Updated) == 0 && len(result.Skipped) > 0 {
+					fmt.Println("All prompts up-to-date.")
 				}
 			}
 		},
@@ -723,7 +726,7 @@ If the agent is not running, falls back to sending the message via gt mail.`,
 2. Initialize macguffin workspace (mg init)
 3. Install default agent prompts to ~/.pogo/agents/
 
-Safe to run multiple times — existing files are preserved unless --force is passed.`,
+Safe to run multiple times — stale prompts are auto-updated, other files are preserved.`,
 		Args: cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
 			// Step 1: Ensure daemon is running
@@ -777,8 +780,11 @@ Safe to run multiple times — existing files are preserved unless --force is pa
 				if len(result.Installed) > 0 {
 					fmt.Printf("  ✓ installed %d prompt(s)\n", len(result.Installed))
 				}
+				if len(result.Updated) > 0 {
+					fmt.Printf("  ✓ updated %d stale prompt(s)\n", len(result.Updated))
+				}
 				if len(result.Skipped) > 0 {
-					fmt.Printf("  ✓ %d prompt(s) already exist (use --force to overwrite)\n", len(result.Skipped))
+					fmt.Printf("  ✓ %d prompt(s) up-to-date\n", len(result.Skipped))
 				}
 				fmt.Println("\nReady. Next steps:")
 				fmt.Println("  pogo agent start mayor    # Start the coordinator")

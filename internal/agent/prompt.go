@@ -2,7 +2,9 @@ package agent
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"fmt"
 	"io/fs"
 	"os"
@@ -192,14 +194,47 @@ func InitPromptDirs() error {
 	return nil
 }
 
+// promptHashPrefix is the marker used to embed a content hash in installed prompt files.
+const promptHashPrefix = "<!-- pogo-prompt-hash: "
+const promptHashSuffix = " -->\n"
+
+// contentHash returns the hex-encoded SHA-256 hash of data.
+func contentHash(data []byte) string {
+	h := sha256.Sum256(data)
+	return hex.EncodeToString(h[:])
+}
+
+// installedPromptHash reads the hash comment from the first line of an installed prompt file.
+// Returns empty string if the file has no hash comment.
+func installedPromptHash(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	firstLine, _, _ := strings.Cut(string(data), "\n")
+	if strings.HasPrefix(firstLine, promptHashPrefix) && strings.HasSuffix(firstLine, strings.TrimSuffix(promptHashSuffix, "\n")) {
+		return strings.TrimPrefix(strings.TrimSuffix(firstLine, strings.TrimSuffix(promptHashSuffix, "\n")), promptHashPrefix)
+	}
+	return ""
+}
+
+// stampedContent prepends a hash comment to prompt file content.
+func stampedContent(data []byte) []byte {
+	hash := contentHash(data)
+	stamp := promptHashPrefix + hash + strings.TrimSuffix(promptHashSuffix, "\n") + "\n"
+	return append([]byte(stamp), data...)
+}
+
 // InstallResult describes what happened during prompt installation.
 type InstallResult struct {
-	Installed []string `json:"installed"` // files written
-	Skipped   []string `json:"skipped"`   // files already existing (not overwritten)
+	Installed []string `json:"installed"`         // files written (new)
+	Updated   []string `json:"updated,omitempty"` // files updated (stale)
+	Skipped   []string `json:"skipped"`           // files already up-to-date
 }
 
 // InstallPrompts copies the default prompt files embedded in the binary to
-// ~/.pogo/agents/. Existing files are not overwritten unless force is true.
+// ~/.pogo/agents/. Stale files are auto-updated by comparing content hashes.
+// If force is true, all files are overwritten regardless of hash.
 func InstallPrompts(force bool) (*InstallResult, error) {
 	if err := InitPromptDirs(); err != nil {
 		return nil, err
@@ -223,20 +258,30 @@ func InstallPrompts(force bool) (*InstallResult, error) {
 			return os.MkdirAll(destPath, 0755)
 		}
 
-		// Check if destination already exists
-		if !force {
-			if _, err := os.Stat(destPath); err == nil {
-				result.Skipped = append(result.Skipped, rel)
-				return nil
-			}
-		}
-
 		data, err := defaultPrompts.ReadFile(path)
 		if err != nil {
 			return fmt.Errorf("read embedded %s: %w", path, err)
 		}
 
-		if err := os.WriteFile(destPath, data, 0644); err != nil {
+		embeddedHash := contentHash(data)
+
+		// Check if destination already exists
+		if !force {
+			if _, statErr := os.Stat(destPath); statErr == nil {
+				if installedPromptHash(destPath) == embeddedHash {
+					result.Skipped = append(result.Skipped, rel)
+					return nil
+				}
+				// Hash mismatch or no hash — file is stale, update it
+				if err := os.WriteFile(destPath, stampedContent(data), 0644); err != nil {
+					return fmt.Errorf("update %s: %w", destPath, err)
+				}
+				result.Updated = append(result.Updated, rel)
+				return nil
+			}
+		}
+
+		if err := os.WriteFile(destPath, stampedContent(data), 0644); err != nil {
 			return fmt.Errorf("write %s: %w", destPath, err)
 		}
 		result.Installed = append(result.Installed, rel)
