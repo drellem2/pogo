@@ -371,8 +371,9 @@ func (a *Agent) Nudge(message string) error {
 		return fmt.Errorf("agent %q has no PTY", a.Name)
 	}
 
-	// Use \n to trigger submission in Claude Code's TUI.
-	_, err := a.master.WriteString(message + "\n")
+	// Use \r (carriage return) to trigger Enter in the PTY.
+	// PTYs translate \r to the submit/Enter key; \n is just a line feed.
+	_, err := a.master.WriteString(message + "\r")
 	if err != nil {
 		return fmt.Errorf("write to PTY: %w", err)
 	}
