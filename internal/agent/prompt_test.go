@@ -228,6 +228,141 @@ func TestResolveTemplate(t *testing.T) {
 	}
 }
 
+func TestContentHash(t *testing.T) {
+	data := []byte("hello world")
+	h := contentHash(data)
+	if len(h) != 64 { // SHA-256 hex = 64 chars
+		t.Errorf("expected 64 char hash, got %d: %s", len(h), h)
+	}
+	// Same input should produce same hash
+	if contentHash(data) != h {
+		t.Error("hash not deterministic")
+	}
+	// Different input should produce different hash
+	if contentHash([]byte("different")) == h {
+		t.Error("different content produced same hash")
+	}
+}
+
+func TestStampedContent(t *testing.T) {
+	data := []byte("# My Prompt\nDo stuff.\n")
+	stamped := stampedContent(data)
+
+	s := string(stamped)
+	if !strings.HasPrefix(s, "<!-- pogo-prompt-hash: ") {
+		t.Errorf("stamped content should start with hash comment, got: %s", s[:60])
+	}
+	if !strings.Contains(s, "# My Prompt\nDo stuff.\n") {
+		t.Error("stamped content should contain original content")
+	}
+}
+
+func TestInstalledPromptHash(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.md")
+
+	// File with valid hash stamp
+	data := []byte("original content")
+	os.WriteFile(path, stampedContent(data), 0644)
+
+	h := installedPromptHash(path)
+	if h != contentHash(data) {
+		t.Errorf("expected hash %s, got %s", contentHash(data), h)
+	}
+
+	// File without hash stamp
+	os.WriteFile(path, []byte("# No hash here\n"), 0644)
+	if installedPromptHash(path) != "" {
+		t.Error("expected empty hash for unstamped file")
+	}
+
+	// Nonexistent file
+	if installedPromptHash(filepath.Join(dir, "nope.md")) != "" {
+		t.Error("expected empty hash for missing file")
+	}
+}
+
+func TestInstallPromptsUpdatesStaleFiles(t *testing.T) {
+	origHome := os.Getenv("HOME")
+	tmpHome := t.TempDir()
+	os.Setenv("HOME", tmpHome)
+	defer os.Setenv("HOME", origHome)
+
+	// First install — should install files
+	result, err := InstallPrompts(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Installed) == 0 {
+		t.Fatal("expected files to be installed on first run")
+	}
+	if len(result.Updated) != 0 {
+		t.Errorf("expected no updates on first run, got %v", result.Updated)
+	}
+
+	// Second install — same binary, should skip all
+	result2, err := InstallPrompts(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result2.Installed) != 0 {
+		t.Errorf("expected no new installs, got %v", result2.Installed)
+	}
+	if len(result2.Updated) != 0 {
+		t.Errorf("expected no updates, got %v", result2.Updated)
+	}
+	if len(result2.Skipped) != len(result.Installed) {
+		t.Errorf("expected %d skipped, got %d", len(result.Installed), len(result2.Skipped))
+	}
+
+	// Simulate stale file by writing old content to one of the installed files
+	mayorPath := filepath.Join(tmpHome, ".pogo", "agents", "mayor.md")
+	os.WriteFile(mayorPath, []byte("<!-- pogo-prompt-hash: oldhash -->\n# Old mayor prompt\n"), 0644)
+
+	result3, err := InstallPrompts(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result3.Updated) == 0 {
+		t.Error("expected stale file to be updated")
+	}
+	found := false
+	for _, f := range result3.Updated {
+		if f == "mayor.md" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected mayor.md in updated list, got %v", result3.Updated)
+	}
+}
+
+func TestInstallPromptsUpdatesUnstampedFiles(t *testing.T) {
+	origHome := os.Getenv("HOME")
+	tmpHome := t.TempDir()
+	os.Setenv("HOME", tmpHome)
+	defer os.Setenv("HOME", origHome)
+
+	// Create pre-existing files without hash stamps (simulates old install)
+	agentsDir := filepath.Join(tmpHome, ".pogo", "agents")
+	tmplDir := filepath.Join(agentsDir, "templates")
+	os.MkdirAll(tmplDir, 0755)
+	os.WriteFile(filepath.Join(agentsDir, "mayor.md"), []byte("# Old mayor\n"), 0644)
+	os.WriteFile(filepath.Join(tmplDir, "polecat.md"), []byte("# Old polecat\n"), 0644)
+
+	result, err := InstallPrompts(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Files without hash stamps should be treated as stale and updated
+	if len(result.Updated) == 0 {
+		t.Error("expected unstamped files to be updated")
+	}
+	if len(result.Installed) != 0 {
+		t.Errorf("expected no new installs (files existed), got %v", result.Installed)
+	}
+}
+
 func TestInitPromptDirs(t *testing.T) {
 	origHome := os.Getenv("HOME")
 	tmpHome := t.TempDir()
