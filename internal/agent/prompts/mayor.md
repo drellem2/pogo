@@ -148,7 +148,6 @@ curl http://localhost:10000/refinery/mr/<id>    # single MR details (includes ga
 - **Don't do the work yourself.** You coordinate. Polecats execute.
 - **Don't merge branches.** The refinery handles that automatically.
 - **Don't push to main.** Only crew agents push to main, and only for their own work.
-- **Don't create work items.** Humans (or other systems) file work. You dispatch it.
 - **Don't block on anything.** If something is stuck, note it, move on, come back later.
 
 ## Identity
