@@ -2,6 +2,7 @@ package refinery
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -320,6 +321,154 @@ func TestRefineryStartStop(t *testing.T) {
 		// OK
 	case <-time.After(2 * time.Second):
 		t.Fatal("refinery did not stop")
+	}
+}
+
+func TestHistoryPruneByCount(t *testing.T) {
+	dir := t.TempDir()
+	r, err := New(Config{
+		Enabled:       true,
+		PollInterval:  time.Hour,
+		WorktreeDir:   dir,
+		MaxHistoryLen: 3,
+		MaxHistoryAge: -1, // disable age pruning
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Manually add 5 entries to history.
+	for i := 0; i < 5; i++ {
+		mr := &MergeRequest{
+			ID:       fmt.Sprintf("mr-%d", i),
+			Status:   StatusMerged,
+			DoneTime: time.Now(),
+		}
+		r.history = append(r.history, mr)
+		r.byID[mr.ID] = mr
+	}
+	r.pruneHistoryLocked()
+
+	if len(r.history) != 3 {
+		t.Fatalf("expected 3 history entries, got %d", len(r.history))
+	}
+	// Should keep the last 3 (mr-2, mr-3, mr-4).
+	if r.history[0].ID != "mr-2" {
+		t.Errorf("expected first entry mr-2, got %s", r.history[0].ID)
+	}
+	// Pruned entries should be removed from byID.
+	if r.Get("mr-0") != nil {
+		t.Error("expected mr-0 to be pruned from byID")
+	}
+	if r.Get("mr-1") != nil {
+		t.Error("expected mr-1 to be pruned from byID")
+	}
+	// Kept entries should still be in byID.
+	if r.Get("mr-4") == nil {
+		t.Error("expected mr-4 to still be in byID")
+	}
+}
+
+func TestHistoryPruneByAge(t *testing.T) {
+	dir := t.TempDir()
+	r, err := New(Config{
+		Enabled:       true,
+		PollInterval:  time.Hour,
+		WorktreeDir:   dir,
+		MaxHistoryLen: -1, // disable count pruning
+		MaxHistoryAge: 2 * time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	r.nowFunc = func() time.Time { return now }
+
+	// Add entries at different ages.
+	times := []time.Duration{
+		-3 * time.Hour,             // old, should be pruned
+		-2*time.Hour - time.Minute, // old, should be pruned
+		-1 * time.Hour,             // recent, keep
+		-30 * time.Minute,          // recent, keep
+	}
+	for i, offset := range times {
+		mr := &MergeRequest{
+			ID:       fmt.Sprintf("mr-%d", i),
+			Status:   StatusMerged,
+			DoneTime: now.Add(offset),
+		}
+		r.history = append(r.history, mr)
+		r.byID[mr.ID] = mr
+	}
+	r.pruneHistoryLocked()
+
+	if len(r.history) != 2 {
+		t.Fatalf("expected 2 history entries, got %d", len(r.history))
+	}
+	if r.history[0].ID != "mr-2" {
+		t.Errorf("expected first entry mr-2, got %s", r.history[0].ID)
+	}
+	if r.Get("mr-0") != nil {
+		t.Error("expected mr-0 to be pruned")
+	}
+	if r.Get("mr-3") == nil {
+		t.Error("expected mr-3 to be kept")
+	}
+}
+
+func TestHistoryPruneBothLimits(t *testing.T) {
+	dir := t.TempDir()
+	r, err := New(Config{
+		Enabled:       true,
+		PollInterval:  time.Hour,
+		WorktreeDir:   dir,
+		MaxHistoryLen: 5,
+		MaxHistoryAge: 1 * time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	r.nowFunc = func() time.Time { return now }
+
+	// 8 entries: 3 old (>1h), 5 recent. Age prunes 3, then count prunes none (5 <= 5).
+	for i := 0; i < 8; i++ {
+		age := -30 * time.Minute
+		if i < 3 {
+			age = -2 * time.Hour
+		}
+		mr := &MergeRequest{
+			ID:       fmt.Sprintf("mr-%d", i),
+			Status:   StatusMerged,
+			DoneTime: now.Add(age),
+		}
+		r.history = append(r.history, mr)
+		r.byID[mr.ID] = mr
+	}
+	r.pruneHistoryLocked()
+
+	if len(r.history) != 5 {
+		t.Fatalf("expected 5 history entries, got %d", len(r.history))
+	}
+}
+
+func TestHistoryDefaultLimits(t *testing.T) {
+	dir := t.TempDir()
+	r, err := New(Config{
+		Enabled:      true,
+		PollInterval: time.Hour,
+		WorktreeDir:  dir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.cfg.MaxHistoryLen != DefaultMaxHistoryLen {
+		t.Errorf("expected default MaxHistoryLen=%d, got %d", DefaultMaxHistoryLen, r.cfg.MaxHistoryLen)
+	}
+	if r.cfg.MaxHistoryAge != DefaultMaxHistoryAge {
+		t.Errorf("expected default MaxHistoryAge=%s, got %s", DefaultMaxHistoryAge, r.cfg.MaxHistoryAge)
 	}
 }
 
