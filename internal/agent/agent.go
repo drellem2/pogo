@@ -141,12 +141,14 @@ func ProcessName(agentType AgentType, name string) string {
 
 // SpawnRequest contains everything needed to spawn an agent.
 type SpawnRequest struct {
-	Name       string
-	Type       AgentType
-	Command    []string // e.g. ["claude", "--append-system-prompt", "<prompt content>"]
-	Env        []string // additional env vars
-	PromptFile string   // path to prompt file (optional)
-	Dir        string   // working directory for the process (optional)
+	Name        string
+	Type        AgentType
+	Command     []string // e.g. ["claude", "--append-system-prompt", "<prompt content>"]
+	Env         []string // additional env vars
+	PromptFile  string   // path to prompt file (optional)
+	Dir         string   // working directory for the process (optional)
+	WorktreeDir string   // git worktree path for polecat isolation (optional)
+	SourceRepo  string   // original repo path for worktree removal (optional)
 }
 
 // Spawn starts a new agent process with a PTY.
@@ -194,6 +196,8 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 		Status:      StatusRunning,
 		PromptFile:  req.PromptFile,
 		Dir:         req.Dir,
+		WorktreeDir: req.WorktreeDir,
+		SourceRepo:  req.SourceRepo,
 		master:      master,
 		cmd:         cmd,
 		outputBuf:   NewRingBuffer(64 * 1024), // 64KB rolling buffer
