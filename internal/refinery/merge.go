@@ -1,6 +1,7 @@
 package refinery
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -11,24 +12,51 @@ import (
 
 // processMerge runs the full merge pipeline for a single MR:
 // 1. Ensure worktree exists for the repo
-// 2. Fetch the branch
-// 3. Checkout branch and run quality gates
+// 2. Fetch, checkout branch, rebase onto latest target
+// 3. Run quality gates on rebased code
 // 4. Fast-forward merge to target ref
 // 5. Push
+//
+// If another polecat merges to the target between our rebase and push,
+// the ff-only merge or push will fail. We retry up to 3 times with a
+// fresh fetch+rebase+gates cycle to handle this race.
 func (r *Refinery) processMerge(mr *MergeRequest) error {
 	wtDir, err := r.ensureWorktree(mr.RepoPath)
 	if err != nil {
 		return fmt.Errorf("worktree setup: %w", err)
 	}
 
+	const maxAttempts = 3
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if attempt > 1 {
+			log.Printf("refinery: MR %s step=retry attempt=%d/%d", mr.ID, attempt, maxAttempts)
+		}
+
+		err := r.attemptMerge(wtDir, mr, attempt)
+		if err == nil {
+			return nil
+		}
+
+		// Only retry on merge or push failures (target moved)
+		if attempt < maxAttempts && isRetryable(err) {
+			log.Printf("refinery: MR %s attempt %d failed (will retry): %v", mr.ID, attempt, err)
+			continue
+		}
+		return err
+	}
+	return fmt.Errorf("merge failed after %d attempts", maxAttempts)
+}
+
+// attemptMerge runs a single fetch→rebase→gates→merge→push cycle.
+func (r *Refinery) attemptMerge(wtDir string, mr *MergeRequest, attempt int) error {
 	// Fetch latest from origin
-	log.Printf("refinery: MR %s step=fetch branch=%s", mr.ID, mr.Branch)
+	log.Printf("refinery: MR %s step=fetch branch=%s attempt=%d", mr.ID, mr.Branch, attempt)
 	if output, err := gitCmdOutput(wtDir, "fetch", "origin"); err != nil {
 		return fmt.Errorf("fetch: %s: %w", output, err)
 	}
 
-	// Checkout the branch to test
-	log.Printf("refinery: MR %s step=checkout-branch branch=%s", mr.ID, mr.Branch)
+	// Checkout the branch fresh from origin
+	log.Printf("refinery: MR %s step=checkout-branch branch=%s attempt=%d", mr.ID, mr.Branch, attempt)
 	if output, err := gitCmdOutput(wtDir, "checkout", "-B", mr.Branch, "origin/"+mr.Branch); err != nil {
 		return fmt.Errorf("checkout branch: %s: %w", output, err)
 	}
@@ -36,7 +64,7 @@ func (r *Refinery) processMerge(mr *MergeRequest) error {
 	// Rebase onto latest target so the branch is a direct descendant of main.
 	// Polecat branches fork from main at spawn time and may be behind by the
 	// time they reach the refinery.
-	log.Printf("refinery: MR %s step=rebase target=%s", mr.ID, mr.TargetRef)
+	log.Printf("refinery: MR %s step=rebase target=%s attempt=%d", mr.ID, mr.TargetRef, attempt)
 	if output, err := gitCmdOutput(wtDir, "rebase", "origin/"+mr.TargetRef); err != nil {
 		// Abort the failed rebase to leave worktree in a clean state
 		gitCmdOutput(wtDir, "rebase", "--abort")
@@ -44,7 +72,7 @@ func (r *Refinery) processMerge(mr *MergeRequest) error {
 	}
 
 	// Run quality gates (on the rebased branch — tests what will actually land)
-	log.Printf("refinery: MR %s step=quality-gates", mr.ID)
+	log.Printf("refinery: MR %s step=quality-gates attempt=%d", mr.ID, attempt)
 	gateOutput, err := r.runQualityGates(wtDir, mr.RepoPath)
 	mr.GateOutput = gateOutput
 	if err != nil {
@@ -52,30 +80,44 @@ func (r *Refinery) processMerge(mr *MergeRequest) error {
 	}
 
 	// Checkout target ref for merge
-	log.Printf("refinery: MR %s step=checkout-target target=%s", mr.ID, mr.TargetRef)
+	log.Printf("refinery: MR %s step=checkout-target target=%s attempt=%d", mr.ID, mr.TargetRef, attempt)
 	if output, err := gitCmdOutput(wtDir, "checkout", mr.TargetRef); err != nil {
 		return fmt.Errorf("checkout target: %s: %w", output, err)
 	}
 
 	// Pull latest target
-	log.Printf("refinery: MR %s step=pull-target target=%s", mr.ID, mr.TargetRef)
+	log.Printf("refinery: MR %s step=pull-target target=%s attempt=%d", mr.ID, mr.TargetRef, attempt)
 	if output, err := gitCmdOutput(wtDir, "pull", "--ff-only", "origin", mr.TargetRef); err != nil {
 		return fmt.Errorf("pull target: %s: %w", output, err)
 	}
 
-	// Fast-forward merge — guaranteed to work after rebase
-	log.Printf("refinery: MR %s step=merge branch=%s", mr.ID, mr.Branch)
+	// Fast-forward merge — guaranteed to work if target hasn't moved since fetch
+	log.Printf("refinery: MR %s step=merge branch=%s attempt=%d", mr.ID, mr.Branch, attempt)
 	if output, err := gitCmdOutput(wtDir, "merge", "--ff-only", mr.Branch); err != nil {
-		return fmt.Errorf("merge (ff-only): %s: %w", output, err)
+		return &retryableError{fmt.Errorf("merge (ff-only): %s: %w", output, err)}
 	}
 
 	// Push to origin
-	log.Printf("refinery: MR %s step=push target=%s", mr.ID, mr.TargetRef)
+	log.Printf("refinery: MR %s step=push target=%s attempt=%d", mr.ID, mr.TargetRef, attempt)
 	if output, err := gitCmdOutput(wtDir, "push", "origin", mr.TargetRef); err != nil {
-		return fmt.Errorf("push: %s: %w", output, err)
+		return &retryableError{fmt.Errorf("push: %s: %w", output, err)}
 	}
 
 	return nil
+}
+
+// retryableError wraps errors from merge/push failures that can be retried
+// with a fresh rebase (e.g. target moved because another polecat merged first).
+type retryableError struct {
+	err error
+}
+
+func (e *retryableError) Error() string { return e.err.Error() }
+func (e *retryableError) Unwrap() error { return e.err }
+
+func isRetryable(err error) bool {
+	var re *retryableError
+	return errors.As(err, &re)
 }
 
 // ensureWorktree creates or validates a worktree for the given repo.
