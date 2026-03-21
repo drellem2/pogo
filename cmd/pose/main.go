@@ -14,13 +14,14 @@ import (
 
 	"github.com/drellem2/pogo/internal/cli"
 	"github.com/drellem2/pogo/internal/client"
+	"github.com/drellem2/pogo/internal/version"
 )
 
 func main() {
 	var jsonOutput bool
 	var searchAll bool
 
-	var rootCmd = &cobra.Command{Use: "pose"}
+	var rootCmd = &cobra.Command{Use: "pose", Version: version.Version}
 	rootCmd.Flags().BoolP("list", "l", false, "List all files with matching lines")
 	rootCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSON format")
 	rootCmd.Flags().BoolVar(&searchAll, "all", false, "Search across all known projects")

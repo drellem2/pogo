@@ -289,11 +289,20 @@ func (r *Registry) handleStart(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	// Give crew agents a stable working directory under ~/.pogo/agents/<name>/
+	home, _ := os.UserHomeDir()
+	agentDir := filepath.Join(home, ".pogo", "agents", startReq.Name)
+	if err := os.MkdirAll(agentDir, 0755); err != nil {
+		http.Error(w, fmt.Sprintf("failed to create agent dir: %v", err), http.StatusInternalServerError)
+		return
+	}
+
 	a, err := r.Spawn(SpawnRequest{
 		Name:       startReq.Name,
 		Type:       TypeCrew,
 		Command:    []string{"claude", "--permission-mode", "bypassPermissions", "--append-system-prompt", string(promptContent)},
 		PromptFile: promptFile,
+		Dir:        agentDir,
 	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusConflict)
@@ -417,7 +426,7 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		go func() {
 			time.Sleep(2 * time.Second)
 			prompt := buildPolecatPrompt(spawnReq)
-			a.Nudge(prompt + "\n")
+			a.Nudge(prompt)
 		}()
 	}
 
