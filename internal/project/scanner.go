@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -84,6 +85,11 @@ func (s *Scanner) watchParent(projectPath string) {
 		return
 	}
 
+	// Never watch inside ~/.pogo (pogo's own data directory)
+	if isInsidePogoData(parent) {
+		return
+	}
+
 	// Check for .pogo_stop in the parent directory
 	if fileExists(filepath.Join(parent, ".pogo_stop")) {
 		logger.Info("scanner: skipping parent dir with .pogo_stop", "path", parent)
@@ -131,6 +137,11 @@ func (s *Scanner) handleCreate(path string) {
 		return
 	}
 
+	// Never index anything inside ~/.pogo (pogo's own data directory)
+	if isInsidePogoData(path) {
+		return
+	}
+
 	// Check for .pogo_stop in the new directory
 	if fileExists(filepath.Join(path, ".pogo_stop")) {
 		return
@@ -168,4 +179,25 @@ func (s *Scanner) handleCreate(path string) {
 func fileExists(path string) bool {
 	_, err := os.Lstat(path)
 	return err == nil
+}
+
+// pogoDataDir returns the ~/.pogo directory path.
+func pogoDataDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".pogo")
+}
+
+// isInsidePogoData reports whether path is inside the ~/.pogo directory.
+// Pogo's own data directory should never be indexed as a project.
+func isInsidePogoData(path string) bool {
+	dataDir := pogoDataDir()
+	if dataDir == "" {
+		return false
+	}
+	clean := filepath.Clean(path)
+	// Check if path is dataDir itself or a child of it
+	return clean == dataDir || strings.HasPrefix(clean, dataDir+string(filepath.Separator))
 }
