@@ -317,6 +317,16 @@ func main() {
 		} else {
 			mergeQueue.SetOnMerged(func(mr *refinery.MergeRequest) {
 				log.Printf("refinery: merged %s (branch=%s, author=%s)", mr.ID, mr.Branch, mr.Author)
+
+				// Auto-archive done work items after successful merge.
+				// The polecat marks its item done before submitting to the
+				// refinery, so by the time we reach here the item is in done/.
+				// Archive with --days=0 to move it to archive/ immediately.
+				if result, err := client.ArchiveMGDoneItems(); err != nil {
+					log.Printf("refinery: auto-archive failed: %v", err)
+				} else if result != "" {
+					log.Printf("refinery: %s", result)
+				}
 			})
 			mergeQueue.SetOnFailed(func(mr *refinery.MergeRequest) {
 				log.Printf("refinery: failed %s (branch=%s, author=%s, error=%s)", mr.ID, mr.Branch, mr.Author, mr.Error)
