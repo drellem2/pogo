@@ -397,12 +397,14 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 	}
 
 	a, err := r.Spawn(SpawnRequest{
-		Name:       spawnReq.Name,
-		Type:       TypePolecat,
-		Command:    cmd,
-		Env:        env,
-		PromptFile: promptFile,
-		Dir:        worktreeDir,
+		Name:        spawnReq.Name,
+		Type:        TypePolecat,
+		Command:     cmd,
+		Env:         env,
+		PromptFile:  promptFile,
+		Dir:         worktreeDir,
+		WorktreeDir: worktreeDir,
+		SourceRepo:  sourceRepo,
 	})
 	if err != nil {
 		os.Remove(promptFile) // Clean up temp file on spawn failure
@@ -422,10 +424,6 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 			a.Nudge(fmt.Sprintf("Look at the system prompt and complete the steps for this work item: %s", spawnReq.Id))
 		}()
 	}
-
-	// Store worktree info on the agent for cleanup
-	a.WorktreeDir = worktreeDir
-	a.SourceRepo = sourceRepo
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
