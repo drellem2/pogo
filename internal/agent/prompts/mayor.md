@@ -68,13 +68,23 @@ Before spawning, check that no polecat is already working on this item:
 pogo agent list
 ```
 
-### 3. Check agent health
+### 3. Check agent health and clean up completed polecats
 
 ```bash
 pogo agent list
 ```
 
 Look for:
+- **Completed polecats**: Polecats do NOT exit on their own after finishing work. They remain running until you stop them. To detect completion, check both conditions:
+  1. The work item is no longer in `claimed` status (the polecat ran `mg done`)
+  2. The refinery history shows the submission merged (`curl http://localhost:10000/refinery/history`)
+
+  Once both conditions are met, stop the polecat:
+  ```bash
+  pogo agent stop <name>
+  ```
+  Check for completed polecats on every cycle — leaving them running wastes resources.
+
 - **Stuck polecats**: Running much longer than expected with no progress. Nudge them:
   ```bash
   pogo nudge <name> "status check — are you stuck?"
