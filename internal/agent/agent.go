@@ -92,6 +92,13 @@ type Agent struct {
 	mu sync.Mutex
 }
 
+// GetStatus returns the agent's current status, safe for concurrent use.
+func (a *Agent) GetStatus() AgentStatus {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.Status
+}
+
 // Registry is the in-memory agent registry. Thread-safe.
 type Registry struct {
 	mu     sync.RWMutex
@@ -364,10 +371,8 @@ func (a *Agent) Nudge(message string) error {
 		return fmt.Errorf("agent %q has no PTY", a.Name)
 	}
 
-	// Use \r (carriage return) — Claude Code's TUI runs in raw terminal mode
-	// where Enter sends \r, not \n. A \n gets treated as a literal newline in
-	// the input editor instead of triggering submission.
-	_, err := a.master.WriteString(message + "\r")
+	// Use \n to trigger submission in Claude Code's TUI.
+	_, err := a.master.WriteString(message + "\n")
 	if err != nil {
 		return fmt.Errorf("write to PTY: %w", err)
 	}
