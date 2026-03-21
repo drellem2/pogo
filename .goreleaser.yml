@@ -114,6 +114,29 @@ changelog:
     - title: "Others"
       order: 999
 
+brews:
+  - ids:
+      - pogo
+      - pogod
+      - lsp
+      - pose
+    repository:
+      owner: drellem2
+      name: homebrew-tap
+    commit_author:
+      name: goreleaserbot
+      email: bot@goreleaser.com
+    homepage: "https://github.com/drellem2/pogo"
+    description: "Code intelligence daemon for multi-repo discovery"
+    license: "MIT"
+    install: |
+      bin.install "pogo"
+      bin.install "pogod"
+      bin.install "lsp"
+      bin.install "pose"
+    test: |
+      system "#{bin}/pogo", "version"
+
 release:
   github:
     owner: drellem2
