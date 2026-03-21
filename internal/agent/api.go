@@ -372,8 +372,11 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		return
 	}
 
-	// Build command — interactive mode so Claude can actually run commands
-	cmd := []string{"claude", "--permission-mode", "bypassPermissions", "--append-system-prompt", string(expandedContent)}
+	// Build command — interactive mode so Claude can actually run commands.
+	// Use --bare to isolate polecats from shared project memories: skips auto-memory,
+	// CLAUDE.md auto-discovery, hooks, and other persistent state. Context is provided
+	// explicitly via --append-system-prompt and --add-dir.
+	cmd := []string{"claude", "--bare", "--permission-mode", "bypassPermissions", "--append-system-prompt", string(expandedContent)}
 
 	// Ensure POGO_ROLE is set for mg prime and role detection
 	env := append(spawnReq.Env, "POGO_ROLE=polecat")
@@ -400,6 +403,10 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 			return
 		}
 		log.Printf("polecat %s: created worktree at %s (branch %s)", spawnReq.Name, worktreeDir, branchName)
+
+		// With --bare, CLAUDE.md is not auto-discovered. Add the worktree dir
+		// explicitly so project instructions (CLAUDE.md) are still loaded.
+		cmd = append(cmd, "--add-dir", worktreeDir)
 	}
 
 	a, err := r.Spawn(SpawnRequest{
