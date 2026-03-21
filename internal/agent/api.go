@@ -282,13 +282,6 @@ func (r *Registry) handleStart(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// Read prompt file and pass via --append-system-prompt
-	promptContent, err := os.ReadFile(promptFile)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("failed to read prompt file: %v", err), http.StatusInternalServerError)
-		return
-	}
-
 	// Give crew agents a stable working directory under ~/.pogo/agents/<name>/
 	home, _ := os.UserHomeDir()
 	agentDir := filepath.Join(home, ".pogo", "agents", startReq.Name)
@@ -303,7 +296,7 @@ func (r *Registry) handleStart(w http.ResponseWriter, req *http.Request) {
 		// DO NOT change --dangerously-skip-permissions. Polecats have regressed this
 		// flag twice. --permission-mode bypassPermissions does NOT work without
 		// additional setup. This flag is required for autonomous agent execution.
-		Command:    []string{"claude", "--dangerously-skip-permissions", "--append-system-prompt", string(promptContent)},
+		Command:    []string{"claude", "--dangerously-skip-permissions", "--append-system-prompt-file", promptFile},
 		PromptFile: promptFile,
 		Dir:        agentDir,
 	})
@@ -367,20 +360,12 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		return
 	}
 
-	// Read expanded prompt and pass via --append-system-prompt
-	expandedContent, err := os.ReadFile(promptFile)
-	if err != nil {
-		os.Remove(promptFile)
-		http.Error(w, fmt.Sprintf("failed to read expanded prompt: %v", err), http.StatusInternalServerError)
-		return
-	}
-
 	// Build command — interactive mode so Claude can actually run commands.
 	// NOTE: --bare is currently broken due to an Anthropic issue — omitting it
 	// until the upstream fix lands. Without --bare, polecats will pick up
 	// auto-memory, CLAUDE.md auto-discovery, hooks, etc.
 	// DO NOT change --dangerously-skip-permissions. See comment in handleStart.
-	cmd := []string{"claude", "--dangerously-skip-permissions", "--append-system-prompt", string(expandedContent)}
+	cmd := []string{"claude", "--dangerously-skip-permissions", "--append-system-prompt-file", promptFile}
 
 	// Ensure POGO_ROLE is set for mg prime and role detection
 	env := append(spawnReq.Env, "POGO_ROLE=polecat")
