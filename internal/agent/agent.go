@@ -371,7 +371,7 @@ func (a *Agent) Nudge(message string) error {
 		return fmt.Errorf("agent %q has no PTY", a.Name)
 	}
 
-	_, err := a.master.WriteString(message + "\r\n")
+	_, err := a.master.WriteString(message + "\r")
 	if err != nil {
 		return fmt.Errorf("write to PTY: %w", err)
 	}

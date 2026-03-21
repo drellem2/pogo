@@ -313,7 +313,7 @@ func (r *Registry) handleStart(w http.ResponseWriter, req *http.Request) {
 	// Claude Code interactive mode waits for input — this sends the first message.
 	go func() {
 		time.Sleep(2 * time.Second)
-		a.Nudge("You are now running. Begin your coordination loop.\n")
+		a.Nudge("You are now running. Begin your coordination loop.")
 	}()
 
 	w.Header().Set("Content-Type", "application/json")
