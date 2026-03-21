@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -305,15 +304,10 @@ func (r *Registry) handleStart(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// Nudge crew agent once it's ready to accept input.
+	// Nudge crew agent after a brief delay to kick off execution.
 	// Claude Code interactive mode waits for input — this sends the first message.
-	// WaitReady adapts to actual startup time instead of a hardcoded sleep.
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), DefaultReadyTimeout)
-		defer cancel()
-		if err := a.WaitReady(ctx, DefaultIdleThreshold); err != nil {
-			log.Printf("agent %s: startup wait failed, nudging anyway: %v", a.Name, err)
-		}
+		time.Sleep(10 * time.Second)
 		a.Nudge("You are now running. Begin your coordination loop.")
 	}()
 
@@ -420,16 +414,11 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		return
 	}
 
-	// Nudge polecat once it's ready to accept input.
+	// Nudge polecat after a brief delay to kick off execution.
 	// Claude Code interactive mode waits for input — this sends the initial prompt.
-	// WaitReady adapts to actual startup time instead of a hardcoded sleep.
 	if spawnReq.Task != "" {
 		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), DefaultReadyTimeout)
-			defer cancel()
-			if err := a.WaitReady(ctx, DefaultIdleThreshold); err != nil {
-				log.Printf("polecat %s: startup wait failed, nudging anyway: %v", spawnReq.Name, err)
-			}
+			time.Sleep(10 * time.Second)
 			a.Nudge(fmt.Sprintf("Look at the system prompt and complete the steps for this work item: %s", spawnReq.Id))
 		}()
 	}
