@@ -39,7 +39,7 @@ func TestSpawnAndNudge(t *testing.T) {
 	}
 
 	// Nudge: write to the agent's PTY
-	err = agent.Nudge("hello\n")
+	err = agent.Nudge("hello")
 	if err != nil {
 		t.Fatalf("Nudge: %v", err)
 	}
