@@ -24,6 +24,9 @@ Follow these steps exactly, in order. Skipping any step is a failure.
    ```
 
 2. **Do the work.** Stay focused on the task described above. You are already in your isolated worktree on branch `polecat-{{.Id}}`.
+   - **Write or update tests** for any code you change. If the repo has existing tests, follow the same patterns.
+   - **Run existing tests** (e.g. `./test.sh`, `go test ./...`, `npm test`) before committing to make sure nothing is broken.
+   - **Update documentation** (README, inline docs, help text) if your changes affect user-facing behavior.
 
 3. **Commit and push your branch:**
    ```bash

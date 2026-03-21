@@ -127,6 +127,15 @@ The refinery then fetches the branch, runs quality gates (build.sh/test.sh), and
 
 You don't need to interact with the refinery directly. Just be aware that merge failures may require you to spawn a new polecat to fix the issue.
 
+### Work item archival
+
+Once a ticket's code is merged, the refinery archives the work item automatically — no action needed from you.
+
+If a work item has no code change (e.g., an investigation or evaluation task), the refinery won't archive it. In that case, archive it yourself once the work is complete:
+```bash
+mg archive <id>
+```
+
 ### Refinery logs
 
 When diagnosing merge failures, the refinery logs every pipeline step with structured key=value fields (MR ID, branch, step name). Logs are written to pogod's stderr:

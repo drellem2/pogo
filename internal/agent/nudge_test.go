@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -148,6 +149,77 @@ func TestNudgeExitedAgent(t *testing.T) {
 	err = a.NudgeWithMode("hello", NudgeWaitIdle, 5*time.Second)
 	if err == nil {
 		t.Error("expected error nudging exited agent in wait-idle mode")
+	}
+}
+
+func TestWaitReady(t *testing.T) {
+	tmpDir := t.TempDir()
+	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	defer reg.StopAll(2 * time.Second)
+
+	// Spawn a cat process — it produces no output until we write to it,
+	// then echoes back immediately.
+	a, err := reg.Spawn(SpawnRequest{
+		Name:    "ready-test",
+		Type:    TypePolecat,
+		Command: []string{"cat"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// WaitReady should block because no output has been produced yet.
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	err = a.WaitReady(ctx, 200*time.Millisecond)
+	if err == nil {
+		t.Error("expected WaitReady to time out with no output, but it succeeded")
+	}
+
+	// Now generate output, then WaitReady should succeed once it goes idle.
+	a.Nudge("startup output")
+	time.Sleep(100 * time.Millisecond)
+
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel2()
+	start := time.Now()
+	err = a.WaitReady(ctx2, 500*time.Millisecond)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("WaitReady after output: %v", err)
+	}
+	// Should have waited at least the idle threshold
+	if elapsed < 500*time.Millisecond {
+		t.Errorf("expected to wait at least 500ms for idle, but only waited %v", elapsed)
+	}
+}
+
+func TestWaitReadyExitedAgent(t *testing.T) {
+	tmpDir := t.TempDir()
+	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+
+	// Spawn an agent that exits immediately without output
+	a, err := reg.Spawn(SpawnRequest{
+		Name:    "ready-exit-test",
+		Type:    TypePolecat,
+		Command: []string{"true"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-a.Done()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err = a.WaitReady(ctx, 200*time.Millisecond)
+	if err == nil {
+		t.Error("expected error from WaitReady on exited agent")
 	}
 }
 

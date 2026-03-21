@@ -624,6 +624,40 @@ Stale files are auto-updated when the embedded version changes. Use --force to o
 		},
 	}
 
+	// Create crew prompt
+	var createPromptForce bool
+	var cmdAgentPromptCreate = &cobra.Command{
+		Use:   "create <name>",
+		Short: "Create a new crew agent prompt file",
+		Long: `Scaffold a new crew agent prompt file at ~/.pogo/agents/crew/<name>.md.
+
+Creates the file with a default template that you can customize. Use --force to
+overwrite an existing prompt file.
+
+Example:
+  pogo agent prompt create reviewer`,
+		Args: cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			name := args[0]
+			path, err := agent.CreateCrewPrompt(name, createPromptForce)
+			if err != nil {
+				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+			}
+			if jsonOutput {
+				cli.PrintJSON(map[string]string{
+					"status": "created",
+					"name":   name,
+					"path":   path,
+				})
+			} else {
+				fmt.Printf("Created crew prompt: %s\n", path)
+				fmt.Println("Edit the file to customize your agent's behavior, then start it with:")
+				fmt.Printf("  pogo agent start %s\n", name)
+			}
+		},
+	}
+	cmdAgentPromptCreate.Flags().BoolVar(&createPromptForce, "force", false, "Overwrite existing prompt file")
+
 	// Spawn polecat from template
 	var spawnPolecatTemplate string
 	var spawnPolecatTask string
@@ -924,6 +958,7 @@ The path is resolved to an absolute path and the git root is discovered automati
 	cmdAgentPrompt.AddCommand(cmdAgentPromptInit)
 	cmdAgentPrompt.AddCommand(cmdAgentPromptInstall)
 	cmdAgentPrompt.AddCommand(cmdAgentPromptShow)
+	cmdAgentPrompt.AddCommand(cmdAgentPromptCreate)
 	cmdAgent.AddCommand(cmdAgentPrompt)
 	rootCmd.AddCommand(cmdAgent)
 	rootCmd.AddCommand(cmdNudge)
