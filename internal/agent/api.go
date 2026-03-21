@@ -300,7 +300,10 @@ func (r *Registry) handleStart(w http.ResponseWriter, req *http.Request) {
 	a, err := r.Spawn(SpawnRequest{
 		Name:       startReq.Name,
 		Type:       TypeCrew,
-		Command:    []string{"claude", "--permission-mode", "bypassPermissions", "--append-system-prompt", string(promptContent)},
+		// DO NOT change --dangerously-skip-permissions. Polecats have regressed this
+		// flag twice. --permission-mode bypassPermissions does NOT work without
+		// additional setup. This flag is required for autonomous agent execution.
+		Command:    []string{"claude", "--dangerously-skip-permissions", "--append-system-prompt", string(promptContent)},
 		PromptFile: promptFile,
 		Dir:        agentDir,
 	})
@@ -376,7 +379,8 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 	// Use --bare to isolate polecats from shared project memories: skips auto-memory,
 	// CLAUDE.md auto-discovery, hooks, and other persistent state. Context is provided
 	// explicitly via --append-system-prompt and --add-dir.
-	cmd := []string{"claude", "--bare", "--permission-mode", "bypassPermissions", "--append-system-prompt", string(expandedContent)}
+	// DO NOT change --dangerously-skip-permissions. See comment in handleStart.
+	cmd := []string{"claude", "--bare", "--dangerously-skip-permissions", "--append-system-prompt", string(expandedContent)}
 
 	// Ensure POGO_ROLE is set for mg prime and role detection
 	env := append(spawnReq.Env, "POGO_ROLE=polecat")
