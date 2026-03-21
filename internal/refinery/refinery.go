@@ -254,10 +254,10 @@ func (r *Refinery) processNext() {
 	if err != nil {
 		mr.Status = StatusFailed
 		mr.Error = err.Error()
-		log.Printf("refinery: MR %s failed: %v", mr.ID, err)
+		log.Printf("refinery: REJECTED MR %s branch=%s author=%s reason=%v", mr.ID, mr.Branch, mr.Author, err)
 	} else {
 		mr.Status = StatusMerged
-		log.Printf("refinery: MR %s merged successfully", mr.ID)
+		log.Printf("refinery: MR %s merged successfully branch=%s author=%s", mr.ID, mr.Branch, mr.Author)
 	}
 	r.history = append(r.history, mr)
 	onMerged := r.onMerged

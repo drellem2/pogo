@@ -2,6 +2,7 @@ package refinery
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,23 +22,29 @@ func (r *Refinery) processMerge(mr *MergeRequest) error {
 	}
 
 	// Fetch latest from origin
-	if err := gitCmd(wtDir, "fetch", "origin"); err != nil {
-		return fmt.Errorf("fetch: %w", err)
+	log.Printf("refinery: MR %s step=fetch branch=%s", mr.ID, mr.Branch)
+	if output, err := gitCmdOutput(wtDir, "fetch", "origin"); err != nil {
+		return fmt.Errorf("fetch: %s: %w", output, err)
 	}
 
 	// Checkout the branch to test
-	if err := gitCmd(wtDir, "checkout", "-B", mr.Branch, "origin/"+mr.Branch); err != nil {
-		return fmt.Errorf("checkout branch: %w", err)
+	log.Printf("refinery: MR %s step=checkout-branch branch=%s", mr.ID, mr.Branch)
+	if output, err := gitCmdOutput(wtDir, "checkout", "-B", mr.Branch, "origin/"+mr.Branch); err != nil {
+		return fmt.Errorf("checkout branch: %s: %w", output, err)
 	}
 
 	// Rebase onto latest target so the branch is a direct descendant of main.
 	// Polecat branches fork from main at spawn time and may be behind by the
 	// time they reach the refinery.
-	if err := gitCmd(wtDir, "rebase", "origin/"+mr.TargetRef); err != nil {
-		return fmt.Errorf("rebase onto %s: %w", mr.TargetRef, err)
+	log.Printf("refinery: MR %s step=rebase target=%s", mr.ID, mr.TargetRef)
+	if output, err := gitCmdOutput(wtDir, "rebase", "origin/"+mr.TargetRef); err != nil {
+		// Abort the failed rebase to leave worktree in a clean state
+		gitCmdOutput(wtDir, "rebase", "--abort")
+		return fmt.Errorf("rebase onto %s: %s: %w", mr.TargetRef, output, err)
 	}
 
 	// Run quality gates (on the rebased branch — tests what will actually land)
+	log.Printf("refinery: MR %s step=quality-gates", mr.ID)
 	gateOutput, err := r.runQualityGates(wtDir, mr.RepoPath)
 	mr.GateOutput = gateOutput
 	if err != nil {
@@ -45,23 +52,27 @@ func (r *Refinery) processMerge(mr *MergeRequest) error {
 	}
 
 	// Checkout target ref for merge
-	if err := gitCmd(wtDir, "checkout", mr.TargetRef); err != nil {
-		return fmt.Errorf("checkout target: %w", err)
+	log.Printf("refinery: MR %s step=checkout-target target=%s", mr.ID, mr.TargetRef)
+	if output, err := gitCmdOutput(wtDir, "checkout", mr.TargetRef); err != nil {
+		return fmt.Errorf("checkout target: %s: %w", output, err)
 	}
 
 	// Pull latest target
-	if err := gitCmd(wtDir, "pull", "--ff-only", "origin", mr.TargetRef); err != nil {
-		return fmt.Errorf("pull target: %w", err)
+	log.Printf("refinery: MR %s step=pull-target target=%s", mr.ID, mr.TargetRef)
+	if output, err := gitCmdOutput(wtDir, "pull", "--ff-only", "origin", mr.TargetRef); err != nil {
+		return fmt.Errorf("pull target: %s: %w", output, err)
 	}
 
 	// Fast-forward merge — guaranteed to work after rebase
-	if err := gitCmd(wtDir, "merge", "--ff-only", mr.Branch); err != nil {
-		return fmt.Errorf("merge (ff-only): %w", err)
+	log.Printf("refinery: MR %s step=merge branch=%s", mr.ID, mr.Branch)
+	if output, err := gitCmdOutput(wtDir, "merge", "--ff-only", mr.Branch); err != nil {
+		return fmt.Errorf("merge (ff-only): %s: %w", output, err)
 	}
 
 	// Push to origin
-	if err := gitCmd(wtDir, "push", "origin", mr.TargetRef); err != nil {
-		return fmt.Errorf("push: %w", err)
+	log.Printf("refinery: MR %s step=push target=%s", mr.ID, mr.TargetRef)
+	if output, err := gitCmdOutput(wtDir, "push", "origin", mr.TargetRef); err != nil {
+		return fmt.Errorf("push: %s: %w", output, err)
 	}
 
 	return nil
@@ -91,10 +102,9 @@ func (r *Refinery) ensureWorktree(repoPath string) (string, error) {
 	}
 
 	cmd := exec.Command("git", "clone", repoPath, wtDir)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("clone: %w", err)
+	cloneOutput, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("clone: %s: %w", strings.TrimSpace(string(cloneOutput)), err)
 	}
 
 	// Fix origin to point at the actual remote, not the local path
@@ -122,7 +132,10 @@ func fixRemoteURL(wtDir, repoPath string) error {
 		// Empty or self-referential — nothing to fix
 		return nil
 	}
-	return gitCmd(wtDir, "remote", "set-url", "origin", remoteURL)
+	if output, err := gitCmdOutput(wtDir, "remote", "set-url", "origin", remoteURL); err != nil {
+		return fmt.Errorf("%s: %w", output, err)
+	}
+	return nil
 }
 
 // runQualityGates runs the configured quality gates for the repo.
@@ -242,11 +255,18 @@ func runGate(wtDir, command string) (string, error) {
 	return string(output), err
 }
 
-// gitCmd runs a git command in the given directory.
-func gitCmd(dir string, args ...string) error {
+// gitCmdOutput runs a git command in the given directory and captures
+// combined stdout/stderr output. Returns the output and any error.
+// This ensures git error messages (e.g. push rejection reasons) are
+// available for logging and stored in MergeRequest.Error, rather than
+// being lost to pogod's stdout/stderr.
+func gitCmdOutput(dir string, args ...string) (string, error) {
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	output, err := cmd.CombinedOutput()
+	out := strings.TrimSpace(string(output))
+	if err != nil {
+		log.Printf("refinery: git %v failed: %s: %v", args, out, err)
+	}
+	return out, err
 }
