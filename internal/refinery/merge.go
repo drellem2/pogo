@@ -74,7 +74,9 @@ func (r *Refinery) attemptMerge(wtDir string, mr *MergeRequest, attempt int) err
 	// Run quality gates (on the rebased branch — tests what will actually land)
 	log.Printf("refinery: MR %s step=quality-gates attempt=%d", mr.ID, attempt)
 	gateOutput, err := r.runQualityGates(wtDir, mr.RepoPath)
+	r.mu.Lock()
 	mr.GateOutput = gateOutput
+	r.mu.Unlock()
 	if err != nil {
 		return fmt.Errorf("quality gate: %w", err)
 	}
