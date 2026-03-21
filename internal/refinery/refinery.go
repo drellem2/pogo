@@ -30,6 +30,9 @@ type Config struct {
 	// WorktreeDir is where the refinery creates git worktrees.
 	// Default: ~/.pogo/refinery/worktrees/
 	WorktreeDir string
+	// MacguffinDir is the macguffin root directory for QA gate checks.
+	// Default: ~/.macguffin/
+	MacguffinDir string
 }
 
 // DefaultConfig returns a Config with sensible defaults.
@@ -39,6 +42,7 @@ func DefaultConfig() Config {
 		Enabled:      true,
 		PollInterval: DefaultPollInterval,
 		WorktreeDir:  filepath.Join(home, ".pogo", "refinery", "worktrees"),
+		MacguffinDir: filepath.Join(home, ".macguffin"),
 	}
 }
 
@@ -241,6 +245,19 @@ func (r *Refinery) processNext() {
 		return
 	}
 
+	// QA gate check: if a paired QA item exists but isn't done, hold the MR.
+	if r.cfg.MacguffinDir != "" {
+		status, qaID := checkQAGate(r.cfg.MacguffinDir, mr.Author)
+		if status == QAPending {
+			log.Printf("refinery: MR %s held — QA item %s for %s is not yet done", mr.ID, qaID, mr.Author)
+			r.requeue(mr)
+			return
+		}
+		if status == QAPassed {
+			log.Printf("refinery: MR %s QA gate passed (qa=%s)", mr.ID, qaID)
+		}
+	}
+
 	r.mu.Lock()
 	mr.Status = StatusProcessing
 	r.mu.Unlock()
@@ -270,6 +287,13 @@ func (r *Refinery) processNext() {
 	} else if err == nil && onMerged != nil {
 		onMerged(mr)
 	}
+}
+
+// requeue puts an MR back at the end of the queue (e.g. when held by QA gate).
+func (r *Refinery) requeue(mr *MergeRequest) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.queue = append(r.queue, mr)
 }
 
 // dequeue removes and returns the first queued item, or nil if empty.
