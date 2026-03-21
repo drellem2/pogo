@@ -315,7 +315,7 @@ func (r *Registry) handleStart(w http.ResponseWriter, req *http.Request) {
 	// Nudge crew agent after a brief delay to kick off execution.
 	// Claude Code interactive mode waits for input — this sends the first message.
 	go func() {
-		time.Sleep(5 * time.Second)
+		time.Sleep(10 * time.Second)
 		a.Nudge("You are now running. Begin your coordination loop.")
 	}()
 
@@ -435,7 +435,7 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 	// Claude Code interactive mode waits for input — this sends the initial prompt.
 	if spawnReq.Task != "" {
 		go func() {
-			time.Sleep(5 * time.Second)
+			time.Sleep(10 * time.Second)
 			prompt := buildPolecatPrompt(spawnReq)
 			a.Nudge(prompt)
 		}()
