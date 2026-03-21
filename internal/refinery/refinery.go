@@ -42,6 +42,9 @@ type Config struct {
 	// MaxHistoryAge is the maximum age of completed merge requests to keep.
 	// Zero means use DefaultMaxHistoryAge. Negative means no age limit.
 	MaxHistoryAge time.Duration
+	// MacguffinDir is the path to the macguffin work directory (e.g. ~/.macguffin/work).
+	// If empty, the QA gate is disabled.
+	MacguffinDir string
 }
 
 // DefaultConfig returns a Config with sensible defaults.
@@ -51,6 +54,7 @@ func DefaultConfig() Config {
 		Enabled:      true,
 		PollInterval: DefaultPollInterval,
 		WorktreeDir:  filepath.Join(home, ".pogo", "refinery", "worktrees"),
+		MacguffinDir: filepath.Join(home, ".macguffin", "work"),
 	}
 }
 
@@ -261,6 +265,13 @@ func (r *Refinery) GetStatus() Status {
 func (r *Refinery) processNext() {
 	mr := r.dequeue()
 	if mr == nil {
+		return
+	}
+
+	// QA gate: check if a QA work item exists for this MR's author (work ID).
+	result, qaItemID := r.checkQAGate(mr.Author)
+	if result == QAGateHold {
+		r.holdMergeRequest(mr, qaItemID)
 		return
 	}
 
