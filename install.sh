@@ -380,7 +380,7 @@ if command -v code >/dev/null 2>&1; then
     done
     if [ "$vscode_ok" = true ] && command -v npm >/dev/null 2>&1; then
       echo "  Building and installing extension..."
-      (cd "$vscode_tmpdir" && npm install --ignore-scripts 2>/dev/null && npx vsce package -o pogo.vsix 2>/dev/null && code --install-extension pogo.vsix 2>/dev/null)
+      (cd "$vscode_tmpdir" && npm install --ignore-scripts && npx vsce package -o pogo.vsix && code --install-extension pogo.vsix)
       if [ $? -eq 0 ]; then
         echo "  vscode: extension installed successfully."
       else
