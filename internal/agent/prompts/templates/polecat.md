@@ -37,7 +37,7 @@ Follow these steps exactly, in order. Skipping any step is a failure.
 
 4. **Submit to the merge queue:**
    ```bash
-   pogo refinery submit polecat-{{.Id}} --repo={{.Repo}} --author={{.Id}}
+   pogo refinery submit polecat-{{.Id}} --repo={{.Repo}} --author={{.Id}} --target={{if .Branch}}{{.Branch}}{{else}}main{{end}}
    ```
 
 5. **Mark the work item done:**

@@ -664,6 +664,7 @@ Example:
 	var spawnPolecatBody string
 	var spawnPolecatId string
 	var spawnPolecatRepo string
+	var spawnPolecatBranch string
 	var spawnPolecatEnv []string
 	var cmdAgentSpawnPolecat = &cobra.Command{
 		Use:   "spawn-polecat <name>",
@@ -679,6 +680,7 @@ The template is expanded with the provided variables and used as the agent's pro
 				Body:     spawnPolecatBody,
 				Id:       spawnPolecatId,
 				Repo:     spawnPolecatRepo,
+				Branch:   spawnPolecatBranch,
 				Env:      spawnPolecatEnv,
 			})
 			if err != nil {
@@ -696,6 +698,7 @@ The template is expanded with the provided variables and used as the agent's pro
 	cmdAgentSpawnPolecat.Flags().StringVar(&spawnPolecatBody, "body", "", "Work item body ({{.Body}})")
 	cmdAgentSpawnPolecat.Flags().StringVar(&spawnPolecatId, "id", "", "Work item ID ({{.Id}})")
 	cmdAgentSpawnPolecat.Flags().StringVar(&spawnPolecatRepo, "repo", "", "Target repository path ({{.Repo}})")
+	cmdAgentSpawnPolecat.Flags().StringVar(&spawnPolecatBranch, "branch", "", "Target branch for refinery submit ({{.Branch}})")
 	cmdAgentSpawnPolecat.Flags().StringSliceVarP(&spawnPolecatEnv, "env", "e", nil, "Additional environment variables (KEY=VALUE)")
 
 	// Nudge command — top-level for convenience

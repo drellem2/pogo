@@ -17,7 +17,7 @@ mg show <id>                   # Full details on a work item
 # Agent management
 pogo agent list                # Running agents (crew + polecats)
 pogo agent status <name>       # Detailed status for one agent
-pogo agent spawn-polecat <name> --task="<title>" --body="<details>" --id="<id>" --repo="<repo>"
+pogo agent spawn-polecat <name> --task="<title>" --body="<details>" --id="<id>" --repo="<repo>" [--branch="<branch>"]
 pogo nudge <name> "<message>"  # Wake up an agent
 
 # Mail
@@ -58,10 +58,11 @@ pogo agent spawn-polecat <short-id> \
   --task="<work item title>" \
   --body="<work item body>" \
   --id="<work item id>" \
-  --repo="<target repo path>"
+  --repo="<target repo path>" \
+  --branch="<target branch, if specified on work item>"
 ```
 
-The polecat's name should be a short identifier derived from the work item ID. One polecat per work item — don't spawn duplicates.
+The polecat's name should be a short identifier derived from the work item ID. One polecat per work item — don't spawn duplicates. If the work item has a `branch` field (visible in `mg show` or the work item frontmatter), pass it via `--branch` so the polecat targets the correct branch. If no branch is specified, omit the flag (defaults to main).
 
 Before spawning, check that no polecat is already working on this item:
 ```bash

@@ -50,6 +50,35 @@ Repository: {{.Repo}}
 	}
 }
 
+func TestExpandTemplateBranch(t *testing.T) {
+	dir := t.TempDir()
+	tmplPath := filepath.Join(dir, "polecat.md")
+	content := `pogo refinery submit polecat-{{.Id}} --target={{if .Branch}}{{.Branch}}{{else}}main{{end}}`
+	if err := os.WriteFile(tmplPath, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// With branch specified
+	vars := TemplateVars{Id: "gt-a3f", Branch: "feature/foo"}
+	result, err := ExpandTemplate(tmplPath, vars)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result, "--target=feature/foo") {
+		t.Errorf("expected --target=feature/foo, got: %s", result)
+	}
+
+	// Without branch — should default to main
+	vars2 := TemplateVars{Id: "gt-a3f"}
+	result2, err := ExpandTemplate(tmplPath, vars2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result2, "--target=main") {
+		t.Errorf("expected --target=main, got: %s", result2)
+	}
+}
+
 func TestExpandTemplateEmptyVars(t *testing.T) {
 	dir := t.TempDir()
 	tmplPath := filepath.Join(dir, "minimal.md")
