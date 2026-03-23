@@ -73,8 +73,8 @@ func TestPluginsLoad(t *testing.T) {
 		return
 	}
 	numPlugins := len(driver.GetPluginPaths())
-	if numPlugins != 1 {
-		t.Errorf("Wrong number of plugins, expected %d but found %d", 1, numPlugins)
+	if numPlugins != 2 {
+		t.Errorf("Wrong number of plugins, expected %d but found %d", 2, numPlugins)
 		return
 	}
 }
@@ -163,14 +163,11 @@ func TestPluginExecute(t *testing.T) {
 	// We wait for that goroutine to finish before executing the test.
 	time.Sleep(1 * time.Second)
 
-	plugins := driver.GetPluginPaths()
-	numPlugins := len(plugins)
-	if numPlugins < 1 {
-		t.Errorf("Wrong number of plugins, expected at least %d but found %d", 1, numPlugins)
+	searchPlugin := driver.GetPlugin("pogo-plugin-search")
+	if searchPlugin == nil {
+		t.Errorf("Search plugin not found")
 		return
 	}
-	pluginPath := plugins[0]
-	plugin := driver.GetPlugin(pluginPath)
 	aServiceAbs, err := absolute(aService)
 	if err != nil {
 		t.Errorf("Failed to get absolute path for %s", aService)
@@ -178,7 +175,7 @@ func TestPluginExecute(t *testing.T) {
 	}
 
 	req := "{\"type\": \"files\", \"projectRoot\": \"" + aServiceAbs + "\"}"
-	resp := (*plugin).Execute(req)
+	resp := (*searchPlugin).Execute(req)
 	t.Logf("Response: %s", resp)
 	// Print current directory
 	d, _ := os.Getwd()
