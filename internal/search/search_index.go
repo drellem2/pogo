@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -24,7 +25,6 @@ import (
 const saveFileName = "search_index.json"
 const codeSearchIndexFileName = "code_search_index"
 const indexStartCapacity = 50
-const indexCacheMinutes = 24 * 60
 
 type PogoChunkMatch struct {
 	Line    uint32 `json:"line"`
@@ -51,19 +51,34 @@ const (
 )
 
 type IndexedProject struct {
-	Root       string            `json:"root"`
-	Paths      []string          `json:"paths"`
-	FileHashes map[string]string `json:"file_hashes,omitempty"`
-	FileMtimes map[string]int64  `json:"file_mtimes,omitempty"`
-	Status     IndexingStatus    `json:"indexing_status"`
+	Root        string            `json:"root"`
+	Paths       []string          `json:"paths"`
+	FileHashes  map[string]string `json:"file_hashes,omitempty"`
+	FileMtimes  map[string]int64  `json:"file_mtimes,omitempty"`
+	GitTreeHash string            `json:"git_tree_hash,omitempty"`
+	Status      IndexingStatus    `json:"indexing_status"`
+}
+
+// gitTreeHash returns the SHA of the tree object at HEAD for the given repo.
+// This changes whenever any tracked file in the repo changes, making it ideal
+// for cache invalidation without a fixed TTL.
+func gitTreeHash(repoDir string) (string, error) {
+	cmd := exec.Command("git", "rev-parse", "HEAD^{tree}")
+	cmd.Dir = repoDir
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
 }
 
 // deepCopyProject returns a deep copy of an IndexedProject,
 // ensuring FileHashes and Paths are independent copies.
 func deepCopyProject(p IndexedProject) IndexedProject {
 	cp := IndexedProject{
-		Root:   p.Root,
-		Status: p.Status,
+		Root:        p.Root,
+		GitTreeHash: p.GitTreeHash,
+		Status:      p.Status,
 	}
 	cp.Paths = make([]string, len(p.Paths))
 	copy(cp.Paths, p.Paths)
@@ -540,6 +555,13 @@ func (g *BasicSearch) serializeProjectIndex(proj *IndexedProject) {
 		}
 	}
 
+	// Capture the current git tree hash so we can detect changes on next Load.
+	if h, err := gitTreeHash(proj.Root); err == nil {
+		proj.GitTreeHash = h
+	} else {
+		g.logger.Warn("Could not read git tree hash for " + proj.Root + ": " + err.Error())
+	}
+
 	proj.Status = StatusReady
 	g.mu.Lock()
 	g.projects[proj.Root] = *proj
@@ -610,7 +632,7 @@ func (g *BasicSearch) Load(projectRoot string) (*IndexedProject, error) {
 		return nil, err
 	}
 	saveFilePath := filepath.Join(searchDir, saveFileName)
-	stat, err := os.Lstat(saveFilePath)
+	_, err = os.Lstat(saveFilePath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			g.mu.Lock()
@@ -641,10 +663,19 @@ func (g *BasicSearch) Load(projectRoot string) (*IndexedProject, error) {
 		project.FileMtimes = make(map[string]int64)
 	}
 
-	// Check if index is stale — still return the data so callers can
-	// use hashes/mtimes for incremental re-indexing.
-	if time.Since(stat.ModTime()).Minutes() > indexCacheMinutes {
-		g.logger.Info("Index is stale for " + projectRoot + ", will re-index incrementally")
+	// Check if index is stale by comparing stored git tree hash against
+	// the current HEAD tree hash. This detects actual repo changes (commits,
+	// branch switches) without relying on a fixed TTL.
+	currentHash, hashErr := gitTreeHash(projectRoot)
+	if hashErr != nil {
+		g.logger.Warn("Could not read git tree hash for " + projectRoot + ": " + hashErr.Error())
+	}
+	if hashErr != nil || project.GitTreeHash == "" || project.GitTreeHash != currentHash {
+		if hashErr == nil {
+			g.logger.Info("Index is stale for " + projectRoot + " (tree hash changed), will re-index incrementally")
+		} else {
+			g.logger.Info("Index is stale for " + projectRoot + " (could not verify tree hash), will re-index incrementally")
+		}
 		project.Status = StatusStale
 		g.mu.Lock()
 		g.projects[projectRoot] = *project

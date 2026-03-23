@@ -193,6 +193,7 @@ func TestPluginExecute(t *testing.T) {
                ],
                "file_hashes":"<<PRESENCE>>",
                "file_mtimes":"<<PRESENCE>>",
+               "git_tree_hash":"<<PRESENCE>>",
                "indexing_status":"ready"
             },
             "results":{
