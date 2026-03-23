@@ -21,6 +21,17 @@ func (r *Refinery) RegisterHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/refinery/history", r.handleHistory)
 	mux.HandleFunc("/refinery/submit", r.handleSubmit)
 	mux.HandleFunc("/refinery/mr/{id}", r.handleMR)
+	mux.HandleFunc("/refinery/prune", r.handlePrune)
+}
+
+func (r *Refinery) handlePrune(w http.ResponseWriter, req *http.Request) {
+	if req.Method != "POST" {
+		http.Error(w, "", http.StatusMethodNotAllowed)
+		return
+	}
+	results := r.PruneWorktrees()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(results)
 }
 
 func (r *Refinery) handleStatus(w http.ResponseWriter, req *http.Request) {

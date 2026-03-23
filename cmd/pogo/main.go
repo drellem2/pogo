@@ -1331,10 +1331,48 @@ Example:
 		},
 	}
 
+	var cmdRefineryPrune = &cobra.Command{
+		Use:   "prune",
+		Short: "Prune merged branches from refinery worktrees",
+		Long: `Clean up branches in ~/.pogo/refinery/worktrees/ that have been
+merged to main. Also prunes stale remote-tracking references.
+
+This reclaims disk space and keeps the refinery worktree clones tidy.`,
+		Args: cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			results, err := client.PruneWorktrees()
+			if err != nil {
+				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+			}
+			if jsonOutput {
+				cli.PrintJSON(results)
+			} else {
+				total := 0
+				for _, r := range results {
+					if r.Error != "" {
+						fmt.Printf("%s: error: %s\n", r.Repo, r.Error)
+						continue
+					}
+					if len(r.PrunedBranches) > 0 {
+						fmt.Printf("%s: pruned %d branches: %s\n", r.Repo, len(r.PrunedBranches),
+							strings.Join(r.PrunedBranches, ", "))
+						total += len(r.PrunedBranches)
+					}
+				}
+				if total == 0 {
+					fmt.Println("No merged branches to prune.")
+				} else {
+					fmt.Printf("Pruned %d merged branches total.\n", total)
+				}
+			}
+		},
+	}
+
 	cmdRefinery.AddCommand(cmdRefinerySubmit)
 	cmdRefinery.AddCommand(cmdRefineryQueue)
 	cmdRefinery.AddCommand(cmdRefineryHistory)
 	cmdRefinery.AddCommand(cmdRefineryShow)
+	cmdRefinery.AddCommand(cmdRefineryPrune)
 	rootCmd.AddCommand(cmdRefinery)
 
 	// Cross-repo operations
