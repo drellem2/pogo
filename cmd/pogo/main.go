@@ -104,6 +104,27 @@ Child commands include start, stop, and status.`,
 				}
 				return
 			}
+
+			// Server is running — check if orchestration is stopped
+			mode, err := client.GetServerMode()
+			if err == nil && mode == "index-only" {
+				if !jsonOutput {
+					fmt.Println("Restarting orchestration...")
+				}
+				if err := client.StartOrchestration(); err != nil {
+					cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+				}
+				if jsonOutput {
+					cli.PrintJSON(map[string]interface{}{
+						"status":  "started",
+						"message": "orchestration restarted",
+					})
+				} else {
+					fmt.Println("Orchestration restarted")
+				}
+				return
+			}
+
 			if jsonOutput {
 				cli.PrintJSON(map[string]interface{}{
 					"status":  "running",

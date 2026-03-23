@@ -135,12 +135,29 @@ func (s *Server) RequireOrchestration(next http.Handler) http.Handler {
 func (s *Server) RegisterHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/server/mode", s.handleMode)
 	mux.HandleFunc("/server/stop-orchestration", s.handleStopOrchestration)
+	mux.HandleFunc("/server/start-orchestration", s.handleStartOrchestration)
 }
 
 // handleMode returns the current run mode as JSON.
 func (s *Server) handleMode(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"mode": s.Mode().String(),
+	})
+}
+
+// handleStartOrchestration transitions to full mode, restarting agents and refinery.
+func (s *Server) handleStartOrchestration(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := s.SetMode(config.ModeFull); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")

@@ -198,6 +198,74 @@ func TestRequireOrchestrationResumesAfterModeChange(t *testing.T) {
 	}
 }
 
+func TestHandleStartOrchestration(t *testing.T) {
+	s := New(nil, nil)
+	s.SetRefineryStarter(func() error { return nil })
+	mux := http.NewServeMux()
+	s.RegisterHandlers(mux)
+
+	// First stop orchestration
+	req := httptest.NewRequest(http.MethodPost, "/server/stop-orchestration", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if s.Mode() != config.ModeIndexOnly {
+		t.Fatalf("expected ModeIndexOnly, got %s", s.Mode())
+	}
+
+	// Now start orchestration
+	req = httptest.NewRequest(http.MethodPost, "/server/start-orchestration", nil)
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var resp map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp["mode"] != "full" {
+		t.Fatalf("expected mode=full, got %s", resp["mode"])
+	}
+	if s.Mode() != config.ModeFull {
+		t.Fatalf("expected ModeFull after start-orchestration")
+	}
+}
+
+func TestHandleStartOrchestrationWrongMethod(t *testing.T) {
+	s := New(nil, nil)
+	mux := http.NewServeMux()
+	s.RegisterHandlers(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/server/start-orchestration", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", w.Code)
+	}
+}
+
+func TestHandleStartOrchestrationIdempotent(t *testing.T) {
+	s := New(nil, nil) // starts in ModeFull
+	mux := http.NewServeMux()
+	s.RegisterHandlers(mux)
+
+	// Calling start-orchestration when already in full mode should be a no-op
+	req := httptest.NewRequest(http.MethodPost, "/server/start-orchestration", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if s.Mode() != config.ModeFull {
+		t.Fatalf("expected ModeFull, got %s", s.Mode())
+	}
+}
+
 func TestHandleModeAfterStopOrchestration(t *testing.T) {
 	s := New(nil, nil)
 	mux := http.NewServeMux()
