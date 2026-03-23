@@ -110,6 +110,49 @@ fi
 rm -rf "$tmpdir"
 
 echo "Done! Installed to ${INSTALL_DIR}"
+
+###############################################################################
+# Check for macguffin (mg) dependency
+###############################################################################
+
+if command -v mg >/dev/null 2>&1; then
+  echo ""
+  echo "✓ macguffin (mg) is already installed."
+else
+  echo ""
+  echo "⚠ macguffin (mg) is not installed."
+  echo "  Pogo requires macguffin for agent orchestration (work items, claims, mail)."
+  echo ""
+  echo "  Install it with:"
+  echo "    go install github.com/drellem2/macguffin/cmd/mg@latest"
+  echo ""
+  echo "  Or see: https://github.com/drellem2/macguffin"
+  echo ""
+  MG_INSTALLED=false
+
+  # Attempt auto-install if Go is available
+  if command -v go >/dev/null 2>&1; then
+    if [ "$INTERACTIVE" = true ]; then
+      if ask_yn "  Install macguffin (mg) now via 'go install'?"; then
+        if go install github.com/drellem2/macguffin/cmd/mg@latest; then
+          echo "  ✓ macguffin (mg) installed"
+          MG_INSTALLED=true
+        else
+          echo "  ✗ Failed to install macguffin. Please install it manually." >&2
+        fi
+      fi
+    else
+      echo "  Tip: Re-run with --interactive to install macguffin automatically."
+    fi
+  fi
+
+  if [ "$MG_INSTALLED" = false ]; then
+    echo "  Pogo will work for code search and project discovery without mg,"
+    echo "  but agent orchestration (pogo install, pogo agent start) requires it."
+  fi
+fi
+
+echo ""
 echo "Run 'pogo install' to set up agent orchestration."
 
 ###############################################################################

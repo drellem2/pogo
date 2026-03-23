@@ -205,6 +205,15 @@ else
 fi
 rm -rf "$TMPDIR_TEST"
 
+# --- Test 13: mg dependency check present in script ---
+echo ""
+echo "Test 13: macguffin (mg) dependency check exists in install script"
+if grep -q "macguffin" "$INSTALL_SCRIPT" && grep -q "command -v mg" "$INSTALL_SCRIPT"; then
+  pass "Install script contains macguffin dependency check"
+else
+  fail "Install script missing macguffin dependency check"
+fi
+
 # --- Summary ---
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
