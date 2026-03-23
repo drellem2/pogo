@@ -15,31 +15,21 @@ const (
 	DefaultBind = "127.0.0.1"
 )
 
-// RunMode describes which subsystems are active in pogod.
-type RunMode int
+// RunMode describes how the pogo daemon is operating.
+type RunMode string
 
 const (
-	// ModeFull means all subsystems are running: agents, refinery, indexing, HTTP.
-	ModeFull RunMode = iota
-	// ModeIndexOnly means only indexing, search, and HTTP are active.
-	ModeIndexOnly
+	// RunModeFull means the server runs indexing, plugins, agents, and refinery.
+	RunModeFull RunMode = "full"
+	// RunModeIndexOnly means the server only indexes projects (no agents/refinery).
+	RunModeIndexOnly RunMode = "index-only"
 )
-
-func (m RunMode) String() string {
-	switch m {
-	case ModeFull:
-		return "full"
-	case ModeIndexOnly:
-		return "index-only"
-	default:
-		return "unknown"
-	}
-}
 
 // Config holds pogo daemon configuration.
 type Config struct {
 	Port     int
 	Bind     string
+	Mode     RunMode
 	Refinery RefineryConfig
 }
 
@@ -57,6 +47,7 @@ func Load() *Config {
 	cfg := &Config{
 		Port: DefaultPort,
 		Bind: DefaultBind,
+		Mode: RunModeFull,
 		Refinery: RefineryConfig{
 			Enabled:      true,
 			PollInterval: 30 * time.Second,
@@ -81,6 +72,11 @@ func Load() *Config {
 	}
 	if bind := os.Getenv("POGO_BIND"); bind != "" {
 		cfg.Bind = bind
+	}
+	if mode := os.Getenv("POGO_MODE"); mode != "" {
+		if m := RunMode(mode); m == RunModeFull || m == RunModeIndexOnly {
+			cfg.Mode = m
+		}
 	}
 
 	return cfg
@@ -165,6 +161,11 @@ func loadConfigFile() (*Config, error) {
 				}
 			case "bind":
 				cfg.Bind = val
+			case "mode":
+				val = strings.Trim(val, "\"")
+				if m := RunMode(val); m == RunModeFull || m == RunModeIndexOnly {
+					cfg.Mode = m
+				}
 			}
 		case "refinery":
 			switch key {

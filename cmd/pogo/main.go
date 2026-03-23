@@ -17,6 +17,7 @@ import (
 	"github.com/drellem2/pogo/internal/agent"
 	"github.com/drellem2/pogo/internal/cli"
 	"github.com/drellem2/pogo/internal/client"
+	"github.com/drellem2/pogo/internal/config"
 	"github.com/drellem2/pogo/internal/refinery"
 	"github.com/drellem2/pogo/internal/service"
 	"github.com/drellem2/pogo/internal/version"
@@ -140,7 +141,7 @@ Child commands include start, stop, and status.`,
 		Long:  `Check whether the pogo server is running and report its current mode (full or index-only).`,
 		Args:  cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
-			err := client.HealthCheck()
+			ss, err := client.GetServerStatus()
 			if err != nil {
 				if jsonOutput {
 					cli.PrintJSON(map[string]interface{}{
@@ -152,17 +153,18 @@ Child commands include start, stop, and status.`,
 				}
 				return
 			}
-			mode, modeErr := client.GetServerMode()
-			if modeErr != nil {
-				mode = "unknown"
+			mode := string(ss.Mode)
+			if mode == "" {
+				mode = string(config.RunModeFull)
 			}
 			if jsonOutput {
 				cli.PrintJSON(map[string]interface{}{
 					"running": true,
 					"mode":    mode,
+					"uptime":  ss.Uptime,
 				})
 			} else {
-				fmt.Printf("Server is running (mode: %s)\n", mode)
+				fmt.Printf("Server is running (mode: %s, uptime: %s)\n", mode, ss.Uptime)
 			}
 		},
 	}
@@ -177,23 +179,19 @@ Child commands include start, stop, and status.`,
 		Args: cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
 			type statusReport struct {
-				ServerRunning bool                    `json:"server_running"`
-				ServerMode    string                  `json:"server_mode,omitempty"`
-				Agents        []agent.AgentInfo       `json:"agents"`
-				WorkItems     string                  `json:"work_items,omitempty"`
-				Refinery      *refinery.Status        `json:"refinery,omitempty"`
-				Queue         []refinery.MergeRequest `json:"refinery_queue,omitempty"`
+				Server    *client.ServerStatus    `json:"server,omitempty"`
+				Agents    []agent.AgentInfo       `json:"agents"`
+				WorkItems string                  `json:"work_items,omitempty"`
+				Refinery  *refinery.Status        `json:"refinery,omitempty"`
+				Queue     []refinery.MergeRequest `json:"refinery_queue,omitempty"`
 			}
 
 			var report statusReport
 
-			// Server
-			serverErr := client.HealthCheck()
+			// Server status
+			serverStatus, serverErr := client.GetServerStatus()
 			if serverErr == nil {
-				report.ServerRunning = true
-				if mode, err := client.GetServerMode(); err == nil {
-					report.ServerMode = mode
-				}
+				report.Server = serverStatus
 			}
 
 			// Agents
@@ -228,13 +226,13 @@ Child commands include start, stop, and status.`,
 			// Server section
 			fmt.Println("=== Server ===")
 			if serverErr != nil {
-				fmt.Println("  Not running.")
+				fmt.Printf("  (unavailable: %s)\n", serverErr)
 			} else {
-				mode := report.ServerMode
+				mode := string(serverStatus.Mode)
 				if mode == "" {
-					mode = "unknown"
+					mode = string(config.RunModeFull)
 				}
-				fmt.Printf("  Running (mode: %s)\n", mode)
+				fmt.Printf("  Mode: %s  |  Uptime: %s\n", mode, serverStatus.Uptime)
 			}
 			fmt.Println()
 

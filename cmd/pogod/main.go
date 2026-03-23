@@ -34,7 +34,7 @@ import (
 
 var agentRegistry *agent.Registry
 var mergeQueue *refinery.Refinery
-var currentMode = config.ModeFull
+var serverCfg *config.Config
 
 var bindFlag = flag.String("bind", "", "address to bind the server to (default: 127.0.0.1)")
 
@@ -209,12 +209,22 @@ func projectById(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func serverMode(w http.ResponseWriter, r *http.Request) {
-	fmt.Println("Visited /server/mode")
+// ServerStatus is the JSON response for GET /server/status.
+type ServerStatus struct {
+	Mode   config.RunMode `json:"mode"`
+	Uptime string         `json:"uptime"`
+}
+
+var serverStartTime = time.Now()
+
+func serverStatus(w http.ResponseWriter, r *http.Request) {
+	fmt.Println("Visited /server/status")
 	switch r.Method {
-	case "GET", "":
-		json.NewEncoder(w).Encode(map[string]string{
-			"mode": currentMode.String(),
+	case "GET":
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(ServerStatus{
+			Mode:   serverCfg.Mode,
+			Uptime: time.Since(serverStartTime).Truncate(time.Second).String(),
 		})
 	default:
 		http.Error(w, "", http.StatusMethodNotAllowed)
@@ -240,7 +250,7 @@ func registerHandlers() {
 	http.HandleFunc("/plugins", plugins)
 	http.HandleFunc("/health", health)
 	http.HandleFunc("/status", status)
-	http.HandleFunc("/server/mode", serverMode)
+	http.HandleFunc("/server/status", serverStatus)
 
 	// Agent management endpoints
 	agentRegistry.RegisterHandlers(http.DefaultServeMux)
@@ -319,6 +329,7 @@ func main() {
 
 	// Start refinery merge queue loop
 	cfg := config.Load()
+	serverCfg = cfg
 	if cfg.Refinery.Enabled {
 		refineCfg := refinery.DefaultConfig()
 		if cfg.Refinery.PollInterval > 0 {
