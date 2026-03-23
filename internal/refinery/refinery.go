@@ -295,9 +295,10 @@ func (r *Refinery) processNext() {
 
 	log.Printf("refinery: processing MR %s branch=%s", mr.ID, mr.Branch)
 
-	err := r.processMerge(mr)
+	gateOutput, err := r.processMerge(mr)
 
 	r.mu.Lock()
+	mr.GateOutput = gateOutput
 	mr.DoneTime = time.Now()
 	if err != nil {
 		mr.Status = StatusFailed
