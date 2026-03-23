@@ -285,14 +285,20 @@ if command -v tmux >/dev/null 2>&1; then
     echo "  tmux: pogo plugin already installed in ${tmux_plugin_dir}, skipping."
   elif ask_yn "  Install tmux integration?"; then
     mkdir -p "$tmux_plugin_dir"
-    curl -fsSL -o "${tmux_plugin_dir}/pogo.tmux" "${TMUX_SOURCE_URL}/pogo.tmux"
-    curl -fsSL -o "${tmux_plugin_dir}/pogo-status.sh" "${TMUX_SOURCE_URL}/pogo-status.sh"
-    chmod +x "${tmux_plugin_dir}/pogo.tmux" "${tmux_plugin_dir}/pogo-status.sh"
-    echo "  tmux: plugin installed to ${tmux_plugin_dir}"
-    echo ""
-    echo "  Add to your .tmux.conf:"
-    echo "    run-shell ${tmux_plugin_dir}/pogo.tmux"
-    echo "    set -g status-right '#(${tmux_plugin_dir}/pogo-status.sh #{pane_current_path})'"
+    if ! curl -fsSL -o "${tmux_plugin_dir}/pogo.tmux" "${TMUX_SOURCE_URL}/pogo.tmux"; then
+      echo "  tmux: failed to download pogo.tmux" >&2
+      rm -f "${tmux_plugin_dir}/pogo.tmux"
+    elif ! curl -fsSL -o "${tmux_plugin_dir}/pogo-status.sh" "${TMUX_SOURCE_URL}/pogo-status.sh"; then
+      echo "  tmux: failed to download pogo-status.sh" >&2
+      rm -f "${tmux_plugin_dir}/pogo.tmux" "${tmux_plugin_dir}/pogo-status.sh"
+    else
+      chmod +x "${tmux_plugin_dir}/pogo.tmux" "${tmux_plugin_dir}/pogo-status.sh"
+      echo "  tmux: plugin installed to ${tmux_plugin_dir}"
+      echo ""
+      echo "  Add to your .tmux.conf:"
+      echo "    run-shell ${tmux_plugin_dir}/pogo.tmux"
+      echo "    set -g status-right '#(${tmux_plugin_dir}/pogo-status.sh #{pane_current_path})'"
+    fi
   else
     echo "  tmux: skipped."
   fi
