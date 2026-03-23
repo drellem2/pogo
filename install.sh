@@ -2,12 +2,14 @@
 # Pogo install script
 # Usage: curl -fsSL https://raw.githubusercontent.com/drellem2/pogo/main/install.sh | sh
 #        curl -fsSL ... | sh -s -- --interactive
+#        curl -fsSL ... | sh -s -- --with-editors
 set -e
 
 REPO="drellem2/pogo"
 INSTALL_DIR="${POGO_INSTALL_DIR:-/usr/local/bin}"
 BINARIES="pogo pogod lsp pose"
 INTERACTIVE=false
+WITH_EDITORS=false
 SHELL_SOURCE_URL="https://raw.githubusercontent.com/${REPO}/main/shell"
 TMUX_SOURCE_URL="https://raw.githubusercontent.com/${REPO}/main/tmux"
 
@@ -16,6 +18,9 @@ for arg in "$@"; do
   case "$arg" in
     --interactive|--with-integrations)
       INTERACTIVE=true
+      ;;
+    --with-editors)
+      WITH_EDITORS=true
       ;;
   esac
 done
@@ -107,9 +112,77 @@ rm -rf "$tmpdir"
 echo "Done! Installed to ${INSTALL_DIR}"
 echo "Run 'pogo install' to set up agent orchestration."
 
+###############################################################################
+# Non-interactive editor setup (--with-editors)
+###############################################################################
+
+if [ "$WITH_EDITORS" = true ]; then
+  EDITOR_SOURCE_URL="https://raw.githubusercontent.com/${REPO}/main"
+
+  # Detect the repo root if running from a local checkout
+  SCRIPT_DIR=""
+  if [ -f "${0%/*}/emacs/pogo.el" ] 2>/dev/null; then
+    SCRIPT_DIR=$(cd "${0%/*}" && pwd)
+  fi
+
+  install_editor_file() {
+    src_subpath="$1"
+    dest="$2"
+    mkdir -p "$(dirname "$dest")"
+    if [ -n "$SCRIPT_DIR" ] && [ -f "${SCRIPT_DIR}/${src_subpath}" ]; then
+      ln -sf "${SCRIPT_DIR}/${src_subpath}" "$dest"
+    else
+      curl -fsSL -o "$dest" "${EDITOR_SOURCE_URL}/${src_subpath}"
+    fi
+  }
+
+  # Emacs
+  emacs_dir="$HOME/.emacs.d/site-lisp"
+  if [ -f "${emacs_dir}/pogo.el" ]; then
+    echo "  emacs: pogo.el already present in ${emacs_dir}, skipping."
+  else
+    if install_editor_file "emacs/pogo.el" "${emacs_dir}/pogo.el"; then
+      echo "  emacs: installed pogo.el to ${emacs_dir}"
+      echo "  Add to your init.el:"
+      echo "    (add-to-list 'load-path \"${emacs_dir}\")"
+      echo "    (require 'pogo)"
+    else
+      echo "  emacs: failed to install pogo.el" >&2
+    fi
+  fi
+
+  # Neovim
+  nvim_data_dir="${XDG_DATA_HOME:-$HOME/.local/share}/nvim/site/pack/pogo/start/pogo"
+  if [ -d "$nvim_data_dir" ]; then
+    echo "  neovim: plugin already present in ${nvim_data_dir}, skipping."
+  else
+    mkdir -p "${nvim_data_dir}/lua/pogo"
+    mkdir -p "${nvim_data_dir}/plugin"
+    nvim_ok=true
+    for f in init.lua client.lua telescope.lua; do
+      if ! install_editor_file "nvim/lua/pogo/${f}" "${nvim_data_dir}/lua/pogo/${f}"; then
+        echo "  neovim: failed to install ${f}" >&2
+        nvim_ok=false
+      fi
+    done
+    if ! install_editor_file "nvim/plugin/pogo.lua" "${nvim_data_dir}/plugin/pogo.lua"; then
+      echo "  neovim: failed to install plugin/pogo.lua" >&2
+      nvim_ok=false
+    fi
+    if [ "$nvim_ok" = true ]; then
+      echo "  neovim: plugin installed to ${nvim_data_dir}"
+      echo "  Configure in your init.lua:"
+      echo "    require('pogo').setup({})"
+    fi
+  fi
+fi
+
 if [ "$INTERACTIVE" = false ]; then
-  echo ""
-  echo "Tip: Re-run with --interactive to set up shell and editor integrations."
+  if [ "$WITH_EDITORS" = false ]; then
+    echo ""
+    echo "Tip: Re-run with --interactive to set up shell and editor integrations,"
+    echo "     or --with-editors to install editor plugins non-interactively."
+  fi
   exit 0
 fi
 
