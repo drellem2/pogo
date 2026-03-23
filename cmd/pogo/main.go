@@ -17,6 +17,7 @@ import (
 	"github.com/drellem2/pogo/internal/agent"
 	"github.com/drellem2/pogo/internal/cli"
 	"github.com/drellem2/pogo/internal/client"
+	"github.com/drellem2/pogo/internal/completion"
 	"github.com/drellem2/pogo/internal/refinery"
 	"github.com/drellem2/pogo/internal/service"
 	"github.com/drellem2/pogo/internal/version"
@@ -1016,6 +1017,7 @@ Example:
 
 	cmdRefinery.AddCommand(cmdRefinerySubmit)
 	rootCmd.AddCommand(cmdRefinery)
+	completion.AddCommand(rootCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(cli.ExitError)
