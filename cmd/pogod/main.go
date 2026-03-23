@@ -34,6 +34,7 @@ import (
 
 var agentRegistry *agent.Registry
 var mergeQueue *refinery.Refinery
+var currentMode = config.ModeFull
 
 var bindFlag = flag.String("bind", "", "address to bind the server to (default: 127.0.0.1)")
 
@@ -208,6 +209,18 @@ func projectById(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func serverMode(w http.ResponseWriter, r *http.Request) {
+	fmt.Println("Visited /server/mode")
+	switch r.Method {
+	case "GET", "":
+		json.NewEncoder(w).Encode(map[string]string{
+			"mode": currentMode.String(),
+		})
+	default:
+		http.Error(w, "", http.StatusMethodNotAllowed)
+	}
+}
+
 func status(w http.ResponseWriter, r *http.Request) {
 	fmt.Println("Visited /status")
 	switch r.Method {
@@ -227,6 +240,7 @@ func registerHandlers() {
 	http.HandleFunc("/plugins", plugins)
 	http.HandleFunc("/health", health)
 	http.HandleFunc("/status", status)
+	http.HandleFunc("/server/mode", serverMode)
 
 	// Agent management endpoints
 	agentRegistry.RegisterHandlers(http.DefaultServeMux)

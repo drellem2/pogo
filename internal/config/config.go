@@ -15,6 +15,27 @@ const (
 	DefaultBind = "127.0.0.1"
 )
 
+// RunMode describes which subsystems are active in pogod.
+type RunMode int
+
+const (
+	// ModeFull means all subsystems are running: agents, refinery, indexing, HTTP.
+	ModeFull RunMode = iota
+	// ModeIndexOnly means only indexing, search, and HTTP are active.
+	ModeIndexOnly
+)
+
+func (m RunMode) String() string {
+	switch m {
+	case ModeFull:
+		return "full"
+	case ModeIndexOnly:
+		return "index-only"
+	default:
+		return "unknown"
+	}
+}
+
 // Config holds pogo daemon configuration.
 type Config struct {
 	Port     int

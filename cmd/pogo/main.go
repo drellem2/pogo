@@ -134,6 +134,39 @@ Child commands include start, stop, and status.`,
 		},
 	}
 
+	var cmdServerStatus = &cobra.Command{
+		Use:   "status",
+		Short: "Show pogo server status",
+		Long:  `Check whether the pogo server is running and report its current mode (full or index-only).`,
+		Args:  cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			err := client.HealthCheck()
+			if err != nil {
+				if jsonOutput {
+					cli.PrintJSON(map[string]interface{}{
+						"running": false,
+						"mode":    "",
+					})
+				} else {
+					fmt.Println("Server is not running.")
+				}
+				return
+			}
+			mode, modeErr := client.GetServerMode()
+			if modeErr != nil {
+				mode = "unknown"
+			}
+			if jsonOutput {
+				cli.PrintJSON(map[string]interface{}{
+					"running": true,
+					"mode":    mode,
+				})
+			} else {
+				fmt.Printf("Server is running (mode: %s)\n", mode)
+			}
+		},
+	}
+
 	var cmdStatus = &cobra.Command{
 		Use:   "status",
 		Short: "Show unified dashboard of agents, work items, and refinery queue",
@@ -144,13 +177,24 @@ Child commands include start, stop, and status.`,
 		Args: cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
 			type statusReport struct {
-				Agents    []agent.AgentInfo       `json:"agents"`
-				WorkItems string                  `json:"work_items,omitempty"`
-				Refinery  *refinery.Status        `json:"refinery,omitempty"`
-				Queue     []refinery.MergeRequest `json:"refinery_queue,omitempty"`
+				ServerRunning bool                    `json:"server_running"`
+				ServerMode    string                  `json:"server_mode,omitempty"`
+				Agents        []agent.AgentInfo       `json:"agents"`
+				WorkItems     string                  `json:"work_items,omitempty"`
+				Refinery      *refinery.Status        `json:"refinery,omitempty"`
+				Queue         []refinery.MergeRequest `json:"refinery_queue,omitempty"`
 			}
 
 			var report statusReport
+
+			// Server
+			serverErr := client.HealthCheck()
+			if serverErr == nil {
+				report.ServerRunning = true
+				if mode, err := client.GetServerMode(); err == nil {
+					report.ServerMode = mode
+				}
+			}
 
 			// Agents
 			agents, agentErr := client.ListAgents()
@@ -180,6 +224,19 @@ Child commands include start, stop, and status.`,
 			}
 
 			// --- Text output ---
+
+			// Server section
+			fmt.Println("=== Server ===")
+			if serverErr != nil {
+				fmt.Println("  Not running.")
+			} else {
+				mode := report.ServerMode
+				if mode == "" {
+					mode = "unknown"
+				}
+				fmt.Printf("  Running (mode: %s)\n", mode)
+			}
+			fmt.Println()
 
 			// Agents section
 			fmt.Println("=== Agents ===")
@@ -939,6 +996,7 @@ The path is resolved to an absolute path and the git root is discovered automati
 	rootCmd.AddCommand(cmdStatus)
 	cmdServer.AddCommand(cmdServerStart)
 	cmdServer.AddCommand(cmdServerStop)
+	cmdServer.AddCommand(cmdServerStatus)
 	rootCmd.AddCommand(cmdServer)
 	cmdService.AddCommand(cmdServiceInstall)
 	cmdService.AddCommand(cmdServiceUninstall)

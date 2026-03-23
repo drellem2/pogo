@@ -284,6 +284,26 @@ func Search(query string, dir string) (*SearchResponse, error) {
 	return results, nil
 }
 
+// GetServerMode returns the current running mode of the pogo daemon.
+func GetServerMode() (string, error) {
+	r, err := http.Get(serverURL + "/server/mode")
+	if err != nil {
+		return "", err
+	}
+	defer r.Body.Close()
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		return "", err
+	}
+	var resp struct {
+		Mode string `json:"mode"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return "", err
+	}
+	return resp.Mode, nil
+}
+
 func GetStatus() ([]ProjectStatusResponse, error) {
 	statuses, err := RunWithHealthCheck(func() ([]ProjectStatusResponse, error) {
 		r, err := http.Get(serverURL + "/status")
