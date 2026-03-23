@@ -264,18 +264,26 @@ func (r *Registry) Stop(name string, timeout time.Duration) error {
 		return fmt.Errorf("agent %q not found", name)
 	}
 
-	// Send SIGTERM via the process
-	if err := agent.cmd.Process.Signal(os.Interrupt); err != nil {
-		return fmt.Errorf("signal agent: %w", err)
-	}
-
+	// Check if already exited before signaling to avoid
+	// "os: process already finished" errors.
 	select {
 	case <-agent.done:
-		// Clean exit
-	case <-time.After(timeout):
-		// Force kill
-		agent.cmd.Process.Kill()
-		<-agent.done
+		// Already exited, skip signal/wait
+	default:
+		// Send SIGTERM via the process
+		if err := agent.cmd.Process.Signal(os.Interrupt); err != nil {
+			// Process may have exited between check and signal — that's OK
+			<-agent.done
+		} else {
+			select {
+			case <-agent.done:
+				// Clean exit
+			case <-time.After(timeout):
+				// Force kill
+				agent.cmd.Process.Kill()
+				<-agent.done
+			}
+		}
 	}
 
 	agent.Cleanup()
@@ -489,15 +497,18 @@ func (a *Agent) startListener() error {
 	}
 	a.listener = l
 
-	go a.acceptLoop()
+	// Pass listener directly so acceptLoop doesn't access a.listener,
+	// avoiding a nil-pointer race when Cleanup nils it concurrently.
+	go a.acceptLoop(l)
 	return nil
 }
 
 // acceptLoop handles incoming attach connections.
 // Each connection gets bidirectional bridging to the PTY master.
-func (a *Agent) acceptLoop() {
+// Takes the listener as a parameter to avoid racing with Cleanup.
+func (a *Agent) acceptLoop(l net.Listener) {
 	for {
-		conn, err := a.listener.Accept()
+		conn, err := l.Accept()
 		if err != nil {
 			return // listener closed
 		}
