@@ -391,18 +391,19 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 			return
 		}
 		log.Printf("polecat %s: created worktree at %s (branch %s)", spawnReq.Name, worktreeDir, branchName)
-
-		// Add the worktree dir so Claude operates in the right directory.
-		cmd = append(cmd, "--add-dir", worktreeDir)
+		// No --add-dir needed: the process CWD is set to worktreeDir via SpawnRequest.Dir,
+		// and --add-dir triggers a directory trust prompt that blocks autonomous execution.
 	}
 
 	a, err := r.Spawn(SpawnRequest{
-		Name:       spawnReq.Name,
-		Type:       TypePolecat,
-		Command:    cmd,
-		Env:        env,
-		PromptFile: promptFile,
-		Dir:        worktreeDir,
+		Name:        spawnReq.Name,
+		Type:        TypePolecat,
+		Command:     cmd,
+		Env:         env,
+		PromptFile:  promptFile,
+		Dir:         worktreeDir,
+		WorktreeDir: worktreeDir,
+		SourceRepo:  sourceRepo,
 	})
 	if err != nil {
 		os.Remove(promptFile) // Clean up temp file on spawn failure
@@ -422,10 +423,6 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 			a.Nudge(fmt.Sprintf("Look at the system prompt and complete the steps for this work item: %s", spawnReq.Id))
 		}()
 	}
-
-	// Store worktree info on the agent for cleanup
-	a.WorktreeDir = worktreeDir
-	a.SourceRepo = sourceRepo
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)

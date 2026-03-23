@@ -379,3 +379,77 @@ func TestRespawn(t *testing.T) {
 		t.Error("expected new PID after respawn")
 	}
 }
+
+func TestWorktreeFieldsSetBeforeSpawn(t *testing.T) {
+	tmpDir := t.TempDir()
+	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	defer reg.StopAll(2 * time.Second)
+
+	a, err := reg.Spawn(SpawnRequest{
+		Name:        "wt-test",
+		Type:        TypePolecat,
+		Command:     []string{"cat"},
+		WorktreeDir: "/tmp/fake-worktree",
+		SourceRepo:  "/tmp/fake-repo",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Fields must be set immediately after Spawn returns
+	if a.WorktreeDir != "/tmp/fake-worktree" {
+		t.Errorf("WorktreeDir = %q, want %q", a.WorktreeDir, "/tmp/fake-worktree")
+	}
+	if a.SourceRepo != "/tmp/fake-repo" {
+		t.Errorf("SourceRepo = %q, want %q", a.SourceRepo, "/tmp/fake-repo")
+	}
+}
+
+func TestWorktreeFieldsVisibleInOnExit(t *testing.T) {
+	tmpDir := t.TempDir()
+	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+
+	// Track what onExit sees
+	type exitInfo struct {
+		worktreeDir string
+		sourceRepo  string
+	}
+	exitCh := make(chan exitInfo, 1)
+
+	reg.SetOnExit(func(a *Agent, err error) {
+		exitCh <- exitInfo{
+			worktreeDir: a.WorktreeDir,
+			sourceRepo:  a.SourceRepo,
+		}
+	})
+
+	// Spawn a fast-exiting process — the race condition scenario
+	_, err = reg.Spawn(SpawnRequest{
+		Name:        "fast-exit",
+		Type:        TypePolecat,
+		Command:     []string{"true"},
+		WorktreeDir: "/tmp/test-worktree",
+		SourceRepo:  "/tmp/test-repo",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case info := <-exitCh:
+		if info.worktreeDir != "/tmp/test-worktree" {
+			t.Errorf("onExit saw WorktreeDir = %q, want %q", info.worktreeDir, "/tmp/test-worktree")
+		}
+		if info.sourceRepo != "/tmp/test-repo" {
+			t.Errorf("onExit saw SourceRepo = %q, want %q", info.sourceRepo, "/tmp/test-repo")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("onExit was not called within 5 seconds")
+	}
+}

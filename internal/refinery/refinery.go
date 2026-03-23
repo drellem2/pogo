@@ -21,6 +21,12 @@ import (
 // DefaultPollInterval is how often the refinery checks for new merge requests.
 const DefaultPollInterval = 30 * time.Second
 
+// Default history limits.
+const (
+	DefaultMaxHistoryLen = 100
+	DefaultMaxHistoryAge = 7 * 24 * time.Hour // 7 days
+)
+
 // Config holds refinery configuration.
 type Config struct {
 	// Enabled controls whether the refinery loop runs.
@@ -30,6 +36,15 @@ type Config struct {
 	// WorktreeDir is where the refinery creates git worktrees.
 	// Default: ~/.pogo/refinery/worktrees/
 	WorktreeDir string
+	// MaxHistoryLen is the maximum number of completed merge requests to keep.
+	// Zero means use DefaultMaxHistoryLen. Negative means unlimited.
+	MaxHistoryLen int
+	// MaxHistoryAge is the maximum age of completed merge requests to keep.
+	// Zero means use DefaultMaxHistoryAge. Negative means no age limit.
+	MaxHistoryAge time.Duration
+	// MacguffinDir is the path to the macguffin work directory (e.g. ~/.macguffin/work).
+	// If empty, the QA gate is disabled.
+	MacguffinDir string
 }
 
 // DefaultConfig returns a Config with sensible defaults.
@@ -39,6 +54,7 @@ func DefaultConfig() Config {
 		Enabled:      true,
 		PollInterval: DefaultPollInterval,
 		WorktreeDir:  filepath.Join(home, ".pogo", "refinery", "worktrees"),
+		MacguffinDir: filepath.Join(home, ".macguffin", "work"),
 	}
 }
 
@@ -84,6 +100,10 @@ type Refinery struct {
 	onMerged OnMerged
 	onFailed OnFailed
 
+	// nowFunc is used for time-based pruning; defaults to time.Now.
+	// Override in tests to control time.
+	nowFunc func() time.Time
+
 	cancel context.CancelFunc
 	done   chan struct{}
 }
@@ -96,13 +116,20 @@ func New(cfg Config) (*Refinery, error) {
 	if cfg.PollInterval <= 0 {
 		cfg.PollInterval = DefaultPollInterval
 	}
+	if cfg.MaxHistoryLen == 0 {
+		cfg.MaxHistoryLen = DefaultMaxHistoryLen
+	}
+	if cfg.MaxHistoryAge == 0 {
+		cfg.MaxHistoryAge = DefaultMaxHistoryAge
+	}
 	if err := os.MkdirAll(cfg.WorktreeDir, 0755); err != nil {
 		return nil, fmt.Errorf("create worktree dir: %w", err)
 	}
 	return &Refinery{
-		cfg:  cfg,
-		byID: make(map[string]*MergeRequest),
-		done: make(chan struct{}),
+		cfg:     cfg,
+		byID:    make(map[string]*MergeRequest),
+		done:    make(chan struct{}),
+		nowFunc: time.Now,
 	}, nil
 }
 
@@ -241,6 +268,13 @@ func (r *Refinery) processNext() {
 		return
 	}
 
+	// QA gate: check if a QA work item exists for this MR's author (work ID).
+	result, qaItemID := r.checkQAGate(mr.Author)
+	if result == QAGateHold {
+		r.holdMergeRequest(mr, qaItemID)
+		return
+	}
+
 	r.mu.Lock()
 	mr.Status = StatusProcessing
 	r.mu.Unlock()
@@ -260,6 +294,7 @@ func (r *Refinery) processNext() {
 		log.Printf("refinery: MR %s merged successfully branch=%s author=%s", mr.ID, mr.Branch, mr.Author)
 	}
 	r.history = append(r.history, mr)
+	r.pruneHistoryLocked()
 	onMerged := r.onMerged
 	onFailed := r.onFailed
 	r.mu.Unlock()
@@ -284,4 +319,30 @@ func (r *Refinery) dequeue() *MergeRequest {
 	mr := r.queue[0]
 	r.queue = r.queue[1:]
 	return mr
+}
+
+// pruneHistoryLocked removes old entries from history. Must be called with mu held.
+// It enforces both the count limit (MaxHistoryLen) and age limit (MaxHistoryAge).
+func (r *Refinery) pruneHistoryLocked() {
+	// Age-based pruning (history is append-order, oldest first).
+	if r.cfg.MaxHistoryAge > 0 {
+		cutoff := r.nowFunc().Add(-r.cfg.MaxHistoryAge)
+		i := 0
+		for i < len(r.history) && r.history[i].DoneTime.Before(cutoff) {
+			delete(r.byID, r.history[i].ID)
+			i++
+		}
+		if i > 0 {
+			r.history = r.history[i:]
+		}
+	}
+
+	// Count-based pruning.
+	if r.cfg.MaxHistoryLen > 0 && len(r.history) > r.cfg.MaxHistoryLen {
+		excess := len(r.history) - r.cfg.MaxHistoryLen
+		for _, mr := range r.history[:excess] {
+			delete(r.byID, mr.ID)
+		}
+		r.history = r.history[excess:]
+	}
 }

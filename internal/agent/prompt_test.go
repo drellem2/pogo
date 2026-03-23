@@ -349,6 +349,7 @@ func TestInstallPromptsUpdatesUnstampedFiles(t *testing.T) {
 	os.MkdirAll(tmplDir, 0755)
 	os.WriteFile(filepath.Join(agentsDir, "mayor.md"), []byte("# Old mayor\n"), 0644)
 	os.WriteFile(filepath.Join(tmplDir, "polecat.md"), []byte("# Old polecat\n"), 0644)
+	os.WriteFile(filepath.Join(tmplDir, "polecat-qa.md"), []byte("# Old polecat-qa\n"), 0644)
 
 	result, err := InstallPrompts(false)
 	if err != nil {
