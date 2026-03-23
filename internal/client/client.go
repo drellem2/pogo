@@ -89,6 +89,21 @@ func StartServer() error {
 	return nil
 }
 
+// StopOrchestration tells pogod to transition to index-only mode,
+// stopping agents and refinery while keeping the server alive.
+func StopOrchestration() error {
+	resp, err := http.Post(serverURL+"/server/stop-orchestration", "application/json", nil)
+	if err != nil {
+		return fmt.Errorf("failed to contact server: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("server returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return nil
+}
+
 func StopServer() error {
 	pidPath := filepath.Join(os.TempDir(), "pogo.pid")
 
