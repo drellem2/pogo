@@ -1224,7 +1224,94 @@ Example:
 	cmdRefinerySubmit.Flags().StringVar(&submitTarget, "target", "main", "Target ref to merge into")
 	cmdRefinerySubmit.Flags().StringVar(&submitAuthor, "author", "", "Author agent name")
 
+	var cmdRefineryQueue = &cobra.Command{
+		Use:   "queue",
+		Short: "Show pending merge requests",
+		Args:  cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			queue, err := client.GetRefineryQueue()
+			if err != nil {
+				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+			}
+			if jsonOutput {
+				cli.PrintJSON(queue)
+			} else {
+				if len(queue) == 0 {
+					fmt.Println("No pending merges.")
+					return
+				}
+				for _, mr := range queue {
+					fmt.Printf("%-12s  branch=%-30s  author=%-15s  status=%-10s  submitted=%s\n",
+						mr.ID, mr.Branch, mr.Author, string(mr.Status), mr.SubmitTime.Format("2006-01-02 15:04"))
+				}
+			}
+		},
+	}
+
+	var cmdRefineryHistory = &cobra.Command{
+		Use:   "history",
+		Short: "Show completed merge requests with status",
+		Args:  cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			history, err := client.GetRefineryHistory()
+			if err != nil {
+				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+			}
+			if jsonOutput {
+				cli.PrintJSON(history)
+			} else {
+				if len(history) == 0 {
+					fmt.Println("No merge history.")
+					return
+				}
+				for _, mr := range history {
+					line := fmt.Sprintf("%-12s  branch=%-30s  author=%-15s  status=%-10s  done=%s",
+						mr.ID, mr.Branch, mr.Author, string(mr.Status), mr.DoneTime.Format("2006-01-02 15:04"))
+					if mr.Error != "" {
+						line += fmt.Sprintf("  error=%s", mr.Error)
+					}
+					fmt.Println(line)
+				}
+			}
+		},
+	}
+
+	var cmdRefineryShow = &cobra.Command{
+		Use:   "show <mr-id>",
+		Short: "Show details for a single merge request",
+		Args:  cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			mr, err := client.GetRefineryMR(args[0])
+			if err != nil {
+				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+			}
+			if jsonOutput {
+				cli.PrintJSON(mr)
+			} else {
+				fmt.Printf("ID:        %s\n", mr.ID)
+				fmt.Printf("Branch:    %s\n", mr.Branch)
+				fmt.Printf("Target:    %s\n", mr.TargetRef)
+				fmt.Printf("Author:    %s\n", mr.Author)
+				fmt.Printf("Status:    %s\n", mr.Status)
+				fmt.Printf("Repo:      %s\n", mr.RepoPath)
+				fmt.Printf("Submitted: %s\n", mr.SubmitTime.Format("2006-01-02 15:04:05"))
+				if !mr.DoneTime.IsZero() {
+					fmt.Printf("Done:      %s\n", mr.DoneTime.Format("2006-01-02 15:04:05"))
+				}
+				if mr.Error != "" {
+					fmt.Printf("Error:     %s\n", mr.Error)
+				}
+				if mr.GateOutput != "" {
+					fmt.Printf("\n--- Gate Output ---\n%s\n", mr.GateOutput)
+				}
+			}
+		},
+	}
+
 	cmdRefinery.AddCommand(cmdRefinerySubmit)
+	cmdRefinery.AddCommand(cmdRefineryQueue)
+	cmdRefinery.AddCommand(cmdRefineryHistory)
+	cmdRefinery.AddCommand(cmdRefineryShow)
 	rootCmd.AddCommand(cmdRefinery)
 	completion.AddCommand(rootCmd)
 

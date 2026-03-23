@@ -38,6 +38,37 @@ func GetRefineryQueue() ([]refinery.MergeRequest, error) {
 	return queue, nil
 }
 
+// GetRefineryHistory returns completed merge requests (most recent first).
+func GetRefineryHistory() ([]refinery.MergeRequest, error) {
+	r, err := http.Get(serverURL + "/refinery/history")
+	if err != nil {
+		return nil, err
+	}
+	defer r.Body.Close()
+	var history []refinery.MergeRequest
+	if err := json.NewDecoder(r.Body).Decode(&history); err != nil {
+		return nil, err
+	}
+	return history, nil
+}
+
+// GetRefineryMR returns a single merge request by ID.
+func GetRefineryMR(id string) (*refinery.MergeRequest, error) {
+	r, err := http.Get(serverURL + "/refinery/mr/" + id)
+	if err != nil {
+		return nil, err
+	}
+	defer r.Body.Close()
+	if r.StatusCode == http.StatusNotFound {
+		return nil, fmt.Errorf("merge request %s not found", id)
+	}
+	var mr refinery.MergeRequest
+	if err := json.NewDecoder(r.Body).Decode(&mr); err != nil {
+		return nil, err
+	}
+	return &mr, nil
+}
+
 // SubmitMerge submits a branch to the refinery merge queue.
 func SubmitMerge(req refinery.SubmitRequest) (string, error) {
 	body, err := json.Marshal(req)
