@@ -5,6 +5,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -23,6 +24,7 @@ import (
 	"github.com/drellem2/pogo/internal/refinery"
 	"github.com/drellem2/pogo/internal/service"
 	"github.com/drellem2/pogo/internal/version"
+	"github.com/drellem2/pogo/internal/xref"
 )
 
 func showPromptFile(path string, jsonOut bool) {
@@ -1313,6 +1315,102 @@ Example:
 	cmdRefinery.AddCommand(cmdRefineryHistory)
 	cmdRefinery.AddCommand(cmdRefineryShow)
 	rootCmd.AddCommand(cmdRefinery)
+
+	// Cross-repo operations
+	var cmdDeps = &cobra.Command{
+		Use:   "deps",
+		Short: "Show dependency graph across indexed repos",
+		Long: `Analyze Go module paths and import statements across all indexed
+repos to build a dependency graph showing which repos depend on which.`,
+		Args: cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			graph, err := client.BuildDepGraph()
+			if err != nil {
+				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+			}
+			if jsonOutput {
+				cli.PrintJSON(graph)
+				return
+			}
+			if len(graph.Nodes) == 0 {
+				fmt.Println("No repos indexed.")
+				return
+			}
+			fmt.Println("=== Repos ===")
+			for _, n := range graph.Nodes {
+				if n.ModulePath != "" {
+					fmt.Printf("  %s  (%s)\n", n.Repo, n.ModulePath)
+				} else {
+					fmt.Printf("  %s\n", n.Repo)
+				}
+			}
+			fmt.Println()
+			if len(graph.Edges) == 0 {
+				fmt.Println("No cross-repo dependencies found.")
+				return
+			}
+			fmt.Println("=== Dependencies ===")
+			for _, e := range graph.Edges {
+				fmt.Printf("  %s → %s  (via %s)\n", e.From, e.To, e.ImportPath)
+			}
+			fmt.Printf("\n%d repos, %d dependencies\n", len(graph.Nodes), len(graph.Edges))
+		},
+	}
+
+	var cmdRefs = &cobra.Command{
+		Use:   "refs <symbol>",
+		Short: "Find cross-repo references to a symbol",
+		Long: `Search for a symbol across all indexed repos and classify matches
+as definitions, imports, or call sites.`,
+		Args: cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			total := 0
+			first := true
+			err := client.FindReferences(args[0], func(rr *xref.RepoRefs) {
+				if jsonOutput {
+					data, merr := json.Marshal(rr)
+					if merr != nil {
+						return
+					}
+					fmt.Println(string(data))
+					return
+				}
+				if !first {
+					fmt.Println()
+				}
+				first = false
+				fmt.Printf("=== %s ===\n", rr.Repo)
+				if rr.Error != "" {
+					fmt.Printf("  error: %s\n", rr.Error)
+					return
+				}
+				byKind := map[xref.RefKind][]xref.Reference{}
+				for _, ref := range rr.Refs {
+					byKind[ref.Kind] = append(byKind[ref.Kind], ref)
+				}
+				kindOrder := []xref.RefKind{xref.RefDefinition, xref.RefImport, xref.RefCall}
+				for _, kind := range kindOrder {
+					refs := byKind[kind]
+					if len(refs) == 0 {
+						continue
+					}
+					fmt.Printf("  [%s]\n", kind)
+					for _, ref := range refs {
+						fmt.Printf("    %s:%d\t%s\n", ref.File, ref.Line, ref.Content)
+					}
+					total += len(refs)
+				}
+			})
+			if err != nil {
+				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+			}
+			if !jsonOutput {
+				fmt.Printf("\n%d references found across repos\n", total)
+			}
+		},
+	}
+	rootCmd.AddCommand(cmdDeps)
+	rootCmd.AddCommand(cmdRefs)
 	completion.AddCommand(rootCmd)
 
 	if err := rootCmd.Execute(); err != nil {
