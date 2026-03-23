@@ -872,6 +872,17 @@ Safe to run multiple times — stale prompts are auto-updated, other files are p
 			}
 
 			// Step 2: Initialize macguffin
+			if _, lookErr := exec.LookPath("mg"); lookErr != nil {
+				if !jsonOutput {
+					fmt.Println("  ✗ macguffin (mg) not found in PATH")
+					fmt.Println("")
+					fmt.Println("  Agent orchestration requires macguffin. Install it with:")
+					fmt.Println("    go install github.com/drellem2/macguffin/cmd/mg@latest")
+					fmt.Println("")
+					fmt.Println("  See: https://github.com/drellem2/macguffin")
+				}
+				cli.ExitWithError(jsonOutput, "macguffin (mg) is not installed — install it with: go install github.com/drellem2/macguffin/cmd/mg@latest", cli.ExitError)
+			}
 			mgInit := func() error {
 				c := exec.Command("mg", "init")
 				c.Stdout = os.Stdout
@@ -879,9 +890,8 @@ Safe to run multiple times — stale prompts are auto-updated, other files are p
 				return c.Run()
 			}
 			if err := mgInit(); err != nil {
-				// mg init is idempotent — if it fails, mg might not be installed
 				if !jsonOutput {
-					fmt.Println("  ⚠ mg init failed (is macguffin installed?)")
+					fmt.Println("  ⚠ mg init failed — check macguffin installation")
 				}
 			} else {
 				if !jsonOutput {
@@ -1008,7 +1018,7 @@ Exits with code 1 if any critical check fails.`,
 
 			// 6. Macguffin available
 			if _, err := exec.LookPath("mg"); err != nil {
-				warn("macguffin (mg)", "not found in PATH")
+				warn("macguffin (mg)", "not found in PATH (install: go install github.com/drellem2/macguffin/cmd/mg@latest)")
 			} else {
 				// Check for stale claimed items
 				mgOut, mgErr := exec.Command("mg", "list", "--status=claimed").CombinedOutput()
