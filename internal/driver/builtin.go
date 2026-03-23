@@ -5,6 +5,7 @@
 package driver
 
 import (
+	diagnosticsPlugin "github.com/drellem2/pogo/internal/diagnostics"
 	searchPlugin "github.com/drellem2/pogo/internal/search"
 	pogoPlugin "github.com/drellem2/pogo/pkg/plugin"
 )
@@ -12,7 +13,8 @@ import (
 type BuiltinFactory func() (pogoPlugin.IPogoPlugin, error)
 
 var builtinPlugins = map[string]BuiltinFactory{
-	"pogo-plugin-search": searchPlugin.New(),
+	"pogo-plugin-search":      searchPlugin.New(),
+	"pogo-plugin-diagnostics": diagnosticsPlugin.New(),
 }
 
 var builtinRegistry = newRegistry()

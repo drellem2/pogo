@@ -39,6 +39,7 @@ var handshakeConfig = plugin.HandshakeConfig{
 // pluginMap is the map of plugins we can dispense.
 var pluginMap = map[string]plugin.Plugin{
 	"basicSearch": &pogoPlugin.PogoPlugin{},
+	"diagnostics": &pogoPlugin.PogoPlugin{},
 }
 
 var clients map[string]*plugin.Client
