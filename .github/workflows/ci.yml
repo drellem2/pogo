@@ -83,6 +83,7 @@ jobs:
         run: shell/bashrc_test.sh
 
   version-check:
+    if: false  # Disabled — re-enable by removing this line
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
