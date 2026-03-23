@@ -125,6 +125,79 @@ func TestHandleStopOrchestrationWrongMethod(t *testing.T) {
 	}
 }
 
+func TestRequireOrchestrationAllowsFullMode(t *testing.T) {
+	s := New(nil, nil)
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("ok"))
+	})
+	handler := s.RequireOrchestration(inner)
+
+	req := httptest.NewRequest(http.MethodGet, "/agents", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 in full mode, got %d", w.Code)
+	}
+}
+
+func TestRequireOrchestrationRejects503InIndexOnly(t *testing.T) {
+	s := New(nil, nil)
+	s.SetMode(config.ModeIndexOnly)
+
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("handler should not be called in index-only mode")
+	})
+	handler := s.RequireOrchestration(inner)
+
+	req := httptest.NewRequest(http.MethodGet, "/agents", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d", w.Code)
+	}
+
+	var resp map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp["error"] != "orchestration is stopped" {
+		t.Fatalf("expected error message, got %q", resp["error"])
+	}
+	if resp["mode"] != "index-only" {
+		t.Fatalf("expected mode=index-only, got %s", resp["mode"])
+	}
+}
+
+func TestRequireOrchestrationResumesAfterModeChange(t *testing.T) {
+	s := New(nil, nil)
+	s.SetRefineryStarter(func() error { return nil })
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := s.RequireOrchestration(inner)
+
+	// Stop orchestration
+	s.SetMode(config.ModeIndexOnly)
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 in index-only, got %d", w.Code)
+	}
+
+	// Resume orchestration
+	s.SetMode(config.ModeFull)
+	req = httptest.NewRequest(http.MethodGet, "/test", nil)
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 after resuming, got %d", w.Code)
+	}
+}
+
 func TestHandleModeAfterStopOrchestration(t *testing.T) {
 	s := New(nil, nil)
 	mux := http.NewServeMux()

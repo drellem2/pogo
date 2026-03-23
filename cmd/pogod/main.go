@@ -231,17 +231,25 @@ func registerHandlers() {
 	http.HandleFunc("/health", health)
 	http.HandleFunc("/status", status)
 
-	// Agent management endpoints
-	agentRegistry.RegisterHandlers(http.DefaultServeMux)
-
-	// Refinery endpoints
+	// Agent and refinery endpoints behind orchestration guard.
+	// When the server is in index-only mode, these return 503.
+	orchestrated := http.NewServeMux()
+	agentRegistry.RegisterHandlers(orchestrated)
 	if mergeQueue != nil {
-		mergeQueue.RegisterHandlers(http.DefaultServeMux)
+		mergeQueue.RegisterHandlers(orchestrated)
 	}
-
-	// Server mode endpoints
 	if srv != nil {
+		http.Handle("/agents/", srv.RequireOrchestration(orchestrated))
+		http.Handle("/agents", srv.RequireOrchestration(orchestrated))
+		http.Handle("/refinery/", srv.RequireOrchestration(orchestrated))
+
+		// Server mode endpoints (not guarded — always available)
 		srv.RegisterHandlers(http.DefaultServeMux)
+	} else {
+		// No server coordinator — register directly
+		http.Handle("/agents/", orchestrated)
+		http.Handle("/agents", orchestrated)
+		http.Handle("/refinery/", orchestrated)
 	}
 }
 

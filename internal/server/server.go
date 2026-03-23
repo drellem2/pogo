@@ -113,6 +113,24 @@ func (s *Server) transitionToFull() error {
 	return nil
 }
 
+// RequireOrchestration returns middleware that rejects requests with 503
+// when the server is in index-only mode. Use this to guard agent and
+// refinery endpoints that require full orchestration.
+func (s *Server) RequireOrchestration(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.Mode() != config.ModeFull {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error": "orchestration is stopped",
+				"mode":  s.Mode().String(),
+			})
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // RegisterHandlers registers the server mode HTTP endpoints.
 func (s *Server) RegisterHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/server/mode", s.handleMode)
