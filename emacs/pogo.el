@@ -51,8 +51,9 @@
 (defvar pogo-visit-cache-seconds (* 60 10))
 (defvar pogo-failure-count 0) ;; Number of failures starting pogo server
 (defvar pogo-server-started nil)
-(defvar pogo--mode-line nil
-  "Current Pogo mode-line string.")
+(defvar pogo--mode-line " Pogo[-]"
+  "Current Pogo mode-line string.
+Updated dynamically by `pogo-update-mode-line'.")
 (defvar pogo-commander-methods nil
   "List of file-selection methods for the `pogo-commander' command.
 Each element is a list (KEY DESCRIPTION FUNCTION).
@@ -1277,6 +1278,8 @@ The function does pretty much nothing when triggered on remote files
 as all the operations it normally performs are extremely slow over
 tramp."
   (pogo-maybe-limit-project-file-buffers)
+  (when pogo-dynamic-mode-line
+    (pogo-update-mode-line))
   (pogo-project-p))
 
 
@@ -1284,7 +1287,7 @@ tramp."
 (define-minor-mode pogo-mode
   "Minor mode for project management and code intelligence.
 \\{pogo-mode-map}"
-  :lighter "pogo" ;; TODO: Make this dynamic
+  :lighter pogo--mode-line
   :keymap pogo-mode-map
   :group 'pogo
   :require 'pogo
@@ -1303,6 +1306,7 @@ tramp."
                 #'pogo-compilation-find-file)
     (setq pogo-failure-count 0)
     (setq pogo-server-started nil)
+    (pogo-update-mode-line)
     (pogo-try-start))
    (t
     (remove-hook 'find-file-hook #'pogo-find-file-hook-function)
