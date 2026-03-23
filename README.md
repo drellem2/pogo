@@ -172,7 +172,7 @@ Use `sp` (fuzzy project switcher via fzf) and automatic project registration in 
 |--------|--------|------|
 | [Emacs](docs/emacs.md) | Supported | Full minor mode with project navigation, code search, and buffer management |
 | [Neovim](docs/neovim.md) | Supported | Lua plugin with Telescope/fzf-lua integration |
-| [VS Code](docs/vscode.md) | In development | Extension with command palette and search panel |
+| [VS Code](docs/vscode.md) | Supported | Extension with command palette and search panel |
 
 ### tmux
 
