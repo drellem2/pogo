@@ -88,6 +88,35 @@ func StartServer() error {
 	return nil
 }
 
+// GetServerMode returns the current run mode of the server ("full" or "index-only").
+func GetServerMode() (string, error) {
+	resp, err := http.Get(serverURL + "/server/mode")
+	if err != nil {
+		return "", fmt.Errorf("failed to contact server: %w", err)
+	}
+	defer resp.Body.Close()
+	var result map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("failed to decode response: %w", err)
+	}
+	return result["mode"], nil
+}
+
+// StartOrchestration tells pogod to transition to full mode,
+// restarting agents and refinery without re-indexing.
+func StartOrchestration() error {
+	resp, err := http.Post(serverURL+"/server/start-orchestration", "application/json", nil)
+	if err != nil {
+		return fmt.Errorf("failed to contact server: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("server returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return nil
+}
+
 // StopOrchestration tells pogod to transition to index-only mode,
 // stopping agents and refinery while keeping the server alive.
 func StopOrchestration() error {
