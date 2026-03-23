@@ -304,12 +304,15 @@ func (r *Registry) handleStart(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// Nudge crew agent after a brief delay to kick off execution.
-	// Claude Code interactive mode waits for input — this sends the first message.
-	go func() {
-		time.Sleep(10 * time.Second)
-		a.Nudge("You are now running. Begin your coordination loop.")
-	}()
+	// Only nudge the mayor to kick off its coordination loop.
+	// Other crew agents (like architect) are interactive and should not
+	// receive unsolicited nudges — doing so disrupts their sessions.
+	if startReq.Name == "mayor" {
+		go func() {
+			time.Sleep(10 * time.Second)
+			a.Nudge("You are now running. Begin your coordination loop.")
+		}()
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
