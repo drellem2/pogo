@@ -828,6 +828,146 @@ Safe to run multiple times — stale prompts are auto-updated, other files are p
 	}
 	cmdInstall.Flags().BoolVar(&installForceFlag, "force", false, "Overwrite existing prompt files")
 
+	// Doctor command — system health check
+	var cmdDoctor = &cobra.Command{
+		Use:   "doctor",
+		Short: "Check system health and configuration",
+		Long: `Run diagnostic checks on the pogo system:
+  - Is pogod running?
+  - Is the system service installed?
+  - Are required tools installed (git, go, claude)?
+  - Are repos configured?
+  - Are agent prompts installed?
+  - Are there stale work items?
+
+Exits with code 1 if any critical check fails.`,
+		Args: cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			type checkResult struct {
+				Name   string `json:"name"`
+				Status string `json:"status"` // "pass", "fail", "warn"
+				Detail string `json:"detail,omitempty"`
+			}
+
+			var checks []checkResult
+			hasFail := false
+
+			pass := func(name, detail string) {
+				checks = append(checks, checkResult{Name: name, Status: "pass", Detail: detail})
+			}
+			fail := func(name, detail string) {
+				checks = append(checks, checkResult{Name: name, Status: "fail", Detail: detail})
+				hasFail = true
+			}
+			warn := func(name, detail string) {
+				checks = append(checks, checkResult{Name: name, Status: "warn", Detail: detail})
+			}
+
+			// 1. Is pogod running?
+			if err := client.HealthCheck(); err != nil {
+				fail("pogod running", "server is not reachable")
+			} else {
+				pass("pogod running", "")
+			}
+
+			// 2. System service installed?
+			installed, svcPath := service.Status()
+			if installed {
+				pass("system service", svcPath)
+			} else {
+				warn("system service", "not installed (run 'pogo service install')")
+			}
+
+			// 3. Required tools
+			for _, tool := range []string{"git", "go", "claude"} {
+				if p, err := exec.LookPath(tool); err != nil {
+					if tool == "claude" {
+						warn(tool+" in PATH", "not found")
+					} else {
+						fail(tool+" in PATH", "not found")
+					}
+				} else {
+					pass(tool+" in PATH", p)
+				}
+			}
+
+			// 4. Repos configured
+			projs, projErr := client.GetProjects()
+			if projErr != nil {
+				warn("projects", "could not query projects: "+projErr.Error())
+			} else if len(projs) == 0 {
+				warn("projects", "no repos registered (run 'pogo visit <path>')")
+			} else {
+				pass("projects", fmt.Sprintf("%d repo(s) registered", len(projs)))
+			}
+
+			// 5. Agent prompts installed
+			promptDir := agent.PromptDir()
+			if _, err := os.Stat(promptDir); os.IsNotExist(err) {
+				warn("agent prompts", "~/.pogo/agents/ not found (run 'pogo install')")
+			} else {
+				prompts, err := agent.ListPrompts()
+				if err != nil {
+					warn("agent prompts", "error listing: "+err.Error())
+				} else if len(prompts) == 0 {
+					warn("agent prompts", "no prompts found (run 'pogo agent prompt install')")
+				} else {
+					pass("agent prompts", fmt.Sprintf("%d prompt(s) found", len(prompts)))
+				}
+			}
+
+			// 6. Macguffin available
+			if _, err := exec.LookPath("mg"); err != nil {
+				warn("macguffin (mg)", "not found in PATH")
+			} else {
+				// Check for stale claimed items
+				mgOut, mgErr := exec.Command("mg", "list", "--status=claimed").CombinedOutput()
+				if mgErr != nil {
+					pass("macguffin (mg)", "installed")
+				} else {
+					items := strings.TrimSpace(string(mgOut))
+					if items == "" {
+						pass("macguffin (mg)", "no stale claims")
+					} else {
+						count := len(strings.Split(items, "\n"))
+						warn("macguffin (mg)", fmt.Sprintf("%d claimed work item(s) — check for stale claims", count))
+					}
+				}
+			}
+
+			// Output
+			if jsonOutput {
+				cli.PrintJSON(map[string]interface{}{
+					"checks":  checks,
+					"healthy": !hasFail,
+				})
+			} else {
+				for _, c := range checks {
+					var icon string
+					switch c.Status {
+					case "pass":
+						icon = "✓"
+					case "fail":
+						icon = "✗"
+					case "warn":
+						icon = "!"
+					}
+					if c.Detail != "" {
+						fmt.Printf("  %s  %-20s  %s\n", icon, c.Name, c.Detail)
+					} else {
+						fmt.Printf("  %s  %s\n", icon, c.Name)
+					}
+				}
+				if hasFail {
+					fmt.Println("\nSome checks failed.")
+					os.Exit(cli.ExitError)
+				} else {
+					fmt.Println("\nAll critical checks passed.")
+				}
+			}
+		},
+	}
+
 	var cmdVersion = &cobra.Command{
 		Use:   "version",
 		Short: "Print the pogo version",
@@ -937,6 +1077,7 @@ The path is resolved to an absolute path and the git root is discovered automati
 	rootCmd.AddCommand(cmdInstall)
 	rootCmd.AddCommand(cmdVisit)
 	rootCmd.AddCommand(cmdStatus)
+	rootCmd.AddCommand(cmdDoctor)
 	cmdServer.AddCommand(cmdServerStart)
 	cmdServer.AddCommand(cmdServerStop)
 	rootCmd.AddCommand(cmdServer)
