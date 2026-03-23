@@ -391,9 +391,8 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 			return
 		}
 		log.Printf("polecat %s: created worktree at %s (branch %s)", spawnReq.Name, worktreeDir, branchName)
-
-		// Add the worktree dir so Claude operates in the right directory.
-		cmd = append(cmd, "--add-dir", worktreeDir)
+		// No --add-dir needed: the process CWD is set to worktreeDir via SpawnRequest.Dir,
+		// and --add-dir triggers a directory trust prompt that blocks autonomous execution.
 	}
 
 	a, err := r.Spawn(SpawnRequest{
