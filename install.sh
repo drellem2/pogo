@@ -110,6 +110,49 @@ fi
 rm -rf "$tmpdir"
 
 echo "Done! Installed to ${INSTALL_DIR}"
+
+###############################################################################
+# Check for macguffin (mg) dependency
+###############################################################################
+
+if command -v mg >/dev/null 2>&1; then
+  echo ""
+  echo "✓ macguffin (mg) is already installed."
+else
+  echo ""
+  echo "⚠ macguffin (mg) is not installed."
+  echo "  Pogo requires macguffin for agent orchestration (work items, claims, mail)."
+  echo ""
+  echo "  Install it with:"
+  echo "    go install github.com/drellem2/macguffin/cmd/mg@latest"
+  echo ""
+  echo "  Or see: https://github.com/drellem2/macguffin"
+  echo ""
+  MG_INSTALLED=false
+
+  # Attempt auto-install if Go is available
+  if command -v go >/dev/null 2>&1; then
+    if [ "$INTERACTIVE" = true ]; then
+      if ask_yn "  Install macguffin (mg) now via 'go install'?"; then
+        if go install github.com/drellem2/macguffin/cmd/mg@latest; then
+          echo "  ✓ macguffin (mg) installed"
+          MG_INSTALLED=true
+        else
+          echo "  ✗ Failed to install macguffin. Please install it manually." >&2
+        fi
+      fi
+    else
+      echo "  Tip: Re-run with --interactive to install macguffin automatically."
+    fi
+  fi
+
+  if [ "$MG_INSTALLED" = false ]; then
+    echo "  Pogo will work for code search and project discovery without mg,"
+    echo "  but agent orchestration (pogo install, pogo agent start) requires it."
+  fi
+fi
+
+echo ""
 echo "Run 'pogo install' to set up agent orchestration."
 
 ###############################################################################
@@ -285,14 +328,20 @@ if command -v tmux >/dev/null 2>&1; then
     echo "  tmux: pogo plugin already installed in ${tmux_plugin_dir}, skipping."
   elif ask_yn "  Install tmux integration?"; then
     mkdir -p "$tmux_plugin_dir"
-    curl -fsSL -o "${tmux_plugin_dir}/pogo.tmux" "${TMUX_SOURCE_URL}/pogo.tmux"
-    curl -fsSL -o "${tmux_plugin_dir}/pogo-status.sh" "${TMUX_SOURCE_URL}/pogo-status.sh"
-    chmod +x "${tmux_plugin_dir}/pogo.tmux" "${tmux_plugin_dir}/pogo-status.sh"
-    echo "  tmux: plugin installed to ${tmux_plugin_dir}"
-    echo ""
-    echo "  Add to your .tmux.conf:"
-    echo "    run-shell ${tmux_plugin_dir}/pogo.tmux"
-    echo "    set -g status-right '#(${tmux_plugin_dir}/pogo-status.sh #{pane_current_path})'"
+    if ! curl -fsSL -o "${tmux_plugin_dir}/pogo.tmux" "${TMUX_SOURCE_URL}/pogo.tmux"; then
+      echo "  tmux: failed to download pogo.tmux" >&2
+      rm -f "${tmux_plugin_dir}/pogo.tmux"
+    elif ! curl -fsSL -o "${tmux_plugin_dir}/pogo-status.sh" "${TMUX_SOURCE_URL}/pogo-status.sh"; then
+      echo "  tmux: failed to download pogo-status.sh" >&2
+      rm -f "${tmux_plugin_dir}/pogo.tmux" "${tmux_plugin_dir}/pogo-status.sh"
+    else
+      chmod +x "${tmux_plugin_dir}/pogo.tmux" "${tmux_plugin_dir}/pogo-status.sh"
+      echo "  tmux: plugin installed to ${tmux_plugin_dir}"
+      echo ""
+      echo "  Add to your .tmux.conf:"
+      echo "    run-shell ${tmux_plugin_dir}/pogo.tmux"
+      echo "    set -g status-right '#(${tmux_plugin_dir}/pogo-status.sh #{pane_current_path})'"
+    fi
   else
     echo "  tmux: skipped."
   fi
@@ -380,7 +429,7 @@ if command -v code >/dev/null 2>&1; then
     done
     if [ "$vscode_ok" = true ] && command -v npm >/dev/null 2>&1; then
       echo "  Building and installing extension..."
-      (cd "$vscode_tmpdir" && npm install --ignore-scripts 2>/dev/null && npx vsce package -o pogo.vsix 2>/dev/null && code --install-extension pogo.vsix 2>/dev/null)
+      (cd "$vscode_tmpdir" && npm install --ignore-scripts && npx vsce package -o pogo.vsix && code --install-extension pogo.vsix)
       if [ $? -eq 0 ]; then
         echo "  vscode: extension installed successfully."
       else

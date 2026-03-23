@@ -117,8 +117,8 @@ else
   fail "POGO_VERSION override not reflected in output"
 fi
 # Downloads will fail (fake version) but that's expected - we're testing the variable override
-if echo "$OUTPUT" | grep -q "Warning: failed to download"; then
-  pass "Download failures reported as warnings (expected for fake version)"
+if echo "$OUTPUT" | grep -q "Error: failed to download"; then
+  pass "Download failures reported as errors (expected for fake version)"
 fi
 rm -rf "$TMPDIR_INSTALL"
 
@@ -204,6 +204,15 @@ else
   fail "Marker detection failed"
 fi
 rm -rf "$TMPDIR_TEST"
+
+# --- Test 13: mg dependency check present in script ---
+echo ""
+echo "Test 13: macguffin (mg) dependency check exists in install script"
+if grep -q "macguffin" "$INSTALL_SCRIPT" && grep -q "command -v mg" "$INSTALL_SCRIPT"; then
+  pass "Install script contains macguffin dependency check"
+else
+  fail "Install script missing macguffin dependency check"
+fi
 
 # --- Summary ---
 echo ""

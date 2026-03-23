@@ -37,15 +37,24 @@ File work, walk away, come back to merged code on `main`.
 
 - [Go](https://go.dev/dl/) 1.21+ (to build from source)
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI installed
-- [macguffin](https://github.com/drellem2/macguffin) (`mg`) CLI installed
+- [macguffin](https://github.com/drellem2/macguffin) (`mg`) CLI — **required for agent orchestration**
 
 ### Install
 
 ```sh
 # Quick install (prebuilt binaries)
 curl -fsSL https://raw.githubusercontent.com/drellem2/pogo/main/install.sh | sh
+```
 
-# Or build from source
+The install script checks for macguffin and offers to install it automatically in `--interactive` mode. To install macguffin manually:
+
+```sh
+go install github.com/drellem2/macguffin/cmd/mg@latest
+```
+
+Or build pogo from source:
+
+```sh
 git clone https://github.com/drellem2/pogo.git && cd pogo
 ./build.sh
 ```

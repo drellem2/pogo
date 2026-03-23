@@ -872,6 +872,17 @@ Safe to run multiple times — stale prompts are auto-updated, other files are p
 			}
 
 			// Step 2: Initialize macguffin
+			if _, lookErr := exec.LookPath("mg"); lookErr != nil {
+				if !jsonOutput {
+					fmt.Println("  ✗ macguffin (mg) not found in PATH")
+					fmt.Println("")
+					fmt.Println("  Agent orchestration requires macguffin. Install it with:")
+					fmt.Println("    go install github.com/drellem2/macguffin/cmd/mg@latest")
+					fmt.Println("")
+					fmt.Println("  See: https://github.com/drellem2/macguffin")
+				}
+				cli.ExitWithError(jsonOutput, "macguffin (mg) is not installed — install it with: go install github.com/drellem2/macguffin/cmd/mg@latest", cli.ExitError)
+			}
 			mgInit := func() error {
 				c := exec.Command("mg", "init")
 				c.Stdout = os.Stdout
@@ -879,9 +890,8 @@ Safe to run multiple times — stale prompts are auto-updated, other files are p
 				return c.Run()
 			}
 			if err := mgInit(); err != nil {
-				// mg init is idempotent — if it fails, mg might not be installed
 				if !jsonOutput {
-					fmt.Println("  ⚠ mg init failed (is macguffin installed?)")
+					fmt.Println("  ⚠ mg init failed — check macguffin installation")
 				}
 			} else {
 				if !jsonOutput {
@@ -1008,7 +1018,7 @@ Exits with code 1 if any critical check fails.`,
 
 			// 6. Macguffin available
 			if _, err := exec.LookPath("mg"); err != nil {
-				warn("macguffin (mg)", "not found in PATH")
+				warn("macguffin (mg)", "not found in PATH (install: go install github.com/drellem2/macguffin/cmd/mg@latest)")
 			} else {
 				// Check for stale claimed items
 				mgOut, mgErr := exec.Command("mg", "list", "--status=claimed").CombinedOutput()
@@ -1331,10 +1341,48 @@ Example:
 		},
 	}
 
+	var cmdRefineryPrune = &cobra.Command{
+		Use:   "prune",
+		Short: "Prune merged branches from refinery worktrees",
+		Long: `Clean up branches in ~/.pogo/refinery/worktrees/ that have been
+merged to main. Also prunes stale remote-tracking references.
+
+This reclaims disk space and keeps the refinery worktree clones tidy.`,
+		Args: cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			results, err := client.PruneWorktrees()
+			if err != nil {
+				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+			}
+			if jsonOutput {
+				cli.PrintJSON(results)
+			} else {
+				total := 0
+				for _, r := range results {
+					if r.Error != "" {
+						fmt.Printf("%s: error: %s\n", r.Repo, r.Error)
+						continue
+					}
+					if len(r.PrunedBranches) > 0 {
+						fmt.Printf("%s: pruned %d branches: %s\n", r.Repo, len(r.PrunedBranches),
+							strings.Join(r.PrunedBranches, ", "))
+						total += len(r.PrunedBranches)
+					}
+				}
+				if total == 0 {
+					fmt.Println("No merged branches to prune.")
+				} else {
+					fmt.Printf("Pruned %d merged branches total.\n", total)
+				}
+			}
+		},
+	}
+
 	cmdRefinery.AddCommand(cmdRefinerySubmit)
 	cmdRefinery.AddCommand(cmdRefineryQueue)
 	cmdRefinery.AddCommand(cmdRefineryHistory)
 	cmdRefinery.AddCommand(cmdRefineryShow)
+	cmdRefinery.AddCommand(cmdRefineryPrune)
 	rootCmd.AddCommand(cmdRefinery)
 
 	// Cross-repo operations
