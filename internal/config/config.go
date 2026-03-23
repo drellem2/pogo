@@ -15,6 +15,29 @@ const (
 	DefaultBind = "127.0.0.1"
 )
 
+// RunMode represents the operating mode of the pogo daemon.
+type RunMode int
+
+const (
+	// ModeFull means everything is running: agents, refinery, indexing, HTTP.
+	ModeFull RunMode = iota
+	// ModeIndexOnly means only project indexing, search, and HTTP are running.
+	// Agents and refinery are stopped.
+	ModeIndexOnly
+)
+
+// String returns the human-readable name of the run mode.
+func (m RunMode) String() string {
+	switch m {
+	case ModeFull:
+		return "full"
+	case ModeIndexOnly:
+		return "index-only"
+	default:
+		return "unknown"
+	}
+}
+
 // Config holds pogo daemon configuration.
 type Config struct {
 	Port     int

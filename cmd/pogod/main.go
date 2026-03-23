@@ -28,12 +28,14 @@ import (
 	"github.com/drellem2/pogo/internal/driver"
 	"github.com/drellem2/pogo/internal/project"
 	"github.com/drellem2/pogo/internal/refinery"
+	"github.com/drellem2/pogo/internal/server"
 
 	pogoPlugin "github.com/drellem2/pogo/pkg/plugin"
 )
 
 var agentRegistry *agent.Registry
 var mergeQueue *refinery.Refinery
+var srv *server.Server
 
 var bindFlag = flag.String("bind", "", "address to bind the server to (default: 127.0.0.1)")
 
@@ -235,6 +237,11 @@ func registerHandlers() {
 	if mergeQueue != nil {
 		mergeQueue.RegisterHandlers(http.DefaultServeMux)
 	}
+
+	// Server mode endpoints
+	if srv != nil {
+		srv.RegisterHandlers(http.DefaultServeMux)
+	}
 }
 
 func main() {
@@ -305,8 +312,8 @@ func main() {
 
 	// Start refinery merge queue loop
 	cfg := config.Load()
+	refineCfg := refinery.DefaultConfig()
 	if cfg.Refinery.Enabled {
-		refineCfg := refinery.DefaultConfig()
 		if cfg.Refinery.PollInterval > 0 {
 			refineCfg.PollInterval = cfg.Refinery.PollInterval
 		}
@@ -349,6 +356,28 @@ func main() {
 			go mergeQueue.Start(context.Background())
 			defer mergeQueue.Stop()
 		}
+	}
+
+	// Initialize server coordinator
+	srv = server.New(agentRegistry, mergeQueue)
+	if mergeQueue != nil {
+		onMerged := mergeQueue.OnMergedFunc()
+		onFailed := mergeQueue.OnFailedFunc()
+		srv.SetRefineryStarter(func() error {
+			newRef, err := refinery.New(refineCfg)
+			if err != nil {
+				return err
+			}
+			if onMerged != nil {
+				newRef.SetOnMerged(onMerged)
+			}
+			if onFailed != nil {
+				newRef.SetOnFailed(onFailed)
+			}
+			mergeQueue = newRef
+			go mergeQueue.Start(context.Background())
+			return nil
+		})
 	}
 
 	// Register HTTP handlers

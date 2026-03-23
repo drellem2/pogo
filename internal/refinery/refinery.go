@@ -147,6 +147,20 @@ func (r *Refinery) SetOnFailed(fn OnFailed) {
 	r.onFailed = fn
 }
 
+// OnMergedFunc returns the current OnMerged callback.
+func (r *Refinery) OnMergedFunc() OnMerged {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.onMerged
+}
+
+// OnFailedFunc returns the current OnFailed callback.
+func (r *Refinery) OnFailedFunc() OnFailed {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.onFailed
+}
+
 // Submit adds a merge request to the queue. Returns the assigned ID.
 func (r *Refinery) Submit(req MergeRequest) (string, error) {
 	r.mu.Lock()
