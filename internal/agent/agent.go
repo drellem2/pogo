@@ -459,15 +459,20 @@ func (r *Registry) waitAndHandle(a *Agent) {
 	}
 	a.mu.Unlock()
 
-	close(a.done)
 	log.Printf("agent %s: exited (err=%v)", a.Name, a.exitErr)
 
+	// Fire onExit callback BEFORE closing done, so that callers waiting on
+	// Done() (e.g. Stop/StopAll during shutdown) block until cleanup
+	// (including worktree removal) has completed. Previously, done was closed
+	// first, allowing the server to exit before onExit could clean up.
 	r.mu.RLock()
 	cb := r.onExit
 	r.mu.RUnlock()
 	if cb != nil {
 		cb(a, a.exitErr)
 	}
+
+	close(a.done)
 }
 
 // Cleanup closes PTY and socket. Exported for use by lifecycle callbacks.

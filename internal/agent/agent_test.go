@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -451,5 +452,38 @@ func TestWorktreeFieldsVisibleInOnExit(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("onExit was not called within 5 seconds")
+	}
+}
+
+func TestDoneBlocksUntilOnExitCompletes(t *testing.T) {
+	tmpDir := t.TempDir()
+	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+
+	// onExit sleeps briefly; Done() must not signal until it returns.
+	var onExitDone atomic.Bool
+	reg.SetOnExit(func(a *Agent, err error) {
+		time.Sleep(200 * time.Millisecond)
+		onExitDone.Store(true)
+	})
+
+	a, err := reg.Spawn(SpawnRequest{
+		Name:    "done-blocks",
+		Type:    TypePolecat,
+		Command: []string{"true"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-a.Done():
+		if !onExitDone.Load() {
+			t.Fatal("Done() signaled before onExit completed — cleanup race")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Done() never signaled")
 	}
 }
