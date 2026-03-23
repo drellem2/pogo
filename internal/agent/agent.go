@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
@@ -232,7 +233,7 @@ func (r *Registry) Get(name string) *Agent {
 	return r.agents[name]
 }
 
-// List returns all running agents.
+// List returns all running agents sorted by type (crew first) then name.
 func (r *Registry) List() []*Agent {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -240,6 +241,12 @@ func (r *Registry) List() []*Agent {
 	for _, a := range r.agents {
 		agents = append(agents, a)
 	}
+	sort.Slice(agents, func(i, j int) bool {
+		if agents[i].Type != agents[j].Type {
+			return agents[i].Type == TypeCrew
+		}
+		return agents[i].Name < agents[j].Name
+	})
 	return agents
 }
 
