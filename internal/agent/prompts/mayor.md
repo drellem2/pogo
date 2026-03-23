@@ -85,6 +85,12 @@ Look for:
   ```
   Check for completed polecats on every cycle — leaving them running wastes resources.
 
+- **Unstarted polecats**: If a polecat was spawned but hasn't claimed its work item within ~30-60 seconds, nudge it with a short message to kick-start it. This fixes intermittent folder permission issues that can block initialization:
+  ```bash
+  pogo nudge <name> "1"
+  ```
+  Check claimed status via `mg list --status=claimed` — if the polecat's item is still `available`, it hasn't started yet.
+
 - **Stuck polecats**: Running much longer than expected with no progress. Nudge them:
   ```bash
   pogo nudge <name> "status check — are you stuck?"
