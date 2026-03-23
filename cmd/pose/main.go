@@ -17,16 +17,19 @@ import (
 	"github.com/drellem2/pogo/internal/client"
 	"github.com/drellem2/pogo/internal/completion"
 	"github.com/drellem2/pogo/internal/version"
+	"github.com/drellem2/pogo/internal/xref"
 )
 
 func main() {
 	var jsonOutput bool
 	var searchAll bool
+	var findRefs bool
 
 	var rootCmd = &cobra.Command{Use: "pose", Version: version.Version}
 	rootCmd.Flags().BoolP("list", "l", false, "List all files with matching lines")
 	rootCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSON format")
 	rootCmd.Flags().BoolVar(&searchAll, "all", false, "Search across all known projects")
+	rootCmd.Flags().BoolVar(&findRefs, "refs", false, "Find cross-repo references (definitions, imports, calls)")
 
 	rootCmd.Run = func(cobraCmd *cobra.Command, args []string) {
 		if len(args) == 0 {
@@ -36,6 +39,11 @@ func main() {
 		list, err := cobraCmd.Flags().GetBool("list")
 		if err != nil {
 			cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+		}
+
+		if findRefs {
+			runFindRefs(args[0], jsonOutput)
+			return
 		}
 
 		if searchAll {
@@ -165,5 +173,58 @@ func runSearchAll(query string, jsonOutput bool, list bool) {
 	})
 	if err != nil {
 		cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+	}
+}
+
+func runFindRefs(symbol string, jsonOutput bool) {
+	first := true
+	total := 0
+
+	err := client.FindReferences(symbol, func(rr *xref.RepoRefs) {
+		if jsonOutput {
+			data, err := json.Marshal(rr)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, `{"error": "failed to marshal JSON: %s"}`+"\n", err)
+				return
+			}
+			fmt.Println(string(data))
+			return
+		}
+
+		if !first {
+			fmt.Println()
+		}
+		first = false
+
+		fmt.Printf("=== %s ===\n", rr.Repo)
+		if rr.Error != "" {
+			fmt.Printf("  error: %s\n", rr.Error)
+			return
+		}
+
+		// Group by kind for readability
+		byKind := map[xref.RefKind][]xref.Reference{}
+		for _, ref := range rr.Refs {
+			byKind[ref.Kind] = append(byKind[ref.Kind], ref)
+		}
+
+		kindOrder := []xref.RefKind{xref.RefDefinition, xref.RefImport, xref.RefCall}
+		for _, kind := range kindOrder {
+			refs := byKind[kind]
+			if len(refs) == 0 {
+				continue
+			}
+			fmt.Printf("  [%s]\n", kind)
+			for _, ref := range refs {
+				fmt.Printf("    %s:%d\t%s\n", ref.File, ref.Line, ref.Content)
+			}
+			total += len(refs)
+		}
+	})
+	if err != nil {
+		cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+	}
+	if !jsonOutput {
+		fmt.Printf("\n%d references found across repos\n", total)
 	}
 }
