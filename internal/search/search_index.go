@@ -6,7 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"io/ioutil"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -532,7 +532,7 @@ func (g *BasicSearch) serializeProjectIndex(proj *IndexedProject) {
 		if err != nil {
 			g.logger.Error("Error getting absolute path - file may not exist", path)
 		} else {
-			bytes, err := ioutil.ReadFile(absPath)
+			bytes, err := os.ReadFile(absPath)
 			if err != nil {
 				g.logger.Error("Error reading file ", absPath)
 			} else {
@@ -593,7 +593,7 @@ func (g *BasicSearch) Load(projectRoot string) (*IndexedProject, error) {
 		return nil, err
 	}
 	defer file.Close()
-	byteValue, _ := ioutil.ReadAll(file)
+	byteValue, _ := io.ReadAll(file)
 	err = json.Unmarshal(byteValue, project)
 	if err != nil {
 		g.logger.Error("Error deserializing index file: %v", err)
