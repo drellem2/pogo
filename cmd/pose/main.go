@@ -14,6 +14,7 @@ import (
 
 	"github.com/drellem2/pogo/internal/cli"
 	"github.com/drellem2/pogo/internal/client"
+	"github.com/drellem2/pogo/internal/completion"
 	"github.com/drellem2/pogo/internal/version"
 )
 
@@ -93,6 +94,8 @@ func main() {
 			}
 		}
 	}
+
+	completion.AddCommand(rootCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(cli.ExitError)
