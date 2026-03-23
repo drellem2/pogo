@@ -3,7 +3,6 @@ package search
 import (
 	"bytes"
 	"encoding/json"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -85,26 +84,18 @@ func TestSearch(t *testing.T) {
 		t.Errorf("Could not serialize search request as json")
 		return
 	}
-	// urlEncode searchRequestJson
-	searchRequestJsonUrlEncoded := url.QueryEscape(string(searchRequestJson))
-
 	// Sleep 500ms to allow the search index to be built
 	time.Sleep(500 * time.Millisecond)
-	resp := basicSearch.Execute(searchRequestJsonUrlEncoded)
+	resp := basicSearch.Execute(string(searchRequestJson))
 	if err != nil {
 		t.Errorf("Could not execute search request")
 		return
 	}
 
-	respDecoded, err := url.QueryUnescape(resp)
-	if err != nil {
-		t.Errorf("Could not url decode response")
-		return
-	}
-	// Unmarshal respDecoded into type SearchResponse
+	// Unmarshal resp into type SearchResponse
 	var searchResponse SearchResponse
-	t.Logf("Search Response: %s", respDecoded)
-	err = json.Unmarshal([]byte(respDecoded), &searchResponse)
+	t.Logf("Search Response: %s", resp)
+	err = json.Unmarshal([]byte(resp), &searchResponse)
 	if err != nil {
 		t.Errorf("Could not unmarshal response")
 		return
@@ -156,7 +147,7 @@ func TestSearch(t *testing.T) {
 		t.Errorf("Could not execute template")
 		return
 	}
-	jsonassert.New(t).Assertf(respDecoded, "%s", buff.String())
+	jsonassert.New(t).Assertf(resp, "%s", buff.String())
 }
 
 func TestNewFileCausesReIndex(t *testing.T) {
