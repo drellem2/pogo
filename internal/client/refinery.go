@@ -69,6 +69,24 @@ func GetRefineryMR(id string) (*refinery.MergeRequest, error) {
 	return &mr, nil
 }
 
+// PruneWorktrees asks the refinery to prune merged branches from worktree clones.
+func PruneWorktrees() ([]refinery.PruneResult, error) {
+	r, err := http.Post(serverURL+"/refinery/prune", "application/json", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer r.Body.Close()
+	if r.StatusCode != http.StatusOK {
+		msg, _ := io.ReadAll(r.Body)
+		return nil, fmt.Errorf("prune failed: %s", string(msg))
+	}
+	var results []refinery.PruneResult
+	if err := json.NewDecoder(r.Body).Decode(&results); err != nil {
+		return nil, err
+	}
+	return results, nil
+}
+
 // SubmitMerge submits a branch to the refinery merge queue.
 func SubmitMerge(req refinery.SubmitRequest) (string, error) {
 	body, err := json.Marshal(req)
