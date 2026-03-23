@@ -177,7 +177,7 @@ func (g *BasicSearch) ProcessProject(req *pogoPlugin.IProcessProjectReq) error {
 	if err != nil {
 		g.logger.Error("Error processing project", "error", err)
 	}
-	if err != nil || len(proj.Paths) == 0 {
+	if err != nil || len(proj.Paths) == 0 || proj.Status == StatusStale {
 		go g.Index(req)
 	}
 	return nil

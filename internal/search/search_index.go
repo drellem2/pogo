@@ -54,6 +54,7 @@ type IndexedProject struct {
 	Root       string            `json:"root"`
 	Paths      []string          `json:"paths"`
 	FileHashes map[string]string `json:"file_hashes,omitempty"`
+	FileMtimes map[string]int64  `json:"file_mtimes,omitempty"`
 	Status     IndexingStatus    `json:"indexing_status"`
 }
 
@@ -69,6 +70,10 @@ func deepCopyProject(p IndexedProject) IndexedProject {
 	cp.FileHashes = make(map[string]string, len(p.FileHashes))
 	for k, v := range p.FileHashes {
 		cp.FileHashes[k] = v
+	}
+	cp.FileMtimes = make(map[string]int64, len(p.FileMtimes))
+	for k, v := range p.FileMtimes {
+		cp.FileMtimes[k] = v
 	}
 	return cp
 }
@@ -158,9 +163,12 @@ func (g *BasicSearch) write(u *ProjectUpdater) {
 	}
 }
 
-// Should only be called by index
+// Should only be called by index.
+// prevHashes and prevMtimes hold data from a previous index run; when a file's
+// mtime has not changed we reuse the old hash instead of re-reading the file.
 func (g *BasicSearch) indexRec(proj *IndexedProject, path string,
-	gitIgnore *ignore.GitIgnore, u *ProjectUpdater) error {
+	gitIgnore *ignore.GitIgnore, u *ProjectUpdater,
+	prevHashes map[string]string, prevMtimes map[string]int64) error {
 	// First index all files in the project
 	file, err := os.Open(path)
 	if err != nil {
@@ -189,12 +197,23 @@ func (g *BasicSearch) indexRec(proj *IndexedProject, path string,
 		if !gitIgnore.MatchesPath(relativePath) && subFile != ".git" && subFile != ".pogo" {
 			if fileInfo.IsDir() {
 				u.addFw <- newPath
-				err = g.indexRec(proj, newPath, gitIgnore, u)
+				err = g.indexRec(proj, newPath, gitIgnore, u, prevHashes, prevMtimes)
 				if err != nil {
 					g.logger.Warn(err.Error())
 				}
 			} else {
 				files = append(files, relativePath)
+				mtime := fileInfo.ModTime().UnixNano()
+				proj.FileMtimes[relativePath] = mtime
+
+				// If mtime unchanged and we have a previous hash, reuse it
+				if oldMtime, ok := prevMtimes[relativePath]; ok && oldMtime == mtime {
+					if oldHash, hok := prevHashes[relativePath]; hok {
+						proj.FileHashes[relativePath] = oldHash
+						continue
+					}
+				}
+				// File is new or modified — compute hash
 				if hash, herr := computeFileHash(newPath); herr == nil {
 					proj.FileHashes[relativePath] = hash
 				}
@@ -207,16 +226,21 @@ func (g *BasicSearch) indexRec(proj *IndexedProject, path string,
 
 // Try to index all files in the project, then create a code search index.
 // The first is table stakes - so we error on failure. If the second fails, we log it and return.
+// prevHashes/prevMtimes are from a previous index run and enable incremental indexing.
 func (g *BasicSearch) index(proj *IndexedProject, path string,
-	gitIgnore *ignore.GitIgnore) {
+	gitIgnore *ignore.GitIgnore,
+	prevHashes map[string]string, prevMtimes map[string]int64) {
 
 	u := g.updater
 
 	if proj.FileHashes == nil {
 		proj.FileHashes = make(map[string]string)
 	}
+	if proj.FileMtimes == nil {
+		proj.FileMtimes = make(map[string]int64)
+	}
 
-	err := g.indexRec(proj, path, gitIgnore, u)
+	err := g.indexRec(proj, path, gitIgnore, u, prevHashes, prevMtimes)
 	if err != nil {
 		g.logger.Warn("Error indexing project: ", err.Error())
 		return
@@ -275,6 +299,7 @@ func (g *BasicSearch) ReIndex(path string) {
 			} else {
 				u.removeFw <- p
 				delete(indexed.FileHashes, p)
+				delete(indexed.FileMtimes, p)
 			}
 		}
 		indexed.Paths = paths
@@ -283,7 +308,7 @@ func (g *BasicSearch) ReIndex(path string) {
 		if err != nil {
 			g.logger.Error("Error parsing gitignore %v", err)
 		}
-		g.index(&indexed, fullPath, gitIgnore)
+		g.index(&indexed, fullPath, gitIgnore, indexed.FileHashes, indexed.FileMtimes)
 	}()
 }
 
@@ -318,6 +343,10 @@ func (g *BasicSearch) ReIndexFile(path string, op fsnotify.Op) {
 	u := g.updater
 	changed := false
 
+	if indexed.FileMtimes == nil {
+		indexed.FileMtimes = make(map[string]int64)
+	}
+
 	if op.Has(fsnotify.Remove) || op.Has(fsnotify.Rename) {
 		// Remove file from index
 		paths := indexed.Paths[:0]
@@ -329,6 +358,7 @@ func (g *BasicSearch) ReIndexFile(path string, op fsnotify.Op) {
 		if len(paths) != len(indexed.Paths) {
 			indexed.Paths = paths
 			delete(indexed.FileHashes, relativePath)
+			delete(indexed.FileMtimes, relativePath)
 			u.removeFw <- fullPath
 			changed = true
 		}
@@ -352,6 +382,9 @@ func (g *BasicSearch) ReIndexFile(path string, op fsnotify.Op) {
 		}
 
 		indexed.FileHashes[relativePath] = hash
+		if fi, serr := os.Lstat(fullPath); serr == nil {
+			indexed.FileMtimes[relativePath] = fi.ModTime().UnixNano()
+		}
 
 		if op.Has(fsnotify.Create) {
 			// Add to paths if not already present
@@ -444,14 +477,25 @@ func (g *BasicSearch) Index(req *pogoPlugin.IProcessProjectReq) {
 	g.mu.RLock()
 	p, ok := g.projects[path]
 	g.mu.RUnlock()
-	if ok && p.Paths != nil && len(p.Paths) > 0 {
+	if ok && p.Status == StatusReady && p.Paths != nil && len(p.Paths) > 0 {
 		g.logger.Info("Already indexed ", path)
 		return
 	}
+
+	// Preserve previous hashes/mtimes for incremental indexing
+	var prevHashes map[string]string
+	var prevMtimes map[string]int64
+	if ok && len(p.FileHashes) > 0 {
+		prevHashes = p.FileHashes
+		prevMtimes = p.FileMtimes
+		g.logger.Info("Incremental index: reusing ", strconv.Itoa(len(prevHashes)), " cached hashes for ", path)
+	}
+
 	proj := IndexedProject{
 		Root:       path,
 		Paths:      make([]string, 0, indexStartCapacity),
 		FileHashes: make(map[string]string),
+		FileMtimes: make(map[string]int64),
 		Status:     StatusIndexing,
 	}
 	g.mu.Lock()
@@ -462,7 +506,7 @@ func (g *BasicSearch) Index(req *pogoPlugin.IProcessProjectReq) {
 		// Non-fatal error
 		g.logger.Error("Error parsing gitignore", err)
 	}
-	g.index(&proj, path, gitIgnore)
+	g.index(&proj, path, gitIgnore, prevHashes, prevMtimes)
 }
 
 // Here is the method where we extract the code above
@@ -577,16 +621,6 @@ func (g *BasicSearch) Load(projectRoot string) (*IndexedProject, error) {
 		}
 		return nil, err
 	}
-	// Check if index is stale
-	if time.Since(stat.ModTime()).Minutes() > indexCacheMinutes {
-		g.logger.Info("Index is stale for " + projectRoot)
-		project.Status = StatusStale
-		g.mu.Lock()
-		g.projects[projectRoot] = *project
-		g.mu.Unlock()
-		return project, nil
-	}
-
 	file, err := os.Open(saveFilePath)
 	if err != nil {
 		g.logger.Error("Error opening index file.")
@@ -599,10 +633,25 @@ func (g *BasicSearch) Load(projectRoot string) (*IndexedProject, error) {
 		g.logger.Error("Error deserializing index file: %v", err)
 		return nil, err
 	}
-	// Initialize FileHashes for backward compatibility with old index files
+	// Initialize maps for backward compatibility with old index files
 	if project.FileHashes == nil {
 		project.FileHashes = make(map[string]string)
 	}
+	if project.FileMtimes == nil {
+		project.FileMtimes = make(map[string]int64)
+	}
+
+	// Check if index is stale — still return the data so callers can
+	// use hashes/mtimes for incremental re-indexing.
+	if time.Since(stat.ModTime()).Minutes() > indexCacheMinutes {
+		g.logger.Info("Index is stale for " + projectRoot + ", will re-index incrementally")
+		project.Status = StatusStale
+		g.mu.Lock()
+		g.projects[projectRoot] = *project
+		g.mu.Unlock()
+		return project, nil
+	}
+
 	project.Status = StatusReady
 	g.logger.Info("Loaded " + strconv.Itoa(len(project.Paths)) + " files for " + projectRoot)
 	g.updater.c <- project
