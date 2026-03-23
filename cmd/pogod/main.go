@@ -36,6 +36,7 @@ var agentRegistry *agent.Registry
 var mergeQueue *refinery.Refinery
 
 var bindFlag = flag.String("bind", "", "address to bind the server to (default: 127.0.0.1)")
+var portFlag = flag.Int("port", 0, "port to listen on (default: 10000)")
 
 func health(w http.ResponseWriter, r *http.Request) {
 	fmt.Println("Visited /health")
@@ -358,6 +359,9 @@ func main() {
 	// is immediately responsive to API calls (especially agent management).
 	if *bindFlag != "" {
 		cfg.Bind = *bindFlag
+	}
+	if *portFlag != 0 {
+		cfg.Port = *portFlag
 	}
 	addr := cfg.ListenAddr()
 	ln, listenErr := net.Listen("tcp", addr)
