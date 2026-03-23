@@ -2,7 +2,6 @@ package driver_test
 
 import (
 	"bytes"
-	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
@@ -178,13 +177,9 @@ func TestPluginExecute(t *testing.T) {
 		return
 	}
 
-	req := url.QueryEscape("{\"type\": \"files\", \"projectRoot\": \"" + aServiceAbs + "\"}")
-	encodedResp := (*plugin).Execute(req)
-	resp, err2 := url.QueryUnescape(encodedResp)
+	req := "{\"type\": \"files\", \"projectRoot\": \"" + aServiceAbs + "\"}"
+	resp := (*plugin).Execute(req)
 	t.Logf("Response: %s", resp)
-	if err2 != nil {
-		t.Errorf("Error decoding response %v", err2)
-	}
 	// Print current directory
 	d, _ := os.Getwd()
 	expectedResTemplate := `

@@ -2,7 +2,6 @@ package search
 
 import (
 	"encoding/json"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -104,7 +103,7 @@ func (g *BasicSearch) errorResponse(code int, message string) string {
 		g.logger.Error("Error writing error response")
 		panic(err)
 	}
-	return url.QueryEscape(string(bytes))
+	return string(bytes)
 }
 
 func (g *BasicSearch) searchResponse(index *IndexedProject, results *SearchResults) string {
@@ -129,7 +128,7 @@ func (g *BasicSearch) searchResponse(index *IndexedProject, results *SearchResul
 		g.logger.Error("Error writing search response")
 		return g.errorResponse(500, "Error writing search response")
 	}
-	return url.QueryEscape(string(bytes))
+	return string(bytes)
 }
 
 func (g *BasicSearch) Info() *pogoPlugin.PluginInfoRes {
@@ -138,13 +137,8 @@ func (g *BasicSearch) Info() *pogoPlugin.PluginInfoRes {
 }
 
 // Executes a command sent to this plugin.
-func (g *BasicSearch) Execute(encodedReq string) string {
+func (g *BasicSearch) Execute(req string) string {
 	g.logger.Debug("Executing request.")
-	req, err2 := url.QueryUnescape(encodedReq)
-	if err2 != nil {
-		g.logger.Error("500 Could not query decode request.", "error", err2)
-		return g.errorResponse(500, "Could not query decode request.")
-	}
 	var searchRequest SearchRequest
 	err := json.Unmarshal([]byte(req), &searchRequest)
 	if err != nil {

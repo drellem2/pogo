@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -234,18 +233,19 @@ func Search(query string, dir string) (*SearchResponse, error) {
 	if err != nil {
 		return nil, err
 	}
-	// urlencode searchRequestJson
-	encodedRequest := url.QueryEscape(string(searchRequestJson))
-
 	results, err := RunWithHealthCheck(func() (*SearchResponse, error) {
 		client := &http.Client{}
 
+		dataObj := pogoPlugin.DataObject{
+			Plugin: searchPluginPath,
+			Value:  string(searchRequestJson),
+		}
+		dataObjJson, err := json.Marshal(dataObj)
+		if err != nil {
+			return nil, err
+		}
 		req, err := http.NewRequest("POST", serverURL+"/plugin",
-			strings.NewReader(
-				fmt.Sprintf(`{"plugin": "%s",
-                                              "value": "%s"}`,
-					searchPluginPath,
-					encodedRequest)))
+			strings.NewReader(string(dataObjJson)))
 		if err != nil {
 			return nil, err
 		}
@@ -267,12 +267,8 @@ func Search(query string, dir string) (*SearchResponse, error) {
 		if err != nil {
 			return nil, err
 		}
-		respJson, err := url.QueryUnescape(dataObject.Value)
-		if err != nil {
-			return nil, err
-		}
 		var results SearchResponse
-		err = json.Unmarshal([]byte(respJson), &results)
+		err = json.Unmarshal([]byte(dataObject.Value), &results)
 		if err != nil {
 			return nil, err
 		}
@@ -335,14 +331,18 @@ func SearchAll(query string) ([]*SearchResponse, error) {
 		if err != nil {
 			return nil, err
 		}
-		encoded := url.QueryEscape(string(reqJSON))
-
 		resp, err := RunWithHealthCheck(func() (*SearchResponse, error) {
 			client := &http.Client{}
+			dataObj := pogoPlugin.DataObject{
+				Plugin: searchPluginPath,
+				Value:  string(reqJSON),
+			}
+			dataObjJson, err := json.Marshal(dataObj)
+			if err != nil {
+				return nil, err
+			}
 			httpReq, err := http.NewRequest("POST", serverURL+"/plugin",
-				strings.NewReader(
-					fmt.Sprintf(`{"plugin": "%s", "value": "%s"}`,
-						searchPluginPath, encoded)))
+				strings.NewReader(string(dataObjJson)))
 			if err != nil {
 				return nil, err
 			}
@@ -362,12 +362,8 @@ func SearchAll(query string) ([]*SearchResponse, error) {
 			if err != nil {
 				return nil, err
 			}
-			respJSON, err := url.QueryUnescape(dataObject.Value)
-			if err != nil {
-				return nil, err
-			}
 			var sr SearchResponse
-			err = json.Unmarshal([]byte(respJSON), &sr)
+			err = json.Unmarshal([]byte(dataObject.Value), &sr)
 			if err != nil {
 				return nil, err
 			}

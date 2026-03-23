@@ -33,7 +33,7 @@ type IPogoPlugin interface {
 	// Returns info about the plugin. Most importantly API version.
 	Info() *PluginInfoRes
 
-	// Executes a url-encoded json string, and returns one.
+	// Executes a JSON string request and returns a JSON string response.
 	Execute(req string) string
 
 	// Notifies the plugin that a project exists. It is the plugin's responsibility
