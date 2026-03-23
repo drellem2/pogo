@@ -8,7 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -74,7 +74,7 @@ func Init() {
 			return
 		}
 		defer file.Close()
-		byteValue, _ := ioutil.ReadAll(file)
+		byteValue, _ := io.ReadAll(file)
 		var projectsStruct ProjectsSave
 		json.Unmarshal(byteValue, &projectsStruct)
 		projects = projectsStruct.Projects
