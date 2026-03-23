@@ -185,8 +185,10 @@ func (r *Registry) handleNudge(w http.ResponseWriter, req *http.Request) {
 
 	name := req.PathValue("name")
 	agent := r.Get(name)
-	if agent == nil {
-		// Return 404 with structured response so clients can detect and fall back
+	if agent == nil || agent.Status != StatusRunning {
+		// Return 404 with structured response so clients can detect and fall back.
+		// This covers both missing agents and agents that exist in the registry
+		// but aren't running (e.g. crew agents between exit and respawn).
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusNotFound)
 		json.NewEncoder(w).Encode(NudgeAPIResponse{
