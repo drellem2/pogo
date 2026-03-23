@@ -199,6 +199,7 @@ func (r *Refinery) Start(ctx context.Context) {
 
 	for {
 		r.processNext()
+		r.pruneHistory()
 
 		select {
 		case <-ctx.Done():
@@ -334,6 +335,13 @@ func (r *Refinery) dequeue() *MergeRequest {
 	mr := r.queue[0]
 	r.queue = r.queue[1:]
 	return mr
+}
+
+// pruneHistory acquires the lock and prunes old history entries.
+func (r *Refinery) pruneHistory() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.pruneHistoryLocked()
 }
 
 // pruneHistoryLocked removes old entries from history. Must be called with mu held.
