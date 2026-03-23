@@ -46,13 +46,14 @@ type StartAPIRequest struct {
 // SpawnPolecatAPIRequest is the JSON body for POST /agents/spawn-polecat.
 // Spawns a polecat from a template with variable expansion.
 type SpawnPolecatAPIRequest struct {
-	Name     string   `json:"name"`           // Agent name (e.g., short ID)
-	Template string   `json:"template"`       // Template name (default: "polecat")
-	Task     string   `json:"task,omitempty"` // Work item title
-	Body     string   `json:"body,omitempty"` // Work item body
-	Id       string   `json:"id,omitempty"`   // Work item ID
-	Repo     string   `json:"repo,omitempty"` // Target repository path
-	Env      []string `json:"env,omitempty"`  // Additional env vars
+	Name     string   `json:"name"`             // Agent name (e.g., short ID)
+	Template string   `json:"template"`         // Template name (default: "polecat")
+	Task     string   `json:"task,omitempty"`   // Work item title
+	Body     string   `json:"body,omitempty"`   // Work item body
+	Id       string   `json:"id,omitempty"`     // Work item ID
+	Repo     string   `json:"repo,omitempty"`   // Target repository path
+	Branch   string   `json:"branch,omitempty"` // Target branch for refinery submit
+	Env      []string `json:"env,omitempty"`    // Additional env vars
 }
 
 // NudgeAPIRequest is the JSON body for POST /agents/:name/nudge.
@@ -351,10 +352,11 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 
 	// Expand template to a temp file
 	vars := TemplateVars{
-		Task: spawnReq.Task,
-		Body: spawnReq.Body,
-		Id:   spawnReq.Id,
-		Repo: spawnReq.Repo,
+		Task:   spawnReq.Task,
+		Body:   spawnReq.Body,
+		Id:     spawnReq.Id,
+		Repo:   spawnReq.Repo,
+		Branch: spawnReq.Branch,
 	}
 	promptFile, err := ExpandTemplateToFile(tmplPath, vars)
 	if err != nil {

@@ -153,6 +153,7 @@ func TestPolecatTemplateExpansion(t *testing.T) {
 		"mg claim gt-a3f",
 		"mg done gt-a3f",
 		"polecat-gt-a3f",
+		"--target=main",
 	}
 	for _, check := range checks {
 		if !strings.Contains(expanded, check) {
