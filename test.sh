@@ -8,3 +8,6 @@ go test ./...
 
 echo "Testing neovim plugin" && \
 bash nvim/test_nvim.sh
+
+echo "Testing bash shell integration" && \
+bash shell/bashrc_test.sh
