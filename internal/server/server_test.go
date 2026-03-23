@@ -1,0 +1,150 @@
+package server
+
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/drellem2/pogo/internal/config"
+)
+
+func TestNewServerStartsInFullMode(t *testing.T) {
+	s := New(nil, nil)
+	if s.Mode() != config.ModeFull {
+		t.Fatalf("expected ModeFull, got %s", s.Mode())
+	}
+}
+
+func TestSetModeIndexOnly(t *testing.T) {
+	s := New(nil, nil)
+	if err := s.SetMode(config.ModeIndexOnly); err != nil {
+		t.Fatalf("SetMode(ModeIndexOnly): %v", err)
+	}
+	if s.Mode() != config.ModeIndexOnly {
+		t.Fatalf("expected ModeIndexOnly, got %s", s.Mode())
+	}
+}
+
+func TestSetModeIdempotent(t *testing.T) {
+	s := New(nil, nil)
+	if err := s.SetMode(config.ModeIndexOnly); err != nil {
+		t.Fatal(err)
+	}
+	// Setting same mode again should be a no-op
+	if err := s.SetMode(config.ModeIndexOnly); err != nil {
+		t.Fatal(err)
+	}
+	if s.Mode() != config.ModeIndexOnly {
+		t.Fatalf("expected ModeIndexOnly, got %s", s.Mode())
+	}
+}
+
+func TestSetModeFullAfterIndexOnly(t *testing.T) {
+	refineryCalled := false
+	s := New(nil, nil)
+	s.SetRefineryStarter(func() error {
+		refineryCalled = true
+		return nil
+	})
+
+	if err := s.SetMode(config.ModeIndexOnly); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetMode(config.ModeFull); err != nil {
+		t.Fatal(err)
+	}
+	if s.Mode() != config.ModeFull {
+		t.Fatalf("expected ModeFull, got %s", s.Mode())
+	}
+	if !refineryCalled {
+		t.Fatal("expected refinery starter to be called")
+	}
+}
+
+func TestHandleModeGET(t *testing.T) {
+	s := New(nil, nil)
+	mux := http.NewServeMux()
+	s.RegisterHandlers(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/server/mode", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var resp map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp["mode"] != "full" {
+		t.Fatalf("expected mode=full, got %s", resp["mode"])
+	}
+}
+
+func TestHandleStopOrchestration(t *testing.T) {
+	s := New(nil, nil)
+	mux := http.NewServeMux()
+	s.RegisterHandlers(mux)
+
+	req := httptest.NewRequest(http.MethodPost, "/server/stop-orchestration", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var resp map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp["mode"] != "index-only" {
+		t.Fatalf("expected mode=index-only, got %s", resp["mode"])
+	}
+
+	// Verify mode actually changed
+	if s.Mode() != config.ModeIndexOnly {
+		t.Fatalf("expected ModeIndexOnly after stop-orchestration")
+	}
+}
+
+func TestHandleStopOrchestrationWrongMethod(t *testing.T) {
+	s := New(nil, nil)
+	mux := http.NewServeMux()
+	s.RegisterHandlers(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/server/stop-orchestration", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", w.Code)
+	}
+}
+
+func TestHandleModeAfterStopOrchestration(t *testing.T) {
+	s := New(nil, nil)
+	mux := http.NewServeMux()
+	s.RegisterHandlers(mux)
+
+	// Stop orchestration
+	req := httptest.NewRequest(http.MethodPost, "/server/stop-orchestration", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	// Check mode endpoint reflects the change
+	req = httptest.NewRequest(http.MethodGet, "/server/mode", nil)
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	var resp map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp["mode"] != "index-only" {
+		t.Fatalf("expected mode=index-only, got %s", resp["mode"])
+	}
+}
