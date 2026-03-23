@@ -112,29 +112,52 @@ Child commands include start, stop, and status.`,
 		},
 	}
 
+	var stopAll bool
 	var cmdServerStop = &cobra.Command{
 		Use:   "stop",
-		Short: "Stop the pogo server",
-		Long:  `Stop the pogo server.`,
-		Args:  cobra.MinimumNArgs(0),
+		Short: "Stop orchestration (agents + refinery); use --all for full teardown",
+		Long: `By default, stops orchestration (agents and refinery) while keeping
+the pogo server running for indexing and search. Use --all to fully
+shut down the server process.`,
+		Args: cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
-			if !jsonOutput {
-				fmt.Println("Stopping pogo server...")
-			}
-			err := client.StopServer()
-			if err != nil {
-				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
-			}
-			if jsonOutput {
-				cli.PrintJSON(map[string]interface{}{
-					"status":  "stopped",
-					"message": "pogo server stopped",
-				})
+			if stopAll {
+				if !jsonOutput {
+					fmt.Println("Stopping pogo server...")
+				}
+				err := client.StopServer()
+				if err != nil {
+					cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+				}
+				if jsonOutput {
+					cli.PrintJSON(map[string]interface{}{
+						"status":  "stopped",
+						"message": "pogo server stopped",
+					})
+				} else {
+					fmt.Println("Server stopped.")
+				}
 			} else {
-				fmt.Println("Server stopped.")
+				if !jsonOutput {
+					fmt.Println("Stopping orchestration (agents + refinery)...")
+				}
+				err := client.StopOrchestration()
+				if err != nil {
+					cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+				}
+				if jsonOutput {
+					cli.PrintJSON(map[string]interface{}{
+						"status":  "index-only",
+						"message": "orchestration stopped, server still running",
+					})
+				} else {
+					fmt.Println("Orchestration stopped. Server still running (indexing + search).")
+					fmt.Println("Use --all to fully shut down the server.")
+				}
 			}
 		},
 	}
+	cmdServerStop.Flags().BoolVar(&stopAll, "all", false, "fully shut down the server process")
 
 	var statusLive bool
 	var statusInterval time.Duration
