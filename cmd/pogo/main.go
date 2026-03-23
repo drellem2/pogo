@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -134,120 +136,158 @@ Child commands include start, stop, and status.`,
 		},
 	}
 
+	var statusLive bool
+	var statusInterval time.Duration
+
+	renderStatus := func() {
+		type statusReport struct {
+			Agents    []agent.AgentInfo       `json:"agents"`
+			WorkItems string                  `json:"work_items,omitempty"`
+			Refinery  *refinery.Status        `json:"refinery,omitempty"`
+			Queue     []refinery.MergeRequest `json:"refinery_queue,omitempty"`
+		}
+
+		var report statusReport
+
+		// Agents
+		agents, agentErr := client.ListAgents()
+		if agentErr == nil {
+			report.Agents = agents
+		}
+
+		// Work items via mg list
+		mgOut, mgErr := exec.Command("mg", "list").CombinedOutput()
+		if mgErr == nil {
+			report.WorkItems = strings.TrimSpace(string(mgOut))
+		}
+
+		// Refinery
+		refStatus, refErr := client.GetRefineryStatus()
+		if refErr == nil {
+			report.Refinery = refStatus
+		}
+		queue, queueErr := client.GetRefineryQueue()
+		if queueErr == nil {
+			report.Queue = queue
+		}
+
+		if jsonOutput {
+			cli.PrintJSON(report)
+			return
+		}
+
+		// --- Text output ---
+
+		if statusLive {
+			fmt.Printf("pogo status --live  (every %s, Ctrl-C to quit)\n\n", statusInterval)
+		}
+
+		// Agents section
+		fmt.Println("=== Agents ===")
+		if agentErr != nil {
+			fmt.Printf("  (unavailable: %s)\n", agentErr)
+		} else if len(agents) == 0 {
+			fmt.Println("  No agents running.")
+		} else {
+			crew := 0
+			polecats := 0
+			running := 0
+			for _, a := range agents {
+				if a.Type == "crew" {
+					crew++
+				} else {
+					polecats++
+				}
+				if a.Status == "running" {
+					running++
+				}
+			}
+			fmt.Printf("  %d total (%d crew, %d polecat), %d running\n",
+				len(agents), crew, polecats, running)
+			for _, a := range agents {
+				fmt.Printf("  %-20s  %-8s  %-10s  pid=%-6d  uptime=%s\n",
+					a.Name, a.Type, a.Status, a.PID, a.Uptime)
+			}
+		}
+		fmt.Println()
+
+		// Work items section
+		fmt.Println("=== Work Items ===")
+		if mgErr != nil {
+			fmt.Println("  (unavailable: mg not found)")
+		} else if report.WorkItems == "" {
+			fmt.Println("  No work items.")
+		} else {
+			for _, line := range strings.Split(report.WorkItems, "\n") {
+				fmt.Printf("  %s\n", line)
+			}
+		}
+		fmt.Println()
+
+		// Refinery section
+		fmt.Println("=== Refinery ===")
+		if refErr != nil {
+			fmt.Printf("  (unavailable: %s)\n", refErr)
+		} else {
+			state := "stopped"
+			if refStatus.Running {
+				state = "running"
+			}
+			if !refStatus.Enabled {
+				state = "disabled"
+			}
+			fmt.Printf("  Status: %s  |  Queue: %d  |  History: %d  |  Poll: %s\n",
+				state, refStatus.QueueLen, refStatus.HistoryLen, refStatus.PollInterval)
+		}
+		if queueErr == nil && len(queue) > 0 {
+			fmt.Println()
+			for _, mr := range queue {
+				age := time.Since(mr.SubmitTime).Truncate(time.Second)
+				author := mr.Author
+				if author == "" {
+					author = "-"
+				}
+				fmt.Printf("  %-8s  %-20s  branch=%-30s  author=%-15s  age=%s\n",
+					mr.Status, mr.ID, mr.Branch, author, age)
+			}
+		}
+	}
+
 	var cmdStatus = &cobra.Command{
 		Use:   "status",
 		Short: "Show unified dashboard of agents, work items, and refinery queue",
 		Long: `Show a unified read-only dashboard aggregating:
   - Running agents (from pogod)
   - Work items (from macguffin)
-  - Refinery merge queue (from pogod)`,
+  - Refinery merge queue (from pogod)
+
+Use --live for a continuously updating view (like watch).`,
 		Args: cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
-			type statusReport struct {
-				Agents    []agent.AgentInfo       `json:"agents"`
-				WorkItems string                  `json:"work_items,omitempty"`
-				Refinery  *refinery.Status        `json:"refinery,omitempty"`
-				Queue     []refinery.MergeRequest `json:"refinery_queue,omitempty"`
-			}
-
-			var report statusReport
-
-			// Agents
-			agents, agentErr := client.ListAgents()
-			if agentErr == nil {
-				report.Agents = agents
-			}
-
-			// Work items via mg list
-			mgOut, mgErr := exec.Command("mg", "list").CombinedOutput()
-			if mgErr == nil {
-				report.WorkItems = strings.TrimSpace(string(mgOut))
-			}
-
-			// Refinery
-			refStatus, refErr := client.GetRefineryStatus()
-			if refErr == nil {
-				report.Refinery = refStatus
-			}
-			queue, queueErr := client.GetRefineryQueue()
-			if queueErr == nil {
-				report.Queue = queue
-			}
-
-			if jsonOutput {
-				cli.PrintJSON(report)
+			if !statusLive {
+				renderStatus()
 				return
 			}
 
-			// --- Text output ---
+			// Live mode: clear screen and refresh on interval
+			sig := make(chan os.Signal, 1)
+			signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 
-			// Agents section
-			fmt.Println("=== Agents ===")
-			if agentErr != nil {
-				fmt.Printf("  (unavailable: %s)\n", agentErr)
-			} else if len(agents) == 0 {
-				fmt.Println("  No agents running.")
-			} else {
-				crew := 0
-				polecats := 0
-				running := 0
-				for _, a := range agents {
-					if a.Type == "crew" {
-						crew++
-					} else {
-						polecats++
-					}
-					if a.Status == "running" {
-						running++
-					}
-				}
-				fmt.Printf("  %d total (%d crew, %d polecat), %d running\n",
-					len(agents), crew, polecats, running)
-				for _, a := range agents {
-					fmt.Printf("  %-20s  %-8s  %-10s  pid=%-6d  uptime=%s\n",
-						a.Name, a.Type, a.Status, a.PID, a.Uptime)
-				}
-			}
-			fmt.Println()
+			ticker := time.NewTicker(statusInterval)
+			defer ticker.Stop()
 
-			// Work items section
-			fmt.Println("=== Work Items ===")
-			if mgErr != nil {
-				fmt.Println("  (unavailable: mg not found)")
-			} else if report.WorkItems == "" {
-				fmt.Println("  No work items.")
-			} else {
-				for _, line := range strings.Split(report.WorkItems, "\n") {
-					fmt.Printf("  %s\n", line)
-				}
-			}
-			fmt.Println()
+			// Initial render
+			fmt.Print("\033[2J\033[H") // clear screen, cursor to top
+			renderStatus()
 
-			// Refinery section
-			fmt.Println("=== Refinery ===")
-			if refErr != nil {
-				fmt.Printf("  (unavailable: %s)\n", refErr)
-			} else {
-				state := "stopped"
-				if refStatus.Running {
-					state = "running"
-				}
-				if !refStatus.Enabled {
-					state = "disabled"
-				}
-				fmt.Printf("  Status: %s  |  Queue: %d  |  History: %d  |  Poll: %s\n",
-					state, refStatus.QueueLen, refStatus.HistoryLen, refStatus.PollInterval)
-			}
-			if queueErr == nil && len(queue) > 0 {
-				fmt.Println()
-				for _, mr := range queue {
-					age := time.Since(mr.SubmitTime).Truncate(time.Second)
-					author := mr.Author
-					if author == "" {
-						author = "-"
-					}
-					fmt.Printf("  %-8s  %-20s  branch=%-30s  author=%-15s  age=%s\n",
-						mr.Status, mr.ID, mr.Branch, author, age)
+			for {
+				select {
+				case <-sig:
+					fmt.Println()
+					return
+				case <-ticker.C:
+					fmt.Print("\033[2J\033[H") // clear screen, cursor to top
+					renderStatus()
 				}
 			}
 		},
@@ -939,6 +979,8 @@ The path is resolved to an absolute path and the git root is discovered automati
 	rootCmd.AddCommand(cmdVersion)
 	rootCmd.AddCommand(cmdInstall)
 	rootCmd.AddCommand(cmdVisit)
+	cmdStatus.Flags().BoolVar(&statusLive, "live", false, "Continuously refresh the dashboard (like watch)")
+	cmdStatus.Flags().DurationVar(&statusInterval, "interval", 2*time.Second, "Refresh interval for --live mode")
 	rootCmd.AddCommand(cmdStatus)
 	cmdServer.AddCommand(cmdServerStart)
 	cmdServer.AddCommand(cmdServerStop)
