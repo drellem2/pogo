@@ -192,6 +192,7 @@ func TestPluginExecute(t *testing.T) {
                   ".gitignore"
                ],
                "file_hashes":"<<PRESENCE>>",
+               "file_mtimes":"<<PRESENCE>>",
                "indexing_status":"ready"
             },
             "results":{
