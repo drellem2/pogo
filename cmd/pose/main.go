@@ -5,6 +5,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -103,31 +104,37 @@ func main() {
 }
 
 func runSearchAll(query string, jsonOutput bool, list bool) {
-	responses, err := client.SearchAll(query)
-	if err != nil {
-		cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
-	}
-
-	if len(responses) == 0 {
-		if jsonOutput {
-			cli.PrintJSON([]interface{}{})
-		}
-		return
-	}
+	first := true
+	count := 0
 
 	if jsonOutput {
-		cli.PrintJSON(responses)
+		// Use newline-delimited JSON: emit each repo's result object as it arrives
+		err := client.SearchAllStreaming(query, func(resp *client.SearchResponse) {
+			count++
+			data, err := json.Marshal(resp)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, `{"error": "failed to marshal JSON: %s"}`+"\n", err)
+				return
+			}
+			fmt.Println(string(data))
+		})
+		if err != nil {
+			cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+		}
 		return
 	}
 
-	for i, resp := range responses {
-		if i > 0 {
+	err := client.SearchAllStreaming(query, func(resp *client.SearchResponse) {
+		count++
+		if !first {
 			fmt.Println()
 		}
+		first = false
+
 		fmt.Printf("=== %s ===\n", resp.Index.Root)
 		if resp.Error != "" {
 			fmt.Printf("  error: %s\n", resp.Error)
-			continue
+			return
 		}
 
 		files := resp.Results.Files
@@ -155,5 +162,8 @@ func runSearchAll(query string, jsonOutput bool, list bool) {
 				}
 			}
 		}
+	})
+	if err != nil {
+		cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
 	}
 }

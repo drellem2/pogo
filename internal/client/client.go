@@ -321,20 +321,30 @@ func GetStatus() ([]ProjectStatusResponse, error) {
 
 // SearchAll searches across all known projects, returning results for each.
 func SearchAll(query string) ([]*SearchResponse, error) {
+	var results []*SearchResponse
+	err := SearchAllStreaming(query, func(resp *SearchResponse) {
+		results = append(results, resp)
+	})
+	return results, err
+}
+
+// SearchAllStreaming searches across all known projects, calling onResult for
+// each repo's results as soon as they are available. This allows callers to
+// display results incrementally instead of waiting for every repo to finish.
+func SearchAllStreaming(query string, onResult func(*SearchResponse)) error {
 	projs, err := GetProjects()
 	if err != nil {
-		return nil, fmt.Errorf("failed to list projects: %w", err)
+		return fmt.Errorf("failed to list projects: %w", err)
 	}
 	if len(projs) == 0 {
-		return nil, errors.New("no projects registered with pogo")
+		return errors.New("no projects registered with pogo")
 	}
 
 	searchPluginPath, err := GetSearchPlugin()
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	var results []*SearchResponse
 	for _, proj := range projs {
 		req := SearchRequest{
 			Type:        "search",
@@ -344,7 +354,7 @@ func SearchAll(query string) ([]*SearchResponse, error) {
 		}
 		reqJSON, err := json.Marshal(req)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		resp, err := RunWithHealthCheck(func() (*SearchResponse, error) {
 			client := &http.Client{}
@@ -386,17 +396,17 @@ func SearchAll(query string) ([]*SearchResponse, error) {
 		})
 		if err != nil {
 			// Include the error as a result rather than aborting the whole search
-			results = append(results, &SearchResponse{
+			onResult(&SearchResponse{
 				Index: IndexedProject{Root: proj.Path},
 				Error: err.Error(),
 			})
 			continue
 		}
 		if resp != nil && (len(resp.Results.Files) > 0 || resp.Error != "") {
-			results = append(results, resp)
+			onResult(resp)
 		}
 	}
-	return results, nil
+	return nil
 }
 
 // RemoveProject removes a project from pogod by path.
