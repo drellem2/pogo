@@ -436,11 +436,17 @@ func main() {
 	defer driver.Kill()
 	defer project.SaveProjects()
 
+	// Load configuration to determine mode
+	cfg := config.Load()
+
+	if cfg.IsCloud() {
+		log.Printf("pogod: starting in CLOUD mode (workspace=%s)", cfg.WorkspaceDir)
+	}
+
 	// Load project list from disk (fast, no indexing)
 	project.Init()
 
 	// Start refinery merge queue loop
-	cfg := config.Load()
 	refineCfg := refinery.DefaultConfig()
 	if cfg.Refinery.Enabled {
 		if cfg.Refinery.PollInterval > 0 {
@@ -529,15 +535,27 @@ func main() {
 
 	// Now start background work: indexing and repo scanning.
 	// The server is already accepting connections above.
-	go func() {
-		project.IndexAll()
-		log.Printf("pogod: background project indexing complete")
-	}()
+	if cfg.IsCloud() {
+		// Cloud mode: use GitHub discovery instead of filesystem scanning
+		ghDiscovery := project.NewGitHubDiscovery(cfg)
+		if err := ghDiscovery.Start(); err != nil {
+			log.Printf("Warning: GitHub discovery failed to start: %v", err)
+		} else {
+			defer ghDiscovery.Stop()
+			log.Printf("pogod: GitHub repo discovery started")
+		}
+	} else {
+		// Local mode: filesystem-based indexing and scanning
+		go func() {
+			project.IndexAll()
+			log.Printf("pogod: background project indexing complete")
+		}()
 
-	if err := project.StartScanner(); err != nil {
-		fmt.Printf("Warning: repo scanner failed to start: %v\n", err)
+		if err := project.StartScanner(); err != nil {
+			fmt.Printf("Warning: repo scanner failed to start: %v\n", err)
+		}
+		defer project.StopScanner()
 	}
-	defer project.StopScanner()
 
 	// Serve HTTP (blocks until shutdown)
 	log.Fatal(http.Serve(ln, nil))

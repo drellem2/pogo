@@ -127,6 +127,114 @@ func TestBindEnvOverride(t *testing.T) {
 	}
 }
 
+func TestDefaultMode(t *testing.T) {
+	os.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	defer os.Unsetenv("XDG_CONFIG_HOME")
+	os.Unsetenv("POGO_MODE")
+
+	cfg := Load()
+	if cfg.Mode != ModeLocal {
+		t.Errorf("expected default mode %s, got %s", ModeLocal, cfg.Mode)
+	}
+	if cfg.IsCloud() {
+		t.Error("expected IsCloud() to be false for default config")
+	}
+}
+
+func TestCloudModeEnv(t *testing.T) {
+	os.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	defer os.Unsetenv("XDG_CONFIG_HOME")
+	os.Setenv("POGO_MODE", "cloud")
+	defer os.Unsetenv("POGO_MODE")
+
+	cfg := Load()
+	if cfg.Mode != ModeCloud {
+		t.Errorf("expected mode cloud, got %s", cfg.Mode)
+	}
+	if !cfg.IsCloud() {
+		t.Error("expected IsCloud() to be true")
+	}
+	if cfg.WorkspaceDir != "/workspace/repos" {
+		t.Errorf("expected default cloud workspace /workspace/repos, got %s", cfg.WorkspaceDir)
+	}
+}
+
+func TestCloudModeConfigFile(t *testing.T) {
+	dir := t.TempDir()
+	os.Setenv("XDG_CONFIG_HOME", dir)
+	defer os.Unsetenv("XDG_CONFIG_HOME")
+	os.Unsetenv("POGO_MODE")
+	os.Unsetenv("POGO_GITHUB_TOKEN")
+	os.Unsetenv("POGO_WORKSPACE_DIR")
+
+	pogoDir := filepath.Join(dir, "pogo")
+	os.MkdirAll(pogoDir, 0755)
+	os.WriteFile(filepath.Join(pogoDir, "config.toml"), []byte(`
+[server]
+mode = cloud
+github_token = "ghp_test123"
+workspace_dir = "/tmp/test-repos"
+`), 0644)
+
+	cfg := Load()
+	if cfg.Mode != ModeCloud {
+		t.Errorf("expected mode cloud from config file, got %s", cfg.Mode)
+	}
+	if cfg.GitHubToken != "ghp_test123" {
+		t.Errorf("expected token ghp_test123, got %s", cfg.GitHubToken)
+	}
+	if cfg.WorkspaceDir != "/tmp/test-repos" {
+		t.Errorf("expected workspace /tmp/test-repos, got %s", cfg.WorkspaceDir)
+	}
+}
+
+func TestGitHubTokenEnvOverride(t *testing.T) {
+	dir := t.TempDir()
+	os.Setenv("XDG_CONFIG_HOME", dir)
+	defer os.Unsetenv("XDG_CONFIG_HOME")
+
+	pogoDir := filepath.Join(dir, "pogo")
+	os.MkdirAll(pogoDir, 0755)
+	os.WriteFile(filepath.Join(pogoDir, "config.toml"), []byte(`
+[server]
+github_token = "file_token"
+`), 0644)
+
+	os.Setenv("POGO_GITHUB_TOKEN", "env_token")
+	defer os.Unsetenv("POGO_GITHUB_TOKEN")
+
+	cfg := Load()
+	if cfg.GitHubToken != "env_token" {
+		t.Errorf("expected env token to override file token, got %s", cfg.GitHubToken)
+	}
+}
+
+func TestWorkspaceDirEnvOverride(t *testing.T) {
+	os.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	defer os.Unsetenv("XDG_CONFIG_HOME")
+	os.Setenv("POGO_MODE", "cloud")
+	defer os.Unsetenv("POGO_MODE")
+	os.Setenv("POGO_WORKSPACE_DIR", "/custom/repos")
+	defer os.Unsetenv("POGO_WORKSPACE_DIR")
+
+	cfg := Load()
+	if cfg.WorkspaceDir != "/custom/repos" {
+		t.Errorf("expected /custom/repos, got %s", cfg.WorkspaceDir)
+	}
+}
+
+func TestLocalModeNoDefaultWorkspace(t *testing.T) {
+	os.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	defer os.Unsetenv("XDG_CONFIG_HOME")
+	os.Unsetenv("POGO_MODE")
+	os.Unsetenv("POGO_WORKSPACE_DIR")
+
+	cfg := Load()
+	if cfg.WorkspaceDir != "" {
+		t.Errorf("expected empty workspace dir in local mode, got %s", cfg.WorkspaceDir)
+	}
+}
+
 func TestBindConfigFile(t *testing.T) {
 	dir := t.TempDir()
 	os.Setenv("XDG_CONFIG_HOME", dir)

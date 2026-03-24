@@ -21,6 +21,7 @@ import (
 	"github.com/drellem2/pogo/internal/cli"
 	"github.com/drellem2/pogo/internal/client"
 	"github.com/drellem2/pogo/internal/completion"
+	"github.com/drellem2/pogo/internal/config"
 	"github.com/drellem2/pogo/internal/refinery"
 	"github.com/drellem2/pogo/internal/service"
 	"github.com/drellem2/pogo/internal/version"
@@ -40,6 +41,114 @@ func showPromptFile(path string, jsonOut bool) {
 	} else {
 		fmt.Print(string(data))
 	}
+}
+
+// installCloud configures pogo for cloud mode: sets mode=cloud in config.toml,
+// verifies gh CLI, creates workspace dirs, and optionally prompts for a GitHub token.
+func installCloud(jsonOut bool) {
+	if !jsonOut {
+		fmt.Println("Configuring pogo for cloud mode...")
+	}
+
+	// Step 1: Verify gh CLI is available
+	if _, err := exec.LookPath("gh"); err != nil {
+		cli.ExitWithError(jsonOut, "gh CLI not found in PATH — install it from https://cli.github.com/", cli.ExitError)
+	}
+	if !jsonOut {
+		fmt.Println("  ✓ gh CLI found")
+	}
+
+	// Step 2: Check gh auth status
+	ghAuth := exec.Command("gh", "auth", "status")
+	if err := ghAuth.Run(); err != nil {
+		if !jsonOut {
+			fmt.Println("  ⚠ gh is not authenticated — run 'gh auth login' first, or set POGO_GITHUB_TOKEN")
+		}
+	} else {
+		if !jsonOut {
+			fmt.Println("  ✓ gh authenticated")
+		}
+	}
+
+	// Step 3: Ensure config directory exists
+	cfgDir := config.ConfigDir()
+	if cfgDir == "" {
+		cli.ExitWithError(jsonOut, "cannot determine config directory", cli.ExitError)
+	}
+	if err := os.MkdirAll(cfgDir, 0755); err != nil {
+		cli.ExitWithError(jsonOut, "failed to create config dir: "+err.Error(), cli.ExitError)
+	}
+
+	// Step 4: Write mode=cloud to config.toml
+	cfgPath := config.ConfigFilePath()
+	if err := writeCloudConfig(cfgPath); err != nil {
+		cli.ExitWithError(jsonOut, "failed to write config: "+err.Error(), cli.ExitError)
+	}
+	if !jsonOut {
+		fmt.Printf("  ✓ wrote mode = cloud to %s\n", cfgPath)
+	}
+
+	// Step 5: Create default workspace directory
+	cfg := config.Load()
+	wsDir := cfg.WorkspaceDir
+	if wsDir == "" {
+		wsDir = "/workspace/repos"
+	}
+	if err := os.MkdirAll(wsDir, 0755); err != nil {
+		if !jsonOut {
+			fmt.Printf("  ⚠ could not create workspace dir %s: %v\n", wsDir, err)
+		}
+	} else {
+		if !jsonOut {
+			fmt.Printf("  ✓ workspace directory: %s\n", wsDir)
+		}
+	}
+
+	if jsonOut {
+		cli.PrintJSON(map[string]interface{}{
+			"status":        "configured",
+			"mode":          "cloud",
+			"config_path":   cfgPath,
+			"workspace_dir": wsDir,
+		})
+	} else {
+		fmt.Println("\nCloud mode configured. Next steps:")
+		fmt.Println("  pogo server start         # Start pogod in cloud mode")
+		fmt.Println("  pogo install              # Complete setup (prompts, macguffin)")
+	}
+}
+
+// writeCloudConfig reads the existing config.toml (if any) and ensures it
+// contains mode = cloud in the [server] section.
+func writeCloudConfig(cfgPath string) error {
+	content := ""
+	if data, err := os.ReadFile(cfgPath); err == nil {
+		content = string(data)
+	}
+
+	// Check if [server] section exists with mode already set
+	if strings.Contains(content, "mode = ") || strings.Contains(content, "mode=") {
+		// Replace existing mode line
+		lines := strings.Split(content, "\n")
+		for i, line := range lines {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "mode") && strings.Contains(trimmed, "=") {
+				lines[i] = "mode = cloud"
+			}
+		}
+		content = strings.Join(lines, "\n")
+	} else if strings.Contains(content, "[server]") {
+		// Add mode under existing [server] section
+		content = strings.Replace(content, "[server]", "[server]\nmode = cloud", 1)
+	} else {
+		// Append new [server] section
+		if content != "" && !strings.HasSuffix(content, "\n") {
+			content += "\n"
+		}
+		content += "\n[server]\nmode = cloud\n"
+	}
+
+	return os.WriteFile(cfgPath, []byte(content), 0644)
 }
 
 func main() {
@@ -842,6 +951,7 @@ If the agent is not running, falls back to sending the message via gt mail.`,
 	cmdNudge.Flags().IntVarP(&nudgeTimeout, "timeout", "T", 30, "Seconds to wait for agent idle (wait-idle mode)")
 
 	var installForceFlag bool
+	var installCloudFlag bool
 	var cmdInstall = &cobra.Command{
 		Use:   "install",
 		Short: "Set up pogo for agent orchestration",
@@ -850,9 +960,17 @@ If the agent is not running, falls back to sending the message via gt mail.`,
 2. Initialize macguffin workspace (mg init)
 3. Install default agent prompts to ~/.pogo/agents/
 
+Use --cloud to configure pogo for cloud mode, which uses GitHub for repo
+discovery instead of local filesystem scanning.
+
 Safe to run multiple times — stale prompts are auto-updated, other files are preserved.`,
 		Args: cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
+			if installCloudFlag {
+				installCloud(jsonOutput)
+				return
+			}
+
 			// Step 1: Ensure daemon is running
 			err := client.HealthCheck()
 			if err != nil {
@@ -927,6 +1045,7 @@ Safe to run multiple times — stale prompts are auto-updated, other files are p
 		},
 	}
 	cmdInstall.Flags().BoolVar(&installForceFlag, "force", false, "Overwrite existing prompt files")
+	cmdInstall.Flags().BoolVar(&installCloudFlag, "cloud", false, "Configure pogo for cloud mode (GitHub-based repo discovery)")
 
 	// Doctor command — system health check
 	var doctorCheck bool
