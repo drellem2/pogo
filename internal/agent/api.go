@@ -106,6 +106,7 @@ func (r *Registry) RegisterHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/agents/{name}", r.handleAgent)
 	mux.HandleFunc("/agents/{name}/nudge", r.handleNudge)
 	mux.HandleFunc("/agents/{name}/output", r.handleOutput)
+	mux.HandleFunc("/agents/{name}/terminal", r.handleTerminal)
 }
 
 func (r *Registry) handleAgents(w http.ResponseWriter, req *http.Request) {
