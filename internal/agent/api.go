@@ -298,26 +298,30 @@ func (r *Registry) handleStart(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// Resolve the pogo-claude wrapper, which handles operational plumbing
-	// (mg init, env setup) so agent prompts stay clean.
-	claudeCmd, err := ClaudeWrapperPath()
+	// Build command from configurable template.
+	// Default: "claude --dangerously-skip-permissions --append-system-prompt-file {{.PromptFile}}"
+	// NOTE: --dangerously-skip-permissions is required for autonomous agent execution.
+	// --permission-mode bypassPermissions does NOT work without additional setup.
+	cmd, err := ExpandCommand(r.commandTemplate(TypeCrew), CommandTemplateVars{
+		PromptFile: promptFile,
+		AgentName:  startReq.Name,
+		AgentType:  string(TypeCrew),
+		WorkDir:    agentDir,
+	})
 	if err != nil {
-		log.Printf("warning: pogo-claude wrapper not available, falling back to raw claude: %v", err)
-		claudeCmd = "claude"
+		http.Error(w, fmt.Sprintf("agent command template error: %v", err), http.StatusInternalServerError)
+		return
 	}
 
-	a, err := r.Spawn(SpawnRequest{
-		Name: startReq.Name,
-		Type: TypeCrew,
-		// DO NOT change --dangerously-skip-permissions. Polecats have regressed this
-		// flag twice. --permission-mode bypassPermissions does NOT work without
-		// additional setup. This flag is required for autonomous agent execution.
-		Command:    []string{claudeCmd, "--dangerously-skip-permissions", "--append-system-prompt-file", promptFile},
+	a, spawnErr := r.Spawn(SpawnRequest{
+		Name:       startReq.Name,
+		Type:       TypeCrew,
+		Command:    cmd,
 		PromptFile: promptFile,
 		Dir:        agentDir,
 	})
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusConflict)
+	if spawnErr != nil {
+		http.Error(w, spawnErr.Error(), http.StatusConflict)
 		return
 	}
 
@@ -380,18 +384,6 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		return
 	}
 
-	// Build command — interactive mode so Claude can actually run commands.
-	// NOTE: --bare is currently broken due to an Anthropic issue — omitting it
-	// until the upstream fix lands. Without --bare, polecats will pick up
-	// auto-memory, CLAUDE.md auto-discovery, hooks, etc.
-	// DO NOT change --dangerously-skip-permissions. See comment in handleStart.
-	polecatClaudeCmd, polecatWrapperErr := ClaudeWrapperPath()
-	if polecatWrapperErr != nil {
-		log.Printf("warning: pogo-claude wrapper not available, falling back to raw claude: %v", polecatWrapperErr)
-		polecatClaudeCmd = "claude"
-	}
-	cmd := []string{polecatClaudeCmd, "--dangerously-skip-permissions", "--append-system-prompt-file", promptFile}
-
 	// Ensure POGO_ROLE is set for mg prime and role detection
 	env := append(spawnReq.Env, "POGO_ROLE=polecat")
 
@@ -419,6 +411,24 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		log.Printf("polecat %s: created worktree at %s (branch %s)", spawnReq.Name, worktreeDir, branchName)
 		// No --add-dir needed: the process CWD is set to worktreeDir via SpawnRequest.Dir,
 		// and --add-dir triggers a directory trust prompt that blocks autonomous execution.
+	}
+
+	// Build command from configurable template.
+	// Default: "claude --dangerously-skip-permissions --append-system-prompt-file {{.PromptFile}}"
+	// NOTE: --dangerously-skip-permissions is required for autonomous execution.
+	cmd, cmdErr := ExpandCommand(r.commandTemplate(TypePolecat), CommandTemplateVars{
+		PromptFile: promptFile,
+		AgentName:  spawnReq.Name,
+		AgentType:  string(TypePolecat),
+		WorkDir:    worktreeDir,
+	})
+	if cmdErr != nil {
+		os.Remove(promptFile)
+		if worktreeDir != "" {
+			exec.Command("git", "-C", sourceRepo, "worktree", "remove", worktreeDir, "--force").Run()
+		}
+		http.Error(w, fmt.Sprintf("agent command template error: %v", cmdErr), http.StatusInternalServerError)
+		return
 	}
 
 	a, err := r.Spawn(SpawnRequest{

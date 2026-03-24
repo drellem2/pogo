@@ -100,6 +100,12 @@ func (a *Agent) GetStatus() AgentStatus {
 	return a.Status
 }
 
+// AgentCommandConfig provides the command template for a given agent type.
+// This interface decouples the agent package from the config package.
+type AgentCommandConfig interface {
+	AgentCommand(agentType string) string
+}
+
 // Registry is the in-memory agent registry. Thread-safe.
 type Registry struct {
 	mu     sync.RWMutex
@@ -107,6 +113,9 @@ type Registry struct {
 
 	// socketDir is where per-agent unix domain sockets live.
 	socketDir string
+
+	// cmdConfig provides agent command templates. May be nil (uses default).
+	cmdConfig AgentCommandConfig
 
 	// onExit is called when an agent process exits. Set by the registry owner
 	// (pogod) to handle crew restarts and polecat cleanup.
@@ -119,6 +128,26 @@ func (r *Registry) SetOnExit(fn func(a *Agent, err error)) {
 	defer r.mu.Unlock()
 	r.onExit = fn
 }
+
+// SetCommandConfig sets the agent command configuration.
+func (r *Registry) SetCommandConfig(cfg AgentCommandConfig) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.cmdConfig = cfg
+}
+
+// commandTemplate returns the command template for the given agent type.
+func (r *Registry) commandTemplate(agentType AgentType) string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.cmdConfig != nil {
+		return r.cmdConfig.AgentCommand(string(agentType))
+	}
+	return DefaultAgentCommand
+}
+
+// DefaultAgentCommand is the fallback command template when no config is set.
+const DefaultAgentCommand = "claude --dangerously-skip-permissions --append-system-prompt-file {{.PromptFile}}"
 
 // NewRegistry creates an agent registry. socketDir is created if needed.
 func NewRegistry(socketDir string) (*Registry, error) {

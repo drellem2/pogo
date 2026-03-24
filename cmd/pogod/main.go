@@ -404,6 +404,16 @@ func main() {
 	}
 	defer agentRegistry.StopAll(5 * time.Second)
 
+	// Load config early so we can use it for agent command setup
+	cfg := config.Load()
+
+	// Configure agent command templates and validate the binary exists
+	agentRegistry.SetCommandConfig(&cfg.Agents)
+	agent.ValidateCommandBinary(cfg.Agents.AgentCommand("crew"))
+	if polecatCmd := cfg.Agents.AgentCommand("polecat"); polecatCmd != cfg.Agents.AgentCommand("crew") {
+		agent.ValidateCommandBinary(polecatCmd)
+	}
+
 	// Set up agent lifecycle callbacks
 	agentRegistry.SetOnExit(func(a *agent.Agent, err error) {
 		if a.Type == agent.TypeCrew {
@@ -436,8 +446,7 @@ func main() {
 	defer driver.Kill()
 	defer project.SaveProjects()
 
-	// Load configuration to determine mode
-	cfg := config.Load()
+	// Cloud mode check (cfg already loaded above for agent command setup)
 
 	if cfg.IsCloud() {
 		log.Printf("pogod: starting in CLOUD mode (workspace=%s)", cfg.WorkspaceDir)
