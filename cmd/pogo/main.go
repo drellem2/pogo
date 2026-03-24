@@ -929,10 +929,20 @@ Safe to run multiple times — stale prompts are auto-updated, other files are p
 	cmdInstall.Flags().BoolVar(&installForceFlag, "force", false, "Overwrite existing prompt files")
 
 	// Doctor command — system health check
+	var doctorCheck bool
 	var cmdDoctor = &cobra.Command{
-		Use:   "doctor",
-		Short: "Check system health and configuration",
-		Long: `Run diagnostic checks on the pogo system:
+		Use:   "doctor [message]",
+		Short: "Diagnose pogo system health",
+		Long: `Start the doctor agent for interactive diagnosis, or run quick health checks.
+
+Without --check, starts the doctor crew agent for interactive debugging:
+  pogo doctor                    # Start the doctor agent
+  pogo doctor "why did the refinery fail?"  # Start + nudge with question
+
+With --check, runs a deterministic health checklist and exits:
+  pogo doctor --check            # Quick health checks, no agent
+
+The --check mode verifies:
   - Is pogod running?
   - Is the system service installed?
   - Are required tools installed (git, go, claude)?
@@ -940,9 +950,50 @@ Safe to run multiple times — stale prompts are auto-updated, other files are p
   - Are agent prompts installed?
   - Are there stale work items?
 
-Exits with code 1 if any critical check fails.`,
-		Args: cobra.NoArgs,
+Exits with code 1 if any critical check fails (--check mode only).`,
+		Args: cobra.ArbitraryArgs,
 		Run: func(cmd *cobra.Command, args []string) {
+			if !doctorCheck {
+				// Start the doctor agent
+				info, err := client.StartAgent("doctor")
+				if err != nil {
+					cli.ExitWithError(jsonOutput, "failed to start doctor agent: "+err.Error(), cli.ExitError)
+				}
+				if jsonOutput {
+					result := map[string]interface{}{
+						"agent": info,
+					}
+					// If a message was provided, nudge the agent
+					if len(args) > 0 {
+						message := strings.Join(args, " ")
+						opts := &client.NudgeOpts{Mode: "wait-idle", Timeout: 30}
+						_, nudgeErr := client.NudgeOrMail("doctor", message, opts)
+						if nudgeErr != nil {
+							result["nudge"] = map[string]string{"status": "error", "error": nudgeErr.Error()}
+						} else {
+							result["nudge"] = map[string]string{"status": "delivered", "message": message}
+						}
+					}
+					cli.PrintJSON(result)
+				} else {
+					fmt.Printf("Started doctor agent (pid=%d)\n", info.PID)
+					if len(args) > 0 {
+						message := strings.Join(args, " ")
+						opts := &client.NudgeOpts{Mode: "wait-idle", Timeout: 30}
+						_, nudgeErr := client.NudgeOrMail("doctor", message, opts)
+						if nudgeErr != nil {
+							fmt.Printf("Warning: could not nudge doctor: %s\n", nudgeErr)
+						} else {
+							fmt.Printf("Nudged doctor: %s\n", message)
+						}
+					}
+					fmt.Println("Use 'pogo nudge doctor <message>' to ask questions.")
+					fmt.Println("Use 'pogo agent stop doctor' when done.")
+				}
+				return
+			}
+
+			// --check mode: run deterministic health checks
 			type checkResult struct {
 				Name   string `json:"name"`
 				Status string `json:"status"` // "pass", "fail", "warn"
@@ -1179,6 +1230,7 @@ The path is resolved to an absolute path and the git root is discovered automati
 	cmdStatus.Flags().BoolVar(&statusLive, "live", false, "Continuously refresh the dashboard (like watch)")
 	cmdStatus.Flags().DurationVar(&statusInterval, "interval", 2*time.Second, "Refresh interval for --live mode")
 	rootCmd.AddCommand(cmdStatus)
+	cmdDoctor.Flags().BoolVar(&doctorCheck, "check", false, "Run quick health checks without starting the doctor agent")
 	rootCmd.AddCommand(cmdDoctor)
 	cmdServer.AddCommand(cmdServerStart)
 	cmdServer.AddCommand(cmdServerStop)
