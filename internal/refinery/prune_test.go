@@ -14,8 +14,8 @@ func initBareRepo(t *testing.T, parent string, name string) (string, string) {
 	bareDir := filepath.Join(parent, name+".git")
 	cloneDir := filepath.Join(parent, name)
 
-	// Create bare repo
-	cmd := exec.Command("git", "init", "--bare", bareDir)
+	// Create bare repo with explicit default branch "main"
+	cmd := exec.Command("git", "init", "--bare", "--initial-branch=main", bareDir)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git init --bare: %s: %v", out, err)
 	}
