@@ -68,6 +68,11 @@ type NudgeAPIRequest struct {
 // OutputAPIRequest query params for GET /agents/:name/output.
 // ?lines=N or ?bytes=N
 
+// ExportInfo returns the public AgentInfo for an agent.
+func ExportInfo(a *Agent) AgentInfo {
+	return agentInfo(a)
+}
+
 func agentInfo(a *Agent) AgentInfo {
 	a.mu.Lock()
 	defer a.mu.Unlock()

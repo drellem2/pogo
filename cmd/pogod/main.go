@@ -38,6 +38,7 @@ var agentRegistry *agent.Registry
 var mergeQueue *refinery.Refinery
 var srv *server.Server
 var workspaceMgr *workspace.Manager
+var startTime time.Time
 
 var bindFlag = flag.String("bind", "", "address to bind the server to (default: 127.0.0.1)")
 var portFlag = flag.Int("port", 0, "port to listen on (default: 10000)")
@@ -45,6 +46,117 @@ var portFlag = flag.Int("port", 0, "port to listen on (default: 10000)")
 func health(w http.ResponseWriter, r *http.Request) {
 	fmt.Println("Visited /health")
 	fmt.Fprintf(w, "pogo is up and bouncing")
+}
+
+// FullHealthResponse is the structured JSON response for GET /health/full.
+type FullHealthResponse struct {
+	Pogod    PogodHealth    `json:"pogod"`
+	Agents   AgentsHealth   `json:"agents"`
+	Refinery RefineryHealth `json:"refinery"`
+}
+
+// PogodHealth reports basic daemon health.
+type PogodHealth struct {
+	Status string `json:"status"`
+	Uptime string `json:"uptime"`
+	Mode   string `json:"mode"`
+}
+
+// AgentHealthDetail is a summary of one agent.
+type AgentHealthDetail struct {
+	Name     string `json:"name"`
+	Status   string `json:"status"`
+	Restarts int    `json:"restarts,omitempty"`
+	Uptime   string `json:"uptime"`
+	ExitCode int    `json:"exit_code,omitempty"`
+}
+
+// AgentsHealth summarises the agent fleet.
+type AgentsHealth struct {
+	Total   int                 `json:"total"`
+	Running int                 `json:"running"`
+	Exited  int                 `json:"exited"`
+	Details []AgentHealthDetail `json:"details"`
+}
+
+// RefineryHealth summarises the refinery state.
+type RefineryHealth struct {
+	Enabled        bool   `json:"enabled"`
+	Running        bool   `json:"running"`
+	QueueLength    int    `json:"queue_length"`
+	RecentFailures int    `json:"recent_failures"`
+	HistoryLength  int    `json:"history_length"`
+	PollInterval   string `json:"poll_interval,omitempty"`
+}
+
+func healthFull(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		http.Error(w, "", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Pogod health
+	mode := "full"
+	if srv != nil {
+		mode = srv.Mode().String()
+	}
+	pogodHealth := PogodHealth{
+		Status: "ok",
+		Uptime: time.Since(startTime).Truncate(time.Second).String(),
+		Mode:   mode,
+	}
+
+	// Agents health
+	var agentsHealth AgentsHealth
+	if agentRegistry != nil {
+		agents := agentRegistry.List()
+		agentsHealth.Total = len(agents)
+		agentsHealth.Details = make([]AgentHealthDetail, len(agents))
+		for i, a := range agents {
+			info := agent.ExportInfo(a)
+			detail := AgentHealthDetail{
+				Name:     info.Name,
+				Status:   string(info.Status),
+				Restarts: info.RestartCount,
+				Uptime:   info.Uptime,
+				ExitCode: info.ExitCode,
+			}
+			agentsHealth.Details[i] = detail
+			switch info.Status {
+			case "running":
+				agentsHealth.Running++
+			default:
+				agentsHealth.Exited++
+			}
+		}
+	}
+
+	// Refinery health
+	var refineryHealth RefineryHealth
+	if mergeQueue != nil {
+		st := mergeQueue.GetStatus()
+		refineryHealth.Enabled = st.Enabled
+		refineryHealth.Running = st.Running
+		refineryHealth.QueueLength = st.QueueLen
+		refineryHealth.HistoryLength = st.HistoryLen
+		refineryHealth.PollInterval = st.PollInterval
+
+		// Count recent failures from history
+		for _, mr := range mergeQueue.History() {
+			if mr.Status == refinery.StatusFailed {
+				refineryHealth.RecentFailures++
+			}
+		}
+	}
+
+	resp := FullHealthResponse{
+		Pogod:    pogodHealth,
+		Agents:   agentsHealth,
+		Refinery: refineryHealth,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
 }
 
 func homePage(w http.ResponseWriter, r *http.Request) {
@@ -231,6 +343,7 @@ func registerHandlers() {
 	http.HandleFunc("/plugin", plugin)
 	http.HandleFunc("/plugins", plugins)
 	http.HandleFunc("/health", health)
+	http.HandleFunc("/health/full", healthFull)
 	http.HandleFunc("/status", status)
 
 	// Workspace symbol query endpoints
@@ -261,6 +374,7 @@ func registerHandlers() {
 
 func main() {
 	flag.Parse()
+	startTime = time.Now()
 
 	// Acquire lockfile
 	lock, err := lockfile.New(filepath.Join(os.TempDir(), "pogo.pid"))
