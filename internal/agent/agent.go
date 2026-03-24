@@ -78,9 +78,9 @@ type Agent struct {
 	socketPath string
 	listener   net.Listener
 
-	// attachConns tracks active attach connections.
+	// attachConns tracks active attach/terminal connections for output fanout.
 	// readOutput fans out PTY output to these in addition to the ring buffer.
-	attachConns map[net.Conn]struct{}
+	attachConns map[io.Writer]struct{}
 	attachMu    sync.Mutex
 
 	// done is closed when the agent process exits and output is drained.
@@ -202,7 +202,7 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 		master:      master,
 		cmd:         cmd,
 		outputBuf:   NewRingBuffer(64 * 1024), // 64KB rolling buffer
-		attachConns: make(map[net.Conn]struct{}),
+		attachConns: make(map[io.Writer]struct{}),
 		socketPath:  filepath.Join(r.socketDir, req.Name+".sock"),
 		done:        make(chan struct{}),
 		outputDone:  make(chan struct{}),
@@ -362,7 +362,7 @@ func (r *Registry) Respawn(name string) (*Agent, error) {
 		master:       master,
 		cmd:          cmd,
 		outputBuf:    NewRingBuffer(64 * 1024),
-		attachConns:  make(map[net.Conn]struct{}),
+		attachConns:  make(map[io.Writer]struct{}),
 		socketPath:   filepath.Join(r.socketDir, old.Name+".sock"),
 		done:         make(chan struct{}),
 		outputDone:   make(chan struct{}),
@@ -425,9 +425,9 @@ func (a *Agent) readOutput() {
 
 			// Fan out to attached connections
 			a.attachMu.Lock()
-			for conn := range a.attachConns {
+			for w := range a.attachConns {
 				// Best-effort write — don't block output on slow clients
-				conn.Write(data)
+				w.Write(data)
 			}
 			a.attachMu.Unlock()
 		}
