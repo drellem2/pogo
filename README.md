@@ -227,3 +227,12 @@ git config core.hooksPath hooks
 
 - `POGO_HOME`: Folder for pogo to store indexes
 - `POGO_PLUGIN_PATH`: Folder to discover plugins
+
+## License
+
+Pogo uses a split license model:
+
+- **Apache 2.0** — CLI tools (`pogo`, `lsp`, `pose`), editor plugins, shell and tmux integrations. See [LICENSE-APACHE](LICENSE-APACHE).
+- **BSL 1.1** — Daemon (`pogod`), `internal/`, and `pkg/`. Local use is fully permitted; the only restriction is offering it as a commercial hosted service. Converts to Apache 2.0 after 4 years. See [LICENSE-BSL](LICENSE-BSL).
+
+See [LICENSING.md](LICENSING.md) for the full details.
