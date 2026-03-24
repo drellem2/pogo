@@ -292,13 +292,21 @@ func (r *Registry) handleStart(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	// Resolve the pogo-claude wrapper, which handles operational plumbing
+	// (mg init, env setup) so agent prompts stay clean.
+	claudeCmd, err := ClaudeWrapperPath()
+	if err != nil {
+		log.Printf("warning: pogo-claude wrapper not available, falling back to raw claude: %v", err)
+		claudeCmd = "claude"
+	}
+
 	a, err := r.Spawn(SpawnRequest{
 		Name: startReq.Name,
 		Type: TypeCrew,
 		// DO NOT change --dangerously-skip-permissions. Polecats have regressed this
 		// flag twice. --permission-mode bypassPermissions does NOT work without
 		// additional setup. This flag is required for autonomous agent execution.
-		Command:    []string{"claude", "--dangerously-skip-permissions", "--append-system-prompt-file", promptFile},
+		Command:    []string{claudeCmd, "--dangerously-skip-permissions", "--append-system-prompt-file", promptFile},
 		PromptFile: promptFile,
 		Dir:        agentDir,
 	})
@@ -371,7 +379,12 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 	// until the upstream fix lands. Without --bare, polecats will pick up
 	// auto-memory, CLAUDE.md auto-discovery, hooks, etc.
 	// DO NOT change --dangerously-skip-permissions. See comment in handleStart.
-	cmd := []string{"claude", "--dangerously-skip-permissions", "--append-system-prompt-file", promptFile}
+	polecatClaudeCmd, polecatWrapperErr := ClaudeWrapperPath()
+	if polecatWrapperErr != nil {
+		log.Printf("warning: pogo-claude wrapper not available, falling back to raw claude: %v", polecatWrapperErr)
+		polecatClaudeCmd = "claude"
+	}
+	cmd := []string{polecatClaudeCmd, "--dangerously-skip-permissions", "--append-system-prompt-file", promptFile}
 
 	// Ensure POGO_ROLE is set for mg prime and role detection
 	env := append(spawnReq.Env, "POGO_ROLE=polecat")
