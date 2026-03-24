@@ -1,9 +1,8 @@
 # pogo
-UNIX-native agent orchestrator for autonomous development
 
-Pogo coordinates multiple AI agents working on a codebase together. Agents are UNIX processes — you can find them with `ps`, signal them with `kill`, and attach to their terminals with `pogo agent attach`. All coordination happens through the filesystem via [macguffin](https://github.com/drellem2/macguffin).
+File a task, walk away, come back to merged code on `main`.
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the full system design, [MVP.md](MVP.md) for implementation roadmap, and [VISION.md](VISION.md) for principles.
+Pogo is a UNIX-native agent orchestrator. It coordinates multiple AI agents working on your codebase — spawning them, supervising them, and merging their work. Agents are plain UNIX processes: find them with `ps`, signal them with `kill`, attach to their terminals with `pogo agent attach`. Coordination happens through the filesystem via [macguffin](https://github.com/drellem2/macguffin).
 
 ## The loop
 
@@ -29,37 +28,13 @@ You                    pogod                     macguffin
  │                       │                          │
 ```
 
-File work, walk away, come back to merged code on `main`.
-
-## Getting started
-
-### Prerequisites
-
-- [Go](https://go.dev/dl/) 1.21+ (to build from source)
-- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI installed
-- [macguffin](https://github.com/drellem2/macguffin) (`mg`) CLI — **required for agent orchestration**
-
-### Install
+## Install
 
 ```sh
-# Quick install (prebuilt binaries)
 curl -fsSL https://raw.githubusercontent.com/drellem2/pogo/main/install.sh | sh
 ```
 
-The install script checks for macguffin and offers to install it automatically in `--interactive` mode. To install macguffin manually:
-
-```sh
-go install github.com/drellem2/macguffin/cmd/mg@latest
-```
-
-Or build pogo from source:
-
-```sh
-git clone https://github.com/drellem2/pogo.git && cd pogo
-./build.sh
-```
-
-Then run one-step setup:
+Then run setup:
 
 ```sh
 pogo install
@@ -77,7 +52,9 @@ This starts the daemon, initializes macguffin, and installs default agent prompt
 
 Run `pogo install` again any time — it's idempotent. Existing prompt files are preserved unless you pass `--force`.
 
-### Start the mayor and file work
+**Prerequisites:** [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI must be installed. The install script handles [macguffin](https://github.com/drellem2/macguffin) automatically; pass `--interactive` to configure shell and editor integrations.
+
+## Getting started
 
 ```sh
 pogo agent start mayor              # Start the coordinator
@@ -133,79 +110,17 @@ pogo agent start reviewer
 
 Polecats read `~/.pogo/agents/templates/polecat.md` fresh on each spawn, so template changes take effect immediately.
 
-## Project discovery and code search
-
-Pogo includes a background daemon (`pogod`) that automatically discovers and indexes git repositories as you work. This infrastructure supports both human navigation and agent awareness of the codebase.
-
-### CLI tools
-
-**`lsp`** — List known projects:
-
-```sh
-lsp              # One path per line
-lsp --json       # JSON array of project objects
-```
-
-**`pose`** — Search across projects (powered by [zoekt](https://github.com/sourcegraph/zoekt)):
-
-```sh
-pose QUERY           # Search all indexed repos
-pose QUERY .         # Search current repo only
-pose -l QUERY        # List only file paths
-pose --json QUERY    # JSON output with full match details
-```
-
-**`pogo`** — Server and project management:
-
-```sh
-pogo visit <path>        # Register a repo with pogo
-pogo server start        # Start the daemon
-pogo server stop         # Stop the daemon
-```
-
-Projects are discovered automatically as you `cd` into directories — no manual registration required. Code search uses a pre-built trigram index, so results return instantly even in large repos.
-
-### Shell integration
-
-Use `sp` (fuzzy project switcher via fzf) and automatic project registration in any supported shell:
-
-| Shell | Setup |
-|-------|-------|
-| [Bash](docs/bash.md) | Append snippet to `~/.bashrc` |
-| [Zsh](docs/zsh.md) | Append snippet to `~/.zshrc` |
-| [Fish](docs/fish.md) | Copy `pogo.fish` to `conf.d/` |
-
-### Editor integration
-
-| Editor | Status | Docs |
-|--------|--------|------|
-| [Emacs](docs/emacs.md) | Supported | Full minor mode with project navigation, code search, and buffer management |
-| [Neovim](docs/neovim.md) | Supported | Lua plugin with Telescope/fzf-lua integration |
-| [VS Code](docs/vscode.md) | Supported | Extension with command palette and search panel |
-
-### tmux
-
-| Tool | Status | Docs |
-|------|--------|------|
-| [tmux](docs/tmux.md) | Supported | Plugin with project switcher popup, code search popup, and status bar segment |
-
-Run the interactive installer to set up shell, editor, and tmux integrations automatically:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/drellem2/pogo/main/install.sh | sh -s -- --interactive
-```
-
 ## How it works
 
-Pogo has three layers:
-
-1. **Discovery** — background daemon scans and indexes git repositories as you visit them
-2. **Agent supervision** — pogod spawns agents with PTY allocation, manages lifecycle, provides interactive access
-3. **Refinery** — deterministic merge queue loop runs quality gates and merges polecat branches to main
-
-The refinery is code, not an agent — it never burns tokens on merge decisions. It maintains its own git worktrees and never touches agent or user working directories.
+Pogo has three layers: a **discovery daemon** that indexes git repositories as you visit them, **agent supervision** that spawns agents with PTY allocation and manages their lifecycle, and a **refinery** that runs quality gates and merges polecat branches to main. The refinery is code, not an agent — it never burns tokens on merge decisions.
 
 All coordination state lives in macguffin (`~/.macguffin/`): work items are markdown files, mail is Maildir, claims are atomic renames. No database, no server.
+
+## Also included
+
+Pogo bundles project discovery and cross-repo code search via `lsp` (list projects) and `pose` (search code). Shell, editor, and tmux integrations are available — see [docs/](docs/) for setup details or run the installer with `--interactive`.
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the full system design, [MVP.md](MVP.md) for implementation roadmap, and [VISION.md](VISION.md) for principles.
 
 ## Development
 
@@ -216,6 +131,8 @@ All coordination state lives in macguffin (`~/.macguffin/`): work items are mark
 ```
 
 Binaries are in `cmd/`: `cmd/pogo`, `cmd/lsp`, `cmd/pose`, `cmd/pogod`.
+
+To build from source: `git clone https://github.com/drellem2/pogo.git && cd pogo && ./build.sh` (requires [Go](https://go.dev/dl/) 1.21+).
 
 Set up the pre-commit hook:
 
