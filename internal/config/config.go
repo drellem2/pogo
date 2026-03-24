@@ -48,6 +48,9 @@ const (
 	ModeCloud ServerMode = "cloud"
 )
 
+// DefaultAgentCommand is the default command template for spawning agents.
+const DefaultAgentCommand = "claude --dangerously-skip-permissions --append-system-prompt-file {{.PromptFile}}"
+
 // Config holds pogo daemon configuration.
 type Config struct {
 	Port         int
@@ -56,6 +59,42 @@ type Config struct {
 	GitHubToken  string
 	WorkspaceDir string
 	Refinery     RefineryConfig
+	Agents       AgentsConfig
+}
+
+// AgentsConfig holds agent command configuration.
+type AgentsConfig struct {
+	// Command is the default command template for all agent types.
+	// Supports Go template variables: {{.PromptFile}}, {{.AgentName}}, {{.AgentType}}, {{.WorkDir}}
+	Command string
+	// Crew overrides the command template for crew agents.
+	Crew AgentTypeConfig
+	// Polecat overrides the command template for polecat agents.
+	Polecat AgentTypeConfig
+}
+
+// AgentTypeConfig holds per-agent-type command configuration.
+type AgentTypeConfig struct {
+	Command string
+}
+
+// AgentCommand returns the command template for a given agent type,
+// falling back to the default if no per-type override is set.
+func (c *AgentsConfig) AgentCommand(agentType string) string {
+	switch agentType {
+	case "crew":
+		if c.Crew.Command != "" {
+			return c.Crew.Command
+		}
+	case "polecat":
+		if c.Polecat.Command != "" {
+			return c.Polecat.Command
+		}
+	}
+	if c.Command != "" {
+		return c.Command
+	}
+	return DefaultAgentCommand
 }
 
 // RefineryConfig holds merge queue configuration.
@@ -96,6 +135,7 @@ func Load() *Config {
 		if fileCfg.WorkspaceDir != "" {
 			cfg.WorkspaceDir = fileCfg.WorkspaceDir
 		}
+		cfg.Agents = fileCfg.Agents
 	}
 
 	// Environment variables override config file
@@ -124,6 +164,11 @@ func Load() *Config {
 	// Set default workspace dir for cloud mode
 	if cfg.Mode == ModeCloud && cfg.WorkspaceDir == "" {
 		cfg.WorkspaceDir = "/workspace/repos"
+	}
+
+	// POGO_AGENT_COMMAND overrides the default agent command from config file
+	if agentCmd := os.Getenv("POGO_AGENT_COMMAND"); agentCmd != "" {
+		cfg.Agents.Command = agentCmd
 	}
 
 	return cfg
@@ -204,6 +249,9 @@ func loadConfigFile() (*Config, error) {
 		key := strings.TrimSpace(parts[0])
 		val := strings.TrimSpace(parts[1])
 
+		// Strip surrounding quotes from values
+		unquotedVal := strings.Trim(val, "\"")
+
 		switch currentSection {
 		case "server":
 			switch key {
@@ -234,6 +282,18 @@ func loadConfigFile() (*Config, error) {
 				if d, err := time.ParseDuration(val); err == nil {
 					cfg.Refinery.PollInterval = d
 				}
+			}
+		case "agents":
+			if key == "command" {
+				cfg.Agents.Command = unquotedVal
+			}
+		case "agents.crew":
+			if key == "command" {
+				cfg.Agents.Crew.Command = unquotedVal
+			}
+		case "agents.polecat":
+			if key == "command" {
+				cfg.Agents.Polecat.Command = unquotedVal
 			}
 		}
 	}

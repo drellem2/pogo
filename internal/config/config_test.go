@@ -235,6 +235,84 @@ func TestLocalModeNoDefaultWorkspace(t *testing.T) {
 	}
 }
 
+func TestAgentCommandDefault(t *testing.T) {
+	cfg := &AgentsConfig{}
+	if got := cfg.AgentCommand("crew"); got != DefaultAgentCommand {
+		t.Errorf("expected default command, got %s", got)
+	}
+}
+
+func TestAgentCommandGlobal(t *testing.T) {
+	cfg := &AgentsConfig{Command: "myagent --flag {{.PromptFile}}"}
+	if got := cfg.AgentCommand("crew"); got != "myagent --flag {{.PromptFile}}" {
+		t.Errorf("expected global command, got %s", got)
+	}
+	if got := cfg.AgentCommand("polecat"); got != "myagent --flag {{.PromptFile}}" {
+		t.Errorf("expected global command for polecat, got %s", got)
+	}
+}
+
+func TestAgentCommandPerType(t *testing.T) {
+	cfg := &AgentsConfig{
+		Command: "default --flag {{.PromptFile}}",
+		Crew:    AgentTypeConfig{Command: "crew-agent {{.PromptFile}}"},
+		Polecat: AgentTypeConfig{Command: "polecat-agent {{.PromptFile}}"},
+	}
+	if got := cfg.AgentCommand("crew"); got != "crew-agent {{.PromptFile}}" {
+		t.Errorf("expected crew override, got %s", got)
+	}
+	if got := cfg.AgentCommand("polecat"); got != "polecat-agent {{.PromptFile}}" {
+		t.Errorf("expected polecat override, got %s", got)
+	}
+}
+
+func TestAgentCommandEnvOverride(t *testing.T) {
+	dir := t.TempDir()
+	os.Setenv("XDG_CONFIG_HOME", dir)
+	defer os.Unsetenv("XDG_CONFIG_HOME")
+	os.Unsetenv("POGO_PORT")
+
+	os.Setenv("POGO_AGENT_COMMAND", "custom-agent {{.PromptFile}}")
+	defer os.Unsetenv("POGO_AGENT_COMMAND")
+
+	cfg := Load()
+	if cfg.Agents.Command != "custom-agent {{.PromptFile}}" {
+		t.Errorf("expected env override, got %s", cfg.Agents.Command)
+	}
+}
+
+func TestAgentCommandConfigFile(t *testing.T) {
+	dir := t.TempDir()
+	os.Setenv("XDG_CONFIG_HOME", dir)
+	defer os.Unsetenv("XDG_CONFIG_HOME")
+	os.Unsetenv("POGO_PORT")
+	os.Unsetenv("POGO_AGENT_COMMAND")
+
+	pogoDir := filepath.Join(dir, "pogo")
+	os.MkdirAll(pogoDir, 0755)
+	os.WriteFile(filepath.Join(pogoDir, "config.toml"), []byte(`
+[agents]
+command = "aider --model gpt-4o --read {{.PromptFile}}"
+
+[agents.crew]
+command = "crew-cmd {{.PromptFile}}"
+
+[agents.polecat]
+command = "polecat-cmd {{.PromptFile}}"
+`), 0644)
+
+	cfg := Load()
+	if cfg.Agents.Command != "aider --model gpt-4o --read {{.PromptFile}}" {
+		t.Errorf("expected agents.command from file, got %s", cfg.Agents.Command)
+	}
+	if cfg.Agents.Crew.Command != "crew-cmd {{.PromptFile}}" {
+		t.Errorf("expected agents.crew.command from file, got %s", cfg.Agents.Crew.Command)
+	}
+	if cfg.Agents.Polecat.Command != "polecat-cmd {{.PromptFile}}" {
+		t.Errorf("expected agents.polecat.command from file, got %s", cfg.Agents.Polecat.Command)
+	}
+}
+
 func TestBindConfigFile(t *testing.T) {
 	dir := t.TempDir()
 	os.Setenv("XDG_CONFIG_HOME", dir)
