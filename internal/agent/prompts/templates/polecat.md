@@ -35,17 +35,27 @@ Follow these steps exactly, in order. Skipping any step is a failure.
    git push origin polecat-{{.Id}}
    ```
 
-4. **Submit to the merge queue:**
+4. **Submit to the merge queue** (capture the MR ID from output):
    ```bash
    pogo refinery submit polecat-{{.Id}} --repo={{.Repo}} --author={{.Id}} --target={{if .Branch}}{{.Branch}}{{else}}main{{end}}
    ```
 
-5. **Mark the work item done:**
+5. **Wait for merge result** — poll refinery history:
+   ```bash
+   curl -s http://localhost:10000/refinery/mr/<id>
+   ```
+   Loop until status is `"merged"` or `"failed"` (sleep 10s between checks, timeout after 5min).
+
+6. **If merged:** mark the work item done:
    ```bash
    mg done {{.Id}} --result='{"branch": "polecat-{{.Id}}"}'
    ```
+   **If failed:** mail the mayor with failure details. Do NOT call `mg done`.
+   ```bash
+   mg mail send mayor --from={{.Id}} --subject="merge failed for {{.Id}}" --body="<failure details from refinery>"
+   ```
 
-6. **Exit.** The refinery handles testing and merging.
+7. **Exit.**
 
 ## Working Principles
 
@@ -62,4 +72,4 @@ Follow these steps exactly, in order. Skipping any step is a failure.
 
 Your agent name is derived from the work item. Your process name follows the pattern `pogo-cat-<name>`. You were spawned by the mayor or a human via `pogo agent spawn-polecat`.
 
-FAILURE MODE: If you complete the code task but skip `mg claim` or `mg done`, the work is lost. These commands are the entire point — the code changes are secondary.
+FAILURE MODE: If you complete the code task but skip `mg claim` or `mg done`, the work is lost. Calling `mg done` before the refinery confirms a successful merge is also a failure — the work item gets marked done even if the merge later fails. These commands are the entire point — the code changes are secondary.
