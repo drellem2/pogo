@@ -859,8 +859,16 @@ Safe to run multiple times — stale prompts are auto-updated, other files are p
 				if !jsonOutput {
 					fmt.Println("Starting pogo server...")
 				}
-				if err := client.StartServer(); err != nil {
-					cli.ExitWithError(jsonOutput, "failed to start server: "+err.Error(), cli.ExitError)
+				// If the launchd/systemd service is installed, restart via the
+				// service manager so pogod is properly supervised.
+				if installed, _ := service.Status(); installed {
+					if err := service.Restart(); err != nil {
+						cli.ExitWithError(jsonOutput, "failed to restart service: "+err.Error(), cli.ExitError)
+					}
+				} else {
+					if err := client.StartServer(); err != nil {
+						cli.ExitWithError(jsonOutput, "failed to start server: "+err.Error(), cli.ExitError)
+					}
 				}
 				if !jsonOutput {
 					fmt.Println("  ✓ pogo server started")
