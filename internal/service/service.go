@@ -247,6 +247,49 @@ func uninstallSystemd() error {
 	return nil
 }
 
+// Restart restarts the service via the system service manager (launchd/systemd).
+// Returns an error if the service is not installed.
+func Restart() error {
+	switch runtime.GOOS {
+	case "darwin":
+		return restartLaunchd()
+	case "linux":
+		return restartSystemd()
+	default:
+		return fmt.Errorf("unsupported OS: %s", runtime.GOOS)
+	}
+}
+
+func restartLaunchd() error {
+	plistPath := launchdPlistPath()
+	if _, err := os.Stat(plistPath); os.IsNotExist(err) {
+		return fmt.Errorf("service not installed at %s", plistPath)
+	}
+	// kickstart -k forces a restart even if the service is stopped
+	cmd := exec.Command("launchctl", "kickstart", "-k", "gui/"+fmt.Sprint(os.Getuid())+"/"+launchdLabel)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		// Fallback: unload + load for older macOS
+		exec.Command("launchctl", "unload", plistPath).Run()
+		loadCmd := exec.Command("launchctl", "load", plistPath)
+		if out2, err2 := loadCmd.CombinedOutput(); err2 != nil {
+			return fmt.Errorf("launchctl load failed: %s (kickstart failed: %s): %w", string(out2), string(out), err2)
+		}
+	}
+	return nil
+}
+
+func restartSystemd() error {
+	unitPath := systemdUnitPath()
+	if _, err := os.Stat(unitPath); os.IsNotExist(err) {
+		return fmt.Errorf("service not installed at %s", unitPath)
+	}
+	cmd := exec.Command("systemctl", "--user", "restart", "pogo.service")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("systemctl restart failed: %s: %w", string(out), err)
+	}
+	return nil
+}
+
 // Status returns whether the service is installed and its path.
 func Status() (installed bool, path string) {
 	switch runtime.GOOS {
