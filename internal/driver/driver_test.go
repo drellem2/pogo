@@ -184,6 +184,7 @@ func TestPluginExecute(t *testing.T) {
             "index":{
                "root":"{{ .current_dir }}/_testdata/a-service/",
                "paths":[
+                  "<<UNORDERED>>",
                   "src/a.c",
                   "README.md",
                   ".gitignore"
