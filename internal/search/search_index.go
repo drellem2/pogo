@@ -209,7 +209,7 @@ func (g *BasicSearch) indexRec(proj *IndexedProject, path string,
 		// Remove projectRoot prefix from newPath
 		relativePath := strings.TrimPrefix(newPath, proj.Root)
 
-		if !gitIgnore.MatchesPath(relativePath) && subFile != ".git" && subFile != ".pogo" {
+		if !gitIgnore.MatchesPath(relativePath) && subFile != ".git" && subFile != ".pogo" && subFile != "node_modules" {
 			if fileInfo.IsDir() {
 				u.addFw <- newPath
 				err = g.indexRec(proj, newPath, gitIgnore, u, prevHashes, prevMtimes)
