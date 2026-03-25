@@ -38,28 +38,15 @@ func (m RunMode) String() string {
 	}
 }
 
-// ServerMode represents whether pogo runs in local or cloud mode.
-type ServerMode string
-
-const (
-	// ModeLocal is the default: filesystem-based project discovery.
-	ModeLocal ServerMode = "local"
-	// ModeCloud uses GitHub for project discovery instead of local filesystem.
-	ModeCloud ServerMode = "cloud"
-)
-
 // DefaultAgentCommand is the default command template for spawning agents.
 const DefaultAgentCommand = "claude --dangerously-skip-permissions --append-system-prompt-file {{.PromptFile}}"
 
 // Config holds pogo daemon configuration.
 type Config struct {
-	Port         int
-	Bind         string
-	Mode         ServerMode
-	GitHubToken  string
-	WorkspaceDir string
-	Refinery     RefineryConfig
-	Agents       AgentsConfig
+	Port     int
+	Bind     string
+	Refinery RefineryConfig
+	Agents   AgentsConfig
 }
 
 // AgentsConfig holds agent command configuration.
@@ -111,7 +98,6 @@ func Load() *Config {
 	cfg := &Config{
 		Port: DefaultPort,
 		Bind: DefaultBind,
-		Mode: ModeLocal,
 		Refinery: RefineryConfig{
 			Enabled:      true,
 			PollInterval: 30 * time.Second,
@@ -126,15 +112,6 @@ func Load() *Config {
 		if fileCfg.Bind != "" {
 			cfg.Bind = fileCfg.Bind
 		}
-		if fileCfg.Mode != "" {
-			cfg.Mode = fileCfg.Mode
-		}
-		if fileCfg.GitHubToken != "" {
-			cfg.GitHubToken = fileCfg.GitHubToken
-		}
-		if fileCfg.WorkspaceDir != "" {
-			cfg.WorkspaceDir = fileCfg.WorkspaceDir
-		}
 		cfg.Agents = fileCfg.Agents
 	}
 
@@ -147,25 +124,6 @@ func Load() *Config {
 	if bind := os.Getenv("POGO_BIND"); bind != "" {
 		cfg.Bind = bind
 	}
-	if mode := os.Getenv("POGO_MODE"); mode != "" {
-		if mode == "cloud" {
-			cfg.Mode = ModeCloud
-		} else if mode == "local" {
-			cfg.Mode = ModeLocal
-		}
-	}
-	if token := os.Getenv("POGO_GITHUB_TOKEN"); token != "" {
-		cfg.GitHubToken = token
-	}
-	if wsDir := os.Getenv("POGO_WORKSPACE_DIR"); wsDir != "" {
-		cfg.WorkspaceDir = wsDir
-	}
-
-	// Set default workspace dir for cloud mode
-	if cfg.Mode == ModeCloud && cfg.WorkspaceDir == "" {
-		cfg.WorkspaceDir = "/workspace/repos"
-	}
-
 	// POGO_AGENT_COMMAND overrides the default agent command from config file
 	if agentCmd := os.Getenv("POGO_AGENT_COMMAND"); agentCmd != "" {
 		cfg.Agents.Command = agentCmd
@@ -182,11 +140,6 @@ func (c *Config) ServerURL() string {
 // ListenAddr returns the address string for the server to listen on.
 func (c *Config) ListenAddr() string {
 	return fmt.Sprintf("%s:%d", c.Bind, c.Port)
-}
-
-// IsCloud reports whether the daemon is configured for cloud mode.
-func (c *Config) IsCloud() bool {
-	return c.Mode == ModeCloud
 }
 
 // ConfigDir returns the pogo configuration directory path.
@@ -261,17 +214,6 @@ func loadConfigFile() (*Config, error) {
 				}
 			case "bind":
 				cfg.Bind = val
-			case "mode":
-				val = strings.Trim(val, "\"")
-				if val == "cloud" {
-					cfg.Mode = ModeCloud
-				} else if val == "local" {
-					cfg.Mode = ModeLocal
-				}
-			case "github_token":
-				cfg.GitHubToken = strings.Trim(val, "\"")
-			case "workspace_dir":
-				cfg.WorkspaceDir = strings.Trim(val, "\"")
 			}
 		case "refinery":
 			switch key {
