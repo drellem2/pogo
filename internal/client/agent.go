@@ -251,6 +251,19 @@ func ArchiveMGDoneItems() (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
+// ReopenMGWorkItem calls mg reopen to move a done work item back to available.
+// Returns nil if the reopen succeeds. Non-fatal errors (e.g. item not in done/)
+// are returned as errors for the caller to log.
+func ReopenMGWorkItem(id string) error {
+	cmd := execCommand("mg", "reopen", id)
+	cmd.Stderr = nil
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("mg reopen failed: %s (%w)", strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
 // execCommand is a variable for testability.
 var execCommand = execCommandFunc
 

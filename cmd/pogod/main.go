@@ -494,6 +494,16 @@ func main() {
 				if err := client.SendMGMail("mayor", "refinery", subject, body); err != nil {
 					log.Printf("refinery: failed to mail mayor: %v", err)
 				}
+
+				// Auto-reopen the work item so it's available for retry.
+				// Polecats use their work item ID as the author field.
+				if mr.Author != "" {
+					if err := client.ReopenMGWorkItem(mr.Author); err != nil {
+						log.Printf("refinery: failed to reopen work item %s: %v", mr.Author, err)
+					} else {
+						log.Printf("refinery: reopened work item %s after merge failure", mr.Author)
+					}
+				}
 			})
 			go mergeQueue.Start(context.Background())
 			defer mergeQueue.Stop()
