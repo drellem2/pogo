@@ -27,6 +27,7 @@ mg mail send <agent> --from=mayor --subject="<subj>" --body="<body>"
 
 # Process stale claims
 mg reap                        # Reclaim items from dead processes
+mg reopen <id>                 # Move a done item back to available
 ```
 
 ## The Propulsion Principle
@@ -76,15 +77,7 @@ pogo agent list
 ```
 
 Look for:
-- **Completed polecats**: Polecats do NOT exit on their own after finishing work. They remain running until you stop them. To detect completion, check both conditions:
-  1. The work item is no longer in `claimed` status (the polecat ran `mg done`)
-  2. The refinery history shows the submission merged (`curl http://localhost:10000/refinery/history`)
-
-  Once both conditions are met, stop the polecat:
-  ```bash
-  pogo agent stop <name>
-  ```
-  Check for completed polecats on every cycle — leaving them running wastes resources.
+- **Completed polecats**: Polecats exit on their own after finishing work. A polecat waits for the refinery to confirm its merge succeeded, calls `mg done`, then exits. You don't need to stop them manually. If a polecat's process is gone and its work item is in `done` status, it completed normally.
 
 - **Unstarted polecats**: If a polecat was spawned but hasn't claimed its work item within ~30-60 seconds, nudge it with a short message to kick-start it. This fixes intermittent folder permission issues that can block initialization:
   ```bash
@@ -101,6 +94,20 @@ Look for:
   mg reap
   ```
   This reclaims items from dead processes back to available status.
+
+- **Refinery failures on done items**: A work item may be in `done/` status but the refinery rejected its branch. This happens when a polecat exits after a merge failure without calling `mg done` — but can also occur due to races or bugs. On each cycle, check refinery history for failures:
+  ```bash
+  curl -s http://localhost:10000/refinery/history
+  ```
+  Cross-reference with `mg list --status=done`. If a done item's branch shows as failed in refinery history:
+  1. Reopen the item so it can be re-dispatched:
+     ```bash
+     mg reopen <id>
+     ```
+  2. If the same item has failed multiple times, create a new work item with retry context instead of reopening blindly:
+     ```bash
+     mg create --type=task --depends=<id> --title="retry: <original title>" --body="Previous attempts failed. Errors: <summary>. Try a different approach."
+     ```
 
 ### 4. Handle QA for completed work
 
@@ -132,10 +139,20 @@ For each message, read it with `mg mail read mayor <msg-id>` — this marks it a
 
 Agents and the refinery mail you when things need attention:
 
-- **Refinery failures**: The refinery sends mail when a merge fails quality gates. Read the failure details, check if the polecat's branch has obvious issues (test failures, build errors). You can re-dispatch the work item to a new polecat with context about what went wrong:
-  ```bash
-  mg mail send <new-polecat> --from=mayor --subject="retry: <task>" --body="Previous attempt failed: <error>. Try a different approach."
-  ```
+- **Refinery failures**: The refinery sends mail when a merge fails quality gates. When you receive a refinery failure mail:
+  1. Read the failure details to understand what went wrong (test failures, build errors, rebase conflicts).
+  2. Reopen the work item so it returns to available status:
+     ```bash
+     mg reopen <work-item-id>
+     ```
+  3. The reopened item will be picked up in your next cycle (step 1) and dispatched to a new polecat. To give the new polecat context about the prior failure, mail it after spawning:
+     ```bash
+     mg mail send <new-polecat> --from=mayor --subject="retry: <task>" --body="Previous attempt failed: <error>. Try a different approach."
+     ```
+  4. If the same work item has failed multiple times (check refinery history for repeated failures on the same branch pattern), consider creating a scoped retry item instead:
+     ```bash
+     mg create --type=task --depends=<id> --title="retry: <original title>" --body="Failed <N> times. Errors: <summary>. Root cause likely: <your assessment>."
+     ```
 - **Routing questions**: An agent doesn't know which repo to work in. Use `lsp` to find it and mail them back.
 - **Blocked reports**: An agent is stuck. Check the work item, see if you can unblock it or reassign.
 - **Completion reports**: Note and move on — the refinery handles merging.
@@ -158,9 +175,11 @@ When deciding whether to spawn a polecat:
 The refinery is a deterministic merge queue loop inside pogod — not an agent. It runs automatically. When a polecat finishes work, it:
 1. Pushes a branch (e.g., `polecat-<id>`)
 2. Submits it via `pogo refinery submit <branch> --repo=<path>`
-3. Marks the work item done via `mg done <id>`
+3. Polls the refinery for the merge result
+4. If merged: marks the work item done via `mg done <id>` and exits
+5. If failed: mails you with failure details and exits **without** calling `mg done`
 
-The refinery then fetches the branch, runs quality gates (build.sh/test.sh), and either merges to main or rejects. On failure, the refinery mails both the author agent and you (the mayor). If the author was a polecat that already exited, their copy goes unread — so check your mail for refinery failure notifications and re-dispatch work if needed.
+The refinery fetches the branch, runs quality gates (build.sh/test.sh), and either merges to main or rejects. On failure, the refinery mails both the author agent and you (the mayor). Since polecats mail you on failure, you'll typically learn about failures through your inbox. However, also check refinery history in step 3 to catch any failures that slipped through (e.g., polecat crashed before sending mail).
 
 You don't need to interact with the refinery directly. Just be aware that merge failures may require you to spawn a new polecat to fix the issue.
 
