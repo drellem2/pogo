@@ -161,16 +161,25 @@ func (g *BasicSearch) write(u *ProjectUpdater) {
 			case p := <-u.addFw:
 				if g.watcher == nil {
 					g.logger.Warn("watcher is nil")
-				}
-				w := g.watcher.Add(p)
-				if w != nil {
-					g.logger.Error("Error adding file watcher: %v", w)
+				} else if max := g.maxWatchers; max > 0 && g.watchCount.Load() >= max {
+					g.logger.Warn("File watcher limit reached, skipping watch",
+						"path", p, "limit", max)
+				} else {
+					w := g.watcher.Add(p)
+					if w != nil {
+						g.logger.Error("Error adding file watcher: %v", w)
+					} else {
+						g.watchCount.Add(1)
+					}
 				}
 			case p := <-u.removeFw:
 				if g.watcher == nil {
 					g.logger.Warn("watcher is nil")
 				}
-				g.watcher.Remove(p)
+				err := g.watcher.Remove(p)
+				if err == nil {
+					g.watchCount.Add(-1)
+				}
 			case <-u.quit:
 				u.closed = true
 			}

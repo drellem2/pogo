@@ -6,11 +6,13 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
+	"sync/atomic"
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/go-plugin"
 
+	"github.com/drellem2/pogo/internal/config"
 	pogoPlugin "github.com/drellem2/pogo/pkg/plugin"
 )
 
@@ -25,11 +27,13 @@ const UseWatchers = true
 var SearchService = createBasicSearch()
 
 type BasicSearch struct {
-	mu       sync.RWMutex
-	logger   hclog.Logger
-	projects map[string]IndexedProject
-	watcher  *fsnotify.Watcher
-	updater  *ProjectUpdater
+	mu          sync.RWMutex
+	logger      hclog.Logger
+	projects    map[string]IndexedProject
+	watcher     *fsnotify.Watcher
+	updater     *ProjectUpdater
+	maxWatchers int32        // configurable cap; 0 means unlimited
+	watchCount  atomic.Int32 // current number of watched paths
 }
 
 // Input to an "Execute" call should be a serialized SearchRequest
@@ -217,6 +221,15 @@ func (g *BasicSearch) GetStatus(projectRoot string) *ProjectStatus {
 	}
 }
 
+// SetMaxWatchers updates the cap on filesystem watchers.
+// Call this after loading configuration to override the default.
+func (g *BasicSearch) SetMaxWatchers(max int) {
+	if max > 0 {
+		g.maxWatchers = int32(max)
+		g.logger.Info("Max file watchers set to "+strconv.Itoa(max), "max_watchers", max)
+	}
+}
+
 func (g *BasicSearch) Close() {
 	g.watcher.Close()
 }
@@ -254,11 +267,19 @@ func createBasicSearch() *BasicSearch {
 		logger.Error("Could not create file watcher. Index will run frequently.")
 	}
 
+	maxW := int32(config.DefaultMaxWatchers)
+	if mwStr := os.Getenv("POGO_MAX_WATCHERS"); mwStr != "" {
+		if mw, err := strconv.Atoi(mwStr); err == nil && mw > 0 {
+			maxW = int32(mw)
+		}
+	}
+
 	basicSearch := &BasicSearch{
-		logger:   logger,
-		projects: make(map[string]IndexedProject),
-		watcher:  watcher,
-		updater:  nil,
+		logger:      logger,
+		projects:    make(map[string]IndexedProject),
+		watcher:     watcher,
+		updater:     nil,
+		maxWatchers: maxW,
 	}
 	basicSearch.updater = basicSearch.newProjectUpdater()
 

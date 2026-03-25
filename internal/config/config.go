@@ -41,12 +41,18 @@ func (m RunMode) String() string {
 // DefaultAgentCommand is the default command template for spawning agents.
 const DefaultAgentCommand = "claude --dangerously-skip-permissions --append-system-prompt-file {{.PromptFile}}"
 
+// DefaultMaxWatchers is the default cap on filesystem watchers.
+// macOS kqueue uses one file descriptor per watched path; too many watchers
+// can exhaust the per-process FD limit and prevent child process creation.
+const DefaultMaxWatchers = 4096
+
 // Config holds pogo daemon configuration.
 type Config struct {
-	Port     int
-	Bind     string
-	Refinery RefineryConfig
-	Agents   AgentsConfig
+	Port        int
+	Bind        string
+	MaxWatchers int
+	Refinery    RefineryConfig
+	Agents      AgentsConfig
 }
 
 // AgentsConfig holds agent command configuration.
@@ -96,8 +102,9 @@ type RefineryConfig struct {
 //  3. Default (10000)
 func Load() *Config {
 	cfg := &Config{
-		Port: DefaultPort,
-		Bind: DefaultBind,
+		Port:        DefaultPort,
+		Bind:        DefaultBind,
+		MaxWatchers: DefaultMaxWatchers,
 		Refinery: RefineryConfig{
 			Enabled:      true,
 			PollInterval: 30 * time.Second,
@@ -112,6 +119,9 @@ func Load() *Config {
 		if fileCfg.Bind != "" {
 			cfg.Bind = fileCfg.Bind
 		}
+		if fileCfg.MaxWatchers > 0 {
+			cfg.MaxWatchers = fileCfg.MaxWatchers
+		}
 		cfg.Agents = fileCfg.Agents
 	}
 
@@ -124,6 +134,12 @@ func Load() *Config {
 	if bind := os.Getenv("POGO_BIND"); bind != "" {
 		cfg.Bind = bind
 	}
+	if mwStr := os.Getenv("POGO_MAX_WATCHERS"); mwStr != "" {
+		if mw, err := strconv.Atoi(mwStr); err == nil && mw > 0 {
+			cfg.MaxWatchers = mw
+		}
+	}
+
 	// POGO_AGENT_COMMAND overrides the default agent command from config file
 	if agentCmd := os.Getenv("POGO_AGENT_COMMAND"); agentCmd != "" {
 		cfg.Agents.Command = agentCmd
@@ -223,6 +239,13 @@ func loadConfigFile() (*Config, error) {
 				val = strings.Trim(val, "\"")
 				if d, err := time.ParseDuration(val); err == nil {
 					cfg.Refinery.PollInterval = d
+				}
+			}
+		case "search":
+			switch key {
+			case "max_watchers":
+				if mw, err := strconv.Atoi(val); err == nil && mw > 0 {
+					cfg.MaxWatchers = mw
 				}
 			}
 		case "agents":

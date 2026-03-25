@@ -28,6 +28,7 @@ import (
 	"github.com/drellem2/pogo/internal/driver"
 	"github.com/drellem2/pogo/internal/project"
 	"github.com/drellem2/pogo/internal/refinery"
+	"github.com/drellem2/pogo/internal/search"
 	"github.com/drellem2/pogo/internal/server"
 	"github.com/drellem2/pogo/internal/workspace"
 
@@ -406,6 +407,9 @@ func main() {
 
 	// Load config early so we can use it for agent command setup
 	cfg := config.Load()
+
+	// Apply file watcher limit from config
+	search.SearchService.SetMaxWatchers(cfg.MaxWatchers)
 
 	// Configure agent command templates and validate the binary exists
 	agentRegistry.SetCommandConfig(&cfg.Agents)

@@ -205,6 +205,48 @@ command = "polecat-cmd {{.PromptFile}}"
 	}
 }
 
+func TestDefaultMaxWatchers(t *testing.T) {
+	os.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	defer os.Unsetenv("XDG_CONFIG_HOME")
+	os.Unsetenv("POGO_MAX_WATCHERS")
+
+	cfg := Load()
+	if cfg.MaxWatchers != DefaultMaxWatchers {
+		t.Errorf("expected default max watchers %d, got %d", DefaultMaxWatchers, cfg.MaxWatchers)
+	}
+}
+
+func TestMaxWatchersEnvOverride(t *testing.T) {
+	os.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	defer os.Unsetenv("XDG_CONFIG_HOME")
+	os.Setenv("POGO_MAX_WATCHERS", "2048")
+	defer os.Unsetenv("POGO_MAX_WATCHERS")
+
+	cfg := Load()
+	if cfg.MaxWatchers != 2048 {
+		t.Errorf("expected max watchers 2048, got %d", cfg.MaxWatchers)
+	}
+}
+
+func TestMaxWatchersConfigFile(t *testing.T) {
+	dir := t.TempDir()
+	os.Setenv("XDG_CONFIG_HOME", dir)
+	defer os.Unsetenv("XDG_CONFIG_HOME")
+	os.Unsetenv("POGO_MAX_WATCHERS")
+
+	pogoDir := filepath.Join(dir, "pogo")
+	os.MkdirAll(pogoDir, 0755)
+	os.WriteFile(filepath.Join(pogoDir, "config.toml"), []byte(`
+[search]
+max_watchers = 1024
+`), 0644)
+
+	cfg := Load()
+	if cfg.MaxWatchers != 1024 {
+		t.Errorf("expected max watchers 1024 from config file, got %d", cfg.MaxWatchers)
+	}
+}
+
 func TestBindConfigFile(t *testing.T) {
 	dir := t.TempDir()
 	os.Setenv("XDG_CONFIG_HOME", dir)
