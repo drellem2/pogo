@@ -127,7 +127,7 @@
 - Mayor prompt includes full mg toolkit (list, show, mail, reap, archive)
 - `pogo install` runs `mg init`
 - `pogo status` integrates `mg list` for work item display
-- Refinery auto-archives done items after successful merge
+- Refinery mails mayor on merge success; mayor archives done items
 - Refinery sends mg mail to author and mayor on merge failure
 - Nudge falls back to `mg mail send` if agent not running
 
