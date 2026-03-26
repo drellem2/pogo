@@ -370,13 +370,21 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		return
 	}
 
+	// Compute worktree path before template expansion so it can be included in the prompt.
+	var worktreeDir, sourceRepo string
+	if spawnReq.Repo != "" {
+		home, _ := os.UserHomeDir()
+		worktreeDir = filepath.Join(home, ".pogo", "polecats", spawnReq.Name)
+	}
+
 	// Expand template to a temp file
 	vars := TemplateVars{
-		Task:   spawnReq.Task,
-		Body:   spawnReq.Body,
-		Id:     spawnReq.Id,
-		Repo:   spawnReq.Repo,
-		Branch: spawnReq.Branch,
+		Task:        spawnReq.Task,
+		Body:        spawnReq.Body,
+		Id:          spawnReq.Id,
+		Repo:        spawnReq.Repo,
+		Branch:      spawnReq.Branch,
+		WorktreeDir: worktreeDir,
 	}
 	promptFile, err := ExpandTemplateToFile(tmplPath, vars)
 	if err != nil {
@@ -388,10 +396,7 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 	env := append(spawnReq.Env, "POGO_ROLE=polecat")
 
 	// Create git worktree for polecat isolation
-	var worktreeDir, sourceRepo string
 	if spawnReq.Repo != "" {
-		home, _ := os.UserHomeDir()
-		worktreeDir = filepath.Join(home, ".pogo", "polecats", spawnReq.Name)
 		sourceRepo = spawnReq.Repo
 		branchName := "polecat-" + spawnReq.Name
 

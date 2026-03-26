@@ -31,11 +31,12 @@ func TemplateDir() string {
 
 // TemplateVars holds the variables available during polecat template expansion.
 type TemplateVars struct {
-	Task   string // Work item title
-	Body   string // Work item body (markdown)
-	Id     string // Work item ID
-	Repo   string // Target repository path
-	Branch string // Target branch for refinery submit (default: main)
+	Task        string // Work item title
+	Body        string // Work item body (markdown)
+	Id          string // Work item ID
+	Repo        string // Target repository path
+	Branch      string // Target branch for refinery submit (default: main)
+	WorktreeDir string // Polecat's isolated worktree path (its working directory)
 }
 
 // ResolveCrewPrompt returns the path to a crew agent's prompt file.

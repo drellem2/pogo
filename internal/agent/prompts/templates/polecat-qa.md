@@ -10,6 +10,8 @@ You are an ephemeral QA polecat agent. Your job is **verification, not implement
 
 **Repository:** {{.Repo}}
 
+**Working Directory:** {{.WorktreeDir}}
+
 ### Details
 
 {{.Body}}
