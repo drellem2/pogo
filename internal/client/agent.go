@@ -251,7 +251,7 @@ func ArchiveMGDoneItems() (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-// ReopenMGWorkItem calls mg reopen to move a done work item back to available.
+// ReopenMGWorkItem calls mg reopen to move a done work item back to claimed/.
 // Returns nil if the reopen succeeds. Non-fatal errors (e.g. item not in done/)
 // are returned as errors for the caller to log.
 func ReopenMGWorkItem(id string) error {

@@ -495,7 +495,8 @@ func main() {
 					log.Printf("refinery: failed to mail mayor: %v", err)
 				}
 
-				// Auto-reopen the work item so it's available for retry.
+				// Auto-reopen the work item so it moves back to claimed/ for retry.
+				// This keeps the item assigned to the original polecat.
 				// Polecats use their work item ID as the author field.
 				if mr.Author != "" {
 					if err := client.ReopenMGWorkItem(mr.Author); err != nil {
