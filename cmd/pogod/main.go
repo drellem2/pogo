@@ -30,6 +30,7 @@ import (
 	"github.com/drellem2/pogo/internal/refinery"
 	"github.com/drellem2/pogo/internal/search"
 	"github.com/drellem2/pogo/internal/server"
+	"github.com/drellem2/pogo/internal/workitem"
 	"github.com/drellem2/pogo/internal/workspace"
 
 	pogoPlugin "github.com/drellem2/pogo/pkg/plugin"
@@ -346,6 +347,7 @@ func registerHandlers() {
 	http.HandleFunc("/health", health)
 	http.HandleFunc("/health/full", healthFull)
 	http.HandleFunc("/status", status)
+	http.HandleFunc("/workitems", workitem.HandleWorkItems)
 
 	// Workspace symbol query endpoints
 	workspaceMgr = workspace.New()
