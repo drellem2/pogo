@@ -87,6 +87,24 @@ func PruneWorktrees() ([]refinery.PruneResult, error) {
 	return results, nil
 }
 
+// CancelMerge cancels a queued merge request, removing it from the queue.
+func CancelMerge(id string) error {
+	body, err := json.Marshal(refinery.CancelRequest{ID: id})
+	if err != nil {
+		return err
+	}
+	r, err := http.Post(serverURL+"/refinery/cancel", "application/json", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	defer r.Body.Close()
+	if r.StatusCode != http.StatusOK {
+		msg, _ := io.ReadAll(r.Body)
+		return fmt.Errorf("cancel failed: %s", string(msg))
+	}
+	return nil
+}
+
 // SubmitMerge submits a branch to the refinery merge queue.
 func SubmitMerge(req refinery.SubmitRequest) (string, error) {
 	body, err := json.Marshal(req)

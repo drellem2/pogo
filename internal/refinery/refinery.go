@@ -66,6 +66,7 @@ const (
 	StatusProcessing MergeStatus = "processing"
 	StatusMerged     MergeStatus = "merged"
 	StatusFailed     MergeStatus = "failed"
+	StatusCancelled  MergeStatus = "cancelled"
 )
 
 // MergeRequest represents a branch submitted for merging.
@@ -274,6 +275,36 @@ func (r *Refinery) GetStatus() Status {
 		QueueLen:     len(r.queue),
 		HistoryLen:   len(r.history),
 	}
+}
+
+// Cancel removes a queued merge request from the queue without merging.
+// Returns an error if the MR is not found or is not in a cancellable state.
+func (r *Refinery) Cancel(id string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	mr, ok := r.byID[id]
+	if !ok {
+		return fmt.Errorf("merge request %q not found", id)
+	}
+	if mr.Status != StatusQueued {
+		return fmt.Errorf("merge request %q has status %q and cannot be cancelled", id, mr.Status)
+	}
+
+	// Remove from queue.
+	for i, q := range r.queue {
+		if q.ID == id {
+			r.queue = append(r.queue[:i], r.queue[i+1:]...)
+			break
+		}
+	}
+
+	mr.Status = StatusCancelled
+	mr.DoneTime = time.Now()
+	r.history = append(r.history, mr)
+
+	log.Printf("refinery: cancelled MR %s branch=%s author=%s", mr.ID, mr.Branch, mr.Author)
+	return nil
 }
 
 // processNext takes the next queued item and processes it.

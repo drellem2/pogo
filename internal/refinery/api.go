@@ -21,6 +21,7 @@ func (r *Refinery) RegisterHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/refinery/history", r.handleHistory)
 	mux.HandleFunc("/refinery/submit", r.handleSubmit)
 	mux.HandleFunc("/refinery/mr/{id}", r.handleMR)
+	mux.HandleFunc("/refinery/cancel", r.handleCancel)
 	mux.HandleFunc("/refinery/prune", r.handlePrune)
 }
 
@@ -89,6 +90,32 @@ func (r *Refinery) handleSubmit(w http.ResponseWriter, req *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(map[string]string{"id": id})
+}
+
+// CancelRequest is the JSON body for POST /refinery/cancel.
+type CancelRequest struct {
+	ID string `json:"id"`
+}
+
+func (r *Refinery) handleCancel(w http.ResponseWriter, req *http.Request) {
+	if req.Method != "POST" {
+		http.Error(w, "", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var cancelReq CancelRequest
+	if err := json.NewDecoder(req.Body).Decode(&cancelReq); err != nil {
+		http.Error(w, fmt.Sprintf("bad request: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	if err := r.Cancel(cancelReq.ID); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"id": cancelReq.ID, "status": "cancelled"})
 }
 
 func (r *Refinery) handleMR(w http.ResponseWriter, req *http.Request) {
