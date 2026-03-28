@@ -374,9 +374,12 @@ func TestInstallPromptsUpdatesUnstampedFiles(t *testing.T) {
 
 	// Create pre-existing files without hash stamps (simulates old install)
 	agentsDir := filepath.Join(tmpHome, ".pogo", "agents")
+	crewDir := filepath.Join(agentsDir, "crew")
 	tmplDir := filepath.Join(agentsDir, "templates")
+	os.MkdirAll(crewDir, 0755)
 	os.MkdirAll(tmplDir, 0755)
 	os.WriteFile(filepath.Join(agentsDir, "mayor.md"), []byte("# Old mayor\n"), 0644)
+	os.WriteFile(filepath.Join(crewDir, "doctor.md"), []byte("# Old doctor\n"), 0644)
 	os.WriteFile(filepath.Join(tmplDir, "polecat.md"), []byte("# Old polecat\n"), 0644)
 	os.WriteFile(filepath.Join(tmplDir, "polecat-qa.md"), []byte("# Old polecat-qa\n"), 0644)
 
@@ -390,6 +393,41 @@ func TestInstallPromptsUpdatesUnstampedFiles(t *testing.T) {
 	}
 	if len(result.Installed) != 0 {
 		t.Errorf("expected no new installs (files existed), got %v", result.Installed)
+	}
+}
+
+func TestInstallPromptsCrewWithExistingTemplatesDir(t *testing.T) {
+	origHome := os.Getenv("HOME")
+	tmpHome := t.TempDir()
+	os.Setenv("HOME", tmpHome)
+	defer os.Setenv("HOME", origHome)
+
+	// Simulate user who already has templates/ dir but no crew/ dir
+	agentsDir := filepath.Join(tmpHome, ".pogo", "agents")
+	tmplDir := filepath.Join(agentsDir, "templates")
+	os.MkdirAll(tmplDir, 0755)
+	os.WriteFile(filepath.Join(tmplDir, "custom.md"), []byte("# Custom template\n"), 0644)
+
+	result, err := InstallPrompts(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Should install crew/doctor.md even though templates/ existed
+	doctorInstalled := false
+	for _, f := range result.Installed {
+		if f == filepath.Join("crew", "doctor.md") {
+			doctorInstalled = true
+		}
+	}
+	if !doctorInstalled {
+		t.Errorf("expected crew/doctor.md to be installed, installed=%v skipped=%v", result.Installed, result.Skipped)
+	}
+
+	// Verify file exists on disk
+	doctorPath := filepath.Join(agentsDir, "crew", "doctor.md")
+	if _, err := os.Stat(doctorPath); os.IsNotExist(err) {
+		t.Error("crew/doctor.md not found on disk after install")
 	}
 }
 
