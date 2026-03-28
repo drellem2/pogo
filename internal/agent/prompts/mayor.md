@@ -132,7 +132,7 @@ When a polecat completes a work item, check whether the work item has a `qa` fie
 
 - **`qa: manual`** — Human review is required. Create a QA work item assigned to the human:
   ```bash
-  mg create --type=qa --depends=<source-id> --source=<source-id> --assignee=me --title="QA: <original title>"
+  mg create --type=qa --depends=<source-id> --source=<source-id> --assignee=human --title="QA: <original title>"
   ```
   This item won't be dispatched to a polecat — it stays assigned to the human.
 
