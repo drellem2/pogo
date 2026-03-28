@@ -82,6 +82,7 @@ Follow these steps exactly, in order. Skipping any step is a failure.
 - **Be thorough.** Check every acceptance criterion. Run every relevant test. Try edge cases.
 - **Be specific.** When reporting failures, include exact error messages, expected vs actual behavior, and steps to reproduce.
 - **Stay scoped.** Only verify the work described in your assignment. If you find unrelated issues, note them in your report but don't investigate further.
+- **No self-nudging or cron jobs.** Do NOT set up crontab entries, CronCreate jobs, `/loop`, `/schedule`, or `pogo nudge` commands targeting yourself or other agents. Pogod handles all periodic nudging.
 - **If stuck, mail the mayor:**
   ```bash
   mg mail send mayor --from={{.Id}} --subject="stuck on {{.Id}}" --body="<what you tried and what's blocking you>"

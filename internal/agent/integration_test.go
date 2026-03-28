@@ -160,6 +160,17 @@ func TestPolecatTemplateExpansion(t *testing.T) {
 			t.Errorf("expanded template missing %q", check)
 		}
 	}
+
+	// Verify anti-cron instructions are present (polecats must not set up self-nudges)
+	antiCronChecks := []string{
+		"do NOT use cron",
+		"No self-nudging or cron jobs",
+	}
+	for _, check := range antiCronChecks {
+		if !strings.Contains(expanded, check) {
+			t.Errorf("expanded template missing anti-cron instruction %q", check)
+		}
+	}
 }
 
 // TestMayorStartSpawnPolecat is an end-to-end test that verifies:

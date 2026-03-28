@@ -42,11 +42,17 @@ Follow these steps exactly, in order. Skipping any step is a failure.
    pogo refinery submit polecat-{{.Id}} --repo={{.Repo}} --author={{.Id}} --target={{if .Branch}}{{.Branch}}{{else}}main{{end}}
    ```
 
-5. **Wait for merge result** — poll refinery history:
+5. **Wait for merge result** — poll refinery history using a bash while-loop:
    ```bash
-   curl -s http://localhost:10000/refinery/mr/<id>
+   # Poll in a bash loop — do NOT use cron, CronCreate, scheduled tasks, or pogo nudge for this.
+   while true; do
+     STATUS=$(curl -s http://localhost:10000/refinery/mr/<id> | grep -o '"status":"[^"]*"' | head -1)
+     echo "$STATUS"
+     if echo "$STATUS" | grep -q '"merged"\|"failed"'; then break; fi
+     sleep 10
+   done
    ```
-   Loop until status is `"merged"` or `"failed"` (sleep 10s between checks, timeout after 5min).
+   Use a simple bash loop only. Do NOT set up crontab entries, CronCreate jobs, or `pogo nudge` commands to poll — these interrupt interactive sessions.
 
 6. **If merged:** mark the work item done:
    ```bash
@@ -65,6 +71,7 @@ Follow these steps exactly, in order. Skipping any step is a failure.
 - **Commit often.** Small, focused commits are easier to review and merge.
 - **Follow conventions.** Match the existing code style in the repository.
 - **Don't push to main.** Push to your feature branch. The refinery merges to main.
+- **No self-nudging or cron jobs.** Do NOT set up crontab entries, CronCreate jobs, `/loop`, `/schedule`, or `pogo nudge` commands targeting yourself or other agents. Pogod handles all periodic nudging. If you need to poll, use a simple bash while-loop.
 - **If stuck, mail the mayor:**
   ```bash
   mg mail send mayor --from={{.Id}} --subject="stuck on {{.Id}}" --body="<what you tried and what's blocking you>"
