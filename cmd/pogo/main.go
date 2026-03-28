@@ -1438,11 +1438,35 @@ This reclaims disk space and keeps the refinery worktree clones tidy.`,
 		},
 	}
 
+	var cmdRefineryCancel = &cobra.Command{
+		Use:   "cancel <mr-id>",
+		Short: "Cancel a queued merge request",
+		Long: `Remove a merge request from the queue without merging.
+
+Only queued (not yet processing) merge requests can be cancelled.
+
+Example:
+  pogo refinery cancel mr-abc123`,
+		Args: cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			id := args[0]
+			if err := client.CancelMerge(id); err != nil {
+				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+			}
+			if jsonOutput {
+				cli.PrintJSON(map[string]string{"id": id, "status": "cancelled"})
+			} else {
+				fmt.Printf("Cancelled merge request %s\n", id)
+			}
+		},
+	}
+
 	cmdRefinery.AddCommand(cmdRefinerySubmit)
 	cmdRefinery.AddCommand(cmdRefineryQueue)
 	cmdRefinery.AddCommand(cmdRefineryHistory)
 	cmdRefinery.AddCommand(cmdRefineryShow)
 	cmdRefinery.AddCommand(cmdRefineryPrune)
+	cmdRefinery.AddCommand(cmdRefineryCancel)
 	rootCmd.AddCommand(cmdRefinery)
 
 	// Cross-repo operations
