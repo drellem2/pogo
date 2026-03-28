@@ -67,6 +67,10 @@ type Agent struct {
 	// SourceRepo is the original repo path used to create/remove the worktree.
 	SourceRepo string `json:"source_repo,omitempty"`
 
+	// InitialNudge is the message sent after spawn to bypass the CLI interactive prompt.
+	// Stored so Respawn can re-send it.
+	InitialNudge string `json:"-"`
+
 	// master is the PTY master file descriptor. Not exported (held by pogod).
 	master *os.File
 	cmd    *exec.Cmd
@@ -171,14 +175,15 @@ func ProcessName(agentType AgentType, name string) string {
 
 // SpawnRequest contains everything needed to spawn an agent.
 type SpawnRequest struct {
-	Name        string
-	Type        AgentType
-	Command     []string // e.g. ["claude", "--append-system-prompt", "<prompt content>"]
-	Env         []string // additional env vars
-	PromptFile  string   // path to prompt file (optional)
-	Dir         string   // working directory for the process (optional)
-	WorktreeDir string   // git worktree path for polecat isolation (optional)
-	SourceRepo  string   // original repo path for worktree removal (optional)
+	Name         string
+	Type         AgentType
+	Command      []string // e.g. ["claude", "--append-system-prompt", "<prompt content>"]
+	Env          []string // additional env vars
+	PromptFile   string   // path to prompt file (optional)
+	Dir          string   // working directory for the process (optional)
+	WorktreeDir  string   // git worktree path for polecat isolation (optional)
+	SourceRepo   string   // original repo path for worktree removal (optional)
+	InitialNudge string   // if set, pogod sends this nudge after spawn to bypass the CLI interactive prompt
 }
 
 // Spawn starts a new agent process with a PTY.
@@ -252,6 +257,16 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 
 	r.agents[req.Name] = a
 	log.Printf("agent %s: spawned pid=%d type=%s proc=%s", req.Name, a.PID, req.Type, procName)
+
+	// Send initial nudge to bypass the CLI interactive prompt.
+	if req.InitialNudge != "" {
+		a.InitialNudge = req.InitialNudge
+		go func() {
+			time.Sleep(10 * time.Second)
+			a.Nudge(req.InitialNudge)
+		}()
+	}
+
 	return a, nil
 }
 
@@ -388,6 +403,7 @@ func (r *Registry) Respawn(name string) (*Agent, error) {
 		RestartCount: restartCount,
 		PromptFile:   old.PromptFile,
 		Dir:          old.Dir,
+		InitialNudge: old.InitialNudge,
 		master:       master,
 		cmd:          cmd,
 		outputBuf:    NewRingBuffer(64 * 1024),
@@ -406,6 +422,15 @@ func (r *Registry) Respawn(name string) (*Agent, error) {
 
 	r.agents[name] = a
 	log.Printf("agent %s: respawned pid=%d restart=%d", name, a.PID, restartCount)
+
+	// Re-send initial nudge on respawn to bypass the CLI interactive prompt.
+	if a.InitialNudge != "" {
+		go func() {
+			time.Sleep(10 * time.Second)
+			a.Nudge(a.InitialNudge)
+		}()
+	}
+
 	return a, nil
 }
 

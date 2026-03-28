@@ -313,26 +313,26 @@ func (r *Registry) handleStart(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	// All crew agents get an initial nudge to bypass the CLI interactive prompt.
+	// The mayor gets a specific coordination message; others get a generic start message.
+	var nudgeMsg string
+	if startReq.Name == "mayor" {
+		nudgeMsg = "You are now running. Begin your coordination loop."
+	} else {
+		nudgeMsg = "You are now running. Check your mail with `mg mail list " + startReq.Name + "` and begin your work."
+	}
+
 	a, spawnErr := r.Spawn(SpawnRequest{
-		Name:       startReq.Name,
-		Type:       TypeCrew,
-		Command:    cmd,
-		PromptFile: promptFile,
-		Dir:        agentDir,
+		Name:         startReq.Name,
+		Type:         TypeCrew,
+		Command:      cmd,
+		PromptFile:   promptFile,
+		Dir:          agentDir,
+		InitialNudge: nudgeMsg,
 	})
 	if spawnErr != nil {
 		http.Error(w, spawnErr.Error(), http.StatusConflict)
 		return
-	}
-
-	// Only nudge the mayor to kick off its coordination loop.
-	// Other crew agents (like architect) are interactive and should not
-	// receive unsolicited nudges — doing so disrupts their sessions.
-	if startReq.Name == "mayor" {
-		go func() {
-			time.Sleep(10 * time.Second)
-			a.Nudge("You are now running. Begin your coordination loop.")
-		}()
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -436,15 +436,22 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		return
 	}
 
+	// Build the initial nudge message for the polecat.
+	nudgeMsg := "Look at the system prompt and complete the steps for this work item: " + spawnReq.Id
+	if spawnReq.Id == "" {
+		nudgeMsg = "You are now running. Begin your assigned task."
+	}
+
 	a, err := r.Spawn(SpawnRequest{
-		Name:        spawnReq.Name,
-		Type:        TypePolecat,
-		Command:     cmd,
-		Env:         env,
-		PromptFile:  promptFile,
-		Dir:         worktreeDir,
-		WorktreeDir: worktreeDir,
-		SourceRepo:  sourceRepo,
+		Name:         spawnReq.Name,
+		Type:         TypePolecat,
+		Command:      cmd,
+		Env:          env,
+		PromptFile:   promptFile,
+		Dir:          worktreeDir,
+		WorktreeDir:  worktreeDir,
+		SourceRepo:   sourceRepo,
+		InitialNudge: nudgeMsg,
 	})
 	if err != nil {
 		os.Remove(promptFile) // Clean up temp file on spawn failure
@@ -454,15 +461,6 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		}
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
-	}
-
-	// Nudge polecat after a brief delay to kick off execution.
-	// Claude Code interactive mode waits for input — this sends the initial prompt.
-	if spawnReq.Task != "" {
-		go func() {
-			time.Sleep(10 * time.Second)
-			a.Nudge(fmt.Sprintf("Look at the system prompt and complete the steps for this work item: %s", spawnReq.Id))
-		}()
 	}
 
 	w.Header().Set("Content-Type", "application/json")

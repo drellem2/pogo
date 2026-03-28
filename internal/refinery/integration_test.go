@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -276,5 +277,139 @@ func TestMultipleMergeRequests(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(verifyDir, f)); os.IsNotExist(err) {
 			t.Errorf("%s not found on main", f)
 		}
+	}
+}
+
+// TestBranchCheckedOutInWorktree simulates the scenario from GitHub issue #4:
+// a polecat's worktree is still live when the refinery tries to process the MR.
+// The refinery should still succeed because it fetches from the real remote
+// (bare origin), not from a local dev repo with linked worktrees.
+func TestBranchCheckedOutInWorktree(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found")
+	}
+
+	// === Set up "origin" bare repo ===
+	originDir := t.TempDir()
+	run(t, originDir, "git", "init", "--bare", "-b", "main")
+
+	// === Set up a "dev repo" (simulates the user's working clone) ===
+	devDir := t.TempDir()
+	run(t, devDir, "git", "clone", originDir, ".")
+	run(t, devDir, "git", "config", "user.email", "test@test.com")
+	run(t, devDir, "git", "config", "user.name", "Test")
+	os.WriteFile(filepath.Join(devDir, "README.md"), []byte("# Test"), 0644)
+	run(t, devDir, "git", "add", ".")
+	run(t, devDir, "git", "commit", "-m", "initial commit")
+	run(t, devDir, "git", "push", "origin", "main")
+
+	// === Simulate polecat: create a linked worktree on a feature branch ===
+	// This is what `git worktree add` does when spawning a polecat.
+	polecatDir := filepath.Join(t.TempDir(), "polecat-wt")
+	run(t, devDir, "git", "worktree", "add", "-b", "polecat-wt", polecatDir)
+
+	// Make changes in the polecat worktree
+	os.WriteFile(filepath.Join(polecatDir, "feature.txt"), []byte("feature"), 0644)
+	run(t, polecatDir, "git", "add", ".")
+	run(t, polecatDir, "git", "commit", "-m", "feat: add feature (wt)")
+	run(t, polecatDir, "git", "push", "origin", "polecat-wt")
+
+	// The polecat worktree is STILL LIVE — branch polecat-wt is checked out there.
+	// This is the scenario that caused the stall in issue #4.
+
+	// === Set up refinery pointing at the bare origin (not the dev repo) ===
+	wtDir := t.TempDir()
+	r, err := New(Config{
+		Enabled:      true,
+		PollInterval: time.Hour,
+		WorktreeDir:  wtDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Submit with origin (bare repo) as RepoPath — this is the correct path
+	id, err := r.Submit(MergeRequest{
+		RepoPath:  originDir,
+		Branch:    "polecat-wt",
+		TargetRef: "main",
+		Author:    "cat-wt",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	r.processNext()
+
+	mr := r.Get(id)
+	if mr == nil {
+		t.Fatal("MR not found")
+	}
+	if mr.Status != StatusMerged {
+		t.Fatalf("expected merged, got %s (error: %s)", mr.Status, mr.Error)
+	}
+
+	// Verify merge landed on main
+	verifyDir := t.TempDir()
+	run(t, verifyDir, "git", "clone", originDir, ".")
+	if _, err := os.Stat(filepath.Join(verifyDir, "feature.txt")); os.IsNotExist(err) {
+		t.Error("feature.txt not found on main after merge")
+	}
+}
+
+// TestFixRemoteURLRejectsLocalDevRepo verifies that fixRemoteURL returns an
+// error when the source repo is a non-bare repo with no usable remote,
+// preventing the "already checked out" stall.
+func TestFixRemoteURLRejectsLocalDevRepo(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found")
+	}
+
+	// Create a non-bare repo with no remotes (simulates a dev repo
+	// whose origin we can't resolve).
+	noRemoteDir := t.TempDir()
+	run(t, noRemoteDir, "git", "init", "-b", "main")
+	run(t, noRemoteDir, "git", "config", "user.email", "test@test.com")
+	run(t, noRemoteDir, "git", "config", "user.name", "Test")
+	os.WriteFile(filepath.Join(noRemoteDir, "README.md"), []byte("# Test"), 0644)
+	run(t, noRemoteDir, "git", "add", ".")
+	run(t, noRemoteDir, "git", "commit", "-m", "initial")
+
+	// Clone it (simulates ensureWorktree's clone step)
+	cloneDir := t.TempDir()
+	run(t, cloneDir, "git", "clone", "--no-local", noRemoteDir, ".")
+
+	// fixRemoteURL should reject because source is non-bare with no remote
+	err := fixRemoteURL(cloneDir, noRemoteDir)
+	if err == nil {
+		t.Fatal("expected error from fixRemoteURL for non-bare repo without remotes")
+	}
+	if !strings.Contains(err.Error(), "no remote configured") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+// TestFixRemoteURLAllowsBareRepo verifies that fixRemoteURL accepts a bare
+// repo as the source (the common case in tests and when RepoPath points
+// directly at the origin).
+func TestFixRemoteURLAllowsBareRepo(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found")
+	}
+
+	bareDir := t.TempDir()
+	run(t, bareDir, "git", "init", "--bare", "-b", "main")
+
+	// Create a working repo to be the "clone"
+	workDir := t.TempDir()
+	run(t, workDir, "git", "init", "-b", "main")
+	run(t, workDir, "git", "config", "user.email", "test@test.com")
+	run(t, workDir, "git", "config", "user.name", "Test")
+	run(t, workDir, "git", "remote", "add", "origin", bareDir)
+
+	// fixRemoteURL should succeed because source is a bare repo
+	err := fixRemoteURL(workDir, bareDir)
+	if err != nil {
+		t.Fatalf("fixRemoteURL should accept bare repo, got: %v", err)
 	}
 }
