@@ -185,6 +185,7 @@ shut down the server process.`,
 
 	var statusLive bool
 	var statusInterval time.Duration
+	var statusTag string
 
 	renderStatus := func() {
 		type statusReport struct {
@@ -203,7 +204,11 @@ shut down the server process.`,
 		}
 
 		// Work items via mg list
-		mgOut, mgErr := exec.Command("mg", "list").CombinedOutput()
+		mgArgs := []string{"list"}
+		if statusTag != "" {
+			mgArgs = append(mgArgs, "--tag", statusTag)
+		}
+		mgOut, mgErr := exec.Command("mg", mgArgs...).CombinedOutput()
 		if mgErr == nil {
 			report.WorkItems = strings.TrimSpace(string(mgOut))
 		}
@@ -1237,6 +1242,7 @@ The path is resolved to an absolute path and the git root is discovered automati
 	rootCmd.AddCommand(cmdVisit)
 	cmdStatus.Flags().BoolVar(&statusLive, "live", false, "Continuously refresh the dashboard (like watch)")
 	cmdStatus.Flags().DurationVar(&statusInterval, "interval", 2*time.Second, "Refresh interval for --live mode")
+	cmdStatus.Flags().StringVar(&statusTag, "tag", "", "Filter work items by tag")
 	rootCmd.AddCommand(cmdStatus)
 	cmdDoctor.Flags().BoolVar(&doctorCheck, "check", false, "Run quick health checks without starting the doctor agent")
 	rootCmd.AddCommand(cmdDoctor)
