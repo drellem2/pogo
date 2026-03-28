@@ -139,12 +139,15 @@ func (r *Refinery) ensureWorktree(repoPath string) (string, error) {
 		return wtDir, nil
 	}
 
-	// Clone the repo into the worktree dir
+	// Clone the repo into the worktree dir.
+	// Use --no-local to prevent git from sharing the object store via
+	// alternates, which can leak worktree metadata from the source repo
+	// and cause "already checked out" errors.
 	if err := os.MkdirAll(r.cfg.WorktreeDir, 0755); err != nil {
 		return "", fmt.Errorf("mkdir: %w", err)
 	}
 
-	cmd := exec.Command("git", "clone", repoPath, wtDir)
+	cmd := exec.Command("git", "clone", "--no-local", repoPath, wtDir)
 	cloneOutput, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("clone: %s: %w", strings.TrimSpace(string(cloneOutput)), err)
@@ -161,24 +164,43 @@ func (r *Refinery) ensureWorktree(repoPath string) (string, error) {
 // fixRemoteURL ensures the worktree clone's origin points at the real remote
 // (e.g. GitHub) rather than a local filesystem path. If the source repo has
 // an origin remote configured, that URL is propagated to the worktree clone.
-// If the source repo has no origin (e.g. a bare repo used directly), the
-// worktree's origin is left unchanged.
+//
+// If the source repo has no usable remote and is not a bare repo, an error is
+// returned — processing with a local dev repo as origin can cause "already
+// checked out" failures when the dev repo has linked polecat worktrees.
 func fixRemoteURL(wtDir, repoPath string) error {
-	cmd := exec.Command("git", "-C", repoPath, "remote", "get-url", "origin")
+	// Try known remote names in priority order.
+	for _, remote := range []string{"origin", "upstream"} {
+		cmd := exec.Command("git", "-C", repoPath, "remote", "get-url", remote)
+		out, err := cmd.Output()
+		if err != nil {
+			continue
+		}
+		remoteURL := strings.TrimSpace(string(out))
+		if remoteURL == "" || remoteURL == repoPath {
+			continue
+		}
+		// Found a usable remote URL — propagate it to the clone.
+		if output, err := gitCmdOutput(wtDir, "remote", "set-url", "origin", remoteURL); err != nil {
+			return fmt.Errorf("%s: %w", output, err)
+		}
+		return nil
+	}
+
+	// No usable remote found. If the source repo is a bare repo (typical in
+	// tests), the clone's origin already points at the right place.
+	cmd := exec.Command("git", "-C", repoPath, "rev-parse", "--is-bare-repository")
 	out, err := cmd.Output()
-	if err != nil {
-		// Source repo has no origin remote — nothing to fix
+	if err == nil && strings.TrimSpace(string(out)) == "true" {
 		return nil
 	}
-	remoteURL := strings.TrimSpace(string(out))
-	if remoteURL == "" || remoteURL == repoPath {
-		// Empty or self-referential — nothing to fix
-		return nil
-	}
-	if output, err := gitCmdOutput(wtDir, "remote", "set-url", "origin", remoteURL); err != nil {
-		return fmt.Errorf("%s: %w", output, err)
-	}
-	return nil
+
+	return fmt.Errorf(
+		"source repo %s has no remote configured; "+
+			"refinery cannot process MRs from repos without a push remote "+
+			"(local paths cause 'already checked out' errors with linked worktrees)",
+		repoPath,
+	)
 }
 
 // runQualityGates runs the configured quality gates for the repo.
