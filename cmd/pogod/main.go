@@ -464,6 +464,25 @@ func main() {
 		if refErr != nil {
 			fmt.Printf("Warning: refinery failed to start: %v\n", refErr)
 		} else {
+			mergeQueue.SetOnSubmit(func(mr *refinery.MergeRequest) {
+				// When a polecat submits an MR, unlink its worktree so the
+				// branch is no longer marked as "checked out" in the source
+				// repo. This prevents "already checked out" errors in the
+				// refinery's clone. The polecat's directory is left intact
+				// so it can continue polling for merge results.
+				if mr.Author == "" {
+					return
+				}
+				a := agentRegistry.Get(mr.Author)
+				if a == nil || a.WorktreeDir == "" || a.SourceRepo == "" {
+					return
+				}
+				if err := refinery.UnlinkWorktree(a.SourceRepo, a.WorktreeDir); err != nil {
+					log.Printf("refinery: failed to unlink polecat worktree for %s: %v", mr.Author, err)
+				} else {
+					log.Printf("refinery: unlinked polecat worktree for %s at %s", mr.Author, a.WorktreeDir)
+				}
+			})
 			mergeQueue.SetOnMerged(func(mr *refinery.MergeRequest) {
 				log.Printf("refinery: merged %s (branch=%s, author=%s)", mr.ID, mr.Branch, mr.Author)
 
