@@ -38,6 +38,17 @@ func ExpandCommand(tmpl string, vars CommandTemplateVars) ([]string, error) {
 	return parts, nil
 }
 
+// ValidatePolecatCommand checks that a polecat command template includes
+// --dangerously-skip-permissions. Polecats run in freshly-created worktree
+// directories; without this flag, Claude Code prompts for directory trust
+// and blocks autonomous execution. Logs a warning if the flag is missing.
+func ValidatePolecatCommand(tmpl string) {
+	if !strings.Contains(tmpl, "--dangerously-skip-permissions") {
+		log.Printf("WARNING: polecat command template does not include --dangerously-skip-permissions; " +
+			"polecats in new worktree directories may be blocked by permission prompts")
+	}
+}
+
 // ValidateCommandBinary checks that the first token of the command template
 // (the binary) exists on PATH. Logs a warning if not found.
 func ValidateCommandBinary(tmpl string) {
