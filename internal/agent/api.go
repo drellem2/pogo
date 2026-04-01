@@ -546,7 +546,9 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 	// Build command from configurable template.
 	// Default: "claude --dangerously-skip-permissions --append-system-prompt-file {{.PromptFile}}"
 	// NOTE: --dangerously-skip-permissions is required for autonomous execution.
-	cmd, cmdErr := ExpandCommand(r.commandTemplate(TypePolecat), CommandTemplateVars{
+	polecatCmdTmpl := r.commandTemplate(TypePolecat)
+	ValidatePolecatCommand(polecatCmdTmpl)
+	cmd, cmdErr := ExpandCommand(polecatCmdTmpl, CommandTemplateVars{
 		PromptFile: promptFile,
 		AgentName:  spawnReq.Name,
 		AgentType:  string(TypePolecat),
