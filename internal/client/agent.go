@@ -271,6 +271,24 @@ func execCommandFunc(name string, args ...string) *exec.Cmd {
 	return exec.Command(name, args...)
 }
 
+// DiagnoseAgent returns diagnostic information for a specific agent,
+// including stall detection, process health, and recent activity.
+func DiagnoseAgent(name string) (*agent.DiagnoseInfo, error) {
+	r, err := http.Get(serverURL + "/agents/" + name + "/diagnose")
+	if err != nil {
+		return nil, err
+	}
+	defer r.Body.Close()
+	if r.StatusCode == http.StatusNotFound {
+		return nil, fmt.Errorf("agent %q not found", name)
+	}
+	var info agent.DiagnoseInfo
+	if err := json.NewDecoder(r.Body).Decode(&info); err != nil {
+		return nil, err
+	}
+	return &info, nil
+}
+
 // GetAgentOutput returns recent output from an agent.
 // If plain is true, ANSI escape sequences are stripped server-side.
 func GetAgentOutput(name string, plain bool) (string, error) {
