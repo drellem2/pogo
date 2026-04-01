@@ -132,11 +132,23 @@ func (r *Refinery) ensureWorktree(repoPath string) (string, error) {
 	wtDir := filepath.Join(r.cfg.WorktreeDir, repoName)
 
 	if _, err := os.Stat(filepath.Join(wtDir, ".git")); err == nil {
-		// Already cloned — ensure origin points at the real remote
-		if err := fixRemoteURL(wtDir, repoPath); err != nil {
-			return "", fmt.Errorf("fix remote url: %w", err)
+		// If an older clone was made without --no-local, it may have git
+		// alternates linking back to the source repo. This leaks worktree
+		// metadata and causes "already checked out" errors when the source
+		// has linked polecat worktrees. Re-clone to fix.
+		if hasAlternates(wtDir) {
+			log.Printf("refinery: worktree %s has alternates (stale clone), re-cloning", wtDir)
+			if err := os.RemoveAll(wtDir); err != nil {
+				return "", fmt.Errorf("remove stale clone: %w", err)
+			}
+			// Fall through to fresh clone below
+		} else {
+			// Already cloned — ensure origin points at the real remote
+			if err := fixRemoteURL(wtDir, repoPath); err != nil {
+				return "", fmt.Errorf("fix remote url: %w", err)
+			}
+			return wtDir, nil
 		}
-		return wtDir, nil
 	}
 
 	// Clone the repo into the worktree dir.
@@ -318,6 +330,46 @@ func runGate(wtDir, command string) (string, error) {
 
 	output, err := cmd.CombinedOutput()
 	return string(output), err
+}
+
+// hasAlternates reports whether the git repo at dir has an alternates file,
+// which indicates the clone shares its object store with another repo via
+// hardlinks. This happens when git clone is used without --no-local on a
+// local path. Shared object stores leak worktree metadata from the source
+// repo, causing "already checked out" errors.
+func hasAlternates(dir string) bool {
+	// Alternates file lives at .git/objects/info/alternates for a regular repo.
+	altPath := filepath.Join(dir, ".git", "objects", "info", "alternates")
+	info, err := os.Stat(altPath)
+	if err != nil {
+		return false
+	}
+	return info.Size() > 0
+}
+
+// UnlinkWorktree removes the git worktree tracking for a polecat's worktree
+// so the branch is no longer marked as "checked out" in the source repo.
+// The worktree directory is left intact so the polecat process can continue
+// running (it only needs git for push, which is already done by submit time).
+func UnlinkWorktree(sourceRepo, worktreeDir string) error {
+	if sourceRepo == "" || worktreeDir == "" {
+		return nil
+	}
+
+	// Remove the .git file from the worktree (it's a pointer to the
+	// source repo's .git/worktrees/<name>/ directory).
+	gitFile := filepath.Join(worktreeDir, ".git")
+	if err := os.Remove(gitFile); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove worktree .git file: %w", err)
+	}
+
+	// Prune stale worktree entries from the source repo.
+	cmd := exec.Command("git", "-C", sourceRepo, "worktree", "prune")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("worktree prune: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+
+	return nil
 }
 
 // gitCmdOutput runs a git command in the given directory and captures

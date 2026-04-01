@@ -413,3 +413,182 @@ func TestFixRemoteURLAllowsBareRepo(t *testing.T) {
 		t.Fatalf("fixRemoteURL should accept bare repo, got: %v", err)
 	}
 }
+
+// TestEnsureWorktreeReclonesStaleAlternates verifies that ensureWorktree
+// detects a stale clone with git alternates (from a pre-fix clone without
+// --no-local) and re-clones it cleanly.
+func TestEnsureWorktreeReclonesStaleAlternates(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found")
+	}
+
+	// Set up bare origin
+	originDir := t.TempDir()
+	run(t, originDir, "git", "init", "--bare", "-b", "main")
+
+	// Set up a dev repo with an initial commit
+	devDir := t.TempDir()
+	run(t, devDir, "git", "clone", originDir, ".")
+	run(t, devDir, "git", "config", "user.email", "test@test.com")
+	run(t, devDir, "git", "config", "user.name", "Test")
+	os.WriteFile(filepath.Join(devDir, "README.md"), []byte("# Test"), 0644)
+	run(t, devDir, "git", "add", ".")
+	run(t, devDir, "git", "commit", "-m", "initial")
+	run(t, devDir, "git", "push", "origin", "main")
+
+	// Create a feature branch and push it
+	run(t, devDir, "git", "checkout", "-b", "feat-reclone")
+	os.WriteFile(filepath.Join(devDir, "feat.txt"), []byte("feature"), 0644)
+	run(t, devDir, "git", "add", ".")
+	run(t, devDir, "git", "commit", "-m", "feat")
+	run(t, devDir, "git", "push", "origin", "feat-reclone")
+
+	// Set up refinery
+	wtDir := t.TempDir()
+	r, err := New(Config{
+		Enabled:      true,
+		PollInterval: time.Hour,
+		WorktreeDir:  wtDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate a stale clone: clone the repo, then inject an alternates file
+	// to mimic what older git versions or --shared clones produce.
+	repoName := filepath.Base(devDir)
+	staleClone := filepath.Join(wtDir, repoName)
+	cmd := exec.Command("git", "clone", "--no-local", devDir, staleClone)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("clone: %v\n%s", err, out)
+	}
+
+	// Inject alternates file to simulate a stale clone with shared objects
+	altDir := filepath.Join(staleClone, ".git", "objects", "info")
+	os.MkdirAll(altDir, 0755)
+	altFile := filepath.Join(altDir, "alternates")
+	os.WriteFile(altFile, []byte(filepath.Join(devDir, ".git", "objects")+"\n"), 0644)
+
+	// Verify alternates file exists (confirms the clone is "stale")
+	if !hasAlternates(staleClone) {
+		t.Fatal("expected stale clone to have alternates")
+	}
+
+	// Now call ensureWorktree — it should detect alternates and re-clone
+	resultDir, err := r.ensureWorktree(devDir)
+	if err != nil {
+		t.Fatalf("ensureWorktree failed: %v", err)
+	}
+	if resultDir != staleClone {
+		t.Fatalf("expected worktree at %s, got %s", staleClone, resultDir)
+	}
+
+	// The re-cloned repo should NOT have alternates
+	if hasAlternates(resultDir) {
+		t.Error("re-cloned worktree should not have alternates")
+	}
+
+	// Verify it's functional: submit and process an MR through it
+	id, err := r.Submit(MergeRequest{
+		RepoPath:  devDir,
+		Branch:    "feat-reclone",
+		TargetRef: "main",
+		Author:    "test-reclone",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	r.processNext()
+
+	mr := r.Get(id)
+	if mr == nil {
+		t.Fatal("MR not found")
+	}
+	if mr.Status != StatusMerged {
+		t.Fatalf("expected merged, got %s (error: %s)", mr.Status, mr.Error)
+	}
+}
+
+// TestUnlinkWorktree verifies that UnlinkWorktree detaches a polecat's
+// worktree from the source repo so the branch is no longer "checked out".
+func TestUnlinkWorktree(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found")
+	}
+
+	// Set up a source repo
+	srcDir := t.TempDir()
+	run(t, srcDir, "git", "init", "-b", "main")
+	run(t, srcDir, "git", "config", "user.email", "test@test.com")
+	run(t, srcDir, "git", "config", "user.name", "Test")
+	os.WriteFile(filepath.Join(srcDir, "README.md"), []byte("# Test"), 0644)
+	run(t, srcDir, "git", "add", ".")
+	run(t, srcDir, "git", "commit", "-m", "initial")
+
+	// Create a linked worktree (simulates polecat spawn)
+	wtPath := filepath.Join(t.TempDir(), "polecat-wt")
+	run(t, srcDir, "git", "worktree", "add", "-b", "polecat-branch", wtPath)
+
+	// Verify the branch is tracked by git worktree list
+	cmd := exec.Command("git", "-C", srcDir, "worktree", "list", "--porcelain")
+	out, _ := cmd.Output()
+	if !strings.Contains(string(out), wtPath) {
+		t.Fatal("expected worktree to be listed")
+	}
+
+	// Unlink the worktree
+	if err := UnlinkWorktree(srcDir, wtPath); err != nil {
+		t.Fatalf("UnlinkWorktree: %v", err)
+	}
+
+	// Verify the worktree is no longer tracked
+	cmd = exec.Command("git", "-C", srcDir, "worktree", "list", "--porcelain")
+	out, _ = cmd.Output()
+	if strings.Contains(string(out), wtPath) {
+		t.Error("expected worktree to be unlinked from source repo")
+	}
+
+	// The directory should still exist (polecat process needs it)
+	if _, err := os.Stat(wtPath); os.IsNotExist(err) {
+		t.Error("expected worktree directory to still exist")
+	}
+}
+
+// TestOnSubmitCallback verifies that the OnSubmit callback fires when
+// a merge request is submitted.
+func TestOnSubmitCallback(t *testing.T) {
+	dir := t.TempDir()
+	r, err := New(Config{
+		Enabled:      true,
+		PollInterval: time.Hour,
+		WorktreeDir:  dir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var submittedMR *MergeRequest
+	r.SetOnSubmit(func(mr *MergeRequest) {
+		submittedMR = mr
+	})
+
+	id, err := r.Submit(MergeRequest{
+		RepoPath: "/tmp/repo",
+		Branch:   "feat-1",
+		Author:   "cat-test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if submittedMR == nil {
+		t.Fatal("OnSubmit callback was not fired")
+	}
+	if submittedMR.ID != id {
+		t.Errorf("OnSubmit got ID %q, want %q", submittedMR.ID, id)
+	}
+	if submittedMR.Author != "cat-test" {
+		t.Errorf("OnSubmit got author %q, want cat-test", submittedMR.Author)
+	}
+}

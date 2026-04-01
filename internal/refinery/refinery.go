@@ -89,6 +89,11 @@ type OnMerged func(mr *MergeRequest)
 // OnFailed is called when a merge attempt fails quality gates.
 type OnFailed func(mr *MergeRequest)
 
+// OnSubmit is called when a merge request is submitted to the queue.
+// This is used by pogod to clean up polecat worktrees so the branch
+// is no longer marked as "checked out" in the source repo.
+type OnSubmit func(mr *MergeRequest)
+
 // Refinery is the merge queue loop.
 type Refinery struct {
 	cfg Config
@@ -100,6 +105,7 @@ type Refinery struct {
 
 	onMerged OnMerged
 	onFailed OnFailed
+	onSubmit OnSubmit
 
 	// nowFunc is used for time-based pruning; defaults to time.Now.
 	// Override in tests to control time.
@@ -148,6 +154,15 @@ func (r *Refinery) SetOnFailed(fn OnFailed) {
 	r.onFailed = fn
 }
 
+// SetOnSubmit sets the callback for merge request submission.
+// pogod uses this to unlink polecat worktrees so the branch is no
+// longer marked as "checked out" in the source repo.
+func (r *Refinery) SetOnSubmit(fn OnSubmit) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.onSubmit = fn
+}
+
 // OnMergedFunc returns the current OnMerged callback.
 func (r *Refinery) OnMergedFunc() OnMerged {
 	r.mu.Lock()
@@ -183,8 +198,18 @@ func (r *Refinery) Submit(req MergeRequest) (string, error) {
 
 	r.queue = append(r.queue, &req)
 	r.byID[req.ID] = &req
+	onSubmit := r.onSubmit
 
 	log.Printf("refinery: queued MR %s branch=%s repo=%s author=%s", req.ID, req.Branch, req.RepoPath, req.Author)
+
+	// Fire OnSubmit callback outside the lock. pogod uses this to unlink
+	// the polecat's worktree so the branch is no longer "checked out".
+	if onSubmit != nil {
+		r.mu.Unlock()
+		onSubmit(&req)
+		r.mu.Lock()
+	}
+
 	return req.ID, nil
 }
 
