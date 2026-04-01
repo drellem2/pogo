@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"syscall"
 	"time"
 )
 
@@ -65,6 +66,94 @@ type NudgeAPIRequest struct {
 	Timeout int `json:"timeout,omitempty"`
 }
 
+// Stall detection thresholds.
+const (
+	// StallThresholdPolecat is how long a polecat can be idle before it's
+	// considered stalled. Polecats do focused work and should produce output
+	// frequently.
+	StallThresholdPolecat = 5 * time.Minute
+
+	// StallThresholdCrew is how long a crew agent can be idle before it's
+	// considered stalled. Crew agents have longer polling intervals.
+	StallThresholdCrew = 10 * time.Minute
+)
+
+// DiagnoseInfo contains diagnostic details for an agent, including stall
+// detection, process health, and activity analysis.
+type DiagnoseInfo struct {
+	AgentInfo
+
+	// LastActivity is the timestamp of the most recent PTY output.
+	// Zero if no output has been written yet.
+	LastActivity time.Time `json:"last_activity"`
+	// IdleDuration is how long the agent has been idle (no PTY output).
+	IdleDuration string `json:"idle_duration"`
+	// ProcessAlive indicates whether the OS process is still running.
+	ProcessAlive bool `json:"process_alive"`
+	// StallThreshold is the configured threshold for this agent type.
+	StallThreshold string `json:"stall_threshold"`
+	// Stalled is true when the agent's idle time exceeds its stall threshold.
+	Stalled bool `json:"stalled"`
+	// Health is a summary string: "healthy", "idle", "stalled", "exited", or "dead".
+	Health string `json:"health"`
+	// RecentOutputTail is the last ~500 bytes of PTY output for quick triage.
+	RecentOutputTail string `json:"recent_output_tail,omitempty"`
+}
+
+// StallThresholdFor returns the stall detection threshold for the given agent type.
+func StallThresholdFor(t AgentType) time.Duration {
+	if t == TypeCrew {
+		return StallThresholdCrew
+	}
+	return StallThresholdPolecat
+}
+
+// diagnoseAgent builds a DiagnoseInfo for the given agent.
+func diagnoseAgent(a *Agent) DiagnoseInfo {
+	info := agentInfo(a)
+	lastWrite := a.outputBuf.LastWriteTime()
+	threshold := StallThresholdFor(a.Type)
+
+	var idleDur time.Duration
+	if !lastWrite.IsZero() {
+		idleDur = time.Since(lastWrite)
+	}
+
+	// Check if the OS process is still alive via kill(pid, 0).
+	processAlive := false
+	if a.PID > 0 {
+		err := syscall.Kill(a.PID, 0)
+		processAlive = err == nil
+	}
+
+	// Determine overall health.
+	health := "healthy"
+	switch {
+	case info.Status == StatusExited:
+		health = "exited"
+	case a.PID > 0 && !processAlive && info.Status == StatusRunning:
+		health = "dead"
+	case !lastWrite.IsZero() && idleDur >= threshold:
+		health = "stalled"
+	case !lastWrite.IsZero() && idleDur >= threshold/2:
+		health = "idle"
+	}
+
+	// Grab a short tail of recent output for triage.
+	tail := string(a.RecentOutput(500))
+
+	return DiagnoseInfo{
+		AgentInfo:        info,
+		LastActivity:     lastWrite,
+		IdleDuration:     idleDur.Truncate(time.Second).String(),
+		ProcessAlive:     processAlive,
+		StallThreshold:   threshold.String(),
+		Stalled:          !lastWrite.IsZero() && idleDur >= threshold,
+		Health:           health,
+		RecentOutputTail: tail,
+	}
+}
+
 // OutputAPIRequest query params for GET /agents/:name/output.
 // ?lines=N or ?bytes=N
 
@@ -109,6 +198,7 @@ func (r *Registry) RegisterHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/agents/spawn-polecat", r.handleSpawnPolecat)
 	mux.HandleFunc("/agents/prompts", r.handlePrompts)
 	mux.HandleFunc("/agents/{name}", r.handleAgent)
+	mux.HandleFunc("/agents/{name}/diagnose", r.handleDiagnose)
 	mux.HandleFunc("/agents/{name}/nudge", r.handleNudge)
 	mux.HandleFunc("/agents/{name}/output", r.handleOutput)
 	mux.HandleFunc("/agents/{name}/terminal", r.handleTerminal)
@@ -175,6 +265,22 @@ func (r *Registry) handleAgent(w http.ResponseWriter, req *http.Request) {
 	default:
 		http.Error(w, "", http.StatusMethodNotAllowed)
 	}
+}
+
+func (r *Registry) handleDiagnose(w http.ResponseWriter, req *http.Request) {
+	if req.Method != "GET" {
+		http.Error(w, "", http.StatusMethodNotAllowed)
+		return
+	}
+
+	name := req.PathValue("name")
+	agent := r.Get(name)
+	if agent == nil {
+		http.Error(w, fmt.Sprintf("agent %q not found", name), http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(diagnoseAgent(agent))
 }
 
 // NudgeAPIResponse is returned for wait-idle nudges to report delivery status.

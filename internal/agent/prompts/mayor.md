@@ -94,9 +94,18 @@ Look for:
   ```
   Check claimed status via `mg list --status=claimed` — if the polecat's item is still `available`, it hasn't started yet.
 
-- **Stuck polecats**: Running much longer than expected with no progress. Nudge them:
+- **Stuck polecats**: Running much longer than expected with no progress. Use diagnose to check:
+  ```bash
+  pogo agent diagnose <name>
+  ```
+  The diagnose command reports health status: `healthy`, `idle`, `stalled`, `exited`, or `dead`. If the agent is `stalled` (no output for >5 minutes for polecats, >10 minutes for crew), nudge it:
   ```bash
   pogo nudge <name> "status check — are you stuck?"
+  ```
+  If the agent is `dead` (process gone but still registered), stop it and re-dispatch the work:
+  ```bash
+  pogo agent stop <name>
+  mg reap
   ```
 - **Dead polecats**: Exited with errors. Their work items may need re-dispatch. Run:
   ```bash
@@ -206,6 +215,30 @@ curl http://localhost:10000/refinery/history   # completed merges (success + fai
 curl http://localhost:10000/refinery/queue      # pending merges
 curl http://localhost:10000/refinery/mr/<id>    # single MR details (includes gate output)
 ```
+
+## Troubleshooting Stalled Agents
+
+When an agent seems stuck, follow this process:
+
+1. **Diagnose first**: Run `pogo agent diagnose <name>` to get health status, idle duration, and process state.
+
+2. **Interpret the health status**:
+   - `healthy` — Agent is active and producing output. No action needed.
+   - `idle` — Agent has been quiet for a while but not yet past the stall threshold. Monitor.
+   - `stalled` — Agent has been idle longer than its threshold (5min for polecats, 10min for crew). Needs intervention.
+   - `exited` — Process finished. Check exit code and whether the work was completed.
+   - `dead` — Process is gone but pogod still thinks it's running. Clean up needed.
+
+3. **Escalation steps for stalled agents**:
+   - First: nudge with `pogo nudge <name> "status check"` — the agent may just need a prompt.
+   - Second: check recent output with `pogo agent output <name>` — look for error messages or loops.
+   - Third: stop the agent and re-dispatch the work item with retry context:
+     ```bash
+     pogo agent stop <name>
+     mg reap
+     ```
+
+4. **For dead agents**: The OS process is gone but the agent is still registered. This can happen after OOM kills or crashes. Stop the agent to clean up the registration, then reap the work item.
 
 ## What You Don't Do
 

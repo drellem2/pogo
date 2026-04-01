@@ -602,6 +602,56 @@ Detach with Ctrl-\ (SIGQUIT).`,
 		},
 	}
 
+	var cmdAgentDiagnose = &cobra.Command{
+		Use:   "diagnose <name>",
+		Short: "Diagnose agent health (stall detection, process checks)",
+		Long: `Run diagnostics on a specific agent. Checks last-activity timestamps,
+process health, idle duration, and stall detection thresholds.
+
+Health states:
+  healthy  — running and producing output normally
+  idle     — running but quiet for over half the stall threshold
+  stalled  — running but quiet for longer than the stall threshold
+  exited   — process has exited
+  dead     — registered as running but OS process is gone`,
+		Args: cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			diag, err := client.DiagnoseAgent(args[0])
+			if err != nil {
+				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+			}
+			if jsonOutput {
+				cli.PrintJSON(diag)
+			} else {
+				fmt.Printf("Name:           %s\n", diag.Name)
+				fmt.Printf("Type:           %s\n", diag.Type)
+				fmt.Printf("Status:         %s\n", diag.Status)
+				fmt.Printf("PID:            %d\n", diag.PID)
+				fmt.Printf("Process alive:  %v\n", diag.ProcessAlive)
+				fmt.Printf("Uptime:         %s\n", diag.Uptime)
+				if !diag.LastActivity.IsZero() {
+					fmt.Printf("Last activity:  %s ago\n", diag.IdleDuration)
+				} else {
+					fmt.Printf("Last activity:  (no output yet)\n")
+				}
+				fmt.Printf("Stall threshold: %s\n", diag.StallThreshold)
+				fmt.Printf("Health:         %s\n", diag.Health)
+				if diag.Stalled {
+					fmt.Printf("\n⚠ Agent appears stalled. Consider nudging or restarting:\n")
+					fmt.Printf("  pogo nudge %s \"status check\"\n", diag.Name)
+					fmt.Printf("  pogo agent stop %s\n", diag.Name)
+				}
+				if diag.Health == "dead" {
+					fmt.Printf("\n⚠ Process is gone but agent is still registered. Stop and re-dispatch:\n")
+					fmt.Printf("  pogo agent stop %s\n", diag.Name)
+				}
+				if diag.RecentOutputTail != "" {
+					fmt.Printf("\n--- Recent output (last ~500 bytes) ---\n%s\n", diag.RecentOutputTail)
+				}
+			}
+		},
+	}
+
 	// Prompt subcommands
 	var cmdAgentPrompt = &cobra.Command{
 		Use:   "prompt",
@@ -1261,6 +1311,7 @@ The path is resolved to an absolute path and the git root is discovered automati
 	cmdAgent.AddCommand(cmdAgentSpawnPolecat)
 	cmdAgent.AddCommand(cmdAgentStop)
 	cmdAgent.AddCommand(cmdAgentStatus)
+	cmdAgent.AddCommand(cmdAgentDiagnose)
 	cmdAgent.AddCommand(cmdAgentAttach)
 	cmdAgent.AddCommand(cmdAgentOutput)
 	cmdAgentPrompt.AddCommand(cmdAgentPromptList)
