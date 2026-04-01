@@ -26,6 +26,7 @@ type AgentInfo struct {
 	PromptFile   string      `json:"prompt_file,omitempty"`
 	ProcessName  string      `json:"process_name"`
 	Uptime       string      `json:"uptime"`
+	LastActivity string      `json:"last_activity,omitempty"`
 }
 
 // SpawnAPIRequest is the JSON body for POST /agents.
@@ -76,7 +77,7 @@ func ExportInfo(a *Agent) AgentInfo {
 func agentInfo(a *Agent) AgentInfo {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return AgentInfo{
+	info := AgentInfo{
 		Name:         a.Name,
 		PID:          a.PID,
 		Type:         a.Type,
@@ -90,6 +91,12 @@ func agentInfo(a *Agent) AgentInfo {
 		ProcessName:  ProcessName(a.Type, a.Name),
 		Uptime:       agentUptime(a),
 	}
+	if a.outputBuf != nil {
+		if t := a.outputBuf.LastWriteTime(); !t.IsZero() {
+			info.LastActivity = formatLastActivity(t)
+		}
+	}
+	return info
 }
 
 // agentUptime returns the human-readable uptime for an agent.
@@ -100,6 +107,15 @@ func agentUptime(a *Agent) string {
 		return a.ExitTime.Sub(a.StartTime).Truncate(time.Second).String()
 	}
 	return time.Since(a.StartTime).Truncate(time.Second).String()
+}
+
+// formatLastActivity returns a human-readable "time ago" string for the last activity timestamp.
+func formatLastActivity(t time.Time) string {
+	d := time.Since(t).Truncate(time.Second)
+	if d < time.Second {
+		return "just now"
+	}
+	return d.String() + " ago"
 }
 
 // RegisterHandlers registers agent API endpoints on the given mux.
@@ -250,6 +266,9 @@ func (r *Registry) handleOutput(w http.ResponseWriter, req *http.Request) {
 	// Default to last 4KB of output
 	n := 4096
 	output := agent.RecentOutput(n)
+	if req.URL.Query().Get("plain") == "true" {
+		output = StripANSI(output)
+	}
 	w.Header().Set("Content-Type", "application/octet-stream")
 	io.WriteString(w, string(output))
 }

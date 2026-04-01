@@ -439,8 +439,12 @@ The agent runs as a persistent crew process that pogod monitors and restarts on 
 					return
 				}
 				for _, a := range agents {
-					fmt.Printf("%-20s  pid=%-6d  type=%-8s  status=%-10s  uptime=%s\n",
-						a.Name, a.PID, a.Type, a.Status, a.Uptime)
+					activity := ""
+					if a.LastActivity != "" {
+						activity = "  last-activity=" + a.LastActivity
+					}
+					fmt.Printf("%-20s  pid=%-6d  type=%-8s  status=%-10s  uptime=%s%s\n",
+						a.Name, a.PID, a.Type, a.Status, a.Uptime, activity)
 				}
 			}
 		},
@@ -513,12 +517,16 @@ Detach with Ctrl-\ (SIGQUIT).`,
 		},
 	}
 
+	var outputPlain bool
 	var cmdAgentOutput = &cobra.Command{
 		Use:   "output <name>",
 		Short: "Show recent output from an agent",
-		Args:  cobra.ExactArgs(1),
+		Long: `Show recent output from an agent's PTY buffer.
+
+Use --plain to strip ANSI/VT escape sequences for human-readable or machine-parseable output.`,
+		Args: cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
-			output, err := client.GetAgentOutput(args[0])
+			output, err := client.GetAgentOutput(args[0], outputPlain)
 			if err != nil {
 				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
 			}
@@ -529,6 +537,7 @@ Detach with Ctrl-\ (SIGQUIT).`,
 			}
 		},
 	}
+	cmdAgentOutput.Flags().BoolVar(&outputPlain, "plain", false, "Strip ANSI escape sequences from output")
 
 	var cmdAgentStatus = &cobra.Command{
 		Use:   "status [name]",
@@ -550,6 +559,9 @@ Detach with Ctrl-\ (SIGQUIT).`,
 					fmt.Printf("Type:         %s\n", info.Type)
 					fmt.Printf("Status:       %s\n", info.Status)
 					fmt.Printf("Uptime:       %s\n", info.Uptime)
+					if info.LastActivity != "" {
+						fmt.Printf("Last active:  %s\n", info.LastActivity)
+					}
 					if info.PromptFile != "" {
 						fmt.Printf("Prompt:       %s\n", info.PromptFile)
 					}
@@ -590,12 +602,15 @@ Detach with Ctrl-\ (SIGQUIT).`,
 					fmt.Printf("Agents: %d total (%d crew, %d polecat), %d running\n\n",
 						len(agents), crew, polecats, running)
 					for _, a := range agents {
-						restart := ""
+						extra := ""
 						if a.RestartCount > 0 {
-							restart = fmt.Sprintf("  restarts=%d", a.RestartCount)
+							extra += fmt.Sprintf("  restarts=%d", a.RestartCount)
+						}
+						if a.LastActivity != "" {
+							extra += fmt.Sprintf("  last-activity=%s", a.LastActivity)
 						}
 						fmt.Printf("  %-20s  %-12s  %-8s  pid=%-6d  uptime=%s%s\n",
-							a.Name, a.ProcessName, a.Status, a.PID, a.Uptime, restart)
+							a.Name, a.ProcessName, a.Status, a.PID, a.Uptime, extra)
 					}
 				}
 			}

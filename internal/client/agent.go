@@ -272,8 +272,13 @@ func execCommandFunc(name string, args ...string) *exec.Cmd {
 }
 
 // GetAgentOutput returns recent output from an agent.
-func GetAgentOutput(name string) (string, error) {
-	r, err := http.Get(serverURL + "/agents/" + name + "/output")
+// If plain is true, ANSI escape sequences are stripped server-side.
+func GetAgentOutput(name string, plain bool) (string, error) {
+	url := serverURL + "/agents/" + name + "/output"
+	if plain {
+		url += "?plain=true"
+	}
+	r, err := http.Get(url)
 	if err != nil {
 		return "", err
 	}
