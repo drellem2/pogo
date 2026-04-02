@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -469,6 +470,87 @@ func TestHistoryDefaultLimits(t *testing.T) {
 	}
 	if r.cfg.MaxHistoryAge != DefaultMaxHistoryAge {
 		t.Errorf("expected default MaxHistoryAge=%s, got %s", DefaultMaxHistoryAge, r.cfg.MaxHistoryAge)
+	}
+}
+
+func TestRebaseInvalidUpstreamIsRetryable(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found")
+	}
+
+	// Create a bare "origin" repo with an initial commit on main
+	originDir := t.TempDir()
+	run(t, originDir, "git", "init", "--bare", "-b", "main")
+
+	workDir := t.TempDir()
+	run(t, workDir, "git", "clone", originDir, ".")
+	run(t, workDir, "git", "config", "user.email", "test@test.com")
+	run(t, workDir, "git", "config", "user.name", "Test")
+	os.WriteFile(filepath.Join(workDir, "README.md"), []byte("# Test"), 0644)
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", "initial commit")
+	run(t, workDir, "git", "push", "origin", "main")
+
+	// Create a feature branch
+	run(t, workDir, "git", "checkout", "-b", "feature-upstream")
+	os.WriteFile(filepath.Join(workDir, "feature.txt"), []byte("feature"), 0644)
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", "add feature")
+	run(t, workDir, "git", "push", "origin", "feature-upstream")
+
+	// Set up refinery pointing at a target ref that doesn't exist on origin
+	wtDir := t.TempDir()
+	r, err := New(Config{
+		Enabled:      true,
+		PollInterval: time.Hour,
+		WorktreeDir:  wtDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	id, err := r.Submit(MergeRequest{
+		RepoPath:  originDir,
+		Branch:    "feature-upstream",
+		TargetRef: "nonexistent-branch",
+		Author:    "test-cat",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	r.processNext()
+
+	mr := r.Get(id)
+	if mr == nil {
+		t.Fatal("MR not found")
+	}
+	// The MR should fail (nonexistent target), but the error should have
+	// been retried (retryable) before ultimately failing.
+	if mr.Status != StatusFailed {
+		t.Errorf("expected failed, got %s", mr.Status)
+	}
+	if mr.Error == "" {
+		t.Error("expected error message")
+	}
+
+	// Verify the error mentions "invalid upstream" — confirms we hit the right path
+	if !strings.Contains(mr.Error, "invalid upstream") && !strings.Contains(mr.Error, "rebase onto") {
+		t.Errorf("expected rebase error mentioning invalid upstream, got: %s", mr.Error)
+	}
+}
+
+func TestIsRetryableWithInvalidUpstream(t *testing.T) {
+	// A plain error is not retryable
+	plainErr := fmt.Errorf("rebase onto main: some error: exit status 1")
+	if isRetryable(plainErr) {
+		t.Error("plain error should not be retryable")
+	}
+
+	// A retryableError wrapping "invalid upstream" should be retryable
+	retryErr := &retryableError{fmt.Errorf("rebase onto main: invalid upstream 'origin/main': exit status 128")}
+	if !isRetryable(retryErr) {
+		t.Error("retryableError should be retryable")
 	}
 }
 

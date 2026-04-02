@@ -70,7 +70,14 @@ func (r *Refinery) attemptMerge(wtDir string, mr *MergeRequest, attempt int) (st
 	if output, err := gitCmdOutput(wtDir, "rebase", "origin/"+mr.TargetRef); err != nil {
 		// Abort the failed rebase to leave worktree in a clean state
 		gitCmdOutput(wtDir, "rebase", "--abort")
-		return "", fmt.Errorf("rebase onto %s: %s: %w", mr.TargetRef, output, err)
+		rebaseErr := fmt.Errorf("rebase onto %s: %s: %w", mr.TargetRef, output, err)
+		// "invalid upstream" can be transient — e.g. the target branch
+		// hasn't been fetched yet or the ref is missing from the clone.
+		// Treat it as retryable so a fresh fetch gets another chance.
+		if strings.Contains(output, "invalid upstream") {
+			return "", &retryableError{rebaseErr}
+		}
+		return "", rebaseErr
 	}
 
 	// Run quality gates (on the rebased branch — tests what will actually land)
