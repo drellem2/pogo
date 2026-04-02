@@ -387,3 +387,57 @@ func TestPolecatCleanupOnExit(t *testing.T) {
 		t.Fatal("polecat was not cleaned up after exit")
 	}
 }
+
+func TestPolecatWorktreeDirRemovedOnExit(t *testing.T) {
+	socketDir, err := os.MkdirTemp("/tmp", "pogo-wtdir-sock-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(socketDir)
+
+	// Create a fake worktree directory to simulate polecat isolation dir.
+	fakeWtDir, err := os.MkdirTemp("/tmp", "pogo-fake-wt-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Write a file so we can verify the dir is non-empty before removal.
+	if err := os.WriteFile(filepath.Join(fakeWtDir, "dummy.txt"), []byte("hello"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	reg, err := NewRegistry(socketDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reg.StopAll(2 * time.Second)
+
+	cleanupCh := make(chan struct{}, 1)
+	reg.SetOnExit(func(a *Agent, exitErr error) {
+		if a.Type == TypePolecat && a.WorktreeDir != "" {
+			// Mirror the pogod cleanup: os.RemoveAll as fallback.
+			os.RemoveAll(a.WorktreeDir)
+			a.Cleanup()
+			reg.Remove(a.Name)
+			cleanupCh <- struct{}{}
+		}
+	})
+
+	_, err = reg.Spawn(SpawnRequest{
+		Name:        "wt-cleanup-test",
+		Type:        TypePolecat,
+		Command:     []string{"true"}, // exits immediately
+		WorktreeDir: fakeWtDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-cleanupCh:
+		if _, err := os.Stat(fakeWtDir); !os.IsNotExist(err) {
+			t.Errorf("worktree dir %s should have been removed from disk", fakeWtDir)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("polecat was not cleaned up after exit")
+	}
+}

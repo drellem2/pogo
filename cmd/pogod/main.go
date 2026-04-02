@@ -440,6 +440,13 @@ func main() {
 				} else {
 					log.Printf("polecat %s: removed worktree %s", a.Name, a.WorktreeDir)
 				}
+				// Always remove the directory from disk as a fallback.
+				// git worktree remove may leave the directory behind
+				// (e.g. if UnlinkWorktree already detached the .git
+				// pointer during refinery submit).
+				if err := os.RemoveAll(a.WorktreeDir); err != nil {
+					log.Printf("polecat %s: failed to remove worktree dir %s: %v", a.Name, a.WorktreeDir, err)
+				}
 			}
 			a.Cleanup()
 			agentRegistry.Remove(a.Name)
