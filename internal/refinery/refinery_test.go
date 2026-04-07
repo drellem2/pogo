@@ -11,7 +11,28 @@ import (
 	"time"
 )
 
+// initBareOrigin creates a bare git repo with an initial commit on the given branch.
+// Returns the path to the bare repo directory.
+func initBareOrigin(t *testing.T, branch string) string {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found")
+	}
+	originDir := t.TempDir()
+	run(t, originDir, "git", "init", "--bare", "-b", branch)
+	workDir := t.TempDir()
+	run(t, workDir, "git", "clone", originDir, ".")
+	run(t, workDir, "git", "config", "user.email", "test@test.com")
+	run(t, workDir, "git", "config", "user.name", "Test")
+	os.WriteFile(filepath.Join(workDir, "README.md"), []byte("# Test"), 0644)
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", "initial commit")
+	run(t, workDir, "git", "push", "origin", branch)
+	return originDir
+}
+
 func TestSubmitAndQueue(t *testing.T) {
+	originDir := initBareOrigin(t, "main")
 	dir := t.TempDir()
 	r, err := New(Config{
 		Enabled:      true,
@@ -23,7 +44,7 @@ func TestSubmitAndQueue(t *testing.T) {
 	}
 
 	id, err := r.Submit(MergeRequest{
-		RepoPath: "/tmp/fakerepo",
+		RepoPath: originDir,
 		Branch:   "feature-1",
 		Author:   "cat-abc",
 	})
@@ -74,6 +95,7 @@ func TestSubmitValidation(t *testing.T) {
 }
 
 func TestGetMergeRequest(t *testing.T) {
+	originDir := initBareOrigin(t, "main")
 	dir := t.TempDir()
 	r, err := New(Config{
 		Enabled:      true,
@@ -85,7 +107,7 @@ func TestGetMergeRequest(t *testing.T) {
 	}
 
 	id, _ := r.Submit(MergeRequest{
-		RepoPath: "/tmp/repo",
+		RepoPath: originDir,
 		Branch:   "fix-bug",
 	})
 
@@ -473,32 +495,9 @@ func TestHistoryDefaultLimits(t *testing.T) {
 	}
 }
 
-func TestRebaseInvalidUpstreamIsRetryable(t *testing.T) {
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git not found")
-	}
+func TestSubmitRejectsInvalidTargetRef(t *testing.T) {
+	originDir := initBareOrigin(t, "main")
 
-	// Create a bare "origin" repo with an initial commit on main
-	originDir := t.TempDir()
-	run(t, originDir, "git", "init", "--bare", "-b", "main")
-
-	workDir := t.TempDir()
-	run(t, workDir, "git", "clone", originDir, ".")
-	run(t, workDir, "git", "config", "user.email", "test@test.com")
-	run(t, workDir, "git", "config", "user.name", "Test")
-	os.WriteFile(filepath.Join(workDir, "README.md"), []byte("# Test"), 0644)
-	run(t, workDir, "git", "add", ".")
-	run(t, workDir, "git", "commit", "-m", "initial commit")
-	run(t, workDir, "git", "push", "origin", "main")
-
-	// Create a feature branch
-	run(t, workDir, "git", "checkout", "-b", "feature-upstream")
-	os.WriteFile(filepath.Join(workDir, "feature.txt"), []byte("feature"), 0644)
-	run(t, workDir, "git", "add", ".")
-	run(t, workDir, "git", "commit", "-m", "add feature")
-	run(t, workDir, "git", "push", "origin", "feature-upstream")
-
-	// Set up refinery pointing at a target ref that doesn't exist on origin
 	wtDir := t.TempDir()
 	r, err := New(Config{
 		Enabled:      true,
@@ -509,34 +508,23 @@ func TestRebaseInvalidUpstreamIsRetryable(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	id, err := r.Submit(MergeRequest{
+	// Submit with a nonexistent target ref should fail at submission time
+	_, err = r.Submit(MergeRequest{
 		RepoPath:  originDir,
-		Branch:    "feature-upstream",
+		Branch:    "feature-1",
 		TargetRef: "nonexistent-branch",
 		Author:    "test-cat",
 	})
-	if err != nil {
-		t.Fatal(err)
+	if err == nil {
+		t.Fatal("expected error for nonexistent target ref")
+	}
+	if !strings.Contains(err.Error(), "target_ref") || !strings.Contains(err.Error(), "nonexistent-branch") {
+		t.Errorf("expected error mentioning target_ref and branch name, got: %s", err)
 	}
 
-	r.processNext()
-
-	mr := r.Get(id)
-	if mr == nil {
-		t.Fatal("MR not found")
-	}
-	// The MR should fail (nonexistent target), but the error should have
-	// been retried (retryable) before ultimately failing.
-	if mr.Status != StatusFailed {
-		t.Errorf("expected failed, got %s", mr.Status)
-	}
-	if mr.Error == "" {
-		t.Error("expected error message")
-	}
-
-	// Verify the error mentions "invalid upstream" — confirms we hit the right path
-	if !strings.Contains(mr.Error, "invalid upstream") && !strings.Contains(mr.Error, "rebase onto") {
-		t.Errorf("expected rebase error mentioning invalid upstream, got: %s", mr.Error)
+	// Queue should be empty — the MR was rejected before queuing
+	if len(r.Queue()) != 0 {
+		t.Errorf("expected empty queue, got %d items", len(r.Queue()))
 	}
 }
 

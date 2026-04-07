@@ -568,13 +568,15 @@ func TestOnSubmitCallback(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	originDir := initBareOrigin(t, "main")
+
 	var submittedMR *MergeRequest
 	r.SetOnSubmit(func(mr *MergeRequest) {
 		submittedMR = mr
 	})
 
 	id, err := r.Submit(MergeRequest{
-		RepoPath: "/tmp/repo",
+		RepoPath: originDir,
 		Branch:   "feat-1",
 		Author:   "cat-test",
 	})

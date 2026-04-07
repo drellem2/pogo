@@ -246,8 +246,9 @@ func TestProcessNextWithQAHold(t *testing.T) {
 	}
 
 	// Submit an MR whose author matches the pending QA item
+	originDir := initBareOrigin(t, "main")
 	id, err := r.Submit(MergeRequest{
-		RepoPath: "/tmp/repo",
+		RepoPath: originDir,
 		Branch:   "feature-1",
 		Author:   "mg-blocked",
 	})
