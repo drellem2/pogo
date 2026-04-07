@@ -499,10 +499,10 @@ func main() {
 				}
 			})
 			mergeQueue.SetOnFailed(func(mr *refinery.MergeRequest) {
-				log.Printf("refinery: failed %s (branch=%s, author=%s, error=%s)", mr.ID, mr.Branch, mr.Author, mr.Error)
+				log.Printf("refinery: failed %s (branch=%s, author=%s, error=%s, failure_count=%d)", mr.ID, mr.Branch, mr.Author, mr.Error, mr.FailureCount)
 
 				subject := fmt.Sprintf("MERGE FAILED: %s (branch=%s)", mr.ID, mr.Branch)
-				body := fmt.Sprintf("Merge request %s failed.\nBranch: %s\nAuthor: %s\nError: %s\nGate output: %s", mr.ID, mr.Branch, mr.Author, mr.Error, mr.GateOutput)
+				body := fmt.Sprintf("Merge request %s failed.\nBranch: %s\nAuthor: %s\nError: %s\nGate output: %s\nConsecutive failures: %d", mr.ID, mr.Branch, mr.Author, mr.Error, mr.GateOutput, mr.FailureCount)
 
 				// Mail the author agent so they can fix and resubmit.
 				if mr.Author != "" {
@@ -514,6 +514,18 @@ func main() {
 				// Mail the mayor so they can re-dispatch if the author exited.
 				if err := client.SendMGMail("mayor", "refinery", subject, body); err != nil {
 					log.Printf("refinery: failed to mail mayor: %v", err)
+				}
+
+				// Escalation: if the failure threshold has been reached, send
+				// a separate alert to the mayor so it can intervene (e.g. stop
+				// the polecat, reassign the work item).
+				if mr.ThresholdReached {
+					escSubject := fmt.Sprintf("FAILURE THRESHOLD REACHED: %s (%d consecutive failures)", mr.Author, mr.FailureCount)
+					escBody := fmt.Sprintf("Author %s has failed %d consecutive merge attempts.\nLatest MR: %s\nBranch: %s\nError: %s\nConsider stopping the polecat or reassigning the work item.",
+						mr.Author, mr.FailureCount, mr.ID, mr.Branch, mr.Error)
+					if err := client.SendMGMail("mayor", "refinery", escSubject, escBody); err != nil {
+						log.Printf("refinery: failed to mail mayor escalation: %v", err)
+					}
 				}
 
 				// Auto-reopen the work item so it moves back to claimed/ for retry.

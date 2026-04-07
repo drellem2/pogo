@@ -554,6 +554,213 @@ func TestIsRetryableWithInvalidUpstream(t *testing.T) {
 	}
 }
 
+func TestFailureCountTracking(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found")
+	}
+
+	// Create a bare "origin" repo with a failing gate
+	originDir := t.TempDir()
+	run(t, originDir, "git", "init", "--bare", "-b", "main")
+
+	workDir := t.TempDir()
+	run(t, workDir, "git", "clone", originDir, ".")
+	run(t, workDir, "git", "config", "user.email", "test@test.com")
+	run(t, workDir, "git", "config", "user.name", "Test")
+	os.WriteFile(filepath.Join(workDir, "README.md"), []byte("# Test"), 0644)
+	os.MkdirAll(filepath.Join(workDir, ".pogo"), 0755)
+	os.WriteFile(filepath.Join(workDir, ".pogo", "refinery.toml"), []byte(`
+quality_gate = "exit 1"
+`), 0644)
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", "initial")
+	run(t, workDir, "git", "push", "origin", "main")
+
+	// Set up refinery with threshold of 3
+	wtDir := t.TempDir()
+	r, err := New(Config{
+		Enabled:          true,
+		PollInterval:     time.Hour,
+		WorktreeDir:      wtDir,
+		FailureThreshold: 3,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var failedMRs []*MergeRequest
+	r.SetOnFailed(func(mr *MergeRequest) {
+		copy := *mr
+		failedMRs = append(failedMRs, &copy)
+	})
+
+	// Submit and fail 3 times from the same author
+	for i := 0; i < 3; i++ {
+		branchName := fmt.Sprintf("feature-fail-%d", i)
+		run(t, workDir, "git", "checkout", "main")
+		run(t, workDir, "git", "checkout", "-b", branchName)
+		os.WriteFile(filepath.Join(workDir, fmt.Sprintf("bad%d.txt", i)), []byte("bad"), 0644)
+		run(t, workDir, "git", "add", ".")
+		run(t, workDir, "git", "commit", "-m", fmt.Sprintf("bad feature %d", i))
+		run(t, workDir, "git", "push", "origin", branchName)
+
+		r.Submit(MergeRequest{
+			RepoPath:  originDir,
+			Branch:    branchName,
+			TargetRef: "main",
+			Author:    "test-cat",
+		})
+		r.processNext()
+	}
+
+	if len(failedMRs) != 3 {
+		t.Fatalf("expected 3 failures, got %d", len(failedMRs))
+	}
+
+	// Check failure counts increment
+	if failedMRs[0].FailureCount != 1 {
+		t.Errorf("first failure: expected count 1, got %d", failedMRs[0].FailureCount)
+	}
+	if failedMRs[1].FailureCount != 2 {
+		t.Errorf("second failure: expected count 2, got %d", failedMRs[1].FailureCount)
+	}
+	if failedMRs[2].FailureCount != 3 {
+		t.Errorf("third failure: expected count 3, got %d", failedMRs[2].FailureCount)
+	}
+
+	// Threshold should only be reached on the third failure
+	if failedMRs[0].ThresholdReached {
+		t.Error("first failure should not reach threshold")
+	}
+	if failedMRs[1].ThresholdReached {
+		t.Error("second failure should not reach threshold")
+	}
+	if !failedMRs[2].ThresholdReached {
+		t.Error("third failure should reach threshold")
+	}
+
+	// AuthorFailureCount should reflect the count
+	if count := r.AuthorFailureCount("test-cat"); count != 3 {
+		t.Errorf("expected AuthorFailureCount=3, got %d", count)
+	}
+}
+
+func TestFailureCountResetsOnSuccess(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found")
+	}
+
+	// Create a bare "origin" repo with a failing gate
+	originDir := t.TempDir()
+	run(t, originDir, "git", "init", "--bare", "-b", "main")
+
+	workDir := t.TempDir()
+	run(t, workDir, "git", "clone", originDir, ".")
+	run(t, workDir, "git", "config", "user.email", "test@test.com")
+	run(t, workDir, "git", "config", "user.name", "Test")
+	os.WriteFile(filepath.Join(workDir, "README.md"), []byte("# Test"), 0644)
+	os.MkdirAll(filepath.Join(workDir, ".pogo"), 0755)
+	os.WriteFile(filepath.Join(workDir, ".pogo", "refinery.toml"), []byte(`
+quality_gate = "exit 1"
+`), 0644)
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", "initial")
+	run(t, workDir, "git", "push", "origin", "main")
+
+	wtDir := t.TempDir()
+	r, err := New(Config{
+		Enabled:          true,
+		PollInterval:     time.Hour,
+		WorktreeDir:      wtDir,
+		FailureThreshold: 5,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Fail twice
+	for i := 0; i < 2; i++ {
+		branchName := fmt.Sprintf("feature-fail-reset-%d", i)
+		run(t, workDir, "git", "checkout", "main")
+		run(t, workDir, "git", "checkout", "-b", branchName)
+		os.WriteFile(filepath.Join(workDir, fmt.Sprintf("reset%d.txt", i)), []byte("bad"), 0644)
+		run(t, workDir, "git", "add", ".")
+		run(t, workDir, "git", "commit", "-m", fmt.Sprintf("bad %d", i))
+		run(t, workDir, "git", "push", "origin", branchName)
+
+		r.Submit(MergeRequest{
+			RepoPath:  originDir,
+			Branch:    branchName,
+			TargetRef: "main",
+			Author:    "reset-cat",
+		})
+		r.processNext()
+	}
+
+	if count := r.AuthorFailureCount("reset-cat"); count != 2 {
+		t.Fatalf("expected 2 failures before success, got %d", count)
+	}
+
+	// Now succeed: remove the failing gate and submit a clean branch
+	os.WriteFile(filepath.Join(workDir, ".pogo", "refinery.toml"), []byte(`
+quality_gate = "true"
+`), 0644)
+	run(t, workDir, "git", "checkout", "main")
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", "fix gate")
+	run(t, workDir, "git", "push", "origin", "main")
+
+	run(t, workDir, "git", "checkout", "-b", "feature-success")
+	os.WriteFile(filepath.Join(workDir, "good.txt"), []byte("good"), 0644)
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", "good feature")
+	run(t, workDir, "git", "push", "origin", "feature-success")
+
+	r.Submit(MergeRequest{
+		RepoPath:  originDir,
+		Branch:    "feature-success",
+		TargetRef: "main",
+		Author:    "reset-cat",
+	})
+	r.processNext()
+
+	// Failure count should be reset after success
+	if count := r.AuthorFailureCount("reset-cat"); count != 0 {
+		t.Errorf("expected failure count reset to 0 after success, got %d", count)
+	}
+}
+
+func TestFailureCountDefaultThreshold(t *testing.T) {
+	dir := t.TempDir()
+	r, err := New(Config{
+		Enabled:      true,
+		PollInterval: time.Hour,
+		WorktreeDir:  dir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.cfg.FailureThreshold != DefaultFailureThreshold {
+		t.Errorf("expected default FailureThreshold=%d, got %d", DefaultFailureThreshold, r.cfg.FailureThreshold)
+	}
+}
+
+func TestFailureCountDisabledThreshold(t *testing.T) {
+	dir := t.TempDir()
+	r, err := New(Config{
+		Enabled:          true,
+		PollInterval:     time.Hour,
+		WorktreeDir:      dir,
+		FailureThreshold: -1, // disabled
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.cfg.FailureThreshold != -1 {
+		t.Errorf("expected FailureThreshold=-1, got %d", r.cfg.FailureThreshold)
+	}
+}
+
 func run(t *testing.T, dir string, name string, args ...string) {
 	t.Helper()
 	cmd := exec.Command(name, args...)
