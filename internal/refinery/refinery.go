@@ -13,7 +13,9 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -178,10 +180,8 @@ func (r *Refinery) OnFailedFunc() OnFailed {
 }
 
 // Submit adds a merge request to the queue. Returns the assigned ID.
+// Validates that the target ref exists in the repo before queuing.
 func (r *Refinery) Submit(req MergeRequest) (string, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
 	if req.RepoPath == "" {
 		return "", fmt.Errorf("repo_path is required")
 	}
@@ -191,6 +191,14 @@ func (r *Refinery) Submit(req MergeRequest) (string, error) {
 	if req.TargetRef == "" {
 		req.TargetRef = "main"
 	}
+
+	// Validate target ref before acquiring lock (shells out to git).
+	if err := validateTargetRef(req.RepoPath, req.TargetRef); err != nil {
+		return "", err
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
 
 	req.ID = generateID()
 	req.Status = StatusQueued
@@ -211,6 +219,35 @@ func (r *Refinery) Submit(req MergeRequest) (string, error) {
 	}
 
 	return req.ID, nil
+}
+
+// validateTargetRef checks that the target ref exists in the repo's remote.
+// This prevents MRs from being queued with typos or wrong branch names that
+// would silently fail during processing.
+func validateTargetRef(repoPath, targetRef string) error {
+	// Use git ls-remote to check if the ref exists on origin.
+	// This works for both bare repos (used in tests) and regular repos.
+	cmd := exec.Command("git", "-C", repoPath, "ls-remote", "--heads", "origin", targetRef)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		// If ls-remote fails (e.g. no origin remote), fall back to checking
+		// local branches — bare repos used in tests have no remote.
+		cmd2 := exec.Command("git", "-C", repoPath, "rev-parse", "--verify", "refs/heads/"+targetRef)
+		if out2, err2 := cmd2.CombinedOutput(); err2 != nil {
+			return fmt.Errorf("target_ref %q not found: %s", targetRef, strings.TrimSpace(string(out2)))
+		}
+		return nil
+	}
+	// ls-remote succeeded — check if any output was returned (empty = no match)
+	if strings.TrimSpace(string(out)) == "" {
+		// No remote match. Fall back to local branch check for bare repos.
+		cmd2 := exec.Command("git", "-C", repoPath, "rev-parse", "--verify", "refs/heads/"+targetRef)
+		if _, err2 := cmd2.CombinedOutput(); err2 != nil {
+			return fmt.Errorf("target_ref %q not found in repo %s", targetRef, repoPath)
+		}
+		return nil
+	}
+	return nil
 }
 
 // Start begins the merge queue loop. Blocks until ctx is cancelled or Stop is called.
