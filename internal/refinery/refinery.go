@@ -29,6 +29,10 @@ const (
 	DefaultMaxHistoryAge = 7 * 24 * time.Hour // 7 days
 )
 
+// DefaultFailureThreshold is the number of consecutive failures for the same
+// author before the refinery flags the MR for escalation.
+const DefaultFailureThreshold = 3
+
 // Config holds refinery configuration.
 type Config struct {
 	// Enabled controls whether the refinery loop runs.
@@ -47,6 +51,10 @@ type Config struct {
 	// MacguffinDir is the path to the macguffin work directory (e.g. ~/.macguffin/work).
 	// If empty, the QA gate is disabled.
 	MacguffinDir string
+	// FailureThreshold is the number of consecutive failures for the same
+	// author before the MR is flagged for escalation (ThresholdReached is set).
+	// Zero means use DefaultFailureThreshold. Negative means disable threshold.
+	FailureThreshold int
 }
 
 // DefaultConfig returns a Config with sensible defaults.
@@ -73,16 +81,18 @@ const (
 
 // MergeRequest represents a branch submitted for merging.
 type MergeRequest struct {
-	ID         string      `json:"id"`
-	RepoPath   string      `json:"repo_path"`
-	Branch     string      `json:"branch"`
-	TargetRef  string      `json:"target_ref"` // e.g. "main"
-	Author     string      `json:"author"`     // agent name that submitted
-	Status     MergeStatus `json:"status"`
-	SubmitTime time.Time   `json:"submit_time"`
-	DoneTime   time.Time   `json:"done_time,omitempty"`
-	Error      string      `json:"error,omitempty"`
-	GateOutput string      `json:"gate_output,omitempty"`
+	ID               string      `json:"id"`
+	RepoPath         string      `json:"repo_path"`
+	Branch           string      `json:"branch"`
+	TargetRef        string      `json:"target_ref"` // e.g. "main"
+	Author           string      `json:"author"`     // agent name that submitted
+	Status           MergeStatus `json:"status"`
+	SubmitTime       time.Time   `json:"submit_time"`
+	DoneTime         time.Time   `json:"done_time,omitempty"`
+	Error            string      `json:"error,omitempty"`
+	GateOutput       string      `json:"gate_output,omitempty"`
+	FailureCount     int         `json:"failure_count"`
+	ThresholdReached bool        `json:"threshold_reached,omitempty"`
 }
 
 // OnMerged is called when a branch is successfully merged.
@@ -100,10 +110,11 @@ type OnSubmit func(mr *MergeRequest)
 type Refinery struct {
 	cfg Config
 
-	mu      sync.Mutex
-	queue   []*MergeRequest          // ordered FIFO
-	history []*MergeRequest          // completed (merged or failed)
-	byID    map[string]*MergeRequest // all requests by ID
+	mu            sync.Mutex
+	queue         []*MergeRequest          // ordered FIFO
+	history       []*MergeRequest          // completed (merged or failed)
+	byID          map[string]*MergeRequest // all requests by ID
+	failureCounts map[string]int           // consecutive failure count per author
 
 	onMerged OnMerged
 	onFailed OnFailed
@@ -131,14 +142,18 @@ func New(cfg Config) (*Refinery, error) {
 	if cfg.MaxHistoryAge == 0 {
 		cfg.MaxHistoryAge = DefaultMaxHistoryAge
 	}
+	if cfg.FailureThreshold == 0 {
+		cfg.FailureThreshold = DefaultFailureThreshold
+	}
 	if err := os.MkdirAll(cfg.WorktreeDir, 0755); err != nil {
 		return nil, fmt.Errorf("create worktree dir: %w", err)
 	}
 	return &Refinery{
-		cfg:     cfg,
-		byID:    make(map[string]*MergeRequest),
-		done:    make(chan struct{}),
-		nowFunc: time.Now,
+		cfg:           cfg,
+		byID:          make(map[string]*MergeRequest),
+		failureCounts: make(map[string]int),
+		done:          make(chan struct{}),
+		nowFunc:       time.Now,
 	}, nil
 }
 
@@ -339,6 +354,13 @@ func (r *Refinery) GetStatus() Status {
 	}
 }
 
+// AuthorFailureCount returns the current consecutive failure count for an author.
+func (r *Refinery) AuthorFailureCount(author string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.failureCounts[author]
+}
+
 // Cancel removes a queued merge request from the queue without merging.
 // Returns an error if the MR is not found or is not in a cancellable state.
 func (r *Refinery) Cancel(id string) error {
@@ -397,9 +419,20 @@ func (r *Refinery) processNext() {
 	if err != nil {
 		mr.Status = StatusFailed
 		mr.Error = err.Error()
-		log.Printf("refinery: REJECTED MR %s branch=%s author=%s reason=%v", mr.ID, mr.Branch, mr.Author, err)
+		if mr.Author != "" {
+			r.failureCounts[mr.Author]++
+			mr.FailureCount = r.failureCounts[mr.Author]
+			if r.cfg.FailureThreshold > 0 && mr.FailureCount >= r.cfg.FailureThreshold {
+				mr.ThresholdReached = true
+				log.Printf("refinery: author %s reached failure threshold (%d consecutive failures)", mr.Author, mr.FailureCount)
+			}
+		}
+		log.Printf("refinery: REJECTED MR %s branch=%s author=%s reason=%v (failure_count=%d)", mr.ID, mr.Branch, mr.Author, err, mr.FailureCount)
 	} else {
 		mr.Status = StatusMerged
+		if mr.Author != "" {
+			delete(r.failureCounts, mr.Author)
+		}
 		log.Printf("refinery: MR %s merged successfully branch=%s author=%s", mr.ID, mr.Branch, mr.Author)
 	}
 	r.history = append(r.history, mr)
