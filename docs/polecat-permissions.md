@@ -4,13 +4,21 @@
 
 Polecats run in freshly-created git worktrees at `~/.pogo/polecats/<name>`. These directories don't exist until spawn time. Claude Code normally prompts for "directory trust" when started in a directory it hasn't seen before, which would block autonomous execution.
 
-This is handled by the `--dangerously-skip-permissions` flag in the default agent command template:
+Two mechanisms handle this:
+
+1. The `--dangerously-skip-permissions` flag bypasses **tool execution** permission prompts (shell execution, file access, etc.):
 
 ```go
 const DefaultAgentCommand = "claude --dangerously-skip-permissions --append-system-prompt-file {{.PromptFile}}"
 ```
 
-This flag bypasses **all** permission prompts including directory trust, shell execution, and file access. It is required for autonomous agent execution.
+2. The **trust dialog auto-accept** hook (`claude.TrustDialogHook`) monitors the agent's PTY output during startup for the workspace trust dialog and automatically sends Enter to accept it. This is registered as a `PostSpawnHook` on the agent registry and lives in `internal/claude/`, keeping Claude-specific behavior out of the generic agent package.
+
+### Why two mechanisms?
+
+The `--dangerously-skip-permissions` flag does **not** suppress the workspace trust dialog ("Quick safety check: Is this a project you created or one you trust?"). This dialog is a separate security boundary in Claude Code that runs before the permission mode takes effect.
+
+The trust dialog hook polls the agent's output buffer for up to 8 seconds after spawn, looking for the "safety check" text. When detected, it sends Enter (`\r`) to accept the default "Yes" option.
 
 ### Why not `--add-dir`?
 
@@ -54,7 +62,8 @@ The `mg claim` command is called by the **polecat itself**, not by pogo infrastr
 
 | Scenario | What happens | Mitigation |
 |----------|-------------|------------|
-| Permissions prompt blocks startup | Polecat never reaches `mg claim` | `--dangerously-skip-permissions` prevents this |
+| Tool permissions prompt blocks startup | Polecat never reaches `mg claim` | `--dangerously-skip-permissions` prevents this |
+| Workspace trust dialog blocks startup | Polecat never reaches `mg claim` | `claude.TrustDialogHook` auto-accepts within 8s |
 | `mg` binary not on PATH | `mg claim` fails with command-not-found | Polecat should mail mayor; `mg` is installed globally |
 | Work item already claimed | `mg claim` returns error | Polecat should mail mayor and not proceed |
 | Network/macguffin unavailable | `mg claim` fails | Polecat should mail mayor |

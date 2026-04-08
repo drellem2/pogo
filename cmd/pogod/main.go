@@ -23,6 +23,7 @@ import (
 	"github.com/nightlyone/lockfile"
 
 	"github.com/drellem2/pogo/internal/agent"
+	"github.com/drellem2/pogo/internal/claude"
 	"github.com/drellem2/pogo/internal/client"
 	"github.com/drellem2/pogo/internal/config"
 	"github.com/drellem2/pogo/internal/driver"
@@ -413,8 +414,9 @@ func main() {
 	// Apply file watcher limit from config
 	search.SearchService.SetMaxWatchers(cfg.MaxWatchers)
 
-	// Configure agent command templates and validate the binary exists
+	// Configure agent command templates, trust dialog hook, and validate the binary exists
 	agentRegistry.SetCommandConfig(&cfg.Agents)
+	agentRegistry.SetPostSpawnHook(claude.TrustDialogHook)
 	agent.ValidateCommandBinary(cfg.Agents.AgentCommand("crew"))
 	if polecatCmd := cfg.Agents.AgentCommand("polecat"); polecatCmd != cfg.Agents.AgentCommand("crew") {
 		agent.ValidateCommandBinary(polecatCmd)

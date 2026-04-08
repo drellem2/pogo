@@ -124,6 +124,10 @@ type Registry struct {
 	// onExit is called when an agent process exits. Set by the registry owner
 	// (pogod) to handle crew restarts and polecat cleanup.
 	onExit func(a *Agent, err error)
+
+	// postSpawnHook is called after an agent is registered in Spawn.
+	// Used for agent-specific lifecycle behavior (e.g. trust dialog dismissal).
+	postSpawnHook func(a *Agent)
 }
 
 // SetOnExit sets the callback invoked when any agent exits.
@@ -138,6 +142,14 @@ func (r *Registry) SetCommandConfig(cfg AgentCommandConfig) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.cmdConfig = cfg
+}
+
+// SetPostSpawnHook sets a function called after each agent is registered in Spawn.
+// The hook runs in a new goroutine so it does not block spawn.
+func (r *Registry) SetPostSpawnHook(fn func(a *Agent)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.postSpawnHook = fn
 }
 
 // commandTemplate returns the command template for the given agent type.
@@ -257,6 +269,11 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 
 	r.agents[req.Name] = a
 	log.Printf("agent %s: spawned pid=%d type=%s proc=%s", req.Name, a.PID, req.Type, procName)
+
+	// Run post-spawn hook (e.g. trust dialog dismissal) if configured.
+	if r.postSpawnHook != nil {
+		go r.postSpawnHook(a)
+	}
 
 	// Send initial nudge to bypass the CLI interactive prompt.
 	if req.InitialNudge != "" {
@@ -454,6 +471,18 @@ func (a *Agent) Nudge(message string) error {
 // RecentOutput returns the most recent buffered output.
 func (a *Agent) RecentOutput(n int) []byte {
 	return a.outputBuf.Last(n)
+}
+
+// SendRaw writes raw bytes to the PTY master without appending \r.
+// Used for sending individual keypresses like Enter.
+func (a *Agent) SendRaw(s string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.master == nil {
+		return fmt.Errorf("agent %q has no PTY", a.Name)
+	}
+	_, err := a.master.WriteString(s)
+	return err
 }
 
 // Done returns a channel that closes when the agent process exits.
