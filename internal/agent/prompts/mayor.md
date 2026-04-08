@@ -113,6 +113,12 @@ Look for:
   ```
   This reclaims items from dead processes back to available status.
 
+- **Refinery queue**: Check for pending merges that may be stuck or stalled:
+  ```bash
+  curl -s http://localhost:10000/refinery/queue
+  ```
+  If a merge request has been queued for an unusually long time, check the refinery logs for errors. An empty queue is normal — it means the refinery is caught up.
+
 - **Refinery failures on done items**: A work item may be in `done/` status but the refinery rejected its branch. This happens when a polecat exits after a merge failure without calling `mg done` — but can also occur due to races or bugs. On each cycle, check refinery history for failures:
   ```bash
   curl -s http://localhost:10000/refinery/history
