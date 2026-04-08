@@ -258,12 +258,6 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 	r.agents[req.Name] = a
 	log.Printf("agent %s: spawned pid=%d type=%s proc=%s", req.Name, a.PID, req.Type, procName)
 
-	// Watch for and auto-dismiss Claude Code's workspace trust dialog.
-	// The --dangerously-skip-permissions flag bypasses tool permissions but
-	// does NOT suppress the "Quick safety check" trust dialog that appears
-	// when Claude is launched in a directory it hasn't seen before.
-	go a.watchAndDismissTrustDialog()
-
 	// Send initial nudge to bypass the CLI interactive prompt.
 	if req.InitialNudge != "" {
 		a.InitialNudge = req.InitialNudge
