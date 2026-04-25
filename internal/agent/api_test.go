@@ -358,6 +358,35 @@ func TestHandleSpawnPolecat_NudgeOnStartFromFrontmatter(t *testing.T) {
 	}
 }
 
+// TestHandleSpawnPolecat_NudgeOnStartTemplateExpanded verifies that {{.Id}}
+// and other TemplateVars placeholders in nudge_on_start are expanded with
+// the same context as the prompt body. This is what makes the shipped
+// templates/polecat.md frontmatter behave identically to the previous
+// hardcoded "...for this work item: <id>" message.
+func TestHandleSpawnPolecat_NudgeOnStartTemplateExpanded(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	writeTemplate(t, "templated", "+++\nnudge_on_start = \"work item: {{.Id}}\"\n+++\nbody\n")
+
+	reg, err := NewRegistry(filepath.Join(tmpHome, "sockets"))
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	defer reg.StopAll(2 * time.Second)
+	reg.SetCommandConfig(catCommandConfig{})
+
+	a := spawnPolecatViaAPI(t, reg, SpawnPolecatAPIRequest{
+		Name:     "pc-templated",
+		Template: "templated",
+		Id:       "wi-99",
+	})
+	want := "work item: wi-99"
+	if a.InitialNudge != want {
+		t.Errorf("InitialNudge = %q, want %q", a.InitialNudge, want)
+	}
+}
+
 // TestHandleSpawnPolecat_FallbackNudge verifies that a template without a
 // nudge_on_start field still produces the legacy work-item nudge.
 func TestHandleSpawnPolecat_FallbackNudge(t *testing.T) {

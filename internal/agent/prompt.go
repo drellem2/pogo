@@ -76,6 +76,22 @@ func ResolveTemplate(name string) (string, error) {
 	return path, nil
 }
 
+// ExpandString runs s through Go text/template using vars. Strings without
+// template syntax are returned unchanged. Used for short snippets like
+// nudge_on_start that should accept the same {{.Id}}/{{.Repo}} variables as
+// the prompt body.
+func ExpandString(s string, vars TemplateVars) (string, error) {
+	tmpl, err := template.New("inline").Parse(s)
+	if err != nil {
+		return "", fmt.Errorf("parse: %w", err)
+	}
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, vars); err != nil {
+		return "", fmt.Errorf("execute: %w", err)
+	}
+	return buf.String(), nil
+}
+
 // ExpandTemplate reads a template file and expands {{.Variable}} placeholders
 // with the provided vars. Uses Go text/template syntax. Any TOML frontmatter
 // at the top of the file (delimited by '+++' fences) is stripped before
@@ -365,6 +381,15 @@ func ParsePromptFrontmatter(path string) (*AgentMeta, string, error) {
 func parsePromptFrontmatterBytes(data []byte) (*AgentMeta, string, error) {
 	meta := &AgentMeta{}
 	s := string(data)
+
+	// Installed prompts carry a leading "<!-- pogo-prompt-hash: ... -->" line
+	// that InstallPrompts prepends for staleness detection. Skip it so the
+	// frontmatter fence is recognized when present.
+	if strings.HasPrefix(s, promptHashPrefix) {
+		if nl := strings.IndexByte(s, '\n'); nl != -1 {
+			s = s[nl+1:]
+		}
+	}
 
 	// No fence at offset 0 → no frontmatter, return defaults + full body.
 	if !strings.HasPrefix(s, frontmatterFence) {

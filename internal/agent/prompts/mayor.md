@@ -1,6 +1,7 @@
 +++
 auto_start = true
 restart_on_crash = true
+nudge_on_start = "You are now running. Begin your coordination loop."
 +++
 
 # Mayor

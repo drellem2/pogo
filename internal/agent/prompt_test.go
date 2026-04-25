@@ -474,6 +474,37 @@ You are the mayor.
 	}
 }
 
+// TestParsePromptFrontmatterAfterHashComment verifies that the parser
+// recognizes frontmatter on installed prompt files, which carry a leading
+// "<!-- pogo-prompt-hash: ... -->" stamp inserted by InstallPrompts.
+func TestParsePromptFrontmatterAfterHashComment(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mayor.md")
+	content := "<!-- pogo-prompt-hash: deadbeef -->\n" +
+		"+++\n" +
+		"auto_start = true\n" +
+		"nudge_on_start = \"go\"\n" +
+		"+++\n" +
+		"# Mayor\n"
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	meta, body, err := ParsePromptFrontmatter(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !meta.AutoStart {
+		t.Error("expected AutoStart=true on installed file with hash stamp")
+	}
+	if meta.NudgeOnStart != "go" {
+		t.Errorf("NudgeOnStart=%q want %q", meta.NudgeOnStart, "go")
+	}
+	if body != "# Mayor\n" {
+		t.Errorf("body=%q want %q", body, "# Mayor\n")
+	}
+}
+
 func TestParsePromptFrontmatterNoFrontmatter(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "plain.md")

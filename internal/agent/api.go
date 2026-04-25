@@ -624,9 +624,20 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 
 	// Build the initial nudge message for the polecat. A template can override
 	// the default by declaring `nudge_on_start = "..."` in its frontmatter.
+	// The nudge string is run through the same text/template pass as the
+	// prompt body so it can reference TemplateVars (e.g. {{.Id}}).
 	var nudgeMsg string
 	if tmplMeta.NudgeOnStart != "" {
-		nudgeMsg = tmplMeta.NudgeOnStart
+		expanded, err := ExpandString(tmplMeta.NudgeOnStart, vars)
+		if err != nil {
+			os.Remove(promptFile)
+			if worktreeDir != "" {
+				exec.Command("git", "-C", sourceRepo, "worktree", "remove", worktreeDir, "--force").Run()
+			}
+			http.Error(w, fmt.Sprintf("nudge_on_start template error: %v", err), http.StatusInternalServerError)
+			return
+		}
+		nudgeMsg = expanded
 	} else if spawnReq.Id != "" {
 		nudgeMsg = "Look at the system prompt and complete the steps for this work item: " + spawnReq.Id
 	} else {
