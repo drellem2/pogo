@@ -1693,6 +1693,127 @@ Example:
 	cmdEventsEmit.Flags().StringVar(&emitRepo, "repo", "", "repository path (optional)")
 	cmdEventsEmit.Flags().StringVar(&emitDetails, "details", "", "details payload as JSON object (optional)")
 	cmdEvents.AddCommand(cmdEventsEmit)
+
+	var (
+		listSince string
+		listType  string
+		listAgent string
+		listFile  string
+	)
+	var cmdEventsList = &cobra.Command{
+		Use:   "list",
+		Short: "List events from ~/.pogo/events.log",
+		Long: `Print events from the log, optionally filtered by age, type, and agent.
+
+By default prints a pretty one-line-per-event view (timestamp, event_type,
+agent, work_item_id, repo, summarized details). With --json each matching
+event is dumped as raw JSONL on stdout for piping into jq, etc.
+
+Examples:
+  pogo events list --since=1h
+  pogo events list --since=24h --type=refinery_merged
+  pogo events list --since=30m --agent=mayor --json | jq .`,
+		Args: cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			path := listFile
+			if path == "" {
+				p, err := events.DefaultLogPath()
+				if err != nil {
+					cli.ExitWithError(jsonOutput, "could not resolve log path: "+err.Error(), cli.ExitError)
+				}
+				path = p
+			}
+
+			filter := events.Filter{Type: listType, Agent: listAgent}
+			if listSince != "" {
+				d, err := time.ParseDuration(listSince)
+				if err != nil {
+					cli.ExitWithError(jsonOutput, fmt.Sprintf("--since: invalid duration %q: %v", listSince, err), cli.ExitError)
+				}
+				if d <= 0 {
+					cli.ExitWithError(jsonOutput, "--since must be a positive duration (e.g. 1h, 30m)", cli.ExitError)
+				}
+				filter.SinceMin = time.Now().Add(-d)
+			}
+
+			matches, err := events.ReadFiltered(path, filter)
+			if err != nil {
+				cli.ExitWithError(jsonOutput, "read log: "+err.Error(), cli.ExitError)
+			}
+
+			if jsonOutput {
+				enc := json.NewEncoder(os.Stdout)
+				for _, ev := range matches {
+					if err := enc.Encode(ev); err != nil {
+						cli.ExitWithError(false, "encode: "+err.Error(), cli.ExitError)
+					}
+				}
+				return
+			}
+			for _, ev := range matches {
+				fmt.Println(events.FormatPretty(ev))
+			}
+		},
+	}
+	cmdEventsList.Flags().StringVar(&listSince, "since", "", "only show events newer than duration (e.g. 1h, 30m, 24h)")
+	cmdEventsList.Flags().StringVar(&listType, "type", "", "filter by event_type (exact match)")
+	cmdEventsList.Flags().StringVar(&listAgent, "agent", "", "filter by agent identity (exact match)")
+	cmdEventsList.Flags().StringVar(&listFile, "file", "", "log file path (default: ~/.pogo/events.log)")
+	cmdEvents.AddCommand(cmdEventsList)
+
+	var (
+		tailFile     string
+		tailInterval time.Duration
+	)
+	var cmdEventsTail = &cobra.Command{
+		Use:   "tail",
+		Short: "Stream new events from ~/.pogo/events.log (like tail -f)",
+		Long: `Follow the event log: prints each new line as it's appended. Starts at
+the current end of file, so it only shows events written from now on.
+
+Use Ctrl-C to stop. Pretty-printed by default; --json passes through the raw
+JSONL line so the output is machine-parseable.`,
+		Args: cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			path := tailFile
+			if path == "" {
+				p, err := events.DefaultLogPath()
+				if err != nil {
+					cli.ExitWithError(jsonOutput, "could not resolve log path: "+err.Error(), cli.ExitError)
+				}
+				path = p
+			}
+
+			stop := make(chan struct{})
+			sig := make(chan os.Signal, 1)
+			signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+			go func() {
+				<-sig
+				close(stop)
+			}()
+
+			err := events.Follow(path, tailInterval, stop, func(line []byte) {
+				if jsonOutput {
+					os.Stdout.Write(line)
+					os.Stdout.Write([]byte{'\n'})
+					return
+				}
+				ev, perr := events.ParseLine(line)
+				if perr != nil {
+					fmt.Fprintf(os.Stderr, "events: skipping malformed line: %v\n", perr)
+					return
+				}
+				fmt.Println(events.FormatPretty(ev))
+			})
+			if err != nil {
+				cli.ExitWithError(jsonOutput, "tail: "+err.Error(), cli.ExitError)
+			}
+		},
+	}
+	cmdEventsTail.Flags().StringVar(&tailFile, "file", "", "log file path (default: ~/.pogo/events.log)")
+	cmdEventsTail.Flags().DurationVar(&tailInterval, "poll-interval", 200*time.Millisecond, "how often to poll for new lines")
+	cmdEvents.AddCommand(cmdEventsTail)
+
 	rootCmd.AddCommand(cmdEvents)
 
 	completion.AddCommand(rootCmd)
