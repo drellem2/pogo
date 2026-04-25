@@ -26,6 +26,16 @@ const SchemaVersion = 1
 // longer lines take an advisory flock.
 const pipeBufBytes = 512
 
+// maxLogBytes is the size threshold above which Emit rotates the log. Checked
+// inline on every write via a cheap stat — the os.Stat is microseconds and the
+// rotation cost is paid once per ~100MB of events.
+const maxLogBytes = 100 * 1024 * 1024
+
+// maxRotatedFiles is the number of rotated files retained alongside the live
+// log. With maxRotatedFiles=5 the on-disk footprint is bounded at roughly
+// 6 × maxLogBytes (live + .1..maxRotatedFiles).
+const maxRotatedFiles = 5
+
 // Event is one envelope record in the log. Per docs/event-log.md, SchemaVersion
 // and Timestamp are auto-populated by Emit if zero. WorkItemID and Repo are
 // omitted when empty; Details is always emitted (as {} if nil).
@@ -167,6 +177,12 @@ func writeEvent(path string, event Event) error {
 		return fmt.Errorf("mkdir parent: %w", err)
 	}
 
+	if info, err := os.Stat(path); err == nil && info.Size() >= maxLogBytes {
+		if rotErr := rotate(path); rotErr != nil {
+			fmt.Fprintf(os.Stderr, "events: rotate failed: %v\n", rotErr)
+		}
+	}
+
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o644)
 	if err != nil {
 		return fmt.Errorf("open log: %w", err)
@@ -185,6 +201,50 @@ func writeEvent(path string, event Event) error {
 	}
 	if writeErr != nil {
 		return fmt.Errorf("write: %w", writeErr)
+	}
+	return nil
+}
+
+// rotate shifts events.log -> events.log.1, events.log.1 -> events.log.2, ...,
+// and deletes the file at maxRotatedFiles+1 if it spilled over. A separate
+// lock file (events.log.rotate.lock) serializes rotation across processes so
+// concurrent emitters don't double-rotate.
+func rotate(path string) error {
+	lockPath := path + ".rotate.lock"
+	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return fmt.Errorf("open rotate lock: %w", err)
+	}
+	defer lockFile.Close()
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
+		return fmt.Errorf("flock rotate lock: %w", err)
+	}
+	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("stat after lock: %w", err)
+	}
+	if info.Size() < maxLogBytes {
+		return nil
+	}
+
+	oldest := fmt.Sprintf("%s.%d", path, maxRotatedFiles)
+	if err := os.Remove(oldest); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove oldest: %w", err)
+	}
+	for i := maxRotatedFiles - 1; i >= 1; i-- {
+		from := fmt.Sprintf("%s.%d", path, i)
+		to := fmt.Sprintf("%s.%d", path, i+1)
+		if err := os.Rename(from, to); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("rename %s -> %s: %w", from, to, err)
+		}
+	}
+	if err := os.Rename(path, path+".1"); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("rename live -> .1: %w", err)
 	}
 	return nil
 }

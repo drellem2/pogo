@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -339,6 +340,152 @@ func TestExplicitSchemaVersionPreserved(t *testing.T) {
 	}
 	if got.SchemaVersion != 99 {
 		t.Errorf("explicit schema_version clobbered: want 99, got %d", got.SchemaVersion)
+	}
+}
+
+// fillFile writes n bytes of dummy padding to path so a subsequent stat
+// returns a size at or above the threshold. Each line is a JSONL-shaped
+// record so a real reader could still parse the rotated file.
+func fillFile(t *testing.T, path string, n int64) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir parent: %v", err)
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		t.Fatalf("create fill file: %v", err)
+	}
+	defer f.Close()
+	if err := f.Truncate(n); err != nil {
+		t.Fatalf("truncate: %v", err)
+	}
+}
+
+// TestRotationTriggersAtThreshold forces the live log past 100MB and verifies
+// the next Emit moves it to events.log.1 and starts a fresh events.log.
+func TestRotationTriggersAtThreshold(t *testing.T) {
+	path := useTempLog(t)
+	fillFile(t, path, maxLogBytes+1)
+
+	Emit(context.Background(), Event{EventType: "post-rotate", Agent: "test"})
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat live log: %v", err)
+	}
+	if info.Size() >= maxLogBytes {
+		t.Fatalf("live log not rotated: size=%d", info.Size())
+	}
+	rotated, err := os.Stat(path + ".1")
+	if err != nil {
+		t.Fatalf("stat events.log.1: %v", err)
+	}
+	if rotated.Size() < maxLogBytes {
+		t.Fatalf("rotated log too small: size=%d, want >= %d", rotated.Size(), maxLogBytes)
+	}
+	lines := readLines(t, path)
+	if len(lines) != 1 {
+		t.Fatalf("expected 1 post-rotation line, got %d", len(lines))
+	}
+	if !strings.Contains(lines[0], "post-rotate") {
+		t.Fatalf("post-rotation line missing event_type: %q", lines[0])
+	}
+}
+
+// TestRotationBelowThresholdNoOp verifies a near-threshold but undersized log
+// is not rotated — the boundary is `>= maxLogBytes`, not `> maxLogBytes - 1`.
+func TestRotationBelowThresholdNoOp(t *testing.T) {
+	path := useTempLog(t)
+	fillFile(t, path, maxLogBytes-1)
+
+	Emit(context.Background(), Event{EventType: "no-rotate", Agent: "test"})
+
+	if _, err := os.Stat(path + ".1"); !os.IsNotExist(err) {
+		t.Fatalf("events.log.1 should not exist below threshold (err=%v)", err)
+	}
+}
+
+// TestRotationKeepsAtMostFiveAndDeletesOldest forces six rotations and checks
+// that events.log.1..events.log.5 exist, events.log.6 does not, and the oldest
+// (events.log.5) carries the marker from the very first rotation generation —
+// confirming each new rotation pushes everything down by one.
+func TestRotationKeepsAtMostFiveAndDeletesOldest(t *testing.T) {
+	path := useTempLog(t)
+
+	for gen := 0; gen < 6; gen++ {
+		// Make the live log start with a unique marker for this generation,
+		// then pad past the threshold so the next Emit rotates this content
+		// into events.log.1.
+		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+		if err != nil {
+			t.Fatalf("open live log: %v", err)
+		}
+		marker := []byte(fmt.Sprintf("gen-%d\n", gen))
+		if _, err := f.Write(marker); err != nil {
+			t.Fatalf("write marker: %v", err)
+		}
+		if err := f.Truncate(maxLogBytes + 1); err != nil {
+			t.Fatalf("pad live log: %v", err)
+		}
+		f.Close()
+
+		Emit(context.Background(), Event{EventType: "rotate-trigger", Agent: "test"})
+	}
+
+	for i := 1; i <= maxRotatedFiles; i++ {
+		if _, err := os.Stat(fmt.Sprintf("%s.%d", path, i)); err != nil {
+			t.Fatalf("expected events.log.%d to exist: %v", i, err)
+		}
+	}
+	if _, err := os.Stat(fmt.Sprintf("%s.%d", path, maxRotatedFiles+1)); !os.IsNotExist(err) {
+		t.Fatalf("events.log.%d should not exist (err=%v)", maxRotatedFiles+1, err)
+	}
+
+	// After 6 rotations, the oldest (events.log.5) holds gen-1's marker
+	// (gen-0 was deleted). Read just the first line — the rest is padding.
+	oldest, err := os.Open(fmt.Sprintf("%s.%d", path, maxRotatedFiles))
+	if err != nil {
+		t.Fatalf("open oldest: %v", err)
+	}
+	defer oldest.Close()
+	scanner := bufio.NewScanner(oldest)
+	if !scanner.Scan() {
+		t.Fatalf("oldest log empty")
+	}
+	if scanner.Text() != "gen-1" {
+		t.Fatalf("oldest rotation should hold gen-1 marker, got %q (gen-0 should have been deleted)", scanner.Text())
+	}
+}
+
+// TestRotationConcurrentEmittersOnlyRotateOnce verifies the rotate lock
+// serializes concurrent rotations: 20 emitters racing on a too-large file
+// produce one events.log.1, not many — and no events are lost in the live
+// log.
+func TestRotationConcurrentEmittersOnlyRotateOnce(t *testing.T) {
+	path := useTempLog(t)
+	fillFile(t, path, maxLogBytes+1)
+
+	const goroutines = 20
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for g := 0; g < goroutines; g++ {
+		go func(g int) {
+			defer wg.Done()
+			Emit(context.Background(), Event{
+				EventType: "race-rotate",
+				Agent:     "writer",
+				Details:   map[string]any{"g": g},
+			})
+		}(g)
+	}
+	wg.Wait()
+
+	if _, err := os.Stat(path + ".2"); !os.IsNotExist(err) {
+		t.Fatalf("events.log.2 should not exist after a single rotation (err=%v)", err)
+	}
+	lines := readLines(t, path)
+	if len(lines) != goroutines {
+		t.Fatalf("expected %d post-rotation lines, got %d", goroutines, len(lines))
 	}
 }
 

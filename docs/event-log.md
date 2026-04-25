@@ -8,7 +8,7 @@ This document is the design contract for phase F (work items mg-0241, mg-700a, m
 
 - **Path:** `~/.pogo/events.log`
 - **Format:** JSONL (one JSON object per line, UTF-8, terminated by `\n`)
-- **Mode:** append-only. Writers must `O_APPEND | O_WRONLY | O_CREAT` and emit a single line per event. No edits, no deletes (rotation is a separate concern — see F7).
+- **Mode:** append-only. Writers must `O_APPEND | O_WRONLY | O_CREAT` and emit a single line per event. No edits, no deletes (rotation is handled by the writer — see F7 below).
 - **Concurrency:** multiple writers (pogod, mg, mail, refinery, polecats) may append concurrently. POSIX `write(2)` of a single line ≤ `PIPE_BUF` (4096 on Linux, 512 on macOS) is atomic against other appenders. Events larger than `PIPE_BUF` must use a process-level mutex or `flock(2)` on the file. Implementations should keep the JSON object well under 512 bytes whenever possible; lines that exceed it must take an advisory lock.
 - **Persistence:** survives pogod restarts (unlike the in-memory refinery history). This is the durable observability spine.
 - **Not coordination:** the log is purely observational. It is not used to drive state transitions. macguffin remains the source of truth for work item state.
@@ -295,7 +295,7 @@ A reader who wants the lifecycle of one work item filters with `jq 'select(.work
 
 - **No event ordering guarantees beyond per-writer order.** Two writers appending concurrently may interleave. Consumers ordering by `timestamp` is good enough.
 - **No querying by index.** `grep`, `jq`, and the `pogo events` CLI (F6) are the query surface. No SQL, no full-text search.
-- **No retention policy in the schema.** Rotation is F7's problem (mg-214a). Schema-wise, the file grows unboundedly until rotated.
+- **No retention policy in the schema.** Rotation lives below the schema layer (mg-214a, F7): the live log is rotated to `events.log.1` once it exceeds 100MB, older rotations slide down to `events.log.5`, and anything beyond that is deleted. Readers that want full history must consume events as they happen — rotated tail data is not preserved indefinitely.
 - **No event correlation IDs.** `work_item_id` and `merge_request_id` already correlate the events that matter most. A generic correlation ID can be added later as an additive `details` field without bumping `schema_version`.
 
 ## Open questions for F2+
