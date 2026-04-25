@@ -16,8 +16,8 @@ Pogo is an operating system for agent-first development. It combines project dis
 │  │  (merge queue loop)                       │   │
 │  └──────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────┐   │
-│  │         Event Log (via macguffin)         │   │
-│  │  (~/.macguffin/log/)                      │   │
+│  │              Event Log                    │   │
+│  │  (~/.pogo/events.log — JSONL)             │   │
 │  └──────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────┘
           │                    │
@@ -39,7 +39,7 @@ Pogo is an operating system for agent-first development. It combines project dis
                     │    macguffin     │
                     │  ~/.macguffin/   │
                     │  work/ mail/     │
-                    │  log/  .git/     │
+                    │  .git/           │
                     └──────────────────┘
 ```
 
@@ -86,6 +86,34 @@ Agent behavior is defined by markdown files in `~/.pogo/agents/`. Changing an ag
 │   └── polecat.md
 └── mayor.md
 ```
+
+**Frontmatter is the configuration unit.** Each prompt file may declare structured metadata in a TOML frontmatter block (`+++` fences, Hugo-style) at the top of the file. The fields control how pogod runs the agent:
+
+```markdown
++++
+auto_start = true
+restart_on_crash = true
+nudge_on_start = "You are now running. Begin your coordination loop."
+worktree = true
+command = "claude --dangerously-skip-permissions ..."
++++
+
+# Mayor
+
+You are the mayor — the coordinator for a pogo agent workspace...
+```
+
+Recognized fields: `auto_start`, `restart_on_crash`, `nudge_on_start`, `worktree`, `command`. Prompts without frontmatter get type-based defaults (crew restart on crash, polecats don't), so existing prompts keep working unchanged. Parser internals live in `internal/agent/prompt.go` (`ParsePromptFrontmatter`, `AgentMeta`).
+
+Co-locating "what the agent does" (the prose) with "how it runs" (the frontmatter) keeps a single source of truth for agent identity. There is no separate roster file, no orchestration DAG, no handler-side switch on agent name — adding a new crew agent is a matter of dropping a markdown file with `auto_start = true` into `~/.pogo/agents/crew/`.
+
+### Prompt files are the roster
+
+There is no registry, no roster file, and no `pogo agent register` command. The set of agents that exist is exactly the set of prompt files in `~/.pogo/agents/`. The set of agents pogod boots on startup is exactly the subset whose frontmatter declares `auto_start = true`.
+
+On daemon startup, pogod scans `~/.pogo/agents/` (excluding `templates/`) and starts every prompt with `auto_start = true`. The scan is idempotent — agents already registered (e.g. across a `pogod` restart-while-running) are skipped rather than double-started. Implementation: `internal/agent/autostart.go` (`Registry.AutoStartAgents`).
+
+This is what "filesystem is the coordination layer" means at the configuration tier: the disk is the schema. To add an agent that boots with the daemon, drop a markdown file. To stop one from booting, set `auto_start = false` or delete the file. No daemon API is involved in roster management.
 
 ### pogod is the substrate
 
@@ -234,17 +262,40 @@ loop (every poll_interval):
       git merge --ff-only branch
       git push origin main
       mg done item.id --result='{"merged": true}'
-      log event: refinery.merge
+      events.Emit(refinery_merged)
 
     if fail:
       mg update item.id --status=blocked
       mg mail send item.creator --subject="merge failed" --body="..."
-      log event: refinery.fail
+      events.Emit(refinery_merge_failed)
 ```
 
 **Design rationale:** Gas Town's refinery was also deterministic code (not an agent), and this was explicitly validated as the right call. Merge processing is mechanical — it should never spend tokens on judgment. It needs to work even when all agents are down. Own worktrees ensure the refinery never interferes with agent or user checkouts.
 
 **Future:** Batch-then-bisect merging (testing N branches together, binary search on failure) is a known optimization but out of MVP scope.
+
+## Event Log
+
+Pogo writes a single append-only JSONL event log at `~/.pogo/events.log`. It captures agent lifecycle (spawn, stop, crash, restart), polecat-specific milestones, work item transitions mirrored from macguffin, mail and nudge activity, and refinery merge attempts. Every line is a self-describing JSON object with a versioned envelope (`schema_version`, `timestamp`, `event_type`, `agent`, optional `work_item_id` / `repo`, plus per-event `details`).
+
+The log is the durable observability spine: it survives `pogod` restarts, makes the system inspectable with `tail -f` + `jq` (no database, no query language), and lets `pogo events` and `mg` share one timeline.
+
+```
+~/.pogo/
+├── events.log            # active log (JSONL, append-only)
+├── events.log.1          # most recent rotation (rotated at 100 MB)
+└── events.log.N          # older rotations, oldest dropped after N=5
+```
+
+Writers:
+
+- **pogod / agent supervisor** emits `agent_spawned`, `agent_stopped`, `agent_crashed`, `agent_restarted`, `polecat_spawned`, `polecat_completed`.
+- **refinery** emits `refinery_merge_attempted`, `refinery_merged`, `refinery_merge_failed`.
+- **mg** (via the `pogo events emit` CLI bridge) mirrors `work_item_claimed`, `work_item_completed`, and `mail_sent` from macguffin into the same log so a single tail shows the full system narrative.
+
+Emission is best-effort and non-blocking. Lines under 512 bytes rely on POSIX `O_APPEND` atomicity; longer lines take an advisory `flock`. Disk-full or write errors are logged to stderr and swallowed — the event log never blocks or crashes a calling code path. The writer (`internal/events`) is the single entry point; macguffin remains the source of truth for work item state, the event log is purely observational.
+
+The full schema, identity conventions, event catalog, and worked examples live in [`docs/event-log.md`](docs/event-log.md). That document is the contract; this section is the orientation.
 
 ## Directory Layout
 
@@ -252,13 +303,17 @@ loop (every poll_interval):
 
 ```
 ~/.pogo/
-├── agents/
+├── agents/                # Prompt files = roster (auto_start frontmatter selects boot set)
 │   ├── crew/
-│   │   ├── arch.md        # Crew prompt files
+│   │   ├── arch.md        # Crew prompt files (TOML frontmatter optional)
 │   │   └── ops.md
 │   ├── templates/
 │   │   └── polecat.md     # Polecat prompt template
 │   └── mayor.md           # Mayor prompt
+├── events.log             # Append-only JSONL event log (schema: docs/event-log.md)
+├── events.log.{1..5}      # Rotated history (100 MB trigger, 5 generations kept)
+├── refinery/
+│   └── worktrees/         # One worktree per remote, used for merge gates
 └── (existing config, search index, etc.)
 ```
 
@@ -275,9 +330,10 @@ loop (every poll_interval):
 │   └── <agent>/
 │       ├── new/           # Unread
 │       └── cur/           # Read
-├── log/                   # Event log (JSONL)
 └── .git/                  # Audit trail (cold path)
 ```
+
+Work item transitions and mail sends are mirrored into `~/.pogo/events.log` via the `pogo events emit` CLI bridge, so a single tail shows the whole system narrative without forcing macguffin to depend on pogo.
 
 ### Per-repo config
 
@@ -313,7 +369,7 @@ pogod exposes HTTP endpoints. Existing endpoints are unchanged; new endpoints fo
 | `/agents/:name` | DELETE | Stop an agent |
 | `/refinery/queue` | GET | Pending merge items |
 | `/refinery/history` | GET | Recent merge results |
-| `/events` | GET | Query event log (proxies macguffin) |
+| `/events` | GET | Query event log (`~/.pogo/events.log`, JSONL) |
 
 CLI commands (`pogo agent *`, `pogo nudge`) are thin wrappers around these endpoints, following the existing pogo CLI pattern.
 
@@ -366,9 +422,9 @@ For level 2, [libghostty](https://ghostty.org) (Ghostty's embeddable terminal li
 
 ## Open Questions
 
-1. **Crew restart semantics.** `pogo server stop` kills all agents — pogod holds the PTY master fds, so agents can't outlive it. Polecats are ephemeral so this is fine; crew agents losing their session is more painful. Currently the agent registry is in-memory and lost on daemon restart. Future improvement: pogod persists which crew agents were running (e.g. a file in `~/.pogo/crew-roster`), and on `pogo server start` automatically restarts them. Crew agents should send themselves mail before shutdown (via `mg mail send --self`) with context about what they were doing, so the fresh session can pick up where it left off — similar to Gas Town's handoff protocol but using macguffin mail instead of a custom mechanism.
+1. **Attach transport.** Unix domain socket per agent vs. single pogod socket with multiplexing? Per-agent is simpler. Single socket is cleaner for the API. Leaning per-agent for MVP.
 
-2. **Attach transport.** Unix domain socket per agent vs. single pogod socket with multiplexing? Per-agent is simpler. Single socket is cleaner for the API. Leaning per-agent for MVP.
+2. **Crew handoff context.** `pogo server stop` kills all agents (pogod holds the PTY master fds, so they can't outlive it). The roster question is solved — `auto_start` frontmatter brings crew back on the next boot — but a freshly restarted crew agent still loses its in-session context. Open: should crew agents mail themselves a handoff note before shutdown (via `mg mail send --self`) so the fresh session can pick up where it left off, mirroring Gas Town's handoff protocol over macguffin mail?
 
 ## Resolved Decisions
 
@@ -382,7 +438,9 @@ These questions came up during design and have been answered. Recorded here so t
 
 4. **No tmux dependency.** pogod allocates PTYs directly and holds master file descriptors. Interactive access (`pogo agent attach`), input injection (`pogo nudge`), and output monitoring are all consequences of the parent-child process relationship. No terminal multiplexer in the stack.
 
-5. **Single event log in macguffin.** All events — work item transitions, agent lifecycle, refinery merges — write to macguffin's log at `~/.macguffin/log/`. pogod does not maintain a separate event log. macguffin is the single state layer; one place to look, one timeline, one tool (`mg log`) to query.
+5. **Single event log in pogo.** All events — agent lifecycle, polecat milestones, refinery merges, plus work item transitions and mail mirrored from macguffin — write to one JSONL file at `~/.pogo/events.log`. macguffin remains the source of truth for work item state, but the durable observability spine lives in `~/.pogo/` so pogod's writers (refinery, agent supervisor) don't need a macguffin dependency. `mg` mirrors its transitions in via the `pogo events emit` CLI bridge. Schema and event catalog: [`docs/event-log.md`](docs/event-log.md).
+
+6. **Prompt files are the agent roster.** There is no separate roster file or registry. The set of agents that exist is the set of prompt files in `~/.pogo/agents/`; the boot set is the subset whose TOML frontmatter declares `auto_start = true`. This subsumes the earlier proposal of a `~/.pogo/crew-roster` file — the prompts already on disk are the roster, and adding a new agent is a matter of dropping a markdown file with the right frontmatter. Per-agent runtime knobs (`restart_on_crash`, `nudge_on_start`, `worktree`, `command`) live in the same frontmatter block, co-located with the prose that defines the agent's role.
 
 ## What This Is Not
 
