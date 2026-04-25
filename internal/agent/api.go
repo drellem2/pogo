@@ -2,6 +2,7 @@ package agent
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -390,6 +391,77 @@ func CrewPromptDir() string {
 	return filepath.Join(home, ".pogo", "agents", "crew")
 }
 
+// ErrPromptNotFound indicates the prompt file for a crew agent could not be
+// located on disk. Callers (e.g. the HTTP handler) can detect this with
+// errors.Is to map it to a 404.
+var ErrPromptNotFound = errors.New("prompt file not found")
+
+// StartCrewAgent starts a crew agent by name, looking up its prompt file
+// under ~/.pogo/agents/ and applying any frontmatter overrides
+// (nudge_on_start, restart_on_crash).
+//
+// The mayor's prompt lives at ~/.pogo/agents/mayor.md; all other crew prompts
+// live at ~/.pogo/agents/crew/<name>.md.
+//
+// Returns ErrPromptNotFound (wrapped) when the prompt file is missing, or any
+// error from Spawn (e.g. when the agent is already registered).
+func (r *Registry) StartCrewAgent(name string) (*Agent, error) {
+	// Look up prompt file: mayor.md is in PromptDir, crew in CrewPromptDir
+	var promptFile string
+	if name == "mayor" {
+		promptFile = filepath.Join(PromptDir(), "mayor.md")
+	} else {
+		promptFile = filepath.Join(CrewPromptDir(), name+".md")
+	}
+	if _, err := os.Stat(promptFile); os.IsNotExist(err) {
+		return nil, fmt.Errorf("%w: %s (run 'pogo agent prompt install' to install defaults)", ErrPromptNotFound, promptFile)
+	}
+
+	// Give crew agents a stable working directory under ~/.pogo/agents/<name>/
+	home, _ := os.UserHomeDir()
+	agentDir := filepath.Join(home, ".pogo", "agents", name)
+	if err := os.MkdirAll(agentDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create agent dir: %w", err)
+	}
+
+	// Build command from configurable template.
+	// Default: "claude --dangerously-skip-permissions --append-system-prompt-file {{.PromptFile}}"
+	// NOTE: --dangerously-skip-permissions is required for autonomous agent execution.
+	// --permission-mode bypassPermissions does NOT work without additional setup.
+	cmd, err := ExpandCommand(r.commandTemplate(TypeCrew), CommandTemplateVars{
+		PromptFile: promptFile,
+		AgentName:  name,
+		AgentType:  string(TypeCrew),
+		WorkDir:    agentDir,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("agent command template error: %w", err)
+	}
+
+	// All crew agents get an initial nudge to bypass the CLI interactive prompt.
+	// A prompt file may declare its own message via `nudge_on_start` in the
+	// TOML frontmatter; otherwise the mayor gets a coordination message and
+	// everyone else gets a generic start message.
+	var nudgeMsg string
+	if meta, _, err := ParsePromptFrontmatter(promptFile); err == nil && meta.NudgeOnStart != "" {
+		nudgeMsg = meta.NudgeOnStart
+	} else if name == "mayor" {
+		nudgeMsg = "You are now running. Begin your coordination loop."
+	} else {
+		nudgeMsg = "You are now running. Check your mail with `mg mail list " + name + "` and begin your work."
+	}
+
+	return r.Spawn(SpawnRequest{
+		Name:           name,
+		Type:           TypeCrew,
+		Command:        cmd,
+		PromptFile:     promptFile,
+		Dir:            agentDir,
+		InitialNudge:   nudgeMsg,
+		RestartOnCrash: ResolveRestartOnCrash(promptFile, TypeCrew),
+	})
+}
+
 func (r *Registry) handleStart(w http.ResponseWriter, req *http.Request) {
 	if req.Method != "POST" {
 		http.Error(w, "", http.StatusMethodNotAllowed)
@@ -407,65 +479,16 @@ func (r *Registry) handleStart(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// Look up prompt file: mayor.md is in PromptDir, crew in CrewPromptDir
-	var promptFile string
-	if startReq.Name == "mayor" {
-		promptFile = filepath.Join(PromptDir(), "mayor.md")
-	} else {
-		promptFile = filepath.Join(CrewPromptDir(), startReq.Name+".md")
-	}
-	if _, err := os.Stat(promptFile); os.IsNotExist(err) {
-		http.Error(w, fmt.Sprintf("prompt file not found: %s (run 'pogo agent prompt install' to install defaults)", promptFile), http.StatusNotFound)
-		return
-	}
-
-	// Give crew agents a stable working directory under ~/.pogo/agents/<name>/
-	home, _ := os.UserHomeDir()
-	agentDir := filepath.Join(home, ".pogo", "agents", startReq.Name)
-	if err := os.MkdirAll(agentDir, 0755); err != nil {
-		http.Error(w, fmt.Sprintf("failed to create agent dir: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	// Build command from configurable template.
-	// Default: "claude --dangerously-skip-permissions --append-system-prompt-file {{.PromptFile}}"
-	// NOTE: --dangerously-skip-permissions is required for autonomous agent execution.
-	// --permission-mode bypassPermissions does NOT work without additional setup.
-	cmd, err := ExpandCommand(r.commandTemplate(TypeCrew), CommandTemplateVars{
-		PromptFile: promptFile,
-		AgentName:  startReq.Name,
-		AgentType:  string(TypeCrew),
-		WorkDir:    agentDir,
-	})
+	a, err := r.StartCrewAgent(startReq.Name)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("agent command template error: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	// All crew agents get an initial nudge to bypass the CLI interactive prompt.
-	// A prompt file may declare its own message via `nudge_on_start` in the
-	// TOML frontmatter; otherwise the mayor gets a coordination message and
-	// everyone else gets a generic start message.
-	var nudgeMsg string
-	if meta, _, err := ParsePromptFrontmatter(promptFile); err == nil && meta.NudgeOnStart != "" {
-		nudgeMsg = meta.NudgeOnStart
-	} else if startReq.Name == "mayor" {
-		nudgeMsg = "You are now running. Begin your coordination loop."
-	} else {
-		nudgeMsg = "You are now running. Check your mail with `mg mail list " + startReq.Name + "` and begin your work."
-	}
-
-	a, spawnErr := r.Spawn(SpawnRequest{
-		Name:           startReq.Name,
-		Type:           TypeCrew,
-		Command:        cmd,
-		PromptFile:     promptFile,
-		Dir:            agentDir,
-		InitialNudge:   nudgeMsg,
-		RestartOnCrash: ResolveRestartOnCrash(promptFile, TypeCrew),
-	})
-	if spawnErr != nil {
-		http.Error(w, spawnErr.Error(), http.StatusConflict)
+		switch {
+		case errors.Is(err, ErrPromptNotFound):
+			http.Error(w, err.Error(), http.StatusNotFound)
+		case strings.Contains(err.Error(), "already running"):
+			http.Error(w, err.Error(), http.StatusConflict)
+		default:
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
 		return
 	}
 

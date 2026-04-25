@@ -619,6 +619,21 @@ func main() {
 	}
 	defer project.StopScanner()
 
+	// Auto-start crew agents whose prompt frontmatter declares auto_start = true.
+	// This replaces the manual `pogo agent start mayor` step on a fresh boot
+	// and is idempotent — agents already registered (e.g. across pogod
+	// restart-while-running) are skipped.
+	for _, res := range agentRegistry.AutoStartAgents() {
+		switch res.Status {
+		case agent.AutoStartStatusStarted:
+			log.Printf("pogod: auto-started %s", res.Name)
+		case agent.AutoStartStatusSkippedRunning:
+			log.Printf("pogod: %s already running, skipping auto-start", res.Name)
+		case agent.AutoStartStatusFailed:
+			log.Printf("pogod: auto-start of %s failed: %s", res.Name, res.Error)
+		}
+	}
+
 	// Start agent cron: periodically nudge crew agents to check mail
 	// and run their coordination loops.
 	cronCtx, cronCancel := context.WithCancel(context.Background())
