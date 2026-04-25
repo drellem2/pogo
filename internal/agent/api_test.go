@@ -302,3 +302,223 @@ func TestHandleStart_CrewFallbackNudge(t *testing.T) {
 		t.Errorf("InitialNudge = %q, want %q", a.InitialNudge, want)
 	}
 }
+
+// spawnPolecatViaAPI calls handleSpawnPolecat with the given request and
+// returns the spawned Agent. Fails the test if the response is not 201.
+func spawnPolecatViaAPI(t *testing.T, reg *Registry, spawnReq SpawnPolecatAPIRequest) *Agent {
+	t.Helper()
+	body, _ := json.Marshal(spawnReq)
+	req := httptest.NewRequest("POST", "/agents/spawn-polecat", bytes.NewReader(body))
+	rr := httptest.NewRecorder()
+	reg.handleSpawnPolecat(rr, req)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("handleSpawnPolecat status = %d, body=%s", rr.Code, rr.Body.String())
+	}
+	a := reg.Get(spawnReq.Name)
+	if a == nil {
+		t.Fatalf("agent %q not registered after spawn", spawnReq.Name)
+	}
+	return a
+}
+
+// writeTemplate writes a polecat template under the configured TemplateDir().
+func writeTemplate(t *testing.T, name, content string) {
+	t.Helper()
+	if err := InitPromptDirs(); err != nil {
+		t.Fatalf("InitPromptDirs: %v", err)
+	}
+	path := filepath.Join(TemplateDir(), name+".md")
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("write template: %v", err)
+	}
+}
+
+// TestHandleSpawnPolecat_NudgeOnStartFromFrontmatter verifies that the polecat's
+// initial nudge comes from the template's frontmatter when set.
+func TestHandleSpawnPolecat_NudgeOnStartFromFrontmatter(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	writeTemplate(t, "fronted", "+++\nnudge_on_start = \"custom polecat nudge\"\n+++\nbody {{.Id}}\n")
+
+	reg, err := NewRegistry(filepath.Join(tmpHome, "sockets"))
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	defer reg.StopAll(2 * time.Second)
+	reg.SetCommandConfig(catCommandConfig{})
+
+	a := spawnPolecatViaAPI(t, reg, SpawnPolecatAPIRequest{
+		Name:     "pc-fronted",
+		Template: "fronted",
+		Id:       "wi-1",
+	})
+	if a.InitialNudge != "custom polecat nudge" {
+		t.Errorf("InitialNudge = %q, want %q", a.InitialNudge, "custom polecat nudge")
+	}
+}
+
+// TestHandleSpawnPolecat_FallbackNudge verifies that a template without a
+// nudge_on_start field still produces the legacy work-item nudge.
+func TestHandleSpawnPolecat_FallbackNudge(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	writeTemplate(t, "plainpc", "# plain polecat\nbody {{.Id}}\n")
+
+	reg, err := NewRegistry(filepath.Join(tmpHome, "sockets"))
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	defer reg.StopAll(2 * time.Second)
+	reg.SetCommandConfig(catCommandConfig{})
+
+	a := spawnPolecatViaAPI(t, reg, SpawnPolecatAPIRequest{
+		Name:     "pc-plain",
+		Template: "plainpc",
+		Id:       "wi-42",
+	})
+	want := "Look at the system prompt and complete the steps for this work item: wi-42"
+	if a.InitialNudge != want {
+		t.Errorf("InitialNudge = %q, want %q", a.InitialNudge, want)
+	}
+}
+
+// TestHandleSpawnPolecat_WorktreeFalseSkipsCreation verifies that
+// worktree=false in the template's frontmatter prevents worktree creation
+// even when a Repo is supplied.
+func TestHandleSpawnPolecat_WorktreeFalseSkipsCreation(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	workDir, _ := makeRepoWithOrigin(t)
+
+	writeTemplate(t, "noworktree", "+++\nworktree = false\n+++\n# polecat without worktree\n")
+
+	reg, err := NewRegistry(filepath.Join(tmpHome, "sockets"))
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	defer reg.StopAll(2 * time.Second)
+	reg.SetCommandConfig(catCommandConfig{})
+
+	a := spawnPolecatViaAPI(t, reg, SpawnPolecatAPIRequest{
+		Name:     "pc-nowt",
+		Template: "noworktree",
+		Repo:     workDir,
+		Id:       "wi-nowt",
+	})
+
+	if a.WorktreeDir != "" {
+		t.Errorf("WorktreeDir = %q, want empty (worktree=false in frontmatter)", a.WorktreeDir)
+	}
+	expectedWorktree := filepath.Join(tmpHome, ".pogo", "polecats", "pc-nowt")
+	if _, err := os.Stat(expectedWorktree); err == nil {
+		t.Errorf("worktree dir %s should not exist", expectedWorktree)
+	}
+	// Verify no worktree branch was registered in the source repo either.
+	out, err := exec.Command("git", "-C", workDir, "worktree", "list").CombinedOutput()
+	if err != nil {
+		t.Fatalf("worktree list: %v\n%s", err, out)
+	}
+	if strings.Contains(string(out), "polecat-pc-nowt") {
+		t.Errorf("did not expect polecat worktree in:\n%s", out)
+	}
+}
+
+// TestHandleSpawnPolecat_WorktreeTrueCreatesWorktree verifies that
+// worktree=true in frontmatter (the default) creates the isolated worktree.
+func TestHandleSpawnPolecat_WorktreeTrueCreatesWorktree(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	workDir, _ := makeRepoWithOrigin(t)
+
+	writeTemplate(t, "wantsworktree", "+++\nworktree = true\n+++\n# polecat with worktree\n")
+
+	reg, err := NewRegistry(filepath.Join(tmpHome, "sockets"))
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	defer reg.StopAll(2 * time.Second)
+	reg.SetCommandConfig(catCommandConfig{})
+
+	a := spawnPolecatViaAPI(t, reg, SpawnPolecatAPIRequest{
+		Name:     "pc-wt",
+		Template: "wantsworktree",
+		Repo:     workDir,
+		Id:       "wi-wt",
+	})
+	expectedWorktree := filepath.Join(tmpHome, ".pogo", "polecats", "pc-wt")
+	if a.WorktreeDir != expectedWorktree {
+		t.Errorf("WorktreeDir = %q, want %q", a.WorktreeDir, expectedWorktree)
+	}
+	if _, err := os.Stat(expectedWorktree); err != nil {
+		t.Errorf("expected worktree at %s: %v", expectedWorktree, err)
+	}
+}
+
+// TestHandleSpawnPolecat_WorktreeDefaultWhenRepoSet verifies the legacy
+// behavior is preserved when a template declares no worktree field.
+func TestHandleSpawnPolecat_WorktreeDefaultWhenRepoSet(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	workDir, _ := makeRepoWithOrigin(t)
+
+	writeTemplate(t, "defaultwt", "# polecat with default worktree behavior\n")
+
+	reg, err := NewRegistry(filepath.Join(tmpHome, "sockets"))
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	defer reg.StopAll(2 * time.Second)
+	reg.SetCommandConfig(catCommandConfig{})
+
+	a := spawnPolecatViaAPI(t, reg, SpawnPolecatAPIRequest{
+		Name:     "pc-def",
+		Template: "defaultwt",
+		Repo:     workDir,
+		Id:       "wi-def",
+	})
+	expectedWorktree := filepath.Join(tmpHome, ".pogo", "polecats", "pc-def")
+	if a.WorktreeDir != expectedWorktree {
+		t.Errorf("WorktreeDir = %q, want %q (default behavior when Repo set)", a.WorktreeDir, expectedWorktree)
+	}
+}
+
+// TestHandleSpawnPolecat_FrontmatterStrippedFromBody verifies that the
+// frontmatter block does not leak into the rendered prompt file.
+func TestHandleSpawnPolecat_FrontmatterStrippedFromBody(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	writeTemplate(t, "stripfm", "+++\nnudge_on_start = \"go\"\n+++\nID is {{.Id}}\n")
+
+	reg, err := NewRegistry(filepath.Join(tmpHome, "sockets"))
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	defer reg.StopAll(2 * time.Second)
+	reg.SetCommandConfig(catCommandConfig{})
+
+	a := spawnPolecatViaAPI(t, reg, SpawnPolecatAPIRequest{
+		Name:     "pc-strip",
+		Template: "stripfm",
+		Id:       "wi-strip",
+	})
+	data, err := os.ReadFile(a.PromptFile)
+	if err != nil {
+		t.Fatalf("read prompt file: %v", err)
+	}
+	body := string(data)
+	if strings.Contains(body, "+++") {
+		t.Errorf("expected frontmatter fences to be stripped, got: %q", body)
+	}
+	if strings.Contains(body, "nudge_on_start") {
+		t.Errorf("expected frontmatter keys to be stripped, got: %q", body)
+	}
+	if !strings.Contains(body, "ID is wi-strip") {
+		t.Errorf("expected expanded body, got: %q", body)
+	}
+}

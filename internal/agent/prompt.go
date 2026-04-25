@@ -77,14 +77,16 @@ func ResolveTemplate(name string) (string, error) {
 }
 
 // ExpandTemplate reads a template file and expands {{.Variable}} placeholders
-// with the provided vars. Uses Go text/template syntax.
+// with the provided vars. Uses Go text/template syntax. Any TOML frontmatter
+// at the top of the file (delimited by '+++' fences) is stripped before
+// expansion so the metadata block does not leak into the rendered prompt.
 func ExpandTemplate(templatePath string, vars TemplateVars) (string, error) {
-	content, err := os.ReadFile(templatePath)
+	_, body, err := ParsePromptFrontmatter(templatePath)
 	if err != nil {
-		return "", fmt.Errorf("read template: %w", err)
+		return "", err
 	}
 
-	tmpl, err := template.New(filepath.Base(templatePath)).Parse(string(content))
+	tmpl, err := template.New(filepath.Base(templatePath)).Parse(body)
 	if err != nil {
 		return "", fmt.Errorf("parse template: %w", err)
 	}
