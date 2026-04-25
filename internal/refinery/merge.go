@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // processMerge runs the full merge pipeline for a single MR:
@@ -20,6 +21,10 @@ import (
 // If another polecat merges to the target between our rebase and push,
 // the ff-only merge or push will fail. We retry up to 3 times with a
 // fresh fetch+rebase+gates cycle to handle this race.
+//
+// Emits refinery_merge_attempted, refinery_merged, and refinery_merge_failed
+// events as the pipeline progresses. Emission is best-effort and never
+// propagates errors — see internal/events.Emit.
 func (r *Refinery) processMerge(mr *MergeRequest) (string, error) {
 	wtDir, err := r.ensureWorktree(mr.RepoPath)
 	if err != nil {
@@ -28,90 +33,119 @@ func (r *Refinery) processMerge(mr *MergeRequest) (string, error) {
 
 	var gateOutput string
 	const maxAttempts = 3
+	startTime := time.Now()
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		if attempt > 1 {
 			log.Printf("refinery: MR %s step=retry attempt=%d/%d", mr.ID, attempt, maxAttempts)
 		}
 
-		var err error
-		gateOutput, err = r.attemptMerge(wtDir, mr, attempt)
-		if err == nil {
+		emitMergeAttempted(mr, attempt)
+
+		output, stage, sha, attemptErr := r.attemptMerge(wtDir, mr, attempt)
+		gateOutput = output
+		if attemptErr == nil {
+			emitMerged(mr, attempt, sha, time.Since(startTime).Seconds())
 			return gateOutput, nil
 		}
 
-		// Only retry on merge or push failures (target moved)
-		if attempt < maxAttempts && isRetryable(err) {
-			log.Printf("refinery: MR %s attempt %d failed (will retry): %v", mr.ID, attempt, err)
+		retryRemaining := attempt < maxAttempts && isRetryable(attemptErr)
+		emitMergeFailed(mr, attempt, stage, attemptErr, !retryRemaining, gateOutput)
+
+		if retryRemaining {
+			log.Printf("refinery: MR %s attempt %d failed (will retry): %v", mr.ID, attempt, attemptErr)
 			continue
 		}
-		return gateOutput, err
+		return gateOutput, attemptErr
 	}
-	return gateOutput, fmt.Errorf("merge failed after %d attempts", maxAttempts)
+	finalErr := fmt.Errorf("merge failed after %d attempts", maxAttempts)
+	emitMergeFailed(mr, maxAttempts, "unknown", finalErr, true, gateOutput)
+	return gateOutput, finalErr
 }
 
-// attemptMerge runs a single fetch→rebase→gates→merge→push cycle.
-func (r *Refinery) attemptMerge(wtDir string, mr *MergeRequest, attempt int) (string, error) {
+// attemptMerge runs a single fetch→rebase→gates→merge→push cycle. Returns
+// the captured gate output, the pipeline stage that ran (or failed), the
+// merge commit SHA on success (empty otherwise), and any error.
+func (r *Refinery) attemptMerge(wtDir string, mr *MergeRequest, attempt int) (output string, stage string, sha string, err error) {
 	// Fetch latest from origin
 	log.Printf("refinery: MR %s step=fetch branch=%s attempt=%d", mr.ID, mr.Branch, attempt)
-	if output, err := gitCmdOutput(wtDir, "fetch", "origin"); err != nil {
-		return "", fmt.Errorf("fetch: %s: %w", output, err)
+	if out, gerr := gitCmdOutput(wtDir, "fetch", "origin"); gerr != nil {
+		return "", "fetch", "", fmt.Errorf("fetch: %s: %w", out, gerr)
 	}
 
 	// Checkout the branch fresh from origin
 	log.Printf("refinery: MR %s step=checkout-branch branch=%s attempt=%d", mr.ID, mr.Branch, attempt)
-	if output, err := gitCmdOutput(wtDir, "checkout", "-B", mr.Branch, "origin/"+mr.Branch); err != nil {
-		return "", fmt.Errorf("checkout branch: %s: %w", output, err)
+	if out, gerr := gitCmdOutput(wtDir, "checkout", "-B", mr.Branch, "origin/"+mr.Branch); gerr != nil {
+		return "", "fetch", "", fmt.Errorf("checkout branch: %s: %w", out, gerr)
 	}
 
 	// Rebase onto latest target so the branch is a direct descendant of main.
 	// Polecat branches fork from main at spawn time and may be behind by the
 	// time they reach the refinery.
 	log.Printf("refinery: MR %s step=rebase target=%s attempt=%d", mr.ID, mr.TargetRef, attempt)
-	if output, err := gitCmdOutput(wtDir, "rebase", "origin/"+mr.TargetRef); err != nil {
+	if out, gerr := gitCmdOutput(wtDir, "rebase", "origin/"+mr.TargetRef); gerr != nil {
 		// Abort the failed rebase to leave worktree in a clean state
 		gitCmdOutput(wtDir, "rebase", "--abort")
-		rebaseErr := fmt.Errorf("rebase onto %s: %s: %w", mr.TargetRef, output, err)
+		rebaseErr := fmt.Errorf("rebase onto %s: %s: %w", mr.TargetRef, out, gerr)
 		// "invalid upstream" can be transient — e.g. the target branch
 		// hasn't been fetched yet or the ref is missing from the clone.
 		// Treat it as retryable so a fresh fetch gets another chance.
-		if strings.Contains(output, "invalid upstream") {
-			return "", &retryableError{rebaseErr}
+		if strings.Contains(out, "invalid upstream") {
+			return "", "rebase", "", &retryableError{rebaseErr}
 		}
-		return "", rebaseErr
+		return "", "rebase", "", rebaseErr
 	}
 
 	// Run quality gates (on the rebased branch — tests what will actually land)
 	log.Printf("refinery: MR %s step=quality-gates attempt=%d", mr.ID, attempt)
-	gateOutput, err := r.runQualityGates(wtDir, mr.RepoPath)
-	if err != nil {
-		return gateOutput, fmt.Errorf("quality gate: %w", err)
+	gateOutput, gates, qerr := r.runQualityGates(wtDir, mr.RepoPath)
+	if qerr != nil {
+		return gateOutput, gateStage(gates), "", fmt.Errorf("quality gate: %w", qerr)
 	}
 
 	// Checkout target ref for merge
 	log.Printf("refinery: MR %s step=checkout-target target=%s attempt=%d", mr.ID, mr.TargetRef, attempt)
-	if output, err := gitCmdOutput(wtDir, "checkout", mr.TargetRef); err != nil {
-		return gateOutput, fmt.Errorf("checkout target: %s: %w", output, err)
+	if out, gerr := gitCmdOutput(wtDir, "checkout", mr.TargetRef); gerr != nil {
+		return gateOutput, "rebase", "", fmt.Errorf("checkout target: %s: %w", out, gerr)
 	}
 
 	// Pull latest target
 	log.Printf("refinery: MR %s step=pull-target target=%s attempt=%d", mr.ID, mr.TargetRef, attempt)
-	if output, err := gitCmdOutput(wtDir, "pull", "--ff-only", "origin", mr.TargetRef); err != nil {
-		return gateOutput, fmt.Errorf("pull target: %s: %w", output, err)
+	if out, gerr := gitCmdOutput(wtDir, "pull", "--ff-only", "origin", mr.TargetRef); gerr != nil {
+		return gateOutput, "fetch", "", fmt.Errorf("pull target: %s: %w", out, gerr)
 	}
 
 	// Fast-forward merge — guaranteed to work if target hasn't moved since fetch
 	log.Printf("refinery: MR %s step=merge branch=%s attempt=%d", mr.ID, mr.Branch, attempt)
-	if output, err := gitCmdOutput(wtDir, "merge", "--ff-only", mr.Branch); err != nil {
-		return gateOutput, &retryableError{fmt.Errorf("merge (ff-only): %s: %w", output, err)}
+	if out, gerr := gitCmdOutput(wtDir, "merge", "--ff-only", mr.Branch); gerr != nil {
+		return gateOutput, "rebase", "", &retryableError{fmt.Errorf("merge (ff-only): %s: %w", out, gerr)}
 	}
 
 	// Push to origin
 	log.Printf("refinery: MR %s step=push target=%s attempt=%d", mr.ID, mr.TargetRef, attempt)
-	if output, err := gitCmdOutput(wtDir, "push", "origin", mr.TargetRef); err != nil {
-		return gateOutput, &retryableError{fmt.Errorf("push: %s: %w", output, err)}
+	if out, gerr := gitCmdOutput(wtDir, "push", "origin", mr.TargetRef); gerr != nil {
+		return gateOutput, "push", "", &retryableError{fmt.Errorf("push: %s: %w", out, gerr)}
 	}
 
-	return gateOutput, nil
+	// Capture the merge commit SHA (HEAD on target after fast-forward).
+	// Best-effort: if rev-parse fails, return empty SHA — the merge already
+	// pushed successfully.
+	headSHA, _ := gitCmdOutput(wtDir, "rev-parse", "HEAD")
+
+	return gateOutput, "push", headSHA, nil
+}
+
+// gateStage maps quality gate commands to a refinery_merge_failed stage value.
+// Returns "build" for build-* commands, "test" as the conservative default.
+func gateStage(gates []string) string {
+	if len(gates) == 0 {
+		return "test"
+	}
+	last := strings.ToLower(strings.TrimSpace(gates[len(gates)-1]))
+	last = strings.TrimPrefix(last, "./")
+	if strings.HasPrefix(last, "build") {
+		return "build"
+	}
+	return "test"
 }
 
 // retryableError wraps errors from merge/push failures that can be retried
@@ -224,27 +258,31 @@ func fixRemoteURL(wtDir, repoPath string) error {
 
 // runQualityGates runs the configured quality gates for the repo.
 // Checks for per-repo .pogo/refinery.toml first, then falls back to defaults.
-func (r *Refinery) runQualityGates(wtDir, repoPath string) (string, error) {
+// Returns combined output, the slice of gates run up to and including the
+// failing one (or all of them on success), and any error.
+func (r *Refinery) runQualityGates(wtDir, repoPath string) (string, []string, error) {
 	gates := r.loadGateConfig(wtDir, repoPath)
 	if len(gates) == 0 {
 		// No gates configured — pass by default
-		return "(no quality gates configured)", nil
+		return "(no quality gates configured)", nil, nil
 	}
 
 	var allOutput strings.Builder
+	var ran []string
 	for _, gate := range gates {
 		allOutput.WriteString(fmt.Sprintf("=== Running: %s ===\n", gate))
+		ran = append(ran, gate)
 		output, err := runGate(wtDir, gate)
 		allOutput.WriteString(output)
 		allOutput.WriteString("\n")
 		if err != nil {
 			allOutput.WriteString(fmt.Sprintf("FAILED: %v\n", err))
-			return allOutput.String(), fmt.Errorf("%s failed: %w", gate, err)
+			return allOutput.String(), ran, fmt.Errorf("%s failed: %w", gate, err)
 		}
 		allOutput.WriteString("PASSED\n")
 	}
 
-	return allOutput.String(), nil
+	return allOutput.String(), ran, nil
 }
 
 // loadGateConfig returns the quality gate commands to run.
