@@ -11,7 +11,7 @@ You use the same CLI tools as other agents, but focused on diagnosis:
 ### System Health
 - `curl -s http://localhost:10000/health` — is pogod responding?
 - `curl -s http://localhost:10000/agents | jq` — all agents and their status
-- `curl -s http://localhost:10000/refinery/status | jq` — refinery state
+- `pogo refinery status --json | jq` — refinery state
 - `curl -s http://localhost:10000/server/mode | jq` — run mode
 
 ### Agent Diagnosis
