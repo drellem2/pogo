@@ -263,6 +263,39 @@ func InitPromptDirs() error {
 	return nil
 }
 
+// metaFieldFlag is a bitmask of recognized frontmatter keys that were
+// explicitly declared. Stored on AgentMeta so callers can tell "set to the
+// zero value" apart from "not declared at all" — important for boolean keys
+// like restart_on_crash where false is a valid intentional setting.
+type metaFieldFlag uint8
+
+const (
+	metaFieldRestartOnCrash metaFieldFlag = 1 << iota
+	metaFieldAutoStart
+	metaFieldNudgeOnStart
+	metaFieldCommand
+	metaFieldWorktree
+)
+
+// metaFieldByKey maps a TOML key name to its bitmask flag. The second return
+// is false for unrecognized keys, which the parser silently tolerates for
+// forward compatibility.
+func metaFieldByKey(key string) (metaFieldFlag, bool) {
+	switch key {
+	case "restart_on_crash":
+		return metaFieldRestartOnCrash, true
+	case "auto_start":
+		return metaFieldAutoStart, true
+	case "nudge_on_start":
+		return metaFieldNudgeOnStart, true
+	case "command":
+		return metaFieldCommand, true
+	case "worktree":
+		return metaFieldWorktree, true
+	}
+	return 0, false
+}
+
 // AgentMeta is the structured metadata declared at the top of a prompt file
 // via TOML frontmatter. Zero values mean "use defaults" — the parser returns
 // a zero-value AgentMeta for prompts without frontmatter so existing prompts
@@ -280,6 +313,26 @@ type AgentMeta struct {
 	NudgeOnStart   string `json:"nudge_on_start,omitempty"`
 	Command        string `json:"command,omitempty"`
 	Worktree       bool   `json:"worktree,omitempty"`
+
+	// explicit is a bitmask of recognized keys that appeared in the
+	// frontmatter. Unexported so it stays out of JSON output; uint8 so
+	// AgentMeta remains comparable with `==`. Zero for prompts without
+	// frontmatter.
+	explicit metaFieldFlag
+}
+
+// HasField reports whether key was explicitly present in the prompt's
+// frontmatter. Returns false for prompts without frontmatter, prompts that
+// did not declare the key, or unrecognized keys.
+func (m *AgentMeta) HasField(key string) bool {
+	if m == nil {
+		return false
+	}
+	flag, ok := metaFieldByKey(key)
+	if !ok {
+		return false
+	}
+	return m.explicit&flag != 0
 }
 
 // frontmatterFence is the delimiter line that opens and closes a TOML
@@ -401,6 +454,12 @@ func parseFrontmatterBody(text string, meta *AgentMeta) error {
 }
 
 func assignMetaField(meta *AgentMeta, key, raw string) error {
+	flag, known := metaFieldByKey(key)
+	if !known {
+		// Unknown keys are tolerated — keeps older binaries forward-compatible
+		// with prompt files written for newer schema additions.
+		return nil
+	}
 	switch key {
 	case "restart_on_crash":
 		b, err := parseFrontmatterBool(raw)
@@ -432,10 +491,8 @@ func assignMetaField(meta *AgentMeta, key, raw string) error {
 			return fmt.Errorf("%s: %w", key, err)
 		}
 		meta.Command = s
-	default:
-		// Unknown keys are tolerated — keeps older binaries forward-compatible
-		// with prompt files written for newer schema additions.
 	}
+	meta.explicit |= flag
 	return nil
 }
 
@@ -485,6 +542,34 @@ func unescapeFrontmatterString(s string) (string, error) {
 		}
 	}
 	return b.String(), nil
+}
+
+// RestartOnCrashDefault returns the default restart_on_crash value for an
+// agent type when its prompt file does not declare one. Crew agents are
+// long-running and default to restart=true; polecats are ephemeral and
+// default to restart=false.
+func RestartOnCrashDefault(t AgentType) bool {
+	return t == TypeCrew
+}
+
+// ResolveRestartOnCrash decides whether an agent of the given type should be
+// restarted on crash. Frontmatter wins when present; otherwise the type
+// default applies. A missing or unreadable prompt file falls back to the
+// default and is not treated as an error here — callers that need stricter
+// handling should validate the prompt path themselves.
+func ResolveRestartOnCrash(promptFile string, t AgentType) bool {
+	def := RestartOnCrashDefault(t)
+	if promptFile == "" {
+		return def
+	}
+	meta, _, err := ParsePromptFrontmatter(promptFile)
+	if err != nil {
+		return def
+	}
+	if meta.HasField("restart_on_crash") {
+		return meta.RestartOnCrash
+	}
+	return def
 }
 
 // promptHashPrefix is the marker used to embed a content hash in installed prompt files.

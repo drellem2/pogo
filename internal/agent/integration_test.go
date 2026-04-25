@@ -388,6 +388,100 @@ func TestPolecatCleanupOnExit(t *testing.T) {
 	}
 }
 
+// TestRestartOnCrashFlagDrivesBranching verifies the lifecycle callback
+// behavior switches on a.RestartOnCrash rather than a.Type. With the flag
+// set, an exited agent is respawned regardless of type; without it, an
+// exited agent is cleaned up regardless of type. This mirrors the production
+// onExit logic in cmd/pogod/main.go.
+func TestRestartOnCrashFlagDrivesBranching(t *testing.T) {
+	cases := []struct {
+		name           string
+		typ            AgentType
+		restartOnCrash bool
+		wantRestart    bool
+	}{
+		{"crew with restart=true is respawned", TypeCrew, true, true},
+		{"crew with restart=false stays down", TypeCrew, false, false},
+		{"polecat with restart=true is respawned", TypePolecat, true, true},
+		{"polecat with restart=false stays down (default)", TypePolecat, false, false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			socketDir, err := os.MkdirTemp("/tmp", "pogo-roc-sock-")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer os.RemoveAll(socketDir)
+
+			reg, err := NewRegistry(socketDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer reg.StopAll(2 * time.Second)
+
+			restartCh := make(chan struct{}, 1)
+			cleanupCh := make(chan struct{}, 1)
+			reg.SetOnExit(func(a *Agent, exitErr error) {
+				if a.RestartOnCrash {
+					go func() {
+						time.Sleep(50 * time.Millisecond)
+						if _, rerr := reg.Respawn(a.Name); rerr == nil {
+							restartCh <- struct{}{}
+						}
+					}()
+				} else {
+					a.Cleanup()
+					reg.Remove(a.Name)
+					cleanupCh <- struct{}{}
+				}
+			})
+
+			a, err := reg.Spawn(SpawnRequest{
+				Name:           "roc-" + strings.ReplaceAll(tc.name, " ", "-"),
+				Type:           tc.typ,
+				Command:        []string{"true"},
+				RestartOnCrash: tc.restartOnCrash,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if a.RestartOnCrash != tc.restartOnCrash {
+				t.Errorf("Spawn did not propagate RestartOnCrash to agent: got %v want %v",
+					a.RestartOnCrash, tc.restartOnCrash)
+			}
+
+			if tc.wantRestart {
+				select {
+				case <-restartCh:
+					respawned := reg.Get(a.Name)
+					if respawned == nil {
+						t.Fatal("respawned agent missing from registry")
+					}
+					if !respawned.RestartOnCrash {
+						t.Error("Respawn did not preserve RestartOnCrash")
+					}
+				case <-cleanupCh:
+					t.Fatal("agent was cleaned up but should have been restarted")
+				case <-time.After(2 * time.Second):
+					t.Fatal("agent was not restarted within timeout")
+				}
+			} else {
+				select {
+				case <-cleanupCh:
+					if reg.Get(a.Name) != nil {
+						t.Error("agent should be removed from registry after cleanup")
+					}
+				case <-restartCh:
+					t.Fatal("agent was restarted but should have stayed down")
+				case <-time.After(2 * time.Second):
+					t.Fatal("agent was not cleaned up within timeout")
+				}
+			}
+		})
+	}
+}
+
 func TestPolecatWorktreeDirRemovedOnExit(t *testing.T) {
 	socketDir, err := os.MkdirTemp("/tmp", "pogo-wtdir-sock-")
 	if err != nil {

@@ -780,6 +780,99 @@ func TestParsePromptFrontmatterFenceInBody(t *testing.T) {
 	}
 }
 
+func TestAgentMetaHasField(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "x.md")
+	content := "+++\nrestart_on_crash = false\n+++\nbody\n"
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	meta, _, err := ParsePromptFrontmatter(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !meta.HasField("restart_on_crash") {
+		t.Error("expected HasField(restart_on_crash) = true after explicit set to false")
+	}
+	if meta.HasField("auto_start") {
+		t.Error("expected HasField(auto_start) = false (not declared)")
+	}
+	if meta.HasField("unknown") {
+		t.Error("expected HasField(unknown) = false")
+	}
+
+	// Nil receiver tolerated.
+	var nilMeta *AgentMeta
+	if nilMeta.HasField("restart_on_crash") {
+		t.Error("nil meta should report no fields set")
+	}
+
+	// File without frontmatter: nothing set.
+	noFm := filepath.Join(dir, "plain.md")
+	if err := os.WriteFile(noFm, []byte("# Plain\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	meta2, _, err := ParsePromptFrontmatter(noFm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta2.HasField("restart_on_crash") {
+		t.Error("file without frontmatter should report no fields set")
+	}
+}
+
+func TestRestartOnCrashDefault(t *testing.T) {
+	if !RestartOnCrashDefault(TypeCrew) {
+		t.Error("crew default should be true")
+	}
+	if RestartOnCrashDefault(TypePolecat) {
+		t.Error("polecat default should be false")
+	}
+}
+
+func TestResolveRestartOnCrash(t *testing.T) {
+	dir := t.TempDir()
+
+	writePrompt := func(name, content string) string {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+
+	noFm := writePrompt("plain.md", "# Plain\n")
+	crewOptOut := writePrompt("crew-off.md", "+++\nrestart_on_crash = false\n+++\nbody\n")
+	polecatOptIn := writePrompt("polecat-on.md", "+++\nrestart_on_crash = true\n+++\nbody\n")
+	otherKey := writePrompt("other.md", "+++\nauto_start = true\n+++\nbody\n")
+
+	cases := []struct {
+		name       string
+		promptFile string
+		typ        AgentType
+		want       bool
+	}{
+		{"crew default with no prompt", "", TypeCrew, true},
+		{"polecat default with no prompt", "", TypePolecat, false},
+		{"crew default without frontmatter", noFm, TypeCrew, true},
+		{"polecat default without frontmatter", noFm, TypePolecat, false},
+		{"crew opt-out via frontmatter", crewOptOut, TypeCrew, false},
+		{"polecat opt-in via frontmatter", polecatOptIn, TypePolecat, true},
+		{"unrelated frontmatter key keeps default (crew)", otherKey, TypeCrew, true},
+		{"unrelated frontmatter key keeps default (polecat)", otherKey, TypePolecat, false},
+		{"missing file falls back to default (crew)", filepath.Join(dir, "missing.md"), TypeCrew, true},
+		{"missing file falls back to default (polecat)", filepath.Join(dir, "missing.md"), TypePolecat, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ResolveRestartOnCrash(tc.promptFile, tc.typ)
+			if got != tc.want {
+				t.Errorf("got %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestInitPromptDirs(t *testing.T) {
 	origHome := os.Getenv("HOME")
 	tmpHome := t.TempDir()

@@ -16,19 +16,20 @@ import (
 
 // AgentInfo is the JSON representation of an agent for the API.
 type AgentInfo struct {
-	Name         string      `json:"name"`
-	PID          int         `json:"pid"`
-	Type         AgentType   `json:"type"`
-	StartTime    time.Time   `json:"start_time"`
-	Command      []string    `json:"command"`
-	SocketPath   string      `json:"socket_path"`
-	Status       AgentStatus `json:"status"`
-	ExitCode     int         `json:"exit_code,omitempty"`
-	RestartCount int         `json:"restart_count,omitempty"`
-	PromptFile   string      `json:"prompt_file,omitempty"`
-	ProcessName  string      `json:"process_name"`
-	Uptime       string      `json:"uptime"`
-	LastActivity string      `json:"last_activity,omitempty"`
+	Name           string      `json:"name"`
+	PID            int         `json:"pid"`
+	Type           AgentType   `json:"type"`
+	StartTime      time.Time   `json:"start_time"`
+	Command        []string    `json:"command"`
+	SocketPath     string      `json:"socket_path"`
+	Status         AgentStatus `json:"status"`
+	ExitCode       int         `json:"exit_code,omitempty"`
+	RestartCount   int         `json:"restart_count,omitempty"`
+	RestartOnCrash bool        `json:"restart_on_crash"`
+	PromptFile     string      `json:"prompt_file,omitempty"`
+	ProcessName    string      `json:"process_name"`
+	Uptime         string      `json:"uptime"`
+	LastActivity   string      `json:"last_activity,omitempty"`
 }
 
 // SpawnAPIRequest is the JSON body for POST /agents.
@@ -168,18 +169,19 @@ func agentInfo(a *Agent) AgentInfo {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	info := AgentInfo{
-		Name:         a.Name,
-		PID:          a.PID,
-		Type:         a.Type,
-		StartTime:    a.StartTime,
-		Command:      a.Command,
-		SocketPath:   a.SocketPath(),
-		Status:       a.Status,
-		ExitCode:     a.ExitCode,
-		RestartCount: a.RestartCount,
-		PromptFile:   a.PromptFile,
-		ProcessName:  ProcessName(a.Type, a.Name),
-		Uptime:       agentUptime(a),
+		Name:           a.Name,
+		PID:            a.PID,
+		Type:           a.Type,
+		StartTime:      a.StartTime,
+		Command:        a.Command,
+		SocketPath:     a.SocketPath(),
+		Status:         a.Status,
+		ExitCode:       a.ExitCode,
+		RestartCount:   a.RestartCount,
+		RestartOnCrash: a.RestartOnCrash,
+		PromptFile:     a.PromptFile,
+		ProcessName:    ProcessName(a.Type, a.Name),
+		Uptime:         agentUptime(a),
 	}
 	if a.outputBuf != nil {
 		if t := a.outputBuf.LastWriteTime(); !t.IsZero() {
@@ -239,11 +241,12 @@ func (r *Registry) handleAgents(w http.ResponseWriter, req *http.Request) {
 			return
 		}
 		a, err := r.Spawn(SpawnRequest{
-			Name:       spawnReq.Name,
-			Type:       spawnReq.Type,
-			Command:    spawnReq.Command,
-			Env:        spawnReq.Env,
-			PromptFile: spawnReq.PromptFile,
+			Name:           spawnReq.Name,
+			Type:           spawnReq.Type,
+			Command:        spawnReq.Command,
+			Env:            spawnReq.Env,
+			PromptFile:     spawnReq.PromptFile,
+			RestartOnCrash: ResolveRestartOnCrash(spawnReq.PromptFile, spawnReq.Type),
 		})
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusConflict)
@@ -453,12 +456,13 @@ func (r *Registry) handleStart(w http.ResponseWriter, req *http.Request) {
 	}
 
 	a, spawnErr := r.Spawn(SpawnRequest{
-		Name:         startReq.Name,
-		Type:         TypeCrew,
-		Command:      cmd,
-		PromptFile:   promptFile,
-		Dir:          agentDir,
-		InitialNudge: nudgeMsg,
+		Name:           startReq.Name,
+		Type:           TypeCrew,
+		Command:        cmd,
+		PromptFile:     promptFile,
+		Dir:            agentDir,
+		InitialNudge:   nudgeMsg,
+		RestartOnCrash: ResolveRestartOnCrash(promptFile, TypeCrew),
 	})
 	if spawnErr != nil {
 		http.Error(w, spawnErr.Error(), http.StatusConflict)
@@ -585,15 +589,16 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 	}
 
 	a, err := r.Spawn(SpawnRequest{
-		Name:         spawnReq.Name,
-		Type:         TypePolecat,
-		Command:      cmd,
-		Env:          env,
-		PromptFile:   promptFile,
-		Dir:          worktreeDir,
-		WorktreeDir:  worktreeDir,
-		SourceRepo:   sourceRepo,
-		InitialNudge: nudgeMsg,
+		Name:           spawnReq.Name,
+		Type:           TypePolecat,
+		Command:        cmd,
+		Env:            env,
+		PromptFile:     promptFile,
+		Dir:            worktreeDir,
+		WorktreeDir:    worktreeDir,
+		SourceRepo:     sourceRepo,
+		InitialNudge:   nudgeMsg,
+		RestartOnCrash: ResolveRestartOnCrash(promptFile, TypePolecat),
 	})
 	if err != nil {
 		os.Remove(promptFile) // Clean up temp file on spawn failure

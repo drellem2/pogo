@@ -427,32 +427,41 @@ func main() {
 		agent.ValidateCommandBinary(polecatCmd)
 	}
 
-	// Set up agent lifecycle callbacks
+	// Set up agent lifecycle callbacks. Restart vs. cleanup is now driven by
+	// the agent's RestartOnCrash flag (resolved from prompt frontmatter, with
+	// type-based defaults: crew=true, polecat=false). This preserves the
+	// historical behavior — crew agents are still restarted, polecats are
+	// still cleaned up — while letting users opt out per-agent.
 	agentRegistry.SetOnExit(func(a *agent.Agent, err error) {
-		if a.Type == agent.TypeCrew {
-			// Crew agents: restart on unexpected exit (backoff: 2s)
-			log.Printf("crew agent %s exited unexpectedly, scheduling restart", a.Name)
+		if a.RestartOnCrash {
+			// Restart-on-crash agents: respawn after a short backoff so a
+			// fast crash loop doesn't peg the daemon. The agent stays in
+			// the registry and its worktree (if any) is preserved.
+			log.Printf("agent %s (%s) exited unexpectedly, scheduling restart", a.Name, a.Type)
 			go func() {
 				time.Sleep(2 * time.Second)
 				if _, rerr := agentRegistry.Respawn(a.Name); rerr != nil {
-					log.Printf("crew agent %s: restart failed: %v", a.Name, rerr)
+					log.Printf("agent %s: restart failed: %v", a.Name, rerr)
 				}
 			}()
 		} else {
-			// Polecat agents: clean up worktree and remove from registry
-			log.Printf("polecat %s exited, cleaning up", a.Name)
+			// No-restart agents: clean up worktree (if any) and remove from
+			// the registry. Polecats hit this path by default; a crew agent
+			// with restart_on_crash=false in its prompt frontmatter also
+			// lands here.
+			log.Printf("agent %s (%s) exited, cleaning up", a.Name, a.Type)
 			if a.WorktreeDir != "" {
 				if err := exec.Command("git", "-C", a.SourceRepo, "worktree", "remove", a.WorktreeDir, "--force").Run(); err != nil {
-					log.Printf("polecat %s: worktree removal failed: %v", a.Name, err)
+					log.Printf("agent %s: worktree removal failed: %v", a.Name, err)
 				} else {
-					log.Printf("polecat %s: removed worktree %s", a.Name, a.WorktreeDir)
+					log.Printf("agent %s: removed worktree %s", a.Name, a.WorktreeDir)
 				}
 				// Always remove the directory from disk as a fallback.
 				// git worktree remove may leave the directory behind
 				// (e.g. if UnlinkWorktree already detached the .git
 				// pointer during refinery submit).
 				if err := os.RemoveAll(a.WorktreeDir); err != nil {
-					log.Printf("polecat %s: failed to remove worktree dir %s: %v", a.Name, a.WorktreeDir, err)
+					log.Printf("agent %s: failed to remove worktree dir %s: %v", a.Name, a.WorktreeDir, err)
 				}
 			}
 			a.Cleanup()
