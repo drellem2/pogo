@@ -125,6 +125,8 @@ Pogo bundles project discovery and cross-repo code search via `lsp` (list projec
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full system design, [MVP.md](MVP.md) for implementation roadmap, and [VISION.md](VISION.md) for principles.
 
+For a worked non-coding example — using pogo to triage research items, with refinery disabled and no git worktrees — see [docs/examples/research-triage/](docs/examples/research-triage/README.md).
+
 ## Development
 
 ```sh
