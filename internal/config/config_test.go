@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestDefaultPort(t *testing.T) {
@@ -244,6 +245,77 @@ max_watchers = 1024
 	cfg := Load()
 	if cfg.MaxWatchers != 1024 {
 		t.Errorf("expected max watchers 1024 from config file, got %d", cfg.MaxWatchers)
+	}
+}
+
+func TestRefineryEnabledDefault(t *testing.T) {
+	os.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	defer os.Unsetenv("XDG_CONFIG_HOME")
+
+	cfg := Load()
+	if !cfg.Refinery.Enabled {
+		t.Errorf("expected refinery to be enabled by default, got disabled")
+	}
+}
+
+func TestRefineryDisabledViaConfigFile(t *testing.T) {
+	dir := t.TempDir()
+	os.Setenv("XDG_CONFIG_HOME", dir)
+	defer os.Unsetenv("XDG_CONFIG_HOME")
+
+	pogoDir := filepath.Join(dir, "pogo")
+	os.MkdirAll(pogoDir, 0755)
+	os.WriteFile(filepath.Join(pogoDir, "config.toml"), []byte(`
+[refinery]
+enabled = false
+`), 0644)
+
+	cfg := Load()
+	if cfg.Refinery.Enabled {
+		t.Errorf("expected refinery to be disabled by config file, got enabled")
+	}
+}
+
+func TestRefineryEnabledExplicitlyTrue(t *testing.T) {
+	dir := t.TempDir()
+	os.Setenv("XDG_CONFIG_HOME", dir)
+	defer os.Unsetenv("XDG_CONFIG_HOME")
+
+	pogoDir := filepath.Join(dir, "pogo")
+	os.MkdirAll(pogoDir, 0755)
+	os.WriteFile(filepath.Join(pogoDir, "config.toml"), []byte(`
+[refinery]
+enabled = true
+`), 0644)
+
+	cfg := Load()
+	if !cfg.Refinery.Enabled {
+		t.Errorf("expected refinery enabled = true to take effect, got disabled")
+	}
+}
+
+func TestRefineryUnrelatedKeysDontDisableIt(t *testing.T) {
+	// Regression: previously the parser cleared Enabled on any non-"true"
+	// value because Load() didn't distinguish "unset" from "explicitly false".
+	// A config file with [refinery] but no `enabled` key should leave the
+	// default (true) intact.
+	dir := t.TempDir()
+	os.Setenv("XDG_CONFIG_HOME", dir)
+	defer os.Unsetenv("XDG_CONFIG_HOME")
+
+	pogoDir := filepath.Join(dir, "pogo")
+	os.MkdirAll(pogoDir, 0755)
+	os.WriteFile(filepath.Join(pogoDir, "config.toml"), []byte(`
+[refinery]
+poll_interval = "15s"
+`), 0644)
+
+	cfg := Load()
+	if !cfg.Refinery.Enabled {
+		t.Errorf("expected refinery to remain enabled when only poll_interval is set, got disabled")
+	}
+	if cfg.Refinery.PollInterval != 15*time.Second {
+		t.Errorf("expected poll_interval=15s from config file, got %s", cfg.Refinery.PollInterval)
 	}
 }
 
