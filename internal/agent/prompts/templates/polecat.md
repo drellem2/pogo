@@ -50,9 +50,9 @@ Follow these steps exactly, in order. Skipping any step is a failure.
    ```bash
    # Poll in a bash loop — do NOT use cron, CronCreate, scheduled tasks, or pogo nudge for this.
    while true; do
-     STATUS=$(pogo refinery show <id> --json | grep -o '"status":"[^"]*"' | head -1)
+     STATUS=$(pogo refinery show <id> --json | jq -r .status)
      echo "$STATUS"
-     if echo "$STATUS" | grep -q '"merged"\|"failed"'; then break; fi
+     if [ "$STATUS" = "merged" ] || [ "$STATUS" = "failed" ]; then break; fi
      sleep 10
    done
    ```
