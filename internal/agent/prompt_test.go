@@ -431,6 +431,177 @@ func TestInstallPromptsCrewWithExistingTemplatesDir(t *testing.T) {
 	}
 }
 
+func TestParsePromptFrontmatterWellFormed(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mayor.md")
+	content := `+++
+restart_on_crash = true
+auto_start = true
+nudge_on_start = "Begin your coordination loop."
+command = "claude --dangerously-skip-permissions"
+worktree = false
++++
+# Mayor
+
+You are the mayor.
+`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	meta, body, err := ParsePromptFrontmatter(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !meta.RestartOnCrash {
+		t.Error("expected RestartOnCrash=true")
+	}
+	if !meta.AutoStart {
+		t.Error("expected AutoStart=true")
+	}
+	if meta.Worktree {
+		t.Error("expected Worktree=false")
+	}
+	if meta.NudgeOnStart != "Begin your coordination loop." {
+		t.Errorf("NudgeOnStart=%q", meta.NudgeOnStart)
+	}
+	if meta.Command != "claude --dangerously-skip-permissions" {
+		t.Errorf("Command=%q", meta.Command)
+	}
+	wantBody := "# Mayor\n\nYou are the mayor.\n"
+	if body != wantBody {
+		t.Errorf("body=%q want %q", body, wantBody)
+	}
+}
+
+func TestParsePromptFrontmatterNoFrontmatter(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "plain.md")
+	content := "# Plain Prompt\n\nNo frontmatter here.\n"
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	meta, body, err := ParsePromptFrontmatter(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta == nil {
+		t.Fatal("meta should be non-nil zero value, not nil")
+	}
+	if *meta != (AgentMeta{}) {
+		t.Errorf("expected zero-value meta, got %+v", *meta)
+	}
+	if body != content {
+		t.Errorf("body should equal full file content\ngot:  %q\nwant: %q", body, content)
+	}
+}
+
+func TestParsePromptFrontmatterEmptyBody(t *testing.T) {
+	// Frontmatter present but no body after the closing fence.
+	cases := map[string]string{
+		"trailing newline":    "+++\nauto_start = true\n+++\n",
+		"no trailing newline": "+++\nauto_start = true\n+++",
+	}
+	for name, content := range cases {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "x.md")
+			if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+				t.Fatal(err)
+			}
+			meta, body, err := ParsePromptFrontmatter(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !meta.AutoStart {
+				t.Error("expected AutoStart=true")
+			}
+			if body != "" {
+				t.Errorf("expected empty body, got %q", body)
+			}
+		})
+	}
+}
+
+func TestParsePromptFrontmatterMalformed(t *testing.T) {
+	cases := map[string]string{
+		"missing closing fence":    "+++\nauto_start = true\n# no fence below\n",
+		"unterminated opening":     "+++",
+		"junk after opening fence": "+++ stuff\nauto_start = true\n+++\n",
+		"line missing equals":      "+++\nauto_start true\n+++\n",
+		"empty key":                "+++\n = true\n+++\n",
+		"bad bool":                 "+++\nauto_start = yes\n+++\n",
+		"unquoted string":          "+++\nnudge_on_start = hi\n+++\n",
+		"single-quoted string":     "+++\nnudge_on_start = 'hi'\n+++\n",
+		"unterminated escape":      "+++\nnudge_on_start = \"hi\\\"\n+++\n",
+	}
+	for name, content := range cases {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "bad.md")
+			if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+				t.Fatal(err)
+			}
+			_, _, err := ParsePromptFrontmatter(path)
+			if err == nil {
+				t.Errorf("expected error for malformed frontmatter, got nil")
+			}
+		})
+	}
+}
+
+func TestParsePromptFrontmatterUnknownFieldIgnored(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "x.md")
+	content := `+++
+auto_start = true
+future_field = "ignored"
+# this is a comment
+
+restart_on_crash = true
++++
+body
+`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	meta, body, err := ParsePromptFrontmatter(path)
+	if err != nil {
+		t.Fatalf("unknown fields and comments should be tolerated: %v", err)
+	}
+	if !meta.AutoStart || !meta.RestartOnCrash {
+		t.Errorf("known fields not parsed: %+v", meta)
+	}
+	if body != "body\n" {
+		t.Errorf("body=%q", body)
+	}
+}
+
+func TestParsePromptFrontmatterEscapes(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "x.md")
+	content := "+++\nnudge_on_start = \"line1\\nline2\\t\\\"quoted\\\"\"\n+++\n"
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	meta, _, err := ParsePromptFrontmatter(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "line1\nline2\t\"quoted\""
+	if meta.NudgeOnStart != want {
+		t.Errorf("NudgeOnStart=%q want %q", meta.NudgeOnStart, want)
+	}
+}
+
+func TestParsePromptFrontmatterFileNotFound(t *testing.T) {
+	_, _, err := ParsePromptFrontmatter("/nonexistent/prompt.md")
+	if err == nil {
+		t.Error("expected error for missing file")
+	}
+}
+
 func TestInitPromptDirs(t *testing.T) {
 	origHome := os.Getenv("HOME")
 	tmpHome := t.TempDir()

@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/sha256"
 	"embed"
@@ -260,6 +261,230 @@ func InitPromptDirs() error {
 		}
 	}
 	return nil
+}
+
+// AgentMeta is the structured metadata declared at the top of a prompt file
+// via TOML frontmatter. Zero values mean "use defaults" — the parser returns
+// a zero-value AgentMeta for prompts without frontmatter so existing prompts
+// behave exactly as before.
+//
+// Recognized fields:
+//   - restart_on_crash: pogod restarts the agent if it exits unexpectedly
+//   - auto_start:       pogod starts the agent on daemon boot
+//   - nudge_on_start:   message sent to the agent immediately after spawn
+//   - command:          per-agent override of the agent command template
+//   - worktree:         polecat-style isolated worktree on spawn
+type AgentMeta struct {
+	RestartOnCrash bool   `json:"restart_on_crash,omitempty"`
+	AutoStart      bool   `json:"auto_start,omitempty"`
+	NudgeOnStart   string `json:"nudge_on_start,omitempty"`
+	Command        string `json:"command,omitempty"`
+	Worktree       bool   `json:"worktree,omitempty"`
+}
+
+// frontmatterFence is the delimiter line that opens and closes a TOML
+// frontmatter block at the top of a prompt file (Hugo-style).
+const frontmatterFence = "+++"
+
+// ParsePromptFrontmatter reads the prompt file at path and extracts optional
+// TOML frontmatter delimited by '+++' fences at the very top of the file.
+// It returns the parsed metadata and the remaining body (everything after
+// the closing fence).
+//
+// Files without frontmatter return a zero-value AgentMeta and the full file
+// contents as body, which preserves the behavior of existing prompts.
+func ParsePromptFrontmatter(path string) (*AgentMeta, string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, "", fmt.Errorf("read prompt %s: %w", path, err)
+	}
+	meta, body, err := parsePromptFrontmatterBytes(data)
+	if err != nil {
+		return nil, "", fmt.Errorf("parse frontmatter in %s: %w", path, err)
+	}
+	return meta, body, nil
+}
+
+// parsePromptFrontmatterBytes is the in-memory variant of ParsePromptFrontmatter.
+// Split out so tests can exercise the parser without touching the filesystem.
+func parsePromptFrontmatterBytes(data []byte) (*AgentMeta, string, error) {
+	meta := &AgentMeta{}
+	s := string(data)
+
+	// No fence at offset 0 → no frontmatter, return defaults + full body.
+	if !strings.HasPrefix(s, frontmatterFence) {
+		return meta, s, nil
+	}
+
+	after := s[len(frontmatterFence):]
+	eol := strings.IndexByte(after, '\n')
+	if eol == -1 {
+		return nil, "", fmt.Errorf("opening fence not terminated by newline")
+	}
+	if strings.TrimRight(after[:eol], " \t\r") != "" {
+		return nil, "", fmt.Errorf("unexpected content after opening fence: %q", after[:eol])
+	}
+	rest := after[eol+1:]
+
+	closeIdx := findFenceLine(rest)
+	if closeIdx == -1 {
+		return nil, "", fmt.Errorf("missing closing %q fence", frontmatterFence)
+	}
+
+	fmText := rest[:closeIdx]
+	body := rest[closeIdx:]
+	// Drop the closing fence line itself; whatever follows is the body.
+	if nl := strings.IndexByte(body, '\n'); nl == -1 {
+		body = ""
+	} else {
+		body = body[nl+1:]
+	}
+
+	if err := parseFrontmatterBody(fmText, meta); err != nil {
+		return nil, "", err
+	}
+	return meta, body, nil
+}
+
+// findFenceLine returns the byte offset of the start of the next line whose
+// content (ignoring trailing whitespace) is exactly the frontmatter fence.
+// Returns -1 if no such line exists.
+func findFenceLine(s string) int {
+	i := 0
+	for i <= len(s) {
+		nl := strings.IndexByte(s[i:], '\n')
+		var line string
+		if nl == -1 {
+			line = s[i:]
+		} else {
+			line = s[i : i+nl]
+		}
+		if strings.TrimRight(line, " \t\r") == frontmatterFence {
+			return i
+		}
+		if nl == -1 {
+			return -1
+		}
+		i += nl + 1
+	}
+	return -1
+}
+
+// parseFrontmatterBody parses the TOML key=value lines between the fences.
+// The accepted grammar is intentionally tiny: blank lines, '#' comments, and
+// 'key = value' lines where value is either a bool literal (true|false) or a
+// double-quoted string (with \\, \", \n, \r, \t escapes). Unknown keys are
+// ignored so adding new AgentMeta fields stays backwards compatible.
+func parseFrontmatterBody(text string, meta *AgentMeta) error {
+	scanner := bufio.NewScanner(strings.NewReader(text))
+	lineNo := 0
+	for scanner.Scan() {
+		lineNo++
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		eq := strings.IndexByte(line, '=')
+		if eq == -1 {
+			return fmt.Errorf("line %d: missing '=' in %q", lineNo, line)
+		}
+		key := strings.TrimSpace(line[:eq])
+		val := strings.TrimSpace(line[eq+1:])
+		if key == "" {
+			return fmt.Errorf("line %d: empty key in %q", lineNo, line)
+		}
+		if err := assignMetaField(meta, key, val); err != nil {
+			return fmt.Errorf("line %d: %w", lineNo, err)
+		}
+	}
+	return scanner.Err()
+}
+
+func assignMetaField(meta *AgentMeta, key, raw string) error {
+	switch key {
+	case "restart_on_crash":
+		b, err := parseFrontmatterBool(raw)
+		if err != nil {
+			return fmt.Errorf("%s: %w", key, err)
+		}
+		meta.RestartOnCrash = b
+	case "auto_start":
+		b, err := parseFrontmatterBool(raw)
+		if err != nil {
+			return fmt.Errorf("%s: %w", key, err)
+		}
+		meta.AutoStart = b
+	case "worktree":
+		b, err := parseFrontmatterBool(raw)
+		if err != nil {
+			return fmt.Errorf("%s: %w", key, err)
+		}
+		meta.Worktree = b
+	case "nudge_on_start":
+		s, err := parseFrontmatterString(raw)
+		if err != nil {
+			return fmt.Errorf("%s: %w", key, err)
+		}
+		meta.NudgeOnStart = s
+	case "command":
+		s, err := parseFrontmatterString(raw)
+		if err != nil {
+			return fmt.Errorf("%s: %w", key, err)
+		}
+		meta.Command = s
+	default:
+		// Unknown keys are tolerated — keeps older binaries forward-compatible
+		// with prompt files written for newer schema additions.
+	}
+	return nil
+}
+
+func parseFrontmatterBool(raw string) (bool, error) {
+	switch raw {
+	case "true":
+		return true, nil
+	case "false":
+		return false, nil
+	}
+	return false, fmt.Errorf("expected bool (true|false), got %q", raw)
+}
+
+func parseFrontmatterString(raw string) (string, error) {
+	if len(raw) < 2 || raw[0] != '"' || raw[len(raw)-1] != '"' {
+		return "", fmt.Errorf("expected double-quoted string, got %q", raw)
+	}
+	return unescapeFrontmatterString(raw[1 : len(raw)-1])
+}
+
+func unescapeFrontmatterString(s string) (string, error) {
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c != '\\' {
+			b.WriteByte(c)
+			continue
+		}
+		i++
+		if i >= len(s) {
+			return "", fmt.Errorf("trailing backslash in string")
+		}
+		switch s[i] {
+		case 'n':
+			b.WriteByte('\n')
+		case 't':
+			b.WriteByte('\t')
+		case 'r':
+			b.WriteByte('\r')
+		case '"':
+			b.WriteByte('"')
+		case '\\':
+			b.WriteByte('\\')
+		default:
+			return "", fmt.Errorf("unknown escape sequence: \\%c", s[i])
+		}
+	}
+	return b.String(), nil
 }
 
 // promptHashPrefix is the marker used to embed a content hash in installed prompt files.
