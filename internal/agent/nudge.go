@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"time"
+
+	"github.com/drellem2/pogo/internal/events"
 )
 
 // NudgeMode controls how a nudge message is delivered.
@@ -70,7 +72,11 @@ func (a *Agent) WaitIdle(ctx context.Context, quiescence time.Duration) error {
 // In immediate mode, it writes directly (same as Nudge).
 func (a *Agent) NudgeWithMode(msg string, mode NudgeMode, timeout time.Duration) error {
 	if mode == NudgeImmediate {
-		return a.Nudge(msg)
+		if err := a.Nudge(msg); err != nil {
+			return err
+		}
+		emitNudgeSent(a, msg, "immediate")
+		return nil
 	}
 
 	// Wait-idle mode: wait for quiescence, then deliver
@@ -81,5 +87,26 @@ func (a *Agent) NudgeWithMode(msg string, mode NudgeMode, timeout time.Duration)
 		return fmt.Errorf("wait for idle: %w", err)
 	}
 
-	return a.Nudge(msg)
+	if err := a.Nudge(msg); err != nil {
+		return err
+	}
+	emitNudgeSent(a, msg, "idle")
+	return nil
+}
+
+// emitNudgeSent records a nudge_sent event for a successful PTY delivery.
+// Sender is "pogod" — the process actually writing the bytes — since the
+// originating agent identity isn't plumbed through this call site in v1.
+// Best-effort: events.Emit never propagates errors.
+func emitNudgeSent(a *Agent, msg, mode string) {
+	events.Emit(context.Background(), events.Event{
+		EventType: "nudge_sent",
+		Agent:     "pogod",
+		Details: map[string]any{
+			"to":       a.eventAgent(),
+			"message":  msg,
+			"delivery": "pty",
+			"mode":     mode,
+		},
+	})
 }

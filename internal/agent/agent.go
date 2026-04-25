@@ -7,6 +7,7 @@
 package agent
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -19,6 +20,8 @@ import (
 	"time"
 
 	"github.com/creack/pty"
+
+	"github.com/drellem2/pogo/internal/events"
 )
 
 // AgentType distinguishes long-running crew agents from ephemeral polecats.
@@ -94,6 +97,11 @@ type Agent struct {
 	// exitErr holds the process exit error (nil on clean exit).
 	exitErr error
 
+	// stopRequested is set by Stop before signaling so waitAndHandle can
+	// classify a non-zero exit as agent_stopped (reason="requested") rather
+	// than agent_crashed.
+	stopRequested bool
+
 	mu sync.Mutex
 }
 
@@ -102,6 +110,35 @@ func (a *Agent) GetStatus() AgentStatus {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.Status
+}
+
+// eventAgent returns the agent identity string used in event log envelopes.
+// Mirrors the identity convention from docs/event-log.md: crew-<name> or cat-<name>.
+func (a *Agent) eventAgent() string {
+	if a.Type == TypeCrew {
+		return "crew-" + a.Name
+	}
+	return "cat-" + a.Name
+}
+
+// emitSpawned records an agent_spawned event for both fresh spawns and respawns.
+func (a *Agent) emitSpawned() {
+	details := map[string]any{
+		"agent_type": string(a.Type),
+		"pid":        a.PID,
+	}
+	if a.PromptFile != "" {
+		details["prompt_file"] = a.PromptFile
+	}
+	if a.WorktreeDir != "" {
+		details["worktree"] = a.WorktreeDir
+	}
+	events.Emit(context.Background(), events.Event{
+		EventType: "agent_spawned",
+		Agent:     a.eventAgent(),
+		Repo:      a.SourceRepo,
+		Details:   details,
+	})
 }
 
 // AgentCommandConfig provides the command template for a given agent type.
@@ -270,6 +307,8 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 	r.agents[req.Name] = a
 	log.Printf("agent %s: spawned pid=%d type=%s proc=%s", req.Name, a.PID, req.Type, procName)
 
+	a.emitSpawned()
+
 	// Run post-spawn hook (e.g. trust dialog dismissal) if configured.
 	if r.postSpawnHook != nil {
 		go r.postSpawnHook(a)
@@ -341,6 +380,11 @@ func (r *Registry) Stop(name string, timeout time.Duration) error {
 	case <-agent.done:
 		// Already exited, skip signal/wait
 	default:
+		// Mark before signaling so waitAndHandle classifies the exit as
+		// requested (agent_stopped) rather than a crash.
+		agent.mu.Lock()
+		agent.stopRequested = true
+		agent.mu.Unlock()
 		// Send SIGTERM via the process
 		if err := agent.cmd.Process.Signal(os.Interrupt); err != nil {
 			// Process may have exited between check and signal — that's OK
@@ -450,6 +494,18 @@ func (r *Registry) Respawn(name string) (*Agent, error) {
 	r.agents[name] = a
 	log.Printf("agent %s: respawned pid=%d restart=%d", name, a.PID, restartCount)
 
+	a.emitSpawned()
+	events.Emit(context.Background(), events.Event{
+		EventType: "agent_restarted",
+		Agent:     a.eventAgent(),
+		Repo:      a.SourceRepo,
+		Details: map[string]any{
+			"previous_pid":  old.PID,
+			"new_pid":       a.PID,
+			"restart_count": restartCount,
+		},
+	})
+
 	// Re-send initial nudge on respawn to bypass the CLI interactive prompt.
 	if a.InitialNudge != "" {
 		go func() {
@@ -551,9 +607,14 @@ func (r *Registry) waitAndHandle(a *Agent) {
 			a.ExitCode = exitErr.ExitCode()
 		}
 	}
+	stopRequested := a.stopRequested
+	exitCode := a.ExitCode
+	duration := a.ExitTime.Sub(a.StartTime).Seconds()
 	a.mu.Unlock()
 
 	log.Printf("agent %s: exited (err=%v)", a.Name, a.exitErr)
+
+	a.emitExit(stopRequested, exitCode, duration)
 
 	// Fire onExit callback BEFORE closing done, so that callers waiting on
 	// Done() (e.g. Stop/StopAll during shutdown) block until cleanup
@@ -567,6 +628,42 @@ func (r *Registry) waitAndHandle(a *Agent) {
 	}
 
 	close(a.done)
+}
+
+// emitExit records either agent_stopped (clean / requested exit) or
+// agent_crashed (unexpected exit). Best-effort: errors never propagate.
+func (a *Agent) emitExit(stopRequested bool, exitCode int, durationSeconds float64) {
+	if stopRequested || exitCode == 0 {
+		reason := "task_complete"
+		if stopRequested {
+			reason = "requested"
+		}
+		events.Emit(context.Background(), events.Event{
+			EventType: "agent_stopped",
+			Agent:     a.eventAgent(),
+			Repo:      a.SourceRepo,
+			Details: map[string]any{
+				"pid":              a.PID,
+				"exit_code":        exitCode,
+				"reason":           reason,
+				"duration_seconds": durationSeconds,
+			},
+		})
+		return
+	}
+	details := map[string]any{
+		"pid":       a.PID,
+		"exit_code": exitCode,
+	}
+	if last := a.outputBuf.Last(512); len(last) > 0 {
+		details["last_output"] = string(last)
+	}
+	events.Emit(context.Background(), events.Event{
+		EventType: "agent_crashed",
+		Agent:     a.eventAgent(),
+		Repo:      a.SourceRepo,
+		Details:   details,
+	})
 }
 
 // Cleanup closes PTY and socket. Exported for use by lifecycle callbacks.
