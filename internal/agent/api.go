@@ -504,9 +504,26 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		return
 	}
 
+	// Frontmatter on the template controls spawn-time behavior (worktree
+	// creation, initial nudge). Defaults preserve the legacy hardcoded
+	// behavior so templates without frontmatter are unaffected.
+	tmplMeta, _, err := ParsePromptFrontmatter(tmplPath)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("template frontmatter parse failed: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Decide whether this polecat gets an isolated git worktree. Default:
+	// create one when a Repo is supplied. A template can opt out by setting
+	// `worktree = false` in its frontmatter.
+	createWorktree := spawnReq.Repo != ""
+	if tmplMeta.HasField("worktree") {
+		createWorktree = tmplMeta.Worktree && spawnReq.Repo != ""
+	}
+
 	// Compute worktree path before template expansion so it can be included in the prompt.
 	var worktreeDir, sourceRepo string
-	if spawnReq.Repo != "" {
+	if createWorktree {
 		home, _ := os.UserHomeDir()
 		worktreeDir = filepath.Join(home, ".pogo", "polecats", spawnReq.Name)
 	}
@@ -530,7 +547,7 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 	env := append(spawnReq.Env, "POGO_ROLE=polecat")
 
 	// Create git worktree for polecat isolation
-	if spawnReq.Repo != "" {
+	if createWorktree {
 		sourceRepo = spawnReq.Repo
 		branchName := "polecat-" + spawnReq.Name
 
@@ -582,9 +599,14 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		return
 	}
 
-	// Build the initial nudge message for the polecat.
-	nudgeMsg := "Look at the system prompt and complete the steps for this work item: " + spawnReq.Id
-	if spawnReq.Id == "" {
+	// Build the initial nudge message for the polecat. A template can override
+	// the default by declaring `nudge_on_start = "..."` in its frontmatter.
+	var nudgeMsg string
+	if tmplMeta.NudgeOnStart != "" {
+		nudgeMsg = tmplMeta.NudgeOnStart
+	} else if spawnReq.Id != "" {
+		nudgeMsg = "Look at the system prompt and complete the steps for this work item: " + spawnReq.Id
+	} else {
 		nudgeMsg = "You are now running. Begin your assigned task."
 	}
 
