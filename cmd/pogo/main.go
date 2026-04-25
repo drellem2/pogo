@@ -1389,6 +1389,41 @@ Example:
 	cmdRefinerySubmit.Flags().StringVar(&submitTarget, "target", "main", "Target ref to merge into")
 	cmdRefinerySubmit.Flags().StringVar(&submitAuthor, "author", "", "Author agent name")
 
+	var cmdRefineryStatus = &cobra.Command{
+		Use:   "status",
+		Short: "Show refinery summary (enabled, running, queue/history counts)",
+		Long: `Print a summary of the refinery state — whether it's enabled and
+running, the configured poll interval, and the size of the queue and history.
+
+Use this for a quick health check of the refinery. For per-MR details use
+'pogo refinery show <id>', and for full lists use 'pogo refinery queue' or
+'pogo refinery history'.`,
+		Args: cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			status, err := client.GetRefineryStatus()
+			if err != nil {
+				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+			}
+			if jsonOutput {
+				cli.PrintJSON(status)
+			} else {
+				state := "stopped"
+				if status.Running {
+					state = "running"
+				}
+				if !status.Enabled {
+					state = "disabled"
+				}
+				fmt.Printf("Status:  %s\n", state)
+				fmt.Printf("Enabled: %t\n", status.Enabled)
+				fmt.Printf("Running: %t\n", status.Running)
+				fmt.Printf("Poll:    %s\n", status.PollInterval)
+				fmt.Printf("Queue:   %d\n", status.QueueLen)
+				fmt.Printf("History: %d\n", status.HistoryLen)
+			}
+		},
+	}
+
 	var cmdRefineryQueue = &cobra.Command{
 		Use:   "queue",
 		Short: "Show pending merge requests",
@@ -1534,6 +1569,7 @@ Example:
 	}
 
 	cmdRefinery.AddCommand(cmdRefinerySubmit)
+	cmdRefinery.AddCommand(cmdRefineryStatus)
 	cmdRefinery.AddCommand(cmdRefineryQueue)
 	cmdRefinery.AddCommand(cmdRefineryHistory)
 	cmdRefinery.AddCommand(cmdRefineryShow)
