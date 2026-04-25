@@ -2,7 +2,9 @@
 
 File a task, walk away, come back to merged code on `main`.
 
-Pogo is a UNIX-native agent orchestrator. It coordinates multiple AI agents working on your codebase — spawning them, supervising them, and merging their work. Agents are plain UNIX processes: find them with `ps`, signal them with `kill`, attach to their terminals with `pogo agent attach`. Coordination happens through the filesystem via [macguffin](https://github.com/drellem2/macguffin).
+Pogo is a UNIX-native agent orchestrator. It spawns AI agents, supervises them, and routes their output through whatever pipeline you wire up. Agents are plain UNIX processes: find them with `ps`, signal them with `kill`, attach to their terminals with `pogo agent attach`. Coordination happens through the filesystem via [macguffin](https://github.com/drellem2/macguffin).
+
+The default profile is coding-shaped — a **mayor** that dispatches work, **polecats** that implement it on feature branches, and a **refinery** that runs your gates and merges to `main`. The pieces underneath are general: swap the prompts, set `[refinery] enabled = false`, and the same orchestrator drives research notes, content generation, or any other queue-shaped workflow. See [docs/customizing.md](docs/customizing.md) for the walkthrough and [docs/examples/research-triage/](docs/examples/research-triage/) for a non-coding example end-to-end.
 
 ## The loop
 
