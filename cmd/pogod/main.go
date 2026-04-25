@@ -360,6 +360,11 @@ func registerHandlers() {
 	agentRegistry.RegisterHandlers(orchestrated)
 	if mergeQueue != nil {
 		mergeQueue.RegisterHandlers(orchestrated)
+	} else {
+		// Refinery is disabled via config — register stub handlers so
+		// /refinery/* endpoints return a clear "disabled" error instead
+		// of a confusing 404.
+		refinery.RegisterDisabledHandlers(orchestrated)
 	}
 	if srv != nil {
 		http.Handle("/agents/", srv.RequireOrchestration(orchestrated))

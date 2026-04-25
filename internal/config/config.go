@@ -96,6 +96,14 @@ type RefineryConfig struct {
 	PollInterval time.Duration
 }
 
+// parsedConfig is the intermediate result of reading config.toml.
+// It tracks which fields were explicitly set so Load() can distinguish
+// "unset" from "set to a zero value" (e.g. enabled = false).
+type parsedConfig struct {
+	Config
+	refineryEnabledSet bool
+}
+
 // Load reads configuration from (in priority order):
 //  1. POGO_PORT environment variable
 //  2. ~/.config/pogo/config.toml [server] port field
@@ -123,6 +131,12 @@ func Load() *Config {
 			cfg.MaxWatchers = fileCfg.MaxWatchers
 		}
 		cfg.Agents = fileCfg.Agents
+		if fileCfg.refineryEnabledSet {
+			cfg.Refinery.Enabled = fileCfg.Refinery.Enabled
+		}
+		if fileCfg.Refinery.PollInterval > 0 {
+			cfg.Refinery.PollInterval = fileCfg.Refinery.PollInterval
+		}
 	}
 
 	// Environment variables override config file
@@ -181,7 +195,7 @@ func ConfigFilePath() string {
 
 // loadConfigFile reads port from the TOML config file.
 // Only parses the minimal subset needed: [server] section with port key.
-func loadConfigFile() (*Config, error) {
+func loadConfigFile() (*parsedConfig, error) {
 	path := ConfigFilePath()
 	if path == "" {
 		return nil, fmt.Errorf("no config path")
@@ -193,7 +207,7 @@ func loadConfigFile() (*Config, error) {
 	}
 	defer f.Close()
 
-	cfg := &Config{}
+	cfg := &parsedConfig{}
 	currentSection := ""
 	scanner := bufio.NewScanner(f)
 
@@ -235,6 +249,7 @@ func loadConfigFile() (*Config, error) {
 			switch key {
 			case "enabled":
 				cfg.Refinery.Enabled = val == "true"
+				cfg.refineryEnabledSet = true
 			case "poll_interval":
 				val = strings.Trim(val, "\"")
 				if d, err := time.ParseDuration(val); err == nil {

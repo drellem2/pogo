@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/drellem2/pogo/internal/refinery"
 )
@@ -106,6 +107,8 @@ func CancelMerge(id string) error {
 }
 
 // SubmitMerge submits a branch to the refinery merge queue.
+// Returns a wrapped error containing refinery.DisabledMessage when the
+// daemon has refinery disabled in config.
 func SubmitMerge(req refinery.SubmitRequest) (string, error) {
 	body, err := json.Marshal(req)
 	if err != nil {
@@ -118,7 +121,7 @@ func SubmitMerge(req refinery.SubmitRequest) (string, error) {
 	defer r.Body.Close()
 	if r.StatusCode != http.StatusCreated {
 		msg, _ := io.ReadAll(r.Body)
-		return "", fmt.Errorf("submit failed: %s", string(msg))
+		return "", fmt.Errorf("submit failed: %s", strings.TrimSpace(string(msg)))
 	}
 	var result map[string]string
 	if err := json.NewDecoder(r.Body).Decode(&result); err != nil {
