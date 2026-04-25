@@ -600,56 +600,6 @@ func main() {
 		}
 	}
 
-	// Start agent cron: periodically nudge crew agents to check mail
-	// and run their coordination loops.
-	cronCtx, cronCancel := context.WithCancel(context.Background())
-	defer cronCancel()
-	go startAgentCron(cronCtx, agentRegistry)
-
 	// Serve HTTP (blocks until shutdown)
 	log.Fatal(http.Serve(ln, nil))
-}
-
-// startAgentCron runs a ticker that nudges crew agents every 60 seconds.
-// The mayor gets a coordination loop prompt; other crew agents get a mail-check prompt.
-func startAgentCron(ctx context.Context, registry *agent.Registry) {
-	ticker := time.NewTicker(60 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			nudgeCrewAgents(registry)
-		}
-	}
-}
-
-// nudgeCrewAgents iterates running crew agents and nudges them.
-func nudgeCrewAgents(registry *agent.Registry) {
-	agents := registry.List()
-	for _, a := range agents {
-		if a.Type != agent.TypeCrew {
-			continue
-		}
-		if a.GetStatus() != agent.StatusRunning {
-			continue
-		}
-
-		var msg string
-		if a.Name == "mayor" {
-			msg = "Cron: run your coordination loop. Check for available work, monitor agents, read mail."
-		} else {
-			msg = fmt.Sprintf("Cron: check your mail with `mg mail list %s` and handle any messages.", a.Name)
-		}
-
-		go func(a *agent.Agent, msg string) {
-			if err := a.NudgeWithMode(msg, agent.NudgeWaitIdle, 30*time.Second); err != nil {
-				log.Printf("agent-cron: failed to nudge %s: %v", a.Name, err)
-			} else {
-				log.Printf("agent-cron: nudged %s", a.Name)
-			}
-		}(a, msg)
-	}
 }
