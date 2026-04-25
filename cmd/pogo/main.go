@@ -913,6 +913,56 @@ If the agent is not running, falls back to sending the message via gt mail.`,
 	cmdNudge.Flags().BoolVarP(&nudgeImmediate, "immediate", "i", false, "Write directly to PTY without waiting for idle")
 	cmdNudge.Flags().IntVarP(&nudgeTimeout, "timeout", "T", 30, "Seconds to wait for agent idle (wait-idle mode)")
 
+	var initForce bool
+	var initMinimal bool
+	var cmdInit = &cobra.Command{
+		Use:   "init",
+		Short: "Scaffold ~/.pogo/agents/ with the default coding profile",
+		Long: `Scaffold ~/.pogo/agents/ with prompt files for a fresh workspace.
+
+By default, copies the shipped coding-profile prompts (mayor + crew agents +
+polecat templates) into ~/.pogo/agents/. If any target file already exists,
+the command refuses to overwrite — pass --force to override.
+
+Use --minimal to scaffold only an empty mayor prompt and a polecat template
+skeleton, suitable for non-coding workflows.
+
+This command does not start the daemon or initialize macguffin — for that, use
+'pogo install' instead. 'pogo init' is intentionally narrow: it is safe to run
+on a clean machine to lay down agent files, and it is safe to fail-fast on a
+machine that already has prompts so existing customizations are not silently
+overwritten.`,
+		Args: cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			result, err := agent.InitPrompts(initForce, initMinimal)
+			if err != nil {
+				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+			}
+			if jsonOutput {
+				cli.PrintJSON(result)
+				return
+			}
+			fmt.Printf("Scaffolded %s (%s profile):\n", agent.PromptDir(), result.Mode)
+			for _, f := range result.Created {
+				fmt.Printf("  created: %s\n", f)
+			}
+			if len(result.Created) == 0 {
+				fmt.Println("  (no files created)")
+			}
+			if result.Mode == "minimal" {
+				fmt.Println("\nMinimal profile installed. Edit the files to define your workflow:")
+				fmt.Printf("  %s/mayor.md\n", agent.PromptDir())
+				fmt.Printf("  %s/templates/polecat.md\n", agent.PromptDir())
+			} else {
+				fmt.Println("\nReady. Next steps:")
+				fmt.Println("  pogo server start          # Start the pogo daemon")
+				fmt.Println("  pogo agent start mayor     # Start the coordinator")
+			}
+		},
+	}
+	cmdInit.Flags().BoolVar(&initForce, "force", false, "Overwrite existing prompt files")
+	cmdInit.Flags().BoolVar(&initMinimal, "minimal", false, "Scaffold only an empty mayor and polecat template skeleton")
+
 	var installForceFlag bool
 	var cmdInstall = &cobra.Command{
 		Use:   "install",
@@ -1305,6 +1355,7 @@ The path is resolved to an absolute path and the git root is discovered automati
 	rootCmd.PersistentFlags().BoolVar(&jsonOutput, "json", false, "Output in JSON format")
 
 	rootCmd.AddCommand(cmdVersion)
+	rootCmd.AddCommand(cmdInit)
 	rootCmd.AddCommand(cmdInstall)
 	rootCmd.AddCommand(cmdVisit)
 	cmdStatus.Flags().BoolVar(&statusLive, "live", false, "Continuously refresh the dashboard (like watch)")

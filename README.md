@@ -50,7 +50,9 @@ This starts the daemon, initializes macguffin, and installs default agent prompt
     └── polecat.md     # Ephemeral worker template
 ```
 
-Run `pogo install` again any time — it's idempotent. Existing prompt files are preserved unless you pass `--force`. (A higher-level `pogo init` command for one-shot project bootstrap is planned.)
+Run `pogo install` again any time — it's idempotent. Existing prompt files are preserved unless you pass `--force`.
+
+If you only want to scaffold the agent prompts (without starting the daemon or initializing macguffin), use `pogo init`. It refuses to overwrite existing prompts unless you pass `--force`. Pass `--minimal` to scaffold only an empty mayor and polecat skeleton — useful for non-coding workflows where you'll customize the prompts yourself.
 
 **Prerequisites:** [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI must be installed. The install script handles [macguffin](https://github.com/drellem2/macguffin) automatically; pass `--interactive` to configure shell and editor integrations.
 

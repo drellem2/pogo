@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"text/template"
 )
@@ -635,6 +636,194 @@ type InstallResult struct {
 	Installed []string `json:"installed"`         // files written (new)
 	Updated   []string `json:"updated,omitempty"` // files updated (stale)
 	Skipped   []string `json:"skipped"`           // files already up-to-date
+}
+
+// minimalMayorPrompt is the empty mayor skeleton written by `pogo init --minimal`.
+// It includes frontmatter (auto_start, restart_on_crash) so pogod treats it like
+// the full mayor, but leaves the role definition for the user to fill in.
+const minimalMayorPrompt = `+++
+auto_start = true
+restart_on_crash = true
+nudge_on_start = "You are now running. Begin your coordination loop."
++++
+
+# Mayor
+
+You are the mayor — the coordinator for this pogo workspace. You are a crew agent, which means you run persistently and pogod restarts you if you crash.
+
+This is a minimal scaffold. Edit this file to describe how you should coordinate work for your specific workflow. ` + "`pogo init`" + ` (without ` + "`--minimal`" + `) installs a coding-oriented mayor prompt that you can use as a reference.
+
+## Your Tools
+
+` + "```bash" + `
+# Work items
+mg list --status=available     # Unassigned work ready to claim
+mg show <id>                   # Full details on a work item
+
+# Agent management
+pogo agent list                # Running agents (crew + polecats)
+pogo agent spawn-polecat <name> --task="<title>" --body="<details>" --id="<id>" --repo="<repo>"
+pogo nudge <name> "<message>"  # Wake up an agent
+
+# Mail
+mg mail list mayor             # Check your inbox
+mg mail send <agent> --from=mayor --subject="<subj>" --body="<body>"
+` + "```" + `
+
+## Identity
+
+Your agent name is ` + "`mayor`" + `. Your prompt file lives at ` + "`~/.pogo/agents/mayor.md`" + `. Edit it to define your coordination strategy.
+`
+
+// minimalPolecatTemplate is the polecat skeleton written by `pogo init --minimal`.
+// It exposes the standard template variables and a basic claim/done protocol,
+// leaving the actual task workflow open for the user to customize.
+const minimalPolecatTemplate = `+++
+worktree = true
+nudge_on_start = "Look at the system prompt and complete the steps for this work item: {{.Id}}"
++++
+
+# Polecat
+
+You are an ephemeral polecat agent. You exist to complete a single task. **Never exit on your own** — the mayor will stop you when your work is verified.
+
+## Your Assignment
+
+**Task:** {{.Task}}
+
+**Work Item ID:** {{.Id}}
+
+**Repository:** {{.Repo}}
+
+**Working Directory:** {{.WorktreeDir}}
+
+### Details
+
+{{.Body}}
+
+## Protocol
+
+1. **Claim the work item:**
+   ` + "```bash" + `
+   mg claim {{.Id}}
+   ` + "```" + `
+
+2. **Do the work** in ` + "`{{.WorktreeDir}}`" + `. Customize this template for your workflow — the default coding profile from ` + "`pogo init`" + ` adds branching, refinery submission, and merge polling.
+
+3. **Mark the work done:**
+   ` + "```bash" + `
+   mg done {{.Id}}
+   ` + "```" + `
+
+4. **Stay alive.** Wait for the mayor to stop you. If the mayor sends a message, act on it immediately.
+
+## Identity
+
+Your agent name is derived from the work item. Your process name follows the pattern ` + "`pogo-cat-<name>`" + `.
+`
+
+// InitResult describes what happened during prompt initialization.
+type InitResult struct {
+	Created []string `json:"created"`           // files newly written
+	Skipped []string `json:"skipped,omitempty"` // files already present (force=false; not used when refusal is strict)
+	Mode    string   `json:"mode"`              // "default" or "minimal"
+}
+
+// InitPrompts scaffolds ~/.pogo/agents/ with prompt files for a fresh workspace.
+//
+// Unlike InstallPrompts (which auto-updates stale files), InitPrompts is strict:
+// if any target file already exists, it returns an error without writing
+// anything, unless force is true.
+//
+// When minimal is true, only a mayor skeleton and a polecat template skeleton
+// are written — suitable for non-coding workflows. Otherwise the full
+// coding-profile prompts shipped with the binary (mayor + crew/doctor + polecat
+// + polecat-qa) are written.
+func InitPrompts(force, minimal bool) (*InitResult, error) {
+	if err := InitPromptDirs(); err != nil {
+		return nil, err
+	}
+
+	destRoot := PromptDir()
+
+	// Build the file plan: rel-path -> content (raw, unstamped).
+	plan, err := initPromptPlan(minimal)
+	if err != nil {
+		return nil, err
+	}
+
+	// Strict pre-check: if any planned file exists and !force, refuse the whole
+	// operation so we never end up partially overwritten.
+	if !force {
+		var existing []string
+		for rel := range plan {
+			destPath := filepath.Join(destRoot, rel)
+			if _, statErr := os.Stat(destPath); statErr == nil {
+				existing = append(existing, rel)
+			}
+		}
+		if len(existing) > 0 {
+			return nil, fmt.Errorf("refusing to overwrite existing prompt(s): %s (use --force to override)", strings.Join(existing, ", "))
+		}
+	}
+
+	result := &InitResult{Mode: "default"}
+	if minimal {
+		result.Mode = "minimal"
+	}
+
+	// Sort for stable output ordering.
+	rels := make([]string, 0, len(plan))
+	for rel := range plan {
+		rels = append(rels, rel)
+	}
+	sort.Strings(rels)
+
+	for _, rel := range rels {
+		destPath := filepath.Join(destRoot, rel)
+		if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
+			return result, fmt.Errorf("create dir for %s: %w", rel, err)
+		}
+		if err := os.WriteFile(destPath, stampedContent(plan[rel]), 0644); err != nil {
+			return result, fmt.Errorf("write %s: %w", destPath, err)
+		}
+		result.Created = append(result.Created, rel)
+	}
+
+	return result, nil
+}
+
+// initPromptPlan returns the rel-path -> raw content map for InitPrompts.
+// In default mode this is every file under the embedded prompts/ tree; in
+// minimal mode it is just the mayor and polecat template skeletons.
+func initPromptPlan(minimal bool) (map[string][]byte, error) {
+	if minimal {
+		return map[string][]byte{
+			"mayor.md":                               []byte(minimalMayorPrompt),
+			filepath.Join("templates", "polecat.md"): []byte(minimalPolecatTemplate),
+		}, nil
+	}
+
+	plan := map[string][]byte{}
+	err := fs.WalkDir(defaultPrompts, "prompts", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		rel, _ := filepath.Rel("prompts", path)
+		data, readErr := defaultPrompts.ReadFile(path)
+		if readErr != nil {
+			return fmt.Errorf("read embedded %s: %w", path, readErr)
+		}
+		plan[rel] = data
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return plan, nil
 }
 
 // InstallPrompts copies the default prompt files embedded in the binary to

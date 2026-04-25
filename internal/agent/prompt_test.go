@@ -904,6 +904,200 @@ func TestResolveRestartOnCrash(t *testing.T) {
 	}
 }
 
+func TestInitPromptsDefault(t *testing.T) {
+	origHome := os.Getenv("HOME")
+	tmpHome := t.TempDir()
+	os.Setenv("HOME", tmpHome)
+	defer os.Setenv("HOME", origHome)
+
+	result, err := InitPrompts(false, false)
+	if err != nil {
+		t.Fatalf("InitPrompts failed on clean dir: %v", err)
+	}
+	if result.Mode != "default" {
+		t.Errorf("expected mode=default, got %q", result.Mode)
+	}
+	if len(result.Created) == 0 {
+		t.Fatal("expected files to be created")
+	}
+
+	// Verify the shipped coding profile is present on disk.
+	for _, rel := range []string{
+		"mayor.md",
+		filepath.Join("crew", "doctor.md"),
+		filepath.Join("templates", "polecat.md"),
+		filepath.Join("templates", "polecat-qa.md"),
+	} {
+		path := filepath.Join(tmpHome, ".pogo", "agents", rel)
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("expected %s to exist: %v", rel, err)
+		}
+	}
+
+	// Each file should be hash-stamped so it interoperates with InstallPrompts.
+	mayorPath := filepath.Join(tmpHome, ".pogo", "agents", "mayor.md")
+	data, err := os.ReadFile(mayorPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(data), promptHashPrefix) {
+		t.Errorf("expected mayor.md to be hash-stamped, got first line: %q", strings.SplitN(string(data), "\n", 2)[0])
+	}
+}
+
+func TestInitPromptsRefusesExistingFiles(t *testing.T) {
+	origHome := os.Getenv("HOME")
+	tmpHome := t.TempDir()
+	os.Setenv("HOME", tmpHome)
+	defer os.Setenv("HOME", origHome)
+
+	// First init succeeds.
+	if _, err := InitPrompts(false, false); err != nil {
+		t.Fatalf("first init failed: %v", err)
+	}
+
+	// Second init must refuse and not error halfway through.
+	_, err := InitPrompts(false, false)
+	if err == nil {
+		t.Fatal("expected second init to refuse existing files")
+	}
+	if !strings.Contains(err.Error(), "refusing to overwrite") {
+		t.Errorf("expected 'refusing to overwrite' in error, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "--force") {
+		t.Errorf("expected error to mention --force, got: %v", err)
+	}
+}
+
+func TestInitPromptsForceOverwrites(t *testing.T) {
+	origHome := os.Getenv("HOME")
+	tmpHome := t.TempDir()
+	os.Setenv("HOME", tmpHome)
+	defer os.Setenv("HOME", origHome)
+
+	// Pre-populate with a customized mayor.
+	agentsDir := filepath.Join(tmpHome, ".pogo", "agents")
+	os.MkdirAll(agentsDir, 0755)
+	customMayor := []byte("# my customized mayor\n")
+	mayorPath := filepath.Join(agentsDir, "mayor.md")
+	if err := os.WriteFile(mayorPath, customMayor, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Without --force: refuse.
+	if _, err := InitPrompts(false, false); err == nil {
+		t.Fatal("expected refusal when mayor.md exists")
+	}
+
+	// Verify the user file was untouched.
+	got, err := os.ReadFile(mayorPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(customMayor) {
+		t.Errorf("user mayor.md was modified despite refusal: %q", got)
+	}
+
+	// With --force: overwrite.
+	result, err := InitPrompts(true, false)
+	if err != nil {
+		t.Fatalf("force init failed: %v", err)
+	}
+	if len(result.Created) == 0 {
+		t.Error("expected files in Created with force=true")
+	}
+
+	got2, err := os.ReadFile(mayorPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got2) == string(customMayor) {
+		t.Error("--force did not overwrite mayor.md")
+	}
+}
+
+func TestInitPromptsMinimal(t *testing.T) {
+	origHome := os.Getenv("HOME")
+	tmpHome := t.TempDir()
+	os.Setenv("HOME", tmpHome)
+	defer os.Setenv("HOME", origHome)
+
+	result, err := InitPrompts(false, true)
+	if err != nil {
+		t.Fatalf("InitPrompts(minimal) failed: %v", err)
+	}
+	if result.Mode != "minimal" {
+		t.Errorf("expected mode=minimal, got %q", result.Mode)
+	}
+	if len(result.Created) != 2 {
+		t.Errorf("minimal should create exactly 2 files, got %d: %v", len(result.Created), result.Created)
+	}
+
+	agentsDir := filepath.Join(tmpHome, ".pogo", "agents")
+
+	// Mayor and polecat must exist.
+	for _, rel := range []string{"mayor.md", filepath.Join("templates", "polecat.md")} {
+		if _, err := os.Stat(filepath.Join(agentsDir, rel)); err != nil {
+			t.Errorf("expected minimal scaffold to include %s: %v", rel, err)
+		}
+	}
+
+	// Coding-profile-only files must NOT be present.
+	for _, rel := range []string{
+		filepath.Join("crew", "doctor.md"),
+		filepath.Join("templates", "polecat-qa.md"),
+	} {
+		if _, err := os.Stat(filepath.Join(agentsDir, rel)); err == nil {
+			t.Errorf("minimal scaffold should NOT include %s", rel)
+		}
+	}
+
+	// Minimal mayor must contain the {{.Id}} placeholder in the polecat skeleton
+	// so template expansion still works.
+	polecatData, err := os.ReadFile(filepath.Join(agentsDir, "templates", "polecat.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(polecatData), "{{.Id}}") {
+		t.Error("minimal polecat template should expose {{.Id}} for template expansion")
+	}
+}
+
+func TestInitPromptsRefusalIsAtomic(t *testing.T) {
+	// If only one of the planned files exists, the whole operation should still
+	// refuse — no partial writes that would create a half-installed profile.
+	origHome := os.Getenv("HOME")
+	tmpHome := t.TempDir()
+	os.Setenv("HOME", tmpHome)
+	defer os.Setenv("HOME", origHome)
+
+	agentsDir := filepath.Join(tmpHome, ".pogo", "agents")
+	os.MkdirAll(filepath.Join(agentsDir, "templates"), 0755)
+	// Pre-populate one file only.
+	preExisting := []byte("# user-managed polecat template\n")
+	polecatPath := filepath.Join(agentsDir, "templates", "polecat.md")
+	if err := os.WriteFile(polecatPath, preExisting, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := InitPrompts(false, false); err == nil {
+		t.Fatal("expected refusal when any planned file exists")
+	}
+
+	// Mayor must NOT have been written, since the operation aborted.
+	if _, err := os.Stat(filepath.Join(agentsDir, "mayor.md")); err == nil {
+		t.Error("mayor.md should not have been written during a refused init")
+	}
+	// And the user's polecat template must be untouched.
+	got, err := os.ReadFile(polecatPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(preExisting) {
+		t.Errorf("user polecat.md was modified: %q", got)
+	}
+}
+
 func TestInitPromptDirs(t *testing.T) {
 	origHome := os.Getenv("HOME")
 	tmpHome := t.TempDir()
