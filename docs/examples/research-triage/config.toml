@@ -1,0 +1,17 @@
+# Research triage — pogo daemon config.
+#
+# Drop this file at ~/.config/pogo/config.toml (or $XDG_CONFIG_HOME/pogo/config.toml).
+# Restart pogod to pick up changes: `pogo server stop && pogo server start`.
+
+[server]
+port = 10000
+bind = "127.0.0.1"
+
+# Refinery is the merge-queue loop pogod runs by default. It only makes sense
+# if your polecats produce git branches that need to land on main. This
+# workflow writes markdown notes — no branches, no merges — so we turn it off.
+#
+# With this set, pogod skips refinery startup entirely and `pogo refinery
+# submit` returns a clear 503 instead of silently queuing nothing.
+[refinery]
+enabled = false
