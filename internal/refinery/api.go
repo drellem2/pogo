@@ -14,15 +14,40 @@ type SubmitRequest struct {
 	Author    string `json:"author,omitempty"`
 }
 
-// RegisterHandlers registers refinery API endpoints on the given mux.
+// RegisterHandlers registers refinery API endpoints on the given mux,
+// bound to this Refinery instance. Prefer RegisterHandlersFunc when the
+// underlying *Refinery may be replaced after registration (e.g. when
+// orchestration is restarted via SetRefineryStarter).
 func (r *Refinery) RegisterHandlers(mux *http.ServeMux) {
-	mux.HandleFunc("/refinery/status", r.handleStatus)
-	mux.HandleFunc("/refinery/queue", r.handleQueue)
-	mux.HandleFunc("/refinery/history", r.handleHistory)
-	mux.HandleFunc("/refinery/submit", r.handleSubmit)
-	mux.HandleFunc("/refinery/mr/{id}", r.handleMR)
-	mux.HandleFunc("/refinery/cancel", r.handleCancel)
-	mux.HandleFunc("/refinery/prune", r.handlePrune)
+	RegisterHandlersFunc(mux, func() *Refinery { return r })
+}
+
+// RegisterHandlersFunc registers refinery API endpoints that resolve the
+// current *Refinery via the given getter on every request. This is needed
+// when the active Refinery instance may be swapped out at runtime (e.g. on
+// orchestration restart): a stable mux registration keeps serving requests
+// against whatever Refinery the getter returns at call time, instead of
+// being permanently bound to the instance present at registration.
+//
+// If the getter returns nil, handlers respond 503 Service Unavailable.
+func RegisterHandlersFunc(mux *http.ServeMux, get func() *Refinery) {
+	wrap := func(fn func(*Refinery, http.ResponseWriter, *http.Request)) http.HandlerFunc {
+		return func(w http.ResponseWriter, req *http.Request) {
+			r := get()
+			if r == nil {
+				http.Error(w, "refinery is not running", http.StatusServiceUnavailable)
+				return
+			}
+			fn(r, w, req)
+		}
+	}
+	mux.HandleFunc("/refinery/status", wrap((*Refinery).handleStatus))
+	mux.HandleFunc("/refinery/queue", wrap((*Refinery).handleQueue))
+	mux.HandleFunc("/refinery/history", wrap((*Refinery).handleHistory))
+	mux.HandleFunc("/refinery/submit", wrap((*Refinery).handleSubmit))
+	mux.HandleFunc("/refinery/mr/{id}", wrap((*Refinery).handleMR))
+	mux.HandleFunc("/refinery/cancel", wrap((*Refinery).handleCancel))
+	mux.HandleFunc("/refinery/prune", wrap((*Refinery).handlePrune))
 }
 
 func (r *Refinery) handlePrune(w http.ResponseWriter, req *http.Request) {

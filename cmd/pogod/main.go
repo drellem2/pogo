@@ -359,7 +359,13 @@ func registerHandlers() {
 	orchestrated := http.NewServeMux()
 	agentRegistry.RegisterHandlers(orchestrated)
 	if mergeQueue != nil {
-		mergeQueue.RegisterHandlers(orchestrated)
+		// Use a closure so handlers always resolve the current mergeQueue.
+		// SetRefineryStarter swaps the package-level pointer on orchestration
+		// restart; binding handlers to the original instance leaves
+		// /refinery/queue serving stale data from the dead refinery (#9).
+		refinery.RegisterHandlersFunc(orchestrated, func() *refinery.Refinery {
+			return mergeQueue
+		})
 	} else {
 		// Refinery is disabled via config — register stub handlers so
 		// /refinery/* endpoints return a clear "disabled" error instead
