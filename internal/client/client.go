@@ -20,6 +20,7 @@ import (
 	"github.com/nightlyone/lockfile"
 
 	"github.com/drellem2/pogo/internal/config"
+	"github.com/drellem2/pogo/internal/health"
 	"github.com/drellem2/pogo/internal/project"
 	pogoPlugin "github.com/drellem2/pogo/pkg/plugin"
 )
@@ -76,6 +77,24 @@ func HealthCheck() error {
 	_, err := http.Post(serverURL+"/health", "application/json",
 		nil)
 	return err
+}
+
+// GetFullHealth fetches the structured /health/full report from pogod.
+func GetFullHealth() (*health.FullResponse, error) {
+	resp, err := http.Get(serverURL + "/health/full")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("server returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var out health.FullResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	return &out, nil
 }
 
 func StartServer() error {
