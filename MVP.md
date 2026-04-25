@@ -198,7 +198,7 @@ The mayor is a crew agent. Its only special property is its prompt file, which g
 
 The mayor is NOT special code. It's a prompt file that says "you are the coordinator" and has access to the same CLI tools as everyone else. If the mayor prompt is bad, you edit `~/.pogo/agents/mayor.md`. If you want a different coordination strategy, write a different prompt.
 
-**Bootstrap:** `pogo agent start mayor` launches the mayor like any other crew agent.
+**Bootstrap:** pogod auto-starts the mayor on boot via the `auto_start = true` flag in `mayor.md`'s TOML frontmatter — the same mechanism used by any crew agent. `pogo agent start mayor` still works for manual restarts.
 
 ### 4. Refinery
 
