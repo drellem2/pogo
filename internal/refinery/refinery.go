@@ -245,22 +245,20 @@ func validateTargetRef(repoPath, targetRef string) error {
 	cmd := exec.Command("git", "-C", repoPath, "ls-remote", "--heads", "origin", targetRef)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		// If ls-remote fails (e.g. no origin remote), fall back to checking
-		// local branches — bare repos used in tests have no remote.
+		// ls-remote failed (e.g. no origin remote, or remote unreachable).
+		// Fall back to checking local branches — bare repos used in tests
+		// have no remote configured.
 		cmd2 := exec.Command("git", "-C", repoPath, "rev-parse", "--verify", "refs/heads/"+targetRef)
 		if out2, err2 := cmd2.CombinedOutput(); err2 != nil {
 			return fmt.Errorf("target_ref %q not found: %s", targetRef, strings.TrimSpace(string(out2)))
 		}
 		return nil
 	}
-	// ls-remote succeeded — check if any output was returned (empty = no match)
+	// ls-remote succeeded — empty output is a definitive "not found" answer
+	// from the remote. Do NOT fall back to local rev-parse, because a stale
+	// local branch must not mask a missing remote branch.
 	if strings.TrimSpace(string(out)) == "" {
-		// No remote match. Fall back to local branch check for bare repos.
-		cmd2 := exec.Command("git", "-C", repoPath, "rev-parse", "--verify", "refs/heads/"+targetRef)
-		if _, err2 := cmd2.CombinedOutput(); err2 != nil {
-			return fmt.Errorf("target_ref %q not found in repo %s", targetRef, repoPath)
-		}
-		return nil
+		return fmt.Errorf("target_ref %q not found on origin in repo %s", targetRef, repoPath)
 	}
 	return nil
 }

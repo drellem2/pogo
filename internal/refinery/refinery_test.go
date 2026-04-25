@@ -528,6 +528,74 @@ func TestSubmitRejectsInvalidTargetRef(t *testing.T) {
 	}
 }
 
+// TestValidateTargetRefFallbackPaths exercises both branches of validateTargetRef:
+//   - ls-remote unreachable (no origin configured) → falls back to local rev-parse.
+//   - ls-remote reachable but empty output → hard-fails, even if a stale local
+//     branch with the same name exists. Regression test for #10.
+func TestValidateTargetRefFallbackPaths(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found")
+	}
+
+	t.Run("ls-remote unreachable falls back to local rev-parse", func(t *testing.T) {
+		// A bare repo has no "origin" remote configured, so ls-remote fails.
+		// validateTargetRef must fall back to checking local branches.
+		bareRepo := initBareOrigin(t, "main")
+
+		// Existing local branch passes.
+		if err := validateTargetRef(bareRepo, "main"); err != nil {
+			t.Errorf("expected main to validate via local fallback, got: %v", err)
+		}
+
+		// Nonexistent local branch fails.
+		if err := validateTargetRef(bareRepo, "nope"); err == nil {
+			t.Error("expected error for nonexistent branch via local fallback")
+		}
+	})
+
+	t.Run("ls-remote empty output hard-fails despite stale local branch", func(t *testing.T) {
+		// Set up a bare origin with only "main"...
+		originDir := initBareOrigin(t, "main")
+
+		// ...and a working clone that has both "origin" configured and a
+		// stale local branch "ghost" that does NOT exist on origin.
+		workDir := t.TempDir()
+		run(t, workDir, "git", "clone", originDir, ".")
+		run(t, workDir, "git", "config", "user.email", "test@test.com")
+		run(t, workDir, "git", "config", "user.name", "Test")
+		run(t, workDir, "git", "branch", "ghost")
+
+		// Sanity: ls-remote against this clone returns empty for "ghost"
+		// and rev-parse against the local branch succeeds. This is exactly
+		// the bug condition from #10.
+		out, err := exec.Command("git", "-C", workDir, "ls-remote", "--heads", "origin", "ghost").CombinedOutput()
+		if err != nil {
+			t.Fatalf("ls-remote setup failed: %v: %s", err, out)
+		}
+		if strings.TrimSpace(string(out)) != "" {
+			t.Fatalf("ls-remote setup invalid: expected empty output, got %q", string(out))
+		}
+		if err := exec.Command("git", "-C", workDir, "rev-parse", "--verify", "refs/heads/ghost").Run(); err != nil {
+			t.Fatalf("local branch ghost should exist: %v", err)
+		}
+
+		// validateTargetRef must reject "ghost" — empty ls-remote is a
+		// definitive "not found", local fallback must not save it.
+		err = validateTargetRef(workDir, "ghost")
+		if err == nil {
+			t.Fatal("expected error for ref not on origin, even with stale local branch")
+		}
+		if !strings.Contains(err.Error(), "ghost") {
+			t.Errorf("expected error to mention ref name, got: %v", err)
+		}
+
+		// "main" exists on origin and must still pass.
+		if err := validateTargetRef(workDir, "main"); err != nil {
+			t.Errorf("expected main to validate against origin, got: %v", err)
+		}
+	})
+}
+
 func TestIsRetryableWithInvalidUpstream(t *testing.T) {
 	// A plain error is not retryable
 	plainErr := fmt.Errorf("rebase onto main: some error: exit status 1")
