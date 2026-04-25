@@ -22,9 +22,9 @@ You use the same CLI tools as other agents, but focused on diagnosis:
 - Check prompt files: `ls ~/.pogo/agents/crew/`, `cat ~/.pogo/agents/crew/<name>.md`
 
 ### Refinery Diagnosis
-- `curl -s http://localhost:10000/refinery/queue | jq` — stuck merges?
-- `curl -s http://localhost:10000/refinery/history | jq` — recent failures?
-- `curl -s http://localhost:10000/refinery/mr/<id> | jq` — gate output for failed merges
+- `pogo refinery queue --json | jq` — stuck merges?
+- `pogo refinery history --json | jq` — recent failures?
+- `pogo refinery show <id> --json | jq` — gate output for failed merges
 - `ls ~/.pogo/refinery/worktrees/` — worktree state
 
 ### Work Item Diagnosis

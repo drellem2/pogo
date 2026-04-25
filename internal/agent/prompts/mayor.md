@@ -115,13 +115,13 @@ Look for:
 
 - **Refinery queue**: Check for pending merges that may be stuck or stalled:
   ```bash
-  curl -s http://localhost:10000/refinery/queue
+  pogo refinery queue
   ```
   If a merge request has been queued for an unusually long time, check the refinery logs for errors. An empty queue is normal — it means the refinery is caught up.
 
 - **Refinery failures on done items**: A work item may be in `done/` status but the refinery rejected its branch. This happens when a polecat exits after a merge failure without calling `mg done` — but can also occur due to races or bugs. On each cycle, check refinery history for failures:
   ```bash
-  curl -s http://localhost:10000/refinery/history
+  pogo refinery history
   ```
   Cross-reference with `mg list --status=done`. If a done item's branch shows as failed in refinery history:
   1. Reopen the item so it can be re-dispatched:
@@ -215,11 +215,11 @@ When diagnosing merge failures, the refinery logs every pipeline step with struc
 
 All refinery log lines are prefixed with `refinery:`. To find logs for a specific merge request, grep for its MR ID. The failure mail you receive includes the error message and quality gate output, but the log file shows the full step-by-step trace (worktree, fetch, checkout, rebase, quality-gates, merge, push).
 
-You can also query refinery state via the API (these hit pogod directly):
+You can also query refinery state via the CLI (these talk to pogod for you):
 ```bash
-curl http://localhost:10000/refinery/history   # completed merges (success + failure)
-curl http://localhost:10000/refinery/queue      # pending merges
-curl http://localhost:10000/refinery/mr/<id>    # single MR details (includes gate output)
+pogo refinery history   # completed merges (success + failure)
+pogo refinery queue     # pending merges
+pogo refinery show <id> # single MR details (includes gate output)
 ```
 
 ## Troubleshooting Stalled Agents
