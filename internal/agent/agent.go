@@ -56,6 +56,12 @@ type Agent struct {
 	// RestartCount tracks how many times a crew agent has been restarted.
 	RestartCount int `json:"restart_count,omitempty"`
 
+	// RestartOnCrash controls whether pogod respawns this agent when it
+	// exits unexpectedly. Resolved at spawn time from prompt frontmatter
+	// (see ResolveRestartOnCrash); defaults follow agent type — crew
+	// agents restart, polecats do not.
+	RestartOnCrash bool `json:"restart_on_crash"`
+
 	// PromptFile is the path to the agent's prompt file (if any).
 	PromptFile string `json:"prompt_file,omitempty"`
 
@@ -187,15 +193,16 @@ func ProcessName(agentType AgentType, name string) string {
 
 // SpawnRequest contains everything needed to spawn an agent.
 type SpawnRequest struct {
-	Name         string
-	Type         AgentType
-	Command      []string // e.g. ["claude", "--append-system-prompt", "<prompt content>"]
-	Env          []string // additional env vars
-	PromptFile   string   // path to prompt file (optional)
-	Dir          string   // working directory for the process (optional)
-	WorktreeDir  string   // git worktree path for polecat isolation (optional)
-	SourceRepo   string   // original repo path for worktree removal (optional)
-	InitialNudge string   // if set, pogod sends this nudge after spawn to bypass the CLI interactive prompt
+	Name           string
+	Type           AgentType
+	Command        []string // e.g. ["claude", "--append-system-prompt", "<prompt content>"]
+	Env            []string // additional env vars
+	PromptFile     string   // path to prompt file (optional)
+	Dir            string   // working directory for the process (optional)
+	WorktreeDir    string   // git worktree path for polecat isolation (optional)
+	SourceRepo     string   // original repo path for worktree removal (optional)
+	InitialNudge   string   // if set, pogod sends this nudge after spawn to bypass the CLI interactive prompt
+	RestartOnCrash bool     // if true, pogod respawns this agent when it exits unexpectedly
 }
 
 // Spawn starts a new agent process with a PTY.
@@ -235,23 +242,24 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 	}
 
 	a := &Agent{
-		Name:        req.Name,
-		PID:         cmd.Process.Pid,
-		Type:        req.Type,
-		StartTime:   time.Now(),
-		Command:     req.Command,
-		Status:      StatusRunning,
-		PromptFile:  req.PromptFile,
-		Dir:         req.Dir,
-		WorktreeDir: req.WorktreeDir,
-		SourceRepo:  req.SourceRepo,
-		master:      master,
-		cmd:         cmd,
-		outputBuf:   NewRingBuffer(64 * 1024), // 64KB rolling buffer
-		attachConns: make(map[io.Writer]struct{}),
-		socketPath:  filepath.Join(r.socketDir, req.Name+".sock"),
-		done:        make(chan struct{}),
-		outputDone:  make(chan struct{}),
+		Name:           req.Name,
+		PID:            cmd.Process.Pid,
+		Type:           req.Type,
+		StartTime:      time.Now(),
+		Command:        req.Command,
+		Status:         StatusRunning,
+		PromptFile:     req.PromptFile,
+		Dir:            req.Dir,
+		WorktreeDir:    req.WorktreeDir,
+		SourceRepo:     req.SourceRepo,
+		RestartOnCrash: req.RestartOnCrash,
+		master:         master,
+		cmd:            cmd,
+		outputBuf:      NewRingBuffer(64 * 1024), // 64KB rolling buffer
+		attachConns:    make(map[io.Writer]struct{}),
+		socketPath:     filepath.Join(r.socketDir, req.Name+".sock"),
+		done:           make(chan struct{}),
+		outputDone:     make(chan struct{}),
 	}
 
 	// Start output reader — sole reader of master fd, fans out to
@@ -421,23 +429,26 @@ func (r *Registry) Respawn(name string) (*Agent, error) {
 	}
 
 	a := &Agent{
-		Name:         old.Name,
-		PID:          cmd.Process.Pid,
-		Type:         old.Type,
-		StartTime:    time.Now(),
-		Command:      old.Command,
-		Status:       StatusRunning,
-		RestartCount: restartCount,
-		PromptFile:   old.PromptFile,
-		Dir:          old.Dir,
-		InitialNudge: old.InitialNudge,
-		master:       master,
-		cmd:          cmd,
-		outputBuf:    NewRingBuffer(64 * 1024),
-		attachConns:  make(map[io.Writer]struct{}),
-		socketPath:   filepath.Join(r.socketDir, old.Name+".sock"),
-		done:         make(chan struct{}),
-		outputDone:   make(chan struct{}),
+		Name:           old.Name,
+		PID:            cmd.Process.Pid,
+		Type:           old.Type,
+		StartTime:      time.Now(),
+		Command:        old.Command,
+		Status:         StatusRunning,
+		RestartCount:   restartCount,
+		RestartOnCrash: old.RestartOnCrash,
+		PromptFile:     old.PromptFile,
+		Dir:            old.Dir,
+		WorktreeDir:    old.WorktreeDir,
+		SourceRepo:     old.SourceRepo,
+		InitialNudge:   old.InitialNudge,
+		master:         master,
+		cmd:            cmd,
+		outputBuf:      NewRingBuffer(64 * 1024),
+		attachConns:    make(map[io.Writer]struct{}),
+		socketPath:     filepath.Join(r.socketDir, old.Name+".sock"),
+		done:           make(chan struct{}),
+		outputDone:     make(chan struct{}),
 	}
 
 	go a.readOutput()
