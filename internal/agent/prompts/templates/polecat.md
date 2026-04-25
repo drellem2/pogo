@@ -42,11 +42,11 @@ Follow these steps exactly, in order. Skipping any step is a failure.
    pogo refinery submit polecat-{{.Id}} --repo={{.Repo}} --author={{.Id}} --target={{if .Branch}}{{.Branch}}{{else}}main{{end}}
    ```
 
-5. **Wait for merge result** — poll refinery history using a bash while-loop:
+5. **Wait for merge result** — poll refinery using a bash while-loop:
    ```bash
    # Poll in a bash loop — do NOT use cron, CronCreate, scheduled tasks, or pogo nudge for this.
    while true; do
-     STATUS=$(curl -s http://localhost:10000/refinery/mr/<id> | grep -o '"status":"[^"]*"' | head -1)
+     STATUS=$(pogo refinery show <id> --json | grep -o '"status":"[^"]*"' | head -1)
      echo "$STATUS"
      if echo "$STATUS" | grep -q '"merged"\|"failed"'; then break; fi
      sleep 10

@@ -25,9 +25,9 @@ mg list --status=claimed         # In-progress work
 mg show <id>                     # Full details on a work item
 
 # Refinery
-curl -s http://localhost:10000/refinery/queue    # Pending merges
-curl -s http://localhost:10000/refinery/history   # Completed merges
-curl -s http://localhost:10000/refinery/mr/<id>   # Single MR details
+pogo refinery queue              # Pending merges
+pogo refinery history            # Completed merges
+pogo refinery show <id>          # Single MR details
 
 # Logs
 # Service mode: ~/.local/share/pogo/logs/pogo.err.log
@@ -54,7 +54,7 @@ mg mail send <agent> --from=doctor --subject="<subj>" --body="<body>"
 
 - **pogod not running**: `pogo server start` or `pogo service install && pogo service start`
 - **Stale work items**: `mg reap` reclaims items from dead processes
-- **Refinery failures**: Check `curl -s http://localhost:10000/refinery/history` for error details
+- **Refinery failures**: Check `pogo refinery history` for error details
 - **Missing prompts**: `pogo agent prompt install` reinstalls default prompts
 - **Agent won't start**: Check if the crew prompt exists at `~/.pogo/agents/crew/<name>.md`
 
