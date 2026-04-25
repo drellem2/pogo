@@ -276,16 +276,26 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 	}
 
 	// Send initial nudge to bypass the CLI interactive prompt.
+	// Use wait-idle mode so the nudge fires only after Claude's TUI has
+	// finished rendering (trust dialog dismissed, prompt input ready).
+	// A fixed sleep was unreliable: startup time varies, and a nudge typed
+	// before the prompt input is ready gets swallowed by transient dialogs.
 	if req.InitialNudge != "" {
 		a.InitialNudge = req.InitialNudge
 		go func() {
-			time.Sleep(10 * time.Second)
-			a.Nudge(req.InitialNudge)
+			if err := a.NudgeWithMode(req.InitialNudge, NudgeWaitIdle, InitialNudgeTimeout); err != nil {
+				log.Printf("agent %s: initial nudge failed: %v", req.Name, err)
+			}
 		}()
 	}
 
 	return a, nil
 }
+
+// InitialNudgeTimeout is how long to wait for an agent's PTY to go idle
+// before giving up on the post-spawn nudge. Generous because Claude Code
+// startup can be slow on a cold cache or with a large prompt file.
+const InitialNudgeTimeout = 60 * time.Second
 
 // Get returns an agent by name, or nil if not found.
 func (r *Registry) Get(name string) *Agent {
@@ -443,8 +453,9 @@ func (r *Registry) Respawn(name string) (*Agent, error) {
 	// Re-send initial nudge on respawn to bypass the CLI interactive prompt.
 	if a.InitialNudge != "" {
 		go func() {
-			time.Sleep(10 * time.Second)
-			a.Nudge(a.InitialNudge)
+			if err := a.NudgeWithMode(a.InitialNudge, NudgeWaitIdle, InitialNudgeTimeout); err != nil {
+				log.Printf("agent %s: initial nudge on respawn failed: %v", a.Name, err)
+			}
 		}()
 	}
 

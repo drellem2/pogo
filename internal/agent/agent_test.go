@@ -54,6 +54,48 @@ func TestSpawnAndNudge(t *testing.T) {
 	}
 }
 
+// TestInitialNudgeAutoDelivers verifies that when SpawnRequest.InitialNudge
+// is set, pogod auto-delivers the message once the agent's PTY goes idle —
+// without any external 'pogo nudge' call. Regression test for the bug where
+// a fixed 10s sleep made auto-nudge fire before Claude's TUI was ready,
+// leaving polecats stuck until a manual nudge.
+func TestInitialNudgeAutoDelivers(t *testing.T) {
+	tmpDir := t.TempDir()
+	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	defer reg.StopAll(2 * time.Second)
+
+	// bash -c "echo ready; cat" prints "ready" (so PTY has lastWrite set,
+	// allowing IsIdle to return true after quiescence) then echoes input.
+	a, err := reg.Spawn(SpawnRequest{
+		Name:         "auto-nudge",
+		Type:         TypePolecat,
+		Command:      []string{"bash", "-c", "echo ready; cat"},
+		InitialNudge: "begin task",
+	})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+
+	// InitialNudge is stored on the agent so Respawn can re-send it.
+	if a.InitialNudge != "begin task" {
+		t.Errorf("InitialNudge = %q, want %q", a.InitialNudge, "begin task")
+	}
+
+	// Wait long enough for: PTY quiescence (DefaultIdleThreshold=2s) + delivery.
+	// No external nudge — the auto-delivery in Spawn must fire on its own.
+	deadline := time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(string(a.RecentOutput(4096)), "begin task") {
+			return // success
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Errorf("initial nudge did not auto-deliver within 8s; output: %q", string(a.RecentOutput(4096)))
+}
+
 func TestSpawnDuplicate(t *testing.T) {
 	tmpDir := t.TempDir()
 	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
