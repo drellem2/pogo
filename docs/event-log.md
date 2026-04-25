@@ -287,7 +287,7 @@ A reader who wants the lifecycle of one work item filters with `jq 'select(.work
 
 ## Relationship to other state
 
-- **macguffin event log (`~/.macguffin/log/`)**: macguffin maintains its own append log for work item state transitions and mail. Pogo's event log is broader (it includes agent lifecycle and refinery merges) and lives in `~/.pogo/`. The work item events (`work_item_claimed`, `work_item_completed`) and `mail_sent` mirror macguffin transitions into the pogo log so a single tail shows the whole system. Phase F4 (mg-4fa7) wires this mirroring; until then, pogod components write directly and `mg` writes nothing into `~/.pogo/events.log`.
+- **macguffin event log (`~/.macguffin/log/`)**: macguffin maintains its own append log for work item state transitions and mail. Pogo's event log is broader (it includes agent lifecycle and refinery merges) and lives in `~/.pogo/`. The work item events (`work_item_claimed`, `work_item_completed`) and `mail_sent` mirror macguffin transitions into the pogo log so a single tail shows the whole system. Phase F4 (mg-4fa7) wires this mirroring via the `pogo events emit` CLI bridge — `mg` shells out to it as a best-effort fire-and-forget call.
 - **Refinery in-memory history**: still authoritative for queue/active state. The event log is the durable record. Once F5 (mg-287e) lands, the refinery emits an event for every merge attempt, success, and failure, so post-mortem investigation no longer depends on the in-memory history surviving a restart.
 - **PTY ring buffer**: per-agent, 64 KB, lost on agent exit. The event log is system-wide and durable. The two are complementary — the ring buffer captures *what the agent said*, the event log captures *what happened*.
 
@@ -302,7 +302,7 @@ A reader who wants the lifecycle of one work item filters with `jq 'select(.work
 
 These are deliberately deferred — flagged here so the implementation tasks can resolve them:
 
-- **Where is the writer library?** Proposed in F2 (mg-700a): `internal/events.Emit(ctx, event)` with the file path resolved from config (default `~/.pogo/events.log`).
-- **How does `mg` emit?** Either (a) `mg` shells out to the writer library directly (requires `mg` to know about pogo) or (b) pogod exposes an HTTP endpoint and `mg` posts to it. Decide in F4 (mg-4fa7).
-- **What happens when the disk is full?** Writer should drop the event with a stderr warning rather than blocking the calling code path. Decide in F2.
+- **Where is the writer library?** F2 (mg-700a) shipped `internal/events.Emit(ctx, event)`; default path is `~/.pogo/events.log`, overridable for tests via `SetLogPathForTesting`.
+- **How does `mg` emit?** F4 (mg-4fa7) chose the shell-out path: `pogo events emit --type=… --details=…` is a thin CLI wrapper over `events.Emit` that mg invokes after each claim/done/mail send. This keeps macguffin free of any pogo Go-module dependency at the cost of a per-event subprocess (acceptable for the low-frequency mg ops). The CLI auto-derives the `agent` field from `POGO_AGENT_NAME`/`POGO_AGENT_TYPE` so the typical caller passes only `--type`, `--work-item-id`, and `--details`.
+- **What happens when the disk is full?** Writer drops the event with a stderr warning rather than blocking the calling code path (decided in F2; implemented in `events.Emit`).
 - **Truncation policy for `gate_output_truncated` and `last_output`.** 1 KB and 512 B respectively are first guesses; revisit once we see real volumes.

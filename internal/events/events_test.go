@@ -341,3 +341,27 @@ func TestExplicitSchemaVersionPreserved(t *testing.T) {
 		t.Errorf("explicit schema_version clobbered: want 99, got %d", got.SchemaVersion)
 	}
 }
+
+func TestResolveAgent(t *testing.T) {
+	cases := []struct {
+		name      string
+		envName   string
+		envType   string
+		wantAgent string
+	}{
+		{"no env", "", "", "human"},
+		{"polecat", "mg-4fa7", "polecat", "cat-mg-4fa7"},
+		{"crew", "arch", "crew", "crew-arch"},
+		{"mayor special-case", "mayor", "crew", "mayor"},
+		{"name without type", "weird", "", "weird"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("POGO_AGENT_NAME", tc.envName)
+			t.Setenv("POGO_AGENT_TYPE", tc.envType)
+			if got := ResolveAgent(); got != tc.wantAgent {
+				t.Errorf("ResolveAgent() = %q, want %q", got, tc.wantAgent)
+			}
+		})
+	}
+}

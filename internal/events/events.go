@@ -69,6 +69,31 @@ func SetLogPathForTesting(path string) {
 	overrideMu.Unlock()
 }
 
+// ResolveAgent returns the canonical agent identity from POGO_AGENT_NAME and
+// POGO_AGENT_TYPE env vars per the identity convention in docs/event-log.md:
+//
+//   - crew named "mayor" → "mayor"
+//   - other crew         → "crew-<name>"
+//   - polecat            → "cat-<name>"
+//   - no env             → "human"
+func ResolveAgent() string {
+	name := os.Getenv("POGO_AGENT_NAME")
+	if name == "" {
+		return "human"
+	}
+	switch os.Getenv("POGO_AGENT_TYPE") {
+	case "crew":
+		if name == "mayor" {
+			return "mayor"
+		}
+		return "crew-" + name
+	case "polecat":
+		return "cat-" + name
+	default:
+		return name
+	}
+}
+
 func resolvePath() (string, error) {
 	overrideMu.RLock()
 	p := overridePath

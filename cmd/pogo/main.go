@@ -5,6 +5,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -21,6 +22,7 @@ import (
 	"github.com/drellem2/pogo/internal/cli"
 	"github.com/drellem2/pogo/internal/client"
 	"github.com/drellem2/pogo/internal/completion"
+	"github.com/drellem2/pogo/internal/events"
 	"github.com/drellem2/pogo/internal/refinery"
 	"github.com/drellem2/pogo/internal/service"
 	"github.com/drellem2/pogo/internal/version"
@@ -1636,6 +1638,63 @@ as definitions, imports, or call sites.`,
 	}
 	rootCmd.AddCommand(cmdDeps)
 	rootCmd.AddCommand(cmdRefs)
+
+	// Events commands
+	var cmdEvents = &cobra.Command{
+		Use:   "events",
+		Short: "Append-only event log at ~/.pogo/events.log",
+	}
+
+	var (
+		emitType       string
+		emitAgent      string
+		emitWorkItemID string
+		emitRepo       string
+		emitDetails    string
+	)
+	var cmdEventsEmit = &cobra.Command{
+		Use:   "emit",
+		Short: "Emit one event to ~/.pogo/events.log",
+		Long: `Append a single event to ~/.pogo/events.log per the schema in docs/event-log.md.
+
+Designed as a shell-out bridge for processes that don't link the Go events
+package directly (e.g. mg). Best-effort: failures are logged to stderr but
+the command always exits 0 so callers never block on emission.
+
+Example:
+  pogo events emit --type=work_item_claimed --work-item-id=mg-0241 \
+      --details='{"title":"F1: design event log","tags":["pogo","phase-f"]}'`,
+		Args: cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			if emitType == "" {
+				cli.ExitWithError(jsonOutput, "--type is required", cli.ExitError)
+			}
+			ev := events.Event{
+				EventType:  emitType,
+				Agent:      emitAgent,
+				WorkItemID: emitWorkItemID,
+				Repo:       emitRepo,
+			}
+			if ev.Agent == "" {
+				ev.Agent = events.ResolveAgent()
+			}
+			if emitDetails != "" {
+				if err := json.Unmarshal([]byte(emitDetails), &ev.Details); err != nil {
+					fmt.Fprintf(os.Stderr, "events: --details is not valid JSON: %v\n", err)
+					return
+				}
+			}
+			events.Emit(context.Background(), ev)
+		},
+	}
+	cmdEventsEmit.Flags().StringVar(&emitType, "type", "", "event_type (required, e.g. work_item_claimed)")
+	cmdEventsEmit.Flags().StringVar(&emitAgent, "agent", "", "agent identity (default: derived from POGO_AGENT_NAME/TYPE, else \"human\")")
+	cmdEventsEmit.Flags().StringVar(&emitWorkItemID, "work-item-id", "", "macguffin work item ID (optional)")
+	cmdEventsEmit.Flags().StringVar(&emitRepo, "repo", "", "repository path (optional)")
+	cmdEventsEmit.Flags().StringVar(&emitDetails, "details", "", "details payload as JSON object (optional)")
+	cmdEvents.AddCommand(cmdEventsEmit)
+	rootCmd.AddCommand(cmdEvents)
+
 	completion.AddCommand(rootCmd)
 
 	if err := rootCmd.Execute(); err != nil {
