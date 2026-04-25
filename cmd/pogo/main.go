@@ -183,6 +183,39 @@ shut down the server process.`,
 	}
 	cmdServerStop.Flags().BoolVar(&stopAll, "all", false, "fully shut down the server process")
 
+	var cmdServerStatus = &cobra.Command{
+		Use:     "status",
+		Aliases: []string{"health"},
+		Short:   "Show pogo server health (uptime, mode, agents, refinery)",
+		Long: `Query GET /health/full on pogod and print a short summary.
+
+Use --json for the raw structured response.`,
+		Args: cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			report, err := client.GetFullHealth()
+			if err != nil {
+				cli.ExitWithError(jsonOutput, "pogo server is not reachable: "+err.Error(), cli.ExitError)
+			}
+			if jsonOutput {
+				cli.PrintJSON(report)
+				return
+			}
+			fmt.Printf("pogod:    %s  (mode=%s, uptime=%s)\n",
+				report.Pogod.Status, report.Pogod.Mode, report.Pogod.Uptime)
+			fmt.Printf("agents:   %d total, %d running, %d exited\n",
+				report.Agents.Total, report.Agents.Running, report.Agents.Exited)
+			refState := "stopped"
+			if report.Refinery.Running {
+				refState = "running"
+			}
+			if !report.Refinery.Enabled {
+				refState = "disabled"
+			}
+			fmt.Printf("refinery: %s  (queue=%d, history=%d, recent_failures=%d)\n",
+				refState, report.Refinery.QueueLength, report.Refinery.HistoryLength, report.Refinery.RecentFailures)
+		},
+	}
+
 	var statusLive bool
 	var statusInterval time.Duration
 	var statusTag string
@@ -1313,6 +1346,7 @@ The path is resolved to an absolute path and the git root is discovered automati
 	rootCmd.AddCommand(cmdDoctor)
 	cmdServer.AddCommand(cmdServerStart)
 	cmdServer.AddCommand(cmdServerStop)
+	cmdServer.AddCommand(cmdServerStatus)
 	rootCmd.AddCommand(cmdServer)
 	cmdService.AddCommand(cmdServiceInstall)
 	cmdService.AddCommand(cmdServiceUninstall)
