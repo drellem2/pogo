@@ -602,6 +602,184 @@ func TestParsePromptFrontmatterFileNotFound(t *testing.T) {
 	}
 }
 
+// TestParsePromptFrontmatterBodyOnly covers a prompt that is pure markdown
+// with no frontmatter fences anywhere — the common case for legacy prompts.
+// Body must be returned verbatim and meta must be a non-nil zero value.
+func TestParsePromptFrontmatterBodyOnly(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "legacy.md")
+	content := "# Legacy Agent\n\nDo work.\n\n## Section\n\n- bullet\n- bullet\n"
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	meta, body, err := ParsePromptFrontmatter(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta == nil || *meta != (AgentMeta{}) {
+		t.Errorf("expected zero-value meta, got %+v", meta)
+	}
+	if body != content {
+		t.Errorf("body should be returned verbatim\ngot:  %q\nwant: %q", body, content)
+	}
+}
+
+// TestParsePromptFrontmatterCRLF covers Windows-style line endings throughout
+// the file. The parser must accept '\r\n' on the fences and inside the
+// frontmatter body, and the returned body should be unchanged from input.
+func TestParsePromptFrontmatterCRLF(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "crlf.md")
+	content := "+++\r\nauto_start = true\r\nrestart_on_crash = true\r\nnudge_on_start = \"hello\"\r\n+++\r\n# Body\r\n\r\nLine.\r\n"
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	meta, body, err := ParsePromptFrontmatter(path)
+	if err != nil {
+		t.Fatalf("CRLF input should parse: %v", err)
+	}
+	if !meta.AutoStart {
+		t.Error("expected AutoStart=true")
+	}
+	if !meta.RestartOnCrash {
+		t.Error("expected RestartOnCrash=true")
+	}
+	if meta.NudgeOnStart != "hello" {
+		t.Errorf("NudgeOnStart=%q want %q", meta.NudgeOnStart, "hello")
+	}
+	wantBody := "# Body\r\n\r\nLine.\r\n"
+	if body != wantBody {
+		t.Errorf("body=%q want %q", body, wantBody)
+	}
+}
+
+// TestParsePromptFrontmatterBOM documents how a UTF-8 BOM at the start of a
+// file is handled. The parser only recognizes frontmatter that begins at byte
+// offset 0 with the '+++' fence, so a BOM-prefixed file is treated as having
+// no frontmatter and the full content (including BOM) is returned as body.
+func TestParsePromptFrontmatterBOM(t *testing.T) {
+	dir := t.TempDir()
+
+	bom := "\xef\xbb\xbf"
+
+	t.Run("BOM before frontmatter is treated as plain body", func(t *testing.T) {
+		path := filepath.Join(dir, "bom-fm.md")
+		content := bom + "+++\nauto_start = true\n+++\n# Body\n"
+		if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+		meta, body, err := ParsePromptFrontmatter(path)
+		if err != nil {
+			t.Fatalf("BOM-prefixed input should not error: %v", err)
+		}
+		if *meta != (AgentMeta{}) {
+			t.Errorf("expected zero-value meta (BOM hides frontmatter), got %+v", *meta)
+		}
+		if body != content {
+			t.Errorf("body should equal full content including BOM\ngot:  %q\nwant: %q", body, content)
+		}
+	})
+
+	t.Run("BOM before plain body returns content verbatim", func(t *testing.T) {
+		path := filepath.Join(dir, "bom-plain.md")
+		content := bom + "# Plain\n\nbody\n"
+		if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+		meta, body, err := ParsePromptFrontmatter(path)
+		if err != nil {
+			t.Fatalf("BOM-prefixed plain markdown should not error: %v", err)
+		}
+		if *meta != (AgentMeta{}) {
+			t.Errorf("expected zero-value meta, got %+v", *meta)
+		}
+		if body != content {
+			t.Errorf("body should be returned verbatim\ngot:  %q\nwant: %q", body, content)
+		}
+	})
+}
+
+// TestParsePromptFrontmatterExtraWhitespace covers tolerated whitespace
+// variants: extra spacing around '=', tabs, trailing whitespace on fence
+// lines, and blank lines within the frontmatter block.
+func TestParsePromptFrontmatterExtraWhitespace(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ws.md")
+	content := "+++   \n" +
+		"\n" +
+		"  auto_start   =   true   \n" +
+		"\trestart_on_crash\t=\ttrue\t\n" +
+		"   nudge_on_start =     \"go\"   \n" +
+		"\n" +
+		"+++  \n" +
+		"body\n"
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	meta, body, err := ParsePromptFrontmatter(path)
+	if err != nil {
+		t.Fatalf("extra whitespace should be tolerated: %v", err)
+	}
+	if !meta.AutoStart {
+		t.Error("expected AutoStart=true")
+	}
+	if !meta.RestartOnCrash {
+		t.Error("expected RestartOnCrash=true")
+	}
+	if meta.NudgeOnStart != "go" {
+		t.Errorf("NudgeOnStart=%q want %q", meta.NudgeOnStart, "go")
+	}
+	if body != "body\n" {
+		t.Errorf("body=%q want %q", body, "body\n")
+	}
+}
+
+// TestParsePromptFrontmatterEmptyFrontmatter covers a frontmatter block with
+// no key=value lines at all — open fence followed immediately by close fence.
+// This must produce a zero-value meta and an unmodified body.
+func TestParsePromptFrontmatterEmptyFrontmatter(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "empty-fm.md")
+	content := "+++\n+++\nbody only\n"
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	meta, body, err := ParsePromptFrontmatter(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if *meta != (AgentMeta{}) {
+		t.Errorf("expected zero-value meta, got %+v", *meta)
+	}
+	if body != "body only\n" {
+		t.Errorf("body=%q want %q", body, "body only\n")
+	}
+}
+
+// TestParsePromptFrontmatterFenceInBody verifies the parser closes on the
+// FIRST '+++' line after the open fence and preserves any later '+++' lines
+// inside the body verbatim — important when prompts demonstrate frontmatter
+// syntax in their own content.
+func TestParsePromptFrontmatterFenceInBody(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "fence-body.md")
+	content := "+++\nauto_start = true\n+++\n# Example\n\n+++\nlooks like frontmatter\n+++\n"
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	meta, body, err := ParsePromptFrontmatter(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !meta.AutoStart {
+		t.Error("expected AutoStart=true")
+	}
+	wantBody := "# Example\n\n+++\nlooks like frontmatter\n+++\n"
+	if body != wantBody {
+		t.Errorf("body should preserve later fences verbatim\ngot:  %q\nwant: %q", body, wantBody)
+	}
+}
+
 func TestInitPromptDirs(t *testing.T) {
 	origHome := os.Getenv("HOME")
 	tmpHome := t.TempDir()
