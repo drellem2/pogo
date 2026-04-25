@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -532,13 +533,23 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 			return
 		}
 
-		wtCmd := exec.Command("git", "-C", sourceRepo, "worktree", "add", worktreeDir, "-b", branchName)
+		// Base the worktree on origin/<target-branch> rather than local HEAD so
+		// the polecat sees recently merged commits even if the local checkout
+		// is behind origin. Falls back to local HEAD when no usable origin
+		// exists (tests, repos without a remote).
+		baseRef := resolvePolecatBaseRef(sourceRepo, spawnReq.Branch)
+
+		wtArgs := []string{"-C", sourceRepo, "worktree", "add", worktreeDir, "-b", branchName}
+		if baseRef != "" {
+			wtArgs = append(wtArgs, baseRef)
+		}
+		wtCmd := exec.Command("git", wtArgs...)
 		if out, err := wtCmd.CombinedOutput(); err != nil {
 			os.Remove(promptFile)
 			http.Error(w, fmt.Sprintf("worktree creation failed: %v\n%s", err, out), http.StatusInternalServerError)
 			return
 		}
-		log.Printf("polecat %s: created worktree at %s (branch %s)", spawnReq.Name, worktreeDir, branchName)
+		log.Printf("polecat %s: created worktree at %s (branch %s, base %q)", spawnReq.Name, worktreeDir, branchName, baseRef)
 		// No --add-dir needed: the process CWD is set to worktreeDir via SpawnRequest.Dir,
 		// and --add-dir triggers a directory trust prompt that blocks autonomous execution.
 	}
@@ -593,6 +604,45 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(agentInfo(a))
+}
+
+// resolvePolecatBaseRef returns the git ref a new polecat worktree should be
+// based on. It fetches origin so the polecat sees the latest merged commits,
+// then prefers origin/<branch> (the branch the polecat will target via the
+// refinery) and falls back to origin/HEAD's default branch. Returns "" when
+// no usable origin is available, in which case the caller should base the
+// worktree on the source repo's local HEAD.
+//
+// This exists because creating the worktree from local HEAD made polecats
+// invisible to commits that had been merged to origin/main but not yet
+// pulled into the source checkout, producing false reports of unmerged work.
+func resolvePolecatBaseRef(sourceRepo, branch string) string {
+	if sourceRepo == "" {
+		return ""
+	}
+	if err := exec.Command("git", "-C", sourceRepo, "remote", "get-url", "origin").Run(); err != nil {
+		return ""
+	}
+	if out, err := exec.Command("git", "-C", sourceRepo, "fetch", "origin").CombinedOutput(); err != nil {
+		log.Printf("polecat: fetch origin failed in %s, falling back to local HEAD: %v\n%s", sourceRepo, err, out)
+		return ""
+	}
+	if branch != "" {
+		ref := "origin/" + branch
+		if exec.Command("git", "-C", sourceRepo, "rev-parse", "--verify", ref).Run() == nil {
+			return ref
+		}
+	}
+	if out, err := exec.Command("git", "-C", sourceRepo, "symbolic-ref", "refs/remotes/origin/HEAD").Output(); err == nil {
+		ref := strings.TrimSpace(string(out))
+		if r := strings.TrimPrefix(ref, "refs/remotes/"); r != ref {
+			return r
+		}
+	}
+	if exec.Command("git", "-C", sourceRepo, "rev-parse", "--verify", "origin/main").Run() == nil {
+		return "origin/main"
+	}
+	return ""
 }
 
 func (r *Registry) handlePrompts(w http.ResponseWriter, req *http.Request) {
