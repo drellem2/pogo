@@ -50,18 +50,19 @@ This starts the daemon, initializes macguffin, and installs default agent prompt
     └── polecat.md     # Ephemeral worker template
 ```
 
-Run `pogo install` again any time — it's idempotent. Existing prompt files are preserved unless you pass `--force`.
+Run `pogo install` again any time — it's idempotent. Existing prompt files are preserved unless you pass `--force`. (A higher-level `pogo init` command for one-shot project bootstrap is planned.)
 
 **Prerequisites:** [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI must be installed. The install script handles [macguffin](https://github.com/drellem2/macguffin) automatically; pass `--interactive` to configure shell and editor integrations.
 
 ## Getting started
 
 ```sh
-pogo agent start mayor              # Start the coordinator
 mg new "fix the auth token refresh bug"   # File work
 ```
 
-The mayor picks it up, spawns a polecat, and the polecat claims the work, implements a fix on a feature branch, and submits it to the refinery merge queue. The refinery runs your quality gates and merges to `main`.
+That's it. The mayor is already running — pogod auto-starts every crew prompt whose TOML frontmatter declares `auto_start = true`, and the default `mayor.md` ships with that flag set. The mayor picks up your work item, spawns a polecat, and the polecat claims the work, implements a fix on a feature branch, and submits it to the refinery merge queue. The refinery runs your quality gates and merges to `main`.
+
+To opt a crew agent out of boot-time start, set `auto_start = false` in its prompt frontmatter (or omit the field — it defaults to false). You can still start any crew agent on demand with `pogo agent start <name>`.
 
 ## Working with agents
 
