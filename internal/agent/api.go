@@ -440,9 +440,13 @@ func (r *Registry) handleStart(w http.ResponseWriter, req *http.Request) {
 	}
 
 	// All crew agents get an initial nudge to bypass the CLI interactive prompt.
-	// The mayor gets a specific coordination message; others get a generic start message.
+	// A prompt file may declare its own message via `nudge_on_start` in the
+	// TOML frontmatter; otherwise the mayor gets a coordination message and
+	// everyone else gets a generic start message.
 	var nudgeMsg string
-	if startReq.Name == "mayor" {
+	if meta, _, err := ParsePromptFrontmatter(promptFile); err == nil && meta.NudgeOnStart != "" {
+		nudgeMsg = meta.NudgeOnStart
+	} else if startReq.Name == "mayor" {
 		nudgeMsg = "You are now running. Begin your coordination loop."
 	} else {
 		nudgeMsg = "You are now running. Check your mail with `mg mail list " + startReq.Name + "` and begin your work."

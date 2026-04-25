@@ -1,6 +1,10 @@
 package agent
 
 import (
+	"bytes"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -8,6 +12,12 @@ import (
 	"testing"
 	"time"
 )
+
+// catCommandConfig is a test AgentCommandConfig that runs `cat` for any
+// agent type, so spawn-driven tests can succeed without invoking `claude`.
+type catCommandConfig struct{}
+
+func (catCommandConfig) AgentCommand(string) string { return "cat" }
 
 func TestAgentInfoLastActivity(t *testing.T) {
 	tmpDir := t.TempDir()
@@ -188,5 +198,107 @@ func TestResolvePolecatBaseRef_NoOrigin(t *testing.T) {
 	}
 	if got := resolvePolecatBaseRef(workDir, "main"); got != "" {
 		t.Fatalf("resolvePolecatBaseRef = %q, want empty (no origin)", got)
+	}
+}
+
+// startAgentViaAPI calls handleStart for the named agent and returns the
+// spawned Agent. Fails the test if the response is not 201.
+func startAgentViaAPI(t *testing.T, reg *Registry, name string) *Agent {
+	t.Helper()
+	body, _ := json.Marshal(StartAPIRequest{Name: name})
+	req := httptest.NewRequest("POST", "/agents/start", bytes.NewReader(body))
+	rr := httptest.NewRecorder()
+	reg.handleStart(rr, req)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("handleStart status = %d, body=%s", rr.Code, rr.Body.String())
+	}
+	a := reg.Get(name)
+	if a == nil {
+		t.Fatalf("agent %q not registered after start", name)
+	}
+	return a
+}
+
+// TestHandleStart_NudgeOnStartFromFrontmatter verifies that handleStart
+// uses nudge_on_start from a prompt file's TOML frontmatter when present.
+func TestHandleStart_NudgeOnStartFromFrontmatter(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	if err := InitPromptDirs(); err != nil {
+		t.Fatalf("InitPromptDirs: %v", err)
+	}
+	promptPath := filepath.Join(CrewPromptDir(), "frontnudge.md")
+	content := "+++\nnudge_on_start = \"hello from frontmatter\"\n+++\nbody text\n"
+	if err := os.WriteFile(promptPath, []byte(content), 0644); err != nil {
+		t.Fatalf("write prompt: %v", err)
+	}
+
+	reg, err := NewRegistry(filepath.Join(tmpHome, "sockets"))
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	defer reg.StopAll(2 * time.Second)
+	reg.SetCommandConfig(catCommandConfig{})
+
+	a := startAgentViaAPI(t, reg, "frontnudge")
+	if a.InitialNudge != "hello from frontmatter" {
+		t.Errorf("InitialNudge = %q, want %q", a.InitialNudge, "hello from frontmatter")
+	}
+}
+
+// TestHandleStart_MayorFallbackNudge verifies that the mayor without
+// frontmatter still receives the legacy coordination-loop nudge.
+func TestHandleStart_MayorFallbackNudge(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	if err := InitPromptDirs(); err != nil {
+		t.Fatalf("InitPromptDirs: %v", err)
+	}
+	mayorPath := filepath.Join(PromptDir(), "mayor.md")
+	if err := os.WriteFile(mayorPath, []byte("# mayor\n"), 0644); err != nil {
+		t.Fatalf("write mayor prompt: %v", err)
+	}
+
+	reg, err := NewRegistry(filepath.Join(tmpHome, "sockets"))
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	defer reg.StopAll(2 * time.Second)
+	reg.SetCommandConfig(catCommandConfig{})
+
+	a := startAgentViaAPI(t, reg, "mayor")
+	want := "You are now running. Begin your coordination loop."
+	if a.InitialNudge != want {
+		t.Errorf("InitialNudge = %q, want %q", a.InitialNudge, want)
+	}
+}
+
+// TestHandleStart_CrewFallbackNudge verifies that a crew agent without
+// frontmatter receives the legacy generic mail-checking nudge.
+func TestHandleStart_CrewFallbackNudge(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	if err := InitPromptDirs(); err != nil {
+		t.Fatalf("InitPromptDirs: %v", err)
+	}
+	promptPath := filepath.Join(CrewPromptDir(), "plain.md")
+	if err := os.WriteFile(promptPath, []byte("# plain crew\n"), 0644); err != nil {
+		t.Fatalf("write prompt: %v", err)
+	}
+
+	reg, err := NewRegistry(filepath.Join(tmpHome, "sockets"))
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	defer reg.StopAll(2 * time.Second)
+	reg.SetCommandConfig(catCommandConfig{})
+
+	a := startAgentViaAPI(t, reg, "plain")
+	want := "You are now running. Check your mail with `mg mail list plain` and begin your work."
+	if a.InitialNudge != want {
+		t.Errorf("InitialNudge = %q, want %q", a.InitialNudge, want)
 	}
 }
