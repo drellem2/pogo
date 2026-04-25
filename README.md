@@ -147,6 +147,29 @@ Set up the pre-commit hook:
 git config core.hooksPath hooks
 ```
 
+### End-to-end smoke test
+
+`scripts/test-e2e.sh` exercises the full orchestration loop — `pogo init`,
+`pogod`, mayor auto-start, polecat spawn, refinery merge, gate-failure
+rejection, and crew crash → respawn — against a sandboxed `$HOME`, a
+non-default port, and a fake-agent stand-in for `claude`. No API keys
+required.
+
+```sh
+scripts/test-e2e.sh                  # ~30s; prints a per-step PASS/FAIL summary
+POGO_E2E_KEEP=1 scripts/test-e2e.sh  # leave the sandbox dir on disk to inspect
+POGO_E2E_PORT=20000 scripts/test-e2e.sh
+```
+
+The test is also wrapped as a Go test that's skipped by default (so it
+doesn't slow `go test ./...`). To run it through the Go toolchain:
+
+```sh
+POGO_RUN_E2E=1 go test ./internal/agent -run TestE2ESmoke -v -timeout 5m
+```
+
+Requires `mg` (macguffin) on `$PATH`.
+
 ## Environment variables
 
 - `POGO_HOME`: Folder for pogo to store indexes
