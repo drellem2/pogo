@@ -179,7 +179,7 @@ Agents and the refinery mail you when things need attention:
 
 ### 6. Repeat
 
-Wait briefly (30-60 seconds), then start from step 1 again. The system is event-driven through work items and mail — your polling supplements nudge-based wakeups.
+Use `ScheduleWakeup` to schedule your next coordination cycle (30-60 seconds), then start from step 1 again when it fires. The system is event-driven through work items and mail — your polling catches anything not delivered as a wake-up.
 
 ## Dispatch Decisions
 
