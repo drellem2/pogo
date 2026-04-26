@@ -601,8 +601,10 @@ func ResolveRestartOnCrash(promptFile string, t AgentType) bool {
 }
 
 // promptHashPrefix is the marker used to embed a content hash in installed prompt files.
+// Two flavors so the stamp is a valid comment for both Markdown (HTML) and TOML.
 const promptHashPrefix = "<!-- pogo-prompt-hash: "
 const promptHashSuffix = " -->\n"
+const promptHashPrefixTOML = "# pogo-prompt-hash: "
 
 // contentHash returns the hex-encoded SHA-256 hash of data.
 func contentHash(data []byte) string {
@@ -610,24 +612,37 @@ func contentHash(data []byte) string {
 	return hex.EncodeToString(h[:])
 }
 
-// installedPromptHash reads the hash comment from the first line of an installed prompt file.
-// Returns empty string if the file has no hash comment.
+// installedPromptHash reads the hash comment from the first line of an installed
+// prompt or config file. Recognizes both the HTML-comment stamp used in .md and
+// the TOML-comment stamp used in .toml. Returns empty string if no recognized
+// stamp is present.
 func installedPromptHash(path string) string {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return ""
 	}
 	firstLine, _, _ := strings.Cut(string(data), "\n")
-	if strings.HasPrefix(firstLine, promptHashPrefix) && strings.HasSuffix(firstLine, strings.TrimSuffix(promptHashSuffix, "\n")) {
-		return strings.TrimPrefix(strings.TrimSuffix(firstLine, strings.TrimSuffix(promptHashSuffix, "\n")), promptHashPrefix)
+	suffix := strings.TrimSuffix(promptHashSuffix, "\n")
+	if strings.HasPrefix(firstLine, promptHashPrefix) && strings.HasSuffix(firstLine, suffix) {
+		return strings.TrimPrefix(strings.TrimSuffix(firstLine, suffix), promptHashPrefix)
+	}
+	if strings.HasPrefix(firstLine, promptHashPrefixTOML) {
+		return strings.TrimPrefix(firstLine, promptHashPrefixTOML)
 	}
 	return ""
 }
 
-// stampedContent prepends a hash comment to prompt file content.
-func stampedContent(data []byte) []byte {
+// stampedContent prepends a hash comment to a prompt file's content. The
+// comment style is chosen by extension so the stamp is a valid comment in
+// each file format: HTML for .md, # for .toml.
+func stampedContent(path string, data []byte) []byte {
 	hash := contentHash(data)
-	stamp := promptHashPrefix + hash + strings.TrimSuffix(promptHashSuffix, "\n") + "\n"
+	var stamp string
+	if strings.HasSuffix(path, ".toml") {
+		stamp = promptHashPrefixTOML + hash + "\n"
+	} else {
+		stamp = promptHashPrefix + hash + strings.TrimSuffix(promptHashSuffix, "\n") + "\n"
+	}
 	return append([]byte(stamp), data...)
 }
 
@@ -784,7 +799,7 @@ func InitPrompts(force, minimal bool) (*InitResult, error) {
 		if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
 			return result, fmt.Errorf("create dir for %s: %w", rel, err)
 		}
-		if err := os.WriteFile(destPath, stampedContent(plan[rel]), 0644); err != nil {
+		if err := os.WriteFile(destPath, stampedContent(rel, plan[rel]), 0644); err != nil {
 			return result, fmt.Errorf("write %s: %w", destPath, err)
 		}
 		result.Created = append(result.Created, rel)
@@ -867,7 +882,7 @@ func InstallPrompts(force bool) (*InstallResult, error) {
 					return nil
 				}
 				// Hash mismatch or no hash — file is stale, update it
-				if err := os.WriteFile(destPath, stampedContent(data), 0644); err != nil {
+				if err := os.WriteFile(destPath, stampedContent(rel, data), 0644); err != nil {
 					return fmt.Errorf("update %s: %w", destPath, err)
 				}
 				result.Updated = append(result.Updated, rel)
@@ -875,7 +890,7 @@ func InstallPrompts(force bool) (*InstallResult, error) {
 			}
 		}
 
-		if err := os.WriteFile(destPath, stampedContent(data), 0644); err != nil {
+		if err := os.WriteFile(destPath, stampedContent(rel, data), 0644); err != nil {
 			return fmt.Errorf("write %s: %w", destPath, err)
 		}
 		result.Installed = append(result.Installed, rel)

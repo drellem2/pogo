@@ -275,13 +275,30 @@ func TestContentHash(t *testing.T) {
 
 func TestStampedContent(t *testing.T) {
 	data := []byte("# My Prompt\nDo stuff.\n")
-	stamped := stampedContent(data)
+	stamped := stampedContent("crew/foo.md", data)
 
 	s := string(stamped)
 	if !strings.HasPrefix(s, "<!-- pogo-prompt-hash: ") {
-		t.Errorf("stamped content should start with hash comment, got: %s", s[:60])
+		t.Errorf("stamped content should start with HTML hash comment for .md, got: %s", s[:60])
 	}
 	if !strings.Contains(s, "# My Prompt\nDo stuff.\n") {
+		t.Error("stamped content should contain original content")
+	}
+}
+
+func TestStampedContentTOML(t *testing.T) {
+	// TOML files must use a TOML-style comment so the stamp doesn't break parsing.
+	data := []byte("name = \"pm-foo\"\nrepos = [\"foo\"]\n")
+	stamped := stampedContent("pm/foo.toml", data)
+
+	s := string(stamped)
+	if !strings.HasPrefix(s, "# pogo-prompt-hash: ") {
+		t.Errorf("stamped content for .toml should start with TOML hash comment, got: %s", s[:60])
+	}
+	if strings.HasPrefix(s, "<!--") {
+		t.Error("stamped .toml file must not start with HTML comment — would break TOML parsing")
+	}
+	if !strings.Contains(s, "name = \"pm-foo\"") {
 		t.Error("stamped content should contain original content")
 	}
 }
@@ -292,7 +309,7 @@ func TestInstalledPromptHash(t *testing.T) {
 
 	// File with valid hash stamp
 	data := []byte("original content")
-	os.WriteFile(path, stampedContent(data), 0644)
+	os.WriteFile(path, stampedContent("test.md", data), 0644)
 
 	h := installedPromptHash(path)
 	if h != contentHash(data) {
@@ -308,6 +325,19 @@ func TestInstalledPromptHash(t *testing.T) {
 	// Nonexistent file
 	if installedPromptHash(filepath.Join(dir, "nope.md")) != "" {
 		t.Error("expected empty hash for missing file")
+	}
+}
+
+func TestInstalledPromptHashTOML(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.toml")
+
+	data := []byte("name = \"pm-foo\"\n")
+	os.WriteFile(path, stampedContent("test.toml", data), 0644)
+
+	h := installedPromptHash(path)
+	if h != contentHash(data) {
+		t.Errorf("expected hash %s, got %s", contentHash(data), h)
 	}
 }
 
@@ -372,7 +402,11 @@ func TestInstallPromptsUpdatesUnstampedFiles(t *testing.T) {
 	os.Setenv("HOME", tmpHome)
 	defer os.Setenv("HOME", origHome)
 
-	// Create pre-existing files without hash stamps (simulates old install)
+	// Create pre-existing files without hash stamps (simulates old install).
+	// Pre-create one file from each shipped subdirectory so the "stale →
+	// updated" path is exercised; new shipped files (e.g. pm/) will appear
+	// as fresh installs and that's fine — the assertion below targets the
+	// stale path specifically.
 	agentsDir := filepath.Join(tmpHome, ".pogo", "agents")
 	crewDir := filepath.Join(agentsDir, "crew")
 	tmplDir := filepath.Join(agentsDir, "templates")
@@ -387,12 +421,21 @@ func TestInstallPromptsUpdatesUnstampedFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Files without hash stamps should be treated as stale and updated
+	// Files without hash stamps should be treated as stale and updated.
 	if len(result.Updated) == 0 {
 		t.Error("expected unstamped files to be updated")
 	}
-	if len(result.Installed) != 0 {
-		t.Errorf("expected no new installs (files existed), got %v", result.Installed)
+	for _, rel := range []string{"mayor.md", "crew/doctor.md", "templates/polecat.md", "templates/polecat-qa.md"} {
+		found := false
+		for _, u := range result.Updated {
+			if u == rel {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("expected %s in Updated list, got Updated=%v", rel, result.Updated)
+		}
 	}
 }
 
@@ -927,6 +970,9 @@ func TestInitPromptsDefault(t *testing.T) {
 		filepath.Join("crew", "doctor.md"),
 		filepath.Join("templates", "polecat.md"),
 		filepath.Join("templates", "polecat-qa.md"),
+		filepath.Join("pm", "pm-template.md"),
+		filepath.Join("pm", "pogo.toml"),
+		filepath.Join("pm", "onethird.toml"),
 	} {
 		path := filepath.Join(tmpHome, ".pogo", "agents", rel)
 		if _, err := os.Stat(path); err != nil {
@@ -942,6 +988,28 @@ func TestInitPromptsDefault(t *testing.T) {
 	}
 	if !strings.HasPrefix(string(data), promptHashPrefix) {
 		t.Errorf("expected mayor.md to be hash-stamped, got first line: %q", strings.SplitN(string(data), "\n", 2)[0])
+	}
+
+	// PM TOML configs must be stamped with a TOML-style comment so the file
+	// remains valid TOML — an HTML comment at the top would break parsers.
+	for _, rel := range []string{
+		filepath.Join("pm", "pogo.toml"),
+		filepath.Join("pm", "onethird.toml"),
+	} {
+		path := filepath.Join(tmpHome, ".pogo", "agents", rel)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", rel, err)
+		}
+		if !strings.HasPrefix(string(data), promptHashPrefixTOML) {
+			t.Errorf("expected %s to be TOML-stamped, got first line: %q", rel, strings.SplitN(string(data), "\n", 2)[0])
+		}
+		if strings.HasPrefix(string(data), "<!--") {
+			t.Errorf("%s starts with HTML comment — would break TOML parsing", rel)
+		}
+		if !strings.Contains(string(data), "name") || !strings.Contains(string(data), "= \"pm-") {
+			t.Errorf("expected %s to declare a name = \"pm-...\" key", rel)
+		}
 	}
 }
 
