@@ -167,6 +167,8 @@ mg mail list mayor
 
 For each message, read it with `mg mail read mayor <msg-id>` — this marks it as read so you don't re-process it after a restart.
 
+Your inbox is for **coordination only**. If you have something for the user, send it to `human` (not to your own thread). Do not summarize or forward mail addressed to other agents into your own inbox — the apple-side notifier polls `human/new/` and delivers user-facing mail directly.
+
 Agents and the refinery mail you when things need attention:
 
 - **Refinery merges** (subject: `MERGED: ...`): The refinery sends mail when a merge succeeds. This is your signal to stop the polecat and archive the work item (see step 3 above). Handle QA if applicable (step 4).

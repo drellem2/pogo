@@ -41,7 +41,10 @@ pose <query>                     # Search across repos
 mg mail list doctor              # Check your inbox
 mg mail read <msg-id>            # Read a message
 mg mail send <agent> --from=doctor --subject="<subj>" --body="<body>"
+mg mail send human --from=doctor --subject="<subj>" --body="<body>"   # User-facing findings — apple-side notifier delivers these
 ```
+
+If you need to surface a diagnostic finding to the user, mail `human` (not the mayor). The mayor's inbox is for coordination; `human` is the user mailbox the apple-side notifier polls.
 
 ## How to Diagnose
 
