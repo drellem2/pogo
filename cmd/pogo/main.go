@@ -478,8 +478,12 @@ The agent runs as a persistent crew process that pogod monitors and restarts on 
 					if a.LastActivity != "" {
 						activity = "  last-activity=" + a.LastActivity
 					}
-					fmt.Printf("%-20s  pid=%-6d  type=%-8s  status=%-10s  uptime=%s%s\n",
-						a.Name, a.PID, a.Type, a.Status, a.Uptime, activity)
+					workItem := ""
+					if a.WorkItemID != "" {
+						workItem = "  work-item=" + a.WorkItemID
+					}
+					fmt.Printf("%-20s  pid=%-6d  type=%-8s  status=%-10s  uptime=%s%s%s\n",
+						a.Name, a.PID, a.Type, a.Status, a.Uptime, activity, workItem)
 				}
 			}
 		},

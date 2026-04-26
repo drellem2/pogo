@@ -76,6 +76,12 @@ type Agent struct {
 	// SourceRepo is the original repo path used to create/remove the worktree.
 	SourceRepo string `json:"source_repo,omitempty"`
 
+	// WorkItemID links a polecat (or future crew claim) to an mg work item
+	// (e.g. "mg-3640"). Set at spawn from SpawnPolecatAPIRequest.Id; empty for
+	// agents not tied to a specific item. Used by spend tracking to attribute
+	// running-agent token cost to the right item without grepping events.
+	WorkItemID string `json:"work_item_id,omitempty"`
+
 	// InitialNudge is the message sent after spawn to bypass the CLI interactive prompt.
 	// Stored so Respawn can re-send it.
 	InitialNudge string `json:"-"`
@@ -240,6 +246,7 @@ type SpawnRequest struct {
 	SourceRepo     string   // original repo path for worktree removal (optional)
 	InitialNudge   string   // if set, pogod sends this nudge after spawn to bypass the CLI interactive prompt
 	RestartOnCrash bool     // if true, pogod respawns this agent when it exits unexpectedly
+	WorkItemID     string   // mg work item id this agent is assigned to (polecats); empty for crew/general agents
 }
 
 // Spawn starts a new agent process with a PTY.
@@ -290,6 +297,7 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 		WorktreeDir:    req.WorktreeDir,
 		SourceRepo:     req.SourceRepo,
 		RestartOnCrash: req.RestartOnCrash,
+		WorkItemID:     req.WorkItemID,
 		master:         master,
 		cmd:            cmd,
 		outputBuf:      NewRingBuffer(64 * 1024), // 64KB rolling buffer
@@ -486,6 +494,7 @@ func (r *Registry) Respawn(name string) (*Agent, error) {
 		WorktreeDir:    old.WorktreeDir,
 		SourceRepo:     old.SourceRepo,
 		InitialNudge:   old.InitialNudge,
+		WorkItemID:     old.WorkItemID,
 		master:         master,
 		cmd:            cmd,
 		outputBuf:      NewRingBuffer(64 * 1024),

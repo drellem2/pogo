@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -600,5 +601,126 @@ func TestDoneBlocksUntilOnExitCompletes(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Done() never signaled")
+	}
+}
+
+func TestWorkItemIDSetOnSpawn(t *testing.T) {
+	tmpDir := t.TempDir()
+	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	defer reg.StopAll(2 * time.Second)
+
+	a, err := reg.Spawn(SpawnRequest{
+		Name:       "wi-test",
+		Type:       TypePolecat,
+		Command:    []string{"cat"},
+		WorkItemID: "mg-3640",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.WorkItemID != "mg-3640" {
+		t.Errorf("WorkItemID = %q, want %q", a.WorkItemID, "mg-3640")
+	}
+}
+
+func TestWorkItemIDEmptyByDefault(t *testing.T) {
+	tmpDir := t.TempDir()
+	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	defer reg.StopAll(2 * time.Second)
+
+	a, err := reg.Spawn(SpawnRequest{
+		Name:    "no-wi",
+		Type:    TypeCrew,
+		Command: []string{"cat"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.WorkItemID != "" {
+		t.Errorf("WorkItemID = %q, want empty", a.WorkItemID)
+	}
+}
+
+// TestWorkItemIDRoundTripsThroughJSON verifies that the Agent struct's
+// WorkItemID field round-trips through json.Marshal/Unmarshal — the same
+// encoding any future runtime state file would use to persist the registry
+// across pogod restarts. Per the spend-tracking design (mg-75c3),
+// live-attribution of polecat token cost depends on this field surviving.
+func TestWorkItemIDRoundTripsThroughJSON(t *testing.T) {
+	a := &Agent{
+		Name:       "pc-3640",
+		PID:        12345,
+		Type:       TypePolecat,
+		StartTime:  time.Unix(1700000000, 0).UTC(),
+		Command:    []string{"claude"},
+		Status:     StatusRunning,
+		WorkItemID: "mg-3640",
+	}
+
+	data, err := json.Marshal(a)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if !strings.Contains(string(data), `"work_item_id":"mg-3640"`) {
+		t.Errorf("marshal output missing work_item_id: %s", data)
+	}
+
+	var b Agent
+	if err := json.Unmarshal(data, &b); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if b.WorkItemID != "mg-3640" {
+		t.Errorf("after round-trip WorkItemID = %q, want %q", b.WorkItemID, "mg-3640")
+	}
+}
+
+// TestWorkItemIDOmittedWhenEmpty ensures crew agents (which have empty
+// WorkItemID) don't bloat the state-file JSON with an empty string field.
+func TestWorkItemIDOmittedWhenEmpty(t *testing.T) {
+	a := &Agent{Name: "mayor", Type: TypeCrew, Status: StatusRunning}
+	data, err := json.Marshal(a)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if strings.Contains(string(data), "work_item_id") {
+		t.Errorf("expected work_item_id to be omitted when empty, got: %s", data)
+	}
+}
+
+// TestWorkItemIDPreservedAcrossRespawn guards the case where a crashed polecat
+// is respawned by pogod's onExit handler — the work item link must survive so
+// spend tracking and the agent registry stay correct after the restart.
+func TestWorkItemIDPreservedAcrossRespawn(t *testing.T) {
+	tmpDir := t.TempDir()
+	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	defer reg.StopAll(2 * time.Second)
+
+	a, err := reg.Spawn(SpawnRequest{
+		Name:       "respawn-wi",
+		Type:       TypeCrew,
+		Command:    []string{"true"},
+		WorkItemID: "mg-7777",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-a.Done()
+
+	a.Command = []string{"sleep", "10"}
+	b, err := reg.Respawn("respawn-wi")
+	if err != nil {
+		t.Fatalf("Respawn: %v", err)
+	}
+	if b.WorkItemID != "mg-7777" {
+		t.Errorf("after respawn WorkItemID = %q, want %q", b.WorkItemID, "mg-7777")
 	}
 }

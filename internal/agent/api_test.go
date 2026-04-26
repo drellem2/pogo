@@ -551,3 +551,75 @@ func TestHandleSpawnPolecat_FrontmatterStrippedFromBody(t *testing.T) {
 		t.Errorf("expected expanded body, got: %q", body)
 	}
 }
+
+// TestHandleSpawnPolecat_WorkItemIDPlumbedFromRequest verifies that
+// SpawnPolecatAPIRequest.Id flows through to Agent.WorkItemID and surfaces in
+// the AgentInfo JSON returned by the spawn endpoint and the registry list.
+func TestHandleSpawnPolecat_WorkItemIDPlumbedFromRequest(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	writeTemplate(t, "wi", "# polecat\n")
+
+	reg, err := NewRegistry(filepath.Join(tmpHome, "sockets"))
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	defer reg.StopAll(2 * time.Second)
+	reg.SetCommandConfig(catCommandConfig{})
+
+	a := spawnPolecatViaAPI(t, reg, SpawnPolecatAPIRequest{
+		Name:     "pc-wi",
+		Template: "wi",
+		Id:       "mg-3640",
+	})
+	if a.WorkItemID != "mg-3640" {
+		t.Errorf("Agent.WorkItemID = %q, want %q", a.WorkItemID, "mg-3640")
+	}
+
+	info := agentInfo(a)
+	if info.WorkItemID != "mg-3640" {
+		t.Errorf("AgentInfo.WorkItemID = %q, want %q", info.WorkItemID, "mg-3640")
+	}
+
+	data, err := json.Marshal(info)
+	if err != nil {
+		t.Fatalf("Marshal AgentInfo: %v", err)
+	}
+	if !strings.Contains(string(data), `"work_item_id":"mg-3640"`) {
+		t.Errorf("agent list JSON missing work_item_id: %s", data)
+	}
+}
+
+// TestHandleSpawnPolecat_WorkItemIDEmptyWhenNoId ensures the field stays empty
+// when no Id is supplied, and is omitted from JSON output rather than serialized
+// as "".
+func TestHandleSpawnPolecat_WorkItemIDEmptyWhenNoId(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	writeTemplate(t, "noid", "# polecat\n")
+
+	reg, err := NewRegistry(filepath.Join(tmpHome, "sockets"))
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	defer reg.StopAll(2 * time.Second)
+	reg.SetCommandConfig(catCommandConfig{})
+
+	a := spawnPolecatViaAPI(t, reg, SpawnPolecatAPIRequest{
+		Name:     "pc-noid",
+		Template: "noid",
+	})
+	if a.WorkItemID != "" {
+		t.Errorf("Agent.WorkItemID = %q, want empty when no Id supplied", a.WorkItemID)
+	}
+
+	data, err := json.Marshal(agentInfo(a))
+	if err != nil {
+		t.Fatalf("Marshal AgentInfo: %v", err)
+	}
+	if strings.Contains(string(data), "work_item_id") {
+		t.Errorf("expected work_item_id to be omitted when empty, got: %s", data)
+	}
+}

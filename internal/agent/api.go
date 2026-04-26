@@ -31,6 +31,7 @@ type AgentInfo struct {
 	ProcessName    string      `json:"process_name"`
 	Uptime         string      `json:"uptime"`
 	LastActivity   string      `json:"last_activity,omitempty"`
+	WorkItemID     string      `json:"work_item_id,omitempty"`
 }
 
 // SpawnAPIRequest is the JSON body for POST /agents.
@@ -183,6 +184,7 @@ func agentInfo(a *Agent) AgentInfo {
 		PromptFile:     a.PromptFile,
 		ProcessName:    ProcessName(a.Type, a.Name),
 		Uptime:         agentUptime(a),
+		WorkItemID:     a.WorkItemID,
 	}
 	if a.outputBuf != nil {
 		if t := a.outputBuf.LastWriteTime(); !t.IsZero() {
@@ -667,6 +669,7 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		SourceRepo:     sourceRepo,
 		InitialNudge:   nudgeMsg,
 		RestartOnCrash: ResolveRestartOnCrash(promptFile, TypePolecat),
+		WorkItemID:     spawnReq.Id,
 	})
 	if err != nil {
 		os.Remove(promptFile) // Clean up temp file on spawn failure
