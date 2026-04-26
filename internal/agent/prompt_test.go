@@ -969,6 +969,8 @@ func TestInitPromptsDefault(t *testing.T) {
 	for _, rel := range []string{
 		"mayor.md",
 		filepath.Join("crew", "doctor.md"),
+		filepath.Join("crew", "pm-pogo.md"),
+		filepath.Join("crew", "pm-onethird.md"),
 		filepath.Join("templates", "polecat.md"),
 		filepath.Join("templates", "polecat-qa.md"),
 		filepath.Join("pm", "pm-template.md"),
@@ -1218,6 +1220,68 @@ func TestPMTemplateIncludesSweepCronEntries(t *testing.T) {
 	// Each cron's prompt body must be `sweep` so the PM recognizes the trigger.
 	if !strings.Contains(s, "`sweep`") {
 		t.Error("pm-template.md: expected the sweep cron prompt body to be `sweep`")
+	}
+}
+
+// TestPMCrewShimsResolveAgainstShippedTemplate locks in the operational wiring
+// for the initial PM roster (mg-6805 / Ticket D): the crew shim files that
+// ship with the default profile must each carry a single `extends pm-template
+// with config pm/<product>.toml` directive that SynthesizeExtendsPrompt can
+// resolve against the shipped pm-template + per-product TOML. If any of these
+// files drifts (wrong directive, missing config, etc.) `pogo agent start
+// pm-pogo` no-ops at the daemon and the digest channel is dead.
+func TestPMCrewShimsResolveAgainstShippedTemplate(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	// Lay down the shipped coding profile under the temp HOME so the
+	// shims resolve against real template + config files on disk.
+	if _, err := InitPrompts(false, false); err != nil {
+		t.Fatalf("InitPrompts: %v", err)
+	}
+
+	for _, shim := range []struct {
+		name   string
+		config string
+	}{
+		{"pm-pogo", "pm/pogo.toml"},
+		{"pm-onethird", "pm/onethird.toml"},
+	} {
+		shim := shim
+		t.Run(shim.name, func(t *testing.T) {
+			crewPath := filepath.Join(CrewPromptDir(), shim.name+".md")
+			outPath := filepath.Join(t.TempDir(), "synth.md")
+			got, err := SynthesizeExtendsPrompt(crewPath, outPath)
+			if err != nil {
+				t.Fatalf("SynthesizeExtendsPrompt(%s): %v", shim.name, err)
+			}
+			if got != outPath {
+				t.Fatalf("expected directive to be recognized — got empty result for %s", crewPath)
+			}
+			data, err := os.ReadFile(outPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			out := string(data)
+			if !strings.Contains(out, shim.config) {
+				t.Errorf("%s: synthesized prompt missing config path %q", shim.name, shim.config)
+			}
+			if !strings.Contains(out, "Product Manager (PM) — Template") {
+				t.Errorf("%s: synthesized prompt missing pm-template body", shim.name)
+			}
+			// The synthesized prompt must inherit the template's frontmatter
+			// (auto_start=true, restart_on_crash=true) — that is what gives
+			// each PM its boot semantics on `pogo agent start`.
+			meta, _, err := ParsePromptFrontmatter(outPath)
+			if err != nil {
+				t.Fatalf("%s: synthesized prompt frontmatter unparseable: %v", shim.name, err)
+			}
+			if !meta.AutoStart {
+				t.Errorf("%s: expected synthesized prompt to inherit auto_start=true", shim.name)
+			}
+			if !meta.RestartOnCrash {
+				t.Errorf("%s: expected synthesized prompt to inherit restart_on_crash=true", shim.name)
+			}
+		})
 	}
 }
 
