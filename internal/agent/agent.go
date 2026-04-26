@@ -529,8 +529,21 @@ func (r *Registry) Respawn(name string) (*Agent, error) {
 	return a, nil
 }
 
+// NudgeSubmitDelay is the gap between writing the nudge body and the trailing
+// carriage return that submits it. The two writes must arrive in separate
+// stdin read() calls on the receiver: when Claude Code's React/Ink input box
+// gets the body and the \r as one chunk, it treats the chunk as a paste and
+// the \r becomes a literal newline inside the input field instead of a submit.
+// The result is a nudge that lands in the input box but never gets sent —
+// observed on long-running crew agents where the keyboard protocol is fully
+// initialized. Polecats accidentally avoided the bug only because their first
+// nudges fire while the TUI is still in startup, before paste detection is
+// armed. 50ms is generous enough to span Node.js's read loop and Ink's
+// re-render cycle (~16ms) without noticeably slowing nudge throughput.
+const NudgeSubmitDelay = 50 * time.Millisecond
+
 // Nudge writes a message to an agent's PTY master fd.
-// The agent sees this as typed input.
+// The agent sees this as typed input followed by a submit (Enter).
 func (a *Agent) Nudge(message string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -539,9 +552,15 @@ func (a *Agent) Nudge(message string) error {
 		return fmt.Errorf("agent %q has no PTY", a.Name)
 	}
 
-	_, err := a.master.WriteString(message + "\r")
-	if err != nil {
-		return fmt.Errorf("write to PTY: %w", err)
+	if message != "" {
+		if _, err := a.master.WriteString(message); err != nil {
+			return fmt.Errorf("write to PTY: %w", err)
+		}
+		time.Sleep(NudgeSubmitDelay)
+	}
+
+	if _, err := a.master.WriteString("\r"); err != nil {
+		return fmt.Errorf("write submit to PTY: %w", err)
 	}
 	return nil
 }
