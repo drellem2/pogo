@@ -1098,6 +1098,33 @@ func TestInitPromptsRefusalIsAtomic(t *testing.T) {
 	}
 }
 
+// TestPolecatTemplatesIncludeMailCheckCron locks in the requirement that
+// every polecat template instructs the agent to register a mail-check cron at
+// startup. Without this, polecats won't proactively read mail and the mayor
+// can't reach them mid-task. See work item mg-c1d3.
+func TestPolecatTemplatesIncludeMailCheckCron(t *testing.T) {
+	templates := []string{
+		"prompts/templates/polecat.md",
+		"prompts/templates/polecat-qa.md",
+	}
+	for _, path := range templates {
+		data, err := defaultPrompts.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		s := string(data)
+		if !strings.Contains(s, "CronCreate") {
+			t.Errorf("%s: expected CronCreate instruction in template", path)
+		}
+		if !strings.Contains(s, "mg mail list {{.Id}}") {
+			t.Errorf("%s: expected the cron prompt to call `mg mail list {{.Id}}`", path)
+		}
+		if !strings.Contains(s, "*/10 * * * *") {
+			t.Errorf("%s: expected the cron schedule `*/10 * * * *` (every 10 minutes)", path)
+		}
+	}
+}
+
 func TestInitPromptDirs(t *testing.T) {
 	origHome := os.Getenv("HOME")
 	tmpHome := t.TempDir()

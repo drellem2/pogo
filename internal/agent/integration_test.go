@@ -161,15 +161,23 @@ func TestPolecatTemplateExpansion(t *testing.T) {
 		}
 	}
 
-	// Verify anti-cron instructions are present (polecats must not set up self-nudges)
-	antiCronChecks := []string{
-		"do NOT use cron",
-		"No self-nudging or cron jobs",
+	// Verify the mail-check cron instruction is present. Polecats are not on
+	// pogod's nudge cycle, so they need a self-cron to proactively check mail.
+	cronChecks := []string{
+		"CronCreate",          // tool name
+		"*/10 * * * *",        // 10-minute schedule
+		"mg mail list gt-a3f", // expanded cron prompt body
 	}
-	for _, check := range antiCronChecks {
+	for _, check := range cronChecks {
 		if !strings.Contains(expanded, check) {
-			t.Errorf("expanded template missing anti-cron instruction %q", check)
+			t.Errorf("expanded template missing mail-check cron instruction %q", check)
 		}
+	}
+
+	// Verify guidance against additional cron jobs is still present — only
+	// the one mail-check cron is allowed.
+	if !strings.Contains(expanded, "One mail-check cron only") {
+		t.Errorf("expanded template missing guidance limiting cron jobs to the mail-check one")
 	}
 }
 

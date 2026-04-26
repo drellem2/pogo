@@ -29,26 +29,35 @@ Follow these steps exactly, in order. Skipping any step is a failure.
    mg claim {{.Id}}
    ```
 
-2. **Do the work.** Stay focused on the task described above. You are already in your isolated worktree at `{{.WorktreeDir}}` on branch `polecat-{{.Id}}`. **Run all commands in this directory** — do not `cd` to the source repository.
+2. **Set up a mail-check cron** so the mayor can reach you mid-task. Polecats are not on pogod's nudge cycle — without this step, you won't notice incoming mail until your work is done. Use the `CronCreate` tool **exactly once** to register a recurring self-trigger:
+
+   - `cron`: `*/10 * * * *` (every 10 minutes — the default; do not go below 5 minutes or above 10)
+   - `prompt`: `` Check your mail with `mg mail list {{.Id}}` and handle any unread messages. ``
+   - `recurring`: `true`
+
+   Leave `durable` at its default (`false`) so the cron lives only in this session — when your process exits, the cron dies with it, no cleanup needed. This is the **only** self-cron you should create; for refinery polling in step 6, use a bash loop, not cron.
+
+3. **Do the work.** Stay focused on the task described above. You are already in your isolated worktree at `{{.WorktreeDir}}` on branch `polecat-{{.Id}}`. **Run all commands in this directory** — do not `cd` to the source repository.
    - **Write or update tests** for any code you change. If the repo has existing tests, follow the same patterns.
    - **Run existing tests** (e.g. `./test.sh`, `go test ./...`, `npm test`) before committing to make sure nothing is broken.
    - **Update documentation** (README, inline docs, help text) if your changes affect user-facing behavior.
 
-3. **Commit and push your branch:**
+4. **Commit and push your branch:**
    ```bash
    git add <files>
    git commit -m "<type>: <description> ({{.Id}})"
    git push origin polecat-{{.Id}}
    ```
 
-4. **Submit to the merge queue** (capture the MR ID from output):
+5. **Submit to the merge queue** (capture the MR ID from output):
    ```bash
    pogo refinery submit polecat-{{.Id}} --repo={{.Repo}} --author={{.Id}} --target={{if .Branch}}{{.Branch}}{{else}}main{{end}}
    ```
 
-5. **Wait for merge result** — poll refinery using a bash while-loop:
+6. **Wait for merge result** — poll refinery using a bash while-loop:
    ```bash
-   # Poll in a bash loop — do NOT use cron, CronCreate, scheduled tasks, or pogo nudge for this.
+   # Poll in a bash loop — do NOT add another cron, scheduled task, or pogo nudge for this.
+   # The mail-check cron from step 2 is the only background trigger you should have.
    while true; do
      STATUS=$(pogo refinery show <id> --json | jq -r .status)
      echo "$STATUS"
@@ -56,9 +65,9 @@ Follow these steps exactly, in order. Skipping any step is a failure.
      sleep 10
    done
    ```
-   Use a simple bash loop only. Do NOT set up crontab entries, CronCreate jobs, or `pogo nudge` commands to poll — these interrupt interactive sessions.
+   Use a simple bash loop only. Adding more cron jobs or `pogo nudge` commands for polling interrupts interactive sessions — the mail-check cron from step 2 is the only `CronCreate` you should have running.
 
-6. **If merged:** mark the work item done:
+7. **If merged:** mark the work item done:
    ```bash
    mg done {{.Id}} --result='{"branch": "polecat-{{.Id}}"}'
    ```
@@ -67,7 +76,7 @@ Follow these steps exactly, in order. Skipping any step is a failure.
    mg mail send mayor --from={{.Id}} --subject="merge failed for {{.Id}}" --body="<failure details from refinery>"
    ```
 
-7. **Stay alive.** Do NOT exit. After completing steps 1–6, wait for the mayor to stop you. The mayor will verify your work was merged before terminating your process. If the mayor sends you a message (e.g., asking for a fix or retry), act on it immediately.
+8. **Stay alive.** Do NOT exit. After completing steps 1–7, wait for the mayor to stop you. The mayor will verify your work was merged before terminating your process. If the mayor sends you a message (e.g., asking for a fix or retry), act on it immediately.
 
 ## Working Principles
 
@@ -75,7 +84,7 @@ Follow these steps exactly, in order. Skipping any step is a failure.
 - **Commit often.** Small, focused commits are easier to review and merge.
 - **Follow conventions.** Match the existing code style in the repository.
 - **Don't push to main.** Push to your feature branch. The refinery merges to main.
-- **No self-nudging or cron jobs.** Do NOT set up crontab entries, CronCreate jobs, `/loop`, `/schedule`, or `pogo nudge` commands targeting yourself or other agents. Pogod handles all periodic nudging. If you need to poll, use a simple bash while-loop.
+- **One mail-check cron only.** Step 2 sets up a single `CronCreate` for mail-checking — that one is required. Do NOT set up any *additional* crontab entries, CronCreate jobs, `/loop`, `/schedule`, or `pogo nudge` commands targeting yourself or other agents. If you need to poll for refinery status, use a simple bash while-loop (see step 6).
 - **If stuck, mail the mayor:**
   ```bash
   mg mail send mayor --from={{.Id}} --subject="stuck on {{.Id}}" --body="<what you tried and what's blocking you>"
