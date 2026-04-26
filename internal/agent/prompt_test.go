@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestExpandTemplate(t *testing.T) {
@@ -1190,6 +1191,249 @@ func TestPolecatTemplatesIncludeMailCheckCron(t *testing.T) {
 		if !strings.Contains(s, "*/10 * * * *") {
 			t.Errorf("%s: expected the cron schedule `*/10 * * * *` (every 10 minutes)", path)
 		}
+	}
+}
+
+// TestSynthesizeExtendsPrompt covers the PM crew-loader directive that lets a
+// crew prompt redirect to a shared template plus a per-instance TOML config.
+// See docs/product-manager-design.md §1.
+func TestSynthesizeExtendsPrompt(t *testing.T) {
+	origHome := os.Getenv("HOME")
+	tmpHome := t.TempDir()
+	os.Setenv("HOME", tmpHome)
+	defer os.Setenv("HOME", origHome)
+
+	if err := InitPromptDirs(); err != nil {
+		t.Fatal(err)
+	}
+	pmDir := filepath.Join(PromptDir(), "pm")
+	if err := os.MkdirAll(pmDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Template with frontmatter — the synthesized prompt should preserve it
+	// so nudge_on_start / restart_on_crash flow through.
+	tmplBody := "+++\nauto_start = true\nnudge_on_start = \"sweep ready\"\n+++\n# PM Template\n\nYou are a PM.\n"
+	if err := os.WriteFile(filepath.Join(pmDir, "pm-template.md"), []byte(tmplBody), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfgBody := "name = \"pm-pogo\"\nrepos = [\"pogo\"]\n"
+	if err := os.WriteFile(filepath.Join(pmDir, "pogo.toml"), []byte(cfgBody), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	crewPath := filepath.Join(CrewPromptDir(), "pm-pogo.md")
+	if err := os.WriteFile(crewPath, []byte("extends pm-template with config pm/pogo.toml\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	outPath := filepath.Join(t.TempDir(), "synth.md")
+	got, err := SynthesizeExtendsPrompt(crewPath, outPath)
+	if err != nil {
+		t.Fatalf("SynthesizeExtendsPrompt: %v", err)
+	}
+	if got != outPath {
+		t.Errorf("returned path = %q, want %q", got, outPath)
+	}
+	data, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(data)
+
+	// Template body and frontmatter must be preserved.
+	if !strings.Contains(out, "+++\nauto_start = true") {
+		t.Errorf("merged prompt missing template frontmatter:\n%s", out)
+	}
+	if !strings.Contains(out, "# PM Template") {
+		t.Errorf("merged prompt missing template body:\n%s", out)
+	}
+	// Config must be inlined as a TOML block under "Your configuration".
+	if !strings.Contains(out, "## Your configuration") {
+		t.Errorf("merged prompt missing config section:\n%s", out)
+	}
+	if !strings.Contains(out, "```toml\n"+cfgBody+"```") {
+		t.Errorf("merged prompt missing inlined config:\n%s", out)
+	}
+	if !strings.Contains(out, "pm/pogo.toml") {
+		t.Errorf("merged prompt missing config path reference:\n%s", out)
+	}
+
+	// Frontmatter on the merged prompt must be parseable by ParsePromptFrontmatter
+	// — that is how StartCrewAgent finds nudge_on_start / restart_on_crash.
+	meta, _, err := ParsePromptFrontmatter(outPath)
+	if err != nil {
+		t.Fatalf("merged prompt frontmatter unparseable: %v", err)
+	}
+	if !meta.AutoStart {
+		t.Error("expected merged prompt to inherit auto_start=true from template")
+	}
+	if meta.NudgeOnStart != "sweep ready" {
+		t.Errorf("merged prompt nudge_on_start = %q, want %q", meta.NudgeOnStart, "sweep ready")
+	}
+}
+
+// TestSynthesizeExtendsPromptNoDirective verifies that a crew prompt without
+// the directive returns "" so the caller uses the original file as-is.
+func TestSynthesizeExtendsPromptNoDirective(t *testing.T) {
+	origHome := os.Getenv("HOME")
+	tmpHome := t.TempDir()
+	os.Setenv("HOME", tmpHome)
+	defer os.Setenv("HOME", origHome)
+
+	if err := InitPromptDirs(); err != nil {
+		t.Fatal(err)
+	}
+	crewPath := filepath.Join(CrewPromptDir(), "plain.md")
+	if err := os.WriteFile(crewPath, []byte("# Plain crew agent\n\nNo directive here.\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := SynthesizeExtendsPrompt(crewPath, filepath.Join(t.TempDir(), "synth.md"))
+	if err != nil {
+		t.Fatalf("SynthesizeExtendsPrompt: %v", err)
+	}
+	if got != "" {
+		t.Errorf("expected empty result for prompt without directive, got %q", got)
+	}
+}
+
+// TestSynthesizeExtendsPromptStripsHashStamps verifies that the pogo-prompt-hash
+// stamp added by InstallPrompts to the template (HTML-comment) and config
+// (TOML-comment) does not leak into the synthesized prompt.
+func TestSynthesizeExtendsPromptStripsHashStamps(t *testing.T) {
+	origHome := os.Getenv("HOME")
+	tmpHome := t.TempDir()
+	os.Setenv("HOME", tmpHome)
+	defer os.Setenv("HOME", origHome)
+
+	if err := InitPromptDirs(); err != nil {
+		t.Fatal(err)
+	}
+	pmDir := filepath.Join(PromptDir(), "pm")
+	if err := os.MkdirAll(pmDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	tmplData := stampedContent("pm/pm-template.md", []byte("+++\nauto_start = true\n+++\n# PM Template\n"))
+	if err := os.WriteFile(filepath.Join(pmDir, "pm-template.md"), tmplData, 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfgData := stampedContent("pm/pogo.toml", []byte("name = \"pm-pogo\"\n"))
+	if err := os.WriteFile(filepath.Join(pmDir, "pogo.toml"), cfgData, 0644); err != nil {
+		t.Fatal(err)
+	}
+	crewPath := filepath.Join(CrewPromptDir(), "pm-pogo.md")
+	if err := os.WriteFile(crewPath, []byte("extends pm-template with config pm/pogo.toml\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	outPath := filepath.Join(t.TempDir(), "synth.md")
+	if _, err := SynthesizeExtendsPrompt(crewPath, outPath); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(data)
+	if strings.Contains(out, "pogo-prompt-hash") {
+		t.Errorf("synthesized prompt should not contain prompt-hash stamps:\n%s", out)
+	}
+	// Frontmatter must still parse (i.e. starts with `+++` after stripping the stamp).
+	if _, _, err := ParsePromptFrontmatter(outPath); err != nil {
+		t.Errorf("synthesized prompt frontmatter unparseable: %v", err)
+	}
+}
+
+// TestSynthesizeExtendsPromptMissingFiles verifies that referenced template or
+// config files that don't exist surface as errors (not silent fallthrough).
+func TestSynthesizeExtendsPromptMissingFiles(t *testing.T) {
+	origHome := os.Getenv("HOME")
+	tmpHome := t.TempDir()
+	os.Setenv("HOME", tmpHome)
+	defer os.Setenv("HOME", origHome)
+
+	if err := InitPromptDirs(); err != nil {
+		t.Fatal(err)
+	}
+	crewPath := filepath.Join(CrewPromptDir(), "pm-ghost.md")
+	if err := os.WriteFile(crewPath, []byte("extends pm-template with config pm/ghost.toml\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := SynthesizeExtendsPrompt(crewPath, filepath.Join(t.TempDir(), "synth.md")); err == nil {
+		t.Error("expected error when referenced template/config is missing")
+	}
+}
+
+// TestStartCrewAgentResolvesExtendsDirective verifies that StartCrewAgent
+// honors the extends-with-config directive end-to-end: the spawned agent's
+// PromptFile points at the synthesized merged prompt, the merged prompt
+// contains both template + config, and the InitialNudge comes from the
+// template's frontmatter (not the redirecting crew file).
+func TestStartCrewAgentResolvesExtendsDirective(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	if err := InitPromptDirs(); err != nil {
+		t.Fatal(err)
+	}
+	pmDir := filepath.Join(PromptDir(), "pm")
+	if err := os.MkdirAll(pmDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(pmDir, "pm-template.md"),
+		[]byte("+++\nauto_start = true\nnudge_on_start = \"sweep ready\"\n+++\n# PM Template\n"),
+		0644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(pmDir, "pogo.toml"),
+		[]byte("name = \"pm-pogo\"\nrepos = [\"pogo\"]\n"),
+		0644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	crewPath := filepath.Join(CrewPromptDir(), "pm-pogo.md")
+	if err := os.WriteFile(crewPath, []byte("extends pm-template with config pm/pogo.toml\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	reg, err := NewRegistry(filepath.Join(tmpHome, "sockets"))
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	defer reg.StopAll(2 * time.Second)
+	reg.SetCommandConfig(catCommandConfig{})
+
+	a := startAgentViaAPI(t, reg, "pm-pogo")
+
+	// PromptFile must be the synthesized merged prompt under the agent dir,
+	// not the original redirect file.
+	wantPrefix := filepath.Join(tmpHome, ".pogo", "agents", "pm-pogo")
+	if !strings.HasPrefix(a.PromptFile, wantPrefix) {
+		t.Errorf("PromptFile = %q, expected synthesized prompt under %q", a.PromptFile, wantPrefix)
+	}
+	if a.PromptFile == crewPath {
+		t.Errorf("PromptFile must not be the redirect crew file %q", crewPath)
+	}
+
+	data, err := os.ReadFile(a.PromptFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(data)
+	if !strings.Contains(body, "# PM Template") {
+		t.Errorf("merged prompt missing template body:\n%s", body)
+	}
+	if !strings.Contains(body, "name = \"pm-pogo\"") {
+		t.Errorf("merged prompt missing config:\n%s", body)
+	}
+
+	if a.InitialNudge != "sweep ready" {
+		t.Errorf("InitialNudge = %q, want template's nudge_on_start %q", a.InitialNudge, "sweep ready")
 	}
 }
 

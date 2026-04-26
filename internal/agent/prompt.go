@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"text/template"
@@ -75,6 +76,87 @@ func ResolveTemplate(name string) (string, error) {
 		return "", fmt.Errorf("stat template: %w", err)
 	}
 	return path, nil
+}
+
+// extendsDirectiveRE matches `extends <template> with config <config>` on its
+// own line (multiline mode). Used by crew prompts that delegate their content
+// to a shared template + per-instance TOML config (PM tier — see
+// docs/product-manager-design.md §1).
+var extendsDirectiveRE = regexp.MustCompile(`(?m)^extends\s+(\S+)\s+with\s+config\s+(\S+)\s*$`)
+
+// SynthesizeExtendsPrompt looks for an `extends <template> with config <config>`
+// directive in the crew prompt at promptPath. If present, it reads the named
+// template and config, writes a merged prompt (template body + config inlined
+// as a TOML block) to outPath, and returns outPath. If absent, returns "" so
+// the caller can use promptPath as-is.
+//
+// Path resolution: <config> is relative to PromptDir. <template> may be either
+// a full path relative to PromptDir, or a bare name resolved alongside the
+// config file. `.md` is appended to <template> when missing. The template's
+// own frontmatter (e.g. auto_start, nudge_on_start) is preserved so it governs
+// the synthesized agent's behavior.
+func SynthesizeExtendsPrompt(promptPath, outPath string) (string, error) {
+	_, body, err := ParsePromptFrontmatter(promptPath)
+	if err != nil {
+		return "", err
+	}
+	m := extendsDirectiveRE.FindStringSubmatch(body)
+	if m == nil {
+		return "", nil
+	}
+	tmplArg, cfgArg := m[1], m[2]
+	root := PromptDir()
+	cfgPath := filepath.Join(root, cfgArg)
+	var tmplPath string
+	if strings.Contains(tmplArg, "/") {
+		tmplPath = filepath.Join(root, tmplArg)
+	} else {
+		tmplPath = filepath.Join(filepath.Dir(cfgPath), tmplArg)
+	}
+	if !strings.HasSuffix(tmplPath, ".md") {
+		tmplPath += ".md"
+	}
+	tmplData, err := os.ReadFile(tmplPath)
+	if err != nil {
+		return "", fmt.Errorf("read extends template %s: %w", tmplPath, err)
+	}
+	cfgData, err := os.ReadFile(cfgPath)
+	if err != nil {
+		return "", fmt.Errorf("read extends config %s: %w", cfgPath, err)
+	}
+	var buf bytes.Buffer
+	buf.Write(stripPromptHashStamp(tmplData))
+	if !bytes.HasSuffix(buf.Bytes(), []byte("\n")) {
+		buf.WriteByte('\n')
+	}
+	buf.WriteString("\n## Your configuration\n\nLoaded from `")
+	buf.WriteString(cfgArg)
+	buf.WriteString("`:\n\n```toml\n")
+	buf.Write(stripPromptHashStamp(cfgData))
+	if !bytes.HasSuffix(buf.Bytes(), []byte("\n")) {
+		buf.WriteByte('\n')
+	}
+	buf.WriteString("```\n")
+	if err := os.MkdirAll(filepath.Dir(outPath), 0755); err != nil {
+		return "", fmt.Errorf("create dir for synthesized prompt: %w", err)
+	}
+	if err := os.WriteFile(outPath, buf.Bytes(), 0644); err != nil {
+		return "", fmt.Errorf("write synthesized prompt: %w", err)
+	}
+	return outPath, nil
+}
+
+// stripPromptHashStamp removes a leading pogo-prompt-hash comment if present,
+// in either the markdown (HTML-comment) or TOML (#) flavor. Used when inlining
+// installed prompt/config files so the stamp doesn't leak into output.
+func stripPromptHashStamp(data []byte) []byte {
+	s := string(data)
+	if strings.HasPrefix(s, promptHashPrefix) || strings.HasPrefix(s, promptHashPrefixTOML) {
+		if nl := strings.IndexByte(s, '\n'); nl != -1 {
+			return data[nl+1:]
+		}
+	}
+	return data
 }
 
 // ExpandString runs s through Go text/template using vars. Strings without

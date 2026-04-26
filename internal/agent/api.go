@@ -424,6 +424,18 @@ func (r *Registry) StartCrewAgent(name string) (*Agent, error) {
 		return nil, fmt.Errorf("failed to create agent dir: %w", err)
 	}
 
+	// If the crew prompt is an `extends <template> with config <config>`
+	// redirect (PM tier), synthesize the merged prompt to a stable per-agent
+	// path so restart-on-crash reuses it. Empty result means no directive —
+	// use the original prompt as-is.
+	synth, err := SynthesizeExtendsPrompt(promptFile, filepath.Join(agentDir, "synthesized-prompt.md"))
+	if err != nil {
+		return nil, fmt.Errorf("synthesize extends prompt: %w", err)
+	}
+	if synth != "" {
+		promptFile = synth
+	}
+
 	// Build command from configurable template.
 	// Default: "claude --dangerously-skip-permissions --append-system-prompt-file {{.PromptFile}}"
 	// NOTE: --dangerously-skip-permissions is required for autonomous agent execution.
