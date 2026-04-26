@@ -95,6 +95,7 @@ Follow these steps exactly, in order. Skipping any step is a failure.
 - **Be specific.** When reporting failures, include exact error messages, expected vs actual behavior, and steps to reproduce.
 - **Stay scoped.** Only verify the work described in your assignment. If you find unrelated issues, note them in your report but don't investigate further.
 - **One mail-check cron only.** Step 2 sets up a single `CronCreate` for mail-checking — that one is required. Do NOT set up any *additional* crontab entries, CronCreate jobs, `/loop`, `/schedule`, or `pogo nudge` commands targeting yourself or other agents.
+- **If you need to surface something to the user, mail `human`** (not the mayor): `mg mail send human --from={{.Id}} --subject="<subj>" --body="<body>"`. The mayor's inbox is for coordination; user-facing mail goes to `human` so the apple-side notifier picks it up.
 - **If stuck, mail the mayor:**
   ```bash
   mg mail send mayor --from={{.Id}} --subject="stuck on {{.Id}}" --body="<what you tried and what's blocking you>"
