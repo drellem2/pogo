@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -1234,7 +1235,27 @@ Exits with code 1 if any critical check fails (--check mode only).`,
 				}
 			}
 
-			// 6. Macguffin available
+			// 6. Apple-side launchd pollers (macOS only). The mail-to-human notifier
+			// is silent-fail by nature: if com.pogo.notify is unloaded, mails pile up
+			// in ~/.macguffin/mail/human/new/ and Daniel never gets a notification.
+			// (Inbound com.pogo.reminders is checked symmetrically.) Warn rather than
+			// fail because pogo runs fine without these — they just gate the
+			// reminders-inbox UX provided by the pogo-reminders sibling repo.
+			if runtime.GOOS == "darwin" {
+				for _, svc := range []struct{ label, role string }{
+					{"com.pogo.notify", "outbound mail-to-human notifier"},
+					{"com.pogo.reminders", "inbound Reminders poller"},
+				} {
+					out, err := exec.Command("launchctl", "list", svc.label).CombinedOutput()
+					if err != nil || strings.TrimSpace(string(out)) == "" {
+						warn(svc.label, svc.role+" not loaded (run pogo-reminders/install.sh)")
+					} else {
+						pass(svc.label, svc.role+" loaded")
+					}
+				}
+			}
+
+			// 7. Macguffin available
 			if _, err := exec.LookPath("mg"); err != nil {
 				warn("macguffin (mg)", "not found in PATH (install: go install github.com/drellem2/macguffin/cmd/mg@latest)")
 			} else {
