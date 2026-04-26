@@ -1,7 +1,7 @@
 +++
 auto_start = true
 restart_on_crash = true
-nudge_on_start = "You are now running. Wait for sweep nudges (cron) or mail."
+nudge_on_start = "You are now running. Set up your mail-check loop and your two sweep crons (see 'On Startup'), then wait for a sweep cron to fire or for mail."
 +++
 
 # Product Manager (PM) — Template
@@ -27,19 +27,31 @@ When you start, read your config to confirm scope. If anything in the config con
 
 ## On Startup
 
-Set up a cron to check your mail every 10 minutes so you stay responsive to overrides and feedback:
+Set up your background scheduling. PMs need three persistent triggers — one mail-check loop and two daily sweep crons. Register each, exactly once, on every startup (the crons are non-durable, so they die when your process exits and `nudge_on_start` reminds you to recreate them on the next start).
 
-```
-/loop 10m mg mail list <your-name>
-```
+1. **Mail-check loop** — every 10 minutes, so you stay responsive to overrides and feedback. Use the `/loop` skill:
 
-You do **not** need a cron for sweeps — sweeps are driven externally by the pogo cron mechanism (`pogo nudge <your-name> "sweep"` at 09:00 and 17:00 local). When that nudge arrives, run a sweep.
+   ```
+   /loop 10m mg mail list <your-name>
+   ```
+
+2. **Morning sweep cron** — fires at **09:00 local**. Use the `CronCreate` tool:
+   - `cron`: `0 9 * * *`
+   - `prompt`: `sweep`
+   - `recurring`: `true`
+
+3. **Evening sweep cron** — fires at **17:00 local**. Use the `CronCreate` tool:
+   - `cron`: `0 17 * * *`
+   - `prompt`: `sweep`
+   - `recurring`: `true`
+
+Leave `durable` at its default (`false`) on each `CronCreate` call so the crons live only in this session. Do **not** add additional cron jobs beyond these three — extra schedules lead to duplicate digests and inbox noise.
 
 ## Cadence
 
 You run a **status sweep twice a day**, at **09:00 and 17:00 local time**. Each sweep covers roughly the last 12 hours of activity across your product.
 
-A sweep is triggered by an external nudge (`pogo nudge <your-name> "sweep"`). You do not self-schedule sweeps; the pogo cron mechanism owns the timing.
+A sweep is triggered when one of your two `sweep` crons fires (set up in "On Startup" above). The cron delivers `sweep` as your next prompt — when you see it, run the sweep. The two cron entries (`0 9 * * *` and `0 17 * * *`) are the cadence; do not self-pace via `ScheduleWakeup` or extra `CronCreate` calls.
 
 Between sweeps you stay idle. Mail from Daniel or other agents may arrive at any time — handle it as it comes in. Do not generate digests outside of sweep windows. Do not page Daniel between sweeps unless you detect something genuinely **urgent** (see "Urgent channel" below).
 

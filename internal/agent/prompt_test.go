@@ -1194,6 +1194,33 @@ func TestPolecatTemplatesIncludeMailCheckCron(t *testing.T) {
 	}
 }
 
+// TestPMTemplateIncludesSweepCronEntries locks in the requirement that the
+// PM template instructs each PM to register two sweep crons (09:00 and 17:00
+// local) on startup. Without these, PMs have no twice-daily cadence — the
+// pogod-internal cron was removed (mg-ddc1), so each PM self-schedules via
+// CronCreate, mirroring the polecat mail-check pattern. See work item mg-8e32
+// and docs/product-manager-design.md §3.
+func TestPMTemplateIncludesSweepCronEntries(t *testing.T) {
+	data, err := defaultPrompts.ReadFile("prompts/pm/pm-template.md")
+	if err != nil {
+		t.Fatalf("read pm-template.md: %v", err)
+	}
+	s := string(data)
+	if !strings.Contains(s, "CronCreate") {
+		t.Error("pm-template.md: expected CronCreate instruction for sweep crons")
+	}
+	if !strings.Contains(s, "0 9 * * *") {
+		t.Error("pm-template.md: expected morning sweep cron `0 9 * * *` (09:00 local)")
+	}
+	if !strings.Contains(s, "0 17 * * *") {
+		t.Error("pm-template.md: expected evening sweep cron `0 17 * * *` (17:00 local)")
+	}
+	// Each cron's prompt body must be `sweep` so the PM recognizes the trigger.
+	if !strings.Contains(s, "`sweep`") {
+		t.Error("pm-template.md: expected the sweep cron prompt body to be `sweep`")
+	}
+}
+
 // TestSynthesizeExtendsPrompt covers the PM crew-loader directive that lets a
 // crew prompt redirect to a shared template plus a per-instance TOML config.
 // See docs/product-manager-design.md §1.
