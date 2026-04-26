@@ -6,9 +6,7 @@
 
 ## TL;DR
 
-Add a `pm` agent **tier** between Daniel and the mayor. One PM per product line. PMs are long-running crew agents (no new code in pogod), driven by a `pm-template.md` prompt parameterized per product. They don't dispatch work or merge branches — they file `mg` tickets and mail summaries. Identity is config-file driven (`~/.pogo/agents/pm/<name>.toml`) listing repos, tags, and gap-detection sources. Cadence is cron (twice-daily digest) + opportunistic event-driven wake (new merge, new ticket assigned to product). **Authority is broad — PMs are mini-CEOs of their product.** They drive features, UX, deprecation, redesigns, priorities. Daniel is **informed** (not asked) via digest mail; he may override anytime. Structural constraints only: PMs don't spawn polecats (mayor's job), push to main (refinery's job), or edit prompts; cross-product or platform-schema changes go to Daniel. Initial roster: `pm-pogo` and `pm-onethird`. Skip pm for `rent-a-programmer` and `pogo-darwin` until they have enough activity to justify polling overhead.
-
-**Decision needed from Daniel:** greenlight the concept, the initial roster (pm-pogo + pm-onethird), and the mini-CEO authority model in §4. Implementation is small (one prompt template, one config schema, one cron entry per PM).
+Add a `pm` agent **tier** between the user and the mayor. One PM per product line. PMs are long-running crew agents (no new code in pogod), driven by a `pm-template.md` prompt parameterized per product. They don't dispatch work or merge branches — they file `mg` tickets and mail summaries. Identity is config-file driven (`~/.pogo/agents/pm/<name>.toml`) listing repos, tags, and gap-detection sources. Cadence is cron (twice-daily digest) + opportunistic event-driven wake (new merge, new ticket assigned to product). **Authority is broad — PMs are mini-CEOs of their product.** They drive features, UX, deprecation, redesigns, priorities. The user is **informed** (not asked) via digest mail; they may override anytime. Structural constraints only: PMs don't spawn polecats (mayor's job), push to main (refinery's job), or edit prompts; cross-product or platform-schema changes go to the user. Pogo ships only the *generic* PM tier: the `pm-template.md` prompt and the `extends ... with config ...` crew-loader directive. Per-product configs (`pm/<name>.toml`) and crew shims (`crew/pm-<name>.md`) are user-installed under `~/.pogo/agents/`; nothing product-specific lives in the repo.
 
 ---
 
@@ -28,12 +26,13 @@ A PM is just a crew agent whose prompt file is the PM template, parameterized by
 
 ```
 ~/.pogo/agents/pm/
-├── pm-template.md              # the shared PM prompt
-├── pogo.toml                   # config for pm-pogo
-└── onethird.toml               # config for pm-onethird
+├── pm-template.md              # the shared PM prompt (shipped by pogo)
+└── <product>.toml              # per-product config (user-installed)
 ```
 
-The crew loader reads `~/.pogo/agents/crew/pm-pogo.md` and finds a one-line directive: `extends pm-template with config pm/pogo.toml`. The agent process starts with the merged prompt. (Implementation note: this is the simplest extension to the existing crew loader; alternative is to have `pogo agent start pm-pogo` synthesize the prompt at start time and write it to `crew/pm-pogo.md`.)
+The crew loader reads `~/.pogo/agents/crew/pm-<product>.md` and finds a one-line directive: `extends pm-template with config pm/<product>.toml`. The agent process starts with the merged prompt. (Implementation note: this is the simplest extension to the existing crew loader; alternative is to have `pogo agent start pm-<product>` synthesize the prompt at start time and write it to `crew/pm-<product>.md`.)
+
+Pogo ships the template and the loader directive only — the per-product config and crew shim are user-installed under `~/.pogo/agents/`.
 
 ### Why not auto-spawned per product
 
@@ -51,22 +50,15 @@ Same as other crew agents. PMs are long-lived but stateless across handoffs — 
 
 **Product = (repo set, tag set, optional path filter).** Defined in the PM's config file. Don't add a `product` field to mg items.
 
+Example user-installed config (lives at `~/.pogo/agents/pm/<product>.toml` — not shipped in the pogo repo):
+
 ```toml
 # ~/.pogo/agents/pm/pogo.toml
 name        = "pm-pogo"
-display     = "Pogo / Macguffin"
-repos       = ["pogo", "macguffin"]
-tags_any    = ["pogo", "macguffin"]   # mg items with any of these tags
+display     = "Pogo"
+repos       = ["pogo"]
+tags_any    = ["pogo"]                 # mg items with any of these tags
 extra_paths = []                       # untracked dirs the PM still cares about
-```
-
-```toml
-# ~/.pogo/agents/pm/onethird.toml
-name        = "pm-onethird"
-display     = "1/3-2/3 Conjecture"
-repos       = ["onethird-twothirds"]   # whatever the actual repo name is
-tags_any    = ["onethird", "lean", "audit"]
-sources     = ["axioms", "audit-docs", "sorry-count"]
 ```
 
 ### Why not a `product` field on mg items
@@ -173,7 +165,7 @@ Cross-product coordination: **via Daniel, not peer-to-peer.** Until there's a co
 Concretely:
 
 - `pm-pogo` files mg ticket with `tags=[pogo]` → mayor sees it in `mg list --status=available` → mayor dispatches polecat as usual.
-- `pm-pogo` notices something needs `pm-onethird`'s attention → mails Daniel ("FYI, pm-onethird should look at X"), Daniel decides whether to act.
+- `pm-pogo` notices something needs `pm-other`'s attention → mails Daniel ("FYI, pm-other should look at X"), Daniel decides whether to act.
 
 ### Why no PM-peer channel yet
 
@@ -232,11 +224,11 @@ Every PM has a baseline source set; product-specific PMs add to it.
 7. **Polecat transcripts** under `~/.pogo/polecats/<id>/` — scan for "this UX is annoying", "had to do X manually", "couldn't figure out", "wish there was". This is the highest-signal source for UX gaps and Daniel called it out specifically.
 8. Crew agent transcripts (architect, mayor, doctor) — scan for the same patterns.
 
-**pm-onethird extras:**
+**Extras for formalization-style products:**
 
-9. `#print axioms` output on key theorems — track regressions in axiom dependence.
-10. Audit reports in the lean repo (path TBD per repo conventions).
-11. `sorry` count and `admit` count — track over time.
+9. Axiom-dependence output for key theorems — track regressions in what each headline result depends on.
+10. Audit reports in the project repo (path TBD per repo conventions).
+11. Open-goal indicators (`sorry` / `admit` counts in proof assistants, equivalent placeholders elsewhere) — track over time.
 
 ### What "scan transcripts" means concretely
 
@@ -275,22 +267,25 @@ This also gives a clean upgrade path: if the PM tier turns out to be load-bearin
 
 ---
 
-## 9 · Initial roster
+## 9 · Choosing your initial roster
 
-### Recommendation
+Pogo does **not** ship a default PM roster — neither the per-product TOML configs nor the `crew/pm-<name>.md` shims live in the repo. Each user installs the PMs they want under `~/.pogo/agents/`, pointing at `pm-template.md` via the `extends ... with config ...` directive.
 
-Spin up two PMs in v0:
+### How to pick the first PMs
 
-1. **`pm-pogo`** — covers `pogo` and `macguffin` together (they're effectively co-developed and share most contributors/agents). Config: `repos=["pogo","macguffin"]`, `tags_any=["pogo","macguffin"]`. Sources: baseline + polecat/crew transcripts.
+A PM only earns its keep when there is a substantive, ongoing backlog and a stakeholder who wants twice-daily macro signal. For each candidate product line, ask:
 
-2. **`pm-onethird`** — covers the 1/3-2/3 conjecture formalization. Config: `repos=["onethird-twothirds"]` (replace with actual name), `tags_any=["onethird","lean","audit"]`. Sources: baseline + lean-specific (axioms, audit, sorry counts).
+- Is there enough activity (open tickets, recent merges, transcripts) for a 12-hour digest to have something to say?
+- Is the work cohesive enough to define cleanly via `repos` + `tags_any`?
+- Does the user actually want to be informed at the macro level, or do they prefer to read tickets directly?
 
-### Defer
+If all three are "yes," install a PM. If not, defer — a silent PM is pure overhead.
 
-3. **`pm-rent-a-programmer`** — defer until product has a substantive backlog. Currently low-activity; PM would be silent twice a day. Cost is small but the value is zero.
-4. **`pm-pogo-darwin`** — defer until there's enough Darwin-specific work to justify a separate macro view. For now, pogo-darwin work is scoped under pm-pogo's umbrella.
+### Example (Daniel's personal install — not shipped)
 
-Re-evaluate after 2 weeks of pm-pogo + pm-onethird running. If they're useful, expand. If they're noisy, fix the prompt before adding more.
+Daniel runs `pm-pogo` over the pogo / macguffin repos as the proof-of-concept user. The crew shim and TOML config live under his `~/.pogo/agents/`, not in the pogo repo. Anyone else who installs pogo starts with zero PMs and adds whichever ones their workflow justifies.
+
+Re-evaluate after a couple of weeks of any newly-installed PM running. If it's useful, keep it; if it's noisy, fix the prompt or config before adding more.
 
 ---
 
@@ -330,14 +325,19 @@ Each tier is heavier than the last; use the lightest one that fits.
 
 If greenlit, the implementation is roughly:
 
-1. **`~/.pogo/agents/pm/pm-template.md`** — shared prompt. Sections: identity (parameterized), cadence rules, authority boundary, sources to scan, output protocol, failure-mode reminders. ~200 lines.
-2. **`~/.pogo/agents/pm/<product>.toml`** — per-PM config. Schema in §2. Tiny.
-3. **Crew loader change in pogod** — recognize `extends pm-template with config <file>` directive in `crew/pm-*.md` and synthesize the merged prompt at agent start. ~30 LOC.
-4. **Two cron entries** — `09:00 pogo nudge pm-pogo "sweep"`, `17:00 ...`, same for pm-onethird. Use the existing cron mechanism.
-5. **Two config files** — `pogo.toml`, `onethird.toml`.
-6. **One launch:** `pogo agent start pm-pogo && pogo agent start pm-onethird`.
+**Shipped by pogo:**
 
-No new mg fields, no refinery changes, no new daemons. Total: one prompt template, one config schema, one crew-loader extension, two configs, two cron entries.
+1. **`pm-template.md`** — shared prompt. Sections: identity (parameterized), cadence rules, authority boundary, sources to scan, output protocol, failure-mode reminders. ~200 lines.
+2. **Crew loader directive in pogod** — recognize `extends pm-template with config <file>` directive in `crew/pm-*.md` and synthesize the merged prompt at agent start. ~30 LOC.
+
+**User-installed under `~/.pogo/agents/` per PM:**
+
+3. **`pm/<product>.toml`** — per-PM config. Schema in §2. Tiny.
+4. **`crew/pm-<product>.md`** — one-line `extends pm-template with config pm/<product>.toml`.
+5. **Two sweep crons** registered by the PM itself on startup (`0 9 * * *` and `0 17 * * *` with prompt `sweep`) — see `pm-template.md` §"On Startup".
+6. **One launch per PM:** `pogo agent start pm-<product>`.
+
+No new mg fields, no refinery changes, no new daemons. Total in the repo: one prompt template plus one crew-loader directive. Everything per-product is opt-in user state.
 
 The PM tier is a new role layered on top of the existing crew-agent infrastructure. That's the point: prove the value before building anything heavy.
 

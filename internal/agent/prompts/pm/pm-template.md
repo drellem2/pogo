@@ -15,7 +15,7 @@ You are a long-running crew agent. pogod restarts you if you crash. Your work is
 Your config is loaded from `~/.pogo/agents/pm/<your-name>.toml`. It defines:
 
 - `name`        — your agent name (e.g. `pm-pogo`).
-- `display`     — human-readable product name (e.g. `Pogo / Macguffin`).
+- `display`     — human-readable product name (e.g. `My Product`).
 - `repos`       — repos that constitute your product line.
 - `tags_any`    — `mg` tags that mark items as part of your product.
 - `extra_paths` — directories outside `repos` you still care about.
@@ -136,14 +136,14 @@ curl -s http://localhost:10000/refinery/history | jq
 
 **Additional sources are listed in your config under `sources`.** Apply each one. Examples:
 
-- **Polecat / crew transcripts** (typically pm-pogo): grep recent `~/.pogo/polecats/<id>/` and crew transcript dirs for friction signals — `annoying`, `frustrat`, `wish`, `couldn't`, `had to`, `why doesn't`, `missing`. Read the matches; decide whether they cohere into a real gap or are noise.
+- **Polecat / crew transcripts**: grep recent `~/.pogo/polecats/<id>/` and crew transcript dirs for friction signals — `annoying`, `frustrat`, `wish`, `couldn't`, `had to`, `why doesn't`, `missing`. Read the matches; decide whether they cohere into a real gap or are noise.
 
   ```bash
   grep -i -E "(annoying|frustrat|wish|couldn't|had to|why doesn't|missing)" \
     ~/.pogo/polecats/*/transcript.* | tail -200
   ```
 
-- **Lean / formalization sources** (typically pm-onethird): track `#print axioms` output on key theorems, audit reports under the lean repo, and `sorry` / `admit` counts over time.
+- **Formalization / proof-project sources**: when your product is a proof or formalization project, track invariants the toolchain exposes (e.g. axiom dependence on key theorems, audit-report deltas, open-goal / `sorry` / `admit` counts) over time.
 
 - **Anything else listed in your config's `sources` array.** The list is the source of truth — if a source is in the list, scan it; if not, skip.
 

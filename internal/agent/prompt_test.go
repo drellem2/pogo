@@ -969,13 +969,9 @@ func TestInitPromptsDefault(t *testing.T) {
 	for _, rel := range []string{
 		"mayor.md",
 		filepath.Join("crew", "doctor.md"),
-		filepath.Join("crew", "pm-pogo.md"),
-		filepath.Join("crew", "pm-onethird.md"),
 		filepath.Join("templates", "polecat.md"),
 		filepath.Join("templates", "polecat-qa.md"),
 		filepath.Join("pm", "pm-template.md"),
-		filepath.Join("pm", "pogo.toml"),
-		filepath.Join("pm", "onethird.toml"),
 	} {
 		path := filepath.Join(tmpHome, ".pogo", "agents", rel)
 		if _, err := os.Stat(path); err != nil {
@@ -991,28 +987,6 @@ func TestInitPromptsDefault(t *testing.T) {
 	}
 	if !strings.HasPrefix(string(data), promptHashPrefix) {
 		t.Errorf("expected mayor.md to be hash-stamped, got first line: %q", strings.SplitN(string(data), "\n", 2)[0])
-	}
-
-	// PM TOML configs must be stamped with a TOML-style comment so the file
-	// remains valid TOML — an HTML comment at the top would break parsers.
-	for _, rel := range []string{
-		filepath.Join("pm", "pogo.toml"),
-		filepath.Join("pm", "onethird.toml"),
-	} {
-		path := filepath.Join(tmpHome, ".pogo", "agents", rel)
-		data, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatalf("read %s: %v", rel, err)
-		}
-		if !strings.HasPrefix(string(data), promptHashPrefixTOML) {
-			t.Errorf("expected %s to be TOML-stamped, got first line: %q", rel, strings.SplitN(string(data), "\n", 2)[0])
-		}
-		if strings.HasPrefix(string(data), "<!--") {
-			t.Errorf("%s starts with HTML comment — would break TOML parsing", rel)
-		}
-		if !strings.Contains(string(data), "name") || !strings.Contains(string(data), "= \"pm-") {
-			t.Errorf("expected %s to declare a name = \"pm-...\" key", rel)
-		}
 	}
 }
 
@@ -1220,68 +1194,6 @@ func TestPMTemplateIncludesSweepCronEntries(t *testing.T) {
 	// Each cron's prompt body must be `sweep` so the PM recognizes the trigger.
 	if !strings.Contains(s, "`sweep`") {
 		t.Error("pm-template.md: expected the sweep cron prompt body to be `sweep`")
-	}
-}
-
-// TestPMCrewShimsResolveAgainstShippedTemplate locks in the operational wiring
-// for the initial PM roster (mg-6805 / Ticket D): the crew shim files that
-// ship with the default profile must each carry a single `extends pm-template
-// with config pm/<product>.toml` directive that SynthesizeExtendsPrompt can
-// resolve against the shipped pm-template + per-product TOML. If any of these
-// files drifts (wrong directive, missing config, etc.) `pogo agent start
-// pm-pogo` no-ops at the daemon and the digest channel is dead.
-func TestPMCrewShimsResolveAgainstShippedTemplate(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-
-	// Lay down the shipped coding profile under the temp HOME so the
-	// shims resolve against real template + config files on disk.
-	if _, err := InitPrompts(false, false); err != nil {
-		t.Fatalf("InitPrompts: %v", err)
-	}
-
-	for _, shim := range []struct {
-		name   string
-		config string
-	}{
-		{"pm-pogo", "pm/pogo.toml"},
-		{"pm-onethird", "pm/onethird.toml"},
-	} {
-		shim := shim
-		t.Run(shim.name, func(t *testing.T) {
-			crewPath := filepath.Join(CrewPromptDir(), shim.name+".md")
-			outPath := filepath.Join(t.TempDir(), "synth.md")
-			got, err := SynthesizeExtendsPrompt(crewPath, outPath)
-			if err != nil {
-				t.Fatalf("SynthesizeExtendsPrompt(%s): %v", shim.name, err)
-			}
-			if got != outPath {
-				t.Fatalf("expected directive to be recognized — got empty result for %s", crewPath)
-			}
-			data, err := os.ReadFile(outPath)
-			if err != nil {
-				t.Fatal(err)
-			}
-			out := string(data)
-			if !strings.Contains(out, shim.config) {
-				t.Errorf("%s: synthesized prompt missing config path %q", shim.name, shim.config)
-			}
-			if !strings.Contains(out, "Product Manager (PM) — Template") {
-				t.Errorf("%s: synthesized prompt missing pm-template body", shim.name)
-			}
-			// The synthesized prompt must inherit the template's frontmatter
-			// (auto_start=true, restart_on_crash=true) — that is what gives
-			// each PM its boot semantics on `pogo agent start`.
-			meta, _, err := ParsePromptFrontmatter(outPath)
-			if err != nil {
-				t.Fatalf("%s: synthesized prompt frontmatter unparseable: %v", shim.name, err)
-			}
-			if !meta.AutoStart {
-				t.Errorf("%s: expected synthesized prompt to inherit auto_start=true", shim.name)
-			}
-			if !meta.RestartOnCrash {
-				t.Errorf("%s: expected synthesized prompt to inherit restart_on_crash=true", shim.name)
-			}
-		})
 	}
 }
 
