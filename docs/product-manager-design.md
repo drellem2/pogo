@@ -117,7 +117,7 @@ Daniel said "twice a day" explicitly. Hourly cadence would defeat the purpose: P
 ### What PMs may NOT do (these are structural separations, not authority limits)
 
 1. **Spawn polecats.** Architecturally the mayor's job — splitting dispatch across N agents creates contention on the refinery and shared state. PMs file tickets; mayor dispatches. Same rule whatever the PM's seniority.
-2. **Push to main, modify branches, run the refinery.** Mechanical separation; the refinery owns merges.
+2. **Push to main, modify branches, run the refinery.** Mechanical separation; the refinery owns merges. **Narrow exception:** PMs may commit and push `<product-repo>/docs/roadmap.md` directly — that one file only, on whatever branch the PM regenerates it on (typically `main`). The roadmap is the PM's primary artifact, reversion is trivial, and it matches the mini-CEO authority for product direction. No other files; no other branches.
 3. **Edit prompt files** (no self-modification, no editing other agents' prompts). Daniel does that.
 4. **Make changes outside their product.** A PM's authority is scoped to its configured repos/tags. Cross-product proposals → mail Daniel; do not act unilaterally.
 5. **Change mg, pogod, or other core platform schemas / CLIs.** Those are platform decisions; mail Daniel for any proposal. (A PM may *request* a platform change via a ticket assigned to architect, but does not unilaterally drive it.)
