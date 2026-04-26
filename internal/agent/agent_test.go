@@ -54,6 +54,79 @@ func TestSpawnAndNudge(t *testing.T) {
 	}
 }
 
+// TestNudgeSplitsBodyAndSubmit verifies that Nudge writes the message body
+// and the trailing submit (\r) as two separate writes with NudgeSubmitDelay
+// between them. Required so the receiver's input loop reads them in distinct
+// read() calls — otherwise Claude Code's React/Ink input box treats the
+// combined chunk as a paste and the \r becomes a literal newline inside the
+// input field rather than a submit. Regression test for the bug where crew
+// nudges sat unsent in architect's input box.
+func TestNudgeSplitsBodyAndSubmit(t *testing.T) {
+	tmpDir := t.TempDir()
+	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	defer reg.StopAll(2 * time.Second)
+
+	a, err := reg.Spawn(SpawnRequest{
+		Name:    "split-nudge",
+		Type:    TypePolecat,
+		Command: []string{"cat"},
+	})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+
+	start := time.Now()
+	if err := a.Nudge("body"); err != nil {
+		t.Fatalf("Nudge: %v", err)
+	}
+	elapsed := time.Since(start)
+
+	if elapsed < NudgeSubmitDelay {
+		t.Errorf("Nudge returned in %v; expected at least %v so body and submit land in separate read() calls",
+			elapsed, NudgeSubmitDelay)
+	}
+
+	time.Sleep(200 * time.Millisecond)
+	if got := string(a.RecentOutput(1024)); !strings.Contains(got, "body") {
+		t.Errorf("expected output to contain 'body', got %q", got)
+	}
+}
+
+// TestNudgeEmptyMessageNoDelay verifies that a submit-only nudge (empty body)
+// skips the delay — there's nothing for the receiver to read separately, and
+// the delay would just slow down the submit.
+func TestNudgeEmptyMessageNoDelay(t *testing.T) {
+	tmpDir := t.TempDir()
+	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	defer reg.StopAll(2 * time.Second)
+
+	a, err := reg.Spawn(SpawnRequest{
+		Name:    "empty-nudge",
+		Type:    TypePolecat,
+		Command: []string{"cat"},
+	})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+
+	start := time.Now()
+	if err := a.Nudge(""); err != nil {
+		t.Fatalf("Nudge: %v", err)
+	}
+	elapsed := time.Since(start)
+
+	if elapsed >= NudgeSubmitDelay {
+		t.Errorf("Empty Nudge took %v; expected < %v (no body, no delay needed)",
+			elapsed, NudgeSubmitDelay)
+	}
+}
+
 // TestInitialNudgeAutoDelivers verifies that when SpawnRequest.InitialNudge
 // is set, pogod auto-delivers the message once the agent's PTY goes idle —
 // without any external 'pogo nudge' call. Regression test for the bug where
