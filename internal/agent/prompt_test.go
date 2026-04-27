@@ -475,6 +475,106 @@ func TestInstallPromptsCrewWithExistingTemplatesDir(t *testing.T) {
 	}
 }
 
+// TestCheckPromptDriftCleanInstall verifies that immediately after
+// InstallPrompts, no prompt is reported as drifted.
+func TestCheckPromptDriftCleanInstall(t *testing.T) {
+	origHome := os.Getenv("HOME")
+	tmpHome := t.TempDir()
+	os.Setenv("HOME", tmpHome)
+	defer os.Setenv("HOME", origHome)
+
+	if _, err := InstallPrompts(false); err != nil {
+		t.Fatalf("InstallPrompts: %v", err)
+	}
+
+	drift, err := CheckPromptDrift()
+	if err != nil {
+		t.Fatalf("CheckPromptDrift: %v", err)
+	}
+	if len(drift) != 0 {
+		t.Errorf("expected no drift after fresh install, got %+v", drift)
+	}
+}
+
+// TestCheckPromptDriftDetectsStale simulates the mg-ec77 failure mode:
+// the live prompt file carries an out-of-date hash stamp because the
+// embedded version has advanced. Drift must be reported as "stale".
+func TestCheckPromptDriftDetectsStale(t *testing.T) {
+	origHome := os.Getenv("HOME")
+	tmpHome := t.TempDir()
+	os.Setenv("HOME", tmpHome)
+	defer os.Setenv("HOME", origHome)
+
+	if _, err := InstallPrompts(false); err != nil {
+		t.Fatalf("InstallPrompts: %v", err)
+	}
+
+	// Overwrite an arbitrary installed prompt with a wrong hash stamp.
+	// This mirrors what would happen if the binary's embedded version
+	// of pm-template advanced past the on-disk copy.
+	mayorPath := filepath.Join(tmpHome, ".pogo", "agents", "mayor.md")
+	stale := "<!-- pogo-prompt-hash: 0000000000000000000000000000000000000000000000000000000000000000 -->\n# Old mayor prompt\n"
+	if err := os.WriteFile(mayorPath, []byte(stale), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	drift, err := CheckPromptDrift()
+	if err != nil {
+		t.Fatalf("CheckPromptDrift: %v", err)
+	}
+	found := false
+	for _, d := range drift {
+		if d.Path == "mayor.md" {
+			found = true
+			if d.Reason != "stale" {
+				t.Errorf("mayor.md drift reason = %q, want %q", d.Reason, "stale")
+			}
+		}
+	}
+	if !found {
+		t.Errorf("expected mayor.md in drift list, got %+v", drift)
+	}
+}
+
+// TestCheckPromptDriftDetectsMissingAndUnstamped covers the two non-stale
+// drift reasons: the live file simply isn't there yet, or it exists but has
+// no hash stamp (e.g. user hand-edited and stripped it).
+func TestCheckPromptDriftDetectsMissingAndUnstamped(t *testing.T) {
+	origHome := os.Getenv("HOME")
+	tmpHome := t.TempDir()
+	os.Setenv("HOME", tmpHome)
+	defer os.Setenv("HOME", origHome)
+
+	if _, err := InstallPrompts(false); err != nil {
+		t.Fatalf("InstallPrompts: %v", err)
+	}
+
+	mayorPath := filepath.Join(tmpHome, ".pogo", "agents", "mayor.md")
+	if err := os.Remove(mayorPath); err != nil {
+		t.Fatalf("remove mayor.md: %v", err)
+	}
+	pmTmplPath := filepath.Join(tmpHome, ".pogo", "agents", "pm", "pm-template.md")
+	if err := os.WriteFile(pmTmplPath, []byte("# Hand-edited, no hash stamp\n"), 0644); err != nil {
+		t.Fatalf("rewrite pm-template.md: %v", err)
+	}
+
+	drift, err := CheckPromptDrift()
+	if err != nil {
+		t.Fatalf("CheckPromptDrift: %v", err)
+	}
+	reasons := map[string]string{}
+	for _, d := range drift {
+		reasons[d.Path] = d.Reason
+	}
+	if reasons["mayor.md"] != "missing" {
+		t.Errorf("mayor.md reason=%q, want %q", reasons["mayor.md"], "missing")
+	}
+	if reasons[filepath.Join("pm", "pm-template.md")] != "unstamped" {
+		t.Errorf("pm/pm-template.md reason=%q, want %q",
+			reasons[filepath.Join("pm", "pm-template.md")], "unstamped")
+	}
+}
+
 func TestParsePromptFrontmatterWellFormed(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "mayor.md")

@@ -1233,6 +1233,25 @@ Exits with code 1 if any critical check fails (--check mode only).`,
 				} else {
 					pass("agent prompts", fmt.Sprintf("%d prompt(s) found", len(prompts)))
 				}
+
+				// 5b. Drift: live prompt files vs embedded source-of-truth.
+				// A drift means the binary has shipped prompt updates that
+				// running agents cannot see. Fail (not warn) so this is loud
+				// — the PM tier silently skipped roadmap.md regen for days
+				// when this drift went undetected (mg-ec77).
+				if drift, derr := agent.CheckPromptDrift(); derr != nil {
+					warn("agent prompts up-to-date", "drift check failed: "+derr.Error())
+				} else if len(drift) > 0 {
+					names := make([]string, 0, len(drift))
+					for _, d := range drift {
+						names = append(names, fmt.Sprintf("%s (%s)", d.Path, d.Reason))
+					}
+					fail("agent prompts up-to-date",
+						fmt.Sprintf("%d prompt(s) drifted from embedded source: %s — run 'pogo agent prompt install', then restart affected agents",
+							len(drift), strings.Join(names, ", ")))
+				} else {
+					pass("agent prompts up-to-date", "all prompts match embedded source")
+				}
 			}
 
 			// 6. Apple-side launchd pollers (macOS only). The mail-to-human notifier

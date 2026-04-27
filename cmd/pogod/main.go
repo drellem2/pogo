@@ -585,6 +585,20 @@ func main() {
 	}
 	defer project.StopScanner()
 
+	// Refresh installed prompts from the embedded source before auto-starting
+	// any agents. When a new pogo binary ships prompt updates, the live files
+	// under ~/.pogo/agents/ stay stale until something runs InstallPrompts —
+	// previously only `pogo install` and `pogo agent prompt install`. Doing it
+	// here means a daemon restart is enough to propagate updates, and the PMs
+	// auto-started below pick up the latest prompts on the same boot. Hash
+	// stamps make this a no-op when nothing changed.
+	if installRes, err := agent.InstallPrompts(false); err != nil {
+		log.Printf("pogod: prompt refresh failed: %v", err)
+	} else if len(installRes.Updated) > 0 || len(installRes.Installed) > 0 {
+		log.Printf("pogod: refreshed prompts (installed=%d updated=%d skipped=%d)",
+			len(installRes.Installed), len(installRes.Updated), len(installRes.Skipped))
+	}
+
 	// Auto-start crew agents whose prompt frontmatter declares auto_start = true.
 	// This replaces the manual `pogo agent start mayor` step on a fresh boot
 	// and is idempotent — agents already registered (e.g. across pogod

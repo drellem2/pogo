@@ -981,3 +981,64 @@ func InstallPrompts(force bool) (*InstallResult, error) {
 
 	return result, err
 }
+
+// PromptDrift describes a single installed prompt whose content no longer
+// matches the embedded source.
+type PromptDrift struct {
+	// Path is the relative path under ~/.pogo/agents/ (e.g. "pm/pm-template.md").
+	Path string `json:"path"`
+	// Reason is "missing" if the live file does not exist, "unstamped" if it
+	// has no pogo-prompt-hash stamp, or "stale" if the stamped hash differs
+	// from the embedded content's hash.
+	Reason string `json:"reason"`
+}
+
+// CheckPromptDrift compares every embedded prompt against its installed copy
+// under ~/.pogo/agents/ and returns the set that is missing, unstamped, or
+// stale (stamped hash != embedded hash). Returns an empty slice when every
+// embedded prompt is present and up-to-date.
+//
+// Used by `pogo doctor --check` to fail loud when the binary's prompts have
+// advanced past what running agents are reading on disk — the failure mode
+// behind mg-ec77 (PMs silently skipping behavior added to the embedded
+// pm-template).
+func CheckPromptDrift() ([]PromptDrift, error) {
+	destRoot := PromptDir()
+	var drift []PromptDrift
+
+	err := fs.WalkDir(defaultPrompts, "prompts", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		rel, _ := filepath.Rel("prompts", path)
+		destPath := filepath.Join(destRoot, rel)
+
+		data, err := defaultPrompts.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("read embedded %s: %w", path, err)
+		}
+		embeddedHash := contentHash(data)
+
+		if _, statErr := os.Stat(destPath); os.IsNotExist(statErr) {
+			drift = append(drift, PromptDrift{Path: rel, Reason: "missing"})
+			return nil
+		} else if statErr != nil {
+			return fmt.Errorf("stat %s: %w", destPath, statErr)
+		}
+
+		installed := installedPromptHash(destPath)
+		if installed == "" {
+			drift = append(drift, PromptDrift{Path: rel, Reason: "unstamped"})
+			return nil
+		}
+		if installed != embeddedHash {
+			drift = append(drift, PromptDrift{Path: rel, Reason: "stale"})
+		}
+		return nil
+	})
+
+	return drift, err
+}
