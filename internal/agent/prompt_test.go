@@ -1297,6 +1297,53 @@ func TestPMTemplateIncludesSweepCronEntries(t *testing.T) {
 	}
 }
 
+// TestPMTemplateIncludesRoadmapRegen locks in the requirement that the PM
+// template instructs each PM to regenerate <product-repo>/docs/roadmap.md on
+// every sweep, with the standard skeleton, and to commit + push it as the
+// narrow exception to the no-direct-push rule. Without these, sweeps stop
+// producing the roadmap artifact end-to-end and PM digests have nothing to
+// link to. Verified live in mg-00b7; pinned here so future edits to
+// pm-template.md can't silently drop the regen step (the bug mg-ec77 fixed at
+// the propagation layer would re-emerge if the source itself lost the
+// instruction). See work item mg-a7b8 (regen feature) and mg-00b7 (gate).
+func TestPMTemplateIncludesRoadmapRegen(t *testing.T) {
+	data, err := defaultPrompts.ReadFile("prompts/pm/pm-template.md")
+	if err != nil {
+		t.Fatalf("read pm-template.md: %v", err)
+	}
+	s := string(data)
+
+	// Section header that flags the regen step in the synthesized prompt.
+	if !strings.Contains(s, "### Regenerate roadmap.md each sweep") {
+		t.Error("pm-template.md: expected `### Regenerate roadmap.md each sweep` header")
+	}
+	// The artifact path is referenced through a placeholder so each PM
+	// resolves it against its own product repo.
+	if !strings.Contains(s, "<your-product-repo>/docs/roadmap.md") {
+		t.Error("pm-template.md: expected `<your-product-repo>/docs/roadmap.md` artifact reference")
+	}
+	// The skeleton's required buckets — these are what the digest links into.
+	for _, bucket := range []string{
+		"## Now (in flight)",
+		"## Next (queued, available)",
+		"## Later (proposed)",
+		"## Backlog (open but no near-term plan)",
+		"## Recently shipped (last 7d)",
+		"## Trajectory",
+	} {
+		if !strings.Contains(s, bucket) {
+			t.Errorf("pm-template.md: expected roadmap skeleton bucket %q", bucket)
+		}
+	}
+	// The narrow push exception — the only file a PM may push directly.
+	if !strings.Contains(s, "git push origin main") {
+		t.Error("pm-template.md: expected the regen recipe to push to `origin main`")
+	}
+	if !strings.Contains(s, "git commit -m \"pm-") {
+		t.Error("pm-template.md: expected the regen recipe to commit with a `pm-<name>:` message")
+	}
+}
+
 // TestSynthesizeExtendsPrompt covers the PM crew-loader directive that lets a
 // crew prompt redirect to a shared template plus a per-instance TOML config.
 // See docs/product-manager-design.md §1.
