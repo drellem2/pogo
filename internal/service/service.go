@@ -216,8 +216,8 @@ func isLaunchdLoaded() bool {
 
 func installLaunchd() (retErr error) {
 	// Self-report on the way out so a polecat can fire-and-forget the
-	// install (`nohup setsid pogo service install ... &`) and have the
-	// post-install mayor pick up the result via mail.
+	// install (`pogo service install --detach`) and have the post-install
+	// mayor pick up the result via mail.
 	defer func() {
 		if retErr != nil {
 			sendInstallFailureMail(retErr)

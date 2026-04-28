@@ -387,6 +387,7 @@ Use --live for a continuously updating view (like watch).`,
 		Long:  `Install, uninstall, or check the status of the pogo daemon as a system service (launchd on macOS, systemd on Linux).`,
 	}
 
+	var serviceInstallDetach bool
 	var cmdServiceInstall = &cobra.Command{
 		Use:   "install",
 		Short: "Install pogo as a system service",
@@ -407,23 +408,44 @@ polecat itself can't observe completion).
 
 Running detached (required when the caller is a child of pogod):
 
-  nohup setsid pogo service install </dev/null \
-      >/tmp/pogo-service-install.log 2>&1 &
-  disown
+  pogo service install --detach
+
+The --detach flag re-execs pogo in a new session via syscall.Setsid with
+stdio redirected to /tmp/pogo-service-install.log. The parent prints the
+dispatched PID and exits 0 within ~100ms; the child runs the full install
+and self-reports to mayor on completion.
 
 WHY: pogo service install stops the currently-running pogod before launchctl
 loads the new one. Any process that's a child of that pogod (a polecat, a
 crew agent, a refinery worker) gets SIGHUP'd when its parent dies and exits
-mid-install. nohup + setsid + redirected stdio detaches the install from the
-caller's session so it survives the pogod restart. The caller can then exit
-immediately and rely on the mailed report for verification.`,
+mid-install. --detach moves the install into a new session so it survives
+the pogod restart. The caller can then exit immediately and rely on the
+mailed report for verification. (This replaces the prior nohup+setsid
+recipe, which doesn't work on macOS where setsid is not available.)`,
 		Args: cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
+			if serviceInstallDetach {
+				pid, logPath, err := service.Detach("")
+				if err != nil {
+					cli.ExitWithError(jsonOutput, "failed to detach: "+err.Error(), cli.ExitError)
+				}
+				if jsonOutput {
+					cli.PrintJSON(map[string]interface{}{
+						"dispatched": true,
+						"pid":        pid,
+						"log":        logPath,
+					})
+				} else {
+					fmt.Printf("install dispatched in background; PID=%d; log=%s\n", pid, logPath)
+				}
+				return
+			}
 			if err := service.Install(); err != nil {
 				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
 			}
 		},
 	}
+	cmdServiceInstall.Flags().BoolVar(&serviceInstallDetach, "detach", false, "Run the install in a new session and exit immediately; install proceeds in background and self-reports via mail")
 
 	var cmdServiceUninstall = &cobra.Command{
 		Use:   "uninstall",
