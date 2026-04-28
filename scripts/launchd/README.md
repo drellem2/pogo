@@ -10,40 +10,70 @@ The easiest way to install the service is:
 pogo service install
 ```
 
-This auto-detects your `pogod` binary path and sets up everything. Use `pogo service uninstall` to remove it.
+This auto-detects your `pogod` binary path, builds a plist matching the spec below (ProcessType=Interactive, KeepAlive=true, log to `~/.pogo/log/pogod.log`, PATH/HOME/POGO_HOME/POGO_PLUGIN_PATH wired up), and `launchctl load`s it. The installer is idempotent — rerun it after upgrading pogod or changing the plist template, and it will replace the existing service in place.
+
+If a manually-started `pogod` is already running, the installer stops it first so the launchctl load doesn't collide on the lockfile.
+
+Use `pogo service uninstall` to remove it.
 
 ## Manual Installation
 
 If you prefer to install the plist manually:
 
-### 1. Copy and customize the plist
+### 1. Customize the plist
+
+Replace `YOUR_USERNAME` in `com.pogo.daemon.plist` with your actual username, and set the `pogod` path correctly:
 
 ```bash
-cp com.pogo.daemon.plist ~/Library/LaunchAgents/com.pogo.daemon.plist
+which pogod  # confirm location
+sed "s/YOUR_USERNAME/$USER/g" com.pogo.daemon.plist > ~/Library/LaunchAgents/com.pogo.daemon.plist
+mkdir -p ~/.pogo/log
 ```
 
-Edit the plist to set the correct `pogod` path:
+### 2. Stop any running pogod
+
+If you previously ran `pogo server start` manually, stop it before loading the service to avoid a port/lockfile collision:
 
 ```bash
-# Find your pogod binary
-which pogod
-
-# Edit the plist — replace /usr/local/bin/pogod with your actual path
-nano ~/Library/LaunchAgents/com.pogo.daemon.plist
+pogo server stop --all
 ```
 
-### 2. Load the service
+### 3. Load the service
 
 ```bash
 launchctl load ~/Library/LaunchAgents/com.pogo.daemon.plist
 ```
 
-### 3. Verify it's running
+### 4. Verify it's running
 
 ```bash
-launchctl list | grep pogo
-curl http://127.0.0.1:10000/health
+launchctl list | grep com.pogo.daemon   # should show the service with a PID
+curl http://127.0.0.1:10000/health      # should return OK
 ```
+
+### 5. Smoke test auto-restart
+
+```bash
+PID=$(launchctl list com.pogo.daemon | awk '/PID/ {print $3}' | tr -d ';')
+kill -9 "$PID"
+sleep 5
+launchctl list | grep com.pogo.daemon   # PID should be different — launchd restarted it
+```
+
+## Plist contract
+
+The plist must include all of these keys for pogod to behave correctly under launchd:
+
+| Key | Value | Why |
+|-----|-------|-----|
+| `RunAtLoad` | `true` | Start on login. |
+| `KeepAlive` | `true` (unconditional) | Restart on any exit, clean or crashing. The older `<dict><SuccessfulExit>false</SuccessfulExit></dict>` form does NOT restart after a clean exit. |
+| `ProcessType` | `Interactive` | Prevents App Nap from throttling timers. Without this, macOS coalesces wake-ups for "background" daemons, delaying refinery polling and agent idle detection. |
+| `StandardOutPath` / `StandardErrorPath` | `~/.pogo/log/pogod.log` | Colocates daemon logs with the rest of pogo state. |
+| `EnvironmentVariables.PATH` | Includes `~/.local/bin`, `~/go/bin`, `/opt/homebrew/bin`, `/usr/local/bin`, system dirs | pogod spawns claude / git / mg as children; launchd's default PATH does not include these. |
+| `EnvironmentVariables.HOME` | User's home dir | launchd sometimes does not set this. |
+| `EnvironmentVariables.POGO_HOME` | `~/.pogo` | Where pogo state, agent metadata, and refinery data live. |
+| `EnvironmentVariables.POGO_PLUGIN_PATH` | `~/.pogo/plugin` | Where pogod looks for plugins. |
 
 ## Managing the Service
 
@@ -51,13 +81,6 @@ curl http://127.0.0.1:10000/health
 |--------|---------|
 | Load (start) | `launchctl load ~/Library/LaunchAgents/com.pogo.daemon.plist` |
 | Unload (stop) | `launchctl unload ~/Library/LaunchAgents/com.pogo.daemon.plist` |
-| Check status | `launchctl list \| grep pogo` |
-| View logs | `tail -f /tmp/pogo.log` |
-| View errors | `tail -f /tmp/pogo.err.log` |
-
-## Notes
-
-- The plist uses `KeepAlive` with `SuccessfulExit: false`, meaning launchd restarts pogod whenever it exits with a non-zero status.
-- `RunAtLoad: true` ensures pogod starts automatically when the plist is loaded (including on login/reboot).
-- Log paths default to `/tmp/pogo.log` and `/tmp/pogo.err.log`. The programmatic installer (`pogo service install`) uses `~/.local/share/pogo/logs/` instead.
-- The `PATH` environment variable is set explicitly since launchd agents run with a minimal environment.
+| Restart | `launchctl kickstart -k gui/$(id -u)/com.pogo.daemon` |
+| Check status | `launchctl list \| grep com.pogo.daemon` |
+| View logs | `tail -f ~/.pogo/log/pogod.log` |

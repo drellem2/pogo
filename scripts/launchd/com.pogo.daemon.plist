@@ -6,25 +6,38 @@
     <string>com.pogo.daemon</string>
     <key>ProgramArguments</key>
     <array>
-        <!-- Update this path to your pogod binary location.
-             Find it with: which pogod -->
-        <string>/usr/local/bin/pogod</string>
+        <!-- Update this path. Find it with: which pogod -->
+        <string>/Users/YOUR_USERNAME/go/bin/pogod</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
+    <!-- Unconditional KeepAlive: launchd restarts pogod on any exit (clean
+         or crashing). The previous SuccessfulExit:false form would NOT
+         restart after a clean exit, which is wrong for a long-running
+         daemon. -->
     <key>KeepAlive</key>
-    <dict>
-        <key>SuccessfulExit</key>
-        <false/>
-    </dict>
+    <true/>
+    <!-- Interactive prevents App Nap from throttling timers. Without it,
+         macOS coalesces wake-ups for "background" daemons, which delays
+         refinery polling and agent idle detection. -->
+    <key>ProcessType</key>
+    <string>Interactive</string>
     <key>StandardOutPath</key>
-    <string>/tmp/pogo.log</string>
+    <string>/Users/YOUR_USERNAME/.pogo/log/pogod.log</string>
     <key>StandardErrorPath</key>
-    <string>/tmp/pogo.err.log</string>
+    <string>/Users/YOUR_USERNAME/.pogo/log/pogod.log</string>
     <key>EnvironmentVariables</key>
     <dict>
+        <!-- PATH must include wherever claude, git, mg, and pogod live —
+             pogod spawns these as children. -->
         <key>PATH</key>
-        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <string>/Users/YOUR_USERNAME/.local/bin:/Users/YOUR_USERNAME/go/bin:/Users/YOUR_USERNAME/.pogo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>/Users/YOUR_USERNAME</string>
+        <key>POGO_HOME</key>
+        <string>/Users/YOUR_USERNAME/.pogo</string>
+        <key>POGO_PLUGIN_PATH</key>
+        <string>/Users/YOUR_USERNAME/.pogo/plugin</string>
     </dict>
 </dict>
 </plist>
