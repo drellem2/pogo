@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"text/template"
 	"time"
@@ -267,26 +268,72 @@ func isLaunchdLoaded() bool {
 	return len(out) > 0 && !strings.Contains(string(out), "Could not find")
 }
 
-// isLaunchdSupervising reports whether launchd has an actual PID
-// assigned for the label — i.e. a process is currently running under
-// launchd supervision. Stricter than isLaunchdLoaded, which only
-// confirms the label is registered.
+// isLaunchdSupervising reports whether launchd is the supervisor of the
+// pogod that's actually answering /health. Stricter than isLaunchdLoaded
+// (which only confirms the label is registered) and stricter than the
+// initial mg-2c55 gate (which only checked whether `launchctl list
+// LABEL` had a "PID" line).
 //
-// Used by the install fast-path to avoid the orphan-pogod regression
-// (mg-2c55): a pogod started outside launchd (e.g. crew-respawn,
-// PPID=1, port-bound on :10000) makes /health succeed AND keeps
-// `launchctl list LABEL` returning output (the plist is loaded), but
-// the launchd-supervised process has never started. The previous
-// laxer check accepted that state as "healthy" and skipped the
-// orchestrated install — defeating mg-ae84's whole point. Requiring
-// a PID assignment forces fall-through to the orchestrated path.
+// The mg-df4a regression revealed why the bare PID-line check is not
+// enough: an orphan pogod can hold :10000 and answer /health while
+// launchctl reports a different PID — or even no PID at all — for the
+// launchd-supervised slot. Both states must produce a fall-through to
+// the orchestrated reinstall, otherwise we treat the orphan as healthy.
+//
+// To close that gap we cross-check launchctl's PID against the running
+// pogod's lockfile (the file at $TMPDIR/pogo.pid that pogod itself
+// writes on startup, see cmd/pogod/main.go). The fast-path is safe iff
+// launchctl claims a PID AND that PID matches the lockfile PID. Any
+// mismatch — orphan answering /health, stale launchctl PID, missing
+// lockfile — falls through to the orchestrated install.
 func isLaunchdSupervising() bool {
 	out, err := exec.Command("launchctl", "list", launchdLabel).CombinedOutput()
 	if err != nil {
 		return false
 	}
-	_, ok := parseLaunchctlListPID(string(out))
-	return ok
+	runningPID, lockErr := readPogodLockfilePID()
+	return launchctlSupervisesRunningPogod(string(out), runningPID, lockErr)
+}
+
+// launchctlSupervisesRunningPogod is the testable core of
+// isLaunchdSupervising: given the raw `launchctl list LABEL` output and
+// the PID read from the pogod lockfile, decide whether launchd is in
+// fact supervising the running pogod. Split out so tests can exercise
+// the orphan vs. supervised vs. missing-lockfile branches without
+// shelling out.
+func launchctlSupervisesRunningPogod(launchctlOut string, runningPID int, lockErr error) bool {
+	launchctlPID, ok := parseLaunchctlListPID(launchctlOut)
+	if !ok {
+		return false
+	}
+	if lockErr != nil {
+		return false
+	}
+	return launchctlPID == runningPID
+}
+
+// readPogodLockfilePID reads $TMPDIR/pogo.pid (pogod's lockfile, written
+// by cmd/pogod/main.go on startup) and returns the PID stored there.
+// Returns an error when the file is missing, unreadable, or doesn't
+// contain a parseable integer.
+//
+// This is the source of truth for "which process is the running pogod"
+// — the same lockfile client.StopServer reads to find pogod via
+// lock.GetOwner. We re-read it directly (rather than going through
+// nightlyone/lockfile) because the install fast-path only needs the
+// PID, and loading the lockfile package's owner-resolution path adds
+// process-existence checks that would mask a stale lockfile from us.
+func readPogodLockfilePID() (int, error) {
+	pidPath := filepath.Join(os.TempDir(), "pogo.pid")
+	data, err := os.ReadFile(pidPath)
+	if err != nil {
+		return 0, err
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		return 0, fmt.Errorf("malformed pogod lockfile %s: %w", pidPath, err)
+	}
+	return pid, nil
 }
 
 // parseLaunchctlListPID extracts the PID assignment from `launchctl
@@ -354,12 +401,14 @@ func installLaunchd() (retErr error) {
 	// healthy → no-op. Lets the post-install mayor rerun `pogo service
 	// install` as a probe without bouncing the daemon.
 	//
-	// The supervising check (mg-2c55) is the strict gate: just "loaded"
-	// is not enough, because an orphan pogod (PPID=1, started outside
-	// launchd by crew-respawn) keeps the plist registered AND answers
-	// /health on :10000 — but launchd has no PID assigned and has never
-	// actually spawned the daemon. Accepting that state as healthy
-	// silently defeats mg-ae84's orchestration; require a real PID.
+	// The supervising check (mg-2c55, tightened in mg-df4a) is the
+	// strict gate: just "loaded" is not enough, because an orphan pogod
+	// (PPID=1, started outside launchd by crew-respawn) keeps the plist
+	// registered AND answers /health on :10000 — but launchd has no PID
+	// assigned, or assigns a PID that doesn't match the actual running
+	// pogod. Accepting that state as healthy silently defeats mg-ae84's
+	// orchestration; require launchctl's PID to match the running
+	// pogod's lockfile PID.
 	if plistMatches && loaded && isLaunchdSupervising() {
 		if err := client.HealthCheck(); err == nil {
 			fmt.Printf("Service already installed and healthy at %s — no changes.\n", plistPath)

@@ -348,6 +348,107 @@ func TestParseLaunchctlListPIDEmpty(t *testing.T) {
 	}
 }
 
+func TestLaunchctlSupervisesRunningPogodMatch(t *testing.T) {
+	// Healthy supervised state: launchctl reports PID N, pogod lockfile
+	// also says PID N. The fast-path is safe — `pogo service install`
+	// should no-op.
+	out := `{
+	"Label" = "com.pogo.daemon";
+	"PID" = 12345;
+	"Program" = "/Users/test/go/bin/pogod";
+};`
+	if !launchctlSupervisesRunningPogod(out, 12345, nil) {
+		t.Error("expected match when launchctl PID == lockfile PID")
+	}
+}
+
+func TestLaunchctlSupervisesRunningPogodOrphanMismatch(t *testing.T) {
+	// mg-df4a core regression: an orphan pogod (PPID=1, crew-respawned
+	// outside launchd) holds :10000 and answers /health. launchctl may
+	// still report its own PID for the supervised slot — but that PID
+	// is not the process replying to /health. Treat as not-supervised
+	// so installLaunchd falls through to the orchestrated reinstall
+	// rather than declaring "already installed and healthy".
+	out := `{
+	"Label" = "com.pogo.daemon";
+	"PID" = 9999;
+	"Program" = "/Users/test/go/bin/pogod";
+};`
+	if launchctlSupervisesRunningPogod(out, 12345, nil) {
+		t.Error("expected NOT supervised when launchctl PID differs from running pogod PID (orphan scenario)")
+	}
+}
+
+func TestLaunchctlSupervisesRunningPogodNoLaunchctlPID(t *testing.T) {
+	// "loaded but never spawned" state — launchctl knows the label
+	// but has no PID assigned. Same fall-through as before mg-df4a:
+	// the lockfile PID doesn't matter because there's no supervisor.
+	out := `{
+	"Label" = "com.pogo.daemon";
+	"Program" = "/Users/test/go/bin/pogod";
+};`
+	if launchctlSupervisesRunningPogod(out, 12345, nil) {
+		t.Error("expected NOT supervised when launchctl reports no PID")
+	}
+}
+
+func TestLaunchctlSupervisesRunningPogodMissingLockfile(t *testing.T) {
+	// If the lockfile is missing or unreadable we cannot prove the
+	// running pogod is the one launchctl claims to be supervising.
+	// Be conservative: fall through to the orchestrated install rather
+	// than trust a stale launchctl PID.
+	out := `{
+	"Label" = "com.pogo.daemon";
+	"PID" = 12345;
+	"Program" = "/Users/test/go/bin/pogod";
+};`
+	if launchctlSupervisesRunningPogod(out, 0, os.ErrNotExist) {
+		t.Error("expected NOT supervised when pogod lockfile is missing")
+	}
+}
+
+func TestReadPogodLockfilePID(t *testing.T) {
+	// Round-trip: when pogod has written a valid PID to the lockfile,
+	// readPogodLockfilePID returns that integer. Uses TMPDIR override
+	// because os.TempDir() reads $TMPDIR (and falls back to /tmp).
+	dir := t.TempDir()
+	t.Setenv("TMPDIR", dir)
+	if err := os.WriteFile(filepath.Join(dir, "pogo.pid"), []byte("42\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	pid, err := readPogodLockfilePID()
+	if err != nil {
+		t.Fatalf("readPogodLockfilePID: %v", err)
+	}
+	if pid != 42 {
+		t.Errorf("expected PID 42, got %d", pid)
+	}
+}
+
+func TestReadPogodLockfilePIDMissing(t *testing.T) {
+	// Lockfile absent → error surfaced to caller so the fast-path can
+	// fall through. Don't return 0 silently — that would let a launchctl
+	// PID of 0 spuriously match.
+	dir := t.TempDir()
+	t.Setenv("TMPDIR", dir)
+	if _, err := readPogodLockfilePID(); err == nil {
+		t.Error("expected error when lockfile missing, got nil")
+	}
+}
+
+func TestReadPogodLockfilePIDMalformed(t *testing.T) {
+	// Lockfile present but contents aren't an integer. Same fail-safe
+	// as the missing case — surface an error rather than guess.
+	dir := t.TempDir()
+	t.Setenv("TMPDIR", dir)
+	if err := os.WriteFile(filepath.Join(dir, "pogo.pid"), []byte("not-a-pid"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readPogodLockfilePID(); err == nil {
+		t.Error("expected error for malformed lockfile, got nil")
+	}
+}
+
 func TestParseLaunchctlListPIDIgnoresNonPIDLines(t *testing.T) {
 	// Defense against false positives: only the literal "PID" key counts.
 	// LastExitStatus, anchor PID strings inside Program paths, etc. must
