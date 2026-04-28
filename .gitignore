@@ -11,3 +11,12 @@ _testdata/**/.pogo/
 .logs/
 __pycache__/
 state.json
+
+# Dev artifacts
+cover.out
+coverage-internal-driver.out
+coverage-internal-project.out
+*.prof
+*.bak
+projects.json
+/main
