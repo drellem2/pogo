@@ -99,6 +99,15 @@ func launchdPlistPath() string {
 	return filepath.Join(home, "Library", "LaunchAgents", launchdLabel+".plist")
 }
 
+// kickstartLaunchdTarget returns the gui/$UID/<label> service target used by
+// `launchctl kickstart` and `launchctl print`. The gui/$UID prefix scopes
+// the operation to the current GUI session domain — without it launchctl
+// errors with "Could not find specified service". Centralized so install
+// and restart paths use one canonical format.
+func kickstartLaunchdTarget() string {
+	return fmt.Sprintf("gui/%d/%s", os.Getuid(), launchdLabel)
+}
+
 func systemdUnitDir() string {
 	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
 		return filepath.Join(xdg, "systemd", "user")
@@ -429,6 +438,21 @@ func installLaunchd() (retErr error) {
 		return fmt.Errorf("launchctl load failed: %s: %w", string(out), err)
 	}
 
+	// Step 5b: Force launchd to actually spawn pogod now. On modern macOS,
+	// `launchctl load` of a RunAtLoad job leaves the job in
+	// `pended nondemand spawn = speculative` state — launchd has the plist
+	// registered but defers the initial fork-exec opportunistically and
+	// often indefinitely, so `runs = 0` and `last exit code = (never
+	// exited)` (mg-3963 repro state). kickstart forces the spawn
+	// deterministically so verifyLaunchdRunning's healthcheck window has
+	// a real process to wait for. Same kickstart pattern restartLaunchd
+	// already relies on — without it, the post-load /health poll just
+	// times out against a launchd job that never started.
+	target := kickstartLaunchdTarget()
+	if out, err := exec.Command("launchctl", "kickstart", "-k", target).CombinedOutput(); err != nil {
+		return fmt.Errorf("launchctl kickstart %s failed: %s: %w", target, string(out), err)
+	}
+
 	// Step 6: Verify launchd-pogod is bound and answering on /health.
 	if err := verifyLaunchdRunning(); err != nil {
 		return fmt.Errorf("service loaded but verification failed: %w", err)
@@ -483,8 +507,7 @@ func launchctlListOutput() string {
 }
 
 func launchctlPrintOutput() string {
-	target := fmt.Sprintf("gui/%d/%s", os.Getuid(), launchdLabel)
-	out, _ := exec.Command("launchctl", "print", target).CombinedOutput()
+	out, _ := exec.Command("launchctl", "print", kickstartLaunchdTarget()).CombinedOutput()
 	return strings.TrimRight(string(out), "\n")
 }
 
@@ -654,7 +677,7 @@ func restartLaunchd() error {
 		return fmt.Errorf("service not installed at %s", plistPath)
 	}
 	// kickstart -k forces a restart even if the service is stopped
-	cmd := exec.Command("launchctl", "kickstart", "-k", "gui/"+fmt.Sprint(os.Getuid())+"/"+launchdLabel)
+	cmd := exec.Command("launchctl", "kickstart", "-k", kickstartLaunchdTarget())
 	if out, err := cmd.CombinedOutput(); err != nil {
 		// Fallback: unload + load for older macOS
 		exec.Command("launchctl", "unload", plistPath).Run()

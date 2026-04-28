@@ -453,6 +453,31 @@ func TestIsLaunchdLoadedFromOutput(t *testing.T) {
 	}
 }
 
+func TestKickstartLaunchdTargetFormat(t *testing.T) {
+	// installLaunchd issues `launchctl kickstart -k <target>` after
+	// `launchctl load` to defeat the "pended nondemand spawn = speculative"
+	// state that otherwise leaves runs=0 indefinitely (mg-3963).
+	// The target string MUST be `gui/<uid>/<label>` — without the gui/$UID
+	// prefix kickstart fails with "Could not find specified service" and
+	// the install regresses to the silent 10s timeout.
+	tgt := kickstartLaunchdTarget()
+	if !strings.HasPrefix(tgt, "gui/") {
+		t.Errorf("kickstart target must start with gui/ to scope to the current user session domain; got %q", tgt)
+	}
+	if !strings.HasSuffix(tgt, "/"+launchdLabel) {
+		t.Errorf("kickstart target must reference the %s label; got %q", launchdLabel, tgt)
+	}
+	// Catch the regression where someone splits the format and forgets a
+	// segment (e.g. "gui//com.pogo.daemon" or "gui/501com.pogo.daemon").
+	parts := strings.Split(tgt, "/")
+	if len(parts) != 3 {
+		t.Errorf("kickstart target must have exactly 3 slash-separated parts (gui/<uid>/<label>); got %q", tgt)
+	}
+	if len(parts) == 3 && parts[1] == "" {
+		t.Errorf("kickstart target uid segment is empty; got %q", tgt)
+	}
+}
+
 func TestServicePaths(t *testing.T) {
 	switch runtime.GOOS {
 	case "darwin":
