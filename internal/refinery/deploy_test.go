@@ -337,4 +337,3 @@ func TestRunDeployHookCwd(t *testing.T) {
 		t.Errorf("pwd = %q (resolved %q), want %q (resolved %q)", got, gotResolved, dir, wantResolved)
 	}
 }
-
