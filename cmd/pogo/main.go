@@ -390,8 +390,34 @@ Use --live for a continuously updating view (like watch).`,
 	var cmdServiceInstall = &cobra.Command{
 		Use:   "install",
 		Short: "Install pogo as a system service",
-		Long:  `Generate and install a launchd plist (macOS) or systemd unit (Linux) so the pogo daemon starts on login and restarts on crash.`,
-		Args:  cobra.NoArgs,
+		Long: `Generate and install a launchd plist (macOS) or systemd unit (Linux) so the pogo daemon starts on login and restarts on crash.
+
+The install is idempotent: rerunning it diffs the in-repo plist against the
+on-disk plist and only reloads launchd when something changed. If the service
+is already loaded and pogod is healthy, the rerun is a no-op.
+
+On macOS the install also mails the mayor when it finishes:
+
+  [install] com.pogo.daemon installed and running   — on success
+  [install] FAILED com.pogo.daemon                  — on any error
+
+This lets a polecat fire-and-forget the install and have a follow-up agent
+verify the result via mail (the call kills the polecat's parent pogod, so the
+polecat itself can't observe completion).
+
+Running detached (required when the caller is a child of pogod):
+
+  nohup setsid pogo service install </dev/null \
+      >/tmp/pogo-service-install.log 2>&1 &
+  disown
+
+WHY: pogo service install stops the currently-running pogod before launchctl
+loads the new one. Any process that's a child of that pogod (a polecat, a
+crew agent, a refinery worker) gets SIGHUP'd when its parent dies and exits
+mid-install. nohup + setsid + redirected stdio detaches the install from the
+caller's session so it survives the pogod restart. The caller can then exit
+immediately and rely on the mailed report for verification.`,
+		Args: cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
 			if err := service.Install(); err != nil {
 				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)

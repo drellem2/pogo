@@ -16,6 +16,32 @@ If a manually-started `pogod` is already running, the installer stops it first s
 
 Use `pogo service uninstall` to remove it.
 
+## Running the install detached (for agents)
+
+If the caller of `pogo service install` is itself a child of the running `pogod` — a polecat, a crew agent, a refinery worker — it MUST detach before invoking the installer. The install path stops `pogod` (so `launchctl load` can claim the lockfile and port), and any process that was a child of that `pogod` gets SIGHUP'd and exits mid-install.
+
+Use this invocation:
+
+```bash
+nohup setsid pogo service install </dev/null \
+    >/tmp/pogo-service-install.log 2>&1 &
+disown
+```
+
+What each piece does:
+
+- `nohup` — ignore SIGHUP, so the install survives the pogod stop.
+- `setsid` — start a new session, detached from the caller's controlling terminal.
+- `</dev/null >/tmp/... 2>&1` — close stdio that's tied to the caller; without this the install can block on a closed pipe when the caller exits.
+- `&` + `disown` — background the install and remove it from the shell's job table so the caller can exit immediately.
+
+The caller can return as soon as the background process is launched. **Do not wait on it** — the install will outlive you. Verify completion via mail instead:
+
+- On success, the installer mails mayor with subject `[install] com.pogo.daemon installed and running`.
+- On failure, mayor receives `[install] FAILED com.pogo.daemon` with `launchctl print` output and a tail of `~/.pogo/log/pogod.log` in the body.
+
+The post-install mayor (which is now a child of the new `pogod`) picks up the mail and dispatches a verification polecat without any human in the loop.
+
 ## Manual Installation
 
 If you prefer to install the plist manually:

@@ -1,6 +1,9 @@
 package service
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -118,6 +121,75 @@ func TestStatusNotInstalled(t *testing.T) {
 	}
 	// Just verify it returns without panicking; installed state depends on environment
 	_ = installed
+}
+
+func TestRenderLaunchdPlistDeterministic(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("darwin-only")
+	}
+	// renderLaunchdPlist drives the diff-aware idempotency check — the
+	// installer compares its output byte-for-byte against the on-disk
+	// plist. Two consecutive renders against the same env must match
+	// exactly, otherwise every install becomes a forced reload.
+	t.Setenv("POGO_HOME", "/tmp/pogo-render-test")
+	a, _, err := renderLaunchdPlist()
+	if err != nil {
+		t.Fatalf("first render: %v", err)
+	}
+	b, _, err := renderLaunchdPlist()
+	if err != nil {
+		t.Fatalf("second render: %v", err)
+	}
+	if a != b {
+		t.Fatalf("renderLaunchdPlist produced different output on consecutive calls\nfirst:\n%s\nsecond:\n%s", a, b)
+	}
+	if !strings.Contains(a, "/tmp/pogo-render-test/log/pogod.log") {
+		t.Errorf("rendered plist did not pick up POGO_HOME override: %s", a)
+	}
+}
+
+func TestLogTailReadsLastBytes(t *testing.T) {
+	// logTail() is the failure-mail body builder — mayor needs to see the
+	// most recent log lines, not the first ones, when an install fails.
+	dir := t.TempDir()
+	t.Setenv("POGO_HOME", dir)
+	if err := os.MkdirAll(filepath.Join(dir, "log"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write a log file larger than logTailBytes so we exercise the seek path.
+	logPath := filepath.Join(dir, "log", "pogod.log")
+	var sb strings.Builder
+	for i := 0; i < 2000; i++ {
+		fmt.Fprintf(&sb, "line %04d filler\n", i)
+	}
+	expectedTail := "line 1999 filler\n"
+	if err := os.WriteFile(logPath, []byte(sb.String()), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	tail := logTail()
+	if !strings.HasSuffix(tail, expectedTail) {
+		t.Errorf("logTail did not end with most recent line; tail ends with: %q", tail[max(0, len(tail)-40):])
+	}
+	if len(tail) > logTailBytes+128 {
+		t.Errorf("logTail returned %d bytes, expected ~%d", len(tail), logTailBytes)
+	}
+	if strings.Contains(tail, "line 0000 filler") {
+		t.Error("logTail returned start of file instead of end")
+	}
+}
+
+func TestLogTailMissingFile(t *testing.T) {
+	// If the daemon never started, pogod.log won't exist. logTail must
+	// return a human-readable note rather than panicking — the failure
+	// mail still has to render.
+	dir := t.TempDir()
+	t.Setenv("POGO_HOME", dir)
+	tail := logTail()
+	if !strings.Contains(tail, "could not open") {
+		t.Errorf("expected 'could not open' note for missing log, got: %s", tail)
+	}
 }
 
 func TestServicePaths(t *testing.T) {

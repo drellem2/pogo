@@ -1,7 +1,9 @@
 package service
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -167,57 +169,97 @@ func stopRunningPogod() {
 	}
 }
 
-func installLaunchd() error {
+// renderLaunchdPlist materializes the in-repo plist template against the
+// current host (binary path, $HOME, $POGO_HOME). It's the source of truth
+// for diff-aware idempotency: the on-disk plist is compared byte-for-byte
+// against this output.
+func renderLaunchdPlist() (string, launchdData, error) {
 	pogodPath, err := findPogod()
 	if err != nil {
-		return err
+		return "", launchdData{}, err
 	}
-
-	plistPath := launchdPlistPath()
 	home, _ := os.UserHomeDir()
-	logd := logDir()
-
-	if err := os.MkdirAll(logd, 0755); err != nil {
-		return fmt.Errorf("failed to create log directory: %w", err)
-	}
-
-	// Idempotent reinstall: if the plist already exists, unload + remove
-	// it before writing the new one. This makes `pogo service install`
-	// safe to rerun after a plist content update.
-	if _, err := os.Stat(plistPath); err == nil {
-		fmt.Printf("Existing service found at %s — replacing.\n", plistPath)
-		exec.Command("launchctl", "unload", plistPath).Run() // best-effort
-		if err := os.Remove(plistPath); err != nil {
-			return fmt.Errorf("failed to remove existing plist: %w", err)
-		}
-	}
-
-	stopRunningPogod()
-
 	data := launchdData{
 		Label:      launchdLabel,
 		PogodPath:  pogodPath,
-		LogDir:     logd,
+		LogDir:     logDir(),
 		Home:       home,
 		PogoHome:   pogoHome(),
 		PluginPath: filepath.Join(pogoHome(), "plugin"),
 		Path:       launchdPath(),
 	}
-
 	tmpl, err := template.New("plist").Parse(launchdPlistTemplate)
 	if err != nil {
-		return err
+		return "", data, err
 	}
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, data); err != nil {
+		return "", data, err
+	}
+	return buf.String(), data, nil
+}
 
-	f, err := os.Create(plistPath)
+// isLaunchdLoaded reports whether launchd currently knows about the label.
+// "Loaded" here just means `launchctl list LABEL` succeeds — the process
+// behind it may be crash-looping or stopped.
+func isLaunchdLoaded() bool {
+	out, err := exec.Command("launchctl", "list", launchdLabel).CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("failed to create %s: %w", plistPath, err)
+		return false
 	}
-	defer f.Close()
+	return len(out) > 0 && !strings.Contains(string(out), "Could not find")
+}
 
-	if err := tmpl.Execute(f, data); err != nil {
-		os.Remove(plistPath)
+func installLaunchd() (retErr error) {
+	// Self-report on the way out so a polecat can fire-and-forget the
+	// install (`nohup setsid pogo service install ... &`) and have the
+	// post-install mayor pick up the result via mail.
+	defer func() {
+		if retErr != nil {
+			sendInstallFailureMail(retErr)
+		}
+	}()
+
+	rendered, data, err := renderLaunchdPlist()
+	if err != nil {
 		return err
+	}
+
+	plistPath := launchdPlistPath()
+	if err := os.MkdirAll(data.LogDir, 0755); err != nil {
+		return fmt.Errorf("failed to create log directory: %w", err)
+	}
+
+	existing, _ := os.ReadFile(plistPath)
+	plistMatches := string(existing) == rendered
+	loaded := isLaunchdLoaded()
+
+	// Fast path: identical plist already loaded and pogod healthy → no-op.
+	// Lets the post-install mayor rerun `pogo service install` as a probe
+	// without bouncing the daemon.
+	if plistMatches && loaded {
+		if err := client.HealthCheck(); err == nil {
+			fmt.Printf("Service already installed and healthy at %s — no changes.\n", plistPath)
+			sendInstallSuccessMail(plistPath, data.LogDir, true)
+			return nil
+		}
+	}
+
+	// Either the plist content changed, the service is not loaded, or
+	// it's loaded-but-unhealthy. In all cases we want a clean unload +
+	// load cycle so launchd picks up any new plist content and respawns
+	// pogod fresh.
+	if loaded {
+		fmt.Println("Existing service is loaded — unloading before reinstall.")
+		exec.Command("launchctl", "unload", plistPath).Run() // best-effort
+	}
+
+	stopRunningPogod()
+
+	if !plistMatches {
+		if err := os.WriteFile(plistPath, []byte(rendered), 0644); err != nil {
+			return fmt.Errorf("failed to write %s: %w", plistPath, err)
+		}
 	}
 
 	cmd := exec.Command("launchctl", "load", plistPath)
@@ -230,9 +272,77 @@ func installLaunchd() error {
 	}
 
 	fmt.Printf("Service installed: %s\n", plistPath)
-	fmt.Printf("Logs: %s/pogod.log\n", logd)
+	fmt.Printf("Logs: %s/pogod.log\n", data.LogDir)
 	fmt.Println("The pogo daemon will now start on login and restart on crash.")
+	sendInstallSuccessMail(plistPath, data.LogDir, false)
 	return nil
+}
+
+// sendInstallMail is best-effort: if mg isn't on PATH or the mayor inbox
+// doesn't exist yet, the install must still succeed. The mayor is just
+// the fastest verification path; a human can read the log otherwise.
+func sendInstallMail(subject, body string) {
+	cmd := exec.Command("mg", "mail", "send", "mayor",
+		"--from", "service-install",
+		"--subject", subject,
+		"--body", body)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: mail to mayor failed: %v: %s\n", err, strings.TrimSpace(string(out)))
+		return
+	}
+	fmt.Printf("Mailed install report to mayor: %s\n", subject)
+}
+
+func sendInstallSuccessMail(plistPath, logd string, noChange bool) {
+	rerun := "fresh install"
+	if noChange {
+		rerun = "no-op rerun (plist unchanged, service healthy)"
+	}
+	body := fmt.Sprintf("Plist:        %s\nLog dir:      %s\nResult:       %s\n\nlaunchctl list %s:\n%s",
+		plistPath, logd, rerun, launchdLabel, launchctlListOutput())
+	sendInstallMail("[install] com.pogo.daemon installed and running", body)
+}
+
+func sendInstallFailureMail(err error) {
+	body := fmt.Sprintf("Error: %v\n\nlaunchctl print:\n%s\n\nLog tail (~%d bytes):\n%s",
+		err, launchctlPrintOutput(), logTailBytes, logTail())
+	sendInstallMail("[install] FAILED com.pogo.daemon", body)
+}
+
+func launchctlListOutput() string {
+	out, _ := exec.Command("launchctl", "list", launchdLabel).CombinedOutput()
+	return strings.TrimRight(string(out), "\n")
+}
+
+func launchctlPrintOutput() string {
+	target := fmt.Sprintf("gui/%d/%s", os.Getuid(), launchdLabel)
+	out, _ := exec.Command("launchctl", "print", target).CombinedOutput()
+	return strings.TrimRight(string(out), "\n")
+}
+
+const logTailBytes = 4096
+
+func logTail() string {
+	logPath := filepath.Join(logDir(), "pogod.log")
+	f, err := os.Open(logPath)
+	if err != nil {
+		return fmt.Sprintf("(could not open %s: %v)", logPath, err)
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return fmt.Sprintf("(could not stat %s: %v)", logPath, err)
+	}
+	if fi.Size() > logTailBytes {
+		if _, err := f.Seek(-int64(logTailBytes), io.SeekEnd); err != nil {
+			return fmt.Sprintf("(could not seek %s: %v)", logPath, err)
+		}
+	}
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return fmt.Sprintf("(could not read %s: %v)", logPath, err)
+	}
+	return string(data)
 }
 
 // verifyLaunchdRunning confirms that launchctl knows about com.pogo.daemon
