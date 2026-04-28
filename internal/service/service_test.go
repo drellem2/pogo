@@ -2,12 +2,14 @@ package service
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 	"text/template"
+	"time"
 )
 
 func TestLaunchdPlistTemplate(t *testing.T) {
@@ -192,6 +194,104 @@ func TestLogTailMissingFile(t *testing.T) {
 	tail := logTail()
 	if !strings.Contains(tail, "could not open") {
 		t.Errorf("expected 'could not open' note for missing log, got: %s", tail)
+	}
+}
+
+// listenLocal binds an ephemeral 127.0.0.1 port for tests that need to
+// simulate a stuck or releasing port without touching the real pogod
+// at :10000.
+func listenLocal(t *testing.T) (net.Listener, string) {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen ephemeral: %v", err)
+	}
+	return l, l.Addr().String()
+}
+
+func TestDrainAddrReturnsImmediatelyWhenFree(t *testing.T) {
+	// Bind then immediately close so we know the port is unbound but was
+	// recently valid (mirrors the post-launchctl-unload state).
+	l, addr := listenLocal(t)
+	l.Close()
+
+	start := time.Now()
+	if err := drainAddr(addr, 2*time.Second); err != nil {
+		t.Fatalf("drainAddr returned error when port is free: %v", err)
+	}
+	if took := time.Since(start); took > 500*time.Millisecond {
+		t.Errorf("drainAddr on free port took %s, expected <500ms", took)
+	}
+}
+
+func TestDrainAddrTimesOutWhenHeld(t *testing.T) {
+	// If something keeps holding the port past the timeout, the installer
+	// must surface a clear error rather than blindly running launchctl
+	// load — that's the failure mode that produced 3 silent install
+	// retries on mg-9cdc.
+	l, addr := listenLocal(t)
+	defer l.Close()
+	go acceptForever(l)
+
+	start := time.Now()
+	err := drainAddr(addr, 500*time.Millisecond)
+	if err == nil {
+		t.Fatal("drainAddr returned nil while a listener was holding the port")
+	}
+	if took := time.Since(start); took < 400*time.Millisecond {
+		t.Errorf("drainAddr returned too fast (%s); should have polled until ~timeout", took)
+	}
+	if !strings.Contains(err.Error(), addr) {
+		t.Errorf("error should mention the address %q; got: %v", addr, err)
+	}
+}
+
+func TestDrainAddrDetectsLateRelease(t *testing.T) {
+	// Realistic scenario: pogod has started shutting down but the kernel
+	// hasn't released the listening socket yet. drainAddr must notice when
+	// the port frees mid-poll and return nil.
+	l, addr := listenLocal(t)
+	go acceptForever(l)
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		l.Close()
+	}()
+	if err := drainAddr(addr, 3*time.Second); err != nil {
+		t.Errorf("drainAddr did not notice the port releasing: %v", err)
+	}
+}
+
+// acceptForever drains incoming connections so DialTimeout completes
+// successfully (rather than hanging with no Accept).
+func acceptForever(l net.Listener) {
+	for {
+		c, err := l.Accept()
+		if err != nil {
+			return
+		}
+		c.Close()
+	}
+}
+
+func TestQuiesceCrewIsNoOpWhenPogodDown(t *testing.T) {
+	// quiesceCrew is called as the first step of installLaunchd. When
+	// pogod isn't running there's nothing to quiesce — it must not panic
+	// or block. This guards against a regression where the function tries
+	// to talk to pogod unconditionally and stalls the install.
+	if c, err := net.DialTimeout("tcp", pogodPort, 100*time.Millisecond); err == nil {
+		c.Close()
+		t.Skip("pogod is running on this host — skipping pogod-down quiesce test")
+	}
+	done := make(chan struct{})
+	go func() {
+		quiesceCrew()
+		close(done)
+	}()
+	select {
+	case <-done:
+		// good
+	case <-time.After(5 * time.Second):
+		t.Fatal("quiesceCrew blocked for >5s with pogod down — should be a fast no-op")
 	}
 }
 

@@ -395,7 +395,17 @@ Use --live for a continuously updating view (like watch).`,
 
 The install is idempotent: rerunning it diffs the in-repo plist against the
 on-disk plist and only reloads launchd when something changed. If the service
-is already loaded and pogod is healthy, the rerun is a no-op.
+is already loaded and pogod is healthy, the rerun is a no-op. If the plist is
+loaded-but-stopped or loaded-with-stale-config, the install unloads it and
+performs a fresh load.
+
+On macOS the install runs an orchestrated lifecycle to prevent the
+crew/launchd race observed on mg-9cdc (architect's analysis 2026-04-28):
+quiesce crew (stop orchestration so crew agents can't auto-respawn pogod),
+unload any prior plist, stop the running pogod, wait for :10000 to drain,
+load the plist, then health-check launchd-pogod. If a stranger holds :10000
+past the drain timeout the install fails fast rather than producing a
+silent launchd-pogod exit.
 
 On macOS the install also mails the mayor when it finishes:
 

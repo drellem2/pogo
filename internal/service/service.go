@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -160,6 +161,23 @@ func Install() error {
 	}
 }
 
+// quiesceCrew tells the running pogod to stop orchestration (agents +
+// refinery) so crew agents can't auto-respawn pogod via RunWithHealthCheck
+// during the launchd handoff. Without this step, a crew agent's `mg`/`pogo`
+// command issued between `pogo server stop` and `launchctl load` will
+// trigger client.StartServer(), which spawns a non-launchd pogod that wins
+// the :10000 bind and silently knocks launchd's pogod out (the deterministic
+// race observed on mg-9cdc, 2026-04-28). No-op if pogod isn't running.
+func quiesceCrew() {
+	if err := client.HealthCheck(); err != nil {
+		return
+	}
+	fmt.Println("Quiescing crew (stopping orchestration)...")
+	if err := client.StopOrchestration(); err != nil {
+		fmt.Printf("  warning: %v (continuing anyway)\n", err)
+	}
+}
+
 // stopRunningPogod best-effort stops a manually-started pogod so launchctl
 // load doesn't immediately exit on lockfile/port collision. If no pogod is
 // running this is a no-op.
@@ -170,6 +188,41 @@ func stopRunningPogod() {
 	fmt.Println("Stopping running pogod before installing service...")
 	if err := client.StopServer(); err != nil {
 		fmt.Printf("  warning: %v (continuing anyway)\n", err)
+	}
+}
+
+// pogodPort is the well-known port pogod binds. waitForSocketDrain polls it
+// until nothing answers (i.e. it's free for the launchd-supervised pogod to
+// claim) or until timeout.
+const pogodPort = "127.0.0.1:10000"
+
+// waitForPogodPortDrain is the production entry point — calls drainAddr
+// against the real pogod port.
+func waitForPogodPortDrain(timeout time.Duration) error {
+	return drainAddr(pogodPort, timeout)
+}
+
+// drainAddr polls a TCP address until it is no longer accepting connections.
+// Uses Dial (not Listen) so we don't momentarily own the port ourselves and
+// create a fresh window for an outside racer to bind. Fails with a clear
+// error on timeout — the caller must surface this rather than blindly run
+// `launchctl load`, since a stranger holding the port will cause
+// launchd-pogod to exit silently.
+//
+// Address-parameterized so tests can exercise the polling logic against a
+// test-local listener without touching the real :10000.
+func drainAddr(addr string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		c, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
+		if err != nil {
+			return nil // port is free
+		}
+		c.Close()
+		if !time.Now().Before(deadline) {
+			return fmt.Errorf("timed out after %s waiting for %s to drain (something still owns the port)", timeout, addr)
+		}
+		time.Sleep(200 * time.Millisecond)
 	}
 }
 
@@ -249,31 +302,55 @@ func installLaunchd() (retErr error) {
 		}
 	}
 
-	// Either the plist content changed, the service is not loaded, or
-	// it's loaded-but-unhealthy. In all cases we want a clean unload +
-	// load cycle so launchd picks up any new plist content and respawns
-	// pogod fresh.
+	// Orchestrated install sequence — prevents the crew/launchd race
+	// (architect's analysis 2026-04-28T11:37Z, mg-ae84). Each step blocks
+	// until the previous one is complete so launchd-pogod boots into a clean
+	// environment with no other process racing to claim :10000.
+	//
+	// Step 1: Quiesce crew. Tell the running pogod to drop crew agents so
+	// they can't issue a `pogo`/`mg` command that auto-respawns a non-launchd
+	// pogod via client.RunWithHealthCheck.
+	quiesceCrew()
+
+	// Step 2: Unload any prior plist. Best-effort — handles the
+	// loaded-and-running, loaded-and-stopped, and loaded-with-stale-config
+	// cases uniformly. Subsumes mg-6095 (idempotency against pre-loaded
+	// plist).
 	if loaded {
 		fmt.Println("Existing service is loaded — unloading before reinstall.")
 		exec.Command("launchctl", "unload", plistPath).Run() // best-effort
 	}
 
+	// Step 3: Stop any pogod still running (manual or formerly-launchd).
 	stopRunningPogod()
 
+	// Step 4: Wait for :10000 to drain. If a stranger holds the port past
+	// the timeout, fail fast — loading the plist now would just produce
+	// another silent launchd-pogod exit.
+	if err := waitForPogodPortDrain(10 * time.Second); err != nil {
+		return err
+	}
+
+	// Step 5: Write plist (if it changed) and load it.
 	if !plistMatches {
 		if err := os.WriteFile(plistPath, []byte(rendered), 0644); err != nil {
 			return fmt.Errorf("failed to write %s: %w", plistPath, err)
 		}
 	}
-
 	cmd := exec.Command("launchctl", "load", plistPath)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("launchctl load failed: %s: %w", string(out), err)
 	}
 
+	// Step 6: Verify launchd-pogod is bound and answering on /health.
 	if err := verifyLaunchdRunning(); err != nil {
 		return fmt.Errorf("service loaded but verification failed: %w", err)
 	}
+
+	// Step 7: Crew agents auto-restart under the new pogod via
+	// auto_start=true in their prompt frontmatter (mayor.md, pm-template.md).
+	// pogod boots in ModeFull (server.New), so refinery + agent registry
+	// are already running by the time verifyLaunchdRunning returns.
 
 	fmt.Printf("Service installed: %s\n", plistPath)
 	fmt.Printf("Logs: %s/pogod.log\n", data.LogDir)
