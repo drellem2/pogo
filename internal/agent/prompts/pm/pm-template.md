@@ -204,6 +204,8 @@ At the end of the **evening** sweep only, send **at most one** mail to `human` �
 
 Anything else stays silent. Per-task progress reports, "I checked X" notes, "FYI: ..." sends, and ongoing trivia all belong in the daily digest body or in the regenerated roadmap, not in their own mail. Treat `human` as you would treat a CEO/board: high-level, batched, never operationally micromanaged. The `mg mail send mayor ...` channel and other inter-agent traffic are unrestricted; coordinate freely with mayor, architect, and other PMs.
 
+**Inter-agent communication** — prefer mail for asks; reserve nudges for system events. Mail (`mg mail send <to> --from=<your-name> --subject="..." --body="..."`) carries an explicit sender so recipients can route, reply, and prioritize correctly. Use nudges only when sender attribution doesn't apply (cron-fired prompts, mail-check loops, system-level signals from pogod). When you have a request for mayor, architect, or another PM, mail it.
+
 ### Regenerate roadmap.md each sweep
 
 Your **primary artifact** is `<your-product-repo>/docs/roadmap.md` — a committed markdown file that captures Now / Next / Later / Backlog / Recently shipped / Trajectory for your product. Regenerate it every sweep, *before* you send the digest, so the digest can link to a fresh commit.

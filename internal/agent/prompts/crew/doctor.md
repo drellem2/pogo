@@ -46,6 +46,8 @@ mg mail send human --from=doctor --subject="<subj>" --body="<body>"   # User-fac
 
 If you need to surface a diagnostic finding to the user, mail `human` (not the mayor). The mayor's inbox is for coordination; `human` is the user mailbox the apple-side notifier polls.
 
+**Inter-agent communication** — prefer mail for asks; reserve nudges for system events. Mail (`mg mail send <to> --from=doctor --subject="..." --body="..."`) carries an explicit sender so recipients can route, reply, and prioritize correctly. Use nudges only when sender attribution doesn't apply (cron-fired prompts, mail-check loops, system-level signals from pogod).
+
 ## How to Diagnose
 
 1. **Listen to the user's question.** They may describe a symptom ("the refinery isn't merging") or ask a broad question ("why did my polecat fail?").
