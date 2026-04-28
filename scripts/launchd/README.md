@@ -20,22 +20,15 @@ Use `pogo service uninstall` to remove it.
 
 If the caller of `pogo service install` is itself a child of the running `pogod` — a polecat, a crew agent, a refinery worker — it MUST detach before invoking the installer. The install path stops `pogod` (so `launchctl load` can claim the lockfile and port), and any process that was a child of that `pogod` gets SIGHUP'd and exits mid-install.
 
-Use this invocation:
+Use the built-in `--detach` flag:
 
 ```bash
-nohup setsid pogo service install </dev/null \
-    >/tmp/pogo-service-install.log 2>&1 &
-disown
+pogo service install --detach
 ```
 
-What each piece does:
+This re-execs `pogo` in a new session via Go's `syscall.Setsid`, redirects stdio to `/tmp/pogo-service-install.log`, and exits 0 within ~100ms. The detached child runs the install, restarts `pogod` under launchd, and mails mayor with the result. No `nohup`, `setsid`, or `disown` needed at the call site — and unlike `setsid`, this works on macOS (where `setsid` is not in base or Homebrew).
 
-- `nohup` — ignore SIGHUP, so the install survives the pogod stop.
-- `setsid` — start a new session, detached from the caller's controlling terminal.
-- `</dev/null >/tmp/... 2>&1` — close stdio that's tied to the caller; without this the install can block on a closed pipe when the caller exits.
-- `&` + `disown` — background the install and remove it from the shell's job table so the caller can exit immediately.
-
-The caller can return as soon as the background process is launched. **Do not wait on it** — the install will outlive you. Verify completion via mail instead:
+The caller can return as soon as `pogo service install --detach` exits. **Do not wait on it** — the install will outlive you. Verify completion via mail instead:
 
 - On success, the installer mails mayor with subject `[install] com.pogo.daemon installed and running`.
 - On failure, mayor receives `[install] FAILED com.pogo.daemon` with `launchctl print` output and a tail of `~/Library/Logs/pogo/pogod.log` in the body.
