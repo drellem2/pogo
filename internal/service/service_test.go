@@ -362,6 +362,44 @@ func TestParseLaunchctlListPIDIgnoresNonPIDLines(t *testing.T) {
 	}
 }
 
+func TestLaunchdGUIDomain(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("darwin-only")
+	}
+	// launchdGUIDomain must produce a "gui/<uid>" string for the current
+	// user — `launchctl bootstrap` requires an explicit domain target, and
+	// using the user's GUI (Aqua) domain is what makes the install path
+	// work from a non-Aqua caller (a polecat under pogod). Regressing to a
+	// computed-from-context domain would reintroduce the mg-3963 silent
+	// "registered but never spawned" failure.
+	d := launchdGUIDomain()
+	want := fmt.Sprintf("gui/%d", os.Getuid())
+	if d != want {
+		t.Errorf("launchdGUIDomain() = %q, want %q", d, want)
+	}
+	if !strings.HasPrefix(d, "gui/") {
+		t.Errorf("launchdGUIDomain() must start with %q, got %q", "gui/", d)
+	}
+}
+
+func TestLaunchdServiceTarget(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("darwin-only")
+	}
+	// launchdServiceTarget = "<domain>/<label>" — the canonical address
+	// passed to `launchctl kickstart` and `launchctl bootout`. Must round-
+	// trip cleanly with launchdGUIDomain(): bootout undoes what bootstrap
+	// did, so they have to refer to the same service in the same domain.
+	target := launchdServiceTarget()
+	wantPrefix := launchdGUIDomain() + "/"
+	if !strings.HasPrefix(target, wantPrefix) {
+		t.Errorf("launchdServiceTarget() = %q, want prefix %q", target, wantPrefix)
+	}
+	if !strings.HasSuffix(target, "/"+launchdLabel) {
+		t.Errorf("launchdServiceTarget() = %q, want suffix /%s", target, launchdLabel)
+	}
+}
+
 func TestServicePaths(t *testing.T) {
 	switch runtime.GOOS {
 	case "darwin":

@@ -256,6 +256,22 @@ func renderLaunchdPlist() (string, launchdData, error) {
 	return buf.String(), data, nil
 }
 
+// launchdGUIDomain returns the modern launchd "gui/<uid>" domain string for
+// the current user. We always target the user's GUI (Aqua) domain explicitly,
+// regardless of where the install command was invoked from — a polecat
+// running under pogod is not in the Aqua bootstrap by default, and the
+// legacy `launchctl load` form would register the plist in whatever domain
+// the caller happened to live in, leaving RunAtLoad unfired (mg-3963).
+func launchdGUIDomain() string {
+	return fmt.Sprintf("gui/%d", os.Getuid())
+}
+
+// launchdServiceTarget returns the modern launchd "gui/<uid>/<label>"
+// service target for kickstart / bootout / print.
+func launchdServiceTarget() string {
+	return fmt.Sprintf("%s/%s", launchdGUIDomain(), launchdLabel)
+}
+
 // isLaunchdLoaded reports whether launchd currently knows about the label.
 // "Loaded" here just means `launchctl list LABEL` succeeds — the process
 // behind it may be crash-looping or stopped.
@@ -378,12 +394,18 @@ func installLaunchd() (retErr error) {
 	// pogod via client.RunWithHealthCheck.
 	quiesceCrew()
 
-	// Step 2: Unload any prior plist. Best-effort — handles the
+	// Step 2: Boot out any prior plist. Best-effort — handles the
 	// loaded-and-running, loaded-and-stopped, and loaded-with-stale-config
 	// cases uniformly. Subsumes mg-6095 (idempotency against pre-loaded
-	// plist).
+	// plist). `bootout` is the modern equivalent of `unload` and removes
+	// the service from the explicit GUI domain we'll re-bootstrap into
+	// in step 5; without this, `bootstrap` would refuse with EEXIST.
 	if loaded {
-		fmt.Println("Existing service is loaded — unloading before reinstall.")
+		fmt.Println("Existing service is loaded — booting out before reinstall.")
+		exec.Command("launchctl", "bootout", launchdServiceTarget()).Run() // best-effort
+		// Fall back to legacy unload too, in case the prior install
+		// registered via `launchctl load` into a non-Aqua domain that
+		// `bootout gui/<uid>` can't see. Belt and suspenders.
 		exec.Command("launchctl", "unload", plistPath).Run() // best-effort
 	}
 
@@ -397,20 +419,45 @@ func installLaunchd() (retErr error) {
 		return err
 	}
 
-	// Step 5: Write plist (if it changed) and load it.
+	// Step 5: Write plist (if it changed) and bootstrap it into the user's
+	// GUI domain.
+	//
+	// We use `launchctl bootstrap gui/<uid> <plist>` instead of the legacy
+	// `launchctl load <plist>` for two reasons (mg-3963):
+	//
+	//   1. `load` is a no-op silent failure when the calling process isn't
+	//      already in the Aqua session — the plist gets registered in the
+	//      caller's domain (or a synthesized one) and `RunAtLoad` never
+	//      fires. The post-install state shows `runs=0, never exited` even
+	//      after explicit unload+load. Polecats invoking install via
+	//      `--detach` are precisely in this non-Aqua context.
+	//
+	//   2. `bootstrap` requires an explicit domain, so we always land in
+	//      `gui/<uid>` (the user's Aqua session) regardless of the caller.
+	//      This is the form Apple has documented since macOS 10.11 and is
+	//      what `launchctl print` uses for service targets.
+	//
+	// We then run `launchctl kickstart -k <target>` as a belt-and-suspenders
+	// step: bootstrap with `RunAtLoad=true` should spawn the process, but
+	// kickstart guarantees an immediate (re)launch and is a no-op if the
+	// process is already running.
 	if !plistMatches {
 		if err := os.WriteFile(plistPath, []byte(rendered), 0644); err != nil {
 			return fmt.Errorf("failed to write %s: %w", plistPath, err)
 		}
 	}
-	cmd := exec.Command("launchctl", "load", plistPath)
+	cmd := exec.Command("launchctl", "bootstrap", launchdGUIDomain(), plistPath)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("launchctl load failed: %s: %w", string(out), err)
+		return fmt.Errorf("launchctl bootstrap %s %s failed: %s: %w", launchdGUIDomain(), plistPath, strings.TrimSpace(string(out)), err)
 	}
+	// Force the spawn. -k restarts the service if it's already running, or
+	// starts it fresh if not. We ignore errors here because the verify step
+	// is the authoritative health gate; kickstart is just a nudge.
+	exec.Command("launchctl", "kickstart", "-k", launchdServiceTarget()).Run()
 
 	// Step 6: Verify launchd-pogod is bound and answering on /health.
 	if err := verifyLaunchdRunning(); err != nil {
-		return fmt.Errorf("service loaded but verification failed: %w", err)
+		return fmt.Errorf("service bootstrapped but verification failed: %w", err)
 	}
 
 	// Step 7: Crew agents auto-restart under the new pogod via
@@ -493,8 +540,17 @@ func logTail() string {
 }
 
 // verifyLaunchdRunning confirms that launchctl knows about com.pogo.daemon
-// and that pogod is reachable. Polls briefly because launchctl load returns
-// before the child process is actually serving requests.
+// and that pogod is reachable. Polls because `launchctl bootstrap` returns
+// before the child process is actually serving requests, and pogod's own
+// startup (project load, plugin init, refinery boot, agent registry) can
+// take several seconds on a cold cache.
+//
+// The 30s health window is the budget *after* the supervised PID has been
+// observed — if launchd has spawned pogod, we expect the listener up well
+// inside that. The error path prints a diagnostic snapshot
+// (`launchctl print` + log tail) so a polecat retrying the install can
+// actually see why pogod isn't responding instead of just "did not become
+// healthy".
 func verifyLaunchdRunning() error {
 	listed := false
 	deadline := time.Now().Add(5 * time.Second)
@@ -510,14 +566,31 @@ func verifyLaunchdRunning() error {
 		return fmt.Errorf("launchctl list %s did not return the service", launchdLabel)
 	}
 
-	deadline = time.Now().Add(10 * time.Second)
+	// Wait for launchd to actually spawn the program. Without this
+	// gate we'd race straight into the /health poll and time out before
+	// launchd has scheduled the process — exactly the failure mode
+	// observed on mg-3963 (`runs=0, never exited`).
+	deadline = time.Now().Add(15 * time.Second)
+	supervised := false
+	for time.Now().Before(deadline) {
+		if isLaunchdSupervising() {
+			supervised = true
+			break
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	if !supervised {
+		return fmt.Errorf("launchd registered %s but never spawned the program (runs=0); check `launchctl print %s`", launchdLabel, launchdServiceTarget())
+	}
+
+	deadline = time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		if err := client.HealthCheck(); err == nil {
 			return nil
 		}
 		time.Sleep(300 * time.Millisecond)
 	}
-	return fmt.Errorf("pogod did not become healthy within 10s after launchctl load")
+	return fmt.Errorf("pogod did not become healthy within 30s after launchctl bootstrap (PID assigned but /health unreachable — check %s/pogod.log)", logDir())
 }
 
 func installSystemd() error {
@@ -585,8 +658,11 @@ func uninstallLaunchd() error {
 		return fmt.Errorf("no service installed at %s", plistPath)
 	}
 
-	cmd := exec.Command("launchctl", "unload", plistPath)
-	cmd.Run() // best-effort unload
+	// Best-effort: try the modern `bootout` form first (matches the
+	// `bootstrap` form used at install time), then fall back to legacy
+	// `unload` for any plist that was registered the old way.
+	exec.Command("launchctl", "bootout", launchdServiceTarget()).Run()
+	exec.Command("launchctl", "unload", plistPath).Run()
 
 	if err := os.Remove(plistPath); err != nil {
 		return fmt.Errorf("failed to remove %s: %w", plistPath, err)
@@ -632,15 +708,21 @@ func restartLaunchd() error {
 	if _, err := os.Stat(plistPath); os.IsNotExist(err) {
 		return fmt.Errorf("service not installed at %s", plistPath)
 	}
-	// kickstart -k forces a restart even if the service is stopped
-	cmd := exec.Command("launchctl", "kickstart", "-k", "gui/"+fmt.Sprint(os.Getuid())+"/"+launchdLabel)
+	// kickstart -k forces a restart even if the service is stopped.
+	cmd := exec.Command("launchctl", "kickstart", "-k", launchdServiceTarget())
 	if out, err := cmd.CombinedOutput(); err != nil {
-		// Fallback: unload + load for older macOS
+		// Fallback: bootout + bootstrap. The service may not be loaded
+		// in the gui/<uid> domain yet (e.g. a stale install registered
+		// via legacy `launchctl load` into the wrong domain), in which
+		// case kickstart fails with "Could not find service". Re-bootstrap
+		// from scratch.
+		exec.Command("launchctl", "bootout", launchdServiceTarget()).Run()
 		exec.Command("launchctl", "unload", plistPath).Run()
-		loadCmd := exec.Command("launchctl", "load", plistPath)
-		if out2, err2 := loadCmd.CombinedOutput(); err2 != nil {
-			return fmt.Errorf("launchctl load failed: %s (kickstart failed: %s): %w", string(out2), string(out), err2)
+		bootstrapCmd := exec.Command("launchctl", "bootstrap", launchdGUIDomain(), plistPath)
+		if out2, err2 := bootstrapCmd.CombinedOutput(); err2 != nil {
+			return fmt.Errorf("launchctl bootstrap failed: %s (kickstart failed: %s): %w", strings.TrimSpace(string(out2)), strings.TrimSpace(string(out)), err2)
 		}
+		exec.Command("launchctl", "kickstart", "-k", launchdServiceTarget()).Run()
 	}
 	return nil
 }

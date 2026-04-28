@@ -10,7 +10,7 @@ The easiest way to install the service is:
 pogo service install
 ```
 
-This auto-detects your `pogod` binary path, builds a plist matching the spec below (ProcessType=Interactive, KeepAlive=true, log to `~/Library/Logs/pogo/pogod.log`, PATH/HOME/POGO_HOME/POGO_PLUGIN_PATH wired up), and `launchctl load`s it. The installer is idempotent — rerun it after upgrading pogod or changing the plist template, and it will replace the existing service in place.
+This auto-detects your `pogod` binary path, builds a plist matching the spec below (ProcessType=Interactive, KeepAlive=true, log to `~/Library/Logs/pogo/pogod.log`, PATH/HOME/POGO_HOME/POGO_PLUGIN_PATH wired up), and `launchctl bootstrap`s it into your GUI domain (`gui/$(id -u)`). The installer is idempotent — rerun it after upgrading pogod or changing the plist template, and it will replace the existing service in place.
 
 If a manually-started `pogod` is already running, the installer stops it first so the launchctl load doesn't collide on the lockfile.
 
@@ -60,8 +60,14 @@ pogo server stop --all
 ### 3. Load the service
 
 ```bash
-launchctl load ~/Library/LaunchAgents/com.pogo.daemon.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.pogo.daemon.plist
+launchctl kickstart -k gui/$(id -u)/com.pogo.daemon
 ```
+
+The legacy `launchctl load <plist>` form also works in a fresh GUI Terminal,
+but it silently fails to start the program when invoked from a non-Aqua
+process tree (e.g. an agent spawned under pogod). `bootstrap` targets the
+GUI domain explicitly, which is why `pogo service install` uses it.
 
 ### 4. Verify it's running
 
@@ -98,8 +104,8 @@ The plist must include all of these keys for pogod to behave correctly under lau
 
 | Action | Command |
 |--------|---------|
-| Load (start) | `launchctl load ~/Library/LaunchAgents/com.pogo.daemon.plist` |
-| Unload (stop) | `launchctl unload ~/Library/LaunchAgents/com.pogo.daemon.plist` |
+| Load (start) | `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.pogo.daemon.plist` |
+| Unload (stop) | `launchctl bootout gui/$(id -u)/com.pogo.daemon` |
 | Restart | `launchctl kickstart -k gui/$(id -u)/com.pogo.daemon` |
-| Check status | `launchctl list \| grep com.pogo.daemon` |
+| Check status | `launchctl list \| grep com.pogo.daemon` (or `launchctl print gui/$(id -u)/com.pogo.daemon` for full state) |
 | View logs | `tail -f ~/Library/Logs/pogo/pogod.log` |
