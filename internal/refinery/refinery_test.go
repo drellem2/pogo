@@ -181,6 +181,99 @@ commands = ["./build.sh", "./test.sh"]
 	}
 }
 
+func TestParseRefineryTomlDeploy(t *testing.T) {
+	dir := t.TempDir()
+
+	// [deploy] command is parsed
+	path := filepath.Join(dir, "deploy.toml")
+	os.WriteFile(path, []byte(`
+[deploy]
+command = "./deploy.sh"
+`), 0644)
+
+	cfg := parseRefineryConfig(path)
+	if cfg.DeployCommand != "./deploy.sh" {
+		t.Errorf("expected deploy command ./deploy.sh, got %q", cfg.DeployCommand)
+	}
+
+	// Both [gates] and [deploy] coexist without interference
+	mixedPath := filepath.Join(dir, "mixed.toml")
+	os.WriteFile(mixedPath, []byte(`
+[gates]
+commands = ["./build.sh", "./test.sh"]
+
+[deploy]
+command = "./deploy.sh"
+`), 0644)
+
+	mixed := parseRefineryConfig(mixedPath)
+	if mixed.DeployCommand != "./deploy.sh" {
+		t.Errorf("expected deploy command ./deploy.sh, got %q", mixed.DeployCommand)
+	}
+	if len(mixed.Gates) != 2 || mixed.Gates[0] != "./build.sh" || mixed.Gates[1] != "./test.sh" {
+		t.Errorf("expected gates [./build.sh ./test.sh], got %v", mixed.Gates)
+	}
+
+	// Missing [deploy] section returns empty string, not an error
+	gatesOnlyPath := filepath.Join(dir, "gates_only.toml")
+	os.WriteFile(gatesOnlyPath, []byte(`
+[gates]
+commands = ["./build.sh"]
+`), 0644)
+
+	gatesOnly := parseRefineryConfig(gatesOnlyPath)
+	if gatesOnly.DeployCommand != "" {
+		t.Errorf("expected empty deploy command, got %q", gatesOnly.DeployCommand)
+	}
+
+	// Nonexistent file returns zero-value config
+	missing := parseRefineryConfig("/nonexistent")
+	if missing.DeployCommand != "" || missing.Gates != nil {
+		t.Errorf("expected zero-value config, got %+v", missing)
+	}
+}
+
+func TestRefineryDeployCommand(t *testing.T) {
+	dir := t.TempDir()
+	r, err := New(Config{
+		Enabled:      true,
+		PollInterval: time.Hour,
+		WorktreeDir:  dir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Repo with no .pogo/refinery.toml: empty string, no error
+	emptyRepo := t.TempDir()
+	if got := r.DeployCommand(emptyRepo); got != "" {
+		t.Errorf("expected empty deploy command for repo without config, got %q", got)
+	}
+
+	// Repo with a [deploy] section
+	repo := t.TempDir()
+	os.MkdirAll(filepath.Join(repo, ".pogo"), 0755)
+	os.WriteFile(filepath.Join(repo, ".pogo", "refinery.toml"), []byte(`
+[deploy]
+command = "./scripts/deploy.sh production"
+`), 0644)
+
+	if got := r.DeployCommand(repo); got != "./scripts/deploy.sh production" {
+		t.Errorf("expected deploy command from refinery.toml, got %q", got)
+	}
+
+	// Repo with refinery.toml but no [deploy] section
+	gatesOnlyRepo := t.TempDir()
+	os.MkdirAll(filepath.Join(gatesOnlyRepo, ".pogo"), 0755)
+	os.WriteFile(filepath.Join(gatesOnlyRepo, ".pogo", "refinery.toml"), []byte(`
+quality_gate = "./build.sh"
+`), 0644)
+
+	if got := r.DeployCommand(gatesOnlyRepo); got != "" {
+		t.Errorf("expected empty deploy command when only [gates] configured, got %q", got)
+	}
+}
+
 func TestProcessMergeEndToEnd(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not found")

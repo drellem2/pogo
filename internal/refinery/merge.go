@@ -310,6 +310,12 @@ func (r *Refinery) loadGateConfig(wtDir, repoPath string) []string {
 	return defaults
 }
 
+// refineryConfig holds parsed values from a .pogo/refinery.toml file.
+type refineryConfig struct {
+	Gates         []string
+	DeployCommand string
+}
+
 // parseRefineryToml reads a .pogo/refinery.toml and extracts gate commands.
 // Format:
 //
@@ -320,13 +326,32 @@ func (r *Refinery) loadGateConfig(wtDir, repoPath string) []string {
 //
 //	quality_gate = "./build.sh"
 func parseRefineryToml(path string) []string {
+	return parseRefineryConfig(path).Gates
+}
+
+// parseRefineryConfig reads a .pogo/refinery.toml and extracts all known
+// configuration. Recognized sections:
+//
+//	[gates]
+//	commands = ["./build.sh", "./test.sh"]
+//
+//	[deploy]
+//	command = "./deploy.sh"
+//
+// Or simpler top-level keys:
+//
+//	quality_gate = "./build.sh"
+//
+// Returns a zero-value config when the file is missing or unreadable;
+// missing sections are not an error.
+func parseRefineryConfig(path string) refineryConfig {
+	var cfg refineryConfig
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil
+		return cfg
 	}
 
-	var gates []string
-	inGatesSection := false
+	section := ""
 
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
@@ -335,8 +360,7 @@ func parseRefineryToml(path string) []string {
 		}
 
 		if strings.HasPrefix(line, "[") {
-			section := strings.TrimSpace(strings.Trim(line, "[]"))
-			inGatesSection = section == "gates"
+			section = strings.TrimSpace(strings.Trim(line, "[]"))
 			continue
 		}
 
@@ -348,23 +372,33 @@ func parseRefineryToml(path string) []string {
 		val := strings.TrimSpace(parts[1])
 		val = strings.Trim(val, "\"")
 
-		if key == "quality_gate" {
-			gates = append(gates, val)
-		}
-		if inGatesSection && key == "commands" {
+		switch {
+		case key == "quality_gate":
+			cfg.Gates = append(cfg.Gates, val)
+		case section == "gates" && key == "commands":
 			// Parse simple array: ["./build.sh", "./test.sh"]
-			val = strings.Trim(val, "[]")
-			for _, cmd := range strings.Split(val, ",") {
+			arr := strings.Trim(val, "[]")
+			for _, cmd := range strings.Split(arr, ",") {
 				cmd = strings.TrimSpace(cmd)
 				cmd = strings.Trim(cmd, "\"")
 				if cmd != "" {
-					gates = append(gates, cmd)
+					cfg.Gates = append(cfg.Gates, cmd)
 				}
 			}
+		case section == "deploy" && key == "command":
+			cfg.DeployCommand = val
 		}
 	}
 
-	return gates
+	return cfg
+}
+
+// DeployCommand returns the configured post-merge deploy command for a repo,
+// read from <repoPath>/.pogo/refinery.toml. Returns empty string when no
+// [deploy] section is present or the file is missing — not an error, since
+// most repos won't have a deploy hook.
+func (r *Refinery) DeployCommand(repoPath string) string {
+	return parseRefineryConfig(filepath.Join(repoPath, ".pogo", "refinery.toml")).DeployCommand
 }
 
 // runGate executes a single quality gate command in the worktree directory.
