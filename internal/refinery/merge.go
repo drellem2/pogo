@@ -17,18 +17,24 @@ import (
 // 3. Run quality gates on rebased code
 // 4. Fast-forward merge to target ref
 // 5. Push
+// 6. Run the per-repo deploy hook (if configured) against the just-merged commit
 //
 // If another polecat merges to the target between our rebase and push,
 // the ff-only merge or push will fail. We retry up to 3 times with a
 // fresh fetch+rebase+gates cycle to handle this race.
 //
-// Emits refinery_merge_attempted, refinery_merged, and refinery_merge_failed
-// events as the pipeline progresses. Emission is best-effort and never
-// propagates errors — see internal/events.Emit.
-func (r *Refinery) processMerge(mr *MergeRequest) (string, error) {
+// Emits refinery_merge_attempted, refinery_merged, refinery_merge_failed,
+// and (when a deploy hook runs) refinery_deploy_* events. Emission is
+// best-effort and never propagates errors — see internal/events.Emit.
+//
+// Returns the captured gate output, a deploy error string (empty when no
+// deploy ran or it succeeded — populates MergeRequest.DeployError), and the
+// merge error (nil on success). Deploy failure does NOT cause processMerge
+// to return an error: the merge has already landed remotely.
+func (r *Refinery) processMerge(mr *MergeRequest) (string, string, error) {
 	wtDir, err := r.ensureWorktree(mr.RepoPath)
 	if err != nil {
-		return "", fmt.Errorf("worktree setup: %w", err)
+		return "", "", fmt.Errorf("worktree setup: %w", err)
 	}
 
 	var gateOutput string
@@ -45,7 +51,13 @@ func (r *Refinery) processMerge(mr *MergeRequest) (string, error) {
 		gateOutput = output
 		if attemptErr == nil {
 			emitMerged(mr, attempt, sha, time.Since(startTime).Seconds())
-			return gateOutput, nil
+			// Run the per-repo post-merge deploy hook against the refinery's
+			// clone (which now has the merged commit on the target ref). The
+			// hook owns refreshing runtime snapshots like ~/.pogo/<repo>/bin/
+			// so they reflect the just-merged code. Failure is reported via
+			// DeployError + event but does not unwind the merge.
+			deployErr := r.runDeploy(wtDir, mr)
+			return gateOutput, deployErr, nil
 		}
 
 		retryRemaining := attempt < maxAttempts && isRetryable(attemptErr)
@@ -55,11 +67,11 @@ func (r *Refinery) processMerge(mr *MergeRequest) (string, error) {
 			log.Printf("refinery: MR %s attempt %d failed (will retry): %v", mr.ID, attempt, attemptErr)
 			continue
 		}
-		return gateOutput, attemptErr
+		return gateOutput, "", attemptErr
 	}
 	finalErr := fmt.Errorf("merge failed after %d attempts", maxAttempts)
 	emitMergeFailed(mr, maxAttempts, "unknown", finalErr, true, gateOutput)
-	return gateOutput, finalErr
+	return gateOutput, "", finalErr
 }
 
 // attemptMerge runs a single fetch→rebase→gates→merge→push cycle. Returns

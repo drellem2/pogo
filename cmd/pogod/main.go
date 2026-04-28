@@ -483,6 +483,12 @@ func main() {
 				// so it can run cleanup (stop polecat, handle QA, etc.).
 				subject := fmt.Sprintf("MERGED: %s (branch=%s)", mr.ID, mr.Branch)
 				body := fmt.Sprintf("Merge request %s succeeded.\nBranch: %s\nAuthor: %s", mr.ID, mr.Branch, mr.Author)
+				// Surface deploy failures to the mayor so the runtime gap (merged
+				// commit but stale binary) gets remediated. The merge has already
+				// landed — only the post-merge deploy hook failed.
+				if mr.DeployError != "" {
+					body += fmt.Sprintf("\nDeploy: FAILED — %s", mr.DeployError)
+				}
 				if err := client.SendMGMail("mayor", "refinery", subject, body); err != nil {
 					log.Printf("refinery: failed to mail mayor: %v", err)
 				}

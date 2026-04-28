@@ -81,18 +81,23 @@ const (
 
 // MergeRequest represents a branch submitted for merging.
 type MergeRequest struct {
-	ID               string      `json:"id"`
-	RepoPath         string      `json:"repo_path"`
-	Branch           string      `json:"branch"`
-	TargetRef        string      `json:"target_ref"` // e.g. "main"
-	Author           string      `json:"author"`     // agent name that submitted
-	Status           MergeStatus `json:"status"`
-	SubmitTime       time.Time   `json:"submit_time"`
-	DoneTime         time.Time   `json:"done_time,omitempty"`
-	Error            string      `json:"error,omitempty"`
-	GateOutput       string      `json:"gate_output,omitempty"`
-	FailureCount     int         `json:"failure_count"`
-	ThresholdReached bool        `json:"threshold_reached,omitempty"`
+	ID         string      `json:"id"`
+	RepoPath   string      `json:"repo_path"`
+	Branch     string      `json:"branch"`
+	TargetRef  string      `json:"target_ref"` // e.g. "main"
+	Author     string      `json:"author"`     // agent name that submitted
+	Status     MergeStatus `json:"status"`
+	SubmitTime time.Time   `json:"submit_time"`
+	DoneTime   time.Time   `json:"done_time,omitempty"`
+	Error      string      `json:"error,omitempty"`
+	GateOutput string      `json:"gate_output,omitempty"`
+	// DeployError is set when a post-merge deploy hook ran and failed. The
+	// merge itself still succeeded (Status remains StatusMerged); deploy
+	// failure is surfaced for diagnostics, not rolled back. Empty when no
+	// deploy was configured or the deploy succeeded.
+	DeployError      string `json:"deploy_error,omitempty"`
+	FailureCount     int    `json:"failure_count"`
+	ThresholdReached bool   `json:"threshold_reached,omitempty"`
 }
 
 // OnMerged is called when a branch is successfully merged.
@@ -409,10 +414,11 @@ func (r *Refinery) processNext() {
 
 	log.Printf("refinery: processing MR %s branch=%s", mr.ID, mr.Branch)
 
-	gateOutput, err := r.processMerge(mr)
+	gateOutput, deployErr, err := r.processMerge(mr)
 
 	r.mu.Lock()
 	mr.GateOutput = gateOutput
+	mr.DeployError = deployErr
 	mr.DoneTime = time.Now()
 	if err != nil {
 		mr.Status = StatusFailed

@@ -88,6 +88,61 @@ func emitMerged(mr *MergeRequest, attempt int, mergeCommit string, durationSec f
 	})
 }
 
+// emitDeployAttempted writes a refinery_deploy_attempted event before the
+// per-repo post-merge deploy command runs.
+func emitDeployAttempted(mr *MergeRequest, command string) {
+	events.Emit(context.Background(), events.Event{
+		EventType:  "refinery_deploy_attempted",
+		Agent:      "refinery",
+		WorkItemID: workItemIDFromAuthor(mr.Author),
+		Repo:       mr.RepoPath,
+		Details: map[string]any{
+			"merge_request_id": mr.ID,
+			"repo":             mr.RepoPath,
+			"command":          command,
+		},
+	})
+}
+
+// emitDeployed writes a refinery_deployed event for a successful deploy.
+func emitDeployed(mr *MergeRequest, durationSec float64) {
+	details := map[string]any{
+		"merge_request_id": mr.ID,
+		"repo":             mr.RepoPath,
+	}
+	if durationSec > 0 {
+		details["duration_seconds"] = durationSec
+	}
+	events.Emit(context.Background(), events.Event{
+		EventType:  "refinery_deployed",
+		Agent:      "refinery",
+		WorkItemID: workItemIDFromAuthor(mr.Author),
+		Repo:       mr.RepoPath,
+		Details:    details,
+	})
+}
+
+// emitDeployFailed writes a refinery_deploy_failed event when the deploy
+// command exits non-zero. The merge is already landed at this point — the
+// event is for diagnostics and operator alerting.
+func emitDeployFailed(mr *MergeRequest, err error, output string) {
+	details := map[string]any{
+		"merge_request_id": mr.ID,
+		"repo":             mr.RepoPath,
+		"reason":           summarizeReason(err),
+	}
+	if output != "" {
+		details["output_truncated"] = truncate(output, gateOutputCap)
+	}
+	events.Emit(context.Background(), events.Event{
+		EventType:  "refinery_deploy_failed",
+		Agent:      "refinery",
+		WorkItemID: workItemIDFromAuthor(mr.Author),
+		Repo:       mr.RepoPath,
+		Details:    details,
+	})
+}
+
 // emitMergeFailed writes a refinery_merge_failed event for a failed attempt.
 // terminal=true means the refinery has given up on this MR (no more retries).
 func emitMergeFailed(mr *MergeRequest, attempt int, stage string, err error, terminal bool, gateOutput string) {
