@@ -267,6 +267,65 @@ func isLaunchdLoaded() bool {
 	return len(out) > 0 && !strings.Contains(string(out), "Could not find")
 }
 
+// isLaunchdSupervising reports whether launchd has an actual PID
+// assigned for the label — i.e. a process is currently running under
+// launchd supervision. Stricter than isLaunchdLoaded, which only
+// confirms the label is registered.
+//
+// Used by the install fast-path to avoid the orphan-pogod regression
+// (mg-2c55): a pogod started outside launchd (e.g. crew-respawn,
+// PPID=1, port-bound on :10000) makes /health succeed AND keeps
+// `launchctl list LABEL` returning output (the plist is loaded), but
+// the launchd-supervised process has never started. The previous
+// laxer check accepted that state as "healthy" and skipped the
+// orchestrated install — defeating mg-ae84's whole point. Requiring
+// a PID assignment forces fall-through to the orchestrated path.
+func isLaunchdSupervising() bool {
+	out, err := exec.Command("launchctl", "list", launchdLabel).CombinedOutput()
+	if err != nil {
+		return false
+	}
+	_, ok := parseLaunchctlListPID(string(out))
+	return ok
+}
+
+// parseLaunchctlListPID extracts the PID assignment from `launchctl
+// list LABEL` output. Returns (pid, true) when a numeric "PID" key is
+// present (process supervised and running), or (0, false) when absent
+// (loaded but not running — e.g. never-spawned, or post-crash before
+// launchd's restart kicks in).
+//
+// Sample output (supervised):
+//
+//	{
+//	    "Label" = "com.pogo.daemon";
+//	    "PID" = 12345;
+//	    "Program" = "...";
+//	};
+//
+// Sample output (orphan / not running): same dict minus the "PID" line.
+func parseLaunchctlListPID(output string) (int, bool) {
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, `"PID"`) {
+			continue
+		}
+		eq := strings.Index(line, "=")
+		if eq < 0 {
+			continue
+		}
+		rest := strings.TrimSpace(line[eq+1:])
+		rest = strings.TrimSuffix(rest, ";")
+		rest = strings.TrimSpace(rest)
+		var pid int
+		if _, err := fmt.Sscanf(rest, "%d", &pid); err != nil {
+			continue
+		}
+		return pid, true
+	}
+	return 0, false
+}
+
 func installLaunchd() (retErr error) {
 	// Self-report on the way out so a polecat can fire-and-forget the
 	// install (`pogo service install --detach`) and have the post-install
@@ -291,10 +350,17 @@ func installLaunchd() (retErr error) {
 	plistMatches := string(existing) == rendered
 	loaded := isLaunchdLoaded()
 
-	// Fast path: identical plist already loaded and pogod healthy → no-op.
-	// Lets the post-install mayor rerun `pogo service install` as a probe
-	// without bouncing the daemon.
-	if plistMatches && loaded {
+	// Fast path: identical plist already supervised by launchd AND pogod
+	// healthy → no-op. Lets the post-install mayor rerun `pogo service
+	// install` as a probe without bouncing the daemon.
+	//
+	// The supervising check (mg-2c55) is the strict gate: just "loaded"
+	// is not enough, because an orphan pogod (PPID=1, started outside
+	// launchd by crew-respawn) keeps the plist registered AND answers
+	// /health on :10000 — but launchd has no PID assigned and has never
+	// actually spawned the daemon. Accepting that state as healthy
+	// silently defeats mg-ae84's orchestration; require a real PID.
+	if plistMatches && loaded && isLaunchdSupervising() {
 		if err := client.HealthCheck(); err == nil {
 			fmt.Printf("Service already installed and healthy at %s — no changes.\n", plistPath)
 			sendInstallSuccessMail(plistPath, data.LogDir, true)

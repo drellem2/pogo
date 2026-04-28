@@ -295,6 +295,73 @@ func TestQuiesceCrewIsNoOpWhenPogodDown(t *testing.T) {
 	}
 }
 
+func TestParseLaunchctlListPIDSupervised(t *testing.T) {
+	// When launchd is actively supervising the daemon, `launchctl list LABEL`
+	// includes a numeric "PID" line. parseLaunchctlListPID must return that
+	// PID with ok=true so installLaunchd's fast-path can short-circuit.
+	output := `{
+	"LimitLoadToSessionType" = "Aqua";
+	"Label" = "com.pogo.daemon";
+	"OnDemand" = false;
+	"LastExitStatus" = 0;
+	"PID" = 12345;
+	"Program" = "/Users/test/go/bin/pogod";
+};`
+	pid, ok := parseLaunchctlListPID(output)
+	if !ok {
+		t.Fatal("expected PID to be detected in supervised output")
+	}
+	if pid != 12345 {
+		t.Errorf("expected PID 12345, got %d", pid)
+	}
+}
+
+func TestParseLaunchctlListPIDOrphan(t *testing.T) {
+	// mg-2c55 reproduction: launchctl knows about the label (the plist is
+	// loaded — `runs = 0`, "(never exited)") but no process is supervised
+	// because launchd-pogod has never actually spawned. An orphan pogod
+	// (PPID=1, started by crew-respawn outside launchd) is holding :10000
+	// and answering /health. parseLaunchctlListPID must return ok=false
+	// here so installLaunchd falls through to the orchestrated install
+	// instead of treating the orphan as healthy launchd-pogod.
+	output := `{
+	"LimitLoadToSessionType" = "Aqua";
+	"Label" = "com.pogo.daemon";
+	"OnDemand" = false;
+	"LastExitStatus" = 0;
+	"Program" = "/Users/test/go/bin/pogod";
+};`
+	if pid, ok := parseLaunchctlListPID(output); ok {
+		t.Errorf("expected no PID in orphan-state output (loaded but not supervising), got %d", pid)
+	}
+}
+
+func TestParseLaunchctlListPIDEmpty(t *testing.T) {
+	// `launchctl list` returns empty output (or "Could not find" stderr)
+	// when the label is not registered at all. parseLaunchctlListPID must
+	// not panic and must report ok=false.
+	if _, ok := parseLaunchctlListPID(""); ok {
+		t.Error("expected ok=false for empty output")
+	}
+	if _, ok := parseLaunchctlListPID("Could not find service \"com.pogo.daemon\" in domain for port"); ok {
+		t.Error("expected ok=false for not-found output")
+	}
+}
+
+func TestParseLaunchctlListPIDIgnoresNonPIDLines(t *testing.T) {
+	// Defense against false positives: only the literal "PID" key counts.
+	// LastExitStatus, anchor PID strings inside Program paths, etc. must
+	// not be mistaken for the PID assignment.
+	output := `{
+	"Label" = "com.pogo.daemon";
+	"LastExitStatus" = 0;
+	"Program" = "/Users/test/PID/pogod";
+};`
+	if pid, ok := parseLaunchctlListPID(output); ok {
+		t.Errorf("expected no PID, got %d (parser matched a non-PID line)", pid)
+	}
+}
+
 func TestServicePaths(t *testing.T) {
 	switch runtime.GOOS {
 	case "darwin":
