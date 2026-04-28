@@ -23,9 +23,9 @@
     <key>ProcessType</key>
     <string>Interactive</string>
     <key>StandardOutPath</key>
-    <string>/Users/YOUR_USERNAME/.pogo/log/pogod.log</string>
+    <string>/Users/YOUR_USERNAME/Library/Logs/pogo/pogod.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/YOUR_USERNAME/.pogo/log/pogod.log</string>
+    <string>/Users/YOUR_USERNAME/Library/Logs/pogo/pogod.log</string>
     <key>EnvironmentVariables</key>
     <dict>
         <!-- PATH must include wherever claude, git, mg, and pogod live —

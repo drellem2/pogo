@@ -118,10 +118,14 @@ func pogoHome() string {
 	return filepath.Join(home, ".pogo")
 }
 
-// logDir is ~/.pogo/log per mg-1416 spec — colocates daemon logs with
-// the rest of pogo state instead of scattering them under ~/.local/share.
+// logDir is ~/Library/Logs/pogo on macOS — the Apple-standard location for
+// user-scope app logs. Picked over ~/.pogo/log to avoid surprising users
+// whose $HOME root may already contain unrelated files (e.g. a bare "log"
+// file from another tool) and to follow the platform convention so Console.app
+// surfaces the daemon's output naturally.
 func logDir() string {
-	return filepath.Join(pogoHome(), "log")
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, "Library", "Logs", "pogo")
 }
 
 // launchdPath builds a PATH that includes the directories where pogod's

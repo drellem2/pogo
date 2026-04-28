@@ -14,7 +14,7 @@ func TestLaunchdPlistTemplate(t *testing.T) {
 	data := launchdData{
 		Label:      "com.pogo.daemon",
 		PogodPath:  "/Users/test/go/bin/pogod",
-		LogDir:     "/Users/test/.pogo/log",
+		LogDir:     "/Users/test/Library/Logs/pogo",
 		Home:       "/Users/test",
 		PogoHome:   "/Users/test/.pogo",
 		PluginPath: "/Users/test/.pogo/plugin",
@@ -46,7 +46,7 @@ func TestLaunchdPlistTemplate(t *testing.T) {
 		{"KeepAlive unconditional", "<key>KeepAlive</key>\n    <true/>", false},
 		// ProcessType=Interactive prevents App Nap from throttling refinery polling and agent idle detection.
 		{"ProcessType Interactive", "<key>ProcessType</key>\n    <string>Interactive</string>", false},
-		{"log path", "<string>/Users/test/.pogo/log/pogod.log</string>", false},
+		{"log path", "<string>/Users/test/Library/Logs/pogo/pogod.log</string>", false},
 		{"PATH env", "<key>PATH</key>", false},
 		{"HOME env", "<key>HOME</key>\n        <string>/Users/test</string>", false},
 		{"POGO_HOME env", "<key>POGO_HOME</key>\n        <string>/Users/test/.pogo</string>", false},
@@ -77,13 +77,14 @@ func TestLaunchdPathIncludesCommonDirs(t *testing.T) {
 	}
 }
 
-func TestLogDirUnderPogoHome(t *testing.T) {
-	// logDir() = pogoHome() + "/log". Test it tracks POGO_HOME so the plist
-	// log path always lands inside the same state dir as the rest of pogo.
-	t.Setenv("POGO_HOME", "/tmp/pogo-test-home")
+func TestLogDirUnderUserLibraryLogs(t *testing.T) {
+	// logDir() = $HOME/Library/Logs/pogo (macOS-standard). Track HOME so a
+	// test sandbox can redirect daemon logs without touching the real
+	// ~/Library/Logs tree.
+	t.Setenv("HOME", "/tmp/pogo-test-home")
 	d := logDir()
-	if d != "/tmp/pogo-test-home/log" {
-		t.Errorf("logDir() with POGO_HOME=/tmp/pogo-test-home should be /tmp/pogo-test-home/log, got: %s", d)
+	if d != "/tmp/pogo-test-home/Library/Logs/pogo" {
+		t.Errorf("logDir() with HOME=/tmp/pogo-test-home should be /tmp/pogo-test-home/Library/Logs/pogo, got: %s", d)
 	}
 }
 
@@ -131,7 +132,8 @@ func TestRenderLaunchdPlistDeterministic(t *testing.T) {
 	// installer compares its output byte-for-byte against the on-disk
 	// plist. Two consecutive renders against the same env must match
 	// exactly, otherwise every install becomes a forced reload.
-	t.Setenv("POGO_HOME", "/tmp/pogo-render-test")
+	t.Setenv("HOME", "/tmp/pogo-render-test")
+	t.Setenv("POGO_HOME", "/tmp/pogo-render-test/.pogo")
 	a, _, err := renderLaunchdPlist()
 	if err != nil {
 		t.Fatalf("first render: %v", err)
@@ -143,8 +145,8 @@ func TestRenderLaunchdPlistDeterministic(t *testing.T) {
 	if a != b {
 		t.Fatalf("renderLaunchdPlist produced different output on consecutive calls\nfirst:\n%s\nsecond:\n%s", a, b)
 	}
-	if !strings.Contains(a, "/tmp/pogo-render-test/log/pogod.log") {
-		t.Errorf("rendered plist did not pick up POGO_HOME override: %s", a)
+	if !strings.Contains(a, "/tmp/pogo-render-test/Library/Logs/pogo/pogod.log") {
+		t.Errorf("rendered plist did not pick up HOME override: %s", a)
 	}
 }
 
@@ -152,13 +154,14 @@ func TestLogTailReadsLastBytes(t *testing.T) {
 	// logTail() is the failure-mail body builder — mayor needs to see the
 	// most recent log lines, not the first ones, when an install fails.
 	dir := t.TempDir()
-	t.Setenv("POGO_HOME", dir)
-	if err := os.MkdirAll(filepath.Join(dir, "log"), 0755); err != nil {
+	t.Setenv("HOME", dir)
+	logsDir := filepath.Join(dir, "Library", "Logs", "pogo")
+	if err := os.MkdirAll(logsDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 
 	// Write a log file larger than logTailBytes so we exercise the seek path.
-	logPath := filepath.Join(dir, "log", "pogod.log")
+	logPath := filepath.Join(logsDir, "pogod.log")
 	var sb strings.Builder
 	for i := 0; i < 2000; i++ {
 		fmt.Fprintf(&sb, "line %04d filler\n", i)
@@ -185,7 +188,7 @@ func TestLogTailMissingFile(t *testing.T) {
 	// return a human-readable note rather than panicking — the failure
 	// mail still has to render.
 	dir := t.TempDir()
-	t.Setenv("POGO_HOME", dir)
+	t.Setenv("HOME", dir)
 	tail := logTail()
 	if !strings.Contains(tail, "could not open") {
 		t.Errorf("expected 'could not open' note for missing log, got: %s", tail)

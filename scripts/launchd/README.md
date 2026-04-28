@@ -10,7 +10,7 @@ The easiest way to install the service is:
 pogo service install
 ```
 
-This auto-detects your `pogod` binary path, builds a plist matching the spec below (ProcessType=Interactive, KeepAlive=true, log to `~/.pogo/log/pogod.log`, PATH/HOME/POGO_HOME/POGO_PLUGIN_PATH wired up), and `launchctl load`s it. The installer is idempotent — rerun it after upgrading pogod or changing the plist template, and it will replace the existing service in place.
+This auto-detects your `pogod` binary path, builds a plist matching the spec below (ProcessType=Interactive, KeepAlive=true, log to `~/Library/Logs/pogo/pogod.log`, PATH/HOME/POGO_HOME/POGO_PLUGIN_PATH wired up), and `launchctl load`s it. The installer is idempotent — rerun it after upgrading pogod or changing the plist template, and it will replace the existing service in place.
 
 If a manually-started `pogod` is already running, the installer stops it first so the launchctl load doesn't collide on the lockfile.
 
@@ -38,7 +38,7 @@ What each piece does:
 The caller can return as soon as the background process is launched. **Do not wait on it** — the install will outlive you. Verify completion via mail instead:
 
 - On success, the installer mails mayor with subject `[install] com.pogo.daemon installed and running`.
-- On failure, mayor receives `[install] FAILED com.pogo.daemon` with `launchctl print` output and a tail of `~/.pogo/log/pogod.log` in the body.
+- On failure, mayor receives `[install] FAILED com.pogo.daemon` with `launchctl print` output and a tail of `~/Library/Logs/pogo/pogod.log` in the body.
 
 The post-install mayor (which is now a child of the new `pogod`) picks up the mail and dispatches a verification polecat without any human in the loop.
 
@@ -53,7 +53,7 @@ Replace `YOUR_USERNAME` in `com.pogo.daemon.plist` with your actual username, an
 ```bash
 which pogod  # confirm location
 sed "s/YOUR_USERNAME/$USER/g" com.pogo.daemon.plist > ~/Library/LaunchAgents/com.pogo.daemon.plist
-mkdir -p ~/.pogo/log
+mkdir -p ~/Library/Logs/pogo
 ```
 
 ### 2. Stop any running pogod
@@ -95,7 +95,7 @@ The plist must include all of these keys for pogod to behave correctly under lau
 | `RunAtLoad` | `true` | Start on login. |
 | `KeepAlive` | `true` (unconditional) | Restart on any exit, clean or crashing. The older `<dict><SuccessfulExit>false</SuccessfulExit></dict>` form does NOT restart after a clean exit. |
 | `ProcessType` | `Interactive` | Prevents App Nap from throttling timers. Without this, macOS coalesces wake-ups for "background" daemons, delaying refinery polling and agent idle detection. |
-| `StandardOutPath` / `StandardErrorPath` | `~/.pogo/log/pogod.log` | Colocates daemon logs with the rest of pogo state. |
+| `StandardOutPath` / `StandardErrorPath` | `~/Library/Logs/pogo/pogod.log` | macOS-standard location for user-scope app logs; surfaces in Console.app and avoids any collision with arbitrary files at the $HOME root. |
 | `EnvironmentVariables.PATH` | Includes `~/.local/bin`, `~/go/bin`, `/opt/homebrew/bin`, `/usr/local/bin`, system dirs | pogod spawns claude / git / mg as children; launchd's default PATH does not include these. |
 | `EnvironmentVariables.HOME` | User's home dir | launchd sometimes does not set this. |
 | `EnvironmentVariables.POGO_HOME` | `~/.pogo` | Where pogo state, agent metadata, and refinery data live. |
@@ -109,4 +109,4 @@ The plist must include all of these keys for pogod to behave correctly under lau
 | Unload (stop) | `launchctl unload ~/Library/LaunchAgents/com.pogo.daemon.plist` |
 | Restart | `launchctl kickstart -k gui/$(id -u)/com.pogo.daemon` |
 | Check status | `launchctl list \| grep com.pogo.daemon` |
-| View logs | `tail -f ~/.pogo/log/pogod.log` |
+| View logs | `tail -f ~/Library/Logs/pogo/pogod.log` |
