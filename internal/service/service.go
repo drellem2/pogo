@@ -256,36 +256,57 @@ func renderLaunchdPlist() (string, launchdData, error) {
 	return buf.String(), data, nil
 }
 
-// isLaunchdLoaded reports whether launchd currently knows about the label.
-// "Loaded" here just means `launchctl list LABEL` succeeds — the process
-// behind it may be crash-looping or stopped.
-func isLaunchdLoaded() bool {
+// launchctlListOutputForLabel returns the raw `launchctl list LABEL` output.
+// Empty string on subprocess error so callers can treat missing as "not
+// loaded" without a separate err path. This is the single source of truth
+// the install fast-path consults — both the loaded check and the
+// supervising check are derived from one snapshot to avoid a TOCTTOU window
+// where an orphan transitions in/out between two separate launchctl calls.
+func launchctlListOutputForLabel() string {
 	out, err := exec.Command("launchctl", "list", launchdLabel).CombinedOutput()
 	if err != nil {
-		return false
+		return ""
 	}
-	return len(out) > 0 && !strings.Contains(string(out), "Could not find")
+	return string(out)
 }
 
-// isLaunchdSupervising reports whether launchd has an actual PID
-// assigned for the label — i.e. a process is currently running under
-// launchd supervision. Stricter than isLaunchdLoaded, which only
-// confirms the label is registered.
+// isLaunchdLoadedFromOutput reports whether launchctl knows the label,
+// derived from a single `launchctl list LABEL` snapshot. "Loaded" here
+// just means launchctl has the label registered — the process behind it
+// may be missing, crash-looping, or never-spawned (orphan case).
+func isLaunchdLoadedFromOutput(output string) bool {
+	return len(output) > 0 && !strings.Contains(output, "Could not find")
+}
+
+// canSkipInstall reports whether installLaunchd can short-circuit to a
+// no-op based on the on-disk plist comparison and the launchctl snapshot.
+// The HTTP healthcheck is the caller's final gate (it requires live HTTP
+// and is therefore not part of this pure predicate).
 //
-// Used by the install fast-path to avoid the orphan-pogod regression
-// (mg-2c55): a pogod started outside launchd (e.g. crew-respawn,
-// PPID=1, port-bound on :10000) makes /health succeed AND keeps
-// `launchctl list LABEL` returning output (the plist is loaded), but
-// the launchd-supervised process has never started. The previous
-// laxer check accepted that state as "healthy" and skipped the
-// orchestrated install — defeating mg-ae84's whole point. Requiring
-// a PID assignment forces fall-through to the orchestrated path.
-func isLaunchdSupervising() bool {
-	out, err := exec.Command("launchctl", "list", launchdLabel).CombinedOutput()
-	if err != nil {
+// Returns false in any of these cases:
+//   - rendered plist differs from disk (must be rewritten + reloaded)
+//   - launchctl has no record of the label (must be loaded)
+//   - launchctl knows the label but has no PID assigned — the orphan /
+//     never-spawned regression case (mg-2c55, mg-df4a). A pogod started
+//     outside launchd by crew-respawn answers /health on :10000 AND
+//     keeps the plist registered, but launchd has never spawned the
+//     daemon (`runs = 0`, no PID line). The orchestrated install must
+//     take over to replace the orphan with a real launchd-supervised
+//     process.
+//
+// Detection is intentionally based on launchctl's PID assignment alone.
+// PPID is not a reliable orphan signal on macOS — every launchd-spawned
+// daemon also reports PPID=1 because launchd is PID 1. Only launchctl's
+// internal PID-assignment field distinguishes "supervised by launchd"
+// from "running outside launchd".
+func canSkipInstall(plistMatches bool, launchctlListOutput string) bool {
+	if !plistMatches {
 		return false
 	}
-	_, ok := parseLaunchctlListPID(string(out))
+	if !isLaunchdLoadedFromOutput(launchctlListOutput) {
+		return false
+	}
+	_, ok := parseLaunchctlListPID(launchctlListOutput)
 	return ok
 }
 
@@ -348,19 +369,19 @@ func installLaunchd() (retErr error) {
 
 	existing, _ := os.ReadFile(plistPath)
 	plistMatches := string(existing) == rendered
-	loaded := isLaunchdLoaded()
+	listOutput := launchctlListOutputForLabel()
+	loaded := isLaunchdLoadedFromOutput(listOutput)
 
 	// Fast path: identical plist already supervised by launchd AND pogod
 	// healthy → no-op. Lets the post-install mayor rerun `pogo service
-	// install` as a probe without bouncing the daemon.
-	//
-	// The supervising check (mg-2c55) is the strict gate: just "loaded"
-	// is not enough, because an orphan pogod (PPID=1, started outside
-	// launchd by crew-respawn) keeps the plist registered AND answers
-	// /health on :10000 — but launchd has no PID assigned and has never
-	// actually spawned the daemon. Accepting that state as healthy
-	// silently defeats mg-ae84's orchestration; require a real PID.
-	if plistMatches && loaded && isLaunchdSupervising() {
+	// install` as a probe without bouncing the daemon. canSkipInstall is
+	// the strict gate (see its docstring): just "loaded" is not enough,
+	// because an orphan pogod started outside launchd by crew-respawn
+	// keeps the plist registered AND answers /health on :10000, but
+	// launchd has never actually spawned it. mg-2c55/mg-df4a regression
+	// — accepting that state as healthy silently defeats mg-ae84's
+	// orchestration.
+	if canSkipInstall(plistMatches, listOutput) {
 		if err := client.HealthCheck(); err == nil {
 			fmt.Printf("Service already installed and healthy at %s — no changes.\n", plistPath)
 			sendInstallSuccessMail(plistPath, data.LogDir, true)

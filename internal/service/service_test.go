@@ -362,6 +362,97 @@ func TestParseLaunchctlListPIDIgnoresNonPIDLines(t *testing.T) {
 	}
 }
 
+// supervisedListOutput is the launchctl list snapshot when launchd is
+// actively supervising the daemon — the "PID" key is present.
+const supervisedListOutput = `{
+	"LimitLoadToSessionType" = "Aqua";
+	"Label" = "com.pogo.daemon";
+	"OnDemand" = false;
+	"LastExitStatus" = 0;
+	"PID" = 12345;
+	"Program" = "/Users/test/go/bin/pogod";
+};`
+
+// orphanListOutput is the launchctl list snapshot when the plist is
+// loaded but no process is supervised by launchd. This is the mg-df4a
+// regression state: an orphan pogod (started outside launchd by
+// crew-respawn) holds :10000 and answers /health, but launchctl has no
+// PID assigned. The fast-path must NOT short-circuit here — the
+// orchestrated install must take over to replace the orphan.
+const orphanListOutput = `{
+	"LimitLoadToSessionType" = "Aqua";
+	"Label" = "com.pogo.daemon";
+	"OnDemand" = false;
+	"LastExitStatus" = 0;
+	"Program" = "/Users/test/go/bin/pogod";
+};`
+
+func TestCanSkipInstallSupervisedHappyPath(t *testing.T) {
+	// Plist matches and launchctl is supervising — the only legitimate
+	// no-op condition. Caller still gates on /health before short-circuiting.
+	if !canSkipInstall(true, supervisedListOutput) {
+		t.Error("expected canSkipInstall=true when plist matches and launchctl supervising")
+	}
+}
+
+func TestCanSkipInstallOrphanRegression(t *testing.T) {
+	// mg-df4a regression: pogod is running outside launchd (orphan, PPID=1
+	// because launchd is PID 1 — not because the process is unparented),
+	// /health succeeds, plist on disk matches the rendered template, and
+	// launchctl knows the label. Pre-mg-2c55, all three of those signals
+	// were enough to take the fast-path. The PID-assignment gate flips
+	// the decision: launchctl reports no PID, so canSkipInstall must
+	// return false and force the orchestrated install.
+	if canSkipInstall(true, orphanListOutput) {
+		t.Error("regression: canSkipInstall returned true for orphan state " +
+			"(plist loaded, no PID assigned). Fast-path would silently no-op " +
+			"on top of an orphan pogod and never replace it with a launchd-supervised one.")
+	}
+}
+
+func TestCanSkipInstallPlistMismatch(t *testing.T) {
+	// Even when launchctl is supervising, a plist diff (e.g. user upgraded
+	// pogod and the path changed, or template fields drift) must force a
+	// rewrite + reload. canSkipInstall must reject regardless of supervision.
+	if canSkipInstall(false, supervisedListOutput) {
+		t.Error("expected canSkipInstall=false when plist differs from rendered template")
+	}
+}
+
+func TestCanSkipInstallNotRegistered(t *testing.T) {
+	// First-ever install: launchctl returns empty (or "Could not find" on
+	// stderr, normalized to empty by launchctlListOutputForLabel's err path).
+	// Must reject so the orchestrated install runs.
+	if canSkipInstall(true, "") {
+		t.Error("expected canSkipInstall=false when launchctl has no record of the label")
+	}
+	if canSkipInstall(true, `Could not find service "com.pogo.daemon" in domain for port`) {
+		t.Error("expected canSkipInstall=false on \"Could not find\" output")
+	}
+}
+
+func TestIsLaunchdLoadedFromOutput(t *testing.T) {
+	// Defense-in-depth for the loaded gate consumed by canSkipInstall AND
+	// by installLaunchd's "if loaded → unload" branch. Both paths share
+	// one launchctl snapshot now (mg-df4a), so a regression here would
+	// silently break unload-before-reinstall too.
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"empty", "", false},
+		{"could not find", `Could not find service "com.pogo.daemon" in domain for port`, false},
+		{"orphan (loaded but no PID)", orphanListOutput, true},
+		{"supervised", supervisedListOutput, true},
+	}
+	for _, c := range cases {
+		if got := isLaunchdLoadedFromOutput(c.in); got != c.want {
+			t.Errorf("%s: isLaunchdLoadedFromOutput=%v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
 func TestServicePaths(t *testing.T) {
 	switch runtime.GOOS {
 	case "darwin":
