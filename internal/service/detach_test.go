@@ -7,9 +7,10 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // TestBuildDetachCmdWiring verifies that buildDetachCmd assembles an exec.Cmd
@@ -107,7 +108,7 @@ func TestStartDetachedRunsInNewSession(t *testing.T) {
 		t.Fatalf("child never wrote its session ID to %s", sidPath)
 	}
 
-	mySID, err := syscall.Getsid(os.Getpid())
+	mySID, err := unix.Getsid(os.Getpid())
 	if err != nil {
 		t.Fatalf("Getsid: %v", err)
 	}
