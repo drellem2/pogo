@@ -33,7 +33,6 @@ import (
 	"github.com/drellem2/pogo/internal/search"
 	"github.com/drellem2/pogo/internal/server"
 	"github.com/drellem2/pogo/internal/workitem"
-	"github.com/drellem2/pogo/internal/workspace"
 
 	pogoPlugin "github.com/drellem2/pogo/pkg/plugin"
 )
@@ -41,7 +40,6 @@ import (
 var agentRegistry *agent.Registry
 var mergeQueue *refinery.Refinery
 var srv *server.Server
-var workspaceMgr *workspace.Manager
 var startTime time.Time
 
 var bindFlag = flag.String("bind", "", "address to bind the server to (default: 127.0.0.1)")
@@ -309,10 +307,6 @@ func registerHandlers() {
 	http.HandleFunc("/health/full", healthFull)
 	http.HandleFunc("/status", status)
 	http.HandleFunc("/workitems", workitem.HandleWorkItems)
-
-	// Workspace symbol query endpoints
-	workspaceMgr = workspace.New()
-	workspaceMgr.RegisterHandlers(http.DefaultServeMux)
 
 	// Agent and refinery endpoints behind orchestration guard.
 	// When the server is in index-only mode, these return 503.
