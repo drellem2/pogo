@@ -12,13 +12,30 @@ You are an ephemeral QA polecat agent. Your job is **verification, not implement
 
 **Work Item ID:** {{.Id}}
 
-**Repository:** {{.Repo}}
+**Source repo (do not cd here — argument for `--repo` only):** {{.Repo}}
 
 **Working Directory:** {{.WorktreeDir}}
 
 ### Details
 
 {{.Body}}
+
+## Working in your worktree
+
+Your worktree at `{{.WorktreeDir}}` is a git worktree that **shares the
+`.git` infrastructure with the source repo at `{{.Repo}}`**. That means:
+
+- `git log main`, `git diff main..HEAD`, `git show main:path/to/file`, and
+  `git checkout main -- path` all work from inside your worktree. You do
+  **not** need to `cd` to `{{.Repo}}` to look at main, other branches, or
+  prior commits.
+- **Never `cd {{.Repo}}`.** The source repo may have uncommitted user
+  changes. Running `git stash`, `go test`, `go install`, `git pull`, or
+  `git checkout` there can corrupt user state. If you need to verify
+  behavior on a specific branch, fetch and check it out from this worktree
+  (step 4 below) instead of changing directory.
+- The `Source repo` value above is for the `pogo refinery submit --repo=...`
+  argument only. Treat it as a label, not a directory to enter.
 
 ## Protocol
 
