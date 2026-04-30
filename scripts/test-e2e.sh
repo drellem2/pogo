@@ -436,6 +436,89 @@ else
 fi
 
 # -----------------------------------------------------------------------------
+# 9. Recovery agent: enqueue → drain → archive (no real kickstart)
+# -----------------------------------------------------------------------------
+# Exercises the tier-3 recovery script (mg-6749) end-to-end without
+# touching the user's real launchctl / pogod. We:
+#   - run pogo-recovery.sh directly (rather than via launchd) so the test
+#     does not need to bootstrap a plist;
+#   - point POGO_RECOVERY_DIR at the sandbox so we don't pollute the user's
+#     ~/.pogo/recovery/;
+#   - shadow `launchctl` via a stub on $PATH so the script's kickstart call
+#     records the invocation and exits 0 instead of really restarting pogod;
+#   - drive the script from `pogo recovery request` (the polecat-facing
+#     entrypoint) to also cover the tmp+rename enqueue path.
+step "9. recovery agent enqueue + drain (stubbed launchctl)"
+
+REC_BASE="$SANDBOX/recovery"
+mkdir -p "$REC_BASE/bin"
+export POGO_RECOVERY_DIR="$REC_BASE/state"
+
+# Stub launchctl: record the args we receive and exit 0.
+LAUNCHCTL_LOG="$REC_BASE/launchctl.log"
+cat > "$REC_BASE/bin/launchctl" <<EOF
+#!/bin/bash
+echo "\$@" >> "$LAUNCHCTL_LOG"
+exit 0
+EOF
+chmod +x "$REC_BASE/bin/launchctl"
+
+REC_SCRIPT="$REPO_ROOT/scripts/launchd/pogo-recovery.sh"
+[ -x "$REC_SCRIPT" ] && ok "pogo-recovery.sh present + executable" || hard "pogo-recovery.sh missing or not executable"
+
+# Step 9a: pogo recovery request enqueues a .req file via the temp+rename path.
+REQ_OUT="$(pogo recovery request --reason="e2e-test" --requester="smoke" 2>&1)"
+REQ_RC=$?
+[ "$REQ_RC" = "0" ] && ok "pogo recovery request exited 0" || hard "pogo recovery request failed: $REQ_OUT"
+
+QUEUE_DIR="$POGO_RECOVERY_DIR/queue"
+PROCESSED_DIR="$POGO_RECOVERY_DIR/processed"
+FAILED_DIR="$POGO_RECOVERY_DIR/failed"
+
+REQ_COUNT="$(ls -1 "$QUEUE_DIR"/*.req 2>/dev/null | wc -l | tr -d ' ')"
+[ "$REQ_COUNT" = "1" ] && ok ".req file landed in queue (count=$REQ_COUNT)" || hard "expected 1 .req in queue, got $REQ_COUNT"
+
+# No .tmp files should be visible — atomic rename means we only ever see *.req.
+TMP_COUNT="$(ls -1 "$QUEUE_DIR"/.tmp-* 2>/dev/null | wc -l | tr -d ' ')"
+[ "$TMP_COUNT" = "0" ] && ok "no .tmp files leaked into queue" || hard "expected 0 .tmp files, got $TMP_COUNT"
+
+# Step 9b: drive the recovery script with the stubbed launchctl on PATH.
+PATH="$REC_BASE/bin:$PATH" bash "$REC_SCRIPT" >"$REC_BASE/run1.log" 2>&1
+RUN1_RC=$?
+[ "$RUN1_RC" = "0" ] && ok "recovery script run #1 exited 0" || { hard "recovery script run #1 rc=$RUN1_RC"; cat "$REC_BASE/run1.log" >&2; }
+
+# After draining, queue is empty and the .req has moved to processed/.
+LEFT="$(ls -1 "$QUEUE_DIR"/*.req 2>/dev/null | wc -l | tr -d ' ')"
+[ "$LEFT" = "0" ] && ok "queue drained after run #1" || hard "queue not drained ($LEFT .req files remain)"
+
+PROC_COUNT="$(ls -1 "$PROCESSED_DIR"/*.req 2>/dev/null | wc -l | tr -d ' ')"
+[ "$PROC_COUNT" = "1" ] && ok ".req archived to processed/" || hard "expected 1 archived, got $PROC_COUNT"
+
+# launchctl was called exactly once with kickstart -k against com.pogo.daemon.
+KICK_LINES="$(grep -c "kickstart -k gui/.*/com.pogo.daemon" "$LAUNCHCTL_LOG" 2>/dev/null || echo 0)"
+[ "$KICK_LINES" = "1" ] && ok "stubbed launchctl saw exactly one kickstart -k" || hard "expected 1 kickstart call, got $KICK_LINES (log: $(cat "$LAUNCHCTL_LOG" 2>/dev/null))"
+
+# Recovery script must NEVER kill -9 pogod (acceptance criterion #4).
+grep -q "kill -9" "$REC_SCRIPT" && hard "recovery script contains 'kill -9' (forbidden)" || ok "recovery script never uses kill -9"
+
+# Step 9c: rate-limit. last_restart is fresh; second drain should defer.
+pogo recovery request --reason="rate-limit-probe" --requester="smoke" >/dev/null
+PATH="$REC_BASE/bin:$PATH" bash "$REC_SCRIPT" >"$REC_BASE/run2.log" 2>&1
+RUN2_RC=$?
+[ "$RUN2_RC" = "0" ] && ok "recovery script run #2 exited 0" || hard "recovery script run #2 rc=$RUN2_RC"
+
+# After the rate-limited run, the .req should still be in queue (deferred)
+# and launchctl should have been called only the original 1 time.
+DEFER_COUNT="$(ls -1 "$QUEUE_DIR"/*.req 2>/dev/null | wc -l | tr -d ' ')"
+[ "$DEFER_COUNT" = "1" ] && ok "rate-limited request deferred in queue" || hard "expected 1 deferred .req, got $DEFER_COUNT"
+
+KICK_LINES2="$(grep -c "kickstart -k gui/.*/com.pogo.daemon" "$LAUNCHCTL_LOG" 2>/dev/null || echo 0)"
+[ "$KICK_LINES2" = "1" ] && ok "rate limit suppressed second kickstart (still 1 total)" || hard "expected 1 kickstart total after rate-limited run, got $KICK_LINES2"
+
+# Cleanup: kill any backgrounded sleep+touch follow-ups the script spawned.
+pkill -f "touch $QUEUE_DIR/.tickle" 2>/dev/null || true
+
+# -----------------------------------------------------------------------------
 # Done — cleanup runs in trap
 # -----------------------------------------------------------------------------
 step "smoke test complete"

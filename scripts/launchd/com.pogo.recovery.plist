@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.pogo.recovery</string>
+    <key>ProgramArguments</key>
+    <array>
+        <!-- Update YOUR_USERNAME, or use `pogo service install-recovery`. -->
+        <string>/Users/YOUR_USERNAME/.pogo/bin/pogo-recovery.sh</string>
+    </array>
+    <!-- WatchPaths is edge-triggered: launchd re-runs the program every time
+         the watched directory changes (file added, removed, or renamed).
+         This is how polecats signal a restart request without depending on
+         pogod itself — they drop a .req file into the queue dir. -->
+    <key>WatchPaths</key>
+    <array>
+        <string>/Users/YOUR_USERNAME/.pogo/recovery/queue</string>
+    </array>
+    <!-- RunAtLoad drains anything left in the queue from a prior login
+         session before the WatchPaths hook is armed. -->
+    <key>RunAtLoad</key>
+    <true/>
+    <!-- One-shot per trigger. KeepAlive=true would loop forever because the
+         script always exits 0 once the queue is drained. launchd re-runs
+         on the next WatchPaths event. -->
+    <key>KeepAlive</key>
+    <false/>
+    <!-- Background: App-Nap-friendly. Recovery reacts to file events, it
+         does not need timer fidelity, so it differs from pogod's
+         Interactive ProcessType. -->
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>StandardOutPath</key>
+    <string>/Users/YOUR_USERNAME/Library/Logs/pogo/recovery.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/YOUR_USERNAME/Library/Logs/pogo/recovery.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- launchctl must be reachable so the script can kickstart pogod. -->
+        <key>PATH</key>
+        <string>/Users/YOUR_USERNAME/go/bin:/Users/YOUR_USERNAME/.pogo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>/Users/YOUR_USERNAME</string>
+    </dict>
+</dict>
+</plist>

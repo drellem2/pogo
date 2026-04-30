@@ -452,9 +452,51 @@ recipe, which doesn't work on macOS where setsid is not available.)`,
 			if err := service.Install(); err != nil {
 				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
 			}
+			// Tier-3 recovery agent (mg-f5fc / mg-6749) is intentionally
+			// kept separate from this install path: a wedged pogod must
+			// still be recoverable, so install-recovery cannot depend on
+			// install. Print a one-line nudge instead of auto-installing.
+			if installed, _ := service.RecoveryStatus(); !installed {
+				fmt.Println("Recovery agent not installed. Run `pogo service install-recovery` to enable controlled pogod restarts.")
+			}
 		},
 	}
 	cmdServiceInstall.Flags().BoolVar(&serviceInstallDetach, "detach", false, "Run the install in a new session and exit immediately; install proceeds in background and self-reports via mail")
+
+	var cmdServiceInstallRecovery = &cobra.Command{
+		Use:   "install-recovery",
+		Short: "Install the tier-3 recovery LaunchAgent (com.pogo.recovery)",
+		Long: `Install com.pogo.recovery — the external launchd agent that bounces pogod via launchctl kickstart -k when signaled.
+
+The recovery agent runs in its own launchd job, independent of pogod's
+process tree. Polecats and operators signal a restart by writing a .req
+file to ~/.pogo/recovery/queue/ (see ` + "`pogo recovery request`" + `); launchd's
+WatchPaths trigger fires the recovery script, which rate-limits and runs
+launchctl kickstart -k gui/$UID/com.pogo.daemon.
+
+This subcommand is deliberately separate from ` + "`pogo service install`" + `: if
+pogod is wedged, an operator must still be able to install or repair the
+recovery agent. Folding it into the regular install would create a
+chicken-and-egg.`,
+		Args: cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			if err := service.InstallRecovery(); err != nil {
+				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+			}
+		},
+	}
+
+	var cmdServiceUninstallRecovery = &cobra.Command{
+		Use:   "uninstall-recovery",
+		Short: "Remove the tier-3 recovery LaunchAgent (com.pogo.recovery)",
+		Long:  `Stop and remove com.pogo.recovery. State under ~/.pogo/recovery/ (queue, processed/, failed/, last_restart) is left in place.`,
+		Args:  cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			if err := service.UninstallRecovery(); err != nil {
+				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+			}
+		},
+	}
 
 	var cmdServiceUninstall = &cobra.Command{
 		Use:   "uninstall",
@@ -1485,7 +1527,56 @@ The path is resolved to an absolute path and the git root is discovered automati
 	cmdService.AddCommand(cmdServiceInstall)
 	cmdService.AddCommand(cmdServiceUninstall)
 	cmdService.AddCommand(cmdServiceStatus)
+	cmdService.AddCommand(cmdServiceInstallRecovery)
+	cmdService.AddCommand(cmdServiceUninstallRecovery)
 	rootCmd.AddCommand(cmdService)
+
+	// Recovery commands (mg-f5fc tier-3). The agent itself is installed via
+	// `pogo service install-recovery`; this command is the polecat-facing
+	// entry point that drops a request into the queue.
+	var cmdRecovery = &cobra.Command{
+		Use:   "recovery",
+		Short: "Tier-3 recovery: enqueue a controlled pogod restart",
+	}
+
+	var recoveryRequestReason string
+	var recoveryRequestRequester string
+	var cmdRecoveryRequest = &cobra.Command{
+		Use:   "request",
+		Short: "Enqueue a recovery request (controlled pogod restart)",
+		Long: `Drop a *.req file into ~/.pogo/recovery/queue/ so launchd's
+com.pogo.recovery agent runs launchctl kickstart -k against pogod.
+
+The write uses the temp-then-rename pattern so launchd never sees a
+partial file. Exits 0 once the request is enqueued — does NOT block on
+the actual restart. The recovery agent rate-limits to one kickstart per
+60s and archives processed requests to ~/.pogo/recovery/processed/.`,
+		Args: cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			requester := recoveryRequestRequester
+			if requester == "" {
+				requester = os.Getenv("AGENT_NAME")
+			}
+			path, err := service.EnqueueRecoveryRequest(requester, recoveryRequestReason)
+			if err != nil {
+				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+			}
+			if jsonOutput {
+				cli.PrintJSON(map[string]interface{}{
+					"enqueued":  true,
+					"path":      path,
+					"requester": requester,
+					"reason":    recoveryRequestReason,
+				})
+			} else {
+				fmt.Printf("Recovery request enqueued: %s\n", path)
+			}
+		},
+	}
+	cmdRecoveryRequest.Flags().StringVar(&recoveryRequestReason, "reason", "", "Short reason for the recovery request (logged verbatim)")
+	cmdRecoveryRequest.Flags().StringVar(&recoveryRequestRequester, "requester", "", "Identity of the requester (defaults to $AGENT_NAME)")
+	cmdRecovery.AddCommand(cmdRecoveryRequest)
+	rootCmd.AddCommand(cmdRecovery)
 
 	// Agent commands
 	cmdAgent.AddCommand(cmdAgentStart)
