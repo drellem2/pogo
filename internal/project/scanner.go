@@ -90,6 +90,16 @@ func (s *Scanner) watchParent(projectPath string) {
 		return
 	}
 
+	// Never watch $HOME directly. On macOS, FSEvents registration on $HOME
+	// triggers TCC permission popups for protected subtrees (Documents,
+	// Downloads, Desktop, Pictures, Movies, Library) on every cold start.
+	// Sibling-repo discovery for projects sitting directly under $HOME is
+	// sacrificed; users can register new top-level repos with `pogo visit`.
+	if isHomeDir(parent) {
+		logger.Info("scanner: refusing to watch $HOME (would trigger macOS TCC popups)", "path", parent)
+		return
+	}
+
 	// Check for .pogo_stop in the parent directory
 	if fileExists(filepath.Join(parent, ".pogo_stop")) {
 		logger.Info("scanner: skipping parent dir with .pogo_stop", "path", parent)
@@ -200,4 +210,13 @@ func isInsidePogoData(path string) bool {
 	clean := filepath.Clean(path)
 	// Check if path is dataDir itself or a child of it
 	return clean == dataDir || strings.HasPrefix(clean, dataDir+string(filepath.Separator))
+}
+
+// isHomeDir reports whether path is the user's home directory.
+func isHomeDir(path string) bool {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return false
+	}
+	return filepath.Clean(path) == filepath.Clean(home)
 }
