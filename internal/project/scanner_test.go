@@ -113,6 +113,47 @@ func TestScannerRespectsPogoStop(t *testing.T) {
 	}
 }
 
+func TestScannerRefusesToWatchHome(t *testing.T) {
+	ProjectFileName = "projects-scanner-home-test.json"
+	driver.Init()
+	defer driver.Kill()
+	Init()
+	defer RemoveSaveFile()
+
+	// Override $HOME to a temp dir so we can test "parent == $HOME" without
+	// touching the real home. os.UserHomeDir() reads $HOME on Unix/darwin.
+	fakeHome, err := os.MkdirTemp("", "pogo-scanner-home-test")
+	if err != nil {
+		t.Fatalf("failed to create temp home: %v", err)
+	}
+	defer os.RemoveAll(fakeHome)
+
+	origHome := os.Getenv("HOME")
+	if err := os.Setenv("HOME", fakeHome); err != nil {
+		t.Fatalf("failed to set HOME: %v", err)
+	}
+	defer os.Setenv("HOME", origHome)
+
+	// Create a "repo" directly under $HOME — its parent is $HOME itself.
+	repoUnderHome := filepath.Join(fakeHome, "topleveldir")
+	if err := os.MkdirAll(filepath.Join(repoUnderHome, ".git"), 0755); err != nil {
+		t.Fatalf("failed to create repo: %v", err)
+	}
+
+	p := Project{Id: 0, Path: addSlashToPath(repoUnderHome)}
+	Add(&p)
+
+	if err := StartScanner(); err != nil {
+		t.Fatalf("failed to start scanner: %v", err)
+	}
+	defer StopScanner()
+
+	// $HOME must NOT be watched — that's the TCC-popup risk this guards against.
+	if scanner.watched[fakeHome] {
+		t.Errorf("scanner must not watch $HOME directly, but watched %s", fakeHome)
+	}
+}
+
 func TestScannerSkipsNonGitDirs(t *testing.T) {
 	ProjectFileName = "projects-scanner-nongit-test.json"
 	driver.Init()

@@ -90,6 +90,16 @@ func (s *Scanner) watchParent(projectPath string) {
 		return
 	}
 
+	// Never watch $HOME directly. On macOS, fsnotify uses FSEvents which
+	// asks for TCC permission for protected subtrees (Documents, Downloads,
+	// Desktop, Pictures, Movies, Library) at watch-registration time —
+	// causing popups on every cold start. Sibling-discovery for top-level
+	// repos under $HOME is dropped; users can `pogo visit` them manually.
+	if home := userHomeDir(); home != "" && parent == home {
+		logger.Info("scanner: refusing to watch $HOME as parent (TCC popup risk)", "path", parent)
+		return
+	}
+
 	// Check for .pogo_stop in the parent directory
 	if fileExists(filepath.Join(parent, ".pogo_stop")) {
 		logger.Info("scanner: skipping parent dir with .pogo_stop", "path", parent)
@@ -183,11 +193,21 @@ func fileExists(path string) bool {
 
 // pogoDataDir returns the ~/.pogo directory path.
 func pogoDataDir() string {
+	home := userHomeDir()
+	if home == "" {
+		return ""
+	}
+	return filepath.Join(home, ".pogo")
+}
+
+// userHomeDir returns the cleaned user home directory, or "" if it can't be
+// resolved. Cleaning lets callers compare against filepath.Clean'd paths.
+func userHomeDir() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(home, ".pogo")
+	return filepath.Clean(home)
 }
 
 // isInsidePogoData reports whether path is inside the ~/.pogo directory.
