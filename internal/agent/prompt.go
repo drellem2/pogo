@@ -40,6 +40,17 @@ type TemplateVars struct {
 	Repo        string // Target repository path
 	Branch      string // Target branch for refinery submit (default: main)
 	WorktreeDir string // Polecat's isolated worktree path (its working directory)
+
+	// RecentCommits is `git log --oneline -n` output for the source repo's
+	// checked-out branch, surfaced as FYI context so a polecat picking up
+	// the Nth ticket of a multi-ticket feature can see the prior N-1
+	// commits (each carrying its mg-XXXX in the subject) without being
+	// told to look. Empty string means "no context available" — templates
+	// should gate the section behind `{{if .RecentCommits}}`.
+	RecentCommits string
+	// RecentFiles is the unique set of files touched by RecentCommits,
+	// sorted and newline-joined. Same FYI framing as RecentCommits.
+	RecentFiles string
 }
 
 // ResolveCrewPrompt returns the path to a crew agent's prompt file.

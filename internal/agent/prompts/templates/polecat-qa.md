@@ -19,7 +19,23 @@ You are an ephemeral QA polecat agent. Your job is **verification, not implement
 ### Details
 
 {{.Body}}
+{{if .RecentCommits}}
+## Recent activity in `{{.Repo}}`
 
+This is FYI context — not a step, not a checklist. It is here so that if your QA task is verifying the Nth in a multi-ticket feature, you can see what the prior N-1 polecats actually shipped without re-deriving it. Skim, ignore, or `git show <hash>` / `mg show mg-XXXX` whatever looks relevant. Commit subjects often carry the originating work-item ID in parentheses.
+
+Last commits on the checked-out branch:
+
+```
+{{.RecentCommits}}
+```
+{{if .RecentFiles}}
+Files touched by those commits:
+
+```
+{{.RecentFiles}}
+```
+{{end}}{{end}}
 ## Working in your worktree
 
 Your worktree at `{{.WorktreeDir}}` is a git worktree that **shares the

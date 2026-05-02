@@ -144,6 +144,100 @@ func TestExpandTemplateToFile(t *testing.T) {
 	}
 }
 
+// TestShippedTemplatesSurfaceRecentActivity guards the embedded polecat
+// templates against silent removal of the recent-activity context block —
+// the lever introduced for mg-b372. If the conditional ever needs to change
+// shape, update this test deliberately rather than letting the section
+// disappear on a stray edit.
+func TestShippedTemplatesSurfaceRecentActivity(t *testing.T) {
+	for _, name := range []string{"prompts/templates/polecat.md", "prompts/templates/polecat-qa.md"} {
+		data, err := defaultPrompts.ReadFile(name)
+		if err != nil {
+			t.Fatalf("read embedded %s: %v", name, err)
+		}
+		body := string(data)
+		for _, want := range []string{
+			"{{if .RecentCommits}}",
+			"{{.RecentCommits}}",
+			"{{if .RecentFiles}}",
+			"{{.RecentFiles}}",
+			"## Recent activity",
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("%s: expected %q in template body", name, want)
+			}
+		}
+	}
+}
+
+func TestExpandTemplateRecentActivity(t *testing.T) {
+	dir := t.TempDir()
+	tmplPath := filepath.Join(dir, "polecat.md")
+	// Mirror the conditional surfaced in the shipped polecat.md so the test
+	// pins the contract: `{{if .RecentCommits}}` must gate the section, and
+	// the inner `{{if .RecentFiles}}` must gate the files block.
+	content := `Task: {{.Task}}
+{{if .RecentCommits}}
+## Recent activity in ` + "`{{.Repo}}`" + `
+
+` + "```" + `
+{{.RecentCommits}}
+` + "```" + `
+{{if .RecentFiles}}
+Files:
+
+` + "```" + `
+{{.RecentFiles}}
+` + "```" + `
+{{end}}{{end}}
+done.`
+	if err := os.WriteFile(tmplPath, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("populated includes section", func(t *testing.T) {
+		vars := TemplateVars{
+			Task:          "T",
+			Repo:          "/r",
+			RecentCommits: "abc1234 first (mg-1111)\ndef5678 second (mg-2222)",
+			RecentFiles:   "internal/agent/api.go\ninternal/agent/prompt.go",
+		}
+		got, err := ExpandTemplate(tmplPath, vars)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, want := range []string{"Recent activity", "abc1234", "mg-1111", "internal/agent/api.go"} {
+			if !strings.Contains(got, want) {
+				t.Errorf("expected %q in output:\n%s", want, got)
+			}
+		}
+	})
+
+	t.Run("empty RecentCommits omits section entirely", func(t *testing.T) {
+		got, err := ExpandTemplate(tmplPath, TemplateVars{Task: "T", Repo: "/r"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(got, "Recent activity") {
+			t.Errorf("section must be gated when RecentCommits is empty:\n%s", got)
+		}
+	})
+
+	t.Run("commits without files still renders commits", func(t *testing.T) {
+		vars := TemplateVars{Task: "T", Repo: "/r", RecentCommits: "abc1234 only commit"}
+		got, err := ExpandTemplate(tmplPath, vars)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(got, "abc1234 only commit") {
+			t.Errorf("expected commits even without files:\n%s", got)
+		}
+		if strings.Contains(got, "Files:") {
+			t.Errorf("files block must be gated when RecentFiles is empty:\n%s", got)
+		}
+	})
+}
+
 func TestExpandTemplateNotFound(t *testing.T) {
 	_, err := ExpandTemplate("/nonexistent/path.md", TemplateVars{})
 	if err == nil {

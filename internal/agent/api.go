@@ -565,14 +565,24 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		worktreeDir = filepath.Join(home, ".pogo", "polecats", spawnReq.Name)
 	}
 
+	// Capture recent activity in the source repo as best-effort FYI
+	// context for the polecat. The helpers return "" on any failure; the
+	// template gates the section behind `{{if .RecentCommits}}` so a repo
+	// without commits or `.git` simply produces no extra prompt content.
+	// See polecat_context.go for the rationale (mg-b372).
+	recentCommits := captureRecentCommits(spawnReq.Repo, defaultRecentCommits)
+	recentFiles := captureRecentFiles(spawnReq.Repo, defaultRecentCommits, defaultRecentFiles)
+
 	// Expand template to a temp file
 	vars := TemplateVars{
-		Task:        spawnReq.Task,
-		Body:        spawnReq.Body,
-		Id:          spawnReq.Id,
-		Repo:        spawnReq.Repo,
-		Branch:      spawnReq.Branch,
-		WorktreeDir: worktreeDir,
+		Task:          spawnReq.Task,
+		Body:          spawnReq.Body,
+		Id:            spawnReq.Id,
+		Repo:          spawnReq.Repo,
+		Branch:        spawnReq.Branch,
+		WorktreeDir:   worktreeDir,
+		RecentCommits: recentCommits,
+		RecentFiles:   recentFiles,
 	}
 	promptFile, err := ExpandTemplateToFile(tmplPath, vars)
 	if err != nil {
