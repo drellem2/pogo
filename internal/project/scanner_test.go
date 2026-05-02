@@ -113,6 +113,81 @@ func TestScannerRespectsPogoStop(t *testing.T) {
 	}
 }
 
+func TestScannerRefusesToWatchHome(t *testing.T) {
+	ProjectFileName = "projects-scanner-home-test.json"
+	driver.Init()
+	defer driver.Kill()
+	Init()
+	defer RemoveSaveFile()
+
+	// Pretend $HOME is a temp directory so registering a project directly
+	// under it would otherwise cause the scanner to watch $HOME.
+	fakeHome, err := os.MkdirTemp("", "pogo-scanner-home-test")
+	if err != nil {
+		t.Fatalf("failed to create temp home: %v", err)
+	}
+	defer os.RemoveAll(fakeHome)
+	t.Setenv("HOME", fakeHome)
+
+	// A repo sitting directly under $HOME (e.g. ~/.emacs.d, ~/org).
+	topLevelRepo := filepath.Join(fakeHome, "top-level-repo")
+	if err := os.MkdirAll(filepath.Join(topLevelRepo, ".git"), 0755); err != nil {
+		t.Fatalf("failed to create repo: %v", err)
+	}
+
+	p := Project{Id: 0, Path: addSlashToPath(topLevelRepo)}
+	Add(&p)
+
+	if err := StartScanner(); err != nil {
+		t.Fatalf("failed to start scanner: %v", err)
+	}
+	defer StopScanner()
+
+	// $HOME must NOT be watched — that would trigger macOS TCC popups for
+	// Documents/Downloads/Desktop on every pogod restart.
+	if scanner.watched[fakeHome] {
+		t.Errorf("scanner must not watch $HOME (%s); would trigger TCC popups on macOS", fakeHome)
+	}
+}
+
+func TestScannerStillWatchesNestedParents(t *testing.T) {
+	ProjectFileName = "projects-scanner-nested-test.json"
+	driver.Init()
+	defer driver.Kill()
+	Init()
+	defer RemoveSaveFile()
+
+	fakeHome, err := os.MkdirTemp("", "pogo-scanner-nested-test")
+	if err != nil {
+		t.Fatalf("failed to create temp home: %v", err)
+	}
+	defer os.RemoveAll(fakeHome)
+	t.Setenv("HOME", fakeHome)
+
+	// Project at $HOME/dev/foo — parent is $HOME/dev, not $HOME, so the
+	// scanner should still watch it normally.
+	devDir := filepath.Join(fakeHome, "dev")
+	nestedRepo := filepath.Join(devDir, "foo")
+	if err := os.MkdirAll(filepath.Join(nestedRepo, ".git"), 0755); err != nil {
+		t.Fatalf("failed to create nested repo: %v", err)
+	}
+
+	p := Project{Id: 0, Path: addSlashToPath(nestedRepo)}
+	Add(&p)
+
+	if err := StartScanner(); err != nil {
+		t.Fatalf("failed to start scanner: %v", err)
+	}
+	defer StopScanner()
+
+	if !scanner.watched[devDir] {
+		t.Errorf("scanner should watch nested parent %s (not $HOME)", devDir)
+	}
+	if scanner.watched[fakeHome] {
+		t.Errorf("scanner must not watch $HOME (%s)", fakeHome)
+	}
+}
+
 func TestScannerSkipsNonGitDirs(t *testing.T) {
 	ProjectFileName = "projects-scanner-nongit-test.json"
 	driver.Init()
