@@ -1438,6 +1438,88 @@ func TestPMTemplateIncludesRoadmapRegen(t *testing.T) {
 	}
 }
 
+// TestMayorPromptIncludesStallWatch locks in the requirement that the mayor
+// prompt teaches the stall-watch loop introduced in mg-783f. Without these
+// invariants, future edits could silently drop the wedged-session safety net
+// that mg-60ca proved is necessary (a Claude session that hangs mid-conversation
+// while its host process stays alive — restart-on-crash never fires).
+func TestMayorPromptIncludesStallWatch(t *testing.T) {
+	data, err := defaultPrompts.ReadFile("prompts/mayor.md")
+	if err != nil {
+		t.Fatalf("read mayor.md: %v", err)
+	}
+	s := string(data)
+
+	// The new section header.
+	if !strings.Contains(s, "Stall-watch crew agents") {
+		t.Error("mayor.md: expected `Stall-watch crew agents` step in the coordination loop")
+	}
+	// The heartbeat substrate — sweep.log mtime under the PM agent dir.
+	if !strings.Contains(s, "~/.pogo/agents/pm/") || !strings.Contains(s, "sweep.log") {
+		t.Error("mayor.md: expected sweep.log heartbeat reference (`~/.pogo/agents/pm/<name>/sweep.log`)")
+	}
+	// The thresholds — both nudge and restart bounds must be named so the
+	// behavior is unambiguous. T_stall=90min and T_restart=120min are the
+	// conservative defaults agreed in mg-783f.
+	if !strings.Contains(s, "90 min") {
+		t.Error("mayor.md: expected the `90 min` stall threshold")
+	}
+	if !strings.Contains(s, "120 min") {
+		t.Error("mayor.md: expected the `120 min` restart threshold")
+	}
+	// Escalation path: nudge first, then stop+start.
+	if !strings.Contains(s, "pogo agent stop") || !strings.Contains(s, "pogo agent start") {
+		t.Error("mayor.md: expected restart escalation via `pogo agent stop` + `pogo agent start`")
+	}
+	// system_wake suppression — without it, every host wake triggers spurious
+	// restarts before pogod's heartbeat can replay the agent's schedules.
+	if !strings.Contains(s, "system_wake") {
+		t.Error("mayor.md: expected `system_wake` suppression to prevent post-wake false positives")
+	}
+	if !strings.Contains(s, "pogo events list") {
+		t.Error("mayor.md: expected `pogo events list` to query system_wake events")
+	}
+}
+
+// TestPMTemplateIncludesHeartbeat locks in the requirement that the PM template
+// (a) instructs the mail-check schedule to refresh sweep.log on every fire and
+// (b) documents mayor's stall-watch contract so PMs know they will be restarted
+// if their heartbeat goes stale. Without these, mayor's stall-watch loop has
+// nothing fresh to read and would constantly false-positive on every PM. See
+// mg-783f.
+func TestPMTemplateIncludesHeartbeat(t *testing.T) {
+	data, err := defaultPrompts.ReadFile("prompts/pm/pm-template.md")
+	if err != nil {
+		t.Fatalf("read pm-template.md: %v", err)
+	}
+	s := string(data)
+
+	// Mail-check nudge must include the heartbeat append. The literal token
+	// `heartbeat (mail-check)` is the contract between pm-template and mayor:
+	// changing it on either side without the other breaks stall-watch silently.
+	if !strings.Contains(s, "heartbeat (mail-check)") {
+		t.Error("pm-template.md: expected the mail-check nudge to append a `heartbeat (mail-check)` line to sweep.log")
+	}
+	// Section header that documents the contract for human readers and PMs.
+	if !strings.Contains(s, "## Mayor's stall-watch") {
+		t.Error("pm-template.md: expected `## Mayor's stall-watch` section documenting the contract")
+	}
+	// Both thresholds must be named so PMs can reason about how much slack
+	// they have between mail-checks before mayor escalates.
+	if !strings.Contains(s, "T_stall = 90 min") {
+		t.Error("pm-template.md: expected `T_stall = 90 min` threshold")
+	}
+	if !strings.Contains(s, "T_restart = 120 min") {
+		t.Error("pm-template.md: expected `T_restart = 120 min` threshold")
+	}
+	// Polecat warning — accidental clobbering of sweep.log silently breaks
+	// the heartbeat contract. The acceptance criteria in mg-783f calls this
+	// out explicitly.
+	if !strings.Contains(s, "clobber sweep.log") {
+		t.Error("pm-template.md: expected the `Don't clobber sweep.log` warning so polecats don't break the heartbeat")
+	}
+}
+
 // TestSynthesizeExtendsPrompt covers the PM crew-loader directive that lets a
 // crew prompt redirect to a shared template plus a per-instance TOML config.
 // See docs/product-manager-design.md §1.

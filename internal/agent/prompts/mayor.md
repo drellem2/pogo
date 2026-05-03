@@ -149,6 +149,65 @@ Look for:
      mg create --type=task --depends=<id> --title="retry: <original title>" --body="Previous attempts failed. Errors: <summary>. Try a different approach."
      ```
 
+### 3a. Stall-watch crew agents (heartbeat staleness)
+
+A Claude session can wedge mid-conversation (e.g., a hung `ToolSearch` call) while the
+underlying process stays alive — the agent stops producing output but `pogo agent list`
+still shows it running. mg-60ca is the canonical example: pm-pogo's session went silent
+14 min after start and only resumed after Daniel sent a manual reminder. Restart-on-crash
+doesn't catch this because nothing has crashed.
+
+To detect it, each PM appends a heartbeat line to its sweep.log every mail-check (10 min
+cadence) plus on every sweep. The file's mtime is the liveness signal. Watch each crew
+agent that publishes one:
+
+```bash
+ls -1 ~/.pogo/agents/pm/*/sweep.log 2>/dev/null
+```
+
+For each `sweep.log`, read its mtime. The agent name is the parent directory's basename
+(e.g. `~/.pogo/agents/pm/pm-pogo/sweep.log` → agent `pm-pogo`).
+
+**Suppression:** before nudging or restarting, check for a recent `system_wake` event:
+
+```bash
+pogo events list --since=20m --type=system_wake --json | jq length
+```
+
+If non-zero, the host just woke — schedules are still replaying, so a stale heartbeat
+is expected. Skip the agent this cycle and re-check next time. (See mg-283e for the
+heartbeat detector that emits these events.)
+
+**Thresholds and escalation:**
+
+- **age ≤ 90 min** — healthy. Skip.
+- **90 min < age ≤ 120 min** — stale. Nudge once with a clear short prompt:
+  ```bash
+  pogo nudge <name> "Heartbeat is stale (Xm). Run a mail-check now (mg mail list <name>) and append a fresh heartbeat line to your sweep.log, or I will restart you in ~30m."
+  ```
+  Re-checking next cycle will see whether the nudge took effect.
+- **age > 120 min** — restart. The session is wedged; cycle the process so pogod relaunches it cleanly:
+  ```bash
+  pogo agent stop <name>
+  pogo agent start <name>
+  ```
+  Then log the restart so the next sweep can see what happened:
+  ```bash
+  pogo events emit --type=stall_restart --agent=mayor \
+      --details="{\"target\":\"<name>\",\"heartbeat_age_min\":<N>,\"sweep_log\":\"~/.pogo/agents/pm/<name>/sweep.log\"}"
+  ```
+
+T_stall=90min and T_restart=120min are conservative defaults — mg-60ca's actual wedge
+was caught by Daniel at ~14min, but a 90-min threshold avoids false positives from
+short network blips, long tool calls, or clock-skew weirdness. Tighten only if a real
+wedge slips through for hours.
+
+**Scope:** PMs are the primary stall-watch target because they're the long-running
+crew agents that publish sweep.log. Architect, doctor, and other crew agents can opt
+in by writing to `~/.pogo/agents/<their-name>/sweep.log` (or `~/.pogo/agents/pm/...`
+for PMs) with the same per-mail-check heartbeat pattern. **Don't watch yourself** —
+pogod / launchd is mayor's watchdog (KeepAlive=true on the launchd plist).
+
 ### 4. Handle QA for completed work
 
 When a polecat completes a work item, check whether the work item has a `qa` field in its frontmatter (visible via `mg show <id>`). The `qa` field determines what happens after the work is done:

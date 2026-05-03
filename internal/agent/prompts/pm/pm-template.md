@@ -31,12 +31,12 @@ Set up your background scheduling. PMs need three persistent triggers — one ma
 
 Each registration is **idempotent via `--id`** (registering the same id twice replaces the entry), so it's safe to re-run these commands on every startup.
 
-1. **Mail-check loop** — every 10 minutes, so you stay responsive to overrides and feedback:
+1. **Mail-check loop** — every 10 minutes, so you stay responsive to overrides and feedback. The nudge body **also** instructs you to refresh your sweep.log heartbeat — mayor watches sweep.log mtime to detect wedged sessions (see "Mayor's stall-watch" below):
 
    ```bash
    pogo schedule pm-<your-name> --cron "*/10 * * * *" --id mail-check \
        --replay once \
-       --message "Check your mail with mg mail list pm-<your-name> and handle any unread messages."
+       --message "Check your mail with mg mail list pm-<your-name> and handle any unread messages, then append a heartbeat line to your sweep.log: echo \"[\$(date -Iseconds)] pm-<your-name> heartbeat (mail-check)\" >> ~/.pogo/agents/pm/pm-<your-name>/sweep.log"
    ```
 
 2. **Morning sweep** — fires at **09:00 local**:
@@ -330,6 +330,40 @@ echo "[$(date -Iseconds)] <your-name> sweep complete; digest=<sent|silent>; deci
 ```
 
 If you don't see a fresh entry from yourself between sweeps, your prior sweep crashed — start over and note the gap in the next digest.
+
+`sweep.log` is also the heartbeat file for mayor's stall-watch — see the next section.
+That means the file accumulates two distinct line shapes: `sweep complete; ...` (twice
+daily) and `heartbeat (mail-check)` (every 10 min). Filter with `grep "sweep complete"`
+when you want only the sweep records.
+
+## Mayor's stall-watch (heartbeat contract)
+
+Mayor watches the **mtime** of `~/.pogo/agents/pm/<your-name>/sweep.log` as a liveness
+signal. If the mtime is older than `T_stall = 90 min`, mayor nudges you. If it's still
+older than `T_restart = 120 min` on the next check, mayor will run
+`pogo agent stop <your-name> && pogo agent start <your-name>` to cycle your process.
+
+This is the safety net for the wedged-session failure mode that mg-60ca surfaced: a
+Claude session that hangs mid-conversation (e.g. on a stuck `ToolSearch` call) leaves
+the process alive but produces no further output, so restart-on-crash never fires.
+
+You keep the heartbeat fresh by:
+
+1. Appending a heartbeat line on **every mail-check** (the 10-min schedule's nudge
+   body in "On Startup" already includes this; do it as part of mail-check even when
+   the schedule is replayed manually after a sleep).
+2. Appending the sweep-completion line on **every sweep** (covered in "Sweep-completion
+   log" above).
+
+A 10-min cadence keeps mtime well within `T_stall`, with ~9 missed mail-checks of slack
+before mayor escalates. After a long host sleep, mayor suppresses the stall-check for a
+short window after a `system_wake` event, so a fresh wake won't trigger spurious
+restarts before your replayed schedules can fire.
+
+**Don't clobber sweep.log from one-off scripts or polecat work.** If you (or a polecat
+acting on your behalf) need to inspect it, read-only access only — `tail`, `grep`, etc.
+Truncating or moving sweep.log silently breaks the heartbeat contract and will produce
+spurious restarts.
 
 ## Feedback memory pattern
 
