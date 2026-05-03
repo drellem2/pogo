@@ -24,6 +24,7 @@ import (
 	"github.com/drellem2/pogo/internal/completion"
 	"github.com/drellem2/pogo/internal/events"
 	"github.com/drellem2/pogo/internal/refinery"
+	"github.com/drellem2/pogo/internal/scheduler"
 	"github.com/drellem2/pogo/internal/service"
 	"github.com/drellem2/pogo/internal/version"
 	"github.com/drellem2/pogo/internal/xref"
@@ -1050,6 +1051,126 @@ If the agent is not running, falls back to sending the message via gt mail.`,
 	cmdNudge.Flags().BoolVarP(&nudgeImmediate, "immediate", "i", false, "Write directly to PTY without waiting for idle")
 	cmdNudge.Flags().IntVarP(&nudgeTimeout, "timeout", "T", 30, "Seconds to wait for agent idle (wait-idle mode)")
 
+	// Scheduler commands. Talks to pogod's /scheduler/* endpoints. The daemon
+	// drives fires off the heartbeat tick, so schedules persist across
+	// pogod restarts and host sleep — see docs/sleep-resilience-design.md.
+	var (
+		schedCron     string
+		schedID       string
+		schedReplay   string
+		schedDelivery string
+		schedMessage  string
+		schedOnce     bool
+		schedIn       string
+	)
+	var cmdSchedule = &cobra.Command{
+		Use:   "schedule <agent>",
+		Short: "Register a sleep-resilient schedule with pogod",
+		Long: `Register a recurring or one-shot wakeup with pogod.
+
+Recurring (--cron required):
+
+  pogo schedule crew-research --cron "*/15 * * * *" --id research-poll \
+    --message "check the queue"
+
+One-shot (--once + --in):
+
+  pogo schedule cat-foo --once --in 30m --message "wake up"
+
+Schedules persist in ~/.pogo/schedules.json and fire from pogod's heartbeat
+loop — they survive host sleep, NTP steps, and pogod restarts (unlike Claude's
+in-process CronCreate). The default replay policy is "once": after a long sleep
+the schedule fires exactly once and reschedules to the next future occurrence.`,
+		Args: cobra.MinimumNArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			req := scheduler.AddRequest{
+				Agent:        args[0],
+				ID:           schedID,
+				Cron:         schedCron,
+				OneShot:      schedOnce,
+				In:           schedIn,
+				ReplayPolicy: scheduler.ReplayPolicy(schedReplay),
+				Delivery:     scheduler.DeliveryMode(schedDelivery),
+				Message:      schedMessage,
+			}
+			if !schedOnce && schedCron == "" {
+				cli.ExitWithError(jsonOutput, "either --cron or --once + --in is required", cli.ExitError)
+			}
+			if schedOnce && schedIn == "" {
+				cli.ExitWithError(jsonOutput, "--once requires --in <duration>", cli.ExitError)
+			}
+			entry, err := client.AddSchedule(req)
+			if err != nil {
+				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+			}
+			if jsonOutput {
+				cli.PrintJSON(entry)
+			} else {
+				fmt.Printf("Scheduled %s for %s — next fire %s\n", entry.ID, entry.Agent, entry.NextFire.Local().Format(time.RFC3339))
+			}
+		},
+	}
+	cmdSchedule.Flags().StringVar(&schedCron, "cron", "", "Standard 5-field cron expression (e.g. \"*/15 * * * *\")")
+	cmdSchedule.Flags().StringVar(&schedID, "id", "", "Schedule ID (default: random slug)")
+	cmdSchedule.Flags().StringVar(&schedReplay, "replay", "", "Replay policy: once (default), count, skip")
+	cmdSchedule.Flags().StringVar(&schedDelivery, "delivery", "", "Delivery: nudge (default) or mail")
+	cmdSchedule.Flags().StringVar(&schedMessage, "message", "", "Optional payload delivered on each fire")
+	cmdSchedule.Flags().BoolVar(&schedOnce, "once", false, "One-shot wakeup (use with --in)")
+	cmdSchedule.Flags().StringVar(&schedIn, "in", "", "Duration from now for --once (e.g. 30m, 2h)")
+
+	var schedListAgent string
+	var cmdScheduleList = &cobra.Command{
+		Use:   "list",
+		Short: "List schedules registered with pogod",
+		Args:  cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			entries, err := client.ListSchedules(schedListAgent)
+			if err != nil {
+				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+			}
+			if jsonOutput {
+				cli.PrintJSON(entries)
+				return
+			}
+			if len(entries) == 0 {
+				if schedListAgent != "" {
+					fmt.Printf("No schedules for %s.\n", schedListAgent)
+				} else {
+					fmt.Println("No schedules registered.")
+				}
+				return
+			}
+			fmt.Printf("%-20s  %-20s  %-25s  %s\n", "ID", "AGENT", "NEXT FIRE", "CRON / ONCE")
+			for _, e := range entries {
+				kind := e.Cron
+				if e.OneShot {
+					kind = "one-shot"
+				}
+				fmt.Printf("%-20s  %-20s  %-25s  %s\n",
+					e.ID, e.Agent, e.NextFire.Local().Format(time.RFC3339), kind)
+			}
+		},
+	}
+	cmdScheduleList.Flags().StringVar(&schedListAgent, "agent", "", "Filter by agent name")
+
+	var cmdScheduleRm = &cobra.Command{
+		Use:   "rm <id>",
+		Short: "Remove a schedule by ID",
+		Args:  cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			if err := client.RemoveSchedule(args[0]); err != nil {
+				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+			}
+			if jsonOutput {
+				cli.PrintJSON(map[string]string{"removed": args[0]})
+			} else {
+				fmt.Printf("Removed %s.\n", args[0])
+			}
+		},
+	}
+	cmdSchedule.AddCommand(cmdScheduleList)
+	cmdSchedule.AddCommand(cmdScheduleRm)
+
 	var initForce bool
 	var initMinimal bool
 	var cmdInit = &cobra.Command{
@@ -1596,6 +1717,7 @@ the actual restart. The recovery agent rate-limits to one kickstart per
 	cmdAgent.AddCommand(cmdAgentPrompt)
 	rootCmd.AddCommand(cmdAgent)
 	rootCmd.AddCommand(cmdNudge)
+	rootCmd.AddCommand(cmdSchedule)
 
 	// Project commands
 	cmdProject.AddCommand(cmdProjectAdd)

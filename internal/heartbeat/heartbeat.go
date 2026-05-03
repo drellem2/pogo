@@ -62,6 +62,15 @@ type Detector struct {
 	// "pogod" since the daemon owns the heartbeat loop.
 	AgentID string
 
+	// OnTick, if non-nil, is invoked after each tick with the wall-clock
+	// reading taken at the start of the tick. It runs synchronously on the
+	// heartbeat goroutine — keep callbacks fast or kick off async work.
+	// This is the integration point for the scheduler (see internal/scheduler):
+	// piggybacking on the heartbeat loop means a system_wake and the
+	// resulting reschedule happen in the same goroutine, so clock jumps are
+	// handled for free.
+	OnTick func(now time.Time)
+
 	mu       sync.Mutex
 	started  bool
 	prevWall time.Time
@@ -128,11 +137,20 @@ func (d *Detector) Tick() bool {
 	d.prevWall = wall
 	d.prevMono = mono
 
+	emitted := false
 	if gap > d.Threshold {
 		d.emit(gap, elapsedWall, elapsedMono)
-		return true
+		emitted = true
 	}
-	return false
+	if d.OnTick != nil {
+		// Run after we've updated prevWall/prevMono so the callback's view
+		// of "now" is consistent with the next tick's baseline.
+		hook := d.OnTick
+		d.mu.Unlock()
+		hook(wall)
+		d.mu.Lock()
+	}
+	return emitted
 }
 
 func (d *Detector) emit(gap, wallElapsed, monoElapsed time.Duration) {

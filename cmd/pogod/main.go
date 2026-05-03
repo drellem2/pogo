@@ -31,6 +31,7 @@ import (
 	"github.com/drellem2/pogo/internal/heartbeat"
 	"github.com/drellem2/pogo/internal/project"
 	"github.com/drellem2/pogo/internal/refinery"
+	"github.com/drellem2/pogo/internal/scheduler"
 	"github.com/drellem2/pogo/internal/search"
 	"github.com/drellem2/pogo/internal/server"
 	"github.com/drellem2/pogo/internal/workitem"
@@ -40,6 +41,7 @@ import (
 
 var agentRegistry *agent.Registry
 var mergeQueue *refinery.Refinery
+var sched *scheduler.Scheduler
 var srv *server.Server
 var startTime time.Time
 
@@ -327,10 +329,17 @@ func registerHandlers() {
 		// of a confusing 404.
 		refinery.RegisterDisabledHandlers(orchestrated)
 	}
+	if sched != nil {
+		// Scheduler is part of the orchestration substrate — registering or
+		// removing schedules requires pogod to be in the same mode that runs
+		// the heartbeat tick.
+		sched.RegisterHandlers(orchestrated)
+	}
 	if srv != nil {
 		http.Handle("/agents/", srv.RequireOrchestration(orchestrated))
 		http.Handle("/agents", srv.RequireOrchestration(orchestrated))
 		http.Handle("/refinery/", srv.RequireOrchestration(orchestrated))
+		http.Handle("/scheduler/", srv.RequireOrchestration(orchestrated))
 
 		// Server mode endpoints (not guarded — always available)
 		srv.RegisterHandlers(http.DefaultServeMux)
@@ -339,6 +348,7 @@ func registerHandlers() {
 		http.Handle("/agents/", orchestrated)
 		http.Handle("/agents", orchestrated)
 		http.Handle("/refinery/", orchestrated)
+		http.Handle("/scheduler/", orchestrated)
 	}
 }
 
@@ -441,6 +451,31 @@ func main() {
 	if cfg.Heartbeat.JumpThreshold > 0 {
 		hb.Threshold = cfg.Heartbeat.JumpThreshold
 	}
+
+	// Start the scheduler. Schedules in ~/.pogo/schedules.json drive a
+	// Tick() call from the heartbeat loop — wall-clock jumps are absorbed
+	// for free because the scheduler stores absolute fire times and the
+	// same goroutine handles both system_wake detection and the sweep.
+	schedPath, err := scheduler.DefaultPath()
+	if err != nil {
+		log.Printf("pogod: scheduler disabled (cannot resolve home dir): %v", err)
+	} else {
+		deliverer := &scheduler.PogodDeliverer{
+			Registry: agentRegistry,
+			Mail:     client.SendMGMail,
+		}
+		s, err := scheduler.New(schedPath, deliverer)
+		if err != nil {
+			log.Printf("pogod: scheduler load failed (%s): %v", schedPath, err)
+		} else {
+			sched = s
+			hb.OnTick = func(now time.Time) {
+				sched.Tick(context.Background(), now)
+			}
+			log.Printf("pogod: scheduler loaded from %s", schedPath)
+		}
+	}
+
 	hbCtx, hbCancel := context.WithCancel(context.Background())
 	defer hbCancel()
 	go hb.Run(hbCtx)

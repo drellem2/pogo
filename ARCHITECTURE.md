@@ -274,6 +274,93 @@ loop (every poll_interval):
 
 **Future:** Batch-then-bisect merging (testing N branches together, binary search on failure) is a known optimization but out of MVP scope.
 
+## Scheduler
+
+Pogod hosts a daemon-side scheduler so agents can register cron and one-shot
+wakeups that survive host sleep, NTP steps, and pogod restarts. This is the
+**canonical** mechanism for crew-agent recurring schedules — Claude's
+in-process `CronCreate` is reserved for ephemeral, in-session reminders that
+do not need to outlive the agent process.
+
+```
+~/.pogo/schedules.json   # versioned JSON, atomic temp+rename writes
+{
+  "version": 1,
+  "schedules": [
+    {
+      "id":            "research-poll",        // unique slug
+      "agent":         "crew-research",        // delivery target
+      "cron":          "*/15 * * * *",         // 5-field, local time
+      "next_fire":     "2026-05-03T13:30:00Z", // absolute wall-clock UTC
+      "replay_policy": "once",                 // once | count | skip
+      "delivery":      "nudge",                // nudge | mail
+      "message":       "check the queue",      // optional payload
+      "created_at":    "2026-05-03T08:32:10Z",
+      "last_fire":     "2026-05-03T13:15:00Z",
+      "missed_fires":  0
+    }
+  ]
+}
+```
+
+**Tick model.** The scheduler ticks off the heartbeat goroutine
+(`internal/heartbeat`). Because schedules store absolute wall-clock fire times
+and the heartbeat is the same loop that detects clock jumps, a host sleep is
+absorbed for free: the goroutine resumes, sees that several `next_fire` times
+have passed, applies the entry's replay policy, and reschedules. There is no
+separate sleep-aware code path.
+
+**Replay policies.** The fire policy controls what happens after a long sleep:
+
+- `once` (default) — fire exactly once, regardless of how many fire points
+  passed. The delivered payload includes the original `due` time and a
+  `missed` count so the agent can decide whether to catch up or skip ahead.
+- `count` — same delivery as `once`, but accumulates `missed_fires` on disk
+  for inspection.
+- `skip` — drop the fire entirely if it is older than ~2 tick intervals;
+  reschedule to the next future occurrence. Useful for "polling" schedules
+  where stale fires have no value.
+
+**Delivery.** A fire delivers either via PTY nudge (default) or macguffin
+mail. Nudge falls back to mail when the recipient is not currently registered
+with pogod, so a sleeping polecat picks the message up via `mg mail list`
+when it next runs.
+
+**Decision boundary.** Like the refinery, the scheduler is mechanical: it
+fires, it delivers, it persists. It does not interpret the message or decide
+what the agent should do. The decision lives in the agent's prompt — the
+scheduler is just the wakeup substrate.
+
+### Agent-side recipe
+
+A crew prompt that wants a sleep-resilient wakeup registers it on startup and
+reacts to nudges in its main loop:
+
+```markdown
+# crew-research startup
+
+On first boot (or after a handoff), idempotently register your poll schedule:
+
+  pogo schedule crew-research --cron "*/15 * * * *" --id research-poll \
+      --replay once --delivery nudge \
+      --message "Check the research queue and act on any new items."
+
+Adding the same `--id` twice replaces the existing entry (id is the dedup
+key), so it's safe to re-register on every startup.
+
+When you receive a nudge that looks like:
+
+  Check the research queue and act on any new items.
+  [scheduler id=research-poll due=... fired=...]
+
+…run your normal processing loop. The bracketed metadata tells you whether
+this was an on-time fire or a recovery from a sleep — use the `due` /
+`fired` gap to decide whether to skim or catch up.
+```
+
+Polecats use the same surface for one-shot wakeups (`--once --in 1h`) when
+they want to be re-prompted later without spinning their own polling loop.
+
 ## Event Log
 
 Pogo writes a single append-only JSONL event log at `~/.pogo/events.log`. It captures agent lifecycle (spawn, stop, crash, restart), polecat-specific milestones, work item transitions mirrored from macguffin, mail and nudge activity, and refinery merge attempts. Every line is a self-describing JSON object with a versioned envelope (`schema_version`, `timestamp`, `event_type`, `agent`, optional `work_item_id` / `repo`, plus per-event `details`).
@@ -312,6 +399,7 @@ The full schema, identity conventions, event catalog, and worked examples live i
 │   └── mayor.md           # Mayor prompt
 ├── events.log             # Append-only JSONL event log (schema: docs/event-log.md)
 ├── events.log.{1..5}      # Rotated history (100 MB trigger, 5 generations kept)
+├── schedules.json         # Daemon-side scheduler state (see Scheduler section)
 ├── refinery/
 │   └── worktrees/         # One worktree per remote, used for merge gates
 └── (existing config, search index, etc.)
@@ -369,6 +457,8 @@ pogod exposes HTTP endpoints. Existing endpoints are unchanged; new endpoints fo
 | `/agents/:name` | DELETE | Stop an agent |
 | `/refinery/queue` | GET | Pending merge items |
 | `/refinery/history` | GET | Recent merge results |
+| `/scheduler/schedules` | GET, POST | List or register pogod-side schedules |
+| `/scheduler/schedules/{id}` | GET, DELETE | Inspect or remove a schedule |
 | `/events` | GET | Query event log (`~/.pogo/events.log`, JSONL) |
 
 CLI commands (`pogo agent *`, `pogo nudge`) are thin wrappers around these endpoints, following the existing pogo CLI pattern.
