@@ -4,6 +4,7 @@ go 1.25.0
 
 require (
 	github.com/fsnotify/fsnotify v1.6.0
+	github.com/godbus/dbus/v5 v5.2.2
 	github.com/hashicorp/go-hclog v1.3.1
 	github.com/hashicorp/go-plugin v1.4.5
 	github.com/kinbiko/jsonassert v1.1.1
