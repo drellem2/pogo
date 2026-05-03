@@ -161,23 +161,34 @@ func TestPolecatTemplateExpansion(t *testing.T) {
 		}
 	}
 
-	// Verify the mail-check cron instruction is present. Polecats are not on
-	// pogod's nudge cycle, so they need a self-cron to proactively check mail.
-	cronChecks := []string{
-		"CronCreate",          // tool name
-		"*/10 * * * *",        // 10-minute schedule
-		"mg mail list gt-a3f", // expanded cron prompt body
+	// Verify the mail-check schedule instruction is present. Polecats are not
+	// on pogod's nudge cycle, so they need a self-registered schedule to
+	// proactively check mail. Post-mg-2f79 this uses pogod's sleep-resilient
+	// `pogo schedule` rather than Claude's in-process `CronCreate`.
+	scheduleChecks := []string{
+		"pogo schedule cat-gt-a3f", // pogod scheduler CLI, agent name expanded
+		"--cron \"*/10 * * * *\"",  // 10-minute cadence
+		"--id mail-check-gt-a3f",   // idempotent registration key
+		"mg mail list gt-a3f",      // expanded message body
 	}
-	for _, check := range cronChecks {
+	for _, check := range scheduleChecks {
 		if !strings.Contains(expanded, check) {
-			t.Errorf("expanded template missing mail-check cron instruction %q", check)
+			t.Errorf("expanded template missing mail-check schedule instruction %q", check)
 		}
 	}
 
-	// Verify guidance against additional cron jobs is still present — only
-	// the one mail-check cron is allowed.
-	if !strings.Contains(expanded, "One mail-check cron only") {
-		t.Errorf("expanded template missing guidance limiting cron jobs to the mail-check one")
+	// Verify guidance against additional schedules is still present — only the
+	// one mail-check schedule is allowed.
+	if !strings.Contains(expanded, "One mail-check schedule only") {
+		t.Errorf("expanded template missing guidance limiting background triggers to the mail-check schedule")
+	}
+
+	// `CronCreate` should still be mentioned, but only as the documented
+	// ephemeral-in-session option that is explicitly NOT for the mail-check
+	// loop. Catch a regression where someone re-introduces it as the primary
+	// mechanism by checking for the ephemeral guidance heading.
+	if !strings.Contains(expanded, "ephemeral") {
+		t.Errorf("expanded template missing CronCreate-as-ephemeral guidance")
 	}
 }
 

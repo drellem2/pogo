@@ -62,13 +62,15 @@ Follow these steps exactly, in order. Skipping any step is a failure.
    mg claim {{.Id}}
    ```
 
-2. **Set up a mail-check cron** so the mayor can reach you mid-verification. QA polecats are not on pogod's nudge cycle — without this step, you won't notice incoming mail until your work is done. Use the `CronCreate` tool **exactly once** to register a recurring self-trigger:
+2. **Register a mail-check schedule with pogod** so the mayor can reach you mid-verification. QA polecats are not on pogod's nudge cycle — without this step, you won't notice incoming mail until your work is done. Use **`pogo schedule`** (the daemon-side scheduler) so the mail-check survives host sleep / NTP steps / pogod restarts; do **not** use Claude's in-process `CronCreate` for this — it silently drops fires during sleep:
 
-   - `cron`: `*/10 * * * *` (every 10 minutes — the default; do not go below 5 minutes or above 10)
-   - `prompt`: `` Check your mail with `mg mail list {{.Id}}` and handle any unread messages. ``
-   - `recurring`: `true`
+   ```bash
+   pogo schedule cat-{{.Id}} --cron "*/10 * * * *" --id mail-check-{{.Id}} \
+       --replay once \
+       --message "Check your mail with mg mail list {{.Id}} and handle any unread messages."
+   ```
 
-   Leave `durable` at its default (`false`) so the cron lives only in this session — when your process exits, the cron dies with it, no cleanup needed. This is the **only** self-cron you should create.
+   Confirm with `pogo schedule list --agent cat-{{.Id}}` — you should see exactly one entry. The `--id` is keyed on your work item id, so re-running the command is idempotent (it replaces the same entry rather than stacking duplicates). The mayor will `pogo schedule rm mail-check-{{.Id}}` when stopping you, so you don't need to clean up yourself. This is the **only** background schedule you should register.
 
 3. **Read the source work item.** Your QA item's body should reference the original work item ID. Read it to understand what was implemented and what the acceptance criteria are:
    ```bash
@@ -121,13 +123,38 @@ Follow these steps exactly, in order. Skipping any step is a failure.
 
 9. **Stay alive.** Do NOT exit. After reporting your result, wait for the mayor to stop you. The mayor will terminate your process when done. If the mayor sends you a follow-up message, act on it immediately.
 
+## Reacting to scheduler fires (sleep recovery)
+
+The mail-check schedule from step 2 delivers each fire with metadata appended:
+
+```
+Check your mail with mg mail list mg-XXXX and handle any unread messages.
+
+[scheduler id=mail-check-mg-XXXX due=2026-05-03T09:00:00Z fired=2026-05-03T09:00:14Z]
+```
+
+When `due` ≈ `fired`, on-time fire — just check mail. When `fired` is much later than `due`, the host slept and pogod's heartbeat replayed the schedule on wake (a **system_wake catch-up**). The default `once` replay policy fires exactly once regardless of how many 10-minute marks were missed.
+
+| Schedule type             | Replay policy (default) | Reaction on late fire (sleep recovery)                                  |
+|---------------------------|-------------------------|-------------------------------------------------------------------------|
+| Daily sweep (crew agents) | `once` (at-most-once)   | One catch-up sweep covering the gap, then resume cadence.               |
+| Mail-check loop (you)     | `once` (at-most-once)   | One mail check; it drains everything queued during the sleep.           |
+| Polling loop (refinery, status) | `skip`                  | Drop the stale fire; resume on the next regular tick.                   |
+| One-shot reminder (`--once --in N`) | n/a (single fire)       | Fire exactly once on wake. Treat as a normal fire.                      |
+
+For the QA mail-check the action is the same in both cases (check mail), so there's nothing extra to do.
+
+### `CronCreate` is for ephemeral in-session reminders only
+
+Claude's in-process `CronCreate` tool remains valid for **ephemeral, in-session** reminders ("nudge me again in 2 minutes while this test runs"). It does **not** survive host sleep, NTP steps, or process restarts. Never use it for the mail-check loop or anything else that needs to outlive a single sleep cycle — that's what `pogo schedule` is for.
+
 ## Working Principles
 
 - **You do not write code.** Your job is to verify, not to fix. If something is broken, report it — don't patch it.
 - **Be thorough.** Check every acceptance criterion. Run every relevant test. Try edge cases.
 - **Be specific.** When reporting failures, include exact error messages, expected vs actual behavior, and steps to reproduce.
 - **Stay scoped.** Only verify the work described in your assignment. If you find unrelated issues, note them in your report but don't investigate further.
-- **One mail-check cron only.** Step 2 sets up a single `CronCreate` for mail-checking — that one is required. Do NOT set up any *additional* crontab entries, CronCreate jobs, `/loop`, `/schedule`, or `pogo nudge` commands targeting yourself or other agents.
+- **One mail-check schedule only.** Step 2 registers a single `pogo schedule` entry for mail-checking — that one is required. Do NOT register additional schedules, set up `CronCreate` jobs, `/loop`, `/schedule`, or `pogo nudge` commands targeting yourself or other agents.
 - **If you need to surface something to the user, mail `human`** (not the mayor): `mg mail send human --from={{.Id}} --subject="<subj>" --body="<body>"`. The mayor's inbox is for coordination; user-facing mail goes to `human` so the apple-side notifier picks it up.
 - **Reaching another agent — prefer mail for asks; reserve nudges for system events.** Mail (`mg mail send <to> --from={{.Id}} --subject="..." --body="..."`) carries an explicit sender so recipients can route, reply, and prioritize correctly. Use nudges only when sender attribution doesn't apply (cron-fired prompts, mail-check loops, system-level signals from pogod).
 - **If stuck, mail the mayor:**

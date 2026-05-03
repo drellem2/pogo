@@ -62,13 +62,17 @@ Follow these steps exactly, in order. Skipping any step is a failure.
    mg claim {{.Id}}
    ```
 
-2. **Set up a mail-check cron** so the mayor can reach you mid-task. Polecats are not on pogod's nudge cycle — without this step, you won't notice incoming mail until your work is done. Use the `CronCreate` tool **exactly once** to register a recurring self-trigger:
+2. **Register a mail-check schedule with pogod** so the mayor can reach you mid-task. Polecats are not on pogod's nudge cycle — without this step, you won't notice incoming mail until your work is done. Use **`pogo schedule`** (the daemon-side scheduler) so the mail-check survives host sleep / NTP steps / pogod restarts; do **not** use Claude's in-process `CronCreate` for this — it silently drops fires during sleep:
 
-   - `cron`: `*/10 * * * *` (every 10 minutes — the default; do not go below 5 minutes or above 10)
-   - `prompt`: `` Check your mail with `mg mail list {{.Id}}` and handle any unread messages. ``
-   - `recurring`: `true`
+   ```bash
+   pogo schedule cat-{{.Id}} --cron "*/10 * * * *" --id mail-check-{{.Id}} \
+       --replay once \
+       --message "Check your mail with mg mail list {{.Id}} and handle any unread messages."
+   ```
 
-   Leave `durable` at its default (`false`) so the cron lives only in this session — when your process exits, the cron dies with it, no cleanup needed. This is the **only** self-cron you should create; for refinery polling in step 6, use a bash loop, not cron.
+   Confirm with `pogo schedule list --agent cat-{{.Id}}` — you should see exactly one entry. The `--id` is keyed on your work item id, so re-running the command is idempotent (it replaces the same entry rather than stacking duplicates). The mayor will `pogo schedule rm mail-check-{{.Id}}` when stopping you, so you don't need to clean up yourself. This is the **only** background schedule you should register; for refinery polling in step 6, use a bash loop, not a schedule.
+
+   *Why `pogo schedule` and not `CronCreate`?* `CronCreate` lives inside this Claude session and has no notion of wall-clock time across sleep — if the host suspends for an hour, every fire that should have happened in that window is silently dropped. `pogo schedule` stores the next fire time on disk and replays through sleep; see "Reacting to scheduler fires" below for the policy.
 
 3. **Do the work.** Stay focused on the task described above. You are already in your isolated worktree at `{{.WorktreeDir}}` on branch `polecat-{{.Id}}`. **Run all commands in this directory** — do not `cd` to the source repository (see "Working in your worktree" above for why and for the equivalents).
    - **Write or update tests** for any code you change. If the repo has existing tests, follow the same patterns.
@@ -98,7 +102,7 @@ Follow these steps exactly, in order. Skipping any step is a failure.
      sleep 10
    done
    ```
-   Use a simple bash loop only. Adding more cron jobs or `pogo nudge` commands for polling interrupts interactive sessions — the mail-check cron from step 2 is the only `CronCreate` you should have running.
+   Use a simple bash loop only. Adding more cron jobs or `pogo nudge` commands for polling interrupts interactive sessions — the mail-check schedule from step 2 is the only background trigger you should have running.
 
 7. **If merged:** mark the work item done:
    ```bash
@@ -111,13 +115,38 @@ Follow these steps exactly, in order. Skipping any step is a failure.
 
 8. **Stay alive.** Do NOT exit. After completing steps 1–7, wait for the mayor to stop you. The mayor will verify your work was merged before terminating your process. If the mayor sends you a message (e.g., asking for a fix or retry), act on it immediately.
 
+## Reacting to scheduler fires (sleep recovery)
+
+The mail-check schedule registered in step 2 delivers each fire with metadata appended to the message body, e.g.:
+
+```
+Check your mail with mg mail list mg-XXXX and handle any unread messages.
+
+[scheduler id=mail-check-mg-XXXX due=2026-05-03T09:00:00Z fired=2026-05-03T09:00:14Z]
+```
+
+When `due` ≈ `fired` it's an on-time fire — just check mail. When `fired` is much later than `due` (host slept through the original due time and pogod's heartbeat replayed the schedule on wake), it's a **system_wake catch-up**: the at-most-once replay policy fires exactly once regardless of how many 10-minute marks were missed.
+
+| Schedule type             | Replay policy (default) | Reaction on late fire (sleep recovery)                                  |
+|---------------------------|-------------------------|-------------------------------------------------------------------------|
+| Daily sweep (crew agents) | `once` (at-most-once)   | One catch-up sweep covering the gap, then resume cadence.               |
+| Mail-check loop (you)     | `once` (at-most-once)   | One mail check; it drains everything queued during the sleep.           |
+| Polling loop (refinery, status) | `skip`                  | Drop the stale fire; resume on the next regular tick.                   |
+| One-shot reminder (`--once --in N`) | n/a (single fire)       | Fire exactly once on wake. Treat as a normal fire.                      |
+
+For the polecat mail-check the action is the same in both cases (check mail), so there's nothing extra to do — just don't register additional schedules thinking you've missed fires; pogod handles that for you.
+
+### `CronCreate` is for ephemeral in-session reminders only
+
+Claude's in-process `CronCreate` tool remains valid for **ephemeral, in-session** reminders ("nudge me again in 2 minutes while I'm waiting for this build"). It does **not** survive host sleep, NTP steps, or process restarts. Never use it for the mail-check loop or anything else that needs to outlive a single sleep cycle — that's what `pogo schedule` is for.
+
 ## Working Principles
 
 - **Stay scoped.** Only work on your assigned task. If you discover other issues, note them but don't fix them.
 - **Commit often.** Small, focused commits are easier to review and merge.
 - **Follow conventions.** Match the existing code style in the repository.
 - **Don't push to main.** Push to your feature branch. The refinery merges to main.
-- **One mail-check cron only.** Step 2 sets up a single `CronCreate` for mail-checking — that one is required. Do NOT set up any *additional* crontab entries, CronCreate jobs, `/loop`, `/schedule`, or `pogo nudge` commands targeting yourself or other agents. If you need to poll for refinery status, use a simple bash while-loop (see step 6).
+- **One mail-check schedule only.** Step 2 registers a single `pogo schedule` entry for mail-checking — that one is required. Do NOT register additional schedules, set up `CronCreate` jobs, `/loop`, `/schedule`, or `pogo nudge` commands targeting yourself or other agents. If you need to poll for refinery status, use a simple bash while-loop (see step 6).
 - **If you need to surface something to the user, mail `human`** (not the mayor): `mg mail send human --from={{.Id}} --subject="<subj>" --body="<body>"`. The mayor's inbox is for coordination; user-facing mail goes to `human` so the apple-side notifier picks it up.
 - **Reaching another agent — prefer mail for asks; reserve nudges for system events.** Mail (`mg mail send <to> --from={{.Id}} --subject="..." --body="..."`) carries an explicit sender so recipients can route, reply, and prioritize correctly. Use nudges only when sender attribution doesn't apply (cron-fired prompts, mail-check loops, system-level signals from pogod).
 - **If stuck, mail the mayor:**

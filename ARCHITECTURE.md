@@ -361,6 +361,29 @@ this was an on-time fire or a recovery from a sleep — use the `due` /
 Polecats use the same surface for one-shot wakeups (`--once --in 1h`) when
 they want to be re-prompted later without spinning their own polling loop.
 
+**Built-in prompt migration (mg-2f79).** The shipped prompt templates have
+all moved their recurring schedules from Claude's in-process `CronCreate` to
+`pogo schedule`:
+
+- `internal/agent/prompts/pm/pm-template.md` — three schedules (`mail-check`,
+  `sweep-morning`, `sweep-evening`), all with the default `once` replay
+  policy. The morning/evening sweeps are documented as at-most-once on
+  recovery: a single catch-up sweep covers an arbitrarily long sleep, no
+  matter how many cron points were missed.
+- `internal/agent/prompts/templates/polecat.md` and `polecat-qa.md` — one
+  per-polecat mail-check schedule with id `mail-check-<work-item-id>`. The
+  mayor cleans these up in step 3 of its coordination loop when stopping a
+  polecat — pogod does not auto-GC schedules whose target agent has been
+  stopped.
+- `internal/agent/prompts/mayor.md` — unchanged. The mayor's in-process
+  coordination loop still uses `ScheduleWakeup` for dynamic self-pacing
+  (it's event-driven through mail and idempotent across sleep, so missed
+  ticks during a sleep just delay the next cycle by one wake).
+
+`CronCreate` remains valid for ephemeral, in-session reminders ("nudge me
+again in 5 minutes while I work through this"). It is not appropriate for
+any cadence that must outlive a single sleep cycle.
+
 ## Event Log
 
 Pogo writes a single append-only JSONL event log at `~/.pogo/events.log`. It captures agent lifecycle (spawn, stop, crash, restart), polecat-specific milestones, work item transitions mirrored from macguffin, mail and nudge activity, and refinery merge attempts. Every line is a self-describing JSON object with a versioned envelope (`schema_version`, `timestamp`, `event_type`, `agent`, optional `work_item_id` / `repo`, plus per-event `details`).

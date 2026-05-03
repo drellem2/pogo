@@ -92,11 +92,15 @@ Look for:
      ```bash
      pogo agent stop <name>
      ```
-  2. Archive the work item:
+  2. Remove its mail-check schedule from pogod (registered by the polecat in its step 2; pogod does not auto-GC schedules when an agent is stopped):
+     ```bash
+     pogo schedule rm mail-check-<work-item-id>
+     ```
+  3. Archive the work item:
      ```bash
      mg archive --days=0
      ```
-  As a fallback, also check `mg list --status=done` for items whose polecats have already exited — these may have been missed if mail delivery lagged.
+  As a fallback, also check `mg list --status=done` for items whose polecats have already exited — these may have been missed if mail delivery lagged. Same cleanup ordering applies (stop, schedule rm, archive).
 
 - **Unstarted polecats**: If a polecat was spawned but hasn't claimed its work item within ~30-60 seconds, nudge it with a short message to kick-start it. This fixes intermittent folder permission issues that can block initialization:
   ```bash
@@ -112,16 +116,18 @@ Look for:
   ```bash
   pogo nudge <name> "status check — are you stuck?"
   ```
-  If the agent is `dead` (process gone but still registered), stop it and re-dispatch the work:
+  If the agent is `dead` (process gone but still registered), stop it, drop its mail-check schedule, and re-dispatch the work:
   ```bash
   pogo agent stop <name>
+  pogo schedule rm mail-check-<work-item-id>   # see polecat template step 2
   mg reap
   ```
 - **Dead polecats**: Exited with errors. Their work items may need re-dispatch. Run:
   ```bash
+  pogo schedule rm mail-check-<work-item-id>   # see polecat template step 2
   mg reap
   ```
-  This reclaims items from dead processes back to available status.
+  `mg reap` reclaims items from dead processes back to available status; `pogo schedule rm` clears the orphan schedule so pogod doesn't keep delivering mail-check nudges to a non-existent agent.
 
 - **Refinery queue**: Check for pending merges that may be stuck or stalled:
   ```bash
