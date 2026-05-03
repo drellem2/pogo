@@ -53,6 +53,14 @@ type Config struct {
 	MaxWatchers int
 	Refinery    RefineryConfig
 	Agents      AgentsConfig
+	Heartbeat   HeartbeatConfig
+}
+
+// HeartbeatConfig configures pogod's clock-jump detector. Zero values fall
+// back to internal/heartbeat defaults (30s tick, 60s jump threshold).
+type HeartbeatConfig struct {
+	Interval      time.Duration
+	JumpThreshold time.Duration
 }
 
 // AgentsConfig holds agent command configuration.
@@ -136,6 +144,12 @@ func Load() *Config {
 		}
 		if fileCfg.Refinery.PollInterval > 0 {
 			cfg.Refinery.PollInterval = fileCfg.Refinery.PollInterval
+		}
+		if fileCfg.Heartbeat.Interval > 0 {
+			cfg.Heartbeat.Interval = fileCfg.Heartbeat.Interval
+		}
+		if fileCfg.Heartbeat.JumpThreshold > 0 {
+			cfg.Heartbeat.JumpThreshold = fileCfg.Heartbeat.JumpThreshold
 		}
 	}
 
@@ -261,6 +275,17 @@ func loadConfigFile() (*parsedConfig, error) {
 			case "max_watchers":
 				if mw, err := strconv.Atoi(val); err == nil && mw > 0 {
 					cfg.MaxWatchers = mw
+				}
+			}
+		case "heartbeat":
+			switch key {
+			case "interval":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.Heartbeat.Interval = d
+				}
+			case "jump_threshold":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.Heartbeat.JumpThreshold = d
 				}
 			}
 		case "agents":

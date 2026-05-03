@@ -28,6 +28,7 @@ import (
 	"github.com/drellem2/pogo/internal/config"
 	"github.com/drellem2/pogo/internal/driver"
 	"github.com/drellem2/pogo/internal/health"
+	"github.com/drellem2/pogo/internal/heartbeat"
 	"github.com/drellem2/pogo/internal/project"
 	"github.com/drellem2/pogo/internal/refinery"
 	"github.com/drellem2/pogo/internal/search"
@@ -428,6 +429,21 @@ func main() {
 			agentRegistry.Remove(a.Name)
 		}
 	})
+
+	// Start the heartbeat detector. It compares wall vs monotonic time on
+	// each tick and emits a system_wake event if they diverge by more than
+	// the configured threshold — catches host sleep, VM pause, NTP step.
+	// See docs/sleep-resilience-design.md §1.
+	hb := heartbeat.New()
+	if cfg.Heartbeat.Interval > 0 {
+		hb.Interval = cfg.Heartbeat.Interval
+	}
+	if cfg.Heartbeat.JumpThreshold > 0 {
+		hb.Threshold = cfg.Heartbeat.JumpThreshold
+	}
+	hbCtx, hbCancel := context.WithCancel(context.Background())
+	defer hbCancel()
+	go hb.Run(hbCtx)
 
 	// Start plugins
 	driver.Init()

@@ -319,6 +319,51 @@ poll_interval = "15s"
 	}
 }
 
+func TestHeartbeatConfigFile(t *testing.T) {
+	dir := t.TempDir()
+	os.Setenv("XDG_CONFIG_HOME", dir)
+	defer os.Unsetenv("XDG_CONFIG_HOME")
+
+	pogoDir := filepath.Join(dir, "pogo")
+	os.MkdirAll(pogoDir, 0755)
+	os.WriteFile(filepath.Join(pogoDir, "config.toml"), []byte(`
+[heartbeat]
+interval = "15s"
+jump_threshold = "45s"
+`), 0644)
+
+	cfg := Load()
+	if cfg.Heartbeat.Interval != 15*time.Second {
+		t.Errorf("expected heartbeat interval 15s, got %s", cfg.Heartbeat.Interval)
+	}
+	if cfg.Heartbeat.JumpThreshold != 45*time.Second {
+		t.Errorf("expected heartbeat jump_threshold 45s, got %s", cfg.Heartbeat.JumpThreshold)
+	}
+}
+
+func TestHeartbeatDefaultsWhenUnset(t *testing.T) {
+	// With no [heartbeat] section, the Config zero values are returned and
+	// the daemon's heartbeat.New() supplies its package-level defaults.
+	dir := t.TempDir()
+	os.Setenv("XDG_CONFIG_HOME", dir)
+	defer os.Unsetenv("XDG_CONFIG_HOME")
+
+	pogoDir := filepath.Join(dir, "pogo")
+	os.MkdirAll(pogoDir, 0755)
+	os.WriteFile(filepath.Join(pogoDir, "config.toml"), []byte(`
+[server]
+port = 8080
+`), 0644)
+
+	cfg := Load()
+	if cfg.Heartbeat.Interval != 0 {
+		t.Errorf("expected zero heartbeat interval (defaults applied at use site), got %s", cfg.Heartbeat.Interval)
+	}
+	if cfg.Heartbeat.JumpThreshold != 0 {
+		t.Errorf("expected zero heartbeat jump_threshold (defaults applied at use site), got %s", cfg.Heartbeat.JumpThreshold)
+	}
+}
+
 func TestBindConfigFile(t *testing.T) {
 	dir := t.TempDir()
 	os.Setenv("XDG_CONFIG_HOME", dir)
