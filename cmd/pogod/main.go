@@ -29,6 +29,7 @@ import (
 	"github.com/drellem2/pogo/internal/driver"
 	"github.com/drellem2/pogo/internal/health"
 	"github.com/drellem2/pogo/internal/heartbeat"
+	"github.com/drellem2/pogo/internal/platform/sleep"
 	"github.com/drellem2/pogo/internal/project"
 	"github.com/drellem2/pogo/internal/refinery"
 	"github.com/drellem2/pogo/internal/scheduler"
@@ -479,6 +480,16 @@ func main() {
 	hbCtx, hbCancel := context.WithCancel(context.Background())
 	defer hbCancel()
 	go hb.Run(hbCtx)
+
+	// Optional platform-specific wake notifier — reduces wake-event latency
+	// from up-to-Interval (~30s) down to <1s by short-circuiting the
+	// heartbeat tick when the OS reports a wake. Strict performance
+	// optimization: hb alone is correct; an error here is logged and we
+	// continue. See internal/platform/sleep and
+	// docs/sleep-resilience-design.md §5.
+	if err := sleep.Watch(hbCtx, hb.Nudge); err != nil {
+		log.Printf("pogod: platform sleep shim unavailable: %v (heartbeat-only wake detection still active)", err)
+	}
 
 	// Start plugins
 	driver.Init()
