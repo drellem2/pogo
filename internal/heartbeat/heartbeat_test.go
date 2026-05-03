@@ -294,6 +294,100 @@ func TestRunCancelsCleanly(t *testing.T) {
 	}
 }
 
+// TestNudgeShortCircuitsTick exercises the platform-shim integration point:
+// when an external signal calls Nudge, the heartbeat goroutine performs an
+// out-of-band Tick within milliseconds rather than waiting for the next
+// scheduled tick. We use a long Interval (10s) and a short test deadline
+// (1s) so a passing test proves the nudge path, not the ticker.
+func TestNudgeShortCircuitsTick(t *testing.T) {
+	clock := newFakeClock()
+	rec := &recorder{}
+	d := &Detector{
+		Interval:  10 * time.Second, // long enough that the regular ticker won't save us
+		Threshold: 60 * time.Second,
+		Clock:     clock,
+		Emitter:   rec.emit,
+		AgentID:   "pogod",
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		d.Run(ctx)
+		close(done)
+	}()
+
+	// Wait for Run's seed tick. There is no public signal for "seed
+	// complete," so we poll: the seed Tick sets started=true under the
+	// detector's mutex.
+	deadline := time.Now().Add(time.Second)
+	for {
+		d.mu.Lock()
+		seeded := d.started
+		d.mu.Unlock()
+		if seeded {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("Run did not perform its seed Tick within 1s")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	// Simulate a host sleep: wall jumps 1h, mono barely advances.
+	clock.jump(time.Hour, 100*time.Millisecond)
+
+	d.Nudge()
+
+	// The nudge-driven Tick should land within 1s.
+	deadline = time.Now().Add(time.Second)
+	for {
+		if len(rec.snapshot()) > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("Nudge did not produce a system_wake event within 1s")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	got := rec.snapshot()
+	if len(got) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(got))
+	}
+	if got[0].EventType != "system_wake" {
+		t.Errorf("EventType: want system_wake, got %q", got[0].EventType)
+	}
+}
+
+// TestNudgeBeforeRunStartsIsCoalesced verifies Nudge is safe to call before
+// Run begins (the buffered channel queues exactly one signal) and that
+// repeated nudges don't pile up — one Tick per wake regardless of how many
+// platform notifications fire.
+func TestNudgeBeforeRunStartsIsCoalesced(t *testing.T) {
+	clock := newFakeClock()
+	rec := &recorder{}
+	d := &Detector{
+		Interval:  10 * time.Second,
+		Threshold: 60 * time.Second,
+		Clock:     clock,
+		Emitter:   rec.emit,
+		AgentID:   "pogod",
+	}
+
+	// 100 nudges before Run starts — must not panic, must not block.
+	for i := 0; i < 100; i++ {
+		d.Nudge()
+	}
+
+	// The buffered channel holds exactly one entry.
+	if got := len(d.nudgeChan()); got != 1 {
+		t.Fatalf("nudge channel should hold 1 (coalesced), got %d", got)
+	}
+}
+
 // TestEmissionLandsInEventLog drives the default events.Emit path so a
 // system_wake event appears as JSONL in ~/.pogo/events.log (overridden to a
 // temp file for the test). This is the integration-style check called for in

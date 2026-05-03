@@ -75,6 +75,11 @@ type Detector struct {
 	started  bool
 	prevWall time.Time
 	prevMono time.Duration
+
+	// nudge is a buffered channel (capacity 1) that lets platform shims
+	// short-circuit the next scheduled tick. See Nudge for usage.
+	nudgeOnce sync.Once
+	nudge     chan struct{}
 }
 
 // New returns a Detector wired to the real wall/monotonic clocks and the
@@ -86,6 +91,30 @@ func New() *Detector {
 		Clock:     newRealClock(),
 		Emitter:   defaultEmitter,
 		AgentID:   "pogod",
+	}
+}
+
+// nudgeChan lazily initializes the nudge channel so a zero-valued Detector
+// remains usable (matches the rest of the type's lazy-init style).
+func (d *Detector) nudgeChan() chan struct{} {
+	d.nudgeOnce.Do(func() {
+		d.nudge = make(chan struct{}, 1)
+	})
+	return d.nudge
+}
+
+// Nudge requests an out-of-band Tick, used by platform shims that detect
+// host wake faster than a regular Interval (e.g. macOS IOKit / `log stream`
+// in internal/platform/sleep). Nudge is non-blocking: if a previous nudge is
+// still pending, the redundant signal is dropped — one Tick per wake is the
+// goal regardless of how many wake notifications the platform delivers.
+//
+// Safe to call from any goroutine, before Run starts (it queues), and after
+// Run returns (it queues but never fires).
+func (d *Detector) Nudge() {
+	select {
+	case d.nudgeChan() <- struct{}{}:
+	default:
 	}
 }
 
@@ -102,12 +131,21 @@ func (d *Detector) Run(ctx context.Context) {
 	ticker := time.NewTicker(d.Interval)
 	defer ticker.Stop()
 
+	nudge := d.nudgeChan()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 			d.Tick()
+		case <-nudge:
+			// A platform shim observed a host wake. Run the tick now so the
+			// system_wake event lands within ~1s of wake instead of waiting
+			// up to a full Interval. Reset the ticker so the next regular
+			// tick is one full Interval from now — otherwise we'd double-tick
+			// shortly after every nudge.
+			d.Tick()
+			ticker.Reset(d.Interval)
 		}
 	}
 }
