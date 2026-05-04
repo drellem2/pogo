@@ -39,10 +39,16 @@ type AddRequest struct {
 
 // RegisterHandlers wires the scheduler HTTP endpoints onto mux:
 //
-//	GET    /scheduler/schedules           — list (filter by ?agent=)
-//	POST   /scheduler/schedules           — add
-//	GET    /scheduler/schedules/{id}      — fetch one
-//	DELETE /scheduler/schedules/{id}      — remove
+//	GET    /scheduler/schedules                — list (filter by ?agent=)
+//	POST   /scheduler/schedules                — add
+//	GET    /scheduler/schedules/{id}[?agent=X] — fetch one
+//	DELETE /scheduler/schedules/{id}[?agent=X] — remove
+//
+// Schedules are keyed on (agent, id), so two agents may register the same
+// id without collision. The {id} endpoints accept an optional ?agent=X query
+// param: with it, the lookup is exact; without it, the daemon resolves the
+// id only when a single agent owns it (returns 409 Conflict if more than
+// one agent matches).
 func (s *Scheduler) RegisterHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/scheduler/schedules", s.handleList)
 	mux.HandleFunc("/scheduler/schedules/{id}", s.handleByID)
@@ -75,9 +81,18 @@ func (s *Scheduler) handleList(w http.ResponseWriter, r *http.Request) {
 
 func (s *Scheduler) handleByID(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	agent := r.URL.Query().Get("agent")
 	switch r.Method {
 	case "GET":
-		entry, ok := s.Get(id)
+		entry, ok, err := s.lookupByID(agent, id)
+		if err != nil {
+			if amb, isAmb := err.(*ErrAmbiguousID); isAmb {
+				http.Error(w, amb.Error(), http.StatusConflict)
+				return
+			}
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 		if !ok {
 			http.Error(w, fmt.Sprintf("schedule %q not found", id), http.StatusNotFound)
 			return
@@ -85,8 +100,12 @@ func (s *Scheduler) handleByID(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(entry)
 	case "DELETE":
-		removed, err := s.Remove(id)
+		removed, err := s.removeByID(agent, id)
 		if err != nil {
+			if amb, isAmb := err.(*ErrAmbiguousID); isAmb {
+				http.Error(w, amb.Error(), http.StatusConflict)
+				return
+			}
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -98,6 +117,25 @@ func (s *Scheduler) handleByID(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "", http.StatusMethodNotAllowed)
 	}
+}
+
+// lookupByID resolves a single entry. With agent set, it's an exact (agent,
+// id) lookup. Without agent, it falls back to id-only disambiguation —
+// returning *ErrAmbiguousID if multiple agents own the id.
+func (s *Scheduler) lookupByID(agent, id string) (Entry, bool, error) {
+	if agent != "" {
+		e, ok := s.Get(agent, id)
+		return e, ok, nil
+	}
+	return s.GetByID(id)
+}
+
+// removeByID is the deletion counterpart of lookupByID.
+func (s *Scheduler) removeByID(agent, id string) (bool, error) {
+	if agent != "" {
+		return s.Remove(agent, id)
+	}
+	return s.RemoveByID(id)
 }
 
 // addFromRequest is shared between the HTTP handler and tests so the

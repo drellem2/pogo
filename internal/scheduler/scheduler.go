@@ -157,6 +157,29 @@ type FireResult struct {
 	Skipped     bool      // true when ReplaySkip elided the fire
 }
 
+// entryKey is the composite (agent, id) key for the live entries map.
+// Schedules are scoped per-agent — two agents may register the same id
+// without collision. See ErrAmbiguousID for the disambiguation contract
+// when callers only know the id.
+type entryKey struct {
+	Agent string
+	ID    string
+}
+
+// ErrAmbiguousID is returned by id-only lookups (HTTP, CLI) when the same id
+// is registered for more than one agent. Callers must disambiguate by passing
+// an agent. The error message lists the agents that own a matching entry so
+// operators can pick one.
+type ErrAmbiguousID struct {
+	ID     string
+	Agents []string
+}
+
+func (e *ErrAmbiguousID) Error() string {
+	return fmt.Sprintf("scheduler: id %q is registered for multiple agents (%s); pass --agent to disambiguate",
+		e.ID, strings.Join(e.Agents, ", "))
+}
+
 // Scheduler owns the live set of scheduled entries and persists them to
 // ~/.pogo/schedules.json. Safe for concurrent use.
 type Scheduler struct {
@@ -170,7 +193,7 @@ type Scheduler struct {
 	SkipWindow time.Duration
 
 	mu      sync.Mutex
-	entries map[string]*Entry
+	entries map[entryKey]*Entry
 }
 
 // New loads the scheduler state from path, creating an empty store if the file
@@ -186,12 +209,12 @@ func New(path string, deliverer Deliverer) (*Scheduler, error) {
 	s := &Scheduler{
 		store:     st,
 		deliverer: deliverer,
-		entries:   make(map[string]*Entry, len(loaded)),
+		entries:   make(map[entryKey]*Entry, len(loaded)),
 	}
 	for _, e := range loaded {
 		entry := e
 		entry.applyDefaults()
-		s.entries[entry.ID] = &entry
+		s.entries[entryKey{Agent: entry.Agent, ID: entry.ID}] = &entry
 	}
 	return s, nil
 }
@@ -200,6 +223,10 @@ func New(path string, deliverer Deliverer) (*Scheduler, error) {
 // stored copy. If entry.ID is empty a slug is generated. If entry.NextFire is
 // zero for a recurring entry, it is computed from the cron expression relative
 // to now.
+//
+// Replacement is keyed on (agent, id), not id alone — two agents may register
+// the same id without colliding (e.g. multiple PMs each registering
+// "mail-check"). Re-adding with the same (agent, id) is idempotent.
 func (s *Scheduler) Add(entry Entry, now time.Time) (Entry, error) {
 	entry.applyDefaults()
 	if entry.ID == "" {
@@ -224,40 +251,115 @@ func (s *Scheduler) Add(entry Entry, now time.Time) (Entry, error) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	key := entryKey{Agent: entry.Agent, ID: entry.ID}
+	prev, hadPrev := s.entries[key]
 	stored := entry
-	s.entries[entry.ID] = &stored
+	s.entries[key] = &stored
 	if err := s.persistLocked(); err != nil {
-		delete(s.entries, entry.ID)
+		if hadPrev {
+			s.entries[key] = prev
+		} else {
+			delete(s.entries, key)
+		}
 		return Entry{}, err
 	}
 	return stored.Clone(), nil
 }
 
-// Remove deletes the entry by id. Returns false if no such id exists.
-func (s *Scheduler) Remove(id string) (bool, error) {
+// Remove deletes the entry uniquely identified by (agent, id). Returns false
+// if no matching entry exists. To remove by id alone (e.g. from a CLI that
+// doesn't know the agent), use RemoveByID.
+func (s *Scheduler) Remove(agent, id string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, ok := s.entries[id]; !ok {
+	key := entryKey{Agent: agent, ID: id}
+	saved, ok := s.entries[key]
+	if !ok {
 		return false, nil
 	}
-	saved := s.entries[id]
-	delete(s.entries, id)
+	delete(s.entries, key)
 	if err := s.persistLocked(); err != nil {
-		s.entries[id] = saved
+		s.entries[key] = saved
 		return false, err
 	}
 	return true, nil
 }
 
-// Get returns a copy of the entry by id, or zero + false.
-func (s *Scheduler) Get(id string) (Entry, bool) {
+// RemoveByID deletes the entry with the given id when it is unambiguous (i.e.
+// only one agent owns an entry with that id). Returns false if no entry
+// matches; returns *ErrAmbiguousID if more than one agent owns the id —
+// callers must then call Remove(agent, id) with a specific agent.
+func (s *Scheduler) RemoveByID(id string) (bool, error) {
+	s.mu.Lock()
+	matches := s.findByIDLocked(id)
+	if len(matches) == 0 {
+		s.mu.Unlock()
+		return false, nil
+	}
+	if len(matches) > 1 {
+		agents := make([]string, 0, len(matches))
+		for _, e := range matches {
+			agents = append(agents, e.Agent)
+		}
+		sort.Strings(agents)
+		s.mu.Unlock()
+		return false, &ErrAmbiguousID{ID: id, Agents: agents}
+	}
+	key := entryKey{Agent: matches[0].Agent, ID: matches[0].ID}
+	saved := s.entries[key]
+	delete(s.entries, key)
+	if err := s.persistLocked(); err != nil {
+		s.entries[key] = saved
+		s.mu.Unlock()
+		return false, err
+	}
+	s.mu.Unlock()
+	return true, nil
+}
+
+// Get returns a copy of the entry uniquely identified by (agent, id), or
+// zero + false. Use GetByID when only the id is known.
+func (s *Scheduler) Get(agent, id string) (Entry, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	e, ok := s.entries[id]
+	e, ok := s.entries[entryKey{Agent: agent, ID: id}]
 	if !ok {
 		return Entry{}, false
 	}
 	return e.Clone(), true
+}
+
+// GetByID returns the entry with the given id when unambiguous. Returns
+// zero + false if no entry matches; *ErrAmbiguousID if multiple agents own
+// the id.
+func (s *Scheduler) GetByID(id string) (Entry, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	matches := s.findByIDLocked(id)
+	if len(matches) == 0 {
+		return Entry{}, false, nil
+	}
+	if len(matches) > 1 {
+		agents := make([]string, 0, len(matches))
+		for _, e := range matches {
+			agents = append(agents, e.Agent)
+		}
+		sort.Strings(agents)
+		return Entry{}, false, &ErrAmbiguousID{ID: id, Agents: agents}
+	}
+	return matches[0].Clone(), true, nil
+}
+
+// findByIDLocked returns clones of every entry whose ID matches. Caller must
+// hold s.mu.
+func (s *Scheduler) findByIDLocked(id string) []Entry {
+	var out []Entry
+	for k, e := range s.entries {
+		if k.ID == id {
+			out = append(out, e.Clone())
+		}
+	}
+	return out
 }
 
 // List returns all entries (optionally filtered by agent), sorted by next_fire
@@ -297,9 +399,9 @@ func (s *Scheduler) Tick(ctx context.Context, now time.Time) []FireResult {
 
 	results := make([]FireResult, 0, len(due))
 	var changed bool
-	for _, id := range due {
+	for _, key := range due {
 		s.mu.Lock()
-		entry, ok := s.entries[id]
+		entry, ok := s.entries[key]
 		if !ok {
 			s.mu.Unlock()
 			continue
@@ -359,7 +461,7 @@ func (s *Scheduler) Tick(ctx context.Context, now time.Time) []FireResult {
 
 		// Update or remove the entry.
 		s.mu.Lock()
-		entry, ok = s.entries[id]
+		entry, ok = s.entries[key]
 		if !ok {
 			// Deleted concurrently — leave it gone.
 			s.mu.Unlock()
@@ -367,13 +469,13 @@ func (s *Scheduler) Tick(ctx context.Context, now time.Time) []FireResult {
 			continue
 		}
 		if fire.OneShot {
-			delete(s.entries, id)
+			delete(s.entries, key)
 			changed = true
 		} else {
 			c, err := ParseCron(entry.Cron)
 			if err != nil {
-				log.Printf("scheduler: cron %q now unparseable, removing entry %s: %v", entry.Cron, id, err)
-				delete(s.entries, id)
+				log.Printf("scheduler: cron %q now unparseable, removing entry %s/%s: %v", entry.Cron, key.Agent, key.ID, err)
+				delete(s.entries, key)
 				changed = true
 			} else {
 				entry.LastFire = now
@@ -382,8 +484,8 @@ func (s *Scheduler) Tick(ctx context.Context, now time.Time) []FireResult {
 				}
 				entry.NextFire = c.Next(now)
 				if entry.NextFire.IsZero() {
-					log.Printf("scheduler: cron %q has no future fire, removing entry %s", entry.Cron, id)
-					delete(s.entries, id)
+					log.Printf("scheduler: cron %q has no future fire, removing entry %s/%s", entry.Cron, key.Agent, key.ID)
+					delete(s.entries, key)
 				}
 				changed = true
 			}
@@ -400,23 +502,23 @@ func (s *Scheduler) Tick(ctx context.Context, now time.Time) []FireResult {
 	return results
 }
 
-// dueLocked returns IDs of entries whose NextFire is at or before now, ordered
-// by NextFire ascending. Caller must hold s.mu.
-func (s *Scheduler) dueLocked(now time.Time) []string {
+// dueLocked returns keys of entries whose NextFire is at or before now,
+// ordered by NextFire ascending. Caller must hold s.mu.
+func (s *Scheduler) dueLocked(now time.Time) []entryKey {
 	type pair struct {
-		id   string
+		key  entryKey
 		when time.Time
 	}
 	var pairs []pair
-	for id, e := range s.entries {
+	for k, e := range s.entries {
 		if !e.NextFire.IsZero() && (e.NextFire.Before(now) || e.NextFire.Equal(now)) {
-			pairs = append(pairs, pair{id: id, when: e.NextFire})
+			pairs = append(pairs, pair{key: k, when: e.NextFire})
 		}
 	}
 	sort.Slice(pairs, func(i, j int) bool { return pairs[i].when.Before(pairs[j].when) })
-	out := make([]string, len(pairs))
+	out := make([]entryKey, len(pairs))
 	for i, p := range pairs {
-		out[i] = p.id
+		out[i] = p.key
 	}
 	return out
 }

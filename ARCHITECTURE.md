@@ -481,7 +481,7 @@ pogod exposes HTTP endpoints. Existing endpoints are unchanged; new endpoints fo
 | `/refinery/queue` | GET | Pending merge items |
 | `/refinery/history` | GET | Recent merge results |
 | `/scheduler/schedules` | GET, POST | List or register pogod-side schedules |
-| `/scheduler/schedules/{id}` | GET, DELETE | Inspect or remove a schedule |
+| `/scheduler/schedules/{id}[?agent=X]` | GET, DELETE | Inspect or remove a schedule (composite-keyed; `?agent=` disambiguates when multiple agents share an id, otherwise 409) |
 | `/events` | GET | Query event log (`~/.pogo/events.log`, JSONL) |
 
 CLI commands (`pogo agent *`, `pogo nudge`) are thin wrappers around these endpoints, following the existing pogo CLI pattern.
