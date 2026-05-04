@@ -58,6 +58,26 @@ If you only want to scaffold the agent prompts (without starting the daemon or i
 
 **Prerequisites:** [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI must be installed. The install script handles [macguffin](https://github.com/drellem2/macguffin) automatically; pass `--interactive` to configure shell and editor integrations.
 
+## Verify your install
+
+`pogo install` starts pogod under your platform's service manager (launchd on macOS, systemd on Linux), scaffolds default prompts under `~/.pogo/agents/`, and auto-starts every crew agent whose frontmatter declares `auto_start = true` — by default just the **mayor**. Confirm everything is healthy before filing your first work item:
+
+```sh
+pogo server status      # daemon, agents, refinery — all reachable?
+pogo agent list         # mayor should be listed as running
+mg list                 # work-item list — empty on a fresh install, no errors
+```
+
+A healthy `pogo server status` looks like this:
+
+```
+pogod:    ok  (mode=full, uptime=2m13s)
+agents:   1 total, 1 running, 0 exited
+refinery: running  (queue=0, history=0, recent_failures=0)
+```
+
+If anything is missing or errors out, rerun `pogo install` — it's idempotent and will repair a half-installed setup. For deeper diagnostics, run `pogo doctor --check`.
+
 ## Getting started
 
 ```sh
