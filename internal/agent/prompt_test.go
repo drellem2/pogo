@@ -1368,8 +1368,7 @@ func TestPolecatTemplatesIncludeMailCheckCron(t *testing.T) {
 // PM template instructs each PM to register two sweep crons (09:00 and 17:00
 // local) on startup. Without these, PMs have no twice-daily cadence — the
 // pogod-internal cron was removed (mg-ddc1), so each PM self-schedules via
-// CronCreate, mirroring the polecat mail-check pattern. See work item mg-8e32
-// and docs/product-manager-design.md §3.
+// CronCreate, mirroring the polecat mail-check pattern. See work item mg-8e32.
 func TestPMTemplateIncludesSweepCronEntries(t *testing.T) {
 	data, err := defaultPrompts.ReadFile("prompts/pm/pm-template.md")
 	if err != nil {
@@ -1586,7 +1585,6 @@ func TestPMTemplateIncludesPropulsion(t *testing.T) {
 
 // TestSynthesizeExtendsPrompt covers the PM crew-loader directive that lets a
 // crew prompt redirect to a shared template plus a per-instance TOML config.
-// See docs/product-manager-design.md §1.
 func TestSynthesizeExtendsPrompt(t *testing.T) {
 	origHome := os.Getenv("HOME")
 	tmpHome := t.TempDir()

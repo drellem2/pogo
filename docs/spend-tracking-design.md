@@ -2,7 +2,7 @@
 
 **Status:** design / recommendation. Not implemented.
 **Origin:** mg-d66b. **Author:** architect.
-**Sibling docs:** `product-manager-design.md` (PM tier — primary consumer), `macguffin/docs/mg-flow-redesign.md` (flow consumes spend later), `mail-to-daniel-design.md` (PM digests reference roadmap).
+**Sibling docs:** `macguffin/docs/mg-flow-redesign.md` (flow consumes spend later).
 
 ## TL;DR
 

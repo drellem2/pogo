@@ -91,8 +91,7 @@ func ResolveTemplate(name string) (string, error) {
 
 // extendsDirectiveRE matches `extends <template> with config <config>` on its
 // own line (multiline mode). Used by crew prompts that delegate their content
-// to a shared template + per-instance TOML config (PM tier — see
-// docs/product-manager-design.md §1).
+// to a shared template + per-instance TOML config (PM tier).
 var extendsDirectiveRE = regexp.MustCompile(`(?m)^extends\s+(\S+)\s+with\s+config\s+(\S+)\s*$`)
 
 // SynthesizeExtendsPrompt looks for an `extends <template> with config <config>`
