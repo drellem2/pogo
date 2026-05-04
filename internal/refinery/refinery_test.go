@@ -689,6 +689,99 @@ func TestValidateTargetRefFallbackPaths(t *testing.T) {
 	})
 }
 
+func TestIsAuthFailure(t *testing.T) {
+	cases := []struct {
+		name string
+		out  string
+		want bool
+	}{
+		{
+			name: "could-not-read-username-prompt-disabled",
+			out:  "fatal: could not read Username for 'https://github.com': terminal prompts disabled",
+			want: true,
+		},
+		{
+			name: "could-not-read-password",
+			out:  "fatal: could not read Password for 'https://user@github.com': terminal prompts disabled",
+			want: true,
+		},
+		{
+			name: "authentication-failed",
+			out:  "remote: Invalid username or password.\nfatal: Authentication failed for 'https://github.com/foo/bar.git/'",
+			want: true,
+		},
+		{
+			name: "github-deprecated-password-auth",
+			out:  "remote: Support for password authentication was removed on August 13, 2021.",
+			want: true,
+		},
+		{
+			name: "case-insensitive",
+			out:  "FATAL: Could Not Read Username for 'https://example.com'",
+			want: true,
+		},
+		{
+			name: "not-an-auth-error",
+			out:  "fatal: refusing to update branch: non-fast-forward",
+			want: false,
+		},
+		{
+			name: "empty",
+			out:  "",
+			want: false,
+		},
+		{
+			name: "dns-failure-not-auth",
+			out:  "fatal: unable to access 'https://example.invalid/foo.git/': Could not resolve host: example.invalid",
+			want: false,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := isAuthFailure(c.out); got != c.want {
+				t.Errorf("isAuthFailure(%q) = %v, want %v", c.out, got, c.want)
+			}
+		})
+	}
+}
+
+func TestFormatPushAuthError(t *testing.T) {
+	gitOut := "fatal: could not read Username for 'https://github.com': terminal prompts disabled"
+	err := formatPushAuthError(gitOut)
+	if err == nil {
+		t.Fatal("formatPushAuthError returned nil")
+	}
+	msg := err.Error()
+
+	// First three lines must name the failure mode and at least one concrete
+	// next step (acceptance criterion).
+	firstLines := strings.SplitN(msg, "\n", 4)
+	if len(firstLines) < 3 {
+		t.Fatalf("expected at least 3 lines, got %d:\n%s", len(firstLines), msg)
+	}
+	if !strings.Contains(firstLines[0], "could not authenticate") {
+		t.Errorf("line 1 should name failure mode, got: %q", firstLines[0])
+	}
+
+	// Required actionable phrases.
+	for _, phrase := range []string{
+		"Switch the remote to SSH",
+		"credential helper",
+		"GIT_ASKPASS",
+		"git@github.com",
+		"gh auth setup-git",
+	} {
+		if !strings.Contains(msg, phrase) {
+			t.Errorf("error missing actionable phrase %q\nfull error:\n%s", phrase, msg)
+		}
+	}
+
+	// Original git stderr must be preserved further down for debug.
+	if !strings.Contains(msg, gitOut) {
+		t.Errorf("error should preserve raw git output, got:\n%s", msg)
+	}
+}
+
 func TestIsRetryableWithInvalidUpstream(t *testing.T) {
 	// A plain error is not retryable
 	plainErr := fmt.Errorf("rebase onto main: some error: exit status 1")

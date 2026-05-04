@@ -247,9 +247,19 @@ func (r *Refinery) Submit(req MergeRequest) (string, error) {
 func validateTargetRef(repoPath, targetRef string) error {
 	// Use git ls-remote to check if the ref exists on origin.
 	// This works for both bare repos (used in tests) and regular repos.
+	// GIT_TERMINAL_PROMPT=0 makes auth-required HTTPS remotes fail fast
+	// rather than hang waiting for a username on stdin under launchd.
 	cmd := exec.Command("git", "-C", repoPath, "ls-remote", "--heads", "origin", targetRef)
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
+		// Distinguish auth failure from "no remote" — auth failures are
+		// doomed and should be refused at submit time with an actionable
+		// error rather than letting the MR run through the full pipeline
+		// only to fail at push.
+		if isAuthFailure(string(out)) {
+			return formatPushAuthError(strings.TrimSpace(string(out)))
+		}
 		// ls-remote failed (e.g. no origin remote, or remote unreachable).
 		// Fall back to checking local branches — bare repos used in tests
 		// have no remote configured.

@@ -135,6 +135,11 @@ func (r *Refinery) attemptMerge(wtDir string, mr *MergeRequest, attempt int) (ou
 	// Push to origin
 	log.Printf("refinery: MR %s step=push target=%s attempt=%d", mr.ID, mr.TargetRef, attempt)
 	if out, gerr := gitCmdOutput(wtDir, "push", "origin", mr.TargetRef); gerr != nil {
+		// Auth failures don't recover on retry — surface the actionable
+		// error immediately rather than burning attempts.
+		if isAuthFailure(out) {
+			return gateOutput, "push", "", formatPushAuthError(out)
+		}
 		return gateOutput, "push", "", &retryableError{fmt.Errorf("push: %s: %w", out, gerr)}
 	}
 
@@ -471,10 +476,63 @@ func UnlinkWorktree(sourceRepo, worktreeDir string) error {
 func gitCmdOutput(dir string, args ...string) (string, error) {
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
+	// pogod runs under launchd/systemd with no TTY. Without disabling
+	// interactive prompts, an HTTPS remote with no credentials makes git
+	// hang forever waiting for a username on stdin. Force prompts off so
+	// auth failures fail fast and we can detect them via isAuthFailure.
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	output, err := cmd.CombinedOutput()
 	out := strings.TrimSpace(string(output))
 	if err != nil {
 		log.Printf("refinery: git %v failed: %s: %v", args, out, err)
 	}
 	return out, err
+}
+
+// authFailurePatterns match git stderr emitted when a remote requires
+// credentials that pogod can't supply (no TTY, no askpass, no helper).
+// Patterns are matched case-insensitively against combined stdout/stderr.
+var authFailurePatterns = []string{
+	"could not read username",
+	"could not read password",
+	"authentication failed",
+	"invalid username or password",
+	"terminal prompts disabled",
+	"support for password authentication was removed",
+}
+
+// isAuthFailure reports whether git output indicates a credential or
+// authentication failure against the remote. Such failures don't recover
+// on retry — they need a user-side fix (SSH remote, credential helper,
+// or GIT_ASKPASS exported into pogod's env).
+func isAuthFailure(output string) bool {
+	s := strings.ToLower(output)
+	for _, pat := range authFailurePatterns {
+		if strings.Contains(s, pat) {
+			return true
+		}
+	}
+	return false
+}
+
+// formatPushAuthError wraps a raw git-stderr auth failure with actionable
+// next-steps text. The actionable summary is at the top so it survives
+// truncation; the raw git output is preserved verbatim at the bottom for
+// debugging.
+func formatPushAuthError(gitOutput string) error {
+	return fmt.Errorf(
+		"refinery push failed: git could not authenticate against the HTTPS remote.\n"+
+			"pogod runs under launchd / systemd and does not see your interactive shell credentials.\n"+
+			"Fix one of these:\n"+
+			"  a) Switch the remote to SSH:\n"+
+			"       git -C <repo> remote set-url origin git@github.com:<owner>/<repo>.git\n"+
+			"  b) Configure git's credential helper for non-interactive use:\n"+
+			"       git config --global credential.helper osxkeychain   # macOS\n"+
+			"       git config --global credential.helper store         # Linux/BSD\n"+
+			"       gh auth setup-git\n"+
+			"  c) Export GIT_ASKPASS in pogod's environment to a script that emits your token on stdin.\n"+
+			"\n"+
+			"git output:\n%s",
+		gitOutput,
+	)
 }

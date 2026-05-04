@@ -1,6 +1,8 @@
 package refinery
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -592,5 +594,84 @@ func TestOnSubmitCallback(t *testing.T) {
 	}
 	if submittedMR.Author != "cat-test" {
 		t.Errorf("OnSubmit got author %q, want cat-test", submittedMR.Author)
+	}
+}
+
+// TestSubmitRefusesHTTPSRemoteWithoutCredentials reproduces the mg-9e00
+// first-touch failure: a repo whose origin is an HTTPS URL that pogod can't
+// authenticate against. The refinery must refuse the MR with an actionable
+// error rather than letting it run through the full pipeline only to fail
+// opaquely at push.
+//
+// The test uses an httptest server that returns 401 on every request to
+// simulate an HTTPS remote requiring credentials that aren't available in
+// the launchd-spawned process environment.
+func TestSubmitRefusesHTTPSRemoteWithoutCredentials(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found")
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("WWW-Authenticate", `Basic realm="git"`)
+		http.Error(w, "auth required", http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	srcDir := t.TempDir()
+	run(t, srcDir, "git", "init", "-b", "main")
+	run(t, srcDir, "git", "config", "user.email", "test@test.com")
+	run(t, srcDir, "git", "config", "user.name", "Test")
+	os.WriteFile(filepath.Join(srcDir, "README.md"), []byte("# Test"), 0644)
+	run(t, srcDir, "git", "add", ".")
+	run(t, srcDir, "git", "commit", "-m", "initial")
+	// Origin URL points at a server that always returns 401, simulating
+	// an HTTPS remote whose credentials aren't visible to pogod.
+	run(t, srcDir, "git", "remote", "add", "origin", srv.URL)
+
+	wtDir := t.TempDir()
+	r, err := New(Config{
+		Enabled:      true,
+		PollInterval: time.Hour,
+		WorktreeDir:  wtDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, submitErr := r.Submit(MergeRequest{
+		RepoPath:  srcDir,
+		Branch:    "feat",
+		TargetRef: "main",
+		Author:    "cat-auth",
+	})
+	if submitErr == nil {
+		t.Fatal("Submit should have refused the MR for an unreachable HTTPS remote")
+	}
+	msg := submitErr.Error()
+
+	// First three lines must name the failure and a concrete next step.
+	first3 := strings.SplitN(msg, "\n", 4)
+	if len(first3) < 3 {
+		t.Fatalf("expected at least 3 lines in error, got %d:\n%s", len(first3), msg)
+	}
+	header := first3[0] + "\n" + first3[1] + "\n" + first3[2]
+	if !strings.Contains(header, "could not authenticate") {
+		t.Errorf("first 3 lines should name auth failure, got:\n%s", header)
+	}
+
+	// Actionable next-steps must be present.
+	for _, phrase := range []string{
+		"Switch the remote to SSH",
+		"credential helper",
+		"GIT_ASKPASS",
+	} {
+		if !strings.Contains(msg, phrase) {
+			t.Errorf("error missing actionable phrase %q\nfull error:\n%s", phrase, msg)
+		}
+	}
+
+	// Raw git output must be preserved further down for debugging.
+	if !strings.Contains(msg, "git output:") {
+		t.Errorf("error should include 'git output:' section with raw stderr, got:\n%s", msg)
 	}
 }
