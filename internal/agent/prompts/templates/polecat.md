@@ -75,6 +75,12 @@ Follow these steps exactly, in order. Skipping any step is a failure.
    *Why `pogo schedule` and not `CronCreate`?* `CronCreate` lives inside this Claude session and has no notion of wall-clock time across sleep — if the host suspends for an hour, every fire that should have happened in that window is silently dropped. `pogo schedule` stores the next fire time on disk and replays through sleep; see "Reacting to scheduler fires" below for the policy.
 
 3. **Do the work.** Stay focused on the task described above. You are already in your isolated worktree at `{{.WorktreeDir}}` on branch `polecat-{{.Id}}`. **Run all commands in this directory** — do not `cd` to the source repository (see "Working in your worktree" above for why and for the equivalents).
+   - **Verify "not implemented" claims before acting on them.** When a design doc, ticket body, or comment says a feature "doesn't exist yet," "is on the forward plan," or "isn't shipped," confirm the claim before treating it as fact — design docs often pre-date the ship and become archeology, not plans. Run at least one of:
+     - The canonical CLI from the design: `<tool> <subcommand> --help` or the example invocation it cites — does it succeed?
+     - A grep for the named symbol in non-test code: `grep -rn '<symbol>' --include='*.go' .` (use your language's file extension; this works on macOS and Linux).
+     - A check for the named on-disk artifact: `ls <path>`.
+
+     If any check returns positive, the design is at least partially shipped — treat the doc as **archeology**, not a forward plan. Only recommend deletion (or rewrites that assume non-implementation) once you've actively verified absence. This applies double for cleanup-pass polecats: a design doc with shipped code is rationale, not cruft.
    - **Write or update tests** for any code you change. If the repo has existing tests, follow the same patterns.
    - **Run existing tests** (e.g. `./test.sh`, `go test ./...`, `npm test`) before committing to make sure nothing is broken.
    - **Update documentation** (README, inline docs, help text) if your changes affect user-facing behavior.

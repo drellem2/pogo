@@ -1364,6 +1364,43 @@ func TestPolecatTemplatesIncludeMailCheckCron(t *testing.T) {
 	}
 }
 
+// TestPolecatTemplateIncludesNotImplementedVerification locks in the
+// "verify before treating a design as not-implemented" pre-flight rule.
+// Origin: mg-a374's cleanup-pass polecat marked a shipped feature
+// (`mg spend`) as "not implemented" because it never ran the CLI or grepped
+// for the symbol. Without this rule a future cleanup-pass polecat could
+// delete the rationale doc for a shipped feature on the same false premise.
+// See mg-f1de.
+func TestPolecatTemplateIncludesNotImplementedVerification(t *testing.T) {
+	data, err := defaultPrompts.ReadFile("prompts/templates/polecat.md")
+	if err != nil {
+		t.Fatalf("read polecat.md: %v", err)
+	}
+	s := string(data)
+
+	// The sub-step header phrase — pinned so the rule can't silently move
+	// out of the protocol checklist into a less-prominent location.
+	if !strings.Contains(s, `Verify "not implemented" claims before acting on them`) {
+		t.Error(`polecat.md: expected the "Verify 'not implemented' claims before acting on them" sub-step in step 3`)
+	}
+	// The three concrete verification probes from the rule. Each must be
+	// nameable so a polecat reading the template knows what action to take.
+	if !strings.Contains(s, "canonical CLI") {
+		t.Error("polecat.md: expected the canonical-CLI verification probe")
+	}
+	if !strings.Contains(s, "grep") {
+		t.Error("polecat.md: expected the grep-the-named-symbol verification probe")
+	}
+	if !strings.Contains(s, "on-disk artifact") {
+		t.Error("polecat.md: expected the on-disk-artifact verification probe")
+	}
+	// The framing that a positive check means "archeology, not plan" —
+	// this is the load-bearing conclusion of the rule, not just the probes.
+	if !strings.Contains(s, "archeology") {
+		t.Error("polecat.md: expected the `archeology` framing for shipped-but-documented features")
+	}
+}
+
 // TestPMTemplateIncludesSweepCronEntries locks in the requirement that the
 // PM template instructs each PM to register two sweep crons (09:00 and 17:00
 // local) on startup. Without these, PMs have no twice-daily cadence — the
