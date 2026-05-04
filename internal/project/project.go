@@ -44,7 +44,15 @@ func Init() {
 	projects = []Project{}
 	home := os.Getenv("POGO_HOME")
 	if home == "" {
-		home = "."
+		// Match internal/service.pogoHome(): default to ~/.pogo so the
+		// CLI's projects.json doesn't land in cwd when POGO_HOME is unset.
+		// Pre-mg-ff8b this fell back to "." which silently scattered
+		// per-shell projects.json files wherever pogod was first launched.
+		if userHome, err := os.UserHomeDir(); err == nil {
+			home = filepath.Join(userHome, ".pogo")
+		} else {
+			home = "."
+		}
 	}
 	fmt.Printf("POGO_HOME=%s\n", home)
 	if ProjectFileName == "" {

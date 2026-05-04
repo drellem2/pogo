@@ -192,8 +192,8 @@ Requires `mg` (macguffin) on `$PATH`.
 
 ## Environment variables
 
-- `POGO_HOME`: Folder for pogo to store indexes
-- `POGO_PLUGIN_PATH`: Folder to discover plugins
+- `POGO_HOME`: Folder for pogo to store state, recovery queue, and projects.json. Defaults to `~/.pogo`.
+- `POGO_PLUGIN_PATH`: Folder to discover plugins. Defaults to `$POGO_HOME/plugin`.
 
 ## License
 

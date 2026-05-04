@@ -12,8 +12,9 @@ dir_resolve()
 ## Below are some environment variables you should modify
 ## 1. Add the pogo binaries to your path.
 export POGO_BINARY_PATH=$(dir_resolve ~/dev/pogo/bin)
-## 2. Set POGO_HOME to the location where the dotfiles will live.
-export POGO_HOME=$(dir_resolve ~)
+## 2. Set POGO_HOME to where pogo state lives (default ~/.pogo).
+mkdir -p ~/.pogo
+export POGO_HOME=$(dir_resolve ~/.pogo)
 
 ## These shouldn't require modification
 export POGO_PLUGIN_PATH="$POGO_BINARY_PATH/plugin"

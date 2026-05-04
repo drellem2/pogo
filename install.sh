@@ -247,8 +247,10 @@ ask_yn() {
   esac
 }
 
-# Set up POGO_HOME
-POGO_HOME="${POGO_HOME:-$HOME}"
+# Set up POGO_HOME — defaults to ~/.pogo (the canonical state dir).
+# Legacy installs may have POGO_HOME=$HOME; see scripts/migrate-pogo-home.sh.
+POGO_HOME="${POGO_HOME:-$HOME/.pogo}"
+mkdir -p "$POGO_HOME"
 echo "POGO_HOME will be set to: ${POGO_HOME}"
 echo ""
 

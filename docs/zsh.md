@@ -25,7 +25,8 @@ dir_resolve() {
 
 # Configure paths — adjust POGO_BINARY_PATH to your install location
 export POGO_BINARY_PATH=$(dir_resolve ~/dev/pogo/bin)
-export POGO_HOME=$(dir_resolve ~)
+mkdir -p ~/.pogo
+export POGO_HOME=$(dir_resolve ~/.pogo)
 export POGO_PLUGIN_PATH="$POGO_BINARY_PATH/plugin"
 export PATH="$POGO_BINARY_PATH:$PATH"
 
@@ -52,7 +53,7 @@ alias sp="cd \"\$(lsp | fzf)\""
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `POGO_BINARY_PATH` | Directory containing pogo binaries | `~/dev/pogo/bin` |
-| `POGO_HOME` | Directory for pogo data files | `~` |
+| `POGO_HOME` | Directory for pogo data files (state, recovery, projects.json) | `~/.pogo` |
 | `POGO_PLUGIN_PATH` | Plugin discovery directory | `$POGO_BINARY_PATH/plugin` |
 
 ## Requirements
