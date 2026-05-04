@@ -25,7 +25,8 @@ Or add the following to your `config.fish`:
 ```fish
 # Configure paths — adjust POGO_BINARY_PATH to your install location
 set -gx POGO_BINARY_PATH (realpath ~/dev/pogo/bin 2>/dev/null; or echo ~/dev/pogo/bin)
-set -gx POGO_HOME (realpath ~ 2>/dev/null; or echo ~)
+mkdir -p ~/.pogo
+set -gx POGO_HOME (realpath ~/.pogo 2>/dev/null; or echo ~/.pogo)
 set -gx POGO_PLUGIN_PATH "$POGO_BINARY_PATH/plugin"
 fish_add_path --prepend $POGO_BINARY_PATH
 
@@ -52,7 +53,7 @@ abbr -a sp 'cd (lsp | fzf)'
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `POGO_BINARY_PATH` | Directory containing pogo binaries | `~/dev/pogo/bin` |
-| `POGO_HOME` | Directory for pogo data files | `~` |
+| `POGO_HOME` | Directory for pogo data files (state, recovery, projects.json) | `~/.pogo` |
 | `POGO_PLUGIN_PATH` | Plugin discovery directory | `$POGO_BINARY_PATH/plugin` |
 
 ## Requirements
