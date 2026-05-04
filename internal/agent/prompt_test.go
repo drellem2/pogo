@@ -1520,6 +1520,70 @@ func TestPMTemplateIncludesHeartbeat(t *testing.T) {
 	}
 }
 
+// TestPMTemplateIncludesPropulsion locks in the requirement that the PM
+// template carries a `## Self-pacing and propulsion` section with the five
+// concrete behaviors that distinguish propulsion-driven PMs from passive,
+// sweep-only PMs. Daniel's 2026-05-04 feedback ("pms need more self-drive,
+// they dont want to self-pace and keep waiting, ensure they have propulsion
+// principle etc") drove mg-2f76 to encode the principle in-template; without
+// these invariants, future edits could silently drop the propulsion framing
+// and PMs would regress to the passive default.
+func TestPMTemplateIncludesPropulsion(t *testing.T) {
+	data, err := defaultPrompts.ReadFile("prompts/pm/pm-template.md")
+	if err != nil {
+		t.Fatalf("read pm-template.md: %v", err)
+	}
+	s := string(data)
+
+	// Section header — pinning the literal so the section can't be renamed
+	// without an explicit test update.
+	if !strings.Contains(s, "## Self-pacing and propulsion") {
+		t.Error("pm-template.md: expected `## Self-pacing and propulsion` section")
+	}
+	// The core principle, lifted from mayor's "Propulsion Principle":
+	// PMs act on signal, not on cron.
+	if !strings.Contains(s, "When you see signal, you act") {
+		t.Error("pm-template.md: expected `When you see signal, you act` propulsion tagline")
+	}
+	// "Floor not ceiling" is the framing that re-positions sweeps as the
+	// minimum cadence, not the gate on between-sweep work.
+	if !strings.Contains(s, "floor") || !strings.Contains(s, "ceiling") {
+		t.Error("pm-template.md: expected sweeps-as-floor-not-ceiling framing")
+	}
+	// Each of the five concrete behaviors must be pinned. Checking for a
+	// distinguishing token from each behavior keeps the test resilient to
+	// minor wording changes while catching accidental drops.
+	for _, marker := range []string{
+		"act on signal as it arrives",          // behavior 1
+		"Self-paced filing during active arcs", // behavior 2
+		"Proactive backlog mining when idle",   // behavior 3
+		"Mayor will not babysit you",           // behavior 4
+		"Stop-loss is propulsion too",          // behavior 5
+	} {
+		if !strings.Contains(s, marker) {
+			t.Errorf("pm-template.md: expected propulsion behavior marker %q", marker)
+		}
+	}
+	// The propulsion section must precede the scheduler-reaction section,
+	// per mg-2f76's composition rule: PMs read "act on signal" first, then
+	// the scheduler reaction is positioned as the catch-all for events that
+	// don't have a more specific propulsion trigger.
+	propIdx := strings.Index(s, "## Self-pacing and propulsion")
+	schedIdx := strings.Index(s, "## Reacting to scheduler fires")
+	if propIdx < 0 || schedIdx < 0 || propIdx >= schedIdx {
+		t.Errorf("pm-template.md: expected `## Self-pacing and propulsion` to precede `## Reacting to scheduler fires` (propIdx=%d, schedIdx=%d)", propIdx, schedIdx)
+	}
+	// The Cadence section's "Between sweeps" framing must reflect propulsion
+	// (active on signal), not the prior passive "stay idle" wording. This is
+	// the line Daniel's feedback most directly targeted.
+	if !strings.Contains(s, "active on signal") {
+		t.Error("pm-template.md: expected Cadence's `Between sweeps` line to say PMs remain `active on signal` (not `stay idle`)")
+	}
+	if strings.Contains(s, "Between sweeps you stay idle") {
+		t.Error("pm-template.md: legacy `Between sweeps you stay idle` wording should be replaced — it contradicts the propulsion section")
+	}
+}
+
 // TestSynthesizeExtendsPrompt covers the PM crew-loader directive that lets a
 // crew prompt redirect to a shared template plus a per-instance TOML config.
 // See docs/product-manager-design.md §1.
