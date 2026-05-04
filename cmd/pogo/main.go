@@ -1153,21 +1153,29 @@ the schedule fires exactly once and reschedules to the next future occurrence.`,
 	}
 	cmdScheduleList.Flags().StringVar(&schedListAgent, "agent", "", "Filter by agent name")
 
+	var schedRmAgent string
 	var cmdScheduleRm = &cobra.Command{
 		Use:   "rm <id>",
 		Short: "Remove a schedule by ID",
-		Args:  cobra.ExactArgs(1),
+		Long: `Remove a schedule by ID.
+
+Schedules are keyed on (agent, id). If two agents have registered the same
+id, pogod cannot tell which one to remove and the command fails with a
+conflict error listing the matching agents — pass --agent <name> to
+disambiguate. When the id is owned by a single agent, --agent is optional.`,
+		Args: cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
-			if err := client.RemoveSchedule(args[0]); err != nil {
+			if err := client.RemoveSchedule(schedRmAgent, args[0]); err != nil {
 				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
 			}
 			if jsonOutput {
-				cli.PrintJSON(map[string]string{"removed": args[0]})
+				cli.PrintJSON(map[string]string{"removed": args[0], "agent": schedRmAgent})
 			} else {
 				fmt.Printf("Removed %s.\n", args[0])
 			}
 		},
 	}
+	cmdScheduleRm.Flags().StringVar(&schedRmAgent, "agent", "", "Owning agent (required if multiple agents share the id)")
 	cmdSchedule.AddCommand(cmdScheduleList)
 	cmdSchedule.AddCommand(cmdScheduleRm)
 

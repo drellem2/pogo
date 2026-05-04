@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 
 	"github.com/drellem2/pogo/internal/scheduler"
 )
@@ -56,9 +57,16 @@ func ListSchedules(agent string) ([]scheduler.Entry, error) {
 	return entries, nil
 }
 
-// RemoveSchedule deletes a schedule by id.
-func RemoveSchedule(id string) error {
-	req, err := http.NewRequest("DELETE", serverURL+"/scheduler/schedules/"+url.PathEscape(id), nil)
+// RemoveSchedule deletes a schedule. agent may be empty, in which case the
+// daemon disambiguates by id — when multiple agents own a schedule with that
+// id, the request fails with a conflict error and the caller must pass the
+// owning agent explicitly.
+func RemoveSchedule(agent, id string) error {
+	u := serverURL + "/scheduler/schedules/" + url.PathEscape(id)
+	if agent != "" {
+		u += "?agent=" + url.QueryEscape(agent)
+	}
+	req, err := http.NewRequest("DELETE", u, nil)
 	if err != nil {
 		return err
 	}
@@ -69,6 +77,10 @@ func RemoveSchedule(id string) error {
 	defer r.Body.Close()
 	if r.StatusCode == http.StatusNotFound {
 		return fmt.Errorf("schedule %q not found", id)
+	}
+	if r.StatusCode == http.StatusConflict {
+		msg, _ := io.ReadAll(r.Body)
+		return fmt.Errorf("%s", strings.TrimSpace(string(msg)))
 	}
 	if r.StatusCode != http.StatusNoContent {
 		msg, _ := io.ReadAll(r.Body)

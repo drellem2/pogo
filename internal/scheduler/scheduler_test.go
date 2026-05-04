@@ -103,7 +103,7 @@ func TestAddAndPersistRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reload New: %v", err)
 	}
-	got, ok := s2.Get("research-poll")
+	got, ok := s2.Get("crew-research", "research-poll")
 	if !ok {
 		t.Fatal("entry missing after reload")
 	}
@@ -140,7 +140,7 @@ func TestTickFiresWhenDueAndReschedules(t *testing.T) {
 	if res[0].Missed != 0 {
 		t.Errorf("missed: want 0, got %d", res[0].Missed)
 	}
-	got, _ := s.Get("poll")
+	got, _ := s.Get("crew-research", "poll")
 	wantNext := now.Add(10 * time.Minute)
 	if !got.NextFire.Equal(wantNext) {
 		t.Errorf("rescheduled NextFire: want %s, got %s", wantNext, got.NextFire)
@@ -227,7 +227,7 @@ func TestClockJumpAtMostOnceReplayFiresExactlyOnce(t *testing.T) {
 
 	// NextFire after a 1h jump should land on the next 5-minute boundary
 	// strictly after T+60 → T+1h05m.
-	got, _ := s.Get("poll")
+	got, _ := s.Get("crew-research", "poll")
 	wantNext := now.Add(65 * time.Minute)
 	if !got.NextFire.Equal(wantNext) {
 		t.Errorf("post-jump NextFire: want %s, got %s", wantNext, got.NextFire)
@@ -265,7 +265,7 @@ func TestReplaySkipDropsFireOlderThanWindow(t *testing.T) {
 	if len(rec.snapshot()) != 0 {
 		t.Errorf("skip should not deliver, got %d deliveries", len(rec.snapshot()))
 	}
-	got, _ := s.Get("skipper")
+	got, _ := s.Get("crew-poll", "skipper")
 	if !got.NextFire.After(jumped) {
 		t.Errorf("NextFire should be after jump, got %s", got.NextFire)
 	}
@@ -292,7 +292,7 @@ func TestReplayCountAccumulatesMissed(t *testing.T) {
 	if res[0].Missed != 5 {
 		t.Errorf("missed: want 5, got %d", res[0].Missed)
 	}
-	got, _ := s.Get("counter")
+	got, _ := s.Get("crew-poll", "counter")
 	if got.MissedFires != 5 {
 		t.Errorf("MissedFires accumulator: want 5, got %d", got.MissedFires)
 	}
@@ -328,7 +328,7 @@ func TestOneShotFiresOnceAndIsRemoved(t *testing.T) {
 	}
 
 	// After firing: gone.
-	if _, ok := s.Get("wakeup"); ok {
+	if _, ok := s.Get("cat-foo", "wakeup"); ok {
 		t.Error("one-shot entry should be removed after firing")
 	}
 
@@ -338,21 +338,21 @@ func TestOneShotFiresOnceAndIsRemoved(t *testing.T) {
 	}
 }
 
-func TestRemoveByID(t *testing.T) {
+func TestRemoveByCompositeKey(t *testing.T) {
 	s := newSchedulerForTest(t, nil)
 	now := fixedTime()
 	if _, err := s.Add(Entry{Agent: "a", Cron: "* * * * *", ID: "x"}, now); err != nil {
 		t.Fatal(err)
 	}
-	removed, err := s.Remove("x")
+	removed, err := s.Remove("a", "x")
 	if err != nil || !removed {
 		t.Fatalf("Remove: removed=%v err=%v", removed, err)
 	}
-	if _, ok := s.Get("x"); ok {
+	if _, ok := s.Get("a", "x"); ok {
 		t.Error("entry still present after Remove")
 	}
 	// Removing again returns false, no error.
-	removed, err = s.Remove("x")
+	removed, err = s.Remove("a", "x")
 	if err != nil || removed {
 		t.Errorf("Remove second time: removed=%v err=%v", removed, err)
 	}
@@ -406,7 +406,7 @@ func TestDeliveryFailureStillReschedules(t *testing.T) {
 	if res[0].DeliverErr == nil {
 		t.Error("DeliverErr should be set on failure")
 	}
-	got, _ := s.Get("p")
+	got, _ := s.Get("x", "p")
 	wantNext := now.Add(10 * time.Minute)
 	if !got.NextFire.Equal(wantNext) {
 		t.Errorf("NextFire after failure: want %s, got %s", wantNext, got.NextFire)
@@ -490,5 +490,218 @@ func TestPersistedJSONIsHumanReadable(t *testing.T) {
 	}
 	if string(data[:1]) != "{" {
 		t.Errorf("file should be JSON object, starts with %q", string(data[:1]))
+	}
+}
+
+// TestSameIDDifferentAgentsCoexist is the regression test for the bug where
+// two PMs registering the same id (e.g. "mail-check") stomped each other
+// because the storage was keyed on id alone. After the fix, schedules are
+// keyed on (agent, id) and both rows survive — see mg-d11c.
+func TestSameIDDifferentAgentsCoexist(t *testing.T) {
+	s := newSchedulerForTest(t, nil)
+	now := fixedTime()
+
+	if _, err := s.Add(Entry{Agent: "pm-pogo", Cron: "*/10 * * * *", ID: "mail-check"}, now); err != nil {
+		t.Fatalf("Add pm-pogo: %v", err)
+	}
+	if _, err := s.Add(Entry{Agent: "pm-onethird", Cron: "*/10 * * * *", ID: "mail-check"}, now); err != nil {
+		t.Fatalf("Add pm-onethird: %v", err)
+	}
+
+	all := s.List("")
+	if len(all) != 2 {
+		t.Fatalf("unfiltered list: want 2 rows, got %d (%+v)", len(all), all)
+	}
+	seen := map[string]bool{}
+	for _, e := range all {
+		seen[e.Agent] = true
+	}
+	if !seen["pm-pogo"] || !seen["pm-onethird"] {
+		t.Errorf("expected both agents in list, got %+v", seen)
+	}
+
+	if _, ok := s.Get("pm-pogo", "mail-check"); !ok {
+		t.Error("pm-pogo's mail-check missing")
+	}
+	if _, ok := s.Get("pm-onethird", "mail-check"); !ok {
+		t.Error("pm-onethird's mail-check missing")
+	}
+
+	// Removing one composite key leaves the other intact.
+	removed, err := s.Remove("pm-pogo", "mail-check")
+	if err != nil || !removed {
+		t.Fatalf("Remove(pm-pogo,mail-check): removed=%v err=%v", removed, err)
+	}
+	if _, ok := s.Get("pm-pogo", "mail-check"); ok {
+		t.Error("pm-pogo's mail-check still present after Remove")
+	}
+	if _, ok := s.Get("pm-onethird", "mail-check"); !ok {
+		t.Error("pm-onethird's mail-check should be untouched")
+	}
+}
+
+// TestAddIsIdempotentPerCompositeKey confirms that re-adding with the same
+// (agent, id) replaces the existing row (same as before the fix), but does
+// not affect a row with the same id under a different agent.
+func TestAddIsIdempotentPerCompositeKey(t *testing.T) {
+	s := newSchedulerForTest(t, nil)
+	now := fixedTime()
+
+	if _, err := s.Add(Entry{Agent: "pm-pogo", Cron: "*/10 * * * *", ID: "sweep", Message: "first"}, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Add(Entry{Agent: "pm-onethird", Cron: "*/10 * * * *", ID: "sweep", Message: "other-agent"}, now); err != nil {
+		t.Fatal(err)
+	}
+	// Re-register pm-pogo's sweep with new message — should overwrite the
+	// pm-pogo row only.
+	if _, err := s.Add(Entry{Agent: "pm-pogo", Cron: "*/10 * * * *", ID: "sweep", Message: "second"}, now); err != nil {
+		t.Fatal(err)
+	}
+
+	if all := s.List(""); len(all) != 2 {
+		t.Fatalf("want 2 rows after idempotent re-add, got %d", len(all))
+	}
+	got, ok := s.Get("pm-pogo", "sweep")
+	if !ok {
+		t.Fatal("pm-pogo sweep missing")
+	}
+	if got.Message != "second" {
+		t.Errorf("pm-pogo message: want %q, got %q", "second", got.Message)
+	}
+	other, ok := s.Get("pm-onethird", "sweep")
+	if !ok {
+		t.Fatal("pm-onethird sweep missing")
+	}
+	if other.Message != "other-agent" {
+		t.Errorf("pm-onethird message clobbered: got %q", other.Message)
+	}
+}
+
+// TestRemoveByIDDisambiguates verifies the convenience id-only removal:
+// works when only one agent owns the id, errors with *ErrAmbiguousID when
+// more than one does. This is the path used by `pogo schedule rm <id>` and
+// the HTTP handler when no agent query param is supplied.
+func TestRemoveByIDDisambiguates(t *testing.T) {
+	s := newSchedulerForTest(t, nil)
+	now := fixedTime()
+
+	if _, err := s.Add(Entry{Agent: "pm-pogo", Cron: "*/10 * * * *", ID: "mail-check"}, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Add(Entry{Agent: "pm-pogo", Cron: "*/10 * * * *", ID: "uniq"}, now); err != nil {
+		t.Fatal(err)
+	}
+
+	// Unambiguous id → succeeds.
+	removed, err := s.RemoveByID("uniq")
+	if err != nil || !removed {
+		t.Fatalf("RemoveByID(uniq): removed=%v err=%v", removed, err)
+	}
+
+	// Make the id ambiguous, then ensure RemoveByID refuses.
+	if _, err := s.Add(Entry{Agent: "pm-onethird", Cron: "*/10 * * * *", ID: "mail-check"}, now); err != nil {
+		t.Fatal(err)
+	}
+	removed, err = s.RemoveByID("mail-check")
+	if removed {
+		t.Error("ambiguous RemoveByID should not delete anything")
+	}
+	amb, ok := err.(*ErrAmbiguousID)
+	if !ok {
+		t.Fatalf("want *ErrAmbiguousID, got %T (%v)", err, err)
+	}
+	if amb.ID != "mail-check" {
+		t.Errorf("ErrAmbiguousID.ID: want mail-check, got %q", amb.ID)
+	}
+	if len(amb.Agents) != 2 {
+		t.Errorf("ErrAmbiguousID.Agents: want 2 entries, got %d (%v)", len(amb.Agents), amb.Agents)
+	}
+
+	// Both rows still present after the ambiguous failure.
+	if _, ok := s.Get("pm-pogo", "mail-check"); !ok {
+		t.Error("pm-pogo mail-check should still exist after ambiguous remove")
+	}
+	if _, ok := s.Get("pm-onethird", "mail-check"); !ok {
+		t.Error("pm-onethird mail-check should still exist after ambiguous remove")
+	}
+
+	// Disambiguating with the explicit agent removes only that row.
+	removed, err = s.Remove("pm-pogo", "mail-check")
+	if err != nil || !removed {
+		t.Fatalf("Remove(pm-pogo,mail-check): removed=%v err=%v", removed, err)
+	}
+	// Now id is unambiguous again — RemoveByID should work.
+	removed, err = s.RemoveByID("mail-check")
+	if err != nil || !removed {
+		t.Fatalf("RemoveByID after disambiguation: removed=%v err=%v", removed, err)
+	}
+	if all := s.List(""); len(all) != 0 {
+		t.Errorf("expected empty store, got %+v", all)
+	}
+}
+
+// TestPersistRoundTripPreservesSameIDDifferentAgents writes two same-id
+// entries to disk, reloads, and confirms both come back. Guards against a
+// regression where the load path reused the id-only key.
+func TestPersistRoundTripPreservesSameIDDifferentAgents(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "schedules.json")
+	now := fixedTime()
+
+	s, err := New(path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Add(Entry{Agent: "pm-pogo", Cron: "*/10 * * * *", ID: "mail-check"}, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Add(Entry{Agent: "pm-onethird", Cron: "*/10 * * * *", ID: "mail-check"}, now); err != nil {
+		t.Fatal(err)
+	}
+
+	s2, err := New(path, nil)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if _, ok := s2.Get("pm-pogo", "mail-check"); !ok {
+		t.Error("pm-pogo mail-check missing after reload")
+	}
+	if _, ok := s2.Get("pm-onethird", "mail-check"); !ok {
+		t.Error("pm-onethird mail-check missing after reload")
+	}
+	if all := s2.List(""); len(all) != 2 {
+		t.Errorf("reloaded list: want 2 rows, got %d", len(all))
+	}
+}
+
+// TestTickFiresIndependentlyForCollidingIDs is the end-to-end acceptance
+// case: two agents share an id, both fires must be delivered independently
+// when the schedule comes due — neither agent silently loses fires.
+func TestTickFiresIndependentlyForCollidingIDs(t *testing.T) {
+	rec := &recorder{}
+	s := newSchedulerForTest(t, rec)
+	now := fixedTime()
+
+	if _, err := s.Add(Entry{Agent: "pm-pogo", Cron: "*/10 * * * *", ID: "mail-check"}, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Add(Entry{Agent: "pm-onethird", Cron: "*/10 * * * *", ID: "mail-check"}, now); err != nil {
+		t.Fatal(err)
+	}
+
+	res := s.Tick(context.Background(), now.Add(10*time.Minute))
+	if len(res) != 2 {
+		t.Fatalf("want 2 fires (one per agent), got %d", len(res))
+	}
+	gotAgents := map[string]bool{}
+	for _, r := range res {
+		if !r.Delivered {
+			t.Errorf("fire for %s not delivered: %v", r.Entry.Agent, r.DeliverErr)
+		}
+		gotAgents[r.Entry.Agent] = true
+	}
+	if !gotAgents["pm-pogo"] || !gotAgents["pm-onethird"] {
+		t.Errorf("expected both agents to fire, got %+v", gotAgents)
 	}
 }
