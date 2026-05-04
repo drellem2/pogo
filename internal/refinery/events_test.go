@@ -13,14 +13,16 @@ import (
 	"github.com/drellem2/pogo/internal/events"
 )
 
-// useTempEventLog redirects events.Emit to a temp file for the test and
-// returns its path.
+// useTempEventLog redirects events.Emit to a per-test temp file and returns
+// its path. Cleanup restores the package-wide test default set up by TestMain
+// (testEventLogPath) rather than "" so subsequent tests stay redirected away
+// from the user's production ~/.pogo/events.log.
 func useTempEventLog(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "events.log")
 	events.SetLogPathForTesting(path)
-	t.Cleanup(func() { events.SetLogPathForTesting("") })
+	t.Cleanup(func() { events.SetLogPathForTesting(testEventLogPath) })
 	return path
 }
 
@@ -302,7 +304,7 @@ func TestEventEmissionIsBestEffort(t *testing.T) {
 	// Point the log at /dev/null/events.log — opening will fail because
 	// /dev/null is not a directory. Emit should swallow that failure.
 	events.SetLogPathForTesting("/dev/null/events.log")
-	t.Cleanup(func() { events.SetLogPathForTesting("") })
+	t.Cleanup(func() { events.SetLogPathForTesting(testEventLogPath) })
 
 	originDir := initBareOrigin(t, "main")
 
