@@ -272,6 +272,16 @@ loop (every poll_interval):
 
 **Design rationale:** Gas Town's refinery was also deterministic code (not an agent), and this was explicitly validated as the right call. Merge processing is mechanical — it should never spend tokens on judgment. It needs to work even when all agents are down. Own worktrees ensure the refinery never interferes with agent or user checkouts.
 
+**Retry behavior.** If another commit lands on the target between fetch and push (e.g. a CI auto-bump), the ff-only merge fails with a retryable error. The refinery re-runs the full fetch→rebase→gates→merge→push cycle up to `max_attempts` times (default 7). Per-repo `<repo>/.pogo/refinery.toml`:
+
+```toml
+[gates]
+max_attempts  = 7      # ff-only retry budget — raise on repos that race CI
+skip_on_retry = true   # bypass gates on attempts > 1 (cost-saving when
+                       # the only change between attempts is a version bump
+                       # fetched from main)
+```
+
 **Future:** Batch-then-bisect merging (testing N branches together, binary search on failure) is a known optimization but out of MVP scope.
 
 ## Scheduler

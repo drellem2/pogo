@@ -230,6 +230,15 @@ Per-repo override:
 # <repo>/.pogo/refinery.toml
 quality_gate = "./build.sh"
 branch_pattern = "pogo-cat-*"   # Only merge branches matching this pattern
+
+[gates]
+commands      = ["./build.sh", "./test.sh"]
+max_attempts  = 7      # ff-only retry budget; default 7. Raise on repos
+                       # whose CI auto-pushes a version-bump commit to main
+                       # after every merge (the ff-only race).
+skip_on_retry = true   # Bypass gates on attempts > 1. Gates already passed
+                       # on attempt 1; only the version-bump commit from
+                       # main differs. Makes a higher max_attempts cheap.
 ```
 
 **Scope for MVP:** Single-repo, sequential merge. No batch-then-bisect (Gas Town's refinery had this but it's complex and can come later).

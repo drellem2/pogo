@@ -7,9 +7,17 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
+
+// defaultMaxAttempts is the fallback retry budget when no per-repo
+// max_attempts is configured. Bumped from 3 → 7 to absorb the ff-only
+// retry race on repos whose CI auto-pushes a version-bump commit to
+// main between our fetch and push (gh-issue #13). The retry is cheap
+// when paired with [gates] skip_on_retry = true.
+const defaultMaxAttempts = 7
 
 // processMerge runs the full merge pipeline for a single MR:
 // 1. Ensure worktree exists for the repo
@@ -20,8 +28,12 @@ import (
 // 6. Run the per-repo deploy hook (if configured) against the just-merged commit
 //
 // If another polecat merges to the target between our rebase and push,
-// the ff-only merge or push will fail. We retry up to 3 times with a
-// fresh fetch+rebase+gates cycle to handle this race.
+// the ff-only merge or push will fail. We retry up to maxAttempts times
+// (default 7, configurable via [gates] max_attempts) with a fresh
+// fetch+rebase+(gates)+merge+push cycle. When [gates] skip_on_retry is
+// set, attempts after the first skip the quality-gate phase — gates
+// already passed on near-identical code; only the version-bump commit
+// from main differs.
 //
 // Emits refinery_merge_attempted, refinery_merged, refinery_merge_failed,
 // and (when a deploy hook runs) refinery_deploy_* events. Emission is
@@ -37,8 +49,14 @@ func (r *Refinery) processMerge(mr *MergeRequest) (string, string, error) {
 		return "", "", fmt.Errorf("worktree setup: %w", err)
 	}
 
+	cfg := r.loadConfig(wtDir, mr.RepoPath)
+	maxAttempts := cfg.MaxAttempts
+	if maxAttempts <= 0 {
+		maxAttempts = defaultMaxAttempts
+	}
+	skipGatesOnRetry := cfg.SkipGatesOnRetry
+
 	var gateOutput string
-	const maxAttempts = 3
 	startTime := time.Now()
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		if attempt > 1 {
@@ -47,7 +65,8 @@ func (r *Refinery) processMerge(mr *MergeRequest) (string, string, error) {
 
 		emitMergeAttempted(mr, attempt)
 
-		output, stage, sha, attemptErr := r.attemptMerge(wtDir, mr, attempt)
+		skipGates := skipGatesOnRetry && attempt > 1
+		output, stage, sha, attemptErr := r.attemptMerge(wtDir, mr, attempt, skipGates)
 		gateOutput = output
 		if attemptErr == nil {
 			emitMerged(mr, attempt, sha, time.Since(startTime).Seconds())
@@ -77,7 +96,12 @@ func (r *Refinery) processMerge(mr *MergeRequest) (string, string, error) {
 // attemptMerge runs a single fetch→rebase→gates→merge→push cycle. Returns
 // the captured gate output, the pipeline stage that ran (or failed), the
 // merge commit SHA on success (empty otherwise), and any error.
-func (r *Refinery) attemptMerge(wtDir string, mr *MergeRequest, attempt int) (output string, stage string, sha string, err error) {
+//
+// When skipGates is true, the quality-gate phase is bypassed — used on
+// retries when [gates] skip_on_retry is set, on the principle that gates
+// already passed on near-identical code and only the version-bump commit
+// from main differs.
+func (r *Refinery) attemptMerge(wtDir string, mr *MergeRequest, attempt int, skipGates bool) (output string, stage string, sha string, err error) {
 	// Fetch latest from origin
 	log.Printf("refinery: MR %s step=fetch branch=%s attempt=%d", mr.ID, mr.Branch, attempt)
 	if out, gerr := gitCmdOutput(wtDir, "fetch", "origin"); gerr != nil {
@@ -107,11 +131,21 @@ func (r *Refinery) attemptMerge(wtDir string, mr *MergeRequest, attempt int) (ou
 		return "", "rebase", "", rebaseErr
 	}
 
-	// Run quality gates (on the rebased branch — tests what will actually land)
-	log.Printf("refinery: MR %s step=quality-gates attempt=%d", mr.ID, attempt)
-	gateOutput, gates, qerr := r.runQualityGates(wtDir, mr.RepoPath)
-	if qerr != nil {
-		return gateOutput, gateStage(gates), "", fmt.Errorf("quality gate: %w", qerr)
+	// Run quality gates (on the rebased branch — tests what will actually
+	// land). On retries with skip_on_retry set, bypass: gates already
+	// passed on attempt 1 over near-identical code; the only change is
+	// the version-bump commit fetched from main.
+	var gateOutput string
+	if skipGates {
+		log.Printf("refinery: MR %s step=quality-gates attempt=%d skipped (skip_on_retry=true)", mr.ID, attempt)
+		gateOutput = "(quality gates skipped on retry — skip_on_retry=true)"
+	} else {
+		log.Printf("refinery: MR %s step=quality-gates attempt=%d", mr.ID, attempt)
+		out, gates, qerr := r.runQualityGates(wtDir, mr.RepoPath)
+		gateOutput = out
+		if qerr != nil {
+			return gateOutput, gateStage(gates), "", fmt.Errorf("quality gate: %w", qerr)
+		}
 	}
 
 	// Checkout target ref for merge
@@ -305,18 +339,10 @@ func (r *Refinery) runQualityGates(wtDir, repoPath string) (string, []string, er
 // loadGateConfig returns the quality gate commands to run.
 // Priority: per-repo .pogo/refinery.toml > default build.sh
 func (r *Refinery) loadGateConfig(wtDir, repoPath string) []string {
-	// Check for per-repo refinery config in the worktree
-	repoConfig := filepath.Join(wtDir, ".pogo", "refinery.toml")
-	if gates := parseRefineryToml(repoConfig); len(gates) > 0 {
-		return gates
+	cfg := r.loadConfig(wtDir, repoPath)
+	if len(cfg.Gates) > 0 {
+		return cfg.Gates
 	}
-
-	// Check for per-repo refinery config in the original repo
-	origConfig := filepath.Join(repoPath, ".pogo", "refinery.toml")
-	if gates := parseRefineryToml(origConfig); len(gates) > 0 {
-		return gates
-	}
-
 	// Fall back to common scripts
 	var defaults []string
 	for _, script := range []string{"./build.sh", "./test.sh"} {
@@ -327,10 +353,34 @@ func (r *Refinery) loadGateConfig(wtDir, repoPath string) []string {
 	return defaults
 }
 
+// loadConfig returns the merged refinery config for a repo. Worktree
+// values win on a per-field basis, with origin filling in fields the
+// worktree does not set. Used for both per-merge knobs (max_attempts,
+// skip_on_retry) and the gate/deploy lookups.
+func (r *Refinery) loadConfig(wtDir, repoPath string) refineryConfig {
+	wt := parseRefineryConfig(filepath.Join(wtDir, ".pogo", "refinery.toml"))
+	orig := parseRefineryConfig(filepath.Join(repoPath, ".pogo", "refinery.toml"))
+	if len(wt.Gates) == 0 {
+		wt.Gates = orig.Gates
+	}
+	if wt.DeployCommand == "" {
+		wt.DeployCommand = orig.DeployCommand
+	}
+	if wt.MaxAttempts == 0 {
+		wt.MaxAttempts = orig.MaxAttempts
+	}
+	if !wt.SkipGatesOnRetry {
+		wt.SkipGatesOnRetry = orig.SkipGatesOnRetry
+	}
+	return wt
+}
+
 // refineryConfig holds parsed values from a .pogo/refinery.toml file.
 type refineryConfig struct {
-	Gates         []string
-	DeployCommand string
+	Gates            []string
+	DeployCommand    string
+	MaxAttempts      int  // [gates] max_attempts — 0 means use defaultMaxAttempts
+	SkipGatesOnRetry bool // [gates] skip_on_retry — bypass gates on attempt > 1
 }
 
 // parseRefineryToml reads a .pogo/refinery.toml and extracts gate commands.
@@ -350,7 +400,9 @@ func parseRefineryToml(path string) []string {
 // configuration. Recognized sections:
 //
 //	[gates]
-//	commands = ["./build.sh", "./test.sh"]
+//	commands       = ["./build.sh", "./test.sh"]
+//	max_attempts   = 7      # ff-only retry budget; default 7 if omitted
+//	skip_on_retry  = true   # bypass gates on attempts > 1 (race recovery)
 //
 //	[deploy]
 //	command = "./deploy.sh"
@@ -402,12 +454,28 @@ func parseRefineryConfig(path string) refineryConfig {
 					cfg.Gates = append(cfg.Gates, cmd)
 				}
 			}
+		case section == "gates" && key == "max_attempts":
+			if n, err := strconv.Atoi(val); err == nil && n > 0 {
+				cfg.MaxAttempts = n
+			}
+		case section == "gates" && key == "skip_on_retry":
+			cfg.SkipGatesOnRetry = parseTomlBool(val)
 		case section == "deploy" && key == "command":
 			cfg.DeployCommand = val
 		}
 	}
 
 	return cfg
+}
+
+// parseTomlBool parses a TOML-ish bool from a string. Accepts true/false
+// (case-insensitive) and 1/0. Anything else is treated as false.
+func parseTomlBool(val string) bool {
+	switch strings.ToLower(strings.TrimSpace(val)) {
+	case "true", "1", "yes":
+		return true
+	}
+	return false
 }
 
 // DeployCommand returns the configured post-merge deploy command for a repo,

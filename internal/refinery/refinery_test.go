@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -178,6 +179,91 @@ commands = ["./build.sh", "./test.sh"]
 	gates3 := parseRefineryToml("/nonexistent")
 	if gates3 != nil {
 		t.Error("expected nil for nonexistent file")
+	}
+}
+
+func TestParseRefineryTomlRetryKeys(t *testing.T) {
+	dir := t.TempDir()
+
+	// max_attempts under [gates]
+	path := filepath.Join(dir, "max_attempts.toml")
+	os.WriteFile(path, []byte(`
+[gates]
+commands = ["./build.sh"]
+max_attempts = 9
+`), 0644)
+	cfg := parseRefineryConfig(path)
+	if cfg.MaxAttempts != 9 {
+		t.Errorf("expected MaxAttempts=9, got %d", cfg.MaxAttempts)
+	}
+
+	// skip_on_retry under [gates]
+	path2 := filepath.Join(dir, "skip.toml")
+	os.WriteFile(path2, []byte(`
+[gates]
+commands = ["./build.sh"]
+skip_on_retry = true
+`), 0644)
+	cfg2 := parseRefineryConfig(path2)
+	if !cfg2.SkipGatesOnRetry {
+		t.Error("expected SkipGatesOnRetry=true")
+	}
+
+	// skip_on_retry = false leaves field zero-valued
+	path3 := filepath.Join(dir, "skip_false.toml")
+	os.WriteFile(path3, []byte(`
+[gates]
+skip_on_retry = false
+`), 0644)
+	cfg3 := parseRefineryConfig(path3)
+	if cfg3.SkipGatesOnRetry {
+		t.Error("expected SkipGatesOnRetry=false")
+	}
+
+	// Both keys + commands array coexist
+	path4 := filepath.Join(dir, "all.toml")
+	os.WriteFile(path4, []byte(`
+[gates]
+commands = ["./build.sh", "./test.sh"]
+max_attempts = 12
+skip_on_retry = true
+
+[deploy]
+command = "./deploy.sh"
+`), 0644)
+	cfg4 := parseRefineryConfig(path4)
+	if cfg4.MaxAttempts != 12 {
+		t.Errorf("expected MaxAttempts=12, got %d", cfg4.MaxAttempts)
+	}
+	if !cfg4.SkipGatesOnRetry {
+		t.Error("expected SkipGatesOnRetry=true alongside other keys")
+	}
+	if len(cfg4.Gates) != 2 {
+		t.Errorf("expected 2 gates alongside retry keys, got %v", cfg4.Gates)
+	}
+	if cfg4.DeployCommand != "./deploy.sh" {
+		t.Errorf("expected deploy command preserved, got %q", cfg4.DeployCommand)
+	}
+
+	// Invalid max_attempts (non-numeric, zero, negative) leaves field zero
+	for _, raw := range []string{`max_attempts = "abc"`, `max_attempts = 0`, `max_attempts = -1`} {
+		p := filepath.Join(dir, "bad_"+strings.ReplaceAll(raw, " ", "")+".toml")
+		os.WriteFile(p, []byte("[gates]\n"+raw+"\n"), 0644)
+		c := parseRefineryConfig(p)
+		if c.MaxAttempts != 0 {
+			t.Errorf("expected zero MaxAttempts for %q, got %d", raw, c.MaxAttempts)
+		}
+	}
+
+	// parseTomlBool truth table
+	cases := map[string]bool{
+		"true": true, "TRUE": true, "True": true, "1": true, "yes": true,
+		"false": false, "0": false, "no": false, "": false, "garbage": false,
+	}
+	for in, want := range cases {
+		if got := parseTomlBool(in); got != want {
+			t.Errorf("parseTomlBool(%q) = %v, want %v", in, got, want)
+		}
 	}
 }
 
@@ -407,6 +493,298 @@ quality_gate = "exit 1"
 	}
 	if failedMR == nil {
 		t.Error("expected onFailed callback to fire")
+	}
+}
+
+// TestProcessMergeFFRetryOnRace exercises the gh-issue #13 race: between
+// the refinery's fetch and its ff-only push, another commit lands on
+// origin/main (simulating CI's version-bump after every merge). The
+// refinery must retry with a fresh fetch+rebase and succeed within the
+// default maxAttempts budget.
+func TestProcessMergeFFRetryOnRace(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found")
+	}
+
+	// Bare origin.
+	originDir := t.TempDir()
+	run(t, originDir, "git", "init", "--bare", "-b", "main")
+
+	// Primary working clone — sets up main and the feature branch.
+	workDir := t.TempDir()
+	run(t, workDir, "git", "clone", originDir, ".")
+	run(t, workDir, "git", "config", "user.email", "test@test.com")
+	run(t, workDir, "git", "config", "user.name", "Test")
+
+	// Sidecar clone the gate pushes from (stand-in for the CI auto-bump
+	// process). Lives outside the refinery's worktree so the refinery
+	// cannot reset it.
+	sidecarDir := t.TempDir()
+	run(t, sidecarDir, "git", "clone", originDir, ".")
+	run(t, sidecarDir, "git", "config", "user.email", "ci@test.com")
+	run(t, sidecarDir, "git", "config", "user.name", "CI")
+
+	// Race-state files outside any worktree — the refinery resets the
+	// worktree on each attempt, so state must persist elsewhere.
+	stateDir := t.TempDir()
+	raceFlag := filepath.Join(stateDir, "race_done")
+	gateRuns := filepath.Join(stateDir, "gate_runs")
+
+	// build.sh:
+	//   - bumps gate-run counter on every invocation (so we can assert
+	//     the gate ran on each attempt — i.e. skip_on_retry is OFF here)
+	//   - on the first invocation only, pushes an empty commit to
+	//     origin/main from the sidecar clone (the race injection)
+	buildSh := fmt.Sprintf(`#!/bin/sh
+set -e
+RUNS=$(cat %s 2>/dev/null || echo 0)
+RUNS=$((RUNS+1))
+echo $RUNS > %s
+if [ ! -f %s ]; then
+    touch %s
+    (cd %s && git fetch origin main >/dev/null 2>&1 && git reset --hard origin/main >/dev/null 2>&1 && git commit --allow-empty -m "ci: version bump" >/dev/null && git push origin main >/dev/null 2>&1)
+fi
+exit 0
+`, gateRuns, gateRuns, raceFlag, raceFlag, sidecarDir)
+
+	os.WriteFile(filepath.Join(workDir, "build.sh"), []byte(buildSh), 0755)
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", "initial with race-injecting build")
+	run(t, workDir, "git", "push", "origin", "main")
+
+	// Feature branch carries the same build.sh.
+	run(t, workDir, "git", "checkout", "-b", "feature-race")
+	os.WriteFile(filepath.Join(workDir, "feature.txt"), []byte("feature"), 0644)
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", "add feature")
+	run(t, workDir, "git", "push", "origin", "feature-race")
+
+	wtDir := t.TempDir()
+	r, err := New(Config{
+		Enabled:      true,
+		PollInterval: time.Hour,
+		WorktreeDir:  wtDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	id, err := r.Submit(MergeRequest{
+		RepoPath:  originDir,
+		Branch:    "feature-race",
+		TargetRef: "main",
+		Author:    "test-cat",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	r.processNext()
+
+	mr := r.Get(id)
+	if mr == nil {
+		t.Fatal("MR not found")
+	}
+	if mr.Status != StatusMerged {
+		t.Fatalf("expected merged after race retry, got %s\nerror: %s\ngate_output: %s",
+			mr.Status, mr.Error, mr.GateOutput)
+	}
+
+	// Sanity: the race did happen — sidecar pushed something. The merged
+	// HEAD on origin must include both the version bump and the feature.
+	verifyDir := t.TempDir()
+	run(t, verifyDir, "git", "clone", originDir, ".")
+	if _, err := os.Stat(filepath.Join(verifyDir, "feature.txt")); os.IsNotExist(err) {
+		t.Error("feature.txt missing on main after race retry")
+	}
+
+	// Gate ran on every attempt (skip_on_retry NOT set in this test).
+	runsData, _ := os.ReadFile(gateRuns)
+	runs, _ := strconv.Atoi(strings.TrimSpace(string(runsData)))
+	if runs < 2 {
+		t.Errorf("expected gate to run at least twice (race forces retry), got %d", runs)
+	}
+}
+
+// TestProcessMergeSkipGatesOnRetry verifies the [gates] skip_on_retry
+// knob: when set, the quality-gate phase is bypassed on attempts after
+// the first. Pairs with the higher maxAttempts default to make retries
+// cheap on fast-gate repos that race CI auto-bumps.
+func TestProcessMergeSkipGatesOnRetry(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found")
+	}
+
+	originDir := t.TempDir()
+	run(t, originDir, "git", "init", "--bare", "-b", "main")
+
+	workDir := t.TempDir()
+	run(t, workDir, "git", "clone", originDir, ".")
+	run(t, workDir, "git", "config", "user.email", "test@test.com")
+	run(t, workDir, "git", "config", "user.name", "Test")
+
+	sidecarDir := t.TempDir()
+	run(t, sidecarDir, "git", "clone", originDir, ".")
+	run(t, sidecarDir, "git", "config", "user.email", "ci@test.com")
+	run(t, sidecarDir, "git", "config", "user.name", "CI")
+
+	stateDir := t.TempDir()
+	raceFlag := filepath.Join(stateDir, "race_done")
+	gateRuns := filepath.Join(stateDir, "gate_runs")
+
+	buildSh := fmt.Sprintf(`#!/bin/sh
+set -e
+RUNS=$(cat %s 2>/dev/null || echo 0)
+RUNS=$((RUNS+1))
+echo $RUNS > %s
+if [ ! -f %s ]; then
+    touch %s
+    (cd %s && git fetch origin main >/dev/null 2>&1 && git reset --hard origin/main >/dev/null 2>&1 && git commit --allow-empty -m "ci: version bump" >/dev/null && git push origin main >/dev/null 2>&1)
+fi
+exit 0
+`, gateRuns, gateRuns, raceFlag, raceFlag, sidecarDir)
+
+	os.WriteFile(filepath.Join(workDir, "build.sh"), []byte(buildSh), 0755)
+	os.MkdirAll(filepath.Join(workDir, ".pogo"), 0755)
+	os.WriteFile(filepath.Join(workDir, ".pogo", "refinery.toml"), []byte(`
+[gates]
+commands = ["./build.sh"]
+skip_on_retry = true
+`), 0644)
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", "initial with skip_on_retry config")
+	run(t, workDir, "git", "push", "origin", "main")
+
+	run(t, workDir, "git", "checkout", "-b", "feature-skip")
+	os.WriteFile(filepath.Join(workDir, "feature.txt"), []byte("feature"), 0644)
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", "add feature")
+	run(t, workDir, "git", "push", "origin", "feature-skip")
+
+	wtDir := t.TempDir()
+	r, err := New(Config{
+		Enabled:      true,
+		PollInterval: time.Hour,
+		WorktreeDir:  wtDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	id, _ := r.Submit(MergeRequest{
+		RepoPath:  originDir,
+		Branch:    "feature-skip",
+		TargetRef: "main",
+		Author:    "test-cat",
+	})
+
+	r.processNext()
+
+	mr := r.Get(id)
+	if mr.Status != StatusMerged {
+		t.Fatalf("expected merged, got %s (error: %s)", mr.Status, mr.Error)
+	}
+
+	// With skip_on_retry, the gate must run exactly once (attempt 1) even
+	// though the race forces a retry. This is the cost-saving the knob
+	// exists to deliver.
+	runsData, _ := os.ReadFile(gateRuns)
+	runs, _ := strconv.Atoi(strings.TrimSpace(string(runsData)))
+	if runs != 1 {
+		t.Errorf("expected gate to run exactly once with skip_on_retry=true, got %d", runs)
+	}
+
+	// The retry-attempt's gate output should explicitly mark itself as
+	// skipped — useful for diagnostics.
+	if !strings.Contains(mr.GateOutput, "skipped") {
+		t.Errorf("expected GateOutput to mention gates were skipped, got: %s", mr.GateOutput)
+	}
+}
+
+// TestProcessMergeMaxAttemptsConfigurable verifies that [gates]
+// max_attempts overrides the built-in default. We use max_attempts=2
+// with a perpetually-racing gate; the merge must fail after exactly
+// two attempts (gate runs twice, then the loop gives up).
+func TestProcessMergeMaxAttemptsConfigurable(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found")
+	}
+
+	originDir := t.TempDir()
+	run(t, originDir, "git", "init", "--bare", "-b", "main")
+
+	workDir := t.TempDir()
+	run(t, workDir, "git", "clone", originDir, ".")
+	run(t, workDir, "git", "config", "user.email", "test@test.com")
+	run(t, workDir, "git", "config", "user.name", "Test")
+
+	sidecarDir := t.TempDir()
+	run(t, sidecarDir, "git", "clone", originDir, ".")
+	run(t, sidecarDir, "git", "config", "user.email", "ci@test.com")
+	run(t, sidecarDir, "git", "config", "user.name", "CI")
+
+	stateDir := t.TempDir()
+	gateRuns := filepath.Join(stateDir, "gate_runs")
+
+	// build.sh increments the run counter and pushes a bump to
+	// origin/main on every invocation — guarantees the ff-only merge
+	// always fails. Counter tells us exactly how many attempts ran.
+	buildSh := fmt.Sprintf(`#!/bin/sh
+set -e
+RUNS=$(cat %s 2>/dev/null || echo 0)
+RUNS=$((RUNS+1))
+echo $RUNS > %s
+(cd %s && git fetch origin main >/dev/null 2>&1 && git reset --hard origin/main >/dev/null 2>&1 && git commit --allow-empty -m "perpetual bump" >/dev/null && git push origin main >/dev/null 2>&1)
+exit 0
+`, gateRuns, gateRuns, sidecarDir)
+
+	os.WriteFile(filepath.Join(workDir, "build.sh"), []byte(buildSh), 0755)
+	os.MkdirAll(filepath.Join(workDir, ".pogo"), 0755)
+	os.WriteFile(filepath.Join(workDir, ".pogo", "refinery.toml"), []byte(`
+[gates]
+commands = ["./build.sh"]
+max_attempts = 2
+`), 0644)
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", "initial with max_attempts=2")
+	run(t, workDir, "git", "push", "origin", "main")
+
+	run(t, workDir, "git", "checkout", "-b", "feature-perpetual")
+	os.WriteFile(filepath.Join(workDir, "feature.txt"), []byte("f"), 0644)
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", "feat")
+	run(t, workDir, "git", "push", "origin", "feature-perpetual")
+
+	wtDir := t.TempDir()
+	r, err := New(Config{
+		Enabled:      true,
+		PollInterval: time.Hour,
+		WorktreeDir:  wtDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	id, _ := r.Submit(MergeRequest{
+		RepoPath:  originDir,
+		Branch:    "feature-perpetual",
+		TargetRef: "main",
+		Author:    "test-cat",
+	})
+
+	r.processNext()
+
+	mr := r.Get(id)
+	if mr.Status != StatusFailed {
+		t.Fatalf("expected failed (perpetual race exhausts attempts), got %s", mr.Status)
+	}
+
+	// Must have exhausted exactly the configured 2 attempts — not the
+	// default 7. The gate ran once per attempt (skip_on_retry not set).
+	runsData, _ := os.ReadFile(gateRuns)
+	runs, _ := strconv.Atoi(strings.TrimSpace(string(runsData)))
+	if runs != 2 {
+		t.Errorf("expected gate to run exactly max_attempts=2 times, got %d", runs)
 	}
 }
 
