@@ -1517,6 +1517,113 @@ func TestMayorPromptIncludesStallWatch(t *testing.T) {
 	}
 }
 
+// TestMayorPromptIncludesDispatchDontImplement locks in the requirement that
+// the mayor prompt carries a standalone `## Dispatch, don't implement` callout
+// near the top, restating that mayor coordinates and polecats execute. Daniel's
+// 2026-05-07 non-programmer onboarding feedback (mg-5c5b) flagged that mayor
+// occasionally drifts into doing local file edits itself; the rule was
+// implicit before and easy to lose in the surrounding coordination detail.
+// Without these invariants, future edits could silently weaken the
+// dispatch-only contract.
+func TestMayorPromptIncludesDispatchDontImplement(t *testing.T) {
+	data, err := defaultPrompts.ReadFile("prompts/mayor.md")
+	if err != nil {
+		t.Fatalf("read mayor.md: %v", err)
+	}
+	s := string(data)
+
+	// Section header — pinning the literal so the section can't be renamed
+	// without an explicit test update.
+	if !strings.Contains(s, "## Dispatch, don't implement") {
+		t.Error("mayor.md: expected `## Dispatch, don't implement` standalone callout")
+	}
+	// The core executor/dispatcher framing — the line mayor must internalize.
+	if !strings.Contains(s, "polecat is the executor") || !strings.Contains(s, "you are the dispatcher") {
+		t.Error("mayor.md: expected `polecat is the executor; you are the dispatcher` framing")
+	}
+	// Carve-outs must be preserved so mayor doesn't over-correct and refuse
+	// to do its actual coordination work (ticket edits, mail, read-only
+	// diagnostics, polecat lifecycle). All four belong in the prompt.
+	for _, marker := range []string{
+		"Editing `mg` ticket bodies",
+		"Mail to other agents",
+		"Read-only diagnostics",
+		"Spawning, nudging, stopping polecats",
+	} {
+		if !strings.Contains(s, marker) {
+			t.Errorf("mayor.md: expected dispatch-rule carve-out marker %q", marker)
+		}
+	}
+	// The "just fix" anti-pattern is the specific failure mode Daniel
+	// surfaced — mayor jumping in to make a quick local edit instead of
+	// dispatching. Pin the literal so the warning can't quietly drop.
+	if !strings.Contains(s, "just fix") {
+		t.Error("mayor.md: expected `just fix` anti-pattern callout in the dispatch rule")
+	}
+	// The rule must precede the Coordination Loop so it frames every
+	// subsequent step. If it slips below the loop, it loses its priming role.
+	dispatchIdx := strings.Index(s, "## Dispatch, don't implement")
+	loopIdx := strings.Index(s, "## Coordination Loop")
+	if dispatchIdx < 0 || loopIdx < 0 || dispatchIdx >= loopIdx {
+		t.Errorf("mayor.md: expected `## Dispatch, don't implement` to precede `## Coordination Loop` (dispatchIdx=%d, loopIdx=%d)", dispatchIdx, loopIdx)
+	}
+}
+
+// TestMayorPromptIncludesUserConfigRule locks in the requirement that the
+// mayor prompt carries a standalone `## User setup is configuration, not a
+// platform change` callout. Daniel's 2026-05-07 non-programmer onboarding
+// feedback (mg-5c5b) flagged that mayor was misrouting user-side workflow
+// setup as platform feature requests against pogo / macguffin source. The
+// carve-out for genuine platform bugs must be preserved so this rule doesn't
+// over-correct and silence real defect reports.
+func TestMayorPromptIncludesUserConfigRule(t *testing.T) {
+	data, err := defaultPrompts.ReadFile("prompts/mayor.md")
+	if err != nil {
+		t.Fatalf("read mayor.md: %v", err)
+	}
+	s := string(data)
+
+	// Section header — pinning the literal so the section can't be renamed
+	// without an explicit test update.
+	if !strings.Contains(s, "## User setup is configuration, not a platform change") {
+		t.Error("mayor.md: expected `## User setup is configuration, not a platform change` standalone callout")
+	}
+	// The user-config locations the rule applies to. Pin each so a partial
+	// rewrite can't drop one and silently reintroduce the failure mode for
+	// that path.
+	for _, marker := range []string{
+		"~/.pogo/",
+		"~/.config/pogo/",
+		"~/.claude/CLAUDE.md",
+	} {
+		if !strings.Contains(s, marker) {
+			t.Errorf("mayor.md: expected user-config path marker %q", marker)
+		}
+	}
+	// The platform-ticket threshold — explicit user signal that the default
+	// behavior is wrong, not just "could be easier." Pin both phrasings since
+	// each captures a distinct part of the contract.
+	if !strings.Contains(s, "broken in the pogo defaults") {
+		t.Error("mayor.md: expected `broken in the pogo defaults` threshold for platform tickets")
+	}
+	if !strings.Contains(s, "ship for everyone") {
+		t.Error("mayor.md: expected `ship for everyone` threshold for platform tickets")
+	}
+	// The carve-out for genuine platform bugs surfaced via user setup must
+	// stay — otherwise a strict reading of the rule silences real defect
+	// reports (e.g., `pogo init` producing a broken prompt).
+	if !strings.Contains(s, "exposed platform bugs") && !strings.Contains(s, "exposes a real platform") && !strings.Contains(s, "uncovers a real platform defect") {
+		t.Error("mayor.md: expected carve-out for platform bugs exposed by user setup")
+	}
+	// The rule must precede the Coordination Loop so it frames how mayor
+	// triages user requests before the dispatch steps.
+	cfgIdx := strings.Index(s, "## User setup is configuration")
+	loopIdx := strings.Index(s, "## Coordination Loop")
+	if cfgIdx < 0 || loopIdx < 0 || cfgIdx >= loopIdx {
+		t.Errorf("mayor.md: expected user-config rule to precede `## Coordination Loop` (cfgIdx=%d, loopIdx=%d)", cfgIdx, loopIdx)
+	}
+}
+
 // TestPMTemplateIncludesHeartbeat locks in the requirement that the PM template
 // (a) instructs the mail-check schedule to refresh sweep.log on every fire and
 // (b) documents mayor's stall-watch contract so PMs know they will be restarted
