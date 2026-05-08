@@ -1742,6 +1742,7 @@ the actual restart. The recovery agent rate-limits to one kickstart per
 	var submitRepo string
 	var submitTarget string
 	var submitAuthor string
+	var submitAutoCreateTarget bool
 	var cmdRefinerySubmit = &cobra.Command{
 		Use:   "submit <branch>",
 		Short: "Submit a branch to the merge queue",
@@ -1749,6 +1750,11 @@ the actual restart. The recovery agent rate-limits to one kickstart per
 
 The refinery will fetch the branch, run quality gates (build.sh/test.sh or
 .pogo/refinery.toml), and fast-forward merge to the target ref if they pass.
+
+By default the refinery rejects MRs whose --target ref does not exist on
+origin (catches typos like "fam-45" instead of "feat-45"). Pass
+--auto-create-target to opt into having the refinery create the target ref
+from the repo's default branch when it is missing.
 
 Example:
   pogo refinery submit polecat-a3f --repo=/path/to/repo`,
@@ -1759,10 +1765,11 @@ Example:
 				cli.ExitWithError(jsonOutput, "--repo is required", cli.ExitError)
 			}
 			id, err := client.SubmitMerge(refinery.SubmitRequest{
-				RepoPath:  submitRepo,
-				Branch:    branch,
-				TargetRef: submitTarget,
-				Author:    submitAuthor,
+				RepoPath:            submitRepo,
+				Branch:              branch,
+				TargetRef:           submitTarget,
+				Author:              submitAuthor,
+				AutoCreateTargetRef: submitAutoCreateTarget,
 			})
 			if err != nil {
 				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
@@ -1777,6 +1784,7 @@ Example:
 	cmdRefinerySubmit.Flags().StringVar(&submitRepo, "repo", "", "Repository path (required)")
 	cmdRefinerySubmit.Flags().StringVar(&submitTarget, "target", "main", "Target ref to merge into")
 	cmdRefinerySubmit.Flags().StringVar(&submitAuthor, "author", "", "Author agent name")
+	cmdRefinerySubmit.Flags().BoolVar(&submitAutoCreateTarget, "auto-create-target", false, "Create the target ref from the repo's default branch if it doesn't exist (off by default; safer to fail loudly on typos)")
 
 	var cmdRefineryStatus = &cobra.Command{
 		Use:   "status",

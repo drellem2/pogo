@@ -12,6 +12,9 @@ type SubmitRequest struct {
 	Branch    string `json:"branch"`
 	TargetRef string `json:"target_ref,omitempty"` // default: "main"
 	Author    string `json:"author,omitempty"`
+	// AutoCreateTargetRef opts into branching the target ref off the repo's
+	// default branch when it does not exist on origin. Default false.
+	AutoCreateTargetRef bool `json:"auto_create_target_ref,omitempty"`
 }
 
 // RegisterHandlers registers refinery API endpoints on the given mux,
@@ -100,10 +103,11 @@ func (r *Refinery) handleSubmit(w http.ResponseWriter, req *http.Request) {
 	}
 
 	mr := MergeRequest{
-		RepoPath:  submitReq.RepoPath,
-		Branch:    submitReq.Branch,
-		TargetRef: submitReq.TargetRef,
-		Author:    submitReq.Author,
+		RepoPath:            submitReq.RepoPath,
+		Branch:              submitReq.Branch,
+		TargetRef:           submitReq.TargetRef,
+		Author:              submitReq.Author,
+		AutoCreateTargetRef: submitReq.AutoCreateTargetRef,
 	}
 
 	id, err := r.Submit(mr)

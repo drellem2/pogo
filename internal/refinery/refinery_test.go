@@ -1381,6 +1381,134 @@ func TestFailureCountDisabledThreshold(t *testing.T) {
 	}
 }
 
+// TestSubmitAutoCreateTargetRef covers the opt-in behaviour added for gh-issue
+// #14. Default behaviour (auto-create off) must keep erroring out when the
+// target ref doesn't exist; auto-create on must branch the missing ref off
+// the repo's default branch and then accept the MR.
+func TestSubmitAutoCreateTargetRef(t *testing.T) {
+	t.Run("default off — missing target still errors", func(t *testing.T) {
+		originDir := initBareOrigin(t, "main")
+		r, err := New(Config{
+			Enabled:      true,
+			PollInterval: time.Hour,
+			WorktreeDir:  t.TempDir(),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = r.Submit(MergeRequest{
+			RepoPath:  originDir,
+			Branch:    "feature-1",
+			TargetRef: "fam-45",
+			Author:    "test-cat",
+		})
+		if err == nil {
+			t.Fatal("expected error for missing target_ref with auto-create off")
+		}
+		if !strings.Contains(err.Error(), "fam-45") {
+			t.Errorf("expected error to mention target ref name, got: %v", err)
+		}
+	})
+
+	t.Run("opt-in on bare repo — creates target from HEAD", func(t *testing.T) {
+		originDir := initBareOrigin(t, "main")
+		r, err := New(Config{
+			Enabled:      true,
+			PollInterval: time.Hour,
+			WorktreeDir:  t.TempDir(),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		id, err := r.Submit(MergeRequest{
+			RepoPath:            originDir,
+			Branch:              "feature-1",
+			TargetRef:           "fam-45",
+			Author:              "test-cat",
+			AutoCreateTargetRef: true,
+		})
+		if err != nil {
+			t.Fatalf("expected auto-create to succeed, got: %v", err)
+		}
+		if id == "" {
+			t.Fatal("expected non-empty MR id")
+		}
+		// Sanity: the new ref should now resolve in the bare repo and point
+		// at the same commit as main (the source branch).
+		mainSha, err := exec.Command("git", "-C", originDir, "rev-parse", "refs/heads/main").CombinedOutput()
+		if err != nil {
+			t.Fatalf("rev-parse main: %v: %s", err, mainSha)
+		}
+		newSha, err := exec.Command("git", "-C", originDir, "rev-parse", "refs/heads/fam-45").CombinedOutput()
+		if err != nil {
+			t.Fatalf("rev-parse fam-45: %v: %s", err, newSha)
+		}
+		if strings.TrimSpace(string(mainSha)) != strings.TrimSpace(string(newSha)) {
+			t.Errorf("auto-created ref points at %s, expected %s", strings.TrimSpace(string(newSha)), strings.TrimSpace(string(mainSha)))
+		}
+	})
+
+	t.Run("opt-in on working clone — pushes target to origin", func(t *testing.T) {
+		originDir := initBareOrigin(t, "main")
+		workDir := t.TempDir()
+		run(t, workDir, "git", "clone", originDir, ".")
+		run(t, workDir, "git", "config", "user.email", "test@test.com")
+		run(t, workDir, "git", "config", "user.name", "Test")
+
+		r, err := New(Config{
+			Enabled:      true,
+			PollInterval: time.Hour,
+			WorktreeDir:  t.TempDir(),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = r.Submit(MergeRequest{
+			RepoPath:            workDir,
+			Branch:              "feature-1",
+			TargetRef:           "fam-45",
+			Author:              "test-cat",
+			AutoCreateTargetRef: true,
+		})
+		if err != nil {
+			t.Fatalf("expected auto-create from working clone to succeed, got: %v", err)
+		}
+		// The new ref should now appear on origin via ls-remote.
+		out, err := exec.Command("git", "-C", workDir, "ls-remote", "--heads", "origin", "fam-45").CombinedOutput()
+		if err != nil {
+			t.Fatalf("ls-remote: %v: %s", err, out)
+		}
+		if strings.TrimSpace(string(out)) == "" {
+			t.Error("expected fam-45 to exist on origin after auto-create, ls-remote returned empty")
+		}
+	})
+
+	t.Run("opt-in but default branch undetectable — still errors", func(t *testing.T) {
+		// detectDefaultBranch falls back to "main" via HEAD in a bare repo
+		// initialised with -b main, so to exercise the failure path we point
+		// Submit at a path that isn't a git repo at all.
+		notARepo := t.TempDir()
+		r, err := New(Config{
+			Enabled:      true,
+			PollInterval: time.Hour,
+			WorktreeDir:  t.TempDir(),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = r.Submit(MergeRequest{
+			RepoPath:            notARepo,
+			Branch:              "feature-1",
+			TargetRef:           "fam-45",
+			Author:              "test-cat",
+			AutoCreateTargetRef: true,
+		})
+		if err == nil {
+			t.Fatal("expected error when default branch can't be detected")
+		}
+	})
+}
+
 func run(t *testing.T, dir string, name string, args ...string) {
 	t.Helper()
 	cmd := exec.Command(name, args...)
