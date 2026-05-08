@@ -81,16 +81,22 @@ const (
 
 // MergeRequest represents a branch submitted for merging.
 type MergeRequest struct {
-	ID         string      `json:"id"`
-	RepoPath   string      `json:"repo_path"`
-	Branch     string      `json:"branch"`
-	TargetRef  string      `json:"target_ref"` // e.g. "main"
-	Author     string      `json:"author"`     // agent name that submitted
-	Status     MergeStatus `json:"status"`
-	SubmitTime time.Time   `json:"submit_time"`
-	DoneTime   time.Time   `json:"done_time,omitempty"`
-	Error      string      `json:"error,omitempty"`
-	GateOutput string      `json:"gate_output,omitempty"`
+	ID        string      `json:"id"`
+	RepoPath  string      `json:"repo_path"`
+	Branch    string      `json:"branch"`
+	TargetRef string      `json:"target_ref"` // e.g. "main"
+	Author    string      `json:"author"`     // agent name that submitted
+	Status    MergeStatus `json:"status"`
+	// AutoCreateTargetRef opts the request into branching the target ref off
+	// the repo's default branch when it does not yet exist on origin. Off by
+	// default — the safe behaviour (typo in target_ref → error) stays the
+	// default. Submitters that genuinely want a new feature branch carved
+	// off the default must set this explicitly.
+	AutoCreateTargetRef bool      `json:"auto_create_target_ref,omitempty"`
+	SubmitTime          time.Time `json:"submit_time"`
+	DoneTime            time.Time `json:"done_time,omitempty"`
+	Error               string    `json:"error,omitempty"`
+	GateOutput          string    `json:"gate_output,omitempty"`
 	// DeployError is set when a post-merge deploy hook ran and failed. The
 	// merge itself still succeeded (Status remains StatusMerged); deploy
 	// failure is surfaced for diagnostics, not rolled back. Empty when no
@@ -214,7 +220,27 @@ func (r *Refinery) Submit(req MergeRequest) (string, error) {
 
 	// Validate target ref before acquiring lock (shells out to git).
 	if err := validateTargetRef(req.RepoPath, req.TargetRef); err != nil {
-		return "", err
+		if !req.AutoCreateTargetRef {
+			return "", err
+		}
+		// Auto-create requested. Branch off the repo's default branch.
+		// If the default branch *also* can't be located, surface the
+		// original validation error — auto-create is a convenience, not
+		// a way to paper over a broken repo.
+		sourceRef, derr := detectDefaultBranch(req.RepoPath)
+		if derr != nil {
+			return "", fmt.Errorf("auto-create target_ref %q: detect default branch: %w (original: %v)", req.TargetRef, derr, err)
+		}
+		if sourceRef == req.TargetRef {
+			return "", err
+		}
+		if cerr := createTargetRef(req.RepoPath, req.TargetRef, sourceRef); cerr != nil {
+			return "", fmt.Errorf("auto-create target_ref %q from %q: %w", req.TargetRef, sourceRef, cerr)
+		}
+		log.Printf("refinery: auto-created target_ref %q from %q in %s", req.TargetRef, sourceRef, req.RepoPath)
+		if rverr := validateTargetRef(req.RepoPath, req.TargetRef); rverr != nil {
+			return "", fmt.Errorf("auto-created target_ref %q but post-validation failed: %w", req.TargetRef, rverr)
+		}
 	}
 
 	r.mu.Lock()
@@ -274,6 +300,64 @@ func validateTargetRef(repoPath, targetRef string) error {
 	// local branch must not mask a missing remote branch.
 	if strings.TrimSpace(string(out)) == "" {
 		return fmt.Errorf("target_ref %q not found on origin in repo %s", targetRef, repoPath)
+	}
+	return nil
+}
+
+// detectDefaultBranch returns the default branch name for repoPath. It tries
+// origin/HEAD first (working clones with a populated remote), then HEAD itself
+// (bare repos used in tests). Returns an error only when neither lookup works.
+func detectDefaultBranch(repoPath string) (string, error) {
+	out, err := exec.Command("git", "-C", repoPath, "symbolic-ref", "--short", "refs/remotes/origin/HEAD").CombinedOutput()
+	if err == nil {
+		s := strings.TrimSpace(string(out))
+		if rest, ok := strings.CutPrefix(s, "origin/"); ok && rest != "" {
+			return rest, nil
+		}
+	}
+	out, err = exec.Command("git", "-C", repoPath, "symbolic-ref", "--short", "HEAD").CombinedOutput()
+	if err == nil {
+		s := strings.TrimSpace(string(out))
+		if s != "" {
+			return s, nil
+		}
+	}
+	return "", fmt.Errorf("could not determine default branch for %s", repoPath)
+}
+
+// createTargetRef creates targetRef pointing at sourceRef in repoPath. In a
+// working clone it pushes origin/<source> to a new branch on origin; in a bare
+// repo (the layout used by tests) it creates the branch directly via update-ref.
+func createTargetRef(repoPath, targetRef, sourceRef string) error {
+	out, err := exec.Command("git", "-C", repoPath, "rev-parse", "--is-bare-repository").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("inspect %s: %v: %s", repoPath, err, strings.TrimSpace(string(out)))
+	}
+	if strings.TrimSpace(string(out)) == "true" {
+		shaOut, err := exec.Command("git", "-C", repoPath, "rev-parse", "--verify", "refs/heads/"+sourceRef).CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("source_ref %q not found in %s: %s", sourceRef, repoPath, strings.TrimSpace(string(shaOut)))
+		}
+		sha := strings.TrimSpace(string(shaOut))
+		if upOut, err := exec.Command("git", "-C", repoPath, "update-ref", "refs/heads/"+targetRef, sha).CombinedOutput(); err != nil {
+			return fmt.Errorf("update-ref %s in %s: %v: %s", targetRef, repoPath, err, strings.TrimSpace(string(upOut)))
+		}
+		return nil
+	}
+
+	// Working clone path: make sure we have origin/<source> locally, then
+	// push it to a new branch on origin. GIT_TERMINAL_PROMPT=0 so an
+	// auth-required HTTPS remote fails fast instead of hanging.
+	fetchCmd := exec.Command("git", "-C", repoPath, "fetch", "origin", sourceRef)
+	fetchCmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	if fOut, err := fetchCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("fetch source_ref %q from origin: %v: %s", sourceRef, err, strings.TrimSpace(string(fOut)))
+	}
+	pushCmd := exec.Command("git", "-C", repoPath, "push", "origin",
+		"refs/remotes/origin/"+sourceRef+":refs/heads/"+targetRef)
+	pushCmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	if pOut, err := pushCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("push %s:%s to origin: %v: %s", sourceRef, targetRef, err, strings.TrimSpace(string(pOut)))
 	}
 	return nil
 }
