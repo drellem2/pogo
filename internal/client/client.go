@@ -5,6 +5,7 @@
 package client
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -97,14 +99,97 @@ func GetFullHealth() (*health.FullResponse, error) {
 	return &out, nil
 }
 
+// startupHealthTimeout bounds how long StartServer waits for pogod to bind
+// after spawning it. 5s matches the design in mg-71e6: long enough that a
+// cold-start pogod has time to come up, short enough that a true bind
+// failure surfaces promptly to the user instead of a silent false-success.
+const startupHealthTimeout = 5 * time.Second
+
 func StartServer() error {
-	// Store the result of os.exec("pogod") in a variable and describe its type
-	// If the type is a pointer to a process, then the server is running
 	cmd := exec.Command("pogod")
+	return startServerCmd(cmd, HealthCheck, startupHealthTimeout)
+}
+
+// startServerCmd spawns the given command and waits for healthCheck to
+// succeed within timeout. It captures pogod's stdout+stderr so that,
+// when the daemon fails to bind (or exits early), the error message
+// surfaces the underlying cause rather than reporting a false success.
+// Both streams are captured because pogod's startup-error path is
+// inconsistent — lockfile errors go to stdout (fmt.Printf) while runtime
+// log lines go to stderr (log package).
+//
+// On success, the spawned process is left running. On failure, the
+// process is killed and its captured output is included in the returned
+// error (truncated to a sane prefix).
+func startServerCmd(cmd *exec.Cmd, healthCheck func() error, timeout time.Duration) error {
+	var output bytes.Buffer
+	var outputMu sync.Mutex
+	writer := &lockedWriter{w: &output, mu: &outputMu}
+	cmd.Stdout = writer
+	cmd.Stderr = writer
+
 	if err := cmd.Start(); err != nil {
-		return err
+		return fmt.Errorf("failed to spawn pogod: %w", err)
 	}
-	return nil
+
+	exited := make(chan error, 1)
+	go func() { exited <- cmd.Wait() }()
+
+	readOutput := func() string {
+		outputMu.Lock()
+		defer outputMu.Unlock()
+		msg := strings.TrimSpace(output.String())
+		const max = 1024
+		if len(msg) > max {
+			msg = msg[:max] + "..."
+		}
+		return msg
+	}
+
+	deadline := time.After(timeout)
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
+	if err := healthCheck(); err == nil {
+		return nil
+	}
+
+	for {
+		select {
+		case waitErr := <-exited:
+			msg := readOutput()
+			if msg == "" {
+				return fmt.Errorf("pogod exited before binding: %v", waitErr)
+			}
+			return fmt.Errorf("pogod exited before binding: %s", msg)
+		case <-deadline:
+			_ = cmd.Process.Kill()
+			<-exited
+			msg := readOutput()
+			if msg == "" {
+				return fmt.Errorf("pogod did not become healthy within %s", timeout)
+			}
+			return fmt.Errorf("pogod did not become healthy within %s: %s", timeout, msg)
+		case <-ticker.C:
+			if err := healthCheck(); err == nil {
+				return nil
+			}
+		}
+	}
+}
+
+// lockedWriter serializes writes to an underlying buffer so that the
+// background cmd.Wait goroutine and the polling goroutine can safely
+// read pogod's stderr after a deadline trips.
+type lockedWriter struct {
+	w  *bytes.Buffer
+	mu *sync.Mutex
+}
+
+func (l *lockedWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(p)
 }
 
 // GetServerMode returns the current run mode of the server ("full" or "index-only").
@@ -183,28 +268,11 @@ func StopServer() error {
 
 // Run closure with health check
 func RunWithHealthCheck[T ClientResp](run func() (T, error)) (T, error) {
-	err := HealthCheck()
-	if err != nil {
-		err = StartServer()
-		if err != nil {
-			return nil, err
-		}
-		success := false
-		// Loop for up to half a second to check if the server is running
-		// Get current time
-		startTime := time.Now()
-		// Inside for loop, check current time against startTime
-		for time.Now().Sub(startTime) < 2000*time.Millisecond {
-			err = HealthCheck()
-			if err == nil {
-				fmt.Println("Health check successful")
-				success = true
-				break
-			}
-			// Wait 500ms to give the server time to start
-			time.Sleep(500 * time.Millisecond)
-		}
-		if !success {
+	if err := HealthCheck(); err != nil {
+		// StartServer now blocks until pogod is healthy or returns a
+		// descriptive error (including captured stderr) — no separate
+		// retry loop needed here.
+		if err := StartServer(); err != nil {
 			return nil, err
 		}
 	}
