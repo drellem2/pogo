@@ -105,6 +105,8 @@ You are the mayor — the coordinator for a pogo agent workspace...
 
 Recognized fields: `auto_start`, `restart_on_crash`, `nudge_on_start`, `worktree`, `command`. Prompts without frontmatter get type-based defaults (crew restart on crash, polecats don't), so existing prompts keep working unchanged. Parser internals live in `internal/agent/prompt.go` (`ParsePromptFrontmatter`, `AgentMeta`).
 
+**`restart_on_crash = true` is an always-on contract.** When set, pogod respawns the agent on **any** exit — clean exit (Claude finishes its loop and returns 0), crash (non-zero exit or signal), or explicit `pogo agent stop <name>`. The kill switch for an always-on agent is to remove `restart_on_crash = true` from its frontmatter (or set it to `false`) and then stop it. Registry teardown via `StopAll` (pogod shutdown) bypasses respawn unconditionally so daemon restart and test cleanup don't loop. Implementation: `internal/agent/agent.go` (`Stop`, `StopAll`, `Respawn`) and the OnExit hook in `cmd/pogod/main.go`.
+
 Co-locating "what the agent does" (the prose) with "how it runs" (the frontmatter) keeps a single source of truth for agent identity. There is no separate roster file, no orchestration DAG, no handler-side switch on agent name — adding a new crew agent is a matter of dropping a markdown file with `auto_start = true` into `~/.pogo/agents/crew/`.
 
 ### Prompt files are the roster

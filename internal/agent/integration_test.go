@@ -501,6 +501,139 @@ func TestRestartOnCrashFlagDrivesBranching(t *testing.T) {
 	}
 }
 
+// TestStopRespawnsRestartOnCrashAgent reproduces the architect bug from
+// mg-dbf4: when an agent with RestartOnCrash=true is stopped (via Stop()
+// or DELETE /agents/<name>), the OnExit hook scheduled a Respawn() but
+// Stop() removed the agent from the registry first, so the respawn lost
+// the race and the agent stayed dead. After the fix, Stop() leaves
+// restart_on_crash agents in the registry so the supervisor can bring
+// them back per the always-on contract.
+func TestStopRespawnsRestartOnCrashAgent(t *testing.T) {
+	socketDir, err := os.MkdirTemp("/tmp", "pogo-stop-restart-sock-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(socketDir)
+
+	reg, err := NewRegistry(socketDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reg.StopAll(2 * time.Second)
+
+	restartCh := make(chan int, 4)
+	// Mirror the production OnExit hook from cmd/pogod/main.go: respawn
+	// on any exit (clean, crash, or stop) when RestartOnCrash=true.
+	reg.SetOnExit(func(a *Agent, exitErr error) {
+		if !a.RestartOnCrash {
+			a.Cleanup()
+			reg.Remove(a.Name)
+			return
+		}
+		go func() {
+			time.Sleep(50 * time.Millisecond)
+			respawned, rerr := reg.Respawn(a.Name)
+			if rerr != nil {
+				return
+			}
+			restartCh <- respawned.PID
+		}()
+	})
+
+	// Use `cat` so the process stays alive until we send SIGTERM via Stop —
+	// this isolates the Stop()/Respawn() race from a fast-exiting command.
+	a, err := reg.Spawn(SpawnRequest{
+		Name:           "stop-respawn",
+		Type:           TypeCrew,
+		Command:        []string{"cat"},
+		RestartOnCrash: true,
+	})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	originalPID := a.PID
+
+	if err := reg.Stop("stop-respawn", 2*time.Second); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	select {
+	case newPID := <-restartCh:
+		if newPID == originalPID {
+			t.Errorf("respawn returned same PID %d as original — process not actually restarted", newPID)
+		}
+		respawned := reg.Get("stop-respawn")
+		if respawned == nil {
+			t.Fatal("respawned agent missing from registry")
+		}
+		if respawned.RestartCount != 1 {
+			t.Errorf("RestartCount = %d, want 1", respawned.RestartCount)
+		}
+		if !respawned.RestartOnCrash {
+			t.Error("Respawn did not preserve RestartOnCrash=true")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("agent was not respawned after Stop — supervisor failed restart_on_crash=true contract")
+	}
+}
+
+// TestStopAllShutsDownRestartOnCrashAgent verifies that StopAll prevents
+// in-flight respawn goroutines from resurrecting agents during teardown.
+// Without the registry shutdown signal, a restart_on_crash agent stopped
+// via StopAll would come back 2s later — bad on pogod shutdown and
+// disastrous in test cleanup (infinite respawn loop with `true` commands).
+func TestStopAllShutsDownRestartOnCrashAgent(t *testing.T) {
+	socketDir, err := os.MkdirTemp("/tmp", "pogo-stopall-sock-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(socketDir)
+
+	reg, err := NewRegistry(socketDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	respawnAttempted := make(chan error, 4)
+	reg.SetOnExit(func(a *Agent, exitErr error) {
+		if !a.RestartOnCrash {
+			a.Cleanup()
+			reg.Remove(a.Name)
+			return
+		}
+		go func() {
+			time.Sleep(50 * time.Millisecond)
+			_, rerr := reg.Respawn(a.Name)
+			respawnAttempted <- rerr
+		}()
+	})
+
+	if _, err := reg.Spawn(SpawnRequest{
+		Name:           "stopall-restart",
+		Type:           TypeCrew,
+		Command:        []string{"cat"},
+		RestartOnCrash: true,
+	}); err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+
+	reg.StopAll(2 * time.Second)
+
+	if a := reg.Get("stopall-restart"); a != nil {
+		t.Errorf("agent still in registry after StopAll: %+v", a)
+	}
+
+	select {
+	case rerr := <-respawnAttempted:
+		if rerr == nil {
+			t.Error("Respawn succeeded after StopAll — registry shutdown not honored")
+		}
+	case <-time.After(500 * time.Millisecond):
+		// Goroutine may not have fired yet; that's fine — the important
+		// invariant is that the agent is gone from the registry.
+	}
+}
+
 func TestPolecatWorktreeDirRemovedOnExit(t *testing.T) {
 	socketDir, err := os.MkdirTemp("/tmp", "pogo-wtdir-sock-")
 	if err != nil {
