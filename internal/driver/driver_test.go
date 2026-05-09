@@ -79,6 +79,46 @@ func TestPluginsLoad(t *testing.T) {
 	}
 }
 
+// TestInitIgnoresCwdWithPogoBinaries guards mg-b08c: when POGO_PLUGIN_PATH is
+// unset, Init() must NOT scan the current working directory, even if cwd
+// contains files matching the "pogo*" glob (as happens when the daemon is run
+// from the pogo source tree itself, ~/DUGLocal/pogo/, or any agent worktree).
+// Pre-fix, this would have tried to launch every pogo* binary in cwd as a
+// plugin, log.Fatal'ing the daemon on the first failure.
+func TestInitIgnoresCwdWithPogoBinaries(t *testing.T) {
+	tmp := t.TempDir()
+	for _, name := range []string{"pogo-bait", "pogod-bait", "pogo-plugin-bait"} {
+		path := filepath.Join(tmp, name)
+		if err := os.WriteFile(path, []byte("not a real plugin"), 0755); err != nil {
+			t.Fatalf("seed %s: %v", name, err)
+		}
+	}
+
+	prevDir, _ := os.Getwd()
+	defer os.Chdir(prevDir)
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatalf("chdir tmp: %v", err)
+	}
+
+	t.Setenv("POGO_PLUGIN_PATH", "")
+	t.Setenv("POGO_HOME", filepath.Join(tmp, "no-such-pogo-home"))
+
+	driver.Init()
+	defer driver.Kill()
+
+	// Only the two builtins should be registered. The pogo*-bait files in cwd
+	// must be ignored — discovering them would mean the cwd-fallback regressed.
+	paths := driver.GetPluginPaths()
+	if len(paths) != 2 {
+		t.Errorf("expected 2 builtin plugins, got %d: %v", len(paths), paths)
+	}
+	for _, p := range paths {
+		if filepath.Dir(p) == tmp {
+			t.Errorf("plugin %q discovered from cwd — cwd-fallback regression", p)
+		}
+	}
+}
+
 // Test doesn't work for builtin plugins
 
 // func TestPluginRestarts(t *testing.T) {

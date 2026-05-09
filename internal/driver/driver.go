@@ -129,43 +129,10 @@ func Init() {
 	clients = make(map[string]*plugin.Client)
 	Interfaces = make(map[string]*pogoPlugin.IPogoPlugin)
 
-	relativePluginPath := os.Getenv("POGO_PLUGIN_PATH")
-	pluginPath, err := filepath.Abs(relativePluginPath)
-	if err != nil {
-		fmt.Printf("Error getting absolute path for %s: %v", relativePluginPath, err)
-		return
+	if pluginPath := resolvePluginPath(); pluginPath != "" {
+		discoverExternalPlugins(pluginPath)
 	}
 
-	// Test if pluginPath is empty string or whitespace
-
-	if pluginPath == "" {
-		fmt.Printf("POGO_PLUGIN_PATH not set, using current directory\n")
-		pluginPath, _ = os.Getwd()
-	}
-
-	paths, err := plugin.Discover("pogo*", pluginPath)
-	if err != nil {
-		fmt.Printf("Error discovering plugins: %v", err)
-		return
-	}
-	fmt.Printf("Discovered %d plugins in dir %s: %v\n", len(paths), pluginPath, paths)
-	for _, path := range paths {
-		// Try Windows workaround
-		// Replace double backslash with single backslash
-		// If windows, replace single backslash with double backslash
-		// if os.PathSeparator == '\\' {
-		// 	path = strings.Replace(path, "\\\\", "\\", -1)
-		// 	path = strings.Replace(path, "\\", "/", -1)
-		// }
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					fmt.Printf("Caught error during plugin creation: %v", r)
-				}
-			}()
-			startPlugin(path)
-		}()
-	}
 	for name, plugin := range builtinRegistry {
 		if Interfaces[name] != nil {
 			logger.Debug("Found runtime copy of plugin, skipping builtin", "name", name)
@@ -175,9 +142,61 @@ func Init() {
 	}
 }
 
+// resolvePluginPath returns the directory to scan for external plugins.
+// Order: $POGO_PLUGIN_PATH, then $POGO_HOME/plugin, then ~/.pogo/plugin.
+// Returns "" if none can be resolved (e.g. unreadable home dir) — the caller
+// should skip external discovery and rely on builtins.
+//
+// Pre-mg-b08c this fell back to cwd, which made `pogod` load whatever pogo*
+// binaries lived next to wherever it was launched. Foot-gun once pogod is
+// invoked from agent worktrees and the pogo source tree itself.
+func resolvePluginPath() string {
+	if env := os.Getenv("POGO_PLUGIN_PATH"); env != "" {
+		abs, err := filepath.Abs(env)
+		if err != nil {
+			fmt.Printf("Error getting absolute path for POGO_PLUGIN_PATH=%q: %v\n", env, err)
+			return ""
+		}
+		return abs
+	}
+	if home := os.Getenv("POGO_HOME"); home != "" {
+		return filepath.Join(home, "plugin")
+	}
+	userHome, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(userHome, ".pogo", "plugin")
+}
+
+func discoverExternalPlugins(pluginPath string) {
+	if _, err := os.Stat(pluginPath); err != nil {
+		if !os.IsNotExist(err) {
+			fmt.Printf("Cannot stat plugin dir %s: %v\n", pluginPath, err)
+		}
+		return
+	}
+	paths, err := plugin.Discover("pogo*", pluginPath)
+	if err != nil {
+		fmt.Printf("Error discovering plugins: %v\n", err)
+		return
+	}
+	fmt.Printf("Discovered %d plugins in dir %s: %v\n", len(paths), pluginPath, paths)
+	for _, path := range paths {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					fmt.Printf("Caught error during plugin creation: %v", r)
+				}
+			}()
+			startPlugin(path)
+		}()
+	}
+}
+
 func startPlugin(path string) {
 	// Create an hclog.Logger
-	logger := hclog.New(&hclog.LoggerOptions{
+	pluginLogger := hclog.New(&hclog.LoggerOptions{
 		Name:   path,
 		Output: os.Stdout,
 		Level:  hclog.Debug,
@@ -185,15 +204,16 @@ func startPlugin(path string) {
 	// Start plugins
 	file, err := os.Open(path)
 	if err != nil {
-		log.Fatal(err)
+		logger.Error("Skipping plugin: cannot open", "path", path, "err", err)
+		return
 	}
 	defer file.Close()
 
 	hash := sha256.New()
 
-	_, err = io.Copy(hash, file)
-	if err != nil {
-		log.Fatal(err)
+	if _, err = io.Copy(hash, file); err != nil {
+		logger.Error("Skipping plugin: cannot hash", "path", path, "err", err)
+		return
 	}
 
 	sum := hash.Sum(nil)
@@ -208,7 +228,7 @@ func startPlugin(path string) {
 		HandshakeConfig: handshakeConfig,
 		Plugins:         pluginMap,
 		Cmd:             exec.Command(path),
-		Logger:          logger,
+		Logger:          pluginLogger,
 		SecureConfig:    secureConfig,
 	})
 	clients[path] = client
@@ -216,13 +236,19 @@ func startPlugin(path string) {
 	// Connect via RPC
 	rpcClient, err := client.Client()
 	if err != nil {
-		log.Fatal(err)
+		logger.Error("Skipping plugin: rpc client failed", "path", path, "err", err)
+		client.Kill()
+		delete(clients, path)
+		return
 	}
 
 	// Request the plugin
 	raw, err := rpcClient.Dispense("basicSearch")
 	if err != nil {
-		log.Fatal(err)
+		logger.Error("Skipping plugin: dispense failed", "path", path, "err", err)
+		client.Kill()
+		delete(clients, path)
+		return
 	}
 	praw := raw.(pogoPlugin.IPogoPlugin)
 	Interfaces[path] = &praw
