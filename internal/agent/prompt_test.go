@@ -543,7 +543,7 @@ func TestInstallPromptsUpdatesStaleFiles(t *testing.T) {
 	defer os.Setenv("HOME", origHome)
 
 	// First install — should install files
-	result, err := InstallPrompts(false)
+	result, err := InstallPrompts(InstallOpts{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -555,7 +555,7 @@ func TestInstallPromptsUpdatesStaleFiles(t *testing.T) {
 	}
 
 	// Second install — same binary, should skip all
-	result2, err := InstallPrompts(false)
+	result2, err := InstallPrompts(InstallOpts{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -582,7 +582,7 @@ func TestInstallPromptsUpdatesStaleFiles(t *testing.T) {
 	stale := append([]byte("<!-- pogo-prompt-hash: "+oldHash+" -->\n"), oldBody...)
 	os.WriteFile(mayorPath, stale, 0644)
 
-	result3, err := InstallPrompts(false)
+	result3, err := InstallPrompts(InstallOpts{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -621,7 +621,7 @@ func TestInstallPromptsUpdatesUnstampedFiles(t *testing.T) {
 	os.WriteFile(filepath.Join(tmplDir, "polecat.md"), []byte("# Old polecat\n"), 0644)
 	os.WriteFile(filepath.Join(tmplDir, "polecat-qa.md"), []byte("# Old polecat-qa\n"), 0644)
 
-	result, err := InstallPrompts(false)
+	result, err := InstallPrompts(InstallOpts{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -655,7 +655,7 @@ func TestInstallPromptsCrewWithExistingTemplatesDir(t *testing.T) {
 	os.MkdirAll(tmplDir, 0755)
 	os.WriteFile(filepath.Join(tmplDir, "custom.md"), []byte("# Custom template\n"), 0644)
 
-	result, err := InstallPrompts(false)
+	result, err := InstallPrompts(InstallOpts{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -689,7 +689,7 @@ func TestInstallPromptsConflictMatrixSkipsWhenEmbedUnchanged(t *testing.T) {
 	os.Setenv("HOME", tmpHome)
 	defer os.Setenv("HOME", origHome)
 
-	if _, err := InstallPrompts(false); err != nil {
+	if _, err := InstallPrompts(InstallOpts{}); err != nil {
 		t.Fatalf("first InstallPrompts: %v", err)
 	}
 
@@ -713,7 +713,7 @@ func TestInstallPromptsConflictMatrixSkipsWhenEmbedUnchanged(t *testing.T) {
 	}
 	preBody := append([]byte{}, edited...)
 
-	result, err := InstallPrompts(false)
+	result, err := InstallPrompts(InstallOpts{})
 	if err != nil {
 		t.Fatalf("second InstallPrompts: %v", err)
 	}
@@ -782,7 +782,7 @@ func TestInstallPromptsConflictMatrixWritesDistOnUserEditAndEmbedChange(t *testi
 		t.Fatal(err)
 	}
 
-	result, err := InstallPrompts(false)
+	result, err := InstallPrompts(InstallOpts{})
 	if err != nil {
 		t.Fatalf("InstallPrompts: %v", err)
 	}
@@ -841,6 +841,189 @@ func TestInstallPromptsConflictMatrixWritesDistOnUserEditAndEmbedChange(t *testi
 	}
 }
 
+// withFixedNow pins nowFn to a fixed time for the duration of the test so the
+// .bak.<timestamp> suffix is deterministic and the format can be asserted
+// exactly. Returns the suffix the install run will use.
+func withFixedNow(t *testing.T) string {
+	t.Helper()
+	fixed := time.Date(2026, 5, 9, 10, 30, 45, 0, time.UTC)
+	orig := nowFn
+	nowFn = func() time.Time { return fixed }
+	t.Cleanup(func() { nowFn = orig })
+	return ".bak." + fixed.Format(backupTimeLayout)
+}
+
+// installFreshThenEditMayor seeds a tmpHome, runs the matrix install once so
+// mayor.md gets a v1 stamp matching the current binary's embed, then writes a
+// user edit on top of it. Returns the on-disk mayor.md path and the byte
+// contents the user wrote (which the test will compare against the .bak file).
+func installFreshThenEditMayor(t *testing.T, tmpHome string) (string, []byte) {
+	t.Helper()
+	if _, err := InstallPrompts(InstallOpts{}); err != nil {
+		t.Fatalf("seed InstallPrompts: %v", err)
+	}
+	mayorPath := filepath.Join(tmpHome, ".pogo", "agents", "mayor.md")
+	original, err := os.ReadFile(mayorPath)
+	if err != nil {
+		t.Fatalf("read mayor.md: %v", err)
+	}
+	// Preserve the stamp line, append a user-style customization to the
+	// body so currentBodyHash diverges from the recorded body_hash.
+	edited := append([]byte{}, original...)
+	if !strings.HasSuffix(string(edited), "\n") {
+		edited = append(edited, '\n')
+	}
+	edited = append(edited, []byte("\n## My house rules\nKeep PRs small.\n")...)
+	if err := os.WriteFile(mayorPath, edited, 0644); err != nil {
+		t.Fatalf("rewrite mayor.md: %v", err)
+	}
+	return mayorPath, edited
+}
+
+// TestInstallPromptsForceBackupOnUserEdit verifies that --force without
+// --no-backup copies a user-edited canonical to <name>.bak.<ts> *before*
+// overwriting it, names the backup with the deterministic compact-ISO-8601
+// suffix from backupTimeLayout, records the (Path, BackupPath) pair in
+// result.Backups, and writes pre-overwrite content to the backup so users
+// can recover their edits.
+func TestInstallPromptsForceBackupOnUserEdit(t *testing.T) {
+	origHome := os.Getenv("HOME")
+	tmpHome := t.TempDir()
+	os.Setenv("HOME", tmpHome)
+	defer os.Setenv("HOME", origHome)
+
+	suffix := withFixedNow(t)
+
+	mayorPath, userBody := installFreshThenEditMayor(t, tmpHome)
+
+	result, err := InstallPrompts(InstallOpts{Force: true})
+	if err != nil {
+		t.Fatalf("InstallPrompts force: %v", err)
+	}
+
+	// Backups slice must record mayor.md.
+	var backup *PromptBackup
+	for i, b := range result.Backups {
+		if b.Path == "mayor.md" {
+			backup = &result.Backups[i]
+			break
+		}
+	}
+	if backup == nil {
+		t.Fatalf("expected mayor.md in Backups, got Backups=%+v", result.Backups)
+	}
+	wantBackupRel := "mayor.md" + suffix
+	if backup.BackupPath != wantBackupRel {
+		t.Errorf("BackupPath = %q, want %q", backup.BackupPath, wantBackupRel)
+	}
+
+	// Backup file must exist on disk and carry the user's pre-overwrite content.
+	backupAbs := mayorPath + suffix
+	got, err := os.ReadFile(backupAbs)
+	if err != nil {
+		t.Fatalf("read backup file %s: %v", backupAbs, err)
+	}
+	if string(got) != string(userBody) {
+		t.Errorf("backup contents do not match pre-overwrite body:\n got  %q\n want %q", got, userBody)
+	}
+
+	// Canonical mayor.md must now hold the freshly stamped embed (--force
+	// overwrote it). The backup is the only copy of the user's edits.
+	post, err := os.ReadFile(mayorPath)
+	if err != nil {
+		t.Fatalf("read mayor.md after force: %v", err)
+	}
+	if string(post) == string(userBody) {
+		t.Errorf("expected canonical mayor.md to be overwritten by --force, but it still equals user body")
+	}
+	if readInstalledPromptStamp(mayorPath).EmbedHash == "" {
+		t.Errorf("post-force mayor.md missing v1 stamp; --force should rewrite stamped content")
+	}
+}
+
+// TestInstallPromptsForceNoBackupSkipsBackup verifies that --force --no-backup
+// suppresses the backup write entirely: no .bak.<ts> file lands on disk and
+// result.Backups is empty even though the canonical was user-edited (the same
+// fixture that produces a backup in TestInstallPromptsForceBackupOnUserEdit).
+func TestInstallPromptsForceNoBackupSkipsBackup(t *testing.T) {
+	origHome := os.Getenv("HOME")
+	tmpHome := t.TempDir()
+	os.Setenv("HOME", tmpHome)
+	defer os.Setenv("HOME", origHome)
+
+	suffix := withFixedNow(t)
+
+	mayorPath, userBody := installFreshThenEditMayor(t, tmpHome)
+
+	result, err := InstallPrompts(InstallOpts{Force: true, NoBackup: true})
+	if err != nil {
+		t.Fatalf("InstallPrompts force --no-backup: %v", err)
+	}
+
+	if len(result.Backups) != 0 {
+		t.Errorf("expected empty Backups with --no-backup, got %+v", result.Backups)
+	}
+	backupAbs := mayorPath + suffix
+	if _, err := os.Stat(backupAbs); err == nil {
+		t.Errorf("expected no backup file on --no-backup, but %s exists", backupAbs)
+	}
+
+	// Sanity: --force still overwrote — the user's body is gone from the
+	// canonical, which is exactly the silent stomping --no-backup opts into.
+	post, err := os.ReadFile(mayorPath)
+	if err != nil {
+		t.Fatalf("read mayor.md after force: %v", err)
+	}
+	if string(post) == string(userBody) {
+		t.Errorf("expected --force to overwrite mayor.md even with --no-backup, but it kept user body")
+	}
+}
+
+// TestInstallPromptsForceSkipsBackupForPristine verifies that --force does
+// not generate spurious .bak files for canonical files the user has not
+// touched. Backup only triggers when stamp.BodyHash and current body diverge —
+// for a fresh install + immediate --force run, every file is pristine, so
+// Backups must be empty.
+func TestInstallPromptsForceSkipsBackupForPristine(t *testing.T) {
+	origHome := os.Getenv("HOME")
+	tmpHome := t.TempDir()
+	os.Setenv("HOME", tmpHome)
+	defer os.Setenv("HOME", origHome)
+
+	withFixedNow(t)
+
+	if _, err := InstallPrompts(InstallOpts{}); err != nil {
+		t.Fatalf("seed InstallPrompts: %v", err)
+	}
+
+	result, err := InstallPrompts(InstallOpts{Force: true})
+	if err != nil {
+		t.Fatalf("InstallPrompts force: %v", err)
+	}
+
+	if len(result.Backups) != 0 {
+		t.Errorf("expected no backups for pristine files, got %+v", result.Backups)
+	}
+
+	// And no .bak.* file should exist anywhere under the agents tree.
+	agentsDir := filepath.Join(tmpHome, ".pogo", "agents")
+	err = filepath.Walk(agentsDir, func(p string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if info.IsDir() {
+			return nil
+		}
+		if strings.Contains(info.Name(), ".bak.") {
+			t.Errorf("unexpected backup file on pristine --force: %s", p)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk agents dir: %v", err)
+	}
+}
+
 // TestCheckPromptDriftCleanInstall verifies that immediately after
 // InstallPrompts, no prompt is reported as drifted.
 func TestCheckPromptDriftCleanInstall(t *testing.T) {
@@ -849,7 +1032,7 @@ func TestCheckPromptDriftCleanInstall(t *testing.T) {
 	os.Setenv("HOME", tmpHome)
 	defer os.Setenv("HOME", origHome)
 
-	if _, err := InstallPrompts(false); err != nil {
+	if _, err := InstallPrompts(InstallOpts{}); err != nil {
 		t.Fatalf("InstallPrompts: %v", err)
 	}
 
@@ -871,7 +1054,7 @@ func TestCheckPromptDriftDetectsStale(t *testing.T) {
 	os.Setenv("HOME", tmpHome)
 	defer os.Setenv("HOME", origHome)
 
-	if _, err := InstallPrompts(false); err != nil {
+	if _, err := InstallPrompts(InstallOpts{}); err != nil {
 		t.Fatalf("InstallPrompts: %v", err)
 	}
 
@@ -911,7 +1094,7 @@ func TestCheckPromptDriftDetectsMissingAndUnstamped(t *testing.T) {
 	os.Setenv("HOME", tmpHome)
 	defer os.Setenv("HOME", origHome)
 
-	if _, err := InstallPrompts(false); err != nil {
+	if _, err := InstallPrompts(InstallOpts{}); err != nil {
 		t.Fatalf("InstallPrompts: %v", err)
 	}
 
@@ -2820,7 +3003,7 @@ func TestInstallPromptsDoesNotTouchDropIns(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 
 	for _, force := range []bool{false, true} {
-		if _, err := InstallPrompts(force); err != nil {
+		if _, err := InstallPrompts(InstallOpts{Force: force}); err != nil {
 			t.Fatalf("InstallPrompts(force=%v): %v", force, err)
 		}
 		got, err := os.ReadFile(dropFile)

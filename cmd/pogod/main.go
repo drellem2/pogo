@@ -654,7 +654,7 @@ func main() {
 	// here means a daemon restart is enough to propagate updates, and the PMs
 	// auto-started below pick up the latest prompts on the same boot. Hash
 	// stamps make this a no-op when nothing changed.
-	if installRes, err := agent.InstallPrompts(false); err != nil {
+	if installRes, err := agent.InstallPrompts(agent.InstallOpts{}); err != nil {
 		log.Printf("pogod: prompt refresh failed: %v", err)
 	} else if len(installRes.Updated) > 0 || len(installRes.Installed) > 0 {
 		log.Printf("pogod: refreshed prompts (installed=%d updated=%d skipped=%d)",

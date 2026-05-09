@@ -884,14 +884,20 @@ Health states:
 	}
 
 	var installForce bool
+	var installNoBackup bool
 	var cmdAgentPromptInstall = &cobra.Command{
 		Use:   "install",
 		Short: "Install default prompt files to ~/.pogo/agents/",
 		Long: `Copy the default mayor prompt and polecat template to ~/.pogo/agents/.
-Stale files are auto-updated when the embedded version changes. Use --force to overwrite all files.`,
+Stale files are auto-updated when the embedded version changes. Use --force to overwrite all files.
+
+When --force overwrites a user-edited canonical file, the pre-overwrite
+content is copied to <name>.bak.<timestamp> first so customizations are
+recoverable. Pass --no-backup with --force to skip that copy and overwrite
+without a safety net.`,
 		Args: cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
-			result, err := agent.InstallPrompts(installForce)
+			result, err := agent.InstallPrompts(agent.InstallOpts{Force: installForce, NoBackup: installNoBackup})
 			if err != nil {
 				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
 			}
@@ -907,6 +913,9 @@ Stale files are auto-updated when the embedded version changes. Use --force to o
 				for _, f := range result.Skipped {
 					fmt.Printf("  skipped (up-to-date): %s\n", f)
 				}
+				for _, b := range result.Backups {
+					fmt.Printf("  backed up: %s -> %s (user-edited; --force overwrote)\n", b.Path, b.BackupPath)
+				}
 				for _, c := range result.Conflicts {
 					fmt.Fprintf(os.Stderr, "  conflict: %s preserved (user-edited); new embed written to %s — see docs/prompt-customization.md to reconcile\n", c.Path, c.DistPath)
 				}
@@ -917,6 +926,7 @@ Stale files are auto-updated when the embedded version changes. Use --force to o
 		},
 	}
 	cmdAgentPromptInstall.Flags().BoolVar(&installForce, "force", false, "Overwrite existing prompt files")
+	cmdAgentPromptInstall.Flags().BoolVar(&installNoBackup, "no-backup", false, "With --force, skip the pre-overwrite backup of user-edited files")
 
 	var showRaw bool
 	var cmdAgentPromptShow = &cobra.Command{
@@ -1260,6 +1270,7 @@ overwritten.`,
 	cmdInit.Flags().BoolVar(&initMinimal, "minimal", false, "Scaffold only an empty mayor and polecat template skeleton")
 
 	var installForceFlag bool
+	var installNoBackupFlag bool
 	var cmdInstall = &cobra.Command{
 		Use:   "install",
 		Short: "Set up pogo for agent orchestration",
@@ -1268,7 +1279,11 @@ overwritten.`,
 2. Initialize macguffin workspace (mg init)
 3. Install default agent prompts to ~/.pogo/agents/
 
-Safe to run multiple times — stale prompts are auto-updated, other files are preserved.`,
+Safe to run multiple times — stale prompts are auto-updated, other files are preserved.
+
+When --force overwrites a user-edited canonical, the pre-overwrite content is
+copied to <name>.bak.<timestamp> first. Pass --no-backup with --force to skip
+that copy and overwrite without a safety net.`,
 		Args: cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
 			// Step 1: Ensure daemon is running
@@ -1326,7 +1341,7 @@ Safe to run multiple times — stale prompts are auto-updated, other files are p
 			}
 
 			// Step 3: Install prompts
-			result, err := agent.InstallPrompts(installForceFlag)
+			result, err := agent.InstallPrompts(agent.InstallOpts{Force: installForceFlag, NoBackup: installNoBackupFlag})
 			if err != nil {
 				cli.ExitWithError(jsonOutput, "failed to install prompts: "+err.Error(), cli.ExitError)
 			}
@@ -1346,6 +1361,9 @@ Safe to run multiple times — stale prompts are auto-updated, other files are p
 				if len(result.Skipped) > 0 {
 					fmt.Printf("  ✓ %d prompt(s) up-to-date\n", len(result.Skipped))
 				}
+				for _, b := range result.Backups {
+					fmt.Printf("  ⚠ backed up: %s -> %s (user-edited; --force overwrote)\n", b.Path, b.BackupPath)
+				}
 				for _, c := range result.Conflicts {
 					fmt.Fprintf(os.Stderr, "  ⚠ conflict: %s preserved (user-edited); new embed written to %s — see docs/prompt-customization.md to reconcile\n", c.Path, c.DistPath)
 				}
@@ -1356,6 +1374,7 @@ Safe to run multiple times — stale prompts are auto-updated, other files are p
 		},
 	}
 	cmdInstall.Flags().BoolVar(&installForceFlag, "force", false, "Overwrite existing prompt files")
+	cmdInstall.Flags().BoolVar(&installNoBackupFlag, "no-backup", false, "With --force, skip the pre-overwrite backup of user-edited files")
 
 	// Doctor command — system health check
 	var doctorCheck bool

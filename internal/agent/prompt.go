@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"text/template"
+	"time"
 )
 
 //go:embed prompts
@@ -1064,6 +1065,7 @@ type InstallResult struct {
 	Updated   []string         `json:"updated,omitempty"`   // files updated (stale)
 	Skipped   []string         `json:"skipped"`             // files already up-to-date
 	Conflicts []PromptConflict `json:"conflicts,omitempty"` // user-edited canonical + embed changed: new embed written to <Path>.dist
+	Backups   []PromptBackup   `json:"backups,omitempty"`   // user-edited canonical files copied to <Path>.bak.<ts> before --force overwrite
 }
 
 // PromptConflict reports a prompt where a user-edited canonical file collided
@@ -1078,6 +1080,39 @@ type PromptConflict struct {
 	// embed was written (always Path + ".dist").
 	DistPath string `json:"dist_path"`
 }
+
+// PromptBackup reports a user-edited canonical file that was copied aside
+// before being overwritten by `pogo install --force`. The backup preserves
+// pre-overwrite content so users can recover edits that --force would
+// otherwise stomp silently. Suppressed entirely by --no-backup.
+type PromptBackup struct {
+	// Path is the relative path of the canonical file under ~/.pogo/agents/
+	// that was overwritten.
+	Path string `json:"path"`
+	// BackupPath is the relative path of the .bak.<ts> sidecar that holds
+	// the pre-overwrite content (always Path + ".bak." + timestamp).
+	BackupPath string `json:"backup_path"`
+}
+
+// InstallOpts controls InstallPrompts behavior.
+type InstallOpts struct {
+	// Force overwrites every embedded file unconditionally, bypassing the
+	// conflict-matrix gate that otherwise preserves user-edited canonicals.
+	Force bool
+	// NoBackup suppresses the user-edit backup that --force normally writes
+	// to <Path>.bak.<ts> before overwriting. Only meaningful when Force is
+	// true; ignored otherwise.
+	NoBackup bool
+}
+
+// backupTimeLayout is the deterministic timestamp suffix appended to .bak
+// filenames. Compact ISO-8601 (YYYY-MM-DDThhmmssZ) keeps the suffix free of
+// path-hostile characters like ':' while remaining sortable and human-readable.
+const backupTimeLayout = "2006-01-02T150405Z"
+
+// nowFn returns the wall-clock time used to format backup-file suffixes.
+// Replaced in tests so they can assert against a fixed timestamp.
+var nowFn = func() time.Time { return time.Now().UTC() }
 
 // minimalMayorPrompt is the empty mayor skeleton written by `pogo init --minimal`.
 // It includes frontmatter (auto_start, restart_on_crash) so pogod treats it like
@@ -1281,16 +1316,28 @@ func initPromptPlan(minimal bool) (map[string][]byte, error) {
 // at <destPath>.dist, the canonical file is left untouched, and the result's
 // Conflicts slice records the pair for the caller to surface as a warning.
 //
-// If force is true the matrix is bypassed — every file is overwritten with
-// the new embed regardless of edit state. Backup-on-overwrite for force is a
-// separate ticket (mg roadmap §B step 5).
-func InstallPrompts(force bool) (*InstallResult, error) {
+// If opts.Force is true the matrix is bypassed — every file is overwritten
+// with the new embed regardless of edit state. Before each overwrite of a
+// detectably user-edited canonical (stamp.BodyHash known and current body
+// hash differs), the pre-overwrite content is copied to
+// <destPath>.bak.<timestamp> and recorded in the result's Backups slice, so
+// --force does not silently destroy user customizations. opts.NoBackup
+// suppresses that backup write — the documented escape hatch for users who
+// genuinely want a clean overwrite. All backups within one InstallPrompts
+// call share the same timestamp suffix so a single --force run produces a
+// coherent backup set users can grep for and clean up together.
+func InstallPrompts(opts InstallOpts) (*InstallResult, error) {
 	if err := InitPromptDirs(); err != nil {
 		return nil, err
 	}
 
 	result := &InstallResult{}
 	destRoot := PromptDir()
+
+	// Precompute the .bak suffix once per install run so all files backed
+	// up in this --force pass share a single timestamp — easier for users
+	// to identify and clean up as a coherent set.
+	backupSuffix := ".bak." + nowFn().Format(backupTimeLayout)
 
 	err := fs.WalkDir(defaultPrompts, "prompts", func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -1314,7 +1361,7 @@ func InstallPrompts(force bool) (*InstallResult, error) {
 
 		embeddedHash := contentHash(data)
 
-		if !force {
+		if !opts.Force {
 			if _, statErr := os.Stat(destPath); statErr == nil {
 				stamp := readInstalledPromptStamp(destPath)
 				if stamp.EmbedHash == embeddedHash {
@@ -1345,6 +1392,29 @@ func InstallPrompts(force bool) (*InstallResult, error) {
 				}
 				result.Updated = append(result.Updated, rel)
 				return nil
+			}
+		} else if !opts.NoBackup {
+			// Force-overwrite path: copy aside any user-edited canonical
+			// before clobbering it. Strict gate (stamp.BodyHash known and
+			// differs from the on-disk body) so we don't generate noise
+			// backups for pristine files or for unstamped legacy files we
+			// can't classify — those keep --force's pre-mg-7c35 behavior.
+			if _, statErr := os.Stat(destPath); statErr == nil {
+				stamp := readInstalledPromptStamp(destPath)
+				if stamp.BodyHash != "" && currentBodyHash(destPath) != stamp.BodyHash {
+					existing, readErr := os.ReadFile(destPath)
+					if readErr != nil {
+						return fmt.Errorf("read %s for backup: %w", destPath, readErr)
+					}
+					backupAbs := destPath + backupSuffix
+					if err := os.WriteFile(backupAbs, existing, 0644); err != nil {
+						return fmt.Errorf("write backup %s: %w", backupAbs, err)
+					}
+					result.Backups = append(result.Backups, PromptBackup{
+						Path:       rel,
+						BackupPath: rel + backupSuffix,
+					})
+				}
 			}
 		}
 

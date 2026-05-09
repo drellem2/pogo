@@ -23,7 +23,7 @@ func TestMayorPromptResolution(t *testing.T) {
 	}
 
 	// Install prompts
-	result, err := InstallPrompts(false)
+	result, err := InstallPrompts(InstallOpts{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +67,7 @@ func TestInstallPromptsIdempotent(t *testing.T) {
 	defer os.Setenv("HOME", origHome)
 
 	// First install
-	r1, err := InstallPrompts(false)
+	r1, err := InstallPrompts(InstallOpts{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +76,7 @@ func TestInstallPromptsIdempotent(t *testing.T) {
 	}
 
 	// Second install should skip
-	r2, err := InstallPrompts(false)
+	r2, err := InstallPrompts(InstallOpts{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,14 +96,14 @@ func TestInstallPromptsForce(t *testing.T) {
 	defer os.Setenv("HOME", origHome)
 
 	// First install
-	InstallPrompts(false)
+	InstallPrompts(InstallOpts{})
 
 	// Modify a file
 	mayorPath := filepath.Join(tmpHome, ".pogo", "agents", "mayor.md")
 	os.WriteFile(mayorPath, []byte("custom mayor"), 0644)
 
 	// Force install should overwrite
-	r, err := InstallPrompts(true)
+	r, err := InstallPrompts(InstallOpts{Force: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +126,7 @@ func TestPolecatTemplateExpansion(t *testing.T) {
 	os.Setenv("HOME", tmpHome)
 	defer os.Setenv("HOME", origHome)
 
-	InstallPrompts(false)
+	InstallPrompts(InstallOpts{})
 
 	tmplPath, err := ResolveTemplate("polecat")
 	if err != nil {
@@ -206,7 +206,7 @@ func TestMayorStartSpawnPolecat(t *testing.T) {
 	defer os.Setenv("HOME", origHome)
 
 	// Install prompts
-	if _, err := InstallPrompts(false); err != nil {
+	if _, err := InstallPrompts(InstallOpts{}); err != nil {
 		t.Fatal(err)
 	}
 
