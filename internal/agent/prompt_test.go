@@ -480,9 +480,9 @@ func TestReadInstalledPromptStampV0BackwardsCompat(t *testing.T) {
 func TestReadInstalledPromptStampUnrecognized(t *testing.T) {
 	dir := t.TempDir()
 	cases := map[string]string{
-		"plain content":    "# No stamp here\n",
+		"plain content":     "# No stamp here\n",
 		"unrelated comment": "<!-- something else -->\n# Body\n",
-		"empty":            "",
+		"empty":             "",
 	}
 	for name, content := range cases {
 		t.Run(name, func(t *testing.T) {
