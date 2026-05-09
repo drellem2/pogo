@@ -22,6 +22,12 @@ and come back here when you want the reference.
 > full mayor + `crew/doctor` + `polecat` + `polecat-qa` set, which is the right
 > starting point for code-shaped work.
 
+> **Customizing prompts safely:** if your edits go inside the prompt body
+> (rules, sections, protocol steps) rather than the frontmatter or roster,
+> see [`prompt-customization.md`](prompt-customization.md) — it covers the
+> drop-in convention that keeps your customizations from getting overwritten
+> by `pogo install`.
+
 ## 1. The agent roster
 
 In pogo, **the prompt files in `~/.pogo/agents/` *are* the agent roster.** You
