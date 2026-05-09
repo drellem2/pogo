@@ -1,6 +1,6 @@
 # Token Spend Tracking — Design & Recommendation
 
-**Status:** design / recommendation. Not implemented.
+**Status:** SHIPPED. Architecture archeology — kept for the design rationale of the now-implemented `mg spend` command, `~/.macguffin/spend/` store, and `Agent.WorkItemID` field. (Verified 2026-05-09 mg-2e40: `mg spend --help` resolves; `WorkItemID` present in `internal/agent/agent.go:79`; `~/.macguffin/spend/{by-item,by-agent}/` exist.)
 **Origin:** mg-d66b. **Author:** architect.
 **Sibling docs:** `macguffin/docs/mg-flow-redesign.md` (flow consumes spend later).
 
