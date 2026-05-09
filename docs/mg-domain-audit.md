@@ -1,5 +1,12 @@
 # mg Work Item Store: Domain-Neutrality Audit
 
+**Status:** audit answer is durable orientation; concrete follow-ups tracked as:
+- Rename `Branch` field → **not filed** (audit's own recommendation: keep as-is unless friction is reported).
+- `mg new --no-repo` flag → **mg-6a7b** (filed 2026-05-09, mg-2e40 cleanup pass).
+- README non-coding examples → **mg-260d** (filed 2026-05-09, mg-2e40 cleanup pass).
+
+Kept as record.
+
 **Work item:** mg-854d (E4)
 **Scope:** mg's data model + commands. Read-only audit; no code changes here.
 **Question:** Are work items domain-neutral (research, triage, writing) or do
