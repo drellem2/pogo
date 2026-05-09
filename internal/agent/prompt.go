@@ -106,17 +106,48 @@ var extendsDirectiveRE = regexp.MustCompile(`(?m)^extends\s+(\S+)\s+with\s+confi
 // own frontmatter (e.g. auto_start, nudge_on_start) is preserved so it governs
 // the synthesized agent's behavior.
 func SynthesizeExtendsPrompt(promptPath, outPath string) (string, error) {
-	data, err := synthesizeExtendsBytes(promptPath)
+	extData, err := synthesizeExtendsBytes(promptPath)
 	if err != nil {
 		return "", err
 	}
-	if data == nil {
+
+	// Drop-ins are an additive customization slot keyed by the prompt's
+	// filename stem ("mayor" for mayor.md, "doctor" for crew/doctor.md, the
+	// crew agent name for an `extends` redirect like crew/pm-pogo.md).
+	// InstallPrompts never writes here — only the user does.
+	basename := strings.TrimSuffix(filepath.Base(promptPath), ".md")
+	drop, err := LoadDropIns(basename)
+	if err != nil {
+		return "", err
+	}
+
+	// Bail out early when neither layer adds anything — the caller falls
+	// back to using promptPath as-is, avoiding a synthesized-file write for
+	// the common no-customization case.
+	if extData == nil && drop == "" {
 		return "", nil
 	}
+
+	var body []byte
+	if extData != nil {
+		body = extData
+	} else {
+		// No extends directive but drop-ins are present: preserve the file
+		// verbatim (frontmatter intact, hash stamp stripped) so the
+		// synthesized output is parsable by the same downstream readers as
+		// the original on-disk prompt.
+		raw, err := os.ReadFile(promptPath)
+		if err != nil {
+			return "", fmt.Errorf("read prompt %s: %w", promptPath, err)
+		}
+		body = stripPromptHashStamp(raw)
+	}
+	merged := []byte(appendDropIns(string(body), drop))
+
 	if err := os.MkdirAll(filepath.Dir(outPath), 0755); err != nil {
 		return "", fmt.Errorf("create dir for synthesized prompt: %w", err)
 	}
-	if err := os.WriteFile(outPath, data, 0644); err != nil {
+	if err := os.WriteFile(outPath, merged, 0644); err != nil {
 		return "", fmt.Errorf("write synthesized prompt: %w", err)
 	}
 	return outPath, nil
@@ -361,13 +392,25 @@ func ExpandString(s string, vars TemplateVars) (string, error) {
 // with the provided vars. Uses Go text/template syntax. Any TOML frontmatter
 // at the top of the file (delimited by '+++' fences) is stripped before
 // expansion so the metadata block does not leak into the rendered prompt.
+//
+// Drop-ins from ~/.pogo/agents/dropins/<basename>/*.md (where basename is the
+// template's filename stem) are appended to the body before parsing, so
+// fragments can also reference {{.Var}} and participate in the same
+// expansion pass as the shipped template body.
 func ExpandTemplate(templatePath string, vars TemplateVars) (string, error) {
 	_, body, err := ParsePromptFrontmatter(templatePath)
 	if err != nil {
 		return "", err
 	}
 
-	tmpl, err := template.New(filepath.Base(templatePath)).Parse(body)
+	basename := strings.TrimSuffix(filepath.Base(templatePath), ".md")
+	drop, err := LoadDropIns(basename)
+	if err != nil {
+		return "", err
+	}
+	combined := appendDropIns(body, drop)
+
+	tmpl, err := template.New(filepath.Base(templatePath)).Parse(combined)
 	if err != nil {
 		return "", fmt.Errorf("parse template: %w", err)
 	}
