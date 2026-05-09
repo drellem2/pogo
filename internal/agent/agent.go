@@ -177,6 +177,11 @@ type Registry struct {
 	// postSpawnHook is called after an agent is registered in Spawn.
 	// Used for agent-specific lifecycle behavior (e.g. trust dialog dismissal).
 	postSpawnHook func(a *Agent)
+
+	// shutdown is set by StopAll to short-circuit any in-flight respawn
+	// goroutines (scheduled by the OnExit hook for restart_on_crash agents)
+	// so the registry can be torn down without an agent coming back.
+	shutdown bool
 }
 
 // SetOnExit sets the callback invoked when any agent exits.
@@ -384,6 +389,17 @@ func (r *Registry) Remove(name string) {
 }
 
 // Stop signals an agent to exit and waits up to timeout for it.
+//
+// For agents with RestartOnCrash=true, the registry entry is left intact
+// after the process exits so the OnExit hook's Respawn() goroutine can
+// find it and bring the agent back. This matches the "always-on" contract
+// of restart_on_crash=true: the supervisor restarts the agent on any exit
+// (clean or crash, including explicit Stop). To keep such an agent down
+// permanently, remove restart_on_crash=true from its prompt frontmatter
+// or use the registry-level shutdown signal (StopAll).
+//
+// For agents with RestartOnCrash=false, Stop() owns teardown and removes
+// the agent from the registry once the process is gone.
 func (r *Registry) Stop(name string, timeout time.Duration) error {
 	agent := r.Get(name)
 	if agent == nil {
@@ -417,33 +433,61 @@ func (r *Registry) Stop(name string, timeout time.Duration) error {
 		}
 	}
 
+	if agent.RestartOnCrash {
+		// Lifecycle is owned by the OnExit hook — it scheduled (or will
+		// schedule) a Respawn() that needs the registry entry to still
+		// exist. Cleanup of the old PTY/socket happens inside Respawn().
+		log.Printf("agent %s: stopped (restart_on_crash=true; supervisor will respawn)", name)
+		return nil
+	}
+
 	agent.Cleanup()
 	r.Remove(name)
 	log.Printf("agent %s: stopped", name)
 	return nil
 }
 
-// StopAll stops all agents.
+// StopAll stops all agents and prevents subsequent Respawn() calls. Use
+// this on registry teardown (pogod shutdown, test cleanup) to ensure that
+// in-flight respawn goroutines scheduled by the OnExit hook do not bring
+// agents back after StopAll returns.
 func (r *Registry) StopAll(timeout time.Duration) {
-	r.mu.RLock()
+	r.mu.Lock()
+	r.shutdown = true
 	names := make([]string, 0, len(r.agents))
 	for name := range r.agents {
 		names = append(names, name)
 	}
-	r.mu.RUnlock()
+	r.mu.Unlock()
 
 	for _, name := range names {
 		if err := r.Stop(name, timeout); err != nil {
 			log.Printf("agent %s: stop error: %v", name, err)
+		}
+		// During shutdown, Stop() leaves restart_on_crash agents in the
+		// registry expecting Respawn(); but Respawn() now refuses with
+		// shutdown=true, so the agent stays gone. Drop the registry
+		// entry explicitly to release resources.
+		if a := r.Get(name); a != nil {
+			a.Cleanup()
+			r.Remove(name)
 		}
 	}
 }
 
 // Respawn restarts a stopped agent in-place, preserving its name and config.
 // Used by crew monitoring to restart crashed agents.
+//
+// Returns an error without spawning if the registry has been shut down via
+// StopAll — this lets late-firing OnExit respawn goroutines lose cleanly to
+// teardown instead of resurrecting agents the user just stopped.
 func (r *Registry) Respawn(name string) (*Agent, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
+	if r.shutdown {
+		return nil, fmt.Errorf("registry shut down")
+	}
 
 	old := r.agents[name]
 	if old == nil {
