@@ -45,6 +45,30 @@ func showPromptFile(path string, jsonOut bool) {
 	}
 }
 
+// showRawPromptFile resolves a prompt name (mayor → crew → template) and
+// emits the source file verbatim. Used by `pogo agent prompt show --raw`
+// to preserve the pre-synthesis behavior for users who want to inspect the
+// shipped/customized file as-is.
+func showRawPromptFile(name string, jsonOut bool) {
+	if name == "mayor" {
+		path, err := agent.ResolveMayorPrompt()
+		if err != nil {
+			cli.ExitWithError(jsonOut, err.Error(), cli.ExitError)
+		}
+		showPromptFile(path, jsonOut)
+		return
+	}
+	if path, err := agent.ResolveCrewPrompt(name); err == nil {
+		showPromptFile(path, jsonOut)
+		return
+	}
+	if path, err := agent.ResolveTemplate(name); err == nil {
+		showPromptFile(path, jsonOut)
+		return
+	}
+	cli.ExitWithError(jsonOut, fmt.Sprintf("prompt %q not found (checked mayor, crew/, templates/)", name), cli.ExitError)
+}
+
 func main() {
 
 	var jsonOutput bool
@@ -891,35 +915,38 @@ Stale files are auto-updated when the embedded version changes. Use --force to o
 	}
 	cmdAgentPromptInstall.Flags().BoolVar(&installForce, "force", false, "Overwrite existing prompt files")
 
+	var showRaw bool
 	var cmdAgentPromptShow = &cobra.Command{
 		Use:   "show <name>",
-		Short: "Show contents of a prompt file",
-		Long:  `Show the raw contents of a crew prompt, template, or the mayor prompt.`,
-		Args:  cobra.ExactArgs(1),
+		Short: "Show the synthesised prompt for a named agent or template",
+		Long: `Print the prompt content an agent would receive for <name> after applying
+extends-directive synthesis, drop-in fragments from ~/.pogo/agents/dropins/<name>/,
+and (for polecat templates) {{.Var}} substitution with stub preview values.
+
+Resolves <name> in this order: mayor, crew/<name>.md, templates/<name>.md.
+Use --raw to skip synthesis and emit the source file verbatim.`,
+		Args: cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			name := args[0]
-			// Try mayor first
-			if name == "mayor" {
-				path, err := agent.ResolveMayorPrompt()
-				if err != nil {
-					cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
-				}
-				showPromptFile(path, jsonOutput)
+			if showRaw {
+				showRawPromptFile(name, jsonOutput)
 				return
 			}
-			// Try crew
-			if path, err := agent.ResolveCrewPrompt(name); err == nil {
-				showPromptFile(path, jsonOutput)
-				return
+			out, err := agent.SynthesizePrompt(name, agent.PreviewTemplateVars())
+			if err != nil {
+				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
 			}
-			// Try template
-			if path, err := agent.ResolveTemplate(name); err == nil {
-				showPromptFile(path, jsonOutput)
-				return
+			if jsonOutput {
+				cli.PrintJSON(map[string]string{
+					"name":    name,
+					"content": out,
+				})
+			} else {
+				fmt.Print(out)
 			}
-			cli.ExitWithError(jsonOutput, fmt.Sprintf("prompt %q not found (checked crew/, templates/, and mayor.md)", name), cli.ExitError)
 		},
 	}
+	cmdAgentPromptShow.Flags().BoolVar(&showRaw, "raw", false, "Show the source file verbatim (skip synthesis and drop-ins)")
 
 	// Create crew prompt
 	var createPromptForce bool
