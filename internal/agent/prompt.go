@@ -186,6 +186,21 @@ func synthesizeExtendsBytes(promptPath string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read extends config %s: %w", cfgPath, err)
 	}
+
+	// TOML drop-ins layer onto the base config later-wins (lexical order),
+	// keyed off the cfg path's stem under dropins/. For `pm/pogo.toml` that's
+	// `~/.pogo/agents/dropins/pm/pogo/*.toml`. Same shape as the markdown
+	// drop-ins under dropins/<basename>/*.md but lives under a per-config
+	// directory because a single PM tier can ship many sibling configs
+	// (pogo.toml, lineara.toml, onethird.toml) that need independent
+	// override slots.
+	cfgRel := strings.TrimSuffix(cfgArg, ".toml")
+	dropDir := filepath.Join(root, "dropins", cfgRel)
+	mergedCfg, _, err := MergeTOMLDropIns(cfgData, dropDir)
+	if err != nil {
+		return nil, err
+	}
+
 	var buf bytes.Buffer
 	buf.Write(stripPromptHashStamp(tmplData))
 	if !bytes.HasSuffix(buf.Bytes(), []byte("\n")) {
@@ -194,7 +209,7 @@ func synthesizeExtendsBytes(promptPath string) ([]byte, error) {
 	buf.WriteString("\n## Your configuration\n\nLoaded from `")
 	buf.WriteString(cfgArg)
 	buf.WriteString("`:\n\n```toml\n")
-	buf.Write(stripPromptHashStamp(cfgData))
+	buf.Write(stripPromptHashStamp(mergedCfg))
 	if !bytes.HasSuffix(buf.Bytes(), []byte("\n")) {
 		buf.WriteByte('\n')
 	}
