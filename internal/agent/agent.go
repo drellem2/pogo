@@ -7,7 +7,9 @@
 package agent
 
 import (
+	"bufio"
 	"context"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"log"
@@ -39,6 +41,15 @@ const (
 	StatusRunning    AgentStatus = "running"
 	StatusExited     AgentStatus = "exited"
 	StatusRestarting AgentStatus = "restarting"
+)
+
+// Default PTY dimensions used when no attach client has reported its size yet.
+// A real attach overwrites these via the resize frame on connect; the values
+// just need to be non-zero so the agent's TUI doesn't render at 0×0 (which Ink
+// falls back to 80×24).
+const (
+	defaultPTYCols uint16 = 200
+	defaultPTYRows uint16 = 50
 )
 
 // Agent represents a running agent process with its PTY.
@@ -284,8 +295,12 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 	}
 	cmd.Env = append(os.Environ(), append(injectedEnv, req.Env...)...)
 
-	// Start with PTY — master fd returned, slave becomes controlling terminal
-	master, err := pty.Start(cmd)
+	// Start with PTY — master fd returned, slave becomes controlling terminal.
+	// Set a sensible default winsize so the agent's TUI doesn't render at the
+	// kernel default (0×0, which Ink falls back to 80×24). Real attach clients
+	// overwrite this via the resize frame on connect; the goal here is just to
+	// avoid a degenerate initial size.
+	master, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: defaultPTYCols, Rows: defaultPTYRows})
 	if err != nil {
 		return nil, fmt.Errorf("pty start: %w", err)
 	}
@@ -519,7 +534,7 @@ func (r *Registry) Respawn(name string) (*Agent, error) {
 	}
 	cmd.Env = append(os.Environ(), injectedEnv...)
 
-	master, err := pty.Start(cmd)
+	master, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: defaultPTYCols, Rows: defaultPTYRows})
 	if err != nil {
 		return nil, fmt.Errorf("pty start: %w", err)
 	}
@@ -827,9 +842,86 @@ func (a *Agent) handleAttach(conn net.Conn) {
 		a.attachMu.Unlock()
 	}()
 
-	// conn → PTY master (user input → agent)
-	// Blocks until conn closes (user detaches) or master closes (agent exits)
-	io.Copy(master, conn)
+	// Read input from conn and forward to PTY master.
+	// New clients send a leading FrameTypeResize byte to enter framed mode;
+	// legacy clients send raw bytes. See attach_proto.go for the wire format.
+	a.readAttachInput(conn, master)
+}
+
+// readAttachInput dispatches a unix-socket attach connection to either
+// framed-mode parsing or legacy raw-byte streaming based on the first byte.
+// Blocks until conn closes (user detaches) or master closes (agent exits).
+func (a *Agent) readAttachInput(conn net.Conn, master io.Writer) {
+	br := bufio.NewReaderSize(conn, 4096)
+
+	first, err := br.ReadByte()
+	if err != nil {
+		return
+	}
+	if first != FrameTypeResize {
+		// Legacy raw mode — write the byte back to the PTY and stream rest.
+		if _, werr := master.Write([]byte{first}); werr != nil {
+			return
+		}
+		io.Copy(master, br)
+		return
+	}
+
+	// Framed mode — handshake resize frame is the remaining 4 bytes.
+	var hdr [4]byte
+	if _, err := io.ReadFull(br, hdr[:]); err != nil {
+		return
+	}
+	a.applyResize(binary.LittleEndian.Uint16(hdr[0:2]), binary.LittleEndian.Uint16(hdr[2:4]))
+
+	// Continue reading framed messages.
+	for {
+		typ, err := br.ReadByte()
+		if err != nil {
+			return
+		}
+		switch typ {
+		case FrameTypeResize:
+			if _, err := io.ReadFull(br, hdr[:]); err != nil {
+				return
+			}
+			a.applyResize(binary.LittleEndian.Uint16(hdr[0:2]), binary.LittleEndian.Uint16(hdr[2:4]))
+		case FrameTypeData:
+			var lenBuf [2]byte
+			if _, err := io.ReadFull(br, lenBuf[:]); err != nil {
+				return
+			}
+			n := int(binary.LittleEndian.Uint16(lenBuf[:]))
+			if n == 0 {
+				continue
+			}
+			data := make([]byte, n)
+			if _, err := io.ReadFull(br, data); err != nil {
+				return
+			}
+			if _, err := master.Write(data); err != nil {
+				return
+			}
+		default:
+			// Unknown frame type — protocol error, drop the connection so the
+			// client can reconnect cleanly.
+			return
+		}
+	}
+}
+
+// applyResize updates the PTY winsize. cols/rows of 0 are ignored.
+func (a *Agent) applyResize(cols, rows uint16) {
+	if cols == 0 || rows == 0 {
+		return
+	}
+	a.mu.Lock()
+	master := a.master
+	a.mu.Unlock()
+	if master == nil {
+		return
+	}
+	pty.Setsize(master, &pty.Winsize{Cols: cols, Rows: rows})
 }
 
 // SocketPath returns the unix socket path for attach.
