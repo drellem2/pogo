@@ -569,9 +569,18 @@ func TestInstallPromptsUpdatesStaleFiles(t *testing.T) {
 		t.Errorf("expected %d skipped, got %d", len(result.Installed), len(result2.Skipped))
 	}
 
-	// Simulate stale file by writing old content to one of the installed files
+	// Simulate stale file: a v0 stamp whose hash matches the on-disk body
+	// (so the install matrix reads it as "not user-edited") but differs
+	// from the current binary's embedded mayor.md (so the embed has
+	// "changed" from the perspective of this file). Writing the stamp's
+	// hash with a value that matches the body keeps the v0-compat path
+	// honest — v0 stamps record only one hash and the install code treats
+	// it as both EmbedHash and BodyHash.
 	mayorPath := filepath.Join(tmpHome, ".pogo", "agents", "mayor.md")
-	os.WriteFile(mayorPath, []byte("<!-- pogo-prompt-hash: oldhash -->\n# Old mayor prompt\n"), 0644)
+	oldBody := []byte("# Old mayor prompt\n")
+	oldHash := contentHash(oldBody)
+	stale := append([]byte("<!-- pogo-prompt-hash: "+oldHash+" -->\n"), oldBody...)
+	os.WriteFile(mayorPath, stale, 0644)
 
 	result3, err := InstallPrompts(false)
 	if err != nil {
@@ -666,6 +675,169 @@ func TestInstallPromptsCrewWithExistingTemplatesDir(t *testing.T) {
 	doctorPath := filepath.Join(agentsDir, "crew", "doctor.md")
 	if _, err := os.Stat(doctorPath); os.IsNotExist(err) {
 		t.Error("crew/doctor.md not found on disk after install")
+	}
+}
+
+// TestInstallPromptsConflictMatrixSkipsWhenEmbedUnchanged covers cell (b)
+// of the matrix in docs/prompt-customization-design.md §B: the user has
+// edited the canonical file in place, but the embedded prompt has not
+// changed since install. The install must skip (the embed hasn't moved,
+// so there is nothing new to write) and must not produce a .dist sidecar.
+func TestInstallPromptsConflictMatrixSkipsWhenEmbedUnchanged(t *testing.T) {
+	origHome := os.Getenv("HOME")
+	tmpHome := t.TempDir()
+	os.Setenv("HOME", tmpHome)
+	defer os.Setenv("HOME", origHome)
+
+	if _, err := InstallPrompts(false); err != nil {
+		t.Fatalf("first InstallPrompts: %v", err)
+	}
+
+	// User edits mayor.md in place: preserve the stamp line, append a
+	// custom rule to the body. This makes currentBodyHash != stamp.BodyHash
+	// without changing the recorded embed_hash.
+	mayorPath := filepath.Join(tmpHome, ".pogo", "agents", "mayor.md")
+	original, err := os.ReadFile(mayorPath)
+	if err != nil {
+		t.Fatalf("read mayor.md: %v", err)
+	}
+	nl := strings.IndexByte(string(original), '\n')
+	if nl == -1 {
+		t.Fatalf("expected stamped mayor.md to contain a newline, got %q", original)
+	}
+	edited := append([]byte{}, original[:nl+1]...)
+	edited = append(edited, original[nl+1:]...)
+	edited = append(edited, []byte("\n## My house rules\nKeep PRs small.\n")...)
+	if err := os.WriteFile(mayorPath, edited, 0644); err != nil {
+		t.Fatalf("rewrite mayor.md: %v", err)
+	}
+	preBody := append([]byte{}, edited...)
+
+	result, err := InstallPrompts(false)
+	if err != nil {
+		t.Fatalf("second InstallPrompts: %v", err)
+	}
+	if len(result.Conflicts) != 0 {
+		t.Errorf("expected no conflicts when embed unchanged, got %+v", result.Conflicts)
+	}
+	for _, u := range result.Updated {
+		if u == "mayor.md" {
+			t.Errorf("expected mayor.md NOT to be updated when embed unchanged, got Updated=%v", result.Updated)
+		}
+	}
+	skipped := false
+	for _, s := range result.Skipped {
+		if s == "mayor.md" {
+			skipped = true
+			break
+		}
+	}
+	if !skipped {
+		t.Errorf("expected mayor.md in Skipped when embed unchanged, got Skipped=%v Updated=%v Installed=%v",
+			result.Skipped, result.Updated, result.Installed)
+	}
+	// Canonical file must be byte-identical to what the user wrote.
+	post, err := os.ReadFile(mayorPath)
+	if err != nil {
+		t.Fatalf("read mayor.md after install: %v", err)
+	}
+	if string(post) != string(preBody) {
+		t.Errorf("install touched user-edited mayor.md when embed was unchanged")
+	}
+	// And no .dist must have been written.
+	if _, err := os.Stat(mayorPath + ".dist"); err == nil {
+		t.Errorf("unexpected mayor.md.dist on no-conflict path")
+	}
+}
+
+// TestInstallPromptsConflictMatrixWritesDistOnUserEditAndEmbedChange covers
+// cell (d) — the new behavior. Setup mimics "older pogo install + user
+// edit + binary upgrade": a v1 stamp whose embed_hash is *not* the current
+// binary's embed (so the embed has effectively changed) and whose
+// body_hash is the hash of the body the older install wrote, paired with
+// an on-disk body that differs from that hash (so the user has edited).
+// Expectation: canonical file is preserved untouched, the new embed is
+// written to <name>.dist, and the conflict is reported in the result.
+func TestInstallPromptsConflictMatrixWritesDistOnUserEditAndEmbedChange(t *testing.T) {
+	origHome := os.Getenv("HOME")
+	tmpHome := t.TempDir()
+	os.Setenv("HOME", tmpHome)
+	defer os.Setenv("HOME", origHome)
+
+	agentsDir := filepath.Join(tmpHome, ".pogo", "agents")
+	if err := os.MkdirAll(agentsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Synthesize an "older install" of mayor.md that the user has since
+	// edited. The body_hash slot of the stamp records what the older
+	// install wrote (oldPristineHash); the actual body is something else.
+	oldPristineBody := []byte("# Mayor (older shipped version)\n")
+	oldPristineHash := contentHash(oldPristineBody)
+	userBody := []byte("# Mayor (older shipped version)\n\n## My house rules\nNo amend commits.\n")
+	stampLine := "<!-- pogo-prompt: embed=sha256:" + oldPristineHash + " body=sha256:" + oldPristineHash + " -->\n"
+	mayorPath := filepath.Join(agentsDir, "mayor.md")
+	canonicalContent := append([]byte(stampLine), userBody...)
+	if err := os.WriteFile(mayorPath, canonicalContent, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := InstallPrompts(false)
+	if err != nil {
+		t.Fatalf("InstallPrompts: %v", err)
+	}
+
+	// Conflict must be reported for mayor.md.
+	var conflict *PromptConflict
+	for i, c := range result.Conflicts {
+		if c.Path == "mayor.md" {
+			conflict = &result.Conflicts[i]
+			break
+		}
+	}
+	if conflict == nil {
+		t.Fatalf("expected mayor.md in Conflicts, got Conflicts=%+v Updated=%v Installed=%v",
+			result.Conflicts, result.Updated, result.Installed)
+	}
+	if conflict.DistPath != "mayor.md.dist" {
+		t.Errorf("expected DistPath=mayor.md.dist, got %q", conflict.DistPath)
+	}
+
+	// Canonical mayor.md must be untouched.
+	post, err := os.ReadFile(mayorPath)
+	if err != nil {
+		t.Fatalf("read mayor.md after install: %v", err)
+	}
+	if string(post) != string(canonicalContent) {
+		t.Errorf("install modified user-edited canonical file:\n got:  %q\n want: %q", post, canonicalContent)
+	}
+
+	// .dist must exist, carry a stamp, and have an embed_hash matching
+	// the current binary (so a future install reads it as up-to-date if
+	// the user accepts it by renaming over the canonical).
+	distPath := mayorPath + ".dist"
+	distData, err := os.ReadFile(distPath)
+	if err != nil {
+		t.Fatalf("read mayor.md.dist: %v", err)
+	}
+	distStamp := readInstalledPromptStamp(distPath)
+	if distStamp.EmbedHash == "" {
+		t.Errorf("expected mayor.md.dist to carry a stamp, got %q", distData)
+	}
+	if distStamp.EmbedHash == oldPristineHash {
+		t.Errorf("dist file's stamp records old embed hash; expected current binary's embed hash")
+	}
+
+	// Canonical must NOT be in Updated or Installed.
+	for _, u := range result.Updated {
+		if u == "mayor.md" {
+			t.Errorf("mayor.md must not be Updated on conflict, got Updated=%v", result.Updated)
+		}
+	}
+	for _, i := range result.Installed {
+		if i == "mayor.md" {
+			t.Errorf("mayor.md must not be Installed on conflict, got Installed=%v", result.Installed)
+		}
 	}
 }
 

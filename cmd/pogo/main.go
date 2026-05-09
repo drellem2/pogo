@@ -907,7 +907,10 @@ Stale files are auto-updated when the embedded version changes. Use --force to o
 				for _, f := range result.Skipped {
 					fmt.Printf("  skipped (up-to-date): %s\n", f)
 				}
-				if len(result.Installed) == 0 && len(result.Updated) == 0 && len(result.Skipped) > 0 {
+				for _, c := range result.Conflicts {
+					fmt.Fprintf(os.Stderr, "  conflict: %s preserved (user-edited); new embed written to %s — see docs/prompt-customization.md to reconcile\n", c.Path, c.DistPath)
+				}
+				if len(result.Installed) == 0 && len(result.Updated) == 0 && len(result.Skipped) > 0 && len(result.Conflicts) == 0 {
 					fmt.Println("All prompts up-to-date.")
 				}
 			}
@@ -1342,6 +1345,9 @@ Safe to run multiple times — stale prompts are auto-updated, other files are p
 				}
 				if len(result.Skipped) > 0 {
 					fmt.Printf("  ✓ %d prompt(s) up-to-date\n", len(result.Skipped))
+				}
+				for _, c := range result.Conflicts {
+					fmt.Fprintf(os.Stderr, "  ⚠ conflict: %s preserved (user-edited); new embed written to %s — see docs/prompt-customization.md to reconcile\n", c.Path, c.DistPath)
 				}
 				fmt.Println("\nReady. Next steps:")
 				fmt.Println("  pogo agent start mayor    # Start the coordinator")

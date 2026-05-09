@@ -1022,6 +1022,25 @@ func installedPromptHash(path string) string {
 	return readInstalledPromptStamp(path).EmbedHash
 }
 
+// currentBodyHash returns contentHash of the file at path with any leading
+// pogo-prompt stamp line stripped — i.e., the hash of the body as it would
+// have been recorded into the file's stamp at install time. Used by the
+// install matrix to detect whether the user has edited the body in place
+// after install (current_body_hash != stamp.body_hash).
+//
+// Returns "" if the file cannot be read so callers can fall through cleanly.
+// For unstamped files stripPromptHashStamp is a no-op, so the returned hash
+// is the hash of the entire file — that's fine because stamp.BodyHash will
+// also be "" for those files and the matrix treats the pair as "unknown,
+// safe to update."
+func currentBodyHash(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return contentHash(stripPromptHashStamp(data))
+}
+
 // stampedContent prepends a v1 pogo-prompt stamp to a prompt file's content.
 // The comment style is chosen by extension so the stamp is a valid comment in
 // each file format: HTML for .md, # for .toml. Both embed_hash and body_hash
@@ -1041,9 +1060,23 @@ func stampedContent(path string, data []byte) []byte {
 
 // InstallResult describes what happened during prompt installation.
 type InstallResult struct {
-	Installed []string `json:"installed"`         // files written (new)
-	Updated   []string `json:"updated,omitempty"` // files updated (stale)
-	Skipped   []string `json:"skipped"`           // files already up-to-date
+	Installed []string         `json:"installed"`           // files written (new)
+	Updated   []string         `json:"updated,omitempty"`   // files updated (stale)
+	Skipped   []string         `json:"skipped"`             // files already up-to-date
+	Conflicts []PromptConflict `json:"conflicts,omitempty"` // user-edited canonical + embed changed: new embed written to <Path>.dist
+}
+
+// PromptConflict reports a prompt where a user-edited canonical file collided
+// with a changed embed: the canonical file is preserved as-is, and the new
+// embed is written alongside as <Path>.dist for the user to reconcile
+// manually. See docs/prompt-customization.md for the merge workflow.
+type PromptConflict struct {
+	// Path is the relative path of the canonical (user-edited) file under
+	// ~/.pogo/agents/. Left untouched by the install.
+	Path string `json:"path"`
+	// DistPath is the relative path of the .dist sidecar where the new
+	// embed was written (always Path + ".dist").
+	DistPath string `json:"dist_path"`
 }
 
 // minimalMayorPrompt is the empty mayor skeleton written by `pogo init --minimal`.
@@ -1235,8 +1268,22 @@ func initPromptPlan(minimal bool) (map[string][]byte, error) {
 }
 
 // InstallPrompts copies the default prompt files embedded in the binary to
-// ~/.pogo/agents/. Stale files are auto-updated by comparing content hashes.
-// If force is true, all files are overwritten regardless of hash.
+// ~/.pogo/agents/. When the canonical file already exists the install applies
+// the four-cell conflict matrix (see docs/prompt-customization.md and
+// docs/prompt-customization-design.md §B):
+//
+//	                        | embed unchanged | embed changed
+//	------------------------+-----------------+-----------------------------
+//	 user has not edited    | skip            | update
+//	 user has edited body   | skip            | conflict — write <name>.dist
+//
+// On the conflict cell, the new embed is written alongside the canonical file
+// at <destPath>.dist, the canonical file is left untouched, and the result's
+// Conflicts slice records the pair for the caller to surface as a warning.
+//
+// If force is true the matrix is bypassed — every file is overwritten with
+// the new embed regardless of edit state. Backup-on-overwrite for force is a
+// separate ticket (mg roadmap §B step 5).
 func InstallPrompts(force bool) (*InstallResult, error) {
 	if err := InitPromptDirs(); err != nil {
 		return nil, err
@@ -1267,14 +1314,32 @@ func InstallPrompts(force bool) (*InstallResult, error) {
 
 		embeddedHash := contentHash(data)
 
-		// Check if destination already exists
 		if !force {
 			if _, statErr := os.Stat(destPath); statErr == nil {
-				if installedPromptHash(destPath) == embeddedHash {
+				stamp := readInstalledPromptStamp(destPath)
+				if stamp.EmbedHash == embeddedHash {
+					// Embed unchanged — skip regardless of whether
+					// the user has edited the canonical file.
 					result.Skipped = append(result.Skipped, rel)
 					return nil
 				}
-				// Hash mismatch or no hash — file is stale, update it
+				// Embed has changed (or the file is unstamped). Decide
+				// based on whether the user has edited the body in place.
+				// Empty stamp.BodyHash means the file is unstamped or
+				// shape-unrecognized — we cannot tell, so fall through to
+				// the update path (preserves pre-matrix behavior, covered
+				// by TestInstallPromptsUpdatesUnstampedFiles).
+				if stamp.BodyHash != "" && currentBodyHash(destPath) != stamp.BodyHash {
+					distPath := destPath + ".dist"
+					if err := os.WriteFile(distPath, stampedContent(rel, data), 0644); err != nil {
+						return fmt.Errorf("write %s: %w", distPath, err)
+					}
+					result.Conflicts = append(result.Conflicts, PromptConflict{
+						Path:     rel,
+						DistPath: rel + ".dist",
+					})
+					return nil
+				}
 				if err := os.WriteFile(destPath, stampedContent(rel, data), 0644); err != nil {
 					return fmt.Errorf("update %s: %w", destPath, err)
 				}
