@@ -373,8 +373,10 @@ func TestStampedContent(t *testing.T) {
 	stamped := stampedContent("crew/foo.md", data)
 
 	s := string(stamped)
-	if !strings.HasPrefix(s, "<!-- pogo-prompt-hash: ") {
-		t.Errorf("stamped content should start with HTML hash comment for .md, got: %s", s[:60])
+	hash := contentHash(data)
+	wantStamp := "<!-- pogo-prompt: embed=sha256:" + hash + " body=sha256:" + hash + " -->\n"
+	if !strings.HasPrefix(s, wantStamp) {
+		t.Errorf("stamped content should start with v1 HTML stamp\ngot:  %q\nwant: %q", s[:len(wantStamp)+1], wantStamp)
 	}
 	if !strings.Contains(s, "# My Prompt\nDo stuff.\n") {
 		t.Error("stamped content should contain original content")
@@ -387,14 +389,112 @@ func TestStampedContentTOML(t *testing.T) {
 	stamped := stampedContent("pm/foo.toml", data)
 
 	s := string(stamped)
-	if !strings.HasPrefix(s, "# pogo-prompt-hash: ") {
-		t.Errorf("stamped content for .toml should start with TOML hash comment, got: %s", s[:60])
+	hash := contentHash(data)
+	wantStamp := "# pogo-prompt: embed=sha256:" + hash + " body=sha256:" + hash + "\n"
+	if !strings.HasPrefix(s, wantStamp) {
+		t.Errorf("stamped content for .toml should start with v1 TOML stamp\ngot:  %q\nwant: %q", s[:len(wantStamp)+1], wantStamp)
 	}
 	if strings.HasPrefix(s, "<!--") {
 		t.Error("stamped .toml file must not start with HTML comment — would break TOML parsing")
 	}
 	if !strings.Contains(s, "name = \"pm-foo\"") {
 		t.Error("stamped content should contain original content")
+	}
+}
+
+// TestStampedContentV1RoundTrip verifies that stampedContent + readInstalledPromptStamp
+// round-trips both hashes, and that at install time embed_hash == body_hash ==
+// contentHash(data) for both .md and .toml flavors.
+func TestStampedContentV1RoundTrip(t *testing.T) {
+	cases := map[string]struct {
+		path string
+		data []byte
+	}{
+		"markdown": {"crew/foo.md", []byte("# My Prompt\nDo stuff.\n")},
+		"toml":     {"pm/foo.toml", []byte("name = \"pm-foo\"\n")},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, filepath.Base(tc.path))
+			if err := os.WriteFile(path, stampedContent(tc.path, tc.data), 0644); err != nil {
+				t.Fatal(err)
+			}
+			stamp := readInstalledPromptStamp(path)
+			want := contentHash(tc.data)
+			if stamp.EmbedHash != want {
+				t.Errorf("EmbedHash=%q want %q", stamp.EmbedHash, want)
+			}
+			if stamp.BodyHash != want {
+				t.Errorf("BodyHash=%q want %q", stamp.BodyHash, want)
+			}
+			// At install time the two hashes are equal — the v1 stamp records
+			// them separately so future installs can tell embed-changed apart
+			// from user-edited.
+			if stamp.EmbedHash != stamp.BodyHash {
+				t.Errorf("at install time EmbedHash should equal BodyHash, got %q vs %q",
+					stamp.EmbedHash, stamp.BodyHash)
+			}
+		})
+	}
+}
+
+// TestReadInstalledPromptStampV0BackwardsCompat verifies that a v0 single-hash
+// stamp is read as EmbedHash == BodyHash, so files installed by older pogo
+// binaries don't all spuriously read as "user-edited" on the v1 upgrade.
+func TestReadInstalledPromptStampV0BackwardsCompat(t *testing.T) {
+	cases := map[string]struct {
+		filename string
+		content  string
+	}{
+		"v0 markdown": {
+			"test.md",
+			"<!-- pogo-prompt-hash: deadbeef -->\n# Body\n",
+		},
+		"v0 toml": {
+			"test.toml",
+			"# pogo-prompt-hash: deadbeef\nname = \"x\"\n",
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, tc.filename)
+			if err := os.WriteFile(path, []byte(tc.content), 0644); err != nil {
+				t.Fatal(err)
+			}
+			stamp := readInstalledPromptStamp(path)
+			if stamp.EmbedHash != "deadbeef" {
+				t.Errorf("EmbedHash=%q want %q", stamp.EmbedHash, "deadbeef")
+			}
+			if stamp.BodyHash != "deadbeef" {
+				t.Errorf("BodyHash=%q want %q (v0 must read as EmbedHash==BodyHash)",
+					stamp.BodyHash, "deadbeef")
+			}
+		})
+	}
+}
+
+// TestReadInstalledPromptStampUnrecognized verifies that unstamped files and
+// stamps with unknown shapes return the zero value (no spurious matches).
+func TestReadInstalledPromptStampUnrecognized(t *testing.T) {
+	dir := t.TempDir()
+	cases := map[string]string{
+		"plain content":    "# No stamp here\n",
+		"unrelated comment": "<!-- something else -->\n# Body\n",
+		"empty":            "",
+	}
+	for name, content := range cases {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(dir, name+".md")
+			if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+				t.Fatal(err)
+			}
+			stamp := readInstalledPromptStamp(path)
+			if stamp.EmbedHash != "" || stamp.BodyHash != "" {
+				t.Errorf("expected zero stamp for %q, got %+v", content, stamp)
+			}
+		})
 	}
 }
 
@@ -1179,7 +1279,7 @@ func TestInitPromptsDefault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(string(data), promptHashPrefix) {
+	if !strings.HasPrefix(string(data), promptStampPrefix) {
 		t.Errorf("expected mayor.md to be hash-stamped, got first line: %q", strings.SplitN(string(data), "\n", 2)[0])
 	}
 }
@@ -1830,7 +1930,7 @@ func TestSynthesizeExtendsPromptNoDirective(t *testing.T) {
 	}
 }
 
-// TestSynthesizeExtendsPromptStripsHashStamps verifies that the pogo-prompt-hash
+// TestSynthesizeExtendsPromptStripsHashStamps verifies that the pogo-prompt
 // stamp added by InstallPrompts to the template (HTML-comment) and config
 // (TOML-comment) does not leak into the synthesized prompt.
 func TestSynthesizeExtendsPromptStripsHashStamps(t *testing.T) {
@@ -1868,8 +1968,10 @@ func TestSynthesizeExtendsPromptStripsHashStamps(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := string(data)
-	if strings.Contains(out, "pogo-prompt-hash") {
-		t.Errorf("synthesized prompt should not contain prompt-hash stamps:\n%s", out)
+	// Catches both v1 ("pogo-prompt: ") and legacy v0 ("pogo-prompt-hash: ")
+	// shapes — the prefix below is contained in both.
+	if strings.Contains(out, "pogo-prompt") {
+		t.Errorf("synthesized prompt should not contain pogo-prompt stamps:\n%s", out)
 	}
 	// Frontmatter must still parse (i.e. starts with `+++` after stripping the stamp).
 	if _, _, err := ParsePromptFrontmatter(outPath); err != nil {

@@ -156,12 +156,14 @@ func SynthesizeExtendsPrompt(promptPath, outPath string) (string, error) {
 	return outPath, nil
 }
 
-// stripPromptHashStamp removes a leading pogo-prompt-hash comment if present,
-// in either the markdown (HTML-comment) or TOML (#) flavor. Used when inlining
-// installed prompt/config files so the stamp doesn't leak into output.
+// stripPromptHashStamp removes a leading pogo-prompt stamp if present, in
+// either the markdown (HTML-comment) or TOML (#) flavor and in either the v1
+// (embed=… body=…) or v0 (single hash) shape. Used when inlining installed
+// prompt/config files so the stamp doesn't leak into output.
 func stripPromptHashStamp(data []byte) []byte {
 	s := string(data)
-	if strings.HasPrefix(s, promptHashPrefix) || strings.HasPrefix(s, promptHashPrefixTOML) {
+	if strings.HasPrefix(s, promptStampPrefix) || strings.HasPrefix(s, promptStampPrefixTOML) ||
+		strings.HasPrefix(s, promptHashPrefix) || strings.HasPrefix(s, promptHashPrefixTOML) {
 		if nl := strings.IndexByte(s, '\n'); nl != -1 {
 			return data[nl+1:]
 		}
@@ -475,10 +477,11 @@ func parsePromptFrontmatterBytes(data []byte) (*AgentMeta, string, error) {
 	meta := &AgentMeta{}
 	s := string(data)
 
-	// Installed prompts carry a leading "<!-- pogo-prompt-hash: ... -->" line
-	// that InstallPrompts prepends for staleness detection. Skip it so the
-	// frontmatter fence is recognized when present.
-	if strings.HasPrefix(s, promptHashPrefix) {
+	// Installed prompts carry a leading pogo-prompt stamp that InstallPrompts
+	// prepends for staleness / user-edit detection (v1: "<!-- pogo-prompt:
+	// embed=... body=... -->"; v0: "<!-- pogo-prompt-hash: ... -->"). Skip
+	// either shape so the frontmatter fence is recognized when present.
+	if strings.HasPrefix(s, promptStampPrefix) || strings.HasPrefix(s, promptHashPrefix) {
 		if nl := strings.IndexByte(s, '\n'); nl != -1 {
 			s = s[nl+1:]
 		}
@@ -692,8 +695,23 @@ func ResolveRestartOnCrash(promptFile string, t AgentType) bool {
 	return def
 }
 
-// promptHashPrefix is the marker used to embed a content hash in installed prompt files.
-// Two flavors so the stamp is a valid comment for both Markdown (HTML) and TOML.
+// Prompt stamp markers. Two shapes coexist:
+//
+//   - v1 (current): "<!-- pogo-prompt: embed=sha256:<hex> body=sha256:<hex> -->"
+//     records two hashes — embed_hash (the embed payload at install time, used to
+//     detect "binary embed advanced past the on-disk copy") and body_hash (the
+//     file body as it was written, used by future conflict-detection to spot
+//     in-place user edits). At install time the two are equal.
+//   - v0 (legacy, read-only): "<!-- pogo-prompt-hash: <hex> -->" recorded only
+//     the embed hash. Since post-install body == embed, a v0 stamp is read as
+//     embed_hash == body_hash — files installed by older pogo binaries do not
+//     spuriously appear "user-edited" on the v1 upgrade.
+//
+// Each shape has a TOML-comment flavor so the stamp is a valid comment in
+// each file format: HTML for .md, # for .toml.
+const promptStampPrefix = "<!-- pogo-prompt: "
+const promptStampSuffix = " -->\n"
+const promptStampPrefixTOML = "# pogo-prompt: "
 const promptHashPrefix = "<!-- pogo-prompt-hash: "
 const promptHashSuffix = " -->\n"
 const promptHashPrefixTOML = "# pogo-prompt-hash: "
@@ -704,36 +722,106 @@ func contentHash(data []byte) string {
 	return hex.EncodeToString(h[:])
 }
 
-// installedPromptHash reads the hash comment from the first line of an installed
-// prompt or config file. Recognizes both the HTML-comment stamp used in .md and
-// the TOML-comment stamp used in .toml. Returns empty string if no recognized
-// stamp is present.
-func installedPromptHash(path string) string {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return ""
-	}
-	firstLine, _, _ := strings.Cut(string(data), "\n")
-	suffix := strings.TrimSuffix(promptHashSuffix, "\n")
-	if strings.HasPrefix(firstLine, promptHashPrefix) && strings.HasSuffix(firstLine, suffix) {
-		return strings.TrimPrefix(strings.TrimSuffix(firstLine, suffix), promptHashPrefix)
-	}
-	if strings.HasPrefix(firstLine, promptHashPrefixTOML) {
-		return strings.TrimPrefix(firstLine, promptHashPrefixTOML)
-	}
-	return ""
+// installedPromptStamp is the parsed pogo-prompt stamp from an installed
+// prompt or config file's first line. Empty fields indicate "not stamped" or
+// "stamp shape unrecognized."
+type installedPromptStamp struct {
+	// EmbedHash is the hash of the embed payload that produced the file.
+	// InstallPrompts compares it against the current binary's embed to decide
+	// whether the on-disk copy is stale.
+	EmbedHash string
+	// BodyHash is the hash of the file body (everything after the stamp line)
+	// as it was written at install time. Conflict detection (separate ticket)
+	// will compare it against a fresh hash of the current body to detect
+	// in-place user edits.
+	BodyHash string
 }
 
-// stampedContent prepends a hash comment to a prompt file's content. The
-// comment style is chosen by extension so the stamp is a valid comment in
-// each file format: HTML for .md, # for .toml.
+// readInstalledPromptStamp reads the stamp from the first line of an installed
+// prompt or config file. Recognizes the v1 "pogo-prompt: embed=… body=…" shape
+// in both HTML-comment (.md) and TOML-comment (.toml) flavors, and the legacy
+// v0 "pogo-prompt-hash: <hex>" shape (treated as EmbedHash == BodyHash so v0
+// files don't read as "edited" after upgrade). Returns the zero value when no
+// recognized stamp is present.
+func readInstalledPromptStamp(path string) installedPromptStamp {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return installedPromptStamp{}
+	}
+	firstLine, _, _ := strings.Cut(string(data), "\n")
+
+	stampSuffix := strings.TrimSuffix(promptStampSuffix, "\n")
+	if strings.HasPrefix(firstLine, promptStampPrefix) && strings.HasSuffix(firstLine, stampSuffix) {
+		body := strings.TrimSuffix(strings.TrimPrefix(firstLine, promptStampPrefix), stampSuffix)
+		return parsePromptStampBody(body)
+	}
+	if strings.HasPrefix(firstLine, promptStampPrefixTOML) {
+		body := strings.TrimPrefix(firstLine, promptStampPrefixTOML)
+		return parsePromptStampBody(body)
+	}
+
+	// v0 backwards-compat: the recorded hash is the embed payload's hash, and
+	// since the file body equals the embed at install time, treating it as
+	// both EmbedHash and BodyHash matches what the v1 writer would have
+	// produced for the same install.
+	hashSuffix := strings.TrimSuffix(promptHashSuffix, "\n")
+	if strings.HasPrefix(firstLine, promptHashPrefix) && strings.HasSuffix(firstLine, hashSuffix) {
+		h := strings.TrimSuffix(strings.TrimPrefix(firstLine, promptHashPrefix), hashSuffix)
+		return installedPromptStamp{EmbedHash: h, BodyHash: h}
+	}
+	if strings.HasPrefix(firstLine, promptHashPrefixTOML) {
+		h := strings.TrimPrefix(firstLine, promptHashPrefixTOML)
+		return installedPromptStamp{EmbedHash: h, BodyHash: h}
+	}
+
+	return installedPromptStamp{}
+}
+
+// parsePromptStampBody parses the inner body of a v1 stamp (the part between
+// the prefix and the closing "-->", e.g. "embed=sha256:abc body=sha256:def")
+// into its embed_hash and body_hash components. Unknown fields are ignored so
+// new fields can be added without breaking older readers. The "sha256:" prefix
+// is stripped so the returned values are bare hex hashes that compare directly
+// against contentHash output.
+func parsePromptStampBody(body string) installedPromptStamp {
+	var s installedPromptStamp
+	for _, field := range strings.Fields(body) {
+		key, val, ok := strings.Cut(field, "=")
+		if !ok {
+			continue
+		}
+		val = strings.TrimPrefix(val, "sha256:")
+		switch key {
+		case "embed":
+			s.EmbedHash = val
+		case "body":
+			s.BodyHash = val
+		}
+	}
+	return s
+}
+
+// installedPromptHash returns the embed hash from an installed prompt or
+// config file's stamp. Thin wrapper over readInstalledPromptStamp for callers
+// that only need the embed-staleness check (InstallPrompts, CheckPromptDrift);
+// returns empty string if no recognized stamp is present.
+func installedPromptHash(path string) string {
+	return readInstalledPromptStamp(path).EmbedHash
+}
+
+// stampedContent prepends a v1 pogo-prompt stamp to a prompt file's content.
+// The comment style is chosen by extension so the stamp is a valid comment in
+// each file format: HTML for .md, # for .toml. Both embed_hash and body_hash
+// in the emitted stamp are equal to contentHash(data) — they only diverge
+// later, after a user edits the on-disk file in place.
 func stampedContent(path string, data []byte) []byte {
 	hash := contentHash(data)
+	body := "embed=sha256:" + hash + " body=sha256:" + hash
 	var stamp string
 	if strings.HasSuffix(path, ".toml") {
-		stamp = promptHashPrefixTOML + hash + "\n"
+		stamp = promptStampPrefixTOML + body + "\n"
 	} else {
-		stamp = promptHashPrefix + hash + strings.TrimSuffix(promptHashSuffix, "\n") + "\n"
+		stamp = promptStampPrefix + body + promptStampSuffix
 	}
 	return append([]byte(stamp), data...)
 }
@@ -998,7 +1086,7 @@ type PromptDrift struct {
 	// Path is the relative path under ~/.pogo/agents/ (e.g. "pm/pm-template.md").
 	Path string `json:"path"`
 	// Reason is "missing" if the live file does not exist, "unstamped" if it
-	// has no pogo-prompt-hash stamp, or "stale" if the stamped hash differs
+	// has no pogo-prompt stamp, or "stale" if the stamped embed hash differs
 	// from the embedded content's hash.
 	Reason string `json:"reason"`
 }
