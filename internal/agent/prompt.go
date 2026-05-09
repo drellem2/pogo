@@ -106,13 +106,33 @@ var extendsDirectiveRE = regexp.MustCompile(`(?m)^extends\s+(\S+)\s+with\s+confi
 // own frontmatter (e.g. auto_start, nudge_on_start) is preserved so it governs
 // the synthesized agent's behavior.
 func SynthesizeExtendsPrompt(promptPath, outPath string) (string, error) {
-	_, body, err := ParsePromptFrontmatter(promptPath)
+	data, err := synthesizeExtendsBytes(promptPath)
 	if err != nil {
 		return "", err
 	}
+	if data == nil {
+		return "", nil
+	}
+	if err := os.MkdirAll(filepath.Dir(outPath), 0755); err != nil {
+		return "", fmt.Errorf("create dir for synthesized prompt: %w", err)
+	}
+	if err := os.WriteFile(outPath, data, 0644); err != nil {
+		return "", fmt.Errorf("write synthesized prompt: %w", err)
+	}
+	return outPath, nil
+}
+
+// synthesizeExtendsBytes is the in-memory variant of SynthesizeExtendsPrompt.
+// Returns nil bytes (with nil error) when the prompt has no extends directive,
+// so callers can fall back to the original prompt body.
+func synthesizeExtendsBytes(promptPath string) ([]byte, error) {
+	_, body, err := ParsePromptFrontmatter(promptPath)
+	if err != nil {
+		return nil, err
+	}
 	m := extendsDirectiveRE.FindStringSubmatch(body)
 	if m == nil {
-		return "", nil
+		return nil, nil
 	}
 	tmplArg, cfgArg := m[1], m[2]
 	root := PromptDir()
@@ -128,11 +148,11 @@ func SynthesizeExtendsPrompt(promptPath, outPath string) (string, error) {
 	}
 	tmplData, err := os.ReadFile(tmplPath)
 	if err != nil {
-		return "", fmt.Errorf("read extends template %s: %w", tmplPath, err)
+		return nil, fmt.Errorf("read extends template %s: %w", tmplPath, err)
 	}
 	cfgData, err := os.ReadFile(cfgPath)
 	if err != nil {
-		return "", fmt.Errorf("read extends config %s: %w", cfgPath, err)
+		return nil, fmt.Errorf("read extends config %s: %w", cfgPath, err)
 	}
 	var buf bytes.Buffer
 	buf.Write(stripPromptHashStamp(tmplData))
@@ -147,13 +167,163 @@ func SynthesizeExtendsPrompt(promptPath, outPath string) (string, error) {
 		buf.WriteByte('\n')
 	}
 	buf.WriteString("```\n")
-	if err := os.MkdirAll(filepath.Dir(outPath), 0755); err != nil {
-		return "", fmt.Errorf("create dir for synthesized prompt: %w", err)
+	return buf.Bytes(), nil
+}
+
+// DropInDir returns the directory containing user drop-in fragments for the
+// named base prompt. Default: ~/.pogo/agents/dropins/<basename>/
+//
+// basename is the filename stem (no extension, no parent directory) of the
+// shipped prompt — "mayor" for mayor.md, "polecat" for templates/polecat.md,
+// "doctor" for crew/doctor.md.
+func DropInDir(basename string) string {
+	return filepath.Join(PromptDir(), "dropins", basename)
+}
+
+// LoadDropIns reads every *.md file under DropInDir(basename) in lexical
+// order and returns their concatenated content (with a trailing newline
+// inserted between fragments when needed). Subdirectories are ignored.
+//
+// An absent or empty drop-in directory yields "" with a nil error — drop-ins
+// are an opt-in customization slot, not a required part of the prompt.
+func LoadDropIns(basename string) (string, error) {
+	dir := DropInDir(basename)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", fmt.Errorf("read drop-in dir %s: %w", dir, err)
 	}
-	if err := os.WriteFile(outPath, buf.Bytes(), 0644); err != nil {
-		return "", fmt.Errorf("write synthesized prompt: %w", err)
+	var names []string
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
+			continue
+		}
+		names = append(names, e.Name())
 	}
-	return outPath, nil
+	sort.Strings(names)
+	var buf bytes.Buffer
+	for _, n := range names {
+		data, err := os.ReadFile(filepath.Join(dir, n))
+		if err != nil {
+			return "", fmt.Errorf("read drop-in %s: %w", n, err)
+		}
+		buf.Write(data)
+		if !bytes.HasSuffix(buf.Bytes(), []byte("\n")) {
+			buf.WriteByte('\n')
+		}
+	}
+	return buf.String(), nil
+}
+
+// appendDropIns concatenates a base prompt body and a drop-in fragment block,
+// ensuring exactly one separating newline so fragments don't run into the
+// last line of the base.
+func appendDropIns(base, dropins string) string {
+	if dropins == "" {
+		return base
+	}
+	if base == "" {
+		return dropins
+	}
+	if !strings.HasSuffix(base, "\n") {
+		base += "\n"
+	}
+	return base + dropins
+}
+
+// SynthesizePrompt resolves the named prompt and produces the final content
+// that an agent would receive — applying the same transformations as the
+// spawn-time loader, but with no file writes. Used by `pogo agent prompt show`.
+//
+// Resolution order: mayor (when name == "mayor"), crew prompt, template. The
+// first hit wins; an unknown name returns an error.
+//
+// Pipeline:
+//   - mayor or crew without `extends`: read base, append drop-ins from
+//     dropins/<name>/, return.
+//   - crew with `extends`: synthesize template + config in-memory, append
+//     drop-ins from dropins/<name>/, return.
+//   - polecat template: read base, append drop-ins, run text/template
+//     substitution with vars, return.
+//
+// Frontmatter is stripped from the base prompt so the output matches what
+// the agent harness will see.
+func SynthesizePrompt(name string, vars TemplateVars) (string, error) {
+	if name == "mayor" {
+		path, err := ResolveMayorPrompt()
+		if err != nil {
+			return "", err
+		}
+		return synthesizeStaticPrompt(path, name)
+	}
+	if path, err := ResolveCrewPrompt(name); err == nil {
+		return synthesizeStaticPrompt(path, name)
+	}
+	if path, err := ResolveTemplate(name); err == nil {
+		return synthesizePolecatTemplate(path, name, vars)
+	}
+	return "", fmt.Errorf("prompt %q not found (checked mayor, crew/, templates/)", name)
+}
+
+func synthesizeStaticPrompt(path, basename string) (string, error) {
+	extData, err := synthesizeExtendsBytes(path)
+	if err != nil {
+		return "", err
+	}
+	var body string
+	if extData != nil {
+		body = string(extData)
+	} else {
+		_, b, err := ParsePromptFrontmatter(path)
+		if err != nil {
+			return "", err
+		}
+		body = b
+	}
+	drop, err := LoadDropIns(basename)
+	if err != nil {
+		return "", err
+	}
+	return appendDropIns(body, drop), nil
+}
+
+func synthesizePolecatTemplate(path, basename string, vars TemplateVars) (string, error) {
+	_, body, err := ParsePromptFrontmatter(path)
+	if err != nil {
+		return "", err
+	}
+	drop, err := LoadDropIns(basename)
+	if err != nil {
+		return "", err
+	}
+	combined := appendDropIns(body, drop)
+	tmpl, err := template.New(filepath.Base(path)).Parse(combined)
+	if err != nil {
+		return "", fmt.Errorf("parse template: %w", err)
+	}
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, vars); err != nil {
+		return "", fmt.Errorf("execute template: %w", err)
+	}
+	return buf.String(), nil
+}
+
+// PreviewTemplateVars returns stub TemplateVars used by `pogo agent prompt
+// show` when rendering polecat templates. The user is verifying composition,
+// not running the prompt, so vars carry obvious "preview" sentinels rather
+// than realistic values. RecentCommits/RecentFiles stay empty so conditional
+// sections gated by `{{if .RecentCommits}}` show their no-context shape.
+func PreviewTemplateVars() TemplateVars {
+	return TemplateVars{
+		Task:        "(preview) example task title",
+		Body:        "(preview) example body",
+		Id:          "preview",
+		Repo:        "/path/to/repo",
+		Branch:      "main",
+		WorktreeDir: "/path/to/worktree",
+	}
 }
 
 // stripPromptHashStamp removes a leading pogo-prompt-hash comment if present,

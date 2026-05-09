@@ -1990,3 +1990,250 @@ func TestInitPromptDirs(t *testing.T) {
 		t.Error("templates dir not created")
 	}
 }
+
+// TestLoadDropInsAbsentDir confirms that a missing drop-in directory is not
+// an error — drop-ins are an opt-in customization slot.
+func TestLoadDropInsAbsentDir(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	got, err := LoadDropIns("mayor")
+	if err != nil {
+		t.Fatalf("LoadDropIns: %v", err)
+	}
+	if got != "" {
+		t.Errorf("expected empty result for missing dir, got %q", got)
+	}
+}
+
+// TestLoadDropInsLexicalOrder confirms that fragments are concatenated in
+// lexical filename order (the systemd / cron.d convention) so users can use
+// numeric prefixes to control composition.
+func TestLoadDropInsLexicalOrder(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := DropInDir("mayor")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// Write in non-lexical order; expect lexical concatenation regardless.
+	for name, body := range map[string]string{
+		"50-middle.md": "## middle\n",
+		"10-first.md":  "## first\n",
+		"90-last.md":   "## last\n",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := LoadDropIns("mayor")
+	if err != nil {
+		t.Fatalf("LoadDropIns: %v", err)
+	}
+	if !strings.Contains(got, "## first") {
+		t.Errorf("output missing first fragment:\n%s", got)
+	}
+	firstIdx := strings.Index(got, "## first")
+	middleIdx := strings.Index(got, "## middle")
+	lastIdx := strings.Index(got, "## last")
+	if !(firstIdx < middleIdx && middleIdx < lastIdx) {
+		t.Errorf("fragments not in lexical order: first=%d middle=%d last=%d\n%s",
+			firstIdx, middleIdx, lastIdx, got)
+	}
+}
+
+// TestLoadDropInsIgnoresNonMarkdown confirms that non-.md files and
+// subdirectories are skipped — keeps the directory safe to use as a notes
+// area as long as customizations end in .md.
+func TestLoadDropInsIgnoresNonMarkdown(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := DropInDir("mayor")
+	if err := os.MkdirAll(filepath.Join(dir, "subdir"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("ignored\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "real.md"), []byte("kept\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := LoadDropIns("mayor")
+	if err != nil {
+		t.Fatalf("LoadDropIns: %v", err)
+	}
+	if strings.Contains(got, "ignored") {
+		t.Errorf("non-.md content should be skipped:\n%s", got)
+	}
+	if !strings.Contains(got, "kept") {
+		t.Errorf("expected real.md content, got:\n%s", got)
+	}
+}
+
+// TestSynthesizePromptMayorAppendsDropIns confirms that `pogo agent prompt
+// show mayor` (the show-side caller) renders the mayor body plus any
+// dropins/mayor/*.md fragments, frontmatter stripped.
+func TestSynthesizePromptMayorAppendsDropIns(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	if err := InitPromptDirs(); err != nil {
+		t.Fatal(err)
+	}
+	mayorBody := "+++\nauto_start = true\n+++\n# Mayor\n\nBase mayor body.\n"
+	if err := os.WriteFile(filepath.Join(PromptDir(), "mayor.md"), []byte(mayorBody), 0644); err != nil {
+		t.Fatal(err)
+	}
+	dropDir := DropInDir("mayor")
+	if err := os.MkdirAll(dropDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dropDir, "10-house.md"), []byte("## House style\n\nAlways prefer X.\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := SynthesizePrompt("mayor", PreviewTemplateVars())
+	if err != nil {
+		t.Fatalf("SynthesizePrompt: %v", err)
+	}
+	if strings.Contains(got, "+++") {
+		t.Errorf("frontmatter must be stripped from synthesized output:\n%s", got)
+	}
+	if !strings.Contains(got, "Base mayor body.") {
+		t.Errorf("expected base body, got:\n%s", got)
+	}
+	if !strings.Contains(got, "House style") {
+		t.Errorf("expected drop-in fragment appended, got:\n%s", got)
+	}
+	if strings.Index(got, "Base mayor body.") >= strings.Index(got, "House style") {
+		t.Errorf("drop-in must come after base, got:\n%s", got)
+	}
+}
+
+// TestSynthesizePromptCrewWithExtends covers the case where a crew prompt is
+// an `extends ... with config ...` redirect. The synthesized output should
+// inline the template + config, then append any drop-ins keyed by the crew
+// agent name (the user-facing name, not the underlying template).
+func TestSynthesizePromptCrewWithExtends(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	if err := InitPromptDirs(); err != nil {
+		t.Fatal(err)
+	}
+	pmDir := filepath.Join(PromptDir(), "pm")
+	if err := os.MkdirAll(pmDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pmDir, "pm-template.md"),
+		[]byte("# PM Template\n\nYou are a PM.\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pmDir, "pogo.toml"),
+		[]byte("name = \"pm-pogo\"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(CrewPromptDir(), "pm-pogo.md"),
+		[]byte("extends pm-template with config pm/pogo.toml\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	dropDir := DropInDir("pm-pogo")
+	if err := os.MkdirAll(dropDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dropDir, "10-extra.md"),
+		[]byte("## extra rule\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := SynthesizePrompt("pm-pogo", PreviewTemplateVars())
+	if err != nil {
+		t.Fatalf("SynthesizePrompt: %v", err)
+	}
+	for _, want := range []string{"PM Template", "You are a PM.", "Your configuration", "name = \"pm-pogo\"", "extra rule"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("expected %q in synthesized output:\n%s", want, got)
+		}
+	}
+}
+
+// TestSynthesizePromptTemplateExpandsStubs confirms that polecat templates
+// are run through {{.Var}} substitution with the preview stubs and that
+// drop-ins for templates land before expansion (so fragment text can also
+// reference template vars if it wants to).
+func TestSynthesizePromptTemplateExpandsStubs(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	if err := InitPromptDirs(); err != nil {
+		t.Fatal(err)
+	}
+	tmplBody := "+++\nworktree = true\n+++\n" +
+		"# Polecat\n\nWork item: {{.Id}}\nRepo: {{.Repo}}\n"
+	if err := os.WriteFile(filepath.Join(TemplateDir(), "polecat.md"),
+		[]byte(tmplBody), 0644); err != nil {
+		t.Fatal(err)
+	}
+	dropDir := DropInDir("polecat")
+	if err := os.MkdirAll(dropDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dropDir, "20-rules.md"),
+		[]byte("## House polecat rules\n\nAdditional guidance for {{.Id}}.\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := SynthesizePrompt("polecat", PreviewTemplateVars())
+	if err != nil {
+		t.Fatalf("SynthesizePrompt: %v", err)
+	}
+	if strings.Contains(got, "{{.Id}}") {
+		t.Errorf("template vars must be expanded, got:\n%s", got)
+	}
+	if !strings.Contains(got, "Work item: preview") {
+		t.Errorf("expected stub Id in body:\n%s", got)
+	}
+	if !strings.Contains(got, "Repo: /path/to/repo") {
+		t.Errorf("expected stub Repo in body:\n%s", got)
+	}
+	if !strings.Contains(got, "House polecat rules") {
+		t.Errorf("expected drop-in appended:\n%s", got)
+	}
+	if !strings.Contains(got, "Additional guidance for preview.") {
+		t.Errorf("drop-in template vars must also expand:\n%s", got)
+	}
+}
+
+// TestSynthesizePromptUnknownName confirms that an unknown prompt name
+// produces an error so `pogo agent prompt show <unknown>` exits non-zero.
+func TestSynthesizePromptUnknownName(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	if err := InitPromptDirs(); err != nil {
+		t.Fatal(err)
+	}
+	_, err := SynthesizePrompt("nope-not-here", PreviewTemplateVars())
+	if err == nil {
+		t.Error("expected error for unknown prompt name")
+	}
+}
+
+// TestSynthesizePromptResolutionPriority confirms the documented mayor →
+// crew → template precedence — a name that exists as both a crew prompt and
+// a template resolves to the crew prompt first.
+func TestSynthesizePromptResolutionPriority(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	if err := InitPromptDirs(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(CrewPromptDir(), "shared.md"),
+		[]byte("# Crew shared\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(TemplateDir(), "shared.md"),
+		[]byte("# Template shared\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := SynthesizePrompt("shared", PreviewTemplateVars())
+	if err != nil {
+		t.Fatalf("SynthesizePrompt: %v", err)
+	}
+	if !strings.Contains(got, "Crew shared") {
+		t.Errorf("expected crew prompt to win when both exist:\n%s", got)
+	}
+	if strings.Contains(got, "Template shared") {
+		t.Errorf("template body should not have leaked through:\n%s", got)
+	}
+}
