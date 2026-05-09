@@ -1,5 +1,7 @@
 # Declarative Agent Roles and Orchestration
 
+**Status:** Phase 1 + Phase 2 shipped (`auto_start`, `restart_on_crash`, `nudge_on_start` in `internal/agent/prompt.go`). Architecture archeology — kept for the why-TOML-not-X rationale.
+
 Investigation into making pogo's agent roles and orchestration configurable via declarative configuration, rather than the current imperative/prompt-file approach.
 
 ## Current Architecture
