@@ -1,5 +1,7 @@
 # Claude Explore Integration: Scoping (mg-39b6)
 
+**Status:** scoped, deferred. Architecture archeology — see mg-39b6 for context.
+
 This doc scopes the question: **does pogo's index need special config to be useful to the Claude Code "Explore" sub-agent, in the way that [codegraph](https://github.com/colbymchenry/codegraph) does?**
 
 It is a research/scoping doc. No code in this work item — the architect approved a polecat for the scoping pass only (mg-39b6, mail 2026-04-28). If any work falls out, it is filed as a separate ticket.
