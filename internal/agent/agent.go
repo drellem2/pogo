@@ -910,15 +910,40 @@ func (a *Agent) readAttachInput(conn net.Conn, master io.Writer) {
 	}
 }
 
-// applyResize updates the PTY winsize. cols/rows of 0 are ignored.
+// applyResize updates the PTY winsize, but only when it actually changes.
+//
+// cols/rows of 0 mean "size unknown — keep the current winsize" and are
+// ignored: the attach handshake sends 0×0 when the client can't read its
+// terminal size, and a SIGWINCH with a stale 0 dimension would otherwise
+// collapse the agent's TUI.
+//
+// A resize to the size the PTY already has is also skipped. TIOCSWINSZ
+// signals SIGWINCH to the agent's foreground process group *unconditionally*
+// — even when the dimensions are unchanged — and a TUI like Claude Code's Ink
+// renderer answers every SIGWINCH with a full redraw. Those redraw bytes flow
+// back through readOutput into outputBuf, bumping LastWriteTime; if a nudge's
+// WaitIdle poll coincides with the redraw the agent never looks idle and the
+// nudge fails with "context deadline exceeded". Making the resize idempotent
+// keeps a connect-time handshake at the agent's current size (the common case
+// once Spawn sets a sane default) from poking a healthy target.
+//
+// The whole operation runs under a.mu. The ioctls (TIOCGWINSZ/TIOCSWINSZ)
+// reach into the *os.File's fd, and Cleanup closes that fd under the same
+// lock — holding a.mu across the read-and-set is what keeps a concurrent
+// detach/Stop from closing the PTY mid-ioctl (a race the original mg-5564
+// code had, where Setsize ran after the lock was already released).
 func (a *Agent) applyResize(cols, rows uint16) {
 	if cols == 0 || rows == 0 {
 		return
 	}
 	a.mu.Lock()
+	defer a.mu.Unlock()
 	master := a.master
-	a.mu.Unlock()
 	if master == nil {
+		return
+	}
+	if cur, err := pty.GetsizeFull(master); err == nil && cur.Cols == cols && cur.Rows == rows {
+		// Already at this size — skip the redundant SIGWINCH/redraw.
 		return
 	}
 	pty.Setsize(master, &pty.Winsize{Cols: cols, Rows: rows})

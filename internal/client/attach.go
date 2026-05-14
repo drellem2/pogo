@@ -20,9 +20,10 @@ import (
 // the user sends the escape sequence (Ctrl-\).
 //
 // Wire protocol (client → server) is documented in
-// internal/agent/attach_proto.go. Briefly: a leading 5-byte resize frame
-// negotiates the initial PTY size, after which input bytes are wrapped in
-// data frames and SIGWINCH-triggered resizes ride the same channel.
+// internal/agent/attach_proto.go. Briefly: a mandatory leading 5-byte resize
+// frame negotiates the initial PTY size *and* puts the server into framed
+// mode, after which input bytes are wrapped in data frames and
+// SIGWINCH-triggered resizes ride the same channel.
 func AttachAgent(socketPath string) error {
 	conn, err := net.Dial("unix", socketPath)
 	if err != nil {
@@ -41,14 +42,25 @@ func AttachAgent(socketPath string) error {
 	// run in separate goroutines and must not interleave bytes inside a frame.
 	var writeMu sync.Mutex
 
-	// Send the initial resize frame so the server knows our terminal size
-	// before any other input arrives. If the terminal size can't be
-	// determined (e.g. stdin not a TTY) we skip the frame and let the
-	// server fall back to its default winsize.
-	if cols, rows, gerr := term.GetSize(stdinFd); gerr == nil {
-		if err := sendResizeFrame(conn, &writeMu, cols, rows); err != nil {
-			return fmt.Errorf("send initial resize: %w", err)
-		}
+	// Always send the handshake resize frame first. Its leading
+	// FrameTypeResize byte is what puts the server into framed mode; without
+	// it the server inspects the first byte it sees, finds a data frame's
+	// 0x02 type byte instead, concludes "legacy raw client" and io.Copy's the
+	// entire framed stream — every 3-byte data-frame header, every length
+	// field, every mid-session resize frame — straight into the agent's PTY
+	// as if the user had typed it. Injecting control bytes as keystrokes
+	// corrupts the target's TUI.
+	//
+	// When the terminal size can't be determined (e.g. stdin not a TTY) we
+	// still send the frame, with 0×0 dimensions: the server treats 0×0 as
+	// "size unknown — keep the current winsize", so framed mode is
+	// established unambiguously and the agent keeps its spawn-time default.
+	cols, rows, gerr := term.GetSize(stdinFd)
+	if gerr != nil {
+		cols, rows = 0, 0
+	}
+	if err := sendHandshakeFrame(conn, &writeMu, cols, rows); err != nil {
+		return fmt.Errorf("send attach handshake: %w", err)
 	}
 
 	sigCh := make(chan os.Signal, 1)
@@ -99,9 +111,33 @@ func AttachAgent(socketPath string) error {
 	return nil
 }
 
+// sendHandshakeFrame writes the mandatory connect-time resize frame that puts
+// the server into framed mode. Unlike sendResizeFrame it always writes a
+// frame: out-of-range or unknown dimensions are clamped to 0, which the
+// server reads as "keep the current winsize". Establishing framed mode is the
+// point of this frame — skipping it would let the server fall back to legacy
+// raw streaming and dump subsequent frame headers into the agent's PTY.
+func sendHandshakeFrame(conn net.Conn, mu *sync.Mutex, cols, rows int) error {
+	if cols < 0 || cols > 65535 {
+		cols = 0
+	}
+	if rows < 0 || rows > 65535 {
+		rows = 0
+	}
+	var frame [5]byte
+	frame[0] = agent.FrameTypeResize
+	binary.LittleEndian.PutUint16(frame[1:3], uint16(cols))
+	binary.LittleEndian.PutUint16(frame[3:5], uint16(rows))
+	mu.Lock()
+	defer mu.Unlock()
+	_, err := conn.Write(frame[:])
+	return err
+}
+
 // sendResizeFrame writes a 5-byte resize frame (FrameTypeResize + cols u16 LE
 // + rows u16 LE) to conn under mu. Cols/rows ≤ 0 or > 65535 are silently
-// dropped — there is nothing useful to forward.
+// dropped — there is nothing useful to forward mid-session, and unlike the
+// connect-time handshake there is no framed-mode state left to establish.
 func sendResizeFrame(conn net.Conn, mu *sync.Mutex, cols, rows int) error {
 	if cols <= 0 || rows <= 0 || cols > 65535 || rows > 65535 {
 		return nil

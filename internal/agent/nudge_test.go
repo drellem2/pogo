@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -123,6 +125,61 @@ func TestNudgeWithModeWaitIdle(t *testing.T) {
 	output := string(a.RecentOutput(1024))
 	if !strings.Contains(output, "waited msg") {
 		t.Errorf("expected output to contain 'waited msg', got %q", output)
+	}
+}
+
+// TestNudgeWithModeWaitIdleTimeoutOnBusy covers the S1 symptom from mg-8772:
+// a nudge in wait-idle mode against an agent that never goes quiet must fail
+// with a context-deadline error, not hang and not deliver. The agent here
+// emits output continuously, so WaitIdle can never observe quiescence. The
+// returned error must satisfy errors.Is(err, context.DeadlineExceeded) so
+// callers can distinguish "agent busy" from other failures, and the message
+// must name the busy/stuck condition for operator triage.
+func TestNudgeWithModeWaitIdleTimeoutOnBusy(t *testing.T) {
+	tmpDir := t.TempDir()
+	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	defer reg.StopAll(2 * time.Second)
+
+	// A shell that prints forever — the PTY is never quiet, so the agent
+	// never satisfies the idle threshold.
+	a, err := reg.Spawn(SpawnRequest{
+		Name:    "busy-agent",
+		Type:    TypePolecat,
+		Command: []string{"sh", "-c", "while true; do printf x; sleep 0.05; done"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Wait until the agent has actually produced output, so we are testing
+	// the busy path and not the just-spawned no-output path.
+	deadline := time.Now().Add(2 * time.Second)
+	for len(a.RecentOutput(16)) == 0 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if len(a.RecentOutput(16)) == 0 {
+		t.Fatal("busy agent never produced output")
+	}
+
+	start := time.Now()
+	err = a.NudgeWithMode("should not deliver", NudgeWaitIdle, 1*time.Second)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected wait-idle nudge to fail against a perpetually busy agent")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("error must wrap context.DeadlineExceeded for callers to detect busy/timeout; got %v", err)
+	}
+	if !strings.Contains(err.Error(), "busy") && !strings.Contains(err.Error(), "still producing output") {
+		t.Errorf("error message should name the busy/stuck condition; got %q", err.Error())
+	}
+	// The timeout was 1s; the call must return promptly around that, not hang.
+	if elapsed > 5*time.Second {
+		t.Errorf("nudge took %v to time out; expected ~1s", elapsed)
 	}
 }
 

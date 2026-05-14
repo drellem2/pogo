@@ -6,7 +6,6 @@ import (
 	"log"
 	"net/http"
 
-	"github.com/creack/pty"
 	"nhooyr.io/websocket"
 )
 
@@ -121,17 +120,10 @@ func (r *Registry) HandleTerminal(w http.ResponseWriter, req *http.Request) {
 			}
 			switch ctrl.Type {
 			case "resize":
-				if ctrl.Cols > 0 && ctrl.Rows > 0 {
-					agent.mu.Lock()
-					m := agent.master
-					agent.mu.Unlock()
-					if m != nil {
-						pty.Setsize(m, &pty.Winsize{
-							Cols: ctrl.Cols,
-							Rows: ctrl.Rows,
-						})
-					}
-				}
+				// Route through applyResize so the websocket bridge shares the
+				// unix-socket attach path's validation and idempotence: a
+				// 0×0 or no-op resize must not trigger a SIGWINCH-driven redraw.
+				agent.applyResize(ctrl.Cols, ctrl.Rows)
 			}
 		}
 	}

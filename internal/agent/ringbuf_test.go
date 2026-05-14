@@ -2,6 +2,7 @@ package agent
 
 import (
 	"testing"
+	"time"
 )
 
 func TestRingBufferBasic(t *testing.T) {
@@ -59,5 +60,41 @@ func TestRingBufferEmpty(t *testing.T) {
 
 	if rb.Len() != 0 {
 		t.Errorf("Len() on empty = %d, want 0", rb.Len())
+	}
+}
+
+// TestRingBufferLastWriteTimeInvariant guards the invariant that idle
+// detection depends on (see Agent.IsIdle): only Write advances lastWrite —
+// reads (Last, Len, LastWriteTime) must never mutate it. If a read bumped
+// lastWrite, every poll of WaitIdle would reset the idle window and the
+// agent would never be seen as idle. This is the ring-buffer half of the
+// mg-8772 S1 (nudge-timeout) regression coverage.
+func TestRingBufferLastWriteTimeInvariant(t *testing.T) {
+	rb := NewRingBuffer(64)
+
+	rb.Write([]byte("hello world"))
+	afterWrite := rb.LastWriteTime()
+	if afterWrite.IsZero() {
+		t.Fatal("LastWriteTime zero after a write")
+	}
+
+	time.Sleep(10 * time.Millisecond)
+
+	// Reads must not move lastWrite, no matter how many times they run.
+	for i := 0; i < 5; i++ {
+		rb.Last(11)
+		rb.Last(4)
+		rb.Len()
+		rb.LastWriteTime()
+	}
+	if got := rb.LastWriteTime(); !got.Equal(afterWrite) {
+		t.Errorf("reads mutated lastWrite: %v != %v", got, afterWrite)
+	}
+
+	// A subsequent write must advance it.
+	time.Sleep(10 * time.Millisecond)
+	rb.Write([]byte("more"))
+	if got := rb.LastWriteTime(); !got.After(afterWrite) {
+		t.Errorf("write did not advance lastWrite: %v not after %v", got, afterWrite)
 	}
 }

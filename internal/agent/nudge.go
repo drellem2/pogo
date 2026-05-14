@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -84,6 +85,16 @@ func (a *Agent) NudgeWithMode(msg string, mode NudgeMode, timeout time.Duration)
 	defer cancel()
 
 	if err := a.WaitIdle(ctx, DefaultIdleThreshold); err != nil {
+		// Distinguish "agent never went quiet" (busy, or stuck redrawing —
+		// e.g. a TUI corrupted by a bad attach resize) from a plain context
+		// cancellation. The deadline-exceeded case still wraps the original
+		// error so callers' errors.Is(err, context.DeadlineExceeded) holds.
+		if errors.Is(err, context.DeadlineExceeded) {
+			sinceWrite := time.Since(a.outputBuf.LastWriteTime()).Round(time.Millisecond)
+			return fmt.Errorf("wait for idle: agent %q still producing output after %s "+
+				"(last PTY write %s ago) — agent is busy or stuck redrawing: %w",
+				a.Name, timeout, sinceWrite, err)
+		}
 		return fmt.Errorf("wait for idle: %w", err)
 	}
 
