@@ -377,11 +377,14 @@ they want to be re-prompted later without spinning their own polling loop.
 all moved their recurring schedules from Claude's in-process `CronCreate` to
 `pogo schedule`:
 
-- `internal/agent/prompts/pm/pm-template.md` — three schedules (`mail-check`,
-  `sweep-morning`, `sweep-evening`), all with the default `once` replay
-  policy. The morning/evening sweeps are documented as at-most-once on
-  recovery: a single catch-up sweep covers an arbitrarily long sleep, no
-  matter how many cron points were missed.
+- `internal/agent/prompts/pm/pm-template.md` — three schedules with
+  agent-suffixed IDs (`mail-check-pm-<name>`, `sweep-morning-pm-<name>`,
+  `sweep-evening-pm-<name>`), all with the default `once` replay policy.
+  The morning/evening sweeps are documented as at-most-once on recovery: a
+  single catch-up sweep covers an arbitrarily long sleep, no matter how
+  many cron points were missed. The agent-name suffix matches the polecat
+  `mail-check-<work-item-id>` convention and avoids the registry-purge
+  failure mode seen with short / generic IDs (mg-8e5d).
 - `internal/agent/prompts/templates/polecat.md` and `polecat-qa.md` — one
   per-polecat mail-check schedule with id `mail-check-<work-item-id>`. The
   mayor cleans these up in step 3 of its coordination loop when stopping a

@@ -31,10 +31,12 @@ Set up your background scheduling. PMs need three persistent triggers — one ma
 
 Each registration is **idempotent via `--id`** (registering the same id twice replaces the entry), so it's safe to re-run these commands on every startup.
 
+**Schedule IDs are suffixed with your agent name** (`-pm-<your-name>`) — same convention polecats use (`mail-check-<work-item-id>`). The suffix matters: pogod's registry compaction has previously purged short / generic IDs after ~1h (mg-8e5d), but agent-suffixed IDs persist. Re-registering with the same `--id` is still idempotent (id is the dedup key); the suffix only changes which key you're idempotent on.
+
 1. **Mail-check loop** — every 10 minutes, so you stay responsive to overrides and feedback. The nudge body **also** instructs you to refresh your sweep.log heartbeat — mayor watches sweep.log mtime to detect wedged sessions (see "Mayor's stall-watch" below):
 
    ```bash
-   pogo schedule pm-<your-name> --cron "*/10 * * * *" --id mail-check \
+   pogo schedule pm-<your-name> --cron "*/10 * * * *" --id mail-check-pm-<your-name> \
        --replay once \
        --message "Check your mail with mg mail list pm-<your-name> and handle any unread messages, then append a heartbeat line to your sweep.log: echo \"[\$(date -Iseconds)] pm-<your-name> heartbeat (mail-check)\" >> ~/.pogo/agents/pm/pm-<your-name>/sweep.log"
    ```
@@ -42,7 +44,7 @@ Each registration is **idempotent via `--id`** (registering the same id twice re
 2. **Morning sweep** — fires at **09:00 local**:
 
    ```bash
-   pogo schedule pm-<your-name> --cron "0 9 * * *" --id sweep-morning \
+   pogo schedule pm-<your-name> --cron "0 9 * * *" --id sweep-morning-pm-<your-name> \
        --replay once \
        --message "sweep"
    ```
@@ -50,7 +52,7 @@ Each registration is **idempotent via `--id`** (registering the same id twice re
 3. **Evening sweep** — fires at **17:00 local**:
 
    ```bash
-   pogo schedule pm-<your-name> --cron "0 17 * * *" --id sweep-evening \
+   pogo schedule pm-<your-name> --cron "0 17 * * *" --id sweep-evening-pm-<your-name> \
        --replay once \
        --message "sweep"
    ```
@@ -61,7 +63,7 @@ Confirm registration with:
 pogo schedule list --agent pm-<your-name>
 ```
 
-You should see exactly three entries (`mail-check`, `sweep-morning`, `sweep-evening`). Do **not** add additional schedules beyond these three — extra cadences lead to duplicate digests and inbox noise.
+You should see exactly three entries (`mail-check-pm-<your-name>`, `sweep-morning-pm-<your-name>`, `sweep-evening-pm-<your-name>`). Do **not** add additional schedules beyond these three — extra cadences lead to duplicate digests and inbox noise.
 
 ### Claude `CronCreate` is for ephemeral reminders only
 
