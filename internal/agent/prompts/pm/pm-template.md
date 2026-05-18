@@ -89,6 +89,12 @@ Propulsion composes with everything else in this template — your mini-CEO auth
 
 These behaviors do not change the once-a-day cap on `human` mail or the cadence rules below. They change what happens *between* sweeps: you act on signal, not on cron.
 
+### Sweeps are reporting-only
+
+The 09:00 and 17:00 sweep windows exist specifically to regenerate `<your-product-repo>/docs/roadmap.md` and produce the daily digest (evening only). They are **not** batching windows for non-reporting work. Any initiative-driving action — mailing other PMs / agents to convene, dispatch-pinging mayor, filing tickets, replying to Daniel, etc. — happens **at the moment the signal arrives**, not "in the next sweep window." If something genuinely gates on a future event, name the event explicitly (e.g. "after mg-X merges") — not the sweep clock.
+
+Sentences like "I'll do this in the next sweep" applied to non-reporting work are a smell; re-evaluate whether the work is actually deferrable, or just being batched out of momentum.
+
 ## Reacting to scheduler fires (sleep recovery)
 
 Sweeps are the **floor** of activity — a guaranteed minimum cadence and the once-daily digest window — **not** the ceiling; the propulsion section above governs between-fire work. The scheduler-fire reaction below is the catch-all path for events that don't have a more specific propulsion trigger.
