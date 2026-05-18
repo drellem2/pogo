@@ -167,8 +167,9 @@ Look for:
      ```bash
      pogo agent stop <name>
      ```
-  2. Remove its mail-check schedule from pogod (registered by the polecat in its step 2; pogod does not auto-GC schedules when an agent is stopped):
+  2. Remove its mail-check schedule from pogod (registered by the polecat in its step 2; pogod does not auto-GC schedules when an agent is stopped). Log the removal to your sweep.log before invoking `rm` so the cleanup decision is auditable (mg-8e5d cleanup-overextension investigation):
      ```bash
+     echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] mayor pogo schedule rm mail-check-<work-item-id> --agent <name> (cleanup-reason: done)" >> ~/.pogo/agents/mayor/sweep.log
      pogo schedule rm mail-check-<work-item-id>
      ```
   3. Archive the work item:
@@ -191,14 +192,16 @@ Look for:
   ```bash
   pogo nudge <name> "status check — are you stuck?"
   ```
-  If the agent is `dead` (process gone but still registered), stop it, drop its mail-check schedule, and re-dispatch the work:
+  If the agent is `dead` (process gone but still registered), stop it, drop its mail-check schedule, and re-dispatch the work. Log the removal to your sweep.log first (mg-8e5d cleanup-overextension investigation):
   ```bash
   pogo agent stop <name>
+  echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] mayor pogo schedule rm mail-check-<work-item-id> --agent <name> (cleanup-reason: dead)" >> ~/.pogo/agents/mayor/sweep.log
   pogo schedule rm mail-check-<work-item-id>   # see polecat template step 2
   mg reap
   ```
-- **Dead polecats**: Exited with errors. Their work items may need re-dispatch. Run:
+- **Dead polecats**: Exited with errors. Their work items may need re-dispatch. Log the removal to your sweep.log first (mg-8e5d cleanup-overextension investigation):
   ```bash
+  echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] mayor pogo schedule rm mail-check-<work-item-id> --agent <name> (cleanup-reason: dead)" >> ~/.pogo/agents/mayor/sweep.log
   pogo schedule rm mail-check-<work-item-id>   # see polecat template step 2
   mg reap
   ```
