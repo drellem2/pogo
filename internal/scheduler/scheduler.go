@@ -259,6 +259,7 @@ func (s *Scheduler) Add(entry Entry, now time.Time) (Entry, error) {
 		if hadPrev {
 			s.entries[key] = prev
 		} else {
+			emitSchedulerRemovalEvent("rollback_persist_failure", stored, now, err)
 			delete(s.entries, key)
 		}
 		return Entry{}, err
@@ -282,6 +283,7 @@ func (s *Scheduler) Remove(agent, id string) (bool, error) {
 		s.entries[key] = saved
 		return false, err
 	}
+	emitSchedulerRemovalEvent("explicit_rm", *saved, time.Now(), nil)
 	return true, nil
 }
 
@@ -314,6 +316,7 @@ func (s *Scheduler) RemoveByID(id string) (bool, error) {
 		return false, err
 	}
 	s.mu.Unlock()
+	emitSchedulerRemovalEvent("explicit_rm_by_id", *saved, time.Now(), nil)
 	return true, nil
 }
 
@@ -469,12 +472,14 @@ func (s *Scheduler) Tick(ctx context.Context, now time.Time) []FireResult {
 			continue
 		}
 		if fire.OneShot {
+			emitSchedulerRemovalEvent("one_shot_complete", *entry, now, nil)
 			delete(s.entries, key)
 			changed = true
 		} else {
 			c, err := ParseCron(entry.Cron)
 			if err != nil {
 				log.Printf("scheduler: cron %q now unparseable, removing entry %s/%s: %v", entry.Cron, key.Agent, key.ID, err)
+				emitSchedulerRemovalEvent("cron_unparseable", *entry, now, err)
 				delete(s.entries, key)
 				changed = true
 			} else {
@@ -485,6 +490,7 @@ func (s *Scheduler) Tick(ctx context.Context, now time.Time) []FireResult {
 				entry.NextFire = c.Next(now)
 				if entry.NextFire.IsZero() {
 					log.Printf("scheduler: cron %q has no future fire, removing entry %s/%s", entry.Cron, key.Agent, key.ID)
+					emitSchedulerRemovalEvent("no_future_fire", *entry, now, nil)
 					delete(s.entries, key)
 				}
 				changed = true
@@ -570,6 +576,36 @@ func emitSchedulerEvent(eventType string, e Entry, fireTime time.Time, missed in
 	}
 	events.Emit(context.Background(), events.Event{
 		EventType: eventType,
+		Agent:     "pogod",
+		Details:   details,
+	})
+}
+
+// emitSchedulerRemovalEvent writes a schedule_removed event tagged with the
+// reason an entry left the live set. Emitted at every delete site so an
+// operator can answer "why did this schedule disappear?" from events.log alone
+// — see mg-8e5d for the silent-purge incident this guards against.
+func emitSchedulerRemovalEvent(reason string, e Entry, removedAt time.Time, err error) {
+	details := map[string]any{
+		"schedule_id":   e.ID,
+		"to":            e.Agent,
+		"delivery":      string(e.Delivery),
+		"removed_at":    removedAt.Format(time.RFC3339),
+		"replay_policy": string(e.ReplayPolicy),
+		"one_shot":      e.OneShot,
+		"reason":        reason,
+	}
+	if e.Cron != "" {
+		details["cron"] = e.Cron
+	}
+	if !e.NextFire.IsZero() {
+		details["next_fire"] = e.NextFire.Format(time.RFC3339)
+	}
+	if err != nil {
+		details["error"] = err.Error()
+	}
+	events.Emit(context.Background(), events.Event{
+		EventType: "schedule_removed",
 		Agent:     "pogod",
 		Details:   details,
 	})
