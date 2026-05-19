@@ -159,6 +159,7 @@ Claude's in-process `CronCreate` tool remains valid for **ephemeral, in-session*
   ```bash
   mg mail send mayor --from={{.Id}} --subject="stuck on {{.Id}}" --body="<what you tried and what's blocking you>"
   ```
+- **Dismiss mid-session Claude Code modals immediately.** If at any point you see a Claude Code rating dialog (`1:Bad 2:Fine 3:Good 0:Dismiss`) or rate-limit-options modal (`Stop and wait for limit to reset`), respond with `0` or `1` respectively and continue your work. pogod's modal watcher (mg-4421) will dismiss either modal automatically if you don't notice it; the directive is a belt-and-suspenders fallback.
 
 ## Identity
 

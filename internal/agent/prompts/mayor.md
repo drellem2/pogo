@@ -408,6 +408,10 @@ When an agent seems stuck, follow this process:
 - **Don't push to main.** Only crew agents push to main, and only for their own work.
 - **Don't block on anything.** If something is stuck, note it, move on, come back later.
 
+## Mid-session Claude Code modals
+
+If at any point you see a Claude Code rating dialog (`1:Bad 2:Fine 3:Good 0:Dismiss`) or rate-limit-options modal (`Stop and wait for limit to reset`), respond with `0` or `1` respectively and continue your work. pogod's modal watcher (mg-4421) will dismiss either modal automatically if you don't notice it; the directive is a belt-and-suspenders fallback for the long-running crew lifecycle that gets hit by these wedges most often.
+
 ## Identity
 
 Your agent name is `mayor`. Your process name is `pogo-crew-mayor`. You are auto-started by pogod on daemon boot because your prompt declares `auto_start = true` in its TOML frontmatter. You can also be started or restarted manually with `pogo agent start mayor`.

@@ -189,6 +189,16 @@ type Registry struct {
 	// Used for agent-specific lifecycle behavior (e.g. trust dialog dismissal).
 	postSpawnHook func(a *Agent)
 
+	// sessionHook is called once per spawn (after postSpawnHook) and is
+	// expected to block for the agent's lifetime. The context passed in is
+	// cancelled when the agent's PTY exits, letting the hook tear down
+	// cleanly. Used for lifetime watchers — e.g. the modal-dismissal
+	// watcher (mg-4421) that scans tee'd PTY output for mid-session
+	// dialogs and writes the dismissal keystroke. Sibling to the spawn-only
+	// postSpawnHook so a reader of this struct sees both lifecycles
+	// named in the API.
+	sessionHook SessionHookFunc
+
 	// shutdown is set by StopAll to short-circuit any in-flight respawn
 	// goroutines (scheduled by the OnExit hook for restart_on_crash agents)
 	// so the registry can be torn down without an agent coming back.
@@ -215,6 +225,42 @@ func (r *Registry) SetPostSpawnHook(fn func(a *Agent)) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.postSpawnHook = fn
+}
+
+// SessionHookFunc is the signature of a lifetime-scoped agent hook. The ctx
+// passed in is cancelled when the agent's PTY exits; the function is expected
+// to block (goroutine-style) until then. Sibling to PostSpawnHook, which runs
+// only for a bounded post-spawn window — see mg-4421 / mg-ef6b for the
+// motivation (mid-session modal watchers need lifetime scope, not spawn scope).
+type SessionHookFunc func(ctx context.Context, a *Agent)
+
+// SetSessionHook sets a lifetime-scoped hook invoked once per spawn. The hook
+// runs in a new goroutine; the ctx it receives is cancelled when the PTY exits.
+func (r *Registry) SetSessionHook(fn SessionHookFunc) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.sessionHook = fn
+}
+
+// invokeSessionHook spawns the registry's session hook (if any) on a fresh
+// goroutine bound to ctx. The ctx is cancelled by a watcher goroutine when
+// the agent's Done() channel closes, so the hook tears down without callers
+// having to wire OnExit plumbing.
+//
+// Called from Spawn / Respawn while r.mu is already held exclusively — the
+// field read happens without an additional lock to avoid an RLock-while-Lock
+// deadlock that would otherwise wedge spawn.
+func (r *Registry) invokeSessionHook(a *Agent) {
+	fn := r.sessionHook
+	if fn == nil {
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		<-a.done
+		cancel()
+	}()
+	go fn(ctx, a)
 }
 
 // commandTemplate returns the command template for the given agent type.
@@ -349,6 +395,10 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 	if r.postSpawnHook != nil {
 		go r.postSpawnHook(a)
 	}
+
+	// Run lifetime session hook (e.g. modal-dismissal watcher per mg-4421).
+	// Sibling lifecycle to postSpawnHook above.
+	r.invokeSessionHook(a)
 
 	// Send initial nudge to bypass the CLI interactive prompt.
 	// Use wait-idle mode so the nudge fires only after Claude's TUI has
@@ -573,6 +623,12 @@ func (r *Registry) Respawn(name string) (*Agent, error) {
 	r.agents[name] = a
 	log.Printf("agent %s: respawned pid=%d restart=%d", name, a.PID, restartCount)
 
+	// Re-arm the lifetime session hook (mg-4421) for the respawned PTY so the
+	// modal-dismissal watcher covers the new process. (postSpawnHook is
+	// intentionally not re-invoked here, matching pre-mg-4421 behavior: that
+	// gap is tracked separately if it becomes a problem.)
+	r.invokeSessionHook(a)
+
 	a.emitSpawned()
 	events.Emit(context.Background(), events.Event{
 		EventType: "agent_restarted",
@@ -636,6 +692,34 @@ func (a *Agent) Nudge(message string) error {
 // RecentOutput returns the most recent buffered output.
 func (a *Agent) RecentOutput(n int) []byte {
 	return a.outputBuf.Last(n)
+}
+
+// Subscribe registers w to receive a copy of every PTY-output chunk written
+// after Subscribe returns. The writer is invoked synchronously from the PTY
+// reader goroutine (alongside the attach-conn fanout), so its Write must be
+// fast and non-blocking — slow writers stall the agent's output stream for
+// every other consumer. Used by lifetime watchers (e.g. the modal-dismissal
+// watcher in mg-4421) that need to byte-scan output as it arrives.
+//
+// The returned func deregisters w; callers MUST invoke it when they're done.
+// (When the agent's PTY exits, readOutput drains and returns, so a stuck
+// subscription leaks only a map entry until the registry forgets the agent.)
+func (a *Agent) Subscribe(w io.Writer) func() {
+	a.attachMu.Lock()
+	a.attachConns[w] = struct{}{}
+	a.attachMu.Unlock()
+	return func() {
+		a.attachMu.Lock()
+		delete(a.attachConns, w)
+		a.attachMu.Unlock()
+	}
+}
+
+// EventAgent returns the canonical agent-identity string used in event log
+// envelopes ("crew-<name>" or "cat-<name>"). Exported for adapters that need
+// to query per-agent state in the global event log (mg-4421's modal watcher).
+func (a *Agent) EventAgent() string {
+	return a.eventAgent()
 }
 
 // SendRaw writes raw bytes to the PTY master without appending \r.

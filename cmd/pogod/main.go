@@ -394,6 +394,11 @@ func main() {
 	// Configure agent command templates, trust dialog hook, and validate the binary exists
 	agentRegistry.SetCommandConfig(&cfg.Agents)
 	agentRegistry.SetPostSpawnHook(claude.TrustDialogHook)
+	// Lifetime modal-dismissal watcher (mg-4421): scans tee'd PTY output for
+	// the rating dialog and rate-limit-options modal and dismisses each via
+	// its menu keystroke. Survives schedule-substrate failures by living
+	// inside pogod's per-agent PTY goroutine — see mg-ef6b §7 / mg-5a3d §4.
+	agentRegistry.SetSessionHook(claude.ModalHook)
 	agent.ValidateCommandBinary(cfg.Agents.AgentCommand("crew"))
 	if polecatCmd := cfg.Agents.AgentCommand("polecat"); polecatCmd != cfg.Agents.AgentCommand("crew") {
 		agent.ValidateCommandBinary(polecatCmd)
