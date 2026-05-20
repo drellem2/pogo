@@ -258,9 +258,23 @@ for tag in <tags_any>; do mg list --tag=$tag; done
 # Items with new comments since last sweep
 mg show <id>   # for items flagged as recently-touched
 
-# GitHub issues / PRs (where applicable)
-gh issue list --repo <owner>/<repo>
-gh pr list    --repo <owner>/<repo>
+# GitHub issues + CI failures — per repo, EVERY sweep (not "where applicable").
+# `repos` holds local names; derive the GitHub slug from each repo's origin
+# remote, so the scan works for every repo with no extra config.
+for repo in <repos>; do
+  slug=$(git -C $repo remote get-url origin 2>/dev/null \
+           | sed -E 's#^(git@github\.com:|https://github\.com/)##; s#\.git$##')
+  [ -z "$slug" ] && continue                       # not a GitHub repo — skip
+
+  # Open issues / PRs — new or unresolved ones are candidate gaps.
+  gh issue list --repo "$slug" || echo "gh unavailable — $slug issues"
+  gh pr    list --repo "$slug" || echo "gh unavailable — $slug PRs"
+
+  # GitHub Actions CI failures — a red run is a strong signal (see mg-6222).
+  gh run list --repo "$slug" --status failure --limit 10 \
+      --json conclusion,headBranch,workflowName \
+    || echo "gh unavailable — $slug CI"
+done
 
 # Recent commits
 for repo in <repos>; do git -C $repo log --since=<last_sweep>; done
@@ -272,6 +286,28 @@ for repo in <repos>; do git -C $repo log --since=<last_sweep>; done
 curl -s http://localhost:10000/refinery/history | jq
 ```
 
+**GitHub issues + CI failures are a firm per-repo pass, every sweep.** Walk
+every repo in your `repos` config — this is part of the twice-daily sweep, not
+an optional "where applicable" extra:
+
+- **Issues / PRs.** New or unresolved issues are candidate gaps; triage them
+  the same way as any other signal (dedup, decide, file or comment).
+- **CI failures.** Check recent GitHub Actions runs for failures. A failed run
+  **on the default branch** is a strong signal that main is broken — **file a
+  fix ticket immediately** (the way pm-pogo did for mg-6222), don't wait to be
+  told. The local refinery merge gate (`refinery/history` above) does **not**
+  exercise the GitHub Actions cross-compile matrix, so CI can be red while the
+  refinery is green; this scan is the only baseline source that catches that
+  class of break.
+- **Repo-slug derivation.** `repos` holds local repo names; the `owner/repo`
+  slug that `gh` commands need comes from each repo's `git remote get-url
+  origin`. The loop above derives it, so the scan works for every repo with no
+  extra per-product config.
+- **Graceful degradation.** If `gh` auth is unavailable (see mg-31c5 — the
+  token can be invalid or expired), the `|| echo "gh unavailable …"` fallbacks
+  keep the loop running. A `gh` failure must **not** abort the sweep — record
+  "gh unavailable" under "Gaps I'm watching" in the digest and move on.
+
 **Additional sources are listed in your config under `sources`.** Apply each one. Examples:
 
 - **Polecat / crew transcripts**: grep recent `~/.pogo/polecats/<id>/` and crew transcript dirs for friction signals — `annoying`, `frustrat`, `wish`, `couldn't`, `had to`, `why doesn't`, `missing`. Read the matches; decide whether they cohere into a real gap or are noise.
@@ -282,6 +318,13 @@ curl -s http://localhost:10000/refinery/history | jq
   ```
 
 - **Formalization / proof-project sources**: when your product is a proof or formalization project, track invariants the toolchain exposes (e.g. axiom dependence on key theorems, audit-report deltas, open-goal / `sorry` / `admit` counts) over time.
+
+- **Extra GitHub scopes**: the baseline above already scans `gh issue list` /
+  `gh pr list` / `gh run list` for every repo in `repos`. If your product needs
+  a wider net — issues on a downstream repo not in `repos`, a specific
+  workflow's runs, or a label-filtered query — add it to your config's
+  `sources` and apply it here; the per-repo baseline is the floor, not the
+  ceiling.
 
 - **Anything else listed in your config's `sources` array.** The list is the source of truth — if a source is in the list, scan it; if not, skip.
 
