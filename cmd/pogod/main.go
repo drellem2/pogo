@@ -23,7 +23,6 @@ import (
 	"github.com/nightlyone/lockfile"
 
 	"github.com/drellem2/pogo/internal/agent"
-	"github.com/drellem2/pogo/internal/claude"
 	"github.com/drellem2/pogo/internal/client"
 	"github.com/drellem2/pogo/internal/config"
 	"github.com/drellem2/pogo/internal/driver"
@@ -31,6 +30,7 @@ import (
 	"github.com/drellem2/pogo/internal/heartbeat"
 	"github.com/drellem2/pogo/internal/platform/sleep"
 	"github.com/drellem2/pogo/internal/project"
+	"github.com/drellem2/pogo/internal/providers"
 	"github.com/drellem2/pogo/internal/refinery"
 	"github.com/drellem2/pogo/internal/scheduler"
 	"github.com/drellem2/pogo/internal/search"
@@ -354,18 +354,16 @@ func registerHandlers() {
 }
 
 // resolveAgentProvider maps a config provider id to its agent.Provider
-// descriptor. Claude is the only registered provider today; an unknown id logs
-// a warning and falls back to Claude so a stale or mistyped config never wedges
-// daemon startup.
+// descriptor via the providers registry. An unknown id logs a warning and
+// falls back to Claude so a stale or mistyped config never wedges daemon
+// startup.
 func resolveAgentProvider(id string) *agent.Provider {
-	switch id {
-	case "", "claude":
-		return &claude.Provider
-	default:
+	p, ok := providers.Resolve(id)
+	if !ok {
 		log.Printf("WARNING: unknown agent provider %q in config; falling back to %q",
-			id, claude.Provider.ID)
-		return &claude.Provider
+			id, p.ID)
 	}
+	return p
 }
 
 func main() {

@@ -51,6 +51,8 @@ An agent is a process with a name, a prompt file, and access to CLI tools. There
 
 We start with Claude Code as the agent runtime, but the architecture should not depend on it. The PTY interface, process naming, macguffin coordination, and prompt files are all runtime-agnostic — they work with any process that reads from stdin, writes to stdout, and can run CLI commands. If a better agent runtime emerges (or we want to mix runtimes — Claude Code for some agents, a lighter harness for others), nothing in the architecture should need to change. The agent contract is: you're a UNIX process, you have a prompt, you use `mg` and `pogo` CLI tools.
 
+The harness-specific spawn decisions — launch command, prompt-injection mechanism, PTY nudge dialect, and lifecycle hooks — are bundled behind the `agent.Provider` abstraction (`internal/agent/provider.go`); the `provider` config key under `[agents]` selects which harness to use. Claude Code is the only registered provider today (`internal/claude`), but adding another is a matter of registering a second `Provider` value, not touching the orchestration core.
+
 **pogod is the parent process.** It spawns agents, allocates a PTY for each, and holds the master file descriptor. This is the standard UNIX pattern — the parent owns the child's terminal. It's how shells, `expect`, `script(1)`, and terminal multiplexers work. We use the same primitive directly rather than going through tmux.
 
 This gives pogod three capabilities for free:
@@ -95,7 +97,6 @@ auto_start = true
 restart_on_crash = true
 nudge_on_start = "You are now running. Begin your coordination loop."
 worktree = true
-command = "claude --dangerously-skip-permissions ..."
 +++
 
 # Mayor
@@ -103,7 +104,7 @@ command = "claude --dangerously-skip-permissions ..."
 You are the mayor — the coordinator for a pogo agent workspace...
 ```
 
-Recognized fields: `auto_start`, `restart_on_crash`, `nudge_on_start`, `worktree`, `command`. Prompts without frontmatter get type-based defaults (crew restart on crash, polecats don't), so existing prompts keep working unchanged. Parser internals live in `internal/agent/prompt.go` (`ParsePromptFrontmatter`, `AgentMeta`).
+Recognized fields: `auto_start`, `restart_on_crash`, `nudge_on_start`, `worktree`. Prompts without frontmatter get type-based defaults (crew restart on crash, polecats don't), so existing prompts keep working unchanged. The agent's launch command is not a per-prompt field — it comes from the active `Provider` (or the `[agents] command` config key). Parser internals live in `internal/agent/prompt.go` (`ParsePromptFrontmatter`, `AgentMeta`).
 
 **`restart_on_crash = true` is an always-on contract.** When set, pogod respawns the agent on **any** exit — clean exit (Claude finishes its loop and returns 0), crash (non-zero exit or signal), or explicit `pogo agent stop <name>`. The kill switch for an always-on agent is to remove `restart_on_crash = true` from its frontmatter (or set it to `false`) and then stop it. Registry teardown via `StopAll` (pogod shutdown) bypasses respawn unconditionally so daemon restart and test cleanup don't loop. Implementation: `internal/agent/agent.go` (`Stop`, `StopAll`, `Respawn`) and the OnExit hook in `cmd/pogod/main.go`.
 
@@ -153,7 +154,7 @@ pogo agent start arch
         │
         ▼
    pogod spawns pogo-crew-arch
-   (Claude Code + crew/arch.md)
+   (agent harness + crew/arch.md)
         │
         ▼
    ┌─── Agent runs ◄──────────────────┐
@@ -527,14 +528,14 @@ pogod allocates a PTY for each agent it spawns. This is the core mechanism that 
                      PTY slave (stdin/stdout)
                             │
                    ┌────────▼────────┐
-                   │  Claude Code    │
-                   │  (agent process)│
+                   │  Agent harness  │
+                   │  (Claude Code)  │
                    └─────────────────┘
 ```
 
 **Attach protocol:** `pogo agent attach <name>` opens a unix domain socket to pogod. pogod bridges the user's terminal to the agent's PTY master fd. Raw terminal mode — keystrokes flow to the agent, agent output flows to the user. Detach with an escape sequence (e.g., `~.`). The agent keeps running after detach.
 
-**Idle detection:** pogod reads agent output from the PTY master. When it sees the Claude Code prompt marker (idle state), it knows the agent is ready to receive nudge input. This prevents nudges from interrupting active tool calls.
+**Idle detection:** pogod reads agent output from the PTY master. When the output goes quiet for the active provider's idle threshold (`Provider.Nudge.IdleThreshold` — see `internal/agent/provider.go`), it knows the agent is ready to receive nudge input. This prevents nudges from interrupting active tool calls. The threshold is per-harness because output cadence differs between TUIs.
 
 ### PTY complexity and the libghostty path
 
@@ -568,11 +569,11 @@ These questions came up during design and have been answered. Recorded here so t
 
 5. **Single event log in pogo.** All events — agent lifecycle, polecat milestones, refinery merges, plus work item transitions and mail mirrored from macguffin — write to one JSONL file at `~/.pogo/events.log`. macguffin remains the source of truth for work item state, but the durable observability spine lives in `~/.pogo/` so pogod's writers (refinery, agent supervisor) don't need a macguffin dependency. `mg` mirrors its transitions in via the `pogo events emit` CLI bridge. Schema and event catalog: [`docs/event-log.md`](docs/event-log.md).
 
-6. **Prompt files are the agent roster.** There is no separate roster file or registry. The set of agents that exist is the set of prompt files in `~/.pogo/agents/`; the boot set is the subset whose TOML frontmatter declares `auto_start = true`. This subsumes the earlier proposal of a `~/.pogo/crew-roster` file — the prompts already on disk are the roster, and adding a new agent is a matter of dropping a markdown file with the right frontmatter. Per-agent runtime knobs (`restart_on_crash`, `nudge_on_start`, `worktree`, `command`) live in the same frontmatter block, co-located with the prose that defines the agent's role.
+6. **Prompt files are the agent roster.** There is no separate roster file or registry. The set of agents that exist is the set of prompt files in `~/.pogo/agents/`; the boot set is the subset whose TOML frontmatter declares `auto_start = true`. This subsumes the earlier proposal of a `~/.pogo/crew-roster` file — the prompts already on disk are the roster, and adding a new agent is a matter of dropping a markdown file with the right frontmatter. Per-agent runtime knobs (`restart_on_crash`, `nudge_on_start`, `worktree`) live in the same frontmatter block, co-located with the prose that defines the agent's role.
 
 ## What This Is Not
 
-- **Not an agent framework.** There is no "pogo agent SDK." Agents are Claude Code processes that use CLI tools.
+- **Not an agent framework.** There is no "pogo agent SDK." Agents are harness processes (Claude Code today) that use CLI tools.
 - **Not a job scheduler.** The mayor decides when to spawn polecats. pogod just executes the spawn.
 - **Not a database.** All state is files. All coordination is filesystem operations.
 - **Not an IDE.** Pogo is a set of composable tools. It works with any editor, any shell, any workflow.

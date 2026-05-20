@@ -21,8 +21,9 @@ const launchdLabel = "com.pogo.daemon"
 // launchdPlistTemplate matches the mg-1416 spec: ProcessType=Interactive
 // (prevents App Nap throttling of refinery polls + agent idle detection),
 // unconditional KeepAlive (auto-restart on any exit), explicit PATH so
-// spawned crew agents can find claude/git/mg, POGO_HOME and HOME so the
-// daemon resolves the right state dir under launchd's minimal env.
+// spawned crew agents can find the agent harness binary, git, and mg,
+// POGO_HOME and HOME so the daemon resolves the right state dir under
+// launchd's minimal env.
 const launchdPlistTemplate = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -139,13 +140,19 @@ func logDir() string {
 }
 
 // launchdPath builds a PATH that includes the directories where pogod's
-// children (claude, git, mg, pogo) actually live on a typical macOS dev
-// box. The pogod binary itself is invoked by absolute path; this PATH is
-// for the subprocesses it spawns.
+// children (the agent harness binary, git, mg, pogo) actually live on a
+// typical macOS dev box. The pogod binary itself is invoked by absolute
+// path; this PATH is for the subprocesses it spawns.
+//
+// The list is harness-agnostic by design: agent-harness CLIs install into
+// one of ~/.local/bin, a global npm bin, or Homebrew, all of which are
+// covered below. A future provider that lands its binary somewhere exotic
+// could contribute extra dirs (see docs/multi-provider-architecture-survey.md
+// §2.4 C13); none does today, so no provider plumbing is wired here.
 func launchdPath() string {
 	home, _ := os.UserHomeDir()
 	dirs := []string{
-		filepath.Join(home, ".local", "bin"), // claude CLI usually lands here
+		filepath.Join(home, ".local", "bin"), // agent-harness CLIs (e.g. claude) often land here
 		filepath.Join(home, "go", "bin"),     // pogod, mg, pogo
 		filepath.Join(home, ".pogo", "bin"),
 		"/opt/homebrew/bin", // Apple Silicon Homebrew

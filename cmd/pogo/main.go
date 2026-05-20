@@ -22,7 +22,9 @@ import (
 	"github.com/drellem2/pogo/internal/cli"
 	"github.com/drellem2/pogo/internal/client"
 	"github.com/drellem2/pogo/internal/completion"
+	"github.com/drellem2/pogo/internal/config"
 	"github.com/drellem2/pogo/internal/events"
+	"github.com/drellem2/pogo/internal/providers"
 	"github.com/drellem2/pogo/internal/refinery"
 	"github.com/drellem2/pogo/internal/scheduler"
 	"github.com/drellem2/pogo/internal/service"
@@ -1393,7 +1395,7 @@ With --check, runs a deterministic health checklist and exits:
 The --check mode verifies:
   - Is pogod running?
   - Is the system service installed?
-  - Are required tools installed (git, go, claude)?
+  - Are required tools installed (git, go, the configured agent harness)?
   - Are repos configured?
   - Are agent prompts installed?
   - Are there stale work items?
@@ -1477,17 +1479,26 @@ Exits with code 1 if any critical check fails (--check mode only).`,
 				warn("system service", "not installed (run 'pogo service install')")
 			}
 
-			// 3. Required tools
-			for _, tool := range []string{"git", "go", "claude"} {
+			// 3. Required tools. git and go are hard requirements. The agent
+			// harness binary is a soft check: the pogo CLI works fine without
+			// it — only spawning agents needs the harness — and which binary
+			// to look for comes from the configured provider, not a hardcoded
+			// "claude".
+			for _, tool := range []string{"git", "go"} {
 				if p, err := exec.LookPath(tool); err != nil {
-					if tool == "claude" {
-						warn(tool+" in PATH", "not found")
-					} else {
-						fail(tool+" in PATH", "not found")
-					}
+					fail(tool+" in PATH", "not found")
 				} else {
 					pass(tool+" in PATH", p)
 				}
+			}
+			provider, known := providers.Resolve(config.Load().Agents.Provider)
+			if !known {
+				warn("agent provider", fmt.Sprintf("unknown provider configured; using fallback %q", provider.ID))
+			}
+			if p, err := exec.LookPath(provider.Binary); err != nil {
+				warn(provider.Binary+" in PATH", fmt.Sprintf("not found (configured agent harness %q)", provider.ID))
+			} else {
+				pass(provider.Binary+" in PATH", p)
 			}
 
 			// 4. Repos configured

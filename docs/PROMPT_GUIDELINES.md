@@ -72,7 +72,10 @@ Agents are launched with:
 claude --dangerously-skip-permissions --append-system-prompt-file <prompt>
 ```
 
-A different runtime would need its own launch command. The `pogo-claude` wrapper script (`internal/agent/scripts/pogo-claude.sh`) isolates this — it's the natural place to swap runtimes.
+A different runtime needs its own launch command. The `agent.Provider`
+abstraction (`internal/agent/provider.go`, `internal/claude/provider.go`)
+isolates this — `Provider.CommandTemplate` is the per-harness launch command,
+selected by the `provider` config key.
 
 ### Interactive session mode
 
@@ -96,7 +99,7 @@ If pogo adds a second provider, here's what changes:
 
 | Layer | What changes | Where |
 |-------|-------------|-------|
-| Launch command | New command template per runtime | `internal/agent/api.go`, `pogo-claude` wrapper |
+| Launch command | New command template per runtime | `internal/claude/provider.go` (`Provider.CommandTemplate`) |
 | Prompt injection | `--append-system-prompt-file` → runtime equivalent | `internal/agent/api.go` |
 | Nudge mechanism | Interactive stdin → runtime equivalent | `internal/agent/api.go` |
 | Project context | CLAUDE.md → append to prompt or use runtime equivalent | `internal/agent/prompt.go` |

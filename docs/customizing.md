@@ -59,8 +59,8 @@ Three keys worth knowing:
 | `restart_on_crash` | bool | pogod restarts the agent if it exits unexpectedly | `true` for crew, `false` for polecats |
 | `nudge_on_start` | string | Message sent to the agent's PTY immediately after spawn | empty |
 
-There are two more (`command` for per-agent command overrides, `worktree` for
-polecat templates — see below) but those three carry the day.
+There is one more (`worktree` for polecat templates — see below) but those
+three carry the day.
 
 Frontmatter is parsed at spawn time. Edit a file, restart the agent, the new
 settings apply. There's no live reload — pogod won't notice that you flipped

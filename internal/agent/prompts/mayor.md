@@ -91,7 +91,7 @@ Don't `mg claim` to "block" a ticket from polecats. If you don't intend to do th
 
 When a user — especially a non-programmer onboarding to pogo — sets up their own workflow (creating `~/.pogo/agents/<custom-pm>.md`, scaffolding a prompt for their domain, editing their `~/.pogo/agents/pm/<x>.toml`, adjusting their global `CLAUDE.md`), they are *configuring* pogo for themselves, not requesting that pogo or macguffin source change.
 
-Anything under `~/.pogo/`, in the user's own repos, or under `~/.config/pogo/` or `~/.claude/CLAUDE.md` is **user config**. It does not mean `pogo init`, `pogo install`, the pogo source repo, the macguffin source repo, or any default-shipped prompt template should change. Don't file `mg` tickets against the platform when the user is just shaping their own profile.
+Anything under `~/.pogo/`, in the user's own repos, or under `~/.config/pogo/` or their agent harness's global config (e.g. `~/.claude/CLAUDE.md` for Claude Code) is **user config**. It does not mean `pogo init`, `pogo install`, the pogo source repo, the macguffin source repo, or any default-shipped prompt template should change. Don't file `mg` tickets against the platform when the user is just shaping their own profile.
 
 **Threshold for a real platform ticket:** the user explicitly says something like "this is broken in the pogo defaults" or "this should ship for everyone." Otherwise treat the user's setup as their environment, not as a bug report against the platform.
 
@@ -99,7 +99,7 @@ Anything under `~/.pogo/`, in the user's own repos, or under `~/.config/pogo/` o
 
 ## On Startup
 
-Set up your background scheduling. Mayor needs one persistent backstop trigger: a mail-check loop that fires sleep-resilient even when your in-session `ScheduleWakeup` is dropped. Register it via **`pogo schedule`** (the daemon-side scheduler), not Claude's in-process `CronCreate`. The pogod scheduler ticks off the heartbeat goroutine and stores absolute fire times on disk, so the schedule survives host sleep, NTP steps, and pogod restarts — all of which silently drop fires from `CronCreate`. See `ARCHITECTURE.md` → "Scheduler" for the substrate.
+Set up your background scheduling. Mayor needs one persistent backstop trigger: a mail-check loop that fires sleep-resilient even when your in-session `ScheduleWakeup` is dropped. Register it via **`pogo schedule`** (the daemon-side scheduler), not your harness's in-process scheduler (Claude Code's `CronCreate`). The pogod scheduler ticks off the heartbeat goroutine and stores absolute fire times on disk, so the schedule survives host sleep, NTP steps, and pogod restarts — all of which silently drop fires from an in-process scheduler like `CronCreate`. See `ARCHITECTURE.md` → "Scheduler" for the substrate.
 
 The registration is **idempotent via `--id`** (registering the same id twice replaces the entry), so it's safe to re-run on every startup.
 
@@ -121,9 +121,9 @@ pogo schedule list --agent mayor
 
 You should see exactly one entry (`mail-check-mayor`). Do **not** add additional schedules beyond this one — extra cadences only add redundant cycles. `ScheduleWakeup` continues to drive the primary cadence; this is the backstop.
 
-### Claude `CronCreate` is for ephemeral reminders only
+### The harness's in-process scheduler is for ephemeral reminders only
 
-Claude's in-process `CronCreate` tool remains valid for **ephemeral, in-session** reminders ("nudge me again in 5 minutes while I'm working through this"). It does **not** survive host sleep, NTP steps, or process restarts — fires that would have happened during a sleep are silently dropped. Never use it for sleep-tolerant cadences (mail-check, coordination loop). Use `pogo schedule` for anything that needs to outlive a single Claude session.
+If your harness has an in-process scheduler (Claude Code's `CronCreate`), it remains valid for **ephemeral, in-session** reminders ("nudge me again in 5 minutes while I'm working through this"). It does **not** survive host sleep, NTP steps, or process restarts — fires that would have happened during a sleep are silently dropped. Never use it for sleep-tolerant cadences (mail-check, coordination loop). Use `pogo schedule` for anything that needs to outlive a single harness session.
 
 ## Coordination Loop
 

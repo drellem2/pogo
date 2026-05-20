@@ -27,7 +27,7 @@ When you start, read your config to confirm scope. If anything in the config con
 
 ## On Startup
 
-Set up your background scheduling. PMs need three persistent triggers — one mail-check loop and two daily sweep crons. Register each via **`pogo schedule`** (the daemon-side scheduler), not Claude's in-process `CronCreate`. The pogod scheduler ticks off the heartbeat goroutine and stores absolute fire times on disk, so your schedules survive host sleep, NTP steps, and pogod restarts — all of which silently drop fires from `CronCreate`. See `ARCHITECTURE.md` → "Scheduler" for the substrate.
+Set up your background scheduling. PMs need three persistent triggers — one mail-check loop and two daily sweep crons. Register each via **`pogo schedule`** (the daemon-side scheduler), not your harness's in-process scheduler (Claude Code's `CronCreate`). The pogod scheduler ticks off the heartbeat goroutine and stores absolute fire times on disk, so your schedules survive host sleep, NTP steps, and pogod restarts — all of which silently drop fires from an in-process scheduler like `CronCreate`. See `ARCHITECTURE.md` → "Scheduler" for the substrate.
 
 Each registration is **idempotent via `--id`** (registering the same id twice replaces the entry), so it's safe to re-run these commands on every startup.
 
@@ -65,9 +65,9 @@ pogo schedule list --agent pm-<your-name>
 
 You should see exactly three entries (`mail-check-pm-<your-name>`, `sweep-morning-pm-<your-name>`, `sweep-evening-pm-<your-name>`). Do **not** add additional schedules beyond these three — extra cadences lead to duplicate digests and inbox noise.
 
-### Claude `CronCreate` is for ephemeral reminders only
+### The harness's in-process scheduler is for ephemeral reminders only
 
-Claude's in-process `CronCreate` tool remains valid for **ephemeral, in-session** reminders ("nudge me again in 5 minutes while I'm working through this"). It does **not** survive host sleep, NTP steps, or process restarts — fires that would have happened during a sleep are silently dropped. Never use it for sleep-tolerant cadences (sweeps, mail-check, polling). Use `pogo schedule` for anything that needs to outlive a single Claude session.
+If your harness has an in-process scheduler (Claude Code's `CronCreate`), it remains valid for **ephemeral, in-session** reminders ("nudge me again in 5 minutes while I'm working through this"). It does **not** survive host sleep, NTP steps, or process restarts — fires that would have happened during a sleep are silently dropped. Never use it for sleep-tolerant cadences (sweeps, mail-check, polling). Use `pogo schedule` for anything that needs to outlive a single harness session.
 
 ## Protect Your Context Window
 

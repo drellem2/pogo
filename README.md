@@ -56,7 +56,7 @@ Run `pogo install` again any time — it's idempotent. Existing prompt files are
 
 If you only want to scaffold the agent prompts (without starting the daemon or initializing macguffin), use `pogo init`. It refuses to overwrite existing prompts unless you pass `--force`. Pass `--minimal` to scaffold only an empty mayor and polecat skeleton — useful for non-coding workflows where you'll customize the prompts yourself.
 
-**Prerequisites:** [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI must be installed. The install script handles [macguffin](https://github.com/drellem2/macguffin) automatically; pass `--interactive` to configure shell and editor integrations.
+**Prerequisites:** a supported agent harness must be installed — currently [Claude Code](https://docs.anthropic.com/en/docs/claude-code), the default (select the harness with the `provider` config key). The install script handles [macguffin](https://github.com/drellem2/macguffin) automatically; pass `--interactive` to configure shell and editor integrations.
 
 ## Star the repo
 

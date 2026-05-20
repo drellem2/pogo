@@ -62,7 +62,7 @@ Follow these steps exactly, in order. Skipping any step is a failure.
    mg claim {{.Id}}
    ```
 
-2. **Register a mail-check schedule with pogod** so the mayor can reach you mid-verification. QA polecats are not on pogod's nudge cycle — without this step, you won't notice incoming mail until your work is done. Use **`pogo schedule`** (the daemon-side scheduler) so the mail-check survives host sleep / NTP steps / pogod restarts; do **not** use Claude's in-process `CronCreate` for this — it silently drops fires during sleep:
+2. **Register a mail-check schedule with pogod** so the mayor can reach you mid-verification. QA polecats are not on pogod's nudge cycle — without this step, you won't notice incoming mail until your work is done. Use **`pogo schedule`** (the daemon-side scheduler) so the mail-check survives host sleep / NTP steps / pogod restarts; do **not** use your harness's in-process scheduler (Claude Code's `CronCreate`) for this — it silently drops fires during sleep:
 
    ```bash
    pogo schedule cat-{{.Id}} --cron "*/10 * * * *" --id mail-check-{{.Id}} \
@@ -144,9 +144,9 @@ When `due` ≈ `fired`, on-time fire — just check mail. When `fired` is much l
 
 For the QA mail-check the action is the same in both cases (check mail), so there's nothing extra to do.
 
-### `CronCreate` is for ephemeral in-session reminders only
+### The harness's in-process scheduler is for ephemeral in-session reminders only
 
-Claude's in-process `CronCreate` tool remains valid for **ephemeral, in-session** reminders ("nudge me again in 2 minutes while this test runs"). It does **not** survive host sleep, NTP steps, or process restarts. Never use it for the mail-check loop or anything else that needs to outlive a single sleep cycle — that's what `pogo schedule` is for.
+If your harness has an in-process scheduler (Claude Code's `CronCreate`), it remains valid for **ephemeral, in-session** reminders ("nudge me again in 2 minutes while this test runs"). It does **not** survive host sleep, NTP steps, or process restarts. Never use it for the mail-check loop or anything else that needs to outlive a single sleep cycle — that's what `pogo schedule` is for.
 
 ## Working Principles
 

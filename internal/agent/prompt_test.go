@@ -1131,7 +1131,6 @@ func TestParsePromptFrontmatterWellFormed(t *testing.T) {
 restart_on_crash = true
 auto_start = true
 nudge_on_start = "Begin your coordination loop."
-command = "claude --dangerously-skip-permissions"
 worktree = false
 +++
 # Mayor
@@ -1157,9 +1156,6 @@ You are the mayor.
 	}
 	if meta.NudgeOnStart != "Begin your coordination loop." {
 		t.Errorf("NudgeOnStart=%q", meta.NudgeOnStart)
-	}
-	if meta.Command != "claude --dangerously-skip-permissions" {
-		t.Errorf("Command=%q", meta.Command)
 	}
 	wantBody := "# Mayor\n\nYou are the mayor.\n"
 	if body != wantBody {

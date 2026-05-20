@@ -615,7 +615,6 @@ const (
 	metaFieldRestartOnCrash metaFieldFlag = 1 << iota
 	metaFieldAutoStart
 	metaFieldNudgeOnStart
-	metaFieldCommand
 	metaFieldWorktree
 )
 
@@ -630,8 +629,6 @@ func metaFieldByKey(key string) (metaFieldFlag, bool) {
 		return metaFieldAutoStart, true
 	case "nudge_on_start":
 		return metaFieldNudgeOnStart, true
-	case "command":
-		return metaFieldCommand, true
 	case "worktree":
 		return metaFieldWorktree, true
 	}
@@ -647,13 +644,11 @@ func metaFieldByKey(key string) (metaFieldFlag, bool) {
 //   - restart_on_crash: pogod restarts the agent if it exits unexpectedly
 //   - auto_start:       pogod starts the agent on daemon boot
 //   - nudge_on_start:   message sent to the agent immediately after spawn
-//   - command:          per-agent override of the agent command template
 //   - worktree:         polecat-style isolated worktree on spawn
 type AgentMeta struct {
 	RestartOnCrash bool   `json:"restart_on_crash,omitempty"`
 	AutoStart      bool   `json:"auto_start,omitempty"`
 	NudgeOnStart   string `json:"nudge_on_start,omitempty"`
-	Command        string `json:"command,omitempty"`
 	Worktree       bool   `json:"worktree,omitempty"`
 
 	// explicit is a bitmask of recognized keys that appeared in the
@@ -837,12 +832,6 @@ func assignMetaField(meta *AgentMeta, key, raw string) error {
 			return fmt.Errorf("%s: %w", key, err)
 		}
 		meta.NudgeOnStart = s
-	case "command":
-		s, err := parseFrontmatterString(raw)
-		if err != nil {
-			return fmt.Errorf("%s: %w", key, err)
-		}
-		meta.Command = s
 	}
 	meta.explicit |= flag
 	return nil

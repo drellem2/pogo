@@ -62,7 +62,7 @@ Follow these steps exactly, in order. Skipping any step is a failure.
    mg claim {{.Id}}
    ```
 
-2. **Register a mail-check schedule with pogod** so the mayor can reach you mid-task. Polecats are not on pogod's nudge cycle — without this step, you won't notice incoming mail until your work is done. Use **`pogo schedule`** (the daemon-side scheduler) so the mail-check survives host sleep / NTP steps / pogod restarts; do **not** use Claude's in-process `CronCreate` for this — it silently drops fires during sleep:
+2. **Register a mail-check schedule with pogod** so the mayor can reach you mid-task. Polecats are not on pogod's nudge cycle — without this step, you won't notice incoming mail until your work is done. Use **`pogo schedule`** (the daemon-side scheduler) so the mail-check survives host sleep / NTP steps / pogod restarts; do **not** use your harness's in-process scheduler (Claude Code's `CronCreate`) for this — it silently drops fires during sleep:
 
    ```bash
    pogo schedule cat-{{.Id}} --cron "*/10 * * * *" --id mail-check-{{.Id}} \
@@ -72,7 +72,7 @@ Follow these steps exactly, in order. Skipping any step is a failure.
 
    Confirm with `pogo schedule list --agent cat-{{.Id}}` — you should see exactly one entry. The `--id` is keyed on your work item id, so re-running the command is idempotent (it replaces the same entry rather than stacking duplicates). The mayor will `pogo schedule rm mail-check-{{.Id}}` when stopping you, so you don't need to clean up yourself. This is the **only** background schedule you should register; for refinery polling in step 6, use a bash loop, not a schedule.
 
-   *Why `pogo schedule` and not `CronCreate`?* `CronCreate` lives inside this Claude session and has no notion of wall-clock time across sleep — if the host suspends for an hour, every fire that should have happened in that window is silently dropped. `pogo schedule` stores the next fire time on disk and replays through sleep; see "Reacting to scheduler fires" below for the policy.
+   *Why `pogo schedule` and not an in-process scheduler?* A harness in-process scheduler (such as Claude Code's `CronCreate`) lives inside this harness session and has no notion of wall-clock time across sleep — if the host suspends for an hour, every fire that should have happened in that window is silently dropped. `pogo schedule` stores the next fire time on disk and replays through sleep; see "Reacting to scheduler fires" below for the policy.
 
 3. **Do the work.** Stay focused on the task described above. You are already in your isolated worktree at `{{.WorktreeDir}}` on branch `polecat-{{.Id}}`. **Run all commands in this directory** — do not `cd` to the source repository (see "Working in your worktree" above for why and for the equivalents).
    - **Verify "not implemented" claims before acting on them.** When a design doc, ticket body, or comment says a feature "doesn't exist yet," "is on the forward plan," or "isn't shipped," confirm the claim before treating it as fact — design docs often pre-date the ship and become archeology, not plans. Run at least one of:
@@ -142,9 +142,9 @@ When `due` ≈ `fired` it's an on-time fire — just check mail. When `fired` is
 
 For the polecat mail-check the action is the same in both cases (check mail), so there's nothing extra to do — just don't register additional schedules thinking you've missed fires; pogod handles that for you.
 
-### `CronCreate` is for ephemeral in-session reminders only
+### The harness's in-process scheduler is for ephemeral in-session reminders only
 
-Claude's in-process `CronCreate` tool remains valid for **ephemeral, in-session** reminders ("nudge me again in 2 minutes while I'm waiting for this build"). It does **not** survive host sleep, NTP steps, or process restarts. Never use it for the mail-check loop or anything else that needs to outlive a single sleep cycle — that's what `pogo schedule` is for.
+If your harness has an in-process scheduler (Claude Code's `CronCreate`), it remains valid for **ephemeral, in-session** reminders ("nudge me again in 2 minutes while I'm waiting for this build"). It does **not** survive host sleep, NTP steps, or process restarts. Never use it for the mail-check loop or anything else that needs to outlive a single sleep cycle — that's what `pogo schedule` is for.
 
 ## Working Principles
 
