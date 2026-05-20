@@ -289,6 +289,43 @@ the config. Make sure the file is at `~/.config/pogo/config.toml` (or
 `$XDG_CONFIG_HOME/pogo/config.toml`) and you restarted the daemon, not just
 the agents.
 
+## Bounding what pogo indexes
+
+pogo auto-discovers and indexes git repos you visit. By default this is
+zero-config: visit a repo and search works. The `[search]` section of
+`~/.config/pogo/config.toml` bounds that behavior so a stray giant directory
+can't blow up indexing cost or file-descriptor use.
+
+```toml
+[search]
+# Per-tree file-count ceiling. A repo with more files than this is registered
+# but marked "skipped_too_large": it is not deep-indexed or watched. Default
+# 25000. This is the backstop that catches generated-data directories no
+# exclude list anticipated.
+max_files_per_tree = 25000
+
+# Watched-root cap. On macOS the watcher is FSEvents — one recursive stream per
+# project, so the unit watched is the tree. Default 4096 (a sanity backstop).
+max_watchers = 4096
+
+# Optional strict mode. When set, ONLY git repos under one of these paths are
+# eligible for auto-registration. Unset (the default) keeps the zero-config
+# "visit anything" behavior.
+index_roots = ["/Users/you/dev", "/Users/you/work"]
+```
+
+Two more scope controls need no config:
+
+- **Default-excluded directories.** pogo never deep-walks `node_modules`,
+  `vendor`, `target`, `build`, `dist`, `.next`, `.git`, `.pogo`, `IndexedDB`,
+  `*.app` bundles, and similar generated/dependency trees.
+- **`.pogoignore`.** Drop a `.pogoignore` file (gitignore-style globs) at a
+  repo root to carve generated-data subtrees out of pogo's index without
+  touching the repo's `.gitignore`.
+
+Environment overrides exist for the numeric knobs (`POGO_MAX_WATCHERS`,
+`POGO_MAX_FILES_PER_TREE`) and take precedence over the config file.
+
 ## Putting it all together
 
 The three knobs above compose. A non-coding workflow looks like:

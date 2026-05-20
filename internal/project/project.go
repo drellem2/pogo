@@ -34,6 +34,11 @@ var projectFile string
 var projects []Project
 var ProjectFileName string
 
+// indexRoots is the optional index-roots allowlist. When non-empty, only git
+// repos under one of these paths may be auto-registered. Empty (the default)
+// keeps pogo's zero-config behavior. Configured via SetIndexRoots.
+var indexRoots []string
+
 var logger = hclog.New(&hclog.LoggerOptions{
 	Level:      hclog.Info,
 	Output:     os.Stderr,
@@ -95,6 +100,103 @@ func IndexAll() {
 	for _, p := range projects {
 		addToPlugin(p)
 	}
+}
+
+// SetIndexRoots configures the optional index-roots allowlist. When roots is
+// empty, auto-registration keeps its default zero-config behavior.
+func SetIndexRoots(roots []string) {
+	indexRoots = roots
+	if len(roots) > 0 {
+		logger.Info("project: index-roots allowlist active", "roots", roots)
+	}
+}
+
+// PruneRegistry drops stale registry entries. Call it once on startup, after
+// Init() and before IndexAll(). It removes:
+//   - projects whose path no longer exists on disk;
+//   - projects under ephemeral roots (OS temp dirs, polecat worktrees).
+//
+// The cleaned registry is written back to disk. Without this, projects.json
+// accumulates dead entries indefinitely — mg-d205 found it had grown to 356
+// projects, ~280 of them stale polecat worktrees, and pogod re-indexed every
+// one on every startup.
+func PruneRegistry() {
+	if len(projects) == 0 {
+		return
+	}
+	kept := make([]Project, 0, len(projects))
+	pruned := 0
+	for _, p := range projects {
+		reason := ""
+		if isEphemeralPath(p.Path) {
+			reason = "ephemeral path"
+		} else if _, err := os.Stat(p.Path); errors.Is(err, os.ErrNotExist) {
+			reason = "path no longer exists"
+		}
+		if reason != "" {
+			logger.Info("registry GC: pruning project entry", "path", p.Path, "reason", reason)
+			pruned++
+			continue
+		}
+		kept = append(kept, p)
+	}
+	if pruned == 0 {
+		return
+	}
+	projects = kept
+	SaveProjects()
+	logger.Info("registry GC: pruned stale entries", "pruned", pruned, "remaining", len(projects))
+}
+
+// isEphemeralPath reports whether path lives under a directory whose contents
+// are transient by nature — OS temp dirs and the polecat worktree dir. Such
+// repos must never persist in the registry: they are created and destroyed
+// constantly, and re-indexing them every startup is wasted work (mg-d205).
+func isEphemeralPath(path string) bool {
+	clean := filepath.Clean(path)
+
+	tempRoots := []string{
+		filepath.Clean(os.TempDir()),
+		"/tmp",
+		"/private/tmp",
+		"/private/var/folders",
+	}
+	for _, root := range tempRoots {
+		if root == "" || root == "." {
+			continue
+		}
+		if clean == root || strings.HasPrefix(clean, root+string(filepath.Separator)) {
+			return true
+		}
+	}
+
+	// A polecat worktree root is a direct child of ~/.pogo/polecats. Matching
+	// only the immediate child (not arbitrary descendants) keeps this from
+	// flagging repos nested inside a worktree, e.g. test fixtures.
+	if home, err := os.UserHomeDir(); err == nil {
+		polecatsDir := filepath.Join(home, ".pogo", "polecats")
+		if filepath.Dir(clean) == polecatsDir {
+			return true
+		}
+	}
+	return false
+}
+
+// withinIndexRoots reports whether path is eligible under the optional
+// index-roots allowlist. With no allowlist configured (the default) every path
+// is eligible, preserving pogo's zero-config behavior.
+func withinIndexRoots(path string) bool {
+	if len(indexRoots) == 0 {
+		return true
+	}
+	clean := filepath.Clean(path)
+	for _, root := range indexRoots {
+		root = filepath.Clean(root)
+		if clean == root || strings.HasPrefix(clean, root+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
 }
 
 func SaveProjects() {
@@ -318,9 +420,20 @@ func searchAndCreate(path string) (*Project, error) {
 	}
 
 	if hasGit(dirnames) {
+		repoPath := addSlashToPath(path)
+		// Index-scope control (mg-d205): never auto-register transient repos
+		// or, when an allowlist is configured, repos outside it.
+		if isEphemeralPath(repoPath) {
+			logger.Info("project: refusing to auto-register ephemeral repo", "path", repoPath)
+			return nil, nil
+		}
+		if !withinIndexRoots(repoPath) {
+			logger.Info("project: repo outside configured index_roots; not auto-registering", "path", repoPath)
+			return nil, nil
+		}
 		var project = Project{
 			Id:   0,
-			Path: addSlashToPath(path),
+			Path: repoPath,
 		}
 		Add(&project)
 		return &project, nil
