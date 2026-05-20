@@ -186,6 +186,19 @@ into the open.
 
 ---
 
+### Phase 3D — Codex provider e2e validation  [depends 3B]
+
+Full end-to-end validation of the Codex provider on a real workload — see
+`docs/codex-e2e-validation.md`. Outcome: a non-trivial dispatch completes
+through the real `agent.Registry` + `codex.Provider` pipeline; persona
+injection verified for both the polecat (worktree) and crew
+(`~/.pogo/agents/<name>/`) paths — the `CODEX_HOME` mapping floated in §4 risk 4
+proved unnecessary; the 3B `NudgeProfile` holds under a real dispatch; the
+file-based `~/.codex/auth.json` credential is resolved robustly by a
+launchd-started pogod's non-interactive children. Two items escalated to Daniel:
+the auth mode to ship (`chatgpt` vs `--with-api-key`) and per-type provider
+selection so a Codex polecat can be dispatched without a fleet-wide switch.
+
 ## 4 · Risks & open questions
 
 1. **Codex nudge dialect (3B)** — the one genuine unknown; needs live measurement. Bounded by the spike.

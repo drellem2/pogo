@@ -410,6 +410,66 @@ func TestSpawnContextFileInjection(t *testing.T) {
 	}
 }
 
+// TestSpawnContextFileInjectionCrew verifies that ContextFile persona injection
+// also fires for a crew agent — not just polecats. writeContextFilePrompt does
+// not branch on agent type, so the Codex persona is delivered to crew agents
+// the same way (AGENTS.override.md in the working directory). This is the crew
+// half of Phase 3D (mg-6599) acceptance bar 2.
+//
+// Note: the multi-provider survey (§3 Phase 3B, §4 risk 4) anticipated a
+// CODEX_HOME-based variant for crew so the persona never lands inside a
+// checked-out repo's working tree. That variant was not implemented in 3B;
+// crew injection currently uses the same in-directory AGENTS.override.md path
+// as polecats. See docs/codex-e2e-validation.md.
+func TestSpawnContextFileInjectionCrew(t *testing.T) {
+	tmpDir := t.TempDir()
+	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	defer reg.StopAll(2 * time.Second)
+
+	reg.SetProvider(&Provider{
+		ID:     "codex-test",
+		Binary: "codex",
+		PromptInjection: PromptInjection{
+			Kind:        InjectContextFile,
+			ContextFile: "AGENTS.override.md",
+		},
+		Nudge: DefaultNudgeProfile,
+	})
+
+	const persona = "# pogo crew persona\noperating instructions for the crew agent\n"
+	promptFile := filepath.Join(tmpDir, "prompt.md")
+	if err := os.WriteFile(promptFile, []byte(persona), 0644); err != nil {
+		t.Fatalf("write prompt file: %v", err)
+	}
+
+	workDir := filepath.Join(tmpDir, "crewdir")
+	if err := os.MkdirAll(workDir, 0755); err != nil {
+		t.Fatalf("mkdir workdir: %v", err)
+	}
+
+	_, err = reg.Spawn(SpawnRequest{
+		Name:       "codex-crew",
+		Type:       TypeCrew,
+		Command:    []string{"cat"},
+		PromptFile: promptFile,
+		Dir:        workDir,
+	})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(workDir, "AGENTS.override.md"))
+	if err != nil {
+		t.Fatalf("AGENTS.override.md not written for a crew agent: %v", err)
+	}
+	if string(got) != persona {
+		t.Errorf("AGENTS.override.md = %q, want %q", got, persona)
+	}
+}
+
 // TestSpawnNoContextFileForClaude confirms the InjectContextFile path is inert
 // for a flag-injection provider: no stray AGENTS.override.md is written.
 func TestSpawnNoContextFileForClaude(t *testing.T) {
