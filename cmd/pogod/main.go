@@ -15,7 +15,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"time"
@@ -26,6 +25,7 @@ import (
 	"github.com/drellem2/pogo/internal/client"
 	"github.com/drellem2/pogo/internal/config"
 	"github.com/drellem2/pogo/internal/driver"
+	"github.com/drellem2/pogo/internal/gitgc"
 	"github.com/drellem2/pogo/internal/health"
 	"github.com/drellem2/pogo/internal/heartbeat"
 	"github.com/drellem2/pogo/internal/platform/sleep"
@@ -460,19 +460,20 @@ func main() {
 			// the registry. Polecats hit this path by default; a crew agent
 			// with restart_on_crash=false in its prompt frontmatter also
 			// lands here.
+			//
+			// This callback fires from waitAndHandle on EVERY process exit
+			// — normal completion, crash, and force-stop alike (pogo agent
+			// stop SIGTERMs then SIGKILLs; cmd.Wait returns either way) —
+			// so the worktree cleanup below runs on abnormal exits, not
+			// only clean ones. The single exit path no in-process callback
+			// can cover, pogod dying mid-polecat, is the job of the gitgc
+			// startup sweep. See mg-30d5 D3.
 			log.Printf("agent %s (%s) exited, cleaning up", a.Name, a.Type)
 			if a.WorktreeDir != "" {
-				if err := exec.Command("git", "-C", a.SourceRepo, "worktree", "remove", a.WorktreeDir, "--force").Run(); err != nil {
-					log.Printf("agent %s: worktree removal failed: %v", a.Name, err)
+				if err := gitgc.RemoveWorktree(a.SourceRepo, a.WorktreeDir); err != nil {
+					log.Printf("agent %s: worktree cleanup failed: %v", a.Name, err)
 				} else {
 					log.Printf("agent %s: removed worktree %s", a.Name, a.WorktreeDir)
-				}
-				// Always remove the directory from disk as a fallback.
-				// git worktree remove may leave the directory behind
-				// (e.g. if UnlinkWorktree already detached the .git
-				// pointer during refinery submit).
-				if err := os.RemoveAll(a.WorktreeDir); err != nil {
-					log.Printf("agent %s: failed to remove worktree dir %s: %v", a.Name, a.WorktreeDir, err)
 				}
 			}
 			a.Cleanup()
@@ -519,6 +520,11 @@ func main() {
 	hbCtx, hbCancel := context.WithCancel(context.Background())
 	defer hbCancel()
 	go hb.Run(hbCtx)
+
+	// Start the polecat git garbage collector: a startup sweep plus a
+	// periodic ticker that deletes stale polecat-* branches and reclaims
+	// leaked worktrees once their work items have concluded. mg-30d5.
+	startGitGC(hbCtx, agentRegistry, cfg.GitGC)
 
 	// Optional platform-specific wake notifier — reduces wake-event latency
 	// from up-to-Interval (~30s) down to <1s by short-circuiting the
