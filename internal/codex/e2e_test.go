@@ -62,9 +62,8 @@ func TestCodexEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
-	reg.SetProvider(provider)
-	reg.SetPostSpawnHook(provider.PostSpawnHook)
-	reg.SetSessionHook(provider.SessionHook)
+	reg.RegisterProvider(provider)
+	reg.SetDefaultProvider(provider.ID)
 	defer reg.StopAll(3 * time.Second)
 
 	cmd, err := agent.ExpandCommand(provider.CommandTemplate, agent.CommandTemplateVars{
@@ -202,9 +201,8 @@ func TestCodexEndToEndNonTrivial(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
-	reg.SetProvider(provider)
-	reg.SetPostSpawnHook(provider.PostSpawnHook)
-	reg.SetSessionHook(provider.SessionHook)
+	reg.RegisterProvider(provider)
+	reg.SetDefaultProvider(provider.ID)
 	defer reg.StopAll(3 * time.Second) // safety net; explicit StopAll below
 
 	cmd, err := agent.ExpandCommand(provider.CommandTemplate, agent.CommandTemplateVars{

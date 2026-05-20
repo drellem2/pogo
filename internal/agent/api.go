@@ -438,12 +438,26 @@ func (r *Registry) StartCrewAgent(name string) (*Agent, error) {
 		promptFile = synth
 	}
 
+	// Parse the (possibly synthesized) prompt's frontmatter once — it feeds
+	// both provider resolution (provider:) and the initial nudge
+	// (nudge_on_start). A parse error is non-fatal: meta stays a usable zero
+	// value and the type defaults apply.
+	meta, _, _ := ParsePromptFrontmatter(promptFile)
+
+	// Resolve the harness provider for this crew agent. (provider: frontmatter
+	// is wired in a follow-up commit; for now the chain runs from per-type
+	// config down.)
+	provider, perr := r.resolveProvider(TypeCrew, "", "")
+	if perr != nil {
+		return nil, fmt.Errorf("resolve provider: %w", perr)
+	}
+
 	// Build command from the configured template. commandTemplate resolves an
-	// explicit [agents] command if set, otherwise the active provider's default
-	// (claude.Provider.CommandTemplate). The Claude default carries
-	// --dangerously-skip-permissions, required for autonomous agent execution;
-	// --permission-mode bypassPermissions does NOT work without additional setup.
-	cmd, err := ExpandCommand(r.commandTemplate(TypeCrew), CommandTemplateVars{
+	// explicit [agents] command if set, otherwise the resolved provider's
+	// default. The Claude default carries --dangerously-skip-permissions,
+	// required for autonomous agent execution; --permission-mode
+	// bypassPermissions does NOT work without additional setup.
+	cmd, err := ExpandCommand(r.commandTemplate(TypeCrew, provider), CommandTemplateVars{
 		PromptFile: promptFile,
 		AgentName:  name,
 		AgentType:  string(TypeCrew),
@@ -458,7 +472,7 @@ func (r *Registry) StartCrewAgent(name string) (*Agent, error) {
 	// TOML frontmatter; otherwise the mayor gets a coordination message and
 	// everyone else gets a generic start message.
 	var nudgeMsg string
-	if meta, _, err := ParsePromptFrontmatter(promptFile); err == nil && meta.NudgeOnStart != "" {
+	if meta != nil && meta.NudgeOnStart != "" {
 		nudgeMsg = meta.NudgeOnStart
 	} else if name == "mayor" {
 		nudgeMsg = "You are now running. Begin your coordination loop."
@@ -474,6 +488,7 @@ func (r *Registry) StartCrewAgent(name string) (*Agent, error) {
 		Dir:            agentDir,
 		InitialNudge:   nudgeMsg,
 		RestartOnCrash: ResolveRestartOnCrash(promptFile, TypeCrew),
+		Provider:       provider,
 	})
 }
 
@@ -548,6 +563,18 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 	tmplMeta, _, err := ParsePromptFrontmatter(tmplPath)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("template frontmatter parse failed: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Resolve the harness provider for this polecat before any side effects
+	// (temp prompt file, git worktree), so a bad --provider fails fast and
+	// clean. resolveProvider walks the precedence chain; an unknown explicit
+	// provider is a hard error here, an unknown config/frontmatter value warns
+	// and falls back. (--provider flag and provider: frontmatter are wired in
+	// a follow-up commit; for now the chain runs from per-type config down.)
+	provider, perr := r.resolveProvider(TypePolecat, "", "")
+	if perr != nil {
+		http.Error(w, perr.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -628,13 +655,13 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 	}
 
 	// Build command from the configured template. commandTemplate resolves an
-	// explicit [agents] command if set, otherwise the active provider's default.
-	// ValidatePolecatCommand then warns if the template is missing any of the
-	// provider's required non-interactive flags (Claude:
+	// explicit [agents] command if set, otherwise the resolved provider's
+	// default. ValidatePolecatCommand then warns if the template is missing any
+	// of the provider's required non-interactive flags (Claude:
 	// --dangerously-skip-permissions), which polecats need to run unattended in
 	// a freshly-created worktree directory.
-	polecatCmdTmpl := r.commandTemplate(TypePolecat)
-	ValidatePolecatCommand(polecatCmdTmpl, r.activeProvider())
+	polecatCmdTmpl := r.commandTemplate(TypePolecat, provider)
+	ValidatePolecatCommand(polecatCmdTmpl, provider)
 	cmd, cmdErr := ExpandCommand(polecatCmdTmpl, CommandTemplateVars{
 		PromptFile: promptFile,
 		AgentName:  spawnReq.Name,
@@ -684,6 +711,7 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		InitialNudge:   nudgeMsg,
 		RestartOnCrash: ResolveRestartOnCrash(promptFile, TypePolecat),
 		WorkItemID:     spawnReq.Id,
+		Provider:       provider,
 	})
 	if err != nil {
 		os.Remove(promptFile) // Clean up temp file on spawn failure

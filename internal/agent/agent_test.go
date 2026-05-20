@@ -368,8 +368,9 @@ func TestSpawnContextFileInjection(t *testing.T) {
 	defer reg.StopAll(2 * time.Second)
 
 	// A context-file provider, shaped like codex.Provider (agent cannot import
-	// internal/codex — that would be an import cycle).
-	reg.SetProvider(&Provider{
+	// internal/codex — that would be an import cycle). Passed per-spawn via
+	// SpawnRequest.Provider, the path handleSpawnPolecat uses in production.
+	codexProvider := &Provider{
 		ID:     "codex-test",
 		Binary: "codex",
 		PromptInjection: PromptInjection{
@@ -377,7 +378,7 @@ func TestSpawnContextFileInjection(t *testing.T) {
 			ContextFile: "AGENTS.override.md",
 		},
 		Nudge: DefaultNudgeProfile,
-	})
+	}
 
 	const persona = "# pogo persona\noperating instructions for the agent\n"
 	promptFile := filepath.Join(tmpDir, "prompt.md")
@@ -396,6 +397,7 @@ func TestSpawnContextFileInjection(t *testing.T) {
 		Command:    []string{"cat"},
 		PromptFile: promptFile,
 		Dir:        workDir,
+		Provider:   codexProvider,
 	})
 	if err != nil {
 		t.Fatalf("Spawn: %v", err)
@@ -429,7 +431,7 @@ func TestSpawnContextFileInjectionCrew(t *testing.T) {
 	}
 	defer reg.StopAll(2 * time.Second)
 
-	reg.SetProvider(&Provider{
+	codexProvider := &Provider{
 		ID:     "codex-test",
 		Binary: "codex",
 		PromptInjection: PromptInjection{
@@ -437,7 +439,7 @@ func TestSpawnContextFileInjectionCrew(t *testing.T) {
 			ContextFile: "AGENTS.override.md",
 		},
 		Nudge: DefaultNudgeProfile,
-	})
+	}
 
 	const persona = "# pogo crew persona\noperating instructions for the crew agent\n"
 	promptFile := filepath.Join(tmpDir, "prompt.md")
@@ -456,6 +458,7 @@ func TestSpawnContextFileInjectionCrew(t *testing.T) {
 		Command:    []string{"cat"},
 		PromptFile: promptFile,
 		Dir:        workDir,
+		Provider:   codexProvider,
 	})
 	if err != nil {
 		t.Fatalf("Spawn: %v", err)
@@ -480,12 +483,12 @@ func TestSpawnNoContextFileForClaude(t *testing.T) {
 	}
 	defer reg.StopAll(2 * time.Second)
 
-	reg.SetProvider(&Provider{
+	claudeProvider := &Provider{
 		ID:              "claude-test",
 		Binary:          "claude",
 		PromptInjection: PromptInjection{Kind: InjectAppendFlag, Flag: "--append-system-prompt-file"},
 		Nudge:           DefaultNudgeProfile,
-	})
+	}
 
 	promptFile := filepath.Join(tmpDir, "prompt.md")
 	if err := os.WriteFile(promptFile, []byte("persona"), 0644); err != nil {
@@ -502,6 +505,7 @@ func TestSpawnNoContextFileForClaude(t *testing.T) {
 		Command:    []string{"cat"},
 		PromptFile: promptFile,
 		Dir:        workDir,
+		Provider:   claudeProvider,
 	})
 	if err != nil {
 		t.Fatalf("Spawn: %v", err)

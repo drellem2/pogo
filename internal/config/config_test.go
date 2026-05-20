@@ -300,6 +300,104 @@ command = "polecat-cmd {{.PromptFile}}"
 	}
 }
 
+// TestAgentProviderMethodGlobal verifies AgentProvider returns the global
+// [agents] provider for every type when no per-type override is set.
+func TestAgentProviderMethodGlobal(t *testing.T) {
+	cfg := &AgentsConfig{Provider: "codex"}
+	for _, at := range []string{"crew", "polecat"} {
+		if got := cfg.AgentProvider(at); got != "codex" {
+			t.Errorf("AgentProvider(%q) = %q, want codex (global)", at, got)
+		}
+	}
+}
+
+// TestAgentProviderMethodPerType verifies a per-type [agents.<type>] provider
+// overrides the global [agents] provider, while a type without an override
+// inherits the global — the mixed-fleet selection from mg-b31b.
+func TestAgentProviderMethodPerType(t *testing.T) {
+	cfg := &AgentsConfig{
+		Provider: "claude",
+		Polecat:  AgentTypeConfig{Provider: "codex"},
+	}
+	if got := cfg.AgentProvider("polecat"); got != "codex" {
+		t.Errorf("AgentProvider(polecat) = %q, want codex (per-type override)", got)
+	}
+	if got := cfg.AgentProvider("crew"); got != "claude" {
+		t.Errorf("AgentProvider(crew) = %q, want claude (inherits global)", got)
+	}
+}
+
+// TestAgentProviderPerTypeConfigFile verifies [agents.crew] provider and
+// [agents.polecat] provider parse from the config file and that per-type beats
+// the global [agents] provider — the headline mixed-fleet config (mg-b31b).
+func TestAgentProviderPerTypeConfigFile(t *testing.T) {
+	dir := t.TempDir()
+	os.Setenv("XDG_CONFIG_HOME", dir)
+	defer os.Unsetenv("XDG_CONFIG_HOME")
+	os.Unsetenv("POGO_PORT")
+	os.Unsetenv("POGO_AGENT_PROVIDER")
+
+	pogoDir := filepath.Join(dir, "pogo")
+	os.MkdirAll(pogoDir, 0755)
+	os.WriteFile(filepath.Join(pogoDir, "config.toml"), []byte(`
+[agents]
+provider = "claude"
+
+[agents.crew]
+provider = "claude"
+
+[agents.polecat]
+provider = "codex"
+`), 0644)
+
+	cfg := Load()
+	if cfg.Agents.Provider != "claude" {
+		t.Errorf("global provider = %q, want claude", cfg.Agents.Provider)
+	}
+	if cfg.Agents.Crew.Provider != "claude" {
+		t.Errorf("agents.crew.provider = %q, want claude", cfg.Agents.Crew.Provider)
+	}
+	if cfg.Agents.Polecat.Provider != "codex" {
+		t.Errorf("agents.polecat.provider = %q, want codex", cfg.Agents.Polecat.Provider)
+	}
+	if got := cfg.Agents.AgentProvider("polecat"); got != "codex" {
+		t.Errorf("AgentProvider(polecat) = %q, want codex", got)
+	}
+	if got := cfg.Agents.AgentProvider("crew"); got != "claude" {
+		t.Errorf("AgentProvider(crew) = %q, want claude", got)
+	}
+}
+
+// TestAgentProviderBackwardCompatConfigFile verifies a config with only the
+// global [agents] provider set (no per-type sections) still resolves every
+// type to that provider — the no-migration backward-compat guarantee (mg-b31b
+// acceptance bar 7).
+func TestAgentProviderBackwardCompatConfigFile(t *testing.T) {
+	dir := t.TempDir()
+	os.Setenv("XDG_CONFIG_HOME", dir)
+	defer os.Unsetenv("XDG_CONFIG_HOME")
+	os.Unsetenv("POGO_PORT")
+	os.Unsetenv("POGO_AGENT_PROVIDER")
+
+	pogoDir := filepath.Join(dir, "pogo")
+	os.MkdirAll(pogoDir, 0755)
+	os.WriteFile(filepath.Join(pogoDir, "config.toml"), []byte(`
+[agents]
+provider = "codex"
+`), 0644)
+
+	cfg := Load()
+	if cfg.Agents.Crew.Provider != "" || cfg.Agents.Polecat.Provider != "" {
+		t.Errorf("per-type providers should be empty, got crew=%q polecat=%q",
+			cfg.Agents.Crew.Provider, cfg.Agents.Polecat.Provider)
+	}
+	for _, at := range []string{"crew", "polecat"} {
+		if got := cfg.Agents.AgentProvider(at); got != "codex" {
+			t.Errorf("AgentProvider(%q) = %q, want codex (global, no per-type)", at, got)
+		}
+	}
+}
+
 func TestDefaultMaxWatchers(t *testing.T) {
 	os.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	defer os.Unsetenv("XDG_CONFIG_HOME")

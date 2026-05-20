@@ -124,9 +124,16 @@ type AgentsConfig struct {
 	Polecat AgentTypeConfig
 }
 
-// AgentTypeConfig holds per-agent-type command configuration.
+// AgentTypeConfig holds per-agent-type spawn configuration.
 type AgentTypeConfig struct {
+	// Command overrides the command template for this agent type. Empty means
+	// inherit the global [agents] command (or the provider default).
 	Command string
+	// Provider overrides the harness provider ("claude", "codex") for this
+	// agent type. Empty means inherit the global [agents] provider. This is
+	// what lets a mixed fleet run — e.g. [agents.polecat] provider = "codex"
+	// while crew agents stay on Claude. See mg-b31b.
+	Provider string
 }
 
 // AgentCommand returns the explicitly-configured command template for a given
@@ -146,6 +153,25 @@ func (c *AgentsConfig) AgentCommand(agentType string) string {
 		}
 	}
 	return c.Command
+}
+
+// AgentProvider returns the configured harness provider id for a given agent
+// type. Precedence: per-type [agents.<type>] provider > global [agents]
+// provider. The global value is non-empty after Load() (it defaults to
+// DefaultProvider), so a "crew" or "polecat" argument always yields a usable
+// id. Mirrors AgentCommand; see mg-b31b for the mixed-fleet rationale.
+func (c *AgentsConfig) AgentProvider(agentType string) string {
+	switch agentType {
+	case "crew":
+		if c.Crew.Provider != "" {
+			return c.Crew.Provider
+		}
+	case "polecat":
+		if c.Polecat.Provider != "" {
+			return c.Polecat.Provider
+		}
+	}
+	return c.Provider
 }
 
 // RefineryConfig holds merge queue configuration.
@@ -399,12 +425,18 @@ func loadConfigFile() (*parsedConfig, error) {
 				cfg.Agents.Provider = unquotedVal
 			}
 		case "agents.crew":
-			if key == "command" {
+			switch key {
+			case "command":
 				cfg.Agents.Crew.Command = unquotedVal
+			case "provider":
+				cfg.Agents.Crew.Provider = unquotedVal
 			}
 		case "agents.polecat":
-			if key == "command" {
+			switch key {
+			case "command":
 				cfg.Agents.Polecat.Command = unquotedVal
+			case "provider":
+				cfg.Agents.Polecat.Provider = unquotedVal
 			}
 		}
 	}

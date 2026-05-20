@@ -1492,14 +1492,25 @@ Exits with code 1 if any critical check fails (--check mode only).`,
 					pass(tool+" in PATH", p)
 				}
 			}
-			provider, known := providers.Resolve(config.Load().Agents.Provider)
-			if !known {
-				warn("agent provider", fmt.Sprintf("unknown provider configured; using fallback %q", provider.ID))
-			}
-			if p, err := exec.LookPath(provider.Binary); err != nil {
-				warn(provider.Binary+" in PATH", fmt.Sprintf("not found (configured agent harness %q)", provider.ID))
-			} else {
-				pass(provider.Binary+" in PATH", p)
+			// Crew and polecats can each select a different provider via
+			// [agents.<type>] provider, so check every distinct configured
+			// harness binary, not just the global one.
+			agentsCfg := config.Load().Agents
+			checkedProviders := map[string]bool{}
+			for _, agentType := range []string{"crew", "polecat"} {
+				provider, known := providers.Resolve(agentsCfg.AgentProvider(agentType))
+				if checkedProviders[provider.ID] {
+					continue
+				}
+				checkedProviders[provider.ID] = true
+				if !known {
+					warn("agent provider", fmt.Sprintf("unknown provider configured for %s; using fallback %q", agentType, provider.ID))
+				}
+				if p, err := exec.LookPath(provider.Binary); err != nil {
+					warn(provider.Binary+" in PATH", fmt.Sprintf("not found (configured agent harness %q)", provider.ID))
+				} else {
+					pass(provider.Binary+" in PATH", p)
+				}
 			}
 
 			// 4. Repos configured

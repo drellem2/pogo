@@ -18,6 +18,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -101,10 +102,19 @@ type Agent struct {
 	master *os.File
 	cmd    *exec.Cmd
 
-	// nudge is the provider's PTY-input dialect, captured at spawn from the
-	// registry's active provider (or DefaultNudgeProfile when none is set).
+	// nudge is the provider's PTY-input dialect, captured at spawn from this
+	// agent's resolved provider (or DefaultNudgeProfile when none is set).
 	// Immutable after construction, so it is safe to read without a.mu.
 	nudge NudgeProfile
+
+	// provider is the harness descriptor resolved for this agent at spawn
+	// time. It carries the PostSpawnHook / SessionHook, the prompt-injection
+	// strategy, and (via nudge above) the PTY dialect. Stored on the agent so
+	// a restart (Respawn, driven by the onExit hook) comes back with this
+	// agent's OWN provider, not a registry-global default. May be nil for a
+	// bare-registry spawn. Immutable after construction; safe to read without
+	// a.mu.
+	provider *Provider
 
 	// outputBuf holds recent output for monitoring.
 	outputBuf *RingBuffer
@@ -169,12 +179,18 @@ func (a *Agent) emitSpawned() {
 	})
 }
 
-// AgentCommandConfig provides the explicitly-configured command template for a
-// given agent type. This interface decouples the agent package from the config
-// package. An empty return means "no explicit command configured" — the
-// Registry then falls back to the active provider's CommandTemplate.
+// AgentCommandConfig provides the explicitly-configured command template and
+// harness provider for a given agent type. This interface decouples the agent
+// package from the config package (config.AgentsConfig satisfies it).
+//
+// AgentCommand returns "" when no explicit command is configured — the
+// Registry then falls back to the resolved provider's CommandTemplate.
+// AgentProvider returns the configured provider id for the type (per-type
+// override, else the global default); it feeds the per-spawn provider
+// resolution chain in resolveProvider.
 type AgentCommandConfig interface {
 	AgentCommand(agentType string) string
+	AgentProvider(agentType string) string
 }
 
 // Registry is the in-memory agent registry. Thread-safe.
@@ -192,25 +208,26 @@ type Registry struct {
 	// (pogod) to handle crew restarts and polecat cleanup.
 	onExit func(a *Agent, err error)
 
-	// postSpawnHook is called after an agent is registered in Spawn.
-	// Used for agent-specific lifecycle behavior (e.g. trust dialog dismissal).
-	postSpawnHook func(a *Agent)
+	// providers is the pool of known harness descriptors, keyed by id
+	// ("claude", "codex"). pogod registers every provider at startup
+	// (RegisterProvider); resolveProvider then picks one per spawn from the
+	// precedence chain. Before mg-b31b the registry held a single global
+	// provider plus a global hook pair — provider selection is now per-spawn,
+	// so a mixed Claude/Codex fleet needs no pogod restart. An empty map is a
+	// bare registry (unit tests): spawns fall back to pogo's built-in
+	// nudge/PTY defaults and run no lifecycle hooks.
+	//
+	// Each spawn's resolved *Provider is stored on the Agent (Agent.provider),
+	// so its PostSpawnHook / SessionHook / nudge dialect / PTY size travel with
+	// that agent — including across a restart via the onExit hook.
+	providers map[string]*Provider
 
-	// sessionHook is called once per spawn (after postSpawnHook) and is
-	// expected to block for the agent's lifetime. The context passed in is
-	// cancelled when the agent's PTY exits, letting the hook tear down
-	// cleanly. Used for lifetime watchers — e.g. the modal-dismissal
-	// watcher (mg-4421) that scans tee'd PTY output for mid-session
-	// dialogs and writes the dismissal keystroke. Sibling to the spawn-only
-	// postSpawnHook so a reader of this struct sees both lifecycles
-	// named in the API.
-	sessionHook SessionHookFunc
-
-	// provider is the harness descriptor for every agent this registry spawns.
-	// It supplies the default command template, the nudge dialect, the PTY
-	// size, and (via cmd/pogod wiring) the lifecycle hooks. May be nil — a
-	// bare registry then falls back to pogo defaults; pogod always sets it.
-	provider *Provider
+	// defaultProviderID is the global-default provider id — the resolution
+	// tier used when no --provider flag, prompt frontmatter, or per-agent-type
+	// config selects one. pogod sets it from [agents] provider (which
+	// POGO_AGENT_PROVIDER already folds in). Empty leaves the built-in
+	// DefaultProviderID as the floor.
+	defaultProviderID string
 
 	// shutdown is set by StopAll to short-circuit any in-flight respawn
 	// goroutines (scheduled by the OnExit hook for restart_on_crash agents)
@@ -232,75 +249,156 @@ func (r *Registry) SetCommandConfig(cfg AgentCommandConfig) {
 	r.cmdConfig = cfg
 }
 
-// SetPostSpawnHook sets a function called after each agent is registered in Spawn.
-// The hook runs in a new goroutine so it does not block spawn.
-func (r *Registry) SetPostSpawnHook(fn func(a *Agent)) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.postSpawnHook = fn
-}
-
 // SessionHookFunc is the signature of a lifetime-scoped agent hook. The ctx
 // passed in is cancelled when the agent's PTY exits; the function is expected
 // to block (goroutine-style) until then. Sibling to PostSpawnHook, which runs
 // only for a bounded post-spawn window — see mg-4421 / mg-ef6b for the
 // motivation (mid-session modal watchers need lifetime scope, not spawn scope).
+//
+// Both hooks live on the Provider descriptor (Provider.PostSpawnHook /
+// Provider.SessionHook). They are applied per-spawn off the agent's resolved
+// provider, not off a registry-global field — so a Codex polecat and a Claude
+// crew agent in the same fleet each run their own provider's hooks.
 type SessionHookFunc func(ctx context.Context, a *Agent)
 
-// SetSessionHook sets a lifetime-scoped hook invoked once per spawn. The hook
-// runs in a new goroutine; the ctx it receives is cancelled when the PTY exits.
-func (r *Registry) SetSessionHook(fn SessionHookFunc) {
+// RegisterProvider adds a harness provider to the registry's per-spawn
+// resolution pool, keyed by p.ID. pogod registers every known provider at
+// startup (claude, codex); resolveProvider then picks one per spawn from the
+// precedence chain. Registering the same id twice replaces the earlier entry.
+// A nil provider is ignored.
+func (r *Registry) RegisterProvider(p *Provider) {
+	if p == nil {
+		return
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.sessionHook = fn
+	if r.providers == nil {
+		r.providers = make(map[string]*Provider)
+	}
+	r.providers[p.ID] = p
 }
 
-// SetProvider registers the harness provider for every agent the registry
-// spawns. The provider supplies the default command template, the nudge
-// dialect, and the PTY size; pogod additionally wires the provider's
-// PostSpawnHook / SessionHook via the setters above. pogod resolves the
-// provider from config at startup — see cmd/pogod/main.go.
-func (r *Registry) SetProvider(p *Provider) {
+// SetDefaultProvider sets the global-default provider id — the resolution tier
+// consulted when no --provider flag, prompt frontmatter, or per-agent-type
+// config selects one. pogod sets this from [agents] provider (which
+// POGO_AGENT_PROVIDER already folds in). Empty leaves the built-in
+// DefaultProviderID as the resolution floor.
+func (r *Registry) SetDefaultProvider(id string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.provider = p
+	r.defaultProviderID = id
 }
 
-// activeProvider returns the registered provider, or nil when none is set.
-func (r *Registry) activeProvider() *Provider {
+// resolveProvider walks the per-spawn provider precedence chain and returns the
+// harness descriptor for one spawn. See resolveProviderLocked for the chain and
+// error semantics. Takes the read lock; callers must NOT already hold r.mu.
+func (r *Registry) resolveProvider(agentType AgentType, flagProvider, frontmatterProvider string) (*Provider, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return r.provider
+	return r.resolveProviderLocked(agentType, flagProvider, frontmatterProvider)
+}
+
+// resolveProviderLocked is the lock-free core of resolveProvider. The caller
+// must hold r.mu (read or write); Spawn calls it directly because it already
+// holds the write lock.
+//
+// Precedence, highest wins:
+//
+//  1. flagProvider        — explicit --provider override (spawn-polecat)
+//  2. frontmatterProvider — provider: key in the agent prompt's frontmatter
+//  3. per-type / global config — [agents.<type>] provider, then [agents] provider
+//  4. registry default    — SetDefaultProvider (pogod: [agents] provider / env)
+//  5. built-in default    — DefaultProviderID ("claude")
+//
+// An unknown id from the flag tier is a hard error — the caller explicitly
+// asked for that provider, so failing fast beats silently spawning the wrong
+// harness. An unknown id from any lower tier (frontmatter, config, default)
+// logs a warning and falls back to the built-in default, so a stale config or
+// prompt degrades gracefully instead of wedging the spawn.
+//
+// Returns (nil, nil) for a bare registry with no providers registered — the
+// degenerate unit-test case — which tells Spawn to fall back to pogo's
+// built-in nudge/PTY defaults and run no lifecycle hooks.
+func (r *Registry) resolveProviderLocked(agentType AgentType, flagProvider, frontmatterProvider string) (*Provider, error) {
+	// Bare registry: nothing registered, nothing to resolve.
+	if len(r.providers) == 0 {
+		return nil, nil
+	}
+
+	id, tier := flagProvider, "--provider flag"
+	if id == "" {
+		id, tier = frontmatterProvider, "provider: frontmatter"
+	}
+	if id == "" && r.cmdConfig != nil {
+		id, tier = r.cmdConfig.AgentProvider(string(agentType)), "config"
+	}
+	if id == "" {
+		id, tier = r.defaultProviderID, "global default"
+	}
+	if id == "" {
+		id, tier = DefaultProviderID, "built-in default"
+	}
+
+	if p := r.providers[id]; p != nil {
+		return p, nil
+	}
+
+	// Unknown id. The flag is an explicit, just-typed request: fail fast so a
+	// typo never silently spawns the wrong harness.
+	if tier == "--provider flag" {
+		return nil, fmt.Errorf("unknown agent provider %q (known: %s)", id, r.knownProviderIDsLocked())
+	}
+	// Lower tiers: warn and fall back to the built-in default rather than
+	// wedging the spawn (never a silent wrong-provider spawn — the warning is
+	// the trace).
+	log.Printf("WARNING: unknown agent provider %q (from %s); falling back to %q",
+		id, tier, DefaultProviderID)
+	if p := r.providers[DefaultProviderID]; p != nil {
+		return p, nil
+	}
+	return nil, fmt.Errorf("unknown agent provider %q and built-in default %q is not registered",
+		id, DefaultProviderID)
+}
+
+// knownProviderIDsLocked returns the registered provider ids, sorted and
+// comma-joined, for use in error messages. Caller must hold r.mu.
+func (r *Registry) knownProviderIDsLocked() string {
+	ids := make([]string, 0, len(r.providers))
+	for id := range r.providers {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return strings.Join(ids, ", ")
 }
 
 // spawnDefaults returns the nudge profile and PTY winsize for a freshly-spawned
-// agent, sourced from the registered provider — or pogo's built-in defaults
-// when no provider is set. Caller must hold r.mu.
-func (r *Registry) spawnDefaults() (NudgeProfile, *pty.Winsize) {
+// agent, sourced from its resolved per-spawn provider — or pogo's built-in
+// defaults when the provider is nil (bare registry).
+func spawnDefaults(p *Provider) (NudgeProfile, *pty.Winsize) {
 	nudge := DefaultNudgeProfile
 	winsize := &pty.Winsize{Cols: defaultPTYCols, Rows: defaultPTYRows}
-	if r.provider != nil {
-		nudge = r.provider.Nudge
-		if r.provider.PTYSize != nil {
-			winsize = &pty.Winsize{Cols: r.provider.PTYSize.Cols, Rows: r.provider.PTYSize.Rows}
+	if p != nil {
+		nudge = p.Nudge
+		if p.PTYSize != nil {
+			winsize = &pty.Winsize{Cols: p.PTYSize.Cols, Rows: p.PTYSize.Rows}
 		}
 	}
 	return nudge, winsize
 }
 
-// invokeSessionHook spawns the registry's session hook (if any) on a fresh
-// goroutine bound to ctx. The ctx is cancelled by a watcher goroutine when
-// the agent's Done() channel closes, so the hook tears down without callers
-// having to wire OnExit plumbing.
+// invokeSessionHook spawns the agent's resolved-provider session hook (if any)
+// on a fresh goroutine bound to ctx. The ctx is cancelled by a watcher
+// goroutine when the agent's Done() channel closes, so the hook tears down
+// without callers having to wire OnExit plumbing.
 //
-// Called from Spawn / Respawn while r.mu is already held exclusively — the
-// field read happens without an additional lock to avoid an RLock-while-Lock
-// deadlock that would otherwise wedge spawn.
+// The hook is read off a.provider — the agent's own per-spawn provider — so a
+// restarted agent re-arms its own provider's watcher, never a registry-global
+// one. Called from Spawn / Respawn while r.mu is already held exclusively.
 func (r *Registry) invokeSessionHook(a *Agent) {
-	fn := r.sessionHook
-	if fn == nil {
+	if a.provider == nil || a.provider.SessionHook == nil {
 		return
 	}
+	fn := a.provider.SessionHook
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
 		<-a.done
@@ -309,15 +407,16 @@ func (r *Registry) invokeSessionHook(a *Agent) {
 	go fn(ctx, a)
 }
 
-// commandTemplate returns the command template for the given agent type.
+// commandTemplate returns the command template for the given agent type and
+// resolved provider.
 //
 // Precedence: an explicit per-type or global [agents] command (config file or
-// POGO_AGENT_COMMAND env) wins; otherwise the active provider's CommandTemplate
-// supplies the default. Returns "" only in the degenerate case where neither a
-// config command nor a provider is registered — pogod always sets a provider,
-// so this happens only in bare-registry unit tests, where ExpandCommand then
-// surfaces a clear "expanded to empty string" error.
-func (r *Registry) commandTemplate(agentType AgentType) string {
+// POGO_AGENT_COMMAND env) wins; otherwise the resolved provider's
+// CommandTemplate supplies the default. Returns "" only in the degenerate case
+// where neither a config command nor a provider is available — pogod always
+// resolves a provider, so this happens only in bare-registry unit tests, where
+// ExpandCommand then surfaces a clear "expanded to empty string" error.
+func (r *Registry) commandTemplate(agentType AgentType, p *Provider) string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	if r.cmdConfig != nil {
@@ -325,8 +424,8 @@ func (r *Registry) commandTemplate(agentType AgentType) string {
 			return cmd
 		}
 	}
-	if r.provider != nil {
-		return r.provider.CommandTemplate
+	if p != nil {
+		return p.CommandTemplate
 	}
 	return ""
 }
@@ -338,6 +437,7 @@ func NewRegistry(socketDir string) (*Registry, error) {
 	}
 	return &Registry{
 		agents:    make(map[string]*Agent),
+		providers: make(map[string]*Provider),
 		socketDir: socketDir,
 	}, nil
 }
@@ -364,6 +464,14 @@ type SpawnRequest struct {
 	InitialNudge   string   // if set, pogod sends this nudge after spawn to bypass the CLI interactive prompt
 	RestartOnCrash bool     // if true, pogod respawns this agent when it exits unexpectedly
 	WorkItemID     string   // mg work item id this agent is assigned to (polecats); empty for crew/general agents
+
+	// Provider is the harness descriptor resolved for this one spawn. The
+	// handlers that build the command from a provider's template
+	// (handleSpawnPolecat, StartCrewAgent) resolve it up-front and pass it
+	// here. When nil — the generic POST /agents path and bare-registry tests —
+	// Spawn resolves it itself by agent type. It supplies the nudge dialect,
+	// PTY size, prompt-injection strategy, and lifecycle hooks for the agent.
+	Provider *Provider
 }
 
 // Spawn starts a new agent process with a PTY.
@@ -377,6 +485,21 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 
 	if len(req.Command) == 0 {
 		return nil, fmt.Errorf("command is required")
+	}
+
+	// Resolve the harness provider for this one spawn. handleSpawnPolecat /
+	// StartCrewAgent resolve it up-front (they build the command from the
+	// provider's template) and pass it in req.Provider; the generic
+	// POST /agents path and bare-registry tests leave it nil, so resolve it
+	// here by agent type. A nil result is fine — pogo's built-in defaults
+	// apply.
+	provider := req.Provider
+	if provider == nil {
+		p, perr := r.resolveProviderLocked(req.Type, "", "")
+		if perr != nil {
+			return nil, fmt.Errorf("resolve provider: %w", perr)
+		}
+		provider = p
 	}
 
 	cmd := exec.Command(req.Command[0], req.Command[1:]...)
@@ -400,12 +523,12 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 	// reads AGENTS.override.md from its working directory). Must happen before
 	// the process starts so the harness picks it up on launch. A no-op for
 	// flag/env-injection providers like Claude.
-	if err := writeContextFilePrompt(r.provider, req.PromptFile, req.Dir); err != nil {
+	if err := writeContextFilePrompt(provider, req.PromptFile, req.Dir); err != nil {
 		return nil, fmt.Errorf("context-file prompt injection: %w", err)
 	}
 
-	// Resolve the nudge dialect and PTY winsize from the active provider.
-	nudge, winsize := r.spawnDefaults()
+	// Resolve the nudge dialect and PTY winsize from this spawn's provider.
+	nudge, winsize := spawnDefaults(provider)
 
 	// Start with PTY — master fd returned, slave becomes controlling terminal.
 	// Set a sensible default winsize so the agent's TUI doesn't render at the
@@ -433,6 +556,7 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 		master:         master,
 		cmd:            cmd,
 		nudge:          nudge,
+		provider:       provider,
 		outputBuf:      NewRingBuffer(64 * 1024), // 64KB rolling buffer
 		attachConns:    make(map[io.Writer]struct{}),
 		socketPath:     filepath.Join(r.socketDir, req.Name+".sock"),
@@ -458,13 +582,15 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 
 	a.emitSpawned()
 
-	// Run post-spawn hook (e.g. trust dialog dismissal) if configured.
-	if r.postSpawnHook != nil {
-		go r.postSpawnHook(a)
+	// Run post-spawn hook (e.g. trust dialog dismissal) if this agent's
+	// resolved provider declares one. Read off a.provider, not a registry
+	// global, so each agent runs its own provider's hook.
+	if a.provider != nil && a.provider.PostSpawnHook != nil {
+		go a.provider.PostSpawnHook(a)
 	}
 
 	// Run lifetime session hook (e.g. modal-dismissal watcher per mg-4421).
-	// Sibling lifecycle to postSpawnHook above.
+	// Sibling lifecycle to postSpawnHook above; also sourced from a.provider.
 	r.invokeSessionHook(a)
 
 	// Send initial nudge to bypass the CLI interactive prompt.
@@ -648,13 +774,19 @@ func (r *Registry) Respawn(name string) (*Agent, error) {
 	}
 	cmd.Env = append(os.Environ(), injectedEnv...)
 
+	// A restart re-resolves to the agent's OWN provider (carried on old.provider
+	// from its original spawn), never the registry default — so a Codex agent
+	// restarts as Codex even when the fleet default is Claude. See mg-b31b
+	// acceptance bar 9.
+	provider := old.provider
+
 	// Re-deliver the ContextFile persona for the respawned process (no-op for
 	// Claude). Idempotent — overwrites the same AGENTS.override.md.
-	if err := writeContextFilePrompt(r.provider, old.PromptFile, old.Dir); err != nil {
+	if err := writeContextFilePrompt(provider, old.PromptFile, old.Dir); err != nil {
 		return nil, fmt.Errorf("context-file prompt injection: %w", err)
 	}
 
-	nudge, winsize := r.spawnDefaults()
+	nudge, winsize := spawnDefaults(provider)
 
 	master, err := pty.StartWithSize(cmd, winsize)
 	if err != nil {
@@ -679,6 +811,7 @@ func (r *Registry) Respawn(name string) (*Agent, error) {
 		master:         master,
 		cmd:            cmd,
 		nudge:          nudge,
+		provider:       provider,
 		outputBuf:      NewRingBuffer(64 * 1024),
 		attachConns:    make(map[io.Writer]struct{}),
 		socketPath:     filepath.Join(r.socketDir, old.Name+".sock"),

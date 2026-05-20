@@ -406,36 +406,44 @@ func main() {
 	search.SearchService.SetMaxFilesPerTree(cfg.MaxFilesPerTree)
 	project.SetIndexRoots(cfg.IndexRoots)
 
-	// Configure agent command templates and the harness provider.
+	// Configure agent command templates and the harness providers.
 	agentRegistry.SetCommandConfig(&cfg.Agents)
 
-	// Resolve the agent harness provider from config (default "claude"). The
-	// provider supplies the default command template, the nudge dialect, the
-	// PTY size, and the two lifecycle hooks wired below:
-	//   - PostSpawnHook auto-accepts Claude Code's workspace trust dialog.
+	// Register every known harness provider into the registry, then set the
+	// global default. Before mg-b31b a single provider was resolved here, once,
+	// at startup; now the registry resolves a provider per spawn from the
+	// precedence chain (--provider flag > provider: frontmatter > per-type
+	// config > global default). That is what lets one Codex polecat run
+	// alongside a Claude fleet with no pogod restart.
+	//
+	// Each provider carries its own lifecycle hooks (applied per-spawn off the
+	// agent's resolved provider, not a registry global):
+	//   - PostSpawnHook auto-accepts the harness's workspace/trust dialog.
 	//   - SessionHook is the lifetime modal-dismissal watcher (mg-4421) that
 	//     scans tee'd PTY output for the rating dialog and rate-limit-options
 	//     modal and dismisses each via its menu keystroke. It survives
 	//     schedule-substrate failures by living inside pogod's per-agent PTY
 	//     goroutine — see mg-ef6b §7 / mg-5a3d §4.
-	provider := resolveAgentProvider(cfg.Agents.Provider)
-	agentRegistry.SetProvider(provider)
-	agentRegistry.SetPostSpawnHook(provider.PostSpawnHook)
-	agentRegistry.SetSessionHook(provider.SessionHook)
+	for _, p := range providers.All() {
+		agentRegistry.RegisterProvider(p)
+	}
+	agentRegistry.SetDefaultProvider(cfg.Agents.Provider)
 
-	// Validate the resolved command binary exists on PATH. An empty configured
-	// command means "use the provider's default template".
-	crewCmd := cfg.Agents.AgentCommand("crew")
-	if crewCmd == "" {
-		crewCmd = provider.CommandTemplate
-	}
-	agent.ValidateCommandBinary(crewCmd)
-	polecatCmd := cfg.Agents.AgentCommand("polecat")
-	if polecatCmd == "" {
-		polecatCmd = provider.CommandTemplate
-	}
-	if polecatCmd != crewCmd {
-		agent.ValidateCommandBinary(polecatCmd)
+	// Validate the command binary for each agent type exists on PATH. Each type
+	// can select a different provider via [agents.<type>] provider, so resolve
+	// per type. An empty configured command means "use the provider's default
+	// template". Dedupe so an identical command is only checked once.
+	checkedCmds := map[string]bool{}
+	for _, agentType := range []string{"crew", "polecat"} {
+		typeProvider := resolveAgentProvider(cfg.Agents.AgentProvider(agentType))
+		typeCmd := cfg.Agents.AgentCommand(agentType)
+		if typeCmd == "" {
+			typeCmd = typeProvider.CommandTemplate
+		}
+		if !checkedCmds[typeCmd] {
+			agent.ValidateCommandBinary(typeCmd)
+			checkedCmds[typeCmd] = true
+		}
 	}
 
 	// Set up agent lifecycle callbacks. Restart vs. cleanup is now driven by

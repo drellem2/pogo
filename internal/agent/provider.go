@@ -2,6 +2,13 @@ package agent
 
 import "time"
 
+// DefaultProviderID is the built-in fallback harness provider — the final tier
+// of the per-spawn resolution chain (see Registry.resolveProvider). It is kept
+// equal to config.DefaultProvider; the agent package cannot import config
+// (config has no agent dependency and the value is a plain string), so the
+// literal is repeated here as the resolution floor.
+const DefaultProviderID = "claude"
+
 // Provider describes a terminal-native agentic harness that pogo can (a) launch
 // as a long-running interactive TUI, (b) inject a persona prompt into, (c) run
 // fully unattended, and (d) nudge via stdin. It is mostly a data descriptor,

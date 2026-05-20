@@ -16,6 +16,15 @@ import (
 	"github.com/drellem2/pogo/internal/codex"
 )
 
+// All returns every known harness provider descriptor, in a stable order
+// (claude first, then codex). pogod registers the whole set into the agent
+// registry at startup so a provider can be resolved per-spawn — the
+// mixed-fleet capability from mg-b31b — instead of once globally. Use Resolve
+// when mapping a single id; use All when you need the complete set.
+func All() []*agent.Provider {
+	return []*agent.Provider{&claude.Provider, &codex.Provider}
+}
+
 // Resolve maps a config provider id to its agent.Provider descriptor.
 //
 // "" and "claude" resolve to Claude (the default); "codex" resolves to Codex.

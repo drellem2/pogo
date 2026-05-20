@@ -15,9 +15,12 @@ import (
 
 // catCommandConfig is a test AgentCommandConfig that runs `cat` for any
 // agent type, so spawn-driven tests can succeed without invoking `claude`.
+// AgentProvider returns "" — these tests use a bare registry with no
+// providers registered, so provider resolution falls back to pogo defaults.
 type catCommandConfig struct{}
 
-func (catCommandConfig) AgentCommand(string) string { return "cat" }
+func (catCommandConfig) AgentCommand(string) string  { return "cat" }
+func (catCommandConfig) AgentProvider(string) string { return "" }
 
 func TestAgentInfoLastActivity(t *testing.T) {
 	tmpDir := t.TempDir()
