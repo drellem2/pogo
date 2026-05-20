@@ -66,6 +66,46 @@ port = 8080
 	}
 }
 
+func TestGitGCDefaults(t *testing.T) {
+	os.Unsetenv("XDG_CONFIG_HOME")
+	os.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	defer os.Unsetenv("XDG_CONFIG_HOME")
+
+	cfg := Load()
+	if !cfg.GitGC.Enabled {
+		t.Error("git GC should be enabled by default")
+	}
+	if cfg.GitGC.Interval != DefaultGitGCInterval {
+		t.Errorf("git GC interval = %v, want %v", cfg.GitGC.Interval, DefaultGitGCInterval)
+	}
+}
+
+func TestGitGCConfigFile(t *testing.T) {
+	dir := t.TempDir()
+	os.Setenv("XDG_CONFIG_HOME", dir)
+	defer os.Unsetenv("XDG_CONFIG_HOME")
+
+	pogoDir := filepath.Join(dir, "pogo")
+	os.MkdirAll(pogoDir, 0755)
+	os.WriteFile(filepath.Join(pogoDir, "config.toml"), []byte(`
+[gitgc]
+enabled = false
+interval = "15m"
+repos = ["/home/u/dev/pogo", "/home/u/dev/other"]
+`), 0644)
+
+	cfg := Load()
+	if cfg.GitGC.Enabled {
+		t.Error("git GC should be disabled by config file")
+	}
+	if cfg.GitGC.Interval != 15*time.Minute {
+		t.Errorf("git GC interval = %v, want 15m", cfg.GitGC.Interval)
+	}
+	if len(cfg.GitGC.Repos) != 2 || cfg.GitGC.Repos[0] != "/home/u/dev/pogo" {
+		t.Errorf("git GC repos = %v, want 2 entries", cfg.GitGC.Repos)
+	}
+}
+
 func TestEnvOverridesConfigFile(t *testing.T) {
 	dir := t.TempDir()
 	os.Setenv("XDG_CONFIG_HOME", dir)

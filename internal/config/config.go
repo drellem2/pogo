@@ -61,6 +61,12 @@ const DefaultMaxWatchers = 4096
 // no exclude list anticipated. See mg-d205.
 const DefaultMaxFilesPerTree = 25000
 
+// DefaultGitGCInterval is how often pogod runs the polecat git garbage
+// collector (stale `polecat-*` branch + leaked worktree cleanup). Hourly is
+// deliberately conservative: the GC is a backstop for the per-exit cleanup,
+// not a hot path. See internal/gitgc and mg-30d5.
+const DefaultGitGCInterval = time.Hour
+
 // Config holds pogo daemon configuration.
 type Config struct {
 	Port            int
@@ -75,6 +81,24 @@ type Config struct {
 	Refinery   RefineryConfig
 	Agents     AgentsConfig
 	Heartbeat  HeartbeatConfig
+	GitGC      GitGCConfig
+}
+
+// GitGCConfig configures pogod's periodic polecat git garbage collector.
+// It deletes stale `polecat-*` branches and reclaims leaked worktrees once
+// their work items have concluded. See internal/gitgc.
+type GitGCConfig struct {
+	// Enabled turns on the startup sweep and the periodic ticker.
+	// Defaults to true.
+	Enabled bool
+	// Interval between periodic sweeps. Zero falls back to
+	// DefaultGitGCInterval.
+	Interval time.Duration
+	// Repos lists git repositories to sweep. pogod also sweeps the source
+	// repo of every registered agent, so this is mainly needed so the
+	// startup sweep can reach a repo after a pogod crash that left no live
+	// agents behind.
+	Repos []string
 }
 
 // HeartbeatConfig configures pogod's clock-jump detector. Zero values fall
@@ -136,6 +160,7 @@ type RefineryConfig struct {
 type parsedConfig struct {
 	Config
 	refineryEnabledSet bool
+	gitgcEnabledSet    bool
 }
 
 // Load reads configuration from (in priority order):
@@ -151,6 +176,10 @@ func Load() *Config {
 		Refinery: RefineryConfig{
 			Enabled:      true,
 			PollInterval: 30 * time.Second,
+		},
+		GitGC: GitGCConfig{
+			Enabled:  true,
+			Interval: DefaultGitGCInterval,
 		},
 	}
 
@@ -183,6 +212,15 @@ func Load() *Config {
 		}
 		if fileCfg.Heartbeat.JumpThreshold > 0 {
 			cfg.Heartbeat.JumpThreshold = fileCfg.Heartbeat.JumpThreshold
+		}
+		if fileCfg.gitgcEnabledSet {
+			cfg.GitGC.Enabled = fileCfg.GitGC.Enabled
+		}
+		if fileCfg.GitGC.Interval > 0 {
+			cfg.GitGC.Interval = fileCfg.GitGC.Interval
+		}
+		if len(fileCfg.GitGC.Repos) > 0 {
+			cfg.GitGC.Repos = fileCfg.GitGC.Repos
 		}
 	}
 
@@ -340,6 +378,18 @@ func loadConfigFile() (*parsedConfig, error) {
 				if d, err := time.ParseDuration(unquotedVal); err == nil {
 					cfg.Heartbeat.JumpThreshold = d
 				}
+			}
+		case "gitgc":
+			switch key {
+			case "enabled":
+				cfg.GitGC.Enabled = val == "true"
+				cfg.gitgcEnabledSet = true
+			case "interval":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.GitGC.Interval = d
+				}
+			case "repos":
+				cfg.GitGC.Repos = parseStringArray(val)
 			}
 		case "agents":
 			switch key {

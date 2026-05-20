@@ -326,6 +326,46 @@ Two more scope controls need no config:
 Environment overrides exist for the numeric knobs (`POGO_MAX_WATCHERS`,
 `POGO_MAX_FILES_PER_TREE`) and take precedence over the config file.
 
+## Polecat git garbage collection
+
+Every polecat runs in an isolated git worktree on its own `polecat-<id>`
+branch. When a polecat exits — normally or abnormally — pogod removes that
+worktree. But branches accumulate, and a worktree can still leak if pogod
+itself dies mid-polecat. pogo garbage-collects both.
+
+The collector (`internal/gitgc`) only ever touches artifacts whose work
+item has **concluded**: an archived ticket's branch is deleted
+unconditionally; a done ticket's branch is deleted once it is merged into
+`main`. Branches of in-flight work, of currently-running polecats, and
+anything whose work item cannot be positively identified are always kept.
+
+pogod runs it automatically — once on startup (catching anything leaked
+while pogod was down) and then on a periodic ticker. Tune it with a
+`[gitgc]` section in `~/.config/pogo/config.toml`:
+
+```toml
+[gitgc]
+# Turn the startup sweep and periodic ticker on/off. Default true.
+enabled = true
+
+# How often the periodic sweep runs. Default 1h — deliberately
+# conservative; the GC is a backstop, not a hot path.
+interval = "1h"
+
+# Extra repositories to sweep. pogod already sweeps the source repo of
+# every registered agent; list a repo here so the startup sweep can reach
+# it even after a pogod crash that left no live agents behind.
+repos = ["/Users/you/dev/pogo"]
+```
+
+To run a sweep by hand — or to preview one — use `pogo gc`. It defaults to
+a dry run; pass `--apply` to actually delete:
+
+```bash
+pogo gc --repo /path/to/repo            # preview (dry run)
+pogo gc --repo /path/to/repo --apply    # delete stale branches + worktrees
+```
+
 ## Putting it all together
 
 The three knobs above compose. A non-coding workflow looks like:

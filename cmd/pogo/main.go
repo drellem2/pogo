@@ -24,6 +24,7 @@ import (
 	"github.com/drellem2/pogo/internal/completion"
 	"github.com/drellem2/pogo/internal/config"
 	"github.com/drellem2/pogo/internal/events"
+	"github.com/drellem2/pogo/internal/gitgc"
 	"github.com/drellem2/pogo/internal/providers"
 	"github.com/drellem2/pogo/internal/refinery"
 	"github.com/drellem2/pogo/internal/scheduler"
@@ -1698,10 +1699,66 @@ The path is resolved to an absolute path and the git root is discovered automati
 		},
 	}
 
+	var gcRepo string
+	var gcApply bool
+	var cmdGC = &cobra.Command{
+		Use:   "gc",
+		Short: "Garbage-collect stale polecat branches and leaked worktrees",
+		Long: `gc deletes stale polecat-* branches and reclaims leaked git worktrees
+whose work items have concluded (done or archived).
+
+It is the manual entry point to the same internal/gitgc logic pogod runs
+on startup and on a periodic ticker. Branches and worktrees of in-flight
+work items, of currently-running polecats, and anything that cannot be
+positively classified are always kept.
+
+By default gc only reports what it would do; pass --apply to make changes.`,
+		Args: cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			repo, err := filepath.Abs(gcRepo)
+			if err != nil {
+				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+			}
+			// Exclude live polecats from the sweep. Best-effort: if pogod
+			// is unreachable, ticket status and git's checked-out-branch
+			// protection still guard in-flight work.
+			live := map[string]bool{}
+			if agents, lerr := client.ListAgents(); lerr == nil {
+				for _, a := range agents {
+					if a.Type == agent.TypePolecat {
+						live[a.Name] = true
+					}
+				}
+			} else if !jsonOutput {
+				fmt.Printf("warning: could not reach pogod for the live-polecat list (%v);\n"+
+					"         relying on ticket status and git checkout state only.\n\n", lerr)
+			}
+			res, err := gitgc.Sweep(gitgc.Options{
+				Repo:         repo,
+				LivePolecats: live,
+				DryRun:       !gcApply,
+			})
+			if err != nil {
+				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+			}
+			if jsonOutput {
+				cli.PrintJSON(res)
+				return
+			}
+			fmt.Print(res.Summary())
+			if !gcApply {
+				fmt.Println("(dry run — re-run with --apply to delete)")
+			}
+		},
+	}
+	cmdGC.Flags().StringVar(&gcRepo, "repo", ".", "git repository to garbage-collect")
+	cmdGC.Flags().BoolVar(&gcApply, "apply", false, "actually delete (default: dry run)")
+
 	var rootCmd = &cobra.Command{Use: "pogo", Version: version.Version}
 
 	rootCmd.PersistentFlags().BoolVar(&jsonOutput, "json", false, "Output in JSON format")
 
+	rootCmd.AddCommand(cmdGC)
 	rootCmd.AddCommand(cmdVersion)
 	rootCmd.AddCommand(cmdInit)
 	rootCmd.AddCommand(cmdInstall)
