@@ -38,14 +38,28 @@ func ExpandCommand(tmpl string, vars CommandTemplateVars) ([]string, error) {
 	return parts, nil
 }
 
-// ValidatePolecatCommand checks that a polecat command template includes
-// --dangerously-skip-permissions. Polecats run in freshly-created worktree
-// directories; without this flag, Claude Code prompts for directory trust
-// and blocks autonomous execution. Logs a warning if the flag is missing.
-func ValidatePolecatCommand(tmpl string) {
-	if !strings.Contains(tmpl, "--dangerously-skip-permissions") {
-		log.Printf("WARNING: polecat command template does not include --dangerously-skip-permissions; " +
-			"polecats in new worktree directories may be blocked by permission prompts")
+// ValidatePolecatCommand checks that a polecat command template carries every
+// non-interactive flag the provider requires. Polecats run in freshly-created
+// worktree directories; without the harness's permission/trust bypass flags,
+// the agent blocks on an interactive prompt and cannot execute autonomously.
+// Logs a warning naming any missing flags.
+//
+// A nil provider — or one that declares no NonInteractiveFlags — makes this a
+// no-op: there is nothing to require.
+func ValidatePolecatCommand(tmpl string, p *Provider) {
+	if p == nil {
+		return
+	}
+	var missing []string
+	for _, flag := range p.NonInteractiveFlags {
+		if !strings.Contains(tmpl, flag) {
+			missing = append(missing, flag)
+		}
+	}
+	if len(missing) > 0 {
+		log.Printf("WARNING: polecat command template does not include required "+
+			"non-interactive flag(s) %v for provider %q; polecats in new worktree "+
+			"directories may be blocked by permission prompts", missing, p.ID)
 	}
 }
 

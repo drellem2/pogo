@@ -353,6 +353,21 @@ func registerHandlers() {
 	}
 }
 
+// resolveAgentProvider maps a config provider id to its agent.Provider
+// descriptor. Claude is the only registered provider today; an unknown id logs
+// a warning and falls back to Claude so a stale or mistyped config never wedges
+// daemon startup.
+func resolveAgentProvider(id string) *agent.Provider {
+	switch id {
+	case "", "claude":
+		return &claude.Provider
+	default:
+		log.Printf("WARNING: unknown agent provider %q in config; falling back to %q",
+			id, claude.Provider.ID)
+		return &claude.Provider
+	}
+}
+
 func main() {
 	flag.Parse()
 	startTime = time.Now()
@@ -393,16 +408,35 @@ func main() {
 	search.SearchService.SetMaxFilesPerTree(cfg.MaxFilesPerTree)
 	project.SetIndexRoots(cfg.IndexRoots)
 
-	// Configure agent command templates, trust dialog hook, and validate the binary exists
+	// Configure agent command templates and the harness provider.
 	agentRegistry.SetCommandConfig(&cfg.Agents)
-	agentRegistry.SetPostSpawnHook(claude.TrustDialogHook)
-	// Lifetime modal-dismissal watcher (mg-4421): scans tee'd PTY output for
-	// the rating dialog and rate-limit-options modal and dismisses each via
-	// its menu keystroke. Survives schedule-substrate failures by living
-	// inside pogod's per-agent PTY goroutine — see mg-ef6b §7 / mg-5a3d §4.
-	agentRegistry.SetSessionHook(claude.ModalHook)
-	agent.ValidateCommandBinary(cfg.Agents.AgentCommand("crew"))
-	if polecatCmd := cfg.Agents.AgentCommand("polecat"); polecatCmd != cfg.Agents.AgentCommand("crew") {
+
+	// Resolve the agent harness provider from config (default "claude"). The
+	// provider supplies the default command template, the nudge dialect, the
+	// PTY size, and the two lifecycle hooks wired below:
+	//   - PostSpawnHook auto-accepts Claude Code's workspace trust dialog.
+	//   - SessionHook is the lifetime modal-dismissal watcher (mg-4421) that
+	//     scans tee'd PTY output for the rating dialog and rate-limit-options
+	//     modal and dismisses each via its menu keystroke. It survives
+	//     schedule-substrate failures by living inside pogod's per-agent PTY
+	//     goroutine — see mg-ef6b §7 / mg-5a3d §4.
+	provider := resolveAgentProvider(cfg.Agents.Provider)
+	agentRegistry.SetProvider(provider)
+	agentRegistry.SetPostSpawnHook(provider.PostSpawnHook)
+	agentRegistry.SetSessionHook(provider.SessionHook)
+
+	// Validate the resolved command binary exists on PATH. An empty configured
+	// command means "use the provider's default template".
+	crewCmd := cfg.Agents.AgentCommand("crew")
+	if crewCmd == "" {
+		crewCmd = provider.CommandTemplate
+	}
+	agent.ValidateCommandBinary(crewCmd)
+	polecatCmd := cfg.Agents.AgentCommand("polecat")
+	if polecatCmd == "" {
+		polecatCmd = provider.CommandTemplate
+	}
+	if polecatCmd != crewCmd {
 		agent.ValidateCommandBinary(polecatCmd)
 	}
 

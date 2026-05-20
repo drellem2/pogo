@@ -438,9 +438,10 @@ func (r *Registry) StartCrewAgent(name string) (*Agent, error) {
 		promptFile = synth
 	}
 
-	// Build command from configurable template.
-	// Default: "claude --dangerously-skip-permissions --append-system-prompt-file {{.PromptFile}}"
-	// NOTE: --dangerously-skip-permissions is required for autonomous agent execution.
+	// Build command from the configured template. commandTemplate resolves an
+	// explicit [agents] command if set, otherwise the active provider's default
+	// (claude.Provider.CommandTemplate). The Claude default carries
+	// --dangerously-skip-permissions, required for autonomous agent execution;
 	// --permission-mode bypassPermissions does NOT work without additional setup.
 	cmd, err := ExpandCommand(r.commandTemplate(TypeCrew), CommandTemplateVars{
 		PromptFile: promptFile,
@@ -626,11 +627,14 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		// and --add-dir triggers a directory trust prompt that blocks autonomous execution.
 	}
 
-	// Build command from configurable template.
-	// Default: "claude --dangerously-skip-permissions --append-system-prompt-file {{.PromptFile}}"
-	// NOTE: --dangerously-skip-permissions is required for autonomous execution.
+	// Build command from the configured template. commandTemplate resolves an
+	// explicit [agents] command if set, otherwise the active provider's default.
+	// ValidatePolecatCommand then warns if the template is missing any of the
+	// provider's required non-interactive flags (Claude:
+	// --dangerously-skip-permissions), which polecats need to run unattended in
+	// a freshly-created worktree directory.
 	polecatCmdTmpl := r.commandTemplate(TypePolecat)
-	ValidatePolecatCommand(polecatCmdTmpl)
+	ValidatePolecatCommand(polecatCmdTmpl, r.activeProvider())
 	cmd, cmdErr := ExpandCommand(polecatCmdTmpl, CommandTemplateVars{
 		PromptFile: promptFile,
 		AgentName:  spawnReq.Name,

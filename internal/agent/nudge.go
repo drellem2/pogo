@@ -20,10 +20,6 @@ const (
 	NudgeImmediate NudgeMode = "immediate"
 )
 
-// DefaultIdleThreshold is how long the PTY output must be quiet before
-// the agent is considered idle.
-const DefaultIdleThreshold = 2 * time.Second
-
 // DefaultNudgeTimeout is how long to wait for idle before giving up.
 const DefaultNudgeTimeout = 30 * time.Second
 
@@ -84,7 +80,7 @@ func (a *Agent) NudgeWithMode(msg string, mode NudgeMode, timeout time.Duration)
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	if err := a.WaitIdle(ctx, DefaultIdleThreshold); err != nil {
+	if err := a.WaitIdle(ctx, a.nudge.IdleThreshold); err != nil {
 		// Distinguish "agent never went quiet" (busy, or stuck redrawing —
 		// e.g. a TUI corrupted by a bad attach resize) from a plain context
 		// cancellation. The deadline-exceeded case still wraps the original

@@ -1,19 +1,12 @@
 package agent
 
 import (
-	"strings"
 	"testing"
 )
 
-// TestDefaultCommandHasPermissionsSkip verifies that DefaultAgentCommand includes
-// --dangerously-skip-permissions. Polecats run in freshly-created worktree directories
-// that Claude Code has never seen. Without this flag, Claude would prompt for directory
-// trust and block autonomous execution.
-func TestDefaultCommandHasPermissionsSkip(t *testing.T) {
-	if !strings.Contains(DefaultAgentCommand, "--dangerously-skip-permissions") {
-		t.Fatal("DefaultAgentCommand must include --dangerously-skip-permissions for autonomous polecat execution in new worktree directories")
-	}
-}
+// The default command template (with --dangerously-skip-permissions) now lives
+// on claude.Provider — see internal/claude/provider_test.go for the guard that
+// the flag is never accidentally dropped.
 
 func TestExpandCommand(t *testing.T) {
 	tests := []struct {
@@ -91,14 +84,22 @@ func TestExpandCommand(t *testing.T) {
 }
 
 // TestValidatePolecatCommand verifies that ValidatePolecatCommand does not
-// panic and correctly identifies commands missing the permissions flag.
-// The function logs warnings rather than returning errors, so we just
-// verify it runs without panic for both valid and invalid templates.
+// panic and correctly identifies commands missing a provider's required
+// non-interactive flags. The function logs warnings rather than returning
+// errors, so we just verify it runs without panic across the cases.
 func TestValidatePolecatCommand(t *testing.T) {
-	// Should not warn (has the flag)
-	ValidatePolecatCommand("claude --dangerously-skip-permissions --append-system-prompt-file /tmp/p.md")
-	// Should warn but not panic (missing the flag)
-	ValidatePolecatCommand("claude --append-system-prompt-file /tmp/p.md")
-	// Non-claude binary (no flag expected but still warns)
-	ValidatePolecatCommand("aider --model gpt-4o --read /tmp/p.md")
+	p := &Provider{
+		ID:                  "test",
+		NonInteractiveFlags: []string{"--dangerously-skip-permissions"},
+	}
+	// Has the required flag — no warning.
+	ValidatePolecatCommand("claude --dangerously-skip-permissions --append-system-prompt-file /tmp/p.md", p)
+	// Missing the flag — warns, must not panic.
+	ValidatePolecatCommand("claude --append-system-prompt-file /tmp/p.md", p)
+	// Different binary, still missing the flag — warns, must not panic.
+	ValidatePolecatCommand("aider --model gpt-4o --read /tmp/p.md", p)
+	// Nil provider — no-op, must not panic.
+	ValidatePolecatCommand("anything at all", nil)
+	// Provider with no required flags — no-op, must not panic.
+	ValidatePolecatCommand("anything", &Provider{ID: "noflags"})
 }
