@@ -56,8 +56,8 @@ func TestSpawnAndNudge(t *testing.T) {
 }
 
 // TestNudgeSplitsBodyAndSubmit verifies that Nudge writes the message body
-// and the trailing submit (\r) as two separate writes with NudgeSubmitDelay
-// between them. Required so the receiver's input loop reads them in distinct
+// and the trailing submit (\r) as two separate writes with the provider's
+// SubmitDelay between them. Required so the receiver's input loop reads them in distinct
 // read() calls — otherwise Claude Code's React/Ink input box treats the
 // combined chunk as a paste and the \r becomes a literal newline inside the
 // input field rather than a submit. Regression test for the bug where crew
@@ -85,9 +85,9 @@ func TestNudgeSplitsBodyAndSubmit(t *testing.T) {
 	}
 	elapsed := time.Since(start)
 
-	if elapsed < NudgeSubmitDelay {
+	if elapsed < DefaultNudgeProfile.SubmitDelay {
 		t.Errorf("Nudge returned in %v; expected at least %v so body and submit land in separate read() calls",
-			elapsed, NudgeSubmitDelay)
+			elapsed, DefaultNudgeProfile.SubmitDelay)
 	}
 
 	time.Sleep(200 * time.Millisecond)
@@ -122,9 +122,9 @@ func TestNudgeEmptyMessageNoDelay(t *testing.T) {
 	}
 	elapsed := time.Since(start)
 
-	if elapsed >= NudgeSubmitDelay {
+	if elapsed >= DefaultNudgeProfile.SubmitDelay {
 		t.Errorf("Empty Nudge took %v; expected < %v (no body, no delay needed)",
-			elapsed, NudgeSubmitDelay)
+			elapsed, DefaultNudgeProfile.SubmitDelay)
 	}
 }
 
@@ -158,7 +158,7 @@ func TestInitialNudgeAutoDelivers(t *testing.T) {
 		t.Errorf("InitialNudge = %q, want %q", a.InitialNudge, "begin task")
 	}
 
-	// Wait long enough for: PTY quiescence (DefaultIdleThreshold=2s) + delivery.
+	// Wait long enough for: PTY quiescence (DefaultNudgeProfile.IdleThreshold=2s) + delivery.
 	// No external nudge — the auto-delivery in Spawn must fire on its own.
 	deadline := time.Now().Add(8 * time.Second)
 	for time.Now().Before(deadline) {

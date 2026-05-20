@@ -6,11 +6,14 @@ Polecats run in freshly-created git worktrees at `~/.pogo/polecats/<name>`. Thes
 
 Two mechanisms handle this:
 
-1. The `--dangerously-skip-permissions` flag bypasses **tool execution** permission prompts (shell execution, file access, etc.):
+1. The `--dangerously-skip-permissions` flag bypasses **tool execution** permission prompts (shell execution, file access, etc.). It is part of the Claude provider's default command template:
 
 ```go
-const DefaultAgentCommand = "claude --dangerously-skip-permissions --append-system-prompt-file {{.PromptFile}}"
+// internal/claude/provider.go
+CommandTemplate: "claude --dangerously-skip-permissions --append-system-prompt-file {{.PromptFile}}",
 ```
+
+The agent harness is selected by a first-class `agent.Provider` value (see `docs/multi-provider-architecture-survey.md`). Claude is the only registered provider today; its descriptor — `claude.Provider` — owns the command template, the required non-interactive flags, the nudge dialect, and the lifecycle hooks below.
 
 2. The **trust dialog auto-accept** hook (`claude.TrustDialogHook`) monitors the agent's PTY output during startup for the workspace trust dialog and automatically sends Enter to accept it. This is registered as a `PostSpawnHook` on the agent registry and lives in `internal/claude/`, keeping Claude-specific behavior out of the generic agent package.
 
@@ -24,9 +27,27 @@ The trust dialog hook polls the agent's output buffer for up to 8 seconds after 
 
 The `--add-dir` flag was considered and rejected. Adding the worktree directory to Claude Code's trusted directories triggers an interactive trust confirmation prompt — the opposite of what we want. Since `--dangerously-skip-permissions` already handles permissions globally, `--add-dir` is unnecessary.
 
+### The `provider` config key
+
+The agent harness provider is selected via `~/.config/pogo/config.toml`:
+
+```toml
+[agents]
+provider = "claude"   # default — the only registered provider today
+```
+
+It can also be set with the `POGO_AGENT_PROVIDER` environment variable, which
+overrides the config file. **The default is `"claude"`**, so existing
+deployments need no config change. An unknown provider id logs a warning and
+falls back to Claude rather than wedging daemon startup.
+
+The provider supplies the *default* command template, the PTY nudge dialect,
+the PTY size, and the post-spawn / session lifecycle hooks.
+
 ### Custom command override risk
 
-The agent command can be overridden via `~/.config/pogo/config.toml`:
+The agent command can still be overridden directly, which takes precedence over
+the provider's default template:
 
 ```toml
 [agents]
@@ -38,7 +59,7 @@ command = "custom-agent --prompt {{.PromptFile}}"
 
 If a custom command omits `--dangerously-skip-permissions` (or uses a non-Claude binary that has its own permission system), the polecat may get stuck at an interactive prompt in its new worktree directory. The `ValidateCommandBinary` function checks that the binary exists on PATH but does not validate flags.
 
-To guard against this, `ExpandCommand` logs a warning when the expanded command for a polecat does not contain `--dangerously-skip-permissions` or an equivalent bypass flag.
+To guard against this, `ValidatePolecatCommand` logs a warning when a polecat command template is missing any of the active provider's declared non-interactive flags (`claude.Provider.NonInteractiveFlags` — currently just `--dangerously-skip-permissions`).
 
 ## Claim behavior
 
@@ -80,4 +101,4 @@ Claiming is left to the polecat (not done during spawn) because:
 
 ## Testing
 
-The `TestDefaultCommandHasPermissionsSkip` test in `internal/agent/command_test.go` verifies that `DefaultAgentCommand` always includes `--dangerously-skip-permissions`. This guards against accidental removal of the flag during refactoring.
+The `TestProviderCommandHasPermissionsSkip` test in `internal/claude/provider_test.go` verifies that `claude.Provider.CommandTemplate` always includes `--dangerously-skip-permissions`, and `TestProviderNonInteractiveFlags` verifies the flag is declared in `claude.Provider.NonInteractiveFlags`. Together they guard against accidental removal of the flag during refactoring.

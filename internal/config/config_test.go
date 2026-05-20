@@ -129,9 +129,63 @@ func TestBindEnvOverride(t *testing.T) {
 }
 
 func TestAgentCommandDefault(t *testing.T) {
+	// With no explicit command configured, AgentCommand returns "" — the
+	// signal for agent.Registry to fall back to the active provider's
+	// CommandTemplate. The literal default no longer lives in config.
 	cfg := &AgentsConfig{}
-	if got := cfg.AgentCommand("crew"); got != DefaultAgentCommand {
-		t.Errorf("expected default command, got %s", got)
+	if got := cfg.AgentCommand("crew"); got != "" {
+		t.Errorf("expected empty (provider-default) command, got %q", got)
+	}
+	if got := cfg.AgentCommand("polecat"); got != "" {
+		t.Errorf("expected empty (provider-default) command for polecat, got %q", got)
+	}
+}
+
+func TestAgentProviderDefault(t *testing.T) {
+	dir := t.TempDir()
+	os.Setenv("XDG_CONFIG_HOME", dir)
+	defer os.Unsetenv("XDG_CONFIG_HOME")
+	os.Unsetenv("POGO_AGENT_PROVIDER")
+
+	cfg := Load()
+	if cfg.Agents.Provider != DefaultProvider {
+		t.Errorf("expected default provider %q, got %q", DefaultProvider, cfg.Agents.Provider)
+	}
+	if cfg.Agents.Provider != "claude" {
+		t.Errorf("default provider must be \"claude\" to keep existing deployments working, got %q", cfg.Agents.Provider)
+	}
+}
+
+func TestAgentProviderEnvOverride(t *testing.T) {
+	dir := t.TempDir()
+	os.Setenv("XDG_CONFIG_HOME", dir)
+	defer os.Unsetenv("XDG_CONFIG_HOME")
+
+	os.Setenv("POGO_AGENT_PROVIDER", "codex")
+	defer os.Unsetenv("POGO_AGENT_PROVIDER")
+
+	cfg := Load()
+	if cfg.Agents.Provider != "codex" {
+		t.Errorf("expected env override \"codex\", got %q", cfg.Agents.Provider)
+	}
+}
+
+func TestAgentProviderConfigFile(t *testing.T) {
+	dir := t.TempDir()
+	os.Setenv("XDG_CONFIG_HOME", dir)
+	defer os.Unsetenv("XDG_CONFIG_HOME")
+	os.Unsetenv("POGO_AGENT_PROVIDER")
+
+	pogoDir := filepath.Join(dir, "pogo")
+	os.MkdirAll(pogoDir, 0755)
+	os.WriteFile(filepath.Join(pogoDir, "config.toml"), []byte(`
+[agents]
+provider = "codex"
+`), 0644)
+
+	cfg := Load()
+	if cfg.Agents.Provider != "codex" {
+		t.Errorf("expected provider \"codex\" from file, got %q", cfg.Agents.Provider)
 	}
 }
 

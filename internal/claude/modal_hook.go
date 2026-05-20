@@ -401,7 +401,7 @@ func dispatchEventsStale(ctx context.Context, idx int, m ModalMatcher, scanner *
 }
 
 // fireDismissal writes the dismissal sequence via the two-write pattern (body,
-// 50ms gap, submit byte) per mg-09b6's NudgeSubmitDelay bug class. Even though
+// 50ms submit-delay gap, submit byte) per mg-09b6's paste-detection bug class. Even though
 // the trust-hook precedent (commit 782080b) writes "0\n" as one shot for the
 // rating dialog and works, the rate-limit modal is the higher-risk case and
 // the same split costs nothing on the rating path. Returns true if the write
@@ -445,9 +445,12 @@ func fireDismissal(m ModalMatcher, deps ModalHookDeps) bool {
 }
 
 // defaultDismisser produces the production Dismiss func bound to an agent.
-// Uses the two-write pattern (body + NudgeSubmitDelay + submit byte) to dodge
+// Uses the two-write pattern (body + submit-delay + submit byte) to dodge
 // Claude Code's paste-detection collapsing "1\n" into a literal input-box
-// entry rather than a menu selection (mg-09b6 / mg-5a3d Dismissal-write).
+// entry rather than a menu selection (mg-09b6 / mg-5a3d Dismissal-write). The
+// inter-write delay is the Claude nudge dialect's SubmitDelay — read from
+// agent.DefaultNudgeProfile (which claude.Provider.Nudge adopts verbatim)
+// rather than claude.Provider to avoid a package-init cycle.
 func defaultDismisser(a *agent.Agent) func([]byte) error {
 	return func(payload []byte) error {
 		if len(payload) == 0 {
@@ -458,7 +461,7 @@ func defaultDismisser(a *agent.Agent) func([]byte) error {
 			if err := a.SendRaw(string(body)); err != nil {
 				return err
 			}
-			time.Sleep(agent.NudgeSubmitDelay)
+			time.Sleep(agent.DefaultNudgeProfile.SubmitDelay)
 		}
 		if len(submit) > 0 {
 			if err := a.SendRaw(string(submit)); err != nil {

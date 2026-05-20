@@ -117,8 +117,8 @@ func TestNudgeWithModeWaitIdle(t *testing.T) {
 	}
 
 	// Should have waited at least the idle threshold (2s)
-	if elapsed < DefaultIdleThreshold {
-		t.Errorf("expected to wait at least %v, but only waited %v", DefaultIdleThreshold, elapsed)
+	if elapsed < DefaultNudgeProfile.IdleThreshold {
+		t.Errorf("expected to wait at least %v, but only waited %v", DefaultNudgeProfile.IdleThreshold, elapsed)
 	}
 
 	time.Sleep(200 * time.Millisecond)

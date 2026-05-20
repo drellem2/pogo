@@ -101,6 +101,11 @@ type Agent struct {
 	master *os.File
 	cmd    *exec.Cmd
 
+	// nudge is the provider's PTY-input dialect, captured at spawn from the
+	// registry's active provider (or DefaultNudgeProfile when none is set).
+	// Immutable after construction, so it is safe to read without a.mu.
+	nudge NudgeProfile
+
 	// outputBuf holds recent output for monitoring.
 	outputBuf *RingBuffer
 
@@ -164,8 +169,10 @@ func (a *Agent) emitSpawned() {
 	})
 }
 
-// AgentCommandConfig provides the command template for a given agent type.
-// This interface decouples the agent package from the config package.
+// AgentCommandConfig provides the explicitly-configured command template for a
+// given agent type. This interface decouples the agent package from the config
+// package. An empty return means "no explicit command configured" — the
+// Registry then falls back to the active provider's CommandTemplate.
 type AgentCommandConfig interface {
 	AgentCommand(agentType string) string
 }
@@ -198,6 +205,12 @@ type Registry struct {
 	// postSpawnHook so a reader of this struct sees both lifecycles
 	// named in the API.
 	sessionHook SessionHookFunc
+
+	// provider is the harness descriptor for every agent this registry spawns.
+	// It supplies the default command template, the nudge dialect, the PTY
+	// size, and (via cmd/pogod wiring) the lifecycle hooks. May be nil — a
+	// bare registry then falls back to pogo defaults; pogod always sets it.
+	provider *Provider
 
 	// shutdown is set by StopAll to short-circuit any in-flight respawn
 	// goroutines (scheduled by the OnExit hook for restart_on_crash agents)
@@ -242,6 +255,39 @@ func (r *Registry) SetSessionHook(fn SessionHookFunc) {
 	r.sessionHook = fn
 }
 
+// SetProvider registers the harness provider for every agent the registry
+// spawns. The provider supplies the default command template, the nudge
+// dialect, and the PTY size; pogod additionally wires the provider's
+// PostSpawnHook / SessionHook via the setters above. pogod resolves the
+// provider from config at startup — see cmd/pogod/main.go.
+func (r *Registry) SetProvider(p *Provider) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.provider = p
+}
+
+// activeProvider returns the registered provider, or nil when none is set.
+func (r *Registry) activeProvider() *Provider {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.provider
+}
+
+// spawnDefaults returns the nudge profile and PTY winsize for a freshly-spawned
+// agent, sourced from the registered provider — or pogo's built-in defaults
+// when no provider is set. Caller must hold r.mu.
+func (r *Registry) spawnDefaults() (NudgeProfile, *pty.Winsize) {
+	nudge := DefaultNudgeProfile
+	winsize := &pty.Winsize{Cols: defaultPTYCols, Rows: defaultPTYRows}
+	if r.provider != nil {
+		nudge = r.provider.Nudge
+		if r.provider.PTYSize != nil {
+			winsize = &pty.Winsize{Cols: r.provider.PTYSize.Cols, Rows: r.provider.PTYSize.Rows}
+		}
+	}
+	return nudge, winsize
+}
+
 // invokeSessionHook spawns the registry's session hook (if any) on a fresh
 // goroutine bound to ctx. The ctx is cancelled by a watcher goroutine when
 // the agent's Done() channel closes, so the hook tears down without callers
@@ -264,17 +310,26 @@ func (r *Registry) invokeSessionHook(a *Agent) {
 }
 
 // commandTemplate returns the command template for the given agent type.
+//
+// Precedence: an explicit per-type or global [agents] command (config file or
+// POGO_AGENT_COMMAND env) wins; otherwise the active provider's CommandTemplate
+// supplies the default. Returns "" only in the degenerate case where neither a
+// config command nor a provider is registered — pogod always sets a provider,
+// so this happens only in bare-registry unit tests, where ExpandCommand then
+// surfaces a clear "expanded to empty string" error.
 func (r *Registry) commandTemplate(agentType AgentType) string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	if r.cmdConfig != nil {
-		return r.cmdConfig.AgentCommand(string(agentType))
+		if cmd := r.cmdConfig.AgentCommand(string(agentType)); cmd != "" {
+			return cmd
+		}
 	}
-	return DefaultAgentCommand
+	if r.provider != nil {
+		return r.provider.CommandTemplate
+	}
+	return ""
 }
-
-// DefaultAgentCommand is the fallback command template when no config is set.
-const DefaultAgentCommand = "claude --dangerously-skip-permissions --append-system-prompt-file {{.PromptFile}}"
 
 // NewRegistry creates an agent registry. socketDir is created if needed.
 func NewRegistry(socketDir string) (*Registry, error) {
@@ -341,12 +396,15 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 	}
 	cmd.Env = append(os.Environ(), append(injectedEnv, req.Env...)...)
 
+	// Resolve the nudge dialect and PTY winsize from the active provider.
+	nudge, winsize := r.spawnDefaults()
+
 	// Start with PTY — master fd returned, slave becomes controlling terminal.
 	// Set a sensible default winsize so the agent's TUI doesn't render at the
 	// kernel default (0×0, which Ink falls back to 80×24). Real attach clients
 	// overwrite this via the resize frame on connect; the goal here is just to
 	// avoid a degenerate initial size.
-	master, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: defaultPTYCols, Rows: defaultPTYRows})
+	master, err := pty.StartWithSize(cmd, winsize)
 	if err != nil {
 		return nil, fmt.Errorf("pty start: %w", err)
 	}
@@ -366,6 +424,7 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 		WorkItemID:     req.WorkItemID,
 		master:         master,
 		cmd:            cmd,
+		nudge:          nudge,
 		outputBuf:      NewRingBuffer(64 * 1024), // 64KB rolling buffer
 		attachConns:    make(map[io.Writer]struct{}),
 		socketPath:     filepath.Join(r.socketDir, req.Name+".sock"),
@@ -401,14 +460,16 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 	r.invokeSessionHook(a)
 
 	// Send initial nudge to bypass the CLI interactive prompt.
-	// Use wait-idle mode so the nudge fires only after Claude's TUI has
+	// Use wait-idle mode so the nudge fires only after the harness TUI has
 	// finished rendering (trust dialog dismissed, prompt input ready).
 	// A fixed sleep was unreliable: startup time varies, and a nudge typed
 	// before the prompt input is ready gets swallowed by transient dialogs.
-	if req.InitialNudge != "" {
+	// Gated on the provider's NeedsInitialNudge — a harness that takes the
+	// persona prompt as a command-line arg needs no nudge.
+	if req.InitialNudge != "" && a.nudge.NeedsInitialNudge {
 		a.InitialNudge = req.InitialNudge
 		go func() {
-			if err := a.NudgeWithMode(req.InitialNudge, NudgeWaitIdle, InitialNudgeTimeout); err != nil {
+			if err := a.NudgeWithMode(req.InitialNudge, NudgeWaitIdle, a.nudge.InitialNudgeTimeout); err != nil {
 				log.Printf("agent %s: initial nudge failed: %v", req.Name, err)
 			}
 		}()
@@ -416,11 +477,6 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 
 	return a, nil
 }
-
-// InitialNudgeTimeout is how long to wait for an agent's PTY to go idle
-// before giving up on the post-spawn nudge. Generous because Claude Code
-// startup can be slow on a cold cache or with a large prompt file.
-const InitialNudgeTimeout = 60 * time.Second
 
 // Get returns an agent by name, or nil if not found.
 func (r *Registry) Get(name string) *Agent {
@@ -584,7 +640,9 @@ func (r *Registry) Respawn(name string) (*Agent, error) {
 	}
 	cmd.Env = append(os.Environ(), injectedEnv...)
 
-	master, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: defaultPTYCols, Rows: defaultPTYRows})
+	nudge, winsize := r.spawnDefaults()
+
+	master, err := pty.StartWithSize(cmd, winsize)
 	if err != nil {
 		return nil, fmt.Errorf("pty start: %w", err)
 	}
@@ -606,6 +664,7 @@ func (r *Registry) Respawn(name string) (*Agent, error) {
 		WorkItemID:     old.WorkItemID,
 		master:         master,
 		cmd:            cmd,
+		nudge:          nudge,
 		outputBuf:      NewRingBuffer(64 * 1024),
 		attachConns:    make(map[io.Writer]struct{}),
 		socketPath:     filepath.Join(r.socketDir, old.Name+".sock"),
@@ -642,9 +701,10 @@ func (r *Registry) Respawn(name string) (*Agent, error) {
 	})
 
 	// Re-send initial nudge on respawn to bypass the CLI interactive prompt.
+	// a.InitialNudge is only non-empty when the provider needed it at spawn.
 	if a.InitialNudge != "" {
 		go func() {
-			if err := a.NudgeWithMode(a.InitialNudge, NudgeWaitIdle, InitialNudgeTimeout); err != nil {
+			if err := a.NudgeWithMode(a.InitialNudge, NudgeWaitIdle, a.nudge.InitialNudgeTimeout); err != nil {
 				log.Printf("agent %s: initial nudge on respawn failed: %v", a.Name, err)
 			}
 		}()
@@ -653,21 +713,22 @@ func (r *Registry) Respawn(name string) (*Agent, error) {
 	return a, nil
 }
 
-// NudgeSubmitDelay is the gap between writing the nudge body and the trailing
-// carriage return that submits it. The two writes must arrive in separate
-// stdin read() calls on the receiver: when Claude Code's React/Ink input box
-// gets the body and the \r as one chunk, it treats the chunk as a paste and
-// the \r becomes a literal newline inside the input field instead of a submit.
-// The result is a nudge that lands in the input box but never gets sent —
-// observed on long-running crew agents where the keyboard protocol is fully
-// initialized. Polecats accidentally avoided the bug only because their first
-// nudges fire while the TUI is still in startup, before paste detection is
-// armed. 50ms is generous enough to span Node.js's read loop and Ink's
-// re-render cycle (~16ms) without noticeably slowing nudge throughput.
-const NudgeSubmitDelay = 50 * time.Millisecond
-
-// Nudge writes a message to an agent's PTY master fd.
-// The agent sees this as typed input followed by a submit (Enter).
+// Nudge writes a message to an agent's PTY master fd. The agent sees this as
+// typed input followed by a submit (Enter).
+//
+// The body and the trailing submit terminator are written as two separate
+// WriteString calls with a.nudge.SubmitDelay between them. The two writes must
+// arrive in separate stdin read() calls on the receiver: when Claude Code's
+// React/Ink input box gets the body and the terminator as one chunk, it treats
+// the chunk as a paste and the terminator becomes a literal newline inside the
+// input field instead of a submit. The result is a nudge that lands in the
+// input box but never gets sent — observed on long-running crew agents where
+// the keyboard protocol is fully initialized. Polecats accidentally avoided the
+// bug only because their first nudges fire while the TUI is still in startup,
+// before paste detection is armed. The Claude profile's 50ms gap is generous
+// enough to span Node.js's read loop and Ink's re-render cycle (~16ms) without
+// noticeably slowing nudge throughput. Both the gap and the terminator come
+// from the provider's NudgeProfile (see provider.go).
 func (a *Agent) Nudge(message string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -680,10 +741,10 @@ func (a *Agent) Nudge(message string) error {
 		if _, err := a.master.WriteString(message); err != nil {
 			return fmt.Errorf("write to PTY: %w", err)
 		}
-		time.Sleep(NudgeSubmitDelay)
+		time.Sleep(a.nudge.SubmitDelay)
 	}
 
-	if _, err := a.master.WriteString("\r"); err != nil {
+	if _, err := a.master.WriteString(a.nudge.SubmitTerminator); err != nil {
 		return fmt.Errorf("write submit to PTY: %w", err)
 	}
 	return nil

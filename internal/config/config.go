@@ -38,8 +38,11 @@ func (m RunMode) String() string {
 	}
 }
 
-// DefaultAgentCommand is the default command template for spawning agents.
-const DefaultAgentCommand = "claude --dangerously-skip-permissions --append-system-prompt-file {{.PromptFile}}"
+// DefaultProvider is the agent harness provider used when none is configured.
+// Keeping this "claude" means existing deployments work with no config change.
+// The provider supplies the default agent command template; see
+// internal/agent/provider.go and internal/claude/provider.go.
+const DefaultProvider = "claude"
 
 // DefaultMaxWatchers is the default cap on filesystem watchers.
 // macOS kqueue uses one file descriptor per watched path; too many watchers
@@ -65,7 +68,12 @@ type HeartbeatConfig struct {
 
 // AgentsConfig holds agent command configuration.
 type AgentsConfig struct {
-	// Command is the default command template for all agent types.
+	// Provider selects the agent harness ("claude", and in future "codex" /
+	// "gemini"). Resolved by cmd/pogod to an agent.Provider. Empty is treated
+	// as DefaultProvider; Load() fills it in.
+	Provider string
+	// Command is the default command template for all agent types. When empty,
+	// the active provider's CommandTemplate is used instead.
 	// Supports Go template variables: {{.PromptFile}}, {{.AgentName}}, {{.AgentType}}, {{.WorkDir}}
 	Command string
 	// Crew overrides the command template for crew agents.
@@ -79,8 +87,11 @@ type AgentTypeConfig struct {
 	Command string
 }
 
-// AgentCommand returns the command template for a given agent type,
-// falling back to the default if no per-type override is set.
+// AgentCommand returns the explicitly-configured command template for a given
+// agent type, or "" when none is set. An empty result is the signal for the
+// caller (agent.Registry) to fall back to the active provider's default
+// CommandTemplate. Precedence: per-type override > global [agents] command
+// (which POGO_AGENT_COMMAND also feeds via Load).
 func (c *AgentsConfig) AgentCommand(agentType string) string {
 	switch agentType {
 	case "crew":
@@ -92,10 +103,7 @@ func (c *AgentsConfig) AgentCommand(agentType string) string {
 			return c.Polecat.Command
 		}
 	}
-	if c.Command != "" {
-		return c.Command
-	}
-	return DefaultAgentCommand
+	return c.Command
 }
 
 // RefineryConfig holds merge queue configuration.
@@ -171,6 +179,15 @@ func Load() *Config {
 	// POGO_AGENT_COMMAND overrides the default agent command from config file
 	if agentCmd := os.Getenv("POGO_AGENT_COMMAND"); agentCmd != "" {
 		cfg.Agents.Command = agentCmd
+	}
+
+	// POGO_AGENT_PROVIDER overrides the [agents] provider from the config file.
+	if provider := os.Getenv("POGO_AGENT_PROVIDER"); provider != "" {
+		cfg.Agents.Provider = provider
+	}
+	// Default the provider so existing deployments work with no config change.
+	if cfg.Agents.Provider == "" {
+		cfg.Agents.Provider = DefaultProvider
 	}
 
 	return cfg
@@ -289,8 +306,11 @@ func loadConfigFile() (*parsedConfig, error) {
 				}
 			}
 		case "agents":
-			if key == "command" {
+			switch key {
+			case "command":
 				cfg.Agents.Command = unquotedVal
+			case "provider":
+				cfg.Agents.Provider = unquotedVal
 			}
 		case "agents.crew":
 			if key == "command" {
