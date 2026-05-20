@@ -94,7 +94,12 @@ jobs:
         run: ./scripts/check-version.sh
 
   build:
-    runs-on: ubuntu-latest
+    # Darwin cells build on a native macOS runner. The FSEvents watch backend
+    # (internal/watch/watch_darwin.go -> github.com/fsnotify/fsevents) needs
+    # cgo, and Go disables cgo by default when cross-compiling from a Linux
+    # host — so cross-building darwin from ubuntu-latest fails. Linux cells
+    # stay on ubuntu-latest. See mg-6222 (regression from mg-d205).
+    runs-on: ${{ matrix.goos == 'darwin' && 'macos-latest' || 'ubuntu-latest' }}
     strategy:
       matrix:
         goos: [linux, darwin]
@@ -110,6 +115,12 @@ jobs:
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
+          # macos-latest is arm64, so one darwin cell still cross-compiles by
+          # arch — Go disables cgo by default for any cross build. Force cgo
+          # on for darwin so fsevents' cgo file (wrap.go) is compiled; the
+          # macOS toolchain targets both arches. Linux keeps Go's default
+          # (empty value == unset).
+          CGO_ENABLED: ${{ matrix.goos == 'darwin' && '1' || '' }}
         run: |
           for cmd in cmd/*/; do
             name=$(basename "$cmd")
