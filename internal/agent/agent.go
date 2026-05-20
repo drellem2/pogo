@@ -396,6 +396,14 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 	}
 	cmd.Env = append(os.Environ(), append(injectedEnv, req.Env...)...)
 
+	// Deliver the persona prompt to a ContextFile-injection provider (Codex
+	// reads AGENTS.override.md from its working directory). Must happen before
+	// the process starts so the harness picks it up on launch. A no-op for
+	// flag/env-injection providers like Claude.
+	if err := writeContextFilePrompt(r.provider, req.PromptFile, req.Dir); err != nil {
+		return nil, fmt.Errorf("context-file prompt injection: %w", err)
+	}
+
 	// Resolve the nudge dialect and PTY winsize from the active provider.
 	nudge, winsize := r.spawnDefaults()
 
@@ -639,6 +647,12 @@ func (r *Registry) Respawn(name string) (*Agent, error) {
 		injectedEnv = append(injectedEnv, "POGO_AGENT_PROMPT="+old.PromptFile)
 	}
 	cmd.Env = append(os.Environ(), injectedEnv...)
+
+	// Re-deliver the ContextFile persona for the respawned process (no-op for
+	// Claude). Idempotent — overwrites the same AGENTS.override.md.
+	if err := writeContextFilePrompt(r.provider, old.PromptFile, old.Dir); err != nil {
+		return nil, fmt.Errorf("context-file prompt injection: %w", err)
+	}
 
 	nudge, winsize := r.spawnDefaults()
 

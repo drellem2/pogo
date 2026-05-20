@@ -355,6 +355,103 @@ func TestEnvInjection(t *testing.T) {
 	}
 }
 
+// TestSpawnContextFileInjection verifies that Spawn delivers the persona
+// prompt as a context file when the active provider uses the InjectContextFile
+// strategy (Codex's AGENTS.override.md). The file must land in the agent's
+// working directory before the process starts.
+func TestSpawnContextFileInjection(t *testing.T) {
+	tmpDir := t.TempDir()
+	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	defer reg.StopAll(2 * time.Second)
+
+	// A context-file provider, shaped like codex.Provider (agent cannot import
+	// internal/codex — that would be an import cycle).
+	reg.SetProvider(&Provider{
+		ID:     "codex-test",
+		Binary: "codex",
+		PromptInjection: PromptInjection{
+			Kind:        InjectContextFile,
+			ContextFile: "AGENTS.override.md",
+		},
+		Nudge: DefaultNudgeProfile,
+	})
+
+	const persona = "# pogo persona\noperating instructions for the agent\n"
+	promptFile := filepath.Join(tmpDir, "prompt.md")
+	if err := os.WriteFile(promptFile, []byte(persona), 0644); err != nil {
+		t.Fatalf("write prompt file: %v", err)
+	}
+
+	workDir := filepath.Join(tmpDir, "worktree")
+	if err := os.MkdirAll(workDir, 0755); err != nil {
+		t.Fatalf("mkdir workdir: %v", err)
+	}
+
+	_, err = reg.Spawn(SpawnRequest{
+		Name:       "codex-inject",
+		Type:       TypePolecat,
+		Command:    []string{"cat"},
+		PromptFile: promptFile,
+		Dir:        workDir,
+	})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(workDir, "AGENTS.override.md"))
+	if err != nil {
+		t.Fatalf("AGENTS.override.md not written into the worktree: %v", err)
+	}
+	if string(got) != persona {
+		t.Errorf("AGENTS.override.md = %q, want %q", got, persona)
+	}
+}
+
+// TestSpawnNoContextFileForClaude confirms the InjectContextFile path is inert
+// for a flag-injection provider: no stray AGENTS.override.md is written.
+func TestSpawnNoContextFileForClaude(t *testing.T) {
+	tmpDir := t.TempDir()
+	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	defer reg.StopAll(2 * time.Second)
+
+	reg.SetProvider(&Provider{
+		ID:              "claude-test",
+		Binary:          "claude",
+		PromptInjection: PromptInjection{Kind: InjectAppendFlag, Flag: "--append-system-prompt-file"},
+		Nudge:           DefaultNudgeProfile,
+	})
+
+	promptFile := filepath.Join(tmpDir, "prompt.md")
+	if err := os.WriteFile(promptFile, []byte("persona"), 0644); err != nil {
+		t.Fatalf("write prompt file: %v", err)
+	}
+	workDir := filepath.Join(tmpDir, "worktree")
+	if err := os.MkdirAll(workDir, 0755); err != nil {
+		t.Fatalf("mkdir workdir: %v", err)
+	}
+
+	_, err = reg.Spawn(SpawnRequest{
+		Name:       "claude-inject",
+		Type:       TypePolecat,
+		Command:    []string{"cat"},
+		PromptFile: promptFile,
+		Dir:        workDir,
+	})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(workDir, "AGENTS.override.md")); !os.IsNotExist(err) {
+		t.Error("flag-injection provider should not write AGENTS.override.md")
+	}
+}
+
 func TestAgentStatus(t *testing.T) {
 	tmpDir := t.TempDir()
 	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))

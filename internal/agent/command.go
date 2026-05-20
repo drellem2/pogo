@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"text/template"
 )
@@ -61,6 +63,37 @@ func ValidatePolecatCommand(tmpl string, p *Provider) {
 			"non-interactive flag(s) %v for provider %q; polecats in new worktree "+
 			"directories may be blocked by permission prompts", missing, p.ID)
 	}
+}
+
+// writeContextFilePrompt delivers the persona prompt to a provider that uses
+// the InjectContextFile strategy — it copies the expanded prompt file into the
+// agent's working directory under the provider's configured ContextFile name.
+//
+// Codex is the motivating case: it has no --append-system-prompt-file-style
+// flag, but reads AGENTS.override.md from its working directory and prefers it
+// over a checked-in AGENTS.md. Writing the persona there injects it additively
+// without clobbering the repo's own AGENTS.md.
+//
+// It is a no-op for providers that inject via flag (Claude) or env, for a nil
+// provider, and when either the prompt file or the working directory is unset
+// (the prompt is still reachable via the POGO_AGENT_PROMPT env fallback that
+// Spawn always sets). Returns an error only when the copy itself fails.
+func writeContextFilePrompt(p *Provider, promptFile, dir string) error {
+	if p == nil || p.PromptInjection.Kind != InjectContextFile {
+		return nil
+	}
+	if promptFile == "" || dir == "" || p.PromptInjection.ContextFile == "" {
+		return nil
+	}
+	content, err := os.ReadFile(promptFile)
+	if err != nil {
+		return fmt.Errorf("read prompt file for context-file injection: %w", err)
+	}
+	dest := filepath.Join(dir, p.PromptInjection.ContextFile)
+	if err := os.WriteFile(dest, content, 0644); err != nil {
+		return fmt.Errorf("write context file %q: %w", dest, err)
+	}
+	return nil
 }
 
 // ValidateCommandBinary checks that the first token of the command template

@@ -15,6 +15,19 @@ func TestResolveClaude(t *testing.T) {
 	}
 }
 
+func TestResolveCodex(t *testing.T) {
+	p, ok := Resolve("codex")
+	if !ok {
+		t.Fatal("Resolve(\"codex\") returned ok=false")
+	}
+	if p == nil || p.ID != "codex" {
+		t.Fatalf("Resolve(\"codex\") = %+v, want provider with ID=codex", p)
+	}
+	if p.Binary != "codex" {
+		t.Errorf("codex provider Binary = %q, want %q", p.Binary, "codex")
+	}
+}
+
 func TestResolveEmptyDefaultsToClaude(t *testing.T) {
 	p, ok := Resolve("")
 	if !ok {
