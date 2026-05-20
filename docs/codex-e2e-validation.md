@@ -207,11 +207,14 @@ superset of that environment.)
    preferred `--with-api-key`. Decide which mode pogo ships with. If
    `--with-api-key`, run `codex login --with-api-key` once (re-seeds
    `auth.json`); note it replaces the interactive ChatGPT login.
-2. **Single-codex-polecat dispatch needs per-type provider.** v1's global
-   `provider` means a Codex polecat cannot be dispatched through the live pogod
-   without a fleet-wide switch + restart. The survey already anticipates
-   `[agents.polecat] provider` / `[agents.crew] provider` (§2.3) — implementing
-   that forward extension would let a Codex polecat run alongside a Claude fleet.
+2. **Single-codex-polecat dispatch needs per-type provider.** *Resolved by
+   mg-b31b (2026-05-20).* v1's global `provider` meant a Codex polecat could
+   not be dispatched through the live pogod without a fleet-wide switch +
+   restart. mg-b31b made provider selection per-spawn: `[agents.polecat]
+   provider` / `[agents.crew] provider` config keys, a `provider:` prompt
+   frontmatter key, and a `--provider` flag on `pogo agent spawn-polecat` —
+   `pogo agent spawn-polecat --provider codex` now spawns one Codex polecat
+   alongside a Claude fleet with no restart.
 3. **pogod-restart auth re-check** — formality; see §5.
 
 ## 7 · Reproducing

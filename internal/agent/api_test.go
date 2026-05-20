@@ -626,3 +626,131 @@ func TestHandleSpawnPolecat_WorkItemIDEmptyWhenNoId(t *testing.T) {
 		t.Errorf("expected work_item_id to be omitted when empty, got: %s", data)
 	}
 }
+
+// providerTestRegistry builds a registry wired for provider-resolution tests:
+// claude + codex test providers registered, catCommandConfig so the spawned
+// process is a harmless `cat` regardless of which provider is resolved.
+func providerTestRegistry(t *testing.T, tmpHome string) *Registry {
+	t.Helper()
+	reg, err := NewRegistry(filepath.Join(tmpHome, "sockets"))
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	reg.SetCommandConfig(catCommandConfig{})
+	reg.RegisterProvider(testProvider("claude", time.Second))
+	reg.RegisterProvider(testProvider("codex", time.Second))
+	return reg
+}
+
+// TestHandleSpawnPolecat_ProviderFlag verifies the --provider request field
+// (tier 1) selects the harness for that one spawn — the mixed-fleet headline
+// (mg-b31b acceptance bar 3).
+func TestHandleSpawnPolecat_ProviderFlag(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	writeTemplate(t, "flagpc", "# polecat\n")
+
+	reg := providerTestRegistry(t, tmpHome)
+	defer reg.StopAll(2 * time.Second)
+
+	a := spawnPolecatViaAPI(t, reg, SpawnPolecatAPIRequest{
+		Name:     "pc-flag",
+		Template: "flagpc",
+		Provider: "codex",
+	})
+	if a.provider == nil || a.provider.ID != "codex" {
+		t.Errorf("--provider codex not honored: agent provider = %v", a.provider)
+	}
+}
+
+// TestHandleSpawnPolecat_ProviderFrontmatter verifies a provider: key in the
+// template frontmatter (tier 2) selects the harness when no --provider flag
+// is given (mg-b31b acceptance bar 2).
+func TestHandleSpawnPolecat_ProviderFrontmatter(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	writeTemplate(t, "fmpc", "+++\nprovider = \"codex\"\n+++\n# polecat\n")
+
+	reg := providerTestRegistry(t, tmpHome)
+	defer reg.StopAll(2 * time.Second)
+
+	a := spawnPolecatViaAPI(t, reg, SpawnPolecatAPIRequest{
+		Name:     "pc-fm",
+		Template: "fmpc",
+	})
+	if a.provider == nil || a.provider.ID != "codex" {
+		t.Errorf("provider: frontmatter not honored: agent provider = %v", a.provider)
+	}
+}
+
+// TestHandleSpawnPolecat_ProviderFlagBeatsFrontmatter verifies the --provider
+// flag overrides a conflicting provider: frontmatter key (precedence wiring,
+// mg-b31b acceptance bar 4).
+func TestHandleSpawnPolecat_ProviderFlagBeatsFrontmatter(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	writeTemplate(t, "bothpc", "+++\nprovider = \"claude\"\n+++\n# polecat\n")
+
+	reg := providerTestRegistry(t, tmpHome)
+	defer reg.StopAll(2 * time.Second)
+
+	a := spawnPolecatViaAPI(t, reg, SpawnPolecatAPIRequest{
+		Name:     "pc-both",
+		Template: "bothpc",
+		Provider: "codex",
+	})
+	if a.provider == nil || a.provider.ID != "codex" {
+		t.Errorf("--provider flag should beat provider: frontmatter, got %v", a.provider)
+	}
+}
+
+// TestHandleSpawnPolecat_DefaultProviderBackwardCompat verifies a polecat
+// spawned with no --provider flag and no provider: frontmatter resolves to the
+// built-in default (claude) — unchanged pre-mg-b31b behavior (bar 7).
+func TestHandleSpawnPolecat_DefaultProviderBackwardCompat(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	writeTemplate(t, "defpc", "# polecat\n")
+
+	reg := providerTestRegistry(t, tmpHome)
+	defer reg.StopAll(2 * time.Second)
+
+	a := spawnPolecatViaAPI(t, reg, SpawnPolecatAPIRequest{
+		Name:     "pc-def",
+		Template: "defpc",
+	})
+	if a.provider == nil || a.provider.ID != "claude" {
+		t.Errorf("default spawn should resolve to claude, got %v", a.provider)
+	}
+}
+
+// TestHandleSpawnPolecat_UnknownProviderFailsFast verifies an unknown
+// --provider value fails the spawn with a clear 400 before any side effects —
+// never a silent wrong-provider spawn (mg-b31b acceptance bar 8).
+func TestHandleSpawnPolecat_UnknownProviderFailsFast(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	writeTemplate(t, "badpc", "# polecat\n")
+
+	reg := providerTestRegistry(t, tmpHome)
+	defer reg.StopAll(2 * time.Second)
+
+	body, _ := json.Marshal(SpawnPolecatAPIRequest{
+		Name:     "pc-bad",
+		Template: "badpc",
+		Provider: "bogus",
+	})
+	req := httptest.NewRequest("POST", "/agents/spawn-polecat", bytes.NewReader(body))
+	rr := httptest.NewRecorder()
+	reg.handleSpawnPolecat(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for unknown --provider; body=%s", rr.Code, rr.Body.String())
+	}
+	if reg.Get("pc-bad") != nil {
+		t.Error("no agent should be registered after an unknown-provider failure")
+	}
+	if !strings.Contains(rr.Body.String(), "bogus") {
+		t.Errorf("error message should name the bad provider, got: %s", rr.Body.String())
+	}
+}

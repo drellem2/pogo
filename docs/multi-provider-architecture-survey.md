@@ -6,6 +6,20 @@
 **Predecessor:** `docs/harness-provider-research.md` (phase 1, mg-fb9f) — recommends **OpenAI Codex CLI** as provider #2, Gemini CLI as the later #3.
 **Successors:** phase-3 implementation tickets (filed alongside this doc, routed to mayor); phase-3 roadmap reflection (pm-pogo).
 
+> **Update (mg-b31b, 2026-05-20):** the arc shipped — 3A `mg-b56a`, 3B
+> `mg-7f76`, 3C `mg-3e5f`, 3D `mg-6599`, all merged. Two statements below are
+> now superseded: §2.2's "one `provider` field plus a `SetProvider` setter"
+> and §2.3 / §3 / §5's "v1 scope: one global provider, per-type deferred".
+> mg-b31b made provider selection **per-spawn**, not resolved once at pogod
+> startup. The registry now holds a *map* of every known provider and resolves
+> one per spawn from a precedence chain: `--provider` flag > `provider:` prompt
+> frontmatter > `[agents.<type>] provider` > `[agents] provider` /
+> `POGO_AGENT_PROVIDER` > built-in `claude`. `PostSpawnHook` / `SessionHook` /
+> nudge dialect / PTY size travel with the agent's resolved provider, across
+> restarts. A mixed Claude/Codex fleet needs no pogod restart. The change is
+> purely additive — a config with only `[agents] provider` behaves exactly as
+> before; no migration.
+
 ## TL;DR
 
 Pogo's spawn *plumbing* is already half-neutral — the command is a Go template and

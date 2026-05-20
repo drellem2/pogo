@@ -52,14 +52,15 @@ type StartAPIRequest struct {
 // SpawnPolecatAPIRequest is the JSON body for POST /agents/spawn-polecat.
 // Spawns a polecat from a template with variable expansion.
 type SpawnPolecatAPIRequest struct {
-	Name     string   `json:"name"`             // Agent name (e.g., short ID)
-	Template string   `json:"template"`         // Template name (default: "polecat")
-	Task     string   `json:"task,omitempty"`   // Work item title
-	Body     string   `json:"body,omitempty"`   // Work item body
-	Id       string   `json:"id,omitempty"`     // Work item ID
-	Repo     string   `json:"repo,omitempty"`   // Target repository path
-	Branch   string   `json:"branch,omitempty"` // Target branch for refinery submit
-	Env      []string `json:"env,omitempty"`    // Additional env vars
+	Name     string   `json:"name"`               // Agent name (e.g., short ID)
+	Template string   `json:"template"`           // Template name (default: "polecat")
+	Task     string   `json:"task,omitempty"`     // Work item title
+	Body     string   `json:"body,omitempty"`     // Work item body
+	Id       string   `json:"id,omitempty"`       // Work item ID
+	Repo     string   `json:"repo,omitempty"`     // Target repository path
+	Branch   string   `json:"branch,omitempty"`   // Target branch for refinery submit
+	Env      []string `json:"env,omitempty"`      // Additional env vars
+	Provider string   `json:"provider,omitempty"` // Harness provider override (--provider): tier 1 of resolution
 }
 
 // NudgeAPIRequest is the JSON body for POST /agents/:name/nudge.
@@ -443,11 +444,15 @@ func (r *Registry) StartCrewAgent(name string) (*Agent, error) {
 	// (nudge_on_start). A parse error is non-fatal: meta stays a usable zero
 	// value and the type defaults apply.
 	meta, _, _ := ParsePromptFrontmatter(promptFile)
+	var fmProvider string
+	if meta != nil {
+		fmProvider = meta.Provider
+	}
 
-	// Resolve the harness provider for this crew agent. (provider: frontmatter
-	// is wired in a follow-up commit; for now the chain runs from per-type
-	// config down.)
-	provider, perr := r.resolveProvider(TypeCrew, "", "")
+	// Resolve the harness provider for this crew agent. Precedence: provider:
+	// frontmatter > per-type [agents.crew] provider > global default. (Crew
+	// has no --provider flag — see mg-b31b §5.)
+	provider, perr := r.resolveProvider(TypeCrew, "", fmProvider)
 	if perr != nil {
 		return nil, fmt.Errorf("resolve provider: %w", perr)
 	}
@@ -568,11 +573,11 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 
 	// Resolve the harness provider for this polecat before any side effects
 	// (temp prompt file, git worktree), so a bad --provider fails fast and
-	// clean. resolveProvider walks the precedence chain; an unknown explicit
-	// provider is a hard error here, an unknown config/frontmatter value warns
-	// and falls back. (--provider flag and provider: frontmatter are wired in
-	// a follow-up commit; for now the chain runs from per-type config down.)
-	provider, perr := r.resolveProvider(TypePolecat, "", "")
+	// clean. Precedence: --provider flag (spawnReq.Provider) > provider:
+	// template frontmatter (tmplMeta.Provider) > per-type / global config. An
+	// unknown flag value is a hard error; an unknown frontmatter/config value
+	// warns and falls back to the default.
+	provider, perr := r.resolveProvider(TypePolecat, spawnReq.Provider, tmplMeta.Provider)
 	if perr != nil {
 		http.Error(w, perr.Error(), http.StatusBadRequest)
 		return

@@ -1163,6 +1163,54 @@ You are the mayor.
 	}
 }
 
+// TestParsePromptFrontmatterProvider verifies the provider: frontmatter key
+// parses into AgentMeta.Provider and registers in the explicit bitmask — the
+// tier-2 input to per-spawn provider resolution (mg-b31b).
+func TestParsePromptFrontmatterProvider(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "polecat.md")
+	content := "+++\nprovider = \"codex\"\nworktree = true\n+++\n# Polecat\n"
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	meta, body, err := ParsePromptFrontmatter(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta.Provider != "codex" {
+		t.Errorf("Provider = %q, want codex", meta.Provider)
+	}
+	if !meta.HasField("provider") {
+		t.Error("expected HasField(provider) = true")
+	}
+	if body != "# Polecat\n" {
+		t.Errorf("body = %q, want %q", body, "# Polecat\n")
+	}
+}
+
+// TestParsePromptFrontmatterNoProvider verifies a prompt without a provider:
+// key leaves AgentMeta.Provider empty and HasField(provider) false, so
+// resolution falls through to the config tiers.
+func TestParsePromptFrontmatterNoProvider(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "polecat.md")
+	if err := os.WriteFile(path, []byte("+++\nworktree = true\n+++\n# Polecat\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	meta, _, err := ParsePromptFrontmatter(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta.Provider != "" {
+		t.Errorf("Provider = %q, want empty", meta.Provider)
+	}
+	if meta.HasField("provider") {
+		t.Error("expected HasField(provider) = false when key absent")
+	}
+}
+
 // TestParsePromptFrontmatterAfterHashComment verifies that the parser
 // recognizes frontmatter on installed prompt files, which carry a leading
 // "<!-- pogo-prompt-hash: ... -->" stamp inserted by InstallPrompts.

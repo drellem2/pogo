@@ -616,6 +616,7 @@ const (
 	metaFieldAutoStart
 	metaFieldNudgeOnStart
 	metaFieldWorktree
+	metaFieldProvider
 )
 
 // metaFieldByKey maps a TOML key name to its bitmask flag. The second return
@@ -631,6 +632,8 @@ func metaFieldByKey(key string) (metaFieldFlag, bool) {
 		return metaFieldNudgeOnStart, true
 	case "worktree":
 		return metaFieldWorktree, true
+	case "provider":
+		return metaFieldProvider, true
 	}
 	return 0, false
 }
@@ -645,11 +648,15 @@ func metaFieldByKey(key string) (metaFieldFlag, bool) {
 //   - auto_start:       pogod starts the agent on daemon boot
 //   - nudge_on_start:   message sent to the agent immediately after spawn
 //   - worktree:         polecat-style isolated worktree on spawn
+//   - provider:         harness provider id ("claude", "codex") for this
+//     agent — tier 2 of the per-spawn provider precedence chain (mg-b31b),
+//     beating per-type/global config but yielding to a --provider flag
 type AgentMeta struct {
 	RestartOnCrash bool   `json:"restart_on_crash,omitempty"`
 	AutoStart      bool   `json:"auto_start,omitempty"`
 	NudgeOnStart   string `json:"nudge_on_start,omitempty"`
 	Worktree       bool   `json:"worktree,omitempty"`
+	Provider       string `json:"provider,omitempty"`
 
 	// explicit is a bitmask of recognized keys that appeared in the
 	// frontmatter. Unexported so it stays out of JSON output; uint8 so
@@ -832,6 +839,12 @@ func assignMetaField(meta *AgentMeta, key, raw string) error {
 			return fmt.Errorf("%s: %w", key, err)
 		}
 		meta.NudgeOnStart = s
+	case "provider":
+		s, err := parseFrontmatterString(raw)
+		if err != nil {
+			return fmt.Errorf("%s: %w", key, err)
+		}
+		meta.Provider = s
 	}
 	meta.explicit |= flag
 	return nil

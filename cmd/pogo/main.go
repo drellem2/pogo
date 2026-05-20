@@ -1006,6 +1006,7 @@ Example:
 	var spawnPolecatRepo string
 	var spawnPolecatBranch string
 	var spawnPolecatEnv []string
+	var spawnPolecatProvider string
 	var cmdAgentSpawnPolecat = &cobra.Command{
 		Use:   "spawn-polecat <name>",
 		Short: "Spawn a polecat from a prompt template",
@@ -1022,6 +1023,7 @@ The template is expanded with the provided variables and used as the agent's pro
 				Repo:     spawnPolecatRepo,
 				Branch:   spawnPolecatBranch,
 				Env:      spawnPolecatEnv,
+				Provider: spawnPolecatProvider,
 			})
 			if err != nil {
 				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
@@ -1040,6 +1042,7 @@ The template is expanded with the provided variables and used as the agent's pro
 	cmdAgentSpawnPolecat.Flags().StringVar(&spawnPolecatRepo, "repo", "", "Target repository path ({{.Repo}})")
 	cmdAgentSpawnPolecat.Flags().StringVar(&spawnPolecatBranch, "branch", "", "Target branch for refinery submit ({{.Branch}})")
 	cmdAgentSpawnPolecat.Flags().StringSliceVarP(&spawnPolecatEnv, "env", "e", nil, "Additional environment variables (KEY=VALUE)")
+	cmdAgentSpawnPolecat.Flags().StringVar(&spawnPolecatProvider, "provider", "", "Harness provider for this polecat (claude, codex); overrides config and template frontmatter")
 
 	// Nudge command — top-level for convenience
 	var nudgeImmediate bool
