@@ -388,8 +388,10 @@ func main() {
 	// Load config early so we can use it for agent command setup
 	cfg := config.Load()
 
-	// Apply file watcher limit from config
+	// Apply index-scope and watcher limits from config (mg-d205).
 	search.SearchService.SetMaxWatchers(cfg.MaxWatchers)
+	search.SearchService.SetMaxFilesPerTree(cfg.MaxFilesPerTree)
+	project.SetIndexRoots(cfg.IndexRoots)
 
 	// Configure agent command templates, trust dialog hook, and validate the binary exists
 	agentRegistry.SetCommandConfig(&cfg.Agents)
@@ -504,6 +506,10 @@ func main() {
 
 	// Load project list from disk (fast, no indexing)
 	project.Init()
+
+	// Prune stale registry entries — nonexistent paths and ephemeral
+	// worktrees — before any indexing runs (mg-d205).
+	project.PruneRegistry()
 
 	// Start refinery merge queue loop
 	refineCfg := refinery.DefaultConfig()

@@ -8,14 +8,17 @@ import (
 	"sync"
 	"time"
 
-	"github.com/fsnotify/fsnotify"
+	"github.com/drellem2/pogo/internal/watch"
 )
 
 // Scanner watches parent directories of known projects for new sibling repos.
 // When a project at ~/src/foo is registered, Scanner watches ~/src/.
 // If ~/src/bar appears with a .git directory, it gets auto-registered.
+//
+// The watch backend is recursive (FSEvents on darwin), so the scanner
+// restricts discovery to direct children of a watched parent — see loop.
 type Scanner struct {
-	watcher *fsnotify.Watcher
+	watcher watch.Watcher
 	watched map[string]bool // parent dirs currently watched
 	mu      sync.Mutex
 	quit    chan struct{}
@@ -27,7 +30,7 @@ var scanner *Scanner
 // StartScanner creates and starts the background repo scanner.
 // Call after Init() so existing projects seed the watch list.
 func StartScanner() error {
-	w, err := fsnotify.NewWatcher()
+	w, err := watch.New()
 	if err != nil {
 		return fmt.Errorf("scanner: failed to create watcher: %w", err)
 	}
@@ -116,7 +119,7 @@ func (s *Scanner) watchParent(projectPath string) {
 	logger.Info("scanner: watching parent dir for new repos", "path", parent)
 }
 
-// loop processes fsnotify events.
+// loop processes filesystem events.
 func (s *Scanner) loop() {
 	defer close(s.done)
 
@@ -124,14 +127,24 @@ func (s *Scanner) loop() {
 		select {
 		case <-s.quit:
 			return
-		case event, ok := <-s.watcher.Events:
+		case event, ok := <-s.watcher.Events():
 			if !ok {
 				return
 			}
-			if event.Has(fsnotify.Create) {
-				s.handleCreate(event.Name)
+			if !event.Has(watch.Create) {
+				continue
 			}
-		case err, ok := <-s.watcher.Errors:
+			// The watch backend is recursive; restrict sibling-repo
+			// discovery to direct children of a watched parent dir. This
+			// preserves the non-recursive semantics the scanner was built
+			// around and keeps deep file events cheap to discard.
+			s.mu.Lock()
+			direct := s.watched[filepath.Dir(event.Path)]
+			s.mu.Unlock()
+			if direct {
+				s.handleCreate(event.Path)
+			}
+		case err, ok := <-s.watcher.Errors():
 			if !ok {
 				return
 			}
@@ -175,6 +188,12 @@ func (s *Scanner) handleCreate(path string) {
 	// Check if already registered
 	normalizedPath := addSlashToPath(path)
 	if GetProjectByPath(normalizedPath) != nil {
+		return
+	}
+
+	// Honor the optional index-roots allowlist (mg-d205).
+	if !withinIndexRoots(normalizedPath) {
+		logger.Info("scanner: repo outside configured index_roots; not registering", "path", normalizedPath)
 		return
 	}
 

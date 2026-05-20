@@ -181,7 +181,7 @@ func TestNewFileCausesReIndex(t *testing.T) {
 		},
 		{
 			name:     "File in non-existing directory",
-			dirs:     []string{"build"},
+			dirs:     []string{"freshdir"},
 			filename: "a.out",
 			destroy:  true,
 		},
@@ -236,7 +236,7 @@ func TestNewFileCausesReIndex(t *testing.T) {
 				basicSearch.mu.RUnlock()
 				t.Errorf("Error executing test %s", tt.name)
 				t.Errorf("Expected %d files in index but found %d", fileCount+1, currentCount)
-				t.Logf("Watch list: %v", basicSearch.watcher.WatchList())
+				t.Logf("Watched roots: %d", basicSearch.watchCount.Load())
 				t.Logf("File: %v", currentPaths)
 				return
 			}

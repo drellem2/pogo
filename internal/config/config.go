@@ -41,19 +41,37 @@ func (m RunMode) String() string {
 // DefaultAgentCommand is the default command template for spawning agents.
 const DefaultAgentCommand = "claude --dangerously-skip-permissions --append-system-prompt-file {{.PromptFile}}"
 
-// DefaultMaxWatchers is the default cap on filesystem watchers.
-// macOS kqueue uses one file descriptor per watched path; too many watchers
-// can exhaust the per-process FD limit and prevent child process creation.
+// DefaultMaxWatchers is the default cap on watched project roots.
+//
+// On darwin the watch backend is FSEvents (one recursive stream per tree, see
+// internal/watch), so the unit watched is the tree and this cap finally bounds
+// the right unit. Before mg-d205 the kqueue backend consumed one fd per file
+// inside every watched directory, so the cap bounded directories rather than
+// fds and could not prevent FD exhaustion. The default is a generous sanity
+// backstop, not a tuning knob.
 const DefaultMaxWatchers = 4096
+
+// DefaultMaxFilesPerTree is the default per-tree file-count ceiling. A tree
+// with more files than this is registered but marked skipped-too-large: it is
+// not deep-walked or watched. This bounds index cost (building the search
+// index is O(files)) and catches pathological generated-data directories that
+// no exclude list anticipated. See mg-d205.
+const DefaultMaxFilesPerTree = 25000
 
 // Config holds pogo daemon configuration.
 type Config struct {
-	Port        int
-	Bind        string
-	MaxWatchers int
-	Refinery    RefineryConfig
-	Agents      AgentsConfig
-	Heartbeat   HeartbeatConfig
+	Port            int
+	Bind            string
+	MaxWatchers     int
+	MaxFilesPerTree int
+	// IndexRoots, when non-empty, restricts auto-registration to git repos
+	// under one of these paths (opt-in strict mode). Empty means the default
+	// zero-config behavior: any visited git repo may be auto-registered,
+	// bounded by MaxFilesPerTree and the default-exclude patterns.
+	IndexRoots []string
+	Refinery   RefineryConfig
+	Agents     AgentsConfig
+	Heartbeat  HeartbeatConfig
 }
 
 // HeartbeatConfig configures pogod's clock-jump detector. Zero values fall
@@ -118,9 +136,10 @@ type parsedConfig struct {
 //  3. Default (10000)
 func Load() *Config {
 	cfg := &Config{
-		Port:        DefaultPort,
-		Bind:        DefaultBind,
-		MaxWatchers: DefaultMaxWatchers,
+		Port:            DefaultPort,
+		Bind:            DefaultBind,
+		MaxWatchers:     DefaultMaxWatchers,
+		MaxFilesPerTree: DefaultMaxFilesPerTree,
 		Refinery: RefineryConfig{
 			Enabled:      true,
 			PollInterval: 30 * time.Second,
@@ -137,6 +156,12 @@ func Load() *Config {
 		}
 		if fileCfg.MaxWatchers > 0 {
 			cfg.MaxWatchers = fileCfg.MaxWatchers
+		}
+		if fileCfg.MaxFilesPerTree > 0 {
+			cfg.MaxFilesPerTree = fileCfg.MaxFilesPerTree
+		}
+		if len(fileCfg.IndexRoots) > 0 {
+			cfg.IndexRoots = fileCfg.IndexRoots
 		}
 		cfg.Agents = fileCfg.Agents
 		if fileCfg.refineryEnabledSet {
@@ -165,6 +190,11 @@ func Load() *Config {
 	if mwStr := os.Getenv("POGO_MAX_WATCHERS"); mwStr != "" {
 		if mw, err := strconv.Atoi(mwStr); err == nil && mw > 0 {
 			cfg.MaxWatchers = mw
+		}
+	}
+	if mfStr := os.Getenv("POGO_MAX_FILES_PER_TREE"); mfStr != "" {
+		if mf, err := strconv.Atoi(mfStr); err == nil && mf > 0 {
+			cfg.MaxFilesPerTree = mf
 		}
 	}
 
@@ -276,6 +306,12 @@ func loadConfigFile() (*parsedConfig, error) {
 				if mw, err := strconv.Atoi(val); err == nil && mw > 0 {
 					cfg.MaxWatchers = mw
 				}
+			case "max_files_per_tree":
+				if mf, err := strconv.Atoi(val); err == nil && mf > 0 {
+					cfg.MaxFilesPerTree = mf
+				}
+			case "index_roots":
+				cfg.IndexRoots = parseStringArray(val)
 			}
 		case "heartbeat":
 			switch key {
@@ -304,4 +340,23 @@ func loadConfigFile() (*parsedConfig, error) {
 	}
 
 	return cfg, scanner.Err()
+}
+
+// parseStringArray parses a minimal single-line TOML string array,
+// e.g. `["/home/user/dev", "/work"]`, into a slice. Empty/blank entries are
+// dropped. This is intentionally simple — it does not handle multi-line arrays.
+func parseStringArray(val string) []string {
+	val = strings.TrimSpace(val)
+	val = strings.TrimPrefix(val, "[")
+	val = strings.TrimSuffix(val, "]")
+	var out []string
+	for _, part := range strings.Split(val, ",") {
+		part = strings.TrimSpace(part)
+		part = strings.Trim(part, "\"'")
+		part = strings.TrimSpace(part)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }

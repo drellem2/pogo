@@ -387,3 +387,103 @@ bind = 0.0.0.0
 		t.Errorf("expected 0.0.0.0:8080, got %s", got)
 	}
 }
+
+func TestDefaultMaxFilesPerTree(t *testing.T) {
+	os.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	defer os.Unsetenv("XDG_CONFIG_HOME")
+	os.Unsetenv("POGO_MAX_FILES_PER_TREE")
+
+	cfg := Load()
+	if cfg.MaxFilesPerTree != DefaultMaxFilesPerTree {
+		t.Errorf("expected default max files per tree %d, got %d", DefaultMaxFilesPerTree, cfg.MaxFilesPerTree)
+	}
+}
+
+func TestMaxFilesPerTreeEnvOverride(t *testing.T) {
+	os.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	defer os.Unsetenv("XDG_CONFIG_HOME")
+	os.Setenv("POGO_MAX_FILES_PER_TREE", "1234")
+	defer os.Unsetenv("POGO_MAX_FILES_PER_TREE")
+
+	cfg := Load()
+	if cfg.MaxFilesPerTree != 1234 {
+		t.Errorf("expected max files per tree 1234, got %d", cfg.MaxFilesPerTree)
+	}
+}
+
+func TestMaxFilesPerTreeConfigFile(t *testing.T) {
+	dir := t.TempDir()
+	os.Setenv("XDG_CONFIG_HOME", dir)
+	defer os.Unsetenv("XDG_CONFIG_HOME")
+	os.Unsetenv("POGO_MAX_FILES_PER_TREE")
+
+	pogoDir := filepath.Join(dir, "pogo")
+	os.MkdirAll(pogoDir, 0755)
+	os.WriteFile(filepath.Join(pogoDir, "config.toml"), []byte(`
+[search]
+max_files_per_tree = 9000
+`), 0644)
+
+	cfg := Load()
+	if cfg.MaxFilesPerTree != 9000 {
+		t.Errorf("expected max files per tree 9000 from config file, got %d", cfg.MaxFilesPerTree)
+	}
+}
+
+func TestIndexRootsDefaultEmpty(t *testing.T) {
+	os.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	defer os.Unsetenv("XDG_CONFIG_HOME")
+
+	cfg := Load()
+	if len(cfg.IndexRoots) != 0 {
+		t.Errorf("expected no index roots by default, got %v", cfg.IndexRoots)
+	}
+}
+
+func TestIndexRootsConfigFile(t *testing.T) {
+	dir := t.TempDir()
+	os.Setenv("XDG_CONFIG_HOME", dir)
+	defer os.Unsetenv("XDG_CONFIG_HOME")
+
+	pogoDir := filepath.Join(dir, "pogo")
+	os.MkdirAll(pogoDir, 0755)
+	os.WriteFile(filepath.Join(pogoDir, "config.toml"), []byte(`
+[search]
+index_roots = ["/home/user/dev", "/work/repos"]
+`), 0644)
+
+	cfg := Load()
+	want := []string{"/home/user/dev", "/work/repos"}
+	if len(cfg.IndexRoots) != len(want) {
+		t.Fatalf("expected %d index roots, got %v", len(want), cfg.IndexRoots)
+	}
+	for i, w := range want {
+		if cfg.IndexRoots[i] != w {
+			t.Errorf("index root %d: expected %q, got %q", i, w, cfg.IndexRoots[i])
+		}
+	}
+}
+
+func TestParseStringArray(t *testing.T) {
+	cases := []struct {
+		input string
+		want  []string
+	}{
+		{`["a", "b", "c"]`, []string{"a", "b", "c"}},
+		{`[]`, nil},
+		{`["only"]`, []string{"only"}},
+		{`[ "spaced" , "out" ]`, []string{"spaced", "out"}},
+	}
+	for _, c := range cases {
+		got := parseStringArray(c.input)
+		if len(got) != len(c.want) {
+			t.Errorf("parseStringArray(%q) = %v, want %v", c.input, got, c.want)
+			continue
+		}
+		for i := range c.want {
+			if got[i] != c.want[i] {
+				t.Errorf("parseStringArray(%q)[%d] = %q, want %q", c.input, i, got[i], c.want[i])
+			}
+		}
+	}
+}
