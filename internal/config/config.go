@@ -56,10 +56,18 @@ const DefaultMaxWatchers = 4096
 
 // DefaultMaxFilesPerTree is the default per-tree file-count ceiling. A tree
 // with more files than this is registered but marked skipped-too-large: it is
-// not deep-walked or watched. This bounds index cost (building the search
-// index is O(files)) and catches pathological generated-data directories that
-// no exclude list anticipated. See mg-d205.
+// not deep-walked. This bounds index cost (building the search index is
+// O(files)) and catches pathological generated-data directories that no
+// exclude list anticipated. See mg-d205.
 const DefaultMaxFilesPerTree = 25000
+
+// DefaultIndexInterval is how often the timer-driven incremental indexer
+// re-walks every registered project. The re-index is incremental — a
+// no-change tick costs one Lstat per file — so the interval only bounds how
+// long a file change can take to surface in search results. Two minutes is a
+// comfortable default given every index consumer is request-driven. See
+// docs/indexing-strategy.md and mg-5b0d.
+const DefaultIndexInterval = 2 * time.Minute
 
 // DefaultGitGCInterval is how often pogod runs the polecat git garbage
 // collector (stale `polecat-*` branch + leaked worktree cleanup). Hourly is
@@ -73,6 +81,10 @@ type Config struct {
 	Bind            string
 	MaxWatchers     int
 	MaxFilesPerTree int
+	// IndexInterval is how often the timer-driven incremental indexer
+	// re-walks every registered project. Zero falls back to
+	// DefaultIndexInterval. See docs/indexing-strategy.md.
+	IndexInterval time.Duration
 	// IndexRoots, when non-empty, restricts auto-registration to git repos
 	// under one of these paths (opt-in strict mode). Empty means the default
 	// zero-config behavior: any visited git repo may be auto-registered,
@@ -199,6 +211,7 @@ func Load() *Config {
 		Bind:            DefaultBind,
 		MaxWatchers:     DefaultMaxWatchers,
 		MaxFilesPerTree: DefaultMaxFilesPerTree,
+		IndexInterval:   DefaultIndexInterval,
 		Refinery: RefineryConfig{
 			Enabled:      true,
 			PollInterval: 30 * time.Second,
@@ -222,6 +235,9 @@ func Load() *Config {
 		}
 		if fileCfg.MaxFilesPerTree > 0 {
 			cfg.MaxFilesPerTree = fileCfg.MaxFilesPerTree
+		}
+		if fileCfg.IndexInterval > 0 {
+			cfg.IndexInterval = fileCfg.IndexInterval
 		}
 		if len(fileCfg.IndexRoots) > 0 {
 			cfg.IndexRoots = fileCfg.IndexRoots
@@ -390,6 +406,10 @@ func loadConfigFile() (*parsedConfig, error) {
 			case "max_files_per_tree":
 				if mf, err := strconv.Atoi(val); err == nil && mf > 0 {
 					cfg.MaxFilesPerTree = mf
+				}
+			case "index_interval":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.IndexInterval = d
 				}
 			case "index_roots":
 				cfg.IndexRoots = parseStringArray(val)

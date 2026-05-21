@@ -440,6 +440,34 @@ max_watchers = 1024
 	}
 }
 
+func TestDefaultIndexInterval(t *testing.T) {
+	os.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	defer os.Unsetenv("XDG_CONFIG_HOME")
+
+	cfg := Load()
+	if cfg.IndexInterval != DefaultIndexInterval {
+		t.Errorf("expected default index interval %s, got %s", DefaultIndexInterval, cfg.IndexInterval)
+	}
+}
+
+func TestIndexIntervalConfigFile(t *testing.T) {
+	dir := t.TempDir()
+	os.Setenv("XDG_CONFIG_HOME", dir)
+	defer os.Unsetenv("XDG_CONFIG_HOME")
+
+	pogoDir := filepath.Join(dir, "pogo")
+	os.MkdirAll(pogoDir, 0755)
+	os.WriteFile(filepath.Join(pogoDir, "config.toml"), []byte(`
+[search]
+index_interval = "30s"
+`), 0644)
+
+	cfg := Load()
+	if cfg.IndexInterval != 30*time.Second {
+		t.Errorf("expected index interval 30s from config file, got %s", cfg.IndexInterval)
+	}
+}
+
 func TestRefineryEnabledDefault(t *testing.T) {
 	os.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	defer os.Unsetenv("XDG_CONFIG_HOME")

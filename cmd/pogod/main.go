@@ -699,6 +699,12 @@ func main() {
 		log.Printf("pogod: background project indexing complete")
 	}()
 
+	// Start the timer-driven incremental indexer: every index_interval it
+	// re-walks every registered project (incrementally — unchanged files cost
+	// only an Lstat) and scans index_roots for new repos. See
+	// docs/indexing-strategy.md and mg-5b0d.
+	project.StartPeriodicIndexer(hbCtx, cfg.IndexInterval)
+
 	if err := project.StartScanner(); err != nil {
 		fmt.Printf("Warning: repo scanner failed to start: %v\n", err)
 	}
