@@ -4,8 +4,6 @@ go 1.25.0
 
 require (
 	github.com/creack/pty v1.1.24
-	github.com/fsnotify/fsevents v0.2.0
-	github.com/fsnotify/fsnotify v1.6.0
 	github.com/godbus/dbus/v5 v5.2.2
 	github.com/hashicorp/go-hclog v1.3.1
 	github.com/hashicorp/go-plugin v1.4.5
