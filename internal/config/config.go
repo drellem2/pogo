@@ -44,16 +44,6 @@ func (m RunMode) String() string {
 // internal/agent/provider.go and internal/claude/provider.go.
 const DefaultProvider = "claude"
 
-// DefaultMaxWatchers is the default cap on watched project roots.
-//
-// On darwin the watch backend is FSEvents (one recursive stream per tree, see
-// internal/watch), so the unit watched is the tree and this cap finally bounds
-// the right unit. Before mg-d205 the kqueue backend consumed one fd per file
-// inside every watched directory, so the cap bounded directories rather than
-// fds and could not prevent FD exhaustion. The default is a generous sanity
-// backstop, not a tuning knob.
-const DefaultMaxWatchers = 4096
-
 // DefaultMaxFilesPerTree is the default per-tree file-count ceiling. A tree
 // with more files than this is registered but marked skipped-too-large: it is
 // not deep-walked. This bounds index cost (building the search index is
@@ -79,7 +69,6 @@ const DefaultGitGCInterval = time.Hour
 type Config struct {
 	Port            int
 	Bind            string
-	MaxWatchers     int
 	MaxFilesPerTree int
 	// IndexInterval is how often the timer-driven incremental indexer
 	// re-walks every registered project. Zero falls back to
@@ -209,7 +198,6 @@ func Load() *Config {
 	cfg := &Config{
 		Port:            DefaultPort,
 		Bind:            DefaultBind,
-		MaxWatchers:     DefaultMaxWatchers,
 		MaxFilesPerTree: DefaultMaxFilesPerTree,
 		IndexInterval:   DefaultIndexInterval,
 		Refinery: RefineryConfig{
@@ -229,9 +217,6 @@ func Load() *Config {
 		}
 		if fileCfg.Bind != "" {
 			cfg.Bind = fileCfg.Bind
-		}
-		if fileCfg.MaxWatchers > 0 {
-			cfg.MaxWatchers = fileCfg.MaxWatchers
 		}
 		if fileCfg.MaxFilesPerTree > 0 {
 			cfg.MaxFilesPerTree = fileCfg.MaxFilesPerTree
@@ -274,11 +259,6 @@ func Load() *Config {
 	}
 	if bind := os.Getenv("POGO_BIND"); bind != "" {
 		cfg.Bind = bind
-	}
-	if mwStr := os.Getenv("POGO_MAX_WATCHERS"); mwStr != "" {
-		if mw, err := strconv.Atoi(mwStr); err == nil && mw > 0 {
-			cfg.MaxWatchers = mw
-		}
 	}
 	if mfStr := os.Getenv("POGO_MAX_FILES_PER_TREE"); mfStr != "" {
 		if mf, err := strconv.Atoi(mfStr); err == nil && mf > 0 {
@@ -399,10 +379,6 @@ func loadConfigFile() (*parsedConfig, error) {
 			}
 		case "search":
 			switch key {
-			case "max_watchers":
-				if mw, err := strconv.Atoi(val); err == nil && mw > 0 {
-					cfg.MaxWatchers = mw
-				}
 			case "max_files_per_tree":
 				if mf, err := strconv.Atoi(val); err == nil && mf > 0 {
 					cfg.MaxFilesPerTree = mf

@@ -294,23 +294,26 @@ the agents.
 pogo auto-discovers and indexes git repos you visit. By default this is
 zero-config: visit a repo and search works. The `[search]` section of
 `~/.config/pogo/config.toml` bounds that behavior so a stray giant directory
-can't blow up indexing cost or file-descriptor use.
+can't blow up indexing cost.
 
 ```toml
 [search]
 # Per-tree file-count ceiling. A repo with more files than this is registered
-# but marked "skipped_too_large": it is not deep-indexed or watched. Default
-# 25000. This is the backstop that catches generated-data directories no
-# exclude list anticipated.
+# but marked "skipped_too_large": it is not deep-indexed. Default 25000. This
+# is the backstop that catches generated-data directories no exclude list
+# anticipated.
 max_files_per_tree = 25000
 
-# Watched-root cap. On macOS the watcher is FSEvents — one recursive stream per
-# project, so the unit watched is the tree. Default 4096 (a sanity backstop).
-max_watchers = 4096
+# How often the indexer re-walks every registered project to pick up changes.
+# The re-index is incremental, so a no-change tick is cheap; this interval
+# only bounds how long an edit takes to surface in search results. Default 2m.
+# See docs/indexing-strategy.md.
+index_interval = "2m"
 
 # Optional strict mode. When set, ONLY git repos under one of these paths are
-# eligible for auto-registration. Unset (the default) keeps the zero-config
-# "visit anything" behavior.
+# eligible for auto-registration, and the indexer scans them on each tick to
+# pick up new repos. Unset (the default) keeps the zero-config "visit
+# anything" behavior.
 index_roots = ["/Users/you/dev", "/Users/you/work"]
 ```
 
@@ -323,8 +326,8 @@ Two more scope controls need no config:
   repo root to carve generated-data subtrees out of pogo's index without
   touching the repo's `.gitignore`.
 
-Environment overrides exist for the numeric knobs (`POGO_MAX_WATCHERS`,
-`POGO_MAX_FILES_PER_TREE`) and take precedence over the config file.
+An environment override exists for the file-count ceiling
+(`POGO_MAX_FILES_PER_TREE`) and takes precedence over the config file.
 
 ## Polecat git garbage collection
 

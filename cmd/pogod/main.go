@@ -401,8 +401,7 @@ func main() {
 	// Load config early so we can use it for agent command setup
 	cfg := config.Load()
 
-	// Apply index-scope and watcher limits from config (mg-d205).
-	search.SearchService.SetMaxWatchers(cfg.MaxWatchers)
+	// Apply index-scope limits from config (mg-d205).
 	search.SearchService.SetMaxFilesPerTree(cfg.MaxFilesPerTree)
 	project.SetIndexRoots(cfg.IndexRoots)
 
@@ -701,14 +700,10 @@ func main() {
 
 	// Start the timer-driven incremental indexer: every index_interval it
 	// re-walks every registered project (incrementally — unchanged files cost
-	// only an Lstat) and scans index_roots for new repos. See
-	// docs/indexing-strategy.md and mg-5b0d.
+	// only an Lstat) and scans index_roots for new repos. This replaces the
+	// event-based filesystem watcher. See docs/indexing-strategy.md and
+	// mg-5b0d.
 	project.StartPeriodicIndexer(hbCtx, cfg.IndexInterval)
-
-	if err := project.StartScanner(); err != nil {
-		fmt.Printf("Warning: repo scanner failed to start: %v\n", err)
-	}
-	defer project.StopScanner()
 
 	// Refresh installed prompts from the embedded source before auto-starting
 	// any agents. When a new pogo binary ships prompt updates, the live files

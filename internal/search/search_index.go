@@ -18,13 +18,12 @@ import (
 	"github.com/sourcegraph/zoekt"
 	"github.com/sourcegraph/zoekt/query"
 
-	"github.com/drellem2/pogo/internal/watch"
 	pogoPlugin "github.com/drellem2/pogo/pkg/plugin"
 )
 
 // errTreeTooLarge is returned by the index walk when a project tree exceeds
 // the configured per-tree file-count ceiling. The tree is registered but
-// marked StatusSkippedTooLarge and is not deep-walked or watched. See mg-d205.
+// marked StatusSkippedTooLarge and is not deep-walked. See mg-d205.
 var errTreeTooLarge = errors.New("project tree exceeds max_files_per_tree ceiling")
 
 const saveFileName = "search_index.json"
@@ -115,12 +114,10 @@ func computeFileHash(path string) (string, error) {
 	Contains channels that can be written to in order to update the project.
 */
 type ProjectUpdater struct {
-	c     chan *IndexedProject
-	addFw chan string
-	quit  chan bool
-	// closed and watchedRoots are only touched by the single write goroutine.
-	closed       bool
-	watchedRoots map[string]bool // project roots already registered with the watcher
+	c    chan *IndexedProject
+	quit chan bool
+	// closed is only touched by the single write goroutine.
+	closed bool
 }
 
 func absolute(path string) (string, error) {
@@ -146,11 +143,9 @@ func absolute(path string) (string, error) {
 */
 func (g *BasicSearch) newProjectUpdater() *ProjectUpdater {
 	u := &ProjectUpdater{
-		c:            make(chan *IndexedProject),
-		addFw:        make(chan string),
-		quit:         make(chan bool),
-		closed:       false,
-		watchedRoots: make(map[string]bool),
+		c:      make(chan *IndexedProject),
+		quit:   make(chan bool),
+		closed: false,
 	}
 	go g.write(u)
 	return u
@@ -165,45 +160,11 @@ func (g *BasicSearch) write(u *ProjectUpdater) {
 				g.projects[proj.Root] = *proj
 				g.mu.Unlock()
 				g.serializeProjectIndex(proj)
-			case root := <-u.addFw:
-				g.watchRoot(u, root)
 			case <-u.quit:
 				u.closed = true
 			}
 		}()
 	}
-}
-
-// watchRoot registers a project root with the filesystem watcher. The watch
-// abstraction is recursive: one root covers the whole tree. With the FSEvents
-// backend (darwin) that is a single fd-cheap stream; off-darwin it walks and
-// watches every directory. watchRoot is idempotent and honors the
-// watched-root cap. It is only ever called from the single write goroutine.
-func (g *BasicSearch) watchRoot(u *ProjectUpdater, root string) {
-	if g.watcher == nil {
-		g.logger.Warn("watcher is nil")
-		return
-	}
-	if u.watchedRoots[root] {
-		// Already watching. Re-issue Add so directories created since the
-		// last index get picked up (a no-op on the FSEvents backend, a
-		// re-walk off-darwin). The cap is not re-checked: this root is
-		// already counted.
-		if err := g.watcher.Add(root); err != nil {
-			g.logger.Error("Error refreshing file watcher", "root", root, "error", err)
-		}
-		return
-	}
-	if max := g.maxWatchers; max > 0 && g.watchCount.Load() >= max {
-		g.logger.Warn("Watched-root limit reached, skipping watch", "root", root, "limit", max)
-		return
-	}
-	if err := g.watcher.Add(root); err != nil {
-		g.logger.Error("Error adding file watcher", "root", root, "error", err)
-		return
-	}
-	u.watchedRoots[root] = true
-	g.watchCount.Add(1)
 }
 
 // Should only be called by index.
@@ -247,7 +208,7 @@ func (g *BasicSearch) indexRec(proj *IndexedProject, path string,
 
 		// Skip gitignored/pogoignored paths and default-excluded directories
 		// (VCS metadata, dependency and build-artifact trees).
-		if gitIgnore.MatchesPath(relativePath) || watch.IsExcludedDir(subFile) {
+		if gitIgnore.MatchesPath(relativePath) || IsExcludedDir(subFile) {
 			continue
 		}
 
@@ -308,22 +269,15 @@ func (g *BasicSearch) index(proj *IndexedProject, path string,
 
 	err := g.indexRec(proj, path, gitIgnore, prevHashes, prevMtimes)
 	if errors.Is(err, errTreeTooLarge) {
-		g.logger.Warn("Project tree exceeds max_files_per_tree; skipping deep index and watch",
+		g.logger.Warn("Project tree exceeds max_files_per_tree; skipping deep index",
 			"root", proj.Root, "limit", g.maxFilesPerTree, "files_indexed", len(proj.Paths))
 		proj.Status = StatusSkippedTooLarge
-		// Persist the (capped) index without registering a watcher.
 		u.c <- proj
 		return
 	}
 	if err != nil {
 		g.logger.Warn("Error indexing project: ", err.Error())
 		return
-	}
-	// Register one recursive watch for the whole project tree. On darwin this
-	// is a single fd-cheap FSEvents stream; the per-directory watch machinery
-	// that leaked file descriptors is gone (mg-d205).
-	if UseWatchers {
-		u.addFw <- proj.Root
 	}
 	u.c <- proj
 }
@@ -365,14 +319,12 @@ func (g *BasicSearch) ReIndex(path string) {
 
 		/* Below is a golang idiom for removing elements with a given prefix
 		from the slice. We drop the stale entries under the reindexed path so
-		index() re-adds only the files that still exist. The recursive watcher
-		covers the whole tree, so individual files need no per-file unwatch. */
+		index() re-adds only the files that still exist. */
 		relativePath := strings.TrimPrefix(fullPath, matchedRoot)
 
-		// The recursive watcher reports changes inside default-excluded
-		// directories (e.g. pogo's own .pogo/search index files). Re-walking
-		// such a subtree would index artifacts that indexRec deliberately
-		// skips, so bail out here.
+		// A caller may pass a path inside a default-excluded directory (e.g.
+		// pogo's own .pogo/search index files). Re-walking such a subtree
+		// would index artifacts that indexRec deliberately skips, so bail out.
 		if hasExcludedComponent(relativePath) {
 			return
 		}
@@ -397,115 +349,11 @@ func (g *BasicSearch) ReIndex(path string) {
 	}()
 }
 
-// ReIndexFile handles a single-file event without walking the directory tree.
-// This avoids a full directory re-walk when only one file changed.
-func (g *BasicSearch) ReIndexFile(path string, op watch.Op) {
-	fullPath, err := filepath.Abs(path)
-	if err != nil {
-		g.logger.Error("Error getting absolute path: ", path)
-		return
-	}
-
-	// Take a deep copy of the matching project under lock,
-	// then release before doing channel sends or I/O.
-	g.mu.RLock()
-	var matchedRoot string
-	var indexed IndexedProject
-	for projectRoot, idx := range g.projects {
-		if strings.HasPrefix(fullPath, projectRoot) {
-			matchedRoot = projectRoot
-			indexed = deepCopyProject(idx)
-			break
-		}
-	}
-	g.mu.RUnlock()
-
-	if matchedRoot == "" {
-		return
-	}
-
-	relativePath := strings.TrimPrefix(fullPath, matchedRoot)
-
-	// Ignore events inside default-excluded directories (node_modules, build
-	// artifacts, VCS metadata) — the recursive watcher reports them but they
-	// are not part of the index.
-	if hasExcludedComponent(relativePath) {
-		return
-	}
-
-	u := g.updater
-	changed := false
-
-	if indexed.FileMtimes == nil {
-		indexed.FileMtimes = make(map[string]int64)
-	}
-
-	if op.Has(watch.Remove) || op.Has(watch.Rename) {
-		// Remove file from index
-		paths := indexed.Paths[:0]
-		for _, p := range indexed.Paths {
-			if p != relativePath {
-				paths = append(paths, p)
-			}
-		}
-		if len(paths) != len(indexed.Paths) {
-			indexed.Paths = paths
-			delete(indexed.FileHashes, relativePath)
-			delete(indexed.FileMtimes, relativePath)
-			changed = true
-		}
-	} else if op.Has(watch.Create) || op.Has(watch.Write) {
-		// Check gitignore
-		gitIgnore, _ := ParseGitIgnore(matchedRoot)
-		if gitIgnore.MatchesPath(relativePath) {
-			return
-		}
-
-		hash, herr := computeFileHash(fullPath)
-		if herr != nil {
-			g.logger.Error("Error computing file hash: ", herr)
-			return
-		}
-
-		// Skip if content unchanged
-		if oldHash, exists := indexed.FileHashes[relativePath]; exists && oldHash == hash {
-			g.logger.Debug("File unchanged (hash match), skipping reindex: ", relativePath)
-			return
-		}
-
-		indexed.FileHashes[relativePath] = hash
-		if fi, serr := os.Lstat(fullPath); serr == nil {
-			indexed.FileMtimes[relativePath] = fi.ModTime().UnixNano()
-		}
-
-		if op.Has(watch.Create) {
-			// Add to paths if not already present. The recursive watcher
-			// already covers the new file — no per-file watch is needed.
-			found := false
-			for _, p := range indexed.Paths {
-				if p == relativePath {
-					found = true
-					break
-				}
-			}
-			if !found {
-				indexed.Paths = append(indexed.Paths, relativePath)
-			}
-		}
-		changed = true
-	}
-
-	if changed {
-		g.logger.Info("File changed, reindexing: ", relativePath)
-		u.c <- &indexed
-	}
-}
-
 // hasExcludedComponent reports whether any path component of a project-relative
 // path is a default-excluded directory.
 func hasExcludedComponent(relPath string) bool {
 	for _, part := range strings.Split(filepath.ToSlash(relPath), "/") {
-		if part != "" && watch.IsExcludedDir(part) {
+		if part != "" && IsExcludedDir(part) {
 			return true
 		}
 	}

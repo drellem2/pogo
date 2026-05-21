@@ -11,8 +11,8 @@ import (
 )
 
 // TestMaxFilesPerTreeCeiling verifies the mg-d205 per-tree file-count ceiling:
-// a tree over the ceiling is marked StatusSkippedTooLarge, its index is bounded
-// at the ceiling, and it is not watched.
+// a tree over the ceiling is marked StatusSkippedTooLarge and its index is
+// bounded at the ceiling.
 func TestMaxFilesPerTreeCeiling(t *testing.T) {
 	dir := t.TempDir()
 	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
@@ -30,7 +30,6 @@ func TestMaxFilesPerTreeCeiling(t *testing.T) {
 
 	bs := createBasicSearch()
 	defer cleanPogoFolder(t, dir)
-	defer bs.Close()
 
 	const ceiling = 50
 	bs.SetMaxFilesPerTree(ceiling)
@@ -64,14 +63,10 @@ func TestMaxFilesPerTreeCeiling(t *testing.T) {
 	if indexed == 0 {
 		t.Errorf("expected a partial index up to the ceiling, indexed 0")
 	}
-
-	if bs.watchCount.Load() != 0 {
-		t.Errorf("a skipped-too-large tree must not be watched, watchCount=%d", bs.watchCount.Load())
-	}
 }
 
 // TestUnderCeilingIndexedNormally is a control: a tree under the ceiling is
-// fully indexed and watched as usual.
+// fully indexed as usual.
 func TestUnderCeilingIndexedNormally(t *testing.T) {
 	dir := t.TempDir()
 	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
@@ -89,7 +84,6 @@ func TestUnderCeilingIndexedNormally(t *testing.T) {
 
 	bs := createBasicSearch()
 	defer cleanPogoFolder(t, dir)
-	defer bs.Close()
 	bs.SetMaxFilesPerTree(1000)
 
 	req := plugin.IProcessProjectReq(plugin.ProcessProjectReq{PathVar: root})

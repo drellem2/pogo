@@ -31,7 +31,6 @@ func cleanPogoFolder(t *testing.T, projectRoot string) {
 }
 
 func cleanUp(basicSearch *BasicSearch, t *testing.T, projectRoot string) {
-	basicSearch.watcher.Close()
 	cleanPogoFolder(t, projectRoot)
 }
 
@@ -151,9 +150,6 @@ func TestSearch(t *testing.T) {
 }
 
 func TestNewFileCausesReIndex(t *testing.T) {
-	if !UseWatchers {
-		return
-	}
 	aServicePath, err2 := absolute(aService)
 	if err2 != nil {
 		t.Errorf("Could not run tests, failed to construct absolute path of %s", aService)
@@ -236,7 +232,6 @@ func TestNewFileCausesReIndex(t *testing.T) {
 				basicSearch.mu.RUnlock()
 				t.Errorf("Error executing test %s", tt.name)
 				t.Errorf("Expected %d files in index but found %d", fileCount+1, currentCount)
-				t.Logf("Watched roots: %d", basicSearch.watchCount.Load())
 				t.Logf("File: %v", currentPaths)
 				return
 			}

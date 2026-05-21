@@ -6,13 +6,11 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
-	"sync/atomic"
 
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/go-plugin"
 
 	"github.com/drellem2/pogo/internal/config"
-	"github.com/drellem2/pogo/internal/watch"
 	pogoPlugin "github.com/drellem2/pogo/pkg/plugin"
 )
 
@@ -22,26 +20,17 @@ const searchDir = "search"
 // API Version for this plugin
 const version = "0.0.1"
 
-const UseWatchers = true
-
 var SearchService = createBasicSearch()
 
 type BasicSearch struct {
 	mu       sync.RWMutex
 	logger   hclog.Logger
 	projects map[string]IndexedProject
-	watcher  watch.Watcher
 	updater  *ProjectUpdater
-	// maxWatchers caps the number of watched project roots. With the FSEvents
-	// backend the unit watched IS the tree, so this finally bounds the right
-	// unit (mg-d205). 0 means unlimited.
-	maxWatchers int32
 	// maxFilesPerTree caps how many files are indexed per project tree. A tree
 	// over the ceiling is registered, marked skipped-too-large, and not
-	// deep-walked or watched. 0 means unlimited. See mg-d205.
+	// deep-walked. 0 means unlimited. See mg-d205.
 	maxFilesPerTree int32
-	// watchCount is the current number of watched roots.
-	watchCount atomic.Int32
 }
 
 // Input to an "Execute" call should be a serialized SearchRequest
@@ -229,27 +218,12 @@ func (g *BasicSearch) GetStatus(projectRoot string) *ProjectStatus {
 	}
 }
 
-// SetMaxWatchers updates the cap on watched project roots.
-// Call this after loading configuration to override the default.
-func (g *BasicSearch) SetMaxWatchers(max int) {
-	if max > 0 {
-		g.maxWatchers = int32(max)
-		g.logger.Info("Max watched roots set to "+strconv.Itoa(max), "max_watchers", max)
-	}
-}
-
 // SetMaxFilesPerTree updates the per-tree file-count ceiling.
 // Call this after loading configuration to override the default.
 func (g *BasicSearch) SetMaxFilesPerTree(max int) {
 	if max > 0 {
 		g.maxFilesPerTree = int32(max)
 		g.logger.Info("Max files per tree set to "+strconv.Itoa(max), "max_files_per_tree", max)
-	}
-}
-
-func (g *BasicSearch) Close() {
-	if g.watcher != nil {
-		g.watcher.Close()
 	}
 }
 
@@ -281,19 +255,6 @@ func createBasicSearch() *BasicSearch {
 		JSONFormat: true,
 	})
 
-	watcher, err := watch.New()
-	if err != nil {
-		logger.Error("Could not create file watcher. Index will run frequently.", "error", err)
-		watcher = nil
-	}
-
-	maxW := int32(config.DefaultMaxWatchers)
-	if mwStr := os.Getenv("POGO_MAX_WATCHERS"); mwStr != "" {
-		if mw, err := strconv.Atoi(mwStr); err == nil && mw > 0 {
-			maxW = int32(mw)
-		}
-	}
-
 	maxF := int32(config.DefaultMaxFilesPerTree)
 	if mfStr := os.Getenv("POGO_MAX_FILES_PER_TREE"); mfStr != "" {
 		if mf, err := strconv.Atoi(mfStr); err == nil && mf > 0 {
@@ -304,42 +265,10 @@ func createBasicSearch() *BasicSearch {
 	basicSearch := &BasicSearch{
 		logger:          logger,
 		projects:        make(map[string]IndexedProject),
-		watcher:         watcher,
 		updater:         nil,
-		maxWatchers:     maxW,
 		maxFilesPerTree: maxF,
 	}
 	basicSearch.updater = basicSearch.newProjectUpdater()
 
-	if UseWatchers && watcher != nil {
-		go func() {
-			for {
-				select {
-				case event, ok := <-watcher.Events():
-					if !ok {
-						logger.Warn("File watcher event channel closed")
-						return
-					}
-					if event.Has(watch.Create) || event.Has(watch.Remove) || event.Has(watch.Rename) || event.Has(watch.Write) {
-						logger.Info("File update: " + event.String())
-						// Check if this is a file or directory event.
-						// For files, use ReIndexFile to avoid a full directory walk.
-						fileInfo, statErr := os.Lstat(event.Path)
-						isDir := statErr == nil && fileInfo.IsDir()
-						if isDir {
-							basicSearch.ReIndex(event.Path)
-						} else {
-							basicSearch.ReIndexFile(event.Path, event.Op)
-						}
-					}
-				case err, ok := <-watcher.Errors():
-					if !ok {
-						return
-					}
-					logger.Error("File watcher error", "error", err)
-				}
-			}
-		}()
-	}
 	return basicSearch
 }
