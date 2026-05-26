@@ -308,6 +308,49 @@ an optional "where applicable" extra:
   keep the loop running. A `gh` failure must **not** abort the sweep — record
   "gh unavailable" under "Gaps I'm watching" in the digest and move on.
 
+**Release cadence — per-repo overdue check, every sweep (mg-9d82).** For each
+repo with GitHub releases, compute how far `origin/main` has drifted from the
+latest released `v*` tag, and file an `mg new` *release-cut* ticket if either
+threshold is crossed:
+
+- **>= 50 commits ahead** of the latest `v*` tag on `origin/main`, OR
+- **>= 30 days** since the latest release's `publishedAt`.
+
+Whichever fires first. Both constants are tunable here — raise them for slow
+products, lower them for fast-moving CLIs.
+
+```bash
+for repo in <repos>; do
+  slug=$(git -C $repo remote get-url origin 2>/dev/null \
+           | sed -E 's#^(git@github\.com:|https://github\.com/)##; s#\.git$##')
+  [ -z "$slug" ] && continue
+
+  rel=$(gh release view --repo "$slug" --json tagName,publishedAt 2>/dev/null) \
+    || continue  # no releases yet, or gh unavailable — skip
+  tag=$(echo "$rel" | jq -r .tagName)
+  pub=$(echo "$rel" | jq -r .publishedAt)
+  [ -z "$tag" ] || [ "$tag" = "null" ] && continue
+
+  git -C $repo fetch --tags --quiet origin 2>/dev/null || true
+  ahead=$(git -C $repo rev-list --count "$tag..origin/main" 2>/dev/null || echo 0)
+  days=$(( ( $(date +%s) - $(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$pub" +%s 2>/dev/null \
+                                 || date -d "$pub" +%s 2>/dev/null || echo 0) ) / 86400 ))
+
+  if [ "$ahead" -ge 50 ] || [ "$days" -ge 30 ]; then
+    # Dedup: skip if an open release-cut ticket already exists for this repo.
+    mg list --tag=release-cut --status=open 2>/dev/null | grep -q "$slug" && continue
+    mg new --title="release-cut: $slug — main is $ahead commits ahead of $tag (${days}d)" \
+           --assignee=pm-<your-name> \
+           --tag=release-cut \
+           --body="Latest release $tag is ${days} days old; origin/main is ${ahead} commits ahead. Cut a new release with scripts/bump-version.sh X.Y.Z --commit --tag --push (semver: patch for CI/doc-only, minor otherwise). Tag push triggers .github/workflows/release.yml. Thresholds (50 commits / 30 days) are tunable in pm-template.md."
+  fi
+done
+```
+
+The hook only **files** the ticket; the actual version bump + tag push stays
+with the release-cut polecat or Daniel. Surfacing as a ticket is the right
+granularity — never auto-tag.
+
 **Additional sources are listed in your config under `sources`.** Apply each one. Examples:
 
 - **Polecat / crew transcripts**: grep recent `~/.pogo/polecats/<id>/` and crew transcript dirs for friction signals — `annoying`, `frustrat`, `wish`, `couldn't`, `had to`, `why doesn't`, `missing`. Read the matches; decide whether they cohere into a real gap or are noise.

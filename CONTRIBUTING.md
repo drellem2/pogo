@@ -60,6 +60,40 @@ This runs `gofmt -l` and `go build ./...` on every commit.
 - `shell/` - Shell integrations (zsh, bash, fish)
 - `tmux/` - tmux integration
 
+## Releases
+
+Releases are cut by tag-trigger: pushing a `vX.Y.Z` tag to `origin` triggers
+`.github/workflows/release.yml`, which runs `goreleaser` and publishes the
+GitHub release with all four binaries (`pogo`, `pogod`, `lsp`, `pose` for
+linux/darwin × amd64/arm64). `install.sh`'s `releases/latest` resolver picks
+up the new release within minutes.
+
+**Tag-creation policy.** Only the release-cut path pushes `v*` tags — either
+`scripts/bump-version.sh` (which validates strict semver and tags
+annotated/signed) or a maintainer directly. No other automation creates tags.
+Versioning is semver: **patch** for CI / docs / chore-only changes, **minor**
+otherwise; reserve major for breaking CLI changes. Prereleases use a
+`vX.Y.Z-<suffix>` form and surface as GitHub prereleases automatically.
+
+**Cutting a release.** From a clean main with the change you want to ship:
+
+```bash
+./scripts/bump-version.sh X.Y.Z --commit --tag --push
+```
+
+This bumps `internal/version/version.go`, rolls `CHANGELOG.md`, commits, tags,
+and pushes. The release workflow does the rest.
+
+**Recovery from a failed publish.** If GitHub Actions is wedged or the
+goreleaser step fails, the tag stays in place — re-trigger via
+`workflow_dispatch` on the tagged ref once Actions recovers; goreleaser
+handles idempotent re-uploads.
+
+**Cadence.** `pm-pogo` files a `release-cut` `mg` ticket automatically once
+origin/main drifts past either threshold (>= 50 commits ahead of the latest
+release tag, OR >= 30 days since the latest published release). Thresholds
+live in `internal/agent/prompts/pm/pm-template.md`.
+
 ## Reporting Issues
 
 Use the GitHub issue templates for [bug reports](.github/ISSUE_TEMPLATE/bug_report.md) and [feature requests](.github/ISSUE_TEMPLATE/feature_request.md).

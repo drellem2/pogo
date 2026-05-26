@@ -1,5 +1,16 @@
 name: Release
 
+# Tag-creation policy (mg-9d82):
+#   - Only the release-cut path pushes v* tags: either scripts/bump-version.sh
+#     (which validates strict semver vX.Y.Z and signs the tag) or Daniel
+#     directly. No other automation creates tags.
+#   - Semver only: vX.Y.Z (patch for CI/doc-only, minor otherwise). Prereleases
+#     vX.Y.Z-<suffix> are allowed and surface as GitHub prereleases via
+#     goreleaser's `prerelease: auto`.
+#   - On Actions outage at tag-push time, re-trigger via workflow_dispatch on
+#     the tagged ref once the platform recovers. Failed publish leaves the tag
+#     in place; re-run via workflow_dispatch (the goreleaser action handles
+#     idempotent re-uploads).
 on:
   push:
     tags:
