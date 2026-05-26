@@ -399,6 +399,30 @@ func CrewPromptDir() string {
 // errors.Is to map it to a 404.
 var ErrPromptNotFound = errors.New("prompt file not found")
 
+// PromptNotFoundError carries the missing prompt path so callers can surface
+// it (e.g. in a structured 404 response body). errors.Is(err, ErrPromptNotFound)
+// still matches.
+type PromptNotFoundError struct {
+	Path string
+}
+
+func (e *PromptNotFoundError) Error() string {
+	return fmt.Sprintf("prompt file not found: %s (run 'pogo agent prompt install' to install defaults)", e.Path)
+}
+
+func (e *PromptNotFoundError) Unwrap() error { return ErrPromptNotFound }
+
+// StartErrorResponse is the JSON body returned by /agents/start when
+// StartCrewAgent fails in a way the CLI can act on. Reason is a stable
+// machine-readable code; Message is always populated with the human-readable
+// text. Older pogod builds returned plain text, so the CLI must remain
+// tolerant of either form.
+type StartErrorResponse struct {
+	Reason  string `json:"reason"`
+	Path    string `json:"path,omitempty"`
+	Message string `json:"message"`
+}
+
 // StartCrewAgent starts a crew agent by name, looking up its prompt file
 // under ~/.pogo/agents/ and applying any frontmatter overrides
 // (nudge_on_start, restart_on_crash).
@@ -417,7 +441,7 @@ func (r *Registry) StartCrewAgent(name string) (*Agent, error) {
 		promptFile = filepath.Join(CrewPromptDir(), name+".md")
 	}
 	if _, err := os.Stat(promptFile); os.IsNotExist(err) {
-		return nil, fmt.Errorf("%w: %s (run 'pogo agent prompt install' to install defaults)", ErrPromptNotFound, promptFile)
+		return nil, &PromptNotFoundError{Path: promptFile}
 	}
 
 	// Give crew agents a stable working directory under ~/.pogo/agents/<name>/
@@ -518,7 +542,23 @@ func (r *Registry) handleStart(w http.ResponseWriter, req *http.Request) {
 	if err != nil {
 		switch {
 		case errors.Is(err, ErrPromptNotFound):
-			http.Error(w, err.Error(), http.StatusNotFound)
+			// Emit a structured JSON body so the CLI can distinguish
+			// "prompt missing on the server" from "endpoint missing because
+			// pogod is stale" (GitHub Issue #15 / mg-be51). The Message field
+			// preserves the actionable text from err.Error() — including the
+			// missing path and the 'pogo agent prompt install' hint — for old
+			// CLIs that just print the body verbatim.
+			resp := StartErrorResponse{
+				Reason:  "prompt-not-found",
+				Message: err.Error(),
+			}
+			var pnf *PromptNotFoundError
+			if errors.As(err, &pnf) {
+				resp.Path = pnf.Path
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(resp)
 		case strings.Contains(err.Error(), "already running"):
 			http.Error(w, err.Error(), http.StatusConflict)
 		default:

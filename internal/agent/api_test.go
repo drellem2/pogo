@@ -278,6 +278,59 @@ func TestHandleStart_MayorFallbackNudge(t *testing.T) {
 	}
 }
 
+// TestHandleStart_PromptNotFoundStructured verifies that handleStart
+// returns a JSON-bodied 404 with reason="prompt-not-found" when the
+// requested crew prompt is missing. This is the server side of the
+// GitHub Issue #15 / mg-be51 fix — it lets the CLI distinguish a missing
+// prompt (actionable: install prompts) from a missing endpoint
+// (actionable: rebuild pogod).
+func TestHandleStart_PromptNotFoundStructured(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	if err := InitPromptDirs(); err != nil {
+		t.Fatalf("InitPromptDirs: %v", err)
+	}
+	// Intentionally do NOT create crew/missing.md — handleStart should 404.
+
+	reg, err := NewRegistry(filepath.Join(tmpHome, "sockets"))
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	defer reg.StopAll(2 * time.Second)
+	reg.SetCommandConfig(catCommandConfig{})
+
+	body, _ := json.Marshal(StartAPIRequest{Name: "missing"})
+	req := httptest.NewRequest("POST", "/agents/start", bytes.NewReader(body))
+	rr := httptest.NewRecorder()
+	reg.handleStart(rr, req)
+
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404, body=%s", rr.Code, rr.Body.String())
+	}
+	if ct := rr.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		t.Errorf("Content-Type = %q, want application/json", ct)
+	}
+
+	var resp StartErrorResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v\nbody=%s", err, rr.Body.String())
+	}
+	if resp.Reason != "prompt-not-found" {
+		t.Errorf("reason = %q, want prompt-not-found", resp.Reason)
+	}
+	wantPath := filepath.Join(CrewPromptDir(), "missing.md")
+	if resp.Path != wantPath {
+		t.Errorf("path = %q, want %q", resp.Path, wantPath)
+	}
+	if !strings.Contains(resp.Message, "prompt file not found") {
+		t.Errorf("message missing prompt-not-found text: %q", resp.Message)
+	}
+	if !strings.Contains(resp.Message, "pogo agent prompt install") {
+		t.Errorf("message missing fix command: %q", resp.Message)
+	}
+}
+
 // TestHandleStart_CrewFallbackNudge verifies that a crew agent without
 // frontmatter receives the legacy generic mail-checking nudge.
 func TestHandleStart_CrewFallbackNudge(t *testing.T) {
