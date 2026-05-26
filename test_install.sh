@@ -3,6 +3,12 @@
 # Exercises OS/arch detection, POGO_INSTALL_DIR override, and missing release handling.
 set -e
 
+# Tests that exercise the full script (e.g. with a real POGO_VERSION) must
+# never trigger the final `pogo install` step — that would mutate the
+# running user's ~/.pogo/ state, leak daemon processes, and depend on mg.
+# Force the env-var opt-out for every invocation in this file.
+export POGO_NO_POGO_INSTALL=1
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 INSTALL_SCRIPT="${SCRIPT_DIR}/install.sh"
 PASS=0
@@ -212,6 +218,81 @@ if grep -q "macguffin" "$INSTALL_SCRIPT" && grep -q "command -v mg" "$INSTALL_SC
   pass "Install script contains macguffin dependency check"
 else
   fail "Install script missing macguffin dependency check"
+fi
+
+# --- Test 14: --help shows usage and exits 0 ---
+echo ""
+echo "Test 14: --help prints usage and exits 0"
+OUTPUT=$(sh "$INSTALL_SCRIPT" --help 2>&1) && STATUS=$? || STATUS=$?
+if [ $STATUS -eq 0 ] && echo "$OUTPUT" | grep -q "Usage:" && echo "$OUTPUT" | grep -q "\-\-no-pogo-install"; then
+  pass "--help prints usage including --no-pogo-install"
+else
+  fail "--help did not print expected usage (status=$STATUS)"
+fi
+
+# --- Test 15: auto-run is wired into the install script ---
+echo ""
+echo "Test 15: pogo install auto-run helper is wired into install.sh"
+if grep -q "run_pogo_install_step" "$INSTALL_SCRIPT"; then
+  COUNT=$(grep -c "run_pogo_install_step" "$INSTALL_SCRIPT")
+  # one definition + at least two call sites (non-interactive and interactive paths)
+  if [ "$COUNT" -ge 3 ]; then
+    pass "run_pogo_install_step is defined and called from both paths ($COUNT references)"
+  else
+    fail "run_pogo_install_step is referenced only $COUNT times; expected >=3 (definition + 2 call sites)"
+  fi
+else
+  fail "run_pogo_install_step helper not found in install.sh"
+fi
+
+# --- Test 16: --no-pogo-install flag opt-out takes effect ---
+echo ""
+echo "Test 16: --no-pogo-install opt-out prints manual next-step"
+TMPDIR_INSTALL=$(mktemp -d)
+OUTPUT=$(POGO_VERSION="v0.0.0-test" POGO_INSTALL_DIR="$TMPDIR_INSTALL" sh "$INSTALL_SCRIPT" --no-pogo-install 2>&1) || true
+# The script's binary download will fail (fake version), but the flag-parse
+# block doesn't execute the auto-run helper until later — so we instead
+# verify the flag is recognized via the help output covering it AND by
+# script-content inspection that the flag sets SKIP_POGO_INSTALL=true.
+if grep -A2 "\-\-no-pogo-install)" "$INSTALL_SCRIPT" | grep -q "SKIP_POGO_INSTALL=true"; then
+  pass "--no-pogo-install flag sets SKIP_POGO_INSTALL=true"
+else
+  fail "--no-pogo-install flag does not set SKIP_POGO_INSTALL=true in parser"
+fi
+rm -rf "$TMPDIR_INSTALL"
+
+# --- Test 17: POGO_NO_POGO_INSTALL env var opt-out is recognized ---
+echo ""
+echo "Test 17: POGO_NO_POGO_INSTALL env var sets opt-out"
+# Verify the env-var case-statement is wired up correctly.
+if grep -q 'POGO_NO_POGO_INSTALL' "$INSTALL_SCRIPT" && \
+   grep -B1 -A4 'POGO_NO_POGO_INSTALL' "$INSTALL_SCRIPT" | grep -q "SKIP_POGO_INSTALL=true"; then
+  pass "POGO_NO_POGO_INSTALL env var triggers SKIP_POGO_INSTALL=true"
+else
+  fail "POGO_NO_POGO_INSTALL env-var handling missing or wrong"
+fi
+
+# --- Test 18: opt-out branch prints a clear manual next-step ---
+echo ""
+echo "Test 18: opt-out branch surfaces 'pogo install' as the next step"
+if grep -B2 -A6 'SKIP_POGO_INSTALL.*=.*true' "$INSTALL_SCRIPT" | grep -q "pogo install"; then
+  pass "Opt-out branch instructs the user to run 'pogo install' manually"
+else
+  fail "Opt-out branch does not surface 'pogo install' as the manual next-step"
+fi
+
+# --- Test 19: README documents the auto-run + opt-out ---
+echo ""
+echo "Test 19: README documents auto-run and --no-pogo-install"
+README="${SCRIPT_DIR}/README.md"
+if [ -f "$README" ]; then
+  if grep -q "\-\-no-pogo-install" "$README" && grep -q "runs \`pogo install\`" "$README"; then
+    pass "README documents auto-run and --no-pogo-install opt-out"
+  else
+    fail "README missing auto-run or --no-pogo-install documentation"
+  fi
+else
+  fail "README.md not found alongside install.sh"
 fi
 
 # --- Summary ---

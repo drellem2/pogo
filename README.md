@@ -36,13 +36,7 @@ You                    pogod                     macguffin
 curl -fsSL https://raw.githubusercontent.com/drellem2/pogo/main/install.sh | sh
 ```
 
-Then run setup:
-
-```sh
-pogo install
-```
-
-This starts the daemon, initializes macguffin, and installs default agent prompts to `~/.pogo/agents/`:
+The install script places binaries on PATH and then runs `pogo install` as its final step, leaving you with a working setup — the daemon is running, macguffin is initialized, and default agent prompts are in `~/.pogo/agents/`:
 
 ```
 ~/.pogo/agents/
@@ -50,6 +44,14 @@ This starts the daemon, initializes macguffin, and installs default agent prompt
 ├── crew/              # Long-running agent prompts — add your own here
 └── templates/
     └── polecat.md     # Ephemeral worker template
+```
+
+If you'd rather inspect `~/.pogo/` before any writes happen, pass `--no-pogo-install` (or set `POGO_NO_POGO_INSTALL=1`) and run `pogo install` yourself when ready:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/drellem2/pogo/main/install.sh | sh -s -- --no-pogo-install
+# ...inspect, then:
+pogo install
 ```
 
 Run `pogo install` again any time — it's idempotent. Existing prompt files are preserved unless you pass `--force`.
@@ -69,7 +71,7 @@ Optional, never required — pogo behaves the same starred or unstarred.
 
 ## Verify your install
 
-`pogo install` starts pogod under your platform's service manager (launchd on macOS, systemd on Linux), scaffolds default prompts under `~/.pogo/agents/`, and auto-starts every crew agent whose frontmatter declares `auto_start = true` — by default just the **mayor**. Confirm everything is healthy before filing your first work item:
+The install script ends by running `pogo install`, which starts pogod under your platform's service manager (launchd on macOS, systemd on Linux), scaffolds default prompts under `~/.pogo/agents/`, and auto-starts every crew agent whose frontmatter declares `auto_start = true` — by default just the **mayor**. (If you ran the installer with `--no-pogo-install`, run `pogo install` now.) Confirm everything is healthy before filing your first work item:
 
 ```sh
 pogo server status      # daemon, agents, refinery — all reachable?

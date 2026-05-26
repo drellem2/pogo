@@ -3,6 +3,7 @@
 # Usage: curl -fsSL https://raw.githubusercontent.com/drellem2/pogo/main/install.sh | sh
 #        curl -fsSL ... | sh -s -- --interactive
 #        curl -fsSL ... | sh -s -- --with-editors
+#        curl -fsSL ... | sh -s -- --no-pogo-install
 set -e
 
 REPO="drellem2/pogo"
@@ -10,8 +11,42 @@ INSTALL_DIR="${POGO_INSTALL_DIR:-/usr/local/bin}"
 BINARIES="pogo pogod lsp pose"
 INTERACTIVE=false
 WITH_EDITORS=false
+SKIP_POGO_INSTALL=false
 SHELL_SOURCE_URL="https://raw.githubusercontent.com/${REPO}/main/shell"
 TMUX_SOURCE_URL="https://raw.githubusercontent.com/${REPO}/main/tmux"
+
+# Env-var opt-out: equivalent to --no-pogo-install.
+case "$POGO_NO_POGO_INSTALL" in
+  1|true|TRUE|yes|YES) SKIP_POGO_INSTALL=true ;;
+esac
+
+print_help() {
+  cat <<'EOF'
+Pogo install script
+
+Usage:
+  curl -fsSL https://raw.githubusercontent.com/drellem2/pogo/main/install.sh | sh
+  ./install.sh [flags]
+
+Flags:
+  --interactive, --with-integrations
+        Walk through shell, tmux, editor, and daemon-service setup.
+  --with-editors
+        Non-interactively install supported editor plugins (emacs, neovim).
+  --no-pogo-install
+        Skip the automatic 'pogo install' step at the end. The script will
+        still place binaries on PATH; you remain responsible for running
+        'pogo install' yourself before 'pogo agent start' will succeed.
+        Useful if you want to inspect ~/.pogo/ before any writes happen.
+  -h, --help
+        Show this help and exit.
+
+Environment variables:
+  POGO_INSTALL_DIR       Directory to install binaries to. Default: /usr/local/bin.
+  POGO_VERSION           Specific release tag to install. Default: latest.
+  POGO_NO_POGO_INSTALL   When set to 1/true/yes, equivalent to --no-pogo-install.
+EOF
+}
 
 # Parse flags
 for arg in "$@"; do
@@ -21,6 +56,13 @@ for arg in "$@"; do
       ;;
     --with-editors)
       WITH_EDITORS=true
+      ;;
+    --no-pogo-install)
+      SKIP_POGO_INSTALL=true
+      ;;
+    -h|--help)
+      print_help
+      exit 0
       ;;
   esac
 done
@@ -152,8 +194,38 @@ else
   fi
 fi
 
-echo ""
-echo "Run 'pogo install' to set up agent orchestration."
+# Run `pogo install` as the final step so a fresh user ends up with a working
+# pogo (daemon running, macguffin initialized, default prompts in place).
+# Skipped when --no-pogo-install / POGO_NO_POGO_INSTALL=1 is set, or when mg
+# is unavailable. In those cases we print a clear manual next-step instead.
+run_pogo_install_step() {
+  echo ""
+  if [ "$SKIP_POGO_INSTALL" = true ]; then
+    echo "Skipping 'pogo install' (--no-pogo-install). Run it manually when ready:"
+    echo "    pogo install"
+    echo ""
+    echo "Until you do, 'pogo agent start' will fail because ~/.pogo/ is not initialized."
+    return 0
+  fi
+  if ! command -v mg >/dev/null 2>&1; then
+    echo "Skipping 'pogo install' — macguffin (mg) is not installed."
+    echo "Install mg, then run:"
+    echo "    pogo install"
+    return 0
+  fi
+
+  echo "=== Finalizing setup: running 'pogo install' ==="
+  if "${INSTALL_DIR}/pogo" install; then
+    echo ""
+    echo "✓ Installed pogo ${VERSION} (${OS}/${ARCH}) + default agent prompts in ~/.pogo/."
+    echo "  File work with:  mg new \"your first task\""
+  else
+    echo ""
+    echo "⚠ 'pogo install' failed. To diagnose, re-run it directly:"
+    echo "    pogo install"
+    return 0
+  fi
+}
 
 ###############################################################################
 # Non-interactive editor setup (--with-editors)
@@ -226,6 +298,7 @@ if [ "$INTERACTIVE" = false ]; then
     echo "Tip: Re-run with --interactive to set up shell and editor integrations,"
     echo "     or --with-editors to install editor plugins non-interactively."
   fi
+  run_pogo_install_step
   exit 0
 fi
 
@@ -480,3 +553,5 @@ fi
 echo ""
 echo "=== Setup Complete ==="
 echo "Restart your shell or source your rc file to activate integrations."
+
+run_pogo_install_step
