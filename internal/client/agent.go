@@ -55,12 +55,7 @@ func SpawnAgent(req agent.SpawnAPIRequest) (*agent.AgentInfo, error) {
 	}
 	defer r.Body.Close()
 	if r.StatusCode != http.StatusCreated {
-		msg, _ := io.ReadAll(r.Body)
-		body := strings.TrimSpace(string(msg))
-		if r.StatusCode == http.StatusNotFound || body == "greetings from pogo daemon" {
-			return nil, fmt.Errorf("spawn failed: pogod does not support agent endpoints (restart pogod with an updated build)")
-		}
-		return nil, fmt.Errorf("spawn failed: %s", body)
+		return nil, interpretSpawnFailure("spawn", r)
 	}
 	var info agent.AgentInfo
 	if err := json.NewDecoder(r.Body).Decode(&info); err != nil {
@@ -82,12 +77,7 @@ func StartAgent(name string) (*agent.AgentInfo, error) {
 	}
 	defer r.Body.Close()
 	if r.StatusCode != http.StatusCreated {
-		msg, _ := io.ReadAll(r.Body)
-		body := strings.TrimSpace(string(msg))
-		if r.StatusCode == http.StatusNotFound || body == "greetings from pogo daemon" {
-			return nil, fmt.Errorf("start failed: pogod does not support agent endpoints (restart pogod with an updated build)")
-		}
-		return nil, fmt.Errorf("start failed: %s", body)
+		return nil, interpretSpawnFailure("start", r)
 	}
 	var info agent.AgentInfo
 	if err := json.NewDecoder(r.Body).Decode(&info); err != nil {
@@ -164,18 +154,63 @@ func SpawnPolecat(req agent.SpawnPolecatAPIRequest) (*agent.AgentInfo, error) {
 	}
 	defer r.Body.Close()
 	if r.StatusCode != http.StatusCreated {
-		msg, _ := io.ReadAll(r.Body)
-		body := strings.TrimSpace(string(msg))
-		if r.StatusCode == http.StatusNotFound || body == "greetings from pogo daemon" {
-			return nil, fmt.Errorf("spawn-polecat failed: pogod does not support agent endpoints (restart pogod with an updated build)")
-		}
-		return nil, fmt.Errorf("spawn-polecat failed: %s", body)
+		return nil, interpretSpawnFailure("spawn-polecat", r)
 	}
 	var info agent.AgentInfo
 	if err := json.NewDecoder(r.Body).Decode(&info); err != nil {
 		return nil, err
 	}
 	return &info, nil
+}
+
+// interpretSpawnFailure converts a non-2xx response from an agent-spawn
+// endpoint into a user-facing error. Three cases, in priority order:
+//
+//  1. Structured JSON body (new pogod, e.g. {"reason":"prompt-not-found",
+//     "message":"..."}): the Message field is surfaced verbatim.
+//  2. Plain-text body (old pogod): the body is surfaced verbatim — pogod's
+//     text bodies already include the missing path and the suggested fix
+//     command for prompt-not-found.
+//  3. 404 with no body, the Go default "404 page not found" body, or the
+//     "greetings from pogo daemon" sentinel served at /: only here do we
+//     suggest rebuilding pogod, since these are the shapes that indicate the
+//     endpoint truly isn't implemented or the wrong process answered.
+//
+// Fix for GitHub Issue #15 / mg-be51: previously every 404 was reported as
+// "rebuild pogod", which hid pogod's "prompt file not found" message when a
+// crew prompt wasn't installed (a common fresh-install failure mode).
+func interpretSpawnFailure(op string, r *http.Response) error {
+	raw, _ := io.ReadAll(r.Body)
+	body := strings.TrimSpace(string(raw))
+
+	if strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") && len(raw) > 0 {
+		var se agent.StartErrorResponse
+		if err := json.Unmarshal(raw, &se); err == nil && se.Message != "" {
+			return fmt.Errorf("%s failed: %s", op, se.Message)
+		}
+	}
+
+	if r.StatusCode == http.StatusNotFound && isEndpointMissingBody(body) {
+		return fmt.Errorf("%s failed: pogod does not support agent endpoints (restart pogod with an updated build)", op)
+	}
+
+	if body == "" {
+		return fmt.Errorf("%s failed: HTTP %d", op, r.StatusCode)
+	}
+	return fmt.Errorf("%s failed: %s", op, body)
+}
+
+// isEndpointMissingBody reports whether body is one of the well-known shapes
+// returned when /agents/* doesn't exist — Go's default ServeMux 404 page, an
+// empty body, or the "greetings from pogo daemon" sentinel that pogod's root
+// handler serves. pogod's own structured 404s (prompt-not-found, etc.) never
+// match these.
+func isEndpointMissingBody(body string) bool {
+	switch body {
+	case "", "404 page not found", "greetings from pogo daemon":
+		return true
+	}
+	return false
 }
 
 // ListPrompts returns all discovered prompt files from pogod.
