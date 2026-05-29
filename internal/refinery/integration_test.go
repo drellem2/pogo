@@ -597,6 +597,122 @@ func TestOnSubmitCallback(t *testing.T) {
 	}
 }
 
+// TestRebaseReplaySucceedsWithoutAmbientGitIdentity reproduces the
+// "Committer identity unknown" failure (ia-1428 / gh #7). The refinery's
+// worktree clone has no local user.name/user.email. When it runs in an
+// environment with no global/system git config and no usable GIT_*_NAME/EMAIL
+// env vars (pogod under launchd, CI runners), a rebase that *replays* commits
+// onto a moved target fails because git has no committer identity. The fix
+// supplies a default identity from gitCmdOutput, making the refinery
+// self-contained.
+//
+// To exercise the production code path the test strips every ambient identity
+// source — global config, system config, and the GIT_*_NAME/EMAIL vars seeded
+// by TestMain — leaving the gitCmdOutput-injected default as the only identity
+// git can use. Without the fix the rebase fails; with it the MR merges and the
+// replayed commit carries the refinery identity.
+func TestRebaseReplaySucceedsWithoutAmbientGitIdentity(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found")
+	}
+
+	// Neutralize every ambient git-identity source. t.Setenv restores these
+	// on cleanup (and forbids t.Parallel, which is what we want).
+	emptyCfg := filepath.Join(t.TempDir(), "empty.gitconfig")
+	if err := os.WriteFile(emptyCfg, nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", emptyCfg)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("GIT_AUTHOR_NAME", "")
+	t.Setenv("GIT_AUTHOR_EMAIL", "")
+	t.Setenv("GIT_COMMITTER_NAME", "")
+	t.Setenv("GIT_COMMITTER_EMAIL", "")
+
+	// === Set up "origin" bare repo ===
+	originDir := t.TempDir()
+	run(t, originDir, "git", "init", "--bare", "-b", "main")
+
+	// === Working clone for the SETUP commits ===
+	// The `run` helper supplies its own GIT_*_NAME/EMAIL ("Test") for these
+	// commits, so the setup identity lives only in the produced commit objects
+	// — it does not leak into the refinery's worktree clone or the ambient
+	// environment the rebase-under-test runs in.
+	workDir := t.TempDir()
+	run(t, workDir, "git", "clone", originDir, ".")
+
+	os.WriteFile(filepath.Join(workDir, "build.sh"), []byte("#!/bin/sh\nexit 0\n"), 0755)
+	os.WriteFile(filepath.Join(workDir, "main.go"), []byte("package main\nfunc main() {}\n"), 0644)
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", "initial commit")
+	run(t, workDir, "git", "push", "origin", "main")
+
+	// === Polecat branch forks from main and adds a commit ===
+	run(t, workDir, "git", "checkout", "-b", "polecat-identity")
+	os.WriteFile(filepath.Join(workDir, "feature.go"), []byte("package main\n// feature\n"), 0644)
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", "feat: add feature (identity)")
+	run(t, workDir, "git", "push", "origin", "polecat-identity")
+
+	// === Advance main on origin so the rebase must REPLAY the branch commit ===
+	// (a no-op fast-forward rebase wouldn't create a commit and wouldn't need a
+	// committer identity — we need a genuine replay to reproduce the bug).
+	run(t, workDir, "git", "checkout", "main")
+	os.WriteFile(filepath.Join(workDir, "other.go"), []byte("package main\n// moved main\n"), 0644)
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", "chore: advance main")
+	run(t, workDir, "git", "push", "origin", "main")
+
+	// === Refinery ===
+	wtDir := t.TempDir()
+	r, err := New(Config{
+		Enabled:      true,
+		PollInterval: time.Hour,
+		WorktreeDir:  wtDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	id, err := r.Submit(MergeRequest{
+		RepoPath:  originDir,
+		Branch:    "polecat-identity",
+		TargetRef: "main",
+		Author:    "cat-identity",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	r.processNext()
+
+	mr := r.Get(id)
+	if mr == nil {
+		t.Fatal("MR not found after processing")
+	}
+	if mr.Status != StatusMerged {
+		t.Fatalf("expected merged, got %s (error: %s, gate output: %s)", mr.Status, mr.Error, mr.GateOutput)
+	}
+
+	// === Verify the replayed commit carries the refinery committer identity ===
+	verifyDir := t.TempDir()
+	run(t, verifyDir, "git", "clone", originDir, ".")
+	if _, err := os.Stat(filepath.Join(verifyDir, "feature.go")); os.IsNotExist(err) {
+		t.Error("feature.go not found on main after merge")
+	}
+	committer := strings.TrimSpace(runOut(t, verifyDir, "git", "log", "-1", "--format=%cn", "main"))
+	if committer != refineryCommitterName {
+		t.Errorf("replayed commit committer = %q, want %q", committer, refineryCommitterName)
+	}
+	// The original author ("Test", set by the run helper for the setup commit)
+	// must be preserved by the rebase replay — the injected refinery identity
+	// supplies the committer, not the author.
+	author := strings.TrimSpace(runOut(t, verifyDir, "git", "log", "-1", "--format=%an", "main"))
+	if author != "Test" {
+		t.Errorf("replayed commit author = %q, want %q (rebase should preserve author, not overwrite with committer)", author, "Test")
+	}
+}
+
 // TestSubmitRefusesHTTPSRemoteWithoutCredentials reproduces the mg-9e00
 // first-touch failure: a repo whose origin is an HTTPS URL that pogod can't
 // authenticate against. The refinery must refuse the MR with an actionable

@@ -536,6 +536,43 @@ func UnlinkWorktree(sourceRepo, worktreeDir string) error {
 	return nil
 }
 
+// refineryCommitterName / refineryCommitterEmail is the identity git uses to
+// author and commit the commits the refinery creates during a rebase replay
+// (attemptMerge's `git rebase origin/<target>`). The refinery's worktree
+// clones (created by ensureWorktree) have no local user.name/user.email, and
+// pogod runs under launchd/systemd — often with no global/system git config
+// and a username git can't auto-derive into a valid ident
+// ("fatal: empty ident name (for <runner@host>) not allowed"). Supplying an
+// explicit identity via the environment makes the refinery self-contained:
+// rebase replays no longer depend on ambient git config (ia-1428, gh #7).
+const (
+	refineryCommitterName  = "pogo refinery"
+	refineryCommitterEmail = "refinery@pogo.local"
+)
+
+// gitIdentityEnv returns GIT_AUTHOR_*/GIT_COMMITTER_* environment entries that
+// fall back to the refinery identity for any that aren't already set in the
+// process environment. A pre-existing non-empty value (a developer's shell
+// identity, or a test's seeded identity) takes precedence; an unset or empty
+// value gets the refinery default. Appended after os.Environ(), these entries
+// win over any empty same-key values inherited from the environment (Go's
+// exec uses the last value for duplicate keys).
+func gitIdentityEnv() []string {
+	defaults := map[string]string{
+		"GIT_AUTHOR_NAME":     refineryCommitterName,
+		"GIT_AUTHOR_EMAIL":    refineryCommitterEmail,
+		"GIT_COMMITTER_NAME":  refineryCommitterName,
+		"GIT_COMMITTER_EMAIL": refineryCommitterEmail,
+	}
+	var env []string
+	for k, def := range defaults {
+		if os.Getenv(k) == "" {
+			env = append(env, k+"="+def)
+		}
+	}
+	return env
+}
+
 // gitCmdOutput runs a git command in the given directory and captures
 // combined stdout/stderr output. Returns the output and any error.
 // This ensures git error messages (e.g. push rejection reasons) are
@@ -548,7 +585,12 @@ func gitCmdOutput(dir string, args ...string) (string, error) {
 	// interactive prompts, an HTTPS remote with no credentials makes git
 	// hang forever waiting for a username on stdin. Force prompts off so
 	// auth failures fail fast and we can detect them via isAuthFailure.
+	//
+	// Also supply a committer/author identity so rebase replays don't fail
+	// with "Committer identity unknown" when no ambient git config is
+	// available (ia-1428, gh #7).
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	cmd.Env = append(cmd.Env, gitIdentityEnv()...)
 	output, err := cmd.CombinedOutput()
 	out := strings.TrimSpace(string(output))
 	if err != nil {

@@ -1524,3 +1524,22 @@ func run(t *testing.T, dir string, name string, args ...string) {
 		t.Fatalf("%s %v failed: %v\n%s", name, args, err, out)
 	}
 }
+
+// runOut is like run but returns the command's combined output. Useful for
+// reading values back out of a repo (e.g. `git log --format=...`).
+func runOut(t *testing.T, dir string, name string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command(name, args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=Test",
+		"GIT_AUTHOR_EMAIL=test@test.com",
+		"GIT_COMMITTER_NAME=Test",
+		"GIT_COMMITTER_EMAIL=test@test.com",
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s %v failed: %v\n%s", name, args, err, out)
+	}
+	return string(out)
+}
