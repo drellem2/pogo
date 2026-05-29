@@ -1641,6 +1641,54 @@ func TestResolveRestartOnCrash(t *testing.T) {
 	}
 }
 
+// TestEmbeddedDoctorOnDemand verifies the shipped crew/doctor.md prompt
+// declares on-demand semantics (auto_start = false, restart_on_crash = false)
+// so a fresh install can stop the doctor on demand instead of pogod
+// auto-restarting it (gh #18). Mayor/PM keep their always-on default and are
+// asserted to still opt in.
+func TestEmbeddedDoctorOnDemand(t *testing.T) {
+	writeEmbedded := func(embedPath string) string {
+		data, err := defaultPrompts.ReadFile(embedPath)
+		if err != nil {
+			t.Fatalf("read embedded %s: %v", embedPath, err)
+		}
+		path := filepath.Join(t.TempDir(), filepath.Base(embedPath))
+		if err := os.WriteFile(path, data, 0644); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+
+	doctorPath := writeEmbedded("prompts/crew/doctor.md")
+	meta, _, err := ParsePromptFrontmatter(doctorPath)
+	if err != nil {
+		t.Fatalf("parse embedded doctor frontmatter: %v", err)
+	}
+	if !meta.HasField("auto_start") || meta.AutoStart {
+		t.Errorf("embedded doctor should declare auto_start = false, got HasField=%v AutoStart=%v",
+			meta.HasField("auto_start"), meta.AutoStart)
+	}
+	if !meta.HasField("restart_on_crash") || meta.RestartOnCrash {
+		t.Errorf("embedded doctor should declare restart_on_crash = false, got HasField=%v RestartOnCrash=%v",
+			meta.HasField("restart_on_crash"), meta.RestartOnCrash)
+	}
+	// The on-demand frontmatter must override the crew always-on default.
+	if ResolveRestartOnCrash(doctorPath, TypeCrew) {
+		t.Error("embedded doctor should resolve restart_on_crash = false for a crew agent")
+	}
+
+	// Mayor stays always-on by default.
+	mayorPath := writeEmbedded("prompts/mayor.md")
+	mayorMeta, _, err := ParsePromptFrontmatter(mayorPath)
+	if err != nil {
+		t.Fatalf("parse embedded mayor frontmatter: %v", err)
+	}
+	if !mayorMeta.AutoStart || !mayorMeta.RestartOnCrash {
+		t.Errorf("embedded mayor should stay always-on, got AutoStart=%v RestartOnCrash=%v",
+			mayorMeta.AutoStart, mayorMeta.RestartOnCrash)
+	}
+}
+
 func TestInitPromptsDefault(t *testing.T) {
 	origHome := os.Getenv("HOME")
 	tmpHome := t.TempDir()

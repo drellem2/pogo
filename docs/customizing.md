@@ -94,8 +94,19 @@ The next pogod boot will pick it up automatically because of `auto_start = true`
 ### Opt out of auto-start
 
 Some crew agents shouldn't run all the time — the shipped `doctor` is a good
-example. Its prompt has no `auto_start` line at all, which means it defaults
-to `false`. You start it on demand:
+example. Its prompt ships with on-demand frontmatter:
+
+```toml
++++
+auto_start = false
+restart_on_crash = false
++++
+```
+
+`auto_start = false` keeps it from booting with the daemon, and
+`restart_on_crash = false` lets you stop it on demand without pogod
+auto-respawning it (the crew default is `restart_on_crash = true`). You start
+it on demand:
 
 ```bash
 pogo agent start doctor
