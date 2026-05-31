@@ -146,6 +146,10 @@ pogo agent start reviewer
 
 Polecats read `~/.pogo/agents/templates/polecat.md` fresh on each spawn, so template changes take effect immediately.
 
+## Configuration
+
+See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for a survey of pogo's customization points — PM TOMLs, prompt templates, the scheduler, agent registry, refinery gates, `pogo install`, and mail — with the file path and design doc for each.
+
 ## How it works
 
 Pogo has three layers: a **discovery daemon** that indexes git repositories as you visit them, **agent supervision** that spawns agents with PTY allocation and manages their lifecycle, and a **refinery** that runs quality gates and merges polecat branches to main. The refinery is code, not an agent — it never burns tokens on merge decisions.
