@@ -885,3 +885,120 @@ func TestWorkItemIDPreservedAcrossRespawn(t *testing.T) {
 		t.Errorf("after respawn WorkItemID = %q, want %q", b.WorkItemID, "mg-7777")
 	}
 }
+
+// wedgeDeadAgent spawns a RestartOnCrash=true agent whose process exits
+// immediately and waits for it to die, leaving a stale registry entry (dead
+// pid, status=exited) — the gh #19 scenario where a crew agent exited cleanly
+// without re-arming. The registry has no onExit hook, so nothing respawns or
+// removes the entry. Returns the wedged agent.
+func wedgeDeadAgent(t *testing.T, reg *Registry, name string) *Agent {
+	t.Helper()
+	a, err := reg.Spawn(SpawnRequest{
+		Name:           name,
+		Type:           TypeCrew,
+		Command:        []string{"true"},
+		RestartOnCrash: true,
+	})
+	if err != nil {
+		t.Fatalf("Spawn %s: %v", name, err)
+	}
+	<-a.Done()
+	if a.alive() {
+		t.Fatalf("agent %s should be dead after exit", name)
+	}
+	if reg.Get(name) == nil {
+		t.Fatalf("agent %s should still be wedged in registry after clean exit", name)
+	}
+	return a
+}
+
+// gh #19, Fix 1: pogo agent stop clears a dead-process registration even for
+// a RestartOnCrash agent that Stop otherwise leaves intact, so a subsequent
+// start is not blocked by a dead pid.
+func TestStopClearsDeadRestartAgent(t *testing.T) {
+	tmpDir := t.TempDir()
+	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	defer reg.StopAll(2 * time.Second)
+
+	wedgeDeadAgent(t, reg, "wedged")
+
+	if err := reg.Stop("wedged", 2*time.Second); err != nil {
+		t.Fatalf("Stop on dead agent should succeed, got: %v", err)
+	}
+	if reg.Get("wedged") != nil {
+		t.Error("Stop should have cleared the stale registration for the dead agent")
+	}
+}
+
+// gh #19, Fix 3: pogo agent start overwrites a dead-process registration
+// rather than refusing with "already running".
+func TestStartOverwritesDeadRegistration(t *testing.T) {
+	tmpDir := t.TempDir()
+	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	defer reg.StopAll(2 * time.Second)
+
+	old := wedgeDeadAgent(t, reg, "wedged")
+
+	// Start a fresh long-lived process under the same name; Spawn must treat
+	// the dead entry as stale and overwrite it.
+	b, err := reg.Spawn(SpawnRequest{
+		Name:    "wedged",
+		Type:    TypeCrew,
+		Command: []string{"cat"},
+	})
+	if err != nil {
+		t.Fatalf("Spawn over dead registration should succeed, got: %v", err)
+	}
+	if !b.alive() {
+		t.Error("respawned agent should be alive")
+	}
+	if b.PID == old.PID {
+		t.Errorf("expected a fresh pid, got the dead one %d", old.PID)
+	}
+	if reg.Get("wedged") != b {
+		t.Error("registry should now hold the fresh agent")
+	}
+}
+
+// gh #19 no-regression: a live agent is still protected — Spawn refuses a
+// duplicate name whose process is actually running, and Stop tears it down
+// normally. Verified on a distinct agent name per acceptance bar 4.
+func TestSpawnRefusesLiveDuplicate(t *testing.T) {
+	tmpDir := t.TempDir()
+	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	defer reg.StopAll(2 * time.Second)
+
+	a, err := reg.Spawn(SpawnRequest{
+		Name:    "live-one",
+		Type:    TypeCrew,
+		Command: []string{"cat"},
+	})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	if !a.alive() {
+		t.Fatal("live-one should be alive")
+	}
+
+	_, err = reg.Spawn(SpawnRequest{
+		Name:    "live-one",
+		Type:    TypeCrew,
+		Command: []string{"cat"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "already running") {
+		t.Errorf("expected 'already running' error for live duplicate, got: %v", err)
+	}
+	// The live agent must be untouched by the refused spawn.
+	if reg.Get("live-one") != a {
+		t.Error("refused duplicate spawn must not disturb the live registration")
+	}
+}

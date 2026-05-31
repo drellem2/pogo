@@ -20,6 +20,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/creack/pty"
@@ -148,6 +149,31 @@ func (a *Agent) GetStatus() AgentStatus {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.Status
+}
+
+// pidAlive reports whether a process with the given pid is currently running,
+// via kill(pid, 0): a nil error means the process exists and is signalable.
+// A pid <= 0 is treated as dead.
+func pidAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	return syscall.Kill(pid, 0) == nil
+}
+
+// alive reports whether the agent's OS process is still running. A closed done
+// channel (cmd.Wait has returned and reaped the process) or a pid that no
+// longer answers signal 0 both mean not alive. Stop and Spawn use this to
+// detect a stale registry entry whose process has died (gh #19) — a crew
+// agent that exited cleanly without re-arming, a crash whose respawn failed,
+// etc. — so stop can clear it and start can overwrite it.
+func (a *Agent) alive() bool {
+	select {
+	case <-a.done:
+		return false
+	default:
+	}
+	return pidAlive(a.PID)
 }
 
 // eventAgent returns the agent identity string used in event log envelopes.
@@ -479,8 +505,18 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if _, exists := r.agents[req.Name]; exists {
-		return nil, fmt.Errorf("agent %q already running", req.Name)
+	if existing, exists := r.agents[req.Name]; exists {
+		if existing.alive() {
+			return nil, fmt.Errorf("agent %q already running", req.Name)
+		}
+		// Dead-process registry semantics (gh #19): the existing registration's
+		// process has died (clean exit without re-arm, crash whose respawn
+		// failed, …). Treat it as a stale entry — tear it down and proceed with
+		// the fresh spawn below, overwriting it — so `start` just works instead
+		// of refusing against a dead pid.
+		log.Printf("agent %s: overwriting stale registration (previous pid=%d is dead)", req.Name, existing.PID)
+		existing.Cleanup()
+		delete(r.agents, req.Name)
 	}
 
 	if len(req.Command) == 0 {
@@ -659,6 +695,20 @@ func (r *Registry) Stop(name string, timeout time.Duration) error {
 	agent := r.Get(name)
 	if agent == nil {
 		return fmt.Errorf("agent %q not found", name)
+	}
+
+	// Dead-process registry semantics (gh #19): if the registered process is
+	// already gone — a crew agent that exited cleanly without re-arming, a
+	// crash whose respawn failed, etc. — the registry entry is stale. Clear it
+	// unconditionally, even for RestartOnCrash agents that Stop otherwise
+	// leaves intact for the supervisor, so a subsequent `start` is not blocked
+	// by an "already running" error against a dead pid. Makes stop idempotent
+	// and lets a single wedged agent be recovered without bouncing the daemon.
+	if !agent.alive() {
+		agent.Cleanup()
+		r.Remove(name)
+		log.Printf("agent %s: stopped (cleared stale registration; process already dead)", name)
+		return nil
 	}
 
 	// Check if already exited before signaling to avoid

@@ -11,7 +11,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -126,11 +125,7 @@ func diagnoseAgent(a *Agent) DiagnoseInfo {
 	}
 
 	// Check if the OS process is still alive via kill(pid, 0).
-	processAlive := false
-	if a.PID > 0 {
-		err := syscall.Kill(a.PID, 0)
-		processAlive = err == nil
-	}
+	processAlive := pidAlive(a.PID)
 
 	// Determine overall health.
 	health := "healthy"
