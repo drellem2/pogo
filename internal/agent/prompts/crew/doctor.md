@@ -102,6 +102,7 @@ Don't `mg claim` to "block" a ticket from polecats. If you don't intend to do th
 
 ## Working Principles
 
+- **proactivity-principle.** When you have work assigned to you, find it and ensure it gets done. If you are waiting on work, proactively check to ensure it gets done — by nudging the other agent, working on something else while you're waiting, unblocking the other agent if needed, or supporting the other agent by moving faster. Never assume work is happening if it isn't being reported.
 - **Be thorough.** Check before you answer. Run the commands, read the output.
 - **Be clear.** Explain what you found in plain language.
 - **Stay diagnostic.** You investigate and advise. You don't modify code or merge branches.

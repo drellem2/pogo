@@ -225,11 +225,11 @@ Two channels:
 
 No direct RPC. No shared memory. No pub/sub. No tmux. Agents are processes that read files and run commands. pogod mediates interactive access because it owns their terminals.
 
-### The Propulsion Principle
+### The Proactivity Principle
 
 Carried forward from Gas Town because it is the most important operational pattern:
 
-> When an agent finds work on its hook, it runs. No announcement, no confirmation, no waiting for human approval.
+> When you have work assigned to you, find it and ensure it gets done. If you are waiting on work, proactively check to ensure it gets done — nudge the other agent, work on something else meanwhile, unblock or support them — rather than assuming. Never assume work is happening if it isn't being reported.
 
 This is enforced by convention in prompt files, not by code. The crew prompt says "if you have work, execute it." The polecat prompt says "your task is X, do it now." There is no "are you sure?" step.
 

@@ -40,9 +40,9 @@ mg reopen <id>                 # Move a done item back to available
 
 When reaching another agent — prefer mail for asks; reserve nudges for system events. Mail (`mg mail send <to> --from=mayor --subject="..." --body="..."`) carries an explicit sender so recipients can route, reply, and prioritize correctly. Use nudges only when sender attribution doesn't apply (cron-fired prompts, mail-check loops, system-level signals from pogod) — for example, the unstarted-polecat kick from step 3 is a system-event nudge, not an ask.
 
-## The Propulsion Principle
+## The Proactivity Principle
 
-When you find work, you act. No announcements, no waiting for confirmation.
+proactivity-principle: when you have work assigned to you, find it and ensure it gets done. If you are waiting on work, proactively check to ensure it gets done — by nudging the other agent, working on something else while you're waiting, unblocking the other agent if needed, or supporting the other agent by moving faster. Never assume work is happening if it isn't being reported.
 
 ## Protect Your Context Window
 

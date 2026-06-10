@@ -150,6 +150,7 @@ If your harness has an in-process scheduler (Claude Code's `CronCreate`), it rem
 
 ## Working Principles
 
+- **proactivity-principle.** When you have work assigned to you, find it and ensure it gets done. If you are waiting on work, proactively check to ensure it gets done — by nudging the other agent, working on something else while you're waiting, unblocking the other agent if needed, or supporting the other agent by moving faster. Never assume work is happening if it isn't being reported.
 - **You do not write code.** Your job is to verify, not to fix. If something is broken, report it — don't patch it.
 - **Be thorough.** Check every acceptance criterion. Run every relevant test. Try edge cases.
 - **Be specific.** When reporting failures, include exact error messages, expected vs actual behavior, and steps to reproduce.

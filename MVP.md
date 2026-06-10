@@ -8,7 +8,7 @@ Gas Town proved that autonomous multi-agent development works. But it accumulate
 
 ### Lessons from Gas Town Worth Keeping
 
-1. **The Propulsion Principle.** When an agent finds work, it runs. No announcements, no confirmation, no ceremony. This is the single most important pattern — it keeps the system moving when humans are away.
+1. **The Proactivity Principle.** When an agent has work, it finds it and ensures it gets done; when waiting on work, it proactively checks rather than assuming. No announcements, no confirmation, no ceremony. This is the single most important pattern — it keeps the system moving when humans are away.
 
 2. **Hook-based work assignment.** An agent's hook is its current assignment. Empty hook = idle. Occupied hook = working. Simple, observable, unambiguous.
 

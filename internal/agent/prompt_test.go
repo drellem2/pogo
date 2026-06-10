@@ -2210,15 +2210,17 @@ func TestPMTemplateIncludesHeartbeat(t *testing.T) {
 	}
 }
 
-// TestPMTemplateIncludesPropulsion locks in the requirement that the PM
-// template carries a `## Self-pacing and propulsion` section with the five
-// concrete behaviors that distinguish propulsion-driven PMs from passive,
+// TestPMTemplateIncludesProactivity locks in the requirement that the PM
+// template carries a `## Self-pacing and proactivity` section with the five
+// concrete behaviors that distinguish proactivity-driven PMs from passive,
 // sweep-only PMs. Daniel's 2026-05-04 feedback ("pms need more self-drive,
-// they dont want to self-pace and keep waiting, ensure they have propulsion
-// principle etc") drove mg-2f76 to encode the principle in-template; without
-// these invariants, future edits could silently drop the propulsion framing
-// and PMs would regress to the passive default.
-func TestPMTemplateIncludesPropulsion(t *testing.T) {
+// they dont want to self-pace and keep waiting, ensure they have the
+// proactivity principle etc") drove mg-2f76 to encode the principle
+// in-template; mg-1345 renamed it from "propulsion" to "proactivity" per gh
+// #14 (CloverRoss + Daniel). Without these invariants, future edits could
+// silently drop the proactivity framing and PMs would regress to the passive
+// default.
+func TestPMTemplateIncludesProactivity(t *testing.T) {
 	data, err := defaultPrompts.ReadFile("prompts/pm/pm-template.md")
 	if err != nil {
 		t.Fatalf("read pm-template.md: %v", err)
@@ -2227,13 +2229,18 @@ func TestPMTemplateIncludesPropulsion(t *testing.T) {
 
 	// Section header — pinning the literal so the section can't be renamed
 	// without an explicit test update.
-	if !strings.Contains(s, "## Self-pacing and propulsion") {
-		t.Error("pm-template.md: expected `## Self-pacing and propulsion` section")
+	if !strings.Contains(s, "## Self-pacing and proactivity") {
+		t.Error("pm-template.md: expected `## Self-pacing and proactivity` section")
 	}
-	// The core principle, lifted from mayor's "Propulsion Principle":
+	// The canonical proactivity-principle one-liner (gh #14) must be present
+	// as the floor, named so other prompts can reference it.
+	if !strings.Contains(s, "proactivity-principle:") {
+		t.Error("pm-template.md: expected the named `proactivity-principle:` canonical one-liner")
+	}
+	// The core principle, lifted from mayor's "Proactivity Principle":
 	// PMs act on signal, not on cron.
 	if !strings.Contains(s, "When you see signal, you act") {
-		t.Error("pm-template.md: expected `When you see signal, you act` propulsion tagline")
+		t.Error("pm-template.md: expected `When you see signal, you act` proactivity tagline")
 	}
 	// "Floor not ceiling" is the framing that re-positions sweeps as the
 	// minimum cadence, not the gate on between-sweep work.
@@ -2248,29 +2255,74 @@ func TestPMTemplateIncludesPropulsion(t *testing.T) {
 		"Self-paced filing during active arcs", // behavior 2
 		"Proactive backlog mining when idle",   // behavior 3
 		"Mayor will not babysit you",           // behavior 4
-		"Stop-loss is propulsion too",          // behavior 5
+		"Stop-loss is proactivity too",         // behavior 5
 	} {
 		if !strings.Contains(s, marker) {
-			t.Errorf("pm-template.md: expected propulsion behavior marker %q", marker)
+			t.Errorf("pm-template.md: expected proactivity behavior marker %q", marker)
 		}
 	}
-	// The propulsion section must precede the scheduler-reaction section,
+	// The proactivity section must precede the scheduler-reaction section,
 	// per mg-2f76's composition rule: PMs read "act on signal" first, then
 	// the scheduler reaction is positioned as the catch-all for events that
-	// don't have a more specific propulsion trigger.
-	propIdx := strings.Index(s, "## Self-pacing and propulsion")
+	// don't have a more specific proactivity trigger.
+	propIdx := strings.Index(s, "## Self-pacing and proactivity")
 	schedIdx := strings.Index(s, "## Reacting to scheduler fires")
 	if propIdx < 0 || schedIdx < 0 || propIdx >= schedIdx {
-		t.Errorf("pm-template.md: expected `## Self-pacing and propulsion` to precede `## Reacting to scheduler fires` (propIdx=%d, schedIdx=%d)", propIdx, schedIdx)
+		t.Errorf("pm-template.md: expected `## Self-pacing and proactivity` to precede `## Reacting to scheduler fires` (propIdx=%d, schedIdx=%d)", propIdx, schedIdx)
 	}
-	// The Cadence section's "Between sweeps" framing must reflect propulsion
+	// The legacy "propulsion" framing must be fully gone — mg-1345 renamed it.
+	if strings.Contains(s, "propulsion") || strings.Contains(s, "Propulsion") {
+		t.Error("pm-template.md: legacy `propulsion` wording should be gone after the mg-1345 rename to `proactivity`")
+	}
+	// The Cadence section's "Between sweeps" framing must reflect proactivity
 	// (active on signal), not the prior passive "stay idle" wording. This is
 	// the line Daniel's feedback most directly targeted.
 	if !strings.Contains(s, "active on signal") {
 		t.Error("pm-template.md: expected Cadence's `Between sweeps` line to say PMs remain `active on signal` (not `stay idle`)")
 	}
 	if strings.Contains(s, "Between sweeps you stay idle") {
-		t.Error("pm-template.md: legacy `Between sweeps you stay idle` wording should be replaced — it contradicts the propulsion section")
+		t.Error("pm-template.md: legacy `Between sweeps you stay idle` wording should be replaced — it contradicts the proactivity section")
+	}
+}
+
+// TestDefaultPromptsUseProactivityPrinciple locks in the mg-1345 rename
+// (gh #14, CloverRoss + Daniel): the canonical principle is "proactivity",
+// not the legacy "propulsion" framing, and the named one-liner ships in
+// mayor.md plus the crew/polecat prompts so it is referenceable everywhere.
+func TestDefaultPromptsUseProactivityPrinciple(t *testing.T) {
+	// mayor.md is the canonical home of the principle.
+	mayor, err := defaultPrompts.ReadFile("prompts/mayor.md")
+	if err != nil {
+		t.Fatalf("read mayor.md: %v", err)
+	}
+	ms := string(mayor)
+	if !strings.Contains(ms, "## The Proactivity Principle") {
+		t.Error("mayor.md: expected `## The Proactivity Principle` heading")
+	}
+	if !strings.Contains(ms, "proactivity-principle:") {
+		t.Error("mayor.md: expected the named `proactivity-principle:` canonical one-liner")
+	}
+
+	// No default-shipped prompt may retain the legacy "propulsion" framing,
+	// and each must carry the named principle so it can be referenced.
+	for _, rel := range []string{
+		"prompts/mayor.md",
+		"prompts/pm/pm-template.md",
+		"prompts/crew/doctor.md",
+		"prompts/templates/polecat.md",
+		"prompts/templates/polecat-qa.md",
+	} {
+		data, err := defaultPrompts.ReadFile(rel)
+		if err != nil {
+			t.Fatalf("read %s: %v", rel, err)
+		}
+		s := string(data)
+		if strings.Contains(s, "propulsion") || strings.Contains(s, "Propulsion") {
+			t.Errorf("%s: legacy `propulsion` wording should be gone after the mg-1345 rename", rel)
+		}
+		if !strings.Contains(s, "proactivity-principle") {
+			t.Errorf("%s: expected the named `proactivity-principle` so it is referenceable", rel)
+		}
 	}
 }
 
