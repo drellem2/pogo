@@ -32,6 +32,33 @@ default `--replay once` is at-most-once, firing once after a long sleep then
 rescheduling forward. Source of truth: `internal/scheduler/`; run
 `pogo schedule --help` for the full flag set.
 
+## Stall watcher
+
+A passive watcher inside pogod that rides the heartbeat loop and nudges the
+mayor when work piles up *behaviorally* — the mayor's process is healthy but
+its loop has stopped draining work. Two thresholds: an `available` work item
+the mayor owns (assigned to it, or unassigned) sitting unclaimed past an age
+limit, and the mayor's `new/` maildir holding an over-age message or more than
+a count ceiling. On a cross it sends one nudge per offending batch and appends a
+`stall_watch_fired` event to `~/.pogo/events.log`; a per-category cooldown caps
+the nudge rate. Running in pogod's *independent* heartbeat is the point — a
+watcher inside the mayor's own loop can't catch that loop skipping its own
+check-work / check-mail steps (gh drellem2/macguffin #12). Configure under
+`[stall_watch]` in `config.toml`:
+
+```toml
+[stall_watch]
+enabled = true                          # default true
+agent = "mayor"                         # which agent to watch
+unclaimed_item_age_threshold = "10m"    # Threshold A
+unread_mail_age_threshold = "10m"       # Threshold B (age)
+max_unread_mail_count = 5               # Threshold B (count)
+nudge_cooldown = "5m"                   # min gap between same-category nudges
+```
+
+Source of truth: `internal/stallwatch/`; see
+[docs/stall-watch-design.md](stall-watch-design.md).
+
 ## Agent registry
 
 Each agent has a directory under `~/.pogo/agents/<name>/` holding its prompt,

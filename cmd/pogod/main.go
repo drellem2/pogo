@@ -35,6 +35,7 @@ import (
 	"github.com/drellem2/pogo/internal/scheduler"
 	"github.com/drellem2/pogo/internal/search"
 	"github.com/drellem2/pogo/internal/server"
+	"github.com/drellem2/pogo/internal/stallwatch"
 	"github.com/drellem2/pogo/internal/workitem"
 
 	pogoPlugin "github.com/drellem2/pogo/pkg/plugin"
@@ -517,10 +518,52 @@ func main() {
 			log.Printf("pogod: scheduler load failed (%s): %v", schedPath, err)
 		} else {
 			sched = s
-			hb.OnTick = func(now time.Time) {
-				sched.Tick(context.Background(), now)
-			}
 			log.Printf("pogod: scheduler loaded from %s", schedPath)
+		}
+	}
+
+	// Build the stall watcher (gh drellem2/macguffin #12): the pogod-side third
+	// leg of the wedge-response triad. It rides the heartbeat loop and nudges
+	// the mayor when work piles up behaviorally — available items left
+	// unclaimed past a threshold, or unread mail accumulating — even while the
+	// mayor's process looks healthy. Running here, in pogod's
+	// guaranteed-independent heartbeat, is the whole point: a watcher inside the
+	// mayor's own loop can't catch that loop silently skipping its check-work /
+	// check-mail steps. See internal/stallwatch and docs/stall-watch-design.md.
+	var stallWatcher *stallwatch.Watcher
+	if cfg.StallWatch.Enabled {
+		stallWatcher = stallwatch.New(cfg.StallWatch, stallwatch.Options{
+			// Mirror the scheduler's PogodDeliverer: nudge the PTY when the
+			// agent is running, fall back to mail so the signal is durable when
+			// it is offline.
+			Nudge: func(agentName, message string) error {
+				if agentRegistry != nil {
+					a := agentRegistry.Get(agentName)
+					if a != nil && a.Status == agent.StatusRunning {
+						return a.NudgeWithMode(message, agent.NudgeWaitIdle, agent.DefaultNudgeTimeout)
+					}
+				}
+				return client.SendMGMail(agentName, "stall-watch", "stall-watch: work piling up", message)
+			},
+		})
+		log.Printf("pogod: stall watcher enabled (agent=%s item_age=%s mail_age=%s max_mail=%d cooldown=%s)",
+			cfg.StallWatch.Agent, cfg.StallWatch.UnclaimedItemAgeThreshold,
+			cfg.StallWatch.UnreadMailAgeThreshold, cfg.StallWatch.MaxUnreadMailCount,
+			cfg.StallWatch.NudgeCooldown)
+	}
+
+	// Drive both heartbeat-piggybacked subsystems from a single OnTick. The
+	// scheduler runs inline (it stores absolute fire times, so a clock jump is
+	// absorbed in the same goroutine). The stall watcher runs in a goroutine so
+	// a wait-idle nudge — which can block up to DefaultNudgeTimeout — never
+	// delays the next tick or the scheduler sweep; its per-category cooldown and
+	// internal mutex keep overlapping checks safe.
+	hb.OnTick = func(now time.Time) {
+		if sched != nil {
+			sched.Tick(context.Background(), now)
+		}
+		if stallWatcher != nil {
+			go stallWatcher.Check(now)
 		}
 	}
 

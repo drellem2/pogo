@@ -642,6 +642,93 @@ index_roots = ["/home/user/dev", "/work/repos"]
 	}
 }
 
+func TestStallWatchDefaults(t *testing.T) {
+	os.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	defer os.Unsetenv("XDG_CONFIG_HOME")
+
+	cfg := Load()
+	if !cfg.StallWatch.Enabled {
+		t.Error("stall watch should be enabled by default")
+	}
+	if cfg.StallWatch.Agent != DefaultStallWatchAgent {
+		t.Errorf("agent = %q, want %q", cfg.StallWatch.Agent, DefaultStallWatchAgent)
+	}
+	if cfg.StallWatch.UnclaimedItemAgeThreshold != DefaultUnclaimedItemAgeThreshold {
+		t.Errorf("unclaimed threshold = %v, want %v", cfg.StallWatch.UnclaimedItemAgeThreshold, DefaultUnclaimedItemAgeThreshold)
+	}
+	if cfg.StallWatch.UnreadMailAgeThreshold != DefaultUnreadMailAgeThreshold {
+		t.Errorf("mail age threshold = %v, want %v", cfg.StallWatch.UnreadMailAgeThreshold, DefaultUnreadMailAgeThreshold)
+	}
+	if cfg.StallWatch.MaxUnreadMailCount != DefaultMaxUnreadMailCount {
+		t.Errorf("max unread = %d, want %d", cfg.StallWatch.MaxUnreadMailCount, DefaultMaxUnreadMailCount)
+	}
+	if cfg.StallWatch.NudgeCooldown != DefaultStallNudgeCooldown {
+		t.Errorf("cooldown = %v, want %v", cfg.StallWatch.NudgeCooldown, DefaultStallNudgeCooldown)
+	}
+}
+
+func TestStallWatchConfigFile(t *testing.T) {
+	dir := t.TempDir()
+	os.Setenv("XDG_CONFIG_HOME", dir)
+	defer os.Unsetenv("XDG_CONFIG_HOME")
+
+	pogoDir := filepath.Join(dir, "pogo")
+	os.MkdirAll(pogoDir, 0755)
+	os.WriteFile(filepath.Join(pogoDir, "config.toml"), []byte(`
+[stall_watch]
+enabled = false
+agent = "director"
+unclaimed_item_age_threshold = "3m"
+unread_mail_age_threshold = "4m"
+max_unread_mail_count = 9
+nudge_cooldown = "90s"
+`), 0644)
+
+	cfg := Load()
+	if cfg.StallWatch.Enabled {
+		t.Error("stall watch should be disabled by config file")
+	}
+	if cfg.StallWatch.Agent != "director" {
+		t.Errorf("agent = %q, want director", cfg.StallWatch.Agent)
+	}
+	if cfg.StallWatch.UnclaimedItemAgeThreshold != 3*time.Minute {
+		t.Errorf("unclaimed threshold = %v, want 3m", cfg.StallWatch.UnclaimedItemAgeThreshold)
+	}
+	if cfg.StallWatch.UnreadMailAgeThreshold != 4*time.Minute {
+		t.Errorf("mail age threshold = %v, want 4m", cfg.StallWatch.UnreadMailAgeThreshold)
+	}
+	if cfg.StallWatch.MaxUnreadMailCount != 9 {
+		t.Errorf("max unread = %d, want 9", cfg.StallWatch.MaxUnreadMailCount)
+	}
+	if cfg.StallWatch.NudgeCooldown != 90*time.Second {
+		t.Errorf("cooldown = %v, want 90s", cfg.StallWatch.NudgeCooldown)
+	}
+}
+
+// TestStallWatchUnrelatedKeysDontDisableIt mirrors the refinery regression: a
+// [stall_watch] section that sets only a threshold must leave the default
+// enabled=true intact (the enabledSet flag distinguishes unset from false).
+func TestStallWatchUnrelatedKeysDontDisableIt(t *testing.T) {
+	dir := t.TempDir()
+	os.Setenv("XDG_CONFIG_HOME", dir)
+	defer os.Unsetenv("XDG_CONFIG_HOME")
+
+	pogoDir := filepath.Join(dir, "pogo")
+	os.MkdirAll(pogoDir, 0755)
+	os.WriteFile(filepath.Join(pogoDir, "config.toml"), []byte(`
+[stall_watch]
+nudge_cooldown = "2m"
+`), 0644)
+
+	cfg := Load()
+	if !cfg.StallWatch.Enabled {
+		t.Error("stall watch should remain enabled when only nudge_cooldown is set")
+	}
+	if cfg.StallWatch.NudgeCooldown != 2*time.Minute {
+		t.Errorf("cooldown = %v, want 2m", cfg.StallWatch.NudgeCooldown)
+	}
+}
+
 func TestParseStringArray(t *testing.T) {
 	cases := []struct {
 		input string

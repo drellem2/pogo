@@ -65,6 +65,35 @@ const DefaultIndexInterval = 2 * time.Minute
 // not a hot path. See internal/gitgc and mg-30d5.
 const DefaultGitGCInterval = time.Hour
 
+// Stall-watch defaults. The stall watcher is the pogod-side third leg of the
+// wedge-response triad (gh drellem2/macguffin #12): it rides pogod's heartbeat
+// loop and nudges the mayor when work piles up behaviorally (process healthy
+// but items unclaimed / mail unread). Because it runs in pogod's
+// guaranteed-independent heartbeat — not in the mayor's own loop — it catches
+// the one failure mode an Ocean-side watcher can't: the mayor's loop silently
+// dropping its check-work / check-mail steps. See internal/stallwatch and
+// docs/stall-watch-design.md.
+const (
+	// DefaultStallWatchAgent is the agent the watcher monitors. Only the mayor
+	// is in scope today (it is the sole behavioral-stall target), but the name
+	// is configurable so a future deployment can point it elsewhere.
+	DefaultStallWatchAgent = "mayor"
+	// DefaultUnclaimedItemAgeThreshold is how long an available work item
+	// assigned to (or pickup-expected by) the watched agent may sit before the
+	// watcher nudges. Mirrors the gh #12 spec's 600s.
+	DefaultUnclaimedItemAgeThreshold = 10 * time.Minute
+	// DefaultUnreadMailAgeThreshold is how old a message in the watched agent's
+	// new/ maildir may get before the watcher nudges. Mirrors gh #12's 600s.
+	DefaultUnreadMailAgeThreshold = 10 * time.Minute
+	// DefaultMaxUnreadMailCount is the unread-count ceiling above which the
+	// watcher nudges regardless of message age. Mirrors gh #12's 5.
+	DefaultMaxUnreadMailCount = 5
+	// DefaultStallNudgeCooldown is the minimum gap between two nudges for the
+	// same threshold category, so a persistent backlog produces one nudge per
+	// cooldown rather than one per heartbeat tick. Mirrors gh #12's 300s.
+	DefaultStallNudgeCooldown = 5 * time.Minute
+)
+
 // Config holds pogo daemon configuration.
 type Config struct {
 	Port            int
@@ -83,6 +112,38 @@ type Config struct {
 	Agents     AgentsConfig
 	Heartbeat  HeartbeatConfig
 	GitGC      GitGCConfig
+	StallWatch StallWatchConfig
+}
+
+// StallWatchConfig configures pogod's passive stall watcher, which rides the
+// heartbeat loop and nudges the watched agent (the mayor) when work piles up.
+// See internal/stallwatch and docs/stall-watch-design.md.
+//
+// Note on shape: gh drellem2/macguffin #12 sketched this as a nested JSON
+// stall_watch.agents.mayor.* block. pogo's config is flat single-line TOML
+// (parsed by loadConfigFile), and the mayor is the only behavioral-stall
+// target, so this is implemented as a single flat [stall_watch] section with a
+// configurable `agent` key rather than a per-agent map. The thresholds carry
+// the same meaning as the spec's *_seconds fields, expressed as Go durations.
+type StallWatchConfig struct {
+	// Enabled turns the watcher on. Defaults to true.
+	Enabled bool
+	// Agent is the macguffin agent name to watch. Empty falls back to
+	// DefaultStallWatchAgent ("mayor").
+	Agent string
+	// UnclaimedItemAgeThreshold is how long an available work item assigned to
+	// (or unassigned and pickup-expected by) Agent may sit before a nudge.
+	// Zero falls back to DefaultUnclaimedItemAgeThreshold.
+	UnclaimedItemAgeThreshold time.Duration
+	// UnreadMailAgeThreshold is how old a message in Agent's new/ maildir may
+	// get before a nudge. Zero falls back to DefaultUnreadMailAgeThreshold.
+	UnreadMailAgeThreshold time.Duration
+	// MaxUnreadMailCount is the unread-count ceiling above which a nudge fires
+	// regardless of age. Zero falls back to DefaultMaxUnreadMailCount.
+	MaxUnreadMailCount int
+	// NudgeCooldown is the minimum gap between two nudges for the same
+	// threshold category. Zero falls back to DefaultStallNudgeCooldown.
+	NudgeCooldown time.Duration
 }
 
 // GitGCConfig configures pogod's periodic polecat git garbage collector.
@@ -186,8 +247,9 @@ type RefineryConfig struct {
 // "unset" from "set to a zero value" (e.g. enabled = false).
 type parsedConfig struct {
 	Config
-	refineryEnabledSet bool
-	gitgcEnabledSet    bool
+	refineryEnabledSet   bool
+	gitgcEnabledSet      bool
+	stallWatchEnabledSet bool
 }
 
 // Load reads configuration from (in priority order):
@@ -207,6 +269,14 @@ func Load() *Config {
 		GitGC: GitGCConfig{
 			Enabled:  true,
 			Interval: DefaultGitGCInterval,
+		},
+		StallWatch: StallWatchConfig{
+			Enabled:                   true,
+			Agent:                     DefaultStallWatchAgent,
+			UnclaimedItemAgeThreshold: DefaultUnclaimedItemAgeThreshold,
+			UnreadMailAgeThreshold:    DefaultUnreadMailAgeThreshold,
+			MaxUnreadMailCount:        DefaultMaxUnreadMailCount,
+			NudgeCooldown:             DefaultStallNudgeCooldown,
 		},
 	}
 
@@ -248,6 +318,24 @@ func Load() *Config {
 		}
 		if len(fileCfg.GitGC.Repos) > 0 {
 			cfg.GitGC.Repos = fileCfg.GitGC.Repos
+		}
+		if fileCfg.stallWatchEnabledSet {
+			cfg.StallWatch.Enabled = fileCfg.StallWatch.Enabled
+		}
+		if fileCfg.StallWatch.Agent != "" {
+			cfg.StallWatch.Agent = fileCfg.StallWatch.Agent
+		}
+		if fileCfg.StallWatch.UnclaimedItemAgeThreshold > 0 {
+			cfg.StallWatch.UnclaimedItemAgeThreshold = fileCfg.StallWatch.UnclaimedItemAgeThreshold
+		}
+		if fileCfg.StallWatch.UnreadMailAgeThreshold > 0 {
+			cfg.StallWatch.UnreadMailAgeThreshold = fileCfg.StallWatch.UnreadMailAgeThreshold
+		}
+		if fileCfg.StallWatch.MaxUnreadMailCount > 0 {
+			cfg.StallWatch.MaxUnreadMailCount = fileCfg.StallWatch.MaxUnreadMailCount
+		}
+		if fileCfg.StallWatch.NudgeCooldown > 0 {
+			cfg.StallWatch.NudgeCooldown = fileCfg.StallWatch.NudgeCooldown
 		}
 	}
 
@@ -412,6 +500,30 @@ func loadConfigFile() (*parsedConfig, error) {
 				}
 			case "repos":
 				cfg.GitGC.Repos = parseStringArray(val)
+			}
+		case "stall_watch":
+			switch key {
+			case "enabled":
+				cfg.StallWatch.Enabled = val == "true"
+				cfg.stallWatchEnabledSet = true
+			case "agent":
+				cfg.StallWatch.Agent = unquotedVal
+			case "unclaimed_item_age_threshold":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.StallWatch.UnclaimedItemAgeThreshold = d
+				}
+			case "unread_mail_age_threshold":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.StallWatch.UnreadMailAgeThreshold = d
+				}
+			case "max_unread_mail_count":
+				if n, err := strconv.Atoi(unquotedVal); err == nil && n > 0 {
+					cfg.StallWatch.MaxUnreadMailCount = n
+				}
+			case "nudge_cooldown":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.StallWatch.NudgeCooldown = d
+				}
 			}
 		case "agents":
 			switch key {

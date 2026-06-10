@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // WorkItem represents a macguffin work item with its core fields.
@@ -17,6 +18,12 @@ type WorkItem struct {
 	Type     string `json:"type,omitempty"`
 	Priority string `json:"priority,omitempty"`
 	Tags     string `json:"tags,omitempty"`
+	// ModTime is the work item file's last-modified time. It is the best
+	// available proxy for how long an item has sat in its current status
+	// directory (mg rewrites/moves the file on status transitions), which the
+	// stall watcher uses to age unclaimed `available` items. Populated by
+	// ListFrom; zero when the file could not be stat'd.
+	ModTime time.Time `json:"mod_time,omitempty"`
 }
 
 // workspaceDir returns the macguffin workspace root.
@@ -38,11 +45,13 @@ var statusDirs = []struct {
 // List reads all work items from the macguffin workspace.
 // It scans available/, claimed/, and done/ directories.
 func List() ([]WorkItem, error) {
-	return listFrom(workspaceDir())
+	return ListFrom(workspaceDir())
 }
 
-// listFrom reads work items from a given workspace root (for testing).
-func listFrom(root string) ([]WorkItem, error) {
+// ListFrom reads work items from a given workspace root. It is exported so
+// out-of-package consumers (e.g. the stall watcher) can point it at a test
+// workspace or an alternate root rather than the default ~/.macguffin/work.
+func ListFrom(root string) ([]WorkItem, error) {
 	var items []WorkItem
 	for _, sd := range statusDirs {
 		dir := filepath.Join(root, sd.dir)
@@ -60,6 +69,9 @@ func listFrom(root string) ([]WorkItem, error) {
 			item, err := parseWorkItem(filepath.Join(dir, e.Name()), sd.status)
 			if err != nil {
 				continue // skip unparseable files
+			}
+			if info, err := e.Info(); err == nil {
+				item.ModTime = info.ModTime()
 			}
 			items = append(items, item)
 		}

@@ -62,7 +62,7 @@ func writeItem(t *testing.T, path, content string) {
 func TestListFrom(t *testing.T) {
 	root := setupTestWorkspace(t)
 
-	items, err := listFrom(root)
+	items, err := ListFrom(root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +96,7 @@ func TestListFrom(t *testing.T) {
 
 func TestListFromEmptyDir(t *testing.T) {
 	root := t.TempDir()
-	items, err := listFrom(root)
+	items, err := ListFrom(root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,11 +113,11 @@ func TestHandleWorkItems(t *testing.T) {
 	// Temporarily override listFrom by testing via the handler
 	// We'll test the HTTP handler end-to-end by calling it directly
 	// but first we need to make List() point at our test dir.
-	// Since List() calls listFrom(workspaceDir()), we test the handler
+	// Since List() calls ListFrom(workspaceDir()), we test the handler
 	// integration by calling listFrom and HandleWorkItems separately.
 
 	// Test listFrom directly for the data layer
-	items, err := listFrom(root)
+	items, err := ListFrom(root)
 	if err != nil {
 		t.Fatal(err)
 	}
