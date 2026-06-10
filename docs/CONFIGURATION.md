@@ -50,6 +50,25 @@ your repo's `build.sh` / `test.sh` (or a `.pogo/refinery.toml`). Worktrees and
 logs live under `~/.pogo/refinery/`; disable with `[refinery] enabled = false`.
 See [ARCHITECTURE.md](../ARCHITECTURE.md) §"The Refinery".
 
+**QA gate (hardcoded).** Before processing any MR, the refinery scans the
+macguffin workspace (`Config.MacguffinDir`, default `~/.macguffin/work`) for a
+work item with `type: qa` whose `source` matches the MR author (the work-item
+ID behind the branch). If a matching QA item sits in a pending state
+(`available` / `claimed` / `pending`), the merge is **held** — moved to
+`held` status and re-queued at the tail so other MRs proceed. The merge runs
+only once the matching QA item reaches `done`/`archive`, or when no matching QA
+item exists at all (the gate is opt-in per work item, but always-on as a
+mechanism). This is enforced in code — `internal/refinery/qa_gate.go`, called
+from `internal/refinery/refinery.go:499` — not a layered or optional pattern.
+The only knob is `MacguffinDir`: set it empty to disable the gate entirely.
+There is no per-project, per-repo, or per-branch toggle.
+
+The companion convention is the `polecat-qa` prompt template
+(`internal/agent/prompts/templates/polecat-qa.md`), which scripts the polecat
+that completes a QA item — verifying the source work item's acceptance criteria
+and reporting pass/fail. The refinery's gate enforces the existence and
+completion of the QA item independently of which polecat actually runs it.
+
 ## `pogo install`
 
 `pogo install` is one-step setup: start pogod, run `mg init`, and install the
