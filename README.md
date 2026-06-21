@@ -6,9 +6,9 @@ A daemon for agent-shaped work. Agents are UNIX processes — `ps` finds them, `
 
 A daemon runs in the background. A shell runs interactively. An **agent** is the newest process type: a long-lived process you prompt, supervise, and pipe like any other.
 
-Pogo makes agent-processes easy to work with. Spawn them, name them, list them, signal them, attach to them. Script a fleet or sit down and drive one by hand. Coordination happens through the filesystem — no database, no agent framework, no SDK. The process *is* the agent.
+Spawn them, name them, list them, signal them, attach to them. Script a fleet or drive one by hand. Coordination happens through the filesystem — no database, no agent framework, no SDK. The process *is* the agent.
 
-This is the operating system of the future, built from the primitives of the present. Pogo is the UNIX-native successor to Gas Town: the same autonomous-agent experience, none of the conceptual weight. Use it however fits you — build whatever workflow you want (coding, research, content, triage) out of the same few primitives, or work hands-on.
+Pogo is the UNIX-native successor to Gas Town: the same autonomous-agent experience, none of the conceptual weight. Build whatever workflow you want (coding, research, content, triage) out of the same few primitives, or work hands-on.
 
 ## Install
 
@@ -45,7 +45,7 @@ pogo agent spawn "add retry logic"    # one-off polecat
 mg mail send mayor --subject="priority change" --body="pause feature work"
 ```
 
-`attach` connects your terminal to the agent's PTY — you see what it sees. `nudge` writes to its input and waits for idle.
+`attach` connects your terminal to the agent's PTY. `nudge` writes to its input and waits for idle.
 
 | | Crew | Polecat |
 |---|------|---------|
@@ -59,8 +59,6 @@ Behavior is entirely prompt-defined. Edit `~/.pogo/agents/mayor.md` to change di
 ## Coordination: macguffin
 
 Pogo coordinates through [macguffin](https://github.com/drellem2/macguffin), not a database. Work items are markdown files. Mail is Maildir. Claims are atomic renames. State lives in `~/.macguffin/` — no server, no schema, no port.
-
-macguffin replaces Gas Town's beads, which was Dolt-backed: a SQL database with migrations, port management, and a daemon to babysit. macguffin is just the filesystem. Simpler, and more UNIX — `ls`, `cat`, and `mv` are the whole data layer.
 
 ```sh
 mg new "fix the auth token refresh bug"   # file work
