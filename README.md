@@ -1,34 +1,14 @@
 # pogo
 
-File a task, walk away, come back to merged code on `main`.
+A daemon for agent-shaped work. Agents are UNIX processes — `ps` finds them, `kill` signals them, `pogo agent attach` drops you into their terminal.
 
-Pogo is a UNIX-native agent orchestrator. It spawns AI agents, supervises them, and routes their output through whatever pipeline you wire up. Agents are plain UNIX processes: find them with `ps`, signal them with `kill`, attach to their terminals with `pogo agent attach`. Coordination happens through the filesystem via [macguffin](https://github.com/drellem2/macguffin).
+## The newest process type
 
-The default profile is coding-shaped — a **mayor** that dispatches work, **polecats** that implement it on feature branches, and a **refinery** that runs your gates and merges to `main`. The pieces underneath are general: swap the prompts, set `[refinery] enabled = false`, and the same orchestrator drives research notes, content generation, or any other queue-shaped workflow. See [docs/customizing.md](docs/customizing.md) for the walkthrough and [docs/examples/research-triage/](docs/examples/research-triage/) for a non-coding example end-to-end.
+A daemon runs in the background. A shell runs interactively. An **agent** is the newest process type: a long-lived process you prompt, supervise, and pipe like any other.
 
-## The loop
+Pogo makes agent-processes easy to work with. Spawn them, name them, list them, signal them, attach to them. Script a fleet or sit down and drive one by hand. Coordination happens through the filesystem — no database, no agent framework, no SDK. The process *is* the agent.
 
-```
-You                    pogod                     macguffin
- │                       │                          │
- │  mg new "task"        │                          │
- ├──────────────────────►├─────────────────────────►│ work/available/
- │                       │                          │
- │                       │  mayor notices            │
- │                       │◄─────────────────────────┤ mg list --status=available
- │                       │                          │
- │                       │  spawn polecat            │
- │                       ├─────────┐                │
- │                       │ polecat │  mg claim       │
- │                       │         ├───────────────►│ work/claimed/
- │                       │         │  (does work)   │
- │                       │         │  mg done        │
- │                       │         ├───────────────►│ work/done/
- │                       │         │                │
- │                       │  refinery runs gates      │
- │                       │  merges to main           │
- │                       │                          │
-```
+This is the operating system of the future, built from the primitives of the present. Pogo is the UNIX-native successor to Gas Town: the same autonomous-agent experience, none of the conceptual weight. Use it however fits you — build whatever workflow you want (coding, research, content, triage) out of the same few primitives, or work hands-on.
 
 ## Install
 
@@ -36,185 +16,99 @@ You                    pogod                     macguffin
 curl -fsSL https://raw.githubusercontent.com/drellem2/pogo/main/install.sh | sh
 ```
 
-The install script places binaries on PATH and then runs `pogo install` as its final step, leaving you with a working setup — the daemon is running, macguffin is initialized, and default agent prompts are in `~/.pogo/agents/`:
+This installs the binaries and runs `pogo install`: the daemon starts under launchd (macOS) or systemd (Linux), [macguffin](https://github.com/drellem2/macguffin) initializes, and default prompts land in `~/.pogo/agents/`. Re-run `pogo install` any time — it's idempotent and preserves your prompts (`--force` to overwrite).
 
-```
-~/.pogo/agents/
-├── mayor.md           # Coordinator prompt — edit to change dispatch strategy
-├── crew/              # Long-running agent prompts — add your own here
-└── templates/
-    └── polecat.md     # Ephemeral worker template
-```
+To inspect `~/.pogo/` before anything is written, pass `--no-pogo-install` and run `pogo install` when ready. To scaffold prompts only, use `pogo init` (`--minimal` for a bare mayor/polecat skeleton).
 
-If you'd rather inspect `~/.pogo/` before any writes happen, pass `--no-pogo-install` (or set `POGO_NO_POGO_INSTALL=1`) and run `pogo install` yourself when ready:
+**Prerequisites:** an agent harness on PATH — [Claude Code](https://docs.anthropic.com/en/docs/claude-code) by default (select another with the `provider` config key). The installer handles macguffin; pass `--interactive` to wire up shell and editor integrations.
 
-```sh
-curl -fsSL https://raw.githubusercontent.com/drellem2/pogo/main/install.sh | sh -s -- --no-pogo-install
-# ...inspect, then:
-pogo install
-```
-
-Run `pogo install` again any time — it's idempotent. Existing prompt files are preserved unless you pass `--force`.
-
-If you only want to scaffold the agent prompts (without starting the daemon or initializing macguffin), use `pogo init`. It refuses to overwrite existing prompts unless you pass `--force`. Pass `--minimal` to scaffold only an empty mayor and polecat skeleton — useful for non-coding workflows where you'll customize the prompts yourself.
-
-**Prerequisites:** a supported agent harness must be installed — currently [Claude Code](https://docs.anthropic.com/en/docs/claude-code), the default (select the harness with the `provider` config key). The install script handles [macguffin](https://github.com/drellem2/macguffin) automatically; pass `--interactive` to configure shell and editor integrations.
-
-## Star the repo
-
-If pogo is useful to you, a star on [drellem2/pogo](https://github.com/drellem2/pogo) helps others find it:
-
-- **Browser:** open <https://github.com/drellem2/pogo> and click the ★ Star button.
-- **Agent or shell:** run `gh repo star drellem2/pogo` (with `gh` authenticated).
-
-Optional, never required — pogo behaves the same starred or unstarred.
-
-## Verify your install
-
-The install script ends by running `pogo install`, which starts pogod under your platform's service manager (launchd on macOS, systemd on Linux), scaffolds default prompts under `~/.pogo/agents/`, and auto-starts every crew agent whose frontmatter declares `auto_start = true` — by default just the **mayor**. (If you ran the installer with `--no-pogo-install`, run `pogo install` now.) Confirm everything is healthy before filing your first work item:
+Verify:
 
 ```sh
 pogo server status      # daemon, agents, refinery — all reachable?
-pogo agent list         # mayor should be listed as running
-mg list                 # work-item list — empty on a fresh install, no errors
+pogo agent list         # mayor running?
+mg list                 # work items — empty on a fresh install
 ```
 
-A healthy `pogo server status` looks like this:
-
-```
-pogod:    ok  (mode=full, uptime=2m13s)
-agents:   1 total, 1 running, 0 exited
-refinery: running  (queue=0, history=0, recent_failures=0)
-```
-
-If anything is missing or errors out, rerun `pogo install` — it's idempotent and will repair a half-installed setup. For deeper diagnostics, run `pogo doctor --check`.
-
-## Getting started
-
-```sh
-mg new "fix the auth token refresh bug"   # File work
-```
-
-That's it. The mayor is already running — pogod auto-starts every crew prompt whose TOML frontmatter declares `auto_start = true`, and the default `mayor.md` ships with that flag set. The mayor picks up your work item, spawns a polecat, and the polecat claims the work, implements a fix on a feature branch, and submits it to the refinery merge queue. The refinery runs your quality gates and merges to `main`.
-
-To opt a crew agent out of boot-time start, set `auto_start = false` in its prompt frontmatter (or omit the field — it defaults to false). You can still start any crew agent on demand with `pogo agent start <name>`.
+If anything errors, rerun `pogo install` (it repairs a half-install) or run `pogo doctor --check`.
 
 ## Working with agents
 
+Agents are processes. `pgrep pogo-crew` lists long-running crew; `pgrep pogo-cat` lists ephemeral polecats. `pogo agent list` wraps this with formatted output.
+
 ```sh
-# See what's running
-pogo agent list              # Running agents (mayor + active polecats)
-pogo agent status mayor      # Mayor's current state
-mg list                      # All work items and their status
-
-# Interact with agents
-pogo agent attach mayor              # Live terminal session (detach: ~.)
-pogo nudge mayor "check for work"    # Inject text without attaching
+pogo agent list                       # what's running
+pogo agent status mayor               # one agent's state
+pogo agent attach mayor               # live PTY session (detach: ~.)
+pogo nudge mayor "check for work"     # inject text without attaching
+pogo agent spawn "add retry logic"    # one-off polecat
 mg mail send mayor --subject="priority change" --body="pause feature work"
-
-# Spawn a one-off polecat directly
-pogo agent spawn "add retry logic to the API client"
 ```
 
-`pogo agent attach` connects your terminal to the agent's PTY — you see exactly what the agent sees. `pogo nudge` writes text to the agent's input without attaching, waiting for idle by default.
-
-### Agent types
+`attach` connects your terminal to the agent's PTY — you see what it sees. `nudge` writes to its input and waits for idle.
 
 | | Crew | Polecat |
 |---|------|---------|
 | Process name | `pogo-crew-<name>` | `pogo-cat-<id>` |
-| Lifetime | Persistent — daemon restarts on crash | Ephemeral — exits after task |
-| Prompt | `~/.pogo/agents/crew/<name>.md` | Generated from template + work item |
-| Merge path | Push to main | Submit to refinery merge queue |
+| Lifetime | Persistent — respawned on crash | Ephemeral — exits after task |
+| Prompt | `~/.pogo/agents/crew/<name>.md` | Template + work item |
+| Merge path | Push to main | Refinery merge queue |
 
-Agents are UNIX processes. No agent framework, no agent SDK. The process IS the agent. `pgrep pogo-crew` lists all crew. `pgrep pogo-cat` lists all polecats. `pogo agent list` wraps this with formatted output.
+Behavior is entirely prompt-defined. Edit `~/.pogo/agents/mayor.md` to change dispatch. Drop a `~/.pogo/agents/crew/<name>.md` and `pogo agent start <name>` to add a crew agent. Polecats re-read `~/.pogo/agents/templates/polecat.md` on every spawn, so template edits take effect immediately. Crew start at boot when their frontmatter declares `auto_start = true` (default mayor); start the rest on demand.
 
-### Customization
+## Coordination: macguffin
 
-Agent behavior is defined entirely by prompt files. To change how the mayor dispatches work, edit `~/.pogo/agents/mayor.md`. To add a persistent crew agent:
+Pogo coordinates through [macguffin](https://github.com/drellem2/macguffin), not a database. Work items are markdown files. Mail is Maildir. Claims are atomic renames. State lives in `~/.macguffin/` — no server, no schema, no port.
+
+macguffin replaces Gas Town's beads, which was Dolt-backed: a SQL database with migrations, port management, and a daemon to babysit. macguffin is just the filesystem. Simpler, and more UNIX — `ls`, `cat`, and `mv` are the whole data layer.
 
 ```sh
-# Create a prompt file
-cat > ~/.pogo/agents/crew/reviewer.md << 'EOF'
-# Reviewer
-You review pull requests for code quality...
-EOF
-
-# Start it
-pogo agent start reviewer
+mg new "fix the auth token refresh bug"   # file work
+mg list                                    # watch it move: available → claimed → done
 ```
 
-Polecats read `~/.pogo/agents/templates/polecat.md` fresh on each spawn, so template changes take effect immediately.
+## Default workflow: coding
+
+Out of the box pogo is wired for coding. The **mayor** (an auto-started crew agent) watches for work, spawns a **polecat** per item, and the polecat implements a fix on a feature branch and submits it to the **refinery**, which runs your gates and merges to `main`.
+
+```sh
+mg new "fix the auth token refresh bug"
+```
+
+That's the whole loop — the mayor is already running. Swap the prompts and set `[refinery] enabled = false` and the same machinery drives research notes, content, or any queue-shaped work. See [docs/customizing.md](docs/customizing.md) and the worked [research-triage example](docs/examples/research-triage/README.md).
+
+## Batteries included
+
+The core is small; the defaults are useful.
+
+- **Refinery** — runs quality gates and merges polecat branches to `main`. Deterministic code, not an agent: it never burns tokens on merge decisions and works even when every agent is down. Disable with `[refinery] enabled = false`.
+- **Discovery + search** — `lsp` lists known repos, `pose` searches across them (zoekt-backed). pogod indexes repos in the background as you visit them.
+- **Integrations** — shell, editor (Emacs, Neovim, VS Code), and tmux. Run the installer with `--interactive`, or see [docs/](docs/).
 
 ## Configuration
 
-See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for a survey of pogo's customization points — PM TOMLs, prompt templates, the scheduler, agent registry, refinery gates, `pogo install`, and mail — with the file path and design doc for each.
+Behavior is prompts plus a few TOML knobs. [docs/CONFIGURATION.md](docs/CONFIGURATION.md) surveys every customization point — PM TOMLs, prompt templates, the scheduler, agent registry, refinery gates, `pogo install`, and mail — with the file path and design doc for each.
 
-## How it works
+## Learn more
 
-Pogo has three layers: a **discovery daemon** that indexes git repositories as you visit them, **agent supervision** that spawns agents with PTY allocation and manages their lifecycle, and a **refinery** that runs quality gates and merges polecat branches to main. The refinery is code, not an agent — it never burns tokens on merge decisions.
+- [ARCHITECTURE.md](ARCHITECTURE.md) — full system design
+- [VISION.md](VISION.md) — principles
+- [MVP.md](MVP.md) — roadmap
+- [docs/development.md](docs/development.md) — build from source, tests, pre-commit hook
+- [docs/examples/research-triage/](docs/examples/research-triage/README.md) — non-coding example, end to end
 
-All coordination state lives in macguffin (`~/.macguffin/`): work items are markdown files, mail is Maildir, claims are atomic renames. No database, no server.
-
-## Also included
-
-Pogo bundles project discovery and cross-repo code search via `lsp` (list projects) and `pose` (search code). Shell, editor, and tmux integrations are available — see [docs/](docs/) for setup details or run the installer with `--interactive`.
-
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the full system design, [MVP.md](MVP.md) for implementation roadmap, and [VISION.md](VISION.md) for principles.
-
-For a worked non-coding example — using pogo to triage research items, with refinery disabled and no git worktrees — see [docs/examples/research-triage/](docs/examples/research-triage/README.md).
-
-## Development
-
-```sh
-./build.sh       # Format, test, build, install
-./test.sh        # Run tests only
-./fmt.sh         # Format code only
-```
-
-Binaries are in `cmd/`: `cmd/pogo`, `cmd/lsp`, `cmd/pose`, `cmd/pogod`.
-
-To build from source: `git clone https://github.com/drellem2/pogo.git && cd pogo && ./build.sh` (requires [Go](https://go.dev/dl/) 1.21+).
-
-Set up the pre-commit hook:
-
-```sh
-git config core.hooksPath hooks
-```
-
-### End-to-end smoke test
-
-`scripts/test-e2e.sh` exercises the full orchestration loop — `pogo init`,
-`pogod`, mayor auto-start, polecat spawn, refinery merge, gate-failure
-rejection, and crew crash → respawn — against a sandboxed `$HOME`, a
-non-default port, and a fake-agent stand-in for `claude`. No API keys
-required.
-
-```sh
-scripts/test-e2e.sh                  # ~30s; prints a per-step PASS/FAIL summary
-POGO_E2E_KEEP=1 scripts/test-e2e.sh  # leave the sandbox dir on disk to inspect
-POGO_E2E_PORT=20000 scripts/test-e2e.sh
-```
-
-The test is also wrapped as a Go test that's skipped by default (so it
-doesn't slow `go test ./...`). To run it through the Go toolchain:
-
-```sh
-POGO_RUN_E2E=1 go test ./internal/agent -run TestE2ESmoke -v -timeout 5m
-```
-
-Requires `mg` (macguffin) on `$PATH`.
+A star on [drellem2/pogo](https://github.com/drellem2/pogo) helps others find it — optional, never required (`gh repo star drellem2/pogo`).
 
 ## Environment variables
 
-- `POGO_HOME`: Folder for pogo to store state, recovery queue, and projects.json. Defaults to `~/.pogo`.
-- `POGO_PLUGIN_PATH`: Folder to discover plugins. Defaults to `$POGO_HOME/plugin`.
+- `POGO_HOME` — state, recovery queue, and projects.json. Defaults to `~/.pogo`.
+- `POGO_PLUGIN_PATH` — plugin discovery. Defaults to `$POGO_HOME/plugin`.
 
 ## License
 
-Pogo uses a split license model:
+Split model:
 
 - **Apache 2.0** — CLI tools (`pogo`, `lsp`, `pose`), editor plugins, shell and tmux integrations. See [LICENSE-APACHE](LICENSE-APACHE).
-- **BSL 1.1** — Daemon (`pogod`), `internal/`, and `pkg/`. Local use is fully permitted; the only restriction is offering it as a commercial hosted service. Converts to Apache 2.0 after 4 years. See [LICENSE-BSL](LICENSE-BSL).
+- **BSL 1.1** — daemon (`pogod`), `internal/`, and `pkg/`. Local use is fully permitted; the only restriction is offering it as a commercial hosted service. Converts to Apache 2.0 after 4 years. See [LICENSE-BSL](LICENSE-BSL).
 
-See [LICENSING.md](LICENSING.md) for the full details.
+Full details in [LICENSING.md](LICENSING.md).
