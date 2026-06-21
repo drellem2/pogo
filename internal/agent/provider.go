@@ -19,7 +19,7 @@ const DefaultProviderID = "claude"
 // Code is the sole provider today (see internal/claude); the type exists so
 // every Claude-specific spawn decision is forced behind one explicit seam
 // instead of being scattered across config, agent, claude, and cmd/pogod. See
-// docs/multi-provider-architecture-survey.md §2 for the full design.
+// docs/design/multi-provider-architecture-survey.md §2 for the full design.
 //
 // Provider lives in package agent (rather than a standalone internal/provider
 // package) because its hooks take *agent.Agent: a separate package would create

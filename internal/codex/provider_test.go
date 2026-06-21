@@ -67,7 +67,7 @@ func TestProviderPromptInjection(t *testing.T) {
 
 // TestProviderNudgeProfile pins the empirically-calibrated nudge dialect. The
 // values were measured against a live Codex CLI 0.132.0 — see
-// docs/codex-nudge-calibration.md — and deliberately differ from Claude's:
+// docs/investigations/codex-nudge-calibration.md — and deliberately differ from Claude's:
 // codex must NOT inherit DefaultNudgeProfile blindly.
 func TestProviderNudgeProfile(t *testing.T) {
 	n := Provider.Nudge
@@ -119,7 +119,7 @@ func TestProviderHooks(t *testing.T) {
 }
 
 // TestProviderNudgeValues pins the exact calibrated values so a regression in
-// the measured profile is caught. See docs/codex-nudge-calibration.md.
+// the measured profile is caught. See docs/investigations/codex-nudge-calibration.md.
 func TestProviderNudgeValues(t *testing.T) {
 	want := agent.NudgeProfile{
 		NeedsInitialNudge:   true,

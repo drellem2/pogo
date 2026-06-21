@@ -32,7 +32,7 @@ package agent
 // Respawn. The first-party client always sends the handshake frame, so it
 // never lands here: a framed client that skipped the handshake would have
 // its data-frame headers (0x02, length bytes, …) streamed into the PTY as
-// keystrokes, corrupting the target. See docs/pty-investigation-2026-05-09.md
+// keystrokes, corrupting the target. See docs/investigations/pty-investigation-2026-05-09.md
 // for the rationale.
 //
 // Server → client traffic is unchanged: raw PTY output bytes, no framing.

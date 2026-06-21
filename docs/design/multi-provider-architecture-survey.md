@@ -3,7 +3,7 @@
 **Status:** architecture survey / design-of-record. Phase 2 of the multi-provider arc. Not implemented.
 **Origin:** mg-cd53 (phase 2 of the mg-fb9f arc; Daniel reminder 2026-05-20 08:32Z).
 **Author:** architect.
-**Predecessor:** `docs/harness-provider-research.md` (phase 1, mg-fb9f) — recommends **OpenAI Codex CLI** as provider #2, Gemini CLI as the later #3.
+**Predecessor:** `docs/design/harness-provider-research.md` (phase 1, mg-fb9f) — recommends **OpenAI Codex CLI** as provider #2, Gemini CLI as the later #3.
 **Successors:** phase-3 implementation tickets (filed alongside this doc, routed to mayor); phase-3 roadmap reflection (pm-pogo).
 
 > **Update (mg-b31b, 2026-05-20):** the arc shipped — 3A `mg-b56a`, 3B
@@ -203,7 +203,7 @@ into the open.
 ### Phase 3D — Codex provider e2e validation  [depends 3B]
 
 Full end-to-end validation of the Codex provider on a real workload — see
-`docs/codex-e2e-validation.md`. Outcome: a non-trivial dispatch completes
+`docs/investigations/codex-e2e-validation.md`. Outcome: a non-trivial dispatch completes
 through the real `agent.Registry` + `codex.Provider` pipeline; persona
 injection verified for both the polecat (worktree) and crew
 (`~/.pogo/agents/<name>/`) paths — the `CODEX_HOME` mapping floated in §4 risk 4

@@ -16,7 +16,7 @@ import (
 //
 // --dangerously-bypass-approvals-and-sandbox does NOT suppress this dialog —
 // it governs command approvals and the sandbox, not project trust. Verified
-// empirically against Codex 0.132.0; see docs/codex-nudge-calibration.md.
+// empirically against Codex 0.132.0; see docs/investigations/codex-nudge-calibration.md.
 //
 // The dialog body reads (Codex 0.132.0):
 //

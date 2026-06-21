@@ -10,7 +10,7 @@ covers the two safe ways to do that without losing your edits to the next
 > canonical-edit safety net (`.dist` files, `--force` backups, `--no-backup`)
 > is **specified but not yet shipped**: see follow-up tickets `mg-06cb`,
 > `mg-7c35`, `mg-6f9f` and the design at
-> [`prompt-customization-design.md`](prompt-customization-design.md). Until
+> [`prompt-customization-design.md`](design/prompt-customization-design.md). Until
 > those land, treat editing the canonical file as "back it up first" — see
 > [Backup hygiene](#backup-hygiene).
 
@@ -208,7 +208,7 @@ Drop-ins for a PM are keyed on the crew agent's name (the file under
 ## pm-pogo specifics
 
 Treat any item touching `internal/agent/prompts/` as high-impact: open
-the design doc at `docs/prompt-customization-design.md` before triaging.
+the design doc at `docs/design/prompt-customization-design.md` before triaging.
 ```
 
 This appends only to the `pm-pogo` synthesized prompt. To apply a
@@ -390,7 +390,7 @@ next run.
 
 - [`customizing.md`](customizing.md) — agent roster, polecat templates,
   refinery toggle. The broader "how to bend pogo to your workflow" guide.
-- [`prompt-customization-design.md`](prompt-customization-design.md) —
+- [`prompt-customization-design.md`](design/prompt-customization-design.md) —
   the design doc that this guide implements. Read it for the rationale,
   the failure-mode analysis, and the file-class boundary.
 - `pogo agent prompt --help` — `list`, `show`, `init`, `install`, `create`.

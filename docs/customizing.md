@@ -318,7 +318,7 @@ max_files_per_tree = 25000
 # How often the indexer re-walks every registered project to pick up changes.
 # The re-index is incremental, so a no-change tick is cheap; this interval
 # only bounds how long an edit takes to surface in search results. Default 2m.
-# See docs/indexing-strategy.md.
+# See docs/design/indexing-strategy.md.
 index_interval = "2m"
 
 # Optional strict mode. When set, ONLY git repos under one of these paths are

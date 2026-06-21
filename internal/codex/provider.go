@@ -8,8 +8,8 @@
 //
 // The nudge dialect was measured against a live Codex CLI (0.132.0) rather
 // than copied from Claude — Codex's TUI is Rust/ratatui, not Claude's
-// Node/Ink, and the two differ materially. See docs/codex-nudge-calibration.md
-// and docs/multi-provider-architecture-survey.md §3 Phase 3B.
+// Node/Ink, and the two differ materially. See docs/investigations/codex-nudge-calibration.md
+// and docs/design/multi-provider-architecture-survey.md §3 Phase 3B.
 package codex
 
 import (
@@ -32,7 +32,7 @@ import (
 // first time it launches in an unknown directory, and every polecat runs in a
 // fresh worktree. --dangerously-bypass-approvals-and-sandbox does NOT suppress
 // that dialog (it governs command approvals and the sandbox, not project
-// trust) — determined empirically; see docs/codex-nudge-calibration.md.
+// trust) — determined empirically; see docs/investigations/codex-nudge-calibration.md.
 // SessionHook is nil: Codex surfaces no mid-session modal that needs
 // dismissing (the quota/rate-limit notice is an inline message, and command
 // approvals are bypassed by the command flag).
@@ -65,7 +65,7 @@ var Provider = agent.Provider{
 
 	// Codex's Rust/ratatui TUI nudge dialect — every value measured against a
 	// live Codex CLI 0.132.0, NOT copied from Claude. See
-	// docs/codex-nudge-calibration.md for the raw measurements.
+	// docs/investigations/codex-nudge-calibration.md for the raw measurements.
 	Nudge: agent.NudgeProfile{
 		// The Codex TUI opens at an empty composer awaiting input; the task
 		// must be typed and submitted, so an initial nudge is required (the
@@ -99,7 +99,7 @@ var Provider = agent.Provider{
 		// dialog, not the composer (observed: a 1s threshold dropped the
 		// nudge's first word). 2s clears the dialog's quiet gap plus the
 		// hook's worst-case dismiss latency (~1.3s), so the nudge reliably
-		// lands in the ready composer. See docs/codex-nudge-calibration.md.
+		// lands in the ready composer. See docs/investigations/codex-nudge-calibration.md.
 		IdleThreshold: 2 * time.Second,
 	},
 

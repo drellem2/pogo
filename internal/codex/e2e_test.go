@@ -17,7 +17,7 @@ package codex_test
 //
 // The pogo-side pipeline (spawn, persona injection, nudge submission) is fully
 // asserted. Whether Codex's model call then succeeds depends on the OpenAI
-// account having quota — see docs/codex-nudge-calibration.md.
+// account having quota — see docs/investigations/codex-nudge-calibration.md.
 
 import (
 	"os"

@@ -11,7 +11,7 @@ investigation, so the code-volume analysis holds. (An earlier draft ran
 against a stale local checkout — see the corrected breakage section below.)
 
 This design note is the deliverable for acceptance bar #1 — mg-5b0d's first
-commit lands it verbatim as `docs/indexing-strategy.md`.
+commit lands it verbatim as `docs/design/indexing-strategy.md`.
 
 ## The question
 

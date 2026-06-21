@@ -56,7 +56,7 @@ const DefaultMaxFilesPerTree = 25000
 // no-change tick costs one Lstat per file — so the interval only bounds how
 // long a file change can take to surface in search results. Two minutes is a
 // comfortable default given every index consumer is request-driven. See
-// docs/indexing-strategy.md and mg-5b0d.
+// docs/design/indexing-strategy.md and mg-5b0d.
 const DefaultIndexInterval = 2 * time.Minute
 
 // DefaultGitGCInterval is how often pogod runs the polecat git garbage
@@ -72,7 +72,7 @@ const DefaultGitGCInterval = time.Hour
 // guaranteed-independent heartbeat — not in the mayor's own loop — it catches
 // the one failure mode an Ocean-side watcher can't: the mayor's loop silently
 // dropping its check-work / check-mail steps. See internal/stallwatch and
-// docs/stall-watch-design.md.
+// docs/design/stall-watch-design.md.
 const (
 	// DefaultStallWatchAgent is the agent the watcher monitors. Only the mayor
 	// is in scope today (it is the sole behavioral-stall target), but the name
@@ -101,7 +101,7 @@ type Config struct {
 	MaxFilesPerTree int
 	// IndexInterval is how often the timer-driven incremental indexer
 	// re-walks every registered project. Zero falls back to
-	// DefaultIndexInterval. See docs/indexing-strategy.md.
+	// DefaultIndexInterval. See docs/design/indexing-strategy.md.
 	IndexInterval time.Duration
 	// IndexRoots, when non-empty, restricts auto-registration to git repos
 	// under one of these paths (opt-in strict mode). Empty means the default
@@ -117,7 +117,7 @@ type Config struct {
 
 // StallWatchConfig configures pogod's passive stall watcher, which rides the
 // heartbeat loop and nudges the watched agent (the mayor) when work piles up.
-// See internal/stallwatch and docs/stall-watch-design.md.
+// See internal/stallwatch and docs/design/stall-watch-design.md.
 //
 // Note on shape: gh drellem2/macguffin #12 sketched this as a nested JSON
 // stall_watch.agents.mayor.* block. pogo's config is flat single-line TOML

@@ -15,7 +15,7 @@ import (
 // (comments, blank lines, multi-line array continuations) verbatim so the
 // inlined TOML block in a synthesized PM prompt looks like a hand-written
 // config rather than a rebuilt-from-AST one. Merge semantics follow the
-// design (docs/prompt-customization-design.md §A): scalars overwritten, arrays
+// design (docs/design/prompt-customization-design.md §A): scalars overwritten, arrays
 // REPLACED (not appended), new keys added, deep-merged within `[table]`
 // sections. Lexical order across drop-in files is later-wins.
 //

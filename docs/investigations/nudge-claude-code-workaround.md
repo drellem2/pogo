@@ -3,7 +3,7 @@
 **Status:** investigation in progress — test protocol picked, polecat-executed verification pending.
 **Origin:** mg-09b6 (Daniel directive 2026-05-18 19:20 BST — *"may be the wrong workaround now"*).
 **Author:** architect.
-**Sibling docs:** mg-ef6b's `rating-dialog-watcher-design.md` (same Claude Code PTY-interaction territory).
+**Sibling docs:** mg-ef6b's `docs/design/rating-dialog-watcher-design.md` (same Claude Code PTY-interaction territory).
 
 ## TL;DR — two candidates, two different dispositions
 

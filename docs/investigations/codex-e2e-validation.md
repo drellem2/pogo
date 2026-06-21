@@ -1,11 +1,11 @@
 # Codex CLI provider — Phase 3D end-to-end validation report
 
 **Status:** validation record for Phase 3D (mg-6599). Builds on the Phase 3B
-provider (mg-7f76) and its calibration record `docs/codex-nudge-calibration.md`.
+provider (mg-7f76) and its calibration record `docs/investigations/codex-nudge-calibration.md`.
 **Harness validated:** OpenAI Codex CLI **0.132.0** (`codex-cli 0.132.0`,
 `macos-aarch64`), model `gpt-5.5` (the ChatGPT-subscription default).
-**Predecessors:** `docs/multi-provider-architecture-survey.md` (design-of-record),
-`docs/codex-nudge-calibration.md` (3B calibration).
+**Predecessors:** `docs/design/multi-provider-architecture-survey.md` (design-of-record),
+`docs/investigations/codex-nudge-calibration.md` (3B calibration).
 **Origin:** Daniel reminder 2026-05-20 10:09Z green-lighting full e2e testing of
 the Codex provider once 3B landed.
 
@@ -118,7 +118,7 @@ directory. The 3B type-agnostic in-directory injection is correct for crew as-is
 
 ## 4 · Bar 3 — NudgeProfile calibration under a real dispatch
 
-The 3B `NudgeProfile` (`docs/codex-nudge-calibration.md`) held under the real
+The 3B `NudgeProfile` (`docs/investigations/codex-nudge-calibration.md`) held under the real
 non-trivial dispatch:
 
 - **Submit** — the nudged multi-clause task reached the composer and was

@@ -147,7 +147,7 @@ func logDir() string {
 // The list is harness-agnostic by design: agent-harness CLIs install into
 // one of ~/.local/bin, a global npm bin, or Homebrew, all of which are
 // covered below. A future provider that lands its binary somewhere exotic
-// could contribute extra dirs (see docs/multi-provider-architecture-survey.md
+// could contribute extra dirs (see docs/design/multi-provider-architecture-survey.md
 // §2.4 C13); none does today, so no provider plumbing is wired here.
 func launchdPath() string {
 	home, _ := os.UserHomeDir()

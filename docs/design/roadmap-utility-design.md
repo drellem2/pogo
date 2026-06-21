@@ -3,7 +3,7 @@
 **Status:** design / recommendation. Not implemented.
 **Origin:** mg-3069 (Daniel directive 2026-05-13). Open design questions answered by Daniel 2026-05-14 (Apple Reminders → architect).
 **Author:** architect.
-**Sibling docs:** `docs/spend-tracking-design.md` (the `mg spend` aggregator this consumes), `docs/product-manager-design.md` (PM toml schema, for contrast — see §3 on why we do *not* read it).
+**Sibling docs:** `docs/design/spend-tracking-design.md` (the `mg spend` aggregator this consumes), `docs/product-manager-design.md` (PM toml schema, for contrast — see §3 on why we do *not* read it).
 
 ## TL;DR
 
@@ -267,7 +267,7 @@ that … a low priority product line doesn't spend my whole token budget."
   (budgets are soft/epic-level) while adding the product-line *visibility* layer
   Daniel asked for. Rationing is a human/agent decision the tool *informs*.
 
-**Dependency:** this mode needs `mg spend` (see `docs/spend-tracking-design.md`).
+**Dependency:** this mode needs `mg spend` (see `docs/design/spend-tracking-design.md`).
 If `mg spend` is unavailable or returns nothing, `render` degrades gracefully —
 it prints the tree with budget columns blank rather than failing. The roadmap
 tree itself only needs `mg list`.
@@ -347,6 +347,6 @@ Per the mg-3069 routing section and `feedback_design_vs_exec_routing`:
 
 **References:** mg-3069 (this directive). mg-71da (archived 2026-05-02 — prior
 "don't bake roadmap into mg" investigation + reopen triggers; trigger #3 fired).
-`docs/spend-tracking-design.md` (`mg spend`, the budget-layer dependency).
+`docs/design/spend-tracking-design.md` (`mg spend`, the budget-layer dependency).
 `docs/product-manager-design.md` §2 (pogo PM toml schema — the thing we
 deliberately do *not* read).
