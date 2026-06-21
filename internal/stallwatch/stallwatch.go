@@ -21,7 +21,7 @@
 // its own check-work / check-mail steps (prompt drift, LLM cycle-skip), a
 // watcher living in that same loop can't catch it — watcher and watched drift
 // together. pogod's heartbeat is the only watcher with a guaranteed-independent
-// cadence. See docs/stall-watch-design.md.
+// cadence. See docs/design/stall-watch-design.md.
 package stallwatch
 
 import (

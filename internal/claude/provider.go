@@ -10,7 +10,7 @@ import "github.com/drellem2/pogo/internal/agent"
 // and the two lifecycle hooks.
 //
 // Phase 3A is a behavior-preserving refactor: this value reproduces today's
-// exact behavior. See docs/multi-provider-architecture-survey.md §2–3A.
+// exact behavior. See docs/design/multi-provider-architecture-survey.md §2–3A.
 var Provider = agent.Provider{
 	ID:     "claude",
 	Binary: "claude",

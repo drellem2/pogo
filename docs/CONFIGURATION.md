@@ -57,7 +57,7 @@ nudge_cooldown = "5m"                   # min gap between same-category nudges
 ```
 
 Source of truth: `internal/stallwatch/`; see
-[docs/stall-watch-design.md](stall-watch-design.md).
+[docs/design/stall-watch-design.md](design/stall-watch-design.md).
 
 ## Agent registry
 
@@ -65,7 +65,7 @@ Each agent has a directory under `~/.pogo/agents/<name>/` holding its prompt,
 PID, and last-activity state; `pogo agent start`/`stop` manage the lifecycle and
 `pogo agent diagnose <name>` reports health. A dead-process entry is now
 cleared on the next start so a stale record can't block a respawn (mg-427f /
-78b69d7). See [docs/agent-state-machine-design.md](agent-state-machine-design.md)
+78b69d7). See [docs/design/agent-state-machine-design.md](design/agent-state-machine-design.md)
 and [docs/operations.md](operations.md).
 
 ## Refinery / build.sh gates

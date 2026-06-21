@@ -4,7 +4,7 @@
 `codex.Provider` values in `internal/codex/provider.go`.
 **Harness measured:** OpenAI Codex CLI **0.132.0** (`codex-cli 0.132.0`,
 `macos-aarch64`), spawned in a PTY at pogo's default 200×50 winsize.
-**Predecessor:** `docs/multi-provider-architecture-survey.md` §3 Phase 3B.
+**Predecessor:** `docs/design/multi-provider-architecture-survey.md` §3 Phase 3B.
 
 The survey flagged the Codex nudge dialect as "the one genuine unknown" and
 required it be measured against a live Codex CLI rather than copied from

@@ -538,7 +538,7 @@ func main() {
 	// mayor's process looks healthy. Running here, in pogod's
 	// guaranteed-independent heartbeat, is the whole point: a watcher inside the
 	// mayor's own loop can't catch that loop silently skipping its check-work /
-	// check-mail steps. See internal/stallwatch and docs/stall-watch-design.md.
+	// check-mail steps. See internal/stallwatch and docs/design/stall-watch-design.md.
 	var stallWatcher *stallwatch.Watcher
 	if cfg.StallWatch.Enabled {
 		stallWatcher = stallwatch.New(cfg.StallWatch, stallwatch.Options{
@@ -753,7 +753,7 @@ func main() {
 	// Start the timer-driven incremental indexer: every index_interval it
 	// re-walks every registered project (incrementally — unchanged files cost
 	// only an Lstat) and scans index_roots for new repos. This replaces the
-	// event-based filesystem watcher. See docs/indexing-strategy.md and
+	// event-based filesystem watcher. See docs/design/indexing-strategy.md and
 	// mg-5b0d.
 	project.StartPeriodicIndexer(hbCtx, cfg.IndexInterval)
 

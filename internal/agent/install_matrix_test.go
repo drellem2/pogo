@@ -8,7 +8,7 @@ import (
 )
 
 // TestInstallMatrix is the end-to-end install→edit→update matrix from
-// docs/prompt-customization-design.md §B and "--force semantics, restated."
+// docs/design/prompt-customization-design.md §B and "--force semantics, restated."
 // Stamp v1, conflict detection, and --force-backup all participate in the
 // same gate; this table proves the seven externally-observable shapes match
 // the design exactly. The individual TestInstallPromptsConflictMatrix*/

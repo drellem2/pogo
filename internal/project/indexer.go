@@ -18,7 +18,7 @@ const fallbackIndexInterval = 2 * time.Minute
 // background goroutine that, every interval, scans the configured index_roots
 // for new repos and re-indexes every registered project through the existing
 // incremental path. It replaces the event-based filesystem watcher — see
-// docs/indexing-strategy.md and mg-5b0d.
+// docs/design/indexing-strategy.md and mg-5b0d.
 //
 // The re-index is incremental: indexRec reuses cached hashes on an unchanged
 // mtime, and serializeProjectIndex skips the zoekt rebuild when no content

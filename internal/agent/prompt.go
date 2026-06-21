@@ -1322,7 +1322,7 @@ func initPromptPlan(minimal bool) (map[string][]byte, error) {
 // InstallPrompts copies the default prompt files embedded in the binary to
 // ~/.pogo/agents/. When the canonical file already exists the install applies
 // the four-cell conflict matrix (see docs/prompt-customization.md and
-// docs/prompt-customization-design.md §B):
+// docs/design/prompt-customization-design.md §B):
 //
 //	                        | embed unchanged | embed changed
 //	------------------------+-----------------+-----------------------------

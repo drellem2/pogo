@@ -679,7 +679,7 @@ func TestInstallPromptsCrewWithExistingTemplatesDir(t *testing.T) {
 }
 
 // TestInstallPromptsConflictMatrixSkipsWhenEmbedUnchanged covers cell (b)
-// of the matrix in docs/prompt-customization-design.md §B: the user has
+// of the matrix in docs/design/prompt-customization-design.md §B: the user has
 // edited the canonical file in place, but the embedded prompt has not
 // changed since install. The install must skip (the embed hasn't moved,
 // so there is nothing new to write) and must not produce a .dist sidecar.

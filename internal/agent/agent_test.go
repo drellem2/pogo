@@ -422,7 +422,7 @@ func TestSpawnContextFileInjection(t *testing.T) {
 // CODEX_HOME-based variant for crew so the persona never lands inside a
 // checked-out repo's working tree. That variant was not implemented in 3B;
 // crew injection currently uses the same in-directory AGENTS.override.md path
-// as polecats. See docs/codex-e2e-validation.md.
+// as polecats. See docs/investigations/codex-e2e-validation.md.
 func TestSpawnContextFileInjectionCrew(t *testing.T) {
 	tmpDir := t.TempDir()
 	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
