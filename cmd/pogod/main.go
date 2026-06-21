@@ -51,6 +51,29 @@ var startTime time.Time
 var bindFlag = flag.String("bind", "", "address to bind the server to (default: 127.0.0.1)")
 var portFlag = flag.Int("port", 0, "port to listen on (default: 10000)")
 
+// registryLiveness implements scheduler.AgentLiveness against the agent
+// registry so the scheduler can garbage-collect mail-check-* schedules whose
+// target agent has vanished (gh drellem2/macguffin #15). A schedule addresses an
+// agent by its event identity (cat-/crew-<name>) or, for some crew schedules,
+// its bare name, so we match on both. An agent counts as alive when its process
+// is running, or when it's a restart-on-crash agent the registry still holds —
+// a transient mid-restart window must not reap its mail-check loop. Anything
+// else — no registry entry (stopped, or pogod restarted and lost its children),
+// or a terminally-exited no-restart agent — is gone.
+type registryLiveness struct{ reg *agent.Registry }
+
+func (l registryLiveness) IsAlive(scheduleAgent string) bool {
+	if l.reg == nil {
+		return false
+	}
+	for _, a := range l.reg.List() {
+		if a.Name == scheduleAgent || a.EventAgent() == scheduleAgent {
+			return a.Alive() || a.RestartOnCrash
+		}
+	}
+	return false
+}
+
 func healthHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Println("Visited /health")
 	fmt.Fprintf(w, "pogo is up and bouncing")
@@ -495,6 +518,15 @@ func main() {
 			}
 			a.Cleanup()
 			agentRegistry.Remove(a.Name)
+			// Eagerly reap this agent's mail-check loop so it stops firing the
+			// moment the agent is gone, rather than on the next Tick sweep
+			// (gh drellem2/macguffin #15). Match on both the bare name and the
+			// cat-/crew- event identity a schedule may be addressed by.
+			if sched != nil {
+				if n := sched.RemoveMailChecksForAgent(time.Now(), a.Name, a.EventAgent()); n > 0 {
+					log.Printf("agent %s: reaped %d stale mail-check schedule(s)", a.Name, n)
+				}
+			}
 		}
 	})
 
@@ -526,6 +558,10 @@ func main() {
 		if err != nil {
 			log.Printf("pogod: scheduler load failed (%s): %v", schedPath, err)
 		} else {
+			// Install the liveness checker so Tick garbage-collects
+			// mail-check-* schedules whose target agent has disappeared
+			// (gh drellem2/macguffin #15). Backed by the agent registry.
+			s.SetLiveness(registryLiveness{reg: agentRegistry})
 			sched = s
 			log.Printf("pogod: scheduler loaded from %s", schedPath)
 		}

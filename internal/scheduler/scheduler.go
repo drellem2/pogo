@@ -129,6 +129,23 @@ func (e *Entry) applyDefaults() {
 	}
 }
 
+// MailCheckIDPrefix is the schedule-id prefix every per-agent mail-check loop
+// uses (polecats and crew agents register `mail-check-<agent>` so the mayor can
+// reach them mid-task). Such a schedule is only meaningful while its target
+// agent's process is alive; once the agent is gone the schedule is dead weight
+// that fires every interval into a scheduler_fire_failed event. The GC sweep
+// below reaps them. See gh drellem2/macguffin #15.
+const MailCheckIDPrefix = "mail-check-"
+
+// AgentLiveness reports whether the agent addressed by a schedule still has a
+// live process. The scheduler consults it to garbage-collect mail-check-*
+// schedules whose target agent has vanished (gh drellem2/macguffin #15). pogod
+// backs this with its agent registry; an agent it doesn't know about — e.g.
+// after a pogod restart killed every child — counts as "not alive".
+type AgentLiveness interface {
+	IsAlive(scheduleAgent string) bool
+}
+
 // Deliverer abstracts the side of the scheduler that talks to the rest of
 // pogod. Production wires this to a NudgeOrMail-style helper; tests substitute
 // a recorder.
@@ -186,6 +203,10 @@ type Scheduler struct {
 	store     *store
 	deliverer Deliverer
 
+	// liveness, when set, lets Tick garbage-collect mail-check-* schedules
+	// whose target agent has disappeared. nil disables GC (most unit tests).
+	liveness AgentLiveness
+
 	// SkipWindow is how recent a fire must be (relative to "now") to fire
 	// under ReplaySkip. Defaults to 2 × tick interval — wide enough to cover
 	// normal scheduling jitter, tight enough to drop fires from a long sleep.
@@ -217,6 +238,14 @@ func New(path string, deliverer Deliverer) (*Scheduler, error) {
 		s.entries[entryKey{Agent: entry.Agent, ID: entry.ID}] = &entry
 	}
 	return s, nil
+}
+
+// SetLiveness installs the agent-liveness checker used to garbage-collect stale
+// mail-check schedules. Call once at startup before the heartbeat drives Tick.
+func (s *Scheduler) SetLiveness(l AgentLiveness) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.liveness = l
 }
 
 // Add inserts (or replaces) an entry, persists, and returns the canonical
@@ -387,6 +416,12 @@ func (s *Scheduler) List(agent string) []Entry {
 // or the reschedule (we still want to advance NextFire so a flaky deliverer
 // doesn't pin the same fire forever).
 func (s *Scheduler) Tick(ctx context.Context, now time.Time) []FireResult {
+	// Reap mail-check schedules for vanished agents before computing what's due,
+	// so a stale entry is removed instead of firing into a scheduler_fire_failed
+	// event. This is the backstop for the exit path no in-process hook can see —
+	// pogod restarting kills its children without firing onExit (gh #15).
+	s.GCStaleMailChecks(now)
+
 	s.mu.Lock()
 	due := s.dueLocked(now)
 	s.mu.Unlock()
@@ -527,6 +562,86 @@ func (s *Scheduler) dueLocked(now time.Time) []entryKey {
 		out[i] = p.key
 	}
 	return out
+}
+
+// GCStaleMailChecks sweeps every mail-check-* schedule whose target agent is no
+// longer alive (per the configured AgentLiveness) and removes it, emitting a
+// schedule_removed event (reason "agent_gone") for each. Returns the number
+// reaped. Called from Tick on every heartbeat, so a vanished agent's schedule
+// is collected within one tick — well inside its next fire interval, which is
+// what keeps scheduler_fire_failed events from accumulating. No-op when no
+// liveness checker is installed. See gh drellem2/macguffin #15.
+func (s *Scheduler) GCStaleMailChecks(now time.Time) int {
+	s.mu.Lock()
+	live := s.liveness
+	s.mu.Unlock()
+	if live == nil {
+		return 0
+	}
+	return s.reapMailChecks(now, func(agent string) bool { return !live.IsAlive(agent) })
+}
+
+// RemoveMailChecksForAgent eagerly reaps mail-check-* schedules addressed to any
+// of the given agent-identity aliases (a bare name and/or its cat-/crew- event
+// identity). pogod calls this from its onExit hook so a stopped or crashed
+// agent's mail-check loop is cleaned up immediately rather than waiting for the
+// next Tick sweep. Returns the number reaped.
+func (s *Scheduler) RemoveMailChecksForAgent(now time.Time, aliases ...string) int {
+	set := make(map[string]struct{}, len(aliases))
+	for _, a := range aliases {
+		if a != "" {
+			set[a] = struct{}{}
+		}
+	}
+	if len(set) == 0 {
+		return 0
+	}
+	return s.reapMailChecks(now, func(agent string) bool {
+		_, gone := set[agent]
+		return gone
+	})
+}
+
+// reapMailChecks removes every mail-check-* entry for which gone(entry.Agent)
+// reports true, persists, and emits a schedule_removed event (reason
+// "agent_gone") per removal. On a persist failure it rolls the deletions back
+// (keeping memory and disk consistent, matching Add/Remove) and returns 0 — the
+// next sweep retries. Caller must NOT hold s.mu.
+func (s *Scheduler) reapMailChecks(now time.Time, gone func(agent string) bool) int {
+	s.mu.Lock()
+	var staleKeys []entryKey
+	for k, e := range s.entries {
+		if strings.HasPrefix(e.ID, MailCheckIDPrefix) && gone(e.Agent) {
+			staleKeys = append(staleKeys, k)
+		}
+	}
+	if len(staleKeys) == 0 {
+		s.mu.Unlock()
+		return 0
+	}
+	saved := make([]*Entry, len(staleKeys))
+	for i, k := range staleKeys {
+		saved[i] = s.entries[k]
+		delete(s.entries, k)
+	}
+	if err := s.persistLocked(); err != nil {
+		for i, k := range staleKeys {
+			s.entries[k] = saved[i]
+		}
+		s.mu.Unlock()
+		log.Printf("scheduler: mail-check GC of %d entr(ies) failed to persist, rolled back: %v", len(staleKeys), err)
+		return 0
+	}
+	removed := make([]Entry, len(saved))
+	for i, e := range saved {
+		removed[i] = e.Clone()
+	}
+	s.mu.Unlock()
+
+	for _, e := range removed {
+		emitSchedulerRemovalEvent("agent_gone", e, now, nil)
+	}
+	return len(removed)
 }
 
 func (s *Scheduler) persistLocked() error {
