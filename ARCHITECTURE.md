@@ -344,6 +344,27 @@ fires, it delivers, it persists. It does not interpret the message or decide
 what the agent should do. The decision lives in the agent's prompt — the
 scheduler is just the wakeup substrate.
 
+**Stale mail-check GC (gh #15).** A schedule whose id starts with
+`mail-check-` only makes sense while its target agent is alive. When the agent
+disappears — stopped via `pogo agent stop`, crashed, or killed because pogod
+itself restarted — the schedule would otherwise keep firing every interval into
+a `scheduler_fire_failed` event. Two mechanisms reap it:
+
+- **Tick sweep (backstop).** Before computing what's due, every Tick removes
+  each `mail-check-*` entry whose target agent the registry no longer reports
+  alive. This covers the case no in-process hook can see — pogod restarting
+  kills its children without firing their exit callbacks. Reaped within one
+  heartbeat, so the schedule is gone well before its next fire interval.
+- **Eager onExit reap.** When the agent registry observes a non-restart agent
+  exit (stop or crash), pogod immediately removes that agent's `mail-check-*`
+  schedules rather than waiting for the next sweep.
+
+An agent counts as alive when its process is running, or when it is a
+restart-on-crash agent the registry still holds (so a transient mid-restart
+window does not reap a crew agent's loop). Every GC removal emits the same
+`schedule_removed` event as an explicit `rm`, tagged `reason: agent_gone`, so
+the sweep is auditable from `events.log` alone.
+
 ### Agent-side recipe
 
 A crew prompt that wants a sleep-resilient wakeup registers it on startup and
@@ -388,9 +409,10 @@ all moved their recurring schedules from Claude's in-process `CronCreate` to
   failure mode seen with short / generic IDs (mg-8e5d).
 - `internal/agent/prompts/templates/polecat.md` and `polecat-qa.md` — one
   per-polecat mail-check schedule with id `mail-check-<work-item-id>`. The
-  mayor cleans these up in step 3 of its coordination loop when stopping a
-  polecat — pogod does not auto-GC schedules whose target agent has been
-  stopped.
+  mayor removes these in step 3 of its coordination loop when stopping a
+  polecat; pogod also auto-GCs them as a backstop (see **Stale mail-check GC**
+  below) so an agent whose process vanishes without an explicit `schedule rm`
+  doesn't leave a schedule firing into the void.
 - `internal/agent/prompts/mayor.md` — unchanged. The mayor's in-process
   coordination loop still uses `ScheduleWakeup` for dynamic self-pacing
   (it's event-driven through mail and idempotent across sleep, so missed

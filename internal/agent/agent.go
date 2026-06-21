@@ -176,6 +176,11 @@ func (a *Agent) alive() bool {
 	return pidAlive(a.PID)
 }
 
+// Alive reports whether the agent's OS process is still running. Exported for
+// the scheduler's stale-mail-check GC (gh drellem2/macguffin #15), which must
+// distinguish a live agent from one whose process has died.
+func (a *Agent) Alive() bool { return a.alive() }
+
 // eventAgent returns the agent identity string used in event log envelopes.
 // Mirrors the identity convention from docs/event-log.md: crew-<name> or cat-<name>.
 func (a *Agent) eventAgent() string {
