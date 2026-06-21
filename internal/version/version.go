@@ -1,7 +1,7 @@
 package version
 
 // Version is set by goreleaser ldflags or bump-version.sh
-var Version = "0.2.1"
+var Version = "0.2.2"
 
 // Build is the short commit hash, set by goreleaser ldflags
 var Build = "dev"
