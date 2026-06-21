@@ -28,6 +28,7 @@ import (
 	"github.com/drellem2/pogo/internal/gitgc"
 	"github.com/drellem2/pogo/internal/health"
 	"github.com/drellem2/pogo/internal/heartbeat"
+	"github.com/drellem2/pogo/internal/pathenv"
 	"github.com/drellem2/pogo/internal/platform/sleep"
 	"github.com/drellem2/pogo/internal/project"
 	"github.com/drellem2/pogo/internal/providers"
@@ -370,6 +371,14 @@ func resolveAgentProvider(id string) *agent.Provider {
 func main() {
 	flag.Parse()
 	startTime = time.Now()
+
+	// Repair PATH before spawning anything. Under launchd/systemd pogod inherits
+	// a minimal or empty PATH, which breaks bare-name subprocess lookups such as
+	// the scheduler/refinery `mg mail send` fallback (mg-905f). Do this first so
+	// every child spawned below resolves mg/gh/git without absolute paths.
+	if err := pathenv.Ensure(); err != nil {
+		fmt.Printf("Warning: could not augment PATH: %v\n", err)
+	}
 
 	// Acquire lockfile
 	lock, err := lockfile.New(filepath.Join(os.TempDir(), "pogo.pid"))
