@@ -278,6 +278,109 @@ func TestHandleStart_MayorFallbackNudge(t *testing.T) {
 	}
 }
 
+// wedgeDeadCrewViaPrompt writes a minimal crew prompt for name, then spawns a
+// dead-on-arrival process under that name and waits for it to exit, leaving a
+// stale registry entry (dead pid, status=exited) — the gh #19 scenario where a
+// crew agent's loop exited cleanly without re-arming. Returns the wedged agent.
+// The prompt file is what lets a subsequent StartCrewAgent recover the entry.
+func wedgeDeadCrewViaPrompt(t *testing.T, reg *Registry, name string) *Agent {
+	t.Helper()
+	promptPath := filepath.Join(CrewPromptDir(), name+".md")
+	if err := os.WriteFile(promptPath, []byte("# "+name+"\n"), 0644); err != nil {
+		t.Fatalf("write prompt: %v", err)
+	}
+	dead, err := reg.Spawn(SpawnRequest{
+		Name:           name,
+		Type:           TypeCrew,
+		Command:        []string{"true"},
+		RestartOnCrash: true,
+	})
+	if err != nil {
+		t.Fatalf("Spawn wedged %s: %v", name, err)
+	}
+	<-dead.Done()
+	if dead.alive() {
+		t.Fatalf("agent %s should be dead after exit", name)
+	}
+	if reg.Get(name) == nil {
+		t.Fatalf("agent %s should still be wedged in registry after clean exit", name)
+	}
+	return dead
+}
+
+// gh #19, Fix 3 at the CLI layer: `pogo agent start <name>` recovers a wedged
+// crew agent. This exercises the full server path — handleStart →
+// StartCrewAgent (prompt lookup, command template, frontmatter) → Spawn's
+// dead-process overwrite — that the registry-level TestStartOverwritesDeadRegistration
+// bypasses by calling reg.Spawn directly. The literal recovery from the issue:
+// no systemctl restart, no manual registry surgery.
+func TestHandleStart_RecoversWedgedCrewAgent(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	if err := InitPromptDirs(); err != nil {
+		t.Fatalf("InitPromptDirs: %v", err)
+	}
+
+	reg, err := NewRegistry(filepath.Join(tmpHome, "sockets"))
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	defer reg.StopAll(2 * time.Second)
+	reg.SetCommandConfig(catCommandConfig{})
+
+	dead := wedgeDeadCrewViaPrompt(t, reg, "wedged-crew")
+
+	// `pogo agent start wedged-crew` over the wire — must return 201 and start a
+	// fresh process, overwriting the stale entry rather than refusing with 409
+	// "already running" against the dead pid.
+	fresh := startAgentViaAPI(t, reg, "wedged-crew")
+	if !fresh.alive() {
+		t.Error("recovered agent should be alive")
+	}
+	if fresh.PID == dead.PID {
+		t.Errorf("expected a fresh pid, got the dead one %d", dead.PID)
+	}
+	if reg.Get("wedged-crew") != fresh {
+		t.Error("registry should now hold the fresh agent")
+	}
+}
+
+// gh #19, Fix 1 at the CLI layer: `pogo agent stop <name>` clears a wedged crew
+// agent. Exercises handleAgent's DELETE branch → Stop's dead-process clear, so
+// stop is idempotent and a later start is unblocked. The registry-level
+// TestStopClearsDeadRestartAgent calls reg.Stop directly; this covers the HTTP
+// status mapping (204 No Content, not 404).
+func TestHandleStop_ClearsWedgedCrewAgent(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	if err := InitPromptDirs(); err != nil {
+		t.Fatalf("InitPromptDirs: %v", err)
+	}
+
+	reg, err := NewRegistry(filepath.Join(tmpHome, "sockets"))
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	defer reg.StopAll(2 * time.Second)
+	reg.SetCommandConfig(catCommandConfig{})
+
+	wedgeDeadCrewViaPrompt(t, reg, "wedged-stop")
+
+	req := httptest.NewRequest("DELETE", "/agents/wedged-stop", nil)
+	req.SetPathValue("name", "wedged-stop")
+	rr := httptest.NewRecorder()
+	reg.handleAgent(rr, req)
+
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("DELETE on wedged agent: status = %d, want 204; body=%s", rr.Code, rr.Body.String())
+	}
+	if reg.Get("wedged-stop") != nil {
+		t.Error("stop should have cleared the stale registration so a later start is unblocked")
+	}
+}
+
 // TestHandleStart_PromptNotFoundStructured verifies that handleStart
 // returns a JSON-bodied 404 with reason="prompt-not-found" when the
 // requested crew prompt is missing. This is the server side of the

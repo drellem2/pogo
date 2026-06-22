@@ -2,6 +2,15 @@
 
 Operational runbooks for managing a running pogo deployment. This document is the canonical reference for "I need to do something to pogod" — start here before reaching for `kill`.
 
+## Recovering a single wedged agent
+
+An agent whose process has died — a crew loop that exited cleanly without re-arming, a crash whose respawn failed — leaves a stale entry in pogod's in-memory registry (`pogo agent list` shows `status=exited` with the old pid). Recovering it does **not** require a daemon restart; both recovery verbs handle a dead-process entry directly (gh #19):
+
+- `pogo agent stop <name>` — when the registered process is already dead, stop clears the stale entry and returns success (idempotent). Use this to unwedge an agent you don't want to immediately restart.
+- `pogo agent start <name>` — overwrites a dead-process registration rather than refusing with `already running`, so start "just works" against a stale entry and brings the agent back in one step.
+
+A **live** agent is still protected: `start` refuses a duplicate of a running process, and `stop` signals it normally. So there is no need to `systemctl restart pogo.service` / bounce launchd to recover one wedged agent — that bounces the whole fleet. Reserve the daemon restart tiers below for pogod itself misbehaving.
+
 ## Pogod restart policy
 
 `pogod` runs under launchd with `KeepAlive=true` (see `scripts/launchd/com.pogo.daemon.plist`). That means **any uncoordinated kill is a loop**: launchd relaunches the daemon within seconds, and if the caller then re-evaluates "pogod looks broken — kill it again," the system gets stuck in a kill→relaunch→kill cycle. The decision recorded in mg-f5fc is that callers (polecats, crew agents, humans at a terminal) follow a three-tier escalation. Try tier 1 first; only escalate when the situation matches the criteria below.
