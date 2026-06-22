@@ -264,6 +264,21 @@ type Registry struct {
 	// goroutines (scheduled by the OnExit hook for restart_on_crash agents)
 	// so the registry can be torn down without an agent coming back.
 	shutdown bool
+
+	// stallSchedules, when set, supplies the recurring cron schedules targeting
+	// an agent so diagnose can suppress the stalled label during normal
+	// between-cron idle (mg-5b23). pogod wires it to its scheduler; nil (the
+	// default, and what unit tests use) disables cron-aware suppression.
+	stallSchedules StallScheduleProvider
+}
+
+// SetStallScheduleProvider installs the cron-schedule lookup used by diagnose to
+// distinguish by-design between-cron idle from a genuine wedge. Call once at
+// startup before agents are diagnosed.
+func (r *Registry) SetStallScheduleProvider(p StallScheduleProvider) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.stallSchedules = p
 }
 
 // SetOnExit sets the callback invoked when any agent exits.

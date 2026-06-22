@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/nightlyone/lockfile"
@@ -72,6 +73,46 @@ func (l registryLiveness) IsAlive(scheduleAgent string) bool {
 		}
 	}
 	return false
+}
+
+// schedulerStallWindows implements agent.StallScheduleProvider against the
+// scheduler so diagnose can tell a cron-driven agent's by-design between-cron
+// idle from a genuine wedge (mg-5b23). For each recurring cron schedule
+// addressed to the agent it reports the schedule's last/next firing and the
+// interval between firings; one-shot and unparseable schedules contribute
+// nothing.
+type schedulerStallWindows struct{ sched *scheduler.Scheduler }
+
+func (p schedulerStallWindows) CronWindowsForAgent(agentIdentity string) []agent.CronWindow {
+	if p.sched == nil {
+		return nil
+	}
+	now := time.Now()
+	// A schedule may address an agent by its event identity (crew-/cat-<name>)
+	// or, for some crew schedules, its bare name — mirror registryLiveness and
+	// match either. List filters on exact Agent, so query both forms.
+	aliases := []string{agentIdentity}
+	if bare := strings.TrimPrefix(strings.TrimPrefix(agentIdentity, "crew-"), "cat-"); bare != agentIdentity {
+		aliases = append(aliases, bare)
+	}
+	var windows []agent.CronWindow
+	for _, alias := range aliases {
+		for _, e := range p.sched.List(alias) {
+			if e.OneShot {
+				continue
+			}
+			interval := e.CronInterval(now)
+			if interval <= 0 {
+				continue
+			}
+			windows = append(windows, agent.CronWindow{
+				LastFire: e.LastFire,
+				NextFire: e.NextFire,
+				Interval: interval,
+			})
+		}
+	}
+	return windows
 }
 
 func healthHandler(w http.ResponseWriter, r *http.Request) {
@@ -563,6 +604,10 @@ func main() {
 			// (gh drellem2/macguffin #15). Backed by the agent registry.
 			s.SetLiveness(registryLiveness{reg: agentRegistry})
 			sched = s
+			// Make diagnose cron-aware: a crew agent driven by a recurring cron
+			// is idle by design between firings and must not be flagged as
+			// stalled within one cron interval of its last firing (mg-5b23).
+			agentRegistry.SetStallScheduleProvider(schedulerStallWindows{sched: s})
 			log.Printf("pogod: scheduler loaded from %s", schedPath)
 		}
 	}

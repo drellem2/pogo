@@ -97,12 +97,39 @@ type DiagnoseInfo struct {
 	ProcessAlive bool `json:"process_alive"`
 	// StallThreshold is the configured threshold for this agent type.
 	StallThreshold string `json:"stall_threshold"`
-	// Stalled is true when the agent's idle time exceeds its stall threshold.
+	// Stalled is true when the agent's idle time exceeds its stall threshold
+	// AND the idle is not explained by a recurring cron schedule (see
+	// CronCovered).
 	Stalled bool `json:"stalled"`
+	// CronCovered is true when the agent's idle would otherwise cross the stall
+	// threshold but is suppressed because the agent is within one cron interval
+	// of its last scheduled firing — between-cron idle is by design for a
+	// cron-driven crew agent, not a wedge (mg-5b23).
+	CronCovered bool `json:"cron_covered,omitempty"`
 	// Health is a summary string: "healthy", "idle", "stalled", "exited", or "dead".
 	Health string `json:"health"`
 	// RecentOutputTail is the last ~500 bytes of PTY output for quick triage.
 	RecentOutputTail string `json:"recent_output_tail,omitempty"`
+}
+
+// CronWindow is the minimal view of a recurring cron schedule that stall
+// detection needs to decide whether an agent's idle is by-design between-cron
+// idle. pogod builds these from its scheduler; LastFire is the schedule's most
+// recent firing (zero if it has not fired since pogod started), NextFire its
+// upcoming firing, and Interval the spacing between consecutive firings.
+type CronWindow struct {
+	LastFire time.Time
+	NextFire time.Time
+	Interval time.Duration
+}
+
+// StallScheduleProvider supplies the recurring cron schedules targeting an
+// agent identity ("crew-<name>" / "cat-<name>") so stall detection can tell a
+// normal between-cron idle from a genuine wedge. pogod backs this with its
+// scheduler; a nil provider disables cron-aware suppression, which is the
+// default and what unit tests use.
+type StallScheduleProvider interface {
+	CronWindowsForAgent(agentIdentity string) []CronWindow
 }
 
 // StallThresholdFor returns the stall detection threshold for the given agent type.
@@ -113,28 +140,48 @@ func StallThresholdFor(t AgentType) time.Duration {
 	return StallThresholdPolecat
 }
 
-// diagnoseAgent builds a DiagnoseInfo for the given agent.
+// diagnoseAgent builds a DiagnoseInfo for the given agent with no cron-aware
+// stall suppression. It is the cron-unaware path used by unit tests and any
+// caller that has no schedule provider; production code goes through
+// Registry.diagnose, which threads the agent's cron windows.
 func diagnoseAgent(a *Agent) DiagnoseInfo {
+	return diagnoseAgentAt(a, time.Now(), nil)
+}
+
+// diagnoseAgentAt builds a DiagnoseInfo as of now, suppressing the stalled
+// label when the agent's idle is explained by a recurring cron schedule (see
+// withinCronInterval and mg-5b23). now and windows are injected so the logic is
+// deterministically testable.
+func diagnoseAgentAt(a *Agent, now time.Time, windows []CronWindow) DiagnoseInfo {
 	info := agentInfo(a)
 	lastWrite := a.outputBuf.LastWriteTime()
 	threshold := StallThresholdFor(a.Type)
 
 	var idleDur time.Duration
 	if !lastWrite.IsZero() {
-		idleDur = time.Since(lastWrite)
+		idleDur = now.Sub(lastWrite)
 	}
 
 	// Check if the OS process is still alive via kill(pid, 0).
 	processAlive := pidAlive(a.PID)
 
-	// Determine overall health.
+	// An agent past its stall threshold is only a genuine wedge when its idle
+	// is not explained by waiting between cron firings: a cron-driven crew
+	// agent (e.g. doctor's */30 mail-check) produces no PTY output for the
+	// whole between-cron gap, which is by design (mg-5b23).
+	idlePastThreshold := !lastWrite.IsZero() && idleDur >= threshold
+	cronCovered := idlePastThreshold && withinCronInterval(now, windows)
+	stalled := idlePastThreshold && !cronCovered
+
+	// Determine overall health. A cron-covered agent reports "idle" rather than
+	// "stalled" — its idle exceeds threshold/2 by construction.
 	health := "healthy"
 	switch {
 	case info.Status == StatusExited:
 		health = "exited"
 	case a.PID > 0 && !processAlive && info.Status == StatusRunning:
 		health = "dead"
-	case !lastWrite.IsZero() && idleDur >= threshold:
+	case stalled:
 		health = "stalled"
 	case !lastWrite.IsZero() && idleDur >= threshold/2:
 		health = "idle"
@@ -149,10 +196,35 @@ func diagnoseAgent(a *Agent) DiagnoseInfo {
 		IdleDuration:     idleDur.Truncate(time.Second).String(),
 		ProcessAlive:     processAlive,
 		StallThreshold:   threshold.String(),
-		Stalled:          !lastWrite.IsZero() && idleDur >= threshold,
+		Stalled:          stalled,
+		CronCovered:      cronCovered,
 		Health:           health,
 		RecentOutputTail: tail,
 	}
+}
+
+// withinCronInterval reports whether now falls within one cron interval of the
+// most recent scheduled firing among the given cron windows. When true the
+// agent's current idle is the expected gap between firings and must not be
+// flagged as a stall. A window with no usable interval is ignored; one that has
+// never fired is anchored to the firing one interval before its NextFire.
+func withinCronInterval(now time.Time, windows []CronWindow) bool {
+	for _, w := range windows {
+		if w.Interval <= 0 {
+			continue
+		}
+		last := w.LastFire
+		if last.IsZero() && !w.NextFire.IsZero() {
+			last = w.NextFire.Add(-w.Interval)
+		}
+		if last.IsZero() {
+			continue
+		}
+		if now.Sub(last) < w.Interval {
+			return true
+		}
+	}
+	return false
 }
 
 // OutputAPIRequest query params for GET /agents/:name/output.
@@ -299,7 +371,22 @@ func (r *Registry) handleDiagnose(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(diagnoseAgent(agent))
+	json.NewEncoder(w).Encode(r.diagnose(agent))
+}
+
+// diagnose builds a DiagnoseInfo for an agent, consulting the registry's
+// stall-schedule provider (if installed) so a cron-driven agent's between-cron
+// idle is not reported as stalled (mg-5b23).
+func (r *Registry) diagnose(a *Agent) DiagnoseInfo {
+	r.mu.RLock()
+	provider := r.stallSchedules
+	r.mu.RUnlock()
+
+	var windows []CronWindow
+	if provider != nil {
+		windows = provider.CronWindowsForAgent(a.EventAgent())
+	}
+	return diagnoseAgentAt(a, time.Now(), windows)
 }
 
 // NudgeAPIResponse is returned for wait-idle nudges to report delivery status.

@@ -795,7 +795,11 @@ Health states:
   idle     — running but quiet for over half the stall threshold
   stalled  — running but quiet for longer than the stall threshold
   exited   — process has exited
-  dead     — registered as running but OS process is gone`,
+  dead     — registered as running but OS process is gone
+
+A cron-driven agent (e.g. a */30 mail-check) is idle by design between firings.
+While it is within one cron interval of its last scheduled firing it reports
+"idle", not "stalled", even past the threshold — see cron_covered in --json.`,
 		Args: cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			diag, err := client.DiagnoseAgent(args[0])
@@ -818,6 +822,10 @@ Health states:
 				}
 				fmt.Printf("Stall threshold: %s\n", diag.StallThreshold)
 				fmt.Printf("Health:         %s\n", diag.Health)
+				if diag.CronCovered {
+					fmt.Printf("\nℹ Idle past the stall threshold, but within one cron interval of\n")
+					fmt.Printf("  the last scheduled firing — this is normal between-cron idle, not a stall.\n")
+				}
 				if diag.Stalled {
 					fmt.Printf("\n⚠ Agent appears stalled. Consider nudging or restarting:\n")
 					fmt.Printf("  pogo nudge %s \"status check\"\n", diag.Name)

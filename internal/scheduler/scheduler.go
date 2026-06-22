@@ -86,6 +86,32 @@ type Entry struct {
 // without exposing internal state to mutation.
 func (e Entry) Clone() Entry { return e }
 
+// CronInterval returns the spacing between consecutive firings of the entry's
+// cron expression, sampled just after ref. It is zero for one-shot entries, an
+// empty cron, or a cron that fails to parse or has no two future firings.
+//
+// Stall detection uses this to tell a cron-driven agent's by-design idle (the
+// gap between firings) from a genuine wedge: an agent within one CronInterval
+// of its last scheduled firing is idle on purpose, not stalled (mg-5b23).
+func (e Entry) CronInterval(ref time.Time) time.Duration {
+	if e.OneShot || strings.TrimSpace(e.Cron) == "" {
+		return 0
+	}
+	c, err := ParseCron(e.Cron)
+	if err != nil {
+		return 0
+	}
+	n1 := c.Next(ref)
+	if n1.IsZero() {
+		return 0
+	}
+	n2 := c.Next(n1)
+	if n2.IsZero() {
+		return 0
+	}
+	return n2.Sub(n1)
+}
+
 // Validate returns nil if the entry is internally consistent and ready to
 // schedule, or a descriptive error otherwise.
 func (e *Entry) Validate() error {

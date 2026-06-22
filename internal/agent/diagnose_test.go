@@ -156,6 +156,150 @@ func TestDiagnoseIdle(t *testing.T) {
 	}
 }
 
+// stalledCrewAgent returns a crew agent whose last PTY write is idleAgo in the
+// past — past the crew stall threshold so the cron-aware path is what decides
+// stalled vs. idle.
+func stalledCrewAgent(now time.Time, idleAgo time.Duration) *Agent {
+	buf := NewRingBuffer(1024)
+	buf.Write([]byte("old data"))
+	buf.mu.Lock()
+	buf.lastWrite = now.Add(-idleAgo)
+	buf.mu.Unlock()
+	return &Agent{
+		Name:      "diag-crew",
+		Type:      TypeCrew,
+		PID:       0,
+		Status:    StatusRunning,
+		StartTime: now.Add(-time.Hour),
+		outputBuf: buf,
+		done:      make(chan struct{}),
+	}
+}
+
+func TestDiagnoseCronCoveredNotStalled(t *testing.T) {
+	now := time.Date(2026, 5, 21, 22, 0, 0, 0, time.UTC)
+	// Idle 25 min — past the 10-min crew threshold — but the */30 mail-check
+	// fired 25 min ago, so we are still within one cron interval of the last
+	// firing. This is doctor's 2026-05-21 false positive (mg-5b23).
+	a := stalledCrewAgent(now, 25*time.Minute)
+	windows := []CronWindow{{
+		LastFire: now.Add(-25 * time.Minute),
+		NextFire: now.Add(5 * time.Minute),
+		Interval: 30 * time.Minute,
+	}}
+
+	diag := diagnoseAgentAt(a, now, windows)
+	if diag.Stalled {
+		t.Error("cron-covered agent must not be flagged stalled")
+	}
+	if !diag.CronCovered {
+		t.Error("CronCovered should be true for between-cron idle")
+	}
+	if diag.Health != "idle" {
+		t.Errorf("Health = %q, want %q", diag.Health, "idle")
+	}
+}
+
+func TestDiagnoseGenuineWedgeStillStalled(t *testing.T) {
+	now := time.Date(2026, 5, 21, 22, 0, 0, 0, time.UTC)
+	// Idle past threshold with no cron schedule at all — a genuine wedge that
+	// must still be flagged.
+	a := stalledCrewAgent(now, 25*time.Minute)
+
+	diag := diagnoseAgentAt(a, now, nil)
+	if !diag.Stalled {
+		t.Error("agent with no cron schedule should still be flagged stalled")
+	}
+	if diag.CronCovered {
+		t.Error("CronCovered should be false with no cron windows")
+	}
+	if diag.Health != "stalled" {
+		t.Errorf("Health = %q, want %q", diag.Health, "stalled")
+	}
+}
+
+func TestDiagnoseCronStaleStillStalled(t *testing.T) {
+	now := time.Date(2026, 5, 21, 22, 0, 0, 0, time.UTC)
+	// The agent has a */30 schedule, but the last firing was 40 min ago — more
+	// than one interval. The cron is no longer explaining the idle, so a stall
+	// past the threshold is genuine and must surface.
+	a := stalledCrewAgent(now, 40*time.Minute)
+	windows := []CronWindow{{
+		LastFire: now.Add(-40 * time.Minute),
+		NextFire: now.Add(-10 * time.Minute),
+		Interval: 30 * time.Minute,
+	}}
+
+	diag := diagnoseAgentAt(a, now, windows)
+	if !diag.Stalled {
+		t.Error("idle beyond one cron interval of last firing should be stalled")
+	}
+	if diag.CronCovered {
+		t.Error("CronCovered should be false when idle exceeds the cron interval")
+	}
+}
+
+func TestDiagnoseCronNeverFiredAnchorsToNextFire(t *testing.T) {
+	now := time.Date(2026, 5, 21, 22, 0, 0, 0, time.UTC)
+	// A schedule loaded after a pogod restart may have a zero LastFire. We
+	// anchor coverage to NextFire - Interval; with NextFire 5 min out and a
+	// 30-min interval, the implied last firing was 25 min ago — still covered.
+	a := stalledCrewAgent(now, 25*time.Minute)
+	windows := []CronWindow{{
+		NextFire: now.Add(5 * time.Minute),
+		Interval: 30 * time.Minute,
+	}}
+
+	diag := diagnoseAgentAt(a, now, windows)
+	if diag.Stalled {
+		t.Error("never-fired schedule should still cover an in-window idle")
+	}
+	if !diag.CronCovered {
+		t.Error("CronCovered should be true when anchored to NextFire")
+	}
+}
+
+// fakeScheduleProvider records the identity it was queried with and returns a
+// canned window set.
+type fakeScheduleProvider struct {
+	windows []CronWindow
+	queried string
+}
+
+func (f *fakeScheduleProvider) CronWindowsForAgent(agentIdentity string) []CronWindow {
+	f.queried = agentIdentity
+	return f.windows
+}
+
+func TestRegistryDiagnoseUsesScheduleProvider(t *testing.T) {
+	tmpDir := t.TempDir()
+	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+
+	now := time.Now()
+	fake := &fakeScheduleProvider{windows: []CronWindow{{
+		LastFire: now.Add(-25 * time.Minute),
+		NextFire: now.Add(5 * time.Minute),
+		Interval: 30 * time.Minute,
+	}}}
+	reg.SetStallScheduleProvider(fake)
+
+	a := stalledCrewAgent(now, 25*time.Minute)
+
+	diag := reg.diagnose(a)
+	if fake.queried != a.EventAgent() {
+		t.Errorf("provider queried with %q, want %q", fake.queried, a.EventAgent())
+	}
+	if diag.Stalled {
+		t.Error("registry diagnose should suppress stall via the schedule provider")
+	}
+	if !diag.CronCovered {
+		t.Error("CronCovered should be true through the registry path")
+	}
+}
+
 func TestDiagnoseRecentOutputTail(t *testing.T) {
 	tmpDir := t.TempDir()
 	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
