@@ -183,6 +183,192 @@ func TestNudgeWithModeWaitIdleTimeoutOnBusy(t *testing.T) {
 	}
 }
 
+// TestWaitForReadyGatesOnSentinel unit-tests the sentinel gate: the wait must
+// not open until the sentinel has appeared in PTY output AND output has since
+// gone quiet. Regression for mg-ce61, where the initial nudge fired on mere
+// quiescence (true during pre-TUI startup) and piled into the kernel buffer.
+func TestWaitForReadyGatesOnSentinel(t *testing.T) {
+	const sentinel = "? for shortcuts"
+
+	// No output yet: the sentinel can never appear, so the wait must time out
+	// reporting seen=false.
+	buf := NewRingBuffer(1024)
+	a := &Agent{Name: "wfr-empty", outputBuf: buf, done: make(chan struct{})}
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	seen, err := a.WaitForReady(ctx, sentinel, 100*time.Millisecond)
+	cancel()
+	if seen {
+		t.Error("sentinel reported seen with no output at all")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("expected DeadlineExceeded with no sentinel; got %v", err)
+	}
+
+	// Sentinel present, then output goes quiet: the gate opens.
+	buf.Write([]byte("\x1b[1mwelcome\x1b[0m\n? for shortcuts\n"))
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 2*time.Second)
+	seen, err = a.WaitForReady(ctx2, sentinel, 100*time.Millisecond)
+	cancel2()
+	if !seen {
+		t.Error("sentinel present in output but not reported seen")
+	}
+	if err != nil {
+		t.Errorf("WaitForReady should succeed once sentinel seen and idle; got %v", err)
+	}
+}
+
+// TestWaitForReadySentinelSeenButNeverIdle covers the case where the sentinel
+// has appeared but the harness keeps redrawing: the wait must report seen=true
+// (so the caller can deliver best-effort) and a deadline error.
+func TestWaitForReadySentinelSeenButNeverIdle(t *testing.T) {
+	buf := NewRingBuffer(4096)
+	a := &Agent{Name: "wfr-busy", outputBuf: buf, done: make(chan struct{})}
+
+	// Sentinel is already present; a goroutine keeps writing so the buffer is
+	// never quiet for the quiescence window.
+	buf.Write([]byte("? for shortcuts\n"))
+	stop := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				buf.Write([]byte("."))
+				time.Sleep(20 * time.Millisecond)
+			}
+		}
+	}()
+	defer close(stop)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 600*time.Millisecond)
+	seen, err := a.WaitForReady(ctx, "? for shortcuts", 300*time.Millisecond)
+	cancel()
+	if !seen {
+		t.Error("sentinel was present; expected seen=true even though never idle")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("expected DeadlineExceeded when output never settles; got %v", err)
+	}
+}
+
+// TestNudgeWaitReadyDeliversOnSentinel verifies the happy path: once the fake
+// harness emits the prompt-ready sentinel and goes quiet, a wait-ready nudge
+// delivers.
+func TestNudgeWaitReadyDeliversOnSentinel(t *testing.T) {
+	tmpDir := t.TempDir()
+	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	defer reg.StopAll(2 * time.Second)
+
+	a, err := reg.Spawn(SpawnRequest{
+		Name:    "ready-test",
+		Type:    TypePolecat,
+		Command: []string{"bash", "-c", "echo '? for shortcuts'; cat"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := a.NudgeWithMode("go now", NudgeWaitReady, 10*time.Second); err != nil {
+		t.Fatalf("NudgeWithMode(wait-ready): %v", err)
+	}
+
+	time.Sleep(200 * time.Millisecond)
+	output := string(a.RecentOutput(2048))
+	if !strings.Contains(output, "go now") {
+		t.Errorf("expected output to contain 'go now', got %q", output)
+	}
+}
+
+// TestNudgeWaitReadyBestEffortAfterTimeout verifies the graceful-degradation
+// contract: if the sentinel never appears (e.g. a harness UI change made it
+// stale), the wait-ready nudge must NOT fire early (the pre-TUI-quiescence bug)
+// but MUST still deliver best-effort once the timeout elapses, returning nil —
+// degrading to no-worse-than the old wait-idle behavior rather than dropping
+// the initial nudge.
+func TestNudgeWaitReadyBestEffortAfterTimeout(t *testing.T) {
+	tmpDir := t.TempDir()
+	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	defer reg.StopAll(2 * time.Second)
+
+	// Emits output, but never the sentinel.
+	a, err := reg.Spawn(SpawnRequest{
+		Name:    "no-sentinel",
+		Type:    TypePolecat,
+		Command: []string{"bash", "-c", "echo other-banner; cat"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- a.NudgeWithMode("late msg", NudgeWaitReady, 3*time.Second) }()
+
+	// Before the timeout the sentinel-gated nudge must not have delivered.
+	time.Sleep(1500 * time.Millisecond)
+	if strings.Contains(string(a.RecentOutput(2048)), "late msg") {
+		t.Error("wait-ready nudge delivered before the sentinel appeared or timeout elapsed")
+	}
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("best-effort delivery should return nil; got %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("NudgeWithMode(wait-ready) did not return after its timeout")
+	}
+
+	time.Sleep(200 * time.Millisecond)
+	if !strings.Contains(string(a.RecentOutput(2048)), "late msg") {
+		t.Error("expected best-effort delivery of 'late msg' after timeout")
+	}
+}
+
+// TestNudgeWaitReadyFallsBackToWaitIdle verifies that a provider with no
+// prompt-ready sentinel (e.g. Codex) gets pure wait-idle delivery from
+// wait-ready mode: the nudge fires on quiescence alone, with no sentinel gate.
+func TestNudgeWaitReadyFallsBackToWaitIdle(t *testing.T) {
+	tmpDir := t.TempDir()
+	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	defer reg.StopAll(2 * time.Second)
+
+	a, err := reg.Spawn(SpawnRequest{
+		Name:    "no-sentinel-profile",
+		Type:    TypePolecat,
+		Command: []string{"bash", "-c", "echo other-banner; cat"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Clear the sentinel so wait-ready takes the fallback path.
+	a.nudge.PromptReadySentinel = ""
+
+	start := time.Now()
+	if err := a.NudgeWithMode("idle msg", NudgeWaitReady, 10*time.Second); err != nil {
+		t.Fatalf("NudgeWithMode(wait-ready, no sentinel): %v", err)
+	}
+	// Must have waited for quiescence (wait-idle semantics), not the full timeout.
+	if elapsed := time.Since(start); elapsed < DefaultNudgeProfile.IdleThreshold {
+		t.Errorf("expected to wait at least the idle threshold %v; waited %v",
+			DefaultNudgeProfile.IdleThreshold, elapsed)
+	}
+
+	time.Sleep(200 * time.Millisecond)
+	if !strings.Contains(string(a.RecentOutput(2048)), "idle msg") {
+		t.Error("expected fallback wait-idle delivery of 'idle msg'")
+	}
+}
+
 func TestNudgeExitedAgent(t *testing.T) {
 	tmpDir := t.TempDir()
 	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))

@@ -559,6 +559,8 @@ pogod allocates a PTY for each agent it spawns. This is the core mechanism that 
 
 **Idle detection:** pogod reads agent output from the PTY master. When the output goes quiet for the active provider's idle threshold (`Provider.Nudge.IdleThreshold` — see `internal/agent/provider.go`), it knows the agent is ready to receive nudge input. This prevents nudges from interrupting active tool calls. The threshold is per-harness because output cadence differs between TUIs.
 
+**Initial-nudge readiness gate:** the *first* nudge after spawn — the one that bypasses the harness's interactive prompt — cannot rely on quiescence alone. A harness is also quiet during pre-TUI startup, so a quiescence-only gate can fire the nudge before the interactive input loop exists; the bytes then pile in the kernel input buffer and get read as one un-re-tokenized paste block, wedging the agent (mg-ce61). So the initial nudge waits in `NudgeWaitReady` mode (`internal/agent/nudge.go`), which defers delivery until the provider's `Nudge.PromptReadySentinel` (Claude: `"? for shortcuts"`) appears in PTY output *and* output then settles — proving the input loop has rendered, not merely that the harness is quiet. Providers with no sentinel (e.g. Codex) fall back to plain wait-idle. If the sentinel never appears (a harness UI change), delivery degrades to best-effort on timeout rather than dropping the nudge.
+
 ### PTY complexity and the libghostty path
 
 There are two levels of PTY usage:

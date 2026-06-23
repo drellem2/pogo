@@ -1,9 +1,11 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/drellem2/pogo/internal/events"
@@ -18,6 +20,14 @@ const (
 
 	// NudgeImmediate writes directly to the PTY without waiting.
 	NudgeImmediate NudgeMode = "immediate"
+
+	// NudgeWaitReady waits for the provider's prompt-ready sentinel to appear
+	// in PTY output (then for output to settle) before delivering. It is the
+	// initial-nudge mode: the spawn-time gate must prove the harness's
+	// interactive input loop is genuinely ready, not merely quiet, because a
+	// harness is also quiet during pre-TUI startup (mg-ce61). When the
+	// provider declares no sentinel, it falls back to NudgeWaitIdle semantics.
+	NudgeWaitReady NudgeMode = "wait-ready"
 )
 
 // DefaultNudgeTimeout is how long to wait for idle before giving up.
@@ -64,9 +74,62 @@ func (a *Agent) WaitIdle(ctx context.Context, quiescence time.Duration) error {
 	}
 }
 
+// WaitForReady blocks until the agent's PTY output contains the prompt-ready
+// sentinel AND has since gone quiet for quiescence, or the context is
+// cancelled. The sentinel proves the interactive input loop has rendered; the
+// trailing quiescence proves rendering has settled, so a submitted nudge is
+// re-tokenized instead of absorbed into an in-flight paste block (mg-ce61).
+//
+// It reports whether the sentinel was actually observed. On context timeout it
+// returns (sentinelSeen, ctx.Err()) so the caller can decide whether to
+// deliver anyway — the initial-nudge path delivers best-effort rather than
+// dropping the nudge if the sentinel never appears (a harness UI change must
+// degrade to no-worse-than the old wait-idle behavior, not a silent wedge).
+func (a *Agent) WaitForReady(ctx context.Context, sentinel string, quiescence time.Duration) (bool, error) {
+	want := []byte(sentinel)
+	seen := false
+
+	check := func() bool {
+		if !seen {
+			clean := StripANSI(a.outputBuf.Last(a.outputBuf.Len()))
+			if bytes.Contains(clean, want) {
+				seen = true
+			}
+		}
+		return seen && a.IsIdle(quiescence)
+	}
+
+	if check() {
+		return seen, nil
+	}
+
+	pollInterval := quiescence / 2
+	if pollInterval < 100*time.Millisecond {
+		pollInterval = 100 * time.Millisecond
+	}
+
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return seen, ctx.Err()
+		case <-a.done:
+			return seen, fmt.Errorf("agent %q exited while waiting for prompt-ready", a.Name)
+		case <-ticker.C:
+			if check() {
+				return seen, nil
+			}
+		}
+	}
+}
+
 // NudgeWithMode delivers a message to the agent's PTY using the specified mode.
 // In wait-idle mode, it blocks until the agent is idle (or timeout expires).
-// In immediate mode, it writes directly (same as Nudge).
+// In wait-ready mode, it waits for the provider's prompt-ready sentinel (then
+// quiescence) before delivering, falling back to wait-idle when no sentinel is
+// configured. In immediate mode, it writes directly (same as Nudge).
 func (a *Agent) NudgeWithMode(msg string, mode NudgeMode, timeout time.Duration) error {
 	if mode == NudgeImmediate {
 		if err := a.Nudge(msg); err != nil {
@@ -76,7 +139,38 @@ func (a *Agent) NudgeWithMode(msg string, mode NudgeMode, timeout time.Duration)
 		return nil
 	}
 
-	// Wait-idle mode: wait for quiescence, then deliver
+	if mode == NudgeWaitReady && a.nudge.PromptReadySentinel != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+
+		seen, err := a.WaitForReady(ctx, a.nudge.PromptReadySentinel, a.nudge.IdleThreshold)
+		if err != nil {
+			// Agent exited mid-wait: nothing to deliver to.
+			if !errors.Is(err, context.DeadlineExceeded) {
+				return fmt.Errorf("wait for prompt-ready: %w", err)
+			}
+			// Deadline hit. Deliver best-effort rather than dropping the
+			// initial nudge — see WaitForReady's contract. Log what we saw so
+			// a stale sentinel (harness UI change) is diagnosable.
+			if seen {
+				log.Printf("agent %s: prompt-ready sentinel seen but PTY never settled "+
+					"within %s; delivering nudge anyway", a.Name, timeout)
+			} else {
+				log.Printf("agent %s: prompt-ready sentinel %q not seen within %s; "+
+					"delivering nudge best-effort (sentinel may be stale)",
+					a.Name, a.nudge.PromptReadySentinel, timeout)
+			}
+		}
+
+		if err := a.Nudge(msg); err != nil {
+			return err
+		}
+		emitNudgeSent(a, msg, "ready")
+		return nil
+	}
+
+	// Wait-idle mode (or wait-ready with no configured sentinel): wait for
+	// quiescence, then deliver.
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 

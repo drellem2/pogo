@@ -650,16 +650,18 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 	r.invokeSessionHook(a)
 
 	// Send initial nudge to bypass the CLI interactive prompt.
-	// Use wait-idle mode so the nudge fires only after the harness TUI has
-	// finished rendering (trust dialog dismissed, prompt input ready).
-	// A fixed sleep was unreliable: startup time varies, and a nudge typed
-	// before the prompt input is ready gets swallowed by transient dialogs.
-	// Gated on the provider's NeedsInitialNudge — a harness that takes the
-	// persona prompt as a command-line arg needs no nudge.
+	// Use wait-ready mode so the nudge fires only once the harness's
+	// interactive input loop is genuinely ready (prompt-ready sentinel seen,
+	// then output settled), not merely quiet — a harness is also quiet during
+	// pre-TUI startup, and a nudge typed into that gap piles in the kernel
+	// input buffer and gets absorbed into one un-re-tokenized paste block,
+	// wedging the agent (mg-ce61). Providers without a sentinel fall back to
+	// wait-idle. Gated on the provider's NeedsInitialNudge — a harness that
+	// takes the persona prompt as a command-line arg needs no nudge.
 	if req.InitialNudge != "" && a.nudge.NeedsInitialNudge {
 		a.InitialNudge = req.InitialNudge
 		go func() {
-			if err := a.NudgeWithMode(req.InitialNudge, NudgeWaitIdle, a.nudge.InitialNudgeTimeout); err != nil {
+			if err := a.NudgeWithMode(req.InitialNudge, NudgeWaitReady, a.nudge.InitialNudgeTimeout); err != nil {
 				log.Printf("agent %s: initial nudge failed: %v", req.Name, err)
 			}
 		}()
@@ -919,9 +921,10 @@ func (r *Registry) Respawn(name string) (*Agent, error) {
 
 	// Re-send initial nudge on respawn to bypass the CLI interactive prompt.
 	// a.InitialNudge is only non-empty when the provider needed it at spawn.
+	// Wait-ready mode for the same reason as the spawn path (mg-ce61).
 	if a.InitialNudge != "" {
 		go func() {
-			if err := a.NudgeWithMode(a.InitialNudge, NudgeWaitIdle, a.nudge.InitialNudgeTimeout); err != nil {
+			if err := a.NudgeWithMode(a.InitialNudge, NudgeWaitReady, a.nudge.InitialNudgeTimeout); err != nil {
 				log.Printf("agent %s: initial nudge on respawn failed: %v", a.Name, err)
 			}
 		}()

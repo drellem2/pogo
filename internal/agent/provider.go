@@ -112,6 +112,19 @@ type NudgeProfile struct {
 	// IdleThreshold is how long PTY output must be quiet before the agent is
 	// considered idle for wait-idle nudge delivery (Claude: 2s).
 	IdleThreshold time.Duration
+
+	// PromptReadySentinel, when non-empty, is a substring of the harness's
+	// PTY output (after ANSI stripping) that proves the interactive input
+	// loop has rendered and is ready to accept a submitted nudge. The initial
+	// nudge waits for this marker to appear before delivering, rather than
+	// relying on output quiescence alone — quiescence is ALSO true during
+	// pre-TUI startup, so a quiescence-only gate can fire the nudge before
+	// Ink's input loop exists. The bytes then pile in the kernel input buffer
+	// and Ink reads the whole spawn-cluster as one paste-mode block that the
+	// submit never re-tokenizes, wedging the agent (mg-ce61). An empty
+	// sentinel falls back to pure wait-idle behavior (e.g. Codex, whose
+	// ratatui composer has no equivalent stable marker).
+	PromptReadySentinel string
 }
 
 // PTYSize is an explicit PTY winsize a provider can request in place of pogo's
@@ -133,4 +146,13 @@ var DefaultNudgeProfile = NudgeProfile{
 	SubmitTerminator:    "\r",
 	SubmitDelay:         50 * time.Millisecond,
 	IdleThreshold:       2 * time.Second,
+
+	// Claude Code's empty Ink composer renders a "? for shortcuts" hint in its
+	// input box once the interactive input loop is up and idle. The hint is
+	// absent during the loading spinner and the workspace-trust dialog, so its
+	// appearance is a precise "input loop ready" signal — exactly the gate the
+	// initial nudge needs (mg-ce61). Verified stable across Claude Code
+	// versions; if it ever changes, WaitForReady degrades to best-effort
+	// wait-idle delivery rather than dropping the nudge.
+	PromptReadySentinel: "? for shortcuts",
 }

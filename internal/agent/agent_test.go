@@ -129,10 +129,14 @@ func TestNudgeEmptyMessageNoDelay(t *testing.T) {
 }
 
 // TestInitialNudgeAutoDelivers verifies that when SpawnRequest.InitialNudge
-// is set, pogod auto-delivers the message once the agent's PTY goes idle —
-// without any external 'pogo nudge' call. Regression test for the bug where
-// a fixed 10s sleep made auto-nudge fire before Claude's TUI was ready,
-// leaving polecats stuck until a manual nudge.
+// is set, pogod auto-delivers the message once the agent's interactive input
+// loop is ready — without any external 'pogo nudge' call. Regression test for
+// the bug where a fixed 10s sleep made auto-nudge fire before Claude's TUI was
+// ready, leaving polecats stuck until a manual nudge.
+//
+// The default NudgeProfile gates the initial nudge on its prompt-ready
+// sentinel ("? for shortcuts", mg-ce61), so the fake harness must emit a line
+// containing that sentinel before the nudge will deliver.
 func TestInitialNudgeAutoDelivers(t *testing.T) {
 	tmpDir := t.TempDir()
 	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
@@ -141,12 +145,13 @@ func TestInitialNudgeAutoDelivers(t *testing.T) {
 	}
 	defer reg.StopAll(2 * time.Second)
 
-	// bash -c "echo ready; cat" prints "ready" (so PTY has lastWrite set,
-	// allowing IsIdle to return true after quiescence) then echoes input.
+	// Print the prompt-ready sentinel (so WaitForReady's gate opens and PTY
+	// lastWrite is set, letting IsIdle return true after quiescence) then echo
+	// input back with cat.
 	a, err := reg.Spawn(SpawnRequest{
 		Name:         "auto-nudge",
 		Type:         TypePolecat,
-		Command:      []string{"bash", "-c", "echo ready; cat"},
+		Command:      []string{"bash", "-c", "echo '? for shortcuts'; cat"},
 		InitialNudge: "begin task",
 	})
 	if err != nil {
