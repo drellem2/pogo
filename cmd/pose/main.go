@@ -21,11 +21,27 @@ import (
 )
 
 func main() {
+	rootCmd := newRootCmd()
+	completion.AddCommand(rootCmd)
+
+	if err := rootCmd.Execute(); err != nil {
+		os.Exit(cli.ExitError)
+	}
+}
+
+// newRootCmd builds the pose root command. It is split out from main so the
+// argument-routing behavior can be exercised in tests.
+func newRootCmd() *cobra.Command {
 	var jsonOutput bool
 	var searchAll bool
 	var findRefs bool
 
-	var rootCmd = &cobra.Command{Use: "pose", Version: version.Version}
+	var rootCmd = &cobra.Command{Use: "pose QUERY [PATH]", Version: version.Version}
+	// pose takes its query as a positional arg, but registering the
+	// "completion" subcommand makes cobra default to legacyArgs, which rejects
+	// any non-subcommand first positional with `unknown command`. Declaring
+	// ArbitraryArgs routes unmatched positionals to rootCmd.Run instead (gh #20).
+	rootCmd.Args = cobra.ArbitraryArgs
 	rootCmd.Flags().BoolP("list", "l", false, "List all files with matching lines")
 	rootCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSON format")
 	rootCmd.Flags().BoolVar(&searchAll, "all", false, "Search across all known projects")
@@ -104,11 +120,7 @@ func main() {
 		}
 	}
 
-	completion.AddCommand(rootCmd)
-
-	if err := rootCmd.Execute(); err != nil {
-		os.Exit(cli.ExitError)
-	}
+	return rootCmd
 }
 
 func runSearchAll(query string, jsonOutput bool, list bool) {
