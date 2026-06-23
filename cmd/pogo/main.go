@@ -791,9 +791,9 @@ Use --plain to strip ANSI/VT escape sequences for human-readable or machine-pars
 process health, idle duration, and stall detection thresholds.
 
 Health states:
-  healthy  — running and producing output normally
-  idle     — running but quiet for over half the stall threshold
-  stalled  — running but quiet for longer than the stall threshold
+  healthy  — produced output within the last 30s (actively working)
+  idle     — quiet for over 30s but within the stall threshold (alive, between cycles)
+  stalled  — quiet for longer than the stall threshold
   exited   — process has exited
   dead     — registered as running but OS process is gone
 

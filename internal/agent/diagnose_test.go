@@ -130,11 +130,11 @@ func TestDiagnoseStalled(t *testing.T) {
 }
 
 func TestDiagnoseIdle(t *testing.T) {
-	// Simulate an idle agent — past half threshold but not stalled.
+	// Simulate an idle agent — past the active-recency window but not stalled.
 	buf := NewRingBuffer(1024)
 	buf.Write([]byte("some data"))
 	buf.mu.Lock()
-	buf.lastWrite = time.Now().Add(-3 * time.Minute) // > 2.5min (half of 5min), < 5min
+	buf.lastWrite = time.Now().Add(-3 * time.Minute) // > 30s window, < 5min threshold
 	buf.mu.Unlock()
 
 	a := &Agent{
@@ -153,6 +153,40 @@ func TestDiagnoseIdle(t *testing.T) {
 	}
 	if diag.Health != "idle" {
 		t.Errorf("Health = %q, want %q", diag.Health, "idle")
+	}
+}
+
+// TestDiagnoseBusyIdleBoundary pins the healthy→idle boundary to
+// ActiveRecencyWindow rather than the (much wider) stall threshold: an agent
+// quiet for just over the window must report "idle", while one that wrote
+// within the window stays "healthy". This is what lets the bridget agents-view
+// tell a busy agent from a quiet-but-alive one (gh #16).
+func TestDiagnoseBusyIdleBoundary(t *testing.T) {
+	newAgentIdle := func(idleAgo time.Duration) *Agent {
+		buf := NewRingBuffer(1024)
+		buf.Write([]byte("some data"))
+		buf.mu.Lock()
+		buf.lastWrite = time.Now().Add(-idleAgo)
+		buf.mu.Unlock()
+		return &Agent{
+			Name:      "diag-boundary",
+			Type:      TypePolecat,
+			PID:       0,
+			Status:    StatusRunning,
+			StartTime: time.Now().Add(-10 * time.Minute),
+			outputBuf: buf,
+			done:      make(chan struct{}),
+		}
+	}
+
+	// Just inside the window — still actively working.
+	if diag := diagnoseAgent(newAgentIdle(10 * time.Second)); diag.Health != "healthy" {
+		t.Errorf("idle 10s: Health = %q, want %q", diag.Health, "healthy")
+	}
+	// Just past the window but well within the stall threshold — idle, not
+	// healthy. Under the old threshold/2 boundary this would have read "healthy".
+	if diag := diagnoseAgent(newAgentIdle(45 * time.Second)); diag.Health != "idle" {
+		t.Errorf("idle 45s: Health = %q, want %q", diag.Health, "idle")
 	}
 }
 

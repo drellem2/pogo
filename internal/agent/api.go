@@ -81,6 +81,16 @@ const (
 	// StallThresholdCrew is how long a crew agent can be idle before it's
 	// considered stalled. Crew agents have longer polling intervals.
 	StallThresholdCrew = 10 * time.Minute
+
+	// ActiveRecencyWindow is how recently an agent must have produced PTY output
+	// to be reported as "healthy" (actively working / writing right now) rather
+	// than "idle" (alive but quiet between cycles). Past this window but within
+	// the stall threshold, an agent is "idle"; past the threshold it is
+	// "stalled". The short window lets downstream consumers (e.g. the bridget
+	// agents-view) distinguish a busy agent from a quiet-but-alive one — gh #16.
+	// It is intentionally independent of the per-type stall threshold so the
+	// busy/idle split stays the same regardless of how long stall takes.
+	ActiveRecencyWindow = 30 * time.Second
 )
 
 // DiagnoseInfo contains diagnostic details for an agent, including stall
@@ -173,8 +183,11 @@ func diagnoseAgentAt(a *Agent, now time.Time, windows []CronWindow) DiagnoseInfo
 	cronCovered := idlePastThreshold && withinCronInterval(now, windows)
 	stalled := idlePastThreshold && !cronCovered
 
-	// Determine overall health. A cron-covered agent reports "idle" rather than
-	// "stalled" — its idle exceeds threshold/2 by construction.
+	// Determine overall health. "healthy" means the agent produced output within
+	// ActiveRecencyWindow (actively working); past that window but within the
+	// stall threshold it is "idle" (alive, between cycles); past the threshold it
+	// is "stalled". A cron-covered agent reports "idle" rather than "stalled" —
+	// its idle exceeds the recency window by construction (mg-5b23, gh #16).
 	health := "healthy"
 	switch {
 	case info.Status == StatusExited:
@@ -183,7 +196,7 @@ func diagnoseAgentAt(a *Agent, now time.Time, windows []CronWindow) DiagnoseInfo
 		health = "dead"
 	case stalled:
 		health = "stalled"
-	case !lastWrite.IsZero() && idleDur >= threshold/2:
+	case !lastWrite.IsZero() && idleDur >= ActiveRecencyWindow:
 		health = "idle"
 	}
 
