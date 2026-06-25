@@ -60,6 +60,13 @@ type SpawnPolecatAPIRequest struct {
 	Branch   string   `json:"branch,omitempty"`   // Target branch for refinery submit
 	Env      []string `json:"env,omitempty"`      // Additional env vars
 	Provider string   `json:"provider,omitempty"` // Harness provider override (--provider): tier 1 of resolution
+	// NoWorktree, when true, skips git worktree creation entirely regardless of
+	// Repo or template frontmatter, and the polecat runs in-place from a stable
+	// home/scratch dir at ~/.pogo/agents/<name>/. It implies a refinery:NO
+	// posture (no branch push, no MR submit) — see the {{.NoWorktree}} template
+	// variable. Used for in-place edits to files that aren't under a git repo
+	// (e.g. runtime crew prompt mirrors). No Repo is required when set.
+	NoWorktree bool `json:"no_worktree,omitempty"`
 }
 
 // NudgeAPIRequest is the JSON body for POST /agents/:name/nudge.
@@ -720,10 +727,16 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 
 	// Decide whether this polecat gets an isolated git worktree. Default:
 	// create one when a Repo is supplied. A template can opt out by setting
-	// `worktree = false` in its frontmatter.
+	// `worktree = false` in its frontmatter. The --no-worktree flag is an
+	// explicit, highest-precedence opt-out: it skips creation regardless of
+	// Repo or frontmatter so a caller can dispatch in-place edits without a
+	// placeholder --repo (gh #17).
 	createWorktree := spawnReq.Repo != ""
 	if tmplMeta.HasField("worktree") {
 		createWorktree = tmplMeta.Worktree && spawnReq.Repo != ""
+	}
+	if spawnReq.NoWorktree {
+		createWorktree = false
 	}
 
 	// Compute worktree path before template expansion so it can be included in the prompt.
@@ -731,6 +744,22 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 	if createWorktree {
 		home, _ := os.UserHomeDir()
 		worktreeDir = filepath.Join(home, ".pogo", "polecats", spawnReq.Name)
+	}
+
+	// Resolve the polecat's working directory. With a worktree it's the
+	// worktree itself. In --no-worktree mode there is no checkout, so give the
+	// polecat a stable home/scratch dir at ~/.pogo/agents/<name>/ (the same
+	// place crew agents run from) to operate in while it edits the absolute
+	// paths named in its task body.
+	workDir := worktreeDir
+	if spawnReq.NoWorktree {
+		home, _ := os.UserHomeDir()
+		agentDir := filepath.Join(home, ".pogo", "agents", spawnReq.Name)
+		if err := os.MkdirAll(agentDir, 0755); err != nil {
+			http.Error(w, fmt.Sprintf("failed to create agent dir: %v", err), http.StatusInternalServerError)
+			return
+		}
+		workDir = agentDir
 	}
 
 	// Capture recent activity in the source repo as best-effort FYI
@@ -748,7 +777,8 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		Id:            spawnReq.Id,
 		Repo:          spawnReq.Repo,
 		Branch:        spawnReq.Branch,
-		WorktreeDir:   worktreeDir,
+		WorktreeDir:   workDir,
+		NoWorktree:    spawnReq.NoWorktree,
 		RecentCommits: recentCommits,
 		RecentFiles:   recentFiles,
 	}
@@ -806,7 +836,7 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		PromptFile: promptFile,
 		AgentName:  spawnReq.Name,
 		AgentType:  string(TypePolecat),
-		WorkDir:    worktreeDir,
+		WorkDir:    workDir,
 	})
 	if cmdErr != nil {
 		os.Remove(promptFile)
@@ -845,7 +875,7 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		Command:        cmd,
 		Env:            env,
 		PromptFile:     promptFile,
-		Dir:            worktreeDir,
+		Dir:            workDir,
 		WorktreeDir:    worktreeDir,
 		SourceRepo:     sourceRepo,
 		InitialNudge:   nudgeMsg,

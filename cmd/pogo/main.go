@@ -1015,6 +1015,7 @@ Example:
 	var spawnPolecatBranch string
 	var spawnPolecatEnv []string
 	var spawnPolecatProvider string
+	var spawnPolecatNoWorktree bool
 	var cmdAgentSpawnPolecat = &cobra.Command{
 		Use:   "spawn-polecat <name>",
 		Short: "Spawn a polecat from a prompt template",
@@ -1023,15 +1024,16 @@ The template is expanded with the provided variables and used as the agent's pro
 		Args: cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			info, err := client.SpawnPolecat(agent.SpawnPolecatAPIRequest{
-				Name:     args[0],
-				Template: spawnPolecatTemplate,
-				Task:     spawnPolecatTask,
-				Body:     spawnPolecatBody,
-				Id:       spawnPolecatId,
-				Repo:     spawnPolecatRepo,
-				Branch:   spawnPolecatBranch,
-				Env:      spawnPolecatEnv,
-				Provider: spawnPolecatProvider,
+				Name:       args[0],
+				Template:   spawnPolecatTemplate,
+				Task:       spawnPolecatTask,
+				Body:       spawnPolecatBody,
+				Id:         spawnPolecatId,
+				Repo:       spawnPolecatRepo,
+				Branch:     spawnPolecatBranch,
+				Env:        spawnPolecatEnv,
+				Provider:   spawnPolecatProvider,
+				NoWorktree: spawnPolecatNoWorktree,
 			})
 			if err != nil {
 				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
@@ -1051,6 +1053,7 @@ The template is expanded with the provided variables and used as the agent's pro
 	cmdAgentSpawnPolecat.Flags().StringVar(&spawnPolecatBranch, "branch", "", "Target branch for refinery submit ({{.Branch}})")
 	cmdAgentSpawnPolecat.Flags().StringSliceVarP(&spawnPolecatEnv, "env", "e", nil, "Additional environment variables (KEY=VALUE)")
 	cmdAgentSpawnPolecat.Flags().StringVar(&spawnPolecatProvider, "provider", "", "Harness provider for this polecat (claude, codex); overrides config and template frontmatter")
+	cmdAgentSpawnPolecat.Flags().BoolVar(&spawnPolecatNoWorktree, "no-worktree", false, "Skip git worktree creation (no --repo required); polecat edits in-place from ~/.pogo/agents/<name>/ with a refinery:NO posture ({{.NoWorktree}})")
 
 	// Nudge command — top-level for convenience
 	var nudgeImmediate bool

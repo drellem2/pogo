@@ -40,7 +40,14 @@ type TemplateVars struct {
 	Id          string // Work item ID
 	Repo        string // Target repository path
 	Branch      string // Target branch for refinery submit (default: main)
-	WorktreeDir string // Polecat's isolated worktree path (its working directory)
+	WorktreeDir string // Polecat's working directory: its isolated worktree, or (in --no-worktree mode) its ~/.pogo/agents/<name>/ home/scratch dir
+
+	// NoWorktree is true when the polecat was spawned with --no-worktree: no
+	// git worktree was created and it works in-place on absolute paths from
+	// its task body. It implies a refinery:NO posture — templates should gate
+	// branch-push / refinery-submit instructions behind `{{if not .NoWorktree}}`
+	// (or surface the in-place protocol behind `{{if .NoWorktree}}`).
+	NoWorktree bool
 
 	// RecentCommits is `git log --oneline -n` output for the source repo's
 	// checked-out branch, surfaced as FYI context so a polecat picking up

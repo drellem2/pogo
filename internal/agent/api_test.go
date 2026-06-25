@@ -675,6 +675,131 @@ func TestHandleSpawnPolecat_WorktreeDefaultWhenRepoSet(t *testing.T) {
 	}
 }
 
+// TestHandleSpawnPolecat_NoWorktreeFlagSkipsCreation verifies that the
+// --no-worktree flag (NoWorktree request field) skips worktree creation even
+// when a Repo is supplied and the template asks for a worktree, and that the
+// polecat is instead anchored at its ~/.pogo/agents/<name>/ home dir (gh #17).
+func TestHandleSpawnPolecat_NoWorktreeFlagSkipsCreation(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	workDir, _ := makeRepoWithOrigin(t)
+
+	// Even with worktree=true frontmatter AND a Repo, --no-worktree wins.
+	writeTemplate(t, "nowtflag", "+++\nworktree = true\n+++\n# polecat in-place\n")
+
+	reg, err := NewRegistry(filepath.Join(tmpHome, "sockets"))
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	defer reg.StopAll(2 * time.Second)
+	reg.SetCommandConfig(catCommandConfig{})
+
+	a := spawnPolecatViaAPI(t, reg, SpawnPolecatAPIRequest{
+		Name:       "pc-nowtflag",
+		Template:   "nowtflag",
+		Repo:       workDir,
+		Id:         "wi-nowtflag",
+		NoWorktree: true,
+	})
+
+	if a.WorktreeDir != "" {
+		t.Errorf("WorktreeDir = %q, want empty (--no-worktree)", a.WorktreeDir)
+	}
+	if a.SourceRepo != "" {
+		t.Errorf("SourceRepo = %q, want empty (--no-worktree)", a.SourceRepo)
+	}
+	// The polecat should run from its stable home/scratch dir, not a worktree.
+	expectedHome := filepath.Join(tmpHome, ".pogo", "agents", "pc-nowtflag")
+	if a.Dir != expectedHome {
+		t.Errorf("Dir = %q, want %q (home/scratch dir)", a.Dir, expectedHome)
+	}
+	if _, err := os.Stat(expectedHome); err != nil {
+		t.Errorf("expected home dir at %s: %v", expectedHome, err)
+	}
+	// No worktree directory should exist under ~/.pogo/polecats/.
+	leakedWorktree := filepath.Join(tmpHome, ".pogo", "polecats", "pc-nowtflag")
+	if _, err := os.Stat(leakedWorktree); err == nil {
+		t.Errorf("worktree dir %s should not exist", leakedWorktree)
+	}
+	// And no polecat branch/worktree registered in the source repo.
+	out, err := exec.Command("git", "-C", workDir, "worktree", "list").CombinedOutput()
+	if err != nil {
+		t.Fatalf("worktree list: %v\n%s", err, out)
+	}
+	if strings.Contains(string(out), "polecat-pc-nowtflag") {
+		t.Errorf("did not expect polecat worktree in:\n%s", out)
+	}
+}
+
+// TestHandleSpawnPolecat_NoWorktreeNoRepoSucceeds verifies that --no-worktree
+// lifts the implicit --repo requirement: a spawn with no Repo at all succeeds
+// (gh #17, the primary driver — editing files that aren't under a git repo).
+func TestHandleSpawnPolecat_NoWorktreeNoRepoSucceeds(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	writeTemplate(t, "nowtnorepo", "# in-place polecat, no repo\n")
+
+	reg, err := NewRegistry(filepath.Join(tmpHome, "sockets"))
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	defer reg.StopAll(2 * time.Second)
+	reg.SetCommandConfig(catCommandConfig{})
+
+	a := spawnPolecatViaAPI(t, reg, SpawnPolecatAPIRequest{
+		Name:       "pc-nowtnorepo",
+		Template:   "nowtnorepo",
+		Id:         "wi-nowtnorepo",
+		NoWorktree: true,
+	})
+	if a.WorktreeDir != "" {
+		t.Errorf("WorktreeDir = %q, want empty", a.WorktreeDir)
+	}
+	expectedHome := filepath.Join(tmpHome, ".pogo", "agents", "pc-nowtnorepo")
+	if a.Dir != expectedHome {
+		t.Errorf("Dir = %q, want %q", a.Dir, expectedHome)
+	}
+}
+
+// TestHandleSpawnPolecat_NoWorktreeVarExposed verifies the {{.NoWorktree}}
+// template variable reflects the flag so templates can gate refinery-submit
+// instructions on it (refinery:NO posture).
+func TestHandleSpawnPolecat_NoWorktreeVarExposed(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	writeTemplate(t, "nowtvar",
+		"# polecat\n{{if .NoWorktree}}MODE: in-place at {{.WorktreeDir}}{{else}}MODE: worktree{{end}}\n")
+
+	reg, err := NewRegistry(filepath.Join(tmpHome, "sockets"))
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	defer reg.StopAll(2 * time.Second)
+	reg.SetCommandConfig(catCommandConfig{})
+
+	a := spawnPolecatViaAPI(t, reg, SpawnPolecatAPIRequest{
+		Name:       "pc-nowtvar",
+		Template:   "nowtvar",
+		Id:         "wi-nowtvar",
+		NoWorktree: true,
+	})
+	data, err := os.ReadFile(a.PromptFile)
+	if err != nil {
+		t.Fatalf("read prompt file: %v", err)
+	}
+	body := string(data)
+	expectedHome := filepath.Join(tmpHome, ".pogo", "agents", "pc-nowtvar")
+	if !strings.Contains(body, "MODE: in-place at "+expectedHome) {
+		t.Errorf("expected in-place mode with home dir in prompt, got: %q", body)
+	}
+	if strings.Contains(body, "MODE: worktree") {
+		t.Errorf("did not expect worktree mode branch, got: %q", body)
+	}
+}
+
 // TestHandleSpawnPolecat_FrontmatterStrippedFromBody verifies that the
 // frontmatter block does not leak into the rendered prompt file.
 func TestHandleSpawnPolecat_FrontmatterStrippedFromBody(t *testing.T) {

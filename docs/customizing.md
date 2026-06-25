@@ -162,7 +162,8 @@ that get expanded per-spawn:
 | `{{.Body}}` | Work item body (markdown) |
 | `{{.Repo}}` | Target repository path (empty if no `--repo`) |
 | `{{.Branch}}` | Target branch for refinery submit |
-| `{{.WorktreeDir}}` | Path to the polecat's isolated worktree |
+| `{{.WorktreeDir}}` | Polecat's working directory: its isolated worktree, or its `~/.pogo/agents/<name>/` home dir under `--no-worktree` |
+| `{{.NoWorktree}}` | `true` when spawned with `--no-worktree` (in-place, refinery:NO) |
 
 ### The `worktree` knob
 
@@ -183,6 +184,25 @@ polecats that write markdown files outside any repo.
 Note: even with `worktree = true` in the template, pogod still skips worktree
 creation if the mayor spawns the polecat without `--repo`. The frontmatter is
 the *upper bound*; the spawn call decides whether to actually create one.
+
+### The `--no-worktree` flag
+
+For one-off, in-place edits to files that aren't under a git repo — runtime
+crew prompt mirrors at `~/.pogo/agents/crew/*.md`, local config under
+`~/.pogo/` or `/etc/` — pass `--no-worktree`:
+
+```bash
+pogo agent spawn-polecat <short-id> --no-worktree \
+  --task="..." --body="<absolute paths to edit>" --id="<id>"
+```
+
+It skips worktree creation entirely (no `--repo` required, and it overrides
+`worktree = true` frontmatter), and the polecat runs from a stable home/scratch
+dir at `~/.pogo/agents/<name>/` instead of an isolated checkout. The deliverable
+isn't a git commit, so it implies a **refinery:NO** posture — no branch push, no
+MR submit. Templates can detect this via `{{.NoWorktree}}` and gate their
+refinery-submit steps behind `{{if not .NoWorktree}}`. The polecat still claims
+the item and emits `mg done` on completion.
 
 ### Author a second polecat template
 
