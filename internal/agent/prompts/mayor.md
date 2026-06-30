@@ -154,7 +154,7 @@ pogo agent spawn-polecat <short-id> \
   --branch="<target branch, if specified on work item>"
 ```
 
-The polecat's name should be a short identifier derived from the work item ID. One polecat per work item — don't spawn duplicates. If the work item has a `branch` field (visible in `mg show` or the work item frontmatter), pass it via `--branch` so the polecat targets the correct branch. If no branch is specified, omit the flag (defaults to main).
+The polecat's name should be a short identifier derived from the work item ID. One polecat per work item — don't spawn duplicates. If the work item has a `branch` field (visible in `mg show` or the work item frontmatter), pass it via `--branch`. This makes the refinery merge the polecat's work **into that branch** (not `main`). If no branch is specified, omit the flag and the refinery merges to `main`.
 
 Before spawning, check that no polecat is already working on this item:
 ```bash
@@ -354,7 +354,7 @@ The refinery is a deterministic merge queue loop inside pogod — not an agent. 
 4. If merged: marks the work item done via `mg done <id>` and exits
 5. If failed: mails you with failure details and exits **without** calling `mg done`
 
-The refinery fetches the branch, runs quality gates (build.sh/test.sh), and either merges to main or rejects. On failure, the refinery mails both the author agent and you (the mayor). Since polecats mail you on failure, you'll typically learn about failures through your inbox. However, also check refinery history in step 3 to catch any failures that slipped through (e.g., polecat crashed before sending mail).
+The refinery fetches the branch, runs quality gates (build.sh/test.sh), and either merges it to the **target branch** or rejects it. The target branch defaults to `main`, but **if the work item has a `--branch` attribute, the refinery merges into that branch instead** (e.g. a deploy or feature integration branch). A polecat merging into a non-main branch via the refinery is normal and intended when its work item specifies `--branch` — it is not a sign of misuse. On failure, the refinery mails both the author agent and you (the mayor). Since polecats mail you on failure, you'll typically learn about failures through your inbox. However, also check refinery history in step 3 to catch any failures that slipped through (e.g., polecat crashed before sending mail).
 
 You don't need to interact with the refinery directly. Just be aware that merge failures may require you to spawn a new polecat to fix the issue.
 

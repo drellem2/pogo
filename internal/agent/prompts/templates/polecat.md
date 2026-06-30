@@ -152,7 +152,7 @@ If your harness has an in-process scheduler (Claude Code's `CronCreate`), it rem
 - **Stay scoped.** Only work on your assigned task. If you discover other issues, note them but don't fix them.
 - **Commit often.** Small, focused commits are easier to review and merge.
 - **Follow conventions.** Match the existing code style in the repository.
-- **Don't push to main.** Push to your feature branch. The refinery merges to main.
+- **Don't push to main.** Push to your feature branch. The refinery merges it into the target branch — `main` by default, or the work item's `--branch` if one was set (see the `--target` in the submit command above).
 - **One mail-check schedule only.** Step 2 registers a single `pogo schedule` entry for mail-checking — that one is required. Do NOT register additional schedules, set up `CronCreate` jobs, `/loop`, `/schedule`, or `pogo nudge` commands targeting yourself or other agents. If you need to poll for refinery status, use a simple bash while-loop (see step 6).
 - **If you need to surface something to the user, mail `human`** (not the mayor): `mg mail send human --from={{.Id}} --subject="<subj>" --body="<body>"`. The mayor's inbox is for coordination; user-facing mail goes to `human` so the apple-side notifier picks it up.
 - **Reaching another agent — prefer mail for asks; reserve nudges for system events.** Mail (`mg mail send <to> --from={{.Id}} --subject="..." --body="..."`) carries an explicit sender so recipients can route, reply, and prioritize correctly. Use nudges only when sender attribution doesn't apply (cron-fired prompts, mail-check loops, system-level signals from pogod).
