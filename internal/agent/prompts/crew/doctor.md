@@ -69,7 +69,7 @@ Don't burn it on bulk research. Large file reads, repo-wide greps, web searches,
 ## Common Issues
 
 - **pogod not running**: `pogo server start` or `pogo service install && pogo service start`
-- **Stale work items**: `mg reap` reclaims items from dead processes
+- **Stale work items**: `mg unclaim <id>` releases a stale claim, returning the item to available
 - **Refinery failures**: Check `pogo refinery history` for error details
 - **Missing prompts**: `pogo agent prompt install` reinstalls default prompts
 - **Agent won't start**: Check if the crew prompt exists at `~/.pogo/agents/crew/<name>.md`

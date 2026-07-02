@@ -32,7 +32,7 @@ mg mail read <msg-id>          # Read a specific message
 mg mail send <agent> --from={{.Coordinator}} --subject="<subj>" --body="<body>"
 
 # Process stale claims
-mg reap                        # Reclaim items from dead processes
+mg unclaim <id>                # Release a stale claim, returning the item to available
 mg reopen <id>                 # Move a done item back to available
 ```
 
@@ -203,15 +203,15 @@ Look for:
   pogo agent stop <name>
   echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] {{.Coordinator}} pogo schedule rm mail-check-<work-item-id> --agent <name> (cleanup-reason: dead)" >> ~/.pogo/agents/{{.Coordinator}}/sweep.log
   pogo schedule rm mail-check-<work-item-id>   # see polecat template step 2
-  mg reap
+  mg unclaim <work-item-id>
   ```
 - **Dead polecats**: Exited with errors. Their work items may need re-dispatch. Log the removal to your sweep.log first (mg-8e5d cleanup-overextension investigation):
   ```bash
   echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] {{.Coordinator}} pogo schedule rm mail-check-<work-item-id> --agent <name> (cleanup-reason: dead)" >> ~/.pogo/agents/{{.Coordinator}}/sweep.log
   pogo schedule rm mail-check-<work-item-id>   # see polecat template step 2
-  mg reap
+  mg unclaim <work-item-id>
   ```
-  `mg reap` reclaims items from dead processes back to available status; `pogo schedule rm` clears the orphan schedule so pogod doesn't keep delivering mail-check nudges to a non-existent agent.
+  `mg unclaim <id>` returns the dead agent's work item to available status; `pogo schedule rm` clears the orphan schedule so pogod doesn't keep delivering mail-check nudges to a non-existent agent.
 
 - **Refinery queue**: Check for pending merges that may be stuck or stalled:
   ```bash
@@ -402,10 +402,10 @@ When an agent seems stuck, follow this process:
    - Third: stop the agent and re-dispatch the work item with retry context:
      ```bash
      pogo agent stop <name>
-     mg reap
+     mg unclaim <work-item-id>
      ```
 
-4. **For dead agents**: The OS process is gone but the agent is still registered. This can happen after OOM kills or crashes. Stop the agent to clean up the registration, then reap the work item.
+4. **For dead agents**: The OS process is gone but the agent is still registered. This can happen after OOM kills or crashes. Stop the agent to clean up the registration, then unclaim the work item.
 
 ## What You Don't Do
 
