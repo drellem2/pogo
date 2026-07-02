@@ -181,6 +181,18 @@ func (a *Agent) alive() bool {
 // distinguish a live agent from one whose process has died.
 func (a *Agent) Alive() bool { return a.alive() }
 
+// ProviderID returns the id of the harness provider resolved for this agent
+// at spawn time ("claude", "codex", "pi"), or "" for a bare-registry spawn.
+// The field is immutable after construction, so no lock is needed. Exposed so
+// integration tests can assert which provider the resolution chain actually
+// picked (per-type config vs global default vs built-in fallback).
+func (a *Agent) ProviderID() string {
+	if a.provider == nil {
+		return ""
+	}
+	return a.provider.ID
+}
+
 // eventAgent returns the agent identity string used in event log envelopes.
 // Mirrors the identity convention from docs/event-log.md: crew-<name> or cat-<name>.
 func (a *Agent) eventAgent() string {
