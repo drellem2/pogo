@@ -10,10 +10,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -105,7 +104,46 @@ func GetFullHealth() (*health.FullResponse, error) {
 // failure surfaces promptly to the user instead of a silent false-success.
 const startupHealthTimeout = 5 * time.Second
 
+// daemonProbeTimeout bounds the TCP dial used to detect whether a pogod is
+// already bound to the daemon port. It is short because the probe targets
+// loopback: a live daemon answers the SYN immediately, and a free port refuses
+// immediately, so the only thing this timeout guards against is a dropped
+// packet on a wedged host.
+const daemonProbeTimeout = 500 * time.Millisecond
+
+// daemonBound reports whether something is already listening on the pogod TCP
+// port. It probes the actual bind (a raw TCP dial to 127.0.0.1:<port>) rather
+// than /health, answering the specific question "would a second pogod fail to
+// bind :10000?".
+func daemonBound() bool {
+	return portBound(config.Load().DialAddr())
+}
+
+// portBound reports whether a TCP listener currently holds addr.
+func portBound(addr string) bool {
+	conn, err := net.DialTimeout("tcp", addr, daemonProbeTimeout)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
+}
+
+// StartServer ensures a pogod is running, spawning one only when the daemon
+// port is actually free.
+//
+// If the port is already bound we must NOT spawn a rival pogod: a second pogod
+// either loses the bind and exits — closing the PTY masters of any agents it
+// had started — or, during a launchd restart window, wins the bind and
+// displaces the launchd-managed daemon. Either path hangs up the agent fleet
+// via SIGHUP (#22). When the port is held we treat the daemon as up and return
+// nil so the caller connects to it instead. The primary guard against a double
+// daemon is still the shared singleton lockfile (config.LockfilePath); this is
+// a cheaper, earlier check on the client side.
 func StartServer() error {
+	if daemonBound() {
+		return nil
+	}
 	return startServerCmd(newServerCmd(), HealthCheck, startupHealthTimeout)
 }
 
@@ -250,7 +288,10 @@ func StopOrchestration() error {
 }
 
 func StopServer() error {
-	pidPath := filepath.Join(os.TempDir(), "pogo.pid")
+	// Must match cmd/pogod's lock path (config.LockfilePath) so we read the
+	// same lockfile the running daemon holds — a TempDir-based path would miss
+	// the launchd-domain lock and report "not running" (#22).
+	pidPath := config.LockfilePath()
 
 	lock, err := lockfile.New(pidPath)
 	if err != nil {
@@ -282,9 +323,11 @@ func StopServer() error {
 // Run closure with health check
 func RunWithHealthCheck[T ClientResp](run func() (T, error)) (T, error) {
 	if err := HealthCheck(); err != nil {
-		// StartServer now blocks until pogod is healthy or returns a
-		// descriptive error (including captured stderr) — no separate
-		// retry loop needed here.
+		// StartServer blocks until pogod is healthy or returns a descriptive
+		// error (including captured stderr) — no separate retry loop needed
+		// here. It also refuses to spawn a rival pogod when :10000 is already
+		// bound (connecting to the existing daemon instead), so a missed
+		// /health probe can't displace the running daemon (#22).
 		if err := StartServer(); err != nil {
 			return nil, err
 		}

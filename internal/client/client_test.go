@@ -2,6 +2,7 @@ package client
 
 import (
 	"errors"
+	"net"
 	"os"
 	"os/exec"
 	"strings"
@@ -9,6 +10,31 @@ import (
 	"testing"
 	"time"
 )
+
+// TestPortBound verifies the TCP bind probe that keeps StartServer from
+// spawning a rival pogod when :10000 is already held (#22). An ephemeral
+// listener stands in for the running daemon so the test never touches the real
+// port.
+func TestPortBound(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to open ephemeral listener: %v", err)
+	}
+	addr := ln.Addr().String()
+
+	if !portBound(addr) {
+		t.Errorf("portBound(%q) = false while a listener holds it, want true", addr)
+	}
+
+	// After closing the listener the address is free; the probe must say so,
+	// otherwise StartServer would refuse to launch a legitimately-needed pogod.
+	if err := ln.Close(); err != nil {
+		t.Fatalf("failed to close listener: %v", err)
+	}
+	if portBound(addr) {
+		t.Errorf("portBound(%q) = true after listener closed, want false", addr)
+	}
+}
 
 // alwaysFailingHealth simulates a daemon that never becomes healthy.
 func alwaysFailingHealth() error {

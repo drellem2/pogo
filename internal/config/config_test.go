@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -750,5 +751,45 @@ func TestParseStringArray(t *testing.T) {
 				t.Errorf("parseStringArray(%q)[%d] = %q, want %q", c.input, i, got[i], c.want[i])
 			}
 		}
+	}
+}
+
+// TestPogoHomeFromEnv verifies POGO_HOME takes precedence, so the singleton
+// lockfile resolves to the same directory across the launchd domain, shells,
+// and agents (#22).
+func TestPogoHomeFromEnv(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("POGO_HOME", home)
+	if got := PogoHome(); got != home {
+		t.Errorf("PogoHome() = %q, want %q", got, home)
+	}
+	if got, want := LockfilePath(), filepath.Join(home, "pogo.pid"); got != want {
+		t.Errorf("LockfilePath() = %q, want %q", got, want)
+	}
+}
+
+// TestPogoHomeDefaultNotTempDir verifies the fallback (POGO_HOME unset) is
+// ~/.pogo and, critically, never os.TempDir — a TempDir-based path differs
+// between the launchd domain and a shell/agent and would not share the lock.
+func TestPogoHomeDefaultNotTempDir(t *testing.T) {
+	t.Setenv("POGO_HOME", "")
+	got := PogoHome()
+	if home, err := os.UserHomeDir(); err == nil {
+		if want := filepath.Join(home, ".pogo"); got != want {
+			t.Errorf("PogoHome() = %q, want %q", got, want)
+		}
+	}
+	if strings.HasPrefix(got, os.TempDir()) {
+		t.Errorf("PogoHome() = %q must not be under TempDir %q", got, os.TempDir())
+	}
+	if strings.HasPrefix(LockfilePath(), os.TempDir()) {
+		t.Errorf("LockfilePath() = %q must not be under TempDir %q", LockfilePath(), os.TempDir())
+	}
+}
+
+func TestDialAddr(t *testing.T) {
+	cfg := &Config{Port: 10000}
+	if got := cfg.DialAddr(); got != "127.0.0.1:10000" {
+		t.Errorf("DialAddr() = %q, want 127.0.0.1:10000", got)
 	}
 }
