@@ -48,6 +48,34 @@ jobs:
       - name: Test
         run: go test ./...
 
+  pi-e2e:
+    # Live pi-provider integration tests (mg-3e7c): drive a real pi binary
+    # through agent.Registry (TUI initial + mid-session nudges) and in
+    # headless --print --mode json form, against a localhost mock OpenAI
+    # server — no API key, no external model traffic. pi is pinned to the
+    # version the nudge dialect was calibrated against
+    # (docs/investigations/pi-nudge-calibration.md); bump it deliberately and
+    # re-check the calibration if pi's TUI changed.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install pi
+        run: npm install -g --ignore-scripts @earendil-works/pi-coding-agent@0.80.3
+
+      - name: Run pi provider integration tests
+        env:
+          POGO_PI_E2E: "1"
+        run: go test ./internal/pi/ -v -timeout 300s
+
   emacs-test:
     runs-on: ubuntu-latest
     steps:

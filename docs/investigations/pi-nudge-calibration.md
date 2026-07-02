@@ -183,12 +183,23 @@ step, not a pogo concern.
 ## Reproducing
 
 ```
-POGO_PI_E2E=1 go test ./internal/pi/ -run TestPiEndToEnd -v
+POGO_PI_E2E=1 go test ./internal/pi/ -run 'TestPi' -v
 ```
 
 Needs only a `pi` binary on PATH — no API key, no network beyond localhost.
-It drives a real `pi` through pogo's `agent.Registry` + `pi.Provider` and
-asserts: the sentinel-gated initial nudge submits; the persona from
-`--append-system-prompt` reaches the request's system message and the task the
-user message (byte-level, via the mock provider); the reply renders; the
-composer settles; the registry shuts the agent down cleanly.
+`TestPiEndToEnd` drives a real `pi` through pogo's `agent.Registry` +
+`pi.Provider`, wired the way `cmd/pogod` wires it (per-type provider config,
+claude as global default), and asserts: the spawn resolves pi via the
+`[agents.polecat] provider = "pi"` config tier; the sentinel-gated initial
+nudge submits; the persona from `--append-system-prompt` reaches the
+request's system message and the task the user message (byte-level, via the
+mock provider); the repo's own AGENTS.md survives untouched and still reaches
+the request (the mg-9829 collision regression); the reply renders; the
+composer settles; a mid-session `Agent.Nudge` triggers a second turn; the
+registry shuts the agent down cleanly. `TestPiHeadless` runs the same
+provider flags in `--print --mode json` form (mg-3e7c).
+
+GitHub CI runs both in the `pi-e2e` job (`.github/workflows/ci.yml`) against
+a pinned `@earendil-works/pi-coding-agent@0.80.3` — the version calibrated
+here. The ungated `internal/pi/integration_test.go` covers the config →
+provider-registry resolution path in every plain `go test ./...`.
