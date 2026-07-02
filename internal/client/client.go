@@ -172,6 +172,13 @@ func newServerCmd() *exec.Cmd {
 // On success, the spawned process is left running. On failure, the
 // process is killed and its captured output is included in the returned
 // error (truncated to a sane prefix).
+//
+// Ownership note: startServerCmd spawns a background goroutine that calls
+// cmd.Wait and keeps it after returning. Callers (including tests) must
+// never call cmd.Wait themselves — os/exec forbids concurrent Waits, and
+// the losing Wait blocks forever in awaitGoroutines because the internal
+// goroutineErr channel is sent exactly one value (mg-59d5). To stop the
+// process, Kill it and let the background goroutine reap it.
 func startServerCmd(cmd *exec.Cmd, healthCheck func() error, timeout time.Duration) error {
 	var output bytes.Buffer
 	var outputMu sync.Mutex

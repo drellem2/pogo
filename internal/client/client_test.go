@@ -136,9 +136,14 @@ func TestStartServerCmd_HealthySucceeds(t *testing.T) {
 	elapsed := time.Since(start)
 
 	// Always clean up the spawned process, regardless of test outcome.
+	// Kill only — never call cmd.Wait here. startServerCmd's background
+	// goroutine already owns cmd.Wait and reaps the child; a second
+	// concurrent Wait races on os/exec internals and the loser blocks
+	// forever in awaitGoroutines (its internal goroutineErr channel is
+	// sent exactly one value). That deadlock is what made this test panic
+	// on the 10m go-test timeout under refinery load (mg-59d5).
 	if cmd.Process != nil {
 		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
 	}
 
 	if err != nil {
