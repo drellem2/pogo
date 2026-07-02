@@ -28,7 +28,7 @@ Most "pogod is misbehaving" situations are better solved by **filing an mg or re
 - A plugin behaves stalely after you edited its source. → Most plugins reload on file change; if not, fix the plugin's reload path rather than bouncing the daemon.
 - A polecat hangs or misbehaves. → Stop that polecat (`pogo agent stop <name>`); pogod itself is fine.
 - Refinery is slow or backed up. → Inspect with `pogo refinery list`; queue throughput is not a daemon-restart problem.
-- Logs look noisy. → Filter or rotate `~/Library/Logs/pogo/pogod.log`.
+- Logs look noisy. → Filter `~/Library/Logs/pogo/pogod.log`. pogod appends across restarts (crash evidence survives) and rotates the file itself at startup once it exceeds 10 MiB — the prior chunk is `pogod.log.1` (up to `.3`). No manual rotation needed; never truncate the live file mid-run.
 - An mg you expected to appear didn't. → It's almost certainly an mg routing/visibility issue, not a pogod liveness issue.
 
 **Symptoms that DO warrant escalation** (continue to tier 2):

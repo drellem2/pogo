@@ -88,7 +88,7 @@ The plist must include all of these keys for pogod to behave correctly under lau
 | `RunAtLoad` | `true` | Start on login. |
 | `KeepAlive` | `true` (unconditional) | Restart on any exit, clean or crashing. The older `<dict><SuccessfulExit>false</SuccessfulExit></dict>` form does NOT restart after a clean exit. |
 | `ProcessType` | `Interactive` | Prevents App Nap from throttling timers. Without this, macOS coalesces wake-ups for "background" daemons, delaying refinery polling and agent idle detection. |
-| `StandardOutPath` / `StandardErrorPath` | `~/Library/Logs/pogo/pogod.log` | macOS-standard location for user-scope app logs; surfaces in Console.app and avoids any collision with arbitrary files at the $HOME root. |
+| `StandardOutPath` / `StandardErrorPath` | `~/Library/Logs/pogo/pogod.log` | macOS-standard location for user-scope app logs; surfaces in Console.app and avoids any collision with arbitrary files at the $HOME root. launchd opens this in append mode, so output accumulates across KeepAlive respawns — crash traces from a prior run survive for post-mortems. pogod rotates the file at startup once it exceeds 10 MiB (`pogod.log.1` = most recent prior chunk, 3 kept), so the previous run's tail is always in `pogod.log` or `pogod.log.1` (mg-6d02). |
 | `EnvironmentVariables.PATH` | Includes `~/.local/bin`, `~/go/bin`, `/opt/homebrew/bin`, `/usr/local/bin`, system dirs | pogod spawns claude / git / mg as children; launchd's default PATH does not include these. |
 | `EnvironmentVariables.HOME` | User's home dir | launchd sometimes does not set this. |
 | `EnvironmentVariables.POGO_HOME` | `~/.pogo` | Where pogo state, agent metadata, and refinery data live. |
