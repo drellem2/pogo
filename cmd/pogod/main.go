@@ -503,6 +503,12 @@ func main() {
 	// Configure agent command templates and the harness providers.
 	agentRegistry.SetCommandConfig(&cfg.Agents)
 
+	// Resolve the coordinator agent's name ([agents] coordinator, default
+	// "mayor") before any prompt synthesis or autostart happens — it decides
+	// which agent name maps to mayor.md and what prompts call the role.
+	agent.SetCoordinatorName(cfg.Agents.Coordinator)
+	coordinator := cfg.Agents.CoordinatorName()
+
 	// Register every known harness provider into the registry, then set the
 	// global default. Before mg-b31b a single provider was resolved here, once,
 	// at startup; now the registry resolves a provider per spawn from the
@@ -743,7 +749,7 @@ func main() {
 			mergeQueue.SetOnMerged(func(mr *refinery.MergeRequest) {
 				log.Printf("refinery: merged %s (branch=%s, author=%s)", mr.ID, mr.Branch, mr.Author)
 
-				// Mail the mayor so it can stop the polecat and archive
+				// Mail the coordinator so it can stop the polecat and archive
 				// the work item. We used to auto-archive here, but the
 				// mayor needs to see the done/ item before it gets archived
 				// so it can run cleanup (stop polecat, handle QA, etc.).
@@ -755,8 +761,8 @@ func main() {
 				if mr.DeployError != "" {
 					body += fmt.Sprintf("\nDeploy: FAILED — %s", mr.DeployError)
 				}
-				if err := client.SendMGMail("mayor", "refinery", subject, body); err != nil {
-					log.Printf("refinery: failed to mail mayor: %v", err)
+				if err := client.SendMGMail(coordinator, "refinery", subject, body); err != nil {
+					log.Printf("refinery: failed to mail coordinator: %v", err)
 				}
 			})
 			mergeQueue.SetOnFailed(func(mr *refinery.MergeRequest) {
@@ -772,9 +778,9 @@ func main() {
 					}
 				}
 
-				// Mail the mayor so they can re-dispatch if the author exited.
-				if err := client.SendMGMail("mayor", "refinery", subject, body); err != nil {
-					log.Printf("refinery: failed to mail mayor: %v", err)
+				// Mail the coordinator so they can re-dispatch if the author exited.
+				if err := client.SendMGMail(coordinator, "refinery", subject, body); err != nil {
+					log.Printf("refinery: failed to mail coordinator: %v", err)
 				}
 
 				// Escalation: if the failure threshold has been reached, send
@@ -784,8 +790,8 @@ func main() {
 					escSubject := fmt.Sprintf("FAILURE THRESHOLD REACHED: %s (%d consecutive failures)", mr.Author, mr.FailureCount)
 					escBody := fmt.Sprintf("Author %s has failed %d consecutive merge attempts.\nLatest MR: %s\nBranch: %s\nError: %s\nConsider stopping the polecat or reassigning the work item.",
 						mr.Author, mr.FailureCount, mr.ID, mr.Branch, mr.Error)
-					if err := client.SendMGMail("mayor", "refinery", escSubject, escBody); err != nil {
-						log.Printf("refinery: failed to mail mayor escalation: %v", err)
+					if err := client.SendMGMail(coordinator, "refinery", escSubject, escBody); err != nil {
+						log.Printf("refinery: failed to mail coordinator escalation: %v", err)
 					}
 				}
 

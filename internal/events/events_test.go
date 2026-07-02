@@ -491,23 +491,26 @@ func TestRotationConcurrentEmittersOnlyRotateOnce(t *testing.T) {
 
 func TestResolveAgent(t *testing.T) {
 	cases := []struct {
-		name      string
-		envName   string
-		envType   string
-		wantAgent string
+		name        string
+		envName     string
+		envType     string
+		coordinator string
+		wantAgent   string
 	}{
-		{"no env", "", "", "human"},
-		{"polecat", "mg-4fa7", "polecat", "cat-mg-4fa7"},
-		{"crew", "arch", "crew", "crew-arch"},
-		{"mayor special-case", "mayor", "crew", "mayor"},
-		{"name without type", "weird", "", "weird"},
+		{"no env", "", "", "", "human"},
+		{"polecat", "mg-4fa7", "polecat", "", "cat-mg-4fa7"},
+		{"crew", "arch", "crew", "", "crew-arch"},
+		{"mayor special-case", "mayor", "crew", "", "mayor"},
+		{"name without type", "weird", "", "", "weird"},
+		{"renamed coordinator", "boss", "crew", "boss", "boss"},
+		{"mayor is plain crew under renamed coordinator", "mayor", "crew", "boss", "crew-mayor"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("POGO_AGENT_NAME", tc.envName)
 			t.Setenv("POGO_AGENT_TYPE", tc.envType)
-			if got := ResolveAgent(); got != tc.wantAgent {
-				t.Errorf("ResolveAgent() = %q, want %q", got, tc.wantAgent)
+			if got := ResolveAgent(tc.coordinator); got != tc.wantAgent {
+				t.Errorf("ResolveAgent(%q) = %q, want %q", tc.coordinator, got, tc.wantAgent)
 			}
 		})
 	}

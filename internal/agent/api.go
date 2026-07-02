@@ -529,15 +529,17 @@ type StartErrorResponse struct {
 // under ~/.pogo/agents/ and applying any frontmatter overrides
 // (nudge_on_start, restart_on_crash).
 //
-// The mayor's prompt lives at ~/.pogo/agents/mayor.md; all other crew prompts
-// live at ~/.pogo/agents/crew/<name>.md.
+// The coordinator's prompt lives at ~/.pogo/agents/mayor.md (the file name is
+// mechanism and stays put; the agent's name follows [agents] coordinator);
+// all other crew prompts live at ~/.pogo/agents/crew/<name>.md.
 //
 // Returns ErrPromptNotFound (wrapped) when the prompt file is missing, or any
 // error from Spawn (e.g. when the agent is already registered).
 func (r *Registry) StartCrewAgent(name string) (*Agent, error) {
-	// Look up prompt file: mayor.md is in PromptDir, crew in CrewPromptDir
+	// Look up prompt file: the coordinator's mayor.md is in PromptDir, crew
+	// in CrewPromptDir
 	var promptFile string
-	if name == "mayor" {
+	if name == CoordinatorName() {
 		promptFile = filepath.Join(PromptDir(), "mayor.md")
 	} else {
 		promptFile = filepath.Join(CrewPromptDir(), name+".md")
@@ -600,12 +602,12 @@ func (r *Registry) StartCrewAgent(name string) (*Agent, error) {
 
 	// All crew agents get an initial nudge to bypass the CLI interactive prompt.
 	// A prompt file may declare its own message via `nudge_on_start` in the
-	// TOML frontmatter; otherwise the mayor gets a coordination message and
-	// everyone else gets a generic start message.
+	// TOML frontmatter; otherwise the coordinator gets a coordination message
+	// and everyone else gets a generic start message.
 	var nudgeMsg string
 	if meta != nil && meta.NudgeOnStart != "" {
 		nudgeMsg = meta.NudgeOnStart
-	} else if name == "mayor" {
+	} else if name == CoordinatorName() {
 		nudgeMsg = "You are now running. Begin your coordination loop."
 	} else {
 		nudgeMsg = "You are now running. Check your mail with `mg mail list " + name + "` and begin your work."

@@ -44,6 +44,14 @@ func (m RunMode) String() string {
 // internal/agent/provider.go and internal/claude/provider.go.
 const DefaultProvider = "claude"
 
+// DefaultCoordinator is the coordinator agent's name used when [agents]
+// coordinator is not configured. Keeping this "mayor" means existing
+// deployments work with no config change. The name is policy, not mechanism:
+// it decides the coordinator's agent name (and therefore its mg mailbox and
+// schedule ids) and what prompts call the role; the coordinator's prompt file
+// stays at ~/.pogo/agents/mayor.md regardless. See mg-71ea.
+const DefaultCoordinator = "mayor"
+
 // DefaultMaxFilesPerTree is the default per-tree file-count ceiling. A tree
 // with more files than this is registered but marked skipped-too-large: it is
 // not deep-walked. This bounds index cost (building the search index is
@@ -74,10 +82,13 @@ const DefaultGitGCInterval = time.Hour
 // dropping its check-work / check-mail steps. See internal/stallwatch and
 // docs/design/stall-watch-design.md.
 const (
-	// DefaultStallWatchAgent is the agent the watcher monitors. Only the mayor
-	// is in scope today (it is the sole behavioral-stall target), but the name
-	// is configurable so a future deployment can point it elsewhere.
-	DefaultStallWatchAgent = "mayor"
+	// DefaultStallWatchAgent is the agent the watcher monitors. Only the
+	// coordinator is in scope today (it is the sole behavioral-stall target),
+	// but the name is configurable so a deployment can point it elsewhere.
+	// When [stall_watch] agent is unset, Load() resolves it to the configured
+	// [agents] coordinator, so a renamed coordinator is watched under its
+	// configured name without extra config.
+	DefaultStallWatchAgent = DefaultCoordinator
 	// DefaultUnclaimedItemAgeThreshold is how long an available work item
 	// assigned to (or pickup-expected by) the watched agent may sit before the
 	// watcher nudges. Mirrors the gh #12 spec's 600s.
@@ -176,6 +187,11 @@ type AgentsConfig struct {
 	// by cmd/pogod to an agent.Provider. Empty is treated as DefaultProvider;
 	// Load() fills it in.
 	Provider string
+	// Coordinator is the coordinator agent's name ([agents] coordinator).
+	// Empty is treated as DefaultCoordinator ("mayor"); Load() fills it in.
+	// Prefer CoordinatorName() over reading the field so zero-value configs
+	// (tests, callers that skip Load) still resolve to the default.
+	Coordinator string
 	// Command is the default command template for all agent types. When empty,
 	// the active provider's CommandTemplate is used instead.
 	// Supports Go template variables: {{.PromptFile}}, {{.AgentName}}, {{.AgentType}}, {{.WorkDir}}
@@ -215,6 +231,15 @@ func (c *AgentsConfig) AgentCommand(agentType string) string {
 		}
 	}
 	return c.Command
+}
+
+// CoordinatorName returns the configured coordinator agent name, falling back
+// to DefaultCoordinator ("mayor") when unset. Safe on a zero-value AgentsConfig.
+func (c *AgentsConfig) CoordinatorName() string {
+	if c != nil && c.Coordinator != "" {
+		return c.Coordinator
+	}
+	return DefaultCoordinator
 }
 
 // AgentProvider returns the configured harness provider id for a given agent
@@ -271,8 +296,9 @@ func Load() *Config {
 			Interval: DefaultGitGCInterval,
 		},
 		StallWatch: StallWatchConfig{
-			Enabled:                   true,
-			Agent:                     DefaultStallWatchAgent,
+			Enabled: true,
+			// Agent is resolved at the end of Load: explicit [stall_watch]
+			// agent wins, otherwise it follows the [agents] coordinator.
 			UnclaimedItemAgeThreshold: DefaultUnclaimedItemAgeThreshold,
 			UnreadMailAgeThreshold:    DefaultUnreadMailAgeThreshold,
 			MaxUnreadMailCount:        DefaultMaxUnreadMailCount,
@@ -366,6 +392,16 @@ func Load() *Config {
 	// Default the provider so existing deployments work with no config change.
 	if cfg.Agents.Provider == "" {
 		cfg.Agents.Provider = DefaultProvider
+	}
+
+	// Default the coordinator name so existing deployments work with no
+	// config change, then let the stall watcher follow it unless an explicit
+	// [stall_watch] agent was configured.
+	if cfg.Agents.Coordinator == "" {
+		cfg.Agents.Coordinator = DefaultCoordinator
+	}
+	if cfg.StallWatch.Agent == "" {
+		cfg.StallWatch.Agent = cfg.Agents.Coordinator
 	}
 
 	return cfg
@@ -566,6 +602,8 @@ func loadConfigFile() (*parsedConfig, error) {
 				cfg.Agents.Command = unquotedVal
 			case "provider":
 				cfg.Agents.Provider = unquotedVal
+			case "coordinator":
+				cfg.Agents.Coordinator = unquotedVal
 			}
 		case "agents.crew":
 			switch key {

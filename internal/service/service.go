@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/drellem2/pogo/internal/client"
+	"github.com/drellem2/pogo/internal/config"
 )
 
 const launchdLabel = "com.pogo.daemon"
@@ -477,19 +478,20 @@ func installLaunchd() (retErr error) {
 	return nil
 }
 
-// sendInstallMail is best-effort: if mg isn't on PATH or the mayor inbox
-// doesn't exist yet, the install must still succeed. The mayor is just
-// the fastest verification path; a human can read the log otherwise.
+// sendInstallMail is best-effort: if mg isn't on PATH or the coordinator's
+// inbox doesn't exist yet, the install must still succeed. The coordinator is
+// just the fastest verification path; a human can read the log otherwise.
 func sendInstallMail(subject, body string) {
-	cmd := exec.Command("mg", "mail", "send", "mayor",
+	coordinator := config.Load().Agents.CoordinatorName()
+	cmd := exec.Command("mg", "mail", "send", coordinator,
 		"--from", "service-install",
 		"--subject", subject,
 		"--body", body)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: mail to mayor failed: %v: %s\n", err, strings.TrimSpace(string(out)))
+		fmt.Fprintf(os.Stderr, "warning: mail to %s failed: %v: %s\n", coordinator, err, strings.TrimSpace(string(out)))
 		return
 	}
-	fmt.Printf("Mailed install report to mayor: %s\n", subject)
+	fmt.Printf("Mailed install report to %s: %s\n", coordinator, subject)
 }
 
 func sendInstallSuccessMail(plistPath, logd string, noChange bool) {
