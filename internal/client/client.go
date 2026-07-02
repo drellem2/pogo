@@ -144,8 +144,21 @@ func StartServer() error {
 	if daemonBound() {
 		return nil
 	}
+	return startServerCmd(newServerCmd(), HealthCheck, startupHealthTimeout)
+}
+
+// newServerCmd builds the pogod invocation used by StartServer. The daemon is
+// started in its own session (Setsid) so it is detached from the invoking
+// CLI's process group and controlling terminal. Without this, an auto-started
+// pogod is a member of whatever foreground group ran the CLI — a Ctrl-C at
+// that terminal, the terminal closing, or a harness tearing down the CLI's
+// process group SIGTERMs pogod along with it, and pogod's shutdown then stops
+// every agent (the gh #22 cascade: LastExitStatus=15 with no crash trace).
+// Same isolation detach.go uses for `pogod --detach`.
+func newServerCmd() *exec.Cmd {
 	cmd := exec.Command("pogod")
-	return startServerCmd(cmd, HealthCheck, startupHealthTimeout)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	return cmd
 }
 
 // startServerCmd spawns the given command and waits for healthCheck to

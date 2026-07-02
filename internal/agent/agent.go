@@ -591,6 +591,12 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 	// kernel default (0×0, which Ink falls back to 80×24). Real attach clients
 	// overwrite this via the resize frame on connect; the goal here is just to
 	// avoid a degenerate initial size.
+	//
+	// Isolation guarantee (gh #22): pty.StartWithSize forces SysProcAttr
+	// Setsid+Setctty, so every agent runs in its own session and process
+	// group with the PTY slave as its controlling terminal. A signal aimed
+	// at one agent's group (or at pogod's) therefore never cascades to
+	// pogod or sibling agents. TestSpawnProcessGroupIsolation guards this.
 	master, err := pty.StartWithSize(cmd, winsize)
 	if err != nil {
 		return nil, fmt.Errorf("pty start: %w", err)

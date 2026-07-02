@@ -3,8 +3,10 @@ package client
 import (
 	"errors"
 	"net"
+	"os"
 	"os/exec"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -159,5 +161,43 @@ func TestStartServerCmd_SpawnFailure(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "failed to spawn pogod") {
 		t.Errorf("expected spawn-failure error, got: %v", err)
+	}
+}
+
+// TestNewServerCmd_SessionIsolation is the regression guard for the gh #22
+// SIGTERM cascade. An auto-started pogod must be spawned into its own
+// session — otherwise it joins the invoking CLI's process group, and a
+// Ctrl-C at that terminal or a harness tearing down the CLI's process group
+// SIGTERMs pogod (LastExitStatus=15), whose shutdown then stops every agent.
+func TestNewServerCmd_SessionIsolation(t *testing.T) {
+	cmd := newServerCmd()
+	if cmd.SysProcAttr == nil || !cmd.SysProcAttr.Setsid {
+		t.Fatal("StartServer must spawn pogod with SysProcAttr.Setsid so the daemon detaches from the CLI's process group and controlling terminal")
+	}
+
+	// Behavioral check: the same SysProcAttr, applied to a stand-in daemon,
+	// actually lands the child in its own process group.
+	fake := exec.Command("sh", "-c", "exec sleep 30")
+	fake.SysProcAttr = cmd.SysProcAttr
+	if err := startServerCmd(fake, func() error { return nil }, 5*time.Second); err != nil {
+		t.Fatalf("startServerCmd: %v", err)
+	}
+	defer func() {
+		_ = fake.Process.Kill()
+	}()
+
+	childPgid, err := syscall.Getpgid(fake.Process.Pid)
+	if err != nil {
+		t.Fatalf("Getpgid(child): %v", err)
+	}
+	selfPgid, err := syscall.Getpgid(os.Getpid())
+	if err != nil {
+		t.Fatalf("Getpgid(self): %v", err)
+	}
+	if childPgid == selfPgid {
+		t.Fatalf("spawned daemon shares the CLI's process group (pgid=%d); group-wide signals would cascade into pogod", childPgid)
+	}
+	if childPgid != fake.Process.Pid {
+		t.Errorf("spawned daemon pgid = %d, want %d (daemon should lead its own session/process group)", childPgid, fake.Process.Pid)
 	}
 }

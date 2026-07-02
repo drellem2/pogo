@@ -230,7 +230,7 @@ Look for:
      ```
   2. If the same item has failed multiple times, create a new work item with retry context instead of reopening blindly:
      ```bash
-     mg create --type=task --depends=<id> --title="retry: <original title>" --body="Previous attempts failed. Errors: <summary>. Try a different approach."
+     mg new --type=task --depends=<id> --title="retry: <original title>" --body="Previous attempts failed. Errors: <summary>. Try a different approach."
      ```
 
 ### 3a. Stall-watch crew agents (heartbeat staleness)
@@ -298,7 +298,7 @@ When a polecat completes a work item, check whether the work item has a `qa` fie
 
 - **`qa: required`** — Create a paired QA work item to verify the polecat's output:
   ```bash
-  mg create --type=qa --depends=<source-id> --source=<source-id> --title="QA: <original title>"
+  mg new --type=qa --depends=<source-id> --title="QA: <original title>" --body="QA for <source-id>."
   ```
   This QA item will be dispatched to a new polecat like any other work item. Don't stop the original polecat until QA passes.
 
@@ -306,7 +306,7 @@ When a polecat completes a work item, check whether the work item has a `qa` fie
 
 - **`qa: manual`** — Human review is required. Create a QA work item assigned to the human:
   ```bash
-  mg create --type=qa --depends=<source-id> --source=<source-id> --assignee=human --title="QA: <original title>"
+  mg new --type=qa --depends=<source-id> --assignee=human --title="QA: <original title>" --body="QA for <source-id>."
   ```
   This item won't be dispatched to a polecat — it stays assigned to the human.
 

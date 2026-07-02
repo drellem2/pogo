@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -1005,5 +1006,45 @@ func TestSpawnRefusesLiveDuplicate(t *testing.T) {
 	// The live agent must be untouched by the refused spawn.
 	if reg.Get("live-one") != a {
 		t.Error("refused duplicate spawn must not disturb the live registration")
+	}
+}
+
+// TestSpawnProcessGroupIsolation is the regression guard for the gh #22
+// SIGTERM cascade: a spawned agent must run in its own process group (its
+// own session, courtesy of pty.StartWithSize's Setsid), NOT in pogod's.
+// If an agent ever lands in pogod's group again, a group-wide signal aimed
+// at either side kills both — pogo doctor / any agent spawn takes down
+// pogod and every sibling agent at once.
+func TestSpawnProcessGroupIsolation(t *testing.T) {
+	tmpDir := t.TempDir()
+	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	defer reg.StopAll(2 * time.Second)
+
+	a, err := reg.Spawn(SpawnRequest{
+		Name:    "isolated",
+		Type:    TypePolecat,
+		Command: []string{"cat"},
+	})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+
+	agentPgid, err := syscall.Getpgid(a.PID)
+	if err != nil {
+		t.Fatalf("Getpgid(agent %d): %v", a.PID, err)
+	}
+	selfPgid, err := syscall.Getpgid(os.Getpid())
+	if err != nil {
+		t.Fatalf("Getpgid(self): %v", err)
+	}
+	if agentPgid == selfPgid {
+		t.Fatalf("agent shares the spawner's process group (pgid=%d); a group-wide signal would cascade across pogod and all agents", agentPgid)
+	}
+	// Setsid makes the agent its own session and group leader.
+	if agentPgid != a.PID {
+		t.Errorf("agent pgid = %d, want %d (agent should lead its own process group)", agentPgid, a.PID)
 	}
 }
