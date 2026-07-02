@@ -23,6 +23,27 @@ copies live in `~/.pogo/agents/`). The `extends <template> with config <toml>`
 directive synthesizes a crew prompt from a base plus a TOML. See
 [docs/prompt-customization.md](prompt-customization.md) and [PROMPT_GUIDELINES.md](PROMPT_GUIDELINES.md).
 
+## Coordinator name
+
+The coordinator role is called "mayor" by default, but the name is policy, not
+mechanism — rename it with:
+
+```toml
+[agents]
+coordinator = "boss"   # default "mayor"
+```
+
+The configured name decides the coordinator's agent name (and therefore its mg
+mailbox, its `mail-check-<name>` schedule id, and where pogod's refinery and
+stall watcher address their mail/nudges), and what the shipped prompts call the
+role: prompt files reference the coordinator via `{{.Coordinator}}` (and
+`{{.CoordinatorTitle}}` for headings), resolved at prompt-synthesis time.
+Polecat templates resolve it through the same text/template pass as `{{.Id}}`;
+static prompts (mayor.md, crew, pm-template) get a plain string substitution,
+so user prompts containing other `{{` sequences are untouched. Two things stay
+fixed regardless of the name: the prompt file path `~/.pogo/agents/mayor.md`,
+and the `"mayor"` category label in `pogo agent prompt list --json`.
+
 ## Scheduler
 
 `pogo schedule` registers recurring (`--cron`) or one-shot (`--once --in N`)
@@ -49,7 +70,8 @@ check-work / check-mail steps (gh drellem2/macguffin #12). Configure under
 ```toml
 [stall_watch]
 enabled = true                          # default true
-agent = "mayor"                         # which agent to watch
+agent = "mayor"                         # which agent to watch (default: the
+                                        # configured [agents] coordinator)
 unclaimed_item_age_threshold = "10m"    # Threshold A
 unread_mail_age_threshold = "10m"       # Threshold B (age)
 max_unread_mail_count = 5               # Threshold B (count)

@@ -48,12 +48,12 @@ func showPromptFile(path string, jsonOut bool) {
 	}
 }
 
-// showRawPromptFile resolves a prompt name (mayor → crew → template) and
-// emits the source file verbatim. Used by `pogo agent prompt show --raw`
+// showRawPromptFile resolves a prompt name (coordinator → crew → template)
+// and emits the source file verbatim. Used by `pogo agent prompt show --raw`
 // to preserve the pre-synthesis behavior for users who want to inspect the
 // shipped/customized file as-is.
 func showRawPromptFile(name string, jsonOut bool) {
-	if name == "mayor" {
+	if name == agent.CoordinatorName() {
 		path, err := agent.ResolveMayorPrompt()
 		if err != nil {
 			cli.ExitWithError(jsonOut, err.Error(), cli.ExitError)
@@ -69,10 +69,15 @@ func showRawPromptFile(name string, jsonOut bool) {
 		showPromptFile(path, jsonOut)
 		return
 	}
-	cli.ExitWithError(jsonOut, fmt.Sprintf("prompt %q not found (checked mayor, crew/, templates/)", name), cli.ExitError)
+	cli.ExitWithError(jsonOut, fmt.Sprintf("prompt %q not found (checked %s, crew/, templates/)", name, agent.CoordinatorName()), cli.ExitError)
 }
 
 func main() {
+
+	// Resolve the coordinator agent's name ([agents] coordinator, default
+	// "mayor") before any prompt resolution or synthesis happens client-side
+	// (prompt show/list run in this process, not in pogod).
+	agent.SetCoordinatorName(config.Load().Agents.Coordinator)
 
 	var jsonOutput bool
 
@@ -1279,7 +1284,7 @@ overwritten.`,
 			} else {
 				fmt.Println("\nReady. Next steps:")
 				fmt.Println("  pogo server start          # Start the pogo daemon")
-				fmt.Println("  pogo agent start mayor     # Start the coordinator")
+				fmt.Printf("  pogo agent start %-10s # Start the coordinator\n", agent.CoordinatorName())
 			}
 		},
 	}
@@ -1385,7 +1390,7 @@ that copy and overwrite without a safety net.`,
 					fmt.Fprintf(os.Stderr, "  ⚠ conflict: %s preserved (user-edited); new embed written to %s — see docs/prompt-customization.md to reconcile\n", c.Path, c.DistPath)
 				}
 				fmt.Println("\nReady. Next steps:")
-				fmt.Println("  pogo agent start mayor    # Start the coordinator")
+				fmt.Printf("  pogo agent start %-9s # Start the coordinator\n", agent.CoordinatorName())
 				fmt.Println("  mg new \"your task here\"   # File work for agents")
 			}
 		},
@@ -2252,7 +2257,7 @@ Example:
 				Repo:       emitRepo,
 			}
 			if ev.Agent == "" {
-				ev.Agent = events.ResolveAgent()
+				ev.Agent = events.ResolveAgent(agent.CoordinatorName())
 			}
 			if emitDetails != "" {
 				if err := json.Unmarshal([]byte(emitDetails), &ev.Details); err != nil {

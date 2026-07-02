@@ -80,21 +80,26 @@ func SetLogPathForTesting(path string) {
 }
 
 // ResolveAgent returns the canonical agent identity from POGO_AGENT_NAME and
-// POGO_AGENT_TYPE env vars per the identity convention in docs/event-log.md:
+// POGO_AGENT_TYPE env vars per the identity convention in docs/event-log.md.
+// coordinator is the configured coordinator agent name ([agents] coordinator);
+// empty falls back to the default, "mayor":
 //
-//   - crew named "mayor" → "mayor"
-//   - other crew         → "crew-<name>"
-//   - polecat            → "cat-<name>"
-//   - no env             → "human"
-func ResolveAgent() string {
+//   - crew named after the coordinator → bare coordinator name (e.g. "mayor")
+//   - other crew                       → "crew-<name>"
+//   - polecat                          → "cat-<name>"
+//   - no env                           → "human"
+func ResolveAgent(coordinator string) string {
+	if coordinator == "" {
+		coordinator = "mayor"
+	}
 	name := os.Getenv("POGO_AGENT_NAME")
 	if name == "" {
 		return "human"
 	}
 	switch os.Getenv("POGO_AGENT_TYPE") {
 	case "crew":
-		if name == "mayor" {
-			return "mayor"
+		if name == coordinator {
+			return name
 		}
 		return "crew-" + name
 	case "polecat":

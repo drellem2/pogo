@@ -20,6 +20,65 @@ import (
 //go:embed prompts
 var defaultPrompts embed.FS
 
+// DefaultCoordinatorName is the coordinator agent's default name. It is kept
+// equal to config.DefaultCoordinator (the agent package cannot import config —
+// config has no agent dependency and the value is a plain string), so the
+// literal is repeated here as the resolution floor.
+const DefaultCoordinatorName = "mayor"
+
+// coordinatorPlaceholder is the token shipped prompts use where the
+// coordinator's name belongs; coordinatorTitlePlaceholder is its
+// first-letter-capitalized twin for headings and sentence-initial prose.
+// Polecat templates resolve both natively through text/template
+// (TemplateVars.Coordinator / .CoordinatorTitle); static prompts (mayor.md,
+// crew, pm-template) get a plain string substitution at synthesis time — they
+// never pass through text/template, so user-authored crew prompts containing
+// other `{{` sequences keep working unchanged.
+const (
+	coordinatorPlaceholder      = "{{.Coordinator}}"
+	coordinatorTitlePlaceholder = "{{.CoordinatorTitle}}"
+)
+
+// titleFirst upper-cases the first rune of s (ASCII-oriented; agent names are
+// mailbox/process identifiers, effectively ASCII).
+func titleFirst(s string) string {
+	if s == "" {
+		return s
+	}
+	return strings.ToUpper(s[:1]) + s[1:]
+}
+
+// coordinatorName is the process-wide coordinator agent name. It is set once
+// at process start (cmd/pogod and cmd/pogo call SetCoordinatorName from the
+// loaded config before any prompt work happens) and read by the prompt
+// synthesis pipeline; it is not synchronized for concurrent mutation.
+var coordinatorName = DefaultCoordinatorName
+
+// SetCoordinatorName sets the process-wide coordinator agent name from
+// configuration ([agents] coordinator). An empty name resets to the default
+// ("mayor").
+func SetCoordinatorName(name string) {
+	if name == "" {
+		name = DefaultCoordinatorName
+	}
+	coordinatorName = name
+}
+
+// CoordinatorName returns the process-wide coordinator agent name.
+func CoordinatorName() string {
+	return coordinatorName
+}
+
+// substituteCoordinator replaces every coordinator placeholder in s with the
+// process-wide coordinator name (and the title placeholder with its
+// capitalized form). Used for static prompts that do not pass through
+// text/template.
+func substituteCoordinator(s string) string {
+	name := CoordinatorName()
+	s = strings.ReplaceAll(s, coordinatorPlaceholder, name)
+	return strings.ReplaceAll(s, coordinatorTitlePlaceholder, titleFirst(name))
+}
+
 // PromptDir returns the root directory for agent prompt files.
 // Default: ~/.pogo/agents/
 func PromptDir() string {
@@ -59,6 +118,29 @@ type TemplateVars struct {
 	// RecentFiles is the unique set of files touched by RecentCommits,
 	// sorted and newline-joined. Same FYI framing as RecentCommits.
 	RecentFiles string
+
+	// Coordinator is the coordinator agent's name ([agents] coordinator,
+	// default "mayor"). Templates reference it as {{.Coordinator}} for mail
+	// targets and role prose. Left empty by callers, it is filled from the
+	// process-wide CoordinatorName() at expansion time.
+	Coordinator string
+	// CoordinatorTitle is Coordinator with its first letter upper-cased
+	// ("Mayor"), for headings and sentence-initial prose. Filled alongside
+	// Coordinator at expansion time.
+	CoordinatorTitle string
+}
+
+// withCoordinator returns vars with Coordinator (and CoordinatorTitle)
+// defaulted from the process-wide coordinator name when the caller left them
+// empty.
+func withCoordinator(vars TemplateVars) TemplateVars {
+	if vars.Coordinator == "" {
+		vars.Coordinator = CoordinatorName()
+	}
+	if vars.CoordinatorTitle == "" {
+		vars.CoordinatorTitle = titleFirst(vars.Coordinator)
+	}
+	return vars
 }
 
 // ResolveCrewPrompt returns the path to a crew agent's prompt file.
@@ -105,8 +187,10 @@ var extendsDirectiveRE = regexp.MustCompile(`(?m)^extends\s+(\S+)\s+with\s+confi
 // SynthesizeExtendsPrompt looks for an `extends <template> with config <config>`
 // directive in the crew prompt at promptPath. If present, it reads the named
 // template and config, writes a merged prompt (template body + config inlined
-// as a TOML block) to outPath, and returns outPath. If absent, returns "" so
-// the caller can use promptPath as-is.
+// as a TOML block) to outPath, and returns outPath. Drop-ins and the
+// coordinator-name substitution ({{.Coordinator}} → configured name) are
+// applied on top. When no layer changes anything — no directive, no drop-ins,
+// no placeholder — it returns "" so the caller can use promptPath as-is.
 //
 // Path resolution: <config> is relative to PromptDir. <template> may be either
 // a full path relative to PromptDir, or a bare name resolved alongside the
@@ -129,28 +213,29 @@ func SynthesizeExtendsPrompt(promptPath, outPath string) (string, error) {
 		return "", err
 	}
 
-	// Bail out early when neither layer adds anything — the caller falls
-	// back to using promptPath as-is, avoiding a synthesized-file write for
-	// the common no-customization case.
-	if extData == nil && drop == "" {
-		return "", nil
-	}
-
 	var body []byte
 	if extData != nil {
 		body = extData
 	} else {
-		// No extends directive but drop-ins are present: preserve the file
-		// verbatim (frontmatter intact, hash stamp stripped) so the
-		// synthesized output is parsable by the same downstream readers as
-		// the original on-disk prompt.
+		// No extends directive: preserve the file verbatim (frontmatter
+		// intact, hash stamp stripped) so the synthesized output is parsable
+		// by the same downstream readers as the original on-disk prompt.
 		raw, err := os.ReadFile(promptPath)
 		if err != nil {
 			return "", fmt.Errorf("read prompt %s: %w", promptPath, err)
 		}
 		body = stripPromptHashStamp(raw)
 	}
-	merged := []byte(appendDropIns(string(body), drop))
+	withDrops := appendDropIns(string(body), drop)
+	merged := []byte(substituteCoordinator(withDrops))
+
+	// Bail out early when no layer changed anything — no extends directive,
+	// no drop-ins, and no coordinator placeholder — so the caller falls back
+	// to using promptPath as-is, avoiding a synthesized-file write for the
+	// common no-customization case.
+	if extData == nil && drop == "" && withDrops == string(merged) {
+		return "", nil
+	}
 
 	if err := os.MkdirAll(filepath.Dir(outPath), 0755); err != nil {
 		return "", fmt.Errorf("create dir for synthesized prompt: %w", err)
@@ -291,8 +376,9 @@ func appendDropIns(base, dropins string) string {
 // that an agent would receive — applying the same transformations as the
 // spawn-time loader, but with no file writes. Used by `pogo agent prompt show`.
 //
-// Resolution order: mayor (when name == "mayor"), crew prompt, template. The
-// first hit wins; an unknown name returns an error.
+// Resolution order: the coordinator prompt (when name is the configured
+// coordinator, default "mayor"), crew prompt, template. The first hit wins;
+// an unknown name returns an error.
 //
 // Pipeline:
 //   - mayor or crew without `extends`: read base, append drop-ins from
@@ -305,7 +391,7 @@ func appendDropIns(base, dropins string) string {
 // Frontmatter is stripped from the base prompt so the output matches what
 // the agent harness will see.
 func SynthesizePrompt(name string, vars TemplateVars) (string, error) {
-	if name == "mayor" {
+	if name == CoordinatorName() {
 		path, err := ResolveMayorPrompt()
 		if err != nil {
 			return "", err
@@ -318,7 +404,7 @@ func SynthesizePrompt(name string, vars TemplateVars) (string, error) {
 	if path, err := ResolveTemplate(name); err == nil {
 		return synthesizePolecatTemplate(path, name, vars)
 	}
-	return "", fmt.Errorf("prompt %q not found (checked mayor, crew/, templates/)", name)
+	return "", fmt.Errorf("prompt %q not found (checked %s, crew/, templates/)", name, CoordinatorName())
 }
 
 func synthesizeStaticPrompt(path, basename string) (string, error) {
@@ -340,7 +426,7 @@ func synthesizeStaticPrompt(path, basename string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return appendDropIns(body, drop), nil
+	return substituteCoordinator(appendDropIns(body, drop)), nil
 }
 
 func synthesizePolecatTemplate(path, basename string, vars TemplateVars) (string, error) {
@@ -358,7 +444,7 @@ func synthesizePolecatTemplate(path, basename string, vars TemplateVars) (string
 		return "", fmt.Errorf("parse template: %w", err)
 	}
 	var buf bytes.Buffer
-	if err := tmpl.Execute(&buf, vars); err != nil {
+	if err := tmpl.Execute(&buf, withCoordinator(vars)); err != nil {
 		return "", fmt.Errorf("execute template: %w", err)
 	}
 	return buf.String(), nil
@@ -405,7 +491,7 @@ func ExpandString(s string, vars TemplateVars) (string, error) {
 		return "", fmt.Errorf("parse: %w", err)
 	}
 	var buf bytes.Buffer
-	if err := tmpl.Execute(&buf, vars); err != nil {
+	if err := tmpl.Execute(&buf, withCoordinator(vars)); err != nil {
 		return "", fmt.Errorf("execute: %w", err)
 	}
 	return buf.String(), nil
@@ -439,7 +525,7 @@ func ExpandTemplate(templatePath string, vars TemplateVars) (string, error) {
 	}
 
 	var buf bytes.Buffer
-	if err := tmpl.Execute(&buf, vars); err != nil {
+	if err := tmpl.Execute(&buf, withCoordinator(vars)); err != nil {
 		return "", fmt.Errorf("execute template: %w", err)
 	}
 
@@ -487,11 +573,15 @@ func ListPrompts() ([]PromptInfo, error) {
 	root := PromptDir()
 	var prompts []PromptInfo
 
-	// Mayor prompt (top-level)
+	// Coordinator prompt (top-level). The file is always mayor.md
+	// (mechanism); the agent name it starts under follows the configured
+	// coordinator (policy), so autostart and `pogo agent start` address the
+	// coordinator by its configured name. Category stays "mayor" as a stable
+	// machine-readable label.
 	mayorPath := filepath.Join(root, "mayor.md")
 	if _, err := os.Stat(mayorPath); err == nil {
 		prompts = append(prompts, PromptInfo{
-			Name:     "mayor",
+			Name:     CoordinatorName(),
 			Path:     mayorPath,
 			Category: "mayor",
 		})
@@ -532,7 +622,12 @@ func ListPrompts() ([]PromptInfo, error) {
 	return prompts, nil
 }
 
-// DefaultCrewPromptTemplate is the default content for new crew agent prompt files.
+// DefaultCrewPromptTemplate is the default content for new crew agent prompt
+// files. It is rendered once at creation time (CreateCrewPrompt) with the
+// agent's name; the escaped {{"{{.Coordinator}}"}} sequence survives that
+// render as a literal {{.Coordinator}} placeholder in the created file, which
+// the spawn-time synthesis pass then resolves to the configured coordinator
+// name.
 const DefaultCrewPromptTemplate = `# {{.Name}}
 
 You are a crew agent — a long-running assistant managed by pogo. Unlike polecats (ephemeral, single-task agents), you run persistently and pogod restarts you if you crash.
@@ -557,7 +652,7 @@ mg mail send <agent> --from={{.Name}} --subject="<subj>" --body="<body>"
 - **Stay in your lane.** Handle work within your domain. Route other requests to the appropriate agent.
 - **Be responsive.** Check your mail regularly and reply promptly.
 - **Follow conventions.** Match the existing code style and project norms.
-- **Communicate.** If you're blocked or need help, mail the mayor.
+- **Communicate.** If you're blocked or need help, mail the {{"{{.Coordinator}}"}}.
 
 ## Identity
 
@@ -1147,11 +1242,11 @@ restart_on_crash = true
 nudge_on_start = "You are now running. Begin your coordination loop."
 +++
 
-# Mayor
+# {{.CoordinatorTitle}}
 
-You are the mayor — the coordinator for this pogo workspace. You are a crew agent, which means you run persistently and pogod restarts you if you crash.
+You are the {{.Coordinator}} — the coordinator for this pogo workspace. You are a crew agent, which means you run persistently and pogod restarts you if you crash.
 
-This is a minimal scaffold. Edit this file to describe how you should coordinate work for your specific workflow. ` + "`pogo init`" + ` (without ` + "`--minimal`" + `) installs a coding-oriented mayor prompt that you can use as a reference.
+This is a minimal scaffold. Edit this file to describe how you should coordinate work for your specific workflow. ` + "`pogo init`" + ` (without ` + "`--minimal`" + `) installs a coding-oriented {{.Coordinator}} prompt that you can use as a reference.
 
 ## Your Tools
 
@@ -1166,13 +1261,13 @@ pogo agent spawn-polecat <name> --task="<title>" --body="<details>" --id="<id>" 
 pogo nudge <name> "<message>"  # Wake up an agent
 
 # Mail
-mg mail list mayor             # Check your inbox
-mg mail send <agent> --from=mayor --subject="<subj>" --body="<body>"
+mg mail list {{.Coordinator}}             # Check your inbox
+mg mail send <agent> --from={{.Coordinator}} --subject="<subj>" --body="<body>"
 ` + "```" + `
 
 ## Identity
 
-Your agent name is ` + "`mayor`" + `. Your prompt file lives at ` + "`~/.pogo/agents/mayor.md`" + `. Edit it to define your coordination strategy.
+Your agent name is ` + "`{{.Coordinator}}`" + `. Your prompt file lives at ` + "`~/.pogo/agents/mayor.md`" + `. Edit it to define your coordination strategy.
 `
 
 // minimalPolecatTemplate is the polecat skeleton written by `pogo init --minimal`.
@@ -1185,7 +1280,7 @@ nudge_on_start = "Look at the system prompt and complete the steps for this work
 
 # Polecat
 
-You are an ephemeral polecat agent. You exist to complete a single task. **Never exit on your own** — the mayor will stop you when your work is verified.
+You are an ephemeral polecat agent. You exist to complete a single task. **Never exit on your own** — the {{.Coordinator}} will stop you when your work is verified.
 
 ## Your Assignment
 
@@ -1215,7 +1310,7 @@ You are an ephemeral polecat agent. You exist to complete a single task. **Never
    mg done {{.Id}}
    ` + "```" + `
 
-4. **Stay alive.** Wait for the mayor to stop you. If the mayor sends a message, act on it immediately.
+4. **Stay alive.** Wait for the {{.Coordinator}} to stop you. If the {{.Coordinator}} sends a message, act on it immediately.
 
 ## Identity
 

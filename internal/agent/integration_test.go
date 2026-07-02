@@ -54,7 +54,9 @@ func TestMayorPromptResolution(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), "You are the mayor") {
+	// The raw installed file carries the coordinator placeholder; the
+	// synthesis pass resolves it to the configured name at spawn time.
+	if !strings.Contains(string(data), "You are the {{.Coordinator}}") {
 		t.Error("mayor prompt content missing expected text")
 	}
 }

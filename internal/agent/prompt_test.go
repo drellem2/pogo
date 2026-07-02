@@ -2191,8 +2191,8 @@ func TestPMTemplateIncludesHeartbeat(t *testing.T) {
 		t.Error("pm-template.md: expected the mail-check nudge to append a `heartbeat (mail-check)` line to sweep.log")
 	}
 	// Section header that documents the contract for human readers and PMs.
-	if !strings.Contains(s, "## Mayor's stall-watch") {
-		t.Error("pm-template.md: expected `## Mayor's stall-watch` section documenting the contract")
+	if !strings.Contains(s, "## {{.CoordinatorTitle}}'s stall-watch") {
+		t.Error("pm-template.md: expected `## {{.CoordinatorTitle}}'s stall-watch` section documenting the contract")
 	}
 	// Both thresholds must be named so PMs can reason about how much slack
 	// they have between mail-checks before mayor escalates.
@@ -2251,11 +2251,11 @@ func TestPMTemplateIncludesProactivity(t *testing.T) {
 	// distinguishing token from each behavior keeps the test resilient to
 	// minor wording changes while catching accidental drops.
 	for _, marker := range []string{
-		"act on signal as it arrives",          // behavior 1
-		"Self-paced filing during active arcs", // behavior 2
-		"Proactive backlog mining when idle",   // behavior 3
-		"Mayor will not babysit you",           // behavior 4
-		"Stop-loss is proactivity too",         // behavior 5
+		"act on signal as it arrives",                // behavior 1
+		"Self-paced filing during active arcs",       // behavior 2
+		"Proactive backlog mining when idle",         // behavior 3
+		"{{.CoordinatorTitle}} will not babysit you", // behavior 4
+		"Stop-loss is proactivity too",               // behavior 5
 	} {
 		if !strings.Contains(s, marker) {
 			t.Errorf("pm-template.md: expected proactivity behavior marker %q", marker)

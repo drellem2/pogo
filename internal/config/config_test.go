@@ -793,3 +793,71 @@ func TestDialAddr(t *testing.T) {
 		t.Errorf("DialAddr() = %q, want 127.0.0.1:10000", got)
 	}
 }
+
+func TestCoordinatorDefault(t *testing.T) {
+	dir := t.TempDir()
+	os.Setenv("XDG_CONFIG_HOME", dir)
+	defer os.Unsetenv("XDG_CONFIG_HOME")
+
+	cfg := Load()
+	if cfg.Agents.Coordinator != DefaultCoordinator {
+		t.Errorf("coordinator = %q, want %q", cfg.Agents.Coordinator, DefaultCoordinator)
+	}
+	if got := cfg.Agents.CoordinatorName(); got != "mayor" {
+		t.Errorf("CoordinatorName() = %q, want mayor", got)
+	}
+}
+
+func TestCoordinatorConfigFile(t *testing.T) {
+	dir := t.TempDir()
+	os.Setenv("XDG_CONFIG_HOME", dir)
+	defer os.Unsetenv("XDG_CONFIG_HOME")
+
+	pogoDir := filepath.Join(dir, "pogo")
+	os.MkdirAll(pogoDir, 0755)
+	os.WriteFile(filepath.Join(pogoDir, "config.toml"), []byte(`
+[agents]
+coordinator = "boss"
+`), 0644)
+
+	cfg := Load()
+	if cfg.Agents.Coordinator != "boss" {
+		t.Errorf("coordinator = %q, want boss", cfg.Agents.Coordinator)
+	}
+	// The stall watcher follows the coordinator when [stall_watch] agent is unset.
+	if cfg.StallWatch.Agent != "boss" {
+		t.Errorf("stall watch agent = %q, want boss", cfg.StallWatch.Agent)
+	}
+}
+
+func TestCoordinatorExplicitStallWatchAgentWins(t *testing.T) {
+	dir := t.TempDir()
+	os.Setenv("XDG_CONFIG_HOME", dir)
+	defer os.Unsetenv("XDG_CONFIG_HOME")
+
+	pogoDir := filepath.Join(dir, "pogo")
+	os.MkdirAll(pogoDir, 0755)
+	os.WriteFile(filepath.Join(pogoDir, "config.toml"), []byte(`
+[agents]
+coordinator = "boss"
+
+[stall_watch]
+agent = "watched-elsewhere"
+`), 0644)
+
+	cfg := Load()
+	if cfg.StallWatch.Agent != "watched-elsewhere" {
+		t.Errorf("stall watch agent = %q, want watched-elsewhere", cfg.StallWatch.Agent)
+	}
+}
+
+func TestCoordinatorNameZeroValue(t *testing.T) {
+	var cfg AgentsConfig
+	if got := cfg.CoordinatorName(); got != DefaultCoordinator {
+		t.Errorf("CoordinatorName() = %q, want %q", got, DefaultCoordinator)
+	}
+	var nilCfg *AgentsConfig
+	if got := nilCfg.CoordinatorName(); got != DefaultCoordinator {
+		t.Errorf("nil CoordinatorName() = %q, want %q", got, DefaultCoordinator)
+	}
+}
