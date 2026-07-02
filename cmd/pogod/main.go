@@ -444,8 +444,12 @@ func main() {
 		fmt.Printf("Warning: could not augment PATH: %v\n", err)
 	}
 
-	// Acquire lockfile
-	lock, err := lockfile.New(filepath.Join(os.TempDir(), "pogo.pid"))
+	// Acquire lockfile. The path is derived from POGO_HOME (see
+	// config.LockfilePath), NOT os.TempDir(): $TMPDIR differs between the
+	// launchd domain and a shell/agent, so a TempDir-based lock did not
+	// prevent a second pogod from starting and racing the live daemon for
+	// :10000, hanging up the agent fleet via SIGHUP (#22).
+	lock, err := lockfile.New(config.LockfilePath())
 	if err != nil {
 		fmt.Printf("Cannot create lock. reason: %v", err)
 		os.Exit(1)

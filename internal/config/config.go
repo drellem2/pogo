@@ -402,6 +402,41 @@ func ConfigFilePath() string {
 	return filepath.Join(dir, "config.toml")
 }
 
+// PogoHome returns the pogo state directory: $POGO_HOME, or ~/.pogo when
+// unset. It deliberately never falls back to os.TempDir(): $TMPDIR differs
+// between the launchd domain and an interactive shell/agent, so a
+// TempDir-based path is not shared across domains. The singleton daemon
+// lockfile (see LockfilePath) must resolve to the SAME path from launchd,
+// shells, and agents, otherwise a second pogod acquires its own lock and
+// displaces the running daemon (the :10000 race in #22). This mirrors the
+// existing POGO_HOME resolution in internal/service, internal/project, and
+// internal/driver.
+func PogoHome() string {
+	if h := os.Getenv("POGO_HOME"); h != "" {
+		return h
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".pogo")
+}
+
+// LockfilePath returns the deterministic path of the pogod singleton lockfile
+// (pogo.pid) under PogoHome. Because PogoHome is domain-independent, the lock
+// is shared across the launchd-managed pogod, shells, and agents, so a second
+// pogod's TryLock fails instead of racing the live daemon for :10000 (#22).
+func LockfilePath() string {
+	return filepath.Join(PogoHome(), "pogo.pid")
+}
+
+// DialAddr returns a loopback TCP address (127.0.0.1:<port>) for probing
+// whether a pogod is already bound to the daemon port. It targets 127.0.0.1
+// explicitly rather than the raw Bind so a wildcard bind (0.0.0.0/::) is still
+// probed on a concrete loopback address, and so the probe never races
+// IPv6-vs-IPv4 resolution of "localhost". Callers use this to avoid spawning a
+// rival pogod when the port is already held (#22).
+func (c *Config) DialAddr() string {
+	return fmt.Sprintf("127.0.0.1:%d", c.Port)
+}
+
 // loadConfigFile reads port from the TOML config file.
 // Only parses the minimal subset needed: [server] section with port key.
 func loadConfigFile() (*parsedConfig, error) {
