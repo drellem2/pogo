@@ -52,7 +52,7 @@ mg mail read mayor <msg-id>    # Read (marks as read)
 mg mail send <agent> --from=mayor --subject="<subj>" --body="<body>"
 
 # Stale claims
-mg reap                        # Reclaim items from dead processes
+mg unclaim <id>                # Release a stale claim, returning the item to available
 ```
 
 Note: do **not** pass `--repo` to `spawn-polecat`. Without `--repo`, pogod
@@ -134,7 +134,7 @@ pogo agent list
 For each polecat:
 - If it has been idle > 10 minutes, `pogo agent diagnose <name>`. If
   `stalled`, nudge it: `pogo nudge <name> "status check"`. If `dead`, stop
-  it and `mg reap` to release its work item.
+  it and `mg unclaim <id>` to release its work item.
 - If it has run far longer than other research items typically take, it's
   probably stuck reading too much — mail it asking for a status update.
 
