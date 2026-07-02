@@ -25,7 +25,7 @@ const DefaultProviderID = "claude"
 // package) because its hooks take *agent.Agent: a separate package would create
 // the import cycle agent → provider → agent.
 type Provider struct {
-	// ID is the config-key identity ("claude", "codex", "gemini").
+	// ID is the config-key identity ("claude", "codex", "pi").
 	ID string
 
 	// Binary is the executable name — used by `pogo doctor` and PATH checks.
