@@ -54,13 +54,42 @@ func GetRefineryHistory() ([]refinery.MergeRequest, error) {
 }
 
 // GetRefineryMR returns a single merge request by ID.
+//
+// A 410 Gone response means the refinery lost the MR across a pogod restart:
+// it is returned as a MergeRequest with Status=lost (not an error) so callers
+// — including `pogo refinery show --json` poll loops — can see status=lost
+// and auto-resubmit.
 func GetRefineryMR(id string) (*refinery.MergeRequest, error) {
 	r, err := http.Get(serverURL + "/refinery/mr/" + id)
 	if err != nil {
 		return nil, err
 	}
 	defer r.Body.Close()
+	if r.StatusCode == http.StatusGone {
+		var lost struct {
+			ID     string `json:"id"`
+			Branch string `json:"branch"`
+			Author string `json:"author"`
+			Reason string `json:"reason"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&lost); err != nil {
+			return nil, fmt.Errorf("merge request %s lost across a pogod restart (resubmit it)", id)
+		}
+		return &refinery.MergeRequest{
+			ID:     id,
+			Branch: lost.Branch,
+			Author: lost.Author,
+			Status: refinery.StatusLost,
+			Error:  lost.Reason,
+		}, nil
+	}
 	if r.StatusCode == http.StatusNotFound {
+		// Preserve the server's message — it distinguishes "pruned from
+		// history" from a plain not-found.
+		msg, _ := io.ReadAll(r.Body)
+		if m := strings.TrimSpace(string(msg)); m != "" {
+			return nil, fmt.Errorf("merge request %s: %s", id, m)
+		}
 		return nil, fmt.Errorf("merge request %s not found", id)
 	}
 	var mr refinery.MergeRequest

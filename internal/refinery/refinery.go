@@ -10,6 +10,7 @@ package refinery
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -55,6 +56,10 @@ type Config struct {
 	// author before the MR is flagged for escalation (ThresholdReached is set).
 	// Zero means use DefaultFailureThreshold. Negative means disable threshold.
 	FailureThreshold int
+	// StatePath is where refinery state (queue, history, lost list) is
+	// persisted so it survives pogod restarts. Empty disables persistence
+	// (used by most unit tests). Default: ~/.pogo/refinery-state.json
+	StatePath string
 }
 
 // DefaultConfig returns a Config with sensible defaults.
@@ -65,6 +70,7 @@ func DefaultConfig() Config {
 		PollInterval: DefaultPollInterval,
 		WorktreeDir:  filepath.Join(home, ".pogo", "refinery", "worktrees"),
 		MacguffinDir: filepath.Join(home, ".macguffin", "work"),
+		StatePath:    filepath.Join(home, ".pogo", "refinery-state.json"),
 	}
 }
 
@@ -77,6 +83,11 @@ const (
 	StatusMerged     MergeStatus = "merged"
 	StatusFailed     MergeStatus = "failed"
 	StatusCancelled  MergeStatus = "cancelled"
+	// StatusLost marks an MR that restart recovery could not carry forward
+	// (state file unreadable, branch deleted, remote unreachable). Surfaced
+	// via HTTP 410 Gone so callers can distinguish it from "never existed"
+	// and auto-resubmit.
+	StatusLost MergeStatus = "lost"
 )
 
 // MergeRequest represents a branch submitted for merging.
@@ -127,6 +138,24 @@ type Refinery struct {
 	byID          map[string]*MergeRequest // all requests by ID
 	failureCounts map[string]int           // consecutive failure count per author
 
+	// processing is the single in-flight item between dequeue and history
+	// append (the queue loop is single-threaded). Tracked so the persisted
+	// snapshot never has an MR in limbo: an item is always in exactly one of
+	// queue, processing, or history.
+	processing *MergeRequest
+	// recovered holds a processing item loaded from the state file. It is
+	// resolved (ancestor probe) at the top of Start, once callbacks are
+	// wired — see resolveRecovered.
+	recovered *MergeRequest
+	// lost records MRs that restart recovery could not carry forward.
+	lost []LostEntry
+	// pruned is a ring of MR IDs removed from history by pruning, kept so
+	// lookups can answer "pruned from history" instead of "not found".
+	pruned []string
+
+	// store persists state across restarts; nil when cfg.StatePath is empty.
+	store *store
+
 	onMerged OnMerged
 	onFailed OnFailed
 	onSubmit OnSubmit
@@ -159,13 +188,101 @@ func New(cfg Config) (*Refinery, error) {
 	if err := os.MkdirAll(cfg.WorktreeDir, 0755); err != nil {
 		return nil, fmt.Errorf("create worktree dir: %w", err)
 	}
-	return &Refinery{
+	r := &Refinery{
 		cfg:           cfg,
 		byID:          make(map[string]*MergeRequest),
 		failureCounts: make(map[string]int),
 		done:          make(chan struct{}),
 		nowFunc:       time.Now,
-	}, nil
+	}
+	if cfg.StatePath != "" {
+		r.store = &store{path: cfg.StatePath}
+		if err := r.loadState(); err != nil {
+			return nil, err
+		}
+	}
+	return r, nil
+}
+
+// loadState restores persisted state from cfg.StatePath. A missing file is a
+// clean first start. A corrupt file is moved aside (evidence preserved) and
+// the refinery starts empty rather than staying down. A file written by a
+// newer binary is a hard error — refusing to run means refusing to overwrite
+// state we don't understand.
+func (r *Refinery) loadState() error {
+	st, err := r.store.load()
+	if err != nil {
+		if errors.Is(err, errStateCorrupt) {
+			backup := r.store.path + ".corrupt"
+			log.Printf("refinery: %v — moving aside to %s and starting empty", err, backup)
+			if mvErr := os.Rename(r.store.path, backup); mvErr != nil {
+				log.Printf("refinery: failed to back up corrupt state file: %v", mvErr)
+			}
+			return nil
+		}
+		return err
+	}
+	if st == nil {
+		return nil
+	}
+
+	// Rebuild in-memory state. byID indexes queue + history + the recovered
+	// processing item so `refinery show` answers correctly from the moment
+	// the API is up.
+	r.queue = st.Queue
+	r.history = st.History
+	if st.FailureCounts != nil {
+		r.failureCounts = st.FailureCounts
+	}
+	for _, mr := range r.queue {
+		r.byID[mr.ID] = mr
+	}
+	for _, mr := range r.history {
+		r.byID[mr.ID] = mr
+	}
+	if st.Processing != nil {
+		// Resolved by resolveRecovered at Start — do not blindly re-run: the
+		// crash may have happened after `git push` landed the merge.
+		r.recovered = st.Processing
+		r.byID[st.Processing.ID] = st.Processing
+	}
+	r.pruned = st.PrunedIDs
+
+	// Lost entries age out after lostMaxRestarts pogod restarts.
+	for _, le := range st.Lost {
+		le.Restarts++
+		if le.Restarts <= lostMaxRestarts {
+			r.lost = append(r.lost, le)
+		}
+	}
+
+	log.Printf("refinery: restored state from %s (queue=%d history=%d lost=%d, in-flight=%v)",
+		r.store.path, len(r.queue), len(r.history), len(r.lost), r.recovered != nil)
+	return nil
+}
+
+// saveStateLocked persists the current state to disk. Must be called with mu
+// held. Persistence errors are logged, not propagated — a full disk must not
+// wedge the merge queue.
+func (r *Refinery) saveStateLocked() {
+	if r.store == nil {
+		return
+	}
+	processing := r.processing
+	if processing == nil {
+		processing = r.recovered
+	}
+	st := &persistedState{
+		Queue:         r.queue,
+		Processing:    processing,
+		History:       r.history,
+		FailureCounts: r.failureCounts,
+		Lost:          r.lost,
+		PrunedIDs:     r.pruned,
+	}
+	if err := r.store.save(st); err != nil {
+		log.Printf("refinery: failed to persist state: %v", err)
+	}
 }
 
 // SetOnMerged sets the callback for successful merges.
@@ -203,6 +320,16 @@ func (r *Refinery) OnFailedFunc() OnFailed {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.onFailed
+}
+
+// OnSubmitFunc returns the current OnSubmit callback. Used by pogod's
+// orchestration-restart path to carry the callback over to a fresh Refinery
+// instance (without it, submits stop unlinking polecat worktrees after a
+// restart).
+func (r *Refinery) OnSubmitFunc() OnSubmit {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.onSubmit
 }
 
 // Submit adds a merge request to the queue. Returns the assigned ID.
@@ -252,6 +379,7 @@ func (r *Refinery) Submit(req MergeRequest) (string, error) {
 
 	r.queue = append(r.queue, &req)
 	r.byID[req.ID] = &req
+	r.saveStateLocked()
 	onSubmit := r.onSubmit
 
 	log.Printf("refinery: queued MR %s branch=%s repo=%s author=%s", req.ID, req.Branch, req.RepoPath, req.Author)
@@ -369,6 +497,12 @@ func (r *Refinery) Start(ctx context.Context) {
 
 	log.Printf("refinery: started (poll_interval=%s)", r.cfg.PollInterval)
 
+	// Resolve any in-flight item recovered from the state file before the
+	// first processNext. This runs here rather than in New so the OnMerged/
+	// OnFailed callbacks (wired between New and Start) fire for a merge that
+	// landed just before the crash.
+	r.resolveRecovered()
+
 	ticker := time.NewTicker(r.cfg.PollInterval)
 	defer ticker.Stop()
 
@@ -387,12 +521,19 @@ func (r *Refinery) Start(ctx context.Context) {
 	}
 }
 
-// Stop signals the refinery loop to exit.
+// Stop signals the refinery loop to exit and flushes state to disk.
+// The final flush is belt-and-braces — writes are already per-mutation —
+// but guarantees the file reflects the latest state on graceful shutdown
+// (including the orchestration-restart path, which builds a fresh Refinery
+// from this file).
 func (r *Refinery) Stop() {
 	if r.cancel != nil {
 		r.cancel()
 		<-r.done
 	}
+	r.mu.Lock()
+	r.saveStateLocked()
+	r.mu.Unlock()
 }
 
 // Queue returns a snapshot of queued merge requests.
@@ -483,6 +624,7 @@ func (r *Refinery) Cancel(id string) error {
 	mr.Status = StatusCancelled
 	mr.DoneTime = time.Now()
 	r.history = append(r.history, mr)
+	r.saveStateLocked()
 
 	log.Printf("refinery: cancelled MR %s branch=%s author=%s", mr.ID, mr.Branch, mr.Author)
 	return nil
@@ -504,6 +646,7 @@ func (r *Refinery) processNext() {
 
 	r.mu.Lock()
 	mr.Status = StatusProcessing
+	r.saveStateLocked()
 	r.mu.Unlock()
 
 	log.Printf("refinery: processing MR %s branch=%s", mr.ID, mr.Branch)
@@ -534,7 +677,9 @@ func (r *Refinery) processNext() {
 		log.Printf("refinery: MR %s merged successfully branch=%s author=%s", mr.ID, mr.Branch, mr.Author)
 	}
 	r.history = append(r.history, mr)
+	r.processing = nil
 	r.pruneHistoryLocked()
+	r.saveStateLocked()
 	onMerged := r.onMerged
 	onFailed := r.onFailed
 	r.mu.Unlock()
@@ -548,6 +693,9 @@ func (r *Refinery) processNext() {
 }
 
 // dequeue removes and returns the first queued item, or nil if empty.
+// The item is tracked as r.processing so the persisted snapshot never has
+// an MR in limbo between queue and history — a crash anywhere after this
+// point resolves it via the recovery probe on next start.
 func (r *Refinery) dequeue() *MergeRequest {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -558,29 +706,40 @@ func (r *Refinery) dequeue() *MergeRequest {
 
 	mr := r.queue[0]
 	r.queue = r.queue[1:]
+	r.processing = mr
+	r.saveStateLocked()
 	return mr
 }
 
-// pruneHistory acquires the lock and prunes old history entries.
+// pruneHistory acquires the lock and prunes old history entries, persisting
+// the result if anything changed.
 func (r *Refinery) pruneHistory() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.pruneHistoryLocked()
+	if r.pruneHistoryLocked() {
+		r.saveStateLocked()
+	}
 }
 
 // pruneHistoryLocked removes old entries from history. Must be called with mu held.
 // It enforces both the count limit (MaxHistoryLen) and age limit (MaxHistoryAge).
-func (r *Refinery) pruneHistoryLocked() {
+// Pruned IDs are remembered in a bounded ring so lookups can answer "pruned
+// from history" instead of a bare "not found". Returns whether anything was
+// pruned; the caller is responsible for persisting.
+func (r *Refinery) pruneHistoryLocked() bool {
+	pruned := false
 	// Age-based pruning (history is append-order, oldest first).
 	if r.cfg.MaxHistoryAge > 0 {
 		cutoff := r.nowFunc().Add(-r.cfg.MaxHistoryAge)
 		i := 0
 		for i < len(r.history) && r.history[i].DoneTime.Before(cutoff) {
 			delete(r.byID, r.history[i].ID)
+			r.recordPrunedLocked(r.history[i].ID)
 			i++
 		}
 		if i > 0 {
 			r.history = r.history[i:]
+			pruned = true
 		}
 	}
 
@@ -589,7 +748,46 @@ func (r *Refinery) pruneHistoryLocked() {
 		excess := len(r.history) - r.cfg.MaxHistoryLen
 		for _, mr := range r.history[:excess] {
 			delete(r.byID, mr.ID)
+			r.recordPrunedLocked(mr.ID)
 		}
 		r.history = r.history[excess:]
+		pruned = true
 	}
+	return pruned
+}
+
+// recordPrunedLocked appends an ID to the pruned ring, evicting the oldest
+// entries beyond prunedRingCap. Must be called with mu held.
+func (r *Refinery) recordPrunedLocked(id string) {
+	r.pruned = append(r.pruned, id)
+	if len(r.pruned) > prunedRingCap {
+		r.pruned = r.pruned[len(r.pruned)-prunedRingCap:]
+	}
+}
+
+// LostInfo returns the lost-list entry for id, or nil if the ID is not on the
+// lost list. A lost MR is one that restart recovery could not carry forward.
+func (r *Refinery) LostInfo(id string) *LostEntry {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i := range r.lost {
+		if r.lost[i].ID == id {
+			le := r.lost[i]
+			return &le
+		}
+	}
+	return nil
+}
+
+// WasPruned reports whether id was removed from history by pruning (age or
+// count limits), as opposed to never having existed.
+func (r *Refinery) WasPruned(id string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, p := range r.pruned {
+		if p == id {
+			return true
+		}
+	}
+	return false
 }

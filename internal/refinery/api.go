@@ -156,6 +156,25 @@ func (r *Refinery) handleMR(w http.ResponseWriter, req *http.Request) {
 	id := req.PathValue("id")
 	mr := r.Get(id)
 	if mr == nil {
+		// Distinguish "lost across a restart" (410 Gone, resubmittable) and
+		// "pruned from history by age/count limits" from a plain 404 —
+		// callers react differently to each (see templates/polecat.md).
+		if le := r.LostInfo(id); le != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusGone)
+			json.NewEncoder(w).Encode(map[string]string{
+				"id":     id,
+				"status": string(StatusLost),
+				"branch": le.Branch,
+				"author": le.Author,
+				"reason": le.Reason,
+			})
+			return
+		}
+		if r.WasPruned(id) {
+			http.Error(w, fmt.Sprintf("MR %q pruned from history (completed, then aged out of the retention window)", id), http.StatusNotFound)
+			return
+		}
 		http.Error(w, fmt.Sprintf("MR %q not found", id), http.StatusNotFound)
 		return
 	}

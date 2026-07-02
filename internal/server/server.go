@@ -16,10 +16,15 @@ import (
 	"github.com/drellem2/pogo/internal/refinery"
 )
 
-// RefineryStarter is a function that starts the refinery loop in a goroutine.
-// It is provided by the caller so the server package doesn't need to know
-// about refinery start details (context, callbacks, etc.).
-type RefineryStarter func() error
+// RefineryStarter is a function that starts the refinery loop in a goroutine
+// and returns the new instance. It is provided by the caller so the server
+// package doesn't need to know about refinery start details (context,
+// callbacks, etc.). Returning the instance lets the server track the
+// currently-running refinery, so a later transition to index-only stops the
+// replacement — not the long-dead original. That matters doubly now that
+// refinery state is persisted: a stale instance left running would clobber
+// the shared state file with its own (stale) view.
+type RefineryStarter func() (*refinery.Refinery, error)
 
 // Server coordinates subsystem lifecycle and mode transitions.
 type Server struct {
@@ -103,8 +108,12 @@ func (s *Server) transitionToFull() error {
 
 	// Restart refinery if we have a starter function
 	if s.startRefinery != nil {
-		if err := s.startRefinery(); err != nil {
+		newRef, err := s.startRefinery()
+		if err != nil {
 			return fmt.Errorf("restart refinery: %w", err)
+		}
+		if newRef != nil {
+			s.refinery = newRef
 		}
 	}
 

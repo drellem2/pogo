@@ -155,5 +155,9 @@ func (r *Refinery) holdMergeRequest(mr *MergeRequest, qaItemID string) {
 	mr.Error = fmt.Sprintf("held: QA item %s not yet done", qaItemID)
 	// Put it back at the end of the queue so other MRs can proceed.
 	r.queue = append(r.queue, mr)
+	if r.processing == mr {
+		r.processing = nil
+	}
+	r.saveStateLocked()
 	log.Printf("refinery: MR %s held (QA item %s pending), re-queued", mr.ID, qaItemID)
 }

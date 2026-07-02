@@ -143,6 +143,26 @@ func emitDeployFailed(mr *MergeRequest, err error, output string) {
 	})
 }
 
+// emitRecoveryLost writes a refinery_mr_lost event when restart recovery
+// could not resolve an in-flight MR (branch deleted, remote unreachable).
+// The MR moves to the lost list; `refinery show` answers 410/status=lost so
+// the author can resubmit.
+func emitRecoveryLost(mr *MergeRequest, err error) {
+	events.Emit(context.Background(), events.Event{
+		EventType:  "refinery_mr_lost",
+		Agent:      "refinery",
+		WorkItemID: workItemIDFromAuthor(mr.Author),
+		Repo:       mr.RepoPath,
+		Details: map[string]any{
+			"merge_request_id": mr.ID,
+			"branch":           mr.Branch,
+			"target":           mr.TargetRef,
+			"author":           mr.Author,
+			"reason":           summarizeReason(err),
+		},
+	})
+}
+
 // emitMergeFailed writes a refinery_merge_failed event for a failed attempt.
 // terminal=true means the refinery has given up on this MR (no more retries).
 func emitMergeFailed(mr *MergeRequest, attempt int, stage string, err error, terminal bool, gateOutput string) {

@@ -4,9 +4,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/drellem2/pogo/internal/config"
+	"github.com/drellem2/pogo/internal/refinery"
 )
 
 func TestNewServerStartsInFullMode(t *testing.T) {
@@ -43,9 +46,9 @@ func TestSetModeIdempotent(t *testing.T) {
 func TestSetModeFullAfterIndexOnly(t *testing.T) {
 	refineryCalled := false
 	s := New(nil, nil)
-	s.SetRefineryStarter(func() error {
+	s.SetRefineryStarter(func() (*refinery.Refinery, error) {
 		refineryCalled = true
-		return nil
+		return nil, nil
 	})
 
 	if err := s.SetMode(config.ModeIndexOnly); err != nil {
@@ -173,7 +176,7 @@ func TestRequireOrchestrationRejects503InIndexOnly(t *testing.T) {
 
 func TestRequireOrchestrationResumesAfterModeChange(t *testing.T) {
 	s := New(nil, nil)
-	s.SetRefineryStarter(func() error { return nil })
+	s.SetRefineryStarter(func() (*refinery.Refinery, error) { return nil, nil })
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
@@ -200,7 +203,7 @@ func TestRequireOrchestrationResumesAfterModeChange(t *testing.T) {
 
 func TestHandleStartOrchestration(t *testing.T) {
 	s := New(nil, nil)
-	s.SetRefineryStarter(func() error { return nil })
+	s.SetRefineryStarter(func() (*refinery.Refinery, error) { return nil, nil })
 	mux := http.NewServeMux()
 	s.RegisterHandlers(mux)
 
@@ -287,5 +290,39 @@ func TestHandleModeAfterStopOrchestration(t *testing.T) {
 	}
 	if resp["mode"] != "index-only" {
 		t.Fatalf("expected mode=index-only, got %s", resp["mode"])
+	}
+}
+
+// TestModeCycleTracksReplacementRefinery guards the stale-instance bug: after
+// an index-only -> full transition creates a fresh Refinery, a later
+// transition to index-only must stop the replacement, not the long-dead
+// original. Detection: Stop() flushes refinery state to disk, so the
+// replacement's state file exists iff the server stopped the right instance.
+func TestModeCycleTracksReplacementRefinery(t *testing.T) {
+	ref1, err := refinery.New(refinery.Config{WorktreeDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(t.TempDir(), "refinery-state.json")
+	ref2, err := refinery.New(refinery.Config{WorktreeDir: t.TempDir(), StatePath: statePath})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s := New(nil, ref1)
+	s.SetRefineryStarter(func() (*refinery.Refinery, error) { return ref2, nil })
+
+	if err := s.SetMode(config.ModeIndexOnly); err != nil { // stops ref1
+		t.Fatal(err)
+	}
+	if err := s.SetMode(config.ModeFull); err != nil { // starts ref2
+		t.Fatal(err)
+	}
+	if err := s.SetMode(config.ModeIndexOnly); err != nil { // must stop ref2
+		t.Fatal(err)
+	}
+
+	if _, err := os.Stat(statePath); err != nil {
+		t.Errorf("replacement refinery was not stopped on the second index-only transition (no state flush): %v", err)
 	}
 }

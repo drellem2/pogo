@@ -268,6 +268,23 @@ A merge attempt failed. Whether this is terminal depends on `attempt` and the co
 {"schema_version":1,"timestamp":"2026-04-25T10:23:05.000000000Z","event_type":"refinery_merge_failed","agent":"refinery","work_item_id":"mg-0241","repo":"/Users/daniel/dev/pogo","details":{"merge_request_id":"mr-9482","branch":"polecat-mg-0241","target":"main","attempt":1,"stage":"test","reason":"./test.sh exited with status 1","terminal":false,"gate_output_truncated":"--- FAIL: TestEventEmit ..."}}
 ```
 
+#### `refinery_mr_lost`
+
+Restart recovery could not carry an in-flight merge request forward (branch deleted from origin, remote unreachable, worktree setup failed). The MR moves to the state file's lost list; `refinery show <id>` answers HTTP 410 with `status=lost` so the author can resubmit. See docs/refinery-persistence-design.md (mg-abfd).
+
+- **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent`, `repo`, `details`
+- **Optional envelope:** `work_item_id`
+- **`details` fields:**
+  - `merge_request_id` (string, required)
+  - `branch` (string, required)
+  - `target` (string, required)
+  - `author` (string, required): submitting agent
+  - `reason` (string, required): why recovery could not resolve the MR, single line, ≤ 200 chars
+
+```json
+{"schema_version":1,"timestamp":"2026-07-02T09:14:02.000000000Z","event_type":"refinery_mr_lost","agent":"refinery","work_item_id":"mg-0241","repo":"/Users/daniel/dev/pogo","details":{"merge_request_id":"mr-9482","branch":"polecat-mg-0241","target":"main","author":"cat-mg-0241","reason":"branch \"polecat-mg-0241\" not found on origin"}}
+```
+
 ### Daemon watchers
 
 #### `stall_watch_fired`

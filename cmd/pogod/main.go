@@ -810,10 +810,14 @@ func main() {
 	if mergeQueue != nil {
 		onMerged := mergeQueue.OnMergedFunc()
 		onFailed := mergeQueue.OnFailedFunc()
-		srv.SetRefineryStarter(func() error {
+		onSubmit := mergeQueue.OnSubmitFunc()
+		srv.SetRefineryStarter(func() (*refinery.Refinery, error) {
+			// refineCfg carries StatePath, so the fresh instance loads the
+			// state the outgoing one flushed in Stop() — an orchestration
+			// restart no longer empties the merge queue.
 			newRef, err := refinery.New(refineCfg)
 			if err != nil {
-				return err
+				return nil, err
 			}
 			if onMerged != nil {
 				newRef.SetOnMerged(onMerged)
@@ -821,9 +825,14 @@ func main() {
 			if onFailed != nil {
 				newRef.SetOnFailed(onFailed)
 			}
+			// Re-wire OnSubmit too — without it, submits after an
+			// orchestration restart stop unlinking polecat worktrees.
+			if onSubmit != nil {
+				newRef.SetOnSubmit(onSubmit)
+			}
 			mergeQueue = newRef
 			go mergeQueue.Start(context.Background())
-			return nil
+			return newRef, nil
 		})
 	}
 
