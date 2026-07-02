@@ -13,7 +13,7 @@ Two mechanisms handle this:
 CommandTemplate: "claude --dangerously-skip-permissions --append-system-prompt-file {{.PromptFile}}",
 ```
 
-The agent harness is selected by a first-class `agent.Provider` value (see `docs/design/multi-provider-architecture-survey.md`). Claude is the only registered provider today; its descriptor — `claude.Provider` — owns the command template, the required non-interactive flags, the nudge dialect, and the lifecycle hooks below.
+The agent harness is selected by a first-class `agent.Provider` value (see `docs/design/multi-provider-architecture-survey.md`). Three providers are registered — `claude` (the default), `codex`, and `pi` — each owning its command template, required non-interactive flags, nudge dialect, and lifecycle hooks (`internal/claude`, `internal/codex`, `internal/pi`).
 
 2. The **trust dialog auto-accept** hook (`claude.TrustDialogHook`) monitors the agent's PTY output during startup for the workspace trust dialog and automatically sends Enter to accept it. This is registered as a `PostSpawnHook` on the agent registry and lives in `internal/claude/`, keeping Claude-specific behavior out of the generic agent package.
 
@@ -33,7 +33,7 @@ The agent harness provider is selected via `~/.config/pogo/config.toml`:
 
 ```toml
 [agents]
-provider = "claude"   # default — the only registered provider today
+provider = "claude"   # default; also registered: "codex", "pi"
 ```
 
 It can also be set with the `POGO_AGENT_PROVIDER` environment variable, which

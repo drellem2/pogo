@@ -1,5 +1,5 @@
 // Package providers is the registry of agent harness providers: it maps a
-// config provider id ("claude", "codex", and in future "gemini") to its
+// config provider id ("claude", "codex", "pi", and in future "gemini") to its
 // agent.Provider descriptor.
 //
 // It lives in its own package — rather than in internal/agent — because
@@ -14,20 +14,22 @@ import (
 	"github.com/drellem2/pogo/internal/agent"
 	"github.com/drellem2/pogo/internal/claude"
 	"github.com/drellem2/pogo/internal/codex"
+	"github.com/drellem2/pogo/internal/pi"
 )
 
 // All returns every known harness provider descriptor, in a stable order
-// (claude first, then codex). pogod registers the whole set into the agent
-// registry at startup so a provider can be resolved per-spawn — the
+// (claude first, then codex, then pi). pogod registers the whole set into the
+// agent registry at startup so a provider can be resolved per-spawn — the
 // mixed-fleet capability from mg-b31b — instead of once globally. Use Resolve
 // when mapping a single id; use All when you need the complete set.
 func All() []*agent.Provider {
-	return []*agent.Provider{&claude.Provider, &codex.Provider}
+	return []*agent.Provider{&claude.Provider, &codex.Provider, &pi.Provider}
 }
 
 // Resolve maps a config provider id to its agent.Provider descriptor.
 //
-// "" and "claude" resolve to Claude (the default); "codex" resolves to Codex.
+// "" and "claude" resolve to Claude (the default); "codex" resolves to Codex;
+// "pi" resolves to pi.
 //
 // ok is false when id names no known provider. The returned *agent.Provider is
 // still safe to use in that case — it is the Claude fallback — so a stale or
@@ -38,6 +40,8 @@ func Resolve(id string) (provider *agent.Provider, ok bool) {
 		return &claude.Provider, true
 	case codex.Provider.ID:
 		return &codex.Provider, true
+	case pi.Provider.ID:
+		return &pi.Provider, true
 	default:
 		return &claude.Provider, false
 	}

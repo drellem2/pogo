@@ -28,6 +28,32 @@ func TestResolveCodex(t *testing.T) {
 	}
 }
 
+func TestResolvePi(t *testing.T) {
+	p, ok := Resolve("pi")
+	if !ok {
+		t.Fatal("Resolve(\"pi\") returned ok=false")
+	}
+	if p == nil || p.ID != "pi" {
+		t.Fatalf("Resolve(\"pi\") = %+v, want provider with ID=pi", p)
+	}
+	if p.Binary != "pi" {
+		t.Errorf("pi provider Binary = %q, want %q", p.Binary, "pi")
+	}
+}
+
+func TestAllContainsEveryProvider(t *testing.T) {
+	all := All()
+	want := []string{"claude", "codex", "pi"}
+	if len(all) != len(want) {
+		t.Fatalf("All() returned %d providers, want %d", len(all), len(want))
+	}
+	for i, id := range want {
+		if all[i] == nil || all[i].ID != id {
+			t.Errorf("All()[%d].ID = %v, want %q", i, all[i], id)
+		}
+	}
+}
+
 func TestResolveEmptyDefaultsToClaude(t *testing.T) {
 	p, ok := Resolve("")
 	if !ok {
