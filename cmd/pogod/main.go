@@ -37,6 +37,7 @@ import (
 	"github.com/drellem2/pogo/internal/scheduler"
 	"github.com/drellem2/pogo/internal/search"
 	"github.com/drellem2/pogo/internal/server"
+	"github.com/drellem2/pogo/internal/service"
 	"github.com/drellem2/pogo/internal/stallwatch"
 	"github.com/drellem2/pogo/internal/workitem"
 
@@ -435,6 +436,22 @@ func resolveAgentProvider(id string) *agent.Provider {
 func main() {
 	flag.Parse()
 	startTime = time.Now()
+
+	// Rotate the launchd-managed log before anything writes to it, then mark
+	// the run boundary. launchd appends across restarts (so prior-run crash
+	// evidence survives), and this startup rotation keeps the file bounded
+	// while guaranteeing the previous run's tail is in pogod.log or
+	// pogod.log.1 when a post-mortem needs it (mg-6d02). No-op unless
+	// stderr actually is pogod.log — dev runs and pipe-captured spawns are
+	// untouched.
+	rotated, logPath, rotErr := service.RotatePogodLogIfNeeded()
+	if rotErr != nil {
+		log.Printf("pogod: log rotation failed (continuing): %v", rotErr)
+	}
+	if rotated {
+		log.Printf("pogod: rotated %s (previous run's log is %s.1)", logPath, logPath)
+	}
+	log.Printf("pogod: starting (pid=%d)", os.Getpid())
 
 	// Repair PATH before spawning anything. Under launchd/systemd pogod inherits
 	// a minimal or empty PATH, which breaks bare-name subprocess lookups such as
