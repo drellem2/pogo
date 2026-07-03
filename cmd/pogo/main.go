@@ -1057,7 +1057,7 @@ The template is expanded with the provided variables and used as the agent's pro
 	cmdAgentSpawnPolecat.Flags().StringVar(&spawnPolecatRepo, "repo", "", "Target repository path ({{.Repo}})")
 	cmdAgentSpawnPolecat.Flags().StringVar(&spawnPolecatBranch, "branch", "", "Target branch for refinery submit ({{.Branch}})")
 	cmdAgentSpawnPolecat.Flags().StringSliceVarP(&spawnPolecatEnv, "env", "e", nil, "Additional environment variables (KEY=VALUE)")
-	cmdAgentSpawnPolecat.Flags().StringVar(&spawnPolecatProvider, "provider", "", "Harness provider for this polecat (claude, codex); overrides config and template frontmatter")
+	cmdAgentSpawnPolecat.Flags().StringVar(&spawnPolecatProvider, "provider", "", "Harness provider for this polecat (claude, codex, pi); overrides config and template frontmatter")
 	cmdAgentSpawnPolecat.Flags().BoolVar(&spawnPolecatNoWorktree, "no-worktree", false, "Skip git worktree creation (no --repo required); polecat edits in-place from ~/.pogo/agents/<name>/ with a refinery:NO posture ({{.NoWorktree}})")
 
 	// Nudge command — top-level for convenience
