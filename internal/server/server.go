@@ -28,6 +28,10 @@ type RefineryStarter func() (*refinery.Refinery, error)
 
 // Server coordinates subsystem lifecycle and mode transitions.
 type Server struct {
+	// mu guards the fields below and is held only for quick reads/writes —
+	// never across subsystem stops or starts, which can take seconds
+	// (StopAll has a 5s timeout) and would block every guarded request's
+	// Mode() check on RLock (gh #38).
 	mu             sync.RWMutex
 	mode           config.RunMode
 	agents         *agent.Registry
@@ -36,6 +40,11 @@ type Server struct {
 	refineryCancel context.CancelFunc
 	refineryCfg    *refinery.Config
 	startRefinery  RefineryStarter
+
+	// transitionMu serializes mode transitions so overlapping SetMode calls
+	// can't interleave stop/start work (e.g. stopping a refinery instance
+	// that a concurrent transition just replaced).
+	transitionMu sync.Mutex
 }
 
 // New creates a Server in ModeFull.
@@ -64,10 +73,10 @@ func (s *Server) Mode() config.RunMode {
 
 // SetMode transitions the server to the given run mode.
 func (s *Server) SetMode(mode config.RunMode) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.transitionMu.Lock()
+	defer s.transitionMu.Unlock()
 
-	if s.mode == mode {
+	if s.Mode() == mode {
 		return nil // already in requested mode
 	}
 
@@ -82,42 +91,57 @@ func (s *Server) SetMode(mode config.RunMode) error {
 }
 
 // transitionToIndexOnly stops agents and refinery, keeping indexing alive.
-// Caller must hold s.mu.
+// Caller must hold s.transitionMu (not s.mu).
 func (s *Server) transitionToIndexOnly() error {
 	log.Printf("server: transitioning to index-only mode")
 
-	// Stop all agents
-	if s.agents != nil {
-		s.agents.StopAll(5 * time.Second)
-	}
-
-	// Stop refinery
-	if s.refinery != nil {
-		s.refinery.Stop()
-	}
-
+	// Flip the mode first so guarded endpoints start rejecting with 503
+	// immediately, then snapshot the subsystems and stop them outside the
+	// lock — StopAll can take up to its full 5s timeout.
+	s.mu.Lock()
 	s.mode = config.ModeIndexOnly
+	agents := s.agents
+	ref := s.refinery
+	s.mu.Unlock()
+
+	if agents != nil {
+		agents.StopAll(5 * time.Second)
+	}
+	if ref != nil {
+		ref.Stop()
+	}
+
 	log.Printf("server: now in index-only mode")
 	return nil
 }
 
 // transitionToFull restarts agents registry and refinery.
-// Caller must hold s.mu.
+// Caller must hold s.transitionMu (not s.mu).
 func (s *Server) transitionToFull() error {
 	log.Printf("server: transitioning to full mode")
 
-	// Restart refinery if we have a starter function
-	if s.startRefinery != nil {
-		newRef, err := s.startRefinery()
+	s.mu.RLock()
+	start := s.startRefinery
+	s.mu.RUnlock()
+
+	// Restart refinery if we have a starter function; run it outside the
+	// lock so Mode() checks don't block on startup work.
+	var newRef *refinery.Refinery
+	if start != nil {
+		var err error
+		newRef, err = start()
 		if err != nil {
 			return fmt.Errorf("restart refinery: %w", err)
 		}
-		if newRef != nil {
-			s.refinery = newRef
-		}
 	}
 
+	s.mu.Lock()
+	if newRef != nil {
+		s.refinery = newRef
+	}
 	s.mode = config.ModeFull
+	s.mu.Unlock()
+
 	log.Printf("server: now in full mode")
 	return nil
 }
