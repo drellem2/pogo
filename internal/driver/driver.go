@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 
+	"github.com/drellem2/pogo/internal/config"
 	pogoPlugin "github.com/drellem2/pogo/pkg/plugin"
 	hclog "github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/go-plugin"
@@ -143,7 +144,8 @@ func Init() {
 }
 
 // resolvePluginPath returns the directory to scan for external plugins.
-// Order: $POGO_PLUGIN_PATH, then $POGO_HOME/plugin, then ~/.pogo/plugin.
+// Order: $POGO_PLUGIN_PATH, then $POGO_HOME/plugin (default ~/.pogo/plugin
+// via config.PogoHome).
 // Returns "" if none can be resolved (e.g. unreadable home dir) — the caller
 // should skip external discovery and rely on builtins.
 //
@@ -159,14 +161,7 @@ func resolvePluginPath() string {
 		}
 		return abs
 	}
-	if home := os.Getenv("POGO_HOME"); home != "" {
-		return filepath.Join(home, "plugin")
-	}
-	userHome, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(userHome, ".pogo", "plugin")
+	return filepath.Join(config.PogoHome(), "plugin")
 }
 
 func discoverExternalPlugins(pluginPath string) {

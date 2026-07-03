@@ -124,6 +124,12 @@ type Config struct {
 	Heartbeat  HeartbeatConfig
 	GitGC      GitGCConfig
 	StallWatch StallWatchConfig
+	// Source is the path of the config file Load read its values from, or ""
+	// when no config file was found and everything is defaults + env. pogod
+	// uses this to gate crew auto-start: a daemon with no config file is
+	// treated as an unconfigured/isolated instance and must not spawn agents
+	// (mg-3dc3).
+	Source string
 }
 
 // StallWatchConfig configures pogod's passive stall watcher, which rides the
@@ -315,6 +321,7 @@ func Load() *Config {
 
 	// Try config file first (lowest priority, overridden by env)
 	if fileCfg, err := loadConfigFile(); err == nil {
+		cfg.Source = ConfigFilePath()
 		if fileCfg.Port != 0 {
 			cfg.Port = fileCfg.Port
 		}
@@ -442,7 +449,20 @@ func ConfigDir() string {
 }
 
 // ConfigFilePath returns the path to the pogo config file.
+//
+// When POGO_HOME is set and $POGO_HOME/config.toml exists, that file wins so
+// an isolated daemon (tests, CI) reads its own config instead of the real
+// user's (mg-3dc3). Otherwise the XDG path from ConfigDir applies. The
+// POGO_HOME probe is existence-gated rather than unconditional so
+// deployments that set POGO_HOME but keep config.toml in ~/.config/pogo
+// (the historical layout) are unaffected.
 func ConfigFilePath() string {
+	if os.Getenv("POGO_HOME") != "" {
+		p := filepath.Join(PogoHome(), "config.toml")
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
 	dir := ConfigDir()
 	if dir == "" {
 		return ""
@@ -456,11 +476,25 @@ func ConfigFilePath() string {
 // TempDir-based path is not shared across domains. The singleton daemon
 // lockfile (see LockfilePath) must resolve to the SAME path from launchd,
 // shells, and agents, otherwise a second pogod acquires its own lock and
-// displaces the running daemon (the :10000 race in #22). This mirrors the
-// existing POGO_HOME resolution in internal/service, internal/project, and
-// internal/driver.
+// displaces the running daemon (the :10000 race in #22).
+//
+// Every pogo state path (refinery-state.json, schedules.json, agents/,
+// polecats/, events.log, recovery/, projects.json, plugin/) derives from this
+// function, so overriding POGO_HOME (or HOME, via the default) fully isolates
+// a daemon's state (mg-3dc3).
+//
+// Legacy normalization: an old shell integration exported POGO_HOME=$HOME
+// ("where the dotfiles live"), and that value survives in existing zshrc
+// copies and launchd plists. Honoring it literally would scatter agents/,
+// refinery-state.json, etc. across the home directory root, so a POGO_HOME
+// equal to the user's home dir is normalized to $HOME/.pogo — the documented
+// default, and where all of that state already lives on such machines.
 func PogoHome() string {
 	if h := os.Getenv("POGO_HOME"); h != "" {
+		if home, err := os.UserHomeDir(); err == nil && home != "" &&
+			filepath.Clean(h) == filepath.Clean(home) {
+			return filepath.Join(h, ".pogo")
+		}
 		return h
 	}
 	home, _ := os.UserHomeDir()

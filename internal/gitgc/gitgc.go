@@ -24,6 +24,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/drellem2/pogo/internal/config"
 )
 
 // BranchPrefix is the prefix every polecat branch carries. A polecat
@@ -36,15 +38,12 @@ const BranchPrefix = "polecat-"
 const DefaultTargetBranch = "main"
 
 // DefaultPolecatsDir returns the directory polecat worktrees live under
-// (~/.pogo/polecats) — the value callers pass as Options.PolecatsDir to
-// enable the orphan-dir scan. Must match the worktree path chosen at spawn
-// time in internal/agent.
+// ($POGO_HOME/polecats, default ~/.pogo/polecats) — the value callers pass as
+// Options.PolecatsDir to enable the orphan-dir scan. Must match the worktree
+// path chosen at spawn time in internal/agent (which calls this). The error
+// return is kept for call-site compatibility; it is always nil.
 func DefaultPolecatsDir() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("resolve home dir: %w", err)
-	}
-	return filepath.Join(home, ".pogo", "polecats"), nil
+	return filepath.Join(config.PogoHome(), "polecats"), nil
 }
 
 // git runs a git subcommand against repo and returns combined output. A

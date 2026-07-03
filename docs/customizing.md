@@ -66,6 +66,13 @@ Frontmatter is parsed at spawn time. Edit a file, restart the agent, the new
 settings apply. There's no live reload — pogod won't notice that you flipped
 `auto_start` on a running agent until you restart it.
 
+Auto-start (and the boot-time prompt refresh) only runs when a `config.toml`
+exists (`~/.config/pogo/config.toml`, `$XDG_CONFIG_HOME/pogo/config.toml`, or
+`$POGO_HOME/config.toml`). A pogod with no config file — a fresh install, or
+an isolated test daemon under an overridden `POGO_HOME` — never spawns
+agents; create the config file (even an empty one) to opt in to
+orchestration.
+
 ### Add a custom crew agent
 
 Say you want a `triager` crew agent that wakes up on boot, watches a research

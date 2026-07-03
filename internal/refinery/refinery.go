@@ -19,6 +19,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/drellem2/pogo/internal/config"
 )
 
 // DefaultPollInterval is how often the refinery checks for new merge requests
@@ -64,15 +66,20 @@ type Config struct {
 	StatePath string
 }
 
-// DefaultConfig returns a Config with sensible defaults.
+// DefaultConfig returns a Config with sensible defaults. Pogo state paths
+// derive from the pogo state dir ($POGO_HOME, default ~/.pogo) so an isolated
+// daemon never touches the real user's refinery state (mg-3dc3);
+// MacguffinDir stays HOME-derived because ~/.macguffin belongs to mg, not
+// pogo.
 func DefaultConfig() Config {
+	pogoHome := config.PogoHome()
 	home, _ := os.UserHomeDir()
 	return Config{
 		Enabled:      true,
 		PollInterval: DefaultPollInterval,
-		WorktreeDir:  filepath.Join(home, ".pogo", "refinery", "worktrees"),
+		WorktreeDir:  filepath.Join(pogoHome, "refinery", "worktrees"),
 		MacguffinDir: filepath.Join(home, ".macguffin", "work"),
-		StatePath:    filepath.Join(home, ".pogo", "refinery-state.json"),
+		StatePath:    filepath.Join(pogoHome, "refinery-state.json"),
 	}
 }
 

@@ -114,7 +114,7 @@ Co-locating "what the agent does" (the prose) with "how it runs" (the frontmatte
 
 There is no registry, no roster file, and no `pogo agent register` command. The set of agents that exist is exactly the set of prompt files in `~/.pogo/agents/`. The set of agents pogod boots on startup is exactly the subset whose frontmatter declares `auto_start = true`.
 
-On daemon startup, pogod scans `~/.pogo/agents/` (excluding `templates/`) and starts every prompt with `auto_start = true`. The scan is idempotent — agents already registered (e.g. across a `pogod` restart-while-running) are skipped rather than double-started. Implementation: `internal/agent/autostart.go` (`Registry.AutoStartAgents`).
+On daemon startup, pogod scans `$POGO_HOME/agents/` (default `~/.pogo/agents/`, excluding `templates/`) and starts every prompt with `auto_start = true`. The scan is idempotent — agents already registered (e.g. across a `pogod` restart-while-running) are skipped rather than double-started. Both the boot-time prompt refresh and the auto-start scan are gated on a `config.toml` existing: a daemon with no config file (a fresh install, or an isolated `POGO_HOME` sandbox) never installs prompts or spawns agents (mg-3dc3). Implementation: `internal/agent/autostart.go` (`Registry.AutoStartAgents`).
 
 This is what "filesystem is the coordination layer" means at the configuration tier: the disk is the schema. To add an agent that boots with the daemon, drop a markdown file. To stop one from booting, set `auto_start = false` or delete the file. No daemon API is involved in roster management.
 

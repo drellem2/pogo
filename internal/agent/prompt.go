@@ -15,15 +15,17 @@ import (
 	"strings"
 	"text/template"
 	"time"
+
+	"github.com/drellem2/pogo/internal/config"
 )
 
 //go:embed prompts
 var defaultPrompts embed.FS
 
 // DefaultCoordinatorName is the coordinator agent's default name. It is kept
-// equal to config.DefaultCoordinator (the agent package cannot import config —
-// config has no agent dependency and the value is a plain string), so the
-// literal is repeated here as the resolution floor.
+// equal to config.DefaultCoordinator; the literal is repeated here as the
+// resolution floor so prompt handling never depends on config having been
+// loaded.
 const DefaultCoordinatorName = "mayor"
 
 // coordinatorPlaceholder is the token shipped prompts use where the
@@ -79,11 +81,12 @@ func substituteCoordinator(s string) string {
 	return strings.ReplaceAll(s, coordinatorTitlePlaceholder, titleFirst(name))
 }
 
-// PromptDir returns the root directory for agent prompt files.
-// Default: ~/.pogo/agents/
+// PromptDir returns the root directory for agent prompt files:
+// $POGO_HOME/agents, default ~/.pogo/agents. Deriving from the pogo state
+// dir (not the bare home dir) means an isolated daemon discovers and
+// auto-starts only its own prompt set, never the real user's crew (mg-3dc3).
 func PromptDir() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".pogo", "agents")
+	return filepath.Join(config.PogoHome(), "agents")
 }
 
 // TemplateDir returns the directory for polecat prompt templates.

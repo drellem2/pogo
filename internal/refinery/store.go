@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/drellem2/pogo/internal/config"
 )
 
 // StateVersion is the current on-disk schema version for refinery-state.json.
@@ -68,13 +70,11 @@ type store struct {
 	mu sync.Mutex
 }
 
-// DefaultStatePath returns ~/.pogo/refinery-state.json.
+// DefaultStatePath returns refinery-state.json under the pogo state dir
+// ($POGO_HOME, default ~/.pogo). The error return is kept for call-site
+// compatibility; it is always nil.
 func DefaultStatePath() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(home, ".pogo", "refinery-state.json"), nil
+	return filepath.Join(config.PogoHome(), "refinery-state.json"), nil
 }
 
 // errStateCorrupt wraps JSON parse failures so New can distinguish a corrupt

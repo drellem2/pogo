@@ -122,12 +122,11 @@ func systemdUnitPath() string {
 	return filepath.Join(systemdUnitDir(), "pogo.service")
 }
 
+// pogoHome delegates to config.PogoHome so the launchd plist, recovery
+// queue, and every other service-managed path agree with the daemon's own
+// state-dir resolution (including the legacy POGO_HOME=$HOME normalization).
 func pogoHome() string {
-	if h := os.Getenv("POGO_HOME"); h != "" {
-		return h
-	}
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".pogo")
+	return config.PogoHome()
 }
 
 // logDir is ~/Library/Logs/pogo on macOS — the Apple-standard location for

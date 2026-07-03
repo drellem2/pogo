@@ -16,6 +16,7 @@ import (
 
 	"github.com/hashicorp/go-hclog"
 
+	"github.com/drellem2/pogo/internal/config"
 	"github.com/drellem2/pogo/internal/driver"
 	"github.com/drellem2/pogo/internal/search"
 	pogoPlugin "github.com/drellem2/pogo/pkg/plugin"
@@ -47,23 +48,20 @@ var logger = hclog.New(&hclog.LoggerOptions{
 
 func Init() {
 	projects = []Project{}
-	home := os.Getenv("POGO_HOME")
-	if home == "" {
-		// Match internal/service.pogoHome(): default to ~/.pogo so the
-		// CLI's projects.json doesn't land in cwd when POGO_HOME is unset.
-		// Pre-mg-ff8b this fell back to "." which silently scattered
-		// per-shell projects.json files wherever pogod was first launched.
-		if userHome, err := os.UserHomeDir(); err == nil {
-			home = filepath.Join(userHome, ".pogo")
-		} else {
-			home = "."
-		}
-	}
+	// config.PogoHome resolves $POGO_HOME (default ~/.pogo) with the legacy
+	// POGO_HOME=$HOME value normalized to $HOME/.pogo. Pre-mg-ff8b this fell
+	// back to "." which silently scattered per-shell projects.json files
+	// wherever pogod was first launched.
+	home := config.PogoHome()
 	fmt.Printf("POGO_HOME=%s\n", home)
 	if ProjectFileName == "" {
 		ProjectFileName = "projects.json"
 	}
 	projectFile = filepath.Join(home, ProjectFileName)
+	migrateLegacyProjectFile(projectFile)
+	if err := os.MkdirAll(home, 0755); err != nil {
+		fmt.Printf("Error creating pogo home %s: %v", home, err)
+	}
 	_, err := os.Lstat(projectFile)
 	skipImport := false
 	if err != nil {
@@ -91,6 +89,33 @@ func Init() {
 		var projectsStruct ProjectsSave
 		json.Unmarshal(byteValue, &projectsStruct)
 		projects = projectsStruct.Projects
+	}
+}
+
+// migrateLegacyProjectFile copies projects.json from a raw $POGO_HOME that
+// config.PogoHome normalized away (the legacy POGO_HOME=$HOME layout kept
+// projects.json at the home dir root). One-time and best-effort: it only
+// runs when the canonical file is absent and the legacy one exists, so the
+// visited-projects registry survives the normalization instead of silently
+// resetting (mg-3dc3). The legacy file is left in place.
+func migrateLegacyProjectFile(canonical string) {
+	raw := os.Getenv("POGO_HOME")
+	if raw == "" || filepath.Clean(raw) == filepath.Clean(config.PogoHome()) {
+		return
+	}
+	if _, err := os.Lstat(canonical); !errors.Is(err, os.ErrNotExist) {
+		return
+	}
+	legacy := filepath.Join(raw, ProjectFileName)
+	data, err := os.ReadFile(legacy)
+	if err != nil {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(canonical), 0755); err != nil {
+		return
+	}
+	if err := os.WriteFile(canonical, data, 0644); err == nil {
+		fmt.Printf("Migrated %s to %s\n", legacy, canonical)
 	}
 }
 
@@ -170,14 +195,12 @@ func isEphemeralPath(path string) bool {
 		}
 	}
 
-	// A polecat worktree root is a direct child of ~/.pogo/polecats. Matching
-	// only the immediate child (not arbitrary descendants) keeps this from
-	// flagging repos nested inside a worktree, e.g. test fixtures.
-	if home, err := os.UserHomeDir(); err == nil {
-		polecatsDir := filepath.Join(home, ".pogo", "polecats")
-		if filepath.Dir(clean) == polecatsDir {
-			return true
-		}
+	// A polecat worktree root is a direct child of $POGO_HOME/polecats.
+	// Matching only the immediate child (not arbitrary descendants) keeps
+	// this from flagging repos nested inside a worktree, e.g. test fixtures.
+	polecatsDir := filepath.Join(config.PogoHome(), "polecats")
+	if filepath.Dir(clean) == polecatsDir {
+		return true
 	}
 	return false
 }
