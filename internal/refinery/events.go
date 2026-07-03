@@ -68,7 +68,9 @@ func emitMergeAttempted(mr *MergeRequest, attempt int) {
 }
 
 // emitMerged writes a refinery_merged event for a successful merge.
-func emitMerged(mr *MergeRequest, attempt int, mergeCommit string, durationSec float64) {
+// alreadyMerged marks the no-op resolution of a re-submitted branch that had
+// already landed on the target (gh #34) — no gates ran, nothing was pushed.
+func emitMerged(mr *MergeRequest, attempt int, mergeCommit string, durationSec float64, alreadyMerged bool) {
 	details := map[string]any{
 		"merge_request_id": mr.ID,
 		"branch":           mr.Branch,
@@ -78,6 +80,9 @@ func emitMerged(mr *MergeRequest, attempt int, mergeCommit string, durationSec f
 	}
 	if durationSec > 0 {
 		details["duration_seconds"] = durationSec
+	}
+	if alreadyMerged {
+		details["already_merged"] = true
 	}
 	events.Emit(context.Background(), events.Event{
 		EventType:  "refinery_merged",

@@ -35,7 +35,7 @@ func (r *Refinery) resolveRecovered() {
 		return
 	}
 
-	merged, sha, probeErr := r.probeInFlight(mr)
+	merged, sha, probeErr := r.probeAlreadyMerged(mr)
 
 	r.mu.Lock()
 	r.recovered = nil
@@ -75,22 +75,28 @@ func (r *Refinery) resolveRecovered() {
 	if probeErr != nil {
 		emitRecoveryLost(mr, probeErr)
 	} else if merged {
-		emitMerged(mr, 0, sha, 0)
+		emitMerged(mr, 0, sha, 0, false)
 		if fire != nil {
 			fire(mr)
 		}
 	}
 }
 
-// probeInFlight reports whether the in-flight MR's branch already landed on
-// the target ref. It cleans the refinery's private clone first: a crash
-// mid-rebase leaves an in-progress rebase that would break every subsequent
-// git operation (ensureWorktree only checks that .git exists).
+// probeAlreadyMerged reports whether the MR's branch already landed on the
+// target ref (branch tip is an ancestor of origin/<target> after a fresh
+// fetch). It cleans the refinery's private clone first: a crash mid-rebase
+// leaves an in-progress rebase that would break every subsequent git
+// operation (ensureWorktree only checks that .git exists).
+//
+// Two callers, both on the single-threaded queue path so the clone is
+// exclusively theirs: resolveRecovered (crash-window recovery, above) and
+// processMerge (already-merged guard against double-submits, gh #34).
 //
 // Returns (merged, branchSHA, error). A non-nil error means the probe itself
-// could not answer (branch deleted, remote unreachable) — the caller moves
-// the MR to the lost list.
-func (r *Refinery) probeInFlight(mr *MergeRequest) (bool, string, error) {
+// could not answer (branch deleted, remote unreachable) — recovery moves the
+// MR to the lost list; processMerge falls through to the normal pipeline,
+// which surfaces the real error.
+func (r *Refinery) probeAlreadyMerged(mr *MergeRequest) (bool, string, error) {
 	wtDir, err := r.ensureWorktree(mr.RepoPath)
 	if err != nil {
 		return false, "", fmt.Errorf("worktree setup: %w", err)

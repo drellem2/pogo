@@ -2046,6 +2046,9 @@ Use this for a quick health check of the refinery. For per-MR details use
 				fmt.Printf("Target:    %s\n", mr.TargetRef)
 				fmt.Printf("Author:    %s\n", mr.Author)
 				fmt.Printf("Status:    %s\n", mr.Status)
+				if mr.AlreadyMerged {
+					fmt.Printf("Note:      branch had already landed on the target — resolved as merged without re-running gates\n")
+				}
 				fmt.Printf("Repo:      %s\n", mr.RepoPath)
 				fmt.Printf("Submitted: %s\n", mr.SubmitTime.Format("2006-01-02 15:04:05"))
 				if !mr.DoneTime.IsZero() {
