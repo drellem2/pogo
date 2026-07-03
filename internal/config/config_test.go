@@ -1041,3 +1041,114 @@ func TestLoadSourceEmptyWithoutConfigFile(t *testing.T) {
 		t.Errorf("Load().Source = %q, want \"\" when no config file exists", cfg.Source)
 	}
 }
+
+// TestAgentAutoStartDefault verifies crew auto-start is globally enabled by
+// default, with or without a config file (mg-9a1c).
+func TestAgentAutoStartDefault(t *testing.T) {
+	t.Setenv("POGO_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	cfg := Load()
+	if !cfg.Agents.AutoStart {
+		t.Errorf("expected agents autostart enabled by default, got disabled")
+	}
+}
+
+// TestAgentAutoStartDisabledViaConfigFile verifies [agents] autostart = false
+// turns the global auto-start switch off — the sandbox/testing knob from
+// mg-9a1c for daemons that need a config file but no crew fleet.
+func TestAgentAutoStartDisabledViaConfigFile(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("POGO_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	pogoDir := filepath.Join(dir, "pogo")
+	os.MkdirAll(pogoDir, 0755)
+	os.WriteFile(filepath.Join(pogoDir, "config.toml"), []byte(`
+[agents]
+autostart = false
+`), 0644)
+
+	cfg := Load()
+	if cfg.Agents.AutoStart {
+		t.Errorf("expected [agents] autostart = false to disable auto-start, got enabled")
+	}
+}
+
+// TestAgentAutoStartExplicitlyTrue verifies autostart = true is honored.
+func TestAgentAutoStartExplicitlyTrue(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("POGO_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	pogoDir := filepath.Join(dir, "pogo")
+	os.MkdirAll(pogoDir, 0755)
+	os.WriteFile(filepath.Join(pogoDir, "config.toml"), []byte(`
+[agents]
+autostart = true
+`), 0644)
+
+	cfg := Load()
+	if !cfg.Agents.AutoStart {
+		t.Errorf("expected [agents] autostart = true to keep auto-start enabled, got disabled")
+	}
+}
+
+// TestAgentAutoStartUnrelatedKeysKeepDefault guards the wholesale
+// cfg.Agents = fileCfg.Agents copy in Load: an [agents] section that sets
+// other keys but not autostart must leave the default (true) intact.
+func TestAgentAutoStartUnrelatedKeysKeepDefault(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("POGO_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	pogoDir := filepath.Join(dir, "pogo")
+	os.MkdirAll(pogoDir, 0755)
+	os.WriteFile(filepath.Join(pogoDir, "config.toml"), []byte(`
+[agents]
+command = "sleep 600"
+`), 0644)
+
+	cfg := Load()
+	if !cfg.Agents.AutoStart {
+		t.Errorf("expected auto-start to remain enabled when [agents] sets only command, got disabled")
+	}
+	if cfg.Agents.Command != "sleep 600" {
+		t.Errorf("expected command from config file, got %q", cfg.Agents.Command)
+	}
+}
+
+// TestAgentAutoStartEnvOverride verifies POGO_AGENT_AUTOSTART overrides the
+// config file in both directions, matching the other POGO_AGENT_* env vars.
+func TestAgentAutoStartEnvOverride(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("POGO_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	pogoDir := filepath.Join(dir, "pogo")
+	os.MkdirAll(pogoDir, 0755)
+	os.WriteFile(filepath.Join(pogoDir, "config.toml"), []byte(`
+[agents]
+autostart = true
+`), 0644)
+
+	t.Setenv("POGO_AGENT_AUTOSTART", "false")
+	if cfg := Load(); cfg.Agents.AutoStart {
+		t.Errorf("expected POGO_AGENT_AUTOSTART=false to override autostart = true, got enabled")
+	}
+
+	os.WriteFile(filepath.Join(pogoDir, "config.toml"), []byte(`
+[agents]
+autostart = false
+`), 0644)
+
+	t.Setenv("POGO_AGENT_AUTOSTART", "true")
+	if cfg := Load(); !cfg.Agents.AutoStart {
+		t.Errorf("expected POGO_AGENT_AUTOSTART=true to override autostart = false, got disabled")
+	}
+
+	t.Setenv("POGO_AGENT_AUTOSTART", "not-a-bool")
+	if cfg := Load(); cfg.Agents.AutoStart {
+		t.Errorf("expected malformed POGO_AGENT_AUTOSTART to be ignored, leaving autostart = false from the file")
+	}
+}

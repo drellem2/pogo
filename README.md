@@ -96,7 +96,9 @@ Swap the prompts and set `[refinery] enabled = false` to drive research, content
 - `POGO_PLUGIN_PATH` — plugin discovery. Defaults to `$POGO_HOME/plugin`.
 
 pogod only installs default prompts and auto-starts crew agents when a
-`config.toml` exists — a daemon with no config file never spawns agents.
+`config.toml` exists — a daemon with no config file never spawns agents. A
+configured daemon can also opt out with `[agents] autostart = false` (or
+`POGO_AGENT_AUTOSTART=false`).
 
 ## License
 

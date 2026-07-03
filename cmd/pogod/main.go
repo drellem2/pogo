@@ -930,15 +930,23 @@ func main() {
 		// Auto-start crew agents whose prompt frontmatter declares auto_start = true.
 		// This replaces the manual `pogo agent start mayor` step on a fresh boot
 		// and is idempotent — agents already registered (e.g. across pogod
-		// restart-while-running) are skipped.
-		for _, res := range agentRegistry.AutoStartAgents() {
-			switch res.Status {
-			case agent.AutoStartStatusStarted:
-				log.Printf("pogod: auto-started %s", res.Name)
-			case agent.AutoStartStatusSkippedRunning:
-				log.Printf("pogod: %s already running, skipping auto-start", res.Name)
-			case agent.AutoStartStatusFailed:
-				log.Printf("pogod: auto-start of %s failed: %s", res.Name, res.Error)
+		// restart-while-running) are skipped. [agents] autostart = false (or
+		// POGO_AGENT_AUTOSTART=false) turns the whole sweep off for daemons
+		// that are configured but must not spawn a fleet — sandboxes and
+		// tests (mg-9a1c). Prompt refresh above still runs: it only writes
+		// files, it doesn't start anything.
+		if !cfg.Agents.AutoStart {
+			log.Printf("pogod: crew auto-start disabled ([agents] autostart = false); not starting any agents")
+		} else {
+			for _, res := range agentRegistry.AutoStartAgents() {
+				switch res.Status {
+				case agent.AutoStartStatusStarted:
+					log.Printf("pogod: auto-started %s", res.Name)
+				case agent.AutoStartStatusSkippedRunning:
+					log.Printf("pogod: %s already running, skipping auto-start", res.Name)
+				case agent.AutoStartStatusFailed:
+					log.Printf("pogod: auto-start of %s failed: %s", res.Name, res.Error)
+				}
 			}
 		}
 	}

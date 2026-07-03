@@ -122,6 +122,15 @@ pogo agent start doctor
 If you want to *temporarily* keep an existing crew agent from booting (without
 deleting its file), open the prompt and set `auto_start = false` at the top.
 
+To keep the daemon from starting *any* crew agent — a sandbox or test daemon
+that needs a config file but no fleet — flip the global switch instead of
+editing every prompt:
+
+```toml
+[agents]
+autostart = false   # default true; POGO_AGENT_AUTOSTART overrides
+```
+
 ### Stop pogod from restarting a flaky agent
 
 If a crew agent is in a crash loop and you'd rather not have pogod respawn it

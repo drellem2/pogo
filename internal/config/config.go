@@ -198,6 +198,16 @@ type AgentsConfig struct {
 	// Prefer CoordinatorName() over reading the field so zero-value configs
 	// (tests, callers that skip Load) still resolve to the default.
 	Coordinator string
+	// AutoStart globally gates crew auto-start at pogod boot ([agents]
+	// autostart). Defaults to true. Setting it false keeps a *configured*
+	// daemon from spawning any crew agents, regardless of per-prompt
+	// auto_start frontmatter — the switch for sandboxes and tests that need
+	// a config file (e.g. for an [agents] command override) but no fleet
+	// (mg-9a1c). Complements the mg-3dc3 gate, which only covers daemons
+	// with no config file at all. POGO_AGENT_AUTOSTART overrides. Note: the
+	// zero value is false — read this via a Load()ed Config, not a
+	// hand-built AgentsConfig.
+	AutoStart bool
 	// Command is the default command template for all agent types. When empty,
 	// the active provider's CommandTemplate is used instead.
 	// Supports Go template variables: {{.PromptFile}}, {{.AgentName}}, {{.AgentType}}, {{.WorkDir}}
@@ -288,6 +298,7 @@ type parsedConfig struct {
 	refineryEnabledSet   bool
 	gitgcEnabledSet      bool
 	stallWatchEnabledSet bool
+	agentsAutoStartSet   bool
 }
 
 // Load reads configuration from (in priority order):
@@ -300,6 +311,9 @@ func Load() *Config {
 		Bind:            DefaultBind,
 		MaxFilesPerTree: DefaultMaxFilesPerTree,
 		IndexInterval:   DefaultIndexInterval,
+		Agents: AgentsConfig{
+			AutoStart: true,
+		},
 		Refinery: RefineryConfig{
 			Enabled:      true,
 			PollInterval: 30 * time.Second,
@@ -338,6 +352,11 @@ func Load() *Config {
 			cfg.IndexRoots = fileCfg.IndexRoots
 		}
 		cfg.Agents = fileCfg.Agents
+		if !fileCfg.agentsAutoStartSet {
+			// The wholesale Agents copy above clobbers the default; restore
+			// it unless the file set [agents] autostart explicitly.
+			cfg.Agents.AutoStart = true
+		}
 		if fileCfg.refineryEnabledSet {
 			cfg.Refinery.Enabled = fileCfg.Refinery.Enabled
 		}
@@ -407,6 +426,13 @@ func Load() *Config {
 	// POGO_EXTRA_PATH overrides [agents] extra_path from the config file.
 	if extra := os.Getenv("POGO_EXTRA_PATH"); extra != "" {
 		cfg.Agents.ExtraPath = filepath.SplitList(extra)
+	}
+
+	// POGO_AGENT_AUTOSTART overrides [agents] autostart from the config file.
+	if v := os.Getenv("POGO_AGENT_AUTOSTART"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			cfg.Agents.AutoStart = b
+		}
 	}
 	// Default the provider so existing deployments work with no config change.
 	if cfg.Agents.Provider == "" {
@@ -643,6 +669,9 @@ func loadConfigFile() (*parsedConfig, error) {
 			}
 		case "agents":
 			switch key {
+			case "autostart":
+				cfg.Agents.AutoStart = val == "true"
+				cfg.agentsAutoStartSet = true
 			case "command":
 				cfg.Agents.Command = unquotedVal
 			case "provider":

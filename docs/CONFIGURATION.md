@@ -44,6 +44,25 @@ so user prompts containing other `{{` sequences are untouched. Two things stay
 fixed regardless of the name: the prompt file path `~/.pogo/agents/mayor.md`,
 and the `"mayor"` category label in `pogo agent prompt list --json`.
 
+## Crew auto-start
+
+At boot pogod starts every crew agent whose prompt frontmatter says
+`auto_start = true` — but only when a `config.toml` exists (a daemon with no
+config file is treated as unconfigured/isolated and never spawns agents;
+mg-3dc3). A *configured* daemon can turn the whole sweep off with the global
+switch (mg-9a1c):
+
+```toml
+[agents]
+autostart = false   # default true
+```
+
+`POGO_AGENT_AUTOSTART` (true/false) overrides the file setting. This is the
+knob for sandboxes and tests that need a config file (e.g. an `[agents]`
+command override) without putting a crew fleet on the machine. Per-agent
+opt-out stays in prompt frontmatter — see
+[docs/customizing.md](customizing.md) §"Opt out of auto-start".
+
 ## Agent PATH (extra_path)
 
 Under launchd/systemd pogod inherits a minimal PATH, so spawned harnesses must
