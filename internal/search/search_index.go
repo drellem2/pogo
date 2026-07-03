@@ -6,10 +6,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"hash/fnv"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -108,16 +110,36 @@ func computeFileHash(path string) (string, error) {
 	return hex.EncodeToString(h[:]), nil
 }
 
+// indexWorkerPoolSize bounds how many zoekt index builds run concurrently.
+// Builds used to funnel through a single writer goroutine, so N repos' cold
+// start builds ran strictly one-at-a-time even though every walk was spawned
+// in parallel (gh #39). More workers than CPUs just thrash: the build is
+// CPU-bound (hashing + trigram construction).
+var indexWorkerPoolSize = min(4, runtime.NumCPU())
+
 /*
 *
 
 	Contains channels that can be written to in order to update the project.
+	Updates are sharded by project root: updates for one project always land
+	on the same worker, keeping per-project ordering and build serialization,
+	while distinct projects build in parallel (gh #39).
 */
 type ProjectUpdater struct {
-	c    chan *IndexedProject
-	quit chan bool
-	// closed is only touched by the single write goroutine.
-	closed bool
+	shards []chan *IndexedProject
+	quit   chan struct{}
+}
+
+// send routes an update to the worker that owns its project root.
+func (u *ProjectUpdater) send(proj *IndexedProject) {
+	u.shards[u.shardIndex(proj.Root)] <- proj
+}
+
+// shardIndex maps a project root to its owning worker.
+func (u *ProjectUpdater) shardIndex(root string) int {
+	h := fnv.New32a()
+	h.Write([]byte(root))
+	return int(h.Sum32() % uint32(len(u.shards)))
 }
 
 func absolute(path string) (string, error) {
@@ -143,35 +165,35 @@ func absolute(path string) (string, error) {
 */
 func (g *BasicSearch) newProjectUpdater() *ProjectUpdater {
 	u := &ProjectUpdater{
-		c:      make(chan *IndexedProject),
-		quit:   make(chan bool),
-		closed: false,
+		shards: make([]chan *IndexedProject, indexWorkerPoolSize),
+		quit:   make(chan struct{}),
 	}
-	go g.write(u)
+	for i := range u.shards {
+		u.shards[i] = make(chan *IndexedProject)
+		go g.write(u, u.shards[i])
+	}
 	return u
 }
 
-func (g *BasicSearch) write(u *ProjectUpdater) {
-	for !u.closed {
-		func() {
-			select {
-			case proj := <-u.c:
-				// Capture the previous entry under the same lock as the store:
-				// serializeProjectIndex compares against it to decide whether
-				// file content actually changed. Reading the map after the
-				// store would compare the new index against itself and always
-				// report "unchanged" — which skipped every zoekt rebuild and
-				// pinned search results to the first build (mg-1236).
-				g.mu.Lock()
-				prev, prevKnown := g.projects[proj.Root]
-				g.projects[proj.Root] = *proj
-				g.mu.Unlock()
-				changed := g.serializeProjectIndex(proj, &prev, prevKnown)
-				g.notifyIndexed(proj.Root, changed)
-			case <-u.quit:
-				u.closed = true
-			}
-		}()
+func (g *BasicSearch) write(u *ProjectUpdater, c chan *IndexedProject) {
+	for {
+		select {
+		case proj := <-c:
+			// Capture the previous entry under the same lock as the store:
+			// serializeProjectIndex compares against it to decide whether
+			// file content actually changed. Reading the map after the
+			// store would compare the new index against itself and always
+			// report "unchanged" — which skipped every zoekt rebuild and
+			// pinned search results to the first build (mg-1236).
+			g.mu.Lock()
+			prev, prevKnown := g.projects[proj.Root]
+			g.projects[proj.Root] = *proj
+			g.mu.Unlock()
+			changed := g.serializeProjectIndex(proj, &prev, prevKnown)
+			g.notifyIndexed(proj.Root, changed)
+		case <-u.quit:
+			return
+		}
 	}
 }
 
@@ -280,14 +302,14 @@ func (g *BasicSearch) index(proj *IndexedProject, path string,
 		g.logger.Warn("Project tree exceeds max_files_per_tree; skipping deep index",
 			"root", proj.Root, "limit", g.maxFilesPerTree, "files_indexed", len(proj.Paths))
 		proj.Status = StatusSkippedTooLarge
-		u.c <- proj
+		u.send(proj)
 		return
 	}
 	if err != nil {
 		g.logger.Warn("Error indexing project: ", err.Error())
 		return
 	}
-	u.c <- proj
+	u.send(proj)
 }
 
 func (g *BasicSearch) ReIndex(path string) {
@@ -669,7 +691,7 @@ func (g *BasicSearch) Load(projectRoot string) (*IndexedProject, error) {
 	g.projects[projectRoot] = *project
 	g.mu.Unlock()
 	g.logger.Info("Loaded " + strconv.Itoa(len(project.Paths)) + " files for " + projectRoot)
-	g.updater.c <- project
+	g.updater.send(project)
 	return project, nil
 }
 
