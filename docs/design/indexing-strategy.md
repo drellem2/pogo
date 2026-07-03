@@ -157,3 +157,27 @@ shell/editor integrations on every cd — snaps it back to base. Active repos
 keep one-interval freshness; idle repos converge to one cheap Lstat-walk per
 32m. The worst case staleness (repo changed by something that never visits,
 e.g. a cron git fetch) is the 16× cap.
+
+## Addendum (mg-a77f, 2026-07-03) — gh #39 remainder: build pool, single-read, SearchAll, eviction
+
+The four remaining scaling pieces from gh #39 landed together:
+
+- **Bounded build pool.** Zoekt builds used to funnel through a single
+  writer goroutine, so N repos' cold-start builds ran strictly serially.
+  A pool of `min(4, NumCPU)` workers now runs them; updates are sharded by
+  project root, so builds for one project stay ordered and serialized while
+  distinct projects build in parallel.
+- **Single read on cold start.** The hash walk read every new/changed file
+  for its SHA-256 and the zoekt build then read the same file again. The
+  walk now carries the bytes it read to the build, bounded by a global
+  256 MiB budget (all cold-start walks run concurrently); past the budget
+  the build falls back to re-reading.
+- **SearchAll fan-out.** `pose` across N projects cost ~2N serial
+  round-trips: a /health probe per project plus a connection-per-call
+  search (`req.Close`). Liveness is now established once, and per-project
+  searches fan out in parallel (bounded at 8) over kept-alive connections.
+- **Eviction.** The search service's in-memory map held every repo ever
+  registered, forever. Removing a project (or the startup registry GC, or
+  the periodic indexer noticing an unregistered root) now evicts its
+  paths/hashes/mtimes; on-disk index files stay, so re-registering reloads
+  instead of re-indexing.
