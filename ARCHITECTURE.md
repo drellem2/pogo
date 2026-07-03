@@ -275,6 +275,8 @@ loop (every poll_interval):
 
 **Design rationale:** Gas Town's refinery was also deterministic code (not an agent), and this was explicitly validated as the right call. Merge processing is mechanical — it should never spend tokens on judgment. It needs to work even when all agents are down. Own worktrees ensure the refinery never interferes with agent or user checkouts.
 
+**Merged-polecat reap.** On a successful merge, the refinery's `OnMerged` hook has pogod reap the authoring polecat immediately: mark its work item done on its behalf, stop the process, and (via the agent exit hook) remove its worktree and mail-check schedule. This is event-driven rather than waiting for the mayor's next coordination cycle, closing the window where a lingering completed polecat holds a slot or re-submits its branch (gh #35). The mayor's reap loop remains as backstop for merges that resolve while pogod is down.
+
 **Retry behavior.** If another commit lands on the target between fetch and push (e.g. a CI auto-bump), the ff-only merge fails with a retryable error. The refinery re-runs the full fetch→rebase→gates→merge→push cycle up to `max_attempts` times (default 7). Per-repo `<repo>/.pogo/refinery.toml`:
 
 ```toml
