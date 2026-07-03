@@ -151,6 +151,32 @@ func TestUnassignedItemCountsAsMayors(t *testing.T) {
 	}
 }
 
+func TestNonAvailableItemsDoNotFire(t *testing.T) {
+	w, rec, workRoot, _ := testEnv(t, baseConfig())
+	now := time.Now()
+	// Stale, mayor-assigned items in claimed/ and done/ — outside the
+	// watcher's scope. Only available/ is scanned (gh #37), so these must
+	// neither fire nor even be parsed.
+	for _, dir := range []string{"claimed", "done"} {
+		id := "mg-" + dir
+		path := filepath.Join(workRoot, dir, id+".md")
+		content := fmt.Sprintf("---\nid: %s\ntype: task\nassignee: mayor\n---\n# %s\n", id, id)
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		old := now.Add(-20 * time.Minute)
+		if err := os.Chtimes(path, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	w.Check(now)
+
+	if rec.nudgeCount() != 0 {
+		t.Fatalf("expected 0 nudges for claimed/done items, got %d", rec.nudgeCount())
+	}
+}
+
 func TestFreshItemDoesNotFire(t *testing.T) {
 	w, rec, workRoot, _ := testEnv(t, baseConfig())
 	now := time.Now()

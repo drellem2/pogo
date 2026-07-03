@@ -143,17 +143,17 @@ func (w *Watcher) Check(now time.Time) {
 
 // checkUnclaimedItems fires when one or more available work items the watched
 // agent is responsible for have aged past the threshold without being claimed.
+// Only available/ is scanned — claimed/ and done/ are irrelevant here, and
+// done/ grows unbounded, so walking it every 30s tick would get linearly more
+// expensive over a long run.
 func (w *Watcher) checkUnclaimedItems(now time.Time) {
-	items, err := workitem.ListFrom(w.workRoot)
+	items, err := workitem.ListFrom(w.workRoot, "available")
 	if err != nil {
 		return
 	}
 
 	var stale []workitem.WorkItem
 	for _, it := range items {
-		if it.Status != "available" {
-			continue
-		}
 		if !w.assignedToWatched(it.Assignee) {
 			continue
 		}

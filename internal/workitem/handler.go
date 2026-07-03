@@ -17,21 +17,18 @@ func HandleWorkItems(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	items, err := List()
+	// Optional status filter, applied before the walk so filtered requests
+	// only read the matching status directory (an unknown status walks
+	// nothing and returns an empty array).
+	var statuses []string
+	if statusFilter := r.URL.Query().Get("status"); statusFilter != "" {
+		statuses = append(statuses, statusFilter)
+	}
+
+	items, err := List(statuses...)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
-	}
-
-	// Optional status filter
-	if statusFilter := r.URL.Query().Get("status"); statusFilter != "" {
-		filtered := items[:0]
-		for _, item := range items {
-			if item.Status == statusFilter {
-				filtered = append(filtered, item)
-			}
-		}
-		items = filtered
 	}
 
 	if items == nil {

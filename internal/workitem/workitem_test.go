@@ -94,6 +94,67 @@ func TestListFrom(t *testing.T) {
 	}
 }
 
+func TestListFromStatusFilter(t *testing.T) {
+	root := setupTestWorkspace(t)
+
+	items, err := ListFrom(root, "available")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 available item, got %d", len(items))
+	}
+	if items[0].ID != "mg-0001" || items[0].Status != "available" {
+		t.Errorf("got id=%s status=%s", items[0].ID, items[0].Status)
+	}
+
+	items, err = ListFrom(root, "claimed", "done")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("expected 2 items for claimed+done, got %d", len(items))
+	}
+	if items[0].Status != "claimed" || items[1].Status != "done" {
+		t.Errorf("got statuses %s, %s", items[0].Status, items[1].Status)
+	}
+
+	items, err = ListFrom(root, "nonexistent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("expected 0 items for unknown status, got %d", len(items))
+	}
+}
+
+// TestListFromFilterSkipsOtherDirs proves the filter applies at the directory
+// level: with done/ made unreadable, a filtered list must still succeed
+// because it never opens the directory, while an unfiltered list fails.
+func TestListFromFilterSkipsOtherDirs(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("permission bits are ignored when running as root")
+	}
+	root := setupTestWorkspace(t)
+	doneDir := filepath.Join(root, "done")
+	if err := os.Chmod(doneDir, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(doneDir, 0o755) })
+
+	items, err := ListFrom(root, "available")
+	if err != nil {
+		t.Fatalf("filtered list touched done/: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 available item, got %d", len(items))
+	}
+
+	if _, err := ListFrom(root); err == nil {
+		t.Fatal("unfiltered list should fail on unreadable done/")
+	}
+}
+
 func TestListFromEmptyDir(t *testing.T) {
 	root := t.TempDir()
 	items, err := ListFrom(root)
