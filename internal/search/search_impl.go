@@ -247,6 +247,23 @@ func (g *BasicSearch) GetStatus(projectRoot string) *ProjectStatus {
 	}
 }
 
+// Evict drops a project from the in-memory index map, releasing its paths,
+// hashes and mtimes. Without eviction the map held every repo ever registered
+// for the daemon's lifetime (gh #39). On-disk index files under the project's
+// .pogo dir are left in place, so a re-registered project reloads instead of
+// re-indexing. An index pass already in flight for the root re-inserts it on
+// completion; callers that evict on a schedule (the periodic indexer) simply
+// evict it again next pass.
+func (g *BasicSearch) Evict(projectRoot string) {
+	g.mu.Lock()
+	_, existed := g.projects[projectRoot]
+	delete(g.projects, projectRoot)
+	g.mu.Unlock()
+	if existed {
+		g.logger.Info("Evicted project from in-memory index map: " + projectRoot)
+	}
+}
+
 // SetMaxFilesPerTree updates the per-tree file-count ceiling.
 // Call this after loading configuration to override the default.
 func (g *BasicSearch) SetMaxFilesPerTree(max int) {

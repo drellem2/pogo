@@ -209,6 +209,15 @@ func reindexTick(s *reindexScheduler, now time.Time) {
 		search.SearchService.ReIndex(p.Path)
 	}
 	s.prune(active)
+	// Evict search-service state for projects no longer registered, the
+	// in-memory counterpart of s.prune. Remove() evicts directly; this sweep
+	// additionally catches entries re-inserted by an index pass that was in
+	// flight when its project was removed (gh #39).
+	for _, st := range search.SearchService.GetAllStatuses() {
+		if !active[st.Root] {
+			search.SearchService.Evict(st.Root)
+		}
+	}
 }
 
 // discoverNewRepos scans each configured index_root for git repositories that
