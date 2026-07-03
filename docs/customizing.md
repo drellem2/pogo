@@ -164,6 +164,7 @@ that get expanded per-spawn:
 | `{{.Branch}}` | Target branch for refinery submit |
 | `{{.WorktreeDir}}` | Polecat's working directory: its isolated worktree, or its `~/.pogo/agents/<name>/` home dir under `--no-worktree` |
 | `{{.NoWorktree}}` | `true` when spawned with `--no-worktree` (in-place, refinery:NO) |
+| `{{.Provider}}` | Resolved harness provider id (`claude`, `codex`, `pi`; defaults to `claude`). Gate harness-specific guidance with `{{if eq .Provider "claude"}}...{{end}}` — the shipped templates use this to drop Claude-Code-isms (CronCreate, rating-modal dismissal) under other harnesses. Drop-in fragments can use it too. |
 
 ### The `worktree` knob
 

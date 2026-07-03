@@ -1,10 +1,12 @@
 package agent
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"text/template"
 	"time"
 )
 
@@ -167,6 +169,90 @@ func TestShippedTemplatesSurfaceRecentActivity(t *testing.T) {
 				t.Errorf("%s: expected %q in template body", name, want)
 			}
 		}
+	}
+}
+
+// TestShippedTemplatesProviderGating expands the embedded polecat templates
+// under each provider and asserts the Claude-Code-specific guidance
+// (CronCreate naming, the rating-modal dismissal bullet) appears only when
+// Provider is "claude" (mg-e310 / gh #32). The templates are executed
+// directly rather than through ExpandTemplate so the test doesn't pick up
+// drop-ins from the developer's real ~/.pogo/agents/.
+func TestShippedTemplatesProviderGating(t *testing.T) {
+	claudeIsms := []string{"Claude Code", "CronCreate", "rating dialog"}
+	expand := func(t *testing.T, name, provider string) string {
+		t.Helper()
+		data, err := defaultPrompts.ReadFile(name)
+		if err != nil {
+			t.Fatalf("read embedded %s: %v", name, err)
+		}
+		_, body, err := parsePromptFrontmatterBytes(data)
+		if err != nil {
+			t.Fatalf("parse frontmatter in %s: %v", name, err)
+		}
+		tmpl, err := template.New(name).Parse(body)
+		if err != nil {
+			t.Fatalf("parse template %s: %v", name, err)
+		}
+		var buf bytes.Buffer
+		if err := tmpl.Execute(&buf, withDefaults(TemplateVars{Provider: provider})); err != nil {
+			t.Fatalf("execute template %s: %v", name, err)
+		}
+		return buf.String()
+	}
+
+	for _, name := range []string{"prompts/templates/polecat.md", "prompts/templates/polecat-qa.md"} {
+		for _, provider := range []string{"pi", "codex"} {
+			out := expand(t, name, provider)
+			for _, ism := range claudeIsms {
+				if strings.Contains(out, ism) {
+					t.Errorf("%s under provider %q: expected no %q in expanded prompt", name, provider, ism)
+				}
+			}
+			// The provider-neutral scheduler policy must survive the gating.
+			if !strings.Contains(out, "in-process scheduler") {
+				t.Errorf("%s under provider %q: neutral in-process-scheduler guidance missing", name, provider)
+			}
+		}
+		out := expand(t, name, "claude")
+		for _, ism := range claudeIsms {
+			if !strings.Contains(out, ism) {
+				t.Errorf("%s under provider \"claude\": expected %q in expanded prompt", name, ism)
+			}
+		}
+	}
+}
+
+// TestExpandTemplateProviderDefault pins the fail-safe: an empty Provider
+// defaults to "claude" at expansion time, so Claude-gated blocks stay visible
+// for callers that predate the field (never silently hidden by an
+// empty-string comparison).
+func TestExpandTemplateProviderDefault(t *testing.T) {
+	dir := t.TempDir()
+	tmplPath := filepath.Join(dir, "provider-gate.md")
+	content := `Rule.{{if eq .Provider "claude"}} CLAUDE-ONLY.{{end}}`
+	if err := os.WriteFile(tmplPath, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := ExpandTemplate(tmplPath, TemplateVars{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "CLAUDE-ONLY") {
+		t.Errorf("empty Provider should default to claude and keep gated block, got: %q", out)
+	}
+
+	out, err = ExpandTemplate(tmplPath, TemplateVars{Provider: "pi"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, "CLAUDE-ONLY") {
+		t.Errorf("Provider=pi should drop gated block, got: %q", out)
+	}
+
+	if got := PreviewTemplateVars().Provider; got != DefaultProviderID {
+		t.Errorf("PreviewTemplateVars().Provider = %q, want %q", got, DefaultProviderID)
 	}
 }
 

@@ -772,6 +772,16 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 	recentCommits := captureRecentCommits(spawnReq.Repo, defaultRecentCommits)
 	recentFiles := captureRecentFiles(spawnReq.Repo, defaultRecentCommits, defaultRecentFiles)
 
+	// The resolved provider's id gates harness-specific template blocks
+	// ({{if eq .Provider "claude"}}). resolveProvider returns (nil, nil) for a
+	// bare registry with no providers registered; fall back to the built-in
+	// default id so gated blocks keep their current-behavior (Claude) shape —
+	// never empty-string, which would silently hide them.
+	providerID := DefaultProviderID
+	if provider != nil && provider.ID != "" {
+		providerID = provider.ID
+	}
+
 	// Expand template to a temp file
 	vars := TemplateVars{
 		Task:          spawnReq.Task,
@@ -783,6 +793,7 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		NoWorktree:    spawnReq.NoWorktree,
 		RecentCommits: recentCommits,
 		RecentFiles:   recentFiles,
+		Provider:      providerID,
 	}
 	promptFile, err := ExpandTemplateToFile(tmplPath, vars)
 	if err != nil {
