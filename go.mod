@@ -17,7 +17,10 @@ require (
 	nhooyr.io/websocket v1.8.17
 )
 
-require github.com/rs/xid v1.5.0
+require (
+	github.com/rs/xid v1.5.0
+	golang.org/x/net v0.17.0
+)
 
 require (
 	github.com/RoaringBitmap/roaring v1.3.0 // indirect
@@ -37,7 +40,6 @@ require (
 	github.com/sourcegraph/go-ctags v0.0.0-20231024141911-299d0263dc95 // indirect
 	github.com/spf13/pflag v1.0.5 // indirect
 	golang.org/x/exp v0.0.0-20230713183714-613f0c0eb8a1 // indirect
-	golang.org/x/net v0.17.0 // indirect
 	golang.org/x/text v0.13.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20230628200519-e449d1ea0e82 // indirect
 	google.golang.org/grpc v1.56.1 // indirect

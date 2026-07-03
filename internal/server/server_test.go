@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/drellem2/pogo/internal/config"
 	"github.com/drellem2/pogo/internal/refinery"
@@ -290,6 +291,51 @@ func TestHandleModeAfterStopOrchestration(t *testing.T) {
 	}
 	if resp["mode"] != "index-only" {
 		t.Fatalf("expected mode=index-only, got %s", resp["mode"])
+	}
+}
+
+// TestModeReadableDuringSlowTransition guards the gh #38 lock fix: SetMode
+// used to hold the server write-lock across slow subsystem work (a 5s
+// StopAll, refinery restart), blocking every guarded request's Mode() check
+// for the duration. The slow work must run outside s.mu. The refinery
+// starter is the injectable slow step: while it is blocked mid-transition,
+// Mode() must still return promptly.
+func TestModeReadableDuringSlowTransition(t *testing.T) {
+	s := New(nil, nil)
+	starterEntered := make(chan struct{})
+	releaseStarter := make(chan struct{})
+	s.SetRefineryStarter(func() (*refinery.Refinery, error) {
+		close(starterEntered)
+		<-releaseStarter
+		return nil, nil
+	})
+
+	if err := s.SetMode(config.ModeIndexOnly); err != nil {
+		t.Fatal(err)
+	}
+
+	transitionDone := make(chan error, 1)
+	go func() { transitionDone <- s.SetMode(config.ModeFull) }()
+	<-starterEntered
+
+	modeRead := make(chan config.RunMode, 1)
+	go func() { modeRead <- s.Mode() }()
+	select {
+	case m := <-modeRead:
+		// Mode flips to full only after the starter returns.
+		if m != config.ModeIndexOnly {
+			t.Errorf("expected ModeIndexOnly mid-transition, got %s", m)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Mode() blocked while a mode transition was in progress")
+	}
+
+	close(releaseStarter)
+	if err := <-transitionDone; err != nil {
+		t.Fatal(err)
+	}
+	if s.Mode() != config.ModeFull {
+		t.Fatalf("expected ModeFull after transition, got %s", s.Mode())
 	}
 }
 

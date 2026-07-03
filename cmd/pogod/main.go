@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/nightlyone/lockfile"
+	"golang.org/x/net/netutil"
 
 	"github.com/drellem2/pogo/internal/agent"
 	"github.com/drellem2/pogo/internal/client"
@@ -52,6 +53,11 @@ var startTime time.Time
 
 var bindFlag = flag.String("bind", "", "address to bind the server to (default: 127.0.0.1)")
 var portFlag = flag.Int("port", 0, "port to listen on (default: 10000)")
+
+// maxHTTPConns caps concurrent HTTP connections so a client leak can't
+// exhaust daemon file descriptors. Generous for a localhost daemon whose
+// normal load is a handful of CLI and agent clients.
+const maxHTTPConns = 256
 
 // registryLiveness implements scheduler.AgentLiveness against the agent
 // registry so the scheduler can garbage-collect mail-check-* schedules whose
@@ -910,6 +916,17 @@ func main() {
 		}
 	}
 
-	// Serve HTTP (blocks until shutdown)
-	log.Fatal(http.Serve(ln, nil))
+	// Serve HTTP (blocks until shutdown). Explicit server instead of bare
+	// http.Serve so a slow or hung client can't pin a goroutine forever,
+	// with a connection cap for backpressure (gh #38). Localhost-only
+	// today, so the values are generous; WriteTimeout must cover the
+	// slowest handler (/agents/spawn-polecat does a git worktree add plus
+	// agent startup).
+	httpServer := &http.Server{
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       1 * time.Minute,
+		WriteTimeout:      5 * time.Minute,
+		IdleTimeout:       2 * time.Minute,
+	}
+	log.Fatal(httpServer.Serve(netutil.LimitListener(ln, maxHTTPConns)))
 }
