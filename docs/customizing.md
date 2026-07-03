@@ -336,10 +336,13 @@ can't blow up indexing cost.
 # anticipated.
 max_files_per_tree = 25000
 
-# How often the indexer re-walks every registered project to pick up changes.
-# The re-index is incremental, so a no-change tick is cheap; this interval
-# only bounds how long an edit takes to surface in search results. Default 2m.
-# See docs/design/indexing-strategy.md.
+# Base cadence for the incremental re-indexer. Each project backs off
+# exponentially while its content is unchanged — up to 16x this interval
+# (32m at the default) — and snaps back to base cadence when a re-index
+# detects changes or the project is visited (`pogo visit`, which the shell
+# and editor integrations fire on every cd). An edit in a repo you're
+# working in surfaces within one interval; an idle repo is re-walked at
+# most every 16 intervals. Default 2m. See docs/design/indexing-strategy.md.
 index_interval = "2m"
 
 # Optional strict mode. When set, ONLY git repos under one of these paths are

@@ -10,7 +10,22 @@ is the curated, human-readable summary kept in sync at each release cut.
 
 ## [Unreleased]
 
+### Changed
+- **Indexer backoff-on-unchanged**: the periodic re-indexer no longer re-walks
+  every project every `index_interval`. Each project backs off exponentially
+  while unchanged (up to 16× the base interval) and snaps back to base cadence
+  on a detected change or a `pogo visit`, cutting the steady background tax of
+  large idle trees (gh #39 piece 1, mg-1236).
+
 ### Fixed
+- The periodic re-index is now actually incremental: it previously wiped its
+  own hash/mtime cache before each project-root walk, re-reading and
+  re-hashing every file every tick; unchanged files now cost one Lstat
+  (mg-1236).
+- Content changes are searchable again after a re-index: change detection
+  compared the new index against itself, so the zoekt index was never rebuilt
+  after its first build and search results stayed pinned to stale content
+  (mg-1236).
 - The per-repo `.pogo/` search-index directory no longer shows up as an
   untracked dir in `git status`: pogo appends `.pogo/` to each repo's
   `.git/info/exclude` at index time (repo-local, never committed). Applies to
