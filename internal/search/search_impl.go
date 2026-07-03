@@ -245,6 +245,9 @@ func (p *IndexedProject) makeSearchDir() (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// The index dir lives inside the repo working tree; keep it out of
+	// `git status` for every repo pogo touches (gh #40).
+	ensurePogoGitExcluded(p.Root)
 	return fullSearchDir, nil
 }
 

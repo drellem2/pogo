@@ -10,6 +10,12 @@ is the curated, human-readable summary kept in sync at each release cut.
 
 ## [Unreleased]
 
+### Fixed
+- The per-repo `.pogo/` search-index directory no longer shows up as an
+  untracked dir in `git status`: pogo appends `.pogo/` to each repo's
+  `.git/info/exclude` at index time (repo-local, never committed). Applies to
+  already-polluted repos on their next index (gh #40, mg-f51b).
+
 ## [0.2.2] - 2026-06-21
 
 ### Added
