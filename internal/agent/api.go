@@ -742,7 +742,7 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 	}
 
 	// Compute worktree path before template expansion so it can be included in the prompt.
-	var worktreeDir, sourceRepo string
+	var worktreeDir, sourceRepo, branchName string
 	if createWorktree {
 		home, _ := os.UserHomeDir()
 		worktreeDir = filepath.Join(home, ".pogo", "polecats", spawnReq.Name)
@@ -796,7 +796,7 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 	// Create git worktree for polecat isolation
 	if createWorktree {
 		sourceRepo = spawnReq.Repo
-		branchName := "polecat-" + spawnReq.Name
+		branchName = "polecat-" + spawnReq.Name
 
 		// Ensure parent directory exists
 		if err := os.MkdirAll(filepath.Dir(worktreeDir), 0755); err != nil {
@@ -842,9 +842,7 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 	})
 	if cmdErr != nil {
 		os.Remove(promptFile)
-		if worktreeDir != "" {
-			exec.Command("git", "-C", sourceRepo, "worktree", "remove", worktreeDir, "--force").Run()
-		}
+		cleanupFailedPolecatSpawn(sourceRepo, worktreeDir, branchName)
 		http.Error(w, fmt.Sprintf("agent command template error: %v", cmdErr), http.StatusInternalServerError)
 		return
 	}
@@ -858,9 +856,7 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		expanded, err := ExpandString(tmplMeta.NudgeOnStart, vars)
 		if err != nil {
 			os.Remove(promptFile)
-			if worktreeDir != "" {
-				exec.Command("git", "-C", sourceRepo, "worktree", "remove", worktreeDir, "--force").Run()
-			}
+			cleanupFailedPolecatSpawn(sourceRepo, worktreeDir, branchName)
 			http.Error(w, fmt.Sprintf("nudge_on_start template error: %v", err), http.StatusInternalServerError)
 			return
 		}
@@ -887,10 +883,7 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 	})
 	if err != nil {
 		os.Remove(promptFile) // Clean up temp file on spawn failure
-		// Clean up worktree on spawn failure
-		if worktreeDir != "" {
-			exec.Command("git", "-C", sourceRepo, "worktree", "remove", worktreeDir, "--force").Run()
-		}
+		cleanupFailedPolecatSpawn(sourceRepo, worktreeDir, branchName)
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
@@ -898,6 +891,25 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(agentInfo(a))
+}
+
+// cleanupFailedPolecatSpawn undoes the git side effects of a polecat spawn
+// that failed after its worktree was created: it removes the worktree and
+// deletes the polecat-<name> branch that `git worktree add -b` made. Without
+// the branch deletion a retry of the same work item fails with "branch
+// already exists" (gh #27). Both commands are best-effort; `git branch -D`
+// refuses to delete a branch still checked out in another worktree, so a
+// live polecat's branch is never at risk.
+func cleanupFailedPolecatSpawn(sourceRepo, worktreeDir, branchName string) {
+	if worktreeDir == "" {
+		return
+	}
+	exec.Command("git", "-C", sourceRepo, "worktree", "remove", worktreeDir, "--force").Run()
+	if branchName != "" {
+		if out, err := exec.Command("git", "-C", sourceRepo, "branch", "-D", branchName).CombinedOutput(); err != nil {
+			log.Printf("polecat spawn cleanup: failed to delete branch %s in %s: %v\n%s", branchName, sourceRepo, err, out)
+		}
+	}
 }
 
 // resolvePolecatBaseRef returns the git ref a new polecat worktree should be
