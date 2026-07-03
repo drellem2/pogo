@@ -237,7 +237,7 @@ This is enforced by convention in prompt files, not by code. The crew prompt say
 
 A deterministic loop inside pogod, not an agent.
 
-The refinery maintains its own git worktrees for testing and merging — it never touches agent or user working directories. This isolates merge operations from active development and avoids dirty-tree conflicts.
+The refinery maintains its own git worktrees for testing and merging — it never tests or merges in agent or user working directories. This isolates merge operations from active development and avoids dirty-tree conflicts. The one deliberate exception: after a successful merge advances `origin/<target>`, the refinery fast-forwards the source checkout the MR was submitted from — but only if that checkout is clean and sitting on the target branch (ff-only; never a merge, rebase, or reset; dirty trees are logged and skipped). Without this, the local checkout reads "merged" while still showing pre-merge code, and the next polecat branches from stale state (gh #30).
 
 The refinery is rigless. It doesn't resolve project references or care how many local clones of a repo exist. Each merge-ready work item carries a repo path; the refinery reads the remote URL from that path and maintains exactly one worktree per remote. Multiple agents can work on different clones of the same repo — the refinery sees one remote and pushes to it.
 
@@ -587,7 +587,7 @@ These questions came up during design and have been answered. Recorded here so t
 
 2. **Polecat concurrency: no limit in pogod.** The daemon doesn't enforce concurrency limits. The mayor (or human) decides how many polecats to spawn. pogod is substrate, not policy.
 
-3. **Refinery repo access: own worktrees.** The refinery maintains dedicated worktrees under `~/.pogo/refinery/worktrees/`, one per repo. It never touches agent or user working directories. Isolation prevents dirty-tree conflicts and keeps merge operations predictable.
+3. **Refinery repo access: own worktrees.** The refinery maintains dedicated worktrees under `~/.pogo/refinery/worktrees/`, one per repo. All testing and merging happens there, never in agent or user working directories. Isolation prevents dirty-tree conflicts and keeps merge operations predictable. Post-merge, it will fast-forward the source checkout's target branch as a convenience — but only when that checkout is clean and on the target branch (gh #30).
 
 4. **No tmux dependency.** pogod allocates PTYs directly and holds master file descriptors. Interactive access (`pogo agent attach`), input injection (`pogo nudge`), and output monitoring are all consequences of the parent-child process relationship. No terminal multiplexer in the stack.
 

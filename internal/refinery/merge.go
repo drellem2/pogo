@@ -20,12 +20,14 @@ import (
 const defaultMaxAttempts = 7
 
 // processMerge runs the full merge pipeline for a single MR:
-// 1. Ensure worktree exists for the repo
-// 2. Fetch, checkout branch, rebase onto latest target
-// 3. Run quality gates on rebased code
-// 4. Fast-forward merge to target ref
-// 5. Push
-// 6. Run the per-repo deploy hook (if configured) against the just-merged commit
+//  1. Ensure worktree exists for the repo
+//  2. Fetch, checkout branch, rebase onto latest target
+//  3. Run quality gates on rebased code
+//  4. Fast-forward merge to target ref
+//  5. Push
+//  6. Fast-forward the source checkout's target branch (iff clean and on
+//     that branch — see fastForwardSourceCheckout)
+//  7. Run the per-repo deploy hook (if configured) against the just-merged commit
 //
 // If another polecat merges to the target between our rebase and push,
 // the ff-only merge or push will fail. We retry up to maxAttempts times
@@ -70,6 +72,10 @@ func (r *Refinery) processMerge(mr *MergeRequest) (string, string, error) {
 		gateOutput = output
 		if attemptErr == nil {
 			emitMerged(mr, attempt, sha, time.Since(startTime).Seconds())
+			// origin/<target> just advanced; refresh the checkout the MR
+			// was submitted from so it doesn't go stale (gh #30).
+			// Best-effort — logs and skips unless clean and on the target.
+			fastForwardSourceCheckout(mr.RepoPath, mr.TargetRef)
 			// Run the per-repo post-merge deploy hook against the refinery's
 			// clone (which now has the merged commit on the target ref). The
 			// hook owns refreshing runtime snapshots like ~/.pogo/<repo>/bin/
