@@ -916,6 +916,12 @@ func cleanupFailedPolecatSpawn(sourceRepo, worktreeDir, branchName string) {
 		return
 	}
 	exec.Command("git", "-C", sourceRepo, "worktree", "remove", worktreeDir, "--force").Run()
+	// Backstop: if git refused (e.g. files created after checkout) or the
+	// worktree was never registered, reclaim the directory anyway so no
+	// orphan is left behind (gh #31).
+	if err := os.RemoveAll(worktreeDir); err != nil {
+		log.Printf("polecat spawn cleanup: failed to remove worktree dir %s: %v", worktreeDir, err)
+	}
 	if branchName != "" {
 		if out, err := exec.Command("git", "-C", sourceRepo, "branch", "-D", branchName).CombinedOutput(); err != nil {
 			log.Printf("polecat spawn cleanup: failed to delete branch %s in %s: %v\n%s", branchName, sourceRepo, err, out)

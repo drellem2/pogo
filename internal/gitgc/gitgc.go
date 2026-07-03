@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -33,6 +34,18 @@ const BranchPrefix = "polecat-"
 // DefaultTargetBranch is the branch a polecat branch must be merged into
 // before a *done* (but not archived) ticket's branch becomes deletable.
 const DefaultTargetBranch = "main"
+
+// DefaultPolecatsDir returns the directory polecat worktrees live under
+// (~/.pogo/polecats) — the value callers pass as Options.PolecatsDir to
+// enable the orphan-dir scan. Must match the worktree path chosen at spawn
+// time in internal/agent.
+func DefaultPolecatsDir() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve home dir: %w", err)
+	}
+	return filepath.Join(home, ".pogo", "polecats"), nil
+}
 
 // git runs a git subcommand against repo and returns combined output. A
 // non-zero exit is turned into an error carrying the trimmed output.

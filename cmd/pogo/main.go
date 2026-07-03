@@ -1735,7 +1735,9 @@ The path is resolved to an absolute path and the git root is discovered automati
 		Use:   "gc",
 		Short: "Garbage-collect stale polecat branches and leaked worktrees",
 		Long: `gc deletes stale polecat-* branches and reclaims leaked git worktrees
-whose work items have concluded (done or archived).
+whose work items have concluded (done or archived). It also removes orphaned
+polecat directories under ~/.pogo/polecats — dirs left behind with files but
+no .git when teardown never ran after the worktree was unlinked (gh #31).
 
 It is the manual entry point to the same internal/gitgc logic pogod runs
 on startup and on a periodic ticker. Branches and worktrees of in-flight
@@ -1763,10 +1765,14 @@ By default gc only reports what it would do; pass --apply to make changes.`,
 				fmt.Printf("warning: could not reach pogod for the live-polecat list (%v);\n"+
 					"         relying on ticket status and git checkout state only.\n\n", lerr)
 			}
+			// Best-effort: without a resolvable home dir the orphan-dir
+			// scan is skipped and gc still sweeps branches and worktrees.
+			polecatsDir, _ := gitgc.DefaultPolecatsDir()
 			res, err := gitgc.Sweep(gitgc.Options{
 				Repo:         repo,
 				LivePolecats: live,
 				DryRun:       !gcApply,
+				PolecatsDir:  polecatsDir,
 			})
 			if err != nil {
 				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)

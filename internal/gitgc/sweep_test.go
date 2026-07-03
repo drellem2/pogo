@@ -302,6 +302,154 @@ func TestSweepDryRun(t *testing.T) {
 	}
 }
 
+// TestSweepOrphanDirs covers gh #31: a polecat dir whose worktree was
+// unlinked at submit time (no .git, no registration) and whose exit cleanup
+// never ran is invisible to `git worktree list` — the PolecatsDir scan must
+// reclaim it once the ticket concludes, generated files and all, while
+// keeping live, in-flight, unclassifiable, and still-linked dirs.
+func TestSweepOrphanDirs(t *testing.T) {
+	r := newTestRepo(t)
+	polecats := t.TempDir()
+
+	// mkOrphan builds a dir shaped like the gh #31 leftovers: checked-out
+	// files plus test-generated __pycache__, but no .git pointer.
+	mkOrphan := func(name string) string {
+		t.Helper()
+		dir := filepath.Join(polecats, name)
+		if err := os.MkdirAll(filepath.Join(dir, "__pycache__"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		for _, f := range []string{"test_foo.py", "__pycache__/test_foo.cpython-312.pyc"} {
+			if err := os.WriteFile(filepath.Join(dir, f), []byte("x"), 0644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return dir
+	}
+
+	doneDir := mkOrphan("aaaa")    // done       -> removed
+	archDir := mkOrphan("bbbb")    // archived   -> removed
+	flightDir := mkOrphan("cccc")  // in-flight  -> kept
+	unknownDir := mkOrphan("dddd") // unknown    -> kept
+	liveDir := mkOrphan("eeee")    // live, done -> kept
+
+	// A dir still carrying a .git pointer is a linked worktree of some
+	// repo, not an orphan — untouched even with a concluded ticket.
+	linkedDir := filepath.Join(polecats, "ffff")
+	if err := os.MkdirAll(linkedDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(linkedDir, ".git"), []byte("gitdir: /elsewhere/.git/worktrees/ffff"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// A stray file directly under the polecats dir is ignored.
+	if err := os.WriteFile(filepath.Join(polecats, "notes.txt"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	tickets := TicketIndex{
+		"mg-aaaa": TicketDone,
+		"mg-bbbb": TicketArchived,
+		"mg-cccc": TicketInFlight,
+		// mg-dddd intentionally absent
+		"mg-eeee": TicketDone,
+		"mg-ffff": TicketArchived,
+	}
+	res, err := Sweep(Options{
+		Repo:         r.dir,
+		Tickets:      tickets,
+		LivePolecats: map[string]bool{"eeee": true},
+		PolecatsDir:  polecats,
+	})
+	if err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if len(res.Errors) != 0 {
+		t.Fatalf("unexpected sweep errors: %v", res.Errors)
+	}
+
+	for _, dir := range []string{doneDir, archDir} {
+		if _, err := os.Stat(dir); !os.IsNotExist(err) {
+			t.Errorf("orphan dir %s should be gone, stat err = %v", dir, err)
+		}
+	}
+	for _, dir := range []string{flightDir, unknownDir, liveDir, linkedDir} {
+		if _, err := os.Stat(dir); err != nil {
+			t.Errorf("dir %s should remain: %v", dir, err)
+		}
+	}
+	if len(res.WorktreesRemoved) != 2 {
+		t.Errorf("want 2 orphan removals reported, got %+v", res.WorktreesRemoved)
+	}
+	if _, err := os.Stat(filepath.Join(polecats, "notes.txt")); err != nil {
+		t.Errorf("stray file should be untouched: %v", err)
+	}
+}
+
+// TestSweepOrphanDirsDryRun confirms the orphan scan reports without
+// deleting, and that a missing polecats dir is not an error.
+func TestSweepOrphanDirsDryRun(t *testing.T) {
+	r := newTestRepo(t)
+	polecats := t.TempDir()
+	dir := filepath.Join(polecats, "aaaa")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	tickets := TicketIndex{"mg-aaaa": TicketArchived}
+	res, err := Sweep(Options{Repo: r.dir, Tickets: tickets, PolecatsDir: polecats, DryRun: true})
+	if err != nil {
+		t.Fatalf("Sweep dry-run: %v", err)
+	}
+	if len(res.WorktreesRemoved) != 1 || res.WorktreesRemoved[0].Path != dir {
+		t.Errorf("dry run should report the orphan removal, got %+v", res.WorktreesRemoved)
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Errorf("dry run must not remove the orphan dir: %v", err)
+	}
+
+	// Nonexistent polecats dir: skipped silently.
+	res, err = Sweep(Options{Repo: r.dir, Tickets: tickets, PolecatsDir: filepath.Join(polecats, "nope")})
+	if err != nil {
+		t.Fatalf("Sweep with missing polecats dir: %v", err)
+	}
+	if len(res.Errors) != 0 {
+		t.Errorf("missing polecats dir should not be an error: %v", res.Errors)
+	}
+}
+
+// TestSweepOrphanDirsSkipsRegistered confirms a real registered worktree
+// living under the polecats dir is owned by the registered-worktree scan,
+// not double-handled by the orphan scan.
+func TestSweepOrphanDirsSkipsRegistered(t *testing.T) {
+	r := newTestRepo(t)
+	polecats := t.TempDir()
+	if real, err := filepath.EvalSymlinks(polecats); err == nil {
+		polecats = real
+	}
+	r.branch("polecat-aaaa")
+	wt := filepath.Join(polecats, "aaaa")
+	r.git("worktree", "add", "-q", wt, "polecat-aaaa")
+
+	tickets := TicketIndex{"mg-aaaa": TicketInFlight}
+	res, err := Sweep(Options{Repo: r.dir, Tickets: tickets, PolecatsDir: polecats})
+	if err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if _, err := os.Stat(wt); err != nil {
+		t.Errorf("in-flight registered worktree should remain: %v", err)
+	}
+	if len(res.WorktreesRemoved) != 0 {
+		t.Errorf("nothing should be removed, got %+v", res.WorktreesRemoved)
+	}
+	// Exactly one kept entry — from the worktree scan, not doubled by the
+	// orphan scan.
+	if len(res.WorktreesKept) != 1 {
+		t.Errorf("want 1 kept entry, got %+v", res.WorktreesKept)
+	}
+}
+
 func branchSet(actions []BranchAction) map[string]bool {
 	set := map[string]bool{}
 	for _, a := range actions {
