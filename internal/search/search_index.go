@@ -100,14 +100,32 @@ func deepCopyProject(p IndexedProject) IndexedProject {
 	return cp
 }
 
-// computeFileHash returns the hex-encoded SHA-256 hash of a file's contents.
-func computeFileHash(path string) (string, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", err
+// carriedContentBudget caps the total bytes of file content carried from hash
+// walks to zoekt builds across all in-flight index passes. Carrying the bytes
+// lets a cold-start build reuse the read the hash already paid for instead of
+// re-reading every file (gh #39); the cap keeps a cold start over many large
+// repos — where every walk runs concurrently — from holding all their
+// contents in memory at once. Files past the budget are re-read at build
+// time, the pre-existing behavior.
+const carriedContentBudget = 256 << 20 // 256 MiB
+
+// reserveContent claims n bytes of the carried-content budget, reporting
+// whether the claim fit.
+func (g *BasicSearch) reserveContent(n int) bool {
+	if g.carriedBytes.Add(int64(n)) > carriedContentBudget {
+		g.carriedBytes.Add(-int64(n))
+		return false
 	}
-	h := sha256.Sum256(data)
-	return hex.EncodeToString(h[:]), nil
+	return true
+}
+
+// releaseContents returns the budget held by every entry of a carried-content
+// map. Call it once the map is no longer needed (after the build consumed it,
+// or when a walk errors out before reaching the build).
+func (g *BasicSearch) releaseContents(contents map[string][]byte) {
+	for _, data := range contents {
+		g.carriedBytes.Add(-int64(len(data)))
+	}
 }
 
 // indexWorkerPoolSize bounds how many zoekt index builds run concurrently.
@@ -116,6 +134,16 @@ func computeFileHash(path string) (string, error) {
 // in parallel (gh #39). More workers than CPUs just thrash: the build is
 // CPU-bound (hashing + trigram construction).
 var indexWorkerPoolSize = min(4, runtime.NumCPU())
+
+// indexUpdate carries a finished walk to the build workers: the walked
+// project plus any file contents the walk already read for hashing, so the
+// zoekt build can reuse them instead of re-reading the file (gh #39). Every
+// carried byte holds a reservation against carriedContentBudget; whoever
+// drops the map must release it via releaseContents.
+type indexUpdate struct {
+	proj     *IndexedProject
+	contents map[string][]byte
+}
 
 /*
 *
@@ -126,13 +154,13 @@ var indexWorkerPoolSize = min(4, runtime.NumCPU())
 	while distinct projects build in parallel (gh #39).
 */
 type ProjectUpdater struct {
-	shards []chan *IndexedProject
+	shards []chan *indexUpdate
 	quit   chan struct{}
 }
 
 // send routes an update to the worker that owns its project root.
-func (u *ProjectUpdater) send(proj *IndexedProject) {
-	u.shards[u.shardIndex(proj.Root)] <- proj
+func (u *ProjectUpdater) send(upd *indexUpdate) {
+	u.shards[u.shardIndex(upd.proj.Root)] <- upd
 }
 
 // shardIndex maps a project root to its owning worker.
@@ -165,20 +193,21 @@ func absolute(path string) (string, error) {
 */
 func (g *BasicSearch) newProjectUpdater() *ProjectUpdater {
 	u := &ProjectUpdater{
-		shards: make([]chan *IndexedProject, indexWorkerPoolSize),
+		shards: make([]chan *indexUpdate, indexWorkerPoolSize),
 		quit:   make(chan struct{}),
 	}
 	for i := range u.shards {
-		u.shards[i] = make(chan *IndexedProject)
+		u.shards[i] = make(chan *indexUpdate)
 		go g.write(u, u.shards[i])
 	}
 	return u
 }
 
-func (g *BasicSearch) write(u *ProjectUpdater, c chan *IndexedProject) {
+func (g *BasicSearch) write(u *ProjectUpdater, c chan *indexUpdate) {
 	for {
 		select {
-		case proj := <-c:
+		case upd := <-c:
+			proj := upd.proj
 			// Capture the previous entry under the same lock as the store:
 			// serializeProjectIndex compares against it to decide whether
 			// file content actually changed. Reading the map after the
@@ -189,7 +218,7 @@ func (g *BasicSearch) write(u *ProjectUpdater, c chan *IndexedProject) {
 			prev, prevKnown := g.projects[proj.Root]
 			g.projects[proj.Root] = *proj
 			g.mu.Unlock()
-			changed := g.serializeProjectIndex(proj, &prev, prevKnown)
+			changed := g.serializeProjectIndex(proj, &prev, prevKnown, upd.contents)
 			g.notifyIndexed(proj.Root, changed)
 		case <-u.quit:
 			return
@@ -206,7 +235,8 @@ func (g *BasicSearch) write(u *ProjectUpdater, c chan *IndexedProject) {
 // skipped-too-large rather than indexing an unbounded number of files.
 func (g *BasicSearch) indexRec(proj *IndexedProject, path string,
 	gitIgnore *ignore.GitIgnore,
-	prevHashes map[string]string, prevMtimes map[string]int64) error {
+	prevHashes map[string]string, prevMtimes map[string]int64,
+	contents map[string][]byte) error {
 	// Enforce the per-tree file-count ceiling before descending further.
 	if g.maxFilesPerTree > 0 && int32(len(proj.Paths)) >= g.maxFilesPerTree {
 		return errTreeTooLarge
@@ -243,7 +273,7 @@ func (g *BasicSearch) indexRec(proj *IndexedProject, path string,
 		}
 
 		if fileInfo.IsDir() {
-			err = g.indexRec(proj, newPath, gitIgnore, prevHashes, prevMtimes)
+			err = g.indexRec(proj, newPath, gitIgnore, prevHashes, prevMtimes, contents)
 			if errors.Is(err, errTreeTooLarge) {
 				proj.Paths = append(proj.Paths, files...)
 				return err
@@ -271,9 +301,15 @@ func (g *BasicSearch) indexRec(proj *IndexedProject, path string,
 					continue
 				}
 			}
-			// File is new or modified — compute hash
-			if hash, herr := computeFileHash(newPath); herr == nil {
-				proj.FileHashes[relativePath] = hash
+			// File is new or modified — read it once: hash the bytes and,
+			// budget permitting, carry them to the zoekt build so it does
+			// not have to read the file again (gh #39).
+			if data, herr := os.ReadFile(newPath); herr == nil {
+				h := sha256.Sum256(data)
+				proj.FileHashes[relativePath] = hex.EncodeToString(h[:])
+				if contents != nil && g.reserveContent(len(data)) {
+					contents[relativePath] = data
+				}
 			}
 		}
 	}
@@ -297,19 +333,21 @@ func (g *BasicSearch) index(proj *IndexedProject, path string,
 		proj.FileMtimes = make(map[string]int64)
 	}
 
-	err := g.indexRec(proj, path, gitIgnore, prevHashes, prevMtimes)
+	contents := make(map[string][]byte)
+	err := g.indexRec(proj, path, gitIgnore, prevHashes, prevMtimes, contents)
 	if errors.Is(err, errTreeTooLarge) {
 		g.logger.Warn("Project tree exceeds max_files_per_tree; skipping deep index",
 			"root", proj.Root, "limit", g.maxFilesPerTree, "files_indexed", len(proj.Paths))
 		proj.Status = StatusSkippedTooLarge
-		u.send(proj)
+		u.send(&indexUpdate{proj: proj, contents: contents})
 		return
 	}
 	if err != nil {
 		g.logger.Warn("Error indexing project: ", err.Error())
+		g.releaseContents(contents)
 		return
 	}
-	u.send(proj)
+	u.send(&indexUpdate{proj: proj, contents: contents})
 }
 
 func (g *BasicSearch) ReIndex(path string) {
@@ -520,7 +558,17 @@ func (g *BasicSearch) Index(req *pogoPlugin.IProcessProjectReq) {
 // file content actually changed relative to prev — the map entry that was in
 // place before this pass, captured by write(). The returned signal drives the
 // periodic indexer's backoff-on-unchanged scheduling (mg-1236).
-func (g *BasicSearch) serializeProjectIndex(proj *IndexedProject, prev *IndexedProject, prevKnown bool) bool {
+//
+// contents optionally carries file bytes the hash walk already read; the
+// zoekt build uses them instead of re-reading those files, so a cold start
+// reads each file exactly once (gh #39). Files not present (unchanged files
+// whose hash was cached, or reads past the carried-content budget) fall back
+// to a read here. May be nil (e.g. on Load, which rebuilds only if the zoekt
+// index file went missing).
+func (g *BasicSearch) serializeProjectIndex(proj *IndexedProject, prev *IndexedProject, prevKnown bool, contents map[string][]byte) bool {
+	// The carried bytes are only needed within this pass; whatever the build
+	// below does or doesn't consume, their budget reservation ends here.
+	defer g.releaseContents(contents)
 	searchDir, err := proj.makeSearchDir()
 	if err != nil {
 		g.logger.Error("Error making search dir: ", err)
@@ -592,6 +640,14 @@ func (g *BasicSearch) serializeProjectIndex(proj *IndexedProject, prev *IndexedP
 	for _, path := range proj.Paths {
 		// Prepend Root to path
 		fullPath := filepath.Join(proj.Root, path)
+		// Reuse bytes carried from the hash walk when we have them; the walk
+		// stored them keyed by the same root-relative path, and Root already
+		// carries its trailing separator, so fullPath matches what absolute()
+		// would return for an existing file.
+		if data, ok := contents[path]; ok {
+			indexer.AddFile(fullPath, data)
+			continue
+		}
 		absPath, err := absolute(fullPath)
 		if err != nil {
 			g.logger.Error("Error getting absolute path - file may not exist", path)
@@ -691,7 +747,7 @@ func (g *BasicSearch) Load(projectRoot string) (*IndexedProject, error) {
 	g.projects[projectRoot] = *project
 	g.mu.Unlock()
 	g.logger.Info("Loaded " + strconv.Itoa(len(project.Paths)) + " files for " + projectRoot)
-	g.updater.send(project)
+	g.updater.send(&indexUpdate{proj: project})
 	return project, nil
 }
 
