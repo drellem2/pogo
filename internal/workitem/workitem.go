@@ -42,18 +42,27 @@ var statusDirs = []struct {
 	{"done", "done"},
 }
 
-// List reads all work items from the macguffin workspace.
-// It scans available/, claimed/, and done/ directories.
-func List() ([]WorkItem, error) {
-	return ListFrom(workspaceDir())
+// List reads work items from the macguffin workspace, optionally filtered to
+// the given statuses. With no arguments it scans available/, claimed/, and
+// done/.
+func List(statuses ...string) ([]WorkItem, error) {
+	return ListFrom(workspaceDir(), statuses...)
 }
 
-// ListFrom reads work items from a given workspace root. It is exported so
-// out-of-package consumers (e.g. the stall watcher) can point it at a test
-// workspace or an alternate root rather than the default ~/.macguffin/work.
-func ListFrom(root string) ([]WorkItem, error) {
+// ListFrom reads work items from a given workspace root, optionally filtered
+// to the given statuses ("available", "claimed", "done"). The filter applies
+// at the directory level — non-matching status directories are never read or
+// parsed — so callers that need only one status skip the cost of walking the
+// others (done/ grows unbounded over a long run). No statuses means all.
+// Exported so out-of-package consumers (e.g. the stall watcher) can point it
+// at a test workspace or an alternate root rather than the default
+// ~/.macguffin/work.
+func ListFrom(root string, statuses ...string) ([]WorkItem, error) {
 	var items []WorkItem
 	for _, sd := range statusDirs {
+		if !statusRequested(sd.status, statuses) {
+			continue
+		}
 		dir := filepath.Join(root, sd.dir)
 		entries, err := os.ReadDir(dir)
 		if err != nil {
@@ -77,6 +86,20 @@ func ListFrom(root string) ([]WorkItem, error) {
 		}
 	}
 	return items, nil
+}
+
+// statusRequested reports whether a status directory should be scanned given
+// the caller's filter. An empty filter selects every status.
+func statusRequested(status string, filter []string) bool {
+	if len(filter) == 0 {
+		return true
+	}
+	for _, s := range filter {
+		if s == status {
+			return true
+		}
+	}
+	return false
 }
 
 // parseWorkItem reads a macguffin work item markdown file and extracts
