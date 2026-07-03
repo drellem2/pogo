@@ -8,7 +8,7 @@ package pi_test
 //	[agents.polecat] provider = "pi"   (config tier of resolveProvider)
 //	  -> ExpandCommand(provider.CommandTemplate, ...)
 //	  -> Registry.Spawn
-//	  -> initial nudge (the task, typed into the pi composer)
+//	  -> initial task appended to argv (InitialPromptViaArgv, gh #26)
 //	  -> mid-session nudge (Agent.Nudge into the settled composer)
 //
 // The registry is wired exactly as cmd/pogod wires it (all providers
@@ -25,8 +25,8 @@ package pi_test
 // the test points a "mock" provider at a local httptest server that captures
 // the completion request and streams back a fixed reply. That capture gives
 // byte-level assertions the TUI can't: the persona delivered via
-// --append-system-prompt lands in the system message, and the nudged task
-// arrives intact as the user message. PI_CODING_AGENT_DIR isolates pi's
+// --append-system-prompt lands in the system message, and the argv-delivered
+// task arrives intact as the user message. PI_CODING_AGENT_DIR isolates pi's
 // config/auth/session state from the developer's real ~/.pi.
 //
 // The tests are opt-in only because they need a `pi` binary (Node >= 22.19)
@@ -224,22 +224,29 @@ func TestPiEndToEnd(t *testing.T) {
 		t.Fatalf("resolved provider = %q, want pi via the [agents.polecat] config tier", got)
 	}
 
-	// Acceptance: the initial nudge is submitted and pi runs a turn — the mock
-	// server receives a completion request.
+	// Acceptance (gh #26): Spawn appended the task to the argv — the polecat's
+	// task delivery no longer depends on a PTY idle window that pi-tui's
+	// differential renderer may never open.
+	if got := a.Command[len(a.Command)-1]; got != task {
+		t.Fatalf("last command element = %q, want the argv-delivered task %q", got, task)
+	}
+
+	// Acceptance: the argv-delivered task starts a turn — the mock server
+	// receives a completion request.
 	deadline := time.Now().Add(60 * time.Second)
 	for time.Now().Before(deadline) && mock.count() == 0 {
 		time.Sleep(500 * time.Millisecond)
 	}
 	if mock.count() == 0 {
 		out := string(agent.StripANSI(a.RecentOutput(65536)))
-		t.Fatalf("pi never sent a completion request — sentinel gate, nudge "+
-			"submission, or model selection failed.\npi output tail:\n%s",
+		t.Fatalf("pi never sent a completion request — argv task delivery "+
+			"or model selection failed.\npi output tail:\n%s",
 			tail(out, 2000))
 	}
 
 	// Acceptance (byte-level, via the captured request): the persona delivered
-	// with --append-system-prompt landed in the system prompt, and the nudged
-	// task arrived intact as the user message.
+	// with --append-system-prompt landed in the system prompt, and the
+	// argv-delivered task arrived intact as the user message.
 	var req struct {
 		Messages []struct {
 			Role    string          `json:"role"`
@@ -266,7 +273,7 @@ func TestPiEndToEnd(t *testing.T) {
 		t.Error("persona from --append-system-prompt did not reach the system prompt")
 	}
 	if !taskSeen {
-		t.Error("nudged task did not arrive intact in the user message (startup race?)")
+		t.Error("argv-delivered task did not arrive intact in the user message")
 	}
 
 	// Acceptance (mg-9829 collision regression): AppendFlag injection must
@@ -285,13 +292,13 @@ func TestPiEndToEnd(t *testing.T) {
 	}
 
 	// Acceptance: the calibrated PromptReadySentinel actually appears in pi's
-	// output as seen through pogo's own ANSI stripper — if this fails the
-	// initial nudge is running on the degraded wait-idle path (see
-	// agent.NudgeProfile.PromptReadySentinel).
+	// output as seen through pogo's own ANSI stripper. Argv delivery (gh #26)
+	// means no initial nudge waits on it anymore, but the profile retains it
+	// as the measured input-loop-ready marker — this catches it going stale.
 	clean := string(agent.StripANSI(a.RecentOutput(1 << 20)))
 	if !strings.Contains(clean, provider.Nudge.PromptReadySentinel) {
 		t.Errorf("PromptReadySentinel %q not found in stripped pi output — "+
-			"sentinel is stale, initial nudges degrade to wait-idle",
+			"the calibrated marker is stale (pi TUI changed its hint line?)",
 			provider.Nudge.PromptReadySentinel)
 	}
 

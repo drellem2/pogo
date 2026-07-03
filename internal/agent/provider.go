@@ -45,6 +45,18 @@ type Provider struct {
 	// ValidatePolecatCommand checks all of these are present.
 	NonInteractiveFlags []string
 
+	// InitialPromptViaArgv is true when the harness accepts its initial task
+	// message as a trailing positional argv element (pi: `pi [messages...]`).
+	// Spawn then appends SpawnRequest.InitialNudge to the spawn command as a
+	// single argument and skips the PTY initial-nudge path entirely. This is
+	// the reliable delivery for a differential-render TUI that redraws
+	// near-continuously: such a TUI can hold the PTY busy indefinitely, the
+	// idle window the typed initial nudge waits for never opens, and the agent
+	// sits taskless forever while showing "running" (gh #26). Providers whose
+	// harness has no argv message support leave this false and take the
+	// NeedsInitialNudge nudge path.
+	InitialPromptViaArgv bool
+
 	// Nudge is the PTY-input dialect pogo uses to drive the harness.
 	Nudge NudgeProfile
 

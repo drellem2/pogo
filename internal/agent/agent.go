@@ -570,7 +570,23 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 		provider = p
 	}
 
-	cmd := exec.Command(req.Command[0], req.Command[1:]...)
+	// Deliver the initial prompt as a trailing positional argv element when the
+	// provider declares InitialPromptViaArgv (pi: `pi [messages...]`). Argv
+	// delivery replaces the PTY initial-nudge path below: a differential-render
+	// TUI can redraw near-continuously, the idle window the typed nudge waits
+	// for never opens, and the nudge times out leaving the agent taskless
+	// forever (gh #26). The harness reads argv before its TUI even starts, so
+	// there is no idle-window race. The command is copied, not appended in
+	// place, so the caller's slice is never mutated; the stored a.Command
+	// carries the prompt so restart-on-crash re-delivers it via re-exec.
+	command := req.Command
+	promptViaArgv := provider != nil && provider.InitialPromptViaArgv && req.InitialNudge != ""
+	if promptViaArgv {
+		command = append(append([]string(nil), req.Command...), req.InitialNudge)
+		log.Printf("agent %s: delivering initial prompt via argv (provider %q)", req.Name, provider.ID)
+	}
+
+	cmd := exec.Command(command[0], command[1:]...)
 	if req.Dir != "" {
 		cmd.Dir = req.Dir
 	}
@@ -619,7 +635,7 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 		PID:            cmd.Process.Pid,
 		Type:           req.Type,
 		StartTime:      time.Now(),
-		Command:        req.Command,
+		Command:        command,
 		Status:         StatusRunning,
 		PromptFile:     req.PromptFile,
 		Dir:            req.Dir,
@@ -675,8 +691,10 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 	// input buffer and gets absorbed into one un-re-tokenized paste block,
 	// wedging the agent (mg-ce61). Providers without a sentinel fall back to
 	// wait-idle. Gated on the provider's NeedsInitialNudge — a harness that
-	// takes the persona prompt as a command-line arg needs no nudge.
-	if req.InitialNudge != "" && a.nudge.NeedsInitialNudge {
+	// takes the persona prompt as a command-line arg needs no nudge — and
+	// skipped when the prompt already went out via argv above (a.InitialNudge
+	// then stays empty, so Respawn re-delivers via re-exec, not re-nudge).
+	if req.InitialNudge != "" && a.nudge.NeedsInitialNudge && !promptViaArgv {
 		a.InitialNudge = req.InitialNudge
 		go func() {
 			if err := a.NudgeWithMode(req.InitialNudge, NudgeWaitReady, a.nudge.InitialNudgeTimeout); err != nil {

@@ -176,6 +176,91 @@ func TestInitialNudgeAutoDelivers(t *testing.T) {
 	t.Errorf("initial nudge did not auto-deliver within 8s; output: %q", string(a.RecentOutput(4096)))
 }
 
+// TestInitialPromptViaArgvAppendsToCommand verifies the gh #26 delivery path:
+// when the spawn's provider declares InitialPromptViaArgv, the InitialNudge
+// message is appended to the spawn command as a single trailing argv element
+// and the PTY initial-nudge path is skipped entirely — no idle window, no
+// ready sentinel, no timeout. The stored a.Command carries the prompt so a
+// restart-on-crash re-exec re-delivers it, and a.InitialNudge stays empty so
+// Respawn doesn't also re-nudge.
+func TestInitialPromptViaArgvAppendsToCommand(t *testing.T) {
+	tmpDir := t.TempDir()
+	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	defer reg.StopAll(2 * time.Second)
+
+	const task = "begin task delivered via argv"
+	// echo prints its argv — the appended prompt — and exits; the multi-word
+	// message must arrive as ONE argument, hence the single-line echo output.
+	a, err := reg.Spawn(SpawnRequest{
+		Name:         "argv-prompt",
+		Type:         TypePolecat,
+		Command:      []string{"echo"},
+		InitialNudge: task,
+		Provider: &Provider{
+			ID:                   "argv-capable",
+			InitialPromptViaArgv: true,
+			// NeedsInitialNudge deliberately true: argv delivery must win even
+			// if a provider mistakenly sets both, or the task lands twice.
+			Nudge: NudgeProfile{NeedsInitialNudge: true, InitialNudgeTimeout: time.Second},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+
+	// The prompt is appended to the stored command as a single element, so
+	// restart-on-crash (which re-execs a.Command) re-delivers it.
+	if got := a.Command[len(a.Command)-1]; got != task {
+		t.Errorf("last command element = %q, want the initial prompt %q", got, task)
+	}
+	// The PTY nudge path must not run: InitialNudge stays empty so Respawn
+	// doesn't double-deliver via re-nudge on top of the re-exec'd argv.
+	if a.InitialNudge != "" {
+		t.Errorf("InitialNudge = %q, want empty (argv delivery skips the nudge path)", a.InitialNudge)
+	}
+
+	// The process actually received the message as an argument.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(string(a.RecentOutput(4096)), task) {
+			return // success
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Errorf("argv-delivered prompt never appeared in output; output: %q", string(a.RecentOutput(4096)))
+}
+
+// TestInitialPromptViaArgvEmptyNudgeNoAppend: with no InitialNudge there is
+// nothing to deliver — the command must run unmodified even for an
+// argv-capable provider.
+func TestInitialPromptViaArgvEmptyNudgeNoAppend(t *testing.T) {
+	tmpDir := t.TempDir()
+	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	defer reg.StopAll(2 * time.Second)
+
+	a, err := reg.Spawn(SpawnRequest{
+		Name:    "argv-no-prompt",
+		Type:    TypePolecat,
+		Command: []string{"cat"},
+		Provider: &Provider{
+			ID:                   "argv-capable",
+			InitialPromptViaArgv: true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	if len(a.Command) != 1 || a.Command[0] != "cat" {
+		t.Errorf("Command = %v, want [cat] unmodified", a.Command)
+	}
+}
+
 func TestSpawnDuplicate(t *testing.T) {
 	tmpDir := t.TempDir()
 	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))

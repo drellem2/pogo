@@ -21,12 +21,16 @@ The calibrated `NudgeProfile`:
 
 | Field | Claude | Codex | **pi** | Why pi differs |
 |---|---|---|---|---|
-| `NeedsInitialNudge` | true | true | **true** | TUI opens at an empty composer; the task must be typed in. |
-| `InitialNudgeTimeout` | 60s | 30s | **30s** | Node CLI, TUI ready ~1.5s from spawn; bound generous for the first-ever run's fd/ripgrep helper download. |
+| `NeedsInitialNudge` | true | true | **false** | Initial task arrives via **argv** (`pi [messages...]`), not a typed nudge — see the gh #26 addendum below. |
+| `InitialNudgeTimeout` | 60s | 30s | **30s** | Unused while `NeedsInitialNudge` is false; retained as the measured value (TUI ready ~1.5s from spawn; bound generous for the first-ever run's fd/ripgrep helper download). |
 | `SubmitTerminator` | `\r` | `\r` | **`\r`** | A carriage return submits the composer. |
 | `SubmitDelay` | 50ms | 50ms | **50ms** | NOT load-bearing for pi (see below) — kept for a uniform `Agent.Nudge` split-write path. |
 | `IdleThreshold` | 2s | 2s | **2s** | No pi-specific constraint (no silent dialog race); kept uniform. |
-| `PromptReadySentinel` | `? for shortcuts` | *(none)* | **`/ commands · ! bash`** | pi's keybinding hint line; gates the initial nudge past ~1.5s of silent pre-TUI startup. |
+| `PromptReadySentinel` | `? for shortcuts` | *(none)* | **`/ commands · ! bash`** | pi's keybinding hint line — the measured "input loop ready" marker. Unused for the initial task (argv delivery, gh #26); retained for any future wait-ready use. |
+
+Plus `Provider.InitialPromptViaArgv = true` (not a `NudgeProfile` field): pi
+accepts trailing positional messages, so `Registry.Spawn` appends the initial
+task to the spawn argv — see the gh #26 addendum.
 
 Plus the two integration decisions that are **not** `NudgeProfile` fields:
 
@@ -171,6 +175,30 @@ with no configured pi default and no `GEMINI_API_KEY` will error at the first
 turn (inline, non-blocking) until the user picks a model — a pi-side setup
 step, not a pogo concern.
 
+## Addendum (gh #26): initial task via argv, not the typed nudge
+
+Field evidence overturned one calibration conclusion. The "idle composer emits
+zero PTY output" measurement (10.5s watch, single quiet spawn) does **not**
+hold universally: during pi-harness smoke testing (pogo @ 920e8c9, pi 0.80.3),
+pi-tui's differential renderer emitted near-continuous PTY writes — worst
+under concurrent PTY load, e.g. a mayor dispatching several polecats at once.
+The initial nudge's wait-ready gate (sentinel, then a 2s idle window) then
+never fires: the window never opens, delivery times out
+(`still producing output after 30s (last PTY write 68ms ago)`), and the
+polecat sits "running" forever without ever receiving its task. Intermittent
+and silent — direct spawns succeeded 4/4 while a mayor-dispatched spawn
+stalled indefinitely.
+
+The fix removes the race instead of re-tuning it: pi accepts trailing
+positional messages (`pi [messages...]`), so the provider sets
+`InitialPromptViaArgv = true` and `Registry.Spawn` appends the initial task to
+the spawn argv as a single element — the harness reads it before the TUI even
+starts. `NeedsInitialNudge` is now false; `InitialNudgeTimeout` and
+`PromptReadySentinel` are unused on the initial path but retained above as the
+measured record (and `TestPiEndToEnd` still asserts the sentinel renders, so
+staleness is caught). Mid-session nudges are unaffected — they keep the
+measured `\r` submit dialect and wait-idle delivery.
+
 ## Environment notes
 
 - pi 0.80.3 requires Node ≥ 22.19 (`npm install -g --ignore-scripts
@@ -190,10 +218,10 @@ Needs only a `pi` binary on PATH — no API key, no network beyond localhost.
 `TestPiEndToEnd` drives a real `pi` through pogo's `agent.Registry` +
 `pi.Provider`, wired the way `cmd/pogod` wires it (per-type provider config,
 claude as global default), and asserts: the spawn resolves pi via the
-`[agents.polecat] provider = "pi"` config tier; the sentinel-gated initial
-nudge submits; the persona from `--append-system-prompt` reaches the
-request's system message and the task the user message (byte-level, via the
-mock provider); the repo's own AGENTS.md survives untouched and still reaches
+`[agents.polecat] provider = "pi"` config tier; the initial task is appended
+to the spawn argv (gh #26) and starts a turn; the persona from
+`--append-system-prompt` reaches the request's system message and the task
+the user message (byte-level, via the mock provider); the repo's own AGENTS.md survives untouched and still reaches
 the request (the mg-9829 collision regression); the reply renders; the
 composer settles; a mid-session `Agent.Nudge` triggers a second turn; the
 registry shuts the agent down cleanly. `TestPiHeadless` runs the same
