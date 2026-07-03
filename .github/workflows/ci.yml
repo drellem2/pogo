@@ -50,7 +50,8 @@ jobs:
 
   pi-e2e:
     # Live pi-provider integration tests (mg-3e7c): drive a real pi binary
-    # through agent.Registry (TUI initial + mid-session nudges) and in
+    # through agent.Registry (argv-delivered initial task per gh #26 +
+    # mid-session nudges) and in
     # headless --print --mode json form, against a localhost mock OpenAI
     # server — no API key, no external model traffic. pi is pinned to the
     # version the nudge dialect was calibrated against

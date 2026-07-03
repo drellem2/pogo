@@ -71,9 +71,12 @@ func TestProviderPromptInjection(t *testing.T) {
 func TestProviderNudgeProfile(t *testing.T) {
 	n := Provider.Nudge
 
-	// The pi TUI opens at an empty composer; the task must be nudged in.
-	if !n.NeedsInitialNudge {
-		t.Error("pi needs an initial nudge to deliver the task into the composer")
+	// The initial task arrives via argv, never as a typed nudge: pi-tui's
+	// differential renderer can defeat the idle window the typed nudge waits
+	// for, silently leaving the polecat taskless (gh #26).
+	if n.NeedsInitialNudge {
+		t.Error("pi must not take the PTY initial-nudge path — pi-tui redraws " +
+			"defeat the idle-window gate (gh #26); the task is delivered via argv")
 	}
 	// A carriage return submits the composer.
 	if n.SubmitTerminator != "\r" {
@@ -100,12 +103,12 @@ func TestProviderNudgeProfile(t *testing.T) {
 			"a shorter timeout than Claude's %v", n.InitialNudgeTimeout,
 			agent.DefaultNudgeProfile.InitialNudgeTimeout)
 	}
-	// pi's pre-TUI startup is silent, so a quiescence-only initial-nudge gate
-	// would fire before the input loop exists (mg-ce61) — a sentinel is
-	// required.
+	// The sentinel is unused for the initial prompt (argv delivery, gh #26)
+	// but retained as the measured "input loop ready" marker for any future
+	// wait-ready use — see the provider comment.
 	if n.PromptReadySentinel == "" {
-		t.Error("pi.Provider.Nudge.PromptReadySentinel must be set: pi's " +
-			"~1.5s of silent pre-TUI startup defeats a quiescence-only gate")
+		t.Error("pi.Provider.Nudge.PromptReadySentinel must be set: it is the " +
+			"measured input-loop-ready marker (see pi-nudge-calibration.md)")
 	}
 	// And it must not be Claude's sentinel: pi renders no "? for shortcuts".
 	if n.PromptReadySentinel == agent.DefaultNudgeProfile.PromptReadySentinel {
@@ -132,7 +135,7 @@ func TestProviderHooks(t *testing.T) {
 // the measured profile is caught. See docs/investigations/pi-nudge-calibration.md.
 func TestProviderNudgeValues(t *testing.T) {
 	want := agent.NudgeProfile{
-		NeedsInitialNudge:   true,
+		NeedsInitialNudge:   false, // initial task arrives via argv (gh #26)
 		InitialNudgeTimeout: 30 * time.Second,
 		SubmitTerminator:    "\r",
 		SubmitDelay:         50 * time.Millisecond,
@@ -141,6 +144,23 @@ func TestProviderNudgeValues(t *testing.T) {
 	}
 	if Provider.Nudge != want {
 		t.Errorf("Provider.Nudge = %+v, want %+v", Provider.Nudge, want)
+	}
+}
+
+// TestProviderInitialPromptViaArgv pins the gh #26 fix: pi accepts trailing
+// positional messages (`pi [messages...]`), so the initial task is appended to
+// the spawn argv by Registry.Spawn instead of typed into the composer during a
+// PTY idle window that pi-tui's differential renderer may never open. The two
+// fields must stay paired: argv delivery on, nudge path off — both set would
+// deliver the task twice, both unset would never deliver it at all.
+func TestProviderInitialPromptViaArgv(t *testing.T) {
+	if !Provider.InitialPromptViaArgv {
+		t.Error("pi.Provider.InitialPromptViaArgv must be true — the typed " +
+			"initial nudge is defeated by pi-tui redraws (gh #26)")
+	}
+	if Provider.Nudge.NeedsInitialNudge {
+		t.Error("NeedsInitialNudge must be false when InitialPromptViaArgv is " +
+			"set, or the task would be delivered twice")
 	}
 }
 

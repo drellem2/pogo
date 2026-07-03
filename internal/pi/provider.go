@@ -5,7 +5,7 @@
 // terminal coding agent. It exports a single agent.Provider value, pi.Provider,
 // capturing every pi-specific spawn decision: the command template, the
 // --append-system-prompt prompt-injection flag, the --approve non-interactive
-// flag, and the PTY nudge dialect.
+// flag, argv delivery of the initial task (gh #26), and the PTY nudge dialect.
 //
 // The nudge dialect was measured against a live pi 0.80.3 rather than copied
 // from Claude or Codex — pi's TUI is its own differential-rendering framework
@@ -63,17 +63,28 @@ var Provider = agent.Provider{
 
 	NonInteractiveFlags: []string{"--approve"},
 
+	// pi accepts the initial task as a trailing positional argv element
+	// (`pi [messages...]`), so Spawn appends it to the command instead of
+	// typing it into the composer. The typed initial nudge was unreliable
+	// here: pi-tui's differential renderer can emit near-continuous PTY
+	// writes under load (worst with concurrent PTY activity, e.g. a mayor
+	// dispatching several polecats), the idle window the nudge waits for
+	// never opens, and the polecat silently sits taskless forever (gh #26).
+	InitialPromptViaArgv: true,
+
 	// pi's pi-tui nudge dialect — every value measured against a live pi
 	// 0.80.3 at pogo's default 200×50 winsize, NOT copied from Claude or
 	// Codex. See docs/investigations/pi-nudge-calibration.md for the raw
 	// measurements.
 	Nudge: agent.NudgeProfile{
-		// The pi TUI opens at an empty composer awaiting input; the task must
-		// be typed and submitted (the persona arrives via the
-		// --append-system-prompt flag, not the nudge).
-		NeedsInitialNudge: true,
+		// The initial task arrives via argv (InitialPromptViaArgv above), not
+		// as a typed nudge — see gh #26. The persona arrives via the
+		// --append-system-prompt flag.
+		NeedsInitialNudge: false,
 
-		// pi is a Node CLI that renders its TUI in ~1.5s from spawn — slower
+		// Unused while NeedsInitialNudge is false; retained as the measured
+		// calibration record should the nudge path ever be needed again. pi
+		// is a Node CLI that renders its TUI in ~1.5s from spawn — slower
 		// than Codex's native binary but far faster than Claude/Ink's cold
 		// start. The bound is generous because pi's first-ever run also
 		// downloads its fd/ripgrep helper binaries into ~/.pi/agent/bin.
@@ -100,12 +111,13 @@ var Provider = agent.Provider{
 
 		// pi renders a keybinding hint line under the composer once its input
 		// loop is up — "escape interrupt · ctrl+c/ctrl+d clear/exit ·
-		// / commands · ! bash · ctrl+o more". The substring below gates the
-		// initial nudge past pi's ~1.5s of pre-TUI silence, which a
-		// quiescence-only check would misread as idle (mg-ce61). The "/" and
-		// "!" are keybinding names, so a custom ~/.pi/agent keybinding config
-		// could reword the hint — in that case WaitForReady degrades to
-		// best-effort wait-idle delivery rather than dropping the nudge.
+		// / commands · ! bash · ctrl+o more". Unused for the initial prompt
+		// while NeedsInitialNudge is false (argv delivery has no ready gate to
+		// wait for); retained as the measured "input loop ready" marker for
+		// any future wait-ready use. The "/" and "!" are keybinding names, so
+		// a custom ~/.pi/agent keybinding config could reword the hint — in
+		// that case WaitForReady degrades to best-effort wait-idle delivery
+		// rather than dropping the nudge.
 		PromptReadySentinel: "/ commands · ! bash",
 	},
 
