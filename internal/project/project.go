@@ -160,6 +160,7 @@ func PruneRegistry() {
 		}
 		if reason != "" {
 			logger.Info("registry GC: pruning project entry", "path", p.Path, "reason", reason)
+			search.SearchService.Evict(p.Path)
 			pruned++
 			continue
 		}
@@ -506,6 +507,9 @@ func Remove(path string) bool {
 		if p.Path == path {
 			projects = append(projects[:i], projects[i+1:]...)
 			SaveProjects()
+			// Drop the search service's in-memory index state too, or the
+			// removed project's paths/hashes stay resident forever (gh #39).
+			search.SearchService.Evict(path)
 			return true
 		}
 	}
