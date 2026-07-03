@@ -2,6 +2,8 @@ package gitgc
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 )
@@ -24,6 +26,13 @@ type Options struct {
 	// Sweep loads them via LoadTicketIndex (`mg list`). Injecting a map
 	// keeps Sweep unit-testable without the mg binary.
 	Tickets TicketIndex
+	// PolecatsDir, when set, is additionally scanned for orphan polecat
+	// directories — dirs whose git worktree registration is gone (unlinked
+	// at refinery-submit time) but whose files were never deleted, e.g.
+	// because pogod died before the polecat's exit cleanup ran (gh #31).
+	// Such dirs are invisible to `git worktree list`, so the worktree scan
+	// alone can never reclaim them. Empty means skip the scan.
+	PolecatsDir string
 	// DryRun reports what would be done without deleting anything.
 	DryRun bool
 	// Logf, when set, receives a line per action for progress logging.
@@ -133,6 +142,24 @@ func Sweep(opts Options) (Result, error) {
 		res.WorktreesRemoved = append(res.WorktreesRemoved, action)
 	}
 
+	// --- Phase 1b: orphan polecat dirs ------------------------------------
+	// A polecat's worktree is unlinked from git at refinery-submit time (its
+	// .git pointer removed, its registration pruned) so the branch stops
+	// being "checked out" while the polecat keeps polling. Normally the
+	// polecat's exit cleanup RemoveAll's the directory, but if pogod dies
+	// first the dir survives with no .git and no registration — orphaned
+	// files that the worktree scan above can never see (gh #31). Scan
+	// PolecatsDir for such dirs and rm -rf the concluded ones; there is no
+	// registration left for `git worktree remove --force` to act on, so
+	// RemoveAll is the whole job.
+	if opts.PolecatsDir != "" {
+		registered := map[string]bool{}
+		for _, wt := range worktrees {
+			registered[wt.Path] = true
+		}
+		sweepOrphanDirs(opts, tickets, registered, &res)
+	}
+
 	// Drop registrations whose directory is already gone.
 	if pruneOut, err := PruneWorktrees(opts.Repo, opts.DryRun); err != nil {
 		res.Errors = append(res.Errors, fmt.Sprintf("worktree prune: %v", err))
@@ -205,6 +232,64 @@ func Sweep(opts Options) (Result, error) {
 	}
 
 	return res, nil
+}
+
+// sweepOrphanDirs scans opts.PolecatsDir for orphaned polecat directories
+// and removes the eligible ones (see the phase 1b comment in Sweep).
+// Eligibility mirrors the worktree phase: never a live polecat, never an
+// in-flight or unclassifiable ticket. Removal is scoped strictly to
+// directories directly under PolecatsDir whose basename resolves to a
+// concluded work item; anything with a .git entry is still a linked
+// worktree and is left to the registered-worktree scan of its owning repo.
+func sweepOrphanDirs(opts Options, tickets TicketIndex, registered map[string]bool, res *Result) {
+	entries, err := os.ReadDir(opts.PolecatsDir)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			res.Errors = append(res.Errors, fmt.Sprintf("read polecats dir %s: %v", opts.PolecatsDir, err))
+		}
+		return
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		path := filepath.Join(opts.PolecatsDir, name)
+		// A dir that is a registered worktree, or still carries a .git
+		// pointer (possibly into a repo outside this sweep), is not an
+		// orphan — the registered-worktree scan owns it.
+		if registered[path] {
+			continue
+		}
+		if _, err := os.Lstat(filepath.Join(path, ".git")); err == nil {
+			continue
+		}
+		branch := BranchPrefix + name
+		if opts.LivePolecats[name] {
+			res.WorktreesKept = append(res.WorktreesKept, WorktreeAction{
+				Path: path, Branch: branch, Reason: "orphan dir, live polecat",
+			})
+			continue
+		}
+		_, state := tickets.BranchState(branch)
+		if !state.Concluded() {
+			res.WorktreesKept = append(res.WorktreesKept, WorktreeAction{
+				Path: path, Branch: branch, Reason: "orphan dir, ticket " + state.String(),
+			})
+			continue
+		}
+		action := WorktreeAction{Path: path, Branch: branch, Reason: "orphan dir, ticket " + state.String()}
+		if opts.DryRun {
+			opts.logf("would remove orphan dir %s (%s)", path, branch)
+		} else {
+			if err := os.RemoveAll(path); err != nil {
+				res.Errors = append(res.Errors, fmt.Sprintf("remove orphan dir %s: %v", path, err))
+				continue
+			}
+			opts.logf("removed orphan dir %s (%s)", path, branch)
+		}
+		res.WorktreesRemoved = append(res.WorktreesRemoved, action)
+	}
 }
 
 // Summary renders a human-readable multi-line report of a sweep result.
