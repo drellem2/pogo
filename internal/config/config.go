@@ -525,7 +525,7 @@ func loadConfigFile() (*parsedConfig, error) {
 		val := strings.TrimSpace(parts[1])
 
 		// Strip surrounding quotes from values
-		unquotedVal := strings.Trim(val, "\"")
+		unquotedVal := unquote(val)
 
 		switch currentSection {
 		case "server":
@@ -535,7 +535,7 @@ func loadConfigFile() (*parsedConfig, error) {
 					cfg.Port = port
 				}
 			case "bind":
-				cfg.Bind = val
+				cfg.Bind = unquotedVal
 			}
 		case "refinery":
 			switch key {
@@ -543,8 +543,7 @@ func loadConfigFile() (*parsedConfig, error) {
 				cfg.Refinery.Enabled = val == "true"
 				cfg.refineryEnabledSet = true
 			case "poll_interval":
-				val = strings.Trim(val, "\"")
-				if d, err := time.ParseDuration(val); err == nil {
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
 					cfg.Refinery.PollInterval = d
 				}
 			}
@@ -637,6 +636,22 @@ func loadConfigFile() (*parsedConfig, error) {
 	}
 
 	return cfg, scanner.Err()
+}
+
+// unquote strips one matched pair of surrounding TOML string quotes — basic
+// ("...") or literal ('...') — from val. Values without a matched pair are
+// returned unchanged, so a bare (technically invalid, but historically
+// accepted) value like `bind = 127.0.0.1` keeps working, and interior quotes
+// are never eaten. This is the regression from mg-a616: `bind = "127.0.0.1"`
+// used to keep its quotes and produce an unusable listen address.
+func unquote(val string) string {
+	if len(val) >= 2 {
+		first, last := val[0], val[len(val)-1]
+		if first == last && (first == '"' || first == '\'') {
+			return val[1 : len(val)-1]
+		}
+	}
+	return val
 }
 
 // parseStringArray parses a minimal single-line TOML string array,

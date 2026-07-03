@@ -567,6 +567,76 @@ bind = 0.0.0.0
 	}
 }
 
+// TestBindConfigFileQuoted is the mg-a616 regression: a valid-TOML quoted
+// bind value must not keep its surrounding quotes, which produced an
+// unusable listen address like `"127.0.0.1":8080`.
+func TestBindConfigFileQuoted(t *testing.T) {
+	dir := t.TempDir()
+	os.Setenv("XDG_CONFIG_HOME", dir)
+	defer os.Unsetenv("XDG_CONFIG_HOME")
+	os.Unsetenv("POGO_PORT")
+	os.Unsetenv("POGO_BIND")
+
+	pogoDir := filepath.Join(dir, "pogo")
+	os.MkdirAll(pogoDir, 0755)
+	os.WriteFile(filepath.Join(pogoDir, "config.toml"), []byte(`
+[server]
+port = 8080
+bind = "127.0.0.1"
+`), 0644)
+
+	cfg := Load()
+	if cfg.Bind != "127.0.0.1" {
+		t.Errorf("expected bind 127.0.0.1 from quoted config value, got %q", cfg.Bind)
+	}
+	if got := cfg.ListenAddr(); got != "127.0.0.1:8080" {
+		t.Errorf("expected 127.0.0.1:8080, got %s", got)
+	}
+}
+
+// TestBindConfigFileSingleQuoted covers TOML literal strings ('...'), which
+// the quote stripping must handle alongside basic strings ("...").
+func TestBindConfigFileSingleQuoted(t *testing.T) {
+	dir := t.TempDir()
+	os.Setenv("XDG_CONFIG_HOME", dir)
+	defer os.Unsetenv("XDG_CONFIG_HOME")
+	os.Unsetenv("POGO_PORT")
+	os.Unsetenv("POGO_BIND")
+
+	pogoDir := filepath.Join(dir, "pogo")
+	os.MkdirAll(pogoDir, 0755)
+	os.WriteFile(filepath.Join(pogoDir, "config.toml"), []byte(`
+[server]
+bind = '0.0.0.0'
+`), 0644)
+
+	cfg := Load()
+	if cfg.Bind != "0.0.0.0" {
+		t.Errorf("expected bind 0.0.0.0 from single-quoted config value, got %q", cfg.Bind)
+	}
+}
+
+func TestUnquote(t *testing.T) {
+	cases := []struct {
+		input string
+		want  string
+	}{
+		{`"127.0.0.1"`, "127.0.0.1"},
+		{`'127.0.0.1'`, "127.0.0.1"},
+		{`127.0.0.1`, "127.0.0.1"},       // bare value stays intact
+		{`""`, ""},                       // empty string
+		{`"`, `"`},                       // lone quote: no matched pair
+		{`"mismatched'`, `"mismatched'`}, // mismatched pair left alone
+		{`"a"b"`, `a"b`},                 // only the outer pair is stripped
+		{``, ``},
+	}
+	for _, c := range cases {
+		if got := unquote(c.input); got != c.want {
+			t.Errorf("unquote(%q) = %q, want %q", c.input, got, c.want)
+		}
+	}
+}
+
 func TestDefaultMaxFilesPerTree(t *testing.T) {
 	os.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	defer os.Unsetenv("XDG_CONFIG_HOME")
