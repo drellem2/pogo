@@ -16,7 +16,7 @@ Runs `pogo install`: the daemon starts under launchd (macOS) or systemd (Linux),
 
 `pogo init` scaffolds prompts only (`--minimal` for a bare skeleton); `--no-pogo-install` inspects `~/.pogo/` before anything is written.
 
-**Prerequisites:** an agent harness on PATH — [Claude Code](https://docs.anthropic.com/en/docs/claude-code) by default (`provider` selects another). Pass `--interactive` to wire up shell and editor integrations.
+**Prerequisites:** an agent harness on PATH — [Claude Code](https://docs.anthropic.com/en/docs/claude-code) by default (`provider` selects another) — and [macguffin](https://github.com/drellem2/macguffin) >= v0.1.3 (default prompts use `mg unclaim`, added in v0.1.3). Pass `--interactive` to wire up shell and editor integrations.
 
 Verify:
 

@@ -46,4 +46,4 @@ The test is also wrapped as a Go test, skipped by default so it doesn't slow
 POGO_RUN_E2E=1 go test ./internal/agent -run TestE2ESmoke -v -timeout 5m
 ```
 
-Requires `mg` (macguffin) on `$PATH`.
+Requires `mg` (macguffin) >= v0.1.3 on `$PATH`.
