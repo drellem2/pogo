@@ -235,13 +235,12 @@ func allProjects(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// clean normalizes an incoming visit path. It must not append a trailing
+// separator: the path may name a file, and lstat("/repo/file.go/") fails
+// with ENOTDIR (mg-88cc). project.Visit appends the separator to directory
+// paths where it needs one.
 func clean(path string) string {
-	// Append a trailing delimiter if it doesn't exist
-	p := filepath.Clean(path)
-	if p[len(p)-1] != filepath.Separator {
-		p += string(filepath.Separator)
-	}
-	return p
+	return filepath.Clean(path)
 }
 
 func file(w http.ResponseWriter, r *http.Request) {
