@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
+	"sync/atomic"
 
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/go-plugin"
@@ -31,6 +32,9 @@ type BasicSearch struct {
 	// over the ceiling is registered, marked skipped-too-large, and not
 	// deep-walked. 0 means unlimited. See mg-d205.
 	maxFilesPerTree int32
+	// carriedBytes tracks file content carried from hash walks to zoekt
+	// builds, bounded by carriedContentBudget (gh #39).
+	carriedBytes atomic.Int64
 	// onIndexed, when set, is invoked after every completed index pass with
 	// the project root and whether file content actually changed. The
 	// periodic indexer uses it to drive backoff-on-unchanged scheduling
