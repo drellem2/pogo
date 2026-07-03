@@ -196,6 +196,13 @@ type AgentsConfig struct {
 	// the active provider's CommandTemplate is used instead.
 	// Supports Go template variables: {{.PromptFile}}, {{.AgentName}}, {{.AgentType}}, {{.WorkDir}}
 	Command string
+	// ExtraPath lists directories to prepend to pogod's PATH — and therefore
+	// to every spawned child's PATH — beyond the automatic repair in
+	// internal/pathenv. Use it for harness runtimes in locations the daemon
+	// cannot discover on its own (e.g. a nonstandard Node install for pi; see
+	// gh #25). Set via [agents] extra_path or POGO_EXTRA_PATH
+	// (list-separator-joined, i.e. colon-separated on unix).
+	ExtraPath []string
 	// Crew overrides the command template for crew agents.
 	Crew AgentTypeConfig
 	// Polecat overrides the command template for polecat agents.
@@ -388,6 +395,11 @@ func Load() *Config {
 	// POGO_AGENT_PROVIDER overrides the [agents] provider from the config file.
 	if provider := os.Getenv("POGO_AGENT_PROVIDER"); provider != "" {
 		cfg.Agents.Provider = provider
+	}
+
+	// POGO_EXTRA_PATH overrides [agents] extra_path from the config file.
+	if extra := os.Getenv("POGO_EXTRA_PATH"); extra != "" {
+		cfg.Agents.ExtraPath = filepath.SplitList(extra)
 	}
 	// Default the provider so existing deployments work with no config change.
 	if cfg.Agents.Provider == "" {
@@ -604,6 +616,8 @@ func loadConfigFile() (*parsedConfig, error) {
 				cfg.Agents.Provider = unquotedVal
 			case "coordinator":
 				cfg.Agents.Coordinator = unquotedVal
+			case "extra_path":
+				cfg.Agents.ExtraPath = parseStringArray(val)
 			}
 		case "agents.crew":
 			switch key {
