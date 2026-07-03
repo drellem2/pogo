@@ -42,13 +42,33 @@ const defaultMaxAttempts = 7
 // best-effort and never propagates errors — see internal/events.Emit.
 //
 // Returns the captured gate output, a deploy error string (empty when no
-// deploy ran or it succeeded — populates MergeRequest.DeployError), and the
-// merge error (nil on success). Deploy failure does NOT cause processMerge
-// to return an error: the merge has already landed remotely.
-func (r *Refinery) processMerge(mr *MergeRequest) (string, string, error) {
+// deploy ran or it succeeded — populates MergeRequest.DeployError), whether
+// the branch was found already merged (see the guard below — populates
+// MergeRequest.AlreadyMerged), and the merge error (nil on success). Deploy
+// failure does NOT cause processMerge to return an error: the merge has
+// already landed remotely.
+func (r *Refinery) processMerge(mr *MergeRequest) (string, string, bool, error) {
 	wtDir, err := r.ensureWorktree(mr.RepoPath)
 	if err != nil {
-		return "", "", fmt.Errorf("worktree setup: %w", err)
+		return "", "", false, fmt.Errorf("worktree setup: %w", err)
+	}
+
+	// Already-merged guard (gh #34): a polecat whose poll loop lost track of
+	// its MR can re-submit a branch that already landed on the target. Probe
+	// before attempting: if the branch tip is an ancestor of origin/<target>,
+	// resolve as merged without re-running gates or pushing — a second merge
+	// cycle would be a wasteful no-op. The probe only recognizes tips that
+	// landed verbatim; a branch whose commits were rewritten by the rebase in
+	// a prior merge falls through to the normal pipeline, which no-ops safely.
+	// A probe error is not fatal here — the pipeline's own fetch/checkout
+	// surfaces the real problem with full retry/lost handling.
+	if merged, sha, probeErr := r.probeAlreadyMerged(mr); probeErr == nil && merged {
+		log.Printf("refinery: MR %s branch=%s already merged into origin/%s — resolving as merged without re-running gates (no-op)", mr.ID, mr.Branch, mr.TargetRef)
+		emitMerged(mr, 0, sha, 0, true)
+		gateOutput := fmt.Sprintf("(branch already merged into origin/%s — quality gates, push, and deploy skipped)", mr.TargetRef)
+		return gateOutput, "", true, nil
+	} else if probeErr != nil {
+		log.Printf("refinery: MR %s already-merged probe inconclusive (%v) — proceeding with merge", mr.ID, probeErr)
 	}
 
 	cfg := r.loadConfig(wtDir, mr.RepoPath)
@@ -71,7 +91,7 @@ func (r *Refinery) processMerge(mr *MergeRequest) (string, string, error) {
 		output, stage, sha, attemptErr := r.attemptMerge(wtDir, mr, attempt, skipGates)
 		gateOutput = output
 		if attemptErr == nil {
-			emitMerged(mr, attempt, sha, time.Since(startTime).Seconds())
+			emitMerged(mr, attempt, sha, time.Since(startTime).Seconds(), false)
 			// origin/<target> just advanced; refresh the checkout the MR
 			// was submitted from so it doesn't go stale (gh #30).
 			// Best-effort — logs and skips unless clean and on the target.
@@ -82,7 +102,7 @@ func (r *Refinery) processMerge(mr *MergeRequest) (string, string, error) {
 			// so they reflect the just-merged code. Failure is reported via
 			// DeployError + event but does not unwind the merge.
 			deployErr := r.runDeploy(wtDir, mr)
-			return gateOutput, deployErr, nil
+			return gateOutput, deployErr, false, nil
 		}
 
 		retryRemaining := attempt < maxAttempts && isRetryable(attemptErr)
@@ -92,11 +112,11 @@ func (r *Refinery) processMerge(mr *MergeRequest) (string, string, error) {
 			log.Printf("refinery: MR %s attempt %d failed (will retry): %v", mr.ID, attempt, attemptErr)
 			continue
 		}
-		return gateOutput, "", attemptErr
+		return gateOutput, "", false, attemptErr
 	}
 	finalErr := fmt.Errorf("merge failed after %d attempts", maxAttempts)
 	emitMergeFailed(mr, maxAttempts, "unknown", finalErr, true, gateOutput)
-	return gateOutput, "", finalErr
+	return gateOutput, "", false, finalErr
 }
 
 // attemptMerge runs a single fetch→rebase→gates→merge→push cycle. Returns

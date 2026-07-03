@@ -108,6 +108,11 @@ type MergeRequest struct {
 	DoneTime            time.Time `json:"done_time,omitempty"`
 	Error               string    `json:"error,omitempty"`
 	GateOutput          string    `json:"gate_output,omitempty"`
+	// AlreadyMerged marks an MR whose branch had already landed on the target
+	// before processing began (a re-submit of a merged branch, gh #34). The
+	// MR resolves as StatusMerged — so poll loops keying off status terminate
+	// normally — but gates, push, and deploy were skipped as no-ops.
+	AlreadyMerged bool `json:"already_merged,omitempty"`
 	// DeployError is set when a post-merge deploy hook ran and failed. The
 	// merge itself still succeeded (Status remains StatusMerged); deploy
 	// failure is surfaced for diagnostics, not rolled back. Empty when no
@@ -651,11 +656,12 @@ func (r *Refinery) processNext() {
 
 	log.Printf("refinery: processing MR %s branch=%s", mr.ID, mr.Branch)
 
-	gateOutput, deployErr, err := r.processMerge(mr)
+	gateOutput, deployErr, alreadyMerged, err := r.processMerge(mr)
 
 	r.mu.Lock()
 	mr.GateOutput = gateOutput
 	mr.DeployError = deployErr
+	mr.AlreadyMerged = alreadyMerged
 	mr.DoneTime = time.Now()
 	if err != nil {
 		mr.Status = StatusFailed
@@ -674,7 +680,11 @@ func (r *Refinery) processNext() {
 		if mr.Author != "" {
 			delete(r.failureCounts, mr.Author)
 		}
-		log.Printf("refinery: MR %s merged successfully branch=%s author=%s", mr.ID, mr.Branch, mr.Author)
+		if alreadyMerged {
+			log.Printf("refinery: MR %s resolved as already merged (no-op) branch=%s author=%s", mr.ID, mr.Branch, mr.Author)
+		} else {
+			log.Printf("refinery: MR %s merged successfully branch=%s author=%s", mr.ID, mr.Branch, mr.Author)
+		}
 	}
 	r.history = append(r.history, mr)
 	r.processing = nil

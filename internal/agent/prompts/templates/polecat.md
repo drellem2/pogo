@@ -114,6 +114,8 @@ Follow these steps exactly, in order. Skipping any step is a failure.
    ```
    Use a simple bash loop only. Adding more cron jobs or `pogo nudge` commands for polling interrupts interactive sessions — the mail-check schedule from step 2 is the only background trigger you should have running.
 
+   If your branch already landed on the target (e.g. you resubmitted after losing track of a merged MR), the refinery detects it and resolves the MR as `merged` immediately — without re-running gates or pushing — with `"already_merged": true` in the `--json` output. Treat it exactly like a normal `merged`: proceed to step 7, and do **not** submit the branch again.
+
    Two non-terminal outcomes need explicit handling — do NOT treat them as merge failures:
    - **`lost`** — the refinery lost this MR across a pogod restart (the branch is intact on origin). Resubmit **once** with the same step-5 command, capture the new MR ID, and go back to polling. If the resubmitted MR also comes back `lost`, stop resubmitting and mail the mayor instead.
    - **empty/`null` (not found)** — the MR ID is unknown to the refinery (or was pruned from history — the error text will say "pruned" if so). Do not spin on it and do not improvise: mail the mayor (`mg mail send mayor --from={{.Id}} --subject="refinery lost track of my MR" --body="MR <id> for branch polecat-{{.Id}}: refinery show returns not-found"`) and hold per step 8 — stay alive and wait for instructions.

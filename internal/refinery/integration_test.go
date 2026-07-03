@@ -132,6 +132,135 @@ func TestEndToEndMergeLoop(t *testing.T) {
 	}
 }
 
+// TestResubmitAlreadyMergedBranch reproduces the double-merge from gh #34: a
+// polecat loses track of its merged MR and re-submits the same branch. The
+// refinery must detect that the branch already landed on the target and
+// resolve the second MR as merged WITHOUT re-running gates or pushing — and
+// still fire OnMerged so the event-driven polecat stop (mg-ff34) happens.
+func TestResubmitAlreadyMergedBranch(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found")
+	}
+	logPath := useTempEventLog(t)
+
+	originDir := t.TempDir()
+	run(t, originDir, "git", "init", "--bare", "-b", "main")
+
+	workDir := t.TempDir()
+	run(t, workDir, "git", "clone", originDir, ".")
+	run(t, workDir, "git", "config", "user.email", "test@test.com")
+	run(t, workDir, "git", "config", "user.name", "Test")
+
+	// Gate script counts its runs in a file outside both repos, so we can
+	// assert the no-op resubmit did not re-run gates.
+	gateMarker := filepath.Join(t.TempDir(), "gate-runs")
+	gate := "#!/bin/sh\necho ran >> " + gateMarker + "\nexit 0\n"
+	os.WriteFile(filepath.Join(workDir, "build.sh"), []byte(gate), 0755)
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", "initial with counting gate")
+	run(t, workDir, "git", "push", "origin", "main")
+
+	run(t, workDir, "git", "checkout", "-b", "polecat-mg-dup")
+	os.WriteFile(filepath.Join(workDir, "feature.txt"), []byte("feature"), 0644)
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", "feat: feature (mg-dup)")
+	run(t, workDir, "git", "push", "origin", "polecat-mg-dup")
+
+	r, err := New(Config{
+		Enabled:      true,
+		PollInterval: time.Hour,
+		WorktreeDir:  t.TempDir(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mergedIDs []string
+	r.SetOnMerged(func(mr *MergeRequest) {
+		mergedIDs = append(mergedIDs, mr.ID)
+	})
+
+	submit := func() string {
+		t.Helper()
+		id, err := r.Submit(MergeRequest{
+			RepoPath:  originDir,
+			Branch:    "polecat-mg-dup",
+			TargetRef: "main",
+			Author:    "mg-dup",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+
+	// First cycle: normal merge.
+	firstID := submit()
+	r.processNext()
+	first := r.Get(firstID)
+	if first == nil || first.Status != StatusMerged {
+		t.Fatalf("first MR: expected merged, got %+v", first)
+	}
+	if first.AlreadyMerged {
+		t.Error("first MR should not be flagged already_merged")
+	}
+
+	mainSHA := gitOutput(t, workDir, "ls-remote", "origin", "main")
+
+	// Second cycle: the polecat re-submits the same (now merged) branch.
+	secondID := submit()
+	r.processNext()
+	second := r.Get(secondID)
+	if second == nil || second.Status != StatusMerged {
+		t.Fatalf("resubmitted MR: expected merged (terminal for poll loops), got %+v", second)
+	}
+	if !second.AlreadyMerged {
+		t.Error("resubmitted MR should be flagged already_merged")
+	}
+	if !strings.Contains(second.GateOutput, "already merged") {
+		t.Errorf("gate output should note the no-op, got %q", second.GateOutput)
+	}
+	if len(mergedIDs) != 2 || mergedIDs[1] != secondID {
+		t.Errorf("OnMerged should fire for the no-op resolution too (polecat stop), got %v", mergedIDs)
+	}
+
+	// Nothing new landed: target unchanged, gates ran exactly once.
+	if got := gitOutput(t, workDir, "ls-remote", "origin", "main"); got != mainSHA {
+		t.Errorf("origin/main moved on a no-op resubmit: %q -> %q", mainSHA, got)
+	}
+	if data, err := os.ReadFile(gateMarker); err != nil || strings.Count(string(data), "ran") != 1 {
+		t.Errorf("gates should run exactly once, marker = %q (err %v)", string(data), err)
+	}
+
+	// Event trail: one real attempt+merge, then a merged event flagged
+	// already_merged with no second attempt.
+	all := readEvents(t, logPath)
+	if got := len(filterEvents(all, "refinery_merge_attempted")); got != 1 {
+		t.Errorf("expected 1 refinery_merge_attempted, got %d", got)
+	}
+	merged := filterEvents(all, "refinery_merged")
+	if len(merged) != 2 {
+		t.Fatalf("expected 2 refinery_merged events, got %d", len(merged))
+	}
+	if flag, _ := merged[0].Details["already_merged"].(bool); flag {
+		t.Error("first refinery_merged should not carry already_merged")
+	}
+	if flag, _ := merged[1].Details["already_merged"].(bool); !flag {
+		t.Errorf("second refinery_merged should carry already_merged=true, details = %v", merged[1].Details)
+	}
+}
+
+// gitOutput runs a git command in dir and returns its trimmed stdout.
+func gitOutput(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %s: %v", args, out, err)
+	}
+	return strings.TrimSpace(string(out))
+}
+
 // TestEndToEndMergeRejection simulates a failed merge:
 // 1. Polecat creates a branch
 // 2. Refinery processes it but quality gate fails

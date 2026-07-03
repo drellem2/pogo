@@ -241,8 +241,9 @@ The refinery successfully merged a branch (gates passed, fast-forward push to ta
   - `branch` (string, required)
   - `target` (string, required)
   - `merge_commit` (string, required): SHA of the merge commit (or fast-forwarded HEAD)
-  - `attempt` (int, required): attempt number that succeeded
+  - `attempt` (int, required): attempt number that succeeded (`0` when no merge attempt ran: restart recovery found the merge already pushed, or the branch was already merged at processing time)
   - `duration_seconds` (number, optional): total time from `refinery_merge_attempted` (attempt 1) to merge
+  - `already_merged` (bool, optional): `true` when the branch had already landed on the target before processing began (a re-submitted branch, gh #34) — the MR resolved as merged without running gates or pushing, and no `refinery_merge_attempted` event precedes this one
 
 ```json
 {"schema_version":1,"timestamp":"2026-04-25T10:23:09.000000000Z","event_type":"refinery_merged","agent":"refinery","work_item_id":"mg-0241","repo":"/Users/daniel/dev/pogo","details":{"merge_request_id":"mr-9482","branch":"polecat-mg-0241","target":"main","merge_commit":"7f97c8b1a2b3c4d5","attempt":1,"duration_seconds":19.2}}
