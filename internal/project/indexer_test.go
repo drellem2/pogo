@@ -114,6 +114,15 @@ func TestDiscoverNewReposScansIndexRoots(t *testing.T) {
 		t.Fatalf("failed to create new repo: %v", err)
 	}
 
+	// Registration kicks off an async index pass that writes .pogo/search
+	// inside the repo, racing t.TempDir's RemoveAll if the test returns
+	// first (mg-6929). onIndexed fires only after every index write has
+	// finished — GetStatus reports StatusReady before the zoekt file is
+	// written, so waiting on status alone would leave the window open.
+	indexed := make(chan string, 4)
+	search.SearchService.SetOnIndexed(func(root string, _ bool) { indexed <- root })
+	defer search.SearchService.SetOnIndexed(nil)
+
 	numBefore := len(projects)
 	discoverNewRepos()
 
@@ -128,6 +137,20 @@ func TestDiscoverNewReposScansIndexRoots(t *testing.T) {
 	discoverNewRepos()
 	if len(projects) != numBefore+1 {
 		t.Errorf("discovery re-registered an already-known repo: %d projects", len(projects))
+	}
+
+	// Wait for the discovered repo's index pass to settle before returning.
+	newRoot := addSlashToPath(newRepo)
+	timeout := time.After(15 * time.Second)
+	for {
+		select {
+		case root := <-indexed:
+			if root == newRoot {
+				return
+			}
+		case <-timeout:
+			t.Fatalf("index pass for discovered repo did not settle: %s", newRoot)
+		}
 	}
 }
 
