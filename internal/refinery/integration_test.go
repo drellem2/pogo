@@ -1,6 +1,7 @@
 package refinery
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -789,5 +790,95 @@ func TestSubmitRefusesHTTPSRemoteWithoutCredentials(t *testing.T) {
 	// Raw git output must be preserved further down for debugging.
 	if !strings.Contains(msg, "git output:") {
 		t.Errorf("error should include 'git output:' section with raw stderr, got:\n%s", msg)
+	}
+}
+
+// TestSubmitWakesRunningLoop verifies that a Submit wakes the queue loop
+// immediately instead of waiting out the poll interval, and that multiple
+// submits drain back-to-back. The poll interval is one hour, so any pickup
+// within the test timeout proves the wake path (gh #36).
+func TestSubmitWakesRunningLoop(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found")
+	}
+
+	// Origin with a passing quality gate on main.
+	originDir := t.TempDir()
+	run(t, originDir, "git", "init", "--bare", "-b", "main")
+	workDir := t.TempDir()
+	run(t, workDir, "git", "clone", originDir, ".")
+	run(t, workDir, "git", "config", "user.email", "test@test.com")
+	run(t, workDir, "git", "config", "user.name", "Test")
+	os.WriteFile(filepath.Join(workDir, "build.sh"), []byte("#!/bin/sh\nexit 0\n"), 0755)
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", "initial commit")
+	run(t, workDir, "git", "push", "origin", "main")
+
+	// Two feature branches, each with its own file.
+	for _, name := range []string{"feature-a", "feature-b"} {
+		run(t, workDir, "git", "checkout", "-b", name, "main")
+		os.WriteFile(filepath.Join(workDir, name+".go"), []byte("package main\n"), 0644)
+		run(t, workDir, "git", "add", ".")
+		run(t, workDir, "git", "commit", "-m", "feat: "+name)
+		run(t, workDir, "git", "push", "origin", name)
+	}
+
+	r, err := New(Config{
+		Enabled:      true,
+		PollInterval: time.Hour, // pickup within the timeout proves the wake, not the tick
+		WorktreeDir:  t.TempDir(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	merged := make(chan string, 2)
+	r.SetOnMerged(func(mr *MergeRequest) {
+		merged <- mr.ID
+	})
+	r.SetOnFailed(func(mr *MergeRequest) {
+		t.Errorf("unexpected merge failure: %s: %s", mr.ID, mr.Error)
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	loopDone := make(chan struct{})
+	go func() {
+		r.Start(ctx)
+		close(loopDone)
+	}()
+	defer func() {
+		cancel()
+		<-loopDone
+	}()
+
+	// Let the loop pass its initial processNext and block in select.
+	time.Sleep(100 * time.Millisecond)
+
+	// Back-to-back submits: the first wake picks up feature-a; feature-b is
+	// drained by the loop's re-arm (wakeIfActionable), not a poll tick.
+	ids := make(map[string]bool)
+	for _, name := range []string{"feature-a", "feature-b"} {
+		id, err := r.Submit(MergeRequest{
+			RepoPath: originDir,
+			Branch:   name,
+			Author:   "cat-" + name,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids[id] = true
+	}
+
+	for i := 0; i < 2; i++ {
+		select {
+		case id := <-merged:
+			if !ids[id] {
+				t.Errorf("merged unknown MR %s", id)
+			}
+			delete(ids, id)
+		case <-time.After(60 * time.Second):
+			t.Fatalf("MR not merged before timeout — submit did not wake the loop (still waiting: %v)", ids)
+		}
 	}
 }

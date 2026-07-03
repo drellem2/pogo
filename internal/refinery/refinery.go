@@ -21,7 +21,9 @@ import (
 	"time"
 )
 
-// DefaultPollInterval is how often the refinery checks for new merge requests.
+// DefaultPollInterval is how often the refinery checks for new merge requests
+// when nothing wakes it sooner. Submit signals the loop directly, so the poll
+// is a backstop (held-MR retries, missed wakes), not the pickup latency.
 const DefaultPollInterval = 30 * time.Second
 
 // Default history limits.
@@ -164,6 +166,11 @@ type Refinery struct {
 	// Override in tests to control time.
 	nowFunc func() time.Time
 
+	// wakeCh wakes the queue loop ahead of the poll tick. Buffered with
+	// capacity 1 so signalling never blocks and concurrent signals collapse
+	// into a single wake.
+	wakeCh chan struct{}
+
 	cancel context.CancelFunc
 	done   chan struct{}
 }
@@ -194,6 +201,7 @@ func New(cfg Config) (*Refinery, error) {
 		failureCounts: make(map[string]int),
 		done:          make(chan struct{}),
 		nowFunc:       time.Now,
+		wakeCh:        make(chan struct{}, 1),
 	}
 	if cfg.StatePath != "" {
 		r.store = &store{path: cfg.StatePath}
@@ -384,6 +392,9 @@ func (r *Refinery) Submit(req MergeRequest) (string, error) {
 
 	log.Printf("refinery: queued MR %s branch=%s repo=%s author=%s", req.ID, req.Branch, req.RepoPath, req.Author)
 
+	// Wake the queue loop so pickup doesn't wait out the poll interval.
+	r.wake()
+
 	// Fire OnSubmit callback outside the lock. pogod uses this to unlink
 	// the polecat's worktree so the branch is no longer "checked out".
 	if onSubmit != nil {
@@ -393,6 +404,33 @@ func (r *Refinery) Submit(req MergeRequest) (string, error) {
 	}
 
 	return req.ID, nil
+}
+
+// wake signals the queue loop to run immediately instead of waiting for the
+// next poll tick. Non-blocking: if a wake is already pending it is a no-op.
+func (r *Refinery) wake() {
+	select {
+	case r.wakeCh <- struct{}{}:
+	default:
+	}
+}
+
+// wakeIfActionable signals the queue loop when the queue still holds an item
+// worth processing now. Held MRs (waiting on a QA gate) don't count — waking
+// for those would busy-loop the gate check; they retry on the poll tick.
+func (r *Refinery) wakeIfActionable() {
+	r.mu.Lock()
+	actionable := false
+	for _, mr := range r.queue {
+		if mr.Status != StatusHeld {
+			actionable = true
+			break
+		}
+	}
+	r.mu.Unlock()
+	if actionable {
+		r.wake()
+	}
 }
 
 // validateTargetRef checks that the target ref exists in the repo's remote.
@@ -510,6 +548,11 @@ func (r *Refinery) Start(ctx context.Context) {
 		r.processNext()
 		r.pruneHistory()
 
+		// Several submits can land while one MR is processing; their wakes
+		// collapse into a single buffered signal. Re-arm it here so the loop
+		// drains the queue back-to-back instead of one item per tick.
+		r.wakeIfActionable()
+
 		select {
 		case <-ctx.Done():
 			log.Printf("refinery: stopped")
@@ -517,6 +560,8 @@ func (r *Refinery) Start(ctx context.Context) {
 			return
 		case <-ticker.C:
 			// next iteration
+		case <-r.wakeCh:
+			// submitted (or still-queued) work — next iteration now
 		}
 	}
 }

@@ -248,7 +248,7 @@ The refinery is rigless. It doesn't resolve project references or care how many 
 ```
 
 ```
-loop (every poll_interval):
+loop (woken by submit, or every poll_interval as backstop):
   items = mg list --status=available --tag=merge-ready
   for each item:
     branch = item.metadata.branch

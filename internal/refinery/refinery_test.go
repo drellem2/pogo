@@ -818,6 +818,88 @@ func TestRefineryStartStop(t *testing.T) {
 	}
 }
 
+func TestSubmitSignalsWake(t *testing.T) {
+	originDir := initBareOrigin(t, "main")
+	r, err := New(Config{
+		Enabled:      true,
+		PollInterval: time.Hour,
+		WorktreeDir:  t.TempDir(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := r.Submit(MergeRequest{
+		RepoPath: originDir,
+		Branch:   "feature-1",
+		Author:   "cat-abc",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-r.wakeCh:
+		// OK — Submit left a wake pending for the loop.
+	default:
+		t.Fatal("expected a pending wake signal after Submit")
+	}
+
+	// Concurrent signals collapse: two more wakes leave exactly one pending.
+	r.wake()
+	r.wake()
+	select {
+	case <-r.wakeCh:
+	default:
+		t.Fatal("expected a pending wake signal")
+	}
+	select {
+	case <-r.wakeCh:
+		t.Fatal("wake signals should collapse into one")
+	default:
+	}
+}
+
+func TestWakeIfActionableSkipsHeld(t *testing.T) {
+	r, err := New(Config{
+		Enabled:      true,
+		PollInterval: time.Hour,
+		WorktreeDir:  t.TempDir(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Empty queue: no wake.
+	r.wakeIfActionable()
+	select {
+	case <-r.wakeCh:
+		t.Fatal("empty queue must not signal a wake")
+	default:
+	}
+
+	// Held-only queue: no wake — waking would busy-loop the QA gate check.
+	r.mu.Lock()
+	r.queue = append(r.queue, &MergeRequest{ID: "held-1", Status: StatusHeld})
+	r.mu.Unlock()
+	r.wakeIfActionable()
+	select {
+	case <-r.wakeCh:
+		t.Fatal("held-only queue must not signal a wake")
+	default:
+	}
+
+	// A queued item behind the held one: wake.
+	r.mu.Lock()
+	r.queue = append(r.queue, &MergeRequest{ID: "queued-1", Status: StatusQueued})
+	r.mu.Unlock()
+	r.wakeIfActionable()
+	select {
+	case <-r.wakeCh:
+	default:
+		t.Fatal("expected a wake for the queued item")
+	}
+}
+
 func TestHistoryPruneByCount(t *testing.T) {
 	dir := t.TempDir()
 	r, err := New(Config{
