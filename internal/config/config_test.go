@@ -861,3 +861,53 @@ func TestCoordinatorNameZeroValue(t *testing.T) {
 		t.Errorf("nil CoordinatorName() = %q, want %q", got, DefaultCoordinator)
 	}
 }
+
+func TestExtraPathDefaultEmpty(t *testing.T) {
+	os.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	defer os.Unsetenv("XDG_CONFIG_HOME")
+
+	cfg := Load()
+	if len(cfg.Agents.ExtraPath) != 0 {
+		t.Errorf("extra_path should default empty, got %v", cfg.Agents.ExtraPath)
+	}
+}
+
+func TestExtraPathConfigFile(t *testing.T) {
+	dir := t.TempDir()
+	os.Setenv("XDG_CONFIG_HOME", dir)
+	defer os.Unsetenv("XDG_CONFIG_HOME")
+
+	pogoDir := filepath.Join(dir, "pogo")
+	os.MkdirAll(pogoDir, 0755)
+	os.WriteFile(filepath.Join(pogoDir, "config.toml"), []byte(`
+[agents]
+extra_path = ["~/.nvm/versions/node/v22.1.0/bin", "/opt/node/bin"]
+`), 0644)
+
+	cfg := Load()
+	want := []string{"~/.nvm/versions/node/v22.1.0/bin", "/opt/node/bin"}
+	if len(cfg.Agents.ExtraPath) != 2 || cfg.Agents.ExtraPath[0] != want[0] || cfg.Agents.ExtraPath[1] != want[1] {
+		t.Errorf("extra_path = %v, want %v", cfg.Agents.ExtraPath, want)
+	}
+}
+
+func TestExtraPathEnvOverride(t *testing.T) {
+	dir := t.TempDir()
+	os.Setenv("XDG_CONFIG_HOME", dir)
+	defer os.Unsetenv("XDG_CONFIG_HOME")
+
+	pogoDir := filepath.Join(dir, "pogo")
+	os.MkdirAll(pogoDir, 0755)
+	os.WriteFile(filepath.Join(pogoDir, "config.toml"), []byte(`
+[agents]
+extra_path = ["/from/file/bin"]
+`), 0644)
+
+	os.Setenv("POGO_EXTRA_PATH", "/from/env/bin:/from/env/other")
+	defer os.Unsetenv("POGO_EXTRA_PATH")
+
+	cfg := Load()
+	if len(cfg.Agents.ExtraPath) != 2 || cfg.Agents.ExtraPath[0] != "/from/env/bin" || cfg.Agents.ExtraPath[1] != "/from/env/other" {
+		t.Errorf("extra_path = %v, want env override [/from/env/bin /from/env/other]", cfg.Agents.ExtraPath)
+	}
+}

@@ -496,6 +496,13 @@ func main() {
 	// Load config early so we can use it for agent command setup
 	cfg := config.Load()
 
+	// Second, config-aware PATH repair pass: [agents] extra_path lets a
+	// deployment point pogod at harness runtimes the automatic probe in
+	// pathenv.Ensure misses (gh #25). Runs before any agent spawns.
+	if err := pathenv.EnsureExtra(cfg.Agents.ExtraPath); err != nil {
+		fmt.Printf("Warning: could not apply [agents] extra_path: %v\n", err)
+	}
+
 	// Apply index-scope limits from config (mg-d205).
 	search.SearchService.SetMaxFilesPerTree(cfg.MaxFilesPerTree)
 	project.SetIndexRoots(cfg.IndexRoots)

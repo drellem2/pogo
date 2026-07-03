@@ -44,6 +44,24 @@ so user prompts containing other `{{` sequences are untouched. Two things stay
 fixed regardless of the name: the prompt file path `~/.pogo/agents/mayor.md`,
 and the `"mayor"` category label in `pogo agent prompt list --json`.
 
+## Agent PATH (extra_path)
+
+Under launchd/systemd pogod inherits a minimal PATH, so spawned harnesses must
+resolve from what `internal/pathenv` repairs at startup: the pogod binary's own
+directory, the inherited PATH, discovered per-user toolchain dirs (`~/.local/bin`,
+every installed nvm Node version's bin — newest first, the npm global prefix
+from `~/.npmrc`, `~/.npm-global/bin`, `~/.volta/bin`), then system fallbacks. If a harness
+runtime lives somewhere the probe can't find (gh #25 — pi under an exotic Node
+install), add it explicitly:
+
+```toml
+[agents]
+extra_path = ["~/my-node/bin", "/opt/tools/bin"]   # prepended to pogod's PATH
+```
+
+`POGO_EXTRA_PATH` (colon-separated) overrides the file setting. Entries support
+`~` and `$HOME` expansion and win over every discovered location.
+
 ## Scheduler
 
 `pogo schedule` registers recurring (`--cron`) or one-shot (`--once --in N`)
