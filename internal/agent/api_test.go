@@ -572,6 +572,56 @@ func TestHandleSpawnPolecat_FallbackNudge(t *testing.T) {
 	}
 }
 
+// TestHandleSpawnPolecat_FailureCleansUpBranch verifies that a spawn failing
+// after worktree creation deletes the polecat-<name> branch along with the
+// worktree, so a retry with the same name is not blocked by "branch already
+// exists" (gh #27). The failure is triggered via an unparseable
+// nudge_on_start template, which errors after the worktree/branch exist.
+func TestHandleSpawnPolecat_FailureCleansUpBranch(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	workDir, _ := makeRepoWithOrigin(t)
+
+	writeTemplate(t, "retrypc", "+++\nnudge_on_start = \"{{.Bogus\"\n+++\n# polecat\n")
+
+	reg, err := NewRegistry(filepath.Join(tmpHome, "sockets"))
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	defer reg.StopAll(2 * time.Second)
+	reg.SetCommandConfig(catCommandConfig{})
+
+	spawnReq := SpawnPolecatAPIRequest{
+		Name:     "pc-retry",
+		Template: "retrypc",
+		Repo:     workDir,
+		Id:       "wi-retry",
+	}
+	body, _ := json.Marshal(spawnReq)
+	req := httptest.NewRequest("POST", "/agents/spawn-polecat", bytes.NewReader(body))
+	rr := httptest.NewRecorder()
+	reg.handleSpawnPolecat(rr, req)
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("first spawn status = %d, want 500, body=%s", rr.Code, rr.Body.String())
+	}
+
+	expectedWorktree := filepath.Join(tmpHome, ".pogo", "polecats", "pc-retry")
+	if _, err := os.Stat(expectedWorktree); err == nil {
+		t.Errorf("worktree dir %s should have been removed", expectedWorktree)
+	}
+	if exec.Command("git", "-C", workDir, "rev-parse", "--verify", "polecat-pc-retry").Run() == nil {
+		t.Errorf("branch polecat-pc-retry should have been deleted after failed spawn")
+	}
+
+	// Retry with the same name after fixing the template must succeed.
+	writeTemplate(t, "retrypc", "# polecat\n")
+	a := spawnPolecatViaAPI(t, reg, spawnReq)
+	if a.WorktreeDir != expectedWorktree {
+		t.Errorf("retry WorktreeDir = %q, want %q", a.WorktreeDir, expectedWorktree)
+	}
+}
+
 // TestHandleSpawnPolecat_WorktreeFalseSkipsCreation verifies that
 // worktree=false in the template's frontmatter prevents worktree creation
 // even when a Repo is supplied.
