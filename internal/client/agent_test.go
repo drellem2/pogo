@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os/exec"
 	"strings"
 	"testing"
 
@@ -151,5 +152,36 @@ func TestSpawnPolecat_TemplateNotFound(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "restart pogod") {
 		t.Errorf("must NOT suggest rebuilding pogod for a meaningful 404 body, got: %v", err)
+	}
+}
+
+// TestCompleteMGWorkItem_BuildsMGDoneCommand verifies the mg done invocation
+// pogod's OnMerged reap issues on a merged polecat's behalf (gh #35):
+// `mg done <id> --result=<json>`, with the --result flag omitted when no
+// sidecar is given.
+func TestCompleteMGWorkItem_BuildsMGDoneCommand(t *testing.T) {
+	var got []string
+	old := execCommand
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		got = append([]string{name}, args...)
+		// Run a no-op so CombinedOutput succeeds.
+		return exec.Command("true")
+	}
+	t.Cleanup(func() { execCommand = old })
+
+	if err := CompleteMGWorkItem("mg-1234", `{"branch":"polecat-mg-1234"}`); err != nil {
+		t.Fatalf("CompleteMGWorkItem: %v", err)
+	}
+	want := []string{"mg", "done", "mg-1234", `--result={"branch":"polecat-mg-1234"}`}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Errorf("command = %v, want %v", got, want)
+	}
+
+	if err := CompleteMGWorkItem("mg-1234", ""); err != nil {
+		t.Fatalf("CompleteMGWorkItem (no result): %v", err)
+	}
+	want = []string{"mg", "done", "mg-1234"}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Errorf("command (no result) = %v, want %v", got, want)
 	}
 }

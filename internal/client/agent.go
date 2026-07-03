@@ -299,6 +299,26 @@ func ReopenMGWorkItem(id string) error {
 	return nil
 }
 
+// CompleteMGWorkItem calls mg done to move a claimed work item to done/,
+// recording the result JSON as a sidecar. pogod's OnMerged hook uses this to
+// record completion on a merged polecat's behalf before stopping it (gh #35):
+// a polecat stopped at merge time never sees the merged status, so it never
+// gets to run mg done itself. An "already done" error just means the polecat
+// won the race — callers should log and move on.
+func CompleteMGWorkItem(id, resultJSON string) error {
+	args := []string{"done", id}
+	if resultJSON != "" {
+		args = append(args, "--result="+resultJSON)
+	}
+	cmd := execCommand("mg", args...)
+	cmd.Stderr = nil
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("mg done failed: %s (%w)", strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
 // execCommand is a variable for testability.
 var execCommand = execCommandFunc
 

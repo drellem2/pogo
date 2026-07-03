@@ -97,7 +97,9 @@ Follow these steps exactly, in order. Skipping any step is a failure.
    pogo refinery submit polecat-{{.Id}} --repo={{.Repo}} --author={{.Id}} --target={{if .Branch}}{{.Branch}}{{else}}main{{end}}
    ```
 
-6. **Wait for merge result** — poll refinery using a bash while-loop:
+6. **Wait for merge result** — poll refinery using a bash while-loop.
+
+   **Note:** on a successful merge, pogod stops you the moment the merge lands (event-driven, gh #35) — it marks your work item done on your behalf, so being terminated mid-poll after a merge is the normal happy path, not an error. Steps 7–8 below only apply if you outlive the merge (e.g. pogod restarted mid-merge).
    ```bash
    # Poll in a bash loop — do NOT add another cron, scheduled task, or pogo nudge for this.
    # The mail-check cron from step 2 is the only background trigger you should have.
@@ -120,6 +122,8 @@ Follow these steps exactly, in order. Skipping any step is a failure.
    ```bash
    mg done {{.Id}} --result='{"branch": "polecat-{{.Id}}"}'
    ```
+   pogod usually beats you to this (see step 6 note). If `mg done` fails because the item is already done, that is success — do not retry or escalate.
+
    **If failed:** mail the {{.Coordinator}} with failure details. Do NOT call `mg done`.
    ```bash
    mg mail send {{.Coordinator}} --from={{.Id}} --subject="merge failed for {{.Id}}" --body="<failure details from refinery>"

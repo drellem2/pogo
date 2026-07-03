@@ -756,10 +756,17 @@ func main() {
 			mergeQueue.SetOnMerged(func(mr *refinery.MergeRequest) {
 				log.Printf("refinery: merged %s (branch=%s, author=%s)", mr.ID, mr.Branch, mr.Author)
 
-				// Mail the coordinator so it can stop the polecat and archive
-				// the work item. We used to auto-archive here, but the
-				// mayor needs to see the done/ item before it gets archived
-				// so it can run cleanup (stop polecat, handle QA, etc.).
+				// Event-driven polecat stop (gh #35): mark the work item
+				// done and stop the merged polecat now instead of waiting
+				// for the mayor's next coordination cycle. Run async — the
+				// stop can block up to its SIGTERM timeout and this
+				// callback fires on the refinery loop.
+				go reapMergedPolecat(agentRegistry, mr, client.CompleteMGWorkItem)
+
+				// Mail the coordinator so it can archive the work item and
+				// handle QA. The mayor's reap loop stays as a backstop for
+				// polecats the event-driven stop above misses (e.g. a merge
+				// resolved while pogod was down).
 				subject := fmt.Sprintf("MERGED: %s (branch=%s)", mr.ID, mr.Branch)
 				body := fmt.Sprintf("Merge request %s succeeded.\nBranch: %s\nAuthor: %s", mr.ID, mr.Branch, mr.Author)
 				// Surface deploy failures to the mayor so the runtime gap (merged

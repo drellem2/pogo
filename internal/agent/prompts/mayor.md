@@ -168,19 +168,20 @@ pogo agent list
 ```
 
 Look for:
-- **Completed polecats**: The refinery mails you when a merge succeeds (subject starts with `MERGED:`). When you receive a merge-success mail:
-  1. Stop the polecat that submitted the merge:
+- **Completed polecats**: The refinery mails you when a merge succeeds (subject starts with `MERGED:`). pogod stops the merged polecat, marks its work item done, and reaps its mail-check schedule **automatically at merge time** (event-driven, gh #35) — you normally only need to:
+  1. Archive the work item:
+     ```bash
+     mg archive --days=0
+     ```
+  You are the **backstop** for polecats the event-driven stop missed (e.g. the merge resolved while pogod was restarting). If `pogo agent list` still shows the polecat after a merge-success mail:
+  1. Stop it:
      ```bash
      pogo agent stop <name>
      ```
-  2. Remove its mail-check schedule from pogod (registered by the polecat in its step 2; pogod does not auto-GC schedules when an agent is stopped). Log the removal to your sweep.log before invoking `rm` so the cleanup decision is auditable (mg-8e5d cleanup-overextension investigation):
+  2. Remove its mail-check schedule from pogod (pogod reaps it automatically when it stops an agent, but not if the schedule outlived the agent some other way). Log the removal to your sweep.log before invoking `rm` so the cleanup decision is auditable (mg-8e5d cleanup-overextension investigation):
      ```bash
      echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] {{.Coordinator}} pogo schedule rm mail-check-<work-item-id> --agent <name> (cleanup-reason: done)" >> ~/.pogo/agents/{{.Coordinator}}/sweep.log
      pogo schedule rm mail-check-<work-item-id>
-     ```
-  3. Archive the work item:
-     ```bash
-     mg archive --days=0
      ```
   As a fallback, also check `mg list --status=done` for items whose polecats have already exited — these may have been missed if mail delivery lagged. Same cleanup ordering applies (stop, schedule rm, archive).
 
@@ -324,7 +325,7 @@ Your inbox is for **coordination only**. If you have something for the user, sen
 
 Agents and the refinery mail you when things need attention:
 
-- **Refinery merges** (subject: `MERGED: ...`): The refinery sends mail when a merge succeeds. This is your signal to stop the polecat and archive the work item (see step 3 above). Handle QA if applicable (step 4).
+- **Refinery merges** (subject: `MERGED: ...`): The refinery sends mail when a merge succeeds. pogod already stopped the polecat and marked the item done at merge time (gh #35); archive the work item and verify the polecat is actually gone (see step 3 above). Handle QA if applicable (step 4).
 - **Refinery failures** (subject: `MERGE FAILED: ...`): The refinery sends mail when a merge fails quality gates. Read the failure details, check if the polecat's branch has obvious issues (test failures, build errors). You can re-dispatch the work item to a new polecat with context about what went wrong:
   ```bash
   mg mail send <new-polecat> --from={{.Coordinator}} --subject="retry: <task>" --body="Previous attempt failed: <error>. Try a different approach."
