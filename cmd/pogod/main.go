@@ -888,10 +888,13 @@ func main() {
 	}()
 
 	// Start the timer-driven incremental indexer: every index_interval it
-	// re-walks every registered project (incrementally — unchanged files cost
-	// only an Lstat) and scans index_roots for new repos. This replaces the
-	// event-based filesystem watcher. See docs/design/indexing-strategy.md and
-	// mg-5b0d.
+	// scans index_roots for new repos and re-walks the registered projects
+	// that are due. Per-project exponential backoff skips projects whose
+	// content hasn't changed (up to 16× the base interval); a detected change
+	// or a `pogo visit` resets a project to base cadence (mg-1236). The walk
+	// itself is incremental — unchanged files cost only an Lstat. This
+	// replaces the event-based filesystem watcher. See
+	// docs/design/indexing-strategy.md and mg-5b0d.
 	project.StartPeriodicIndexer(hbCtx, cfg.IndexInterval)
 
 	// Refresh installed prompts from the embedded source before auto-starting

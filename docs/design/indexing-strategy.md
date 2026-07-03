@@ -128,3 +128,32 @@ fix must be filed.
   into it (the watch half; the scope-control half is retained by design).
 - On Daniel's go-ahead: architect unshelves mg-5b0d, tags it dispatchable,
   and notifies mayor.
+
+## Addendum (mg-1236, 2026-07-03) — backoff-on-unchanged + two premise bugs
+
+gh #39 measured the shipped design's live cost: every registered project was
+re-walked every 2m, a steady tax on big idle trees (mathlib, 8.5k files).
+Investigation found the "no-change tick costs one Lstat per file" premise
+above was NOT true as shipped, for two reasons, both fixed by mg-1236:
+
+1. **The root re-index wiped its own cache.** `ReIndex` pruned stale entries
+   by deleting from the only copy of the hash/mtime maps; for a project-root
+   re-index the prune prefix is `""`, so the entire cache was emptied and
+   every tick re-read and re-hashed every file — option B's cost, not
+   option C's. The pre-walk cache is now snapshotted and handed to the walk,
+   so an unchanged file costs one Lstat as designed.
+2. **Change detection compared the new index against itself.** The write
+   goroutine stored the new state into the projects map before
+   `serializeProjectIndex` read its "previous" state from that same map, so
+   content always compared "unchanged" and the zoekt rebuild was skipped
+   forever — new content never became searchable until the search dir was
+   deleted. The previous entry is now captured before the store.
+
+On top of the (now real) incremental walk, the periodic indexer gained
+per-project exponential backoff: each pass that finds no content change
+doubles that project's interval (capped at 16× `index_interval`, so 32m at
+the default 2m), and a detected change or a `pogo visit` — fired by the
+shell/editor integrations on every cd — snaps it back to base. Active repos
+keep one-interval freshness; idle repos converge to one cheap Lstat-walk per
+32m. The worst case staleness (repo changed by something that never visits,
+e.g. a cron git fetch) is the 16× cap.

@@ -31,6 +31,31 @@ type BasicSearch struct {
 	// over the ceiling is registered, marked skipped-too-large, and not
 	// deep-walked. 0 means unlimited. See mg-d205.
 	maxFilesPerTree int32
+	// onIndexed, when set, is invoked after every completed index pass with
+	// the project root and whether file content actually changed. The
+	// periodic indexer uses it to drive backoff-on-unchanged scheduling
+	// (mg-1236). Guarded by onIndexedMu; invoked from the write goroutine.
+	onIndexedMu sync.RWMutex
+	onIndexed   func(root string, contentChanged bool)
+}
+
+// SetOnIndexed registers a callback invoked after each completed index pass
+// (initial index, load, or re-index) with the project root and whether file
+// content changed relative to the previous pass. Passing nil clears it.
+func (g *BasicSearch) SetOnIndexed(fn func(root string, contentChanged bool)) {
+	g.onIndexedMu.Lock()
+	g.onIndexed = fn
+	g.onIndexedMu.Unlock()
+}
+
+// notifyIndexed invokes the registered onIndexed callback, if any.
+func (g *BasicSearch) notifyIndexed(root string, contentChanged bool) {
+	g.onIndexedMu.RLock()
+	fn := g.onIndexed
+	g.onIndexedMu.RUnlock()
+	if fn != nil {
+		fn(root, contentChanged)
+	}
 }
 
 // Input to an "Execute" call should be a serialized SearchRequest

@@ -72,9 +72,15 @@ func TestPeriodicReindexPicksUpNewFile(t *testing.T) {
 	}
 
 	// Start the periodic indexer with a short interval so the test is fast.
+	// Wait for the indexer goroutine to fully exit on teardown: a mid-tick
+	// goroutine surviving into the next test races with its Init() /
+	// SetIndexRoots() writes to package globals.
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	StartPeriodicIndexer(ctx, 100*time.Millisecond)
+	done := StartPeriodicIndexer(ctx, 100*time.Millisecond)
+	defer func() {
+		cancel()
+		<-done
+	}()
 
 	// Within a few ticks the new file must be reflected in the index.
 	deadline := time.Now().Add(10 * time.Second)

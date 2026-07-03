@@ -156,10 +156,18 @@ func (g *BasicSearch) write(u *ProjectUpdater) {
 		func() {
 			select {
 			case proj := <-u.c:
+				// Capture the previous entry under the same lock as the store:
+				// serializeProjectIndex compares against it to decide whether
+				// file content actually changed. Reading the map after the
+				// store would compare the new index against itself and always
+				// report "unchanged" — which skipped every zoekt rebuild and
+				// pinned search results to the first build (mg-1236).
 				g.mu.Lock()
+				prev, prevKnown := g.projects[proj.Root]
 				g.projects[proj.Root] = *proj
 				g.mu.Unlock()
-				g.serializeProjectIndex(proj)
+				changed := g.serializeProjectIndex(proj, &prev, prevKnown)
+				g.notifyIndexed(proj.Root, changed)
 			case <-u.quit:
 				u.closed = true
 			}
@@ -328,15 +336,31 @@ func (g *BasicSearch) ReIndex(path string) {
 		if hasExcludedComponent(relativePath) {
 			return
 		}
+
+		// Keep the pre-walk hash/mtime cache aside and hand it to index() as
+		// the previous state: indexRec reuses a cached hash whenever a file's
+		// mtime is unchanged, so an unchanged file costs one Lstat instead of
+		// a full read+hash. The pruned maps rebuilt below must be separate
+		// objects — before mg-1236 the prune deleted from the only copy, which
+		// for a project-root reindex (relativePath == "") emptied the cache
+		// and silently turned every periodic tick into a full re-read of
+		// every file in the tree.
+		prevHashes := indexed.FileHashes
+		prevMtimes := indexed.FileMtimes
+		indexed.FileHashes = make(map[string]string, len(prevHashes))
+		indexed.FileMtimes = make(map[string]int64, len(prevMtimes))
 		paths := indexed.Paths
 		paths2 := paths
 		paths = paths[:0]
 		for _, p := range paths2 {
 			if !strings.HasPrefix(p, relativePath) {
 				paths = append(paths, p)
-			} else {
-				delete(indexed.FileHashes, p)
-				delete(indexed.FileMtimes, p)
+				if h, ok := prevHashes[p]; ok {
+					indexed.FileHashes[p] = h
+				}
+				if m, ok := prevMtimes[p]; ok {
+					indexed.FileMtimes[p] = m
+				}
 			}
 		}
 		indexed.Paths = paths
@@ -345,7 +369,7 @@ func (g *BasicSearch) ReIndex(path string) {
 		if err != nil {
 			g.logger.Error("Error parsing gitignore %v", err)
 		}
-		g.index(&indexed, fullPath, gitIgnore, indexed.FileHashes, indexed.FileMtimes)
+		g.index(&indexed, fullPath, gitIgnore, prevHashes, prevMtimes)
 	}()
 }
 
@@ -448,8 +472,18 @@ func (g *BasicSearch) Index(req *pogoPlugin.IProcessProjectReq) {
 		FileMtimes: make(map[string]int64),
 		Status:     StatusIndexing,
 	}
+	// The in-progress placeholder gets its own maps: storing proj itself
+	// would alias the maps the walk below mutates, and write()'s prev-capture
+	// would then compare the finished index against itself and always report
+	// "unchanged" (mg-1236).
 	g.mu.Lock()
-	g.projects[path] = proj
+	g.projects[path] = IndexedProject{
+		Root:       path,
+		Paths:      make([]string, 0),
+		FileHashes: make(map[string]string),
+		FileMtimes: make(map[string]int64),
+		Status:     StatusIndexing,
+	}
 	g.mu.Unlock()
 	gitIgnore, err := ParseGitIgnore(path)
 	if err != nil {
@@ -459,12 +493,18 @@ func (g *BasicSearch) Index(req *pogoPlugin.IProcessProjectReq) {
 	g.index(&proj, path, gitIgnore, prevHashes, prevMtimes)
 }
 
-// Here is the method where we extract the code above
-func (g *BasicSearch) serializeProjectIndex(proj *IndexedProject) {
+// serializeProjectIndex persists the index save file, rebuilds the zoekt
+// index when content changed (or its file is missing), and reports whether
+// file content actually changed relative to prev — the map entry that was in
+// place before this pass, captured by write(). The returned signal drives the
+// periodic indexer's backoff-on-unchanged scheduling (mg-1236).
+func (g *BasicSearch) serializeProjectIndex(proj *IndexedProject, prev *IndexedProject, prevKnown bool) bool {
 	searchDir, err := proj.makeSearchDir()
 	if err != nil {
 		g.logger.Error("Error making search dir: ", err)
-		return
+		// Conservative: an errored pass reports "changed" so the periodic
+		// indexer retries at base cadence instead of backing off.
+		return true
 	}
 	saveFilePath := filepath.Join(searchDir, saveFileName)
 	outBytes, err2 := json.Marshal(proj)
@@ -475,15 +515,13 @@ func (g *BasicSearch) serializeProjectIndex(proj *IndexedProject) {
 	if err3 != nil {
 		g.logger.Error("Error saving index", "save_path", saveFilePath)
 	}
-	// Check if file content actually changed by comparing hashes with previous index.
-	// If nothing changed and the zoekt index file exists, skip the expensive rebuild.
-	g.mu.RLock()
-	oldProj, exists := g.projects[proj.Root]
-	g.mu.RUnlock()
-	contentChanged := !exists || len(oldProj.FileHashes) != len(proj.FileHashes)
-	if !contentChanged && oldProj.FileHashes != nil {
+	// Check if file content actually changed by comparing hashes with the
+	// previous index. If nothing changed and the zoekt index file exists,
+	// skip the expensive rebuild.
+	contentChanged := !prevKnown || len(prev.FileHashes) != len(proj.FileHashes)
+	if !contentChanged && prev.FileHashes != nil {
 		for path, hash := range proj.FileHashes {
-			if oldHash, ok := oldProj.FileHashes[path]; !ok || oldHash != hash {
+			if oldHash, ok := prev.FileHashes[path]; !ok || oldHash != hash {
 				contentChanged = true
 				break
 			}
@@ -511,7 +549,7 @@ func (g *BasicSearch) serializeProjectIndex(proj *IndexedProject) {
 		indexPath := filepath.Join(searchDir, codeSearchIndexFileName)
 		if _, err := os.Lstat(indexPath); err == nil {
 			g.logger.Info("No content changes detected, skipping zoekt rebuild for " + proj.Root)
-			return
+			return contentChanged
 		}
 		g.logger.Info("Zoekt index missing, rebuilding for " + proj.Root)
 	}
@@ -524,7 +562,7 @@ func (g *BasicSearch) serializeProjectIndex(proj *IndexedProject) {
 	indexer, err := zoekt.NewIndexBuilder(nil)
 	if err != nil {
 		g.logger.Error("Error creating search index")
-		return
+		return contentChanged
 	}
 
 	// Next create the code search index
@@ -547,15 +585,16 @@ func (g *BasicSearch) serializeProjectIndex(proj *IndexedProject) {
 	indexFile, err := g.getIndexFile(proj)
 	if err != nil {
 		g.logger.Error("Error getting index file ", proj.Root)
-		return
+		return contentChanged
 	}
 	defer indexFile.Close()
 	err = indexer.Write(indexFile)
 	if err != nil {
 		g.logger.Error("Error writing index file ", proj.Root)
 		g.logger.Error("Error: ", err.Error())
-		return
+		return contentChanged
 	}
+	return contentChanged
 }
 
 func (g *BasicSearch) Load(projectRoot string) (*IndexedProject, error) {
@@ -622,6 +661,13 @@ func (g *BasicSearch) Load(projectRoot string) (*IndexedProject, error) {
 	}
 
 	project.Status = StatusReady
+	// Store before sending so the write goroutine's prev-capture sees an
+	// identical entry: the content compare then reports "unchanged" and the
+	// zoekt rebuild is skipped unless its index file is missing — a clean
+	// load validated by the tree-hash match above must not trigger a rebuild.
+	g.mu.Lock()
+	g.projects[projectRoot] = *project
+	g.mu.Unlock()
 	g.logger.Info("Loaded " + strconv.Itoa(len(project.Paths)) + " files for " + projectRoot)
 	g.updater.c <- project
 	return project, nil

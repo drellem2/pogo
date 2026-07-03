@@ -379,6 +379,10 @@ func Visit(req VisitRequest) (*VisitResponse, *ErrorResponse) {
 	}
 
 	if parentProj != nil {
+		// A visit is the activity signal for the reindex backoff scheduler:
+		// it resets the project to base cadence so the next tick re-walks it
+		// even if unchanged passes had backed it off (mg-1236).
+		MarkProjectActivity(parentProj.Path)
 		return &VisitResponse{
 			ParentProject: *parentProj,
 		}, nil
