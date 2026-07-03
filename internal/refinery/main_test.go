@@ -36,6 +36,12 @@ var testEventLogPath string
 // take precedence over auto-derivation but are overridden by per-repo
 // `git config user.email` calls in tests that need a specific identity.
 func TestMain(m *testing.M) {
+	// Clear any ambient POGO_HOME (e.g. from the developer's shell) so
+	// PogoHome-derived defaults resolve under the per-test HOME overrides
+	// instead of the real state dir (mg-3dc3). Tests that exercise POGO_HOME
+	// semantics set it explicitly via t.Setenv.
+	os.Unsetenv("POGO_HOME")
+
 	dir, err := os.MkdirTemp("", "refinery-events-*")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "refinery TestMain: mkdir temp: %v\n", err)

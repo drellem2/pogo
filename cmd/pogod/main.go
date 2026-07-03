@@ -466,6 +466,14 @@ func main() {
 		fmt.Printf("Warning: could not augment PATH: %v\n", err)
 	}
 
+	// Ensure the state dir exists before anything writes into it — a fresh
+	// or isolated POGO_HOME (mg-3dc3) starts empty and the lockfile create
+	// below fails on a missing parent dir.
+	if err := os.MkdirAll(config.PogoHome(), 0755); err != nil {
+		fmt.Printf("Cannot create state dir %s: %v", config.PogoHome(), err)
+		os.Exit(1)
+	}
+
 	// Acquire lockfile. The path is derived from POGO_HOME (see
 	// config.LockfilePath), NOT os.TempDir(): $TMPDIR differs between the
 	// launchd domain and a shell/agent, so a TempDir-based lock did not
@@ -896,32 +904,42 @@ func main() {
 	// docs/design/indexing-strategy.md and mg-5b0d.
 	project.StartPeriodicIndexer(hbCtx, cfg.IndexInterval)
 
-	// Refresh installed prompts from the embedded source before auto-starting
-	// any agents. When a new pogo binary ships prompt updates, the live files
-	// under ~/.pogo/agents/ stay stale until something runs InstallPrompts —
-	// previously only `pogo install` and `pogo agent prompt install`. Doing it
-	// here means a daemon restart is enough to propagate updates, and the PMs
-	// auto-started below pick up the latest prompts on the same boot. Hash
-	// stamps make this a no-op when nothing changed.
-	if installRes, err := agent.InstallPrompts(agent.InstallOpts{}); err != nil {
-		log.Printf("pogod: prompt refresh failed: %v", err)
-	} else if len(installRes.Updated) > 0 || len(installRes.Installed) > 0 {
-		log.Printf("pogod: refreshed prompts (installed=%d updated=%d skipped=%d)",
-			len(installRes.Installed), len(installRes.Updated), len(installRes.Skipped))
-	}
+	// Prompt refresh and crew auto-start are gated on a config file existing.
+	// A pogod with no config file is an unconfigured or deliberately isolated
+	// instance (tests, CI, POGO_HOME sandboxes) — installing default prompts
+	// and spawning a mayor from them would put an unrequested agent fleet on
+	// the machine, and before mg-3dc3 an isolated daemon did exactly that,
+	// racing the real crew. Orchestration is opt-in via config.toml.
+	if cfg.Source == "" {
+		log.Printf("pogod: no config file at %s; skipping prompt refresh and crew auto-start", config.ConfigFilePath())
+	} else {
+		// Refresh installed prompts from the embedded source before auto-starting
+		// any agents. When a new pogo binary ships prompt updates, the live files
+		// under $POGO_HOME/agents/ stay stale until something runs InstallPrompts —
+		// previously only `pogo install` and `pogo agent prompt install`. Doing it
+		// here means a daemon restart is enough to propagate updates, and the PMs
+		// auto-started below pick up the latest prompts on the same boot. Hash
+		// stamps make this a no-op when nothing changed.
+		if installRes, err := agent.InstallPrompts(agent.InstallOpts{}); err != nil {
+			log.Printf("pogod: prompt refresh failed: %v", err)
+		} else if len(installRes.Updated) > 0 || len(installRes.Installed) > 0 {
+			log.Printf("pogod: refreshed prompts (installed=%d updated=%d skipped=%d)",
+				len(installRes.Installed), len(installRes.Updated), len(installRes.Skipped))
+		}
 
-	// Auto-start crew agents whose prompt frontmatter declares auto_start = true.
-	// This replaces the manual `pogo agent start mayor` step on a fresh boot
-	// and is idempotent — agents already registered (e.g. across pogod
-	// restart-while-running) are skipped.
-	for _, res := range agentRegistry.AutoStartAgents() {
-		switch res.Status {
-		case agent.AutoStartStatusStarted:
-			log.Printf("pogod: auto-started %s", res.Name)
-		case agent.AutoStartStatusSkippedRunning:
-			log.Printf("pogod: %s already running, skipping auto-start", res.Name)
-		case agent.AutoStartStatusFailed:
-			log.Printf("pogod: auto-start of %s failed: %s", res.Name, res.Error)
+		// Auto-start crew agents whose prompt frontmatter declares auto_start = true.
+		// This replaces the manual `pogo agent start mayor` step on a fresh boot
+		// and is idempotent — agents already registered (e.g. across pogod
+		// restart-while-running) are skipped.
+		for _, res := range agentRegistry.AutoStartAgents() {
+			switch res.Status {
+			case agent.AutoStartStatusStarted:
+				log.Printf("pogod: auto-started %s", res.Name)
+			case agent.AutoStartStatusSkippedRunning:
+				log.Printf("pogod: %s already running, skipping auto-start", res.Name)
+			case agent.AutoStartStatusFailed:
+				log.Printf("pogod: auto-start of %s failed: %s", res.Name, res.Error)
+			}
 		}
 	}
 

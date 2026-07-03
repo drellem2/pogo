@@ -59,6 +59,9 @@ func runPogo(t *testing.T, handler http.HandlerFunc, args ...string) (stdout, st
 		fmt.Sprintf("POGO_PORT=%d", port),
 		"HOME="+t.TempDir(),
 		"XDG_CONFIG_HOME="+t.TempDir(),
+		// Clear any ambient POGO_HOME so the CLI's state dir stays under the
+		// temp HOME above instead of the developer's real ~/.pogo (mg-3dc3).
+		"POGO_HOME=",
 	)
 	var outBuf, errBuf bytes.Buffer
 	cmd.Stdout = &outBuf

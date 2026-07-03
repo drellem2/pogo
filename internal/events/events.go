@@ -16,6 +16,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/drellem2/pogo/internal/config"
 )
 
 // SchemaVersion is the on-disk schema version. See docs/event-log.md.
@@ -58,15 +60,11 @@ var (
 	overridePath string
 )
 
-// DefaultLogPath returns ~/.pogo/events.log.
+// DefaultLogPath returns events.log under the pogo state dir ($POGO_HOME,
+// default ~/.pogo).
 func DefaultLogPath() (string, error) {
 	pathOnce.Do(func() {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			defaultErr = err
-			return
-		}
-		defaultPath = filepath.Join(home, ".pogo", "events.log")
+		defaultPath = filepath.Join(config.PogoHome(), "events.log")
 	})
 	return defaultPath, defaultErr
 }

@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+
+	"github.com/drellem2/pogo/internal/config"
 )
 
 // store handles persistence of the scheduler state to a single JSON file.
@@ -26,13 +28,11 @@ type onDisk struct {
 	Schedules []Entry `json:"schedules"`
 }
 
-// DefaultPath returns ~/.pogo/schedules.json.
+// DefaultPath returns schedules.json under the pogo state dir ($POGO_HOME,
+// default ~/.pogo). The error return is kept for call-site compatibility; it
+// is always nil.
 func DefaultPath() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(home, ".pogo", "schedules.json"), nil
+	return filepath.Join(config.PogoHome(), "schedules.json"), nil
 }
 
 func (s *store) applyDefaults() {

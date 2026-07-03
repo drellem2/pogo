@@ -981,3 +981,63 @@ extra_path = ["/from/file/bin"]
 		t.Errorf("extra_path = %v, want env override [/from/env/bin /from/env/other]", cfg.Agents.ExtraPath)
 	}
 }
+
+// TestPogoHomeLegacyHomeNormalized verifies that the legacy shell
+// integration's POGO_HOME=$HOME export is normalized to $HOME/.pogo instead
+// of scattering state files across the home dir root (mg-3dc3).
+func TestPogoHomeLegacyHomeNormalized(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("POGO_HOME", home)
+	if got, want := PogoHome(), filepath.Join(home, ".pogo"); got != want {
+		t.Errorf("PogoHome() with POGO_HOME=$HOME = %q, want %q", got, want)
+	}
+	// A trailing slash on the env value must not defeat the comparison.
+	t.Setenv("POGO_HOME", home+string(filepath.Separator))
+	if got, want := PogoHome(), filepath.Join(home, ".pogo"); got != want {
+		t.Errorf("PogoHome() with POGO_HOME=$HOME/ = %q, want %q", got, want)
+	}
+}
+
+// TestConfigFilePathPrefersPogoHome verifies that an isolated daemon with a
+// config.toml inside $POGO_HOME reads that file, and falls back to the XDG
+// path when $POGO_HOME has no config (mg-3dc3).
+func TestConfigFilePathPrefersPogoHome(t *testing.T) {
+	pogoHome := t.TempDir()
+	xdg := t.TempDir()
+	t.Setenv("POGO_HOME", pogoHome)
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+
+	// No config.toml in POGO_HOME: XDG path wins.
+	if got, want := ConfigFilePath(), filepath.Join(xdg, "pogo", "config.toml"); got != want {
+		t.Errorf("ConfigFilePath() = %q, want XDG fallback %q", got, want)
+	}
+
+	// config.toml present in POGO_HOME: it wins.
+	own := filepath.Join(pogoHome, "config.toml")
+	if err := os.WriteFile(own, []byte("[server]\nport = 12345\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if got := ConfigFilePath(); got != own {
+		t.Errorf("ConfigFilePath() = %q, want %q", got, own)
+	}
+	cfg := Load()
+	if cfg.Port != 12345 {
+		t.Errorf("Load().Port = %d, want 12345 from $POGO_HOME/config.toml", cfg.Port)
+	}
+	if cfg.Source != own {
+		t.Errorf("Load().Source = %q, want %q", cfg.Source, own)
+	}
+}
+
+// TestLoadSourceEmptyWithoutConfigFile verifies Load reports no config source
+// when no file exists anywhere — the signal pogod uses to skip crew
+// auto-start on unconfigured/isolated daemons (mg-3dc3).
+func TestLoadSourceEmptyWithoutConfigFile(t *testing.T) {
+	t.Setenv("POGO_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	cfg := Load()
+	if cfg.Source != "" {
+		t.Errorf("Load().Source = %q, want \"\" when no config file exists", cfg.Source)
+	}
+}

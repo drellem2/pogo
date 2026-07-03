@@ -85,8 +85,18 @@ Swap the prompts and set `[refinery] enabled = false` to drive research, content
 
 ## Environment variables
 
-- `POGO_HOME` — state, recovery queue, and projects.json. Defaults to `~/.pogo`.
+- `POGO_HOME` — the pogo state directory, default `~/.pogo`. All daemon state
+  derives from it: agent prompts (`agents/`), polecat worktrees (`polecats/`),
+  `refinery-state.json`, `schedules.json`, `events.log`, `projects.json`, the
+  recovery queue, and the singleton lockfile. Overriding it (together with
+  `HOME`) fully isolates a test/CI daemon from the real one; a `config.toml`
+  placed directly in `$POGO_HOME` overrides `~/.config/pogo/config.toml`.
+  (Legacy: `POGO_HOME=$HOME`, exported by an old shell integration, is
+  normalized to `$HOME/.pogo`.)
 - `POGO_PLUGIN_PATH` — plugin discovery. Defaults to `$POGO_HOME/plugin`.
+
+pogod only installs default prompts and auto-starts crew agents when a
+`config.toml` exists — a daemon with no config file never spawns agents.
 
 ## License
 

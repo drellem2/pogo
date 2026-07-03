@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/drellem2/pogo/internal/gitgc"
 )
 
 // AgentInfo is the JSON representation of an agent for the API.
@@ -490,10 +492,9 @@ func (r *Registry) handleOutput(w http.ResponseWriter, req *http.Request) {
 }
 
 // CrewPromptDir is the directory where crew agent prompt files live.
-// Default: ~/.pogo/agents/crew/
+// Default: $POGO_HOME/agents/crew (~/.pogo/agents/crew).
 func CrewPromptDir() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".pogo", "agents", "crew")
+	return filepath.Join(PromptDir(), "crew")
 }
 
 // ErrPromptNotFound indicates the prompt file for a crew agent could not be
@@ -548,9 +549,8 @@ func (r *Registry) StartCrewAgent(name string) (*Agent, error) {
 		return nil, &PromptNotFoundError{Path: promptFile}
 	}
 
-	// Give crew agents a stable working directory under ~/.pogo/agents/<name>/
-	home, _ := os.UserHomeDir()
-	agentDir := filepath.Join(home, ".pogo", "agents", name)
+	// Give crew agents a stable working directory under $POGO_HOME/agents/<name>/
+	agentDir := filepath.Join(PromptDir(), name)
 	if err := os.MkdirAll(agentDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create agent dir: %w", err)
 	}
@@ -741,11 +741,13 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		createWorktree = false
 	}
 
-	// Compute worktree path before template expansion so it can be included in the prompt.
+	// Compute worktree path before template expansion so it can be included
+	// in the prompt. gitgc.DefaultPolecatsDir is the single source of truth
+	// for this location — its orphan-dir scan must see the same directory.
 	var worktreeDir, sourceRepo, branchName string
 	if createWorktree {
-		home, _ := os.UserHomeDir()
-		worktreeDir = filepath.Join(home, ".pogo", "polecats", spawnReq.Name)
+		polecatsDir, _ := gitgc.DefaultPolecatsDir()
+		worktreeDir = filepath.Join(polecatsDir, spawnReq.Name)
 	}
 
 	// Resolve the polecat's working directory. With a worktree it's the
@@ -755,8 +757,7 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 	// paths named in its task body.
 	workDir := worktreeDir
 	if spawnReq.NoWorktree {
-		home, _ := os.UserHomeDir()
-		agentDir := filepath.Join(home, ".pogo", "agents", spawnReq.Name)
+		agentDir := filepath.Join(PromptDir(), spawnReq.Name)
 		if err := os.MkdirAll(agentDir, 0755); err != nil {
 			http.Error(w, fmt.Sprintf("failed to create agent dir: %v", err), http.StatusInternalServerError)
 			return
