@@ -128,17 +128,29 @@ type TemplateVars struct {
 	// ("Mayor"), for headings and sentence-initial prose. Filled alongside
 	// Coordinator at expansion time.
 	CoordinatorTitle string
+
+	// Provider is the resolved harness provider id ("claude", "codex", "pi")
+	// the polecat will run under. Templates gate harness-specific guidance
+	// behind `{{if eq .Provider "claude"}}` so Claude-Code-isms (CronCreate,
+	// rating-modal dismissal) don't leak into prompts for other harnesses
+	// (gh #32). Left empty by callers, it defaults to DefaultProviderID
+	// ("claude") at expansion time — never empty-string, which would
+	// silently hide gated blocks.
+	Provider string
 }
 
-// withCoordinator returns vars with Coordinator (and CoordinatorTitle)
-// defaulted from the process-wide coordinator name when the caller left them
-// empty.
-func withCoordinator(vars TemplateVars) TemplateVars {
+// withDefaults returns vars with Coordinator (and CoordinatorTitle) defaulted
+// from the process-wide coordinator name and Provider defaulted to
+// DefaultProviderID when the caller left them empty.
+func withDefaults(vars TemplateVars) TemplateVars {
 	if vars.Coordinator == "" {
 		vars.Coordinator = CoordinatorName()
 	}
 	if vars.CoordinatorTitle == "" {
 		vars.CoordinatorTitle = titleFirst(vars.Coordinator)
+	}
+	if vars.Provider == "" {
+		vars.Provider = DefaultProviderID
 	}
 	return vars
 }
@@ -444,7 +456,7 @@ func synthesizePolecatTemplate(path, basename string, vars TemplateVars) (string
 		return "", fmt.Errorf("parse template: %w", err)
 	}
 	var buf bytes.Buffer
-	if err := tmpl.Execute(&buf, withCoordinator(vars)); err != nil {
+	if err := tmpl.Execute(&buf, withDefaults(vars)); err != nil {
 		return "", fmt.Errorf("execute template: %w", err)
 	}
 	return buf.String(), nil
@@ -455,6 +467,8 @@ func synthesizePolecatTemplate(path, basename string, vars TemplateVars) (string
 // not running the prompt, so vars carry obvious "preview" sentinels rather
 // than realistic values. RecentCommits/RecentFiles stay empty so conditional
 // sections gated by `{{if .RecentCommits}}` show their no-context shape.
+// Provider is the default ("claude") so the preview matches what a real
+// Claude polecat receives, including `{{if eq .Provider "claude"}}` blocks.
 func PreviewTemplateVars() TemplateVars {
 	return TemplateVars{
 		Task:        "(preview) example task title",
@@ -463,6 +477,7 @@ func PreviewTemplateVars() TemplateVars {
 		Repo:        "/path/to/repo",
 		Branch:      "main",
 		WorktreeDir: "/path/to/worktree",
+		Provider:    DefaultProviderID,
 	}
 }
 
@@ -491,7 +506,7 @@ func ExpandString(s string, vars TemplateVars) (string, error) {
 		return "", fmt.Errorf("parse: %w", err)
 	}
 	var buf bytes.Buffer
-	if err := tmpl.Execute(&buf, withCoordinator(vars)); err != nil {
+	if err := tmpl.Execute(&buf, withDefaults(vars)); err != nil {
 		return "", fmt.Errorf("execute: %w", err)
 	}
 	return buf.String(), nil
@@ -525,7 +540,7 @@ func ExpandTemplate(templatePath string, vars TemplateVars) (string, error) {
 	}
 
 	var buf bytes.Buffer
-	if err := tmpl.Execute(&buf, withCoordinator(vars)); err != nil {
+	if err := tmpl.Execute(&buf, withDefaults(vars)); err != nil {
 		return "", fmt.Errorf("execute template: %w", err)
 	}
 
