@@ -252,7 +252,7 @@ type Registry struct {
 	onExit func(a *Agent, err error)
 
 	// providers is the pool of known harness descriptors, keyed by id
-	// ("claude", "codex"). pogod registers every provider at startup
+	// ("claude", "codex", "pi"). pogod registers every provider at startup
 	// (RegisterProvider); resolveProvider then picks one per spawn from the
 	// precedence chain. Before mg-b31b the registry held a single global
 	// provider plus a global hook pair — provider selection is now per-spawn,
@@ -321,7 +321,7 @@ type SessionHookFunc func(ctx context.Context, a *Agent)
 
 // RegisterProvider adds a harness provider to the registry's per-spawn
 // resolution pool, keyed by p.ID. pogod registers every known provider at
-// startup (claude, codex); resolveProvider then picks one per spawn from the
+// startup (claude, codex, pi); resolveProvider then picks one per spawn from the
 // precedence chain. Registering the same id twice replaces the earlier entry.
 // A nil provider is ignored.
 func (r *Registry) RegisterProvider(p *Provider) {
