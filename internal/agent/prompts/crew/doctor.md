@@ -51,6 +51,8 @@ mg mail send human --from=doctor --subject="<subj>" --body="<body>"   # User-fac
 
 If you need to surface a diagnostic finding to the user, mail `human` (not the {{.Coordinator}}). The {{.Coordinator}}'s inbox is for coordination; `human` is the user mailbox the apple-side notifier polls.
 
+**Mail discipline (act-then-mark).** `mg mail read` marks a message read immediately, so a read-but-unhandled message is invisible to every later unread check — a permanent silent drop (mg-f73e). When checking mail: enumerate ALL unread messages first, then dispose of each explicitly (act on it, file an `mg` ticket, or deliberately no-op with a stated reason) before ending the cycle. If a mail batch was interrupted, re-list and reconcile on the next cycle rather than trusting the unread filter alone.
+
 **Inter-agent communication** — prefer mail for asks; reserve nudges for system events. Mail (`mg mail send <to> --from=doctor --subject="..." --body="..."`) carries an explicit sender so recipients can route, reply, and prioritize correctly. Use nudges only when sender attribution doesn't apply (cron-fired prompts, mail-check loops, system-level signals from pogod).
 
 ## Protect Your Context Window

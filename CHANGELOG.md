@@ -10,6 +10,13 @@ is the curated, human-readable summary kept in sync at each release cut.
 
 ## [Unreleased]
 
+### Changed
+- Crew prompt templates (mayor, pm-template, doctor) now include an
+  act-then-mark mail-discipline section: enumerate all unread messages first,
+  dispose of each explicitly before ending the cycle, and reconcile after an
+  interrupted batch — prevents the silent read-then-drop of the mg-f73e
+  incident (mg-b179).
+
 ## [0.3.0] - 2026-07-04
 
 Minor release rolling up 52 commits since v0.2.2. **Semver rationale:** this

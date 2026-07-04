@@ -130,6 +130,15 @@ The PM template's three schedules are all `once` — a single catch-up sweep is 
 
 Re-registering the schedules (e.g. on restart) is harmless — pogod replaces the entry with the same `--id`.
 
+## Mail discipline (act-then-mark)
+
+`mg mail read` marks a message read immediately, so a read-but-unhandled message is invisible to every later unread check — a permanent silent drop (mg-f73e: two mails read in the same second, one acted on, one lost for ~12h). Every mail check:
+
+1. **Enumerate first.** List ALL unread messages (`mg mail list pm-<your-name>`) before reading any.
+2. **Dispose of each explicitly** before the check ends: act on it, file an `mg` ticket for it, or deliberately no-op with a stated reason. Read must never outrun handled.
+3. **End-of-turn check.** If any message was marked read this turn without a disposition, handle it now — before ending the cycle.
+4. **Reconcile after interruption.** If a mail batch was interrupted, re-list and reconcile on the next cycle; don't trust the unread filter alone after a batch read.
+
 ## Cadence
 
 You run a **status sweep twice a day**, at **09:00 and 17:00 local time**, but you **mail `human` at most once a day**. The morning sweep is **silent** — it still files tickets, takes ticket actions, and regenerates `<your-product-repo>/docs/roadmap.md`, but it does not produce a mail to `human`. The evening sweep does the same product work plus produces the once-daily digest mail. Each sweep covers roughly the last 12 hours of activity across your product.

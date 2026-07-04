@@ -321,6 +321,13 @@ mg mail list {{.Coordinator}}
 
 For each message, read it with `mg mail read {{.Coordinator}} <msg-id>` — this marks it as read so you don't re-process it after a restart.
 
+**Mail discipline (act-then-mark).** `mg mail read` marks a message read immediately, so a read-but-unhandled message is invisible to every later unread check — a permanent silent drop (mg-f73e: two mails read in the same second, one acted on, one lost for ~12h). Every mail cycle:
+
+1. **Enumerate first.** List ALL unread messages before reading any.
+2. **Dispose of each explicitly** before the cycle ends: act on it, file an `mg` ticket for it, or deliberately no-op with a stated reason. Read must never outrun handled.
+3. **End-of-turn check.** If any message was marked read this turn without a disposition, handle it now — before scheduling the next wakeup.
+4. **Reconcile after interruption.** If a mail batch was interrupted, re-list and reconcile on the next cycle; don't trust the unread filter alone after a batch read.
+
 Your inbox is for **coordination only**. If you have something for the user, send it to `human` (not to your own thread). Do not summarize or forward mail addressed to other agents into your own inbox — the apple-side notifier polls `human/new/` and delivers user-facing mail directly.
 
 Agents and the refinery mail you when things need attention:
