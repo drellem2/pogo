@@ -10,6 +10,8 @@ is the curated, human-readable summary kept in sync at each release cut.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-04
+
 Minor release rolling up 52 commits since v0.2.2. **Semver rationale:** this
 is a minor (0.3.0) rather than a patch bump because it adds new
 backwards-compatible capabilities — most notably the pi coding-agent provider
