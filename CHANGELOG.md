@@ -10,14 +10,65 @@ is the curated, human-readable summary kept in sync at each release cut.
 
 ## [Unreleased]
 
+Minor release rolling up 52 commits since v0.2.2. **Semver rationale:** this
+is a minor (0.3.0) rather than a patch bump because it adds new
+backwards-compatible capabilities — most notably the pi coding-agent provider
+working end-to-end (verified by live smoke 2026-07-04) — plus new config
+surfaces (`[agents] autostart`, `[agents] extra_path`, configurable
+coordinator term) and new refinery behaviors (state persistence,
+event-driven polecat stop). No breaking changes.
+
+### Added
+- **pi coding-agent provider, end-to-end**: pogod can now spawn and drive
+  polecats on the pi harness — provider plumbing (mg-9829), Node toolchain
+  PATH probing plus `[agents] extra_path` config (mg-1dbe), initial prompt
+  delivered via argv since TUI redraws defeat the idle-window nudge (mg-3c2a),
+  spawn exit-code contract locked by e2e tests and `--provider` help
+  (mg-a1e4), integration coverage wired into CI (mg-3e7c), and polecat prompt
+  templates that gate Claude-Code-isms on `{{.Provider}}` (mg-e310). Verified
+  by a live end-to-end smoke on 2026-07-04 (mg-fd56).
+- **Refinery state persistence**: merge-request state survives pogod restarts
+  (mg-584a, design in docs/refinery-persistence-design.md, mg-abfd).
+- **Event-driven polecat stop on merge**: pogod stops a polecat the moment its
+  MR merges via an OnMerged hook instead of waiting for a poll (mg-ff34).
+- Refinery resolves re-submitted already-merged branches as no-op `merged`
+  instead of failing them (mg-383a), and fast-forwards the local source
+  checkout after a merge when it is clean (mg-9fa9).
+- `[agents] autostart` config switch (and `POGO_AGENT_AUTOSTART`) to disable
+  crew auto-start (mg-9a1c).
+- The "mayor" coordinator term is configurable (mg-71ea).
+- `pogo agent spawn-polecat --no-worktree` for in-place edits (mg-c905).
+- pogod size-rotates `pogod.log` at startup so post-mortems keep prior-run
+  evidence (mg-6d02).
+- Cron-aware stall detection skips by-design between-cron idle (mg-5b23);
+  stale `mail-check-<agent>` schedules are GC'd when the target agent
+  vanishes (mg-3f36).
+
 ### Changed
-- **Indexer backoff-on-unchanged**: the periodic re-indexer no longer re-walks
-  every project every `index_interval`. Each project backs off exponentially
-  while unchanged (up to 16× the base interval) and snaps back to base cadence
-  on a detected change or a `pogo visit`, cutting the steady background tax of
-  large idle trees (gh #39 piece 1, mg-1236).
+- **Indexing/search performance overhaul (gh #39)**:
+  - The periodic re-indexer no longer re-walks every project every
+    `index_interval`. Each project backs off exponentially while unchanged
+    (up to 16× the base interval) and snaps back to base cadence on a
+    detected change or a `pogo visit` (mg-1236).
+  - Zoekt index builds run through a bounded worker pool instead of
+    unbounded goroutines (mg-a77f).
+  - Cold start reads each file once for both hashing and indexing (mg-a77f).
+  - The client uses keep-alive connections and parallel `SearchAll` fan-out,
+    and drops the per-call health probe (mg-a77f).
+  - Removed projects are evicted from the in-memory index map (mg-a77f).
+- Refinery queue loop wakes on `Submit` instead of waiting out the 30s poll
+  (mg-b7b9).
+- Work-item scans filter by status directory before parsing; stall-watch
+  scans `available/` only (mg-3db0).
 
 ### Fixed
+- **POGO_HOME isolation**: all pogod state paths derive from `POGO_HOME`, and
+  crew auto-start is gated on a config file actually existing (mg-3dc3).
+- pogod HTTP server hardening: request timeouts and a connection cap;
+  `SetMode` stops agents outside the write-lock (mg-e7d1).
+- A second `pogod` can no longer displace the running daemon (port :10000
+  race, PR #23), and auto-started daemons run in their own session so client
+  SIGTERM doesn't cascade into them (mg-fc73).
 - The periodic re-index is now actually incremental: it previously wiped its
   own hash/mtime cache before each project-root walk, re-reading and
   re-hashing every file every tick; unchanged files now cost one Lstat
@@ -30,6 +81,27 @@ is the curated, human-readable summary kept in sync at each release cut.
   untracked dir in `git status`: pogo appends `.pogo/` to each repo's
   `.git/info/exclude` at index time (repo-local, never committed). Applies to
   already-polluted repos on their next index (gh #40, mg-f51b).
+- `pogo visit` no longer appends a trailing separator that broke file
+  arguments (mg-88cc); `pose` routes positional queries to the root command
+  instead of subcommand resolution (mg-32e0).
+- Surrounding quotes are stripped from the `bind` value in `config.toml`
+  (mg-a616).
+- git-gc reclaims orphan polecat directories invisible to
+  `git worktree list` (mg-c3ee), and a failed polecat spawn deletes its
+  `polecat-<id>` branch so retries aren't blocked (mg-1f8e).
+- pogod repairs its subprocess PATH so `mg`/`gh`/`git` resolve by name
+  (mg-905f), and gates the initial nudge on a prompt-ready sentinel instead
+  of quiescence (mg-ce61).
+- `test.sh` propagates step failures so gates can't merge broken code
+  (mg-59d5).
+
+### Documentation
+- README halved via two subtractive tightening passes (mg-e53c, mg-4b64);
+  design docs and investigations archived into `docs/design/` and
+  `docs/investigations/` (mg-cfbd).
+- Minimum macguffin version required by the prompts documented (>= v0.1.3,
+  mg-eb17); refinery merge-target semantics clarified (mg-762f); prompt
+  fixes for removed/renamed mg commands (mg-0692, mg-97c6).
 
 ## [0.2.2] - 2026-06-21
 
@@ -71,7 +143,8 @@ Early patch release.
 Initial tagged release of Pogo: multi-repo discovery, indexing, and
 cross-project zoekt search (`lsp`, `pose`, `pogo`, `pogod`).
 
-[Unreleased]: https://github.com/drellem2/pogo/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/drellem2/pogo/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/drellem2/pogo/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/drellem2/pogo/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/drellem2/pogo/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/drellem2/pogo/compare/v0.1.1...v0.2.0
