@@ -17,9 +17,9 @@ See [docs/prompt-customization.md](prompt-customization.md).
 ## Prompt templates
 
 Agent behavior is defined by prompt files under `internal/agent/prompts/` —
-`mayor.md`, `crew/doctor.md`, `pm/pm-template.md`, and the
-`templates/polecat.md` / `templates/polecat-qa.md` worker templates (installed
-copies live in `~/.pogo/agents/`). The `extends <template> with config <toml>`
+`mayor.md` (the coordinator), `crew/doctor.md`, `pm/pm-template.md`, and the
+`templates/polecat.md` / `templates/polecat-qa.md` templates for polecats
+(disposable worker agents); installed copies live in `~/.pogo/agents/`. The `extends <template> with config <toml>`
 directive synthesizes a crew prompt from a base plus a TOML. See
 [docs/prompt-customization.md](prompt-customization.md) and [PROMPT_GUIDELINES.md](PROMPT_GUIDELINES.md).
 
@@ -33,9 +33,10 @@ mechanism — rename it with:
 coordinator = "boss"   # default "mayor"
 ```
 
-The configured name decides the coordinator's agent name (and therefore its mg
-mailbox, its `mail-check-<name>` schedule id, and where pogod's refinery and
-stall watcher address their mail/nudges), and what the shipped prompts call the
+The configured name decides the coordinator's agent name (and therefore its
+`mg` (the task-store CLI) mailbox, its `mail-check-<name>` schedule id, and
+where pogod's refinery (the merge queue) and stall watcher address their
+mail/nudges), and what the shipped prompts call the
 role: prompt files reference the coordinator via `{{.Coordinator}}` (and
 `{{.CoordinatorTitle}}` for headings), resolved at prompt-synthesis time.
 Polecat templates resolve it through the same text/template pass as `{{.Id}}`;

@@ -2,7 +2,7 @@
 
 ## Problem
 
-Polecats currently work directly in whatever repo path is passed as `--repo`. If that's the same checkout a crew member or user is using, `git checkout -b polecat-<id>` switches the branch in their working directory. This causes branch conflicts, dirty tree errors, and confusion.
+Polecats (disposable worker agents) currently work directly in whatever repo path is passed as `--repo`. If that's the same checkout a crew member or user is using, `git checkout -b polecat-<id>` switches the branch in their working directory. This causes branch conflicts, dirty tree errors, and confusion.
 
 ## Solution
 
@@ -56,7 +56,7 @@ In the `onExit` callback (cmd/pogod/main.go):
    ```
    git -C <source-repo> worktree remove ~/.pogo/polecats/<name> --force
    ```
-2. Optionally delete the local branch if the refinery already merged:
+2. Optionally delete the local branch if the refinery (the merge queue) already merged:
    ```
    git -C <source-repo> branch -d polecat-<name>
    ```

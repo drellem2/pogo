@@ -1,12 +1,14 @@
 # Research-triage example
 
 This is a worked example of using pogo for a workflow that has nothing to do
-with code. Pogo's defaults — git worktrees, branch-per-polecat, a refinery
-merge queue — are aimed at coding work, but the pieces underneath (mayor,
-polecats, work items, mail) are general. This example walks through bending
-them into a "research triage" workspace where:
+with code. Pogo's defaults — git worktrees, a branch per polecat (a disposable
+worker agent), a refinery merge queue — are aimed at coding work. The pieces
+underneath — the mayor (the coordinator), polecats, work items, mail — are
+general. This example walks through bending them into a "research triage"
+workspace where:
 
-- The user files investigation/decision items via `mg new`.
+- The user files investigation/decision items via `mg new` (`mg` is the
+  task-store CLI).
 - A custom **mayor** dispatches polecats to research them.
 - A custom **polecat template** writes a markdown note per item, mails the
   mayor with the path, and waits.

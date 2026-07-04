@@ -12,7 +12,7 @@ A daemon runs in the background, a shell interactively. An **agent** is the newe
 curl -fsSL https://raw.githubusercontent.com/drellem2/pogo/main/install.sh | sh
 ```
 
-Runs `pogo install`: the daemon starts under launchd (macOS) or systemd (Linux), [macguffin](https://github.com/drellem2/macguffin) initializes, default prompts land in `~/.pogo/agents/`. Idempotent (`--force` overwrites prompts).
+Runs `pogo install`: the daemon starts under launchd (macOS) or systemd (Linux), [macguffin](https://github.com/drellem2/macguffin) (the task-store CLI, `mg`) initializes, default prompts land in `~/.pogo/agents/`. Idempotent (`--force` overwrites prompts).
 
 `pogo init` scaffolds prompts only (`--minimal` for a bare skeleton); `--no-pogo-install` inspects `~/.pogo/` before anything is written.
 
@@ -21,8 +21,8 @@ Runs `pogo install`: the daemon starts under launchd (macOS) or systemd (Linux),
 Verify:
 
 ```sh
-pogo server status      # daemon, agents, refinery — all reachable?
-pogo agent list         # mayor running?
+pogo server status      # daemon, agents, refinery (the merge queue) — all reachable?
+pogo agent list         # mayor (the coordinator) running?
 mg list                 # work items — empty on a fresh install
 ```
 
@@ -30,7 +30,7 @@ On error, rerun `pogo install` or `pogo doctor --check`.
 
 ## Working with agents
 
-`pgrep pogo-crew` lists crew; `pgrep pogo-cat` lists polecats. `pogo agent list` formats this.
+`pgrep pogo-crew` lists crew; `pgrep pogo-cat` lists polecats (disposable worker agents). `pogo agent list` formats this.
 
 ```sh
 pogo agent list                       # what's running

@@ -1,7 +1,8 @@
 # Customizing pogo prompts
 
-Pogo ships a default set of prompts at `~/.pogo/agents/` (mayor, crew, polecat
-templates, PM template + configs). You'll want to customize them. This guide
+Pogo ships a default set of prompts at `~/.pogo/agents/`: the mayor (the
+coordinator), crew agents, templates for polecats (disposable worker agents),
+and the PM template + configs. You'll want to customize them. This guide
 covers the two safe ways to do that without losing your edits to the next
 `pogo install` run.
 
@@ -183,7 +184,7 @@ pogo agent stop mayor && pogo agent start mayor
 ## Extra: changelog stamp
 
 After step 4 (`git push`), append a one-line summary of your change to
-`CHANGELOG.md` under "Unreleased" before submitting to the refinery:
+`CHANGELOG.md` under "Unreleased" before submitting to the refinery (the merge queue):
 
 ```bash
 echo "- {{.Task}} (mg-{{.Id}})" >> CHANGELOG.md

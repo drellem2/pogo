@@ -439,6 +439,17 @@ func resolveAgentProvider(id string) *agent.Provider {
 }
 
 func main() {
+	flag.Usage = func() {
+		fmt.Fprint(flag.CommandLine.Output(), `pogod — the pogo daemon.
+
+Supervises agents as UNIX processes: the mayor (the coordinator), polecats
+(disposable worker agents), and the refinery (the merge queue). Work items
+and mail live in mg/macguffin (the task-store CLI).
+
+Flags:
+`)
+		flag.PrintDefaults()
+	}
 	flag.Parse()
 	startTime = time.Now()
 

@@ -29,7 +29,8 @@ The hook runs `gofmt -l` and `go build ./...` on every commit.
 ## End-to-end smoke test
 
 `scripts/test-e2e.sh` exercises the full loop — `pogo init`, `pogod`, mayor
-auto-start, polecat spawn, refinery merge, gate-failure rejection, and crew
+(the coordinator) auto-start, polecat (disposable worker agent) spawn,
+refinery (merge queue) merge, gate-failure rejection, and crew
 crash → respawn — against a sandboxed `$HOME`, a non-default port, and a
 fake-agent stand-in for `claude`. No API keys required.
 
@@ -46,4 +47,4 @@ The test is also wrapped as a Go test, skipped by default so it doesn't slow
 POGO_RUN_E2E=1 go test ./internal/agent -run TestE2ESmoke -v -timeout 5m
 ```
 
-Requires `mg` (macguffin) >= v0.1.3 on `$PATH`.
+Requires `mg` (macguffin, the task-store CLI) >= v0.1.3 on `$PATH`.

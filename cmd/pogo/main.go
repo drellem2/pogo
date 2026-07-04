@@ -1024,7 +1024,7 @@ Example:
 	var cmdAgentSpawnPolecat = &cobra.Command{
 		Use:   "spawn-polecat <name>",
 		Short: "Spawn a polecat from a prompt template",
-		Long: `Spawn an ephemeral polecat agent using a prompt template from ~/.pogo/agents/templates/.
+		Long: `Spawn an ephemeral polecat (a disposable worker agent) using a prompt template from ~/.pogo/agents/templates/.
 The template is expanded with the provided variables and used as the agent's prompt file.`,
 		Args: cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
@@ -1790,7 +1790,16 @@ By default gc only reports what it would do; pass --apply to make changes.`,
 	cmdGC.Flags().StringVar(&gcRepo, "repo", ".", "git repository to garbage-collect")
 	cmdGC.Flags().BoolVar(&gcApply, "apply", false, "actually delete (default: dry run)")
 
-	var rootCmd = &cobra.Command{Use: "pogo", Version: version.Version}
+	var rootCmd = &cobra.Command{
+		Use:     "pogo",
+		Version: version.Version,
+		Short:   "Agent-shaped work as UNIX processes",
+		Long: `pogo — a daemon for agent-shaped work.
+
+The mayor (the coordinator) dispatches work items to polecats (disposable
+worker agents); the refinery (the merge queue) gates and merges their
+branches; work items and mail live in mg/macguffin (the task-store CLI).`,
+	}
 
 	rootCmd.PersistentFlags().BoolVar(&jsonOutput, "json", false, "Output in JSON format")
 

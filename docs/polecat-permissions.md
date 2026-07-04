@@ -2,7 +2,7 @@
 
 ## How permissions work for polecats
 
-Polecats run in freshly-created git worktrees at `~/.pogo/polecats/<name>`. These directories don't exist until spawn time. Claude Code normally prompts for "directory trust" when started in a directory it hasn't seen before, which would block autonomous execution.
+Polecats (disposable worker agents) run in freshly-created git worktrees at `~/.pogo/polecats/<name>`. These directories don't exist until spawn time. Claude Code normally prompts for "directory trust" when started in a directory it hasn't seen before, which would block autonomous execution.
 
 Two mechanisms handle this:
 
@@ -63,7 +63,7 @@ To guard against this, `ValidatePolecatCommand` logs a warning when a polecat co
 
 ## Claim behavior
 
-The `mg claim` command is called by the **polecat itself**, not by pogo infrastructure. It appears in step 1 of the polecat prompt template (`internal/agent/prompts/templates/polecat.md`):
+The `mg claim` command (`mg` is macguffin, the task-store CLI) is called by the **polecat itself**, not by pogo infrastructure. It appears in step 1 of the polecat prompt template (`internal/agent/prompts/templates/polecat.md`):
 
 ```
 1. **Claim the work item** (prevents duplicate work):
@@ -77,7 +77,7 @@ The `mg claim` command is called by the **polecat itself**, not by pogo infrastr
 3. After 10 seconds, pogod sends an initial nudge via PTY
 4. The polecat (Claude) runs `mg claim <id>` as its first action
 5. If claim succeeds, polecat proceeds with the work
-6. If claim fails (already claimed), the polecat should mail the mayor
+6. If claim fails (already claimed), the polecat should mail the mayor (the coordinator)
 
 ### What can go wrong
 

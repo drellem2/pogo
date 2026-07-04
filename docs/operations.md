@@ -13,14 +13,14 @@ A **live** agent is still protected: `start` refuses a duplicate of a running pr
 
 ## Pogod restart policy
 
-`pogod` runs under launchd with `KeepAlive=true` (see `scripts/launchd/com.pogo.daemon.plist`). That means **any uncoordinated kill is a loop**: launchd relaunches the daemon within seconds, and if the caller then re-evaluates "pogod looks broken — kill it again," the system gets stuck in a kill→relaunch→kill cycle. The decision recorded in mg-f5fc is that callers (polecats, crew agents, humans at a terminal) follow a three-tier escalation. Try tier 1 first; only escalate when the situation matches the criteria below.
+`pogod` runs under launchd with `KeepAlive=true` (see `scripts/launchd/com.pogo.daemon.plist`). That means **any uncoordinated kill is a loop**: launchd relaunches the daemon within seconds, and if the caller then re-evaluates "pogod looks broken — kill it again," the system gets stuck in a kill→relaunch→kill cycle. The decision recorded in mg-f5fc is that callers — polecats (disposable worker agents), crew agents, humans at a terminal — follow a three-tier escalation. Try tier 1 first; only escalate when the situation matches the criteria below.
 
 > **Critical invariant: never `kill -9 pogod`.**
 > launchd's `KeepAlive=true` will relaunch it immediately, and a SIGKILL skips pogod's own shutdown logic (mail flush, lockfile release, child-process cleanup). Use tier 2 or tier 3.
 
 ### Tier 1 — Don't restart pogod (default)
 
-Most "pogod is misbehaving" situations are better solved by **filing an mg or restarting a specific subcomponent**. A pogod restart is a heavy hammer: it interrupts every running polecat, drops in-flight refinery work back into the queue, and re-arms every cron and watcher from cold. Reach for it only when the lighter alternatives below don't apply.
+Most "pogod is misbehaving" situations are better solved by **filing an mg (a work item in macguffin, the task-store CLI) or restarting a specific subcomponent**. A pogod restart is a heavy hammer: it interrupts every running polecat, drops in-flight refinery (the merge queue) work back into the queue, and re-arms every cron and watcher from cold. Reach for it only when the lighter alternatives below don't apply.
 
 **Symptoms that do NOT warrant a restart** (file an mg or fix in place):
 
