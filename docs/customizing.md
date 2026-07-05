@@ -21,8 +21,8 @@ and come back here when you want the reference.
 > `--minimal` if you're building a non-coding workflow and don't want the
 > shipped coding-profile prompts in your way. Without `--minimal`, you get the
 > full mayor + `crew/doctor` + polecat-template (`polecat`, `polecat-qa`,
-> `polecat-build-pr`, `polecat-triage`) set, which is the right starting
-> point for code-shaped work.
+> `polecat-build-pr`, `polecat-triage`, `polecat-review`) set, which is the
+> right starting point for code-shaped work.
 
 > **Customizing prompts safely:** if your edits go inside the prompt body
 > (rules, sections, protocol steps) rather than the frontmatter or roster,
@@ -238,15 +238,17 @@ MR submit. Templates can detect this via `{{.NoWorktree}}` and gate their
 refinery-submit steps behind `{{if not .NoWorktree}}`. The polecat still claims
 the item and emits `mg done` on completion.
 
-### Author a second polecat template
+### Author another polecat template
 
-You're not limited to one template. The shipped profile already has four:
+You're not limited to one template. The shipped profile already has five:
 `polecat.md` (writes code, submits to the refinery), `polecat-qa.md` (verifies
 code), `polecat-build-pr.md` (writes code on the GitHub-issue track: opens
 a PR and works the review loop instead of self-submitting — the coordinator
-submits to the refinery when review passes), and `polecat-triage.md`
-(investigates a GitHub issue and recommends — no code). Add another by
-dropping a file under `~/.pogo/agents/templates/`:
+submits to the refinery when review passes), `polecat-triage.md`
+(investigates a GitHub issue and recommends — no code), and
+`polecat-review.md` (reviews a pull request through QA, architecture, and
+design-faithfulness lenses). Add another by dropping a file under
+`~/.pogo/agents/templates/`:
 
 ```bash
 $EDITOR ~/.pogo/agents/templates/polecat-research.md

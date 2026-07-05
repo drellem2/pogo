@@ -19,7 +19,8 @@ See [docs/prompt-customization.md](prompt-customization.md).
 Agent behavior is defined by prompt files under `internal/agent/prompts/` —
 `mayor.md` (the coordinator), `crew/doctor.md`, `pm/pm-template.md`, and the
 `templates/polecat.md` / `templates/polecat-qa.md` /
-`templates/polecat-build-pr.md` / `templates/polecat-triage.md` templates for polecats
+`templates/polecat-build-pr.md` / `templates/polecat-triage.md` /
+`templates/polecat-review.md` templates for polecats
 (disposable worker agents); installed copies live in `~/.pogo/agents/`. The `extends <template> with config <toml>`
 directive synthesizes a crew prompt from a base plus a TOML. See
 [docs/prompt-customization.md](prompt-customization.md) and [PROMPT_GUIDELINES.md](PROMPT_GUIDELINES.md).
