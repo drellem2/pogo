@@ -255,7 +255,11 @@ Use --json for the raw structured response.`,
 	var statusInterval time.Duration
 	var statusTag string
 
-	renderStatus := func() {
+	// renderStatus fetches the current dashboard state and returns it as a
+	// fully-formatted text frame. In JSON mode it prints directly and returns
+	// "". The whole frame is built into a buffer before returning so live mode
+	// can write it to the terminal in a single flicker-free update.
+	renderStatus := func() string {
 		type statusReport struct {
 			Agents    []agent.AgentInfo       `json:"agents"`
 			WorkItems string                  `json:"work_items,omitempty"`
@@ -293,21 +297,25 @@ Use --json for the raw structured response.`,
 
 		if jsonOutput {
 			cli.PrintJSON(report)
-			return
+			return ""
 		}
 
 		// --- Text output ---
+		// Build the entire frame into a buffer so callers can emit it in one
+		// write. Never print incrementally here: in live mode a partially
+		// written frame is exactly what causes visible flicker.
+		var b strings.Builder
 
 		if statusLive {
-			fmt.Printf("pogo status --live  (every %s, Ctrl-C to quit)\n\n", statusInterval)
+			fmt.Fprintf(&b, "pogo status --live  (every %s, Ctrl-C to quit)\n\n", statusInterval)
 		}
 
 		// Agents section
-		fmt.Println("=== Agents ===")
+		fmt.Fprintln(&b, "=== Agents ===")
 		if agentErr != nil {
-			fmt.Printf("  (unavailable: %s)\n", agentErr)
+			fmt.Fprintf(&b, "  (unavailable: %s)\n", agentErr)
 		} else if len(agents) == 0 {
-			fmt.Println("  No agents running.")
+			fmt.Fprintln(&b, "  No agents running.")
 		} else {
 			crew := 0
 			polecats := 0
@@ -322,32 +330,32 @@ Use --json for the raw structured response.`,
 					running++
 				}
 			}
-			fmt.Printf("  %d total (%d crew, %d polecat), %d running\n",
+			fmt.Fprintf(&b, "  %d total (%d crew, %d polecat), %d running\n",
 				len(agents), crew, polecats, running)
 			for _, a := range agents {
-				fmt.Printf("  %-20s  %-8s  %-10s  pid=%-6d  uptime=%s\n",
+				fmt.Fprintf(&b, "  %-20s  %-8s  %-10s  pid=%-6d  uptime=%s\n",
 					a.Name, a.Type, a.Status, a.PID, a.Uptime)
 			}
 		}
-		fmt.Println()
+		fmt.Fprintln(&b)
 
 		// Work items section
-		fmt.Println("=== Work Items ===")
+		fmt.Fprintln(&b, "=== Work Items ===")
 		if mgErr != nil {
-			fmt.Println("  (unavailable: mg not found)")
+			fmt.Fprintln(&b, "  (unavailable: mg not found)")
 		} else if report.WorkItems == "" {
-			fmt.Println("  No work items.")
+			fmt.Fprintln(&b, "  No work items.")
 		} else {
 			for _, line := range strings.Split(report.WorkItems, "\n") {
-				fmt.Printf("  %s\n", line)
+				fmt.Fprintf(&b, "  %s\n", line)
 			}
 		}
-		fmt.Println()
+		fmt.Fprintln(&b)
 
 		// Refinery section
-		fmt.Println("=== Refinery ===")
+		fmt.Fprintln(&b, "=== Refinery ===")
 		if refErr != nil {
-			fmt.Printf("  (unavailable: %s)\n", refErr)
+			fmt.Fprintf(&b, "  (unavailable: %s)\n", refErr)
 		} else {
 			state := "stopped"
 			if refStatus.Running {
@@ -356,21 +364,23 @@ Use --json for the raw structured response.`,
 			if !refStatus.Enabled {
 				state = "disabled"
 			}
-			fmt.Printf("  Status: %s  |  Queue: %d  |  History: %d  |  Poll: %s\n",
+			fmt.Fprintf(&b, "  Status: %s  |  Queue: %d  |  History: %d  |  Poll: %s\n",
 				state, refStatus.QueueLen, refStatus.HistoryLen, refStatus.PollInterval)
 		}
 		if queueErr == nil && len(queue) > 0 {
-			fmt.Println()
+			fmt.Fprintln(&b)
 			for _, mr := range queue {
 				age := time.Since(mr.SubmitTime).Truncate(time.Second)
 				author := mr.Author
 				if author == "" {
 					author = "-"
 				}
-				fmt.Printf("  %-8s  %-20s  branch=%-30s  author=%-15s  age=%s\n",
+				fmt.Fprintf(&b, "  %-8s  %-20s  branch=%-30s  author=%-15s  age=%s\n",
 					mr.Status, mr.ID, mr.Branch, author, age)
 			}
 		}
+
+		return b.String()
 	}
 
 	var cmdStatus = &cobra.Command{
@@ -385,20 +395,47 @@ Use --live for a continuously updating view (like watch).`,
 		Args: cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
 			if !statusLive {
-				renderStatus()
+				fmt.Print(renderStatus())
 				return
 			}
 
-			// Live mode: clear screen and refresh on interval
+			// Live mode: refresh in place on interval.
 			sig := make(chan os.Signal, 1)
 			signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 
 			ticker := time.NewTicker(statusInterval)
 			defer ticker.Stop()
 
-			// Initial render
-			fmt.Print("\033[2J\033[H") // clear screen, cursor to top
-			renderStatus()
+			// draw fetches the next frame and repaints it flicker-free.
+			//
+			// The frame is fetched in full BEFORE any terminal control codes
+			// are emitted (fetching involves an mg exec + two pogod HTTP
+			// calls). We then repaint in a single write: cursor home, each
+			// line cleared to end-of-line as it is overwritten, and finally
+			// erase-to-end-of-screen to remove any trailing lines left by a
+			// previously taller frame. This never blanks the whole screen, so
+			// there is no visible flash between frames — unlike a \033[2J
+			// full-screen erase, which leaves the terminal blank for the whole
+			// fetch latency every tick.
+			draw := func() {
+				frame := renderStatus()
+				if jsonOutput {
+					// JSON mode already printed; nothing to repaint.
+					return
+				}
+				var out strings.Builder
+				out.WriteString("\033[H") // cursor to top-left
+				out.WriteString(strings.ReplaceAll(frame, "\n", "\033[K\n"))
+				out.WriteString("\033[J") // erase from cursor to end of screen
+				fmt.Print(out.String())
+			}
+
+			// One-time full clear so stale scrollback doesn't bleed into the
+			// first frame; subsequent repaints reuse the same region.
+			if !jsonOutput {
+				fmt.Print("\033[2J\033[H")
+			}
+			draw()
 
 			for {
 				select {
@@ -406,8 +443,7 @@ Use --live for a continuously updating view (like watch).`,
 					fmt.Println()
 					return
 				case <-ticker.C:
-					fmt.Print("\033[2J\033[H") // clear screen, cursor to top
-					renderStatus()
+					draw()
 				}
 			}
 		},
