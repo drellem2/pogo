@@ -2191,6 +2191,11 @@ func TestReviewTemplateProtocol(t *testing.T) {
 	if !strings.Contains(s, `"verdict": "pass"`) || !strings.Contains(s, `"verdict": "fail"`) {
 		t.Error("polecat-review.md: expected mg done verdict JSON for both pass and fail")
 	}
+	// Advisory findings must survive in the verdict of record, not just in
+	// mail and PR comments (pm-pogo sign-off condition, mg-546c).
+	if !strings.Contains(s, `"advisory":`) {
+		t.Error("polecat-review.md: expected the pass verdict JSON to carry an `advisory` array")
+	}
 
 	// Loop protocol: findings mailed to the builder directly, round status and
 	// verdict transitions to the coordinator, 3-round cap with escalation.
