@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Template: replace /Users/YOU throughout (launchd does not expand $HOME
+     or environment variables in paths), then:
+       cp com.pogo.pa-heyfeed.plist ~/Library/LaunchAgents/
+       launchctl load ~/Library/LaunchAgents/com.pogo.pa-heyfeed.plist
+       launchctl kickstart gui/$(id -u)/com.pogo.pa-heyfeed
+     PATH must include the directories holding `hey`, `mg`, and `jq`. -->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.pogo.pa-heyfeed</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/YOU/.pogo/pogo-pa/bin/poll-hey.sh</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/YOU/.pogo/pogo-pa</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/Users/YOU/.pogo/pa/heyfeed/poller.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/YOU/.pogo/pa/heyfeed/poller.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/YOU/go/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>POLL_INTERVAL</key>
+        <string>120</string>
+        <key>HEY_BOXES</key>
+        <string>imbox</string>
+    </dict>
+</dict>
+</plist>
