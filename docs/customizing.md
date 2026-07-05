@@ -20,8 +20,9 @@ and come back here when you want the reference.
 > **Before you start:** `pogo init` scaffolds `~/.pogo/agents/` for you. Pass
 > `--minimal` if you're building a non-coding workflow and don't want the
 > shipped coding-profile prompts in your way. Without `--minimal`, you get the
-> full mayor + `crew/doctor` + `polecat` + `polecat-qa` set, which is the right
-> starting point for code-shaped work.
+> full mayor + `crew/doctor` + polecat-template (`polecat`, `polecat-qa`,
+> `polecat-build-pr`) set, which is the right starting point for code-shaped
+> work.
 
 > **Customizing prompts safely:** if your edits go inside the prompt body
 > (rules, sections, protocol steps) rather than the frontmatter or roster,
@@ -239,9 +240,12 @@ the item and emits `mg done` on completion.
 
 ### Author a second polecat template
 
-You're not limited to one template. The shipped profile already has two:
-`polecat.md` (writes code) and `polecat-qa.md` (verifies code). Add a third by
-dropping a file under `~/.pogo/agents/templates/`:
+You're not limited to one template. The shipped profile already has three:
+`polecat.md` (writes code, submits to the refinery), `polecat-qa.md` (verifies
+code), and `polecat-build-pr.md` (writes code on the GitHub-issue track: opens
+a PR and works the review loop instead of self-submitting — the coordinator
+submits to the refinery when review passes). Add another by dropping a file
+under `~/.pogo/agents/templates/`:
 
 ```bash
 $EDITOR ~/.pogo/agents/templates/polecat-research.md

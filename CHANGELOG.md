@@ -11,6 +11,17 @@ is the curated, human-readable summary kept in sync at each release cut.
 ## [Unreleased]
 
 ### Added
+- **`polecat-build-pr.md` template: issue-track build variant** (mg-9675,
+  gh-issue-workflow design §3/§6). Shipped polecat template for work that
+  answers a GitHub issue: after commit + branch push the builder opens a PR
+  with `gh pr create` (body links the `gh: <owner>/<repo>#<n>` issue ref and
+  the approved triage recommendation) instead of running
+  `pogo refinery submit`, mails the coordinator + the review ticket owner,
+  and stays alive for the modify↔review loop (fix → push → `gh pr comment` →
+  mail the reviewer back). Refinery submission happens later, by the
+  coordinator, when the review loop passes — the builder never self-submits.
+  `polecat.md` is unchanged for internal mg work (two audiences, two
+  protocols — separate template rather than a conditional).
 - **`pogo agent park` / `pogo agent wake`: supported crew dormancy** (mg-41e1,
   design mg-88a8). `park` persists a flag at `~/.pogo/agents/<name>/.parked`
   *before* stopping the agent — so the `restart_on_crash` respawn can never

@@ -152,7 +152,7 @@ func TestExpandTemplateToFile(t *testing.T) {
 // shape, update this test deliberately rather than letting the section
 // disappear on a stray edit.
 func TestShippedTemplatesSurfaceRecentActivity(t *testing.T) {
-	for _, name := range []string{"prompts/templates/polecat.md", "prompts/templates/polecat-qa.md"} {
+	for _, name := range []string{"prompts/templates/polecat.md", "prompts/templates/polecat-qa.md", "prompts/templates/polecat-build-pr.md"} {
 		data, err := defaultPrompts.ReadFile(name)
 		if err != nil {
 			t.Fatalf("read embedded %s: %v", name, err)
@@ -201,7 +201,7 @@ func TestShippedTemplatesProviderGating(t *testing.T) {
 		return buf.String()
 	}
 
-	for _, name := range []string{"prompts/templates/polecat.md", "prompts/templates/polecat-qa.md"} {
+	for _, name := range []string{"prompts/templates/polecat.md", "prompts/templates/polecat-qa.md", "prompts/templates/polecat-build-pr.md"} {
 		for _, provider := range []string{"pi", "codex"} {
 			out := expand(t, name, provider)
 			for _, ism := range claudeIsms {
@@ -220,6 +220,56 @@ func TestShippedTemplatesProviderGating(t *testing.T) {
 				t.Errorf("%s under provider \"claude\": expected %q in expanded prompt", name, ism)
 			}
 		}
+	}
+}
+
+// TestShippedBuildPRTemplateProtocol pins the protocol contract of the
+// issue-track build template (mg-9675, gh-issue-workflow design §3/§6): the
+// builder opens a PR linking the GH issue and triage recommendation, works
+// the modify↔review loop via mail + gh pr comment, and NEVER self-submits to
+// the refinery — the coordinator submits after the review loop passes.
+func TestShippedBuildPRTemplateProtocol(t *testing.T) {
+	data, err := defaultPrompts.ReadFile("prompts/templates/polecat-build-pr.md")
+	if err != nil {
+		t.Fatalf("read embedded polecat-build-pr.md: %v", err)
+	}
+	_, body, err := parsePromptFrontmatterBytes(data)
+	if err != nil {
+		t.Fatalf("parse frontmatter: %v", err)
+	}
+	tmpl, err := template.New("polecat-build-pr").Parse(body)
+	if err != nil {
+		t.Fatalf("parse template: %v", err)
+	}
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, withDefaults(TemplateVars{Id: "mg-test", Provider: "claude"})); err != nil {
+		t.Fatalf("execute template: %v", err)
+	}
+	out := buf.String()
+
+	for _, want := range []string{
+		// PR creation replaces refinery submission, body links issue + triage rec.
+		"gh pr create",
+		"Resolves <owner>/<repo>#<n>",
+		"triage recommendation",
+		// Review loop: PR comments plus direct mail to the reviewer.
+		"gh pr comment",
+		// The no-self-submit rule must be stated explicitly.
+		"Never run `pogo refinery submit` yourself",
+		"Refinery submission happens later, by the mayor",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("expanded polecat-build-pr.md: expected %q", want)
+		}
+	}
+
+	// The internal-track self-submit command must not appear as an
+	// instruction (polecat.md's step-5 form is "pogo refinery submit
+	// polecat-<id> ..."). Mentions of the command inside the "never run"
+	// prose don't carry the branch argument, so this catches a copy-paste
+	// of the submit step without false-positives on the prohibition text.
+	if strings.Contains(out, "pogo refinery submit polecat-") {
+		t.Errorf("expanded polecat-build-pr.md: contains internal-track self-submit command")
 	}
 }
 
@@ -706,6 +756,7 @@ func TestInstallPromptsUpdatesUnstampedFiles(t *testing.T) {
 	os.WriteFile(filepath.Join(crewDir, "doctor.md"), []byte("# Old doctor\n"), 0644)
 	os.WriteFile(filepath.Join(tmplDir, "polecat.md"), []byte("# Old polecat\n"), 0644)
 	os.WriteFile(filepath.Join(tmplDir, "polecat-qa.md"), []byte("# Old polecat-qa\n"), 0644)
+	os.WriteFile(filepath.Join(tmplDir, "polecat-build-pr.md"), []byte("# Old polecat-build-pr\n"), 0644)
 
 	result, err := InstallPrompts(InstallOpts{})
 	if err != nil {
@@ -715,7 +766,7 @@ func TestInstallPromptsUpdatesUnstampedFiles(t *testing.T) {
 	if len(result.Updated) == 0 {
 		t.Error("expected unstamped files to be updated")
 	}
-	for _, rel := range []string{"mayor.md", "crew/doctor.md", "templates/polecat.md", "templates/polecat-qa.md"} {
+	for _, rel := range []string{"mayor.md", "crew/doctor.md", "templates/polecat.md", "templates/polecat-qa.md", "templates/polecat-build-pr.md"} {
 		found := false
 		for _, u := range result.Updated {
 			if u == rel {

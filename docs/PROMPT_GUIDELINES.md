@@ -116,6 +116,7 @@ All prompt files in `internal/agent/prompts/` and `~/.pogo/agents/` were audited
 | Mayor | `prompts/mayor.md` | Yes | Uses CLI tools, no model references, standard markdown |
 | Polecat | `prompts/templates/polecat.md` | Yes | Template-driven, behavioral instructions only |
 | Polecat QA | `prompts/templates/polecat-qa.md` | Yes | Same pattern as polecat, verification-focused |
+| Polecat Build-PR | `prompts/templates/polecat-build-pr.md` | Yes | Issue-track build variant: opens a PR via `gh`, review loop by mail, no self refinery-submit |
 | Architect (crew) | `~/.pogo/agents/crew/architect.md` | Yes | CLI-driven coordination, no model assumptions |
 
 No current prompt files contain Claude-specific patterns. The prompts are behavioral ("claim the work item", "run the tests", "mail the mayor") and interact through shell commands. They would work with any agent runtime that can execute shell commands and follow markdown instructions.
