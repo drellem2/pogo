@@ -84,6 +84,19 @@ Rejected alternatives:
   the triage recommendation linked, review loop runs on the PR (§6), and when
   the loop terminates the coordinator submits to the refinery exactly as
   today. Gates still run; the refinery still does the merge.
+- **External-fork PRs** (first hit: pogo#43 / PR #44, 2026-07-05): the
+  refinery-path default above assumes *our* PRs, where closed-not-merged is
+  cosmetic. For an external contributor, "closed" reads as rejected and costs
+  them the merged-PR credit — the exact optics this workflow exists to fix.
+  Until pr_mode (phase 2) lands, apply this decision rule: if the PR is
+  current with main (`gh pr view --json mergeStateStatus` not BEHIND), use
+  the refinery path — the ff-merge lands the exact head SHAs and GitHub marks
+  the PR merged on its own. If it is behind, merge with `gh pr merge --rebase
+  --admin` (the documented fallback): the review polecat's QA lens already
+  built and tested the head, which acceptably approximates the gates for the
+  one-off. Rebase preserves author fields either way, so git-log attribution
+  survives the refinery path too; only the PR badge is at stake. Once pr_mode
+  lands this rule retires.
 
 ### Phasing
 
