@@ -285,7 +285,11 @@ max_attempts  = 7      # ff-only retry budget — raise on repos that race CI
 skip_on_retry = true   # bypass gates on attempts > 1 (cost-saving when
                        # the only change between attempts is a version bump
                        # fetched from main)
+pr_mode       = true   # push the rebased branch back so open GitHub PRs
+                       # read "merged" (see below)
 ```
+
+**PR mode.** The refinery rebases before merging, so a branch's original SHAs never land verbatim on the target — GitHub would show any open PR for the branch as "closed" rather than "merged". With `pr_mode = true`, the refinery asks `gh pr view` whether an open PR exists for the branch and, if so, force-pushes (`--force-with-lease`) the rebased branch back to origin after gates pass and before the ff-merge push — realigning the PR head with exactly the gate-tested commits, so GitHub marks the PR merged when the tip lands. The path is fail-soft end to end: if the `gh` lookup or the push-back fails (missing `gh`, no network, someone pushed to the PR branch mid-merge), the merge proceeds normally and the PR merely reads "closed" — the pre-`pr_mode` status quo.
 
 **Future:** Batch-then-bisect merging (testing N branches together, binary search on failure) is a known optimization but out of MVP scope.
 

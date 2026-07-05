@@ -1,6 +1,8 @@
 package refinery
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -88,7 +90,7 @@ func (r *Refinery) processMerge(mr *MergeRequest) (string, string, bool, error) 
 		emitMergeAttempted(mr, attempt)
 
 		skipGates := skipGatesOnRetry && attempt > 1
-		output, stage, sha, attemptErr := r.attemptMerge(wtDir, mr, attempt, skipGates)
+		output, stage, sha, attemptErr := r.attemptMerge(wtDir, mr, attempt, skipGates, cfg.PRMode)
 		gateOutput = output
 		if attemptErr == nil {
 			emitMerged(mr, attempt, sha, time.Since(startTime).Seconds(), false)
@@ -127,7 +129,13 @@ func (r *Refinery) processMerge(mr *MergeRequest) (string, string, bool, error) 
 // retries when [gates] skip_on_retry is set, on the principle that gates
 // already passed on near-identical code and only the version-bump commit
 // from main differs.
-func (r *Refinery) attemptMerge(wtDir string, mr *MergeRequest, attempt int, skipGates bool) (output string, stage string, sha string, err error) {
+//
+// When prMode is true ([gates] pr_mode in .pogo/refinery.toml) and an open
+// GitHub PR exists for the branch, the rebased branch is force-pushed back
+// to origin after gates pass and before the ff-merge push, so GitHub marks
+// the PR "merged" (not "closed") when the tip lands on the target. All
+// failures on that path are soft — see pushBackForPR.
+func (r *Refinery) attemptMerge(wtDir string, mr *MergeRequest, attempt int, skipGates, prMode bool) (output string, stage string, sha string, err error) {
 	// Fetch latest from origin
 	log.Printf("refinery: MR %s step=fetch branch=%s attempt=%d", mr.ID, mr.Branch, attempt)
 	if out, gerr := gitCmdOutput(wtDir, "fetch", "origin"); gerr != nil {
@@ -174,6 +182,17 @@ func (r *Refinery) attemptMerge(wtDir string, mr *MergeRequest, attempt int, ski
 		}
 	}
 
+	// PR-mode push-back (phase 2, mg-b828): the rebase above rewrote the
+	// branch's SHAs, so the PR's head tip would never become reachable from
+	// the target and GitHub would show the PR "closed" instead of "merged".
+	// Pushing the rebased branch back to origin before the ff-merge push
+	// realigns the PR head with exactly the gate-tested commits that are
+	// about to land. Must happen before the target push — GitHub marks a PR
+	// merged when the head tip becomes reachable from the base.
+	if prMode {
+		r.pushBackForPR(wtDir, mr, attempt)
+	}
+
 	// Checkout target ref for merge
 	log.Printf("refinery: MR %s step=checkout-target target=%s attempt=%d", mr.ID, mr.TargetRef, attempt)
 	if out, gerr := gitCmdOutput(wtDir, "checkout", mr.TargetRef); gerr != nil {
@@ -209,6 +228,77 @@ func (r *Refinery) attemptMerge(wtDir string, mr *MergeRequest, attempt int, ski
 	headSHA, _ := gitCmdOutput(wtDir, "rev-parse", "HEAD")
 
 	return gateOutput, "push", headSHA, nil
+}
+
+// prLookupTimeout bounds the gh CLI call in openPRNumber so a hung network
+// lookup can't stall the merge pipeline — the push-back is cosmetic-only and
+// never worth blocking a merge on.
+const prLookupTimeout = 30 * time.Second
+
+// pushBackForPR force-pushes the just-rebased branch back to origin when an
+// open GitHub PR exists for it, so GitHub marks the PR "merged" once the tip
+// lands on the target. Every failure here is soft: the merge itself must
+// never be blocked by PR cosmetics, so lookup errors (gh missing, no
+// network, non-GitHub remote) and push failures (lease lost to a concurrent
+// push on the PR branch) are logged and skipped — the PR then reads
+// "closed" instead of "merged", which is the pre-phase-2 status quo.
+func (r *Refinery) pushBackForPR(wtDir string, mr *MergeRequest, attempt int) {
+	num, err := openPRNumber(wtDir, mr.Branch)
+	if err != nil {
+		log.Printf("refinery: MR %s step=pr-push-back skipped: gh lookup failed (%v) — a PR for %s (if any) will read closed, not merged", mr.ID, err, mr.Branch)
+		return
+	}
+	if num == 0 {
+		log.Printf("refinery: MR %s step=pr-push-back skipped: no open PR for branch %s", mr.ID, mr.Branch)
+		return
+	}
+	log.Printf("refinery: MR %s step=pr-push-back branch=%s pr=#%d attempt=%d", mr.ID, mr.Branch, num, attempt)
+	// --force-with-lease uses origin/<branch> as fetched at the top of this
+	// attempt: if anyone pushed to the PR branch since, the push is refused
+	// instead of clobbering their commits.
+	if out, gerr := gitCmdOutput(wtDir, "push", "--force-with-lease", "origin", mr.Branch); gerr != nil {
+		log.Printf("refinery: MR %s step=pr-push-back failed (%s) — proceeding; PR #%d will read closed, not merged", mr.ID, out, num)
+	}
+}
+
+// openPRNumber returns the number of the open GitHub PR whose head is
+// branch, or 0 when the branch has a PR that is not open. gh infers the
+// GitHub repo from the worktree's origin remote. A branch with no PR at all
+// is reported as (0, nil); anything else that goes wrong (gh not installed,
+// no network, non-GitHub remote, output drift) is returned as an error for
+// the caller to fail soft on.
+func openPRNumber(wtDir, branch string) (int, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), prLookupTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "gh", "pr", "view", branch, "--json", "state,number")
+	cmd.Dir = wtDir
+	cmd.Env = append(os.Environ(), "GH_PROMPT_DISABLED=1", "GH_NO_UPDATE_NOTIFIER=1")
+	out, err := cmd.Output()
+	if err != nil {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			stderr := strings.TrimSpace(string(ee.Stderr))
+			// gh exits 1 with this message when the branch simply has no
+			// PR — a normal state for internal mg-track branches, not a
+			// lookup failure.
+			if strings.Contains(strings.ToLower(stderr), "no pull requests found") {
+				return 0, nil
+			}
+			return 0, fmt.Errorf("gh pr view %s: %s: %w", branch, stderr, err)
+		}
+		return 0, fmt.Errorf("gh pr view %s: %w", branch, err)
+	}
+	var pr struct {
+		State  string `json:"state"`
+		Number int    `json:"number"`
+	}
+	if err := json.Unmarshal(out, &pr); err != nil {
+		return 0, fmt.Errorf("parse gh pr view output: %w", err)
+	}
+	if !strings.EqualFold(pr.State, "OPEN") {
+		return 0, nil
+	}
+	return pr.Number, nil
 }
 
 // gateStage maps quality gate commands to a refinery_merge_failed stage value.
@@ -398,6 +488,9 @@ func (r *Refinery) loadConfig(wtDir, repoPath string) refineryConfig {
 	if !wt.SkipGatesOnRetry {
 		wt.SkipGatesOnRetry = orig.SkipGatesOnRetry
 	}
+	if !wt.PRMode {
+		wt.PRMode = orig.PRMode
+	}
 	return wt
 }
 
@@ -407,6 +500,7 @@ type refineryConfig struct {
 	DeployCommand    string
 	MaxAttempts      int  // [gates] max_attempts — 0 means use defaultMaxAttempts
 	SkipGatesOnRetry bool // [gates] skip_on_retry — bypass gates on attempt > 1
+	PRMode           bool // pr_mode — push rebased branch back so open PRs read merged
 }
 
 // parseRefineryToml reads a .pogo/refinery.toml and extracts gate commands.
@@ -429,6 +523,7 @@ func parseRefineryToml(path string) []string {
 //	commands       = ["./build.sh", "./test.sh"]
 //	max_attempts   = 7      # ff-only retry budget; default 7 if omitted
 //	skip_on_retry  = true   # bypass gates on attempts > 1 (race recovery)
+//	pr_mode        = true   # push rebased branch back so open PRs read merged
 //
 //	[deploy]
 //	command = "./deploy.sh"
@@ -486,6 +581,10 @@ func parseRefineryConfig(path string) refineryConfig {
 			}
 		case section == "gates" && key == "skip_on_retry":
 			cfg.SkipGatesOnRetry = parseTomlBool(val)
+		case key == "pr_mode":
+			// Accepted top-level or under [gates] — the ticket and design
+			// doc cite both spellings (mg-b828).
+			cfg.PRMode = parseTomlBool(val)
 		case section == "deploy" && key == "command":
 			cfg.DeployCommand = val
 		}

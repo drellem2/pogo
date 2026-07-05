@@ -105,13 +105,18 @@ Rejected alternatives:
   never land verbatim on main and GitHub shows the PR "closed" (when gitgc
   deletes the branch) rather than "merged". Review history is preserved either
   way.
-- **Phase 2 (small refinery change, makes PRs read "merged")**: teach
-  `attemptMerge` a PR-aware mode — when an open PR exists for the branch
-  (`gh pr view --json`), after rebase + gates, `git push --force-with-lease`
-  the rebased branch back to origin *before* the ff-merge push. GitHub then
-  marks the PR merged when the tip lands on main. This is ~30 lines in
-  `internal/refinery/merge.go` plus a `gh` lookup; keep it optional per-repo
-  config (`[gates]`-style key in `.pogo/refinery.toml`, e.g. `pr_mode = true`).
+- **Phase 2 (small refinery change, makes PRs read "merged")** — **SHIPPED
+  (mg-b828, 2026-07-05)**: `attemptMerge` has a PR-aware mode — when an open
+  PR exists for the branch (`gh pr view --json state,number`), after rebase +
+  gates, it `git push --force-with-lease`es the rebased branch back to origin
+  *before* the ff-merge push. GitHub then marks the PR merged when the tip
+  lands on main. Optional per-repo config: `pr_mode = true` in
+  `.pogo/refinery.toml` (top-level or under `[gates]`). Fail-soft throughout:
+  a failed `gh` lookup or push-back logs and falls through to the normal
+  path (PR reads closed — the phase-1 status quo). See
+  `internal/refinery/merge.go` (`pushBackForPR`) and ARCHITECTURE.md
+  "PR mode". The §3 external-fork decision rule above retires once the
+  target repos set `pr_mode = true`.
 
   Phase 2 is scheduled **immediately after the first end-to-end proof**, not
   loosely "later": pm-pogo's review is right that for the company-adoption

@@ -1591,6 +1591,209 @@ func TestSubmitAutoCreateTargetRef(t *testing.T) {
 	})
 }
 
+func TestParseRefineryTomlPRMode(t *testing.T) {
+	dir := t.TempDir()
+
+	// Under [gates] (the design doc's spelling)
+	path := filepath.Join(dir, "gates.toml")
+	os.WriteFile(path, []byte(`
+[gates]
+commands = ["./build.sh"]
+pr_mode = true
+`), 0644)
+	if !parseRefineryConfig(path).PRMode {
+		t.Error("expected PRMode=true under [gates]")
+	}
+
+	// Top-level (the ticket's spelling)
+	path2 := filepath.Join(dir, "toplevel.toml")
+	os.WriteFile(path2, []byte(`
+pr_mode = true
+`), 0644)
+	if !parseRefineryConfig(path2).PRMode {
+		t.Error("expected PRMode=true at top level")
+	}
+
+	// Absent → false
+	path3 := filepath.Join(dir, "absent.toml")
+	os.WriteFile(path3, []byte(`
+[gates]
+commands = ["./build.sh"]
+`), 0644)
+	if parseRefineryConfig(path3).PRMode {
+		t.Error("expected PRMode=false when key absent")
+	}
+
+	// Explicit false → false
+	path4 := filepath.Join(dir, "false.toml")
+	os.WriteFile(path4, []byte(`
+[gates]
+pr_mode = false
+`), 0644)
+	if parseRefineryConfig(path4).PRMode {
+		t.Error("expected PRMode=false when explicitly false")
+	}
+}
+
+// fakeGH installs a stub `gh` executable ahead of PATH with the given shell
+// script body, so PR-mode tests control the PR lookup without a network or
+// a real GitHub repo.
+func fakeGH(t *testing.T, script string) {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "gh")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+script+"\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// setupPRModeRepo builds a bare origin with pr_mode enabled on main, a
+// feature branch, and a later commit on main so the refinery's rebase
+// actually rewrites the branch SHAs (the case PR-mode exists for).
+// Returns the origin path and the feature branch's pre-merge tip SHA.
+func setupPRModeRepo(t *testing.T) (originDir, branchSHA string) {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found")
+	}
+
+	originDir = t.TempDir()
+	run(t, originDir, "git", "init", "--bare", "-b", "main")
+
+	workDir := t.TempDir()
+	run(t, workDir, "git", "clone", originDir, ".")
+	run(t, workDir, "git", "config", "user.email", "test@test.com")
+	run(t, workDir, "git", "config", "user.name", "Test")
+	os.MkdirAll(filepath.Join(workDir, ".pogo"), 0755)
+	os.WriteFile(filepath.Join(workDir, ".pogo", "refinery.toml"), []byte(`
+[gates]
+pr_mode = true
+`), 0644)
+	os.WriteFile(filepath.Join(workDir, "README.md"), []byte("# Test"), 0644)
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", "initial commit")
+	run(t, workDir, "git", "push", "origin", "main")
+
+	// Feature branch forked from the initial commit.
+	run(t, workDir, "git", "checkout", "-b", "feature-pr")
+	os.WriteFile(filepath.Join(workDir, "feature.txt"), []byte("new feature"), 0644)
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", "add feature")
+	run(t, workDir, "git", "push", "origin", "feature-pr")
+
+	// Advance main so the rebase rewrites the branch's SHAs.
+	run(t, workDir, "git", "checkout", "main")
+	os.WriteFile(filepath.Join(workDir, "other.txt"), []byte("moved on"), 0644)
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", "main moved on")
+	run(t, workDir, "git", "push", "origin", "main")
+
+	branchSHA = strings.TrimSpace(runOut(t, originDir, "git", "rev-parse", "feature-pr"))
+	return originDir, branchSHA
+}
+
+// TestProcessMergePRModePushBack exercises the phase-2 PR-mode happy path
+// (mg-b828): with pr_mode enabled and gh reporting an open PR, the refinery
+// force-pushes the rebased branch back to origin, so after the ff-merge the
+// branch tip on origin equals the target tip — the condition under which
+// GitHub marks the PR merged.
+func TestProcessMergePRModePushBack(t *testing.T) {
+	originDir, oldSHA := setupPRModeRepo(t)
+	fakeGH(t, `echo '{"state":"OPEN","number":7}'`)
+
+	r, err := New(Config{Enabled: true, PollInterval: time.Hour, WorktreeDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := r.Submit(MergeRequest{
+		RepoPath:  originDir,
+		Branch:    "feature-pr",
+		TargetRef: "main",
+		Author:    "test-cat",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.processNext()
+
+	mr := r.Get(id)
+	if mr.Status != StatusMerged {
+		t.Fatalf("expected merged, got %s (error: %s)", mr.Status, mr.Error)
+	}
+
+	mainSHA := strings.TrimSpace(runOut(t, originDir, "git", "rev-parse", "main"))
+	branchSHA := strings.TrimSpace(runOut(t, originDir, "git", "rev-parse", "feature-pr"))
+	if branchSHA == oldSHA {
+		t.Error("expected origin branch to be force-pushed to the rebased SHAs, but tip is unchanged")
+	}
+	if branchSHA != mainSHA {
+		t.Errorf("expected origin branch tip %s to equal merged main tip %s (PR would not read merged)", branchSHA, mainSHA)
+	}
+}
+
+// TestProcessMergePRModeFailSoft: when the gh PR lookup fails, PR mode must
+// not block the merge (the push-back is cosmetic-only) and must not rewrite
+// the branch on origin.
+func TestProcessMergePRModeFailSoft(t *testing.T) {
+	originDir, oldSHA := setupPRModeRepo(t)
+	fakeGH(t, `echo "gh: network unreachable" >&2; exit 1`)
+
+	r, err := New(Config{Enabled: true, PollInterval: time.Hour, WorktreeDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := r.Submit(MergeRequest{
+		RepoPath:  originDir,
+		Branch:    "feature-pr",
+		TargetRef: "main",
+		Author:    "test-cat",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.processNext()
+
+	mr := r.Get(id)
+	if mr.Status != StatusMerged {
+		t.Fatalf("expected merged despite gh failure, got %s (error: %s)", mr.Status, mr.Error)
+	}
+	if got := strings.TrimSpace(runOut(t, originDir, "git", "rev-parse", "feature-pr")); got != oldSHA {
+		t.Errorf("expected origin branch untouched on gh failure, got %s (was %s)", got, oldSHA)
+	}
+}
+
+// TestOpenPRNumber covers the gh output states openPRNumber distinguishes:
+// open PR, non-open PR, no PR at all, and hard lookup failure.
+func TestOpenPRNumber(t *testing.T) {
+	dir := t.TempDir()
+
+	fakeGH(t, `echo '{"state":"OPEN","number":42}'`)
+	if n, err := openPRNumber(dir, "b"); err != nil || n != 42 {
+		t.Errorf("open PR: expected (42, nil), got (%d, %v)", n, err)
+	}
+
+	fakeGH(t, `echo '{"state":"MERGED","number":42}'`)
+	if n, err := openPRNumber(dir, "b"); err != nil || n != 0 {
+		t.Errorf("merged PR: expected (0, nil), got (%d, %v)", n, err)
+	}
+
+	fakeGH(t, `echo 'no pull requests found for branch "b"' >&2; exit 1`)
+	if n, err := openPRNumber(dir, "b"); err != nil || n != 0 {
+		t.Errorf("no PR: expected (0, nil), got (%d, %v)", n, err)
+	}
+
+	fakeGH(t, `echo "gh: could not determine base repo" >&2; exit 1`)
+	if _, err := openPRNumber(dir, "b"); err == nil {
+		t.Error("hard failure: expected an error, got nil")
+	}
+
+	fakeGH(t, `echo 'not json'`)
+	if _, err := openPRNumber(dir, "b"); err == nil {
+		t.Error("bad JSON: expected an error, got nil")
+	}
+}
+
 func run(t *testing.T, dir string, name string, args ...string) {
 	t.Helper()
 	cmd := exec.Command(name, args...)
