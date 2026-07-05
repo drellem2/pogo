@@ -230,7 +230,9 @@ real new primitive; don't build it for a sample size of one.
 
 1. **mg-f7a3 — Ruleset setup** — enable the §3 ruleset on drellem2/pogo and
    drellem2/macguffin (scope per Daniel 2026-07-05; pogo-reminders dropped).
-   Unblocked; trivial to execute (admin `gh api` call or UI).
+   **Done 2026-07-05**: ruleset `main-require-pr` active on both repos (pogo
+   id 18534732, macguffin id 18534735); admin direct-push bypass and
+   `gh pr create` verified. Ops notes: `docs/operations.md`.
 2. **mg-be91 — `polecat-triage.md` template** — investigate + recommend, no
    code; pm-pogo supplies the quality bar / recommendation format.
 3. **mg-546c — `polecat-review.md` template** — §6. pm-pogo reviews prompt

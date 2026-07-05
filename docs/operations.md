@@ -90,6 +90,16 @@ This drops a `.req` file into `~/.pogo/recovery/queue/` and exits 0 immediately 
 
 When tier 3 itself fails — recovery agent not installed, queue dir unwritable, kickstart returning non-zero — the failed `.req` files land in `~/.pogo/recovery/failed/`. Inspect that directory and `~/Library/Logs/pogo/recovery.log` before filing the mg; the log line `kickstart failed (rc=...)` is the most actionable signal.
 
+## GitHub branch protection on main (rulesets)
+
+Since 2026-07-05 (mg-f7a3), `main` in **drellem2/pogo** (ruleset `main-require-pr`, id 18534732) and **drellem2/macguffin** (id 18534735) is protected by a GitHub ruleset per the gh-issue workflow design (`docs/design/gh-issue-workflow-design.md` §3):
+
+- **Require a pull request before merging** — 0 approving reviews required. "Required approving reviews" is deliberately OFF: every actor on this machine shares one GitHub identity, and GitHub rejects self-reviews, so a review requirement would be unsatisfiable.
+- **Block force pushes** (`non_fast_forward`).
+- **Bypass actor: repository admin, mode `always`.** The refinery pushes to `main` as the admin identity, so refinery merges keep working unchanged — GitHub logs `Bypassed rule violations` on each such push. Only `main` is targeted (`~DEFAULT_BRANCH`); per-item `branch` targets the refinery supports are unaffected.
+
+Inspect or modify with `gh api repos/drellem2/<repo>/rulesets` (effective rules: `gh api repos/drellem2/<repo>/rules/branches/main`). In an org deployment the bypass actor becomes a dedicated refinery GitHub App; the ruleset is otherwise identical.
+
 ## See also
 
 - `scripts/launchd/README.md` — install, uninstall, and plist contracts for both `com.pogo.daemon` and `com.pogo.recovery`. Operational commands (load/unload/kickstart/inspect logs) live there.
