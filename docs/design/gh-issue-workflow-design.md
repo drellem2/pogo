@@ -1,8 +1,8 @@
 # GH-Issue Response Workflow — Mechanism Design
 
-Status: DRAFT for review (pm-pogo, mayor, Daniel)
+Status: APPROVED (pm-pogo review 2026-07-05) with Daniel corrections folded in
 Author: architect
-Date: 2026-07-05
+Date: 2026-07-05 (rev 2: pm-pogo additions + Daniel branch-field/scope corrections)
 Context: Daniel directive 2026-07-05 (company-adoption pivot). Product spec and
 triage-quality bar are owned by pm-pogo; this doc covers mechanism only.
 
@@ -21,9 +21,11 @@ triage-quality bar are owned by pm-pogo; this doc covers mechanism only.
 
 - **Refinery** (`internal/refinery/`): daemon merge queue. Per branch: fetch →
   rebase onto target → quality gates (`.pogo/refinery.toml` or
-  `build.sh`/`test.sh`) → `merge --ff-only` → `git push origin main` directly.
-  No PR support anywhere; retries on races; mails author + coordinator on
-  failure; escalates after 3 consecutive failures per author.
+  `build.sh`/`test.sh`) → `merge --ff-only` → direct `git push origin
+  <target>`. The target is the work item's `branch` field when set, default
+  branch otherwise (Daniel correction 2026-07-05 — the refinery is *not*
+  main-only). No PR support anywhere; retries on races; mails author +
+  coordinator on failure; escalates after 3 consecutive failures per author.
 - **Single GitHub identity.** Every actor on this machine — polecats, crew,
   the refinery — authenticates as the same GitHub user (ambient credentials of
   `pogod`; the refinery's `refinery@pogo.local` identity is committer metadata,
@@ -68,7 +70,9 @@ Rejected alternatives:
 
 ### Mechanism
 
-- **Protection**: a GitHub **ruleset** on `main` in each participating repo:
+- **Protection**: a GitHub **ruleset** on `main` in **drellem2/pogo and
+  drellem2/macguffin** (Daniel scope decision 2026-07-05: the intensive
+  workflow targets those two repos; the poller's repo list stays broader):
   require a pull request before merging; block force pushes; **bypass actor:
   repository admin** (today that is the one identity everything uses; in a
   company/org deployment the bypass actor becomes a dedicated refinery GitHub
@@ -95,6 +99,23 @@ Rejected alternatives:
   marks the PR merged when the tip lands on main. This is ~30 lines in
   `internal/refinery/merge.go` plus a `gh` lookup; keep it optional per-repo
   config (`[gates]`-style key in `.pogo/refinery.toml`, e.g. `pr_mode = true`).
+
+  Phase 2 is scheduled **immediately after the first end-to-end proof**, not
+  loosely "later": pm-pogo's review is right that for the company-adoption
+  audience a wall of "closed" PRs is storefront optics, not cosmetics.
+
+  Alternatives weighed for phase 2 (Daniel prompt, 2026-07-05):
+  - *Refinery-merge to a staging branch the PR targets* (using the existing
+    work-item `branch` field): **doesn't avoid the push-back.** GitHub marks
+    a PR merged only when the head branch's *tip* becomes reachable from the
+    base, and the refinery rebases before merging, so the SHAs change
+    regardless of base branch. Same dance, plus a staging→main promotion
+    step. Declined.
+  - *`gh pr merge --rebase --admin` after gates pass*: genuinely simpler (one
+    call, real merged event, admin bypasses protection), but GitHub re-does
+    the rebase server-side, so what merges is not byte-for-byte what the
+    gates tested when the base has moved. Kept as fallback; force-with-lease
+    remains the recommendation because it merges exactly the tested SHAs.
 
 ## 4. Q2 — Issue poller
 
@@ -142,6 +163,17 @@ framework abstractions" (docs/design/declarative-orchestration.md) and the
    state machine as a numbered playbook (keyed off the frontmatter above);
    pm-pogo's template gets the triage-consult section (pm-pogo owns that
    content).
+
+Two product requirements folded in from pm-pogo's review (2026-07-05):
+
+- **Reporter-visible response is the product goal.** The triage polecat posts
+  a brief professional ack comment on the GH issue when triage starts, and a
+  substantive public reply lands after the Daniel gate — the plan on go, an
+  honest reasoned close on no-go. Wording/tone standards are pm-pogo's
+  (UNIX-voice, no AI slop) and ship in the template ticket bodies.
+- **Daniel-gate semantics: silence = HOLD.** No timeout-defaults-to-go, ever,
+  on external-facing work. One re-ping at 48h is acceptable; beyond that the
+  ticket stays gated.
 
 **Growth path, when a second workflow shows up**: package a workflow as a
 **drop-in pack** — a directory of `dropins/mayor/gh-issue.md`,
@@ -196,9 +228,9 @@ real new primitive; don't build it for a sample size of one.
 
 ## 7. Build tickets (filed under design ticket mg-01e9)
 
-1. **mg-f7a3 — Ruleset setup** — enable the §3 ruleset on drellem2/{pogo,
-   macguffin,pogo-reminders}. Gated on Daniel's scope answer; trivial to
-   execute (admin `gh api` call or UI).
+1. **mg-f7a3 — Ruleset setup** — enable the §3 ruleset on drellem2/pogo and
+   drellem2/macguffin (scope per Daniel 2026-07-05; pogo-reminders dropped).
+   Unblocked; trivial to execute (admin `gh api` call or UI).
 2. **mg-be91 — `polecat-triage.md` template** — investigate + recommend, no
    code; pm-pogo supplies the quality bar / recommendation format.
 3. **mg-546c — `polecat-review.md` template** — §6. pm-pogo reviews prompt
@@ -212,19 +244,21 @@ real new primitive; don't build it for a sample size of one.
    summary format (pm-pogo owns summary content standards).
 6. **mg-0606 — Poller routing tweak** — `[gh]` mail body text pointing mayor
    at the playbook; repo list env when company repos land.
-7. **mg-b828 — Phase 2 refinery PR-mode** — §3 phasing; do after the flow is
-   proven end-to-end on a real issue.
+7. **mg-b828 — Phase 2 refinery PR-mode** — §3 phasing; lands immediately
+   after the flow is proven end-to-end on one real issue.
 
-Tickets 2–6 are polecat-executable and independent; 1 is Daniel-gated; 7 is
-deliberately last.
+Tickets 2–6 are polecat-executable and independent; 1 is unblocked (scope
+answered); 7 waits only for the first end-to-end proof.
 
 ## 8. Open questions (Daniel)
 
-- Scope of branch protection: all merges wrapped in PRs eventually, or
-  issue-track only? (pm-pogo already asked; §3 works for either answer —
-  it only changes whether internal work *also* opens PRs, not who merges.)
+- ~~Scope of branch protection~~ **Answered 2026-07-05**: the intensive
+  workflow + rulesets target **pogo and macguffin** only; poller repo list
+  stays broader. (Whether internal work also opens PRs remains open but
+  blocks nothing — §3 works either way.)
 - Will Daniel comment on PRs directly (→ build `poll-gh-prs.sh`) or gate via
   issue comments / existing channels only?
 - Appetite for a second GitHub identity (bot account or GitHub App) to make
-  approvals count and unlock "required approving reviews" — needed for the
-  company-org story eventually; not needed to ship this workflow.
+  approvals count and unlock "required approving reviews". Architect + pm-pogo
+  joint recommendation: **yes eventually** — required for the company-org
+  story — but not needed to ship this workflow.
