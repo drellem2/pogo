@@ -1367,8 +1367,8 @@ type InitResult struct {
 //
 // When minimal is true, only a mayor skeleton and a polecat template skeleton
 // are written — suitable for non-coding workflows. Otherwise the full
-// coding-profile prompts shipped with the binary (mayor + crew/doctor + polecat
-// + polecat-qa) are written.
+// coding-profile prompts shipped with the binary (mayor + crew + pm + the
+// polecat templates: polecat, polecat-qa, polecat-build-pr) are written.
 func InitPrompts(force, minimal bool) (*InitResult, error) {
 	if err := InitPromptDirs(); err != nil {
 		return nil, err
