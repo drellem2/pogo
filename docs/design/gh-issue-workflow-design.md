@@ -194,22 +194,28 @@ real new primitive; don't build it for a sample size of one.
   3. **Coordinator abort** (Daniel no-go mid-flight, superseded issue) →
      mayor stops both polecats; gitgc reaps branch/worktree as usual.
 
-## 7. Proposed build tickets (for mayor to file)
+## 7. Build tickets (filed under design ticket mg-01e9)
 
-1. **Ruleset setup** — enable the §3 ruleset on drellem2/{pogo,macguffin,
-   pogo-reminders}. Gated on Daniel's scope answer; trivial to execute
-   (admin `gh api` call or UI).
-2. **`polecat-triage.md` template** — investigate + recommend, no code;
-   pm-pogo supplies the quality bar / recommendation format.
-3. **`polecat-review.md` template** — §6. pm-pogo reviews prompt content.
-4. **Mayor playbook section** — §5 state machine + Daniel gate summary
-   format (pm-pogo owns summary content standards).
-5. **Poller routing tweak** — `[gh]` mail body text pointing mayor at the
-   playbook; repo list env when company repos land.
-6. **Phase 2 refinery PR-mode** — §3 phasing; do after the flow is proven
-   end-to-end on a real issue.
+1. **mg-f7a3 — Ruleset setup** — enable the §3 ruleset on drellem2/{pogo,
+   macguffin,pogo-reminders}. Gated on Daniel's scope answer; trivial to
+   execute (admin `gh api` call or UI).
+2. **mg-be91 — `polecat-triage.md` template** — investigate + recommend, no
+   code; pm-pogo supplies the quality bar / recommendation format.
+3. **mg-546c — `polecat-review.md` template** — §6. pm-pogo reviews prompt
+   content.
+4. **mg-9675 — `polecat-build-pr.md` template** — the issue-track build
+   variant of `polecat.md`: after branch push, `gh pr create` instead of
+   `pogo refinery submit`; stays alive for the §6 loop; never self-submits —
+   the coordinator submits on pass. Separate template rather than a
+   conditional in `polecat.md`: two audiences, two protocols.
+5. **mg-841a — Mayor playbook section** — §5 state machine + Daniel gate
+   summary format (pm-pogo owns summary content standards).
+6. **mg-0606 — Poller routing tweak** — `[gh]` mail body text pointing mayor
+   at the playbook; repo list env when company repos land.
+7. **mg-b828 — Phase 2 refinery PR-mode** — §3 phasing; do after the flow is
+   proven end-to-end on a real issue.
 
-Tickets 2–5 are polecat-executable and independent; 1 is Daniel-gated; 6 is
+Tickets 2–6 are polecat-executable and independent; 1 is Daniel-gated; 7 is
 deliberately last.
 
 ## 8. Open questions (Daniel)
