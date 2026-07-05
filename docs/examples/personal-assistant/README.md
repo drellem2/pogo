@@ -1,19 +1,22 @@
-# Personal-assistant (pa) example — HEY email feed
+# Personal-assistant (pa) example — HEY email feed + Google Calendar feed
 
 A worked example of wiring a **personal-assistant crew agent** into pogo:
-a `pa` crew agent that triages the operator's email, fed by a standalone
-poller that reads a [HEY](https://hey.com) mailbox through the official
-`hey` CLI ([basecamp/hey-cli](https://github.com/basecamp/hey-cli)) and
-delivers new mail into `pa`'s pogo mailbox.
+a `pa` crew agent that triages the operator's email and answers calendar
+questions, fed by standalone pollers — one reading a [HEY](https://hey.com)
+mailbox through the official `hey` CLI
+([basecamp/hey-cli](https://github.com/basecamp/hey-cli)), one reading
+Google Calendar through [gcalcli](https://github.com/insanum/gcalcli) —
+each delivering into `pa`'s pogo mailbox.
 
-This is the Phase-1 (email read path) shape from the pa design; the
-architecture decision record is
+This covers Phase 1 (email read path, mg-8066) and Phase 2 (calendar read
+path, mg-a909) from the pa design; the architecture decision record is
 [`docs/pa-email-ingest-research.md`](../../pa-email-ingest-research.md)
 (official CLI as primary; HEY auto-forwarding to a controlled mailbox as
-fallback; Gmail IMAP as interim). Calendar (Phase 2) is out of scope here.
+fallback; Gmail IMAP as interim; §5 covers the calendar options).
 Email *send* authority (Phase 3) is deployment-optional; when an operator
 enables it, use the [approval-gated send pattern](#send-authority-phase-3--the-approval-gated-send-pattern)
-below rather than open-ended write access.
+below rather than open-ended write access. Calendar *write* authority
+(also Phase 3) is out of scope here — the calendar feed is read-only.
 
 ## Architecture
 
@@ -62,8 +65,10 @@ Design rules this encodes:
 ```
 docs/examples/personal-assistant/
 ├── README.md                            (this file)
-├── bin/poll-hey.sh                      (the poller — reference copy)
-└── launchd/com.pogo.pa-heyfeed.plist    (LaunchAgent template)
+├── bin/poll-hey.sh                      (email poller — reference copy)
+├── bin/poll-gcal.sh                     (calendar poller — reference copy)
+├── launchd/com.pogo.pa-heyfeed.plist    (LaunchAgent template, email)
+└── launchd/com.pogo.pa-calendar.plist   (LaunchAgent template, calendar)
 ```
 
 The deployed copies live outside the repo: the poller at
@@ -185,3 +190,158 @@ The stub answers `auth status --json` with a canned envelope and `box <name>
 run delivers nothing), bump a fixture `updated_at` to verify the
 thread-update path, and run with `STUB_AUTH=false` to verify the quiet
 pre-auth idle.
+
+---
+
+# Google Calendar feed (Phase 2, mg-a909)
+
+Same skeleton, second feed: a standalone poller reads the operator's Google
+Calendar through [gcalcli](https://github.com/insanum/gcalcli) and mails `pa`
+about new, changed, or removed upcoming events. Read path only — `pa` may
+run read-only gcalcli commands itself (`agenda`, `calw`, `calm`, `list`,
+`search`); calendar *writes* (`add`, `edit`, `delete`, `quick`, `import`,
+`agendaupdate`) are Phase 3 and forbidden until then.
+
+```
+Google Calendar ──(gcalcli agenda --tsv, OAuth)──► poll-gcal.sh  (LaunchAgent, ~/.pogo/pogo-pa/bin/)
+                                                      │  seen.json dedupe (~/.pogo/pa/gcalfeed/)
+                                                      ▼
+                                                mg mail send pa --from=gcal-feed
+                                                      │
+                                                      ▼
+                                                pa crew agent  — answers "what's on today/this week"
+                                                      │           via read-only gcalcli; folds today's
+                                                      ▼           agenda into its morning sweep
+                                                mg mail send human
+```
+
+## Why gcalcli (mechanism decision)
+
+Evaluated per the mg-113d research sidebar (consumer OAuth realities):
+
+- **gcalcli (chosen).** Maintained CLI (4.5.x, Homebrew) that wraps the
+  Calendar API: OAuth login + token refresh, recurring-event expansion, TSV
+  output with a header row, and stable per-instance event ids
+  (`--details id`) for dedupe. Everything a hand-rolled script would need to
+  reimplement.
+- **Minimal script + OAuth device-code flow (rejected).** Google's
+  limited-input-device flow does not allow Calendar scopes at all, so the
+  "device flow avoids the consent screen" hope is moot — a custom script
+  needs the same loopback-server installed-app flow gcalcli already has.
+- **Google CalDAV (rejected).** Requires the same OAuth plumbing (no
+  app-password basic auth, unlike iCloud) *plus* a CalDAV client and RRULE
+  expansion. Strictly worse.
+
+No path avoids a Google Cloud project: gcalcli ships no embedded OAuth
+client (Google policy), so the operator supplies their own client id/secret.
+The consent-screen clicks are documented below as part of the one-login
+step. Trade-off to know: gcalcli requests the full `auth/calendar` scope
+(read-write token) — the read-only boundary is enforced at the command/
+prompt level, same as the hey feed (where the CLI can also send email).
+
+## Setup
+
+1. **Install the CLI:** `brew install gcalcli` (or `pipx install gcalcli`).
+
+2. **Deploy the poller** and its LaunchAgent (idles quietly until auth):
+
+   ```bash
+   mkdir -p ~/.pogo/pogo-pa/bin ~/.pogo/pa/gcalfeed
+   cp bin/poll-gcal.sh ~/.pogo/pogo-pa/bin/
+   # edit launchd/com.pogo.pa-calendar.plist: replace /Users/YOU
+   cp launchd/com.pogo.pa-calendar.plist ~/Library/LaunchAgents/
+   launchctl load ~/Library/LaunchAgents/com.pogo.pa-calendar.plist
+   launchctl kickstart gui/$(id -u)/com.pogo.pa-calendar
+   ```
+
+   The log at `~/.pogo/pa/gcalfeed/poller.log` should show one
+   "not authenticated … idles quietly" line and nothing else.
+
+3. **Extend the `pa` crew prompt** (`~/.pogo/agents/crew/pa.md`): the feed
+   format (`--from=gcal-feed`, `[gcal] <date> <time> — <title>` subjects,
+   `updated:`/`removed:` variants), the read-only command list above, the
+   write prohibition, and a line in its morning-sweep schedule message to
+   fold `gcalcli agenda` for today into the digest mailed to `human`.
+
+4. **One-time Google auth** (the single interactive step; ~5 minutes of
+   console clicks because Google requires a per-user OAuth client):
+
+   1. [console.cloud.google.com](https://console.cloud.google.com) → create
+      a project (any name, e.g. `pa-gcal`).
+   2. *APIs & Services → Library* → enable **Google Calendar API**.
+   3. *APIs & Services → OAuth consent screen* (Google Auth Platform) →
+      configure: **External**, fill in app name + your email twice, no
+      scopes/branding needed.
+   4. *Audience* → **Publish app** (status "In production"). Do NOT stay in
+      "Testing": Testing-status refresh tokens expire after 7 days and the
+      poller dies weekly. Unverified-in-production is fine for personal use —
+      the login just shows an "unverified app" warning (Advanced → continue).
+   5. *Clients* → Create client → type **Desktop app** → note the client id
+      and secret (these are not account credentials; they identify the app).
+   6. On the Mac: `gcalcli init` → paste client id/secret → browser opens →
+      sign in with the Google account → allow. The token lands in
+      `~/Library/Application Support/gcalcli/oauth` and the poller goes live
+      on its next cycle — no restart needed.
+
+## Poller contract
+
+`bin/poll-gcal.sh` — environment knobs, all optional:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `POLL_INTERVAL` | `300` | Seconds between cycles |
+| `STATE_DIR` | `~/.pogo/pa/gcalfeed` | Holds `seen.json` |
+| `MAILDIR_ROOT` | `~/.macguffin/mail` | Where delivery is verified |
+| `TARGET_AGENT` | `pa` | Mailbox to deliver to |
+| `FROM_NAME` | `gcal-feed` | Sender name on delivered mail |
+| `GCALCLI_BIN` | `gcalcli` | Override with a stub for fixture tests |
+| `GCAL_TOKEN_FILE` | `~/Library/Application Support/gcalcli/oauth` | Token path gating polling (Linux: `~/.local/share/gcalcli/oauth`) |
+| `WINDOW_DAYS` | `7` | Days ahead to watch |
+| `FAIL_ALERT_AFTER` | `5` | Consecutive fetch failures before mailing `human` |
+| `ONESHOT` | `false` | `true` = one cycle, then exit (testing) |
+
+Semantics:
+
+- **Dedupe key** is the event id from `--details id` (recurring instances
+  get distinct ids), mapped to a fingerprint of the visible fields — a
+  rescheduled or renamed event re-surfaces as `updated:`, an event that
+  vanishes from the window before its start date as `removed:`.
+- **First authenticated cycle primes silently:** existing events are
+  recorded without one-mail-per-event flooding; `pa` gets a single
+  "feed is live — N event(s)" summary.
+- **Pre-auth gate is existence-only.** gcalcli auto-launches an interactive
+  OAuth flow when it has no token — lethal under launchd — so the poller
+  never invokes gcalcli until the token file exists. It never reads the
+  token file's contents.
+- **Fetch-failure alerting:** after `FAIL_ALERT_AFTER` consecutive gcalcli
+  failures (revoked token, password change, API outage) it mails `human`
+  once per outage with the fix (`gcalcli init`), then stays quiet until
+  recovery.
+- Pull-verify-consume delivery and atomic `seen.json` writes, exactly as
+  the hey poller.
+
+## Testing without Google auth
+
+Point `GCALCLI_BIN` at a stub that prints a TSV fixture (header row
+included) and `GCAL_TOKEN_FILE` at any non-empty file:
+
+```bash
+ONESHOT=true GCALCLI_BIN=./gcal-stub GCAL_TOKEN_FILE=./fake-oauth \
+  STATE_DIR=/tmp/gcalfeed-test TARGET_AGENT=pa-test \
+  ~/.pogo/pogo-pa/bin/poll-gcal.sh
+```
+
+First run primes (summary mail only); run again unchanged to verify dedupe
+(nothing delivered); change a fixture time to verify `updated:`; drop a
+fixture row to verify `removed:`; point `GCAL_TOKEN_FILE` at a missing file
+to verify the quiet pre-auth idle. The fixture's header row is parsed by
+name, so column order doesn't matter.
+
+## Feed-coverage caveat
+
+The feed sees the **next `WINDOW_DAYS` days only**, at `POLL_INTERVAL`
+granularity, on the calendars the Google account can read. Events further
+out, calendars the account isn't subscribed to, and sub-poll-interval churn
+are invisible to the *feed* — but `pa` answers live questions by running
+`gcalcli agenda`/`calw` directly, which has no window limit. "No feed mail
+about X" ≠ "X isn't on the calendar".

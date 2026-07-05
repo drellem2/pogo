@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Template: replace /Users/YOU throughout (launchd does not expand $HOME
+     or environment variables in paths), then:
+       cp com.pogo.pa-calendar.plist ~/Library/LaunchAgents/
+       launchctl load ~/Library/LaunchAgents/com.pogo.pa-calendar.plist
+       launchctl kickstart gui/$(id -u)/com.pogo.pa-calendar
+     PATH must include the directories holding `gcalcli`, `mg`, and `jq`. -->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.pogo.pa-calendar</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/YOU/.pogo/pogo-pa/bin/poll-gcal.sh</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/YOU/.pogo/pogo-pa</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/Users/YOU/.pogo/pa/gcalfeed/poller.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/YOU/.pogo/pa/gcalfeed/poller.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/YOU/go/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>POLL_INTERVAL</key>
+        <string>300</string>
+        <key>WINDOW_DAYS</key>
+        <string>7</string>
+    </dict>
+</dict>
+</plist>
