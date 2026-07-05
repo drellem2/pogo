@@ -152,7 +152,7 @@ func TestExpandTemplateToFile(t *testing.T) {
 // shape, update this test deliberately rather than letting the section
 // disappear on a stray edit.
 func TestShippedTemplatesSurfaceRecentActivity(t *testing.T) {
-	for _, name := range []string{"prompts/templates/polecat.md", "prompts/templates/polecat-qa.md", "prompts/templates/polecat-build-pr.md", "prompts/templates/polecat-triage.md"} {
+	for _, name := range []string{"prompts/templates/polecat.md", "prompts/templates/polecat-qa.md", "prompts/templates/polecat-build-pr.md", "prompts/templates/polecat-triage.md", "prompts/templates/polecat-review.md"} {
 		data, err := defaultPrompts.ReadFile(name)
 		if err != nil {
 			t.Fatalf("read embedded %s: %v", name, err)
@@ -201,7 +201,7 @@ func TestShippedTemplatesProviderGating(t *testing.T) {
 		return buf.String()
 	}
 
-	for _, name := range []string{"prompts/templates/polecat.md", "prompts/templates/polecat-qa.md", "prompts/templates/polecat-build-pr.md", "prompts/templates/polecat-triage.md"} {
+	for _, name := range []string{"prompts/templates/polecat.md", "prompts/templates/polecat-qa.md", "prompts/templates/polecat-build-pr.md", "prompts/templates/polecat-triage.md", "prompts/templates/polecat-review.md"} {
 		for _, provider := range []string{"pi", "codex"} {
 			out := expand(t, name, provider)
 			for _, ism := range claudeIsms {
@@ -1851,6 +1851,7 @@ func TestInitPromptsDefault(t *testing.T) {
 		filepath.Join("templates", "polecat.md"),
 		filepath.Join("templates", "polecat-qa.md"),
 		filepath.Join("templates", "polecat-triage.md"),
+		filepath.Join("templates", "polecat-review.md"),
 		filepath.Join("pm", "pm-template.md"),
 	} {
 		path := filepath.Join(tmpHome, ".pogo", "agents", rel)
@@ -2032,6 +2033,7 @@ func TestPolecatTemplatesIncludeMailCheckCron(t *testing.T) {
 		"prompts/templates/polecat.md",
 		"prompts/templates/polecat-qa.md",
 		"prompts/templates/polecat-triage.md",
+		"prompts/templates/polecat-review.md",
 	}
 	for _, path := range templates {
 		data, err := defaultPrompts.ReadFile(path)
@@ -2144,6 +2146,66 @@ func TestTriageTemplateInvestigateAndRecommendOnly(t *testing.T) {
 	// The full verdict vocabulary, including the polite already-works close.
 	if !strings.Contains(s, "implement|wontfix|needs-info|duplicate|already-works") {
 		t.Error("polecat-triage.md: expected the full recommendation vocabulary")
+	}
+}
+
+// TestReviewTemplateProtocol pins the load-bearing pieces of the reviewer
+// polecat protocol (docs/design/gh-issue-workflow-design.md §6, mg-546c):
+// the three review lenses in order, the dual-channel output (gh pr comment
+// for humans, mg done verdict JSON as the record), the same-identity
+// prohibition on `gh pr review`, and the 3-round modify↔review cap with
+// coordinator escalation. A stray edit dropping any of these silently
+// changes the gh-issue workflow's termination guarantees.
+func TestReviewTemplateProtocol(t *testing.T) {
+	data, err := defaultPrompts.ReadFile("prompts/templates/polecat-review.md")
+	if err != nil {
+		t.Fatalf("read polecat-review.md: %v", err)
+	}
+	s := string(data)
+
+	// The three lenses, present and in order.
+	qa := strings.Index(s, "QA — build and tests actually run")
+	arch := strings.Index(s, "Architecture — fits the codebase")
+	faith := strings.Index(s, "Design-faithfulness — the diff matches the approved recommendation")
+	if qa < 0 || arch < 0 || faith < 0 {
+		t.Fatalf("polecat-review.md: missing review lens heading(s): qa=%d arch=%d faith=%d", qa, arch, faith)
+	}
+	if !(qa < arch && arch < faith) {
+		t.Errorf("polecat-review.md: lenses out of order: qa=%d arch=%d faith=%d (want QA < architecture < design-faithfulness)", qa, arch, faith)
+	}
+
+	// Design-faithfulness must name its two failure modes.
+	for _, want := range []string{"scope creep", "silent omissions"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("polecat-review.md: expected design-faithfulness lens to flag %q", want)
+		}
+	}
+
+	// Dual-channel output: PR comment for visibility, mg verdict as the record.
+	if !strings.Contains(s, "gh pr comment") {
+		t.Error("polecat-review.md: expected `gh pr comment` as the PR-visible channel")
+	}
+	if !strings.Contains(s, "never `gh pr review`") {
+		t.Error("polecat-review.md: expected the same-identity prohibition on `gh pr review`")
+	}
+	if !strings.Contains(s, `"verdict": "pass"`) || !strings.Contains(s, `"verdict": "fail"`) {
+		t.Error("polecat-review.md: expected mg done verdict JSON for both pass and fail")
+	}
+
+	// Loop protocol: findings mailed to the builder directly, round status and
+	// verdict transitions to the coordinator, 3-round cap with escalation.
+	if !strings.Contains(s, "mg mail send <build-ticket-id>") {
+		t.Error("polecat-review.md: expected findings mailed directly to the builder polecat")
+	}
+	if !strings.Contains(s, "round 3 ends without a pass") {
+		t.Error("polecat-review.md: expected the 3-round cap termination exit")
+	}
+	if !strings.Contains(s, `"rounds": 3`) {
+		t.Error("polecat-review.md: expected the round-cap fail verdict to record rounds=3")
+	}
+	// mg done must be gated to terminal verdicts only.
+	if !strings.Contains(s, "Do **not** call `mg done`") {
+		t.Error("polecat-review.md: expected the mid-loop mg-done prohibition")
 	}
 }
 
@@ -2511,6 +2573,7 @@ func TestDefaultPromptsUseProactivityPrinciple(t *testing.T) {
 		"prompts/templates/polecat.md",
 		"prompts/templates/polecat-qa.md",
 		"prompts/templates/polecat-triage.md",
+		"prompts/templates/polecat-review.md",
 	} {
 		data, err := defaultPrompts.ReadFile(rel)
 		if err != nil {

@@ -47,7 +47,8 @@ extension, no parent directory:
 │   ├── polecat.md                    # shipped
 │   ├── polecat-qa.md                 # shipped
 │   ├── polecat-build-pr.md           # shipped
-│   └── polecat-triage.md             # shipped
+│   ├── polecat-triage.md             # shipped
+│   └── polecat-review.md             # shipped
 └── dropins/                          # ← user-owned, install never touches
     ├── mayor/
     │   ├── 00-house-style.md
