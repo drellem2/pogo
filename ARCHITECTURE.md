@@ -409,8 +409,8 @@ all moved their recurring schedules from Claude's in-process `CronCreate` to
   many cron points were missed. The agent-name suffix matches the polecat
   `mail-check-<work-item-id>` convention and avoids the registry-purge
   failure mode seen with short / generic IDs (mg-8e5d).
-- `internal/agent/prompts/templates/polecat.md`, `polecat-qa.md`, and
-  `polecat-build-pr.md` — one
+- `internal/agent/prompts/templates/polecat.md`, `polecat-qa.md`,
+  `polecat-build-pr.md`, and `polecat-triage.md` — one
   per-polecat mail-check schedule with id `mail-check-<work-item-id>`. The
   mayor removes these in step 3 of its coordination loop when stopping a
   polecat; pogod also auto-GCs them as a backstop (see **Stale mail-check GC**

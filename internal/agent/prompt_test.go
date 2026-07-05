@@ -152,7 +152,7 @@ func TestExpandTemplateToFile(t *testing.T) {
 // shape, update this test deliberately rather than letting the section
 // disappear on a stray edit.
 func TestShippedTemplatesSurfaceRecentActivity(t *testing.T) {
-	for _, name := range []string{"prompts/templates/polecat.md", "prompts/templates/polecat-qa.md", "prompts/templates/polecat-build-pr.md"} {
+	for _, name := range []string{"prompts/templates/polecat.md", "prompts/templates/polecat-qa.md", "prompts/templates/polecat-build-pr.md", "prompts/templates/polecat-triage.md"} {
 		data, err := defaultPrompts.ReadFile(name)
 		if err != nil {
 			t.Fatalf("read embedded %s: %v", name, err)
@@ -201,7 +201,7 @@ func TestShippedTemplatesProviderGating(t *testing.T) {
 		return buf.String()
 	}
 
-	for _, name := range []string{"prompts/templates/polecat.md", "prompts/templates/polecat-qa.md", "prompts/templates/polecat-build-pr.md"} {
+	for _, name := range []string{"prompts/templates/polecat.md", "prompts/templates/polecat-qa.md", "prompts/templates/polecat-build-pr.md", "prompts/templates/polecat-triage.md"} {
 		for _, provider := range []string{"pi", "codex"} {
 			out := expand(t, name, provider)
 			for _, ism := range claudeIsms {
@@ -757,6 +757,7 @@ func TestInstallPromptsUpdatesUnstampedFiles(t *testing.T) {
 	os.WriteFile(filepath.Join(tmplDir, "polecat.md"), []byte("# Old polecat\n"), 0644)
 	os.WriteFile(filepath.Join(tmplDir, "polecat-qa.md"), []byte("# Old polecat-qa\n"), 0644)
 	os.WriteFile(filepath.Join(tmplDir, "polecat-build-pr.md"), []byte("# Old polecat-build-pr\n"), 0644)
+	os.WriteFile(filepath.Join(tmplDir, "polecat-triage.md"), []byte("# Old polecat-triage\n"), 0644)
 
 	result, err := InstallPrompts(InstallOpts{})
 	if err != nil {
@@ -766,7 +767,7 @@ func TestInstallPromptsUpdatesUnstampedFiles(t *testing.T) {
 	if len(result.Updated) == 0 {
 		t.Error("expected unstamped files to be updated")
 	}
-	for _, rel := range []string{"mayor.md", "crew/doctor.md", "templates/polecat.md", "templates/polecat-qa.md", "templates/polecat-build-pr.md"} {
+	for _, rel := range []string{"mayor.md", "crew/doctor.md", "templates/polecat.md", "templates/polecat-qa.md", "templates/polecat-build-pr.md", "templates/polecat-triage.md"} {
 		found := false
 		for _, u := range result.Updated {
 			if u == rel {
@@ -1849,6 +1850,7 @@ func TestInitPromptsDefault(t *testing.T) {
 		filepath.Join("crew", "doctor.md"),
 		filepath.Join("templates", "polecat.md"),
 		filepath.Join("templates", "polecat-qa.md"),
+		filepath.Join("templates", "polecat-triage.md"),
 		filepath.Join("pm", "pm-template.md"),
 	} {
 		path := filepath.Join(tmpHome, ".pogo", "agents", rel)
@@ -2029,6 +2031,7 @@ func TestPolecatTemplatesIncludeMailCheckCron(t *testing.T) {
 	templates := []string{
 		"prompts/templates/polecat.md",
 		"prompts/templates/polecat-qa.md",
+		"prompts/templates/polecat-triage.md",
 	}
 	for _, path := range templates {
 		data, err := defaultPrompts.ReadFile(path)
@@ -2082,6 +2085,65 @@ func TestPolecatTemplateIncludesNotImplementedVerification(t *testing.T) {
 	// this is the load-bearing conclusion of the rule, not just the probes.
 	if !strings.Contains(s, "archeology") {
 		t.Error("polecat.md: expected the `archeology` framing for shipped-but-documented features")
+	}
+}
+
+// TestTriageTemplateInvestigateAndRecommendOnly locks in the polecat-triage
+// template's contract from the gh-issue workflow design (mg-be91,
+// docs/design/gh-issue-workflow-design.md §5–6): triage polecats read the
+// GitHub issue named in their work item, investigate the codebase, consult
+// the product PM synchronously, and report a structured recommendation —
+// they never implement, push, or submit to the refinery.
+func TestTriageTemplateInvestigateAndRecommendOnly(t *testing.T) {
+	data, err := defaultPrompts.ReadFile("prompts/templates/polecat-triage.md")
+	if err != nil {
+		t.Fatalf("read polecat-triage.md: %v", err)
+	}
+	s := string(data)
+
+	// Read-only worktree posture: the frontmatter still requests a worktree
+	// (an isolated, current checkout to investigate from), but the body must
+	// carry the no-code rule — the defining difference from polecat.md.
+	if !strings.Contains(s, "worktree = true") {
+		t.Error("polecat-triage.md: expected `worktree = true` frontmatter")
+	}
+	if !strings.Contains(s, "You do not write code") {
+		t.Error("polecat-triage.md: expected the `You do not write code` principle")
+	}
+	// The template must never instruct a refinery submission; the only
+	// allowed mention is the prohibition itself.
+	if strings.Contains(s, "pogo refinery submit polecat-") {
+		t.Error("polecat-triage.md: must not contain a refinery submit command")
+	}
+
+	// Reads the GH issue referenced in the work item body, and acks it —
+	// the one permitted issue-write during triage (pm-pogo consult,
+	// 2026-07-05).
+	if !strings.Contains(s, "gh issue view") {
+		t.Error("polecat-triage.md: expected the `gh issue view` step")
+	}
+	if !strings.Contains(s, "gh: <owner>/<repo>#<n>") {
+		t.Error("polecat-triage.md: expected the `gh: <owner>/<repo>#<n>` issue-reference convention")
+	}
+	if !strings.Contains(s, "gh issue comment") {
+		t.Error("polecat-triage.md: expected the claim-time ack comment step")
+	}
+
+	// Synchronous PM consult before finalizing the recommendation.
+	if !strings.Contains(s, "pm-pogo") {
+		t.Error("polecat-triage.md: expected the pm-pogo consult step")
+	}
+
+	// Structured recommendation keys in the mg done result, per pm-pogo's
+	// authoritative format (owner of the quality bar).
+	for _, key := range []string{`"workflow"`, `"issue"`, `"kind"`, `"recommendation"`, `"proposed_approach"`, `"effort"`, `"open_questions"`, `"checked"`, `"reproduced"`, `"duplicates"`, `"proposed_public_reply"`} {
+		if !strings.Contains(s, key) {
+			t.Errorf("polecat-triage.md: expected %s key in the structured mg done result", key)
+		}
+	}
+	// The full verdict vocabulary, including the polite already-works close.
+	if !strings.Contains(s, "implement|wontfix|needs-info|duplicate|already-works") {
+		t.Error("polecat-triage.md: expected the full recommendation vocabulary")
 	}
 }
 
@@ -2448,6 +2510,7 @@ func TestDefaultPromptsUseProactivityPrinciple(t *testing.T) {
 		"prompts/crew/doctor.md",
 		"prompts/templates/polecat.md",
 		"prompts/templates/polecat-qa.md",
+		"prompts/templates/polecat-triage.md",
 	} {
 		data, err := defaultPrompts.ReadFile(rel)
 		if err != nil {
