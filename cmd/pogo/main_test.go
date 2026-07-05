@@ -135,6 +135,49 @@ func TestSpawnPolecat_SuccessExitsZero(t *testing.T) {
 	}
 }
 
+// TestStatusLive_RejectsNonPositiveInterval locks the mg-c167 guard: --live
+// with --interval <= 0 must exit with a clean error instead of the
+// time.NewTicker panic it used to hit. The stub pogod is never consulted —
+// validation happens before any fetch.
+func TestStatusLive_RejectsNonPositiveInterval(t *testing.T) {
+	for _, interval := range []string{"0", "-1s"} {
+		t.Run(interval, func(t *testing.T) {
+			stdout, stderr, code := runPogo(t, func(w http.ResponseWriter, r *http.Request) {
+				http.Error(w, "should not be called", http.StatusInternalServerError)
+			}, "status", "--live", "--interval", interval)
+
+			if code == 0 {
+				t.Errorf("--live --interval %s must exit nonzero, got 0 (stdout=%q)", interval, stdout)
+			}
+			if !strings.Contains(stderr, "--interval must be positive") {
+				t.Errorf("expected interval error on stderr, got stderr=%q stdout=%q", stderr, stdout)
+			}
+			if strings.Contains(stdout, "panic") || strings.Contains(stderr, "panic") {
+				t.Errorf("must not panic, got stdout=%q stderr=%q", stdout, stderr)
+			}
+		})
+	}
+}
+
+// TestStatusLive_RejectsNonPositiveIntervalJSON is the --json flavor: the
+// error object goes to stdout and the exit code is still nonzero.
+func TestStatusLive_RejectsNonPositiveIntervalJSON(t *testing.T) {
+	stdout, _, code := runPogo(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "should not be called", http.StatusInternalServerError)
+	}, "--json", "status", "--live", "--interval", "0")
+
+	if code == 0 {
+		t.Error("--live --interval 0 must exit nonzero in --json mode, got 0")
+	}
+	var obj map[string]interface{}
+	if err := json.Unmarshal([]byte(stdout), &obj); err != nil {
+		t.Fatalf("expected JSON error object on stdout, got %q: %v", stdout, err)
+	}
+	if _, ok := obj["error"]; !ok {
+		t.Errorf("expected \"error\" key in JSON output, got %q", stdout)
+	}
+}
+
 // TestSpawnPolecat_ProviderHelpListsPi locks the gh #29 fix: the --provider
 // flag help must enumerate every registered provider, including pi.
 func TestSpawnPolecat_ProviderHelpListsPi(t *testing.T) {

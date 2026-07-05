@@ -391,12 +391,25 @@ Use --json for the raw structured response.`,
   - Work items (from macguffin)
   - Refinery merge queue (from pogod)
 
-Use --live for a continuously updating view (like watch).`,
+Use --live for a continuously updating view (like watch), refreshed every
+--interval (default 2s; must be positive).
+
+With --json a single snapshot is printed as one indented JSON object.
+Combining --live with --json emits a stream of such objects on stdout — one
+full snapshot per interval, no terminal control codes — suitable for piping
+into a machine consumer (e.g. jq with its streaming slurp). Ctrl-C ends the
+stream.`,
 		Args: cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
 			if !statusLive {
 				fmt.Print(renderStatus())
 				return
+			}
+
+			// time.NewTicker panics on a non-positive interval; reject it
+			// with a clean error instead.
+			if statusInterval <= 0 {
+				cli.ExitWithError(jsonOutput, fmt.Sprintf("--interval must be positive, got %s", statusInterval), cli.ExitError)
 			}
 
 			// Live mode: refresh in place on interval.
@@ -1903,7 +1916,7 @@ branches; work items and mail live in mg/macguffin (the task-store CLI).`,
 	rootCmd.AddCommand(cmdInstall)
 	rootCmd.AddCommand(cmdVisit)
 	cmdStatus.Flags().BoolVar(&statusLive, "live", false, "Continuously refresh the dashboard (like watch)")
-	cmdStatus.Flags().DurationVar(&statusInterval, "interval", 2*time.Second, "Refresh interval for --live mode")
+	cmdStatus.Flags().DurationVar(&statusInterval, "interval", 2*time.Second, "Refresh interval for --live mode (must be > 0)")
 	cmdStatus.Flags().StringVar(&statusTag, "tag", "", "Filter work items by tag")
 	rootCmd.AddCommand(cmdStatus)
 	cmdDoctor.Flags().BoolVar(&doctorCheck, "check", false, "Run quick health checks without starting the doctor agent")
