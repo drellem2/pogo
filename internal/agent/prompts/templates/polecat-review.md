@@ -125,6 +125,8 @@ Follow these steps exactly, in order. Skipping any step is a failure.
    ```
    Every finding carries a `file:line` reference. Use `gh pr comment` **only** — never `gh pr review` (approve or request-changes): every agent here shares one GitHub identity, and GitHub rejects reviews on your own PR. Your comment is informational; the verdict of record travels through mg (steps 8–9).
 
+   PR comments are **outward-facing**: engineers outside this system will read them when evaluating the repo. Write them to a public standard — terse, professional, plain prose, no filler.
+
 8. **Route the round result.** Findings go to the builder directly; verdict transitions go to the {{.Coordinator}}. Track the round number yourself — it appears in every comment, mail, and the final verdict.
 
    **If fail, rounds 1 or 2:**
@@ -137,8 +139,9 @@ Follow these steps exactly, in order. Skipping any step is a failure.
    **If pass (any round):** mail the verdict transition to the {{.Coordinator}} (who submits the branch to the refinery — you never submit it yourself), then record the verdict:
    ```bash
    mg mail send {{.Coordinator}} --from={{.Id}} --subject="review pass for <build-ticket-id>" --body="PR <pr-number> passed review in round <R>. <advisory nits, if any, explicitly non-blocking>"
-   mg done {{.Id}} --result='{"verdict": "pass", "pr": <pr-number>, "source_item": "<build-ticket-id>", "rounds": <R>, "summary": "<one line>"}'
+   mg done {{.Id}} --result='{"verdict": "pass", "pr": <pr-number>, "source_item": "<build-ticket-id>", "rounds": <R>, "advisory": ["<file:line — nit>", ...], "summary": "<one line>"}'
    ```
+   `advisory` retains the non-blocking findings in the verdict of record (mail and PR comments age out; the result JSON doesn't) — use an empty array when there are none.
 
    **Round cap — if round 3 ends without a pass:** stop. Do not start round 4, do not keep trading mails with the builder. Mail the {{.Coordinator}} the open findings for escalation to Daniel, then record the fail verdict:
    ```bash
