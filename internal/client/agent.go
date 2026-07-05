@@ -107,6 +107,44 @@ func StopAgent(name string) error {
 	return nil
 }
 
+// ParkAgent asks pogod to park a crew agent: stop it, persist a park flag
+// that suppresses respawn and auto-start, and pause its schedules.
+func ParkAgent(name string) (*agent.ParkAPIResponse, error) {
+	r, err := http.Post(serverURL+"/agents/"+name+"/park", "application/json", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer r.Body.Close()
+	if r.StatusCode != http.StatusOK {
+		msg, _ := io.ReadAll(r.Body)
+		return nil, fmt.Errorf("park failed: %s", strings.TrimSpace(string(msg)))
+	}
+	var resp agent.ParkAPIResponse
+	if err := json.NewDecoder(r.Body).Decode(&resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// WakeAgent asks pogod to wake a parked crew agent: start it, restore its
+// recorded schedules, and clear the park flag.
+func WakeAgent(name string) (*agent.WakeAPIResponse, error) {
+	r, err := http.Post(serverURL+"/agents/"+name+"/wake", "application/json", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer r.Body.Close()
+	if r.StatusCode != http.StatusOK {
+		msg, _ := io.ReadAll(r.Body)
+		return nil, fmt.Errorf("wake failed: %s", strings.TrimSpace(string(msg)))
+	}
+	var resp agent.WakeAPIResponse
+	if err := json.NewDecoder(r.Body).Decode(&resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
 // NudgeOpts configures nudge delivery.
 type NudgeOpts struct {
 	Mode    string // "wait-idle" or "immediate"

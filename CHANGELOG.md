@@ -10,6 +10,26 @@ is the curated, human-readable summary kept in sync at each release cut.
 
 ## [Unreleased]
 
+### Added
+- **`pogo agent park` / `pogo agent wake`: supported crew dormancy** (mg-41e1,
+  design mg-88a8). `park` persists a flag at `~/.pogo/agents/<name>/.parked`
+  *before* stopping the agent — so the `restart_on_crash` respawn can never
+  win the race — removes the agent's pogod schedules (recording them in the
+  park file for restore), and stops the process. Parked agents survive pogod
+  restarts (auto-start skips them regardless of `auto_start`), report
+  `status=parked` in `pogo agent list` so the mayor's stall-watch can skip
+  them mechanically, and are refused by `pogo agent start` (which points at
+  `wake`). `wake` starts the agent, restores the recorded schedules, and
+  clears the flag. Replaces the interim three-step pattern (stub flag edit +
+  schedule removal + stand-down nudge).
+
+### Fixed
+- PM-tier `extends` stubs: a stub-level `restart_on_crash` override is now
+  honored — previously the flag was resolved from the synthesized prompt,
+  whose frontmatter comes from the shared template (always `true` for
+  pm-template.md), so the operator-editable stub was silently ignored
+  (mg-41e1).
+
 ### Changed
 - Crew prompt templates (mayor, pm-template, doctor) now include an
   act-then-mark mail-discipline section: enumerate all unread messages first,

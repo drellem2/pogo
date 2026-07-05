@@ -1046,6 +1046,23 @@ func ResolveRestartOnCrash(promptFile string, t AgentType) bool {
 	return def
 }
 
+// ResolveRestartOnCrashWithStub resolves restart_on_crash for a crew agent
+// whose prompt may have been synthesized from an `extends` stub (PM tier).
+// The stub is the operator-editable file, so an explicit restart_on_crash in
+// its frontmatter wins over the synthesized prompt's — which inherits the
+// shared template's frontmatter (always true for pm-template.md) and would
+// otherwise silently ignore a stub-level opt-out (mg-41e1). When the stub
+// declares nothing, resolution falls through to the synthesized prompt's
+// frontmatter and then the type default, exactly as ResolveRestartOnCrash.
+func ResolveRestartOnCrashWithStub(stubFile, promptFile string, t AgentType) bool {
+	if stubFile != "" && stubFile != promptFile {
+		if meta, _, err := ParsePromptFrontmatter(stubFile); err == nil && meta != nil && meta.HasField("restart_on_crash") {
+			return meta.RestartOnCrash
+		}
+	}
+	return ResolveRestartOnCrash(promptFile, t)
+}
+
 // Prompt stamp markers. Two shapes coexist:
 //
 //   - v1 (current): "<!-- pogo-prompt: embed=sha256:<hex> body=sha256:<hex> -->"

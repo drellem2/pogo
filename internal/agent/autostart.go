@@ -19,6 +19,10 @@ const (
 	// AutoStartStatusSkippedNoFlag means the prompt did not declare
 	// auto_start = true.
 	AutoStartStatusSkippedNoFlag AutoStartStatus = "skipped_no_flag"
+	// AutoStartStatusSkippedParked means the agent has a park flag on disk
+	// (see Registry.Park); parked agents stay dormant across pogod restarts
+	// regardless of auto_start.
+	AutoStartStatusSkippedParked AutoStartStatus = "skipped_parked"
 	// AutoStartStatusFailed means we tried to start the agent but the spawn
 	// itself errored out.
 	AutoStartStatusFailed AutoStartStatus = "failed"
@@ -67,6 +71,18 @@ func (r *Registry) AutoStartAgents() []AutoStartResult {
 
 	var results []AutoStartResult
 	for _, c := range cands {
+		// The park flag wins over auto_start: a parked agent stays dormant
+		// across pogod restarts until explicitly woken (mg-41e1).
+		if IsParked(c.name) {
+			log.Printf("autostart: %s is parked; skipping (wake with 'pogo agent wake %s')", c.name, c.name)
+			results = append(results, AutoStartResult{
+				Name:     c.name,
+				Path:     c.path,
+				Category: c.category,
+				Status:   AutoStartStatusSkippedParked,
+			})
+			continue
+		}
 		meta, _, err := ParsePromptFrontmatter(c.path)
 		if err != nil {
 			log.Printf("autostart: parse %s failed: %v", c.path, err)

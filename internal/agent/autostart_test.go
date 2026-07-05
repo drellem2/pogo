@@ -113,6 +113,37 @@ func TestAutoStartAgents_Idempotent(t *testing.T) {
 	}
 }
 
+// TestAutoStartAgents_SkipsParked verifies a park flag wins over
+// auto_start = true: parked agents stay dormant across pogod restarts until
+// explicitly woken (mg-41e1).
+func TestAutoStartAgents_SkipsParked(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	if err := InitPromptDirs(); err != nil {
+		t.Fatalf("InitPromptDirs: %v", err)
+	}
+	writePrompt(t, CrewPromptDir(), "napper", "+++\nauto_start = true\n+++\n# napper\n")
+	if err := writeParkState(&ParkState{Name: "napper", ParkedAt: time.Now()}); err != nil {
+		t.Fatalf("writeParkState: %v", err)
+	}
+
+	reg, err := NewRegistry(filepath.Join(tmpHome, "sockets"))
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	defer reg.StopAll(2 * time.Second)
+	reg.SetCommandConfig(catCommandConfig{})
+
+	results := reg.AutoStartAgents()
+	if len(results) != 1 || results[0].Status != AutoStartStatusSkippedParked {
+		t.Fatalf("results = %+v, want one skipped_parked entry", results)
+	}
+	if reg.Get("napper") != nil {
+		t.Error("parked agent must not be auto-started")
+	}
+}
+
 // TestAutoStartAgents_NoPromptDir verifies the scan returns no results (and
 // does not panic) when ~/.pogo/agents/ does not exist.
 func TestAutoStartAgents_NoPromptDir(t *testing.T) {

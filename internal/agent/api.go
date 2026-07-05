@@ -33,6 +33,9 @@ type AgentInfo struct {
 	Uptime         string      `json:"uptime"`
 	LastActivity   string      `json:"last_activity,omitempty"`
 	WorkItemID     string      `json:"work_item_id,omitempty"`
+	// ParkedAt (RFC 3339) is set only on status=parked entries, which are
+	// synthesized from on-disk park flags rather than live registry state.
+	ParkedAt string `json:"parked_at,omitempty"`
 }
 
 // SpawnAPIRequest is the JSON body for POST /agents.
@@ -310,6 +313,8 @@ func (r *Registry) RegisterHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/agents/spawn-polecat", r.handleSpawnPolecat)
 	mux.HandleFunc("/agents/prompts", r.handlePrompts)
 	mux.HandleFunc("/agents/{name}", r.handleAgent)
+	mux.HandleFunc("/agents/{name}/park", r.handlePark)
+	mux.HandleFunc("/agents/{name}/wake", r.handleWake)
 	mux.HandleFunc("/agents/{name}/diagnose", r.handleDiagnose)
 	mux.HandleFunc("/agents/{name}/nudge", r.handleNudge)
 	mux.HandleFunc("/agents/{name}/output", r.handleOutput)
@@ -323,6 +328,25 @@ func (r *Registry) handleAgents(w http.ResponseWriter, req *http.Request) {
 		infos := make([]AgentInfo, len(agents))
 		for i, a := range agents {
 			infos[i] = agentInfo(a)
+		}
+		// Surface parked (dormant) agents alongside running ones so the
+		// mayor's stall-watch can skip them mechanically (mg-41e1). Parked
+		// agents have no registry entry; synthesize their info from the
+		// on-disk park flags. A registry entry with the same name wins (e.g.
+		// mid-wake).
+		if parked, err := ListParked(); err == nil {
+			for _, p := range parked {
+				if r.Get(p.Name) != nil {
+					continue
+				}
+				infos = append(infos, AgentInfo{
+					Name:        p.Name,
+					Type:        TypeCrew,
+					Status:      StatusParked,
+					ProcessName: ProcessName(TypeCrew, p.Name),
+					ParkedAt:    p.ParkedAt.Format(time.RFC3339),
+				})
+			}
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(infos)
@@ -378,6 +402,74 @@ func (r *Registry) handleAgent(w http.ResponseWriter, req *http.Request) {
 	default:
 		http.Error(w, "", http.StatusMethodNotAllowed)
 	}
+}
+
+// ParkAPIResponse is the JSON body returned by POST /agents/{name}/park.
+type ParkAPIResponse struct {
+	Status          string `json:"status"` // "parked"
+	Agent           string `json:"agent"`
+	SchedulesPaused int    `json:"schedules_paused"`
+}
+
+// WakeAPIResponse is the JSON body returned by POST /agents/{name}/wake.
+type WakeAPIResponse struct {
+	Status            string `json:"status"` // "woken"
+	Agent             string `json:"agent"`
+	PID               int    `json:"pid"`
+	SchedulesRestored int    `json:"schedules_restored"`
+}
+
+func (r *Registry) handlePark(w http.ResponseWriter, req *http.Request) {
+	if req.Method != "POST" {
+		http.Error(w, "", http.StatusMethodNotAllowed)
+		return
+	}
+	name := req.PathValue("name")
+	paused, err := r.Park(name, 5*time.Second)
+	if err != nil {
+		status := http.StatusInternalServerError
+		switch {
+		case errors.Is(err, ErrPromptNotFound):
+			status = http.StatusNotFound
+		case strings.Contains(err.Error(), "polecat"):
+			status = http.StatusBadRequest
+		}
+		http.Error(w, err.Error(), status)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(ParkAPIResponse{
+		Status:          "parked",
+		Agent:           name,
+		SchedulesPaused: paused,
+	})
+}
+
+func (r *Registry) handleWake(w http.ResponseWriter, req *http.Request) {
+	if req.Method != "POST" {
+		http.Error(w, "", http.StatusMethodNotAllowed)
+		return
+	}
+	name := req.PathValue("name")
+	a, restored, err := r.Wake(name)
+	if err != nil {
+		status := http.StatusInternalServerError
+		switch {
+		case strings.Contains(err.Error(), "is not parked"):
+			status = http.StatusConflict
+		case errors.Is(err, ErrPromptNotFound):
+			status = http.StatusNotFound
+		}
+		http.Error(w, err.Error(), status)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(WakeAPIResponse{
+		Status:            "woken",
+		Agent:             name,
+		PID:               a.PID,
+		SchedulesRestored: restored,
+	})
 }
 
 func (r *Registry) handleDiagnose(w http.ResponseWriter, req *http.Request) {
@@ -538,16 +630,14 @@ type StartErrorResponse struct {
 // error from Spawn (e.g. when the agent is already registered).
 func (r *Registry) StartCrewAgent(name string) (*Agent, error) {
 	// Look up prompt file: the coordinator's mayor.md is in PromptDir, crew
-	// in CrewPromptDir
-	var promptFile string
-	if name == CoordinatorName() {
-		promptFile = filepath.Join(PromptDir(), "mayor.md")
-	} else {
-		promptFile = filepath.Join(CrewPromptDir(), name+".md")
+	// in CrewPromptDir. This on-disk file is the operator-editable stub —
+	// kept separate from the (possibly synthesized) promptFile below because
+	// stub-level frontmatter overrides win for restart_on_crash.
+	stubFile, err := crewPromptPath(name)
+	if err != nil {
+		return nil, err
 	}
-	if _, err := os.Stat(promptFile); os.IsNotExist(err) {
-		return nil, &PromptNotFoundError{Path: promptFile}
-	}
+	promptFile := stubFile
 
 	// Give crew agents a stable working directory under $POGO_HOME/agents/<name>/
 	agentDir := filepath.Join(PromptDir(), name)
@@ -620,7 +710,7 @@ func (r *Registry) StartCrewAgent(name string) (*Agent, error) {
 		PromptFile:     promptFile,
 		Dir:            agentDir,
 		InitialNudge:   nudgeMsg,
-		RestartOnCrash: ResolveRestartOnCrash(promptFile, TypeCrew),
+		RestartOnCrash: ResolveRestartOnCrashWithStub(stubFile, promptFile, TypeCrew),
 		Provider:       provider,
 	})
 }
@@ -639,6 +729,13 @@ func (r *Registry) handleStart(w http.ResponseWriter, req *http.Request) {
 
 	if startReq.Name == "" {
 		http.Error(w, "name is required", http.StatusBadRequest)
+		return
+	}
+
+	// A parked agent must be woken, not started: start alone would leave the
+	// park flag in place, silently suppressing the next respawn and autostart.
+	if IsParked(startReq.Name) {
+		http.Error(w, fmt.Sprintf("agent %q is parked; wake it with 'pogo agent wake %s'", startReq.Name, startReq.Name), http.StatusConflict)
 		return
 	}
 

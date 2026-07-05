@@ -82,6 +82,60 @@ func (l registryLiveness) IsAlive(scheduleAgent string) bool {
 	return false
 }
 
+// schedulePauser implements agent.SchedulePauser against the scheduler so
+// park can remove an agent's schedules (recording them in the park file for
+// restore) and wake can re-add them (mg-41e1). Entries travel as raw JSON
+// because the agent package cannot import the scheduler package (the
+// scheduler already imports agent).
+type schedulePauser struct{ sched *scheduler.Scheduler }
+
+func (p schedulePauser) PauseForAgent(aliases ...string) ([]json.RawMessage, error) {
+	var out []json.RawMessage
+	for _, alias := range aliases {
+		for _, e := range p.sched.List(alias) {
+			if _, err := p.sched.Remove(e.Agent, e.ID); err != nil {
+				return out, err
+			}
+			data, err := json.Marshal(e)
+			if err != nil {
+				return out, err
+			}
+			out = append(out, data)
+		}
+	}
+	return out, nil
+}
+
+func (p schedulePauser) RestoreForAgent(entries []json.RawMessage) (int, error) {
+	restored := 0
+	var firstErr error
+	now := time.Now()
+	for _, raw := range entries {
+		var e scheduler.Entry
+		if err := json.Unmarshal(raw, &e); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		// Recompute the next fire for recurring entries — the recorded
+		// NextFire likely came due during the park and must not replay as a
+		// missed fire. One-shots keep their fire time on purpose: a gate-lift
+		// reminder that came due while parked should fire once on wake.
+		if !e.OneShot {
+			e.NextFire = time.Time{}
+		}
+		if _, err := p.sched.Add(e, now); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		restored++
+	}
+	return restored, firstErr
+}
+
 // schedulerStallWindows implements agent.StallScheduleProvider against the
 // scheduler so diagnose can tell a cron-driven agent's by-design between-cron
 // idle from a genuine wedge (mg-5b23). For each recurring cron schedule
@@ -583,7 +637,7 @@ Flags:
 	// historical behavior — crew agents are still restarted, polecats are
 	// still cleaned up — while letting users opt out per-agent.
 	agentRegistry.SetOnExit(func(a *agent.Agent, err error) {
-		if a.RestartOnCrash {
+		if a.ShouldRespawn() {
 			// Restart-on-crash agents: respawn after a short backoff so a
 			// fast crash loop doesn't peg the daemon. The agent stays in
 			// the registry and its worktree (if any) is preserved.
@@ -595,6 +649,12 @@ Flags:
 				}
 			}()
 		} else {
+			if a.RestartOnCrash {
+				// restart_on_crash is set but the agent is parked — the park
+				// flag (written before the park stop) suppresses the respawn
+				// and routes the exit through the cleanup path (mg-41e1).
+				log.Printf("agent %s (%s) exited while parked; suppressing respawn", a.Name, a.Type)
+			}
 			// No-restart agents: clean up worktree (if any) and remove from
 			// the registry. Polecats hit this path by default; a crew agent
 			// with restart_on_crash=false in its prompt frontmatter also
@@ -666,6 +726,8 @@ Flags:
 			// is idle by design between firings and must not be flagged as
 			// stalled within one cron interval of its last firing (mg-5b23).
 			agentRegistry.SetStallScheduleProvider(schedulerStallWindows{sched: s})
+			// Let park/wake pause and restore an agent's schedules (mg-41e1).
+			agentRegistry.SetSchedulePauser(schedulePauser{sched: s})
 			log.Printf("pogod: scheduler loaded from %s", schedPath)
 		}
 	}

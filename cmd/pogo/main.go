@@ -607,6 +607,11 @@ The agent runs as a persistent crew process that pogod monitors and restarts on 
 					return
 				}
 				for _, a := range agents {
+					if a.Status == agent.StatusParked {
+						fmt.Printf("%-20s  pid=-       type=%-8s  status=%-10s  parked-at=%s\n",
+							a.Name, a.Type, a.Status, a.ParkedAt)
+						continue
+					}
 					activity := ""
 					if a.LastActivity != "" {
 						activity = "  last-activity=" + a.LastActivity
@@ -666,6 +671,59 @@ The agent runs as a persistent crew process that pogod monitors and restarts on 
 				cli.PrintJSON(map[string]string{"status": "stopped", "name": args[0]})
 			} else {
 				fmt.Printf("Agent %s stopped.\n", args[0])
+			}
+		},
+	}
+
+	var cmdAgentPark = &cobra.Command{
+		Use:   "park <name>",
+		Short: "Park a crew agent: stop it and keep it stopped across restarts",
+		Long: `Park puts a crew agent into supported dormancy in one command:
+
+  1. persists a park flag at ~/.pogo/agents/<name>/.parked — it survives
+     pogod restarts, suppresses the restart_on_crash respawn, and makes
+     boot-time auto-start skip the agent regardless of auto_start;
+  2. removes the agent's pogod schedules, recording them in the park file
+     so wake can restore them;
+  3. stops the agent process.
+
+This is the supported way to keep a restart_on_crash=true agent down —
+a plain 'pogo agent stop' is respawned by the supervisor within seconds.
+Parked agents show as status=parked in 'pogo agent list'. Reverse with
+'pogo agent wake <name>'.`,
+		Args: cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			resp, err := client.ParkAgent(args[0])
+			if err != nil {
+				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+			}
+			if jsonOutput {
+				cli.PrintJSON(resp)
+			} else {
+				fmt.Printf("Parked agent %s (%d schedule(s) paused). Wake with 'pogo agent wake %s'.\n",
+					resp.Agent, resp.SchedulesPaused, resp.Agent)
+			}
+		},
+	}
+
+	var cmdAgentWake = &cobra.Command{
+		Use:   "wake <name>",
+		Short: "Wake a parked crew agent",
+		Long: `Wake reverses a park: starts the agent, restores the schedules that were
+recorded when it was parked, and clears the park flag. The agent also
+re-registers its own schedules per the crew startup contract; schedule
+adds are keyed on (agent, id), so nothing stacks duplicates.`,
+		Args: cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			resp, err := client.WakeAgent(args[0])
+			if err != nil {
+				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+			}
+			if jsonOutput {
+				cli.PrintJSON(resp)
+			} else {
+				fmt.Printf("Woke agent %s (pid=%d, %d schedule(s) restored).\n",
+					resp.Agent, resp.PID, resp.SchedulesRestored)
 			}
 		},
 	}
@@ -1878,6 +1936,8 @@ the actual restart. The recovery agent rate-limits to one kickstart per
 	cmdAgent.AddCommand(cmdAgentSpawn)
 	cmdAgent.AddCommand(cmdAgentSpawnPolecat)
 	cmdAgent.AddCommand(cmdAgentStop)
+	cmdAgent.AddCommand(cmdAgentPark)
+	cmdAgent.AddCommand(cmdAgentWake)
 	cmdAgent.AddCommand(cmdAgentStatus)
 	cmdAgent.AddCommand(cmdAgentDiagnose)
 	cmdAgent.AddCommand(cmdAgentAttach)

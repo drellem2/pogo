@@ -282,6 +282,11 @@ type Registry struct {
 	// between-cron idle (mg-5b23). pogod wires it to its scheduler; nil (the
 	// default, and what unit tests use) disables cron-aware suppression.
 	stallSchedules StallScheduleProvider
+
+	// schedulePauser, when set, lets Park/Wake pause and restore an agent's
+	// pogod schedules (mg-41e1). pogod wires it to its scheduler; nil (bare
+	// registry, scheduler disabled) makes park skip schedule handling.
+	schedulePauser SchedulePauser
 }
 
 // SetStallScheduleProvider installs the cron-schedule lookup used by diagnose to
@@ -744,10 +749,12 @@ func (r *Registry) Remove(name string) {
 // find it and bring the agent back. This matches the "always-on" contract
 // of restart_on_crash=true: the supervisor restarts the agent on any exit
 // (clean or crash, including explicit Stop). To keep such an agent down
-// permanently, remove restart_on_crash=true from its prompt frontmatter
-// or use the registry-level shutdown signal (StopAll).
+// permanently, park it — `pogo agent park <name>` (Registry.Park) persists
+// a park flag that suppresses the respawn and survives pogod restarts.
+// Registry teardown (StopAll) also bypasses respawn unconditionally.
 //
-// For agents with RestartOnCrash=false, Stop() owns teardown and removes
+// For agents with RestartOnCrash=false — and for parked agents, whose
+// respawn the supervisor will refuse — Stop() owns teardown and removes
 // the agent from the registry once the process is gone.
 func (r *Registry) Stop(name string, timeout time.Duration) error {
 	agent := r.Get(name)
@@ -796,7 +803,7 @@ func (r *Registry) Stop(name string, timeout time.Duration) error {
 		}
 	}
 
-	if agent.RestartOnCrash {
+	if agent.RestartOnCrash && !IsParked(name) {
 		// Lifecycle is owned by the OnExit hook — it scheduled (or will
 		// schedule) a Respawn() that needs the registry entry to still
 		// exist. Cleanup of the old PTY/socket happens inside Respawn().
@@ -850,6 +857,13 @@ func (r *Registry) Respawn(name string) (*Agent, error) {
 
 	if r.shutdown {
 		return nil, fmt.Errorf("registry shut down")
+	}
+
+	// Backstop for the park race: a respawn goroutine scheduled by a crash
+	// that predates the park must lose to the on-disk flag (the primary check
+	// is ShouldRespawn in the OnExit hook, before the goroutine is scheduled).
+	if IsParked(name) {
+		return nil, fmt.Errorf("agent %q is parked", name)
 	}
 
 	old := r.agents[name]

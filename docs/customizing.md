@@ -134,10 +134,25 @@ autostart = false   # default true; POGO_AGENT_AUTOSTART overrides
 
 ### Stop pogod from restarting a flaky agent
 
-If a crew agent is in a crash loop and you'd rather not have pogod respawn it
-while you debug, set `restart_on_crash = false` in its frontmatter and restart
-the daemon. The agent will run once on boot (if `auto_start = true`); if it
-exits, it stays down.
+The one-command way to take a running crew agent out of rotation — no
+frontmatter edit, no daemon restart — is to **park** it:
+
+```bash
+pogo agent park <name>    # stop + persist a park flag + pause its schedules
+pogo agent wake <name>    # start it again and restore the schedules
+```
+
+The park flag lives at `~/.pogo/agents/<name>/.parked`, survives pogod
+restarts (boot-time auto-start skips parked agents regardless of
+`auto_start`), and suppresses the `restart_on_crash` respawn. Parked agents
+show as `status=parked` in `pogo agent list`.
+
+Alternatively, if you want the *permanent* posture to change, set
+`restart_on_crash = false` in the agent's frontmatter and restart the daemon.
+The agent will run once on boot (if `auto_start = true`); if it exits, it
+stays down. For a PM-tier `extends` stub, setting `restart_on_crash = false`
+at the stub level works too — the stub's frontmatter overrides the shared
+template's.
 
 This is the same knob that makes polecats ephemeral by default — they're set
 to `restart_on_crash = false` because they're supposed to exit (well, get

@@ -11,6 +11,16 @@ An agent whose process has died — a crew loop that exited cleanly without re-a
 
 A **live** agent is still protected: `start` refuses a duplicate of a running process, and `stop` signals it normally. So there is no need to `systemctl restart pogo.service` / bounce launchd to recover one wedged agent — that bounces the whole fleet. Reserve the daemon restart tiers below for pogod itself misbehaving.
 
+## Parking a crew agent (supported dormancy)
+
+`restart_on_crash = true` is an always-on contract: pogod respawns the agent on **any** exit — including an explicit `pogo agent stop` — within seconds. To take such an agent out of rotation (e.g. a PM whose workstream is gated with zero in-flight items), **park** it instead of stopping it:
+
+- `pogo agent park <name>` — one command that (1) persists a park flag at `~/.pogo/agents/<name>/.parked`, (2) removes the agent's pogod schedules, recording them in the park file, and (3) stops the process. The flag is written before the stop, so the respawn can't win the race; it also survives pogod restarts — boot-time auto-start skips parked agents regardless of `auto_start`.
+- `pogo agent wake <name>` — reverses it: starts the agent, restores the recorded schedules (the agent's own startup re-registration doesn't stack duplicates — schedule adds are keyed on agent + id), and clears the flag.
+- `pogo agent list` shows parked agents with `status=parked`, so the mayor's stall-watch can skip them mechanically.
+
+Parking an agent that isn't currently running is valid (the flag still gates auto-start); `pogo agent start` refuses a parked agent and points at `wake`. Parking is for crew agents — polecats are ephemeral and are simply stopped.
+
 ## Pogod restart policy
 
 `pogod` runs under launchd with `KeepAlive=true` (see `scripts/launchd/com.pogo.daemon.plist`). That means **any uncoordinated kill is a loop**: launchd relaunches the daemon within seconds, and if the caller then re-evaluates "pogod looks broken — kill it again," the system gets stuck in a kill→relaunch→kill cycle. The decision recorded in mg-f5fc is that callers — polecats (disposable worker agents), crew agents, humans at a terminal — follow a three-tier escalation. Try tier 1 first; only escalate when the situation matches the criteria below.
