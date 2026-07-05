@@ -10,8 +10,10 @@ This is the Phase-1 (email read path) shape from the pa design; the
 architecture decision record is
 [`docs/pa-email-ingest-research.md`](../../pa-email-ingest-research.md)
 (official CLI as primary; HEY auto-forwarding to a controlled mailbox as
-fallback; Gmail IMAP as interim). Calendar (Phase 2) and any email *send*
-authority (Phase 3) are out of scope here.
+fallback; Gmail IMAP as interim). Calendar (Phase 2) is out of scope here.
+Email *send* authority (Phase 3) is deployment-optional; when an operator
+enables it, use the [approval-gated send pattern](#send-authority-phase-3--the-approval-gated-send-pattern)
+below rather than open-ended write access.
 
 ## Architecture
 
@@ -38,10 +40,13 @@ Design rules this encodes:
   durable delivery; the poller stats the maildir file before recording a
   posting as seen, and leaves it un-seen (retry next cycle) otherwise. The
   bias is duplicate delivery over silent loss.
-- **Read-only email.** The poller only lists; the agent only reads
-  (`hey boxes` / `hey box` / `hey threads`). Replies are *drafted* into mail
-  to the `human` mailbox for the operator to send. No `hey compose`/`reply`,
-  no `hey seen`. Write authority is a separate, explicitly-gated phase.
+- **Read-only email by default.** The poller only lists; the agent only
+  reads (`hey boxes` / `hey box` / `hey threads`). Replies are *drafted*
+  into mail to the `human` mailbox for the operator to send. No
+  `hey seen`/`unseen` ever — the operator's unread state is theirs. Send
+  authority (`hey compose`/`reply`) is a separate phase the operator
+  explicitly grants, and even then it is approval-gated per message — see
+  the pattern below.
 - **Graceful pre-auth.** `hey auth status --json` reports
   `authenticated: false` (exit 0) until the operator runs `hey auth login`
   interactively — the one step that cannot be automated. In that state the
@@ -96,7 +101,8 @@ prompt with the operator's actual triage preferences stays out of the repo).
    policy (escalate time-sensitive items to `human`, batch FYIs into a
    digest, escalate ambiguity instead of acting), the authority boundary
    above, and daemon-side schedules (`pogo schedule pa …`) for mail-check
-   and a morning sweep. Then `pogo agent start pa`.
+   and a morning sweep. If you grant send authority, encode the
+   approval-gated send pattern below verbatim. Then `pogo agent start pa`.
 
 4. **Authenticate** (interactive, once): `hey auth login`. The next poll
    cycle picks it up — no restart needed.
@@ -110,6 +116,38 @@ the pa prompt should encode that ("no mail from X in the feed" ≠ "no mail
 from X exists"). This differs from the forwarding fallback, whose
 documented gap is HEY's spam classification instead (see the research doc's
 coverage matrix).
+
+## Send authority (Phase 3) — the approval-gated send pattern
+
+The hey CLI *can* send: `hey compose --to <addr> --subject "<subj>" -m "<text>"`
+for new messages and `hey reply <topic-id> -m "<text>"` for thread replies
+(this superseded the pre-CLI assumption that sending as `@hey.com` was
+impossible). Having a send path does not mean the agent should have open
+write access. When the operator decides to grant send authority, gate it
+per message:
+
+1. **Approval is per message and per exact text.** The agent may send an
+   email only when the operator has approved the exact final text of that
+   specific message. Approval must quote the text or unambiguously
+   reference it ("send the draft from your 14:02 mail as-is"); a generic
+   "yes, reply to them" approves no particular text.
+2. **Any edit after approval voids the approval** — even a one-word tweak,
+   even one the operator asked for. The new text needs fresh approval.
+3. **Log every send** to an agent-state file outside the repo (e.g.
+   `~/.pogo/agents/<agent>-state/send-log.md`): timestamp, recipient,
+   subject, and a reference to where the approval happened. No send
+   without a log entry.
+4. **No bulk sends.** One approved message to its approved recipient(s)
+   per send; never loop over a list, never re-use an approved text for a
+   different recipient.
+5. **Ambiguity means do not send.** Unsure which text was approved, or for
+   which recipient or thread? Ask; don't send.
+
+The upgrade is thus from "agent drafts + operator sends" to "agent sends
+*after* the operator approves the exact text" — the operator stays the
+authority on every outbound message; only the mechanical copy-paste step
+is delegated. Autonomous sending (no per-message approval) is a different,
+larger grant this example deliberately does not cover.
 
 ## Poller contract
 
