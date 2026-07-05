@@ -89,7 +89,7 @@ Follow these steps exactly, in order. Skipping any step is a failure.
    - **For bugs: reproduce, or state exactly why you could not.** Try in your worktree (build, run tests, exercise the CLI). "Could not reproduce" needs the specific reason — environment, missing data, load-dependent.
    - **Form a root-cause hypothesis with `file:line` evidence.**
    - **Verify "not implemented" claims before acting on them.** If the issue (or a design doc it cites) says a feature "doesn't exist yet," confirm by running the canonical CLI, grepping for the named symbol in non-test code, or checking for the named on-disk artifact. If any check returns positive, the design is at least partially shipped — treat the doc as **archeology**, not a forward plan.
-   - **Check for duplicates in BOTH places** — GitHub issues (`gh issue list --repo <owner>/<repo> --search "..."`) and the mg archive (`mg list`) — and list the refs you checked or matched. The ask may already be fixed, in flight, or previously rejected.
+   - **Check for duplicates in BOTH places** — GitHub issues (`gh issue list --repo <owner>/<repo> --search "..."`) and mg work items — and list the refs you checked or matched. On the mg side, cover both active and archived history (`mg list` **and** `mg list --status=archived`, substring-matching titles): resolved-or-rejected items are exactly where duplicate asks hide. The ask may already be fixed, in flight, or previously rejected.
    - **For `implement` recommendations: name at least one alternative considered** and say why you prefer yours.
    - **For `needs-info`: write the exact questions to ask** the reporter — not "needs more detail."
    - **Zero scope creep.** The recommendation covers the issue as filed, nothing beyond it.
