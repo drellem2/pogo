@@ -68,6 +68,17 @@ type IdleGatePolicy struct {
 	Mode            IdleMode
 	IdleAfterMarker time.Duration // for ModeScannerIdle
 	EventStaleness  time.Duration // for ModeEventsStale
+
+	// UsageLimitStaleness, when > 0, enables a second, earlier stage on a
+	// ModeEventsStale matcher: while the marker is recently visible and the
+	// agent's event log has been stale for longer than this (shorter than
+	// EventStaleness), the watcher declares a *suspected usage-limit hit* —
+	// emits usage_limit_hit, flags the agent RateLimited, and notifies the
+	// fleet usage-limit coordinator. It clears (usage_limit_cleared) when the
+	// event log advances again. This is diagnostic only; it does not dismiss
+	// the modal — the EventStaleness gate still owns the 20m auto-dismissal.
+	// Zero disables the stage (used by matchers with no usage-limit semantics).
+	UsageLimitStaleness time.Duration // for ModeEventsStale (gh #45)
 }
 
 // ModalMatcher is one entry in the watcher table. Adding a matcher = adding
@@ -96,11 +107,24 @@ var DefaultModalMatchers = []ModalMatcher{
 		LineMarker: RateLimitMarker,
 		Dismissal:  []byte("1\n"),
 		IdleGate: IdleGatePolicy{
-			Mode:           ModeEventsStale,
-			EventStaleness: 20 * time.Minute,
+			Mode:                ModeEventsStale,
+			EventStaleness:      20 * time.Minute,
+			UsageLimitStaleness: UsageLimitSuspectStaleness,
 		},
 	},
 }
+
+// UsageLimitSuspectStaleness is how long the agent's event log must be stale —
+// with the rate-limit modal still recently visible — before the watcher
+// declares a suspected usage-limit hit (gh #45). It is deliberately much
+// longer than a scanner-idle window: the rate-limit marker text also appears in
+// ordinary transcripts, so a seconds-level trigger would false-positive on an
+// agent that merely quotes the phrase. Requiring ~5m of event-log silence means
+// only a genuinely wedged agent — one that has stopped producing events while
+// the modal stays on screen — trips the gate. It is shorter than
+// EventStaleness (20m) so operators learn of the wedge well before the
+// auto-dismissal fires.
+const UsageLimitSuspectStaleness = 5 * time.Minute
 
 // dismissalCooldown is the per-matcher no-re-fire window after a successful
 // dismissal write. Prevents a modal that briefly redraws its marker line from
@@ -146,6 +170,19 @@ type ModalHookDeps struct {
 	Now       func() time.Time           // overridable clock for tests
 	EmitEvent func(ev events.Event)      // dismissal observability
 	NotifyPM  func(agentID, matcherName string)
+
+	// WorkItemID is the agent's mg work item (e.g. "mg-7ffa"), stamped into the
+	// usage_limit_hit / usage_limit_cleared events and the coordinator roster.
+	// Empty for agents not tied to an item.
+	WorkItemID string
+	// SetRateLimited flags/unflags the agent's RateLimited condition (surfaced
+	// in `pogo status` and `pogo agent diagnose`). Nil in tests that don't care.
+	SetRateLimited func(bool)
+	// OnUsageLimitHit / OnUsageLimitClear notify the fleet usage-limit
+	// coordinator so it can coalesce one operator mail per fleet-wide episode
+	// (gh #45). Nil disables the coalesced-mail path.
+	OnUsageLimitHit   func(agentID, workItemID string, when time.Time)
+	OnUsageLimitClear func(agentID string, when time.Time)
 }
 
 // ModalHook is the SessionHook entrypoint. Wires production defaults and runs
@@ -160,6 +197,15 @@ func ModalHook(ctx context.Context, a *agent.Agent) {
 		Now:       time.Now,
 		EmitEvent: func(ev events.Event) { events.Emit(context.Background(), ev) },
 		NotifyPM:  defaultNotifyPM,
+
+		WorkItemID:     a.WorkItemID,
+		SetRateLimited: a.SetRateLimited,
+		OnUsageLimitHit: func(agentID, workItemID string, when time.Time) {
+			defaultUsageLimitCoordinator().OnHit(agentID, workItemID, when)
+		},
+		OnUsageLimitClear: func(agentID string, when time.Time) {
+			defaultUsageLimitCoordinator().OnClear(agentID, when)
+		},
 	}
 	RunModalHook(ctx, deps, DefaultModalMatchers)
 }
@@ -359,19 +405,55 @@ func dispatchEventsStale(ctx context.Context, idx int, m ModalMatcher, scanner *
 	defer ticker.Stop()
 	var lastDismissed time.Time
 
+	// Usage-limit hit/clear state (gh #45). hitActive is true once we've
+	// declared a suspected hit that has not yet cleared; hitEventsSeen is the
+	// event-log LastSeen value at the moment we declared it, so the clear gate
+	// can detect the log advancing (agent producing events again).
+	var (
+		hitActive     bool
+		hitEventsSeen time.Time
+	)
+
 	check := func() {
+		now := deps.Now()
 		seen := scanner.MarkerLastSeen(idx)
+		eventsLastSeen := deps.Tracker.LastSeen(deps.AgentID)
+
+		// --- usage-limit suspected-hit / clear stage -----------------------
+		// Independent of the dismissal gate below: emitting the hit is
+		// observability, not intervention. Runs only for matchers that opt in
+		// via UsageLimitStaleness > 0 (the rate-limit-options matcher).
+		if m.IdleGate.UsageLimitStaleness > 0 {
+			if !hitActive {
+				markerFresh := !seen.IsZero() && now.Sub(seen) <= markerRecency
+				// A fresh-spawned agent with no events yet is treated as fresh
+				// (never a hit); the same guard the dismissal gate uses.
+				eventsStale := !eventsLastSeen.IsZero() &&
+					now.Sub(eventsLastSeen) > m.IdleGate.UsageLimitStaleness
+				if markerFresh && eventsStale {
+					emitUsageLimitHit(deps, now)
+					hitActive = true
+					hitEventsSeen = eventsLastSeen
+				}
+			} else if !eventsLastSeen.IsZero() && eventsLastSeen.After(hitEventsSeen) {
+				// Event log advanced past the wedge point — the agent is
+				// producing events again, so the limit has cleared.
+				emitUsageLimitCleared(deps, now)
+				hitActive = false
+				hitEventsSeen = time.Time{}
+			}
+		}
+
+		// --- 20m auto-dismissal gate (unchanged) ---------------------------
 		if seen.IsZero() {
 			return
 		}
-		now := deps.Now()
 		if now.Sub(seen) > markerRecency {
 			return
 		}
 		if !lastDismissed.IsZero() && now.Sub(lastDismissed) < dismissalCooldown {
 			return
 		}
-		eventsLastSeen := deps.Tracker.LastSeen(deps.AgentID)
 		// A fresh-spawned agent without any events yet is treated as fresh;
 		// the dispatcher will get another tick once events show up. Without
 		// this guard, a missing tracker entry would fire dismissal immediately
@@ -391,12 +473,69 @@ func dispatchEventsStale(ctx context.Context, idx int, m ModalMatcher, scanner *
 	for {
 		select {
 		case <-ctx.Done():
+			// If the agent exits while still flagged, release the flag and let
+			// the coordinator drop it from the current episode so a stuck agent
+			// can't hold the episode open forever. This is a release, not a
+			// recovery — no usage_limit_cleared event is emitted (the agent's
+			// lifecycle events already record its death).
+			if hitActive {
+				if deps.SetRateLimited != nil {
+					deps.SetRateLimited(false)
+				}
+				if deps.OnUsageLimitClear != nil {
+					deps.OnUsageLimitClear(deps.AgentID, deps.Now())
+				}
+			}
 			return
 		case <-scanner.observed[idx]:
 			// Just an arming signal; the ticker drives evaluation.
 		case <-ticker.C:
 			check()
 		}
+	}
+}
+
+// emitUsageLimitHit records a suspected usage-limit hit: it flags the agent
+// RateLimited, emits the usage_limit_hit event, and notifies the fleet
+// coordinator. Called at most once per wedge (guarded by hitActive).
+func emitUsageLimitHit(deps ModalHookDeps, when time.Time) {
+	if deps.SetRateLimited != nil {
+		deps.SetRateLimited(true)
+	}
+	log.Printf("modal_hook: agent %s suspected usage-limit hit (rate-limit modal visible, event log stale)",
+		deps.AgentName)
+	deps.EmitEvent(events.Event{
+		EventType:  "usage_limit_hit",
+		Agent:      deps.AgentID,
+		WorkItemID: deps.WorkItemID,
+		Timestamp:  when.UTC().Format(time.RFC3339Nano),
+		Details: map[string]any{
+			"matcher": "rate-limit-options",
+		},
+	})
+	if deps.OnUsageLimitHit != nil {
+		deps.OnUsageLimitHit(deps.AgentID, deps.WorkItemID, when)
+	}
+}
+
+// emitUsageLimitCleared records recovery from a usage-limit hit: it clears the
+// RateLimited flag, emits usage_limit_cleared, and notifies the coordinator.
+func emitUsageLimitCleared(deps ModalHookDeps, when time.Time) {
+	if deps.SetRateLimited != nil {
+		deps.SetRateLimited(false)
+	}
+	log.Printf("modal_hook: agent %s usage limit cleared (event log advancing again)", deps.AgentName)
+	deps.EmitEvent(events.Event{
+		EventType:  "usage_limit_cleared",
+		Agent:      deps.AgentID,
+		WorkItemID: deps.WorkItemID,
+		Timestamp:  when.UTC().Format(time.RFC3339Nano),
+		Details: map[string]any{
+			"matcher": "rate-limit-options",
+		},
+	})
+	if deps.OnUsageLimitClear != nil {
+		deps.OnUsageLimitClear(deps.AgentID, when)
 	}
 }
 

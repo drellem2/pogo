@@ -129,6 +129,49 @@ func TestDiagnoseStalled(t *testing.T) {
 	}
 }
 
+// A rate-limited agent looks stalled by output-idle but must report the
+// distinct "rate_limited" health so operators don't mistake a usage-limit wait
+// for a genuine wedge (gh #45). rate_limited outranks stalled.
+func TestDiagnoseRateLimited(t *testing.T) {
+	buf := NewRingBuffer(1024)
+	buf.Write([]byte("old data"))
+	buf.mu.Lock()
+	buf.lastWrite = time.Now().Add(-10 * time.Minute) // would otherwise be "stalled"
+	buf.mu.Unlock()
+
+	a := &Agent{
+		Name:      "diag-ratelimited",
+		Type:      TypePolecat,
+		PID:       0,
+		Status:    StatusRunning,
+		StartTime: time.Now().Add(-15 * time.Minute),
+		outputBuf: buf,
+		done:      make(chan struct{}),
+	}
+	a.SetRateLimited(true)
+
+	diag := diagnoseAgent(a)
+	if diag.Health != "rate_limited" {
+		t.Errorf("Health = %q, want %q", diag.Health, "rate_limited")
+	}
+	if !diag.RateLimited {
+		t.Error("RateLimited should be true")
+	}
+	if diag.RateLimitedSince.IsZero() {
+		t.Error("RateLimitedSince should be set")
+	}
+
+	// Clearing it drops back to the underlying condition (stalled here).
+	a.SetRateLimited(false)
+	diag = diagnoseAgent(a)
+	if diag.Health != "stalled" {
+		t.Errorf("after clear, Health = %q, want %q", diag.Health, "stalled")
+	}
+	if diag.RateLimited {
+		t.Error("RateLimited should be false after clear")
+	}
+}
+
 func TestDiagnoseIdle(t *testing.T) {
 	// Simulate an idle agent — past the active-recency window but not stalled.
 	buf := NewRingBuffer(1024)
