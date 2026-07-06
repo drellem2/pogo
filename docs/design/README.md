@@ -14,6 +14,7 @@ doubt, the code is the source of truth.
 | [indexing-strategy.md](indexing-strategy.md) | Timer-driven incremental re-index vs event-based file-watching | Adopted & shipped (mg-5b0d) |
 | [mg-domain-audit.md](mg-domain-audit.md) | Whether macguffin's work-item store is domain-neutral (not coding-specific) | Audit; durable orientation, concrete follow-ups filed separately |
 | [multi-provider-architecture-survey.md](multi-provider-architecture-survey.md) | Phase 2: provider-abstraction architecture (design-of-record) | Survey; Codex provider since shipped (`internal/codex/`) |
+| [pa-thread-index-design.md](pa-thread-index-design.md) | pa's local-only, pointer-only thread-index git repo (payloads stay in self-mail) | Shipped (mg-da41, decision mg-9a32); machine-local state, archeology |
 | [prompt-customization-design.md](prompt-customization-design.md) | Customizing agent prompts so edits survive `pogo install --force` | Shipped (`internal/agent/tomlmerge.go`); user guide: [../prompt-customization.md](../prompt-customization.md) |
 | [rate-limit-modal-watcher-design.md](rate-limit-modal-watcher-design.md) | Auto-dismissing the Claude API rate-limit-options modal | Shipped (mg-4421, `internal/claude/modal_hook.go`); archeology |
 | [rating-dialog-watcher-design.md](rating-dialog-watcher-design.md) | Auto-dismissing Claude Code's mid-session rating dialog | Shipped (mg-4421, `internal/claude/modal_hook.go`); archeology |
