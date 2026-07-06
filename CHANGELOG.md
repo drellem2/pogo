@@ -50,6 +50,18 @@ is the curated, human-readable summary kept in sync at each release cut.
   schedule removal + stand-down nudge).
 
 ### Fixed
+- **Polecat mail-check auto-registered at spawn** (mg-e633). `spawn-polecat`
+  now registers a per-polecat mail-check schedule (id `mail-check-<work-item-id>`,
+  `*/10` cron, `--replay once`, nudge delivery) at spawn time, addressed to the
+  polecat's bare registry name — the identity pogod delivers nudges to and reaps
+  under. Previously a polecat only self-registered this in its own step-2, so a
+  builder↔reviewer review loop could stall **silently**: reviewer-findings mail
+  never woke the builder because polecats don't poll mail, and both agents sat
+  idle-by-design with no error. Teardown is unchanged — pogod's existing
+  on-exit reap (`RemoveMailChecksForAgent`, gh #35 / #15) already removes it. The
+  polecat templates' step-2 now addresses `$POGO_AGENT_NAME` (matching the
+  spawn-registered entry) so re-running it is an idempotent confirm, not a
+  duplicate.
 - PM-tier `extends` stubs: a stub-level `restart_on_crash` override is now
   honored — previously the flag was resolved from the synthesized prompt,
   whose frontmatter comes from the shared template (always `true` for

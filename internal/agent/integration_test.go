@@ -164,14 +164,17 @@ func TestPolecatTemplateExpansion(t *testing.T) {
 	}
 
 	// Verify the mail-check schedule instruction is present. Polecats are not
-	// on pogod's nudge cycle, so they need a self-registered schedule to
-	// proactively check mail. Post-mg-2f79 this uses pogod's sleep-resilient
-	// `pogo schedule` rather than Claude's in-process `CronCreate`.
+	// on pogod's nudge cycle, so they need a mail-check schedule to proactively
+	// check mail. Post-mg-2f79 this uses pogod's sleep-resilient `pogo schedule`
+	// rather than Claude's in-process `CronCreate`. Post-mg-e633 spawn-polecat
+	// auto-registers it under the polecat's bare registry name, so the template
+	// instruction addresses `$POGO_AGENT_NAME` (matching the spawn-registered
+	// entry, keeping it idempotent) rather than the event identity.
 	scheduleChecks := []string{
-		"pogo schedule cat-gt-a3f", // pogod scheduler CLI, agent name expanded
-		"--cron \"*/10 * * * *\"",  // 10-minute cadence
-		"--id mail-check-gt-a3f",   // idempotent registration key
-		"mg mail list gt-a3f",      // expanded message body
+		"pogo schedule $POGO_AGENT_NAME", // pogod scheduler CLI, bare agent name
+		"--cron \"*/10 * * * *\"",        // 10-minute cadence
+		"--id mail-check-gt-a3f",         // idempotent registration key (work item id)
+		"mg mail list gt-a3f",            // expanded message body
 	}
 	for _, check := range scheduleChecks {
 		if !strings.Contains(expanded, check) {

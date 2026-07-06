@@ -325,6 +325,12 @@ type Registry struct {
 	// pogod schedules (mg-41e1). pogod wires it to its scheduler; nil (bare
 	// registry, scheduler disabled) makes park skip schedule handling.
 	schedulePauser SchedulePauser
+
+	// mailCheckRegistrar, when set, auto-registers a per-polecat mail-check
+	// schedule at spawn so a review-loop polecat notices peer mail without
+	// polling (mg-e633). pogod wires it to its scheduler; nil (bare registry,
+	// scheduler disabled) makes spawn skip registration.
+	mailCheckRegistrar MailCheckRegistrar
 }
 
 // SetStallScheduleProvider installs the cron-schedule lookup used by diagnose to

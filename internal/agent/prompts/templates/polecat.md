@@ -65,12 +65,12 @@ Follow these steps exactly, in order. Skipping any step is a failure.
 2. **Register a mail-check schedule with pogod** so the {{.Coordinator}} can reach you mid-task. Polecats are not on pogod's nudge cycle — without this step, you won't notice incoming mail until your work is done. Use **`pogo schedule`** (the daemon-side scheduler) so the mail-check survives host sleep / NTP steps / pogod restarts; do **not** use your harness's in-process scheduler{{if eq .Provider "claude"}} (Claude Code's `CronCreate`){{end}} for this — it silently drops fires during sleep:
 
    ```bash
-   pogo schedule cat-{{.Id}} --cron "*/10 * * * *" --id mail-check-{{.Id}} \
+   pogo schedule $POGO_AGENT_NAME --cron "*/10 * * * *" --id mail-check-{{.Id}} \
        --replay once \
        --message "Check your mail with mg mail list {{.Id}} and handle any unread messages."
    ```
 
-   Confirm with `pogo schedule list --agent cat-{{.Id}}` — you should see exactly one entry. The `--id` is keyed on your work item id, so re-running the command is idempotent (it replaces the same entry rather than stacking duplicates). The {{.Coordinator}} will `pogo schedule rm mail-check-{{.Id}}` when stopping you, so you don't need to clean up yourself. This is the **only** background schedule you should register; for refinery polling in step 6, use a bash loop, not a schedule.
+   Confirm with `pogo schedule list --agent $POGO_AGENT_NAME` — you should see exactly one entry. pogod already auto-registers this schedule for you at spawn (mg-e633), so this command is a safe re-confirm; the `--id` is keyed on your work item id, so re-running it replaces the same `(agent, id)` entry rather than stacking duplicates. The {{.Coordinator}} will `pogo schedule rm mail-check-{{.Id}}` when stopping you, so you don't need to clean up yourself. This is the **only** background schedule you should register; for refinery polling in step 6, use a bash loop, not a schedule.
 
    *Why `pogo schedule` and not an in-process scheduler?* A harness in-process scheduler{{if eq .Provider "claude"}} (such as Claude Code's `CronCreate`){{end}} lives inside this harness session and has no notion of wall-clock time across sleep — if the host suspends for an hour, every fire that should have happened in that window is silently dropped. `pogo schedule` stores the next fire time on disk and replays through sleep; see "Reacting to scheduler fires" below for the policy.
 

@@ -1018,6 +1018,14 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		return
 	}
 
+	// Auto-register the polecat's mail-check loop so a builder<->reviewer review
+	// loop can round-trip without the mayor registering schedules by hand
+	// (mg-e633). Addressed to the bare agent name, which is the identity pogod
+	// delivers nudges to and reaps under when the polecat exits. Best-effort:
+	// the polecat is already running, so a registration failure is logged, not
+	// fatal.
+	r.registerPolecatMailCheck(spawnReq.Name, spawnReq.Id)
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(agentInfo(a))

@@ -141,6 +141,37 @@ func TestRemoveMailChecksForAgent(t *testing.T) {
 	}
 }
 
+// TestRemoveMailChecksForAgentReapsSpawnRegistered proves the mg-e633
+// teardown path: spawn-polecat auto-registers the mail-check addressed to the
+// polecat's BARE registry name (id mail-check-<work-item-id>), and pogod's
+// onExit reap — RemoveMailChecksForAgent(now, a.Name, a.EventAgent()) — removes
+// it. Here the polecat's name ("spwsch") differs from its work item id
+// ("mg-e633"), so the schedule id suffix is the work item id while the agent is
+// the bare name; the reap must match on the bare-name alias regardless.
+func TestRemoveMailChecksForAgentReapsSpawnRegistered(t *testing.T) {
+	now := fixedTime()
+	s := newSchedulerForTest(t, nil)
+
+	// Mirror mailCheckRegistrar.RegisterMailCheck: agent = bare name,
+	// id = mail-check-<work-item-id>.
+	if _, err := s.Add(Entry{
+		Agent: "spwsch",
+		ID:    MailCheckIDPrefix + "mg-e633",
+		Cron:  "*/10 * * * *",
+	}, now); err != nil {
+		t.Fatalf("Add spawn-registered mail-check: %v", err)
+	}
+
+	// pogod's onExit passes (a.Name, a.EventAgent()).
+	n := s.RemoveMailChecksForAgent(now, "spwsch", "cat-spwsch")
+	if n != 1 {
+		t.Fatalf("RemoveMailChecksForAgent reaped %d, want 1 (spawn-registered mail-check not torn down)", n)
+	}
+	if len(s.List("")) != 0 {
+		t.Fatalf("spawn-registered mail-check survived reap: %+v", s.List(""))
+	}
+}
+
 // TestGCEmitsAgentGoneEvent asserts the sweep emits an observable
 // schedule_removed event with reason "agent_gone" (acceptance: GC sweeps reuse
 // the same removal-event signal as explicit rm — mg-afdb / mg-8e5d).

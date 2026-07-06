@@ -136,6 +136,30 @@ func (p schedulePauser) RestoreForAgent(entries []json.RawMessage) (int, error) 
 	return restored, firstErr
 }
 
+// mailCheckRegistrar implements agent.MailCheckRegistrar against the scheduler
+// so spawn-polecat can auto-register a polecat's mail-check loop at spawn time
+// (mg-e633). The entry is addressed to the polecat's bare registry name — the
+// identity PogodDeliverer.Get resolves for PTY nudge delivery and the reap path
+// (RemoveMailChecksForAgent) matches on exit — with a mail-check-<id> schedule
+// id so the scheduler's stale-entry sweep leaves it alone (mg-8e5d). Replay
+// policy "once" and nudge delivery mirror the crew-agent mail-check convention.
+type mailCheckRegistrar struct{ sched *scheduler.Scheduler }
+
+func (m mailCheckRegistrar) RegisterMailCheck(agentName, workItemID, cron, message string) error {
+	if m.sched == nil {
+		return nil
+	}
+	_, err := m.sched.Add(scheduler.Entry{
+		Agent:        agentName,
+		ID:           scheduler.MailCheckIDPrefix + workItemID,
+		Cron:         cron,
+		ReplayPolicy: scheduler.ReplayOnce,
+		Delivery:     scheduler.DeliveryNudge,
+		Message:      message,
+	}, time.Now())
+	return err
+}
+
 // schedulerStallWindows implements agent.StallScheduleProvider against the
 // scheduler so diagnose can tell a cron-driven agent's by-design between-cron
 // idle from a genuine wedge (mg-5b23). For each recurring cron schedule
@@ -728,6 +752,9 @@ Flags:
 			agentRegistry.SetStallScheduleProvider(schedulerStallWindows{sched: s})
 			// Let park/wake pause and restore an agent's schedules (mg-41e1).
 			agentRegistry.SetSchedulePauser(schedulePauser{sched: s})
+			// Auto-register a polecat's mail-check loop at spawn so review
+			// loops round-trip without manual schedule registration (mg-e633).
+			agentRegistry.SetMailCheckRegistrar(mailCheckRegistrar{sched: s})
 			log.Printf("pogod: scheduler loaded from %s", schedPath)
 		}
 	}
