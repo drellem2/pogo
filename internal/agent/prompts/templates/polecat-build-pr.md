@@ -114,9 +114,9 @@ Follow these steps exactly, in order. Skipping any step is a failure.
 6. **Announce the PR.** Mail the {{.Coordinator}} and the review ticket's owner (the reviewer polecat's mail address is its work item id — your ticket body or `depends` chain names the review ticket):
 
    ```bash
-   mg mail send {{.Coordinator}} --from={{.Id}} --subject="PR open for {{.Id}}" \
+   mg mail send {{.Coordinator}} --from=$POGO_AGENT_NAME --subject="PR open for {{.Id}}" \
        --body="PR <url> open for branch polecat-{{.Id}} (issue <owner>/<repo>#<n>). Entering review loop."
-   mg mail send <review-ticket-id> --from={{.Id}} --subject="PR ready for review: {{.Id}}" \
+   mg mail send <review-ticket-id> --from=$POGO_AGENT_NAME --subject="PR ready for review: {{.Id}}" \
        --body="PR <url>, branch polecat-{{.Id}}, issue <owner>/<repo>#<n>. Triage recommendation: <pointer>."
    ```
 
@@ -167,11 +167,11 @@ If your harness has an in-process scheduler{{if eq .Provider "claude"}} (Claude 
 - **Follow conventions.** Match the existing code style in the repository.
 - **Don't push to main, and don't merge the PR.** Push to your feature branch; never `gh pr merge`. The refinery — driven by the {{.Coordinator}} after review passes — is the only merge path.
 - **One mail-check schedule only.** Step 2 registers a single `pogo schedule` entry for mail-checking — that one is required. Do NOT register additional schedules, set up {{if eq .Provider "claude"}}`CronCreate` jobs, `/loop`, `/schedule`, {{else}}in-process scheduler jobs {{end}}or `pogo nudge` commands targeting yourself or other agents.
-- **If you need to surface something to the user, mail `human`** (not the {{.Coordinator}}): `mg mail send human --from={{.Id}} --subject="<subj>" --body="<body>"`. The {{.Coordinator}}'s inbox is for coordination; user-facing mail goes to `human` so the apple-side notifier picks it up.
-- **Reaching another agent — prefer mail for asks; reserve nudges for system events.** Mail (`mg mail send <to> --from={{.Id}} --subject="..." --body="..."`) carries an explicit sender so recipients can route, reply, and prioritize correctly. Use nudges only when sender attribution doesn't apply (cron-fired prompts, mail-check loops, system-level signals from pogod).
+- **If you need to surface something to the user, mail `human`** (not the {{.Coordinator}}): `mg mail send human --from=$POGO_AGENT_NAME --subject="<subj>" --body="<body>"`. The {{.Coordinator}}'s inbox is for coordination; user-facing mail goes to `human` so the apple-side notifier picks it up.
+- **Reaching another agent — prefer mail for asks; reserve nudges for system events.** Mail (`mg mail send <to> --from=$POGO_AGENT_NAME --subject="..." --body="..."`) carries an explicit sender so recipients can route, reply, and prioritize correctly. Use nudges only when sender attribution doesn't apply (cron-fired prompts, mail-check loops, system-level signals from pogod).
 - **If stuck, mail the {{.Coordinator}}:**
   ```bash
-  mg mail send {{.Coordinator}} --from={{.Id}} --subject="stuck on {{.Id}}" --body="<what you tried and what's blocking you>"
+  mg mail send {{.Coordinator}} --from=$POGO_AGENT_NAME --subject="stuck on {{.Id}}" --body="<what you tried and what's blocking you>"
   ```
 {{if eq .Provider "claude"}}- **Dismiss mid-session Claude Code modals immediately.** If at any point you see a Claude Code rating dialog (`1:Bad 2:Fine 3:Good 0:Dismiss`) or rate-limit-options modal (`Stop and wait for limit to reset`), respond with `0` or `1` respectively and continue your work. pogod's modal watcher (mg-4421) will dismiss either modal automatically if you don't notice it; the directive is a belt-and-suspenders fallback.
 {{end}}

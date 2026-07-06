@@ -118,7 +118,7 @@ Follow these steps exactly, in order. Skipping any step is a failure.
 
    Two non-terminal outcomes need explicit handling — do NOT treat them as merge failures:
    - **`lost`** — the refinery lost this MR across a pogod restart (the branch is intact on origin). Resubmit **once** with the same step-5 command, capture the new MR ID, and go back to polling. If the resubmitted MR also comes back `lost`, stop resubmitting and mail the mayor instead.
-   - **empty/`null` (not found)** — the MR ID is unknown to the refinery (or was pruned from history — the error text will say "pruned" if so). Do not spin on it and do not improvise: mail the mayor (`mg mail send mayor --from={{.Id}} --subject="refinery lost track of my MR" --body="MR <id> for branch polecat-{{.Id}}: refinery show returns not-found"`) and hold per step 8 — stay alive and wait for instructions.
+   - **empty/`null` (not found)** — the MR ID is unknown to the refinery (or was pruned from history — the error text will say "pruned" if so). Do not spin on it and do not improvise: mail the mayor (`mg mail send mayor --from=$POGO_AGENT_NAME --subject="refinery lost track of my MR" --body="MR <id> for branch polecat-{{.Id}}: refinery show returns not-found"`) and hold per step 8 — stay alive and wait for instructions.
 
 7. **If merged:** mark the work item done:
    ```bash
@@ -128,7 +128,7 @@ Follow these steps exactly, in order. Skipping any step is a failure.
 
    **If failed:** mail the {{.Coordinator}} with failure details. Do NOT call `mg done`.
    ```bash
-   mg mail send {{.Coordinator}} --from={{.Id}} --subject="merge failed for {{.Id}}" --body="<failure details from refinery>"
+   mg mail send {{.Coordinator}} --from=$POGO_AGENT_NAME --subject="merge failed for {{.Id}}" --body="<failure details from refinery>"
    ```
 
 8. **Stay alive.** Do NOT exit. After completing steps 1–7, wait for the {{.Coordinator}} to stop you. The {{.Coordinator}} will verify your work was merged before terminating your process. If the {{.Coordinator}} sends you a message (e.g., asking for a fix or retry), act on it immediately.
@@ -166,11 +166,11 @@ If your harness has an in-process scheduler{{if eq .Provider "claude"}} (Claude 
 - **Follow conventions.** Match the existing code style in the repository.
 - **Don't push to main.** Push to your feature branch. The refinery merges it into the target branch — `main` by default, or the work item's `--branch` if one was set (see the `--target` in the submit command above).
 - **One mail-check schedule only.** Step 2 registers a single `pogo schedule` entry for mail-checking — that one is required. Do NOT register additional schedules, set up {{if eq .Provider "claude"}}`CronCreate` jobs, `/loop`, `/schedule`, {{else}}in-process scheduler jobs {{end}}or `pogo nudge` commands targeting yourself or other agents. If you need to poll for refinery status, use a simple bash while-loop (see step 6).
-- **If you need to surface something to the user, mail `human`** (not the {{.Coordinator}}): `mg mail send human --from={{.Id}} --subject="<subj>" --body="<body>"`. The {{.Coordinator}}'s inbox is for coordination; user-facing mail goes to `human` so the apple-side notifier picks it up.
-- **Reaching another agent — prefer mail for asks; reserve nudges for system events.** Mail (`mg mail send <to> --from={{.Id}} --subject="..." --body="..."`) carries an explicit sender so recipients can route, reply, and prioritize correctly. Use nudges only when sender attribution doesn't apply (cron-fired prompts, mail-check loops, system-level signals from pogod).
+- **If you need to surface something to the user, mail `human`** (not the {{.Coordinator}}): `mg mail send human --from=$POGO_AGENT_NAME --subject="<subj>" --body="<body>"`. The {{.Coordinator}}'s inbox is for coordination; user-facing mail goes to `human` so the apple-side notifier picks it up.
+- **Reaching another agent — prefer mail for asks; reserve nudges for system events.** Mail (`mg mail send <to> --from=$POGO_AGENT_NAME --subject="..." --body="..."`) carries an explicit sender so recipients can route, reply, and prioritize correctly. Use nudges only when sender attribution doesn't apply (cron-fired prompts, mail-check loops, system-level signals from pogod).
 - **If stuck, mail the {{.Coordinator}}:**
   ```bash
-  mg mail send {{.Coordinator}} --from={{.Id}} --subject="stuck on {{.Id}}" --body="<what you tried and what's blocking you>"
+  mg mail send {{.Coordinator}} --from=$POGO_AGENT_NAME --subject="stuck on {{.Id}}" --body="<what you tried and what's blocking you>"
   ```
 {{if eq .Provider "claude"}}- **Dismiss mid-session Claude Code modals immediately.** If at any point you see a Claude Code rating dialog (`1:Bad 2:Fine 3:Good 0:Dismiss`) or rate-limit-options modal (`Stop and wait for limit to reset`), respond with `0` or `1` respectively and continue your work. pogod's modal watcher (mg-4421) will dismiss either modal automatically if you don't notice it; the directive is a belt-and-suspenders fallback.
 {{end}}

@@ -131,21 +131,21 @@ Follow these steps exactly, in order. Skipping any step is a failure.
 
    **If fail, rounds 1 or 2:**
    ```bash
-   mg mail send <build-ticket-id> --from={{.Id}} --subject="review round <R>: fail — <n> blocking" --body="<full findings with file:line refs, blocking first; what pass looks like>"
-   mg mail send {{.Coordinator}} --from={{.Id}} --subject="review round <R> for <build-ticket-id>: fail" --body="round <R>: <n> blocking, <n> advisory; findings mailed to builder; PR <pr-number>"
+   mg mail send <build-ticket-id> --from=$POGO_AGENT_NAME --subject="review round <R>: fail — <n> blocking" --body="<full findings with file:line refs, blocking first; what pass looks like>"
+   mg mail send {{.Coordinator}} --from=$POGO_AGENT_NAME --subject="review round <R> for <build-ticket-id>: fail" --body="round <R>: <n> blocking, <n> advisory; findings mailed to builder; PR <pr-number>"
    ```
    Do **not** call `mg done` — the loop is still open. Wait for the builder's fixed-and-pushed mail (your step-2 schedule surfaces it), then go back to step 4 and re-review as round R+1: sync to the new head, run all three lenses again — the fix itself can introduce new problems.
 
    **If pass (any round):** mail the verdict transition to the {{.Coordinator}} (who submits the branch to the refinery — you never submit it yourself), then record the verdict:
    ```bash
-   mg mail send {{.Coordinator}} --from={{.Id}} --subject="review pass for <build-ticket-id>" --body="PR <pr-number> passed review in round <R>. <advisory nits, if any, explicitly non-blocking>"
+   mg mail send {{.Coordinator}} --from=$POGO_AGENT_NAME --subject="review pass for <build-ticket-id>" --body="PR <pr-number> passed review in round <R>. <advisory nits, if any, explicitly non-blocking>"
    mg done {{.Id}} --result='{"verdict": "pass", "pr": <pr-number>, "source_item": "<build-ticket-id>", "rounds": <R>, "advisory": ["<file:line — nit>", ...], "summary": "<one line>"}'
    ```
    `advisory` retains the non-blocking findings in the verdict of record (mail and PR comments age out; the result JSON doesn't) — use an empty array when there are none.
 
    **Round cap — if round 3 ends without a pass:** stop. Do not start round 4, do not keep trading mails with the builder. Mail the {{.Coordinator}} the open findings for escalation to Daniel, then record the fail verdict:
    ```bash
-   mg mail send {{.Coordinator}} --from={{.Id}} --subject="review round cap for <build-ticket-id>: fail after 3 rounds" --body="<open blocking findings with file:line refs; per-round history in brief; PR <pr-number>. Needs Daniel.>"
+   mg mail send {{.Coordinator}} --from=$POGO_AGENT_NAME --subject="review round cap for <build-ticket-id>: fail after 3 rounds" --body="<open blocking findings with file:line refs; per-round history in brief; PR <pr-number>. Needs Daniel.>"
    mg done {{.Id}} --result='{"verdict": "fail", "pr": <pr-number>, "source_item": "<build-ticket-id>", "rounds": 3, "summary": "<open blocking findings, one line each>"}'
    ```
 
@@ -185,11 +185,11 @@ If your harness has an in-process scheduler{{if eq .Provider "claude"}} (Claude 
 - **Blocking means blocking.** Only findings that would make the merge wrong — broken behavior, missing promised scope, a design violation — block. Style nits are advisory; a pass-with-nits is a pass.
 - **Stay scoped.** Review this PR against its recommendation. Unrelated pre-existing issues you notice go in the advisory list or a note to the {{.Coordinator}} — don't expand the review.
 - **One mail-check schedule only.** Step 2 registers a single `pogo schedule` entry for mail-checking — that one is required. Do NOT register additional schedules, set up {{if eq .Provider "claude"}}`CronCreate` jobs, `/loop`, `/schedule`, {{else}}in-process scheduler jobs {{end}}or `pogo nudge` commands targeting yourself or other agents.
-- **If you need to surface something to the user, mail `human`** (not the {{.Coordinator}}): `mg mail send human --from={{.Id}} --subject="<subj>" --body="<body>"`. The {{.Coordinator}}'s inbox is for coordination; user-facing mail goes to `human` so the apple-side notifier picks it up.
-- **Reaching another agent — prefer mail for asks; reserve nudges for system events.** Mail (`mg mail send <to> --from={{.Id}} --subject="..." --body="..."`) carries an explicit sender so recipients can route, reply, and prioritize correctly. Use nudges only when sender attribution doesn't apply (cron-fired prompts, mail-check loops, system-level signals from pogod).
+- **If you need to surface something to the user, mail `human`** (not the {{.Coordinator}}): `mg mail send human --from=$POGO_AGENT_NAME --subject="<subj>" --body="<body>"`. The {{.Coordinator}}'s inbox is for coordination; user-facing mail goes to `human` so the apple-side notifier picks it up.
+- **Reaching another agent — prefer mail for asks; reserve nudges for system events.** Mail (`mg mail send <to> --from=$POGO_AGENT_NAME --subject="..." --body="..."`) carries an explicit sender so recipients can route, reply, and prioritize correctly. Use nudges only when sender attribution doesn't apply (cron-fired prompts, mail-check loops, system-level signals from pogod).
 - **If stuck, mail the {{.Coordinator}}:**
   ```bash
-  mg mail send {{.Coordinator}} --from={{.Id}} --subject="stuck on {{.Id}}" --body="<what you tried and what's blocking you>"
+  mg mail send {{.Coordinator}} --from=$POGO_AGENT_NAME --subject="stuck on {{.Id}}" --body="<what you tried and what's blocking you>"
   ```
 {{if eq .Provider "claude"}}- **Dismiss mid-session Claude Code modals immediately.** If at any point you see a Claude Code rating dialog (`1:Bad 2:Fine 3:Good 0:Dismiss`) or rate-limit-options modal (`Stop and wait for limit to reset`), respond with `0` or `1` respectively and continue your work. pogod's modal watcher (mg-4421) will dismiss either modal automatically if you don't notice it; the directive is a belt-and-suspenders fallback.
 {{end}}
