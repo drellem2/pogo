@@ -786,7 +786,7 @@ adds are keyed on (agent, id), so nothing stacks duplicates.`,
 		Short: "Attach terminal to a running agent",
 		Long: `Connect your terminal to a running agent's PTY via its unix domain socket.
 The agent's output streams to your terminal and your input goes to the agent.
-Detach with Ctrl-\ (SIGQUIT).`,
+Detach with Ctrl-\ to leave the agent running and restore your terminal.`,
 		Args: cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			info, err := client.GetAgent(args[0])

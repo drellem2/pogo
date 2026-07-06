@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"encoding/binary"
 	"io"
 	"net"
@@ -10,6 +11,47 @@ import (
 
 	"github.com/drellem2/pogo/internal/agent"
 )
+
+// TestSplitDetach is the regression guard for the detach fix. Before it,
+// AttachAgent put the terminal in raw mode (clearing ISIG) but never scanned
+// stdin for the documented Ctrl-\ escape, so the 0x1c byte was wrapped in a
+// data frame and injected into the agent's PTY — there was no way to detach.
+// splitDetach must forward the bytes before the escape, report detach, and
+// drop the escape byte (and anything after it in the same read).
+func TestSplitDetach(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		chunk       []byte
+		wantForward []byte
+		wantDetach  bool
+	}{
+		{"no escape", []byte("ls -la\r"), []byte("ls -la\r"), false},
+		{"escape only", []byte{detachByte}, []byte{}, true},
+		{"bytes then escape", []byte{'a', 'b', detachByte}, []byte{'a', 'b'}, true},
+		{"escape then bytes dropped", []byte{detachByte, 'x', 'y'}, []byte{}, true},
+		{"bytes escape bytes", []byte{'h', 'i', detachByte, 'z'}, []byte{'h', 'i'}, true},
+		{"empty", []byte{}, []byte{}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			forward, detach := splitDetach(tc.chunk)
+			if detach != tc.wantDetach {
+				t.Errorf("detach = %v, want %v", detach, tc.wantDetach)
+			}
+			if !bytes.Equal(forward, tc.wantForward) {
+				t.Errorf("forward = %q, want %q", forward, tc.wantForward)
+			}
+		})
+	}
+}
+
+// TestDetachByteIsCtrlBackslash pins the escape keystroke to Ctrl-\ (0x1c),
+// matching the value the attach command's help text advertises. A drift here
+// would silently make the documented detach key stop working.
+func TestDetachByteIsCtrlBackslash(t *testing.T) {
+	if detachByte != 0x1c {
+		t.Errorf("detachByte = 0x%02x, want 0x1c (Ctrl-\\)", detachByte)
+	}
+}
 
 // readN reads exactly n bytes from conn with a deadline, failing the test on
 // error. net.Pipe writes block until read, so the caller drives reads while

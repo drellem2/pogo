@@ -7,6 +7,7 @@ item are the anchor.
 
 | Doc | Covers | Outcome |
 |-----|--------|---------|
+| [attach-detach-2026-07-06.md](attach-detach-2026-07-06.md) | Root cause: `pogo attach` Ctrl-\ detach never worked (raw mode clears ISIG, no byte scan) | Root-cause trace + fix (mg-5be3) |
 | [bridget-fork-2026-05-09.md](bridget-fork-2026-05-09.md) | Forking `cloverross/bridget` for the Discord integration | Done — fork follow-up to the [bridget design](../design/bridget-integration-design.md) (mg-7921) |
 | [claude-explore-integration.md](claude-explore-integration.md) | Whether pogo's index needs special config for Claude Code's "Explore" sub-agent | Scoped, deferred (mg-39b6) |
 | [codex-e2e-validation.md](codex-e2e-validation.md) | Phase 3D end-to-end validation of the Codex CLI provider | Passed — validation record (mg-6599) |

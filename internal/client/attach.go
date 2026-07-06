@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -15,9 +16,18 @@ import (
 	"github.com/drellem2/pogo/internal/agent"
 )
 
+// detachByte is the escape keystroke that ends an attach session: Ctrl-\
+// (ASCII FS, 0x1c). Because AttachAgent puts the terminal in raw mode, the
+// kernel's ISIG processing is disabled, so Ctrl-\ no longer raises SIGQUIT —
+// the byte is delivered to us like any other keystroke. We therefore detect it
+// in the stdin stream and unwind the attach, rather than relying on a signal
+// (which never fires) or forwarding the byte to the agent (which would inject
+// a stray Ctrl-\ into the agent's TUI and leave the user stuck attached).
+const detachByte = 0x1c
+
 // AttachAgent connects the current terminal to a running agent's PTY
 // via its unix domain socket. Returns when the connection closes or
-// the user sends the escape sequence (Ctrl-\).
+// the user presses the detach key (Ctrl-\); see detachByte.
 //
 // Wire protocol (client → server) is documented in
 // internal/agent/attach_proto.go. Briefly: a mandatory leading 5-byte resize
@@ -84,14 +94,23 @@ func AttachAgent(socketPath string) error {
 		}
 	}()
 
-	// stdin → data frames → conn
+	// stdin → data frames → conn. Each chunk is scanned for the detach byte
+	// (Ctrl-\): bytes before it are forwarded, then the goroutine returns so
+	// AttachAgent unwinds and the deferred term.Restore leaves the terminal
+	// sane. The detach byte itself is consumed, never forwarded to the agent.
 	go func() {
 		defer func() { done <- struct{}{} }()
 		buf := make([]byte, 4096)
 		for {
 			n, err := os.Stdin.Read(buf)
 			if n > 0 {
-				if werr := sendDataFrame(conn, &writeMu, buf[:n]); werr != nil {
+				forward, detach := splitDetach(buf[:n])
+				if len(forward) > 0 {
+					if werr := sendDataFrame(conn, &writeMu, forward); werr != nil {
+						return
+					}
+				}
+				if detach {
 					return
 				}
 			}
@@ -109,6 +128,18 @@ func AttachAgent(socketPath string) error {
 
 	<-done
 	return nil
+}
+
+// splitDetach scans a chunk of raw terminal input for the detach byte (Ctrl-\).
+// It returns the bytes preceding the first detach byte — which should still be
+// forwarded to the agent — and whether a detach byte was found. The detach byte
+// and anything after it in the same chunk are dropped: once the user asks to
+// detach, remaining keystrokes in that read are not meant for the agent.
+func splitDetach(chunk []byte) (forward []byte, detach bool) {
+	if i := bytes.IndexByte(chunk, detachByte); i >= 0 {
+		return chunk[:i], true
+	}
+	return chunk, false
 }
 
 // sendHandshakeFrame writes the mandatory connect-time resize frame that puts
