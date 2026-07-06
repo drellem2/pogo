@@ -26,6 +26,13 @@ type testRig struct {
 	pmNotifications []string
 	tracker         *fakeTracker
 	now             func() time.Time
+
+	// usage-limit capture (gh #45)
+	rateLimited  int32 // last SetRateLimited value: 1 = true, 0 = false
+	hitCount     int32
+	clearCount   int32
+	lastHitAgent string
+	lastHitItem  string
 }
 
 func newTestRig(now func() time.Time) *testRig {
@@ -78,8 +85,30 @@ func (r *testRig) deps(agentID string) ModalHookDeps {
 			r.pmNotifications = append(r.pmNotifications, agentID+":"+matcherName)
 			r.mu.Unlock()
 		},
+		WorkItemID: "mg-test",
+		SetRateLimited: func(v bool) {
+			if v {
+				atomic.StoreInt32(&r.rateLimited, 1)
+			} else {
+				atomic.StoreInt32(&r.rateLimited, 0)
+			}
+		},
+		OnUsageLimitHit: func(agentID, workItemID string, _ time.Time) {
+			r.mu.Lock()
+			r.lastHitAgent = agentID
+			r.lastHitItem = workItemID
+			r.mu.Unlock()
+			atomic.AddInt32(&r.hitCount, 1)
+		},
+		OnUsageLimitClear: func(agentID string, _ time.Time) {
+			atomic.AddInt32(&r.clearCount, 1)
+		},
 	}
 }
+
+func (r *testRig) hits() int           { return int(atomic.LoadInt32(&r.hitCount)) }
+func (r *testRig) clears() int         { return int(atomic.LoadInt32(&r.clearCount)) }
+func (r *testRig) isRateLimited() bool { return atomic.LoadInt32(&r.rateLimited) == 1 }
 
 func (r *testRig) dismissals() int { return int(atomic.LoadInt32(&r.dismissCount)) }
 
@@ -156,8 +185,9 @@ func testMatchers() []ModalMatcher {
 			LineMarker: RateLimitMarker,
 			Dismissal:  []byte("1\n"),
 			IdleGate: IdleGatePolicy{
-				Mode:           ModeEventsStale,
-				EventStaleness: 20 * time.Minute,
+				Mode:                ModeEventsStale,
+				EventStaleness:      20 * time.Minute,
+				UsageLimitStaleness: UsageLimitSuspectStaleness,
 			},
 		},
 	}
@@ -391,6 +421,125 @@ func TestModalHook_Case6_RateLimitQuotedNoFire(t *testing.T) {
 	}
 	if rig.dismissals() != 0 {
 		t.Errorf("expected no dismissal for transcript-quoted marker with fresh events, got %d", rig.dismissals())
+	}
+}
+
+// --- gh #45 usage-limit hit/clear cases ------------------------------------
+
+// Marker visible + events stale past the ~5m usage-limit gate (but well under
+// the 20m dismissal gate) → a usage_limit_hit fires: the agent is flagged
+// rate-limited and the coordinator is notified, WITHOUT any modal dismissal.
+func TestModalHook_UsageLimit_HitOnStaleEvents(t *testing.T) {
+	clock := &fakeClock{now: time.Unix(1_700_000_000, 0)}
+	rig := newTestRig(clock.Now)
+	// Events stale 6m: past UsageLimitSuspectStaleness (5m), under EventStaleness (20m).
+	rig.tracker.set("cat-test", clock.Now().Add(-6*time.Minute))
+
+	prev := setEventsStalePollIntervalForTest(20 * time.Millisecond)
+	defer setEventsStalePollIntervalForTest(prev)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go RunModalHook(ctx, rig.deps("cat-test"), testMatchers())
+	if !waitFor(t, time.Second, func() bool {
+		rig.mu.Lock()
+		ok := rig.scanner != nil
+		rig.mu.Unlock()
+		return ok
+	}) {
+		t.Fatalf("scanner never subscribed")
+	}
+
+	rig.writeOutput([]byte("What do you want to do?\n  1: " + RateLimitMarker + "\n"))
+
+	if !waitFor(t, 2*time.Second, func() bool { return rig.hits() >= 1 }) {
+		t.Fatalf("expected a usage_limit_hit, got %d", rig.hits())
+	}
+	if !rig.isRateLimited() {
+		t.Errorf("agent should be flagged rate-limited after a hit")
+	}
+	rig.mu.Lock()
+	agent, item := rig.lastHitAgent, rig.lastHitItem
+	rig.mu.Unlock()
+	if agent != "cat-test" || item != "mg-test" {
+		t.Errorf("hit carried agent=%q item=%q, want cat-test/mg-test", agent, item)
+	}
+	// The 5m stage must NOT dismiss the modal (that's the 20m gate's job).
+	if rig.dismissals() != 0 {
+		t.Errorf("suspected-hit stage must not dismiss the modal, got %d dismissals", rig.dismissals())
+	}
+}
+
+// After a hit, the event log advancing again (agent resumed producing events)
+// clears the condition: usage_limit_cleared fires and the flag is dropped.
+func TestModalHook_UsageLimit_ClearsOnResume(t *testing.T) {
+	clock := &fakeClock{now: time.Unix(1_700_000_000, 0)}
+	rig := newTestRig(clock.Now)
+	rig.tracker.set("cat-test", clock.Now().Add(-6*time.Minute))
+
+	prev := setEventsStalePollIntervalForTest(20 * time.Millisecond)
+	defer setEventsStalePollIntervalForTest(prev)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go RunModalHook(ctx, rig.deps("cat-test"), testMatchers())
+	if !waitFor(t, time.Second, func() bool {
+		rig.mu.Lock()
+		ok := rig.scanner != nil
+		rig.mu.Unlock()
+		return ok
+	}) {
+		t.Fatalf("scanner never subscribed")
+	}
+
+	rig.writeOutput([]byte(RateLimitMarker + "\n"))
+	if !waitFor(t, 2*time.Second, func() bool { return rig.hits() >= 1 }) {
+		t.Fatalf("expected a usage_limit_hit first, got %d", rig.hits())
+	}
+
+	// Agent resumes: event log advances to "now" (fresh, after the wedge point).
+	rig.tracker.set("cat-test", clock.Now())
+	if !waitFor(t, 2*time.Second, func() bool { return rig.clears() >= 1 }) {
+		t.Fatalf("expected a usage_limit_cleared after events resumed, got %d", rig.clears())
+	}
+	if rig.isRateLimited() {
+		t.Errorf("agent should no longer be rate-limited after clear")
+	}
+}
+
+// The marker quoted in a transcript while the event log stays fresh must NOT
+// trip the hit gate — the ~5m staleness requirement is what disambiguates a
+// real wedge from an agent that merely prints the phrase (reviewer gate).
+func TestModalHook_UsageLimit_QuotedMarkerNoHit(t *testing.T) {
+	clock := &fakeClock{now: time.Unix(1_700_000_000, 0)}
+	rig := newTestRig(clock.Now)
+	rig.tracker.set("cat-test", clock.Now()) // events fresh
+
+	prev := setEventsStalePollIntervalForTest(20 * time.Millisecond)
+	defer setEventsStalePollIntervalForTest(prev)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go RunModalHook(ctx, rig.deps("cat-test"), testMatchers())
+	if !waitFor(t, time.Second, func() bool {
+		rig.mu.Lock()
+		ok := rig.scanner != nil
+		rig.mu.Unlock()
+		return ok
+	}) {
+		t.Fatalf("scanner never subscribed")
+	}
+
+	rig.writeOutput([]byte("narration: I will think about \"" + RateLimitMarker + "\" now.\n"))
+	for i := 0; i < 8; i++ {
+		time.Sleep(20 * time.Millisecond)
+		rig.tracker.set("cat-test", clock.Now())
+	}
+	if rig.hits() != 0 {
+		t.Errorf("quoted marker with fresh events must not trip a hit, got %d", rig.hits())
+	}
+	if rig.isRateLimited() {
+		t.Errorf("agent must not be flagged rate-limited on a quoted marker")
 	}
 }
 

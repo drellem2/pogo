@@ -304,6 +304,32 @@ pogod's stall watcher (gh drellem2/macguffin #12) crossed a work-pile-up thresho
 {"schema_version":1,"timestamp":"2026-06-10T16:20:00.000000000Z","event_type":"stall_watch_fired","agent":"pogod","details":{"category":"unclaimed_items","watched_agent":"mayor","item_count":2,"item_ids":["mg-2350","mg-9299"],"age_threshold":"10m0s","oldest_age_seconds":1830.4}}
 ```
 
+#### `usage_limit_hit`
+
+pogod's modal watcher ([modal_hook.go](../internal/claude/modal_hook.go), gh drellem2/pogo #45) declared a **suspected** provider usage-limit hit for an agent: the rate-limit-options modal has been recently visible AND the agent's event log has been stale for longer than the usage-limit staleness gate (~5m, `UsageLimitSuspectStaleness`). This is a heuristic derived entirely from the existing event-staleness tracker — there is no provider quota/API probe. The ~5m gate is deliberately long because the marker text also appears in ordinary transcripts; a shorter gate would false-positive on an agent that merely prints the phrase. Emitted once per wedge; the paired `usage_limit_cleared` fires on recovery. Additive — no `schema_version` bump.
+
+- **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent` (the wedged agent, e.g. `"cat-mg-7ffa"`), `details`
+- **Optional envelope:** `work_item_id` (present when the agent is tied to a work item)
+- **`details` fields:**
+  - `matcher` (string, required): always `"rate-limit-options"` in v1
+
+```json
+{"schema_version":1,"timestamp":"2026-07-06T18:20:00.000000000Z","event_type":"usage_limit_hit","agent":"cat-mg-7ffa","work_item_id":"mg-7ffa","details":{"matcher":"rate-limit-options"}}
+```
+
+#### `usage_limit_cleared`
+
+The agent flagged by a prior `usage_limit_hit` recovered: its event log advanced past the wedge point (the agent is producing events again). This is the recovery signal operators wait on — it means the limit reset and the agent resumed work. Emitted once per hit, paired with the preceding `usage_limit_hit`. (If the agent instead exits while still limited, no `usage_limit_cleared` is emitted — the agent's `agent_stopped`/`agent_crashed` lifecycle event records the death, and the fleet coordinator releases it from the episode.) Additive — no `schema_version` bump.
+
+- **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent`, `details`
+- **Optional envelope:** `work_item_id` (present when the agent is tied to a work item)
+- **`details` fields:**
+  - `matcher` (string, required): always `"rate-limit-options"` in v1
+
+```json
+{"schema_version":1,"timestamp":"2026-07-06T22:05:00.000000000Z","event_type":"usage_limit_cleared","agent":"cat-mg-7ffa","work_item_id":"mg-7ffa","details":{"matcher":"rate-limit-options"}}
+```
+
 ## Worked example: a polecat merge cycle
 
 The lines below show the canonical event sequence for a successful polecat run. Times are illustrative.

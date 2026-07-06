@@ -11,6 +11,21 @@ is the curated, human-readable summary kept in sync at each release cut.
 ## [Unreleased]
 
 ### Added
+- **Usage-limit visibility + recovery** (mg-7ffa, gh #45). pogod's modal
+  watcher now recognizes a provider usage-limit wedge as a distinct, observable
+  condition instead of a silent stall. When the rate-limit-options modal stays
+  visible while an agent's event log goes stale past ~5m (a heuristic off the
+  existing event-staleness tracker — no quota/API probe), pogod emits a
+  `usage_limit_hit` event `{agent, work_item_id, timestamp}`, flags the agent
+  `RateLimited`, and surfaces it as `health=rate_limited` in
+  `pogo agent diagnose` and `⚠ rate-limited` in `pogo status`. Recovery is
+  detected when the event log advances again: pogod emits `usage_limit_cleared`
+  and drops the flag. To avoid an N-agent notification storm, operator mail is
+  coalesced to **one mail to `human` per fleet-wide episode** — one at hit, one
+  at clear, the latter carrying a per-agent resume checklist. Runbook in
+  [docs/operations.md](docs/operations.md#recovering-from-a-usage-limit-episode);
+  event catalog in [docs/event-log.md](docs/event-log.md). Deferred (not built):
+  auto-resume of waiting agents, a `pogo usage` command, provider quota probes.
 - **`polecat-build-pr.md` template: issue-track build variant** (mg-9675,
   gh-issue-workflow design §3/§6). Shipped polecat template for work that
   answers a GitHub issue: after commit + branch push the builder opens a PR

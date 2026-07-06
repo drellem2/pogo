@@ -333,8 +333,12 @@ Use --json for the raw structured response.`,
 			fmt.Fprintf(&b, "  %d total (%d crew, %d polecat), %d running\n",
 				len(agents), crew, polecats, running)
 			for _, a := range agents {
-				fmt.Fprintf(&b, "  %-20s  %-8s  %-10s  pid=%-6d  uptime=%s\n",
-					a.Name, a.Type, a.Status, a.PID, a.Uptime)
+				marker := ""
+				if a.RateLimited {
+					marker = "  ⚠ rate-limited"
+				}
+				fmt.Fprintf(&b, "  %-20s  %-8s  %-10s  pid=%-6d  uptime=%s%s\n",
+					a.Name, a.Type, a.Status, a.PID, a.Uptime, marker)
 			}
 		}
 		fmt.Fprintln(&b)
@@ -885,6 +889,9 @@ Use --plain to strip ANSI/VT escape sequences for human-readable or machine-pars
 						if a.RestartCount > 0 {
 							extra += fmt.Sprintf("  restarts=%d", a.RestartCount)
 						}
+						if a.RateLimited {
+							extra += "  rate-limited"
+						}
 						if a.LastActivity != "" {
 							extra += fmt.Sprintf("  last-activity=%s", a.LastActivity)
 						}
@@ -903,11 +910,12 @@ Use --plain to strip ANSI/VT escape sequences for human-readable or machine-pars
 process health, idle duration, and stall detection thresholds.
 
 Health states:
-  healthy  — produced output within the last 30s (actively working)
-  idle     — quiet for over 30s but within the stall threshold (alive, between cycles)
-  stalled  — quiet for longer than the stall threshold
-  exited   — process has exited
-  dead     — registered as running but OS process is gone
+  healthy      — produced output within the last 30s (actively working)
+  idle         — quiet for over 30s but within the stall threshold (alive, between cycles)
+  stalled      — quiet for longer than the stall threshold
+  rate_limited — alive but wedged on the provider's usage-limit modal (gh #45)
+  exited       — process has exited
+  dead         — registered as running but OS process is gone
 
 A cron-driven agent (e.g. a */30 mail-check) is idle by design between firings.
 While it is within one cron interval of its last scheduled firing it reports
@@ -934,6 +942,15 @@ While it is within one cron interval of its last scheduled firing it reports
 				}
 				fmt.Printf("Stall threshold: %s\n", diag.StallThreshold)
 				fmt.Printf("Health:         %s\n", diag.Health)
+				if diag.RateLimited {
+					fmt.Printf("\n⚠ Agent appears rate-limited (provider usage limit).")
+					if !diag.RateLimitedSince.IsZero() {
+						fmt.Printf(" Since %s.", diag.RateLimitedSince.UTC().Format(time.RFC3339))
+					}
+					fmt.Printf("\n  It is alive but wedged on the rate-limit modal; work resumes when the limit\n")
+					fmt.Printf("  resets. Do not restart it to \"fix\" the wedge. See docs/operations.md →\n")
+					fmt.Printf("  \"Recovering from a usage-limit episode\".\n")
+				}
 				if diag.CronCovered {
 					fmt.Printf("\nℹ Idle past the stall threshold, but within one cron interval of\n")
 					fmt.Printf("  the last scheduled firing — this is normal between-cron idle, not a stall.\n")

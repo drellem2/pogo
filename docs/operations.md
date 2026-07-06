@@ -11,6 +11,32 @@ An agent whose process has died — a crew loop that exited cleanly without re-a
 
 A **live** agent is still protected: `start` refuses a duplicate of a running process, and `stop` signals it normally. So there is no need to `systemctl restart pogo.service` / bounce launchd to recover one wedged agent — that bounces the whole fleet. Reserve the daemon restart tiers below for pogod itself misbehaving.
 
+## Recovering from a usage-limit episode
+
+When the provider's usage limit is hit, Claude Code renders a rate-limit-options modal ("Stop and wait for limit to reset") and the agent's reasoning loop wedges — it stops producing events but stays alive. pogod's modal watcher (gh #45) detects this and surfaces it so you aren't left guessing why a fleet went quiet. **Do not restart or `kill` a rate-limited agent to "fix" the wedge** — it is not broken; it is waiting for the limit to reset, and a restart just loses in-flight context. Recovery is: wait for the reset, then nudge or restart as needed.
+
+### How you find out
+
+- **One coalesced mail to `human` at the start of an episode** (subject `usage limit hit — fleet episode started`). An "episode" is one fleet-wide limit event: the first affected agent triggers the mail; additional agents that hit the same limit join the episode **silently** (no per-agent mail storm). No action is required at hit time.
+- **`pogo status`** marks affected agents with `⚠ rate-limited` in the agent rows; `pogo agent list` appends `rate-limited`.
+- **`pogo agent diagnose <name>`** reports `Health: rate_limited` — a distinct condition that outranks `stalled`/`idle`, so a limit wait is never mistaken for a genuine wedge. `--json` carries `rate_limited` and `rate_limited_since`.
+- The `usage_limit_hit` / `usage_limit_cleared` events land in `~/.pogo/events.log` (see [event-log.md](event-log.md)) with `{agent, work_item_id, timestamp}` — filter with `jq 'select(.event_type=="usage_limit_hit")'`.
+
+### When the limit resets
+
+The condition **clears automatically** when each agent resumes producing events (its event log advances past the wedge point): the `rate_limited` flag drops, a `usage_limit_cleared` event is emitted, and — once the **last** limited agent clears — pogod sends **one coalesced clear mail to `human`** (subject `usage limit cleared — N agent(s) recovered`) carrying a per-agent **resume checklist**:
+
+```
+- cat-mg-7ffa (work item mg-7ffa)
+    verify: pogo agent diagnose mg-7ffa
+    if idle: pogo nudge mg-7ffa "usage limit reset — resume your task"
+    if exited: pogo agent start mg-7ffa
+```
+
+Work through the checklist per agent: `pogo agent diagnose` to see whether it self-resumed, `pogo nudge` an idle-but-alive agent to prod it back into its loop, or `pogo agent start` one that exited during the wait. Agents that were mid-task and resumed on their own need nothing.
+
+> **Note on marker drift (pre-existing risk):** detection keys off the modal's marker text (`"Stop and wait for limit to reset"`). If a future Claude Code version changes that string, detection silently stops until the marker constant is updated — the same drift risk the modal-dismissal watcher already carries. This is diagnostic-only: a missed detection means you fall back to the pre-#45 behavior (agents read as `stalled`), it does not break anything.
+
 ## Parking a crew agent (supported dormancy)
 
 `restart_on_crash = true` is an always-on contract: pogod respawns the agent on **any** exit — including an explicit `pogo agent stop` — within seconds. To take such an agent out of rotation (e.g. a PM whose workstream is gated with zero in-flight items), **park** it instead of stopping it:

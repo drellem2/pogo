@@ -33,6 +33,15 @@ type AgentInfo struct {
 	Uptime         string      `json:"uptime"`
 	LastActivity   string      `json:"last_activity,omitempty"`
 	WorkItemID     string      `json:"work_item_id,omitempty"`
+	// RateLimited is true when the modal watcher has flagged the agent as
+	// suspected-usage-limited (rate-limit modal visible + event log stale). It
+	// is a distinct condition from idle/stalled: the agent is alive but wedged
+	// on the provider's rate-limit modal. Surfaced in `pogo status` rows and
+	// `pogo agent diagnose`.
+	RateLimited bool `json:"rate_limited,omitempty"`
+	// RateLimitedSince (RFC 3339) is when RateLimited was set; omitted when the
+	// agent is not rate-limited.
+	RateLimitedSince time.Time `json:"rate_limited_since,omitempty"`
 	// ParkedAt (RFC 3339) is set only on status=parked entries, which are
 	// synthesized from on-disk park flags rather than live registry state.
 	ParkedAt string `json:"parked_at,omitempty"`
@@ -128,7 +137,8 @@ type DiagnoseInfo struct {
 	// of its last scheduled firing — between-cron idle is by design for a
 	// cron-driven crew agent, not a wedge (mg-5b23).
 	CronCovered bool `json:"cron_covered,omitempty"`
-	// Health is a summary string: "healthy", "idle", "stalled", "exited", or "dead".
+	// Health is a summary string: "healthy", "idle", "stalled", "rate_limited",
+	// "exited", or "dead".
 	Health string `json:"health"`
 	// RecentOutputTail is the last ~500 bytes of PTY output for quick triage.
 	RecentOutputTail string `json:"recent_output_tail,omitempty"`
@@ -200,12 +210,19 @@ func diagnoseAgentAt(a *Agent, now time.Time, windows []CronWindow) DiagnoseInfo
 	// stall threshold it is "idle" (alive, between cycles); past the threshold it
 	// is "stalled". A cron-covered agent reports "idle" rather than "stalled" —
 	// its idle exceeds the recency window by construction (mg-5b23, gh #16).
+	//
+	// "rate_limited" is a distinct condition that outranks stalled/idle: a
+	// usage-limited agent is alive but wedged on the provider's rate-limit modal
+	// and would otherwise read as stalled. Surfacing it separately keeps
+	// operators from mistaking a limit wait for a genuine wedge (gh #45).
 	health := "healthy"
 	switch {
 	case info.Status == StatusExited:
 		health = "exited"
 	case a.PID > 0 && !processAlive && info.Status == StatusRunning:
 		health = "dead"
+	case info.RateLimited:
+		health = "rate_limited"
 	case stalled:
 		health = "stalled"
 	case !lastWrite.IsZero() && idleDur >= ActiveRecencyWindow:
@@ -278,6 +295,10 @@ func agentInfo(a *Agent) AgentInfo {
 		ProcessName:    ProcessName(a.Type, a.Name),
 		Uptime:         agentUptime(a),
 		WorkItemID:     a.WorkItemID,
+		RateLimited:    a.RateLimited,
+	}
+	if a.RateLimited {
+		info.RateLimitedSince = a.RateLimitedSince
 	}
 	if a.outputBuf != nil {
 		if t := a.outputBuf.LastWriteTime(); !t.IsZero() {

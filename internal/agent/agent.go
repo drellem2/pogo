@@ -95,6 +95,17 @@ type Agent struct {
 	// running-agent token cost to the right item without grepping events.
 	WorkItemID string `json:"work_item_id,omitempty"`
 
+	// RateLimited is set by the modal watcher when the agent is suspected to
+	// have hit a provider usage limit — the rate-limit-options modal is visible
+	// and the agent's event log has been stale past the usage-limit threshold
+	// (~5m). It is cleared when the agent resumes producing events. Guarded by
+	// mu; mutated only through SetRateLimited. See internal/claude/modal_hook.go
+	// and docs/operations.md (usage-limit recovery runbook).
+	RateLimited bool `json:"rate_limited,omitempty"`
+	// RateLimitedSince records when RateLimited was last set true (zero when the
+	// agent is not currently rate-limited). Guarded by mu.
+	RateLimitedSince time.Time `json:"rate_limited_since,omitempty"`
+
 	// InitialNudge is the message sent after spawn to bypass the CLI interactive prompt.
 	// Stored so Respawn can re-send it.
 	InitialNudge string `json:"-"`
@@ -149,6 +160,33 @@ func (a *Agent) GetStatus() AgentStatus {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.Status
+}
+
+// SetRateLimited records (or clears) the usage-limit condition for this agent.
+// It is idempotent: setting the same value twice is a no-op, so the modal
+// watcher can call it on every gate evaluation without churning
+// RateLimitedSince. Setting true stamps RateLimitedSince with the current time;
+// clearing resets it to zero. Safe for concurrent use — the modal watcher
+// goroutine calls this while status/diagnose readers hold the same lock.
+func (a *Agent) SetRateLimited(v bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if v == a.RateLimited {
+		return
+	}
+	a.RateLimited = v
+	if v {
+		a.RateLimitedSince = time.Now()
+	} else {
+		a.RateLimitedSince = time.Time{}
+	}
+}
+
+// IsRateLimited reports whether the agent is currently flagged as rate-limited.
+func (a *Agent) IsRateLimited() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.RateLimited
 }
 
 // pidAlive reports whether a process with the given pid is currently running,
