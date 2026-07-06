@@ -37,6 +37,20 @@ Work through the checklist per agent: `pogo agent diagnose` to see whether it se
 
 > **Note on marker drift (pre-existing risk):** detection keys off the modal's marker text (`"Stop and wait for limit to reset"`). If a future Claude Code version changes that string, detection silently stops until the marker constant is updated — the same drift risk the modal-dismissal watcher already carries. This is diagnostic-only: a missed detection means you fall back to the pre-#45 behavior (agents read as `stalled`), it does not break anything.
 
+## Token spend accounting (`mg spend`)
+
+pogo has **no `spend` command of its own** — token-usage accounting lives in **macguffin** (the work-item store), because that's where each transcript message is joined to the work item that was claimed when it was written. To see how many tokens the fleet has consumed — in total or broken down per agent, item, tag, or repo — reach for `mg spend`:
+
+- **`mg spend`** — per-item totals, ending in a grand-`TOTAL` row that column-sums the view, so a bare `mg spend` already answers "how many tokens in total?" without a flag.
+- **`mg spend --by agent`** — per-agent breakdown (who is spending the most).
+- **`mg spend --total`** — a today / this-week / all-time headline in one shot.
+- **`mg spend --window today|week`** — bound the tally to a calendar day (since local midnight) or week (since Monday). This is distinct from `--since D`, a *rolling* duration ending now (`--since 24h` = the last 24 hours); the two are mutually exclusive.
+- **`mg spend --json`** — machine-readable output for dashboards.
+
+**This is a consumption tally, not the usage-limit meter.** `mg spend` measures token *consumption recorded in transcripts* (input, cache-read — which usually dominates — cache-create, output). It is **not** a read of Anthropic's usage-limit meter, and the two can diverge. For the limit side — when a fleet wedges because the provider limit was hit — see [Recovering from a usage-limit episode](#recovering-from-a-usage-limit-episode) above and the `usage_limit_hit` / `usage_limit_cleared` events + `rate_limited` diagnose condition it describes ([pogo #45](https://github.com/drellem2/pogo/issues/45)). Spend answers "where did our tokens go"; the #45 signals answer "are we currently throttled" — complementary readings, not the same number. In particular, `--window week`'s Monday anchor is a fixed calendar convention that only *approximates* a weekly view; it does **not** track Anthropic's account-specific weekly reset.
+
+**Historical-spend semantics (harvested-only, single-machine).** Spend is tracked only once *harvested*, and harvesting runs automatically at the start of every `mg spend` invocation — so running the command is what advances the record, and any window is only as complete as the last time the command ran (schedule `mg spend` for continuous capture). Once harvested, a record survives Claude Code restarts, `mg` upgrades, and transcript rotation; the one thing that loses data is deleting a transcript *before* it has been harvested. The store is a single-host tally under `~/.macguffin/` — there is no cross-machine aggregation. The full survives/lost matrix and the graceful-attribution rules live in the macguffin README's [Token spend accounting](https://github.com/drellem2/macguffin#token-spend-accounting) section — consult it there rather than relying on this summary.
+
 ## Parking a crew agent (supported dormancy)
 
 `restart_on_crash = true` is an always-on contract: pogod respawns the agent on **any** exit — including an explicit `pogo agent stop` — within seconds. To take such an agent out of rotation (e.g. a PM whose workstream is gated with zero in-flight items), **park** it instead of stopping it:
