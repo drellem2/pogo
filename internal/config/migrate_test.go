@@ -263,3 +263,42 @@ func TestGuard_ExistingKeepsOldDefault_FreshGetsNew(t *testing.T) {
 		}
 	})
 }
+
+// TestPinRoleDefaults_FrozenLiterals is the regression that catches a post-flip
+// leak: the guard must pin the FROZEN historical role names, not whatever the
+// live Default* consts resolve to today. The expectations here are BARE literals
+// ("mayor" / "polecat") and deliberately do NOT reference DefaultCoordinator /
+// DefaultWorker — that decoupling is the whole point. When the gated
+// flavor-rename flip (mg-ce47) changes the Default* consts, a guard that (wrongly)
+// pinned the live const would write the NEW name and this test would fail, while
+// a guard reading the frozen literals keeps writing the historical name and stays
+// green.
+func TestPinRoleDefaults_FrozenLiterals(t *testing.T) {
+	// Freeze the legacy consts themselves: these must stay the historical role
+	// names regardless of any future Default* flip. Bare literals on purpose.
+	if legacyCoordinatorDefault != "mayor" {
+		t.Errorf("legacyCoordinatorDefault = %q, want frozen literal %q", legacyCoordinatorDefault, "mayor")
+	}
+	if legacyWorkerDefault != "polecat" {
+		t.Errorf("legacyWorkerDefault = %q, want frozen literal %q", legacyWorkerDefault, "polecat")
+	}
+
+	_, path := sandbox(t)
+	if _, err := PinRoleDefaultsIfExistingInstall(true); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("guard should have written config.toml: %v", err)
+	}
+	got := string(data)
+	// The pinned config must contain the bare historical literals. Comparing
+	// against DefaultCoordinator / DefaultWorker would make this test follow a
+	// flip instead of catching it, so the expectations are hard-coded strings.
+	if !strings.Contains(got, `coordinator = "mayor"`) {
+		t.Errorf("guard did not pin the frozen coordinator literal:\n%s", got)
+	}
+	if !strings.Contains(got, `worker = "polecat"`) {
+		t.Errorf("guard did not pin the frozen worker literal:\n%s", got)
+	}
+}

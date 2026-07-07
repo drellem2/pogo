@@ -17,24 +17,40 @@ import (
 // POGO_ROLE=polecat) are frozen and NOT driven by this constant. See mg-6a24.
 const DefaultWorker = "polecat"
 
-// roleDefault pairs an [agents] role key with the role name in effect for this
-// binary. The default-migration guard pins these into config.toml on existing
-// installs so a later change to the corresponding Default* constant (the gated
-// flavor-rename flip, mg-ce47) cannot silently rename an install's roles.
+// legacyCoordinatorDefault and legacyWorkerDefault are the FROZEN historical
+// role names the migration guard pins into existing installs. They are
+// deliberately DISTINCT symbols from the live DefaultCoordinator / DefaultWorker
+// consts: the guard must pin a fixed historical value, not whatever the shipped
+// default happens to be today. If the guard read the live consts, the gated
+// flavor-rename flip (mg-ce47) — which changes exactly those consts — would
+// defeat the guard, pinning the NEW name on both a same-release install and a
+// version-skip upgrade. Keeping these literal and separate is what decouples the
+// pinned value from the flip. Do NOT redefine these in terms of Default*.
+const (
+	legacyCoordinatorDefault = "mayor"
+	legacyWorkerDefault      = "polecat"
+)
+
+// roleDefault pairs an [agents] role key with the frozen historical role name
+// the guard pins for it. The default-migration guard writes these into
+// config.toml on existing installs so a later change to the corresponding
+// Default* constant (the gated flavor-rename flip, mg-ce47) cannot silently
+// rename an install's roles.
 type roleDefault struct {
 	key     string // the [agents] key, e.g. "coordinator"
-	current string // the name to pin — the default in effect today
+	current string // the frozen historical name to pin — a fixed legacy literal, NOT today's live Default*
 }
 
 // roleDefaults lists every [agents] role key the guard protects. It is generic
 // on purpose: the guard covers the coordinator AND the worker (and any future
 // role key added here), because mg-71ea shipped the coordinator key with no
 // migration guard, so a coordinator default-flip is just as unsafe as a worker
-// one for existing installs.
+// one for existing installs. The pinned values are the FROZEN legacy literals,
+// not the live Default* consts, so a future flip cannot leak through the guard.
 func roleDefaults() []roleDefault {
 	return []roleDefault{
-		{key: "coordinator", current: DefaultCoordinator},
-		{key: "worker", current: DefaultWorker},
+		{key: "coordinator", current: legacyCoordinatorDefault},
+		{key: "worker", current: legacyWorkerDefault},
 	}
 }
 
