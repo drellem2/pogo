@@ -57,7 +57,7 @@ pogo has **no `spend` command of its own** — token-usage accounting lives in *
 
 - `pogo agent park <name>` — one command that (1) persists a park flag at `~/.pogo/agents/<name>/.parked`, (2) removes the agent's pogod schedules, recording them in the park file, and (3) stops the process. The flag is written before the stop, so the respawn can't win the race; it also survives pogod restarts — boot-time auto-start skips parked agents regardless of `auto_start`.
 - `pogo agent wake <name>` — reverses it: starts the agent, restores the recorded schedules (the agent's own startup re-registration doesn't stack duplicates — schedule adds are keyed on agent + id), and clears the flag.
-- `pogo agent list` shows parked agents with `status=parked`, so the mayor's stall-watch can skip them mechanically.
+- `pogo agent list` shows parked agents with `status=parked`, so the coordinator's stall-watch can skip them mechanically. (The coordinator defaults to `ringmaster`; configurable via `[agents] coordinator`.)
 
 Parking an agent that isn't currently running is valid (the flag still gates auto-start); `pogo agent start` refuses a parked agent and points at `wake`. Parking is for crew agents — polecats are ephemeral and are simply stopped.
 

@@ -1,7 +1,8 @@
 # Customizing pogo
 
-Pogo's defaults — a coding ringmaster (the coordinator), a pogocat (a disposable
-worker agent) that opens a feature branch, and a refinery (the merge queue)
+Pogo's defaults — a coding ringmaster (the coordinator, set via `[agents]
+coordinator`), a pogocat (a disposable worker agent, set via `[agents] worker`)
+that opens a feature branch, and a refinery (the merge queue)
 that merges to `main` — are one specific shape. The pieces underneath
 (prompt files, frontmatter, `config.toml`) are general. This guide walks through
 the three knobs you'll reach for first:
@@ -20,7 +21,7 @@ and come back here when you want the reference.
 > **Before you start:** `pogo init` scaffolds `~/.pogo/agents/` for you. Pass
 > `--minimal` if you're building a non-coding workflow and don't want the
 > shipped coding-profile prompts in your way. Without `--minimal`, you get the
-> full mayor + `crew/doctor` + polecat-template (`polecat`, `polecat-qa`,
+> full coordinator + `crew/doctor` + polecat-template (`polecat`, `polecat-qa`,
 > `polecat-build-pr`, `polecat-triage`, `polecat-review`) set, which is the
 > right starting point for code-shaped work.
 
@@ -48,9 +49,9 @@ restart_on_crash = true
 nudge_on_start = "You are now running. Begin your coordination loop."
 +++
 
-# Mayor
+# Coordinator
 
-You are the mayor — the coordinator for this pogo workspace...
+You are the coordinator for this pogo workspace...
 ```
 
 Three keys worth knowing:
@@ -157,12 +158,12 @@ template's.
 
 This is the same knob that makes polecats ephemeral by default — they're set
 to `restart_on_crash = false` because they're supposed to exit (well, get
-stopped by the mayor) once their work is done.
+stopped by the coordinator) once their work is done.
 
 ### Shape the boot nudge
 
 `nudge_on_start` is the first thing the agent reads after spawn. The default
-mayor uses it to kick off its coordination loop:
+coordinator uses it to kick off its coordination loop:
 
 ```toml
 nudge_on_start = "You are now running. Begin your coordination loop."
@@ -182,7 +183,7 @@ nudge naming its work item, and immediately knows what to do.
 
 ## 2. Custom polecat templates
 
-Polecat templates live under `~/.pogo/agents/templates/`. The mayor decides
+Polecat templates live under `~/.pogo/agents/templates/`. The coordinator decides
 which template to use when it spawns a polecat (`spawn-polecat --template=<name>`,
 defaulting to `polecat`). Each template is a markdown file with the same
 frontmatter convention as crew prompts, plus access to a few template variables
@@ -216,7 +217,7 @@ onto `main` in its own worktree, and they don't step on each other. Set
 polecats that write markdown files outside any repo.
 
 Note: even with `worktree = true` in the template, pogod still skips worktree
-creation if the mayor spawns the polecat without `--repo`. The frontmatter is
+creation if the coordinator spawns the polecat without `--repo`. The frontmatter is
 the *upper bound*; the spawn call decides whether to actually create one.
 
 ### The `--no-worktree` flag
@@ -274,12 +275,12 @@ nudge_on_start = "Read the task and produce a research note for {{.Id}}."
 
 1. `mg claim {{.Id}}` — fail loudly if someone else owns it.
 2. Do the research. Write the note to `$NOTES_DIR/research-notes-{{.Id}}.md`.
-3. Mail the mayor: `mg mail send mayor --from={{.Id}} --subject="note-filed: {{.Id}}" --body="..."`
+3. Mail the coordinator: `mg mail send ringmaster --from={{.Id}} --subject="note-filed: {{.Id}}" --body="..."`
 4. `mg done {{.Id}} --result='{"note":"research-notes-{{.Id}}.md"}'`
-5. Wait for the mayor to stop you. **Do not exit on your own.**
+5. Wait for the coordinator to stop you. **Do not exit on your own.**
 ```
 
-Then teach the mayor's prompt to spawn it for the right kind of item:
+Then teach the coordinator's prompt to spawn it for the right kind of item:
 
 ```bash
 pogo agent spawn-polecat <short-id> \
@@ -293,12 +294,12 @@ A few rules of thumb:
 - **Always include `mg claim {{.Id}}` and `mg done {{.Id}}`.** Skipping `claim`
   means another polecat can grab the same item; skipping `done` means
   `mg list --status=available` will keep showing it.
-- **Tell the polecat not to exit on its own.** The mayor stops polecats once
-  their output is accepted — premature exit means the mayor can't send
+- **Tell the polecat not to exit on its own.** The coordinator stops polecats once
+  their output is accepted — premature exit means the coordinator can't send
   follow-up nudges (e.g., "this note is too vague, revise it"). The shipped
   templates all carry an explicit "**Never exit on your own**" line; keep that
   pattern.
-- **Match the spawner's expectations.** If the mayor's prompt expects the
+- **Match the spawner's expectations.** If the coordinator's prompt expects the
   polecat to mail back with subject `note-filed:`, the template's protocol
   must produce exactly that subject. The two prompts together are the
   contract.
@@ -337,8 +338,8 @@ What changes:
   "refinery is disabled" message instead of silently queuing nothing. This
   matters when you're porting code from a coding workflow and forget to strip
   the submit call.
-- **Archival becomes the mayor's job.** With the refinery on, a successful
-  merge archives the work item; with it off, your mayor prompt has to call
+- **Archival becomes the coordinator's job.** With the refinery on, a successful
+  merge archives the work item; with it off, your coordinator prompt has to call
   `mg archive <id>` explicitly after reviewing the polecat's output.
 
 There's no half-on state. The refinery is either running (default) or absent.
@@ -456,7 +457,7 @@ The three knobs above compose. A non-coding workflow looks like:
    dispatch logic, mention the tags and templates you actually use.
 3. Edit `~/.pogo/agents/templates/polecat.md` (or add a new template) — set
    `worktree = false` if there's no git change, and write the protocol the
-   mayor expects.
+   coordinator expects.
 4. Drop `[refinery] enabled = false` in `~/.config/pogo/config.toml`.
 5. `pogo install` (or `pogo server start` if pogod is already up) and `mg new`
    your first item.

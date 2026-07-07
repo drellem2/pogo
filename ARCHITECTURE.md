@@ -29,7 +29,7 @@ Pogo is an operating system for agent-first development. It combines project dis
 │  pose, mg    │     │ │ crew-arch   │ │
 │              │     │ │ crew-ops    │ │
 │              │     │ │ cat-a3f     │ │
-│              │     │ │ mayor       │ │
+│              │     │ │ ringmaster  │ │
 │              │     │ └─────────────┘ │
 └──────────────┘     └────────┬────────┘
                               │
@@ -65,7 +65,7 @@ Two agent types, distinguished by naming convention and lifecycle:
 - **Crew** (`pogo-crew-<name>`): Long-running. The daemon restarts them on crash. They handoff to fresh sessions when context fills. They push directly to main.
 - **Polecat** (`pogo-cat-<id>`): Ephemeral. Spawned for a single task. Exit on completion. Submit work to the refinery merge queue.
 
-The mayor is a crew agent. There is no special mayor code — just a prompt file that says "you coordinate work."
+The coordinator (default: ringmaster; configurable via `[agents] coordinator`, as workers are via `[agents] worker`) is a crew agent. There is no special coordinator code — just a prompt file that says "you coordinate work."
 
 ### The filesystem is the coordination layer
 
@@ -99,9 +99,9 @@ nudge_on_start = "You are now running. Begin your coordination loop."
 worktree = true
 +++
 
-# Mayor
+# Coordinator
 
-You are the mayor — the coordinator for a pogo agent workspace...
+You are the coordinator for a pogo agent workspace...
 ```
 
 Recognized fields: `auto_start`, `restart_on_crash`, `nudge_on_start`, `worktree`. Prompts without frontmatter get type-based defaults (crew restart on crash, polecats don't), so existing prompts keep working unchanged. The agent's launch command is not a per-prompt field — it comes from the active `Provider` (or the `[agents] command` config key). Parser internals live in `internal/agent/prompt.go` (`ParsePromptFrontmatter`, `AgentMeta`).
@@ -207,8 +207,8 @@ pogo agent spawn "fix the auth bug"
 
 Work flows through macguffin:
 
-1. **Human or mayor** creates work: `mg new --type=bug "auth tokens expire early"`
-2. **Mayor** (or human) decides who should do it:
+1. **Human or coordinator** creates work: `mg new --type=bug "auth tokens expire early"`
+2. **Coordinator** (or human) decides who should do it:
    - Crew work: `mg mail send crew-arch --subject="look at gt-a3f"`
    - Polecat work: `pogo agent spawn --item=gt-a3f`
 3. **Agent** claims the item: `mg claim gt-a3f`
@@ -275,7 +275,7 @@ loop (woken by submit, or every poll_interval as backstop):
 
 **Design rationale:** Gas Town's refinery was also deterministic code (not an agent), and this was explicitly validated as the right call. Merge processing is mechanical — it should never spend tokens on judgment. It needs to work even when all agents are down. Own worktrees ensure the refinery never interferes with agent or user checkouts.
 
-**Merged-polecat reap.** On a successful merge, the refinery's `OnMerged` hook has pogod reap the authoring polecat immediately: mark its work item done on its behalf, stop the process, and (via the agent exit hook) remove its worktree and mail-check schedule. This is event-driven rather than waiting for the mayor's next coordination cycle, closing the window where a lingering completed polecat holds a slot or re-submits its branch (gh #35). The mayor's reap loop remains as backstop for merges that resolve while pogod is down.
+**Merged-polecat reap.** On a successful merge, the refinery's `OnMerged` hook has pogod reap the authoring polecat immediately: mark its work item done on its behalf, stop the process, and (via the agent exit hook) remove its worktree and mail-check schedule. This is event-driven rather than waiting for the coordinator's next coordination cycle, closing the window where a lingering completed polecat holds a slot or re-submits its branch (gh #35). The coordinator's reap loop remains as backstop for merges that resolve while pogod is down.
 
 **Retry behavior.** If another commit lands on the target between fetch and push (e.g. a CI auto-bump), the ff-only merge fails with a retryable error. The refinery re-runs the full fetch→rebase→gates→merge→push cycle up to `max_attempts` times (default 7). Per-repo `<repo>/.pogo/refinery.toml`:
 
@@ -416,11 +416,11 @@ all moved their recurring schedules from Claude's in-process `CronCreate` to
 - `internal/agent/prompts/templates/polecat.md`, `polecat-qa.md`,
   `polecat-build-pr.md`, and `polecat-triage.md` — one
   per-polecat mail-check schedule with id `mail-check-<work-item-id>`. The
-  mayor removes these in step 3 of its coordination loop when stopping a
+  coordinator removes these in step 3 of its coordination loop when stopping a
   polecat; pogod also auto-GCs them as a backstop (see **Stale mail-check GC**
   below) so an agent whose process vanishes without an explicit `schedule rm`
   doesn't leave a schedule firing into the void.
-- `internal/agent/prompts/mayor.md` — unchanged. The mayor's in-process
+- `internal/agent/prompts/mayor.md` — unchanged. The coordinator's in-process
   coordination loop still uses `ScheduleWakeup` for dynamic self-pacing
   (it's event-driven through mail and idempotent across sleep, so missed
   ticks during a sleep just delay the next cycle by one wake).
@@ -464,7 +464,7 @@ The full schema, identity conventions, event catalog, and worked examples live i
 │   │   └── ops.md
 │   ├── templates/
 │   │   └── polecat.md     # Polecat prompt template
-│   └── mayor.md           # Mayor prompt
+│   └── mayor.md           # Coordinator prompt
 ├── events.log             # Append-only JSONL event log (schema: docs/event-log.md)
 ├── events.log.{1..5}      # Rotated history (100 MB trigger, 5 generations kept)
 ├── schedules.json         # Daemon-side scheduler state (see Scheduler section)
@@ -508,7 +508,7 @@ Process names are the agent identity system. No registry, no UUID, no database.
 |---------|---------|---------|
 | `pogo-crew-<name>` | Long-running crew agent | `pogo-crew-arch` |
 | `pogo-cat-<id>` | Ephemeral polecat | `pogo-cat-a3f` |
-| `pogo-mayor` | The coordinator | `pogo-mayor` |
+| `pogo-crew-<coordinator>` | The coordinator (a crew agent; default: ringmaster) | `pogo-crew-ringmaster` |
 | `pogod` | The daemon | `pogod` |
 
 Discovery: `pgrep -a pogo-crew` lists all crew. `pgrep -a pogo-cat` lists all polecats. `pogo agent list` wraps this with formatted output.
@@ -592,7 +592,7 @@ These questions came up during design and have been answered. Recorded here so t
 
 1. **macguffin scope: global.** One macguffin tree at `~/.macguffin/`, not per-project. Work items reference repo paths as metadata. Pogo provides project awareness via `lsp` and `pose` — macguffin doesn't need to duplicate it. Agents check one place for work.
 
-2. **Polecat concurrency: no limit in pogod.** The daemon doesn't enforce concurrency limits. The mayor (or human) decides how many polecats to spawn. pogod is substrate, not policy.
+2. **Polecat concurrency: no limit in pogod.** The daemon doesn't enforce concurrency limits. The coordinator (or human) decides how many polecats to spawn. pogod is substrate, not policy.
 
 3. **Refinery repo access: own worktrees.** The refinery maintains dedicated worktrees under `~/.pogo/refinery/worktrees/`, one per repo. All testing and merging happens there, never in agent or user working directories. Isolation prevents dirty-tree conflicts and keeps merge operations predictable. Post-merge, it will fast-forward the source checkout's target branch as a convenience — but only when that checkout is clean and on the target branch (gh #30).
 
@@ -605,6 +605,6 @@ These questions came up during design and have been answered. Recorded here so t
 ## What This Is Not
 
 - **Not an agent framework.** There is no "pogo agent SDK." Agents are harness processes (Claude Code today) that use CLI tools.
-- **Not a job scheduler.** The mayor decides when to spawn polecats. pogod just executes the spawn.
+- **Not a job scheduler.** The coordinator decides when to spawn polecats. pogod just executes the spawn.
 - **Not a database.** All state is files. All coordination is filesystem operations.
 - **Not an IDE.** Pogo is a set of composable tools. It works with any editor, any shell, any workflow.

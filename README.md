@@ -22,7 +22,7 @@ Verify:
 
 ```sh
 pogo server status      # daemon, agents, refinery (the merge queue) — all reachable?
-pogo agent list         # mayor (the coordinator) running?
+pogo agent list         # coordinator running?
 mg list                 # work items — empty on a fresh install
 ```
 
@@ -30,15 +30,15 @@ On error, rerun `pogo install` or `pogo doctor --check`.
 
 ## Working with agents
 
-`pgrep pogo-crew` lists crew; `pgrep pogo-cat` lists polecats (disposable worker agents). `pogo agent list` formats this.
+`pgrep pogo-crew` lists crew; `pgrep pogo-cat` lists polecats (disposable worker agents). `pogo agent list` formats this. The coordinator's agent name is `ringmaster` by default (workers default to `pogocat`); both are configurable via `[agents] coordinator` / `[agents] worker`.
 
 ```sh
-pogo agent list                       # what's running
-pogo agent status mayor               # one agent's state
-pogo agent attach mayor               # live PTY session (detach: ~.)
-pogo nudge mayor "check for work"     # inject text without attaching
-pogo agent spawn "add retry logic"    # one-off polecat
-mg mail send mayor --subject="priority change" --body="pause feature work"
+pogo agent list                         # what's running
+pogo agent status ringmaster            # one agent's state
+pogo agent attach ringmaster            # live PTY session (detach: ~.)
+pogo nudge ringmaster "check for work"  # inject text without attaching
+pogo agent spawn "add retry logic"      # one-off polecat
+mg mail send ringmaster --subject="priority change" --body="pause feature work"
 ```
 
 | | Crew | Polecat |
@@ -61,7 +61,7 @@ mg list                                    # available → claimed → done
 
 ## Default workflow: coding
 
-The **mayor** (auto-started crew, already running) watches for work and spawns a **polecat** per item; the polecat fixes it on a branch and submits to the **refinery**, which runs your gates and merges to `main`.
+The **coordinator** (auto-started crew, already running) watches for work and spawns a **polecat** per item; the polecat fixes it on a branch and submits to the **refinery**, which runs your gates and merges to `main`.
 
 Swap the prompts and set `[refinery] enabled = false` to drive research, content, or any queue-shaped work. See [docs/customizing.md](docs/customizing.md) and the [research-triage example](docs/examples/research-triage/README.md).
 

@@ -169,7 +169,7 @@ Agent identity = prompt file. No registry, no database, no schema.
 │   └── ops.md           # "You are ops, the infrastructure lead..."
 ├── templates/
 │   └── polecat.md       # "You are a polecat. Your task: {{.Task}}"
-└── mayor.md             # "You are the mayor. You coordinate..."
+└── mayor.md             # "You are the coordinator. You coordinate..."
 ```
 
 **Prompt file format:** Plain markdown. The file IS the system prompt. No frontmatter, no YAML, no special syntax beyond optional `{{.Variable}}` template expansion for polecats.
@@ -186,9 +186,9 @@ Agent identity = prompt file. No registry, no database, no schema.
 - Readable by humans and agents alike
 - No import step — drop a file, it exists
 
-### 3. Mayor
+### 3. Coordinator
 
-The mayor is a crew agent. Its only special property is its prompt file, which gives it conventions for:
+The coordinator (default: ringmaster, configurable via `[agents] coordinator`; workers default to pogocat via `[agents] worker`) is a crew agent. Its only special property is its prompt file, which gives it conventions for:
 
 - Periodically checking `mg list --status=available` for unassigned work
 - Spawning polecats via `pogo agent spawn` for ready items
@@ -196,9 +196,9 @@ The mayor is a crew agent. Its only special property is its prompt file, which g
 - Checking `pogo agent list` for stuck or idle agents
 - Running `mg schedule` to promote items whose dependencies cleared
 
-The mayor is NOT special code. It's a prompt file that says "you are the coordinator" and has access to the same CLI tools as everyone else. If the mayor prompt is bad, you edit `~/.pogo/agents/mayor.md`. If you want a different coordination strategy, write a different prompt.
+The coordinator is NOT special code. It's a prompt file that says "you are the coordinator" and has access to the same CLI tools as everyone else. If the coordinator prompt is bad, you edit `~/.pogo/agents/mayor.md`. If you want a different coordination strategy, write a different prompt.
 
-**Bootstrap:** pogod auto-starts the mayor on boot via the `auto_start = true` flag in `mayor.md`'s TOML frontmatter — the same mechanism used by any crew agent. `pogo agent start mayor` still works for manual restarts.
+**Bootstrap:** pogod auto-starts the coordinator on boot via the `auto_start = true` flag in `mayor.md`'s TOML frontmatter — the same mechanism used by any crew agent. `pogo agent start ringmaster` still works for manual restarts.
 
 ### 4. Refinery
 
@@ -249,7 +249,7 @@ Agent-to-agent wakeup. Delivered via PTY — no tmux dependency.
 
 ```bash
 pogo nudge <agent-name> "message"     # Send text to agent's session
-pogo nudge mayor "new work available"
+pogo nudge ringmaster "new work available"
 pogo nudge arch "check your mail"
 ```
 
@@ -296,7 +296,7 @@ These are things we might want eventually but are explicitly out of scope:
 - **Web UI / dashboard.** The CLI + event log is the interface. A TUI or web dashboard can come later.
 - **Cross-repo molecule orchestration.** Multi-repo workflows exist but aren't the first problem to solve.
 - **Agent-to-agent RPC.** Agents communicate through macguffin mail and nudge. No direct RPC protocol.
-- **Automatic agent scaling.** The mayor spawns polecats based on its prompt instructions, not autoscaling rules.
+- **Automatic agent scaling.** The coordinator spawns polecats based on its prompt instructions, not autoscaling rules.
 
 ## Implementation Order
 
@@ -315,7 +315,7 @@ Add `pogo agent start|spawn|list|stop|status` commands. Build on Phase 0's PTY i
 **Deliverable:** Can launch crew agents and ephemeral polecats from the CLI
 
 ### Phase 2: Prompt Files
-Establish the `~/.pogo/agents/` convention. Template expansion for polecats. Write the initial mayor prompt.
+Establish the `~/.pogo/agents/` convention. Template expansion for polecats. Write the initial coordinator prompt.
 
 **Depends on:** Phase 1
 **Deliverable:** Agent behavior is configured entirely through markdown files
@@ -332,8 +332,8 @@ Add the merge queue loop to pogod.
 **Depends on:** Phase 1 (agents need to submit work)
 **Deliverable:** Polecats can submit branches; they get merged automatically after quality gates pass
 
-### Phase 5: Mayor Prompt + Integration Testing
-Write the real mayor prompt. Run the full loop: human files work → mayor dispatches → polecat executes → refinery merges.
+### Phase 5: Coordinator Prompt + Integration Testing
+Write the real coordinator prompt. Run the full loop: human files work → coordinator dispatches → polecat executes → refinery merges.
 
 **Depends on:** Phases 1-4
 **Deliverable:** End-to-end autonomous development cycle
@@ -343,7 +343,7 @@ Write the real mayor prompt. Run the full loop: human files work → mayor dispa
 The MVP is done when:
 
 1. A human can file a macguffin work item and walk away
-2. The mayor notices the item and spawns a polecat
+2. The coordinator notices the item and spawns a polecat
 3. The polecat claims the item, does the work, pushes a branch
 4. The refinery merges the branch after tests pass
 5. The human comes back to merged code on main

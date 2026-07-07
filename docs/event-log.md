@@ -22,7 +22,7 @@ Every line is a JSON object with the same envelope:
 | `schema_version`| int    | yes      | Schema version. `1` for the initial release. Bump on incompatible changes. |
 | `timestamp`     | string | yes      | RFC3339 with nanosecond precision, UTC. Example: `"2026-04-25T17:42:09.123456789Z"`. |
 | `event_type`    | string | yes      | One of the event types in the catalog below. Dot-separated namespace is reserved for future expansion (e.g. `agent.spawned`); v1 uses flat names listed below. |
-| `agent`         | string | see note | The acting agent's identity. `"mayor"`, `"crew-arch"`, `"cat-mg-0241"`, `"refinery"`, `"mg"`, `"human"`, etc. Required for every event except those with no clear actor (none in v1, so effectively always required). |
+| `agent`         | string | see note | The acting agent's identity. `"ringmaster"`, `"crew-arch"`, `"cat-mg-0241"`, `"refinery"`, `"mg"`, `"human"`, etc. Required for every event except those with no clear actor (none in v1, so effectively always required). |
 | `work_item_id`  | string | optional | macguffin work item ID (e.g. `"mg-0241"`). Required for events that reference a specific item; omitted when no item is in scope (e.g. `agent_spawned` for crew). When absent, the field is omitted entirely (not emitted as `""` or `null`). |
 | `repo`          | string | optional | Absolute path to the repository the event pertains to. Omitted when not applicable. |
 | `details`       | object | yes      | Event-specific payload. Always present, even if `{}`. Schema is defined per `event_type` below. Unknown keys are tolerated by readers — additive changes do not require a `schema_version` bump. |
@@ -128,10 +128,10 @@ A polecat has been spawned for a specific work item. Emitted in addition to `age
 - **`details` fields:**
   - `template` (string, required): name of the polecat template (e.g. `"polecat"`, `"researcher"`)
   - `branch` (string, required): branch name the polecat will work on (e.g. `"polecat-mg-0241"`)
-  - `parent` (string, optional): identity of the spawning agent (`"mayor"`, `"human"`)
+  - `parent` (string, optional): identity of the spawning agent (`"ringmaster"`, `"human"`)
 
 ```json
-{"schema_version":1,"timestamp":"2026-04-25T10:00:00.150000000Z","event_type":"polecat_spawned","agent":"cat-mg-0241","work_item_id":"mg-0241","repo":"/Users/daniel/dev/pogo","details":{"template":"polecat","branch":"polecat-mg-0241","parent":"mayor"}}
+{"schema_version":1,"timestamp":"2026-04-25T10:00:00.150000000Z","event_type":"polecat_spawned","agent":"cat-mg-0241","work_item_id":"mg-0241","repo":"/Users/daniel/dev/pogo","details":{"template":"polecat","branch":"polecat-mg-0241","parent":"ringmaster"}}
 ```
 
 #### `polecat_completed`
@@ -187,12 +187,12 @@ An agent sent macguffin mail (`mg mail send`).
 - **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent`, `details`
 - **Optional envelope:** `work_item_id` (if the mail references one)
 - **`details` fields:**
-  - `to` (string, required): recipient identity (e.g. `"mayor"`, `"crew-arch"`)
+  - `to` (string, required): recipient identity (e.g. `"ringmaster"`, `"crew-arch"`)
   - `subject` (string, required)
   - `mail_id` (string, optional): macguffin mail ID, if assigned
 
 ```json
-{"schema_version":1,"timestamp":"2026-04-25T10:23:00.000000000Z","event_type":"mail_sent","agent":"cat-mg-0241","work_item_id":"mg-0241","details":{"to":"mayor","subject":"merge failed for mg-0241","mail_id":"mail-2f81"}}
+{"schema_version":1,"timestamp":"2026-04-25T10:23:00.000000000Z","event_type":"mail_sent","agent":"cat-mg-0241","work_item_id":"mg-0241","details":{"to":"ringmaster","subject":"merge failed for mg-0241","mail_id":"mail-2f81"}}
 ```
 
 #### `nudge_sent`
@@ -207,7 +207,7 @@ An agent sent macguffin mail (`mg mail send`).
   - `mode` (string, optional): `"idle"` (default) or `"immediate"`
 
 ```json
-{"schema_version":1,"timestamp":"2026-04-25T10:15:30.000000000Z","event_type":"nudge_sent","agent":"mayor","details":{"to":"crew-arch","message":"check your mail","delivery":"pty","mode":"idle"}}
+{"schema_version":1,"timestamp":"2026-04-25T10:15:30.000000000Z","event_type":"nudge_sent","agent":"ringmaster","details":{"to":"crew-arch","message":"check your mail","delivery":"pty","mode":"idle"}}
 ```
 
 ### Refinery
@@ -290,7 +290,7 @@ Restart recovery could not carry an in-flight merge request forward (branch dele
 
 #### `stall_watch_fired`
 
-pogod's stall watcher (gh drellem2/macguffin #12) crossed a work-pile-up threshold for the watched agent (the mayor) and emitted a nudge. One event per offending batch per heartbeat tick, rate-limited by a per-category cooldown. See [stall-watch-design.md](design/stall-watch-design.md).
+pogod's stall watcher (gh drellem2/macguffin #12) crossed a work-pile-up threshold for the watched agent (the coordinator, `ringmaster` by default) and emitted a nudge. One event per offending batch per heartbeat tick, rate-limited by a per-category cooldown. See [stall-watch-design.md](design/stall-watch-design.md).
 
 - **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent` (always `"pogod"`), `details`
 - **`details` fields:**
@@ -301,7 +301,7 @@ pogod's stall watcher (gh drellem2/macguffin #12) crossed a work-pile-up thresho
   - For `unread_mail`: `unread_count` (int), `max_count` (int), `oldest_age_seconds` (float), `age_threshold` (string), `over_count` (bool), `over_age` (bool)
 
 ```json
-{"schema_version":1,"timestamp":"2026-06-10T16:20:00.000000000Z","event_type":"stall_watch_fired","agent":"pogod","details":{"category":"unclaimed_items","watched_agent":"mayor","item_count":2,"item_ids":["mg-2350","mg-9299"],"age_threshold":"10m0s","oldest_age_seconds":1830.4}}
+{"schema_version":1,"timestamp":"2026-06-10T16:20:00.000000000Z","event_type":"stall_watch_fired","agent":"pogod","details":{"category":"unclaimed_items","watched_agent":"ringmaster","item_count":2,"item_ids":["mg-2350","mg-9299"],"age_threshold":"10m0s","oldest_age_seconds":1830.4}}
 ```
 
 #### `usage_limit_hit`
@@ -337,7 +337,7 @@ The lines below show the canonical event sequence for a successful polecat run. 
 ```json
 {"schema_version":1,"timestamp":"2026-04-25T09:59:55.000000000Z","event_type":"work_item_claimed","agent":"cat-mg-0241","work_item_id":"mg-0241","details":{"title":"F1: Design event log schema","tags":["pogo","event-log","phase-f"]}}
 {"schema_version":1,"timestamp":"2026-04-25T10:00:00.000000000Z","event_type":"agent_spawned","agent":"cat-mg-0241","work_item_id":"mg-0241","repo":"/Users/daniel/dev/pogo","details":{"agent_type":"polecat","pid":48213,"prompt_file":"/Users/daniel/.pogo/agents/templates/polecat.md","worktree":"/Users/daniel/.pogo/polecats/pc-0241"}}
-{"schema_version":1,"timestamp":"2026-04-25T10:00:00.150000000Z","event_type":"polecat_spawned","agent":"cat-mg-0241","work_item_id":"mg-0241","repo":"/Users/daniel/dev/pogo","details":{"template":"polecat","branch":"polecat-mg-0241","parent":"mayor"}}
+{"schema_version":1,"timestamp":"2026-04-25T10:00:00.150000000Z","event_type":"polecat_spawned","agent":"cat-mg-0241","work_item_id":"mg-0241","repo":"/Users/daniel/dev/pogo","details":{"template":"polecat","branch":"polecat-mg-0241","parent":"ringmaster"}}
 {"schema_version":1,"timestamp":"2026-04-25T10:22:50.000000000Z","event_type":"refinery_merge_attempted","agent":"refinery","work_item_id":"mg-0241","repo":"/Users/daniel/dev/pogo","details":{"merge_request_id":"mr-9482","branch":"polecat-mg-0241","target":"main","attempt":1,"author":"cat-mg-0241"}}
 {"schema_version":1,"timestamp":"2026-04-25T10:23:09.000000000Z","event_type":"refinery_merged","agent":"refinery","work_item_id":"mg-0241","repo":"/Users/daniel/dev/pogo","details":{"merge_request_id":"mr-9482","branch":"polecat-mg-0241","target":"main","merge_commit":"7f97c8b1a2b3c4d5","attempt":1,"duration_seconds":19.2}}
 {"schema_version":1,"timestamp":"2026-04-25T10:23:10.000000000Z","event_type":"polecat_completed","agent":"cat-mg-0241","work_item_id":"mg-0241","details":{"outcome":"merged","branch":"polecat-mg-0241","merge_request_id":"mr-9482","commits":1}}
