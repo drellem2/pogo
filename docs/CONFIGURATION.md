@@ -47,6 +47,44 @@ so user prompts containing other `{{` sequences are untouched. Two things stay
 fixed regardless of the name: the prompt file path `~/.pogo/agents/mayor.md`,
 and the `"mayor"` category label in `pogo agent prompt list --json`.
 
+## Worker name
+
+The worker role (the disposable per-task agents) is called "polecat" by default.
+Like the coordinator name it is policy, not mechanism — rename the display name
+with:
+
+```toml
+[agents]
+worker = "pogocat"   # default "polecat"
+```
+
+**This is a display-only knob, and that is the important difference from the
+coordinator.** The coordinator name IS an address — it decides a mailbox,
+schedule ids, and prompt-file paths — so renaming it moves real routing. A
+worker is never addressed by its role word: every polecat is reached by its bare
+agent name (e.g. `30d5`), so the configured `worker` name feeds **only prose** —
+prompt files reference it via `{{.Worker}}` (and `{{.WorkerTitle}}` for
+headings), resolved at prompt-synthesis time the same way `{{.Coordinator}}` is.
+
+Renaming the worker changes what the prompts *call* the role and nothing else.
+Five load-bearing identifiers stay frozen at `polecat` regardless of the display
+name (a rename touching any of them would orphan on-disk state or break a
+cross-tool contract):
+
+| Identifier | Value | Why frozen |
+|---|---|---|
+| Branch prefix (`gitgc.BranchPrefix`) | `polecat-` | orphan-sweep reads live branches back by this prefix |
+| Polecats dir (`gitgc.DefaultPolecatsDir`) | `~/.pogo/polecats` | orphan-sweep reads the dir back from disk |
+| Agent-type key (`agent.TypePolecat`) | `polecat` | written to `POGO_AGENT_TYPE`; matched by reap/park/gitgc/config lookups |
+| Event-log actor prefix | `cat-<name>` | persisted actor identity; `classify.go` parses it back |
+| Role env var | `POGO_ROLE=polecat` | cross-tool contract consumed by `mg prime` / role detection |
+
+The `[agents.polecat]` config sub-table key (for per-worker provider overrides)
+is likewise a frozen identifier, not a display name — it stays `polecat` even if
+you rename the display. And `--type polecat` on the CLI keeps naming the frozen
+accepted value: the flag documents an identifier, not the display role, so it is
+deliberately *not* driven by the `worker` name.
+
 ## Crew auto-start
 
 At boot pogod starts every crew agent whose prompt frontmatter says
@@ -166,6 +204,50 @@ prompts are auto-updated, user edits preserved (`--force` overwrites, backing up
 to `<name>.bak.<timestamp>`). The bundled `install.sh` runs it as its final
 step; opt out with `--no-pogo-install` or `POGO_NO_POGO_INSTALL=1` (mg-6bfd).
 See [docs/customizing.md](customizing.md).
+
+## Role default-migration guard
+
+pogo never writes `config.toml` on its own, and the role-name defaults
+(`coordinator = "mayor"`, `worker = "polecat"`) live only in code — `Load()`
+fills them in-memory from a const when the key is absent. So the common existing
+install has **no `[agents]` role keys on disk**. That is normally fine, but it
+means the day a future pogo release changes a shipped default, every existing
+install would *silently* adopt the new name on the next binary run — moving the
+coordinator's mailbox/schedule-ids or the worker's display out from under a
+running deployment.
+
+The guard closes that gap. On an **existing install** it pins the current
+defaults into `config.toml`, once:
+
+```toml
+# pinned by pogo default-migration guard (mg-7d95) — keeps this existing install
+# on its current role names if a future pogo release changes the shipped defaults.
+[agents]
+coordinator = "mayor"
+worker = "polecat"
+```
+
+It runs at two seams: `pogo install` (the explicit upgrade) and pogod boot (so a
+daemon restart alone propagates it). Behavior:
+
+- **Existing install** (a `config.toml` exists, *or* a stamped prompt exists
+  under `~/.pogo/agents/` for installs predating config.toml) with a role key
+  **absent** → the current default is appended, without reformatting the rest of
+  the file. An operator-set value is never overwritten.
+- **Fresh install** (neither signal) → **no-op**; nothing is written, so a fresh
+  machine adopts whatever default the binary ships. This is the intended "fresh
+  gets the new default" path.
+- **Idempotent** — a role key already present under `[agents]` is the durable
+  done-signal; re-runs (and every subsequent daemon boot) rewrite nothing.
+
+The guard is generic over role keys — it covers `coordinator` and `worker`
+today, and any role key added later — so no future default-flip is unsafe for
+existing installs *provided the guard has already rolled out to them*. That
+ordering is a hard constraint: the guard pins the default in effect **when it
+runs**, so it must reach existing installs (via an upgrade or a daemon restart)
+**before** any release flips a default. Once a default is flipped on an install
+that never ran the guard, the original name is unrecoverable — nothing recorded
+it. Source of truth: `internal/config/migrate.go`.
 
 ## Mail
 

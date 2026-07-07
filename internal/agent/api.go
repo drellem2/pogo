@@ -920,8 +920,11 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		return
 	}
 
-	// Ensure POGO_ROLE is set for mg prime and role detection
-	env := append(spawnReq.Env, "POGO_ROLE=polecat")
+	// Ensure POGO_ROLE is set for mg prime and role detection. Its value is the
+	// frozen agent-type literal (string(TypePolecat)), never the worker DISPLAY
+	// name — a cross-tool identifier, so a display rename must never move it
+	// (mg-6a24 §1.1). Byte-identical to the previous "polecat" literal.
+	env := append(spawnReq.Env, "POGO_ROLE="+string(TypePolecat))
 
 	// Create git worktree for polecat isolation
 	if createWorktree {

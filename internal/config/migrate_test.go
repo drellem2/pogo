@@ -209,3 +209,57 @@ func TestPin_StampedPromptOnlyInstall(t *testing.T) {
 		t.Errorf("config.toml should have been created for the stamped-prompt install: %v", err)
 	}
 }
+
+// TestGuard_ExistingKeepsOldDefault_FreshGetsNew is the WI-5 statement of the
+// migration-guard contract (mg-6a24 §3): a future default-flip must leave
+// existing installs on their old role names while fresh installs adopt the new
+// ones. We can't flip the compile-time const inside a test, so we assert the
+// mechanism that makes the flip safe — where each install's resolved name comes
+// FROM:
+//
+//   - Existing install → the guard writes worker="polecat" to config.toml, and
+//     Load() reads that DISK value. A later const change is inert: the name is
+//     pinned on disk, not derived from the const.
+//   - Fresh install    → no config is written, so Load() falls back to the
+//     DefaultWorker CONST. Flip the const and this install follows it — exactly
+//     the "fresh gets the new default" path.
+func TestGuard_ExistingKeepsOldDefault_FreshGetsNew(t *testing.T) {
+	t.Run("existing install pins the current name to disk", func(t *testing.T) {
+		_, path := sandbox(t)
+		if _, err := PinRoleDefaultsIfExistingInstall(true); err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("guard should have written config.toml: %v", err)
+		}
+		// The literal string on disk — not the const — is what survives a flip.
+		if !strings.Contains(string(data), `worker = "polecat"`) {
+			t.Errorf("worker not pinned to its current name on disk:\n%s", data)
+		}
+		// Load() reads the pinned disk value, so the name is decoupled from any
+		// future DefaultWorker change.
+		if got := Load().Agents.WorkerName(); got != "polecat" {
+			t.Errorf("existing install worker = %q, want the pinned polecat", got)
+		}
+	})
+
+	t.Run("fresh install stays const-driven so a flip reaches it", func(t *testing.T) {
+		_, path := sandbox(t)
+		res, err := PinRoleDefaultsIfExistingInstall(false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(res.Pinned) != 0 {
+			t.Errorf("fresh install must pin nothing, got %v", res.Pinned)
+		}
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Error("fresh install must not write config.toml (would freeze the default)")
+		}
+		// With no pinned key, WorkerName() resolves from the const — today that
+		// is DefaultWorker, and a flip of that const would flow straight through.
+		if got := Load().Agents.WorkerName(); got != DefaultWorker {
+			t.Errorf("fresh install worker = %q, want the const DefaultWorker %q", got, DefaultWorker)
+		}
+	})
+}
