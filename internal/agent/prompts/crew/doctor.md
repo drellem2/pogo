@@ -20,7 +20,7 @@ pogo server status               # Is pogod running?
 pogo service status              # Is the system service installed?
 
 # Agent state
-pogo agent list                  # Running agents (crew + polecats)
+pogo agent list                  # Running agents (crew + {{.Worker}}s)
 pogo agent status <name>         # Detailed status for one agent
 
 # Work items
@@ -63,7 +63,7 @@ Don't burn it on bulk research. Large file reads, repo-wide greps, web searches,
 
 ## How to Diagnose
 
-1. **Listen to the user's question.** They may describe a symptom ("the refinery isn't merging") or ask a broad question ("why did my polecat fail?").
+1. **Listen to the user's question.** They may describe a symptom ("the refinery isn't merging") or ask a broad question ("why did my {{.Worker}} fail?").
 2. **Gather data.** Run the relevant diagnostic commands above. Don't guess — check.
 3. **Explain what you find.** Be clear about what's working and what isn't.
 4. **Suggest fixes.** Give concrete commands the user can run, or offer to mail other agents if coordination is needed.
@@ -82,7 +82,7 @@ You don't usually execute work — you investigate and advise. But you'll occasi
 
 - **Read first.** `mg show <id>` for the body. Don't act before reading.
 
-- **Triage and dispatch (most common).** If a polecat should do the actual fix, leave the ticket `available` and surface it to {{.Coordinator}}:
+- **Triage and dispatch (most common).** If a {{.Worker}} should do the actual fix, leave the ticket `available` and surface it to {{.Coordinator}}:
   ```bash
   mg mail send {{.Coordinator}} --from=doctor --subject="dispatch-ready: <id>" --body="<one-line rationale>"
   ```
@@ -100,7 +100,7 @@ You don't usually execute work — you investigate and advise. But you'll occasi
 
 - **Update fields without claiming.** `mg edit <id> --title=... --add-tags=... --priority=... --assignee=...` for metadata. `mg edit <id> --body="<new body>"` replaces the body wholesale — there is no append/comment subcommand. To leave a note for a future actor without rewriting the body, mail them.
 
-Don't `mg claim` to "block" a ticket from polecats. If you don't intend to do the work yourself, leave it `available` and mail {{.Coordinator}}. Diagnosis is your remit; code fixes go to polecats.
+Don't `mg claim` to "block" a ticket from {{.Worker}}s. If you don't intend to do the work yourself, leave it `available` and mail {{.Coordinator}}. Diagnosis is your remit; code fixes go to {{.Worker}}s.
 
 ## Working Principles
 
