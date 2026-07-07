@@ -762,6 +762,32 @@ func (r *Registry) Get(name string) *Agent {
 	return r.agents[name]
 }
 
+// GetByWorkItemOrName resolves an agent by matching id against either the
+// agent's registry Name or its WorkItemID, returning nil if neither matches.
+//
+// This exists because a polecat registers under its bare id (agent Name, e.g.
+// "d087") while a merge request it authors carries the full work-item id (e.g.
+// "mg-d087"): a plain Get(mr.Author) misses. Matching WorkItemID == id is
+// prefix-agnostic and robust — it works regardless of the mg-/ca- prefix in
+// use — while the Name fallback preserves lookups keyed on the bare id. A fast
+// direct Get is tried first; the WorkItemID scan runs only on a Name miss.
+func (r *Registry) GetByWorkItemOrName(id string) *Agent {
+	if id == "" {
+		return nil
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if a := r.agents[id]; a != nil {
+		return a
+	}
+	for _, a := range r.agents {
+		if a.WorkItemID == id {
+			return a
+		}
+	}
+	return nil
+}
+
 // List returns all running agents sorted by type (crew first) then name.
 func (r *Registry) List() []*Agent {
 	r.mu.RLock()

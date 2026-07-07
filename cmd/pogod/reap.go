@@ -16,7 +16,7 @@ const mergedPolecatStopTimeout = 5 * time.Second
 
 // polecatReaper is the slice of agent.Registry that reapMergedPolecat needs.
 type polecatReaper interface {
-	Get(name string) *agent.Agent
+	GetByWorkItemOrName(id string) *agent.Agent
 	Stop(name string, timeout time.Duration) error
 }
 
@@ -38,7 +38,11 @@ func reapMergedPolecat(reg polecatReaper, mr *refinery.MergeRequest, complete fu
 	if mr.Author == "" {
 		return
 	}
-	a := reg.Get(mr.Author)
+	// Resolve by work-item id OR registry name: a polecat registers under its
+	// bare id (a.Name, e.g. "d087") but authors its MR with the full work-item
+	// id (mr.Author == a.WorkItemID, e.g. "mg-d087"), so a plain Get(mr.Author)
+	// misses and the polecat lingers post-merge (gh #48).
+	a := reg.GetByWorkItemOrName(mr.Author)
 	if a == nil || a.Type != agent.TypePolecat {
 		return
 	}
@@ -46,7 +50,8 @@ func reapMergedPolecat(reg polecatReaper, mr *refinery.MergeRequest, complete fu
 	// Record completion before stopping: the polecat's own protocol runs
 	// mg done when it observes the merged status, but it will be gone
 	// before its next poll. If the polecat won the race after all, the
-	// call fails with an already-done error — harmless.
+	// call fails with an already-done error — harmless. Keyed on mr.Author,
+	// which is the mg work-item id.
 	result, _ := json.Marshal(map[string]string{
 		"branch":       mr.Branch,
 		"mr":           mr.ID,
@@ -56,9 +61,42 @@ func reapMergedPolecat(reg polecatReaper, mr *refinery.MergeRequest, complete fu
 		log.Printf("refinery: mg done %s on merged polecat's behalf failed (may already be done): %v", mr.Author, err)
 	}
 
-	if err := reg.Stop(mr.Author, mergedPolecatStopTimeout); err != nil {
-		log.Printf("refinery: failed to stop merged polecat %s: %v", mr.Author, err)
+	// Stop keys on the registry name, which is the bare id — not mr.Author.
+	if err := reg.Stop(a.Name, mergedPolecatStopTimeout); err != nil {
+		log.Printf("refinery: failed to stop merged polecat %s: %v", a.Name, err)
 		return
 	}
-	log.Printf("refinery: stopped merged polecat %s (event-driven, gh #35)", mr.Author)
+	log.Printf("refinery: stopped merged polecat %s (event-driven, gh #35)", a.Name)
+}
+
+// worktreeUnlinker is the slice of agent.Registry that
+// unlinkSubmittedPolecatWorktree needs.
+type worktreeUnlinker interface {
+	GetByWorkItemOrName(id string) *agent.Agent
+}
+
+// unlinkSubmittedPolecatWorktree runs on the refinery's OnSubmit hook: when a
+// polecat submits an MR, its worktree is unlinked so the branch is no longer
+// marked "checked out" in the source repo, which would otherwise trigger
+// "already checked out" errors in the refinery's clone. The polecat's directory
+// is left intact so it can keep polling for merge results.
+//
+// Like reapMergedPolecat, it resolves the polecat by work-item id OR registry
+// name: mr.Author carries the full work-item id (== a.WorkItemID) while the
+// polecat registers under its bare id (a.Name), so a plain Get(mr.Author)
+// misses — the same gh #48 defect as the reap path. unlink is injected so the
+// hook is testable without touching git.
+func unlinkSubmittedPolecatWorktree(reg worktreeUnlinker, mr *refinery.MergeRequest, unlink func(sourceRepo, worktreeDir string) error) {
+	if mr.Author == "" {
+		return
+	}
+	a := reg.GetByWorkItemOrName(mr.Author)
+	if a == nil || a.WorktreeDir == "" || a.SourceRepo == "" {
+		return
+	}
+	if err := unlink(a.SourceRepo, a.WorktreeDir); err != nil {
+		log.Printf("refinery: failed to unlink polecat worktree for %s: %v", mr.Author, err)
+	} else {
+		log.Printf("refinery: unlinked polecat worktree for %s at %s", mr.Author, a.WorktreeDir)
+	}
 }
