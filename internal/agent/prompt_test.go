@@ -2351,8 +2351,8 @@ func TestMayorPromptIncludesDispatchDontImplement(t *testing.T) {
 		t.Error("mayor.md: expected `## Dispatch, don't implement` standalone callout")
 	}
 	// The core executor/dispatcher framing — the line mayor must internalize.
-	if !strings.Contains(s, "polecat is the executor") || !strings.Contains(s, "you are the dispatcher") {
-		t.Error("mayor.md: expected `polecat is the executor; you are the dispatcher` framing")
+	if !strings.Contains(s, "{{.Worker}} is the executor") || !strings.Contains(s, "you are the dispatcher") {
+		t.Error("mayor.md: expected `{{.Worker}} is the executor; you are the dispatcher` framing")
 	}
 	// Carve-outs must be preserved so mayor doesn't over-correct and refuse
 	// to do its actual coordination work (ticket edits, mail, read-only
@@ -2361,7 +2361,7 @@ func TestMayorPromptIncludesDispatchDontImplement(t *testing.T) {
 		"Editing `mg` ticket bodies",
 		"Mail to other agents",
 		"Read-only diagnostics",
-		"Spawning, nudging, stopping polecats",
+		"Spawning, nudging, stopping {{.Worker}}s",
 	} {
 		if !strings.Contains(s, marker) {
 			t.Errorf("mayor.md: expected dispatch-rule carve-out marker %q", marker)

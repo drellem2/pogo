@@ -118,8 +118,9 @@ pogo agent prompt show pm-pogo
 
 The output is the synthesized prompt (extends-directive expanded, drop-ins
 appended, polecat templates rendered with stub preview values for `{{.Var}}`,
-and the `{{.Coordinator}}` / `{{.CoordinatorTitle}}` placeholders resolved to
-the configured coordinator name — see `[agents] coordinator` in
+and the `{{.Coordinator}}` / `{{.CoordinatorTitle}}` and `{{.Worker}}` /
+`{{.WorkerTitle}}` placeholders resolved to the configured coordinator and
+worker names — see `[agents] coordinator` and `[agents] worker` in
 [CONFIGURATION.md](CONFIGURATION.md)). Run it before and after adding a
 drop-in to see the diff.
 
