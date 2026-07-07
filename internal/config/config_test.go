@@ -932,6 +932,49 @@ func TestCoordinatorNameZeroValue(t *testing.T) {
 	}
 }
 
+func TestWorkerDefault(t *testing.T) {
+	dir := t.TempDir()
+	os.Setenv("XDG_CONFIG_HOME", dir)
+	defer os.Unsetenv("XDG_CONFIG_HOME")
+
+	cfg := Load()
+	if cfg.Agents.Worker != DefaultWorker {
+		t.Errorf("worker = %q, want %q", cfg.Agents.Worker, DefaultWorker)
+	}
+	if got := cfg.Agents.WorkerName(); got != "polecat" {
+		t.Errorf("WorkerName() = %q, want polecat", got)
+	}
+}
+
+func TestWorkerConfigFile(t *testing.T) {
+	dir := t.TempDir()
+	os.Setenv("XDG_CONFIG_HOME", dir)
+	defer os.Unsetenv("XDG_CONFIG_HOME")
+
+	pogoDir := filepath.Join(dir, "pogo")
+	os.MkdirAll(pogoDir, 0755)
+	os.WriteFile(filepath.Join(pogoDir, "config.toml"), []byte(`
+[agents]
+worker = "pogocat"
+`), 0644)
+
+	cfg := Load()
+	if cfg.Agents.Worker != "pogocat" {
+		t.Errorf("worker = %q, want pogocat", cfg.Agents.Worker)
+	}
+}
+
+func TestWorkerNameZeroValue(t *testing.T) {
+	var cfg AgentsConfig
+	if got := cfg.WorkerName(); got != DefaultWorker {
+		t.Errorf("WorkerName() = %q, want %q", got, DefaultWorker)
+	}
+	var nilCfg *AgentsConfig
+	if got := nilCfg.WorkerName(); got != DefaultWorker {
+		t.Errorf("nil WorkerName() = %q, want %q", got, DefaultWorker)
+	}
+}
+
 func TestExtraPathDefaultEmpty(t *testing.T) {
 	os.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	defer os.Unsetenv("XDG_CONFIG_HOME")

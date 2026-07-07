@@ -52,6 +52,12 @@ const DefaultProvider = "claude"
 // stays at ~/.pogo/agents/mayor.md regardless. See mg-71ea.
 const DefaultCoordinator = "mayor"
 
+// DefaultWorker (the worker role's display-name default, "polecat") is
+// declared in migrate.go alongside the role-default migration table that
+// consumes it. The worker seam here — AgentsConfig.Worker, WorkerName(), the
+// "worker" config key, and Load() defaulting — references it. See mg-ccec
+// (design mg-6a24 §1.4).
+
 // DefaultMaxFilesPerTree is the default per-tree file-count ceiling. A tree
 // with more files than this is registered but marked skipped-too-large: it is
 // not deep-walked. This bounds index cost (building the search index is
@@ -198,6 +204,11 @@ type AgentsConfig struct {
 	// Prefer CoordinatorName() over reading the field so zero-value configs
 	// (tests, callers that skip Load) still resolve to the default.
 	Coordinator string
+	// Worker is the worker role's display name ([agents] worker). Empty is
+	// treated as DefaultWorker ("polecat"); Load() fills it in. Prefer
+	// WorkerName() over reading the field so zero-value configs still resolve
+	// to the default. Display-only — it never renames an identifier.
+	Worker string
 	// AutoStart globally gates crew auto-start at pogod boot ([agents]
 	// autostart). Defaults to true. Setting it false keeps a *configured*
 	// daemon from spawning any crew agents, regardless of per-prompt
@@ -263,6 +274,15 @@ func (c *AgentsConfig) CoordinatorName() string {
 		return c.Coordinator
 	}
 	return DefaultCoordinator
+}
+
+// WorkerName returns the configured worker display name, falling back to
+// DefaultWorker ("polecat") when unset. Safe on a zero-value AgentsConfig.
+func (c *AgentsConfig) WorkerName() string {
+	if c != nil && c.Worker != "" {
+		return c.Worker
+	}
+	return DefaultWorker
 }
 
 // AgentProvider returns the configured harness provider id for a given agent
@@ -444,6 +464,11 @@ func Load() *Config {
 	// [stall_watch] agent was configured.
 	if cfg.Agents.Coordinator == "" {
 		cfg.Agents.Coordinator = DefaultCoordinator
+	}
+	// Default the worker display name so existing deployments work with no
+	// config change. Display-only; touches no identifier.
+	if cfg.Agents.Worker == "" {
+		cfg.Agents.Worker = DefaultWorker
 	}
 	if cfg.StallWatch.Agent == "" {
 		cfg.StallWatch.Agent = cfg.Agents.Coordinator
@@ -678,6 +703,8 @@ func loadConfigFile() (*parsedConfig, error) {
 				cfg.Agents.Provider = unquotedVal
 			case "coordinator":
 				cfg.Agents.Coordinator = unquotedVal
+			case "worker":
+				cfg.Agents.Worker = unquotedVal
 			case "extra_path":
 				cfg.Agents.ExtraPath = parseStringArray(val)
 			}

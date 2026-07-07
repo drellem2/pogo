@@ -616,6 +616,10 @@ Flags:
 	// "mayor") before any prompt synthesis or autostart happens — it decides
 	// which agent name maps to mayor.md and what prompts call the role.
 	agent.SetCoordinatorName(cfg.Agents.Coordinator)
+	// Resolve the worker role's display name ([agents] worker, default
+	// "polecat") alongside it. Display-only: it feeds prompt prose, never a
+	// mailbox, schedule id, or agent-type key.
+	agent.SetWorkerName(cfg.Agents.Worker)
 	coordinator := cfg.Agents.CoordinatorName()
 
 	// Register every known harness provider into the registry, then set the

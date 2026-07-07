@@ -75,9 +75,13 @@ func showRawPromptFile(name string, jsonOut bool) {
 func main() {
 
 	// Resolve the coordinator agent's name ([agents] coordinator, default
-	// "mayor") before any prompt resolution or synthesis happens client-side
-	// (prompt show/list run in this process, not in pogod).
-	agent.SetCoordinatorName(config.Load().Agents.Coordinator)
+	// "mayor") and the worker role's display name ([agents] worker, default
+	// "polecat") before any prompt resolution or synthesis happens client-side
+	// (prompt show/list run in this process, not in pogod). The worker name is
+	// display-only — it feeds prompt prose, never an identifier.
+	cliCfg := config.Load()
+	agent.SetCoordinatorName(cliCfg.Agents.Coordinator)
+	agent.SetWorkerName(cliCfg.Agents.Worker)
 
 	var jsonOutput bool
 

@@ -36,8 +36,8 @@ func TestSubstituteCoordinator(t *testing.T) {
 	setCoordinator(t, "boss")
 	in := "mail {{.Coordinator}}; see {{.CoordinatorTitle}}'s stall-watch"
 	want := "mail boss; see Boss's stall-watch"
-	if got := substituteCoordinator(in); got != want {
-		t.Errorf("substituteCoordinator = %q, want %q", got, want)
+	if got := substituteRoleNames(in); got != want {
+		t.Errorf("substituteRoleNames = %q, want %q", got, want)
 	}
 }
 

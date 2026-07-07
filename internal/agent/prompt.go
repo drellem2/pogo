@@ -41,6 +41,25 @@ const (
 	coordinatorTitlePlaceholder = "{{.CoordinatorTitle}}"
 )
 
+// DefaultWorkerName is the worker role's default display name. It is kept
+// equal to config.DefaultWorker; the literal is repeated here as the
+// resolution floor so prompt handling never depends on config having been
+// loaded (the agent package cannot import config). Unlike the coordinator,
+// this name is display-only — it feeds prompt prose, never a mailbox,
+// schedule id, branch prefix, or agent-type key, all of which stay frozen at
+// "polecat". See mg-ccec.
+const DefaultWorkerName = "polecat"
+
+// workerPlaceholder is the token shipped prompts use where the worker role's
+// display name belongs; workerTitlePlaceholder is its first-letter-capitalized
+// twin for headings and sentence-initial prose. Polecat templates resolve
+// both natively through text/template (TemplateVars.Worker / .WorkerTitle);
+// static prompts get a plain string substitution at synthesis time.
+const (
+	workerPlaceholder      = "{{.Worker}}"
+	workerTitlePlaceholder = "{{.WorkerTitle}}"
+)
+
 // titleFirst upper-cases the first rune of s (ASCII-oriented; agent names are
 // mailbox/process identifiers, effectively ASCII).
 func titleFirst(s string) string {
@@ -71,14 +90,38 @@ func CoordinatorName() string {
 	return coordinatorName
 }
 
-// substituteCoordinator replaces every coordinator placeholder in s with the
-// process-wide coordinator name (and the title placeholder with its
+// workerName is the process-wide worker role display name. It is set once at
+// process start (cmd/pogod and cmd/pogo call SetWorkerName from the loaded
+// config before any prompt work happens) and read by the prompt synthesis
+// pipeline; it is not synchronized for concurrent mutation.
+var workerName = DefaultWorkerName
+
+// SetWorkerName sets the process-wide worker role display name from
+// configuration ([agents] worker). An empty name resets to the default
+// ("polecat").
+func SetWorkerName(name string) {
+	if name == "" {
+		name = DefaultWorkerName
+	}
+	workerName = name
+}
+
+// WorkerName returns the process-wide worker role display name.
+func WorkerName() string {
+	return workerName
+}
+
+// substituteRoleNames replaces every coordinator and worker placeholder in s
+// with the process-wide role names (and each title placeholder with its
 // capitalized form). Used for static prompts that do not pass through
 // text/template.
-func substituteCoordinator(s string) string {
-	name := CoordinatorName()
-	s = strings.ReplaceAll(s, coordinatorPlaceholder, name)
-	return strings.ReplaceAll(s, coordinatorTitlePlaceholder, titleFirst(name))
+func substituteRoleNames(s string) string {
+	cname := CoordinatorName()
+	s = strings.ReplaceAll(s, coordinatorPlaceholder, cname)
+	s = strings.ReplaceAll(s, coordinatorTitlePlaceholder, titleFirst(cname))
+	wname := WorkerName()
+	s = strings.ReplaceAll(s, workerPlaceholder, wname)
+	return strings.ReplaceAll(s, workerTitlePlaceholder, titleFirst(wname))
 }
 
 // PromptDir returns the root directory for agent prompt files:
@@ -132,6 +175,16 @@ type TemplateVars struct {
 	// Coordinator at expansion time.
 	CoordinatorTitle string
 
+	// Worker is the worker role's display name ([agents] worker, default
+	// "polecat"). Templates reference it as {{.Worker}} for role prose. It is
+	// display-only — never a mail target or identifier. Left empty by callers,
+	// it is filled from the process-wide WorkerName() at expansion time.
+	Worker string
+	// WorkerTitle is Worker with its first letter upper-cased ("Polecat"), for
+	// headings and sentence-initial prose. Filled alongside Worker at
+	// expansion time.
+	WorkerTitle string
+
 	// Provider is the resolved harness provider id ("claude", "codex", "pi")
 	// the polecat will run under. Templates gate harness-specific guidance
 	// behind `{{if eq .Provider "claude"}}` so Claude-Code-isms (CronCreate,
@@ -143,14 +196,21 @@ type TemplateVars struct {
 }
 
 // withDefaults returns vars with Coordinator (and CoordinatorTitle) defaulted
-// from the process-wide coordinator name and Provider defaulted to
-// DefaultProviderID when the caller left them empty.
+// from the process-wide coordinator name, Worker (and WorkerTitle) from the
+// process-wide worker name, and Provider defaulted to DefaultProviderID when
+// the caller left them empty.
 func withDefaults(vars TemplateVars) TemplateVars {
 	if vars.Coordinator == "" {
 		vars.Coordinator = CoordinatorName()
 	}
 	if vars.CoordinatorTitle == "" {
 		vars.CoordinatorTitle = titleFirst(vars.Coordinator)
+	}
+	if vars.Worker == "" {
+		vars.Worker = WorkerName()
+	}
+	if vars.WorkerTitle == "" {
+		vars.WorkerTitle = titleFirst(vars.Worker)
 	}
 	if vars.Provider == "" {
 		vars.Provider = DefaultProviderID
@@ -242,11 +302,11 @@ func SynthesizeExtendsPrompt(promptPath, outPath string) (string, error) {
 		body = stripPromptHashStamp(raw)
 	}
 	withDrops := appendDropIns(string(body), drop)
-	merged := []byte(substituteCoordinator(withDrops))
+	merged := []byte(substituteRoleNames(withDrops))
 
 	// Bail out early when no layer changed anything — no extends directive,
-	// no drop-ins, and no coordinator placeholder — so the caller falls back
-	// to using promptPath as-is, avoiding a synthesized-file write for the
+	// no drop-ins, and no coordinator/worker placeholder — so the caller falls
+	// back to using promptPath as-is, avoiding a synthesized-file write for the
 	// common no-customization case.
 	if extData == nil && drop == "" && withDrops == string(merged) {
 		return "", nil
@@ -441,7 +501,7 @@ func synthesizeStaticPrompt(path, basename string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return substituteCoordinator(appendDropIns(body, drop)), nil
+	return substituteRoleNames(appendDropIns(body, drop)), nil
 }
 
 func synthesizePolecatTemplate(path, basename string, vars TemplateVars) (string, error) {
