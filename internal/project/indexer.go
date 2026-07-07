@@ -253,6 +253,13 @@ func scanRootForRepos(root string) {
 		if GetProjectByPath(normalized) != nil {
 			continue
 		}
+		// Never register a repo in $HOME or a macOS TCC-protected home subtree
+		// (Desktop/Documents/Downloads/…): indexing it fires permission popups
+		// on every tick (mg-5cd6, regression of mg-cbc5).
+		if search.IsProtectedHomePath(repo) {
+			logger.Info("periodic indexer: skipping repo in macOS-protected home dir (would trigger TCC popups)", "path", normalized)
+			continue
+		}
 		// A repo may opt out of indexing with a .pogo_stop marker. No
 		// ephemeral-path check is needed here: index_roots is an explicit,
 		// user-configured allowlist — unlike Visit, which auto-registers

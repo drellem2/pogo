@@ -267,8 +267,11 @@ func (g *BasicSearch) indexRec(proj *IndexedProject, path string,
 		relativePath := strings.TrimPrefix(newPath, proj.Root)
 
 		// Skip gitignored/pogoignored paths and default-excluded directories
-		// (VCS metadata, dependency and build-artifact trees).
-		if gitIgnore.MatchesPath(relativePath) || IsExcludedDir(subFile) {
+		// (VCS metadata, dependency and build-artifact trees). Also refuse to
+		// descend into macOS TCC-protected home subtrees (Documents, Downloads,
+		// …) even if reached transitively — reading them fires permission
+		// popups on every tick (mg-5cd6).
+		if gitIgnore.MatchesPath(relativePath) || IsExcludedDir(subFile) || IsProtectedHomePath(newPath) {
 			continue
 		}
 

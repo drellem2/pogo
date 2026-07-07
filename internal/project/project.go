@@ -457,6 +457,14 @@ func searchAndCreate(path string) (*Project, error) {
 			logger.Info("project: refusing to auto-register ephemeral repo", "path", repoPath)
 			return nil, nil
 		}
+		// Never auto-register a repo in $HOME or a macOS TCC-protected home
+		// subtree (Desktop/Documents/Downloads/…): the periodic indexer would
+		// read it every tick and trigger permission popups (mg-5cd6, regression
+		// of mg-cbc5). Users can still register such repos manually if desired.
+		if search.IsProtectedHomePath(repoPath) {
+			logger.Info("project: refusing to auto-register repo in macOS-protected home dir (would trigger TCC popups)", "path", repoPath)
+			return nil, nil
+		}
 		if !withinIndexRoots(repoPath) {
 			logger.Info("project: repo outside configured index_roots; not auto-registering", "path", repoPath)
 			return nil, nil
