@@ -11,6 +11,21 @@ is the curated, human-readable summary kept in sync at each release cut.
 ## [Unreleased]
 
 ### Added
+- **Coordinator priority wake** (gh #61, mg-b1d9). The stall watcher now has a
+  priority-aware branch: a **ready, high-priority** `available` work item
+  assigned to (or unassigned and pickup-expected by) the watched coordinator
+  bypasses the 10-minute unclaimed-item gate and is delivered after a short
+  `high_priority_wake_delay` (default 30s) via the **same wait-idle nudge** — so
+  a busy coordinator is never interrupted mid-turn and an idle one is woken at
+  once. This closes the idle-latency gap where a `priority = high` item with no
+  accompanying mail could wait up to ~30 minutes for pickup. A dedicated
+  `high_priority_wake_cooldown` (default 3m) plus scanning only `available/`
+  (never `pending/` or `claimed/`) means a blocked, gated, or already-claimed
+  item cannot loop-nudge. New `[stall_watch]` knobs: `priority_wake_enabled`
+  (default true), `high_priority_wake_delay`, `high_priority_wake_cooldown`,
+  `fast_priorities` (default `["high"]`). The wake policy lives entirely in
+  pogod, keyed off the generic `WorkItem.Priority` field — no `mg` flag, no
+  mg→pogod event. See [docs/design/priority-wake-design.md](docs/design/priority-wake-design.md).
 - **Install default-migration guard** (mg-7d95, flavor-rename mechanism). On an
   *existing* install, `pogo install` and pogod boot now pin the current role
   defaults (`coordinator = "mayor"`, `worker = "polecat"`) into `config.toml`

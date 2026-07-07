@@ -154,10 +154,46 @@ unclaimed_item_age_threshold = "10m"    # Threshold A
 unread_mail_age_threshold = "10m"       # Threshold B (age)
 max_unread_mail_count = 5               # Threshold B (count)
 nudge_cooldown = "5m"                   # min gap between same-category nudges
+
+# Priority wake (gh #61): a high-priority available item skips the 10m gate.
+priority_wake_enabled = true            # default true
+high_priority_wake_delay = "30s"        # min age before a high-priority item wakes
+high_priority_wake_cooldown = "3m"      # min gap between priority-wake nudges
+fast_priorities = ["high"]              # Priority values that trigger the wake
 ```
 
+### Priority wake
+
+Threshold A treats every unclaimed item the same — it waits out the full
+`unclaimed_item_age_threshold` (10m) regardless of priority. That is the wrong
+latency for urgent work: when the coordinator is idle and has backed its polling
+off, a `priority = high` item with no accompanying mail could sit up to ~30
+minutes before pickup (gh drellem2/pogo #61).
+
+The priority wake is a priority-aware branch on the *same* 30s available/ scan.
+An item that is **ready** (deps met — it is in `available/`, not `pending/`),
+**assigned to the watched agent** (or unassigned), and carries a priority in
+`fast_priorities` bypasses the 10m gate and is delivered after only
+`high_priority_wake_delay` — via the **same wait-idle nudge**, so a busy agent is
+never interrupted (the write lands at its next turn boundary) and an idle agent
+is woken at once. A dedicated `high_priority_wake_cooldown` keeps an item that
+stays available (e.g. it can't be dispatched yet) from re-nudging every tick;
+blocked (`pending/`) and already-claimed (`claimed/`) items are never scanned, so
+they cannot loop-nudge either. When the wake is disabled, high-priority items
+fall back to the standard 10m gate — disabling it never silences them.
+
+This is a sanctioned system-event nudge (gh #33), not a producer-attributed ask:
+the wake policy lives entirely in pogod, keyed off the generic
+`WorkItem.Priority` field, so `mg` stays a decoupled work queue with no
+pogo-specific "wake" flag.
+
+Note on `pogo agent diagnose`: diagnose measures a coordinator's health against
+its ~30-min backstop cron, so it does **not** surface this idle-latency gap — the
+priority wake, not diagnose, is the real fast path for urgent work.
+
 Source of truth: `internal/stallwatch/`; see
-[docs/design/stall-watch-design.md](design/stall-watch-design.md).
+[docs/design/stall-watch-design.md](design/stall-watch-design.md) and
+[docs/design/priority-wake-design.md](design/priority-wake-design.md).
 
 ## Agent registry
 

@@ -44,6 +44,10 @@ import (
 const (
 	categoryUnclaimedItems = "unclaimed_items"
 	categoryUnreadMail     = "unread_mail"
+	// categoryPriorityWake keys the priority-wake cooldown and stamps the
+	// emitted event. It is deliberately distinct from categoryUnclaimedItems so
+	// the fast wake and the standard 10-min stall nudge cool down independently.
+	categoryPriorityWake = "priority_wake"
 )
 
 // Nudger delivers a short message to an agent. pogod injects an implementation
@@ -67,6 +71,14 @@ type Options struct {
 	Nudge Nudger
 	// Emit writes the stall_watch_fired event. Defaults to events.Emit.
 	Emit Emitter
+	// FastPoll, if set, requests an out-of-band heartbeat tick right after a
+	// priority wake fires, so pogod re-checks the queue well before the next
+	// ~30s poll instead of waiting a full interval. pogod wires this to
+	// heartbeat.Detector.Nudge; tests leave it nil. Strictly optional — the
+	// wake is correct without it. It cannot loop: it is only called on an
+	// actual fire, and the priority cooldown suppresses the very next check,
+	// so at most one extra tick follows each wake.
+	FastPoll func()
 }
 
 // Watcher samples macguffin state and nudges the watched agent on stall.
@@ -76,6 +88,7 @@ type Watcher struct {
 	mailRoot string
 	nudge    Nudger
 	emit     Emitter
+	fastPoll func()
 
 	mu        sync.Mutex
 	lastNudge map[string]time.Time
@@ -98,6 +111,20 @@ func New(cfg config.StallWatchConfig, opts Options) *Watcher {
 	}
 	if cfg.NudgeCooldown <= 0 {
 		cfg.NudgeCooldown = config.DefaultStallNudgeCooldown
+	}
+	// Priority-wake defaults. PriorityWakeEnabled is intentionally NOT defaulted
+	// here: New() cannot tell an unset bool from an explicit false, so the
+	// production default (true) is set by config.Load(); a zero-value config
+	// leaves the wake off. The numeric/slice knobs still default so a config
+	// that enables the wake without tuning it is usable.
+	if cfg.HighPriorityWakeDelay <= 0 {
+		cfg.HighPriorityWakeDelay = config.DefaultHighPriorityWakeDelay
+	}
+	if cfg.HighPriorityWakeCooldown <= 0 {
+		cfg.HighPriorityWakeCooldown = config.DefaultHighPriorityWakeCooldown
+	}
+	if len(cfg.FastPriorities) == 0 {
+		cfg.FastPriorities = config.DefaultFastPriorities
 	}
 
 	workRoot := opts.WorkRoot
@@ -124,6 +151,7 @@ func New(cfg config.StallWatchConfig, opts Options) *Watcher {
 		mailRoot:  mailRoot,
 		nudge:     opts.Nudge,
 		emit:      emit,
+		fastPoll:  opts.FastPoll,
 		lastNudge: make(map[string]time.Time),
 	}
 }
@@ -152,9 +180,26 @@ func (w *Watcher) checkUnclaimedItems(now time.Time) {
 		return
 	}
 
+	// Priority-aware fast wake (gh drellem2/pogo #61). A ready, watched,
+	// high-priority available item bypasses the 10-min UnclaimedItemAgeThreshold
+	// and is delivered promptly via the same wait-idle nudge, so urgent work no
+	// longer waits out the idle-coordinator polling gap. This scans the same
+	// listing, so it is nearly free.
+	w.checkPriorityWake(now, items)
+
+	// Standard unclaimed-item stall: an assigned available item aged past the
+	// 10-min threshold. When the priority wake is active it OWNS fast-priority
+	// items (they follow the short priority cooldown, not the 10-min gate), so
+	// skip them here — otherwise a stuck high-priority item would draw a second,
+	// slower nudge on top of the fast one. When the wake is disabled they fall
+	// through to the standard gate exactly as before, so disabling the feature
+	// never silences a high-priority item.
 	var stale []workitem.WorkItem
 	for _, it := range items {
 		if !w.assignedToWatched(it.Assignee) {
+			continue
+		}
+		if w.cfg.PriorityWakeEnabled && w.isFastPriority(it.Priority) {
 			continue
 		}
 		if it.ModTime.IsZero() {
@@ -168,7 +213,7 @@ func (w *Watcher) checkUnclaimedItems(now time.Time) {
 		return
 	}
 
-	if !w.tryFire(categoryUnclaimedItems, now) {
+	if !w.tryFire(categoryUnclaimedItems, now, w.cfg.NudgeCooldown) {
 		return
 	}
 
@@ -190,6 +235,99 @@ func (w *Watcher) checkUnclaimedItems(now time.Time) {
 		"age_threshold":      w.cfg.UnclaimedItemAgeThreshold.String(),
 		"oldest_age_seconds": now.Sub(oldestModTime(stale)).Seconds(),
 	})
+}
+
+// checkPriorityWake delivers the priority-aware fast wake (gh drellem2/pogo
+// #61). It fires when one or more ready, watched, high-priority items sit in
+// available/ — bypassing the 10-min UnclaimedItemAgeThreshold in favor of the
+// much shorter HighPriorityWakeDelay — and delivers via the same wait-idle
+// nudge the standard checks use, so a BUSY agent is never interrupted (the
+// nudge blocks until the agent's PTY goes quiet) and an idle agent is woken at
+// once. items is the caller's already-listed available/ snapshot.
+//
+// Two structural properties keep it from loop-nudging a stuck item:
+//
+//   - Only available/ is listed. An item with unmet deps sits in pending/ and
+//     an already-claimed item in claimed/, so neither is ever seen here — a
+//     blocked or claimed high-priority item cannot trigger a wake at all.
+//   - The dedicated HighPriorityWakeCooldown gates repeats, so a ready
+//     high-priority item that simply stays available (e.g. the coordinator
+//     can't dispatch it yet) draws at most one nudge per cooldown, not one per
+//     heartbeat tick.
+func (w *Watcher) checkPriorityWake(now time.Time, items []workitem.WorkItem) {
+	if !w.cfg.PriorityWakeEnabled {
+		return
+	}
+
+	var ready []workitem.WorkItem
+	for _, it := range items {
+		if !w.assignedToWatched(it.Assignee) {
+			continue
+		}
+		if !w.isFastPriority(it.Priority) {
+			continue
+		}
+		if it.ModTime.IsZero() {
+			continue
+		}
+		if now.Sub(it.ModTime) >= w.cfg.HighPriorityWakeDelay {
+			ready = append(ready, it)
+		}
+	}
+	if len(ready) == 0 {
+		return
+	}
+
+	if !w.tryFire(categoryPriorityWake, now, w.cfg.HighPriorityWakeCooldown) {
+		return
+	}
+
+	sort.Slice(ready, func(i, j int) bool { return ready[i].ID < ready[j].ID })
+	ids := make([]string, len(ready))
+	for i, it := range ready {
+		ids[i] = it.ID
+	}
+
+	msg := fmt.Sprintf(
+		"priority-wake: %d high-priority work item(s) are ready and unclaimed — claim or dispatch now: %s",
+		len(ready), strings.Join(ids, ", "))
+
+	w.fire(categoryPriorityWake, msg, map[string]any{
+		"category":       categoryPriorityWake,
+		"watched_agent":  w.cfg.Agent,
+		"item_count":     len(ready),
+		"item_ids":       ids,
+		"wake_delay":     w.cfg.HighPriorityWakeDelay.String(),
+		"wake_cooldown":  w.cfg.HighPriorityWakeCooldown.String(),
+		"fast_priority":  strings.Join(w.cfg.FastPriorities, ","),
+		"oldest_age_sec": now.Sub(oldestModTime(ready)).Seconds(),
+	})
+
+	// Collapse the ~30s poll for the follow-up check so pogod re-samples the
+	// queue promptly (e.g. to notice the item got claimed, or that more urgent
+	// work landed) instead of waiting a full interval. Safe from looping: the
+	// priority cooldown suppresses the immediate re-check, so this yields at
+	// most one extra tick per wake. See Options.FastPoll.
+	if w.fastPoll != nil {
+		w.fastPoll()
+	}
+}
+
+// isFastPriority reports whether a work item's Priority value is in the
+// configured fast-priority set (default ["high"]). The comparison is
+// case-insensitive and whitespace-trimmed so a "High" or " high " frontmatter
+// value still triggers the wake.
+func (w *Watcher) isFastPriority(priority string) bool {
+	p := strings.ToLower(strings.TrimSpace(priority))
+	if p == "" {
+		return false
+	}
+	for _, fp := range w.cfg.FastPriorities {
+		if p == strings.ToLower(strings.TrimSpace(fp)) {
+			return true
+		}
+	}
+	return false
 }
 
 // checkUnreadMail fires when the watched agent's new/ maildir holds a message
@@ -228,7 +366,7 @@ func (w *Watcher) checkUnreadMail(now time.Time) {
 		return
 	}
 
-	if !w.tryFire(categoryUnreadMail, now) {
+	if !w.tryFire(categoryUnreadMail, now, w.cfg.NudgeCooldown) {
 		return
 	}
 
@@ -265,15 +403,17 @@ func (w *Watcher) assignedToWatched(assignee string) bool {
 	return a == "" || a == w.cfg.Agent
 }
 
-// tryFire enforces the per-category cooldown. It returns true and records the
+// tryFire enforces a per-category cooldown. It returns true and records the
 // fire time when a nudge is allowed, false when the category is still cooling
-// down. Recording before the nudge attempt means a failed delivery still
-// counts toward the cooldown — better to retry next cooldown window than to
-// hammer a wedged recipient every tick.
-func (w *Watcher) tryFire(category string, now time.Time) bool {
+// down. The caller passes the cooldown so each category can have its own — the
+// priority wake recovers faster (HighPriorityWakeCooldown) than the standard
+// stall categories (NudgeCooldown). Recording before the nudge attempt means a
+// failed delivery still counts toward the cooldown — better to retry next
+// cooldown window than to hammer a wedged recipient every tick.
+func (w *Watcher) tryFire(category string, now time.Time, cooldown time.Duration) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if last, ok := w.lastNudge[category]; ok && now.Sub(last) < w.cfg.NudgeCooldown {
+	if last, ok := w.lastNudge[category]; ok && now.Sub(last) < cooldown {
 		return false
 	}
 	w.lastNudge[category] = now

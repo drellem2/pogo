@@ -516,6 +516,30 @@ func resolveAgentProvider(id string) *agent.Provider {
 	return p
 }
 
+// newStallNudger builds the stall watcher's delivery function, mirroring the
+// scheduler's PogodDeliverer: when the target agent is running, deliver via the
+// PTY in wait-idle mode; otherwise fall back to durable macguffin mail so the
+// signal survives an offline recipient.
+//
+// The wait-idle mode is the load-bearing choice for gh drellem2/pogo #61: it
+// blocks until the agent's PTY goes quiet before writing, so a BUSY agent is
+// never interrupted mid-turn (the write lands at the next turn boundary) and an
+// idle agent is woken at once. The priority wake reuses this exact nudger — it
+// does not introduce a second, more aggressive delivery path — so it inherits
+// the never-interrupt-a-busy-agent guarantee. Extracted from main so the
+// wait-idle behavior is unit-testable (see main_stallnudger_test.go).
+func newStallNudger(reg *agent.Registry, mail func(to, from, subject, body string) error) stallwatch.Nudger {
+	return func(agentName, message string) error {
+		if reg != nil {
+			a := reg.Get(agentName)
+			if a != nil && a.Status == agent.StatusRunning {
+				return a.NudgeWithMode(message, agent.NudgeWaitIdle, agent.DefaultNudgeTimeout)
+			}
+		}
+		return mail(agentName, "stall-watch", "stall-watch: work piling up", message)
+	}
+}
+
 func main() {
 	flag.Usage = func() {
 		fmt.Fprint(flag.CommandLine.Output(), `pogod — the pogo daemon.
@@ -774,23 +798,19 @@ Flags:
 	var stallWatcher *stallwatch.Watcher
 	if cfg.StallWatch.Enabled {
 		stallWatcher = stallwatch.New(cfg.StallWatch, stallwatch.Options{
-			// Mirror the scheduler's PogodDeliverer: nudge the PTY when the
-			// agent is running, fall back to mail so the signal is durable when
-			// it is offline.
-			Nudge: func(agentName, message string) error {
-				if agentRegistry != nil {
-					a := agentRegistry.Get(agentName)
-					if a != nil && a.Status == agent.StatusRunning {
-						return a.NudgeWithMode(message, agent.NudgeWaitIdle, agent.DefaultNudgeTimeout)
-					}
-				}
-				return client.SendMGMail(agentName, "stall-watch", "stall-watch: work piling up", message)
-			},
+			Nudge: newStallNudger(agentRegistry, client.SendMGMail),
+			// Let a priority wake short-circuit the ~30s heartbeat poll for a
+			// prompt follow-up sweep (gh #61). hb.Nudge coalesces, so this can't
+			// storm the loop; the priority cooldown bounds it to one extra tick
+			// per wake.
+			FastPoll: hb.Nudge,
 		})
-		log.Printf("pogod: stall watcher enabled (agent=%s item_age=%s mail_age=%s max_mail=%d cooldown=%s)",
+		log.Printf("pogod: stall watcher enabled (agent=%s item_age=%s mail_age=%s max_mail=%d cooldown=%s priority_wake=%t wake_delay=%s wake_cooldown=%s fast_priorities=%s)",
 			cfg.StallWatch.Agent, cfg.StallWatch.UnclaimedItemAgeThreshold,
 			cfg.StallWatch.UnreadMailAgeThreshold, cfg.StallWatch.MaxUnreadMailCount,
-			cfg.StallWatch.NudgeCooldown)
+			cfg.StallWatch.NudgeCooldown, cfg.StallWatch.PriorityWakeEnabled,
+			cfg.StallWatch.HighPriorityWakeDelay, cfg.StallWatch.HighPriorityWakeCooldown,
+			strings.Join(cfg.StallWatch.FastPriorities, ","))
 	}
 
 	// Drive both heartbeat-piggybacked subsystems from a single OnTick. The

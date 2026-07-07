@@ -736,6 +736,19 @@ func TestStallWatchDefaults(t *testing.T) {
 	if cfg.StallWatch.NudgeCooldown != DefaultStallNudgeCooldown {
 		t.Errorf("cooldown = %v, want %v", cfg.StallWatch.NudgeCooldown, DefaultStallNudgeCooldown)
 	}
+	// Priority wake (gh #61) is default-on for the watched coordinator.
+	if !cfg.StallWatch.PriorityWakeEnabled {
+		t.Error("priority wake should be enabled by default")
+	}
+	if cfg.StallWatch.HighPriorityWakeDelay != DefaultHighPriorityWakeDelay {
+		t.Errorf("wake delay = %v, want %v", cfg.StallWatch.HighPriorityWakeDelay, DefaultHighPriorityWakeDelay)
+	}
+	if cfg.StallWatch.HighPriorityWakeCooldown != DefaultHighPriorityWakeCooldown {
+		t.Errorf("wake cooldown = %v, want %v", cfg.StallWatch.HighPriorityWakeCooldown, DefaultHighPriorityWakeCooldown)
+	}
+	if len(cfg.StallWatch.FastPriorities) != 1 || cfg.StallWatch.FastPriorities[0] != "high" {
+		t.Errorf("fast priorities = %v, want [high]", cfg.StallWatch.FastPriorities)
+	}
 }
 
 func TestStallWatchConfigFile(t *testing.T) {
@@ -753,11 +766,27 @@ unclaimed_item_age_threshold = "3m"
 unread_mail_age_threshold = "4m"
 max_unread_mail_count = 9
 nudge_cooldown = "90s"
+priority_wake_enabled = false
+high_priority_wake_delay = "10s"
+high_priority_wake_cooldown = "90s"
+fast_priorities = ["high", "critical"]
 `), 0644)
 
 	cfg := Load()
 	if cfg.StallWatch.Enabled {
 		t.Error("stall watch should be disabled by config file")
+	}
+	if cfg.StallWatch.PriorityWakeEnabled {
+		t.Error("priority wake should be disabled by config file")
+	}
+	if cfg.StallWatch.HighPriorityWakeDelay != 10*time.Second {
+		t.Errorf("wake delay = %v, want 10s", cfg.StallWatch.HighPriorityWakeDelay)
+	}
+	if cfg.StallWatch.HighPriorityWakeCooldown != 90*time.Second {
+		t.Errorf("wake cooldown = %v, want 90s", cfg.StallWatch.HighPriorityWakeCooldown)
+	}
+	if len(cfg.StallWatch.FastPriorities) != 2 || cfg.StallWatch.FastPriorities[0] != "high" || cfg.StallWatch.FastPriorities[1] != "critical" {
+		t.Errorf("fast priorities = %v, want [high critical]", cfg.StallWatch.FastPriorities)
 	}
 	if cfg.StallWatch.Agent != "director" {
 		t.Errorf("agent = %q, want director", cfg.StallWatch.Agent)
@@ -797,6 +826,34 @@ nudge_cooldown = "2m"
 	}
 	if cfg.StallWatch.NudgeCooldown != 2*time.Minute {
 		t.Errorf("cooldown = %v, want 2m", cfg.StallWatch.NudgeCooldown)
+	}
+	// The priority wake likewise stays at its default-on unless explicitly set.
+	if !cfg.StallWatch.PriorityWakeEnabled {
+		t.Error("priority wake should remain enabled when only nudge_cooldown is set")
+	}
+}
+
+// TestPriorityWakeUnrelatedKeysDontDisableIt: setting only a wake tuning knob
+// must leave priority_wake_enabled at its default-true (the priorityWakeEnabledSet
+// flag distinguishes unset from an explicit false).
+func TestPriorityWakeUnrelatedKeysDontDisableIt(t *testing.T) {
+	dir := t.TempDir()
+	os.Setenv("XDG_CONFIG_HOME", dir)
+	defer os.Unsetenv("XDG_CONFIG_HOME")
+
+	pogoDir := filepath.Join(dir, "pogo")
+	os.MkdirAll(pogoDir, 0755)
+	os.WriteFile(filepath.Join(pogoDir, "config.toml"), []byte(`
+[stall_watch]
+high_priority_wake_delay = "5s"
+`), 0644)
+
+	cfg := Load()
+	if !cfg.StallWatch.PriorityWakeEnabled {
+		t.Error("priority wake should remain enabled when only a wake knob is set")
+	}
+	if cfg.StallWatch.HighPriorityWakeDelay != 5*time.Second {
+		t.Errorf("wake delay = %v, want 5s", cfg.StallWatch.HighPriorityWakeDelay)
 	}
 }
 

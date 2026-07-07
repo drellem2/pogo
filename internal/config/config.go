@@ -110,7 +110,25 @@ const (
 	// same threshold category, so a persistent backlog produces one nudge per
 	// cooldown rather than one per heartbeat tick. Mirrors gh #12's 300s.
 	DefaultStallNudgeCooldown = 5 * time.Minute
+	// DefaultHighPriorityWakeDelay is the minimum age a high-priority available
+	// item must reach before the priority wake fires. Small enough to feel
+	// immediate versus the old up-to-30-min idle-poll gap, large enough to let
+	// a burst of enqueues settle so a batch produces one nudge rather than one
+	// per item. See the priority-wake half of gh drellem2/pogo #61.
+	DefaultHighPriorityWakeDelay = 30 * time.Second
+	// DefaultHighPriorityWakeCooldown is the minimum gap between two
+	// priority-wake nudges. It is deliberately shorter than the standard stall
+	// cooldown (urgent work should recover fast) but long enough that a
+	// high-priority item which stays available — e.g. the coordinator can't
+	// dispatch it yet — does not re-nudge every heartbeat tick.
+	DefaultHighPriorityWakeCooldown = 3 * time.Minute
 )
+
+// DefaultFastPriorities is the set of WorkItem.Priority values that trigger the
+// priority wake. Just "high" today; extend it (e.g. add "critical") if the
+// priority vocabulary grows. Kept as a var because a slice cannot be a const;
+// treat it as read-only.
+var DefaultFastPriorities = []string{"high"}
 
 // Config holds pogo daemon configuration.
 type Config struct {
@@ -168,6 +186,28 @@ type StallWatchConfig struct {
 	// NudgeCooldown is the minimum gap between two nudges for the same
 	// threshold category. Zero falls back to DefaultStallNudgeCooldown.
 	NudgeCooldown time.Duration
+
+	// PriorityWakeEnabled turns on the priority-aware fast wake (gh
+	// drellem2/pogo #61): a ready, watched, high-priority available item
+	// bypasses UnclaimedItemAgeThreshold and is delivered promptly via the same
+	// wait-idle nudge, so urgent work no longer waits out the idle-coordinator
+	// polling gap. Because New() cannot distinguish an unset bool from an
+	// explicit false, the production default (true) is applied by Load(), not
+	// New(); a hand-built config must set this field to activate the wake.
+	PriorityWakeEnabled bool
+	// HighPriorityWakeDelay is the minimum age a high-priority available item
+	// must reach before the priority wake fires (bypassing
+	// UnclaimedItemAgeThreshold). Zero falls back to
+	// DefaultHighPriorityWakeDelay.
+	HighPriorityWakeDelay time.Duration
+	// HighPriorityWakeCooldown is the minimum gap between two priority-wake
+	// nudges — a dedicated cooldown so a high-priority item that stays available
+	// does not re-nudge every tick. Zero falls back to
+	// DefaultHighPriorityWakeCooldown.
+	HighPriorityWakeCooldown time.Duration
+	// FastPriorities lists the WorkItem.Priority values that trigger the
+	// priority wake. Empty falls back to DefaultFastPriorities (["high"]).
+	FastPriorities []string
 }
 
 // GitGCConfig configures pogod's periodic polecat git garbage collector.
@@ -316,10 +356,11 @@ type RefineryConfig struct {
 // "unset" from "set to a zero value" (e.g. enabled = false).
 type parsedConfig struct {
 	Config
-	refineryEnabledSet   bool
-	gitgcEnabledSet      bool
-	stallWatchEnabledSet bool
-	agentsAutoStartSet   bool
+	refineryEnabledSet     bool
+	gitgcEnabledSet        bool
+	stallWatchEnabledSet   bool
+	priorityWakeEnabledSet bool
+	agentsAutoStartSet     bool
 }
 
 // Load reads configuration from (in priority order):
@@ -351,6 +392,11 @@ func Load() *Config {
 			UnreadMailAgeThreshold:    DefaultUnreadMailAgeThreshold,
 			MaxUnreadMailCount:        DefaultMaxUnreadMailCount,
 			NudgeCooldown:             DefaultStallNudgeCooldown,
+			// Priority wake is default-on for the watched coordinator (gh #61).
+			PriorityWakeEnabled:      true,
+			HighPriorityWakeDelay:    DefaultHighPriorityWakeDelay,
+			HighPriorityWakeCooldown: DefaultHighPriorityWakeCooldown,
+			FastPriorities:           DefaultFastPriorities,
 		},
 	}
 
@@ -416,6 +462,18 @@ func Load() *Config {
 		}
 		if fileCfg.StallWatch.NudgeCooldown > 0 {
 			cfg.StallWatch.NudgeCooldown = fileCfg.StallWatch.NudgeCooldown
+		}
+		if fileCfg.priorityWakeEnabledSet {
+			cfg.StallWatch.PriorityWakeEnabled = fileCfg.StallWatch.PriorityWakeEnabled
+		}
+		if fileCfg.StallWatch.HighPriorityWakeDelay > 0 {
+			cfg.StallWatch.HighPriorityWakeDelay = fileCfg.StallWatch.HighPriorityWakeDelay
+		}
+		if fileCfg.StallWatch.HighPriorityWakeCooldown > 0 {
+			cfg.StallWatch.HighPriorityWakeCooldown = fileCfg.StallWatch.HighPriorityWakeCooldown
+		}
+		if len(fileCfg.StallWatch.FastPriorities) > 0 {
+			cfg.StallWatch.FastPriorities = fileCfg.StallWatch.FastPriorities
 		}
 	}
 
@@ -692,6 +750,19 @@ func loadConfigFile() (*parsedConfig, error) {
 				if d, err := time.ParseDuration(unquotedVal); err == nil {
 					cfg.StallWatch.NudgeCooldown = d
 				}
+			case "priority_wake_enabled":
+				cfg.StallWatch.PriorityWakeEnabled = val == "true"
+				cfg.priorityWakeEnabledSet = true
+			case "high_priority_wake_delay":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.StallWatch.HighPriorityWakeDelay = d
+				}
+			case "high_priority_wake_cooldown":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.StallWatch.HighPriorityWakeCooldown = d
+				}
+			case "fast_priorities":
+				cfg.StallWatch.FastPriorities = parseStringArray(val)
 			}
 		case "agents":
 			switch key {
