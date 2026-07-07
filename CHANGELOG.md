@@ -11,6 +11,17 @@ is the curated, human-readable summary kept in sync at each release cut.
 ## [Unreleased]
 
 ### Added
+- **Install default-migration guard** (mg-7d95, flavor-rename mechanism). On an
+  *existing* install, `pogo install` and pogod boot now pin the current role
+  defaults (`coordinator = "mayor"`, `worker = "polecat"`) into `config.toml`
+  the first time they run, so a later change to the shipped default names can
+  never silently rename a live deployment's roles. Detection mirrors the signal
+  pogod already trusts: a config file exists, or a stamped prompt lives under
+  `$POGO_HOME/agents/`. Fresh installs (neither signal) are left untouched and
+  adopt the new defaults. The writer is idempotent and append-only — a role key
+  already present is never rewritten, and the rest of `config.toml` is preserved
+  byte-for-byte. Generic over all `[agents]` role keys; a hard prerequisite for
+  the gated default-name flip.
 - **Usage-limit visibility + recovery** (mg-7ffa, gh #45). pogod's modal
   watcher now recognizes a provider usage-limit wedge as a distinct, observable
   condition instead of a silent stall. When the rate-limit-options modal stays

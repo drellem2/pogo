@@ -1486,16 +1486,33 @@ that copy and overwrite without a safety net.`,
 				}
 			}
 
+			// Snapshot whether this is a pre-existing install BEFORE InstallPrompts
+			// writes fresh prompts — afterwards a brand-new machine would carry
+			// stamped prompts and read as existing (see PinRoleDefaultsIfExistingInstall).
+			existingInstall := config.IsExistingInstall()
+
 			// Step 3: Install prompts
 			result, err := agent.InstallPrompts(agent.InstallOpts{Force: installForceFlag, NoBackup: installNoBackupFlag})
 			if err != nil {
 				cli.ExitWithError(jsonOutput, "failed to install prompts: "+err.Error(), cli.ExitError)
 			}
 
+			// Step 3b: On an existing install, pin the current role-name defaults
+			// into config.toml so a future default-name flip cannot silently
+			// rename this deployment's coordinator/worker. Fresh installs are a
+			// no-op and adopt the new defaults. Non-fatal: a pin failure must not
+			// break `pogo install`.
+			pinRes, pinErr := config.PinRoleDefaultsIfExistingInstall(existingInstall)
+			if pinErr != nil && !jsonOutput {
+				fmt.Fprintf(os.Stderr, "  ⚠ could not pin role defaults: %v\n", pinErr)
+			}
+
 			if jsonOutput {
 				cli.PrintJSON(map[string]interface{}{
-					"status":  "installed",
-					"prompts": result,
+					"status":       "installed",
+					"prompts":      result,
+					"pinnedRoles":  pinRes.Pinned,
+					"configPinned": len(pinRes.Pinned) > 0,
 				})
 			} else {
 				if len(result.Installed) > 0 {
@@ -1512,6 +1529,10 @@ that copy and overwrite without a safety net.`,
 				}
 				for _, c := range result.Conflicts {
 					fmt.Fprintf(os.Stderr, "  ⚠ conflict: %s preserved (user-edited); new embed written to %s — see docs/prompt-customization.md to reconcile\n", c.Path, c.DistPath)
+				}
+				if len(pinRes.Pinned) > 0 {
+					fmt.Printf("  ✓ pinned current role default(s) [%s] in %s (existing install)\n",
+						strings.Join(pinRes.Pinned, ", "), pinRes.Path)
 				}
 				fmt.Println("\nReady. Next steps:")
 				fmt.Printf("  pogo agent start %-9s # Start the coordinator\n", agent.CoordinatorName())

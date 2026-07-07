@@ -1,0 +1,211 @@
+package config
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+// sandbox points POGO_HOME and XDG_CONFIG_HOME at fresh temp dirs so config /
+// prompt state is fully isolated, and returns the resolved config.toml path.
+func sandbox(t *testing.T) (home string, configPath string) {
+	t.Helper()
+	home = t.TempDir()
+	xdg := t.TempDir()
+	t.Setenv("POGO_HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	return home, ConfigFilePath()
+}
+
+func writeConfig(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeStampedPrompt(t *testing.T, home, name string) {
+	t.Helper()
+	dir := filepath.Join(home, "agents")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := "<!-- pogo-prompt: embed=sha256:abc body=sha256:def -->\n# " + name + "\n"
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestIsExistingInstall_Fresh(t *testing.T) {
+	sandbox(t)
+	if IsExistingInstall() {
+		t.Error("fresh sandbox (no config, no prompts) should not read as existing")
+	}
+}
+
+func TestIsExistingInstall_ConfigFile(t *testing.T) {
+	_, path := sandbox(t)
+	writeConfig(t, path, "[server]\nport = 8080\n")
+	if !IsExistingInstall() {
+		t.Error("a present config file should mark an existing install")
+	}
+}
+
+func TestIsExistingInstall_StampedPromptFallback(t *testing.T) {
+	home, _ := sandbox(t)
+	writeStampedPrompt(t, home, "mayor.md")
+	if !IsExistingInstall() {
+		t.Error("a stamped prompt under agents/ should mark an existing install")
+	}
+}
+
+func TestIsExistingInstall_UnstampedPromptIgnored(t *testing.T) {
+	home, _ := sandbox(t)
+	dir := filepath.Join(home, "agents")
+	os.MkdirAll(dir, 0o755)
+	os.WriteFile(filepath.Join(dir, "notes.md"), []byte("# just a file\n"), 0o644)
+	if IsExistingInstall() {
+		t.Error("an unstamped file under agents/ must not mark an existing install")
+	}
+}
+
+func TestPin_FreshInstallNoOp(t *testing.T) {
+	_, path := sandbox(t)
+	res, err := PinRoleDefaultsIfExistingInstall(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Pinned) != 0 {
+		t.Errorf("fresh install should pin nothing, got %v", res.Pinned)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Error("fresh install must not create config.toml")
+	}
+}
+
+func TestPin_ExistingNoConfigCreatesFile(t *testing.T) {
+	_, path := sandbox(t)
+	res, err := PinRoleDefaultsIfExistingInstall(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(res.Pinned, ","); got != "coordinator,worker" {
+		t.Errorf("expected both roles pinned, got %q", got)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("config.toml should have been created: %v", err)
+	}
+	content := string(data)
+	if !strings.Contains(content, `coordinator = "mayor"`) {
+		t.Errorf("coordinator not pinned to mayor:\n%s", content)
+	}
+	if !strings.Contains(content, `worker = "polecat"`) {
+		t.Errorf("worker not pinned to polecat:\n%s", content)
+	}
+	// Round-trip: the loader reads the pinned coordinator back.
+	if cfg := Load(); cfg.Agents.CoordinatorName() != "mayor" {
+		t.Errorf("Load() after pin: coordinator = %q, want mayor", cfg.Agents.CoordinatorName())
+	}
+}
+
+func TestPin_Idempotent(t *testing.T) {
+	_, path := sandbox(t)
+	if _, err := PinRoleDefaultsIfExistingInstall(true); err != nil {
+		t.Fatal(err)
+	}
+	first, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := PinRoleDefaultsIfExistingInstall(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Pinned) != 0 {
+		t.Errorf("second run should pin nothing, got %v", res.Pinned)
+	}
+	second, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(first) != string(second) {
+		t.Errorf("second run rewrote config.toml:\n--- first ---\n%s\n--- second ---\n%s", first, second)
+	}
+}
+
+func TestPin_PreservesExistingCoordinator(t *testing.T) {
+	_, path := sandbox(t)
+	writeConfig(t, path, "[agents]\ncoordinator = \"ringmaster\"\nprovider = \"claude\"\n")
+	res, err := PinRoleDefaultsIfExistingInstall(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(res.Pinned, ","); got != "worker" {
+		t.Errorf("only worker should be pinned when coordinator is already set, got %q", got)
+	}
+	data, _ := os.ReadFile(path)
+	content := string(data)
+	if !strings.Contains(content, `coordinator = "ringmaster"`) {
+		t.Errorf("operator coordinator value must be preserved:\n%s", content)
+	}
+	if strings.Contains(content, `coordinator = "mayor"`) {
+		t.Errorf("guard must not overwrite an operator-set coordinator:\n%s", content)
+	}
+	if !strings.Contains(content, `provider = "claude"`) {
+		t.Errorf("existing [agents] keys must be preserved:\n%s", content)
+	}
+	if !strings.Contains(content, `worker = "polecat"`) {
+		t.Errorf("worker should be pinned:\n%s", content)
+	}
+	// The pinned key lands inside the [agents] table, not in a duplicate one.
+	if strings.Count(content, "[agents]") != 1 {
+		t.Errorf("must not create a second [agents] table:\n%s", content)
+	}
+}
+
+func TestPin_InsertsIntoExistingAgentsSection(t *testing.T) {
+	_, path := sandbox(t)
+	// [agents.polecat] sub-table present but no top-level role keys.
+	writeConfig(t, path, "[server]\nport = 9000\n\n[agents]\nprovider = \"claude\"\n\n[agents.polecat]\nprovider = \"pi\"\n")
+	if _, err := PinRoleDefaultsIfExistingInstall(true); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(path)
+	content := string(data)
+	if strings.Count(content, "[agents]") != 1 {
+		t.Errorf("must not add a duplicate [agents] table:\n%s", content)
+	}
+	// The sub-table's provider override must survive untouched.
+	if !strings.Contains(content, "[agents.polecat]\nprovider = \"pi\"") {
+		t.Errorf("[agents.polecat] override must be preserved:\n%s", content)
+	}
+	// Round-trip through the real loader: pinned coordinator is read, and the
+	// polecat sub-table override still parses.
+	cfg := Load()
+	if cfg.Agents.CoordinatorName() != "mayor" {
+		t.Errorf("coordinator = %q, want mayor", cfg.Agents.CoordinatorName())
+	}
+	if cfg.Agents.AgentProvider("polecat") != "pi" {
+		t.Errorf("polecat provider override lost: %q", cfg.Agents.AgentProvider("polecat"))
+	}
+}
+
+func TestPin_StampedPromptOnlyInstall(t *testing.T) {
+	home, path := sandbox(t)
+	writeStampedPrompt(t, home, "mayor.md")
+	res, err := PinRoleDefaultsIfExistingInstall(IsExistingInstall())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Pinned) != 2 {
+		t.Errorf("stamped-prompt-only install should pin both roles, got %v", res.Pinned)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("config.toml should have been created for the stamped-prompt install: %v", err)
+	}
+}

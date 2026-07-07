@@ -1027,6 +1027,19 @@ Flags:
 				len(installRes.Installed), len(installRes.Updated), len(installRes.Skipped))
 		}
 
+		// A daemon reaching here has a config file (cfg.Source != ""), so it
+		// is by definition an existing install: pin its current role-name
+		// defaults into config.toml, mirroring how prompt refresh piggybacks
+		// on boot. A plain daemon restart is then enough to protect an
+		// existing deployment before a future default-name flip ships.
+		// Idempotent — a no-op once the keys are present.
+		if pinRes, err := config.PinRoleDefaultsIfExistingInstall(true); err != nil {
+			log.Printf("pogod: role-default pin failed: %v", err)
+		} else if len(pinRes.Pinned) > 0 {
+			log.Printf("pogod: pinned current role default(s) [%s] in %s",
+				strings.Join(pinRes.Pinned, ", "), pinRes.Path)
+		}
+
 		// Auto-start crew agents whose prompt frontmatter declares auto_start = true.
 		// This replaces the manual `pogo agent start mayor` step on a fresh boot
 		// and is idempotent — agents already registered (e.g. across pogod
