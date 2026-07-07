@@ -18,6 +18,7 @@ import (
 
 	"github.com/drellem2/pogo/internal/config"
 	"github.com/drellem2/pogo/internal/driver"
+	"github.com/drellem2/pogo/internal/gitgc"
 	"github.com/drellem2/pogo/internal/search"
 	pogoPlugin "github.com/drellem2/pogo/pkg/plugin"
 )
@@ -199,7 +200,9 @@ func isEphemeralPath(path string) bool {
 	// A polecat worktree root is a direct child of $POGO_HOME/polecats.
 	// Matching only the immediate child (not arbitrary descendants) keeps
 	// this from flagging repos nested inside a worktree, e.g. test fixtures.
-	polecatsDir := filepath.Join(config.PogoHome(), "polecats")
+	// gitgc.DefaultPolecatsDir is the single source of truth for this path
+	// (its error return is always nil).
+	polecatsDir, _ := gitgc.DefaultPolecatsDir()
 	if filepath.Dir(clean) == polecatsDir {
 		return true
 	}

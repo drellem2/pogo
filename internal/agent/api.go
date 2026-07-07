@@ -926,7 +926,7 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 	// Create git worktree for polecat isolation
 	if createWorktree {
 		sourceRepo = spawnReq.Repo
-		branchName = "polecat-" + spawnReq.Name
+		branchName = gitgc.BranchPrefix + spawnReq.Name
 
 		// Ensure parent directory exists
 		if err := os.MkdirAll(filepath.Dir(worktreeDir), 0755); err != nil {
