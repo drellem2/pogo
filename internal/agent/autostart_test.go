@@ -52,8 +52,10 @@ func TestAutoStartAgents_StartsOnlyFlaggedPrompts(t *testing.T) {
 		got[r.Name] = r.Status
 	}
 
-	if got["mayor"] != AutoStartStatusStarted {
-		t.Errorf("mayor status = %q, want %q (results=%v)", got["mayor"], AutoStartStatusStarted, results)
+	// The top-level mayor.md prompt is registered under the coordinator's
+	// display name (default "ringmaster" post-flip), not the file stem.
+	if got["ringmaster"] != AutoStartStatusStarted {
+		t.Errorf("coordinator status = %q, want %q (results=%v)", got["ringmaster"], AutoStartStatusStarted, results)
 	}
 	if got["scout"] != AutoStartStatusStarted {
 		t.Errorf("scout status = %q, want %q", got["scout"], AutoStartStatusStarted)
@@ -68,8 +70,8 @@ func TestAutoStartAgents_StartsOnlyFlaggedPrompts(t *testing.T) {
 	}
 
 	// And the registry should reflect both started agents.
-	if reg.Get("mayor") == nil {
-		t.Error("mayor not registered after auto-start")
+	if reg.Get("ringmaster") == nil {
+		t.Error("coordinator not registered after auto-start")
 	}
 	if reg.Get("scout") == nil {
 		t.Error("scout not registered after auto-start")
@@ -101,15 +103,15 @@ func TestAutoStartAgents_Idempotent(t *testing.T) {
 	if len(first) != 1 || first[0].Status != AutoStartStatusStarted {
 		t.Fatalf("first scan = %+v, want one started entry", first)
 	}
-	originalPID := reg.Get("mayor").PID
+	originalPID := reg.Get("ringmaster").PID
 
 	// Second call must not respawn the running agent.
 	second := reg.AutoStartAgents()
 	if len(second) != 1 || second[0].Status != AutoStartStatusSkippedRunning {
 		t.Fatalf("second scan = %+v, want one skipped_running entry", second)
 	}
-	if got := reg.Get("mayor"); got == nil || got.PID != originalPID {
-		t.Errorf("mayor PID changed after second scan: original=%d got=%v", originalPID, got)
+	if got := reg.Get("ringmaster"); got == nil || got.PID != originalPID {
+		t.Errorf("coordinator PID changed after second scan: original=%d got=%v", originalPID, got)
 	}
 }
 
@@ -193,7 +195,7 @@ func TestAutoStartAgents_AlphabeticalOrder(t *testing.T) {
 	for i, r := range results {
 		names[i] = r.Name
 	}
-	want := []string{"alpha", "mayor", "zeta"}
+	want := []string{"alpha", "ringmaster", "zeta"}
 	if !sort.StringsAreSorted(names) {
 		t.Errorf("results not sorted: got %v", names)
 	}
@@ -227,7 +229,7 @@ func TestAutoStartAgents_NoFrontmatterDoesNotStart(t *testing.T) {
 	if len(results) != 1 || results[0].Status != AutoStartStatusSkippedNoFlag {
 		t.Fatalf("results = %+v, want one skipped_no_flag entry", results)
 	}
-	if reg.Get("mayor") != nil {
-		t.Error("mayor should not be running without auto_start = true")
+	if reg.Get("ringmaster") != nil {
+		t.Error("coordinator should not be running without auto_start = true")
 	}
 }

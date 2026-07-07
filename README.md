@@ -48,7 +48,7 @@ mg mail send mayor --subject="priority change" --body="pause feature work"
 | Prompt | `~/.pogo/agents/crew/<name>.md` | Template + work item |
 | Merge path | Push to main | Refinery merge queue |
 
-Behavior is prompt-defined. Edit `~/.pogo/agents/mayor.md` to change dispatch. Add a crew agent with `~/.pogo/agents/crew/<name>.md` + `pogo agent start <name>`. Polecats re-read `~/.pogo/agents/templates/polecat.md` each spawn. Crew with `auto_start = true` start at boot (default mayor).
+Behavior is prompt-defined. Edit `~/.pogo/agents/mayor.md` to change dispatch. Add a crew agent with `~/.pogo/agents/crew/<name>.md` + `pogo agent start <name>`. Polecats re-read `~/.pogo/agents/templates/polecat.md` each spawn. Crew with `auto_start = true` start at boot (default ringmaster).
 
 ## Coordination: macguffin
 

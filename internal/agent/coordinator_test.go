@@ -126,13 +126,14 @@ func TestSynthesizePromptResolvesConfiguredCoordinator(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Default coordinator: shipped prompts render with "mayor".
-	out, err := SynthesizePrompt("mayor", PreviewTemplateVars())
+	// Default coordinator: resolved under the default display name "ringmaster"
+	// (which maps to the frozen mayor.md file) and rendered with it.
+	out, err := SynthesizePrompt("ringmaster", PreviewTemplateVars())
 	if err != nil {
-		t.Fatalf("SynthesizePrompt(mayor): %v", err)
+		t.Fatalf("SynthesizePrompt(ringmaster): %v", err)
 	}
-	if !strings.Contains(out, "mg mail list mayor") {
-		t.Errorf("default coordinator prompt missing mayor mail command:\n%.400s", out)
+	if !strings.Contains(out, "mg mail list ringmaster") {
+		t.Errorf("default coordinator prompt missing ringmaster mail command:\n%.400s", out)
 	}
 	if strings.Contains(out, "{{.Coordinator") {
 		t.Errorf("leftover placeholder in default coordinator prompt")
@@ -196,7 +197,7 @@ func TestExpandTemplateCoordinatorVar(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := "Task mg-1: mail mayor (Mayor)\n"; out != want {
+	if want := "Task mg-1: mail ringmaster (Ringmaster)\n"; out != want {
 		t.Errorf("default expansion = %q, want %q", out, want)
 	}
 

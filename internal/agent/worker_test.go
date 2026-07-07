@@ -55,7 +55,7 @@ func TestExpandTemplateWorkerVar(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := "You are a polecat (Polecat).\n"; out != want {
+	if want := "You are a pogocat (Pogocat).\n"; out != want {
 		t.Errorf("default expansion = %q, want %q", out, want)
 	}
 

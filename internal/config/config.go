@@ -45,14 +45,15 @@ func (m RunMode) String() string {
 const DefaultProvider = "claude"
 
 // DefaultCoordinator is the coordinator agent's name used when [agents]
-// coordinator is not configured. Keeping this "mayor" means existing
-// deployments work with no config change. The name is policy, not mechanism:
-// it decides the coordinator's agent name (and therefore its mg mailbox and
-// schedule ids) and what prompts call the role; the coordinator's prompt file
-// stays at ~/.pogo/agents/mayor.md regardless. See mg-71ea.
-const DefaultCoordinator = "mayor"
+// coordinator is not configured. The name is policy, not mechanism: it decides
+// the coordinator's agent name (and therefore its mg mailbox and schedule ids)
+// and what prompts call the role. Existing installs are unaffected by a change
+// to this value: the default-migration guard (see migrate.go) pins their
+// historical coordinator name into config.toml, so this flip only sets the
+// default for fresh installs. See mg-71ea, mg-ce47.
+const DefaultCoordinator = "ringmaster"
 
-// DefaultWorker (the worker role's display-name default, "polecat") is
+// DefaultWorker (the worker role's display-name default, "pogocat") is
 // declared in migrate.go alongside the role-default migration table that
 // consumes it. The worker seam here — AgentsConfig.Worker, WorkerName(), the
 // "worker" config key, and Load() defaulting — references it. See mg-ccec
@@ -152,7 +153,7 @@ type StallWatchConfig struct {
 	// Enabled turns the watcher on. Defaults to true.
 	Enabled bool
 	// Agent is the macguffin agent name to watch. Empty falls back to
-	// DefaultStallWatchAgent ("mayor").
+	// DefaultStallWatchAgent ("ringmaster").
 	Agent string
 	// UnclaimedItemAgeThreshold is how long an available work item assigned to
 	// (or unassigned and pickup-expected by) Agent may sit before a nudge.
@@ -200,12 +201,12 @@ type AgentsConfig struct {
 	// Load() fills it in.
 	Provider string
 	// Coordinator is the coordinator agent's name ([agents] coordinator).
-	// Empty is treated as DefaultCoordinator ("mayor"); Load() fills it in.
+	// Empty is treated as DefaultCoordinator ("ringmaster"); Load() fills it in.
 	// Prefer CoordinatorName() over reading the field so zero-value configs
 	// (tests, callers that skip Load) still resolve to the default.
 	Coordinator string
 	// Worker is the worker role's display name ([agents] worker). Empty is
-	// treated as DefaultWorker ("polecat"); Load() fills it in. Prefer
+	// treated as DefaultWorker ("pogocat"); Load() fills it in. Prefer
 	// WorkerName() over reading the field so zero-value configs still resolve
 	// to the default. Display-only — it never renames an identifier.
 	Worker string
@@ -268,7 +269,7 @@ func (c *AgentsConfig) AgentCommand(agentType string) string {
 }
 
 // CoordinatorName returns the configured coordinator agent name, falling back
-// to DefaultCoordinator ("mayor") when unset. Safe on a zero-value AgentsConfig.
+// to DefaultCoordinator ("ringmaster") when unset. Safe on a zero-value AgentsConfig.
 func (c *AgentsConfig) CoordinatorName() string {
 	if c != nil && c.Coordinator != "" {
 		return c.Coordinator
@@ -277,7 +278,7 @@ func (c *AgentsConfig) CoordinatorName() string {
 }
 
 // WorkerName returns the configured worker display name, falling back to
-// DefaultWorker ("polecat") when unset. Safe on a zero-value AgentsConfig.
+// DefaultWorker ("pogocat") when unset. Safe on a zero-value AgentsConfig.
 func (c *AgentsConfig) WorkerName() string {
 	if c != nil && c.Worker != "" {
 		return c.Worker

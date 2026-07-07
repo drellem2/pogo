@@ -1,6 +1,6 @@
 # Customizing pogo
 
-Pogo's defaults — a coding mayor (the coordinator), a polecat (a disposable
+Pogo's defaults — a coding ringmaster (the coordinator), a pogocat (a disposable
 worker agent) that opens a feature branch, and a refinery (the merge queue)
 that merges to `main` — are one specific shape. The pieces underneath
 (prompt files, frontmatter, `config.toml`) are general. This guide walks through

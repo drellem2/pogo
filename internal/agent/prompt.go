@@ -25,8 +25,9 @@ var defaultPrompts embed.FS
 // DefaultCoordinatorName is the coordinator agent's default name. It is kept
 // equal to config.DefaultCoordinator; the literal is repeated here as the
 // resolution floor so prompt handling never depends on config having been
-// loaded.
-const DefaultCoordinatorName = "mayor"
+// loaded. When config.DefaultCoordinator flips (mg-ce47), this mirror flips
+// with it to preserve that equality.
+const DefaultCoordinatorName = "ringmaster"
 
 // coordinatorPlaceholder is the token shipped prompts use where the
 // coordinator's name belongs; coordinatorTitlePlaceholder is its
@@ -44,11 +45,12 @@ const (
 // DefaultWorkerName is the worker role's default display name. It is kept
 // equal to config.DefaultWorker; the literal is repeated here as the
 // resolution floor so prompt handling never depends on config having been
-// loaded (the agent package cannot import config). Unlike the coordinator,
-// this name is display-only — it feeds prompt prose, never a mailbox,
-// schedule id, branch prefix, or agent-type key, all of which stay frozen at
-// "polecat". See mg-ccec.
-const DefaultWorkerName = "polecat"
+// loaded (the agent package cannot import config). When config.DefaultWorker
+// flips (mg-ce47), this mirror flips with it to preserve that equality. Unlike
+// the coordinator, this name is display-only — it feeds prompt prose, never a
+// mailbox, schedule id, branch prefix, or agent-type key, all of which stay
+// frozen at "polecat". See mg-ccec.
+const DefaultWorkerName = "pogocat"
 
 // workerPlaceholder is the token shipped prompts use where the worker role's
 // display name belongs; workerTitlePlaceholder is its first-letter-capitalized
@@ -77,7 +79,7 @@ var coordinatorName = DefaultCoordinatorName
 
 // SetCoordinatorName sets the process-wide coordinator agent name from
 // configuration ([agents] coordinator). An empty name resets to the default
-// ("mayor").
+// ("ringmaster").
 func SetCoordinatorName(name string) {
 	if name == "" {
 		name = DefaultCoordinatorName
@@ -98,7 +100,7 @@ var workerName = DefaultWorkerName
 
 // SetWorkerName sets the process-wide worker role display name from
 // configuration ([agents] worker). An empty name resets to the default
-// ("polecat").
+// ("pogocat").
 func SetWorkerName(name string) {
 	if name == "" {
 		name = DefaultWorkerName

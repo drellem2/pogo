@@ -27,12 +27,12 @@ directive synthesizes a crew prompt from a base plus a TOML. See
 
 ## Coordinator name
 
-The coordinator role is called "mayor" by default, but the name is policy, not
+The coordinator role is called "ringmaster" by default, but the name is policy, not
 mechanism — rename it with:
 
 ```toml
 [agents]
-coordinator = "boss"   # default "mayor"
+coordinator = "boss"   # default "ringmaster"
 ```
 
 The configured name decides the coordinator's agent name (and therefore its
@@ -49,13 +49,13 @@ and the `"mayor"` category label in `pogo agent prompt list --json`.
 
 ## Worker name
 
-The worker role (the disposable per-task agents) is called "polecat" by default.
+The worker role (the disposable per-task agents) is called "pogocat" by default.
 Like the coordinator name it is policy, not mechanism — rename the display name
 with:
 
 ```toml
 [agents]
-worker = "pogocat"   # default "polecat"
+worker = "critter"   # default "pogocat"
 ```
 
 **This is a display-only knob, and that is the important difference from the
@@ -208,7 +208,7 @@ See [docs/customizing.md](customizing.md).
 ## Role default-migration guard
 
 pogo never writes `config.toml` on its own, and the role-name defaults
-(`coordinator = "mayor"`, `worker = "polecat"`) live only in code — `Load()`
+(`coordinator = "ringmaster"`, `worker = "pogocat"`) live only in code — `Load()`
 fills them in-memory from a const when the key is absent. So the common existing
 install has **no `[agents]` role keys on disk**. That is normally fine, but it
 means the day a future pogo release changes a shipped default, every existing
@@ -216,8 +216,10 @@ install would *silently* adopt the new name on the next binary run — moving th
 coordinator's mailbox/schedule-ids or the worker's display out from under a
 running deployment.
 
-The guard closes that gap. On an **existing install** it pins the current
-defaults into `config.toml`, once:
+The guard closes that gap. On an **existing install** it pins the frozen
+historical role names into `config.toml`, once — these are the pre-flip
+defaults (`mayor` / `polecat`), deliberately distinct from the current shipped
+defaults above, so a default flip cannot move a running deployment:
 
 ```toml
 # pinned by pogo default-migration guard (mg-7d95) — keeps this existing install

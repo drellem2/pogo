@@ -271,7 +271,7 @@ func TestHandleStart_MayorFallbackNudge(t *testing.T) {
 	defer reg.StopAll(2 * time.Second)
 	reg.SetCommandConfig(catCommandConfig{})
 
-	a := startAgentViaAPI(t, reg, "mayor")
+	a := startAgentViaAPI(t, reg, "ringmaster")
 	want := "You are now running. Begin your coordination loop."
 	if a.InitialNudge != want {
 		t.Errorf("InitialNudge = %q, want %q", a.InitialNudge, want)

@@ -7,15 +7,16 @@ import (
 	"strings"
 )
 
-// DefaultWorker is the worker (polecat) agent's DISPLAY name used when [agents]
-// worker is not configured. Keeping this "polecat" means existing deployments
-// read the same role name with no config change.
+// DefaultWorker is the worker agent's DISPLAY name used when [agents]
+// worker is not configured. Existing deployments are unaffected by a change to
+// this value: the default-migration guard below pins their historical worker
+// name into config.toml, so this flip only sets the default for fresh installs.
 //
 // Unlike DefaultCoordinator, this is a display value only: the worker's
 // load-bearing identifiers (branch prefix polecat-, the ~/.pogo/polecats dir,
 // the "polecat" agent-type/registry key, the cat- event-actor prefix, and
-// POGO_ROLE=polecat) are frozen and NOT driven by this constant. See mg-6a24.
-const DefaultWorker = "polecat"
+// POGO_ROLE=polecat) are frozen and NOT driven by this constant. See mg-6a24, mg-ce47.
+const DefaultWorker = "pogocat"
 
 // legacyCoordinatorDefault and legacyWorkerDefault are the FROZEN historical
 // role names the migration guard pins into existing installs. They are

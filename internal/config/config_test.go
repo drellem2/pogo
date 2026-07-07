@@ -873,8 +873,8 @@ func TestCoordinatorDefault(t *testing.T) {
 	if cfg.Agents.Coordinator != DefaultCoordinator {
 		t.Errorf("coordinator = %q, want %q", cfg.Agents.Coordinator, DefaultCoordinator)
 	}
-	if got := cfg.Agents.CoordinatorName(); got != "mayor" {
-		t.Errorf("CoordinatorName() = %q, want mayor", got)
+	if got := cfg.Agents.CoordinatorName(); got != "ringmaster" {
+		t.Errorf("CoordinatorName() = %q, want ringmaster", got)
 	}
 }
 
@@ -941,8 +941,8 @@ func TestWorkerDefault(t *testing.T) {
 	if cfg.Agents.Worker != DefaultWorker {
 		t.Errorf("worker = %q, want %q", cfg.Agents.Worker, DefaultWorker)
 	}
-	if got := cfg.Agents.WorkerName(); got != "polecat" {
-		t.Errorf("WorkerName() = %q, want polecat", got)
+	if got := cfg.Agents.WorkerName(); got != "pogocat" {
+		t.Errorf("WorkerName() = %q, want pogocat", got)
 	}
 }
 

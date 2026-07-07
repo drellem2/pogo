@@ -256,7 +256,7 @@ func TestShippedBuildPRTemplateProtocol(t *testing.T) {
 		"gh pr comment",
 		// The no-self-submit rule must be stated explicitly.
 		"Never run `pogo refinery submit` yourself",
-		"Refinery submission happens later, by the mayor",
+		"Refinery submission happens later, by the ringmaster",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("expanded polecat-build-pr.md: expected %q", want)
@@ -2938,8 +2938,10 @@ func TestLoadDropInsIgnoresNonMarkdown(t *testing.T) {
 }
 
 // TestSynthesizePromptMayorAppendsDropIns confirms that `pogo agent prompt
-// show mayor` (the show-side caller) renders the mayor body plus any
-// dropins/mayor/*.md fragments, frontmatter stripped.
+// show <coordinator>` (the show-side caller) renders the coordinator body plus
+// any dropins/<coordinator>/*.md fragments, frontmatter stripped. The prompt
+// file stays mayor.md, but it resolves under the coordinator's display name
+// (default "ringmaster"), and drop-ins are keyed by that name.
 func TestSynthesizePromptMayorAppendsDropIns(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	if err := InitPromptDirs(); err != nil {
@@ -2949,7 +2951,7 @@ func TestSynthesizePromptMayorAppendsDropIns(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(PromptDir(), "mayor.md"), []byte(mayorBody), 0644); err != nil {
 		t.Fatal(err)
 	}
-	dropDir := DropInDir("mayor")
+	dropDir := DropInDir("ringmaster")
 	if err := os.MkdirAll(dropDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -2957,7 +2959,7 @@ func TestSynthesizePromptMayorAppendsDropIns(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := SynthesizePrompt("mayor", PreviewTemplateVars())
+	got, err := SynthesizePrompt("ringmaster", PreviewTemplateVars())
 	if err != nil {
 		t.Fatalf("SynthesizePrompt: %v", err)
 	}
