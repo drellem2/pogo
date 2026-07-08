@@ -295,3 +295,31 @@ Each uses the standard `cur/new/tmp` convention, so delivery is an atomic
 rename — no locks, no server. Send with `mg mail send <to> --from=<id> ...` and
 read with `mg mail list <id>`. See [ARCHITECTURE.md](../ARCHITECTURE.md) for the
 filesystem-coordination model.
+
+## State directory (`POGO_HOME`) and running multiple instances
+
+Every pogo state path derives from a single root: `$POGO_HOME`, or `~/.pogo`
+when the variable is unset (`PogoHome()` in `internal/config/config.go`). That
+one function seeds `refinery-state.json`, `schedules.json`, `agents/`,
+`polecats/`, `events.log`, `recovery/`, `projects.json`, and `plugin/` — so the
+root you pick determines where *all* daemon state lives.
+
+**Running N pogo instances requires a distinct `POGO_HOME` per instance.**
+Because every state path hangs off `PogoHome()`, overriding `POGO_HOME` (or
+`HOME`, which supplies the default) fully isolates a daemon's state (mg-3dc3):
+two daemons with different roots share nothing.
+
+**Sharing one `POGO_HOME` shares *all* state — by construction, not by leak.**
+If two instances resolve to the same root, they read and write the same
+refinery queue, the same scheduler entries, the same `agents/` and Maildir. This
+is not a bug or a state leak; it is the direct consequence of every path deriving
+from the shared root. Refinery counts, schedules, and mailboxes co-mingle because
+they are literally the same files. If you want isolation, give each instance its
+own `POGO_HOME`; if you want a single shared fleet, point them at the same one on
+purpose.
+
+One caveat on the default: an old shell integration exported `POGO_HOME=$HOME`,
+and pogo normalizes a `POGO_HOME` equal to the user's home directory to
+`$HOME/.pogo` (the documented default) rather than scattering state across the
+home root. See the `PogoHome()` doc comment for the full rationale, including why
+it never falls back to `os.TempDir()`.

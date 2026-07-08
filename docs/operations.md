@@ -140,6 +140,24 @@ Since 2026-07-05 (mg-f7a3), `main` in **drellem2/pogo** (ruleset `main-require-p
 
 Inspect or modify with `gh api repos/drellem2/<repo>/rulesets` (effective rules: `gh api repos/drellem2/<repo>/rules/branches/main`). In an org deployment the bypass actor becomes a dedicated refinery GitHub App; the ruleset is otherwise identical.
 
+## Running multiple instances
+
+If you run more than one pogo instance on a host — a production fleet plus a
+sandbox for verification, say — **give each instance its own `POGO_HOME`.** Every
+pogo state path (the refinery queue, `schedules.json`, `agents/`, the Maildir,
+`events.log`) derives from `PogoHome()` (`internal/config/config.go`), which
+resolves to `$POGO_HOME` or `~/.pogo`. Distinct roots isolate distinct daemons
+completely (mg-3dc3).
+
+**Two instances sharing a `POGO_HOME` share all of that state — by construction.**
+Refinery counts, scheduler entries, registered agents, and mailboxes co-mingle
+because they are the same files on disk, not because state leaks across a
+boundary. If you see a second instance picking up the first's schedules or
+refinery work, check whether both resolve to the same root before treating it as
+a bug. To sandbox a daemon for verification without touching the live fleet, set
+`POGO_HOME` (or `HOME`) to a scratch directory; see
+[docs/CONFIGURATION.md](CONFIGURATION.md#state-directory-pogo_home-and-running-multiple-instances).
+
 ## See also
 
 - `scripts/launchd/README.md` — install, uninstall, and plist contracts for both `com.pogo.daemon` and `com.pogo.recovery`. Operational commands (load/unload/kickstart/inspect logs) live there.
