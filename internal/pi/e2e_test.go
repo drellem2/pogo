@@ -320,13 +320,44 @@ func TestPiEndToEnd(t *testing.T) {
 
 	// Acceptance (NudgeProfile calibration): a settled pi composer emits zero
 	// PTY output — the buffer must stop growing once the turn is done.
-	before := len(a.RecentOutput(1 << 20))
-	time.Sleep(4 * time.Second)
-	after := len(a.RecentOutput(1 << 20))
-	t.Logf("idle check: PTY buffer %d -> %d bytes over 4s", before, after)
-	if after-before > 4096 {
-		t.Errorf("pi composer did not settle — buffer grew %d bytes in 4s idle",
-			after-before)
+	//
+	// This is polled for a quiet WINDOW rather than sampled once, because a
+	// single fixed sample is a CI flake source (this de-flake, mg-8cc0). pi-tui
+	// is a differential renderer: after PONG first renders it can still emit a
+	// delayed full-screen repaint (a "turn complete" state flip, spinner
+	// teardown) — and the calibration addendum (gh #26 in
+	// docs/investigations/pi-nudge-calibration.md) records that its writes are
+	// *not* reliably zero under load. A 200×50 repaint alone is ~10–20 KB, so a
+	// fixed 4s window that happened to straddle one read tens of KB of growth
+	// and failed spuriously on ~1/day of main runs, going green on the next
+	// commit. A settled composer stays silent once it settles, so a quiet
+	// window always arrives unless pi never settles at all — which is the real
+	// regression this still guards against.
+	const (
+		quietWindow  = 2 * time.Second
+		quietBudget  = 2048 // ~1 KB/s: far under a full repaint, far over a stray cursor-blink escape
+		settleBudget = 20 * time.Second
+	)
+	settleDeadline := time.Now().Add(settleBudget)
+	settled := false
+	var growth int
+	for {
+		before := len(a.RecentOutput(1 << 20))
+		time.Sleep(quietWindow)
+		growth = len(a.RecentOutput(1<<20)) - before
+		if growth <= quietBudget {
+			settled = true
+			break
+		}
+		if !time.Now().Before(settleDeadline) {
+			break
+		}
+	}
+	t.Logf("idle check: composer settled=%v (last %s window grew %d bytes)",
+		settled, quietWindow, growth)
+	if !settled {
+		t.Errorf("pi composer never settled — buffer kept growing >%d bytes per "+
+			"%s across %s of idle polling", quietBudget, quietWindow, settleBudget)
 	}
 
 	// Acceptance (nudge dialect, mid-session): Agent.Nudge into the settled

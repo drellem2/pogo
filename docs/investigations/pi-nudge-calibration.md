@@ -223,7 +223,9 @@ to the spawn argv (gh #26) and starts a turn; the persona from
 `--append-system-prompt` reaches the request's system message and the task
 the user message (byte-level, via the mock provider); the repo's own AGENTS.md survives untouched and still reaches
 the request (the mg-9829 collision regression); the reply renders; the
-composer settles; a mid-session `Agent.Nudge` triggers a second turn; the
+composer settles (polled for a quiet PTY window, not a single fixed sample —
+the differential renderer's post-turn repaint made a one-shot sample a CI
+flake, mg-8cc0); a mid-session `Agent.Nudge` triggers a second turn; the
 registry shuts the agent down cleanly. `TestPiHeadless` runs the same
 provider flags in `--print --mode json` form (mg-3e7c).
 
