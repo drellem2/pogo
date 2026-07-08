@@ -100,6 +100,12 @@ pogod only installs default prompts and auto-starts crew agents when a
 configured daemon can also opt out with `[agents] autostart = false` (or
 `POGO_AGENT_AUTOSTART=false`).
 
+## Community integrations
+
+Integrations built by the community. Open a PR to add yours — one bullet per integration.
+
+- [pogo-slack-bridge](https://github.com/bath/pogo-slack-bridge) — a Slack ↔ pogo bridge for driving pogo from Slack.
+
 ## License
 
 - **Apache 2.0** — CLI tools (`pogo`, `lsp`, `pose`), editor plugins, shell and tmux integrations. See [LICENSE-APACHE](LICENSE-APACHE).
