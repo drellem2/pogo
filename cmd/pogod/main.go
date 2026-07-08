@@ -599,7 +599,19 @@ Flags:
 	}
 
 	if err = lock.TryLock(); err != nil {
-		fmt.Printf("Cannot get lock %q, reason: %v", lock, err)
+		// Only one pogod may own a POGO_HOME at a time. Name the PID that
+		// currently holds the lock so the operator can find the live daemon.
+		holder := "an unknown pid"
+		if p, gerr := lock.GetOwner(); gerr == nil {
+			holder = fmt.Sprintf("pid %d", p.Pid)
+		}
+		// Shared refinery/queue counts across host + containerized clients are
+		// by-design shared-POGO_HOME state, not two live daemons (which cannot
+		// coexist — this path hard-exits). See docs/CONFIGURATION.md (mg-f227).
+		fmt.Printf("Cannot acquire pogod lock %s: held by %s (reason: %v).\n"+
+			"A single pogod owns each POGO_HOME; its refinery/queue state is "+
+			"shared by design across every client on this POGO_HOME (mg-f227).\n",
+			config.LockfilePath(), holder, err)
 		os.Exit(1)
 	}
 
