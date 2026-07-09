@@ -84,6 +84,28 @@ otherwise; reserve major for breaking CLI changes. Prereleases use a
 This bumps `internal/version/version.go`, rolls `CHANGELOG.md`, commits, tags,
 and pushes. The release workflow does the rest.
 
+Two things the script does **not** do, which the releaser must:
+
+- **Run the upgrade smoke first if the release changes a role-name default.**
+  `./scripts/upgrade-smoke.sh` seeds a config from the previous release, upgrades
+  to the working tree, and asserts that an existing install keeps its role names
+  across both pin sites (`pogo install` and pogod boot) while a fresh install
+  adopts the new ones. It is a **hard publish gate**: a red run means do not tag.
+  The guard it protects is unrecoverable after the fact — an install whose role
+  names were never pinned cannot have them recovered.
+- **Maintain the link-reference block at the bottom of `CHANGELOG.md`.**
+  `update_changelog()` only inserts the version heading; the `[X.Y.Z]:` compare
+  links are hand-maintained. Each cut adds one line for the new version and
+  repoints `[Unreleased]` at it:
+
+  ```
+  [Unreleased]: https://github.com/drellem2/pogo/compare/vX.Y.Z...HEAD
+  [X.Y.Z]: https://github.com/drellem2/pogo/compare/vW.V.U...vX.Y.Z
+  ```
+
+  Miss it and the new heading renders as literal `[X.Y.Z]` text on GitHub, and
+  `[Unreleased]` keeps claiming the commits you just released.
+
 **Recovery from a failed publish.** If GitHub Actions is wedged or the
 goreleaser step fails, the tag stays in place — re-trigger via
 `workflow_dispatch` on the tagged ref once Actions recovers; goreleaser

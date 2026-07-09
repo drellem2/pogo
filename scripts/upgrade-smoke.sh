@@ -70,14 +70,29 @@ expect_absent() {
     else pass "$1"; fi
 }
 
+# free_port prints a loopback TCP port that nothing is listening on.
+#
+# It deliberately does NOT bind :0. That returns a port from the OS ephemeral
+# range (49152-65535 on macOS), which is exactly the range the kernel hands out
+# to transient outbound connections — so between our close() and the daemon's
+# bind(), an unrelated process can take it. Scanning a fixed range well below
+# the ephemeral one leaves only the (much smaller) window of another smoke run
+# racing us, and PORT_SEQ keeps the phases within one run from colliding.
+PORT_SEQ=0
 free_port() {
-    python3 - <<'PY'
-import socket
-s = socket.socket()
-s.bind(("127.0.0.1", 0))
-print(s.getsockname()[1])
-s.close()
-PY
+    local base=$(( 20000 + (($$ * 7) % 8000) ))
+    local p
+    for _ in $(seq 1 200); do
+        p=$(( base + PORT_SEQ ))
+        PORT_SEQ=$(( PORT_SEQ + 1 ))
+        [ "$p" -gt 29999 ] && { base=20000; PORT_SEQ=0; continue; }
+        if ! lsof -ti "tcp:$p" >/dev/null 2>&1; then
+            printf '%s' "$p"
+            return 0
+        fi
+    done
+    echo "free_port: no free port in 20000-29999" >&2
+    return 1
 }
 
 # new_sandbox <name> — prints the sandbox root. Creates state/, ws/, .config/.
@@ -234,11 +249,14 @@ else
     # make these follow a future default flip instead of catching it.
     expect_contains "B1 boot 1 auto-started coordinator as 'mayor'"   "$LOGS_B" "auto-started mayor"
     expect_absent   "B2 boot 1 did not auto-start 'ringmaster'"       "$LOGS_B" "auto-started ringmaster"
-    expect_absent   "B3 stall watcher not armed on 'ringmaster'"      "$LOGS_B" "stall watcher enabled (agent=ringmaster"
+    # Paired positive/negative: an absence assertion alone also passes when the
+    # watcher never arms at all, or when the log line's format drifts.
+    expect_contains "B3 stall watcher armed on 'mayor'"              "$LOGS_B" "stall watcher enabled (agent=mayor"
+    expect_absent   "B4 stall watcher not armed on 'ringmaster'"     "$LOGS_B" "stall watcher enabled (agent=ringmaster"
 
     CFG_B="$(cat "$SB_B/state/config.toml")"
-    expect_contains "B4 config pinned coordinator = \"mayor\""        "$CFG_B" 'coordinator = "mayor"'
-    expect_contains "B5 config pinned worker = \"polecat\""           "$CFG_B" 'worker = "polecat"'
+    expect_contains "B5 config pinned coordinator = \"mayor\""        "$CFG_B" 'coordinator = "mayor"'
+    expect_contains "B6 config pinned worker = \"polecat\""           "$CFG_B" 'worker = "polecat"'
 fi
 
 # --- Phase C: fresh install + frozen worker identifiers ---------------------
