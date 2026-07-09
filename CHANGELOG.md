@@ -10,7 +10,65 @@ is the curated, human-readable summary kept in sync at each release cut.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-09
+
+Minor release rolling up the 45 feature and fix commits merged since v0.3.0
+(release-prep commits excluded). **Semver rationale:** this is a minor (0.4.0)
+rather than a patch bump because it adds new backwards-compatible capabilities —
+a configurable worker display name, refinery `pr_mode`, the `pogo agent
+park`/`wake` crew-dormancy lifecycle, priority-aware coordinator wake, and three
+new polecat prompt templates for the GitHub-issue workflow. Nothing breaks for an
+existing install. The one change that *could* have broken one — flipping the
+shipped default role names to `ringmaster`/`pogocat` — is guarded: a
+default-migration pin freezes every existing deployment on `mayor`/`polecat`, and
+the new names reach fresh installs only. That guard is enforced at release time
+by a live v0.3.0 → v0.4.0 upgrade smoke (`scripts/upgrade-smoke.sh`, mg-73bf)
+which exercises both pin sites against real binaries and is a hard publish gate.
+
 ### Added
+
+#### Config / role rename
+- **Worker display name is configurable; shipped role defaults flip to
+  `ringmaster` / `pogocat`** (mg-ccec, mg-c4ba, mg-ce47). `[agents] worker`
+  joins `[agents] coordinator` as a display-name seam, and the shipped prompts
+  render both through `{{.Coordinator}}` / `{{.Worker}}` placeholders instead of
+  hard-coded prose. The worker name is **display-only**: every worker is
+  addressed by its own bare name, never by the role word, so the load-bearing
+  identifiers stay frozen at `polecat` no matter what the role is called — the
+  `polecat-` branch prefix, the `~/.pogo/polecats` directory, the `polecat`
+  agent-type/registry key, the `cat-` event-log actor prefix, and
+  `POGO_ROLE=polecat`. A round-trip guard test asserts each of the five
+  (mg-d582), and the literals are centralized in `internal/gitgc` (mg-88fc).
+- **Existing installs keep `mayor` / `polecat` across the flip** (mg-7d95,
+  mg-3f86, mg-bc47). On an *existing* install, `pogo install` and pogod boot pin
+  the current role defaults into `config.toml` the first time they run, so a
+  change to the shipped default names can never silently rename a live
+  deployment's roles. Detection mirrors the signal pogod already trusts: a config
+  file exists, or a stamped prompt lives under `$POGO_HOME/agents/`. Fresh
+  installs (neither signal) are left untouched and adopt the new defaults. The
+  writer is idempotent and append-only — a role key already present is never
+  rewritten, and the rest of `config.toml` is preserved byte-for-byte. The pinned
+  values are frozen historical literals, not the live `Default*` consts, so the
+  flip cannot leak through the guard it is gated on (mg-3f86). Both binaries run
+  the guard **before** they resolve role names (mg-bc47): `config.Load` fills an
+  absent `coordinator` / `worker` from the live defaults, so an upgrading install
+  that pinned after resolving would spend its first process acting on the *new*
+  names — pogod auto-starting a `ringmaster`, arming the stall watcher on it, and
+  addressing coordinator mail to it — while writing `mayor` to disk in the same
+  second.
+
+#### Refinery
+- **`pr_mode`: rebased branches push back so open PRs read as merged**
+  (mg-b828, gh-issue-workflow design §3). With `pr_mode = true` under `[gates]`
+  in `.pogo/refinery.toml` (off by default), `attemptMerge` asks `gh` whether an
+  open PR exists for the branch and, if so, force-pushes the rebased branch back
+  to origin (`--force-with-lease`) after gates pass and before the fast-forward
+  merge push — so GitHub marks the PR **merged** when the tip lands on the
+  target, rather than closing it with its commits silently absorbed. Fail-soft
+  throughout: a `gh` lookup or push-back failure logs and falls through to the
+  normal path (the PR reads closed, the phase-1 status quo).
+
+#### Agent lifecycle
 - **Coordinator priority wake** (gh #61, mg-b1d9). The stall watcher now has a
   priority-aware branch: a **ready, high-priority** `available` work item
   assigned to (or unassigned and pickup-expected by) the watched coordinator
@@ -26,22 +84,17 @@ is the curated, human-readable summary kept in sync at each release cut.
   `fast_priorities` (default `["high"]`). The wake policy lives entirely in
   pogod, keyed off the generic `WorkItem.Priority` field — no `mg` flag, no
   mg→pogod event. See [docs/design/priority-wake-design.md](docs/design/priority-wake-design.md).
-- **Install default-migration guard** (mg-7d95, flavor-rename mechanism). On an
-  *existing* install, `pogo install` and pogod boot now pin the current role
-  defaults (`coordinator = "mayor"`, `worker = "polecat"`) into `config.toml`
-  the first time they run, so a later change to the shipped default names can
-  never silently rename a live deployment's roles. Detection mirrors the signal
-  pogod already trusts: a config file exists, or a stamped prompt lives under
-  `$POGO_HOME/agents/`. Fresh installs (neither signal) are left untouched and
-  adopt the new defaults. The writer is idempotent and append-only — a role key
-  already present is never rewritten, and the rest of `config.toml` is preserved
-  byte-for-byte. Generic over all `[agents]` role keys; a hard prerequisite for
-  the gated default-name flip. Both binaries run the guard **before** they
-  resolve role names (mg-bc47): `config.Load` fills an absent `coordinator` /
-  `worker` from the live defaults, so an upgrading install that pinned after
-  resolving would spend its first process acting on the *new* names — pogod
-  auto-starting a `ringmaster`, arming the stall watcher on it, and addressing
-  coordinator mail to it — while writing `mayor` to disk in the same second.
+- **`pogo agent park` / `pogo agent wake`: supported crew dormancy** (mg-41e1,
+  design mg-88a8). `park` persists a flag at `~/.pogo/agents/<name>/.parked`
+  *before* stopping the agent — so the `restart_on_crash` respawn can never
+  win the race — removes the agent's pogod schedules (recording them in the
+  park file for restore), and stops the process. Parked agents survive pogod
+  restarts (auto-start skips them regardless of `auto_start`), report
+  `status=parked` in `pogo agent list` so the coordinator's stall-watch can skip
+  them mechanically, and are refused by `pogo agent start` (which points at
+  `wake`). `wake` starts the agent, restores the recorded schedules, and
+  clears the flag. Replaces the interim three-step pattern (stub flag edit +
+  schedule removal + stand-down nudge).
 - **Usage-limit visibility + recovery** (mg-7ffa, gh #45). pogod's modal
   watcher now recognizes a provider usage-limit wedge as a distinct, observable
   condition instead of a silent stall. When the rate-limit-options modal stays
@@ -57,6 +110,8 @@ is the curated, human-readable summary kept in sync at each release cut.
   [docs/operations.md](docs/operations.md#recovering-from-a-usage-limit-episode);
   event catalog in [docs/event-log.md](docs/event-log.md). Deferred (not built):
   auto-resume of waiting agents, a `pogo usage` command, provider quota probes.
+
+#### Prompt templates (GitHub-issue workflow)
 - **`polecat-build-pr.md` template: issue-track build variant** (mg-9675,
   gh-issue-workflow design §3/§6). Shipped polecat template for work that
   answers a GitHub issue: after commit + branch push the builder opens a PR
@@ -68,17 +123,23 @@ is the curated, human-readable summary kept in sync at each release cut.
   coordinator, when the review loop passes — the builder never self-submits.
   `polecat.md` is unchanged for internal mg work (two audiences, two
   protocols — separate template rather than a conditional).
-- **`pogo agent park` / `pogo agent wake`: supported crew dormancy** (mg-41e1,
-  design mg-88a8). `park` persists a flag at `~/.pogo/agents/<name>/.parked`
-  *before* stopping the agent — so the `restart_on_crash` respawn can never
-  win the race — removes the agent's pogod schedules (recording them in the
-  park file for restore), and stops the process. Parked agents survive pogod
-  restarts (auto-start skips them regardless of `auto_start`), report
-  `status=parked` in `pogo agent list` so the mayor's stall-watch can skip
-  them mechanically, and are refused by `pogo agent start` (which points at
-  `wake`). `wake` starts the agent, restores the recorded schedules, and
-  clears the flag. Replaces the interim three-step pattern (stub flag edit +
-  schedule removal + stand-down nudge).
+- **`polecat-triage.md` template: investigate + recommend for GH issues**
+  (mg-be91). Shipped template for the triage stage of the issue workflow: the
+  polecat reproduces the report, forms an implement / decline / need-info
+  recommendation, and hands it to the PM and the human gate rather than writing
+  code. Its duplicate check covers **archived** mg items too, so an issue that
+  restates already-closed work is caught instead of re-dispatched.
+- **`polecat-review.md` template: QA + architecture + design-faithfulness PR
+  review** (mg-546c). Shipped template for the reviewer polecat that drives the
+  modify↔review loop against a builder's PR — findings flow builder↔reviewer
+  directly, verdicts (pass, fail-final, escalation) flow to the coordinator, and
+  the reviewer escalates after three rounds without a pass. The pm-pogo prompt
+  gains a matching sign-off standard: an outward-facing PR comment and an
+  advisory array in the pass verdict.
+- **Coordinator GH-issue workflow playbook** (mg-841a). The coordinator prompt
+  gains the issue-track state machine — triage → human gate → build → review →
+  coordinator-submitted merge — with the human GO/NO-GO gate made explicit, so
+  the coordinator never dispatches a build off an unapproved triage.
 
 ### Fixed
 - **Polecat mail-check auto-registered at spawn** (mg-e633). `spawn-polecat`
@@ -93,18 +154,47 @@ is the curated, human-readable summary kept in sync at each release cut.
   polecat templates' step-2 now addresses `$POGO_AGENT_NAME` (matching the
   spawn-registered entry) so re-running it is an idempotent confirm, not a
   duplicate.
+- **Merged polecats are reaped by work-item id, not just name** (mg-a58e,
+  gh #48). A polecat registers under its bare id (`d087`) while the merge request
+  it authors carries the full work-item id (`mg-d087`), so the post-merge reap and
+  the worktree-unlink hook both missed it — the merged polecat lingered, holding a
+  slot and a live process. Both sites now resolve against either identity.
+- **The indexer no longer reads TCC-protected home directories** (mg-5cd6).
+  pogod's timer indexer walks every registered repo each tick, and repos
+  auto-register with an allow-all `index_roots` default — so a repo under
+  `~/Desktop`, `~/Documents`, `~/Downloads`, `~/Pictures`, `~/Movies` or
+  `~/Library` triggered a macOS permission popup every cycle. The protected-dir /
+  `$HOME` guard lost in the FSEvents→timer-poller swap is restored.
+- **`pogo attach`: Ctrl-\ detach actually detaches** (mg-5be3). Attach has
+  advertised Ctrl-\ since Phase 0, but `term.MakeRaw` clears `ISIG`, so the byte
+  never raised `SIGQUIT` — it was forwarded into the agent's PTY, landing inside
+  the inner TUI and stranding the user. The client now scans stdin for the escape
+  byte, the standard raw-mode detach used by `docker attach`, `ssh ~.` and tmux.
+- **`pogo status --live` no longer flickers** (gh #43) and no longer panics on
+  `--interval 0` (mg-c167). Live mode cleared the whole screen every tick before
+  re-rendering; it now repaints in place. A non-positive interval is validated
+  instead of reaching `time.NewTicker`, and `--live --json` is documented.
+- Polecat prompt templates address mail `--from` the agent name rather than the
+  work-item id, matching the identity pogod delivers to (mg-97c9).
 - PM-tier `extends` stubs: a stub-level `restart_on_crash` override is now
   honored — previously the flag was resolved from the synthesized prompt,
   whose frontmatter comes from the shared template (always `true` for
   pm-template.md), so the operator-editable stub was silently ignored
   (mg-41e1).
+- pogod's singleton lock-failure message now names the holding PID and
+  cross-references a shared `POGO_HOME` as the likely cause (mg-98e8).
 
 ### Changed
-- Crew prompt templates (mayor, pm-template, doctor) now include an
+- Crew prompt templates (coordinator, pm-template, doctor) now include an
   act-then-mark mail-discipline section: enumerate all unread messages first,
   dispose of each explicitly before ending the cycle, and reconcile after an
   interrupted batch — prevents the silent read-then-drop of the mg-f73e
   incident (mg-b179).
+- Public docs are written in terms of the coordinator role rather than the
+  `mayor` literal, ahead of the default-name flip (mg-e726). `docs/` also gains
+  the multi-instance `POGO_HOME` isolation expectation (mg-f227), a pointer to
+  `mg spend` for token usage (mg-5f94), and a Community integrations section
+  linking pogo-slack-bridge (mg-ba1e).
 
 ## [0.3.0] - 2026-07-04
 
