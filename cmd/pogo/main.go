@@ -74,14 +74,17 @@ func showRawPromptFile(name string, jsonOut bool) {
 
 func main() {
 
-	// Resolve the coordinator agent's name ([agents] coordinator, default
-	// "mayor") and the worker role's display name ([agents] worker, default
-	// "polecat") before any prompt resolution or synthesis happens client-side
-	// (prompt show/list run in this process, not in pogod). The worker name is
-	// display-only — it feeds prompt prose, never an identifier.
-	cliCfg := config.Load()
-	agent.SetCoordinatorName(cliCfg.Agents.Coordinator)
-	agent.SetWorkerName(cliCfg.Agents.Worker)
+	// Resolve the coordinator agent's name ([agents] coordinator) and the worker
+	// role's display name ([agents] worker) before any prompt resolution or
+	// synthesis happens client-side (prompt show/list run in this process, not
+	// in pogod). The worker name is display-only — it feeds prompt prose, never
+	// an identifier.
+	//
+	// On an existing install whose config.toml predates the role keys, these
+	// names come from the live Default* consts until the migration guard pins
+	// the frozen legacy ones. `pogo install` runs that guard and re-resolves
+	// before it synthesizes prompts; see pinAndResolveRoles (mg-bc47).
+	resolveRoles()
 
 	var jsonOutput bool
 
@@ -1495,20 +1498,22 @@ that copy and overwrite without a safety net.`,
 			// stamped prompts and read as existing (see PinRoleDefaultsIfExistingInstall).
 			existingInstall := config.IsExistingInstall()
 
+			// Step 2b: On an existing install, pin the current role-name defaults
+			// into config.toml so a default-name flip cannot silently rename this
+			// deployment's coordinator/worker, and re-resolve this process's role
+			// names from the pinned file. Both must happen before the prompts
+			// below are synthesized, which expand the role names into prose.
+			// Fresh installs are a no-op and adopt the new defaults. Non-fatal:
+			// a pin failure must not break `pogo install`.
+			pinRes, pinErr := pinAndResolveRoles(existingInstall)
+			if pinErr != nil && !jsonOutput {
+				fmt.Fprintf(os.Stderr, "  ⚠ could not pin role defaults: %v\n", pinErr)
+			}
+
 			// Step 3: Install prompts
 			result, err := agent.InstallPrompts(agent.InstallOpts{Force: installForceFlag, NoBackup: installNoBackupFlag})
 			if err != nil {
 				cli.ExitWithError(jsonOutput, "failed to install prompts: "+err.Error(), cli.ExitError)
-			}
-
-			// Step 3b: On an existing install, pin the current role-name defaults
-			// into config.toml so a future default-name flip cannot silently
-			// rename this deployment's coordinator/worker. Fresh installs are a
-			// no-op and adopt the new defaults. Non-fatal: a pin failure must not
-			// break `pogo install`.
-			pinRes, pinErr := config.PinRoleDefaultsIfExistingInstall(existingInstall)
-			if pinErr != nil && !jsonOutput {
-				fmt.Fprintf(os.Stderr, "  ⚠ could not pin role defaults: %v\n", pinErr)
 			}
 
 			if jsonOutput {

@@ -192,6 +192,35 @@ func PinRoleDefaultsIfExistingInstall(existing bool) (PinResult, error) {
 	return PinResult{Pinned: pinned, Path: path}, nil
 }
 
+// PinAndLoad runs the default-migration guard and then re-reads config, so the
+// caller resolves role names from the PINNED values instead of the live
+// Default* consts. It exists because the guard being correct is not enough: the
+// binaries must also run it before they resolve a role name (mg-bc47).
+//
+// Load fills an empty [agents] coordinator/worker with DefaultCoordinator /
+// DefaultWorker. On the first process of a build that flipped those consts
+// (mg-ce47), an existing install whose config.toml predates the role keys
+// therefore reads the NEW names — and, unless the pin has already rewritten the
+// file, keeps them for that process's whole lifetime while writing the OLD ones
+// to disk. Pinning first and re-loading collapses that window: the guard's
+// pinned keys are present by the time Load runs, so the returned Config carries
+// the frozen legacy names.
+//
+// The reload is unconditional. An empty PinResult.Pinned does not mean "nothing
+// changed on disk" — another process (pogod, started by `pogo install`) may
+// have pinned the file after this process's startup Load, which leaves the keys
+// present, the pin a no-op, and this process still holding the stale names.
+//
+// existing is the IsExistingInstall determination, passed in for the same
+// reason PinRoleDefaultsIfExistingInstall takes it: callers that later run
+// InstallPrompts must snapshot it first. Callers should pass whatever signal
+// they already trust — pogod passes cfg.Source != "", deliberately not
+// IsExistingInstall (see cmd/pogod/main.go).
+func PinAndLoad(existing bool) (*Config, PinResult, error) {
+	res, err := PinRoleDefaultsIfExistingInstall(existing)
+	return Load(), res, err
+}
+
 // agentsSectionKeys returns the set of keys already present under the top-level
 // [agents] table in content. Sub-tables like [agents.crew] are deliberately
 // excluded — their keys are a different namespace. Section detection matches

@@ -302,3 +302,79 @@ func TestPinRoleDefaults_FrozenLiterals(t *testing.T) {
 		t.Errorf("guard did not pin the frozen worker literal:\n%s", got)
 	}
 }
+
+// PinAndLoad must return a Config carrying the PINNED role names, not the live
+// Default* consts. This is the seam the binaries call: the guard being correct
+// buys nothing if the process resolves its role names before running it
+// (mg-bc47).
+func TestPinAndLoad_ResolvesFromPinnedValues(t *testing.T) {
+	_, path := sandbox(t)
+	// A v0.3.0-era config: [agents] exists but never carried role keys.
+	writeConfig(t, path, "[agents]\nautostart = false\n")
+
+	// Precondition: a plain Load on this config resolves the NEW defaults —
+	// that is exactly the trap PinAndLoad exists to close.
+	if got := Load().Agents.Coordinator; got != DefaultCoordinator {
+		t.Fatalf("precondition: Load() coordinator = %q, want the live default %q", got, DefaultCoordinator)
+	}
+
+	cfg, res, err := PinAndLoad(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Pinned) != 2 {
+		t.Errorf("Pinned = %v, want both role keys", res.Pinned)
+	}
+	// Bare literals: comparing against Default* would make this follow a flip.
+	if cfg.Agents.Coordinator != "mayor" {
+		t.Errorf("PinAndLoad coordinator = %q, want %q", cfg.Agents.Coordinator, "mayor")
+	}
+	if cfg.Agents.Worker != "polecat" {
+		t.Errorf("PinAndLoad worker = %q, want %q", cfg.Agents.Worker, "polecat")
+	}
+	// The stall watcher follows the coordinator when unset, so it must follow
+	// the pinned name too — pogod arms it straight off this field.
+	if cfg.StallWatch.Agent != "mayor" {
+		t.Errorf("PinAndLoad stall_watch agent = %q, want %q", cfg.StallWatch.Agent, "mayor")
+	}
+}
+
+// A second process (pogod, started by `pogo install`) may pin the file between
+// our startup Load and our own pin call. The pin is then a no-op — Pinned is
+// empty — but the caller still holds the stale names, so PinAndLoad must reload
+// unconditionally rather than short-circuiting on an empty PinResult.
+func TestPinAndLoad_ReloadsWhenAlreadyPinned(t *testing.T) {
+	_, path := sandbox(t)
+	writeConfig(t, path, "[agents]\ncoordinator = \"mayor\"\nworker = \"polecat\"\n")
+
+	cfg, res, err := PinAndLoad(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Pinned) != 0 {
+		t.Errorf("Pinned = %v, want nothing (keys already present)", res.Pinned)
+	}
+	if cfg.Agents.Coordinator != "mayor" {
+		t.Errorf("coordinator = %q, want the already-pinned %q", cfg.Agents.Coordinator, "mayor")
+	}
+}
+
+// A fresh install must adopt the new defaults: PinAndLoad neither writes a
+// config file nor rewrites the resolved names.
+func TestPinAndLoad_FreshInstallAdoptsNewDefaults(t *testing.T) {
+	_, path := sandbox(t)
+
+	cfg, res, err := PinAndLoad(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Pinned) != 0 {
+		t.Errorf("Pinned = %v, want nothing on a fresh install", res.Pinned)
+	}
+	if cfg.Agents.Coordinator != DefaultCoordinator {
+		t.Errorf("coordinator = %q, want the live default %q", cfg.Agents.Coordinator, DefaultCoordinator)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("fresh install wrote %s; the guard must be a no-op", path)
+	}
+}

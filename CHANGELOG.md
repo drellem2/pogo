@@ -36,7 +36,12 @@ is the curated, human-readable summary kept in sync at each release cut.
   adopt the new defaults. The writer is idempotent and append-only — a role key
   already present is never rewritten, and the rest of `config.toml` is preserved
   byte-for-byte. Generic over all `[agents]` role keys; a hard prerequisite for
-  the gated default-name flip.
+  the gated default-name flip. Both binaries run the guard **before** they
+  resolve role names (mg-bc47): `config.Load` fills an absent `coordinator` /
+  `worker` from the live defaults, so an upgrading install that pinned after
+  resolving would spend its first process acting on the *new* names — pogod
+  auto-starting a `ringmaster`, arming the stall watcher on it, and addressing
+  coordinator mail to it — while writing `mayor` to disk in the same second.
 - **Usage-limit visibility + recovery** (mg-7ffa, gh #45). pogod's modal
   watcher now recognizes a provider usage-limit wedge as a distinct, observable
   condition instead of a silent stall. When the rate-limit-options modal stays

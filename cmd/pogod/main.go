@@ -634,6 +634,19 @@ Flags:
 	// Load config early so we can use it for agent command setup
 	cfg := config.Load()
 
+	// Pin the frozen legacy role names BEFORE anything reads a role name off
+	// cfg (mg-bc47). The guard used to run much further down, next to the
+	// prompt refresh — correct logic, too late: config.Load fills an empty
+	// [agents] coordinator/worker with the LIVE Default* consts, so the first
+	// boot of a build that flipped those defaults (mg-ce47) resolved the NEW
+	// names and acted on them — auto-started a coordinator named "ringmaster",
+	// armed the stall watcher on it, addressed refinery mail to its mailbox —
+	// in the same second it wrote "mayor" into config.toml. It self-healed on
+	// the next restart, leaving boot 1's coordinator a stray agent with an
+	// orphaned mailbox. Pinning here and re-loading means boot 1 already sees
+	// the pinned names.
+	cfg = pinAndResolveRoles(cfg)
+
 	// Second, config-aware PATH repair pass: [agents] extra_path lets a
 	// deployment point pogod at harness runtimes the automatic probe in
 	// pathenv.Ensure misses (gh #25). Runs before any agent spawns.
@@ -648,14 +661,8 @@ Flags:
 	// Configure agent command templates and the harness providers.
 	agentRegistry.SetCommandConfig(&cfg.Agents)
 
-	// Resolve the coordinator agent's name ([agents] coordinator, default
-	// "mayor") before any prompt synthesis or autostart happens — it decides
-	// which agent name maps to mayor.md and what prompts call the role.
-	agent.SetCoordinatorName(cfg.Agents.Coordinator)
-	// Resolve the worker role's display name ([agents] worker, default
-	// "polecat") alongside it. Display-only: it feeds prompt prose, never a
-	// mailbox, schedule id, or agent-type key.
-	agent.SetWorkerName(cfg.Agents.Worker)
+	// Role names were resolved by pinAndResolveRoles above, before any consumer
+	// could read one. cfg here is the post-pin config.
 	coordinator := cfg.Agents.CoordinatorName()
 
 	// Register every known harness provider into the registry, then set the
@@ -1047,18 +1054,12 @@ Flags:
 				len(installRes.Installed), len(installRes.Updated), len(installRes.Skipped))
 		}
 
-		// A daemon reaching here has a config file (cfg.Source != ""), so it
-		// is by definition an existing install: pin its current role-name
-		// defaults into config.toml, mirroring how prompt refresh piggybacks
-		// on boot. A plain daemon restart is then enough to protect an
-		// existing deployment before a future default-name flip ships.
-		// Idempotent — a no-op once the keys are present.
-		if pinRes, err := config.PinRoleDefaultsIfExistingInstall(true); err != nil {
-			log.Printf("pogod: role-default pin failed: %v", err)
-		} else if len(pinRes.Pinned) > 0 {
-			log.Printf("pogod: pinned current role default(s) [%s] in %s",
-				strings.Join(pinRes.Pinned, ", "), pinRes.Path)
-		}
+		// The role-default pin used to live here, between prompt refresh and
+		// auto-start. It now runs in pinAndResolveRoles(), immediately after
+		// config.Load() — the prompts refreshed just above are synthesized with
+		// the process-wide role names, and the sweep below auto-starts an agent
+		// named after the coordinator, so both must see the PINNED names, not
+		// the freshly-flipped Default* consts (mg-bc47).
 
 		// Auto-start crew agents whose prompt frontmatter declares auto_start = true.
 		// This replaces the manual `pogo agent start mayor` step on a fresh boot
