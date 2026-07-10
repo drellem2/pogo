@@ -8,7 +8,7 @@ Pogo is a Go project. Binaries live in `cmd/`: `cmd/pogo`, `cmd/lsp`, `cmd/pose`
 git clone https://github.com/drellem2/pogo.git && cd pogo && ./build.sh
 ```
 
-Requires [Go](https://go.dev/dl/) 1.21+.
+Requires [Go](https://go.dev/dl/) 1.25+.
 
 ```sh
 ./build.sh              # Format, test, build all binaries into ./bin

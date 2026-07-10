@@ -29,7 +29,7 @@ What actually happened, including any error messages or unexpected output.
 ## Environment
 
 - OS: [e.g., macOS 14, Ubuntu 24.04]
-- Go version: [e.g., 1.24]
+- Go version: [e.g., 1.25]
 - Pogo version: [e.g., v0.1.0 or commit hash]
 - Shell: [e.g., zsh, bash, fish]
 - Editor/integration: [e.g., Neovim, Emacs, VS Code, tmux]

@@ -5,7 +5,7 @@ Thanks for your interest in contributing to pogo! This guide covers the basics o
 ## Getting Started
 
 1. Fork and clone the repository
-2. Install Go (1.24+)
+2. Install Go (1.25+)
 3. Run `./build.sh` to build and test
 
 ## Development Workflow
