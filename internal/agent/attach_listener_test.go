@@ -10,6 +10,42 @@ import (
 	"time"
 )
 
+// listenerID returns the identity of the agent's current attach listener. A
+// rebind installs a new listener and a new dead channel, so a change here is
+// exactly what "the socket was rebound" means. Inode numbers are not usable for
+// this: Linux happily reuses one across an unlink/rebind of the same path.
+func listenerID(a *Agent) (net.Listener, chan struct{}) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.listener, a.listenerDead
+}
+
+// waitForRebind blocks until the agent's listener identity changes from the one
+// given, reporting whether it did within the timeout.
+func waitForRebind(t *testing.T, a *Agent, oldL net.Listener, timeout time.Duration) bool {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if l, _ := listenerID(a); l != oldL && l != nil {
+			return true
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return false
+}
+
+// ownsSocketPath reports whether the file at socketPath is the one the agent's
+// listener is currently bound to.
+func ownsSocketPath(a *Agent) bool {
+	cur, err := os.Stat(a.SocketPath())
+	if err != nil {
+		return false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.socketInfo != nil && os.SameFile(cur, a.socketInfo)
+}
+
 // Regression coverage for mg-d216: `pogo agent attach mayor` failed with
 // "connect: connection refused" against a socket file that existed, while the
 // mayor process was alive and healthy. On a unix socket that pairing means the
@@ -74,15 +110,21 @@ func TestAttachRebindsAfterAcceptLoopDies(t *testing.T) {
 	if !waitForAttach(t, a, 2*time.Second) {
 		t.Fatal("attach socket not usable before the fault was injected")
 	}
-	before := fileInode(a.SocketPath())
+	oldListener, oldDead := listenerID(a)
 
 	killAcceptLoop(t, a)
 
-	if !waitForAttach(t, a, 3*time.Second) {
+	if !waitForRebind(t, a, oldListener, 3*time.Second) {
+		t.Fatal("supervisor never rebound the listener after the accept loop died")
+	}
+	if _, dead := listenerID(a); dead == oldDead {
+		t.Error("listener rebound but the accept loop was not restarted")
+	}
+	if !waitForAttach(t, a, 2*time.Second) {
 		t.Fatal("attach socket never recovered after the accept loop died")
 	}
-	if after := fileInode(a.SocketPath()); after == 0 || after == before {
-		t.Errorf("expected a freshly bound socket, inode before=%d after=%d", before, after)
+	if !ownsSocketPath(a) {
+		t.Error("agent does not own the socket file at its own path after rebind")
 	}
 }
 
@@ -96,11 +138,15 @@ func TestAttachRebindsAfterSocketFileRemoved(t *testing.T) {
 	if !waitForAttach(t, a, 2*time.Second) {
 		t.Fatal("attach socket not usable before the fault was injected")
 	}
+	oldListener, _ := listenerID(a)
 	if err := os.Remove(a.SocketPath()); err != nil {
 		t.Fatalf("remove socket: %v", err)
 	}
 
-	if !waitForAttach(t, a, 3*time.Second) {
+	if !waitForRebind(t, a, oldListener, 3*time.Second) {
+		t.Fatal("supervisor never rebound the listener after the socket file was removed")
+	}
+	if !waitForAttach(t, a, 2*time.Second) {
 		t.Fatal("attach socket never recovered after the socket file was removed")
 	}
 }
@@ -114,6 +160,8 @@ func TestAttachRebindsAfterSocketFileReplaced(t *testing.T) {
 	if !waitForAttach(t, a, 2*time.Second) {
 		t.Fatal("attach socket not usable before the fault was injected")
 	}
+	oldListener, _ := listenerID(a)
+
 	// Replace the socket file with a foreign listener nobody accepts on.
 	os.Remove(a.SocketPath())
 	foreign, err := net.Listen("unix", a.SocketPath())
@@ -122,26 +170,19 @@ func TestAttachRebindsAfterSocketFileReplaced(t *testing.T) {
 	}
 	disarmUnlinkOnClose(foreign)
 	defer foreign.Close()
-	foreignIno := fileInode(a.SocketPath())
 
 	// The supervisor must notice the path no longer names its own socket and
-	// reclaim it. Inode identity is the assertion — a dial would succeed against
-	// the foreign listener's backlog and prove nothing.
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		cur := fileInode(a.SocketPath())
-		a.mu.Lock()
-		owned := a.socketIno
-		a.mu.Unlock()
-		if cur != 0 && cur != foreignIno && cur == owned {
-			if !waitForAttach(t, a, time.Second) {
-				t.Fatal("reclaimed socket is not attachable")
-			}
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
+	// reclaim it. Listener identity is the assertion — a dial would succeed
+	// against the foreign listener's backlog and prove nothing.
+	if !waitForRebind(t, a, oldListener, 3*time.Second) {
+		t.Fatal("supervisor never reclaimed the replaced socket path")
 	}
-	t.Fatal("supervisor never reclaimed the replaced socket path")
+	if !ownsSocketPath(a) {
+		t.Error("agent does not own the socket file at its own path after reclaim")
+	}
+	if !waitForAttach(t, a, 2*time.Second) {
+		t.Fatal("reclaimed socket is not attachable")
+	}
 }
 
 // TestAttachNotRecreatedAfterCleanup: a retired agent's supervisor must not

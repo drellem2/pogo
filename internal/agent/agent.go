@@ -136,11 +136,14 @@ type Agent struct {
 	socketPath string
 	listener   net.Listener
 
-	// socketIno is the inode of the socket file the current listener is bound
-	// to. The supervisor compares it against whatever now sits at socketPath to
-	// notice a socket that was unlinked underneath us (macOS reaps stale entries
-	// under $TMPDIR) or replaced by a foreign bind. 0 means "unknown, skip it".
-	socketIno uint64
+	// socketInfo identifies the socket file the current listener is bound to.
+	// The supervisor compares it (os.SameFile — device + inode) against whatever
+	// now sits at socketPath, to notice a socket that was unlinked underneath us
+	// (macOS reaps stale entries under $TMPDIR) or replaced by a foreign bind.
+	// nil means "unknown, skip the check". Best-effort: a rebind of the same
+	// path can reuse the inode number, so a replacement can go unnoticed. The
+	// accept-loop and missing-file signals below are exact; this one is a guard.
+	socketInfo os.FileInfo
 
 	// listenerDead is closed by acceptLoop when it stops serving. The supervisor
 	// waits on it so a listener that dies while the process lives gets rebound
@@ -1300,7 +1303,7 @@ func (a *Agent) retireListenerLocked() {
 		a.listener = nil
 	}
 	os.Remove(a.socketPath)
-	a.socketIno = 0
+	a.socketInfo = nil
 }
 
 // attachSupervisorInterval is how often the attach-listener supervisor re-checks
@@ -1352,11 +1355,11 @@ func (a *Agent) bindListenerLocked() error {
 		// A nil listenerDead parks the supervisor's select on that arm, so it
 		// retries on the ticker rather than spinning on a closed channel.
 		a.listenerDead = nil
-		a.socketIno = 0
+		a.socketInfo = nil
 		return fmt.Errorf("listen: %w", err)
 	}
 	a.listener = l
-	a.socketIno = fileInode(a.socketPath)
+	a.socketInfo, _ = os.Stat(a.socketPath)
 
 	// Pass listener and dead channel directly so acceptLoop doesn't access
 	// a.listener, avoiding a nil-pointer race when Cleanup nils it concurrently.
@@ -1475,7 +1478,7 @@ func (a *Agent) superviseListener(stop chan struct{}, interval time.Duration) {
 // file that is actually at socketPath.
 func (a *Agent) attachUnhealthyReason() string {
 	a.mu.Lock()
-	l, dead, ino := a.listener, a.listenerDead, a.socketIno
+	l, dead, want := a.listener, a.listenerDead, a.socketInfo
 	a.mu.Unlock()
 
 	if l == nil || dead == nil {
@@ -1486,13 +1489,14 @@ func (a *Agent) attachUnhealthyReason() string {
 		return "accept_loop_stopped"
 	default:
 	}
-	if ino == 0 {
-		return "" // inode unknown — nothing to compare against
+	if want == nil {
+		return "" // identity unknown — nothing to compare against
 	}
-	switch cur := fileInode(a.socketPath); {
-	case cur == 0:
+	cur, err := os.Stat(a.socketPath)
+	if err != nil {
 		return "socket_file_missing"
-	case cur != ino:
+	}
+	if !os.SameFile(cur, want) {
 		return "socket_file_replaced"
 	}
 	return ""
@@ -1535,19 +1539,6 @@ func disarmUnlinkOnClose(l net.Listener) {
 	if ul, ok := l.(*net.UnixListener); ok {
 		ul.SetUnlinkOnClose(false)
 	}
-}
-
-// fileInode returns the inode of path, or 0 when it cannot be determined.
-func fileInode(path string) uint64 {
-	fi, err := os.Stat(path)
-	if err != nil {
-		return 0
-	}
-	st, ok := fi.Sys().(*syscall.Stat_t)
-	if !ok {
-		return 0
-	}
-	return uint64(st.Ino)
 }
 
 // handleAttach bridges a unix socket connection to the PTY master.
