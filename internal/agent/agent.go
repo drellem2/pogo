@@ -563,10 +563,11 @@ func (r *Registry) commandTemplate(agentType AgentType, p *Provider) string {
 	return ""
 }
 
-// NewRegistry creates an agent registry. socketDir is created if needed.
+// NewRegistry creates an agent registry. socketDir is created if needed, and
+// is refused outright if another user owns it — see secureSocketDir.
 func NewRegistry(socketDir string) (*Registry, error) {
-	if err := os.MkdirAll(socketDir, 0700); err != nil {
-		return nil, fmt.Errorf("create socket dir: %w", err)
+	if err := secureSocketDir(socketDir); err != nil {
+		return nil, err
 	}
 	return &Registry{
 		agents:    make(map[string]*Agent),

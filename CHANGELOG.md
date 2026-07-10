@@ -39,6 +39,18 @@ is the curated, human-readable summary kept in sync at each release cut.
   `os.TempDir()` unchecked, so a `TMPDIR` over ~52 bytes produced a socket directory
   in which no legal agent name could bind. (mg-ef80)
 
+### Security
+
+- **pogod: the agent socket directory must be owned by pogod and mode `0700`.**
+  Attach sockets broker a PTY, and `os.MkdirAll(dir, 0700)` never corrects the mode
+  of a directory that already exists. When `POGO_HOME` and `TMPDIR` are both too
+  deep for `sun_path`, the sockets land in `/tmp/pogo-agents-<hash of POGO_HOME>`;
+  a local user who guessed the root could pre-create that leaf at `0777` — or
+  symlink it somewhere they controlled — and then read or replace an agent's attach
+  socket. pogod now tightens a too-permissive directory of its own, refuses one
+  owned by another user, and never follows a symlink at the leaf; a refusal is a
+  loud startup failure. (mg-f783)
+
 - **`build.sh` no longer overwrites the installed binaries.** The build step ran
   `go install ./cmd/...`, writing to GOBIN (`~/go/bin`). Because `build.sh` also runs
   unattended in agent worktrees and as the refinery's quality gate, every build that

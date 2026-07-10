@@ -343,6 +343,14 @@ with an unusually deep `TMPDIR`; the guarantee it protects is that **the 24-byte
 agent-name budget below holds under every root and every `TMPDIR`**, so a legal
 name never fails to bind.
 
+Wherever the socket directory lands, pogod insists on owning it and on mode
+`0700` before it binds anything inside. An attach socket brokers a PTY, so a
+directory another local user can write to — a hashed leaf pre-created under
+world-writable `/tmp`, or a symlink planted there — would let them read or
+replace the socket. pogod tightens a too-permissive directory of its own,
+refuses one owned by anyone else, and never follows a symlink at the leaf;
+either refusal is a loud exit at startup, not a silent downgrade.
+
 The same limit implies a hard ceiling on **agent names**: pogo reserves 24 bytes
 for `<agent>.sock` when choosing the socket directory (`MaxAgentNameLen`). Real
 names are far shorter — `pm-dealdesk` is 11, a polecat is named for its work
