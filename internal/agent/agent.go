@@ -10,6 +10,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -134,6 +135,28 @@ type Agent struct {
 	// socketPath is the unix domain socket for attach.
 	socketPath string
 	listener   net.Listener
+
+	// socketIno is the inode of the socket file the current listener is bound
+	// to. The supervisor compares it against whatever now sits at socketPath to
+	// notice a socket that was unlinked underneath us (macOS reaps stale entries
+	// under $TMPDIR) or replaced by a foreign bind. 0 means "unknown, skip it".
+	socketIno uint64
+
+	// listenerDead is closed by acceptLoop when it stops serving. The supervisor
+	// waits on it so a listener that dies while the process lives gets rebound
+	// rather than leaving a socket file nobody accepts on (mg-d216).
+	listenerDead chan struct{}
+
+	// attachStop is closed by Cleanup to retire the supervisor. attachStopped
+	// records the same fact under mu so a rebind that is already in flight
+	// aborts instead of recreating a socket for a torn-down agent.
+	attachStop    chan struct{}
+	attachStopped bool
+
+	// supervisorInterval is this agent's copy of attachSupervisorInterval,
+	// snapshotted on the spawning goroutine so a test that retunes the package
+	// default cannot race a running supervisor. Zero means use the default.
+	supervisorInterval time.Duration
 
 	// attachConns tracks active attach/terminal connections for output fanout.
 	// readOutput fans out PTY output to these in addition to the ring buffer.
@@ -1258,41 +1281,273 @@ func (a *Agent) Cleanup() {
 		a.master.Close()
 		a.master = nil
 	}
+	a.retireListenerLocked()
+}
+
+// retireListenerLocked stops the supervisor and tears the listener down. Once it
+// returns, no rebind can resurrect the socket: a supervisor that was already
+// waiting on a.mu sees attachStopped and gives up. Idempotent — Cleanup runs
+// more than once on some paths (stop, then the exit callback).
+func (a *Agent) retireListenerLocked() {
+	if !a.attachStopped {
+		a.attachStopped = true
+		if a.attachStop != nil {
+			close(a.attachStop)
+		}
+	}
 	if a.listener != nil {
 		a.listener.Close()
 		a.listener = nil
 	}
 	os.Remove(a.socketPath)
+	a.socketIno = 0
 }
 
-// startListener creates a unix domain socket for attach connections.
+// attachSupervisorInterval is how often the attach-listener supervisor re-checks
+// the socket file for a vanished or replaced inode. Overridden by tests.
+var attachSupervisorInterval = 30 * time.Second
+
+// Accept-retry backoff bounds for transient errors.
+const (
+	attachAcceptMinBackoff = 5 * time.Millisecond
+	attachAcceptMaxBackoff = time.Second
+)
+
+// startListener creates a unix domain socket for attach connections and starts
+// the supervisor that keeps it usable for the life of the process. The
+// supervisor starts even when the first bind fails, so an agent spawned during
+// fd exhaustion recovers attach once fds free up instead of losing it for good.
 func (a *Agent) startListener() error {
-	// Remove stale socket if it exists
+	a.mu.Lock()
+	if a.attachStop == nil {
+		a.attachStop = make(chan struct{})
+	}
+	if a.supervisorInterval == 0 {
+		a.supervisorInterval = attachSupervisorInterval
+	}
+	stop := a.attachStop
+	interval := a.supervisorInterval
+	err := a.bindListenerLocked()
+	a.mu.Unlock()
+
+	go a.superviseListener(stop, interval)
+	return err
+}
+
+// bindListenerLocked binds socketPath and starts a fresh accept loop, replacing
+// any previous listener. Called with a.mu held.
+func (a *Agent) bindListenerLocked() error {
+	// Drop the old listener without letting it unlink the path we are about to
+	// bind — Go's UnixListener unlinks by path on Close, not by inode.
+	if a.listener != nil {
+		disarmUnlinkOnClose(a.listener)
+		a.listener.Close()
+		a.listener = nil
+	}
+	// Remove the stale socket file: a leftover makes bind fail with EADDRINUSE.
 	os.Remove(a.socketPath)
 
 	l, err := net.Listen("unix", a.socketPath)
 	if err != nil {
+		// A nil listenerDead parks the supervisor's select on that arm, so it
+		// retries on the ticker rather than spinning on a closed channel.
+		a.listenerDead = nil
+		a.socketIno = 0
 		return fmt.Errorf("listen: %w", err)
 	}
 	a.listener = l
+	a.socketIno = fileInode(a.socketPath)
 
-	// Pass listener directly so acceptLoop doesn't access a.listener,
-	// avoiding a nil-pointer race when Cleanup nils it concurrently.
-	go a.acceptLoop(l)
+	// Pass listener and dead channel directly so acceptLoop doesn't access
+	// a.listener, avoiding a nil-pointer race when Cleanup nils it concurrently.
+	dead := make(chan struct{})
+	a.listenerDead = dead
+	go a.acceptLoop(l, dead)
 	return nil
 }
 
 // acceptLoop handles incoming attach connections.
 // Each connection gets bidirectional bridging to the PTY master.
-// Takes the listener as a parameter to avoid racing with Cleanup.
-func (a *Agent) acceptLoop(l net.Listener) {
+// Takes the listener as a parameter to avoid racing with Cleanup, and closes
+// dead on exit so the supervisor learns the socket stopped being served.
+func (a *Agent) acceptLoop(l net.Listener, dead chan struct{}) {
+	defer close(dead)
+
+	var backoff time.Duration
 	for {
 		conn, err := l.Accept()
 		if err != nil {
-			return // listener closed
+			if errors.Is(err, net.ErrClosed) {
+				return // listener closed by Cleanup or a rebind
+			}
+			// A transient accept error must not retire the listener. Under fd
+			// exhaustion Accept returns EMFILE/ENFILE; returning here leaves the
+			// socket file bound with nobody accepting, so the listen backlog
+			// fills and every later attach gets ECONNREFUSED against a perfectly
+			// healthy agent — the mg-d216 symptom.
+			var tmp interface{ Temporary() bool }
+			if errors.As(err, &tmp) && tmp.Temporary() {
+				backoff = nextAcceptBackoff(backoff)
+				log.Printf("agent %s: attach accept: %v — retrying in %s", a.Name, err, backoff)
+				time.Sleep(backoff)
+				continue
+			}
+			log.Printf("agent %s: attach accept stopped: %v", a.Name, err)
+			return // permanent — the supervisor rebinds while the process lives
 		}
+		backoff = 0
 		go a.handleAttach(conn)
 	}
+}
+
+// nextAcceptBackoff doubles the accept-retry delay up to attachAcceptMaxBackoff.
+func nextAcceptBackoff(cur time.Duration) time.Duration {
+	if cur == 0 {
+		return attachAcceptMinBackoff
+	}
+	if next := cur * 2; next < attachAcceptMaxBackoff {
+		return next
+	}
+	return attachAcceptMaxBackoff
+}
+
+// superviseListener ties the attach socket's lifetime to the process's. It
+// repairs the two ways a live agent can end up unattachable (mg-d216):
+//
+//   - The accept loop stopped — a permanent Accept error, or a bind that failed
+//     at spawn — while the process runs on. The socket file lingers, nothing
+//     accepts, and once the backlog fills every attach gets ECONNREFUSED.
+//   - The socket file was unlinked or replaced underneath a live listener (macOS
+//     reaps stale entries under $TMPDIR), leaving the listener bound to an
+//     orphaned inode and attach failing with ENOENT.
+//
+// It exits when the process exits or Cleanup retires the listener, and never
+// recreates a socket for a torn-down agent.
+func (a *Agent) superviseListener(stop chan struct{}, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		a.mu.Lock()
+		dead := a.listenerDead
+		a.mu.Unlock()
+
+		select {
+		case <-stop:
+			return
+		case <-a.done:
+			return // process exited — Cleanup owns the socket now
+		case <-dead:
+			// accept loop stopped; deliberate closes land here too, and are
+			// filtered out by the stop/alive checks below
+		case <-ticker.C:
+			// periodic check for a vanished or replaced socket file
+		}
+
+		if !a.alive() {
+			return
+		}
+		select {
+		case <-stop:
+			return // Cleanup raced us to the dead channel
+		default:
+		}
+
+		reason := a.attachUnhealthyReason()
+		if reason == "" {
+			continue
+		}
+		rebound, err := a.rebindListener()
+		if err != nil {
+			log.Printf("agent %s: attach listener rebind (%s) failed: %v", a.Name, reason, err)
+			continue
+		}
+		if !rebound {
+			return // Cleanup retired the listener while we were deciding
+		}
+		log.Printf("agent %s: attach listener rebound on %s (%s)", a.Name, a.socketPath, reason)
+		a.emitAttachRebound(reason)
+	}
+}
+
+// attachUnhealthyReason names the reason attach connections can no longer land,
+// or "" when the listener is healthy: a live accept loop bound to the socket
+// file that is actually at socketPath.
+func (a *Agent) attachUnhealthyReason() string {
+	a.mu.Lock()
+	l, dead, ino := a.listener, a.listenerDead, a.socketIno
+	a.mu.Unlock()
+
+	if l == nil || dead == nil {
+		return "no_listener"
+	}
+	select {
+	case <-dead:
+		return "accept_loop_stopped"
+	default:
+	}
+	if ino == 0 {
+		return "" // inode unknown — nothing to compare against
+	}
+	switch cur := fileInode(a.socketPath); {
+	case cur == 0:
+		return "socket_file_missing"
+	case cur != ino:
+		return "socket_file_replaced"
+	}
+	return ""
+}
+
+// rebindListener re-creates the attach socket for a still-live agent. It reports
+// whether it rebound; once Cleanup has retired the listener it does nothing and
+// returns false, so a retired agent never gets its socket resurrected.
+func (a *Agent) rebindListener() (bool, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.attachStopped {
+		return false, nil
+	}
+	if err := a.bindListenerLocked(); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// emitAttachRebound records that the attach socket was repaired under a live
+// agent — the operator-visible signal that this fault occurred.
+func (a *Agent) emitAttachRebound(reason string) {
+	events.Emit(context.Background(), events.Event{
+		EventType: "agent_attach_rebound",
+		Agent:     a.eventAgent(),
+		Repo:      a.SourceRepo,
+		Details: map[string]any{
+			"pid":    a.PID,
+			"socket": a.socketPath,
+			"reason": reason,
+		},
+	})
+}
+
+// disarmUnlinkOnClose stops a unix listener from unlinking its socket path on
+// Close. Go unlinks by path, so a listener closed after the path was rebound
+// would otherwise delete the new socket.
+func disarmUnlinkOnClose(l net.Listener) {
+	if ul, ok := l.(*net.UnixListener); ok {
+		ul.SetUnlinkOnClose(false)
+	}
+}
+
+// fileInode returns the inode of path, or 0 when it cannot be determined.
+func fileInode(path string) uint64 {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return 0
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0
+	}
+	return uint64(st.Ino)
 }
 
 // handleAttach bridges a unix socket connection to the PTY master.

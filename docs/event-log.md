@@ -116,6 +116,30 @@ A crew agent that crashed has been automatically restarted by pogod's supervisor
 {"schema_version":1,"timestamp":"2026-04-25T11:02:50.310000000Z","event_type":"agent_restarted","agent":"crew-arch","details":{"previous_pid":47011,"new_pid":47089,"restart_count":2}}
 ```
 
+#### `agent_attach_rebound`
+
+pogod repaired an agent's attach socket while the agent process kept running. The
+socket had stopped serving connections — see `reason` — so `pogo agent attach`
+would have failed against a live, healthy agent. Emitted once per repair; the
+agent is not restarted and loses no state. A steady trickle of these for one
+agent points at whatever keeps breaking the socket (fd exhaustion, a `$TMPDIR`
+reaper) rather than at the attach mechanism itself. Additive — no
+`schema_version` bump.
+
+- **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent`, `details`
+- **`details` fields:**
+  - `pid` (int, required): PID of the still-running agent process
+  - `socket` (string, required): path of the rebound unix socket
+  - `reason` (string, required): one of
+    - `accept_loop_stopped` — the accept loop exited under a live process. The socket file lingers with nothing accepting, so once the listen backlog fills, attach gets `connection refused`.
+    - `no_listener` — no listener was ever bound (e.g. the bind at spawn failed under fd exhaustion).
+    - `socket_file_missing` — the socket file was unlinked underneath a live listener.
+    - `socket_file_replaced` — a different socket now occupies the path.
+
+```json
+{"schema_version":1,"timestamp":"2026-07-10T09:12:03.410000000Z","event_type":"agent_attach_rebound","agent":"crew-mayor","details":{"pid":23884,"socket":"/var/folders/4n/T/pogo-agents/mayor.sock","reason":"accept_loop_stopped"}}
+```
+
 ### Polecat-specific lifecycle
 
 `agent_spawned` and `agent_stopped` already cover polecats. The two events below give polecat lifecycle a dedicated, work-item-scoped narrative for tools that want to filter by polecat events without inferring from `agent_type`.

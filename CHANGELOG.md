@@ -10,6 +10,18 @@ is the curated, human-readable summary kept in sync at each release cut.
 
 ## [Unreleased]
 
+### Fixed
+
+- **pogod: attach socket no longer dies while the agent lives.** `pogo agent attach <name>`
+  could fail with `connect: connection refused` against a socket file that existed,
+  on an agent whose process was alive and healthy. The accept loop returned on *any*
+  `Accept` error — including transient `EMFILE`/`ENFILE` under fd exhaustion — leaving
+  the socket bound with nothing accepting; once the listen backlog filled, every
+  subsequent attach was refused, permanently. The accept loop now retries transient
+  errors with bounded backoff, and a supervisor tied to process lifetime rebinds a
+  listener that stops serving or whose socket file is unlinked or replaced. Each
+  repair emits an `agent_attach_rebound` event. (mg-d216)
+
 ## [0.4.0] - 2026-07-09
 
 Minor release rolling up the 45 feature and fix commits merged since v0.3.0
