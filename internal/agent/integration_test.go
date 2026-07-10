@@ -418,16 +418,20 @@ func TestPolecatCleanupOnExit(t *testing.T) {
 // exited agent is cleaned up regardless of type. This mirrors the production
 // onExit logic in cmd/pogod/main.go.
 func TestRestartOnCrashFlagDrivesBranching(t *testing.T) {
+	// agent is spelled out per case rather than derived from name: a name over
+	// config.MaxAgentNameLen is refused at spawn (mg-ef80), and these subtest
+	// names are far longer than that.
 	cases := []struct {
 		name           string
+		agent          string
 		typ            AgentType
 		restartOnCrash bool
 		wantRestart    bool
 	}{
-		{"crew with restart=true is respawned", TypeCrew, true, true},
-		{"crew with restart=false stays down", TypeCrew, false, false},
-		{"polecat with restart=true is respawned", TypePolecat, true, true},
-		{"polecat with restart=false stays down (default)", TypePolecat, false, false},
+		{"crew with restart=true is respawned", "roc-crew-on", TypeCrew, true, true},
+		{"crew with restart=false stays down", "roc-crew-off", TypeCrew, false, false},
+		{"polecat with restart=true is respawned", "roc-cat-on", TypePolecat, true, true},
+		{"polecat with restart=false stays down (default)", "roc-cat-off", TypePolecat, false, false},
 	}
 
 	for _, tc := range cases {
@@ -462,7 +466,7 @@ func TestRestartOnCrashFlagDrivesBranching(t *testing.T) {
 			})
 
 			a, err := reg.Spawn(SpawnRequest{
-				Name:           "roc-" + strings.ReplaceAll(tc.name, " ", "-"),
+				Name:           tc.agent,
 				Type:           tc.typ,
 				Command:        []string{"true"},
 				RestartOnCrash: tc.restartOnCrash,

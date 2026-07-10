@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -8,6 +9,22 @@ import (
 
 	"github.com/drellem2/pogo/internal/agent"
 )
+
+// shortSocketDir returns a socket dir short enough that "<dir>/<name>.sock"
+// fits AF_UNIX's sun_path limit. t.TempDir() on darwin lives under
+// /var/folders/... and already exceeds it on its own, so a registry rooted
+// there cannot bind an attach socket for any agent — which fails the spawn
+// outright since mg-ef80. Production takes this dir from config.AgentSocketDir,
+// which guarantees the fit.
+func shortSocketDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "pogo-pogod-sock-")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	return filepath.Join(dir, "s")
+}
 
 // TestStallNudgerNeverInterruptsBusyAgent is the end-to-end proof of gh
 // drellem2/pogo #61 review point (a): the priority wake reuses newStallNudger,
@@ -17,7 +34,7 @@ import (
 // proves the wait-idle primitive) by exercising the exact function the stall
 // watcher and priority wake call.
 func TestStallNudgerNeverInterruptsBusyAgent(t *testing.T) {
-	reg, err := agent.NewRegistry(filepath.Join(t.TempDir(), "sockets"))
+	reg, err := agent.NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -66,7 +83,7 @@ func TestStallNudgerNeverInterruptsBusyAgent(t *testing.T) {
 // registered/running, the nudger delivers via macguffin mail so the signal is
 // durable rather than dropped.
 func TestStallNudgerFallsBackToMailWhenOffline(t *testing.T) {
-	reg, err := agent.NewRegistry(filepath.Join(t.TempDir(), "sockets"))
+	reg, err := agent.NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}

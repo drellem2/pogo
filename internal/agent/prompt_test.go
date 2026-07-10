@@ -2802,7 +2802,7 @@ func TestStartCrewAgentResolvesExtendsDirective(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	reg, err := NewRegistry(filepath.Join(tmpHome, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}

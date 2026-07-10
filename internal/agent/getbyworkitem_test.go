@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"path/filepath"
 	"testing"
 )
 
@@ -10,7 +9,7 @@ import (
 // the full work-item id (WorkItemID) an authored MR carries, while a plain Get
 // only matches the registry key.
 func TestGetByWorkItemOrName(t *testing.T) {
-	reg, err := NewRegistry(filepath.Join(t.TempDir(), "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}

@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"path/filepath"
 	"testing"
 	"time"
 )
@@ -16,8 +15,7 @@ func TestStallThresholdFor(t *testing.T) {
 }
 
 func TestDiagnoseHealthy(t *testing.T) {
-	tmpDir := t.TempDir()
-	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -55,8 +53,7 @@ func TestDiagnoseHealthy(t *testing.T) {
 }
 
 func TestDiagnoseExited(t *testing.T) {
-	tmpDir := t.TempDir()
-	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -349,8 +346,7 @@ func (f *fakeScheduleProvider) CronWindowsForAgent(agentIdentity string) []CronW
 }
 
 func TestRegistryDiagnoseUsesScheduleProvider(t *testing.T) {
-	tmpDir := t.TempDir()
-	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -378,8 +374,7 @@ func TestRegistryDiagnoseUsesScheduleProvider(t *testing.T) {
 }
 
 func TestDiagnoseRecentOutputTail(t *testing.T) {
-	tmpDir := t.TempDir()
-	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}

@@ -79,8 +79,7 @@ func TestOnExitWorktreeCleanupOnAbnormalExit(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			sourceRepo, worktreeDir := makeWorktreeRepo(t, tc.name)
 
-			tmpDir := t.TempDir()
-			reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+			reg, err := NewRegistry(shortSocketDir(t))
 			if err != nil {
 				t.Fatalf("NewRegistry: %v", err)
 			}

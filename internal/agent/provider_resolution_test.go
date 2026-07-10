@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"path/filepath"
 	"testing"
 	"time"
 )
@@ -46,7 +45,7 @@ func testProvider(id string, idle time.Duration) *Provider {
 // registered (distinct nudge thresholds: claude 1s, codex 9s).
 func newResolutionRegistry(t *testing.T) (reg *Registry, claudeP, codexP *Provider) {
 	t.Helper()
-	reg, err := NewRegistry(filepath.Join(t.TempDir(), "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -185,7 +184,7 @@ func TestResolveProviderUnknownFrontmatterFallsBack(t *testing.T) {
 // registered resolves to a nil provider — the degenerate unit-test path that
 // lets Spawn fall back to pogo's built-in nudge/PTY defaults.
 func TestResolveProviderBareRegistry(t *testing.T) {
-	reg, err := NewRegistry(filepath.Join(t.TempDir(), "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -278,7 +277,7 @@ func TestSpawnRunsResolvedProviderHooks(t *testing.T) {
 // provider (bare registry) falls back to pogo's built-in nudge defaults —
 // preserving pre-mg-b31b behavior for unit-test registries.
 func TestSpawnNilProviderUsesBuiltinDefaults(t *testing.T) {
-	reg, err := NewRegistry(filepath.Join(t.TempDir(), "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}

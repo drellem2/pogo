@@ -73,8 +73,7 @@ func waitForEvent(t *testing.T, path, eventType, agent string, timeout time.Dura
 
 func TestEmitsAgentSpawned(t *testing.T) {
 	path := useTempEventLog(t)
-	tmpDir := t.TempDir()
-	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,8 +115,7 @@ func TestEmitsAgentSpawned(t *testing.T) {
 
 func TestEmitsAgentStoppedOnCleanExit(t *testing.T) {
 	path := useTempEventLog(t)
-	tmpDir := t.TempDir()
-	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,8 +149,7 @@ func TestEmitsAgentStoppedOnCleanExit(t *testing.T) {
 
 func TestEmitsAgentStoppedOnRequestedStop(t *testing.T) {
 	path := useTempEventLog(t)
-	tmpDir := t.TempDir()
-	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,8 +179,7 @@ func TestEmitsAgentStoppedOnRequestedStop(t *testing.T) {
 
 func TestEmitsAgentCrashedOnNonZeroExit(t *testing.T) {
 	path := useTempEventLog(t)
-	tmpDir := t.TempDir()
-	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -215,8 +211,7 @@ func TestEmitsAgentCrashedOnNonZeroExit(t *testing.T) {
 
 func TestEmitsAgentRestartedOnRespawn(t *testing.T) {
 	path := useTempEventLog(t)
-	tmpDir := t.TempDir()
-	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -258,8 +253,7 @@ func TestEmitsAgentRestartedOnRespawn(t *testing.T) {
 
 func TestEmitsNudgeSent(t *testing.T) {
 	path := useTempEventLog(t)
-	tmpDir := t.TempDir()
-	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -301,8 +295,7 @@ func TestEmitsNudgeSent(t *testing.T) {
 // timestamp (RFC3339Nano UTC), event_type, agent, and details.
 func TestEventEnvelope(t *testing.T) {
 	path := useTempEventLog(t)
-	tmpDir := t.TempDir()
-	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatal(err)
 	}

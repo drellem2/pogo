@@ -3,15 +3,13 @@ package agent
 import (
 	"context"
 	"errors"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
 
 func TestIsIdle(t *testing.T) {
-	tmpDir := t.TempDir()
-	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -58,8 +56,7 @@ func TestIsIdleNoOutput(t *testing.T) {
 }
 
 func TestNudgeWithModeImmediate(t *testing.T) {
-	tmpDir := t.TempDir()
-	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -88,8 +85,7 @@ func TestNudgeWithModeImmediate(t *testing.T) {
 }
 
 func TestNudgeWithModeWaitIdle(t *testing.T) {
-	tmpDir := t.TempDir()
-	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -136,8 +132,7 @@ func TestNudgeWithModeWaitIdle(t *testing.T) {
 // callers can distinguish "agent busy" from other failures, and the message
 // must name the busy/stuck condition for operator triage.
 func TestNudgeWithModeWaitIdleTimeoutOnBusy(t *testing.T) {
-	tmpDir := t.TempDir()
-	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -256,8 +251,7 @@ func TestWaitForReadySentinelSeenButNeverIdle(t *testing.T) {
 // harness emits the prompt-ready sentinel and goes quiet, a wait-ready nudge
 // delivers.
 func TestNudgeWaitReadyDeliversOnSentinel(t *testing.T) {
-	tmpDir := t.TempDir()
-	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -290,8 +284,7 @@ func TestNudgeWaitReadyDeliversOnSentinel(t *testing.T) {
 // degrading to no-worse-than the old wait-idle behavior rather than dropping
 // the initial nudge.
 func TestNudgeWaitReadyBestEffortAfterTimeout(t *testing.T) {
-	tmpDir := t.TempDir()
-	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -335,8 +328,7 @@ func TestNudgeWaitReadyBestEffortAfterTimeout(t *testing.T) {
 // prompt-ready sentinel (e.g. Codex) gets pure wait-idle delivery from
 // wait-ready mode: the nudge fires on quiescence alone, with no sentinel gate.
 func TestNudgeWaitReadyFallsBackToWaitIdle(t *testing.T) {
-	tmpDir := t.TempDir()
-	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -370,8 +362,7 @@ func TestNudgeWaitReadyFallsBackToWaitIdle(t *testing.T) {
 }
 
 func TestNudgeExitedAgent(t *testing.T) {
-	tmpDir := t.TempDir()
-	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}

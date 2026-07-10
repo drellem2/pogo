@@ -37,7 +37,7 @@ func TestAutoStartAgents_StartsOnlyFlaggedPrompts(t *testing.T) {
 	writePrompt(t, CrewPromptDir(), "lurker", "+++\nauto_start = false\n+++\n# lurker\n")
 	writePrompt(t, TemplateDir(), "polecat", "+++\nauto_start = true\n+++\n# polecat template\n")
 
-	reg, err := NewRegistry(filepath.Join(tmpHome, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -92,7 +92,7 @@ func TestAutoStartAgents_Idempotent(t *testing.T) {
 	}
 	writePrompt(t, PromptDir(), "mayor", "+++\nauto_start = true\n+++\n# mayor\n")
 
-	reg, err := NewRegistry(filepath.Join(tmpHome, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -130,7 +130,7 @@ func TestAutoStartAgents_SkipsParked(t *testing.T) {
 		t.Fatalf("writeParkState: %v", err)
 	}
 
-	reg, err := NewRegistry(filepath.Join(tmpHome, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -152,7 +152,7 @@ func TestAutoStartAgents_NoPromptDir(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 
-	reg, err := NewRegistry(filepath.Join(tmpHome, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -180,7 +180,7 @@ func TestAutoStartAgents_AlphabeticalOrder(t *testing.T) {
 	writePrompt(t, CrewPromptDir(), "alpha", "+++\nauto_start = true\n+++\n")
 	writePrompt(t, PromptDir(), "mayor", "+++\nauto_start = true\n+++\n")
 
-	reg, err := NewRegistry(filepath.Join(tmpHome, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -218,7 +218,7 @@ func TestAutoStartAgents_NoFrontmatterDoesNotStart(t *testing.T) {
 	}
 	writePrompt(t, PromptDir(), "mayor", "# mayor with no frontmatter\n")
 
-	reg, err := NewRegistry(filepath.Join(tmpHome, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}

@@ -10,7 +10,34 @@ is the curated, human-readable summary kept in sync at each release cut.
 
 ## [Unreleased]
 
+### Changed
+
+- **pogod: agent names longer than 24 bytes are refused at spawn.** `MaxAgentNameLen`
+  was the byte budget pogod reserves for `<agent>.sock` when choosing the attach
+  socket directory, but nothing enforced it. Under a `POGO_HOME` deep enough to
+  consume the remaining headroom, a longer name produced a socket path past the
+  `sun_path` limit: the bind failed, pogod logged `attach listener failed`, and
+  `POST /agents/start` still returned 201 for an agent that could never be
+  attached to. Such a name now gets a 400 from every spawn endpoint, under every
+  root — a name's fate must not depend on how deep the operator's root happens to
+  be. Real names are far shorter (`pm-dealdesk` is 11; a polecat is named for its
+  work item), and the default `~/.pogo` root always had room for a 64-byte name,
+  so no default deployment could reach the old failure. **Operator note:** a crew
+  agent whose configured name exceeds 24 bytes will now fail to start (and fail to
+  auto-start or wake) with an explicit error, where it previously started without
+  a working `pogo agent attach`. Rename it to 24 bytes or fewer. (mg-ef80)
+
 ### Fixed
+
+- **pogod: a spawn whose attach socket cannot bind now fails instead of lying.**
+  Backstop for the name check above: if binding the attach socket fails for a reason
+  no retry can clear — the path overruns `sun_path` — the spawn is torn down and
+  reports an error rather than returning a live agent nobody can reach. Transient
+  bind failures (fd exhaustion) still keep the agent, and the mg-d216 supervisor
+  rebinds once they clear. Relatedly, `AgentSocketDir`'s fallback root is now
+  guaranteed to leave room for the reserved name budget: it previously derived from
+  `os.TempDir()` unchecked, so a `TMPDIR` over ~52 bytes produced a socket directory
+  in which no legal agent name could bind. (mg-ef80)
 
 - **`build.sh` no longer overwrites the installed binaries.** The build step ran
   `go install ./cmd/...`, writing to GOBIN (`~/go/bin`). Because `build.sh` also runs

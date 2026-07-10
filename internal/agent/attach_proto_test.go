@@ -3,27 +3,12 @@ package agent
 import (
 	"encoding/binary"
 	"net"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/creack/pty"
 )
-
-// shortSocketDir returns a tempdir with a path short enough to fit inside
-// AF_UNIX's sun_path limit (≈104 bytes on macOS). t.TempDir() on darwin
-// returns paths under /var/folders/... which routinely exceed that.
-func shortSocketDir(t *testing.T) string {
-	t.Helper()
-	dir, err := os.MkdirTemp("/tmp", "pogo-attach-")
-	if err != nil {
-		t.Fatalf("MkdirTemp: %v", err)
-	}
-	t.Cleanup(func() { os.RemoveAll(dir) })
-	return filepath.Join(dir, "s")
-}
 
 // waitForPTYSize polls pty.Getsize on master until cols/rows match the wanted
 // values or the deadline elapses. Returns the last observed size on timeout.

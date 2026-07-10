@@ -37,7 +37,7 @@ func newParkTestRegistry(t *testing.T) *Registry {
 	if err := InitPromptDirs(); err != nil {
 		t.Fatalf("InitPromptDirs: %v", err)
 	}
-	reg, err := NewRegistry(filepath.Join(tmpHome, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}

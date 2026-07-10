@@ -335,12 +335,18 @@ startup when it takes this path. Everything else still lives under the root. If
 you want your sockets under `POGO_HOME` (nicer to inspect and clean up), pick a
 shallow root: `~/.pogo-sandbox` fits comfortably, a 90-byte path does not.
 
-The same limit implies a ceiling on **agent names**: pogo reserves 24 bytes for
-`<agent>.sock` when choosing the socket directory (`MaxAgentNameLen`). Real names
-are far shorter — `pm-dealdesk` is 11, a polecat is named for its work item. But
-a name longer than 24 bytes, under a root deep enough to have consumed the
-headroom (roughly 53+ bytes), produces a socket path past `sun_path`: the agent
-spawns and runs, `pogo agent attach` does not work against it, and pogod logs
-`attach listener failed`. Nothing rejects such a name at spawn today. Under the
-default `~/.pogo` root there is room for a 64-byte name, so this is only
-reachable with both a deep root and a long name.
+The same limit implies a hard ceiling on **agent names**: pogo reserves 24 bytes
+for `<agent>.sock` when choosing the socket directory (`MaxAgentNameLen`). Real
+names are far shorter — `pm-dealdesk` is 11, a polecat is named for its work
+item — so you are unlikely to meet this limit. A name longer than 24 bytes is
+rejected at spawn with HTTP 400 (`pogo agent start` and `pogo agent spawn-polecat`
+print the error and exit non-zero).
+
+The rejection is unconditional, not conditional on your root's depth. Only a root
+deep enough to have consumed the socket directory's headroom (roughly 53+ bytes)
+would actually push such a name's socket path past `sun_path` — the default
+`~/.pogo` root has room for a 64-byte name — but a name that works on one machine
+and silently loses attach on another is worse than a name that is refused
+everywhere. If pogod cannot bind an agent's attach socket at all, the spawn now
+fails outright rather than returning a running agent that `pogo agent attach`
+cannot reach.

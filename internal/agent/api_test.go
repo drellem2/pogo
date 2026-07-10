@@ -23,8 +23,7 @@ func (catCommandConfig) AgentCommand(string) string  { return "cat" }
 func (catCommandConfig) AgentProvider(string) string { return "" }
 
 func TestAgentInfoLastActivity(t *testing.T) {
-	tmpDir := t.TempDir()
-	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -55,8 +54,7 @@ func TestAgentInfoLastActivity(t *testing.T) {
 }
 
 func TestAgentInfoLastActivityEmpty(t *testing.T) {
-	tmpDir := t.TempDir()
-	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -237,7 +235,7 @@ func TestHandleStart_NudgeOnStartFromFrontmatter(t *testing.T) {
 		t.Fatalf("write prompt: %v", err)
 	}
 
-	reg, err := NewRegistry(filepath.Join(tmpHome, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -264,7 +262,7 @@ func TestHandleStart_MayorFallbackNudge(t *testing.T) {
 		t.Fatalf("write mayor prompt: %v", err)
 	}
 
-	reg, err := NewRegistry(filepath.Join(tmpHome, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -322,7 +320,7 @@ func TestHandleStart_RecoversWedgedCrewAgent(t *testing.T) {
 		t.Fatalf("InitPromptDirs: %v", err)
 	}
 
-	reg, err := NewRegistry(filepath.Join(tmpHome, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -359,7 +357,7 @@ func TestHandleStop_ClearsWedgedCrewAgent(t *testing.T) {
 		t.Fatalf("InitPromptDirs: %v", err)
 	}
 
-	reg, err := NewRegistry(filepath.Join(tmpHome, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -396,7 +394,7 @@ func TestHandleStart_PromptNotFoundStructured(t *testing.T) {
 	}
 	// Intentionally do NOT create crew/missing.md — handleStart should 404.
 
-	reg, err := NewRegistry(filepath.Join(tmpHome, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -448,7 +446,7 @@ func TestHandleStart_CrewFallbackNudge(t *testing.T) {
 		t.Fatalf("write prompt: %v", err)
 	}
 
-	reg, err := NewRegistry(filepath.Join(tmpHome, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -500,7 +498,7 @@ func TestHandleSpawnPolecat_NudgeOnStartFromFrontmatter(t *testing.T) {
 
 	writeTemplate(t, "fronted", "+++\nnudge_on_start = \"custom polecat nudge\"\n+++\nbody {{.Id}}\n")
 
-	reg, err := NewRegistry(filepath.Join(tmpHome, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -528,7 +526,7 @@ func TestHandleSpawnPolecat_NudgeOnStartTemplateExpanded(t *testing.T) {
 
 	writeTemplate(t, "templated", "+++\nnudge_on_start = \"work item: {{.Id}}\"\n+++\nbody\n")
 
-	reg, err := NewRegistry(filepath.Join(tmpHome, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -554,7 +552,7 @@ func TestHandleSpawnPolecat_FallbackNudge(t *testing.T) {
 
 	writeTemplate(t, "plainpc", "# plain polecat\nbody {{.Id}}\n")
 
-	reg, err := NewRegistry(filepath.Join(tmpHome, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -585,7 +583,7 @@ func TestHandleSpawnPolecat_FailureCleansUpBranch(t *testing.T) {
 
 	writeTemplate(t, "retrypc", "+++\nnudge_on_start = \"{{.Bogus\"\n+++\n# polecat\n")
 
-	reg, err := NewRegistry(filepath.Join(tmpHome, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -633,7 +631,7 @@ func TestHandleSpawnPolecat_WorktreeFalseSkipsCreation(t *testing.T) {
 
 	writeTemplate(t, "noworktree", "+++\nworktree = false\n+++\n# polecat without worktree\n")
 
-	reg, err := NewRegistry(filepath.Join(tmpHome, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -674,7 +672,7 @@ func TestHandleSpawnPolecat_WorktreeTrueCreatesWorktree(t *testing.T) {
 
 	writeTemplate(t, "wantsworktree", "+++\nworktree = true\n+++\n# polecat with worktree\n")
 
-	reg, err := NewRegistry(filepath.Join(tmpHome, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -706,7 +704,7 @@ func TestHandleSpawnPolecat_WorktreeDefaultWhenRepoSet(t *testing.T) {
 
 	writeTemplate(t, "defaultwt", "# polecat with default worktree behavior\n")
 
-	reg, err := NewRegistry(filepath.Join(tmpHome, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -738,7 +736,7 @@ func TestHandleSpawnPolecat_NoWorktreeFlagSkipsCreation(t *testing.T) {
 	// Even with worktree=true frontmatter AND a Repo, --no-worktree wins.
 	writeTemplate(t, "nowtflag", "+++\nworktree = true\n+++\n# polecat in-place\n")
 
-	reg, err := NewRegistry(filepath.Join(tmpHome, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -791,7 +789,7 @@ func TestHandleSpawnPolecat_NoWorktreeNoRepoSucceeds(t *testing.T) {
 
 	writeTemplate(t, "nowtnorepo", "# in-place polecat, no repo\n")
 
-	reg, err := NewRegistry(filepath.Join(tmpHome, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -823,7 +821,7 @@ func TestHandleSpawnPolecat_NoWorktreeVarExposed(t *testing.T) {
 	writeTemplate(t, "nowtvar",
 		"# polecat\n{{if .NoWorktree}}MODE: in-place at {{.WorktreeDir}}{{else}}MODE: worktree{{end}}\n")
 
-	reg, err := NewRegistry(filepath.Join(tmpHome, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -858,7 +856,7 @@ func TestHandleSpawnPolecat_FrontmatterStrippedFromBody(t *testing.T) {
 
 	writeTemplate(t, "stripfm", "+++\nnudge_on_start = \"go\"\n+++\nID is {{.Id}}\n")
 
-	reg, err := NewRegistry(filepath.Join(tmpHome, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -895,7 +893,7 @@ func TestHandleSpawnPolecat_WorkItemIDPlumbedFromRequest(t *testing.T) {
 
 	writeTemplate(t, "wi", "# polecat\n")
 
-	reg, err := NewRegistry(filepath.Join(tmpHome, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -934,7 +932,7 @@ func TestHandleSpawnPolecat_WorkItemIDEmptyWhenNoId(t *testing.T) {
 
 	writeTemplate(t, "noid", "# polecat\n")
 
-	reg, err := NewRegistry(filepath.Join(tmpHome, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -963,7 +961,7 @@ func TestHandleSpawnPolecat_WorkItemIDEmptyWhenNoId(t *testing.T) {
 // process is a harmless `cat` regardless of which provider is resolved.
 func providerTestRegistry(t *testing.T, tmpHome string) *Registry {
 	t.Helper()
-	reg, err := NewRegistry(filepath.Join(tmpHome, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}

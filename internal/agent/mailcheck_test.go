@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -43,7 +42,7 @@ func TestSpawnPolecatRegistersMailCheck(t *testing.T) {
 
 	writeTemplate(t, "plainpc", "# plain polecat\nbody {{.Id}}\n")
 
-	reg, err := NewRegistry(filepath.Join(tmpHome, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -87,7 +86,7 @@ func TestSpawnPolecatMailCheckFallsBackToName(t *testing.T) {
 
 	writeTemplate(t, "noidpc", "# polecat no id\nbody\n")
 
-	reg, err := NewRegistry(filepath.Join(tmpHome, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -125,7 +124,7 @@ func TestSpawnPolecatMailCheckFailureNonFatal(t *testing.T) {
 
 	writeTemplate(t, "errpc", "# polecat\nbody {{.Id}}\n")
 
-	reg, err := NewRegistry(filepath.Join(tmpHome, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -155,7 +154,7 @@ func TestSpawnPolecatNoMailCheckRegistrar(t *testing.T) {
 
 	writeTemplate(t, "bareepc", "# polecat\nbody {{.Id}}\n")
 
-	reg, err := NewRegistry(filepath.Join(tmpHome, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}

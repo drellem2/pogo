@@ -12,8 +12,7 @@ import (
 )
 
 func TestSpawnAndNudge(t *testing.T) {
-	tmpDir := t.TempDir()
-	socketDir := filepath.Join(tmpDir, "sockets")
+	socketDir := shortSocketDir(t)
 
 	reg, err := NewRegistry(socketDir)
 	if err != nil {
@@ -64,8 +63,7 @@ func TestSpawnAndNudge(t *testing.T) {
 // input field rather than a submit. Regression test for the bug where crew
 // nudges sat unsent in architect's input box.
 func TestNudgeSplitsBodyAndSubmit(t *testing.T) {
-	tmpDir := t.TempDir()
-	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -101,8 +99,7 @@ func TestNudgeSplitsBodyAndSubmit(t *testing.T) {
 // skips the delay — there's nothing for the receiver to read separately, and
 // the delay would just slow down the submit.
 func TestNudgeEmptyMessageNoDelay(t *testing.T) {
-	tmpDir := t.TempDir()
-	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -139,8 +136,7 @@ func TestNudgeEmptyMessageNoDelay(t *testing.T) {
 // sentinel ("? for shortcuts", mg-ce61), so the fake harness must emit a line
 // containing that sentinel before the nudge will deliver.
 func TestInitialNudgeAutoDelivers(t *testing.T) {
-	tmpDir := t.TempDir()
-	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -184,8 +180,7 @@ func TestInitialNudgeAutoDelivers(t *testing.T) {
 // restart-on-crash re-exec re-delivers it, and a.InitialNudge stays empty so
 // Respawn doesn't also re-nudge.
 func TestInitialPromptViaArgvAppendsToCommand(t *testing.T) {
-	tmpDir := t.TempDir()
-	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -237,8 +232,7 @@ func TestInitialPromptViaArgvAppendsToCommand(t *testing.T) {
 // nothing to deliver — the command must run unmodified even for an
 // argv-capable provider.
 func TestInitialPromptViaArgvEmptyNudgeNoAppend(t *testing.T) {
-	tmpDir := t.TempDir()
-	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -262,8 +256,7 @@ func TestInitialPromptViaArgvEmptyNudgeNoAppend(t *testing.T) {
 }
 
 func TestSpawnDuplicate(t *testing.T) {
-	tmpDir := t.TempDir()
-	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -289,8 +282,7 @@ func TestSpawnDuplicate(t *testing.T) {
 }
 
 func TestListAndGet(t *testing.T) {
-	tmpDir := t.TempDir()
-	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -319,8 +311,7 @@ func TestListAndGet(t *testing.T) {
 }
 
 func TestStopAgent(t *testing.T) {
-	tmpDir := t.TempDir()
-	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -371,8 +362,7 @@ func TestSocketPath(t *testing.T) {
 }
 
 func TestProcessExit(t *testing.T) {
-	tmpDir := t.TempDir()
-	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -406,8 +396,7 @@ func TestProcessName(t *testing.T) {
 }
 
 func TestEnvInjection(t *testing.T) {
-	tmpDir := t.TempDir()
-	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -452,7 +441,7 @@ func TestEnvInjection(t *testing.T) {
 // working directory before the process starts.
 func TestSpawnContextFileInjection(t *testing.T) {
 	tmpDir := t.TempDir()
-	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -516,7 +505,7 @@ func TestSpawnContextFileInjection(t *testing.T) {
 // as polecats. See docs/investigations/codex-e2e-validation.md.
 func TestSpawnContextFileInjectionCrew(t *testing.T) {
 	tmpDir := t.TempDir()
-	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -568,7 +557,7 @@ func TestSpawnContextFileInjectionCrew(t *testing.T) {
 // for a flag-injection provider: no stray AGENTS.override.md is written.
 func TestSpawnNoContextFileForClaude(t *testing.T) {
 	tmpDir := t.TempDir()
-	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -608,8 +597,7 @@ func TestSpawnNoContextFileForClaude(t *testing.T) {
 }
 
 func TestAgentStatus(t *testing.T) {
-	tmpDir := t.TempDir()
-	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -635,8 +623,7 @@ func TestAgentStatus(t *testing.T) {
 }
 
 func TestExitStatus(t *testing.T) {
-	tmpDir := t.TempDir()
-	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -683,8 +670,7 @@ func TestExitStatus(t *testing.T) {
 }
 
 func TestOnExitCallback(t *testing.T) {
-	tmpDir := t.TempDir()
-	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -714,8 +700,7 @@ func TestOnExitCallback(t *testing.T) {
 }
 
 func TestRespawn(t *testing.T) {
-	tmpDir := t.TempDir()
-	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -750,8 +735,7 @@ func TestRespawn(t *testing.T) {
 }
 
 func TestWorktreeFieldsSetBeforeSpawn(t *testing.T) {
-	tmpDir := t.TempDir()
-	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -778,8 +762,7 @@ func TestWorktreeFieldsSetBeforeSpawn(t *testing.T) {
 }
 
 func TestWorktreeFieldsVisibleInOnExit(t *testing.T) {
-	tmpDir := t.TempDir()
-	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -824,8 +807,7 @@ func TestWorktreeFieldsVisibleInOnExit(t *testing.T) {
 }
 
 func TestDoneBlocksUntilOnExitCompletes(t *testing.T) {
-	tmpDir := t.TempDir()
-	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -857,8 +839,7 @@ func TestDoneBlocksUntilOnExitCompletes(t *testing.T) {
 }
 
 func TestWorkItemIDSetOnSpawn(t *testing.T) {
-	tmpDir := t.TempDir()
-	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -879,8 +860,7 @@ func TestWorkItemIDSetOnSpawn(t *testing.T) {
 }
 
 func TestWorkItemIDEmptyByDefault(t *testing.T) {
-	tmpDir := t.TempDir()
-	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -949,8 +929,7 @@ func TestWorkItemIDOmittedWhenEmpty(t *testing.T) {
 // is respawned by pogod's onExit handler — the work item link must survive so
 // spend tracking and the agent registry stay correct after the restart.
 func TestWorkItemIDPreservedAcrossRespawn(t *testing.T) {
-	tmpDir := t.TempDir()
-	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -1007,8 +986,7 @@ func wedgeDeadAgent(t *testing.T, reg *Registry, name string) *Agent {
 // a RestartOnCrash agent that Stop otherwise leaves intact, so a subsequent
 // start is not blocked by a dead pid.
 func TestStopClearsDeadRestartAgent(t *testing.T) {
-	tmpDir := t.TempDir()
-	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -1027,8 +1005,7 @@ func TestStopClearsDeadRestartAgent(t *testing.T) {
 // gh #19, Fix 3: pogo agent start overwrites a dead-process registration
 // rather than refusing with "already running".
 func TestStartOverwritesDeadRegistration(t *testing.T) {
-	tmpDir := t.TempDir()
-	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -1061,8 +1038,7 @@ func TestStartOverwritesDeadRegistration(t *testing.T) {
 // duplicate name whose process is actually running, and Stop tears it down
 // normally. Verified on a distinct agent name per acceptance bar 4.
 func TestSpawnRefusesLiveDuplicate(t *testing.T) {
-	tmpDir := t.TempDir()
-	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -1101,8 +1077,7 @@ func TestSpawnRefusesLiveDuplicate(t *testing.T) {
 // at either side kills both — pogo doctor / any agent spawn takes down
 // pogod and every sibling agent at once.
 func TestSpawnProcessGroupIsolation(t *testing.T) {
-	tmpDir := t.TempDir()
-	reg, err := NewRegistry(filepath.Join(tmpDir, "sockets"))
+	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
