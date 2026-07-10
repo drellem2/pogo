@@ -12,6 +12,22 @@ is the curated, human-readable summary kept in sync at each release cut.
 
 ### Changed
 
+- **Config files layer key by key instead of shadowing wholesale.** `Load()` reads
+  `~/.config/pogo/config.toml` and then `$POGO_HOME/config.toml`, with the latter
+  overriding only the keys it actually sets. Previously the `POGO_HOME` file, when
+  it existed, was the *only* file read — so anything that created a partial one
+  (a sandbox script, a fixture, an operator pinning a port) silently dropped every
+  key the real config carried. Including the `[agents]` coordinator/worker pin the
+  default-migration guard writes, whose loss re-arms the v0.4.0 role-default flip
+  against the very installs the pin exists to protect. `pogo install`'s role pin
+  now skips any role key set in either layer, so it cannot override the other
+  file. **Operator note:** `$POGO_HOME/config.toml` no longer *suppresses* keys
+  set in `~/.config/pogo/config.toml` by existing — override each key explicitly.
+  A sandbox that isolated its config by setting `POGO_HOME` alone now inherits the
+  real user's keys it does not override; point `HOME` and `XDG_CONFIG_HOME` at the
+  sandbox too. `POGO_HOME` isolates *state*, and always did; it never isolated
+  *config* writes, and now does not isolate config reads either. (mg-cf9e)
+
 - **pogod: agent names longer than 24 bytes are refused at spawn.** `MaxAgentNameLen`
   was the byte budget pogod reserves for `<agent>.sock` when choosing the attach
   socket directory, but nothing enforced it. Under a `POGO_HOME` deep enough to
@@ -26,6 +42,20 @@ is the curated, human-readable summary kept in sync at each release cut.
   agent whose configured name exceeds 24 bytes will now fail to start (and fail to
   auto-start or wake) with an explicit error, where it previously started without
   a working `pogo agent attach`. Rename it to 24 bytes or fewer. (mg-ef80)
+
+### Added
+
+- **A running coordinator is never renamed.** The coordinator's name is
+  load-bearing — its `mg` mailbox, its `mail-check-<name>` schedule id, the name
+  the stall watcher arms on, the address the refinery mails merge results to, and
+  the name pogod auto-starts all follow it. Renaming it out from under a live
+  process orphans every one of those. Until now the only thing standing in the way
+  was a config key (the `[agents]` pin), which made a lost pin fatal. Now the
+  registry records the running coordinator's name and pid in
+  `$POGO_HOME/coordinator.json`, and role resolution in both `pogo` and `pogod`
+  refuses to adopt a different name while that process is alive, logging the
+  refusal. Renaming a *stopped* coordinator works exactly as before — stop it,
+  edit `[agents] coordinator`, start it again. (mg-cf9e)
 
 ### Fixed
 

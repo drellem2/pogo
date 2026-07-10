@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/drellem2/pogo/internal/config"
 )
 
 // setCoordinator sets the process-wide coordinator name for the duration of a
@@ -244,5 +246,59 @@ func TestStartCrewAgentCoordinatorRename(t *testing.T) {
 	}
 	if !strings.Contains(s, "# Boss") {
 		t.Errorf("spawned coordinator prompt missing title substitution:\n%s", s)
+	}
+}
+
+// The registry arms and disarms the coordinator-rename guard (mg-cf9e): spawning
+// the coordinator writes the running-coordinator record that
+// config.GuardRunningCoordinator refuses renames against, and the coordinator's
+// exit clears it so a stopped coordinator can still be renamed.
+func TestSpawnRecordsRunningCoordinator(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	setCoordinator(t, "mayor")
+
+	reg, err := NewRegistry(shortSocketDir(t))
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	defer reg.StopAll(2 * time.Second)
+
+	if got := config.RunningCoordinator(); got != nil {
+		t.Fatalf("precondition: RunningCoordinator() = %+v, want nil", got)
+	}
+
+	// A non-coordinator crew agent leaves the record alone.
+	if _, err := reg.Spawn(SpawnRequest{Name: "doctor", Type: TypeCrew, Command: []string{"cat"}}); err != nil {
+		t.Fatalf("spawn doctor: %v", err)
+	}
+	if got := config.RunningCoordinator(); got != nil {
+		t.Errorf("a non-coordinator spawn recorded itself: %+v", got)
+	}
+
+	a, err := reg.Spawn(SpawnRequest{Name: "mayor", Type: TypeCrew, Command: []string{"cat"}})
+	if err != nil {
+		t.Fatalf("spawn mayor: %v", err)
+	}
+	rec := config.RunningCoordinator()
+	if rec == nil || rec.Name != "mayor" || rec.PID != a.PID {
+		t.Fatalf("RunningCoordinator() = %+v, want mayor/%d", rec, a.PID)
+	}
+
+	// The guard now refuses to rename it, whatever config says.
+	cfg := &config.Config{}
+	cfg.Agents.Coordinator = "ringmaster"
+	cfg, refusal := config.GuardRunningCoordinator(cfg)
+	if refusal == nil || cfg.Agents.Coordinator != "mayor" {
+		t.Errorf("guard did not refuse the rename of a live coordinator: coordinator=%q refusal=%v",
+			cfg.Agents.Coordinator, refusal)
+	}
+
+	// Stopping it disarms the guard.
+	if err := reg.Stop("mayor", 2*time.Second); err != nil {
+		t.Fatalf("stop mayor: %v", err)
+	}
+	if got := config.RunningCoordinator(); got != nil {
+		t.Errorf("RunningCoordinator() = %+v after stop, want nil — a stopped coordinator may be renamed", got)
 	}
 }

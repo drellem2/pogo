@@ -11,7 +11,7 @@ import (
 // install` may write to config.toml — so the read path and the pin path are
 // separate calls.
 func resolveRoles() *config.Config {
-	cfg := config.Load()
+	cfg, _ := config.GuardRunningCoordinator(config.Load())
 	agent.SetCoordinatorName(cfg.Agents.Coordinator)
 	agent.SetWorkerName(cfg.Agents.Worker)
 	return cfg
@@ -39,9 +39,15 @@ func resolveRoles() *config.Config {
 // install` starts pogod first, and that daemon now pins on boot — so by the time
 // we get here the keys can already be present, making our own pin a no-op while
 // this process still holds the stale names read at startup.
-func pinAndResolveRoles(existing bool) (config.PinResult, error) {
+//
+// The rename guard runs last and outranks both. `pogo install` on a machine whose
+// coordinator is up must not synthesize prompts naming a role that install does
+// not have, nor tell the operator to start a coordinator under a new name while
+// the old one is still answering mail (mg-cf9e).
+func pinAndResolveRoles(existing bool) (config.PinResult, *config.RenameRefusal, error) {
 	cfg, res, err := config.PinAndLoad(existing)
+	cfg, refusal := config.GuardRunningCoordinator(cfg)
 	agent.SetCoordinatorName(cfg.Agents.Coordinator)
 	agent.SetWorkerName(cfg.Agents.Worker)
-	return res, err
+	return res, refusal, err
 }

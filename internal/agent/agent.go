@@ -769,6 +769,10 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 	r.agents[req.Name] = a
 	log.Printf("agent %s: spawned pid=%d type=%s proc=%s", req.Name, a.PID, req.Type, procName)
 
+	// Arm the coordinator-rename guard: a coordinator that is running may not
+	// be renamed out from under itself, whatever config later says (mg-cf9e).
+	noteCoordinatorStart(a)
+
 	a.emitSpawned()
 
 	// Run post-spawn hook (e.g. trust dialog dismissal) if this agent's
@@ -1071,6 +1075,9 @@ func (r *Registry) Respawn(name string) (*Agent, error) {
 	r.agents[name] = a
 	log.Printf("agent %s: respawned pid=%d restart=%d", name, a.PID, restartCount)
 
+	// Re-arm the rename guard on the new pid; the old one's exit cleared it.
+	noteCoordinatorStart(a)
+
 	// Re-arm the lifetime session hook (mg-4421) for the respawned PTY so the
 	// modal-dismissal watcher covers the new process. (postSpawnHook is
 	// intentionally not re-invoked here, matching pre-mg-4421 behavior: that
@@ -1246,6 +1253,9 @@ func (r *Registry) waitAndHandle(a *Agent) {
 	a.mu.Unlock()
 
 	log.Printf("agent %s: exited (err=%v)", a.Name, a.exitErr)
+
+	// Disarm the rename guard: a stopped coordinator may be renamed (mg-cf9e).
+	noteCoordinatorExit(a)
 
 	a.emitExit(stopRequested, exitCode, duration)
 

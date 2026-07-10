@@ -36,6 +36,14 @@ func pinAndResolveRoles(cfg *config.Config) *config.Config {
 		}
 	}
 
+	// Whatever config says, a coordinator that is running right now — an orphan
+	// left by a SIGKILLed pogod, say — is not renamed. The pin above is the
+	// belt; this is the braces (mg-cf9e).
+	cfg, refusal := config.GuardRunningCoordinator(cfg)
+	if refusal != nil {
+		log.Printf("pogod: %v", refusal)
+	}
+
 	// Resolve the coordinator agent's name ([agents] coordinator) before any
 	// prompt synthesis or autostart happens — it decides which agent name maps
 	// to the coordinator prompt and what prompts call the role. The worker's

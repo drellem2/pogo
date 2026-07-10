@@ -1505,9 +1505,12 @@ that copy and overwrite without a safety net.`,
 			// below are synthesized, which expand the role names into prose.
 			// Fresh installs are a no-op and adopt the new defaults. Non-fatal:
 			// a pin failure must not break `pogo install`.
-			pinRes, pinErr := pinAndResolveRoles(existingInstall)
+			pinRes, renameRefusal, pinErr := pinAndResolveRoles(existingInstall)
 			if pinErr != nil && !jsonOutput {
 				fmt.Fprintf(os.Stderr, "  ⚠ could not pin role defaults: %v\n", pinErr)
+			}
+			if renameRefusal != nil && !jsonOutput {
+				fmt.Fprintf(os.Stderr, "  ⚠ %v\n", renameRefusal)
 			}
 
 			// Step 3: Install prompts

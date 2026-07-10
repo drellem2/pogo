@@ -25,6 +25,37 @@ Agent behavior is defined by prompt files under `internal/agent/prompts/` —
 directive synthesizes a crew prompt from a base plus a TOML. See
 [docs/prompt-customization.md](prompt-customization.md) and [PROMPT_GUIDELINES.md](PROMPT_GUIDELINES.md).
 
+## Where `config.toml` lives, and how the two files combine
+
+pogo reads up to two config files and **layers them key by key**, lowest
+precedence first:
+
+1. `~/.config/pogo/config.toml` (or `$XDG_CONFIG_HOME/pogo/config.toml`)
+2. `$POGO_HOME/config.toml` — only when `POGO_HOME` is set
+
+A key set in the `POGO_HOME` file overrides the same key in the XDG file. Every
+key it does *not* set keeps the XDG file's value. So a `$POGO_HOME/config.toml`
+holding nothing but `[server] port = 10001` changes the port and nothing else.
+
+This used to be whole-file precedence: whichever file existed at the higher
+layer was the *only* file read. That made `$POGO_HOME/config.toml` a trapdoor —
+anything that created a partial one silently dropped every key the user's real
+config carried, including the `[agents]` role pin the migration guard writes
+there (below). Layering closes it (mg-cf9e).
+
+Two consequences worth knowing:
+
+- **Writes still go to one file.** `pogo install`'s role pin writes to
+  `$POGO_HOME/config.toml` when it exists, otherwise the XDG file. It skips any
+  role key already set in *either* layer, so pinning never overrides a value you
+  set in the other file.
+- **`Config.Sources`** lists the files that were actually read, in precedence
+  order; `Config.Source` is the highest-precedence one. A daemon with neither
+  file has an empty `Source` and does not auto-start crew (mg-3dc3).
+
+Environment variables (`POGO_PORT`, `POGO_AGENT_COMMAND`, `POGO_AGENT_PROVIDER`,
+`POGO_EXTRA_PATH`, `POGO_AGENT_AUTOSTART`, …) override both files.
+
 ## Coordinator name
 
 The coordinator role is called "ringmaster" by default, but the name is policy, not
@@ -34,6 +65,29 @@ mechanism — rename it with:
 [agents]
 coordinator = "boss"   # default "ringmaster"
 ```
+
+**A running coordinator is never renamed.** Whatever config resolves to, if a
+coordinator process is currently running under a different name, pogo refuses the
+rename, keeps the running name, and logs the refusal. Stop the coordinator first
+if the rename is intended:
+
+```
+pogo agent stop mayor     # then edit [agents] coordinator, then start it again
+```
+
+The refusal is what keeps a config mishap from being fatal. The coordinator's
+name is load-bearing — it is the agent's `mg` mailbox, its `mail-check-<name>`
+schedule id, the name the stall watcher arms on, the address the refinery mails
+merge results to, and the name pogod auto-starts. Renaming it out from under a
+live process orphans all of that. Before the guard, the only thing preventing it
+was the pinned config key below; now a lost pin leaves the wrong name in a file
+that the next resolve overrides from the live process.
+
+Mechanically: the agent registry writes `$POGO_HOME/coordinator.json` (name +
+pid) when it spawns the coordinator and removes it when the process exits. A
+record whose pid no longer answers signal 0 counts as "not running", so a
+coordinator that stopped — or one whose pogod was `SIGKILL`ed — never freezes the
+name permanently. Source of truth: `internal/config/coordinator.go` (mg-cf9e).
 
 The configured name decides the coordinator's agent name (and therefore its
 `mg` (the task-store CLI) mailbox, its `mail-check-<name>` schedule id, and
@@ -287,6 +341,12 @@ runs**, so it must reach existing installs (via an upgrade or a daemon restart)
 that never ran the guard, the original name is unrecoverable — nothing recorded
 it. Source of truth: `internal/config/migrate.go`.
 
+The pin is a belt, not the only belt. Two other mechanisms back it up, because a
+config key that must never be lost is a bad single point of failure: config files
+now **layer key by key** so a partial file cannot drop the pin, and a **running
+coordinator is never renamed** whatever the config resolves to. See the two
+sections above (mg-cf9e).
+
 ## Mail
 
 Inter-agent coordination flows through Maildir mailboxes under
@@ -318,6 +378,14 @@ from the shared root. Refinery counts, schedules, and mailboxes co-mingle becaus
 they are literally the same files. If you want isolation, give each instance its
 own `POGO_HOME`; if you want a single shared fleet, point them at the same one on
 purpose.
+
+**`POGO_HOME` isolates *state*, not *config*.** Every path above hangs off
+`PogoHome()`, but `config.toml` does not: `~/.config/pogo/config.toml` is read as
+the base layer regardless of `POGO_HOME`, and `$POGO_HOME/config.toml` layers on
+top of it (see "Where `config.toml` lives" above). A sandbox that sets only
+`POGO_HOME` therefore inherits the real user's config keys it does not itself
+override. To isolate config too, point `HOME` and `XDG_CONFIG_HOME` at the
+sandbox as well — the isolation tests and `cmd/pogod`'s do exactly that.
 
 One caveat on the default: an old shell integration exported `POGO_HOME=$HOME`,
 and pogo normalizes a `POGO_HOME` equal to the user's home directory to

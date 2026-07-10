@@ -480,8 +480,14 @@ func installLaunchd() (retErr error) {
 // sendInstallMail is best-effort: if mg isn't on PATH or the coordinator's
 // inbox doesn't exist yet, the install must still succeed. The coordinator is
 // just the fastest verification path; a human can read the log otherwise.
+//
+// The rename guard runs here for the same reason it runs at every other seam
+// that resolves the coordinator's name: mail addressed to a name config invented
+// while a differently-named coordinator is running lands in a mailbox nobody
+// reads (mg-cf9e).
 func sendInstallMail(subject, body string) {
-	coordinator := config.Load().Agents.CoordinatorName()
+	cfg, _ := config.GuardRunningCoordinator(config.Load())
+	coordinator := cfg.Agents.CoordinatorName()
 	cmd := exec.Command("mg", "mail", "send", coordinator,
 		"--from", "service-install",
 		"--subject", subject,

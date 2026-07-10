@@ -58,9 +58,12 @@ func TestPinAndResolveRoles_ExistingInstallReResolvesAfterPin(t *testing.T) {
 		t.Fatalf("precondition: process-wide name is %q, want the live default", agent.CoordinatorName())
 	}
 
-	res, err := pinAndResolveRoles(config.IsExistingInstall())
+	res, refusal, err := pinAndResolveRoles(config.IsExistingInstall())
 	if err != nil {
 		t.Fatal(err)
+	}
+	if refusal != nil {
+		t.Fatalf("unexpected rename refusal: %v", refusal)
 	}
 	if len(res.Pinned) != 2 {
 		t.Errorf("Pinned = %v, want both role keys", res.Pinned)
@@ -105,9 +108,12 @@ func TestPinAndResolveRoles_ReResolvesWhenAnotherProcessAlreadyPinned(t *testing
 		t.Fatal(err)
 	}
 
-	res, err := pinAndResolveRoles(true)
+	res, refusal, err := pinAndResolveRoles(true)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if refusal != nil {
+		t.Fatalf("unexpected rename refusal: %v", refusal)
 	}
 	if len(res.Pinned) != 0 {
 		t.Errorf("Pinned = %v, want nothing — another process already pinned", res.Pinned)
@@ -125,9 +131,12 @@ func TestPinAndResolveRoles_FreshInstallAdoptsNewDefaults(t *testing.T) {
 	if config.IsExistingInstall() {
 		t.Fatal("precondition: empty sandbox must not read as an existing install")
 	}
-	res, err := pinAndResolveRoles(config.IsExistingInstall())
+	res, refusal, err := pinAndResolveRoles(config.IsExistingInstall())
 	if err != nil {
 		t.Fatal(err)
+	}
+	if refusal != nil {
+		t.Fatalf("unexpected rename refusal: %v", refusal)
 	}
 	if len(res.Pinned) != 0 {
 		t.Errorf("Pinned = %v, want nothing on a fresh install", res.Pinned)
