@@ -22,8 +22,11 @@ RUN apk add --no-cache ca-certificates git tini
 
 RUN addgroup -S pogo && adduser -S pogo -G pogo
 
-RUN mkdir -p /workspace/repos /tmp/pogo-agents && \
-    chown -R pogo:pogo /workspace /tmp/pogo-agents
+# Agent attach sockets used to live in /tmp/pogo-agents, pre-created here. Since
+# mg-8532 they hang off PogoHome() (POGO_HOME, else $HOME/.pogo), which pogod
+# creates itself at startup — as it already did for the rest of the state tree.
+RUN mkdir -p /workspace/repos && \
+    chown -R pogo:pogo /workspace
 
 COPY --from=builder /pogod /usr/local/bin/pogod
 

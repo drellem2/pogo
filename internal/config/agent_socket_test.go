@@ -21,6 +21,25 @@ func shortHome(t *testing.T) string {
 	return dir
 }
 
+// homeOfLen returns an existing directory whose path is exactly n bytes long, so
+// a test can sit a POGO_HOME precisely on a sun_path boundary.
+func homeOfLen(t *testing.T, n int) string {
+	t.Helper()
+	base := shortHome(t)
+	pad := n - len(base) - 1 // -1 for the separator
+	if pad < 1 {
+		t.Fatalf("cannot build a %d-byte home: base %q is already %d bytes", n, base, len(base))
+	}
+	dir := filepath.Join(base, strings.Repeat("d", pad))
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if len(dir) != n {
+		t.Fatalf("built home %q is %d bytes, want %d", dir, len(dir), n)
+	}
+	return dir
+}
+
 // deepHome returns a POGO_HOME deep enough to force AgentSocketDir's fallback
 // on any platform. It nests until the derived dir provably cannot fit a socket,
 // rather than assuming t.TempDir() is long (it is on darwin, not on linux).
@@ -42,6 +61,66 @@ func legacySharedDir() string {
 	return filepath.Join(os.TempDir(), "pogo-agents")
 }
 
+// bindOK reports whether a unix socket can actually be bound at path.
+func bindOK(t *testing.T, path string) error {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	l, err := net.Listen("unix", path)
+	if err != nil {
+		return err
+	}
+	l.Close()
+	return nil
+}
+
+// TestMaxUnixSocketPathLenBinds pins maxUnixSocketPathLen against the running
+// kernel from above: a path of exactly that length must bind. It deliberately
+// does not assert that one more byte fails — the constant is the darwin figure
+// (103) used on every platform, and linux tolerates 107, so being conservative
+// is the intent. Too *large* a constant is the bug this catches.
+func TestMaxUnixSocketPathLenBinds(t *testing.T) {
+	sock := filepath.Join(homeOfLen(t, maxUnixSocketPathLen-len("/x.sock")), "x.sock")
+	if len(sock) != maxUnixSocketPathLen {
+		t.Fatalf("test bug: built a %d-byte path, want %d", len(sock), maxUnixSocketPathLen)
+	}
+	if err := bindOK(t, sock); err != nil {
+		t.Fatalf("maxUnixSocketPathLen=%d but binding a %d-byte path failed: %v",
+			maxUnixSocketPathLen, len(sock), err)
+	}
+}
+
+// TestAgentSocketDirBindableAtBudgetLimit is the load-bearing test for the
+// budget constants. It sizes POGO_HOME so the derived dir lands exactly on
+// agentSocketLeafBudget's limit, then binds a socket for the longest agent name
+// the budget promises. The resulting path is exactly maxUnixSocketPathLen bytes,
+// so an over-large maxUnixSocketPathLen or an under-sized leaf budget makes this
+// fail with EINVAL rather than passing quietly.
+func TestAgentSocketDirBindableAtBudgetLimit(t *testing.T) {
+	const suffix = "/agents/sockets"
+	root := homeOfLen(t, maxUnixSocketPathLen-agentSocketLeafBudget-len(suffix))
+	t.Setenv("POGO_HOME", root)
+
+	dir, inside := AgentSocketDir()
+	if !inside {
+		t.Fatalf("a root exactly at the budget limit must keep its sockets under POGO_HOME, got %q", dir)
+	}
+	sock := filepath.Join(dir, strings.Repeat("a", MaxAgentNameLen)+".sock")
+	if len(sock) != maxUnixSocketPathLen {
+		t.Fatalf("test bug: socket path is %d bytes, want exactly %d", len(sock), maxUnixSocketPathLen)
+	}
+	if err := bindOK(t, sock); err != nil {
+		t.Fatalf("a %d-byte agent name at the budget limit must bind, got: %v", MaxAgentNameLen, err)
+	}
+
+	// One byte deeper must tip into the fallback rather than into a failed bind.
+	t.Setenv("POGO_HOME", homeOfLen(t, maxUnixSocketPathLen-agentSocketLeafBudget-len(suffix)+1))
+	if dir, inside := AgentSocketDir(); inside {
+		t.Errorf("a root one byte past the budget must fall back, got %q under POGO_HOME", dir)
+	}
+}
+
 // TestAgentSocketDirUnderPogoHome pins the headline behavior of mg-8532: a
 // normal root keeps its attach sockets inside POGO_HOME, alongside the rest of
 // the daemon state that PogoHome() seeds.
@@ -50,8 +129,12 @@ func TestAgentSocketDirUnderPogoHome(t *testing.T) {
 	t.Setenv("POGO_HOME", home)
 
 	want := filepath.Join(home, "agents", "sockets")
-	if got := AgentSocketDir(); got != want {
-		t.Errorf("AgentSocketDir() = %q, want %q", got, want)
+	dir, inside := AgentSocketDir()
+	if dir != want {
+		t.Errorf("AgentSocketDir() = %q, want %q", dir, want)
+	}
+	if !inside {
+		t.Errorf("AgentSocketDir() reported the fallback for a shallow root %q", home)
 	}
 }
 
@@ -74,9 +157,9 @@ func TestAgentSocketDirDistinctPerPogoHome(t *testing.T) {
 			}
 
 			t.Setenv("POGO_HOME", homeA)
-			dirA := AgentSocketDir()
+			dirA, _ := AgentSocketDir()
 			t.Setenv("POGO_HOME", homeB)
-			dirB := AgentSocketDir()
+			dirB, _ := AgentSocketDir()
 
 			if dirA == dirB {
 				t.Errorf("distinct POGO_HOME roots share socket dir %q", dirA)
@@ -90,12 +173,11 @@ func TestAgentSocketDirDistinctPerPogoHome(t *testing.T) {
 	}
 }
 
-// TestAgentSocketDirBindable is the load-bearing test for agentSocketLeafBudget:
-// a socket named for the longest agent we budget for must actually bind under
-// the returned dir, in both the PogoHome and the fallback branch. It checks the
-// constant against the kernel rather than against the 104/108 folklore.
+// TestAgentSocketDirBindable checks that a socket for the longest budgeted agent
+// name binds under both branches for ordinary roots. The boundary case — where
+// the budget is actually load-bearing — is TestAgentSocketDirBindableAtBudgetLimit.
 func TestAgentSocketDirBindable(t *testing.T) {
-	longestName := strings.Repeat("a", 24)
+	longestName := strings.Repeat("a", MaxAgentNameLen)
 
 	for _, tc := range []struct {
 		name string
@@ -107,18 +189,13 @@ func TestAgentSocketDirBindable(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("POGO_HOME", tc.home(t))
 
-			dir := AgentSocketDir()
-			if err := os.MkdirAll(dir, 0700); err != nil {
-				t.Fatalf("MkdirAll(%q): %v", dir, err)
-			}
+			dir, _ := AgentSocketDir()
 			t.Cleanup(func() { os.RemoveAll(dir) })
 
 			sock := filepath.Join(dir, longestName+".sock")
-			l, err := net.Listen("unix", sock)
-			if err != nil {
+			if err := bindOK(t, sock); err != nil {
 				t.Fatalf("cannot bind %q (%d bytes): %v", sock, len(sock), err)
 			}
-			l.Close()
 		})
 	}
 }
@@ -130,12 +207,26 @@ func TestAgentSocketDirFallbackIsShort(t *testing.T) {
 	home := deepHome(t)
 	t.Setenv("POGO_HOME", home)
 
-	dir := AgentSocketDir()
-	if strings.HasPrefix(dir, filepath.Clean(home)+string(filepath.Separator)) {
+	dir, inside := AgentSocketDir()
+	if inside {
 		t.Errorf("AgentSocketDir() = %q, want a path outside the too-deep root %q", dir, home)
 	}
 	if !agentSocketDirFits(dir) {
 		t.Errorf("fallback dir %q (%d bytes) does not fit sun_path", dir, len(dir))
+	}
+}
+
+// TestAgentSocketDirRootPogoHome guards the edge that made a prefix test the
+// wrong way to detect the fallback: POGO_HOME="/" derives "/agents/sockets",
+// which fits, so the sockets really are inside the root.
+func TestAgentSocketDirRootPogoHome(t *testing.T) {
+	t.Setenv("POGO_HOME", "/")
+	dir, inside := AgentSocketDir()
+	if want := filepath.Join("/", "agents", "sockets"); dir != want {
+		t.Errorf("AgentSocketDir() = %q, want %q", dir, want)
+	}
+	if !inside {
+		t.Errorf("AgentSocketDir() reported the fallback for POGO_HOME=/, but %q is inside it", dir)
 	}
 }
 
@@ -155,9 +246,9 @@ func TestAgentSocketDirStableAcrossSpellings(t *testing.T) {
 			home := tc.home(t)
 
 			t.Setenv("POGO_HOME", home)
-			bare := AgentSocketDir()
+			bare, _ := AgentSocketDir()
 			t.Setenv("POGO_HOME", home+string(filepath.Separator))
-			slashed := AgentSocketDir()
+			slashed, _ := AgentSocketDir()
 
 			if bare != slashed {
 				t.Errorf("POGO_HOME %q -> %q but %q/ -> %q; spellings must agree",
@@ -180,7 +271,9 @@ func TestAgentSocketDirDeterministic(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("POGO_HOME", tc.home(t))
-			if first, second := AgentSocketDir(), AgentSocketDir(); first != second {
+			first, _ := AgentSocketDir()
+			second, _ := AgentSocketDir()
+			if first != second {
 				t.Errorf("AgentSocketDir() not deterministic: %q then %q", first, second)
 			}
 		})
@@ -196,7 +289,7 @@ func TestAgentSocketDirLegacyHomeNormalized(t *testing.T) {
 	t.Setenv("POGO_HOME", home)
 
 	want := filepath.Join(home, ".pogo", "agents", "sockets")
-	if got := AgentSocketDir(); got != want {
-		t.Errorf("AgentSocketDir() with POGO_HOME=$HOME = %q, want %q", got, want)
+	if dir, _ := AgentSocketDir(); dir != want {
+		t.Errorf("AgentSocketDir() with POGO_HOME=$HOME = %q, want %q", dir, want)
 	}
 }

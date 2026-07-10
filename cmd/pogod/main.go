@@ -625,8 +625,8 @@ Flags:
 	// os.TempDir(): $TMPDIR is per-user, so two daemons on distinct POGO_HOME
 	// roots with identically-named agents used to share one socket file and
 	// fight the mg-d216 supervisor over it forever (mg-8532).
-	socketDir := config.AgentSocketDir()
-	if pogoHome := filepath.Clean(config.PogoHome()); strings.HasPrefix(socketDir, pogoHome+string(filepath.Separator)) {
+	socketDir, insidePogoHome := config.AgentSocketDir()
+	if insidePogoHome {
 		// NewRegistry creates socketDir with mode 0700, and MkdirAll stamps that
 		// mode on every parent it creates on the way down — including the agents/
 		// dir the sockets share with the prompt files, which has always been
@@ -639,7 +639,8 @@ Flags:
 		}
 	} else {
 		log.Printf("pogod: POGO_HOME %s is too deep to hold unix sockets (sun_path limit); "+
-			"agent attach sockets live in %s instead — still unique to this POGO_HOME", pogoHome, socketDir)
+			"agent attach sockets live in %s instead — still unique to this POGO_HOME",
+			config.PogoHome(), socketDir)
 	}
 	var initErr error
 	agentRegistry, initErr = agent.NewRegistry(socketDir)

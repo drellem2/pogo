@@ -334,3 +334,13 @@ distinct, so the isolation guarantee holds either way; pogod logs a line at
 startup when it takes this path. Everything else still lives under the root. If
 you want your sockets under `POGO_HOME` (nicer to inspect and clean up), pick a
 shallow root: `~/.pogo-sandbox` fits comfortably, a 90-byte path does not.
+
+The same limit implies a ceiling on **agent names**: pogo reserves 24 bytes for
+`<agent>.sock` when choosing the socket directory (`MaxAgentNameLen`). Real names
+are far shorter — `pm-dealdesk` is 11, a polecat is named for its work item. But
+a name longer than 24 bytes, under a root deep enough to have consumed the
+headroom (roughly 53+ bytes), produces a socket path past `sun_path`: the agent
+spawns and runs, `pogo agent attach` does not work against it, and pogod logs
+`attach listener failed`. Nothing rejects such a name at spawn today. Under the
+default `~/.pogo` root there is room for a 64-byte name, so this is only
+reachable with both a deep root and a long name.

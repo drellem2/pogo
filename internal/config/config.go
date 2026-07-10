@@ -627,28 +627,40 @@ func LockfilePath() string {
 // that one POGO_HOME resolves to the same socket dir regardless of GOOS.
 const maxUnixSocketPathLen = 103
 
+// MaxAgentNameLen is the longest agent name whose attach socket is guaranteed to
+// bind under AgentSocketDir. Real names are far shorter — "pm-dealdesk" (11) is
+// the longest crew name, and a polecat is named for its work item ("8532") — so
+// 24 bytes leaves better than 2x headroom.
+//
+// The reservation is a fixed constant rather than a function of the agent being
+// bound: every agent under one POGO_HOME must agree on one socket dir, so the
+// dir cannot depend on which agent binds first. That makes this a ceiling, not a
+// promise — a name longer than this under a root deep enough to consume the
+// headroom will fail to bind, and the agent runs with attach unavailable (pogod
+// logs "attach listener failed"). Nothing enforces the ceiling at spawn today;
+// see mg-8532 advisory 2 and its follow-up.
+const MaxAgentNameLen = 24
+
 // agentSocketLeafBudget reserves room for the "/<agent name>.sock" leaf that
-// callers append to AgentSocketDir. Real agent names are short — "pm-dealdesk"
-// (11) is the longest crew name, and a polecat is named for its work item
-// ("8532") — so 24 bytes of name leaves better than 2x headroom. The reservation
-// is a fixed constant rather than a function of the agent being bound: every
-// agent under one POGO_HOME must agree on one socket dir, so the dir cannot
-// depend on which agent binds first.
-const agentSocketLeafBudget = len("/") + 24 + len(".sock")
+// callers append to AgentSocketDir.
+const agentSocketLeafBudget = len("/") + MaxAgentNameLen + len(".sock")
 
 // AgentSocketDir returns the directory holding the per-agent unix domain sockets
-// that back `pogo agent attach`.
+// that back `pogo agent attach`, and whether that directory lives inside
+// PogoHome. Callers that want to report the fallback should use the returned
+// bool rather than re-deriving it by inspecting the path: a POGO_HOME of "/"
+// makes any prefix test lie.
 //
-// It derives from PogoHome() so two daemons on distinct POGO_HOME roots never
-// share a socket path. Deriving it from os.TempDir() instead — as pogod did
-// before mg-8532 — gave identically-named agents under different roots a single
-// shared socket file, because $TMPDIR is per-user, not per-POGO_HOME. The
-// singleton lockfile bars two pogods on the *same* root, but nothing stopped two
-// on *different* roots from colliding here. The old symptom was quiet: whichever
-// daemon bound last owned the path and the other silently lost attach. Once the
-// mg-d216 attach supervisor shipped, it turned loud — each daemon observes the
-// other's bind as its own socket being replaced, unlinks that live socket and
-// rebinds, forever, on a 30s ticker.
+// The directory derives from PogoHome() so two daemons on distinct POGO_HOME
+// roots never share a socket path. Deriving it from os.TempDir() instead — as
+// pogod did before mg-8532 — gave identically-named agents under different roots
+// a single shared socket file, because $TMPDIR is per-user, not per-POGO_HOME.
+// The singleton lockfile bars two pogods on the *same* root, but nothing stopped
+// two on *different* roots from colliding here. The old symptom was quiet:
+// whichever daemon bound last owned the path and the other silently lost attach.
+// Once the mg-d216 attach supervisor shipped, it turned loud — each daemon
+// observes the other's bind as its own socket being replaced, unlinks that live
+// socket and rebinds, forever, on a 30s ticker.
 //
 // The sun_path limit forces one wrinkle. A sufficiently deep POGO_HOME (a
 // t.TempDir() under /var/folders on darwin, say) leaves no room for the socket
@@ -657,12 +669,12 @@ const agentSocketLeafBudget = len("/") + 24 + len(".sock")
 // distinctness this function exists to guarantee survives the fallback. The hash
 // is taken over the cleaned root so that "/a/b" and "/a/b/" — which the lockfile
 // already treats as one daemon — agree on one socket dir too.
-func AgentSocketDir() string {
+func AgentSocketDir() (dir string, insidePogoHome bool) {
 	if dir := filepath.Join(PogoHome(), "agents", "sockets"); agentSocketDirFits(dir) {
-		return dir
+		return dir, true
 	}
 	sum := sha256.Sum256([]byte(filepath.Clean(PogoHome())))
-	return filepath.Join(os.TempDir(), "pogo-agents-"+hex.EncodeToString(sum[:4]))
+	return filepath.Join(os.TempDir(), "pogo-agents-"+hex.EncodeToString(sum[:4])), false
 }
 
 // agentSocketDirFits reports whether dir leaves room to bind an agent socket

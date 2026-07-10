@@ -156,6 +156,12 @@ If you are running an older pogod, expect `pogo agent attach` to reach whichever
 daemon bound the socket last, and expect the two daemons' attach supervisors to
 unlink and rebind each other's live socket every 30s (mg-d216).
 
+A root too deep to fit a unix socket path keeps the isolation but not the
+location: its sockets land in `$TMPDIR/pogo-agents-<hash of the root>`, still one
+directory per root, and pogod logs a line saying so at startup. See
+[docs/CONFIGURATION.md](CONFIGURATION.md#state-directory-pogo_home-and-running-multiple-instances)
+for the `sun_path` limit and the agent-name ceiling it implies.
+
 **Two instances sharing a `POGO_HOME` share all of that state — by construction.**
 Refinery counts, scheduler entries, registered agents, and mailboxes co-mingle
 because they are the same files on disk, not because state leaks across a
