@@ -42,6 +42,15 @@ const personaRuleHeader = "---\n" +
 	"alwaysApply: true\n" +
 	"---\n\n"
 
+// promptReadySentinel is Cursor's composer placeholder — the measured "input
+// loop ready" marker. It is absent during the loading banner and the trust
+// dialog (verified 3/3 against a live, never-dismissed dialog), and after the
+// first turn it is replaced by "Add a follow-up".
+//
+// Two consumers: Provider.Nudge.PromptReadySentinel, and TrustDialogHook, which
+// uses its appearance to prove there is no trust dialog left to dismiss.
+const promptReadySentinel = "Plan, search, build anything"
+
 // Provider is the Cursor CLI harness descriptor.
 //
 // Prompt injection uses the ContextFile strategy, because Cursor has no
@@ -163,8 +172,8 @@ var Provider = agent.Provider{
 		// for); retained as the measured marker for any future wait-ready use,
 		// and asserted by the e2e so a Cursor UI change is caught. It rendered
 		// in 3/3 argv-delivered spawns before the turn replaced it with "Add a
-		// follow-up".
-		PromptReadySentinel: "Plan, search, build anything",
+		// follow-up". TrustDialogHook also keys off it — see promptReadySentinel.
+		PromptReadySentinel: promptReadySentinel,
 	},
 
 	// PostSpawnHook auto-accepts Cursor's workspace-trust dialog; SessionHook is

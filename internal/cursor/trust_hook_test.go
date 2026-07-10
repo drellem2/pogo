@@ -98,6 +98,70 @@ func TestMatchesTrustDialog(t *testing.T) {
 	}
 }
 
+// TestComposerReady pins the hook's false-positive guard. The composer
+// placeholder proves the dialog is not on screen; it never renders while the
+// dialog is up.
+func TestComposerReady(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  bool
+	}{
+		{"composer placeholder rendered", "  → Plan, search, build anything\n  Auto", true},
+		{"placeholder with ANSI", "\x1b[2m→ Plan, search, build anything\x1b[0m", true},
+		{"trust dialog up — no placeholder", realDialog, false},
+		{"loading banner", "  Cursor Agent\n  v2026.07.09-a3815c0", false},
+		{"post-turn composer (placeholder replaced)", "→ Add a follow-up", false},
+		{"empty", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := composerReady([]byte(tt.input)); got != tt.want {
+				t.Errorf("composerReady(%q) = %v, want %v", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestEchoedTaskLooksLikeTheTrustDialog is the reason composerReady exists.
+//
+// trustDialogMarker matches on PTY text, and Cursor echoes the argv-delivered
+// task into the TUI. A work item that merely *quotes* the dialog matches the
+// marker — mg-c146's own body does. On an already-trusted worktree (respawn:
+// Cursor persists trust per workspace) there is no dialog, so an unguarded hook
+// would type a stray "a" into the live composer.
+//
+// The assertions below encode exactly that: the echoed task DOES match the
+// dialog marker (so the marker alone is not sufficient), and the composer
+// placeholder that accompanies it DOES gate the hook off.
+func TestEchoedTaskLooksLikeTheTrustDialog(t *testing.T) {
+	// A polecat task body describing the very dialog this hook dismisses.
+	echoedTask := "Investigate the workspace-trust dialog: it offers " +
+		"[a] Trust this workspace and [q] Quit, and --force does not suppress it."
+
+	if !matchesTrustDialog([]byte(echoedTask)) {
+		t.Fatal("precondition changed: the echoed task no longer matches " +
+			"trustDialogMarker — if the marker got stricter, this guard may be " +
+			"redundant, but verify before deleting composerReady")
+	}
+
+	// On an already-trusted spawn the composer is up and the task is echoed
+	// beneath it. composerReady must gate the hook off before the marker fires.
+	screen := "  → Plan, search, build anything\n\n  " + echoedTask + "\n"
+	if !composerReady([]byte(screen)) {
+		t.Error("composerReady must detect the rendered composer and stop the " +
+			"hook from typing into it")
+	}
+
+	// And with the real dialog up, the hook must still fire.
+	if composerReady([]byte(realDialog)) {
+		t.Error("composerReady must be false while the trust dialog is up")
+	}
+	if !matchesTrustDialog([]byte(realDialog)) {
+		t.Error("the real dialog must still match the marker")
+	}
+}
+
 // TestTrustDialogAcceptIsExplicitAccelerator guards a deliberate divergence
 // from claude/codex, whose hooks send "\r". Cursor's dialog is a two-item menu
 // where Enter selects the highlighted row; if Cursor ever reorders it, "\r"
