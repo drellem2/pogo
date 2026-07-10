@@ -207,23 +207,40 @@ func (g *BasicSearch) write(u *ProjectUpdater, c chan *indexUpdate) {
 	for {
 		select {
 		case upd := <-c:
-			proj := upd.proj
-			// Capture the previous entry under the same lock as the store:
-			// serializeProjectIndex compares against it to decide whether
-			// file content actually changed. Reading the map after the
-			// store would compare the new index against itself and always
-			// report "unchanged" — which skipped every zoekt rebuild and
-			// pinned search results to the first build (mg-1236).
-			g.mu.Lock()
-			prev, prevKnown := g.projects[proj.Root]
-			g.projects[proj.Root] = *proj
-			g.mu.Unlock()
-			changed := g.serializeProjectIndex(proj, &prev, prevKnown, upd.contents)
-			g.notifyIndexed(proj.Root, changed)
+			g.applyUpdate(upd)
 		case <-u.quit:
 			return
 		}
 	}
+}
+
+// applyUpdate stores a finished index pass and persists it. It releases the
+// inflight count index() took out before queueing the update — after the
+// on-disk writes, so Quiesce cannot report idle while .pogo/search is still
+// being written.
+func (g *BasicSearch) applyUpdate(upd *indexUpdate) {
+	defer g.inflight.Add(-1)
+	proj := upd.proj
+	// Capture the previous entry under the same lock as the store:
+	// serializeProjectIndex compares against it to decide whether
+	// file content actually changed. Reading the map after the
+	// store would compare the new index against itself and always
+	// report "unchanged" — which skipped every zoekt rebuild and
+	// pinned search results to the first build (mg-1236).
+	g.mu.Lock()
+	prev, prevKnown := g.projects[proj.Root]
+	g.projects[proj.Root] = *proj
+	g.mu.Unlock()
+	changed := g.serializeProjectIndex(proj, &prev, prevKnown, upd.contents)
+	g.notifyIndexed(proj.Root, changed)
+}
+
+// queueUpdate hands a finished walk to the write shard that owns its project
+// root, taking out the inflight count applyUpdate releases once the pass has
+// hit disk.
+func (g *BasicSearch) queueUpdate(u *ProjectUpdater, upd *indexUpdate) {
+	g.inflight.Add(1)
+	u.send(upd)
 }
 
 // Should only be called by index.
@@ -342,7 +359,7 @@ func (g *BasicSearch) index(proj *IndexedProject, path string,
 		g.logger.Warn("Project tree exceeds max_files_per_tree; skipping deep index",
 			"root", proj.Root, "limit", g.maxFilesPerTree, "files_indexed", len(proj.Paths))
 		proj.Status = StatusSkippedTooLarge
-		u.send(&indexUpdate{proj: proj, contents: contents})
+		g.queueUpdate(u, &indexUpdate{proj: proj, contents: contents})
 		return
 	}
 	if err != nil {
@@ -350,7 +367,7 @@ func (g *BasicSearch) index(proj *IndexedProject, path string,
 		g.releaseContents(contents)
 		return
 	}
-	u.send(&indexUpdate{proj: proj, contents: contents})
+	g.queueUpdate(u, &indexUpdate{proj: proj, contents: contents})
 }
 
 func (g *BasicSearch) ReIndex(path string) {
@@ -363,7 +380,9 @@ func (g *BasicSearch) ReIndex(path string) {
 		path = filepath.Dir(path)
 	}
 	g.logger.Info("Reindexing ", path)
+	g.inflight.Add(1)
 	go func() {
+		defer g.inflight.Add(-1)
 		fullPath, err2 := absolute(path)
 		if err2 != nil {
 			g.logger.Error("Error getting absolute path", path)
@@ -510,6 +529,10 @@ func (g *BasicSearch) getIndexFile(p *IndexedProject) (*os.File, error) {
 }
 
 func (g *BasicSearch) Index(req *pogoPlugin.IProcessProjectReq) {
+	// Held across the whole walk so Quiesce cannot report idle between a
+	// synchronous Index call starting and queueUpdate taking its own count.
+	g.inflight.Add(1)
+	defer g.inflight.Add(-1)
 	path := (*req).Path()
 	g.mu.RLock()
 	p, ok := g.projects[path]

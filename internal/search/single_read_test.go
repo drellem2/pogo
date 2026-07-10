@@ -70,7 +70,7 @@ func TestZoektBuildReusesCarriedContents(t *testing.T) {
 // build completes.
 func TestCarriedContentBudgetReleasedAfterIndex(t *testing.T) {
 	g := createBasicSearch()
-	root := makeTestRepo(t, "budget")
+	root := makeTestRepo(t, g, "budget")
 
 	req := plugin.IProcessProjectReq(plugin.ProcessProjectReq{PathVar: root})
 	g.Index(&req)

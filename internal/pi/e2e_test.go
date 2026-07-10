@@ -300,27 +300,26 @@ func TestPiEndToEnd(t *testing.T) {
 	// output as seen through pogo's own ANSI stripper. Argv delivery (gh #26)
 	// means no initial nudge waits on it anymore, but the profile retains it
 	// as the measured input-loop-ready marker — this catches it going stale.
-	clean := string(agent.StripANSI(a.RecentOutput(1 << 20)))
-	if !strings.Contains(clean, provider.Nudge.PromptReadySentinel) {
-		t.Errorf("PromptReadySentinel %q not found in stripped pi output — "+
-			"the calibrated marker is stale (pi TUI changed its hint line?)",
-			provider.Nudge.PromptReadySentinel)
+	//
+	// Polled, not sampled once (this de-flake, mg-36d9): nothing orders pi-tui's
+	// first paint of the composer hint line against the mock server receiving a
+	// completion request, which is all that has happened above. Sampling here
+	// asserted on a paint that had not necessarily occurred yet, and failed on
+	// main for a docs-only commit. The condition is monotonic — once the hint
+	// line is in the PTY ring it stays (this test's total output is orders of
+	// magnitude under the 1 MiB window) — so waiting for it is a barrier, not a
+	// retry: if the marker really has gone stale, the timeout still fails.
+	if !waitFor(t, a, 30*time.Second, provider.Nudge.PromptReadySentinel) {
+		t.Errorf("PromptReadySentinel %q not found in stripped pi output within "+
+			"30s — the calibrated marker is stale (pi TUI changed its hint "+
+			"line?)\noutput tail:\n%s",
+			provider.Nudge.PromptReadySentinel, outputTail(a, 2000))
 	}
 
 	// Acceptance: the mock reply rendered — the turn completed in the TUI.
-	deadline = time.Now().Add(15 * time.Second)
-	rendered := false
-	for time.Now().Before(deadline) {
-		clean = string(agent.StripANSI(a.RecentOutput(1 << 20)))
-		if strings.Contains(clean, "PONG") {
-			rendered = true
-			break
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
-	if !rendered {
+	if !waitFor(t, a, 15*time.Second, "PONG") {
 		t.Errorf("mock reply never rendered in the pi TUI.\noutput tail:\n%s",
-			tail(clean, 1200))
+			outputTail(a, 1200))
 	}
 
 	// Acceptance (NudgeProfile calibration): a settled pi composer emits zero
@@ -379,10 +378,9 @@ func TestPiEndToEnd(t *testing.T) {
 		time.Sleep(500 * time.Millisecond)
 	}
 	if mock.count() == turnsBefore {
-		clean = string(agent.StripANSI(a.RecentOutput(1 << 20)))
 		t.Fatalf("mid-session nudge never triggered a completion request — "+
 			"submit terminator or idle handling regressed.\noutput tail:\n%s",
-			tail(clean, 1200))
+			outputTail(a, 1200))
 	}
 	var followReq struct {
 		Messages []struct {
@@ -542,6 +540,25 @@ func TestPiHeadless(t *testing.T) {
 		t.Errorf("--mode json produced no parseable JSON lines.\noutput:\n%s",
 			tail(string(out), 2000))
 	}
+}
+
+// waitFor polls the agent's ANSI-stripped PTY output for a substring until it
+// appears or timeout elapses. Output the agent has already emitted stays in the
+// ring, so this waits for a paint to happen rather than re-rolling a race.
+func waitFor(t *testing.T, a *agent.Agent, timeout time.Duration, want string) bool {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if strings.Contains(string(agent.StripANSI(a.RecentOutput(1<<20))), want) {
+			return true
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	return false
+}
+
+func outputTail(a *agent.Agent, n int) string {
+	return tail(string(agent.StripANSI(a.RecentOutput(1<<20))), n)
 }
 
 func tail(s string, n int) string {

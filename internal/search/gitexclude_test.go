@@ -193,13 +193,18 @@ func TestIndexExcludesPogoDirFromGitStatus(t *testing.T) {
 	runGit(t, repo, "commit", "-m", "init")
 
 	basicSearch := createBasicSearch()
+	quiesceOnCleanup(t, basicSearch)
 	root, err := absolute(repo)
 	if err != nil {
 		t.Fatal(err)
 	}
 	req := plugin.IProcessProjectReq(plugin.ProcessProjectReq{PathVar: root})
 	basicSearch.Index(&req)
-	time.Sleep(1 * time.Second)
+	// Wait for the write shard to land .pogo/search rather than sleeping a
+	// fixed second and hoping — Index returns before the pass hits disk.
+	if !basicSearch.Quiesce(30 * time.Second) {
+		t.Fatal("index pass did not finish within 30s")
+	}
 
 	if _, err := os.Stat(filepath.Join(repo, ".pogo", "search")); err != nil {
 		t.Fatalf("index did not create .pogo/search: %v", err)

@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/go-plugin"
@@ -35,6 +36,11 @@ type BasicSearch struct {
 	// carriedBytes tracks file content carried from hash walks to zoekt
 	// builds, bounded by carriedContentBudget (gh #39).
 	carriedBytes atomic.Int64
+	// inflight counts index work that has not yet finished touching disk:
+	// every Index/ReIndex call (including the goroutines ProcessProject and
+	// ReIndex spawn) and every update queued to the write shards. Quiesce
+	// waits for it to reach zero. See Quiesce for why this exists.
+	inflight atomic.Int64
 	// onIndexed, when set, is invoked after every completed index pass with
 	// the project root and whether file content actually changed. The
 	// periodic indexer uses it to drive backoff-on-unchanged scheduling
@@ -208,9 +214,38 @@ func (g *BasicSearch) ProcessProject(req *pogoPlugin.IProcessProjectReq) error {
 		g.logger.Error("Error processing project", "error", err)
 	}
 	if err != nil || len(proj.Paths) == 0 || proj.Status == StatusStale {
-		go g.Index(req)
+		// Count the goroutine before starting it, not inside it: between the
+		// `go` statement and Index's first instruction the pass is real work
+		// in flight, and a Quiesce in that window must not report idle.
+		g.inflight.Add(1)
+		go func() {
+			defer g.inflight.Add(-1)
+			g.Index(req)
+		}()
 	}
 	return nil
+}
+
+// Quiesce blocks until every in-flight index pass has finished writing, or
+// timeout elapses; it reports whether the service went idle.
+//
+// Indexing is asynchronous end to end. ProcessProject spawns `go Index`, and
+// the sharded write goroutine creates <root>/.pogo/search, the index save
+// file and the zoekt shard *after* the project's status has already flipped
+// to Ready. A caller that stops as soon as its assertions pass — a test
+// returning into t.TempDir()'s RemoveAll — therefore races those writes and
+// fails with "directory not empty" (mg-36d9). Quiesce is the barrier such
+// callers need: it waits for the work itself to finish, rather than retrying
+// an assertion until the race happens to fall the right way.
+func (g *BasicSearch) Quiesce(timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for g.inflight.Load() > 0 {
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	return true
 }
 
 type ProjectStatus struct {

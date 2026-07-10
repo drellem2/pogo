@@ -45,6 +45,7 @@ func TestPeriodicReindexPicksUpNewFile(t *testing.T) {
 	defer RemoveSaveFile()
 
 	repo := t.TempDir()
+	drainSearch(t)
 	if resolved, err := filepath.EvalSymlinks(repo); err == nil {
 		repo = resolved
 	}
@@ -106,6 +107,7 @@ func TestDiscoverNewReposScansIndexRoots(t *testing.T) {
 	defer RemoveSaveFile()
 
 	parentDir := t.TempDir()
+	drainSearch(t)
 	SetIndexRoots([]string{parentDir})
 	defer SetIndexRoots(nil)
 

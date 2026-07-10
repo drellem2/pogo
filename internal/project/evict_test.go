@@ -15,6 +15,7 @@ import (
 func makeGitRepo(t *testing.T) string {
 	t.Helper()
 	repo := t.TempDir()
+	drainSearch(t)
 	if resolved, err := filepath.EvalSymlinks(repo); err == nil {
 		repo = resolved
 	}

@@ -10,6 +10,23 @@ is the curated, human-readable summary kept in sync at each release cut.
 
 ## [Unreleased]
 
+### Fixed
+
+- **CI's TempDir and first-paint flakes, root-caused rather than retried.** Four
+  tests failed on `main` for reasons no PR caused — the worst on a docs-only
+  commit, which is exactly how a team learns to wave through red. Three shared one
+  bug: `search.ProcessProject` indexes from a background goroutine, and the write
+  shard creates `<repo>/.pogo/search` *after* the project's status flips to
+  `Ready`. A test that returned on `Ready` therefore raced `t.TempDir()`'s
+  `RemoveAll` against those writes (`directory not empty`) — or, in
+  `TestWorkerPoolIndexesMultipleProjects`, searched a zoekt shard that was missing
+  or half-written. `BasicSearch.Quiesce` now gives callers a real barrier: it
+  blocks until every in-flight pass has hit disk. The fourth, pi's e2e
+  `PromptReadySentinel` assertion, sampled the PTY the instant the mock server saw
+  its first completion request; measurement showed pi-tui paints the composer hint
+  line 7–229 ms *after* that request, every run, so the assertion's only slack was
+  a 500 ms poll sleep. It now waits for the paint.
+
 ### Changed
 
 - **Agent prompts now ban unanchored `pkill -f`.** The five polecat templates, the

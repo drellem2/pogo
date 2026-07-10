@@ -20,6 +20,10 @@ func TestDiscoverNewReposSkipsProtectedHomeDir(t *testing.T) {
 	defer RemoveSaveFile()
 
 	home := t.TempDir()
+	// discoverNewRepos registers the ~/dev repo, and the search plugin then
+	// indexes it from a background goroutine that writes <repo>/.pogo/search.
+	// Drain that before home is torn down (mg-36d9).
+	drainSearch(t)
 	t.Setenv("HOME", home)
 
 	// A repo under ~/Documents (protected) and one under ~/dev (normal).

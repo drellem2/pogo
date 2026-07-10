@@ -33,6 +33,7 @@ func newTestProject(t *testing.T, files map[string]string) (*BasicSearch, string
 		t.Fatalf("absolute: %v", err)
 	}
 	bs := createBasicSearch()
+	quiesceOnCleanup(t, bs)
 	events := make(chan indexEvent, 16)
 	bs.SetOnIndexed(func(r string, changed bool) {
 		events <- indexEvent{root: r, changed: changed}

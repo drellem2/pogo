@@ -29,7 +29,10 @@ func TestMaxFilesPerTreeCeiling(t *testing.T) {
 	root := dir + string(os.PathSeparator)
 
 	bs := createBasicSearch()
-	defer cleanPogoFolder(t, dir)
+	// Registered before the drain so it runs after it (LIFO): removing .pogo
+	// while the write shard is still creating it is the same race.
+	t.Cleanup(func() { cleanPogoFolder(t, dir) })
+	quiesceOnCleanup(t, bs)
 
 	const ceiling = 50
 	bs.SetMaxFilesPerTree(ceiling)
@@ -83,7 +86,10 @@ func TestUnderCeilingIndexedNormally(t *testing.T) {
 	root := dir + string(os.PathSeparator)
 
 	bs := createBasicSearch()
-	defer cleanPogoFolder(t, dir)
+	// Registered before the drain so it runs after it (LIFO): removing .pogo
+	// while the write shard is still creating it is the same race.
+	t.Cleanup(func() { cleanPogoFolder(t, dir) })
+	quiesceOnCleanup(t, bs)
 	bs.SetMaxFilesPerTree(1000)
 
 	req := plugin.IProcessProjectReq(plugin.ProcessProjectReq{PathVar: root})

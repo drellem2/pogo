@@ -12,9 +12,21 @@ import (
 
 // makeTestRepo creates a minimal project tree with one searchable file and
 // returns its root (with trailing separator, as project roots are stored).
-func makeTestRepo(t *testing.T, marker string) string {
+//
+// The repo lives under t.TempDir(), and g writes its index into
+// <root>/.pogo/search from a background goroutine that outlives the
+// assertions. Cleanups run LIFO, so the drain registered here — after
+// t.TempDir() registered its RemoveAll — runs first and keeps the removal
+// from racing those writes (mg-36d9).
+func makeTestRepo(t *testing.T, g *BasicSearch, marker string) string {
 	t.Helper()
 	dir := t.TempDir()
+	t.Cleanup(func() {
+		if !g.Quiesce(30 * time.Second) {
+			t.Errorf("search service still indexing 30s after the test; "+
+				"its writes into %s will race t.TempDir cleanup", dir)
+		}
+	})
 	content := fmt.Sprintf("// unique-%s-token\n", marker)
 	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(content), 0644); err != nil {
 		t.Fatalf("could not write test file: %v", err)
@@ -48,14 +60,23 @@ func TestWorkerPoolIndexesMultipleProjects(t *testing.T) {
 	const n = 5
 	roots := make([]string, n)
 	for i := 0; i < n; i++ {
-		roots[i] = makeTestRepo(t, fmt.Sprintf("repo%d", i))
+		roots[i] = makeTestRepo(t, g, fmt.Sprintf("repo%d", i))
 	}
 	for _, root := range roots {
 		req := plugin.IProcessProjectReq(plugin.ProcessProjectReq{PathVar: root})
 		go g.Index(&req)
 	}
-	for i, root := range roots {
+	for _, root := range roots {
 		waitForStatus(t, g, root, StatusReady)
+	}
+	// Ready means the index landed in memory; the zoekt shard under
+	// .pogo/search is written after that. Searching on Ready alone read a
+	// missing or half-written shard under load — "no such file or directory"
+	// and "invalid argument" — one of the mg-36d9 flakes on main.
+	if !g.Quiesce(30 * time.Second) {
+		t.Fatal("index passes did not finish writing within 30s")
+	}
+	for i, root := range roots {
 		res, err := g.Search(root, fmt.Sprintf("unique-repo%d-token", i), "10s")
 		if err != nil {
 			t.Fatalf("search failed for %s: %v", root, err)

@@ -11,7 +11,7 @@ import (
 // file lookups, and evicting an unknown root is a no-op.
 func TestEvictDropsProjectState(t *testing.T) {
 	g := createBasicSearch()
-	root := makeTestRepo(t, "evict")
+	root := makeTestRepo(t, g, "evict")
 
 	req := plugin.IProcessProjectReq(plugin.ProcessProjectReq{PathVar: root})
 	g.Index(&req)
