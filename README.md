@@ -100,6 +100,12 @@ pogod only installs default prompts and auto-starts crew agents when a
 configured daemon can also opt out with `[agents] autostart = false` (or
 `POGO_AGENT_AUTOSTART=false`).
 
+## Utilities
+
+Peripheral tools built on the pogo CLI. One bullet per utility.
+
+- [pogo-sleepwake](https://github.com/drellem2/pogo-sleepwake) — launchd-supervised sleep/wake scheduler: nightly park windows plus wake-on-mail, so a parked agent costs ~zero tokens without losing reachability.
+
 ## Community integrations
 
 Integrations built by the community. Open a PR to add yours — one bullet per integration.
