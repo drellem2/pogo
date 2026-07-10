@@ -315,6 +315,80 @@ is the named, accepted single point of failure until the reboot settles tier 2.
 Source of truth: `internal/reaper/`; see
 [docs/design/reaper-design.md](design/reaper-design.md).
 
+## Host reconcile + drift check
+
+`pogo service reconcile` and `pogo service check-drift` close the gap the reaper
+does **not**: the repo is not the running system. A fix can merge correctly into
+git, the code can be correct, and the running host can stay on the old behavior
+— because pogo generates correct artifacts and, until this, had no step that
+reconciled them onto the host and no check that noticed when the host had
+drifted. That defect produced four incidents in a single day, none with a worker
+at fault; one (a stale recovery plist) hid for **six weeks** because nothing
+compared the *loaded* job to what the generator would produce (mg-be0c).
+
+**Complementary to the reaper, not overlapping.** The reaper kickstarts a job
+whose *heartbeat* is stale (a dead or wedged process). Reconcile restarts a job
+after its *file* changed (an alive process running old code). A fresh heartbeat
+proves the process is doing work, not that it runs the current code — a hardened
+poller still executing its pre-hardening loop ticks its heartbeat perfectly, and
+the reaper correctly leaves it alone. Neither covers the other's case.
+
+Declare the host-side artifacts to manage under `[reconcile]`:
+
+```toml
+[reconcile]
+# Each mirror: "<name>|<source>|<target>[|<launchd-label>]". A leading ~ in
+# either path is expanded to $HOME. The label is optional — omit it for a file
+# that is not a running launchd job. Host artifacts are COPIES of their source,
+# never symlinks into a checkout.
+mirrors = [
+  "watchdog|~/dev/pogo-reminders/bin/watchdog.sh|~/.pogo/pogo-reminders/bin/watchdog.sh|com.pogo.watchdog",
+  "gh-issues|~/dev/pogo-reminders/bin/poll-gh-issues.sh|~/.pogo/pogo-reminders/bin/poll-gh-issues.sh|com.pogo.gh-issues",
+]
+```
+
+Four properties are load-bearing and every one is tested (`internal/reconcile`),
+with an end-to-end acceptance in `scripts/reconcile-acceptance.sh`:
+
+- **Copies, never symlinks.** A symlink from `~/.pogo/…/bin/*.sh` into a
+  `~/dev/…` checkout would make an *uncommitted local edit instantly live in
+  production* — no merge, no review — inverting the repo/host boundary this whole
+  step defends. Copies preserve the boundary; the cost is that copies can drift,
+  and drift is detectable (that is what `check-drift` is for).
+- **Atomic replace, never in-place rewrite.** `reconcile` writes a temp file in
+  the target's directory and `rename(2)`s it over the target. bash reads a
+  script by byte offset; rewriting the file under a live interpreter can resume
+  it at a shifted offset and execute garbage. The idle interpreter keeps its
+  original inode until it is replaced wholesale.
+- **Restart the process, never just the file.** Writing bytes changes nothing
+  for a long-lived bash `while` loop — bash parses the loop once and never
+  re-reads the file, so a patched poller can run its pre-patch code for its
+  entire life. After replacing the bytes `reconcile` issues an explicit
+  `launchctl kickstart` (a demand spawn, which works on this host despite the
+  nondemand-spawn wedge, mg-50e0); delegating the restart to `KeepAlive` would
+  restart nothing. A re-run also heals a box whose file is already correct but
+  whose process started before the file was written.
+- **check-drift reports, never fixes — and compares the RUNNING reality.** It
+  never reconciles (an auto-fix loop fighting a genuinely-broken artifact is the
+  unbounded-reaper failure shape); it exits 1 when any mirror drifts so a
+  schedule or CI step can gate on it. It checks three dimensions: **file** (the
+  on-disk copy no longer matches its source), **loaded** (the launchd job execs
+  a *different program* than the target — the recovery-plist case, exactly how a
+  stale plist hid for six weeks), and **process** (the running process started
+  *before* the target was last written, so it parsed old bytes even at the
+  correct path — pa's pollers ran 41 minutes of pre-patch code). The last two are
+  the running-reality checks: *the file is not the process.*
+
+Run `check-drift` on a schedule so drift shouts rather than rots — a reconcile
+step you must remember to run is another thing that silently goes stale:
+
+```bash
+pogo schedule "$POGO_AGENT_NAME" --cron "*/15 * * * *" --id reconcile-drift \
+    --message "Run: pogo service check-drift; if it exits 1, run pogo service reconcile."
+```
+
+Source of truth: `internal/reconcile/`.
+
 ## Agent registry
 
 Each agent has a directory under `~/.pogo/agents/<name>/` holding its prompt,

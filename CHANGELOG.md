@@ -12,6 +12,26 @@ is the curated, human-readable summary kept in sync at each release cut.
 
 ### Added
 
+- **Host reconcile step + drift check (mg-be0c).** `pogo service reconcile`
+  copies declared `[reconcile]` mirrors (poller scripts) from their repo source
+  onto the host and restarts the running job so the change is actually live:
+  **atomic replace** (temp file + `rename(2)`, never an in-place rewrite that
+  could resume a live bash interpreter at a shifted byte offset) followed by an
+  explicit **`launchctl kickstart`** (writing bytes changes nothing for a
+  long-lived `while` loop, and the nondemand-spawn wedge means `KeepAlive`
+  restarts nothing — mg-50e0). Host artifacts are **copies, never symlinks** into
+  a checkout: a symlink would make an uncommitted local edit instantly live in
+  production, inverting the repo/host boundary. `pogo service check-drift`
+  **reports** (never auto-fixes; exits 1 on drift) and compares the **running
+  reality**, not just the on-disk file — the *loaded* launchd program path (the
+  recovery-plist case that hid for six weeks, mg-6e82) and the running process's
+  start time vs the target's mtime (pa's pollers ran 41 minutes of pre-patch
+  code). This closes the defect behind four incidents in one day — the repo is
+  not the running system and nothing detected the gap — and is **complementary**
+  to the tier-1 reaper: the reaper kickstarts a *stale-heartbeat* job (dead
+  process), reconcile restarts a *changed-file* job (alive process, old code);
+  neither subsumes the other. End-to-end proof in
+  `scripts/reconcile-acceptance.sh`; see `docs/CONFIGURATION.md`.
 - **Tier-1 heartbeat reaper inside pogod (mg-d18b).** A goroutine that watches a
   declared list of launchd jobs and `launchctl kickstart`s any whose *heartbeat*
   has gone stale. Liveness is heartbeat freshness (a state-file mtime vs the

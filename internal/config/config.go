@@ -161,6 +161,7 @@ type Config struct {
 	GitGC      GitGCConfig
 	StallWatch StallWatchConfig
 	Reaper     ReaperConfig
+	Reconcile  ReconcileConfig
 	// Source is the path of the highest-precedence config file Load read, or
 	// "" when no config file was found and everything is defaults + env. pogod
 	// uses this to gate crew auto-start: a daemon with no config file is
@@ -277,6 +278,30 @@ type ReaperJob struct {
 	Label     string
 	Heartbeat string
 	Period    time.Duration
+}
+
+// ReconcileConfig declares the host-side artifacts that `pogo service
+// reconcile` and `pogo service check-drift` manage (mg-be0c). Each mirror is a
+// COPY of a generator/repo source — never a symlink into a checkout — so the
+// repo/host boundary is preserved and drift is detectable. See
+// internal/reconcile.
+type ReconcileConfig struct {
+	// Mirrors is the declared mirror list. Each entry is a single line of the
+	// form
+	//   "<name>|<source>|<target>[|<launchd-label>]"
+	// e.g. "watchdog|~/dev/pogo-reminders/bin/watchdog.sh|~/.pogo/pogo-reminders/bin/watchdog.sh|com.pogo.watchdog".
+	// A leading ~ in either path is expanded to the user's home directory. The
+	// label is optional: omit it for a file that is not a running launchd job.
+	// Malformed entries are dropped (and reported) at load.
+	Mirrors []ReconcileMirror
+}
+
+// ReconcileMirror is one parsed [reconcile] mirrors entry.
+type ReconcileMirror struct {
+	Name   string
+	Source string
+	Target string
+	Label  string
 }
 
 // AgentsConfig holds agent command configuration.
@@ -521,6 +546,9 @@ func Load() *Config {
 		}
 		if len(fileCfg.Reaper.Jobs) > 0 {
 			cfg.Reaper.Jobs = fileCfg.Reaper.Jobs
+		}
+		if len(fileCfg.Reconcile.Mirrors) > 0 {
+			cfg.Reconcile.Mirrors = fileCfg.Reconcile.Mirrors
 		}
 		if fileCfg.stallWatchEnabledSet {
 			cfg.StallWatch.Enabled = fileCfg.StallWatch.Enabled
@@ -1007,6 +1035,11 @@ func parseConfigFileInto(cfg *parsedConfig, path string) error {
 			case "jobs":
 				cfg.Reaper.Jobs = parseReaperJobs(parseStringArray(val))
 			}
+		case "reconcile":
+			switch key {
+			case "mirrors":
+				cfg.Reconcile.Mirrors = parseReconcileMirrors(parseStringArray(val))
+			}
 		case "agents":
 			switch key {
 			case "autostart":
@@ -1084,6 +1117,50 @@ func parseReaperJobs(entries []string) []ReaperJob {
 		out = append(out, ReaperJob{Label: label, Heartbeat: path, Period: period})
 	}
 	return out
+}
+
+// parseReconcileMirrors turns raw "<name>|<source>|<target>[|<label>]" entries
+// into ReconcileMirror values. The label is optional (three or four fields).
+// A leading ~ in source/target is expanded to the home directory so config can
+// be written portably. Malformed entries (wrong field count or an empty
+// name/source/target) are dropped with a log line rather than failing the whole
+// config load — a typo in one mirror should not take reconcile (or pogod) down.
+// The flat single-line encoding matches [reaper] jobs: pogo's config is
+// hand-parsed flat TOML with no table-array support.
+func parseReconcileMirrors(entries []string) []ReconcileMirror {
+	var out []ReconcileMirror
+	for _, e := range entries {
+		parts := strings.Split(e, "|")
+		if len(parts) != 3 && len(parts) != 4 {
+			log.Printf("config: [reconcile] ignoring malformed mirror %q (want name|source|target[|label])", e)
+			continue
+		}
+		name := strings.TrimSpace(parts[0])
+		source := expandTildePath(strings.TrimSpace(parts[1]))
+		target := expandTildePath(strings.TrimSpace(parts[2]))
+		label := ""
+		if len(parts) == 4 {
+			label = strings.TrimSpace(parts[3])
+		}
+		if name == "" || source == "" || target == "" {
+			log.Printf("config: [reconcile] ignoring invalid mirror %q", e)
+			continue
+		}
+		out = append(out, ReconcileMirror{Name: name, Source: source, Target: target, Label: label})
+	}
+	return out
+}
+
+// expandTildePath expands a leading ~ to the user's home directory. A bare ~ or
+// ~/... only; ~user is left untouched (unsupported). Mirrors the reaper's
+// expandHome so config paths are written portably.
+func expandTildePath(p string) string {
+	if p == "~" || strings.HasPrefix(p, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, strings.TrimPrefix(p, "~"))
+		}
+	}
+	return p
 }
 
 // parseStringArray parses a minimal single-line TOML string array,
