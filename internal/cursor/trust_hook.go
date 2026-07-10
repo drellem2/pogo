@@ -55,6 +55,25 @@ func matchesTrustDialog(output []byte) bool {
 	return trustDialogMarker.MatchString(collapsed)
 }
 
+// composerReady reports whether Cursor's composer placeholder has rendered,
+// which proves the trust dialog is not on screen: the dialog blocks the TUI,
+// and the placeholder is absent for as long as it is up (verified 3/3 against a
+// live, never-dismissed dialog).
+//
+// This is the hook's false-positive guard, and it is load-bearing.
+// trustDialogMarker matches on PTY *text*, and Cursor echoes the argv-delivered
+// task into the TUI — so a work item whose body merely quotes the dialog ("[a]
+// Trust this workspace") matches the marker. Without this guard, a spawn into an
+// already-trusted worktree (Registry.Respawn re-enters the same Dir, and
+// Cursor persists trust per workspace) would see no dialog, match the echoed
+// task instead, and type a stray "a" into the live composer — corrupting the
+// next nudge, whose body would arrive prefixed by it.
+//
+// mg-c146's own ticket body would have tripped this.
+func composerReady(output []byte) bool {
+	return strings.Contains(string(agent.StripANSI(output)), promptReadySentinel)
+}
+
 // TrustDialogPollInterval is how often to scan PTY output for the trust dialog.
 const TrustDialogPollInterval = 250 * time.Millisecond
 
@@ -96,6 +115,13 @@ func TrustDialogHook(a *agent.Agent) {
 			output := a.RecentOutput(8192)
 			if len(output) == 0 {
 				continue
+			}
+			// The composer is up, so no dialog is blocking. Stop scanning
+			// before the echoed task can be mistaken for the dialog, and
+			// return early on an already-trusted worktree instead of polling
+			// out the full timeout. See composerReady.
+			if composerReady(output) {
+				return
 			}
 			if matchesTrustDialog(output) {
 				log.Printf("agent %s: detected Cursor workspace-trust dialog, auto-accepting", a.Name)
