@@ -151,12 +151,17 @@ type Config struct {
 	Heartbeat  HeartbeatConfig
 	GitGC      GitGCConfig
 	StallWatch StallWatchConfig
-	// Source is the path of the config file Load read its values from, or ""
-	// when no config file was found and everything is defaults + env. pogod
+	// Source is the path of the highest-precedence config file Load read, or
+	// "" when no config file was found and everything is defaults + env. pogod
 	// uses this to gate crew auto-start: a daemon with no config file is
 	// treated as an unconfigured/isolated instance and must not spawn agents
-	// (mg-3dc3).
+	// (mg-3dc3). When two layers exist, the values in the Config come from
+	// both — see Sources.
 	Source string
+	// Sources lists every config file Load actually read, lowest precedence
+	// first (~/.config/pogo/config.toml, then $POGO_HOME/config.toml). Empty
+	// when no config file was found. Source is the last entry.
+	Sources []string
 }
 
 // StallWatchConfig configures pogod's passive stall watcher, which rides the
@@ -353,9 +358,14 @@ type RefineryConfig struct {
 	PollInterval time.Duration
 }
 
-// parsedConfig is the intermediate result of reading config.toml.
+// parsedConfig is the intermediate result of reading the config layers.
 // It tracks which fields were explicitly set so Load() can distinguish
 // "unset" from "set to a zero value" (e.g. enabled = false).
+//
+// One parsedConfig is filled by every layer in turn (lowest precedence first),
+// which is what makes the merge key-by-key: parseConfigFileInto only assigns a
+// field when its key appears on a line, so a higher layer overrides exactly the
+// keys it names and leaves the rest of the lower layer's values in place.
 type parsedConfig struct {
 	Config
 	refineryEnabledSet     bool
@@ -363,12 +373,20 @@ type parsedConfig struct {
 	stallWatchEnabledSet   bool
 	priorityWakeEnabledSet bool
 	agentsAutoStartSet     bool
+	// sources are the files that were read, lowest precedence first.
+	sources []string
 }
 
 // Load reads configuration from (in priority order):
-//  1. POGO_PORT environment variable
-//  2. ~/.config/pogo/config.toml [server] port field
-//  3. Default (10000)
+//  1. Environment variables (POGO_PORT, POGO_AGENT_COMMAND, …)
+//  2. $POGO_HOME/config.toml, key by key
+//  3. ~/.config/pogo/config.toml, key by key
+//  4. Compiled-in defaults
+//
+// The two config files LAYER: a key set in $POGO_HOME/config.toml overrides the
+// same key in ~/.config/pogo/config.toml, and every key it does not set keeps
+// the ~/.config value. See loadConfigFiles for why whole-file precedence was a
+// footgun (mg-cf9e).
 func Load() *Config {
 	cfg := &Config{
 		Port:            DefaultPort,
@@ -402,9 +420,10 @@ func Load() *Config {
 		},
 	}
 
-	// Try config file first (lowest priority, overridden by env)
-	if fileCfg, err := loadConfigFile(); err == nil {
-		cfg.Source = ConfigFilePath()
+	// Try config files first (lowest priority, overridden by env)
+	if fileCfg, err := loadConfigFiles(); err == nil {
+		cfg.Sources = fileCfg.sources
+		cfg.Source = fileCfg.sources[len(fileCfg.sources)-1]
 		if fileCfg.Port != 0 {
 			cfg.Port = fileCfg.Port
 		}
@@ -560,14 +579,19 @@ func ConfigDir() string {
 	return filepath.Join(home, ".config", "pogo")
 }
 
-// ConfigFilePath returns the path to the pogo config file.
+// ConfigFilePath returns the path pogo WRITES config to, and the path whose
+// existence answers "is this an install with a config file?".
 //
 // When POGO_HOME is set and $POGO_HOME/config.toml exists, that file wins so
-// an isolated daemon (tests, CI) reads its own config instead of the real
+// an isolated daemon (tests, CI) writes its own config instead of the real
 // user's (mg-3dc3). Otherwise the XDG path from ConfigDir applies. The
 // POGO_HOME probe is existence-gated rather than unconditional so
 // deployments that set POGO_HOME but keep config.toml in ~/.config/pogo
 // (the historical layout) are unaffected.
+//
+// It is NOT the whole read path: Load reads every layer ConfigFilePaths
+// returns and merges them key by key. Callers that want "where did this value
+// come from" should read Config.Sources.
 func ConfigFilePath() string {
 	if os.Getenv("POGO_HOME") != "" {
 		p := filepath.Join(PogoHome(), "config.toml")
@@ -580,6 +604,29 @@ func ConfigFilePath() string {
 		return ""
 	}
 	return filepath.Join(dir, "config.toml")
+}
+
+// ConfigFilePaths returns the config file layers Load reads, LOWEST precedence
+// first: the XDG file (~/.config/pogo/config.toml), then — when POGO_HOME is
+// set — $POGO_HOME/config.toml. Paths are returned whether or not they exist;
+// Load skips the missing ones.
+//
+// The POGO_HOME layer is gated on the env var, not on PogoHome(), so an install
+// that never sets POGO_HOME keeps reading exactly one file (~/.pogo/config.toml
+// has never been consulted in that case, and starting now would be a surprise).
+// A POGO_HOME that resolves onto the XDG directory yields one layer, not two.
+func ConfigFilePaths() []string {
+	var paths []string
+	if dir := ConfigDir(); dir != "" {
+		paths = append(paths, filepath.Join(dir, "config.toml"))
+	}
+	if os.Getenv("POGO_HOME") != "" {
+		p := filepath.Join(PogoHome(), "config.toml")
+		if len(paths) == 0 || filepath.Clean(paths[0]) != filepath.Clean(p) {
+			paths = append(paths, p)
+		}
+	}
+	return paths
 }
 
 // PogoHome returns the pogo state directory: $POGO_HOME, or ~/.pogo when
@@ -716,21 +763,58 @@ func (c *Config) DialAddr() string {
 	return fmt.Sprintf("127.0.0.1:%d", c.Port)
 }
 
-// loadConfigFile reads port from the TOML config file.
-// Only parses the minimal subset needed: [server] section with port key.
-func loadConfigFile() (*parsedConfig, error) {
-	path := ConfigFilePath()
-	if path == "" {
+// loadConfigFiles reads every config layer in ConfigFilePaths and merges them
+// KEY BY KEY into one parsedConfig, lowest precedence first. It returns an
+// error when no layer exists at all, which is Load's signal to stay on
+// defaults + env.
+//
+// Key-by-key is the whole point. $POGO_HOME/config.toml used to shadow
+// ~/.config/pogo/config.toml wholesale: whichever file ConfigFilePath picked
+// was the only file read. That made the file a trapdoor — anything that
+// created a partial $POGO_HOME/config.toml (a sandbox script, a test fixture,
+// an operator pinning a port) silently dropped every key the real config
+// carried, including the [agents] coordinator/worker pin the default-migration
+// guard writes there. Dropping the pin re-arms the role-default flip (mg-ce47)
+// against a deployment that was explicitly protected from it. Layering keeps
+// the unnamed keys and overrides only what the higher file actually says
+// (mg-cf9e).
+func loadConfigFiles() (*parsedConfig, error) {
+	paths := ConfigFilePaths()
+	if len(paths) == 0 {
 		return nil, fmt.Errorf("no config path")
 	}
 
+	cfg := &parsedConfig{}
+	var firstErr error
+	for _, path := range paths {
+		switch err := parseConfigFileInto(cfg, path); {
+		case err == nil:
+			cfg.sources = append(cfg.sources, path)
+		case os.IsNotExist(err):
+			// A missing layer is the normal case, not an error.
+		case firstErr == nil:
+			firstErr = err
+		}
+	}
+	if len(cfg.sources) == 0 {
+		if firstErr != nil {
+			return nil, firstErr
+		}
+		return nil, os.ErrNotExist
+	}
+	return cfg, nil
+}
+
+// parseConfigFileInto parses one TOML config file into cfg, overwriting only
+// the fields whose keys the file names. Only the minimal subset pogo needs is
+// understood; unknown sections and keys are ignored.
+func parseConfigFileInto(cfg *parsedConfig, path string) error {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer f.Close()
 
-	cfg := &parsedConfig{}
 	currentSection := ""
 	scanner := bufio.NewScanner(f)
 
@@ -884,7 +968,7 @@ func loadConfigFile() (*parsedConfig, error) {
 		}
 	}
 
-	return cfg, scanner.Err()
+	return scanner.Err()
 }
 
 // unquote strips one matched pair of surrounding TOML string quotes — basic

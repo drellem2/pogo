@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -162,5 +163,134 @@ func TestPinAndResolveRoles_NoConfigNeitherPinsNorCreatesOne(t *testing.T) {
 		if _, err := os.Stat(p); !os.IsNotExist(err) {
 			t.Errorf("pogod created %s with no config present", p)
 		}
+	}
+}
+
+// The mg-cf9e scenario, end to end through pogod's own boot ordering. The
+// [agents] pin lives in ~/.config/pogo/config.toml, where the migration guard
+// wrote it. Something — a sandbox script, a test fixture, an operator pinning a
+// port — creates a $POGO_HOME/config.toml that says nothing about roles. That
+// file used to shadow the pinned one wholesale, so this boot resolved the flipped
+// default, auto-started a coordinator named "ringmaster", armed the stall watcher
+// on it, and left the running "mayor" holding an orphaned mailbox.
+//
+// Bare literals: comparing against Default* would follow a future flip.
+func TestPinAndResolveRoles_PartialPogoHomeConfigDoesNotDropThePin(t *testing.T) {
+	state := sandboxHome(t)
+	restoreRoleNames(t)
+
+	xdgPogo := filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "pogo")
+	if err := os.MkdirAll(xdgPogo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	xdgCfg := filepath.Join(xdgPogo, "config.toml")
+	pinned := "[agents]\ncoordinator = \"mayor\"\nworker = \"polecat\"\n"
+	if err := os.WriteFile(xdgCfg, []byte(pinned), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The trapdoor: a POGO_HOME config with no [agents] section at all.
+	homeCfg := filepath.Join(state, "config.toml")
+	if err := os.WriteFile(homeCfg, []byte("[server]\nport = 10001\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := pinAndResolveRoles(config.Load())
+
+	if cfg.Agents.Coordinator != "mayor" {
+		t.Errorf("cfg coordinator = %q, want mayor — pogod would auto-start %q and kill the running mayor",
+			cfg.Agents.Coordinator, cfg.Agents.Coordinator)
+	}
+	if cfg.Agents.Worker != "polecat" {
+		t.Errorf("cfg worker = %q, want polecat", cfg.Agents.Worker)
+	}
+	if got := agent.CoordinatorName(); got != "mayor" {
+		t.Errorf("process-wide coordinator name = %q, want mayor — this is the name AutoStartAgents spawns", got)
+	}
+	if cfg.StallWatch.Agent != "mayor" {
+		t.Errorf("stall watch agent = %q, want mayor", cfg.StallWatch.Agent)
+	}
+	if cfg.Port != 10001 {
+		t.Errorf("port = %d, want 10001 — the POGO_HOME layer still overrides the keys it sets", cfg.Port)
+	}
+	// The pin is already satisfied by the XDG layer; pogod must not re-pin it
+	// into the POGO_HOME layer, where it would override that operator's file.
+	data, err := os.ReadFile(homeCfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "coordinator") {
+		t.Errorf("pin leaked into the POGO_HOME layer; a key set in any layer is already pinned:\n%s", data)
+	}
+}
+
+// Even with the pin gone from every layer — the worst case, an install the
+// migration guard never reached — a coordinator that is RUNNING is not renamed.
+// This is what makes the config pin stop being load-bearing (mg-cf9e).
+func TestPinAndResolveRoles_RefusesToRenameARunningCoordinator(t *testing.T) {
+	state := sandboxHome(t)
+	restoreRoleNames(t)
+
+	// Config says "ringmaster" outright — the worst case. The key is present, so
+	// the migration guard is a no-op and cannot be what saves us here: only the
+	// rename refusal can.
+	if err := os.WriteFile(filepath.Join(state, "config.toml"),
+		[]byte("[agents]\ncoordinator = \"ringmaster\"\nworker = \"pogocat\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// A live coordinator named "mayor" — an orphan of a SIGKILLed pogod, say.
+	sleep := exec.Command("sleep", "600")
+	if err := sleep.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sleep.Process.Kill(); _ = sleep.Wait() })
+	if err := config.RecordRunningCoordinator("mayor", sleep.Process.Pid); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := config.Load().Agents.Coordinator; got != "ringmaster" {
+		t.Fatalf("precondition: Load() coordinator = %q, want the configured %q", got, "ringmaster")
+	}
+
+	cfg := pinAndResolveRoles(config.Load())
+
+	if cfg.Agents.Coordinator != "mayor" {
+		t.Errorf("cfg coordinator = %q, want mayor — a running coordinator must never be renamed", cfg.Agents.Coordinator)
+	}
+	if got := agent.CoordinatorName(); got != "mayor" {
+		t.Errorf("process-wide coordinator name = %q, want mayor", got)
+	}
+	if cfg.StallWatch.Agent != "mayor" {
+		t.Errorf("stall watch agent = %q, want mayor", cfg.StallWatch.Agent)
+	}
+}
+
+// A coordinator that is not running may still be renamed — the documented way to
+// rename the role. The guard freezes live processes, not config files.
+func TestPinAndResolveRoles_StoppedCoordinatorIsRenamable(t *testing.T) {
+	state := sandboxHome(t)
+	restoreRoleNames(t)
+
+	if err := os.WriteFile(filepath.Join(state, "config.toml"),
+		[]byte("[agents]\ncoordinator = \"boss\"\nworker = \"polecat\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// A record left by a coordinator that has since exited.
+	done := exec.Command("true")
+	if err := done.Run(); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.RecordRunningCoordinator("mayor", done.Process.Pid); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := pinAndResolveRoles(config.Load())
+
+	if cfg.Agents.Coordinator != "boss" {
+		t.Errorf("cfg coordinator = %q, want boss — a stopped coordinator must remain renamable", cfg.Agents.Coordinator)
+	}
+	if got := agent.CoordinatorName(); got != "boss" {
+		t.Errorf("process-wide coordinator name = %q, want boss", got)
 	}
 }

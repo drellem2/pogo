@@ -166,7 +166,11 @@ func PinRoleDefaultsIfExistingInstall(existing bool) (PinResult, error) {
 	}
 	content := string(data)
 
-	present := agentsSectionKeys(content)
+	// A role key set in ANY layer is already pinned — Load merges the layers key
+	// by key, so writing the frozen default into the higher-precedence file would
+	// override a value the operator set in the lower one. Presence is read across
+	// every layer; the write still goes to ConfigFilePath (mg-cf9e).
+	present := presentAgentsKeys()
 	var toPin []roleDefault
 	for _, rd := range roleDefaults() {
 		if !present[rd.key] {
@@ -219,6 +223,23 @@ func PinRoleDefaultsIfExistingInstall(existing bool) (PinResult, error) {
 func PinAndLoad(existing bool) (*Config, PinResult, error) {
 	res, err := PinRoleDefaultsIfExistingInstall(existing)
 	return Load(), res, err
+}
+
+// presentAgentsKeys returns the union of the [agents] keys set by any config
+// layer. That union — not the single file the pin writes to — is the pin's
+// done-signal, because Load resolves a role name from whichever layer sets it.
+func presentAgentsKeys() map[string]bool {
+	keys := map[string]bool{}
+	for _, p := range ConfigFilePaths() {
+		data, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		for k := range agentsSectionKeys(string(data)) {
+			keys[k] = true
+		}
+	}
+	return keys
 }
 
 // agentsSectionKeys returns the set of keys already present under the top-level
