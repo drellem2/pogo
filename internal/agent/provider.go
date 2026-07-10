@@ -193,15 +193,26 @@ var DefaultNudgeProfile = NudgeProfile{
 	PromptReadySentinel: "? for shortcuts",
 
 	// Alternates keep readiness detection working after Claude Code's composer
-	// dropped the "? for shortcuts" hint (v2.1.x). Two markers render only once
-	// the interactive input loop is up: the mode bar's mode-cycle hint and the
-	// empty composer's rotating placeholder. NOTE the missing spaces: v2.1.x
-	// renders the footer with per-word cursor-column moves (ESC[<n>G), so after
-	// ANSI stripping the words concatenate — the live PTY yields
-	// "accepteditson(shift+tabtocycle)…" and `❯ Try"…"`, not the spaced forms.
-	// "shift+tabtocycle" is mode-invariant (shown for every permission mode);
-	// `Try"` marks the empty composer a fresh spawn always starts at. Without
-	// these, v2.1.x spawns never match the primary sentinel and burn the full
-	// 60s InitialNudgeTimeout as dead time on every worker.
-	PromptReadyAlternates: []string{"shift+tabtocycle", "Try\""},
+	// dropped the spaced "? for shortcuts" hint (v2.1.x). NOTE the missing
+	// spaces below: v2.1.x renders the footer with per-word cursor-column moves
+	// (ESC[<n>G), so after ANSI stripping the words concatenate — the live PTY
+	// yields "bypasspermissionson (shift+tabtocycle)", "?forshortcuts", and
+	// `❯ Try"…"`, not the spaced forms. Which marker is present depends on the
+	// harness's permission mode, so the set is ordered structural-first with a
+	// mode-invariant fallback (all three verified against real captured v2.1.206
+	// PTY bytes, both bypass-permissions and manual modes):
+	//   - "shift+tabtocycle": the mode-cycle hint in the accept-edits and
+	//     bypass-permissions mode bars. Polecats spawn with
+	//     --dangerously-skip-permissions (bypass mode), so this is the primary
+	//     structural marker for a real spawn. It is NOT shown in manual mode.
+	//   - "?forshortcuts": the manual-mode footer's shortcuts hint — the same
+	//     "? for shortcuts" text the primary sentinel wants, but spaceless. It
+	//     covers a claude run in manual permission mode (absent in bypass mode).
+	//   - "Try\"": the empty composer's rotating placeholder prefix. It is the
+	//     only marker present in every mode we captured, so it is kept last as a
+	//     mode-invariant fallback — but it is preferred least because the
+	//     placeholder text can be reworded across harness versions.
+	// Without these, v2.1.x spawns never match the primary sentinel and burn the
+	// full 60s InitialNudgeTimeout as dead time on every worker.
+	PromptReadyAlternates: []string{"shift+tabtocycle", "?forshortcuts", "Try\""},
 }
