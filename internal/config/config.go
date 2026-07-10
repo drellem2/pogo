@@ -640,9 +640,13 @@ const maxUnixSocketPathLen = 103
 // merely a ceiling: a longer name is refused (HTTP 400) under every POGO_HOME,
 // shallow or deep, rather than spawning an agent that runs fine but can never be
 // attached to. Enforcing it unconditionally is the point — a name's fate must
-// not depend on how deep the operator's root happens to be. Should this
-// arithmetic ever drift from the real sun_path limit, agent.Spawn also treats a
-// permanent bind failure as fatal, so the failure is loud either way (mg-ef80).
+// not depend on how deep the operator's root happens to be.
+//
+// The promise holds only because AgentSocketDir never returns a directory with
+// less than agentSocketLeafBudget bytes of headroom, on any root and any TMPDIR;
+// TestAgentSocketDirAlwaysFits pins that. Should this arithmetic ever drift from
+// the real sun_path limit anyway, agent.Spawn treats a permanent bind failure as
+// fatal, so the failure is loud rather than silent either way (mg-ef80).
 const MaxAgentNameLen = 24
 
 // agentSocketLeafBudget reserves room for the "/<agent name>.sock" leaf that
@@ -669,16 +673,31 @@ const agentSocketLeafBudget = len("/") + MaxAgentNameLen + len(".sock")
 // The sun_path limit forces one wrinkle. A sufficiently deep POGO_HOME (a
 // t.TempDir() under /var/folders on darwin, say) leaves no room for the socket
 // leaf, and bind would fail with EINVAL. Such a root falls back to a short
-// directory under os.TempDir() named for a hash of the root — so the per-root
-// distinctness this function exists to guarantee survives the fallback. The hash
-// is taken over the cleaned root so that "/a/b" and "/a/b/" — which the lockfile
-// already treats as one daemon — agree on one socket dir too.
+// directory named for a hash of the root — so the per-root distinctness this
+// function exists to guarantee survives the fallback. The hash is taken over the
+// cleaned root so that "/a/b" and "/a/b/" — which the lockfile already treats as
+// one daemon — agree on one socket dir too.
+//
+// The returned directory always leaves room for the reserved MaxAgentNameLen
+// leaf; every caller, and MaxAgentNameLen's promise to agent.ValidateAgentName,
+// depends on that. The fallback therefore prefers os.TempDir() — per-user on
+// darwin, and where these sockets already live — but only when it fits, because
+// TMPDIR is itself unbounded: a TMPDIR over ~52 bytes leaves a directory in which
+// no legal agent name could bind, which agent.Spawn treats as a fatal error
+// rather than the silent attach loss it used to be. "/tmp" is the last resort;
+// at 4 bytes it fits under any budget these constants could grow to. If it is
+// not writable, NewRegistry's MkdirAll fails and pogod exits loudly at startup,
+// which is the honest outcome (mg-ef80).
 func AgentSocketDir() (dir string, insidePogoHome bool) {
 	if dir := filepath.Join(PogoHome(), "agents", "sockets"); agentSocketDirFits(dir) {
 		return dir, true
 	}
 	sum := sha256.Sum256([]byte(filepath.Clean(PogoHome())))
-	return filepath.Join(os.TempDir(), "pogo-agents-"+hex.EncodeToString(sum[:4])), false
+	leaf := "pogo-agents-" + hex.EncodeToString(sum[:4])
+	if dir := filepath.Join(os.TempDir(), leaf); agentSocketDirFits(dir) {
+		return dir, false
+	}
+	return filepath.Join("/tmp", leaf), false
 }
 
 // agentSocketDirFits reports whether dir leaves room to bind an agent socket

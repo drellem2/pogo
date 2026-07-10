@@ -335,6 +335,14 @@ startup when it takes this path. Everything else still lives under the root. If
 you want your sockets under `POGO_HOME` (nicer to inspect and clean up), pick a
 shallow root: `~/.pogo-sandbox` fits comfortably, a 90-byte path does not.
 
+`$TMPDIR` is itself unbounded, so if it is long enough to squeeze out the
+reserved name budget (roughly 52+ bytes), the sockets degrade one step further to
+`/tmp/pogo-agents-<hash of the root>`, which fits under any root. The hash — and
+with it the per-root isolation — is unchanged. This only matters if you run pogod
+with an unusually deep `TMPDIR`; the guarantee it protects is that **the 24-byte
+agent-name budget below holds under every root and every `TMPDIR`**, so a legal
+name never fails to bind.
+
 The same limit implies a hard ceiling on **agent names**: pogo reserves 24 bytes
 for `<agent>.sock` when choosing the socket directory (`MaxAgentNameLen`). Real
 names are far shorter — `pm-dealdesk` is 11, a polecat is named for its work

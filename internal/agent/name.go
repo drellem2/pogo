@@ -23,10 +23,13 @@ var ErrInvalidAgentName = errors.New("invalid agent name")
 // of the name alone: a name either works under every POGO_HOME or fails under
 // all of them. Enforcing it only where it actually overflows would make spawn
 // succeed or fail based on how deep the operator's root happens to be, which is
-// the surprise this check exists to remove. Spawn also treats a permanent bind
-// failure as fatal, so a name that passes here and still cannot bind — should
-// the reservation arithmetic ever drift from sun_path — fails the spawn instead
-// of silently losing attach (mg-ef80).
+// the surprise this check exists to remove.
+//
+// That equivalence rests on config.AgentSocketDir always reserving
+// MaxAgentNameLen bytes for the name, whatever the root or TMPDIR. Spawn also
+// treats a permanent bind failure as fatal, so a name that passes here and still
+// cannot bind — should the reservation arithmetic ever drift from sun_path —
+// fails the spawn instead of silently losing attach (mg-ef80).
 //
 // The comparison is on bytes, not runes: sun_path is a byte budget.
 func ValidateAgentName(name string) error {

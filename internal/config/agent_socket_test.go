@@ -293,3 +293,117 @@ func TestAgentSocketDirLegacyHomeNormalized(t *testing.T) {
 		t.Errorf("AgentSocketDir() with POGO_HOME=$HOME = %q, want %q", dir, want)
 	}
 }
+
+// tmpDirOfLen returns an existing directory of exactly n bytes, for sitting
+// TMPDIR on a chosen side of the socket-dir budget.
+func tmpDirOfLen(t *testing.T, n int) string {
+	t.Helper()
+	base := shortHome(t)
+	pad := n - len(base) - 1 // -1 for the separator
+	if pad < 1 || pad > 255 {
+		t.Fatalf("cannot build a %d-byte TMPDIR from a %d-byte base in one component", n, len(base))
+	}
+	dir := filepath.Join(base, strings.Repeat("t", pad))
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if len(dir) != n {
+		t.Fatalf("built TMPDIR %q is %d bytes, want %d", dir, len(dir), n)
+	}
+	return dir
+}
+
+// TestAgentSocketDirAlwaysFits is the invariant MaxAgentNameLen's promise rests
+// on: whatever the root and whatever TMPDIR, the directory AgentSocketDir hands
+// back leaves room for the reserved "/<name>.sock" leaf. Without it, a name
+// inside the 24-byte ceiling can still fail to bind — which agent.Spawn treats
+// as fatal — so the ceiling would be a ceiling again and not a promise.
+//
+// The long-TMPDIR rows are the regression: the fallback used to derive from
+// os.TempDir() unchecked, so a TMPDIR past ~52 bytes produced a socket dir in
+// which no legal agent name could bind (mg-ef80, review round 1 blocking 1).
+func TestAgentSocketDirAlwaysFits(t *testing.T) {
+	// bindable is false for "/": its socket dir fits, but only root can create
+	// /agents/sockets, so that row asserts the budget without binding.
+	roots := map[string]struct {
+		mk       func(*testing.T) string
+		bindable bool
+	}{
+		"shallow root": {shortHome, true},
+		"deep root":    {deepHome, true},
+		"root is /":    {func(*testing.T) string { return "/" }, false},
+	}
+	tmpdirs := map[string]func(*testing.T) string{
+		"short TMPDIR": func(t *testing.T) string { return tmpDirOfLen(t, 20) },
+		"TMPDIR at the budget limit": func(t *testing.T) string {
+			return tmpDirOfLen(t, maxUnixSocketPathLen-agentSocketLeafBudget-len("/pogo-agents-abcdef01"))
+		},
+		"TMPDIR one byte past the budget": func(t *testing.T) string {
+			return tmpDirOfLen(t, maxUnixSocketPathLen-agentSocketLeafBudget-len("/pogo-agents-abcdef01")+1)
+		},
+		"pathologically long TMPDIR": func(t *testing.T) string { return tmpDirOfLen(t, 90) },
+	}
+
+	for rootName, root := range roots {
+		for tmpName, mkTmp := range tmpdirs {
+			t.Run(rootName+"/"+tmpName, func(t *testing.T) {
+				t.Setenv("POGO_HOME", root.mk(t))
+				t.Setenv("TMPDIR", mkTmp(t))
+
+				dir, _ := AgentSocketDir()
+				if !agentSocketDirFits(dir) {
+					t.Fatalf("AgentSocketDir() = %q (%d bytes): no room for the %d-byte leaf under the %d-byte sun_path limit",
+						dir, len(dir), agentSocketLeafBudget, maxUnixSocketPathLen)
+				}
+				if !root.bindable {
+					return
+				}
+				// The budget is only meaningful if the longest promised name
+				// actually binds there.
+				sock := filepath.Join(dir, strings.Repeat("a", MaxAgentNameLen)+".sock")
+				if err := bindOK(t, sock); err != nil {
+					t.Fatalf("a %d-byte name must bind under %q, got: %v", MaxAgentNameLen, dir, err)
+				}
+			})
+		}
+	}
+}
+
+// TestAgentSocketDirPrefersTempDirWhenItFits pins that the /tmp last resort is a
+// degradation, not the default: a TMPDIR with room keeps the sockets under it,
+// preserving the per-user $TMPDIR isolation darwin gives us.
+func TestAgentSocketDirPrefersTempDirWhenItFits(t *testing.T) {
+	tmp := tmpDirOfLen(t, 20)
+	t.Setenv("POGO_HOME", deepHome(t))
+	t.Setenv("TMPDIR", tmp)
+
+	dir, inside := AgentSocketDir()
+	if inside {
+		t.Fatalf("a deep root must fall back, got %q inside POGO_HOME", dir)
+	}
+	if filepath.Dir(dir) != tmp {
+		t.Errorf("AgentSocketDir() = %q, want it under the fitting TMPDIR %q", dir, tmp)
+	}
+}
+
+// TestAgentSocketDirFallsBackToTmpWhenTempDirTooLong is the other side: an
+// unusable TMPDIR degrades to /tmp rather than to a directory nothing can bind
+// in. Distinctness per root must survive that degradation.
+func TestAgentSocketDirFallsBackToTmpWhenTempDirTooLong(t *testing.T) {
+	t.Setenv("TMPDIR", tmpDirOfLen(t, 90))
+
+	t.Setenv("POGO_HOME", deepHome(t))
+	first, inside := AgentSocketDir()
+	if inside {
+		t.Fatalf("a deep root must fall back, got %q inside POGO_HOME", first)
+	}
+	if filepath.Dir(first) != "/tmp" {
+		t.Errorf("AgentSocketDir() = %q, want it directly under /tmp", first)
+	}
+
+	t.Setenv("POGO_HOME", deepHome(t))
+	second, _ := AgentSocketDir()
+	if first == second {
+		t.Errorf("two distinct roots share the degraded socket dir %q — the per-root distinctness guarantee is lost", first)
+	}
+}
