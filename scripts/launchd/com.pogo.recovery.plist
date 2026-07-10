@@ -42,6 +42,12 @@
         <string>/Users/YOUR_USERNAME/go/bin:/Users/YOUR_USERNAME/.pogo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
         <key>HOME</key>
         <string>/Users/YOUR_USERNAME</string>
+        <!-- Must name the parent of the WatchPaths directory above. Without it
+             pogo-recovery.sh falls back to $HOME/.pogo/recovery, so a custom
+             POGO_HOME leaves launchd watching one directory and the script
+             draining another. -->
+        <key>POGO_RECOVERY_DIR</key>
+        <string>/Users/YOUR_USERNAME/.pogo/recovery</string>
     </dict>
 </dict>
 </plist>

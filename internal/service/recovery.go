@@ -31,6 +31,12 @@ const recoveryLabel = "com.pogo.recovery"
 // (edge-triggered file event), KeepAlive=false because the script is
 // one-shot per trigger, ProcessType=Background because recovery reacts to
 // file events rather than needing timer fidelity.
+//
+// POGO_RECOVERY_DIR is exported because pogo-recovery.sh otherwise falls back
+// to $HOME/.pogo/recovery. Under a POGO_HOME that resolves elsewhere, launchd
+// would watch {{.QueueDir}} while the script drained a different directory —
+// every request would spawn the job and log "queue empty", draining nothing.
+// Binding it here keeps watched and drained dirs the same by construction.
 const recoveryPlistTemplate = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -61,18 +67,21 @@ const recoveryPlistTemplate = `<?xml version="1.0" encoding="UTF-8"?>
         <string>{{.Path}}</string>
         <key>HOME</key>
         <string>{{.Home}}</string>
+        <key>POGO_RECOVERY_DIR</key>
+        <string>{{.RecoveryDir}}</string>
     </dict>
 </dict>
 </plist>
 `
 
 type recoveryData struct {
-	Label      string
-	ScriptPath string
-	QueueDir   string
-	LogDir     string
-	Path       string
-	Home       string
+	Label       string
+	ScriptPath  string
+	QueueDir    string
+	RecoveryDir string
+	LogDir      string
+	Path        string
+	Home        string
 }
 
 func recoveryPlistPath() string {
@@ -145,12 +154,13 @@ func findRecoveryScriptSource() (string, error) {
 func renderRecoveryPlist() (string, recoveryData, error) {
 	home, _ := os.UserHomeDir()
 	data := recoveryData{
-		Label:      recoveryLabel,
-		ScriptPath: recoveryScriptInstallPath(),
-		QueueDir:   recoveryQueueDir(),
-		LogDir:     logDir(),
-		Path:       launchdPath(),
-		Home:       home,
+		Label:       recoveryLabel,
+		ScriptPath:  recoveryScriptInstallPath(),
+		QueueDir:    recoveryQueueDir(),
+		RecoveryDir: recoveryDir(),
+		LogDir:      logDir(),
+		Path:        launchdPath(),
+		Home:        home,
 	}
 	tmpl, err := template.New("recovery-plist").Parse(recoveryPlistTemplate)
 	if err != nil {

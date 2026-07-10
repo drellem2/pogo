@@ -144,6 +144,7 @@ This drops a `.req` file into `~/.pogo/recovery/queue/` using the temp-then-rena
 | `StandardOutPath` / `StandardErrorPath` | `~/Library/Logs/pogo/recovery.log` | Same convention as `pogod.log`. |
 | `EnvironmentVariables.PATH` | Includes `~/go/bin`, `~/.pogo/bin`, `/opt/homebrew/bin`, system dirs | `launchctl` and `flock` must be reachable. |
 | `EnvironmentVariables.HOME` | User's home dir | launchd does not always set this. |
+| `EnvironmentVariables.POGO_RECOVERY_DIR` | Parent of the `WatchPaths` dir (`~/.pogo/recovery`) | Must be set. `pogo-recovery.sh` otherwise defaults to `$HOME/.pogo/recovery`, so a `POGO_HOME` pointing elsewhere leaves launchd watching one directory while the script drains another — the job spawns, logs `queue empty`, and drops every request. |
 
 ### Recovery script behavior
 

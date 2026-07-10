@@ -50,6 +50,61 @@ func TestEnqueueRecoveryRequest(t *testing.T) {
 	}
 }
 
+// TestRenderRecoveryPlistBindsRecoveryDir pins the invariant that made
+// com.pogo.recovery inert on a real host (mg-6e82): the plist's WatchPaths is
+// derived from POGO_HOME, but pogo-recovery.sh falls back to $HOME/.pogo/recovery
+// when POGO_RECOVERY_DIR is unset. If the plist does not export POGO_RECOVERY_DIR,
+// a POGO_HOME pointing anywhere else leaves launchd watching one directory while
+// the script drains another — the job spawns, logs "queue empty", and every
+// recovery request is silently dropped.
+func TestRenderRecoveryPlistBindsRecoveryDir(t *testing.T) {
+	custom := t.TempDir()
+	t.Setenv("POGO_HOME", custom)
+	os.Unsetenv("POGO_RECOVERY_DIR")
+
+	rendered, data, err := renderRecoveryPlist()
+	if err != nil {
+		t.Fatalf("renderRecoveryPlist: %v", err)
+	}
+
+	wantDir := filepath.Join(custom, "recovery")
+	if data.RecoveryDir != wantDir {
+		t.Errorf("RecoveryDir = %q; want %q", data.RecoveryDir, wantDir)
+	}
+	// The watched dir must be exactly the queue under the dir the script drains.
+	if data.QueueDir != filepath.Join(data.RecoveryDir, "queue") {
+		t.Errorf("QueueDir %q is not queue/ under RecoveryDir %q", data.QueueDir, data.RecoveryDir)
+	}
+	if !strings.Contains(rendered, "<key>POGO_RECOVERY_DIR</key>") {
+		t.Error("rendered plist does not export POGO_RECOVERY_DIR; the script would fall back to $HOME/.pogo/recovery")
+	}
+	if !strings.Contains(rendered, "<string>"+wantDir+"</string>") {
+		t.Errorf("rendered plist does not bind POGO_RECOVERY_DIR to %q:\n%s", wantDir, rendered)
+	}
+}
+
+// TestRenderRecoveryPlistHonorsRecoveryDirEnv verifies an operator-supplied
+// POGO_RECOVERY_DIR is baked into the plist, so the installed job watches and
+// drains the override rather than the POGO_HOME-derived default.
+func TestRenderRecoveryPlistHonorsRecoveryDirEnv(t *testing.T) {
+	override := t.TempDir()
+	t.Setenv("POGO_RECOVERY_DIR", override)
+
+	rendered, data, err := renderRecoveryPlist()
+	if err != nil {
+		t.Fatalf("renderRecoveryPlist: %v", err)
+	}
+	if data.RecoveryDir != override {
+		t.Errorf("RecoveryDir = %q; want %q", data.RecoveryDir, override)
+	}
+	if data.QueueDir != filepath.Join(override, "queue") {
+		t.Errorf("QueueDir = %q; want %q", data.QueueDir, filepath.Join(override, "queue"))
+	}
+	if !strings.Contains(rendered, "<string>"+override+"</string>") {
+		t.Errorf("rendered plist does not bind POGO_RECOVERY_DIR to %q", override)
+	}
+}
+
 func TestSanitizeRequester(t *testing.T) {
 	cases := []struct {
 		in, want string

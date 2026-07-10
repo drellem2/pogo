@@ -127,8 +127,16 @@ This drops a `.req` file into `~/.pogo/recovery/queue/` and exits 0 immediately 
 - **The recovery agent rate-limits to 60s.** Two `pogo recovery request` calls inside a 60-second window result in exactly one restart. The second request is not lost — it sits in the queue and a deferred tickle drains it after the floor elapses — but you cannot bounce pogod faster than once per minute. This is intentional: it bounds the worst-case impact of a polecat that mistakenly decides "restart pogod" is the right answer to every error.
 - **The recovery script never `kill -9`s pogod.** It only ever calls `launchctl kickstart -k`. Tier 3 is for *controlled* restarts; the SIGKILL prohibition still applies.
 - **One `pogod` ⇒ one restart per drained batch.** All `.req` files in the queue at trigger time are coalesced into a single kickstart call, then archived together. Don't expect "10 requests = 10 restarts."
+- **The plist bakes absolute paths at install time.** `WatchPaths` and `POGO_RECOVERY_DIR` are rendered from `POGO_HOME` when you run `install-recovery`. Move `POGO_HOME` afterwards and the installed job keeps watching the old directory — silently, because `pogo service status` only checks that the plist *file exists*, not that its paths still resolve. **Re-run `pogo service install-recovery` after any `POGO_HOME` change**; `scripts/migrate-pogo-home.sh` does this for you.
 
 When tier 3 itself fails — recovery agent not installed, queue dir unwritable, kickstart returning non-zero — the failed `.req` files land in `~/.pogo/recovery/failed/`. Inspect that directory and `~/Library/Logs/pogo/recovery.log` before filing the mg; the log line `kickstart failed (rc=...)` is the most actionable signal.
+
+**Verifying tier 3 is actually armed.** An installed plist is not a working one, and `pogo service status` cannot tell the difference. Check two things with `launchctl print gui/$(id -u)/com.pogo.recovery`:
+
+1. Its `WatchPaths` entry is the queue the CLI writes to — `~/.pogo/recovery/queue` under a default `POGO_HOME`.
+2. The job actually *spawns* when that directory changes. Drop a file into the queue, then confirm `runs` increments and `~/Library/Logs/pogo/recovery.log` gains a line.
+
+A job that stays at `runs = 0` while showing `pended nondemand spawn` is **not armed**: launchd is accepting the trigger and never dispatching it. No plist edit fixes that — the job only runs via an explicit `launchctl kickstart`, which defeats the purpose of tier 3. See mg-6e82.
 
 ## GitHub branch protection on main (rulesets)
 
