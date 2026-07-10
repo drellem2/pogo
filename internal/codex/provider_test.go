@@ -1,6 +1,7 @@
 package codex
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -94,7 +95,7 @@ func TestProviderNudgeProfile(t *testing.T) {
 
 	// The profile is calibrated for Codex, not inherited from Claude: Codex's
 	// faster cold start gives a shorter InitialNudgeTimeout than Claude's 60s.
-	if n == agent.DefaultNudgeProfile {
+	if reflect.DeepEqual(n, agent.DefaultNudgeProfile) {
 		t.Error("codex.Provider.Nudge must be calibrated for Codex, " +
 			"not equal to the Claude-tuned DefaultNudgeProfile")
 	}
@@ -128,7 +129,7 @@ func TestProviderNudgeValues(t *testing.T) {
 		SubmitDelay:         50 * time.Millisecond,
 		IdleThreshold:       2 * time.Second,
 	}
-	if Provider.Nudge != want {
+	if !reflect.DeepEqual(Provider.Nudge, want) {
 		t.Errorf("Provider.Nudge = %+v, want %+v", Provider.Nudge, want)
 	}
 }

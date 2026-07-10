@@ -1,6 +1,7 @@
 package cursor
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -148,7 +149,7 @@ func TestProviderNudgeProfile(t *testing.T) {
 	}
 
 	// The profile is calibrated for Cursor, not inherited from Claude.
-	if n == agent.DefaultNudgeProfile {
+	if reflect.DeepEqual(n, agent.DefaultNudgeProfile) {
 		t.Error("cursor.Provider.Nudge must be calibrated for Cursor, " +
 			"not equal to the Claude-tuned DefaultNudgeProfile")
 	}
@@ -180,7 +181,7 @@ func TestProviderNudgeValues(t *testing.T) {
 		IdleThreshold:       2 * time.Second,
 		PromptReadySentinel: "Plan, search, build anything",
 	}
-	if Provider.Nudge != want {
+	if !reflect.DeepEqual(Provider.Nudge, want) {
 		t.Errorf("Provider.Nudge = %+v, want %+v", Provider.Nudge, want)
 	}
 }

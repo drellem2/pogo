@@ -1,6 +1,7 @@
 package pi
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -94,7 +95,7 @@ func TestProviderNudgeProfile(t *testing.T) {
 
 	// The profile is calibrated for pi, not inherited from Claude: pi's ~1.5s
 	// TUI render gives a shorter InitialNudgeTimeout than Claude/Ink's 60s.
-	if n == agent.DefaultNudgeProfile {
+	if reflect.DeepEqual(n, agent.DefaultNudgeProfile) {
 		t.Error("pi.Provider.Nudge must be calibrated for pi, " +
 			"not equal to the Claude-tuned DefaultNudgeProfile")
 	}
@@ -142,7 +143,7 @@ func TestProviderNudgeValues(t *testing.T) {
 		IdleThreshold:       2 * time.Second,
 		PromptReadySentinel: "/ commands · ! bash",
 	}
-	if Provider.Nudge != want {
+	if !reflect.DeepEqual(Provider.Nudge, want) {
 		t.Errorf("Provider.Nudge = %+v, want %+v", Provider.Nudge, want)
 	}
 }

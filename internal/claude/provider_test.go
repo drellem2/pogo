@@ -1,6 +1,7 @@
 package claude
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -71,7 +72,7 @@ func TestProviderPromptInjection(t *testing.T) {
 // Claude provider must carry exactly the nudge dialect pogo used before the
 // Provider abstraction (DefaultNudgeProfile).
 func TestProviderNudgeProfile(t *testing.T) {
-	if Provider.Nudge != agent.DefaultNudgeProfile {
+	if !reflect.DeepEqual(Provider.Nudge, agent.DefaultNudgeProfile) {
 		t.Errorf("Provider.Nudge = %+v, want DefaultNudgeProfile %+v",
 			Provider.Nudge, agent.DefaultNudgeProfile)
 	}
