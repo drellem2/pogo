@@ -149,6 +149,18 @@ type NudgeProfile struct {
 	// sentinel falls back to pure wait-idle behavior (e.g. Codex, whose
 	// ratatui composer has no equivalent stable marker).
 	PromptReadySentinel string
+
+	// PromptReadyAlternates are additional accepted ready-markers: WaitForReady
+	// opens its gate when the primary sentinel OR any alternate appears. It
+	// exists because a single exact-string sentinel is brittle — when the
+	// harness's TUI changes the exact hint text (as Claude Code did between the
+	// "? for shortcuts" era and v2.1.x, which shows a "shift+tab to cycle" mode
+	// bar and a rotating `Try "…"` placeholder instead), the lone sentinel stops
+	// matching and EVERY spawn silently pays the full InitialNudgeTimeout as dead
+	// time before the best-effort delivery. Listing several stable markers keeps
+	// readiness detection working across harness versions instead of regressing
+	// to a flat per-spawn timeout tax (mg-ce61 follow-up).
+	PromptReadyAlternates []string
 }
 
 // PTYSize is an explicit PTY winsize a provider can request in place of pogo's
@@ -179,4 +191,17 @@ var DefaultNudgeProfile = NudgeProfile{
 	// versions; if it ever changes, WaitForReady degrades to best-effort
 	// wait-idle delivery rather than dropping the nudge.
 	PromptReadySentinel: "? for shortcuts",
+
+	// Alternates keep readiness detection working after Claude Code's composer
+	// dropped the "? for shortcuts" hint (v2.1.x). Two markers render only once
+	// the interactive input loop is up: the mode bar's mode-cycle hint and the
+	// empty composer's rotating placeholder. NOTE the missing spaces: v2.1.x
+	// renders the footer with per-word cursor-column moves (ESC[<n>G), so after
+	// ANSI stripping the words concatenate — the live PTY yields
+	// "accepteditson(shift+tabtocycle)…" and `❯ Try"…"`, not the spaced forms.
+	// "shift+tabtocycle" is mode-invariant (shown for every permission mode);
+	// `Try"` marks the empty composer a fresh spawn always starts at. Without
+	// these, v2.1.x spawns never match the primary sentinel and burn the full
+	// 60s InitialNudgeTimeout as dead time on every worker.
+	PromptReadyAlternates: []string{"shift+tabtocycle", "Try\""},
 }
