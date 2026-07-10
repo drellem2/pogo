@@ -217,6 +217,11 @@ func TestModalHook_Case1_RatingDialogFires(t *testing.T) {
 	}
 
 	rig.writeOutput([]byte("Some preamble\n" + RatingDialogMarker + "\n"))
+	// The idle gate measures its window on the injected clock (mg-872b), so
+	// advance the clock past IdleAfterMarker with no further output to open a
+	// genuine idle gap. The real timer only wakes the dispatcher; the fire
+	// decision is this clock advance, not a scheduling race.
+	clock.Advance(200 * time.Millisecond)
 
 	if !waitFor(t, time.Second, func() bool { return rig.dismissals() >= 1 }) {
 		t.Fatalf("expected dismissal to fire, got %d", rig.dismissals())
@@ -248,25 +253,32 @@ func TestModalHook_Case2_RatingDialogMentionedNoFalsePositive(t *testing.T) {
 		t.Fatalf("scanner never subscribed")
 	}
 
-	// Drip output so that the marker scrolls off (more than scanBufBytes of
-	// trailing content) before the idle gate would fire.
+	// The idle gate measures its window on the injected clock (mg-872b): the
+	// fire condition is deps.Now()-lastChunk >= IdleAfterMarker. Here the
+	// injected clock never advances, so that gap stays 0 and the gate can never
+	// fire — no matter how the dispatcher and this goroutine are scheduled.
+	//
+	// The marker is left visible in the buffer and a real idle gap is opened
+	// below, so a regression to the old real-timer gate (which fired on real
+	// elapsed time regardless of the injected clock) would still misfire here
+	// and fail the test. Before mg-872b that real-timer gate false-fired under
+	// full-suite load when a starved drip let a real idle window open
+	// (modal_hook_test.go:271 "expected no dismissal ... got 1").
 	rig.writeOutput([]byte("Transcript line referencing " + RatingDialogMarker + " as a string.\n"))
-	stop := time.After(300 * time.Millisecond) // ~6× IdleAfterMarker
-	tick := time.NewTicker(10 * time.Millisecond)
-	defer tick.Stop()
 	pad := make([]byte, 256)
 	for i := range pad {
 		pad[i] = 'x'
 	}
-	for {
-		select {
-		case <-stop:
-			goto verify
-		case <-tick.C:
-			rig.writeOutput(pad)
-		}
+	// A few pads of trailing output — the marker stays within scanBufBytes, so
+	// MarkerVisible remains true throughout the idle gap below.
+	for i := 0; i < 4; i++ {
+		rig.writeOutput(pad)
 	}
-verify:
+	// Real-time idle window (~4× IdleAfterMarker) with no further output. A
+	// real-timer gate would fire in this window; the injected-clock gate must
+	// not, because the injected clock has not advanced.
+	time.Sleep(200 * time.Millisecond)
+
 	if rig.dismissals() != 0 {
 		t.Errorf("expected no dismissal for in-transcript mention, got %d", rig.dismissals())
 	}

@@ -263,6 +263,14 @@ type modalScanner struct {
 	// Write under mu.
 	markerLastSeen []time.Time
 
+	// lastChunk records the injected-clock time of the most recent chunk of
+	// any kind (marker or not). The ModeScannerIdle gate measures its idle
+	// window as deps.Now()-lastChunk rather than trusting a real wall-clock
+	// timer, so a real-time wakeup that lands while output was in fact still
+	// flowing — e.g. a drip→reset chain starved under full-suite load — can
+	// only delay a fire, never manufacture one (mg-872b).
+	lastChunk time.Time
+
 	// observed[i] signals a matcher i observation; output signals any chunk.
 	observed []chan struct{}
 	output   chan struct{}
@@ -299,6 +307,7 @@ func (s *modalScanner) Write(p []byte) (int, error) {
 	}
 	clean := agent.StripANSI(s.rawBuf)
 	now := s.now()
+	s.lastChunk = now
 	for i, m := range s.matchers {
 		if bytes.Contains(clean, []byte(m.LineMarker)) {
 			s.markerLastSeen[i] = now
@@ -325,6 +334,15 @@ func (s *modalScanner) MarkerLastSeen(idx int) time.Time {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.markerLastSeen[idx]
+}
+
+// LastChunk returns the injected-clock time of the most recent chunk of any
+// kind. Zero if no chunk has arrived. The ModeScannerIdle gate uses it to
+// measure idleness on the injected clock instead of a real timer.
+func (s *modalScanner) LastChunk() time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lastChunk
 }
 
 func nbSend(ch chan struct{}) {
@@ -383,8 +401,21 @@ func dispatchScannerIdle(ctx context.Context, idx int, m ModalMatcher, scanner *
 			if !armed {
 				continue
 			}
+			// The real timer is only a wakeup hint. The idle window is
+			// measured on the INJECTED clock: deps.Now() minus the scanner's
+			// last-chunk timestamp. If that gap is still shorter than
+			// IdleAfterMarker, a chunk genuinely arrived inside the window and
+			// this timer fire was a real-time artifact (a drip→reset chain
+			// starved under full-suite load) — re-arm and wait rather than
+			// dismiss. This is what makes the gate assert on logic instead of
+			// on whether a ticker got scheduled in time (mg-872b).
+			now := deps.Now()
+			if last := scanner.LastChunk(); !last.IsZero() && now.Sub(last) < m.IdleGate.IdleAfterMarker {
+				resetIdle()
+				continue
+			}
 			armed = false
-			if !lastDismissed.IsZero() && deps.Now().Sub(lastDismissed) < dismissalCooldown {
+			if !lastDismissed.IsZero() && now.Sub(lastDismissed) < dismissalCooldown {
 				continue
 			}
 			// Re-verify marker is still visible before firing — guards
@@ -394,7 +425,7 @@ func dispatchScannerIdle(ctx context.Context, idx int, m ModalMatcher, scanner *
 				continue
 			}
 			if fireDismissal(m, deps) {
-				lastDismissed = deps.Now()
+				lastDismissed = now
 			}
 		}
 	}
