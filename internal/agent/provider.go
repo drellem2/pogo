@@ -25,7 +25,7 @@ const DefaultProviderID = "claude"
 // package) because its hooks take *agent.Agent: a separate package would create
 // the import cycle agent → provider → agent.
 type Provider struct {
-	// ID is the config-key identity ("claude", "codex", "pi").
+	// ID is the config-key identity ("claude", "codex", "pi", "cursor").
 	ID string
 
 	// Binary is the executable name — used by `pogo doctor` and PATH checks.
@@ -96,6 +96,18 @@ type PromptInjection struct {
 	Kind        PromptInjectionKind
 	Flag        string // InjectAppendFlag: e.g. "--append-system-prompt-file"
 	ContextFile string // InjectContextFile: e.g. "AGENTS.override.md"
+
+	// ContextFileHeader is prepended verbatim to the persona when the context
+	// file is written. It exists for harnesses whose context files are only
+	// honored when they carry a machine-readable preamble: Cursor ignores a
+	// .cursor/rules/*.mdc that has no YAML frontmatter, and only a rule
+	// declaring `alwaysApply: true` is guaranteed to reach the system prompt
+	// (measured — see docs/investigations/cursor-nudge-calibration.md). Empty
+	// for Codex, whose AGENTS.override.md is plain markdown.
+	//
+	// ContextFile may name a nested path ("dir/file.md"); the parent
+	// directories are created under the agent's working directory.
+	ContextFileHeader string
 }
 
 // NudgeProfile is a provider's PTY-input dialect: the timings and terminator
