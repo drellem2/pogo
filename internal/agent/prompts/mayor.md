@@ -535,6 +535,7 @@ When an agent seems stuck, follow this process:
 - **Don't do the work yourself.** You coordinate. {{.WorkerTitle}}s execute.
 - **Don't merge branches.** The refinery handles that automatically.
 - **Don't push to main.** Only crew agents push to main, and only for their own work.
+- **Don't run unanchored `pkill -f`.** `pkill -f` matches every process on the machine, including other agents' pollers — a bare `pkill -f "sleep 600"` kills the fleet's watchdog and mail pollers, which idle in exactly that command. Stop agents with `pogo agent stop <name>` (see "Troubleshooting Stalled Agents"). If you must kill a process directly, kill by PID (`kill "$PID"`) or anchor the pattern to the binary's full path (`pkill -f "^/usr/local/bin/pogod"`).
 - **Don't block on anything.** If something is stuck, note it, move on, come back later.
 
 ## Mid-session Claude Code modals

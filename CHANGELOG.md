@@ -12,6 +12,16 @@ is the curated, human-readable summary kept in sync at each release cut.
 
 ### Changed
 
+- **Agent prompts now ban unanchored `pkill -f`.** The five polecat templates, the
+  coordinator prompt, and the doctor crew prompt each carry the rule, the reason,
+  and — because a bare prohibition gets ignored under time pressure — the correct
+  replacement: kill by PID, or anchor the pattern to a path you own
+  (`pkill -f "^$WORKTREE/bin/pogod"`). `pkill -f` matches every process on the
+  machine: four polecat sessions ran `pkill -f "sleep N"`, which matched the
+  `sleep $INTERVAL` that every pogo poller idles in. Under `set -euo pipefail` the
+  killed sleep returned 143 and the pollers exited — including the watchdog, the
+  job that detects dead jobs, so the failure concealed itself.
+
 - **Config files layer key by key instead of shadowing wholesale.** `Load()` reads
   `~/.config/pogo/config.toml` and then `$POGO_HOME/config.toml`, with the latter
   overriding only the keys it actually sets. Previously the `POGO_HOME` file, when

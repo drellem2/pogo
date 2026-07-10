@@ -172,6 +172,47 @@ func TestShippedTemplatesSurfaceRecentActivity(t *testing.T) {
 	}
 }
 
+// TestShippedTemplatesBanUnanchoredPkill guards the prohibition on unanchored
+// `pkill -f` in every prompt that drives a shell (mg-8c9c). Four polecat
+// sessions once ran machine-wide `pkill -f "sleep N"`; every pogo poller idles
+// in `sleep $INTERVAL` under `set -euo pipefail`, so the killed sleep returned
+// 143, `set -e` fired, and the pollers — the watchdog among them — killed
+// themselves. A bare prohibition gets ignored under time pressure, so each
+// prompt must also carry the replacement: kill by PID, or anchor the pattern.
+// If the wording changes, update this test deliberately rather than letting the
+// rule disappear on a stray edit.
+func TestShippedTemplatesBanUnanchoredPkill(t *testing.T) {
+	names := []string{
+		"prompts/templates/polecat.md",
+		"prompts/templates/polecat-qa.md",
+		"prompts/templates/polecat-build-pr.md",
+		"prompts/templates/polecat-triage.md",
+		"prompts/templates/polecat-review.md",
+		"prompts/mayor.md",
+		"prompts/crew/doctor.md",
+	}
+	for _, name := range names {
+		data, err := defaultPrompts.ReadFile(name)
+		if err != nil {
+			t.Fatalf("read embedded %s: %v", name, err)
+		}
+		body := string(data)
+		for _, want := range []string{
+			// The rule itself.
+			"unanchored `pkill -f`",
+			// The one-line why — agents obey rules they understand.
+			"matches every process on the machine",
+			// The replacements, without which the rule gets ignored.
+			`kill "$PID"`,
+			`pkill -f "^`,
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("%s: expected %q in template body", name, want)
+			}
+		}
+	}
+}
+
 // TestShippedTemplatesProviderGating expands the embedded polecat templates
 // under each provider and asserts the Claude-Code-specific guidance
 // (CronCreate naming, the rating-modal dismissal bullet) appears only when

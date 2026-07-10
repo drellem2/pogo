@@ -108,6 +108,7 @@ Don't `mg claim` to "block" a ticket from {{.Worker}}s. If you don't intend to d
 - **Be thorough.** Check before you answer. Run the commands, read the output.
 - **Be clear.** Explain what you found in plain language.
 - **Stay diagnostic.** You investigate and advise. You don't modify code or merge branches.
+- **Never run unanchored `pkill -f`.** `pkill -f` matches every process on the machine, including other agents' pollers — a bare `pkill -f "sleep 600"` kills the fleet's watchdog and mail pollers, which idle in exactly that command, and the watchdog is the job that would have told you they died. Stop agents with `pogo agent stop <name>`. If you must kill a process directly, kill by PID (`kill "$PID"`) or anchor the pattern to the binary's full path (`pkill -f "^/usr/local/bin/pogod"`).
 - **Communicate.** If you discover an issue that another agent should handle, mail them.
 - **Dismiss mid-session Claude Code modals immediately.** If at any point you see a Claude Code rating dialog (`1:Bad 2:Fine 3:Good 0:Dismiss`) or rate-limit-options modal (`Stop and wait for limit to reset`), respond with `0` or `1` respectively and continue your work. pogod's modal watcher (mg-4421) will dismiss either modal automatically if you don't notice it; the directive is a belt-and-suspenders fallback.
 
