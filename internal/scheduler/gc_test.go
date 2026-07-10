@@ -2,11 +2,8 @@ package scheduler
 
 import (
 	"context"
-	"path/filepath"
 	"testing"
 	"time"
-
-	"github.com/drellem2/pogo/internal/events"
 )
 
 // fakeLiveness is an AgentLiveness backed by a set of agent identities that are
@@ -176,12 +173,12 @@ func TestRemoveMailChecksForAgentReapsSpawnRegistered(t *testing.T) {
 // schedule_removed event with reason "agent_gone" (acceptance: GC sweeps reuse
 // the same removal-event signal as explicit rm — mg-afdb / mg-8e5d).
 func TestGCEmitsAgentGoneEvent(t *testing.T) {
-	logPath := filepath.Join(t.TempDir(), "events.log")
-	events.SetLogPathForTesting(logPath)
-	t.Cleanup(func() { events.SetLogPathForTesting("") })
-
 	now := fixedTime()
 	s := newSchedulerForTest(t, nil)
+	// The scheduler writes its removal events to its OWN root (s.logPath,
+	// derived from the store's temp dir), not a globally-resolved path — see
+	// mg-e06d. Read the event back from there.
+	logPath := s.logPath
 	addMailCheck(t, s, "cat-ghost", now)
 	s.SetLiveness(fakeLiveness{alive: map[string]bool{}})
 

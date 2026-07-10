@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -229,6 +230,17 @@ type Scheduler struct {
 	store     *store
 	deliverer Deliverer
 
+	// logPath is the events.log this scheduler appends its observable events
+	// (schedule_removed, scheduler_fire_*) to. It is derived from the store's
+	// directory in New — events.log is a sibling of schedules.json under
+	// POGO_HOME — so a scheduler rooted at a temp dir (a test) or an isolated
+	// POGO_HOME writes its audit events THERE, and never to the operator's live
+	// ~/.pogo/events.log merely because this package was linked into a test
+	// binary. Threading the root here instead of resolving events.log globally
+	// is mg-4fa7's fix class applied to pogo (mg-e06d): a library must not
+	// write to the user's live state because of the caller it happens to have.
+	logPath string
+
 	// liveness, when set, lets Tick garbage-collect mail-check-* schedules
 	// whose target agent has disappeared. nil disables GC (most unit tests).
 	liveness AgentLiveness
@@ -256,6 +268,7 @@ func New(path string, deliverer Deliverer) (*Scheduler, error) {
 	s := &Scheduler{
 		store:     st,
 		deliverer: deliverer,
+		logPath:   filepath.Join(filepath.Dir(path), "events.log"),
 		entries:   make(map[entryKey]*Entry, len(loaded)),
 	}
 	for _, e := range loaded {
@@ -314,7 +327,7 @@ func (s *Scheduler) Add(entry Entry, now time.Time) (Entry, error) {
 		if hadPrev {
 			s.entries[key] = prev
 		} else {
-			emitSchedulerRemovalEvent("rollback_persist_failure", stored, now, err)
+			s.emitSchedulerRemovalEvent("rollback_persist_failure", stored, now, err)
 			delete(s.entries, key)
 		}
 		return Entry{}, err
@@ -338,7 +351,7 @@ func (s *Scheduler) Remove(agent, id string) (bool, error) {
 		s.entries[key] = saved
 		return false, err
 	}
-	emitSchedulerRemovalEvent("explicit_rm", *saved, time.Now(), nil)
+	s.emitSchedulerRemovalEvent("explicit_rm", *saved, time.Now(), nil)
 	return true, nil
 }
 
@@ -371,7 +384,7 @@ func (s *Scheduler) RemoveByID(id string) (bool, error) {
 		return false, err
 	}
 	s.mu.Unlock()
-	emitSchedulerRemovalEvent("explicit_rm_by_id", *saved, time.Now(), nil)
+	s.emitSchedulerRemovalEvent("explicit_rm_by_id", *saved, time.Now(), nil)
 	return true, nil
 }
 
@@ -504,7 +517,7 @@ func (s *Scheduler) Tick(ctx context.Context, now time.Time) []FireResult {
 			if now.Sub(fire.NextFire) > skipWindow {
 				shouldFire = false
 				res.Skipped = true
-				emitSchedulerEvent("scheduler_fire_skipped", fire, now, missed, nil)
+				s.emitSchedulerEvent("scheduler_fire_skipped", fire, now, missed, nil)
 			}
 		}
 
@@ -517,9 +530,9 @@ func (s *Scheduler) Tick(ctx context.Context, now time.Time) []FireResult {
 			res.Delivered = derr == nil
 			if derr != nil {
 				log.Printf("scheduler: deliver %s to %s failed: %v", fire.ID, fire.Agent, derr)
-				emitSchedulerEvent("scheduler_fire_failed", fire, now, missed, derr)
+				s.emitSchedulerEvent("scheduler_fire_failed", fire, now, missed, derr)
 			} else {
-				emitSchedulerEvent("scheduler_fire_delivered", fire, now, missed, nil)
+				s.emitSchedulerEvent("scheduler_fire_delivered", fire, now, missed, nil)
 			}
 		}
 
@@ -533,14 +546,14 @@ func (s *Scheduler) Tick(ctx context.Context, now time.Time) []FireResult {
 			continue
 		}
 		if fire.OneShot {
-			emitSchedulerRemovalEvent("one_shot_complete", *entry, now, nil)
+			s.emitSchedulerRemovalEvent("one_shot_complete", *entry, now, nil)
 			delete(s.entries, key)
 			changed = true
 		} else {
 			c, err := ParseCron(entry.Cron)
 			if err != nil {
 				log.Printf("scheduler: cron %q now unparseable, removing entry %s/%s: %v", entry.Cron, key.Agent, key.ID, err)
-				emitSchedulerRemovalEvent("cron_unparseable", *entry, now, err)
+				s.emitSchedulerRemovalEvent("cron_unparseable", *entry, now, err)
 				delete(s.entries, key)
 				changed = true
 			} else {
@@ -551,7 +564,7 @@ func (s *Scheduler) Tick(ctx context.Context, now time.Time) []FireResult {
 				entry.NextFire = c.Next(now)
 				if entry.NextFire.IsZero() {
 					log.Printf("scheduler: cron %q has no future fire, removing entry %s/%s", entry.Cron, key.Agent, key.ID)
-					emitSchedulerRemovalEvent("no_future_fire", *entry, now, nil)
+					s.emitSchedulerRemovalEvent("no_future_fire", *entry, now, nil)
 					delete(s.entries, key)
 				}
 				changed = true
@@ -665,7 +678,7 @@ func (s *Scheduler) reapMailChecks(now time.Time, gone func(agent string) bool) 
 	s.mu.Unlock()
 
 	for _, e := range removed {
-		emitSchedulerRemovalEvent("agent_gone", e, now, nil)
+		s.emitSchedulerRemovalEvent("agent_gone", e, now, nil)
 	}
 	return len(removed)
 }
@@ -697,8 +710,10 @@ func generateID() string {
 }
 
 // emitSchedulerEvent writes a structured event for fire delivery / skip /
-// failure. Best-effort; events.Emit never blocks the caller.
-func emitSchedulerEvent(eventType string, e Entry, fireTime time.Time, missed int, err error) {
+// failure. Best-effort; events.EmitTo never blocks the caller. Written to the
+// scheduler's own root (s.logPath), never a globally-resolved path — see the
+// logPath field and mg-e06d.
+func (s *Scheduler) emitSchedulerEvent(eventType string, e Entry, fireTime time.Time, missed int, err error) {
 	details := map[string]any{
 		"schedule_id":   e.ID,
 		"to":            e.Agent,
@@ -715,7 +730,7 @@ func emitSchedulerEvent(eventType string, e Entry, fireTime time.Time, missed in
 	if err != nil {
 		details["error"] = err.Error()
 	}
-	events.Emit(context.Background(), events.Event{
+	events.EmitTo(context.Background(), s.logPath, events.Event{
 		EventType: eventType,
 		Agent:     "pogod",
 		Details:   details,
@@ -725,8 +740,9 @@ func emitSchedulerEvent(eventType string, e Entry, fireTime time.Time, missed in
 // emitSchedulerRemovalEvent writes a schedule_removed event tagged with the
 // reason an entry left the live set. Emitted at every delete site so an
 // operator can answer "why did this schedule disappear?" from events.log alone
-// — see mg-8e5d for the silent-purge incident this guards against.
-func emitSchedulerRemovalEvent(reason string, e Entry, removedAt time.Time, err error) {
+// — see mg-8e5d for the silent-purge incident this guards against. Written to
+// the scheduler's own root (s.logPath); see the logPath field and mg-e06d.
+func (s *Scheduler) emitSchedulerRemovalEvent(reason string, e Entry, removedAt time.Time, err error) {
 	details := map[string]any{
 		"schedule_id":   e.ID,
 		"to":            e.Agent,
@@ -745,7 +761,7 @@ func emitSchedulerRemovalEvent(reason string, e Entry, removedAt time.Time, err 
 	if err != nil {
 		details["error"] = err.Error()
 	}
-	events.Emit(context.Background(), events.Event{
+	events.EmitTo(context.Background(), s.logPath, events.Event{
 		EventType: "schedule_removed",
 		Agent:     "pogod",
 		Details:   details,

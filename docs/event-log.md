@@ -13,6 +13,20 @@ This document is the design contract for phase F (work items mg-0241, mg-700a, m
 - **Persistence:** survives pogod restarts (unlike the in-memory refinery history). This is the durable observability spine.
 - **Not coordination:** the log is purely observational. It is not used to drive state transitions. macguffin remains the source of truth for work item state.
 
+## Aggregate reliability: the test-contamination cutoff (mg-e06d)
+
+**Per-record integrity holds; pre-cutoff aggregates do not.** From **2026-06-21 until the mg-e06d fix landed**, running `go test ./internal/scheduler` on a developer or CI machine appended real `schedule_removed` records to the operator's live `~/.pogo/events.log`. The scheduler's event emitters resolved the log path *globally* (to `$POGO_HOME/events.log`) instead of from the root the caller handed the scheduler, so a temp-rooted test store still wrote its audit events to the real log. Fixture agents you will see from this window — `mail-check-cat-dead`, `mail-check-cat-alsodead`, `cat-ghost`, `cat-bye`, `mg-e633`, and similar — are **test artifacts, not production events**.
+
+Consequences, and how to read the log around them:
+
+- **A specific record is still trustworthy.** Each line is authoritative for its own `schedule_id`/`agent`/`reason`, so an operator can still answer "why did *this* schedule disappear?" from the log alone — the property `emitSchedulerRemovalEvent` exists to provide (mg-8e5d). This is why the mayor and pa correctly falsified a data-loss theory from it.
+- **Any COUNT or RATE over the pre-cutoff window is contaminated.** Aggregates such as "how many `agent_gone` events this hour" mix production churn with test churn and are not production statistics. Nothing in an individual line marks it as test-originated, so aggregates cannot self-clean.
+- **Fixture records may appear duplicated under one `schedule_id`** (e.g. `mail-check-cat-dead` reaped twice in a tick) — an artifact of parallel/re-run test binaries, another reason not to trust pre-cutoff aggregates.
+
+**What was deliberately NOT done:** the existing records were **not** rewritten, deleted, or truncated. The log is append-only and the architect's mg-0a89 acceptance tamper-check depends on that per-record property (a record's existence and integrity may be verified; aggregates may not be reasoned over). No marker record was appended to the live log either — that would be one more write to operator state, and the fix's job is to stop *new* pollution, not to edit the log. This documented cutoff **is** the marker: records with the fixture agents above, dated before the mg-e06d fix, are contaminated-in-aggregate; the fix stops any further test writes so aggregates computed over the post-cutoff window are clean.
+
+See `internal/scheduler/events_isolation_test.go` for the regression guard (with a positive control) that keeps this closed, and mg-4fa7 for the same defect class fixed in mg.
+
 ## Envelope
 
 Every line is a JSON object with the same envelope:
