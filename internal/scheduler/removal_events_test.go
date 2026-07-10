@@ -5,11 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"os"
-	"path/filepath"
 	"testing"
 	"time"
-
-	"github.com/drellem2/pogo/internal/events"
 )
 
 // TestEmitsScheduleRemovedAtAllPaths exercises every delete site in the
@@ -20,12 +17,12 @@ func TestEmitsScheduleRemovedAtAllPaths(t *testing.T) {
 	cases := []struct {
 		name   string
 		reason string
-		setup  func(t *testing.T) (scheduleID, agent string)
+		setup  func(t *testing.T) (s *Scheduler, scheduleID, agent string)
 	}{
 		{
 			name:   "rollback_persist_failure",
 			reason: "rollback_persist_failure",
-			setup: func(t *testing.T) (string, string) {
+			setup: func(t *testing.T) (*Scheduler, string, string) {
 				s := newSchedulerForTest(t, nil)
 				// Break the store so persistLocked fails inside Add. The path
 				// has /dev/null as a non-directory parent, so MkdirAll errors.
@@ -33,13 +30,13 @@ func TestEmitsScheduleRemovedAtAllPaths(t *testing.T) {
 				if _, err := s.Add(Entry{Agent: "crew-rollback", Cron: "*/5 * * * *", ID: "rollback-me"}, fixedTime()); err == nil {
 					t.Fatal("expected Add to fail under broken store")
 				}
-				return "rollback-me", "crew-rollback"
+				return s, "rollback-me", "crew-rollback"
 			},
 		},
 		{
 			name:   "explicit_rm",
 			reason: "explicit_rm",
-			setup: func(t *testing.T) (string, string) {
+			setup: func(t *testing.T) (*Scheduler, string, string) {
 				s := newSchedulerForTest(t, nil)
 				if _, err := s.Add(Entry{Agent: "crew-rm", Cron: "*/5 * * * *", ID: "rm-me"}, fixedTime()); err != nil {
 					t.Fatal(err)
@@ -48,13 +45,13 @@ func TestEmitsScheduleRemovedAtAllPaths(t *testing.T) {
 				if err != nil || !ok {
 					t.Fatalf("Remove: ok=%v err=%v", ok, err)
 				}
-				return "rm-me", "crew-rm"
+				return s, "rm-me", "crew-rm"
 			},
 		},
 		{
 			name:   "explicit_rm_by_id",
 			reason: "explicit_rm_by_id",
-			setup: func(t *testing.T) (string, string) {
+			setup: func(t *testing.T) (*Scheduler, string, string) {
 				s := newSchedulerForTest(t, nil)
 				if _, err := s.Add(Entry{Agent: "crew-rmid", Cron: "*/5 * * * *", ID: "rm-by-id"}, fixedTime()); err != nil {
 					t.Fatal(err)
@@ -63,13 +60,13 @@ func TestEmitsScheduleRemovedAtAllPaths(t *testing.T) {
 				if err != nil || !ok {
 					t.Fatalf("RemoveByID: ok=%v err=%v", ok, err)
 				}
-				return "rm-by-id", "crew-rmid"
+				return s, "rm-by-id", "crew-rmid"
 			},
 		},
 		{
 			name:   "one_shot_complete",
 			reason: "one_shot_complete",
-			setup: func(t *testing.T) (string, string) {
+			setup: func(t *testing.T) (*Scheduler, string, string) {
 				s := newSchedulerForTest(t, nil)
 				now := fixedTime()
 				if _, err := s.Add(Entry{
@@ -79,13 +76,13 @@ func TestEmitsScheduleRemovedAtAllPaths(t *testing.T) {
 					t.Fatal(err)
 				}
 				s.Tick(context.Background(), now.Add(2*time.Minute))
-				return "oneshot-me", "cat-oneshot"
+				return s, "oneshot-me", "cat-oneshot"
 			},
 		},
 		{
 			name:   "cron_unparseable",
 			reason: "cron_unparseable",
-			setup: func(t *testing.T) (string, string) {
+			setup: func(t *testing.T) (*Scheduler, string, string) {
 				s := newSchedulerForTest(t, nil)
 				now := fixedTime()
 				if _, err := s.Add(Entry{Agent: "crew-corrupt", Cron: "*/5 * * * *", ID: "corrupt-me"}, now); err != nil {
@@ -100,13 +97,13 @@ func TestEmitsScheduleRemovedAtAllPaths(t *testing.T) {
 				s.entries[key].NextFire = now.Add(-time.Second)
 				s.mu.Unlock()
 				s.Tick(context.Background(), now)
-				return "corrupt-me", "crew-corrupt"
+				return s, "corrupt-me", "crew-corrupt"
 			},
 		},
 		{
 			name:   "no_future_fire",
 			reason: "no_future_fire",
-			setup: func(t *testing.T) (string, string) {
+			setup: func(t *testing.T) (*Scheduler, string, string) {
 				s := newSchedulerForTest(t, nil)
 				now := fixedTime()
 				// "0 0 31 2 *" parses cleanly but Next() never finds a match
@@ -124,18 +121,17 @@ func TestEmitsScheduleRemovedAtAllPaths(t *testing.T) {
 				}
 				s.mu.Unlock()
 				s.Tick(context.Background(), now)
-				return "no-future", "crew-nofuture"
+				return s, "no-future", "crew-nofuture"
 			},
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			logPath := filepath.Join(t.TempDir(), "events.log")
-			events.SetLogPathForTesting(logPath)
-			t.Cleanup(func() { events.SetLogPathForTesting("") })
-
-			scheduleID, agent := tc.setup(t)
+			// Each scheduler writes to its OWN root (s.logPath), not a
+			// globally-resolved path — mg-e06d. Read the event back from there.
+			s, scheduleID, agent := tc.setup(t)
+			logPath := s.logPath
 
 			ev := findScheduleRemoved(t, logPath, scheduleID, tc.reason)
 			if ev == nil {
