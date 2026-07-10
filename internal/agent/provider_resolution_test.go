@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -291,7 +292,7 @@ func TestSpawnNilProviderUsesBuiltinDefaults(t *testing.T) {
 	if a.provider != nil {
 		t.Errorf("bare-registry spawn should have a nil provider, got %q", a.provider.ID)
 	}
-	if a.nudge != DefaultNudgeProfile {
+	if !reflect.DeepEqual(a.nudge, DefaultNudgeProfile) {
 		t.Errorf("bare-registry spawn should use DefaultNudgeProfile, got %+v", a.nudge)
 	}
 }

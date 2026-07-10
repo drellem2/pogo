@@ -85,15 +85,23 @@ func (a *Agent) WaitIdle(ctx context.Context, quiescence time.Duration) error {
 // deliver anyway — the initial-nudge path delivers best-effort rather than
 // dropping the nudge if the sentinel never appears (a harness UI change must
 // degrade to no-worse-than the old wait-idle behavior, not a silent wedge).
-func (a *Agent) WaitForReady(ctx context.Context, sentinel string, quiescence time.Duration) (bool, error) {
-	want := []byte(sentinel)
+func (a *Agent) WaitForReady(ctx context.Context, sentinels []string, quiescence time.Duration) (bool, error) {
+	wants := make([][]byte, 0, len(sentinels))
+	for _, s := range sentinels {
+		if s != "" {
+			wants = append(wants, []byte(s))
+		}
+	}
 	seen := false
 
 	check := func() bool {
 		if !seen {
 			clean := StripANSI(a.outputBuf.Last(a.outputBuf.Len()))
-			if bytes.Contains(clean, want) {
-				seen = true
+			for _, want := range wants {
+				if bytes.Contains(clean, want) {
+					seen = true
+					break
+				}
 			}
 		}
 		return seen && a.IsIdle(quiescence)
@@ -143,7 +151,8 @@ func (a *Agent) NudgeWithMode(msg string, mode NudgeMode, timeout time.Duration)
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
 
-		seen, err := a.WaitForReady(ctx, a.nudge.PromptReadySentinel, a.nudge.IdleThreshold)
+		sentinels := append([]string{a.nudge.PromptReadySentinel}, a.nudge.PromptReadyAlternates...)
+		seen, err := a.WaitForReady(ctx, sentinels, a.nudge.IdleThreshold)
 		if err != nil {
 			// Agent exited mid-wait: nothing to deliver to.
 			if !errors.Is(err, context.DeadlineExceeded) {

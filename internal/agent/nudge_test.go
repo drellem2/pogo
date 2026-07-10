@@ -195,7 +195,7 @@ func TestWaitForReadyGatesOnSentinel(t *testing.T) {
 	buf := NewRingBuffer(1024)
 	a := &Agent{Name: "wfr-empty", outputBuf: buf, done: make(chan struct{})}
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
-	seen, err := a.WaitForReady(ctx, sentinel, 100*time.Millisecond)
+	seen, err := a.WaitForReady(ctx, []string{sentinel}, 100*time.Millisecond)
 	cancel()
 	if seen {
 		t.Error("sentinel reported seen with no output at all")
@@ -207,7 +207,7 @@ func TestWaitForReadyGatesOnSentinel(t *testing.T) {
 	// Sentinel present, then output goes quiet: the gate opens.
 	buf.Write([]byte("\x1b[1mwelcome\x1b[0m\n? for shortcuts\n"))
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 2*time.Second)
-	seen, err = a.WaitForReady(ctx2, sentinel, 100*time.Millisecond)
+	seen, err = a.WaitForReady(ctx2, []string{sentinel}, 100*time.Millisecond)
 	cancel2()
 	if !seen {
 		t.Error("sentinel present in output but not reported seen")
@@ -242,7 +242,7 @@ func TestWaitForReadySentinelSeenButNeverIdle(t *testing.T) {
 	defer close(stop)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 600*time.Millisecond)
-	seen, err := a.WaitForReady(ctx, "? for shortcuts", 300*time.Millisecond)
+	seen, err := a.WaitForReady(ctx, []string{"? for shortcuts"}, 300*time.Millisecond)
 	cancel()
 	if !seen {
 		t.Error("sentinel was present; expected seen=true even though never idle")
