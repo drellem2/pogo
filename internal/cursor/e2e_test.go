@@ -21,11 +21,22 @@ package cursor_test
 //
 // pi's e2e runs fully offline: pi supports custom OpenAI-compatible providers,
 // so the test points it at a local mock server and asserts byte-level on the
-// captured completion request. Cursor admits no such rig. It is closed-source
-// and speaks a proprietary connectrpc/protobuf protocol to api2.cursor.sh; the
-// only base-URL override in the bundle (CURSOR_API_BASE_URL) fronts the
-// auth-poll endpoint, not the chat transport. So this test follows the *Codex*
-// pattern instead: opt-in, real binary, real network, real Cursor plan credits.
+// captured completion request. The `agent` binary admits no such rig.
+//
+// Cursor speaks a proprietary connectrpc/protobuf protocol to api2.cursor.sh,
+// which alone would make a mock absurd. But the bundle DOES carry a hidden
+// local-provider mode (--local-agent-base-url, CURSOR_LOCAL_AGENT_BASE_URL,
+// ANTHROPIC_BASE_URL, CURSOR_ENABLE_AUTHLESS) that accepts an OpenAI-compatible
+// endpoint — exactly what an offline rig needs. It is gated to a *different
+// executable*, cursor-agent-local, on its own download channel. Measured against
+// the `agent` binary this provider targets: the flag is rejected outright
+// ("unknown option"), and every env-var route left a local mock server with zero
+// requests while the real backend answered. See the calibration doc.
+//
+// So this test follows the *Codex* pattern instead: opt-in, real binary, real
+// network, real Cursor plan credits. If pogo ever targets cursor-agent-local, a
+// pi-style offline mock becomes available — a different binary, a different
+// ticket.
 //
 // Losing byte-level capture costs the "did the persona reach the system
 // prompt?" assertion. It is recovered BEHAVIOURALLY: the injected persona and

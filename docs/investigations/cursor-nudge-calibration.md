@@ -264,15 +264,73 @@ account's quota, unlike a BYOK provider.
 
 pi's e2e runs fully offline: pi supports custom OpenAI-compatible providers, so
 the test points it at a local mock and asserts byte-level on the captured
-completion request. **Cursor admits no such rig.** It is closed-source and speaks
-a proprietary connectrpc/protobuf protocol to `api2.cursor.sh`; the only
-base-URL override in the bundle (`CURSOR_API_BASE_URL`) fronts the *auth-poll*
-endpoint, not the chat transport. Mocking the chat protocol would mean
-reimplementing an undocumented, fast-churning protobuf API.
+completion request. **The `agent` binary pogo drives admits no such rig** — but
+the reason is narrower, and more interesting, than "it's closed-source".
 
-So `internal/cursor/e2e_test.go` follows the **Codex** pattern instead: opt-in,
-real binary, real network, real plan credits. Losing byte-level capture costs
-the "did the persona reach the system prompt?" assertion; it is recovered
+### The obvious argument, and why it is not the whole story
+
+Cursor speaks a proprietary connectrpc/protobuf protocol to `api2.cursor.sh`.
+Reimplementing that to mock it would be absurd. But the bundle *does* contain a
+local-provider mode, and it must be ruled out explicitly rather than waved past:
+
+```
+--local-agent-base-url <url>   Provider base URL for agent-cli-local
+                               (OpenAI-compatible or Anthropic Messages;
+                               for example http://127.0.0.1:11434/v1; can also
+                               use CURSOR_LOCAL_AGENT_BASE_URL or
+                               ANTHROPIC_BASE_URL env vars)
+--local-agent-api-key <key>
+```
+
+plus `CURSOR_ENABLE_AUTHLESS`, `CURSOR_BEDROCK_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`.
+That is *exactly* the shape pi's offline rig needs — an OpenAI-compatible base
+URL. The flag is `.hideHelp()`-hidden, so `agent --help` never shows it.
+
+### It is gated to a different distribution — measured, not assumed
+
+The bundle gates every one of those on the CLI's own identity:
+
+```js
+function s(e = "agent-cli") {
+  return "agent-cli-local" === e
+    ? { rootDirName: "cursor-agent-local", executableName: "cursor-agent-local", … }
+    : …
+}
+```
+
+`agent-cli-local` is a **separate executable** (`cursor-agent-local`) shipped on
+its own download channel (`agent-cli-local-prod`). The `agent` binary pogo drives
+is `agent-cli`, and it does not enable any of it:
+
+| Route tried on `agent` (agent-cli) | Result |
+|---|---|
+| `--local-agent-base-url http://127.0.0.1:PORT/v1` | `error: unknown option '--local-agent-base-url'` |
+| `CURSOR_LOCAL_AGENT_BASE_URL` + `CURSOR_LOCAL_AGENT_API_KEY` + `CURSOR_ENABLE_AUTHLESS=1` | ignored — mock received **0** requests |
+| `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` | ignored — mock received **0** requests |
+| `CURSOR_API_BASE_URL` | ignored for chat — mock received **0** requests (it fronts `${base}/auth/poll` only) |
+
+Method note, because the first version of this probe lied. Asking Cursor to
+"reply with exactly `PONGMOCK`" and then seeing `PONGMOCK` proves nothing: the
+*real* backend will happily obey that instruction, and the reply is
+indistinguishable from a mocked one. The probe was redone so the mock's canned
+answer (`PONGMOCK`) **differs** from the token the prompt requests (`ALPHA`).
+Every run returned `ALPHA` with zero mock hits: the real backend answered each
+time. (A `--help`-based flag check lied too — `commander` prints help and exits 0
+before validating options, so `agent --local-agent-base-url X --help` "succeeds"
+on a flag the CLI does not have.)
+
+**Conclusion, stated at the strength the evidence supports:** an offline e2e is
+not achievable for the `agent` binary this provider targets. It is *not* a
+statement about Cursor-the-company forever. If pogo ever targets
+`cursor-agent-local`, a pi-style offline mock rig becomes available — that would
+be a different binary, a different provider `Binary` value, and a different
+ticket.
+
+### What the live test buys instead
+
+So `internal/cursor/e2e_test.go` follows the **Codex** pattern: opt-in, real
+binary, real network, real plan credits. Losing byte-level capture costs the
+"did the persona reach the system prompt?" assertion; it is recovered
 behaviourally — the persona and the repo's `AGENTS.md` each instruct a distinct
 token, and the reply must carry both. That is arguably a *stronger* statement
 than "the bytes were in the request": it proves Cursor honoured both rule
