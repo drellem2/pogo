@@ -38,6 +38,13 @@
 //     delivers, so a quiet mailbox is indistinguishable from a dead poller.
 //     That is why this keys on a state-file mtime that ticks every cycle
 //     regardless of delivery.
+//
+// Boundary: a fresh heartbeat proves the process is DOING work — NOT that it is
+// running the CURRENT code. A job whose file was patched but whose process was
+// never restarted keeps ticking its heartbeat while executing the old loop, and
+// the reaper correctly leaves it alone. Detecting alive-but-running-old-code is
+// mg-be0c's reconcile step, not this reaper's; the two are complementary, not
+// overlapping. See docs/design/reaper-design.md.
 package reaper
 
 import (

@@ -47,6 +47,30 @@ mistake cost a 5.4h estimate for a 3.1h outage. The state-file mtime ticks every
 cycle regardless of whether the cycle had anything to deliver, which is exactly
 what makes it a liveness signal and a log line not.
 
+## Boundary: the reaper detects a stopped heartbeat, not stale code
+
+Heartbeat freshness proves a process is **doing work** — it does **not** prove
+the process is running the **current** code. A job whose file was patched but
+whose process was never restarted keeps ticking its heartbeat perfectly: a bash
+poller parses its top-level `while` loop once at start and never re-reads the
+file, so the *old* loop keeps running and freshening the state file. The reaper
+sees a fresh heartbeat and — correctly — leaves it alone. The process is alive;
+it is simply executing outdated code.
+
+So **the reaper and mg-be0c's reconcile step are complementary, not
+overlapping** — neither covers the other's failure:
+
+| Mechanism | Trigger | Catches |
+|-----------|---------|---------|
+| **d18b (this reaper)** | heartbeat gone **stale** | dead / wedged processes — a job that stopped doing work |
+| **mg-be0c (reconcile)** | job's **file changed** | alive-but-running-old-code — a job still executing a pre-patch loop |
+
+The reaper **cannot** detect stale code, and must not be designed to try — a
+fresh heartbeat carries no information about which revision produced it. Do not
+read this reaper as making be0c redundant: a running process executing outdated
+code is invisible to heartbeat supervision by construction, and closing that gap
+is be0c's job, not this one's.
+
 ## Hard conditions (all from the architect ruling)
 
 1. **Heartbeat freshness only** — implemented in `Reaper.checkJob`: `fresh :=
