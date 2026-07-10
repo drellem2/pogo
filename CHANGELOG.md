@@ -12,6 +12,15 @@ is the curated, human-readable summary kept in sync at each release cut.
 
 ### Fixed
 
+- **`build.sh` no longer overwrites the installed binaries.** The build step ran
+  `go install ./cmd/...`, writing to GOBIN (`~/go/bin`). Because `build.sh` also runs
+  unattended in agent worktrees and as the refinery's quality gate, every build that
+  touched `cmd/pogod` silently replaced the machine's installed `pogod` with an
+  unreviewed branch build — so a daemon restart could launch whatever branch compiled
+  last. `build.sh` now compiles into `./bin` (gitignored, overridable with
+  `POGO_BUILD_DIR`) and still fails on a compile error. Installing into GOBIN is now
+  opt-in via `./build.sh --install`. (mg-b630)
+
 - **pogod: attach socket no longer dies while the agent lives.** `pogo agent attach <name>`
   could fail with `connect: connection refused` against a socket file that existed,
   on an agent whose process was alive and healthy. The accept loop returned on *any*

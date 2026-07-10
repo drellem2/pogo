@@ -6,19 +6,26 @@ Thanks for your interest in contributing to pogo! This guide covers the basics o
 
 1. Fork and clone the repository
 2. Install Go (1.24+)
-3. Run `./build.sh` to build, test, and install
+3. Run `./build.sh` to build and test
 
 ## Development Workflow
 
 ### Building
 
 ```bash
-./build.sh    # Format, test, and install all binaries
-./test.sh     # Run tests only
-./fmt.sh      # Format code only
+./build.sh              # Format, test, and build all binaries into ./bin
+./build.sh --install    # ...and also `go install` them into GOBIN
+./test.sh               # Run tests only
+./fmt.sh                # Format code only
 ```
 
-`./build.sh` runs all three steps (format, test, install) and is the recommended way to verify your changes before committing.
+`./build.sh` runs all three steps (format, test, build) and is the recommended way to verify your changes before committing.
+
+Binaries land in `./bin` (gitignored). `./build.sh` deliberately does *not* write
+to GOBIN: it runs unattended in agent worktrees and as the refinery's quality
+gate, where a `go install` would overwrite the machine's installed `pogod` with
+an unreviewed branch build. Pass `--install` when you actually want the binaries
+on your `PATH`, or set `POGO_BUILD_DIR` to redirect the output directory.
 
 ### Code Style
 

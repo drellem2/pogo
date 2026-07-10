@@ -11,12 +11,18 @@ git clone https://github.com/drellem2/pogo.git && cd pogo && ./build.sh
 Requires [Go](https://go.dev/dl/) 1.21+.
 
 ```sh
-./build.sh       # Format, test, build, install
-./test.sh        # Run tests only
-./fmt.sh         # Format code only
+./build.sh              # Format, test, build all binaries into ./bin
+./build.sh --install    # ...and also `go install` them into GOBIN
+./test.sh               # Run tests only
+./fmt.sh                # Format code only
 ```
 
 Always run `./build.sh` before committing. If it fails, fix the issue before pushing.
+
+`./build.sh` builds into `./bin` (gitignored) and never writes GOBIN, so an
+unattended build in an agent worktree or in the refinery's quality gate cannot
+overwrite the installed `pogod`. Use `--install` to put binaries on your `PATH`;
+set `POGO_BUILD_DIR` to build somewhere other than `./bin`.
 
 ## Pre-commit hook
 

@@ -66,10 +66,14 @@ If you add or advance an integration, update both `README.md` and this table.
 Go project. Build and test:
 
 ```bash
-./build.sh       # Build all binaries (runs fmt + test + install)
+./build.sh       # Build all binaries into ./bin (runs fmt + test + build)
 ./test.sh        # Run tests
 ./fmt.sh         # Format code (go fmt)
 ```
+
+`./build.sh` compiles into `./bin` and does **not** `go install` into GOBIN —
+that would overwrite the machine's live `pogod` with a branch build. Pass
+`--install` if you want the binaries on `PATH`.
 
 Binaries are in `cmd/`: `cmd/pogo`, `cmd/lsp`, `cmd/pose`, `cmd/pogod` (daemon).
 
