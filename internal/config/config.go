@@ -238,7 +238,7 @@ type HeartbeatConfig struct {
 
 // AgentsConfig holds agent command configuration.
 type AgentsConfig struct {
-	// Provider selects the agent harness ("claude", "codex", "pi"). Resolved
+	// Provider selects the agent harness ("claude", "codex", "pi", "cursor"). Resolved
 	// by cmd/pogod to an agent.Provider. Empty is treated as DefaultProvider;
 	// Load() fills it in.
 	Provider string
@@ -284,7 +284,7 @@ type AgentTypeConfig struct {
 	// Command overrides the command template for this agent type. Empty means
 	// inherit the global [agents] command (or the provider default).
 	Command string
-	// Provider overrides the harness provider ("claude", "codex", "pi") for
+	// Provider overrides the harness provider ("claude", "codex", "pi", "cursor") for
 	// this agent type. Empty means inherit the global [agents] provider. This
 	// is what lets a mixed fleet run — e.g. [agents.polecat] provider = "pi"
 	// while crew agents stay on Claude. See mg-b31b.

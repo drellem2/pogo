@@ -202,7 +202,7 @@ func TestShippedTemplatesProviderGating(t *testing.T) {
 	}
 
 	for _, name := range []string{"prompts/templates/polecat.md", "prompts/templates/polecat-qa.md", "prompts/templates/polecat-build-pr.md", "prompts/templates/polecat-triage.md", "prompts/templates/polecat-review.md"} {
-		for _, provider := range []string{"pi", "codex"} {
+		for _, provider := range []string{"pi", "codex", "cursor"} {
 			out := expand(t, name, provider)
 			for _, ism := range claudeIsms {
 				if strings.Contains(out, ism) {

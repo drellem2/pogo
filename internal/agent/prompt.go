@@ -187,7 +187,8 @@ type TemplateVars struct {
 	// expansion time.
 	WorkerTitle string
 
-	// Provider is the resolved harness provider id ("claude", "codex", "pi")
+	// Provider is the resolved harness provider id ("claude", "codex", "pi",
+	// "cursor")
 	// the polecat will run under. Templates gate harness-specific guidance
 	// behind `{{if eq .Provider "claude"}}` so Claude-Code-isms (CronCreate,
 	// rating-modal dismissal) don't leak into prompts for other harnesses

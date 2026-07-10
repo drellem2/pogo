@@ -41,9 +41,56 @@ func TestResolvePi(t *testing.T) {
 	}
 }
 
+// TestResolveCursor pins the Cursor id -> descriptor mapping. Note the id and
+// the binary differ: the config key is "cursor", but the CLI command is
+// "agent" (renamed from cursor-agent in 2026).
+func TestResolveCursor(t *testing.T) {
+	p, ok := Resolve("cursor")
+	if !ok {
+		t.Fatal("Resolve(\"cursor\") returned ok=false")
+	}
+	if p == nil || p.ID != "cursor" {
+		t.Fatalf("Resolve(\"cursor\") = %+v, want provider with ID=cursor", p)
+	}
+	if p.Binary != "agent" {
+		t.Errorf("cursor provider Binary = %q, want %q", p.Binary, "agent")
+	}
+}
+
+// TestAllProvidersHaveDistinctIDs guards the Resolve switch: two providers
+// sharing an ID would make one of them unreachable by config.
+func TestAllProvidersHaveDistinctIDs(t *testing.T) {
+	seen := map[string]bool{}
+	for _, p := range All() {
+		if p == nil {
+			t.Fatal("All() contains a nil provider")
+		}
+		if seen[p.ID] {
+			t.Errorf("duplicate provider ID %q in All()", p.ID)
+		}
+		seen[p.ID] = true
+	}
+}
+
+// TestAllProvidersResolveByID keeps All() and Resolve() in lockstep: every
+// descriptor All() advertises must be reachable through the config id, and
+// Resolve must hand back that exact descriptor pointer.
+func TestAllProvidersResolveByID(t *testing.T) {
+	for _, p := range All() {
+		got, ok := Resolve(p.ID)
+		if !ok {
+			t.Errorf("Resolve(%q) returned ok=false, but %q is in All()", p.ID, p.ID)
+			continue
+		}
+		if got != p {
+			t.Errorf("Resolve(%q) = %p, want the All() descriptor %p", p.ID, got, p)
+		}
+	}
+}
+
 func TestAllContainsEveryProvider(t *testing.T) {
 	all := All()
-	want := []string{"claude", "codex", "pi"}
+	want := []string{"claude", "codex", "pi", "cursor"}
 	if len(all) != len(want) {
 		t.Fatalf("All() returned %d providers, want %d", len(all), len(want))
 	}

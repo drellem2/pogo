@@ -246,7 +246,7 @@ func (a *Agent) alive() bool {
 func (a *Agent) Alive() bool { return a.alive() }
 
 // ProviderID returns the id of the harness provider resolved for this agent
-// at spawn time ("claude", "codex", "pi"), or "" for a bare-registry spawn.
+// at spawn time ("claude", "codex", "pi", "cursor"), or "" for a bare-registry spawn.
 // The field is immutable after construction, so no lock is needed. Exposed so
 // integration tests can assert which provider the resolution chain actually
 // picked (per-type config vs global default vs built-in fallback).
@@ -316,7 +316,7 @@ type Registry struct {
 	onExit func(a *Agent, err error)
 
 	// providers is the pool of known harness descriptors, keyed by id
-	// ("claude", "codex", "pi"). pogod registers every provider at startup
+	// ("claude", "codex", "pi", "cursor"). pogod registers every provider at startup
 	// (RegisterProvider); resolveProvider then picks one per spawn from the
 	// precedence chain. Before mg-b31b the registry held a single global
 	// provider plus a global hook pair — provider selection is now per-spawn,
