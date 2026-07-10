@@ -81,6 +81,7 @@ import (
 
 	"github.com/creack/pty"
 	"github.com/drellem2/pogo/internal/agent"
+	"github.com/drellem2/pogo/internal/agenttest"
 	"github.com/drellem2/pogo/internal/cursor"
 	"github.com/drellem2/pogo/internal/providers"
 )
@@ -179,7 +180,7 @@ func TestCursorEndToEnd(t *testing.T) {
 	// claude as the global default. cursor being resolved for the polecat spawn
 	// below therefore proves the `[agents.polecat] provider = "cursor"` config
 	// tier, not a registry-global default.
-	reg, err := agent.NewRegistry(shortSocketDir(t))
+	reg, err := agent.NewRegistry(agenttest.SocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}

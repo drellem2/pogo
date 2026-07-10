@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"github.com/drellem2/pogo/internal/agent"
+	"github.com/drellem2/pogo/internal/agenttest"
 	"github.com/drellem2/pogo/internal/config"
 	"github.com/drellem2/pogo/internal/cursor"
 	"github.com/drellem2/pogo/internal/providers"
@@ -117,27 +118,12 @@ func stubCommand(t *testing.T) []string {
 	return []string{sleep, "30"}
 }
 
-// shortSocketDir returns a directory path short enough that "<dir>/<name>.sock"
-// fits inside AF_UNIX's sun_path limit (104 bytes on darwin, 108 on linux).
-// t.TempDir() on darwin returns /var/folders/... paths that exceed it on their
-// own, and since mg-ef80 an unbindable attach socket is fatal to the spawn.
-// Mirrors internal/agent's own unexported helper of the same name.
-func shortSocketDir(t *testing.T) string {
-	t.Helper()
-	dir, err := os.MkdirTemp("/tmp", "pogo-cursor-sock-")
-	if err != nil {
-		t.Fatalf("MkdirTemp: %v", err)
-	}
-	t.Cleanup(func() { os.RemoveAll(dir) })
-	return filepath.Join(dir, "s")
-}
-
 // spawnWithCursorProvider runs Registry.Spawn against workDir with the real
 // cursor.Provider descriptor and a stub binary, and returns the registry so the
 // caller can stop it.
 func spawnWithCursorProvider(t *testing.T, workDir, promptFile, name string) *agent.Registry {
 	t.Helper()
-	reg, err := agent.NewRegistry(shortSocketDir(t))
+	reg, err := agent.NewRegistry(agenttest.SocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}

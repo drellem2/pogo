@@ -54,6 +54,7 @@ import (
 	"time"
 
 	"github.com/drellem2/pogo/internal/agent"
+	"github.com/drellem2/pogo/internal/agenttest"
 	"github.com/drellem2/pogo/internal/providers"
 )
 
@@ -174,7 +175,11 @@ func TestPiEndToEnd(t *testing.T) {
 	// claude as the global default. pi being resolved for the polecat spawn
 	// below therefore proves the `[agents.polecat] provider = "pi"` config
 	// tier, not a registry-global default.
-	reg, err := agent.NewRegistry(filepath.Join(base, "sock"))
+	//
+	// The registry roots at agenttest.SocketDir, not under base: base is a
+	// t.TempDir(), whose /var/folders/... path on darwin overflows sun_path, and
+	// since mg-ef80 an attach socket that cannot bind fails the spawn (mg-7318).
+	reg, err := agent.NewRegistry(agenttest.SocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}

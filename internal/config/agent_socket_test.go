@@ -358,6 +358,13 @@ func TestAgentSocketDirAlwaysFits(t *testing.T) {
 				if !root.bindable {
 					return
 				}
+				// bindOK creates dir. For a deep root with a long TMPDIR that is
+				// /tmp/pogo-agents-<hash>, outside every temp root the test owns,
+				// so nothing else would ever reap it: each run of this test would
+				// strand another empty directory in /tmp (mg-7318). Registered
+				// after the bindable check because the "/" row never creates it.
+				t.Cleanup(func() { os.RemoveAll(dir) })
+
 				// The budget is only meaningful if the longest promised name
 				// actually binds there.
 				sock := filepath.Join(dir, strings.Repeat("a", MaxAgentNameLen)+".sock")
