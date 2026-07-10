@@ -358,3 +358,11 @@ and silently loses attach on another is worse than a name that is refused
 everywhere. If pogod cannot bind an agent's attach socket at all, the spawn now
 fails outright rather than returning a running agent that `pogo agent attach`
 cannot reach.
+
+Length is not the only constraint. An agent name is path-joined onto the socket
+directory, the prompt directory (`<prompt dir>/<agent>`) and, for a polecat, its
+worktree root — so a name must be a **single path component**: no `/` or `\`, not
+`.` or `..`, and no control characters. `../x` would otherwise place all three
+outside the directory meant to contain them. Names that merely *contain* dots are
+fine (`pm..pogo`, `.hidden`); only a bare `.`/`..` or an embedded separator
+traverses. Like the length ceiling, a bad name is rejected at spawn with HTTP 400.
