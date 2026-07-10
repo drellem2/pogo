@@ -206,6 +206,72 @@ enabled = false
 	}
 }
 
+func TestReconcileDefaults(t *testing.T) {
+	os.Unsetenv("POGO_HOME")
+	os.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	defer os.Unsetenv("XDG_CONFIG_HOME")
+
+	cfg := Load()
+	if len(cfg.Reconcile.Mirrors) != 0 {
+		t.Errorf("reconcile should have no mirrors by default, got %v", cfg.Reconcile.Mirrors)
+	}
+}
+
+func TestReconcileConfigFile(t *testing.T) {
+	os.Unsetenv("POGO_HOME")
+	dir := t.TempDir()
+	os.Setenv("XDG_CONFIG_HOME", dir)
+	defer os.Unsetenv("XDG_CONFIG_HOME")
+
+	home, _ := os.UserHomeDir()
+	pogoDir := filepath.Join(dir, "pogo")
+	os.MkdirAll(pogoDir, 0755)
+	os.WriteFile(filepath.Join(pogoDir, "config.toml"), []byte(`
+[reconcile]
+mirrors = ["watchdog|~/dev/pogo-reminders/bin/watchdog.sh|~/.pogo/pogo-reminders/bin/watchdog.sh|com.pogo.watchdog", "notify|/abs/src/notify.sh|/abs/dst/notify.sh"]
+`), 0644)
+
+	cfg := Load()
+	if len(cfg.Reconcile.Mirrors) != 2 {
+		t.Fatalf("reconcile mirrors = %v, want 2 entries", cfg.Reconcile.Mirrors)
+	}
+	m0 := cfg.Reconcile.Mirrors[0]
+	wantSource := filepath.Join(home, "dev/pogo-reminders/bin/watchdog.sh")
+	wantTarget := filepath.Join(home, ".pogo/pogo-reminders/bin/watchdog.sh")
+	if m0.Name != "watchdog" || m0.Source != wantSource || m0.Target != wantTarget || m0.Label != "com.pogo.watchdog" {
+		t.Errorf("mirror[0] = %+v; want name=watchdog source=%s target=%s label=com.pogo.watchdog", m0, wantSource, wantTarget)
+	}
+	// Second mirror has no label (3 fields) and absolute paths (no ~ expansion).
+	m1 := cfg.Reconcile.Mirrors[1]
+	if m1.Name != "notify" || m1.Source != "/abs/src/notify.sh" || m1.Target != "/abs/dst/notify.sh" || m1.Label != "" {
+		t.Errorf("mirror[1] = %+v, unexpected", m1)
+	}
+}
+
+func TestReconcileMalformedMirrorsDropped(t *testing.T) {
+	os.Unsetenv("POGO_HOME")
+	dir := t.TempDir()
+	os.Setenv("XDG_CONFIG_HOME", dir)
+	defer os.Unsetenv("XDG_CONFIG_HOME")
+
+	pogoDir := filepath.Join(dir, "pogo")
+	os.MkdirAll(pogoDir, 0755)
+	// Entry 1: too few fields. Entry 2: empty name. Entry 3: ok (3 fields).
+	// Entry 4: too many fields. A bad mirror must not poison the good one.
+	os.WriteFile(filepath.Join(pogoDir, "config.toml"), []byte(`
+[reconcile]
+mirrors = ["justname", "|/src|/dst", "ok|/src/ok.sh|/dst/ok.sh", "x|a|b|c|d"]
+`), 0644)
+
+	cfg := Load()
+	if len(cfg.Reconcile.Mirrors) != 1 {
+		t.Fatalf("expected only the one valid mirror to survive, got %v", cfg.Reconcile.Mirrors)
+	}
+	if cfg.Reconcile.Mirrors[0].Name != "ok" {
+		t.Errorf("surviving mirror = %+v, want ok", cfg.Reconcile.Mirrors[0])
+	}
+}
+
 func TestEnvOverridesConfigFile(t *testing.T) {
 	dir := t.TempDir()
 	os.Setenv("XDG_CONFIG_HOME", dir)

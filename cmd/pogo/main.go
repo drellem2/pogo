@@ -26,6 +26,7 @@ import (
 	"github.com/drellem2/pogo/internal/events"
 	"github.com/drellem2/pogo/internal/gitgc"
 	"github.com/drellem2/pogo/internal/providers"
+	"github.com/drellem2/pogo/internal/reconcile"
 	"github.com/drellem2/pogo/internal/refinery"
 	"github.com/drellem2/pogo/internal/scheduler"
 	"github.com/drellem2/pogo/internal/service"
@@ -599,6 +600,178 @@ chicken-and-egg.`,
 		Run: func(cmd *cobra.Command, args []string) {
 			if err := service.Uninstall(); err != nil {
 				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+			}
+		},
+	}
+
+	var reconcileDryRun bool
+	var cmdServiceReconcile = &cobra.Command{
+		Use:   "reconcile",
+		Short: "Reconcile host-side artifacts (poller scripts) from their repo sources",
+		Long: `Reconcile every mirror declared in [reconcile] mirrors onto the host.
+
+For each mirror pogo copies the repo/generator source over the host target using
+an ATOMIC replace (write a temp file in the target's directory, then rename(2))
+— never an in-place rewrite, because bash reads a script by byte offset and
+rewriting it under a live interpreter can resume at a shifted offset and execute
+garbage. Then, if the mirror names a launchd job, pogo KICKSTARTS it so the
+running process actually picks up the new bytes: writing the file changes
+nothing for a long-lived bash while-loop (it parses the loop once and never
+re-reads the file), and on this host launchd dispatches no nondemand spawns
+(mg-50e0), so an explicit ` + "`launchctl kickstart`" + ` is the only thing that
+makes the change real. A re-run also heals a box whose file is already correct
+but whose process started before the file was written.
+
+Host artifacts are COPIES, never symlinks into a checkout: a symlink would make
+an uncommitted local edit instantly live in production, inverting the repo/host
+boundary this step defends (mg-be0c).
+
+Declare mirrors in config.toml:
+
+  [reconcile]
+  mirrors = [
+    "watchdog|~/dev/pogo-reminders/bin/watchdog.sh|~/.pogo/pogo-reminders/bin/watchdog.sh|com.pogo.watchdog",
+  ]`,
+		Args: cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			cfg := config.Load()
+			mirrors := cfg.Reconcile.Mirrors
+			if len(mirrors) == 0 {
+				if jsonOutput {
+					cli.PrintJSON(map[string]interface{}{"mirrors": []interface{}{}, "message": "no [reconcile] mirrors declared"})
+				} else {
+					fmt.Println("No [reconcile] mirrors declared. Add them to config.toml under [reconcile] mirrors.")
+				}
+				return
+			}
+			deps := reconcile.HostDeps()
+			type outRes struct {
+				Name        string `json:"name"`
+				Changed     bool   `json:"changed"`
+				Kickstarted bool   `json:"kickstarted"`
+				NewPID      int    `json:"new_pid,omitempty"`
+				Reason      string `json:"reason,omitempty"`
+				Error       string `json:"error,omitempty"`
+			}
+			var results []outRes
+			anyErr := false
+			for _, m := range mirrors {
+				mir := reconcile.Mirror{Name: m.Name, Source: m.Source, Target: m.Target, Label: m.Label}
+				if reconcileDryRun {
+					d := reconcile.CheckDrift(mir, deps)
+					r := outRes{Name: m.Name}
+					if !d.Clean() {
+						r.Changed = true
+						r.Reason = "would reconcile: " + strings.TrimSpace(d.Report())
+					} else {
+						r.Reason = "clean"
+					}
+					results = append(results, r)
+					if !jsonOutput {
+						if d.Clean() {
+							fmt.Printf("  clean   %s\n", m.Name)
+						} else {
+							fmt.Printf("%s", d.Report())
+						}
+					}
+					continue
+				}
+				res := reconcile.Reconcile(mir, service.KickstartJob, deps)
+				r := outRes{Name: res.Name, Changed: res.Changed, Kickstarted: res.Kickstarted, NewPID: res.NewPID, Reason: res.Reason}
+				if res.Err != nil {
+					r.Error = res.Err.Error()
+					anyErr = true
+				}
+				results = append(results, r)
+				if !jsonOutput {
+					switch {
+					case res.Err != nil:
+						fmt.Printf("  ERROR   %s: %v\n", res.Name, res.Err)
+					case res.Kickstarted:
+						fmt.Printf("  updated %s: %s, kickstarted (new pid %d)\n", res.Name, res.Reason, res.NewPID)
+					case res.Changed:
+						fmt.Printf("  updated %s: %s\n", res.Name, res.Reason)
+					default:
+						fmt.Printf("  ok      %s: already current\n", res.Name)
+					}
+				}
+			}
+			if jsonOutput {
+				cli.PrintJSON(map[string]interface{}{"dry_run": reconcileDryRun, "results": results})
+			}
+			if anyErr {
+				os.Exit(cli.ExitError)
+			}
+		},
+	}
+	cmdServiceReconcile.Flags().BoolVar(&reconcileDryRun, "dry-run", false, "Report what would be reconciled without writing or restarting anything")
+
+	var cmdServiceCheckDrift = &cobra.Command{
+		Use:   "check-drift",
+		Short: "Report host artifacts that have drifted from their repo sources (never fixes)",
+		Long: `Compare every [reconcile] mirror against its source and the RUNNING reality,
+and report divergence. This command REPORTS ONLY — it never reconciles. Auto-
+fixing drift silently is a reconcile loop fighting a genuinely-broken artifact,
+the same failure shape as an unbounded reaper; report loudly, let a human or an
+explicit ` + "`pogo service reconcile`" + ` act.
+
+It checks three dimensions per mirror:
+
+  file     the on-disk copy no longer matches its source (a hand-edit or a
+           merge that never reached the host);
+  loaded   the LOADED launchd job execs a different program than the target —
+           a plist whose bytes match the generator but whose loaded job still
+           points at the old path (exactly how the recovery plist hid for six
+           weeks, mg-6e82);
+  process  the process launchd is running started BEFORE the target was last
+           written, so it parsed old bytes even at the correct path (pa's
+           pollers ran 41 minutes of pre-patch code, mg-be0c).
+
+The last two are the "running reality" checks: the file is not the process.
+
+Exit status is 0 when every mirror is clean, 1 when any drift is found (so it
+can gate a schedule or CI step).`,
+		Args: cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			cfg := config.Load()
+			mirrors := cfg.Reconcile.Mirrors
+			deps := reconcile.HostDeps()
+			type outDrift struct {
+				Name      string `json:"name"`
+				Target    string `json:"target"`
+				Label     string `json:"label,omitempty"`
+				Clean     bool   `json:"clean"`
+				FileDrift string `json:"file_drift,omitempty"`
+				PathDrift string `json:"path_drift,omitempty"`
+				StaleProc string `json:"stale_proc,omitempty"`
+			}
+			var drifts []outDrift
+			driftCount := 0
+			for _, m := range mirrors {
+				d := reconcile.CheckDrift(reconcile.Mirror{Name: m.Name, Source: m.Source, Target: m.Target, Label: m.Label}, deps)
+				drifts = append(drifts, outDrift{
+					Name: d.Name, Target: d.Target, Label: d.Label, Clean: d.Clean(),
+					FileDrift: d.FileDrift, PathDrift: d.PathDrift, StaleProc: d.StaleProc,
+				})
+				if !d.Clean() {
+					driftCount++
+					if !jsonOutput {
+						fmt.Printf("%s", d.Report())
+					}
+				} else if !jsonOutput {
+					fmt.Printf("  clean   %s (%s)\n", d.Name, d.Target)
+				}
+			}
+			if jsonOutput {
+				cli.PrintJSON(map[string]interface{}{"drift_count": driftCount, "mirrors": drifts})
+			} else if driftCount == 0 {
+				fmt.Printf("deploy OK: %d mirror(s) match source and running reality.\n", len(mirrors))
+			} else {
+				fmt.Printf("\nDEPLOY DRIFT: %d of %d mirror(s) drifted — what runs is not what the repo says.\n", driftCount, len(mirrors))
+				fmt.Println("Fix with: pogo service reconcile")
+			}
+			if driftCount > 0 {
+				os.Exit(cli.ExitError)
 			}
 		},
 	}
@@ -1980,6 +2153,8 @@ branches; work items and mail live in mg/macguffin (the task-store CLI).`,
 	cmdService.AddCommand(cmdServiceStatus)
 	cmdService.AddCommand(cmdServiceInstallRecovery)
 	cmdService.AddCommand(cmdServiceUninstallRecovery)
+	cmdService.AddCommand(cmdServiceReconcile)
+	cmdService.AddCommand(cmdServiceCheckDrift)
 	rootCmd.AddCommand(cmdService)
 
 	// Recovery commands (mg-f5fc tier-3). The agent itself is installed via
