@@ -224,6 +224,109 @@ func TestRebindListenerNoOpAfterCleanup(t *testing.T) {
 	}
 }
 
+// TestSupervisorThrottlesRebindFlap is the regression for review round 1's
+// blocking finding: a listener that dies the instant it is rebound must not
+// drive the supervisor as a hot loop. Unthrottled this measured ~10,900
+// rebinds/sec, each writing an agent_attach_rebound event (~7.8 GB/hour into
+// events.log) while pegging a core, for the life of the process.
+//
+// The flap is simulated by killing every new accept loop the moment it appears,
+// which is what a recurring permanent Accept error (ENOMEM, EPERM) does.
+func TestSupervisorThrottlesRebindFlap(t *testing.T) {
+	withSupervisorInterval(t, time.Hour) // isolate: only the dead-channel path drives this
+	a := spawnAgent(t, "rebind-flap", "sleep", "30")
+
+	if !waitForAttach(t, a, 2*time.Second) {
+		t.Fatal("attach socket not usable before the fault was injected")
+	}
+
+	const window = 600 * time.Millisecond
+	seen := map[net.Listener]bool{}
+	prev, _ := listenerID(a)
+
+	// Kill each listener as soon as the supervisor installs it.
+	killAcceptLoopLocked(a)
+	deadline := time.Now().Add(window)
+	for time.Now().Before(deadline) {
+		if cur, _ := listenerID(a); cur != nil && cur != prev {
+			seen[cur] = true
+			prev = cur
+			killAcceptLoopLocked(a)
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// With backoff (50ms doubling to 30s) a 600ms window admits ~4 rebinds.
+	// Without it, thousands. The bound is deliberately loose — this test guards
+	// an order of magnitude, not an exact schedule.
+	const maxRebinds = 15
+	if len(seen) > maxRebinds {
+		t.Errorf("supervisor rebound %d times in %s — rebind path is not throttled", len(seen), window)
+	}
+	if len(seen) == 0 {
+		t.Error("supervisor never rebound the flapping listener at all")
+	}
+}
+
+// killAcceptLoopLocked closes the current listener while leaving its socket file,
+// without the *testing.T fatal path — safe to call from a polling loop.
+func killAcceptLoopLocked(a *Agent) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.listener != nil {
+		disarmUnlinkOnClose(a.listener)
+		a.listener.Close()
+	}
+}
+
+// TestIsRetryableAcceptErr pins the classification the accept loop rests on.
+// Errno.Temporary() covers only EINTR/EMFILE/ENFILE/timeouts, so the errnos
+// accept(2) raises under memory pressure must be named explicitly — otherwise
+// they fall through to the (throttled, but pointless) rebind path.
+func TestIsRetryableAcceptErr(t *testing.T) {
+	opErr := func(e syscall.Errno) error {
+		return &net.OpError{Op: "accept", Net: "unix", Err: os.NewSyscallError("accept", e)}
+	}
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"EMFILE (fd exhaustion — the mg-d216 trigger)", opErr(syscall.EMFILE), true},
+		{"ENFILE (system-wide fd exhaustion)", opErr(syscall.ENFILE), true},
+		{"EINTR", opErr(syscall.EINTR), true},
+		{"ENOMEM (memory pressure)", opErr(syscall.ENOMEM), true},
+		{"ENOBUFS (memory pressure)", opErr(syscall.ENOBUFS), true},
+		{"ECONNABORTED (peer vanished)", opErr(syscall.ECONNABORTED), true},
+		{"ECONNRESET (peer vanished)", opErr(syscall.ECONNRESET), true},
+		{"EPERM (sandbox policy — permanent)", opErr(syscall.EPERM), false},
+		{"EBADF (permanent)", opErr(syscall.EBADF), false},
+		{"EINVAL (permanent)", opErr(syscall.EINVAL), false},
+		{"ErrClosed (deliberate)", net.ErrClosed, false},
+	}
+	for _, tc := range cases {
+		if got := isRetryableAcceptErr(tc.err); got != tc.want {
+			t.Errorf("isRetryableAcceptErr(%s) = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestRebindBackoffIsBounded keeps the repair loop's throttle honest.
+func TestRebindBackoffIsBounded(t *testing.T) {
+	if got := nextRebindBackoff(0); got != attachRebindMinBackoff {
+		t.Errorf("first rebind backoff = %s, want %s", got, attachRebindMinBackoff)
+	}
+	if got := nextRebindBackoff(attachRebindMinBackoff); got != 2*attachRebindMinBackoff {
+		t.Errorf("second rebind backoff = %s, want %s", got, 2*attachRebindMinBackoff)
+	}
+	if got := nextRebindBackoff(attachRebindMaxBackoff); got != attachRebindMaxBackoff {
+		t.Errorf("saturated rebind backoff = %s, want %s", got, attachRebindMaxBackoff)
+	}
+	if got := nextRebindBackoff(attachRebindMaxBackoff / 2); got != attachRebindMaxBackoff {
+		t.Errorf("rebind backoff overshoot = %s, want clamp to %s", got, attachRebindMaxBackoff)
+	}
+}
+
 // stubListener feeds acceptLoop a scripted sequence of Accept errors.
 type stubListener struct {
 	mu     sync.Mutex

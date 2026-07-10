@@ -1316,6 +1316,46 @@ const (
 	attachAcceptMaxBackoff = time.Second
 )
 
+// Rebind backoff bounds. A listener that dies the instant it is rebound — a
+// recurring permanent Accept error — would otherwise drive the supervisor as a
+// hot loop: a pegged core and one agent_attach_rebound event per iteration. The
+// backoff resets once a listener has survived attachRebindResetAfter, so
+// unrelated faults hours apart each still get an immediate repair.
+const (
+	attachRebindMinBackoff = 50 * time.Millisecond
+	attachRebindMaxBackoff = 30 * time.Second
+	attachRebindResetAfter = 5 * time.Minute
+)
+
+// acceptRetryLogInterval rate-limits the per-retry log line during a sustained
+// accept-error streak, so a wedged listener cannot flood the daemon log.
+const acceptRetryLogInterval = 30 * time.Second
+
+// isRetryableAcceptErr reports whether Accept failed for a reason that may clear
+// on its own, so the loop should back off and keep serving rather than retire
+// the listener.
+//
+// Errno.Temporary() covers only EINTR, EMFILE, ENFILE and the timeout errnos.
+// accept(2) also fails with ENOMEM/ENOBUFS under memory pressure, and with
+// ECONNABORTED/ECONNRESET when a peer goes away between connect and accept — all
+// recoverable, none reported as temporary. Anything else (EPERM under a sandbox
+// policy, EBADF, EINVAL) is genuinely permanent: the loop returns and the
+// supervisor rebinds on its own bounded backoff.
+func isRetryableAcceptErr(err error) bool {
+	var tmp interface{ Temporary() bool }
+	if errors.As(err, &tmp) && tmp.Temporary() {
+		return true
+	}
+	var errno syscall.Errno
+	if errors.As(err, &errno) {
+		switch errno {
+		case syscall.ENOMEM, syscall.ENOBUFS, syscall.ECONNABORTED, syscall.ECONNRESET:
+			return true
+		}
+	}
+	return false
+}
+
 // startListener creates a unix domain socket for attach connections and starts
 // the supervisor that keeps it usable for the life of the process. The
 // supervisor starts even when the first bind fails, so an agent spawned during
@@ -1377,21 +1417,24 @@ func (a *Agent) acceptLoop(l net.Listener, dead chan struct{}) {
 	defer close(dead)
 
 	var backoff time.Duration
+	var lastLog time.Time
 	for {
 		conn, err := l.Accept()
 		if err != nil {
 			if errors.Is(err, net.ErrClosed) {
 				return // listener closed by Cleanup or a rebind
 			}
-			// A transient accept error must not retire the listener. Under fd
+			// A recoverable accept error must not retire the listener. Under fd
 			// exhaustion Accept returns EMFILE/ENFILE; returning here leaves the
 			// socket file bound with nobody accepting, so the listen backlog
 			// fills and every later attach gets ECONNREFUSED against a perfectly
 			// healthy agent — the mg-d216 symptom.
-			var tmp interface{ Temporary() bool }
-			if errors.As(err, &tmp) && tmp.Temporary() {
+			if isRetryableAcceptErr(err) {
 				backoff = nextAcceptBackoff(backoff)
-				log.Printf("agent %s: attach accept: %v — retrying in %s", a.Name, err, backoff)
+				if lastLog.IsZero() || time.Since(lastLog) >= acceptRetryLogInterval {
+					log.Printf("agent %s: attach accept: %v — retrying in %s", a.Name, err, backoff)
+					lastLog = time.Now()
+				}
 				time.Sleep(backoff)
 				continue
 			}
@@ -1399,19 +1442,30 @@ func (a *Agent) acceptLoop(l net.Listener, dead chan struct{}) {
 			return // permanent — the supervisor rebinds while the process lives
 		}
 		backoff = 0
+		lastLog = time.Time{}
 		go a.handleAttach(conn)
 	}
 }
 
 // nextAcceptBackoff doubles the accept-retry delay up to attachAcceptMaxBackoff.
 func nextAcceptBackoff(cur time.Duration) time.Duration {
-	if cur == 0 {
-		return attachAcceptMinBackoff
+	return doubleBackoff(cur, attachAcceptMinBackoff, attachAcceptMaxBackoff)
+}
+
+// nextRebindBackoff doubles the rebind delay up to attachRebindMaxBackoff.
+func nextRebindBackoff(cur time.Duration) time.Duration {
+	return doubleBackoff(cur, attachRebindMinBackoff, attachRebindMaxBackoff)
+}
+
+// doubleBackoff returns min, then doubles toward max, saturating there.
+func doubleBackoff(cur, min, max time.Duration) time.Duration {
+	if cur <= 0 {
+		return min
 	}
-	if next := cur * 2; next < attachAcceptMaxBackoff {
+	if next := cur * 2; next < max {
 		return next
 	}
-	return attachAcceptMaxBackoff
+	return max
 }
 
 // superviseListener ties the attach socket's lifetime to the process's. It
@@ -1429,6 +1483,12 @@ func nextAcceptBackoff(cur time.Duration) time.Duration {
 func (a *Agent) superviseListener(stop chan struct{}, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+
+	// Rebinding is repair, and repair that never succeeds must not become a hot
+	// loop: an Accept error that recurs on every fresh listener would otherwise
+	// spin the supervisor at syscall speed, one event written per iteration.
+	var backoff time.Duration
+	var lastRebind time.Time
 
 	for {
 		a.mu.Lock()
@@ -1460,16 +1520,47 @@ func (a *Agent) superviseListener(stop chan struct{}, interval time.Duration) {
 		if reason == "" {
 			continue
 		}
+
+		// A listener that has been healthy for a while makes this a fresh
+		// incident, not a flap — repair it immediately.
+		if !lastRebind.IsZero() && time.Since(lastRebind) >= attachRebindResetAfter {
+			backoff = 0
+		}
+
 		rebound, err := a.rebindListener()
-		if err != nil {
+		switch {
+		case err != nil:
 			log.Printf("agent %s: attach listener rebind (%s) failed: %v", a.Name, reason, err)
-			continue
-		}
-		if !rebound {
+		case !rebound:
 			return // Cleanup retired the listener while we were deciding
+		default:
+			log.Printf("agent %s: attach listener rebound on %s (%s)", a.Name, a.socketPath, reason)
+			a.emitAttachRebound(reason)
 		}
-		log.Printf("agent %s: attach listener rebound on %s (%s)", a.Name, a.socketPath, reason)
-		a.emitAttachRebound(reason)
+
+		// Throttle the next repair — after both a failed bind and a rebind whose
+		// listener may die again immediately. This bounds the loop's rate, and
+		// with it the agent_attach_rebound event rate and the rebind-failure log.
+		lastRebind = time.Now()
+		backoff = nextRebindBackoff(backoff)
+		if !a.sleepInterruptibly(backoff, stop) {
+			return
+		}
+	}
+}
+
+// sleepInterruptibly waits for d, returning false if the agent was retired or
+// its process exited first — so Cleanup never blocks behind a backoff.
+func (a *Agent) sleepInterruptibly(d time.Duration, stop chan struct{}) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return true
+	case <-stop:
+		return false
+	case <-a.done:
+		return false
 	}
 }
 

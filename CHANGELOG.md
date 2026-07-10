@@ -19,8 +19,10 @@ is the curated, human-readable summary kept in sync at each release cut.
   the socket bound with nothing accepting; once the listen backlog filled, every
   subsequent attach was refused, permanently. The accept loop now retries transient
   errors with bounded backoff, and a supervisor tied to process lifetime rebinds a
-  listener that stops serving or whose socket file is unlinked or replaced. Each
-  repair emits an `agent_attach_rebound` event. (mg-d216)
+  listener that stops serving or whose socket file is unlinked or replaced. Both
+  the accept retry and the rebind repair are rate-limited, so a permanently broken
+  socket cannot spin the daemon or flood the event log. Each repair emits an
+  `agent_attach_rebound` event. (mg-d216)
 
 ## [0.4.0] - 2026-07-09
 

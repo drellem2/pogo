@@ -123,8 +123,13 @@ socket had stopped serving connections — see `reason` — so `pogo agent attac
 would have failed against a live, healthy agent. Emitted once per repair; the
 agent is not restarted and loses no state. A steady trickle of these for one
 agent points at whatever keeps breaking the socket (fd exhaustion, a `$TMPDIR`
-reaper) rather than at the attach mechanism itself. Additive — no
-`schema_version` bump.
+reaper) rather than at the attach mechanism itself.
+
+Repairs are rate-limited: a listener that fails again the instant it is rebound
+(a recurring permanent `accept(2)` error) backs off from 50ms to a ceiling of
+30s, so a persistently broken socket cannot flood this log. The backoff resets
+once a listener has stayed healthy for five minutes, so unrelated faults hours
+apart each get an immediate repair. Additive — no `schema_version` bump.
 
 - **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent`, `details`
 - **`details` fields:**
