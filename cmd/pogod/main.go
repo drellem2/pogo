@@ -621,8 +621,26 @@ Flags:
 		}
 	}()
 
-	// Initialize agent registry
-	socketDir := filepath.Join(os.TempDir(), "pogo-agents")
+	// Initialize agent registry. The socket dir hangs off PogoHome, not
+	// os.TempDir(): $TMPDIR is per-user, so two daemons on distinct POGO_HOME
+	// roots with identically-named agents used to share one socket file and
+	// fight the mg-d216 supervisor over it forever (mg-8532).
+	socketDir := config.AgentSocketDir()
+	if pogoHome := filepath.Clean(config.PogoHome()); strings.HasPrefix(socketDir, pogoHome+string(filepath.Separator)) {
+		// NewRegistry creates socketDir with mode 0700, and MkdirAll stamps that
+		// mode on every parent it creates on the way down — including the agents/
+		// dir the sockets share with the prompt files, which has always been
+		// 0755. Create that parent first so a fresh POGO_HOME ends up with the
+		// same layout as an existing one. socketDir itself still lands at 0700,
+		// which is what an attach socket wants.
+		if err := os.MkdirAll(agent.PromptDir(), 0755); err != nil {
+			fmt.Printf("Cannot create agent state dir %s: %v\n", agent.PromptDir(), err)
+			os.Exit(1)
+		}
+	} else {
+		log.Printf("pogod: POGO_HOME %s is too deep to hold unix sockets (sun_path limit); "+
+			"agent attach sockets live in %s instead — still unique to this POGO_HOME", pogoHome, socketDir)
+	}
 	var initErr error
 	agentRegistry, initErr = agent.NewRegistry(socketDir)
 	if initErr != nil {

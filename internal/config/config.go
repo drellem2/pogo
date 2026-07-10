@@ -2,6 +2,8 @@ package config
 
 import (
 	"bufio"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -617,6 +619,56 @@ func PogoHome() string {
 // pogod's TryLock fails instead of racing the live daemon for :10000 (#22).
 func LockfilePath() string {
 	return filepath.Join(PogoHome(), "pogo.pid")
+}
+
+// maxUnixSocketPathLen is the longest bindable AF_UNIX path. sockaddr_un's
+// sun_path field is 104 bytes on darwin and 108 on linux, both counting the NUL
+// terminator. We budget against the smaller (darwin) figure on every platform so
+// that one POGO_HOME resolves to the same socket dir regardless of GOOS.
+const maxUnixSocketPathLen = 103
+
+// agentSocketLeafBudget reserves room for the "/<agent name>.sock" leaf that
+// callers append to AgentSocketDir. Real agent names are short — "pm-dealdesk"
+// (11) is the longest crew name, and a polecat is named for its work item
+// ("8532") — so 24 bytes of name leaves better than 2x headroom. The reservation
+// is a fixed constant rather than a function of the agent being bound: every
+// agent under one POGO_HOME must agree on one socket dir, so the dir cannot
+// depend on which agent binds first.
+const agentSocketLeafBudget = len("/") + 24 + len(".sock")
+
+// AgentSocketDir returns the directory holding the per-agent unix domain sockets
+// that back `pogo agent attach`.
+//
+// It derives from PogoHome() so two daemons on distinct POGO_HOME roots never
+// share a socket path. Deriving it from os.TempDir() instead — as pogod did
+// before mg-8532 — gave identically-named agents under different roots a single
+// shared socket file, because $TMPDIR is per-user, not per-POGO_HOME. The
+// singleton lockfile bars two pogods on the *same* root, but nothing stopped two
+// on *different* roots from colliding here. The old symptom was quiet: whichever
+// daemon bound last owned the path and the other silently lost attach. Once the
+// mg-d216 attach supervisor shipped, it turned loud — each daemon observes the
+// other's bind as its own socket being replaced, unlinks that live socket and
+// rebinds, forever, on a 30s ticker.
+//
+// The sun_path limit forces one wrinkle. A sufficiently deep POGO_HOME (a
+// t.TempDir() under /var/folders on darwin, say) leaves no room for the socket
+// leaf, and bind would fail with EINVAL. Such a root falls back to a short
+// directory under os.TempDir() named for a hash of the root — so the per-root
+// distinctness this function exists to guarantee survives the fallback. The hash
+// is taken over the cleaned root so that "/a/b" and "/a/b/" — which the lockfile
+// already treats as one daemon — agree on one socket dir too.
+func AgentSocketDir() string {
+	if dir := filepath.Join(PogoHome(), "agents", "sockets"); agentSocketDirFits(dir) {
+		return dir
+	}
+	sum := sha256.Sum256([]byte(filepath.Clean(PogoHome())))
+	return filepath.Join(os.TempDir(), "pogo-agents-"+hex.EncodeToString(sum[:4]))
+}
+
+// agentSocketDirFits reports whether dir leaves room to bind an agent socket
+// beneath it without exceeding sun_path.
+func agentSocketDirFits(dir string) bool {
+	return len(dir)+agentSocketLeafBudget <= maxUnixSocketPathLen
 }
 
 // DialAddr returns a loopback TCP address (127.0.0.1:<port>) for probing
