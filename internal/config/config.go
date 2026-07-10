@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -82,6 +83,14 @@ const DefaultIndexInterval = 2 * time.Minute
 // not a hot path. See internal/gitgc and mg-30d5.
 const DefaultGitGCInterval = time.Hour
 
+// DefaultReaperInterval is how often the tier-1 heartbeat reaper sweeps its
+// job list when [reaper] interval is unset.
+const DefaultReaperInterval = 60 * time.Second
+
+// DefaultReaperMaxKickstarts caps consecutive kickstarts of one job before the
+// reaper gives up and escalates, when [reaper] max_kickstarts is unset.
+const DefaultReaperMaxKickstarts = 3
+
 // Stall-watch defaults. The stall watcher is the pogod-side third leg of the
 // wedge-response triad (gh drellem2/macguffin #12): it rides pogod's heartbeat
 // loop and nudges the mayor when work piles up behaviorally (process healthy
@@ -151,6 +160,7 @@ type Config struct {
 	Heartbeat  HeartbeatConfig
 	GitGC      GitGCConfig
 	StallWatch StallWatchConfig
+	Reaper     ReaperConfig
 	// Source is the path of the highest-precedence config file Load read, or
 	// "" when no config file was found and everything is defaults + env. pogod
 	// uses this to gate crew auto-start: a daemon with no config file is
@@ -239,6 +249,34 @@ type GitGCConfig struct {
 type HeartbeatConfig struct {
 	Interval      time.Duration
 	JumpThreshold time.Duration
+}
+
+// ReaperConfig configures pogod's tier-1 heartbeat reaper, which kickstarts
+// declared launchd jobs whose heartbeat state file has gone stale. Liveness is
+// heartbeat freshness, never process existence. See internal/reaper and
+// docs/design/reaper-design.md.
+type ReaperConfig struct {
+	// Enabled turns the reaper loop on. Defaults to true; with no Jobs it is a
+	// logged no-op.
+	Enabled bool
+	// Interval between sweeps. Zero falls back to DefaultReaperInterval.
+	Interval time.Duration
+	// MaxKickstarts caps consecutive kickstarts of one job before the reaper
+	// gives up and escalates. Zero falls back to DefaultReaperMaxKickstarts.
+	MaxKickstarts int
+	// Jobs is the declared job list. Each entry is a single line of the form
+	//   "<launchd-label>|<heartbeat-path>|<period>"
+	// e.g. "com.pogo.watchdog|~/.pogo/health/watchdog.heartbeat|5m". A leading
+	// ~ in the path is expanded to the user's home directory. period is a Go
+	// duration. Malformed entries are dropped (and reported) at load.
+	Jobs []ReaperJob
+}
+
+// ReaperJob is one parsed [reaper] jobs entry.
+type ReaperJob struct {
+	Label     string
+	Heartbeat string
+	Period    time.Duration
 }
 
 // AgentsConfig holds agent command configuration.
@@ -373,6 +411,7 @@ type parsedConfig struct {
 	stallWatchEnabledSet   bool
 	priorityWakeEnabledSet bool
 	agentsAutoStartSet     bool
+	reaperEnabledSet       bool
 	// sources are the files that were read, lowest precedence first.
 	sources []string
 }
@@ -403,6 +442,11 @@ func Load() *Config {
 		GitGC: GitGCConfig{
 			Enabled:  true,
 			Interval: DefaultGitGCInterval,
+		},
+		Reaper: ReaperConfig{
+			Enabled:       true,
+			Interval:      DefaultReaperInterval,
+			MaxKickstarts: DefaultReaperMaxKickstarts,
 		},
 		StallWatch: StallWatchConfig{
 			Enabled: true,
@@ -465,6 +509,18 @@ func Load() *Config {
 		}
 		if len(fileCfg.GitGC.Repos) > 0 {
 			cfg.GitGC.Repos = fileCfg.GitGC.Repos
+		}
+		if fileCfg.reaperEnabledSet {
+			cfg.Reaper.Enabled = fileCfg.Reaper.Enabled
+		}
+		if fileCfg.Reaper.Interval > 0 {
+			cfg.Reaper.Interval = fileCfg.Reaper.Interval
+		}
+		if fileCfg.Reaper.MaxKickstarts > 0 {
+			cfg.Reaper.MaxKickstarts = fileCfg.Reaper.MaxKickstarts
+		}
+		if len(fileCfg.Reaper.Jobs) > 0 {
+			cfg.Reaper.Jobs = fileCfg.Reaper.Jobs
 		}
 		if fileCfg.stallWatchEnabledSet {
 			cfg.StallWatch.Enabled = fileCfg.StallWatch.Enabled
@@ -935,6 +991,22 @@ func parseConfigFileInto(cfg *parsedConfig, path string) error {
 			case "fast_priorities":
 				cfg.StallWatch.FastPriorities = parseStringArray(val)
 			}
+		case "reaper":
+			switch key {
+			case "enabled":
+				cfg.Reaper.Enabled = val == "true"
+				cfg.reaperEnabledSet = true
+			case "interval":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.Reaper.Interval = d
+				}
+			case "max_kickstarts":
+				if n, err := strconv.Atoi(unquotedVal); err == nil && n > 0 {
+					cfg.Reaper.MaxKickstarts = n
+				}
+			case "jobs":
+				cfg.Reaper.Jobs = parseReaperJobs(parseStringArray(val))
+			}
 		case "agents":
 			switch key {
 			case "autostart":
@@ -985,6 +1057,33 @@ func unquote(val string) string {
 		}
 	}
 	return val
+}
+
+// parseReaperJobs turns raw "<label>|<heartbeat-path>|<period>" entries into
+// ReaperJob values. Malformed entries (wrong field count, empty label/path, or
+// an unparseable period) are dropped with a log line rather than failing the
+// whole config load — a typo in one job should not take the reaper (or pogod)
+// down. The flat single-line encoding is deliberate: pogo's config is
+// hand-parsed flat TOML with no table-array support (see the [stall_watch]
+// note), so a per-field nested block is not available.
+func parseReaperJobs(entries []string) []ReaperJob {
+	var out []ReaperJob
+	for _, e := range entries {
+		parts := strings.Split(e, "|")
+		if len(parts) != 3 {
+			log.Printf("config: [reaper] ignoring malformed job %q (want label|path|period)", e)
+			continue
+		}
+		label := strings.TrimSpace(parts[0])
+		path := strings.TrimSpace(parts[1])
+		period, err := time.ParseDuration(strings.TrimSpace(parts[2]))
+		if label == "" || path == "" || err != nil || period <= 0 {
+			log.Printf("config: [reaper] ignoring invalid job %q", e)
+			continue
+		}
+		out = append(out, ReaperJob{Label: label, Heartbeat: path, Period: period})
+	}
+	return out
 }
 
 // parseStringArray parses a minimal single-line TOML string array,

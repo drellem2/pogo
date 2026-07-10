@@ -478,6 +478,21 @@ func TestKickstartLaunchdTargetFormat(t *testing.T) {
 	}
 }
 
+func TestKickstartTargetForLabel(t *testing.T) {
+	// The reaper (mg-d18b) kickstarts jobs OTHER than pogod, so the target
+	// builder must be label-parameterized and produce the same gui/<uid>/<label>
+	// form the pogod path relies on.
+	tgt := kickstartTargetForLabel("com.pogo.watchdog")
+	parts := strings.Split(tgt, "/")
+	if len(parts) != 3 || parts[0] != "gui" || parts[1] == "" || parts[2] != "com.pogo.watchdog" {
+		t.Errorf("kickstartTargetForLabel = %q, want gui/<uid>/com.pogo.watchdog", tgt)
+	}
+	// And the pogod path must still route through the same builder.
+	if kickstartLaunchdTarget() != kickstartTargetForLabel(launchdLabel) {
+		t.Errorf("kickstartLaunchdTarget diverged from kickstartTargetForLabel(%s)", launchdLabel)
+	}
+}
+
 func TestServicePaths(t *testing.T) {
 	switch runtime.GOOS {
 	case "darwin":

@@ -34,6 +34,7 @@ import (
 	"github.com/drellem2/pogo/internal/platform/sleep"
 	"github.com/drellem2/pogo/internal/project"
 	"github.com/drellem2/pogo/internal/providers"
+	"github.com/drellem2/pogo/internal/reaper"
 	"github.com/drellem2/pogo/internal/refinery"
 	"github.com/drellem2/pogo/internal/scheduler"
 	"github.com/drellem2/pogo/internal/search"
@@ -857,7 +858,18 @@ Flags:
 	// a wait-idle nudge — which can block up to DefaultNudgeTimeout — never
 	// delays the next tick or the scheduler sweep; its per-category cooldown and
 	// internal mutex keep overlapping checks safe.
+	// pogodHeartbeatPath is pogod's OWN heartbeat file. The tier-1 reaper can
+	// supervise every com.pogo.* job EXCEPT pogod itself (a child agent cannot
+	// reap its parent, and launchd will not — mg-50e0). Publishing pogod's
+	// heartbeat here, on every heartbeat tick, gives an external human-held
+	// check (the digest, or bridget once threading is on) a way to DETECT a
+	// dead pogod. This is detection, not recovery: the known single point of
+	// failure this tier explicitly leaves open. See docs/design/reaper-design.md.
+	pogodHeartbeatPath := filepath.Join(config.PogoHome(), "health", "pogod.heartbeat")
 	hb.OnTick = func(now time.Time) {
+		if err := reaper.WriteHeartbeat(pogodHeartbeatPath); err != nil {
+			log.Printf("pogod: failed to write own heartbeat %s: %v", pogodHeartbeatPath, err)
+		}
 		if sched != nil {
 			sched.Tick(context.Background(), now)
 		}
@@ -874,6 +886,12 @@ Flags:
 	// periodic ticker that deletes stale polecat-* branches and reclaims
 	// leaked worktrees once their work items have concluded. mg-30d5.
 	startGitGC(hbCtx, agentRegistry, cfg.GitGC)
+
+	// Start the tier-1 heartbeat reaper: a goroutine (NOT a LaunchAgent — the
+	// wedge in mg-50e0 means we cannot rely on being spawned) that kickstarts
+	// declared launchd jobs whose heartbeat state file has gone stale. Liveness
+	// is heartbeat freshness, never process existence. mg-d18b.
+	startReaper(hbCtx, cfg.Reaper)
 
 	// Optional platform-specific wake notifier — reduces wake-event latency
 	// from up-to-Interval (~30s) down to <1s by short-circuiting the

@@ -10,6 +10,25 @@ is the curated, human-readable summary kept in sync at each release cut.
 
 ## [Unreleased]
 
+### Added
+
+- **Tier-1 heartbeat reaper inside pogod (mg-d18b).** A goroutine that watches a
+  declared list of launchd jobs and `launchctl kickstart`s any whose *heartbeat*
+  has gone stale. Liveness is heartbeat freshness (a state-file mtime vs the
+  job's period), never process existence and never PID liveness — the failure
+  class `KeepAlive` structurally cannot see, because a wedged-but-alive process
+  looks healthy to exit-triggered supervision forever. It is loud (logs every
+  kickstart, recovery, and give-up), bounded (caps consecutive kickstarts at
+  `max_kickstarts`, default 3, then STOPS and mails mayor + human rather than
+  loop — the mg-1679 defense against a job that FATALs on every start), backed
+  off (the period doubles as a post-kickstart settle window), and kills nothing
+  by pattern (`kickstart -k` targets one label; `pkill -f` stays banned). pogod
+  also now publishes its **own** heartbeat to `~/.pogo/health/pogod.heartbeat`
+  every tick, so an external human-held check can *detect* a dead pogod — the one
+  gap tier 1 carries, named as a known single point of failure. Configure under
+  `[reaper]`; who reaps pogod (tier 2) stays deliberately unbuilt pending the
+  reboot experiment. See `docs/design/reaper-design.md`.
+
 ### Fixed
 
 - **CI's TempDir and first-paint flakes, root-caused rather than retried.** Four

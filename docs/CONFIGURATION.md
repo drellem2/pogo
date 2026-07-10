@@ -249,6 +249,72 @@ Source of truth: `internal/stallwatch/`; see
 [docs/design/stall-watch-design.md](design/stall-watch-design.md) and
 [docs/design/priority-wake-design.md](design/priority-wake-design.md).
 
+## Heartbeat reaper (tier 1)
+
+A goroutine inside pogod that watches a declared list of launchd jobs and
+`launchctl kickstart`s any whose **heartbeat has gone stale**. Liveness here is
+**heartbeat freshness, never process existence and never PID liveness**: a job
+at `state = running` whose heartbeat state file has not been touched within its
+period is *dead*, and the reaper says so and restarts it. This is the failure
+class `KeepAlive` structurally cannot see — a wedged run loop, a closed socket,
+a timer that never rearmed — because the process persists, so launchd sees a
+healthy job forever. See [docs/design/reaper-design.md](design/reaper-design.md)
+for the full rationale (mg-d18b).
+
+Each job touches a state file at the end of every *successful* loop iteration
+(e.g. `seen.json`, `bridget.seen`, or a dedicated
+`~/.pogo/health/<job>.heartbeat`); the reaper keys on that file's mtime, never
+on a log line — a poller logs only when it delivers, so a quiet mailbox is
+indistinguishable from a dead poller. Configure under `[reaper]`:
+
+```toml
+[reaper]
+enabled = true            # default true; with no jobs it is a logged no-op
+interval = "60s"          # how often the reaper sweeps (default 60s)
+max_kickstarts = 3        # consecutive kickstarts before GIVING UP + escalating
+# Each job: "<launchd-label>|<heartbeat-path>|<period>". A leading ~ in the
+# path is expanded to $HOME; period is a Go duration. The period doubles as the
+# post-kickstart settle/backoff window.
+jobs = [
+  "com.pogo.watchdog|~/.pogo/health/watchdog.heartbeat|5m",
+  "com.pogo.gh-issues|~/.pogo/gh-issues/seen.json|10m",
+]
+```
+
+Three properties are load-bearing and every one is tested:
+
+- **Loud.** Every kickstart logs the job, observed staleness, attempt number,
+  and resulting pid; every recovery and every give-up logs too. A silent
+  supervisor eventually becomes the thing concealing the failure.
+- **Bounded, backed off, gives up loudly.** After `max_kickstarts` consecutive
+  kickstarts that do not restore freshness, the reaper **STOPS** and mails both
+  `mayor` and `human`, then stays quiet. This is the mg-1679 defense: a job that
+  FATALs on every start (launchctl reports a fresh pid each time) would
+  otherwise be kickstarted forever — a new self-concealing failure.
+  `"Kickstarted 3 times, heartbeat still stale"` is the most important line the
+  reaper emits. The `period` is the settle window: a just-kickstarted job is not
+  re-judged until it has had that long to write a fresh beat.
+- **Kickstart only.** The reaper never kills by pattern (`pkill -f` is banned —
+  mg-8c9c); it only issues `launchctl kickstart -k gui/$UID/<label>`, a demand
+  spawn, which works on this host even though the nondemand-spawn wedge
+  (mg-50e0) blocks `KeepAlive`/`RunAtLoad`.
+
+### The gap this tier does NOT close (known single point of failure)
+
+The reaper can restart every `com.pogo.*` job **except pogod itself** — a child
+agent cannot reap its parent, and launchd will not (mg-50e0). "Who reaps pogod"
+(tier 2) is deliberately **unbuilt**: it is blocked on the open experiment of
+whether a reboot unwedges `gui/501`. The obligation tier 1 *does* carry is
+**detection, not recovery**: an unnoticed pogod death is indistinguishable from
+a quiet afternoon. So pogod publishes its **own** heartbeat to
+`~/.pogo/health/pogod.heartbeat` on every heartbeat tick (independently of
+`[reaper]` enablement), so an external, human-held check — the digest, or
+bridget once threading is on — can surface pogod's own liveness. That one check
+is the named, accepted single point of failure until the reboot settles tier 2.
+
+Source of truth: `internal/reaper/`; see
+[docs/design/reaper-design.md](design/reaper-design.md).
+
 ## Agent registry
 
 Each agent has a directory under `~/.pogo/agents/<name>/` holding its prompt,

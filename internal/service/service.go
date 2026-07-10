@@ -107,7 +107,41 @@ func launchdPlistPath() string {
 // errors with "Could not find specified service". Centralized so install
 // and restart paths use one canonical format.
 func kickstartLaunchdTarget() string {
-	return fmt.Sprintf("gui/%d/%s", os.Getuid(), launchdLabel)
+	return kickstartTargetForLabel(launchdLabel)
+}
+
+// kickstartTargetForLabel returns the gui/$UID/<label> service target for an
+// arbitrary launchd label. Same domain form as kickstartLaunchdTarget; the
+// tier-1 reaper (internal/reaper) uses it to kickstart jobs other than pogod.
+func kickstartTargetForLabel(label string) string {
+	return fmt.Sprintf("gui/%d/%s", os.Getuid(), label)
+}
+
+// KickstartJob forces a demand-spawn restart of the launchd job `label`
+// (gui/$UID/<label>) and returns the pid launchd assigns afterward.
+//
+// `kickstart -k` kills the current instance (if any) and re-runs the job. It is
+// a DEMAND spawn, so it works on this host even though the nondemand-spawn wedge
+// (mg-50e0) blocks KeepAlive/RunAtLoad/StartInterval. This is the operation the
+// tier-1 reaper drives; centralizing it here keeps every launchctl call in one
+// package and lets the reaper stay launchd-free and unit-testable.
+//
+// The returned pid is best-effort: kickstart itself prints nothing useful, so
+// the pid is read from a follow-up `launchctl list <label>`. A zero pid with a
+// nil error means the restart was issued but launchd had not yet assigned a pid
+// by the time we looked; the reaper's next sweep will observe the heartbeat and
+// judge liveness regardless — the pid is for the log line, not the decision.
+func KickstartJob(label string) (int, error) {
+	target := kickstartTargetForLabel(label)
+	if out, err := exec.Command("launchctl", "kickstart", "-k", target).CombinedOutput(); err != nil {
+		return 0, fmt.Errorf("launchctl kickstart -k %s: %s: %w", target, strings.TrimSpace(string(out)), err)
+	}
+	out, err := exec.Command("launchctl", "list", label).CombinedOutput()
+	if err != nil {
+		return 0, nil
+	}
+	pid, _ := parseLaunchctlListPID(string(out))
+	return pid, nil
 }
 
 func systemdUnitDir() string {

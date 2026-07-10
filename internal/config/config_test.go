@@ -107,6 +107,105 @@ repos = ["/home/u/dev/pogo", "/home/u/dev/other"]
 	}
 }
 
+func TestReaperDefaults(t *testing.T) {
+	os.Unsetenv("POGO_HOME")
+	os.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	defer os.Unsetenv("XDG_CONFIG_HOME")
+
+	cfg := Load()
+	if !cfg.Reaper.Enabled {
+		t.Error("reaper should be enabled by default")
+	}
+	if cfg.Reaper.Interval != DefaultReaperInterval {
+		t.Errorf("reaper interval = %v, want %v", cfg.Reaper.Interval, DefaultReaperInterval)
+	}
+	if cfg.Reaper.MaxKickstarts != DefaultReaperMaxKickstarts {
+		t.Errorf("reaper max_kickstarts = %d, want %d", cfg.Reaper.MaxKickstarts, DefaultReaperMaxKickstarts)
+	}
+	if len(cfg.Reaper.Jobs) != 0 {
+		t.Errorf("reaper should have no jobs by default, got %v", cfg.Reaper.Jobs)
+	}
+}
+
+func TestReaperConfigFile(t *testing.T) {
+	os.Unsetenv("POGO_HOME")
+	dir := t.TempDir()
+	os.Setenv("XDG_CONFIG_HOME", dir)
+	defer os.Unsetenv("XDG_CONFIG_HOME")
+
+	pogoDir := filepath.Join(dir, "pogo")
+	os.MkdirAll(pogoDir, 0755)
+	os.WriteFile(filepath.Join(pogoDir, "config.toml"), []byte(`
+[reaper]
+enabled = true
+interval = "30s"
+max_kickstarts = 5
+jobs = ["com.pogo.watchdog|~/.pogo/health/watchdog.heartbeat|5m", "com.pogo.gh-issues|/abs/gh.seen|10m"]
+`), 0644)
+
+	cfg := Load()
+	if cfg.Reaper.Interval != 30*time.Second {
+		t.Errorf("reaper interval = %v, want 30s", cfg.Reaper.Interval)
+	}
+	if cfg.Reaper.MaxKickstarts != 5 {
+		t.Errorf("reaper max_kickstarts = %d, want 5", cfg.Reaper.MaxKickstarts)
+	}
+	if len(cfg.Reaper.Jobs) != 2 {
+		t.Fatalf("reaper jobs = %v, want 2 entries", cfg.Reaper.Jobs)
+	}
+	j0 := cfg.Reaper.Jobs[0]
+	if j0.Label != "com.pogo.watchdog" || j0.Heartbeat != "~/.pogo/health/watchdog.heartbeat" || j0.Period != 5*time.Minute {
+		t.Errorf("job[0] = %+v, unexpected", j0)
+	}
+	j1 := cfg.Reaper.Jobs[1]
+	if j1.Label != "com.pogo.gh-issues" || j1.Heartbeat != "/abs/gh.seen" || j1.Period != 10*time.Minute {
+		t.Errorf("job[1] = %+v, unexpected", j1)
+	}
+}
+
+func TestReaperMalformedJobsDropped(t *testing.T) {
+	os.Unsetenv("POGO_HOME")
+	dir := t.TempDir()
+	os.Setenv("XDG_CONFIG_HOME", dir)
+	defer os.Unsetenv("XDG_CONFIG_HOME")
+
+	pogoDir := filepath.Join(dir, "pogo")
+	os.MkdirAll(pogoDir, 0755)
+	// Entry 1: missing period field. Entry 2: unparseable period. Entry 3: ok.
+	// Entry 4: empty label. A bad job must not poison the good one.
+	os.WriteFile(filepath.Join(pogoDir, "config.toml"), []byte(`
+[reaper]
+jobs = ["com.pogo.a|/a", "com.pogo.b|/b|notaduration", "com.pogo.c|/c|2m", "|/d|3m"]
+`), 0644)
+
+	cfg := Load()
+	if len(cfg.Reaper.Jobs) != 1 {
+		t.Fatalf("expected only the one valid job to survive, got %v", cfg.Reaper.Jobs)
+	}
+	if cfg.Reaper.Jobs[0].Label != "com.pogo.c" {
+		t.Errorf("surviving job = %+v, want com.pogo.c", cfg.Reaper.Jobs[0])
+	}
+}
+
+func TestReaperDisabledByConfig(t *testing.T) {
+	os.Unsetenv("POGO_HOME")
+	dir := t.TempDir()
+	os.Setenv("XDG_CONFIG_HOME", dir)
+	defer os.Unsetenv("XDG_CONFIG_HOME")
+
+	pogoDir := filepath.Join(dir, "pogo")
+	os.MkdirAll(pogoDir, 0755)
+	os.WriteFile(filepath.Join(pogoDir, "config.toml"), []byte(`
+[reaper]
+enabled = false
+`), 0644)
+
+	cfg := Load()
+	if cfg.Reaper.Enabled {
+		t.Error("reaper should be disabled by config file")
+	}
+}
+
 func TestEnvOverridesConfigFile(t *testing.T) {
 	dir := t.TempDir()
 	os.Setenv("XDG_CONFIG_HOME", dir)
