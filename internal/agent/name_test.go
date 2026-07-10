@@ -31,6 +31,33 @@ func TestValidateAgentName(t *testing.T) {
 		// 13 three-byte runes are 39 bytes and must be refused even though
 		// they are well under MaxAgentNameLen runes.
 		{"multibyte over the byte limit", strings.Repeat("日", 13), true},
+
+		// Path traversal (mg-edb2). Each of these escapes at least one of the
+		// roots the name is joined onto: the socket dir, the prompt dir, the
+		// polecats worktree dir.
+		{"parent traversal", "../x", true},
+		{"bare dotdot", "..", true},
+		{"bare dot", ".", true},
+		{"deep traversal", "../../etc/passwd", true},
+		{"leading slash", "/etc/passwd", true},
+		{"interior separator", "a/b", true},
+		{"trailing separator", "mayor/", true},
+		{"traversal via interior dotdot", "sub/../../x", true},
+		{"backslash traversal", `..\x`, true},
+		{"interior backslash", `a\b`, true},
+
+		// Control characters: the name is also a log field value.
+		{"NUL", "may\x00or", true},
+		{"newline", "mayor\nts=forged", true},
+		{"carriage return", "mayor\rx", true},
+		{"DEL", "mayor\x7f", true},
+
+		// Not traversal: ".." only escapes as a whole component, and a name is
+		// always a single component once separators are refused. Rejecting any
+		// name merely *containing* ".." would be a false rejection.
+		{"dotdot inside a name", "pm..pogo", false},
+		{"leading dot", ".hidden", false},
+		{"dotdot prefix", "..hidden", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -42,6 +69,55 @@ func TestValidateAgentName(t *testing.T) {
 				t.Errorf("error %v does not wrap ErrInvalidAgentName", err)
 			}
 		})
+	}
+}
+
+// TestValidateAgentNameAcceptsLiveNames is the false-rejection guard on
+// mg-edb2's traversal check: every name the running fleet actually uses must
+// keep validating. A separator/control-char gate that also refused "pm-pogo"
+// or a hex polecat id would take pogod down rather than secure it.
+func TestValidateAgentNameAcceptsLiveNames(t *testing.T) {
+	live := []string{
+		"mayor",
+		"architect",
+		"pm-pogo",
+		"pm-dealdesk",
+		"f783", // polecat ids are the work item's hex suffix
+		"edb2",
+		"ef80",
+	}
+	for _, name := range live {
+		if err := ValidateAgentName(name); err != nil {
+			t.Errorf("ValidateAgentName(%q) = %v, want nil: this name is in live use", name, err)
+		}
+	}
+}
+
+// TestSpawnRejectsTraversingName pins mg-edb2 at the layer that matters. The
+// unit table proves the predicate; this proves the predicate is actually on
+// Spawn's path, so "../x" never reaches filepath.Join(socketDir, name+".sock")
+// or filepath.Join(PromptDir(), name).
+func TestSpawnRejectsTraversingName(t *testing.T) {
+	reg, err := NewRegistry(shortSocketDir(t))
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	defer reg.StopAll(2 * time.Second)
+
+	for _, name := range []string{"../x", "..", "a/b", "mayor\nts=forged"} {
+		a, err := reg.Spawn(SpawnRequest{Name: name, Type: TypePolecat, Command: []string{"cat"}})
+		if err == nil {
+			t.Errorf("Spawn(%q) succeeded; the name escapes its socket/prompt roots", name)
+		}
+		if a != nil {
+			t.Errorf("Spawn(%q) returned an agent alongside its error: %+v", name, a)
+		}
+		if err != nil && !errors.Is(err, ErrInvalidAgentName) {
+			t.Errorf("Spawn(%q) error %v does not wrap ErrInvalidAgentName", name, err)
+		}
+		if reg.Get(name) != nil {
+			t.Errorf("a rejected name %q left a registry entry behind", name)
+		}
 	}
 }
 
