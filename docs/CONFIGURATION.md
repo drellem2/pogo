@@ -300,9 +300,10 @@ filesystem-coordination model.
 
 Every pogo state path derives from a single root: `$POGO_HOME`, or `~/.pogo`
 when the variable is unset (`PogoHome()` in `internal/config/config.go`). That
-one function seeds `refinery-state.json`, `schedules.json`, `agents/`,
-`polecats/`, `events.log`, `recovery/`, `projects.json`, and `plugin/` — so the
-root you pick determines where *all* daemon state lives.
+one function seeds `refinery-state.json`, `schedules.json`, `agents/` (including
+the `agents/sockets/` attach sockets), `polecats/`, `events.log`, `recovery/`,
+`projects.json`, and `plugin/` — so the root you pick determines where *all*
+daemon state lives.
 
 **Running N pogo instances requires a distinct `POGO_HOME` per instance.**
 Because every state path hangs off `PogoHome()`, overriding `POGO_HOME` (or
@@ -323,3 +324,13 @@ and pogo normalizes a `POGO_HOME` equal to the user's home directory to
 `$HOME/.pogo` (the documented default) rather than scattering state across the
 home root. See the `PogoHome()` doc comment for the full rationale, including why
 it never falls back to `os.TempDir()`.
+
+One caveat on the attach sockets: a unix domain socket path cannot exceed
+`sun_path` (103 usable bytes on darwin, 107 on linux), and a deep enough
+`POGO_HOME` leaves no room for `agents/sockets/<agent>.sock`. Such a root — a
+scratch dir under `/var/folders` on darwin, say — puts the sockets in
+`$TMPDIR/pogo-agents-<hash of the root>` instead. The hash keeps distinct roots
+distinct, so the isolation guarantee holds either way; pogod logs a line at
+startup when it takes this path. Everything else still lives under the root. If
+you want your sockets under `POGO_HOME` (nicer to inspect and clean up), pick a
+shallow root: `~/.pogo-sandbox` fits comfortably, a 90-byte path does not.

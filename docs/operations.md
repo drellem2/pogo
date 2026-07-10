@@ -145,9 +145,16 @@ Inspect or modify with `gh api repos/drellem2/<repo>/rulesets` (effective rules:
 If you run more than one pogo instance on a host — a production fleet plus a
 sandbox for verification, say — **give each instance its own `POGO_HOME`.** Every
 pogo state path (the refinery queue, `schedules.json`, `agents/`, the Maildir,
-`events.log`) derives from `PogoHome()` (`internal/config/config.go`), which
-resolves to `$POGO_HOME` or `~/.pogo`. Distinct roots isolate distinct daemons
-completely (mg-3dc3).
+`events.log`, and the agent attach sockets in `agents/sockets/`) derives from
+`PogoHome()` (`internal/config/config.go`), which resolves to `$POGO_HOME` or
+`~/.pogo`. Distinct roots isolate distinct daemons completely (mg-3dc3, mg-8532).
+
+Attach sockets were the one exception until mg-8532: pogod derived their
+directory from `$TMPDIR`, which is per-user rather than per-`POGO_HOME`, so two
+daemons on distinct roots with identically-named agents shared one socket file.
+If you are running an older pogod, expect `pogo agent attach` to reach whichever
+daemon bound the socket last, and expect the two daemons' attach supervisors to
+unlink and rebind each other's live socket every 30s (mg-d216).
 
 **Two instances sharing a `POGO_HOME` share all of that state — by construction.**
 Refinery counts, scheduler entries, registered agents, and mailboxes co-mingle

@@ -122,8 +122,15 @@ pogod repaired an agent's attach socket while the agent process kept running. Th
 socket had stopped serving connections — see `reason` — so `pogo agent attach`
 would have failed against a live, healthy agent. Emitted once per repair; the
 agent is not restarted and loses no state. A steady trickle of these for one
-agent points at whatever keeps breaking the socket (fd exhaustion, a `$TMPDIR`
-reaper) rather than at the attach mechanism itself.
+agent points at whatever keeps breaking the socket (fd exhaustion, a tmp reaper
+if this root fell back to `$TMPDIR`) rather than at the attach mechanism itself.
+
+Before mg-8532 a steady `socket_file_replaced` trickle had one more cause: a
+second pogod on a *different* `POGO_HOME` binding the same `$TMPDIR`-derived
+socket path, so the two daemons unlinked and rebound each other's live socket
+every 30s. Socket paths now derive from `PogoHome()`, so two daemons on distinct
+roots can no longer collide. Seeing this reason repeat on a modern pogod means
+something outside pogo is replacing the file.
 
 Repairs are rate-limited: a listener that fails again the instant it is rebound
 (a recurring permanent `accept(2)` error) backs off from 50ms to a ceiling of
@@ -142,7 +149,7 @@ apart each get an immediate repair. Additive — no `schema_version` bump.
     - `socket_file_replaced` — a different socket now occupies the path.
 
 ```json
-{"schema_version":1,"timestamp":"2026-07-10T09:12:03.410000000Z","event_type":"agent_attach_rebound","agent":"crew-mayor","details":{"pid":23884,"socket":"/var/folders/4n/T/pogo-agents/mayor.sock","reason":"accept_loop_stopped"}}
+{"schema_version":1,"timestamp":"2026-07-10T09:12:03.410000000Z","event_type":"agent_attach_rebound","agent":"crew-mayor","details":{"pid":23884,"socket":"/Users/daniel/.pogo/agents/sockets/mayor.sock","reason":"accept_loop_stopped"}}
 ```
 
 ### Polecat-specific lifecycle
