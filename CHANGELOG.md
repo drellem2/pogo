@@ -10,7 +10,7 @@ is the curated, human-readable summary kept in sync at each release cut.
 
 ## [Unreleased]
 
-## [0.4.1] - 2026-07-10
+## [0.5.0] - 2026-07-10
 
 ### Added
 
@@ -503,8 +503,8 @@ Early patch release.
 Initial tagged release of Pogo: multi-repo discovery, indexing, and
 cross-project zoekt search (`lsp`, `pose`, `pogo`, `pogod`).
 
-[Unreleased]: https://github.com/drellem2/pogo/compare/v0.4.1...HEAD
-[0.4.1]: https://github.com/drellem2/pogo/compare/v0.4.0...v0.4.1
+[Unreleased]: https://github.com/drellem2/pogo/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/drellem2/pogo/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/drellem2/pogo/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/drellem2/pogo/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/drellem2/pogo/compare/v0.2.1...v0.2.2
