@@ -634,11 +634,15 @@ const maxUnixSocketPathLen = 103
 //
 // The reservation is a fixed constant rather than a function of the agent being
 // bound: every agent under one POGO_HOME must agree on one socket dir, so the
-// dir cannot depend on which agent binds first. That makes this a ceiling, not a
-// promise — a name longer than this under a root deep enough to consume the
-// headroom will fail to bind, and the agent runs with attach unavailable (pogod
-// logs "attach listener failed"). Nothing enforces the ceiling at spawn today;
-// see mg-8532 advisory 2 and its follow-up.
+// dir cannot depend on which agent binds first.
+//
+// agent.ValidateAgentName enforces this at spawn, so it is a promise and not
+// merely a ceiling: a longer name is refused (HTTP 400) under every POGO_HOME,
+// shallow or deep, rather than spawning an agent that runs fine but can never be
+// attached to. Enforcing it unconditionally is the point — a name's fate must
+// not depend on how deep the operator's root happens to be. Should this
+// arithmetic ever drift from the real sun_path limit, agent.Spawn also treats a
+// permanent bind failure as fatal, so the failure is loud either way (mg-ef80).
 const MaxAgentNameLen = 24
 
 // agentSocketLeafBudget reserves room for the "/<agent name>.sock" leaf that

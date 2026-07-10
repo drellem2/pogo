@@ -609,6 +609,15 @@ type SpawnRequest struct {
 
 // Spawn starts a new agent process with a PTY.
 func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
+	// Validate before taking the lock or touching the filesystem: a name pogod
+	// cannot bind an attach socket for is rejected outright rather than spawned
+	// with attach quietly unavailable (mg-ef80). This is the choke point every
+	// spawn path funnels through — the generic POST /agents, StartCrewAgent,
+	// and handleSpawnPolecat.
+	if err := ValidateAgentName(req.Name); err != nil {
+		return nil, err
+	}
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -729,18 +738,32 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 		outputDone:     make(chan struct{}),
 	}
 
+	// Bind the attach socket before the PTY plumbing goroutines start and
+	// before the agent enters the registry, so a permanent bind failure can be
+	// undone with a kill instead of a partial teardown.
+	//
+	// A permanent failure means this agent could never be attached to — the
+	// socket path itself is unusable — and returning a live agent (and a 201)
+	// for it would be a lie. Every other bind failure is transient from the
+	// supervisor's point of view: it keeps retrying on its ticker, so an agent
+	// spawned during fd exhaustion recovers attach once fds free up rather than
+	// losing it for good (mg-d216). See mg-ef80.
+	if err := a.startListener(); err != nil {
+		if isFatalListenErr(err) {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+			a.Cleanup()
+			return nil, fmt.Errorf("%w: agent %s at %s: %w", ErrAttachSocketUnusable, req.Name, a.socketPath, err)
+		}
+		log.Printf("agent %s: attach listener failed: %v — supervisor will retry", req.Name, err)
+	}
+
 	// Start output reader — sole reader of master fd, fans out to
 	// ring buffer + any active attach connections
 	go a.readOutput()
 
 	// Start process reaper — waits for exit, fires onExit callback
 	go r.waitAndHandle(a)
-
-	// Start attach listener
-	if err := a.startListener(); err != nil {
-		// Non-fatal — agent runs fine, just can't attach
-		log.Printf("agent %s: attach listener failed: %v", req.Name, err)
-	}
 
 	r.agents[req.Name] = a
 	log.Printf("agent %s: spawned pid=%d type=%s proc=%s", req.Name, a.PID, req.Type, procName)
@@ -1356,10 +1379,36 @@ func isRetryableAcceptErr(err error) bool {
 	return false
 }
 
+// ErrAttachSocketUnusable reports a spawn abandoned because the agent's attach
+// socket could never be bound. It is a property of the environment (a POGO_HOME
+// deep enough to push the socket path past sun_path), not of the request, so the
+// API handlers answer 500 rather than the legacy catch-all 409.
+var ErrAttachSocketUnusable = errors.New("attach socket cannot be bound")
+
+// isFatalListenErr reports whether binding the attach socket failed for a
+// reason no retry can clear, because the socket path itself is unusable.
+//
+// The class that matters is a path that overruns sockaddr_un's sun_path.
+// syscall.SockaddrUnix.sockaddr rejects such a path with EINVAL on darwin and
+// linux alike, before the bind syscall is ever made, so EINVAL is the errno to
+// key on rather than the ENAMETOOLONG one might expect. ENAMETOOLONG is checked
+// too, for the paths a kernel does reject itself (a component past NAME_MAX).
+//
+// Everything else — EMFILE/ENFILE under fd exhaustion, EADDRINUSE against a
+// racing daemon, a socket dir that a sweep removed out from under us — may clear
+// on its own, and the supervisor rebinds when it does. Spawn kills the agent for
+// a fatal error, so this set stays deliberately narrow: a false positive costs
+// an agent that would otherwise have recovered.
+func isFatalListenErr(err error) bool {
+	return errors.Is(err, syscall.EINVAL) || errors.Is(err, syscall.ENAMETOOLONG)
+}
+
 // startListener creates a unix domain socket for attach connections and starts
 // the supervisor that keeps it usable for the life of the process. The
 // supervisor starts even when the first bind fails, so an agent spawned during
 // fd exhaustion recovers attach once fds free up instead of losing it for good.
+// Spawn checks the returned error with isFatalListenErr: a bind that can never
+// succeed fails the spawn rather than leaving a live agent nobody can attach to.
 func (a *Agent) startListener() error {
 	a.mu.Lock()
 	if a.attachStop == nil {

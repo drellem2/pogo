@@ -387,7 +387,7 @@ func (r *Registry) handleAgents(w http.ResponseWriter, req *http.Request) {
 			RestartOnCrash: ResolveRestartOnCrash(spawnReq.PromptFile, spawnReq.Type),
 		})
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusConflict)
+			http.Error(w, err.Error(), spawnErrStatus(err))
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -396,6 +396,22 @@ func (r *Registry) handleAgents(w http.ResponseWriter, req *http.Request) {
 
 	default:
 		http.Error(w, "", http.StatusMethodNotAllowed)
+	}
+}
+
+// spawnErrStatus maps a Registry.Spawn error to an HTTP status. A name pogod
+// refuses is the caller's mistake (400); an attach socket that can never bind is
+// the daemon's environment, not the request (500). Everything else keeps the
+// legacy catch-all of 409 — the errors Spawn returned before mg-ef80 were all
+// registry conflicts ("agent %q already running").
+func spawnErrStatus(err error) int {
+	switch {
+	case errors.Is(err, ErrInvalidAgentName):
+		return http.StatusBadRequest
+	case errors.Is(err, ErrAttachSocketUnusable):
+		return http.StatusInternalServerError
+	default:
+		return http.StatusConflict
 	}
 }
 
@@ -650,6 +666,13 @@ type StartErrorResponse struct {
 // Returns ErrPromptNotFound (wrapped) when the prompt file is missing, or any
 // error from Spawn (e.g. when the agent is already registered).
 func (r *Registry) StartCrewAgent(name string) (*Agent, error) {
+	// Reject an unusable name up front. Spawn checks it again, but the callers
+	// that reach this function directly — autostart and Wake — would otherwise
+	// create the agent dir and expand a prompt for a name that cannot spawn.
+	if err := ValidateAgentName(name); err != nil {
+		return nil, err
+	}
+
 	// Look up prompt file: the coordinator's mayor.md is in PromptDir, crew
 	// in CrewPromptDir. This on-disk file is the operator-editable stub —
 	// kept separate from the (possibly synthesized) promptFile below because
@@ -748,8 +771,8 @@ func (r *Registry) handleStart(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	if startReq.Name == "" {
-		http.Error(w, "name is required", http.StatusBadRequest)
+	if err := ValidateAgentName(startReq.Name); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -763,6 +786,8 @@ func (r *Registry) handleStart(w http.ResponseWriter, req *http.Request) {
 	a, err := r.StartCrewAgent(startReq.Name)
 	if err != nil {
 		switch {
+		case errors.Is(err, ErrInvalidAgentName):
+			http.Error(w, err.Error(), http.StatusBadRequest)
 		case errors.Is(err, ErrPromptNotFound):
 			// Emit a structured JSON body so the CLI can distinguish
 			// "prompt missing on the server" from "endpoint missing because
@@ -806,8 +831,10 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		return
 	}
 
-	if spawnReq.Name == "" {
-		http.Error(w, "name is required", http.StatusBadRequest)
+	// Validate before the worktree, agent dir, and expanded prompt file get
+	// created — a rejected name should leave nothing behind (mg-ef80).
+	if err := ValidateAgentName(spawnReq.Name); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -1017,7 +1044,7 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 	if err != nil {
 		os.Remove(promptFile) // Clean up temp file on spawn failure
 		cleanupFailedPolecatSpawn(sourceRepo, worktreeDir, branchName)
-		http.Error(w, err.Error(), http.StatusConflict)
+		http.Error(w, err.Error(), spawnErrStatus(err))
 		return
 	}
 
