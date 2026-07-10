@@ -67,17 +67,21 @@ func ValidatePolecatCommand(tmpl string, p *Provider) {
 
 // writeContextFilePrompt delivers the persona prompt to a provider that uses
 // the InjectContextFile strategy — it copies the expanded prompt file into the
-// agent's working directory under the provider's configured ContextFile name.
+// agent's working directory under the provider's configured ContextFile name,
+// prefixed by the provider's ContextFileHeader.
 //
 // Codex is the motivating case: it has no --append-system-prompt-file-style
 // flag, but reads AGENTS.override.md from its working directory and prefers it
 // over a checked-in AGENTS.md. Writing the persona there injects it additively
-// without clobbering the repo's own AGENTS.md.
+// without clobbering the repo's own AGENTS.md. Cursor is the same shape one
+// level down: its persona lands in .cursor/rules/pogo-persona.mdc — a nested
+// path, hence the MkdirAll — behind an `alwaysApply: true` frontmatter header,
+// which is the only rule form Cursor reliably folds into the system prompt.
 //
-// It is a no-op for providers that inject via flag (Claude) or env, for a nil
-// provider, and when either the prompt file or the working directory is unset
-// (the prompt is still reachable via the POGO_AGENT_PROMPT env fallback that
-// Spawn always sets). Returns an error only when the copy itself fails.
+// It is a no-op for providers that inject via flag (Claude, pi) or env, for a
+// nil provider, and when either the prompt file or the working directory is
+// unset (the prompt is still reachable via the POGO_AGENT_PROMPT env fallback
+// that Spawn always sets). Returns an error only when the copy itself fails.
 func writeContextFilePrompt(p *Provider, promptFile, dir string) error {
 	if p == nil || p.PromptInjection.Kind != InjectContextFile {
 		return nil
@@ -89,7 +93,15 @@ func writeContextFilePrompt(p *Provider, promptFile, dir string) error {
 	if err != nil {
 		return fmt.Errorf("read prompt file for context-file injection: %w", err)
 	}
+	if header := p.PromptInjection.ContextFileHeader; header != "" {
+		content = append([]byte(header), content...)
+	}
 	dest := filepath.Join(dir, p.PromptInjection.ContextFile)
+	// ContextFile may be nested (Cursor: .cursor/rules/pogo-persona.mdc). The
+	// worktree carries no such directory, so create it before writing.
+	if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
+		return fmt.Errorf("create context file directory for %q: %w", dest, err)
+	}
 	if err := os.WriteFile(dest, content, 0644); err != nil {
 		return fmt.Errorf("write context file %q: %w", dest, err)
 	}

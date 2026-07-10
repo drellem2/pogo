@@ -142,6 +142,97 @@ func TestWriteContextFilePrompt(t *testing.T) {
 		}
 	})
 
+	// Codex's context file is plain markdown: no header configured, nothing
+	// prepended. Guards against a header leaking into providers that don't want
+	// one.
+	t.Run("no header leaves the persona byte-identical", func(t *testing.T) {
+		dir := t.TempDir()
+		p := &Provider{
+			ID: "codex",
+			PromptInjection: PromptInjection{
+				Kind:        InjectContextFile,
+				ContextFile: "AGENTS.override.md",
+			},
+		}
+		if err := writeContextFilePrompt(p, newPromptFile(t), dir); err != nil {
+			t.Fatalf("writeContextFilePrompt: %v", err)
+		}
+		got, _ := os.ReadFile(filepath.Join(dir, "AGENTS.override.md"))
+		if string(got) != persona {
+			t.Errorf("context file = %q, want the persona verbatim %q", got, persona)
+		}
+	})
+
+	// Cursor's shape: a nested path whose parents don't exist yet, plus a
+	// frontmatter header without which Cursor silently ignores the rule.
+	t.Run("nested context file with a header", func(t *testing.T) {
+		dir := t.TempDir()
+		const header = "---\nalwaysApply: true\n---\n\n"
+		p := &Provider{
+			ID: "cursor",
+			PromptInjection: PromptInjection{
+				Kind:              InjectContextFile,
+				ContextFile:       ".cursor/rules/pogo-persona.mdc",
+				ContextFileHeader: header,
+			},
+		}
+		if err := writeContextFilePrompt(p, newPromptFile(t), dir); err != nil {
+			t.Fatalf("writeContextFilePrompt: %v", err)
+		}
+		got, err := os.ReadFile(filepath.Join(dir, ".cursor", "rules", "pogo-persona.mdc"))
+		if err != nil {
+			t.Fatalf("nested context file not written: %v", err)
+		}
+		if want := header + persona; string(got) != want {
+			t.Errorf("context file = %q, want %q", got, want)
+		}
+	})
+
+	// Respawn re-delivers the persona into a worktree where the nested path
+	// already exists. MkdirAll must tolerate it, and the header must not double.
+	t.Run("re-delivery over an existing nested file", func(t *testing.T) {
+		dir := t.TempDir()
+		const header = "---\nalwaysApply: true\n---\n\n"
+		p := &Provider{
+			ID: "cursor",
+			PromptInjection: PromptInjection{
+				Kind:              InjectContextFile,
+				ContextFile:       ".cursor/rules/pogo-persona.mdc",
+				ContextFileHeader: header,
+			},
+		}
+		promptFile := newPromptFile(t)
+		for i := 0; i < 2; i++ {
+			if err := writeContextFilePrompt(p, promptFile, dir); err != nil {
+				t.Fatalf("writeContextFilePrompt call %d: %v", i, err)
+			}
+		}
+		got, _ := os.ReadFile(filepath.Join(dir, ".cursor", "rules", "pogo-persona.mdc"))
+		if want := header + persona; string(got) != want {
+			t.Errorf("re-delivery = %q, want %q (header must not double)", got, want)
+		}
+	})
+
+	// A context file whose parent cannot be created must surface an error, not
+	// silently drop the persona.
+	t.Run("uncreatable nested parent returns an error", func(t *testing.T) {
+		dir := t.TempDir()
+		// A regular file where the persona's parent directory needs to be.
+		if err := os.WriteFile(filepath.Join(dir, ".cursor"), []byte("not a dir"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		p := &Provider{
+			ID: "cursor",
+			PromptInjection: PromptInjection{
+				Kind:        InjectContextFile,
+				ContextFile: ".cursor/rules/pogo-persona.mdc",
+			},
+		}
+		if err := writeContextFilePrompt(p, newPromptFile(t), dir); err == nil {
+			t.Error("expected an error when the context file's parent cannot be created")
+		}
+	})
+
 	t.Run("append-flag provider is a no-op", func(t *testing.T) {
 		dir := t.TempDir()
 		p := &Provider{
