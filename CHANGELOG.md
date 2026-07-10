@@ -10,6 +10,8 @@ is the curated, human-readable summary kept in sync at each release cut.
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-07-10
+
 ### Added
 
 - **Host reconcile step + drift check (mg-be0c).** `pogo service reconcile`
@@ -51,6 +53,18 @@ is the curated, human-readable summary kept in sync at each release cut.
 
 ### Fixed
 
+- **Cold-start nudge no longer burns 60s per spawn (#76).** Claude Code v2.1.x
+  dropped the spaced `? for shortcuts` composer hint that the prompt-ready
+  sentinel matched on. v2.1.x renders the footer with per-word cursor-column
+  moves (`ESC[<n>G`), so after ANSI-stripping the words concatenate and the
+  spaced sentinel never appears — a spawned worker matched nothing and burned
+  the full 60s `InitialNudgeTimeout` as dead time before its first nudge.
+  `WaitForReady` now accepts a set of stable markers instead of one spaced
+  string: the structural `shift+tab to cycle` mode-bar hint first (present in
+  the bypass-permissions mode polecats spawn in), plus a spaceless
+  `?forshortcuts` for manual mode and a `Try "` placeholder as a mode-invariant
+  fallback — so readiness is caught the moment the composer paints. Measured
+  cold start ~60s → ~2.5s.
 - **CI's TempDir and first-paint flakes, root-caused rather than retried.** Four
   tests failed on `main` for reasons no PR caused — the worst on a docs-only
   commit, which is exactly how a team learns to wave through red. Three shared one
@@ -489,7 +503,8 @@ Early patch release.
 Initial tagged release of Pogo: multi-repo discovery, indexing, and
 cross-project zoekt search (`lsp`, `pose`, `pogo`, `pogod`).
 
-[Unreleased]: https://github.com/drellem2/pogo/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/drellem2/pogo/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/drellem2/pogo/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/drellem2/pogo/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/drellem2/pogo/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/drellem2/pogo/compare/v0.2.1...v0.2.2
