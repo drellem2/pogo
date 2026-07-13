@@ -1566,6 +1566,25 @@ machine that already has prompts so existing customizations are not silently
 overwritten.`,
 		Args: cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
+			// Pin legacy role names and re-resolve BEFORE InitPrompts, which
+			// expands {{.Coordinator}} into the scaffolded prompt prose and
+			// whose next-step print names the coordinator. Without this, the
+			// first `pogo init` of a build that flipped the role defaults
+			// (mg-ce47) on an existing install scaffolds — and prints "pogo
+			// agent start <new-default>" — under a name the pinned config
+			// disowns, the same ordering bug `pogo install` fixes at its own
+			// seam (mg-e545, xref mg-bc47 / 10d673f). Snapshot existing before
+			// InitPrompts writes stamped prompts that IsExistingInstall would
+			// otherwise read as an existing install. Non-fatal, like install:
+			// a pin failure or rename refusal must not break `pogo init`.
+			existingInstall := config.IsExistingInstall()
+			_, renameRefusal, pinErr := pinAndResolveRoles(existingInstall)
+			if pinErr != nil && !jsonOutput {
+				fmt.Fprintf(os.Stderr, "  ⚠ could not pin role defaults: %v\n", pinErr)
+			}
+			if renameRefusal != nil && !jsonOutput {
+				fmt.Fprintf(os.Stderr, "  ⚠ %v\n", renameRefusal)
+			}
 			result, err := agent.InitPrompts(initForce, initMinimal)
 			if err != nil {
 				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
