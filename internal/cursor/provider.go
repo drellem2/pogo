@@ -115,6 +115,12 @@ var Provider = agent.Provider{
 
 	NonInteractiveFlags: []string{"--force"},
 
+	// --force is documented as aliasing --yolo (see CommandTemplate above). An
+	// operator [agents] override that spells it `agent --yolo` is just as
+	// non-interactive, so declare the alias — otherwise ValidatePolecatCommand
+	// warns spuriously that the required --force flag is missing.
+	NonInteractiveFlagAliases: map[string][]string{"--force": {"--yolo"}},
+
 	// Cursor accepts the initial task as a trailing positional argv element
 	// (`agent [options] [prompt...]`), so Spawn appends it to the command
 	// instead of typing it into the composer.

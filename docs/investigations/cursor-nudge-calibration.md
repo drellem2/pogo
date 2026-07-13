@@ -300,7 +300,8 @@ function s(e = "agent-cli") {
 
 `agent-cli-local` is a **separate executable** (`cursor-agent-local`) shipped on
 its own download channel (`agent-cli-local-prod`). The `agent` binary pogo drives
-is `agent-cli`, and it does not enable any of it:
+is `agent-cli`. Measured against it, the local-provider flags are inert — but one
+route, the plain transport redirect, *is* honoured:
 
 | Route tried on `agent` (agent-cli) | Result |
 |---|---|
@@ -308,6 +309,16 @@ is `agent-cli`, and it does not enable any of it:
 | `CURSOR_LOCAL_AGENT_BASE_URL` + `CURSOR_LOCAL_AGENT_API_KEY` + `CURSOR_ENABLE_AUTHLESS=1` | ignored — mock received **0** requests |
 | `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` | ignored — mock received **0** requests |
 | `CURSOR_API_BASE_URL` | ignored for chat — mock received **0** requests (it fronts `${base}/auth/poll` only) |
+| `--agent-endpoint http://127.0.0.1:PORT` (hidden flag) | **redirects the chat transport** — a dead port hangs the turn (`Connection lost, reconnecting to http://127.0.0.1:1`); a raw socket received an h2c preface (`PRI * HTTP/2.0` + HPACK). The same turns succeed without it. |
+
+The last row corrects an earlier belief that `CURSOR_API_BASE_URL` was the only
+base-URL override: the transport **is** redirectable on the public `agent`
+binary, via the hidden `--agent-endpoint`. But redirection is not the hard part.
+The endpoint that would sit on the other end must speak Cursor's undocumented
+`agent/v1` ConnectRPC bidi-streaming service; a stub means reimplementing that
+service, not standing up an OpenAI-compatible completions mock the way pi's rig
+does. That is the gap between "can be pointed at a local port" and "an offline
+e2e exists" (mg-cdb6).
 
 Method note, because the first version of this probe lied. Asking Cursor to
 "reply with exactly `PONGMOCK`" and then seeing `PONGMOCK` proves nothing: the
@@ -320,8 +331,11 @@ before validating options, so `agent --local-agent-base-url X --help` "succeeds"
 on a flag the CLI does not have.)
 
 **Conclusion, stated at the strength the evidence supports:** an offline e2e is
-not achievable for the `agent` binary this provider targets. It is *not* a
-statement about Cursor-the-company forever. If pogo ever targets
+not achievable *at proportionate cost* for the `agent` binary this provider
+targets. Not "impossible": the transport is redirectable (see `--agent-endpoint`
+above), but a useful stub would have to reimplement Cursor's proprietary
+`agent/v1` ConnectRPC service, which is out of proportion to what the test buys.
+It is *not* a statement about Cursor-the-company forever. If pogo ever targets
 `cursor-agent-local`, a pi-style offline mock rig becomes available — that would
 be a different binary, a different provider `Binary` value, and a different
 ticket.

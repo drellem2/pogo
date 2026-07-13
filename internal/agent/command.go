@@ -49,20 +49,44 @@ func ExpandCommand(tmpl string, vars CommandTemplateVars) ([]string, error) {
 // A nil provider — or one that declares no NonInteractiveFlags — makes this a
 // no-op: there is nothing to require.
 func ValidatePolecatCommand(tmpl string, p *Provider) {
-	if p == nil {
-		return
-	}
-	var missing []string
-	for _, flag := range p.NonInteractiveFlags {
-		if !strings.Contains(tmpl, flag) {
-			missing = append(missing, flag)
-		}
-	}
+	missing := missingNonInteractiveFlags(tmpl, p)
 	if len(missing) > 0 {
 		log.Printf("WARNING: polecat command template does not include required "+
 			"non-interactive flag(s) %v for provider %q; polecats in new worktree "+
 			"directories may be blocked by permission prompts", missing, p.ID)
 	}
+}
+
+// missingNonInteractiveFlags returns the provider's required non-interactive
+// flags that the template neither contains directly nor satisfies through a
+// declared alias (see Provider.NonInteractiveFlagAliases). A nil provider — or
+// one that declares no NonInteractiveFlags — yields nil. Split out from
+// ValidatePolecatCommand, which only logs, so the alias contract is testable.
+func missingNonInteractiveFlags(tmpl string, p *Provider) []string {
+	if p == nil {
+		return nil
+	}
+	var missing []string
+	for _, flag := range p.NonInteractiveFlags {
+		if flagPresent(tmpl, flag, p.NonInteractiveFlagAliases[flag]) {
+			continue
+		}
+		missing = append(missing, flag)
+	}
+	return missing
+}
+
+// flagPresent reports whether tmpl carries flag or any of its aliases.
+func flagPresent(tmpl, flag string, aliases []string) bool {
+	if strings.Contains(tmpl, flag) {
+		return true
+	}
+	for _, alias := range aliases {
+		if strings.Contains(tmpl, alias) {
+			return true
+		}
+	}
+	return false
 }
 
 // writeContextFilePrompt delivers the persona prompt to a provider that uses

@@ -45,6 +45,14 @@ type Provider struct {
 	// ValidatePolecatCommand checks all of these are present.
 	NonInteractiveFlags []string
 
+	// NonInteractiveFlagAliases maps a required NonInteractiveFlag to alternative
+	// spellings that satisfy the same requirement. ValidatePolecatCommand treats
+	// a flag as present if the template carries it OR any of its listed aliases,
+	// so an operator override that uses a documented alias (Cursor: --yolo for
+	// --force) does not trip a spurious warning. nil for providers whose
+	// non-interactive flags have no aliases.
+	NonInteractiveFlagAliases map[string][]string
+
 	// InitialPromptViaArgv is true when the harness accepts its initial task
 	// message as a trailing positional argv element (pi: `pi [messages...]`).
 	// Spawn then appends SpawnRequest.InitialNudge to the spawn command as a
