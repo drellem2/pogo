@@ -1,6 +1,7 @@
 package claude
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"sync"
@@ -8,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/drellem2/pogo/internal/agent"
 	"github.com/drellem2/pogo/internal/events"
 )
 
@@ -591,5 +593,89 @@ func TestModalScannerANSIStripping(t *testing.T) {
 	}
 	if !scanner.MarkerVisible(0) {
 		t.Errorf("expected marker visible after ANSI-bracketed write")
+	}
+}
+
+// columnMoveRatingFooter renders the rating dialog the way Claude Code's TUI
+// actually paints it: option columns positioned with cursor-forward escapes
+// (ESC[<n>C) rather than literal spaces, wrapped in SGR color. This is the
+// production layout that the original literal-spaces matcher never matched —
+// StripANSI deletes the cursor-move escapes outright, so the on-screen spaces
+// are gone by the time the scanner compares (mg-f36b).
+const columnMoveRatingFooter = "\x1b[2K\x1b[38;5;244m1:Bad\x1b[3C2:Fine\x1b[3C3:Good\x1b[3C0:Dismiss\x1b[0m\n"
+
+// TestModalScannerColumnMoveFooter is the direct regression for mg-f36b: the
+// realistic column-move footer must be detected, AND we assert that the old
+// literal-spaces bytes.Contains would NOT have matched it — documenting the
+// exact production gap this fix closes.
+func TestModalScannerColumnMoveFooter(t *testing.T) {
+	clock := &fakeClock{now: time.Unix(1_700_000_000, 0)}
+	scanner := newModalScanner(testMatchers(), clock.Now)
+	if _, err := scanner.Write([]byte(columnMoveRatingFooter)); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if !scanner.MarkerVisible(0) {
+		t.Errorf("expected rating-dialog marker visible for column-move footer")
+	}
+
+	// Guard the root cause: the pre-fix literal compare must fail on this
+	// input, so this test would have caught the production regression.
+	clean := agent.StripANSI([]byte(columnMoveRatingFooter))
+	if bytes.Contains(clean, []byte(RatingDialogMarker)) {
+		t.Errorf("literal-spaces marker unexpectedly matched %q — the "+
+			"column-move footer no longer reproduces the mg-f36b gap", clean)
+	}
+}
+
+// TestModalHook_ColumnMoveRatingDialogFires drives the full watcher against the
+// production column-move footer and asserts a dismissal fires. Case1 proves the
+// clean-text path; this proves the real-render path the field wedge exposed.
+func TestModalHook_ColumnMoveRatingDialogFires(t *testing.T) {
+	clock := &fakeClock{now: time.Unix(1_700_000_000, 0)}
+	rig := newTestRig(clock.Now)
+	rig.tracker.set("cat-test", clock.Now())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { RunModalHook(ctx, rig.deps("cat-test"), testMatchers()); close(done) }()
+	if !waitFor(t, time.Second, func() bool {
+		rig.mu.Lock()
+		ok := rig.scanner != nil
+		rig.mu.Unlock()
+		return ok
+	}) {
+		t.Fatalf("scanner never subscribed")
+	}
+
+	rig.writeOutput([]byte(columnMoveRatingFooter))
+	clock.Advance(200 * time.Millisecond)
+
+	if !waitFor(t, time.Second, func() bool { return rig.dismissals() >= 1 }) {
+		t.Fatalf("expected dismissal to fire for column-move footer, got %d", rig.dismissals())
+	}
+	rig.mu.Lock()
+	if string(rig.dismissed[0]) != "0\n" {
+		t.Errorf("expected dismissal payload %q, got %q", "0\n", rig.dismissed[0])
+	}
+	rig.mu.Unlock()
+}
+
+// TestMatchNormalize covers the whitespace-stripping helper directly, including
+// the drift variants it is meant to absorb (space after colon, doubled spaces).
+func TestMatchNormalize(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"1:Bad 2:Fine 3:Good 0:Dismiss", "1:Bad2:Fine3:Good0:Dismiss"},
+		{"1: Bad  2: Fine\t3:Good\n0:Dismiss", "1:Bad2:Fine3:Good0:Dismiss"},
+		{"Stop and wait for limit to reset", "Stopandwaitforlimittoreset"},
+		{"", ""},
+		{"   \t\n\r", ""},
+	}
+	for _, c := range cases {
+		if got := string(matchNormalize([]byte(c.in))); got != c.want {
+			t.Errorf("matchNormalize(%q) = %q, want %q", c.in, got, c.want)
+		}
 	}
 }

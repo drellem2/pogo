@@ -18,3 +18,4 @@ item are the anchor.
 | [nudge-claude-code-workaround.md](nudge-claude-code-workaround.md) | Workarounds for nudging Claude Code through mid-session modals | Investigation; the modal watcher it scopes since shipped (mg-4421, `internal/claude/modal_hook.go`) |
 | [pi-nudge-calibration.md](pi-nudge-calibration.md) | Empirical nudge timing + persona/trust integration for the pi provider | Calibration record backing `internal/pi/provider.go` (mg-9829) |
 | [pty-investigation-2026-05-09.md](pty-investigation-2026-05-09.md) | PTY rendering glitches on `pogo agent attach` | Read-only investigation; fix carried by a follow-up ticket (mg-098c) |
+| [rating-dialog-match-2026-07-13.md](rating-dialog-match-2026-07-13.md) | Root cause: rating-dialog marker never matched the real TUI footer (column-move escapes collapse spaces under `StripANSI`) | Root-cause trace + fix — whitespace-insensitive matching (mg-f36b) |

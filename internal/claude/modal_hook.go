@@ -39,8 +39,19 @@ import (
 )
 
 // RatingDialogMarker matches Claude Code's mid-session session-rating prompt.
-// The string is stable across current Claude Code versions; if it drifts, set
-// POGO_RATING_DIALOG_MARKER to override per mg-ef6b §3.
+//
+// Marker matching is whitespace-insensitive (see matchNormalize): the spaces
+// written here are only for readability. This is load-bearing, not cosmetic —
+// Claude Code renders the option row as a TUI footer whose columns are placed
+// with cursor-forward escapes (ESC[<n>C), NOT literal spaces. StripANSI deletes
+// those escapes outright rather than substituting a space, so the on-screen
+// "1:Bad 2:Fine 3:Good 0:Dismiss" reaches the scan buffer as the run-together
+// "1:Bad2:Fine3:Good0:Dismiss". A literal bytes.Contains against the spaced
+// string therefore never matched in production — the watcher logged zero
+// rating-dialog dismissals between its 2026-05-19 merge and the 2026-07-13
+// wedge (mg-f36b) despite the dialog appearing. Normalizing whitespace out of
+// both the buffer and the marker fixes that and absorbs lesser drift (a space
+// after each colon, doubled spaces) for free.
 const RatingDialogMarker = "1:Bad 2:Fine 3:Good 0:Dismiss"
 
 // RateLimitMarker matches the first menu option of Claude Code's API
@@ -258,6 +269,11 @@ type modalScanner struct {
 	matchers []ModalMatcher
 	now      func() time.Time
 
+	// normMarkers[i] is matcher i's LineMarker with whitespace stripped
+	// (matchNormalize), precomputed once so Write doesn't re-normalize each
+	// marker on every chunk. Compared against the whitespace-stripped buffer.
+	normMarkers [][]byte
+
 	// markerLastSeen[i] records the most recent time matcher i's marker was
 	// observed in the cleaned buffer. Read by dispatchMatcher; updated by
 	// Write under mu.
@@ -281,11 +297,15 @@ func newModalScanner(matchers []ModalMatcher, now func() time.Time) *modalScanne
 		matchers:       matchers,
 		now:            now,
 		markerLastSeen: make([]time.Time, len(matchers)),
+		normMarkers:    make([][]byte, len(matchers)),
 		observed:       make([]chan struct{}, len(matchers)),
 		output:         make(chan struct{}, 1),
 	}
 	for i := range s.observed {
 		s.observed[i] = make(chan struct{}, 1)
+	}
+	for i, m := range matchers {
+		s.normMarkers[i] = matchNormalize([]byte(m.LineMarker))
 	}
 	return s
 }
@@ -305,11 +325,11 @@ func (s *modalScanner) Write(p []byte) (int, error) {
 	if len(s.rawBuf) > scanBufBytes {
 		s.rawBuf = s.rawBuf[len(s.rawBuf)-scanBufBytes:]
 	}
-	clean := agent.StripANSI(s.rawBuf)
+	clean := matchNormalize(agent.StripANSI(s.rawBuf))
 	now := s.now()
 	s.lastChunk = now
-	for i, m := range s.matchers {
-		if bytes.Contains(clean, []byte(m.LineMarker)) {
+	for i := range s.matchers {
+		if bytes.Contains(clean, s.normMarkers[i]) {
 			s.markerLastSeen[i] = now
 			nbSend(s.observed[i])
 		}
@@ -325,8 +345,8 @@ func (s *modalScanner) Write(p []byte) (int, error) {
 func (s *modalScanner) MarkerVisible(idx int) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	clean := agent.StripANSI(s.rawBuf)
-	return bytes.Contains(clean, []byte(s.matchers[idx].LineMarker))
+	clean := matchNormalize(agent.StripANSI(s.rawBuf))
+	return bytes.Contains(clean, s.normMarkers[idx])
 }
 
 // MarkerLastSeen returns the most recent time matcher idx's marker was seen.
@@ -350,6 +370,31 @@ func nbSend(ch chan struct{}) {
 	case ch <- struct{}{}:
 	default:
 	}
+}
+
+// matchNormalize strips ASCII whitespace so a marker matches the scan buffer
+// regardless of how the TUI spaced the on-screen text. It is applied to BOTH
+// the ANSI-stripped buffer and the marker before comparison. See the
+// RatingDialogMarker doc comment for why this is required rather than cosmetic:
+// modal footers arrive with their inter-column spaces already deleted by
+// StripANSI (the cursor-move escapes that produced them are gone, not turned
+// into spaces), so only a whitespace-insensitive compare reliably fires.
+//
+// Collapsing whitespace to nothing (rather than to a single space) is what
+// makes the compare robust to the column-move case; the markers are specific
+// enough ("1:Bad2:Fine3:Good0:Dismiss", "Stopandwaitforlimittoreset") that
+// run-together forms don't coincide with ordinary agent output, and the idle
+// gate is the real guard against transcript mentions regardless.
+func matchNormalize(b []byte) []byte {
+	out := make([]byte, 0, len(b))
+	for _, c := range b {
+		switch c {
+		case ' ', '\t', '\n', '\r', '\v', '\f':
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
 }
 
 // dispatchMatcher is one goroutine per matcher. It owns the idle-gate state
