@@ -3,6 +3,7 @@ package agent
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -104,6 +105,47 @@ func TestValidatePolecatCommand(t *testing.T) {
 	ValidatePolecatCommand("anything at all", nil)
 	// Provider with no required flags — no-op, must not panic.
 	ValidatePolecatCommand("anything", &Provider{ID: "noflags"})
+}
+
+// TestMissingNonInteractiveFlags pins the flag-presence contract that
+// ValidatePolecatCommand logs from — including the alias rule, so a documented
+// alternative spelling of a required flag does not report as missing.
+func TestMissingNonInteractiveFlags(t *testing.T) {
+	p := &Provider{
+		ID:                  "cursor",
+		NonInteractiveFlags: []string{"--force"},
+		NonInteractiveFlagAliases: map[string][]string{
+			"--force": {"--yolo"},
+		},
+	}
+
+	cases := []struct {
+		name string
+		tmpl string
+		want []string
+	}{
+		{"flag present", "agent --force", nil},
+		{"alias present is not missing", "agent --yolo", nil},
+		{"neither present is missing", "agent --model auto", []string{"--force"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := missingNonInteractiveFlags(tc.tmpl, p)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("missingNonInteractiveFlags(%q) = %v, want %v", tc.tmpl, got, tc.want)
+			}
+		})
+	}
+
+	// A required flag with no declared aliases still reports missing.
+	noAlias := &Provider{ID: "claude", NonInteractiveFlags: []string{"--dangerously-skip-permissions"}}
+	if got := missingNonInteractiveFlags("claude --append-system-prompt-file /tmp/p.md", noAlias); !reflect.DeepEqual(got, []string{"--dangerously-skip-permissions"}) {
+		t.Errorf("missing flag without aliases = %v, want [--dangerously-skip-permissions]", got)
+	}
+	// A nil provider yields no missing flags.
+	if got := missingNonInteractiveFlags("anything", nil); got != nil {
+		t.Errorf("nil provider missing = %v, want nil", got)
+	}
 }
 
 // TestWriteContextFilePrompt verifies the ContextFile prompt-injection path:

@@ -21,17 +21,21 @@ package cursor_test
 //
 // pi's e2e runs fully offline: pi supports custom OpenAI-compatible providers,
 // so the test points it at a local mock server and asserts byte-level on the
-// captured completion request. The `agent` binary admits no such rig.
+// captured completion request. For the `agent` binary a rig like that is not
+// achievable at proportionate cost — the reason is narrower than "closed-source".
 //
-// Cursor speaks a proprietary connectrpc/protobuf protocol to api2.cursor.sh,
-// which alone would make a mock absurd. But the bundle DOES carry a hidden
-// local-provider mode (--local-agent-base-url, CURSOR_LOCAL_AGENT_BASE_URL,
-// ANTHROPIC_BASE_URL, CURSOR_ENABLE_AUTHLESS) that accepts an OpenAI-compatible
-// endpoint — exactly what an offline rig needs. It is gated to a *different
-// executable*, cursor-agent-local, on its own download channel. Measured against
-// the `agent` binary this provider targets: the flag is rejected outright
-// ("unknown option"), and every env-var route left a local mock server with zero
-// requests while the real backend answered. See the calibration doc.
+// Cursor speaks a proprietary connectrpc/protobuf protocol to api2.cursor.sh.
+// The chat transport IS redirectable: the hidden --agent-endpoint <url> flag is
+// honoured by agent-cli (a dead port hangs the turn "reconnecting"; a raw socket
+// receives an h2c preface). But redirecting it is not the hard part — the
+// endpoint must speak Cursor's undocumented agent/v1 ConnectRPC bidi-stream, so a
+// stub means reimplementing that service, not standing up an OpenAI-compatible
+// mock. The bundle's local-provider mode (--local-agent-base-url,
+// CURSOR_LOCAL_AGENT_BASE_URL, ANTHROPIC_BASE_URL, CURSOR_ENABLE_AUTHLESS) would
+// sidestep that, but it is gated to a *different executable*, cursor-agent-local,
+// on its own download channel: against the `agent` binary those flags are
+// rejected ("unknown option") or ignored (a local mock saw zero requests while
+// the real backend answered). See the calibration doc (mg-cdb6).
 //
 // So this test follows the *Codex* pattern instead: opt-in, real binary, real
 // network, real Cursor plan credits. If pogo ever targets cursor-agent-local, a
