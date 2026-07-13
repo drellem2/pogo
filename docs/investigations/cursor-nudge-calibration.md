@@ -131,12 +131,17 @@ prompt into `<dir>/<ContextFile>`. Cursor needs:
 2. **`PromptInjection.ContextFileHeader`** — the frontmatter, prepended to the
    persona. Empty for Codex, whose `AGENTS.override.md` is plain markdown.
 
-### Residue (out of scope, noted)
+### Residue (fixed in mg-9de9)
 
 The persona lands as an untracked file inside the polecat's worktree, so a
 `git add -A` would commit it. This is **not new**: Codex's `AGENTS.override.md`
-has the same posture today, and neither is gitignored. Worth a follow-up ticket;
-deliberately not fixed here.
+has the same posture. **Fixed in mg-9de9:** `writeContextFilePrompt` now appends
+the injected `ContextFile` path (anchored, e.g. `/​.cursor/rules/pogo-persona.mdc`)
+to the worktree's `.git/info/exclude`, so `git status` never lists it and
+`git add -A` cannot stage it. `info/exclude` is repo-local and never committed,
+so the repo the user owns is untouched — no `.gitignore` churn. The step is
+best-effort: a non-git dir or unwritable exclude is logged, not fatal, since the
+persona has already been delivered.
 
 ## Measurements
 
