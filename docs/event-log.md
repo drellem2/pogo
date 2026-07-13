@@ -380,6 +380,24 @@ The agent flagged by a prior `usage_limit_hit` recovered: its event log advanced
 {"schema_version":1,"timestamp":"2026-07-06T22:05:00.000000000Z","event_type":"usage_limit_cleared","agent":"cat-mg-7ffa","work_item_id":"mg-7ffa","details":{"matcher":"rate-limit-options"}}
 ```
 
+#### `sentinel_drift`
+
+pogod's prompt-ready sentinel drift detector ([sentineldrift.go](../internal/agent/sentineldrift.go), mg-ce4c, fast-follow to pogo#76 / PR #77) declared a **fleet-wide** ready-gate sentinel stale: the fraction of spawns MISSING their prompt-ready sentinel within a rolling window crossed the alert threshold. The gates are hardcoded UI-string sentinels scraped from harness PTY output — the Claude initial-nudge gate (`initial-nudge`) and Cursor's trust-dialog hook (`trust-dialog`) — and when a harness UI change makes one stop matching, the gate silently degrades (a ~60s per-spawn cold-start tax for Claude; unguarded dialog dismissal for Cursor). A single missed spawn is noise; a windowed run of them means the sentinel drifted. The detector aggregates in-process (pogod is the single fleet process), so the count is fleet-wide without reading the log back. Rate-limited to one event per sentinel per drift episode (not per spawn). The paired signal is a mail to the coordinator — a log line alone is not a signal on this host. Additive — no `schema_version` bump.
+
+- **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent` (always `"pogod"`), `details`
+- **`details` fields:**
+  - `provider` (string, required): harness provider id, e.g. `"claude"`, `"cursor"`
+  - `gate` (string, required): `"initial-nudge"` or `"trust-dialog"`
+  - `sentinel` (string, required): the primary sentinel string that is probably stale
+  - `missed` (int, required): spawns in the window that missed the sentinel
+  - `total` (int, required): spawns in the window
+  - `fraction` (float, required): `missed / total`
+  - `window` (string, required): the window the rate was computed over, e.g. `"1h0m0s"`
+
+```json
+{"schema_version":1,"timestamp":"2026-07-13T18:20:00.000000000Z","event_type":"sentinel_drift","agent":"pogod","details":{"provider":"claude","gate":"initial-nudge","sentinel":"? for shortcuts","missed":11,"total":12,"fraction":0.9166666666666666,"window":"1h0m0s"}}
+```
+
 ## Worked example: a polecat merge cycle
 
 The lines below show the canonical event sequence for a successful polecat run. Times are illustrative.

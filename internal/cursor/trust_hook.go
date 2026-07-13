@@ -108,8 +108,18 @@ func TrustDialogHook(a *agent.Agent) {
 	for {
 		select {
 		case <-deadline:
+			// Watched the whole window and matched NEITHER sentinel — neither
+			// the trust-dialog marker nor the composer-ready marker. On a
+			// healthy spawn the hook resolves well inside the window (dialog
+			// dismissed ~0.7s, or composer seen on an already-trusted
+			// worktree), so a deadline hit is the drift signature: a hardcoded
+			// UI string has probably changed, leaving trust-dialog dismissal
+			// unguarded. Record it so a fleet-wide run of these goes loud
+			// (mg-ce4c / mg-ff2c).
+			agent.RecordTrustDialogReady(a.ProviderID(), promptReadySentinel, false)
 			return
 		case <-a.Done():
+			// Agent exited mid-watch: inconclusive, not a ready-gate result.
 			return
 		case <-ticker.C:
 			output := a.RecentOutput(8192)
@@ -121,6 +131,7 @@ func TrustDialogHook(a *agent.Agent) {
 			// return early on an already-trusted worktree instead of polling
 			// out the full timeout. See composerReady.
 			if composerReady(output) {
+				agent.RecordTrustDialogReady(a.ProviderID(), promptReadySentinel, true)
 				return
 			}
 			if matchesTrustDialog(output) {
@@ -130,6 +141,9 @@ func TrustDialogHook(a *agent.Agent) {
 				if err := a.SendRaw(trustDialogAccept); err != nil {
 					log.Printf("agent %s: failed to dismiss Cursor trust dialog: %v", a.Name, err)
 				}
+				// The trust-dialog marker matched and we acted on it — the
+				// sentinel is live. Record a confirmed outcome.
+				agent.RecordTrustDialogReady(a.ProviderID(), promptReadySentinel, true)
 				return
 			}
 		}

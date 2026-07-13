@@ -171,6 +171,15 @@ func (a *Agent) NudgeWithMode(msg string, mode NudgeMode, timeout time.Duration)
 			}
 		}
 
+		// Feed the fleet-wide drift detector. Both the settled (err == nil) and
+		// the deadline path carry a meaningful gate result — seen is true only
+		// when the sentinel actually matched. The non-deadline error above
+		// returned early (agent died mid-wait: inconclusive, not recorded), so
+		// every outcome that reaches here is a real spawn's ready-gate result.
+		// A per-spawn log line was invisible for the whole #76 episode; this
+		// turns a fleet-wide run of misses into one loud alert (mg-ce4c).
+		RecordInitialNudgeReady(a.ProviderID(), a.nudge.PromptReadySentinel, seen)
+
 		if err := a.Nudge(msg); err != nil {
 			return err
 		}
