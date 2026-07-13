@@ -10,6 +10,8 @@ import (
 	"testing"
 	"text/template"
 	"time"
+
+	"github.com/drellem2/pogo/internal/config"
 )
 
 func TestLaunchdPlistTemplate(t *testing.T) {
@@ -507,5 +509,65 @@ func TestServicePaths(t *testing.T) {
 		}
 	default:
 		t.Skip("unsupported OS")
+	}
+}
+
+// sandboxHome redirects HOME, XDG_CONFIG_HOME and POGO_HOME at fresh temp dirs
+// and returns the POGO_HOME path. Both the developer shell and launchd export
+// POGO_HOME on some machines, and config.toml is layered across HOME/XDG since
+// mg-cf9e, so POGO_HOME alone would not isolate the write.
+func sandboxHome(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	state := filepath.Join(home, "state")
+	if err := os.MkdirAll(state, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("POGO_HOME", state)
+	return state
+}
+
+// The mg-bc47 role-migration bug, service-install mail side (mg-e545). On an
+// existing install whose config.toml predates the [agents] role keys, the first
+// process of a build that flipped the defaults (mg-ce47) would address the
+// install report to the NEW default's mailbox nobody reads. installMailCoordinator
+// must pin the frozen legacy name and resolve from the pinned config instead.
+func TestInstallMailCoordinatorResolvesPinnedName(t *testing.T) {
+	state := sandboxHome(t)
+
+	cfgPath := filepath.Join(state, "config.toml")
+	if err := os.WriteFile(cfgPath, []byte("[agents]\nautostart = false\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Bare literal, not config.DefaultCoordinator: comparing against the const
+	// would follow a future flip instead of catching a regression.
+	if got := installMailCoordinator(); got != "mayor" {
+		t.Errorf("coordinator = %q, want pinned legacy %q — install mail would reach a mailbox nobody reads", got, "mayor")
+	}
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `coordinator = "mayor"`) {
+		t.Errorf("config.toml not pinned:\n%s", data)
+	}
+}
+
+// A fresh install has no config.toml and adopts the live defaults; the pin is a
+// no-op and writes nothing.
+func TestInstallMailCoordinatorFreshInstallUsesDefault(t *testing.T) {
+	state := sandboxHome(t)
+
+	if config.IsExistingInstall() {
+		t.Fatal("precondition: empty sandbox must not read as an existing install")
+	}
+	if got := installMailCoordinator(); got != config.DefaultCoordinator {
+		t.Errorf("coordinator = %q, want live default %q on a fresh install", got, config.DefaultCoordinator)
+	}
+	if _, err := os.Stat(filepath.Join(state, "config.toml")); !os.IsNotExist(err) {
+		t.Error("fresh install wrote config.toml; the pin must be a no-op")
 	}
 }

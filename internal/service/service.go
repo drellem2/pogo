@@ -513,15 +513,11 @@ func installLaunchd() (retErr error) {
 
 // sendInstallMail is best-effort: if mg isn't on PATH or the coordinator's
 // inbox doesn't exist yet, the install must still succeed. The coordinator is
-// just the fastest verification path; a human can read the log otherwise.
-//
-// The rename guard runs here for the same reason it runs at every other seam
-// that resolves the coordinator's name: mail addressed to a name config invented
-// while a differently-named coordinator is running lands in a mailbox nobody
-// reads (mg-cf9e).
+// just the fastest verification path; a human can read the log otherwise. The
+// name comes from installMailCoordinator, which resolves it from the PINNED
+// config (mg-e545).
 func sendInstallMail(subject, body string) {
-	cfg, _ := config.GuardRunningCoordinator(config.Load())
-	coordinator := cfg.Agents.CoordinatorName()
+	coordinator := installMailCoordinator()
 	cmd := exec.Command("mg", "mail", "send", coordinator,
 		"--from", "service-install",
 		"--subject", subject,
@@ -531,6 +527,27 @@ func sendInstallMail(subject, body string) {
 		return
 	}
 	fmt.Printf("Mailed install report to %s: %s\n", coordinator, subject)
+}
+
+// installMailCoordinator resolves the coordinator's name for install-report
+// mail from the PINNED config (PinAndLoad), not a raw Load: on the first process
+// of a build that flipped the role defaults (mg-ce47), an existing install whose
+// config.toml predates the [agents] keys would otherwise address the report to
+// the NEW default's mailbox nobody reads, while the pinned config keeps the
+// legacy one. PinAndLoad pins the frozen legacy names (idempotent — a no-op on a
+// fresh install or once the keys are present) and re-reads, so we resolve what
+// config actually carries. `pogo service install` writes no prompts, so
+// IsExistingInstall reflects the true prior state here (mg-e545, xref mg-bc47 /
+// 10d673f).
+//
+// The rename guard then runs for the same reason it runs at every other seam
+// that resolves the coordinator's name: a name config invented while a
+// differently-named coordinator is running addresses a mailbox nobody reads
+// (mg-cf9e).
+func installMailCoordinator() string {
+	cfg, _, _ := config.PinAndLoad(config.IsExistingInstall())
+	cfg, _ = config.GuardRunningCoordinator(cfg)
+	return cfg.Agents.CoordinatorName()
 }
 
 func sendInstallSuccessMail(plistPath, logd string, noChange bool) {
