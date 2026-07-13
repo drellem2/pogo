@@ -108,6 +108,73 @@ func TestPruneWorktrees_MergedBranches(t *testing.T) {
 	}
 }
 
+// TestPruneWorktrees_DivergentTargetReset verifies that prune realigns a
+// clone whose local main has diverged from origin. A plain 'pull --ff-only'
+// cannot recover such a clone; prune must hard-reset the target to origin so
+// it is a genuine operator escape hatch for a polluted/divergent target.
+func TestPruneWorktrees_DivergentTargetReset(t *testing.T) {
+	tmp := t.TempDir()
+
+	bareDir, sourceDir := initBareRepo(t, tmp, "myrepo")
+
+	// Advance origin/main by one commit from the source clone.
+	if err := os.WriteFile(filepath.Join(sourceDir, "upstream.txt"), []byte("upstream"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	gitInDir(t, sourceDir, "add", "upstream.txt")
+	gitInDir(t, sourceDir, "commit", "-m", "upstream commit")
+	gitInDir(t, sourceDir, "push", "origin", "main")
+	originMain := gitInDir(t, sourceDir, "rev-parse", "origin/main")
+
+	// Build the refinery clone from the state BEFORE the upstream commit, then
+	// create a local commit on main so it diverges from origin (a
+	// fast-forward is impossible: origin and local both moved from the base).
+	wtDir := filepath.Join(tmp, "worktrees")
+	refineryClone := filepath.Join(wtDir, "myrepo")
+	cmd := exec.Command("git", "clone", bareDir, refineryClone)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("clone for refinery: %s: %v", out, err)
+	}
+	gitInDir(t, refineryClone, "reset", "--hard", "HEAD~1")
+	gitInDir(t, refineryClone, "config", "user.email", "test@test.com")
+	gitInDir(t, refineryClone, "config", "user.name", "test")
+	if err := os.WriteFile(filepath.Join(refineryClone, "local.txt"), []byte("local"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	gitInDir(t, refineryClone, "add", "local.txt")
+	gitInDir(t, refineryClone, "commit", "-m", "divergent local commit")
+
+	r, err := New(Config{
+		Enabled:      true,
+		PollInterval: time.Hour,
+		WorktreeDir:  wtDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	results := r.PruneWorktrees()
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if results[0].Error != "" {
+		t.Fatalf("unexpected error: %s", results[0].Error)
+	}
+
+	// After prune, the clone's main must match origin/main exactly — the
+	// divergent local commit is gone and the upstream commit is present.
+	localMain := gitInDir(t, refineryClone, "rev-parse", "main")
+	if localMain != originMain {
+		t.Errorf("expected main reset to origin/main (%s), got %s", originMain, localMain)
+	}
+	if _, err := os.Stat(filepath.Join(refineryClone, "upstream.txt")); err != nil {
+		t.Errorf("expected upstream.txt present after reset to origin/main: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(refineryClone, "local.txt")); !os.IsNotExist(err) {
+		t.Errorf("expected divergent local.txt discarded after reset, stat err=%v", err)
+	}
+}
+
 func TestPruneWorktrees_NoMergedBranches(t *testing.T) {
 	tmp := t.TempDir()
 

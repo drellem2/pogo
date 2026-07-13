@@ -63,10 +63,17 @@ func pruneWorktreeClone(wtDir, name string) PruneResult {
 		return result
 	}
 
-	// Pull latest main so merged detection is accurate
-	if _, err := gitCmdOutput(wtDir, "pull", "--ff-only", "origin", "main"); err != nil {
-		// Non-fatal: we can still prune with possibly stale main
-		log.Printf("refinery: prune: pull main failed for %s: %v", name, err)
+	// Realign main to origin so merged detection is accurate. A plain
+	// 'git pull --ff-only' silently aborts when the local target has diverged
+	// from origin ("Not possible to fast-forward"), leaving a polluted or
+	// divergent target in place — so prune would not be an operator escape
+	// hatch for such a clone. Hard-reset to the fetched origin/main instead:
+	// the clone's target then matches origin regardless of prior local state.
+	// Mirrors the merge-path target reset (merge.go). (mg-58f6)
+	if _, err := gitCmdOutput(wtDir, "reset", "--hard", "origin/main"); err != nil {
+		// Non-fatal: origin/main may be absent (fetch above failed, or the
+		// remote is unreachable). Fall back to pruning against the local main.
+		log.Printf("refinery: prune: reset main to origin/main failed for %s: %v", name, err)
 	}
 
 	// List branches merged into main (excluding main itself)
