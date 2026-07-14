@@ -19,3 +19,4 @@ item are the anchor.
 | [pi-nudge-calibration.md](pi-nudge-calibration.md) | Empirical nudge timing + persona/trust integration for the pi provider | Calibration record backing `internal/pi/provider.go` (mg-9829) |
 | [pty-investigation-2026-05-09.md](pty-investigation-2026-05-09.md) | PTY rendering glitches on `pogo agent attach` | Read-only investigation; fix carried by a follow-up ticket (mg-098c) |
 | [rating-dialog-match-2026-07-13.md](rating-dialog-match-2026-07-13.md) | Root cause: rating-dialog marker never matched the real TUI footer (column-move escapes collapse spaces under `StripANSI`) | Root-cause trace + fix — whitespace-insensitive matching (mg-f36b) |
+| [renudge-efficacy-2026-07-14.md](renudge-efficacy-2026-07-14.md) | Efficacy of the bare-CR auto-renudge against a real Claude Code paste-buffered kickoff wedge | Verified 3/3 — bare CR recovers; no `"1"` fallback needed (mg-feb3) |
