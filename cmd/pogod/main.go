@@ -541,6 +541,29 @@ func newStallNudger(reg *agent.Registry, mail func(to, from, subject, body strin
 	}
 }
 
+// newStartVerifier builds the post-spawn start-verification query for the
+// auto-renudge watcher (mg-feb3). It reports a polecat as "started" once its mg
+// work item has left the available/ queue — the item's presence in available/
+// is the HARD unstarted-signal the watcher gates its bare-CR renudge on. workRoot
+// is the macguffin work directory (~/.macguffin/work); it scans only available/,
+// so the check is cheap and never walks the unbounded done/ tree. A read error
+// propagates so the watcher treats it as inconclusive rather than renudging a
+// possibly-working agent.
+func newStartVerifier(workRoot string) agent.StartVerifier {
+	return func(workItemID string) (bool, error) {
+		items, err := workitem.ListFrom(workRoot, "available")
+		if err != nil {
+			return false, err
+		}
+		for _, it := range items {
+			if it.ID == workItemID {
+				return false, nil // still available → not yet claimed → unstarted
+			}
+		}
+		return true, nil // left the available queue → claimed → started
+	}
+}
+
 func main() {
 	flag.Usage = func() {
 		fmt.Fprint(flag.CommandLine.Output(), `pogod — the pogo daemon.
@@ -704,6 +727,15 @@ Flags:
 		agentRegistry.RegisterProvider(p)
 	}
 	agentRegistry.SetDefaultProvider(cfg.Agents.Provider)
+
+	// Wire the post-spawn start-verification watcher (mg-feb3): after the initial
+	// nudge, pogod checks whether a polecat actually claimed its work item and, if
+	// a concurrent-spawn init-stall swallowed the kickoff, re-delivers a bare
+	// submit terminator. The macguffin work root mirrors the stall watcher's
+	// default (~/.macguffin/work).
+	if home, err := os.UserHomeDir(); err == nil {
+		agentRegistry.SetStartVerifier(newStartVerifier(filepath.Join(home, ".macguffin", "work")))
+	}
 
 	// Validate the command binary for each agent type exists on PATH. Each type
 	// can select a different provider via [agents.<type>] provider, so resolve

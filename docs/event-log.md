@@ -398,6 +398,22 @@ pogod's prompt-ready sentinel drift detector ([sentineldrift.go](../internal/age
 {"schema_version":1,"timestamp":"2026-07-13T18:20:00.000000000Z","event_type":"sentinel_drift","agent":"pogod","details":{"provider":"claude","gate":"initial-nudge","sentinel":"? for shortcuts","missed":11,"total":12,"fraction":0.9166666666666666,"window":"1h0m0s"}}
 ```
 
+#### `auto_renudge`
+
+pogod's post-spawn start-verification watcher ([startverify.go](../internal/agent/startverify.go), mg-feb3, gh drellem2/macguffin#24) re-delivered a bare submit terminator (CR) to a freshly spawned polecat because its mg work item was still unclaimed after the start-verify window. Under a concurrent spawn wave a CPU-starved harness can miss the initial kickoff nudge (the false-idle gate delivers it before Claude Code is listening; it piles in the kernel input buffer and Ink absorbs it as one paste block whose CR never re-tokenizes as a submit — mg-ce61), leaving the agent alive but never claiming its item. The watcher gates on the HARD started-signal (the item leaving `available/`), never on output quiescence, and retries a bounded number of times; one event is emitted per delivered CR. A run of these on the same spawn wave is the productized-recovery footprint of the init-stall. Additive — no `schema_version` bump.
+
+- **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent` (always `"pogod"`), `details`
+- **`details` fields:**
+  - `to` (string, required): the renudged agent's identity, e.g. `"cat-feb3"`
+  - `work_item_id` (string, required): the mg work item that was still unclaimed, e.g. `"mg-feb3"`
+  - `attempt` (int, required): 1-based attempt index for this CR
+  - `max_attempts` (int, required): the bounded retry ceiling
+  - `reason` (string, required): why the renudge fired, e.g. `"work_item_unclaimed"`
+
+```json
+{"schema_version":1,"timestamp":"2026-07-14T00:05:00.000000000Z","event_type":"auto_renudge","agent":"pogod","details":{"to":"cat-feb3","work_item_id":"mg-feb3","attempt":1,"max_attempts":3,"reason":"work_item_unclaimed"}}
+```
+
 ## Worked example: a polecat merge cycle
 
 The lines below show the canonical event sequence for a successful polecat run. Times are illustrative.

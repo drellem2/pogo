@@ -36,6 +36,16 @@ const DefaultNudgeTimeout = 30 * time.Second
 // IsIdle returns true if no output has been written to the agent's PTY
 // for at least the given duration. An agent with no output yet (just spawned)
 // is not considered idle.
+//
+// Caveat (mg-feb3): idleness is purely "time since last PTY write", so a
+// CPU-starved harness that has stalled without emitting output reads as idle
+// even though its interactive input loop is not yet listening. WaitForReady
+// pairs this with the prompt-ready sentinel to resist that false-idle at the
+// initial-nudge gate, but under a concurrent spawn wave the gate can still
+// misfire and swallow the kickoff. The post-spawn auto-renudge watcher
+// (verifyStartAndRenudge) is the failure-mode-agnostic backstop: it gates on the
+// HARD started-signal (the work item leaving available/), never on quiescence,
+// precisely because a quiescence re-check would reproduce this same false-idle.
 func (a *Agent) IsIdle(quiescence time.Duration) bool {
 	lastWrite := a.outputBuf.LastWriteTime()
 	if lastWrite.IsZero() {

@@ -357,6 +357,18 @@ type Registry struct {
 	// polling (mg-e633). pogod wires it to its scheduler; nil (bare registry,
 	// scheduler disabled) makes spawn skip registration.
 	mailCheckRegistrar MailCheckRegistrar
+
+	// startVerifier, when set, reports whether a freshly spawned polecat has
+	// actually begun its work (claimed its mg work item) — the HARD
+	// started-signal the post-spawn auto-renudge watcher gates on (mg-feb3).
+	// pogod wires it to a macguffin-backed query; nil (bare registry, unit
+	// tests) disables auto-renudge, so the initial nudge stands on its own.
+	startVerifier StartVerifier
+	// startVerifyDelay / startVerifyMaxAttempts override the auto-renudge
+	// timing. Zero means use the package defaults; only tests set these so they
+	// don't have to wait the real 25s window. Immutable once agents spawn.
+	startVerifyDelay       time.Duration
+	startVerifyMaxAttempts int
 }
 
 // SetStallScheduleProvider installs the cron-schedule lookup used by diagnose to
@@ -803,6 +815,12 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 			if err := a.NudgeWithMode(req.InitialNudge, NudgeWaitReady, a.nudge.InitialNudgeTimeout); err != nil {
 				log.Printf("agent %s: initial nudge failed: %v", req.Name, err)
 			}
+			// Productize the mayor's manual nudge-1 into a daemon guarantee:
+			// verify the agent actually claimed its work item and, if the kickoff
+			// nudge never took (concurrent-spawn init-stall — mg-feb3), re-deliver
+			// a bare submit terminator. No-op when no start verifier is wired
+			// (bare registry) or the agent carries no work item id.
+			r.verifyStartAndRenudge(a)
 		}()
 	}
 

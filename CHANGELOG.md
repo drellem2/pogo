@@ -10,6 +10,27 @@ is the curated, human-readable summary kept in sync at each release cut.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Concurrent-spawn init-stall self-heal (mg-feb3, gh drellem2/macguffin#24).**
+  pogod now verifies that a freshly spawned polecat actually started — claimed
+  its mg work item — and, if a concurrent spawn wave swallowed the initial
+  kickoff nudge, re-delivers a bare submit terminator (CR) to flush the
+  paste-buffered kickoff, retrying a bounded number of times. Under a spawn wave
+  a CPU-starved harness emits no PTY writes, so the initial-nudge idle gate
+  misreads starvation-silence as input-loop-ready and delivers the kickoff before
+  Claude Code is listening; it piles in the kernel input buffer and Ink absorbs
+  it as one paste block whose CR never re-tokenizes as a submit — the agent is
+  alive but never claims its item (mg-ce61). The recovery gates on the **HARD
+  started-signal** (the item leaving `available/`), never on output quiescence
+  (which would reproduce the same false-idle), and prefers a bare CR so a working
+  agent is not corrupted by a stray character. This productizes the mayor's
+  manual `nudge "1"` workaround into a daemon guarantee and is
+  failure-mode-agnostic (false-idle gate, stale sentinel, or paste pileup). Emits
+  an `auto_renudge` event per recovery keystroke. The mayor's MAX-2 concurrent-
+  spawn cap + unstarted-check is intentionally retained pending real-spawn-wave
+  verification.
+
 ## [0.5.0] - 2026-07-10
 
 ### Added
