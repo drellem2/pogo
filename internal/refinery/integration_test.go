@@ -250,6 +250,127 @@ func TestResubmitAlreadyMergedBranch(t *testing.T) {
 	}
 }
 
+// TestFailedTargetPushDoesNotPoisonReusedClone reproduces the persistent-clone
+// reuse bug from gh #80 / mg-f1db. ensureWorktree keeps ONE clone per repo. If
+// a cycle's local ff-merge to the target lands but the subsequent
+// `git push origin <target>` fails (protected branch, transient remote error),
+// the clone's local target is left AHEAD of origin and never rolled back. Under
+// the old code the NEXT MR reusing that clone did `checkout <target>` +
+// `pull --ff-only`, which aborts "Not possible to fast-forward" and was returned
+// non-retryable — wedging every later MR through that clone.
+//
+// The fix hard-resets the target to origin/<target> at the start of the merge
+// phase, so a poisoned/ahead target self-heals. This test drives the real path:
+// a pre-receive hook on origin rejects the first MR's push to main (after its
+// local merge already landed), leaving the reused clone poisoned; the hook is
+// then removed and a second MR must merge cleanly through the same clone.
+func TestFailedTargetPushDoesNotPoisonReusedClone(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found")
+	}
+
+	// === origin bare repo + working clone with a passing gate on main ===
+	originDir := t.TempDir()
+	run(t, originDir, "git", "init", "--bare", "-b", "main")
+
+	workDir := t.TempDir()
+	run(t, workDir, "git", "clone", originDir, ".")
+	run(t, workDir, "git", "config", "user.email", "test@test.com")
+	run(t, workDir, "git", "config", "user.name", "Test")
+	os.WriteFile(filepath.Join(workDir, "build.sh"), []byte("#!/bin/sh\nexit 0\n"), 0755)
+	os.WriteFile(filepath.Join(workDir, "main.go"), []byte("package main\nfunc main() {}\n"), 0644)
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", "initial commit with build gate")
+	run(t, workDir, "git", "push", "origin", "main")
+
+	// feature-1 forks main — this MR's push will be rejected below.
+	run(t, workDir, "git", "checkout", "-b", "feature-1")
+	os.WriteFile(filepath.Join(workDir, "feature1.txt"), []byte("feature 1"), 0644)
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", "feat: feature 1")
+	run(t, workDir, "git", "push", "origin", "feature-1")
+
+	// feature-2 forks main independently — the second MR, which must recover.
+	run(t, workDir, "git", "checkout", "main")
+	run(t, workDir, "git", "checkout", "-b", "feature-2")
+	os.WriteFile(filepath.Join(workDir, "feature2.txt"), []byte("feature 2"), 0644)
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", "feat: feature 2")
+	run(t, workDir, "git", "push", "origin", "feature-2")
+
+	wtDir := t.TempDir()
+	r, err := New(Config{
+		Enabled:      true,
+		PollInterval: time.Hour,
+		WorktreeDir:  wtDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Install a pre-receive hook on origin that rejects every push. The
+	// refinery's local ff-merge of feature-1 still succeeds, so the reused
+	// clone is left with local main ahead of origin — the poison state.
+	hookPath := filepath.Join(originDir, "hooks", "pre-receive")
+	if err := os.WriteFile(hookPath, []byte("#!/bin/sh\necho 'remote: rejected by protected-branch policy' >&2\nexit 1\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	id1, err := r.Submit(MergeRequest{
+		RepoPath:  originDir,
+		Branch:    "feature-1",
+		TargetRef: "main",
+		Author:    "cat-1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.processNext()
+	if mr1 := r.Get(id1); mr1 == nil || mr1.Status != StatusFailed {
+		t.Fatalf("MR #1 should fail (push rejected by hook), got %+v", mr1)
+	}
+
+	// Remove the hook: pushes to main now succeed. The clone is still poisoned
+	// (local main ahead of origin from feature-1's un-pushed local merge).
+	if err := os.Remove(hookPath); err != nil {
+		t.Fatal(err)
+	}
+
+	// MR #2 reuses the SAME persistent clone. Without the target reset it fails
+	// with "Not possible to fast-forward"; with it, the clone realigns to
+	// origin/main and feature-2 lands.
+	id2, err := r.Submit(MergeRequest{
+		RepoPath:  originDir,
+		Branch:    "feature-2",
+		TargetRef: "main",
+		Author:    "cat-2",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.processNext()
+	mr2 := r.Get(id2)
+	if mr2 == nil || mr2.Status != StatusMerged {
+		t.Fatalf("MR #2 should merge through the reused clone, got %+v (error: %s)", mr2, func() string {
+			if mr2 != nil {
+				return mr2.Error
+			}
+			return "<nil>"
+		}())
+	}
+
+	// origin/main must carry feature-2 but NOT feature-1: feature-1's poisoned
+	// local merge was discarded by the target reset and was never pushed.
+	verifyDir := t.TempDir()
+	run(t, verifyDir, "git", "clone", originDir, ".")
+	if _, err := os.Stat(filepath.Join(verifyDir, "feature2.txt")); os.IsNotExist(err) {
+		t.Error("feature2.txt not found on main after MR #2 merged")
+	}
+	if _, err := os.Stat(filepath.Join(verifyDir, "feature1.txt")); !os.IsNotExist(err) {
+		t.Error("feature1.txt should NOT be on main — MR #1's push was rejected and its local merge must be discarded by the reset")
+	}
+}
+
 // gitOutput runs a git command in dir and returns its trimmed stdout.
 func gitOutput(t *testing.T, dir string, args ...string) string {
 	t.Helper()

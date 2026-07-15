@@ -193,16 +193,32 @@ func (r *Refinery) attemptMerge(wtDir string, mr *MergeRequest, attempt int, ski
 		r.pushBackForPR(wtDir, mr, attempt)
 	}
 
-	// Checkout target ref for merge
-	log.Printf("refinery: MR %s step=checkout-target target=%s attempt=%d", mr.ID, mr.TargetRef, attempt)
-	if out, gerr := gitCmdOutput(wtDir, "checkout", mr.TargetRef); gerr != nil {
-		return gateOutput, "rebase", "", fmt.Errorf("checkout target: %s: %w", out, gerr)
+	// Check out the target and hard-reset it to origin, discarding any local
+	// state on the target left by a prior attempt or a prior MR that reused
+	// this persistent clone (ensureWorktree keeps one clone per repo).
+	//
+	// The old path — plain `git checkout <target>` + `git pull --ff-only` —
+	// cannot recover a clone whose local target is AHEAD of origin. That
+	// happens when an earlier cycle's local ff-merge (below) succeeded but the
+	// subsequent `git push origin <target>` FAILED (protected branch, transient
+	// network/remote error): the local target is left ahead and never rolled
+	// back. The next `pull --ff-only` then aborts non-fatally with "fatal: Not
+	// possible to fast-forward", which is both misleading (the real cause is the
+	// earlier failed push, not the branch under merge) and was returned
+	// non-retryable — wedging this MR and every later MR reusing the clone.
+	//
+	// Fetch fresh (origin may have advanced during the gate phase) and realign
+	// the target to origin/<target> the same way the source branch is reset at
+	// the top of this attempt (checkout -B origin/<branch>, above). `-B` forces
+	// the local target ref to the fetched origin tip regardless of prior local
+	// state, so a poisoned/ahead target self-heals instead of aborting. (mg-f1db)
+	log.Printf("refinery: MR %s step=fetch-target target=%s attempt=%d", mr.ID, mr.TargetRef, attempt)
+	if out, gerr := gitCmdOutput(wtDir, "fetch", "origin", mr.TargetRef); gerr != nil {
+		return gateOutput, "fetch", "", &retryableError{fmt.Errorf("fetch target %s: %s: %w", mr.TargetRef, out, gerr)}
 	}
-
-	// Pull latest target
-	log.Printf("refinery: MR %s step=pull-target target=%s attempt=%d", mr.ID, mr.TargetRef, attempt)
-	if out, gerr := gitCmdOutput(wtDir, "pull", "--ff-only", "origin", mr.TargetRef); gerr != nil {
-		return gateOutput, "fetch", "", fmt.Errorf("pull target: %s: %w", out, gerr)
+	log.Printf("refinery: MR %s step=reset-target target=%s attempt=%d", mr.ID, mr.TargetRef, attempt)
+	if out, gerr := gitCmdOutput(wtDir, "checkout", "-B", mr.TargetRef, "origin/"+mr.TargetRef); gerr != nil {
+		return gateOutput, "fetch", "", &retryableError{fmt.Errorf("reset target %s to origin: %s: %w", mr.TargetRef, out, gerr)}
 	}
 
 	// Fast-forward merge — guaranteed to work if target hasn't moved since fetch
