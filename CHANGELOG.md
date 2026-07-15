@@ -10,6 +10,22 @@ is the curated, human-readable summary kept in sync at each release cut.
 
 ## [Unreleased]
 
+### Added
+
+- **`pogo refinery submit --defer-done` + bounded backstop (gh drellem2/pogo#81).**
+  By default, the instant a polecat's branch merges pogod records the work item
+  done and stops the polecat (the gh #35 event-driven stop). For a `--branch`
+  (PR-flow) polecat that still has post-merge work — open the PR, run verify
+  checks, mail the PR URL — that stop lands mid-flow and the PR is never opened.
+  `--defer-done` makes the polecat **own its own lifecycle**: pogod skips the
+  auto-done/auto-stop at merge, and the polecat calls `mg done` itself once its
+  full flow finishes. To keep the swap from trading a silent KILL for a silent
+  LINGER (which would regress the gh #34/#35 slot-protection guarantees), a
+  **bounded backstop** arms when a deferred polecat merges — if it never ends its
+  lifecycle within the window (15m), pogod reaps the lingering process and
+  escalates to the mayor. A clean exit disarms the backstop via pogod's OnExit
+  hook. Default (non-defer) submits are unchanged.
+
 ### Fixed
 
 - **Concurrent-spawn init-stall self-heal (mg-feb3, gh drellem2/macguffin#24).**

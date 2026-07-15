@@ -15,6 +15,12 @@ type SubmitRequest struct {
 	// AutoCreateTargetRef opts into branching the target ref off the repo's
 	// default branch when it does not exist on origin. Default false.
 	AutoCreateTargetRef bool `json:"auto_create_target_ref,omitempty"`
+	// DeferDone opts the submitter into owning its own post-merge lifecycle:
+	// pogod skips the auto-done + auto-stop it normally applies at merge time
+	// so a --branch (PR-flow) polecat can finish its post-merge work (open the
+	// PR, verify, mail) and call `mg done` itself (gh drellem2/pogo #81).
+	// Default false.
+	DeferDone bool `json:"defer_done,omitempty"`
 }
 
 // RegisterHandlers registers refinery API endpoints on the given mux,
@@ -108,6 +114,7 @@ func (r *Refinery) handleSubmit(w http.ResponseWriter, req *http.Request) {
 		TargetRef:           submitReq.TargetRef,
 		Author:              submitReq.Author,
 		AutoCreateTargetRef: submitReq.AutoCreateTargetRef,
+		DeferDone:           submitReq.DeferDone,
 	}
 
 	id, err := r.Submit(mr)

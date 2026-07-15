@@ -882,7 +882,29 @@ Flags:
 	// type-based defaults: crew=true, polecat=false). This preserves the
 	// historical behavior — crew agents are still restarted, polecats are
 	// still cleaned up — while letting users opt out per-agent.
+	// Bounded backstop for --defer-done polecats (gh #81): when such a polecat
+	// merges, OnMerged skips the auto-done/auto-stop and arms this instead, so
+	// the polecat can finish its own post-merge flow. If it never ends its
+	// lifecycle, the backstop reaps + escalates it — the OnExit hook below
+	// disarms it on a clean exit. Escalation mails the mayor.
+	deferBackstop := newDeferredBackstop(deferDoneBackstopTimeout, agentRegistry, func(mr *refinery.MergeRequest) {
+		subject := fmt.Sprintf("DEFER-DONE BACKSTOP FIRED: polecat %s lingered post-merge", mr.Author)
+		body := fmt.Sprintf("A --defer-done polecat merged but did not complete its lifecycle within %s.\n"+
+			"pogod reaped the lingering process to free its slot (gh #34/#35).\n\n"+
+			"Work item: %s\nBranch: %s\nMR: %s\n\n"+
+			"The polecat never called `mg done` — verify the work item state and re-dispatch if its post-merge flow (PR creation, verify, mail) did not finish.",
+			deferDoneBackstopTimeout, mr.Author, mr.Branch, mr.ID)
+		if err := client.SendMGMail(coordinator, "refinery", subject, body); err != nil {
+			log.Printf("refinery: failed to mail coordinator defer-done backstop escalation: %v", err)
+		}
+	})
+
 	agentRegistry.SetOnExit(func(a *agent.Agent, err error) {
+		// Disarm any defer-done backstop for this polecat: its process has
+		// ended, so the slot is free and there is nothing left to reap (gh #81).
+		// A no-op for the vast majority of agents, which are not --defer-done.
+		deferBackstop.cancel(a.Name)
+
 		if a.ShouldRespawn() {
 			// Restart-on-crash agents: respawn after a short backoff so a
 			// fast crash loop doesn't peg the daemon. The agent stays in
@@ -1108,7 +1130,7 @@ Flags:
 				// for the mayor's next coordination cycle. Run async — the
 				// stop can block up to its SIGTERM timeout and this
 				// callback fires on the refinery loop.
-				go reapMergedPolecat(agentRegistry, mr, client.CompleteMGWorkItem)
+				go reapMergedPolecat(agentRegistry, mr, client.CompleteMGWorkItem, deferBackstop)
 
 				// Mail the coordinator so it can archive the work item and
 				// handle QA. The mayor's reap loop stays as a backstop for

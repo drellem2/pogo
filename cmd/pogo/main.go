@@ -2261,6 +2261,7 @@ the actual restart. The recovery agent rate-limits to one kickstart per
 	var submitTarget string
 	var submitAuthor string
 	var submitAutoCreateTarget bool
+	var submitDeferDone bool
 	var cmdRefinerySubmit = &cobra.Command{
 		Use:   "submit <branch>",
 		Short: "Submit a branch to the merge queue",
@@ -2273,6 +2274,14 @@ By default the refinery rejects MRs whose --target ref does not exist on
 origin (catches typos like "fam-45" instead of "feat-45"). Pass
 --auto-create-target to opt into having the refinery create the target ref
 from the repo's default branch when it is missing.
+
+By default, the moment a polecat's branch merges pogod records the work item
+done and stops the polecat. A --branch (PR-flow) polecat that still has
+post-merge work — opening the PR, running verify checks, mailing the PR URL —
+gets killed mid-flow. Pass --defer-done to make the polecat own its own
+lifecycle: pogod skips the auto-done/auto-stop, and the polecat calls
+'mg done' itself once its full flow finishes. A bounded backstop still reaps
+and escalates a deferred polecat that never completes.
 
 Example:
   pogo refinery submit polecat-a3f --repo=/path/to/repo`,
@@ -2288,6 +2297,7 @@ Example:
 				TargetRef:           submitTarget,
 				Author:              submitAuthor,
 				AutoCreateTargetRef: submitAutoCreateTarget,
+				DeferDone:           submitDeferDone,
 			})
 			if err != nil {
 				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
@@ -2303,6 +2313,7 @@ Example:
 	cmdRefinerySubmit.Flags().StringVar(&submitTarget, "target", "main", "Target ref to merge into")
 	cmdRefinerySubmit.Flags().StringVar(&submitAuthor, "author", "", "Author agent name")
 	cmdRefinerySubmit.Flags().BoolVar(&submitAutoCreateTarget, "auto-create-target", false, "Create the target ref from the repo's default branch if it doesn't exist (off by default; safer to fail loudly on typos)")
+	cmdRefinerySubmit.Flags().BoolVar(&submitDeferDone, "defer-done", false, "Skip pogod's auto-done/auto-stop at merge so the polecat owns its post-merge lifecycle and calls 'mg done' itself (a bounded backstop reaps a deferred polecat that never completes)")
 
 	var cmdRefineryStatus = &cobra.Command{
 		Use:   "status",
