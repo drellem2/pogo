@@ -51,6 +51,29 @@ classify a b c
 # main unknown -> cannot classify (non-zero)
 if classify aaa aaa "" ; then fail "empty main should fail classify"; else pass "empty main fails classify"; fi
 
+# --- classify_drain_precondition: the mg-065e bootstrap disambiguation ---
+# 2xx -> proceed with drain
+[ "$(classify_drain_precondition 200)" = "drain" ] \
+    && pass "drain-precond: 200 -> drain" || fail "drain-precond 200 ($(classify_drain_precondition 200))"
+[ "$(classify_drain_precondition 204)" = "drain" ] \
+    && pass "drain-precond: 204 -> drain" || fail "drain-precond 204"
+# 404 -> bootstrap (server up, endpoint predates mg-cae1) — NOT "pogod down"
+[ "$(classify_drain_precondition 404)" = "bootstrap" ] \
+    && pass "drain-precond: 404 -> bootstrap" || fail "drain-precond 404 ($(classify_drain_precondition 404))"
+# 000 / empty -> pogod genuinely unreachable (connection refused / timeout)
+[ "$(classify_drain_precondition 000)" = "down" ] \
+    && pass "drain-precond: 000 -> down" || fail "drain-precond 000"
+[ "$(classify_drain_precondition "")" = "down" ] \
+    && pass "drain-precond: empty -> down" || fail "drain-precond empty"
+# any other status -> error:<code>, refuse rather than guess
+[ "$(classify_drain_precondition 500)" = "error:500" ] \
+    && pass "drain-precond: 500 -> error:500" || fail "drain-precond 500 ($(classify_drain_precondition 500))"
+[ "$(classify_drain_precondition 401)" = "error:401" ] \
+    && pass "drain-precond: 401 -> error:401" || fail "drain-precond 401"
+
+# --skip-drain flag defaults false and is settable (bootstrap remedy)
+[ "$SKIP_DRAIN" = false ] && pass "skip-drain defaults false" || fail "skip-drain default"
+
 echo ""
 PASS_COUNT=$(grep -c '^PASS:' "$RESULTS_FILE" 2>/dev/null || true)
 FAIL_COUNT=$(grep -c '^FAIL:' "$RESULTS_FILE" 2>/dev/null || true)

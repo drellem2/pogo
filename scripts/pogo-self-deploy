@@ -26,6 +26,11 @@
 #                         after the drain timeout (kills them, then cleans up
 #                         their claims + worktrees). Default REFUSES — the
 #                         fleet-kill footgun must be explicit (mg-6afa MVP).
+#   --skip-drain          skip the drain phase entirely and go straight to
+#                         rebuild+restart. Required to self-deploy ONTO a pogod
+#                         that predates the /agents/drain endpoint (mg-cae1) —
+#                         the one-time bootstrap chicken-and-egg (mg-065e). Also
+#                         usable when the operator knows the fleet is idle.
 #   --drain-timeout SECS  how long to wait for polecats to finish (default 1800)
 #   --repo PATH           pogo source repo to build from (see repo resolution)
 #   --port N              pogod HTTP port (default $POGO_PORT or 10000)
@@ -45,6 +50,7 @@ LAUNCHCTL="${LAUNCHCTL:-launchctl}"
 DRAIN_TIMEOUT=1800
 FORCE=false
 ASSUME_YES=false
+SKIP_DRAIN=false
 REPO="${POGO_REPO:-}"
 
 ts()   { date -u +%Y-%m-%dT%H:%M:%SZ; }
@@ -175,6 +181,34 @@ confirm() {
     case "$ans" in y|Y|yes|YES) return 0 ;; *) log "aborted by user"; exit 0 ;; esac
 }
 
+# POST a drain state ({"draining":<bool>}) and echo the HTTP status code so the
+# caller can tell an ANSWERED-but-missing endpoint (404, bootstrap) apart from a
+# genuinely-unreachable pogod. curl (no -f) writes "000" for connection
+# refused / DNS / timeout, so a numeric-but-non-2xx code always means the server
+# answered. Kept curl-only on purpose — no jq, no extra hop (see file header).
+drain_post() {
+    local state="$1"
+    curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
+        -X POST "$(base_url)/agents/drain" \
+        -H 'Content-Type: application/json' -d "{\"draining\":${state}}" 2>/dev/null
+}
+
+# Pure decision function (unit-tested): map the POST /agents/drain HTTP status
+# to a drain-phase disposition. Echoes exactly one word:
+#   drain      — 2xx: endpoint present, proceed to drain_wait
+#   bootstrap  — 404: server answers but predates the drain endpoint (mg-cae1);
+#                the one-time self-deploy chicken-and-egg (mg-065e)
+#   down       — 000/empty: pogod not answering (connection refused / timeout)
+#   error:<c>  — any other status; refuse rather than guess
+classify_drain_precondition() {
+    case "$1" in
+        2??)     echo "drain" ;;
+        404)     echo "bootstrap" ;;
+        000|"")  echo "down" ;;
+        *)       echo "error:$1" ;;
+    esac
+}
+
 # Poll the drain readout down to zero polecats, or time out. Echoes the final
 # polecat count on stdout; returns 0 if it reached zero, 1 on timeout.
 drain_wait() {
@@ -275,29 +309,55 @@ cmd_redeploy() {
     confirm
 
     # 1. Signal drain (stop dispatching new polecats) and let the fleet quiesce.
-    log "enabling drain mode"
-    curl -sf --max-time 5 -X POST "$(base_url)/agents/drain" \
-        -H 'Content-Type: application/json' -d '{"draining":true}' >/dev/null \
-        || { err "failed to enable drain mode (is pogod up?)"; exit 6; }
-
+    #    Disambiguate three POST /agents/drain outcomes (mg-065e): endpoint
+    #    present (drain), endpoint absent but server up (bootstrap — a pogod
+    #    predating mg-cae1), and pogod genuinely down. Each has a DIFFERENT
+    #    remedy, so they must not collapse into one "is pogod up?" message.
     local snapshot leftover=0
-    if drain_wait >/dev/null; then
-        log "drain complete — 0 polecats active"
+    if $SKIP_DRAIN; then
+        # Operator-directed skip (or the bootstrap remedy). No drain, no fleet
+        # quiesce, no snapshot — the kickstart -k below will bounce whatever is
+        # running. Explicit acknowledgement of the un-drained bounce.
+        log "--skip-drain: skipping drain phase (no fleet quiesce, no orphan cleanup)"
     else
-        leftover="$(curl -sf --max-time 5 "$(base_url)/agents/drain" 2>/dev/null | json_num count)"
-        leftover="${leftover:-?}"
-        if ! $FORCE; then
-            err "$leftover polecat(s) still active after ${DRAIN_TIMEOUT}s drain timeout"
-            err "refusing to hard-bounce the fleet without --force; restoring dispatch"
-            curl -sf --max-time 5 -X POST "$(base_url)/agents/drain" \
-                -H 'Content-Type: application/json' -d '{"draining":false}' >/dev/null || true
-            exit 7
-        fi
-        log "--force: hard-bouncing with $leftover polecat(s) active; will clean up after"
+        log "enabling drain mode"
+        local disp; disp="$(classify_drain_precondition "$(drain_post true)")"
+        case "$disp" in
+            drain)
+                if drain_wait >/dev/null; then
+                    log "drain complete — 0 polecats active"
+                else
+                    leftover="$(curl -sf --max-time 5 "$(base_url)/agents/drain" 2>/dev/null | json_num count)"
+                    leftover="${leftover:-?}"
+                    if ! $FORCE; then
+                        err "$leftover polecat(s) still active after ${DRAIN_TIMEOUT}s drain timeout"
+                        err "refusing to hard-bounce the fleet without --force; restoring dispatch"
+                        drain_post false >/dev/null || true
+                        exit 7
+                    fi
+                    log "--force: hard-bouncing with $leftover polecat(s) active; will clean up after"
+                fi
+                # Capture the pre-kickstart polecat snapshot for post-bounce cleanup.
+                snapshot="$(curl -sf --max-time 5 "$(base_url)/agents/drain" 2>/dev/null)"
+                ;;
+            bootstrap)
+                err "bootstrap: this pogod predates the /agents/drain endpoint (HTTP 404 from mg-cae1's feature)"
+                err "the pogod you are replacing does not yet have the drain feature you are deploying —"
+                err "the one-time self-deploy chicken-and-egg. Nothing to drain via the API."
+                err "re-run with --skip-drain to rebuild+restart without draining (safe when the fleet is idle)."
+                exit 6
+                ;;
+            down)
+                err "pogod is not answering POST $(base_url)/agents/drain (connection refused / timeout)"
+                err "this is NOT the bootstrap case — the server did not respond at all. Start pogod, then retry."
+                exit 6
+                ;;
+            error:*)
+                err "unexpected HTTP ${disp#error:} from POST /agents/drain; refusing to proceed"
+                exit 6
+                ;;
+        esac
     fi
-
-    # Capture the pre-kickstart polecat snapshot for post-bounce cleanup.
-    snapshot="$(curl -sf --max-time 5 "$(base_url)/agents/drain" 2>/dev/null)"
 
     # 2. Build (only if a build is owed — a restart-only drift skips go install
     #    so we do not pay a rebuild we do not need).
@@ -334,6 +394,7 @@ main() {
         case "$1" in
             --yes)            ASSUME_YES=true ;;
             --force)          FORCE=true ;;
+            --skip-drain)     SKIP_DRAIN=true ;;
             --drain-timeout)  DRAIN_TIMEOUT="$2"; shift ;;
             --repo)           REPO="$2"; shift ;;
             --port)           PORT="$2"; shift ;;
