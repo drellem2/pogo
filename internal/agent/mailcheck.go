@@ -52,6 +52,30 @@ type MailCheckRegistrar interface {
 	RegisterMailCheck(agentName, workItemID, cron, message string) error
 }
 
+// ScheduleRegisterFailureReporter emits structured schedule_register_failed
+// telemetry when a polecat's mail-check loop could not be registered. It is
+// deliberately SEPARATE from MailCheckRegistrar for one reason: the registrar
+// can itself be nil — pogod installs it only after its scheduler loads, so a
+// scheduler that fails to load at startup leaves every polecat spawn on the
+// nil-registrar path (mailcheck.go's `reg == nil`). That drop — a live polecat
+// with no reachability channel — is exactly the case that most needs a LOUD,
+// structured signal, yet the registrar that would carry it is absent. Wiring
+// the reporter independently of the registrar is what lets the failure still be
+// recorded when the registrar is gone.
+//
+// Event-ONLY: a nil registrar at startup is benign (bare registry in tests, or
+// a daemon with the scheduler disabled), so it must NOT escalate to a mayor
+// nudge — that noise is reserved for the persistent post-retry Add-failure
+// path, which the registrar adapter owns (mg-6fe0).
+type ScheduleRegisterFailureReporter interface {
+	// ReportScheduleRegisterFailed records that a polecat's mail-check schedule
+	// could not be registered. mailbox is the schedule-id key (the work item id,
+	// or the agent name when the spawn carried none); reason is a short,
+	// machine-stable cause so a reader can tell the two live suspects apart (a
+	// benign startup nil registrar vs. a transient persist-IO failure).
+	ReportScheduleRegisterFailed(agentName, mailbox, reason string)
+}
+
 // SetMailCheckRegistrar installs the scheduler adapter used by spawn-polecat to
 // auto-register a polecat's mail-check loop. Call once at startup before any
 // polecat is spawned. A nil registrar disables auto-registration.
@@ -67,21 +91,61 @@ func (r *Registry) getMailCheckRegistrar() MailCheckRegistrar {
 	return r.mailCheckRegistrar
 }
 
-// registerPolecatMailCheck best-effort registers the mail-check loop for a
-// freshly spawned polecat. workItemID falls back to the agent name when the
-// spawn carried no work item id, so every polecat gets a specific,
-// reap-matchable schedule id. Failure is logged, never fatal: the polecat is
-// already running and a missing mail-check only degrades proactive reachability.
-func (r *Registry) registerPolecatMailCheck(agentName, workItemID string) {
-	reg := r.getMailCheckRegistrar()
-	if reg == nil {
+// SetScheduleRegisterFailureReporter installs the reporter used to emit
+// schedule_register_failed telemetry. Call once at startup — critically, wire it
+// EVEN WHEN the scheduler (and therefore the mail-check registrar) fails to
+// load, so the startup nil-registrar drop still produces a structured signal.
+// A nil reporter falls back to a plain log line (see reportScheduleRegisterFailed).
+func (r *Registry) SetScheduleRegisterFailureReporter(rep ScheduleRegisterFailureReporter) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.scheduleRegisterFailureReporter = rep
+}
+
+func (r *Registry) reportScheduleRegisterFailed(agentName, mailbox, reason string) {
+	r.mu.RLock()
+	rep := r.scheduleRegisterFailureReporter
+	r.mu.RUnlock()
+	if rep == nil {
+		// No reporter wired (a unit test, or pogod could not even resolve the
+		// scheduler root): fall back to a log line so the drop is never fully
+		// silent — the whole point of mg-6fe0 is that this stops being invisible.
+		log.Printf("polecat %s: mail-check schedule registration failed (%s); no failure reporter wired", agentName, reason)
 		return
 	}
+	rep.ReportScheduleRegisterFailed(agentName, mailbox, reason)
+}
+
+// registerPolecatMailCheck registers the mail-check loop for a freshly spawned
+// polecat. workItemID falls back to the agent name when the spawn carried no
+// work item id, so every polecat gets a specific, reap-matchable schedule id.
+//
+// Registration stays NON-fatal to the spawn (the polecat is already running),
+// but it is no longer best-effort-and-silent: a mail-check loop is a polecat's
+// PRIMARY reachability channel — the modify<->review loop is driven by it — so a
+// drop is a reliability event, not a cosmetic one. Both failure paths are made
+// LOUD via schedule_register_failed telemetry (mg-6fe0):
+//
+//   - nil registrar: pogod's scheduler failed to load, so SetMailCheckRegistrar
+//     was never called. Event-only — this is a benign startup condition and the
+//     registrar is nil synchronously here, so there is nothing to retry and a
+//     mayor nudge would be pure noise.
+//   - RegisterMailCheck error: the adapter already ran verify-after-register +
+//     retry-once (recovering the transient persist-IO suspect) and escalated to
+//     the mayor before returning; a non-nil error here means the entry is
+//     genuinely absent after that. Record it so the telemetry is complete.
+func (r *Registry) registerPolecatMailCheck(agentName, workItemID string) {
 	mailbox := workItemID
 	if mailbox == "" {
 		mailbox = agentName
 	}
+	reg := r.getMailCheckRegistrar()
+	if reg == nil {
+		r.reportScheduleRegisterFailed(agentName, mailbox, "nil_registrar")
+		return
+	}
 	if err := reg.RegisterMailCheck(agentName, mailbox, PolecatMailCheckCron, PolecatMailCheckMessage(mailbox)); err != nil {
-		log.Printf("polecat %s: mail-check schedule registration failed: %v", agentName, err)
+		log.Printf("polecat %s: mail-check schedule registration failed after verify+retry: %v", agentName, err)
+		r.reportScheduleRegisterFailed(agentName, mailbox, "register_error: "+err.Error())
 	}
 }

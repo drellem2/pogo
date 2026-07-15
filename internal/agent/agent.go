@@ -358,6 +358,13 @@ type Registry struct {
 	// scheduler disabled) makes spawn skip registration.
 	mailCheckRegistrar MailCheckRegistrar
 
+	// scheduleRegisterFailureReporter, when set, emits schedule_register_failed
+	// telemetry when a polecat's mail-check loop could not be registered —
+	// including when mailCheckRegistrar itself is nil (scheduler failed to load
+	// at startup). Wired independently of the registrar so the nil-registrar
+	// drop is still made loud (mg-6fe0). nil falls back to a log line.
+	scheduleRegisterFailureReporter ScheduleRegisterFailureReporter
+
 	// startVerifier, when set, reports whether a freshly spawned polecat has
 	// actually begun its work (claimed its mg work item) — the HARD
 	// started-signal the post-spawn auto-renudge watcher gates on (mg-feb3).

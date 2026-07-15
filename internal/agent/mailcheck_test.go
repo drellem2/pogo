@@ -32,6 +32,30 @@ func (f *fakeMailCheckRegistrar) recorded() []mailCheckCall {
 	return append([]mailCheckCall(nil), f.calls...)
 }
 
+// fakeScheduleFailureReporter records ReportScheduleRegisterFailed calls so
+// tests can assert that a failed mail-check registration is made LOUD (mg-6fe0)
+// while the spawn itself stays non-fatal.
+type fakeScheduleFailureReporter struct {
+	mu    sync.Mutex
+	calls []scheduleFailure
+}
+
+type scheduleFailure struct {
+	agent, mailbox, reason string
+}
+
+func (f *fakeScheduleFailureReporter) ReportScheduleRegisterFailed(agentName, mailbox, reason string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, scheduleFailure{agentName, mailbox, reason})
+}
+
+func (f *fakeScheduleFailureReporter) recorded() []scheduleFailure {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]scheduleFailure(nil), f.calls...)
+}
+
 // TestSpawnPolecatRegistersMailCheck locks in the mg-e633 fix: spawning a
 // polecat auto-registers its mail-check loop, addressed to the polecat's bare
 // registry name (the identity pogod delivers nudges to and reaps under) with a
@@ -115,9 +139,10 @@ func TestSpawnPolecatMailCheckFallsBackToName(t *testing.T) {
 }
 
 // TestSpawnPolecatMailCheckFailureNonFatal verifies that a mail-check
-// registration error does not fail the spawn: the polecat is already running,
-// so a missing mail-check only degrades reachability, it must not kill the
-// worker.
+// registration error does not fail the spawn (the polecat is already running,
+// so a missing mail-check only degrades reachability) AND that it is no longer
+// silent: the failure is reported as schedule_register_failed telemetry —
+// louder, but still non-fatal (mg-6fe0).
 func TestSpawnPolecatMailCheckFailureNonFatal(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
@@ -132,6 +157,8 @@ func TestSpawnPolecatMailCheckFailureNonFatal(t *testing.T) {
 	reg.SetCommandConfig(catCommandConfig{})
 
 	reg.SetMailCheckRegistrar(&fakeMailCheckRegistrar{err: errRegistrarBoom})
+	reporter := &fakeScheduleFailureReporter{}
+	reg.SetScheduleRegisterFailureReporter(reporter)
 
 	// spawnPolecatViaAPI already asserts a 201; reaching here means the spawn
 	// succeeded despite the registrar error.
@@ -142,6 +169,69 @@ func TestSpawnPolecatMailCheckFailureNonFatal(t *testing.T) {
 	})
 	if a == nil {
 		t.Fatal("expected polecat to spawn despite mail-check registration failure")
+	}
+
+	// Louder: the registrar error must surface as a schedule_register_failed
+	// report keyed on the work item, carrying a register_error reason.
+	calls := reporter.recorded()
+	if len(calls) != 1 {
+		t.Fatalf("ReportScheduleRegisterFailed called %d times, want 1: %+v", len(calls), calls)
+	}
+	if calls[0].agent != "pc-err" {
+		t.Errorf("report agent = %q, want %q", calls[0].agent, "pc-err")
+	}
+	if calls[0].mailbox != "wi-err" {
+		t.Errorf("report mailbox = %q, want %q", calls[0].mailbox, "wi-err")
+	}
+	if !strings.HasPrefix(calls[0].reason, "register_error:") {
+		t.Errorf("report reason = %q, want a register_error: prefix", calls[0].reason)
+	}
+	if !strings.Contains(calls[0].reason, errRegistrarBoom.Error()) {
+		t.Errorf("report reason = %q, want it to carry the underlying error %q", calls[0].reason, errRegistrarBoom.Error())
+	}
+}
+
+// TestSpawnPolecatNilRegistrarReportsFailure locks in the load-bearing half of
+// mg-6fe0: when the mail-check registrar is nil (pogod's scheduler failed to
+// load at startup), spawn must not silently drop the mail-check loop — it emits
+// a schedule_register_failed report with reason "nil_registrar", event-only,
+// while the spawn stays non-fatal.
+func TestSpawnPolecatNilRegistrarReportsFailure(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	writeTemplate(t, "nilregpc", "# polecat\nbody {{.Id}}\n")
+
+	reg, err := NewRegistry(shortSocketDir(t))
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	defer reg.StopAll(2 * time.Second)
+	reg.SetCommandConfig(catCommandConfig{})
+
+	// No SetMailCheckRegistrar — the registrar is nil, mirroring a pogod whose
+	// scheduler failed to load. The reporter IS wired (it is set independently).
+	reporter := &fakeScheduleFailureReporter{}
+	reg.SetScheduleRegisterFailureReporter(reporter)
+
+	a := spawnPolecatViaAPI(t, reg, SpawnPolecatAPIRequest{
+		Name:     "pc-nilreg",
+		Template: "nilregpc",
+		Id:       "wi-nilreg",
+	})
+	if a == nil {
+		t.Fatal("expected polecat to spawn with a nil mail-check registrar")
+	}
+
+	calls := reporter.recorded()
+	if len(calls) != 1 {
+		t.Fatalf("ReportScheduleRegisterFailed called %d times, want 1: %+v", len(calls), calls)
+	}
+	if calls[0].reason != "nil_registrar" {
+		t.Errorf("report reason = %q, want %q", calls[0].reason, "nil_registrar")
+	}
+	if calls[0].agent != "pc-nilreg" || calls[0].mailbox != "wi-nilreg" {
+		t.Errorf("report = %+v, want agent=pc-nilreg mailbox=wi-nilreg", calls[0])
 	}
 }
 

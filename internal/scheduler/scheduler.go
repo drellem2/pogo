@@ -268,7 +268,7 @@ func New(path string, deliverer Deliverer) (*Scheduler, error) {
 	s := &Scheduler{
 		store:     st,
 		deliverer: deliverer,
-		logPath:   filepath.Join(filepath.Dir(path), "events.log"),
+		logPath:   EventLogPath(path),
 		entries:   make(map[entryKey]*Entry, len(loaded)),
 	}
 	for _, e := range loaded {
@@ -765,5 +765,43 @@ func (s *Scheduler) emitSchedulerRemovalEvent(reason string, e Entry, removedAt 
 		EventType: "schedule_removed",
 		Agent:     "pogod",
 		Details:   details,
+	})
+}
+
+// EventLogPath returns the own-root events.log path for a scheduler whose state
+// file lives at schedulesPath (events.log is its sibling under POGO_HOME). New
+// derives s.logPath from this, and it is exported so a caller that holds the
+// scheduler root but not a live *Scheduler — pogod when scheduler.New failed to
+// load — can still address the same own-root log. Keeping the derivation in one
+// place is what stops a library from writing to the operator's global
+// ~/.pogo/events.log merely because of the caller it was linked into (mg-e06d).
+func EventLogPath(schedulesPath string) string {
+	return filepath.Join(filepath.Dir(schedulesPath), "events.log")
+}
+
+// EmitScheduleRegisterFailedTo writes a schedule_register_failed event to
+// logPath (an own-root events.log, see EventLogPath). It records that a
+// per-agent schedule could not be registered — a load-bearing signal because a
+// polecat's mail-check loop is its PRIMARY reachability channel, so a silent
+// drop leaves a live worker unreachable with no telemetry (mg-6fe0). Written
+// here alongside emitSchedulerRemovalEvent so all scheduler observability shares
+// one own-root emit path.
+//
+// This is a package function taking logPath rather than a *Scheduler method on
+// purpose: the load-bearing case is the STARTUP nil-registrar (scheduler.New
+// failed, so there is no *Scheduler to hang a method on), yet the failure still
+// needs to be loud. The reason field is a short, machine-stable cause
+// ("nil_registrar", "register_error: ...") so a reader can tell the two live
+// suspects apart — a benign startup nil registrar vs. a transient persist-IO
+// failure that survived verify+retry.
+func EmitScheduleRegisterFailedTo(logPath, agent, scheduleID, reason string) {
+	events.EmitTo(context.Background(), logPath, events.Event{
+		EventType: "schedule_register_failed",
+		Agent:     "pogod",
+		Details: map[string]any{
+			"agent":       agent,
+			"schedule_id": scheduleID,
+			"reason":      reason,
+		},
 	})
 }
