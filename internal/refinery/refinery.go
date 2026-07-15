@@ -112,11 +112,21 @@ type MergeRequest struct {
 	// default — the safe behaviour (typo in target_ref → error) stays the
 	// default. Submitters that genuinely want a new feature branch carved
 	// off the default must set this explicitly.
-	AutoCreateTargetRef bool      `json:"auto_create_target_ref,omitempty"`
-	SubmitTime          time.Time `json:"submit_time"`
-	DoneTime            time.Time `json:"done_time,omitempty"`
-	Error               string    `json:"error,omitempty"`
-	GateOutput          string    `json:"gate_output,omitempty"`
+	AutoCreateTargetRef bool `json:"auto_create_target_ref,omitempty"`
+	// DeferDone opts the submitter into owning its own post-merge lifecycle
+	// (gh drellem2/pogo #81). When true, pogod's OnMerged reap path skips the
+	// auto-done + auto-stop it would otherwise apply the instant a polecat's
+	// branch merges — a --branch (PR-flow) polecat still has post-merge work to
+	// do (open the PR, run verify checks, mail the PR URL) and must not be
+	// killed mid-flow. The polecat calls `mg done` itself when its full flow
+	// finishes. A bounded backstop reaps + escalates a deferred polecat that
+	// never completes, so this does not regress the gh #34/#35 slot guarantees.
+	// Off by default — the auto-done/auto-stop path stays the default.
+	DeferDone  bool      `json:"defer_done,omitempty"`
+	SubmitTime time.Time `json:"submit_time"`
+	DoneTime   time.Time `json:"done_time,omitempty"`
+	Error      string    `json:"error,omitempty"`
+	GateOutput string    `json:"gate_output,omitempty"`
 	// AlreadyMerged marks an MR whose branch had already landed on the target
 	// before processing began (a re-submit of a merged branch, gh #34). The
 	// MR resolves as StatusMerged — so poll loops keying off status terminate

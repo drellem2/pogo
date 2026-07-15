@@ -1591,6 +1591,65 @@ func TestSubmitAutoCreateTargetRef(t *testing.T) {
 	})
 }
 
+// TestSubmitDeferDonePreserved covers gh drellem2/pogo #81: the DeferDone flag
+// set on a submitted MR must survive onto the queued MergeRequest (and its
+// persisted state) so pogod's OnMerged reap path can honour it at merge time.
+func TestSubmitDeferDonePreserved(t *testing.T) {
+	originDir := initBareOrigin(t, "main")
+	statePath := filepath.Join(t.TempDir(), "refinery.json")
+	r, err := New(Config{
+		Enabled:      true,
+		PollInterval: time.Hour,
+		WorktreeDir:  t.TempDir(),
+		StatePath:    statePath,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := r.Submit(MergeRequest{
+		RepoPath:  originDir,
+		Branch:    "feature-1",
+		TargetRef: "main",
+		Author:    "mg-1234",
+		DeferDone: true,
+	})
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	if got := r.Get(id); got == nil || !got.DeferDone {
+		t.Fatalf("expected queued MR to carry DeferDone=true, got %+v", got)
+	}
+
+	// Default (non-defer) submit must stay DeferDone=false.
+	id2, err := r.Submit(MergeRequest{
+		RepoPath:  originDir,
+		Branch:    "feature-2",
+		TargetRef: "main",
+		Author:    "mg-5678",
+	})
+	if err != nil {
+		t.Fatalf("submit default: %v", err)
+	}
+	if got := r.Get(id2); got == nil || got.DeferDone {
+		t.Fatalf("expected default MR to have DeferDone=false, got %+v", got)
+	}
+
+	// DeferDone must round-trip through the persisted state file: a fresh
+	// Refinery loaded from the same StatePath sees the flag on recovery.
+	r2, err := New(Config{
+		Enabled:      true,
+		PollInterval: time.Hour,
+		WorktreeDir:  t.TempDir(),
+		StatePath:    statePath,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := r2.Get(id); got == nil || !got.DeferDone {
+		t.Fatalf("expected DeferDone=true to survive state reload, got %+v", got)
+	}
+}
+
 func TestParseRefineryTomlPRMode(t *testing.T) {
 	dir := t.TempDir()
 
