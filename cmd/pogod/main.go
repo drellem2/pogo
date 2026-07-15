@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
@@ -204,6 +205,39 @@ func (p schedulerStallWindows) CronWindowsForAgent(agentIdentity string) []agent
 func healthHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Println("Visited /health")
 	fmt.Fprintf(w, "pogo is up and bouncing")
+}
+
+// versionInfo is the JSON body of GET /version. It reports the RUNNING
+// process's build identity — the axis bin/pogo-self-deploy needs for three-way
+// drift detection (running vs installed binary vs main HEAD) per mg-6afa. The
+// running revision must be self-reported: reading `go version -m ~/go/bin/pogod`
+// gives the INSTALLED binary's revision, which diverges from the running one
+// the instant `go install` rewrites that file underneath a live daemon.
+type versionInfo struct {
+	Revision  string `json:"revision"`   // vcs.revision embedded at build
+	Time      string `json:"time"`       // vcs.time
+	Modified  bool   `json:"modified"`   // vcs.modified (dirty tree at build)
+	GoVersion string `json:"go_version"` // toolchain that built it
+	StartTime string `json:"start_time"` // RFC3339 process start
+}
+
+func versionHandler(w http.ResponseWriter, r *http.Request) {
+	info := versionInfo{StartTime: startTime.Format(time.RFC3339)}
+	if bi, ok := debug.ReadBuildInfo(); ok {
+		info.GoVersion = bi.GoVersion
+		for _, s := range bi.Settings {
+			switch s.Key {
+			case "vcs.revision":
+				info.Revision = s.Value
+			case "vcs.time":
+				info.Time = s.Value
+			case "vcs.modified":
+				info.Modified = s.Value == "true"
+			}
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(info)
 }
 
 func healthFull(w http.ResponseWriter, r *http.Request) {
@@ -460,6 +494,7 @@ func registerHandlers() {
 	http.HandleFunc("/plugins", plugins)
 	http.HandleFunc("/health", healthHandler)
 	http.HandleFunc("/health/full", healthFull)
+	http.HandleFunc("/version", versionHandler)
 	http.HandleFunc("/status", status)
 	http.HandleFunc("/workitems", workitem.HandleWorkItems)
 

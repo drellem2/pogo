@@ -19,5 +19,8 @@ bash nvim/test_nvim.sh
 echo "Testing bash shell integration"
 bash shell/bashrc_test.sh
 
+echo "Testing pogo-self-deploy driver"
+bash scripts/pogo-self-deploy_test.sh
+
 echo "Testing build.sh"
 bash build_test.sh

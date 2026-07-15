@@ -83,6 +83,21 @@ type SpawnPolecatAPIRequest struct {
 	NoWorktree bool `json:"no_worktree,omitempty"`
 }
 
+// DrainAPIRequest is the JSON body for POST /agents/drain. Toggling drain mode
+// is how the out-of-band bin/pogo-self-deploy driver quiesces the fleet before
+// a pogod redeploy (mg-6afa / mg-cae1).
+type DrainAPIRequest struct {
+	Draining bool `json:"draining"`
+}
+
+// DrainStatus is the JSON body returned by GET/POST /agents/drain. The driver
+// polls Polecats down to empty while Draining is true, then rebuilds+restarts.
+type DrainStatus struct {
+	Draining bool          `json:"draining"`
+	Count    int           `json:"count"`
+	Polecats []PolecatInfo `json:"polecats"`
+}
+
 // NudgeAPIRequest is the JSON body for POST /agents/:name/nudge.
 type NudgeAPIRequest struct {
 	Message string `json:"message"`
@@ -332,6 +347,7 @@ func (r *Registry) RegisterHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/agents", r.handleAgents)
 	mux.HandleFunc("/agents/start", r.handleStart)
 	mux.HandleFunc("/agents/spawn-polecat", r.handleSpawnPolecat)
+	mux.HandleFunc("/agents/drain", r.handleDrain)
 	mux.HandleFunc("/agents/prompts", r.handlePrompts)
 	mux.HandleFunc("/agents/{name}", r.handleAgent)
 	mux.HandleFunc("/agents/{name}/park", r.handlePark)
@@ -825,6 +841,15 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		return
 	}
 
+	// Drain gate: while the self-deploy driver is quiescing the fleet for a
+	// redeploy, refuse new polecat dispatch so the live count can reach zero
+	// (mg-6afa mechanism 3). 503 is retryable — the caller (mayor) can redispatch
+	// once the redeploy lands and drain clears on the fresh daemon.
+	if r.Draining() {
+		http.Error(w, "pogod is draining for a redeploy; not dispatching new polecats", http.StatusServiceUnavailable)
+		return
+	}
+
 	var spawnReq SpawnPolecatAPIRequest
 	if err := json.NewDecoder(req.Body).Decode(&spawnReq); err != nil {
 		http.Error(w, fmt.Sprintf("bad request: %v", err), http.StatusBadRequest)
@@ -1123,6 +1148,37 @@ func resolvePolecatBaseRef(sourceRepo, branch string) string {
 		return "origin/main"
 	}
 	return ""
+}
+
+// handleDrain reports and toggles drain mode — the pogod half of the self-deploy
+// path (mg-6afa / mg-cae1). GET returns the current drain flag plus the live
+// polecat readout the driver polls to zero. POST {"draining":true|false} flips
+// the flag and returns the same snapshot. The driver (bin/pogo-self-deploy) is
+// the only expected caller; keeping the state here honors the ruling that only
+// pogod knows its children and controls dispatch.
+func (r *Registry) handleDrain(w http.ResponseWriter, req *http.Request) {
+	switch req.Method {
+	case "GET":
+		// read-only snapshot
+	case "POST":
+		var body DrainAPIRequest
+		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+			http.Error(w, fmt.Sprintf("bad request: %v", err), http.StatusBadRequest)
+			return
+		}
+		r.SetDraining(body.Draining)
+	default:
+		http.Error(w, "", http.StatusMethodNotAllowed)
+		return
+	}
+
+	polecats := r.Polecats()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(DrainStatus{
+		Draining: r.Draining(),
+		Count:    len(polecats),
+		Polecats: polecats,
+	})
 }
 
 func (r *Registry) handlePrompts(w http.ResponseWriter, req *http.Request) {

@@ -1,0 +1,358 @@
+#!/bin/bash
+# pogo-self-deploy — out-of-band pogod redeployer (mg-6afa / mg-cae1).
+#
+# WHY THIS IS A STANDALONE SCRIPT, NOT A pogod OR pogo SUBCOMMAND
+# ---------------------------------------------------------------
+# A thing that replaces or supervises X cannot live inside X — not inside X's
+# process tree, and not inside X's change-surface (architect ruling, mg-6afa).
+# pogod redeploys pogod; if the redeployer shipped *with* pogod (as a `pogod`
+# or `pogo` subcommand) it would churn on every pogod change and could ship
+# broken exactly when you need it to fix a broken pogod — a deploy path you
+# cannot fix without the deploy path. So this is a deliberately thin, rarely-
+# touched script that calls only STABLE primitives: curl, go install,
+# launchctl kickstart, git rev-parse, mg unclaim. Keep it dumb.
+#
+# It also must run OUT OF BAND — not as a descendant of pogod — because the
+# redeploy kickstart -k kills pogod's entire process tree. A human runs it
+# today; a healthy-launchd one-shot may run it later (mg-6afa sequencing).
+#
+# USAGE
+#   pogo-self-deploy check                 # three-way drift report; NEVER acts
+#   pogo-self-deploy redeploy [flags]      # guarded rebuild+restart
+#
+# redeploy flags:
+#   --yes                 proceed without the interactive confirmation prompt
+#   --force               permit a HARD BOUNCE while polecats are still active
+#                         after the drain timeout (kills them, then cleans up
+#                         their claims + worktrees). Default REFUSES — the
+#                         fleet-kill footgun must be explicit (mg-6afa MVP).
+#   --drain-timeout SECS  how long to wait for polecats to finish (default 1800)
+#   --repo PATH           pogo source repo to build from (see repo resolution)
+#   --port N              pogod HTTP port (default $POGO_PORT or 10000)
+#
+# ENV overrides: POGO_PORT, POGO_REPO, POGO_DAEMON_LABEL (default
+# com.pogo.daemon), POGO_DEPLOY_REF (default main), LAUNCHCTL, POGO_GOBIN.
+
+set -u
+
+# ---------------------------------------------------------------------------
+# Config / stable primitives
+# ---------------------------------------------------------------------------
+PORT="${POGO_PORT:-10000}"
+DAEMON_LABEL="${POGO_DAEMON_LABEL:-com.pogo.daemon}"
+DEPLOY_REF="${POGO_DEPLOY_REF:-main}"
+LAUNCHCTL="${LAUNCHCTL:-launchctl}"
+DRAIN_TIMEOUT=1800
+FORCE=false
+ASSUME_YES=false
+REPO="${POGO_REPO:-}"
+
+ts()   { date -u +%Y-%m-%dT%H:%M:%SZ; }
+log()  { echo "[$(ts)] $*"; }
+err()  { echo "[$(ts)] ERROR: $*" >&2; }
+short(){ printf '%s' "${1:0:12}"; }
+
+# Flat-JSON field extractors — the driver stays jq-free on purpose (one fewer
+# dependency in the path that must work when everything else is broken). Go's
+# json.Encoder emits single-line objects, so these single-line seds suffice.
+json_str() { sed -n "s/.*\"$1\":\"\([^\"]*\)\".*/\1/p"; }
+json_num() { sed -n "s/.*\"$1\":\([0-9][0-9]*\).*/\1/p"; }
+
+base_url() { echo "http://127.0.0.1:${PORT}"; }
+
+# ---------------------------------------------------------------------------
+# Revision sources (the three axes of drift)
+# ---------------------------------------------------------------------------
+
+# running: the revision of the LIVE pogod process, self-reported via /version.
+# Must come from the process, not `go version -m` on disk: `go install` rewrites
+# the on-disk binary underneath a live daemon, so the file's revision diverges
+# from the running one the instant a rebuild happens.
+running_rev() {
+    curl -sf --max-time 5 "$(base_url)/version" 2>/dev/null | json_str revision
+}
+
+# installed: the revision baked into the on-disk ~/go/bin/pogod binary.
+installed_bin() {
+    if [ -n "${POGO_GOBIN:-}" ]; then echo "$POGO_GOBIN/pogod"; return; fi
+    local gobin; gobin="$(go env GOBIN 2>/dev/null)"
+    if [ -n "$gobin" ]; then echo "$gobin/pogod"; return; fi
+    echo "$(go env GOPATH 2>/dev/null)/bin/pogod"
+}
+installed_rev() {
+    local bin; bin="$(installed_bin)"
+    [ -x "$bin" ] || return 0
+    go version -m "$bin" 2>/dev/null | sed -n 's/.*vcs.revision=\([0-9a-f]*\).*/\1/p' | head -1
+}
+
+# main: what the repo says SHOULD run (the deploy ref's HEAD).
+main_rev() {
+    git -C "$REPO" rev-parse "$DEPLOY_REF" 2>/dev/null
+}
+
+# ---------------------------------------------------------------------------
+# Repo resolution — build from a known-good local checkout of the pogo source.
+# Precedence: --repo / $POGO_REPO > the checkout this script lives in (when it
+# is the pogo module) > error. The driver refuses to guess.
+# ---------------------------------------------------------------------------
+resolve_repo() {
+    if [ -n "$REPO" ]; then
+        git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || { err "repo path '$REPO' is not a git repo"; exit 2; }
+        return
+    fi
+    local self_dir top
+    self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    top="$(git -C "$self_dir" rev-parse --show-toplevel 2>/dev/null)"
+    if [ -n "$top" ] && [ -f "$top/go.mod" ] && grep -q '^module github.com/drellem2/pogo$' "$top/go.mod" 2>/dev/null; then
+        REPO="$top"
+        return
+    fi
+    err "cannot resolve the pogo source repo; pass --repo PATH or set POGO_REPO"
+    exit 2
+}
+
+# ---------------------------------------------------------------------------
+# Drift computation
+# ---------------------------------------------------------------------------
+RUNNING="" ; INSTALLED="" ; MAIN=""
+compute_drift() {
+    RUNNING="$(running_rev)"
+    INSTALLED="$(installed_rev)"
+    MAIN="$(main_rev)"
+}
+
+print_drift() {
+    echo "pogod revision drift (repo: $REPO, ref: $DEPLOY_REF)"
+    printf '  running   : %s\n' "${RUNNING:-<unreachable — pogod not answering /version>}"
+    printf '  installed : %s\n' "${INSTALLED:-<none on disk>}"
+    printf '  main HEAD  : %s\n' "${MAIN:-<unknown>}"
+}
+
+# Sets NEEDS_BUILD / NEEDS_RESTART / owed-action string. Reports; never acts.
+NEEDS_BUILD=false ; NEEDS_RESTART=false ; ACTION=""
+classify_drift() {
+    NEEDS_BUILD=false ; NEEDS_RESTART=false
+    if [ -z "$MAIN" ]; then ACTION="cannot classify: main HEAD unknown"; return 1; fi
+    [ "$INSTALLED" != "$MAIN" ] && NEEDS_BUILD=true
+    [ "$RUNNING"  != "$MAIN" ] && NEEDS_RESTART=true
+    if [ "$RUNNING" = "$MAIN" ] && [ "$INSTALLED" = "$MAIN" ]; then
+        ACTION="clean — running == installed == main; nothing owed"
+    elif [ "$INSTALLED" = "$MAIN" ] && [ "$RUNNING" != "$MAIN" ]; then
+        # A rebuild already happened; only a restart bounces the fleet.
+        ACTION="RESTART owed (no go install): installed already matches main, running is stale"
+    elif [ "$RUNNING" = "$INSTALLED" ] && [ "$INSTALLED" != "$MAIN" ]; then
+        ACTION="BUILD + RESTART owed: running == installed, both behind main"
+    else
+        ACTION="BUILD + RESTART owed: running/installed/main all differ"
+    fi
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# check — report only, never act
+# ---------------------------------------------------------------------------
+cmd_check() {
+    resolve_repo
+    compute_drift
+    print_drift
+    classify_drift || { echo "action    : $ACTION"; return 1; }
+    echo "action    : $ACTION"
+    echo
+    echo "(report only — 'pogo-self-deploy redeploy' performs the guarded rebuild+restart)"
+}
+
+# ---------------------------------------------------------------------------
+# redeploy — guarded rebuild + restart
+# ---------------------------------------------------------------------------
+confirm() {
+    $ASSUME_YES && return 0
+    if [ ! -t 0 ]; then
+        err "refusing to redeploy non-interactively without --yes (fleet-wide bounce)"
+        exit 3
+    fi
+    printf 'Redeploy pogod (this WILL bounce the whole fleet)? [y/N] '
+    read -r ans
+    case "$ans" in y|Y|yes|YES) return 0 ;; *) log "aborted by user"; exit 0 ;; esac
+}
+
+# Poll the drain readout down to zero polecats, or time out. Echoes the final
+# polecat count on stdout; returns 0 if it reached zero, 1 on timeout.
+drain_wait() {
+    local deadline=$(( $(date +%s) + DRAIN_TIMEOUT )) count body
+    while :; do
+        body="$(curl -sf --max-time 5 "$(base_url)/agents/drain" 2>/dev/null)"
+        count="$(printf '%s' "$body" | json_num count)"
+        count="${count:-0}"
+        if [ "$count" -eq 0 ]; then echo 0; return 0; fi
+        if [ "$(date +%s)" -ge "$deadline" ]; then echo "$count"; return 1; fi
+        log "draining: $count polecat(s) still active — waiting..." >&2
+        sleep 15
+    done
+}
+
+# On a forced hard bounce, clean up every polecat the bounce orphaned: unclaim
+# its work item and gc its worktree. Input: the /agents/drain snapshot captured
+# BEFORE the kickstart (after kickstart, pogod's registry is gone).
+cleanup_orphans() {
+    local snapshot="$1" line id wt repo
+    # Extract "work_item_id":"..","worktree_dir":"..","source_repo":".." tuples.
+    # One polecat object per line after we split on '},{'.
+    printf '%s' "$snapshot" \
+        | sed 's/},{/}\n{/g' \
+        | while IFS= read -r line; do
+            id="$(printf '%s' "$line"  | json_str work_item_id)"
+            wt="$(printf '%s' "$line"  | json_str worktree_dir)"
+            repo="$(printf '%s' "$line" | json_str source_repo)"
+            [ -z "$id" ] && [ -z "$wt" ] && continue
+            if [ -n "$id" ]; then
+                log "unclaiming orphaned work item $id"
+                mg unclaim "$id" 2>&1 | sed 's/^/  /' || err "mg unclaim $id failed"
+            fi
+            if [ -n "$wt" ] && [ -n "$repo" ] && git -C "$repo" rev-parse --git-dir >/dev/null 2>&1; then
+                log "removing orphaned worktree $wt"
+                git -C "$repo" worktree remove --force "$wt" 2>&1 | sed 's/^/  /' || true
+            fi
+        done
+    # Reap any now-dangling worktree administrative entries.
+    [ -n "$REPO" ] && git -C "$REPO" worktree prune 2>/dev/null || true
+}
+
+do_build() {
+    log "building pogod from $REPO ($DEPLOY_REF)"
+    local head; head="$(git -C "$REPO" rev-parse HEAD 2>/dev/null)"
+    if [ "$head" != "$MAIN" ]; then
+        err "repo HEAD ($(short "$head")) != $DEPLOY_REF ($(short "$MAIN")); checkout $DEPLOY_REF first or pass --repo to a checkout on it"
+        exit 4
+    fi
+    if [ -n "$(git -C "$REPO" status --porcelain 2>/dev/null)" ]; then
+        err "repo $REPO has uncommitted changes; refusing to go install a dirty tree"
+        exit 4
+    fi
+    ( cd "$REPO" && go install ./cmd/pogod ) || { err "go install failed"; exit 4; }
+    local now; now="$(installed_rev)"
+    if [ "$now" != "$MAIN" ]; then
+        err "post-install installed revision $(short "$now") != main $(short "$MAIN")"
+        exit 4
+    fi
+    log "installed pogod is now $(short "$now")"
+}
+
+do_restart() {
+    local target="gui/$(id -u)/$DAEMON_LABEL"
+    log "restarting pogod: launchctl kickstart -k $target"
+    # ALWAYS kickstart — never rely on KeepAlive to pick up a stopped job
+    # (mg-6afa mechanism 2 / mg-50e0). -k kills the running instance first.
+    $LAUNCHCTL kickstart -k "$target" || { err "launchctl kickstart failed"; exit 5; }
+}
+
+verify_running() {
+    local deadline=$(( $(date +%s) + 60 )) rev
+    while :; do
+        rev="$(running_rev)"
+        if [ "$rev" = "$MAIN" ]; then
+            log "verified: new pogod running at $(short "$rev")"
+            return 0
+        fi
+        if [ "$(date +%s)" -ge "$deadline" ]; then
+            err "new pogod did not report main revision within 60s (got '${rev:-unreachable}')"
+            return 1
+        fi
+        sleep 3
+    done
+}
+
+cmd_redeploy() {
+    resolve_repo
+    compute_drift
+    print_drift
+    if ! classify_drift; then err "$ACTION"; exit 1; fi
+    echo "action    : $ACTION"
+    if ! $NEEDS_BUILD && ! $NEEDS_RESTART; then
+        log "nothing owed — pogod is already at main. Done."
+        exit 0
+    fi
+
+    confirm
+
+    # 1. Signal drain (stop dispatching new polecats) and let the fleet quiesce.
+    log "enabling drain mode"
+    curl -sf --max-time 5 -X POST "$(base_url)/agents/drain" \
+        -H 'Content-Type: application/json' -d '{"draining":true}' >/dev/null \
+        || { err "failed to enable drain mode (is pogod up?)"; exit 6; }
+
+    local snapshot leftover=0
+    if drain_wait >/dev/null; then
+        log "drain complete — 0 polecats active"
+    else
+        leftover="$(curl -sf --max-time 5 "$(base_url)/agents/drain" 2>/dev/null | json_num count)"
+        leftover="${leftover:-?}"
+        if ! $FORCE; then
+            err "$leftover polecat(s) still active after ${DRAIN_TIMEOUT}s drain timeout"
+            err "refusing to hard-bounce the fleet without --force; restoring dispatch"
+            curl -sf --max-time 5 -X POST "$(base_url)/agents/drain" \
+                -H 'Content-Type: application/json' -d '{"draining":false}' >/dev/null || true
+            exit 7
+        fi
+        log "--force: hard-bouncing with $leftover polecat(s) active; will clean up after"
+    fi
+
+    # Capture the pre-kickstart polecat snapshot for post-bounce cleanup.
+    snapshot="$(curl -sf --max-time 5 "$(base_url)/agents/drain" 2>/dev/null)"
+
+    # 2. Build (only if a build is owed — a restart-only drift skips go install
+    #    so we do not pay a rebuild we do not need).
+    if $NEEDS_BUILD; then
+        do_build
+    else
+        log "installed already matches main — skipping go install (restart-only)"
+    fi
+
+    # 3. Restart (always kickstart) and verify the new process is main.
+    do_restart
+    verify_running || exit 8
+
+    # 4. If a forced bounce killed active polecats, clean up the wreckage.
+    if [ "$leftover" != "0" ] && [ "$leftover" != "?" ]; then
+        log "cleaning up $leftover polecat(s) orphaned by the forced bounce"
+        cleanup_orphans "$snapshot"
+    fi
+
+    log "redeploy complete."
+}
+
+# ---------------------------------------------------------------------------
+# Arg parsing
+# ---------------------------------------------------------------------------
+usage() {
+    sed -n '2,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+}
+
+main() {
+    [ $# -ge 1 ] || { usage; exit 2; }
+    local subcmd="$1"; shift
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --yes)            ASSUME_YES=true ;;
+            --force)          FORCE=true ;;
+            --drain-timeout)  DRAIN_TIMEOUT="$2"; shift ;;
+            --repo)           REPO="$2"; shift ;;
+            --port)           PORT="$2"; shift ;;
+            -h|--help)        usage; exit 0 ;;
+            *)                err "unknown flag: $1"; usage; exit 2 ;;
+        esac
+        shift
+    done
+
+    case "$subcmd" in
+        check)     cmd_check ;;
+        redeploy)  cmd_redeploy ;;
+        -h|--help) usage; exit 0 ;;
+        *)         err "unknown subcommand: $subcmd"; usage; exit 2 ;;
+    esac
+}
+
+# Run main only when executed directly, so a test harness can source this file
+# to exercise the pure helpers (classify_drift, json_str) without dispatching.
+if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
+    main "$@"
+fi

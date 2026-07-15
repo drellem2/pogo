@@ -369,6 +369,15 @@ type Registry struct {
 	// don't have to wait the real 25s window. Immutable once agents spawn.
 	startVerifyDelay       time.Duration
 	startVerifyMaxAttempts int
+
+	// draining, when true, makes handleSpawnPolecat refuse to dispatch new
+	// polecats — the drain half of the pogo self-deploy path (mg-cae1 /
+	// mg-6afa). Only pogod knows its children and controls dispatch, so the
+	// drain STATE lives here; the out-of-band bin/pogo-self-deploy driver flips
+	// it on (POST /agents/drain), polls PolecatCount() down to zero, then
+	// rebuilds+restarts pogod. Guarded by mu. Reset to false on every pogod
+	// start (the zero value) — a fresh daemon always dispatches.
+	draining bool
 }
 
 // SetStallScheduleProvider installs the cron-schedule lookup used by diagnose to
@@ -385,6 +394,72 @@ func (r *Registry) SetOnExit(fn func(a *Agent, err error)) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.onExit = fn
+}
+
+// SetDraining toggles drain mode. While draining, handleSpawnPolecat refuses
+// new polecat dispatch (503) so the fleet quiesces to a safe boundary before a
+// pogod redeploy bounces it. Crew agents are unaffected — they re-read durable
+// state on restart, so they are bounced, not drained (see mg-6afa mechanism 3).
+// The driver flips this on, waits for PolecatCount() to reach zero, then
+// rebuilds+restarts. Idempotent.
+func (r *Registry) SetDraining(draining bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.draining = draining
+}
+
+// Draining reports whether drain mode is active.
+func (r *Registry) Draining() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.draining
+}
+
+// PolecatInfo is a snapshot of one live polecat, enough for the self-deploy
+// driver to report drain progress and — on a forced hard bounce — unclaim the
+// orphaned work item and gc the orphaned worktree (mg-6afa MVP guard b).
+type PolecatInfo struct {
+	Name        string `json:"name"`
+	PID         int    `json:"pid"`
+	WorkItemID  string `json:"work_item_id,omitempty"`
+	WorktreeDir string `json:"worktree_dir,omitempty"`
+	SourceRepo  string `json:"source_repo,omitempty"`
+}
+
+// Polecats returns a snapshot of every live polecat (Type==TypePolecat whose
+// process is still alive). The driver polls this during drain; a forced bounce
+// reads WorkItemID/WorktreeDir/SourceRepo off it to clean up after itself.
+func (r *Registry) Polecats() []PolecatInfo {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var out []PolecatInfo
+	for _, a := range r.agents {
+		if a.Type == TypePolecat && a.alive() {
+			out = append(out, PolecatInfo{
+				Name:        a.Name,
+				PID:         a.PID,
+				WorkItemID:  a.WorkItemID,
+				WorktreeDir: a.WorktreeDir,
+				SourceRepo:  a.SourceRepo,
+			})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+// PolecatCount returns the number of live polecats — the readout the driver
+// polls down to zero before a drained redeploy.
+func (r *Registry) PolecatCount() int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	n := 0
+	for _, a := range r.agents {
+		if a.Type == TypePolecat && a.alive() {
+			n++
+		}
+	}
+	return n
 }
 
 // SetCommandConfig sets the agent command configuration.
