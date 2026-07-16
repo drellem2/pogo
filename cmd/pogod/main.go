@@ -612,6 +612,18 @@ func resolveAgentProvider(id string) *agent.Provider {
 	return p
 }
 
+// stallWatchArmed reports whether pogod should arm the passive stall watcher on
+// this boot. It requires both the watcher being enabled AND a config file being
+// present (cfg.Source set). The cfg.Source gate mirrors the prompt-refresh /
+// crew-auto-start gate in main(): an unconfigured daemon never auto-starts a
+// coordinator, so arming the watcher would nudge a coordinator (default
+// "ringmaster") this process never launched — spurious nudges and durable-mail
+// noise on every isolated/CI/sandbox daemon (gh drellem2/pogo #75). Only watch a
+// coordinator the daemon would actually start.
+func stallWatchArmed(cfg *config.Config) bool {
+	return cfg.StallWatch.Enabled && cfg.Source != ""
+}
+
 // newStallNudger builds the stall watcher's delivery function, mirroring the
 // scheduler's PogodDeliverer: when the target agent is running, deliver via the
 // PTY in wait-idle mode; otherwise fall back to durable macguffin mail so the
@@ -1026,8 +1038,18 @@ Flags:
 	// guaranteed-independent heartbeat, is the whole point: a watcher inside the
 	// mayor's own loop can't catch that loop silently skipping its check-work /
 	// check-mail steps. See internal/stallwatch and docs/design/stall-watch-design.md.
+	//
+	// Gate arming on cfg.Source, exactly as prompt refresh and crew auto-start
+	// are below (see the cfg.Source == "" branch): an unconfigured daemon never
+	// auto-starts a coordinator, so arming the watcher would nudge a coordinator
+	// (default "ringmaster") that this process never launched — spurious nudges
+	// and durable-mail noise on every isolated/CI/sandbox daemon (gh drellem2/pogo
+	// #75). Only watch a coordinator the daemon would actually start.
 	var stallWatcher *stallwatch.Watcher
-	if cfg.StallWatch.Enabled {
+	if cfg.StallWatch.Enabled && cfg.Source == "" {
+		log.Printf("pogod: no config file at %s; stall watcher not armed (no auto-started coordinator to nudge)", config.ConfigFilePath())
+	}
+	if stallWatchArmed(cfg) {
 		stallWatcher = stallwatch.New(cfg.StallWatch, stallwatch.Options{
 			Nudge: newStallNudger(agentRegistry, client.SendMGMail),
 			// Let a priority wake short-circuit the ~30s heartbeat poll for a
