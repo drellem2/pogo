@@ -28,6 +28,19 @@ is the curated, human-readable summary kept in sync at each release cut.
 
 ### Fixed
 
+- **Rebased PRs no longer dangle open after their content merges (mg-f18c).**
+  The refinery rebases each branch onto the target before merging, so for any
+  2nd-or-later merge in a batch the landed SHA differs from the PR's head SHA
+  and GitHub cannot auto-detect the merge — the PR stayed OPEN even though the
+  content shipped, and had to be closed by hand (gh drellem2/pogo#81 dangled;
+  #80, merged first and verbatim, auto-closed on its own). After every
+  successful merge the refinery now looks up the branch's PR and, if it is
+  still open, closes it with a comment naming the SHA it actually landed as,
+  then reaps the remote branch. When GitHub already auto-detected the merge the
+  PR reads MERGED and only the reap runs; branches with no PR are left alone.
+  The whole step is fail-soft — it runs after the merge has landed, so a `gh`
+  outage or a lost branch-delete race is logged and never fails the merge.
+
 - **Concurrent-spawn init-stall self-heal (mg-feb3, gh drellem2/macguffin#24).**
   pogod now verifies that a freshly spawned polecat actually started — claimed
   its mg work item — and, if a concurrent spawn wave swallowed the initial

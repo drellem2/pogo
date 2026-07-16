@@ -118,6 +118,15 @@ Rejected alternatives:
   "PR mode". The §3 external-fork decision rule above retires once the
   target repos set `pr_mode = true`.
 
+  **Phase 2b — post-merge close + reap (mg-f18c, 2026-07-16)**: `pr_mode`
+  closes the loop only when the push-back succeeds *and* the repo opts in.
+  Everywhere else a rebased PR still dangles OPEN after its content lands
+  (gh #81 dangled; gh #80, merged first and verbatim, auto-closed). The
+  refinery now closes any still-open PR after a successful merge, with a
+  comment naming the landed SHA, and reaps the remote branch. Already-merged
+  PRs skip the close; branches with no PR are untouched. Fail-soft — see
+  `closePRAndReap` in `internal/refinery/merge.go`.
+
   Phase 2 is scheduled **immediately after the first end-to-end proof**, not
   loosely "later": pm-pogo's review is right that for the company-adoption
   audience a wall of "closed" PRs is storefront optics, not cosmetics.

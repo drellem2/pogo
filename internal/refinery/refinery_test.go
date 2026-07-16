@@ -1707,11 +1707,61 @@ func fakeGH(t *testing.T, script string) {
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
-// setupPRModeRepo builds a bare origin with pr_mode enabled on main, a
-// feature branch, and a later commit on main so the refinery's rebase
-// actually rewrites the branch SHAs (the case PR-mode exists for).
-// Returns the origin path and the feature branch's pre-merge tip SHA.
+// fakeGHLog installs a stub `gh` that appends each invocation's arguments to
+// a log file (one space-joined line per call, e.g. `pr close 7 --comment ...`)
+// before running script, so tests can assert on which gh subcommands the
+// refinery actually issued. The log path is exported to script as $GH_LOG,
+// letting a stub vary its answer by how many times it has been called — the
+// PR state genuinely changes across a merge, so a static stub can't model it.
+func fakeGHLog(t *testing.T, script string) (logPath string) {
+	t.Helper()
+	dir := t.TempDir()
+	logPath = filepath.Join(dir, "gh.log")
+	path := filepath.Join(dir, "gh")
+	body := fmt.Sprintf("#!/bin/sh\nGH_LOG=%q\necho \"$@\" >> \"$GH_LOG\"\n%s\n", logPath, script)
+	if err := os.WriteFile(path, []byte(body), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return logPath
+}
+
+// ghCalls returns the gh invocations recorded by fakeGHLog, in order.
+func ghCalls(t *testing.T, logPath string) []string {
+	t.Helper()
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		t.Fatal(err)
+	}
+	return strings.Split(strings.TrimSpace(string(data)), "\n")
+}
+
+// ghCalled reports whether any recorded gh invocation starts with prefix.
+func ghCalled(t *testing.T, logPath, prefix string) bool {
+	t.Helper()
+	for _, c := range ghCalls(t, logPath) {
+		if strings.HasPrefix(c, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// setupPRModeRepo builds a bare origin with pr_mode enabled. See setupPRRepo.
 func setupPRModeRepo(t *testing.T) (originDir, branchSHA string) {
+	t.Helper()
+	return setupPRRepo(t, true)
+}
+
+// setupPRRepo builds a bare origin on main, a feature branch, and a later
+// commit on main so the refinery's rebase actually rewrites the branch SHAs
+// (the case PR-mode and the post-merge PR close both exist for). prMode sets
+// [gates] pr_mode in the repo's refinery.toml. Returns the origin path and
+// the feature branch's pre-merge tip SHA.
+func setupPRRepo(t *testing.T, prMode bool) (originDir, branchSHA string) {
 	t.Helper()
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not found")
@@ -1725,10 +1775,10 @@ func setupPRModeRepo(t *testing.T) (originDir, branchSHA string) {
 	run(t, workDir, "git", "config", "user.email", "test@test.com")
 	run(t, workDir, "git", "config", "user.name", "Test")
 	os.MkdirAll(filepath.Join(workDir, ".pogo"), 0755)
-	os.WriteFile(filepath.Join(workDir, ".pogo", "refinery.toml"), []byte(`
+	os.WriteFile(filepath.Join(workDir, ".pogo", "refinery.toml"), []byte(fmt.Sprintf(`
 [gates]
-pr_mode = true
-`), 0644)
+pr_mode = %t
+`, prMode)), 0644)
 	os.WriteFile(filepath.Join(workDir, "README.md"), []byte("# Test"), 0644)
 	run(t, workDir, "git", "add", ".")
 	run(t, workDir, "git", "commit", "-m", "initial commit")
@@ -1757,9 +1807,24 @@ pr_mode = true
 // force-pushes the rebased branch back to origin, so after the ff-merge the
 // branch tip on origin equals the target tip — the condition under which
 // GitHub marks the PR merged.
+// The post-merge close+reap (mg-f18c) deletes origin's branch, so the
+// push-back's effect on origin can only be observed before that runs. The
+// stub's post-merge `pr view` — issued after the ff-merge push and before the
+// reap — snapshots origin's branch tip at exactly that moment.
 func TestProcessMergePRModePushBack(t *testing.T) {
 	originDir, oldSHA := setupPRModeRepo(t)
-	fakeGH(t, `echo '{"state":"OPEN","number":7}'`)
+	snapshot := filepath.Join(t.TempDir(), "tip")
+	fakeGHLog(t, fmt.Sprintf(`
+views=$(grep -c '^pr view' "$GH_LOG")
+if [ "$views" -le 1 ]; then
+  # Pre-merge lookup: the PR is open, so the push-back should run.
+  echo '{"state":"OPEN","number":7}'
+else
+  # Post-merge lookup: the realigned head landed, so GitHub has already
+  # marked the PR merged. Snapshot origin's tip before the reap removes it.
+  git --git-dir=%q rev-parse feature-pr > %q
+  echo '{"state":"MERGED","number":7}'
+fi`, originDir, snapshot))
 
 	r, err := New(Config{Enabled: true, PollInterval: time.Hour, WorktreeDir: t.TempDir()})
 	if err != nil {
@@ -1782,12 +1847,220 @@ func TestProcessMergePRModePushBack(t *testing.T) {
 	}
 
 	mainSHA := strings.TrimSpace(runOut(t, originDir, "git", "rev-parse", "main"))
-	branchSHA := strings.TrimSpace(runOut(t, originDir, "git", "rev-parse", "feature-pr"))
+	data, err := os.ReadFile(snapshot)
+	if err != nil {
+		t.Fatalf("no post-merge snapshot of origin's branch tip: %v", err)
+	}
+	branchSHA := strings.TrimSpace(string(data))
 	if branchSHA == oldSHA {
 		t.Error("expected origin branch to be force-pushed to the rebased SHAs, but tip is unchanged")
 	}
 	if branchSHA != mainSHA {
 		t.Errorf("expected origin branch tip %s to equal merged main tip %s (PR would not read merged)", branchSHA, mainSHA)
+	}
+}
+
+// TestProcessMergeClosesRebasedPRAndReapsBranch is direction (a) of mg-f18c:
+// the refinery rebased the branch, so the landed SHA differs from the PR head
+// and GitHub cannot auto-detect the merge. The PR must end CLOSED (with a
+// comment naming the SHA it landed as) and the remote branch must be gone.
+func TestProcessMergeClosesRebasedPRAndReapsBranch(t *testing.T) {
+	originDir, oldSHA := setupPRRepo(t, false)
+	ghLog := fakeGHLog(t, `
+case "$1 $2" in
+  "pr view")  echo '{"state":"OPEN","number":81}' ;;
+  "pr close") echo "Closed pull request #81" ;;
+esac`)
+
+	r, err := New(Config{Enabled: true, PollInterval: time.Hour, WorktreeDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := r.Submit(MergeRequest{
+		RepoPath:  originDir,
+		Branch:    "feature-pr",
+		TargetRef: "main",
+		Author:    "test-cat",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.processNext()
+
+	mr := r.Get(id)
+	if mr.Status != StatusMerged {
+		t.Fatalf("expected merged, got %s (error: %s)", mr.Status, mr.Error)
+	}
+	mainSHA := strings.TrimSpace(runOut(t, originDir, "git", "rev-parse", "main"))
+	if mainSHA == oldSHA {
+		t.Fatalf("main tip %s equals the pre-merge branch tip — no rebase happened, so this is not the dangling-PR case", mainSHA)
+	}
+
+	// (a1) the PR is closed out, with the landed SHA in the comment.
+	var closeCall string
+	for _, c := range ghCalls(t, ghLog) {
+		if strings.HasPrefix(c, "pr close") {
+			closeCall = c
+		}
+	}
+	if closeCall == "" {
+		t.Fatalf("expected `gh pr close` for the rebased branch's open PR; gh calls: %q", ghCalls(t, ghLog))
+	}
+	if !strings.Contains(closeCall, "pr close 81 --comment") {
+		t.Errorf("expected close of PR #81 with a comment, got: %q", closeCall)
+	}
+	if !strings.Contains(closeCall, mainSHA) {
+		t.Errorf("expected the close comment to name the merged SHA %s, got: %q", mainSHA, closeCall)
+	}
+
+	// (a2) the remote branch is reaped.
+	if _, err := exec.Command("git", "--git-dir="+originDir, "rev-parse", "--verify", "feature-pr").Output(); err == nil {
+		t.Error("expected origin's feature-pr branch to be reaped after the merge, but it still exists")
+	}
+}
+
+// TestProcessMergeAutoClosedPRNotClosedAgain is direction (b) of mg-f18c: on
+// the single/first-MR path GitHub auto-detects the merge and closes the PR
+// itself. The post-merge step must not try to close an already-closed PR (and
+// must still merge cleanly), but must still reap the branch.
+func TestProcessMergeAutoClosedPRNotClosedAgain(t *testing.T) {
+	originDir, _ := setupPRRepo(t, false)
+	ghLog := fakeGHLog(t, `
+case "$1 $2" in
+  "pr view")  echo '{"state":"MERGED","number":85}' ;;
+  "pr close") echo "gh: PR #85 is already closed" >&2; exit 1 ;;
+esac`)
+
+	r, err := New(Config{Enabled: true, PollInterval: time.Hour, WorktreeDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := r.Submit(MergeRequest{
+		RepoPath:  originDir,
+		Branch:    "feature-pr",
+		TargetRef: "main",
+		Author:    "test-cat",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.processNext()
+
+	if mr := r.Get(id); mr.Status != StatusMerged {
+		t.Fatalf("expected merged, got %s (error: %s)", mr.Status, mr.Error)
+	}
+	if ghCalled(t, ghLog, "pr close") {
+		t.Errorf("expected no close of an already-merged PR; gh calls: %q", ghCalls(t, ghLog))
+	}
+	if _, err := exec.Command("git", "--git-dir="+originDir, "rev-parse", "--verify", "feature-pr").Output(); err == nil {
+		t.Error("expected origin's feature-pr branch to be reaped even when GitHub auto-closed the PR")
+	}
+}
+
+// TestProcessMergeNoPRLeavesBranch: branches with no GitHub PR (internal
+// mg-track branches) have no PR loop to close, so the post-merge step must
+// leave them — and their remote branch — alone. Reaping is PR hygiene, not a
+// general branch-cleanup policy; gitgc owns the rest.
+func TestProcessMergeNoPRLeavesBranch(t *testing.T) {
+	originDir, _ := setupPRRepo(t, false)
+	ghLog := fakeGHLog(t, `echo 'no pull requests found for branch "feature-pr"' >&2; exit 1`)
+
+	r, err := New(Config{Enabled: true, PollInterval: time.Hour, WorktreeDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := r.Submit(MergeRequest{
+		RepoPath:  originDir,
+		Branch:    "feature-pr",
+		TargetRef: "main",
+		Author:    "test-cat",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.processNext()
+
+	if mr := r.Get(id); mr.Status != StatusMerged {
+		t.Fatalf("expected merged, got %s (error: %s)", mr.Status, mr.Error)
+	}
+	if ghCalled(t, ghLog, "pr close") {
+		t.Errorf("expected no close when the branch has no PR; gh calls: %q", ghCalls(t, ghLog))
+	}
+	if _, err := exec.Command("git", "--git-dir="+originDir, "rev-parse", "--verify", "feature-pr").Output(); err != nil {
+		t.Error("expected origin's feature-pr branch to survive when it has no PR")
+	}
+}
+
+// TestClosePRAndReapFailSoft: every failure mode of the post-merge step is
+// non-fatal by construction (it returns nothing), but the merge that precedes
+// it must survive a gh that is broken outright.
+func TestProcessMergeClosePRFailSoft(t *testing.T) {
+	originDir, _ := setupPRRepo(t, false)
+	fakeGHLog(t, `echo "gh: network unreachable" >&2; exit 1`)
+
+	r, err := New(Config{Enabled: true, PollInterval: time.Hour, WorktreeDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := r.Submit(MergeRequest{
+		RepoPath:  originDir,
+		Branch:    "feature-pr",
+		TargetRef: "main",
+		Author:    "test-cat",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.processNext()
+
+	if mr := r.Get(id); mr.Status != StatusMerged {
+		t.Fatalf("expected merged despite a broken gh, got %s (error: %s)", mr.Status, mr.Error)
+	}
+}
+
+// TestLookupPR covers the gh output states lookupPR distinguishes; the state
+// string drives whether closePRAndReap closes the PR or leaves it alone.
+func TestLookupPR(t *testing.T) {
+	dir := t.TempDir()
+
+	fakeGH(t, `echo '{"state":"OPEN","number":42}'`)
+	if n, state, err := lookupPR(dir, "b"); err != nil || n != 42 || state != "OPEN" {
+		t.Errorf("open PR: expected (42, OPEN, nil), got (%d, %s, %v)", n, state, err)
+	}
+
+	fakeGH(t, `echo '{"state":"MERGED","number":42}'`)
+	if n, state, err := lookupPR(dir, "b"); err != nil || n != 42 || state != "MERGED" {
+		t.Errorf("merged PR: expected (42, MERGED, nil), got (%d, %s, %v)", n, state, err)
+	}
+
+	fakeGH(t, `echo 'no pull requests found for branch "b"' >&2; exit 1`)
+	if n, state, err := lookupPR(dir, "b"); err != nil || n != 0 || state != "" {
+		t.Errorf("no PR: expected (0, \"\", nil), got (%d, %s, %v)", n, state, err)
+	}
+
+	fakeGH(t, `echo "gh: could not determine base repo" >&2; exit 1`)
+	if _, _, err := lookupPR(dir, "b"); err == nil {
+		t.Error("hard failure: expected an error, got nil")
+	}
+}
+
+// TestPRClosedComment: the comment must name the SHA the content landed as —
+// that pointer is the whole reason to close explicitly rather than silently.
+func TestPRClosedComment(t *testing.T) {
+	mr := &MergeRequest{ID: "mr-1", Branch: "polecat-mg-f18c", TargetRef: "main"}
+
+	got := prClosedComment(mr, "deadbeef\n")
+	if !strings.Contains(got, "deadbeef") {
+		t.Errorf("expected the merged SHA in the comment, got: %q", got)
+	}
+	if strings.Contains(got, "\n") && !strings.Contains(got, "mr-1") {
+		t.Errorf("expected the MR ID in the comment, got: %q", got)
+	}
+
+	// A rev-parse failure leaves the SHA empty (the merge still landed) —
+	// the comment must stay coherent rather than reading "Merged as  on".
+	if got := prClosedComment(mr, ""); !strings.Contains(got, "the current main tip") {
+		t.Errorf("expected a fallback pointer when the SHA is unknown, got: %q", got)
 	}
 }
 

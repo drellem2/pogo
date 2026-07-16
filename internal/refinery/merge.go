@@ -98,6 +98,10 @@ func (r *Refinery) processMerge(mr *MergeRequest) (string, string, bool, error) 
 			// was submitted from so it doesn't go stale (gh #30).
 			// Best-effort — logs and skips unless clean and on the target.
 			fastForwardSourceCheckout(mr.RepoPath, mr.TargetRef)
+			// Close out the branch's GitHub PR and reap its remote branch so
+			// PR-flow loop-closure never leaves danglers (mg-f18c). Soft —
+			// never unwinds an already-landed merge.
+			r.closePRAndReap(wtDir, mr, sha)
 			// Run the per-repo post-merge deploy hook against the refinery's
 			// clone (which now has the merged commit on the target ref). The
 			// hook owns refreshing runtime snapshots like ~/.pogo/<repo>/bin/
@@ -251,6 +255,11 @@ func (r *Refinery) attemptMerge(wtDir string, mr *MergeRequest, attempt int, ski
 // never worth blocking a merge on.
 const prLookupTimeout = 30 * time.Second
 
+// prCloseTimeout bounds the `gh pr close` call in closePRAndReap for the same
+// reason — the close is loop-closure hygiene that runs after the merge has
+// already landed, and must never hold the pipeline open.
+const prCloseTimeout = 30 * time.Second
+
 // pushBackForPR force-pushes the just-rebased branch back to origin when an
 // open GitHub PR exists for it, so GitHub marks the PR "merged" once the tip
 // lands on the target. Every failure here is soft: the merge itself must
@@ -278,12 +287,24 @@ func (r *Refinery) pushBackForPR(wtDir string, mr *MergeRequest, attempt int) {
 }
 
 // openPRNumber returns the number of the open GitHub PR whose head is
-// branch, or 0 when the branch has a PR that is not open. gh infers the
-// GitHub repo from the worktree's origin remote. A branch with no PR at all
-// is reported as (0, nil); anything else that goes wrong (gh not installed,
-// no network, non-GitHub remote, output drift) is returned as an error for
-// the caller to fail soft on.
+// branch, or 0 when the branch has a PR that is not open. A branch with no PR
+// at all is reported as (0, nil); anything else that goes wrong is returned as
+// an error for the caller to fail soft on. See lookupPR.
 func openPRNumber(wtDir, branch string) (int, error) {
+	num, state, err := lookupPR(wtDir, branch)
+	if err != nil || !strings.EqualFold(state, "OPEN") {
+		return 0, err
+	}
+	return num, nil
+}
+
+// lookupPR returns the number and state ("OPEN", "MERGED", "CLOSED") of the
+// GitHub PR whose head is branch. gh infers the GitHub repo from the
+// worktree's origin remote. A branch with no PR at all is reported as
+// (0, "", nil); anything else that goes wrong (gh not installed, no network,
+// non-GitHub remote, output drift) is returned as an error for the caller to
+// fail soft on.
+func lookupPR(wtDir, branch string) (int, string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), prLookupTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "gh", "pr", "view", branch, "--json", "state,number")
@@ -298,23 +319,91 @@ func openPRNumber(wtDir, branch string) (int, error) {
 			// PR — a normal state for internal mg-track branches, not a
 			// lookup failure.
 			if strings.Contains(strings.ToLower(stderr), "no pull requests found") {
-				return 0, nil
+				return 0, "", nil
 			}
-			return 0, fmt.Errorf("gh pr view %s: %s: %w", branch, stderr, err)
+			return 0, "", fmt.Errorf("gh pr view %s: %s: %w", branch, stderr, err)
 		}
-		return 0, fmt.Errorf("gh pr view %s: %w", branch, err)
+		return 0, "", fmt.Errorf("gh pr view %s: %w", branch, err)
 	}
 	var pr struct {
 		State  string `json:"state"`
 		Number int    `json:"number"`
 	}
 	if err := json.Unmarshal(out, &pr); err != nil {
-		return 0, fmt.Errorf("parse gh pr view output: %w", err)
+		return 0, "", fmt.Errorf("parse gh pr view output: %w", err)
 	}
-	if !strings.EqualFold(pr.State, "OPEN") {
-		return 0, nil
+	return pr.Number, pr.State, nil
+}
+
+// closePRAndReap closes out a merged branch's GitHub PR and deletes the
+// branch from origin (mg-f18c). It runs after every successful merge.
+//
+// The refinery rebases a branch onto the target before merging, so for any
+// 2nd-or-later MR in a batch the landed SHA differs from the PR's head SHA
+// and GitHub cannot auto-detect the merge — the PR dangles OPEN even though
+// the content shipped (gh drellem2/pogo #81). Closing it explicitly, with a
+// comment pointing at the SHA it actually landed as, closes that loop.
+//
+// The paths where GitHub *did* auto-detect (a first/only MR that merged
+// verbatim, or a pr_mode push-back that realigned the head) are no-ops here:
+// the PR reads MERGED/CLOSED already, so only the branch reap runs.
+//
+// Every failure is soft. The merge has already landed on origin by the time
+// this runs; a gh outage or a lost branch-delete race must never turn a
+// successful merge into a failed one, so problems are logged and skipped.
+func (r *Refinery) closePRAndReap(wtDir string, mr *MergeRequest, sha string) {
+	num, state, err := lookupPR(wtDir, mr.Branch)
+	if err != nil {
+		log.Printf("refinery: MR %s step=pr-close skipped: gh lookup failed (%v) — a PR for %s (if any) may be left open", mr.ID, err, mr.Branch)
+		return
 	}
-	return pr.Number, nil
+	if num == 0 {
+		log.Printf("refinery: MR %s step=pr-close skipped: no PR for branch %s", mr.ID, mr.Branch)
+		return
+	}
+
+	if strings.EqualFold(state, "OPEN") {
+		log.Printf("refinery: MR %s step=pr-close branch=%s pr=#%d", mr.ID, mr.Branch, num)
+		if out, cerr := ghClosePR(wtDir, num, prClosedComment(mr, sha)); cerr != nil {
+			log.Printf("refinery: MR %s step=pr-close failed (%v: %s) — PR #%d left open; merge already landed", mr.ID, cerr, out, num)
+		}
+	} else {
+		log.Printf("refinery: MR %s step=pr-close skipped: PR #%d already %s (GitHub auto-detected the merge)", mr.ID, num, state)
+	}
+
+	// Reap the remote branch so no stale head lingers behind the closed PR.
+	// Deleting the head branch is what GitHub's own auto-delete does after a
+	// merge; do it after the close so the delete can't race the close.
+	log.Printf("refinery: MR %s step=branch-reap branch=%s", mr.ID, mr.Branch)
+	if out, gerr := gitCmdOutput(wtDir, "push", "origin", "--delete", mr.Branch); gerr != nil {
+		log.Printf("refinery: MR %s step=branch-reap failed (%s) — origin/%s may linger; merge already landed", mr.ID, strings.TrimSpace(out), mr.Branch)
+	}
+}
+
+// prClosedComment is the comment left on a PR the refinery closes out, so a
+// human reading the PR can find the commit its content actually landed as.
+func prClosedComment(mr *MergeRequest, sha string) string {
+	landed := strings.TrimSpace(sha)
+	if landed == "" {
+		landed = "the current " + mr.TargetRef + " tip"
+	}
+	return fmt.Sprintf("Merged as %s on `%s` by the pogo refinery (MR %s).\n\n"+
+		"The refinery rebases each branch onto `%s` before merging, so the landed commits "+
+		"have different SHAs than this PR's head and GitHub could not auto-detect the merge. "+
+		"Closing explicitly — the content shipped.",
+		landed, mr.TargetRef, mr.ID, mr.TargetRef)
+}
+
+// ghClosePR closes PR number with a comment. Bounded by prCloseTimeout so a
+// hung gh call can't stall the merge pipeline after the merge has landed.
+func ghClosePR(wtDir string, number int, comment string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), prCloseTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "gh", "pr", "close", strconv.Itoa(number), "--comment", comment)
+	cmd.Dir = wtDir
+	cmd.Env = append(os.Environ(), "GH_PROMPT_DISABLED=1", "GH_NO_UPDATE_NOTIFIER=1")
+	out, err := cmd.CombinedOutput()
+	return strings.TrimSpace(string(out)), err
 }
 
 // gateStage maps quality gate commands to a refinery_merge_failed stage value.
