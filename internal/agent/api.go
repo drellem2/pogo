@@ -152,8 +152,22 @@ type DiagnoseInfo struct {
 	// of its last scheduled firing — between-cron idle is by design for a
 	// cron-driven crew agent, not a wedge (mg-5b23).
 	CronCovered bool `json:"cron_covered,omitempty"`
+	// MailCheckMissing is true when the agent is EXPECTED (in pogod's desired
+	// state) but has no mail-check-<name> schedule: it can be mailed, but
+	// nothing will ever wake it to read the mail. Such an agent is unhealthy —
+	// see the "no_mail_loop" health state (mg-de08).
+	//
+	// This is the inverse of CronCovered, and the asymmetry it corrects was the
+	// mg-de08 defect. Before it, the ONLY thing diagnose did with schedules was
+	// consult them to SUPPRESS a stall label — schedule-awareness ran in
+	// exactly one direction and could only ever make an agent look healthier.
+	// An agent whose mail loop had been silently reaped therefore diagnosed
+	// clean, which is precisely why a fleet-wide mail outage stayed invisible
+	// for two hours. A missing mail loop must be able to turn a health signal
+	// RED, or the next variant is just as quiet.
+	MailCheckMissing bool `json:"mail_check_missing,omitempty"`
 	// Health is a summary string: "healthy", "idle", "stalled", "rate_limited",
-	// "exited", or "dead".
+	// "no_mail_loop", "exited", or "dead".
 	Health string `json:"health"`
 	// RecentOutputTail is the last ~500 bytes of PTY output for quick triage.
 	RecentOutputTail string `json:"recent_output_tail,omitempty"`
@@ -179,6 +193,34 @@ type StallScheduleProvider interface {
 	CronWindowsForAgent(agentIdentity string) []CronWindow
 }
 
+// MailCheckProvider reports whether a mail-check-<name> schedule exists for an
+// agent identity ("crew-<name>" / "cat-<name>" / bare name) — that is, whether
+// anything will ever wake the agent to read its mail. diagnose uses it to flag
+// an EXPECTED agent with no delivery path (mg-de08). pogod backs this with its
+// scheduler; a nil provider disables the check, which is the default and what
+// unit tests use.
+type MailCheckProvider interface {
+	HasMailCheck(agentIdentity string) bool
+}
+
+// mailLoopState is diagnose's view of an agent's mail delivery path. Like
+// scheduler.AgentState it is a tri-state whose zero value is the "no claim"
+// answer: without a schedule provider, or for an agent that is not expected to
+// have a mail loop at all, diagnose says nothing rather than guessing.
+type mailLoopState int
+
+const (
+	// mailLoopUnknown means diagnose has no basis to judge — no provider
+	// installed, or the agent is not in pogod's desired state (a polecat
+	// registers its own loop; an unexpected agent is not owed one).
+	mailLoopUnknown mailLoopState = iota
+	// mailLoopPresent means the agent is expected and has its mail-check.
+	mailLoopPresent
+	// mailLoopMissing means the agent is expected and has NO mail-check: it
+	// can be mailed but never woken. This is the RED state.
+	mailLoopMissing
+)
+
 // StallThresholdFor returns the stall detection threshold for the given agent type.
 func StallThresholdFor(t AgentType) time.Duration {
 	if t == TypeCrew {
@@ -192,14 +234,15 @@ func StallThresholdFor(t AgentType) time.Duration {
 // caller that has no schedule provider; production code goes through
 // Registry.diagnose, which threads the agent's cron windows.
 func diagnoseAgent(a *Agent) DiagnoseInfo {
-	return diagnoseAgentAt(a, time.Now(), nil)
+	return diagnoseAgentAt(a, time.Now(), nil, mailLoopUnknown)
 }
 
 // diagnoseAgentAt builds a DiagnoseInfo as of now, suppressing the stalled
 // label when the agent's idle is explained by a recurring cron schedule (see
-// withinCronInterval and mg-5b23). now and windows are injected so the logic is
-// deterministically testable.
-func diagnoseAgentAt(a *Agent, now time.Time, windows []CronWindow) DiagnoseInfo {
+// withinCronInterval and mg-5b23), and reporting RED when an expected agent has
+// no mail loop (mg-de08). now, windows and mailLoop are injected so the logic
+// is deterministically testable.
+func diagnoseAgentAt(a *Agent, now time.Time, windows []CronWindow, mailLoop mailLoopState) DiagnoseInfo {
 	info := agentInfo(a)
 	lastWrite := a.outputBuf.LastWriteTime()
 	threshold := StallThresholdFor(a.Type)
@@ -230,6 +273,15 @@ func diagnoseAgentAt(a *Agent, now time.Time, windows []CronWindow) DiagnoseInfo
 	// usage-limited agent is alive but wedged on the provider's rate-limit modal
 	// and would otherwise read as stalled. Surfacing it separately keeps
 	// operators from mistaking a limit wait for a genuine wedge (gh #45).
+	//
+	// "no_mail_loop" is RED for a structural reason rather than a behavioural
+	// one: the agent may be running perfectly and still be unreachable, because
+	// nothing will wake it to read its mail. It outranks stalled/idle/healthy —
+	// an agent with no delivery path must never diagnose clean (mg-de08) — but
+	// not rate_limited, which is the more actionable truth when both hold. The
+	// MailCheckMissing field is reported either way, so the fact is never
+	// hidden by whichever label wins.
+	mailCheckMissing := mailLoop == mailLoopMissing
 	health := "healthy"
 	switch {
 	case info.Status == StatusExited:
@@ -238,6 +290,8 @@ func diagnoseAgentAt(a *Agent, now time.Time, windows []CronWindow) DiagnoseInfo
 		health = "dead"
 	case info.RateLimited:
 		health = "rate_limited"
+	case mailCheckMissing:
+		health = "no_mail_loop"
 	case stalled:
 		health = "stalled"
 	case !lastWrite.IsZero() && idleDur >= ActiveRecencyWindow:
@@ -255,6 +309,7 @@ func diagnoseAgentAt(a *Agent, now time.Time, windows []CronWindow) DiagnoseInfo
 		StallThreshold:   threshold.String(),
 		Stalled:          stalled,
 		CronCovered:      cronCovered,
+		MailCheckMissing: mailCheckMissing,
 		Health:           health,
 		RecentOutputTail: tail,
 	}
@@ -542,18 +597,43 @@ func (r *Registry) handleDiagnose(w http.ResponseWriter, req *http.Request) {
 }
 
 // diagnose builds a DiagnoseInfo for an agent, consulting the registry's
-// stall-schedule provider (if installed) so a cron-driven agent's between-cron
-// idle is not reported as stalled (mg-5b23).
+// schedule providers (if installed) so a cron-driven agent's between-cron idle
+// is not reported as stalled (mg-5b23) and an expected agent with no mail loop
+// is reported RED (mg-de08).
 func (r *Registry) diagnose(a *Agent) DiagnoseInfo {
 	r.mu.RLock()
 	provider := r.stallSchedules
+	mailChecks := r.mailChecks
 	r.mu.RUnlock()
 
 	var windows []CronWindow
 	if provider != nil {
 		windows = provider.CronWindowsForAgent(a.EventAgent())
 	}
-	return diagnoseAgentAt(a, time.Now(), windows)
+	return diagnoseAgentAt(a, time.Now(), windows, mailLoopFor(a, mailChecks))
+}
+
+// mailLoopFor classifies an agent's mail delivery path. It judges only agents
+// in pogod's DESIRED STATE — the same predicate the mail-check reap uses
+// (IsExpectedAgent), so the two consumers cannot drift apart: the reap removes
+// mail-checks for agents NOT in the desired state, diagnose flags agents IN it
+// with no mail-check.
+//
+// Everything else is mailLoopUnknown rather than a guess. A polecat is not
+// judged here: it registers its own loop at spawn (mg-e633) with its own
+// escalation path on failure (mg-6fe0), and a polecat between spawn and
+// registration is not a fault.
+func mailLoopFor(a *Agent, p MailCheckProvider) mailLoopState {
+	if p == nil || a == nil {
+		return mailLoopUnknown
+	}
+	if !IsExpectedAgent(a.Name) {
+		return mailLoopUnknown
+	}
+	if p.HasMailCheck(a.EventAgent()) {
+		return mailLoopPresent
+	}
+	return mailLoopMissing
 }
 
 // NudgeAPIResponse is returned for wait-idle nudges to report delivery status.

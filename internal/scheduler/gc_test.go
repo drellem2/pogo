@@ -6,13 +6,25 @@ import (
 	"time"
 )
 
-// fakeLiveness is an AgentLiveness backed by a set of agent identities that are
-// considered alive. Anything not in the set is "gone".
+// fakeLiveness is an AgentLiveness backed by two sets of agent identities:
+// those with a live process, and those in the desired state but not (yet)
+// running — the EXPECTED case a pogod restart puts every crew agent into
+// (mg-de08). Anything in neither set is GONE.
 type fakeLiveness struct {
-	alive map[string]bool
+	alive    map[string]bool
+	expected map[string]bool
 }
 
-func (f fakeLiveness) IsAlive(agent string) bool { return f.alive[agent] }
+func (f fakeLiveness) AgentState(agent string) AgentState {
+	switch {
+	case f.alive[agent]:
+		return AgentAlive
+	case f.expected[agent]:
+		return AgentExpected
+	default:
+		return AgentGone
+	}
+}
 
 // addMailCheck inserts a mail-check-<agent> schedule for the given agent and
 // fails the test on error.

@@ -63,25 +63,63 @@ const maxHTTPConns = 256
 
 // registryLiveness implements scheduler.AgentLiveness against the agent
 // registry so the scheduler can garbage-collect mail-check-* schedules whose
-// target agent has vanished (gh drellem2/macguffin #15). A schedule addresses an
+// target agent is gone (gh drellem2/macguffin #15). A schedule addresses an
 // agent by its event identity (cat-/crew-<name>) or, for some crew schedules,
-// its bare name, so we match on both. An agent counts as alive when its process
-// is running, or when it's a restart-on-crash agent the registry still holds —
-// a transient mid-restart window must not reap its mail-check loop. Anything
-// else — no registry entry (stopped, or pogod restarted and lost its children),
-// or a terminally-exited no-restart agent — is gone.
+// its bare name, so we match on both.
+//
+// It answers on TWO independent sources, and the second one is the mg-de08 fix:
+//
+//   - the registry — evidence of an actual process. A running agent, or a
+//     restart-on-crash agent the registry still holds (a transient mid-restart
+//     window), is ALIVE.
+//   - the desired state on disk (agent.IsExpectedAgent) — an auto_start, not
+//     parked crew prompt. Such an agent is EXPECTED whether or not it is
+//     registered.
+//
+// The registry alone is NOT sufficient, and believing it was is what caused
+// mg-de08. A freshly-started pogod has an EMPTY registry: its scheduler loads
+// the fleet's persisted mail-check-* from disk and starts ticking BEFORE
+// AutoStartAgents() spawns the crew, so a registry-only answer reports every
+// crew agent gone and reaps the entire fleet's mail loop seconds before the
+// crew boot into a world where their schedules no longer exist. The old
+// RestartOnCrash guard could not save them: it reads a flag off a registry
+// entry that does not exist yet.
+//
+// So an empty registry means UNKNOWN, never GONE. GONE keeps its previous
+// meaning and its previous behaviour — not in the desired state (polecats,
+// agents whose prompt was removed) or explicitly stopped — which is what
+// preserves orphan-nudge prevention. Across a pogod restart the population
+// splits cleanly: crew are auto_start (EXPECTED → keep), polecats are not
+// (GONE → reap, exactly as before).
 type registryLiveness struct{ reg *agent.Registry }
 
-func (l registryLiveness) IsAlive(scheduleAgent string) bool {
-	if l.reg == nil {
-		return false
-	}
-	for _, a := range l.reg.List() {
-		if a.Name == scheduleAgent || a.EventAgent() == scheduleAgent {
-			return a.Alive() || a.RestartOnCrash
+func (l registryLiveness) AgentState(scheduleAgent string) scheduler.AgentState {
+	if l.reg != nil {
+		for _, a := range l.reg.List() {
+			if a.Name == scheduleAgent || a.EventAgent() == scheduleAgent {
+				if a.Alive() || a.RestartOnCrash {
+					return scheduler.AgentAlive
+				}
+			}
 		}
 	}
-	return false
+	// No live process. That is not evidence of death — ask the desired state
+	// whether this agent is supposed to be running before reaping anything.
+	// An explicitly stopped agent is already reaped eagerly by pogod's onExit
+	// hook (RemoveMailChecksForAgent), so this sweep does not need to catch it.
+	expected, err := agent.DesiredStateFor(scheduleAgent)
+	switch {
+	case err != nil:
+		// A prompt exists for this agent but we could not read it. We know it
+		// was configured and know nothing else — the one thing we must not do
+		// is call that death.
+		log.Printf("scheduler: cannot classify %s against the desired state (%v); NOT reaping its mail-check", scheduleAgent, err)
+		return scheduler.AgentUnknown
+	case expected:
+		return scheduler.AgentExpected
+	default:
+		return scheduler.AgentGone
+	}
 }
 
 // schedulePauser implements agent.SchedulePauser against the scheduler so
@@ -260,6 +298,33 @@ func (p schedulerStallWindows) CronWindowsForAgent(agentIdentity string) []agent
 		}
 	}
 	return windows
+}
+
+// schedulerMailChecks implements agent.MailCheckProvider against the scheduler
+// so diagnose can report an EXPECTED agent that has no mail delivery path
+// (mg-de08). It is the inverse consumer of schedulerStallWindows: that one
+// reads schedules to explain away idle, this one reads them to condemn an
+// agent nothing can wake.
+type schedulerMailChecks struct{ sched *scheduler.Scheduler }
+
+func (p schedulerMailChecks) HasMailCheck(agentIdentity string) bool {
+	if p.sched == nil {
+		return false
+	}
+	// Match the same alias forms as schedulerStallWindows and registryLiveness:
+	// a mail-check may be registered under the event identity or the bare name.
+	aliases := []string{agentIdentity}
+	if bare := strings.TrimPrefix(strings.TrimPrefix(agentIdentity, "crew-"), "cat-"); bare != agentIdentity {
+		aliases = append(aliases, bare)
+	}
+	for _, alias := range aliases {
+		for _, e := range p.sched.List(alias) {
+			if strings.HasPrefix(e.ID, scheduler.MailCheckIDPrefix) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func healthHandler(w http.ResponseWriter, r *http.Request) {
@@ -981,6 +1046,11 @@ Flags:
 		hb.Threshold = cfg.Heartbeat.JumpThreshold
 	}
 
+	// The mail-check reap's startup grace (mg-de08). Built here because the
+	// scheduler below installs it and the auto-start sweep further down opens
+	// it; it stays closed until then.
+	gcGate := newStartupGCGate(startupGCSettle)
+
 	// Start the scheduler. Schedules in ~/.pogo/schedules.json drive a
 	// Tick() call from the heartbeat loop — wall-clock jumps are absorbed
 	// for free because the scheduler stores absolute fire times and the
@@ -1007,14 +1077,27 @@ Flags:
 			log.Printf("pogod: scheduler load failed (%s): %v", schedPath, err)
 		} else {
 			// Install the liveness checker so Tick garbage-collects
-			// mail-check-* schedules whose target agent has disappeared
-			// (gh drellem2/macguffin #15). Backed by the agent registry.
+			// mail-check-* schedules whose target agent is gone (gh
+			// drellem2/macguffin #15). Backed by the agent registry AND the
+			// desired state on disk: an unregistered crew agent is EXPECTED,
+			// not gone (mg-de08).
 			s.SetLiveness(registryLiveness{reg: agentRegistry})
+			// Hold that reap until the first auto-start sweep has completed and
+			// settled. The invariant above is only as good as the data it reads,
+			// and at this point in startup the registry is empty and the crew
+			// have not been spawned yet (mg-de08).
+			s.SetGCGate(gcGate.open)
 			sched = s
 			// Make diagnose cron-aware: a crew agent driven by a recurring cron
 			// is idle by design between firings and must not be flagged as
 			// stalled within one cron interval of its last firing (mg-5b23).
 			agentRegistry.SetStallScheduleProvider(schedulerStallWindows{sched: s})
+			// The inverse check (mg-de08): an agent pogod is expected to be
+			// running with NO mail-check schedule can be mailed but never
+			// woken, and until now diagnosed perfectly healthy. Same
+			// desired-state predicate as the reap above — one source of truth,
+			// two directions.
+			agentRegistry.SetMailCheckProvider(schedulerMailChecks{sched: s})
 			// Let park/wake pause and restore an agent's schedules (mg-41e1).
 			agentRegistry.SetSchedulePauser(schedulePauser{sched: s})
 			// Auto-register a polecat's mail-check loop at spawn so review
@@ -1335,6 +1418,15 @@ Flags:
 			}
 		}
 	}
+
+	// Open the mail-check reap's startup grace (after the settle window). This
+	// sits OUTSIDE the branches above on purpose: every startup path must reach
+	// it, including the two that deliberately start nothing (no config file,
+	// [agents] autostart = false). Those daemons still supervise polecats, and
+	// a gate that never opens would never reap a dead polecat's mail-check
+	// loop — trading mg-de08 for the orphan-nudge accumulation the reap exists
+	// to prevent (mg-de08 PART B).
+	gcGate.markAutoStartComplete(time.Now())
 
 	// Serve HTTP (blocks until shutdown). Explicit server instead of bare
 	// http.Serve so a slow or hung client can't pin a goroutine forever,

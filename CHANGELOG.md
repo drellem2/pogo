@@ -28,6 +28,40 @@ is the curated, human-readable summary kept in sync at each release cut.
 
 ### Fixed
 
+- **A pogod restart no longer reaps the fleet's mail-check schedules (mg-de08).**
+  Every redeploy silently killed the mail cadence of the entire crew. The
+  successor pogod — not the bounce — was the culprit: it starts with an **empty
+  registry**, loads the fleet's persisted `mail-check-*` from disk, and starts
+  ticking *before* `AutoStartAgents()` spawns the crew, so the GC sweep saw no
+  registry entry for any agent, classified all of them `agent_gone`, and deleted
+  their mail loops seconds before the crew booted into a world without them.
+  Observed live on 2026-07-17: five crew mail-checks reaped at 02:00, a ~2h
+  silent mail stall, caught only because one unrelated heartbeat happened to
+  look stale. The reap now requires **positive evidence of death, never absence
+  of evidence of life**: an agent in pogod's desired state (an `auto_start`,
+  not-parked crew prompt) is EXPECTED and keeps its mail-check whether or not it
+  is registered, while GONE keeps its exact previous meaning and behaviour — a
+  polecat's mail-check is still reaped, so orphan-nudge prevention is unchanged.
+  The sweep is additionally held until the first auto-start sweep completes plus
+  a 30s settle window, so the invariant is never evaluated against data that
+  isn't loaded yet. Fails safe: a delayed reap is invisible, a premature one was
+  this bug.
+
+- **`pogo agent diagnose` reports a missing mail loop as unhealthy (mg-de08).**
+  The reap above fixed one instance; this fixes the class. An agent that can be
+  mailed but has nothing to wake it looked *perfectly healthy* — running, decent
+  uptime, answering nudges — which is why the outage stayed invisible for hours,
+  and why an agent that never had a mail loop at all (architect) went unnoticed
+  in the same window. The cause was an asymmetry: the only thing diagnose did
+  with schedules was consult them to **suppress** a stall label (`cron_covered`),
+  so schedule-awareness could only ever make an agent look healthier. Diagnose
+  now runs the inverse check off the **same desired-state predicate** as the
+  reap — one source of truth, two directions — and an EXPECTED agent with no
+  `mail-check-<name>` reports `health: no_mail_loop` (`mail_check_missing` in
+  `--json`), with the restore command in the text output. `bin/pogo-self-deploy`
+  additionally asserts post-bounce that no mail-check was lost, tolerating the
+  loops of polecats a `--force` bounce legitimately killed.
+
 - **Rebased PRs no longer dangle open after their content merges (mg-f18c).**
   The refinery rebases each branch onto the target before merging, so for any
   2nd-or-later merge in a batch the landed SHA differs from the PR's head SHA

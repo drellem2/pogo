@@ -347,6 +347,12 @@ type Registry struct {
 	// default, and what unit tests use) disables cron-aware suppression.
 	stallSchedules StallScheduleProvider
 
+	// mailChecks, when set, reports whether an agent has a live mail-check
+	// schedule so diagnose can turn RED on an EXPECTED agent that has no mail
+	// delivery path (mg-de08). pogod wires it to its scheduler; nil (the
+	// default, and what unit tests use) disables the check.
+	mailChecks MailCheckProvider
+
 	// schedulePauser, when set, lets Park/Wake pause and restore an agent's
 	// pogod schedules (mg-41e1). pogod wires it to its scheduler; nil (bare
 	// registry, scheduler disabled) makes park skip schedule handling.
@@ -394,6 +400,15 @@ func (r *Registry) SetStallScheduleProvider(p StallScheduleProvider) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.stallSchedules = p
+}
+
+// SetMailCheckProvider installs the mail-check lookup used by diagnose to
+// detect an EXPECTED agent with no mail delivery path (mg-de08). Call once at
+// startup before agents are diagnosed.
+func (r *Registry) SetMailCheckProvider(p MailCheckProvider) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.mailChecks = p
 }
 
 // SetOnExit sets the callback invoked when any agent exits.

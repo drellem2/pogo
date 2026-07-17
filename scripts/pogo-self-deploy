@@ -67,6 +67,100 @@ json_num() { sed -n "s/.*\"$1\":\([0-9][0-9]*\).*/\1/p"; }
 base_url() { echo "http://127.0.0.1:${PORT}"; }
 
 # ---------------------------------------------------------------------------
+# Mail-check post-check (mg-de08)
+# ---------------------------------------------------------------------------
+# The bounce is the one moment the fleet's mail loop reliably breaks, so it is
+# the one moment worth checking it. On 2026-07-17 a redeploy reaped five crew
+# mail-check schedules as agent_gone; the fleet then looked healthy — scheduled,
+# answering nudges, diagnosing clean — with no mail delivery for ~2h. Nobody
+# noticed until an unrelated heartbeat happened to look stale.
+#
+# pogod now keeps EXPECTED agents' mail-checks across a restart (mg-de08 Part
+# A), and diagnose reports a missing one RED (Part C). This is the third leg:
+# an independent assertion, from outside pogod, on the exact event that
+# triggers the failure. It reports; it never blocks the redeploy — the daemon
+# is already up and running main by the time it runs, and a false alarm must
+# not look like a failed deploy.
+
+# count_mail_checks — count mail-check-* ids on stdin. Pure: the sed/grep half
+# of mail_check_count, split out so it is testable without a live daemon.
+count_mail_checks() {
+    grep -o '"id":"mail-check-[^"]*"' | wc -l | tr -d ' '
+}
+
+# mail_check_count — how many mail-check-* schedules pogod currently holds.
+# Empty (not 0) when pogod cannot be reached: "unreachable" and "zero
+# schedules" are different facts and must not compare equal — treating an
+# unreachable daemon as "0 mail-checks" would report the entire fleet lost.
+mail_check_count() {
+    local body
+    body="$(curl -sf --max-time 5 "$(base_url)/scheduler/schedules" 2>/dev/null)" || return 0
+    [ -n "$body" ] || return 0
+    printf '%s' "$body" | count_mail_checks
+}
+
+# classify_mail_check_restore PRE POST SLACK -> ok | unknown | missing:<n>
+#
+# SLACK is the number of mail-checks whose loss is EXPECTED — the polecats a
+# --force bounce killed. Their schedules are reaped on purpose (they really are
+# gone), so counting them as damage would cry wolf on every forced deploy.
+#
+# A post-count ABOVE pre is "ok": the crew re-registering, or a polecat
+# spawning, both legitimately add. This check only ever asserts that mail-checks
+# were not silently LOST.
+classify_mail_check_restore() {
+    local pre="$1" post="$2" slack="${3:-0}"
+    # Validate each count SEPARATELY. Concatenating them first ("$pre$post")
+    # reads as numeric when either side is empty, which turns an unreachable
+    # daemon into a report that the whole fleet's mail loop was wiped.
+    case "$pre"  in ''|*[!0-9]*) echo "unknown"; return ;; esac
+    case "$post" in ''|*[!0-9]*) echo "unknown"; return ;; esac
+    case "$slack" in ''|*[!0-9]*) slack=0 ;; esac
+    if [ "$post" -ge $(( pre - slack )) ]; then
+        echo "ok"
+    else
+        echo "missing:$(( pre - slack - post ))"
+    fi
+}
+
+# verify_mail_checks_restored PRE SLACK — poll the post-bounce count and report.
+# Polls because the new pogod loads its schedules from disk moments after the
+# port answers; it is not an "agents re-register in time" race (Part A means
+# nothing has to re-register), just startup ordering.
+verify_mail_checks_restored() {
+    local pre="$1" slack="${2:-0}" deadline verdict post
+    if [ -z "$pre" ]; then
+        log "mail-check post-check: SKIPPED (could not count mail-checks before the bounce)"
+        return 0
+    fi
+    deadline=$(( $(date +%s) + 30 ))
+    while :; do
+        post="$(mail_check_count)"
+        verdict="$(classify_mail_check_restore "$pre" "${post:-}" "$slack")"
+        [ "$verdict" = "ok" ] && break
+        [ "$(date +%s)" -ge "$deadline" ] && break
+        sleep 3
+    done
+    case "$verdict" in
+        ok)
+            log "mail-check post-check: OK — $post mail-check schedule(s) present (pre-bounce $pre, expected loss $slack)"
+            ;;
+        unknown)
+            log "mail-check post-check: UNKNOWN — could not read schedules from the new pogod"
+            log "  verify by hand: pogo schedule list | grep mail-check"
+            ;;
+        missing:*)
+            err "mail-check post-check: FAILED — ${verdict#missing:} mail-check schedule(s) LOST across the bounce"
+            err "  pre-bounce $pre, now ${post:-?}, expected loss $slack (mg-de08)"
+            err "  the fleet's mail loop is degraded and WILL LOOK HEALTHY. Diagnose:"
+            err "    pogo schedule list | grep mail-check"
+            err "    pogo agent diagnose <name>    # reports no_mail_loop for an agent with no loop"
+            err "  restore by nudging the affected agents to re-register their mail-check."
+            ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
 # Revision sources (the three axes of drift)
 # ---------------------------------------------------------------------------
 
@@ -368,6 +462,9 @@ cmd_redeploy() {
     fi
 
     # 3. Restart (always kickstart) and verify the new process is main.
+    #    Count the fleet's mail-checks FIRST — the old pogod is the only thing
+    #    that can tell us what there was to preserve (mg-de08).
+    local mail_pre; mail_pre="$(mail_check_count)"
     do_restart
     verify_running || exit 8
 
@@ -376,6 +473,15 @@ cmd_redeploy() {
         log "cleaning up $leftover polecat(s) orphaned by the forced bounce"
         cleanup_orphans "$snapshot"
     fi
+
+    # 5. Assert the fleet's mail loop survived the bounce. Reports only — the
+    #    daemon is already up; a mail-check gap is an alarm to act on, not a
+    #    reason to call a completed deploy failed (mg-de08).
+    local mail_slack=0
+    if [ "$leftover" != "0" ] && [ "$leftover" != "?" ]; then
+        mail_slack="$leftover" # those polecats are genuinely gone; their loops go with them
+    fi
+    verify_mail_checks_restored "$mail_pre" "$mail_slack"
 
     log "redeploy complete."
 }

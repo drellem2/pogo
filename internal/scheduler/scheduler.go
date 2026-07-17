@@ -164,13 +164,44 @@ func (e *Entry) applyDefaults() {
 // below reaps them. See gh drellem2/macguffin #15.
 const MailCheckIDPrefix = "mail-check-"
 
-// AgentLiveness reports whether the agent addressed by a schedule still has a
-// live process. The scheduler consults it to garbage-collect mail-check-*
-// schedules whose target agent has vanished (gh drellem2/macguffin #15). pogod
-// backs this with its agent registry; an agent it doesn't know about — e.g.
-// after a pogod restart killed every child — counts as "not alive".
+// AgentState is what the reap decision knows about the agent a schedule
+// addresses. It is deliberately a tri-state and not a bool: "I have no evidence
+// this agent is alive" and "I have evidence this agent is dead" are different
+// claims, and only the second one licenses a reap (mg-de08).
+type AgentState int
+
+const (
+	// AgentUnknown means we have no evidence either way. It is the zero value
+	// on purpose: an AgentLiveness that cannot classify an agent — or a future
+	// implementation that forgets a case — fails SAFE, and the schedule stays.
+	// A schedule kept one tick too long is harmless; one reaped a tick too
+	// early is the mg-de08 outage.
+	AgentUnknown AgentState = iota
+	// AgentAlive means the agent has a live process right now.
+	AgentAlive
+	// AgentExpected means the agent is in pogod's desired state — it is
+	// supposed to be running, whether or not it is registered yet. An agent
+	// mid-restart, or one whose pogod has not finished its auto-start sweep,
+	// is EXPECTED, not gone. Its mail-check loop must survive.
+	AgentExpected
+	// AgentGone means positive evidence of death: the agent is not in the
+	// desired state (a polecat, an agent whose prompt was removed) or was
+	// explicitly stopped. Only this state licenses a reap.
+	AgentGone
+)
+
+// AgentLiveness classifies the agent addressed by a schedule. The scheduler
+// consults it to garbage-collect mail-check-* schedules whose target agent is
+// GONE (gh drellem2/macguffin #15). pogod backs this with its agent registry
+// plus the desired-state predicate (agent.IsExpectedAgent).
+//
+// The contract is one-directional and load-bearing: a reap requires POSITIVE
+// EVIDENCE OF DEATH, never absence of evidence of life. An implementation that
+// does not know must answer AgentUnknown — never AgentGone. Answering GONE for
+// an agent that is merely unregistered is what silently reaped the whole
+// fleet's mail loop across a pogod restart (mg-de08).
 type AgentLiveness interface {
-	IsAlive(scheduleAgent string) bool
+	AgentState(scheduleAgent string) AgentState
 }
 
 // Deliverer abstracts the side of the scheduler that talks to the rest of
@@ -245,6 +276,12 @@ type Scheduler struct {
 	// whose target agent has disappeared. nil disables GC (most unit tests).
 	liveness AgentLiveness
 
+	// gcGate, when set, must return true before GCStaleMailChecks reaps
+	// anything. pogod uses it to hold the sweep until its desired state is
+	// loaded (mg-de08). nil means no gate — the default, and what unit tests
+	// that drive GC directly rely on.
+	gcGate func(now time.Time) bool
+
 	// SkipWindow is how recent a fire must be (relative to "now") to fire
 	// under ReplaySkip. Defaults to 2 × tick interval — wide enough to cover
 	// normal scheduling jitter, tight enough to drop fires from a long sleep.
@@ -285,6 +322,23 @@ func (s *Scheduler) SetLiveness(l AgentLiveness) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.liveness = l
+}
+
+// SetGCGate installs a gate that must open before GCStaleMailChecks reaps
+// anything. It exists because the reap's own inputs need time to load: a
+// freshly-started pogod has an empty registry and has not yet run its
+// auto-start sweep, so every liveness answer it could give is uninformed
+// (mg-de08).
+//
+// The invariant lives in AgentLiveness; the gate is what keeps that invariant
+// from being evaluated against data that isn't loaded yet. It fails safe in
+// the only direction that matters: a delayed reap is harmless, a premature one
+// is the outage. Call once at startup before the heartbeat drives Tick; a nil
+// gate (the default) reaps immediately.
+func (s *Scheduler) SetGCGate(gate func(now time.Time) bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.gcGate = gate
 }
 
 // Add inserts (or replaces) an entry, persists, and returns the canonical
@@ -603,21 +657,38 @@ func (s *Scheduler) dueLocked(now time.Time) []entryKey {
 	return out
 }
 
-// GCStaleMailChecks sweeps every mail-check-* schedule whose target agent is no
-// longer alive (per the configured AgentLiveness) and removes it, emitting a
+// GCStaleMailChecks sweeps every mail-check-* schedule whose target agent is
+// GONE (per the configured AgentLiveness) and removes it, emitting a
 // schedule_removed event (reason "agent_gone") for each. Returns the number
 // reaped. Called from Tick on every heartbeat, so a vanished agent's schedule
 // is collected within one tick — well inside its next fire interval, which is
-// what keeps scheduler_fire_failed events from accumulating. No-op when no
-// liveness checker is installed. See gh drellem2/macguffin #15.
+// what keeps scheduler_fire_failed events from accumulating for agents that
+// really are gone.
+//
+// Only AgentGone reaps. An ALIVE, EXPECTED, or UNKNOWN agent keeps its
+// schedule: the sweep must never infer death from a missing registry entry
+// (mg-de08). Note the asymmetry this creates with GC's accumulation rationale —
+// for an EXPECTED agent a scheduler_fire_failed is not garbage to collect, it
+// is the fault reporting itself, and deleting the schedule would suppress the
+// symptom instead of the fault. Such an agent stays noisy on purpose; diagnose
+// turns it RED (see agent.DiagnoseInfo.MailCheckMissing).
+//
+// No-op when no liveness checker is installed, or before the GC gate opens
+// (see SetGCGate). See gh drellem2/macguffin #15.
 func (s *Scheduler) GCStaleMailChecks(now time.Time) int {
 	s.mu.Lock()
 	live := s.liveness
+	gate := s.gcGate
 	s.mu.Unlock()
 	if live == nil {
 		return 0
 	}
-	return s.reapMailChecks(now, func(agent string) bool { return !live.IsAlive(agent) })
+	if gate != nil && !gate(now) {
+		return 0
+	}
+	return s.reapMailChecks(now, func(agent string) bool {
+		return live.AgentState(agent) == AgentGone
+	})
 }
 
 // RemoveMailChecksForAgent eagerly reaps mail-check-* schedules addressed to any

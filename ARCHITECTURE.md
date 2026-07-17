@@ -359,19 +359,69 @@ itself restarted — the schedule would otherwise keep firing every interval int
 a `scheduler_fire_failed` event. Two mechanisms reap it:
 
 - **Tick sweep (backstop).** Before computing what's due, every Tick removes
-  each `mail-check-*` entry whose target agent the registry no longer reports
-  alive. This covers the case no in-process hook can see — pogod restarting
-  kills its children without firing their exit callbacks. Reaped within one
-  heartbeat, so the schedule is gone well before its next fire interval.
+  each `mail-check-*` entry whose target agent is **GONE**. This covers the case
+  no in-process hook can see — pogod restarting kills its children without
+  firing their exit callbacks. Reaped within one heartbeat, so the schedule is
+  gone well before its next fire interval.
 - **Eager onExit reap.** When the agent registry observes a non-restart agent
   exit (stop or crash), pogod immediately removes that agent's `mail-check-*`
   schedules rather than waiting for the next sweep.
 
-An agent counts as alive when its process is running, or when it is a
-restart-on-crash agent the registry still holds (so a transient mid-restart
-window does not reap a crew agent's loop). Every GC removal emits the same
-`schedule_removed` event as an explicit `rm`, tagged `reason: agent_gone`, so
-the sweep is auditable from `events.log` alone.
+**The reap requires positive evidence of death, never absence of evidence of
+life (mg-de08).** `AgentLiveness` answers a tri-state, and only `AgentGone`
+reaps:
+
+| State | Meaning | Mail-check |
+|---|---|---|
+| `AgentAlive` | process running, or a restart-on-crash agent the registry still holds (transient mid-restart) | kept |
+| `AgentExpected` | in pogod's **desired state** — an `auto_start`, not-parked crew prompt — whether or not it is registered | kept |
+| `AgentGone` | **not** in the desired state (a polecat, a prompt without `auto_start`, a parked agent), or explicitly stopped | reaped |
+| `AgentUnknown` | the desired state could not be read — e.g. a prompt that exists but does not parse, so the agent is known to be configured and nothing more. Also the zero value, so an implementation that cannot classify fails safe | kept |
+
+The desired-state half is what a registry-only answer cannot supply, and its
+absence caused a fleet-wide outage. A restarted pogod begins with an **empty
+registry**: it loads the fleet's persisted `mail-check-*` from disk and starts
+ticking *before* `AutoStartAgents()` spawns the crew, so a registry-only answer
+reports every crew agent gone and reaps the whole fleet's mail loop seconds
+before the crew boot into a world without their schedules. The old
+restart-on-crash guard could not prevent it — it reads a flag off a registry
+entry that does not exist yet. Across a restart the population now splits
+cleanly: crew are `auto_start` (EXPECTED → keep), polecats are not (GONE →
+reap), so orphan-nudge prevention is unchanged.
+
+**Startup grace.** The sweep is additionally held until pogod's first
+`AutoStartAgents()` sweep completes plus a 30s settle window: the invariant
+above is only as good as the data it reads, and at boot neither the registry
+nor the desired state is loaded yet. It fails safe in the only direction that
+matters — a delayed reap is invisible, a premature one is the outage.
+
+**Do not delete the alarm.** The GC's rationale is that it keeps
+`scheduler_fire_failed` events from accumulating. For an EXPECTED agent a fire
+failure is not garbage — it is the fault reporting itself, so such an agent
+stays noisy on purpose and `pogo agent diagnose` reports `no_mail_loop` (see
+below). Where the noise needs a channel, escalate (as
+`newMailCheckReachabilityEscalator` does); never by deletion.
+
+Every GC removal emits the same `schedule_removed` event as an explicit `rm`,
+tagged `reason: agent_gone`, so the sweep is auditable from `events.log` alone.
+
+### The inverse check: a missing mail loop must be legible
+
+`agent.IsExpectedAgent` — the desired-state predicate — has **two consumers and
+one source of truth**, so they cannot drift apart:
+
+- the **reap** enforces the invariant by removing mail-checks for agents *not*
+  in the desired state;
+- **diagnose** enforces it by flagging agents *in* the desired state with *no*
+  mail-check (`health: no_mail_loop`, `mail_check_missing: true`).
+
+Before mg-de08 the only thing diagnose did with schedules was consult them to
+*suppress* a stall label (`cron_covered`): schedule-awareness ran in exactly one
+direction and could only ever make an agent look healthier. An agent whose mail
+loop had been reaped therefore diagnosed clean — which is why a two-hour
+fleet-wide mail outage stayed invisible. An agent that can be mailed but never
+woken is unhealthy, and now says so. `bin/pogo-self-deploy` asserts the same
+invariant from outside the daemon, post-bounce.
 
 ### Agent-side recipe
 

@@ -74,6 +74,62 @@ if classify aaa aaa "" ; then fail "empty main should fail classify"; else pass 
 # --skip-drain flag defaults false and is settable (bootstrap remedy)
 [ "$SKIP_DRAIN" = false ] && pass "skip-drain defaults false" || fail "skip-drain default"
 
+# --- mail-check post-check: the mg-de08 positive control -------------------
+# A check that cannot fail is not a check. The FIRST assertion below is the one
+# that earns the rest: it drives the exact live incident — five crew mail-checks
+# present before a bounce, reaped as agent_gone during it, zero after — and
+# proves the check reports RED. Only then is a green from it worth anything.
+
+# The 2026-07-17 outage: 5 mail-checks in, 0 out, no polecats killed.
+[ "$(classify_mail_check_restore 5 0 0)" = "missing:5" ] \
+    && pass "post-check FAILS on the live mg-de08 incident (5 reaped -> missing:5)" \
+    || fail "post-check did not fire on the mg-de08 incident ($(classify_mail_check_restore 5 0 0))"
+# A partial loss must fire too — the outage was only caught because ONE agent's
+# heartbeat went stale; four surviving loops must not mask the fifth.
+[ "$(classify_mail_check_restore 5 4 0)" = "missing:1" ] \
+    && pass "post-check FAILS on a partial loss (5 -> 4)" \
+    || fail "post-check missed a partial loss ($(classify_mail_check_restore 5 4 0))"
+
+# ...and the other direction: an intact fleet is OK, or the check cries wolf on
+# every deploy and gets ignored — which is how mg-de08 stayed quiet.
+[ "$(classify_mail_check_restore 5 5 0)" = "ok" ] \
+    && pass "post-check passes when every mail-check survives" || fail "post-check false alarm (5 -> 5)"
+[ "$(classify_mail_check_restore 5 6 0)" = "ok" ] \
+    && pass "post-check passes when a mail-check is ADDED (5 -> 6)" || fail "post-check false alarm on an added schedule"
+[ "$(classify_mail_check_restore 0 0 0)" = "ok" ] \
+    && pass "post-check passes on an empty fleet (0 -> 0)" || fail "post-check false alarm on empty fleet"
+
+# A --force bounce kills polecats; their mail-checks are reaped ON PURPOSE.
+# Counting that as damage would cry wolf on every forced deploy.
+[ "$(classify_mail_check_restore 5 3 2)" = "ok" ] \
+    && pass "post-check tolerates the loss of 2 force-killed polecats' loops" \
+    || fail "post-check flagged an expected polecat loss ($(classify_mail_check_restore 5 3 2))"
+# But slack must not swallow a real loss beyond the polecats that died.
+[ "$(classify_mail_check_restore 5 2 2)" = "missing:1" ] \
+    && pass "post-check still fires on a loss beyond the force-killed polecats" \
+    || fail "slack swallowed a real loss ($(classify_mail_check_restore 5 2 2))"
+
+# Unreachable pogod -> unknown, never "everything is gone". mail_check_count
+# returns EMPTY (not 0) when curl fails, and an empty count must not read as a
+# fleet-wide wipe.
+[ "$(classify_mail_check_restore 5 "" 0)" = "unknown" ] \
+    && pass "post-check reports unknown (not FAILED) when the count is unreadable" \
+    || fail "unreadable post-count misclassified ($(classify_mail_check_restore 5 "" 0))"
+[ "$(classify_mail_check_restore "" 5 0)" = "unknown" ] \
+    && pass "post-check reports unknown when the pre-count is unreadable" || fail "unreadable pre-count misclassified"
+
+# --- count_mail_checks against a representative /scheduler/schedules body ---
+SCHEDS='[{"id":"mail-check-mayor","agent":"mayor","cron":"*/10 * * * *"},{"id":"sweep-morning","agent":"crew-pm-pogo","cron":"0 9 * * *"},{"id":"mail-check-pm-pogo","agent":"pm-pogo","cron":"*/10 * * * *"},{"id":"mail-check-mg-de08","agent":"de08","cron":"*/10 * * * *"}]'
+[ "$(printf '%s' "$SCHEDS" | count_mail_checks)" = "3" ] \
+    && pass "count_mail_checks counts only mail-check-* ids" \
+    || fail "count_mail_checks ($(printf '%s' "$SCHEDS" | count_mail_checks))"
+# The sweeps are exactly what made the outage invisible — agents kept LOOKING
+# scheduled. The counter must not be fooled by them.
+[ "$(printf '%s' '[{"id":"sweep-morning","agent":"crew-pm-pogo"},{"id":"sweep-evening","agent":"crew-pm-pogo"}]' | count_mail_checks)" = "0" ] \
+    && pass "count_mail_checks does not count surviving sweeps as mail-checks" || fail "count_mail_checks counted a sweep"
+[ "$(printf '%s' '[]' | count_mail_checks)" = "0" ] \
+    && pass "count_mail_checks handles an empty schedule list" || fail "count_mail_checks on empty list"
+
 echo ""
 PASS_COUNT=$(grep -c '^PASS:' "$RESULTS_FILE" 2>/dev/null || true)
 FAIL_COUNT=$(grep -c '^FAIL:' "$RESULTS_FILE" 2>/dev/null || true)

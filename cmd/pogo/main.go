@@ -1094,6 +1094,8 @@ Health states:
   idle         — quiet for over 30s but within the stall threshold (alive, between cycles)
   stalled      — quiet for longer than the stall threshold
   rate_limited — alive but wedged on the provider's usage-limit modal (gh #45)
+  no_mail_loop — expected to be running but has no mail-check schedule: it can
+                 be mailed, but nothing will wake it to read the mail (mg-de08)
   exited       — process has exited
   dead         — registered as running but OS process is gone
 
@@ -1134,6 +1136,14 @@ While it is within one cron interval of its last scheduled firing it reports
 				if diag.CronCovered {
 					fmt.Printf("\nℹ Idle past the stall threshold, but within one cron interval of\n")
 					fmt.Printf("  the last scheduled firing — this is normal between-cron idle, not a stall.\n")
+				}
+				if diag.MailCheckMissing {
+					fmt.Printf("\n⚠ NO MAIL LOOP: %s is expected to be running but has no\n", diag.Name)
+					fmt.Printf("  mail-check schedule. Mail sent to it will sit unread until something\n")
+					fmt.Printf("  nudges it by hand — the agent looks fine and is unreachable (mg-de08).\n")
+					fmt.Printf("  Restore it:\n")
+					fmt.Printf("    pogo schedule %s --cron \"*/10 * * * *\" --id mail-check-%s --replay once \\\n", diag.Name, diag.Name)
+					fmt.Printf("        --message \"Check your mail with mg mail list %s and handle any unread messages.\"\n", diag.Name)
 				}
 				if diag.Stalled {
 					fmt.Printf("\n⚠ Agent appears stalled. Consider nudging or restarting:\n")
