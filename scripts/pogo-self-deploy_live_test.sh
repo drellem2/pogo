@@ -64,8 +64,28 @@ cleanup() {
 }
 trap cleanup EXIT
 
-pass() { echo "PASS: $1"; echo "PASS: $1" >> "$RESULTS_FILE"; }
-fail() { echo "FAIL: $1"; echo "FAIL: $1" >> "$RESULTS_FILE"; }
+# Guard the WRITE, not the count. This file runs `set -u` and deliberately not
+# `set -e`, so a failed `>>` would not abort — and RESULTS_FILE being EMPTY (what
+# mktemp yields when it fails) is not something `set -u` catches: the variable IS
+# set. Without this guard, every assertion below really runs, prints a clean PASS
+# line to stdout, appends to nothing, and the verdict block tallies an unreadable
+# ledger as `0 passed, 0 failed` -> exit 0 -> GREEN. The refinery reads only the
+# exit code, and at 03:00 unattended this script is the SOLE detector: a green
+# gate that recorded nothing is indistinguishable from a green gate that recorded
+# everything. So the instrument reports its own failure AT the point of failure,
+# on the FIRST assertion, instead of having its health inferred from a downstream
+# tally that cannot tell "zero" from "unknown".
+#
+# NOTE: no number appears here, on purpose. A control that hard-codes a fact
+# about the system it controls inherits that fact's decay — the first draft of
+# this guard asserted a count of 4 assertions and was already stale when written
+# (mg-ea3e had added a fifth). It would have failed the next legitimate diff and
+# then been deleted by whoever it inconvenienced, leaving no protection at all.
+# This guard asserts an invariant, not a measurement: add a sixth assertion and
+# it keeps working untouched. "Did every assertion run?" is a DIFFERENT guard,
+# it owns a literal and therefore owns its decay, and it is deliberately not here.
+pass() { echo "PASS: $1"; echo "PASS: $1" >> "$RESULTS_FILE" || { echo "LEDGER WRITE FAILED: $1"; exit 1; }; }
+fail() { echo "FAIL: $1"; echo "FAIL: $1" >> "$RESULTS_FILE" || { echo "LEDGER WRITE FAILED: $1"; exit 1; }; }
 
 # Build FIRST, under the real HOME. Go resolves GOPATH/GOMODCACHE off $HOME, so
 # building after the sandbox override below sends it to re-download the whole
@@ -345,6 +365,15 @@ case "$OUT_UNK" in
 esac
 
 echo ""
+# Backstop to the write guard above: the ledger must be readable and non-empty
+# before any verdict is drawn from it. The `|| true` on the two greps below is
+# load-bearing and must stay — `grep -c` exits 1 on no-match, so a legitimate
+# zero NEEDS it — but that same `|| true` cannot tell a real zero from "I could
+# not read the file", and silently reports both as 0. This line makes that
+# distinction before the tally is trusted, so the `|| true` only ever has to mean
+# what it says. No literal here either: "the ledger has content" holds no matter
+# how many assertions this file grows.
+[ -s "$RESULTS_FILE" ] || { echo "ledger unreadable/empty — verdict cannot be trusted"; exit 1; }
 PASS_COUNT=$(grep -c '^PASS:' "$RESULTS_FILE" 2>/dev/null || true)
 FAIL_COUNT=$(grep -c '^FAIL:' "$RESULTS_FILE" 2>/dev/null || true)
 PASS_COUNT=${PASS_COUNT:-0}; FAIL_COUNT=${FAIL_COUNT:-0}
