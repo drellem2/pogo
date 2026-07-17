@@ -471,7 +471,7 @@ When deciding whether to spawn a {{.Worker}}:
 ## The Refinery
 
 The refinery is a deterministic merge queue loop inside pogod — not an agent. It runs automatically. When a {{.Worker}} finishes work, it:
-1. Pushes a branch (e.g., `polecat-<id>`)
+1. Pushes a branch — named after the {{.Worker}}'s **agent name**, not its work item id (`spawn-polecat abea --id=mg-abea` gets branch `polecat-abea`). **Never tell a {{.Worker}} its branch name** — not in a dispatch body, not in a wakeup note. You will get it wrong: it reads its own branch with `git rev-parse --abbrev-ref HEAD`, and its worktree is the authority (mg-d39e).
 2. Submits it via `pogo refinery submit <branch> --repo=<path>`
 3. Polls the refinery for the merge result
 4. If merged: marks the work item done via `mg done <id>` and exits

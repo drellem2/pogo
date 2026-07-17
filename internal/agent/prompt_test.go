@@ -3515,3 +3515,99 @@ func mustStat(t *testing.T, path string) os.FileInfo {
 	}
 	return fi
 }
+
+// TestShippedTemplatesNeverNameTheBranch pins the fix for mg-d39e: no shipped
+// polecat template may construct a branch name out of {{.Id}}.
+//
+// The branch pogod actually creates is gitgc.BranchPrefix + spawnReq.Name (see
+// api.go's polecat spawn path), but the template is only handed Id. Every
+// coordinator dispatch spawns with name=<short> --id=mg-<short>, so a rendered
+// "polecat-{{.Id}}" named polecat-mg-<short> while the real branch was
+// polecat-<short> — wrong on 100% of dispatches, and it cost three merge
+// cycles before anyone noticed (the polecats that merged cleanly did so by
+// reading their own worktree instead of trusting the doc).
+//
+// Name is deliberately NOT plumbed into TemplateVars as the fix. A branch name
+// in a prompt is a claim that can rot; the worktree is the observation. The
+// templates tell the polecat to read the branch instead — so this test asserts
+// the absence of the fabricated name, not the presence of a corrected one.
+func TestShippedTemplatesNeverNameTheBranch(t *testing.T) {
+	// Mirror a real coordinator dispatch: `spawn-polecat abea --id=mg-abea`.
+	const name, id = "abea", "mg-abea"
+	realBranch := "polecat-" + name // what pogod checks out
+	fabricated := "polecat-" + id   // what "polecat-{{.Id}}" used to render
+
+	for _, tmplName := range []string{
+		"prompts/templates/polecat.md",
+		"prompts/templates/polecat-qa.md",
+		"prompts/templates/polecat-build-pr.md",
+		"prompts/templates/polecat-triage.md",
+		"prompts/templates/polecat-review.md",
+	} {
+		data, err := defaultPrompts.ReadFile(tmplName)
+		if err != nil {
+			t.Fatalf("read embedded %s: %v", tmplName, err)
+		}
+		_, body, err := parsePromptFrontmatterBytes(data)
+		if err != nil {
+			t.Fatalf("parse frontmatter %s: %v", tmplName, err)
+		}
+		tmpl, err := template.New(tmplName).Parse(body)
+		if err != nil {
+			t.Fatalf("parse template %s: %v", tmplName, err)
+		}
+		var buf bytes.Buffer
+		vars := withDefaults(TemplateVars{
+			Id:          id,
+			Repo:        "/path/to/repo",
+			WorktreeDir: "/path/to/worktree",
+			Provider:    "claude",
+		})
+		if err := tmpl.Execute(&buf, vars); err != nil {
+			t.Fatalf("execute template %s: %v", tmplName, err)
+		}
+		out := buf.String()
+
+		if strings.Contains(out, fabricated) {
+			t.Errorf("%s: renders branch %q, but pogod creates %q — "+
+				"the template must not name the branch; tell the polecat to read it "+
+				"with `git rev-parse --abbrev-ref HEAD`", tmplName, fabricated, realBranch)
+		}
+	}
+}
+
+// TestShippedPolecatTemplatesTeachBranchObservation is the other half of
+// mg-d39e: the branch-using templates must hand the polecat the way to observe
+// its branch, not just stay silent about the name.
+func TestShippedPolecatTemplatesTeachBranchObservation(t *testing.T) {
+	// Only the templates whose protocol pushes a branch need this.
+	for _, tmplName := range []string{
+		"prompts/templates/polecat.md",
+		"prompts/templates/polecat-build-pr.md",
+	} {
+		data, err := defaultPrompts.ReadFile(tmplName)
+		if err != nil {
+			t.Fatalf("read embedded %s: %v", tmplName, err)
+		}
+		_, body, err := parsePromptFrontmatterBytes(data)
+		if err != nil {
+			t.Fatalf("parse frontmatter %s: %v", tmplName, err)
+		}
+		tmpl, err := template.New(tmplName).Parse(body)
+		if err != nil {
+			t.Fatalf("parse template %s: %v", tmplName, err)
+		}
+		var buf bytes.Buffer
+		if err := tmpl.Execute(&buf, withDefaults(TemplateVars{
+			Id: "mg-abea", Repo: "/path/to/repo", WorktreeDir: "/path/to/worktree", Provider: "claude",
+		})); err != nil {
+			t.Fatalf("execute template %s: %v", tmplName, err)
+		}
+		out := buf.String()
+
+		if !strings.Contains(out, "git rev-parse --abbrev-ref HEAD") {
+			t.Errorf("%s: must teach the polecat to read its branch with "+
+				"`git rev-parse --abbrev-ref HEAD`", tmplName)
+		}
+	}
+}

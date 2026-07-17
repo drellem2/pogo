@@ -74,7 +74,14 @@ Follow these steps exactly, in order. Skipping any step is a failure.
 
    *Why `pogo schedule` and not an in-process scheduler?* A harness in-process scheduler{{if eq .Provider "claude"}} (such as Claude Code's `CronCreate`){{end}} lives inside this harness session and has no notion of wall-clock time across sleep — if the host suspends for an hour, every fire that should have happened in that window is silently dropped. `pogo schedule` stores the next fire time on disk and replays through sleep; see "Reacting to scheduler fires" below for the policy.
 
-3. **Do the work.** Stay focused on the task described above. You are already in your isolated worktree at `{{.WorktreeDir}}` on branch `polecat-{{.Id}}`. **Run all commands in this directory** — do not `cd` to the source repository (see "Working in your worktree" above for why and for the equivalents).
+3. **Do the work.** Stay focused on the task described above. You are already in your isolated worktree at `{{.WorktreeDir}}`, on a branch that is **already checked out for you**. **Run all commands in this directory** — do not `cd` to the source repository (see "Working in your worktree" above for why and for the equivalents).
+
+   **Read your branch name — do not guess it, and do not let anyone tell you what it is:**
+   ```bash
+   BRANCH=$(git rev-parse --abbrev-ref HEAD)
+   echo "$BRANCH"
+   ```
+   Use `"$BRANCH"` everywhere below (push, submit, mail, `mg done`). This prompt deliberately does **not** name your branch: your work item id and your agent name are different strings, and the branch is named after the latter. A branch name written into a doc is a claim that can rot; `git rev-parse` is an observation that cannot. If a dispatch body, a wakeup note, or the {{.Coordinator}} tells you a branch name that disagrees with `git rev-parse --abbrev-ref HEAD`, **your worktree is right and the message is wrong** — use the worktree's answer and say so in your reply.
    - **Verify "not implemented" claims before acting on them.** When a design doc, ticket body, or comment says a feature "doesn't exist yet," "is on the forward plan," or "isn't shipped," confirm the claim before treating it as fact — design docs often pre-date the ship and become archeology, not plans. Run at least one of:
      - The canonical CLI from the design: `<tool> <subcommand> --help` or the example invocation it cites — does it succeed?
      - A grep for the named symbol in non-test code: `grep -rn '<symbol>' --include='*.go' .` (use your language's file extension; this works on macOS and Linux).
@@ -89,12 +96,12 @@ Follow these steps exactly, in order. Skipping any step is a failure.
    ```bash
    git add <files>
    git commit -m "<type>: <description> ({{.Id}})"
-   git push origin polecat-{{.Id}}
+   git push origin "$BRANCH"
    ```
 
 5. **Submit to the merge queue** (capture the MR ID from output):
    ```bash
-   pogo refinery submit polecat-{{.Id}} --repo={{.Repo}} --author={{.Id}} --target={{if .Branch}}{{.Branch}}{{else}}main{{end}}
+   pogo refinery submit "$BRANCH" --repo={{.Repo}} --author={{.Id}} --target={{if .Branch}}{{.Branch}}{{else}}main{{end}}
    ```
 
 6. **Wait for merge result** — poll refinery using a bash while-loop.
@@ -118,11 +125,11 @@ Follow these steps exactly, in order. Skipping any step is a failure.
 
    Two non-terminal outcomes need explicit handling — do NOT treat them as merge failures:
    - **`lost`** — the refinery lost this MR across a pogod restart (the branch is intact on origin). Resubmit **once** with the same step-5 command, capture the new MR ID, and go back to polling. If the resubmitted MR also comes back `lost`, stop resubmitting and mail the mayor instead.
-   - **empty/`null` (not found)** — the MR ID is unknown to the refinery (or was pruned from history — the error text will say "pruned" if so). Do not spin on it and do not improvise: mail the mayor (`mg mail send mayor --from=$POGO_AGENT_NAME --subject="refinery lost track of my MR" --body="MR <id> for branch polecat-{{.Id}}: refinery show returns not-found"`) and hold per step 8 — stay alive and wait for instructions.
+   - **empty/`null` (not found)** — the MR ID is unknown to the refinery (or was pruned from history — the error text will say "pruned" if so). Do not spin on it and do not improvise: mail the mayor (`mg mail send mayor --from=$POGO_AGENT_NAME --subject="refinery lost track of my MR" --body="MR <id> for branch $BRANCH: refinery show returns not-found"`) and hold per step 8 — stay alive and wait for instructions.
 
 7. **If merged:** mark the work item done:
    ```bash
-   mg done {{.Id}} --result='{"branch": "polecat-{{.Id}}"}'
+   mg done {{.Id}} --result="{\"branch\": \"$BRANCH\"}"
    ```
    pogod usually beats you to this (see step 6 note). If `mg done` fails because the item is already done, that is success — do not retry or escalate.
 

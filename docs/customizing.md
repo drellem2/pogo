@@ -406,8 +406,11 @@ An environment override exists for the file-count ceiling
 
 ## Polecat git garbage collection
 
-Every polecat runs in an isolated git worktree on its own `polecat-<id>`
-branch. When a polecat exits — normally or abnormally — pogod removes that
+Every polecat runs in an isolated git worktree on its own
+`polecat-<agent-name>` branch — named after the agent name passed to
+`spawn-polecat`, not the work item id (`spawn-polecat abea --id=mg-abea`
+gets branch `polecat-abea`). `gitgc` relies on this: a polecat's name equals
+its branch's `polecat-` suffix *and* its worktree basename. When a polecat exits — normally or abnormally — pogod removes that
 worktree. But branches accumulate, and a worktree can still leak if pogod
 itself dies mid-polecat. pogo garbage-collects both, plus orphaned polecat
 directories under `~/.pogo/polecats` — dirs no longer in `git worktree

@@ -154,13 +154,25 @@ func TestPolecatTemplateExpansion(t *testing.T) {
 		"OAuth tokens expire after 5 minutes",
 		"mg claim gt-a3f",
 		"mg done gt-a3f",
-		"polecat-gt-a3f",
 		"--target=main",
 	}
 	for _, check := range checks {
 		if !strings.Contains(expanded, check) {
 			t.Errorf("expanded template missing %q", check)
 		}
+	}
+
+	// The template must NOT name the branch. This assertion used to demand
+	// "polecat-gt-a3f" — pinning the mg-d39e defect in place: pogod names the
+	// branch after the agent name, not the work item id, so a template built
+	// from Id was wrong on every dispatch. The template now tells the polecat
+	// to read its branch instead. See TestShippedTemplatesNeverNameTheBranch.
+	if strings.Contains(expanded, "polecat-gt-a3f") {
+		t.Errorf("expanded template names a branch built from Id (%q); "+
+			"it must tell the polecat to read its branch instead", "polecat-gt-a3f")
+	}
+	if !strings.Contains(expanded, "git rev-parse --abbrev-ref HEAD") {
+		t.Errorf("expanded template must teach the polecat to read its branch")
 	}
 
 	// Verify the mail-check schedule instruction is present. Polecats are not

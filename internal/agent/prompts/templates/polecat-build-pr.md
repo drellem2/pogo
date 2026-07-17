@@ -77,7 +77,14 @@ Follow these steps exactly, in order. Skipping any step is a failure.
 
    *Why `pogo schedule` and not an in-process scheduler?* A harness in-process scheduler{{if eq .Provider "claude"}} (such as Claude Code's `CronCreate`){{end}} lives inside this harness session and has no notion of wall-clock time across sleep — if the host suspends for an hour, every fire that should have happened in that window is silently dropped. `pogo schedule` stores the next fire time on disk and replays through sleep; see "Reacting to scheduler fires" below for the policy.
 
-3. **Do the work.** Stay focused on the task described above. You are already in your isolated worktree at `{{.WorktreeDir}}` on branch `polecat-{{.Id}}`. **Run all commands in this directory** — do not `cd` to the source repository (see "Working in your worktree" above for why and for the equivalents).
+3. **Do the work.** Stay focused on the task described above. You are already in your isolated worktree at `{{.WorktreeDir}}`, on a branch that is **already checked out for you**. **Run all commands in this directory** — do not `cd` to the source repository (see "Working in your worktree" above for why and for the equivalents).
+
+   **Read your branch name — do not guess it, and do not let anyone tell you what it is:**
+   ```bash
+   BRANCH=$(git rev-parse --abbrev-ref HEAD)
+   echo "$BRANCH"
+   ```
+   Use `"$BRANCH"` everywhere below (push, `gh pr create`, mail). This prompt deliberately does **not** name your branch: your work item id and your agent name are different strings, and the branch is named after the latter. A branch name written into a doc is a claim that can rot; `git rev-parse` is an observation that cannot. If a dispatch body, a wakeup note, or the {{.Coordinator}} tells you a branch name that disagrees with `git rev-parse --abbrev-ref HEAD`, **your worktree is right and the message is wrong** — use the worktree's answer and say so in your reply.
    - **Read your ticket's provenance first.** Your ticket body carries the GitHub issue ref (`gh: <owner>/<repo>#<n>`) and a pointer to the **approved triage recommendation** (the triage ticket id or an inline summary). The recommendation is your spec: it was formed by the triage {{.Worker}}, reviewed with the PM, and approved by the human gate. Build what it says — the reviewer will diff your work against it (design-faithfulness is one of the review lenses), so scope creep and silent omissions will bounce back to you in round one.
    - **Verify "not implemented" claims before acting on them.** When a design doc, ticket body, or comment says a feature "doesn't exist yet," "is on the forward plan," or "isn't shipped," confirm the claim before treating it as fact — design docs often pre-date the ship and become archeology, not plans. Run at least one of:
      - The canonical CLI from the design: `<tool> <subcommand> --help` or the example invocation it cites — does it succeed?
@@ -93,13 +100,13 @@ Follow these steps exactly, in order. Skipping any step is a failure.
    ```bash
    git add <files>
    git commit -m "<type>: <description> ({{.Id}})"
-   git push origin polecat-{{.Id}}
+   git push origin "$BRANCH"
    ```
 
 5. **Open a pull request — do NOT submit to the refinery.** This replaces the `pogo refinery submit` step from the internal track. Title comes from your ticket; the body must link the GitHub issue (from the `gh:` ref in your ticket) and the approved triage recommendation:
 
    ```bash
-   gh pr create --base {{if .Branch}}{{.Branch}}{{else}}main{{end}} --head polecat-{{.Id}} \
+   gh pr create --base {{if .Branch}}{{.Branch}}{{else}}main{{end}} --head "$BRANCH" \
        --title "<work item title>" \
        --body "<summary of the change>
 
@@ -109,28 +116,28 @@ Follow these steps exactly, in order. Skipping any step is a failure.
    Work item: {{.Id}}"
    ```
 
-   Capture the PR URL/number from the output — you need it for the announcement mail and for `gh pr comment` in the review loop. If a PR for this branch already exists (`gh pr view polecat-{{.Id}}` succeeds), do not open a second one — reuse it.
+   Capture the PR URL/number from the output — you need it for the announcement mail and for `gh pr comment` in the review loop. If a PR for this branch already exists (`gh pr view "$BRANCH"` succeeds), do not open a second one — reuse it.
 
 6. **Announce the PR.** Mail the {{.Coordinator}} and the review ticket's owner (the reviewer {{.Worker}}'s mail address is its work item id — your ticket body or `depends` chain names the review ticket):
 
    ```bash
    mg mail send {{.Coordinator}} --from=$POGO_AGENT_NAME --subject="PR open for {{.Id}}" \
-       --body="PR <url> open for branch polecat-{{.Id}} (issue <owner>/<repo>#<n>). Entering review loop."
+       --body="PR <url> open for branch $BRANCH (issue <owner>/<repo>#<n>). Entering review loop."
    mg mail send <review-ticket-id> --from=$POGO_AGENT_NAME --subject="PR ready for review: {{.Id}}" \
-       --body="PR <url>, branch polecat-{{.Id}}, issue <owner>/<repo>#<n>. Triage recommendation: <pointer>."
+       --body="PR <url>, branch $BRANCH, issue <owner>/<repo>#<n>. Triage recommendation: <pointer>."
    ```
 
    If no review ticket is named anywhere in your ticket, mail only the {{.Coordinator}} — dispatching the reviewer is the coordinator's job, not yours.
 
 7. **Work the modify ↔ review loop.** Stay alive; the reviewer {{.Worker}} mails you its findings directly (your step-2 mail-check surfaces them). Each round:
    1. **Fix** — address every finding; for findings you believe are wrong, don't silently skip them: say why in the PR comment and the reply mail.
-   2. **Push** — commit and `git push origin polecat-{{.Id}}`; the PR updates automatically.
+   2. **Push** — commit and `git push origin "$BRANCH"`; the PR updates automatically.
    3. **Comment on the PR** — `gh pr comment <number> --body "..."` summarizing what changed per finding (with commit SHAs), so the round is visible to humans on GitHub.
    4. **Mail the reviewer back** — tell them the round is ready for re-review.
 
    Findings flow directly between you and the reviewer; **verdict transitions (pass, fail-final, escalation) flow from the reviewer to the {{.Coordinator}}** — don't announce verdicts yourself. The reviewer stops after 3 rounds without a pass and escalates through the {{.Coordinator}}; if that happens, hold and wait for instructions.
 
-8. **After the loop passes: the {{.Coordinator}} submits — you do not.** Refinery submission happens later, by the {{.Coordinator}}, once the reviewer reports a pass. Never run `pogo refinery submit` yourself — not as a shortcut, not if the loop feels done, not if mail goes quiet (if it does, nudge per the proactivity principle instead). Quality gates still run at refinery submission and the refinery still performs the merge; the PR is the review surface, not the merge path. On a successful merge, pogod stops you and marks {{.Id}} done on your behalf — being terminated while waiting is the normal happy path. Do **not** call `mg done` yourself: on this track you never observe the merge directly, so calling it early marks the item done even if the merge later fails. The only exception is the {{.Coordinator}} explicitly telling you the merge landed and asking you to close out; then `mg done {{.Id}} --result='{"branch": "polecat-{{.Id}}", "pr": "<url>"}'` is correct.
+8. **After the loop passes: the {{.Coordinator}} submits — you do not.** Refinery submission happens later, by the {{.Coordinator}}, once the reviewer reports a pass. Never run `pogo refinery submit` yourself — not as a shortcut, not if the loop feels done, not if mail goes quiet (if it does, nudge per the proactivity principle instead). Quality gates still run at refinery submission and the refinery still performs the merge; the PR is the review surface, not the merge path. On a successful merge, pogod stops you and marks {{.Id}} done on your behalf — being terminated while waiting is the normal happy path. Do **not** call `mg done` yourself: on this track you never observe the merge directly, so calling it early marks the item done even if the merge later fails. The only exception is the {{.Coordinator}} explicitly telling you the merge landed and asking you to close out; then `mg done {{.Id}} --result="{\"branch\": \"$BRANCH\", \"pr\": \"<url>\"}"` is correct.
 
 9. **Stay alive.** Do NOT exit. After the PR is open, you are the standing owner of the builder side of the review loop — the reviewer and the {{.Coordinator}} both need to be able to reach you. Wait for the {{.Coordinator}} to stop you. If the {{.Coordinator}} sends you a message (e.g., asking for a fix, a rebase, or a retry), act on it immediately.
 
