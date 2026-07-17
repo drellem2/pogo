@@ -12,8 +12,24 @@ is the curated, human-readable summary kept in sync at each release cut.
 
 ### Fixed
 
-- **A redeploy now proves the detector against the artifact it is about to
-  deploy — both directions — or refuses to deploy (mg-bfe5).** `do_build` ran
+- **A redeploy that refuses to deploy now says so OUTSIDE the script (mg-f206).**
+  `exit 7` — the drain timed out with polecats still working, and `--force` is
+  not set, so nothing is deployed — reported itself as two `err` lines to the
+  script's own stderr. Attended that is enough: the human who ran it is reading.
+  Unattended it is a deploy that **silently never happens**, and the fleet stops
+  tracking `main` with every light green, indefinitely. *Failing closed is not
+  failing visibly.* `exit 7` now emits a `deploy_stalled` event and mails the
+  coordinator a diagnosis and the remedies, following the sink shape
+  `sentineldrift.go` / `orphan.go` already use. The mail is **verified by reading
+  it back out of the recipient's mailbox** — a send that merely exits 0 is not a
+  delivery, and a send that *creates* the coordinator's mailbox is proof the
+  recipient name is wrong rather than proof of success. Failure escalates to
+  `human`. Proven in `scripts/pogo-self-deploy_live_test.sh` in both directions:
+  a real `exit 7` puts the alert where a separate `mg` process can read it, and a
+  redeploy that fails for a non-stall reason sends nothing. **The nightly cron
+  this was built for is NOT armed**: `drain_wait` reads an unreadable polecat
+  count as zero and reports the fleet quiesced, so the drain gate can fail open
+  and bounce live work — see mg-65b2. `do_build` ran
   `go install` and **no tests**, so the live control that proves the mail-check
   post-check can actually fail (`scripts/pogo-self-deploy_live_test.sh`, wired
   into `test.sh`) ran **at merge and never at deploy**: every redeploy shipped a

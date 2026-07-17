@@ -608,6 +608,182 @@ curl -sf -X POST "$URL/agents/drain" -H 'Content-Type: application/json' \
     -d '{"draining":false}' >/dev/null 2>&1
 
 # ===========================================================================
+# 7. THE EXTERNAL SINK — exit 7 must be observable from OUTSIDE the script
+#    (mg-f206).  THE FIFTH ASK.
+# ===========================================================================
+# exit 7 is the drain-timeout refusal: polecats are still working, --force is not
+# set, so the deploy restores dispatch and does NOTHING. Attended that reports
+# itself — the human who ran it reads the two err lines. Unattended at 03:00 it
+# is a deploy that silently never happens, and the fleet stops tracking main with
+# every light green. The sink is what makes that outcome leave the script.
+#
+# So the assertion is NOT "the script printed something". It is that an
+# INDEPENDENT READER — a separate `mg` process, reading a mailbox this script
+# never wrote to directly — can see the alert. That is the whole content of
+# architect's ruling ("loud must be observable from OUTSIDE the thing that
+# failed"), and it is the only form of it that a log line cannot satisfy.
+#
+# WHAT IS REAL HERE, AND THE ONE THING THAT IS NOT. Real: cmd_redeploy, the
+# drain POST against the live daemon, the FORCE branch, alert_drain_stalled,
+# alert_external, mail_alert, the `mg` binary, the mail store, the readback, the
+# restore trap, the exit code. Stubbed: `drain_wait`'s VERDICT, and nothing else.
+# Driving a true drain timeout needs a live polecat that outlasts the deadline —
+# a real PTY, a real provider, a real worktree — which this sandbox deliberately
+# cannot make (POGO_AGENT_AUTOSTART=false, no config, no repo). So the scenario's
+# PRECONDITION is asserted and everything downstream of it is exercised. That is
+# the same move test 6 makes when it neuters restore_drain to demonstrate its
+# RED, and the same bound applies: this proves the sink FIRES AND LANDS on the
+# exit-7 path; it does not re-prove that drain_wait decides to time out
+# correctly. drain_wait's verdict is mg-46a4's measurement, not this file's.
+#
+# MAIL ISOLATION IS LOAD-BEARING, NOT HYGIENE. do_prove runs this file on EVERY
+# redeploy. `mg` resolves its store as --root > $MG_ROOT > $HOME/.macguffin, so
+# HOME alone would be enough today only because MG_ROOT happens to be unset on
+# this box — which is exactly the reasoning that put POGO_HOME on the live fleet
+# from a stale profile export (see the sandbox block above). Pinned explicitly:
+# unpinned, every deploy would mail the REAL coordinator a fake stall alert, and
+# the sink would be indistinguishable from a spammer.
+export MG_ROOT="$SANDBOX/home/.macguffin"
+
+if ! command -v mg >/dev/null 2>&1; then
+    fail "no 'mg' on PATH — the exit-7 sink cannot be proven, and an unproven sink is the thing mg-f206 exists to remove"
+else
+# The coordinator this control addresses. Overriding the driver's global rather
+# than the config: the sandbox has no config.toml on purpose (tests 1-6 depend on
+# that), and the name is what mail_alert is going to check.
+COORDINATOR="sink-coordinator"
+SINK_SUBJ="[deploy-stalled]"
+
+# The coordinator's mailbox must EXIST before the run, because "the box existed"
+# is precisely what mail_alert uses to tell a real delivery from a phantom. This
+# seeding send is also the control on the sandbox itself: if mg cannot write here,
+# every assertion below is measuring the wrong thing and we want to know now.
+if mg mail send "$COORDINATOR" --from=live-control --subject="seed" --body="seed" >/dev/null 2>&1; then
+    pass "sink sandbox: MG_ROOT=$MG_ROOT is writable and the coordinator mailbox exists (the real fleet's mail store is untouched)"
+else
+    fail "sink sandbox: could not seed a mailbox under MG_ROOT=$MG_ROOT — the sink controls below cannot mean anything"
+fi
+
+# These controls emit SINK-FIRED / SINK-QUIET, deliberately NOT the bare
+# RED / GREEN that do_prove gates on. Same reasoning the `proved` helper gives
+# for not calling itself from pass(): "the mail-check detector was shown able to
+# go RED against this binary" and "the stall sink was shown able to fire" are
+# different claims, and one token for both would let either stand in for the
+# other — a run with the mail-check controls deleted would still satisfy
+# do_prove off these. do_prove's contract is the ARTIFACT's detector (mg-bfe5),
+# and the sink is not in the artifact: it is this script plus `mg`. These still
+# gate every deploy, via the FAIL tally, which is the honest lever for them.
+#
+# An INDEPENDENT observation of the recipient's mailbox: a separate mg process,
+# reading the store, exactly as a human would. Deliberately NOT mail_alert's own
+# readback — a sink that grades its own homework proves nothing.
+sink_mail_count() {
+    mg mail list "$COORDINATOR" --all --json 2>/dev/null | grep -Fc "$SINK_SUBJ" || true
+}
+
+# (a) CONDITIONAL / NEGATIVE — the direction that stops this being a sink that
+#     always fires. A run that fails for a DIFFERENT reason (do_build's exit 4,
+#     driven by test 6's fixture) must send NOTHING. A sink wired to the wrong
+#     scope — to the trap, to every exit — would pass the RED below and still be
+#     useless, because an alert that fires on every failure tells you nothing
+#     about the one failure that is otherwise invisible.
+SINK_BEFORE_HEALTHY="$(sink_mail_count)"
+curl -sf -X POST "$URL/agents/drain" -H 'Content-Type: application/json' \
+    -d '{"draining":false}' >/dev/null 2>&1
+SINK_RC_QUIET="$(dr_run)"
+SINK_AFTER_HEALTHY="$(sink_mail_count)"
+[ "$SINK_RC_QUIET" = "4" ] \
+    && pass "sink control (a) precondition: the non-stall run really failed in do_build (exit 4), i.e. it is a DIFFERENT failure than exit 7" \
+    || fail "sink control (a): expected exit 4 from the do_build fixture, got $SINK_RC_QUIET — the negative direction is not exercising a real non-stall failure"
+if [ "$SINK_AFTER_HEALTHY" = "$SINK_BEFORE_HEALTHY" ]; then
+    pass "CONDITIONAL: a redeploy that failed for a NON-stall reason sent no stall alert (count stayed $SINK_BEFORE_HEALTHY) — the sink is scoped to exit 7, not wired to every exit"
+    proved "SINK-QUIET"
+else
+    fail "the sink fired on a run that did NOT stall ($SINK_BEFORE_HEALTHY -> $SINK_AFTER_HEALTHY) — an alert that fires on everything is as useless as one that never fires"
+fi
+
+# (b) THE RED, AND THE ASK. Force the exit-7 precondition and watch the alert
+#     arrive somewhere the script cannot reach.
+sink_stall_run() {
+    (
+        POGO_GOBIN="$SANDBOX/nobin" \
+        POGO_DEPLOY_REF=main-fixture \
+        REPO="$DR_REPO" DEPLOY_REF=main-fixture \
+        ASSUME_YES=true FORCE=false SKIP_DRAIN=false
+        # The ONLY stub: assert the timeout verdict this sandbox cannot produce
+        # honestly. Everything from the `if ! $FORCE` below it is the real path.
+        drain_wait() { echo 2; return 1; }
+        cmd_redeploy
+    ) >/dev/null 2>&1
+    echo $?
+}
+curl -sf -X POST "$URL/agents/drain" -H 'Content-Type: application/json' \
+    -d '{"draining":false}' >/dev/null 2>&1
+SINK_BEFORE="$(sink_mail_count)"
+SINK_RC="$(sink_stall_run)"
+SINK_AFTER="$(sink_mail_count)"
+
+[ "$SINK_RC" = "7" ] \
+    && pass "the stall run really takes the exit-7 path (drain timeout, no --force, nothing deployed)" \
+    || fail "expected exit 7 from the drain-timeout refusal, got $SINK_RC — the path the sink hangs off was never entered"
+
+if [ "$SINK_AFTER" -gt "$SINK_BEFORE" ]; then
+    pass "RED, OBSERVED FROM OUTSIDE: exit 7 put a '$SINK_SUBJ' alert in '$COORDINATOR''s mailbox, read back by a SEPARATE mg process ($SINK_BEFORE -> $SINK_AFTER)"
+    proved "SINK-FIRED"
+else
+    fail "SILENT STALL: exit 7 delivered no mail to '$COORDINATOR' ($SINK_BEFORE -> $SINK_AFTER) — the nightly would fail closed at 03:00 and nobody would ever learn the deploy did not happen"
+fi
+
+# The alert has to be worth reading, not merely present. A stall alert whose body
+# lost its remedies is a page that tells you something is wrong and not what to
+# do — and this body is assembled through a temp file and --body-file precisely
+# because --body would let the shell eat it silently (mg-8380).
+SINK_ID="$(mg mail list "$COORDINATOR" --all --json 2>/dev/null | grep -F "$SINK_SUBJ" | tail -1 \
+           | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')"
+# --force: reading a mailbox we do not own is refused without it, and this
+# control is by construction a third party to the coordinator's inbox — which is
+# the entire point of the assertion.
+SINK_DELIVERED="$(mg mail read "$COORDINATOR" "$SINK_ID" --force 2>/dev/null)"
+# Two phrases, chosen because they are the two things the reader needs and the
+# two most likely to be silently lost: the DIAGNOSIS (why nothing deployed) and
+# the --force GUARD (the "fix" that would re-gate mg-0b77 and mg-13a3, which is
+# the single most likely wrong move by whoever this alert wakes up).
+if [ -n "$SINK_ID" ] \
+   && printf '%s' "$SINK_DELIVERED" | grep -q "the drain waited" \
+   && printf '%s' "$SINK_DELIVERED" | grep -q "adding --force"; then
+    pass "the delivered alert carries the WHY (the drain waited) AND the --force guard in its body, not just a subject line — the multi-line body survived --body-file intact"
+else
+    fail "the alert arrived but its body did not survive intact — a page with no diagnosis is a louder log line with a mailbox (id=${SINK_ID:-<none>})"
+fi
+
+# (c) THE SINK REFUSES TO CLAIM A DELIVERY IT CANNOT SEE. The recipient name is a
+#     CLAIM about config, and a wrong one does not error: mg creates the mailbox
+#     and reports success, so the alert lands in a phantom nobody reads and the
+#     send looks perfect. That is this ticket's own defect wearing the sink's
+#     clothes, and it is not hypothetical — the live box carries such a phantom
+#     today. mail_alert must call this UNDELIVERED, not OK.
+#
+# A REAL, NON-EMPTY body file: mg rejects an empty one outright ("a body is
+# required"), which would make this assertion pass on the error it was not
+# written to catch — a false green in the control for the false green in the sink.
+SINK_PROBE_BODY="$SANDBOX/sink-probe-body.txt"
+echo "phantom probe body" > "$SINK_PROBE_BODY"
+SINK_PHANTOM_OUT="$(mail_alert "sink-no-such-box-$$" "$SINK_SUBJ phantom probe" "$SINK_PROBE_BODY" 2>&1)"
+SINK_PHANTOM_RC=$?
+# Non-zero is necessary but NOT sufficient: mail_alert returns 1 from several
+# paths (mg absent, send error, readback miss), and a probe that "passes" because
+# mg was missing would be reporting on nothing. Assert the REASON too, so this
+# stays a control on the phantom-mailbox check specifically.
+if [ "$SINK_PHANTOM_RC" -ne 0 ] && printf '%s' "$SINK_PHANTOM_OUT" | grep -q "had NO mailbox"; then
+    pass "mail_alert reports UNDELIVERED, and names the reason, when the recipient had no mailbox — a send that INVENTS the box is not a delivery"
+elif [ "$SINK_PHANTOM_RC" -ne 0 ]; then
+    fail "mail_alert refused the phantom send but for the WRONG reason (not the mailbox_created check) — this control is not measuring what it claims: $SINK_PHANTOM_OUT"
+else
+    fail "mail_alert reported SUCCESS into a mailbox it had just created — a renamed coordinator would silently swallow every stall alert forever, exactly like the phantom box already sitting on this machine"
+fi
+fi   # command -v mg
+
+# ===========================================================================
 # 5. FAIL-OPEN SEAM — a dead daemon must be UNKNOWN, never OK, never "all gone".
 # ===========================================================================
 # The specific thing architect named: a classifier handed "" instead of "0".
