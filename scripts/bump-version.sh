@@ -158,7 +158,14 @@ main() {
         "Version = \"$CURRENT_VERSION\"" \
         "Version = \"$NEW_VERSION\""
 
-    # 2. Update CHANGELOG.md
+    # 2. Assemble changelog.d/ fragments into [Unreleased], then roll it to the
+    #    new version. Assembly is a HARD gate (mg-d917): if it produces an empty
+    #    [Unreleased] it exits non-zero and set -e aborts the release here —
+    #    never cut a release with no changelog entries.
+    echo "  • changelog.d/ fragments → CHANGELOG.md"
+    "$SCRIPT_DIR/assemble-changelog.sh"
+
+    # 3. Update CHANGELOG.md
     echo "  • CHANGELOG.md"
     update_changelog "$NEW_VERSION"
 
@@ -193,6 +200,11 @@ main() {
 
         if [ -f "CHANGELOG.md" ]; then
             git add CHANGELOG.md
+        fi
+
+        # Stage assembled/removed changelog fragments (mg-d917).
+        if [ -d "changelog.d" ]; then
+            git add -A changelog.d
         fi
 
         git commit -m "chore: Bump version to $NEW_VERSION

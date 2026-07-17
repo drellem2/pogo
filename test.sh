@@ -33,3 +33,6 @@ bash scripts/pogo-self-deploy_live_test.sh
 
 echo "Testing build.sh"
 bash build_test.sh
+
+echo "Testing changelog fragment assembler"
+bash scripts/assemble-changelog_test.sh

@@ -88,8 +88,19 @@ otherwise; reserve major for breaking CLI changes. Prereleases use a
 ./scripts/bump-version.sh X.Y.Z --commit --tag --push
 ```
 
-This bumps `internal/version/version.go`, rolls `CHANGELOG.md`, commits, tags,
-and pushes. The release workflow does the rest.
+This assembles the `changelog.d/` fragments into `CHANGELOG.md`, bumps
+`internal/version/version.go`, rolls `CHANGELOG.md`, commits, tags, and pushes.
+The release workflow does the rest.
+
+**Adding a changelog entry (per change, not per release).** Do **not** append to
+`CHANGELOG.md` — write a fragment file instead: `changelog.d/<slug>.<category>.md`
+(named by work-item id, e.g. `changelog.d/mg-1234.fixed.md`). Every change
+appending to the shared `## [Unreleased]` tail collided there under concurrency,
+and that one file was the dominant recorded merge-conflict cause (mg-d917); one
+file per change makes the collision structurally impossible. See
+`changelog.d/README.md` for the format. `bump-version.sh` folds the fragments in
+at release time via `scripts/assemble-changelog.sh`, which **refuses to cut an
+empty changelog** (no fragments and an empty `[Unreleased]` → non-zero exit).
 
 Two things the script does **not** do, which the releaser must:
 

@@ -111,6 +111,9 @@ jobs:
       - name: Run Bash shell integration tests
         run: shell/bashrc_test.sh
 
+      - name: Run changelog fragment assembler tests
+        run: scripts/assemble-changelog_test.sh
+
   version-check:
     if: false  # Disabled — re-enable by removing this line
     runs-on: ubuntu-latest

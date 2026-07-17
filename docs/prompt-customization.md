@@ -188,12 +188,19 @@ pogo agent stop mayor && pogo agent start mayor
 ```markdown
 ## Extra: changelog stamp
 
-After step 4 (`git push`), append a one-line summary of your change to
-`CHANGELOG.md` under "Unreleased" before submitting to the refinery (the merge queue):
+After step 4 (`git push`), write a changelog **fragment** — a NEW file named by
+your work-item id — before submitting to the refinery (the merge queue). Do
+**not** append to `CHANGELOG.md`: every polecat appending to the same
+`## [Unreleased]` tail collided there under concurrency, and that shared tail was
+the dominant recorded merge-conflict cause (mg-d917). One file per change means
+two polecats never touch the same path, so the conflict is structurally
+impossible. See `changelog.d/README.md` for the format.
 
 ```bash
-echo "- {{.Task}} (mg-{{.Id}})" >> CHANGELOG.md
-git add CHANGELOG.md && git commit --amend --no-edit
+cat > changelog.d/mg-{{.Id}}.changed.md <<'EOF'
+- {{.Task}} (mg-{{.Id}})
+EOF
+git add changelog.d/mg-{{.Id}}.changed.md && git commit --amend --no-edit
 ```
 ```
 
