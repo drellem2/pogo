@@ -6,8 +6,9 @@
 // mayor) when work has piled up behaviorally even though the agent's process is
 // healthy:
 //
-//   - Threshold A — unclaimed items: an `available` work item assigned to (or
-//     unassigned and pickup-expected by) the watched agent has sat in the
+//   - Threshold A — unclaimed items: an `available` work item awaiting the
+//     watched agent's dispatch — anything not gated to a non-dispatchable
+//     executor, whoever OWNS it (see watchedForDispatch) — has sat in the
 //     available/ queue longer than UnclaimedItemAgeThreshold.
 //   - Threshold B — unread mail: the watched agent's new/ maildir holds a
 //     message older than UnreadMailAgeThreshold, or more than
@@ -126,6 +127,9 @@ func New(cfg config.StallWatchConfig, opts Options) *Watcher {
 	if len(cfg.FastPriorities) == 0 {
 		cfg.FastPriorities = config.DefaultFastPriorities
 	}
+	if len(cfg.NonDispatchableAssignees) == 0 {
+		cfg.NonDispatchableAssignees = config.DefaultNonDispatchableAssignees
+	}
 
 	workRoot := opts.WorkRoot
 	mailRoot := opts.MailRoot
@@ -196,7 +200,7 @@ func (w *Watcher) checkUnclaimedItems(now time.Time) {
 	// never silences a high-priority item.
 	var stale []workitem.WorkItem
 	for _, it := range items {
-		if !w.assignedToWatched(it.Assignee) {
+		if !w.watchedForDispatch(it.Assignee) {
 			continue
 		}
 		if w.cfg.PriorityWakeEnabled && w.isFastPriority(it.Priority) {
@@ -261,7 +265,7 @@ func (w *Watcher) checkPriorityWake(now time.Time, items []workitem.WorkItem) {
 
 	var ready []workitem.WorkItem
 	for _, it := range items {
-		if !w.assignedToWatched(it.Assignee) {
+		if !w.watchedForDispatch(it.Assignee) {
 			continue
 		}
 		if !w.isFastPriority(it.Priority) {
@@ -395,12 +399,52 @@ func (w *Watcher) checkUnreadMail(now time.Time) {
 	})
 }
 
-// assignedToWatched reports whether an available item is the watched agent's
-// responsibility: explicitly assigned to it, or unassigned (the mayor is the
-// expected dispatcher of unclaimed work).
-func (w *Watcher) assignedToWatched(assignee string) bool {
-	a := strings.TrimSpace(assignee)
-	return a == "" || a == w.cfg.Agent
+// watchedForDispatch reports whether an available item is the watched agent's
+// dispatch responsibility.
+//
+// The Assignee field carries two incompatible meanings, and this predicate
+// exists to separate them:
+//
+//   - OWNERSHIP — "pm-pogo owns this ticket". The owner is who to ask about the
+//     item, NOT who executes it; the coordinator still dispatches a worker. This
+//     is the overwhelming majority of the queue (13 of 14 items on 2026-07-17),
+//     because pm-template files every ticket with `--assignee=pm-<name>`.
+//   - EXECUTION GATE — "a human must do this by hand". mayor.md files manual-QA
+//     items with `--assignee=human` so a worker is never dispatched at them.
+//
+// So the test is NOT "is this assigned to the coordinator?" — it is "is this
+// gated away from automatic dispatch?". Everything that is not gated is watched,
+// whoever owns it.
+//
+// This inverts the original predicate (`a == "" || a == w.cfg.Agent`), which
+// allowlisted the two assignee values a DISPATCHER would carry and therefore
+// skipped every item that named an OWNER. It was not silent — unassigned items
+// fired routinely, which is why it held confidence — but it could only ever see
+// the shrinking population of unassigned work (mg-4bd4).
+//
+// The failure directions are deliberately asymmetric. An unrecognized assignee
+// is watched, so a newly-added agent's work is visible on day one; the cost of
+// guessing wrong is a nudge about an item the coordinator cannot dispatch, which
+// is loud and self-correcting. The old default guessed the other way and paid in
+// silence, which is indistinguishable from a healthy queue.
+func (w *Watcher) watchedForDispatch(assignee string) bool {
+	return !w.isDispatchGated(assignee)
+}
+
+// isDispatchGated reports whether an assignee names a non-dispatchable executor
+// (default: "human"). Matching is case-insensitive and whitespace-trimmed, so a
+// "Human" or " human " frontmatter value still gates, mirroring isFastPriority.
+func (w *Watcher) isDispatchGated(assignee string) bool {
+	a := strings.ToLower(strings.TrimSpace(assignee))
+	if a == "" {
+		return false
+	}
+	for _, g := range w.cfg.NonDispatchableAssignees {
+		if a == strings.ToLower(strings.TrimSpace(g)) {
+			return true
+		}
+	}
+	return false
 }
 
 // tryFire enforces a per-category cooldown. It returns true and records the

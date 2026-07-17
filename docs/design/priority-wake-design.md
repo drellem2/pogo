@@ -42,7 +42,11 @@ needs no `--wake` flag and no mg→pogod event — it remains a decoupled work q
 In `stallwatch.checkUnclaimedItems`, over the same `available/` listing, add a
 priority pass (`checkPriorityWake`):
 
-- An item qualifies when it is **assigned to the watched agent** (or unassigned),
+- An item qualifies when it is **assigned to the watched agent** (or unassigned)
+  — **SUPERSEDED by mg-4bd4:** it now qualifies unless its assignee is an
+  execution gate (`non_dispatchable_assignees`, default `["human"]`), so
+  PM-owned items are visible; see "Ownership vs execution" in
+  docs/CONFIGURATION.md —
   its priority is in `fast_priorities` (default `["high"]`), and it has aged past
   the short **`high_priority_wake_delay`** (default 30s) rather than the 10-min
   `unclaimed_item_age_threshold`. The small delay lets a burst of enqueues settle

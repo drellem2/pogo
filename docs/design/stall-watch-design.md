@@ -43,7 +43,17 @@ On each tick the watcher runs two independent checks:
 
 Scan `~/.macguffin/work/available/` via `workitem.ListFrom`. An item counts as
 the mayor's responsibility when its `assignee` is the watched agent **or** empty
-(unassigned available work is the mayor's to dispatch). Age is the work-item
+(unassigned available work is the mayor's to dispatch).
+
+> **SUPERSEDED (mg-4bd4, 2026-07-17).** The rule above is what shipped, and it
+> was wrong: it allowlisted the values a *dispatcher* carries, so it skipped
+> every item naming an *owner* — 13 of 14 available items, because PMs file with
+> `--assignee=pm-<name>`. An item now counts as the mayor's responsibility unless
+> its assignee is an execution gate (`non_dispatchable_assignees`, default
+> `["human"]`); ownership no longer affects visibility. See "Ownership vs
+> execution" in docs/CONFIGURATION.md.
+
+Age is the work-item
 file's mtime — the best available proxy for "time sitting in the available
 queue," since mg rewrites/moves the file on status transitions. Any qualifying
 item older than `unclaimed_item_age_threshold` triggers a single batched nudge
