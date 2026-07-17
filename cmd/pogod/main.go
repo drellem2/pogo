@@ -1315,6 +1315,14 @@ Flags:
 		if stallWatcher != nil {
 			go stallWatcher.Check(now)
 		}
+		// Surface polecats that outlived an earlier pogod and are now alive but
+		// unreachable — UNKNOWN forever, holding a worktree and a claim, with
+		// nothing else in the tree looking at them (mg-0b77). Only a human can
+		// resolve one, so this reports rather than acts. In a goroutine because
+		// the alert shells out to `mg mail send`, which must never delay a tick.
+		if agentRegistry != nil {
+			go agentRegistry.ReportOrphanedPolecats()
+		}
 	}
 
 	hbCtx, hbCancel := context.WithCancel(context.Background())

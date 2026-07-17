@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -408,29 +409,68 @@ func PolecatWitness(scheduleAgent string) WitnessVerdict {
 		if r.Name != scheduleAgent && "cat-"+r.Name != scheduleAgent {
 			continue
 		}
-		if !pidAlive(r.PID) {
-			// Nothing holds this pid. Our polecat is dead and no recycling has
-			// happened yet.
-			return WitnessDead
-		}
-		start, ok := procStartFn(r.PID)
-		if !ok {
-			// The pid answers signal 0 but we cannot establish whose it is.
-			log.Printf("witness: polecat %s pid=%d is alive but its start time is unreadable — "+
-				"cannot confirm the process is ours; NOT reaping (mg-13a3)", r.Name, r.PID)
-			return WitnessUnreadable
-		}
-		if !start.Equal(r.StartTime) {
-			// Something is alive on this pid, but it started at a different
-			// time, so it is NOT the process we recorded. The pid was
-			// recycled; our polecat died. Reaping here is what keeps a
-			// recycled pid from holding a dead polecat's schedule open
-			// forever (mg-8677).
-			log.Printf("witness: polecat %s pid=%d is alive but started %s, not %s — pid was recycled by an "+
-				"unrelated process; our polecat is GONE (mg-13a3)", r.Name, r.PID, start, r.StartTime)
-			return WitnessDead
-		}
-		return WitnessAlive
+		return witnessVerdict(r)
 	}
 	return WitnessNoRecord
+}
+
+// witnessVerdict probes ONE record's process and reports what it says.
+//
+// This is the single place the (pid, start_time) identity match is made.
+// PolecatWitness (one agent, "should I reap its mail-check?") and
+// WitnessedAlivePolecats (every agent, "who is alive that the registry cannot
+// see?") both route through here, and that is deliberate: they are two
+// questions about the same fact, and if they ever disagreed about what "our
+// process is alive" means, the drain and the reaper would be reasoning about
+// different fleets. The verdict has exactly one definition.
+func witnessVerdict(r witnessRecord) WitnessVerdict {
+	if !pidAlive(r.PID) {
+		// Nothing holds this pid. Our polecat is dead and no recycling has
+		// happened yet.
+		return WitnessDead
+	}
+	start, ok := procStartFn(r.PID)
+	if !ok {
+		// The pid answers signal 0 but we cannot establish whose it is.
+		log.Printf("witness: polecat %s pid=%d is alive but its start time is unreadable — "+
+			"cannot confirm the process is ours; NOT reaping (mg-13a3)", r.Name, r.PID)
+		return WitnessUnreadable
+	}
+	if !start.Equal(r.StartTime) {
+		// Something is alive on this pid, but it started at a different
+		// time, so it is NOT the process we recorded. The pid was
+		// recycled; our polecat died. Reaping here is what keeps a
+		// recycled pid from holding a dead polecat's schedule open
+		// forever (mg-8677).
+		log.Printf("witness: polecat %s pid=%d is alive but started %s, not %s — pid was recycled by an "+
+			"unrelated process; our polecat is GONE (mg-13a3)", r.Name, r.PID, start, r.StartTime)
+		return WitnessDead
+	}
+	return WitnessAlive
+}
+
+// WitnessedAlivePolecats returns every witnessed polecat whose process is
+// provably OURS and running — the positive population the witness store exists
+// to make visible. Order is by name so callers and their tests see a stable
+// list.
+//
+// A read error yields nil, NOT an empty list with a nil error: "I cannot read
+// the witness file" and "no polecats are alive" are different facts, and this
+// store's entire subject is not conflating them. Callers get the error and must
+// decide; none of them may render an unreadable store as zero.
+func WitnessedAlivePolecats() ([]witnessRecord, error) {
+	witnessMu.Lock()
+	recs, err := loadWitness()
+	witnessMu.Unlock()
+	if err != nil {
+		return nil, fmt.Errorf("witness: cannot read %s: %w", WitnessPath(), err)
+	}
+	var out []witnessRecord
+	for _, r := range recs {
+		if witnessVerdict(r) == WitnessAlive {
+			out = append(out, r)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
 }
