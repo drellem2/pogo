@@ -713,8 +713,16 @@ curl -sf -X POST "$URL/agents/drain" -H 'Content-Type: application/json' \
 # the sink would be indistinguishable from a spammer.
 export MG_ROOT="$SANDBOX/home/.macguffin"
 
-if ! command -v mg >/dev/null 2>&1; then
-    fail "no 'mg' on PATH — the exit-7 sink cannot be proven, and an unproven sink is the thing mg-f206 exists to remove"
+# RESOLVE macguffin `mg` TO AN ABSOLUTE PATH — never trust bare `mg` (mg-015f).
+# `command -v mg` is NOT enough: on macOS /usr/bin/mg is the Micro-Emacs editor,
+# and it satisfies the existence check while panicking headless and delivering
+# nothing. That editor-satisfies-existence gap is exactly what let the nightly
+# fail closed and silent. resolve_mg (sourced from the driver) locates the
+# go-installed macguffin binary PATH-independently and CONFIRMS it is macguffin,
+# failing loudly if the only `mg` reachable is the editor — which is the exact
+# instrument these controls exercise, so it must be the real one.
+if ! resolve_mg; then
+    fail "could not resolve the macguffin 'mg' — the exit-7 sink cannot be proven, and an unproven sink is the thing mg-f206 exists to remove. Bare 'mg' is the Micro-Emacs editor here and would panic headless (mg-015f)."
 else
 # The coordinator this control addresses. Overriding the driver's global rather
 # than the config: the sandbox has no config.toml on purpose (tests 1-6 depend on
@@ -726,7 +734,7 @@ SINK_SUBJ="[deploy-stalled]"
 # is precisely what mail_alert uses to tell a real delivery from a phantom. This
 # seeding send is also the control on the sandbox itself: if mg cannot write here,
 # every assertion below is measuring the wrong thing and we want to know now.
-if mg mail send "$COORDINATOR" --from=live-control --subject="seed" --body="seed" >/dev/null 2>&1; then
+if "$MG" mail send "$COORDINATOR" --from=live-control --subject="seed" --body="seed" >/dev/null 2>&1; then
     pass "sink sandbox: MG_ROOT=$MG_ROOT is writable and the coordinator mailbox exists (the real fleet's mail store is untouched)"
 else
     fail "sink sandbox: could not seed a mailbox under MG_ROOT=$MG_ROOT — the sink controls below cannot mean anything"
@@ -746,7 +754,7 @@ fi
 # reading the store, exactly as a human would. Deliberately NOT mail_alert's own
 # readback — a sink that grades its own homework proves nothing.
 sink_mail_count() {
-    mg mail list "$COORDINATOR" --all --json 2>/dev/null | grep -Fc "$SINK_SUBJ" || true
+    "$MG" mail list "$COORDINATOR" --all --json 2>/dev/null | grep -Fc "$SINK_SUBJ" || true
 }
 
 # (a) CONDITIONAL / NEGATIVE — the direction that stops this being a sink that
@@ -824,9 +832,9 @@ sink_unknown_run() {
 }
 curl -sf -X POST "$URL/agents/drain" -H 'Content-Type: application/json' \
     -d '{"draining":false}' >/dev/null 2>&1
-UNK_BEFORE="$(mg mail list "$COORDINATOR" --all --json 2>/dev/null | grep -Fc "FLEET STATE UNKNOWN" || true)"
+UNK_BEFORE="$("$MG" mail list "$COORDINATOR" --all --json 2>/dev/null | grep -Fc "FLEET STATE UNKNOWN" || true)"
 UNK_RC="$(sink_unknown_run)"
-UNK_AFTER="$(mg mail list "$COORDINATOR" --all --json 2>/dev/null | grep -Fc "FLEET STATE UNKNOWN" || true)"
+UNK_AFTER="$("$MG" mail list "$COORDINATOR" --all --json 2>/dev/null | grep -Fc "FLEET STATE UNKNOWN" || true)"
 
 [ "$UNK_RC" = "7" ] \
     && pass "mg-65b2: a drain that CANNOT TELL takes the exit-7 refusal (it does not bounce a fleet whose state is unknown)" \
@@ -871,14 +879,14 @@ FORCE_RC="$(force_unknown_run)"
 # alert happened to be sent last — and quietly measure the wrong page the moment
 # someone adds a control below. Each body assertion names the alert it is about.
 sink_id_matching() {
-    mg mail list "$COORDINATOR" --all --json 2>/dev/null | grep -F "$1" | tail -1 \
+    "$MG" mail list "$COORDINATOR" --all --json 2>/dev/null | grep -F "$1" | tail -1 \
         | sed -n 's/.*"id":"\([^"]*\)".*/\1/p'
 }
 SINK_ID="$(sink_id_matching "still active")"
 # --force: reading a mailbox we do not own is refused without it, and this
 # control is by construction a third party to the coordinator's inbox — which is
 # the entire point of the assertion.
-SINK_DELIVERED="$(mg mail read "$COORDINATOR" "$SINK_ID" --force 2>/dev/null)"
+SINK_DELIVERED="$("$MG" mail read "$COORDINATOR" "$SINK_ID" --force 2>/dev/null)"
 # Two phrases, chosen because they are the two things the reader needs and the
 # two most likely to be silently lost: the DIAGNOSIS (why nothing deployed) and
 # the --force GUARD (the "fix" that would re-gate mg-0b77 and mg-13a3, which is
@@ -900,7 +908,7 @@ fi
 # would mean the reason parameter is decorative and the sink still tells one
 # story regardless of what happened.
 UNK_ID="$(sink_id_matching "FLEET STATE UNKNOWN")"
-UNK_DELIVERED="$(mg mail read "$COORDINATOR" "$UNK_ID" --force 2>/dev/null)"
+UNK_DELIVERED="$("$MG" mail read "$COORDINATOR" "$UNK_ID" --force 2>/dev/null)"
 if [ -n "$UNK_ID" ] \
    && printf '%s' "$UNK_DELIVERED" | grep -q "could not establish whether any polecat is alive" \
    && printf '%s' "$UNK_DELIVERED" | grep -q "pogo agent witness" \
@@ -935,7 +943,7 @@ elif [ "$SINK_PHANTOM_RC" -ne 0 ]; then
 else
     fail "mail_alert reported SUCCESS into a mailbox it had just created — a renamed coordinator would silently swallow every stall alert forever, exactly like the phantom box already sitting on this machine"
 fi
-fi   # command -v mg
+fi   # resolve_mg
 
 # ===========================================================================
 # 5. FAIL-OPEN SEAM — a dead daemon must be UNKNOWN, never OK, never "all gone".
@@ -1000,9 +1008,18 @@ mkdir -p "$CO_REPO"
 
 CO_LOG="$SANDBOX/mg-calls"
 : > "$CO_LOG"
-# The recorder. cleanup_orphans runs `mg unclaim "$id"` inside a pipeline
+# The recorder. cleanup_orphans runs `"$MG" unclaim "$id"` inside a pipeline
 # subshell, so the record goes to a FILE — a variable would not survive back out.
-mg() { echo "$*" >> "$CO_LOG"; }
+# cleanup_orphans invokes mg by its RESOLVED ABSOLUTE PATH now (mg-015f), never
+# the bare name, so a shell function named `mg` would not intercept it. Point MG
+# at a recorder SCRIPT instead, and restore the real resolution afterwards.
+CO_MG_SAVED="$MG"
+MG="$SANDBOX/mg-recorder"
+cat > "$MG" <<EOF
+#!/bin/bash
+echo "\$*" >> "$CO_LOG"
+EOF
+chmod +x "$MG"
 
 # Two polecats. mg-zzzz sorts LAST in the body, which is the only thing that
 # matters: it is the record that carries no trailing newline.
@@ -1038,7 +1055,7 @@ if grep -qxF "unclaim mg-solo" "$CO_LOG" && [ ! -d "$SANDBOX/wt-solo" ]; then
 else
     fail "mg-a558: a ONE-polecat snapshot cleaned NOTHING and said nothing (output: '$CO_OUT1') — cleanup_orphans is a no-op on the commonest forced-bounce shape"
 fi
-unset -f mg
+MG="$CO_MG_SAVED"
 
 # ===========================================================================
 # 8. DRAIN GATE — an UNREADABLE polecat count must never render as ZERO.

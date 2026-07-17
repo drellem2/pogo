@@ -742,6 +742,84 @@ restore_drain() {
 # a mis-shelled recipient, and it is invisible precisely because it was silent.)
 COORDINATOR="${POGO_COORDINATOR:-mayor}"
 
+# MG — the ABSOLUTE path to the macguffin `mg`, resolved once by resolve_mg().
+#
+# BARE `mg` IS A TRAP, AND IT IS THE BUG THIS SINK WAS SILENTLY LOSING TO
+# (mg-015f). On macOS, /usr/bin/mg is the Micro-Emacs text EDITOR. Under any
+# PATH where /usr/bin precedes ~/go/bin — a login shell's reordered profile, or
+# launchd's minimal PATH (/usr/bin:/bin:/usr/sbin:/sbin, which has NO ~/go/bin) —
+# bare `mg` binds to that editor, not the macguffin tracker. Headless it panics
+# ("standard input and output must be a terminal") and exits, so a bare-`mg`
+# alert delivers NOTHING. The nightly redeploy runs in exactly that launchd
+# context: a 03:00 stall alert would invoke the editor, panic, and fail closed
+# and SILENT — the precise failure this whole sink exists to prevent.
+#
+# So every `mg` call in this deploy goes through "$MG", an absolute path to the
+# go-installed macguffin binary. NOT a per-wrapper PATH export: that would only
+# fix the launchers we happen to control and leaves the script PATH-fragile,
+# which is worthless against a nightly launcher we do not control. An absolute
+# path makes the deploy PATH-INDEPENDENT, which is the only thing that protects
+# the nightly.
+MG=""
+
+# resolve_mg — set MG to the macguffin `mg`, or fail loudly. Never falls back to
+# an UNVERIFIED bare `mg` (that could be the editor).
+#
+# It walks a list of candidate binaries and accepts the FIRST that passes a
+# macguffin IDENTITY check. Two rules make this safe and PATH-independent:
+#
+#   1. IDENTITY, NOT EXISTENCE. /usr/bin/mg (the editor) satisfies -x and even
+#      `command -v mg`, so locating a candidate never means trusting it. Every
+#      candidate must self-identify as macguffin (its --help names "macguffin";
+#      the editor's does not — it errors "illegal option -- -") before use. This
+#      identity gate is the real safety property: the editor can appear anywhere
+#      in the list and is always found-and-rejected, never invoked.
+#
+#   2. GOPATH CANDIDATES FIRST. The go-install bin dir is derived and tried
+#      before any PATH lookup, so the production nightly — launchd's minimal PATH
+#      with NO `go` and /usr/bin/mg (editor) ahead of ~/go/bin — resolves the
+#      real ~/go/bin/mg without ever consulting PATH. That PATH-independence is
+#      the whole point (mg-015f): a per-wrapper PATH export would only fix
+#      launchers we control, and we do not control the nightly's.
+#
+# Deliberately NOT POGO_GOBIN: that overrides where THIS deploy INSTALLS pogod
+# and pogo (its target dir, which the sink controls point at a throwaway). mg is
+# not a deployed binary — it is a stable external tool macguffin `go install`s to
+# the standard go bin dir.
+resolve_mg() {
+    local cand gobin gopath pathmg
+    local -a cands=()
+    gobin="$(go env GOBIN 2>/dev/null)"
+    [ -n "$gobin" ] && cands+=("$gobin/mg")
+    gopath="$(go env GOPATH 2>/dev/null)"
+    [ -n "$gopath" ] && cands+=("$gopath/bin/mg")
+    # `go` may be off PATH entirely (launchd's minimal PATH has no go), so the
+    # env-var and conventional-default GOPATH cover the case where `go env` said
+    # nothing. macguffin installs to $GOPATH/bin, default $HOME/go/bin.
+    [ -n "${GOPATH:-}" ] && cands+=("$GOPATH/bin/mg")
+    cands+=("$HOME/go/bin/mg")
+    # LAST RESORT: a macguffin `mg` already on PATH — accepted ONLY if it passes
+    # the identity check, so the editor at /usr/bin/mg is rejected here rather
+    # than run. This rescues an isolated HOME (the live control sandboxes HOME to
+    # isolate the mail STORE, which points every $HOME/go path at an empty tree
+    # while the real macguffin binary sits on PATH). Production never reaches this
+    # rung — its GOPATH candidate resolves first.
+    pathmg="$(command -v mg 2>/dev/null)"
+    [ -n "$pathmg" ] && cands+=("$pathmg")
+
+    for cand in "${cands[@]}"; do
+        [ -x "$cand" ] || continue
+        "$cand" --help 2>/dev/null | grep -q 'macguffin' || continue
+        MG="$cand"
+        log "mg: resolved macguffin at $MG"
+        return 0
+    done
+
+    err "mg: no macguffin 'mg' found among the go-install paths or PATH (tried: ${cands[*]})."
+    err "mg: refusing bare 'mg' — on this OS that is /usr/bin/mg, the Micro-Emacs EDITOR, which satisfies 'command -v' but panics headless and delivers no alert (mg-015f)."
+    return 1
+}
+
 # mail_alert RECIPIENT SUBJECT BODY_FILE
 # Returns 0 ONLY when the message is READ BACK out of the recipient's mailbox.
 # Every other path returns 1 and says which one it took: "we could not tell" and
@@ -754,7 +832,7 @@ COORDINATOR="${POGO_COORDINATOR:-mayor}"
 mail_alert() {
     local to="$1" subject="$2" body_file="$3"
     local out id created
-    if ! out="$(mg mail send "$to" --from=pogo-self-deploy \
+    if ! out="$("$MG" mail send "$to" --from=pogo-self-deploy \
                     --subject="$subject" --body-file "$body_file" --json 2>&1)"; then
         err "sink: mg mail send to '$to' failed: $out"
         return 1
@@ -775,7 +853,7 @@ mail_alert() {
     # and out of an unread-only listing. Without --all a FAST reader would look
     # exactly like a lost message and we would escalate over a success.
     # -F: msg_ids are dotted, and we are matching a literal, not a pattern.
-    if mg mail list "$to" --all --json 2>/dev/null | grep -Fq "$id"; then
+    if "$MG" mail list "$to" --all --json 2>/dev/null | grep -Fq "$id"; then
         return 0
     fi
     err "sink: mailed '$to' (msg_id=$id) but could not read it back — treating as UNDELIVERED"
@@ -1256,7 +1334,7 @@ cleanup_orphans() {
             [ -z "$id" ] && [ -z "$wt" ] && continue
             if [ -n "$id" ]; then
                 log "unclaiming orphaned work item $id"
-                mg unclaim "$id" 2>&1 | sed 's/^/  /' || err "mg unclaim $id failed"
+                "$MG" unclaim "$id" 2>&1 | sed 's/^/  /' || err "mg unclaim $id failed"
             fi
             if [ -n "$wt" ] && [ -n "$repo" ] && git -C "$repo" rev-parse --git-dir >/dev/null 2>&1; then
                 log "removing orphaned worktree $wt"
@@ -1463,6 +1541,11 @@ verify_running() {
 }
 
 cmd_redeploy() {
+    # Resolve the macguffin `mg` to an absolute path up front. The redeploy's
+    # entire alert path (mail_alert) and its orphan cleanup call `mg`; a redeploy
+    # whose alerter cannot be resolved is a redeploy that cannot report its own
+    # stalls — refuse it loudly rather than ship a silent one (mg-015f).
+    resolve_mg || { err "cannot resolve the macguffin 'mg' — refusing to redeploy with an unusable alert path"; exit 1; }
     resolve_repo
     compute_drift
     print_drift

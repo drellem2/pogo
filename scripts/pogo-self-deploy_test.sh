@@ -801,6 +801,63 @@ PR_RC=$(
     && pass "do_prove: re-entry refuses LOUD (never silently skips the proof)" \
     || fail "do_prove re-entry did not refuse (rc=$PR_RC) — either it recurses or it skips silently"
 
+# --- resolve_mg: the macguffin-NOT-editor resolver (mg-015f) -----------------
+# The deploy's real alert path (mail_alert) and the live controls invoke `mg` by
+# this RESOLVED ABSOLUTE path, never the bare name — because /usr/bin/mg on macOS
+# is the Micro-Emacs EDITOR. Bare `mg` binds to it under launchd's minimal PATH
+# (the nightly's exact context: /usr/bin ahead of ~/go/bin, no go) and panics
+# headless, delivering NO alert. These controls stage fake binaries so the two
+# acceptance directions run deterministically on any box.
+MG_T="$(mktemp -d)"
+mkdir -p "$MG_T/editoronly"
+# A stand-in for /usr/bin/mg: its --help does NOT self-identify as macguffin (the
+# real editor errors "illegal option -- -"), so the resolver must REJECT it even
+# though it satisfies -x and `command -v mg`.
+cat > "$MG_T/editoronly/mg" <<'EOF'
+#!/bin/bash
+echo "usage: mg [-nR] [-b file] [file ...]" >&2
+exit 1
+EOF
+chmod +x "$MG_T/editoronly/mg"
+mk_macguffin() {
+    cat > "$1" <<'EOF'
+#!/bin/bash
+echo "macguffin work-item tracker"
+EOF
+    chmod +x "$1"
+}
+
+# (A) POSITIVE CONTROL — the nightly's exact context. Only the editor is on PATH,
+# ~/go is not on PATH, and `go` itself is absent. The real macguffin still sits at
+# $HOME/go/bin/mg ON DISK, and the resolver must find it WITHOUT consulting PATH.
+MG_HOME_A="$MG_T/home-a"; mkdir -p "$MG_HOME_A/go/bin"; mk_macguffin "$MG_HOME_A/go/bin/mg"
+MG_RESOLVED_A="$(
+    export HOME="$MG_HOME_A" PATH="$MG_T/editoronly:/usr/bin:/bin"
+    unset GOPATH GOBIN POGO_GOBIN
+    MG=""; resolve_mg >/dev/null 2>&1 && printf '%s' "$MG"
+)"
+[ "$MG_RESOLVED_A" = "$MG_HOME_A/go/bin/mg" ] \
+    && pass "resolve_mg (mg-015f): PATH-INDEPENDENT — with only the editor on PATH and no go, it still resolves the go-installed macguffin ($MG_RESOLVED_A). This is the nightly's context." \
+    || fail "resolve_mg did not resolve macguffin under the nightly's bad PATH (got '$MG_RESOLVED_A') — the deploy would bind bare mg to the editor and fail closed and silent"
+
+# (B) LOUD FAILURE — when the ONLY mg reachable ANYWHERE (GOPATH, $HOME/go, PATH)
+# is the editor, the resolver must FAIL and say so, never silently accept it.
+# Existence is not identity — a mere `command -v mg` guard would pass it through.
+MG_ERR_B="$MG_T/b.err"
+MG_RC_B="$(
+    export HOME="$MG_T/emptyhome-b" GOPATH="$MG_T/gp-editor-b" PATH="$MG_T/editoronly:/usr/bin:/bin"
+    unset GOBIN POGO_GOBIN
+    mkdir -p "$HOME" "$GOPATH/bin"
+    cp "$MG_T/editoronly/mg" "$GOPATH/bin/mg"
+    MG=""; resolve_mg 2>"$MG_ERR_B"; printf '%s|%s' "$?" "$MG"
+)"
+if [ "${MG_RC_B%%|*}" != "0" ] && [ -z "${MG_RC_B#*|}" ] && grep -q "refusing bare 'mg'" "$MG_ERR_B"; then
+    pass "resolve_mg (mg-015f): FAILS LOUDLY when only the editor is reachable — it rejects /usr/bin/mg by identity, leaves MG unset, and names why"
+else
+    fail "resolve_mg accepted the editor or failed quietly (rc|MG='$MG_RC_B') — an existence-only guard would pass the editor straight through and the sink would panic headless"
+fi
+rm -rf "$MG_T"
+
 echo ""
 PASS_COUNT=$(grep -c '^PASS:' "$RESULTS_FILE" 2>/dev/null || true)
 FAIL_COUNT=$(grep -c '^FAIL:' "$RESULTS_FILE" 2>/dev/null || true)
