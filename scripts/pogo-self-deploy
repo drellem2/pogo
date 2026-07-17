@@ -48,6 +48,13 @@ DAEMON_LABEL="${POGO_DAEMON_LABEL:-com.pogo.daemon}"
 DEPLOY_REF="${POGO_DEPLOY_REF:-main}"
 LAUNCHCTL="${LAUNCHCTL:-launchctl}"
 DRAIN_TIMEOUT=1800
+# How long verify_mail_checks_restored polls for the new pogod to finish loading
+# its schedules. A variable rather than a literal so the live control
+# (pogo-self-deploy_live_test.sh) can drive the RED and UNKNOWN verdicts without
+# burning the full window per assertion. It changes how many times the check
+# probes, never what a probe does — the seam under test (curl -> parse ->
+# classify -> report) is identical either way.
+MAIL_CHECK_TIMEOUT=30
 FORCE=false
 ASSUME_YES=false
 SKIP_DRAIN=false
@@ -81,6 +88,13 @@ base_url() { echo "http://127.0.0.1:${PORT}"; }
 # triggers the failure. It reports; it never blocks the redeploy — the daemon
 # is already up and running main by the time it runs, and a false alarm must
 # not look like a failed deploy.
+#
+# The ASSEMBLED path below (verify_mail_checks_restored -> mail_check_count ->
+# live curl -> parse -> classify) is shown able to go RED by
+# scripts/pogo-self-deploy_live_test.sh, which stands up a real pogod, lets its
+# real GC reap real mail-checks, and asserts this code reports the loss (mg-c02d).
+# The pure-function tests in pogo-self-deploy_test.sh do NOT cover that wiring.
+# If you change anything in that chain, that live control is the one that matters.
 
 # count_mail_checks — count mail-check-* ids on stdin. Pure: the sed/grep half
 # of mail_check_count, split out so it is testable without a live daemon.
@@ -133,7 +147,7 @@ verify_mail_checks_restored() {
         log "mail-check post-check: SKIPPED (could not count mail-checks before the bounce)"
         return 0
     fi
-    deadline=$(( $(date +%s) + 30 ))
+    deadline=$(( $(date +%s) + MAIL_CHECK_TIMEOUT ))
     while :; do
         post="$(mail_check_count)"
         verdict="$(classify_mail_check_restore "$pre" "${post:-}" "$slack")"

@@ -22,5 +22,14 @@ bash shell/bashrc_test.sh
 echo "Testing pogo-self-deploy driver"
 bash scripts/pogo-self-deploy_test.sh
 
+# The live control for the mg-de08 mail-check post-check (mg-c02d). Stands up a
+# sandboxed pogod and drives the ASSEMBLED verify path — the unit test above
+# only proves the pure classifier can fail. Costs ~40s (pogod holds its
+# mail-check reap for 30s after boot); that is the price of the only assertion
+# that shows the redeploy post-check can go RED at all, and mg-f206's unattended
+# nightly redeploy rests on it.
+echo "Testing pogo-self-deploy live mail-check control"
+bash scripts/pogo-self-deploy_live_test.sh
+
 echo "Testing build.sh"
 bash build_test.sh
