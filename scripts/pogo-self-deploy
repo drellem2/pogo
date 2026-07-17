@@ -16,9 +16,19 @@
 # redeploy kickstart -k kills pogod's entire process tree. A human runs it
 # today; a healthy-launchd one-shot may run it later (mg-6afa sequencing).
 #
+# A redeploy PROVES THE DETECTOR BEFORE IT TRUSTS IT (do_prove, mg-bfe5). After
+# the build and before the kickstart, every run stands the live control up
+# against the artifact it is about to deploy and refuses to proceed unless the
+# mail-check post-check is observed going RED on a broken fleet AND GREEN on an
+# intact one. do_build runs `go install` and no tests, so without this a redeploy
+# ships a pogod whose detector has never been exercised against it; a merge-time
+# pass is a claim about a commit, not a measurement of the artifact. It adds ~2min
+# to a redeploy, inside the drain window. A refusal exits with the drain trap
+# still armed, so the old pogod keeps running and dispatching.
+#
 # USAGE
 #   pogo-self-deploy check                 # three-way drift report; NEVER acts
-#   pogo-self-deploy redeploy [flags]      # guarded rebuild+restart
+#   pogo-self-deploy redeploy [flags]      # guarded rebuild+prove+restart
 #
 # redeploy flags:
 #   --yes                 proceed without the interactive confirmation prompt
@@ -631,6 +641,104 @@ do_build() {
     log "installed pogod is now $(short "$now")"
 }
 
+# ---------------------------------------------------------------------------
+# do_prove — the deploy must not trust a detector it has not just proven can
+# fail. Runs the live control against the BUILT ARTIFACT, both directions, and
+# refuses to deploy unless it observes both (mg-bfe5).
+#
+# WHY THIS EXISTS: do_build runs `go install` and NO TESTS. The live control is
+# wired into test.sh, so it runs at MERGE and never at DEPLOY — every redeploy
+# before this shipped a pogod whose detector had never been exercised against it.
+# The attended ones were not safe either; they were covered by a human standing
+# there doing the detector's job by hand.
+#
+# AND MERGE-TIME PROOF DOES NOT SUBSTITUTE. It is tempting — the refinery really
+# does re-gate on the exact tree that lands (mg-a9bb read it: attemptMerge orders
+# fetch -> checkout -B -> rebase -> runQualityGates -> merge --ff-only, so the
+# gate runs on the rebased worktree, there is no batch primitive, and --ff-only
+# re-gates on a race). So "main is green" is NOT a decaying claim. It is still
+# the wrong fact: a merge-time pass is a claim about a COMMIT, and what gets
+# kickstarted is an ARTIFACT. `go install` reads a toolchain, a module cache and
+# a build environment that the gate's machine did not necessarily share.
+#
+# WHY THIS SHAPE AND NOT A PATH LIST: "re-prove when the diff touches the reap"
+# is a PROXY for "did this change break the detector?", and it inherits that
+# proxy's decay — move the reap out of cmd/pogod/main.go and the list silently
+# stops covering it. It fails OPEN: a check that can no longer fail, inside the
+# mechanism protecting the thing we spent all night proving can fail. Tonight
+# proved it twice (a `-eq 4` literal decayed on the next commit; mg-6b66's
+# main.go:915 decayed on that same night's merges). Every decaying guard is a
+# proxy for a question you could ask directly — and this question is directly
+# observable, so it asks it: run the detector and see. This function names no
+# path, judges no diff, and asserts nothing about the tree. It contains a
+# measurement, not a claim, which is why it cannot rot.
+#
+# ITS HONEST LIMIT: per-run proof shows the detector WORKS; it cannot show its
+# coverage is COMPLETE. Nothing self-proves coverage. That argues for expanding
+# the control as new modes are learned — not for a human, who at 03:00 is asleep
+# and awake would be reading these same signals by hand.
+do_prove() {
+    local ctl="$REPO/scripts/pogo-self-deploy_live_test.sh"
+    local bin; bin="$(installed_bin)"
+
+    # The gate must fail CLOSED on its own absence. If the control is missing,
+    # that is not "nothing to prove" — it is the detector's detector gone, which
+    # is the exact fail-open this function exists to close.
+    if [ ! -f "$ctl" ]; then
+        err "live control $ctl not found — refusing to deploy a pogod whose detector cannot be proven"
+        exit 9
+    fi
+    if [ ! -x "$bin" ]; then
+        err "no installed pogod at $bin to prove — refusing to deploy"
+        exit 9
+    fi
+
+    # Re-entrancy: fail LOUD, never skip. The live control drives real
+    # cmd_redeploy runs, and today every one of them dies in do_build (exit 4)
+    # and so never reaches here — but that is a CLAIM about the control, and
+    # claims rot. If one ever gets past the build, this turns an infinite
+    # recursion of 2-minute daemon-spawning runs into one legible error. Skipping
+    # instead would mean a stray env var silently downgrades a deploy to the
+    # unproven behaviour this ticket removes, which is the wrong direction to
+    # fail in.
+    if [ -n "${POGO_DEPLOY_PROVING:-}" ]; then
+        err "do_prove re-entered from inside the live control (POGO_DEPLOY_PROVING is set) — refusing to recurse"
+        exit 9
+    fi
+
+    log "proving the detector against the built artifact $(short "$(installed_rev)") ($bin)"
+    log "  running $ctl — both directions, ~2min; a deploy does not trust an unproven detector"
+
+    # Capture rather than stream: the verdict is drawn from the tokens, so the
+    # output has to be readable afterwards. It is echoed on failure only — on
+    # success the two PROVED lines below are the whole story.
+    local out rc=0
+    out="$(POGO_DEPLOY_PROVING=1 POGO_LIVE_CONTROL_POGOD="$bin" bash "$ctl" 2>&1)" || rc=$?
+
+    if [ "$rc" -ne 0 ]; then
+        err "the live control FAILED against the built artifact (exit $rc) — refusing to deploy a pogod whose detector does not work on it"
+        printf '%s\n' "$out" | sed 's/^/  control: /'
+        exit 9
+    fi
+
+    # BOTH DIRECTIONS OR NOTHING. Not the exit code: exit 0 only means nothing
+    # that ran failed, and cannot tell a run that demonstrated both directions
+    # from one where the RED control was deleted, skipped, or never reached. A
+    # control that only demonstrates RED can be hard-wired to RED; one that only
+    # demonstrates GREEN is decoration. So assert on what was OBSERVED.
+    local saw_red=false saw_green=false
+    printf '%s\n' "$out" | grep -q '^PROVED: RED$'   && saw_red=true
+    printf '%s\n' "$out" | grep -q '^PROVED: GREEN$' && saw_green=true
+
+    if ! $saw_red || ! $saw_green; then
+        err "the live control exited 0 but did not demonstrate both directions against the artifact (RED=$saw_red GREEN=$saw_green) — refusing to deploy on a detector that was not shown able to fail AND able to pass"
+        printf '%s\n' "$out" | sed 's/^/  control: /'
+        exit 9
+    fi
+
+    log "proven on this artifact: detector goes RED on a broken fleet and GREEN on an intact one"
+}
+
 do_restart() {
     local target="gui/$(id -u)/$DAEMON_LABEL"
     log "restarting pogod: launchctl kickstart -k $target"
@@ -749,6 +857,25 @@ cmd_redeploy() {
     else
         log "installed already matches main — skipping go install (restart-only)"
     fi
+
+    # 2a. Prove the detector against the artifact we are about to kickstart into
+    #     — RED on a broken fleet, GREEN on an intact one — or refuse to deploy.
+    #
+    #     EVERY run, not just $NEEDS_BUILD runs. A restart-only deploy installs
+    #     nothing, but it still kickstarts the fleet onto that binary and still
+    #     leans on the post-check at step 5 to tell it whether the mail loop
+    #     survived; the artifact being older than this run does not make its
+    #     detector proven. Gating this on NEEDS_BUILD would also make the
+    #     guarantee conditional on a drift classification — i.e. back to a claim
+    #     about when proof is needed, which is the shape that rots.
+    #
+    #     Deliberately INSIDE the drain window, per the ticket: after go install,
+    #     before do_restart. It costs ~2min of drain, and a refusal here exits
+    #     while the trap is still armed — so the restore puts dispatch back
+    #     exactly as it does for a failed build (mg-8b48). A refusal to deploy
+    #     therefore leaves the OLD pogod running and the fleet dispatching, which
+    #     is the correct resting state for "we could not prove the new one".
+    do_prove
 
     # 3. Restart (always kickstart) and verify the new process is main.
     #    Read the fleet's mail-checks FIRST — the old pogod is the only thing

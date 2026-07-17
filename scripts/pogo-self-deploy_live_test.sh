@@ -55,6 +55,42 @@
 # rather than a pure helper, so unlike 1-5 it is a control on the DRIVER, not on
 # the post-check. It shares this file because it needs the same thing: a real
 # pogod whose state can be read back after the code under test has moved it.
+#
+# RUNNING AGAINST A PREBUILT ARTIFACT ($POGO_LIVE_CONTROL_POGOD) — mg-bfe5
+# ----------------------------------------------------------------------
+# By default this file builds its own pogod from $REPO_ROOT, which is what the
+# refinery gate wants: a control on the COMMIT. `do_prove` in the driver sets
+# POGO_LIVE_CONTROL_POGOD to the binary `go install` just produced and runs this
+# same file against THAT, which is what a deploy wants: a measurement of the
+# ARTIFACT. Those are different facts, and the difference is the whole of mg-bfe5
+# — `do_build` runs `go install` and no tests, so before this every redeploy
+# shipped a pogod whose detector had never been exercised against it. A merge-time
+# pass is a claim about a commit; it is not an observation of the bytes that are
+# about to become the fleet's daemon.
+#
+# The seam is deliberately just the binary. Everything else — the driver sourced
+# below, the assertions, the sandbox — still comes from $REPO_ROOT, because
+# do_build has already refused to install from a tree that is not exactly
+# $DEPLOY_REF and clean. So at deploy time the shell code and the artifact are
+# from the same commit, and the artifact is the installed one rather than a
+# second build of it.
+#
+# WHAT `PROVED:` LINES ARE FOR (and why the exit code is not enough)
+# -----------------------------------------------------------------
+# Controls 2 and 4 are the two directions of the post-check: OK on an intact
+# fleet, RED on a real reap. Each records a `PROVED: GREEN` / `PROVED: RED`
+# token, and do_prove refuses to deploy unless it observes BOTH in this file's
+# output.
+#
+# It reads the tokens rather than the exit code because those answer different
+# questions. Exit 0 means "nothing that ran failed" — it cannot distinguish a run
+# that demonstrated both directions from one where control 4 was deleted, or was
+# skipped by an early `exit`, or never ran because the seam check bailed out at
+# line ~200. All of those exit 0 with every surviving assertion passing, and all
+# of them would hand a deploy a detector that had never been shown able to fail
+# against that artifact. The tokens make the gate assert on what was OBSERVED
+# rather than on what was not reported — a control that only demonstrates RED can
+# be hard-wired to RED, and one that only demonstrates GREEN is decoration.
 
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -97,14 +133,50 @@ trap cleanup EXIT
 pass() { echo "PASS: $1"; echo "PASS: $1" >> "$RESULTS_FILE" || { echo "LEDGER WRITE FAILED: $1"; exit 1; }; }
 fail() { echo "FAIL: $1"; echo "FAIL: $1" >> "$RESULTS_FILE" || { echo "LEDGER WRITE FAILED: $1"; exit 1; }; }
 
+# A direction actually DEMONSTRATED against the artifact under test (mg-bfe5).
+# Emitted only from the two sites that observe the assembled post-check reporting
+# each way, and guarded like the ledger writes for the same reason: a deploy gate
+# that reads these must not be handed silence by a failed append.
+#
+# It is deliberately NOT called from pass() — "an assertion passed" and "the
+# detector was shown able to go RED against this binary" are different claims,
+# and collapsing them would let any 24 green assertions satisfy do_prove.
+proved() { echo "PROVED: $1"; echo "PROVED: $1" >> "$RESULTS_FILE" || { echo "LEDGER WRITE FAILED: PROVED $1"; exit 1; }; }
+
+# The artifact under test. Default: build one from $REPO_ROOT (the refinery gate's
+# control on the commit). $POGO_LIVE_CONTROL_POGOD: use the caller's prebuilt
+# binary verbatim (the driver's do_prove, pointing at what `go install` just
+# produced — a control on the artifact). See the header.
+#
+# Copied, not run in place: the sandbox daemon must stay killable and disposable,
+# and the real ~/go/bin/pogod is a file a concurrent `go install` may rewrite
+# underneath a live process (the same reason running_rev reads the PROCESS, not
+# `go version -m` on disk). A copy pins the bytes for the length of the run.
+#
 # Build FIRST, under the real HOME. Go resolves GOPATH/GOMODCACHE off $HOME, so
 # building after the sandbox override below sends it to re-download the whole
 # module cache and toolchain into $SANDBOX — minutes of network, and a module
 # cache that is read-only by design and so defeats the cleanup rm -rf.
-echo "Building pogod into the sandbox..."
-if ! (cd "$REPO_ROOT" && go build -o "$SANDBOX/pogod" ./cmd/pogod); then
-    fail "could not build cmd/pogod — the live control cannot run"
-    exit 1
+if [ -n "${POGO_LIVE_CONTROL_POGOD:-}" ]; then
+    # Refuse to silently fall back to a source build: the caller asked for a
+    # specific artifact, and quietly testing a DIFFERENT binary than the one
+    # about to be deployed is precisely the fail-open this ticket exists to close.
+    if [ ! -x "$POGO_LIVE_CONTROL_POGOD" ]; then
+        fail "POGO_LIVE_CONTROL_POGOD=$POGO_LIVE_CONTROL_POGOD is not an executable — refusing to fall back to a source build and report on the wrong binary"
+        exit 1
+    fi
+    echo "Using prebuilt artifact: $POGO_LIVE_CONTROL_POGOD"
+    if ! cp "$POGO_LIVE_CONTROL_POGOD" "$SANDBOX/pogod"; then
+        fail "could not copy $POGO_LIVE_CONTROL_POGOD into the sandbox — the live control cannot run"
+        exit 1
+    fi
+    chmod +x "$SANDBOX/pogod"
+else
+    echo "Building pogod into the sandbox..."
+    if ! (cd "$REPO_ROOT" && go build -o "$SANDBOX/pogod" ./cmd/pogod); then
+        fail "could not build cmd/pogod — the live control cannot run"
+        exit 1
+    fi
 fi
 
 # --- sandbox: a real pogod that cannot reach the real fleet ------------------
@@ -213,7 +285,10 @@ fi
 OUT_OK="$(verify_mail_checks_restored "$LIVE_PRE" "" 2>&1)"
 case "$OUT_OK" in
     *"post-check: OK"*)
-        pass "assembled path reports OK against a live, intact fleet (the RED below is conditional)" ;;
+        pass "assembled path reports OK against a live, intact fleet (the RED below is conditional)"
+        # The GREEN half of do_prove's deploy gate (mg-bfe5): this artifact's
+        # detector was observed reporting OK on a fleet that really is intact.
+        proved "GREEN" ;;
     *)
         fail "assembled path did not report OK on an intact fleet: $OUT_OK" ;;
 esac
@@ -336,7 +411,12 @@ else
     OUT_RED="$(MAIL_CHECK_TIMEOUT=2 verify_mail_checks_restored "$LIVE_PRE" "" 2>&1)"
     case "$OUT_RED" in
         *"post-check: FAILED"*"6 mail-check schedule(s) LOST"*)
-            pass "positive control: assembled path reports RED on a real reap (6 -> 0 = FAILED, 6 LOST)" ;;
+            pass "positive control: assembled path reports RED on a real reap (6 -> 0 = FAILED, 6 LOST)"
+            # The RED half of do_prove's deploy gate (mg-bfe5): this artifact's
+            # detector was observed going RED on a real reap it really suffered.
+            # Paired with the GREEN above, that RED is conditional rather than
+            # hard-wired — which is the only form of it worth deploying on.
+            proved "RED" ;;
         *)
             fail "positive control FAILED: real reap of 6 mail-checks, assembled path did NOT report RED. Got: $OUT_RED" ;;
     esac

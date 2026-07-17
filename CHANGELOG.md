@@ -12,6 +12,39 @@ is the curated, human-readable summary kept in sync at each release cut.
 
 ### Fixed
 
+- **A redeploy now proves the detector against the artifact it is about to
+  deploy — both directions — or refuses to deploy (mg-bfe5).** `do_build` ran
+  `go install` and **no tests**, so the live control that proves the mail-check
+  post-check can actually fail (`scripts/pogo-self-deploy_live_test.sh`, wired
+  into `test.sh`) ran **at merge and never at deploy**: every redeploy shipped a
+  pogod whose detector had never been exercised against it. The attended
+  redeploys were not safe either — they were covered by a human standing there
+  doing the detector's job by hand. `do_prove` now runs, after `go install` and
+  before the kickstart on **every** run (including restart-only, which
+  kickstarts the fleet onto that binary and leans on the same post-check), the
+  live control against the **installed binary** via `$POGO_LIVE_CONTROL_POGOD`,
+  and refuses (exit 9) unless it observes the post-check going **RED on a real
+  reap AND GREEN on an intact fleet**. Both directions or nothing: a control
+  only ever shown going RED can be hard-wired to RED, and one only shown going
+  GREEN is decoration. It asserts on `PROVED:` tokens the control emits at those
+  two sites rather than on the exit code, because exit 0 only means nothing that
+  ran failed — it cannot tell a run that demonstrated both directions from one
+  where the RED control was deleted, skipped, or never reached. Verified by
+  building a pogod with `reapMailChecks` sabotaged to a no-op and watching
+  `do_prove` refuse it (exit 9) — an artifact `go install` would have shipped
+  without complaint. **Merge-time proof does not substitute:** the refinery
+  really does re-gate on the exact tree that lands (mg-a9bb), so "main is green"
+  is not a decaying claim — it is simply a claim about a *commit*, where what
+  gets kickstarted is an *artifact* built by a toolchain and module cache the
+  gate's machine need not have shared. Deliberately **not** a "re-prove when the
+  diff touches the reap" path list: that is a proxy for "did this change break
+  the detector?", it fails **open** when the reap moves out of the file it names,
+  and the question is directly observable — so it asks it. Costs ~2min inside the
+  drain window; a refusal exits with the drain trap armed, so the old pogod keeps
+  running and dispatching (mg-8b48). Its honest limit: per-run proof shows the
+  detector *works*, not that its coverage is *complete* — which argues for
+  growing the control as new modes are learned, not for a human at 03:00.
+
 - **The refinery no longer strands a polecat on merge failure — the submit-time
   worktree unlink is deleted (gh #88, mg-143e).** pogod wired the refinery's
   `OnSubmit` hook to unlink the submitting polecat's worktree (`os.Remove(

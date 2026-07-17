@@ -295,6 +295,124 @@ ERRBODY='{"draining":true,"count":0,"polecats":[],"unreachable_err":"witness: ca
     esac
 ) 2>/dev/null
 
+# --- do_prove: the deploy-time gate on the detector (mg-bfe5) ---------------
+# do_prove decides whether a redeploy is allowed to proceed. These drive its REAL
+# body against a stub control whose output and exit code the test dictates, so
+# every verdict below is the driver's own logic.
+#
+# The stub is the point, not a shortcut. The question here is NOT "does the live
+# control work" — the live control answers that itself, at length, against a real
+# daemon. It is "does the GATE refuse?", and the only way to ask that is to hand
+# it a control that fails, that half-passes, or that lies by exiting 0 while
+# demonstrating nothing. None of those can be staged with the real control.
+#
+# Without these, do_prove would be a guard whose refusal path had never once been
+# executed — a check shipped without a demonstrated RED, inside the mechanism
+# that exists because checks get shipped without demonstrated REDs.
+PROVE_DIR=$(mktemp -d)
+trap 'rm -f "$RESULTS_FILE"; rm -rf "$PROVE_DIR"' EXIT
+mkdir -p "$PROVE_DIR/repo/scripts" "$PROVE_DIR/gobin"
+# A stand-in for the installed artifact. do_prove only needs it to exist and be
+# executable; the stub control below is what "reports" on it.
+printf '#!/bin/sh\nexit 0\n' > "$PROVE_DIR/gobin/pogod"; chmod +x "$PROVE_DIR/gobin/pogod"
+
+# Write a stub live control that emits $1 and exits $2.
+stub_control() {
+    { printf '#!/bin/bash\ncat <<'"'"'STUBEOF'"'"'\n%s\nSTUBEOF\nexit %s\n' "$1" "$2"; } \
+        > "$PROVE_DIR/repo/scripts/pogo-self-deploy_live_test.sh"
+    chmod +x "$PROVE_DIR/repo/scripts/pogo-self-deploy_live_test.sh"
+}
+
+# Run the real do_prove against the fixture. Echoes rc; stdout/stderr to $1.
+prove_run() {
+    local outfile="$1"
+    (
+        REPO="$PROVE_DIR/repo"
+        POGO_GOBIN="$PROVE_DIR/gobin"
+        MAIN=deadbeefdeadbeef
+        installed_rev() { echo deadbeefdeadbeef; }
+        unset POGO_DEPLOY_PROVING
+        do_prove
+    ) > "$outfile" 2>&1
+    echo $?
+}
+PROVE_OUT="$PROVE_DIR/out"
+
+# (a) THE GREEN. Both directions demonstrated -> the deploy proceeds. Without
+#     this the refusals below could all be "do_prove always refuses".
+stub_control 'PASS: something
+PROVED: GREEN
+PROVED: RED
+=== Results: 19 passed, 0 failed ===' 0
+[ "$(prove_run "$PROVE_OUT")" = "0" ] \
+    && pass "do_prove: a control that demonstrates BOTH directions lets the deploy proceed" \
+    || fail "do_prove refused a control that proved both directions (rc=$(prove_run "$PROVE_OUT")): $(cat "$PROVE_OUT")"
+
+# (b) THE ASK, half 1: RED demonstrated but never GREEN. A detector only ever
+#     shown going RED can be hard-wired to RED and is worth nothing.
+stub_control 'PROVED: RED
+=== Results: 19 passed, 0 failed ===' 0
+PR_RC="$(prove_run "$PROVE_OUT")"
+{ [ "$PR_RC" = "9" ] && grep -q "both directions" "$PROVE_OUT"; } \
+    && pass "do_prove: REFUSES a control that demonstrated RED but never GREEN (a hard-wired RED proves nothing)" \
+    || fail "do_prove ALLOWED a RED-only control (rc=$PR_RC) — a detector hard-wired to RED would deploy"
+
+# (c) THE ASK, half 2: GREEN demonstrated but never RED. This is the loophole the
+#     whole family lives in — the control that has never been shown able to fail.
+stub_control 'PROVED: GREEN
+=== Results: 19 passed, 0 failed ===' 0
+PR_RC="$(prove_run "$PROVE_OUT")"
+{ [ "$PR_RC" = "9" ] && grep -q "both directions" "$PROVE_OUT"; } \
+    && pass "do_prove: REFUSES a control that demonstrated GREEN but never RED (an undemonstrated RED is decoration)" \
+    || fail "do_prove ALLOWED a GREEN-only control (rc=$PR_RC) — the exact defect this ticket exists to close"
+
+# (d) THE EXIT CODE IS NOT THE SIGNAL. A control that exits 0 having demonstrated
+#     nothing — every assertion deleted, or an early exit before the controls —
+#     must not be read as proof. This is why do_prove asserts on the tokens.
+stub_control 'PASS: driver resolves base_url to the sandbox daemon
+=== Results: 1 passed, 0 failed ===' 0
+PR_RC="$(prove_run "$PROVE_OUT")"
+[ "$PR_RC" = "9" ] \
+    && pass "do_prove: REFUSES a control that exits 0 while demonstrating NEITHER direction (exit 0 != proven)" \
+    || fail "do_prove trusted a clean exit 0 that proved nothing (rc=$PR_RC) — the gate reads the exit code, not the evidence"
+
+# (e) a control that actually fails must stop the deploy, and say so.
+stub_control 'PROVED: GREEN
+FAIL: positive control FAILED: assembled path did NOT report RED
+=== Results: 1 passed, 1 failed ===' 1
+PR_RC="$(prove_run "$PROVE_OUT")"
+{ [ "$PR_RC" = "9" ] && grep -q "FAILED against the built artifact" "$PROVE_OUT"; } \
+    && pass "do_prove: a FAILING control refuses the deploy (and the failure is echoed, not swallowed)" \
+    || fail "do_prove did not refuse on a failing control (rc=$PR_RC)"
+
+# (f) the gate fails CLOSED on its own absence. A missing control is the
+#     detector's detector gone — not "nothing to prove".
+rm -f "$PROVE_DIR/repo/scripts/pogo-self-deploy_live_test.sh"
+PR_RC="$(prove_run "$PROVE_OUT")"
+[ "$PR_RC" = "9" ] \
+    && pass "do_prove: a MISSING live control refuses the deploy (fails closed, not open)" \
+    || fail "do_prove proceeded with no live control present (rc=$PR_RC) — the gate fails open on its own absence"
+
+# (g) re-entrancy fails LOUD rather than skipping. The live control drives real
+#     cmd_redeploy runs; today they all die in do_build and never reach do_prove,
+#     but a control that ever got past the build would otherwise recurse forever.
+#     Refusing (not skipping) also means a stray env var cannot silently
+#     downgrade a deploy back to the unproven behaviour.
+stub_control 'PROVED: GREEN
+PROVED: RED' 0
+PR_RC=$(
+    (
+        REPO="$PROVE_DIR/repo"; POGO_GOBIN="$PROVE_DIR/gobin"; MAIN=deadbeefdeadbeef
+        installed_rev() { echo deadbeefdeadbeef; }
+        POGO_DEPLOY_PROVING=1
+        do_prove
+    ) > "$PROVE_OUT" 2>&1
+    echo $?
+)
+{ [ "$PR_RC" = "9" ] && grep -q "refusing to recurse" "$PROVE_OUT"; } \
+    && pass "do_prove: re-entry refuses LOUD (never silently skips the proof)" \
+    || fail "do_prove re-entry did not refuse (rc=$PR_RC) — either it recurses or it skips silently"
+
 echo ""
 PASS_COUNT=$(grep -c '^PASS:' "$RESULTS_FILE" 2>/dev/null || true)
 FAIL_COUNT=$(grep -c '^FAIL:' "$RESULTS_FILE" 2>/dev/null || true)
