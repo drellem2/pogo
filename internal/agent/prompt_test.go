@@ -3696,14 +3696,17 @@ func TestArchitectTemplateNoticesRatherThanRules(t *testing.T) {
 // predicate must MEASURE it against the population it would govern, report the
 // count, and state whether that population is stationary.
 //
-// The rule is not speculative. On 2026-07-17 three agents made the identical
+// The rule is not speculative. On 2026-07-17 four agents made the identical
 // error inside one hour, each holding different advantages: a polecat-architect
 // read every call site and was right about all of it, then recommended a
 // predicate matching 0 of the 14 queued items; the mayor caught that, then
 // wrote an acceptance bar already satisfied 9x that day; the standing architect
 // scoped a fix "for the whole class at once" that covered 32 of 63 nested repos
 // — a count that was 67 fifteen minutes later, because dispatching polecats is
-// what grows it.
+// what grows it; and the PM who caught that miscount then scoped their own
+// follow-up ticket to 35 of 67, in the correction to it, and caught it
+// themselves. Two of the four were caught by their own authors, and three of
+// the four counts happened only because someone had just been shown one.
 //
 // The architect's own conclusion, ruling on a failure it had just committed:
 // "Fresh context wasn't the variable. The polecat and I failed the same way
@@ -3720,10 +3723,16 @@ func TestArchitectTemplateNoticesRatherThanRules(t *testing.T) {
 // This lands on the template and not on crew/architect.md or mayor.md by
 // deliberate ruling: a template binds because dispatch instantiates it, per
 // verdict, fresh; a crew prompt is read once at boot and then competes with
-// everything else in a multi-hour context. The polecat is also the only agent
-// that rules and then ACTS on its own ruling — mayor and architect are
-// structurally forbidden from implementing their own verdicts, which guarantees
-// a counter downstream of every ruling they make. The polecat has none.
+// everything else in a multi-hour context. The polecat is the only one the
+// template can reach — not the only one that NEEDS the rule. An earlier draft
+// claimed a structural forcing function (mayor and architect "structurally
+// forbidden from implementing their own verdicts, so a counter always stands
+// downstream"); its author retracted that before merge as an uncounted claim
+// about a control, the exact sin this template exists to stop. The four counts
+// were a cascade, not a control, and no forcing function has been identified
+// for anyone. What the polecat's position adds is real but narrower: it acts on
+// its own ruling, and an act touches the population the verdict NAMED, never the
+// one it should have — so its own act cannot audit its own scope (mg-b42f).
 //
 // If the wording changes, update this test deliberately. In particular do NOT
 // let the rule acquire an escape hatch ("consider measuring", "where
@@ -3764,12 +3773,39 @@ func TestArchitectTemplateRequiresMeasuringReusedPredicates(t *testing.T) {
 		"67, not 63",
 		// Why the verdict and not the author.
 		"counting is a separate act that nothing forces",
-		// Why the polecat and not the crew.
-		"Judging doesn't touch the population; acting does.",
-		"rules and then ACTS on your own ruling",
+		// Why the polecat and not the crew — the HONEST version (mg-b42f).
+		// The earlier "judging doesn't touch the population; acting does" /
+		// "a counter always stands downstream" mechanism was retracted by its
+		// own author before merge: the four counts were a cascade, not a
+		// control, and no forcing function stands downstream of anyone. The
+		// polecat gets the rule because it is the only one the template can
+		// reach, not the only one that needs it.
+		"cascade, not a control",
+		"No forcing function has been identified for anyone here",
+		"you're the only one of us it can reach",
+		"act on your own ruling",
+		"Your own act cannot audit your own scope",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("polecat-architect.md: missing measure-the-population rule %q", want)
+		}
+	}
+
+	// The retracted counter-downstream mechanism (mg-b42f). These phrases
+	// asserted an uncounted claim about a control, in the very file that exists
+	// to stop exactly that; the architect retracted them ~20 minutes after
+	// writing them, but the retraction lost a race to a polecat's read and they
+	// shipped anyway. A grep cannot tell the claim from a note retracting it —
+	// so this guard pins their ABSENCE, not merely the presence of the fix.
+	for _, retracted := range []string{
+		"Judging doesn't touch the population; acting does.",
+		"a counter always stands downstream",
+		"none by its author",
+		"you're the only one who needs it",
+		"the only one who needs it",
+	} {
+		if strings.Contains(body, retracted) {
+			t.Errorf("polecat-architect.md: retracted counter-downstream mechanism must not reappear: %q", retracted)
 		}
 	}
 

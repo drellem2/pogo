@@ -39,19 +39,44 @@ If your verdict proposes **reusing** an existing predicate, rule, gate, or bar �
 
 ### Provenance — this rule was written by an architect who had just failed it
 
-Not advice; a record. On 2026-07-17, three agents made this identical error within one hour, each holding different advantages:
+Not advice; a record. On 2026-07-17, four agents made this identical error within one hour, each holding different advantages:
 
 - **A polecat-architect** read every call site, every design doc, and the history — and was right about all of it. It recommended lifting an existing `assignee == "" || assignee == self` predicate to the dispatch point. **It matched 0 of the 14 items then in the queue**; the gate would have refused the entire queue. A ticket had already merged an hour earlier under an assignee the predicate rejected — code and predicate had diverged in production, and the code was right.
 - **The coordinator** caught that one, then wrote an acceptance bar reading *"prove each detector CAN fire"* — **already satisfied 9× that day.** A builder could meet it honestly, change nothing, and close the ticket.
 - **The standing architect** ruled that relocating a directory fixed an exposure *"for the whole class at once."* Counted afterwards, unprompted: **63 nested repos, the fix covering 32** — missing the largest single group, two inside the architect's own working directory, and one carrying a live exposure that day. Fifteen minutes later the count was **67, not 63**: the delta was a polecat dispatched in between. The population grows as a function of our own dispatch rate.
+- **The PM** who caught that 32-of-63 miscount then, in the very ticket filed to fix it, scoped their own follow-up to **35 of 67** — and caught it themselves, with no actor downstream of them. The same error, in the same hour, inside the correction to the error.
 
 The architect's conclusion, and the reason this binds the **verdict** and not the author: *"Fresh context wasn't the variable. The polecat and I failed the same way because reading is what produces the verdict, and counting is a separate act that nothing forces."*
 
 ### Why this rule lands on you and not on the crew
 
-Each of those three errors was caught — none by its author, none by a reviewer reviewing. Each was caught by **the recipient who was about to ACT on it**. **Judging doesn't touch the population; acting does.** The coordinator and the standing architect are structurally forbidden from implementing their own verdicts, so a counter always stands downstream of their rulings.
+**Not because the crew has already solved it.** The record above says three; it was **four**. The PM who caught the architect's 32-of-63 then scoped their own follow-up ticket to **35 of 67** — written *after* the catch, in the ticket filed to fix it. **Two of the four were caught by their own authors**, and three of the four counts happened only because someone had just been shown a count. That is a **cascade, not a control**: it does not survive the hour and nothing pins it. **No forcing function has been identified for anyone here** — not seniority, not review, not the separation of ruling from doing. An earlier version of this section claimed one. It was an uncounted claim about a control, in the file that exists to stop uncounted claims about controls; its author retracted it twenty minutes after writing it, and it shipped here anyway.
 
-**You are the only one of us who rules and then ACTS on your own ruling.** No separate actor exists downstream of you to hit the population. That is the gap this rule fills — you don't get it because you're trusted less, you get it because you're the only one who needs it.
+So you are **not** being handed a discipline the crew keeps and you lack. We need it exactly as much as you do. The difference is that **you have a template and we don't.** You don't get this rule because you're trusted less — you get it because **you're the only one of us it can reach.**
+
+**So do not treat a verdict as counted because a crew member wrote it.** If a ruling you are handed scopes by a predicate and never reports what it matches, that is this exact defect, and naming it is your job — including when it came from the standing architect. On the day this rule was written, the standing architect's ruling was wrong and a dispatched polecat-architect inverted it correctly.
+
+**What your position does add:** you rule and then **act on your own ruling** — and acting on a scope touches the population the verdict **NAMED**, never the population it **SHOULD have** named. Implement *"fix every X under `polecats/`"* faithfully and you will touch 35 repos and learn nothing about the 31 outside it. **Your own act cannot audit your own scope.** Count before you rule, not while you build.
+
+### A count that agrees with you is not a wasted count
+
+Every count on the day this rule was written inverted something — and that primes you to hear *"I counted"* as a synonym for *"and it turned out wrong."* One of the counts that afternoon **confirmed** the verdict it checked, and it was exactly as necessary as the ones that overturned theirs: the same act, a different result. **Counting is not a gotcha-generator.** If the template teaches it as one, it reads as punitive and gets skipped in the one case where it was about to agree with you — which is precisely the case where skipping it costs you the evidence that you were right.
+
+### The boundary lives inside the number — both ways
+
+A count protects you only if you name **what population it is a count OF.** Two failures, opposite directions, same defect. Both happened the day this rule was written, hours apart, to the people writing the rule.
+
+**Counted too FEW — a subset mistaken for the whole.** A polecat counted `0` callers in `scripts/` and wrote *"required is cheap here — that is countable, not arguable."* It had counted the fleet; the tool was a **public CLI shipping released binaries.** `find` answers *"what's on this disk"*; it never answers *"who depends on this."* Past a distribution boundary there **is no query.**
+
+**Counted too MANY — a superset mistaken for the evidenced set.** The standing architect counted a state file's merge-request IDs (**234**) and reported *"5 conflicts across 234 merges" = 2.1%*. The file was `history` (**100** records, with outcomes) plus `pruned_ids` (**134** bare IDs, *records deleted*). All 5 conflicts could only come from the 100. **An observed numerator over an observed-plus-unobserved denominator.** True rate **5%**, and a *floor*. The miscount **understated the very ticket the count was arguing for**, by more than 2×.
+
+**So, mechanically, every time:** say what the denominator is a population **of**. *"234 merge requests"* and *"234 merge requests we have outcomes for"* are different claims and only one was true. Where the population is unmeasurable, **substitute a different KIND of evidence** — a semver contract, an adoption signal, a deprecation window — and say that's what you did. Never substitute the assumption that the population you can reach is the whole one.
+
+**And do not assume a bad count errs safely.** One of these overstated confidence, the other understated a real problem. **A miscount is not conservative; it is arbitrary** — you do not get to skip naming the boundary because you think the error would fall in your favour.
+
+**Corollary worth reaching for first:** *dominance is denominator-independent; a rate never is.* "4 of the 5 conflicts are one file" needed no denominator and survived the whole dispute intact. **When the denominator is contested or unknowable, lead with the ratio that doesn't depend on it.**
+
+**And the discipline that prevents both:** name your population before you count it, and ask what it excludes. Naming it first is what makes the exclusion visible; counting first hides it behind a number.
 
 ## What you are NOT
 
