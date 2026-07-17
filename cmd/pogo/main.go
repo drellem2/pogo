@@ -2291,7 +2291,9 @@ The path is resolved to an absolute path and the git root is discovered automati
 		Long: `gc deletes stale polecat-* branches and reclaims leaked git worktrees
 whose work items have concluded (done or archived). It also removes orphaned
 polecat directories under ~/.pogo/polecats — dirs left behind with files but
-no .git when teardown never ran after the worktree was unlinked (gh #31).
+no .git when a polecat's exit teardown never ran (e.g. pogod died mid-polecat,
+gh #31). The submit-time worktree unlink that used to strand these was removed
+(gh #88), so these are now legacy leftovers rather than a still-active leak.
 
 It is the manual entry point to the same internal/gitgc logic pogod runs
 on startup and on a periodic ticker. Branches and worktrees of in-flight
