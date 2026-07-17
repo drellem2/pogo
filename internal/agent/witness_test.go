@@ -45,8 +45,12 @@ func liveProcess(t *testing.T) int {
 }
 
 // waitForNextSecond blocks until the wall clock crosses a whole-second
-// boundary, so a process started after it returns has a different `ps lstart`
-// reading than one started before.
+// boundary. TestWitnessDeadWhenPidRecycled uses it to make forward progress
+// between spawn retries: after it returns, a freshly spawned process reads a
+// LATER `ps lstart` second than one started before the call, so the retry loop
+// converges. It is not a standalone guarantee that two spawns differ — that is
+// the loop's job (mg-9c14) — only that each retry advances past the prior
+// second.
 func waitForNextSecond(t *testing.T) {
 	t.Helper()
 	now := time.Now()
@@ -99,28 +103,50 @@ func TestWitnessDeadWhenPidRecycled(t *testing.T) {
 	sandboxWitness(t)
 	ourPid := liveProcess(t)
 
-	// `ps lstart` resolves to whole seconds, so two processes started in the
-	// same second are indistinguishable to the probe. Cross into the next
-	// second before starting the stand-in, or this test would skip (or worse,
-	// silently pass for the wrong reason) whenever both spawns landed in the
-	// same tick — which is most runs. See the resolution caveat on
-	// PolecatWitness: real pid recycling is separated by far more than a
-	// second, but a TEST that only fails on a lucky clock boundary is the
-	// control-that-cannot-fail defect this ticket exists to end.
-	waitForNextSecond(t)
-	otherPid := liveProcess(t)
-
-	otherStart, ok := procStart(otherPid)
-	if !ok {
-		t.Fatalf("precondition: cannot read start time of pid %d", otherPid)
-	}
 	ourStart, ok := procStart(ourPid)
 	if !ok {
 		t.Fatalf("precondition: cannot read start time of pid %d", ourPid)
 	}
+
+	// The recycled case needs a stand-in whose kernel start time the probe
+	// reads as DIFFERENT from ourPid's — that difference is exactly what the
+	// probe sees after a pid is reused. `ps lstart` resolves only to whole
+	// seconds, so two processes born in the same second are indistinguishable
+	// to it.
+	//
+	// A single wait across one second boundary does NOT durably separate two
+	// spawns: under CI load the stand-in could still land in ourPid's second,
+	// and then this test's own precondition Fatalf'd and flapped main CI
+	// (mg-9c14) — a control-that-cannot-fail defect. So don't gamble on one
+	// boundary crossing. Spawn the stand-in, RE-READ both real start times, and
+	// retry past the next boundary until the probe itself confirms they differ.
+	// The loop's exit condition IS the precondition, so setup cannot proceed on
+	// two indistinguishable identities, and it makes forward progress every
+	// iteration (each waitForNextSecond permanently advances past ourPid's
+	// second), so it terminates. Both times stay genuine `ps` readings of real
+	// processes — the probe is never mocked here, because an instrument that
+	// cannot tell our process from some process is the exact defect this store
+	// prevents.
+	var otherStart time.Time
+	for {
+		standIn := liveProcess(t)
+		s, ok := procStart(standIn)
+		if !ok {
+			t.Fatalf("precondition: cannot read start time of pid %d", standIn)
+		}
+		if !s.Equal(ourStart) {
+			otherStart = s
+			break
+		}
+		waitForNextSecond(t)
+	}
+
+	// Last-resort assert. The loop above establishes this invariant
+	// constructively, so on a healthy machine it can never fire; it stays as a
+	// tripwire in case the setup is ever weakened back toward a timing gamble.
 	if otherStart.Equal(ourStart) {
-		t.Fatalf("precondition: both probe processes report start time %v despite waiting for a second "+
-			"boundary — the two identities must differ or the recycled-pid case below is untestable", ourStart)
+		t.Fatalf("precondition: the stand-in's start time %v equals ourPid's despite looping until the probe "+
+			"reported them distinct — the two identities must differ or the recycled-pid case below is untestable", ourStart)
 	}
 
 	// The control: with the TRUE identity recorded, this pid reads alive. If
