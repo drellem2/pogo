@@ -58,20 +58,56 @@ and silent.
 
 ### Nudge + event
 
-On a cross the watcher calls its injected `Nudger`, which pogod wires to the
-same PTY-then-mail fallback the scheduler's `PogodDeliverer` uses: nudge the
-mayor's PTY when it's running, fall back to `mg` mail when it's offline so the
-signal is durable. It then appends a `stall_watch_fired` event to the event log
-with the category, counts, ages, and (on failure) the nudge error — so the log
-records a threshold cross even when delivery fails.
+On a cross the watcher calls its injected `Nudger`, which pogod wires to a
+PTY-then-mail fallback: nudge the mayor's PTY in wait-idle mode when it's
+running, and fall back to durable `mg` mail whenever the PTY cannot carry the
+message — **both** when the mayor is offline and when the PTY nudge *fails*. It
+then appends a `stall_watch_fired` event recording the category, counts, ages,
+the delivery channel (`nudge_delivery`), and — only if every channel failed —
+the nudge error.
+
+#### Why mail backstops a *running* agent (mg-79dc)
+
+The fallback originally covered only an offline mayor, on the reasoning that a
+running agent gets the PTY and mailing it too would double-deliver. That
+conflates *running* with *reached*. Wait-idle can only deliver to an agent that
+goes quiet, and **a working agent never goes quiet** — so the channel failed
+exactly when the mayor was busy, which is precisely when a dispatch stall is
+most likely and the notice most needed. A watcher whose reporting channel goes
+dark under the very condition it watches for is not lossy; it is blind, and the
+correlation is the whole problem.
+
+Measured on 2026-07-17: 18 of 47 fires (~38%) died with `still producing output
+after 30s ... context deadline exceeded`, including both work-item fires.
+
+**Not a timeout-tuning problem.** Every dropped fire recorded a "last PTY write"
+of 2–305ms: the mayor was writing *continuously*, not almost-quiet. No deadline
+survives that, so lengthening the timeout would only trade a visible failure for
+a slower one. `mg mail` is the right shape because it does not require an idle
+recipient at all. The fallback also lands in a channel stall-watch itself
+watches (`unread_mail`), so an ignored notice escalates rather than vanishing.
+
+This does not weaken the never-interrupt-a-busy-agent guarantee (gh #61): the
+PTY is still never written to while busy. The guarantee was "do not interrupt a
+busy agent", not "do not inform it". Nor does it double-deliver — mail is sent
+only when the PTY nudge returned an error, i.e. only when nothing was written.
 
 ### Cooldown
 
-Each category (`unclaimed_items`, `unread_mail`) has its own cooldown keyed in a
-mutex-guarded map. A persistent backlog therefore produces one nudge per
-`nudge_cooldown` window per category, not one per heartbeat tick. The fire time
-is recorded *before* the nudge attempt, so a failed delivery still consumes the
-cooldown (retry next window beats hammering a wedged recipient every tick).
+Each category (`unclaimed_items`, `unread_mail`, `priority_wake`) has its own
+cooldown keyed in a mutex-guarded map. A persistent backlog therefore produces
+one nudge per `nudge_cooldown` window per category, not one per heartbeat tick.
+The fire time is recorded *before* the nudge attempt, so a failed delivery still
+consumes the cooldown rather than hammering a wedged recipient every tick.
+
+**The cooldown is a rate limiter, not a retry queue** — the distinction is
+load-bearing and easy to get backwards. A failed nudge is never queued or
+re-sent. What happens after the cooldown is that the *condition* is sampled
+afresh, and only if it still holds is a *new* message composed. So a stall that
+resolves inside the cooldown window takes its undelivered notice with it,
+silently; a stall that resolves-then-recurs reports the recurrence as if it were
+the first. This is why delivery must succeed on the **first** attempt, and why
+the mail fallback — not a retry — is the fix.
 
 The check runs in a goroutine off `OnTick`: a wait-idle nudge can block up to
 `DefaultNudgeTimeout` (30s), and the heartbeat goroutine must not stall the

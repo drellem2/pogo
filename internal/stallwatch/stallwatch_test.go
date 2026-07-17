@@ -19,6 +19,9 @@ type recorder struct {
 	nudges   []nudge
 	events   []events.Event
 	nudgeErr error
+	// nudgeDelivery is the Delivery the fake nudger reports. The zero value
+	// leaves Channel empty; tests that care about channel stamping set it.
+	nudgeDelivery Delivery
 }
 
 type nudge struct {
@@ -26,11 +29,11 @@ type nudge struct {
 	message string
 }
 
-func (r *recorder) nudge(agent, message string) error {
+func (r *recorder) nudge(agent, message string) (Delivery, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.nudges = append(r.nudges, nudge{agent, message})
-	return r.nudgeErr
+	return r.nudgeDelivery, r.nudgeErr
 }
 
 func (r *recorder) emit(e events.Event) {
@@ -623,5 +626,73 @@ func TestDefaultsAppliedFromZeroConfig(t *testing.T) {
 	}
 	if w.cfg.NudgeCooldown != config.DefaultStallNudgeCooldown {
 		t.Errorf("cooldown = %v, want default", w.cfg.NudgeCooldown)
+	}
+}
+
+// TestFireStampsDeliveryChannel (mg-79dc): the emitted event must record WHICH
+// channel carried the nudge, not merely whether something errored. Before this,
+// a fire delivered over the PTY and a fire that fell back to durable mail were
+// indistinguishable in the log — and a fire that reached NOBODY was
+// distinguishable only by a free-text `nudge_error` string. Channel stamping is
+// what makes the PTY channel's failure rate countable instead of grep-able.
+func TestFireStampsDeliveryChannel(t *testing.T) {
+	tests := []struct {
+		name           string
+		delivery       Delivery
+		nudgeErr       error
+		wantChannel    any
+		wantReason     any
+		wantErrPresent bool
+	}{
+		{
+			name:        "pty delivery stamps the channel and no fallback reason",
+			delivery:    Delivery{Channel: DeliveryPTY},
+			wantChannel: DeliveryPTY,
+			wantReason:  nil,
+		},
+		{
+			// The mg-79dc case: the busy mayor. Delivery SUCCEEDED (no error)
+			// but took the durable road, and the event says so.
+			name:        "busy-agent mail fallback stamps channel and reason",
+			delivery:    Delivery{Channel: DeliveryMailFallback, FallbackReason: "still producing output after 30s"},
+			wantChannel: DeliveryMailFallback,
+			wantReason:  "still producing output after 30s",
+		},
+		{
+			// Both channels down. Now — and only now — does nudge_error mean
+			// "the notice reached nobody".
+			name:           "hard failure records the error and claims no channel",
+			delivery:       Delivery{},
+			nudgeErr:       fmt.Errorf("everything is down"),
+			wantChannel:    nil,
+			wantReason:     nil,
+			wantErrPresent: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			w, rec, workRoot, _ := testEnv(t, baseConfig())
+			rec.nudgeDelivery = tc.delivery
+			rec.nudgeErr = tc.nudgeErr
+
+			now := time.Now()
+			writePriorityItem(t, workRoot, "mg-ch01", "mayor", "high", now.Add(-1*time.Minute))
+			w.Check(now)
+
+			if rec.eventCount() != 1 {
+				t.Fatalf("expected 1 event, got %d", rec.eventCount())
+			}
+			d := rec.events[0].Details
+			if got := d["nudge_delivery"]; got != tc.wantChannel {
+				t.Errorf("nudge_delivery = %v, want %v", got, tc.wantChannel)
+			}
+			if got := d["nudge_fallback_reason"]; got != tc.wantReason {
+				t.Errorf("nudge_fallback_reason = %v, want %v", got, tc.wantReason)
+			}
+			if _, ok := d["nudge_error"]; ok != tc.wantErrPresent {
+				t.Errorf("nudge_error present = %v, want %v", ok, tc.wantErrPresent)
+			}
+		})
 	}
 }

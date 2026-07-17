@@ -801,28 +801,99 @@ func stallWatchArmed(cfg *config.Config) bool {
 	return cfg.StallWatch.Enabled && cfg.Source != ""
 }
 
-// newStallNudger builds the stall watcher's delivery function, mirroring the
-// scheduler's PogodDeliverer: when the target agent is running, deliver via the
-// PTY in wait-idle mode; otherwise fall back to durable macguffin mail so the
-// signal survives an offline recipient.
+// newStallNudger builds the stall watcher's delivery function. It tries the
+// agent's PTY in wait-idle mode when the agent is running, and falls back to
+// durable macguffin mail in BOTH cases where the PTY cannot carry the message:
+// the agent is not running, or the PTY nudge failed.
 //
 // The wait-idle mode is the load-bearing choice for gh drellem2/pogo #61: it
 // blocks until the agent's PTY goes quiet before writing, so a BUSY agent is
 // never interrupted mid-turn (the write lands at the next turn boundary) and an
 // idle agent is woken at once. The priority wake reuses this exact nudger — it
 // does not introduce a second, more aggressive delivery path — so it inherits
-// the never-interrupt-a-busy-agent guarantee. Extracted from main so the
-// wait-idle behavior is unit-testable (see main_stallnudger_test.go).
-func newStallNudger(reg *agent.Registry, mail func(to, from, subject, body string) error) stallwatch.Nudger {
-	return func(agentName, message string) error {
+// the never-interrupt-a-busy-agent guarantee.
+//
+// The fallback-on-FAILURE half is mg-79dc, and it exists because wait-idle has
+// a structural blind spot: it can only deliver to an agent that goes idle, and
+// a working agent never goes idle. On 2026-07-17, 18 of 47 stall fires (~38%)
+// died with `still producing output after 30s ... context deadline exceeded`,
+// including both work-item fires. The channel failed EXACTLY when the mayor was
+// busy — which is precisely when a dispatch stall is most likely and the notice
+// most needed. A watcher whose reporting channel goes dark under the condition
+// it watches for is not a lossy watcher; it is a blind one.
+//
+// The failures were not near-misses that a longer timeout would catch: the
+// recorded "last PTY write" values were 2ms, 8ms, 26ms — the mayor was writing
+// continuously, not almost-quiet. No timeout survives a genuinely busy agent,
+// which is why lengthening it is the wrong fix (it would only trade a visible
+// failure for a slower one).
+//
+// Mail is the right shape for this signal: `mg mail` does not require an idle
+// recipient, and the mayor drains its inbox on its own cadence. Note the fallback
+// lands in a channel stall-watch ITSELF watches (categoryUnreadMail), so an
+// ignored fallback escalates rather than vanishing.
+//
+// This does NOT weaken the #61 never-interrupt guarantee — we still never write
+// to a busy PTY. The guarantee was "do not interrupt a busy agent", not "do not
+// inform it". Nor does it double-deliver: mail is sent only when the PTY nudge
+// returned an error, i.e. only when nothing was written.
+//
+// The shape mirrors newMailCheckReachabilityEscalator below, which already got
+// this right — try the PTY, fall back to mail on failure.
+//
+// ptyTimeout is the wait-idle budget. Production passes
+// agent.DefaultNudgeTimeout (see newStallNudger); tests inject a short one so
+// the busy-agent fallback path can be proven in milliseconds rather than by
+// sleeping out a 30s deadline. The timeout's LENGTH is deliberately not what
+// the fallback depends on — see mg-79dc: no length saves a busy agent, which is
+// exactly why the fallback exists and why lengthening it was ruled out.
+func newStallNudgerWithTimeout(reg *agent.Registry, mail func(to, from, subject, body string) error, ptyTimeout time.Duration) stallwatch.Nudger {
+	return func(agentName, message string) (stallwatch.Delivery, error) {
 		if reg != nil {
 			a := reg.Get(agentName)
 			if a != nil && a.Status == agent.StatusRunning {
-				return a.NudgeWithMode(message, agent.NudgeWaitIdle, agent.DefaultNudgeTimeout)
+				err := a.NudgeWithMode(message, agent.NudgeWaitIdle, ptyTimeout)
+				if err == nil {
+					return stallwatch.Delivery{Channel: stallwatch.DeliveryPTY}, nil
+				}
+				// The PTY could not take it — busy, or wedged redrawing. The
+				// message was NOT written, so mail is the only delivery, not a
+				// second one. Tell the recipient why it arrived here: a stall
+				// notice in the inbox rather than on the terminal means the
+				// terminal was busy, and that context is itself diagnostic.
+				body := fmt.Sprintf(
+					"%s\n\n---\nThis notice could not be delivered to your terminal (%v), "+
+						"so it was sent as mail instead. It may therefore be older than it looks — "+
+						"re-check the current state before acting on it.",
+					message, err)
+				if mailErr := mail(agentName, "stall-watch", "stall-watch: work piling up (undelivered to terminal)", body); mailErr != nil {
+					// Both channels are down. This is the genuine hard failure:
+					// nothing carried the message. Log loudly — a stall notice
+					// that reaches nobody is the failure this watcher exists to
+					// prevent, and it must not be inferable only from a JSON
+					// field in a log nobody reads.
+					log.Printf("pogod: STALL NUDGE UNDELIVERED to %s — pty nudge failed (%v) "+
+						"AND mail fallback failed (%v); the stall notice reached NOBODY", agentName, err, mailErr)
+					return stallwatch.Delivery{}, fmt.Errorf(
+						"pty nudge failed (%v) and mail fallback failed: %w", err, mailErr)
+				}
+				return stallwatch.Delivery{
+					Channel:        stallwatch.DeliveryMailFallback,
+					FallbackReason: err.Error(),
+				}, nil
 			}
 		}
-		return mail(agentName, "stall-watch", "stall-watch: work piling up", message)
+		if err := mail(agentName, "stall-watch", "stall-watch: work piling up", message); err != nil {
+			return stallwatch.Delivery{}, err
+		}
+		return stallwatch.Delivery{Channel: stallwatch.DeliveryMail}, nil
 	}
+}
+
+// newStallNudger is the production constructor: newStallNudgerWithTimeout at
+// the standard wait-idle budget.
+func newStallNudger(reg *agent.Registry, mail func(to, from, subject, body string) error) stallwatch.Nudger {
+	return newStallNudgerWithTimeout(reg, mail, agent.DefaultNudgeTimeout)
 }
 
 // newMailCheckReachabilityEscalator builds the mayor-nudge fired when a
