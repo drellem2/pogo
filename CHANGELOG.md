@@ -60,6 +60,51 @@ is the curated, human-readable summary kept in sync at each release cut.
 
 ### Fixed
 
+- **`go test` wrote PHANTOM polecats into the LIVE witness store, and pogod
+  mailed the mayor a `kill <pid>` for them (mg-da48).** Any test in package
+  `agent` that spawned an agent reached `RecordPolecatWitness` and wrote live
+  state — real test-process pids under Go fixture names. pogod's orphan detector
+  read them back, found no registry entry for `ready-test`, and mailed the mayor
+  an authoritative `kill 71259`. Three such mails in ten minutes on 2026-07-17;
+  every pid was already dead and **recyclable** by the time it was read. Fixed in
+  both halves, because they are two defects:
+
+  **The store is test-safe BY DEFAULT.** Under a test binary
+  (`testing.Testing()`), `WitnessPath()` resolves to a per-process temp file and
+  the live store is not reachable from the function at all. `witnessPathOverride`
+  still wins when a test asks for a specific path — that is isolation from *other
+  tests*, a different question. Deliberately **not** more `sandboxWitness` calls
+  in the two offending files: that is the same opt-in guard that already failed
+  to transfer, and the distribution is the whole finding — `witness_test.go`
+  sandboxed **16 times**, `nudge_test.go` and `attach_regression_test.go` **zero
+  times between them**, because they spawn agents while testing *nudges* and
+  *attach* and had no reason to know this store exists. **An opt-in guard is only
+  ever remembered by the tests that least need it.** The acceptance bar is
+  therefore that a new test file which spawns an agent and does nothing special
+  cannot touch the real store, and the test that pins it is written that way: no
+  sandbox, standing exactly where a naive sibling stands.
+
+  **The orphan alert is re-verifiable at READ time.** The mail repeats hourly and
+  is read at an unbounded delay; a bare `kill <pid>` is only safe in the second it
+  was written. mg-13a3's `(pid, start_time)` witness already protects the
+  *detector* from pid reuse — but the mail stripped `start_time` out, so the
+  protection never reached the one consumer told to run `kill`. The body now
+  carries the recorded start time, names the stale case as the **default**
+  reading, and **gates** every runnable kill on the instrument itself:
+  `pogo agent witness --json | grep -q '"name":"x","pid":N' && kill N && …`. The
+  pattern pins both halves of the identity — a name-only grep would pass against a
+  live *successor*, since names are reused on respawn — and `cmd/pogo` pins the
+  pattern against the real command's real marshalled output. The alert is **not**
+  silenced or rate-limited: real orphans (mg-0b77, mg-46a4, mg-61a0) are unsolved
+  and this is their only signal — the noise was the bug, not the alarm.
+
+  Also fixed en route: a survivor with no work item produced `mg unclaim (unknown
+  — no work item recorded in its witness)`, which is not a command but a shell
+  syntax error wearing one. A line that errors as written trains the reader to
+  edit before running, and the first casualty is the gate they did not
+  understand. See
+  `docs/investigations/phantom-polecats-from-go-test-2026-07-17.md`.
+
 - **`polecat-qa` was dispatched by nobody (mg-7150).** The mayor's step-4 QA
   prose said a `--type=qa` item "will be dispatched to a new polecat like any
   other work item" — i.e. the default **code-writing** template.

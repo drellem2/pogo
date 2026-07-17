@@ -248,12 +248,56 @@ func defaultOrphanAlert(p OrphanedPolecat) {
 // someone who can look up the work item, decide whether the survivor's worktree
 // holds anything worth keeping, and then unclaim/kill/let-it-finish. That is
 // the mayor's job, and the mayor escalates to a human when it is not.
+//
+// WHY THE BODY SENDS THE READER TO `pogo agent witness` BEFORE KILLING
+// (mg-da48). This mail's claim is true when written and decays immediately:
+// pids are recycled, and the moment the survivor exits its pid is free for an
+// unrelated process. Everything about the delivery channel widens that window
+// — the alert repeats hourly until resolved, mail sits unread for an unbounded
+// time, and pogod cannot recall a mail it already sent. So a bare `kill <pid>`
+// in this body is an instruction that is only safe in the second it was
+// written, delivered by a channel that guarantees it will be read later. That
+// is stray-pkill-killed-the-fleet with the daemon's authority behind it, aimed
+// by a decayed record.
+//
+// The cruel part is that the protection already exists and does not reach the
+// one consumer told to run `kill`. witnessVerdict matches (pid, start_time), so
+// the DETECTOR cannot be fooled by a recycled pid — it re-probes and resolves
+// GONE. The reader gets a pid and a prose paragraph. The fix is not to weaken
+// the alert (real orphans are an unsolved problem and this is their only
+// signal — mg-0b77, mg-46a4, mg-61a0; the noise was the bug, not the alarm) but
+// to hand the reader the same instrument the detector uses. `pogo agent
+// witness` IS witnessVerdict reached over a process boundary — one definition
+// of "our process is alive", not a second one written in prose — so the body
+// names it and states the stale case as the DEFAULT reading, because by the
+// time this is read that is the likelier one.
 func mailOrphanAlert(p OrphanedPolecat) {
 	coordinator := CoordinatorName()
 	work := p.WorkItemID
 	if work == "" {
 		work = "(unknown — no work item recorded in its witness)"
 	}
+
+	// The one runnable line the reader is offered, gated on the witness so the
+	// kill cannot outrun the fact that justifies it. Built once and used for
+	// both resolutions below: two spellings of the same command are two things
+	// to keep right, and the salvage path and the discard path differ in what
+	// the reader does BEFORE running it, not in what they run.
+	//
+	// The unclaim is conditional because `work` is PROSE when the witness has no
+	// work item — the literal string this alert put in front of the mayor on
+	// 2026-07-17 was `kill 438 && mg unclaim (unknown — no work item recorded in
+	// its witness)`, which is not a command, it is a shell syntax error wearing
+	// one. Handing out an unrunnable line teaches the reader to edit the line
+	// before running it, and the first thing an editing reader drops is the part
+	// they did not understand — the grep. So: if there is nothing to unclaim,
+	// say so in a comment and keep the line paste-clean.
+	unclaim := fmt.Sprintf(" && mg unclaim %s", p.WorkItemID)
+	if p.WorkItemID == "" {
+		unclaim = "   # no work item in its witness — check `mg list` for an orphaned claim"
+	}
+	action := fmt.Sprintf("pogo agent witness --json | grep -q '%s' && kill %d%s",
+		WitnessAliveGrep(p.Name, p.PID), p.PID, unclaim)
 	subject := fmt.Sprintf("[orphaned-polecat] %s is alive on pid %d but unreachable", p.Name, p.PID)
 	body := fmt.Sprintf(
 		"A polecat outlived the pogod that spawned it and is now beyond this daemon's control.\n\n"+
@@ -273,18 +317,42 @@ func mailOrphanAlert(p OrphanedPolecat) {
 			"orphaned slave), and killing on the strength of a missing registry entry is the one\n"+
 			"move that is definitely wrong. So it needs a decision that weighs what is in the\n"+
 			"worktree, which is yours.\n\n"+
-			"TO RESOLVE, pick one and act:\n"+
+			"BEFORE YOU KILL ANYTHING, RE-CONFIRM IDENTITY. THIS IS NOT OPTIONAL.\n"+
+			"This mail was true when it was WRITTEN, and it does not know when you are reading\n"+
+			"it: it repeats about every %s until resolved, and mail waits. A pid is NOT an\n"+
+			"identity — only (pid, start_time) is. If %s has exited since this was sent, pid %d\n"+
+			"was freed and the kernel is free to hand it to an unrelated process, which\n"+
+			"`kill %d` would then kill. Assume that has happened until you have checked:\n\n"+
+			"      pogo agent witness --json\n\n"+
+			"That re-probes (pid, start_time) NOW with the same verdict the detector used to\n"+
+			"send this — it is the instrument, not a second opinion. Read its output:\n\n"+
+			"  - %s is NOT in `alive` — THIS ALERT IS STALE. The polecat is already gone, there\n"+
+			"    is nothing to resolve, and pid %d is no longer ours. Run none of the kills\n"+
+			"    below. If this keeps arriving with the same pid, the store is lying and THAT\n"+
+			"    is the bug — report it rather than killing anything.\n"+
+			"  - %s IS in `alive` on pid %d — the record still matches a live process started\n"+
+			"    %s. The survivor is real and the actions below are safe TO RUN NOW. Re-check\n"+
+			"    if you put this down and come back to it.\n\n"+
+			"TO RESOLVE, once the witness has confirmed it is still alive, pick one and act:\n"+
 			"  - Let it finish, if it can still commit and submit unaided. It will exit on its own\n"+
 			"    and this alert stops.\n"+
 			"  - Salvage then stop it: check its worktree for uncommitted work, then\n"+
-			"      kill %d && mg unclaim %s\n"+
+			"      %s\n"+
 			"  - Stop it if the work is worthless or reproducible:\n"+
-			"      kill %d && mg unclaim %s\n\n"+
+			"      %s\n\n"+
+			"The grep is the re-check wired INTO the command so it cannot be skipped: if the\n"+
+			"polecat is no longer witnessed alive, grep fails and the kill never runs. Do not\n"+
+			"drop it for a bare `kill %d` — a pid pasted out of a mail of unknown age is how an\n"+
+			"unrelated process dies (mg-da48).\n\n"+
 			"This alert repeats about every %s until the process is gone, because nothing else\n"+
 			"will tell you: the only other signal is scheduler_fire_failed in events.log, which\n"+
 			"nobody reads unless already suspicious (mg-0b77).\n",
 		p.Name, p.PID, p.StartTime.Format(time.RFC3339), work,
-		p.PID, work, p.PID, work, orphanAlertCooldown)
+		orphanAlertCooldown, p.Name, p.PID, p.PID,
+		p.Name, p.PID,
+		p.Name, p.PID, p.StartTime.Format(time.RFC3339),
+		action, action,
+		p.PID, orphanAlertCooldown)
 
 	cmd := exec.Command("mg", "mail", "send", coordinator,
 		"--from", "pogod", "--subject", subject, "--body", body)

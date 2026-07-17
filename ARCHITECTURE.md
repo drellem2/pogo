@@ -430,6 +430,32 @@ witnessed (UNKNOWN → keep), and dead polecats either had their witness dropped
 at exit or fail the identity match (GONE → reap). Orphan-nudge prevention is
 unchanged.
 
+**The store is test-safe by default, not by remembering (mg-da48).** Under a
+test binary (`testing.Testing()`), `WitnessPath()` resolves to a per-process
+temp file and the live store is **not reachable from the function at all**;
+`witnessPathOverride` still lets one test pick its own path, which is isolation
+from *other tests* — a different question. This is a default and not a guard
+because the opt-in guard already existed and already failed: `go test
+./internal/agent/` wrote **phantom** polecats into the live store — real
+test-process pids under Go fixture names — which pogod's orphan detector then
+read back as leaked polecats and mailed the mayor an authoritative `kill <pid>`
+for, three times in ten minutes on 2026-07-17. `witness_test.go` sandboxed
+sixteen times; the two files that polluted the fleet sandboxed zero, because
+they spawn agents while testing *nudges* and *attach* and had no reason to know
+this store exists. **An opt-in guard is only ever remembered by the tests that
+least need it** — so the acceptance bar is that a new test file which spawns an
+agent and does nothing special cannot touch the real store.
+
+**The orphan alert is re-verifiable at read time (mg-da48).** The alert repeats
+hourly and is read at an unbounded delay, by which point the survivor has
+usually exited and its pid is recyclable — so its body carries the recorded
+`start_time` and gates every runnable `kill` behind `pogo agent witness --json |
+grep -q ...`, which re-probes `(pid, start_time)` **now**. The identity match
+above protects the *detector* from a recycled pid; without this it did not reach
+the one consumer told to run `kill`. An instruction that is only safe in the
+second it was written must not be handed out ungated by a channel with an hourly
+repeat.
+
 ```
 ~/.pogo/polecat-witness.json   # versioned JSON, atomic temp+rename writes
 {

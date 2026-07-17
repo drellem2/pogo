@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"testing"
 	"time"
 
 	"github.com/drellem2/pogo/internal/config"
@@ -102,26 +103,120 @@ type witnessOnDisk struct {
 	Polecats []witnessRecord `json:"polecats"`
 }
 
+// WitnessAliveGrep returns the fragment of `pogo agent witness --json` output
+// that is present exactly when (name, pid) is witnessed ALIVE right now.
+//
+// WHY A HELPER AND NOT A LITERAL IN THE CALLER (mg-da48). The orphan alert mail
+// tells its reader to re-confirm identity before killing, and wires the check
+// into the command it hands out so it cannot be skipped:
+//
+//	pogo agent witness --json | grep -q '<this>' && kill <pid> && mg unclaim <item>
+//
+// That instruction is worth exactly as much as the pattern is right. A pattern
+// that never matches turns the mail into advice that always refuses — annoying
+// but safe. A pattern that matches too MUCH is the dangerous one, and it is
+// easy to write by accident: grepping the name alone passes for a DIFFERENT
+// incarnation of the same polecat (names are reused; RecordPolecatWitness
+// explicitly replaces a record by name), so the kill would land on a live
+// successor's pid. Both halves of the identity, or the check is theatre.
+//
+// It is exported so cmd/pogo can pin it against the real command's real output
+// in a test. The pattern is a claim about a serialization that lives in another
+// package; the only thing that makes it a fact rather than a hope is a test
+// that marshals the actual report and greps it. See TestWitnessAliveGrepMatches
+// (cmd/pogo). Field order here is not incidental — it is the contract, and the
+// test is what keeps it one.
+func WitnessAliveGrep(name string, pid int) string {
+	return fmt.Sprintf(`"name":"%s","pid":%d`, name, pid)
+}
+
 // witnessMu serialises read-modify-write cycles on the witness file. The file
 // is small and written only at polecat spawn/exit, so a single package mutex
 // is sufficient and keeps the store independent of any Registry instance —
 // the classifier reads it from a pogod that never spawned these agents.
 var witnessMu sync.Mutex
 
-// witnessPathOverride lets tests point the store at a temp dir without
-// mutating POGO_HOME for the whole process. Empty means "use PogoHome()".
+// witnessPathOverride lets one test point the store at its own temp file
+// without mutating POGO_HOME for the whole process. Empty does NOT mean "use
+// PogoHome()" — see WitnessPath. It means "no test asked for a specific path",
+// which under `go test` still resolves to a sandbox, never to the live store.
 var witnessPathOverride string
 
 // procStartFn is the process start-time probe, indirected so tests can force
 // the unreadable-identity branch. Production always uses procStart.
 var procStartFn = procStart
 
+// testWitnessOnce/testWitnessDir memoise the per-process sandbox that
+// testDefaultWitnessPath hands out. One directory per test binary: tests that
+// need isolation from EACH OTHER call sandboxWitness, which is a different
+// question from isolation from the LIVE fleet, and only the latter is decided
+// here.
+var (
+	testWitnessOnce sync.Once
+	testWitnessDir  string
+)
+
 // WitnessPath returns the absolute path of the polecat witness file.
+//
+// WHY THE TEST BRANCH IS NOT OPT-IN (mg-da48). This store is written at polecat
+// spawn, from Spawn, via noteWitnessStart — and `go test ./internal/agent/` is
+// full of tests that spawn agents while testing something else entirely. Those
+// tests wrote PHANTOM records into the LIVE store: real test-process pids under
+// fixture names ("ready-test", "cadence", "no-sentinel-profile"), which pogod's
+// orphan detector then read back as leaked polecats and mailed the mayor an
+// authoritative `kill <pid>` for. Measured on the live fleet three times in ten
+// minutes on 2026-07-17; the pids were dead and recyclable by the time anyone
+// read the mail.
+//
+// The guard for this already existed — witnessPathOverride, and witness_test.go
+// calls sandboxWitness sixteen times. It did not help, and the reason is the
+// whole lesson: witness_test.go remembers because the witness is its SUBJECT.
+// nudge_test.go and attach_regression_test.go spawn agents INCIDENTALLY, and
+// from where they stand they are testing nudges and attach — they have no
+// reason to know this store exists, and so had zero sandboxWitness calls
+// between them. An opt-in guard is only ever remembered by the tests that
+// least need it. The same shape as mg-a558, and the same pollutant that hit
+// events.log in trust-the-record-not-the-statistic.
+//
+// So the DEFAULT is the sandbox and there is nothing to remember: under a test
+// binary the live store is not reachable from this function at all. A new test
+// file that spawns an agent and does nothing special cannot touch it — which is
+// the acceptance bar, because "does nothing special" is precisely what the two
+// polluting files did.
+//
+// This branch is decided by testing.Testing(), i.e. by whether OUR binary is a
+// test binary. A test that boots the real pogod as a SUBPROCESS is unaffected:
+// that child is not a test binary and resolves POGO_HOME as production does,
+// which is correct — such tests already sandbox POGO_HOME for the child, and it
+// is not this function's business to second-guess a real daemon's state dir.
 func WitnessPath() string {
 	if witnessPathOverride != "" {
 		return witnessPathOverride
 	}
+	if testing.Testing() {
+		return testDefaultWitnessPath()
+	}
 	return filepath.Join(config.PogoHome(), witnessFileName)
+}
+
+// testDefaultWitnessPath returns this test binary's private witness path.
+//
+// It never returns a path under PogoHome, and it has no error return, because
+// there is no failure here that could justify handing back the live store: a
+// test that cannot get a temp dir must fail to write ANYWHERE rather than
+// succeed at writing a phantom polecat into the fleet's state. The fallback is
+// therefore another unwritable-at-worst temp path, not config.PogoHome().
+func testDefaultWitnessPath() string {
+	testWitnessOnce.Do(func() {
+		dir, err := os.MkdirTemp("", "pogo-test-witness-*")
+		if err != nil {
+			// Still not the live store. A bad path here fails the test that
+			// needed it; the live store's phantom records outlive everything.
+			dir = filepath.Join(os.TempDir(), fmt.Sprintf("pogo-test-witness-%d", os.Getpid()))
+		}
+		testWitnessDir = dir
+	})
+	return filepath.Join(testWitnessDir, witnessFileName)
 }
 
 // procStart reads process pid's start time via `ps -o lstart=`, which prints a

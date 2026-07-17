@@ -120,6 +120,78 @@ func TestDefaultOrphanAlert_EmitsAndMails(t *testing.T) {
 	}
 }
 
+// TestMailOrphanAlert_IsReVerifiableAtReadTime is the acceptance test for the
+// second half of mg-da48.
+//
+// The alert repeats hourly and is read at an unbounded delay, so by the time
+// anyone acts on it the survivor has usually exited and its pid is recyclable —
+// three such mails on 2026-07-17 named pids that were already gone, one of them
+// pid 438, wrapped and low, on a box demonstrably reusing pids. A body that says
+// only `kill 438` is an instruction that is safe in the second it was written
+// and delivered by a channel that guarantees it will be read later.
+//
+// The detector itself is NOT fooled by a recycled pid — witnessVerdict matches
+// (pid, start_time) and resolves GONE. That protection just never reached the
+// one consumer told to run `kill`. So the body must carry the recorded start
+// time AND route the reader to the instrument that re-probes it.
+func TestMailOrphanAlert_IsReVerifiableAtReadTime(t *testing.T) {
+	record := fakeMG(t)
+	start := time.Date(2026, 7, 17, 2, 14, 0, 0, time.UTC)
+
+	mailOrphanAlert(OrphanedPolecat{
+		Name:       "cat-9f21",
+		PID:        41207,
+		StartTime:  start,
+		WorkItemID: "mg-9f21",
+	})
+
+	raw, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatalf("read fake mg record: %v", err)
+	}
+	got := string(raw)
+
+	// The recorded start time must survive the trip to the reader. It is the
+	// half of the identity that distinguishes our polecat from a recycled pid,
+	// and stripping it is what left the reader holding a bare pid.
+	if !strings.Contains(got, start.Format(time.RFC3339)) {
+		t.Errorf("the mail does not carry the recorded start_time — the reader is left with a bare pid, "+
+			"which is not an identity. The detector's (pid, start_time) protection does not survive the "+
+			"trip to the one consumer told to run `kill` (mg-da48).\nbody was:\n%s", got)
+	}
+
+	// It must name the instrument that re-checks at READ time, rather than
+	// asking the reader to trust a claim of unknown age.
+	if !strings.Contains(got, "pogo agent witness") {
+		t.Errorf("the mail never points the reader at `pogo agent witness` — the one command that "+
+			"re-probes (pid, start_time) NOW, using the same verdict the detector used to send this. "+
+			"Without it the reader cannot re-confirm identity at all.\nbody was:\n%s", got)
+	}
+
+	// And the kill must be GATED, not merely preceded by advice. Prose asking
+	// the reader to check first is skippable; a `grep && kill` is not.
+	gate := WitnessAliveGrep("cat-9f21", 41207)
+	if !strings.Contains(got, gate) {
+		t.Errorf("the mail's kill is not gated on the witness pattern %q — an instruction that can only "+
+			"be safely executed in the second it was written must not be handed out ungated by a "+
+			"channel with an hourly repeat.\nbody was:\n%s", gate, got)
+	}
+	// No PASTEABLE line may start with a bare kill. The body discusses `kill`
+	// in prose (explaining the hazard), which is fine and necessary — the thing
+	// that must not exist is a line a reader can copy straight out of the mail
+	// and run, with nothing between it and the process. Those lines are the
+	// indented commands, and every one of them must lead with the re-check.
+	for _, line := range strings.Split(got, "\n") {
+		cmd := strings.TrimSpace(line)
+		if !strings.HasPrefix(cmd, "kill ") {
+			continue
+		}
+		t.Errorf("this line is directly pasteable and runs a kill with nothing checked first:\n\t%s\n"+
+			"Every runnable kill in this body must be gated on `pogo agent witness`, or a reader acting "+
+			"on an hours-old alert fires it at a pid that has since been recycled (mg-da48).", cmd)
+	}
+}
+
 // TestMailOrphanAlert_SurvivesAMissingMG pins the best-effort posture. `mg` not
 // being on PATH must not panic or kill the daemon: the polecat_orphaned event
 // is already on the durable spine by this point, and a leaked agent must never
@@ -148,5 +220,49 @@ func TestMailOrphanAlert_NamesAnUnknownWorkItemRatherThanBlank(t *testing.T) {
 	if !strings.Contains(string(raw), "unknown") {
 		t.Errorf("a survivor with no recorded work item must SAY its work item is unknown; a blank "+
 			"field reads as a broken alert and gets dismissed.\nargv was:\n%s", string(raw))
+	}
+}
+
+// TestMailOrphanAlert_UnknownWorkItemStaysPasteClean pins the OTHER half of an
+// unknown work item: it may be prose in the header and must not be prose in the
+// command.
+//
+// This is what the fleet actually put in front of the mayor on 2026-07-17:
+//
+//	kill 438 && mg unclaim (unknown — no work item recorded in its witness)
+//
+// which is not a command, it is a shell syntax error wearing one. That matters
+// more than it looks. What makes this alert safe is a `grep -q ... &&` gate the
+// reader must not remove — and a line that errors as written trains the reader
+// to edit before running, at which point the first casualty is the part they did
+// not understand. Commands that run as written are what keep the gate on.
+func TestMailOrphanAlert_UnknownWorkItemStaysPasteClean(t *testing.T) {
+	record := fakeMG(t)
+
+	mailOrphanAlert(OrphanedPolecat{Name: "cadence", PID: 438})
+
+	raw, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatalf("read fake mg record: %v", err)
+	}
+	saw := false
+	for _, line := range strings.Split(string(raw), "\n") {
+		cmd := strings.TrimSpace(line)
+		if !strings.HasPrefix(cmd, "pogo agent witness --json | grep") {
+			continue
+		}
+		saw = true
+		// A bare `(` opens a subshell: the prose marker for an absent work item
+		// does not merely read badly here, it makes the whole line unparseable.
+		if strings.Contains(cmd, "unclaim (") {
+			t.Errorf("the runnable line carries the prose work-item marker and is not a command:\n\t%s",
+				cmd)
+		}
+		if strings.HasSuffix(cmd, "mg unclaim") {
+			t.Errorf("the runnable line ends in a bare `mg unclaim` with no argument:\n\t%s", cmd)
+		}
+	}
+	if !saw {
+		t.Error("the alert offered no gated command at all for a survivor with no work item")
 	}
 }
