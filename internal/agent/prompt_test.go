@@ -3659,10 +3659,22 @@ func TestArchitectTemplateNoticesRatherThanRules(t *testing.T) {
 		// The named risk, not a softened paraphrase of it.
 		"authority but without evidence",
 		"nothing but priors",
+		// The permanent-condition framing. A polecat never accumulates
+		// context, so day-one risk is not a transient the template grows out
+		// of — it is the operating condition of every dispatch, forever. The
+		// standing architect only saw this when asked to judge its own draft:
+		// "a standing architect ramps; this one is day one every single time,
+		// and my draft opens by telling that fresh context it is the
+		// authority. That's the worst possible line in the worst possible
+		// place." Softening this to "you may lack context" loses the point.
+		"you never will",
+		"day one, every time",
 		// Fluency is what makes the failure mode survive review.
 		"Fluency is not evidence",
 		// The design constraint itself.
 		"NOTICING, not RULING",
+		// Noticing is a legitimate terminal output, not a failure to rule.
+		"is a complete and valuable answer",
 		// The anchoring rule that operationalizes it.
 		"file:line",
 	} {
