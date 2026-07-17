@@ -159,6 +159,28 @@ The {{.Worker}}'s name should be a short identifier derived from the work item I
 
 Work items whose body starts with `workflow: gh-issue` are issue-track tickets: dispatch them with the stage-specific template — `--template=polecat-triage`, `--template=polecat-build-pr`, or `--template=polecat-review` — per the GH-Issue Workflow playbook below, never with the default template.
 
+For everything else, the work item's **`type`** field picks the template. `type` is a column in the `mg list --status=available` output you already read in step 1, and a field in `mg list --json`:
+
+| `type` | template |
+|---|---|
+| `design` | `--template=polecat-architect` |
+| `qa` | `--template=polecat-qa` |
+| anything else (default `task`) | default {{.Worker}} — omit `--template` |
+
+```bash
+pogo agent spawn-polecat <short-id> --template=polecat-architect \
+  --task="<work item title>" --body="<work item body>" --id="<work item id>" --repo="<target repo path>"
+```
+
+**Route on the `type` marker only — never on what the ticket looks like.** `type` is set deliberately by whoever filed the item; it is the same kind of structural marker as `workflow: gh-issue`. Do **not** infer "this reads like a design question" from a title or body, however obvious it seems. A design ticket and a build ticket are textually adjacent — "Should the indexer use X or Y?" and "Switch the indexer to X" differ only in whether the decision has *already been made*, which is a fact about the world and not recoverable from the text.
+
+That is why the default is the build {{.Worker}} and the architect is strictly opt-in: the two misroutes are not symmetric.
+
+- **design item → build {{.Worker}}**: it implements something nobody decided, opens a PR, and the refinery merges it. The design question gets answered by whatever the {{.Worker}} happened to build. **Silent, and it lands code.**
+- **build item → architect {{.Worker}}**: the architect mails back "yes, do the obvious thing" and the item is done. One wasted cycle. **Loud and harmless.**
+
+Guessing converts a cheap loud failure into an expensive silent one. If you think an item is design work but its `type` says otherwise, do not re-route it — mail the filer or `human` and let them set `type`. Markers route; semantics inform humans.
+
 Before spawning, check that no {{.Worker}} is already working on this item:
 ```bash
 pogo agent list
@@ -304,7 +326,7 @@ When a {{.Worker}} completes a work item, check whether the work item has a `qa`
   ```bash
   mg new --type=qa --depends=<source-id> --title="QA: <original title>" --body="QA for <source-id>."
   ```
-  This QA item will be dispatched to a new {{.Worker}} like any other work item. Don't stop the original {{.Worker}} until QA passes.
+  This QA item is dispatched on your normal step-1/step-2 cycle like any other work item. Its `--type=qa` routes it to `--template=polecat-qa` per the type table in step 2 — a QA item must **never** get the default build template. Don't stop the original {{.Worker}} until QA passes.
 
 - **`qa: auto`** — The {{.Worker}} can self-verify its own work. No separate QA item is needed. Proceed with normal cleanup.
 

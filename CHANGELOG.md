@@ -12,6 +12,28 @@ is the curated, human-readable summary kept in sync at each release cut.
 
 ### Added
 
+- **The mayor routes dispatch on the work item's `type` field
+  (mg-7150).** `type=design` dispatches `--template=polecat-architect`,
+  `type=qa` dispatches `--template=polecat-qa`, everything else gets the
+  default polecat. `workflow: gh-issue` keeps its own stage machine,
+  unchanged: **type** selects the template for single-shot work, **workflow +
+  stage** selects it for staged work. No schema change — `--type` is
+  free-form, already defaults to `task`, and already renders as a column in
+  the `mg list --status=available` output the mayor's dispatch loop already
+  reads.
+
+  The rule keys on the **marker the filer sets, never on inferred
+  design-shapedness**, because the two misroutes are asymmetric and only one
+  is silent. A design item sent to the build polecat gets implemented,
+  PR'd, and **merged** — the design question answered by whatever the
+  polecat happened to build. A build item sent to the architect wastes one
+  loud, harmless cycle. Guessing trades the cheap loud failure for the
+  expensive silent one, so the default stays `polecat` and the architect is
+  strictly opt-in. This also matches the grain of the only other
+  template-routing rule (`workflow: gh-issue`, also a filer-written marker):
+  markers route, semantics inform humans — the one place the system classifies
+  semantically (`polecat-triage`) feeds a human gate, never dispatch.
+
 - **`polecat-architect` template — an architect you dispatch instead of run
   (mg-564c).** *A reactive architect answers questions; a standing one notices
   that a question exists.* This ships the reactive one, deliberately. Noticing
@@ -37,6 +59,16 @@ is the curated, human-readable summary kept in sync at each release cut.
   standing `crew/architect`** — the two coexist.
 
 ### Fixed
+
+- **`polecat-qa` was dispatched by nobody (mg-7150).** The mayor's step-4 QA
+  prose said a `--type=qa` item "will be dispatched to a new polecat like any
+  other work item" — i.e. the default **code-writing** template.
+  `--template=polecat-qa` appeared nowhere in the shipped prompts outside the
+  template's own self-description, so QA items were verified by a build polecat
+  and the QA template shipped dead. The `type`->template rule above fixes this
+  and the design-dispatch gap in one stroke — independent evidence for the
+  rule: a template with no dispatcher is exactly what a missing routing
+  mechanism looks like.
 
 - **The redeploy drain no longer reads an UNREADABLE polecat count as ZERO — its
   gate was failing OPEN (mg-65b2).** `drain_wait` ended with

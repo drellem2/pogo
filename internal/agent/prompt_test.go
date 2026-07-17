@@ -3729,3 +3729,87 @@ func TestArchitectTemplateDefersPRReviewToReviewTemplate(t *testing.T) {
 		t.Error("polecat-architect.md: shape C was cut as duplicative of polecat-review; do not resurrect it")
 	}
 }
+
+// TestMayorRoutesOnTypeMarkerNotInference pins the type->template routing rule
+// (mg-7150) and, more importantly, the reason it dispatches on a marker rather
+// than on meaning.
+//
+// mayor.md's only other template-routing rule keys on `workflow: gh-issue` — a
+// structural marker the filer writes. The one place the system DOES classify
+// semantically (polecat-triage's kind/recommendation/effort) feeds a HUMAN
+// gate, never dispatch. The system's position is: markers route, semantics
+// inform humans. An inferred design-detector would be the first crossing of
+// that line.
+//
+// It must stay a marker because the two misroutes are asymmetric, and only one
+// is silent: a design item sent to the build polecat gets implemented, PR'd,
+// and MERGED — the design question answered by whatever got built. A build
+// item sent to the architect wastes one loud, harmless cycle. A rule that
+// guesses trades the cheap loud failure for the expensive silent one, so the
+// default stays `polecat` and architect is strictly opt-in.
+//
+// These strings are load-bearing. If the wording changes, update this test
+// deliberately — do not let the constraint erode into "detect design-shaped
+// tickets", which is the exact thing it forbids.
+func TestMayorRoutesOnTypeMarkerNotInference(t *testing.T) {
+	data, err := defaultPrompts.ReadFile("prompts/mayor.md")
+	if err != nil {
+		t.Fatalf("read mayor.md: %v", err)
+	}
+	body := string(data)
+
+	// The rule itself: type selects the template for single-shot work.
+	for _, want := range []string{
+		"`design` | `--template=polecat-architect`",
+		"`qa` | `--template=polecat-qa`",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("mayor.md: missing type->template routing rule %q", want)
+		}
+	}
+
+	// The prohibition on inferring, and the asymmetry that justifies it.
+	for _, want := range []string{
+		"Route on the `type` marker only — never on what the ticket looks like",
+		"Silent, and it lands code",
+		"Loud and harmless",
+		"Markers route; semantics inform humans",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("mayor.md: missing marker-not-inference constraint %q", want)
+		}
+	}
+
+	// The default must remain opt-in. If the architect ever becomes the
+	// default for un-typed work, the silent failure mode above is live.
+	if !strings.Contains(body, "anything else (default `task`)") {
+		t.Error("mayor.md: type table must name the default `task` route; architect stays opt-in")
+	}
+}
+
+// TestMayorDispatchesQAItemsToQATemplate guards a live bug this rule fixed
+// (mg-7150): mayor.md's step-4 QA prose used to say a `--type=qa` item "will be
+// dispatched to a new polecat like any other work item" — i.e. the DEFAULT
+// code-writing template. `--template=polecat-qa` appeared nowhere in this
+// prompt tree outside the template's own self-description, so polecat-qa was
+// dispatched by nobody: QA items got the build template and the QA template
+// shipped dead. The step-4 prose must keep pointing at the type table.
+func TestMayorDispatchesQAItemsToQATemplate(t *testing.T) {
+	data, err := defaultPrompts.ReadFile("prompts/mayor.md")
+	if err != nil {
+		t.Fatalf("read mayor.md: %v", err)
+	}
+	body := string(data)
+
+	if !strings.Contains(body, "mg new --type=qa") {
+		t.Fatal("mayor.md: expected step 4 to create QA items with --type=qa")
+	}
+	if !strings.Contains(body, "never** get the default build template") {
+		t.Error("mayor.md: step-4 QA prose must forbid the default build template for QA items")
+	}
+	// The regression: prose that hands QA off to the generic dispatch path
+	// without naming the template it lands on.
+	if strings.Contains(body, "dispatched to a new {{.Worker}} like any other work item") {
+		t.Error("mayor.md: step-4 QA prose reverted to the generic-dispatch wording that routed QA items to the build template (mg-7150)")
+	}
+}
