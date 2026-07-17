@@ -1329,6 +1329,7 @@ Example:
 	var spawnPolecatTemplate string
 	var spawnPolecatTask string
 	var spawnPolecatBody string
+	var spawnPolecatBodyFile string
 	var spawnPolecatId string
 	var spawnPolecatRepo string
 	var spawnPolecatBranch string
@@ -1339,14 +1340,31 @@ Example:
 		Use:   "spawn-polecat <name>",
 		Short: "Spawn a polecat from a prompt template",
 		Long: `Spawn an ephemeral polecat (a disposable worker agent) using a prompt template from ~/.pogo/agents/templates/.
-The template is expanded with the provided variables and used as the agent's prompt file.`,
+The template is expanded with the provided variables and used as the agent's prompt file.
+
+The body comes from --body (inline) or --body-file (read from a file, "-" for
+stdin); the two are mutually exclusive.
+
+Prefer --body-file for any dispatch body you care about arriving exactly. The
+shell expands ` + "`backticks`" + `, $VAR and $(cmd) inside --body="..." before pogo runs,
+so the polecat's prompt silently loses them and pogo cannot tell that apart
+from a body someone typed that way. --body-file reads the file's bytes
+verbatim, with no shell in the path:
+
+  pogo agent spawn-polecat cat-1234 --id mg-1234 --body-file ./task.md
+
+A --body-file that cannot be read is an error, never an empty body.`,
 		Args: cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
+			body, err := bodyFromFlags(cmd, spawnPolecatBody, spawnPolecatBodyFile)
+			if err != nil {
+				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+			}
 			info, err := client.SpawnPolecat(agent.SpawnPolecatAPIRequest{
 				Name:       args[0],
 				Template:   spawnPolecatTemplate,
 				Task:       spawnPolecatTask,
-				Body:       spawnPolecatBody,
+				Body:       body,
 				Id:         spawnPolecatId,
 				Repo:       spawnPolecatRepo,
 				Branch:     spawnPolecatBranch,
@@ -1366,7 +1384,8 @@ The template is expanded with the provided variables and used as the agent's pro
 	}
 	cmdAgentSpawnPolecat.Flags().StringVar(&spawnPolecatTemplate, "template", "polecat", "Template name (from ~/.pogo/agents/templates/)")
 	cmdAgentSpawnPolecat.Flags().StringVar(&spawnPolecatTask, "task", "", "Work item title ({{.Task}})")
-	cmdAgentSpawnPolecat.Flags().StringVar(&spawnPolecatBody, "body", "", "Work item body ({{.Body}})")
+	cmdAgentSpawnPolecat.Flags().StringVar(&spawnPolecatBody, "body", "", "Work item body ({{.Body}}); mutually exclusive with --body-file")
+	cmdAgentSpawnPolecat.Flags().StringVar(&spawnPolecatBodyFile, "body-file", "", "Read the work item body verbatim from a file (\"-\" for stdin); mutually exclusive with --body")
 	cmdAgentSpawnPolecat.Flags().StringVar(&spawnPolecatId, "id", "", "Work item ID ({{.Id}})")
 	cmdAgentSpawnPolecat.Flags().StringVar(&spawnPolecatRepo, "repo", "", "Target repository path ({{.Repo}})")
 	cmdAgentSpawnPolecat.Flags().StringVar(&spawnPolecatBranch, "branch", "", "Target branch for refinery submit ({{.Branch}})")
