@@ -229,6 +229,72 @@ SNAP_CREWNAME='{"draining":true,"count":1,"polecats":[{"name":"pm-pogo","pid":33
 [ -z "$(expected_lost_mail_checks "$PRE_BODY" '')" ] \
     && pass "no dead polecats -> no slack at all" || fail "slack granted with an empty snapshot"
 
+# --- unreachable_list: the survivors the drain CANNOT drain (mg-0b77) -------
+# `count` is a fact about pogod's in-memory REGISTRY, not about the machine. A
+# polecat that outlived an earlier pogod restart is permanently absent from that
+# registry while still alive, so it reads as 0 — and the driver used to print
+# "drain complete — 0 polecats active" over it: no snapshot, no cleanup, no
+# mention. These parse the `unreachable` array that now carries them.
+#
+# THE CASE THAT MATTERS is count:0 WITH a survivor — the exact shape the old
+# message lied about. If unreachable_list cannot read that payload, the fix is
+# decorative.
+SURVIVOR='{"draining":true,"count":0,"polecats":[],"unreachable":[{"name":"cat-9f21","pid":41207,"start_time":"2026-07-17T02:14:00Z","work_item_id":"mg-9f21"}]}'
+[ "$(unreachable_list "$SURVIVOR")" = "cat-9f21 (pid=41207, work_item=mg-9f21)" ] \
+    && pass "mg-0b77: unreachable_list reads a survivor out of a count:0 drain payload" \
+    || fail "mg-0b77: unreachable_list count:0 survivor ($(unreachable_list "$SURVIVOR"))"
+
+# The registry count must NOT be disturbed by the new field — drain_wait polls
+# it to zero, and a survivor is deliberately not counted (it is not drainable;
+# counting it would block every future redeploy forever).
+[ "$(printf '%s' "$SURVIVOR" | json_num count)" = "0" ] \
+    && pass "mg-0b77: the unreachable array does not corrupt json_num count" \
+    || fail "mg-0b77: json_num count with unreachable present ($(printf '%s' "$SURVIVOR" | json_num count))"
+
+# Two survivors, one line each.
+SURVIVORS2='{"draining":true,"count":0,"polecats":[],"unreachable":[{"name":"cat-a","pid":11,"start_time":"2026-07-17T02:14:00Z","work_item_id":"mg-aaaa"},{"name":"cat-b","pid":12,"start_time":"2026-07-17T02:15:00Z","work_item_id":"mg-bbbb"}]}'
+[ "$(unreachable_list "$SURVIVORS2" | wc -l | tr -d ' ')" = "2" ] \
+    && pass "mg-0b77: unreachable_list splits multiple survivors" \
+    || fail "mg-0b77: unreachable_list multiple ($(unreachable_list "$SURVIVORS2" | tr '\n' ' '))"
+
+# A clean drain has no `unreachable` key at all (omitempty). It must yield
+# NOTHING rather than a spurious line — a false alarm on every redeploy would
+# train its reader to ignore the real one.
+[ -z "$(unreachable_list "$DRAIN_OFF")" ] \
+    && pass "mg-0b77: a clean drain payload yields no survivors" \
+    || fail "mg-0b77: spurious survivor from a clean payload ($(unreachable_list "$DRAIN_OFF"))"
+
+# A live polecat in `polecats` is NOT a survivor: it is registered, drainable,
+# and drain_wait is already waiting for it. Reading it out of the wrong array
+# would report a healthy fleet as leaked.
+[ -z "$(unreachable_list "$DRAIN")" ] \
+    && pass "mg-0b77: registered polecats are not read as unreachable" \
+    || fail "mg-0b77: healthy polecat reported as a survivor ($(unreachable_list "$DRAIN"))"
+
+# An unreadable witness is "cannot see", NOT "none" (mg-76e5). The field must be
+# readable so report_drain_complete can refuse to print a clean drain.
+ERRBODY='{"draining":true,"count":0,"polecats":[],"unreachable_err":"witness: cannot read /p/w.json: unexpected end of JSON input"}'
+[ -n "$(printf '%s' "$ERRBODY" | json_str unreachable_err)" ] \
+    && pass "mg-0b77: unreachable_err is readable, so 'cannot see' never prints as a clean drain" \
+    || fail "mg-0b77: unreachable_err unreadable"
+
+# report_drain_complete must never turn "I could not look" into "none
+# unreachable". Its fetch is a SECOND, independent call — drain_wait's success
+# proves the daemon answered 15s ago, not that it answers now. Drive the failure
+# by pointing base_url at a closed port, and assert on what it SAYS: the
+# distinction is the whole ticket, so a silent 0-exit is not good enough.
+(
+    base_url() { echo "http://127.0.0.1:1"; }   # nothing listens here
+    OUT="$(report_drain_complete 2>&1)"
+    case "$OUT" in
+        *"could not look"*)
+            pass "mg-0b77: an unreachable daemon reports 'could not look', not 'none unreachable'" ;;
+        *"none unreachable"*)
+            fail "mg-0b77: a FAILED fetch printed 'none unreachable' — absence of evidence rendered as a claim about the world" ;;
+        *)  fail "mg-0b77: report_drain_complete said nothing useful on a failed fetch ($OUT)" ;;
+    esac
+) 2>/dev/null
+
 echo ""
 PASS_COUNT=$(grep -c '^PASS:' "$RESULTS_FILE" 2>/dev/null || true)
 FAIL_COUNT=$(grep -c '^FAIL:' "$RESULTS_FILE" 2>/dev/null || true)

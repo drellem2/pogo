@@ -164,7 +164,44 @@ running process, a witness written by the production writer
 (`RecordPolecatWitness`), and a registry that has never heard of it — which is
 not a contrivance but the ordinary, permanent state of a survivor.
 
-## 7. What this does NOT fix
+## 7. The fix rebuilt the bug inside itself (caught by its own test)
+
+`unreachable_list`'s first draft used the ordinary idiom:
+
+```sh
+| while IFS= read -r line; do
+```
+
+The body arrives via command substitution, which **strips trailing newlines**, so
+the pipeline's last record has none — and a bare `read` sets `$line` and *then*
+returns non-zero at EOF, so the loop **silently drops the last record**. With one
+survivor that is all of them: the function reported **nothing** while looking
+like it worked. **The exact silence this ticket exists to remove, rebuilt inside
+its own fix**, and it would have shipped as "drain complete, none unreachable".
+
+It was caught because the test asserted the payload shape that actually matters
+— `count:0` **with** a survivor — rather than a shape that was convenient. Both
+new tests went RED on the real defect, which is a better proof than any mutation
+I could have staged.
+
+This is not a novel trap: **`expected_lost_mail_checks` (`:143`) already carries
+the `|| [ -n "$line" ]` guard**, and its comment records the same discovery —
+*"That silently forgives whichever schedule sorts last — a miss in the detector,
+found only by an assertion that named a schedule the daemon really emitted
+last."* The lesson did not transfer to the next author (me). It is now recorded
+at both sites.
+
+### Adjacent defect found, NOT fixed (out of scope — reported to mayor)
+
+**`cleanup_orphans` (`scripts/pogo-self-deploy`, the `--force` hard-bounce path)
+has the same bug and is still live.** It splits the pre-kickstart polecat
+snapshot with a bare `read`, so on a forced bounce it **drops the LAST polecat**:
+that work item is never unclaimed and its worktree is never removed. Verified by
+simulating its extraction on a two-polecat snapshot (`mg-aaaa` cleaned,
+`mg-bbbb` silently skipped). Left alone deliberately — it belongs to mg-6afa's
+cleanup path, not this ticket.
+
+## 8. What this does NOT fix
 
 Stated rather than glossed:
 
