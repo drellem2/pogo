@@ -125,13 +125,13 @@ INSTALLED=new INSTALLED_CLI=new MAIN=new
 # --- DEPLOYED_CMDS is the coupling that stops this recurring --------------
 # The drift check and the build BOTH iterate this list. If pogo ever falls out
 # of it, the CLI goes dark again — and silently, which is the whole ticket.
-case " $DEPLOYED_CMDS " in
+case " ${DEPLOYED_CMDS[*]} " in
     *" pogod "*) pass "DEPLOYED_CMDS includes pogod" ;;
-    *) fail "DEPLOYED_CMDS must include pogod ($DEPLOYED_CMDS)" ;;
+    *) fail "DEPLOYED_CMDS must include pogod (${DEPLOYED_CMDS[*]})" ;;
 esac
-case " $DEPLOYED_CMDS " in
+case " ${DEPLOYED_CMDS[*]} " in
     *" pogo "*) pass "DEPLOYED_CMDS includes pogo — the CLI ships with the daemon" ;;
-    *) fail "DEPLOYED_CMDS must include pogo ($DEPLOYED_CMDS)" ;;
+    *) fail "DEPLOYED_CMDS must include pogo (${DEPLOYED_CMDS[*]})" ;;
 esac
 
 # --- installed_bin resolves per-binary paths, honouring POGO_GOBIN ---------
