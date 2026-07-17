@@ -65,7 +65,16 @@ func runGitGCSweep(reg *agent.Registry, cfg config.GitGCConfig) {
 	if err != nil {
 		log.Printf("pogod: git GC orphan-dir scan disabled: %v", err)
 	}
-	live := livePolecatSet(reg)
+	live, err := livePolecatSet(reg)
+	if err != nil {
+		// The witness store is on disk but unreadable. It is the ONLY guard a
+		// restart-surviving polecat's worktree has (worktree removal has no
+		// merge gate), and an unreadable store is not an empty fleet — reading
+		// it as "no polecats live" would delete a running polecat's work. Skip
+		// the sweep, exactly as an unreadable ticket index does above (mg-0130).
+		log.Printf("pogod: git GC skipped — cannot read polecat witness: %v", err)
+		return
+	}
 	for _, repo := range repos {
 		res, err := gitgc.Sweep(gitgc.Options{
 			Repo:         repo,
@@ -107,15 +116,51 @@ func gitGCRepos(reg *agent.Registry, cfg config.GitGCConfig) []string {
 	return repos
 }
 
-// livePolecatSet returns the names of all running polecats. A polecat's
-// name equals its branch's "polecat-" suffix and its worktree basename, so
-// gitgc.Sweep can match exclusions directly against it.
-func livePolecatSet(reg *agent.Registry) map[string]bool {
+// livePolecatSet returns the names of every polecat a sweep must treat as live
+// and therefore never disturb. A polecat's name equals its branch's "polecat-"
+// suffix and its worktree basename, so gitgc.Sweep matches exclusions directly
+// against it.
+//
+// It unions TWO sources, because neither is complete alone (mg-0130):
+//
+//   - the in-memory registry — authoritative while pogod has run continuously,
+//     but EMPTY after a restart, permanently, because the registry has no
+//     adopt/reattach path (mg-13a3);
+//   - the persisted polecat witness — which survives a restart and answers on
+//     (pid, start_time), so a polecat that outlived the pogod that spawned it
+//     stays protected.
+//
+// Without the witness union a restart empties the live set while startGitGC's
+// startup sweep runs, and a polecat whose ticket is already done but whose
+// process is still alive — every polecat's NORMAL end state (`mg done`, then
+// await the mayor's stop) — loses its sole worktree guard. Worktree removal is
+// gated on the live set alone, with no merge gate to catch the mistake, unlike
+// branch deletion; so the worktree is removed out from under a running polecat.
+//
+// A witnessed polecat counts as live when its process is provably ours
+// (WitnessAlive) OR when its identity cannot be established (WitnessUnreadable):
+// the asymmetry favours keeping a running polecat's work over reclaiming a dead
+// one's disk, matching the mail-check reaper, which likewise never reaps on
+// Unreadable (registryLiveness). WitnessDead and WitnessNoRecord add nothing —
+// a provably-dead polecat is exactly what the sweep exists to clean up.
+//
+// A witness READ error is returned, not swallowed: the caller must skip the
+// sweep rather than sweep against a live set it knows is missing survivors.
+func livePolecatSet(reg *agent.Registry) (map[string]bool, error) {
 	live := map[string]bool{}
 	for _, a := range reg.List() {
 		if a.Type == agent.TypePolecat {
 			live[a.Name] = true
 		}
 	}
-	return live
+	verdicts, err := agent.WitnessedPolecatVerdicts()
+	if err != nil {
+		return nil, err
+	}
+	for name, v := range verdicts {
+		if v == agent.WitnessAlive || v == agent.WitnessUnreadable {
+			live[name] = true
+		}
+	}
+	return live, nil
 }
