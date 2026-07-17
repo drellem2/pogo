@@ -114,6 +114,13 @@ cleanup() {
     # out the machine's live daemon and every agent poller with it.
     [ -n "$POGOD_PID" ] && kill "$POGOD_PID" 2>/dev/null
     [ -n "$POGOD_PID" ] && wait "$POGOD_PID" 2>/dev/null
+    # Make the tree writable before removing it. Any `go` call under the sandbox
+    # HOME (installed_bin's `go env`, installed_rev's `go version -m`) materialises
+    # the go.mod toolchain module into $SANDBOX/home/go/pkg/mod, and Go marks the
+    # module cache 0444 by design — so a plain `rm -rf` fails "Permission denied"
+    # on every file and litters /var/folders each redeploy (mg-e91e). chmod clears
+    # the read-only bit so the removal actually completes.
+    chmod -R u+w "$SANDBOX" 2>/dev/null
     rm -rf "$SANDBOX"
     rm -f "$RESULTS_FILE"
 }
@@ -634,16 +641,36 @@ curl -sf -X POST "$URL/agents/drain" -H 'Content-Type: application/json' \
 # finish, which is a 30-MINUTE window by default and by far the likeliest way
 # anyone ever interrupts this script.
 #
-# Runs as its OWN script rather than a ( subshell ) because this box's bash is
-# 3.2, which has no $BASHPID: inside a subshell `$$` is still the PARENT's pid,
-# so `kill -INT $$` would signal this test file instead of the code under test,
-# and the assertion would be reporting on nothing.
+# Runs as its OWN script, launched into its OWN process group (perl setsid — this
+# box's bash is 3.2 and macOS ships no `setsid` binary), for two reasons. First,
+# 3.2 has no $BASHPID, so inside a ( subshell ) `$$` is still the PARENT's pid and
+# a self-signal would hit this test file, not the code under test. Second — and
+# this is what makes the control DETERMINISTIC instead of a timing flake (mg-e91e)
+# — the signal below is delivered to the whole process GROUP, exactly as a
+# terminal Ctrl-C is: the kernel signals every process in the foreground group at
+# once. The own-group launch bounds that blast radius to this sigtest tree, so
+# `kill -INT 0` cannot reach the harness, the sandbox pogod, or the live fleet.
+#
+# WHY A GROUP SIGNAL AND NOT `kill -INT $$` (mg-e91e). The old form fired a
+# single-target async SIGINT at the parent from INSIDE a `$(drain_wait)`
+# command-substitution child that then ran `sleep 2; echo 0; return 0` and exited
+# 0 CLEANLY. Whether the parent's pending INT trap ran (exit 130) or the signal
+# was coalesced/lost as the child returned 0 was a bash-3.2 signal-delivery race:
+# green under light load, and deterministically RED under the full control suite,
+# where it observed exit 4 and blocked every redeploy through do_prove. A real
+# Ctrl-C has no such race — it hits the child too, so the child never returns 0.
+# Signalling the group models that faithfully and removes the clean-return path,
+# and with it the race.
 #
 # rc is the discriminator, and it is what makes this control able to fail:
 #   130 = the signal stopped the deploy (correct).
 #     4 = the handler RETURNED, drain_wait completed, and the deploy carried on
 #         into do_build — the returning-handler bug, which restores dispatch and
 #         then rebuilds and kickstarts the fleet anyway.
+# rc ALONE cannot tell a returning handler from a signal that never arrived —
+# both leave the abort unproven — so the parent's own trap message is captured as
+# a POSITIVE sub-assertion below: a lost/coalesced signal fails LOUD as "never
+# delivered", not as a false returning-handler verdict.
 cat > "$SANDBOX/sigtest.sh" <<SIGEOF
 #!/bin/bash
 set -u
@@ -653,20 +680,42 @@ source "$REPO_ROOT/scripts/pogo-self-deploy"
 # daemon's real stamp is foreign to the DR_REPO fixture, and a foreign stamp is
 # now a refusal, which would stop this run before it ever reached drain_wait).
 running_rev() { git -C "$DR_REPO" rev-parse HEAD 2>/dev/null; }
-# The human hits Ctrl-C while the deploy waits for the fleet to quiesce.
-drain_wait() { kill -INT \$\$; sleep 2; echo 0; return 0; }
+# The human hits Ctrl-C while the deploy waits for the fleet to quiesce. Model it
+# faithfully: reset THIS command-substitution child's INT to default first, so the
+# group signal kills the child SILENTLY — a child that inherited the driver's INT
+# trap would print the parent's "interrupted (SIGINT)" line and forge the positive
+# delivery evidence the verdict below reads — then signal the whole foreground
+# process GROUP as a terminal Ctrl-C does. The child dies instead of returning 0,
+# so there is no clean-return race with the parent's pending trap (mg-e91e).
+drain_wait() { trap - INT; kill -INT 0; sleep 2; echo 0; return 0; }
 POGO_GOBIN="$SANDBOX/nobin"
 REPO="$DR_REPO" DEPLOY_REF=main-fixture
 ASSUME_YES=true FORCE=false SKIP_DRAIN=false
 cmd_redeploy
 SIGEOF
-POGO_PORT="$PORT" bash "$SANDBOX/sigtest.sh" >/dev/null 2>&1
+# setsid puts sigtest in its own process group so `kill -INT 0` stays contained;
+# macOS has no `setsid` binary and bash 3.2 cannot self-setpgid, so perl does it
+# (it exec's bash, so bash's exit status is what $? captures). stderr is kept, not
+# discarded — the positive sub-assertion reads the parent trap's message from it.
+POGO_PORT="$PORT" perl -e 'use POSIX; POSIX::setsid() or die "setsid: $!"; exec("/bin/bash", $ARGV[0]) or die "exec: $!"' \
+    "$SANDBOX/sigtest.sh" >/dev/null 2>"$SANDBOX/sigtest.err"
 DR_SIG_RC=$?
-case "$DR_SIG_RC" in
-    130) pass "SIGINT in the drain window STOPS the real cmd_redeploy at the signal (exit 130) — it does not restore dispatch and then carry on building" ;;
-    4)   fail "SIGINT's handler RETURNED and the deploy resumed into do_build (exit 4) — a returning INT handler restores dispatch and then rebuilds and kickstarts the fleet anyway" ;;
-    *)   fail "expected exit 130 from a SIGINT in the drain window, got $DR_SIG_RC" ;;
-esac
+# POSITIVE sub-assertion (mg-e91e): the SIGINT actually reached the PARENT's INT
+# trap. The driver's handler (pogo-self-deploy: `trap '...exit 130' INT`) prints
+# this exact line on its way out, and the child was silenced above, so this line
+# can ONLY be the parent. Its ABSENCE means the signal was lost/coalesced before
+# the parent could act — a control-harness delivery fault that must fail LOUD, not
+# be read as a live verdict about the handler.
+if grep -q 'interrupted (SIGINT) during the drain window' "$SANDBOX/sigtest.err"; then
+    pass "the drain-window SIGINT was DELIVERED to the parent trap (the driver's INT handler ran) — the rc verdict below is about the handler, not about a lost signal"
+    case "$DR_SIG_RC" in
+        130) pass "SIGINT in the drain window STOPS the real cmd_redeploy at the signal (exit 130) — it does not restore dispatch and then carry on building" ;;
+        4)   fail "SIGINT's handler RETURNED and the deploy resumed into do_build (exit 4) — a returning INT handler restores dispatch and then rebuilds and kickstarts the fleet anyway" ;;
+        *)   fail "the INT trap fired but cmd_redeploy exited $DR_SIG_RC, not 130 — the signal was delivered yet the deploy did not abort cleanly" ;;
+    esac
+else
+    fail "the drain-window SIGINT NEVER reached cmd_redeploy's INT trap (no 'interrupted (SIGINT)' from the driver; rc=$DR_SIG_RC) — a lost/coalesced signal, i.e. a control-harness delivery fault, NOT a returning-handler bug. Read no handler verdict from this run."
+fi
 [ "$(dr_state)" = "false" ] \
     && pass "SIGINT in the drain window restores dispatch on the way out (Ctrl-C cannot strand the fleet either)" \
     || fail "SIGINT left the live daemon at draining=$(dr_state) — an aborted deploy strands the fleet exactly like a failed build"
