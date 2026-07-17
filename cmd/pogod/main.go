@@ -67,16 +67,25 @@ const maxHTTPConns = 256
 // agent by its event identity (cat-/crew-<name>) or, for some crew schedules,
 // its bare name, so we match on both.
 //
-// It answers on TWO sources, consulted in a STRICT ORDER (mg-8677):
+// It answers on THREE sources, consulted in a STRICT ORDER (mg-8677, mg-13a3):
 //
 //  1. the registry — evidence about an actual process. A registered agent that
 //     is running, or one held for an imminent respawn, is ALIVE. A registered
 //     agent that has terminally exited with no respawn coming is GONE.
-//  2. the desired state on disk (agent.DesiredStateFor) — an auto_start, not
-//     parked crew prompt. Consulted ONLY when step 1 yielded no evidence at
-//     all, i.e. the registry holds no entry for this agent.
+//  2. the persisted polecat witness (agent.PolecatWitness) — evidence about an
+//     actual process that OUTLIVES the pogod that observed it. Consulted ONLY
+//     when step 1 yielded no evidence at all, i.e. the registry holds no entry.
+//  3. the desired state on disk (agent.DesiredStateFor) — an auto_start, not
+//     parked crew prompt. Consulted ONLY when steps 1 and 2 both yielded no
+//     evidence at all.
 //
-// The order is the whole design, and both halves of it were learned from a bug:
+// The order is the whole design, and every step of it was learned from a bug.
+// Steps 1 and 2 are both EVIDENCE (something looked at a process); step 3 is
+// EXPECTATION (something read a config file about what ought to be running).
+// Evidence beats expectation, always; that is the mg-8677 rule and adding a
+// second evidence source does not weaken it — the witness is consulted after
+// the registry and before the desired state precisely because it is the same
+// KIND of thing as the registry, and a strictly better thing than a prompt.
 //
 // The registry alone is NOT sufficient, and believing it was is what caused
 // mg-de08. A freshly-started pogod has an EMPTY registry: its scheduler loads
@@ -94,11 +103,40 @@ const maxHTTPConns = 256
 // forever and accumulating unbounded scheduler_fire_failed noise. The registry
 // LOOKED and found a corpse; auto_start does not resurrect it.
 //
-// GONE means positive evidence of death — a corpse in the registry, or an agent
-// that is neither registered nor in the desired state (polecats, agents whose
-// prompt was removed) — which is what preserves orphan-nudge prevention. Across
-// a pogod restart the unregistered population splits cleanly: crew are
-// auto_start (EXPECTED → keep), polecats are not (GONE → reap).
+// And the desired state cannot answer for an agent that never had one, which
+// was mg-13a3. A polecat has no prompt and no auto_start, so before the
+// witness existed BOTH sources came back absent for every polecat that
+// survived a pogod restart, and the default arm called that death:
+//
+//	registry: no entry        (absence)
+//	desired state: not wanted (absence)
+//	=> GONE => reap the mail-check
+//
+// Two absences are not evidence of anything. The comment that shipped with
+// mg-8677 asserted otherwise — it called "neither registered nor in the
+// desired state" a form of positive evidence, which defined an absence into a
+// presence and licensed exactly the reap mg-de08 forbade. mg-61a0 then
+// reproduced the consequence: a live polecat, unregistered after a restart,
+// lost its mail-check from memory and disk and went permanently dark. The
+// registry is in-memory with no adopt path, so absence never heals on its own.
+// The witness is what heals it — a polecat's own (pid, start_time), persisted,
+// so a successor pogod has something to LOOK at.
+//
+// GONE therefore means positive evidence of death, with no disjunct that is
+// merely an absence wearing the word "evidence":
+//
+//   - a corpse in the registry (step 1: we watched it exit), or
+//   - a witness whose process is provably not ours — the pid answers nothing,
+//     or it answers but started at a different time, meaning the pid was
+//     recycled and our polecat is long dead (step 2), or
+//   - an agent with no witness AND no desired state: nothing on this machine
+//     has ever claimed this agent should exist or observed that it did. That
+//     is not the polecat case any more; a live polecat now has a witness.
+//
+// Across a pogod restart the unregistered population splits on EVIDENCE, not
+// on the shape of its config: crew are auto_start (EXPECTED → keep), live
+// polecats are witnessed (UNKNOWN → keep), and dead polecats' witnesses are
+// dropped at exit or fail the identity match (GONE → reap).
 type registryLiveness struct{ reg *agent.Registry }
 
 func (l registryLiveness) AgentState(scheduleAgent string) scheduler.AgentState {
@@ -145,8 +183,42 @@ func (l registryLiveness) AgentState(scheduleAgent string) scheduler.AgentState 
 		}
 	}
 	// The registry holds no entry for this agent: no evidence either way, NOT
-	// evidence of death (mg-de08). Only now may the desired state speak — ask
-	// whether this agent is supposed to be running before reaping anything.
+	// evidence of death (mg-de08). Before asking what SHOULD be running, ask
+	// whether we have any surviving evidence about what IS — a polecat's
+	// persisted (pid, start_time) outlives the pogod that recorded it, so a
+	// restarted pogod can still look at the process itself (mg-13a3).
+	switch v := agent.PolecatWitness(scheduleAgent); v {
+	case agent.WitnessAlive:
+		// OUR process — matched on pid AND start time — is running. The
+		// registry has simply forgotten it (in-memory, no adopt path across a
+		// restart). This is the case that used to reap a live polecat.
+		//
+		// UNKNOWN, not ALIVE: the honest claim is "this process is running",
+		// which is not the same as "this agent is healthy and reachable". Both
+		// keep the schedule, and UNKNOWN keeps us from asserting more than we
+		// checked.
+		return scheduler.AgentUnknown
+	case agent.WitnessDead:
+		// Positive evidence of death: the pid holds nothing, or it holds a
+		// process that started at a different time and is therefore not ours.
+		// Reap. Refusing to reap here is what would re-enter mg-8677 — a
+		// recycled pid keeping a dead polecat's mail-check firing forever.
+		return scheduler.AgentGone
+	case agent.WitnessUnreadable:
+		// A witness exists and something is alive on its pid, but we could not
+		// confirm the process is ours. We must not call an unmeasurable thing
+		// dead.
+		log.Printf("scheduler: cannot confirm the process behind %s's witness is ours; NOT reaping its mail-check", scheduleAgent)
+		return scheduler.AgentUnknown
+	case agent.WitnessNoRecord:
+		// No witness at all — crew (never witnessed; their auto_start is their
+		// second witness) and agents whose witness was dropped when this or an
+		// earlier pogod watched them exit. Fall through to the desired state.
+	}
+
+	// Neither the registry nor the witness has anything to say. Only now may
+	// the desired state speak — ask whether this agent is supposed to be
+	// running before reaping anything.
 	expected, err := agent.DesiredStateFor(scheduleAgent)
 	switch {
 	case err != nil:
