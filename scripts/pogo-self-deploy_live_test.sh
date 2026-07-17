@@ -815,6 +815,77 @@ case "$OUT_UNK" in
         fail "dead daemon did not report UNKNOWN: $OUT_UNK" ;;
 esac
 
+# ===========================================================================
+# 6. CLEANUP_ORPHANS — the LAST polecat in the snapshot must be cleaned too.
+# ===========================================================================
+# WHY THIS EXISTS AT ALL: cleanup_orphans had no test, and that — not missing
+# knowledge — is why it shipped broken. The `|| [ -n "$line" ]` guard was already
+# in this same file TWICE, in extract_mail_check_ids_for_agents and in
+# unreachable_list, each with a comment explaining the trap in English. It did not
+# transfer. A guard in a neighbouring function is a note, not a mechanism; the
+# thing that makes a fix hold is something that FAILS when you get it wrong.
+#
+# THE BUG (mg-a558): the snapshot arrives via `$(curl ...)`, command substitution
+# strips trailing newlines, so the last object has none — and a bare `read` sets
+# the variable and returns non-zero at EOF, so the loop silently drops it. On a
+# --force bounce that population is exactly the one the bounce just killed, so
+# nothing else ever comes for it: the claim and the worktree leak forever.
+#
+# Driven through the driver's REAL function against REAL git worktrees. `mg` is
+# stubbed to a recorder — this control must never touch the live ledger — and
+# that stub is the only seam; the loop, the parse and the worktree removal are
+# the shipped code.
+CO_REPO="$SANDBOX/orphan-repo"
+mkdir -p "$CO_REPO"
+(
+    cd "$CO_REPO" && git init -q . && git config user.email t@t && git config user.name t
+    echo one > f && git add f && git commit -qm one
+    git worktree add -q -b wt-a-br "$SANDBOX/wt-a"
+    git worktree add -q -b wt-z-br "$SANDBOX/wt-z"
+) >/dev/null 2>&1
+
+CO_LOG="$SANDBOX/mg-calls"
+: > "$CO_LOG"
+# The recorder. cleanup_orphans runs `mg unclaim "$id"` inside a pipeline
+# subshell, so the record goes to a FILE — a variable would not survive back out.
+mg() { echo "$*" >> "$CO_LOG"; }
+
+# Two polecats. mg-zzzz sorts LAST in the body, which is the only thing that
+# matters: it is the record that carries no trailing newline.
+CO_SNAP='{"draining":true,"count":2,"polecats":[{"name":"cat-a","pid":111,"work_item_id":"mg-aaaa","worktree_dir":"'"$SANDBOX/wt-a"'","source_repo":"'"$CO_REPO"'"},{"name":"cat-z","pid":222,"work_item_id":"mg-zzzz","worktree_dir":"'"$SANDBOX/wt-z"'","source_repo":"'"$CO_REPO"'"}]}'
+cleanup_orphans "$CO_SNAP" >/dev/null 2>&1
+
+# (a) THE ASSERTION THIS TICKET EXISTS FOR. Against the pre-fix bare `read` this
+# goes RED: mg-zzzz is never unclaimed and $SANDBOX/wt-z is still on disk.
+if grep -qxF "unclaim mg-zzzz" "$CO_LOG" && [ ! -d "$SANDBOX/wt-z" ]; then
+    pass "mg-a558: the LAST polecat in the snapshot is unclaimed AND its worktree removed (the trailing-newline record is not dropped)"
+else
+    fail "mg-a558 REGRESSION: the LAST polecat leaked — unclaimed=$(grep -qxF 'unclaim mg-zzzz' "$CO_LOG" && echo yes || echo NO) worktree_gone=$([ ! -d "$SANDBOX/wt-z" ] && echo yes || echo NO). On a --force bounce nothing else will ever clean it up."
+fi
+
+# (b) CONDITIONAL, not hard-wired: every OTHER entry is still cleaned too. Without
+# this, (a) would also pass on a function that cleaned only the last record, or on
+# one that unclaimed everything it was ever handed regardless of the snapshot.
+if grep -qxF "unclaim mg-aaaa" "$CO_LOG" && [ ! -d "$SANDBOX/wt-a" ]; then
+    pass "mg-a558: the non-last entries are cleaned as well — (a) is a claim about the LAST record, not about a function that always fires"
+else
+    fail "mg-a558: mg-aaaa (not last) was not cleaned — cleanup_orphans is dropping entries it never dropped before"
+fi
+
+# (c) THE WORST CASE, and the one a real forced bounce hits most: ONE polecat is
+# ALL of them. Pre-fix this function returned in silence — no log, no unclaim, no
+# removal, nothing to notice. A no-op that reports nothing is not a quiet success.
+: > "$CO_LOG"
+git -C "$CO_REPO" worktree add -q -b wt-solo-br "$SANDBOX/wt-solo" >/dev/null 2>&1
+CO_SNAP1='{"draining":true,"count":1,"polecats":[{"name":"cat-solo","pid":333,"work_item_id":"mg-solo","worktree_dir":"'"$SANDBOX/wt-solo"'","source_repo":"'"$CO_REPO"'"}]}'
+CO_OUT1="$(cleanup_orphans "$CO_SNAP1" 2>&1)"
+if grep -qxF "unclaim mg-solo" "$CO_LOG" && [ ! -d "$SANDBOX/wt-solo" ]; then
+    pass "mg-a558: a ONE-polecat snapshot is cleaned — the single-entry case (where the only record is also the last) is not a silent no-op"
+else
+    fail "mg-a558: a ONE-polecat snapshot cleaned NOTHING and said nothing (output: '$CO_OUT1') — cleanup_orphans is a no-op on the commonest forced-bounce shape"
+fi
+unset -f mg
+
 echo ""
 # Backstop to the write guard above: the ledger must be readable and non-empty
 # before any verdict is drawn from it. The `|| true` on the two greps below is
