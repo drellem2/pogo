@@ -38,6 +38,32 @@ is the curated, human-readable summary kept in sync at each release cut.
   `pogod` behind. The post-install check now asks **every** binary its revision
   and refuses unless they all report main.
 
+- **`diagnose` can now report a dead mail loop on an `auto_start=false` agent
+  someone turned ON (mg-738f).** Such an agent was a **deaf survivor**: it ran,
+  answered nothing, and every health signal stayed green. `mailLoopFor` opened
+  with `if !IsExpectedAgent(a.Name) { return mailLoopUnknown }` — and
+  `auto_start=false` puts an agent outside the desired state **by definition**,
+  so the check returned UNKNOWN *before any mail-check lookup* and could never
+  return MISSING. Structurally. Not a bug in the check — **the check could not
+  reach the question.** `restart_on_crash` does not cover it: that is **process**
+  death, not **mail-loop** death. The agent is alive; it just can't hear.
+  `doctor` and `pm-lineara` ship this config today.
+  `diagnose` now judges an agent that is **configured and running**, not only one
+  that is **expected** — mg-8677's *evidence beats expectation* rule, one consumer
+  over. The reap already followed it (registry evidence before `DesiredStateFor`);
+  `diagnose` asked expectation first and so never looked. Liveness keeps the RED
+  **conditional**: a genuinely-absent agent still reports UNKNOWN, because a
+  detector that cannot tell *"not there"* from *"there and deaf"* is the defect,
+  not the fix. The reap was confirmed **not** implicated — a running agent keeps
+  its schedule; only the diagnosis was blind.
+  This makes the fault **detectable, not announced**: `diagnose` is its only
+  consumer, and a `diagnose` field helps someone already running `diagnose`. That
+  gap, and the populations this bar still excludes (polecats, not-running agents),
+  are named out loud in the investigation — because mg-de08's bar has now missed
+  three populations and every boundary was drawn by its own acceptance criterion.
+  See
+  [docs/investigations/deaf-survivor-off-by-default-2026-07-17.md](docs/investigations/deaf-survivor-off-by-default-2026-07-17.md).
+
 - **A redeploy that refuses to deploy now says so OUTSIDE the script (mg-f206).**
   `exit 7` — the drain timed out with polecats still working, and `--force` is
   not set, so nothing is deployed — reported itself as two `err` lines to the

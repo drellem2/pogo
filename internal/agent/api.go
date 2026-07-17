@@ -175,10 +175,12 @@ type DiagnoseInfo struct {
 	// of its last scheduled firing — between-cron idle is by design for a
 	// cron-driven crew agent, not a wedge (mg-5b23).
 	CronCovered bool `json:"cron_covered,omitempty"`
-	// MailCheckMissing is true when the agent is EXPECTED (in pogod's desired
-	// state) but has no mail-check-<name> schedule: it can be mailed, but
-	// nothing will ever wake it to read the mail. Such an agent is unhealthy —
-	// see the "no_mail_loop" health state (mg-de08).
+	// MailCheckMissing is true when an agent diagnose has standing to judge —
+	// one pogod EXPECTS to be running (mg-de08), or one that is CONFIGURED and
+	// actually RUNNING (mg-738f) — has no mail-check-<name> schedule: it can be
+	// mailed, but nothing will ever wake it to read the mail. Such an agent is
+	// unhealthy; see the "no_mail_loop" health state and mailLoopJudgeable,
+	// which documents who is judged and who is deliberately not.
 	//
 	// This is the inverse of CronCovered, and the asymmetry it corrects was the
 	// mg-de08 defect. Before it, the ONLY thing diagnose did with schedules was
@@ -636,27 +638,85 @@ func (r *Registry) diagnose(a *Agent) DiagnoseInfo {
 	return diagnoseAgentAt(a, time.Now(), windows, mailLoopFor(a, mailChecks))
 }
 
-// mailLoopFor classifies an agent's mail delivery path. It judges only agents
-// in pogod's DESIRED STATE — the same predicate the mail-check reap uses
-// (IsExpectedAgent), so the two consumers cannot drift apart: the reap removes
-// mail-checks for agents NOT in the desired state, diagnose flags agents IN it
-// with no mail-check.
-//
-// Everything else is mailLoopUnknown rather than a guess. A polecat is not
-// judged here: it registers its own loop at spawn (mg-e633) with its own
-// escalation path on failure (mg-6fe0), and a polecat between spawn and
-// registration is not a fault.
+// mailLoopFor classifies an agent's mail delivery path. Everything it cannot
+// judge is mailLoopUnknown rather than a guess — see mailLoopJudgeable for who
+// is judged and, just as importantly, who is not.
 func mailLoopFor(a *Agent, p MailCheckProvider) mailLoopState {
 	if p == nil || a == nil {
 		return mailLoopUnknown
 	}
-	if !IsExpectedAgent(a.Name) {
+	if !mailLoopJudgeable(a) {
 		return mailLoopUnknown
 	}
 	if p.HasMailCheck(a.EventAgent()) {
 		return mailLoopPresent
 	}
 	return mailLoopMissing
+}
+
+// mailLoopJudgeable reports whether diagnose has standing to judge a's mail
+// loop. Two disjuncts, and the second one was a hole for a while:
+//
+//   - EXPECTED (mg-de08): pogod means to be running this agent, so it is owed a
+//     mail loop whatever its process is currently doing. This is the same
+//     predicate the mail-check reap uses, so the two consumers cannot drift
+//     apart: the reap removes mail-checks for agents NOT in the desired state,
+//     diagnose flags agents IN it with no mail-check.
+//
+//   - CONFIGURED AND RUNNING (mg-738f): an agent with auto_start=false is
+//     outside the desired state by definition, so the first disjunct alone
+//     returned UNKNOWN for it — never MISSING — BEFORE it could reach the
+//     question. Turn such an agent on, let its mail loop die, and it becomes a
+//     DEAF SURVIVOR: alive, answering nothing, every health signal green. That
+//     is mg-de08's exact pathology in the population de08's acceptance criterion
+//     could not see, and `doctor` and `pm-lineara` ship auto_start=false today.
+//     restart_on_crash does not cover it — that is PROCESS death, not MAIL-LOOP
+//     death. The agent is alive. It just can't hear.
+//
+// The second disjunct is mg-8677's rule one consumer over: EVIDENCE BEATS
+// EXPECTATION. registryLiveness already consults the registry before the desired
+// state, because a config file cannot overrule a process you looked at. diagnose
+// asked expectation FIRST and so never looked. "Not in the desired state"
+// answers "should this agent be running?" — the wrong question for an agent that
+// IS running. A running process is observable; a running process nothing can
+// wake is a fault.
+//
+// Liveness is what keeps the RED conditional rather than hard-wired to
+// auto_start=false, and it is real evidence (pidAlive), not a status field:
+//
+//	not there      -> UNKNOWN  (nothing is owed a loop it has no process to answer with)
+//	there and deaf -> MISSING  (the fault)
+//
+// A detector that cannot tell those apart is the defect this fleet spent
+// 2026-07-17 on.
+//
+// WHO THIS STILL DOES NOT JUDGE — named out loud, because mg-de08's bar has now
+// missed three populations and every boundary was drawn by its own acceptance
+// criterion:
+//
+//   - POLECATS (unregistered / no prompt) — NOT judged, deliberately. They
+//     register their own loop at spawn (mg-e633) with their own escalation path
+//     on failure (mg-6fe0); one between spawn and registration is not a fault.
+//     This is mg-61a0/mg-13a3's population, and it is covered by the witness,
+//     not by diagnose.
+//   - A CONFIGURED AGENT THAT IS NOT RUNNING — NOT judged. That is the "not
+//     there" case above, and UNKNOWN is the right answer.
+//   - AN AGENT WITH AN UNREADABLE PROMPT TREE — NOT judged; we cannot classify
+//     what we cannot read, and a false RED costs more than silence.
+//   - ANYTHING DIAGNOSE IS NEVER RUN AGAINST. This check is only as loud as its
+//     caller: a diagnose field helps someone already running diagnose. It is
+//     detection, not an alarm.
+func mailLoopJudgeable(a *Agent) bool {
+	if IsExpectedAgent(a.Name) {
+		return true
+	}
+	// A polecat can never reach the configured branch (it has no prompt), but
+	// say so explicitly rather than resting on that: the exclusion is a decision,
+	// not an accident of naming.
+	if a.Type == TypePolecat {
+		return false
+	}
+	return a.Alive() && IsConfiguredAgent(a.Name)
 }
 
 // NudgeAPIResponse is returned for wait-idle nudges to report delivery status.

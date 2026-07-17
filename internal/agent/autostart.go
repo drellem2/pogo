@@ -174,6 +174,48 @@ func IsExpectedAgent(identity string) bool {
 	return expected && err == nil
 }
 
+// IsConfiguredAgent reports whether identity names a crew or mayor prompt on
+// disk — an agent this machine is CONFIGURED to have — regardless of whether
+// pogod wants it running. It is deliberately weaker than IsExpectedAgent, and
+// the gap between the two is the point (mg-738f):
+//
+//	IsExpectedAgent   — "should this agent be running?"  (auto_start, not parked)
+//	IsConfiguredAgent — "is this agent one of ours?"     (a prompt exists)
+//
+// The desired state answers the first question, and diagnose used it to decide
+// whether an agent was owed a mail loop. That is the wrong question for an agent
+// that IS running: an auto_start=false agent someone turned on is outside the
+// desired state forever, so its missing mail loop could never be reported
+// (mailLoopFor returned UNKNOWN before it could look). Pairing this predicate
+// with process liveness lets diagnose judge a running agent on EVIDENCE and stay
+// quiet about one that isn't there — the mg-8677 precedence rule the reap
+// already follows.
+//
+// A polecat identity ("cat-de08") is never configured: polecats have no prompt.
+// They own their own registration path (mg-e633) and are not judged here.
+// An unreadable prompt tree collapses to false — diagnose must not guess, and a
+// wrong "no" here only costs silence, never a false RED.
+func IsConfiguredAgent(identity string) bool {
+	if identity == "" {
+		return false
+	}
+	cands, err := autoStartCandidates()
+	if err != nil {
+		log.Printf("configured-agent: list prompts failed: %v", err)
+		return false
+	}
+	// Only the crew- form is unwrapped, for the same reason DesiredStateFor
+	// unwraps only that one: a cat- identity is a polecat and can never name a
+	// crew prompt.
+	bare := strings.TrimPrefix(identity, "crew-")
+	for _, c := range cands {
+		if c.name == identity || c.name == bare {
+			return true
+		}
+	}
+	return false
+}
+
 // AutoStartAgents scans crew prompt files under ~/.pogo/agents/ and starts
 // every agent whose prompt declares auto_start = true in its TOML frontmatter
 // and is not parked — that is, every agent in the desired state described by

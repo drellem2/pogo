@@ -1138,8 +1138,12 @@ Health states:
   idle         — quiet for over 30s but within the stall threshold (alive, between cycles)
   stalled      — quiet for longer than the stall threshold
   rate_limited — alive but wedged on the provider's usage-limit modal (gh #45)
-  no_mail_loop — expected to be running but has no mail-check schedule: it can
-                 be mailed, but nothing will wake it to read the mail (mg-de08)
+  no_mail_loop — has no mail-check schedule: it can be mailed, but nothing will
+                 wake it to read the mail. Reported for an agent pogod expects
+                 to be running (mg-de08) and for any configured agent that IS
+                 running, including an auto_start=false one someone turned on —
+                 a running agent nothing can wake is a fault whatever its
+                 frontmatter wants (mg-738f)
   exited       — process has exited
   dead         — registered as running but OS process is gone
 
@@ -1190,9 +1194,11 @@ down. To keep it down, park it.`,
 					fmt.Printf("  the last scheduled firing — this is normal between-cron idle, not a stall.\n")
 				}
 				if diag.MailCheckMissing {
-					fmt.Printf("\n⚠ NO MAIL LOOP: %s is expected to be running but has no\n", diag.Name)
-					fmt.Printf("  mail-check schedule. Mail sent to it will sit unread until something\n")
-					fmt.Printf("  nudges it by hand — the agent looks fine and is unreachable (mg-de08).\n")
+					fmt.Printf("\n⚠ NO MAIL LOOP: %s has no mail-check schedule. Mail sent to it\n", diag.Name)
+					fmt.Printf("  will sit unread until something nudges it by hand — the agent looks fine\n")
+					fmt.Printf("  and is unreachable (mg-de08). An agent that is running but not\n")
+					fmt.Printf("  auto_start is reported too: turning one on does not give it a mail\n")
+					fmt.Printf("  loop, and nothing else will flag that it cannot hear (mg-738f).\n")
 					fmt.Printf("  Restore it:\n")
 					fmt.Printf("    pogo schedule %s --cron \"*/10 * * * *\" --id mail-check-%s --replay once \\\n", diag.Name, diag.Name)
 					fmt.Printf("        --message \"Check your mail with mg mail list %s and handle any unread messages.\"\n", diag.Name)

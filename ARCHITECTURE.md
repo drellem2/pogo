@@ -476,6 +476,21 @@ one source of truth**, so they cannot drift apart:
 - **diagnose** enforces it by flagging agents *in* the desired state with *no*
   mail-check (`health: no_mail_loop`, `mail_check_missing: true`).
 
+**But the desired state is not the whole judged set (mg-738f).** An
+`auto_start=false` agent is outside it *by definition*, so gating diagnose on
+`IsExpectedAgent` alone meant a turned-on off-by-default agent could never be
+reported MISSING — only UNKNOWN, before any lookup. It ran, answered nothing, and
+diagnosed `healthy`: mg-de08's own pathology, in the population de08's bar
+excludes. So diagnose *also* judges an agent that is **configured** — a crew
+prompt exists (`agent.IsConfiguredAgent`) — **and running**, whatever its
+`auto_start` says. That is the reap's own rule one consumer over: **evidence
+beats expectation.** "Not in the desired state" answers *should this be
+running?* — the wrong question for an agent that **is**. Liveness keeps the RED
+conditional: an agent that is not there stays UNKNOWN, because a detector that
+cannot tell *"not there"* from *"there and deaf"* is the defect it is meant to
+catch. Polecats stay unjudged — the **witness** covers them, not diagnose. See
+[docs/investigations/deaf-survivor-off-by-default-2026-07-17.md](docs/investigations/deaf-survivor-off-by-default-2026-07-17.md).
+
 Before mg-de08 the only thing diagnose did with schedules was consult them to
 *suppress* a stall label (`cron_covered`): schedule-awareness ran in exactly one
 direction and could only ever make an agent look healthier. An agent whose mail
