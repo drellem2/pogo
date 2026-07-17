@@ -474,3 +474,40 @@ func WitnessedAlivePolecats() ([]witnessRecord, error) {
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, nil
 }
+
+// WitnessStoreExists reports whether the witness file is on disk at all.
+//
+// WHY THIS IS NOT THE SAME QUESTION AS "are any polecats alive?" (mg-65b2).
+// loadWitness maps a missing file to (nil, nil) — "no polecat has been
+// witnessed" — and for the reaper that is right: no record means no evidence to
+// reap on, and it declines. But a caller that must decide whether the fleet is
+// IDLE cannot accept that mapping, because it collapses the two states this
+// package exists to keep apart:
+//
+//	file present, "polecats":[]  — pogod looked and there are none. A ZERO.
+//	file absent                  — nobody ever wrote one here. AN ABSENCE.
+//
+// saveWitness never removes the file (recs == nil is written as an empty
+// array), so on any box whose pogod postdates mg-13a3 an idle fleet leaves a
+// present-and-empty file. Absence therefore means something else entirely: a
+// pogod that predates the witness, a wiped POGO_HOME, or a store we are not
+// looking at. None of those are evidence that nothing is running.
+//
+// The drain gate is the caller that needs this (drain_wait, via `pogo agent
+// witness`): consulting a witness that was never written and reading its
+// emptiness as "idle" would rebuild the very fail-open it was reached for —
+// concluding "drained" from a SINGLE absence, one layer up (mg-13a3's thesis).
+//
+// A stat error other than not-exist is returned, never folded into false: "I
+// could not look" is not "it is not there", which is this file's whole subject.
+func WitnessStoreExists() (bool, error) {
+	witnessMu.Lock()
+	defer witnessMu.Unlock()
+	if _, err := os.Stat(WitnessPath()); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, fmt.Errorf("witness: cannot stat %s: %w", WitnessPath(), err)
+	}
+	return true, nil
+}

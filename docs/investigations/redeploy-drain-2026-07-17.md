@@ -9,6 +9,31 @@ mode), mg-6afa, mg-065e (`d02e087`)
 Point-in-time record. Read against `05eef74`. Fact-finding only — **no fix
 shipped, nothing changed**. Defects noted here are for the mayor to file.
 
+> **AMENDMENT 2026-07-17 (mg-65b2) — finding #1 is TRUE ONLY WHEN THE READOUT IS
+> READABLE, and that qualifier is load-bearing.** This document's central claim
+> — *"it WAITS ... on timeout it fails closed"* — was measured on the path where
+> `GET /agents/drain` answers. It did **not** hold when the readout could not be
+> read. `drain_wait` ended with `count="${count:-0}"`, and `curl -sf` yields an
+> empty body on **any** failure, so an unreadable count rendered as a confident
+> **zero** and the drain reported *quiesced on the first poll, having waited for
+> nothing*. The gate **failed OPEN**, and a redeploy could `kickstart -k` a live
+> fleet and mint survivors with **no `--force`** — the very compounding this
+> document's §5(a) describes, reachable on the **default** path.
+>
+> This matters most for the reader who came here for **mg-f206's arming
+> decision**, because f206's non-gating of mg-0b77 and mg-13a3 rested on this
+> document's finding #1: *"the drain waits, so f206 mints no survivors."* That
+> reasoning was sound only while the drain actually waited. **mg-65b2 fixed the
+> gate** — a missing sample is re-polled; sustained silence is classified by
+> `classify_drain_precondition`; a `down` verdict consults the mg-13a3 witness
+> (idle → proceed, live → refuse, double absence → fail closed); `--force`
+> overrides. Finding #1 now holds unconditionally, but it did not when this was
+> written, and nothing else here should be read as though it did.
+>
+> The rest of this record stands as written, including §5(b), which mg-8b48 has
+> since fixed. It is a point-in-time record, not a live spec — **verify before
+> relying on any claim here**.
+
 ## The question
 
 > Does the drain **WAIT** for in-flight polecats, **KILL** them, or **neither**

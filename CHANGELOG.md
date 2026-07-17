@@ -12,6 +12,53 @@ is the curated, human-readable summary kept in sync at each release cut.
 
 ### Fixed
 
+- **The redeploy drain no longer reads an UNREADABLE polecat count as ZERO — its
+  gate was failing OPEN (mg-65b2).** `drain_wait` ended with
+  `count="${count:-0}"`, and `curl -sf` yields an **empty body on any failure**
+  — refused connection, timeout, 5xx, non-JSON. So "I could not read it" became
+  "there are zero polecats", and the drain reported **quiesced on the first
+  poll, having waited for nothing**. Measured against a dead port, not inferred:
+  `drain_wait -> stdout=[0] rc=0`. Downstream, the redeploy would then
+  `kickstart -k` a **live fleet** — and polecats `setsid` out of the process
+  group and **survive** (mg-46a4, mg-61a0), holding worktrees and claims,
+  invisible to the successor's registry forever, with **no `--force` anywhere**.
+  The irony was exact: `report_drain_complete` had already been taught to say
+  *"this is NOT a report that there are none — it is a report that we could not
+  look"* (mg-0b77), while the function that **decides whether to bounce**, three
+  lines up, still rendered the same absence as a confident zero. mg-0b77 fixed
+  the report; it never touched the gate.
+
+  The fix is not a better default for an unknown state — it is to stop making the
+  state unknown, in three parts:
+
+  1. **A missing sample is not a measurement.** The drain is a deadline-bounded
+     poll, so a transient curl failure now costs a **re-poll**, not a verdict.
+     That alone covers most real occurrences (a >5s response under load, a blip).
+  2. **Sustained silence is a real state change** — classified by
+     `classify_drain_precondition`, the pure, unit-tested function that already
+     lived twelve lines up. It is **reused**, not reimplemented: two functions
+     with private definitions of "down" is how this recurs.
+  3. **`down` consults the second witness instead of guessing.** Unreachable is
+     not unknowable — `/agents/drain` is a proxy, and mg-13a3 already persisted
+     the real answer to disk. Witness says **idle → PROCEED** (bouncing a wedged
+     pogod strands nothing already stranded, and *is* the repair); witness says
+     **live → REFUSE** (that bounce mints permanent survivors); **double absence
+     → fail closed**. `--force` overrides every refusal.
+
+  A live control (`scripts/pogo-self-deploy_live_test.sh` §8) reproduces the
+  fail-open against a **really-dead daemon** and drives all four states, plus the
+  negative — a healthy drain still drains, so the refusal is conditional, not a
+  gate welded shut.
+
+- **`pogo agent witness`** — new: reports which polecats are provably alive from
+  the on-disk witness, **with no `pogod` required**. It re-probes each record's
+  `(pid, start_time)` against the kernel, so it answers when the daemon is down,
+  which is the only reason it exists. Exit codes keep three states apart that
+  must never be collapsed: `0` present and readable (`alive_count` is a
+  measurement, `0` included), `2` **no witness file — an absence, not a zero**,
+  `1` a witness exists but could not be read. An idle fleet leaves a
+  present-and-empty witness, so a missing file is not evidence that nothing runs.
+
 - **A redeploy now installs the `pogo` CLI in lockstep with `pogod` — merged is
   not deployed (mg-ddf1).** `do_build` ran `go install ./cmd/pogod` and nothing
   else, so **no code path installed the CLI at all**. Every `cmd/pogo` change was

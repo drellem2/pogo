@@ -50,11 +50,20 @@
 #                   undispatchable. Includes the RED, demonstrated by neutering
 #                   the restore and watching the live daemon really strand at
 #                   draining=true. mg-8b48's ask.
+#   8. DRAIN-GATE — an UNREADABLE polecat count must never render as ZERO. The
+#                   RED is reproduced live against a really-dead daemon (the
+#                   pre-fix shape reporting "0 polecats, quiesced" off a body it
+#                   never read), then the fix is driven through all four states:
+#                   witness-live -> REFUSE, witness-idle -> PROCEED, double
+#                   absence -> FAIL CLOSED, and a healthy pogod -> still drains.
+#                   mg-65b2's ask.
 #
-# 6 drives the REAL cmd_redeploy end-to-end (drain -> failing build -> trap)
-# rather than a pure helper, so unlike 1-5 it is a control on the DRIVER, not on
-# the post-check. It shares this file because it needs the same thing: a real
-# pogod whose state can be read back after the code under test has moved it.
+# 6 and 8 drive the REAL cmd_redeploy / drain_wait end-to-end rather than a pure
+# helper, so unlike 1-5 they are controls on the DRIVER, not on the post-check.
+# They share this file because they need the same thing: a real pogod whose state
+# can be read back after the code under test has moved it — and, for 8, a real
+# pogod that can be really killed, since the bug is what a real curl returns when
+# nothing is listening.
 #
 # RUNNING AGAINST A PREBUILT ARTIFACT ($POGO_LIVE_CONTROL_POGOD) — mg-bfe5
 # ----------------------------------------------------------------------
@@ -177,6 +186,47 @@ else
         fail "could not build cmd/pogod — the live control cannot run"
         exit 1
     fi
+fi
+
+# The `pogo` CLI, for the drain-gate control (#8). The drain asks the on-disk
+# polecat witness whether any polecat is alive when pogod has stopped answering,
+# and it asks by shelling to `pogo agent witness` (mg-65b2) — so the control has
+# to point $POGO_CLI at a binary that HAS that subcommand. The machine's
+# installed one may not: it is whatever the last deploy left, which on the first
+# night this ships is a `pogo` that never heard of the subcommand.
+#
+# Same artifact discipline as pogod above, and for the same reason: given a
+# prebuilt one (do_prove hands us what `go install` just produced), test THAT and
+# refuse to fall back to a source build — quietly proving a different binary than
+# the one about to be deployed is the fail-open this file exists to close.
+if [ -n "${POGO_LIVE_CONTROL_POGO:-}" ]; then
+    if [ ! -x "$POGO_LIVE_CONTROL_POGO" ]; then
+        fail "POGO_LIVE_CONTROL_POGO=$POGO_LIVE_CONTROL_POGO is not an executable — refusing to fall back to a source build and report on the wrong CLI"
+        exit 1
+    fi
+    echo "Using prebuilt CLI artifact: $POGO_LIVE_CONTROL_POGO"
+    if ! cp "$POGO_LIVE_CONTROL_POGO" "$SANDBOX/pogo"; then
+        fail "could not copy $POGO_LIVE_CONTROL_POGO into the sandbox — the drain-gate control cannot run"
+        exit 1
+    fi
+    chmod +x "$SANDBOX/pogo"
+else
+    echo "Building the pogo CLI into the sandbox..."
+    if ! (cd "$REPO_ROOT" && go build -o "$SANDBOX/pogo" ./cmd/pogo); then
+        fail "could not build cmd/pogo — the drain-gate control cannot run"
+        exit 1
+    fi
+fi
+
+# The witness fixture writer. ALWAYS from source, never from a prebuilt: it is
+# control scaffolding, not an artifact, and there is nothing to prove about it.
+# It writes a witness record through the recorder pogod itself uses, which is why
+# the control below can assert on a REAL (pid, start_time) pair without
+# re-implementing `ps -o lstart=` parsing in shell — see its header.
+echo "Building the witness fixture writer into the sandbox..."
+if ! (cd "$REPO_ROOT" && go build -o "$SANDBOX/witnessfixture" ./scripts/witnessfixture); then
+    fail "could not build scripts/witnessfixture — the drain-gate control cannot stage a live polecat"
+    exit 1
 fi
 
 # --- sandbox: a real pogod that cannot reach the real fleet ------------------
@@ -734,12 +784,79 @@ else
     fail "SILENT STALL: exit 7 delivered no mail to '$COORDINATOR' ($SINK_BEFORE -> $SINK_AFTER) — the nightly would fail closed at 03:00 and nobody would ever learn the deploy did not happen"
 fi
 
+# (c) THE NEW REFUSAL, AND --force OVERRIDING IT (mg-65b2). exit 7 now has TWO
+#     causes: the fleet was BUSY at the deadline (above), or the drain could not
+#     ESTABLISH whether the fleet is idle. They are different situations wanting
+#     opposite reactions from a human, so the sink is told which one it is rather
+#     than narrating the timeout unconditionally. Both halves are asserted: the
+#     refusal fires and says the right thing, and --force still gets past it.
+sink_unknown_run() {
+    (
+        POGO_GOBIN="$SANDBOX/nobin" \
+        POGO_DEPLOY_REF=main-fixture \
+        REPO="$DR_REPO" DEPLOY_REF=main-fixture \
+        ASSUME_YES=true FORCE=false SKIP_DRAIN=false
+        # The ONLY stub: assert the CANNOT-TELL verdict (rc 2 + "?"), which this
+        # sandbox cannot produce honestly here — §8 produces it for real, against
+        # a really-dead daemon. Everything from `if ! $FORCE` on is the real path.
+        drain_wait() { echo "?"; return 2; }
+        cmd_redeploy
+    ) >/dev/null 2>&1
+    echo $?
+}
+curl -sf -X POST "$URL/agents/drain" -H 'Content-Type: application/json' \
+    -d '{"draining":false}' >/dev/null 2>&1
+UNK_BEFORE="$(mg mail list "$COORDINATOR" --all --json 2>/dev/null | grep -Fc "FLEET STATE UNKNOWN" || true)"
+UNK_RC="$(sink_unknown_run)"
+UNK_AFTER="$(mg mail list "$COORDINATOR" --all --json 2>/dev/null | grep -Fc "FLEET STATE UNKNOWN" || true)"
+
+[ "$UNK_RC" = "7" ] \
+    && pass "mg-65b2: a drain that CANNOT TELL takes the exit-7 refusal (it does not bounce a fleet whose state is unknown)" \
+    || fail "expected exit 7 from the unknown-state refusal, got $UNK_RC — the fail-open path is back"
+
+if [ "$UNK_AFTER" -gt "$UNK_BEFORE" ]; then
+    pass "mg-65b2: the alert says FLEET STATE UNKNOWN — the sink tells the operator which refusal this is, instead of narrating a timeout that never happened ($UNK_BEFORE -> $UNK_AFTER)"
+else
+    fail "the unknown-state refusal sent no 'FLEET STATE UNKNOWN' alert ($UNK_BEFORE -> $UNK_AFTER) — it either stayed silent or mis-reported an unknown as a busy-fleet timeout, advising 'ignore it once' for a real fault"
+fi
+
+# --force must override EVERY refusal, this one included: it already means "I
+# know it's wedged, bounce it anyway", and a gate with no escape is a gate that
+# strands the operator. Reaching do_build's exit 4 is the proof it got past the
+# drain — that is the NEXT failure in the sequence, and it cannot be reached from
+# the exit-7 path at all.
+force_unknown_run() {
+    (
+        POGO_GOBIN="$SANDBOX/nobin" \
+        POGO_DEPLOY_REF=main-fixture \
+        REPO="$DR_REPO" DEPLOY_REF=main-fixture \
+        ASSUME_YES=true FORCE=true SKIP_DRAIN=false
+        drain_wait() { echo "?"; return 2; }
+        cmd_redeploy
+    ) >/dev/null 2>&1
+    echo $?
+}
+curl -sf -X POST "$URL/agents/drain" -H 'Content-Type: application/json' \
+    -d '{"draining":false}' >/dev/null 2>&1
+FORCE_RC="$(force_unknown_run)"
+[ "$FORCE_RC" = "4" ] \
+    && pass "mg-65b2: --force OVERRIDES the unknown-state refusal — the run proceeds past the drain (and then fails in do_build, exit 4, which is the next step and unreachable from exit 7)" \
+    || fail "--force did not get past the unknown-state refusal (rc=$FORCE_RC, wanted 4 = do_build) — the escape hatch is welded shut and an operator who KNOWS the daemon is wedged cannot deploy"
+
 # The alert has to be worth reading, not merely present. A stall alert whose body
 # lost its remedies is a page that tells you something is wrong and not what to
 # do — and this body is assembled through a temp file and --body-file precisely
 # because --body would let the shell eat it silently (mg-8380).
-SINK_ID="$(mg mail list "$COORDINATOR" --all --json 2>/dev/null | grep -F "$SINK_SUBJ" | tail -1 \
-           | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')"
+# Selected by the TIMEOUT subject, not by "the last [deploy-stalled] mail":
+# exit 7 has two causes now (mg-65b2) and they send deliberately different
+# bodies, so a `tail -1` here would assert the busy-fleet body against whichever
+# alert happened to be sent last — and quietly measure the wrong page the moment
+# someone adds a control below. Each body assertion names the alert it is about.
+sink_id_matching() {
+    mg mail list "$COORDINATOR" --all --json 2>/dev/null | grep -F "$1" | tail -1 \
+        | sed -n 's/.*"id":"\([^"]*\)".*/\1/p'
+}
+SINK_ID="$(sink_id_matching "still active")"
 # --force: reading a mailbox we do not own is refused without it, and this
 # control is by construction a third party to the coordinator's inbox — which is
 # the entire point of the assertion.
@@ -753,7 +870,26 @@ if [ -n "$SINK_ID" ] \
    && printf '%s' "$SINK_DELIVERED" | grep -q "adding --force"; then
     pass "the delivered alert carries the WHY (the drain waited) AND the --force guard in its body, not just a subject line — the multi-line body survived --body-file intact"
 else
-    fail "the alert arrived but its body did not survive intact — a page with no diagnosis is a louder log line with a mailbox (id=${SINK_ID:-<none>})"
+    fail "the timeout alert arrived but its body did not survive intact — a page with no diagnosis is a louder log line with a mailbox (id=${SINK_ID:-<none>})"
+fi
+
+# The UNKNOWN alert's body, held to the same bar and asserted SEPARATELY (mg-65b2).
+# It is not a reworded timeout: it must carry its own diagnosis and its own
+# remedy, and it must NOT carry the timeout's advice. "Ignore it once, the fleet
+# was busy at 03:00" is correct for a busy fleet and actively wrong for a pogod
+# that went silent mid-drain — the operator would shrug at a real fault. The
+# negative half below is the one that matters: the same string in both bodies
+# would mean the reason parameter is decorative and the sink still tells one
+# story regardless of what happened.
+UNK_ID="$(sink_id_matching "FLEET STATE UNKNOWN")"
+UNK_DELIVERED="$(mg mail read "$COORDINATOR" "$UNK_ID" --force 2>/dev/null)"
+if [ -n "$UNK_ID" ] \
+   && printf '%s' "$UNK_DELIVERED" | grep -q "could not establish whether any polecat is alive" \
+   && printf '%s' "$UNK_DELIVERED" | grep -q "pogo agent witness" \
+   && ! printf '%s' "$UNK_DELIVERED" | grep -q "the drain waited"; then
+    pass "mg-65b2: the UNKNOWN alert carries its OWN diagnosis and its own remedy ('pogo agent witness'), and does NOT tell the timeout's story — the sink reports what happened rather than what usually happens"
+else
+    fail "the UNKNOWN alert's body is wrong (id=${UNK_ID:-<none>}): it must say the state could not be established and point at 'pogo agent witness', and must NOT claim 'the drain waited' — narrating a deadline that never passed, over a state we admitted we could not read, is this ticket's defect rebuilt inside the alert about it"
 fi
 
 # (c) THE SINK REFUSES TO CLAIM A DELIVERY IT CANNOT SEE. The recipient name is a
@@ -885,6 +1021,140 @@ else
     fail "mg-a558: a ONE-polecat snapshot cleaned NOTHING and said nothing (output: '$CO_OUT1') — cleanup_orphans is a no-op on the commonest forced-bounce shape"
 fi
 unset -f mg
+
+# ===========================================================================
+# 8. DRAIN GATE — an UNREADABLE polecat count must never render as ZERO.
+# ===========================================================================
+# THE DEFECT, measured on main at claim time (mg-65b2). drain_wait ended with:
+#
+#     count="$(printf '%s' "$body" | json_num count)"
+#     count="${count:-0}"
+#     if [ "$count" -eq 0 ]; then echo 0; return 0; fi
+#
+# `curl -sf` yields an EMPTY body on ANY failure — refused connection, timeout,
+# 5xx, non-JSON — so json_num yielded empty and `${count:-0}` turned "I could not
+# read it" into "there are zero polecats". The gate returned QUIESCED on the
+# FIRST poll, without waiting at all. Downstream: do_build, do_prove, then
+# `kickstart -k` over a LIVE fleet. Polecats setsid out of the process group and
+# SURVIVE (mg-46a4, mg-61a0), holding worktrees and claims, invisible to the
+# successor's registry forever — with no --force anywhere near it.
+#
+# WHY THIS CONTROL IS IN THE LIVE FILE AND NOT ONLY THE UNIT ONE. Its sibling
+# drives drain_wait with a stubbed drain_probe and proves the DECISION table.
+# That is not this ticket's failure mode. This ticket happened because a REAL
+# curl against a REAL dead port returns an empty body that a `${:-0}` renders as
+# a number — a wiring fact no stub can be wrong about, since a stub returns
+# whatever its author already believed. The same lesson mg-c02d learned one file
+# up: "the failure mode a positive control exists to catch lives in the WIRING —
+# a curl that errors, a count that comes back empty, a classifier handed ''
+# instead of '0'". So: a real pogod, really killed, and the real `pogo` binary
+# reading a real witness off disk.
+#
+# The daemon is already dead here (§5 killed it) — which is exactly the state
+# this section needs, so it runs last and restarts one only for the negative.
+GATE_WITNESS="$POGO_HOME/polecat-witness.json"
+gate_drain_wait() {
+    # Echo "<stdout>|<rc>" from a real drain_wait against the sandbox port.
+    # DRAIN_UNREADABLE_SLEEP=0: the retry POLICY is what is under test, not the
+    # wall clock, and a real deploy's 2s-per-retry would only make this slower.
+    (
+        PORT="$GATE_PORT"; DRAIN_TIMEOUT=5; DRAIN_UNREADABLE_SLEEP=0
+        POGO_CLI="$SANDBOX/pogo"
+        local out rc=0
+        out="$(drain_wait 2>/dev/null)" || rc=$?
+        echo "$out|$rc"
+    )
+}
+
+# (a) THE RED, LIVE, AGAINST THE REAL DEAD PORT. The old code, verbatim, wired to
+#     the same drain_probe the fixed one uses — so the ONLY difference is the
+#     ${count:-0} line. If this does not report a confident zero, the scenario is
+#     not reproducing the bug and every assertion below is measuring nothing.
+GATE_PORT="$PORT"   # §5 killed the daemon on this port; nothing is listening
+gate_old_drain_wait() {
+    (
+        PORT="$GATE_PORT"
+        local raw code body count
+        raw="$(drain_probe)"; code="${raw##*$'\n'}"; body="${raw%$'\n'*}"
+        count="$(printf '%s' "$body" | json_num count)"
+        count="${count:-0}"            # <- the defect, and the whole ticket
+        if [ "$count" -eq 0 ]; then echo "0|0"; return 0; fi
+        echo "$count|1"
+    )
+}
+GATE_RED="$(gate_old_drain_wait)"
+[ "$GATE_RED" = "0|0" ] \
+    && pass "RED REPRODUCED, LIVE: the pre-fix drain_wait reports '0 polecats, quiesced' (rc 0) off a REAL unreadable readout — on the first poll, having waited for nothing" \
+    || fail "the pre-fix shape did not fail open here ($GATE_RED) — this scenario is not reproducing mg-65b2, so nothing below is a control"
+
+# (b) THE FIX, SAME WIRE, WITNESS SAYS LIVE -> REFUSE. A real process, recorded
+#     through pogod's own recorder, so (pid, start_time) is a real kernel pair.
+rm -f "$GATE_WITNESS"
+sleep 300 &
+GATE_CAT_PID=$!
+if "$SANDBOX/witnessfixture" gatecat "$GATE_CAT_PID" mg-gate >/dev/null 2>&1; then
+    pass "drain-gate precondition: a live polecat is witnessed on disk through pogod's OWN recorder (pid=$GATE_CAT_PID) — the fixture cannot drift from what pogod writes"
+else
+    fail "could not stage a witnessed live polecat — the refuse-on-live assertion below would pass vacuously"
+fi
+GATE_LIVE="$(gate_drain_wait)"
+[ "$GATE_LIVE" = "?|2" ] \
+    && pass "THE FIX: pogod dead + a REAL live polecat in the witness -> REFUSES with '?' (rc 2). This is the bounce that would have minted permanent survivors" \
+    || fail "FAIL-OPEN: dead pogod + a live witnessed polecat returned '$GATE_LIVE' — a redeploy would kickstart -k over a live fleet and mint survivors with no --force"
+
+# (c) CONDITIONAL, and the case that stops this being a gate that never opens:
+#     the SAME dead pogod, but the witness says the fleet is idle -> PROCEED. The
+#     wedged-pogod repair must not be blocked at the moment it is needed (the
+#     mg-a532 shape). Their mail-checks were already reaped and they already
+#     setsid'd out, so the bounce strands nothing that is not already stranded —
+#     it IS the repair, and it proceeds BY RIGHT, not by exemption.
+kill "$GATE_CAT_PID" 2>/dev/null
+wait "$GATE_CAT_PID" 2>/dev/null
+# The record now names a DEAD pid, which is the honest way to reach "idle": the
+# witness is untouched and the process is gone, exactly as after a real drain.
+GATE_IDLE="$(gate_drain_wait)"
+[ "$GATE_IDLE" = "0|0" ] \
+    && pass "CONDITIONAL: dead pogod + the witness's polecat really exited -> PROCEEDS (rc 0). The refusal is conditional on live work, not hard-wired — the wedged-pogod repair still runs" \
+    || fail "dead pogod + an idle fleet returned '$GATE_IDLE' — the gate refuses the repair it exists to allow"
+
+# (d) DOUBLE ABSENCE -> FAIL CLOSED. pogod silent AND no witness to consult.
+#     Nothing here knows anything, so it must not guess. This is 13a3's thesis one
+#     layer up: never conclude "drained" from a SINGLE absence, let alone two.
+rm -f "$GATE_WITNESS"
+GATE_NOWIT="$(gate_drain_wait)"
+[ "$GATE_NOWIT" = "?|2" ] \
+    && pass "DOUBLE ABSENCE: dead pogod + NO witness file -> fails CLOSED with '?' (rc 2) — an unwritten witness is not an idle fleet" \
+    || fail "dead pogod + absent witness returned '$GATE_NOWIT' — absence of evidence rendered as evidence of absence, which is the whole defect"
+
+# (e) A CORRUPT witness is the same fact as a missing one: we cannot look.
+printf 'not json at all{{{\n' > "$GATE_WITNESS"
+GATE_BADWIT="$(gate_drain_wait)"
+[ "$GATE_BADWIT" = "?|2" ] \
+    && pass "dead pogod + an UNREADABLE witness -> fails CLOSED with '?' (rc 2)" \
+    || fail "dead pogod + corrupt witness returned '$GATE_BADWIT' — a parse error must never read as an idle fleet"
+rm -f "$GATE_WITNESS"
+
+# (f) THE NEGATIVE, against a REAL LIVE pogod: a healthy drain still drains. Every
+#     assertion above is a refusal, and a gate that refuses unconditionally would
+#     satisfy all of them while breaking every deploy. This is the one that says
+#     the fix is a discrimination and not a brick. A fresh daemon on the same
+#     port — §5's is gone and its port is free.
+"$SANDBOX/pogod" -port "$GATE_PORT" > "$SANDBOX/pogod-gate.log" 2>&1 &
+POGOD_PID=$!    # hand it to the EXIT trap; nothing else kills it
+GATE_UP=false
+for _ in $(seq 1 80); do
+    if curl -sf --max-time 2 "http://127.0.0.1:$GATE_PORT/agents/drain" >/dev/null 2>&1; then GATE_UP=true; break; fi
+    sleep 0.25
+done
+if $GATE_UP; then
+    pass "drain-gate precondition: a real pogod is answering /agents/drain again on port $GATE_PORT"
+    GATE_HEALTHY="$(gate_drain_wait)"
+    [ "$GATE_HEALTHY" = "0|0" ] \
+        && pass "NEGATIVE: a HEALTHY drain still drains — a real pogod reporting 0 polecats quiesces (rc 0). The refusals above are conditional, not a gate welded shut" \
+        || fail "a healthy live pogod reporting an empty fleet returned '$GATE_HEALTHY' — the fix broke the ordinary deploy path"
+else
+    fail "could not restart pogod for the negative control — 'a healthy drain still drains' is unproven, so the refusals above could be unconditional"
+fi
 
 echo ""
 # Backstop to the write guard above: the ledger must be readable and non-empty

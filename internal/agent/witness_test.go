@@ -407,3 +407,98 @@ func readWitnessForTest(t *testing.T) []witnessRecord {
 	}
 	return recs
 }
+
+// TestWitnessStoreExistsSeparatesAbsenceFromZero is the mg-65b2 acceptance test.
+//
+// The drain gate must tell "pogod looked and there are no polecats" from "nobody
+// ever wrote a witness here", because it ACTS on the answer: the first is an idle
+// fleet and it may bounce; the second is an absence and it must refuse. Every
+// other reader of this store maps a missing file to "no record" and declines to
+// act, so the distinction never had to exist. It does now.
+func TestWitnessStoreExistsSeparatesAbsenceFromZero(t *testing.T) {
+	sandboxWitness(t)
+
+	// No file: an ABSENCE. WitnessedAlivePolecats reports zero alive here too,
+	// with a nil error — which is right for the reaper and is exactly why the
+	// drain cannot rely on it alone.
+	present, err := WitnessStoreExists()
+	if err != nil {
+		t.Fatalf("WitnessStoreExists on a missing file: unexpected error %v", err)
+	}
+	if present {
+		t.Fatal("WitnessStoreExists reported a witness that does not exist")
+	}
+	alive, err := WitnessedAlivePolecats()
+	if err != nil || len(alive) != 0 {
+		t.Fatalf("precondition: absent store should read as 0 alive, nil err; got %d, %v", len(alive), err)
+	}
+
+	// An idle fleet leaves a present-and-EMPTY file: saveWitness writes
+	// "polecats":[] rather than removing it. This is the state that means a
+	// genuine ZERO, and it must be distinguishable from the one above — the two
+	// agree on alive_count and disagree on everything that matters.
+	pid := liveProcess(t)
+	if err := RecordPolecatWitness("cat-gone", pid, "mg-x"); err != nil {
+		t.Fatalf("record: %v", err)
+	}
+	if err := saveWitness(nil); err != nil {
+		t.Fatalf("saveWitness(nil): %v", err)
+	}
+	present, err = WitnessStoreExists()
+	if err != nil {
+		t.Fatalf("WitnessStoreExists on an empty store: unexpected error %v", err)
+	}
+	if !present {
+		t.Fatal("an emptied witness store must still EXIST — an idle fleet is a zero, not an absence")
+	}
+	alive, err = WitnessedAlivePolecats()
+	if err != nil || len(alive) != 0 {
+		t.Fatalf("emptied store should read as 0 alive, nil err; got %d, %v", len(alive), err)
+	}
+}
+
+// TestWitnessStoreExistsWithLivePolecat pins the positive population the drain
+// gate refuses on: a witnessed, running polecat, seen with no pogod involved.
+func TestWitnessStoreExistsWithLivePolecat(t *testing.T) {
+	sandboxWitness(t)
+	pid := liveProcess(t)
+	if err := RecordPolecatWitness("cat-live", pid, "mg-live"); err != nil {
+		t.Fatalf("record: %v", err)
+	}
+
+	present, err := WitnessStoreExists()
+	if err != nil || !present {
+		t.Fatalf("WitnessStoreExists after a record: present=%v err=%v", present, err)
+	}
+	alive, err := WitnessedAlivePolecats()
+	if err != nil {
+		t.Fatalf("WitnessedAlivePolecats: %v", err)
+	}
+	if len(alive) != 1 || alive[0].Name != "cat-live" || alive[0].PID != pid {
+		t.Fatalf("expected the live polecat to be witnessed; got %+v", alive)
+	}
+}
+
+// TestWitnessStoreExistsDoesNotHideAReadError: "I could not look" is not "it is
+// not there". A stat error other than not-exist must reach the caller, because
+// the caller's whole job is refusing to act on states it cannot establish.
+func TestWitnessStoreExistsDoesNotHideAReadError(t *testing.T) {
+	sandboxWitness(t)
+	// A path whose PARENT is a file, not a directory: stat yields ENOTDIR, which
+	// is neither "exists" nor "does not exist".
+	blocker := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(blocker, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write blocker: %v", err)
+	}
+	prev := witnessPathOverride
+	witnessPathOverride = filepath.Join(blocker, "polecat-witness.json")
+	t.Cleanup(func() { witnessPathOverride = prev })
+
+	present, err := WitnessStoreExists()
+	if err == nil {
+		t.Fatal("a stat error was reported as a clean absence — 'cannot look' must never render as 'not there'")
+	}
+	if present {
+		t.Fatal("WitnessStoreExists reported present alongside an error")
+	}
+}

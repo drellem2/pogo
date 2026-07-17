@@ -1219,6 +1219,30 @@ down. To keep it down, park it.`,
 		},
 	}
 
+	var cmdAgentWitness = &cobra.Command{
+		Use:   "witness",
+		Short: "Report witnessed-alive polecats from the on-disk witness (no pogod required)",
+		Long: `Read the persisted polecat witness and report which polecats are provably alive.
+
+This asks the PROCESSES, not pogod: each record's (pid, start_time) pair is
+re-probed against the kernel, so it answers when pogod is down — which is the
+only reason it exists. The redeploy drain uses it to tell a wedged-but-idle
+fleet (safe to bounce) from a wedged-and-live one (bouncing mints permanent
+survivors) — see scripts/pogo-self-deploy's drain_wait (mg-65b2).
+
+Exit codes distinguish three states that must never be collapsed:
+  0  witness present and readable — alive_count is a measurement, 0 included
+  2  no witness file — an ABSENCE, not a report of zero
+  1  a witness exists but could not be read
+
+An idle fleet leaves a present-and-EMPTY witness, so a missing file is not
+evidence that nothing is running.`,
+		Args: cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			runAgentWitness(jsonOutput)
+		},
+	}
+
 	// Prompt subcommands
 	var cmdAgentPrompt = &cobra.Command{
 		Use:   "prompt",
@@ -2322,6 +2346,7 @@ the actual restart. The recovery agent rate-limits to one kickstart per
 	cmdAgent.AddCommand(cmdAgentDiagnose)
 	cmdAgent.AddCommand(cmdAgentAttach)
 	cmdAgent.AddCommand(cmdAgentOutput)
+	cmdAgent.AddCommand(cmdAgentWitness)
 	cmdAgentPrompt.AddCommand(cmdAgentPromptList)
 	cmdAgentPrompt.AddCommand(cmdAgentPromptInit)
 	cmdAgentPrompt.AddCommand(cmdAgentPromptInstall)

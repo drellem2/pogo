@@ -48,10 +48,16 @@
 #
 # redeploy flags:
 #   --yes                 proceed without the interactive confirmation prompt
-#   --force               permit a HARD BOUNCE while polecats are still active
-#                         after the drain timeout (kills them, then cleans up
-#                         their claims + worktrees). Default REFUSES — the
-#                         fleet-kill footgun must be explicit (mg-6afa MVP).
+#   --force               permit a HARD BOUNCE the drain would otherwise refuse.
+#                         Two refusals, both overridden by this flag:
+#                           - polecats still active after the drain timeout
+#                             (kills them, then cleans up claims + worktrees)
+#                           - the drain could not establish whether the fleet is
+#                             idle: pogod went silent or unreadable mid-drain and
+#                             the on-disk witness could not settle it (mg-65b2)
+#                         Default REFUSES both — the fleet-kill footgun must be
+#                         explicit (mg-6afa MVP). On the second, --force means
+#                         "I know it's wedged, bounce it anyway".
 #   --skip-drain          skip the drain phase entirely and go straight to
 #                         rebuild+restart. Required to self-deploy ONTO a pogod
 #                         that predates the /agents/drain endpoint (mg-cae1) —
@@ -73,6 +79,13 @@ PORT="${POGO_PORT:-10000}"
 DAEMON_LABEL="${POGO_DAEMON_LABEL:-com.pogo.daemon}"
 DEPLOY_REF="${POGO_DEPLOY_REF:-main}"
 LAUNCHCTL="${LAUNCHCTL:-launchctl}"
+# The `pogo` CLI, used for ONE thing: asking the on-disk polecat witness whether
+# any polecat is alive when pogod has stopped answering (drain_wait, mg-65b2).
+# A variable rather than a bare `pogo` for the same reason LAUNCHCTL is one — the
+# live control has to point it at a sandbox artifact instead of the machine's
+# installed binary, and PATH games in a script that runs as root at 03:00 are a
+# worse seam. See witness_alive_count for why this hop is not a header violation.
+POGO_CLI="${POGO_CLI:-pogo}"
 DRAIN_TIMEOUT=1800
 # How long verify_mail_checks_restored polls for the new pogod to finish loading
 # its schedules. A variable rather than a literal so the live control
@@ -673,41 +686,75 @@ alert_external() {
     return $rc
 }
 
-# alert_drain_stalled LEFTOVER — the exit 7 sink.
+# alert_drain_stalled REASON LEFTOVER — the exit 7 sink.
 #
-# `leftover` is a COUNT or the "?" sentinel: the timeout path re-reads the drain
-# endpoint, and that read can itself fail. "?" is carried into the mail verbatim
-# — the operator must see "we could not count them", not a fabricated number —
-# but it is not a JSON number, so the event's `leftover` is emitted as a STRING.
-# Quoting it keeps both facts expressible in one field rather than making "?"
-# masquerade as 0, which is the count-vs-unknown collapse this file exists to
+# `leftover` is a COUNT or the "?" sentinel. "?" is carried into the mail
+# verbatim — the operator must see "we could not count them", not a fabricated
+# number — but it is not a JSON number, so the event's `leftover` is emitted as a
+# STRING. Quoting it keeps both facts expressible in one field rather than making
+# "?" masquerade as 0, which is the count-vs-unknown collapse this file exists to
 # refuse (mg-76e5).
+#
+# REASON SELECTS THE STORY, AND IT HAS TO (mg-65b2). Exit 7 now has two causes,
+# and they are different situations needing different reactions:
+#
+#   timeout — the fleet was BUSY at the deadline. Nothing is wrong; the deploy
+#             just didn't happen. Ignore it once; investigate if it repeats.
+#   unknown — the drain could not establish the fleet's state at all. Something
+#             IS wrong (pogod went silent mid-drain, or its readout is
+#             unreadable), and it wants a human now.
+#
+# Before this the body narrated the timeout unconditionally: "the drain waited
+# ${DRAIN_TIMEOUT}s ... and N were still active at the deadline". Sent for an
+# unknown, every clause of that is false — no deadline passed, nothing was
+# counted — and the "ignore it once" advice is exactly wrong. An alert that
+# invents a confident story about a state we admitted we could not read is this
+# ticket's defect wearing the sink's hat, so the sink gets told which one it is
+# rather than assuming.
 alert_drain_stalled() {
-    local leftover="$1"
-    alert_external deploy_stalled \
-        "[deploy-stalled] nightly pogod redeploy did NOT deploy — $leftover polecat(s) still active" \
-        "A pogod redeploy refused to deploy and exited WITHOUT changing anything.
-
-Fleet is HEALTHY and dispatching. Nothing is broken. That is the problem:
+    local reason="$1" leftover="$2"
+    local subject preamble what verdict todo
+    case "$reason" in
+        unknown)
+            subject="[deploy-stalled] nightly pogod redeploy did NOT deploy — FLEET STATE UNKNOWN"
+            preamble="The fleet's state is UNKNOWN — this is not the routine busy-fleet stall.
+Something stopped answering, and this run refused rather than guess. The
+refusal is correct and nothing was destroyed, but the CAUSE is still there
+and the next run will refuse the same way until a human looks."
+            verdict="This IS worth looking at, unlike a plain drain timeout: the deploy did not
+happen AND the reason it did not happen is itself a fault. Refusing was the
+safe outcome, not a resolution."
+            what="the drain could not establish whether any polecat is alive.
+                pogod stopped answering its drain readout mid-drain, or answered
+                something unreadable, and the on-disk polecat witness could not
+                settle it either. Bouncing a fleet whose state is unknown can
+                mint PERMANENT survivors — polecats setsid out of the process
+                group, outlive kickstart -k, and go invisible to every future
+                registry — so this run refused. Nothing was killed or deployed."
+            todo="WHAT TO DO. Unlike a plain drain timeout, this one is NOT routine and does
+not clear itself. Look now:
+  - Is pogod alive and answering?  curl $(base_url)/agents/drain
+  - If it is WEDGED but the fleet is idle, the redeploy is the repair and will
+    proceed on its own once pogod answers — or force it: redeploy --force.
+  - If polecats ARE live, let them finish; do NOT --force. It re-gates mg-0b77
+    and mg-13a3, and 46a4 measured that --force neither waits nor reliably
+    kills: kickstart -k kills the job's process group, and polecats setsid out.
+  - 'pogo agent witness' reports what the on-disk witness can still see with
+    pogod down. If it says the witness is missing or unreadable, that is the
+    double absence that produced this alert — fix the witness first."
+            ;;
+        *)
+            subject="[deploy-stalled] nightly pogod redeploy did NOT deploy — $leftover polecat(s) still active"
+            preamble="Fleet is HEALTHY and dispatching. Nothing is broken. That is the problem:
 this run failed CLOSED and produced no other signal, so the fleet is simply
-NOT TRACKING main and every light stays green while it doesn't.
-
-What happened:  the drain waited ${DRAIN_TIMEOUT}s for the fleet to quiesce and
+NOT TRACKING main and every light stays green while it doesn't."
+            verdict="This is NOT an emergency and NOT a bug. It is the safe outcome, reported —
+the deploy simply did not happen and you would otherwise never learn that."
+            what="the drain waited ${DRAIN_TIMEOUT}s for the fleet to quiesce and
                 $leftover polecat(s) were still active at the deadline. Deploying
                 past that means hard-bouncing live work, which needs --force, and
-                --force is deliberately not armed on the nightly.
-Deploy ref:     $DEPLOY_REF
-Running pogod:  $(short "${RUNNING:-?}")
-Installed pogod:$(short "${INSTALLED:-?}")
-Installed pogo: $(short "${INSTALLED_CLI:-?}")
-main:           $(short "${MAIN:-?}")
-Dispatch:       RESTORED (the exit trap put back draining=${DRAIN_PRIOR:-?}).
-                No polecat was killed. No worktree was touched. Nothing deployed.
-
-This is NOT an emergency and NOT a bug. It is the safe outcome, reported —
-the deploy simply did not happen and you would otherwise never learn that.
-
-WHAT TO DO. Nothing, if this is a one-off: the fleet was busy at 03:00 and the
+                --force is deliberately not armed on the nightly."
+            todo="WHAT TO DO. Nothing, if this is a one-off: the fleet was busy at 03:00 and the
 next run will deploy. It matters when it REPEATS — a nightly that stalls every
 night has silently stopped tracking main, which looks identical to one that
 succeeds every night. So:
@@ -717,11 +764,31 @@ succeeds every night. So:
                or move the window. Consider --drain-timeout.
   - Do NOT 'fix' this by adding --force. It re-gates mg-0b77 and mg-13a3 (read
     them first), and 46a4 measured that --force neither waits nor reliably kills:
-    kickstart -k kills the job's process group and polecats setsid out of it.
+    kickstart -k kills the job's process group and polecats setsid out of it."
+            ;;
+    esac
+    alert_external deploy_stalled \
+        "$subject" \
+        "A pogod redeploy refused to deploy and exited WITHOUT changing anything.
+
+$preamble
+
+What happened:  $what
+Deploy ref:     $DEPLOY_REF
+Running pogod:  $(short "${RUNNING:-?}")
+Installed pogod:$(short "${INSTALLED:-?}")
+Installed pogo: $(short "${INSTALLED_CLI:-?}")
+main:           $(short "${MAIN:-?}")
+Dispatch:       RESTORED (the exit trap put back draining=${DRAIN_PRIOR:-?}).
+                No polecat was killed. No worktree was touched. Nothing deployed.
+
+$verdict
+
+$todo
 
 Redeploy by hand when the fleet is idle:
   scripts/pogo-self-deploy redeploy --yes" \
-        "{\"leftover\":\"${leftover}\",\"drain_timeout\":${DRAIN_TIMEOUT},\"deploy_ref\":\"${DEPLOY_REF}\",\"outcome\":\"no_deploy\"}"
+        "{\"leftover\":\"${leftover}\",\"reason\":\"${reason}\",\"drain_timeout\":${DRAIN_TIMEOUT},\"deploy_ref\":\"${DEPLOY_REF}\",\"outcome\":\"no_deploy\"}"
 }
 
 # Pure decision function (unit-tested): map the POST /agents/drain HTTP status
@@ -740,18 +807,204 @@ classify_drain_precondition() {
     esac
 }
 
-# Poll the drain readout down to zero polecats, or time out. Echoes the final
-# polecat count on stdout; returns 0 if it reached zero, 1 on timeout.
+# drain_probe — GET the drain readout and echo BODY, then a final line carrying
+# the HTTP status. One hop, two facts: the body we must parse and the status
+# classify_drain_precondition needs to rule on it. Mirrors drain_post's `-w
+# '%{http_code}'` trick, and for the same reason — curl (no -f) writes "000" for
+# connection refused / DNS / timeout, so a numeric-but-non-2xx code always means
+# the server answered.
+#
+# Deliberately NOT two calls. Fetching the body and then the status separately
+# would let them describe different moments — a body from a live pogod and a
+# status from a dead one — and the whole point of the caller is to stop treating
+# two world-states as one.
+drain_probe() {
+    curl -s -w '\n%{http_code}' --max-time 5 "$(base_url)/agents/drain" 2>/dev/null
+}
+
+# witness_alive_count — consult the SECOND witness (mg-13a3) about whether any
+# polecat is alive, WITHOUT pogod. Echoes a count and returns 0 when that count
+# is a measurement; echoes "?" and returns 1 when the witness cannot answer.
+#
+# WHY A CLI HOP IN A CURL-AND-SED SCRIPT. The header's rule is "call only STABLE
+# primitives; keep it dumb", and reading the JSON here with the seds above would
+# obey its letter. It would break the rule that matters. "Alive" is not "the pid
+# is in the file" — it is kill(pid,0) AND a `ps -o lstart=` identity match,
+# because a bare pid is a false witness (pids get recycled). That test already
+# exists, unit-tested, in ONE place, whose own doc names this caller: "if they
+# ever disagreed about what 'our process is alive' means, the drain and the
+# reaper would be reasoning about different fleets." A shell re-implementation
+# would be a second definition of the word, free to drift silently — the same
+# mistake as growing a private notion of "down" beside
+# classify_drain_precondition, which the ruling on mg-65b2 forbade twelve lines
+# up. So: one definition, reached over a process boundary.
+#
+# THE DEPENDENCY FAILS CLOSED, WHICH IS WHY IT IS TOLERABLE. `pogo` is a binary
+# this script DEPLOYS, so leaning on it here is a real coupling. Every way it can
+# fail — missing from PATH, too old to know the subcommand, broken — exits
+# non-zero and lands on "?", i.e. REFUSE. A broken CLI cannot manufacture a
+# confident zero, and that asymmetry is the whole reason this hop is safe. Note
+# the consequence honestly: until a redeploy installs a `pogo` carrying `agent
+# witness`, the down-branch below always refuses. That is the safe direction and
+# --force is the escape, but it is a real change of behaviour on the first night.
+#
+# BOUND OF THE INSTRUMENT, STATED RATHER THAN GLOSSED. The witness only knows
+# polecats spawned by a pogod carrying mg-13a3. A survivor of a PRE-witness pogod
+# is invisible to it — exactly as it is to the registry — so a present witness can
+# under-count. That is the same limit 13a3 shipped with, it shrinks to nothing as
+# the box's pogod moves past that commit, and it is not a reason to prefer the
+# unconditional zero this replaces.
+witness_alive_count() {
+    local out rc n msg
+    # 2>&1 on purpose: on the happy path the command says nothing on stderr, and
+    # on a sad one — an OLD `pogo` that answers this subcommand with cobra's
+    # usage text rather than our JSON — the complaint is the only diagnostic
+    # there is, and it belongs in the operator's log rather than /dev/null.
+    out="$("$POGO_CLI" agent witness --json 2>&1)"; rc=$?
+    # The reason as a sentence, falling back to whatever came out if it was not
+    # our JSON at all (again: the old-CLI case).
+    msg="$(printf '%s' "$out" | json_str error)"; msg="${msg:-$out}"
+    case "$rc" in
+        0)
+            n="$(printf '%s' "$out" | json_num alive_count)"
+            case "$n" in
+                ''|*[!0-9]*)
+                    err "witness: '$POGO_CLI agent witness' returned no readable alive_count: $msg"
+                    echo "?"; return 1 ;;
+            esac
+            echo "$n"; return 0 ;;
+        2)
+            err "witness: $msg"
+            echo "?"; return 1 ;;
+        *)
+            err "witness: cannot read the on-disk polecat witness (rc=$rc): $msg"
+            echo "?"; return 1 ;;
+    esac
+}
+
+# Poll the drain readout down to zero polecats. Echoes the final polecat count,
+# or the "?" sentinel when the fleet's state could not be established.
+#
+#   rc 0 — quiesced. The fleet is idle and it is safe to bounce.
+#   rc 1 — the deadline passed with polecats still active (echoes the count).
+#   rc 2 — CANNOT TELL (echoes "?"). Refuse; --force overrides.
+#
+# WHY THIS IS NOT `count="${count:-0}"` ANY MORE (mg-65b2)
+# --------------------------------------------------------
+# It used to be. `curl -sf` yields an EMPTY body on any failure — refused
+# connection, timeout, 5xx, a non-JSON body — json_num then yields empty, and
+# `${count:-0}` rendered "I could not read it" as "there are zero polecats". The
+# gate returned quiesced on the FIRST poll, without waiting at all, and the
+# redeploy went on to kickstart -k over a live fleet: polecats setsid out of the
+# process group and SURVIVE (mg-46a4, mg-61a0), holding worktrees and claims,
+# invisible to the successor's registry forever. No --force required. Measured
+# against a dead port, not inferred.
+#
+# The irony was exact and is worth keeping on the record: report_drain_complete,
+# three lines down, was ALREADY honest — 935ce5f taught it to say "this is NOT a
+# report that there are none — it is a report that we could not look" — while the
+# function that DECIDES WHETHER TO BOUNCE still rendered the same absence as a
+# confident zero. 0b77 fixed the report. It never touched the gate.
+#
+# THE FORK "FAIL OPEN OR FAIL CLOSED?" IS MALFORMED, AND BOTH RULERS REFUSED IT.
+# Each is an attempt to pick a least-bad action for a state whose distinguishing
+# information `${count:-0}` had already destroyed. The fix is not a better
+# default for an unknown state; it is to STOP MAKING THE STATE UNKNOWN. Three
+# parts, cheapest first:
+#
+#   1. A MISSING SAMPLE IS NOT A MEASUREMENT. This is a deadline-bounded poll: a
+#      single transient curl failure means no data this tick, not a reading of
+#      zero. So poll again. That alone covers most real occurrences — a >5s
+#      response under load, a blip — and it needs no policy and no fork.
+#   2. SUSTAINED SILENCE IS A REAL STATE CHANGE — and the classifier for it
+#      already exists, pure and unit-tested, twelve lines up. Reuse it. Two
+#      functions with private definitions of "down" is how this recurs.
+#   3. THEN EACH BRANCH IS OBVIOUS. See the case below.
+#
+# UNREACHABLE IS NOT UNKNOWABLE. /agents/drain is a PROXY; the real question —
+# "are there live polecats?" — stays observable when pogod dies, because mg-13a3
+# persisted a second witness to disk for exactly this class of question. We just
+# had not noticed the drain was asking it. So `down` consults the witness rather
+# than guessing, and that is what dissolves the objection that refusing on an
+# unreachable pogod blocks the repair at the moment it is needed: wedged+idle
+# PROCEEDS (by right — the bounce IS the repair, and strands nothing that is not
+# already stranded), wedged+live REFUSES. The gate blocks exactly when it should
+# and never when it shouldn't.
+DRAIN_UNREADABLE_LIMIT=3   # consecutive unreadable samples before it means something
+DRAIN_UNREADABLE_SLEEP=2   # a blip is re-probed in seconds, not the 15s drain tick
+
 drain_wait() {
-    local deadline=$(( $(date +%s) + DRAIN_TIMEOUT )) count body
+    local deadline=$(( $(date +%s) + DRAIN_TIMEOUT ))
+    local raw code body count disp live misses=0
     while :; do
-        body="$(curl -sf --max-time 5 "$(base_url)/agents/drain" 2>/dev/null)"
-        count="$(printf '%s' "$body" | json_num count)"
-        count="${count:-0}"
-        if [ "$count" -eq 0 ]; then echo 0; return 0; fi
-        if [ "$(date +%s)" -ge "$deadline" ]; then echo "$count"; return 1; fi
-        log "draining: $count polecat(s) still active — waiting..." >&2
-        sleep 15
+        raw="$(drain_probe)"
+        code="${raw##*$'\n'}"
+        body="${raw%$'\n'*}"
+
+        # A count is a MEASUREMENT only if the server answered 2xx AND the body
+        # actually parsed. Anything else falls through to the missing-sample
+        # path below — it must never reach the `-eq 0` test.
+        count=""
+        [ "$(classify_drain_precondition "$code")" = "drain" ] \
+            && count="$(printf '%s' "$body" | json_num count)"
+
+        case "$count" in
+            ''|*[!0-9]*) ;;   # no sample this tick — handled below
+            *)
+                misses=0
+                if [ "$count" -eq 0 ]; then echo 0; return 0; fi
+                if [ "$(date +%s)" -ge "$deadline" ]; then echo "$count"; return 1; fi
+                log "draining: $count polecat(s) still active — waiting..." >&2
+                sleep 15
+                continue ;;
+        esac
+
+        # --- (1) missing sample: poll again, conclude nothing ----------------
+        misses=$(( misses + 1 ))
+        if [ "$misses" -lt "$DRAIN_UNREADABLE_LIMIT" ]; then
+            log "drain readout unreadable (http=${code:-000}, sample $misses/$DRAIN_UNREADABLE_LIMIT) — polling again" >&2
+            if [ "$(date +%s)" -ge "$deadline" ]; then echo "?"; return 2; fi
+            sleep "$DRAIN_UNREADABLE_SLEEP"
+            continue
+        fi
+
+        # --- (2) sustained: classify it, with the classifier we already have -
+        disp="$(classify_drain_precondition "$code")"
+        case "$disp" in
+            down)
+                # (3) pogod is not answering. Ask the other witness.
+                live="$(witness_alive_count)" || {
+                    # DOUBLE ABSENCE — pogod silent AND the witness cannot
+                    # answer. Genuinely unknown, and the one place where there
+                    # is nothing left to consult. Fail closed; that is 13a3's
+                    # thesis one layer up: never conclude "drained" from a
+                    # SINGLE absence, and certainly not from two.
+                    err "pogod is not answering AND the polecat witness could not be read"
+                    err "this is a DOUBLE ABSENCE: nothing here knows whether polecats are alive."
+                    err "refusing to bounce a fleet whose state is unknown. --force overrides."
+                    echo "?"; return 2
+                }
+                if [ "$live" -eq 0 ]; then
+                    log "pogod stopped answering, and the witness reports no live polecat" >&2
+                    log "the fleet is idle: bouncing a wedged pogod strands nothing and IS the repair" >&2
+                    echo 0; return 0
+                fi
+                err "pogod is not answering, but the witness reports $live live polecat(s)"
+                err "bouncing now would mint PERMANENT survivors: they outlive kickstart -k"
+                err "(they setsid out of the process group) and go dark forever — no registry"
+                err "can ever see them again. Refusing. --force overrides."
+                echo "?"; return 2 ;;
+            *)
+                # Reachable, but we cannot read what it said. A LIVE pogod with
+                # an invisible count is exactly where bouncing destroys work,
+                # and the witness cannot help: it does not know about polecats
+                # this pogod holds in a registry we just failed to read. Refuse
+                # rather than guess — --force already means "I know it's wedged,
+                # bounce it anyway".
+                err "pogod is answering (${disp}) but its drain readout is unreadable after $misses tries"
+                err "refusing to bounce a LIVE pogod whose polecat count we cannot see. --force overrides."
+                echo "?"; return 2 ;;
+        esac
     done
 }
 
@@ -972,6 +1225,13 @@ do_prove() {
     local ctl="$REPO/scripts/pogo-self-deploy_live_test.sh"
     # pogod specifically: the control proves the DAEMON's detector.
     local bin; bin="$(installed_bin pogod)"
+    # ...and the CLI, because the drain gate now shells to `pogo agent witness`
+    # to ask the on-disk witness whether the fleet is live (mg-65b2). That makes
+    # the CLI part of the deploy's decision path, not just its payload, so the
+    # control drives the artifact we are about to install rather than whatever
+    # `pogo` the PATH happens to resolve. Same discipline as $bin above: prove
+    # the thing being deployed, not a stand-in for it.
+    local cli; cli="$(installed_bin pogo)"
 
     # The gate must fail CLOSED on its own absence. If the control is missing,
     # that is not "nothing to prove" — it is the detector's detector gone, which
@@ -982,6 +1242,16 @@ do_prove() {
     fi
     if [ ! -x "$bin" ]; then
         err "no installed pogod at $bin to prove — refusing to deploy"
+        exit 9
+    fi
+    # Fail closed on the CLI's absence too, rather than letting the control
+    # quietly source-build one: do_build installs pogo in lockstep with pogod
+    # (mg-ddf1), so a missing artifact here means the build did not do what it
+    # said, and proving a binary we then do not deploy proves nothing.
+    if [ ! -x "$cli" ]; then
+        err "no installed pogo CLI at $cli to prove — refusing to deploy"
+        err "the drain gate shells to 'pogo agent witness' when pogod stops answering (mg-65b2),"
+        err "so an unproven CLI is an unproven gate."
         exit 9
     fi
 
@@ -1005,7 +1275,7 @@ do_prove() {
     # output has to be readable afterwards. It is echoed on failure only — on
     # success the two PROVED lines below are the whole story.
     local out rc=0
-    out="$(POGO_DEPLOY_PROVING=1 POGO_LIVE_CONTROL_POGOD="$bin" bash "$ctl" 2>&1)" || rc=$?
+    out="$(POGO_DEPLOY_PROVING=1 POGO_LIVE_CONTROL_POGOD="$bin" POGO_LIVE_CONTROL_POGO="$cli" bash "$ctl" 2>&1)" || rc=$?
 
     if [ "$rc" -ne 0 ]; then
         err "the live control FAILED against the built artifact (exit $rc) — refusing to deploy a pogod whose detector does not work on it"
@@ -1103,14 +1373,32 @@ cmd_redeploy() {
         local disp; disp="$(classify_drain_precondition "$(drain_post true)")"
         case "$disp" in
             drain)
-                if drain_wait >/dev/null; then
+                # Take drain_wait's OWN verdict and its OWN number, rather than
+                # re-reading the endpoint for a third opinion (mg-65b2). The old
+                # re-fetch was redundant on the timeout path and actively wrong
+                # on the new one: when drain_wait refuses because pogod went
+                # silent, that curl fails too, `${leftover:-?}` renders "?", and
+                # the script announced "? polecat(s) still active after 1800s
+                # drain timeout" — a confident story about a deadline that never
+                # passed, over a state we had just admitted we could not read.
+                # Telling a timeout's story about an unknown is this ticket's own
+                # defect rebuilt inside its fix.
+                local drain_rc=0 leftover
+                leftover="$(drain_wait)" || drain_rc=$?
+                if [ "$drain_rc" -eq 0 ]; then
                     report_drain_complete
                 else
-                    leftover="$(curl -sf --max-time 5 "$(base_url)/agents/drain" 2>/dev/null | json_num count)"
                     leftover="${leftover:-?}"
                     if ! $FORCE; then
-                        err "$leftover polecat(s) still active after ${DRAIN_TIMEOUT}s drain timeout"
-                        err "refusing to hard-bounce the fleet without --force; restoring dispatch"
+                        if [ "$drain_rc" -eq 2 ]; then
+                            # The drain could not establish the fleet's state and
+                            # has already said why, in detail, above.
+                            err "the drain could not establish whether the fleet is idle (see above)"
+                            err "refusing to bounce a fleet whose state is unknown; restoring dispatch"
+                        else
+                            err "$leftover polecat(s) still active after ${DRAIN_TIMEOUT}s drain timeout"
+                            err "refusing to hard-bounce the fleet without --force; restoring dispatch"
+                        fi
                         # The two err lines above are the ATTENDED report: they
                         # work because a human ran this and is reading them. The
                         # sink below is the UNATTENDED one, and it is not a
@@ -1120,7 +1408,15 @@ cmd_redeploy() {
                         # of them announces failures that are already reported by
                         # something else. This one is scoped to the single outcome
                         # nothing else can see — the run that changed NOTHING.
-                        alert_drain_stalled "$leftover"
+                        # The sink is told WHICH refusal this is: a busy fleet
+                        # and an unreadable one need opposite reactions from the
+                        # operator, and one story for both would mis-advise half
+                        # the pages it sends (mg-65b2).
+                        if [ "$drain_rc" -eq 2 ]; then
+                            alert_drain_stalled unknown "$leftover"
+                        else
+                            alert_drain_stalled timeout "$leftover"
+                        fi
                         # The restore is the trap's job now — and the trap puts
                         # back the PRIOR value, where the bare `drain_post false`
                         # that used to live here asserted `false` unconditionally.
@@ -1128,7 +1424,21 @@ cmd_redeploy() {
                         # other exit between here and the kickstart leaked drain.
                         exit 7
                     fi
-                    log "--force: hard-bouncing with $leftover polecat(s) active; will clean up after"
+                    if [ "$drain_rc" -eq 2 ]; then
+                        # Do not promise the cleanup here. The snapshot below is
+                        # fetched from the daemon we just failed to read, so on
+                        # this path it comes back EMPTY and cleanup_orphans has
+                        # nothing to work from — no unclaim, no worktree removal.
+                        # The timeout path's message can promise cleanup because
+                        # pogod is answering there; saying it here would be one
+                        # more confident claim about a state we cannot see, which
+                        # is the whole thing this ticket removes.
+                        log "--force: bouncing WITHOUT knowing whether polecats are live (the drain could not tell)"
+                        log "--force: if any are, they will survive the bounce and keep their claims + worktrees;"
+                        log "--force: no snapshot is readable from a silent pogod, so nothing will be cleaned up"
+                    else
+                        log "--force: hard-bouncing with $leftover polecat(s) active; will clean up after"
+                    fi
                 fi
                 # Capture the pre-kickstart polecat snapshot for post-bounce cleanup.
                 snapshot="$(curl -sf --max-time 5 "$(base_url)/agents/drain" 2>/dev/null)"

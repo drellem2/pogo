@@ -159,6 +159,196 @@ esac
 [ "$(classify_drain_precondition 401)" = "error:401" ] \
     && pass "drain-precond: 401 -> error:401" || fail "drain-precond 401"
 
+# --- drain_wait: the gate that used to fail OPEN (mg-65b2) -----------------
+# THE DEFECT, for the reader who finds this in a year. drain_wait used to end
+# with `count="${count:-0}"`, and `curl -sf` yields an EMPTY body on ANY failure
+# — refused connection, timeout, 5xx, non-JSON. So "I could not read it" became
+# "there are zero polecats", on the FIRST poll, and the drain reported quiesced
+# without waiting. The redeploy then kickstart -k'd a LIVE fleet, minting
+# survivors that setsid out of the process group and go invisible forever — with
+# no --force anywhere. Measured against a dead port, not inferred.
+#
+# These are the PURE half: drain_probe and witness_alive_count are stubbed so the
+# decision table can be driven without a daemon. They prove drain_wait DECIDES
+# correctly. They deliberately do NOT prove the wiring — a stubbed curl is not a
+# curl, and this whole ticket exists because a real curl's empty body meant
+# something nobody checked. The live control (pogo-self-deploy_live_test.sh)
+# owns that direction, against a real pogod it really kills.
+#
+# The contract under test:
+#   rc 0 + count  — quiesced, safe to bounce
+#   rc 1 + count  — deadline passed, polecats still active
+#   rc 2 + "?"    — CANNOT TELL; refuse (--force overrides, in cmd_redeploy)
+dw() (
+    # Run drain_wait in a subshell with stubs, echoing "<stdout>|<rc>".
+    DRAIN_TIMEOUT="${DW_TIMEOUT:-5}"
+    DRAIN_UNREADABLE_SLEEP=0   # the retry POLICY is under test, not the clock
+    local out rc=0
+    out="$(drain_wait 2>/dev/null)" || rc=$?
+    echo "$out|$rc"
+)
+
+# A healthy readout of zero: quiesced. The NEGATIVE direction — without this the
+# assertions below are satisfied by a drain_wait that refuses unconditionally,
+# which would be a gate that never opens rather than a gate that works.
+drain_probe() { printf '%s\n200' '{"draining":true,"count":0,"polecats":[]}'; }
+[ "$(dw)" = "0|0" ] \
+    && pass "drain_wait: a healthy readout of 0 still quiesces (the refusal is CONDITIONAL, not hard-wired)" \
+    || fail "drain_wait: healthy zero did not quiesce ($(dw)) — the gate never opens"
+
+# A healthy readout of N, past the deadline: the pre-existing timeout path, which
+# must survive this change untouched. It is what exit 7 has always hung off.
+drain_probe() { printf '%s\n200' '{"draining":true,"count":3,"polecats":[]}'; }
+[ "$(DW_TIMEOUT=0 dw)" = "3|1" ] \
+    && pass "drain_wait: N active at the deadline -> rc 1 and the COUNT (the exit-7 timeout path is unchanged)" \
+    || fail "drain_wait: timeout path regressed ($(DW_TIMEOUT=0 dw))"
+
+# (1) A MISSING SAMPLE IS NOT A MEASUREMENT. The cheapest part of the fix and
+# probably most real occurrences: one transient failure must cost a re-poll, not
+# end the drain. The stub fails once and then answers honestly.
+#
+# THE CALL COUNTER LIVES IN A FILE, NOT A VARIABLE, AND THAT IS NOT FUSSINESS.
+# drain_wait probes via `raw="$(drain_probe)"`, so every stub call runs in its
+# own command-substitution SUBSHELL and a `DW_CALLS=$((DW_CALLS+1))` increments a
+# copy that dies with it — the counter reads 0 forever, the stub returns its
+# first-call answer every time, and the assertion passes without ever exercising
+# the recovery it names. The first draft of this test did exactly that and went
+# green against code that could not have worked. A control that cannot fail is
+# not a control (mg-c02d), and a shell test whose state evaporates is one.
+DW_STATE="$(mktemp)"
+trap 'rm -f "$RESULTS_FILE" "$DW_STATE"' EXIT
+dw_calls() { cat "$DW_STATE" 2>/dev/null || echo 0; }
+dw_bump()  { echo $(( $(dw_calls) + 1 )) > "$DW_STATE"; }
+
+echo 0 > "$DW_STATE"
+drain_probe() {
+    dw_bump
+    if [ "$(dw_calls)" -eq 1 ]; then printf '\n000'    # curl: connection refused
+    else printf '%s\n200' '{"draining":true,"count":0,"polecats":[]}'; fi
+}
+DW_RES="$(dw)"
+{ [ "$DW_RES" = "0|0" ] && [ "$(dw_calls)" -ge 2 ]; } \
+    && pass "drain_wait: ONE unreadable sample -> polls again ($(dw_calls) probes) and then MEASURES zero (does not conclude from it)" \
+    || fail "drain_wait: a transient blip was not re-polled ($DW_RES after $(dw_calls) probe(s))"
+
+# Now the RED's exact shape: a readout that NEVER answers. The old code took
+# `${count:-0}` -> 0 -> quiesced off sample 1 and never probed twice. Asserting
+# the probe COUNT is what pins the difference — a fix that still decided on the
+# first sample would satisfy every verdict assertion above while reproducing the
+# bug, because "refuse" and "refuse immediately" have the same stdout.
+echo 0 > "$DW_STATE"
+drain_probe() { dw_bump; printf '\n000'; }
+witness_alive_count() { echo 0; return 0; }
+DW_RES="$(dw)"
+[ "$(dw_calls)" -ge "$DRAIN_UNREADABLE_LIMIT" ] \
+    && pass "drain_wait: an unreadable readout is probed $(dw_calls)x (>= $DRAIN_UNREADABLE_LIMIT) before it means anything — the old code decided on sample 1" \
+    || fail "drain_wait: decided after $(dw_calls) sample(s) — a single missing sample must never be a verdict"
+
+# (2)+(3) SUSTAINED SILENCE -> classify with the classifier we ALREADY have, then
+# consult the SECOND witness rather than guess. pogod down + witness says idle:
+# PROCEED, by right. The bounce is the repair and strands nothing that is not
+# already stranded (mg-61a0) — this is the case a blanket refuse-on-unreachable
+# would have broken, blocking the repair at the moment it is needed.
+drain_probe() { printf '\n000'; }
+witness_alive_count() { echo 0; return 0; }
+[ "$(dw)" = "0|0" ] \
+    && pass "drain_wait: pogod down + witness reports NO live polecat -> PROCEED (the wedged-pogod repair is not blocked)" \
+    || fail "drain_wait: down+idle did not proceed ($(dw)) — the repair path is blocked"
+
+# pogod down + witness says a polecat IS alive: REFUSE. Bouncing here mints
+# PERMANENT survivors — they outlive kickstart -k and go dark forever.
+witness_alive_count() { echo 2; return 0; }
+[ "$(dw)" = "?|2" ] \
+    && pass "drain_wait: pogod down + witness reports LIVE polecats -> REFUSE with '?' (never a fabricated 0)" \
+    || fail "drain_wait: down+live did not refuse ($(dw)) — this is the fail-open that mints survivors"
+
+# DOUBLE ABSENCE: pogod silent AND the witness cannot answer. Genuinely unknown
+# — nothing left to consult — so fail closed. This is mg-13a3's thesis one layer
+# up: never conclude "drained" from a single absence, let alone two.
+witness_alive_count() { echo "?"; return 1; }
+[ "$(dw)" = "?|2" ] \
+    && pass "drain_wait: DOUBLE ABSENCE (pogod down + witness unreadable) -> fails CLOSED with '?'" \
+    || fail "drain_wait: double absence did not fail closed ($(dw))"
+
+# REACHABLE but unreadable — a LIVE pogod whose count we cannot see. The witness
+# must NOT be consulted here: it knows nothing about polecats this pogod holds in
+# a registry we just failed to read, so a 0 from it would be a fresh fail-open.
+# Refuse instead; --force already means "I know it's wedged, bounce it anyway".
+drain_probe() { printf '%s\n503' '{"error":"overloaded"}'; }
+witness_alive_count() { echo 0; return 0; }   # would say "idle" — must be ignored
+[ "$(dw)" = "?|2" ] \
+    && pass "drain_wait: a LIVE pogod with an unreadable count -> REFUSE (the witness cannot speak for a registry we could not read)" \
+    || fail "drain_wait: reachable-but-unreadable did not refuse ($(dw)) — a live pogod would be bounced blind"
+
+# A 2xx whose BODY does not parse is the same fact as a 5xx: reachable, and we
+# still cannot count. It must not fall through to `-eq 0` on an empty string.
+drain_probe() { printf '%s\n200' '{"draining":true,"polecats":[]}'; }   # no count field
+[ "$(dw)" = "?|2" ] \
+    && pass "drain_wait: 2xx with an UNPARSEABLE body -> REFUSE (an absent count is not a zero one)" \
+    || fail "drain_wait: an unparseable 2xx body was treated as a measurement ($(dw))"
+
+# Put the REAL functions back. `unset -f` would not do it: bash keeps no stack of
+# shadowed definitions, so unsetting a stub deletes the function outright and
+# every assertion below would measure a "command not found" instead of the code.
+# shellcheck source=/dev/null
+source "$HERE/pogo-self-deploy"
+
+# --- witness_alive_count: EMPTY-never-0, at the CLI seam (mg-65b2) ----------
+# The drain's second witness is reached by shelling to `pogo agent witness`, and
+# every way that hop can fail must land on "?" — never on a confident 0. The
+# hazard is concrete: the `pogo` on PATH during a drain is the one from the LAST
+# deploy, so an old CLI that has never heard of this subcommand is the EXPECTED
+# case on the first night this ships, not an exotic one.
+POGO_CLI_STUB="$(mktemp)"; chmod +x "$POGO_CLI_STUB"
+trap 'rm -f "$RESULTS_FILE" "$DW_STATE" "$POGO_CLI_STUB"' EXIT
+wac() { POGO_CLI="$POGO_CLI_STUB" witness_alive_count 2>/dev/null; echo "|$?"; }
+
+printf '#!/bin/bash\necho %s\n' "'{\"witness_present\":true,\"alive_count\":0,\"alive\":[]}'" > "$POGO_CLI_STUB"
+[ "$(wac)" = "0
+|0" ] && pass "witness_alive_count: a readable witness reporting 0 is a MEASUREMENT (rc 0)" \
+      || fail "witness_alive_count: readable zero not reported ($(wac))"
+
+printf '#!/bin/bash\necho %s\n' "'{\"witness_present\":true,\"alive_count\":2,\"alive\":[{\"name\":\"a\",\"pid\":1}]}'" > "$POGO_CLI_STUB"
+[ "$(wac)" = "2
+|0" ] && pass "witness_alive_count: reads a live count off the CLI's compact JSON" \
+      || fail "witness_alive_count: live count not read ($(wac))"
+
+# rc 2 = no witness file. An ABSENCE, not a zero — the whole reason the CLI
+# spends an exit code on it.
+printf '#!/bin/bash\necho %s\nexit 2\n' "'{\"error\":\"no polecat witness at /x\"}'" > "$POGO_CLI_STUB"
+[ "$(wac)" = "?
+|1" ] && pass "witness_alive_count: an ABSENT witness yields '?' (never 0 — an unwritten witness is not an idle fleet)" \
+      || fail "witness_alive_count: absent witness did not yield '?' ($(wac))"
+
+# rc 1 = a witness exists and could not be read.
+printf '#!/bin/bash\necho %s\nexit 1\n' "'{\"error\":\"parse error\"}'" > "$POGO_CLI_STUB"
+[ "$(wac)" = "?
+|1" ] && pass "witness_alive_count: an UNREADABLE witness yields '?'" \
+      || fail "witness_alive_count: unreadable witness did not yield '?' ($(wac))"
+
+# The old-CLI case, exactly as cobra fails it: a usage dump on stderr, non-zero,
+# no JSON at all. Must not parse as anything.
+printf '#!/bin/bash\necho "Error: unknown command \\"witness\\" for \\"pogo agent\\"" >&2\nexit 1\n' > "$POGO_CLI_STUB"
+[ "$(wac)" = "?
+|1" ] && pass "witness_alive_count: an OLD pogo that has never heard of 'agent witness' yields '?' (fails CLOSED, the expected first-night case)" \
+      || fail "witness_alive_count: an old CLI did not fail closed ($(wac))"
+
+# Absent binary entirely — launchd hands jobs a minimal PATH (the sink already
+# learned this the hard way).
+POGO_CLI_SAVE="$POGO_CLI_STUB"; POGO_CLI_STUB="/nonexistent/pogo-$$"
+[ "$(wac)" = "?
+|1" ] && pass "witness_alive_count: a MISSING pogo binary yields '?' (minimal-PATH launchd case)" \
+      || fail "witness_alive_count: missing binary did not yield '?' ($(wac))"
+POGO_CLI_STUB="$POGO_CLI_SAVE"
+
+# A 0 that is NOT accompanied by rc 0 must never be believed: this is the
+# EMPTY-never-0 rule (mg-76e5) at this seam. A CLI that fails while printing a
+# zero-shaped body is exactly how a fail-open sneaks back in.
+printf '#!/bin/bash\necho %s\nexit 1\n' "'{\"witness_present\":true,\"alive_count\":0,\"alive\":[]}'" > "$POGO_CLI_STUB"
+[ "$(wac)" = "?
+|1" ] && pass "witness_alive_count: a FAILING CLI that prints alive_count:0 is still '?' (the exit code decides, not the body)" \
+      || fail "witness_alive_count: believed a zero from a failed CLI ($(wac)) — the fail-open, rebuilt at the new seam"
+
 # --skip-drain flag defaults false and is settable (bootstrap remedy)
 [ "$SKIP_DRAIN" = false ] && pass "skip-drain defaults false" || fail "skip-drain default"
 
@@ -380,9 +570,17 @@ ERRBODY='{"draining":true,"count":0,"polecats":[],"unreachable_err":"witness: ca
 PROVE_DIR=$(mktemp -d)
 trap 'rm -f "$RESULTS_FILE"; rm -rf "$PROVE_DIR"' EXIT
 mkdir -p "$PROVE_DIR/repo/scripts" "$PROVE_DIR/gobin"
-# A stand-in for the installed artifact. do_prove only needs it to exist and be
-# executable; the stub control below is what "reports" on it.
+# Stand-ins for the installed artifacts. do_prove only needs them to exist and be
+# executable; the stub control below is what "reports" on them.
+#
+# BOTH binaries, not just pogod (mg-65b2): the drain gate shells to `pogo agent
+# witness` when pogod stops answering, so the CLI is now part of the deploy's
+# DECISION path and do_prove hands it to the control as POGO_LIVE_CONTROL_POGO.
+# It refuses if either artifact is missing — which is why the fixture stages
+# both. If you are here because these tests started exiting 9, that is the check
+# working: do_prove's preconditions grew, and the fixture has to grow with them.
 printf '#!/bin/sh\nexit 0\n' > "$PROVE_DIR/gobin/pogod"; chmod +x "$PROVE_DIR/gobin/pogod"
+printf '#!/bin/sh\nexit 0\n' > "$PROVE_DIR/gobin/pogo"; chmod +x "$PROVE_DIR/gobin/pogo"
 
 # Write a stub live control that emits $1 and exits $2.
 stub_control() {
@@ -453,7 +651,23 @@ PR_RC="$(prove_run "$PROVE_OUT")"
     && pass "do_prove: a FAILING control refuses the deploy (and the failure is echoed, not swallowed)" \
     || fail "do_prove did not refuse on a failing control (rc=$PR_RC)"
 
-# (f) the gate fails CLOSED on its own absence. A missing control is the
+# (f2) a MISSING pogo CLI refuses too (mg-65b2). do_build installs pogo in
+#      lockstep with pogod, so an absent CLI here means the build did not do what
+#      it said — and the drain gate calls `pogo agent witness` to decide whether
+#      a silent pogod's fleet is live. Proving a gate whose CLI we never checked,
+#      and then deploying it, is the shape of fail-open this whole file refuses.
+#      Restored immediately: everything after it needs the fixture intact.
+stub_control 'PROVED: RED
+PROVED: GREEN
+=== Results: 2 passed, 0 failed ===' 0
+mv "$PROVE_DIR/gobin/pogo" "$PROVE_DIR/gobin/pogo.hidden"
+PR_RC="$(prove_run "$PROVE_OUT")"
+{ [ "$PR_RC" = "9" ] && grep -q "no installed pogo CLI" "$PROVE_OUT"; } \
+    && pass "do_prove: a MISSING pogo CLI refuses the deploy — the drain gate's own dependency is checked, not assumed" \
+    || fail "do_prove deployed with no pogo CLI installed (rc=$PR_RC) — the gate that reads the witness would be unproven"
+mv "$PROVE_DIR/gobin/pogo.hidden" "$PROVE_DIR/gobin/pogo"
+
+# (g) the gate fails CLOSED on its own absence. A missing control is the
 #     detector's detector gone — not "nothing to prove".
 rm -f "$PROVE_DIR/repo/scripts/pogo-self-deploy_live_test.sh"
 PR_RC="$(prove_run "$PROVE_OUT")"
