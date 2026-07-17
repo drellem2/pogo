@@ -58,9 +58,13 @@ func runGitGCSweep(reg *agent.Registry, cfg config.GitGCConfig) {
 		log.Printf("pogod: git GC skipped — cannot load work items: %v", err)
 		return
 	}
-	// Orphan polecat dirs (worktree unlinked at submit time, exit cleanup
-	// never ran — gh #31) are only reachable through the polecats-dir scan;
-	// scanning on every repo's sweep is idempotent, so no dedup is needed.
+	// Orphan polecat dirs (files left behind with no .git when a polecat's
+	// exit cleanup never ran — e.g. pogod died mid-polecat, gh #31) are only
+	// reachable through the polecats-dir scan; scanning on every repo's sweep
+	// is idempotent, so no dedup is needed. The submit-time worktree unlink
+	// that once stripped a live polecat's registration was deleted (gh #88),
+	// so new orphans of that shape no longer accrue; the scan stays for the
+	// legacy dirs it left behind and the pogod-died-mid-polecat case.
 	polecatsDir, err := gitgc.DefaultPolecatsDir()
 	if err != nil {
 		log.Printf("pogod: git GC orphan-dir scan disabled: %v", err)

@@ -148,12 +148,14 @@ func Sweep(opts Options) (Result, error) {
 	}
 
 	// --- Phase 1b: orphan polecat dirs ------------------------------------
-	// A polecat's worktree is unlinked from git at refinery-submit time (its
-	// .git pointer removed, its registration pruned) so the branch stops
-	// being "checked out" while the polecat keeps polling. Normally the
-	// polecat's exit cleanup RemoveAll's the directory, but if pogod dies
-	// first the dir survives with no .git and no registration — orphaned
-	// files that the worktree scan above can never see (gh #31). Scan
+	// This shape of orphan dates from when a polecat's worktree was unlinked
+	// from git at refinery-submit time (its .git pointer removed, its
+	// registration pruned) so the branch stopped being "checked out" while the
+	// polecat kept polling; that submit-time unlink was deleted (gh #88), so
+	// new orphans of this shape no longer accrue. Normally the polecat's exit
+	// cleanup RemoveAll's the directory, but if pogod dies first the dir
+	// survives with no .git and no registration — orphaned files that the
+	// worktree scan above can never see (gh #31). Scan
 	// PolecatsDir for such dirs and rm -rf the concluded ones; there is no
 	// registration left for `git worktree remove --force` to act on, so
 	// RemoveAll is the whole job.
