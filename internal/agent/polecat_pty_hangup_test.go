@@ -28,9 +28,13 @@ import (
 //
 //   - The registry is in-memory with no adoption/reattach path, so a restarted
 //     pogod's registry is empty PERMANENTLY for anything that outlived it.
-//   - pogod has no signal handler at all (no signal.Notify), and its StopAll is
-//     a bare `defer` (cmd/pogod/main.go) that a SIGTERM skips entirely — so
-//     pogod never actually stops its agents on the way out.
+//   - pogod has no signal handler at all (no signal.Notify), so SIGTERM — the
+//     routine stop — kills it at the default disposition, and its only other
+//     exit is log.Fatal(Serve(...)). Both skip deferred functions, as do
+//     SIGKILL, panic and host crash. pogod runs NO cleanup on any path out and
+//     never stops its agents. It used to carry a `defer StopAll` that read like
+//     it did; mg-6b66 removed it as unreachable rather than leave the code
+//     lying about how this fleet dies.
 //
 // The only thing that kills them is the PTY hangup: pogod owns the master, its
 // death force-closes it, the terminal is revoked, and the agent — a session

@@ -173,7 +173,8 @@ func TestStartServerCmd_SpawnFailure(t *testing.T) {
 // SIGTERM cascade. An auto-started pogod must be spawned into its own
 // session — otherwise it joins the invoking CLI's process group, and a
 // Ctrl-C at that terminal or a harness tearing down the CLI's process group
-// SIGTERMs pogod (LastExitStatus=15), whose shutdown then stops every agent.
+// SIGTERMs pogod (LastExitStatus=15), and its death hangs up every agent's PTY
+// (mg-6b66 — pogod has no handler and stops nothing on the way out).
 func TestNewServerCmd_SessionIsolation(t *testing.T) {
 	cmd := newServerCmd()
 	if cmd.SysProcAttr == nil || !cmd.SysProcAttr.Setsid {

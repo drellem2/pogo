@@ -152,8 +152,11 @@ func StartServer() error {
 // CLI's process group and controlling terminal. Without this, an auto-started
 // pogod is a member of whatever foreground group ran the CLI — a Ctrl-C at
 // that terminal, the terminal closing, or a harness tearing down the CLI's
-// process group SIGTERMs pogod along with it, and pogod's shutdown then stops
-// every agent (the gh #22 cascade: LastExitStatus=15 with no crash trace).
+// process group SIGTERMs pogod along with it, and every agent dies with it (the
+// gh #22 cascade: LastExitStatus=15 with no crash trace). Not because pogod
+// stops them — it has no signal handler and never gets to run cleanup — but
+// because its death force-closes the PTY masters it owns, hanging up each
+// agent's controlling terminal (mg-6b66).
 // Same isolation detach.go uses for `pogod --detach`.
 func newServerCmd() *exec.Cmd {
 	cmd := exec.Command("pogod")

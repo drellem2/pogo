@@ -1064,10 +1064,21 @@ func (r *Registry) Stop(name string, timeout time.Duration) error {
 	return nil
 }
 
-// StopAll stops all agents and prevents subsequent Respawn() calls. Use
-// this on registry teardown (pogod shutdown, test cleanup) to ensure that
+// StopAll stops all agents and prevents subsequent Respawn() calls, so that
 // in-flight respawn goroutines scheduled by the OnExit hook do not bring
 // agents back after StopAll returns.
+//
+// Its live caller is Server.transitionToIndexOnly (internal/server/server.go),
+// which drops a full daemon to index-only mode; tests use it for cleanup.
+//
+// It is NOT pogod's shutdown path, despite how it reads — pogod has no signal
+// handler and exits via SIGTERM's default disposition or log.Fatal, both of
+// which skip defers. Agents die by PTY hangup instead; see the comment where
+// the registry is built in cmd/pogod/main.go (mg-6b66).
+//
+// Note the cost: agents are stopped serially, each with the full timeout, so
+// worst case is timeout × len(agents). Callers on a deadline must budget for
+// that.
 func (r *Registry) StopAll(timeout time.Duration) {
 	r.mu.Lock()
 	r.shutdown = true

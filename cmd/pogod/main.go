@@ -984,7 +984,37 @@ Flags:
 		fmt.Printf("Cannot create agent registry: %v\n", initErr)
 		os.Exit(1)
 	}
-	defer agentRegistry.StopAll(5 * time.Second)
+	// NO `defer agentRegistry.StopAll(...)` here, deliberately (mg-6b66).
+	//
+	// There used to be one. It could never run, on any path, and it lied to
+	// every reader about how this fleet dies:
+	//
+	//   - SIGTERM — the routine stop (`pogo server stop` signals it directly,
+	//     see internal/client.stopDaemon; so do launchd and the nightly
+	//     restart) — has no handler here, so it kills at the default
+	//     disposition and skips deferred functions entirely.
+	//   - The only other way out is the bottom of main(): log.Fatal(Serve(...)),
+	//     and log.Fatal is os.Exit(1), which also skips defers.
+	//   - SIGKILL, panic and host crash skip them too.
+	//
+	// So agents are NOT stopped on the way out. What actually kills them is the
+	// PTY hangup: pogod owns each agent's PTY master, its death force-closes
+	// that fd, the terminal is revoked, and the agent — a session leader with
+	// that PTY as its controlling terminal (gh #22) — takes SIGHUP and dies at
+	// the default disposition. That accident is load-bearing: pogod's GC sweep
+	// reaps the mail-check of any polecat missing from the in-memory registry,
+	// which is only safe because a polecat cannot outlive pogod. It is pinned by
+	// TestPolecatDoesNotOutlivePogod (internal/agent/polecat_pty_hangup_test.go,
+	// mg-61a0) and documented in docs/investigations/.
+	//
+	// Restoring the defer would change nothing — re-read the exit paths above
+	// before you try. A SIGTERM handler WOULD make graceful shutdown real, but
+	// it is a behaviour change, not a cleanup: StopAll stops agents serially at
+	// up to 5s each while stopDaemon gives pogod a 5s deadline in total, so a
+	// naive handler makes `pogo server stop` miss its own deadline on any real
+	// fleet. It also cannot cover SIGKILL/panic/host crash — the paths that
+	// actually strand agents. If you want it, size the budget to that deadline
+	// and keep the hangup documented; it stays load-bearing either way.
 
 	// Load config early so we can use it for agent command setup
 	cfg := config.Load()
