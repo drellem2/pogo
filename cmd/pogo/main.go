@@ -26,6 +26,7 @@ import (
 	"github.com/drellem2/pogo/internal/events"
 	"github.com/drellem2/pogo/internal/gitceiling"
 	"github.com/drellem2/pogo/internal/gitgc"
+	"github.com/drellem2/pogo/internal/memcheck"
 	"github.com/drellem2/pogo/internal/providers"
 	"github.com/drellem2/pogo/internal/reconcile"
 	"github.com/drellem2/pogo/internal/refinery"
@@ -1895,6 +1896,7 @@ The --check mode verifies:
   - Are repos configured?
   - Are agent prompts installed?
   - Are there stale work items?
+  - Is any MEMORY.md index approaching the harness read cliff?
 
 Exits with code 1 if any critical check fails (--check mode only).`,
 		Args: cobra.ArbitraryArgs,
@@ -2093,6 +2095,56 @@ Exits with code 1 if any critical check fails (--check mode only).`,
 					} else {
 						count := len(strings.Split(items, "\n"))
 						warn("macguffin (mg)", fmt.Sprintf("%d claimed work item(s) — check for stale claims", count))
+					}
+				}
+			}
+
+			// 7. Auto-memory indexes approaching the harness read cliff.
+			// A MEMORY.md over the harness read cap stops loading ENTIRELY —
+			// every memory it indexes vanishes at once, silently. This warns
+			// BEFORE the cliff and names the fattest index lines (the
+			// actionable target). DETECT + WARN ONLY: it never rewrites
+			// MEMORY.md. Compaction is a destructive rewrite of the shared
+			// durable record and stays a deliberate, human-verified judgment
+			// call — a warn here, never an auto-fix (mg-15c0).
+			if home, herr := os.UserHomeDir(); herr != nil {
+				warn("memory index size", "could not resolve home dir: "+herr.Error())
+			} else {
+				memFiles := memcheck.Locate(home)
+				var approaching []memcheck.Result
+				checked := 0
+				for _, mf := range memFiles {
+					res, cerr := memcheck.CheckFile(mf)
+					if cerr != nil {
+						continue
+					}
+					checked++
+					if res.Approaching {
+						approaching = append(approaching, res)
+					}
+				}
+				capKB := float64(memcheck.HarnessReadCapBytes) / 1024
+				if checked == 0 {
+					// No auto-memory indexes on this machine — nothing to warn
+					// about, and their absence is not itself a problem.
+					pass("memory index size", "no MEMORY.md indexes found")
+				} else if len(approaching) == 0 {
+					pass("memory index size", fmt.Sprintf("%d MEMORY.md index(es) under %.0f%% of the ~%.1fKB read cap",
+						checked, memcheck.WarnFraction*100, capKB))
+				} else {
+					for _, res := range approaching {
+						var fat []string
+						for _, ln := range res.FattestLines {
+							text := ln.Text
+							if len(text) > 100 {
+								text = text[:100] + "…"
+							}
+							fat = append(fat, fmt.Sprintf("[%dB] %s", ln.Bytes, text))
+						}
+						warn("memory index size", fmt.Sprintf(
+							"%s is %dB, at/over the %dB warn threshold (%.0f%% of the ~%.1fKB harness read cap); past %dB it stops loading and ALL its memories vanish at once. Compact it deliberately (never auto — verify the entry count and links). Fattest index lines: %s",
+							res.Path, res.SizeBytes, res.ThresholdBytes, memcheck.WarnFraction*100, capKB,
+							res.CapBytes, strings.Join(fat, " | ")))
 					}
 				}
 			}
