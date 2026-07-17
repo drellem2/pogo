@@ -512,9 +512,22 @@ mkdir -p "$DR_REPO"
 ) >/dev/null 2>&1
 
 # Drive the driver's own primitives at the sandbox: POGO_GOBIN points at an
-# empty dir so installed_rev is empty != MAIN -> NEEDS_BUILD=true -> do_build
-# really runs. POGO_DEPLOY_REF is the fixture branch HEAD has diverged from.
+# empty dir so installed_rev reports <missing> != MAIN -> NEEDS_BUILD=true ->
+# do_build really runs. POGO_DEPLOY_REF is the fixture branch HEAD has diverged
+# from.
 mkdir -p "$SANDBOX/nobin"
+
+# THE RUNNING AXIS MUST BE A COMMIT DR_REPO ACTUALLY HAS (mg-8f09). The sandbox
+# daemon is a REAL pogod, so it is stamped with a real commit from the pogo
+# repo — which this throwaway `git init` fixture has never heard of. That pairs
+# a real binary with an unrelated repo, which is not a state any box can be in;
+# it is a fixture artifact, and mg-8f09's provenance gate correctly REFUSES it
+# (a foreign stamp is now a loud refusal, not a "behind main" guess). Report the
+# running daemon as DR_REPO's own HEAD: a commit the fixture repo has, and one
+# that is behind main-fixture — so a restart is still owed and every case below
+# exercises the path it was written for. Provenance is not what these cases are
+# testing; classify_drift's own unit tests own that axis.
+running_rev() { git -C "$DR_REPO" rev-parse HEAD 2>/dev/null; }
 dr_run() {
     # One failing redeploy, start to finish, in a subshell. Echoes its exit code.
     # The redirect sits on the SUBSHELL, not on cmd_redeploy: the trap fires on
@@ -635,6 +648,11 @@ cat > "$SANDBOX/sigtest.sh" <<SIGEOF
 #!/bin/bash
 set -u
 source "$REPO_ROOT/scripts/pogo-self-deploy"
+# This script sources the driver FRESH, so it does not inherit the test file's
+# running_rev override and needs its own (mg-8f09 — same reason: the sandbox
+# daemon's real stamp is foreign to the DR_REPO fixture, and a foreign stamp is
+# now a refusal, which would stop this run before it ever reached drain_wait).
+running_rev() { git -C "$DR_REPO" rev-parse HEAD 2>/dev/null; }
 # The human hits Ctrl-C while the deploy waits for the fleet to quiesce.
 drain_wait() { kill -INT \$\$; sleep 2; echo 0; return 0; }
 POGO_GOBIN="$SANDBOX/nobin"

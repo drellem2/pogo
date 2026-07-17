@@ -10,6 +10,73 @@ is the curated, human-readable summary kept in sync at each release cut.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The drift check no longer TRUSTS the binary's VCS stamp — an absent stamp
+  is UNKNOWN, never clean, and never "behind" (mg-8f09).** `pogo-self-deploy`
+  compared the stamp to `main` and reported the difference as *"both behind
+  main"*. A stamp is **evidence, not truth**, and it has three states the check
+  must keep apart, because they owe three different actions:
+
+  1. **present and ours** — a commit that exists in the repo. Comparable to
+     main; clean if equal.
+  2. **ABSENT** — no `vcs.revision` at all. **Provenance UNKNOWN.** Not clean,
+     and *not behind either*: both are claims about a binary that has told us
+     nothing. The check now REFUSES (non-zero) instead of classifying.
+  3. **present but FOREIGN** — a real commit from a *different repository*.
+     Loud refusal naming the claimed revision, the repo it is absent from, and
+     the ref/HEAD that was expected.
+
+  The old code could only say "behind" — a claim about **ancestry it had not
+  measured** and, for states 2 and 3, could not measure. Both states produced
+  the *identical* verdict, so two unrelated root causes were indistinguishable
+  in the output. Provenance is now decided by `git cat-file -e <rev>^{commit}`
+  against the deploy repo, so every verdict is re-derivable from its own output
+  with one command instead of re-investigated from scratch.
+
+  **Absence is not evidence.** The fleet already bought this lesson once: the
+  mg-de08 reap concluded death from two absences. A drift check that reads "no
+  stamp" as "no drift" repeats that defect exactly, in the one check whose job
+  is catching it. Relatedly, `installed_rev` fused two different absences into
+  one empty string — *missing binary* (a build genuinely is owed, and a build
+  fixes it) and *unstamped binary* (a build is **not** owed and does **not**
+  fix it: the rebuild is unstamped too, so it still `!= MAIN`, so the drift
+  never clears — a reconcile loop against an artifact that is not broken).
+  They are now distinct sentinels, and a test pins them apart.
+
+  **This is the HEALTHY worktree failing, not a corruption case.** A `.git`
+  *file* is the NORMAL state of every git worktree, and Go walks straight past
+  it looking for a `.git` *directory*. Verified on live polecat worktree 8f09,
+  whose `.git` is a regular file that git resolves correctly.
+
+- **Corrected record: mg-49bc's "stale dirty build" was never stale and never
+  dirty (mg-8f09).** mg-49bc concluded the `pogo` CLI was *"a STALE DIRTY
+  build"* from `vcs.revision=ec68dc1 vcs.modified=TRUE`. That reading was
+  **wrong**. `ec68dc1` is the HEAD of **`~/.pogo`** — a different repository —
+  and `vcs.modified=true` described **`~/.pogo`'s** dirty tree, not pogo's. The
+  binary was not a stale build of pogo; it was stamped with a **foreign repo's
+  HEAD**. Confirmed by hash identity, not inference: a build from a polecat
+  worktree under `~/.pogo/polecats/` still stamps `ec68dc1` today.
+
+  The mechanism, and why the same defect got explained wrongly **twice**: Go
+  does not understand `.git`-as-a-file, so from a worktree it walks *up* past
+  it. What it finds next decides the symptom —
+
+  | worktree location | Go finds | symptom | wrong reading |
+  |---|---|---|---|
+  | nested in another repo (`~/.pogo/polecats/…`) | `~/.pogo/.git` | **foreign stamp** + that repo's dirty flag | mg-49bc: "stale dirty build" |
+  | not nested in any repo | nothing | **unstamped** | mg-d001: "worktrees silently produce unstamped binaries" |
+
+  Both readings are the same bug wearing two faces, which is precisely how it
+  came to be fixed twice and owned by nobody. It is recorded **here** rather
+  than only in mg-49bc because 49bc has since archived — a finding that lives
+  only in its incident dies with it.
+
+  Consequence for sequencing: **state 2 is reachable today** from any
+  non-nested worktree, and mg-2ce4 (relocating `polecats/` out of the `~/.pogo`
+  repo) converts the whole fleet from state 3 to state 2 — a loud lie into a
+  silent absence. That is why this check landed first.
+
 ### Added
 
 - **The mayor routes dispatch on the work item's `type` field
