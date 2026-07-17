@@ -882,6 +882,14 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 	// be renamed out from under itself, whatever config later says (mg-cf9e).
 	noteCoordinatorStart(a)
 
+	// Persist a polecat's (pid, start_time) so a pogod that outlives this one
+	// has EVIDENCE about this process instead of only the absence of one. The
+	// registry is in-memory and does not survive a restart; without this the
+	// mail-check GC classifies every surviving polecat from two absences and
+	// concludes death (mg-13a3). No-op for crew, whose prompt's auto_start is
+	// already an independent second witness.
+	noteWitnessStart(a)
+
 	a.emitSpawned()
 
 	// Run post-spawn hook (e.g. trust dialog dismissal) if this agent's
@@ -1371,6 +1379,11 @@ func (r *Registry) waitAndHandle(a *Agent) {
 
 	// Disarm the rename guard: a stopped coordinator may be renamed (mg-cf9e).
 	noteCoordinatorExit(a)
+
+	// Drop a polecat's witness: we just watched this process die, so the
+	// record is known false rather than merely stale. Leaving it would let a
+	// recycled pid argue for a polecat we know is dead (mg-13a3).
+	noteWitnessExit(a)
 
 	a.emitExit(stopRequested, exitCode, duration)
 
