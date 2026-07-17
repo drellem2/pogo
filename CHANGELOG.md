@@ -12,6 +12,32 @@ is the curated, human-readable summary kept in sync at each release cut.
 
 ### Fixed
 
+- **A redeploy now installs the `pogo` CLI in lockstep with `pogod` — merged is
+  not deployed (mg-ddf1).** `do_build` ran `go install ./cmd/pogod` and nothing
+  else, so **no code path installed the CLI at all**. Every `cmd/pogo` change was
+  merged and dark, indefinitely, with no signal — not a staleness window, an
+  absence. Measured on the box: `~/go/bin/pogo` was **three days behind main**,
+  and `pogo agent stop --help | grep -ci park` returned **0** against **12** in
+  source, so mg-ce26's park help text — written precisely to put the docs *where
+  the operator stands* — was sitting in a binary the operator never runs.
+  mg-8380's `--body-file` was dark the same way, unusable six minutes after it
+  merged. **The drift check was blind in the same place**: it read only the
+  installed `pogod`, so "daemon current, CLI stale" — the box's actual state —
+  classified as *"clean, nothing owed"*, and the redeploy could not see the drift
+  it exists to catch. Worse, the restart-only branch **skips `go install`**, so a
+  stale CLI could be stranded dark for another cycle. Both paths now iterate one
+  `DEPLOYED_CMDS` list (`pogod`, `pogo`); adding a binary to it covers the drift
+  check for free, which is the coupling that stops this recurring a third time.
+  **The redeploy is the correct home for this, not the convenient one**: a new
+  CLI against the old running daemon risks a protocol mismatch that breaks the
+  tooling every agent depends on, mid-flight (mg-49bc), and a redeploy is the
+  exact moment `pogod` moves to main's revision — so it is the one moment the CLI
+  can move safely. The build stages a compile of the whole set into a throwaway
+  dir before installing anything, because `go install pkgA pkgB` is **not**
+  all-or-nothing — a broken `cmd/pogo` was measured leaving a freshly-installed
+  `pogod` behind. The post-install check now asks **every** binary its revision
+  and refuses unless they all report main.
+
 - **A redeploy that refuses to deploy now says so OUTSIDE the script (mg-f206).**
   `exit 7` — the drain timed out with polecats still working, and `--force` is
   not set, so nothing is deployed — reported itself as two `err` lines to the

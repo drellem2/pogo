@@ -877,13 +877,25 @@ cleanup_orphans() {
     [ -n "$REPO" ] && git -C "$REPO" worktree prune 2>/dev/null || true
 }
 
-# Installs every binary in DEPLOYED_CMDS, in ONE `go install`. The single
-# invocation is the lockstep: the daemon and the CLI are compiled and installed
-# by one command that either succeeds for both or fails, so there is no window
-# where a redeploy has moved pogod and left the operator on an old pogo. It also
-# gives the negative for free — every refusal above (dirty tree, wrong HEAD, a
-# compile error in either package) happens BEFORE anything is written to GOBIN,
-# so a redeploy that fails cannot leave a half-installed CLI behind.
+# Installs every binary in DEPLOYED_CMDS. The daemon and the CLI move together
+# or not at all — that lockstep is the point, so the failure modes must not be
+# able to move one without the other.
+#
+# COMPILE EVERYTHING BEFORE INSTALLING ANYTHING. `go install pkgA pkgB` is NOT
+# all-or-nothing: it installs each package as that package finishes, so a
+# compile error in the CLI still leaves a freshly-installed pogod on disk. That
+# is measured, not assumed — a deliberately broken cmd/pogo installed pogod and
+# nothing else. Building the whole set into a throwaway dir first turns a
+# compile error into a refusal that has written nothing to GOBIN, and costs
+# almost nothing: the install that follows is a build-cache hit, not a recompile.
+#
+# ITS HONEST LIMIT: this closes the compile-error window, not every window. A
+# go install that dies for a non-compile reason (full disk, GOBIN perms) after
+# writing pogod can still split the pair. The post-install check below is what
+# catches that: it asks EVERY binary its revision and refuses unless they all
+# report main, so a split pair fails the deploy loudly instead of shipping. A
+# refusal here exits with the drain trap still armed, leaving the old pogod
+# running and dispatching — the correct resting state for "we could not build".
 do_build() {
     local name; local pkgs=()
     for name in "${DEPLOYED_CMDS[@]}"; do pkgs+=("./cmd/$name"); done
@@ -897,6 +909,15 @@ do_build() {
         err "repo $REPO has uncommitted changes; refusing to go install a dirty tree"
         exit 4
     fi
+    # Stage: compile the whole set into a throwaway dir. A failure here has
+    # written nothing to GOBIN.
+    local stage; stage="$(mktemp -d)" || { err "cannot create a staging dir"; exit 4; }
+    if ! ( cd "$REPO" && go build -o "$stage/" "${pkgs[@]}" ); then
+        rm -rf "$stage"
+        err "go build failed — refusing to install a partial set (nothing was written to GOBIN)"
+        exit 4
+    fi
+    rm -rf "$stage"
     ( cd "$REPO" && go install "${pkgs[@]}" ) || { err "go install failed"; exit 4; }
     # Verify EVERY binary, not just the daemon: an install that silently skipped
     # one is exactly the failure this ticket exists to end, and it is only
