@@ -324,6 +324,7 @@ func (m mailCheckRegistrar) RegisterMailCheck(agentName, workItemID, cron, messa
 	entry := scheduler.Entry{
 		Agent:        agentName,
 		ID:           scheduleID,
+		Kind:         scheduler.KindMailCheck,
 		Cron:         cron,
 		ReplayPolicy: scheduler.ReplayOnce,
 		Delivery:     scheduler.DeliveryNudge,
@@ -434,7 +435,11 @@ func (p schedulerMailChecks) HasMailCheck(agentIdentity string) bool {
 	}
 	for _, alias := range aliases {
 		for _, e := range p.sched.List(alias) {
-			if strings.HasPrefix(e.ID, scheduler.MailCheckIDPrefix) {
+			// Structural, not lexical (mg-fa53): a mail-check is identified by its
+			// Kind, so this stays correct even if the id-naming convention ever
+			// drifts. List returns entries loaded through applyDefaults, so legacy
+			// no-kind entries already have KindMailCheck inferred.
+			if e.Kind == scheduler.KindMailCheck {
 				return true
 			}
 		}

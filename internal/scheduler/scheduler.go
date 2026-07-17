@@ -50,6 +50,65 @@ const (
 	DeliveryMail  DeliveryMode = "mail"
 )
 
+// ScheduleKind classifies what a scheduled Entry is FOR. It is the structural
+// discriminator that replaces string-matching a schedule's id against
+// MailCheckIDPrefix (mg-fa53).
+//
+// Before this field, the only way to tell a per-agent mail-check loop from a
+// crew agenda sweep or a one-shot reminder was a lexical prefix on the id — a
+// typed distinction smuggled into a naming convention that nothing type-checked.
+// That is precisely why the mg-de08 reap was quiet: the crew sweeps survived the
+// mail-check GC only because of how they were NAMED (they lacked the
+// "mail-check-" prefix), not because anything knew they were a different KIND of
+// thing. A rename would have silently changed their fate. Kind makes the
+// distinction structural: the reap targets KindMailCheck, so a sweep or a
+// reminder is immune by TYPE rather than by naming accident.
+type ScheduleKind string
+
+const (
+	// KindMailCheck is a per-agent mail-check loop (id "mail-check-<agent>").
+	// This is the load-bearing kind: the stale-schedule reap (reapMailChecks)
+	// collects exactly this kind for a GONE agent, so every other kind is
+	// structurally immune to it. See MailCheckIDPrefix and gh drellem2/macguffin
+	// #15.
+	KindMailCheck ScheduleKind = "mail-check"
+	// KindSweep is a recurring crew agenda/triage sweep (sweep-morning-*,
+	// sweep-evening-*, triage-sweep-*): a daily nudge to run a coordination or
+	// triage cycle. These are the schedules whose survival across the mg-de08
+	// reap was a naming accident; naming them a kind is what makes that survival
+	// intentional.
+	KindSweep ScheduleKind = "sweep"
+	// KindGateLift is a reminder (often one-shot, sometimes calendar-recurring)
+	// that a gate or hold should be lifted at a wall-clock time (gate-lift-*).
+	KindGateLift ScheduleKind = "gate-lift"
+	// KindOther is the catch-all for an ad-hoc or generated schedule that matches
+	// none of the known kinds. It carries NO special behavior — in particular it
+	// is never touched by the mail-check reap.
+	KindOther ScheduleKind = "other"
+)
+
+// inferKind classifies a schedule by its id. It is the backward-compatibility
+// bridge for entries persisted before the Kind field existed: a legacy
+// ~/.pogo/schedules.json carries no "kind", so applyDefaults infers one from the
+// id prefix the entry was NAMED with. The inference is deliberately conservative
+// — only the exact "mail-check-" prefix yields KindMailCheck, so no crew sweep or
+// reminder is ever newly swept into the reap by this migration (the mg-fa53
+// safety bar). An unrecognized id falls to KindOther, which is inert.
+func inferKind(id string) ScheduleKind {
+	switch {
+	case strings.HasPrefix(id, MailCheckIDPrefix):
+		return KindMailCheck
+	case strings.HasPrefix(id, "sweep-") ||
+		strings.Contains(id, "-sweep-") ||
+		strings.HasSuffix(id, "-sweep"):
+		return KindSweep
+	case strings.HasPrefix(id, "gate-lift-"):
+		return KindGateLift
+	default:
+		return KindOther
+	}
+}
+
 // Entry is a single scheduled fire. Persisted as a JSON object inside
 // ~/.pogo/schedules.json; field names are snake_case to match the rest of the
 // pogo on-disk format.
@@ -59,6 +118,7 @@ const (
 //	{
 //	  "id":            "research-poll",        // unique slug, agent-scoped
 //	  "agent":         "crew-research",        // recipient
+//	  "kind":          "mail-check",           // see ScheduleKind; inferred from id for legacy entries
 //	  "cron":          "*/15 * * * *",         // empty for one-shot
 //	  "one_shot":      false,                  // true → deleted after firing
 //	  "next_fire":     "2026-05-03T13:30:00Z", // absolute wall-clock time
@@ -69,9 +129,15 @@ const (
 //	  "last_fire":     "2026-05-03T13:15:00Z", // zero if never fired
 //	  "missed_fires":  0                       // accumulated missed count for "count" policy
 //	}
+//
+// Kind carries omitempty so a schedules.json written by this binary stays
+// diff-clean, but its absence is never load-bearing: applyDefaults infers a kind
+// from the id for any entry that lacks one (a pre-mg-fa53 file), so a loaded
+// Entry always has a concrete Kind in memory.
 type Entry struct {
 	ID           string       `json:"id"`
 	Agent        string       `json:"agent"`
+	Kind         ScheduleKind `json:"kind,omitempty"`
 	Cron         string       `json:"cron,omitempty"`
 	OneShot      bool         `json:"one_shot,omitempty"`
 	NextFire     time.Time    `json:"next_fire"`
@@ -144,6 +210,11 @@ func (e *Entry) Validate() error {
 	default:
 		return fmt.Errorf("scheduler: unknown replay_policy %q (want once|count|skip)", e.ReplayPolicy)
 	}
+	switch e.Kind {
+	case "", KindMailCheck, KindSweep, KindGateLift, KindOther:
+	default:
+		return fmt.Errorf("scheduler: unknown kind %q (want mail-check|sweep|gate-lift|other)", e.Kind)
+	}
 	return nil
 }
 
@@ -154,6 +225,13 @@ func (e *Entry) applyDefaults() {
 	if e.ReplayPolicy == "" {
 		e.ReplayPolicy = ReplayOnce
 	}
+	// Backfill kind for legacy entries (pre-mg-fa53 schedules.json carries no
+	// "kind"). This runs on every entry at both load (New) and Add, so a loaded
+	// mail-check-* entry gets KindMailCheck and the structural reap sees it —
+	// which is what keeps the migration from silently disabling a live schedule.
+	if e.Kind == "" {
+		e.Kind = inferKind(e.ID)
+	}
 }
 
 // MailCheckIDPrefix is the schedule-id prefix every per-agent mail-check loop
@@ -162,6 +240,14 @@ func (e *Entry) applyDefaults() {
 // agent's process is alive; once the agent is gone the schedule is dead weight
 // that fires every interval into a scheduler_fire_failed event. The GC sweep
 // below reaps them. See gh drellem2/macguffin #15.
+//
+// This prefix is now a NAMING convention only, not the type discriminator it
+// once was (mg-fa53): the reap keys on Entry.Kind == KindMailCheck, not on this
+// string. The prefix survives for two jobs — constructing new mail-check ids
+// (mailCheckRegistrar) and, via inferKind, backfilling KindMailCheck for legacy
+// entries persisted before the Kind field existed. Renaming a schedule no longer
+// silently changes what it IS; that lexical coupling is exactly what made the
+// mg-de08 reap quiet.
 const MailCheckIDPrefix = "mail-check-"
 
 // AgentState is what the reap decision knows about the agent a schedule
@@ -350,10 +436,13 @@ func (s *Scheduler) SetGCGate(gate func(now time.Time) bool) {
 // the same id without colliding (e.g. multiple PMs each registering
 // "mail-check"). Re-adding with the same (agent, id) is idempotent.
 func (s *Scheduler) Add(entry Entry, now time.Time) (Entry, error) {
-	entry.applyDefaults()
+	// Generate the id BEFORE applyDefaults so kind inference (which reads the id)
+	// sees the final id, not the empty string. A caller that sets Kind explicitly
+	// — mailCheckRegistrar does — is unaffected; inference only fills a blank.
 	if entry.ID == "" {
 		entry.ID = generateID()
 	}
+	entry.applyDefaults()
 	if entry.CreatedAt.IsZero() {
 		entry.CreatedAt = now
 	}
@@ -721,7 +810,13 @@ func (s *Scheduler) reapMailChecks(now time.Time, gone func(agent string) bool) 
 	s.mu.Lock()
 	var staleKeys []entryKey
 	for k, e := range s.entries {
-		if strings.HasPrefix(e.ID, MailCheckIDPrefix) && gone(e.Agent) {
+		// Match on kind, not on the id's lexical prefix (mg-fa53). Every loaded
+		// entry has a concrete Kind (applyDefaults infers one for legacy entries),
+		// so a mail-check-* schedule is KindMailCheck whether it was written by a
+		// current binary or migrated from a pre-kind schedules.json — and a crew
+		// sweep is KindSweep, structurally immune to this reap rather than immune
+		// only because of how it happens to be named.
+		if e.Kind == KindMailCheck && gone(e.Agent) {
 			staleKeys = append(staleKeys, k)
 		}
 	}
