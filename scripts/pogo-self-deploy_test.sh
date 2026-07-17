@@ -53,7 +53,17 @@ DRAIN_OFF='{"draining":false,"count":0,"polecats":[]}'
 # what they always did.
 # ${4-$2}, NOT ${4:-$2}: an explicitly-empty 4th arg means "no CLI on disk", and
 # that is precisely the value that must not be read as "matches pogod".
-classify() { RUNNING="$1"; INSTALLED="$2"; MAIN="$3"; INSTALLED_CLI="${4-$2}"; classify_drift; }
+#
+# rev_in_repo is stubbed KNOWN here (mg-8f09): these cases exercise the
+# STALENESS axis with symbolic revisions ("old"/"new"), which no real repo
+# contains. Stubbing provenance-is-fine is what keeps them testing the one thing
+# they were written to test. The provenance axis gets its own cases below, where
+# the stub is what varies.
+classify() {
+    RUNNING="$1"; INSTALLED="$2"; MAIN="$3"; INSTALLED_CLI="${4-$2}"
+    rev_in_repo() { return 0; }
+    classify_drift
+}
 
 classify aaa aaa aaa
 { [ "$NEEDS_BUILD" = false ] && [ "$NEEDS_RESTART" = false ] && [[ "$ACTION" == clean* ]]; } \
@@ -93,16 +103,112 @@ classify new new new old
 [[ "$ACTION" == *pogo* ]] && [[ "$ACTION" != *pogod\ behind* ]] \
     && pass "CLI-stale action names pogo (and does not blame pogod)" || fail "action must name the stale binary ($ACTION)"
 
-# An ABSENT CLI is drift, not a pass. installed_rev yields empty for a binary
-# that is not on disk; empty must never read as "matches main".
+# A MISSING CLI binary is drift, not a pass — and unlike an unstamped one, a
+# build really is the fix, so it stays on the BUILD path (mg-8f09).
+classify new new new "$REV_MISSING"
+{ [ "$NEEDS_BUILD" = true ] && [[ "$ACTION" == BUILD\ owed* ]]; } \
+    && pass "missing CLI owes a BUILD (a build is what fixes a missing binary)" || fail "missing CLI case ($ACTION)"
+
+# The bare-empty spelling must behave the same: nothing may read as "matches".
 classify new new new ""
 { [ "$NEEDS_BUILD" = true ] && [[ "$ACTION" == BUILD\ owed* ]]; } \
-    && pass "absent CLI owes a BUILD (empty revision != main)" || fail "absent CLI case ($ACTION)"
+    && pass "empty CLI revision owes a BUILD (empty never reads as matches main)" || fail "empty CLI case ($ACTION)"
 
 # The converse guard: a current CLI must not mask a stale pogod.
 classify old old new new
 { [ "$NEEDS_BUILD" = true ] && [ "$NEEDS_RESTART" = true ]; } \
     && pass "stale pogod still owes BUILD+RESTART when the CLI is current" || fail "stale-pogod-current-CLI case ($ACTION)"
+
+# --- THE THREE PROVENANCE STATES (mg-8f09) --------------------------------
+# The stamp is EVIDENCE, not truth. These three cases are the whole ticket, and
+# they are asserted in all three states — a check demonstrated only in its
+# passing state is not evidence that it can fail.
+
+# STATE 1 — stamp present and ours: comparable to main, and clean.
+classify aaa aaa aaa
+{ [ "$NEEDS_BUILD" = false ] && [ "$NEEDS_RESTART" = false ] && [[ "$ACTION" == clean* ]]; } \
+    && pass "state 1: a stamp from THIS repo that matches main is clean" || fail "state 1 ($ACTION)"
+
+# STATE 2 — stamp ABSENT (the post-mg-2ce4 world, and the regression that would
+# otherwise ship invisibly). Must NOT be clean, and must NOT be "behind" either:
+# both are claims about a binary that has told us nothing.
+unstamped() {
+    RUNNING="$1"; INSTALLED="$2"; MAIN="$3"; INSTALLED_CLI="${4-$2}"
+    rev_in_repo() { return 0; }
+    classify_drift
+}
+unstamped "$REV_UNSTAMPED" "$REV_UNSTAMPED" aaa "$REV_UNSTAMPED"
+if [ "$NEEDS_BUILD" = false ] && [ "$NEEDS_RESTART" = false ] && [[ "$ACTION" == clean* ]]; then
+    fail "state 2: an UNSTAMPED binary read as CLEAN — the mg-de08 defect (absence read as evidence)"
+else
+    pass "state 2: an unstamped binary is NOT clean"
+fi
+{ ! classify_drift; } \
+    && pass "state 2: an unstamped binary REFUSES to classify (non-zero), so check exits 1" \
+    || fail "state 2 must return non-zero"
+[[ "$ACTION" == UNKNOWN\ PROVENANCE* ]] \
+    && pass "state 2: verdict says provenance UNKNOWN" || fail "state 2 must say UNKNOWN ($ACTION)"
+# Not "does the word 'behind' appear" — the verdict is allowed to say it is NOT
+# behind. What it must never do is ASSERT behind-ness (the mg-49bc phrasing) for
+# something whose ancestry it could not measure.
+{ [[ "$ACTION" != *"behind main"* ]] && [[ "$ACTION" != BUILD* ]] && [[ "$ACTION" != RESTART* ]]; } \
+    && pass "state 2: verdict does NOT assert 'behind main' (an unmeasured claim about ancestry)" \
+    || fail "state 2 must not claim behind-ness it never measured ($ACTION)"
+# It must name what it compared: the ref and the expected HEAD.
+{ [[ "$ACTION" == *main* ]] && [[ "$ACTION" == *aaa* ]]; } \
+    && pass "state 2: verdict names the ref and the expected HEAD it wanted" \
+    || fail "state 2 must name what it compared ($ACTION)"
+# A build does not clear an unstamped binary, so it must not be prescribed.
+[ "$NEEDS_BUILD" = false ] \
+    && pass "state 2: does NOT owe a build (a rebuild is unstamped too — that is a reconcile loop)" \
+    || fail "state 2 must not prescribe a build"
+
+# STATE 3 — stamp PRESENT but from a FOREIGN repo. This is today's live
+# behavior: a binary built in a polecat worktree carries ~/.pogo's HEAD.
+# rev_in_repo is the only thing that varies from state 1.
+foreign() {
+    RUNNING="$1"; INSTALLED="$2"; MAIN="$3"; INSTALLED_CLI="${4-$2}"
+    rev_in_repo() { [ "$1" != "ffffdeadbeef" ]; }
+    classify_drift
+}
+foreign ffffdeadbeef ffffdeadbeef aaaabbbbcccc
+if [ "$NEEDS_BUILD" = false ] && [ "$NEEDS_RESTART" = false ] && [[ "$ACTION" == clean* ]]; then
+    fail "state 3: a FOREIGN stamp read as clean"
+else
+    pass "state 3: a foreign stamp is NOT clean"
+fi
+{ ! classify_drift; } \
+    && pass "state 3: a foreign stamp REFUSES to classify (loud, non-zero)" \
+    || fail "state 3 must return non-zero"
+[[ "$ACTION" == FOREIGN* ]] \
+    && pass "state 3: verdict leads with FOREIGN STAMP" || fail "state 3 must say FOREIGN ($ACTION)"
+# Name BOTH sides — the claimed revision and the repo/ref it is absent from.
+# This is the mg-49bc lesson: "drift" alone sent the reader to look for a stale
+# dirty build that did not exist.
+[[ "$ACTION" == *ffffdeadbeef* ]] \
+    && pass "state 3: verdict names the CLAIMED revision" || fail "state 3 must name the claimed rev ($ACTION)"
+{ [[ "$ACTION" == *aaaabbbbcccc* ]] && [[ "$ACTION" == *main* ]]; } \
+    && pass "state 3: verdict names the EXPECTED repo HEAD and ref" \
+    || fail "state 3 must name what it expected ($ACTION)"
+[[ "$ACTION" != *behind* ]] \
+    && pass "state 3: verdict does NOT call a foreign commit 'behind'" \
+    || fail "state 3 must not describe a foreign commit as behind ($ACTION)"
+
+# The regression that made mg-49bc misread the box: a foreign stamp's
+# vcs.modified=true describes the FOREIGN repo's tree, so a foreign stamp must
+# never be explained as a stale-or-dirty local build.
+[[ "$ACTION" != *dirty* ]] && [[ "$ACTION" != *stale* ]] \
+    && pass "state 3: verdict does not blame a stale/dirty local tree (the mg-49bc misreading)" \
+    || fail "state 3 must not reach for stale/dirty ($ACTION)"
+
+# --- the two absences must stay apart (mg-de08's rule, mechanized) ---------
+# MISSING owes a build; UNSTAMPED refuses. If these ever collapse back into one
+# empty string, this is the test that says so.
+classify new new new "$REV_MISSING"; missing_build="$NEEDS_BUILD"
+unstamped new new new "$REV_UNSTAMPED"; unstamped_build="$NEEDS_BUILD"
+{ [ "$missing_build" = true ] && [ "$unstamped_build" = false ]; } \
+    && pass "missing != unstamped: one owes a build, the other refuses" \
+    || fail "the two absences collapsed (missing_build=$missing_build unstamped_build=$unstamped_build)"
 
 # Clean means BOTH match — the restart-only branch must not fire while the CLI
 # is stale, because that branch SKIPS go install and would strand the CLI dark

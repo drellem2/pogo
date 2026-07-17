@@ -325,12 +325,43 @@ verify_mail_checks_restored() {
 # Revision sources (the three axes of drift)
 # ---------------------------------------------------------------------------
 
+# THE STAMP IS EVIDENCE, NOT TRUTH (mg-8f09). Every axis below reports what a
+# binary CLAIMS about its own provenance, and a claim has three failure modes
+# this check must keep apart, because they owe three different actions:
+#
+#   present & ours    — a commit that exists in $REPO. Comparable to main.
+#   ABSENT            — no vcs stamp at all. NOT comparable to anything.
+#   present & FOREIGN — a real commit, from a DIFFERENT repo. NOT comparable.
+#
+# The old code collapsed all three into a bare string and compared it to MAIN.
+# That is why it could only ever say "behind main" — a claim about ANCESTRY it
+# had not measured and, for the last two cases, could not measure. mg-49bc read
+# that output and concluded "stale dirty build"; the truth was a foreign repo's
+# HEAD (see the FOREIGN STAMP note in classify_drift). A verdict phrased in a
+# vocabulary the check cannot actually support sends the reader somewhere else.
+#
+# So each source distinguishes its OWN kinds of absence, with sentinels that
+# can never collide with a hex revision. Two absences that mean different things
+# must not arrive here as the same empty string — that is the mg-de08 defect
+# (absence of evidence read as evidence), and it is the one this file is for.
+REV_UNSTAMPED='<unstamped>'     # binary is there; it carries NO vcs stamp
+REV_MISSING='<missing>'         # binary is not on disk at all
+REV_UNREACHABLE='<unreachable>' # pogod is not answering /version
+
 # running: the revision of the LIVE pogod process, self-reported via /version.
 # Must come from the process, not `go version -m` on disk: `go install` rewrites
 # the on-disk binary underneath a live daemon, so the file's revision diverges
 # from the running one the instant a rebuild happens.
+#
+# UNREACHABLE and UNSTAMPED are different answers: a daemon that will not talk
+# owes a restart, a daemon that talks but cannot say what it is owes an
+# investigation. Reporting both as "" made them one state.
 running_rev() {
-    curl -sf --max-time 5 "$(base_url)/version" 2>/dev/null | json_str revision
+    local body
+    body="$(curl -sf --max-time 5 "$(base_url)/version" 2>/dev/null)" \
+        || { echo "$REV_UNREACHABLE"; return 0; }
+    local rev; rev="$(printf '%s' "$body" | json_str revision)"
+    if [ -n "$rev" ]; then echo "$rev"; else echo "$REV_UNSTAMPED"; fi
 }
 
 # DEPLOYED_CMDS: every binary this deploy owns, as `go install` package paths.
@@ -341,7 +372,7 @@ running_rev() {
 # rather than naming a binary.
 DEPLOYED_CMDS=(pogod pogo)
 
-# installed: the revision baked into an on-disk ~/go/bin/<name> binary.
+# installed_bin: where a deployed binary lives on disk.
 installed_bin() {
     local name="$1"
     if [ -n "${POGO_GOBIN:-}" ]; then echo "$POGO_GOBIN/$name"; return; fi
@@ -349,13 +380,47 @@ installed_bin() {
     if [ -n "$gobin" ]; then echo "$gobin/$name"; return; fi
     echo "$(go env GOPATH 2>/dev/null)/bin/$name"
 }
-# Empty when the binary is absent or carries no stamp. Empty is a REAL answer
-# here: it never equals MAIN, so an absent CLI classifies as a build owed rather
-# than passing as "matches".
+# installed: the revision baked into an on-disk ~/go/bin/<name> binary.
+#
+# The old contract was "empty when the binary is absent OR carries no stamp",
+# justified as: empty never equals MAIN, so it classifies as a build owed rather
+# than passing as "matches". That reasoning is CORRECT for a missing binary and
+# WRONG for an unstamped one, and it fused the two cases into one string:
+#
+#   MISSING   — no binary. A build genuinely IS owed, and a build fixes it.
+#   UNSTAMPED — a binary, built from a tree Go could not read VCS info for. A
+#               build is NOT owed and a build does NOT fix it: the rebuild is
+#               unstamped too, so it still "!= MAIN", so the drift never clears.
+#               "Never equals MAIN" stops being a safe default the moment it
+#               becomes permanent — it is a reconcile loop against an artifact
+#               that is not broken, which is the exact thing this file's header
+#               says a drift check must never start.
+#
+# Keeping them apart is what lets classify_drift owe a build for the first and
+# refuse for the second.
 installed_rev() {
     local bin; bin="$(installed_bin "$1")"
-    [ -x "$bin" ] || return 0
-    go version -m "$bin" 2>/dev/null | sed -n 's/.*vcs.revision=\([0-9a-f]*\).*/\1/p' | head -1
+    [ -x "$bin" ] || { echo "$REV_MISSING"; return 0; }
+    local rev
+    rev="$(go version -m "$bin" 2>/dev/null | sed -n 's/.*vcs.revision=\([0-9a-f]*\).*/\1/p' | head -1)"
+    if [ -n "$rev" ]; then echo "$rev"; else echo "$REV_UNSTAMPED"; fi
+}
+
+# rev_in_repo — does $REPO actually contain this commit? This is the whole
+# foreign-stamp test, and it is re-derivable by hand: `git -C $REPO cat-file -e
+# <rev>^{commit}`. A stamp naming a commit no ancestor query can even resolve is
+# not "behind"; it is from somewhere else. Stubbed by the unit tests, which
+# exercise the staleness axis with symbolic revisions.
+rev_in_repo() {
+    git -C "${REPO:-}" cat-file -e "${1}^{commit}" 2>/dev/null
+}
+
+# Revisions that are not comparable to MAIN at all — the sentinels above.
+rev_is_sentinel() {
+    case "$1" in
+        "$REV_UNSTAMPED"|"$REV_MISSING"|"$REV_UNREACHABLE"|"") return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
 # main: what the repo says SHOULD run (the deploy ref's HEAD).
@@ -400,10 +465,51 @@ compute_drift() {
 # row and not a column: installed-vs-main is the whole question for it.
 print_drift() {
     echo "revision drift (repo: $REPO, ref: $DEPLOY_REF)"
-    printf '  running        : %s\n' "${RUNNING:-<unreachable — pogod not answering /version>}"
-    printf '  installed pogod: %s\n' "${INSTALLED:-<none on disk>}"
-    printf '  installed pogo : %s\n' "${INSTALLED_CLI:-<none on disk>}"
+    printf '  running        : %s\n' "$(annotate_rev "${RUNNING:-$REV_UNREACHABLE}")"
+    printf '  installed pogod: %s\n' "$(annotate_rev "${INSTALLED:-$REV_MISSING}")"
+    printf '  installed pogo : %s\n' "$(annotate_rev "${INSTALLED_CLI:-$REV_MISSING}")"
     printf '  main HEAD      : %s\n' "${MAIN:-<unknown>}"
+}
+
+# annotate_rev — print a revision with what we know ABOUT it. A bare hash in the
+# report tells the reader nothing about whether it is even this repo's hash, and
+# that missing word is what mg-49bc had to guess at.
+annotate_rev() {
+    local rev="$1"
+    case "$rev" in
+        "$REV_UNSTAMPED")   echo "<no vcs stamp — provenance UNKNOWN>"; return ;;
+        "$REV_MISSING")     echo "<none on disk>"; return ;;
+        "$REV_UNREACHABLE") echo "<unreachable — pogod not answering /version>"; return ;;
+    esac
+    if rev_in_repo "$rev"; then echo "$rev"; else echo "$rev  <FOREIGN — no such commit in $REPO>"; fi
+}
+
+# The three axes as "label:revision" pairs. One list, so a new axis cannot be
+# added to the staleness check and forgotten by the provenance check.
+drift_axes() {
+    printf '%s\n' "running pogod:$RUNNING" "installed pogod:$INSTALLED" "installed pogo:$INSTALLED_CLI"
+}
+
+# Names the axes whose binary carries no vcs stamp at all.
+unstamped_axes() {
+    local line out=""
+    while IFS= read -r line; do
+        [ "${line#*:}" = "$REV_UNSTAMPED" ] && out="${out:+$out, }${line%%:*}"
+    done < <(drift_axes)
+    echo "$out"
+}
+
+# Names the axes whose stamp is a real revision that this repo has never heard
+# of, quoting the claimed revision — the operator must be able to see WHAT was
+# claimed, not just that something was wrong.
+foreign_axes() {
+    local line rev out=""
+    while IFS= read -r line; do
+        rev="${line#*:}"
+        rev_is_sentinel "$rev" && continue
+        rev_in_repo "$rev" || out="${out:+$out; }${line%%:*} claims $(short "$rev")"
+    done < <(drift_axes)
+    echo "$out"
 }
 
 # Names the binaries whose installed revision is behind main, for the operator
@@ -420,6 +526,37 @@ NEEDS_BUILD=false ; NEEDS_RESTART=false ; ACTION=""
 classify_drift() {
     NEEDS_BUILD=false ; NEEDS_RESTART=false
     if [ -z "$MAIN" ]; then ACTION="cannot classify: main HEAD unknown"; return 1; fi
+
+    # THE PROVENANCE GATE (mg-8f09) — runs BEFORE any comparison to MAIN,
+    # because a comparison to MAIN is only meaningful once we know the thing we
+    # are comparing is a commit from this repo. Both branches below REFUSE
+    # (return 1) rather than owe a build: a build is the answer to "behind",
+    # and neither of these is behind. Refusing is also the safe direction — the
+    # caller leaves the old pogod running and dispatching, which is the correct
+    # resting state for "we do not know what is deployed".
+    local unstamped; unstamped="$(unstamped_axes)"
+    if [ -n "$unstamped" ]; then
+        # THE POST-mg-2ce4 WORLD. Once polecat worktrees move out of the ~/.pogo
+        # repo, Go finds no VCS to read and stamps NOTHING. Absent beats false —
+        # but absent must not read as clean, and it must not read as "behind"
+        # either. Both are claims about a binary that has told us nothing.
+        # The fleet already paid for this lesson once: the mg-de08 reap
+        # concluded death from two absences. Absence of evidence is not
+        # evidence, and a drift check is the last place that rule may lapse.
+        ACTION="UNKNOWN PROVENANCE: $unstamped — NO vcs stamp. This is not a clean box and it is not a stale one; the binary has told us nothing. Expected a commit from $DEPLOY_REF (HEAD $(short "$MAIN")) in ${REPO:-<unresolved>}. A rebuild will NOT clear this — an unstamped binary rebuilds unstamped. Verify: go version -m \$(command -v pogod) | grep vcs."
+        return 1
+    fi
+
+    local foreign; foreign="$(foreign_axes)"
+    if [ -n "$foreign" ]; then
+        # THE mg-49bc CORRECTION, made mechanical. A stamp naming a commit that
+        # does not exist in $REPO is not stale and is not dirty — it is from
+        # another repo entirely, and no amount of "git log main" will explain
+        # it. Name BOTH sides so the verdict can be re-derived from its own
+        # output with one cat-file, instead of re-investigated from scratch.
+        ACTION="FOREIGN STAMP: $foreign — no such commit in ${REPO:-<unresolved>}. Expected a commit from $DEPLOY_REF (HEAD $(short "$MAIN")). This binary was built against a DIFFERENT repository; its revision (and any vcs.modified=true it reports) describes that repo, not this one. Verify: git -C ${REPO:-<repo>} cat-file -e <rev>^{commit}"
+        return 1
+    fi
     # A build is owed if ANY deployed binary is behind main — not just pogod.
     # Reading only pogod here is what let the CLI sit three days stale while this
     # very function reported "clean": the daemon matched main, so nothing looked
