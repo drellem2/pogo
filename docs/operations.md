@@ -6,7 +6,7 @@ Operational runbooks for managing a running pogo deployment. This document is th
 
 An agent whose process has died — a crew loop that exited cleanly without re-arming, a crash whose respawn failed — leaves a stale entry in pogod's in-memory registry (`pogo agent list` shows `status=exited` with the old pid). Recovering it does **not** require a daemon restart; both recovery verbs handle a dead-process entry directly (gh #19):
 
-- `pogo agent stop <name>` — when the registered process is already dead, stop clears the stale entry and returns success (idempotent). Use this to unwedge an agent you don't want to immediately restart.
+- `pogo agent stop <name>` — when the registered process is already dead, stop clears the stale entry and returns success (idempotent). Note that stop does **not** keep a `restart_on_crash = true` agent down: pogod respawns it within seconds, so against an always-on agent stop is a *restart*. To keep one down, [park it](#parking-a-crew-agent-supported-dormancy).
 - `pogo agent start <name>` — overwrites a dead-process registration rather than refusing with `already running`, so start "just works" against a stale entry and brings the agent back in one step.
 
 A **live** agent is still protected: `start` refuses a duplicate of a running process, and `stop` signals it normally. So there is no need to `systemctl restart pogo.service` / bounce launchd to recover one wedged agent — that bounces the whole fleet. Reserve the daemon restart tiers below for pogod itself misbehaving.
@@ -60,6 +60,18 @@ pogo has **no `spend` command of its own** — token-usage accounting lives in *
 - `pogo agent list` shows parked agents with `status=parked`, so the coordinator's stall-watch can skip them mechanically. (The coordinator defaults to `ringmaster`; configurable via `[agents] coordinator`.)
 
 Parking an agent that isn't currently running is valid (the flag still gates auto-start); `pogo agent start` refuses a parked agent and points at `wake`. Parking is for crew agents — polecats are ephemeral and are simply stopped.
+
+**Park→wake is also the context-cycle lever.** To give an always-on agent a fresh context on a schedule (e.g. a nightly cycle per agent), park it and then wake it: wake starts a new process, so the agent comes back fresh, with its recorded schedules restored. Do **not** script `stop` → `start` for this. That races pogod's respawn: when the respawn wins, `start` fails with `already running` — and treating that error text as a success signal ("it's up, just not by my hand") is a brittle dependence on both the ~2s respawn timing and an error string. Park writes its flag before the stop, so it has no race to lose (drellem2/pogo#89).
+
+### Confirming an agent is actually down
+
+`pogo agent list` is a registry view, not a liveness probe — **absence from it is not evidence of exit**, and a listed pid can be stale. To confirm a teardown, use the probe:
+
+```bash
+pogo agent diagnose <name> --json | jq .process_alive   # false ⇒ that process is gone
+```
+
+`process_alive` is a real `kill(pid, 0)` check against the agent's pid, and `health` reports `exited`/`dead` alongside it. Remember that for a `restart_on_crash` agent a false `process_alive` means *that* process is gone, not that the agent will stay down — only a park keeps it down.
 
 ## Pogod restart policy
 
