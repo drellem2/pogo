@@ -133,6 +133,16 @@ const (
 	// high-priority item which stays available — e.g. the coordinator can't
 	// dispatch it yet — does not re-nudge every heartbeat tick.
 	DefaultHighPriorityWakeCooldown = 3 * time.Minute
+	// DefaultDriftCheckInterval is how often pogod's drift-check runner samples
+	// the [reconcile] mirrors from the heartbeat OnTick loop (mg-345b). It is
+	// deliberately COARSE — far larger than the ~30s heartbeat tick — because the
+	// check shells out to `launchctl print` / `ps` per mirror and a genuine
+	// deploy drift persists for minutes-to-hours, not seconds. This interval also
+	// serves as the mail-rate limiter: a persistent drift re-mails `human` once
+	// per interval, never once per tick. NOT a launchd timer — the nondemand-spawn
+	// wedge (mg-50e0) means a launchd timer would silently never fire, the exact
+	// "inert while appearing correct" failure the detector exists to catch.
+	DefaultDriftCheckInterval = 15 * time.Minute
 )
 
 // DefaultFastPriorities is the set of WorkItem.Priority values that trigger the
@@ -180,6 +190,7 @@ type Config struct {
 	StallWatch StallWatchConfig
 	Reaper     ReaperConfig
 	Reconcile  ReconcileConfig
+	DriftWatch DriftWatchConfig
 	// Source is the path of the highest-precedence config file Load read, or
 	// "" when no config file was found and everything is defaults + env. pogod
 	// uses this to gate crew auto-start: a daemon with no config file is
@@ -328,6 +339,32 @@ type ReconcileMirror struct {
 	Label  string
 }
 
+// DriftWatchConfig configures pogod's drift-check RUNNER (mg-345b): the
+// heartbeat-driven backstop that periodically runs the check-drift detector
+// (internal/reconcile.CheckDrift) over the [reconcile] mirrors and mails
+// `human` when a host artifact has drifted from its repo source.
+//
+// It is the DETECTION half of mg-75f9's ruling — the backstop for the four
+// paths the refinery `[deploy]` PREVENTION misses (a probeAlreadyMerged
+// early-return that skips deploy, a silently-failed deploy_command, a service
+// that dies after a good deploy, and any un-enrolled repo). It is REPORT-ONLY:
+// it never reconciles. Auto-fixing drift from the detector is a reconcile loop
+// fighting a genuinely-broken artifact — the unbounded-reaper failure shape the
+// reconcile package's own doc warns against.
+//
+// The runner rides pogod's heartbeat OnTick, NOT a launchd timer: the
+// nondemand-spawn wedge on this box (mg-50e0) means a launchd timer would
+// silently never fire, the exact failure the detector exists to catch.
+type DriftWatchConfig struct {
+	// Enabled turns the runner on. Defaults to true; with no [reconcile]
+	// mirrors declared it is a no-op (there is nothing to watch).
+	Enabled bool
+	// Interval is the COARSE gap between drift samples. Zero falls back to
+	// DefaultDriftCheckInterval. It must be far larger than the heartbeat tick;
+	// the throttle enforces that the runner does not sample every ~30s tick.
+	Interval time.Duration
+}
+
 // AgentsConfig holds agent command configuration.
 type AgentsConfig struct {
 	// Provider selects the agent harness ("claude", "codex", "pi", "cursor"). Resolved
@@ -461,6 +498,7 @@ type parsedConfig struct {
 	priorityWakeEnabledSet bool
 	agentsAutoStartSet     bool
 	reaperEnabledSet       bool
+	driftWatchEnabledSet   bool
 	// sources are the files that were read, lowest precedence first.
 	sources []string
 }
@@ -511,6 +549,10 @@ func Load() *Config {
 			HighPriorityWakeCooldown: DefaultHighPriorityWakeCooldown,
 			FastPriorities:           DefaultFastPriorities,
 			NonDispatchableAssignees: DefaultNonDispatchableAssignees,
+		},
+		DriftWatch: DriftWatchConfig{
+			Enabled:  true,
+			Interval: DefaultDriftCheckInterval,
 		},
 	}
 
@@ -574,6 +616,12 @@ func Load() *Config {
 		}
 		if len(fileCfg.Reconcile.Mirrors) > 0 {
 			cfg.Reconcile.Mirrors = fileCfg.Reconcile.Mirrors
+		}
+		if fileCfg.driftWatchEnabledSet {
+			cfg.DriftWatch.Enabled = fileCfg.DriftWatch.Enabled
+		}
+		if fileCfg.DriftWatch.Interval > 0 {
+			cfg.DriftWatch.Interval = fileCfg.DriftWatch.Interval
 		}
 		if fileCfg.stallWatchEnabledSet {
 			cfg.StallWatch.Enabled = fileCfg.StallWatch.Enabled
@@ -1069,6 +1117,16 @@ func parseConfigFileInto(cfg *parsedConfig, path string) error {
 			switch key {
 			case "mirrors":
 				cfg.Reconcile.Mirrors = parseReconcileMirrors(parseStringArray(val))
+			}
+		case "drift_watch":
+			switch key {
+			case "enabled":
+				cfg.DriftWatch.Enabled = val == "true"
+				cfg.driftWatchEnabledSet = true
+			case "interval":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.DriftWatch.Interval = d
+				}
 			}
 		case "agents":
 			switch key {

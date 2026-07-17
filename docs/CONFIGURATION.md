@@ -421,15 +421,43 @@ with an end-to-end acceptance in `scripts/reconcile-acceptance.sh`:
   correct path — pa's pollers ran 41 minutes of pre-patch code). The last two are
   the running-reality checks: *the file is not the process.*
 
-Run `check-drift` on a schedule so drift shouts rather than rots — a reconcile
-step you must remember to run is another thing that silently goes stale:
+### The built-in drift-check runner
 
-```bash
-pogo schedule "$POGO_AGENT_NAME" --cron "*/15 * * * *" --id reconcile-drift \
-    --message "Run: pogo service check-drift; if it exits 1, run pogo service reconcile."
+`check-drift` is only useful if something actually runs it. mg-5701 shipped the
+detector with **no runner** — "a detector you have to remember to ask," the
+guard-that-depends-on-memory class that already failed twice on pa. So pogod runs
+it for you: on a **coarse** interval, from the heartbeat `OnTick` loop, pogod
+samples every `[reconcile]` mirror with the same `CheckDrift` the CLI uses and
+**mails `human`** naming any drifted artifact (`internal/driftwatch`, mg-345b).
+
+This is the **detection backstop** for the four deploy paths the refinery
+`[deploy]` prevention (deploy-at-merge) does not cover (mg-75f9): a
+`probeAlreadyMerged` early-return that resolves as merged but *skips* deploy, a
+`deploy_command` that fails silently, a service that dies *after* a good deploy,
+and any un-enrolled repo. Prevention keeps drift from opening; this catches it
+when prevention was never in the path.
+
+Three properties are deliberate and tested (`internal/driftwatch`):
+
+- **Heartbeat, NOT launchd.** The nondemand-spawn wedge on this box (mg-50e0)
+  means a launchd timer would silently never fire — the exact "inert while
+  appearing correct" failure the detector exists to catch. The heartbeat already
+  ticks ~30s and drives the reaper and stall-nudger; the runner rides it.
+- **Report-only.** It mails; it **never** reconciles. An auto-fix loop fighting a
+  genuinely-broken artifact is the unbounded-reaper failure shape. A human (or a
+  deliberate `pogo service reconcile`) acts on the mail.
+- **Coarse throttle.** It samples at most once per `interval` no matter how often
+  the heartbeat ticks, which also rate-limits the mail: a persistent drift
+  re-reports once per interval, never once per tick.
+
+```toml
+[drift_watch]
+enabled = true       # default true; a no-op when no [reconcile] mirrors exist
+interval = "15m"     # coarse sample/mail cadence (default 15m)
 ```
 
-Source of truth: `internal/reconcile/`.
+Source of truth: `internal/driftwatch/` (runner) and `internal/reconcile/`
+(detector).
 
 ## Agent registry
 

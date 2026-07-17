@@ -27,6 +27,7 @@ import (
 	"github.com/drellem2/pogo/internal/agent"
 	"github.com/drellem2/pogo/internal/client"
 	"github.com/drellem2/pogo/internal/config"
+	"github.com/drellem2/pogo/internal/driftwatch"
 	"github.com/drellem2/pogo/internal/driver"
 	"github.com/drellem2/pogo/internal/gitceiling"
 	"github.com/drellem2/pogo/internal/gitgc"
@@ -37,6 +38,7 @@ import (
 	"github.com/drellem2/pogo/internal/project"
 	"github.com/drellem2/pogo/internal/providers"
 	"github.com/drellem2/pogo/internal/reaper"
+	"github.com/drellem2/pogo/internal/reconcile"
 	"github.com/drellem2/pogo/internal/refinery"
 	"github.com/drellem2/pogo/internal/scheduler"
 	"github.com/drellem2/pogo/internal/search"
@@ -1382,6 +1384,35 @@ Flags:
 			strings.Join(cfg.StallWatch.NonDispatchableAssignees, ","))
 	}
 
+	// Build the drift-check runner (mg-345b): the DETECTION backstop that rides
+	// the heartbeat and, on a COARSE interval, runs the check-drift detector
+	// (internal/reconcile.CheckDrift) over the [reconcile] mirrors and mails
+	// `human` when a host artifact has drifted from its repo source. This is the
+	// runner mg-5701's detector never had — "a detector you have to remember to
+	// ask." It is REPORT-ONLY (never reconciles) and rides the heartbeat, NOT a
+	// launchd timer, because the nondemand-spawn wedge (mg-50e0) would leave a
+	// launchd timer silently never firing. See internal/driftwatch and mg-75f9.
+	//
+	// Armed only when it has something to check: no [reconcile] mirrors means no
+	// artifacts to watch, so an unconfigured/sandbox daemon is a silent no-op and
+	// never mails `human`. The Enabled flag (default true) is the off switch.
+	var driftWatcher *driftwatch.Watcher
+	if cfg.DriftWatch.Enabled && len(cfg.Reconcile.Mirrors) > 0 {
+		mirrors := make([]reconcile.Mirror, 0, len(cfg.Reconcile.Mirrors))
+		for _, m := range cfg.Reconcile.Mirrors {
+			mirrors = append(mirrors, reconcile.Mirror{Name: m.Name, Source: m.Source, Target: m.Target, Label: m.Label})
+		}
+		driftWatcher = driftwatch.New(cfg.DriftWatch, driftwatch.Options{
+			Mirrors: mirrors,
+			// The FACTORY, not a pre-built Deps: HostDeps carries a per-sample
+			// launchctl cache, so each sample must get a fresh one or drift would
+			// freeze after the first check (see driftwatch.Options.NewDeps).
+			NewDeps: reconcile.HostDeps,
+			Mail:    client.SendMGMail,
+		})
+		log.Printf("pogod: drift-check runner enabled (mirrors=%d interval=%s, report-only)", len(mirrors), cfg.DriftWatch.Interval)
+	}
+
 	// Drive both heartbeat-piggybacked subsystems from a single OnTick. The
 	// scheduler runs inline (it stores absolute fire times, so a clock jump is
 	// absorbed in the same goroutine). The stall watcher runs in a goroutine so
@@ -1405,6 +1436,14 @@ Flags:
 		}
 		if stallWatcher != nil {
 			go stallWatcher.Check(now)
+		}
+		// The drift-check runner rides the same tick but throttles itself to a
+		// COARSE interval (its own lastRun gate), so it samples at most once per
+		// DriftWatch.Interval no matter how often this fires. In a goroutine
+		// because CheckDrift shells out to launchctl/ps and the mail send shells
+		// out to `mg mail send` — neither must delay the next tick. Report-only.
+		if driftWatcher != nil {
+			go driftWatcher.Check(now)
 		}
 		// Surface polecats that outlived an earlier pogod and are now alive but
 		// unreachable — UNKNOWN forever, holding a worktree and a claim, with
