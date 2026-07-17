@@ -147,9 +147,15 @@ type OnMerged func(mr *MergeRequest)
 // OnFailed is called when a merge attempt fails quality gates.
 type OnFailed func(mr *MergeRequest)
 
-// OnSubmit is called when a merge request is submitted to the queue.
-// This is used by pogod to clean up polecat worktrees so the branch
-// is no longer marked as "checked out" in the source repo.
+// OnSubmit is called when a merge request is submitted to the queue —
+// at StatusQueued, BEFORE any merge is attempted.
+//
+// It has no user today. pogod formerly used it to unlink the submitting
+// polecat's worktree; that stranded the polecat in a non-git directory on
+// every merge failure and was deleted (gh #88). A callback wired here fires
+// on a merge request whose outcome is not yet known, so it must not take any
+// action that a failed merge would need undone — in particular it must not
+// touch the author's worktree.
 type OnSubmit func(mr *MergeRequest)
 
 // Refinery is the merge queue loop.
@@ -329,9 +335,8 @@ func (r *Refinery) SetOnFailed(fn OnFailed) {
 	r.onFailed = fn
 }
 
-// SetOnSubmit sets the callback for merge request submission.
-// pogod uses this to unlink polecat worktrees so the branch is no
-// longer marked as "checked out" in the source repo.
+// SetOnSubmit sets the callback for merge request submission. See OnSubmit
+// for the constraint any callback wired here must respect.
 func (r *Refinery) SetOnSubmit(fn OnSubmit) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -352,10 +357,8 @@ func (r *Refinery) OnFailedFunc() OnFailed {
 	return r.onFailed
 }
 
-// OnSubmitFunc returns the current OnSubmit callback. Used by pogod's
-// orchestration-restart path to carry the callback over to a fresh Refinery
-// instance (without it, submits stop unlinking polecat worktrees after a
-// restart).
+// OnSubmitFunc returns the current OnSubmit callback, so a caller replacing a
+// Refinery instance can carry it over.
 func (r *Refinery) OnSubmitFunc() OnSubmit {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -417,8 +420,7 @@ func (r *Refinery) Submit(req MergeRequest) (string, error) {
 	// Wake the queue loop so pickup doesn't wait out the poll interval.
 	r.wake()
 
-	// Fire OnSubmit callback outside the lock. pogod uses this to unlink
-	// the polecat's worktree so the branch is no longer "checked out".
+	// Fire OnSubmit callback outside the lock. No user today — see OnSubmit.
 	if onSubmit != nil {
 		r.mu.Unlock()
 		onSubmit(&req)

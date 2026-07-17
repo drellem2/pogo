@@ -203,11 +203,17 @@ func PruneWorktrees(repo string, dryRun bool) (string, error) {
 //
 // This is the cleanup invoked on every polecat exit — normal and abnormal
 // alike (see the onExit hook in cmd/pogod) — and during a GC sweep. The
-// `git worktree remove` step is best-effort: after a refinery submit the
-// worktree's .git pointer is already unlinked, so the command fails
-// harmlessly and os.RemoveAll is the backstop that actually reclaims the
-// directory. The returned error reflects only whether the directory is
-// gone, which is the outcome callers care about.
+// `git worktree remove` step is best-effort: it drops the registration when
+// the worktree is still linked (the normal case since the submit-time unlink
+// was deleted in gh #88), and fails harmlessly on a legacy worktree whose
+// .git pointer that hook already removed. os.RemoveAll is the backstop that
+// reclaims the directory either way. The returned error reflects only whether
+// the directory is gone, which is the outcome callers care about.
+//
+// Dropping the registration is load-bearing, not incidental: it is what frees
+// the polecat's branch for deletion (git refuses to delete a branch checked
+// out in a worktree), which is why Sweep processes worktrees before branches.
+// TestRemoveWorktreeFreesCheckedOutBranch guards it.
 func RemoveWorktree(sourceRepo, worktreeDir string) error {
 	if worktreeDir == "" {
 		return nil

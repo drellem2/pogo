@@ -209,35 +209,3 @@ func (b *deferredBackstop) fire(name string, mr *refinery.MergeRequest) {
 		b.escalate(mr)
 	}
 }
-
-// worktreeUnlinker is the slice of agent.Registry that
-// unlinkSubmittedPolecatWorktree needs.
-type worktreeUnlinker interface {
-	GetByWorkItemOrName(id string) *agent.Agent
-}
-
-// unlinkSubmittedPolecatWorktree runs on the refinery's OnSubmit hook: when a
-// polecat submits an MR, its worktree is unlinked so the branch is no longer
-// marked "checked out" in the source repo, which would otherwise trigger
-// "already checked out" errors in the refinery's clone. The polecat's directory
-// is left intact so it can keep polling for merge results.
-//
-// Like reapMergedPolecat, it resolves the polecat by work-item id OR registry
-// name: mr.Author carries the full work-item id (== a.WorkItemID) while the
-// polecat registers under its bare id (a.Name), so a plain Get(mr.Author)
-// misses — the same gh #48 defect as the reap path. unlink is injected so the
-// hook is testable without touching git.
-func unlinkSubmittedPolecatWorktree(reg worktreeUnlinker, mr *refinery.MergeRequest, unlink func(sourceRepo, worktreeDir string) error) {
-	if mr.Author == "" {
-		return
-	}
-	a := reg.GetByWorkItemOrName(mr.Author)
-	if a == nil || a.WorktreeDir == "" || a.SourceRepo == "" {
-		return
-	}
-	if err := unlink(a.SourceRepo, a.WorktreeDir); err != nil {
-		log.Printf("refinery: failed to unlink polecat worktree for %s: %v", mr.Author, err)
-	} else {
-		log.Printf("refinery: unlinked polecat worktree for %s at %s", mr.Author, a.WorktreeDir)
-	}
-}

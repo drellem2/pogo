@@ -12,6 +12,26 @@ is the curated, human-readable summary kept in sync at each release cut.
 
 ### Fixed
 
+- **The refinery no longer strands a polecat on merge failure — the submit-time
+  worktree unlink is deleted (gh #88, mg-143e).** pogod wired the refinery's
+  `OnSubmit` hook to unlink the submitting polecat's worktree (`os.Remove(
+  worktree/.git)` + `git worktree prune`). `OnSubmit` fires at *enqueue*, before
+  any merge is attempted, so on a merge **failure** the polecat was left in a
+  directory that is no longer a git repository — unable to commit or push a fix.
+  pogod thereby contradicted itself in one function: it deleted the polecat's
+  `.git` at submit, then on failure mailed that same polecat "so they can fix and
+  resubmit" and reopened the work item "assigned to the original polecat". Every
+  merge failure hit this, not just the reporter's. The hook is **deleted** rather
+  than deferred or gated: it was prong 2 of the gh #4 fix (`37c1359`), and prong
+  1 of that same commit — `git clone --no-local` plus pointing the refinery's
+  clone at the real remote — removed the reason prong 2 existed. The refinery
+  merges in its own independent clone, so the source repo's checked-out branches
+  are invisible to it; `TestBranchCheckedOutInWorktree` merges a live,
+  checked-out polecat branch with no unlink and is now the load-bearing
+  regression guard. `refinery.UnlinkWorktree` had exactly one non-test caller and
+  is removed as dead code; the generic `OnSubmit` hook point is kept. This also
+  stops new gh #31 orphan dirs accruing — the unlink was what stripped a live
+  polecat's worktree registration in the first place.
 - **An orphaned polecat is now surfaced instead of silently leaked, and the
   redeploy drain stops declaring completion over it (mg-0b77).** mg-13a3 stopped
   pogod reaping a live polecat that outlived a restart — it resolves `UNKNOWN`

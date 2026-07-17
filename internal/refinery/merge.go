@@ -741,31 +741,6 @@ func hasAlternates(dir string) bool {
 	return info.Size() > 0
 }
 
-// UnlinkWorktree removes the git worktree tracking for a polecat's worktree
-// so the branch is no longer marked as "checked out" in the source repo.
-// The worktree directory is left intact so the polecat process can continue
-// running (it only needs git for push, which is already done by submit time).
-func UnlinkWorktree(sourceRepo, worktreeDir string) error {
-	if sourceRepo == "" || worktreeDir == "" {
-		return nil
-	}
-
-	// Remove the .git file from the worktree (it's a pointer to the
-	// source repo's .git/worktrees/<name>/ directory).
-	gitFile := filepath.Join(worktreeDir, ".git")
-	if err := os.Remove(gitFile); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("remove worktree .git file: %w", err)
-	}
-
-	// Prune stale worktree entries from the source repo.
-	cmd := exec.Command("git", "-C", sourceRepo, "worktree", "prune")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("worktree prune: %s: %w", strings.TrimSpace(string(out)), err)
-	}
-
-	return nil
-}
-
 // refineryCommitterName / refineryCommitterEmail is the identity git uses to
 // author and commit the commits the refinery creates during a rebase replay
 // (attemptMerge's `git rebase origin/<target>`). The refinery's worktree

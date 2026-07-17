@@ -27,11 +27,16 @@ type Options struct {
 	// keeps Sweep unit-testable without the mg binary.
 	Tickets TicketIndex
 	// PolecatsDir, when set, is additionally scanned for orphan polecat
-	// directories — dirs whose git worktree registration is gone (unlinked
-	// at refinery-submit time) but whose files were never deleted, e.g.
-	// because pogod died before the polecat's exit cleanup ran (gh #31).
-	// Such dirs are invisible to `git worktree list`, so the worktree scan
-	// alone can never reclaim them. Empty means skip the scan.
+	// directories — dirs whose git worktree registration is gone but whose
+	// files were never deleted, e.g. because pogod died before the polecat's
+	// exit cleanup ran (gh #31). Such dirs are invisible to `git worktree
+	// list`, so the worktree scan alone can never reclaim them. Empty means
+	// skip the scan.
+	//
+	// New orphans of this shape stopped accruing when the submit-time unlink
+	// was deleted (gh #88) — that hook was what stripped the registration
+	// from a live polecat in the first place. The scan stays for the legacy
+	// dirs it left behind, and for the pogod-died-mid-polecat case.
 	PolecatsDir string
 	// DryRun reports what would be done without deleting anything.
 	DryRun bool

@@ -153,11 +153,27 @@ func TestRemoveWorktreeAndPrune(t *testing.T) {
 	if _, err := os.Stat(wtPath); err != nil {
 		t.Fatalf("worktree dir should exist: %v", err)
 	}
+	// The worktree is LINKED and its branch is checked out in it — the state
+	// every polecat is now in at exit, since the submit-time unlink that used
+	// to strip the registration was deleted (gh #88). This is the negative
+	// control for that deletion: the exit/GC cleanup must still fully reclaim
+	// a polecat whose merge SUCCEEDED.
 	if err := RemoveWorktree(r.dir, wtPath); err != nil {
 		t.Fatalf("RemoveWorktree: %v", err)
 	}
 	if _, err := os.Stat(wtPath); !os.IsNotExist(err) {
 		t.Errorf("worktree dir should be gone, stat err = %v", err)
+	}
+	// The registration must go too, not just the directory. A leftover
+	// registration is the gh #31 orphan shape.
+	registered, err := ListWorktrees(r.dir)
+	if err != nil {
+		t.Fatalf("ListWorktrees: %v", err)
+	}
+	for _, wt := range registered {
+		if wt.Path == wtPath {
+			t.Errorf("worktree registration should be gone, still listed: %s", wt.Path)
+		}
 	}
 
 	// RemoveWorktree is idempotent — a second call is a no-op success.
@@ -179,6 +195,33 @@ func TestRemoveWorktreeAndPrune(t *testing.T) {
 	wts, _ := ListWorktrees(r.dir)
 	if len(wts) != 1 {
 		t.Errorf("after prune want only main worktree, got %d: %v", len(wts), wts)
+	}
+}
+
+// TestRemoveWorktreeFreesCheckedOutBranch is the negative control for the gh
+// #88 deletion of the submit-time unlink. Without that hook a polecat's branch
+// stays checked out in its worktree right up to exit, and `git branch -D`
+// refuses a branch that is checked out somewhere. The cleanup is only safe
+// because RemoveWorktree drops the registration first, which is exactly why
+// Sweep processes worktrees before branches. If this ever regresses, every
+// merged polecat leaks its branch.
+func TestRemoveWorktreeFreesCheckedOutBranch(t *testing.T) {
+	r := newTestRepo(t)
+	r.branch("polecat-live")
+	wtPath := r.worktree("polecat-live")
+
+	// Precondition: while the worktree is live, the branch is pinned. This is
+	// the state the deleted hook used to prevent — assert it, so the test
+	// proves the ordering matters rather than assuming it.
+	if err := DeleteBranch(r.dir, "polecat-live"); err == nil {
+		t.Fatal("expected git to refuse deleting a branch checked out in a live worktree")
+	}
+
+	if err := RemoveWorktree(r.dir, wtPath); err != nil {
+		t.Fatalf("RemoveWorktree: %v", err)
+	}
+	if err := DeleteBranch(r.dir, "polecat-live"); err != nil {
+		t.Errorf("branch should be deletable once its worktree is removed: %v", err)
 	}
 }
 

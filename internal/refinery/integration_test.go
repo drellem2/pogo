@@ -763,51 +763,6 @@ func TestEnsureWorktreeReclonesStaleAlternates(t *testing.T) {
 	}
 }
 
-// TestUnlinkWorktree verifies that UnlinkWorktree detaches a polecat's
-// worktree from the source repo so the branch is no longer "checked out".
-func TestUnlinkWorktree(t *testing.T) {
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git not found")
-	}
-
-	// Set up a source repo
-	srcDir := t.TempDir()
-	run(t, srcDir, "git", "init", "-b", "main")
-	run(t, srcDir, "git", "config", "user.email", "test@test.com")
-	run(t, srcDir, "git", "config", "user.name", "Test")
-	os.WriteFile(filepath.Join(srcDir, "README.md"), []byte("# Test"), 0644)
-	run(t, srcDir, "git", "add", ".")
-	run(t, srcDir, "git", "commit", "-m", "initial")
-
-	// Create a linked worktree (simulates polecat spawn)
-	wtPath := filepath.Join(t.TempDir(), "polecat-wt")
-	run(t, srcDir, "git", "worktree", "add", "-b", "polecat-branch", wtPath)
-
-	// Verify the branch is tracked by git worktree list
-	cmd := exec.Command("git", "-C", srcDir, "worktree", "list", "--porcelain")
-	out, _ := cmd.Output()
-	if !strings.Contains(string(out), wtPath) {
-		t.Fatal("expected worktree to be listed")
-	}
-
-	// Unlink the worktree
-	if err := UnlinkWorktree(srcDir, wtPath); err != nil {
-		t.Fatalf("UnlinkWorktree: %v", err)
-	}
-
-	// Verify the worktree is no longer tracked
-	cmd = exec.Command("git", "-C", srcDir, "worktree", "list", "--porcelain")
-	out, _ = cmd.Output()
-	if strings.Contains(string(out), wtPath) {
-		t.Error("expected worktree to be unlinked from source repo")
-	}
-
-	// The directory should still exist (polecat process needs it)
-	if _, err := os.Stat(wtPath); os.IsNotExist(err) {
-		t.Error("expected worktree directory to still exist")
-	}
-}
-
 // TestOnSubmitCallback verifies that the OnSubmit callback fires when
 // a merge request is submitted.
 func TestOnSubmitCallback(t *testing.T) {

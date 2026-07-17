@@ -411,8 +411,8 @@ branch. When a polecat exits — normally or abnormally — pogod removes that
 worktree. But branches accumulate, and a worktree can still leak if pogod
 itself dies mid-polecat. pogo garbage-collects both, plus orphaned polecat
 directories under `~/.pogo/polecats` — dirs no longer in `git worktree
-list` (the worktree is unlinked when the polecat submits its branch) whose
-files were never deleted because the exit cleanup never got to run (gh #31).
+list` whose files were never deleted because the exit cleanup never got to
+run (gh #31).
 
 The collector (`internal/gitgc`) only ever touches artifacts whose work
 item has **concluded**: an archived ticket's branch is deleted

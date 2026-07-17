@@ -76,9 +76,10 @@ ambiguity:
 On load (both instantiation paths — see Hook points):
 
 1. **`queued` and `held` items → replay.** Safe: no side effects have
-   happened yet beyond the OnSubmit worktree-unlink, which already
-   occurred pre-crash. Preserve FIFO order; `held` re-enters via the QA
-   gate as today.
+   happened yet. (This originally read "beyond the OnSubmit worktree-unlink,
+   which already occurred pre-crash" — that hook was deleted in gh #88, so
+   submit now has no side effects at all and replay is strictly safer.)
+   Preserve FIFO order; `held` re-enters via the QA gate as today.
 2. **The `processing` item (at most one — the queue loop is
    single-threaded, refinery.go:366-388) → resolve, don't blindly re-run.**
    The dangerous window is **after `git push`, before the history
@@ -109,10 +110,11 @@ On load (both instantiation paths — see Hook points):
 - **The `SetRefineryStarter` closure (main.go:813-828) must use the same
   store** — this path fires on every orchestration restart and is a
   state-loss source in its own right.
-- Adjacent bug found during investigation, fix in the same impl ticket:
-  that closure re-wires OnMerged/OnFailed but **not OnSubmit**
-  (main.go:818-823), so after an orchestration restart submits stop
-  unlinking polecat worktrees.
+- Adjacent bug found during investigation, fixed in the same impl ticket:
+  that closure re-wired OnMerged/OnFailed but **not OnSubmit**, so after an
+  orchestration restart submits stopped unlinking polecat worktrees.
+  Superseded — gh #88 deleted the unlink hook itself, so there is no longer
+  an OnSubmit callback to carry over, and the re-wire went with it.
 - Graceful shutdown: final flush in `Stop()` (refinery.go:391-396) /
   server.go:89-92 — belt-and-braces only, since writes are already
   per-mutation.

@@ -1374,9 +1374,6 @@ Flags:
 		if refErr != nil {
 			fmt.Printf("Warning: refinery failed to start: %v\n", refErr)
 		} else {
-			mergeQueue.SetOnSubmit(func(mr *refinery.MergeRequest) {
-				unlinkSubmittedPolecatWorktree(agentRegistry, mr, refinery.UnlinkWorktree)
-			})
 			mergeQueue.SetOnMerged(func(mr *refinery.MergeRequest) {
 				log.Printf("refinery: merged %s (branch=%s, author=%s)", mr.ID, mr.Branch, mr.Author)
 
@@ -1454,7 +1451,6 @@ Flags:
 	if mergeQueue != nil {
 		onMerged := mergeQueue.OnMergedFunc()
 		onFailed := mergeQueue.OnFailedFunc()
-		onSubmit := mergeQueue.OnSubmitFunc()
 		srv.SetRefineryStarter(func() (*refinery.Refinery, error) {
 			// refineCfg carries StatePath, so the fresh instance loads the
 			// state the outgoing one flushed in Stop() — an orchestration
@@ -1468,11 +1464,6 @@ Flags:
 			}
 			if onFailed != nil {
 				newRef.SetOnFailed(onFailed)
-			}
-			// Re-wire OnSubmit too — without it, submits after an
-			// orchestration restart stop unlinking polecat worktrees.
-			if onSubmit != nil {
-				newRef.SetOnSubmit(onSubmit)
 			}
 			mergeQueue = newRef
 			go mergeQueue.Start(context.Background())
