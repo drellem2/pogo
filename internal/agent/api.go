@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/drellem2/pogo/internal/events"
 	"github.com/drellem2/pogo/internal/gitgc"
 )
 
@@ -1004,25 +1006,32 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		return
 	}
 
+	var spawnReq SpawnPolecatAPIRequest
+	if err := json.NewDecoder(req.Body).Decode(&spawnReq); err != nil {
+		failPolecatSpawn(w, spawnReq, http.StatusBadRequest, fmt.Sprintf("bad request: %v", err))
+		return
+	}
+
 	// Drain gate: while the self-deploy driver is quiescing the fleet for a
 	// redeploy, refuse new polecat dispatch so the live count can reach zero
 	// (mg-6afa mechanism 3). 503 is retryable — the caller (mayor) can redispatch
 	// once the redeploy lands and drain clears on the fresh daemon.
+	//
+	// Gated after the decode, not before, so the refusal can name the agent and
+	// work item it refused. A throttle that emits an anonymous nothing is
+	// indistinguishable from a spawn that failed — that ambiguity is the whole
+	// defect this handler's event emission exists to close (mg-d22a). The decode
+	// has no side effects, so moving the gate below it costs the drain nothing.
 	if r.Draining() {
-		http.Error(w, "pogod is draining for a redeploy; not dispatching new polecats", http.StatusServiceUnavailable)
-		return
-	}
-
-	var spawnReq SpawnPolecatAPIRequest
-	if err := json.NewDecoder(req.Body).Decode(&spawnReq); err != nil {
-		http.Error(w, fmt.Sprintf("bad request: %v", err), http.StatusBadRequest)
+		failPolecatSpawn(w, spawnReq, http.StatusServiceUnavailable,
+			"pogod is draining for a redeploy; not dispatching new polecats")
 		return
 	}
 
 	// Validate before the worktree, agent dir, and expanded prompt file get
 	// created — a rejected name should leave nothing behind (mg-ef80).
 	if err := ValidateAgentName(spawnReq.Name); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		failPolecatSpawn(w, spawnReq, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -1035,7 +1044,7 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 	// Resolve template path
 	tmplPath, err := ResolveTemplate(tmplName)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		failPolecatSpawn(w, spawnReq, http.StatusNotFound, err.Error())
 		return
 	}
 
@@ -1044,7 +1053,7 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 	// behavior so templates without frontmatter are unaffected.
 	tmplMeta, _, err := ParsePromptFrontmatter(tmplPath)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("template frontmatter parse failed: %v", err), http.StatusInternalServerError)
+		failPolecatSpawn(w, spawnReq, http.StatusInternalServerError, fmt.Sprintf("template frontmatter parse failed: %v", err))
 		return
 	}
 
@@ -1056,7 +1065,7 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 	// warns and falls back to the default.
 	provider, perr := r.resolveProvider(TypePolecat, spawnReq.Provider, tmplMeta.Provider)
 	if perr != nil {
-		http.Error(w, perr.Error(), http.StatusBadRequest)
+		failPolecatSpawn(w, spawnReq, http.StatusBadRequest, perr.Error())
 		return
 	}
 
@@ -1092,7 +1101,7 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 	if spawnReq.NoWorktree {
 		agentDir := filepath.Join(PromptDir(), spawnReq.Name)
 		if err := os.MkdirAll(agentDir, 0755); err != nil {
-			http.Error(w, fmt.Sprintf("failed to create agent dir: %v", err), http.StatusInternalServerError)
+			failPolecatSpawn(w, spawnReq, http.StatusInternalServerError, fmt.Sprintf("failed to create agent dir: %v", err))
 			return
 		}
 		workDir = agentDir
@@ -1131,7 +1140,7 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 	}
 	promptFile, err := ExpandTemplateToFile(tmplPath, vars)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("template expansion failed: %v", err), http.StatusInternalServerError)
+		failPolecatSpawn(w, spawnReq, http.StatusInternalServerError, fmt.Sprintf("template expansion failed: %v", err))
 		return
 	}
 
@@ -1149,7 +1158,8 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		// Ensure parent directory exists
 		if err := os.MkdirAll(filepath.Dir(worktreeDir), 0755); err != nil {
 			os.Remove(promptFile)
-			http.Error(w, fmt.Sprintf("failed to create polecats dir: %v", err), http.StatusInternalServerError)
+			failPolecatSpawn(w, spawnReq, http.StatusInternalServerError,
+				fmt.Sprintf("failed to create polecats dir: %v", err))
 			return
 		}
 
@@ -1159,6 +1169,22 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		// exists (tests, repos without a remote).
 		baseRef := resolvePolecatBaseRef(sourceRepo, spawnReq.Branch)
 
+		// A polecat-<name> branch left over from earlier work would make the
+		// worktree add below fail permanently. Clear it if it is provably
+		// spent; refuse with a cause-naming error if it is not (mg-d22a).
+		if err := reclaimStalePolecatBranch(sourceRepo, branchName, baseRef); err != nil {
+			os.Remove(promptFile)
+			failPolecatSpawn(w, spawnReq, http.StatusConflict, err.Error())
+			return
+		}
+
+		// Whether the branch exists *now*, after reclamation and immediately
+		// before the add. Normally false — reclaim either deleted it or bailed.
+		// A true here means something created it in the intervening window (a
+		// concurrent spawn of the same name), and that branch is not ours to
+		// delete on the failure path below.
+		branchPreexisted := polecatBranchExists(sourceRepo, branchName)
+
 		wtArgs := []string{"-C", sourceRepo, "worktree", "add", worktreeDir, "-b", branchName}
 		if baseRef != "" {
 			wtArgs = append(wtArgs, baseRef)
@@ -1166,7 +1192,18 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		wtCmd := exec.Command("git", wtArgs...)
 		if out, err := wtCmd.CombinedOutput(); err != nil {
 			os.Remove(promptFile)
-			http.Error(w, fmt.Sprintf("worktree creation failed: %v\n%s", err, out), http.StatusInternalServerError)
+			// `git worktree add -b` creates the branch and *then* checks it
+			// out, so a failure here can leave the branch behind with no
+			// worktree — which is exactly the state that poisons every retry.
+			// Every other failure path in this handler already rolls back; this
+			// one did not (mg-d22a). Roll back only the branch we created:
+			// deleting a branch that appeared underneath us would destroy a
+			// concurrent spawn's work.
+			if !branchPreexisted {
+				cleanupFailedPolecatSpawn(sourceRepo, worktreeDir, branchName)
+			}
+			failPolecatSpawn(w, spawnReq, http.StatusInternalServerError,
+				fmt.Sprintf("worktree creation failed: %v\n%s", err, out))
 			return
 		}
 		log.Printf("polecat %s: created worktree at %s (branch %s, base %q)", spawnReq.Name, worktreeDir, branchName, baseRef)
@@ -1191,7 +1228,7 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 	if cmdErr != nil {
 		os.Remove(promptFile)
 		cleanupFailedPolecatSpawn(sourceRepo, worktreeDir, branchName)
-		http.Error(w, fmt.Sprintf("agent command template error: %v", cmdErr), http.StatusInternalServerError)
+		failPolecatSpawn(w, spawnReq, http.StatusInternalServerError, fmt.Sprintf("agent command template error: %v", cmdErr))
 		return
 	}
 
@@ -1205,7 +1242,7 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		if err != nil {
 			os.Remove(promptFile)
 			cleanupFailedPolecatSpawn(sourceRepo, worktreeDir, branchName)
-			http.Error(w, fmt.Sprintf("nudge_on_start template error: %v", err), http.StatusInternalServerError)
+			failPolecatSpawn(w, spawnReq, http.StatusInternalServerError, fmt.Sprintf("nudge_on_start template error: %v", err))
 			return
 		}
 		nudgeMsg = expanded
@@ -1232,7 +1269,7 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 	if err != nil {
 		os.Remove(promptFile) // Clean up temp file on spawn failure
 		cleanupFailedPolecatSpawn(sourceRepo, worktreeDir, branchName)
-		http.Error(w, err.Error(), spawnErrStatus(err))
+		failPolecatSpawn(w, spawnReq, spawnErrStatus(err), err.Error())
 		return
 	}
 
@@ -1247,6 +1284,51 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(agentInfo(a))
+}
+
+// failPolecatSpawn reports a polecat dispatch that produced no agent, on both
+// channels that matter — and they are not interchangeable.
+//
+// The HTTP status tells the *live caller* (the CLI exits nonzero off it). The
+// event tells *every later reader* why a work item has no agent_spawned
+// record. Fix only the status and a gap in the spawn record still has no cause
+// attached to it: a throttled spawn and a failed spawn emit the identical
+// nothing, and a reader reconstructing the history has to supply a story. That
+// is not hypothetical — it produced a false "the MAX-2 cap throttled it"
+// finding that was written into a ticket and mailed as a STOP (mg-d22a).
+// An absence is a fact with a cause, and the cause is only recoverable if the
+// system emitted it.
+func failPolecatSpawn(w http.ResponseWriter, spawnReq SpawnPolecatAPIRequest, status int, msg string) {
+	emitPolecatSpawnFailed(spawnReq, status, msg)
+	http.Error(w, msg, status)
+}
+
+// emitPolecatSpawnFailed records an agent_spawn_failed event: the counterpart
+// to agent_spawned for a dispatch that never produced an agent. It carries the
+// intended identity (which does not exist yet — that is the point), the work
+// item, the repo, and the underlying error verbatim, so a gap between spawn
+// records can be read back to its cause without inference.
+func emitPolecatSpawnFailed(spawnReq SpawnPolecatAPIRequest, status int, reason string) {
+	// The agent was never created, so there is no Agent to ask for an identity
+	// string; mirror eventAgent's polecat convention against the *intended*
+	// name. A request too malformed to name an agent is attributed to pogod,
+	// the only actor known to exist in that case.
+	actor := "pogod"
+	if spawnReq.Name != "" {
+		actor = "cat-" + spawnReq.Name
+	}
+	events.Emit(context.Background(), events.Event{
+		EventType:  "agent_spawn_failed",
+		Agent:      actor,
+		WorkItemID: spawnReq.Id,
+		Repo:       spawnReq.Repo,
+		Details: map[string]any{
+			"agent_type":  string(TypePolecat),
+			"agent_name":  spawnReq.Name,
+			"status_code": status,
+			"reason":      reason,
+		},
+	})
 }
 
 // cleanupFailedPolecatSpawn undoes the git side effects of a polecat spawn
@@ -1272,6 +1354,97 @@ func cleanupFailedPolecatSpawn(sourceRepo, worktreeDir, branchName string) {
 			log.Printf("polecat spawn cleanup: failed to delete branch %s in %s: %v\n%s", branchName, sourceRepo, err, out)
 		}
 	}
+}
+
+// polecatBranchExists reports whether refs/heads/<branch> exists in repo.
+func polecatBranchExists(repo, branch string) bool {
+	if repo == "" || branch == "" {
+		return false
+	}
+	return exec.Command("git", "-C", repo, "rev-parse", "--verify", "--quiet",
+		"refs/heads/"+branch).Run() == nil
+}
+
+// polecatBranchWorktree returns the path of the worktree that has branch
+// checked out, or "" if no worktree does. A branch with a worktree belongs to
+// a live polecat; a branch without one is a leftover.
+func polecatBranchWorktree(repo, branch string) string {
+	out, err := exec.Command("git", "-C", repo, "worktree", "list", "--porcelain").Output()
+	if err != nil {
+		return ""
+	}
+	var wt string
+	for _, line := range strings.Split(string(out), "\n") {
+		switch {
+		case strings.HasPrefix(line, "worktree "):
+			wt = strings.TrimPrefix(line, "worktree ")
+		case line == "branch refs/heads/"+branch:
+			return wt
+		}
+	}
+	return ""
+}
+
+// polecatBranchIsSpent reports whether every commit on branch is already
+// reachable from baseRef — i.e. the branch holds nothing that would be lost by
+// deleting it. It answers "no" on any error: an unreadable branch is treated
+// as carrying work, because the cost of a wrong "yes" is destroyed commits.
+func polecatBranchIsSpent(repo, branch, baseRef string) bool {
+	out, err := exec.Command("git", "-C", repo, "rev-list", "--count",
+		baseRef+".."+branch).Output()
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(out)) == "0"
+}
+
+// reclaimStalePolecatBranch clears a leftover polecat-<name> branch so that a
+// re-dispatch of the same work item can create its worktree.
+//
+// This is the fix for a permanent, silent dispatch blocker. `git worktree add
+// -b` refuses to create a branch that already exists, and polecat branches
+// outlive their worktrees routinely — not only when a spawn fails, but after
+// ordinary successful merged work (55 such branches existed in one repo when
+// this was written). Every one is a landmine for the next dispatch that reuses
+// that id, and it breaks the recovery procedure the mayor's own prompt
+// documents: stop the agent → mg unclaim → re-dispatch fails on the surviving
+// branch until a human runs `git branch -D` (mg-d22a).
+//
+// Reclamation is deliberately narrow. A branch is cleared only when it is
+// provably spent — no worktree, and no commits absent from baseRef. The two
+// refusals are the cases where deleting would destroy something:
+//
+//   - checked out in a worktree: a live polecat owns it.
+//   - carries unmerged commits: real work nobody has merged.
+//
+// Both return an error naming the recovery, so the caller sees why the item is
+// undispatchable instead of git's misleading "a branch named X already exists",
+// which names nothing about the actual cause.
+func reclaimStalePolecatBranch(repo, branch, baseRef string) error {
+	if !polecatBranchExists(repo, branch) {
+		return nil
+	}
+	if wt := polecatBranchWorktree(repo, branch); wt != "" {
+		return fmt.Errorf("branch %s is checked out at %s: a polecat for this work item is still live. "+
+			"Stop it before re-dispatching", branch, wt)
+	}
+	// resolvePolecatBaseRef returns "" to mean "base on local HEAD"; use the
+	// same ref here so the spent test is asked against the commit the worktree
+	// would actually have been created from.
+	if baseRef == "" {
+		baseRef = "HEAD"
+	}
+	if !polecatBranchIsSpent(repo, branch, baseRef) {
+		return fmt.Errorf("branch %s has no worktree but carries commits not in %s: it holds unmerged work "+
+			"and will not be reclaimed automatically. Inspect it (git -C %s log %s..%s) and delete it "+
+			"(git -C %s branch -D %s) once the work is safe", branch, baseRef, repo, baseRef, branch, repo, branch)
+	}
+	if out, err := exec.Command("git", "-C", repo, "branch", "-D", branch).CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to reclaim spent branch %s: %v\n%s", branch, err, out)
+	}
+	log.Printf("polecat: reclaimed spent branch %s in %s (no worktree, nothing unmerged vs %s)",
+		branch, repo, baseRef)
+	return nil
 }
 
 // resolvePolecatBaseRef returns the git ref a new polecat worktree should be

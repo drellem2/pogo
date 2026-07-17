@@ -86,6 +86,26 @@ A crew or polecat process has been started by pogod (PTY allocated, Claude Code 
 {"schema_version":1,"timestamp":"2026-04-25T10:00:00.000000000Z","event_type":"agent_spawned","agent":"cat-mg-0241","work_item_id":"mg-0241","repo":"/Users/daniel/dev/pogo","details":{"agent_type":"polecat","pid":48213,"prompt_file":"/Users/daniel/.pogo/agents/templates/polecat.md","worktree":"/Users/daniel/.pogo/polecats/pc-0241"}}
 ```
 
+#### `agent_spawn_failed`
+
+A polecat dispatch was refused or failed, and **no agent process was created**. The counterpart to `agent_spawned`: emitted on every failure path of `/agents/spawn-polecat`, including the drain-gate refusal.
+
+Read this event as the cause of a gap in the spawn record. Without it, a work item with no `agent_spawned` line is ambiguous — a throttled dispatch, a failed dispatch, and a dispatch never attempted all emit the identical nothing, and a reader reconstructing the history has to supply a mechanism from imagination. That is not a hypothetical failure mode: it produced a false "the dispatch cap throttled it" finding that was written into a ticket and mailed as a stop order (mg-d22a). An absence is a fact with a cause, and the cause is only recoverable if the system emitted it.
+
+Note the identity: `agent` names the polecat that was *intended*. It does not exist and never did — that is the point of the event. A request too malformed to name an agent is attributed to `pogod`.
+
+- **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent`, `details`
+- **Optional envelope:** `work_item_id` (the item being dispatched), `repo` (the target repository)
+- **`details` fields:**
+  - `agent_type` (string, required): always `"polecat"`
+  - `agent_name` (string, required): the intended agent name; empty when the request could not be parsed
+  - `status_code` (int, required): the HTTP status returned to the caller. `503` is a retryable throttle (drain); `409` is a conflicting branch; `4xx` otherwise is a bad request; `5xx` is a genuine failure
+  - `reason` (string, required): the underlying error, verbatim — e.g. `"worktree creation failed: exit status 255\nfatal: a branch named 'polecat-4bd4' already exists"`
+
+```json
+{"schema_version":1,"timestamp":"2026-07-17T13:21:29.000000000Z","event_type":"agent_spawn_failed","agent":"cat-4bd4","work_item_id":"mg-4bd4","repo":"/Users/daniel/dev/pogo","details":{"agent_type":"polecat","agent_name":"4bd4","status_code":500,"reason":"worktree creation failed: exit status 255\nfatal: a branch named 'polecat-4bd4' already exists"}}
+```
+
 #### `agent_stopped`
 
 An agent process exited cleanly (received stop signal, completed task, or `pogo agent stop` was issued).

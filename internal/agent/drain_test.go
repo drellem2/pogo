@@ -118,7 +118,9 @@ func TestHandleDrainPostSetsFlag(t *testing.T) {
 
 // TestSpawnPolecatRefusedWhileDraining is the load-bearing guard: no new
 // polecat is dispatched while the fleet is draining for a redeploy. The 503
-// fires before body decode, so an empty request exercises exactly the gate.
+// fires immediately after body decode — early enough that an empty request
+// still exercises exactly the gate and nothing below it, late enough that the
+// refusal's event can name the agent it refused (mg-d22a).
 func TestSpawnPolecatRefusedWhileDraining(t *testing.T) {
 	reg := newDrainTestRegistry(t)
 	reg.SetDraining(true)

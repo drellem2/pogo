@@ -10,6 +10,27 @@ is the curated, human-readable summary kept in sync at each release cut.
 
 ## [Unreleased]
 
+### Added
+
+- **`agent_spawn_failed` — a failed polecat spawn now says so on the record
+  (mg-d22a).** pogod emitted **no failure event at all**: 34,090 `agent_spawned`
+  events in the live log and not one counterpart. So a work item with no spawn
+  record was **ambiguous** — a throttled dispatch, a failed dispatch, and a
+  dispatch never attempted all emitted the *identical nothing*, and anyone
+  reconstructing the history had to supply a mechanism from imagination. One
+  did: an investigator with the log open inferred "the dispatch cap throttled
+  it", wrote it into a ticket as a structural finding, and mailed a stop order
+  built on it. The spawn had simply failed. **No amount of care distinguishes
+  two causes that emit the same absence** — an absence is a fact with a cause,
+  and the cause is recoverable only if the system emitted it.
+
+  Emitted on every failure path of `/agents/spawn-polecat` — including the
+  drain-gate refusal, so a *throttle* is now distinguishable from a *failure* —
+  carrying the intended agent, work item, repo, status code, and the underlying
+  error verbatim. This is **independent of the exit code**: the status tells the
+  live caller, the event tells every later reader. Fixing only one leaves the
+  other blind. See `docs/event-log.md`.
+
 ### Fixed
 
 - **A stall nudge the mayor's terminal can't take now goes to its INBOX instead
@@ -91,6 +112,29 @@ is the curated, human-readable summary kept in sync at each release cut.
   replace relocating `polecats/` (mg-2ce4): relocation reaches only the repos
   that *can* move, and only while `$HOME` stays free of a `.git`. Both are
   wanted.
+- **A failed polecat spawn no longer leaves a branch that poisons every retry
+  (mg-d22a).** `git worktree add -b <branch>` creates the branch and *then*
+  checks it out, so a failed checkout left the branch behind with **no
+  worktree** — and that leftover, not the original fault, is what broke the
+  retry: permanently, with a *different* and misleading error ("a branch named
+  X already exists") naming nothing about the actual cause. The work item stayed
+  undispatchable until a human ran `git branch -D` by hand. Every other failure
+  path in the handler already rolled back; this one did not.
+
+  The leftovers were **not** rare race artifacts: **55 polecat branches with no
+  worktree existed in one repo**, accumulated from ordinary *successful, merged*
+  work — each one a permanent landmine for the next dispatch reusing that id.
+  This also broke the recovery procedure documented in the mayor's own prompt
+  (stop → `mg unclaim` → re-dispatch), which failed on the surviving branch.
+
+  A spawn now reclaims a leftover `polecat-<name>` branch when it is **provably
+  spent** — no worktree, and nothing that isn't already in the base ref.
+  Reclamation deletes branches, so it refuses in the two cases where deleting
+  would destroy something, each with an error naming the cause and the recovery:
+  a branch **checked out in a worktree** (a live polecat owns it) and a branch
+  carrying **unmerged commits** (real work). On a failed `worktree add`, the
+  handler rolls back **only the branch it created** — never one that appeared
+  underneath it.
 
 - **The drift check no longer TRUSTS the binary's VCS stamp — an absent stamp
   is UNKNOWN, never clean, and never "behind" (mg-8f09).** `pogo-self-deploy`
