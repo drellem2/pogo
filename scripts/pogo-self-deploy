@@ -89,83 +89,185 @@ base_url() { echo "http://127.0.0.1:${PORT}"; }
 # is already up and running main by the time it runs, and a false alarm must
 # not look like a failed deploy.
 #
-# The ASSEMBLED path below (verify_mail_checks_restored -> mail_check_count ->
+# The ASSEMBLED path below (verify_mail_checks_restored -> mail_check_ids ->
 # live curl -> parse -> classify) is shown able to go RED by
 # scripts/pogo-self-deploy_live_test.sh, which stands up a real pogod, lets its
 # real GC reap real mail-checks, and asserts this code reports the loss (mg-c02d).
 # The pure-function tests in pogo-self-deploy_test.sh do NOT cover that wiring.
 # If you change anything in that chain, that live control is the one that matters.
+#
+# EVERYTHING HERE REASONS ABOUT NAMES, NEVER TALLIES (mg-ea3e). The first cut of
+# this check compared counts and granted slack as a NUMBER of dead polecats, so
+# a --force bounce that killed a polecat with no mail-check handed out an
+# allowance no schedule had earned — and one REAL crew loss slid under it
+# silently. Architect: "Slack computed as a COUNT of dead polecats rather than
+# the SET of schedules that legitimately vanished is the same error shape as the
+# original bug — reasoning about a number instead of an identity." Count
+# arithmetic cannot tell you WHICH schedule went missing, and WHICH is the only
+# question this check exists to answer. A silent miss in the detector, inside
+# the detector built because a health signal could not tell "fine" from "gone".
+# So: sets in, set difference, names out. If you find yourself adding an
+# integer here, you are reintroducing the bug.
 
-# count_mail_checks — count mail-check-* ids on stdin. Pure: the sed/grep half
-# of mail_check_count, split out so it is testable without a live daemon.
-count_mail_checks() {
-    grep -o '"id":"mail-check-[^"]*"' | wc -l | tr -d ' '
+# extract_mail_check_ids — the SET of mail-check-* schedule ids in a
+# /scheduler/schedules body on stdin, one per line, sorted. Pure: the parse half
+# of mail_check_ids, split out so it is testable without a live daemon.
+extract_mail_check_ids() {
+    grep -o '"id":"mail-check-[^"]*"' | sed 's/^"id":"//; s/"$//' | LC_ALL=C sort -u
 }
 
-# mail_check_count — how many mail-check-* schedules pogod currently holds.
-# Empty (not 0) when pogod cannot be reached: "unreachable" and "zero
-# schedules" are different facts and must not compare equal — treating an
-# unreachable daemon as "0 mail-checks" would report the entire fleet lost.
-mail_check_count() {
+# extract_mail_check_ids_for_agents NAMES — from a /scheduler/schedules body on
+# stdin, the mail-check ids ADDRESSED TO any agent named in NAMES (one name per
+# line). Pure.
+#
+# Matches on the schedule's `agent` field, not on the id string, because that is
+# the identity both ends already agree on: internal/agent/mailcheck.go registers
+# a polecat's loop against its bare registry name — "the same identity the reap
+# path matches on" — while the id is keyed on the work item id. An agent with no
+# mail-check yields no id here, which is exactly the point: slack it never
+# earned is slack it never gets.
+extract_mail_check_ids_for_agents() {
+    local names="$1" line agent
+    [ -n "$names" ] || return 0
+    # `|| [ -n "$line" ]` is load-bearing: the body's LAST object carries no
+    # trailing newline, so a bare `read` sets $line and then returns 1, and the
+    # loop drops it. That silently forgives whichever schedule sorts last — a
+    # miss in the detector, found only by an assertion that named a schedule the
+    # daemon really emitted last.
+    sed 's/},{/}\n{/g' | while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in *'"id":"mail-check-'*) ;; *) continue ;; esac
+        agent="$(printf '%s' "$line" | json_str agent)"
+        [ -n "$agent" ] || continue
+        printf '%s\n' "$names" | grep -qxF "$agent" || continue
+        printf '%s' "$line" | json_str id
+    done | LC_ALL=C sort -u
+}
+
+# snapshot_polecat_names — the names of every polecat in an /agents/drain
+# snapshot on stdin, one per line. Pure. These are the identities a forced
+# bounce killed; they are what the slack set is looked up BY.
+snapshot_polecat_names() {
+    sed 's/},{/}\n{/g' | grep -o '"name":"[^"]*"' | sed 's/^"name":"//; s/"$//'
+}
+
+# schedules_body — the raw /scheduler/schedules body. Returns 1 (and prints
+# nothing) when pogod cannot be reached, so callers can tell "unreachable" from
+# "reachable, and it holds nothing" — different facts that must never compare
+# equal. Reporting an unreachable daemon as an empty fleet would announce the
+# entire fleet lost; reporting it as OK would make this check decoration.
+schedules_body() {
     local body
-    body="$(curl -sf --max-time 5 "$(base_url)/scheduler/schedules" 2>/dev/null)" || return 0
-    [ -n "$body" ] || return 0
-    printf '%s' "$body" | count_mail_checks
+    body="$(curl -sf --max-time 5 "$(base_url)/scheduler/schedules" 2>/dev/null)" || return 1
+    [ -n "$body" ] || return 1
+    printf '%s' "$body"
 }
 
-# classify_mail_check_restore PRE POST SLACK -> ok | unknown | missing:<n>
+# mail_check_ids — the SET of mail-check-* ids pogod currently holds, one per
+# line. Echoes the "?" sentinel and returns 1 when pogod is unreachable.
 #
-# SLACK is the number of mail-checks whose loss is EXPECTED — the polecats a
-# --force bounce killed. Their schedules are reaped on purpose (they really are
-# gone), so counting them as damage would cry wolf on every forced deploy.
+# The sentinel is load-bearing. Under the old count this role was played by an
+# empty string, which worked only because "" is not a number. A set has no such
+# luck: "" is a perfectly good EMPTY SET. So unreachable gets an explicit mark —
+# "?", the same sentinel this script already uses for an unknown polecat count —
+# and empty is left free to mean what it says.
+mail_check_ids() {
+    local body
+    body="$(schedules_body)" || { echo "?"; return 1; }
+    printf '%s' "$body" | extract_mail_check_ids
+}
+
+# expected_lost_mail_checks PRE_BODY SNAPSHOT -> the SET of mail-check ids whose
+# loss the forced bounce EXPLAINS, one per line.
 #
-# A post-count ABOVE pre is "ok": the crew re-registering, or a polecat
-# spawning, both legitimately add. This check only ever asserts that mail-checks
-# were not silently LOST.
+# A schedule qualifies only if it (a) belongs to a polecat the bounce killed and
+# (b) really existed before the bounce. Both halves come from names: the dead
+# polecats' names out of the pre-kickstart drain snapshot, the schedules out of
+# the pre-kickstart schedule body. Nothing is inferred from how MANY polecats
+# died — a bounce that kills three polecats holding one mail-check between them
+# excuses exactly one schedule, and it can say which.
+expected_lost_mail_checks() {
+    local body="$1" snapshot="$2" names
+    names="$(printf '%s' "$snapshot" | snapshot_polecat_names)"
+    printf '%s' "$body" | extract_mail_check_ids_for_agents "$names"
+}
+
+# missing_mail_checks PRE POST SLACK -> the SET of ids that vanished unexplained.
+# Pure set arithmetic: PRE - (POST + SLACK). Each argument is a newline-separated
+# set of ids. This is the whole check.
+missing_mail_checks() {
+    LC_ALL=C comm -23 \
+        <(printf '%s\n' "$1" | sed '/^$/d' | LC_ALL=C sort -u) \
+        <(printf '%s\n%s\n' "$2" "$3" | sed '/^$/d' | LC_ALL=C sort -u)
+}
+
+# classify_mail_check_restore PRE POST SLACK -> ok | unknown | missing:<ids>
+#
+# PRE and POST are SETS of mail-check ids (newline-separated); "?" means the
+# daemon could not be read. SLACK is the SET of ids whose loss is EXPECTED — the
+# schedules the --force-killed polecats really did take with them. They are
+# reaped on purpose, so calling them damage would cry wolf on every forced
+# deploy; but slack is granted per NAMED schedule, so it can only ever excuse
+# the schedule it names.
+#
+# Ids in POST that were never in PRE are "ok": the crew re-registering, or a
+# polecat spawning, both legitimately add. This check only ever asserts that
+# mail-checks were not silently LOST.
 classify_mail_check_restore() {
-    local pre="$1" post="$2" slack="${3:-0}"
-    # Validate each count SEPARATELY. Concatenating them first ("$pre$post")
-    # reads as numeric when either side is empty, which turns an unreachable
-    # daemon into a report that the whole fleet's mail loop was wiped.
-    case "$pre"  in ''|*[!0-9]*) echo "unknown"; return ;; esac
-    case "$post" in ''|*[!0-9]*) echo "unknown"; return ;; esac
-    case "$slack" in ''|*[!0-9]*) slack=0 ;; esac
-    if [ "$post" -ge $(( pre - slack )) ]; then
+    local pre="$1" post="$2" slack="${3:-}" missing
+    # Test each side SEPARATELY for the unreachable sentinel — an unreadable
+    # daemon on either end is unknown, and must never be differenced against a
+    # real set as though "?" were an id.
+    [ "$pre" = "?" ] && { echo "unknown"; return; }
+    [ "$post" = "?" ] && { echo "unknown"; return; }
+    [ "$slack" = "?" ] && { echo "unknown"; return; }
+    missing="$(missing_mail_checks "$pre" "$post" "$slack")"
+    if [ -z "$missing" ]; then
         echo "ok"
     else
-        echo "missing:$(( pre - slack - post ))"
+        echo "missing:$(printf '%s' "$missing" | tr '\n' ' ' | sed 's/ *$//')"
     fi
 }
 
-# verify_mail_checks_restored PRE SLACK — poll the post-bounce count and report.
-# Polls because the new pogod loads its schedules from disk moments after the
-# port answers; it is not an "agents re-register in time" race (Part A means
-# nothing has to re-register), just startup ordering.
+# set_size — how many ids are in a newline-separated set. For REPORTING only:
+# the verdict is reached by name, and the count is a courtesy to the reader.
+set_size() { printf '%s' "$1" | sed '/^$/d' | grep -c . ; }
+
+# verify_mail_checks_restored PRE SLACK — poll the post-bounce SET and report.
+# PRE and SLACK are newline-separated sets of mail-check ids ("?" for PRE when
+# the pre-bounce daemon could not be read). Polls because the new pogod loads
+# its schedules from disk moments after the port answers; it is not an "agents
+# re-register in time" race (Part A means nothing has to re-register), just
+# startup ordering.
 verify_mail_checks_restored() {
-    local pre="$1" slack="${2:-0}" deadline verdict post
-    if [ -z "$pre" ]; then
-        log "mail-check post-check: SKIPPED (could not count mail-checks before the bounce)"
+    local pre="$1" slack="${2:-}" deadline verdict post
+    if [ "$pre" = "?" ]; then
+        log "mail-check post-check: SKIPPED (could not read mail-checks before the bounce)"
         return 0
     fi
     deadline=$(( $(date +%s) + MAIL_CHECK_TIMEOUT ))
     while :; do
-        post="$(mail_check_count)"
-        verdict="$(classify_mail_check_restore "$pre" "${post:-}" "$slack")"
+        post="$(mail_check_ids)"
+        verdict="$(classify_mail_check_restore "$pre" "$post" "$slack")"
         [ "$verdict" = "ok" ] && break
         [ "$(date +%s)" -ge "$deadline" ] && break
         sleep 3
     done
     case "$verdict" in
         ok)
-            log "mail-check post-check: OK — $post mail-check schedule(s) present (pre-bounce $pre, expected loss $slack)"
+            log "mail-check post-check: OK — $(set_size "$post") mail-check schedule(s) present (pre-bounce $(set_size "$pre"), expected loss $(set_size "$slack"))"
+            if [ -n "$slack" ]; then
+                log "  expected loss (force-killed polecats' own loops): $(printf '%s' "$slack" | tr '\n' ' ')"
+            fi
             ;;
         unknown)
             log "mail-check post-check: UNKNOWN — could not read schedules from the new pogod"
             log "  verify by hand: pogo schedule list | grep mail-check"
             ;;
         missing:*)
-            err "mail-check post-check: FAILED — ${verdict#missing:} mail-check schedule(s) LOST across the bounce"
-            err "  pre-bounce $pre, now ${post:-?}, expected loss $slack (mg-de08)"
+            local lost="${verdict#missing:}"
+            err "mail-check post-check: FAILED — $(printf '%s' "$lost" | wc -w | tr -d ' ') mail-check schedule(s) LOST across the bounce"
+            err "  LOST: $lost"
+            err "  pre-bounce $(set_size "$pre"), now $(set_size "$post"), expected loss $(set_size "$slack") (mg-de08)"
             err "  the fleet's mail loop is degraded and WILL LOOK HEALTHY. Diagnose:"
             err "    pogo schedule list | grep mail-check"
             err "    pogo agent diagnose <name>    # reports no_mail_loop for an agent with no loop"
@@ -476,9 +578,17 @@ cmd_redeploy() {
     fi
 
     # 3. Restart (always kickstart) and verify the new process is main.
-    #    Count the fleet's mail-checks FIRST — the old pogod is the only thing
-    #    that can tell us what there was to preserve (mg-de08).
-    local mail_pre; mail_pre="$(mail_check_count)"
+    #    Read the fleet's mail-checks FIRST — the old pogod is the only thing
+    #    that can tell us what there was to preserve (mg-de08). Keep the whole
+    #    body, not just the ids: step 5 needs the agent each schedule is
+    #    addressed to in order to name the losses a forced bounce explains, and
+    #    after the kickstart there is nothing left to ask (mg-ea3e).
+    local mail_pre_body="" mail_pre
+    if mail_pre_body="$(schedules_body)"; then
+        mail_pre="$(printf '%s' "$mail_pre_body" | extract_mail_check_ids)"
+    else
+        mail_pre="?"
+    fi
     do_restart
     verify_running || exit 8
 
@@ -491,9 +601,15 @@ cmd_redeploy() {
     # 5. Assert the fleet's mail loop survived the bounce. Reports only — the
     #    daemon is already up; a mail-check gap is an alarm to act on, not a
     #    reason to call a completed deploy failed (mg-de08).
-    local mail_slack=0
-    if [ "$leftover" != "0" ] && [ "$leftover" != "?" ]; then
-        mail_slack="$leftover" # those polecats are genuinely gone; their loops go with them
+    #
+    #    Slack is the SET of schedules the force-killed polecats took with them,
+    #    looked up BY NAME out of the pre-bounce body — never the NUMBER of dead
+    #    polecats (mg-ea3e). The two differ exactly when a dead polecat had no
+    #    mail-check to lose: the count hands out an allowance nothing earned,
+    #    and a real crew loss disappears under it without a word.
+    local mail_slack=""
+    if [ -n "$mail_pre_body" ] && [ "$leftover" != "0" ] && [ "$leftover" != "?" ]; then
+        mail_slack="$(expected_lost_mail_checks "$mail_pre_body" "$snapshot")"
     fi
     verify_mail_checks_restored "$mail_pre" "$mail_slack"
 

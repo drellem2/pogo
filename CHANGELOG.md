@@ -47,6 +47,26 @@ is the curated, human-readable summary kept in sync at each release cut.
   isn't loaded yet. Fails safe: a delayed reap is invisible, a premature one was
   this bug.
 
+- **The redeploy mail-check post-check grants slack by NAME, not by COUNT of
+  dead polecats (mg-ea3e).** On `--force`, `pogo-self-deploy` hard-bounces the
+  fleet while polecats are still working; their mail-checks die with them, so
+  the post-check forgives that loss rather than crying wolf on every forced
+  deploy. It forgave it as a **number**: N dead polecats bought N schedules of
+  slack. A polecat that had **no** mail-check therefore bought an allowance
+  nothing had earned, and one **real crew loss** could be spent against it — the
+  post-check reporting a cheerful `OK` over an agent gone mute. Slack is now the
+  **set of schedules that actually vanished**, looked up by the agent each one is
+  addressed to out of the pre-bounce snapshot, and the verdict is a set
+  difference that **names** what went missing (`LOST: mail-check-pa`) instead of
+  tallying it. Killing a polecat with no mail-check now grants exactly zero
+  slack, and slack naming an absent schedule cannot be redeemed against a
+  present one. Per architect, the count was *"the same error shape as the
+  original bug — reasoning about a number instead of an identity"*: a silent
+  miss inside the detector built because a health signal could not tell "fine"
+  from "gone". `scripts/pogo-self-deploy_live_test.sh` now drives the exact case
+  against a real daemon, with a counterfactual assertion pinning the old
+  arithmetic's `OK` in place so the control is provably driving it.
+
 - **`pogo agent diagnose` reports a missing mail loop as unhealthy (mg-de08).**
   The reap above fixed one instance; this fixes the class. An agent that can be
   mailed but has nothing to wake it looked *perfectly healthy* — running, decent

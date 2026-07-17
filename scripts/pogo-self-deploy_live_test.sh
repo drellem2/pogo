@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Live end-to-end control for the mg-de08 redeploy mail-check post-check (mg-c02d).
+# Live end-to-end control for the mg-de08 redeploy mail-check post-check
+# (mg-c02d; extended by mg-ea3e with the name-slack control, #3 below).
 #
 # WHY THIS FILE EXISTS SEPARATELY FROM pogo-self-deploy_test.sh
 # -------------------------------------------------------------
@@ -8,7 +9,7 @@
 # NOT prove the thing that actually runs at redeploy can fail, because the
 # wired chain is
 #
-#     verify_mail_checks_restored -> mail_check_count -> live curl
+#     verify_mail_checks_restored -> mail_check_ids -> live curl
 #         -> JSON parse -> classify_mail_check_restore -> log/err
 #
 # and every arrow in it was ARGUED, never demonstrated (mg-c02d; architect:
@@ -22,23 +23,28 @@
 # sandbox, lets the REAL GC reap REAL mail-check schedules as agent_gone (the
 # literal 2026-07-17 incident), and asserts the ASSEMBLED path reports RED.
 #
-# Nothing here is mocked. mail_check_count really curls; the body it parses is
-# really what Go's json.Encoder emitted; the count really drops because pogod
-# really reaped. The daemon is pinned to a sandbox HOME/XDG_CONFIG_HOME/
-# POGO_HOME and a spare port, so it cannot see, touch, or be confused with the
-# machine's live fleet.
+# Nothing here is mocked. mail_check_ids really curls; the body it parses is
+# really what Go's json.Encoder emitted; the schedules really vanish because
+# pogod really reaped or really honoured a DELETE. The daemon is pinned to a
+# sandbox HOME/XDG_CONFIG_HOME/POGO_HOME and a spare port, so it cannot see,
+# touch, or be confused with the machine's live fleet.
 #
-# The four assertions are load-bearing in different directions, and a detector
-# that cannot do BOTH is not a detector (mg-c02d field evidence: architect's
-# awk filter matched every line and so could never return zero; mayor's
+# The assertions are load-bearing in different directions, and a detector that
+# cannot do BOTH is not a detector (mg-c02d field evidence: architect's awk
+# filter matched every line and so could never return zero; mayor's
 # `schedule_added` discriminator would have returned a confident GREEN from an
 # event type pogod never emits). Hence:
 #
-#   1. SEAM      — the live body parses to the true count (not a fixture's).
-#   2. NEGATIVE  — an intact fleet reports OK, so the RED below is conditional
-#                  on the thing being measured rather than unconditional.
-#   3. POSITIVE  — a real reap makes the assembled path report RED. THE ASK.
-#   4. FAIL-OPEN — a dead daemon reports UNKNOWN, never OK and never "all gone".
+#   1. SEAM       — the live body parses to the true schedule NAMES (not a
+#                   fixture's, and not merely to the right tally — mg-ea3e).
+#   2. NEGATIVE   — an intact fleet reports OK, so the REDs below are
+#                   conditional on the thing being measured, not unconditional.
+#   3. NAME-SLACK — on --force, a real crew loss beside a no-mail-check
+#                   polecat's death reports RED and NAMES the loss, where the
+#                   old COUNT slack said OK. mg-ea3e's ask, plus the
+#                   counterfactual that proves it drives that exact case.
+#   4. POSITIVE   — a real reap makes the assembled path report RED. mg-c02d's ask.
+#   5. FAIL-OPEN  — a dead daemon reports UNKNOWN, never OK and never "all gone".
 
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -127,7 +133,7 @@ source "$REPO_ROOT/scripts/pogo-self-deploy"
 # Six crew mail-checks: the real roster the operational hand-check expects
 # (pa, pm-pogo, pm-onethird, pm-dealdesk, architect, mayor). Plus a sweep, which
 # is exactly what made the live outage invisible — agents kept LOOKING scheduled
-# because their sweeps survived. The counter must not be fooled by it.
+# because their sweeps survived. The parser must not be fooled by it.
 CREW="pa pm-pogo pm-onethird pm-dealdesk architect mayor"
 for a in $CREW; do
     curl -sf -X POST "$URL/scheduler/schedules" -H 'Content-Type: application/json' \
@@ -141,16 +147,22 @@ curl -sf -X POST "$URL/scheduler/schedules" -H 'Content-Type: application/json' 
 # ===========================================================================
 # 1. SEAM — the live curl + parse half, against a body Go really emitted.
 # ===========================================================================
-# The sibling unit test feeds count_mail_checks a hand-typed JSON string. That
-# string is an ASSUMPTION about json.Encoder's output; if the encoder ever
+# The sibling unit test feeds extract_mail_check_ids a hand-typed JSON string.
+# That string is an ASSUMPTION about json.Encoder's output; if the encoder ever
 # emitted a space after the colon, or renamed the field, every unit assertion
-# would keep passing while the live count silently went to 0 — and 0 reads as a
-# fleet-wide wipe. This is the assertion that ties the fixture to reality.
-LIVE_PRE="$(mail_check_count)"
-if [ "$LIVE_PRE" = "6" ]; then
-    pass "mail_check_count reads 6 from the LIVE daemon (real curl, real json.Encoder body)"
+# would keep passing while the live read silently went empty — and empty reads
+# as a fleet-wide wipe. This is the assertion that ties the fixture to reality.
+#
+# It asserts the six NAMES, not the number six (mg-ea3e). The driver reasons
+# about identity now, so a seam assertion that only tallied would leave the
+# question the driver actually asks — WHICH schedules are here — untied to
+# reality. A parse that returned six wrong names would pass a count check.
+LIVE_PRE="$(mail_check_ids)"
+EXPECT_PRE="$(printf '%s\n' $CREW | sed 's/^/mail-check-/' | LC_ALL=C sort -u)"
+if [ "$LIVE_PRE" = "$EXPECT_PRE" ]; then
+    pass "mail_check_ids reads the six crew mail-checks BY NAME from the LIVE daemon (real curl, real json.Encoder body)"
 else
-    fail "mail_check_count returned '$LIVE_PRE' from the live daemon, expected 6 — the curl/parse seam is broken"
+    fail "mail_check_ids returned '$(printf '%s' "$LIVE_PRE" | tr '\n' ' ')' from the live daemon, expected '$(printf '%s' "$EXPECT_PRE" | tr '\n' ' ')' — the curl/parse seam is broken"
     # Everything below reads the count through this same seam, so with it broken
     # they cannot mean what they say: a count stuck at 0 makes "the fleet was
     # reaped" trivially true and the OK verdict trivially right. Refuse to emit
@@ -168,7 +180,7 @@ fi
 # held (mg-de08 Part B), so the fleet is provably intact here. Without this, a
 # post-check hard-wired to RED would pass assertion 3 — the same shape as the
 # awk filter that could not return zero.
-OUT_OK="$(verify_mail_checks_restored "$LIVE_PRE" 0 2>&1)"
+OUT_OK="$(verify_mail_checks_restored "$LIVE_PRE" "" 2>&1)"
 case "$OUT_OK" in
     *"post-check: OK"*)
         pass "assembled path reports OK against a live, intact fleet (the RED below is conditional)" ;;
@@ -177,7 +189,90 @@ case "$OUT_OK" in
 esac
 
 # ===========================================================================
-# 3. POSITIVE CONTROL — a REAL reap drives the ASSEMBLED path RED.  THE ASK.
+# 3. NAME-SLACK CONTROL — a real crew loss must not hide behind a dead
+#    polecat's allowance on --force (mg-ea3e).  THE SECOND ASK.
+# ===========================================================================
+# Runs inside the same 30s settle window (the GC must not reap anything out from
+# under us; the reap gets its own control below), and restores the fleet to the
+# six crew loops before it exits so control 4 still measures 6 -> 0.
+#
+# The scenario is the ticket, staged live: a --force bounce kills TWO polecats,
+# and only ONE of them had a mail-check. cat-loop registered one; cat-noloop
+# never did (a polecat spawned while the scheduler was still loading takes the
+# nil-registrar path and gets no loop — mg-6fe0 — so this is a state the fleet
+# really reaches, not a contrivance). Alongside them, crew agent `pa` really
+# loses its loop. That is the REAL crew loss, and nothing about the bounce
+# explains it.
+#
+# Under the old COUNT slack this state read: pre 7, post 5, slack 2 (two dead
+# polecats) -> 5 >= 7-2 -> OK. Silence, over a crew agent gone mute for hours.
+# The allowance cat-noloop never earned paid for pa's loss. Assertion (c) below
+# pins that arithmetic in place so nobody has to take the claim on faith.
+curl -sf -X POST "$URL/scheduler/schedules" -H 'Content-Type: application/json' \
+    -d '{"id":"mail-check-cat-loop","agent":"cat-loop","cron":"*/10 * * * *","delivery":"nudge","message":"check mail"}' \
+    >/dev/null || fail "could not register the force-killed polecat's mail-check"
+
+# The pre-bounce world, read through the driver's own primitive from the live
+# daemon: six crew loops + cat-loop's. cat-noloop is absent BY BEING ABSENT —
+# there is no schedule to see, which is the entire point.
+SLACK_PRE_BODY="$(schedules_body)"
+SLACK_PRE_IDS="$(printf '%s' "$SLACK_PRE_BODY" | extract_mail_check_ids)"
+
+# The pre-kickstart drain snapshot: exactly what the driver captures at
+# scripts/pogo-self-deploy's step 1 and hands to step 5 after the bounce.
+SLACK_SNAP='{"draining":true,"count":2,"polecats":[{"name":"cat-noloop","pid":222,"work_item_id":"mg-noloop","worktree_dir":"'"$SANDBOX/wt-noloop"'","source_repo":"'"$SANDBOX"'"},{"name":"cat-loop","pid":111,"work_item_id":"mg-loop","worktree_dir":"'"$SANDBOX/wt-loop"'","source_repo":"'"$SANDBOX"'"}]}'
+
+# (a) Slack is granted by NAME, off the live body: one schedule, not two polecats.
+SLACK_IDS="$(expected_lost_mail_checks "$SLACK_PRE_BODY" "$SLACK_SNAP")"
+[ "$SLACK_IDS" = "mail-check-cat-loop" ] \
+    && pass "slack off the LIVE body names exactly the one schedule that died with a polecat (2 dead, 1 loop)" \
+    || fail "slack from the live body is '$(printf '%s' "$SLACK_IDS" | tr '\n' ' ')', expected just mail-check-cat-loop"
+
+# Now perform the loss, for real, through the daemon's own endpoint: cat-loop's
+# schedule goes because cat-loop is dead (legitimate), and pa's goes for no
+# reason anyone can name (the outage).
+for gone in mail-check-cat-loop mail-check-pa; do
+    curl -sf -X DELETE "$URL/scheduler/schedules/$gone" >/dev/null \
+        || fail "could not remove $gone from the sandbox daemon"
+done
+
+# (b) THE ASSERTION THIS TICKET EXISTS FOR. Same call the redeployer makes, same
+# args, against a daemon that really is in the state described. It must go RED,
+# and it must NAME pa — a verdict that only says "something is missing" does not
+# tell you who to go nudge.
+OUT_SLACK="$(MAIL_CHECK_TIMEOUT=2 verify_mail_checks_restored "$SLACK_PRE_IDS" "$SLACK_IDS" 2>&1)"
+case "$OUT_SLACK" in
+    *"post-check: FAILED"*"LOST: mail-check-pa"*)
+        pass "mg-ea3e: a real crew loss beside a no-mail-check polecat's death reports RED and NAMES mail-check-pa" ;;
+    *"post-check: OK"*)
+        fail "mg-ea3e REGRESSION: the crew loss was absorbed by the dead polecats' allowance — SILENT MISS: $OUT_SLACK" ;;
+    *)
+        fail "mg-ea3e: expected RED naming mail-check-pa, got: $OUT_SLACK" ;;
+esac
+
+# (c) ...and the counterfactual, so the control above is provably driving the
+# case the bug let through rather than some easier one. This is the arithmetic
+# the old code ran, on the numbers this live state really produces. It says OK.
+# If this ever stops saying OK, the scenario has drifted and (b) is no longer
+# the ticket — fix the scenario, not this assertion.
+OLD_PRE="$(printf '%s' "$SLACK_PRE_IDS" | grep -c .)"
+OLD_POST="$(mail_check_ids | grep -c .)"
+OLD_SLACK=2   # $leftover: the COUNT of polecats the forced bounce killed
+if [ "$OLD_POST" -ge $(( OLD_PRE - OLD_SLACK )) ]; then
+    pass "counterfactual: the OLD count slack ($OLD_PRE -> $OLD_POST, slack $OLD_SLACK) says OK on this exact state — the miss was real, and is now caught"
+else
+    fail "counterfactual did not reproduce: old count arithmetic ($OLD_PRE -> $OLD_POST, slack $OLD_SLACK) would have caught this, so the control above is not driving the mg-ea3e case"
+fi
+
+# Restore the six crew loops for control 4. cat-loop stays gone — it is dead.
+curl -sf -X POST "$URL/scheduler/schedules" -H 'Content-Type: application/json' \
+    -d '{"id":"mail-check-pa","agent":"pa","cron":"*/10 * * * *","delivery":"nudge","message":"check mail"}' \
+    >/dev/null || fail "could not restore mail-check-pa"
+[ "$(mail_check_ids)" = "$LIVE_PRE" ] \
+    || fail "fleet not restored to the six crew mail-checks — control 4 below cannot mean what it says"
+
+# ===========================================================================
+# 4. POSITIVE CONTROL — a REAL reap drives the ASSEMBLED path RED.  THE ASK.
 # ===========================================================================
 # No agent in this sandbox exists, so once the startup gate opens pogod's own
 # heartbeat GC reaps every mail-check as agent_gone — the 2026-07-17 incident,
@@ -186,7 +281,7 @@ esac
 echo "Waiting for pogod's GC to reap the fleet's mail-checks (opens ~30s after boot)..."
 reaped=false
 while [ $(( $(date +%s) - BOOT_T0 )) -lt 120 ]; do
-    if [ "$(mail_check_count)" = "0" ]; then reaped=true; break; fi
+    if [ -z "$(mail_check_ids)" ]; then reaped=true; break; fi
     sleep 1
 done
 if ! $reaped; then
@@ -201,14 +296,14 @@ else
         && pass "the reap took the mail-checks and left the sweep (the count fell for the RIGHT reason)" \
         || fail "sweep-morning also vanished — the count reaching 0 is not evidence about mail-checks"
 
-    # THE ASSERTION THIS TICKET EXISTS FOR. Same call the redeployer makes at
-    # scripts/pogo-self-deploy:484, against a daemon whose fleet really is gone.
+    # THE ASSERTION mg-c02d EXISTS FOR. Same call the redeployer makes at step
+    # 5, against a daemon whose fleet really is gone.
     # If this ever reports OK or UNKNOWN, the post-check fails OPEN and its
     # GREEN is worthless — do not "fix" this test, fix the driver.
     # MAIL_CHECK_TIMEOUT is a prefix assignment on the driver's own shell var —
     # the verdict is already terminal, so polling the full 30s only adds wall
     # clock. It still probes the live daemon; only the retry budget shrinks.
-    OUT_RED="$(MAIL_CHECK_TIMEOUT=2 verify_mail_checks_restored "$LIVE_PRE" 0 2>&1)"
+    OUT_RED="$(MAIL_CHECK_TIMEOUT=2 verify_mail_checks_restored "$LIVE_PRE" "" 2>&1)"
     case "$OUT_RED" in
         *"post-check: FAILED"*"6 mail-check schedule(s) LOST"*)
             pass "positive control: assembled path reports RED on a real reap (6 -> 0 = FAILED, 6 LOST)" ;;
@@ -218,7 +313,7 @@ else
 fi
 
 # ===========================================================================
-# 4. FAIL-OPEN SEAM — a dead daemon must be UNKNOWN, never OK, never "all gone".
+# 5. FAIL-OPEN SEAM — a dead daemon must be UNKNOWN, never OK, never "all gone".
 # ===========================================================================
 # The specific thing architect named: a classifier handed "" instead of "0".
 # mail_check_count must yield EMPTY (not 0) when curl fails, because
@@ -234,12 +329,12 @@ for _ in $(seq 1 40); do
     sleep 0.25
 done
 
-DEAD_COUNT="$(mail_check_count)"
-[ -z "$DEAD_COUNT" ] \
-    && pass "mail_check_count yields EMPTY (not 0) against a genuinely dead daemon" \
-    || fail "mail_check_count returned '$DEAD_COUNT' from a dead daemon — empty must not read as a count"
+DEAD_IDS="$(mail_check_ids)"; DEAD_RC=$?
+[ "$DEAD_IDS" = "?" ] && [ "$DEAD_RC" -ne 0 ] \
+    && pass "mail_check_ids yields the '?' sentinel (not an empty set) against a genuinely dead daemon" \
+    || fail "mail_check_ids returned '$DEAD_IDS' rc=$DEAD_RC from a dead daemon — unreachable must not read as 'holds nothing'"
 
-OUT_UNK="$(MAIL_CHECK_TIMEOUT=2 verify_mail_checks_restored 6 0 2>&1)"
+OUT_UNK="$(MAIL_CHECK_TIMEOUT=2 verify_mail_checks_restored "$LIVE_PRE" "" 2>&1)"
 case "$OUT_UNK" in
     *"post-check: UNKNOWN"*)
         pass "assembled path reports UNKNOWN against a dead daemon (does not fail open, does not cry wolf)" ;;
