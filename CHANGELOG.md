@@ -10,6 +10,32 @@ is the curated, human-readable summary kept in sync at each release cut.
 
 ## [Unreleased]
 
+### Added
+
+- **`polecat-architect` template — an architect you dispatch instead of run
+  (mg-564c).** *A reactive architect answers questions; a standing one notices
+  that a question exists.* This ships the reactive one, deliberately. Noticing
+  that a question exists requires reading everything, so a standing architect's
+  continuous context burn **is** the mechanism, not a side effect of one — a
+  dispatchable template cannot deliver that half, and this one does not pretend
+  to. Different products for different appetites: someone who won't pay a
+  continuous context burn should still get an architect. Dispatch with
+  `pogo agent spawn-polecat <name> --template=polecat-architect`. It handles
+  three shapes, all of them **pre-diff**: a design memo, a pre-build alignment
+  check, and a design artifact (an ADR or design doc, landed through the
+  refinery). It is **not** a PR reviewer — `polecat-review` already reviews
+  through an explicit architecture lens, and it does that better, because it
+  gates a diff against an approved recommendation. The architect answers the
+  design question that exists *before* there is a diff; once code exists,
+  review owns it. The template carries its own honest limit in its text: a
+  freshly dispatched architect has **authority without evidence** and nothing
+  but priors, and the rulings most likely to be wrong are exactly the ones made
+  from priors instead of from looking — so its first job is **noticing, not
+  ruling**, every judgment must anchor to `file:line`, and its verdict JSON
+  carries an `unchecked` field so "I did not verify this" has somewhere to live
+  instead of quietly becoming a confident claim. This **does not retire the
+  standing `crew/architect`** — the two coexist.
+
 ### Fixed
 
 - **The redeploy drain no longer reads an UNREADABLE polecat count as ZERO — its
@@ -58,6 +84,17 @@ is the curated, human-readable summary kept in sync at each release cut.
   measurement, `0` included), `2` **no witness file — an absence, not a zero**,
   `1` a witness exists but could not be read. An idle fleet leaves a
   present-and-empty witness, so a missing file is not evidence that nothing runs.
+
+- **`polecat-{{.Id}}` was not the only way to fabricate a branch name
+  (mg-564c).** mg-d39e's guard against templates naming their own branch had a
+  hole: it compared against a hardcoded `"polecat-"`, but the prefix is
+  `gitgc.BranchPrefix` and is **independent of the worker's display name**
+  (`DefaultWorkerName` is `pogocat`). A template writing `{{.Worker}}-{{.Id}}`
+  therefore rendered `pogocat-mg-abea` under test — never matching — while a
+  real dispatch on a fleet whose worker *is* named `polecat` rendered the
+  fabricated `polecat-mg-<id>`. The guard now derives its expectation from
+  `gitgc.BranchPrefix` and pins the worker name to the value that makes the bug
+  visible. Found by falling into it while writing `polecat-architect`.
 
 - **A redeploy now installs the `pogo` CLI in lockstep with `pogod` — merged is
   not deployed (mg-ddf1).** `do_build` ran `go install ./cmd/pogod` and nothing

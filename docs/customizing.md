@@ -22,8 +22,8 @@ and come back here when you want the reference.
 > `--minimal` if you're building a non-coding workflow and don't want the
 > shipped coding-profile prompts in your way. Without `--minimal`, you get the
 > full coordinator + `crew/doctor` + polecat-template (`polecat`, `polecat-qa`,
-> `polecat-build-pr`, `polecat-triage`, `polecat-review`) set, which is the
-> right starting point for code-shaped work.
+> `polecat-build-pr`, `polecat-triage`, `polecat-review`, `polecat-architect`)
+> set, which is the right starting point for code-shaped work.
 
 > **Customizing prompts safely:** if your edits go inside the prompt body
 > (rules, sections, protocol steps) rather than the frontmatter or roster,
@@ -248,7 +248,16 @@ a PR and works the review loop instead of self-submitting — the coordinator
 submits to the refinery when review passes), `polecat-triage.md`
 (investigates a GitHub issue and recommends — no code), and
 `polecat-review.md` (reviews a pull request through QA, architecture, and
-design-faithfulness lenses). Add another by dropping a file under
+design-faithfulness lenses), and `polecat-architect.md` (answers a design
+question — a memo, a pre-build alignment check, or an ADR/design doc — no
+product code). The last two divide at the diff: `polecat-architect` handles the
+design question that exists *before* there is a diff to review; once code
+exists, `polecat-review` owns it. `polecat-architect` is dispatched on demand
+and does not replace a standing architect crew agent, if you run one — a
+dispatched architect answers what you ask, where a standing one notices what
+you didn't; noticing requires reading everything, so that half costs a
+continuous context burn a template cannot pay. Add another by dropping a file
+under
 `~/.pogo/agents/templates/`:
 
 ```bash
