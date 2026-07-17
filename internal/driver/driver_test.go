@@ -2,6 +2,7 @@ package driver_test
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -199,10 +200,6 @@ func TestPluginExecute(t *testing.T) {
 		t.Errorf("Failed test set-up %v", err)
 		return
 	}
-	// Initialization causes the search plugin to index the files.
-	// We wait for that goroutine to finish before executing the test.
-	time.Sleep(1 * time.Second)
-
 	searchPlugin := driver.GetPlugin("pogo-plugin-search")
 	if searchPlugin == nil {
 		t.Errorf("Search plugin not found")
@@ -215,7 +212,34 @@ func TestPluginExecute(t *testing.T) {
 	}
 
 	req := "{\"type\": \"files\", \"projectRoot\": \"" + aServiceAbs + "\"}"
-	resp := (*searchPlugin).Execute(req)
+
+	// Initialization kicks off asynchronous indexing in a background
+	// goroutine (search.ProcessProject spawns `go Index`). The project lands
+	// in the index map as "indexing" and only later flips to "ready" with
+	// git_tree_hash populated. Reading $.index immediately after the first
+	// Execute therefore races the indexer and intermittently fails the
+	// assertion with indexing_status=="indexing" and git_tree_hash missing
+	// (mg-9ddd). Poll the "files" request until the index reports "ready" —
+	// or a timeout elapses — before asserting on the final response.
+	var resp string
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		resp = (*searchPlugin).Execute(req)
+		var probe struct {
+			Index struct {
+				Status string `json:"indexing_status"`
+			} `json:"index"`
+		}
+		if jsonErr := json.Unmarshal([]byte(resp), &probe); jsonErr == nil &&
+			probe.Index.Status == "ready" {
+			break
+		}
+		if !time.Now().Before(deadline) {
+			t.Errorf("index never reached indexing_status=ready within timeout; last response: %s", resp)
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 	t.Logf("Response: %s", resp)
 	// Print current directory
 	d, _ := os.Getwd()
