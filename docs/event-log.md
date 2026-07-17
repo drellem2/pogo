@@ -380,6 +380,21 @@ pogod's stall watcher (gh drellem2/macguffin #12) crossed a work-pile-up thresho
 
 **Reading `nudge_error` on records from before 2026-07-17 (mg-79dc):** it meant only "the PTY nudge failed", and the nudge was then **dropped** — there was no mail fallback for a running-but-busy agent. On 2026-07-17, 18 of 47 fires (~38%) carried one, every single instance reading `still producing output after 30s ... context deadline exceeded`. Those fires happened and were never heard, which matters when reasoning backwards from mayor's inbox: **an absent stall notice in that era is not evidence the detector did not fire.** mg-4bd4 concluded the work-item detectors had "never been able to fire on real work" from exactly that absence; the events log falsifies it. Records from mg-79dc onward carry `nudge_delivery`, so a fire that took the durable road is visible as such rather than looking like a failure.
 
+#### `drift_watch_fired`
+
+pogod's drift-check runner (mg-345b) sampled the `[reconcile]` mirrors on its coarse interval and found at least one host artifact drifted from its repo source, so it mailed `human`. It is the DETECTION backstop for the deploy paths the refinery `[deploy]` prevention misses (mg-75f9). **Report-only** — it never reconciles. One event per sample that found drift; the coarse interval rate-limits both the sample and the mail. See [CONFIGURATION.md](CONFIGURATION.md) §"The built-in drift-check runner" and `internal/driftwatch`.
+
+- **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent` (always `"pogod"`), `details`
+- **`details` fields:**
+  - `drift_count` (int, required): how many mirrors drifted this sample
+  - `mirror_names` ([]string, required): the drifted mirrors, sorted
+  - `interval` (string, required): the coarse sample/mail cadence
+  - `mail_error` (string, optional): present only when the notice to `human` could not be delivered; the event is still emitted so drift-was-seen is never lost to a down mail channel
+
+```json
+{"schema_version":1,"timestamp":"2026-07-17T16:45:00.000000000Z","event_type":"drift_watch_fired","agent":"pogod","details":{"drift_count":1,"mirror_names":["pogod"],"interval":"15m0s"}}
+```
+
 #### `usage_limit_hit`
 
 pogod's modal watcher ([modal_hook.go](../internal/claude/modal_hook.go), gh drellem2/pogo #45) declared a **suspected** provider usage-limit hit for an agent: the rate-limit-options modal has been recently visible AND the agent's event log has been stale for longer than the usage-limit staleness gate (~5m, `UsageLimitSuspectStaleness`). This is a heuristic derived entirely from the existing event-staleness tracker — there is no provider quota/API probe. The ~5m gate is deliberately long because the marker text also appears in ordinary transcripts; a shorter gate would false-positive on an agent that merely prints the phrase. Emitted once per wedge; the paired `usage_limit_cleared` fires on recovery. Additive — no `schema_version` bump.

@@ -12,6 +12,26 @@ is the curated, human-readable summary kept in sync at each release cut.
 
 ### Added
 
+- **`check-drift` finally has a RUNNER — pogod runs it on a coarse heartbeat
+  interval, report-only (mg-345b).** mg-5701 shipped the drift detector and
+  proved it fires, but wired it to nothing — "a detector you have to remember to
+  ask," the guard-that-depends-on-memory class that already failed twice on pa.
+  pogod now samples every `[reconcile]` mirror from its heartbeat `OnTick` loop
+  on a coarse interval (default 15m) with the same `CheckDrift` the CLI uses, and
+  **mails `human`** naming any drifted artifact (`internal/driftwatch`). This is
+  the DETECTION backstop (mg-75f9) for the four deploy paths the refinery
+  `[deploy]` PREVENTION misses: a `probeAlreadyMerged` early-return that resolves
+  as merged but *skips* deploy, a `deploy_command` that fails silently, a service
+  that dies *after* a good deploy, and any un-enrolled repo. Three properties are
+  load-bearing and tested: it rides the **heartbeat, not launchd** (a launchd
+  timer would silently never fire under the nondemand-spawn wedge, mg-50e0 — the
+  exact "inert while appearing correct" failure the detector exists to catch);
+  it is **report-only** and never reconciles (an auto-fix loop fighting a broken
+  artifact is the unbounded-reaper failure shape); and it **throttles to the
+  coarse interval**, so it never samples every ~30s tick and a persistent drift
+  re-mails once per interval, not once per tick. Configure under `[drift_watch]`;
+  emits `drift_watch_fired`.
+
 - **`agent_spawn_failed` — a failed polecat spawn now says so on the record
   (mg-d22a).** pogod emitted **no failure event at all**: 34,090 `agent_spawned`
   events in the live log and not one counterpart. So a work item with no spawn
