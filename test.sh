@@ -31,6 +31,13 @@ bash scripts/pogo-self-deploy_test.sh
 echo "Testing pogo-self-deploy live mail-check control"
 bash scripts/pogo-self-deploy_live_test.sh
 
+# The deploy script's SIGINT interrupt-safety control (mg-e201). Relocated OUT of
+# the live_test.sh artifact gate (do_prove's comsub) because it tests the DEPLOY
+# SCRIPT's INT trap, not the pogod detector, and its own-process-group Ctrl-C model
+# only holds in this DIRECT context, not inside do_prove's `out="$(bash ...)"`.
+echo "Testing pogo-self-deploy SIGINT interrupt-safety control"
+bash scripts/pogo-self-deploy_sigint_test.sh
+
 echo "Testing build.sh"
 bash build_test.sh
 
