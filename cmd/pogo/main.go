@@ -2040,13 +2040,39 @@ Exits with code 1 if any critical check fails (--check mode only).`,
 				if drift, derr := agent.CheckPromptDrift(); derr != nil {
 					warn("agent prompts up-to-date", "drift check failed: "+derr.Error())
 				} else if len(drift) > 0 {
-					names := make([]string, 0, len(drift))
+					// Two states, two remedies. Install-fixable drift
+					// (missing/unstamped/stale) is cured by re-running
+					// install. An "edited" canonical is NOT: the installer
+					// declines to clobber the local edit and only writes
+					// <name>.dist, so advising install there would exit 0 and
+					// change nothing — a false "I ran the fix" (mg-04ab).
+					// Never fold the two into one remedy string.
+					var installable, edited []agent.PromptDrift
 					for _, d := range drift {
-						names = append(names, fmt.Sprintf("%s (%s)", d.Path, d.Reason))
+						if agent.DriftInstallFixable(d.Reason) {
+							installable = append(installable, d)
+						} else {
+							edited = append(edited, d)
+						}
 					}
-					fail("agent prompts up-to-date",
-						fmt.Sprintf("%d prompt(s) drifted from embedded source: %s — run 'pogo agent prompt install', then restart affected agents",
-							len(drift), strings.Join(names, ", ")))
+					if len(installable) > 0 {
+						names := make([]string, 0, len(installable))
+						for _, d := range installable {
+							names = append(names, fmt.Sprintf("%s (%s)", d.Path, d.Reason))
+						}
+						fail("agent prompts up-to-date",
+							fmt.Sprintf("%d prompt(s) drifted from embedded source: %s — run 'pogo agent prompt install', then restart affected agents",
+								len(installable), strings.Join(names, ", ")))
+					}
+					if len(edited) > 0 {
+						names := make([]string, 0, len(edited))
+						for _, d := range edited {
+							names = append(names, fmt.Sprintf("%s (reconcile against %s.dist)", d.Path, d.Path))
+						}
+						fail("agent prompts up-to-date (local edits)",
+							fmt.Sprintf("%d hand-edited prompt(s) diverged from the embedded source: %s — 'pogo agent prompt install' will NOT overwrite your edits; it writes the shipped copy to <name>.dist. Reconcile each canonical against its .dist sidecar (run install first if the .dist is absent), then restart affected agents",
+								len(edited), strings.Join(names, ", ")))
+					}
 				} else {
 					pass("agent prompts up-to-date", "all prompts match embedded source")
 				}

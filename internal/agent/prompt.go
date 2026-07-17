@@ -1650,21 +1650,45 @@ func InstallPrompts(opts InstallOpts) (*InstallResult, error) {
 type PromptDrift struct {
 	// Path is the relative path under ~/.pogo/agents/ (e.g. "pm/pm-template.md").
 	Path string `json:"path"`
-	// Reason is "missing" if the live file does not exist, "unstamped" if it
-	// has no pogo-prompt stamp, or "stale" if the stamped embed hash differs
-	// from the embedded content's hash.
+	// Reason classifies the drift and, critically, selects the remedy:
+	//
+	//   "missing"   — the live file does not exist.
+	//   "unstamped" — the live file has no pogo-prompt stamp.
+	//   "stale"     — the embed advanced and the canonical was NOT hand-edited;
+	//                 'pogo agent prompt install' updates it cleanly.
+	//   "edited"    — the embed advanced AND the canonical was hand-edited in
+	//                 place (recorded BodyHash no longer matches the on-disk
+	//                 body). InstallPrompts will DECLINE to clobber the edit and
+	//                 only write <name>.dist, so 'pogo agent prompt install' is
+	//                 a silent no-op here (mg-04ab). The correct remedy is to
+	//                 reconcile <name> against <name>.dist by hand.
+	//
+	// "missing"/"unstamped"/"stale" are all install-fixable; "edited" is not,
+	// and the two must never share a remedy string.
 	Reason string `json:"reason"`
 }
 
+// DriftInstallFixable reports whether a drift Reason is resolved by re-running
+// 'pogo agent prompt install'. Everything except "edited" is — an edited
+// canonical is declined by the installer and needs a manual reconcile against
+// its <name>.dist sidecar instead.
+func DriftInstallFixable(reason string) bool {
+	return reason != "edited"
+}
+
 // CheckPromptDrift compares every embedded prompt against its installed copy
-// under ~/.pogo/agents/ and returns the set that is missing, unstamped, or
-// stale (stamped hash != embedded hash). Returns an empty slice when every
+// under ~/.pogo/agents/ and returns the set that has drifted, each tagged with
+// a Reason that selects its remedy: "missing", "unstamped", "stale" (embed
+// advanced, canonical untouched — install fixes it), or "edited" (embed
+// advanced AND canonical hand-edited — install DECLINES, so the remedy is a
+// manual reconcile against <name>.dist). Returns an empty slice when every
 // embedded prompt is present and up-to-date.
 //
 // Used by `pogo doctor --check` to fail loud when the binary's prompts have
 // advanced past what running agents are reading on disk — the failure mode
 // behind mg-ec77 (PMs silently skipping behavior added to the embedded
-// pm-template).
+// pm-template) — while never advising a remedy that will silently no-op
+// (mg-04ab).
 func CheckPromptDrift() ([]PromptDrift, error) {
 	destRoot := PromptDir()
 	var drift []PromptDrift
@@ -1692,13 +1716,32 @@ func CheckPromptDrift() ([]PromptDrift, error) {
 			return fmt.Errorf("stat %s: %w", destPath, statErr)
 		}
 
-		installed := installedPromptHash(destPath)
-		if installed == "" {
+		stamp := readInstalledPromptStamp(destPath)
+		if stamp.EmbedHash == "" {
 			drift = append(drift, PromptDrift{Path: rel, Reason: "unstamped"})
 			return nil
 		}
-		if installed != embeddedHash {
-			drift = append(drift, PromptDrift{Path: rel, Reason: "stale"})
+		if stamp.EmbedHash != embeddedHash {
+			// The embed advanced past the on-disk copy. Splitting on
+			// EmbedHash alone (the pre-mg-04ab behavior) lumped two states
+			// that need OPPOSITE remedies into one "stale" label:
+			//
+			//   - shipped template moved   → install overwrites cleanly.
+			//   - human edited the canonical → install DECLINES (writes the
+			//     new embed to <name>.dist and leaves the canonical), so
+			//     advising install there is a silent no-op — it exits 0 and
+			//     changes nothing.
+			//
+			// BodyHash was recorded at install time and is already parsed
+			// here; use it to tell the two apart. A current body hash that
+			// no longer matches the recorded one is the same signal
+			// InstallPrompts uses to trigger the conflict cell, so this
+			// classification tracks exactly what the installer will do.
+			if stamp.BodyHash != "" && currentBodyHash(destPath) != stamp.BodyHash {
+				drift = append(drift, PromptDrift{Path: rel, Reason: "edited"})
+			} else {
+				drift = append(drift, PromptDrift{Path: rel, Reason: "stale"})
+			}
 		}
 		return nil
 	})
