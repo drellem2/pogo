@@ -47,7 +47,13 @@ DRAIN_OFF='{"draining":false,"count":0,"polecats":[]}'
     && pass "json_bool yields empty for a non-bool value (-> '?', never a guess)" || fail "json_bool non-bool value"
 
 # --- classify_drift: the four cases from the mg-6afa ruling ---
-classify() { RUNNING="$1"; INSTALLED="$2"; MAIN="$3"; classify_drift; }
+# The 4th arg is the installed CLI revision (mg-ddf1); it defaults to the
+# installed pogod revision, which is the "both binaries moved together" state
+# the original four cases were written against — so they still assert exactly
+# what they always did.
+# ${4-$2}, NOT ${4:-$2}: an explicitly-empty 4th arg means "no CLI on disk", and
+# that is precisely the value that must not be read as "matches pogod".
+classify() { RUNNING="$1"; INSTALLED="$2"; MAIN="$3"; INSTALLED_CLI="${4-$2}"; classify_drift; }
 
 classify aaa aaa aaa
 { [ "$NEEDS_BUILD" = false ] && [ "$NEEDS_RESTART" = false ] && [[ "$ACTION" == clean* ]]; } \
@@ -70,6 +76,68 @@ classify a b c
 
 # main unknown -> cannot classify (non-zero)
 if classify aaa aaa "" ; then fail "empty main should fail classify"; else pass "empty main fails classify"; fi
+
+# --- classify_drift sees CLI drift, not just pogod drift (mg-ddf1) ---------
+# THE BUG, pinned. This is the exact state of the box on 2026-07-17: pogod built
+# and running main, the CLI three days behind. The old classifier read only
+# INSTALLED, so it called this "clean — nothing owed" and the redeploy's own
+# drift detection could not see the drift. A build IS owed here, and no restart
+# is: the daemon is already current.
+classify new new new old
+{ [ "$NEEDS_BUILD" = true ] && [ "$NEEDS_RESTART" = false ] && [[ "$ACTION" == BUILD\ owed* ]]; } \
+    && pass "CLI drift alone owes a BUILD (the mg-ddf1 bug: pogod current, pogo stale)" \
+    || fail "CLI-stale-only case: expected BUILD owed, no restart (NEEDS_BUILD=$NEEDS_BUILD NEEDS_RESTART=$NEEDS_RESTART ACTION=$ACTION)"
+
+# ...and it must NAME the CLI, so the operator reading the report learns WHICH
+# binary is behind. "a build is owed" without the name sends them to the daemon.
+[[ "$ACTION" == *pogo* ]] && [[ "$ACTION" != *pogod\ behind* ]] \
+    && pass "CLI-stale action names pogo (and does not blame pogod)" || fail "action must name the stale binary ($ACTION)"
+
+# An ABSENT CLI is drift, not a pass. installed_rev yields empty for a binary
+# that is not on disk; empty must never read as "matches main".
+classify new new new ""
+{ [ "$NEEDS_BUILD" = true ] && [[ "$ACTION" == BUILD\ owed* ]]; } \
+    && pass "absent CLI owes a BUILD (empty revision != main)" || fail "absent CLI case ($ACTION)"
+
+# The converse guard: a current CLI must not mask a stale pogod.
+classify old old new new
+{ [ "$NEEDS_BUILD" = true ] && [ "$NEEDS_RESTART" = true ]; } \
+    && pass "stale pogod still owes BUILD+RESTART when the CLI is current" || fail "stale-pogod-current-CLI case ($ACTION)"
+
+# Clean means BOTH match — the restart-only branch must not fire while the CLI
+# is stale, because that branch SKIPS go install and would strand the CLI dark
+# for another cycle. This is the regression that would silently re-open the bug.
+classify old new new old
+{ [ "$NEEDS_BUILD" = true ] && [ "$NEEDS_RESTART" = true ] && [[ "$ACTION" != RESTART* ]]; } \
+    && pass "stale CLI blocks the restart-only branch (which skips go install)" \
+    || fail "restart-only must not fire with a stale CLI ($ACTION)"
+
+# --- stale_bins names exactly what is behind ------------------------------
+INSTALLED=new INSTALLED_CLI=old MAIN=new
+[ "$(stale_bins)" = "pogo" ] && pass "stale_bins: CLI only" || fail "stale_bins CLI only ($(stale_bins))"
+INSTALLED=old INSTALLED_CLI=new MAIN=new
+[ "$(stale_bins)" = "pogod" ] && pass "stale_bins: daemon only" || fail "stale_bins daemon only ($(stale_bins))"
+INSTALLED=old INSTALLED_CLI=old MAIN=new
+[ "$(stale_bins)" = "pogod, pogo" ] && pass "stale_bins: both" || fail "stale_bins both ($(stale_bins))"
+INSTALLED=new INSTALLED_CLI=new MAIN=new
+[ -z "$(stale_bins)" ] && pass "stale_bins: empty when nothing is behind" || fail "stale_bins clean ($(stale_bins))"
+
+# --- DEPLOYED_CMDS is the coupling that stops this recurring --------------
+# The drift check and the build BOTH iterate this list. If pogo ever falls out
+# of it, the CLI goes dark again — and silently, which is the whole ticket.
+case " $DEPLOYED_CMDS " in
+    *" pogod "*) pass "DEPLOYED_CMDS includes pogod" ;;
+    *) fail "DEPLOYED_CMDS must include pogod ($DEPLOYED_CMDS)" ;;
+esac
+case " $DEPLOYED_CMDS " in
+    *" pogo "*) pass "DEPLOYED_CMDS includes pogo — the CLI ships with the daemon" ;;
+    *) fail "DEPLOYED_CMDS must include pogo ($DEPLOYED_CMDS)" ;;
+esac
+
+# --- installed_bin resolves per-binary paths, honouring POGO_GOBIN ---------
+( POGO_GOBIN=/tmp/gobin
+  [ "$(installed_bin pogod)" = "/tmp/gobin/pogod" ] && [ "$(installed_bin pogo)" = "/tmp/gobin/pogo" ] ) \
+    && pass "installed_bin resolves each binary under POGO_GOBIN" || fail "installed_bin per-name resolution"
 
 # --- classify_drain_precondition: the mg-065e bootstrap disambiguation ---
 # 2xx -> proceed with drain

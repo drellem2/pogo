@@ -1,6 +1,22 @@
 #!/bin/bash
 # pogo-self-deploy — out-of-band pogod redeployer (mg-6afa / mg-cae1).
 #
+# IT DEPLOYS THE CLI TOO, AND THAT IS NOT A CONVENIENCE (mg-ddf1)
+# --------------------------------------------------------------
+# `do_build` installs every binary in DEPLOYED_CMDS — today `pogod` AND `pogo`.
+# The CLI belongs here and nowhere else. A `pogo` newer than the running `pogod`
+# risks a protocol mismatch that breaks the tooling every agent depends on,
+# mid-flight (mg-49bc). A redeploy is the exact moment pogod moves to main's
+# revision — which makes it the one moment the CLI can move safely, and the
+# reason installing it at any OTHER time is the hazard. Lockstep, by design.
+#
+# Before this, `do_build` installed ./cmd/pogod alone, so no code path installed
+# the CLI at all: every cmd/pogo change was merged and dark, indefinitely, with
+# no signal. Not a staleness window — an absence. The CLI sat three days behind
+# main while the drift check called the box clean, because it too read only the
+# daemon. If you add a binary to DEPLOYED_CMDS, the drift check covers it for
+# free; that coupling is deliberate, and it is what stops this recurring.
+#
 # WHY THIS IS A STANDALONE SCRIPT, NOT A pogod OR pogo SUBCOMMAND
 # ---------------------------------------------------------------
 # A thing that replaces or supervises X cannot live inside X — not inside X's
@@ -304,15 +320,27 @@ running_rev() {
     curl -sf --max-time 5 "$(base_url)/version" 2>/dev/null | json_str revision
 }
 
-# installed: the revision baked into the on-disk ~/go/bin/pogod binary.
+# DEPLOYED_CMDS: every binary this deploy owns, as `go install` package paths.
+# The CLI is here because it is not optional cargo: `pogo` is the operator's only
+# interface to the daemon, and a `pogo` older than the `pogod` it talks to is a
+# protocol mismatch waiting to happen (mg-49bc). They move together or not at all
+# — which is why the list lives at the top and every path below iterates it
+# rather than naming a binary.
+DEPLOYED_CMDS="pogod pogo"
+
+# installed: the revision baked into an on-disk ~/go/bin/<name> binary.
 installed_bin() {
-    if [ -n "${POGO_GOBIN:-}" ]; then echo "$POGO_GOBIN/pogod"; return; fi
+    local name="$1"
+    if [ -n "${POGO_GOBIN:-}" ]; then echo "$POGO_GOBIN/$name"; return; fi
     local gobin; gobin="$(go env GOBIN 2>/dev/null)"
-    if [ -n "$gobin" ]; then echo "$gobin/pogod"; return; fi
-    echo "$(go env GOPATH 2>/dev/null)/bin/pogod"
+    if [ -n "$gobin" ]; then echo "$gobin/$name"; return; fi
+    echo "$(go env GOPATH 2>/dev/null)/bin/$name"
 }
+# Empty when the binary is absent or carries no stamp. Empty is a REAL answer
+# here: it never equals MAIN, so an absent CLI classifies as a build owed rather
+# than passing as "matches".
 installed_rev() {
-    local bin; bin="$(installed_bin)"
+    local bin; bin="$(installed_bin "$1")"
     [ -x "$bin" ] || return 0
     go version -m "$bin" 2>/dev/null | sed -n 's/.*vcs.revision=\([0-9a-f]*\).*/\1/p' | head -1
 }
@@ -346,18 +374,32 @@ resolve_repo() {
 # ---------------------------------------------------------------------------
 # Drift computation
 # ---------------------------------------------------------------------------
-RUNNING="" ; INSTALLED="" ; MAIN=""
+RUNNING="" ; INSTALLED="" ; INSTALLED_CLI="" ; MAIN=""
 compute_drift() {
     RUNNING="$(running_rev)"
-    INSTALLED="$(installed_rev)"
+    INSTALLED="$(installed_rev pogod)"
+    INSTALLED_CLI="$(installed_rev pogo)"
     MAIN="$(main_rev)"
 }
 
+# The CLI has no `running` axis — `pogo` is a short-lived process, so there is
+# nothing to be stale except the binary on disk. That asymmetry is why it gets a
+# row and not a column: installed-vs-main is the whole question for it.
 print_drift() {
-    echo "pogod revision drift (repo: $REPO, ref: $DEPLOY_REF)"
-    printf '  running   : %s\n' "${RUNNING:-<unreachable — pogod not answering /version>}"
-    printf '  installed : %s\n' "${INSTALLED:-<none on disk>}"
-    printf '  main HEAD  : %s\n' "${MAIN:-<unknown>}"
+    echo "revision drift (repo: $REPO, ref: $DEPLOY_REF)"
+    printf '  running        : %s\n' "${RUNNING:-<unreachable — pogod not answering /version>}"
+    printf '  installed pogod: %s\n' "${INSTALLED:-<none on disk>}"
+    printf '  installed pogo : %s\n' "${INSTALLED_CLI:-<none on disk>}"
+    printf '  main HEAD      : %s\n' "${MAIN:-<unknown>}"
+}
+
+# Names the binaries whose installed revision is behind main, for the operator
+# who has to read WHY a build is owed.
+stale_bins() {
+    local out=""
+    [ "$INSTALLED" != "$MAIN" ] && out="pogod"
+    [ "$INSTALLED_CLI" != "$MAIN" ] && out="${out:+$out, }pogo"
+    echo "$out"
 }
 
 # Sets NEEDS_BUILD / NEEDS_RESTART / owed-action string. Reports; never acts.
@@ -365,17 +407,27 @@ NEEDS_BUILD=false ; NEEDS_RESTART=false ; ACTION=""
 classify_drift() {
     NEEDS_BUILD=false ; NEEDS_RESTART=false
     if [ -z "$MAIN" ]; then ACTION="cannot classify: main HEAD unknown"; return 1; fi
-    [ "$INSTALLED" != "$MAIN" ] && NEEDS_BUILD=true
+    # A build is owed if ANY deployed binary is behind main — not just pogod.
+    # Reading only pogod here is what let the CLI sit three days stale while this
+    # very function reported "clean": the daemon matched main, so nothing looked
+    # owed, and the drift check could not see the drift it was there to catch
+    # (mg-ddf1). A check blind to half of what it installs reports health it has
+    # not measured.
+    { [ "$INSTALLED" != "$MAIN" ] || [ "$INSTALLED_CLI" != "$MAIN" ]; } && NEEDS_BUILD=true
     [ "$RUNNING"  != "$MAIN" ] && NEEDS_RESTART=true
-    if [ "$RUNNING" = "$MAIN" ] && [ "$INSTALLED" = "$MAIN" ]; then
-        ACTION="clean — running == installed == main; nothing owed"
-    elif [ "$INSTALLED" = "$MAIN" ] && [ "$RUNNING" != "$MAIN" ]; then
+    if ! $NEEDS_BUILD && ! $NEEDS_RESTART; then
+        ACTION="clean — running == installed (pogod, pogo) == main; nothing owed"
+    elif ! $NEEDS_BUILD; then
         # A rebuild already happened; only a restart bounces the fleet.
         ACTION="RESTART owed (no go install): installed already matches main, running is stale"
+    elif ! $NEEDS_RESTART; then
+        # The case the old classifier could not express, and today's actual
+        # state: pogod is current and running main, and the CLI is stale anyway.
+        ACTION="BUILD owed (no restart): running pogod is main, but installed $(stale_bins) behind main"
     elif [ "$RUNNING" = "$INSTALLED" ] && [ "$INSTALLED" != "$MAIN" ]; then
         ACTION="BUILD + RESTART owed: running == installed, both behind main"
     else
-        ACTION="BUILD + RESTART owed: running/installed/main all differ"
+        ACTION="BUILD + RESTART owed: running/installed/main all differ ($(stale_bins) behind)"
     fi
     return 0
 }
@@ -646,7 +698,8 @@ What happened:  the drain waited ${DRAIN_TIMEOUT}s for the fleet to quiesce and
                 --force is deliberately not armed on the nightly.
 Deploy ref:     $DEPLOY_REF
 Running pogod:  $(short "${RUNNING:-?}")
-Installed:      $(short "${INSTALLED:-?}")
+Installed pogod:$(short "${INSTALLED:-?}")
+Installed pogo: $(short "${INSTALLED_CLI:-?}")
 main:           $(short "${MAIN:-?}")
 Dispatch:       RESTORED (the exit trap put back draining=${DRAIN_PRIOR:-?}).
                 No polecat was killed. No worktree was touched. Nothing deployed.
@@ -824,8 +877,17 @@ cleanup_orphans() {
     [ -n "$REPO" ] && git -C "$REPO" worktree prune 2>/dev/null || true
 }
 
+# Installs every binary in DEPLOYED_CMDS, in ONE `go install`. The single
+# invocation is the lockstep: the daemon and the CLI are compiled and installed
+# by one command that either succeeds for both or fails, so there is no window
+# where a redeploy has moved pogod and left the operator on an old pogo. It also
+# gives the negative for free — every refusal above (dirty tree, wrong HEAD, a
+# compile error in either package) happens BEFORE anything is written to GOBIN,
+# so a redeploy that fails cannot leave a half-installed CLI behind.
 do_build() {
-    log "building pogod from $REPO ($DEPLOY_REF)"
+    local pkgs="" name
+    for name in $DEPLOYED_CMDS; do pkgs="${pkgs:+$pkgs }./cmd/$name"; done
+    log "building $DEPLOYED_CMDS from $REPO ($DEPLOY_REF)"
     local head; head="$(git -C "$REPO" rev-parse HEAD 2>/dev/null)"
     if [ "$head" != "$MAIN" ]; then
         err "repo HEAD ($(short "$head")) != $DEPLOY_REF ($(short "$MAIN")); checkout $DEPLOY_REF first or pass --repo to a checkout on it"
@@ -835,13 +897,19 @@ do_build() {
         err "repo $REPO has uncommitted changes; refusing to go install a dirty tree"
         exit 4
     fi
-    ( cd "$REPO" && go install ./cmd/pogod ) || { err "go install failed"; exit 4; }
-    local now; now="$(installed_rev)"
-    if [ "$now" != "$MAIN" ]; then
-        err "post-install installed revision $(short "$now") != main $(short "$MAIN")"
-        exit 4
-    fi
-    log "installed pogod is now $(short "$now")"
+    # shellcheck disable=SC2086  # $pkgs is a deliberate word-split package list
+    ( cd "$REPO" && go install $pkgs ) || { err "go install failed"; exit 4; }
+    # Verify EVERY binary, not just the daemon: an install that silently skipped
+    # one is exactly the failure this ticket exists to end, and it is only
+    # detectable by asking each binary what revision it carries.
+    for name in $DEPLOYED_CMDS; do
+        local now; now="$(installed_rev "$name")"
+        if [ "$now" != "$MAIN" ]; then
+            err "post-install $name revision $(short "$now") != main $(short "$MAIN")"
+            exit 4
+        fi
+        log "installed $name is now $(short "$now")"
+    done
 }
 
 # ---------------------------------------------------------------------------
@@ -882,7 +950,8 @@ do_build() {
 # and awake would be reading these same signals by hand.
 do_prove() {
     local ctl="$REPO/scripts/pogo-self-deploy_live_test.sh"
-    local bin; bin="$(installed_bin)"
+    # pogod specifically: the control proves the DAEMON's detector.
+    local bin; bin="$(installed_bin pogod)"
 
     # The gate must fail CLOSED on its own absence. If the control is missing,
     # that is not "nothing to prove" — it is the detector's detector gone, which
@@ -909,7 +978,7 @@ do_prove() {
         exit 9
     fi
 
-    log "proving the detector against the built artifact $(short "$(installed_rev)") ($bin)"
+    log "proving the detector against the built artifact $(short "$(installed_rev pogod)") ($bin)"
     log "  running $ctl — both directions, ~2min; a deploy does not trust an unproven detector"
 
     # Capture rather than stream: the verdict is drawn from the tokens, so the
