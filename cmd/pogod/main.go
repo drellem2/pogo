@@ -67,14 +67,16 @@ const maxHTTPConns = 256
 // agent by its event identity (cat-/crew-<name>) or, for some crew schedules,
 // its bare name, so we match on both.
 //
-// It answers on TWO independent sources, and the second one is the mg-de08 fix:
+// It answers on TWO sources, consulted in a STRICT ORDER (mg-8677):
 //
-//   - the registry — evidence of an actual process. A running agent, or a
-//     restart-on-crash agent the registry still holds (a transient mid-restart
-//     window), is ALIVE.
-//   - the desired state on disk (agent.IsExpectedAgent) — an auto_start, not
-//     parked crew prompt. Such an agent is EXPECTED whether or not it is
-//     registered.
+//  1. the registry — evidence about an actual process. A registered agent that
+//     is running, or one held for an imminent respawn, is ALIVE. A registered
+//     agent that has terminally exited with no respawn coming is GONE.
+//  2. the desired state on disk (agent.DesiredStateFor) — an auto_start, not
+//     parked crew prompt. Consulted ONLY when step 1 yielded no evidence at
+//     all, i.e. the registry holds no entry for this agent.
+//
+// The order is the whole design, and both halves of it were learned from a bug:
 //
 // The registry alone is NOT sufficient, and believing it was is what caused
 // mg-de08. A freshly-started pogod has an EMPTY registry: its scheduler loads
@@ -83,14 +85,20 @@ const maxHTTPConns = 256
 // crew agent gone and reaps the entire fleet's mail loop seconds before the
 // crew boot into a world where their schedules no longer exist. The old
 // RestartOnCrash guard could not save them: it reads a flag off a registry
-// entry that does not exist yet.
+// entry that does not exist yet. So an ABSENT entry means UNKNOWN, never GONE.
 //
-// So an empty registry means UNKNOWN, never GONE. GONE keeps its previous
-// meaning and its previous behaviour — not in the desired state (polecats,
-// agents whose prompt was removed) or explicitly stopped — which is what
-// preserves orphan-nudge prevention. Across a pogod restart the population
-// splits cleanly: crew are auto_start (EXPECTED → keep), polecats are not
-// (GONE → reap, exactly as before).
+// But the desired state must not be allowed to answer a question the registry
+// already answered, and letting it was mg-8677: a registered, terminally-exited,
+// restart_on_crash=false agent fell through to DesiredStateFor and came back
+// EXPECTED on the strength of auto_start=true, keeping its mail-check alive
+// forever and accumulating unbounded scheduler_fire_failed noise. The registry
+// LOOKED and found a corpse; auto_start does not resurrect it.
+//
+// GONE means positive evidence of death — a corpse in the registry, or an agent
+// that is neither registered nor in the desired state (polecats, agents whose
+// prompt was removed) — which is what preserves orphan-nudge prevention. Across
+// a pogod restart the unregistered population splits cleanly: crew are
+// auto_start (EXPECTED → keep), polecats are not (GONE → reap).
 type registryLiveness struct{ reg *agent.Registry }
 
 func (l registryLiveness) AgentState(scheduleAgent string) scheduler.AgentState {
@@ -100,13 +108,45 @@ func (l registryLiveness) AgentState(scheduleAgent string) scheduler.AgentState 
 				if a.Alive() || a.RestartOnCrash {
 					return scheduler.AgentAlive
 				}
+				// A registered, terminally-exited, no-respawn agent. RETURN
+				// HERE — do not fall through to the desired state. This is the
+				// precedence rule, and it is not a micro-optimisation to be
+				// simplified away by hoisting the DesiredStateFor call out:
+				//
+				//   Consult desired state ONLY when the registry yields NO
+				//   evidence. Evidence beats expectation, always. Never let
+				//   auto_start override a corpse.
+				//
+				// This IS the positive evidence of death that mg-de08 requires
+				// before a reap: the registry looked, and found a body. Asking
+				// the prompt "but is it supposed to be running?" after that can
+				// only produce a wrong answer — an auto_start=true +
+				// restart_on_crash=false agent would be called EXPECTED and its
+				// mail-check would fire at a corpse forever (mg-8677).
+				//
+				// Reaping is right here, and does not violate mg-de08's "stop
+				// deleting the alarm" corollary: that holds only where the
+				// schedule is the ONLY signal. It is not — the agent already
+				// diagnoses "exited" (internal/agent/api.go), which is more
+				// precise than fire-failure noise. The schedule adds no
+				// information here, only unbounded noise.
+				//
+				// The eager onExit reap (RemoveMailChecksForAgent) usually gets
+				// here first, and that is NOT a reason for this sweep to defer
+				// to it: this sweep is the BACKSTOP for what onExit cannot do,
+				// including an eager reap that failed to persist and rolled
+				// back. A backstop that delegates to the thing it backstops is
+				// not a backstop.
+				//
+				// Humans and agents both reason from desired state by default —
+				// which is exactly why the code must not.
+				return scheduler.AgentGone
 			}
 		}
 	}
-	// No live process. That is not evidence of death — ask the desired state
+	// The registry holds no entry for this agent: no evidence either way, NOT
+	// evidence of death (mg-de08). Only now may the desired state speak — ask
 	// whether this agent is supposed to be running before reaping anything.
-	// An explicitly stopped agent is already reaped eagerly by pogod's onExit
-	// hook (RemoveMailChecksForAgent), so this sweep does not need to catch it.
 	expected, err := agent.DesiredStateFor(scheduleAgent)
 	switch {
 	case err != nil:

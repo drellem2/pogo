@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -346,5 +347,174 @@ func TestGCGateBlocksReapDuringStartupWindow(t *testing.T) {
 	// never reaps anything.
 	if n := s.GCStaleMailChecks(now.Add(31 * time.Second)); n != 1 {
 		t.Fatalf("GC reaped %d after the gate opened, want 1 (positive control: the gate must delay the reap, not disable it)", n)
+	}
+}
+
+// writeCrewPromptFull declares a crew agent with BOTH lifecycle keys set
+// explicitly — the shape the mg-8677 corpse case needs (auto_start = true,
+// restart_on_crash = false).
+func writeCrewPromptFull(t *testing.T, name string, autoStart, restartOnCrash bool) {
+	t.Helper()
+	path := filepath.Join(agent.CrewPromptDir(), name+".md")
+	body := fmt.Sprintf("+++\nauto_start = %t\nrestart_on_crash = %t\n+++\n# %s\n",
+		autoStart, restartOnCrash, name)
+	if err := os.WriteFile(path, []byte(body), 0644); err != nil {
+		t.Fatalf("write crew prompt %s: %v", path, err)
+	}
+}
+
+// spawnCorpse registers an agent, lets its process exit, and returns once the
+// registry holds a terminally-exited entry for it. waitAndHandle does NOT
+// remove the entry (only Stop and the onExit hook do), so this is precisely the
+// state the sweep must classify: a REGISTERED body.
+func spawnCorpse(t *testing.T, reg *agent.Registry, name string, restartOnCrash bool) *agent.Agent {
+	t.Helper()
+	a, err := reg.Spawn(agent.SpawnRequest{
+		Name:           name,
+		Type:           agent.TypeCrew,
+		Command:        []string{"sh", "-c", "exit 0"},
+		RestartOnCrash: restartOnCrash,
+	})
+	if err != nil {
+		t.Fatalf("Spawn %s: %v", name, err)
+	}
+	select {
+	case <-a.Done():
+	case <-time.After(10 * time.Second):
+		t.Fatalf("%s never exited", name)
+	}
+	// Precondition, asserted rather than assumed: the corpse is still
+	// REGISTERED. If the registry dropped the entry, this test would be
+	// exercising the unregistered path and could never see the mg-8677 defect.
+	found := false
+	for _, e := range reg.List() {
+		if e.Name == name {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("precondition: %s is not in the registry after exit; this test cannot see the corpse path", name)
+	}
+	if a.Alive() {
+		t.Fatalf("precondition: %s still alive after Done()", name)
+	}
+	return a
+}
+
+// TestRegistryLiveness_AutoStartNeverOverridesACorpse is THE acceptance test
+// for mg-8677 — the precedence rule, stated as an assertion.
+//
+//	Consult desired state ONLY when the registry yields NO evidence.
+//	Evidence beats expectation, always. Never let auto_start override a corpse.
+//
+// A REGISTERED, terminally-exited, restart_on_crash=false agent IS positive
+// evidence of death — the registry looked and found a body. Before this fix it
+// fell through to DesiredStateFor and came back EXPECTED on the strength of
+// auto_start = true, so its mail-check survived forever, firing at a corpse and
+// accumulating unbounded scheduler_fire_failed noise.
+//
+// The defect was LATENT on the live fleet only because no prompt paired
+// auto_start = true with restart_on_crash = false — one word on crew/doctor.md
+// away, which is why the case is pinned here rather than left to the fleet.
+func TestRegistryLiveness_AutoStartNeverOverridesACorpse(t *testing.T) {
+	sandboxPogoHome(t)
+
+	// The arming pair: "start me at boot, don't respawn me if I die" — an
+	// entirely reasonable prompt (it is half-written on crew/doctor.md today).
+	writeCrewPromptFull(t, "pm-corpse", true, false)
+	// The control that must NOT change: auto_start + restart_on_crash, the
+	// shape all 12 live auto_start prompts have. Its registry entry is held
+	// through a mid-restart window and must still read ALIVE.
+	writeCrewPromptFull(t, "pm-restarter", true, true)
+
+	reg, err := agent.NewRegistry(shortSocketDir(t))
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	defer reg.StopAll(2 * time.Second)
+	l := registryLiveness{reg: reg}
+
+	spawnCorpse(t, reg, "pm-corpse", false)
+	spawnCorpse(t, reg, "pm-restarter", true)
+
+	// Sanity: the desired state really does say "expected" for the corpse. If
+	// this ever stops holding, the test below would pass for the wrong reason
+	// — GONE would be trivially correct and the precedence rule untested.
+	expected, err := agent.DesiredStateFor("pm-corpse")
+	if err != nil || !expected {
+		t.Fatalf("precondition: DesiredStateFor(pm-corpse) = %v, %v; want true, nil — "+
+			"the whole point is that desired state SAYS expected and must lose to the registry anyway", expected, err)
+	}
+
+	if got := l.AgentState("pm-corpse"); got != scheduler.AgentGone {
+		t.Errorf("AgentState(pm-corpse) = %v, want %v — a registered, terminally-exited, "+
+			"restart_on_crash=false agent is positive evidence of death; auto_start must not override a corpse (mg-8677)", got, scheduler.AgentGone)
+	}
+	if got := l.AgentState("crew-pm-corpse"); got != scheduler.AgentGone {
+		t.Errorf("AgentState(crew-pm-corpse) = %v, want %v — the event-identity form must resolve identically", got, scheduler.AgentGone)
+	}
+	// mg-de08's invariant, unmoved: a restart_on_crash entry the registry
+	// still holds is a mid-restart window, not a corpse.
+	if got := l.AgentState("pm-restarter"); got != scheduler.AgentAlive {
+		t.Errorf("REGRESSION (mg-de08): AgentState(pm-restarter) = %v, want %v — "+
+			"a restart_on_crash agent mid-respawn must not be reaped", got, scheduler.AgentAlive)
+	}
+	// ...and the unregistered auto_start agent still resolves via the desired
+	// state. The fix narrows WHEN desired state is consulted; it must not stop
+	// it being consulted where it is the only source.
+	writeCrewPromptFull(t, "pm-unregistered", true, false)
+	if got := l.AgentState("pm-unregistered"); got != scheduler.AgentExpected {
+		t.Errorf("REGRESSION (mg-de08): AgentState(pm-unregistered) = %v, want %v — "+
+			"an empty registry is UNKNOWN, so the desired state must still answer", got, scheduler.AgentExpected)
+	}
+}
+
+// TestGCReapsCorpseMailCheckDespiteAutoStart drives the same defect through the
+// real sweep, because AgentState returning GONE only matters if a schedule
+// actually dies. This is the observable the ticket describes: the mail-check
+// that "survives forever, accumulating scheduler_fire_failed noise".
+func TestGCReapsCorpseMailCheckDespiteAutoStart(t *testing.T) {
+	sandboxPogoHome(t)
+	writeCrewPromptFull(t, "pm-corpse", true, false)
+	writeCrewPromptFull(t, "pm-restarter", true, true)
+
+	reg, err := agent.NewRegistry(shortSocketDir(t))
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	defer reg.StopAll(2 * time.Second)
+	spawnCorpse(t, reg, "pm-corpse", false)
+	spawnCorpse(t, reg, "pm-restarter", true)
+
+	now := time.Date(2026, 7, 17, 2, 0, 0, 0, time.UTC)
+	s, err := scheduler.New(filepath.Join(t.TempDir(), "schedules.json"), nil)
+	if err != nil {
+		t.Fatalf("scheduler.New: %v", err)
+	}
+	add := func(agentName, id string) {
+		t.Helper()
+		if _, err := s.Add(scheduler.Entry{Agent: agentName, ID: id, Cron: "*/10 * * * *"}, now); err != nil {
+			t.Fatalf("Add %s/%s: %v", agentName, id, err)
+		}
+	}
+	add("pm-corpse", scheduler.MailCheckIDPrefix+"pm-corpse")
+	add("pm-restarter", scheduler.MailCheckIDPrefix+"pm-restarter")
+	s.SetLiveness(registryLiveness{reg: reg})
+	s.SetGCGate(func(time.Time) bool { return true })
+
+	if n := s.GCStaleMailChecks(now); n != 1 {
+		t.Errorf("GC reaped %d, want exactly 1 (the corpse's mail-check, not the restarter's)", n)
+	}
+
+	survived := map[string]bool{}
+	for _, e := range s.List("") {
+		survived[e.Agent+"/"+e.ID] = true
+	}
+	if survived["pm-corpse/"+scheduler.MailCheckIDPrefix+"pm-corpse"] {
+		t.Error("corpse's mail-check SURVIVED the sweep: it will fire at a dead agent forever, " +
+			"accumulating scheduler_fire_failed noise — auto_start must not override a corpse (mg-8677)")
+	}
+	if !survived["pm-restarter/"+scheduler.MailCheckIDPrefix+"pm-restarter"] {
+		t.Error("REGRESSION (mg-de08): restart_on_crash agent's mail-check was reaped mid-respawn")
 	}
 }

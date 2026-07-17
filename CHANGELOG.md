@@ -28,6 +28,23 @@ is the curated, human-readable summary kept in sync at each release cut.
 
 ### Fixed
 
+- **`auto_start` can no longer override a corpse in the mail-check reap
+  (mg-8677).** A follow-up to mg-de08, which over-corrected: a **registered**,
+  terminally-exited, `restart_on_crash = false` agent fell through to the
+  desired-state check and came back EXPECTED on the strength of
+  `auto_start = true`, so its mail-check survived forever, firing at a dead
+  agent and accumulating unbounded `scheduler_fire_failed` noise. The two
+  sources are now consulted in a strict order: **consult desired state ONLY
+  when the registry yields no evidence. Evidence beats expectation, always.**
+  A registered corpse *is* the positive evidence of death mg-de08 requires —
+  the registry looked and found a body — so it reaps; only an agent the
+  registry has no entry for is UNKNOWN and defers to the prompt. Reaping here
+  loses no signal: the agent already diagnoses `"exited"`, which is more
+  precise than fire-failure noise. Latent on the live fleet (no prompt paired
+  `auto_start = true` with `restart_on_crash = false` — `crew/doctor.md` was one
+  word away), so no observed outage; pinned by test rather than left to the
+  fleet.
+
 - **A pogod restart no longer reaps the fleet's mail-check schedules (mg-de08).**
   Every redeploy silently killed the mail cadence of the entire crew. The
   successor pogod — not the bounce — was the culprit: it starts with an **empty
@@ -40,8 +57,10 @@ is the curated, human-readable summary kept in sync at each release cut.
   look stale. The reap now requires **positive evidence of death, never absence
   of evidence of life**: an agent in pogod's desired state (an `auto_start`,
   not-parked crew prompt) is EXPECTED and keeps its mail-check whether or not it
-  is registered, while GONE keeps its exact previous meaning and behaviour — a
-  polecat's mail-check is still reaped, so orphan-nudge prevention is unchanged.
+  is registered, while a polecat's mail-check is still reaped, so orphan-nudge
+  prevention is unchanged. (This entry originally claimed GONE kept its *exact*
+  previous meaning; it did not — the registered-corpse case regressed, and
+  mg-8677 above restores it.)
   The sweep is additionally held until the first auto-start sweep completes plus
   a 30s settle window, so the invariant is never evaluated against data that
   isn't loaded yet. Fails safe: a delayed reap is invisible, a premature one was
