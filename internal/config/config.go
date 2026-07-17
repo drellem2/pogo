@@ -141,6 +141,24 @@ const (
 // treat it as read-only.
 var DefaultFastPriorities = []string{"high"}
 
+// DefaultNonDispatchableAssignees is the set of WorkItem.Assignee values that
+// mean "the coordinator must NOT dispatch this" — an execution gate rather
+// than a statement of ownership. Only "human" today: internal/agent/prompts
+// /mayor.md files manual-QA items with `--assignee=human` precisely so they are
+// never handed to a worker, and events.ResolveAgent already reserves "human" as
+// the no-agent identity.
+//
+// This is deliberately a DENYLIST of gates, not an allowlist of dispatchable
+// agents. An allowlist would have to enumerate the agent roster (mayor, every
+// pm-*, every future crew name) and would silently stop watching work the day a
+// new agent is added — which is exactly the defect mg-4bd4 fixed. The gate
+// vocabulary, by contrast, is closed: it only grows if someone invents a second
+// meaning for "do not execute this automatically", and then it grows by a
+// config line rather than a code change.
+//
+// Kept as a var because a slice cannot be a const; treat it as read-only.
+var DefaultNonDispatchableAssignees = []string{"human"}
+
 // Config holds pogo daemon configuration.
 type Config struct {
 	Port            int
@@ -226,6 +244,12 @@ type StallWatchConfig struct {
 	// FastPriorities lists the WorkItem.Priority values that trigger the
 	// priority wake. Empty falls back to DefaultFastPriorities (["high"]).
 	FastPriorities []string
+	// NonDispatchableAssignees lists the WorkItem.Assignee values that mark an
+	// item as gated to a non-dispatchable executor, so neither work-item
+	// detector watches it. Every other assignee — unassigned, the coordinator,
+	// or any owning agent such as pm-<name> — IS watched. Empty falls back to
+	// DefaultNonDispatchableAssignees (["human"]).
+	NonDispatchableAssignees []string
 }
 
 // GitGCConfig configures pogod's periodic polecat git garbage collector.
@@ -486,6 +510,7 @@ func Load() *Config {
 			HighPriorityWakeDelay:    DefaultHighPriorityWakeDelay,
 			HighPriorityWakeCooldown: DefaultHighPriorityWakeCooldown,
 			FastPriorities:           DefaultFastPriorities,
+			NonDispatchableAssignees: DefaultNonDispatchableAssignees,
 		},
 	}
 
@@ -579,6 +604,9 @@ func Load() *Config {
 		}
 		if len(fileCfg.StallWatch.FastPriorities) > 0 {
 			cfg.StallWatch.FastPriorities = fileCfg.StallWatch.FastPriorities
+		}
+		if len(fileCfg.StallWatch.NonDispatchableAssignees) > 0 {
+			cfg.StallWatch.NonDispatchableAssignees = fileCfg.StallWatch.NonDispatchableAssignees
 		}
 	}
 
@@ -1018,6 +1046,8 @@ func parseConfigFileInto(cfg *parsedConfig, path string) error {
 				}
 			case "fast_priorities":
 				cfg.StallWatch.FastPriorities = parseStringArray(val)
+			case "non_dispatchable_assignees":
+				cfg.StallWatch.NonDispatchableAssignees = parseStringArray(val)
 			}
 		case "reaper":
 			switch key {

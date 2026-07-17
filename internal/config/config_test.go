@@ -914,6 +914,9 @@ func TestStallWatchDefaults(t *testing.T) {
 	if len(cfg.StallWatch.FastPriorities) != 1 || cfg.StallWatch.FastPriorities[0] != "high" {
 		t.Errorf("fast priorities = %v, want [high]", cfg.StallWatch.FastPriorities)
 	}
+	if len(cfg.StallWatch.NonDispatchableAssignees) != 1 || cfg.StallWatch.NonDispatchableAssignees[0] != "human" {
+		t.Errorf("non-dispatchable assignees = %v, want [human]", cfg.StallWatch.NonDispatchableAssignees)
+	}
 }
 
 func TestStallWatchConfigFile(t *testing.T) {
@@ -935,6 +938,7 @@ priority_wake_enabled = false
 high_priority_wake_delay = "10s"
 high_priority_wake_cooldown = "90s"
 fast_priorities = ["high", "critical"]
+non_dispatchable_assignees = ["human", "legal-review"]
 `), 0644)
 
 	cfg := Load()
@@ -952,6 +956,11 @@ fast_priorities = ["high", "critical"]
 	}
 	if len(cfg.StallWatch.FastPriorities) != 2 || cfg.StallWatch.FastPriorities[0] != "high" || cfg.StallWatch.FastPriorities[1] != "critical" {
 		t.Errorf("fast priorities = %v, want [high critical]", cfg.StallWatch.FastPriorities)
+	}
+	if len(cfg.StallWatch.NonDispatchableAssignees) != 2 ||
+		cfg.StallWatch.NonDispatchableAssignees[0] != "human" ||
+		cfg.StallWatch.NonDispatchableAssignees[1] != "legal-review" {
+		t.Errorf("non-dispatchable assignees = %v, want [human legal-review]", cfg.StallWatch.NonDispatchableAssignees)
 	}
 	if cfg.StallWatch.Agent != "director" {
 		t.Errorf("agent = %q, want director", cfg.StallWatch.Agent)

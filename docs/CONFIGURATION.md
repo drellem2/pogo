@@ -209,12 +209,54 @@ unread_mail_age_threshold = "10m"       # Threshold B (age)
 max_unread_mail_count = 5               # Threshold B (count)
 nudge_cooldown = "5m"                   # min gap between same-category nudges
 
+# Assignees that mean "do NOT dispatch this" — see "Ownership vs execution".
+non_dispatchable_assignees = ["human"]  # everything else is watched
+
 # Priority wake (gh #61): a high-priority available item skips the 10m gate.
 priority_wake_enabled = true            # default true
 high_priority_wake_delay = "30s"        # min age before a high-priority item wakes
 high_priority_wake_cooldown = "3m"      # min gap between priority-wake nudges
 fast_priorities = ["high"]              # Priority values that trigger the wake
 ```
+
+### Ownership vs execution — which items the work-item detectors watch
+
+Both work-item detectors (Threshold A and the priority wake) watch **every**
+available item **except** those whose assignee names a non-dispatchable executor
+— by default just `human`. Ownership does not affect visibility: an item owned by
+`pm-pogo`, by `pm-anyone-else`, or by nobody is watched identically.
+
+That is because `assignee` carries two incompatible meanings:
+
+| Value | Means | Coordinator should |
+|---|---|---|
+| `pm-pogo` (any agent) | **ownership** — who to ask about it | dispatch a worker |
+| *(empty)* | unowned | dispatch a worker |
+| `human` | **execution gate** — a person must do this by hand | never dispatch |
+
+`--assignee=human` is a *gate wearing an assignment's clothes*: `mayor.md` files
+manual-QA items that way precisely so no worker is dispatched at them. So the
+detectors test "is this gated?", never "is this assigned to the coordinator?".
+
+**Why a denylist of gates rather than an allowlist of agents.** Until mg-4bd4 the
+predicate was `assignee == "" || assignee == "mayor"` — an allowlist of the
+values a *dispatcher* carries, which skipped every item naming an *owner*. Since
+`pm-template` files every ticket with `--assignee=pm-<name>`, that hid 13 of 14
+available items on 2026-07-17. It was never silent — unassigned items fired
+routinely, and both detectors fired 9 times that day — which is exactly why it
+held confidence for so long: a detector watching a shrinking population looks
+identical to a healthy queue.
+
+An agent allowlist would have re-introduced the same bug on a timer, since it
+must be edited every time an agent joins — and until someone noticed, the new
+agent's work would be invisible exactly as `pm-pogo`'s was. The gate vocabulary
+is closed instead of growing: it only changes if someone invents a second meaning
+for "do not execute this automatically", and then it changes by a config line.
+
+**The failure directions are asymmetric on purpose.** An unrecognized assignee is
+watched. Guessing wrong costs one nudge about an item the coordinator cannot
+dispatch — loud and self-correcting. The old default guessed the other way and
+paid in silence, which is indistinguishable from having no stalls.
 
 ### Priority wake
 
@@ -226,8 +268,8 @@ minutes before pickup (gh drellem2/pogo #61).
 
 The priority wake is a priority-aware branch on the *same* 30s available/ scan.
 An item that is **ready** (deps met — it is in `available/`, not `pending/`),
-**assigned to the watched agent** (or unassigned), and carries a priority in
-`fast_priorities` bypasses the 10m gate and is delivered after only
+**awaiting the watched agent's dispatch** (see "Ownership vs execution" below),
+and carries a priority in `fast_priorities` bypasses the 10m gate and is delivered after only
 `high_priority_wake_delay` — via the **same wait-idle nudge**, so a busy agent is
 never interrupted (the write lands at its next turn boundary) and an idle agent
 is woken at once. A dedicated `high_priority_wake_cooldown` keeps an item that

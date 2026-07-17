@@ -219,15 +219,90 @@ func TestFreshItemDoesNotFire(t *testing.T) {
 	}
 }
 
-func TestItemAssignedElsewhereIgnored(t *testing.T) {
+// TestUnclaimedItemFiresOnPMAssignedItem is mg-4bd4's acceptance bar for the
+// standard 10-min detector: it must fire on a PM-ASSIGNED item, which is the
+// population that was invisible (13 of 14 available items on 2026-07-17).
+//
+// The bar is deliberately NOT "prove the detector can fire" — the old predicate
+// already passed that, firing 9 times on 2026-07-17 on the unassigned items it
+// could see. Only an owner-assigned item exercises the fix.
+func TestUnclaimedItemFiresOnPMAssignedItem(t *testing.T) {
 	w, rec, workRoot, _ := testEnv(t, baseConfig())
 	now := time.Now()
-	writeItem(t, workRoot, "mg-dddd", "alice", now.Add(-20*time.Minute))
+	writeItem(t, workRoot, "mg-dddd", "pm-pogo", now.Add(-20*time.Minute))
+
+	w.Check(now)
+
+	if rec.nudgeCount() != 1 {
+		t.Fatalf("pm-assigned item past the threshold must fire: got %d nudges, want 1", rec.nudgeCount())
+	}
+	ids, ok := rec.events[0].Details["item_ids"].([]string)
+	if !ok || len(ids) != 1 || ids[0] != "mg-dddd" {
+		t.Errorf("item_ids = %v, want [mg-dddd]", rec.events[0].Details["item_ids"])
+	}
+}
+
+// TestItemGatedToHumanIgnored: `--assignee=human` is an execution GATE, not an
+// assignment — mayor.md files manual-QA items that way precisely so no worker is
+// dispatched at them. It is the one assignee both detectors must still skip.
+func TestItemGatedToHumanIgnored(t *testing.T) {
+	w, rec, workRoot, _ := testEnv(t, baseConfig())
+	now := time.Now()
+	writeItem(t, workRoot, "mg-eeee", "human", now.Add(-20*time.Minute))
 
 	w.Check(now)
 
 	if rec.nudgeCount() != 0 {
-		t.Fatalf("expected no nudge for item assigned to another agent, got %d", rec.nudgeCount())
+		t.Fatalf("human-gated item must not fire, got %d nudges", rec.nudgeCount())
+	}
+}
+
+// TestUnknownAssigneeIsWatched pins the failure DIRECTION: an assignee nobody
+// has seen before is watched, not skipped. This is what keeps the fix from
+// re-introducing the bug the day a new PM joins — a roster allowlist would have
+// to be edited to keep seeing pm-newhire's work, and until someone noticed, that
+// work would be invisible exactly as pm-pogo's was.
+func TestUnknownAssigneeIsWatched(t *testing.T) {
+	w, rec, workRoot, _ := testEnv(t, baseConfig())
+	now := time.Now()
+	writeItem(t, workRoot, "mg-ffff", "pm-newhire", now.Add(-20*time.Minute))
+
+	w.Check(now)
+
+	if rec.nudgeCount() != 1 {
+		t.Fatalf("item owned by an unrecognized agent must still be watched: got %d nudges, want 1", rec.nudgeCount())
+	}
+}
+
+// TestDispatchGateIsCaseInsensitive: a "Human" frontmatter value gates too —
+// otherwise the gate is bypassed by capitalization and a manual-QA item draws
+// nudges forever.
+func TestDispatchGateIsCaseInsensitive(t *testing.T) {
+	w, rec, workRoot, _ := testEnv(t, baseConfig())
+	now := time.Now()
+	writeItem(t, workRoot, "mg-9999", " Human ", now.Add(-20*time.Minute))
+
+	w.Check(now)
+
+	if rec.nudgeCount() != 0 {
+		t.Fatalf("' Human ' must gate like 'human', got %d nudges", rec.nudgeCount())
+	}
+}
+
+// TestNonDispatchableAssigneesConfigurable proves the gate vocabulary is a
+// config value, not a fact compiled into the binary: an operator who invents a
+// second gate adds a config line rather than editing this package.
+func TestNonDispatchableAssigneesConfigurable(t *testing.T) {
+	cfg := baseConfig()
+	cfg.NonDispatchableAssignees = []string{"human", "legal-review"}
+	w, rec, workRoot, _ := testEnv(t, cfg)
+	now := time.Now()
+	writeItem(t, workRoot, "mg-8888", "legal-review", now.Add(-20*time.Minute))
+
+	w.Check(now)
+
+	if rec.nudgeCount() != 0 {
+		t.Fatalf("configured gate 'legal-review' must not fire, got %d nudges", rec.nudgeCount())
 	}
 }
 
@@ -558,14 +633,75 @@ func TestPriorityWakeFastPollInvokedOnFire(t *testing.T) {
 
 // TestPriorityWakeIgnoresItemsAssignedElsewhere: a high-priority item assigned to
 // another agent is not the watched agent's concern and must not wake it.
-func TestPriorityWakeIgnoresItemsAssignedElsewhere(t *testing.T) {
+// TestPriorityWakeFiresOnPMAssignedItem is mg-4bd4's acceptance bar for the
+// second detector: the fast wake must fire on a PM-ASSIGNED high-priority item.
+//
+// This is the matched-control experiment the mayor observed on 2026-07-17 at
+// 12:56Z, when three high-priority available items differed only by assignee and
+// the wake fired on the unassigned one while staying silent on both pm-pogo
+// ones. Under the fixed predicate the silent two are the ones under test.
+func TestPriorityWakeFiresOnPMAssignedItem(t *testing.T) {
 	w, rec, workRoot, _ := testEnv(t, baseConfig())
 	now := time.Now()
-	writePriorityItem(t, workRoot, "mg-hi07", "alice", "high", now.Add(-1*time.Minute))
+	writePriorityItem(t, workRoot, "mg-hi07", "pm-pogo", "high", now.Add(-1*time.Minute))
+
+	w.Check(now)
+
+	if rec.nudgeCount() != 1 {
+		t.Fatalf("pm-assigned high-priority item must wake: got %d nudges, want 1", rec.nudgeCount())
+	}
+	if rec.events[0].Details["category"] != categoryPriorityWake {
+		t.Errorf("category = %v, want %s", rec.events[0].Details["category"], categoryPriorityWake)
+	}
+}
+
+// TestPriorityWakeIgnoresHumanGatedItem: the gate outranks priority. A
+// high-priority manual-QA item is still not the coordinator's to dispatch.
+func TestPriorityWakeIgnoresHumanGatedItem(t *testing.T) {
+	w, rec, workRoot, _ := testEnv(t, baseConfig())
+	now := time.Now()
+	writePriorityItem(t, workRoot, "mg-hi08", "human", "high", now.Add(-1*time.Minute))
 
 	w.Check(now)
 	if rec.nudgeCount() != 0 {
-		t.Fatalf("high-priority item assigned elsewhere must not wake, got %d", rec.nudgeCount())
+		t.Fatalf("human-gated high-priority item must not wake, got %d", rec.nudgeCount())
+	}
+}
+
+// TestBothDetectorsSeeMixedQueue models 2026-07-17's real queue shape — mostly
+// PM-owned, one human-gated — and asserts both detectors report exactly the
+// dispatchable items and exclude the gate. The old predicate saw 0 of these.
+func TestBothDetectorsSeeMixedQueue(t *testing.T) {
+	w, rec, workRoot, _ := testEnv(t, baseConfig())
+	now := time.Now()
+	// Stale, owner-assigned → standard detector.
+	writeItem(t, workRoot, "mg-own1", "pm-pogo", now.Add(-20*time.Minute))
+	writeItem(t, workRoot, "mg-own2", "pm-other", now.Add(-20*time.Minute))
+	// Gated → neither detector.
+	writeItem(t, workRoot, "mg-gate", "human", now.Add(-20*time.Minute))
+	writePriorityItem(t, workRoot, "mg-gatp", "human", "high", now.Add(-20*time.Minute))
+	// Fresh high-priority, owner-assigned → priority wake.
+	writePriorityItem(t, workRoot, "mg-fast", "pm-pogo", "high", now.Add(-1*time.Minute))
+
+	w.Check(now)
+
+	if rec.nudgeCount() != 2 {
+		t.Fatalf("want 2 nudges (one per work-item detector), got %d", rec.nudgeCount())
+	}
+	got := map[string][]string{}
+	for _, ev := range rec.events {
+		cat, _ := ev.Details["category"].(string)
+		ids, _ := ev.Details["item_ids"].([]string)
+		got[cat] = ids
+	}
+	want := map[string][]string{
+		categoryUnclaimedItems: {"mg-own1", "mg-own2"},
+		categoryPriorityWake:   {"mg-fast"},
+	}
+	for cat, wantIDs := range want {
+		if strings.Join(got[cat], ",") != strings.Join(wantIDs, ",") {
+			t.Errorf("%s item_ids = %v, want %v", cat, got[cat], wantIDs)
+		}
 	}
 }
 
@@ -623,5 +759,14 @@ func TestDefaultsAppliedFromZeroConfig(t *testing.T) {
 	}
 	if w.cfg.NudgeCooldown != config.DefaultStallNudgeCooldown {
 		t.Errorf("cooldown = %v, want default", w.cfg.NudgeCooldown)
+	}
+	// A zero-value config must still gate "human": New() defaulting this is what
+	// keeps a bare config from dispatch-nudging manual-QA items.
+	if !w.isDispatchGated("human") {
+		t.Errorf("zero config must default the dispatch gate to %v, got %v",
+			config.DefaultNonDispatchableAssignees, w.cfg.NonDispatchableAssignees)
+	}
+	if !w.watchedForDispatch("pm-pogo") {
+		t.Error("zero config must watch pm-assigned items")
 	}
 }

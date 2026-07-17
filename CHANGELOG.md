@@ -77,6 +77,35 @@ is the curated, human-readable summary kept in sync at each release cut.
   repo) converts the whole fleet from state 3 to state 2 — a loud lie into a
   silent absence. That is why this check landed first.
 
+- **stall-watch's two work-item detectors now watch PM-owned items
+  (mg-4bd4).** `assignedToWatched` gated both detectors on `assignee == "" ||
+  assignee == "mayor"` — an allowlist of the values a *dispatcher* carries,
+  which skipped every item naming an *owner*. Since `pm-template` files every
+  ticket with `--assignee=pm-<name>`, that hid **13 of 14** available items on
+  2026-07-17. The predicate is inverted: watch everything **except** items
+  gated to a non-dispatchable executor (`non_dispatchable_assignees`, default
+  `["human"]`).
+
+  `assignee` was carrying two incompatible meanings — **ownership** (`pm-pogo`
+  owns it; the coordinator still dispatches a worker) and **execution gate**
+  (`human` must do it by hand; `mayor.md` files manual-QA items this way
+  precisely so no worker is dispatched). No predicate over that one string can
+  separate them, which is why this one silently picked the wrong 13.
+
+  The bug was never silent, which is why it held confidence: unassigned items
+  fired routinely — both detectors fired 9 times on 2026-07-17, including on
+  mg-4bd4 itself, 3m26s after it was filed asserting they could not. A
+  detector watching a shrinking population looks identical to a healthy queue.
+  The fleet had also healed around the wound: PMs mail the mayor
+  `dispatch-ready:` by hand, so the blindness never produced a missed dispatch
+  and therefore never produced a complaint.
+
+  Deliberately **not** a `pm-*` allowlist: that hard-codes today's roster and
+  re-introduces the bug the day a new PM joins. Gates are a closed vocabulary;
+  rosters grow. Failure directions are asymmetric on purpose — an unrecognized
+  assignee is **watched**, so guessing wrong costs one loud, self-correcting
+  nudge rather than silence.
+
 ### Added
 
 - **`polecat-architect` must MEASURE any predicate its verdict proposes

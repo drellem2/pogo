@@ -1283,12 +1283,13 @@ Flags:
 			// per wake.
 			FastPoll: hb.Nudge,
 		})
-		log.Printf("pogod: stall watcher enabled (agent=%s item_age=%s mail_age=%s max_mail=%d cooldown=%s priority_wake=%t wake_delay=%s wake_cooldown=%s fast_priorities=%s)",
+		log.Printf("pogod: stall watcher enabled (agent=%s item_age=%s mail_age=%s max_mail=%d cooldown=%s priority_wake=%t wake_delay=%s wake_cooldown=%s fast_priorities=%s non_dispatchable=%s)",
 			cfg.StallWatch.Agent, cfg.StallWatch.UnclaimedItemAgeThreshold,
 			cfg.StallWatch.UnreadMailAgeThreshold, cfg.StallWatch.MaxUnreadMailCount,
 			cfg.StallWatch.NudgeCooldown, cfg.StallWatch.PriorityWakeEnabled,
 			cfg.StallWatch.HighPriorityWakeDelay, cfg.StallWatch.HighPriorityWakeCooldown,
-			strings.Join(cfg.StallWatch.FastPriorities, ","))
+			strings.Join(cfg.StallWatch.FastPriorities, ","),
+			strings.Join(cfg.StallWatch.NonDispatchableAssignees, ","))
 	}
 
 	// Drive both heartbeat-piggybacked subsystems from a single OnTick. The
