@@ -1654,9 +1654,10 @@ Flags:
 		// stamps make this a no-op when nothing changed.
 		if installRes, err := agent.InstallPrompts(agent.InstallOpts{}); err != nil {
 			log.Printf("pogod: prompt refresh failed: %v", err)
-		} else if len(installRes.Updated) > 0 || len(installRes.Installed) > 0 {
-			log.Printf("pogod: refreshed prompts (installed=%d updated=%d skipped=%d)",
-				len(installRes.Installed), len(installRes.Updated), len(installRes.Skipped))
+		} else {
+			for _, line := range promptRefreshLogLines(installRes) {
+				log.Print(line)
+			}
 		}
 
 		// The role-default pin used to live here, between prompt refresh and
@@ -1712,4 +1713,41 @@ Flags:
 		IdleTimeout:       2 * time.Minute,
 	}
 	log.Fatal(httpServer.Serve(netutil.LimitListener(ln, maxHTTPConns)))
+}
+
+// promptRefreshLogLines renders the boot-time report for a prompt refresh into
+// the lines pogod should log. It exists so a DECLINED sync is VISIBLE: a
+// conflict is where InstallPrompts preserved a user-edited canonical and
+// diverted the shipped update to a <name>.md.dist sidecar, meaning the
+// propagation that pogod's boot is supposed to guarantee did NOT happen for
+// that file.
+//
+// Two failure modes this repairs (both were silent before mg-f86c):
+//
+//  1. A boot with conflicts AND installs/updates used to print a reassuring
+//     "refreshed prompts (installed=.. updated=.. skipped=..)" that structurally
+//     could not name the file it declined. Conflicts now appears in the count.
+//  2. A CONFLICT-ONLY boot (no installs, no updates) used to satisfy neither
+//     arm of the old `else if len(Updated)>0 || len(Installed)>0` and logged
+//     NOTHING AT ALL — total silence for the outcome that most needs saying.
+//     Conflicts now drives the condition, so this boot logs loudly.
+//
+// Each conflict gets its own loud line naming the file and the remedy, because
+// the reader's next question is always "which one, and what do I do".
+func promptRefreshLogLines(res *agent.InstallResult) []string {
+	// Nothing propagated and nothing declined: stay quiet (hash stamps make the
+	// common boot a no-op). Conflicts count here so a conflict-only boot speaks.
+	if res == nil || (len(res.Installed) == 0 && len(res.Updated) == 0 && len(res.Conflicts) == 0) {
+		return nil
+	}
+	lines := []string{
+		fmt.Sprintf("pogod: refreshed prompts (installed=%d updated=%d skipped=%d conflicts=%d)",
+			len(res.Installed), len(res.Updated), len(res.Skipped), len(res.Conflicts)),
+	}
+	for _, c := range res.Conflicts {
+		lines = append(lines, fmt.Sprintf(
+			"pogod: ⚠ prompt sync DECLINED for %s — user-edited canonical preserved; shipped update diverted to %s. Reconcile %s with %s (see docs/prompt-customization.md).",
+			c.Path, c.DistPath, c.Path, c.DistPath))
+	}
+	return lines
 }
