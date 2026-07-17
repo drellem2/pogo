@@ -485,6 +485,192 @@ restore_drain() {
     esac
 }
 
+# ---------------------------------------------------------------------------
+# The external sink (mg-f206) — how a run that DOES NOTHING gets noticed
+# ---------------------------------------------------------------------------
+# THE FAILURE THIS COVERS. `redeploy` fails CLOSED when the drain times out with
+# polecats still working: it restores dispatch and exits 7 without deploying,
+# rather than killing live work. Attended that is correct and self-reporting —
+# the human who ran it is standing there and reads the refusal. Unattended at
+# 03:00 it is a deploy that SILENTLY NEVER HAPPENS. Nothing is broken, so nothing
+# goes red: pogod is up, the port answers, the fleet dispatches, every light is
+# green — and we believe we track main while not tracking it, indefinitely. The
+# absence of a deploy produces no signal. That is this fleet's defect (mg-de08,
+# mg-8b48, mg-0b77) at the OUTCOME layer.
+#
+# "FAILS CLOSED" IS NOT "FAILS VISIBLY". They are as different as *unreachable*
+# and *zero*, which is the distinction the rest of this file is built around.
+#
+# WHAT LOUD MEANS HERE, AND WHY IT IS NOT A LOG LINE. Architect's ruling: loud
+# must be OBSERVABLE FROM OUTSIDE THE THING THAT FAILED. A louder err line into
+# an unread log is the same silence with more characters — this script's stderr
+# at 03:00 goes to a file nobody opens unless already suspicious, which is the
+# state we are trying to cause, not assume. The shape is not invented here:
+# sentineldrift.go and orphan.go (mg-0b77) both answer it with a durable event
+# PLUS a mail to the coordinator, and this follows that precedent rather than
+# inventing a second notion of loud.
+#
+# WHY THE MAIL IS VERIFIED AND THE EVENT IS NOT COUNTED. mg-0b77's sink is
+# best-effort: a failed `mg` shell-out lands in a log line, so the sink can rot
+# (a renamed flag, a moved binary) and go silent exactly like the thing it
+# reports on. Its answer was a positive control proving the assembled sink fires
+# — the ask this ticket inherits, and the live control does that. But a sink that
+# fires at most once per run can do better than be proven in a lab: it can READ
+# ITS OWN MESSAGE BACK OUT OF THE RECIPIENT'S MAILBOX and refuse to claim a
+# delivery it cannot see. That is not proof it CAN fire; it is observation that
+# it DID. `pogo events emit` cannot be held to that standard — it is documented
+# best-effort and ALWAYS exits 0, so its status cannot distinguish a landed event
+# from a dropped one. So it is emitted for mg and the digest, and deliberately
+# NOT counted toward delivery. Counting it would be exactly the lie this script
+# refuses everywhere else: inferring a fact from a channel that cannot report it.
+#
+# THE RESIDUAL, STATED HONESTLY. If every outbound channel is dead, this run is
+# silent and no code here can fix that — a process whose every channel is gone
+# cannot report that its channels are gone. What is bounded is the far more
+# likely case: one channel wrong (a renamed coordinator, an unwritable box)
+# while another works. Hence two recipients and a readback, not one blind send.
+#
+# The coordinator's mailbox is not addressed by a name we trust. This default is
+# a CLAIM about config ([agents] coordinator) and it decays like any other — so
+# it is CHECKED rather than believed: mg reports `mailbox_created` when a send
+# invents the box, and for THIS recipient that is proof the name is wrong. The
+# coordinator always has a mailbox by the time a nightly redeploy runs; if our
+# send had to create one, we just filed the alert in a phantom nobody reads.
+# (That is not hypothetical — this box carries a phantom mailbox today, minted by
+# a mis-shelled recipient, and it is invisible precisely because it was silent.)
+COORDINATOR="${POGO_COORDINATOR:-mayor}"
+
+# mail_alert RECIPIENT SUBJECT BODY_FILE
+# Returns 0 ONLY when the message is READ BACK out of the recipient's mailbox.
+# Every other path returns 1 and says which one it took: "we could not tell" and
+# "it was delivered" must not collapse, here least of all.
+#
+# --body-file, not --body: the shell expands $VAR, backticks and $(cmd) inside
+# --body="..." before mg ever sees them, and mg reports Delivered on the mangled
+# string because it cannot tell it from one you typed (mg-8380). This body
+# carries the operator's remedies; it must arrive as written.
+mail_alert() {
+    local to="$1" subject="$2" body_file="$3"
+    local out id created
+    if ! out="$(mg mail send "$to" --from=pogo-self-deploy \
+                    --subject="$subject" --body-file "$body_file" --json 2>&1)"; then
+        err "sink: mg mail send to '$to' failed: $out"
+        return 1
+    fi
+    id="$(printf '%s' "$out" | json_str msg_id)"
+    created="$(printf '%s' "$out" | json_bool mailbox_created)"
+    if [ -z "$id" ]; then
+        err "sink: mg mail send to '$to' exited 0 but named no msg_id: $out"
+        return 1
+    fi
+    if [ "$created" = "true" ]; then
+        err "sink: '$to' had NO mailbox — this send CREATED one, so the alert is sitting in a phantom box nobody reads"
+        err "sink: the recipient name is wrong (POGO_COORDINATOR / [agents] coordinator), not the message"
+        return 1
+    fi
+    # THE READBACK. --all, not the default: the coordinator is a live agent and
+    # may read the mail between the send and this probe, which moves it to cur/
+    # and out of an unread-only listing. Without --all a FAST reader would look
+    # exactly like a lost message and we would escalate over a success.
+    # -F: msg_ids are dotted, and we are matching a literal, not a pattern.
+    if mg mail list "$to" --all --json 2>/dev/null | grep -Fq "$id"; then
+        return 0
+    fi
+    err "sink: mailed '$to' (msg_id=$id) but could not read it back — treating as UNDELIVERED"
+    return 1
+}
+
+# alert_external EVENT_TYPE SUBJECT BODY [DETAILS_JSON]
+# Returns 0 iff a mail was VERIFIED into a real mailbox, by any recipient.
+alert_external() {
+    local event_type="$1" subject="$2" body="$3" details="${4:-}"
+    local bf rc=1
+    local -a ev
+
+    if ! bf="$(mktemp)"; then
+        err "sink: cannot create a temp file for the alert body — mailing the subject alone"
+        bf=""
+    else
+        printf '%s\n' "$body" > "$bf" || { err "sink: could not write the alert body"; : > "$bf"; }
+    fi
+
+    # Channel 1 — the durable event, for mg and the digest. Best-effort by the
+    # bridge's own contract (always exits 0); see the header for why its silence
+    # is not counted as delivery.
+    if command -v pogo >/dev/null 2>&1; then
+        ev=(events emit --type="$event_type" --agent=pogo-self-deploy)
+        [ -n "$details" ] && ev+=(--details="$details")
+        pogo "${ev[@]}" >/dev/null 2>&1 || true
+    else
+        err "sink: no 'pogo' on PATH — the $event_type event was not emitted (launchd hands jobs a minimal PATH; the nightly wrapper must set it)"
+    fi
+
+    # Channel 2 — the mail. The loud half, and the only one we verify.
+    if [ -n "$bf" ] && mail_alert "$COORDINATOR" "$subject" "$bf"; then
+        log "sink: alerted '$COORDINATOR' and read the message back out of the mailbox"
+        rc=0
+    elif [ -n "$bf" ] && mail_alert human "$subject" "$bf"; then
+        err "sink: could not verify a mail to coordinator '$COORDINATOR' — escalated to 'human' instead"
+        rc=0
+    else
+        err "sink: NO EXTERNAL ALERT WAS DELIVERED — neither '$COORDINATOR' nor 'human' could be reached."
+        err "sink: this run is now as silent as it was before mg-f206; the $event_type event (if it landed) is the only trace."
+        rc=1
+    fi
+    [ -n "$bf" ] && rm -f "$bf"
+    return $rc
+}
+
+# alert_drain_stalled LEFTOVER — the exit 7 sink.
+#
+# `leftover` is a COUNT or the "?" sentinel: the timeout path re-reads the drain
+# endpoint, and that read can itself fail. "?" is carried into the mail verbatim
+# — the operator must see "we could not count them", not a fabricated number —
+# but it is not a JSON number, so the event's `leftover` is emitted as a STRING.
+# Quoting it keeps both facts expressible in one field rather than making "?"
+# masquerade as 0, which is the count-vs-unknown collapse this file exists to
+# refuse (mg-76e5).
+alert_drain_stalled() {
+    local leftover="$1"
+    alert_external deploy_stalled \
+        "[deploy-stalled] nightly pogod redeploy did NOT deploy — $leftover polecat(s) still active" \
+        "A pogod redeploy refused to deploy and exited WITHOUT changing anything.
+
+Fleet is HEALTHY and dispatching. Nothing is broken. That is the problem:
+this run failed CLOSED and produced no other signal, so the fleet is simply
+NOT TRACKING main and every light stays green while it doesn't.
+
+What happened:  the drain waited ${DRAIN_TIMEOUT}s for the fleet to quiesce and
+                $leftover polecat(s) were still active at the deadline. Deploying
+                past that means hard-bouncing live work, which needs --force, and
+                --force is deliberately not armed on the nightly.
+Deploy ref:     $DEPLOY_REF
+Running pogod:  $(short "${RUNNING:-?}")
+Installed:      $(short "${INSTALLED:-?}")
+main:           $(short "${MAIN:-?}")
+Dispatch:       RESTORED (the exit trap put back draining=${DRAIN_PRIOR:-?}).
+                No polecat was killed. No worktree was touched. Nothing deployed.
+
+This is NOT an emergency and NOT a bug. It is the safe outcome, reported —
+the deploy simply did not happen and you would otherwise never learn that.
+
+WHAT TO DO. Nothing, if this is a one-off: the fleet was busy at 03:00 and the
+next run will deploy. It matters when it REPEATS — a nightly that stalls every
+night has silently stopped tracking main, which looks identical to one that
+succeeds every night. So:
+  - Once:      ignore it.
+  - Repeatedly: the fleet is never idle at 03:00, or a polecat is wedged and
+               never finishing. Check for a stuck polecat, then either resolve it
+               or move the window. Consider --drain-timeout.
+  - Do NOT 'fix' this by adding --force. It re-gates mg-0b77 and mg-13a3 (read
+    them first), and 46a4 measured that --force neither waits nor reliably kills:
+    kickstart -k kills the job's process group and polecats setsid out of it.
+
+Redeploy by hand when the fleet is idle:
+  scripts/pogo-self-deploy redeploy --yes" \
+        "{\"leftover\":\"${leftover}\",\"drain_timeout\":${DRAIN_TIMEOUT},\"deploy_ref\":\"${DEPLOY_REF}\",\"outcome\":\"no_deploy\"}"
+}
+
 # Pure decision function (unit-tested): map the POST /agents/drain HTTP status
 # to a drain-phase disposition. Echoes exactly one word:
 #   drain      — 2xx: endpoint present, proceed to drain_wait
@@ -819,6 +1005,16 @@ cmd_redeploy() {
                     if ! $FORCE; then
                         err "$leftover polecat(s) still active after ${DRAIN_TIMEOUT}s drain timeout"
                         err "refusing to hard-bounce the fleet without --force; restoring dispatch"
+                        # The two err lines above are the ATTENDED report: they
+                        # work because a human ran this and is reading them. The
+                        # sink below is the UNATTENDED one, and it is not a
+                        # louder version of them — it leaves the script (mg-f206).
+                        # Fired BEFORE the exit, not from the trap: the trap runs
+                        # on every armed exit path, and a sink that fires on all
+                        # of them announces failures that are already reported by
+                        # something else. This one is scoped to the single outcome
+                        # nothing else can see — the run that changed NOTHING.
+                        alert_drain_stalled "$leftover"
                         # The restore is the trap's job now — and the trap puts
                         # back the PRIOR value, where the bare `drain_post false`
                         # that used to live here asserted `false` unconditionally.
