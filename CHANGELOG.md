@@ -232,6 +232,30 @@ is the curated, human-readable summary kept in sync at each release cut.
   spawn cap + unstarted-check is intentionally retained pending real-spawn-wave
   verification.
 
+### Documentation
+
+- **The stop/park/diagnose contract is now stated where the choice is made (gh
+  #89, mg-ce26).** No behaviour change — pogo already shipped every mechanism
+  below; it was not findable. The reporter read the docs, concluded the
+  stopped-by-intent mechanism did not exist, and hardened a workaround toward
+  behaviour pogo already had, because nothing at `pogo agent stop` pointed at
+  `park`. Three facts are now documented at the point of use rather than only in
+  `ARCHITECTURE.md`: (1) **`restart_on_crash = true` makes `stop` a restart** —
+  pogod respawns on *any* exit, so scripting stop→start races the respawn and
+  reads the resulting `"already running"` as an error when it is really the fresh
+  instance; (2) **`park`/`wake` is the dormancy *and* context-cycle lever** — the
+  supported stopped-by-intent flag, race-free by construction
+  (`ShouldRespawn() == RestartOnCrash && !IsParked`, flag written *before* the
+  stop), persistent across pogod restarts, gating boot auto-start, and crew-only;
+  (3) **`diagnose --json`'s `process_alive` is the teardown signal, never
+  list-absence** — a real `kill(pid, 0)` probe, because registry presence is not
+  liveness in either direction. Lands in the long help for `agent stop`, `park`,
+  `list` and `diagnose` (and the `agent` command listing itself, so `stop` routes
+  to `park` without the reader knowing `park` exists), plus `docs/operations.md`
+  and `ARCHITECTURE.md`. Also corrects `docs/operations.md`, which described
+  `stop` as the way to unwedge "an agent you don't want to immediately restart" —
+  precisely backwards for an always-on agent.
+
 ## [0.5.0] - 2026-07-10
 
 ### Added

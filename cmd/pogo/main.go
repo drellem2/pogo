@@ -825,8 +825,20 @@ The agent runs as a persistent crew process that pogod monitors and restarts on 
 
 	var cmdAgentList = &cobra.Command{
 		Use:   "list",
-		Short: "List running agents",
-		Args:  cobra.NoArgs,
+		Short: "List agents pogod knows about (presence here is not liveness)",
+		Long: `List the agents in pogod's registry, with pid, type, status and uptime.
+
+This is a registry view, not a liveness probe. Do not read it as one:
+
+  - Absence is not evidence of exit. An agent pogod never knew about, or
+    one dropped by a restart, is absent while its process runs.
+  - Presence is not evidence of life. A listed pid can already be gone;
+    status=exited is reported here, but the pid stays stale through the
+    ~2s window in which a restart_on_crash agent is being respawned.
+
+To decide whether a process is actually gone, ask for the probe:
+'pogo agent diagnose <name> --json' reports process_alive.`,
+		Args: cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
 			agents, err := client.ListAgents()
 			if err != nil {
@@ -893,8 +905,32 @@ The agent runs as a persistent crew process that pogod monitors and restarts on 
 
 	var cmdAgentStop = &cobra.Command{
 		Use:   "stop <name>",
-		Short: "Stop a running agent",
-		Args:  cobra.ExactArgs(1),
+		Short: "Stop an agent once (a restart_on_crash agent is respawned — see 'park')",
+		Long: `Stop terminates the agent's process. It is a one-shot action, not a
+dormancy switch.
+
+IF THE AGENT HAS restart_on_crash = true, STOP IS A RESTART.
+That flag is an always-on contract: pogod respawns the agent after ANY
+exit — a clean return, a crash, or this command. Stop therefore cycles
+such an agent rather than keeping it down, and the replacement is a
+fresh process with a new pid.
+
+  - To keep a crew agent down — for a maintenance window, or to cycle a
+    long-running agent's context — use 'pogo agent park <name>' and
+    'pogo agent wake <name>'. Park is the supported stopped-by-intent
+    lever: it persists a flag that suppresses the respawn, survives
+    pogod restarts, and gates boot-time auto-start.
+  - Do not script stop→start against a restart_on_crash agent. You are
+    racing pogod's respawn, and when it wins, start fails with "already
+    running" — an error that is really reporting the fresh instance.
+    Park→wake has no such race: the flag is written before the stop.
+
+Stopping an agent without restart_on_crash keeps it stopped, and stop
+is idempotent against an agent whose process has already died.
+
+To confirm a teardown, ask 'pogo agent diagnose <name> --json' for
+process_alive. Do not infer it from absence in 'pogo agent list'.`,
+		Args: cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			err := client.StopAgent(args[0])
 			if err != nil {
@@ -923,7 +959,15 @@ The agent runs as a persistent crew process that pogod monitors and restarts on 
 This is the supported way to keep a restart_on_crash=true agent down —
 a plain 'pogo agent stop' is respawned by the supervisor within seconds.
 Parked agents show as status=parked in 'pogo agent list'. Reverse with
-'pogo agent wake <name>'.`,
+'pogo agent wake <name>'.
+
+Park is also the supported way to CYCLE an always-on agent: park it,
+then wake it. Wake starts a fresh process, so the agent comes back with
+a new context, and the recorded schedules are restored with it. Prefer
+this to a scripted stop→start, which races the respawn.
+
+Park applies to crew agents only; it rejects polecats, which are
+ephemeral by design and are not respawned.`,
 		Args: cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			resp, err := client.ParkAgent(args[0])
@@ -1101,7 +1145,15 @@ Health states:
 
 A cron-driven agent (e.g. a */30 mail-check) is idle by design between firings.
 While it is within one cron interval of its last scheduled firing it reports
-"idle", not "stalled", even past the threshold — see cron_covered in --json.`,
+"idle", not "stalled", even past the threshold — see cron_covered in --json.
+
+CONFIRMING A TEARDOWN. process_alive in --json is the signal to use — it is a
+kill(pid, 0) probe of the agent's pid, so it answers whether that process is
+still there, rather than whether pogod still lists it. Absence from
+'pogo agent list' is not evidence of exit and must not be read as one. Note
+that a restart_on_crash agent legitimately comes back ~2s after any exit: a
+false process_alive means that process is gone, not that the agent will stay
+down. To keep it down, park it.`,
 		Args: cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			diag, err := client.DiagnoseAgent(args[0])
