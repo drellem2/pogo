@@ -601,9 +601,26 @@ cleanup_orphans() {
     local snapshot="$1" line id wt repo
     # Extract "work_item_id":"..","worktree_dir":"..","source_repo":".." tuples.
     # One polecat object per line after we split on '},{'.
+    #
+    # `|| [ -n "$line" ]` is load-bearing — the third encounter with the trap
+    # extract_mail_check_ids_for_agents and unreachable_list already document
+    # above. The snapshot arrives from a `$(curl ...)`, and command substitution
+    # strips trailing newlines, so the LAST object has none; a bare `read` sets
+    # $line and then returns non-zero at EOF, and the loop body never runs for it.
+    #
+    # Here that is worse than a miss. This function only runs on a --force hard
+    # bounce, over the population that bounce just killed — so the last polecat is
+    # never unclaimed and its worktree is never removed, and nothing else will
+    # ever come for it: the claim and the worktree leak permanently. With ONE
+    # polecat it dropped all of them, logging nothing at all.
+    #
+    # The guard existed in this same file, with a comment explaining exactly this,
+    # and it did not transfer. What made this copy live is not that the knowledge
+    # was missing — it is that cleanup_orphans had no test, so getting it wrong
+    # failed silently. The control below (mg-a558) is the part that can fail.
     printf '%s' "$snapshot" \
         | sed 's/},{/}\n{/g' \
-        | while IFS= read -r line; do
+        | while IFS= read -r line || [ -n "$line" ]; do
             id="$(printf '%s' "$line"  | json_str work_item_id)"
             wt="$(printf '%s' "$line"  | json_str worktree_dir)"
             repo="$(printf '%s' "$line" | json_str source_repo)"
