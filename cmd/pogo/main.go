@@ -24,6 +24,7 @@ import (
 	"github.com/drellem2/pogo/internal/completion"
 	"github.com/drellem2/pogo/internal/config"
 	"github.com/drellem2/pogo/internal/events"
+	"github.com/drellem2/pogo/internal/gitceiling"
 	"github.com/drellem2/pogo/internal/gitgc"
 	"github.com/drellem2/pogo/internal/providers"
 	"github.com/drellem2/pogo/internal/reconcile"
@@ -74,6 +75,21 @@ func showRawPromptFile(name string, jsonOut bool) {
 }
 
 func main() {
+
+	// Bound every git repository lookup at POGO_HOME before any subcommand runs.
+	// The CLI is in the same class as the daemon: `pogo gc` prunes polecat
+	// worktrees and the refinery drives merges, both by shelling out to git
+	// against repos nested inside ~/.pogo. A lookup aimed at one that has lost
+	// its .git walks up and silently succeeds on the fleet's config repo, so gc
+	// would prune against the wrong toplevel (mg-ca7d).
+	//
+	// Inert outside ~/.pogo: a ceiling that is not an ancestor of the working
+	// directory does not affect the walk, so this does not touch an operator
+	// running `pogo` against their own repos.
+	if err := gitceiling.Ensure(); err != nil {
+		fmt.Fprintf(os.Stderr, "Cannot bound git repository lookups at %s: %v\n", config.PogoHome(), err)
+		os.Exit(1)
+	}
 
 	// Resolve the coordinator agent's name ([agents] coordinator) and the worker
 	// role's display name ([agents] worker) before any prompt resolution or

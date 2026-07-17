@@ -60,6 +60,37 @@ is the curated, human-readable summary kept in sync at each release cut.
   to fire on real work" from exactly that absence; the events log falsifies it.
   (mg-4bd4's predicate blindness is real and separately tracked — this fixes the
   channel, not which items the detectors can see.)
+- **A git lookup by pogod, the CLI, or any agent they spawn can no longer walk
+  out of `POGO_HOME` (mg-ca7d).** Git answers "which repo am I in?" by climbing
+  parent directories until it finds a `.git`. Nothing scopes that climb to the
+  caller's intent, so a lookup aimed at a directory that has lost its `.git`
+  keeps going and **silently succeeds on whatever repo it hits first** — under
+  `~/.pogo`, that is the fleet's own live config repo. A polecat teardown or a
+  refinery gc then operates on `~/.pogo` with no error, because from git's side
+  nothing went wrong.
+
+  Every repo pogod manages is nested inside `~/.pogo` and so in that class:
+  `polecats/*`, `refinery/worktrees/*` (the refinery's own structure),
+  `agents/*` and `pogo-pa` (live agents' working dirs). pogod and `pogo` now set
+  **`GIT_CEILING_DIRECTORIES=$POGO_HOME`** on themselves at startup, which bounds
+  the climb before `~/.pogo` is examined: an escaping lookup fails loudly with
+  *"not a git repository"* instead of quietly resolving the wrong one. Because
+  children inherit the environment, one call at startup covers pogod's own git
+  invocations **and every agent it spawns** — including git run by an agent's
+  harness, far outside this codebase.
+
+  Two of git's semantics keep one ceiling entry both sufficient and safe, and
+  both are pinned by tests: the ceiling never excludes the working directory
+  itself, so a legitimate git operation **on** `~/.pogo` still resolves; and a
+  ceiling that is not an ancestor of the working directory is inert, so repos
+  outside `~/.pogo` (the source repos the refinery merges) are untouched.
+
+  The ceiling is derived from `config.PogoHome()`, never from a list of the
+  parents that hold repos today — that list is a measurement, and it grows every
+  time pogod dispatches a polecat. This does **not** move anything, and does not
+  replace relocating `polecats/` (mg-2ce4): relocation reaches only the repos
+  that *can* move, and only while `$HOME` stays free of a `.git`. Both are
+  wanted.
 
 - **The drift check no longer TRUSTS the binary's VCS stamp — an absent stamp
   is UNKNOWN, never clean, and never "behind" (mg-8f09).** `pogo-self-deploy`

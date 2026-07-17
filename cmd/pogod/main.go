@@ -28,6 +28,7 @@ import (
 	"github.com/drellem2/pogo/internal/client"
 	"github.com/drellem2/pogo/internal/config"
 	"github.com/drellem2/pogo/internal/driver"
+	"github.com/drellem2/pogo/internal/gitceiling"
 	"github.com/drellem2/pogo/internal/gitgc"
 	"github.com/drellem2/pogo/internal/health"
 	"github.com/drellem2/pogo/internal/heartbeat"
@@ -984,6 +985,24 @@ Flags:
 	// every child spawned below resolves mg/gh/git without absolute paths.
 	if err := pathenv.Ensure(); err != nil {
 		fmt.Printf("Warning: could not augment PATH: %v\n", err)
+	}
+
+	// Bound every git repository lookup at POGO_HOME, before anything shells out
+	// to git or spawns an agent. Every repo pogod manages (polecats/*,
+	// refinery/worktrees/*, agents/*) is nested INSIDE ~/.pogo, so a lookup
+	// aimed at one that has lost its .git walks up and silently succeeds on the
+	// fleet's own config repo. Setting the ceiling on this process covers
+	// pogod's own git calls and every child it spawns — including git run by an
+	// agent's harness — because children inherit this environment (mg-ca7d).
+	//
+	// Fatal, not a warning: unset, this variable's absence is indistinguishable
+	// from a walk that never needed bounding, so a daemon that merely logged and
+	// carried on would run the whole fleet unguarded with the reassurance of a
+	// startup line nobody reads. The same reasoning as mg-8f09 — an absent guard
+	// is UNKNOWN, never clean.
+	if err := gitceiling.Ensure(); err != nil {
+		fmt.Printf("Cannot bound git repository lookups at %s: %v\n", config.PogoHome(), err)
+		os.Exit(1)
 	}
 
 	// Ensure the state dir exists before anything writes into it — a fresh
