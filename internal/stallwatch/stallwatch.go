@@ -51,10 +51,42 @@ const (
 	categoryPriorityWake = "priority_wake"
 )
 
+// Delivery reports how a nudge reached its recipient. It is returned alongside
+// the error so a fire can record WHICH channel carried the message, not merely
+// that something worked — a nudge that arrived by the slow durable channel is a
+// different event from one that landed on the PTY, and the difference is the
+// only way to measure the PTY channel's failure rate without parsing error
+// strings out of a log.
+type Delivery struct {
+	// Channel names the channel that carried the message: DeliveryPTY,
+	// DeliveryMail, or DeliveryMailFallback. Empty when delivery failed
+	// outright.
+	Channel string
+	// FallbackReason, when non-empty, records why the preferred PTY channel
+	// was not used. Delivery still SUCCEEDED — this is not an error, it is the
+	// reason the message took the durable road instead.
+	FallbackReason string
+}
+
+// Channel values for Delivery.Channel.
+const (
+	// DeliveryPTY means the message was written to the agent's live terminal.
+	DeliveryPTY = "pty"
+	// DeliveryMail means the recipient was not running, so the message went
+	// straight to durable macguffin mail.
+	DeliveryMail = "mail"
+	// DeliveryMailFallback means the recipient WAS running but the PTY nudge
+	// failed (typically: too busy to ever go idle), so the message went to
+	// durable mail instead. This is the load-bearing case for mg-79dc — see
+	// newStallNudger in cmd/pogod.
+	DeliveryMailFallback = "mail_fallback"
+)
+
 // Nudger delivers a short message to an agent. pogod injects an implementation
 // that nudges the agent's PTY when it is running and falls back to macguffin
-// mail otherwise (mirroring the scheduler's PogodDeliverer).
-type Nudger func(agent, message string) error
+// mail both when the agent is offline AND when the PTY nudge fails, so a busy
+// recipient still hears the notice (mg-79dc).
+type Nudger func(agent, message string) (Delivery, error)
 
 // Emitter writes an event to the shared log. Defaults to events.Emit; tests
 // substitute a recorder.
@@ -451,9 +483,23 @@ func (w *Watcher) isDispatchGated(assignee string) bool {
 // fire time when a nudge is allowed, false when the category is still cooling
 // down. The caller passes the cooldown so each category can have its own — the
 // priority wake recovers faster (HighPriorityWakeCooldown) than the standard
-// stall categories (NudgeCooldown). Recording before the nudge attempt means a
-// failed delivery still counts toward the cooldown — better to retry next
-// cooldown window than to hammer a wedged recipient every tick.
+// stall categories (NudgeCooldown).
+//
+// Recording before the nudge attempt means a failed delivery still counts
+// toward the cooldown, so a wedged recipient is not hammered every tick. Be
+// precise about what that costs, because mg-79dc's ticket asked and the
+// answer is not what the cooldown's existence suggests: THERE IS NO RETRY. A
+// failed nudge is not queued and never re-sent. What happens after the
+// cooldown is that the CONDITION is sampled again from scratch — and only if
+// it still holds does a fresh message get composed. So a stall that resolves
+// inside the cooldown window takes its undelivered notice with it, silently,
+// and a stall that resolves-then-recurs reports the recurrence as if it were
+// the first (the original is neither re-sent nor referenced).
+//
+// This is why delivery must succeed on the FIRST attempt rather than lean on
+// the cooldown as a safety net: the cooldown is a rate limiter, not a retry
+// queue, and treating it as one is what left ~38% of a day's fires unheard.
+// The mail fallback in newStallNudger is that first-attempt guarantee.
 func (w *Watcher) tryFire(category string, now time.Time, cooldown time.Duration) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -464,12 +510,30 @@ func (w *Watcher) tryFire(category string, now time.Time, cooldown time.Duration
 	return true
 }
 
-// fire delivers the nudge and appends the stall_watch_fired event. A nudge
-// error is recorded in the event details rather than dropped, so the event log
-// still records that a threshold crossed even when delivery failed.
+// fire delivers the nudge and appends the stall_watch_fired event.
+//
+// The event records the delivery CHANNEL, not just the failure. Recording only
+// the error was how mg-79dc stayed invisible: ~38% of a day's fires carried a
+// `nudge_error` and nothing else changed, so the fires looked identical to
+// successful ones from every vantage point except a hand-read of the log.
+// Stamping the channel makes "this notice took the slow road" a first-class,
+// countable fact.
+//
+// A nudge error is still recorded rather than dropped, so the log shows that a
+// threshold crossed even when BOTH channels failed. But note what a
+// nudge_error now means: with the mail fallback in place (see newStallNudger),
+// an error here is a HARD failure — every channel was tried and none carried
+// the message. It is no longer the routine busy-agent case.
 func (w *Watcher) fire(category, message string, details map[string]any) {
-	if err := w.nudge(w.cfg.Agent, message); err != nil {
+	delivery, err := w.nudge(w.cfg.Agent, message)
+	if err != nil {
 		details["nudge_error"] = err.Error()
+	}
+	if delivery.Channel != "" {
+		details["nudge_delivery"] = delivery.Channel
+	}
+	if delivery.FallbackReason != "" {
+		details["nudge_fallback_reason"] = delivery.FallbackReason
 	}
 	w.emit(events.Event{
 		EventType: "stall_watch_fired",

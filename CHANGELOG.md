@@ -12,6 +12,55 @@ is the curated, human-readable summary kept in sync at each release cut.
 
 ### Fixed
 
+- **A stall nudge the mayor's terminal can't take now goes to its INBOX instead
+  of nowhere (mg-79dc).** pogod's stall watcher delivered via a wait-idle PTY
+  nudge, falling back to durable `mg` mail only when the mayor was *offline*. A
+  running-but-busy mayor got neither: the nudge burned its 30s idle wait, failed,
+  and was **dropped** — the threshold cross recorded in `events.log` and the
+  notice never delivered. On 2026-07-17, **18 of 47 fires (~38%) died this way**,
+  including both work-item fires.
+
+  The old fallback covered "offline", on the reasoning that a running agent gets
+  the PTY and mailing it too would double-deliver. That conflates *running* with
+  *reached*. Wait-idle can only deliver to an agent that goes quiet, and **a
+  working agent never goes quiet** — so the channel failed exactly when the mayor
+  was busy, i.e. **precisely when a dispatch stall is most likely and the notice
+  most needed**. The failure was *correlated with the thing being detected*: not
+  a lossy channel, a channel that went dark on cue.
+
+  **This was not a timeout to lengthen.** Every dropped fire recorded a "last PTY
+  write" of 2–305ms — the mayor was writing *continuously*, not almost-quiet. No
+  deadline survives that; a longer one buys a slower failure. `mg mail` is the
+  right shape because it needs no idle recipient. The nudger now falls back to
+  mail whenever the PTY nudge **fails**, not only when the agent is offline, and
+  the mail says why it came that way. The notice also lands in a channel
+  stall-watch itself watches (`unread_mail`), so an ignored one escalates.
+
+  The never-interrupt-a-busy-agent guarantee (gh #61) is intact — the PTY is
+  still never written to while busy. It said "do not interrupt a busy agent", not
+  "do not inform it". And there is no double-delivery: mail goes out only when
+  the PTY nudge errored, i.e. only when nothing was written.
+
+  Two things the fix also settles, both of which had been assumed rather than
+  read:
+
+  - **The cooldown is a rate limiter, not a retry queue.** A failed nudge was
+    never re-sent. After the cooldown the *condition* is re-sampled and a *new*
+    message composed only if it still holds — so a stall that resolved inside the
+    window took its undelivered notice with it, and a resolve-then-recur reported
+    the recurrence as if it were the first.
+  - **`nudge_delivery` now names the channel** (`pty` / `mail` / `mail_fallback`)
+    on every `stall_watch_fired` event, making the PTY channel's failure rate
+    countable instead of grep-able. `nudge_error` now means what it says: every
+    channel failed and the notice reached nobody. That case also logs loudly.
+
+  Backwards-reasoning caveat for anyone reading pre-fix records: **an absent
+  stall notice in mayor's inbox before this fix is not evidence the detector
+  didn't fire.** mg-4bd4 concluded the work-item detectors had "never been able
+  to fire on real work" from exactly that absence; the events log falsifies it.
+  (mg-4bd4's predicate blindness is real and separately tracked — this fixes the
+  channel, not which items the detectors can see.)
+
 - **The drift check no longer TRUSTS the binary's VCS stamp — an absent stamp
   is UNKNOWN, never clean, and never "behind" (mg-8f09).** `pogo-self-deploy`
   compared the stamp to `main` and reported the difference as *"both behind

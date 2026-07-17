@@ -344,15 +344,21 @@ pogod's stall watcher (gh drellem2/macguffin #12) crossed a work-pile-up thresho
 
 - **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent` (always `"pogod"`), `details`
 - **`details` fields:**
-  - `category` (string, required): `"unclaimed_items"` or `"unread_mail"`
+  - `category` (string, required): `"unclaimed_items"`, `"unread_mail"`, or `"priority_wake"`
   - `watched_agent` (string, required): the agent that was nudged
-  - `nudge_error` (string, optional): present only when delivery failed; the event is still emitted
-  - For `unclaimed_items`: `item_count` (int), `item_ids` ([]string), `age_threshold` (string), `oldest_age_seconds` (float)
-  - For `unread_mail`: `unread_count` (int), `max_count` (int), `oldest_age_seconds` (float), `age_threshold` (string), `over_count` (bool), `over_age` (bool)
+  - `nudge_delivery` (string, optional): the channel that carried the nudge — `"pty"` (written to the agent's live terminal), `"mail"` (agent not running, so straight to durable mail), or `"mail_fallback"` (agent running but the PTY nudge failed, so durable mail carried it instead). Absent only when delivery failed outright.
+  - `nudge_fallback_reason` (string, optional): present with `"mail_fallback"`; why the PTY channel was not used. **Not an error** — the nudge was delivered.
+  - `nudge_error` (string, optional): present only when **every** channel failed and the notice reached nobody; the event is still emitted. Before mg-79dc this field also covered the routine busy-agent case, so historical records carrying it are not all hard failures — see below.
 
 ```json
-{"schema_version":1,"timestamp":"2026-06-10T16:20:00.000000000Z","event_type":"stall_watch_fired","agent":"pogod","details":{"category":"unclaimed_items","watched_agent":"ringmaster","item_count":2,"item_ids":["mg-2350","mg-9299"],"age_threshold":"10m0s","oldest_age_seconds":1830.4}}
+{"schema_version":1,"timestamp":"2026-06-10T16:20:00.000000000Z","event_type":"stall_watch_fired","agent":"pogod","details":{"category":"unclaimed_items","watched_agent":"ringmaster","item_count":2,"item_ids":["mg-2350","mg-9299"],"age_threshold":"10m0s","oldest_age_seconds":1830.4,"nudge_delivery":"pty"}}
 ```
+
+  - For `unclaimed_items`: `item_count` (int), `item_ids` ([]string), `age_threshold` (string), `oldest_age_seconds` (float)
+  - For `unread_mail`: `unread_count` (int), `max_count` (int), `oldest_age_seconds` (float), `age_threshold` (string), `over_count` (bool), `over_age` (bool)
+  - For `priority_wake`: `item_count` (int), `item_ids` ([]string), `wake_delay` (string), `wake_cooldown` (string), `fast_priority` (string), `oldest_age_sec` (float)
+
+**Reading `nudge_error` on records from before 2026-07-17 (mg-79dc):** it meant only "the PTY nudge failed", and the nudge was then **dropped** — there was no mail fallback for a running-but-busy agent. On 2026-07-17, 18 of 47 fires (~38%) carried one, every single instance reading `still producing output after 30s ... context deadline exceeded`. Those fires happened and were never heard, which matters when reasoning backwards from mayor's inbox: **an absent stall notice in that era is not evidence the detector did not fire.** mg-4bd4 concluded the work-item detectors had "never been able to fire on real work" from exactly that absence; the events log falsifies it. Records from mg-79dc onward carry `nudge_delivery`, so a fire that took the durable road is visible as such rather than looking like a failure.
 
 #### `usage_limit_hit`
 
