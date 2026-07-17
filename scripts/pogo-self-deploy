@@ -506,6 +506,64 @@ drain_wait() {
     done
 }
 
+# Echo one line per polecat that is alive but UNREACHABLE — witnessed processes
+# with no registry entry (mg-0b77). Input: an /agents/drain snapshot.
+#
+# These are survivors of an EARLIER pogod restart. They are not in `count`, and
+# so they are not what drain_wait polls to zero: a survivor is not drainable
+# (there is no adopt path, and absence never heals), so counting one would block
+# every future redeploy forever rather than fix anything. They are reported
+# instead — the drain completes, it just stops claiming they do not exist.
+unreachable_list() {
+    printf '%s' "$1" \
+        | sed -n 's/.*"unreachable":\[\(.*\)\].*/\1/p' \
+        | sed 's/},{/}\n{/g' \
+        | while IFS= read -r line; do
+            local n p w
+            n="$(printf '%s' "$line" | json_str name)"
+            p="$(printf '%s' "$line" | json_num pid)"
+            w="$(printf '%s' "$line" | json_str work_item_id)"
+            [ -z "$n" ] && continue
+            echo "$n (pid=${p:-?}, work_item=${w:-unknown})"
+        done
+}
+
+# Report the end of a successful drain HONESTLY. `count` reaching zero is a fact
+# about pogod's in-memory REGISTRY, not about the machine, and the old message
+# ("drain complete — 0 polecats active") asserted the second on the strength of
+# the first — declaring completion over any polecat that outlived an earlier
+# restart and is invisible to this registry forever (mg-0b77 / mg-46a4 §5a).
+report_drain_complete() {
+    local body errmsg leftovers n
+    body="$(curl -sf --max-time 5 "$(base_url)/agents/drain" 2>/dev/null)"
+
+    # A witness we could not read means we do not know whether survivors exist.
+    # That is NOT "none" and must not be printed as a clean drain (mg-76e5).
+    errmsg="$(printf '%s' "$body" | json_str unreachable_err)"
+    if [ -n "$errmsg" ]; then
+        log "drain complete — 0 polecats in pogod's registry"
+        err "cannot tell whether any polecat survived an earlier restart: $errmsg"
+        err "proceeding, but this redeploy may bounce live work it cannot see"
+        return 0
+    fi
+
+    leftovers="$(unreachable_list "$body")"
+    if [ -z "$leftovers" ]; then
+        log "drain complete — 0 polecats in the registry, none unreachable"
+        return 0
+    fi
+
+    n="$(printf '%s\n' "$leftovers" | wc -l | tr -d ' ')"
+    log "drain complete — 0 polecats in pogod's registry"
+    err "$n polecat(s) are ALIVE but unreachable and were NOT drained:"
+    printf '%s\n' "$leftovers" | while IFS= read -r line; do err "  $line"; done
+    err "these survived an earlier pogod restart, so this registry cannot see them"
+    err "and never will (no adopt path — absence never heals). They are still"
+    err "holding a worktree and a claim. This redeploy does NOT touch them; they"
+    err "need a human. pogod is also mailing the coordinator about each one."
+    return 0
+}
+
 # On a forced hard bounce, clean up every polecat the bounce orphaned: unclaim
 # its work item and gc its worktree. Input: the /agents/drain snapshot captured
 # BEFORE the kickstart (after kickstart, pogod's registry is gone).
@@ -626,7 +684,7 @@ cmd_redeploy() {
         case "$disp" in
             drain)
                 if drain_wait >/dev/null; then
-                    log "drain complete — 0 polecats active"
+                    report_drain_complete
                 else
                     leftover="$(curl -sf --max-time 5 "$(base_url)/agents/drain" 2>/dev/null | json_num count)"
                     leftover="${leftover:-?}"

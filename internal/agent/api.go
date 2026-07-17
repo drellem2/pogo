@@ -92,10 +92,33 @@ type DrainAPIRequest struct {
 
 // DrainStatus is the JSON body returned by GET/POST /agents/drain. The driver
 // polls Polecats down to empty while Draining is true, then rebuilds+restarts.
+//
+// Count and Polecats are facts about the REGISTRY, not about the machine, and
+// the driver must not report them as the latter (mg-0b77). A polecat that
+// outlived an earlier pogod restart is permanently absent from the in-memory
+// registry while still alive, so it reads as 0 here — and a drain that says
+// "0 polecats active" on the strength of that has declared completion over
+// live work. Unreachable is the missing half: the survivors this daemon can
+// see (via the mg-13a3 witness) but cannot drain.
 type DrainStatus struct {
 	Draining bool          `json:"draining"`
 	Count    int           `json:"count"`
 	Polecats []PolecatInfo `json:"polecats"`
+
+	// Unreachable lists polecats that are provably alive and provably beyond
+	// this pogod's control — witnessed processes with no registry entry. They
+	// are NOT included in Count, and that is deliberate rather than an
+	// oversight: Count is what the driver polls to zero, and a survivor is not
+	// drainable. Absence never heals, so counting one would block every future
+	// redeploy forever — which would not fix the lie, only move it. The drain
+	// completes; it must simply stop claiming these do not exist.
+	Unreachable []OrphanedPolecat `json:"unreachable,omitempty"`
+
+	// UnreachableErr is set when the witness store could not be read, meaning
+	// we do not know whether survivors exist. An empty Unreachable with this
+	// set means "cannot see", NOT "none" — the caller must not render the two
+	// the same way (mg-76e5).
+	UnreachableErr string `json:"unreachable_err,omitempty"`
 }
 
 // NudgeAPIRequest is the JSON body for POST /agents/:name/nudge.
@@ -1253,12 +1276,24 @@ func (r *Registry) handleDrain(w http.ResponseWriter, req *http.Request) {
 	}
 
 	polecats := r.Polecats()
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(DrainStatus{
+	status := DrainStatus{
 		Draining: r.Draining(),
 		Count:    len(polecats),
 		Polecats: polecats,
-	})
+	}
+	// The registry cannot see a polecat that survived an earlier restart, so
+	// ask the witness — the one source that outlives the pogod that wrote it.
+	// Report a read failure rather than letting it collapse into "none"
+	// (mg-0b77).
+	orphans, err := r.OrphanedPolecats()
+	if err != nil {
+		status.UnreachableErr = err.Error()
+	} else {
+		status.Unreachable = orphans
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(status)
 }
 
 func (r *Registry) handlePrompts(w http.ResponseWriter, req *http.Request) {
