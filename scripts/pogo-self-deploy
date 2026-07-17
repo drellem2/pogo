@@ -515,10 +515,18 @@ drain_wait() {
 # every future redeploy forever rather than fix anything. They are reported
 # instead — the drain completes, it just stops claiming they do not exist.
 unreachable_list() {
+    # `|| [ -n "$line" ]` is load-bearing, not defensive noise — the same trap
+    # extract_mail_check_ids_for_agents already documents above. The pipeline's
+    # last record carries NO trailing newline (the body arrives via command
+    # substitution, which strips them), and a bare `read` sets the variable but
+    # returns non-zero at EOF, so the plain loop silently DROPS the last
+    # survivor. With one survivor that is all of them: this function reports
+    # nothing while looking like it worked — the exact silence mg-0b77 exists to
+    # remove, rebuilt inside its own fix. Caught by its own test, not by review.
     printf '%s' "$1" \
         | sed -n 's/.*"unreachable":\[\(.*\)\].*/\1/p' \
         | sed 's/},{/}\n{/g' \
-        | while IFS= read -r line; do
+        | while IFS= read -r line || [ -n "$line" ]; do
             local n p w
             n="$(printf '%s' "$line" | json_str name)"
             p="$(printf '%s' "$line" | json_num pid)"
@@ -536,6 +544,18 @@ unreachable_list() {
 report_drain_complete() {
     local body errmsg leftovers n
     body="$(curl -sf --max-time 5 "$(base_url)/agents/drain" 2>/dev/null)"
+
+    # This is a SECOND, independent fetch — drain_wait's success proves the
+    # daemon answered 15s ago, not that it is answering now. An empty body means
+    # we learned nothing, and "I could not ask" must never print as "none
+    # unreachable": that is this ticket's own defect (absence of evidence
+    # rendered as a positive claim about the world) reproduced inside its fix.
+    if [ -z "$body" ]; then
+        log "drain complete — 0 polecats in pogod's registry"
+        err "could not re-read /agents/drain to check for unreachable survivors"
+        err "this is NOT a report that there are none — it is a report that we could not look"
+        return 0
+    fi
 
     # A witness we could not read means we do not know whether survivors exist.
     # That is NOT "none" and must not be printed as a clean drain (mg-76e5).

@@ -12,6 +12,27 @@ is the curated, human-readable summary kept in sync at each release cut.
 
 ### Fixed
 
+- **An orphaned polecat is now surfaced instead of silently leaked, and the
+  redeploy drain stops declaring completion over it (mg-0b77).** mg-13a3 stopped
+  pogod reaping a live polecat that outlived a restart — it resolves `UNKNOWN`
+  rather than `GONE`. But `UNKNOWN` was designed as a *transient*: for crew it
+  resolves when the agent registers, and for such a polecat it never does, since
+  the registry is in-memory with no adopt path. Nothing consumed `UNKNOWN` except
+  the mail-check GC's "is it GONE?" test, so the survivor sat in limbo forever —
+  alive, unreachable, holding a worktree and a claim, its mail-check firing into
+  a void. **Only a human can resolve one**: re-attaching is impossible (the PTY
+  master died with the pogod that owned it), and killing on a missing registry
+  entry would make absence authoritative for destruction — the defect mg-de08 and
+  mg-8677 exist to prevent. pogod now enumerates survivors (witness-alive *and*
+  registry-absent) and reports each with a durable `polecat_orphaned` event plus
+  a mail to the coordinator, repeating hourly until the process is gone and
+  stopping by itself when it is. `GET /agents/drain` gains `unreachable` /
+  `unreachable_err`, and `pogo-self-deploy` no longer logs "drain complete — 0
+  polecats active" over live work: survivors are reported but deliberately *not*
+  counted, since a survivor is not drainable and counting one would block every
+  future redeploy forever. An unreadable witness reports an error, never zero.
+  See `docs/investigations/orphaned-polecat-2026-07-17.md`.
+
 - **Polecats get a second witness: a live polecat's mail-check is no longer
   reaped after a pogod restart (mg-13a3).** pogod's mail-check GC classified an
   unregistered polecat from *two absences* — not in the in-memory registry, not
