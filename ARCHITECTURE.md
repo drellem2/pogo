@@ -375,8 +375,14 @@ reaps:
 |---|---|---|
 | `AgentAlive` | process running, or a restart-on-crash agent the registry still holds (transient mid-restart) | kept |
 | `AgentExpected` | in pogod's **desired state** — an `auto_start`, not-parked crew prompt — whether or not it is registered | kept |
-| `AgentGone` | **not** in the desired state (a polecat, a prompt without `auto_start`, a parked agent), or explicitly stopped | reaped |
-| `AgentUnknown` | the desired state could not be read — e.g. a prompt that exists but does not parse, so the agent is known to be configured and nothing more. Also the zero value, so an implementation that cannot classify fails safe | kept |
+| `AgentGone` | a corpse the registry holds; **or** a polecat whose persisted witness proves its process is not ours (pid holds nothing, or holds a process that started at a different time); **or** an agent with no registry entry, no witness **and** no desired state — nothing on this machine has ever claimed it should exist or observed that it did | reaped |
+| `AgentUnknown` | evidence exists but is not conclusive — a witnessed polecat whose process is alive, a prompt that exists but does not parse, a witness whose pid we cannot identify. Also the zero value, so an implementation that cannot classify fails safe | kept |
+
+**Three sources, one strict order: registry → witness → desired state.** The
+first two are *evidence* (something looked at a process); the third is
+*expectation* (something read a config file). Evidence beats expectation, and a
+fresher look beats a staler one, so a corpse in the registry is never
+resurrected by either of the later sources (mg-8677).
 
 The desired-state half is what a registry-only answer cannot supply, and its
 absence caused a fleet-wide outage. A restarted pogod begins with an **empty
@@ -385,9 +391,56 @@ ticking *before* `AutoStartAgents()` spawns the crew, so a registry-only answer
 reports every crew agent gone and reaps the whole fleet's mail loop seconds
 before the crew boot into a world without their schedules. The old
 restart-on-crash guard could not prevent it — it reads a flag off a registry
-entry that does not exist yet. Across a restart the population now splits
-cleanly: crew are `auto_start` (EXPECTED → keep), polecats are not (GONE →
-reap), so orphan-nudge prevention is unchanged.
+entry that does not exist yet.
+
+**The witness half is what the desired state cannot supply (mg-13a3).** Fixing
+the crew outage above left polecats classified from *two absences* — not in the
+registry, not in the desired state — and the code called that death. Absence of
+evidence is not evidence of death, whatever a comment says about it: crew
+survived only because `auto_start` happened to be an independent second witness,
+and polecats have no prompt at all. mg-61a0 reproduced the consequence
+end-to-end (a live polecat, unregistered after a restart, lost its mail-check
+from memory *and* disk and went permanently dark). Since the registry is
+in-memory with **no adopt/reattach path**, a survivor's absence never heals on
+its own.
+
+So each polecat's `(pid, start_time)` is persisted at spawn and dropped at exit,
+giving a successor pogod something to *look at*:
+
+> **Registry-absent + OUR process alive = UNKNOWN, never GONE.**
+
+`(pid, start_time)`, never pid alone — pids are reused, and a bare
+`kill(pid, 0)` answers "is SOME process alive", never "is OUR process alive". A
+recycled pid reading alive would keep a dead polecat's schedule firing at a
+corpse forever, which is mg-8677 re-entered through the fix for mg-61a0. The
+start time is the kernel's, read via `ps -o lstart=`, because it must be
+re-derivable by a process that never spawned the polecat.
+
+Across a restart the population now splits on **evidence** rather than on the
+shape of its config: crew are `auto_start` (EXPECTED → keep), live polecats are
+witnessed (UNKNOWN → keep), and dead polecats either had their witness dropped
+at exit or fail the identity match (GONE → reap). Orphan-nudge prevention is
+unchanged.
+
+```
+~/.pogo/polecat-witness.json   # versioned JSON, atomic temp+rename writes
+{
+  "version": 1,
+  "polecats": [
+    {
+      "name":         "cat-13a3",
+      "pid":          32471,
+      "start_time":   "2026-07-17T08:12:03+01:00",  // the KERNEL's, via ps -o lstart=
+      "work_item_id": "mg-13a3"
+    }
+  ]
+}
+```
+
+If the start time cannot be read at spawn, **nothing is written**: no witness
+leaves the classifier exactly as it was, whereas a pid-only record would be a
+false witness that answers UNKNOWN at a corpse forever. Implementation:
+`internal/agent/witness.go`.
 
 **Startup grace.** The sweep is additionally held until pogod's first
 `AutoStartAgents()` sweep completes plus a 30s settle window: the invariant

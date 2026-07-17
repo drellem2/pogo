@@ -10,6 +10,37 @@ is the curated, human-readable summary kept in sync at each release cut.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Polecats get a second witness: a live polecat's mail-check is no longer
+  reaped after a pogod restart (mg-13a3).** pogod's mail-check GC classified an
+  unregistered polecat from *two absences* — not in the in-memory registry, not
+  in the on-disk desired state — and concluded death. Absence of evidence is not
+  evidence of death: crew survive that path only because `auto_start` in their
+  prompt is an independent second witness, and polecats have no prompt at all.
+  The consequence was reproduced end-to-end (mg-61a0): a live polecat,
+  unregistered after a restart, had its `mail-check-*` deleted from memory and
+  disk and went **permanently dark** — still working, unreachable by the mayor,
+  with no signal anything was wrong. The registry is in-memory with no
+  adopt/reattach path, so a restarted pogod's registry is empty permanently for
+  any survivor; absence never heals.
+
+  Each polecat's `(pid, start_time)` is now persisted to
+  `~/.pogo/polecat-witness.json` at spawn and dropped at exit, so a successor
+  pogod has evidence to probe instead of a second absence:
+  **registry-absent + OUR process alive = UNKNOWN, never GONE.** The classifier
+  consults registry → witness → desired state, i.e. evidence, then evidence,
+  then expectation; a corpse in the registry still beats both (mg-8677's
+  precedence rule is unchanged).
+
+  It is `(pid, start_time)` and never pid alone: pids are reused, and a bare
+  `kill(pid, 0)` answers "is SOME process alive", never "is OUR process alive".
+  A recycled pid reading alive would keep a dead polecat's schedule firing at a
+  corpse forever — mg-8677, re-entered through the fix for mg-61a0. A pid whose
+  start time disagrees is not our polecat and reaps. The start time is the
+  kernel's (`ps -o lstart=`), not `time.Now()` at spawn, because it must be
+  re-derivable by a process that never spawned the polecat.
+
 ### Added
 
 - **`pogo refinery submit --defer-done` + bounded backstop (gh drellem2/pogo#81).**
