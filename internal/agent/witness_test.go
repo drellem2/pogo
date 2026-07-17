@@ -502,3 +502,61 @@ func TestWitnessStoreExistsDoesNotHideAReadError(t *testing.T) {
 		t.Fatal("WitnessStoreExists reported present alongside an error")
 	}
 }
+
+// TestWitnessedPolecatVerdicts_ReportsEachRecordsVerdict pins the contract
+// gitgc's sweep depends on (mg-0130): the raw per-polecat verdict, including
+// WitnessUnreadable, is handed to the caller rather than pre-collapsed the way
+// WitnessedAlivePolecats collapses it. A reaper that only ever saw "provably
+// alive" would delete on the strength of "not provably alive", which is exactly
+// what deletes the work an unmeasurable-but-live polecat is doing.
+func TestWitnessedPolecatVerdicts_ReportsEachRecordsVerdict(t *testing.T) {
+	sandboxWitness(t)
+
+	// A live process whose identity we can read: Alive.
+	alivePid := liveProcess(t)
+	if err := RecordPolecatWitness("alive", alivePid, "mg-0130"); err != nil {
+		t.Fatalf("record alive: %v", err)
+	}
+	// A process started and then reaped: its pid holds nothing → Dead.
+	dead := exec.Command("sleep", "600")
+	if err := dead.Start(); err != nil {
+		t.Fatalf("start dead: %v", err)
+	}
+	deadPid := dead.Process.Pid
+	if err := RecordPolecatWitness("dead", deadPid, "mg-0130"); err != nil {
+		t.Fatalf("record dead: %v", err)
+	}
+	_ = dead.Process.Kill()
+	_, _ = dead.Process.Wait()
+
+	verdicts, err := WitnessedPolecatVerdicts()
+	if err != nil {
+		t.Fatalf("WitnessedPolecatVerdicts: %v", err)
+	}
+	if verdicts["alive"] != WitnessAlive {
+		t.Errorf("verdicts[alive] = %v, want %v", verdicts["alive"], WitnessAlive)
+	}
+	if verdicts["dead"] != WitnessDead {
+		t.Errorf("verdicts[dead] = %v, want %v", verdicts["dead"], WitnessDead)
+	}
+
+	// Now blind the identity probe: the alive pid still answers signals but its
+	// start time is unreadable. It must surface as Unreadable, NOT dropped and
+	// NOT called dead — "cannot tell" is never "safe to delete". The dead pid,
+	// which holds nothing, stays Dead: pidAlive settles it before the probe.
+	prev := procStartFn
+	procStartFn = func(int) (time.Time, bool) { return time.Time{}, false }
+	t.Cleanup(func() { procStartFn = prev })
+
+	blind, err := WitnessedPolecatVerdicts()
+	if err != nil {
+		t.Fatalf("WitnessedPolecatVerdicts (blind): %v", err)
+	}
+	if blind["alive"] != WitnessUnreadable {
+		t.Errorf("with an unreadable probe, verdicts[alive] = %v, want %v — a live pid whose identity we "+
+			"cannot confirm is UNREADABLE; a reaper must keep it, not delete it (mg-0130)", blind["alive"], WitnessUnreadable)
+	}
+	if blind["dead"] != WitnessDead {
+		t.Errorf("verdicts[dead] = %v, want %v — a pid that holds nothing is dead regardless of the probe", blind["dead"], WitnessDead)
+	}
+}

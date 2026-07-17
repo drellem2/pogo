@@ -570,6 +570,43 @@ func WitnessedAlivePolecats() ([]witnessRecord, error) {
 	return out, nil
 }
 
+// WitnessedPolecatVerdicts probes every persisted witness and returns each
+// polecat's name mapped to what its own process says right now. It is the raw
+// per-polecat truth the store holds; callers apply their own reap policy.
+//
+// WHY THIS AND NOT WitnessedAlivePolecats (mg-0130). That function answers "who
+// is PROVABLY ours and running" and drops everything else, which is right for
+// the orphan report but wrong for a reaper: it discards WitnessUnreadable, and
+// an UNREADABLE polecat is one we could not prove is dead. A reaper deleting on
+// the strength of "not provably alive" would delete the very work an
+// unmeasurable-but-live process is doing. The scheduler's mail-check GC already
+// weighs this correctly — it keeps a schedule on Alive OR Unreadable and reaps
+// only on Dead (cmd/pogod registryLiveness) — and gitgc's sweep must protect a
+// worktree on exactly those same two verdicts, because worktree removal is
+// gated on the live set ALONE, with no merge gate to catch a mistake (gitgc
+// sweep phase 1/1b). This function hands callers the full verdict so the
+// asymmetry ("keep a running polecat's work over reclaiming a dead one's disk")
+// is decided at the reap site, next to the reasoning, rather than pre-collapsed
+// here.
+//
+// A read error yields (nil, err), never an empty map with a nil error: an
+// unreadable store is not an empty fleet, and no caller may render it as one
+// (the whole subject of this file, mg-13a3). Names are unique in the store
+// (RecordPolecatWitness replaces by name), so the map loses nothing.
+func WitnessedPolecatVerdicts() (map[string]WitnessVerdict, error) {
+	witnessMu.Lock()
+	recs, err := loadWitness()
+	witnessMu.Unlock()
+	if err != nil {
+		return nil, fmt.Errorf("witness: cannot read %s: %w", WitnessPath(), err)
+	}
+	out := make(map[string]WitnessVerdict, len(recs))
+	for _, r := range recs {
+		out[r.Name] = witnessVerdict(r)
+	}
+	return out, nil
+}
+
 // WitnessStoreExists reports whether the witness file is on disk at all.
 //
 // WHY THIS IS NOT THE SAME QUESTION AS "are any polecats alive?" (mg-65b2).
