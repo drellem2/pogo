@@ -149,6 +149,9 @@ the claim; RED is the evidence the claim can be false.
 | 5 | Alert once per pogod lifetime (never re-fire) | `RepeatsOnCooldownNotEveryTick` |
 | 6 | Keep the cooldown after a survivor resolves | `ResolvedSurvivorGoesQuietAndCanReturn` |
 | 7 | Don't populate `DrainStatus.Unreachable` | `DrainStatus_ReportsUnreachableSurvivors` |
+| 8 | Remove the empty-body guard (failed fetch → "none unreachable") | `report_drain_complete` failed-fetch control |
+| 9 | Break the sink's argv (`mg mail send` → `mg mail post`) | `MailOrphanAlert_ActuallySendsMail` |
+| 10 | Sink emits the event but never mails | `DefaultOrphanAlert_EmitsAndMails` |
 
 Mutations 1 and 2 are the ones that matter. *"Alive but unreachable"* is a
 **conjunction**, and each half has a failure mode that reads as success:
@@ -163,6 +166,24 @@ The tests model a restart **as it occurs** rather than imitating it: a real
 running process, a witness written by the production writer
 (`RecordPolecatWitness`), and a registry that has never heard of it — which is
 not a contrivance but the ordinary, permanent state of a survivor.
+
+**Proof 10 was not staged — it found a real hole.** With only `mailOrphanAlert`
+under test, deleting `mailOrphanAlert(p)` from `defaultOrphanAlert` left the
+**entire unit suite green**: the loud half could have been removed wholesale,
+the fleet would have emitted a `polecat_orphaned` event into `events.log` (which
+nobody reads — the premise of this whole ticket) and mailed no one, and the
+tests would have reported success. **This ticket's central claim would have been
+false with a green suite.** That is mg-c02d's ruling exactly — the pure-function
+tests do not cover the wiring, so the wiring needs its own control. A test per
+half plus an untested join is two green halves and a silent gap where the fix
+was supposed to be. `DefaultOrphanAlert_EmitsAndMails` now covers the join.
+
+**Proof 9 is why the sink is tested at all.** `mailOrphanAlert` is deliberately
+best-effort (a leaked agent must not take pogod down), so a broken invocation —
+a wrong subcommand, a renamed flag — **cannot announce itself**: it fails into a
+log line, which is the one outcome the ruling rejects. A best-effort sink is
+precisely the kind that needs a positive control, because nothing else will ever
+tell you it stopped working.
 
 ## 7. The fix rebuilt the bug inside itself (caught by its own test)
 
