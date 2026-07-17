@@ -28,6 +28,33 @@ is the curated, human-readable summary kept in sync at each release cut.
 
 ### Fixed
 
+- **A failed `pogo-self-deploy redeploy` no longer leaves the fleet
+  undispatchable (mg-8b48).** `redeploy` enables drain mode on the live pogod and
+  then rebuilds. There was no `trap`: every exit between those two steps —
+  including all four of `do_build`'s, one of which fires on nothing worse than an
+  **uncommitted change in the source tree** — returned without turning drain back
+  off. The old pogod stayed up with `draining = true` and **dispatched no
+  polecats, fleet-wide, until a human noticed and restarted it**. Nothing went
+  red: the daemon was up, the port answered, crew kept answering mail, so every
+  health signal stayed green while the fleet quietly stopped doing work — the
+  mg-de08 shape (invisible outage, all lights green) at the dispatch layer. This
+  was live on **every** redeploy, and unattended it is a worse outcome than a
+  missed deploy. Dispatch is now restored on any exit — build failure, `set -u`
+  error, or Ctrl-C — via a `trap` armed before the drain POST (so a POST that
+  times out *after* pogod set the flag still restores) and disarmed at the
+  kickstart, which destroys the daemon whose state was mutated and so ends the
+  window. It restores the **prior** value rather than asserting `false`: a deploy
+  must not switch dispatch back on underneath someone who drained the fleet for
+  an unrelated reason. The old timeout path's bare `drain_post false` — the only
+  restore that existed, and an assertion rather than a restore — is gone. `exit 5`
+  and `exit 8` only ever looked covered: a landed kickstart resets `draining` to
+  its zero value, which is luck of zero-value initialisation, not a restore path.
+  Proven both ways by a live control (`scripts/pogo-self-deploy_live_test.sh` #6)
+  that drives the real `cmd_redeploy` against a real pogod: the RED is
+  **demonstrated** by neutering the restore and watching the daemon really strand
+  at `draining = true`, and the restore is shown **conditional** — past the
+  disarm boundary a deploy still drains.
+
 - **`auto_start` can no longer override a corpse in the mail-check reap
   (mg-8677).** A follow-up to mg-de08, which over-corrected: a **registered**,
   terminally-exited, `restart_on_crash = false` agent fell through to the

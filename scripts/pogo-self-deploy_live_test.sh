@@ -45,6 +45,16 @@
 #                   counterfactual that proves it drives that exact case.
 #   4. POSITIVE   — a real reap makes the assembled path report RED. mg-c02d's ask.
 #   5. FAIL-OPEN  — a dead daemon reports UNKNOWN, never OK and never "all gone".
+#   6. DRAIN      — a build that fails AFTER the drain restores dispatch on the
+#                   way out, so a failed deploy cannot leave the fleet
+#                   undispatchable. Includes the RED, demonstrated by neutering
+#                   the restore and watching the live daemon really strand at
+#                   draining=true. mg-8b48's ask.
+#
+# 6 drives the REAL cmd_redeploy end-to-end (drain -> failing build -> trap)
+# rather than a pure helper, so unlike 1-5 it is a control on the DRIVER, not on
+# the post-check. It shares this file because it needs the same thing: a real
+# pogod whose state can be read back after the code under test has moved it.
 
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -331,6 +341,191 @@ else
             fail "positive control FAILED: real reap of 6 mail-checks, assembled path did NOT report RED. Got: $OUT_RED" ;;
     esac
 fi
+
+# ===========================================================================
+# 6. DRAIN RESTORE — a build that fails AFTER the drain must not leave the
+#    fleet undispatchable (mg-8b48).  THE FOURTH ASK.
+# ===========================================================================
+# Until the trap existed, `pogo-self-deploy redeploy` enabled drain on the live
+# pogod and then, on any do_build failure, exited WITHOUT turning it back off.
+# The old daemon stayed up with draining=true and dispatched no polecats,
+# fleet-wide, until a human noticed — and nothing goes red when that happens.
+# It fires on a dirty tree, which is a condition a human creates by accident.
+#
+# This drives the REAL cmd_redeploy — not a fixture, not the trap called by
+# hand — against the REAL sandbox daemon, and makes do_build really fail on the
+# really-dirty-tree branch. The redeploy runs in a ( subshell ) so its exit 4 is
+# an assertion instead of the end of this file; a trap set inside a subshell
+# fires on that subshell's exit, which is exactly the mechanism under test.
+#
+# Assertions, in the order that makes each one mean something:
+#   (a) precondition — dispatch really is ON before we start, or (d) is vacuous.
+#   (b) the RED, DEMONSTRATED — with restore_drain neutered, this exact scenario
+#       really does strand the daemon at draining=true. This is the bug, live.
+#       Without it, (d) could pass on a script that never drained at all.
+#   (c) the build really failed AFTER the drain (exit 4), not before it.
+#   (d) the FIX — the real trap restores dispatch on that same exit path.
+#   (e) CONDITIONAL, not hard-wired — a run that gets past do_build leaves drain
+#       ON at the kickstart boundary, so the restore is scoped to failure and is
+#       not just "this script always ends with draining=false".
+
+# A pogo checkout whose HEAD is NOT $DEPLOY_REF -> do_build's first exit 4.
+# Built here rather than reusing $REPO_ROOT: this must not depend on whether the
+# polecat's own worktree happens to be clean or on which ref it sits.
+DR_REPO="$SANDBOX/drain-repo"
+mkdir -p "$DR_REPO"
+(
+    cd "$DR_REPO" && git init -q . && git config user.email t@t && git config user.name t
+    echo one > f && git add f && git commit -qm one
+    git branch -f main-fixture
+    echo two > f && git commit -qam two   # HEAD now != main-fixture
+) >/dev/null 2>&1
+
+# Drive the driver's own primitives at the sandbox: POGO_GOBIN points at an
+# empty dir so installed_rev is empty != MAIN -> NEEDS_BUILD=true -> do_build
+# really runs. POGO_DEPLOY_REF is the fixture branch HEAD has diverged from.
+mkdir -p "$SANDBOX/nobin"
+dr_run() {
+    # One failing redeploy, start to finish, in a subshell. Echoes its exit code.
+    # The redirect sits on the SUBSHELL, not on cmd_redeploy: the trap fires on
+    # subshell EXIT, i.e. after any redirection scoped to the command inside it
+    # has already ended, so redirecting the command alone lets restore_drain's
+    # log leak into this function's stdout and corrupt the exit code it echoes.
+    (
+        POGO_GOBIN="$SANDBOX/nobin" \
+        POGO_DEPLOY_REF=main-fixture \
+        REPO="$DR_REPO" DEPLOY_REF=main-fixture \
+        ASSUME_YES=true FORCE=false SKIP_DRAIN=false
+        cmd_redeploy
+    ) >/dev/null 2>&1
+    echo $?
+}
+dr_state() { curl -sf --max-time 5 "$URL/agents/drain" 2>/dev/null | json_bool draining; }
+
+curl -sf -X POST "$URL/agents/drain" -H 'Content-Type: application/json' \
+    -d '{"draining":false}' >/dev/null 2>&1
+# (a) precondition
+[ "$(dr_state)" = "false" ] \
+    && pass "drain-restore precondition: the sandbox daemon is dispatching (draining=false) before the run" \
+    || fail "drain-restore precondition: daemon is not at draining=false — the controls below cannot mean what they say"
+
+# (b) THE RED, DEMONSTRATED. Neuter ONLY the trap's body; everything else is the
+# real path. If this ever reports draining=false, the scenario has stopped
+# driving the bug and (d) below is proving nothing — fix the scenario, not this.
+DR_REAL_BODY="$(declare -f restore_drain)"
+restore_drain() { :; }
+DR_RC_RED="$(dr_run)"
+if [ "$(dr_state)" = "true" ]; then
+    pass "RED demonstrated: with the restore neutered, a build failure after drain really does strand the LIVE daemon at draining=true (rc=$DR_RC_RED)"
+else
+    fail "RED did NOT reproduce: neutering restore_drain left draining=$(dr_state) — this scenario is not driving the mg-8b48 bug, so the PASS below would be worthless"
+fi
+eval "$DR_REAL_BODY"   # put the real trap body back
+
+# (c) the failure really is do_build's, i.e. downstream of the drain
+[ "$DR_RC_RED" = "4" ] \
+    && pass "the run really fails in do_build (exit 4) — AFTER drain was enabled, BEFORE any kickstart" \
+    || fail "expected the redeploy to exit 4 from do_build, got $DR_RC_RED — the window under test was never entered"
+
+# (d) THE ASSERTION THIS TICKET EXISTS FOR. Same scenario, real trap.
+curl -sf -X POST "$URL/agents/drain" -H 'Content-Type: application/json' \
+    -d '{"draining":false}' >/dev/null 2>&1
+DR_RC="$(dr_run)"
+if [ "$(dr_state)" = "false" ]; then
+    pass "mg-8b48: the trap restores dispatch (draining=false) after a build that failed post-drain (rc=$DR_RC)"
+else
+    fail "mg-8b48 REGRESSION: build failed after drain and the LIVE daemon is still draining=$(dr_state) — the fleet would dispatch NOTHING until a human noticed"
+fi
+
+# (e) RESTORE THE PRIOR VALUE, NOT A HARD false. Drain was already ON before this
+# run for some unrelated reason; the deploy must put back what it found, not
+# assert its own idea of the world and switch dispatch on under whoever drained.
+#
+# Note what this one does and does not discriminate: it separates "restores the
+# prior value" from "asserts false" (the old timeout path's bare `drain_post
+# false`, which would leave this case at false). It canNOT tell a correct restore
+# from no trap at all — both end at true. That is what (b) and (d) are for, and
+# this assertion leans on them rather than pretending to stand alone.
+curl -sf -X POST "$URL/agents/drain" -H 'Content-Type: application/json' \
+    -d '{"draining":true}' >/dev/null 2>&1
+dr_run >/dev/null
+[ "$(dr_state)" = "true" ] \
+    && pass "mg-8b48: a pre-existing drain is RESTORED, not cleared — the trap restores state, it does not assert it" \
+    || fail "mg-8b48: the trap forced draining=false over a drain that was already on before the deploy — asserting a state instead of restoring one"
+
+# (f) CONDITIONAL, not hard-wired. The restore must be scoped to the failure
+# window: disarming at the kickstart boundary is what makes drain a real deploy
+# phase rather than a no-op this script always undoes. Reach that boundary with
+# the trap armed and confirm drain is still ON, so (d) is a consequence of the
+# FAILURE and not of the script simply always ending at draining=false.
+curl -sf -X POST "$URL/agents/drain" -H 'Content-Type: application/json' \
+    -d '{"draining":false}' >/dev/null 2>&1
+(
+    DRAIN_PRIOR=false
+    DRAIN_ARMED=true
+    trap restore_drain EXIT
+    drain_post true >/dev/null          # the deploy's real mutation
+    DRAIN_ARMED=false; trap - EXIT      # the real disarm, at the real boundary
+    exit 0
+)
+[ "$(dr_state)" = "true" ] \
+    && pass "restore is CONDITIONAL: past the kickstart boundary the trap is disarmed and drain STAYS on (the deploy really drains)" \
+    || fail "drain was cleared past the disarm boundary — the restore is unconditional, so it proves nothing about the failure path"
+
+# (g) A SIGNAL RESTORES AND STOPS — it does not restore and CARRY ON. A bash
+# signal handler that returns resumes the script at the point of interruption,
+# so the obvious `trap restore_drain EXIT INT TERM` would turn dispatch back on
+# and then keep building and kickstarting with the fleet live: a cleanup that
+# fires and then un-fires itself. Ctrl-C during a 30-minute drain wait is the
+# most likely way a human ever enters this path, so it gets an assertion rather
+# than an argument. Driven with a real signal against a real daemon.
+curl -sf -X POST "$URL/agents/drain" -H 'Content-Type: application/json' \
+    -d '{"draining":false}' >/dev/null 2>&1
+#
+# This drives the REAL cmd_redeploy with the REAL trap wiring the driver
+# installs — it does not restate the trap setup here. A control that hand-rolled
+# its own `trap` would pin the IDIOM and not the driver, and would keep passing
+# while cmd_redeploy regressed to the returning-handler form. Overriding
+# drain_wait is the seam: it puts the signal at the exact moment the human
+# actually reaches for Ctrl-C — while the deploy sits waiting for polecats to
+# finish, which is a 30-MINUTE window by default and by far the likeliest way
+# anyone ever interrupts this script.
+#
+# Runs as its OWN script rather than a ( subshell ) because this box's bash is
+# 3.2, which has no $BASHPID: inside a subshell `$$` is still the PARENT's pid,
+# so `kill -INT $$` would signal this test file instead of the code under test,
+# and the assertion would be reporting on nothing.
+#
+# rc is the discriminator, and it is what makes this control able to fail:
+#   130 = the signal stopped the deploy (correct).
+#     4 = the handler RETURNED, drain_wait completed, and the deploy carried on
+#         into do_build — the returning-handler bug, which restores dispatch and
+#         then rebuilds and kickstarts the fleet anyway.
+cat > "$SANDBOX/sigtest.sh" <<SIGEOF
+#!/bin/bash
+set -u
+source "$REPO_ROOT/scripts/pogo-self-deploy"
+# The human hits Ctrl-C while the deploy waits for the fleet to quiesce.
+drain_wait() { kill -INT \$\$; sleep 2; echo 0; return 0; }
+POGO_GOBIN="$SANDBOX/nobin"
+REPO="$DR_REPO" DEPLOY_REF=main-fixture
+ASSUME_YES=true FORCE=false SKIP_DRAIN=false
+cmd_redeploy
+SIGEOF
+POGO_PORT="$PORT" bash "$SANDBOX/sigtest.sh" >/dev/null 2>&1
+DR_SIG_RC=$?
+case "$DR_SIG_RC" in
+    130) pass "SIGINT in the drain window STOPS the real cmd_redeploy at the signal (exit 130) — it does not restore dispatch and then carry on building" ;;
+    4)   fail "SIGINT's handler RETURNED and the deploy resumed into do_build (exit 4) — a returning INT handler restores dispatch and then rebuilds and kickstarts the fleet anyway" ;;
+    *)   fail "expected exit 130 from a SIGINT in the drain window, got $DR_SIG_RC" ;;
+esac
+[ "$(dr_state)" = "false" ] \
+    && pass "SIGINT in the drain window restores dispatch on the way out (Ctrl-C cannot strand the fleet either)" \
+    || fail "SIGINT left the live daemon at draining=$(dr_state) — an aborted deploy strands the fleet exactly like a failed build"
+
+# Leave the daemon dispatching for anything downstream.
+curl -sf -X POST "$URL/agents/drain" -H 'Content-Type: application/json' \
+    -d '{"draining":false}' >/dev/null 2>&1
 
 # ===========================================================================
 # 5. FAIL-OPEN SEAM — a dead daemon must be UNKNOWN, never OK, never "all gone".

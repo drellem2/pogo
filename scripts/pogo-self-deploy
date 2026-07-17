@@ -70,6 +70,12 @@ short(){ printf '%s' "${1:0:12}"; }
 # json.Encoder emits single-line objects, so these single-line seds suffice.
 json_str() { sed -n "s/.*\"$1\":\"\([^\"]*\)\".*/\1/p"; }
 json_num() { sed -n "s/.*\"$1\":\([0-9][0-9]*\).*/\1/p"; }
+# json_bool — a BARE json bool, echoing "true"/"false" (empty if the field is
+# absent or is not a bool). json_str cannot do this and must not be made to: the
+# value carries no quotes, which is exactly what the unit test pins when it
+# asserts `json_str draining` is empty. BRE only — this runs under BSD sed on
+# macOS, where GNU's \| alternation silently matches nothing.
+json_bool() { sed -n "s/.*\"$1\":\([tf][a-z]*\).*/\1/p"; }
 
 base_url() { echo "http://127.0.0.1:${PORT}"; }
 
@@ -403,6 +409,72 @@ drain_post() {
         -H 'Content-Type: application/json' -d "{\"draining\":${state}}" 2>/dev/null
 }
 
+# ---------------------------------------------------------------------------
+# Drain restore (mg-8b48)
+# ---------------------------------------------------------------------------
+# `drain_post true` is a MUTATION OF ANOTHER PROCESS'S STATE, and until this
+# trap existed it had no guaranteed undo. Every exit between enabling drain and
+# the kickstart left the OLD pogod up with draining=true — dispatching NO
+# polecats, fleet-wide, until a human noticed and restarted it. do_build's four
+# exits all sit in that window, and the dirty-tree one fires on a condition a
+# human creates by accident. Nothing goes red when it happens: pogod is up, the
+# port answers, crew keep answering mail, so every health signal stays green
+# while the fleet quietly stops doing work. Unattended at 03:00 that is a worse
+# outcome than a missed deploy (mg-46a4 §5b).
+#
+# exit 5 (kickstart) and exit 8 (verify) LOOK like they are in the window and are
+# not: by then the old process is gone, and a landed kickstart resets draining to
+# its zero value (internal/agent/agent.go). That is luck of zero-value
+# initialisation, not a restore path — do not lean on it, and do not mistake it
+# for coverage of the exits above.
+#
+# RESTORE THE PRIOR VALUE, NEVER A HARD false. If drain was already on for an
+# unrelated reason, forcing false asserts a state instead of restoring one, and
+# that is the same bug wearing a different hat: this deploy would switch
+# dispatch back on underneath whoever turned it off.
+DRAIN_PRIOR=""     # draining as it was BEFORE this run touched it: true|false|?
+DRAIN_ARMED=false  # true only between "we may have enabled drain" and the kickstart
+
+# drain_state — the live draining flag: "true" | "false" | "?" when unreadable.
+# "?" is the same unreachable sentinel the mail-check set uses, and for the same
+# reason: "could not read it" and "it is off" are different facts, and restoring
+# a value we never read is an assertion, not a restore.
+drain_state() {
+    local body v
+    body="$(curl -sf --max-time 5 "$(base_url)/agents/drain" 2>/dev/null)" || { echo "?"; return 1; }
+    v="$(printf '%s' "$body" | json_bool draining)"
+    case "$v" in true|false) echo "$v" ;; *) echo "?"; return 1 ;; esac
+}
+
+# restore_drain — the EXIT trap body. Puts dispatch back the way we found it on
+# ANY exit path while armed: the four do_build exits, an unexpected error under
+# set -u, and Ctrl-C/SIGTERM (INT/TERM are trapped too, since a human aborting a
+# deploy mid-drain leaves exactly the same outage as a failed build).
+#
+# Deliberately NOT self-healing-by-accident: it reports what it did, and reports
+# LOUDLY when it could not, because a failed restore IS the outage this exists to
+# prevent and the operator needs the one command that fixes it.
+restore_drain() {
+    local code=$? want st
+    $DRAIN_ARMED || return
+    DRAIN_ARMED=false   # a restore is attempted exactly once
+    want="$DRAIN_PRIOR"
+    if [ "$want" != "true" ] && [ "$want" != "false" ]; then
+        err "drain restore: pre-deploy drain state was never read; ASSUMING dispatch was enabled"
+        err "  (this ASSERTS draining=false rather than restoring a value — verify by hand if drain was intentionally on)"
+        want=false
+    fi
+    log "restoring dispatch to its pre-deploy state (draining=$want) — deploy exited $code before the kickstart"
+    st="$(drain_post "$want")"
+    case "$st" in
+        2??) log "dispatch restored: draining=$want" ;;
+        *)   err "drain restore FAILED (HTTP ${st:-000}) — pogod may STILL be draining and dispatching NO polecats."
+             err "  The fleet will look healthy and do nothing. Restore by hand:"
+             err "    curl -X POST $(base_url)/agents/drain -H 'Content-Type: application/json' -d '{\"draining\":$want}'"
+             ;;
+    esac
+}
+
 # Pure decision function (unit-tested): map the POST /agents/drain HTTP status
 # to a drain-phase disposition. Echoes exactly one word:
 #   drain      — 2xx: endpoint present, proceed to drain_wait
@@ -531,6 +603,25 @@ cmd_redeploy() {
         log "--skip-drain: skipping drain phase (no fleet quiesce, no orphan cleanup)"
     else
         log "enabling drain mode"
+        # Read dispatch as it stands BEFORE we touch it, then arm the restore.
+        # Armed BEFORE the POST, not after, on purpose: a POST that times out
+        # AFTER pogod set the flag comes back "000" and classifies as `down`,
+        # so the one path where we cannot tell whether we mutated anything is a
+        # path that must still restore. A restore POST on a genuinely-down or
+        # bootstrap daemon fails harmlessly and says so; the reverse mistake is
+        # a silent fleet-wide outage.
+        DRAIN_PRIOR="$(drain_state)"
+        DRAIN_ARMED=true
+        # ONLY the EXIT trap restores. INT/TERM merely convert the signal into an
+        # exit, because a bash signal handler that RETURNS resumes the script
+        # where it was interrupted: `trap restore_drain EXIT INT TERM` would
+        # restore dispatch on Ctrl-C and then carry on building and kickstarting
+        # with the fleet live — a cleanup that fires and then un-fires itself.
+        # Routing both through exit gives one restore, on one path, with the
+        # signal's status preserved.
+        trap restore_drain EXIT
+        trap 'err "interrupted (SIGINT) during the drain window"; exit 130' INT
+        trap 'err "terminated (SIGTERM) during the drain window"; exit 143' TERM
         local disp; disp="$(classify_drain_precondition "$(drain_post true)")"
         case "$disp" in
             drain)
@@ -542,7 +633,11 @@ cmd_redeploy() {
                     if ! $FORCE; then
                         err "$leftover polecat(s) still active after ${DRAIN_TIMEOUT}s drain timeout"
                         err "refusing to hard-bounce the fleet without --force; restoring dispatch"
-                        drain_post false >/dev/null || true
+                        # The restore is the trap's job now — and the trap puts
+                        # back the PRIOR value, where the bare `drain_post false`
+                        # that used to live here asserted `false` unconditionally.
+                        # This path was the ONLY one that restored anything; every
+                        # other exit between here and the kickstart leaked drain.
                         exit 7
                     fi
                     log "--force: hard-bouncing with $leftover polecat(s) active; will clean up after"
@@ -589,6 +684,14 @@ cmd_redeploy() {
     else
         mail_pre="?"
     fi
+    # Disarm BEFORE the kickstart: it kills the pogod whose dispatch flag we
+    # mutated, so from here there is no state left to restore and no process to
+    # restore it on. The replacement starts with draining at its zero value.
+    # This is the far edge of the window mg-46a4 identified; past it, a restore
+    # POST would be aimed at a DIFFERENT daemon than the one we changed — and if
+    # drain had been on before, it would re-drain the fresh fleet.
+    DRAIN_ARMED=false
+    trap - EXIT INT TERM
     do_restart
     verify_running || exit 8
 

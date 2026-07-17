@@ -26,6 +26,26 @@ VER='{"revision":"abc123def456","time":"2026-07-14T00:45:56Z","modified":false}'
 [ "$(printf '%s' "$VER" | json_str revision)" = "abc123def456" ] \
     && pass "json_str extracts revision" || fail "json_str revision"
 
+# --- json_bool: the drain flag the restore trap reads back (mg-8b48) --------
+# json_str CANNOT read `"draining":true` (asserted above), so the restore needs
+# its own extractor. It must read BOTH values, and must yield EMPTY rather than
+# guess when the field is absent or is not a bool — restore_drain turns an empty
+# read into the "?" sentinel, and "?" is what stops it from ASSERTING a state it
+# never observed.
+[ "$(printf '%s' "$DRAIN" | json_bool draining)" = "true" ] \
+    && pass "json_bool reads draining=true off a real drain payload" || fail "json_bool true ($(printf '%s' "$DRAIN" | json_bool draining))"
+DRAIN_OFF='{"draining":false,"count":0,"polecats":[]}'
+[ "$(printf '%s' "$DRAIN_OFF" | json_bool draining)" = "false" ] \
+    && pass "json_bool reads draining=false (and does not collapse it to empty/true)" || fail "json_bool false"
+# false must NOT read as absent: "off" and "unreadable" drive different branches
+# in restore_drain — one restores, the other admits it is assuming.
+[ -n "$(printf '%s' "$DRAIN_OFF" | json_bool draining)" ] \
+    && pass "json_bool: draining=false is a VALUE, not an absence" || fail "json_bool false read as absent"
+[ -z "$(printf '%s' '{"count":0,"polecats":[]}' | json_bool draining)" ] \
+    && pass "json_bool yields empty when the field is absent (-> '?', never a guess)" || fail "json_bool absent field"
+[ -z "$(printf '%s' '{"draining":"yes"}' | json_bool draining)" ] \
+    && pass "json_bool yields empty for a non-bool value (-> '?', never a guess)" || fail "json_bool non-bool value"
+
 # --- classify_drift: the four cases from the mg-6afa ruling ---
 classify() { RUNNING="$1"; INSTALLED="$2"; MAIN="$3"; classify_drift; }
 
