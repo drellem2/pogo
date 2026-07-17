@@ -8,6 +8,8 @@ import (
 	"testing"
 	"text/template"
 	"time"
+
+	"github.com/drellem2/pogo/internal/gitgc"
 )
 
 func TestExpandTemplate(t *testing.T) {
@@ -152,7 +154,7 @@ func TestExpandTemplateToFile(t *testing.T) {
 // shape, update this test deliberately rather than letting the section
 // disappear on a stray edit.
 func TestShippedTemplatesSurfaceRecentActivity(t *testing.T) {
-	for _, name := range []string{"prompts/templates/polecat.md", "prompts/templates/polecat-qa.md", "prompts/templates/polecat-build-pr.md", "prompts/templates/polecat-triage.md", "prompts/templates/polecat-review.md"} {
+	for _, name := range []string{"prompts/templates/polecat.md", "prompts/templates/polecat-qa.md", "prompts/templates/polecat-build-pr.md", "prompts/templates/polecat-triage.md", "prompts/templates/polecat-review.md", "prompts/templates/polecat-architect.md"} {
 		data, err := defaultPrompts.ReadFile(name)
 		if err != nil {
 			t.Fatalf("read embedded %s: %v", name, err)
@@ -187,7 +189,7 @@ func TestShippedTemplatesBanUnanchoredPkill(t *testing.T) {
 		"prompts/templates/polecat-qa.md",
 		"prompts/templates/polecat-build-pr.md",
 		"prompts/templates/polecat-triage.md",
-		"prompts/templates/polecat-review.md",
+		"prompts/templates/polecat-review.md", "prompts/templates/polecat-architect.md",
 		"prompts/mayor.md",
 		"prompts/crew/doctor.md",
 	}
@@ -242,7 +244,7 @@ func TestShippedTemplatesProviderGating(t *testing.T) {
 		return buf.String()
 	}
 
-	for _, name := range []string{"prompts/templates/polecat.md", "prompts/templates/polecat-qa.md", "prompts/templates/polecat-build-pr.md", "prompts/templates/polecat-triage.md", "prompts/templates/polecat-review.md"} {
+	for _, name := range []string{"prompts/templates/polecat.md", "prompts/templates/polecat-qa.md", "prompts/templates/polecat-build-pr.md", "prompts/templates/polecat-triage.md", "prompts/templates/polecat-review.md", "prompts/templates/polecat-architect.md"} {
 		for _, provider := range []string{"pi", "codex", "cursor"} {
 			out := expand(t, name, provider)
 			for _, ism := range claudeIsms {
@@ -1893,6 +1895,7 @@ func TestInitPromptsDefault(t *testing.T) {
 		filepath.Join("templates", "polecat-qa.md"),
 		filepath.Join("templates", "polecat-triage.md"),
 		filepath.Join("templates", "polecat-review.md"),
+		filepath.Join("templates", "polecat-architect.md"),
 		filepath.Join("pm", "pm-template.md"),
 	} {
 		path := filepath.Join(tmpHome, ".pogo", "agents", rel)
@@ -2074,7 +2077,7 @@ func TestPolecatTemplatesIncludeMailCheckCron(t *testing.T) {
 		"prompts/templates/polecat.md",
 		"prompts/templates/polecat-qa.md",
 		"prompts/templates/polecat-triage.md",
-		"prompts/templates/polecat-review.md",
+		"prompts/templates/polecat-review.md", "prompts/templates/polecat-architect.md",
 	}
 	for _, path := range templates {
 		data, err := defaultPrompts.ReadFile(path)
@@ -2619,7 +2622,7 @@ func TestDefaultPromptsUseProactivityPrinciple(t *testing.T) {
 		"prompts/templates/polecat.md",
 		"prompts/templates/polecat-qa.md",
 		"prompts/templates/polecat-triage.md",
-		"prompts/templates/polecat-review.md",
+		"prompts/templates/polecat-review.md", "prompts/templates/polecat-architect.md",
 	} {
 		data, err := defaultPrompts.ReadFile(rel)
 		if err != nil {
@@ -3533,16 +3536,28 @@ func mustStat(t *testing.T, path string) os.FileInfo {
 // the absence of the fabricated name, not the presence of a corrected one.
 func TestShippedTemplatesNeverNameTheBranch(t *testing.T) {
 	// Mirror a real coordinator dispatch: `spawn-polecat abea --id=mg-abea`.
+	//
+	// The branch prefix comes from gitgc.BranchPrefix, NOT from the worker's
+	// display name — they are independent, and on this fleet they differ
+	// (DefaultWorkerName is "pogocat"; the prefix is "polecat-"). Deriving the
+	// expectation from the real constant is what makes this test catch
+	// "{{.Worker}}-{{.Id}}" and not just the literal "polecat-{{.Id}}": with
+	// the default worker name, "{{.Worker}}-{{.Id}}" renders "pogocat-mg-abea"
+	// and would slip past a hardcoded "polecat-" string while still rendering
+	// the fabricated branch on any fleet whose worker IS named "polecat"
+	// (mg-564c found this hole with a template that did exactly that).
+	// setWorker pins the worker name to the value that makes the bug visible.
+	setWorker(t, strings.TrimSuffix(gitgc.BranchPrefix, "-"))
 	const name, id = "abea", "mg-abea"
-	realBranch := "polecat-" + name // what pogod checks out
-	fabricated := "polecat-" + id   // what "polecat-{{.Id}}" used to render
+	realBranch := gitgc.BranchPrefix + name // what pogod checks out
+	fabricated := gitgc.BranchPrefix + id   // what "polecat-{{.Id}}" used to render
 
 	for _, tmplName := range []string{
 		"prompts/templates/polecat.md",
 		"prompts/templates/polecat-qa.md",
 		"prompts/templates/polecat-build-pr.md",
 		"prompts/templates/polecat-triage.md",
-		"prompts/templates/polecat-review.md",
+		"prompts/templates/polecat-review.md", "prompts/templates/polecat-architect.md",
 	} {
 		data, err := defaultPrompts.ReadFile(tmplName)
 		if err != nil {
@@ -3584,6 +3599,7 @@ func TestShippedPolecatTemplatesTeachBranchObservation(t *testing.T) {
 	for _, tmplName := range []string{
 		"prompts/templates/polecat.md",
 		"prompts/templates/polecat-build-pr.md",
+		"prompts/templates/polecat-architect.md",
 	} {
 		data, err := defaultPrompts.ReadFile(tmplName)
 		if err != nil {
@@ -3609,5 +3625,95 @@ func TestShippedPolecatTemplatesTeachBranchObservation(t *testing.T) {
 			t.Errorf("%s: must teach the polecat to read its branch with "+
 				"`git rev-parse --abbrev-ref HEAD`", tmplName)
 		}
+	}
+}
+
+// TestArchitectTemplateNoticesRatherThanRules pins the design constraint that
+// is the entire reason polecat-architect.md ships in the shape it does
+// (mg-564c, from the mg-945c design).
+//
+// The standing architect, asked to judge its own dispatchable twin, answered
+// against its own interest: "a day-one architect isn't merely less useful —
+// it's differently risky. It has authority without evidence. My rulings were
+// good largely because I could check them against accumulated evidence, and
+// the ones I got wrong were exactly the ones I ruled from priors instead of
+// looking. A fresh architect has nothing BUT priors. It will be fluent,
+// confident, and unable to check itself — and fluency is what makes that
+// failure mode survive review."
+//
+// The mitigation is scope, not tone: a fresh instance's first job is NOTICING
+// that a question exists, not RULING on it. A template that opens with
+// confident rulings is the failure mode. These strings are load-bearing — if
+// the wording changes, update this test deliberately rather than letting the
+// constraint erode into generic review boilerplate.
+func TestArchitectTemplateNoticesRatherThanRules(t *testing.T) {
+	data, err := defaultPrompts.ReadFile("prompts/templates/polecat-architect.md")
+	if err != nil {
+		t.Fatalf("read polecat-architect.md: %v", err)
+	}
+	body := string(data)
+
+	for _, want := range []string{
+		// The one sentence that defines the role.
+		"A reactive architect answers questions; a standing one notices that a question exists.",
+		// The named risk, not a softened paraphrase of it.
+		"authority but without evidence",
+		"nothing but priors",
+		// Fluency is what makes the failure mode survive review.
+		"Fluency is not evidence",
+		// The design constraint itself.
+		"NOTICING, not RULING",
+		// The anchoring rule that operationalizes it.
+		"file:line",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("polecat-architect.md: missing honest-limit constraint %q", want)
+		}
+	}
+
+	// The advisory verdict must carry an explicit place to record what the
+	// architect did NOT check. Without it, "I couldn't verify this" has no
+	// home in the output and silently becomes a confident claim.
+	if !strings.Contains(body, `"unchecked"`) {
+		t.Error("polecat-architect.md: advisory result JSON must carry an `unchecked` field")
+	}
+}
+
+// TestArchitectTemplateDefersPRReviewToReviewTemplate pins the non-duplication
+// boundary that made this template shippable at all (mg-564c; the question
+// mg-abea's evidence raised).
+//
+// polecat-review.md already reviews PRs through an explicit architecture lens,
+// against the approved recommendation as its contract. The architect draft's
+// original "shape C — design-correctness review gate" duplicated exactly that,
+// and duplicated it worse: review checks a diff against a stated agreement
+// (evidence), where a fresh architect would check it against priors. Shape C
+// was cut. The architect's domain is the design question that exists BEFORE
+// there is a diff; once code exists, polecat-review owns it.
+//
+// If this boundary blurs, the two templates drift into competing PR reviewers
+// with different contracts — so assert both the deferral and the absence of a
+// resurrected shape C.
+func TestArchitectTemplateDefersPRReviewToReviewTemplate(t *testing.T) {
+	data, err := defaultPrompts.ReadFile("prompts/templates/polecat-architect.md")
+	if err != nil {
+		t.Fatalf("read polecat-architect.md: %v", err)
+	}
+	body := string(data)
+
+	for _, want := range []string{
+		"You are not a PR reviewer",
+		"polecat-review",
+		"There is no shape C",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("polecat-architect.md: missing review-boundary marker %q", want)
+		}
+	}
+
+	// The three surviving shapes are all pre-diff. A resurrected "shape C"
+	// heading is the specific regression this guards.
+	if strings.Contains(body, "**C.") {
+		t.Error("polecat-architect.md: shape C was cut as duplicative of polecat-review; do not resurrect it")
 	}
 }

@@ -146,7 +146,7 @@ func TestSynthesizePromptResolvesConfiguredCoordinator(t *testing.T) {
 	if _, err := SynthesizePrompt("mayor", PreviewTemplateVars()); err == nil {
 		t.Errorf("SynthesizePrompt(mayor) should not resolve the coordinator prompt when coordinator is renamed and no crew/mayor.md exists")
 	}
-	for _, name := range []string{"boss", "doctor", "polecat", "polecat-qa", "polecat-build-pr", "polecat-triage", "polecat-review"} {
+	for _, name := range []string{"boss", "doctor", "polecat", "polecat-qa", "polecat-build-pr", "polecat-triage", "polecat-review", "polecat-architect"} {
 		out, err := SynthesizePrompt(name, PreviewTemplateVars())
 		if err != nil {
 			t.Fatalf("SynthesizePrompt(%s): %v", name, err)
