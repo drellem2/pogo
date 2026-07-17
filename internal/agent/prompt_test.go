@@ -1239,11 +1239,18 @@ func TestCheckPromptDriftDetectsStale(t *testing.T) {
 		t.Fatalf("InstallPrompts: %v", err)
 	}
 
-	// Overwrite an arbitrary installed prompt with a wrong hash stamp.
-	// This mirrors what would happen if the binary's embedded version
-	// of pm-template advanced past the on-disk copy.
+	// Overwrite an arbitrary installed prompt with an out-of-date but
+	// otherwise well-formed stamp: the recorded hash matches the on-disk
+	// body (the file was NOT hand-edited) and simply predates the current
+	// embed. This is the mg-ec77 shape — a stale shipped template — and it
+	// must classify as "stale" (install-fixable), not "edited". A v0 stamp
+	// records one hash for both embed and body, so the recorded hash must
+	// equal contentHash(body) for the body to read as untouched; an
+	// all-zeros hash would instead look hand-edited (mg-04ab).
 	mayorPath := filepath.Join(tmpHome, ".pogo", "agents", "mayor.md")
-	stale := "<!-- pogo-prompt-hash: 0000000000000000000000000000000000000000000000000000000000000000 -->\n# Old mayor prompt\n"
+	oldBody := "# Old mayor prompt\n"
+	oldHash := contentHash([]byte(oldBody))
+	stale := "<!-- pogo-prompt-hash: " + oldHash + " -->\n" + oldBody
 	if err := os.WriteFile(mayorPath, []byte(stale), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -1302,6 +1309,119 @@ func TestCheckPromptDriftDetectsMissingAndUnstamped(t *testing.T) {
 	if reasons[filepath.Join("pm", "pm-template.md")] != "unstamped" {
 		t.Errorf("pm/pm-template.md reason=%q, want %q",
 			reasons[filepath.Join("pm", "pm-template.md")], "unstamped")
+	}
+}
+
+// driftReasonFor returns the Reason CheckPromptDrift reports for rel, or ""
+// if rel is not in the drift set.
+func driftReasonFor(t *testing.T, rel string) string {
+	t.Helper()
+	drift, err := CheckPromptDrift()
+	if err != nil {
+		t.Fatalf("CheckPromptDrift: %v", err)
+	}
+	for _, d := range drift {
+		if d.Path == rel {
+			return d.Reason
+		}
+	}
+	return ""
+}
+
+// TestCheckPromptDriftEditedVsStaleRemediesWork is the mg-04ab acceptance test.
+// It constructs BOTH drift states an advanced embed can produce, asserts they
+// classify apart, and — the actual bar — RUNS the advised remedy for each and
+// proves the file is no longer stale afterward. The pre-fix code labelled both
+// "stale" and advised 'pogo agent prompt install' for both; for the hand-edited
+// canonical that advice is a silent no-op (install declines, writes .dist), so a
+// label-only test would reproduce the bug exactly.
+func TestCheckPromptDriftEditedVsStaleRemediesWork(t *testing.T) {
+	origHome := os.Getenv("HOME")
+	tmpHome := t.TempDir()
+	os.Setenv("HOME", tmpHome)
+	defer os.Setenv("HOME", origHome)
+
+	if _, err := InstallPrompts(InstallOpts{}); err != nil {
+		t.Fatalf("InstallPrompts: %v", err)
+	}
+	// A healthy install must not report stale — the check must be able to
+	// fail, not just always pass.
+	if drift := driftReasonFor(t, "mayor.md"); drift != "" {
+		t.Fatalf("healthy install reported mayor.md as %q, want no drift", drift)
+	}
+
+	agentsDir := filepath.Join(tmpHome, ".pogo", "agents")
+	wrongEmbed := strings.Repeat("0", 64)
+
+	// --- State (a): shipped template moved, canonical NOT hand-edited. ---
+	// On-disk stamp records an old embed hash but a body hash that still
+	// matches the on-disk body, i.e. the file was not touched by a human.
+	stalePath := filepath.Join(agentsDir, "mayor.md")
+	staleBody := "# Old shipped mayor prompt\n"
+	staleBodyHash := contentHash([]byte(staleBody))
+	staleStamp := "<!-- pogo-prompt: embed=sha256:" + wrongEmbed + " body=sha256:" + staleBodyHash + " -->\n"
+	if err := os.WriteFile(stalePath, []byte(staleStamp+staleBody), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// --- State (b): canonical hand-edited AND embed moved. ---
+	// Old embed hash, recorded body hash that no longer matches the (edited)
+	// on-disk body. This is the state where 'install' declines.
+	editedRel := filepath.Join("pm", "pm-template.md")
+	editedPath := filepath.Join(agentsDir, editedRel)
+	recordedBody := "# original shipped pm template\n"
+	recordedBodyHash := contentHash([]byte(recordedBody))
+	editedBody := "# original shipped pm template\nDaniel's local customization line.\n"
+	editedStamp := "<!-- pogo-prompt: embed=sha256:" + wrongEmbed + " body=sha256:" + recordedBodyHash + " -->\n"
+	if err := os.WriteFile(editedPath, []byte(editedStamp+editedBody), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Both classify apart under the same check.
+	if got := driftReasonFor(t, "mayor.md"); got != "stale" {
+		t.Errorf("template-moved canonical: reason=%q, want %q", got, "stale")
+	}
+	if got := driftReasonFor(t, editedRel); got != "edited" {
+		t.Errorf("hand-edited canonical: reason=%q, want %q", got, "edited")
+	}
+	if DriftInstallFixable("stale") != true || DriftInstallFixable("edited") != false {
+		t.Fatalf("DriftInstallFixable mapping wrong: stale=%v edited=%v",
+			DriftInstallFixable("stale"), DriftInstallFixable("edited"))
+	}
+
+	// --- Remedy for (a): 'pogo agent prompt install'. Must actually fix it. ---
+	if _, err := InstallPrompts(InstallOpts{}); err != nil {
+		t.Fatalf("remedy install: %v", err)
+	}
+	if got := driftReasonFor(t, "mayor.md"); got != "" {
+		t.Errorf("after 'pogo agent prompt install', mayor.md still drifted as %q; the remedy must clear it", got)
+	}
+
+	// The SAME install run must NOT have cleared the edited canonical — it
+	// declines and writes the sidecar instead. This is the trap the old code
+	// walked into: install exits 0, and the edited file is still stale.
+	if got := driftReasonFor(t, editedRel); got != "edited" {
+		t.Fatalf("install unexpectedly changed edited canonical drift to %q; expected it to still be %q", got, "edited")
+	}
+	distPath := editedPath + ".dist"
+	if _, err := os.Stat(distPath); err != nil {
+		t.Fatalf("install should have written the .dist sidecar for the edited canonical: %v", err)
+	}
+
+	// --- Remedy for (b): reconcile <name> against <name>.dist. ---
+	// The doctor advice names the .dist sidecar; adopting it (one valid
+	// reconciliation) is a runnable stand-in for the human merge. After it,
+	// the canonical carries the current embed stamp and is no longer stale.
+	distData, err := os.ReadFile(distPath)
+	if err != nil {
+		t.Fatalf("read .dist: %v", err)
+	}
+	if err := os.WriteFile(editedPath, distData, 0644); err != nil {
+		t.Fatalf("reconcile (adopt .dist): %v", err)
+	}
+	_ = os.Remove(distPath)
+	if got := driftReasonFor(t, editedRel); got != "" {
+		t.Errorf("after reconciling %s against its .dist, it still drifted as %q; the advised remedy must clear it", editedRel, got)
 	}
 }
 
