@@ -12,6 +12,36 @@ is the curated, human-readable summary kept in sync at each release cut.
 
 ### Added
 
+- **`polecat-architect` must MEASURE any predicate its verdict proposes
+  reusing or scoping by — the count AND whether the population is stationary
+  (mg-d6ec).** A verdict that reuses an existing predicate, rule, gate, or bar
+  now has to run it against the live population it would govern and report
+  what it matches, plus whether that population sits still or grows — and if
+  it grows, what grows it. No count means saying so and marking the
+  recommendation provisional. The `measured` field in the advisory result JSON
+  is where it lands, as `unchecked` is for the honest-limits rule.
+
+  **Looking finds a member; only counting finds the population.** Reading
+  every call site is not a substitute, and it is the substitute the model
+  reaches for — reading is what produces the verdict, and counting is a
+  separate act that nothing else forces. The rule ships without an escape
+  hatch on purpose: all three failures behind it were committed by agents who
+  would each have said they were being careful.
+
+  Both halves are required because they argue for different fixes. "32 of 63"
+  and "32 of 63, growing ~3 per dispatch" are not the same finding: the second
+  rules out scoping-by-enumeration entirely, because a fix scoped to a
+  snapshot chases a target our own dispatch rate moves. A count without
+  stationarity can still recommend the wrong fix confidently.
+
+  It binds the **template** rather than crew prompts by ruling: a template is
+  instantiated per verdict, fresh, while a crew prompt is read once at boot
+  and then competes with everything else in a multi-hour context. And the
+  polecat is the only agent that rules and then **acts** on its own ruling —
+  the mayor and the standing architect are structurally barred from
+  implementing their own verdicts, which leaves a counter downstream of every
+  ruling they make. The polecat has none; that gap is what this fills.
+
 - **The mayor routes dispatch on the work item's `type` field
   (mg-7150).** `type=design` dispatches `--template=polecat-architect`,
   `type=qa` dispatches `--template=polecat-qa`, everything else gets the

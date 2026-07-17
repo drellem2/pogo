@@ -3691,6 +3691,104 @@ func TestArchitectTemplateNoticesRatherThanRules(t *testing.T) {
 	}
 }
 
+// TestArchitectTemplateRequiresMeasuringReusedPredicates pins the counting rule
+// (mg-d6ec): a verdict that proposes REUSING or SCOPING BY an existing
+// predicate must MEASURE it against the population it would govern, report the
+// count, and state whether that population is stationary.
+//
+// The rule is not speculative. On 2026-07-17 three agents made the identical
+// error inside one hour, each holding different advantages: a polecat-architect
+// read every call site and was right about all of it, then recommended a
+// predicate matching 0 of the 14 queued items; the mayor caught that, then
+// wrote an acceptance bar already satisfied 9x that day; the standing architect
+// scoped a fix "for the whole class at once" that covered 32 of 63 nested repos
+// — a count that was 67 fifteen minutes later, because dispatching polecats is
+// what grows it.
+//
+// The architect's own conclusion, ruling on a failure it had just committed:
+// "Fresh context wasn't the variable. The polecat and I failed the same way
+// because reading is what produces the verdict and counting is a separate act
+// that nothing forces." Hence the rule binds the VERDICT, not the author, and
+// hence reading-every-call-site is named as the substitute rather than left to
+// be inferred — it is the one the model reaches for.
+//
+// Both halves are load-bearing. "32 of 63" and "32 of 63, growing ~3 per
+// dispatch" argue for DIFFERENT fixes: the second rules out scoping-by-
+// enumeration entirely. A count without stationarity can still recommend the
+// wrong fix confidently, so the template must ask for both.
+//
+// This lands on the template and not on crew/architect.md or mayor.md by
+// deliberate ruling: a template binds because dispatch instantiates it, per
+// verdict, fresh; a crew prompt is read once at boot and then competes with
+// everything else in a multi-hour context. The polecat is also the only agent
+// that rules and then ACTS on its own ruling — mayor and architect are
+// structurally forbidden from implementing their own verdicts, which guarantees
+// a counter downstream of every ruling they make. The polecat has none.
+//
+// If the wording changes, update this test deliberately. In particular do NOT
+// let the rule acquire an escape hatch ("consider measuring", "where
+// practical") — all three failures above were committed by agents who would
+// each have said they were being careful, and a rule with an escape hatch is a
+// rule that reports PASS.
+func TestArchitectTemplateRequiresMeasuringReusedPredicates(t *testing.T) {
+	data, err := defaultPrompts.ReadFile("prompts/templates/polecat-architect.md")
+	if err != nil {
+		t.Fatalf("read polecat-architect.md: %v", err)
+	}
+	body := string(data)
+
+	for _, want := range []string{
+		// The line that names why reading doesn't produce the count.
+		"Looking finds a member. Only counting finds the population.",
+		// The rule's two mandatory halves.
+		"MEASURE it against the live population it would govern",
+		"Whether that population is stationary",
+		"name what moves it",
+		// The substitute the model will reach for, named so it can't be
+		// reached for silently.
+		"Reading every call site is not a substitute",
+		"Counting is a **separate act**",
+		// The out, which must be explicit rather than silent.
+		"mark the recommendation provisional",
+		// No escape hatch.
+		"a rule with an escape hatch is a rule that reports PASS",
+		// Stationarity changes the recommendation rather than refining it.
+		"argue for **different fixes**",
+		"can still recommend the wrong fix",
+		// Provenance: the rule arrives with its own falsification attached,
+		// which is what makes it hard to wave through as boilerplate.
+		"an architect who had just failed it",
+		"0 of the 14 items",
+		"already satisfied 9×",
+		"63 nested repos, the fix covering 32",
+		"67, not 63",
+		// Why the verdict and not the author.
+		"counting is a separate act that nothing forces",
+		// Why the polecat and not the crew.
+		"Judging doesn't touch the population; acting does.",
+		"rules and then ACTS on your own ruling",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("polecat-architect.md: missing measure-the-population rule %q", want)
+		}
+	}
+
+	// The rule needs somewhere to LAND in the machine-readable verdict, or it
+	// stays prose the architect can agree with and not do. `measured` is to
+	// this rule what `unchecked` is to the honest-limits rule.
+	if !strings.Contains(body, `"measured"`) {
+		t.Error("polecat-architect.md: advisory result JSON must carry a `measured` field for the count + stationarity")
+	}
+
+	// The escape hatches the ticket explicitly refused. These are the exact
+	// softenings a well-meaning edit reaches for.
+	for _, hatch := range []string{"consider measuring", "where practical"} {
+		if strings.Contains(strings.ToLower(body), hatch) {
+			t.Errorf("polecat-architect.md: the counting rule must not be weakened to %q", hatch)
+		}
+	}
+}
+
 // TestArchitectTemplateDefersPRReviewToReviewTemplate pins the non-duplication
 // boundary that made this template shippable at all (mg-564c; the question
 // mg-abea's evidence raised).
