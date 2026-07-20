@@ -150,8 +150,12 @@ func TestVerifyStartAndRenudge_QueryErrorSkips(t *testing.T) {
 }
 
 // TestVerifyStartAndRenudge_NoWorkItemIsNoop: an agent with no work item id has
-// no hard signal to gate on, so the watcher is a no-op and never consults the
-// verifier.
+// no hard signal to gate on, so the watcher never consults the verifier and
+// never touches the PTY.
+//
+// This asserts only that the RECOVERY is absent, which is correct. It is not a
+// license for the decline to be silent — that silence was mg-2437, and
+// startverify_decline_test.go asserts the decline now announces itself.
 func TestVerifyStartAndRenudge_NoWorkItemIsNoop(t *testing.T) {
 	a, readAll, _ := newRenudgeTestAgent(t, "")
 	verifier, count := countingVerifier([]verifyCall{{started: false}})

@@ -1485,7 +1485,7 @@ A --body-file that cannot be read is an error, never an empty body.`,
 	cmdAgentSpawnPolecat.Flags().StringVar(&spawnPolecatTask, "task", "", "Work item title ({{.Task}})")
 	cmdAgentSpawnPolecat.Flags().StringVar(&spawnPolecatBody, "body", "", "Work item body ({{.Body}}); mutually exclusive with --body-file")
 	cmdAgentSpawnPolecat.Flags().StringVar(&spawnPolecatBodyFile, "body-file", "", "Read the work item body verbatim from a file (\"-\" for stdin); mutually exclusive with --body")
-	cmdAgentSpawnPolecat.Flags().StringVar(&spawnPolecatId, "id", "", "Work item ID ({{.Id}})")
+	cmdAgentSpawnPolecat.Flags().StringVar(&spawnPolecatId, "id", "", "Work item ID ({{.Id}}); omitting it forfeits start-verification — pogod cannot detect or auto-recover a failed start without a claim signal (mg-2437)")
 	cmdAgentSpawnPolecat.Flags().StringVar(&spawnPolecatRepo, "repo", "", "Target repository path ({{.Repo}})")
 	cmdAgentSpawnPolecat.Flags().StringVar(&spawnPolecatBranch, "branch", "", "Target branch for refinery submit ({{.Branch}})")
 	cmdAgentSpawnPolecat.Flags().StringSliceVarP(&spawnPolecatEnv, "env", "e", nil, "Additional environment variables (KEY=VALUE)")

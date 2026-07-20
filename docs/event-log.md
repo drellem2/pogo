@@ -455,6 +455,21 @@ pogod's post-spawn start-verification watcher ([startverify.go](../internal/agen
 {"schema_version":1,"timestamp":"2026-07-14T00:05:00.000000000Z","event_type":"auto_renudge","agent":"pogod","details":{"to":"cat-feb3","work_item_id":"mg-feb3","attempt":1,"max_attempts":3,"reason":"work_item_unclaimed"}}
 ```
 
+#### `agent_unwatched`
+
+pogod's post-spawn start-verification watcher ([startverify.go](../internal/agent/startverify.go), mg-2437) **declined to watch** a freshly spawned polecat, so that spawn has no `auto_renudge` recovery at all. The watcher gates on the HARD started-signal — the agent's mg work item leaving `available/` — and a spawn that carries no work item id gives it nothing to gate on. `--no-worktree` in-place dispatch is exactly the shape that commonly carries no work item, and `--id` is optional, so that dispatch shape had a *structurally absent* recovery net rather than a degraded one: a failure to start, from any cause, went unrecovered until a human or the mayor's stall-watch noticed. Nothing reported it. This event (plus a matching `UNWATCHED` log line naming the agent and the `--id` remedy) makes the absence audible.
+
+The decline itself is correct and unchanged — without a claim signal there is no hard started-signal, and substituting an output-quiescence heuristic would reproduce the false-idle bug the watcher exists to recover (see `auto_renudge` above). Crew agents never carry a work item by design and are exempt, so this event always concerns a polecat. Its presence is the marker to check first when a polecat sat unstarted and no `auto_renudge` appears in the log. Additive — no `schema_version` bump.
+
+- **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent` (always `"pogod"`), `details`
+- **`details` fields:**
+  - `to` (string, required): the unwatched agent's identity, e.g. `"cat-2437"`
+  - `reason` (string, required): which structural gap applies — `"no_work_item_id"` (this dispatch had no `--id`; re-dispatch with one to get start-verification) or `"no_start_verifier"` (nothing is wired on this daemon, so *no* spawn gets recovery)
+
+```json
+{"schema_version":1,"timestamp":"2026-07-21T00:05:00.000000000Z","event_type":"agent_unwatched","agent":"pogod","details":{"to":"cat-2437","reason":"no_work_item_id"}}
+```
+
 ## Worked example: a polecat merge cycle
 
 The lines below show the canonical event sequence for a successful polecat run. Times are illustrative.

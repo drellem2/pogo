@@ -93,16 +93,23 @@ func (r *Registry) startVerifyMaxAttemptsOrDefault() int {
 // re-delivers a bare submit terminator to flush a paste-buffered kickoff. It
 // runs on the initial-nudge goroutine after the kickoff nudge is delivered.
 //
-// It is a no-op — returning without touching the PTY — when no start verifier is
-// wired (bare registry / unit tests) or the agent carries no work item id
-// (crew agents, bare spawns): there is no hard signal to gate on, so the initial
-// nudge stands on its own. The renudge is a bare CR (a.Nudge("") writes only the
+// It declines to watch — returning without touching the PTY — when no start
+// verifier is wired (bare registry / unit tests) or the agent carries no work
+// item id (crew agents, bare spawns): there is no hard signal to gate on, so
+// the initial nudge stands on its own. For a POLECAT that decline is announced
+// loudly by reportUnwatched; it used to be silent, which is mg-2437. The
+// renudge is a bare CR (a.Nudge("") writes only the
 // provider's SubmitTerminator), the payload least likely to corrupt a working
 // agent's input, and it is delivered ONLY while the item is still provably
 // unclaimed — never on a quiescence heuristic (see the package doc).
 func (r *Registry) verifyStartAndRenudge(a *Agent) {
 	verifier := r.getStartVerifier()
 	if verifier == nil || a.WorkItemID == "" {
+		reason := reasonNoWorkItemID
+		if verifier == nil {
+			reason = reasonNoStartVerifier
+		}
+		reportUnwatched(a, reason)
 		return
 	}
 
@@ -142,6 +149,65 @@ func (r *Registry) verifyStartAndRenudge(a *Agent) {
 		}
 		emitAutoRenudge(a, attempt, maxAttempts)
 	}
+}
+
+// Decline reasons reported by reportUnwatched, recorded as the `reason` detail
+// on the agent_unwatched event so an operator can tell a per-dispatch gap ("this
+// spawn had no --id") from a daemon-wide one ("nothing is wired to recover any
+// spawn").
+const (
+	reasonNoWorkItemID    = "no_work_item_id"
+	reasonNoStartVerifier = "no_start_verifier"
+)
+
+// reportUnwatched announces that a freshly spawned POLECAT will get no
+// start-verification at all — mg-2437.
+//
+// The gap it makes visible: `--no-worktree` in-place dispatch is exactly the
+// shape documented as commonly carrying no work item, and `--id` is optional
+// (cmd/pogo/main.go). Such a spawn reached the early return above and got no
+// started-verifier — not a degraded one, a structurally absent one. If it failed
+// to start, for any cause, nothing automatically recovered it; the only rescue
+// was a human or the mayor's stall-watch happening to notice. Nothing said so.
+//
+// This does not close the hole — declining is still correct, because without a
+// claim signal there is no HARD started-signal to gate on, and the package doc
+// above explains at length why substituting an output-quiescence heuristic would
+// reproduce the very false-idle bug the watcher exists to recover. It makes the
+// hole audible, which is the prerequisite for anyone noticing the next failure
+// on this path. Same loud-decline shape as the prompt-sync decline in mg-f86c.
+//
+// It reports through BOTH a log line and an event on purpose: this package's own
+// history is that a per-spawn log line alone stayed invisible for the entire #76
+// sentinel episode (mg-ce4c), which is why the renudge emits an event too. A
+// recovery net that is structurally absent warrants at least that much.
+//
+// Crew agents are deliberately exempt. They never carry a work item by design
+// and are long-lived, respawned and nudged on their own cycle — alarming on
+// every crew spawn would be noise that trains an operator to skip the line that
+// matters.
+func reportUnwatched(a *Agent, reason string) {
+	if a.Type != TypePolecat {
+		return
+	}
+
+	switch reason {
+	case reasonNoStartVerifier:
+		log.Printf("agent %s: UNWATCHED — no start verifier is wired, so no spawn on this daemon gets start-verification or auto-renudge; a failure to start will NOT be automatically recovered",
+			a.Name)
+	default:
+		log.Printf("agent %s: UNWATCHED — spawned with no work item id, so there is no claim signal to gate on and NO auto-renudge will recover a failed start; re-dispatch with --id <work-item> to get start-verification",
+			a.Name)
+	}
+
+	events.Emit(context.Background(), events.Event{
+		EventType: "agent_unwatched",
+		Agent:     "pogod",
+		Details: map[string]any{
+			"to":     a.eventAgent(),
+			"reason": reason,
+		},
+	})
 }
 
 // emitAutoRenudge records an auto_renudge event for one post-spawn recovery
