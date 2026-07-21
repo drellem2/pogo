@@ -6,10 +6,13 @@
 #
 # This is the EARLY half of the check. It fails while the message is still
 # cheap to fix, but it protects only people who installed it, and --no-verify
-# walks straight past it. The guarantee lives in the refinery, which runs the
-# same detector on every branch it merges — see
-# internal/refinery/closingref_gate.go. If you skip this hook, the refinery
-# still catches it; you just find out after pushing.
+# walks straight past it. The LATE half is the refinery, which runs the same
+# detector on every branch it merges — see internal/refinery/closingref_gate.go.
+#
+# That late half is deploy-gated, and the condition matters: the gate is tracked
+# code but executes inside pogod, so it catches anything only once the RUNNING
+# pogod is past 4866a26. Before that deploy, skipping this hook means nothing
+# checks at all; after it, you just find out after pushing instead of before.
 
 set -e
 
@@ -79,7 +82,11 @@ source) (cd "$repo_root" && go run ./cmd/pogo check-commit-body "$msg_file") ;;
     echo "commit-msg:   This is a DEPLOY-STATE problem, not a problem with your commit message." >&2
     echo "commit-msg:   A hazardous body — a closing keyword next to an issue ref, including" >&2
     echo "commit-msg:   across a line wrap — would pass right now too. Nothing was checked." >&2
-    echo "commit-msg:   The refinery runs the same detector on merge and still gates it there." >&2
+    echo "commit-msg:   Do NOT assume the refinery will catch it either. It runs the same" >&2
+    echo "commit-msg:   detector (internal/refinery/closingref_gate.go), but from inside pogod," >&2
+    echo "commit-msg:   so it gates merges only once the RUNNING pogod is past 4866a26. The" >&2
+    echo "commit-msg:   probe failures above are evidence that this deploy is stale, so treat" >&2
+    echo "commit-msg:   the later catch as UNPROVEN and check the body yourself." >&2
     exit 0
     ;;
 esac
