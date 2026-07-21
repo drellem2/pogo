@@ -14,17 +14,74 @@
 set -e
 
 msg_file="$1"
-
-# Prefer a built binary, then one on PATH, then build from source. Never skip:
-# a check that silently no-ops when the binary is missing reports "clean" for
-# the exact commits nobody verified.
 repo_root=$(git rev-parse --show-toplevel)
-if [ -x "$repo_root/bin/pogo" ]; then
-    "$repo_root/bin/pogo" check-commit-body "$msg_file"
-elif command -v pogo >/dev/null 2>&1; then
-    pogo check-commit-body "$msg_file"
-else
-    (cd "$repo_root" && go run ./cmd/pogo check-commit-body "$msg_file")
+
+# Route selection probes CAPABILITY, not PRESENCE (mg-d1f7).
+#
+# The original version asked `command -v pogo` and stopped there. A `pogo` was
+# on PATH, so that arm won — but it was built at 249f349 (2026-07-17), before
+# check-commit-body existed, so every commit died on `unknown command`. The
+# working `go run` arm below it was never reached. Benign bodies and hazardous
+# bodies failed identically, which is the signature of a gate broken by its own
+# dependency rather than one catching bad input.
+#
+# The underlying split: a TRACKED hook goes live the instant the merge lands,
+# while the CLI it calls goes live only on deploy. Anything that couples a
+# tracked file to compiled behaviour is broken in that window. Asking whether
+# the resolved binary actually HAS the subcommand closes it — a stale binary
+# now falls through to source, and the gate self-activates with no redeploy.
+#
+# `<candidate> check-commit-body --help` is the probe: cobra exits 0 when the
+# command exists and 1 (`unknown command`) when it does not. It cannot be
+# confused with a real finding, which also exits 1 — same code, so the probe
+# has to be a separate, side-effect-free invocation.
+checker=
+if [ -x "$repo_root/bin/pogo" ] &&
+    "$repo_root/bin/pogo" check-commit-body --help >/dev/null 2>&1; then
+    checker=bin
+elif command -v pogo >/dev/null 2>&1 &&
+    pogo check-commit-body --help >/dev/null 2>&1; then
+    checker=path
+elif (cd "$repo_root" && go run ./cmd/pogo check-commit-body --help) >/dev/null 2>&1; then
+    # Slowest route by a wide margin: the probe and the check are two separate
+    # `go run` invocations, ~1s together once the build cache is warm (~3s
+    # cold). Live with it — it is the arm that makes the gate work before the
+    # deploy. `./build.sh` populates bin/pogo and takes the first arm instead,
+    # which is effectively free.
+    checker=source
 fi
+
+case "$checker" in
+bin) "$repo_root/bin/pogo" check-commit-body "$msg_file" ;;
+path) pogo check-commit-body "$msg_file" ;;
+source) (cd "$repo_root" && go run ./cmd/pogo check-commit-body "$msg_file") ;;
+*)
+    # Degrade LOUDLY and PASS. A gate whose dependency is missing must not
+    # block work; it must say so, and it must name the layer that is actually
+    # broken. The old failure said `unknown command "check-commit-body"`, which
+    # sends the reader to re-read their commit message — the one place the
+    # problem is not.
+    #
+    # Printed with `echo` and nothing else. This branch is what runs when the
+    # environment is missing things, so it must not itself depend on anything:
+    # an earlier draft used a `cat` heredoc and died with exit 127 on a PATH
+    # thin enough to lack /usr/bin — turning "your checker is missing" back
+    # into "your commit is blocked", the precise failure this arm removes.
+    # `echo` is a POSIX shell builtin and cannot go missing.
+    echo "commit-msg: WARNING — the closing-ref check did NOT run. This commit is UNVERIFIED." >&2
+    echo "commit-msg:" >&2
+    echo "commit-msg:   No route to \`pogo check-commit-body\` was found:" >&2
+    echo "commit-msg:     - built binary   — absent, or predates mg-2627 (fix: ./build.sh)" >&2
+    echo "commit-msg:                        looked for: $repo_root/bin/pogo" >&2
+    echo "commit-msg:     - pogo on PATH   — absent, or predates mg-2627 (fix: redeploy)" >&2
+    echo "commit-msg:     - from source    — no Go toolchain, or this tree lacks the command" >&2
+    echo "commit-msg:" >&2
+    echo "commit-msg:   This is a DEPLOY-STATE problem, not a problem with your commit message." >&2
+    echo "commit-msg:   A hazardous body — a closing keyword next to an issue ref, including" >&2
+    echo "commit-msg:   across a line wrap — would pass right now too. Nothing was checked." >&2
+    echo "commit-msg:   The refinery runs the same detector on merge and still gates it there." >&2
+    exit 0
+    ;;
+esac
 
 echo "commit-msg: ok"
