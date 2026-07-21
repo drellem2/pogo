@@ -207,6 +207,21 @@ fi
 [ -f "$HOME/.pogo/agents/mayor.md" ]              && ok "mayor prompt present"               || hard "mayor.md missing"
 [ -f "$HOME/.pogo/agents/templates/polecat.md" ]  && ok "polecat template present"           || hard "templates/polecat.md missing"
 
+# Pin the coordinator's NAME to "mayor". mayor.md is mechanism (the file name
+# stays put), but the coordinator agent's name comes from [agents] coordinator
+# and defaults to DefaultCoordinatorName — "ringmaster", not "mayor". Without
+# this, every "mayor" the script names resolves as an ordinary crew agent and
+# is looked up at crew/mayor.md, which pogo init never scaffolds: `pogo agent
+# start mayor` fails with "prompt file not found" and the crew legs of the
+# suite (steps 3 and 8) can never run. Writing the config is also what enables
+# pogod's prompt refresh + crew auto-start, so this exercises the production
+# path rather than a config-less one no deployment uses.
+mkdir -p "$HOME/.config/pogo"
+cat > "$HOME/.config/pogo/config.toml" <<'EOF'
+[agents]
+coordinator = "mayor"
+EOF
+
 # -----------------------------------------------------------------------------
 # 3. Start pogod
 # -----------------------------------------------------------------------------
@@ -398,36 +413,64 @@ fi
 # -----------------------------------------------------------------------------
 step "8. crew crash → pogod respawns mayor"
 
-# Locate the mayor's PID. Prefer pgrep over the JSON output so we get the
-# actual leaf process (sleep, after fake-agent's exec) rather than the
-# (possibly wrong) cmd.Process.Pid recorded at spawn time.
-mayor_pid() {
-    pgrep -f "pogo-crew-mayor" 2>/dev/null | head -1
+# Locate the mayor's PID from pogod's own /agents output — the authoritative
+# source, and the only one that actually works.
+#
+# This used to `pgrep -f "pogo-crew-mayor"`, on the stated reasoning that it
+# found "the actual leaf process (sleep, after fake-agent's exec)". That is
+# backwards, and the lookup was dead: pogo-crew-<name> is a DISPLAY label
+# (agent.ProcessName) surfaced in `pogo agent list` and the process_name JSON
+# field. No process ever carries it in argv. fake-agent's `exec sleep 86400`
+# is what *destroys* the argv, not what creates the name — a live mayor's
+# command line is literally "sleep 86400", so `pgrep -f pogo-crew-mayor`
+# returns empty against a healthy fleet (measured: rc=1, mg-710c).
+#
+# Scope the pid to the named agent. The old fallback took `head -1` over the
+# whole document, which is whichever agent sorts first — often the step-6
+# polecat, not the mayor. That would kill the wrong process and then compare
+# the wrong pids.
+agent_pid() {
+    local pid
+    pid="$(http_get /agents 2>/dev/null \
+        | tr '{' '\n' \
+        | grep "\"name\"[[:space:]]*:[[:space:]]*\"$1\"" \
+        | grep -oE '"pid"[[:space:]]*:[[:space:]]*[0-9]+' \
+        | grep -oE '[0-9]+$' \
+        | head -1)"
+    # An agent that is not running (stopped, parked, never spawned) is still
+    # listed, but with pid 0. Never hand that back as a pid.
+    #
+    # This is load-bearing, not defensive dressing. 0 is not a process: to
+    # kill(2) it means "every process in the caller's process group". So
+    # `kill -0 0` SUCCEEDS, and `kill -9 0` would kill the test harness
+    # itself. A parked mayor returning 0 therefore satisfies every check
+    # below — non-empty, different from the old pid, and "alive" — and
+    # reports a dead agent as a successful respawn. That is the exact
+    # vacuous pass this test exists to not have; it was observed live by
+    # parking the mayor and watching step 8 go green (mg-710c).
+    [ -n "$pid" ] && [ "$pid" -gt 0 ] 2>/dev/null || return 0
+    printf '%s' "$pid"
 }
 
+mayor_pid() { agent_pid mayor; }
+
 MAYOR_PID="$(mayor_pid)"
-if [ -z "$MAYOR_PID" ]; then
-    # Fallback: parse the registry's recorded pid (whitespace-tolerant).
-    MAYOR_PID="$(pogo agent list --json 2>/dev/null \
-        | grep -oE '"pid"[[:space:]]*:[[:space:]]*[0-9]+' \
-        | head -1 \
-        | grep -oE '[0-9]+')"
-fi
 
 if [ -z "$MAYOR_PID" ]; then
     hard "could not find mayor PID for crash test"
+elif ! kill -0 "$MAYOR_PID" 2>/dev/null; then
+    # Precondition: the thing we are about to kill must actually be running.
+    # Without this, "it came back" is not a claim about respawn at all.
+    hard "mayor pid=$MAYOR_PID is not alive before the crash test"
 else
     note "killing mayor pid=$MAYOR_PID"
     kill -9 "$MAYOR_PID" 2>/dev/null || true
     # Give pogod's onExit + 2s backoff time to respawn.
     sleep 5
+    # Re-read through the same name-scoped lookup. No second, looser fallback
+    # here: an unscoped `head -1` would happily report some other agent's pid
+    # as "the mayor came back" and turn a real regression green.
     NEW_PID="$(mayor_pid)"
-    if [ -z "$NEW_PID" ]; then
-        NEW_PID="$(pogo agent list --json 2>/dev/null \
-            | grep -oE '"pid"[[:space:]]*:[[:space:]]*[0-9]+' \
-            | head -1 \
-            | grep -oE '[0-9]+')"
-    fi
     if [ -n "$NEW_PID" ] && [ "$NEW_PID" != "$MAYOR_PID" ] && kill -0 "$NEW_PID" 2>/dev/null; then
         ok "mayor respawned (was=$MAYOR_PID, now=$NEW_PID)"
     else

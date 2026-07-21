@@ -694,8 +694,21 @@ func NewRegistry(socketDir string) (*Registry, error) {
 	}, nil
 }
 
-// ProcessName returns the pgrep-discoverable process name for an agent.
+// ProcessName returns an agent's DISPLAY label.
 // Crew: pogo-crew-<name>, Polecat: pogo-cat-<name>
+//
+// This is NOT a process name and NOT discoverable with pgrep. Nothing sets it
+// on any process: agents are spawned as their harness command (claude, codex,
+// a test's fake-agent), and a harness that exec's — as fake-agent does with
+// `exec sleep 86400` — replaces even that argv. `pgrep -f pogo-crew-mayor`
+// against a live, healthy mayor matches nothing (measured, mg-710c).
+//
+// It is used for human-facing display (`pogo agent list`, `pogo agent info`),
+// as the process_name field in the /agents JSON, and injected into the agent's
+// environment as POGO_PROCESS_NAME. To find an agent's pid, ask pogod — the
+// registry's recorded pid via /agents is the authoritative source. Never grep
+// the process table for this string; it will always come back empty, and empty
+// reads as "the agent is gone" (mg-de08).
 func ProcessName(agentType AgentType, name string) string {
 	if agentType == TypeCrew {
 		return "pogo-crew-" + name
