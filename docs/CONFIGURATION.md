@@ -503,6 +503,23 @@ outward-facing and stays human-gated.
   unchanged set stays quiet until `renotify_after`. Neither extreme is safe:
   mailing every interval trains a human to filter the sender, but going
   permanently quiet after one notice is how #89 stayed open for four days.
+- **Routing (mg-b586).** Findings go to `notify_to`, a **fleet** mailbox
+  (`pm-pogo`) rather than `human`. The finding is "our gh-issue workflow's last
+  step did not run on carrier X" — a workflow failure the fleet chases, not a
+  decision a human can action better than the fleet can. The same reasoning that
+  set the cadence sets the recipient: a human mailed operational work he can
+  only forward back learns to filter the sender exactly as surely as one mailed
+  too often. It also keeps the mail contract intact — `human` gets urgent items
+  and one batched daily digest, and this class belongs in the digest.
+- **Escalation.** Once a **single** finding has persisted unbroken for
+  `escalate_after` (72h), the notice also copies `human`. At that point the news
+  is no longer the teardown miss but "the fleet is not clearing it", and that
+  one *is* a human's to know. Escalation copies rather than redirects — the
+  fleet still owns the remedy — and ages each finding separately, so a new miss
+  arriving cannot reset an older one's clock. The clock is in memory, so a pogod
+  restart restarts it; the daily fleet notice is unaffected. Disable escalation
+  with a negative duration (`escalate_after = "-1s"`); zero means "unset, use
+  the default".
 - **Arming.** The runner is skipped entirely when `gh` is not on PATH. Without
   it every lookup is indeterminate, and reporting an environment gap as a wall
   of findings would get the detector muted before the run that matters.
@@ -512,6 +529,9 @@ outward-facing and stays human-gated.
 enabled = true             # default true; skipped when `gh` is unavailable
 interval = "1h"            # coarse sample cadence (default 1h)
 renotify_after = "24h"     # unchanged findings re-mail after this (default 24h)
+notify_to = "pm-pogo"      # mailbox findings go to (default pm-pogo, a FLEET box)
+escalate_after = "72h"     # one unresolved finding also copies `human` after this
+                           # (default 72h; negative disables, zero means default)
 ```
 
 Exit status of `pogo check-teardown` is 0 when nothing is actionable and 1 when
