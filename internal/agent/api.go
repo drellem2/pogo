@@ -1345,6 +1345,22 @@ func emitPolecatSpawnFailed(spawnReq SpawnPolecatAPIRequest, status int, reason 
 // already exists" (gh #27). Both commands are best-effort; `git branch -D`
 // refuses to delete a branch still checked out in another worktree, so a
 // live polecat's branch is never at risk.
+//
+// This path deliberately KEEPS --force, unlike gitgc.RemoveWorktree, which
+// now refuses a worktree with uncommitted work (mg-ee02). The two call sites
+// want different answers because they describe different situations:
+//
+//   - Here, the spawn FAILED. `git worktree add` created this tree moments
+//     ago and the agent process never ran in it, so there is no agent work to
+//     protect. Anything git reports as untracked is checkout residue. A dirty
+//     check here would refuse to clean up after a failed spawn and leak both
+//     the worktree and its branch — and a leaked branch makes the retry of
+//     the same work item fail with "branch already exists" (gh #27), which is
+//     the bug this function was written to fix.
+//   - There, the agent RAN. Whatever is in the tree is its output.
+//
+// The distinguishing fact is whether an agent ever executed in the worktree,
+// not the dirtiness of the tree, which is why the rule cannot be shared.
 func cleanupFailedPolecatSpawn(sourceRepo, worktreeDir, branchName string) {
 	if worktreeDir == "" {
 		return

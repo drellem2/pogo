@@ -2465,6 +2465,7 @@ The path is resolved to an absolute path and the git root is discovered automati
 
 	var gcRepo string
 	var gcApply bool
+	var gcForce bool
 	var cmdGC = &cobra.Command{
 		Use:   "gc",
 		Short: "Garbage-collect stale polecat branches and leaked worktrees",
@@ -2479,6 +2480,13 @@ It is the manual entry point to the same internal/gitgc logic pogod runs
 on startup and on a periodic ticker. Branches and worktrees of in-flight
 work items, of currently-running polecats, and anything that cannot be
 positively classified are always kept.
+
+A worktree holding uncommitted work is KEPT and reported, even when its work
+item has concluded — a concluded ticket means the work was accepted, not that
+the tree is empty, and uncommitted files are unmerged by definition (mg-ee02).
+Pass --force to reclaim those too; it DISCARDS the uncommitted work, so rescue
+anything you want first. A kept worktree keeps its branch checked out, so that
+branch is not deletable until the worktree goes.
 
 By default gc only reports what it would do; pass --apply to make changes.`,
 		Args: cobra.NoArgs,
@@ -2509,6 +2517,7 @@ By default gc only reports what it would do; pass --apply to make changes.`,
 				LivePolecats: live,
 				DryRun:       !gcApply,
 				PolecatsDir:  polecatsDir,
+				Force:        gcForce,
 			})
 			if err != nil {
 				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
@@ -2525,6 +2534,8 @@ By default gc only reports what it would do; pass --apply to make changes.`,
 	}
 	cmdGC.Flags().StringVar(&gcRepo, "repo", ".", "git repository to garbage-collect")
 	cmdGC.Flags().BoolVar(&gcApply, "apply", false, "actually delete (default: dry run)")
+	cmdGC.Flags().BoolVar(&gcForce, "force", false,
+		"also reclaim worktrees holding uncommitted work (DISCARDS that work)")
 
 	var rootCmd = &cobra.Command{
 		Use:     "pogo",
