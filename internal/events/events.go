@@ -53,10 +53,6 @@ type Event struct {
 }
 
 var (
-	pathOnce    sync.Once
-	defaultPath string
-	defaultErr  error
-
 	overrideMu   sync.RWMutex
 	overridePath string
 
@@ -64,13 +60,50 @@ var (
 	testPath     string
 )
 
-// DefaultLogPath returns events.log under the pogo state dir ($POGO_HOME,
-// default ~/.pogo).
-func DefaultLogPath() (string, error) {
-	pathOnce.Do(func() {
-		defaultPath = filepath.Join(config.PogoHome(), "events.log")
-	})
-	return defaultPath, defaultErr
+// LogPath returns the path callers should read from — and the same path Emit
+// appends to. It is the ONLY exported way to obtain an events-log path, and it
+// is test-safe by default: see resolvePath.
+//
+// It replaces the exported DefaultLogPath (mg-abbf). That function handed the
+// operator's LIVE log to any caller, test binary or not, which left the fix in
+// mg-3f1b holding only for callers that happened to go through resolvePath.
+// b399's recommendation #1 asked for the live path to be un-representable from
+// test code; that is now literally true — livePath is unexported, so no code
+// outside this package can name the live log at all, and inside this package it
+// is reachable only past resolvePath's testing.Testing() branch.
+//
+// The three former DefaultLogPath callers (pogo events list, pogo events tail,
+// and the modal hook's activity tracker) are all READERS of the live log in
+// production, and all three get exactly the old path there. Under a test binary
+// they now get this binary's sandbox instead of the operator's real audit log —
+// which is the point: a test that reaches one of them can no longer open
+// operator data, and assertions over it can no longer be flaked by the
+// operator's own traffic.
+//
+// Unexporting rather than adding a testing.Testing() clause to DefaultLogPath
+// (the ticket's option 1) was chosen because a sandboxing DefaultLogPath still
+// leaves an exported symbol whose NAME promises the live path and whose
+// behaviour silently differs by build kind — and, concretely, the mg-3f1b guard
+// in default_sandbox_test.go needs to name the live path in order to assert the
+// resolver does not return it. Keeping livePath as an unexported in-package
+// function serves that need without offering it to anyone else.
+func LogPath() (string, error) { return resolvePath() }
+
+// livePath returns events.log under the pogo state dir ($POGO_HOME, default
+// ~/.pogo) — the operator's real audit log.
+//
+// It deliberately does NOT memoise. The old DefaultLogPath froze this behind a
+// sync.Once, so the destination for the whole process was decided by whichever
+// caller happened to run first: under a test binary that re-points HOME or
+// POGO_HOME, a caller that ran before the re-point pinned the live log for
+// everyone after it, and a caller that ran after pinned a since-deleted
+// t.TempDir() for everyone else. That is what made a wrong path an
+// UNPREDICTABLE wrong path — b399 moved 131 log lines between two destinations
+// by skipping one test in one file, changing nothing else. filepath.Join over
+// an env lookup is nanoseconds; the memo bought nothing that justified a
+// process-lifetime frozen global.
+func livePath() string {
+	return filepath.Join(config.PogoHome(), "events.log")
 }
 
 // SetLogPathForTesting overrides the path used by Emit. Pass "" to restore the
@@ -117,10 +150,10 @@ func ResolveAgent(coordinator string) string {
 // The log is test-safe by DEFAULT, not by remembering (mg-da48, ratified at
 // ARCHITECTURE.md:433). Under a test binary the live ~/.pogo/events.log is not
 // reachable from this function at all: an empty override resolves to a
-// per-process sandbox, never to DefaultLogPath().
+// per-process sandbox, never to livePath().
 //
 // This package shipped the opposite — `if p != "" { return p }; return
-// DefaultLogPath()` — so the ZERO VALUE resolved to the live log and any test
+// DefaultLogPath()` (as the live path was then exported) — so the ZERO VALUE resolved to the live log and any test
 // that did not explicitly set an override wrote to the operator's real audit
 // log. events.log was polluted twice on that shape: mg-e06d (three weeks of
 // phantom schedule_removed records, documented as a permanent aggregate cutoff
@@ -153,7 +186,7 @@ func resolvePath() (string, error) {
 	if testing.Testing() {
 		return testDefaultLogPath(), nil
 	}
-	return DefaultLogPath()
+	return livePath(), nil
 }
 
 // testDefaultLogPath returns this test binary's private events log.

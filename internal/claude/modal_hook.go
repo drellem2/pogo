@@ -725,8 +725,8 @@ func defaultNotifyPM(agentID, matcherName string) {
 
 // --- activity tracker -------------------------------------------------------
 
-// nullTracker reports zero LastSeen for every agent. Used when DefaultLogPath
-// is unavailable (e.g. some test setups); also returned by dispatchEventsStale
+// nullTracker reports zero LastSeen for every agent. Used when the events log
+// path is unavailable (e.g. some test setups); also returned by dispatchEventsStale
 // to short-circuit firing on a missing tracker entry.
 type nullTracker struct{}
 
@@ -751,7 +751,7 @@ var (
 // the log in pure-library callers (tests, mg).
 func defaultActivityTracker() ActivityTracker {
 	defaultTrackerOnce.Do(func() {
-		path, err := events.DefaultLogPath()
+		path, err := events.LogPath()
 		if err != nil {
 			log.Printf("modal_hook: cannot resolve events log path: %v (events-stale gate disabled)", err)
 			defaultTracker = nullTracker{}

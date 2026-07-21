@@ -2999,7 +2999,7 @@ Examples:
 		Run: func(cmd *cobra.Command, args []string) {
 			path := listFile
 			if path == "" {
-				p, err := events.DefaultLogPath()
+				p, err := events.LogPath()
 				if err != nil {
 					cli.ExitWithError(jsonOutput, "could not resolve log path: "+err.Error(), cli.ExitError)
 				}
@@ -3059,7 +3059,7 @@ JSONL line so the output is machine-parseable.`,
 		Run: func(cmd *cobra.Command, args []string) {
 			path := tailFile
 			if path == "" {
-				p, err := events.DefaultLogPath()
+				p, err := events.LogPath()
 				if err != nil {
 					cli.ExitWithError(jsonOutput, "could not resolve log path: "+err.Error(), cli.ExitError)
 				}

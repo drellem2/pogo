@@ -27,10 +27,7 @@ func checkDefaultIsSandboxed(t *testing.T, resolve func() (string, error)) strin
 	if err != nil {
 		return "resolution returned an error: " + err.Error()
 	}
-	live, err := DefaultLogPath()
-	if err != nil {
-		t.Fatalf("DefaultLogPath: %v", err)
-	}
+	live := livePath()
 	if got == live {
 		return "resolved to the LIVE log " + live
 	}
@@ -55,7 +52,7 @@ func preFixResolvePath() (string, error) {
 	if p != "" {
 		return p, nil
 	}
-	return DefaultLogPath()
+	return livePath(), nil
 }
 
 // TestDefaultLogPathIsSandboxedUnderTest is the mg-3f1b regression guard.
@@ -63,8 +60,9 @@ func preFixResolvePath() (string, error) {
 // Before the fix, `internal/events` was the one store that never adopted the
 // default ratified at ARCHITECTURE.md:433 and implemented at
 // internal/agent/witness.go:196 (and deliberately copied to
-// internal/ghteardown/source.go:156): an empty override resolved to
-// DefaultLogPath(), so the zero value pointed at the operator's live audit log.
+// internal/ghteardown/source.go:156): an empty override resolved to the
+// then-exported DefaultLogPath(), so the zero value pointed at the operator's
+// live audit log.
 //
 // The POSITIVE CONTROL runs first, against the pre-fix resolver, and asserts
 // the check FAILS there. Only then is the real resolver's pass meaningful.
@@ -82,7 +80,7 @@ func TestDefaultLogPathIsSandboxedUnderTest(t *testing.T) {
 
 	// --- THE GUARD ---------------------------------------------------------
 	if reason := checkDefaultIsSandboxed(t, resolvePath); reason != "" {
-		live, _ := DefaultLogPath()
+		live := livePath()
 		t.Fatalf("REGRESSION (mg-3f1b): with no override set, events resolution %s; "+
 			"under a test binary the live log (%s) must not be reachable from resolvePath at all",
 			reason, live)
