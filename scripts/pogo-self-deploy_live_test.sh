@@ -284,6 +284,20 @@ export POGO_PORT="$PORT"
 # shellcheck source=/dev/null
 source "$REPO_ROOT/scripts/pogo-self-deploy"
 
+# assert_out_of_band (mg-1bbf) refuses a cmd_redeploy whose caller sits inside
+# pogod's process tree — and THIS SUITE IS ONE: it runs under test.sh, under an
+# agent pogod spawned. Every cmd_redeploy below drives the SANDBOX daemon on
+# $PORT with POGO_GOBIN=$SANDBOX/nobin and a fixture repo, and none of them
+# reaches the real launchctl or the real fleet, so the guard is neutered here,
+# once, in the open — alongside the running_rev override below and for the same
+# reason: a sandbox cannot honestly produce the state the real path demands.
+#
+# This is a SOURCE-level stub, which is exactly what a real invocation cannot
+# do. `pogo-self-deploy redeploy` runs main() -> cmd_redeploy with the real
+# function, and pogo-self-deploy_test.sh asserts that wiring is still in place —
+# so neutering it here cannot quietly neuter it there.
+assert_out_of_band() { :; }
+
 [ "$(base_url)" = "$URL" ] \
     && pass "driver resolves base_url to the sandbox daemon (not the live fleet)" \
     || fail "base_url is $(base_url), expected $URL — the test would be probing the WRONG daemon"

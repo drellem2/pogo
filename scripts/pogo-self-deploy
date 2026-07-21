@@ -31,6 +31,10 @@
 # It also must run OUT OF BAND — not as a descendant of pogod — because the
 # redeploy kickstart -k kills pogod's entire process tree. A human runs it
 # today; a healthy-launchd one-shot may run it later (mg-6afa sequencing).
+# That is ENFORCED, not merely asserted: assert_out_of_band refuses a caller
+# inside pogod's tree, on cmd_redeploy's first line (mg-1bbf). It was prose
+# alone until then — the one constraint in a script with sixteen refusal paths
+# that nothing checked.
 #
 # A redeploy PROVES THE DETECTOR BEFORE IT TRUSTS IT (do_prove, mg-bfe5). After
 # the build and before the kickstart, every run stands the live control up
@@ -117,6 +121,129 @@ json_num() { sed -n "s/.*\"$1\":\([0-9][0-9]*\).*/\1/p"; }
 json_bool() { sed -n "s/.*\"$1\":\([tf][a-z]*\).*/\1/p"; }
 
 base_url() { echo "http://127.0.0.1:${PORT}"; }
+
+# ---------------------------------------------------------------------------
+# Out-of-band guard (mg-1bbf)
+# ---------------------------------------------------------------------------
+# The header above has said "must run OUT OF BAND — not as a descendant of
+# pogod" since mg-6afa. Until this block, that was the ONE constraint in a
+# script with sixteen refusal paths that had no mechanism behind it: enforced
+# only by whether the caller read a 1800-line preamble.
+#
+# That is the wrong enforcement for this population. A human at a terminal
+# reading the header is plausible; an agent told "run the redeploy" is not —
+# and an agent is precisely who this forbids. Every crew agent and every polecat
+# is a pogod descendant, so the actor most likely to skip the prose is the actor
+# the prose exists to stop. On 2026-07-21 what stopped it was a mayor happening
+# to read the header and decline. Nothing else would have.
+#
+# The failure it prevents is unrecoverable and self-erasing: `kickstart -k`
+# kills pogod's entire process tree, so a descendant that gets this far kills
+# the fleet AND itself mid-run, with nobody left to report what happened.
+#
+# TWO independent signals, reported separately because they fail separately:
+#
+#   1. Process ancestry — the walk the header describes. Authoritative when the
+#      chain is intact.
+#   2. The POGO_AGENT_* environment marker pogod stamps on every agent it
+#      spawns. Load-bearing precisely where (1) goes blind: a detached or
+#      backgrounded grandchild whose intermediate parent has exited is
+#      REPARENTED to launchd, and an ancestry walk from there finds no pogod
+#      while the caller is still, in every way that matters, in the fleet.
+#
+# Deliberately NOT wired to `check`, which the usage block promises NEVER acts:
+# it is a read-only drift report, it is how the fleet notices it is stale, and
+# blinding the fleet to its own drift is not what this guard is for. The hazard
+# is exclusively `redeploy`, and that is where the guard sits — on cmd_redeploy's
+# first line, ahead of every other precondition, so no invocation reaches the
+# drain, the build, or the kickstart without passing it.
+#
+# There is no override flag, by design. A flag that lets the forbidden caller
+# proceed reduces this to the prose it replaces.
+
+# ps_parent PID — prints "PPID COMM" for PID, or nothing if PID is unknown.
+# The single seam onto the process table, isolated so the ancestry walk above it
+# can be exercised against a synthetic tree with no processes to spawn (and, in
+# particular, with no pogod to be a descendant of). Overridden wholesale by the
+# unit test; never called with anything but a numeric pid.
+ps_parent() {
+    ps -o ppid=,comm= -p "$1" 2>/dev/null | sed 's/^ *//'
+}
+
+# pogod_ancestor [PID] — walks up the parent chain from PID (default: this
+# process) and prints "PID COMM" of the first pogod ancestor. Returns 0 when one
+# is found, 1 when the walk reaches the root without seeing one.
+#
+# Matches on the basename of COMM: ps reports pogod as the absolute path it was
+# exec'd from (/Users/daniel/go/bin/pogod), which varies per machine and per
+# sandbox, while the basename does not.
+#
+# The depth cap is a termination guarantee, not a policy: this walk must not be
+# able to hang the deploy path even if the process table hands it a cycle.
+pogod_ancestor() {
+    local pid="${1:-$$}" depth=0 parent comm self=true
+    while [ "$depth" -lt 64 ]; do
+        depth=$((depth + 1))
+        # ps_parent yields this pid's PARENT and this pid's OWN comm, so the
+        # chain is walked by stepping to the parent and reading its comm on the
+        # next lap. The starting process is stepped over without being tested:
+        # the question is ancestry, not identity.
+        read -r parent comm <<<"$(ps_parent "$pid")"
+        if ! $self && [ -n "${comm:-}" ] && [ "$(basename "$comm")" = "pogod" ]; then
+            printf '%s %s' "$pid" "$comm"
+            return 0
+        fi
+        self=false
+        # Unknown pid, no parent, a non-numeric read, or the root: the chain
+        # ends here and it ended without a pogod in it.
+        case "${parent:-}" in ''|*[!0-9]*) return 1 ;; esac
+        [ "$parent" -gt 1 ] || return 1
+        pid="$parent"
+    done
+    return 1
+}
+
+# assert_out_of_band — refuse to redeploy from inside pogod's process tree.
+#
+# The message NAMES the remedy and not just the refusal, on purpose: an agent
+# that hits a bare "refused" will reasonably conclude the deploy is broken and
+# either escalate wrongly or start hunting for a way around the guard. The
+# redeploy it was asked to run is legitimate; it is the CALLER that is wrong,
+# and only saying so turns a dead end into a handoff.
+assert_out_of_band() {
+    local ancestor="" reason=""
+    if ancestor="$(pogod_ancestor)"; then
+        reason="this process is a descendant of pogod (pid ${ancestor%% *}, ${ancestor#* })"
+    elif [ -n "${POGO_AGENT_NAME:-}" ]; then
+        reason="this process is a pogod-spawned agent (POGO_AGENT_NAME=${POGO_AGENT_NAME}); its parent chain no longer shows pogod, which is what a detached or reparented agent looks like"
+    else
+        return 0
+    fi
+
+    err "refusing to redeploy: $reason"
+    cat >&2 <<EOF
+
+  A redeploy runs 'launchctl kickstart -k' on ${DAEMON_LABEL}, which kills
+  pogod's ENTIRE process tree. Run from inside that tree, it would kill the
+  fleet and this process along with it, mid-deploy, with nothing left running
+  to report what happened.
+
+  THE REDEPLOY IS LEGITIMATE. THE CALLER IS NOT.
+  It must be performed OUT OF BAND — from a process pogod did not spawn:
+
+    * Daniel, from his own terminal:   scripts/pogo-self-deploy redeploy
+    * a launchd one-shot outside pogod's job (mg-6afa sequencing)
+
+  If you are an agent and were asked to redeploy: you cannot, and no flag
+  changes that. Hand it back — mail 'human' that pogod is ready for an
+  out-of-band redeploy, and say which revision it is owed.
+
+  'scripts/pogo-self-deploy check' is safe from here and never acts; use it to
+  report the drift you were going to fix.
+
+EOF
+    exit 1
+}
 
 # ---------------------------------------------------------------------------
 # Mail-check post-check (mg-de08)
@@ -1541,6 +1668,12 @@ verify_running() {
 }
 
 cmd_redeploy() {
+    # FIRST, ahead of every other precondition (mg-1bbf). Not because it is the
+    # most likely refusal but because it is the only one whose failure mode is
+    # the fleet: everything below this line assumes the caller is allowed to
+    # kill pogod's process tree, and that assumption is checked here or nowhere.
+    assert_out_of_band
+
     # Resolve the macguffin `mg` to an absolute path up front. The redeploy's
     # entire alert path (mail_alert) and its orphan cleanup call `mg`; a redeploy
     # whose alerter cannot be resolved is a redeploy that cannot report its own

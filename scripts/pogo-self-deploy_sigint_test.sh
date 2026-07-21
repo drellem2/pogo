@@ -218,6 +218,13 @@ source "$REPO_ROOT/scripts/pogo-self-deploy"
 # foreign to the DR_REPO fixture, and a foreign stamp is now a refusal, which
 # would stop this run before it ever reached drain_wait).
 running_rev() { git -C "$DR_REPO" rev-parse HEAD 2>/dev/null; }
+# Likewise the out-of-band guard (mg-1bbf): this child is a descendant of the
+# pogod that spawned the agent running test.sh, so the real assert_out_of_band
+# would refuse before the drain window this control exists to interrupt. The
+# run is fully sandboxed (fixture repo, POGO_GOBIN=\$SANDBOX/nobin, sandbox
+# daemon) and never reaches launchctl. Source-level only — a real invocation
+# cannot stub anything, and pogo-self-deploy_test.sh pins the live wiring.
+assert_out_of_band() { :; }
 # The human hits Ctrl-C while the deploy waits for the fleet to quiesce. Model it
 # faithfully: reset THIS command-substitution child's INT to default first, so the
 # group signal kills the child SILENTLY — a child that inherited the driver's INT

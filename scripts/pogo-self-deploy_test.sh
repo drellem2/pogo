@@ -858,6 +858,158 @@ else
 fi
 rm -rf "$MG_T"
 
+# ---------------------------------------------------------------------------
+# Out-of-band guard: pogod_ancestor / assert_out_of_band (mg-1bbf)
+# ---------------------------------------------------------------------------
+# NOTHING HERE INVOKES THE REAL DEPLOY, and that is not fastidiousness. The
+# specimen this guard exists to refuse is a pogod descendant, and the test
+# runner IS one (test.sh runs under an agent, which pogod spawned). So the one
+# arm best placed to be tested by invocation is the arm that, if the guard is
+# broken, proceeds into `kickstart -k` and kills pogod, the fleet, and the test
+# process itself — a test whose failure mode erases the evidence and the tester.
+# Testing by invocation would only be safe if the guard already worked, which is
+# the thing not yet known. So ps_parent — the single seam onto the process
+# table — is replaced with a synthetic tree, and both arms are proved as
+# function calls that never enter cmd_redeploy.
+#
+# The synthetic tree is what makes the NEGATIVE arm real, too: a genuinely
+# detached process cannot be constructed from inside the fleet (anything this
+# test spawns is a descendant of it), so "proceeds past the check" is proved
+# against a chain that terminates at launchd with no pogod in it.
+
+# Two fixture trees. Format: "pid -> ppid comm", fed to a stubbed ps_parent.
+#   descendant:   900 (bash) <- 800 (claude) <- 700 (pogod) <- 1
+#   out-of-band:  900 (bash) <- 500 (login)  <- 400 (Terminal) <- 1
+OOB_TREE=""
+ps_parent() {
+    printf '%s\n' "$OOB_TREE" | while IFS= read -r row; do
+        case "$row" in "$1 "*) printf '%s' "${row#* }"; return 0 ;; esac
+    done
+}
+
+OOB_TREE='900 800 /bin/bash
+800 700 claude
+700 1 /Users/daniel/go/bin/pogod'
+ANC="$(pogod_ancestor 900)"
+if [ "$ANC" = "700 /Users/daniel/go/bin/pogod" ]; then
+    pass "pogod_ancestor (mg-1bbf): FINDS pogod two hops up and reports its pid and path ($ANC) — the guard can fire"
+else
+    fail "pogod_ancestor missed pogod in the descendant tree (got '$ANC') — a guard that cannot fire is the prose it replaced"
+fi
+
+# The absolute path is why the match is on the BASENAME: ps reports the exec
+# path, which differs per machine and per sandbox.
+OOB_TREE='900 800 /bin/bash
+800 700 claude
+700 1 /opt/pogo/sbin/pogod'
+pogod_ancestor 900 >/dev/null \
+    && pass "pogod_ancestor: matches on basename, so a pogod installed at any prefix is still recognised" \
+    || fail "pogod_ancestor missed a pogod at a non-default prefix — the match is path-dependent"
+
+# NEGATIVE ARM. A guard that refuses everything passes the arm above and breaks
+# the only path that works, so this one is not optional.
+OOB_TREE='900 500 /bin/bash
+500 400 login
+400 1 /System/.../Terminal'
+if pogod_ancestor 900 >/dev/null; then
+    fail "pogod_ancestor reported a pogod ancestor in a terminal-rooted chain — the guard refuses the ONLY caller that is allowed to run"
+else
+    pass "pogod_ancestor (mg-1bbf): a terminal-rooted chain (bash <- login <- Terminal <- launchd) walks to the root and finds NO pogod — Daniel's invocation proceeds"
+fi
+
+# A chain that dead-ends on an unreadable pid must terminate, and must terminate
+# as "no pogod found" — not hang, and not guess.
+OOB_TREE='900 800 /bin/bash'
+pogod_ancestor 900 >/dev/null \
+    && fail "pogod_ancestor claimed a pogod ancestor from a chain it could not read" \
+    || pass "pogod_ancestor: an unreadable parent ends the walk without claiming a pogod"
+
+# A cycle must not hang the deploy path.
+OOB_TREE='900 800 /bin/bash
+800 900 /bin/bash'
+pogod_ancestor 900 >/dev/null \
+    && fail "pogod_ancestor found a pogod in a cyclic chain" \
+    || pass "pogod_ancestor: a cyclic parent chain terminates (depth cap) instead of hanging the deploy"
+
+# --- assert_out_of_band: the refusal itself, in a subshell (it exits 1) ------
+# These trees are rooted at the REAL $$, because assert_out_of_band walks from
+# the live process rather than from a pid a caller hands it — that defaulting is
+# part of what is under test, so it is not stubbed away. $$ is stable inside the
+# subshells below (bash keeps the parent's value).
+# POGO_AGENT_NAME is unset explicitly wherever the ancestry arm is the one being
+# proved: this suite RUNS inside a pogod-spawned agent, so the marker is set for
+# real, and leaving it would let the env arm mask an ancestry walk that never
+# fired.
+DESC_TREE="$$ 800 /bin/bash
+800 700 claude
+700 1 /Users/daniel/go/bin/pogod"
+OOB_TREE="$DESC_TREE"
+OOB_ERR="$(mktemp)"
+( unset POGO_AGENT_NAME; assert_out_of_band 2>"$OOB_ERR" >/dev/null ); OOB_RC=$?
+if [ "$OOB_RC" = "1" ]; then
+    pass "assert_out_of_band (mg-1bbf): a pogod descendant is REFUSED with exit 1 — the seventeenth refusal path"
+else
+    fail "assert_out_of_band returned $OOB_RC for a pogod descendant — it did not refuse"
+fi
+grep -qi "descendant of pogod" "$OOB_ERR" \
+    && pass "assert_out_of_band: the refusal NAMES pogod as the reason" \
+    || fail "refusal does not name pogod: $(cat "$OOB_ERR")"
+grep -qi "OUT OF BAND" "$OOB_ERR" \
+    && pass "assert_out_of_band: the refusal states the out-of-band remedy" \
+    || fail "refusal does not state the remedy: $(cat "$OOB_ERR")"
+# An agent that reads only "refused" concludes the DEPLOY is broken and either
+# escalates wrongly or hunts for a way around the guard. The text has to say the
+# deploy is fine and the caller is not, and hand it somewhere.
+grep -q "THE REDEPLOY IS LEGITIMATE" "$OOB_ERR" \
+    && pass "assert_out_of_band: says the redeploy is legitimate and the CALLER is wrong — not a bare denial" \
+    || fail "refusal reads as 'the deploy is broken'"
+grep -q "mail 'human'" "$OOB_ERR" \
+    && pass "assert_out_of_band: names the handoff an agent should perform instead" \
+    || fail "refusal gives an agent no next action"
+rm -f "$OOB_ERR"
+
+# The reparenting hole the ancestry walk cannot see: a detached agent whose
+# intermediate parent exited is adopted by launchd, so the chain shows no pogod
+# while the caller is still inside the fleet. The env marker pogod stamps is
+# what still catches it.
+OOB_TREE="$$ 1 /bin/bash"
+OOB_ERR2="$(mktemp)"
+( export POGO_AGENT_NAME=polecat-dead-parent; assert_out_of_band 2>"$OOB_ERR2" >/dev/null ); OOB_RC2=$?
+if [ "$OOB_RC2" = "1" ] && grep -q "polecat-dead-parent" "$OOB_ERR2"; then
+    pass "assert_out_of_band (mg-1bbf): a REPARENTED agent (chain shows launchd, POGO_AGENT_NAME set) is still refused, and the refusal names the marker it fired on"
+else
+    fail "a reparented pogod-spawned agent walked past the guard (rc=$OOB_RC2) — detaching would be enough to evade it"
+fi
+rm -f "$OOB_ERR2"
+
+# NEGATIVE ARM, assembled: terminal-rooted chain AND no agent marker -> the
+# guard returns 0 and cmd_redeploy carries on to its real preconditions.
+OOB_TREE="$$ 500 /bin/bash
+500 400 login
+400 1 /System/.../Terminal"
+OOB_ERR3="$(mktemp)"
+( unset POGO_AGENT_NAME; assert_out_of_band 2>"$OOB_ERR3" >/dev/null ); OOB_RC3=$?
+if [ "$OOB_RC3" = "0" ] && [ ! -s "$OOB_ERR3" ]; then
+    pass "assert_out_of_band (mg-1bbf): Daniel's terminal invocation PROCEEDS past the check, silently — the one working path is not broken by the guard"
+else
+    fail "assert_out_of_band refused a legitimate out-of-band caller (rc=$OOB_RC3): $(cat "$OOB_ERR3")"
+fi
+rm -f "$OOB_ERR3"
+
+# The guard must sit on the path every redeploy takes — a check the real caller
+# routes around is the same non-mechanism as a comment. Asserted against the
+# source rather than by invocation, for the reason at the top of this section.
+grep -A6 '^cmd_redeploy() {' "$HERE/pogo-self-deploy" | grep -q 'assert_out_of_band' \
+    && pass "assert_out_of_band is called at the TOP of cmd_redeploy — on the entry path, ahead of drain/build/kickstart" \
+    || fail "assert_out_of_band is not wired into cmd_redeploy's entry — the guard exists but nothing reaches it"
+# ...and `check`, which never acts, must NOT be guarded: it is how the fleet
+# notices its own drift.
+sed -n '/^cmd_check() {/,/^}/p' "$HERE/pogo-self-deploy" | grep -q 'assert_out_of_band' \
+    && fail "the guard blinds 'check', which never acts — the fleet can no longer observe its own drift" \
+    || pass "'check' is deliberately unguarded: read-only, never acts, and is the fleet's only way to see it is stale"
+
+unset -f ps_parent
+
 echo ""
 PASS_COUNT=$(grep -c '^PASS:' "$RESULTS_FILE" 2>/dev/null || true)
 FAIL_COUNT=$(grep -c '^FAIL:' "$RESULTS_FILE" 2>/dev/null || true)
