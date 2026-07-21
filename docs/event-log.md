@@ -395,6 +395,33 @@ pogod's drift-check runner (mg-345b) sampled the `[reconcile]` mirrors on its co
 {"schema_version":1,"timestamp":"2026-07-17T16:45:00.000000000Z","event_type":"drift_watch_fired","agent":"pogod","details":{"drift_count":1,"mirror_names":["pogod"],"interval":"15m0s"}}
 ```
 
+#### `gh_teardown_watch_fired`
+
+pogod's gh-issue teardown detector (mg-6e57) sampled the `status=done` gh-issue carriers on its coarse interval and found at least one whose GitHub issue is still open, or whose state could not be established, so it mailed `human`. It exists because the workflow's last step can silently not run: mg-07ba reached `done, stage: merge` while drellem2/pogo#89 stayed OPEN for four days, and a carrier that completed its teardown is outwardly identical to one that skipped it. **Report-only** — it never closes an issue and never comments. Emitted once per sample that mailed; unchanged findings are re-raised only after `renotify_after`, so this event is not one-per-interval. See [CONFIGURATION.md](CONFIGURATION.md) §"The gh-issue teardown detector" and `internal/ghteardown`.
+
+- **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent` (always `"pogod"`), `details`
+- **`details` fields:**
+  - `miss_count` (int, required): done carriers whose issue is still open with no `gh-open:` declaration
+  - `indeterminate_count` (int, required): carriers whose issue state could NOT be established (failed `gh` lookup, unresolvable ref). These are **not** clean — an errored lookup and a closed issue are indistinguishable to a careless check, so they are counted separately and reported rather than assumed shut
+  - `declared_open_count` (int, required): carriers open on purpose per a `gh-open:` body line; reported but never mailed on their own
+  - `scanned` (int, required): how many done carriers were evaluated, so "0 findings" can be told apart from "0 carriers examined"
+  - `mail_error` (string, optional): present only when the notice to `human` could not be delivered; the event is still emitted so a detected miss is never lost to a down mail channel
+
+```json
+{"schema_version":1,"timestamp":"2026-07-21T01:15:00.000000000Z","event_type":"gh_teardown_watch_fired","agent":"pogod","details":{"miss_count":1,"indeterminate_count":0,"declared_open_count":1,"scanned":3}}
+```
+
+#### `gh_teardown_watch_error`
+
+The teardown detector could not READ the work-item store, so it audited nothing this sample. Emitted instead of `gh_teardown_watch_fired`, and deliberately not silent: an unreadable store and a clean scan both otherwise render as "no findings", and conflating them is how a detector goes quietly blind — the exact failure shape `internal/ghteardown` exists to catch, reproduced one level up.
+
+- **`details` fields:**
+  - `error` (string, required): why the store could not be read
+
+```json
+{"schema_version":1,"timestamp":"2026-07-21T01:15:00.000000000Z","event_type":"gh_teardown_watch_error","agent":"pogod","details":{"error":"listing done work items: mg --root ... : command not found"}}
+```
+
 #### `usage_limit_hit`
 
 pogod's modal watcher ([modal_hook.go](../internal/claude/modal_hook.go), gh drellem2/pogo #45) declared a **suspected** provider usage-limit hit for an agent: the rate-limit-options modal has been recently visible AND the agent's event log has been stale for longer than the usage-limit staleness gate (~5m, `UsageLimitSuspectStaleness`). This is a heuristic derived entirely from the existing event-staleness tracker — there is no provider quota/API probe. The ~5m gate is deliberately long because the marker text also appears in ordinary transcripts; a shorter gate would false-positive on an agent that merely prints the phrase. Emitted once per wedge; the paired `usage_limit_cleared` fires on recovery. Additive — no `schema_version` bump.
