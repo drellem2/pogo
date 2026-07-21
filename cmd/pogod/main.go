@@ -1425,8 +1425,13 @@ Flags:
 	// closed. mg-07ba reached `done, stage: merge` with the work genuinely
 	// finished and drellem2/pogo#89 sat OPEN for four days, because a carrier
 	// that completed its teardown and one that skipped it are indistinguishable
-	// from the outside. REPORT-ONLY: it mails `human` and never closes or
-	// comments — that stays human-gated.
+	// from the outside. REPORT-ONLY: it mails and never closes or comments —
+	// that stays human-gated.
+	//
+	// It reports to a FLEET mailbox (`pm-pogo` by default, mg-b586), because a
+	// teardown miss is a workflow failure the fleet chases, not a decision for a
+	// human; `human` is copied only once a finding has gone unresolved past
+	// escalate_after, when "the fleet is not handling this" is itself the news.
 	//
 	// Armed only when `gh` is actually available. Without it EVERY lookup is
 	// indeterminate, and the runner would faithfully report an environment gap
@@ -1445,9 +1450,12 @@ Flags:
 				Mail:          client.SendMGMail,
 				Interval:      cfg.GHTeardown.Interval,
 				RenotifyAfter: cfg.GHTeardown.RenotifyAfter,
+				NotifyTo:      cfg.GHTeardown.NotifyTo,
+				EscalateAfter: cfg.GHTeardown.EscalateAfter,
 			})
-			log.Printf("pogod: gh-issue teardown detector enabled (interval=%s renotify=%s, report-only)",
-				cfg.GHTeardown.Interval, cfg.GHTeardown.RenotifyAfter)
+			log.Printf("pogod: gh-issue teardown detector enabled (interval=%s renotify=%s notify_to=%s escalate_after=%s, report-only)",
+				cfg.GHTeardown.Interval, cfg.GHTeardown.RenotifyAfter,
+				cfg.GHTeardown.NotifyTo, cfg.GHTeardown.EscalateAfter)
 		}
 	}
 

@@ -429,7 +429,7 @@ pogod's drift-check runner (mg-345b) sampled the `[reconcile]` mirrors on its co
 
 #### `gh_teardown_watch_fired`
 
-pogod's gh-issue teardown detector (mg-6e57) sampled the `status=done` gh-issue carriers on its coarse interval and found at least one whose GitHub issue is still open, or whose state could not be established, so it mailed `human`. It exists because the workflow's last step can silently not run: mg-07ba reached `done, stage: merge` while drellem2/pogo#89 stayed OPEN for four days, and a carrier that completed its teardown is outwardly identical to one that skipped it. **Report-only** — it never closes an issue and never comments. Emitted once per sample that mailed; unchanged findings are re-raised only after `renotify_after`, so this event is not one-per-interval. See [CONFIGURATION.md](CONFIGURATION.md) §"The gh-issue teardown detector" and `internal/ghteardown`.
+pogod's gh-issue teardown detector (mg-6e57) sampled the `status=done` gh-issue carriers on its coarse interval and found at least one whose GitHub issue is still open, or whose state could not be established, so it mailed `notify_to` (`pm-pogo` by default — a teardown miss is a fleet workflow failure, not a human decision; mg-b586). It exists because the workflow's last step can silently not run: mg-07ba reached `done, stage: merge` while drellem2/pogo#89 stayed OPEN for four days, and a carrier that completed its teardown is outwardly identical to one that skipped it. **Report-only** — it never closes an issue and never comments. Emitted once per sample that mailed; unchanged findings are re-raised only after `renotify_after`, so this event is not one-per-interval. See [CONFIGURATION.md](CONFIGURATION.md) §"The gh-issue teardown detector" and `internal/ghteardown`.
 
 - **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent` (always `"pogod"`), `details`
 - **`details` fields:**
@@ -437,10 +437,12 @@ pogod's gh-issue teardown detector (mg-6e57) sampled the `status=done` gh-issue 
   - `indeterminate_count` (int, required): carriers whose issue state could NOT be established (failed `gh` lookup, unresolvable ref). These are **not** clean — an errored lookup and a closed issue are indistinguishable to a careless check, so they are counted separately and reported rather than assumed shut
   - `declared_open_count` (int, required): carriers open on purpose per a `gh-open:` body line; reported but never mailed on their own
   - `scanned` (int, required): how many done carriers were evaluated, so "0 findings" can be told apart from "0 carriers examined"
-  - `mail_error` (string, optional): present only when the notice to `human` could not be delivered; the event is still emitted so a detected miss is never lost to a down mail channel
+  - `notified` (string, required): comma-separated mailboxes the notice was sent to, so the routing that actually happened is auditable rather than inferred from config
+  - `escalated` (bool, required): true when a finding had gone unresolved past `escalate_after` and `human` was copied in addition to the fleet mailbox
+  - `mail_error_<mailbox>` (string, optional): one key per recipient the notice could NOT be delivered to; the event is still emitted so a detected miss is never lost to a down mail channel
 
 ```json
-{"schema_version":1,"timestamp":"2026-07-21T01:15:00.000000000Z","event_type":"gh_teardown_watch_fired","agent":"pogod","details":{"miss_count":1,"indeterminate_count":0,"declared_open_count":1,"scanned":3}}
+{"schema_version":1,"timestamp":"2026-07-21T01:15:00.000000000Z","event_type":"gh_teardown_watch_fired","agent":"pogod","details":{"miss_count":1,"indeterminate_count":0,"declared_open_count":1,"scanned":3,"notified":"pm-pogo","escalated":false}}
 ```
 
 #### `gh_teardown_watch_error`

@@ -152,6 +152,16 @@ const (
 	// DefaultGHTeardownRenotify is how long an UNCHANGED set of teardown
 	// findings stays quiet before being raised again.
 	DefaultGHTeardownRenotify = 24 * time.Hour
+	// DefaultGHTeardownNotifyTo is the mailbox teardown findings go to (mg-b586).
+	// A FLEET mailbox, deliberately not `human`: a teardown miss is a workflow
+	// failure the fleet chases, and mailing a human an operational task he can
+	// only forward back to the fleet trains him to filter the sender.
+	DefaultGHTeardownNotifyTo = "pm-pogo"
+	// DefaultGHTeardownEscalateAfter is how long ONE unresolved teardown finding
+	// may persist before `human` is copied as well. A miss the fleet is not
+	// clearing is a different fact from the miss itself, and that one IS a
+	// human's to know.
+	DefaultGHTeardownEscalateAfter = 72 * time.Hour
 )
 
 // DefaultFastPriorities is the set of WorkItem.Priority values that trigger the
@@ -385,7 +395,7 @@ type DriftWatchConfig struct {
 // completed its teardown and one that skipped it are the same three characters
 // from the outside, so the miss emits nothing at all.
 //
-// REPORT-ONLY: it mails `human` and never closes or comments. Closing an
+// REPORT-ONLY: it mails NotifyTo and never closes or comments. Closing an
 // external issue is outward-facing and stays human-gated.
 type GHTeardownConfig struct {
 	// Enabled turns the runner on. Defaults to true; it is additionally armed
@@ -402,6 +412,19 @@ type GHTeardownConfig struct {
 	// trains a human to filter the sender, but going permanently quiet after one
 	// notice is how #89 stayed open for four days.
 	RenotifyAfter time.Duration
+	// NotifyTo is the mailbox findings are reported to. Empty falls back to
+	// DefaultGHTeardownNotifyTo (`pm-pogo`).
+	//
+	// The recipient obeys the same logic as the cadence above. A teardown miss
+	// says "our gh-issue workflow's last step did not run" — a fleet workflow
+	// failure, not a decision needing a human. Routing it to `human` would also
+	// open a third, unbatched mail channel alongside the urgent-items and
+	// daily-digest contract the digest exists to enforce.
+	NotifyTo string
+	// EscalateAfter is how long ONE finding may persist unbroken before the
+	// notice also goes to `human`. Zero falls back to
+	// DefaultGHTeardownEscalateAfter; a NEGATIVE value disables escalation.
+	EscalateAfter time.Duration
 }
 
 // AgentsConfig holds agent command configuration.
@@ -598,6 +621,8 @@ func Load() *Config {
 			Enabled:       true,
 			Interval:      DefaultGHTeardownInterval,
 			RenotifyAfter: DefaultGHTeardownRenotify,
+			NotifyTo:      DefaultGHTeardownNotifyTo,
+			EscalateAfter: DefaultGHTeardownEscalateAfter,
 		},
 	}
 
@@ -676,6 +701,14 @@ func Load() *Config {
 		}
 		if fileCfg.GHTeardown.RenotifyAfter > 0 {
 			cfg.GHTeardown.RenotifyAfter = fileCfg.GHTeardown.RenotifyAfter
+		}
+		if fileCfg.GHTeardown.NotifyTo != "" {
+			cfg.GHTeardown.NotifyTo = fileCfg.GHTeardown.NotifyTo
+		}
+		// Non-zero, not >0: a negative value is the documented way to turn
+		// escalation off, so it must survive the merge like any other override.
+		if fileCfg.GHTeardown.EscalateAfter != 0 {
+			cfg.GHTeardown.EscalateAfter = fileCfg.GHTeardown.EscalateAfter
 		}
 		if fileCfg.stallWatchEnabledSet {
 			cfg.StallWatch.Enabled = fileCfg.StallWatch.Enabled
@@ -1194,6 +1227,12 @@ func parseConfigFileInto(cfg *parsedConfig, path string) error {
 			case "renotify_after":
 				if d, err := time.ParseDuration(unquotedVal); err == nil {
 					cfg.GHTeardown.RenotifyAfter = d
+				}
+			case "notify_to":
+				cfg.GHTeardown.NotifyTo = unquotedVal
+			case "escalate_after":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.GHTeardown.EscalateAfter = d
 				}
 			}
 		case "agents":

@@ -14,17 +14,19 @@ type mailRecorder struct {
 	mu     sync.Mutex
 	sent   []string
 	bodies []string
+	to     []string
 	err    error
 }
 
 func (m *mailRecorder) send(to, from, subject, body string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if to != mailTo || from != mailFrom {
-		panic("unexpected mail routing: " + to + "/" + from)
+	if from != mailFrom {
+		panic("unexpected mail sender: " + from)
 	}
 	m.sent = append(m.sent, subject)
 	m.bodies = append(m.bodies, body)
+	m.to = append(m.to, to)
 	return m.err
 }
 
@@ -32,6 +34,23 @@ func (m *mailRecorder) count() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return len(m.sent)
+}
+
+// recipients reports every mailbox mailed so far, so a test can assert who was
+// NOT reached as easily as who was.
+func (m *mailRecorder) recipients() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.to...)
+}
+
+func (m *mailRecorder) mailed(box string) bool {
+	for _, to := range m.recipients() {
+		if to == box {
+			return true
+		}
+	}
+	return false
 }
 
 func testWatcher(t *testing.T, carriers []Carrier, lookup LookupFunc, mail *mailRecorder) *Watcher {
@@ -49,7 +68,7 @@ func openLookup(string, int) (IssueState, error)   { return StateOpen, nil }
 func closedLookup(string, int) (IssueState, error) { return StateClosed, nil }
 
 // The runner's positive control: a done carrier with an open issue must produce
-// mail to `human`, naming the carrier and the issue.
+// mail, naming the carrier and the issue.
 func TestWatcherMailsOnATeardownMiss(t *testing.T) {
 	mail := &mailRecorder{}
 	w := testWatcher(t, []Carrier{carrier07ba()}, openLookup, mail)
@@ -190,6 +209,180 @@ func TestNewFindingMailsImmediately(t *testing.T) {
 	w.Check(start.Add(2 * time.Minute))
 	if mail.count() != 2 {
 		t.Errorf("a new miss did not page immediately: mailed %d times, want 2", mail.count())
+	}
+}
+
+// ROUTING POSITIVE CONTROL (mg-b586). With NotifyTo unset — the configuration
+// every deployment gets by default — a miss must reach the FLEET mailbox and
+// must NOT reach `human`. A default that has only ever been observed with an
+// explicit override in place has not been tested, so this test deliberately
+// sets no routing options at all.
+func TestDefaultRoutingGoesToTheFleetNotHuman(t *testing.T) {
+	mail := &mailRecorder{}
+	w := New(Options{
+		Enabled: true,
+		Source:  func() ([]Carrier, error) { return []Carrier{carrier07ba()}, nil },
+		Lookup:  openLookup, Mail: mail.send, Emit: func(events.Event) {},
+	})
+
+	w.Check(time.Now())
+
+	if mail.count() != 1 {
+		t.Fatalf("want exactly 1 mail, got %d to %v", mail.count(), mail.recipients())
+	}
+	// A bare literal, not DefaultNotifyTo: comparing against the constant would
+	// make this test FOLLOW a future flip back to `human` instead of catching it.
+	if got := mail.recipients()[0]; got != "pm-pogo" {
+		t.Errorf("default recipient is %q, want the fleet mailbox %q", got, "pm-pogo")
+	}
+	// The load-bearing half: a fleet workflow miss is not a human's decision.
+	if mail.mailed("human") {
+		t.Error("the default routing mailed `human` — a teardown miss is a fleet " +
+			"workflow failure, and unbatched mail a human cannot action gets the sender filtered")
+	}
+}
+
+func TestNotifyToOverrideIsHonoured(t *testing.T) {
+	mail := &mailRecorder{}
+	w := New(Options{
+		Enabled: true, NotifyTo: "mayor",
+		Source: func() ([]Carrier, error) { return []Carrier{carrier07ba()}, nil },
+		Lookup: openLookup, Mail: mail.send, Emit: func(events.Event) {},
+	})
+	w.Check(time.Now())
+	if got := mail.recipients(); len(got) != 1 || got[0] != "mayor" {
+		t.Errorf("recipients = %v, want [mayor]", got)
+	}
+}
+
+// A finding the fleet does not clear is a different fact from the finding
+// itself: at that point "the fleet is not handling this" IS a human's to know.
+func TestAStalledFindingEscalatesToHuman(t *testing.T) {
+	mail := &mailRecorder{}
+	w := New(Options{
+		Enabled: true, Interval: time.Minute, RenotifyAfter: 24 * time.Hour,
+		EscalateAfter: 72 * time.Hour,
+		Source:        func() ([]Carrier, error) { return []Carrier{carrier07ba()}, nil },
+		Lookup:        openLookup, Mail: mail.send, Emit: func(events.Event) {},
+	})
+
+	start := time.Now()
+	w.Check(start) // first sighting: fleet only
+	if mail.mailed("human") {
+		t.Fatal("escalated on the first sighting — the fleet has not failed at anything yet")
+	}
+
+	w.Check(start.Add(25 * time.Hour)) // still inside the window
+	if mail.mailed("human") {
+		t.Fatal("escalated after 25h with escalate_after=72h")
+	}
+
+	w.Check(start.Add(73 * time.Hour))
+	if !mail.mailed("human") {
+		t.Errorf("a finding unresolved for 73h never reached `human`: recipients %v", mail.recipients())
+	}
+	// Escalation COPIES the human; it does not silently redirect away from the
+	// fleet, which still owns the remedy.
+	if !mail.mailed("pm-pogo") {
+		t.Error("escalation dropped the fleet mailbox")
+	}
+	last := mail.bodies[len(mail.bodies)-1]
+	if !strings.Contains(last, "ESCALATED") {
+		t.Error("the escalated notice does not say why it reached a human")
+	}
+}
+
+// Escalation ages each FINDING, not the finding-set. A new miss arriving beside
+// an old one changes the set fingerprint, and if that reset the clock the
+// stalest finding — the exact one escalation exists for — would never age.
+func TestANewFindingDoesNotResetAnOldOnesEscalationClock(t *testing.T) {
+	mail := &mailRecorder{}
+	carriers := []Carrier{carrier07ba()}
+	var mu sync.Mutex
+	w := New(Options{
+		Enabled: true, Interval: time.Minute, RenotifyAfter: 24 * time.Hour,
+		EscalateAfter: 72 * time.Hour,
+		Source: func() ([]Carrier, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			return append([]Carrier(nil), carriers...), nil
+		},
+		Lookup: openLookup, Mail: mail.send, Emit: func(events.Event) {},
+	})
+
+	start := time.Now()
+	w.Check(start)
+
+	// A second miss shows up two days in — long after the first started aging.
+	mu.Lock()
+	carriers = append(carriers, Carrier{ID: "mg-9999", Status: "done", Repo: "drellem2/pogo", Number: 91})
+	mu.Unlock()
+	w.Check(start.Add(48 * time.Hour))
+	if mail.mailed("human") {
+		t.Fatal("escalated at 48h")
+	}
+
+	w.Check(start.Add(73 * time.Hour))
+	if !mail.mailed("human") {
+		t.Error("the newer finding reset the older one's clock — the stalest finding never escalated")
+	}
+}
+
+// A cleared finding that later recurs starts its stall clock fresh: the fleet
+// DID act the first time, so it has not failed to act on the new one.
+func TestResolvedFindingClearsItsEscalationClock(t *testing.T) {
+	mail := &mailRecorder{}
+	state := StateOpen
+	var mu sync.Mutex
+	w := New(Options{
+		Enabled: true, Interval: time.Minute, RenotifyAfter: 24 * time.Hour,
+		EscalateAfter: 72 * time.Hour,
+		Source:        func() ([]Carrier, error) { return []Carrier{carrier07ba()}, nil },
+		Lookup: func(string, int) (IssueState, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			return state, nil
+		},
+		Mail: mail.send, Emit: func(events.Event) {},
+	})
+
+	start := time.Now()
+	w.Check(start)
+
+	mu.Lock()
+	state = StateClosed
+	mu.Unlock()
+	w.Check(start.Add(2 * time.Minute)) // resolved
+
+	mu.Lock()
+	state = StateOpen
+	mu.Unlock()
+	w.Check(start.Add(4 * time.Minute)) // recurred, clock restarts here
+	w.Check(start.Add(71 * time.Hour))  // 71h since recurrence, not 71h since start
+
+	if mail.mailed("human") {
+		t.Errorf("a recurrence escalated on the ORIGINAL sighting's clock: %v", mail.recipients())
+	}
+}
+
+// Escalation must have an off switch distinguishable from an unset field, or a
+// config omitting the key would silently disable it.
+func TestNegativeEscalateAfterDisablesEscalation(t *testing.T) {
+	mail := &mailRecorder{}
+	w := New(Options{
+		Enabled: true, Interval: time.Minute, RenotifyAfter: time.Hour,
+		EscalateAfter: -1,
+		Source:        func() ([]Carrier, error) { return []Carrier{carrier07ba()}, nil },
+		Lookup:        openLookup, Mail: mail.send, Emit: func(events.Event) {},
+	})
+	start := time.Now()
+	w.Check(start)
+	w.Check(start.Add(30 * 24 * time.Hour))
+	if mail.mailed("human") {
+		t.Error("escalation disabled, but `human` was mailed anyway")
+	}
+	if mail.count() == 0 {
+		t.Error("disabling escalation also silenced the fleet notice")
 	}
 }
 
