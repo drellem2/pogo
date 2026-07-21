@@ -4,7 +4,12 @@ package sleep
 
 import (
 	"context"
+	"os"
+	"os/exec"
+	"strconv"
+	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -88,4 +93,196 @@ func TestWatch_StartsAndStops(t *testing.T) {
 	if atomic.LoadInt32(&fired) != first {
 		t.Errorf("hook fired after ctx cancel; before=%d after=%d", first, atomic.LoadInt32(&fired))
 	}
+}
+
+// TestParsePSLine covers the field split. The command field contains spaces —
+// our own predicate has three — so a naive strings.Fields would truncate argv
+// and silently stop matching the very processes the reaper exists to find.
+func TestParsePSLine(t *testing.T) {
+	pid, ppid, argv, ok := parsePSLine(` 3396  3335 log stream --predicate eventMessage CONTAINS[c] "Wake reason:"`)
+	if !ok {
+		t.Fatal("expected parse to succeed")
+	}
+	if pid != 3396 || ppid != 3335 {
+		t.Errorf("pid/ppid = %d/%d, want 3396/3335", pid, ppid)
+	}
+	if want := `log stream --predicate eventMessage CONTAINS[c] "Wake reason:"`; argv != want {
+		t.Errorf("argv = %q, want %q", argv, want)
+	}
+
+	for name, line := range map[string]string{
+		"empty":        "",
+		"pid only":     "3396",
+		"non-numeric":  "header ppid command",
+		"kernel pid 0": "    0     0 kernel_task",
+	} {
+		if _, _, _, ok := parsePSLine(line); ok {
+			t.Errorf("[%s] expected parse to fail for %q", name, line)
+		}
+	}
+}
+
+// TestIsOrphanedWatcher_Matches pins the shapes the reaper must recognize:
+// argv[0] as spawned today ("log"), and a fully-resolved path, both at PPID 1.
+func TestIsOrphanedWatcher_Matches(t *testing.T) {
+	for _, argv := range []string{
+		`log stream --predicate ` + wakePredicate,
+		`/usr/bin/log stream --predicate ` + wakePredicate,
+	} {
+		if !isOrphanedWatcher(1, argv) {
+			t.Errorf("expected match for orphan argv: %s", argv)
+		}
+	}
+}
+
+// TestIsOrphanedWatcher_RejectsFleetProcesses is the safety test, and it is
+// the reason the matcher is an exact comparison rather than a substring one.
+// Anything isOrphanedWatcher accepts gets signalled. Every pogo poller idles
+// in `sleep N` under `set -euo pipefail`, so a matcher that widened to a
+// substring — the moral equivalent of an unanchored `pkill -f` — would take
+// down the fleet's mail pollers and watchdog, as has happened before.
+func TestIsOrphanedWatcher_RejectsFleetProcesses(t *testing.T) {
+	cases := map[string]struct {
+		ppid int
+		argv string
+	}{
+		// The legitimate watcher of a RUNNING pogod. Reaping this would stop
+		// wake detection outright — a regression disguised as a fix.
+		"live pogod's own watcher": {3335, `log stream --predicate ` + wakePredicate},
+		// Fleet infrastructure that an unanchored pattern has killed before.
+		"mail poller":      {1, "sleep 600"},
+		"watchdog poller":  {1, "/bin/sh -c while true; do sleep 60; done"},
+		"pogod itself":     {1, "/Users/daniel/go/bin/pogod"},
+		"a claude harness": {1, "claude --dangerously-skip-permissions"},
+		"a polecat":        {1, "pogo-cat-55de"},
+		// Other `log` invocations that are not ours.
+		"unrelated log stream": {1, `log stream --predicate eventMessage CONTAINS "boot"`},
+		"log show":             {1, `log show --last 1d --predicate ` + wakePredicate},
+		// Substring-shaped near misses: a matcher doing strings.Contains
+		// would accept these.
+		"our predicate as an argument to something else": {1, `grep log stream --predicate ` + wakePredicate},
+		"trailing junk after our predicate":              {1, `log stream --predicate ` + wakePredicate + ` --extra`},
+		"argv0 only":                                     {1, "log"},
+	}
+	for name, c := range cases {
+		if isOrphanedWatcher(c.ppid, c.argv) {
+			t.Errorf("[%s] matcher accepted a process it must never signal: ppid=%d argv=%s", name, c.ppid, c.argv)
+		}
+	}
+}
+
+// TestReapOrphanedWatchers_KillsOrphanSparesLiveWatcher is the positive
+// control. It reproduces the leak for real — a `log stream` whose parent has
+// exited, reparented to PID 1, exactly as every non-graceful pogod death
+// produces — then asserts the reaper kills that one and leaves a live,
+// parented watcher running.
+//
+// Both halves matter. Without the orphan we would be testing a leak we never
+// observed; without the live watcher we could "fix" the leak by killing the
+// feature.
+func TestReapOrphanedWatchers_KillsOrphanSparesLiveWatcher(t *testing.T) {
+	if testing.Short() {
+		t.Skip("spawns real `log stream` processes; skipped in -short")
+	}
+	if _, err := exec.LookPath("log"); err != nil {
+		t.Skipf("log binary unavailable: %v", err)
+	}
+
+	// A live, correctly-parented watcher: the thing the reaper must spare.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := Watch(ctx, func() {}); err != nil {
+		t.Skipf("log stream unavailable in this environment: %v", err)
+	}
+	live := watcherPIDsWithParent(t, os.Getpid())
+	if len(live) != 1 {
+		t.Fatalf("expected exactly 1 live watcher parented to this test, got %d", len(live))
+	}
+
+	// An orphan: sh spawns the watcher and exits, so it reparents to PID 1.
+	// wakePredicate contains no single quotes, so single-quoting is safe.
+	out, err := exec.Command("sh", "-c",
+		`log stream --predicate '`+wakePredicate+`' >/dev/null 2>&1 & echo $!`).Output()
+	if err != nil {
+		t.Fatalf("spawning orphan: %v", err)
+	}
+	orphan, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil {
+		t.Fatalf("parsing orphan pid from %q: %v", out, err)
+	}
+	// If the reaper fails to kill it, this test must not leave a leak behind —
+	// the very thing it is policing. Kill by PID, never by pattern.
+	t.Cleanup(func() {
+		if alive(orphan) {
+			_ = syscall.Kill(orphan, syscall.SIGTERM)
+			t.Errorf("orphan %d survived the reaper; killed it in cleanup", orphan)
+		}
+	})
+
+	if !waitFor(func() bool { return parentOf(t, orphan) == 1 }, 5*time.Second) {
+		t.Fatalf("orphan %d never reparented to PID 1 (ppid=%d)", orphan, parentOf(t, orphan))
+	}
+
+	if n := reapOrphanedWatchers(); n < 1 {
+		t.Fatalf("reapOrphanedWatchers reaped %d, want at least 1", n)
+	}
+
+	if !waitFor(func() bool { return !alive(orphan) }, 5*time.Second) {
+		t.Errorf("orphan %d still alive after reap", orphan)
+	}
+	// The feature still works: our parented watcher was not collateral.
+	if !alive(live[0]) {
+		t.Errorf("reaper killed the LIVE watcher %d — wake detection would be dead", live[0])
+	}
+}
+
+// watcherPIDsWithParent returns the pids of wake watchers whose parent is ppid.
+func watcherPIDsWithParent(t *testing.T, ppid int) []int {
+	t.Helper()
+	out, err := exec.Command("ps", "-axo", "pid=,ppid=,command=").Output()
+	if err != nil {
+		t.Fatalf("ps: %v", err)
+	}
+	var pids []int
+	for _, line := range strings.Split(string(out), "\n") {
+		pid, parent, argv, ok := parsePSLine(line)
+		if !ok || parent != ppid {
+			continue
+		}
+		if strings.HasSuffix(argv, "stream --predicate "+wakePredicate) {
+			pids = append(pids, pid)
+		}
+	}
+	return pids
+}
+
+func parentOf(t *testing.T, pid int) int {
+	t.Helper()
+	out, err := exec.Command("ps", "-o", "ppid=", "-p", strconv.Itoa(pid)).Output()
+	if err != nil {
+		return -1
+	}
+	ppid, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil {
+		return -1
+	}
+	return ppid
+}
+
+// alive reports whether pid exists. Signal 0 performs the existence check
+// without delivering anything, and works for processes that are not our
+// children (an orphan is init's child, so we cannot Wait on it).
+func alive(pid int) bool {
+	return syscall.Kill(pid, syscall.Signal(0)) == nil
+}
+
+func waitFor(cond func() bool, limit time.Duration) bool {
+	deadline := time.Now().Add(limit)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return true
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return cond()
 }
