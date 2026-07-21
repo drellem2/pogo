@@ -143,6 +143,15 @@ const (
 	// wedge (mg-50e0) means a launchd timer would silently never fire, the exact
 	// "inert while appearing correct" failure the detector exists to catch.
 	DefaultDriftCheckInterval = 15 * time.Minute
+
+	// DefaultGHTeardownInterval is how often pogod's gh-issue teardown detector
+	// samples. Coarse: each sample costs one GitHub round-trip per done carrier,
+	// and a teardown miss that has already lasted hours is not made worse by
+	// being found an hour later.
+	DefaultGHTeardownInterval = 1 * time.Hour
+	// DefaultGHTeardownRenotify is how long an UNCHANGED set of teardown
+	// findings stays quiet before being raised again.
+	DefaultGHTeardownRenotify = 24 * time.Hour
 )
 
 // DefaultFastPriorities is the set of WorkItem.Priority values that trigger the
@@ -191,6 +200,7 @@ type Config struct {
 	Reaper     ReaperConfig
 	Reconcile  ReconcileConfig
 	DriftWatch DriftWatchConfig
+	GHTeardown GHTeardownConfig
 	// Source is the path of the highest-precedence config file Load read, or
 	// "" when no config file was found and everything is defaults + env. pogod
 	// uses this to gate crew auto-start: a daemon with no config file is
@@ -365,6 +375,35 @@ type DriftWatchConfig struct {
 	Interval time.Duration
 }
 
+// GHTeardownConfig configures pogod's gh-issue TEARDOWN detector (mg-6e57):
+// the heartbeat-driven runner that checks whether the GitHub issue behind every
+// `status=done` gh-issue carrier is actually closed.
+//
+// It exists because that last workflow step can silently not run. mg-07ba
+// reached `done, stage: merge` with all its work genuinely finished, but nobody
+// closed drellem2/pogo#89 and it sat open for four days. A carrier that
+// completed its teardown and one that skipped it are the same three characters
+// from the outside, so the miss emits nothing at all.
+//
+// REPORT-ONLY: it mails `human` and never closes or comments. Closing an
+// external issue is outward-facing and stays human-gated.
+type GHTeardownConfig struct {
+	// Enabled turns the runner on. Defaults to true; it is additionally armed
+	// only when the `gh` CLI is available, since without it every lookup is
+	// indeterminate and the runner would report an environment gap as findings.
+	Enabled bool
+	// Interval is the COARSE gap between samples. Zero falls back to
+	// DefaultGHTeardownInterval.
+	Interval time.Duration
+	// RenotifyAfter is how long an unchanged set of findings stays quiet before
+	// being mailed again. Zero falls back to DefaultGHTeardownRenotify.
+	//
+	// It is deliberately neither zero nor infinite: re-mailing every interval
+	// trains a human to filter the sender, but going permanently quiet after one
+	// notice is how #89 stayed open for four days.
+	RenotifyAfter time.Duration
+}
+
 // AgentsConfig holds agent command configuration.
 type AgentsConfig struct {
 	// Provider selects the agent harness ("claude", "codex", "pi", "cursor"). Resolved
@@ -499,6 +538,7 @@ type parsedConfig struct {
 	agentsAutoStartSet     bool
 	reaperEnabledSet       bool
 	driftWatchEnabledSet   bool
+	ghTeardownEnabledSet   bool
 	// sources are the files that were read, lowest precedence first.
 	sources []string
 }
@@ -553,6 +593,11 @@ func Load() *Config {
 		DriftWatch: DriftWatchConfig{
 			Enabled:  true,
 			Interval: DefaultDriftCheckInterval,
+		},
+		GHTeardown: GHTeardownConfig{
+			Enabled:       true,
+			Interval:      DefaultGHTeardownInterval,
+			RenotifyAfter: DefaultGHTeardownRenotify,
 		},
 	}
 
@@ -622,6 +667,15 @@ func Load() *Config {
 		}
 		if fileCfg.DriftWatch.Interval > 0 {
 			cfg.DriftWatch.Interval = fileCfg.DriftWatch.Interval
+		}
+		if fileCfg.ghTeardownEnabledSet {
+			cfg.GHTeardown.Enabled = fileCfg.GHTeardown.Enabled
+		}
+		if fileCfg.GHTeardown.Interval > 0 {
+			cfg.GHTeardown.Interval = fileCfg.GHTeardown.Interval
+		}
+		if fileCfg.GHTeardown.RenotifyAfter > 0 {
+			cfg.GHTeardown.RenotifyAfter = fileCfg.GHTeardown.RenotifyAfter
 		}
 		if fileCfg.stallWatchEnabledSet {
 			cfg.StallWatch.Enabled = fileCfg.StallWatch.Enabled
@@ -1126,6 +1180,20 @@ func parseConfigFileInto(cfg *parsedConfig, path string) error {
 			case "interval":
 				if d, err := time.ParseDuration(unquotedVal); err == nil {
 					cfg.DriftWatch.Interval = d
+				}
+			}
+		case "gh_teardown":
+			switch key {
+			case "enabled":
+				cfg.GHTeardown.Enabled = val == "true"
+				cfg.ghTeardownEnabledSet = true
+			case "interval":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.GHTeardown.Interval = d
+				}
+			case "renotify_after":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.GHTeardown.RenotifyAfter = d
 				}
 			}
 		case "agents":

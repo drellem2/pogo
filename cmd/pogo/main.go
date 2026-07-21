@@ -24,6 +24,7 @@ import (
 	"github.com/drellem2/pogo/internal/completion"
 	"github.com/drellem2/pogo/internal/config"
 	"github.com/drellem2/pogo/internal/events"
+	"github.com/drellem2/pogo/internal/ghteardown"
 	"github.com/drellem2/pogo/internal/gitceiling"
 	"github.com/drellem2/pogo/internal/gitgc"
 	"github.com/drellem2/pogo/internal/memcheck"
@@ -792,6 +793,104 @@ can gate a schedule or CI step).`,
 			}
 		},
 	}
+
+	// check-teardown: the gh-issue teardown detector (mg-6e57). Top-level rather
+	// than under `service` because it audits WORKFLOW state (mg carriers vs
+	// GitHub), not host deploy artifacts.
+	var teardownArchived bool
+	var cmdCheckTeardown = &cobra.Command{
+		Use:   "check-teardown",
+		Short: "Report gh-issue carriers that reached done while their issue stayed open (never closes anything)",
+		Long: `Audit the LAST step of the gh-issue workflow: for every carrier work item at
+` + "`status=done`" + `, ask GitHub whether the referenced ` + "`gh:`" + ` issue is actually closed.
+
+This exists because that step can silently not run. mg-07ba reached
+` + "`status=done, stage: merge`" + ` on 2026-07-17 with every promise in the thread
+fulfilled — but nobody closed drellem2/pogo#89, and it sat open for four days.
+Nothing noticed, because from the outside a carrier that completed its teardown
+and one that skipped it are the same three characters: ` + "`done`" + `. The miss is an
+ABSENCE, and an absence emits nothing.
+
+This command REPORTS ONLY. It never closes an issue and never comments —
+closing an external issue is outward-facing and stays human-gated. Its job is to
+make the miss impossible to sit on, not to post on anyone's behalf.
+
+Findings come in three kinds:
+
+  teardown miss   a done carrier whose issue is still OPEN, with no declaration
+                  that it is open on purpose. The finding this exists to produce.
+  indeterminate   the issue's state could NOT be established — gh exited
+                  non-zero, auth expired, rate limit, or the ref names a repo or
+                  issue that no longer resolves. These are NOT clean. A failed
+                  lookup and a closed issue are indistinguishable to a careless
+                  check, so an unreadable answer is reported, never assumed shut.
+  declared open   the carrier says why its issue is open deliberately, via a
+                  ` + "`gh-open: <reason>`" + ` line in its body. Listed, but not a miss
+                  and not an alert — a detector that cries wolf gets muted long
+                  before the run that matters.
+
+Scans ` + "`status=done`" + ` by default. Archived carriers are NOT scanned unless
+--archived is passed: this store holds ~80 archived carriers against 2 done
+ones, and each costs a network round-trip. That is a real coverage gap and it is
+stated rather than hidden — a carrier archived while its issue is still open is
+the most thoroughly forgotten case of all.
+
+Exit status is 0 when nothing is actionable, 1 when any miss or indeterminate
+carrier is found (so it can gate a schedule or CI step).`,
+		Args: cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			src := ghteardown.MGSource{IncludeArchived: teardownArchived}
+			carriers, err := src.Carriers()
+			if err != nil {
+				// A store we could not read is not "no findings". Fail loudly:
+				// silence here would be this detector reproducing, inside itself,
+				// exactly the failure it was built to catch.
+				fmt.Fprintf(os.Stderr, "cannot read work-item store: %v\n", err)
+				os.Exit(cli.ExitError)
+			}
+
+			rep := ghteardown.Detect(carriers, ghteardown.GHLookup)
+
+			if jsonOutput {
+				type outFinding struct {
+					Carrier string `json:"carrier"`
+					Issue   string `json:"issue"`
+					Title   string `json:"title,omitempty"`
+					Stage   string `json:"stage,omitempty"`
+					State   string `json:"state"`
+					Detail  string `json:"detail,omitempty"`
+				}
+				conv := func(fs []ghteardown.Finding) []outFinding {
+					out := make([]outFinding, 0, len(fs))
+					for _, f := range fs {
+						out = append(out, outFinding{
+							Carrier: f.Carrier.ID, Issue: f.Carrier.String(),
+							Title: f.Carrier.Title, Stage: f.Carrier.Stage,
+							State: string(f.State), Detail: f.Detail,
+						})
+					}
+					return out
+				}
+				cli.PrintJSON(map[string]interface{}{
+					"scanned":       rep.Scanned,
+					"statuses":      src.Statuses(),
+					"miss_count":    len(rep.Misses),
+					"indeterminate": conv(rep.Indeterminate),
+					"misses":        conv(rep.Misses),
+					"declared_open": conv(rep.DeclaredOpen),
+					"actionable":    rep.Actionable(),
+				})
+			} else {
+				fmt.Print(rep.Render())
+			}
+
+			if rep.Actionable() {
+				os.Exit(cli.ExitError)
+			}
+		},
+	}
+	cmdCheckTeardown.Flags().BoolVar(&teardownArchived, "archived", false,
+		"Also scan archived carriers (slower: one network lookup per carrier)")
 
 	var cmdServiceStatus = &cobra.Command{
 		Use:   "status",
@@ -2370,6 +2469,7 @@ branches; work items and mail live in mg/macguffin (the task-store CLI).`,
 	rootCmd.AddCommand(cmdStatus)
 	cmdDoctor.Flags().BoolVar(&doctorCheck, "check", false, "Run quick health checks without starting the doctor agent")
 	rootCmd.AddCommand(cmdDoctor)
+	rootCmd.AddCommand(cmdCheckTeardown)
 	cmdServer.AddCommand(cmdServerStart)
 	cmdServer.AddCommand(cmdServerStop)
 	cmdServer.AddCommand(cmdServerStatus)

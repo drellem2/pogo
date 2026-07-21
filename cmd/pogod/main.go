@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime/debug"
 	"strconv"
@@ -29,6 +30,7 @@ import (
 	"github.com/drellem2/pogo/internal/config"
 	"github.com/drellem2/pogo/internal/driftwatch"
 	"github.com/drellem2/pogo/internal/driver"
+	"github.com/drellem2/pogo/internal/ghteardown"
 	"github.com/drellem2/pogo/internal/gitceiling"
 	"github.com/drellem2/pogo/internal/gitgc"
 	"github.com/drellem2/pogo/internal/health"
@@ -1418,6 +1420,37 @@ Flags:
 		log.Printf("pogod: drift-check runner enabled (mirrors=%d interval=%s, report-only)", len(mirrors), cfg.DriftWatch.Interval)
 	}
 
+	// Build the gh-issue teardown detector (mg-6e57): the standing check that
+	// every gh-issue carrier at status=done has actually had its GitHub issue
+	// closed. mg-07ba reached `done, stage: merge` with the work genuinely
+	// finished and drellem2/pogo#89 sat OPEN for four days, because a carrier
+	// that completed its teardown and one that skipped it are indistinguishable
+	// from the outside. REPORT-ONLY: it mails `human` and never closes or
+	// comments — that stays human-gated.
+	//
+	// Armed only when `gh` is actually available. Without it EVERY lookup is
+	// indeterminate, and the runner would faithfully report an environment gap
+	// as a wall of findings — noise that would get the detector muted before the
+	// run that matters. A missing gh is a precondition, not a finding.
+	var teardownWatcher *ghteardown.Watcher
+	if cfg.GHTeardown.Enabled {
+		if _, err := exec.LookPath("gh"); err != nil {
+			log.Printf("pogod: gh-issue teardown detector NOT armed — `gh` not on PATH (%v); "+
+				"done carriers will not be checked against their issues", err)
+		} else {
+			src := ghteardown.MGSource{}
+			teardownWatcher = ghteardown.New(ghteardown.Options{
+				Enabled:       true,
+				Source:        src.Carriers,
+				Mail:          client.SendMGMail,
+				Interval:      cfg.GHTeardown.Interval,
+				RenotifyAfter: cfg.GHTeardown.RenotifyAfter,
+			})
+			log.Printf("pogod: gh-issue teardown detector enabled (interval=%s renotify=%s, report-only)",
+				cfg.GHTeardown.Interval, cfg.GHTeardown.RenotifyAfter)
+		}
+	}
+
 	// Drive both heartbeat-piggybacked subsystems from a single OnTick. The
 	// scheduler runs inline (it stores absolute fire times, so a clock jump is
 	// absorbed in the same goroutine). The stall watcher runs in a goroutine so
@@ -1449,6 +1482,13 @@ Flags:
 		// out to `mg mail send` — neither must delay the next tick. Report-only.
 		if driftWatcher != nil {
 			go driftWatcher.Check(now)
+		}
+		// The gh-issue teardown detector rides the same tick and throttles
+		// itself to a COARSE interval. In a goroutine because it shells out to
+		// `mg` once per carrier and to `gh` over the network — neither must
+		// delay the next tick. Report-only.
+		if teardownWatcher != nil {
+			go teardownWatcher.Check(now)
 		}
 		// Surface polecats that outlived an earlier pogod and are now alive but
 		// unreachable — UNKNOWN forever, holding a worktree and a claim, with

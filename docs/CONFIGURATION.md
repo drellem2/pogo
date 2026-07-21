@@ -459,6 +459,66 @@ interval = "15m"     # coarse sample/mail cadence (default 15m)
 Source of truth: `internal/driftwatch/` (runner) and `internal/reconcile/`
 (detector).
 
+## The gh-issue teardown detector
+
+The gh-issue workflow ends by closing the GitHub issue behind a carrier work
+item. That last step can silently not run. mg-07ba reached `status=done,
+stage: merge` with every promise in the thread fulfilled — but nobody closed
+drellem2/pogo#89, and it sat OPEN for four days. Nothing noticed: from the
+outside, a carrier that completed its teardown and one that skipped it are the
+same three characters. The miss is an **absence**, and an absence emits nothing.
+
+`pogo check-teardown` audits it on demand; pogod runs the same detector on a
+coarse heartbeat interval and mails `human`. Both are **report-only** — neither
+closes an issue nor comments, because posting on an external thread is
+outward-facing and stays human-gated.
+
+- **The predicate** is `workflow: gh-issue` + `status=done` + a `gh:` issue that
+  is still open. Deliberately NOT gated on `stage:`, which is not reliably
+  maintained on live carriers.
+- **Issue state is a tri-state**: open, closed, or **unknown**. A `gh` call that
+  fails — expired auth, rate limit, renamed repo, transferred or deleted issue —
+  produces no "OPEN" token, so a parse that reads "not open" as closed would
+  report every carrier clean at exactly the moment the detector went blind. Only
+  a positive, parsed `CLOSED` clears a carrier; everything else is reported as
+  **indeterminate** and counts as actionable.
+- **Open on purpose.** A carrier whose issue is legitimately open (waiting on a
+  reporter, say) declares it in the carrier body:
+
+  ```
+  gh-open: waiting on reporter for a format-patch — closing would retract the ask
+  ```
+
+  It then stops counting as a miss, but stays LISTED under "declared open".
+  Suppression buys silence from the alert channel, not invisibility: a
+  declaration that outlives its reason is the same silent absence the detector
+  exists to catch. Nothing infers this line — a human writes it, so an
+  un-annotated carrier always fails toward being noticed.
+- **Scope.** Scans `status=done` by default. Archived carriers need
+  `--archived`: each carrier costs a network round-trip, and the store holds
+  ~80 archived carriers against a handful of done ones. That is a real coverage
+  gap, stated rather than hidden — a carrier archived while its issue is still
+  open is the most thoroughly forgotten case of all.
+- **Notification policy.** A changed set of findings mails immediately; an
+  unchanged set stays quiet until `renotify_after`. Neither extreme is safe:
+  mailing every interval trains a human to filter the sender, but going
+  permanently quiet after one notice is how #89 stayed open for four days.
+- **Arming.** The runner is skipped entirely when `gh` is not on PATH. Without
+  it every lookup is indeterminate, and reporting an environment gap as a wall
+  of findings would get the detector muted before the run that matters.
+
+```toml
+[gh_teardown]
+enabled = true             # default true; skipped when `gh` is unavailable
+interval = "1h"            # coarse sample cadence (default 1h)
+renotify_after = "24h"     # unchanged findings re-mail after this (default 24h)
+```
+
+Exit status of `pogo check-teardown` is 0 when nothing is actionable and 1 when
+any miss or indeterminate carrier is found, so it can gate a schedule or CI step.
+
+Source of truth: `internal/ghteardown/`.
+
 ## Agent registry
 
 Each agent has a directory under `~/.pogo/agents/<name>/` holding its prompt,
