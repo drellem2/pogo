@@ -50,6 +50,40 @@ issues as `Refs owner/repo#N`, or add `Closing-ref-ack: <ref> — <why>` when th
 closure is deliberate. The refinery runs the same check on every merge, so this
 hook is an early warning rather than the guarantee.
 
+### Writing a hook: it must self-activate from source
+
+**A tracked gate must not depend on the installed `pogo`/`pogod`.** Tracked
+files — hooks, prompts, templates — go live the instant a merge lands. The
+compiled binaries go live only when self-deploy runs. Those are two different
+clocks, and a gate that couples them is broken for the whole window in between.
+
+This is not hypothetical: a commit-msg hook that called a subcommand from an
+undeployed binary once rejected **every** commit in the repo, benign and
+hazardous bodies alike, and it looked correct to whoever merged it. Identical
+failure on both arms is the signature of a gate broken by its own dependency
+rather than one catching bad input.
+
+Two things are required, and the second is the one people miss:
+
+1. **Have a source route** — `go run ./cmd/pogo ...`. Costs about a second warm.
+2. **Guard on capability, not presence.** `command -v pogo` and
+   `[ -x bin/pogo ]` only answer "does something named pogo exist". A stale
+   binary satisfies both, wins the route, and leaves your source fallback
+   unreachable in exactly the window it was written for. Ask the candidate
+   whether it actually *has* the behaviour — run `<candidate> <subcommand>
+   --help` as a separate, side-effect-free probe — so a stale binary falls
+   through instead of winning.
+
+`hooks/commit-msg` is the worked example. `internal/hookselfactivate` enforces
+both rules over every tracked file under `hooks/` as part of `go test ./...`,
+so a violation fails the build rather than waiting to be noticed. The check is
+a Go test rather than a script calling `pogo`, so it is not subject to the
+problem it detects.
+
+Scope is `hooks/` only. `scripts/` legitimately builds and exercises sandbox
+binaries as part of the self-deploy suite; a check that fired there would get
+switched off, which is worse than one that fires narrowly.
+
 ## Submitting Changes
 
 1. Create a feature branch from `main`
