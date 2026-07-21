@@ -123,15 +123,19 @@ The attach protocol (bridging a remote terminal to the PTY) is more involved but
 
 ### 1. Agent Lifecycle (`pogo agent`)
 
-Two agent types, distinguished by process name and lifecycle:
+Two agent types, distinguished by naming convention and lifecycle:
 
 | | Crew | Polecat |
 |---|------|---------|
-| Process name | `pogo-crew-<name>` | `pogo-cat-<id>` |
+| Display label | `pogo-crew-<name>` | `pogo-cat-<id>` |
 | Lifetime | Persistent — daemon restarts on crash | Ephemeral — exits after task completion |
 | Prompt | `~/.pogo/agents/crew/<name>.md` | Generated from template + work item |
 | Session | Long-lived, handoff-capable | Single task, no handoff |
 | Merge path | Push to main | Submit to refinery |
+
+The display label is human-facing — `pogo agent list` shows it and the `/agents` JSON
+carries it as `process_name`. It is not a process name; nothing sets it on any process,
+so it is not discoverable with `pgrep`. To find an agent's pid, ask pogod.
 
 **Commands:**
 
@@ -147,8 +151,9 @@ pogo agent status [name]             # Show agent status + current hook
 - Agents are Claude Code processes spawned by pogod with PTY allocation (Phase 0)
 - Crew agents: `pogod` monitors and restarts on unexpected exit
 - Polecats: launched, run, exit. `pogod` notices exit and runs `mg reap` for cleanup
-- Process names enable `pgrep pogo-crew` / `pgrep pogo-cat` for discovery
-- Each agent gets a macguffin identity (its process name) for claiming work and sending mail
+- Discovery goes through pogod's registry, not the process table — the `pogo-crew-` /
+  `pogo-cat-` labels are never set on a process, so `pgrep pogo-crew` finds nothing
+- Each agent gets a macguffin identity (its display label) for claiming work and sending mail
 
 **Startup injection:**
 When `pogod` launches an agent, it sets environment variables:

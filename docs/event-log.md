@@ -71,7 +71,7 @@ This means v1 readers can consume future v1 logs even after we add new event typ
 
 ### Identity conventions
 
-- **Crew agents:** `crew-<name>` (matches process name `pogo-crew-<name>` minus the `pogo-` prefix). Examples: `crew-arch`, `crew-ops`. Exception: the coordinator uses its bare configured name (`[agents]` coordinator, default `ringmaster`) with no `crew-` prefix.
+- **Crew agents:** `crew-<name>` (matches the agent's display label `pogo-crew-<name>` — the string `pogo agent list` shows and `/agents` returns as `process_name` — minus the `pogo-` prefix; the label is not a process name and is not discoverable with `pgrep`). Examples: `crew-arch`, `crew-ops`. Exception: the coordinator uses its bare configured name (`[agents]` coordinator, default `ringmaster`) with no `crew-` prefix.
 - **Polecats:** `cat-<work-item-id>` for polecats spawned from a work item, `cat-<id>` for free polecats. Examples: `cat-mg-0241`, `cat-a3f`.
 - **System actors:** `refinery`, `mg`, `pogod`, `human` for events not attributable to a Claude Code agent.
 

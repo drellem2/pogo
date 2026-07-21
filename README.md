@@ -43,10 +43,15 @@ mg mail send ringmaster --subject="priority change" --body="pause feature work"
 
 | | Crew | Polecat |
 |---|------|---------|
-| Process name | `pogo-crew-<name>` | `pogo-cat-<id>` |
+| Display label | `pogo-crew-<name>` | `pogo-cat-<id>` |
 | Lifetime | Persistent — respawned on crash | Ephemeral — exits after task |
 | Prompt | `~/.pogo/agents/crew/<name>.md` | Template + work item |
 | Merge path | Push to main | Refinery merge queue |
+
+The display label is human-facing — it is what `pogo agent list` shows and what
+`process_name` carries in the `/agents` JSON. It is **not** a process name: nothing
+sets it on any process, so `pgrep -f pogo-crew-arch` matches nothing. To find an
+agent's pid, ask pogod.
 
 Behavior is prompt-defined. Edit `~/.pogo/agents/mayor.md` to change dispatch. Add a crew agent with `~/.pogo/agents/crew/<name>.md` + `pogo agent start <name>`. Polecats re-read `~/.pogo/agents/templates/polecat.md` each spawn. Crew with `auto_start = true` start at boot (default ringmaster).
 
