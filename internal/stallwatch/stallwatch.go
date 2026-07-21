@@ -441,8 +441,14 @@ func (w *Watcher) checkUnreadMail(now time.Time) {
 //     item, NOT who executes it; the coordinator still dispatches a worker. This
 //     is the overwhelming majority of the queue (13 of 14 items on 2026-07-17),
 //     because pm-template files every ticket with `--assignee=pm-<name>`.
-//   - EXECUTION GATE — "a human must do this by hand". mayor.md files manual-QA
-//     items with `--assignee=human` so a worker is never dispatched at them.
+//   - EXECUTION GATE — "do not dispatch this automatically". Two sentinels
+//     carry it, for different reasons: `human` ("a person must do this by
+//     hand" — mayor.md files manual-QA items that way so a worker is never
+//     dispatched at them) and `parked` ("deliberately set aside; nobody is
+//     expected to act on it now", mg-a3a2). They are separate values because a
+//     single one would force every parked item to falsely claim a human owner,
+//     and no consumer downstream could tell the two apart afterwards. See
+//     config.DefaultNonDispatchableAssignees.
 //
 // So the test is NOT "is this assigned to the coordinator?" — it is "is this
 // gated away from automatic dispatch?". Everything that is not gated is watched,
@@ -464,7 +470,7 @@ func (w *Watcher) watchedForDispatch(assignee string) bool {
 }
 
 // isDispatchGated reports whether an assignee names a non-dispatchable executor
-// (default: "human"). Matching is case-insensitive and whitespace-trimmed, so a
+// (default: "human", "parked"). Matching is case-insensitive and whitespace-trimmed, so a
 // "Human" or " human " frontmatter value still gates, mirroring isFastPriority.
 func (w *Watcher) isDispatchGated(assignee string) bool {
 	a := strings.ToLower(strings.TrimSpace(assignee))

@@ -210,7 +210,7 @@ max_unread_mail_count = 5               # Threshold B (count)
 nudge_cooldown = "5m"                   # min gap between same-category nudges
 
 # Assignees that mean "do NOT dispatch this" — see "Ownership vs execution".
-non_dispatchable_assignees = ["human"]  # everything else is watched
+non_dispatchable_assignees = ["human", "parked"]  # everything else is watched
 
 # Priority wake (gh #61): a high-priority available item skips the 10m gate.
 priority_wake_enabled = true            # default true
@@ -223,8 +223,8 @@ fast_priorities = ["high"]              # Priority values that trigger the wake
 
 Both work-item detectors (Threshold A and the priority wake) watch **every**
 available item **except** those whose assignee names a non-dispatchable executor
-— by default just `human`. Ownership does not affect visibility: an item owned by
-`pm-pogo`, by `pm-anyone-else`, or by nobody is watched identically.
+— by default `human` and `parked`. Ownership does not affect visibility: an item
+owned by `pm-pogo`, by `pm-anyone-else`, or by nobody is watched identically.
 
 That is because `assignee` carries two incompatible meanings:
 
@@ -233,10 +233,42 @@ That is because `assignee` carries two incompatible meanings:
 | `pm-pogo` (any agent) | **ownership** — who to ask about it | dispatch a worker |
 | *(empty)* | unowned | dispatch a worker |
 | `human` | **execution gate** — a person must do this by hand | never dispatch |
+| `parked` | **execution gate** — deliberately set aside, nobody is expected to act on it now | never dispatch |
 
 `--assignee=human` is a *gate wearing an assignment's clothes*: `mayor.md` files
 manual-QA items that way precisely so no worker is dispatched at them. So the
 detectors test "is this gated?", never "is this assigned to the coordinator?".
+
+**Why `parked` is a separate sentinel and not a convention about `human`
+(mg-a3a2).** Until mg-a3a2, `human` was the only value that silenced these
+detectors, so it accumulated three incompatible senses in one queue: *gated on
+Daniel*, *parked, do not chase*, and *filed here because nothing else was
+expressible*. Use `--assignee=parked` for the second.
+
+This is not a discipline problem that a convention would fix. Two agents who
+both understood the conflation misfiled items into `human` within a single
+session, because the gate had exactly one expressible value. And the cost is not
+confined to the misfiled rows: everything that reads `assignee` to decide what to
+escalate — stall-watch, PM digests, mayor, architect — re-derives the same
+conflation independently and *cannot see the error from the field*, because the
+data does not record which sense was meant. Architect summarized the queue to
+Daniel as "entirely gated on you" when most of it was parked fleet-internal work.
+A convention about how to use `human` cannot be read back out of the data; a
+distinct value can. `mg list --assignee=parked` is now an answerable question,
+and `human` means "Daniel must decide" again — the only property that makes that
+queue worth reading.
+
+**What `parked` does not do.** It buys silence from the nudge channel, not
+disappearance from listings (the `gh-open:` precedent, mg-6e57): a parked item
+still shows up in `mg list` with its assignee and age. And every gate here is
+**unconditional and permanent** — a gated item never ages and never re-alarms,
+whatever sentinel it carries. That is correct for a detector whose job is
+*dispatchable* work: aging gated items would re-alarm on exactly the things the
+gate exists to silence. The aging belongs to the PM sweep, which reads the gated
+queue anyway and can flag "gated N days" with no code change. Live example at
+time of writing: `mg-0ffc` had been `available` and gated for eleven days, and
+stall-watch is structurally incapable of noticing. Stated here so the gap has a
+home rather than being assumed closed.
 
 **Why a denylist of gates rather than an allowlist of agents.** Until mg-4bd4 the
 predicate was `assignee == "" || assignee == "mayor"` — an allowlist of the

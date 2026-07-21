@@ -260,6 +260,54 @@ func TestItemGatedToHumanIgnored(t *testing.T) {
 	}
 }
 
+// TestParkedGateBothDirections (mg-a3a2) is the positive control for the
+// `parked` sentinel, and it is deliberately ONE test covering BOTH directions.
+//
+// A gate only ever observed suppressing has not been shown to pass anything
+// through: if `parked` were silently ignored — misspelled in the default, or
+// dropped from it later — the suppression half alone would still look healthy
+// on a queue that happened to be quiet. So the pass-through cases ride in the
+// same table and cannot be deleted without deleting the suppression cases with
+// them.
+//
+// The two halves also answer different questions. "parked is quiet" is the
+// feature. "empty and pm-pogo still alarm" is the safety property: the point of
+// mg-a3a2 was to stop overloading `human`, NOT to make it easier to mute real
+// work — the failure mode of a good detector is being trained to ignore it.
+func TestParkedGateBothDirections(t *testing.T) {
+	tests := []struct {
+		name      string
+		assignee  string
+		wantFires bool
+		why       string
+	}{
+		{"parked is gated", "parked", false,
+			"a deliberately-parked item must go quiet without claiming a human owns it"},
+		{"parked gates case-insensitively", " Parked ", false,
+			"the sentinel must survive frontmatter capitalization, like human does"},
+		{"human is still gated", "human", false,
+			"adding parked must not disturb the pre-existing gate"},
+		{"unassigned still alarms", "", true,
+			"an unowned item is NOT parked — muting it would hide real work"},
+		{"agent-owned still alarms", "pm-pogo", true,
+			"ownership is not a gate; only an explicit sentinel silences"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w, rec, workRoot, _ := testEnv(t, baseConfig())
+			now := time.Now()
+			writeItem(t, workRoot, "mg-7777", tt.assignee, now.Add(-20*time.Minute))
+
+			w.Check(now)
+
+			got := rec.nudgeCount() > 0
+			if got != tt.wantFires {
+				t.Fatalf("assignee %q: fired=%v, want %v (%s)", tt.assignee, got, tt.wantFires, tt.why)
+			}
+		})
+	}
+}
+
 // TestUnknownAssigneeIsWatched pins the failure DIRECTION: an assignee nobody
 // has seen before is watched, not skipped. This is what keeps the fix from
 // re-introducing the bug the day a new PM joins — a roster allowlist would have
@@ -763,11 +811,16 @@ func TestDefaultsAppliedFromZeroConfig(t *testing.T) {
 	if w.cfg.NudgeCooldown != config.DefaultStallNudgeCooldown {
 		t.Errorf("cooldown = %v, want default", w.cfg.NudgeCooldown)
 	}
-	// A zero-value config must still gate "human": New() defaulting this is what
-	// keeps a bare config from dispatch-nudging manual-QA items.
-	if !w.isDispatchGated("human") {
-		t.Errorf("zero config must default the dispatch gate to %v, got %v",
-			config.DefaultNonDispatchableAssignees, w.cfg.NonDispatchableAssignees)
+	// A zero-value config must gate BOTH sentinels: New() defaulting this is
+	// what keeps a bare config from dispatch-nudging manual-QA items ("human")
+	// and deliberately-parked ones ("parked", mg-a3a2). Asserting each by name
+	// means dropping one from the default fails here rather than at 3am on a
+	// queue nobody is reading.
+	for _, gate := range []string{"human", "parked"} {
+		if !w.isDispatchGated(gate) {
+			t.Errorf("zero config must gate %q by default (got %v, want %v)",
+				gate, w.cfg.NonDispatchableAssignees, config.DefaultNonDispatchableAssignees)
+		}
 	}
 	if !w.watchedForDispatch("pm-pogo") {
 		t.Error("zero config must watch pm-assigned items")

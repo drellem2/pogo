@@ -50,8 +50,10 @@ the mayor's responsibility when its `assignee` is the watched agent **or** empty
 > every item naming an *owner* — 13 of 14 available items, because PMs file with
 > `--assignee=pm-<name>`. An item now counts as the mayor's responsibility unless
 > its assignee is an execution gate (`non_dispatchable_assignees`, default
-> `["human"]`); ownership no longer affects visibility. See "Ownership vs
-> execution" in docs/CONFIGURATION.md.
+> `["human", "parked"]` — `parked` added by mg-a3a2 so a deliberately-parked
+> item can go quiet without falsely claiming a human owns it); ownership no
+> longer affects visibility. See "Ownership vs execution" in
+> docs/CONFIGURATION.md.
 
 Age is the work-item
 file's mtime — the best available proxy for "time sitting in the available

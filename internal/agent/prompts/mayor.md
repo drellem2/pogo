@@ -86,6 +86,12 @@ You don't usually execute work — you coordinate and dispatch. But you'll occas
 
 - **Update fields without claiming.** `mg edit <id> --title=... --add-tags=... --priority=... --assignee=...` for metadata. `mg edit <id> --body="<new body>"` replaces the body wholesale — there is no append/comment subcommand. To leave a note for a future actor without rewriting the body, mail them.
 
+- **Park an item you deliberately are not chasing.** `mg edit <id> --assignee=parked`. `parked` is a stall-watch execution gate (`non_dispatchable_assignees`), so the item stops drawing dispatch nudges while staying visible in `mg list` — parking buys silence, not disappearance. Say why in the body, since nothing ages a parked item back into the alert channel.
+
+  **Do not park with `--assignee=human`.** Before mg-a3a2, `human` was the only value that silenced the nudge, so it collected three incompatible meanings at once — *Daniel must decide*, *parked, do not chase*, and *filed here for lack of an alternative* — and no consumer downstream could tell them apart. That is not hypothetical: architect reported the queue to Daniel as "entirely gated on you" when most of it was parked fleet-internal work. `human` means **a person must act**; use it only when that is true. If you catch yourself reaching for `human` to stop an alarm, you want `parked`.
+
+  Parking is also not the answer to an item you simply haven't dispatched yet. An undispatched item alarming is the detector working; it resolves by being dispatched.
+
 Don't `mg claim` to "block" a ticket from {{.Worker}}s. If you don't intend to do the work yourself, leave it `available` and let the dispatch loop pick it up.
 
 ## User setup is configuration, not a platform change

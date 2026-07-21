@@ -914,8 +914,14 @@ func TestStallWatchDefaults(t *testing.T) {
 	if len(cfg.StallWatch.FastPriorities) != 1 || cfg.StallWatch.FastPriorities[0] != "high" {
 		t.Errorf("fast priorities = %v, want [high]", cfg.StallWatch.FastPriorities)
 	}
-	if len(cfg.StallWatch.NonDispatchableAssignees) != 1 || cfg.StallWatch.NonDispatchableAssignees[0] != "human" {
-		t.Errorf("non-dispatchable assignees = %v, want [human]", cfg.StallWatch.NonDispatchableAssignees)
+	// Both gate sentinels ship by default: "human" (a person must do this by
+	// hand) and "parked" (deliberately set aside, mg-a3a2). They are distinct
+	// values on purpose — collapsing them back into one would restore the
+	// conflation that made the human queue unreadable.
+	if len(cfg.StallWatch.NonDispatchableAssignees) != 2 ||
+		cfg.StallWatch.NonDispatchableAssignees[0] != "human" ||
+		cfg.StallWatch.NonDispatchableAssignees[1] != "parked" {
+		t.Errorf("non-dispatchable assignees = %v, want [human parked]", cfg.StallWatch.NonDispatchableAssignees)
 	}
 }
 

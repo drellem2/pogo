@@ -44,7 +44,8 @@ priority pass (`checkPriorityWake`):
 
 - An item qualifies when it is **assigned to the watched agent** (or unassigned)
   — **SUPERSEDED by mg-4bd4:** it now qualifies unless its assignee is an
-  execution gate (`non_dispatchable_assignees`, default `["human"]`), so
+  execution gate (`non_dispatchable_assignees`, default `["human", "parked"]`
+  since mg-a3a2), so
   PM-owned items are visible; see "Ownership vs execution" in
   docs/CONFIGURATION.md —
   its priority is in `fast_priorities` (default `["high"]`), and it has aged past

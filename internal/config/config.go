@@ -172,10 +172,41 @@ var DefaultFastPriorities = []string{"high"}
 
 // DefaultNonDispatchableAssignees is the set of WorkItem.Assignee values that
 // mean "the coordinator must NOT dispatch this" — an execution gate rather
-// than a statement of ownership. Only "human" today: internal/agent/prompts
-// /mayor.md files manual-QA items with `--assignee=human` precisely so they are
-// never handed to a worker, and events.ResolveAgent already reserves "human" as
-// the no-agent identity.
+// than a statement of ownership. Two gates, and they gate for DIFFERENT
+// reasons:
+//
+//   - "human" — a person must do this by hand. internal/agent/prompts/mayor.md
+//     files manual-QA items with `--assignee=human` precisely so they are never
+//     handed to a worker, and events.ResolveAgent already reserves "human" as
+//     the no-agent identity.
+//   - "parked" — deliberately set aside; nobody is expected to act on it now.
+//     No owner is asserted at all.
+//
+// "parked" exists because until mg-a3a2 "human" was the ONLY value that
+// silenced the dispatch detectors, so it accumulated three incompatible senses
+// in one queue: gated-on-Daniel, parked-do-not-chase, and filed-here-for-lack-
+// of-an-alternative. That is not a discipline failure — two agents who both
+// understood the problem misfiled items within one session, because a gate with
+// one expressible value leaves no way to say anything else. Every consumer that
+// reads `assignee` to decide what to escalate (stall-watch, PM digests, mayor,
+// architect) then re-derived the conflation independently and could not see the
+// error from the field: architect reported the queue to Daniel as "entirely
+// gated on you" when most of it was parked fleet-internal work.
+//
+// A CONVENTION about how to use "human" could not have fixed that, because a
+// convention cannot be read back out of the data. A distinct sentinel can:
+// `mg list --assignee=parked` is now an answerable question, and "human" means
+// only "Daniel must decide" again — the property that makes that queue worth
+// reading.
+//
+// Note what "parked" does NOT do. It buys silence from the nudge channel, not
+// disappearance from listings (the `gh-open:` precedent, mg-6e57): a parked item
+// still appears in `mg list` with its assignee and age visible. And the
+// suppression, like every gate here, is unconditional and permanent — a gated
+// item never ages back into the alert channel whatever sentinel it carries.
+// Aging the gated queue belongs to the PM sweep, which reads it anyway and can
+// flag "gated N days" with no code change. Recorded so the gap has a home
+// rather than being assumed closed.
 //
 // This is deliberately a DENYLIST of gates, not an allowlist of dispatchable
 // agents. An allowlist would have to enumerate the agent roster (mayor, every
@@ -186,7 +217,7 @@ var DefaultFastPriorities = []string{"high"}
 // config line rather than a code change.
 //
 // Kept as a var because a slice cannot be a const; treat it as read-only.
-var DefaultNonDispatchableAssignees = []string{"human"}
+var DefaultNonDispatchableAssignees = []string{"human", "parked"}
 
 // Config holds pogo daemon configuration.
 type Config struct {
@@ -279,7 +310,7 @@ type StallWatchConfig struct {
 	// item as gated to a non-dispatchable executor, so neither work-item
 	// detector watches it. Every other assignee — unassigned, the coordinator,
 	// or any owning agent such as pm-<name> — IS watched. Empty falls back to
-	// DefaultNonDispatchableAssignees (["human"]).
+	// DefaultNonDispatchableAssignees (["human", "parked"]).
 	NonDispatchableAssignees []string
 }
 
