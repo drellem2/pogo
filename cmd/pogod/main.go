@@ -32,7 +32,6 @@ import (
 	"github.com/drellem2/pogo/internal/driver"
 	"github.com/drellem2/pogo/internal/ghteardown"
 	"github.com/drellem2/pogo/internal/gitceiling"
-	"github.com/drellem2/pogo/internal/gitgc"
 	"github.com/drellem2/pogo/internal/health"
 	"github.com/drellem2/pogo/internal/heartbeat"
 	"github.com/drellem2/pogo/internal/pathenv"
@@ -1254,13 +1253,11 @@ Flags:
 			// can cover, pogod dying mid-polecat, is the job of the gitgc
 			// startup sweep. See mg-30d5 D3.
 			log.Printf("agent %s (%s) exited, cleaning up", a.Name, a.Type)
-			if a.WorktreeDir != "" {
-				if err := gitgc.RemoveWorktree(a.SourceRepo, a.WorktreeDir); err != nil {
-					log.Printf("agent %s: worktree cleanup failed: %v", a.Name, err)
-				} else {
-					log.Printf("agent %s: removed worktree %s", a.Name, a.WorktreeDir)
-				}
-			}
+			// A worktree holding uncommitted work is PRESERVED, not reaped
+			// (mg-ee02). See cleanupAgentWorktree for why preservation and
+			// not refusal, and for the notification that keeps a preserved
+			// tree from accumulating unnoticed.
+			cleanupAgentWorktree(a.Name, a.SourceRepo, a.WorktreeDir, coordinator, client.SendMGMail)
 			a.Cleanup()
 			agentRegistry.Remove(a.Name)
 			// Eagerly reap this agent's mail-check loop so it stops firing the

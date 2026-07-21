@@ -197,24 +197,129 @@ func PruneWorktrees(repo string, dryRun bool) (string, error) {
 	return strings.TrimSpace(string(out)), err
 }
 
+// DirtyWorktreeError reports a removal refused because the worktree held
+// uncommitted work. Files lists the `git status --porcelain` entries that
+// caused the refusal, capped at dirtyFileListCap for legibility.
+type DirtyWorktreeError struct {
+	Path  string
+	Files []string
+	// Total is the full count of dirty entries, which may exceed len(Files).
+	Total int
+}
+
+func (e *DirtyWorktreeError) Error() string {
+	shown := strings.Join(e.Files, ", ")
+	if e.Total > len(e.Files) {
+		shown = fmt.Sprintf("%s (+%d more)", shown, e.Total-len(e.Files))
+	}
+	return fmt.Sprintf("worktree %s has %d uncommitted change(s), refusing to remove: %s",
+		e.Path, e.Total, shown)
+}
+
+// dirtyFileListCap bounds how many paths a refusal names. The operator needs
+// enough to recognise the work, not a full status dump in a log line.
+const dirtyFileListCap = 10
+
+// WorktreeDirty reports whether worktreeDir holds uncommitted work — modified
+// tracked files OR untracked new ones. The untracked half is not an
+// afterthought: the loss that produced mg-ee02 was a brand-new 201-line test
+// file, so a check that only noticed tracked modifications would miss exactly
+// the case this exists to prevent. Files ignored via .gitignore do not count;
+// a polecat's ./bin build output is not work, and counting it would make every
+// worktree refuse to reap.
+//
+// A non-nil error means dirtiness could not be determined — the directory is
+// absent, or it is a legacy worktree whose .git pointer was stripped and which
+// git can no longer describe. Callers must decide what an unclassifiable tree
+// deserves; RemoveWorktree proceeds (see its doc comment for why).
+func WorktreeDirty(worktreeDir string) (bool, []string, error) {
+	if worktreeDir == "" {
+		return false, nil, fmt.Errorf("empty worktree path")
+	}
+	if _, err := os.Stat(worktreeDir); err != nil {
+		return false, nil, fmt.Errorf("stat worktree %s: %w", worktreeDir, err)
+	}
+	out, err := git(worktreeDir, "status", "--porcelain")
+	if err != nil {
+		return false, nil, fmt.Errorf("status %s: %w", worktreeDir, err)
+	}
+	var files []string
+	for _, line := range strings.Split(string(out), "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			files = append(files, line)
+		}
+	}
+	return len(files) > 0, files, nil
+}
+
 // RemoveWorktree removes a git worktree registration and deletes its
-// directory from disk. It is safe to call when the registration, the
-// directory, or both are already gone.
+// directory from disk — unless the worktree holds uncommitted work, in which
+// case it refuses and returns a *DirtyWorktreeError naming what it preserved.
+// It is safe to call when the registration, the directory, or both are
+// already gone.
 //
 // This is the cleanup invoked on every polecat exit — normal and abnormal
-// alike (see the onExit hook in cmd/pogod) — and during a GC sweep. The
-// `git worktree remove` step is best-effort: it drops the registration when
-// the worktree is still linked (the normal case since the submit-time unlink
-// was deleted in gh #88), and fails harmlessly on a legacy worktree whose
-// .git pointer that hook already removed. os.RemoveAll is the backstop that
-// reclaims the directory either way. The returned error reflects only whether
-// the directory is gone, which is the outcome callers care about.
+// alike (see the onExit hook in cmd/pogod) — and during a GC sweep.
+//
+// # Why it refuses (mg-ee02)
+//
+// This function used to pass --force and then os.RemoveAll unconditionally,
+// and it destroyed a live polecat's uncommitted work: a stopped mid-flight
+// agent's tree, including a new 201-line race test, went with it. `git
+// worktree remove` refuses a dirty worktree BY DEFAULT — that guard exists
+// precisely for this — and --force opted out of it. Worse, the RemoveAll
+// behind it ran even when git declined, so restoring git's refusal alone
+// would have changed nothing observable. Both had to go; the dirty check now
+// sits in front of both, which is the only placement that actually holds.
+//
+// The operation was safe exactly when the agent had finished, which is when
+// it is normally called — so the destructive case and the common case were
+// disjoint, and nobody noticed. The clean case still reaps, unchanged.
+//
+// # The unclassifiable case
+//
+// If dirtiness cannot be determined — the directory is gone, or it is a
+// legacy worktree whose .git pointer was stripped (the pre-gh#88 unlink
+// shape) — removal PROCEEDS. Refusing instead would strand every gh #31
+// orphan forever, since nothing can ever prove one clean. This is a
+// deliberate, bounded hole: it applies only to trees git can no longer see.
 //
 // Dropping the registration is load-bearing, not incidental: it is what frees
 // the polecat's branch for deletion (git refuses to delete a branch checked
 // out in a worktree), which is why Sweep processes worktrees before branches.
 // TestRemoveWorktreeFreesCheckedOutBranch guards it.
 func RemoveWorktree(sourceRepo, worktreeDir string) error {
+	if worktreeDir == "" {
+		return nil
+	}
+	// Only a tree we can positively prove dirty blocks removal. An error here
+	// means "cannot tell" — proceed, per the doc comment above.
+	if isDirty, files, err := WorktreeDirty(worktreeDir); err == nil && isDirty {
+		shown := files
+		if len(shown) > dirtyFileListCap {
+			shown = shown[:dirtyFileListCap]
+		}
+		return &DirtyWorktreeError{Path: worktreeDir, Files: shown, Total: len(files)}
+	}
+	return RemoveWorktreeForce(sourceRepo, worktreeDir)
+}
+
+// RemoveWorktreeForce removes a worktree regardless of uncommitted work. It is
+// the deliberate override behind RemoveWorktree's refusal, and the escape
+// hatch that keeps preservation from becoming an unbounded leak: without a way
+// to reclaim a dirty tree, a refused worktree would pin its branch forever.
+//
+// Callers must have a positive reason to discard work. Two do: a spawn that
+// failed before the agent ever ran (internal/agent), and an operator who
+// asked for it explicitly (`pogo gc --apply --force`).
+//
+// The `git worktree remove` step is best-effort: it drops the registration
+// when the worktree is still linked (the normal case since the submit-time
+// unlink was deleted in gh #88), and fails harmlessly on a legacy worktree
+// whose .git pointer that hook already removed. os.RemoveAll is the backstop
+// that reclaims the directory either way. The returned error reflects only
+// whether the directory is gone, which is the outcome callers care about.
+func RemoveWorktreeForce(sourceRepo, worktreeDir string) error {
 	if worktreeDir == "" {
 		return nil
 	}

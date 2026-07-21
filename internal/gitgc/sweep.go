@@ -40,6 +40,12 @@ type Options struct {
 	PolecatsDir string
 	// DryRun reports what would be done without deleting anything.
 	DryRun bool
+	// Force reclaims worktrees holding uncommitted work. Off by default: a
+	// dirty worktree is KEPT and reported, because a concluded ticket is not
+	// proof that everything in the tree made it into the merge (mg-ee02).
+	// This is the operator's deliberate escape hatch — without it, a
+	// preserved tree pins its branch indefinitely.
+	Force bool
 	// Logf, when set, receives a line per action for progress logging.
 	Logf func(format string, args ...any)
 }
@@ -133,12 +139,27 @@ func Sweep(opts Options) (Result, error) {
 			})
 			continue
 		}
+		// A concluded ticket says the WORK was accepted; it does not say the
+		// tree is empty. Uncommitted files here are unmerged by definition,
+		// so keep them and say so rather than GC-ing them away (mg-ee02).
+		// Checked before the dry-run branch so a dry run reports the same
+		// decision an apply would make.
+		if !opts.Force {
+			if isDirty, files, derr := WorktreeDirty(wt.Path); derr == nil && isDirty {
+				res.WorktreesKept = append(res.WorktreesKept, WorktreeAction{
+					Path: wt.Path, Branch: wt.Branch,
+					Reason: fmt.Sprintf("%d uncommitted change(s) — rerun with --force to discard", len(files)),
+				})
+				opts.logf("kept worktree %s (%s): %d uncommitted change(s)", wt.Path, wt.Branch, len(files))
+				continue
+			}
+		}
 		freed[wt.Branch] = true
 		action := WorktreeAction{Path: wt.Path, Branch: wt.Branch, Reason: "ticket " + state.String()}
 		if opts.DryRun {
 			opts.logf("would remove worktree %s (%s)", wt.Path, wt.Branch)
 		} else {
-			if err := RemoveWorktree(opts.Repo, wt.Path); err != nil {
+			if err := RemoveWorktreeForce(opts.Repo, wt.Path); err != nil {
 				res.Errors = append(res.Errors, fmt.Sprintf("remove worktree %s: %v", wt.Path, err))
 				continue
 			}
