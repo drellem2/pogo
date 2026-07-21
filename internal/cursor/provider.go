@@ -188,4 +188,10 @@ var Provider = agent.Provider{
 	SessionHook:   nil,
 
 	// PTYSize nil — Cursor renders correctly at pogo's default 200×50 winsize.
+
+	// MemoryIndexGlobs nil: Cursor ships no MEMORY.md auto-memory index.
+	// ~/.cursor/projects/<slug>/ holds trust markers, transcripts and repo
+	// metadata — no index file of that shape (measured 2026-07-21). If Cursor
+	// ships one, declare its glob here — memcheck needs no change.
+	MemoryIndexGlobs: nil,
 }

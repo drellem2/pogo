@@ -161,33 +161,100 @@ func TestCheckFileDoesNotModify(t *testing.T) {
 	}
 }
 
-func TestLocateGlobsBothRoots(t *testing.T) {
+// seed creates path with a MEMORY.md-shaped body and returns it.
+func seed(t *testing.T, path string) string {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("# Memory index\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func has(paths []string, want string) bool {
+	for _, p := range paths {
+		if p == want {
+			return true
+		}
+	}
+	return false
+}
+
+// TestLocateGlobsCallerSuppliedAndPogoRoots: a caller-supplied harness glob and
+// pogo's own agent-memory root are both globbed. The harness glob here is
+// Claude's, matching production.
+func TestLocateGlobsCallerSuppliedAndPogoRoots(t *testing.T) {
 	home := t.TempDir()
-	claudeMem := filepath.Join(home, ".claude", "projects", "-x", "memory", "MEMORY.md")
-	pogoMem := filepath.Join(home, ".pogo", "agents", "pm", "pm-x", "memory", "MEMORY.md")
-	for _, p := range []string{claudeMem, pogoMem} {
-		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(p, []byte("# Memory index\n"), 0o644); err != nil {
-			t.Fatal(err)
-		}
+	claudeGlob := ".claude/projects/*/memory/MEMORY.md"
+	claudeMem := seed(t, filepath.Join(home, ".claude", "projects", "-x", "memory", "MEMORY.md"))
+	pogoMem := seed(t, filepath.Join(home, ".pogo", "agents", "pm", "pm-x", "memory", "MEMORY.md"))
+
+	got := Locate(home, []string{claudeGlob})
+	if !has(got, claudeMem) {
+		t.Errorf("Locate missed the caller-supplied harness index %q; got %v", claudeMem, got)
 	}
-	got := Locate(home)
-	found := map[string]bool{}
-	for _, g := range got {
-		found[g] = true
-	}
-	if !found[claudeMem] {
-		t.Errorf("Locate missed the Claude auto-memory index %q; got %v", claudeMem, got)
-	}
-	if !found[pogoMem] {
+	if !has(got, pogoMem) {
 		t.Errorf("Locate missed the pogo agent memory index %q; got %v", pogoMem, got)
 	}
 }
 
+// TestPositiveControl_NonClaudeHarnessIsCovered is the harness-neutrality
+// positive control, and it is the point of the whole change: memcheck must
+// cover a harness that is NOT Claude. Before the fix this was impossible —
+// the only harness root was a ~/.claude literal, so a non-Claude harness's
+// index could not be found however it was configured. Demonstrating the Claude
+// path still works would NOT have tested this requirement.
+func TestPositiveControl_NonClaudeHarnessIsCovered(t *testing.T) {
+	home := t.TempDir()
+	// A hypothetical non-Claude harness with its own dotdir and layout.
+	otherGlob := ".otherharness/workspaces/*/mem/MEMORY.md"
+	otherMem := seed(t, filepath.Join(home, ".otherharness", "workspaces", "w1", "mem", "MEMORY.md"))
+	// A Claude index also present, to prove coverage is additive rather than
+	// one-harness-at-a-time.
+	claudeMem := seed(t, filepath.Join(home, ".claude", "projects", "-x", "memory", "MEMORY.md"))
+
+	got := Locate(home, []string{".claude/projects/*/memory/MEMORY.md", otherGlob})
+	if !has(got, otherMem) {
+		t.Fatalf("harness-neutrality FAILED: the non-Claude harness index %q was not located; got %v", otherMem, got)
+	}
+	if !has(got, claudeMem) {
+		t.Errorf("adding a second harness dropped the Claude index %q; got %v", claudeMem, got)
+	}
+}
+
+// TestLocateNoHarnessGlobsSkipsClaudePath: on an install whose providers
+// declare no memory root, Locate must not glob ~/.claude at all. This is the
+// negative half of the neutrality requirement — the old literal fired here.
+func TestLocateNoHarnessGlobsSkipsClaudePath(t *testing.T) {
+	home := t.TempDir()
+	claudeMem := seed(t, filepath.Join(home, ".claude", "projects", "-x", "memory", "MEMORY.md"))
+	pogoMem := seed(t, filepath.Join(home, ".pogo", "agents", "pm", "pm-x", "memory", "MEMORY.md"))
+
+	got := Locate(home, nil)
+	if has(got, claudeMem) {
+		t.Fatalf("Locate globbed the Claude path with no harness glob supplied — the hard-coded root is still there; got %v", got)
+	}
+	if !has(got, pogoMem) {
+		t.Errorf("pogo's own agent-memory root is harness-independent and must always be globbed; got %v", got)
+	}
+}
+
+// TestLocateDeduplicates: overlapping provider globs must not yield the same
+// path twice, or doctor would warn about one file twice.
+func TestLocateDeduplicates(t *testing.T) {
+	home := t.TempDir()
+	g := ".claude/projects/*/memory/MEMORY.md"
+	seed(t, filepath.Join(home, ".claude", "projects", "-x", "memory", "MEMORY.md"))
+	got := Locate(home, []string{g, g})
+	if len(got) != 1 {
+		t.Fatalf("expected 1 de-duplicated path, got %d: %v", len(got), got)
+	}
+}
+
 func TestLocateEmptyHomeNoError(t *testing.T) {
-	if got := Locate(t.TempDir()); len(got) != 0 {
+	if got := Locate(t.TempDir(), []string{".claude/projects/*/memory/MEMORY.md"}); len(got) != 0 {
 		t.Fatalf("expected no matches under an empty home, got %v", got)
 	}
 }

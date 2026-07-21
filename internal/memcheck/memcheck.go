@@ -120,17 +120,34 @@ func fattestLines(data []byte, n int) []Line {
 	return lines
 }
 
+// PogoAgentMemoryGlob is pogo's OWN agent-memory index glob, relative to home:
+// ~/.pogo/agents/<type>/<name>/memory/MEMORY.md. It lives here, rather than in a
+// provider, because pogo writes it for every agent whatever harness that agent
+// runs — it is harness-independent by construction, not a Claude artifact.
+const PogoAgentMemoryGlob = ".pogo/agents/*/*/memory/MEMORY.md"
+
 // Locate returns the auto-memory MEMORY.md index paths to check under home.
-// It globs the two roots where these indexes live:
-//   - ~/.claude/projects/<slug>/memory/MEMORY.md  (Claude Code auto-memory)
-//   - ~/.pogo/agents/<type>/<name>/memory/MEMORY.md  (pogo agent memory)
 //
+// harnessGlobs are home-relative globs supplied by the CALLER — one per harness
+// that ships an auto-memory index (see agent.Provider.MemoryIndexGlobs and
+// providers.MemoryIndexGlobs). They are a parameter, not a literal, so this
+// package names no harness's dotdir. That is the whole point: the read cliff
+// this package detects is a property of any harness, and a hard-coded
+// ~/.claude here made a neutral-sounding check silently Claude-only — on a
+// codex/pi/cursor install it globbed a path that could never exist while no
+// equivalent covered the harness actually in use.
+//
+// pogo's own agent-memory root is always included; it is harness-independent.
 // Missing roots simply contribute nothing; a glob error on one root does not
-// stop the others. The result is sorted for deterministic output.
-func Locate(home string) []string {
-	patterns := []string{
-		filepath.Join(home, ".claude", "projects", "*", "memory", "MEMORY.md"),
-		filepath.Join(home, ".pogo", "agents", "*", "*", "memory", "MEMORY.md"),
+// stop the others. The result is sorted and de-duplicated for deterministic
+// output.
+func Locate(home string, harnessGlobs []string) []string {
+	patterns := []string{filepath.Join(home, filepath.FromSlash(PogoAgentMemoryGlob))}
+	for _, g := range harnessGlobs {
+		if g == "" {
+			continue
+		}
+		patterns = append(patterns, filepath.Join(home, filepath.FromSlash(g)))
 	}
 	var found []string
 	for _, p := range patterns {
@@ -141,5 +158,13 @@ func Locate(home string) []string {
 		found = append(found, matches...)
 	}
 	sort.Strings(found)
-	return found
+	// De-duplicate: two providers may declare overlapping roots, and a path
+	// checked twice would be warned about twice.
+	var uniq []string
+	for i, p := range found {
+		if i == 0 || p != found[i-1] {
+			uniq = append(uniq, p)
+		}
+	}
+	return uniq
 }

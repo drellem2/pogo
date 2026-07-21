@@ -1,6 +1,10 @@
 package claude
 
-import "github.com/drellem2/pogo/internal/agent"
+import (
+	"path/filepath"
+
+	"github.com/drellem2/pogo/internal/agent"
+)
 
 // Provider is the Claude Code harness descriptor — pogo's sole registered
 // provider today. It captures, in one value, every Claude-specific spawn
@@ -39,4 +43,13 @@ var Provider = agent.Provider{
 	SessionHook:   ModalHook,
 
 	// PTYSize nil — Claude uses pogo's default 200×50 winsize.
+
+	// Claude Code keeps a per-project auto-memory index at
+	// ~/.claude/projects/<project-slug>/memory/MEMORY.md. This is a Claude Code
+	// product feature, so its path is declared HERE rather than in the shared
+	// memcheck package — that literal living in a neutral package made a
+	// harness-agnostic check Claude-only in practice.
+	MemoryIndexGlobs: []string{
+		filepath.Join(".claude", "projects", "*", "memory", "MEMORY.md"),
+	},
 }

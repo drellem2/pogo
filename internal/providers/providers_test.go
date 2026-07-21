@@ -1,6 +1,10 @@
 package providers
 
-import "testing"
+import (
+	"path/filepath"
+	"strings"
+	"testing"
+)
 
 func TestResolveClaude(t *testing.T) {
 	p, ok := Resolve("claude")
@@ -118,5 +122,64 @@ func TestResolveUnknownFallsBackToClaude(t *testing.T) {
 	}
 	if p == nil || p.ID != "claude" {
 		t.Fatalf("Resolve(\"nonesuch\") = %+v, want the Claude fallback so startup never wedges", p)
+	}
+}
+
+// TestMemoryIndexGlobsCarriesClaudeRoot: the Claude auto-memory root must still
+// be checked after being moved out of internal/memcheck — a refactor that
+// silently dropped coverage would look identical to one that preserved it.
+func TestMemoryIndexGlobsCarriesClaudeRoot(t *testing.T) {
+	globs := MemoryIndexGlobs()
+	if len(globs) == 0 {
+		t.Fatal("MemoryIndexGlobs() is empty — no harness declares a memory root, so doctor checks none")
+	}
+	want := filepath.Join(".claude", "projects", "*", "memory", "MEMORY.md")
+	for _, g := range globs {
+		if g == want {
+			return
+		}
+	}
+	t.Fatalf("Claude's auto-memory root %q is no longer declared by any provider; got %v", want, globs)
+}
+
+// TestMemoryIndexGlobsAreHomeRelative pins the contract memcheck.Locate relies
+// on: globs join UNDER home. An absolute glob would escape the caller's home
+// and, in tests, escape t.TempDir() to hit the real user's files.
+func TestMemoryIndexGlobsAreHomeRelative(t *testing.T) {
+	for _, g := range MemoryIndexGlobs() {
+		if filepath.IsAbs(g) {
+			t.Errorf("glob %q is absolute; MemoryIndexGlobs must be home-relative", g)
+		}
+		if strings.HasPrefix(g, "~") {
+			t.Errorf("glob %q starts with ~; expansion is the caller's job, so this would never match", g)
+		}
+	}
+}
+
+// TestEveryProviderDeclaresMemoryIntent: a provider with no memory root must
+// say so by construction rather than by omission. All four are enumerated here
+// so ADDING a provider forces a decision instead of silently defaulting to
+// "not checked" — the failure mode this whole change exists to remove.
+func TestEveryProviderDeclaresMemoryIntent(t *testing.T) {
+	// id -> whether it is expected to declare at least one memory root.
+	want := map[string]bool{
+		"claude": true,  // per-project auto-memory index
+		"codex":  false, // no MEMORY.md index (measured 2026-07-21)
+		"pi":     false, // no MEMORY.md index (measured 2026-07-21)
+		"cursor": false, // no MEMORY.md index (measured 2026-07-21)
+	}
+	all := All()
+	if len(all) != len(want) {
+		t.Fatalf("All() has %d providers but this test enumerates %d — a new provider must declare whether it ships an auto-memory index", len(all), len(want))
+	}
+	for _, p := range all {
+		expect, known := want[p.ID]
+		if !known {
+			t.Errorf("provider %q is not enumerated here; declare whether it ships an auto-memory index", p.ID)
+			continue
+		}
+		if got := len(p.MemoryIndexGlobs) > 0; got != expect {
+			t.Errorf("provider %q declares memory globs = %v (%v), want %v", p.ID, p.MemoryIndexGlobs, got, expect)
+		}
 	}
 }

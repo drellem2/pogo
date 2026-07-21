@@ -2290,7 +2290,10 @@ Exits with code 1 if any critical check fails (--check mode only).`,
 			if home, herr := os.UserHomeDir(); herr != nil {
 				warn("memory index size", "could not resolve home dir: "+herr.Error())
 			} else {
-				memFiles := memcheck.Locate(home)
+				// Harness memory roots come from the provider registry, not
+				// from a literal inside memcheck — so this check covers
+				// whichever harnesses are in play rather than Claude alone.
+				memFiles := memcheck.Locate(home, providers.MemoryIndexGlobs())
 				var approaching []memcheck.Result
 				checked := 0
 				for _, mf := range memFiles {

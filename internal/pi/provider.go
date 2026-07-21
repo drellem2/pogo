@@ -127,4 +127,9 @@ var Provider = agent.Provider{
 	SessionHook:   nil,
 
 	// PTYSize nil — pi renders correctly at pogo's default 200×50 winsize.
+
+	// MemoryIndexGlobs nil: pi ships no MEMORY.md auto-memory index. ~/.pi
+	// holds only the agent auth/settings store (measured 2026-07-21). If pi
+	// ships one, declare its glob here — memcheck needs no change.
+	MemoryIndexGlobs: nil,
 }

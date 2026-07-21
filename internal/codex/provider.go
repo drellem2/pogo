@@ -109,4 +109,10 @@ var Provider = agent.Provider{
 	SessionHook:   nil,
 
 	// PTYSize nil — Codex renders correctly at pogo's default 200x50 winsize.
+
+	// MemoryIndexGlobs nil: Codex ships no MEMORY.md auto-memory index for
+	// `pogo doctor` to size-check. ~/.codex/memories exists as a directory but
+	// carries no index file of that shape (measured 2026-07-21). If Codex ships
+	// one, declare its glob here — memcheck needs no change.
+	MemoryIndexGlobs: nil,
 }

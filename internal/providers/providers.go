@@ -27,6 +27,25 @@ func All() []*agent.Provider {
 	return []*agent.Provider{&claude.Provider, &codex.Provider, &pi.Provider, &cursor.Provider}
 }
 
+// MemoryIndexGlobs returns the home-relative auto-memory index globs declared
+// by every known provider, in All's stable order. It is the composition point
+// that keeps shared packages free of any one harness's dotdir: memcheck takes
+// these as data instead of naming ~/.claude itself.
+//
+// It spans All rather than the configured provider deliberately. `pogo doctor`
+// checks the MACHINE, not one agent, and pogo resolves a provider per-spawn
+// (the mixed-fleet capability from mg-b31b) — so a machine can be running
+// several harnesses at once, and narrowing to the configured default would
+// under-report exactly the indexes most likely to be missed. Globbing a root
+// that does not exist costs nothing: it contributes no matches.
+func MemoryIndexGlobs() []string {
+	var globs []string
+	for _, p := range All() {
+		globs = append(globs, p.MemoryIndexGlobs...)
+	}
+	return globs
+}
+
 // Resolve maps a config provider id to its agent.Provider descriptor.
 //
 // "" and "claude" resolve to Claude (the default); "codex" resolves to Codex;

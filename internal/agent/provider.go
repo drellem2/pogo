@@ -79,6 +79,25 @@ type Provider struct {
 	// PTYSize overrides pogo's default PTY winsize. nil = pogo default
 	// (defaultPTYCols × defaultPTYRows).
 	PTYSize *PTYSize
+
+	// MemoryIndexGlobs are this harness's auto-memory MEMORY.md index globs,
+	// relative to the user's home directory (e.g. Claude Code's
+	// ".claude/projects/*/memory/MEMORY.md"). `pogo doctor` joins them under
+	// home and checks each match against the harness read cliff — see
+	// internal/memcheck.
+	//
+	// This field exists so a shared package never names one harness's dotdir.
+	// memcheck detects a size cliff that applies to ANY harness; before this
+	// field the Claude path was a literal inside it, which made a neutral-
+	// sounding check silently Claude-only. Each provider declares its own root
+	// or declares none.
+	//
+	// nil means "this harness has no auto-memory index of its own" — a positive
+	// statement, not an omission. Declaring one is additive: a harness that
+	// ships auto-memory later gets covered by adding its glob here, with no
+	// change to memcheck. Note this covers only HARNESS-owned memory; pogo's
+	// own agent memory root is harness-independent and stays in memcheck.
+	MemoryIndexGlobs []string
 }
 
 // PromptInjectionKind enumerates the strategies for delivering a persona prompt
