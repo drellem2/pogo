@@ -21,6 +21,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -131,6 +132,14 @@ type Agent struct {
 
 	// outputBuf holds recent output for monitoring.
 	outputBuf *RingBuffer
+
+	// promptReadySeen latches true the first time this agent's harness is
+	// observed at a ready composer (the provider's prompt-ready sentinel or an
+	// alternate). It latches rather than being re-derived because outputBuf is
+	// bounded: a busy agent scrolls the marker out of the retained window, and
+	// the start-verify fallback would then misread a working agent as stalled
+	// (mg-c33e). See Agent.sawPromptReady.
+	promptReadySeen atomic.Bool
 
 	// socketPath is the unix domain socket for attach.
 	socketPath string

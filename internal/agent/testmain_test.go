@@ -22,6 +22,12 @@ import (
 // agent_attach_rebound records into the developer's live ~/.pogo/events.log.
 // agent_attach_rebound is an operator alarm for a production fault (mg-d216);
 // a test run must not manufacture one.
+// sandboxEventLog is the package-wide throwaway event log TestMain installs.
+// Per-test redirects (useTempEventLog) must restore THIS path on cleanup, not
+// "" — see the note in useTempEventLog for why restoring "" leaked test events
+// into the developer's live log (mg-c33e).
+var sandboxEventLog string
+
 func TestMain(m *testing.M) {
 	os.Unsetenv("POGO_HOME")
 
@@ -29,7 +35,8 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		panic("create temp event log dir: " + err.Error())
 	}
-	events.SetLogPathForTesting(filepath.Join(logDir, "events.log"))
+	sandboxEventLog = filepath.Join(logDir, "events.log")
+	events.SetLogPathForTesting(sandboxEventLog)
 
 	code := m.Run()
 

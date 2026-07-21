@@ -84,6 +84,60 @@ func (a *Agent) WaitIdle(ctx context.Context, quiescence time.Duration) error {
 	}
 }
 
+// markPromptReady records that this agent's harness has been observed at a
+// ready composer at least once. The record is sticky on purpose: the output
+// ring buffer is bounded, so a busy agent scrolls its composer marker out of
+// the retained window, and a readiness test that only re-scans the buffer would
+// flip a working agent back to "not ready" (mg-c33e).
+func (a *Agent) markPromptReady() {
+	a.promptReadySeen.Store(true)
+}
+
+// hasReadySignal reports whether this agent's provider declares any
+// prompt-ready marker at all. A provider without one (e.g. Codex, whose
+// ratatui composer has no stable marker — see NudgeProfile.PromptReadySentinel)
+// gives the start-verify fallback nothing to observe.
+func (a *Agent) hasReadySignal() bool {
+	if a.nudge.PromptReadySentinel != "" {
+		return true
+	}
+	for _, alt := range a.nudge.PromptReadyAlternates {
+		if alt != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// sawPromptReady reports whether the harness has ever rendered a ready
+// composer: either the initial-nudge path already recorded the sighting, or the
+// marker is still present in the retained PTY output.
+//
+// This is a STRUCTURAL observation of the screen — "does the composer exist" —
+// not the output-quiescence heuristic the package doc rejects. The distinction
+// matters: quiescence misreads a CPU-starved process as ready (it is quiet
+// because it is starved), whereas a starved process, a loading spinner, and the
+// workspace-trust dialog all render no composer and so all read correctly as
+// not-ready. See DefaultNudgeProfile's sentinel comment, which notes the hint is
+// absent during exactly those screens.
+func (a *Agent) sawPromptReady() bool {
+	if a.promptReadySeen.Load() {
+		return true
+	}
+	clean := StripANSI(a.outputBuf.Last(a.outputBuf.Len()))
+	if a.nudge.PromptReadySentinel != "" && bytes.Contains(clean, []byte(a.nudge.PromptReadySentinel)) {
+		a.markPromptReady()
+		return true
+	}
+	for _, alt := range a.nudge.PromptReadyAlternates {
+		if alt != "" && bytes.Contains(clean, []byte(alt)) {
+			a.markPromptReady()
+			return true
+		}
+	}
+	return false
+}
+
 // WaitForReady blocks until the agent's PTY output contains the prompt-ready
 // sentinel AND has since gone quiet for quiescence, or the context is
 // cancelled. The sentinel proves the interactive input loop has rendered; the
@@ -110,6 +164,9 @@ func (a *Agent) WaitForReady(ctx context.Context, sentinels []string, quiescence
 			for _, want := range wants {
 				if bytes.Contains(clean, want) {
 					seen = true
+					// Record the sighting so it survives buffer eviction —
+					// the start-verify fallback gates on it (mg-c33e).
+					a.markPromptReady()
 					break
 				}
 			}

@@ -93,23 +93,18 @@ func (r *Registry) startVerifyMaxAttemptsOrDefault() int {
 // re-delivers a bare submit terminator to flush a paste-buffered kickoff. It
 // runs on the initial-nudge goroutine after the kickoff nudge is delivered.
 //
-// It declines to watch — returning without touching the PTY — when no start
-// verifier is wired (bare registry / unit tests) or the agent carries no work
-// item id (crew agents, bare spawns): there is no hard signal to gate on, so
-// the initial nudge stands on its own. For a POLECAT that decline is announced
-// loudly by reportUnwatched; it used to be silent, which is mg-2437. The
-// renudge is a bare CR (a.Nudge("") writes only the
-// provider's SubmitTerminator), the payload least likely to corrupt a working
-// agent's input, and it is delivered ONLY while the item is still provably
-// unclaimed — never on a quiescence heuristic (see the package doc).
+// It gates on the HARD started-signal — the agent's mg work item leaving
+// available/ — whenever the agent carries a work item id. When it does not, it
+// falls back to the READY-COMPOSER signal (mg-c33e); see startedSignal below
+// for both, and for the cases where it still declines outright.
+//
+// The renudge is a bare CR (a.Nudge("") writes only the provider's
+// SubmitTerminator), the payload least likely to corrupt a working agent's
+// input, and it is delivered ONLY while the agent is provably unstarted —
+// never on a quiescence heuristic (see the package doc).
 func (r *Registry) verifyStartAndRenudge(a *Agent) {
-	verifier := r.getStartVerifier()
-	if verifier == nil || a.WorkItemID == "" {
-		reason := reasonNoWorkItemID
-		if verifier == nil {
-			reason = reasonNoStartVerifier
-		}
-		reportUnwatched(a, reason)
+	started, reason, ok := r.startedSignal(a)
+	if !ok {
 		return
 	}
 
@@ -125,7 +120,7 @@ func (r *Registry) verifyStartAndRenudge(a *Agent) {
 		case <-time.After(delay):
 		}
 
-		started, err := verifier(a.WorkItemID)
+		hasStarted, err := started()
 		if err != nil {
 			// mg state unreadable: inconclusive. Do NOT renudge blind — a stray
 			// CR into a working agent is worse than leaving recovery to the stall
@@ -134,21 +129,89 @@ func (r *Registry) verifyStartAndRenudge(a *Agent) {
 				a.Name, a.WorkItemID, err)
 			return
 		}
-		if started {
-			return // work item claimed — healthy start, nothing to do.
+		if hasStarted {
+			return // started — healthy, nothing to do.
 		}
 
-		// HARD unstarted-signal: the item is still in available/. The kickoff
-		// nudge did not take. Re-deliver a bare submit terminator (CR) to flush
-		// any paste-buffered kickoff without injecting a stray character.
-		log.Printf("agent %s: work item %s still unclaimed %s after nudge (attempt %d/%d) — re-delivering submit terminator",
-			a.Name, a.WorkItemID, delay, attempt, maxAttempts)
+		// HARD unstarted-signal. The kickoff nudge did not take. Re-deliver a
+		// bare submit terminator (CR) to flush any paste-buffered kickoff
+		// without injecting a stray character.
+		if reason == reasonNoReadyComposer {
+			log.Printf("agent %s: still shows no ready composer %s after nudge (attempt %d/%d) — re-delivering submit terminator",
+				a.Name, delay, attempt, maxAttempts)
+		} else {
+			log.Printf("agent %s: work item %s still unclaimed %s after nudge (attempt %d/%d) — re-delivering submit terminator",
+				a.Name, a.WorkItemID, delay, attempt, maxAttempts)
+		}
 		if err := a.Nudge(""); err != nil {
 			log.Printf("agent %s: auto-renudge failed: %v", a.Name, err)
 			return
 		}
-		emitAutoRenudge(a, attempt, maxAttempts)
+		emitAutoRenudge(a, attempt, maxAttempts, reason)
 	}
+}
+
+// startedSignal picks the started-signal this agent can be watched on and
+// returns it with the auto_renudge reason that names it. ok is false when the
+// agent cannot be watched at all; the decline has already been reported.
+//
+// Two signals, strongest first:
+//
+//   - work_item_unclaimed — the item leaving available/. The polecat's first
+//     protocol action, and the strongest available: it proves the kickoff nudge
+//     was ACCEPTED, not merely that a composer rendered.
+//   - no_ready_composer — the provider's prompt-ready sentinel has never
+//     appeared. Used when there is no work item, which mg-c33e exists to close:
+//     `--no-worktree` dispatch commonly carries no `--id` (it is optional), and
+//     mg-560d proved that gap is load-bearing. Such a spawn's cwd is a
+//     brand-new ~/.pogo/agents/<name>/, untrusted, so Claude Code raises the
+//     workspace-trust dialog every time; the dialog renders no composer, the
+//     ready sentinel never matches, and the kickoff nudge is never delivered.
+//     560d measured that a bare CR — precisely what this watcher sends —
+//     dismisses that dialog (dialog → composer at t=0.7s, nudge accepted). So
+//     the recovery net could have rescued those polecats and, before this
+//     change, declined to.
+//
+// The fallback is a STRUCTURAL observation of the screen, not the
+// output-quiescence heuristic the package doc rejects at length. Quiescence
+// misreads a CPU-starved harness as ready — it is quiet BECAUSE it is starved.
+// "Has a composer ever rendered" does not: a starved process, a loading
+// spinner, and the trust dialog all show no composer and so all read correctly
+// as unstarted. DefaultNudgeProfile's sentinel comment says as much directly.
+// The sighting is latched (Agent.markPromptReady) so a bounded output buffer
+// scrolling the marker away cannot flip a working agent back to unstarted.
+//
+// It still declines, loudly per mg-2437, in three cases — the fix must not
+// start renudging what the old early return legitimately covered:
+//
+//   - no start verifier wired. pogod wires one at startup, so this is a bare
+//     registry (unit tests) or a daemon-wide fault; either way nothing on it is
+//     watched and renudging on a private signal would misrepresent that.
+//   - crew agents. They never carry a work item by design, are long-lived, and
+//     are respawned and nudged on their own cycle. This is the same
+//     polecat-vs-crew seam reportUnwatched already draws.
+//   - no prompt-ready marker declared by the provider (e.g. Codex, whose
+//     ratatui composer has no stable marker). Nothing to observe.
+func (r *Registry) startedSignal(a *Agent) (started func() (bool, error), reason string, ok bool) {
+	verifier := r.getStartVerifier()
+	if verifier == nil {
+		reportUnwatched(a, reasonNoStartVerifier)
+		return nil, "", false
+	}
+
+	if a.WorkItemID != "" {
+		return func() (bool, error) { return verifier(a.WorkItemID) }, reasonWorkItemUnclaimed, true
+	}
+
+	if a.Type != TypePolecat || !a.hasReadySignal() {
+		reportUnwatched(a, reasonNoReadySignal)
+		return nil, "", false
+	}
+
+	log.Printf("agent %s: no work item id — start-verification falls back to the ready-composer signal "+
+		"(a screen that never renders a composer draws a recovery CR); re-dispatch with --id <work-item> for the stronger claim signal",
+		a.Name)
+	return func() (bool, error) { return a.sawPromptReady(), nil }, reasonNoReadyComposer, true
 }
 
 // Decline reasons reported by reportUnwatched, recorded as the `reason` detail
@@ -156,26 +219,38 @@ func (r *Registry) verifyStartAndRenudge(a *Agent) {
 // spawn had no --id") from a daemon-wide one ("nothing is wired to recover any
 // spawn").
 const (
-	reasonNoWorkItemID    = "no_work_item_id"
+	// reasonNoReadySignal: nothing observable to gate on. Since mg-c33e a
+	// missing work item alone is no longer a decline — the ready-composer
+	// fallback covers it — so this fires only when the provider declares no
+	// prompt-ready marker either (or the agent is crew, where the report is a
+	// no-op by design).
+	reasonNoReadySignal   = "no_ready_signal"
 	reasonNoStartVerifier = "no_start_verifier"
 )
 
+// auto_renudge reasons, naming which started-signal reported the agent
+// unstarted. See Registry.startedSignal.
+const (
+	reasonWorkItemUnclaimed = "work_item_unclaimed"
+	reasonNoReadyComposer   = "no_ready_composer"
+)
+
 // reportUnwatched announces that a freshly spawned POLECAT will get no
-// start-verification at all — mg-2437.
+// start-verification at all — mg-2437, narrowed by mg-c33e.
 //
-// The gap it makes visible: `--no-worktree` in-place dispatch is exactly the
-// shape documented as commonly carrying no work item, and `--id` is optional
-// (cmd/pogo/main.go). Such a spawn reached the early return above and got no
-// started-verifier — not a degraded one, a structurally absent one. If it failed
-// to start, for any cause, nothing automatically recovered it; the only rescue
-// was a human or the mayor's stall-watch happening to notice. Nothing said so.
+// The gap mg-2437 made visible: `--no-worktree` in-place dispatch is exactly
+// the shape documented as commonly carrying no work item, and `--id` is
+// optional (cmd/pogo/main.go). Such a spawn got no started-verifier — not a
+// degraded one, a structurally absent one — and nothing said so. mg-2437 made
+// that audible but left the hole open, and mg-560d then proved the hole was
+// load-bearing for the drellem2/macguffin#25 hang.
 //
-// This does not close the hole — declining is still correct, because without a
-// claim signal there is no HARD started-signal to gate on, and the package doc
-// above explains at length why substituting an output-quiescence heuristic would
-// reproduce the very false-idle bug the watcher exists to recover. It makes the
-// hole audible, which is the prerequisite for anyone noticing the next failure
-// on this path. Same loud-decline shape as the prompt-sync decline in mg-f86c.
+// mg-c33e CLOSED it: a no-work-item polecat is now watched on the
+// ready-composer fallback (see startedSignal), so this report no longer fires
+// for the mere absence of `--id`. What remains is the honest residue — a
+// verifier-less daemon, or a provider that declares no prompt-ready marker at
+// all. Those really do have nothing to gate on, and saying so is still the
+// point. Same loud-decline shape as the prompt-sync decline in mg-f86c.
 //
 // It reports through BOTH a log line and an event on purpose: this package's own
 // history is that a per-spawn log line alone stayed invisible for the entire #76
@@ -196,7 +271,7 @@ func reportUnwatched(a *Agent, reason string) {
 		log.Printf("agent %s: UNWATCHED — no start verifier is wired, so no spawn on this daemon gets start-verification or auto-renudge; a failure to start will NOT be automatically recovered",
 			a.Name)
 	default:
-		log.Printf("agent %s: UNWATCHED — spawned with no work item id, so there is no claim signal to gate on and NO auto-renudge will recover a failed start; re-dispatch with --id <work-item> to get start-verification",
+		log.Printf("agent %s: UNWATCHED — no work item id AND this provider declares no prompt-ready marker, so neither the claim signal nor the ready-composer fallback can gate on anything; NO auto-renudge will recover a failed start; re-dispatch with --id <work-item> to get start-verification",
 			a.Name)
 	}
 
@@ -214,16 +289,18 @@ func reportUnwatched(a *Agent, reason string) {
 // keystroke, so a spawn wave that needed re-nudging is visible in the event log
 // (a per-spawn log line alone was invisible for the whole #76 sentinel episode —
 // see mg-ce4c). Best-effort: events.Emit never propagates errors.
-func emitAutoRenudge(a *Agent, attempt, maxAttempts int) {
+func emitAutoRenudge(a *Agent, attempt, maxAttempts int, reason string) {
 	events.Emit(context.Background(), events.Event{
 		EventType: "auto_renudge",
 		Agent:     "pogod",
 		Details: map[string]any{
-			"to":           a.eventAgent(),
+			"to": a.eventAgent(),
+			// Present but empty on the ready-composer path — the absence of a
+			// work item is the whole reason that path exists (mg-c33e).
 			"work_item_id": a.WorkItemID,
 			"attempt":      attempt,
 			"max_attempts": maxAttempts,
-			"reason":       "work_item_unclaimed",
+			"reason":       reason,
 		},
 	})
 }

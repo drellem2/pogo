@@ -149,25 +149,31 @@ func TestVerifyStartAndRenudge_QueryErrorSkips(t *testing.T) {
 	}
 }
 
-// TestVerifyStartAndRenudge_NoWorkItemIsNoop: an agent with no work item id has
-// no hard signal to gate on, so the watcher never consults the verifier and
-// never touches the PTY.
+// TestVerifyStartAndRenudge_NoWorkItemSkipsTheClaimVerifier: an agent with no
+// work item id gives the CLAIM verifier nothing to answer about, so it is never
+// consulted.
 //
-// This asserts only that the RECOVERY is absent, which is correct. It is not a
-// license for the decline to be silent — that silence was mg-2437, and
-// startverify_decline_test.go asserts the decline now announces itself.
-func TestVerifyStartAndRenudge_NoWorkItemIsNoop(t *testing.T) {
+// It is no longer a no-op overall. This test used to assert that the watcher
+// also never touched the PTY; mg-560d proved that decline was why
+// drellem2/macguffin#25 hung permanently, and mg-c33e replaced it with the
+// ready-composer fallback. The recovery half now lives in
+// startverify_noid_test.go. What survives here is the part that stayed true:
+// no work item means no claim query.
+func TestVerifyStartAndRenudge_NoWorkItemSkipsTheClaimVerifier(t *testing.T) {
 	a, readAll, _ := newRenudgeTestAgent(t, "")
+	// Sitting at a ready composer, so the fallback reports it started and the
+	// PTY stays untouched for reasons unrelated to the claim verifier.
+	a.markPromptReady()
 	verifier, count := countingVerifier([]verifyCall{{started: false}})
 	reg := fastRenudgeRegistry(verifier, 3)
 
 	reg.verifyStartAndRenudge(a)
 
 	if got := readAll(); got != "" {
-		t.Errorf("expected no renudge for an agent with no work item, got %q", got)
+		t.Errorf("expected no renudge for an agent already at a ready composer, got %q", got)
 	}
 	if c := count(); c != 0 {
-		t.Errorf("expected verifier never consulted, got %d", c)
+		t.Errorf("expected claim verifier never consulted with no work item, got %d", c)
 	}
 }
 

@@ -39,30 +39,32 @@ func readEventLinesIfAny(t *testing.T, path string) []map[string]any {
 	return readEventLines(t, path)
 }
 
-// TestVerifyStartAndRenudge_NoWorkItemDeclinesLoudly is the mg-2437 positive
-// control, driven at the code level.
+// TestVerifyStartAndRenudge_NoSignalAtAllDeclinesLoudly is the mg-2437 positive
+// control, narrowed by mg-c33e to the case that still declines.
 //
-// The defect: `--no-worktree` dispatch without `--id` is exactly the shape
-// documented as commonly carrying no work item (see mailcheck_test.go), and
-// `--id` is optional. Such a polecat reaches verifyStartAndRenudge with an
-// empty WorkItemID, which early-returns — so the started-verifier is not a
-// degraded recovery net for that dispatch shape, it is a structurally absent
-// one, and NOTHING said so.
+// The mg-2437 defect: `--no-worktree` dispatch without `--id` is exactly the
+// shape documented as commonly carrying no work item (see mailcheck_test.go),
+// and `--id` is optional. Such a polecat reached verifyStartAndRenudge with an
+// empty WorkItemID and early-returned — a structurally absent recovery net, and
+// NOTHING said so. mg-2437's test was first written against that bug, asserting
+// the silent decline, and confirmed green on unfixed code before the fix
+// inverted it.
 //
-// This test was first written against the bug, asserting the silent-decline
-// behavior, and confirmed green on unfixed code; the fix inverted it. A
-// recovery path only ever observed in its working case has not been tested.
-//
-// Note what is NOT asserted: that the agent gets watched. It cannot be — there
-// is no hard started-signal without a work item, and the package doc explains
-// at length why an output-quiescence substitute would reproduce the very
-// false-idle bug the watcher exists to recover. Declining is correct. Declining
-// SILENTLY is the defect.
-func TestVerifyStartAndRenudge_NoWorkItemDeclinesLoudly(t *testing.T) {
+// mg-c33e then CLOSED the hole rather than only announcing it: an `--id`-less
+// polecat is now watched on the ready-composer fallback, because mg-560d proved
+// the decline was why drellem2/macguffin#25 hung permanently. So the missing
+// `--id` no longer reaches this decline on its own — the agent below also has
+// no prompt-ready marker, which is the residue that genuinely has nothing to
+// gate on. The loudness requirement mg-2437 established is unchanged and still
+// asserted here.
+func TestVerifyStartAndRenudge_NoSignalAtAllDeclinesLoudly(t *testing.T) {
 	logged := captureLog(t)
 	eventLog := useTempEventLog(t)
 
 	a, readAll, _ := newRenudgeTestAgent(t, "")
+	// No work item AND no prompt-ready marker: neither signal is observable.
+	a.nudge.PromptReadySentinel = ""
+	a.nudge.PromptReadyAlternates = nil
 	verifier, count := countingVerifier([]verifyCall{{started: false}})
 	reg := fastRenudgeRegistry(verifier, 3)
 
@@ -70,7 +72,7 @@ func TestVerifyStartAndRenudge_NoWorkItemDeclinesLoudly(t *testing.T) {
 
 	// The decline itself is unchanged: no verifier query, no keystroke.
 	if got := readAll(); got != "" {
-		t.Errorf("expected no renudge for an agent with no work item, got %q", got)
+		t.Errorf("expected no renudge for an agent with no observable signal, got %q", got)
 	}
 	if c := count(); c != 0 {
 		t.Errorf("expected verifier never consulted, got %d", c)
@@ -94,14 +96,14 @@ func TestVerifyStartAndRenudge_NoWorkItemDeclinesLoudly(t *testing.T) {
 	// A structurally absent recovery net deserves at least the same visibility.
 	ev := findEvent(readEventLines(t, eventLog), "agent_unwatched", "pogod")
 	if ev == nil {
-		t.Fatalf("expected an agent_unwatched event for a polecat with no work item; got %v",
+		t.Fatalf("expected an agent_unwatched event for a polecat with no observable signal; got %v",
 			readEventLines(t, eventLog))
 	}
 	details, _ := ev["details"].(map[string]any)
 	if details["to"] != a.eventAgent() {
 		t.Errorf("event must name the unwatched agent, got details=%v", details)
 	}
-	if details["reason"] != "no_work_item_id" {
+	if details["reason"] != "no_ready_signal" {
 		t.Errorf("event must distinguish the decline reason, got details=%v", details)
 	}
 }
