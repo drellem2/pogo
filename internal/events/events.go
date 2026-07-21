@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"sync"
 	"syscall"
+	"testing"
 	"time"
 
 	"github.com/drellem2/pogo/internal/config"
@@ -58,6 +59,9 @@ var (
 
 	overrideMu   sync.RWMutex
 	overridePath string
+
+	testPathOnce sync.Once
+	testPath     string
 )
 
 // DefaultLogPath returns events.log under the pogo state dir ($POGO_HOME,
@@ -70,7 +74,8 @@ func DefaultLogPath() (string, error) {
 }
 
 // SetLogPathForTesting overrides the path used by Emit. Pass "" to restore the
-// default. Intended only for tests.
+// default — which under a test binary is this binary's private sandbox log, not
+// the live ~/.pogo/events.log. Intended only for tests.
 func SetLogPathForTesting(path string) {
 	overrideMu.Lock()
 	overridePath = path
@@ -107,6 +112,37 @@ func ResolveAgent(coordinator string) string {
 	}
 }
 
+// resolvePath returns the path Emit appends to.
+//
+// The log is test-safe by DEFAULT, not by remembering (mg-da48, ratified at
+// ARCHITECTURE.md:433). Under a test binary the live ~/.pogo/events.log is not
+// reachable from this function at all: an empty override resolves to a
+// per-process sandbox, never to DefaultLogPath().
+//
+// This package shipped the opposite — `if p != "" { return p }; return
+// DefaultLogPath()` — so the ZERO VALUE resolved to the live log and any test
+// that did not explicitly set an override wrote to the operator's real audit
+// log. events.log was polluted twice on that shape: mg-e06d (three weeks of
+// phantom schedule_removed records, documented as a permanent aggregate cutoff
+// at docs/event-log.md:16) and again on 2026-07-20 (six phantom auto_renudge
+// rows during mg-2437's development). Both prior fixes were point fixes
+// elsewhere and left this default untouched.
+//
+// The lesson is witness.go's, and its comment already names events.log as the
+// victim: an opt-in guard is only ever remembered by the tests that least need
+// it. internal/refinery and internal/agent remember to sandbox because the log
+// is near their subject; a new test file that emits an event incidentally has
+// no reason to know this store exists. So the default is the sandbox and there
+// is nothing to remember.
+//
+// The explicit override still works and is still worth setting: one test
+// picking its own path is isolation from OTHER TESTS, a different and
+// legitimate question that this default does not answer.
+//
+// The branch is decided by testing.Testing(), i.e. by whether OUR binary is a
+// test binary. A test that boots real pogod as a SUBPROCESS is unaffected —
+// that child is not a test binary and resolves POGO_HOME as production does,
+// which is correct.
 func resolvePath() (string, error) {
 	overrideMu.RLock()
 	p := overridePath
@@ -114,7 +150,31 @@ func resolvePath() (string, error) {
 	if p != "" {
 		return p, nil
 	}
+	if testing.Testing() {
+		return testDefaultLogPath(), nil
+	}
 	return DefaultLogPath()
+}
+
+// testDefaultLogPath returns this test binary's private events log.
+//
+// It never returns a path under PogoHome, and it has no error return, because
+// there is no failure here that could justify handing back the live log: a test
+// that cannot get a temp dir must fail to write ANYWHERE rather than succeed at
+// appending a phantom record to the fleet's audit spine. Emit is best-effort
+// and swallows write errors, so the fallback is another unwritable-at-worst
+// temp path — never config.PogoHome().
+func testDefaultLogPath() string {
+	testPathOnce.Do(func() {
+		dir, err := os.MkdirTemp("", "pogo-test-events-*")
+		if err != nil {
+			// Still not the live log. A bad path here loses the test's own
+			// events; a live-log record outlives every process that saw it.
+			dir = filepath.Join(os.TempDir(), fmt.Sprintf("pogo-test-events-%d", os.Getpid()))
+		}
+		testPath = filepath.Join(dir, "events.log")
+	})
+	return testPath
 }
 
 // Emit appends a single event to the log. It is best-effort: failures are

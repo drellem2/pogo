@@ -27,6 +27,19 @@ Consequences, and how to read the log around them:
 
 See `internal/scheduler/events_isolation_test.go` for the regression guard (with a positive control) that keeps this closed, and mg-4fa7 for the same defect class fixed in mg.
 
+## The writer is test-safe by default (mg-3f1b)
+
+The mg-e06d fix above was a **point fix in the scheduler**, and so was mg-c33e's later repair of an `internal/agent` test helper. Neither touched the thing that made "live" the fallback in the first place: `resolvePath()` in `internal/events` resolved an **empty** override to `DefaultLogPath()`. The zero value pointed at the operator's real log, so a test only stayed out of it by *remembering* to call `SetLogPathForTesting`. events.log was polluted twice on that shape — mg-e06d's three-week window above, and six phantom `auto_renudge` rows on 2026-07-20.
+
+Since mg-3f1b the writer follows the default ratified at `ARCHITECTURE.md:433-447` (mg-da48) and implemented at `internal/agent/witness.go:196`: **under a test binary (`testing.Testing()`), an empty override resolves to a per-process temp file and the live log is not reachable from `resolvePath` at all.** An opt-in guard is only ever remembered by the tests that least need it — `internal/refinery` and `internal/agent` sandbox because the log is near their subject, while a test that emits an event incidentally has no reason to know this store exists.
+
+Two things this deliberately does **not** change:
+
+- **`SetLogPathForTesting` still wins, and `""` is still sayable.** One test picking its own path is isolation from *other tests* — a different and legitimate question the default does not answer. The empty sentinel was made *safe*, not un-representable.
+- **Subprocess tests are unaffected.** The branch turns on whether *our* binary is a test binary. A test that boots real pogod as a child leaves that child resolving `POGO_HOME` exactly as production does, which is correct.
+
+The guard is `internal/events/default_sandbox_test.go`. It runs its acceptance check against a verbatim replica of the pre-fix resolver first and **requires that replica to fail** — a default exercised only by tests that already set an override has not been tested, which is precisely how this survived two incidents and one ratification.
+
 ## Envelope
 
 Every line is a JSON object with the same envelope:
