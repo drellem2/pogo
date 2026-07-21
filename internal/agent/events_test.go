@@ -14,12 +14,21 @@ import (
 
 // useTempEventLog redirects events.Emit to a temp file for the duration of
 // the test and returns the path.
+//
+// Cleanup restores TestMain's package-wide sandbox log, NOT "" — mg-c33e.
+// events.SetLogPathForTesting("") restores the DEFAULT path, which is the
+// developer's live ~/.pogo/events.log, so the old cleanup silently disarmed
+// TestMain's redirect for every test that ran afterwards. That is how
+// startverify_test.go's auto_renudge records (to=cat-renudge-test,
+// work_item_id="mg-test") ended up interleaved with production events in the
+// live log — the same non-transferring-guard shape tracked as mg-da48 for the
+// witness store.
 func useTempEventLog(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "events.log")
 	events.SetLogPathForTesting(path)
-	t.Cleanup(func() { events.SetLogPathForTesting("") })
+	t.Cleanup(func() { events.SetLogPathForTesting(sandboxEventLog) })
 	return path
 }
 

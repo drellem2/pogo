@@ -446,29 +446,38 @@ pogod's post-spawn start-verification watcher ([startverify.go](../internal/agen
 - **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent` (always `"pogod"`), `details`
 - **`details` fields:**
   - `to` (string, required): the renudged agent's identity, e.g. `"cat-feb3"`
-  - `work_item_id` (string, required): the mg work item that was still unclaimed, e.g. `"mg-feb3"`
+  - `work_item_id` (string, required): the mg work item that was still unclaimed, e.g. `"mg-feb3"`. **Empty string** on the `no_ready_composer` path — a spawn with no `--id` is exactly what that signal exists for.
   - `attempt` (int, required): 1-based attempt index for this CR
   - `max_attempts` (int, required): the bounded retry ceiling
-  - `reason` (string, required): why the renudge fired, e.g. `"work_item_unclaimed"`
+  - `reason` (string, required): which started-signal reported the agent unstarted — `"work_item_unclaimed"` (the strong claim signal: the item is still in `available/`) or `"no_ready_composer"` (the fallback: the provider's prompt-ready sentinel has never appeared in this agent's PTY output)
+
+Since mg-c33e a polecat spawned with **no** `--id` is watched on the `no_ready_composer` fallback rather than declined. `--no-worktree` dispatch commonly carries no `--id` (it is optional), and mg-560d proved that gap load-bearing for drellem2/macguffin#25: such a spawn's cwd is a brand-new `~/.pogo/agents/<name>/`, untrusted, so Claude Code raises the workspace-trust dialog every time. The dialog renders no composer, the ready sentinel never matches, and the kickoff nudge is never delivered — and 560d measured that a bare CR, precisely what this watcher sends, dismisses it (dialog → composer at t=0.7s, nudge accepted).
+
+The fallback is a *structural* observation of the screen ("has a composer ever rendered"), not the output-quiescence heuristic the watcher deliberately avoids: quiescence misreads a CPU-starved harness as ready because it is quiet *because* it is starved, whereas a starved process, a loading spinner and the trust dialog all render no composer and so all read correctly as unstarted. The sighting is latched, so a bounded output buffer scrolling the marker away cannot flip a working agent back to unstarted.
 
 ```json
 {"schema_version":1,"timestamp":"2026-07-14T00:05:00.000000000Z","event_type":"auto_renudge","agent":"pogod","details":{"to":"cat-feb3","work_item_id":"mg-feb3","attempt":1,"max_attempts":3,"reason":"work_item_unclaimed"}}
+{"schema_version":1,"timestamp":"2026-07-21T00:05:25.000000000Z","event_type":"auto_renudge","agent":"pogod","details":{"to":"cat-c33e","work_item_id":"","attempt":1,"max_attempts":3,"reason":"no_ready_composer"}}
 ```
 
 #### `agent_unwatched`
 
-pogod's post-spawn start-verification watcher ([startverify.go](../internal/agent/startverify.go), mg-2437) **declined to watch** a freshly spawned polecat, so that spawn has no `auto_renudge` recovery at all. The watcher gates on the HARD started-signal — the agent's mg work item leaving `available/` — and a spawn that carries no work item id gives it nothing to gate on. `--no-worktree` in-place dispatch is exactly the shape that commonly carries no work item, and `--id` is optional, so that dispatch shape had a *structurally absent* recovery net rather than a degraded one: a failure to start, from any cause, went unrecovered until a human or the mayor's stall-watch noticed. Nothing reported it. This event (plus a matching `UNWATCHED` log line naming the agent and the `--id` remedy) makes the absence audible.
+pogod's post-spawn start-verification watcher ([startverify.go](../internal/agent/startverify.go), mg-2437) **declined to watch** a freshly spawned polecat, so that spawn has no `auto_renudge` recovery at all. This event (plus a matching `UNWATCHED` log line naming the agent and the `--id` remedy) makes the absence audible. Its presence is the marker to check first when a polecat sat unstarted and no `auto_renudge` appears in the log.
 
-The decline itself is correct and unchanged — without a claim signal there is no hard started-signal, and substituting an output-quiescence heuristic would reproduce the false-idle bug the watcher exists to recover (see `auto_renudge` above). Crew agents never carry a work item by design and are exempt, so this event always concerns a polecat. Its presence is the marker to check first when a polecat sat unstarted and no `auto_renudge` appears in the log. Additive — no `schema_version` bump.
+**mg-c33e narrowed when this fires.** Under mg-2437 the mere absence of `--id` triggered it, which meant the largest class of unwatched spawns was reported but never rescued; mg-560d then proved that class was the cause of the drellem2/macguffin#25 hang. Those spawns are now *watched* on the `no_ready_composer` fallback (see `auto_renudge` above), so `agent_unwatched` no longer fires for a missing `--id` alone. What remains is the honest residue: nothing observable to gate on at all.
+
+Crew agents never carry a work item by design and are exempt, so this event always concerns a polecat. Additive — no `schema_version` bump.
 
 - **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent` (always `"pogod"`), `details`
 - **`details` fields:**
   - `to` (string, required): the unwatched agent's identity, e.g. `"cat-2437"`
-  - `reason` (string, required): which structural gap applies — `"no_work_item_id"` (this dispatch had no `--id`; re-dispatch with one to get start-verification) or `"no_start_verifier"` (nothing is wired on this daemon, so *no* spawn gets recovery)
+  - `reason` (string, required): which structural gap applies — `"no_ready_signal"` (this dispatch had no `--id` **and** its provider declares no prompt-ready marker, so neither the claim signal nor the ready-composer fallback can observe anything; re-dispatch with `--id` to get start-verification) or `"no_start_verifier"` (nothing is wired on this daemon, so *no* spawn gets recovery)
 
 ```json
-{"schema_version":1,"timestamp":"2026-07-21T00:05:00.000000000Z","event_type":"agent_unwatched","agent":"pogod","details":{"to":"cat-2437","reason":"no_work_item_id"}}
+{"schema_version":1,"timestamp":"2026-07-21T00:05:00.000000000Z","event_type":"agent_unwatched","agent":"pogod","details":{"to":"cat-2437","reason":"no_ready_signal"}}
 ```
+
+> `"no_work_item_id"` was this field's value between mg-2437 and mg-c33e. Log lines predating mg-c33e carry it; it is no longer emitted.
 
 ## Worked example: a polecat merge cycle
 
