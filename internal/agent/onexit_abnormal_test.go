@@ -93,7 +93,7 @@ func TestOnExitWorktreeCleanupOnAbnormalExit(t *testing.T) {
 					cleaned <- nil
 					return
 				}
-				cleaned <- gitgc.RemoveWorktree(a.SourceRepo, a.WorktreeDir)
+				cleaned <- gitgc.RemoveWorktree(a.SourceRepo, a.WorktreeDir, gitgc.OwnerUnproven)
 			})
 
 			// Spawn a long-lived polecat process so we control when it dies.

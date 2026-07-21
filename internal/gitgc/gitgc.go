@@ -220,6 +220,54 @@ func (e *DirtyWorktreeError) Error() string {
 // enough to recognise the work, not a full status dump in a log line.
 const dirtyFileListCap = 10
 
+// UndeterminedWorktreeError reports a removal refused because dirtiness could
+// not be DETERMINED — `git status` failed — rather than because the tree was
+// known dirty. The two are separate types on purpose: reporting a status
+// failure as "dirty" would be a false claim about what is in the tree, and an
+// operator acting on it would go looking for uncommitted files that may not
+// exist. Cannot-tell is its own answer, the same shape as mg-dcb1's
+// RelationUnknown one subsystem over.
+type UndeterminedWorktreeError struct {
+	Path string
+	// Err is the underlying status failure, kept so the operator can see
+	// WHICH way git broke — a corrupt .git reads differently from EACCES.
+	Err error
+}
+
+func (e *UndeterminedWorktreeError) Error() string {
+	return fmt.Sprintf("worktree %s: cannot determine whether it holds uncommitted work, "+
+		"refusing to remove: %v", e.Path, e.Err)
+}
+
+func (e *UndeterminedWorktreeError) Unwrap() error { return e.Err }
+
+// WorktreeOwner is what the CALLER has established about whether anything
+// still owns a worktree. It is the discriminator for the cannot-tell case,
+// and it has to come from the caller: gitgc is deliberately free of any
+// dependency on the agent registry (see the package comment), and liveness
+// lives there.
+//
+// The zero value is the conservative arm. A caller that establishes nothing
+// gets preservation, which is the direction that cannot lose files.
+type WorktreeOwner int
+
+const (
+	// OwnerUnproven: the caller has NOT established that this tree is
+	// unowned. It may hold the in-flight work of a real agent.
+	OwnerUnproven WorktreeOwner = iota
+	// OwnerGone: liveness has been positively excluded — no live agent owns
+	// this tree and none is coming back for it. Only pass this when you have
+	// actually checked; it licenses destroying files that cannot be read.
+	OwnerGone
+)
+
+func (o WorktreeOwner) String() string {
+	if o == OwnerGone {
+		return "owner-gone"
+	}
+	return "owner-unproven"
+}
+
 // WorktreeDirty reports whether worktreeDir holds uncommitted work — modified
 // tracked files OR untracked new ones. The untracked half is not an
 // afterthought: the loss that produced mg-ee02 was a brand-new 201-line test
@@ -228,10 +276,11 @@ const dirtyFileListCap = 10
 // a polecat's ./bin build output is not work, and counting it would make every
 // worktree refuse to reap.
 //
-// A non-nil error means dirtiness could not be determined — the directory is
-// absent, or it is a legacy worktree whose .git pointer was stripped and which
-// git can no longer describe. Callers must decide what an unclassifiable tree
-// deserves; RemoveWorktree proceeds (see its doc comment for why).
+// A non-nil error means dirtiness could not be determined. That population is
+// WIDER than it looks: an absent directory and a stripped .git pointer are in
+// it, but so is any transient failure — lock contention, an I/O blip, EACCES,
+// an interrupted call. Callers must decide what an unclassifiable tree
+// deserves; RemoveWorktree decides on ownership (see its doc comment).
 func WorktreeDirty(worktreeDir string) (bool, []string, error) {
 	if worktreeDir == "" {
 		return false, nil, fmt.Errorf("empty worktree path")
@@ -276,30 +325,70 @@ func WorktreeDirty(worktreeDir string) (bool, []string, error) {
 // it is normally called — so the destructive case and the common case were
 // disjoint, and nobody noticed. The clean case still reaps, unchanged.
 //
-// # The unclassifiable case
+// # The cannot-tell case (mg-4d45): ownership decides
 //
-// If dirtiness cannot be determined — the directory is gone, or it is a
-// legacy worktree whose .git pointer was stripped (the pre-gh#88 unlink
-// shape) — removal PROCEEDS. Refusing instead would strand every gh #31
-// orphan forever, since nothing can ever prove one clean. This is a
-// deliberate, bounded hole: it applies only to trees git can no longer see.
+// mg-ee02 folded cannot-tell into clean and PROCEEDED, on the reasoning that
+// refusing would strand every gh #31 orphan forever, since nothing can ever
+// prove one clean. That reasoning is sound and this is a revision of it, not
+// a repair of an oversight.
+//
+// What was wrong was the BOUNDARY, not the direction. The doc comment bounded
+// the hole to "trees git can no longer see"; the predicate bounded it to "any
+// status error". Those are different populations. A lock contention, an I/O
+// blip, a slow filesystem, an interrupted call — none of those is a tree git
+// can no longer see, and all of them landed in the destructive arm.
+//
+// That miswidening matters more than a fail-open usually would, because the
+// check's failure is CORRELATED with the value at risk. `git status` does not
+// fail at random; it fails when .git is damaged, the disk is unhappy, or
+// permissions are broken — exactly when the working files are least
+// reproducible. A guard whose failure mode coincides with the case it exists
+// to protect is worse than no guard, because it also looks like one.
+//
+// The fix is not to invert the default globally; blanket fail-closed would
+// re-open gh #31. The discriminator is OWNERSHIP, which is knowable
+// independently of git:
+//
+//   - OwnerUnproven — cannot-tell REFUSES, with an *UndeterminedWorktreeError
+//     that names the status failure. The files may be someone's in-flight
+//     work, and a pinned worktree is recoverable by a human where deleted
+//     files are not.
+//   - OwnerGone — cannot-tell RECLAIMS, exactly as before. Nobody is coming
+//     back for an orphan's files, and leaking worktrees is its own defect.
+//
+// An ABSENT directory is not cannot-tell: there are no files to protect, so
+// removal proceeds under either ownership and the registration still gets
+// dropped.
 //
 // Dropping the registration is load-bearing, not incidental: it is what frees
 // the polecat's branch for deletion (git refuses to delete a branch checked
 // out in a worktree), which is why Sweep processes worktrees before branches.
 // TestRemoveWorktreeFreesCheckedOutBranch guards it.
-func RemoveWorktree(sourceRepo, worktreeDir string) error {
+func RemoveWorktree(sourceRepo, worktreeDir string, owner WorktreeOwner) error {
 	if worktreeDir == "" {
 		return nil
 	}
-	// Only a tree we can positively prove dirty blocks removal. An error here
-	// means "cannot tell" — proceed, per the doc comment above.
-	if isDirty, files, err := WorktreeDirty(worktreeDir); err == nil && isDirty {
+	// An absent directory holds nothing to protect. Checked BEFORE the status
+	// call so it never reaches the cannot-tell arm: "there are no files" and
+	// "there may be files I cannot read" are different facts, and only the
+	// second one deserves a refusal.
+	if _, err := os.Stat(worktreeDir); os.IsNotExist(err) {
+		return RemoveWorktreeForce(sourceRepo, worktreeDir)
+	}
+
+	isDirty, files, err := WorktreeDirty(worktreeDir)
+	switch {
+	case err == nil && isDirty:
 		shown := files
 		if len(shown) > dirtyFileListCap {
 			shown = shown[:dirtyFileListCap]
 		}
 		return &DirtyWorktreeError{Path: worktreeDir, Files: shown, Total: len(files)}
+	case err != nil && owner != OwnerGone:
+		// Cannot tell, and nothing has established that this tree is unowned.
+		// Refuse, and say WHY — reporting a status failure as "dirty" would
+		// be a different and false claim.
+		return &UndeterminedWorktreeError{Path: worktreeDir, Err: err}
 	}
 	return RemoveWorktreeForce(sourceRepo, worktreeDir)
 }

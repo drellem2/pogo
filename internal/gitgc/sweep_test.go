@@ -158,7 +158,7 @@ func TestRemoveWorktreeAndPrune(t *testing.T) {
 	// to strip the registration was deleted (gh #88). This is the negative
 	// control for that deletion: the exit/GC cleanup must still fully reclaim
 	// a polecat whose merge SUCCEEDED.
-	if err := RemoveWorktree(r.dir, wtPath); err != nil {
+	if err := RemoveWorktree(r.dir, wtPath, OwnerUnproven); err != nil {
 		t.Fatalf("RemoveWorktree: %v", err)
 	}
 	if _, err := os.Stat(wtPath); !os.IsNotExist(err) {
@@ -177,7 +177,7 @@ func TestRemoveWorktreeAndPrune(t *testing.T) {
 	}
 
 	// RemoveWorktree is idempotent — a second call is a no-op success.
-	if err := RemoveWorktree(r.dir, wtPath); err != nil {
+	if err := RemoveWorktree(r.dir, wtPath, OwnerUnproven); err != nil {
 		t.Errorf("second RemoveWorktree should succeed: %v", err)
 	}
 
@@ -217,7 +217,7 @@ func TestRemoveWorktreeFreesCheckedOutBranch(t *testing.T) {
 		t.Fatal("expected git to refuse deleting a branch checked out in a live worktree")
 	}
 
-	if err := RemoveWorktree(r.dir, wtPath); err != nil {
+	if err := RemoveWorktree(r.dir, wtPath, OwnerUnproven); err != nil {
 		t.Fatalf("RemoveWorktree: %v", err)
 	}
 	if err := DeleteBranch(r.dir, "polecat-live"); err != nil {

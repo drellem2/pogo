@@ -35,7 +35,7 @@ func TestRemoveWorktreeRefusesDirtyUntracked(t *testing.T) {
 
 	racetest := dirty(t, wtPath, "trust_hook_race_test.go", "package main // 201 lines of irreplaceable\n")
 
-	err := RemoveWorktree(r.dir, wtPath)
+	err := RemoveWorktree(r.dir, wtPath, OwnerUnproven)
 	if err == nil {
 		t.Fatal("RemoveWorktree must refuse a worktree with uncommitted work; it returned nil")
 	}
@@ -90,7 +90,7 @@ func TestRemoveWorktreeRefusesDirtyTracked(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := RemoveWorktree(r.dir, wtPath); err == nil {
+	if err := RemoveWorktree(r.dir, wtPath, OwnerUnproven); err == nil {
 		t.Fatal("RemoveWorktree must refuse a worktree with modified tracked files")
 	}
 	got, err := os.ReadFile(seed)
@@ -129,7 +129,7 @@ func TestRemoveWorktreeRefusalSurvivesTheRemoveAllPath(t *testing.T) {
 		t.Fatalf("expected git to refuse removing a dirty worktree; it succeeded: %s", out)
 	}
 
-	if err := RemoveWorktree(r.dir, wtPath); err == nil {
+	if err := RemoveWorktree(r.dir, wtPath, OwnerUnproven); err == nil {
 		t.Fatal("RemoveWorktree must refuse")
 	}
 	if _, err := os.Stat(keep); err != nil {
@@ -145,7 +145,7 @@ func TestRemoveWorktreeStillReapsClean(t *testing.T) {
 	r.branch("polecat-done")
 	wtPath := r.worktree("polecat-done")
 
-	if err := RemoveWorktree(r.dir, wtPath); err != nil {
+	if err := RemoveWorktree(r.dir, wtPath, OwnerUnproven); err != nil {
 		t.Fatalf("a clean worktree must still be reaped: %v", err)
 	}
 	if _, err := os.Stat(wtPath); !os.IsNotExist(err) {
@@ -181,7 +181,7 @@ func TestRemoveWorktreeIgnoresIgnoredFiles(t *testing.T) {
 	}
 	dirty(t, wtPath, "bin/pogod", "ELF-ish\n")
 
-	if err := RemoveWorktree(r.dir, wtPath); err != nil {
+	if err := RemoveWorktree(r.dir, wtPath, OwnerUnproven); err != nil {
 		t.Fatalf("gitignored build output must not block reaping: %v", err)
 	}
 	if _, err := os.Stat(wtPath); !os.IsNotExist(err) {
@@ -212,23 +212,28 @@ func TestRemoveWorktreeForceOverrides(t *testing.T) {
 // including ones whose tree is already gone.
 func TestRemoveWorktreeIdempotentOnMissingDir(t *testing.T) {
 	r := newTestRepo(t)
-	if err := RemoveWorktree(r.dir, filepath.Join(r.dir, "..", "never-existed")); err != nil {
+	if err := RemoveWorktree(r.dir, filepath.Join(r.dir, "..", "never-existed"), OwnerUnproven); err != nil {
 		t.Errorf("removing a nonexistent worktree should succeed: %v", err)
 	}
-	if err := RemoveWorktree(r.dir, ""); err != nil {
+	if err := RemoveWorktree(r.dir, "", OwnerUnproven); err != nil {
 		t.Errorf("empty worktree dir should be a no-op: %v", err)
 	}
 }
 
-// TestWorktreeDirtyUnclassifiableProceeds pins the one hole this fix leaves
-// open, so it is a documented decision rather than a surprise.
+// TestWorktreeDirtyUnclassifiableProceeds pinned the hole mg-ee02 left open.
+// mg-4d45 narrowed that hole, so this test now pins the narrowed version.
 //
 // A legacy worktree whose .git pointer was stripped (the pre-gh#88 unlink
 // shape) cannot be asked whether it is dirty — `git status` fails outright.
-// Such a directory is treated as NOT dirty and is reclaimed, because the
-// alternative regresses gh #31: those orphans would accumulate forever with
-// nothing able to prove them clean. The exposure is real but bounded — it
-// applies only to worktrees git can no longer see.
+// Reclaiming it is still correct WHEN ITS OWNER IS GONE: those orphans would
+// otherwise accumulate forever with nothing able to prove them clean, which
+// regresses gh #31.
+//
+// What changed is that reclaiming is no longer automatic. It is now licensed
+// by OwnerGone rather than by the status call happening to fail, because "any
+// status error" turned out to be a far wider population than "a tree git can
+// no longer see" — see TestCannotTellRefusedWhenOwnerUnproven for the member
+// of that population that was losing files.
 func TestWorktreeDirtyUnclassifiableProceeds(t *testing.T) {
 	r := newTestRepo(t)
 	r.branch("polecat-unlinked")
@@ -247,8 +252,8 @@ func TestWorktreeDirtyUnclassifiableProceeds(t *testing.T) {
 	if isDirty {
 		t.Error("an unclassifiable worktree must not be reported dirty")
 	}
-	if err := RemoveWorktree(r.dir, wtPath); err != nil {
-		t.Errorf("an unclassifiable worktree must still be reclaimable: %v", err)
+	if err := RemoveWorktree(r.dir, wtPath, OwnerGone); err != nil {
+		t.Errorf("an unclassifiable worktree whose owner is gone must still be reclaimable: %v", err)
 	}
 }
 

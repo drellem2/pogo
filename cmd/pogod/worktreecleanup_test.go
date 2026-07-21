@@ -140,3 +140,49 @@ func TestCleanupAgentWorktreeSurvivesMailFailure(t *testing.T) {
 		t.Fatalf("work must survive a failed notification: %v", err)
 	}
 }
+
+// TestCleanupAgentWorktreeKeepsUndeterminable is the mg-4d45 control at the
+// exit-hook layer — the layer `pogo agent stop` actually reaches.
+//
+// The hook fires AFTER the process has exited, so this is precisely the site
+// where a naive reading of "liveness decides" would answer GONE and reap. It
+// must not: the tree belonged to an agent that was running until moments ago,
+// and its files are that agent's in-flight work.
+func TestCleanupAgentWorktreeKeepsUndeterminable(t *testing.T) {
+	repo, wt := wtRepo(t)
+	precious := filepath.Join(wt, "irreplaceable.go")
+	if err := os.WriteFile(precious, []byte("package x // the only copy\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// A genuine `git status` failure: a present but corrupt .git pointer.
+	if err := os.WriteFile(filepath.Join(wt, ".git"), []byte("gitdir: /nonexistent/garbage\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var gotSubject, gotBody string
+	mail := func(to, from, subject, body string) error {
+		gotSubject, gotBody = subject, body
+		return nil
+	}
+
+	outcome := cleanupAgentWorktree("cat1", repo, wt, "mayor", mail)
+	if outcome != worktreeUndetermined {
+		t.Fatalf("outcome = %v, want worktreeUndetermined", outcome)
+	}
+	if _, err := os.Stat(precious); err != nil {
+		t.Fatalf("THE WORK WAS DESTROYED — a tree we could not read must survive: %v", err)
+	}
+
+	// The notice must report what actually happened. Claiming "uncommitted
+	// work" would send an operator hunting for files we never established are
+	// there; cannot-tell has to stay distinguishable from dirty.
+	if !strings.Contains(gotBody, "could NOT be checked") {
+		t.Errorf("body must say the check failed, got:\n%s", gotBody)
+	}
+	if strings.Contains(gotSubject, "preserved uncommitted work") {
+		t.Errorf("subject must not claim uncommitted work was found, got %q", gotSubject)
+	}
+	if !strings.Contains(gotBody, "pogo gc") {
+		t.Errorf("body must say how to reclaim the tree, got:\n%s", gotBody)
+	}
+}
