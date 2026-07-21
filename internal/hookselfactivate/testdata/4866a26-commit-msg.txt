@@ -1,0 +1,30 @@
+#!/bin/sh
+# commit-msg hook: reject commit messages that would close a GitHub issue by
+# closing-keyword adjacency — including across a line wrap (mg-2627).
+#
+# Install: git config core.hooksPath hooks
+#
+# This is the EARLY half of the check. It fails while the message is still
+# cheap to fix, but it protects only people who installed it, and --no-verify
+# walks straight past it. The guarantee lives in the refinery, which runs the
+# same detector on every branch it merges — see
+# internal/refinery/closingref_gate.go. If you skip this hook, the refinery
+# still catches it; you just find out after pushing.
+
+set -e
+
+msg_file="$1"
+
+# Prefer a built binary, then one on PATH, then build from source. Never skip:
+# a check that silently no-ops when the binary is missing reports "clean" for
+# the exact commits nobody verified.
+repo_root=$(git rev-parse --show-toplevel)
+if [ -x "$repo_root/bin/pogo" ]; then
+    "$repo_root/bin/pogo" check-commit-body "$msg_file"
+elif command -v pogo >/dev/null 2>&1; then
+    pogo check-commit-body "$msg_file"
+else
+    (cd "$repo_root" && go run ./cmd/pogo check-commit-body "$msg_file")
+fi
+
+echo "commit-msg: ok"

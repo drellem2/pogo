@@ -15,15 +15,36 @@ import (
 // tested. This repo has zero current violations, so silence is the expected
 // result everywhere else and proves nothing on its own.
 
-// gitShow returns a historical revision of a tracked file. `git`, not `pogo`:
-// see TestMechanismObeysItsOwnRule.
-func gitShow(t *testing.T, rev string) string {
+// specimen returns one of the two historical commit-msg hooks the controls
+// below are built on, read from testdata.
+//
+// These were `git show <sha>:hooks/commit-msg` until mg-4e12. That passed here
+// and failed in CI by construction: ci.yml checks out with actions/checkout@v4
+// and no fetch-depth, i.e. a depth-1 shallow clone, which does not contain
+// those objects — `git show` exited 128 on a machine that was behaving
+// correctly. A control whose fixture is a literal SHA depends on clone depth,
+// on the objects staying fetchable, and on history never being rewritten: three
+// facts about the checkout rather than about the code under test.
+//
+// So the fixtures are checked in, the same way internal/closingref keeps
+// e83f394's commit body. They are not transcriptions — each is the historical
+// blob byte for byte, and `git hash-object` on them still returns the object id
+// git records for that path at that commit:
+//
+//	4866a26-commit-msg.txt  9c140bb09f4ed4724a89d325caa112e49e7bbb2a
+//	c0c203d-commit-msg.txt  f86237dff7b9c626f82050ae2a09f8008621f5a0
+//
+// What keeps them honest is not those hashes, though — it is the two controls
+// themselves. Weaken the broken specimen and TestCatchesTheOriginalHook stops
+// catching it; weaken the fixed one and TestPassesTheFixedHook starts flagging
+// the remedy. Both fail loudly rather than quietly passing on anything.
+func specimen(t *testing.T, name string) string {
 	t.Helper()
-	out, err := exec.Command("git", "-C", repoRoot(t), "show", rev).Output()
+	b, err := os.ReadFile(filepath.Join("testdata", name))
 	if err != nil {
-		t.Fatalf("git show %s: %v", rev, err)
+		t.Fatalf("read specimen %s: %v", name, err)
 	}
-	return string(out)
+	return string(b)
 }
 
 func repoRoot(t *testing.T) string {
@@ -55,7 +76,7 @@ func kinds(fs []Finding) []Kind {
 // the installed binary on presence, so the fallback never runs on any machine
 // with a `pogo` on PATH — which is every machine that matters here.
 func TestCatchesTheOriginalHook(t *testing.T) {
-	src := gitShow(t, "4866a26:hooks/commit-msg")
+	src := specimen(t, "4866a26-commit-msg.txt")
 
 	if !sourceRouteRe.MatchString(src) {
 		t.Fatal("specimen precondition failed: 4866a26 should contain a `go run ./cmd/` " +
@@ -99,7 +120,7 @@ func TestCatchesTheOriginalHook(t *testing.T) {
 // install falls through to source. Same file, same source fallback, opposite
 // verdict — the difference is entirely in the guards.
 func TestPassesTheFixedHook(t *testing.T) {
-	src := gitShow(t, "c0c203d:hooks/commit-msg")
+	src := specimen(t, "c0c203d-commit-msg.txt")
 	if findings := Analyze("hooks/commit-msg@c0c203d", src); len(findings) != 0 {
 		t.Fatalf("the fixed hook must pass; a check that flags the remedy is worse than "+
 			"no check:\n%s", render(findings))
