@@ -37,6 +37,7 @@ package freshen
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -59,9 +60,18 @@ const (
 	// StatusDeclinedDetached: HEAD is detached, so there is no branch to
 	// advance and no upstream to advance it to.
 	StatusDeclinedDetached Status = "declined_detached"
-	// StatusDeclinedNoUpstream: the branch tracks nothing, so "behind" has no
-	// referent. Reported rather than guessed at — a checkout parked on a local
-	// branch is a deliberate state, not a fault.
+	// StatusDeclinedNoUpstream: the branch tracks nothing AND no remote
+	// counterpart could be identified, so "behind" has no referent.
+	//
+	// NARROWED DELIBERATELY (mg-036f). This once fired on absence of tracking
+	// CONFIG, which turned out to select the wrong population: the only agent
+	// workspace that existed was a linked worktree on `main` that nobody had
+	// configured tracking for, and it was declined for being unconfigured
+	// rather than for being parked. `git worktree add <path> main` sets no
+	// tracking, so that state is the DEFAULT for a workspace, not a decision.
+	// Deliberate parking is now identified by what it actually looks like —
+	// a branch with no counterpart on the remote, or one that has diverged —
+	// rather than by a config key nobody set either way.
 	StatusDeclinedNoUpstream Status = "declined_no_upstream"
 	// StatusDeclinedDiverged: behind AND ahead — a fast-forward is not
 	// possible and a merge or rebase is a human's decision.
@@ -80,8 +90,16 @@ type Result struct {
 	Path   string `json:"path"`
 	Status Status `json:"status"`
 	Branch string `json:"branch,omitempty"`
-	// Upstream is the tracking ref, e.g. "origin/main".
+	// Upstream is the ref freshness was measured against, e.g. "origin/main".
 	Upstream string `json:"upstream,omitempty"`
+	// UpstreamInferred reports that Upstream was derived from the branch's
+	// name and the remote's refs rather than read from tracking config.
+	//
+	// This is never silent. An inferred referent is a judgement pogo made on
+	// the operator's behalf, and every rendering of this Result says so, so
+	// that "brought current" can never be mistaken for evidence that someone
+	// had configured what current meant.
+	UpstreamInferred bool `json:"upstream_inferred,omitempty"`
 	// Behind is how many commits upstream had that HEAD did not, measured
 	// against the just-fetched tip. -1 means "not determined" (detached, no
 	// upstream, or the fetch failed) — distinct from 0, which is a positive
@@ -113,10 +131,11 @@ func (r Result) Declined() bool {
 func (r Result) String() string {
 	switch r.Status {
 	case StatusUpdated:
-		return fmt.Sprintf("%s: fast-forwarded %s %d commit(s) to %s (%s..%s)",
-			r.Path, r.Branch, r.Behind, r.Upstream, r.From, r.To)
+		return fmt.Sprintf("%s: fast-forwarded %s %d commit(s) to %s%s (%s..%s)",
+			r.Path, r.Branch, r.Behind, r.Upstream, inferredNote(r), r.From, r.To)
 	case StatusAlreadyCurrent:
-		return fmt.Sprintf("%s: %s already current with %s", r.Path, r.Branch, r.Upstream)
+		return fmt.Sprintf("%s: %s already current with %s%s",
+			r.Path, r.Branch, r.Upstream, inferredNote(r))
 	case StatusSkipped:
 		return fmt.Sprintf("%s: skipped (%s)", r.Path, r.Detail)
 	case StatusFailed:
@@ -125,6 +144,17 @@ func (r Result) String() string {
 		return fmt.Sprintf("%s: DECLINED (%s) — %s behind %s: %s",
 			r.Path, r.Status, behindText(r.Behind), r.Upstream, r.Detail)
 	}
+}
+
+// inferredNote marks a verdict measured against a referent pogo chose rather
+// than one the operator configured. It is appended to every rendering that
+// names an upstream, so an inferred "current" always carries the caveat that
+// nobody said what current meant.
+func inferredNote(r Result) string {
+	if r.UpstreamInferred {
+		return " (upstream inferred from branch name; none configured)"
+	}
+	return ""
 }
 
 func behindText(n int) string {
@@ -178,9 +208,17 @@ func Checkout(repoPath string) Result {
 	// checkout reads as catastrophically stale and the signal is worthless.
 	upstream, err := git(repoPath, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}")
 	if err != nil || upstream == "" {
-		res.Status = StatusDeclinedNoUpstream
-		res.Detail = fmt.Sprintf("branch %q tracks no upstream; freshness has no referent", branch)
-		return res
+		// No tracking config. That is not the same as no referent — see
+		// inferUpstream. Absence of config is the DEFAULT state of a linked
+		// worktree, so treating it as a decision declines the ordinary case.
+		inferred, status, detail := inferUpstream(repoPath, branch)
+		if status != "" {
+			res.Status = status
+			res.Detail = detail
+			return res
+		}
+		upstream = inferred
+		res.UpstreamInferred = true
 	}
 	res.Upstream = upstream
 
@@ -272,6 +310,101 @@ func countDivergence(repoPath string) (behind, ahead int, err error) {
 		return 0, 0, fmt.Errorf("unparseable behind count %q", fields[1])
 	}
 	return behind, ahead, nil
+}
+
+// inferUpstream resolves the remote counterpart of a branch that has no
+// tracking configuration, or reports why it declined to guess.
+//
+// A non-empty returned status is terminal — the caller returns it as the
+// verdict. An empty status means upstream is usable.
+//
+// WHY GUESSING IS CORRECT HERE, HAVING BEEN WRONG BEFORE. The rule this
+// replaces read absence-of-tracking as "deliberately parked, do not touch".
+// That rule was derived from a research checkout genuinely parked on an
+// abandoned branch, and then applied to a population whose only member was a
+// linked worktree on `main` — clean, unparked, months behind, and lacking
+// tracking only because `git worktree add` does not set it. The rule excluded
+// the exact checkout it was written to protect.
+//
+// Inference is confined to the case where the answer is unambiguous: the
+// remote is unambiguous, and it has a branch of this exact name. Every guard
+// that made the original design safe still applies afterwards — the tree must
+// be clean, and a branch that is ahead is still declined as diverged. This
+// widens WHAT gets measured; it does not weaken WHAT MAY BE DONE to it.
+func inferUpstream(repoPath, branch string) (upstream string, status Status, detail string) {
+	out, err := git(repoPath, "remote")
+	if err != nil {
+		return "", StatusFailed, fmt.Sprintf("listing remotes failed: %s", firstLine(out))
+	}
+	var remotes []string
+	for _, line := range strings.Split(out, "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			remotes = append(remotes, line)
+		}
+	}
+
+	remote, ok := pickRemote(remotes)
+	if !ok {
+		return "", StatusDeclinedNoUpstream, fmt.Sprintf(
+			"branch %q tracks nothing and its remote is ambiguous (remotes: %s); "+
+				"set an upstream to say which one is meant",
+			branch, remotesText(remotes))
+	}
+
+	// EXIT CODE 2 IS THE WHOLE POINT OF --exit-code. It means "reached the
+	// remote, no ref matched" — a positive finding that this branch is
+	// local-only. Any other failure means the question was never answered
+	// (unreachable, auth, timeout). Collapsing the two would let a network
+	// outage render as "deliberately parked", which is the one verdict that
+	// must never be inferred from a failure to look.
+	lsOut, err := git(repoPath, "ls-remote", "--exit-code", "--heads", remote, "refs/heads/"+branch)
+	if err != nil {
+		if exitCode(err) == 2 {
+			return "", StatusDeclinedNoUpstream, fmt.Sprintf(
+				"branch %q tracks nothing and %s has no branch of that name; "+
+					"this checkout is local-only, so freshness has no referent",
+				branch, remote)
+		}
+		return "", StatusFailed, fmt.Sprintf(
+			"ls-remote %s %s failed, so it is UNKNOWN whether this branch has a "+
+				"remote counterpart: %s", remote, branch, firstLine(lsOut))
+	}
+
+	return remote + "/" + branch, "", ""
+}
+
+// pickRemote chooses the remote an untracked branch should be measured
+// against: "origin" when present, otherwise the sole remote if there is
+// exactly one. With several remotes and no origin there is no defensible
+// choice, so it declines rather than picking the first alphabetically.
+func pickRemote(remotes []string) (string, bool) {
+	for _, r := range remotes {
+		if r == "origin" {
+			return r, true
+		}
+	}
+	if len(remotes) == 1 {
+		return remotes[0], true
+	}
+	return "", false
+}
+
+func remotesText(remotes []string) string {
+	if len(remotes) == 0 {
+		return "none configured"
+	}
+	return strings.Join(remotes, ", ")
+}
+
+// exitCode extracts a command's exit status, returning -1 when the error was
+// not an exit at all (timeout, binary missing) — deliberately a value no git
+// exit status can collide with.
+func exitCode(err error) int {
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		return ee.ExitCode()
+	}
+	return -1
 }
 
 func splitUpstream(upstream string) (remote, branch string, ok bool) {

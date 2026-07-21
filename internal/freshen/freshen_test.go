@@ -74,6 +74,47 @@ func (f *fixture) advanceOrigin(t *testing.T, n int) {
 	run(t, f.publisher, "git", "push", "origin", "main")
 }
 
+// untrackedWorktree builds the state the agent-workspace population was
+// actually in: a linked worktree, clean, on a branch named `main` that the
+// remote also has, with NO tracking configuration.
+//
+// ON PROVENANCE, HONESTLY. How the production workspace came to be untracked
+// is not known — it was found in that state, not observed being created. This
+// helper therefore reproduces the state by its verified properties and asserts
+// each one, rather than claiming a creation mechanism it cannot support. A
+// first draft of this test asserted `git worktree add <path> main` as the
+// cause; that is wrong (it reuses the existing tracking branch) and the
+// precondition check below is what caught it. Do not remove that check.
+//
+// The clone's own `main` is deleted first so the worktree cannot reuse it,
+// mirroring the production repo whose primary worktree sat on `main-mirror`
+// (mg-2ed2).
+func (f *fixture) untrackedWorktree(t *testing.T) string {
+	t.Helper()
+	run(t, f.checkout, "git", "checkout", "-b", "main-mirror")
+	run(t, f.checkout, "git", "branch", "-D", "main")
+
+	dir := filepath.Join(t.TempDir(), "repo")
+	run(t, f.checkout, "git", "worktree", "add", "--no-track", "-b", "main", dir, "origin/main")
+
+	// Assert the state rather than assume it. If a future git sets tracking
+	// here, these tests must fail loudly rather than silently stop exercising
+	// the case they exist for.
+	if out, err := exec.Command("git", "-C", dir, "rev-parse",
+		"--abbrev-ref", "--symbolic-full-name", "@{upstream}").CombinedOutput(); err == nil {
+		t.Fatalf("precondition lost: worktree branch tracks %q — these tests no "+
+			"longer reproduce the untracked state they exist for",
+			strings.TrimSpace(string(out)))
+	}
+	if got := run(t, dir, "git", "rev-parse", "--abbrev-ref", "HEAD"); got != "main" {
+		t.Fatalf("precondition: branch = %q, want main", got)
+	}
+	if got := run(t, dir, "git", "status", "--porcelain", "--untracked-files=no"); got != "" {
+		t.Fatalf("precondition: worktree is dirty: %q", got)
+	}
+	return dir
+}
+
 func head(t *testing.T, dir string) string {
 	t.Helper()
 	return run(t, dir, "git", "rev-parse", "HEAD")
@@ -342,6 +383,11 @@ func TestDetachedHeadIsDeclined(t *testing.T) {
 	}
 }
 
+// TestNoUpstreamIsDeclined pins the case that genuinely has no referent: a
+// branch that exists ONLY here. Note what makes it decline — the remote has no
+// branch of this name — and not merely that tracking config is unset. Since
+// mg-036f those are different questions; this test asks the second one, and
+// TestUntrackedWorktreeOnRemoteBranchIsFreshened asks the first.
 func TestNoUpstreamIsDeclined(t *testing.T) {
 	f := newFixture(t)
 	run(t, f.checkout, "git", "checkout", "-b", "parked-local-branch")
@@ -353,6 +399,95 @@ func TestNoUpstreamIsDeclined(t *testing.T) {
 	}
 	if res.Behind != -1 {
 		t.Errorf("Behind = %d, want -1 (undetermined)", res.Behind)
+	}
+}
+
+// TestUntrackedWorktreeOnRemoteBranchIsFreshened is the positive control for
+// mg-036f, and it is the point of that ticket.
+//
+// It reconstructs the state the entire agent-workspace population was actually
+// in — clean, on `main`, NO tracking configured, behind origin/main — and
+// confirms the outcome is UPDATED rather than DECLINED.
+//
+// Before mg-036f this returned StatusDeclinedNoUpstream: the fix declined the
+// one checkout that motivated it. A test that only exercised a tracking branch
+// passed throughout and proved nothing about the population.
+func TestUntrackedWorktreeOnRemoteBranchIsFreshened(t *testing.T) {
+	f := newFixture(t)
+	f.advanceOrigin(t, 4)
+	workspace := f.untrackedWorktree(t)
+
+	res := Checkout(workspace)
+
+	if res.Status != StatusUpdated {
+		t.Fatalf("Status = %q, want %q — an untracked worktree on a branch the "+
+			"remote also has is an unconfigured workspace, not a parked one: %+v",
+			res.Status, StatusUpdated, res)
+	}
+	if res.Behind != 4 {
+		t.Errorf("Behind = %d, want 4: %+v", res.Behind, res)
+	}
+	if res.Upstream != "origin/main" {
+		t.Errorf("Upstream = %q, want %q: %+v", res.Upstream, "origin/main", res)
+	}
+	if !res.UpstreamInferred {
+		t.Errorf("UpstreamInferred = false, want true — a referent pogo chose " +
+			"must never render as one the operator configured")
+	}
+	if !strings.Contains(res.String(), "inferred") {
+		t.Errorf("String() must disclose the inference, got %q", res.String())
+	}
+	if res.Stale() {
+		t.Errorf("a freshened checkout must not report Stale(): %+v", res)
+	}
+
+	// The verdict must be the tree's, not just the Result's.
+	if got := run(t, workspace, "git", "rev-parse", "HEAD"); got != head(t, f.publisher) {
+		t.Errorf("HEAD = %s, want origin tip %s — the checkout was not actually moved",
+			got, head(t, f.publisher))
+	}
+}
+
+// TestUntrackedButDirtyIsStillDeclined proves the widened measurement did not
+// widen what may be DONE. Inferring a referent must not hand the dirty-tree
+// guard a new way to be bypassed — that guard is the one protecting the 83
+// staged adds this package's docs describe.
+func TestUntrackedButDirtyIsStillDeclined(t *testing.T) {
+	f := newFixture(t)
+	f.advanceOrigin(t, 2)
+	workspace := f.untrackedWorktree(t)
+	if err := os.WriteFile(filepath.Join(workspace, "README.md"), []byte("edited\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	before := head(t, workspace)
+
+	res := Checkout(workspace)
+
+	if res.Status != StatusDeclinedDirty {
+		t.Fatalf("Status = %q, want %q — an inferred upstream must not weaken the "+
+			"dirty-tree guard: %+v", res.Status, StatusDeclinedDirty, res)
+	}
+	if after := head(t, workspace); after != before {
+		t.Errorf("HEAD moved on a dirty tree: %s -> %s", before, after)
+	}
+}
+
+// TestAmbiguousRemoteIsDeclined pins the one case where a name match is not
+// enough to identify a referent: several remotes could answer, and none is
+// origin. Picking one would be a coin toss wearing the daemon's authority.
+func TestAmbiguousRemoteIsDeclined(t *testing.T) {
+	f := newFixture(t)
+	workspace := f.untrackedWorktree(t)
+	run(t, workspace, "git", "remote", "rename", "origin", "upstream-a")
+	run(t, workspace, "git", "remote", "add", "upstream-b", f.origin)
+
+	res := Checkout(workspace)
+
+	if res.Status != StatusDeclinedNoUpstream {
+		t.Fatalf("Status = %q, want %q: %+v", res.Status, StatusDeclinedNoUpstream, res)
+	}
+	if !strings.Contains(res.Detail, "ambiguous") {
+		t.Errorf("Detail must name ambiguity as the reason, got %q", res.Detail)
 	}
 }
 

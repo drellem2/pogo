@@ -187,9 +187,13 @@ func remedyFor(res freshen.Result) string {
 		return "TO RESOLVE. HEAD is detached, so there is no branch to advance. If that is\n" +
 			"deliberate, nothing is wrong. If it is not, check the branch back out."
 	case freshen.StatusDeclinedNoUpstream:
-		return "TO RESOLVE. The branch tracks nothing, so \"behind\" has no referent and this\n" +
-			"check cannot judge freshness at all. Set an upstream, or accept that this\n" +
-			"checkout is deliberately parked and will never be reported on."
+		return "TO RESOLVE. The branch tracks nothing AND no remote counterpart could be\n" +
+			"identified — either the remote has no branch of this name, or several remotes\n" +
+			"are configured and none is named origin. Missing tracking config alone no\n" +
+			"longer stops this check (mg-036f): a branch whose name matches a remote branch\n" +
+			"is measured against it. So this verdict means the branch really is local-only\n" +
+			"or the remote really is ambiguous. Set an upstream if it should be tracked, or\n" +
+			"accept that this checkout is local-only and will never be reported on."
 	case freshen.StatusFailed:
 		return "TO RESOLVE. Git itself failed, so freshness is UNKNOWN — this is explicitly\n" +
 			"NOT a clean bill of health. The checkout may be fine or may be months behind;\n" +
