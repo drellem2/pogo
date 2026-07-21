@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -21,6 +22,7 @@ import (
 	"github.com/drellem2/pogo/internal/agent"
 	"github.com/drellem2/pogo/internal/cli"
 	"github.com/drellem2/pogo/internal/client"
+	"github.com/drellem2/pogo/internal/closingref"
 	"github.com/drellem2/pogo/internal/completion"
 	"github.com/drellem2/pogo/internal/config"
 	"github.com/drellem2/pogo/internal/events"
@@ -891,6 +893,74 @@ carrier is found (so it can gate a schedule or CI step).`,
 	}
 	cmdCheckTeardown.Flags().BoolVar(&teardownArchived, "archived", false,
 		"Also scan archived carriers (slower: one network lookup per carrier)")
+
+	// check-commit-body: the closing-keyword adjacency detector (mg-2627).
+	// Sibling of check-teardown — that one catches an issue left OPEN, this one
+	// catches an issue closed by accident. Same workflow surface, opposite
+	// direction.
+	var cmdCheckCommitBody = &cobra.Command{
+		Use:   "check-commit-body [file]",
+		Short: "Reject commit messages whose closing keywords would close a GitHub issue",
+		Long: `Read a commit message (from FILE, or stdin when FILE is omitted or "-") and
+report every place GitHub would parse a closing keyword followed by an issue
+reference — INCLUDING across a line wrap.
+
+Exits non-zero on findings, so it can back a commit-msg hook or a CI step. The
+refinery runs the same check on every branch it merges; see
+internal/refinery/closingref_gate.go for why both placements exist.
+
+The wrap is the point. On 2026-07-21 a commit body read:
+
+    ...and every promise in the thread was fulfilled — but nobody closed
+    drellem2/pogo#89, and it sat OPEN from Jul 17 to Jul 21.
+
+Nobody wrote a directive. ` + "`closed`" + ` is a past-tense verb in a narrative
+sentence about someone else's omission, and the reference is a citation. GitHub
+joined the lines, read "closing keyword + reference", and shut an external
+contributor's issue with no explanation on a thread that had been quiet for four
+days. A same-line check would not have seen it.
+
+What passes: ` + "`Refs drellem2/pogo#89`" + `, and ordinary prose citing an issue with
+no closing keyword immediately before it. Our commit bodies cite issues
+constantly and legitimately; a check that flagged all of them would be off
+within a week.
+
+To close an issue on purpose, say so per reference in the body:
+
+    Closing-ref-ack: drellem2/pogo#89 — intentional; <why>
+
+That is a commit-message edit, not a flag — it stays in the permanent record and
+suppresses only the reference it names.`,
+		Args: cobra.MaximumNArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			var (
+				data   []byte
+				err    error
+				source string
+			)
+			if len(args) == 0 || args[0] == "-" {
+				source = "commit message (stdin)"
+				data, err = io.ReadAll(os.Stdin)
+			} else {
+				source = args[0]
+				data, err = os.ReadFile(args[0])
+			}
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "check-commit-body: %v\n", err)
+				os.Exit(cli.ExitError)
+			}
+
+			// Comment lines are what git's editor template adds and strips
+			// again; they never reach the stored message, so judging them
+			// would reject commits over text GitHub never sees.
+			findings := closingref.Check(stripGitComments(string(data)))
+			if len(findings) == 0 {
+				return
+			}
+			fmt.Fprint(os.Stderr, closingref.Report(source, findings))
+			os.Exit(cli.ExitError)
+		},
+	}
 
 	var cmdServiceStatus = &cobra.Command{
 		Use:   "status",
@@ -2481,6 +2551,7 @@ branches; work items and mail live in mg/macguffin (the task-store CLI).`,
 	cmdDoctor.Flags().BoolVar(&doctorCheck, "check", false, "Run quick health checks without starting the doctor agent")
 	rootCmd.AddCommand(cmdDoctor)
 	rootCmd.AddCommand(cmdCheckTeardown)
+	rootCmd.AddCommand(cmdCheckCommitBody)
 	cmdServer.AddCommand(cmdServerStart)
 	cmdServer.AddCommand(cmdServerStop)
 	cmdServer.AddCommand(cmdServerStatus)

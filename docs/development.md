@@ -32,6 +32,13 @@ git config core.hooksPath hooks
 
 The hook runs `gofmt -l` and `go build ./...` on every commit.
 
+The `commit-msg` hook additionally rejects commit messages whose closing
+keywords would shut a GitHub issue — including across a line wrap, which is how
+a narrative body once shut an external contributor's issue by accident. Cite
+issues as `Refs owner/repo#N`, or add `Closing-ref-ack: <ref> — <why>` when the
+closure is deliberate. The refinery runs the same check on every merge, so this
+hook is an early warning rather than the guarantee.
+
 ## End-to-end smoke test
 
 `scripts/test-e2e.sh` exercises the full loop — `pogo init`, `pogod`, mayor

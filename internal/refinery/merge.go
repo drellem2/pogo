@@ -169,6 +169,15 @@ func (r *Refinery) attemptMerge(wtDir string, mr *MergeRequest, attempt int, ski
 		return "", "rebase", "", rebaseErr
 	}
 
+	// Reject commit messages that would close a GitHub issue by keyword
+	// adjacency (mg-2627). Runs on the rebased branch, before the quality
+	// gates, and is NOT subject to skip_on_retry — see checkClosingRefs for
+	// why this is the refinery's job and not only the local hook's.
+	log.Printf("refinery: MR %s step=closing-ref-check branch=%s attempt=%d", mr.ID, mr.Branch, attempt)
+	if cerr := checkClosingRefs(wtDir, mr.TargetRef, mr.Branch); cerr != nil {
+		return cerr.Error(), "closing-ref-check", "", cerr
+	}
+
 	// Run quality gates (on the rebased branch — tests what will actually
 	// land). On retries with skip_on_retry set, bypass: gates already
 	// passed on attempt 1 over near-identical code; the only change is

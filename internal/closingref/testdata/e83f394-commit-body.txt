@@ -1,0 +1,84 @@
+feat(ghteardown): detect gh-issue carriers that reached done while their issue stayed OPEN (mg-6e57)
+
+The gh-issue workflow ends by closing the GitHub issue behind a carrier work
+item. That step can silently not run, and nothing notices.
+
+mg-07ba reached `status=done, stage: merge` on 2026-07-17. The work genuinely
+completed and every promise in the thread was fulfilled — but nobody closed
+drellem2/pogo#89, and it sat OPEN from Jul 17 to Jul 21. No alarm fired, because
+from the outside a carrier that completed its teardown and one that skipped it
+are the same three characters: `done`. The miss is an ABSENCE, and an absence
+emits nothing. It is invisible in exactly the direction that hurts: an issue
+left open after the work lands reads to the reporter as "ignored", which is the
+precise opposite of what happened.
+
+Adds internal/ghteardown: for every carrier at `status=done`, check whether the
+referenced `gh:` issue is actually closed. Surfaced as `pogo check-teardown`
+(exit 1 on findings, so it can gate a schedule or CI step) and wired into
+pogod's heartbeat on a coarse interval, because a detector that is never run is
+the bug wearing the fix's clothes — the lesson internal/driftwatch's own doc
+opens with.
+
+REPORT-ONLY. It never closes an issue and never comments; closing an external
+issue is outward-facing and stays human-gated. There is deliberately no seam in
+the runner through which it could.
+
+ISSUE STATE IS A TRI-STATE — open / closed / UNKNOWN. This is the whole
+difficulty of the instrument: it asks about external state over the network, and
+the reassuring answer is exactly what a broken lookup produces. A `gh` call that
+fails on expired auth, rate limiting, a renamed repo, or a transferred issue
+yields no "OPEN" token, so a parse that reads "not open" as closed would report
+every carrier clean at precisely the moment the detector went blind. A
+silent-failure detector that fails silently is worse than none, because it also
+manufactures confidence. Only a positive, parsed CLOSED clears a carrier;
+everything else is reported as indeterminate and counts as actionable. This is
+the mg-de08 law, restated in mg-07ba's own body — "a reap must require positive
+evidence of death, never absence of evidence of life" — applied to closure.
+
+PROVEN TO FIRE, AND PROVEN ABLE TO FAIL. A detector for a silent failure that
+has only ever been observed passing has not been tested, it has been assumed.
+Four mutants were introduced and all four are killed by the suite: (1) treat an
+open issue as clean — kills the positive control; (2) fold Unknown into clean —
+kills three indeterminate tests; (3) ignore gh's exit code; (4) "not OPEN means
+closed". Mutants 3 and 4 initially SURVIVED — the tri-state was documented and
+implemented but never pinned — which is why issue_test.go drives the real
+GHLookup through a stubbed `gh` across ten exit-code and parse cases.
+
+Controls, verified end-to-end against real GitHub from fixtures in a scratch
+store (never the live one, and no live carrier was read-modified):
+  positive       done carrier + open issue          -> FIRES, exit 1
+  negative       done carrier + CLOSED issue (#48)  -> silent, exit 0
+  indeterminate  unresolvable repo / issue number   -> reported, NOT "closed"
+  declared-open  carrier with a `gh-open:` line     -> listed, not a miss
+
+THE PREDICATE AND THE "OPEN ON PURPOSE" QUESTION. The predicate is
+`workflow: gh-issue` + `status=done` + an open `gh:` issue. It is deliberately
+NOT gated on `stage: merge`: the mayor's own carrier note records mg-c155's
+stage field as "misleading", so stage is not load-bearing evidence.
+
+That predicate fires on carriers whose issue is open legitimately — mg-c155 is
+done while drellem2/pogo#88 correctly waits on the reporter for a patch Daniel
+asked for, and closing it would retract an outstanding request. A detector that
+shouts about #88 every run gets muted long before the run that matters. The
+resolution is an explicit, machine-readable `gh-open: <reason>` line in the
+carrier body: such a carrier is not a miss and never mails, but is still LISTED
+under "declared open", because a suppression that outlives its reason is the
+same silent absence this package exists to catch. Nothing infers the line — a
+human writes it — so an un-annotated carrier always fails toward being noticed.
+
+Tests never touch the live store: MGSource.resolveRoot returns a per-binary temp
+dir under `testing.Testing()` and NEVER `~/.macguffin`. This is a test-safe
+DEFAULT rather than an opt-in helper, which is the whole lesson of mg-da48 —
+witness_test.go shipped a `sandboxWitness(t)` helper and the only tests that
+remembered to call it were the ones whose subject WAS the witness; the rest wrote
+phantom polecats into the live store. An opt-in guard is only ever remembered by
+the tests that least need it. TestCarriersNeverTouchTheLiveStore asserts every
+`mg` invocation carries --root.
+
+Coverage boundary, stated rather than hidden: archived carriers are scanned only
+under --archived, since each carrier costs a network round-trip and the store
+holds ~80 archived against a handful of done. A carrier archived while its issue
+is open is the most forgotten case of all, and the default scan will not see it.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+
