@@ -1540,16 +1540,27 @@ Example:
 		Long: `Spawn an ephemeral polecat (a disposable worker agent) using a prompt template from ~/.pogo/agents/templates/.
 The template is expanded with the provided variables and used as the agent's prompt file.
 
-The body comes from --body (inline) or --body-file (read from a file, "-" for
-stdin); the two are mutually exclusive.
+The body comes from --body-file (read verbatim from a file, "-" for stdin) or
+--body (inline); the two are mutually exclusive. --body-file is the default
+idiom — reach for it first:
 
-Prefer --body-file for any dispatch body you care about arriving exactly. The
-shell expands ` + "`backticks`" + `, $VAR and $(cmd) inside --body="..." before pogo runs,
-so the polecat's prompt silently loses them and pogo cannot tell that apart
-from a body someone typed that way. --body-file reads the file's bytes
-verbatim, with no shell in the path:
+  pogo agent spawn-polecat cat-1234 --id mg-1234 --body-file - <<'EOF'
+  body text with ` + "`backticks`" + ` and $VARS, all literal
+  EOF
 
   pogo agent spawn-polecat cat-1234 --id mg-1234 --body-file ./task.md
+
+THE QUOTING IS THE WHOLE PROPERTY. <<'EOF' is literal; a bare <<EOF expands
+exactly like --body="..." and silently reintroduces the bug.
+
+Why: the shell expands ` + "`backticks`" + `, $VAR and $(cmd) inside --body="..." before
+pogo runs, so the polecat's prompt silently loses them and pogo cannot tell
+that apart from a body someone typed that way. An unset $VAR is the worst
+case — it deletes the object of a constraint and leaves prose that still reads
+as intentional. --body-file puts no shell in the path at all.
+
+--body remains supported and is not deprecated: it is the inline shortcut, fine
+for any body that carries no metacharacters.
 
 A --body-file that cannot be read is an error, never an empty body.`,
 		Args: cobra.ExactArgs(1),
@@ -1582,8 +1593,8 @@ A --body-file that cannot be read is an error, never an empty body.`,
 	}
 	cmdAgentSpawnPolecat.Flags().StringVar(&spawnPolecatTemplate, "template", "polecat", "Template name (from ~/.pogo/agents/templates/)")
 	cmdAgentSpawnPolecat.Flags().StringVar(&spawnPolecatTask, "task", "", "Work item title ({{.Task}})")
-	cmdAgentSpawnPolecat.Flags().StringVar(&spawnPolecatBody, "body", "", "Work item body ({{.Body}}); mutually exclusive with --body-file")
-	cmdAgentSpawnPolecat.Flags().StringVar(&spawnPolecatBodyFile, "body-file", "", "Read the work item body verbatim from a file (\"-\" for stdin); mutually exclusive with --body")
+	cmdAgentSpawnPolecat.Flags().StringVar(&spawnPolecatBodyFile, "body-file", "", "PREFERRED: read the work item body ({{.Body}}) verbatim from a file (\"-\" for stdin) — on stdin, use a quoted heredoc <<'EOF'; mutually exclusive with --body")
+	cmdAgentSpawnPolecat.Flags().StringVar(&spawnPolecatBody, "body", "", "Inline shortcut for the work item body ({{.Body}}); the shell expands backticks and $VARS in it — prefer --body-file; mutually exclusive with --body-file")
 	cmdAgentSpawnPolecat.Flags().StringVar(&spawnPolecatId, "id", "", "Work item ID ({{.Id}}); omitting it forfeits start-verification — pogod cannot detect or auto-recover a failed start without a claim signal (mg-2437)")
 	cmdAgentSpawnPolecat.Flags().StringVar(&spawnPolecatRepo, "repo", "", "Target repository path ({{.Repo}})")
 	cmdAgentSpawnPolecat.Flags().StringVar(&spawnPolecatBranch, "branch", "", "Target branch for refinery submit ({{.Branch}})")
