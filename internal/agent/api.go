@@ -870,6 +870,13 @@ func (r *Registry) StartCrewAgent(name string) (*Agent, error) {
 		return nil, fmt.Errorf("failed to create agent dir: %w", err)
 	}
 
+	// Bring the agent's long-lived repo/ checkout up to date — or say loudly
+	// why not (mg-d5fc). This must stay BEFORE the harness process is spawned:
+	// that is the only instant at which the checkout provably has no reader,
+	// so refreshing it cannot move the ground under an agent mid-edit. Never
+	// fails the start; a stale workspace is reported, not fatal.
+	freshenWorkspace(name)
+
 	// If the crew prompt is an `extends <template> with config <config>`
 	// redirect (PM tier), synthesize the merged prompt to a stable per-agent
 	// path so restart-on-crash reuses it. Empty result means no directive —

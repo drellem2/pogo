@@ -186,6 +186,38 @@ apart each get an immediate repair. Additive — no `schema_version` bump.
 {"schema_version":1,"timestamp":"2026-07-10T09:12:03.410000000Z","event_type":"agent_attach_rebound","agent":"crew-mayor","details":{"pid":23884,"socket":"/Users/daniel/.pogo/agents/sockets/mayor.sock","reason":"accept_loop_stopped"}}
 ```
 
+#### `agent_workspace_freshened`
+
+A crew agent's long-lived checkout at `$POGO_HOME/agents/<name>/repo` was evaluated against its upstream at agent start, **before** the harness process was spawned. Emitted for every verdict except `skipped` — most agents keep no `repo/` at all, and emitting for that would drown the records that matter.
+
+Nothing else keeps these checkouts fresh: the refinery fast-forwards the checkout an MR was *submitted* from, and polecat worktrees are branched from current `origin/main`, but a crew agent's own `repo/` sits outside both paths. One was found 129 commits / ~2 months behind `main`, by accident (mg-d5fc).
+
+The check runs at start specifically because that is the only instant the checkout provably has no reader — so a refresh can never move the ground under an agent mid-edit. It never touches a tree with staged or unstaged changes to tracked files; a dirty stale checkout is declined and reported, never clobbered.
+
+`behind` is derived from `git rev-list HEAD...FETCH_HEAD` **after** a fetch — not from the local remote-tracking ref, which on a stale checkout is exactly as old as its last fetch, and not from path existence at the upstream ref, which cannot distinguish a superseded revision from a current one.
+
+- **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent`, `repo`, `details`
+- **`details` fields:**
+  - `status` (string, required): one of
+    - `updated` — was behind, was fast-forwarded.
+    - `already_current` — HEAD already contained the upstream tip.
+    - `declined_dirty` — behind, but a tracked file is modified or staged. **Not touched.**
+    - `declined_detached` — HEAD is detached; no branch to advance.
+    - `declined_no_upstream` — the branch tracks nothing, so "behind" has no referent.
+    - `declined_diverged` — behind *and* ahead; no fast-forward exists.
+    - `failed` — git itself failed, so freshness is **unknown**. Explicitly not a clean bill of health.
+  - `branch` (string, optional): the checked-out branch; absent when detached.
+  - `upstream` (string, optional): the tracking ref, e.g. `origin/main`.
+  - `behind` (int, required): commits the upstream had that HEAD did not. `-1` means *undetermined* (detached, no upstream, or the fetch failed) — distinct from `0`, which is a positive finding of currency.
+  - `ahead` (int, required): commits HEAD had that the upstream did not; `-1` when undetermined.
+  - `detail` (string, optional): the decline reason or git error.
+
+A `declined_*` or `failed` verdict with `behind` > 0 also mails the coordinator. That is not a tuned threshold: it is the binary fact "this checkout is known to be rotting and nothing here can stop it", which is precisely what went unnoticed for two months.
+
+```json
+{"schema_version":1,"timestamp":"2026-07-21T01:14:02.100000000Z","event_type":"agent_workspace_freshened","agent":"pm-onethird","repo":"/Users/daniel/.pogo/agents/pm-onethird/repo","details":{"status":"declined_dirty","branch":"main","upstream":"origin/main","behind":129,"ahead":0,"detail":"83 tracked path(s) modified or staged; commit or stash, then 'git pull'"}}
+```
+
 ### Polecat-specific lifecycle
 
 `agent_spawned` and `agent_stopped` already cover polecats. The two events below give polecat lifecycle a dedicated, work-item-scoped narrative for tools that want to filter by polecat events without inferring from `agent_type`.
