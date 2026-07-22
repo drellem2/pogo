@@ -16,6 +16,7 @@ import (
 
 	"github.com/drellem2/pogo/internal/events"
 	"github.com/drellem2/pogo/internal/gitgc"
+	"github.com/drellem2/pogo/internal/synthfail"
 )
 
 // AgentInfo is the JSON representation of an agent for the API.
@@ -193,8 +194,27 @@ type DiagnoseInfo struct {
 	// for two hours. A missing mail loop must be able to turn a health signal
 	// RED, or the next variant is just as quiet.
 	MailCheckMissing bool `json:"mail_check_missing,omitempty"`
-	// Health is a summary string: "healthy", "idle", "stalled", "rate_limited",
-	// "no_mail_loop", "exited", or "dead".
+	// TranscriptCheck is the synthetic-failure-turn verdict read from the
+	// harness's session transcript: is this agent answering every nudge locally
+	// and failing it (mg-18d0's class), merely quiet, or is there no transcript
+	// to read at all. nil when no scanner is installed.
+	//
+	// Its tri-state is load-bearing and callers must not flatten it. In
+	// particular StateUnavailable is NOT a clean bill of health — it means pogo
+	// could not look, which for every non-Claude harness is the normal answer.
+	TranscriptCheck *synthfail.Report `json:"transcript_check,omitempty"`
+
+	// RestartSuppressed is true when restart-based remediation must be withheld
+	// for this agent because it is in the synthetic-failure class. Anything
+	// that would stop-and-start an agent — the mayor's 120-minute heartbeat
+	// rule included — must consult this first: no member of the class is
+	// fixable by restarting, and mg-18d0 costed the alternative at ~66 restarts
+	// against a dead credential, each discarding a live session's context and
+	// destroying the transcript the diagnosis rests on.
+	RestartSuppressed bool `json:"restart_suppressed,omitempty"`
+
+	// Health is a summary string: "healthy", "idle", "stalled",
+	// "failing_turns", "rate_limited", "no_mail_loop", "exited", or "dead".
 	Health string `json:"health"`
 	// RecentOutputTail is the last ~500 bytes of PTY output for quick triage.
 	RecentOutputTail string `json:"recent_output_tail,omitempty"`
@@ -230,6 +250,21 @@ type MailCheckProvider interface {
 	HasMailCheck(agentIdentity string) bool
 }
 
+// TranscriptScanner reads an agent's harness session transcript and reports
+// whether it is failing every turn locally (mg-18d0's synthetic zero-token
+// failure class) rather than merely being quiet. pogod backs this with
+// internal/synthwatch over provider-declared paths; a nil scanner disables the
+// check, which is the default and what unit tests use.
+//
+// A nil scanner — and a scanner that returns StateUnavailable — must leave
+// every existing behaviour exactly as it was. That is the whole degradation
+// contract: this signal rides on harness internals pogo does not own, and the
+// day the harness changes them, pogo must lose a detector rather than gain a
+// false all-clear.
+type TranscriptScanner interface {
+	ScanTranscript(name, workdir string) synthfail.Report
+}
+
 // mailLoopState is diagnose's view of an agent's mail delivery path. Like
 // scheduler.AgentState it is a tri-state whose zero value is the "no claim"
 // answer: without a schedule provider, or for an agent that is not expected to
@@ -261,7 +296,7 @@ func StallThresholdFor(t AgentType) time.Duration {
 // caller that has no schedule provider; production code goes through
 // Registry.diagnose, which threads the agent's cron windows.
 func diagnoseAgent(a *Agent) DiagnoseInfo {
-	return diagnoseAgentAt(a, time.Now(), nil, mailLoopUnknown)
+	return diagnoseAgentAt(a, time.Now(), nil, mailLoopUnknown, nil)
 }
 
 // diagnoseAgentAt builds a DiagnoseInfo as of now, suppressing the stalled
@@ -269,7 +304,7 @@ func diagnoseAgent(a *Agent) DiagnoseInfo {
 // withinCronInterval and mg-5b23), and reporting RED when an expected agent has
 // no mail loop (mg-de08). now, windows and mailLoop are injected so the logic
 // is deterministically testable.
-func diagnoseAgentAt(a *Agent, now time.Time, windows []CronWindow, mailLoop mailLoopState) DiagnoseInfo {
+func diagnoseAgentAt(a *Agent, now time.Time, windows []CronWindow, mailLoop mailLoopState, transcript *synthfail.Report) DiagnoseInfo {
 	info := agentInfo(a)
 	lastWrite := a.outputBuf.LastWriteTime()
 	threshold := StallThresholdFor(a.Type)
@@ -308,13 +343,26 @@ func diagnoseAgentAt(a *Agent, now time.Time, windows []CronWindow, mailLoop mai
 	// not rate_limited, which is the more actionable truth when both hold. The
 	// MailCheckMissing field is reported either way, so the fact is never
 	// hidden by whichever label wins.
+	//
+	// "failing_turns" is the mg-18d0 class: the transcript shows the agent
+	// answering every turn locally with a zero-token error. It outranks
+	// rate_limited because it is the strictly better-evidenced statement of the
+	// same kind of fact — a timestamped machine-readable record with a named
+	// reason, covering members (auth expiry, spend cap, server errors) the
+	// PTY modal watcher cannot see at all. Both states forbid restart, so the
+	// ordering carries no safety risk either way; it decides only which truth a
+	// human reads first. It sits BELOW exited/dead because a process that is
+	// gone is a more immediate fact than what its transcript last said.
 	mailCheckMissing := mailLoop == mailLoopMissing
+	failingTurns := transcript != nil && transcript.State == synthfail.StateFailing
 	health := "healthy"
 	switch {
 	case info.Status == StatusExited:
 		health = "exited"
 	case a.PID > 0 && !processAlive && info.Status == StatusRunning:
 		health = "dead"
+	case failingTurns:
+		health = "failing_turns"
 	case info.RateLimited:
 		health = "rate_limited"
 	case mailCheckMissing:
@@ -329,16 +377,18 @@ func diagnoseAgentAt(a *Agent, now time.Time, windows []CronWindow, mailLoop mai
 	tail := string(a.RecentOutput(500))
 
 	return DiagnoseInfo{
-		AgentInfo:        info,
-		LastActivity:     lastWrite,
-		IdleDuration:     idleDur.Truncate(time.Second).String(),
-		ProcessAlive:     processAlive,
-		StallThreshold:   threshold.String(),
-		Stalled:          stalled,
-		CronCovered:      cronCovered,
-		MailCheckMissing: mailCheckMissing,
-		Health:           health,
-		RecentOutputTail: tail,
+		AgentInfo:         info,
+		LastActivity:      lastWrite,
+		IdleDuration:      idleDur.Truncate(time.Second).String(),
+		ProcessAlive:      processAlive,
+		StallThreshold:    threshold.String(),
+		Stalled:           stalled,
+		CronCovered:       cronCovered,
+		MailCheckMissing:  mailCheckMissing,
+		TranscriptCheck:   transcript,
+		RestartSuppressed: transcript != nil && transcript.SuppressRestart(),
+		Health:            health,
+		RecentOutputTail:  tail,
 	}
 }
 
@@ -631,13 +681,52 @@ func (r *Registry) diagnose(a *Agent) DiagnoseInfo {
 	r.mu.RLock()
 	provider := r.stallSchedules
 	mailChecks := r.mailChecks
+	scanner := r.transcripts
 	r.mu.RUnlock()
 
 	var windows []CronWindow
 	if provider != nil {
 		windows = provider.CronWindowsForAgent(a.EventAgent())
 	}
-	return diagnoseAgentAt(a, time.Now(), windows, mailLoopFor(a, mailChecks))
+	var transcript *synthfail.Report
+	if scanner != nil {
+		rep := scanner.ScanTranscript(a.Name, a.Dir)
+		transcript = &rep
+	}
+	return diagnoseAgentAt(a, time.Now(), windows, mailLoopFor(a, mailChecks), transcript)
+}
+
+// ShouldRespawnAgent is the registry-aware restart gate: it answers
+// Agent.ShouldRespawn, then WITHHOLDS the respawn when the agent is in the
+// synthetic-failure-turn class.
+//
+// This is the enforcement half of mg-8cdb, and it is deliberately not advice.
+// A restart cannot fix any member of the class — a new session inherits the
+// same expired credential, the same rate limit, the same spend cap — while it
+// does destroy a live session's accumulated context and the transcript that
+// makes the condition diagnosable at all. Left ungated, restart_on_crash would
+// re-run mg-18d0's arithmetic: ~66 restarts over a day, recovering nothing.
+//
+// The second return value is the reason, empty when nothing was suppressed, so
+// the caller can log and emit rather than silently doing nothing — a silent
+// suppression is indistinguishable from a missing one.
+func (r *Registry) ShouldRespawnAgent(a *Agent) (respawn bool, suppressedBy synthfail.Report) {
+	if a == nil || !a.ShouldRespawn() {
+		return false, synthfail.Report{}
+	}
+	r.mu.RLock()
+	scanner := r.transcripts
+	r.mu.RUnlock()
+	if scanner == nil {
+		// No scanner: today's behaviour, unchanged. Absence of the detector is
+		// never a reason to stop recovering an agent that genuinely crashed.
+		return true, synthfail.Report{}
+	}
+	rep := scanner.ScanTranscript(a.Name, a.Dir)
+	if rep.SuppressRestart() {
+		return false, rep
+	}
+	return true, synthfail.Report{}
 }
 
 // mailLoopFor classifies an agent's mail delivery path. Everything it cannot

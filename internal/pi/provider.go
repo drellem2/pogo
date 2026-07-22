@@ -132,4 +132,14 @@ var Provider = agent.Provider{
 	// holds only the agent auth/settings store (measured 2026-07-21). If pi
 	// ships one, declare its glob here — memcheck needs no change.
 	MemoryIndexGlobs: nil,
+
+	// SessionTranscriptGlob nil: pi does write per-workdir session transcripts
+	// at ~/.pi/agent/sessions/<slug>/*.jsonl (measured 2026-07-23), but its
+	// slug encoding and its failure-turn record shape have not been
+	// characterised, and synthfail's structural test is written against a
+	// record that marks a locally-answered turn. Declaring a glob whose records
+	// never match would produce a confident StateQuiet — a false all-clear,
+	// which is the exact error this detector exists to prevent. nil keeps pi on
+	// today's behaviour until the record shape is measured.
+	SessionTranscriptGlob: nil,
 }

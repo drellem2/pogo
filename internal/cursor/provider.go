@@ -194,4 +194,11 @@ var Provider = agent.Provider{
 	// metadata — no index file of that shape (measured 2026-07-21). If Cursor
 	// ships one, declare its glob here — memcheck needs no change.
 	MemoryIndexGlobs: nil,
+
+	// SessionTranscriptGlob nil: Cursor keeps chats under ~/.cursor/chats/<opaque
+	// hash>/, not addressable from an agent's working directory, and
+	// ~/.cursor/projects/<slug>/ holds only repo metadata (measured
+	// 2026-07-23). No workdir-to-transcript mapping and no characterised
+	// failure-turn record, so Cursor agents stay on today's behaviour.
+	SessionTranscriptGlob: nil,
 }

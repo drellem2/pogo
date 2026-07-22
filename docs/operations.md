@@ -37,6 +37,45 @@ Work through the checklist per agent: `pogo agent diagnose` to see whether it se
 
 > **Note on marker drift (pre-existing risk):** detection keys off the modal's marker text (`"Stop and wait for limit to reset"`). If a future Claude Code version changes that string, detection silently stops until the marker constant is updated — the same drift risk the modal-dismissal watcher already carries. This is diagnostic-only: a missed detection means you fall back to the pre-#45 behavior (agents read as `stalled`), it does not break anything.
 
+## Agents that fail every turn
+
+This is the failure that took the fleet down for 23h30m on 2026-07-22, and the reason every health check read green while it happened ([mg-18d0](investigations/fleet-auth-expiry-2026-07-22.md), detector: mg-8cdb).
+
+**What it is.** When the harness cannot reach the model — an expired credential, a rate limit, an exhausted weekly allowance, a spend cap — it does not block and it does not crash. It answers the turn **locally**, in about 10ms, with a zero-token error, and moves on. The agent is alive, responsive, and consuming every nudge at its due second. It simply accomplishes nothing with any of them.
+
+**Why nothing else catches it.** Every counter pogo has measures *delivery*, not *completion*. During the outage `scheduler_fire_delivered` logged 647 successful deliveries and `nudge_sent` 771 — all true, all useless. Six agents each consumed 143 nudges and failed 143 of them. From the outside, a 100%-dead fleet and a 100%-healthy one produce the same events log.
+
+**The discriminator.** A genuinely wedged agent writes **nothing** to its session transcript. An agent in this class writes a **new turn on every nudge**. The two modes are opposites at the file level, so one reader tells them apart — and pogo's response to them is opposite too.
+
+### How you find out
+
+- **One coalesced page to `human`** (subject `AGENTS ARE FAILING EVERY TURN — <agent> (<reason>)`). This class is characteristically fleet-wide, because one credential is shared: additional agents join the episode silently, and one clear mail names them all when it ends.
+- **`pogo agent diagnose <name>`** reports `Health: failing_turns`, which outranks `stalled`, `rate_limited` and `idle`. `--json` carries `restart_suppressed` and a `transcript_check` object with the reason, the count, and the window.
+- The `synthetic_failure_detected` / `synthetic_failure_cleared` / `synthetic_failure_restart_suppressed` events land in `~/.pogo/events.log`.
+
+### What to do
+
+**Do not restart. Do not nudge.** A restart cannot fix any member of this class — the replacement session inherits the same dead credential or exhausted limit — while it *does* discard the live session's accumulated context (pm-pogo held 2339 messages when it failed) and overwrite the transcript the diagnosis depends on. A nudge is just one more turn to fail. pogod suppresses respawn for affected agents automatically, and the mayor's stall-watch has a mandatory pre-restart check; neither is something to work around.
+
+Each reason needs a human or the passage of time:
+
+| reason | what clears it |
+|---|---|
+| `auth_failed` | a human runs `/login` in a live session |
+| `rate_limit` | time |
+| `weekly_limit` | the stated weekly reset |
+| `spend_limit` | a human raises the cap |
+| `server_error` | time |
+| `invalid_request` | a human — the request itself is being rejected |
+
+When it clears you get one mail with a per-agent checklist. Work through it: the window's nudges were **consumed and destroyed, not queued**, so the scheduled work of that window is gone rather than late — re-run anything that mattered.
+
+### When the check is unavailable
+
+The detector reads harness session transcripts, which are **harness internals pogo does not own** — the path and schema can change without notice, and other harnesses have no such file. Where it cannot read one, `diagnose` says so explicitly (`transcript_check.state: "unavailable"`) and every behaviour falls back to what it was before the detector existed.
+
+**That is not a clean bill of health.** It means the check is off for that agent. Reading an absent transcript as "no failures here" would be the same absence-as-evidence mistake the original incident was made of.
+
 ## Token spend accounting (`mg spend`)
 
 pogo has **no `spend` command of its own** — token-usage accounting lives in **macguffin** (the work-item store), because that's where each transcript message is joined to the work item that was claimed when it was written. To see how many tokens the fleet has consumed — in total or broken down per agent, item, tag, or repo — reach for `mg spend`:

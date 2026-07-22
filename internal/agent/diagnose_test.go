@@ -262,7 +262,7 @@ func TestDiagnoseCronCoveredNotStalled(t *testing.T) {
 		Interval: 30 * time.Minute,
 	}}
 
-	diag := diagnoseAgentAt(a, now, windows, mailLoopUnknown)
+	diag := diagnoseAgentAt(a, now, windows, mailLoopUnknown, nil)
 	if diag.Stalled {
 		t.Error("cron-covered agent must not be flagged stalled")
 	}
@@ -280,7 +280,7 @@ func TestDiagnoseGenuineWedgeStillStalled(t *testing.T) {
 	// must still be flagged.
 	a := stalledCrewAgent(now, 25*time.Minute)
 
-	diag := diagnoseAgentAt(a, now, nil, mailLoopUnknown)
+	diag := diagnoseAgentAt(a, now, nil, mailLoopUnknown, nil)
 	if !diag.Stalled {
 		t.Error("agent with no cron schedule should still be flagged stalled")
 	}
@@ -304,7 +304,7 @@ func TestDiagnoseCronStaleStillStalled(t *testing.T) {
 		Interval: 30 * time.Minute,
 	}}
 
-	diag := diagnoseAgentAt(a, now, windows, mailLoopUnknown)
+	diag := diagnoseAgentAt(a, now, windows, mailLoopUnknown, nil)
 	if !diag.Stalled {
 		t.Error("idle beyond one cron interval of last firing should be stalled")
 	}
@@ -324,7 +324,7 @@ func TestDiagnoseCronNeverFiredAnchorsToNextFire(t *testing.T) {
 		Interval: 30 * time.Minute,
 	}}
 
-	diag := diagnoseAgentAt(a, now, windows, mailLoopUnknown)
+	diag := diagnoseAgentAt(a, now, windows, mailLoopUnknown, nil)
 	if diag.Stalled {
 		t.Error("never-fired schedule should still cover an in-window idle")
 	}

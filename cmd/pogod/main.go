@@ -46,6 +46,7 @@ import (
 	"github.com/drellem2/pogo/internal/server"
 	"github.com/drellem2/pogo/internal/service"
 	"github.com/drellem2/pogo/internal/stallwatch"
+	"github.com/drellem2/pogo/internal/synthwatch"
 	"github.com/drellem2/pogo/internal/workitem"
 
 	pogoPlugin "github.com/drellem2/pogo/pkg/plugin"
@@ -1216,13 +1217,59 @@ Flags:
 		}
 	})
 
+	// Build the synthetic-failure-turn detector (mg-8cdb, from mg-18d0's
+	// finding). It reads each running agent's harness session transcript and
+	// pages `human` when an agent is answering every nudge LOCALLY and failing
+	// it — an expired credential, a rate limit, a spend cap. That class leaves
+	// the agent alive, responsive, and productive of nothing, so no exit-driven
+	// or idle-driven check in this daemon can see it: on 2026-07-22 six agents
+	// burned 143 nudges each for 23h30m while scheduler_fire_delivered logged
+	// 647 healthy deliveries.
+	//
+	// It PAGES and SUPPRESSES RESTARTS; it never remediates. No member of the
+	// class is fixable by restarting, and restarting costs a live session's
+	// whole context plus the transcript the diagnosis depends on.
+	//
+	// It is armed unconditionally — unlike the stall watcher it nudges nobody
+	// and starts nothing, so an unconfigured or sandbox daemon is safe. Where a
+	// harness declares no transcript path (every provider but Claude today) the
+	// scan returns StateUnavailable and every consumer behaves exactly as it did
+	// before this existed.
+	synthWatcher := synthwatch.New(synthwatch.Options{
+		Home:    homeDir(),
+		Targets: func() []synthwatch.Target { return synthTargets(agentRegistry) },
+		Globs:   providers.SessionTranscriptGlobs,
+		Mail:    client.SendMGMail,
+	})
+	// diagnose reports the verdict, and ShouldRespawnAgent consults it before
+	// any restart_on_crash respawn.
+	agentRegistry.SetTranscriptScanner(synthScanner{w: synthWatcher})
+	log.Printf("pogod: synthetic-failure-turn detector enabled (interval=%s, page-only — restarts are SUPPRESSED, never issued)",
+		synthwatch.DefaultInterval)
+
 	agentRegistry.SetOnExit(func(a *agent.Agent, err error) {
 		// Disarm any defer-done backstop for this polecat: its process has
 		// ended, so the slot is free and there is nothing left to reap (gh #81).
 		// A no-op for the vast majority of agents, which are not --defer-done.
 		deferBackstop.cancel(a.Name)
 
-		if a.ShouldRespawn() {
+		// Consult the synthetic-failure-turn detector BEFORE respawning
+		// (mg-8cdb). An agent whose transcript shows it failing every turn
+		// locally is not recoverable by restarting: the replacement session
+		// inherits the same dead credential or exhausted limit, while the
+		// restart discards the session's context and overwrites the transcript
+		// the diagnosis rests on. mg-18d0 costed the ungated version of this
+		// path at ~66 restarts over 23.5h, recovering nothing. The detector has
+		// already paged `human`; there is nothing for this daemon to do but
+		// stand down and say so loudly.
+		respawn, suppressedBy := agentRegistry.ShouldRespawnAgent(a)
+		if !respawn && a.ShouldRespawn() {
+			log.Printf("agent %s (%s) exited while failing every turn (%s); SUPPRESSING respawn — "+
+				"a restart cannot fix this and destroys the session's context (mg-18d0). A human has been paged.",
+				a.Name, a.Type, suppressedBy.Reason)
+			synthWatcher.SuppressRestart(a.Name, a.EventAgent())
+		}
+		if respawn {
 			// Restart-on-crash agents: respawn after a short backoff so a
 			// fast crash loop doesn't peg the daemon. The agent stays in
 			// the registry and its worktree (if any) is preserved.
@@ -1234,10 +1281,13 @@ Flags:
 				}
 			}()
 		} else {
-			if a.RestartOnCrash {
+			if a.RestartOnCrash && !a.ShouldRespawn() {
 				// restart_on_crash is set but the agent is parked — the park
 				// flag (written before the park stop) suppresses the respawn
 				// and routes the exit through the cleanup path (mg-41e1).
+				// (The other suppressor, the synthetic-failure-turn detector,
+				// logs its own line above; a.ShouldRespawn() is still true in
+				// that case, so this one does not double-report it as parked.)
 				log.Printf("agent %s (%s) exited while parked; suppressing respawn", a.Name, a.Type)
 			}
 			// No-restart agents: clean up worktree (if any) and remove from
@@ -1495,6 +1545,11 @@ Flags:
 		if teardownWatcher != nil {
 			go teardownWatcher.Check(now)
 		}
+		// The synthetic-failure-turn detector rides the same tick and throttles
+		// itself to synthwatch.DefaultInterval. In a goroutine because it reads
+		// transcript files off disk and shells out to `mg mail send` on a hit —
+		// neither must delay the next tick. Page-only.
+		go synthWatcher.Check(now)
 		// Surface polecats that outlived an earlier pogod and are now alive but
 		// unreachable — UNKNOWN forever, holding a worktree and a claim, with
 		// nothing else in the tree looking at them (mg-0b77). Only a human can
