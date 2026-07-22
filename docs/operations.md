@@ -133,6 +133,14 @@ This drops a `.req` file into `~/.pogo/recovery/queue/` and exits 0 immediately 
 
 **Why this is a separate launchd job, not a pogod feature:** the whole point of tier 3 is to recover when pogod is wedged. Any signal channel that depends on pogod (an HTTP endpoint, an mg tag, a daemon-served socket) defeats the purpose. The recovery agent uses only the kernel — filesystem writes, `launchctl`, `flock`-equivalent atomic mkdir — so a fully-wedged `pogod` cannot block its own recovery. A polecat dying alongside its parent can still `mv` a file before exiting.
 
+**Tier 3 restarts; it does not redeploy.** The recovery agent runs `launchctl kickstart -k` and nothing else — no `go install`, no build, no `git pull`. It relaunches the binary that is *already installed*, so it activates **zero merged commits**. If you have merged a pogod change and want it live, tier 3 is not the mechanism and no number of recovery requests will make it one. To see what pogod is owed:
+
+```bash
+scripts/pogo-self-deploy check    # three-way drift report; safe from anywhere, never acts
+```
+
+That reports the running / installed / `main` revisions separately, because a restart bounces the whole fleet and a rebuild does not — you should not pay the fleet-bounce cost to discover you only needed one of them. The redeploy itself is guarded and must run out of band; `scripts/pogo-self-deploy redeploy` refuses callers inside pogod's process tree and its refusal explains the handoff. See `docs/investigations/recovery-trigger-restart-not-redeploy-2026-07-23.md` for why the two triggers are deliberately kept separate (mg-cf48).
+
 **Critical invariants (do not break):**
 
 - **Recovery is an independent install.** `pogo service install` does NOT install the recovery agent. Run `pogo service install-recovery` separately. Bundling them would mean a wedged daemon install blocks its own recovery — the very situation tier 3 exists to handle. The post-install hint from `pogo service install` reminds you of this; don't ignore it.
