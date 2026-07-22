@@ -2280,10 +2280,13 @@ Exits with code 1 if any critical check fails (--check mode only).`,
 			}
 
 			// 7. Auto-memory indexes approaching the harness read cliff.
-			// A MEMORY.md over the harness read cap stops loading ENTIRELY —
-			// every memory it indexes vanishes at once, silently. This warns
-			// BEFORE the cliff and names the fattest index lines (the
-			// actionable target). DETECT + WARN ONLY: it never rewrites
+			// The cap is a TOKEN budget, not a byte one (mg-b938): a MEMORY.md
+			// over it is refused rather than served, so the index it provides
+			// is lost wholesale. Token counts here are ESTIMATED — see
+			// memcheck.EstimateTokens for the measured error bounds — so this
+			// warns BEFORE the cliff with headroom that absorbs the estimate,
+			// and names the token-heaviest index lines (the actionable
+			// target). DETECT + WARN ONLY: it never rewrites
 			// MEMORY.md. Compaction is a destructive rewrite of the shared
 			// durable record and stays a deliberate, human-verified judgment
 			// call — a warn here, never an auto-fix (mg-15c0).
@@ -2306,14 +2309,13 @@ Exits with code 1 if any critical check fails (--check mode only).`,
 						approaching = append(approaching, res)
 					}
 				}
-				capKB := float64(memcheck.HarnessReadCapBytes) / 1024
 				if checked == 0 {
 					// No auto-memory indexes on this machine — nothing to warn
 					// about, and their absence is not itself a problem.
 					pass("memory index size", "no MEMORY.md indexes found")
 				} else if len(approaching) == 0 {
-					pass("memory index size", fmt.Sprintf("%d MEMORY.md index(es) under %.0f%% of the ~%.1fKB read cap",
-						checked, memcheck.WarnFraction*100, capKB))
+					pass("memory index size", fmt.Sprintf("%d MEMORY.md index(es) under %.0f%% of the %d-token read cap",
+						checked, memcheck.WarnFraction*100, memcheck.HarnessReadCapTokens))
 				} else {
 					for _, res := range approaching {
 						var fat []string
@@ -2322,12 +2324,12 @@ Exits with code 1 if any critical check fails (--check mode only).`,
 							if len(text) > 100 {
 								text = text[:100] + "…"
 							}
-							fat = append(fat, fmt.Sprintf("[%dB] %s", ln.Bytes, text))
+							fat = append(fat, fmt.Sprintf("[~%dtok] %s", ln.Tokens, text))
 						}
 						warn("memory index size", fmt.Sprintf(
-							"%s is %dB, at/over the %dB warn threshold (%.0f%% of the ~%.1fKB harness read cap); past %dB it stops loading and ALL its memories vanish at once. Compact it deliberately (never auto — verify the entry count and links). Fattest index lines: %s",
-							res.Path, res.SizeBytes, res.ThresholdBytes, memcheck.WarnFraction*100, capKB,
-							res.CapBytes, strings.Join(fat, " | ")))
+							"%s is ~%d tokens (%dB), at/over the %d-token warn threshold (%.0f%% of the %d-token harness read cap); past %d tokens it stops loading in full and the index it provides is lost. Token counts are ESTIMATED (±~11%%), so treat this as a margin warning, not a deadline. Compact it deliberately (never auto — verify the entry count and links). Heaviest index lines: %s",
+							res.Path, res.EstTokens, res.SizeBytes, res.ThresholdTokens, memcheck.WarnFraction*100,
+							res.CapTokens, res.CapTokens, strings.Join(fat, " | ")))
 					}
 				}
 			}
