@@ -2598,7 +2598,14 @@ com.pogo.recovery agent runs launchctl kickstart -k against pogod.
 The write uses the temp-then-rename pattern so launchd never sees a
 partial file. Exits 0 once the request is enqueued — does NOT block on
 the actual restart. The recovery agent rate-limits to one kickstart per
-60s and archives processed requests to ~/.pogo/recovery/processed/.`,
+60s and archives processed requests to ~/.pogo/recovery/processed/.
+
+This RESTARTS pogod; it does NOT redeploy it. The recovery agent runs
+kickstart and nothing else — no build, no install — so it relaunches the
+binary already on disk and activates ZERO merged commits. If you merged a
+pogod change and want it live, this is not the mechanism. Run
+'scripts/pogo-self-deploy check' for the running/installed/main drift
+report; it is safe from anywhere and never acts.`,
 		Args: cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
 			requester := recoveryRequestRequester
