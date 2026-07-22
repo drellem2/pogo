@@ -469,6 +469,51 @@ The teardown detector could not READ the work-item store, so it audited nothing 
 {"schema_version":1,"timestamp":"2026-07-21T01:15:00.000000000Z","event_type":"gh_teardown_watch_error","agent":"pogod","details":{"error":"listing done work items: mg --root ... : command not found"}}
 ```
 
+#### `synthetic_failure_detected`
+
+pogod's synthetic-failure-turn detector ([internal/synthwatch](../internal/synthwatch/synthwatch.go), mg-8cdb) read the agent's harness session transcript and found it answering turns **locally** and failing them: turns attributed to a synthetic model, with zero tokens in and out, flagged as API errors. The agent is alive and consuming every nudge on time; it accomplishes nothing with them. Detection is structural (synthetic model + zero usage + error flag), never a message string.
+
+This is distinct from `usage_limit_hit`, which reads the PTY modal. This one reads the transcript, so it also sees the members that never render a modal at all — expired credentials above all. Emitted once per agent per episode; the paired `synthetic_failure_cleared` fires on recovery. **A restart cannot fix this class** — see `synthetic_failure_restart_suppressed`. Additive — no `schema_version` bump.
+
+- **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent`, `details`
+- **Optional envelope:** `work_item_id`
+- **`details` fields:**
+  - `target` (string, required): the bare agent name
+  - `reason` (string, required): `auth_failed` | `rate_limit` | `weekly_limit` | `spend_limit` | `server_error` | `invalid_request` | `unclassified`
+  - `failing_turns` (int, required): count inside the detection window
+  - `first`, `last` (RFC3339, required): the window's bounds
+  - `detail` (string): the harness's own error text, truncated
+  - `remediation` (string): always the page-don't-restart directive in v1
+
+```json
+{"schema_version":1,"timestamp":"2026-07-22T00:10:26.000000000Z","event_type":"synthetic_failure_detected","agent":"crew-pm-pogo","details":{"target":"pm-pogo","reason":"auth_failed","failing_turns":14,"first":"2026-07-21T23:10:26Z","last":"2026-07-22T00:10:26Z","detail":"Login expired · Please run /login","remediation":"page a human; restart is suppressed and cannot help"}}
+```
+
+#### `synthetic_failure_cleared`
+
+The agent left the failing state: its transcript now shows real model turns in the window, or it stopped running. Restart suppression is lifted. Note that a transcript becoming **unreadable** does NOT clear the state — only a positive quiet reading does, because "we stopped being able to look" is not "it recovered". Additive — no `schema_version` bump.
+
+- **`details` fields:** `target` (string, required)
+
+```json
+{"schema_version":1,"timestamp":"2026-07-22T22:40:37.000000000Z","event_type":"synthetic_failure_cleared","agent":"pm-pogo","details":{"target":"pm-pogo"}}
+```
+
+#### `synthetic_failure_restart_suppressed`
+
+pogod **withheld a restart** it would otherwise have performed, because the agent is in the synthetic-failure class. This is the audit trail for the suppression half of mg-8cdb: a suppression that only ever happened silently would be indistinguishable from one that never shipped. Additive — no `schema_version` bump.
+
+- **`details` fields:**
+  - `target` (string, required): the agent whose restart was withheld
+  - `reason` (string, required): the class member, as above
+  - `failing_turns` (int), `detail` (string)
+  - `suppressed_action` (string, required): what was withheld — `"respawn"` in v1
+  - `why` (string, required): the rationale, for a reader who finds this event with no other context
+
+```json
+{"schema_version":1,"timestamp":"2026-07-22T04:00:00.000000000Z","event_type":"synthetic_failure_restart_suppressed","agent":"crew-pm-pogo","details":{"target":"pm-pogo","reason":"auth_failed","failing_turns":143,"suppressed_action":"respawn","why":"a restart cannot fix a synthetic zero-token failure turn; it discards the session's context and recovers nothing (mg-18d0)"}}
+```
+
 #### `usage_limit_hit`
 
 pogod's modal watcher ([modal_hook.go](../internal/claude/modal_hook.go), gh drellem2/pogo #45) declared a **suspected** provider usage-limit hit for an agent: the rate-limit-options modal has been recently visible AND the agent's event log has been stale for longer than the usage-limit staleness gate (~5m, `UsageLimitSuspectStaleness`). This is a heuristic derived entirely from the existing event-staleness tracker — there is no provider quota/API probe. The ~5m gate is deliberately long because the marker text also appears in ordinary transcripts; a shorter gate would false-positive on an agent that merely prints the phrase. Emitted once per wedge; the paired `usage_limit_cleared` fires on recovery. Additive — no `schema_version` bump.

@@ -98,6 +98,26 @@ type Provider struct {
 	// change to memcheck. Note this covers only HARNESS-owned memory; pogo's
 	// own agent memory root is harness-independent and stays in memcheck.
 	MemoryIndexGlobs []string
+
+	// SessionTranscriptGlob returns a home-relative glob matching the session
+	// transcript files this harness writes for an agent running in workdir
+	// (e.g. Claude Code's ".claude/projects/<slug-of-workdir>/*.jsonl").
+	// internal/synthfail reads those files to tell an agent that is WEDGED
+	// (writes nothing) from one that is answering every nudge locally and
+	// failing it (writes a new zero-token turn per nudge) — the class mg-18d0
+	// identified after the 2026-07-22 fleet outage.
+	//
+	// It is a func rather than a static glob because the path is derived from
+	// the agent's working directory, and the derivation (slug encoding) is a
+	// harness detail that must stay inside that harness's package — the same
+	// discipline MemoryIndexGlobs enforces for dotdirs.
+	//
+	// nil means "this harness exposes no readable session transcript" — a
+	// positive statement, not an omission. Returning "" for a given workdir is
+	// the same statement for that one agent. Either way synthfail reports
+	// StateUnavailable and every consumer degrades to its pre-detector
+	// behaviour; absence is never read as "no failures".
+	SessionTranscriptGlob func(workdir string) string
 }
 
 // PromptInjectionKind enumerates the strategies for delivering a persona prompt

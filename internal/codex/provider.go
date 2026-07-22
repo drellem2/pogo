@@ -115,4 +115,15 @@ var Provider = agent.Provider{
 	// carries no index file of that shape (measured 2026-07-21). If Codex ships
 	// one, declare its glob here — memcheck needs no change.
 	MemoryIndexGlobs: nil,
+
+	// SessionTranscriptGlob nil: Codex writes session rollouts to
+	// ~/.codex/sessions/<YYYY>/<MM>/<DD>/rollout-*.jsonl, which is keyed by
+	// START TIME, not by the agent's working directory (measured 2026-07-23) —
+	// so there is no glob that maps one agent to its transcript, which is what
+	// synthfail needs. Nor has a Codex zero-token failure-turn record been
+	// characterised. Declaring nil keeps Codex agents on today's behaviour
+	// (StateUnavailable) rather than guessing; if a workdir-addressable path or
+	// a verified failure-turn shape turns up, declare it here — synthfail needs
+	// no change.
+	SessionTranscriptGlob: nil,
 }

@@ -362,6 +362,13 @@ type Registry struct {
 	// default, and what unit tests use) disables the check.
 	mailChecks MailCheckProvider
 
+	// transcripts, when set, reads an agent's harness session transcript so
+	// diagnose can report the synthetic-failure-turn class and ShouldRespawnAgent
+	// can withhold a restart that cannot help (mg-8cdb / mg-18d0). pogod wires
+	// it to internal/synthwatch; nil (the default, and what unit tests use)
+	// leaves every behaviour exactly as it was before the detector existed.
+	transcripts TranscriptScanner
+
 	// schedulePauser, when set, lets Park/Wake pause and restore an agent's
 	// pogod schedules (mg-41e1). pogod wires it to its scheduler; nil (bare
 	// registry, scheduler disabled) makes park skip schedule handling.
@@ -418,6 +425,15 @@ func (r *Registry) SetMailCheckProvider(p MailCheckProvider) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.mailChecks = p
+}
+
+// SetTranscriptScanner installs the harness-transcript reader used by diagnose
+// and by ShouldRespawnAgent to detect — and refuse to restart — an agent that is
+// failing every turn locally (mg-8cdb). Call once at startup.
+func (r *Registry) SetTranscriptScanner(s TranscriptScanner) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.transcripts = s
 }
 
 // SetOnExit sets the callback invoked when any agent exits.

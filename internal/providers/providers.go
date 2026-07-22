@@ -46,6 +46,31 @@ func MemoryIndexGlobs() []string {
 	return globs
 }
 
+// SessionTranscriptGlobs returns the home-relative session-transcript globs
+// declared by every known provider for an agent working in workdir, in All's
+// stable order. It is the composition point that keeps internal/synthfail free
+// of any harness's dotdir, exactly as MemoryIndexGlobs does for memcheck.
+//
+// It spans All rather than the configured provider for the same reason
+// MemoryIndexGlobs does: pogo resolves a provider per-spawn (mg-b31b), so the
+// caller asking about an agent may not know which harness produced it, and a
+// glob that matches nothing costs nothing. A provider that declares nil, or
+// returns "" for this workdir, contributes nothing — and an empty result is
+// synthfail's StateUnavailable, which degrades to pre-detector behaviour rather
+// than asserting health.
+func SessionTranscriptGlobs(workdir string) []string {
+	var globs []string
+	for _, p := range All() {
+		if p.SessionTranscriptGlob == nil {
+			continue
+		}
+		if g := p.SessionTranscriptGlob(workdir); g != "" {
+			globs = append(globs, g)
+		}
+	}
+	return globs
+}
+
 // Resolve maps a config provider id to its agent.Provider descriptor.
 //
 // "" and "claude" resolve to Claude (the default); "codex" resolves to Codex;

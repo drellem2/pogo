@@ -294,6 +294,46 @@ If non-zero, the host just woke — schedules are still replaying, so a stale he
 is expected. Skip the agent this cycle and re-check next time. (See mg-283e for the
 heartbeat detector that emits these events.)
 
+**MANDATORY PRE-RESTART CHECK — is it wedged, or is it failing every turn?**
+
+A stale heartbeat has two causes that look identical from the outside and take
+**opposite** responses. Before you nudge or restart anything, ask:
+
+```bash
+pogo agent diagnose <name> --json | jq '{health, restart_suppressed, transcript_check}'
+```
+
+- `health: "failing_turns"` / `restart_suppressed: true` — the agent is **not
+  wedged**. It is alive, consuming every nudge on time, and failing each one
+  locally in ~10ms: an expired credential, a rate limit, a spend cap.
+  **DO NOT RESTART IT, and do not nudge it either** — a nudge is just another
+  turn for it to fail. A restart cannot help, because the replacement session
+  inherits the same credential or limit, and it *destroys* both the session's
+  accumulated context and the transcript that makes the condition diagnosable.
+  pogod has already suppressed restart-based remediation for this agent and
+  paged `human`. **Your job is to stay out of the way.** Record it and move on:
+  ```bash
+  pogo events emit --type=stall_restart_declined --agent={{.Coordinator}} \
+      --details="{\"target\":\"<name>\",\"reason\":\"failing_turns\",\"detail\":\"<transcript_check.reason>\"}"
+  ```
+  Expect this to be **fleet-wide**: one credential is shared, so if one agent is
+  in this state most of the others are too — and so are you. If your own turns
+  start failing you will not be running to notice, which is exactly why this
+  detection lives in pogod and not here.
+
+- `transcript_check.state: "unavailable"` — pogo could not read a transcript for
+  this agent (a non-Claude harness, or the harness moved its files). **This is
+  not a clean bill of health**; it means the check is off. Fall through to the
+  thresholds below, which are pogo's pre-detector behaviour.
+
+- anything else — an ordinary wedge. Proceed with the thresholds below. Restart
+  is the correct remediation for a genuine wedge.
+
+On 2026-07-22 this distinction cost 23h30m. Six agents burned 143 nudges each
+while every health signal read green, and the 120-minute rule below — applied
+without this check — would have produced ~66 restarts that recovered nothing
+(mg-18d0, mg-8cdb).
+
 **Thresholds and escalation:**
 
 - **age ≤ 90 min** — healthy. Skip.
@@ -302,7 +342,8 @@ heartbeat detector that emits these events.)
   pogo nudge <name> "Heartbeat is stale (Xm). Run a mail-check now (mg mail list <name>) and append a fresh heartbeat line to your sweep.log, or I will restart you in ~30m."
   ```
   Re-checking next cycle will see whether the nudge took effect.
-- **age > 120 min** — restart. The session is wedged; cycle the process so pogod relaunches it cleanly:
+- **age > 120 min** — restart, **only after the pre-restart check above came back
+  clean**. The session is wedged; cycle the process so pogod relaunches it cleanly:
   ```bash
   pogo agent stop <name>
   pogo agent start <name>

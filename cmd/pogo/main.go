@@ -35,6 +35,7 @@ import (
 	"github.com/drellem2/pogo/internal/refinery"
 	"github.com/drellem2/pogo/internal/scheduler"
 	"github.com/drellem2/pogo/internal/service"
+	"github.com/drellem2/pogo/internal/synthfail"
 	"github.com/drellem2/pogo/internal/version"
 	"github.com/drellem2/pogo/internal/xref"
 )
@@ -1366,6 +1367,28 @@ down. To keep it down, park it.`,
 				}
 				fmt.Printf("Stall threshold: %s\n", diag.StallThreshold)
 				fmt.Printf("Health:         %s\n", diag.Health)
+				if diag.TranscriptCheck != nil && diag.TranscriptCheck.State == synthfail.StateFailing {
+					tc := diag.TranscriptCheck
+					fmt.Printf("\n⚠ FAILING EVERY TURN: %s is answering turns locally and failing them —\n", diag.Name)
+					fmt.Printf("  %d zero-token failure turns since %s.\n", tc.Count, tc.First.UTC().Format(time.RFC3339))
+					fmt.Printf("  Reason: %s — %s\n", tc.Reason, tc.Reason.Human())
+					if tc.Detail != "" {
+						fmt.Printf("  Harness said: %q\n", tc.Detail)
+					}
+					fmt.Printf("  This is NOT a wedge: the agent is alive and consuming every nudge on\n")
+					fmt.Printf("  time, it just accomplishes nothing with them — so delivery counters read\n")
+					fmt.Printf("  green throughout (mg-18d0).\n")
+					fmt.Printf("  DO NOT RESTART. A new session inherits the same credential/limit and the\n")
+					fmt.Printf("  restart discards this session's context. pogod has suppressed\n")
+					fmt.Printf("  restart-based remediation for this agent and paged `human`.\n")
+				} else if diag.TranscriptCheck != nil && diag.TranscriptCheck.State == synthfail.StateUnavailable {
+					// Say so explicitly. An unread transcript is not a clean bill of
+					// health, and rendering it as silence is the absence-as-evidence
+					// error this detector exists to prevent.
+					fmt.Printf("\nℹ Transcript check unavailable: %s\n", diag.TranscriptCheck.Unavailable)
+					fmt.Printf("  Turn-failure detection is OFF for this agent; the states above are\n")
+					fmt.Printf("  pogo's pre-detector behaviour. This is not evidence of health.\n")
+				}
 				if diag.RateLimited {
 					fmt.Printf("\n⚠ Agent appears rate-limited (provider usage limit).")
 					if !diag.RateLimitedSince.IsZero() {
