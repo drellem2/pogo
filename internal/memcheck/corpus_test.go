@@ -238,25 +238,94 @@ func TestPositiveControl_FiresOnGenuinelyOverCliffIndex(t *testing.T) {
 		len(body), measuredTrueTokens, r.EstTokens, r.ThresholdTokens)
 }
 
-// TestNegativeControl_SilentOnIndexTheHarnessReadsFine is the other half. An
-// index the harness serves in full must NOT be reported as approaching the
-// cliff — and this specific fixture is the one the old byte check got wrong.
+// TestNegativeControl_SilentOnIndexTheHarnessReadsFine is the other half, and
+// it is now scoped to the budget it actually measured. An index the harness
+// READS in full must not be reported as approaching the READ cliff — that is
+// the false alarm mg-b938 removed, and it stays removed.
+//
+// It asserts ApproachingRead, not Approaching, and the difference is the whole
+// of mg-9a89: this same fixture IS over the auto-inject budget (see
+// TestTheReadFineFixtureIsAutoInjectTruncated below). Asserting the combined
+// flag here would be asserting that a truncating index is healthy.
 func TestNegativeControl_SilentOnIndexTheHarnessReadsFine(t *testing.T) {
 	body := []byte(numberedIndex(524))
 	if len(body) != 41082 {
 		t.Fatalf("fixture drifted from the measured one: %d bytes, want 41082", len(body))
 	}
 	r := Check("MEMORY.md", body)
-	if r.Approaching {
-		t.Fatalf("FALSE ALARM: the harness reads this %d-byte index in full, but the detector cried cliff (estimated %d tokens, threshold %d)",
+	if r.ApproachingRead {
+		t.Fatalf("FALSE ALARM: the harness reads this %d-byte index in full, but the read check cried cliff (estimated %d tokens, threshold %d)",
 			len(body), r.EstTokens, r.ThresholdTokens)
 	}
 	// The regression guard: the superseded byte logic fired here.
 	if len(body) < 20000 {
 		t.Fatal("this fixture no longer exercises the original defect — it must exceed the old 20000-byte warn threshold to prove the false alarm is gone")
 	}
-	t.Logf("under-cliff fixture: %d bytes (2x the old 20000-byte warn point), harness read it in full, estimated %d tokens vs threshold %d — detector GREEN as required",
+	t.Logf("under-read-cliff fixture: %d bytes (2x the old 20000-byte warn point), harness read it in full, estimated %d tokens vs threshold %d — read check GREEN as required",
 		len(body), r.EstTokens, r.ThresholdTokens)
+}
+
+// TestTheReadFineFixtureIsAutoInjectTruncated is the mg-9a89 finding as a test,
+// and it is deliberately built on the exact fixture mg-b938 certified healthy.
+//
+// mg-b938 measured this 41082-byte index against the harness Read tool, watched
+// it come back in full, and concluded the detector should stay green on it. All
+// of that was correct. It was also aimed at the wrong path: MEMORY.md does not
+// reach an agent through the Read tool, it reaches it through session-start
+// auto-injection, and that path truncates this file to its first ~25000
+// characters. Roughly 40% of its entries never arrive.
+//
+// So the fixture that proved the old check was over-eager simultaneously proves
+// the new one is necessary. If this test ever goes green-by-silence — if the
+// auto-inject flag stops firing here — the detector has gone back to guarding
+// only the path nobody loads memory through.
+func TestTheReadFineFixtureIsAutoInjectTruncated(t *testing.T) {
+	body := []byte(numberedIndex(524))
+	r := Check("MEMORY.md", body)
+
+	if r.Chars <= HarnessAutoInjectCapChars {
+		t.Fatalf("fixture no longer exercises the finding: %d chars is under the %d-char auto-inject cap", r.Chars, HarnessAutoInjectCapChars)
+	}
+	if !r.ApproachingAutoInject {
+		t.Fatalf("REGRESSION: %d chars is past the %d-char auto-inject cap — the harness injects only a prefix and drops the rest — but the detector stayed silent",
+			r.Chars, HarnessAutoInjectCapChars)
+	}
+	if r.ApproachingRead {
+		t.Fatalf("the read budget must NOT be what fires here; that would make this test unable to distinguish the two paths (est %d tokens vs threshold %d)",
+			r.EstTokens, r.ThresholdTokens)
+	}
+	if got := r.Binding(); got != "auto-inject" {
+		t.Fatalf("Binding() = %q, want %q — a warn that names the read budget here points the reader at the cliff that is NOT near", got, "auto-inject")
+	}
+
+	// Quantify the gap the old scoping left open, so the number is on the
+	// record rather than in a commit message.
+	lost := r.Chars - HarnessAutoInjectCapChars
+	t.Logf("mg-b938's healthy fixture: %d chars vs %d-char auto-inject cap — ~%d chars (~%.0f%%) never injected, while the read check reads it as fine (%d est tokens < %d threshold)",
+		r.Chars, HarnessAutoInjectCapChars, lost, 100*float64(lost)/float64(r.Chars), r.EstTokens, r.ThresholdTokens)
+}
+
+// TestAutoInjectBudgetIsTheBindingOne states the relationship between the two
+// caps that makes checking only the token one unsafe: for ordinary index prose,
+// the character budget is exhausted well before the token budget. If a future
+// change ever inverts this, the doctor's messaging (which leads with the
+// auto-inject path) needs revisiting — so pin it.
+func TestAutoInjectBudgetIsTheBindingOne(t *testing.T) {
+	// An index sized to sit exactly at the auto-inject cap.
+	body := []byte(numberedIndex(524))
+	full := string(body)
+	if len(full) < HarnessAutoInjectCapChars {
+		t.Fatal("fixture too small to trim to the cap")
+	}
+	atCap := []byte(full[:HarnessAutoInjectCapChars])
+
+	r := Check("MEMORY.md", atCap)
+	if r.EstTokens >= HarnessReadCapTokens {
+		t.Fatalf("an index at the %d-char auto-inject cap already costs %d tokens (read cap %d) — the character budget is no longer the binding one for prose, and the doctor's messaging assumes it is",
+			HarnessAutoInjectCapChars, r.EstTokens, HarnessReadCapTokens)
+	}
+	t.Logf("at the %d-char auto-inject cap an index costs ~%d tokens — %.1fx headroom under the %d-token read cap, i.e. auto-injection binds first",
+		HarnessAutoInjectCapChars, r.EstTokens, float64(HarnessReadCapTokens)/float64(r.EstTokens), HarnessReadCapTokens)
 }
 
 // TestWriteCorpus is a generator, not an assertion: it emits the corpus so the

@@ -2405,14 +2405,17 @@ Exits with code 1 if any critical check fails (--check mode only).`,
 				}
 			}
 
-			// 7. Auto-memory indexes approaching the harness read cliff.
-			// The cap is a TOKEN budget, not a byte one (mg-b938): a MEMORY.md
-			// over it is refused rather than served, so the index it provides
-			// is lost wholesale. Token counts here are ESTIMATED — see
-			// memcheck.EstimateTokens for the measured error bounds — so this
-			// warns BEFORE the cliff with headroom that absorbs the estimate,
-			// and names the token-heaviest index lines (the actionable
-			// target). DETECT + WARN ONLY: it never rewrites
+			// 7. Auto-memory indexes approaching a harness cliff.
+			// There are TWO cliffs in two different units, and this checks
+			// both (mg-9a89): session-start AUTO-INJECTION truncates at 25000
+			// CHARACTERS, and the READ TOOL refuses past 25000 TOKENS. The
+			// character one binds first for ordinary index prose — ~2.6x
+			// sooner — and it is the path MEMORY.md actually loads through, so
+			// checking only the token cap (as this did before) passes an index
+			// that is already losing entries at session start. Token counts
+			// are ESTIMATED — see memcheck.EstimateTokens for the measured
+			// error bounds — while character counts are exact. DETECT + WARN
+			// ONLY: it never rewrites
 			// MEMORY.md. Compaction is a destructive rewrite of the shared
 			// durable record and stays a deliberate, human-verified judgment
 			// call — a warn here, never an auto-fix (mg-15c0).
@@ -2440,8 +2443,8 @@ Exits with code 1 if any critical check fails (--check mode only).`,
 					// about, and their absence is not itself a problem.
 					pass("memory index size", "no MEMORY.md indexes found")
 				} else if len(approaching) == 0 {
-					pass("memory index size", fmt.Sprintf("%d MEMORY.md index(es) under %.0f%% of the %d-token read cap",
-						checked, memcheck.WarnFraction*100, memcheck.HarnessReadCapTokens))
+					pass("memory index size", fmt.Sprintf("%d MEMORY.md index(es) under %.0f%% of both the %d-char auto-inject cap and the %d-token read cap",
+						checked, memcheck.WarnFraction*100, memcheck.HarnessAutoInjectCapChars, memcheck.HarnessReadCapTokens))
 				} else {
 					for _, res := range approaching {
 						var fat []string
@@ -2452,10 +2455,22 @@ Exits with code 1 if any critical check fails (--check mode only).`,
 							}
 							fat = append(fat, fmt.Sprintf("[~%dtok] %s", ln.Tokens, text))
 						}
+						// Name the cliff that is actually near. Reporting the
+						// slack budget's number next to a warn is how an index
+						// that is truncating reads as merely large.
+						var which string
+						if res.ApproachingAutoInject {
+							which = fmt.Sprintf(
+								"SESSION-START AUTO-INJECTION: %d chars, at/over the %d-char warn threshold (%.0f%% of the %d-char cap). Past %d chars the harness injects only the entries that fit and drops the rest for the whole session",
+								res.Chars, res.ThresholdChars, memcheck.WarnFraction*100, res.CapChars, res.CapChars)
+						} else {
+							which = fmt.Sprintf(
+								"READ TOOL: ~%d tokens, at/over the %d-token warn threshold (%.0f%% of the %d-token cap). Past %d tokens a read is refused or paginated. Token counts are ESTIMATED (±~11%%), so treat this as a margin warning, not a deadline",
+								res.EstTokens, res.ThresholdTokens, memcheck.WarnFraction*100, res.CapTokens, res.CapTokens)
+						}
 						warn("memory index size", fmt.Sprintf(
-							"%s is ~%d tokens (%dB), at/over the %d-token warn threshold (%.0f%% of the %d-token harness read cap); past %d tokens it stops loading in full and the index it provides is lost. Token counts are ESTIMATED (±~11%%), so treat this as a margin warning, not a deadline. Compact it deliberately (never auto — verify the entry count and links). Heaviest index lines: %s",
-							res.Path, res.EstTokens, res.SizeBytes, res.ThresholdTokens, memcheck.WarnFraction*100,
-							res.CapTokens, res.CapTokens, strings.Join(fat, " | ")))
+							"%s (%d chars, ~%d tokens, %dB) — %s. The harness announces the truncation, but an agent cannot notice entries that were never injected. Compact it deliberately (never auto — verify the entry count and links). Heaviest index lines: %s",
+							res.Path, res.Chars, res.EstTokens, res.SizeBytes, which, strings.Join(fat, " | ")))
 					}
 				}
 			}

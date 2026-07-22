@@ -30,6 +30,23 @@ func buildIndex(wantTokens int) []byte {
 	return []byte(b.String())
 }
 
+// buildIndexChars is buildIndex sized against the CHARACTER budget instead of
+// the token one. It exists because the two budgets are in different units and a
+// fixture that is "small" in one can be over the cliff in the other — which is
+// precisely the confusion mg-9a89 found in this package.
+func buildIndexChars(wantChars int) []byte {
+	var b strings.Builder
+	b.WriteString("# Memory index\n\n")
+	b.WriteString("- [The one that grew into a paragraph](fat.md) — " +
+		strings.Repeat("this hook kept accreting clauses and never got trimmed, ", 8) + "\n")
+	i := 0
+	for b.Len() < wantChars {
+		fmt.Fprintf(&b, "- [Memory %d](file-%d.md) — a reasonably sized one-line hook for entry %d\n", i, i, i)
+		i++
+	}
+	return []byte(b.String())
+}
+
 // TestPositiveControl_FiresOverThreshold is the required positive control: a
 // size check is trivial to write so that it can NEVER fire, so we prove it CAN
 // fire on an over-threshold fixture BEFORE trusting its silence on a healthy
@@ -71,26 +88,39 @@ func TestNamesTheFattestLines(t *testing.T) {
 
 // TestSilentUnderThreshold: a healthy index does not fire (checked AFTER the
 // positive control, per the ordering the acceptance demands).
+//
+// "Healthy" now means under BOTH budgets. Sizing this fixture by tokens alone
+// is what it used to do, and that made it a ~26000-character index — one the
+// auto-inject path truncates — asserted to be fine. The fixture is sized
+// against the binding (character) budget for that reason.
 func TestSilentUnderThreshold(t *testing.T) {
-	// Comfortably under the warn threshold.
-	data := buildIndex(WarnThresholdTokens() / 2)
+	// Comfortably under both warn thresholds.
+	data := buildIndexChars(AutoInjectWarnThresholdChars() / 2)
 	if EstimateTokens(data) >= WarnThresholdTokens() {
 		t.Fatalf("healthy fixture unexpectedly large: ~%d tokens", EstimateTokens(data))
 	}
+	if len(data) >= AutoInjectWarnThresholdChars() {
+		t.Fatalf("healthy fixture unexpectedly long: %d chars", len(data))
+	}
 	r := Check("MEMORY.md", data)
 	if r.Approaching {
-		t.Fatalf("false positive: fired on a healthy ~%d-token index (threshold %d)", r.EstTokens, r.ThresholdTokens)
+		t.Fatalf("false positive: fired on a healthy index (~%d tokens vs threshold %d; %d chars vs threshold %d)",
+			r.EstTokens, r.ThresholdTokens, r.Chars, r.ThresholdChars)
 	}
 	if len(r.FattestLines) != 0 {
 		t.Fatalf("healthy index should not name fat lines; got %d", len(r.FattestLines))
 	}
 }
 
-// TestBoundaryAtThreshold: at exactly the threshold we warn (>=), one token
-// under we do not. Pins the comparison so an off-by-one can't silently flip it.
+// TestBoundaryAtThreshold: at exactly the TOKEN threshold we warn (>=), one
+// token under we do not. Pins the comparison so an off-by-one can't silently
+// flip it.
 //
 // The fixture is built from a body of single-token-per-line filler so the
-// estimate lands on an exact, controllable count.
+// estimate lands on an exact, controllable count. It asserts on
+// ApproachingRead specifically: this filler is also long enough to trip the
+// character budget, and reading the combined Approaching flag here would let a
+// broken token comparison pass on the strength of the other budget firing.
 func TestBoundaryAtThreshold(t *testing.T) {
 	th := WarnThresholdTokens()
 	// "x\n" costs tokensPerAlphaChar + tokensPerLinePrefix per line; find the
@@ -106,8 +136,8 @@ func TestBoundaryAtThreshold(t *testing.T) {
 	if got := EstimateTokens(at); got < th {
 		t.Fatalf("fixture construction failed: %d < %d", got, th)
 	}
-	if !Check("m", at).Approaching {
-		t.Fatalf("at/over the threshold (%d tokens) the check must fire", th)
+	if !Check("m", at).ApproachingRead {
+		t.Fatalf("at/over the threshold (%d tokens) the read check must fire", th)
 	}
 	// Trim back until strictly under the threshold; it must go silent.
 	body := string(at)
@@ -118,8 +148,44 @@ func TestBoundaryAtThreshold(t *testing.T) {
 		}
 		body = body[:idx+1]
 	}
-	if Check("m", []byte(body)).Approaching {
-		t.Fatalf("under the threshold (~%d tokens < %d) the check must stay silent", EstimateTokens([]byte(body)), th)
+	if Check("m", []byte(body)).ApproachingRead {
+		t.Fatalf("under the threshold (~%d tokens < %d) the read check must stay silent", EstimateTokens([]byte(body)), th)
+	}
+}
+
+// TestBoundaryAtAutoInjectThreshold is the same pin for the CHARACTER budget:
+// at the threshold it fires, one character under it does not. The character
+// count is exact, so this boundary is exact — there is no estimator slop to
+// leave room for.
+func TestBoundaryAtAutoInjectThreshold(t *testing.T) {
+	th := AutoInjectWarnThresholdChars()
+	at := []byte(strings.Repeat("a", th))
+	if r := Check("m", at); !r.ApproachingAutoInject {
+		t.Fatalf("at the threshold (%d chars) the auto-inject check must fire; got chars=%d threshold=%d", th, r.Chars, r.ThresholdChars)
+	}
+	under := []byte(strings.Repeat("a", th-1))
+	if r := Check("m", under); r.ApproachingAutoInject {
+		t.Fatalf("one char under the threshold (%d < %d) the auto-inject check must stay silent", r.Chars, r.ThresholdChars)
+	}
+}
+
+// TestCharsCountedAsCharactersNotBytes: the auto-inject budget is denominated
+// in CHARACTERS, so multi-byte content must not be charged by its byte length.
+// An em dash is one character and three bytes; a check that counted bytes would
+// fire ~3x early on the em-dash-separated hooks every real index is full of —
+// the same class of false alarm mg-b938 removed from the token path.
+func TestCharsCountedAsCharactersNotBytes(t *testing.T) {
+	body := []byte(strings.Repeat("—", AutoInjectWarnThresholdChars()-1))
+	r := Check("m", body)
+	if r.Chars != AutoInjectWarnThresholdChars()-1 {
+		t.Fatalf("Chars must count characters: got %d, want %d", r.Chars, AutoInjectWarnThresholdChars()-1)
+	}
+	if r.SizeBytes <= r.Chars {
+		t.Fatalf("fixture is not multi-byte (%d bytes for %d chars) — it cannot discriminate the units", r.SizeBytes, r.Chars)
+	}
+	if r.ApproachingAutoInject {
+		t.Fatalf("false alarm: %d chars is under the %d-char threshold, but the check fired — it is counting bytes (%d), not characters",
+			r.Chars, r.ThresholdChars, r.SizeBytes)
 	}
 }
 
