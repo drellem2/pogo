@@ -491,6 +491,55 @@ interval = "15m"     # coarse sample/mail cadence (default 15m)
 Source of truth: `internal/driftwatch/` (runner) and `internal/reconcile/`
 (detector).
 
+## The credential-expiry warner
+
+The fleet's harness credential holds an OAuth refresh grant with a **hard 30-day
+life that use does not extend**. When it lapses the fleet coasts on its last
+8-hour access token and then stops. This has happened twice, and both times it
+was noticed only after ~24h of destroyed output. Unlike the chronic rate/weekly/
+spend limits, auth expiry is **periodic**, so it can be predicted rather than
+merely detected: the expiry is a plain integer on local disk
+(`refreshTokenExpiresAt`, in the `Claude Code-credentials` keychain item).
+
+pogod reads it on a coarse heartbeat interval and mails `human` at **T−7d,
+T−72h, T−24h and T−2h**, plus once on lapse. `pogo credential expiry` answers the
+same question on demand. Both are **report-only, necessarily** — the fix is a
+human running `/login`, and nothing here can re-mint a credential.
+
+- **Only `refreshTokenExpiresAt` is predictive.** The 8-hour `expiresAt` is
+  routinely in the past on a perfectly healthy machine, because the harness
+  re-mints on demand without always rewriting the stored blob. Threshold-alerting
+  on it would fire constantly and get the mechanism muted. It is reported for
+  context only.
+- **Unreadable is not healthy.** Three distinct outcomes: *present* warns on
+  schedule; *absent* (no item, not macOS, no `security`) disarms silently in mail
+  but **loudly in the log** plus a `cred_expiry_disarmed` event, so a sandbox
+  stays quiet without ever claiming health; *unreadable* (present item, decode
+  failure, timeout, or a moved harness schema) **mails**, throttled, to say the
+  warning is blind. Collapsing the last case into "fine" is the absence-as-
+  evidence error the check exists to avoid.
+- **Escalation ratchets.** Tiers only deepen and each mails once, so a 15-minute
+  cadence yields five mails per 30-day grant. A `/login` resets the ratchet so
+  the next cycle escalates afresh.
+- **Harness internals.** The keychain item name and JSON schema are observed
+  values, not a pogo contract. The check probes, uses when present, and degrades
+  as above when absent.
+- **No token value** is ever read, echoed, logged, mailed or committed. The
+  decoder has no field capable of holding one, and the raw blob is zeroed
+  immediately after the two integers are extracted.
+
+```toml
+[cred_expiry]
+enabled = true           # default true; self-disarms where there is no credential
+interval = "15m"         # coarse sample cadence (default 15m)
+blind_renotify = "24h"   # throttle on the "cannot read the credential" mail
+```
+
+Source of truth: `internal/credexpiry/`. Mechanism:
+`docs/investigations/credential-expiry-mechanism-2026-07-23.md` (mg-ed45).
+This complements, and does not replace, reactive detection — an early
+**revocation** produces no warning here.
+
 ## The gh-issue teardown detector
 
 The gh-issue workflow ends by closing the GitHub issue behind a carrier work

@@ -144,6 +144,21 @@ const (
 	// "inert while appearing correct" failure the detector exists to catch.
 	DefaultDriftCheckInterval = 15 * time.Minute
 
+	// DefaultCredExpiryInterval is how often pogod samples the harness
+	// credential's refresh-grant expiry (mg-7024). Deliberately COARSE: the
+	// event being predicted is up to 30 days away and only ever moves when a
+	// human runs `/login`, so sampling faster buys nothing. Being up to one
+	// interval late at the tightest lead time is fine — the tiers are lead
+	// times, not deadlines. Like drift-watch this rides the heartbeat and NOT a
+	// launchd timer, because the nondemand-spawn wedge (mg-50e0) would leave a
+	// launchd timer silently never firing.
+	DefaultCredExpiryInterval = 15 * time.Minute
+	// DefaultCredExpiryBlindRenotify throttles the "the credential exists but I
+	// cannot read its expiry" mail. Once a day: often enough that a blind
+	// warner is not quietly forgotten, rare enough that a permanently-moved
+	// harness schema does not bury the inbox.
+	DefaultCredExpiryBlindRenotify = 24 * time.Hour
+
 	// DefaultGHTeardownInterval is how often pogod's gh-issue teardown detector
 	// samples. Coarse: each sample costs one GitHub round-trip per done carrier,
 	// and a teardown miss that has already lasted hours is not made worse by
@@ -241,6 +256,7 @@ type Config struct {
 	Reaper     ReaperConfig
 	Reconcile  ReconcileConfig
 	DriftWatch DriftWatchConfig
+	CredExpiry CredExpiryConfig
 	GHTeardown GHTeardownConfig
 	// Source is the path of the highest-precedence config file Load read, or
 	// "" when no config file was found and everything is defaults + env. pogod
@@ -414,6 +430,38 @@ type DriftWatchConfig struct {
 	// DefaultDriftCheckInterval. It must be far larger than the heartbeat tick;
 	// the throttle enforces that the runner does not sample every ~30s tick.
 	Interval time.Duration
+}
+
+// CredExpiryConfig configures pogod's credential-expiry WARNER (mg-7024): the
+// heartbeat-driven check that reads `refreshTokenExpiresAt` from the harness
+// credential and mails `human` on an escalating schedule as the fleet-wide auth
+// expiry approaches.
+//
+// It is the PREDICTION half of the pair mg-ed45 ruled. The OAuth refresh grant
+// has a fixed 30-day life that use does not extend, so the next fleet-wide auth
+// outage has a knowable date sitting on local disk. Both prior outages (2026-06
+// and 2026-07) went unnoticed until the fleet had already been dead about a
+// day; warning beforehand costs nothing and the remedy — a human running
+// `/login` — takes seconds.
+//
+// It does NOT replace mg-8cdb's reactive detector and must not be read as
+// doing so: prediction covers the scheduled lapse of ONE periodic fault. Early
+// revocation, and the genuinely chronic rate/weekly/spend limits, are
+// detectable only after the fact.
+//
+// REPORT-ONLY, and necessarily so: only a human can run `/login`, so this
+// warner has no seam through which it could act even if it wanted to.
+type CredExpiryConfig struct {
+	// Enabled turns the warner on. Defaults to true. It self-disarms (loudly,
+	// in the log) on any host with no readable credential, so leaving it on is
+	// safe for sandboxes and non-macOS boxes.
+	Enabled bool
+	// Interval is the COARSE gap between credential samples. Zero falls back to
+	// DefaultCredExpiryInterval.
+	Interval time.Duration
+	// BlindRenotify throttles the unreadable-credential mail. Zero falls back to
+	// DefaultCredExpiryBlindRenotify.
+	BlindRenotify time.Duration
 }
 
 // GHTeardownConfig configures pogod's gh-issue TEARDOWN detector (mg-6e57):
@@ -592,6 +640,7 @@ type parsedConfig struct {
 	agentsAutoStartSet     bool
 	reaperEnabledSet       bool
 	driftWatchEnabledSet   bool
+	credExpiryEnabledSet   bool
 	ghTeardownEnabledSet   bool
 	// sources are the files that were read, lowest precedence first.
 	sources []string
@@ -647,6 +696,11 @@ func Load() *Config {
 		DriftWatch: DriftWatchConfig{
 			Enabled:  true,
 			Interval: DefaultDriftCheckInterval,
+		},
+		CredExpiry: CredExpiryConfig{
+			Enabled:       true,
+			Interval:      DefaultCredExpiryInterval,
+			BlindRenotify: DefaultCredExpiryBlindRenotify,
 		},
 		GHTeardown: GHTeardownConfig{
 			Enabled:       true,
@@ -723,6 +777,15 @@ func Load() *Config {
 		}
 		if fileCfg.DriftWatch.Interval > 0 {
 			cfg.DriftWatch.Interval = fileCfg.DriftWatch.Interval
+		}
+		if fileCfg.credExpiryEnabledSet {
+			cfg.CredExpiry.Enabled = fileCfg.CredExpiry.Enabled
+		}
+		if fileCfg.CredExpiry.Interval > 0 {
+			cfg.CredExpiry.Interval = fileCfg.CredExpiry.Interval
+		}
+		if fileCfg.CredExpiry.BlindRenotify > 0 {
+			cfg.CredExpiry.BlindRenotify = fileCfg.CredExpiry.BlindRenotify
 		}
 		if fileCfg.ghTeardownEnabledSet {
 			cfg.GHTeardown.Enabled = fileCfg.GHTeardown.Enabled
@@ -1244,6 +1307,20 @@ func parseConfigFileInto(cfg *parsedConfig, path string) error {
 			case "interval":
 				if d, err := time.ParseDuration(unquotedVal); err == nil {
 					cfg.DriftWatch.Interval = d
+				}
+			}
+		case "cred_expiry":
+			switch key {
+			case "enabled":
+				cfg.CredExpiry.Enabled = val == "true"
+				cfg.credExpiryEnabledSet = true
+			case "interval":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.CredExpiry.Interval = d
+				}
+			case "blind_renotify":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.CredExpiry.BlindRenotify = d
 				}
 			}
 		case "gh_teardown":

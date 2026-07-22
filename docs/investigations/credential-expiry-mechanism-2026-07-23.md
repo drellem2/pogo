@@ -192,7 +192,35 @@ falsifiable prediction, and the cheapest possible test of this whole report:
 if a warning fires and a human logs in before 2026-08-21T21:31Z, nothing
 happens — which is the point.
 
+### Two corrections found while implementing the warner (mg-7024)
+
+Both matter to anyone re-reading the field table above.
+
+1. **The fields are nested under `claudeAiOauth`, not flat.** The table above
+   lists `expiresAt` / `refreshTokenExpiresAt` bare, which is how they read in a
+   report but not how they sit in the blob. The real shape is
+   `.claudeAiOauth.refreshTokenExpiresAt`. A parse aimed at the flat shape finds
+   nothing — and a warner that treated "field missing" as "expiry is fine" would
+   then sit silent through the very outage it exists to prevent. mg-7024
+   therefore resolves a missing field to **unreadable**, never to healthy.
+
+2. **`expiresAt` is not a usable signal.** It is routinely *in the past* on a
+   perfectly healthy machine: observed `2026-07-23T06:31:32Z` while reading the
+   live item on `2026-07-22T23:33Z` — already ~7h stale — with the fleet working
+   normally, because the harness re-mints access tokens on demand and does not
+   always rewrite the stored blob. Only `refreshTokenExpiresAt` is predictive.
+   Threshold-alerting on `expiresAt` would fire constantly and get the whole
+   mechanism muted before the run that matters.
+
 ## Recommendation
+
+> **Status: recommendation 1 SHIPPED as mg-7024** — `internal/credexpiry`, riding
+> pogod's heartbeat, mails `human` at T−7d/−72h/−24h/−2h plus once on lapse, with
+> `pogo credential expiry` for on-demand checks. See
+> [docs/operations.md](../operations.md#the-fleet-auth-expiry-warning-pogo-credential-expiry).
+> Two corrections to this report surfaced while building it, both recorded in
+> "The next outage already has a date" below: the fields are **nested under
+> `claudeAiOauth`**, and **`expiresAt` is not a usable signal**.
 
 1. **Warn before, don't detect after.** Read `refreshTokenExpiresAt` from the
    keychain item and mail `human` at, say, T−72h, T−24h and T−2h. This is

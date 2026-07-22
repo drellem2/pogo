@@ -2692,6 +2692,11 @@ branches; work items and mail live in mg/macguffin (the task-store CLI).`,
 	rootCmd.AddCommand(cmdStatus)
 	cmdDoctor.Flags().BoolVar(&doctorCheck, "check", false, "Run quick health checks without starting the doctor agent")
 	rootCmd.AddCommand(cmdDoctor)
+	// `pogo credential expiry` (mg-7024): the on-demand read of the harness
+	// credential's refresh-grant expiry. Read-only, and the way a human confirms
+	// a `/login` actually landed during the ~1h window before running sessions
+	// pick up the new grant.
+	rootCmd.AddCommand(newCredentialCmd(&jsonOutput))
 	rootCmd.AddCommand(cmdCheckTeardown)
 	rootCmd.AddCommand(cmdCheckCommitBody)
 	cmdServer.AddCommand(cmdServerStart)

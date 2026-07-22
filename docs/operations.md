@@ -76,6 +76,94 @@ The detector reads harness session transcripts, which are **harness internals po
 
 **That is not a clean bill of health.** It means the check is off for that agent. Reading an absent transcript as "no failures here" would be the same absence-as-evidence mistake the original incident was made of.
 
+## The fleet auth expiry warning (`pogo credential expiry`)
+
+The fleet's harness credential holds an OAuth **refresh grant with a hard 30-day
+life that use does not extend**. When it lapses the harness can no longer mint
+access tokens; the fleet coasts on its final **8-hour** access token and then
+stops entirely. This has happened twice — 2026-06-20 and 2026-07-21 — and both
+times it went unnoticed until the fleet had already been dead for about a day
+(498 and then 914 failed agent turns). See
+[the mechanism investigation](investigations/credential-expiry-mechanism-2026-07-23.md)
+(mg-ed45).
+
+Unlike the rate-limit, weekly-limit and spend-limit faults, which are chronic and
+can only be detected after the fact, **auth expiry is periodic and can be
+predicted**: the expiry is a plain integer on local disk. pogod reads it and
+warns ahead of time (mg-7024).
+
+### How you find out
+
+Mail to `human` from `cred-expiry` at **T−7 days, T−72h, T−24h and T−2h**, and
+once more if the grant actually lapses. Each mail names the date, the deadline by
+which the fleet stops, and the fix. Subjects look like:
+
+```
+fleet auth expires in 1d 0h (2026-08-21T21:31:50Z) — run /login
+FLEET AUTH GRANT HAS LAPSED (2026-08-21T21:31:50Z) — run /login now
+```
+
+### The fix
+
+**Run `/login` in any Claude Code session.** It takes seconds, and only a human
+can do it — pogod has no way to re-mint a credential and does not try.
+
+**Already-running sessions do not recover instantly.** The lag was measured at
+roughly an hour, bounded by the harness's refresh cadence. That is expected. Do
+not conclude the login failed and repeat it — instead confirm the new expiry
+date directly:
+
+```bash
+pogo credential expiry          # human-readable
+pogo credential expiry --json   # machine-readable
+```
+
+Exit status is `0` healthy (or nothing to inspect), `1` expiring within 7 days or
+already lapsed, `2` a credential exists but its expiry could **not** be read.
+
+### What happens if the check itself fails
+
+This matters more than it looks, because silence is the dangerous default: a
+credential that cannot be read must never be reported as healthy. The three
+outcomes are deliberately distinct.
+
+| Outcome | Meaning | Behaviour |
+|---|---|---|
+| **present** | expiry read successfully | warns on the tier schedule; silent when healthy |
+| **absent** | no keychain item, not macOS, or no `security` binary | **disarms.** No mail — a sandbox or Linux box must stay quiet — but one `pogod:` log line and a `cred_expiry_disarmed` event, so the silence is *declared* rather than assumed |
+| **unreadable** | the item exists but decoding failed, timed out, or the schema moved | **mails `human`**, throttled to once a day, saying the warning is blind |
+
+The *unreadable* case is the one a naive implementation would report as fine.
+If you get that mail, the advance warning is not working and the next outage will
+arrive with no notice. The likely cause is that the harness moved its credential
+storage or JSON schema — both are harness-internal and pogo is not owed
+stability in them. Check by hand with `pogo credential expiry`.
+
+### What this does not cover
+
+It predicts the **scheduled** lapse only. A credential **revoked early** produces
+no warning here and is caught reactively instead, by the failing-turns detector
+in [Agents that fail every turn](#agents-that-fail-every-turn) (mg-8cdb) — which
+reports `auth_failed` after the fact. The chronic rate/weekly/spend limits are
+likewise detection-only; see that section and
+[Recovering from a usage-limit episode](#recovering-from-a-usage-limit-episode).
+The two are complements: this warns before a periodic lapse, the detector
+catches everything prediction cannot.
+
+### Configuration
+
+Off switch and cadence live under `[cred_expiry]` in `config.toml`:
+
+```toml
+[cred_expiry]
+enabled = true          # default
+interval = "15m"        # how often pogod samples
+blind_renotify = "24h"  # throttle on the "cannot read the credential" mail
+```
+
+Only two integers and a few non-secret descriptors are ever read from the
+credential. No token value is read, logged, mailed or stored.
+
 ## Token spend accounting (`mg spend`)
 
 pogo has **no `spend` command of its own** — token-usage accounting lives in **macguffin** (the work-item store), because that's where each transcript message is joined to the work item that was claimed when it was written. To see how many tokens the fleet has consumed — in total or broken down per agent, item, tag, or repo — reach for `mg spend`:

@@ -28,6 +28,7 @@ import (
 	"github.com/drellem2/pogo/internal/agent"
 	"github.com/drellem2/pogo/internal/client"
 	"github.com/drellem2/pogo/internal/config"
+	"github.com/drellem2/pogo/internal/credexpiry"
 	"github.com/drellem2/pogo/internal/driftwatch"
 	"github.com/drellem2/pogo/internal/driver"
 	"github.com/drellem2/pogo/internal/ghteardown"
@@ -1467,6 +1468,41 @@ Flags:
 		log.Printf("pogod: drift-check runner enabled (mirrors=%d interval=%s, report-only)", len(mirrors), cfg.DriftWatch.Interval)
 	}
 
+	// Build the credential-expiry warner (mg-7024): the standing check that
+	// PREDICTS the next fleet-wide auth outage instead of detecting it a day
+	// late. The OAuth refresh grant has a fixed 30-day life that use does not
+	// extend, so its expiry sits on local disk as a plain integer
+	// (`refreshTokenExpiresAt` in the `Claude Code-credentials` keychain item).
+	// Both prior outages went unnoticed until the fleet had been dead ~24h;
+	// this mails `human` at T-7d/-72h/-24h/-2h so a person can run `/login` at
+	// a moment of their choosing. See internal/credexpiry and mg-ed45.
+	//
+	// pogod is the right host for two reasons. It rides the heartbeat rather
+	// than a launchd timer (the nondemand-spawn wedge, mg-50e0, would leave a
+	// timer silently never firing), and it SURVIVES the condition it predicts —
+	// pogod holds no Claude credential of its own, so it keeps ticking through
+	// an auth outage that kills every agent. That second constraint is weaker
+	// here than for a reactive pager, since this warner does its work while
+	// everything is still healthy, but the heartbeat is free so there is no
+	// reason to take the weaker option.
+	//
+	// Always constructed when enabled: unlike drift-watch there is no config to
+	// gate on. It probes for the credential itself and self-disarms LOUDLY (one
+	// log line + a cred_expiry_disarmed event) on a host that has none, so a
+	// sandbox or a non-macOS box is quiet without ever claiming the credential
+	// is healthy. REPORT-ONLY, and necessarily — only a human can run `/login`.
+	var credWatcher *credexpiry.Watcher
+	if cfg.CredExpiry.Enabled {
+		credWatcher = credexpiry.New(credexpiry.Options{
+			Enabled:       true,
+			Mail:          client.SendMGMail,
+			Interval:      cfg.CredExpiry.Interval,
+			BlindRenotify: cfg.CredExpiry.BlindRenotify,
+		})
+		log.Printf("pogod: credential-expiry warner enabled (interval=%s, warns at 7d/72h/24h/2h, report-only)",
+			cfg.CredExpiry.Interval)
+	}
+
 	// Build the gh-issue teardown detector (mg-6e57): the standing check that
 	// every gh-issue carrier at status=done has actually had its GitHub issue
 	// closed. mg-07ba reached `done, stage: merge` with the work genuinely
@@ -1550,6 +1586,14 @@ Flags:
 		// transcript files off disk and shells out to `mg mail send` on a hit —
 		// neither must delay the next tick. Page-only.
 		go synthWatcher.Check(now)
+		// The credential-expiry warner rides the same tick and throttles itself
+		// to a COARSE interval. In a goroutine because it shells out to
+		// `security` (which can block on a keychain authorization prompt, hence
+		// its own internal timeout) and to `mg mail send` — neither must delay
+		// the next tick. Report-only: it warns, it never re-mints.
+		if credWatcher != nil {
+			go credWatcher.Check(context.Background(), now)
+		}
 		// Surface polecats that outlived an earlier pogod and are now alive but
 		// unreachable — UNKNOWN forever, holding a worktree and a claim, with
 		// nothing else in the tree looking at them (mg-0b77). Only a human can
