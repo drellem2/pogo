@@ -47,7 +47,9 @@ func (p *PogodDeliverer) Deliver(ctx context.Context, entry Entry, fireTime time
 		if p.Registry != nil {
 			a := p.Registry.Get(entry.Agent)
 			if a != nil && a.Status == agent.StatusRunning {
-				if err := a.NudgeWithMode(body, agent.NudgeWaitIdle, agent.DefaultNudgeTimeout); err == nil {
+				// Pass the completion token as the nudge's correlation id so
+				// nudge_sent joins to scheduler_fire_completed (mg-a754).
+				if err := a.NudgeWithModeCorrelated(body, agent.NudgeWaitIdle, agent.DefaultNudgeTimeout, entry.PendingToken); err == nil {
 					return nil
 				} else {
 					// Log and fall through to mail — better to deliver late
@@ -73,17 +75,50 @@ func (p *PogodDeliverer) sendMail(to, subject, body string) error {
 
 // buildBody assembles the message text delivered on fire. It always includes
 // the schedule id and the original fire time so the receiving agent can
-// distinguish a fresh fire from a replay during sleep recovery.
+// distinguish a fresh fire from a replay during sleep recovery, and — when the
+// fire carries a completion token — the one-line command that acknowledges it.
 func buildBody(entry Entry, fireTime time.Time) string {
 	original := entry.NextFire.Format(time.RFC3339)
 	now := fireTime.Format(time.RFC3339)
-	if entry.Message != "" {
-		return fmt.Sprintf("%s\n\n[scheduler id=%s due=%s fired=%s]", entry.Message, entry.ID, original, now)
+	var head string
+	switch {
+	case entry.Message != "":
+		head = fmt.Sprintf("%s\n\n[scheduler id=%s due=%s fired=%s%s]",
+			entry.Message, entry.ID, original, now, ackField(entry))
+	case entry.OneShot:
+		head = fmt.Sprintf("Scheduled wakeup id=%s — fired at %s (was due %s).", entry.ID, now, original)
+	default:
+		head = fmt.Sprintf("Scheduled fire id=%s cron=%q — fired at %s (was due %s).", entry.ID, entry.Cron, now, original)
 	}
-	if entry.OneShot {
-		return fmt.Sprintf("Scheduled wakeup id=%s — fired at %s (was due %s).", entry.ID, now, original)
+	return head + ackInstruction(entry)
+}
+
+// ackField renders the ` ack=<token>` addition to the metadata footer. Kept
+// separate so the footer stays byte-identical to its pre-mg-a754 form when no
+// token was issued (a hand-constructed Entry, or a test).
+func ackField(entry Entry) string {
+	if entry.PendingToken == "" {
+		return ""
 	}
-	return fmt.Sprintf("Scheduled fire id=%s cron=%q — fired at %s (was due %s).", entry.ID, entry.Cron, now, original)
+	return " ack=" + entry.PendingToken
+}
+
+// ackInstruction is the line that turns a delivered fire into a completable
+// one. It rides the message body rather than living in a prompt file on
+// purpose: the instruction then reaches EVERY recipient of EVERY schedule
+// without depending on which prompt template the agent was spawned with, or on
+// whether its harness exposes a readable transcript.
+//
+// Running this command is the completion signal. It requires a live model turn
+// that executed a tool, which is precisely what the ~5500 synthetic zero-token
+// failure turns in this fleet's history could not do — see completion.go.
+func ackInstruction(entry Entry) string {
+	if entry.PendingToken == "" {
+		return ""
+	}
+	return fmt.Sprintf(
+		"\nWhen this fire's work is done, run: pogo schedule ack %s --agent %s --token %s",
+		entry.ID, entry.Agent, entry.PendingToken)
 }
 
 func buildSubject(entry Entry, fireTime time.Time) string {

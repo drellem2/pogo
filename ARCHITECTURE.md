@@ -545,15 +545,58 @@ key), so it's safe to re-register on every startup.
 When you receive a nudge that looks like:
 
   Check the research queue and act on any new items.
-  [scheduler id=research-poll due=... fired=...]
+  [scheduler id=research-poll due=... fired=... ack=9f3c1ab2]
+  When this fire's work is done, run: pogo schedule ack research-poll --agent crew-research --token 9f3c1ab2
 
 …run your normal processing loop. The bracketed metadata tells you whether
 this was an on-time fire or a recovery from a sleep — use the `due` /
-`fired` gap to decide whether to skim or catch up.
+`fired` gap to decide whether to skim or catch up. When the work is done,
+run the `ack` command the fire handed you.
 ```
 
 Polecats use the same surface for one-shot wakeups (`--once --in 1h`) when
 they want to be re-prompted later without spinning their own polling loop.
+
+### The completion signal (mg-a754)
+
+Delivery is only half the transaction. During the 23h30m fleet outage of
+2026-07-22, `scheduler_fire_delivered` logged **647 successful deliveries** and
+`nudge_sent` **771** — every record true, none useful, because every consuming
+turn was a synthetic zero-token failure that accomplished nothing in ~10ms.
+With no completion signal, a 100%-dead fleet and a 100%-healthy fleet produce
+the same events log. That is why the failure survived twice.
+
+So every fire now carries a nonce **completion token** plus the one-line command
+that redeems it. The agent runs `pogo schedule ack <id> --agent <a> --token <t>`
+when the fire's work is done; pogod validates the token against the outstanding
+fire and emits `scheduler_fire_completed`.
+
+Three properties do the load-bearing work:
+
+- **It fails in the same direction as the work.** Producing the ack requires a
+  live model turn that ran a tool. A synthetic error turn never calls the API
+  and never runs anything, so it cannot emit one. That is exactly what
+  `scheduler_fire_delivered` does not do.
+- **It is harness-independent.** mg-8cdb's synthetic-failure detector reads
+  Claude Code session transcripts, which codex, pi and cursor do not expose. An
+  ack is a shell command; any harness that can run a tool can produce it.
+- **The denominator survives restarts.** `fires_delivered`, `fires_completed`
+  and `unacked_streak` live on the persisted Entry in `~/.pogo/schedules.json`,
+  not in memory — an in-memory counter would reset on exactly the restarts an
+  outage tends to produce.
+
+Two guards keep the signal honest. Only the newest token is redeemable, so a
+token copied out of an old transcript cannot inflate the numerator. And a
+schedule that has **never** acked is reported as UNKNOWN, not failing
+(`completion_tracked: false`) — an agent can simply forget, so a missing ack is
+never a per-fire verdict.
+
+The signal that matters is fleet-wide and ratioed: one agent skipping one ack
+is noise; every tracked schedule going to zero within the same minute is one
+upstream cause and should page a human rather than trigger N restarts.
+`pogo schedule completion` is the query. Applied to 2026-07-22 00:00–23:40 it
+reads **647 delivered, 0 completed**, with per-schedule streaks climbing to 202
+(mayor) and 143 (each PM).
 
 **Built-in prompt migration (mg-2f79).** The shipped prompt templates have
 all moved their recurring schedules from Claude's in-process `CronCreate` to

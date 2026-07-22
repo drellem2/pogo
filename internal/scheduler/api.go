@@ -2,8 +2,10 @@ package scheduler
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -49,9 +51,75 @@ type AddRequest struct {
 // param: with it, the lookup is exact; without it, the daemon resolves the
 // id only when a single agent owns it (returns 409 Conflict if more than
 // one agent matches).
+// Plus the completion endpoints (mg-a754):
+//
+//	POST /scheduler/schedules/{id}/ack  — acknowledge the outstanding fire
+//	GET  /scheduler/completion          — delivered:completed roll-up (?agent=X)
 func (s *Scheduler) RegisterHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/scheduler/schedules", s.handleList)
 	mux.HandleFunc("/scheduler/schedules/{id}", s.handleByID)
+	mux.HandleFunc("/scheduler/schedules/{id}/ack", s.handleAck)
+	mux.HandleFunc("/scheduler/completion", s.handleCompletion)
+}
+
+// AckRequest is the JSON body for POST /scheduler/schedules/{id}/ack.
+type AckRequest struct {
+	Agent string `json:"agent,omitempty"`
+	Token string `json:"token"`
+}
+
+func (s *Scheduler) handleAck(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "", http.StatusMethodNotAllowed)
+		return
+	}
+	id := r.PathValue("id")
+	var req AckRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	agentName := req.Agent
+	if agentName == "" {
+		agentName = r.URL.Query().Get("agent")
+	}
+
+	res, err := s.Ack(agentName, id, req.Token, time.Now())
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrScheduleNotFound):
+			http.Error(w, err.Error(), http.StatusNotFound)
+		case errors.Is(err, ErrNoPendingFire), errors.Is(err, ErrStaleToken):
+			// 409, not 400: the request is well-formed, it just lost a race
+			// with the next fire. The distinction matters to the caller — a
+			// stale ack is worth logging quietly, a malformed one is a bug.
+			http.Error(w, err.Error(), http.StatusConflict)
+		default:
+			if amb, isAmb := err.(*ErrAmbiguousID); isAmb {
+				http.Error(w, amb.Error(), http.StatusConflict)
+				return
+			}
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(res)
+}
+
+func (s *Scheduler) handleCompletion(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		http.Error(w, "", http.StatusMethodNotAllowed)
+		return
+	}
+	threshold := 0
+	if v := r.URL.Query().Get("threshold"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			threshold = n
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(s.Completion(r.URL.Query().Get("agent"), threshold))
 }
 
 func (s *Scheduler) handleList(w http.ResponseWriter, r *http.Request) {

@@ -320,10 +320,73 @@ An agent sent macguffin mail (`mg mail send`).
   - `message` (string, required): the nudge text
   - `delivery` (string, required): `"pty"` (delivered to live session) or `"mail_fallback"` (target not running, queued as mail)
   - `mode` (string, optional): `"idle"` (default) or `"immediate"`
+  - `fire_token` (string, optional): correlation id, present when the nudge carries a scheduler fire. Joins to `scheduler_fire_delivered` and `scheduler_fire_completed` on the same value.
 
 ```json
 {"schema_version":1,"timestamp":"2026-04-25T10:15:30.000000000Z","event_type":"nudge_sent","agent":"ringmaster","details":{"to":"crew-arch","message":"check your mail","delivery":"pty","mode":"idle"}}
 ```
+
+### Scheduler
+
+#### `scheduler_fire_delivered`
+
+pogod delivered a scheduled fire to an agent (PTY nudge, or mail fallback).
+
+**Read this event with care.** It records that the BYTES arrived, which is only
+half the transaction. During the 23h30m fleet outage of 2026-07-22 it logged
+**647 successful deliveries** while every consuming turn failed in ~10ms on an
+expired credential. Every record was true; none was useful. The completion
+fields below (added by mg-a754) exist so this event can no longer describe a
+100%-dead fleet the same way it describes a healthy one.
+
+- **`details` fields:**
+  - `schedule_id`, `to`, `delivery`, `original_due`, `fired_at`, `missed_fires`, `replay_policy`, `one_shot`, `cron`
+  - `fire_token` (string): the completion nonce issued with this fire. The agent redeems it with `pogo schedule ack`.
+  - `fires_delivered` / `fires_completed` (int): lifetime counters for this schedule, persisted in `schedules.json` so they survive a pogod restart.
+  - `completion_tracked` (bool): whether this schedule has EVER been acked. When `false`, the recipient is not participating in completion tracking and no conclusion may be drawn from a missing ack — the state is UNKNOWN, not failing.
+  - `unacked_streak` (int, present only when `completion_tracked` is true): consecutive delivered-but-unacked fires, **including this one**. A promptly-acking agent reads `1`. A climbing value is the signal: the mayor's would have read `202` by the end of 2026-07-22.
+
+```json
+{"schema_version":1,"timestamp":"2026-07-22T12:00:00.000000000Z","event_type":"scheduler_fire_delivered","agent":"pogod","details":{"schedule_id":"sweep-morning","to":"pm-pogo","delivery":"nudge","fired_at":"2026-07-22T12:00:00Z","fire_token":"9f3c1ab2","fires_delivered":143,"fires_completed":0,"completion_tracked":true,"unacked_streak":143}}
+```
+
+#### `scheduler_fire_completed`
+
+The agent reported that the work a fire triggered has finished, by running
+`pogo schedule ack <id> --agent <a> --token <tok>`.
+
+This is the counterpart signal to `scheduler_fire_delivered`. Producing it
+requires a live model turn that executed a tool — which a synthetic
+zero-token failure turn (`Login expired`, `You've hit your weekly limit`,
+rate-limit 5xx) cannot do. That is the property that makes it useful: it fails
+in the same direction as the work it measures. It is also harness-independent,
+unlike transcript inspection, which only Claude Code supports today.
+
+- **`details` fields:**
+  - `schedule_id`, `to`, `cron`
+  - `fire_token` (string): the redeemed nonce. Joins back to the delivery event.
+  - `completed_at` (string, RFC3339)
+  - `latency_ms` (int): wall time from delivery to acknowledgement.
+  - `fires_delivered` / `fires_completed` (int): counters after this completion.
+
+```json
+{"schema_version":1,"timestamp":"2026-07-23T09:04:12.000000000Z","event_type":"scheduler_fire_completed","agent":"pogod","details":{"schedule_id":"sweep-morning","to":"pm-pogo","fire_token":"9f3c1ab2","completed_at":"2026-07-23T09:04:12Z","latency_ms":252000,"fires_delivered":144,"fires_completed":144}}
+```
+
+**How to read the pair.** A missing completion is not a per-fire verdict — an
+agent can simply forget to ack. The signal that matters is fleet-wide and
+ratioed: one agent skipping one ack is noise; every tracked schedule in the
+fleet going to zero within the same minute is one upstream cause (expired
+credential, rate limit, spend cap) and should page a human rather than trigger
+N independent restarts. `pogo schedule completion` is the query.
+
+#### `scheduler_fire_failed` / `scheduler_fire_skipped`
+
+Delivery errored, or `ReplaySkip` elided a stale fire. Neither issues a
+completion token: no bytes reached the agent, so no turn ran and there is
+nothing to complete. This keeps "the fire did not arrive" distinct from "the
+fire arrived and accomplished nothing" — the two faults this pair of signals
+exists to separate.
 
 ### Refinery
 

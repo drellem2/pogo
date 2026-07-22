@@ -127,7 +127,13 @@ func inferKind(id string) ScheduleKind {
 //	  "message":       "...",                  // optional body delivered on fire
 //	  "created_at":    "2026-05-03T08:32:10Z",
 //	  "last_fire":     "2026-05-03T13:15:00Z", // zero if never fired
-//	  "missed_fires":  0                       // accumulated missed count for "count" policy
+//	  "missed_fires":  0,                      // accumulated missed count for "count" policy
+//	  "fires_delivered": 12,                   // completion tracking — see completion.go
+//	  "fires_completed": 12,
+//	  "unacked_streak":  1,
+//	  "last_completion": "2026-05-03T13:15:22Z",
+//	  "pending_token":   "9f3c1ab2",
+//	  "pending_since":   "2026-05-03T13:15:00Z"
 //	}
 //
 // Kind carries omitempty so a schedules.json written by this binary stays
@@ -147,7 +153,38 @@ type Entry struct {
 	CreatedAt    time.Time    `json:"created_at"`
 	LastFire     time.Time    `json:"last_fire,omitempty"`
 	MissedFires  int          `json:"missed_fires,omitempty"`
+
+	// Completion tracking (mg-a754). These are the denominator and numerator of
+	// the delivered:completed ratio, and they live on the persisted Entry
+	// precisely so the ratio survives a pogod restart — an in-memory counter
+	// would reset on exactly the restarts an outage tends to produce.
+	//
+	// FiresDelivered counts fires pogod successfully handed to the agent.
+	// FiresCompleted counts fires the AGENT reported finished (see Ack).
+	// UnackedStreak is the number of consecutive delivered-but-unacked fires,
+	// reset to zero by an accepted Ack. It is the number that would have read
+	// 202 for the mayor at the end of the 2026-07-22 outage instead of 647
+	// indistinguishable successes.
+	FiresDelivered int       `json:"fires_delivered,omitempty"`
+	FiresCompleted int       `json:"fires_completed,omitempty"`
+	UnackedStreak  int       `json:"unacked_streak,omitempty"`
+	LastCompletion time.Time `json:"last_completion,omitempty"`
+
+	// PendingToken is the nonce issued with the most recent fire. Only an Ack
+	// carrying this exact token is accepted, so a token copied out of an old
+	// transcript cannot inflate FiresCompleted. PendingSince is when it was
+	// issued, and gives the completion latency.
+	PendingToken string    `json:"pending_token,omitempty"`
+	PendingSince time.Time `json:"pending_since,omitempty"`
 }
+
+// CompletionTracked reports whether this schedule has ever had a fire
+// acknowledged. It is the guard that keeps UnackedStreak from being read as a
+// failure signal for a schedule whose recipient never acks at all: an entry
+// that has never completed anything is UNKNOWN, not failing. Only once a
+// schedule has proven it can ack does a growing streak mean the turns stopped
+// accomplishing anything.
+func (e Entry) CompletionTracked() bool { return e.FiresCompleted > 0 }
 
 // Clone returns a shallow copy. Used to hand entries out of the Scheduler
 // without exposing internal state to mutation.
@@ -316,6 +353,14 @@ type FireResult struct {
 	Delivered   bool      // false if Deliverer returned an error or Skip policy short-circuited
 	DeliverErr  error     // set when delivery failed
 	Skipped     bool      // true when ReplaySkip elided the fire
+
+	// UnackedStreak is the count of consecutive delivered-but-unacked fires
+	// INCLUDING this one, so a promptly-acking agent reads 1 and a dead one
+	// climbs without bound. CompletionTracked reports whether the schedule has
+	// ever acked at all — when false the streak is meaningless and must not be
+	// read as failure. See completion.go (mg-a754).
+	UnackedStreak     int
+	CompletionTracked bool
 }
 
 // entryKey is the composite (agent, id) key for the live entries map.
@@ -665,6 +710,19 @@ func (s *Scheduler) Tick(ctx context.Context, now time.Time) []FireResult {
 		}
 
 		if shouldFire {
+			// Issue the completion token BEFORE delivery, so the token the
+			// agent is told to redeem is already recorded on the entry — an
+			// agent that acks within milliseconds of a fast nudge must not race
+			// the scheduler's own bookkeeping (mg-a754). Only a fire that is
+			// actually going out gets one: a skipped fire triggers no turn, so
+			// crediting it with an outstanding token would manufacture a stall.
+			s.mu.Lock()
+			if live, ok := s.entries[key]; ok {
+				fire.PendingToken = issueFireTokenLocked(live, now)
+				fire.PendingSince = now
+			}
+			s.mu.Unlock()
+
 			var derr error
 			if s.deliverer != nil {
 				derr = s.deliverer.Deliver(ctx, fire, now)
@@ -673,10 +731,36 @@ func (s *Scheduler) Tick(ctx context.Context, now time.Time) []FireResult {
 			res.Delivered = derr == nil
 			if derr != nil {
 				log.Printf("scheduler: deliver %s to %s failed: %v", fire.ID, fire.Agent, derr)
+				// Undelivered bytes triggered no turn, so there is nothing to
+				// complete. Drop the token rather than leaving it outstanding —
+				// a delivery failure is already visible as
+				// scheduler_fire_failed, and double-counting it as an unacked
+				// completion would blur the two distinct faults this pair of
+				// signals exists to separate.
+				s.mu.Lock()
+				if live, ok := s.entries[key]; ok && live.PendingToken == fire.PendingToken {
+					live.PendingToken = ""
+					live.PendingSince = time.Time{}
+				}
+				s.mu.Unlock()
 				s.emitSchedulerEvent("scheduler_fire_failed", fire, now, missed, derr)
 			} else {
+				s.mu.Lock()
+				streak := 0
+				tracked := false
+				if live, ok := s.entries[key]; ok {
+					streak = recordDeliveryLocked(live)
+					tracked = live.CompletionTracked()
+					fire.FiresDelivered = live.FiresDelivered
+					fire.FiresCompleted = live.FiresCompleted
+					fire.UnackedStreak = streak
+				}
+				s.mu.Unlock()
+				res.UnackedStreak = streak
+				res.CompletionTracked = tracked
 				s.emitSchedulerEvent("scheduler_fire_delivered", fire, now, missed, nil)
 			}
+			changed = true
 		}
 
 		// Update or remove the entry.
@@ -895,6 +979,20 @@ func (s *Scheduler) emitSchedulerEvent(eventType string, e Entry, fireTime time.
 	}
 	if err != nil {
 		details["error"] = err.Error()
+	}
+	// Completion context on the DELIVERY event (mg-a754). Carrying the streak
+	// here is what stops this event from being a confident liar on its own
+	// terms: during the 2026-07-22 outage, the mayor's 202nd consecutive
+	// unanswered fire would have said so in its own record rather than
+	// requiring 647 identical successes to be cross-referenced against nothing.
+	if eventType == "scheduler_fire_delivered" {
+		details["fire_token"] = e.PendingToken
+		details["fires_delivered"] = e.FiresDelivered
+		details["fires_completed"] = e.FiresCompleted
+		details["completion_tracked"] = e.CompletionTracked()
+		if e.CompletionTracked() {
+			details["unacked_streak"] = e.UnackedStreak
+		}
 	}
 	events.EmitTo(context.Background(), s.logPath, events.Event{
 		EventType: eventType,

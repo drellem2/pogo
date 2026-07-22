@@ -1814,14 +1814,23 @@ the schedule fires exactly once and reschedules to the next future occurrence.`,
 				}
 				return
 			}
-			fmt.Printf("%-20s  %-20s  %-25s  %s\n", "ID", "AGENT", "NEXT FIRE", "CRON / ONCE")
+			fmt.Printf("%-20s  %-20s  %-25s  %-16s  %s\n", "ID", "AGENT", "NEXT FIRE", "CRON / ONCE", "COMPLETED")
 			for _, e := range entries {
 				kind := e.Cron
 				if e.OneShot {
 					kind = "one-shot"
 				}
-				fmt.Printf("%-20s  %-20s  %-25s  %s\n",
-					e.ID, e.Agent, e.NextFire.Local().Format(time.RFC3339), kind)
+				// A schedule that has never acked reads "—", not "0/N": absent
+				// evidence is not evidence of failure (mg-a754).
+				completed := "—"
+				if e.CompletionTracked() {
+					completed = fmt.Sprintf("%d/%d", e.FiresCompleted, e.FiresDelivered)
+					if e.UnackedStreak >= scheduler.DefaultStallThreshold {
+						completed += fmt.Sprintf("  ⚠ %d unacked", e.UnackedStreak)
+					}
+				}
+				fmt.Printf("%-20s  %-20s  %-25s  %-16s  %s\n",
+					e.ID, e.Agent, e.NextFire.Local().Format(time.RFC3339), kind, completed)
 			}
 		},
 	}
@@ -1850,8 +1859,102 @@ disambiguate. When the id is owned by a single agent, --agent is optional.`,
 		},
 	}
 	cmdScheduleRm.Flags().StringVar(&schedRmAgent, "agent", "", "Owning agent (required if multiple agents share the id)")
+
+	// Completion signal (mg-a754). `scheduler_fire_delivered` counts bytes
+	// reaching the agent; `ack` is how the agent reports that the WORK those
+	// bytes triggered finished. See internal/scheduler/completion.go.
+	var (
+		schedAckAgent string
+		schedAckToken string
+	)
+	var cmdScheduleAck = &cobra.Command{
+		Use:   "ack <id>",
+		Short: "Acknowledge that a scheduler fire's work is complete",
+		Long: `Acknowledge that the work a scheduler fire triggered has finished.
+
+Every fire is delivered with a completion token in its footer, plus the exact
+command that redeems it:
+
+  [scheduler id=mail-check-a754 due=... fired=... ack=9f3c1ab2]
+  When this fire's work is done, run: pogo schedule ack mail-check-a754 --agent a754 --token 9f3c1ab2
+
+Run it when the turn's work is done. pogod records the completion and emits a
+scheduler_fire_completed event.
+
+Why this exists: scheduler_fire_delivered counts DELIVERY, not completion.
+During the 23h30m fleet outage of 2026-07-22 it logged 647 successful
+deliveries while every consuming turn failed in ~10ms — all true, all useless,
+and a 100%-dead fleet looked exactly like a healthy one. Producing this ack
+requires a live model turn that ran a tool, which a failing turn cannot do, so
+the signal fails in the same direction as the work it measures.
+
+Only the token from the most recent fire is redeemable; a stale one is rejected
+rather than counted, so an old token cannot manufacture a healthy ratio.`,
+		Args: cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			if schedAckToken == "" {
+				cli.ExitWithError(jsonOutput, "--token is required (copy it from the fire's ack= footer)", cli.ExitError)
+			}
+			res, err := client.AckSchedule(schedAckAgent, args[0], schedAckToken)
+			if err != nil {
+				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+			}
+			if jsonOutput {
+				cli.PrintJSON(res)
+			} else {
+				fmt.Printf("Acked %s for %s — %d/%d fires completed (latency %dms).\n",
+					res.Entry.ID, res.Entry.Agent, res.Entry.FiresCompleted, res.Entry.FiresDelivered, res.LatencyMS)
+			}
+		},
+	}
+	cmdScheduleAck.Flags().StringVar(&schedAckAgent, "agent", "", "Owning agent (required if multiple agents share the id)")
+	cmdScheduleAck.Flags().StringVar(&schedAckToken, "token", "", "Completion token from the fire's ack= footer")
+
+	var (
+		schedComplAgent     string
+		schedComplThreshold int
+	)
+	var cmdScheduleCompletion = &cobra.Command{
+		Use:   "completion",
+		Short: "Show the delivered:completed ratio across schedules",
+		Long: `Report how many delivered fires were actually acknowledged as complete.
+
+This is the query the 2026-07-22 events log could not answer. Schedules that
+have never acked are counted as UNKNOWN, not failing — only a schedule that has
+proven it can ack, and then stopped, is evidence of anything.
+
+The shape to watch for is fleet-wide: one agent skipping one ack is noise,
+every tracked schedule going to zero within the same minute is an outage.`,
+		Args: cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			stats, err := client.SchedulerCompletion(schedComplAgent, schedComplThreshold)
+			if err != nil {
+				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+			}
+			if jsonOutput {
+				cli.PrintJSON(stats)
+				return
+			}
+			fmt.Printf("Schedules:       %d (%d tracked, %d never acked)\n",
+				stats.Schedules, stats.Tracked, stats.Schedules-stats.Tracked)
+			fmt.Printf("Fires delivered: %d\n", stats.FiresDelivered)
+			fmt.Printf("Fires completed: %d (%.1f%%)\n", stats.FiresCompleted, stats.Ratio*100)
+			fmt.Printf("Stalled:         %d of %d tracked (streak >= %d)\n",
+				stats.Stalled, stats.Tracked, stats.StallThreshold)
+			if stats.Tracked > 0 && stats.Stalled == stats.Tracked {
+				fmt.Printf("\n⚠ EVERY tracked schedule is stalled. That is the fleet-wide shape:\n")
+				fmt.Printf("  one upstream cause (expired credential, rate limit, spend cap), not N\n")
+				fmt.Printf("  independent wedges. Check an agent's harness before restarting anything.\n")
+			}
+		},
+	}
+	cmdScheduleCompletion.Flags().StringVar(&schedComplAgent, "agent", "", "Filter by agent name")
+	cmdScheduleCompletion.Flags().IntVar(&schedComplThreshold, "threshold", 0, "Unacked streak at which a schedule counts as stalled (default 2)")
+
 	cmdSchedule.AddCommand(cmdScheduleList)
 	cmdSchedule.AddCommand(cmdScheduleRm)
+	cmdSchedule.AddCommand(cmdScheduleAck)
+	cmdSchedule.AddCommand(cmdScheduleCompletion)
 
 	var initForce bool
 	var initMinimal bool
