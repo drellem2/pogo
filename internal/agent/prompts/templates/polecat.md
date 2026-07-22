@@ -147,7 +147,8 @@ The mail-check schedule registered in step 2 delivers each fire with metadata ap
 ```
 Check your mail with mg mail list mg-XXXX and handle any unread messages.
 
-[scheduler id=mail-check-mg-XXXX due=2026-05-03T09:00:00Z fired=2026-05-03T09:00:14Z]
+[scheduler id=mail-check-mg-XXXX due=2026-05-03T09:00:00Z fired=2026-05-03T09:00:14Z ack=9f3c1ab2]
+When this fire's work is done, run: pogo schedule ack mail-check-mg-XXXX --agent mg-XXXX --token 9f3c1ab2
 ```
 
 When `due` ≈ `fired` it's an on-time fire — just check mail. When `fired` is much later than `due` (host slept through the original due time and pogod's heartbeat replayed the schedule on wake), it's a **system_wake catch-up**: the at-most-once replay policy fires exactly once regardless of how many 10-minute marks were missed.
@@ -160,6 +161,20 @@ When `due` ≈ `fired` it's an on-time fire — just check mail. When `fired` is
 | One-shot reminder (`--once --in N`) | n/a (single fire)       | Fire exactly once on wake. Treat as a normal fire.                      |
 
 For the {{.Worker}} mail-check the action is the same in both cases (check mail), so there's nothing extra to do — just don't register additional schedules thinking you've missed fires; pogod handles that for you.
+
+### Acking the fire when its work is done
+
+The footer's `ack=<token>` is a **completion signal**. When you have finished the work this fire triggered, run the command the fire gave you:
+
+```
+pogo schedule ack <schedule-id> --agent <your-agent-name> --token <token>
+```
+
+Do this at the END of the turn, once the work is actually done — not on receipt. It is one command and it takes no arguments you have to look up; the fire hands you the exact invocation.
+
+**Why it matters.** `scheduler_fire_delivered` records only that the bytes reached you. During the 23h30m fleet outage of 2026-07-22 it logged 647 successful deliveries while every consuming turn failed instantly on an expired credential — all true, all useless, and a 100%-dead fleet was indistinguishable from a healthy one. Your ack is the half nobody could see. Skipping it does not break anything immediately; it just returns the fleet to being unable to tell working from dead.
+
+Only the newest token is redeemable. A rejected ack (`stale token`) means a newer fire has already superseded this one — that is information, not an error to retry.
 
 ### The harness's in-process scheduler is for ephemeral in-session reminders only
 

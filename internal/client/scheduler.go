@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/drellem2/pogo/internal/scheduler"
@@ -55,6 +56,67 @@ func ListSchedules(agent string) ([]scheduler.Entry, error) {
 		return nil, err
 	}
 	return entries, nil
+}
+
+// AckSchedule acknowledges the outstanding fire for a schedule, recording that
+// the work the fire triggered actually finished (mg-a754). agent may be empty
+// when a single agent owns the id.
+//
+// A stale or already-redeemed token comes back as a conflict error rather than
+// being silently accepted — see scheduler.ErrStaleToken.
+func AckSchedule(agent, id, token string) (*scheduler.AckResult, error) {
+	body, err := json.Marshal(scheduler.AckRequest{Agent: agent, Token: token})
+	if err != nil {
+		return nil, err
+	}
+	u := serverURL + "/scheduler/schedules/" + url.PathEscape(id) + "/ack"
+	r, err := http.Post(u, "application/json", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	defer r.Body.Close()
+	if r.StatusCode == http.StatusNotFound {
+		return nil, fmt.Errorf("schedule %q not found", id)
+	}
+	if r.StatusCode != http.StatusOK {
+		msg, _ := io.ReadAll(r.Body)
+		return nil, fmt.Errorf("%s", strings.TrimSpace(string(msg)))
+	}
+	var res scheduler.AckResult
+	if err := json.NewDecoder(r.Body).Decode(&res); err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
+// SchedulerCompletion fetches the delivered:completed roll-up, optionally
+// filtered by agent. threshold <= 0 uses the daemon's default.
+func SchedulerCompletion(agent string, threshold int) (*scheduler.CompletionStats, error) {
+	u := serverURL + "/scheduler/completion"
+	q := url.Values{}
+	if agent != "" {
+		q.Set("agent", agent)
+	}
+	if threshold > 0 {
+		q.Set("threshold", strconv.Itoa(threshold))
+	}
+	if len(q) > 0 {
+		u += "?" + q.Encode()
+	}
+	r, err := http.Get(u)
+	if err != nil {
+		return nil, err
+	}
+	defer r.Body.Close()
+	if r.StatusCode != http.StatusOK {
+		msg, _ := io.ReadAll(r.Body)
+		return nil, fmt.Errorf("completion query failed (%d): %s", r.StatusCode, string(msg))
+	}
+	var stats scheduler.CompletionStats
+	if err := json.NewDecoder(r.Body).Decode(&stats); err != nil {
+		return nil, err
+	}
+	return &stats, nil
 }
 
 // RemoveSchedule deletes a schedule. agent may be empty, in which case the

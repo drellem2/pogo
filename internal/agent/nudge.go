@@ -206,11 +206,28 @@ func (a *Agent) WaitForReady(ctx context.Context, sentinels []string, quiescence
 // quiescence) before delivering, falling back to wait-idle when no sentinel is
 // configured. In immediate mode, it writes directly (same as Nudge).
 func (a *Agent) NudgeWithMode(msg string, mode NudgeMode, timeout time.Duration) error {
+	return a.NudgeWithModeCorrelated(msg, mode, timeout, "")
+}
+
+// NudgeWithModeCorrelated is NudgeWithMode with a correlation id stamped onto
+// the emitted nudge_sent event.
+//
+// The scheduler passes the fire's completion token here (mg-a754). That makes
+// nudge_sent, scheduler_fire_delivered and scheduler_fire_completed joinable on
+// one key, which is the difference between "771 nudges were sent and 647 fires
+// were delivered" — two true, unrelatable numbers, as the 2026-07-22 events log
+// recorded them — and being able to follow a single fire from bytes-written to
+// work-finished, or watch it stop at the former.
+//
+// corr is optional: an empty value emits exactly the pre-existing event shape,
+// so callers with no fire to correlate (manual nudges, mail-check kickoffs) are
+// unchanged.
+func (a *Agent) NudgeWithModeCorrelated(msg string, mode NudgeMode, timeout time.Duration, corr string) error {
 	if mode == NudgeImmediate {
 		if err := a.Nudge(msg); err != nil {
 			return err
 		}
-		emitNudgeSent(a, msg, "immediate")
+		emitNudgeSent(a, msg, "immediate", corr)
 		return nil
 	}
 
@@ -250,7 +267,7 @@ func (a *Agent) NudgeWithMode(msg string, mode NudgeMode, timeout time.Duration)
 		if err := a.Nudge(msg); err != nil {
 			return err
 		}
-		emitNudgeSent(a, msg, "ready")
+		emitNudgeSent(a, msg, "ready", corr)
 		return nil
 	}
 
@@ -276,7 +293,7 @@ func (a *Agent) NudgeWithMode(msg string, mode NudgeMode, timeout time.Duration)
 	if err := a.Nudge(msg); err != nil {
 		return err
 	}
-	emitNudgeSent(a, msg, "idle")
+	emitNudgeSent(a, msg, "idle", corr)
 	return nil
 }
 
@@ -284,15 +301,23 @@ func (a *Agent) NudgeWithMode(msg string, mode NudgeMode, timeout time.Duration)
 // Sender is "pogod" — the process actually writing the bytes — since the
 // originating agent identity isn't plumbed through this call site in v1.
 // Best-effort: events.Emit never propagates errors.
-func emitNudgeSent(a *Agent, msg, mode string) {
+func emitNudgeSent(a *Agent, msg, mode, corr string) {
+	details := map[string]any{
+		"to":       a.eventAgent(),
+		"message":  msg,
+		"delivery": "pty",
+		"mode":     mode,
+	}
+	// Correlation id, when the caller has one. Present only for nudges that
+	// belong to a larger transaction whose completion is separately observable
+	// — today that is a scheduler fire, keyed by its completion token so
+	// nudge_sent joins to scheduler_fire_completed (mg-a754).
+	if corr != "" {
+		details["fire_token"] = corr
+	}
 	events.Emit(context.Background(), events.Event{
 		EventType: "nudge_sent",
 		Agent:     "pogod",
-		Details: map[string]any{
-			"to":       a.eventAgent(),
-			"message":  msg,
-			"delivery": "pty",
-			"mode":     mode,
-		},
+		Details:   details,
 	})
 }

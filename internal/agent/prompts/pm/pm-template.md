@@ -112,7 +112,8 @@ The scheduler delivers each fire as a nudge (or mail fallback) whose body ends w
 ```
 sweep
 
-[scheduler id=sweep-morning due=2026-05-03T09:00:00Z fired=2026-05-03T09:00:14Z]
+[scheduler id=sweep-morning due=2026-05-03T09:00:00Z fired=2026-05-03T09:00:14Z ack=9f3c1ab2]
+When this fire's work is done, run: pogo schedule ack sweep-morning --agent pm-<your-name> --token 9f3c1ab2
 ```
 
 When `due` ≈ `fired`, this is an on-time fire — run the sweep normally.
@@ -129,6 +130,20 @@ When `fired` is much later than `due` (typically because the host slept through 
 The PM template's three schedules are all `once` — a single catch-up sweep is correct; do **not** run "one sweep per missed cron" (that would mail Daniel several digests in a row after a long sleep). If the gap is large enough that the digest needs a "we slept through X" note, include it in the next "Gaps I'm watching" section.
 
 Re-registering the schedules (e.g. on restart) is harmless — pogod replaces the entry with the same `--id`.
+
+### Acking the fire when its work is done
+
+The footer's `ack=<token>` is a **completion signal**. When you have finished the work this fire triggered, run the command the fire gave you:
+
+```
+pogo schedule ack <schedule-id> --agent <your-agent-name> --token <token>
+```
+
+Do this at the END of the turn, once the work is actually done — not on receipt. It is one command and it takes no arguments you have to look up; the fire hands you the exact invocation.
+
+**Why it matters.** `scheduler_fire_delivered` records only that the bytes reached you. During the 23h30m fleet outage of 2026-07-22 it logged 647 successful deliveries while every consuming turn failed instantly on an expired credential — all true, all useless, and a 100%-dead fleet was indistinguishable from a healthy one. Your ack is the half nobody could see. Skipping it does not break anything immediately; it just returns the fleet to being unable to tell working from dead.
+
+Only the newest token is redeemable. A rejected ack (`stale token`) means a newer fire has already superseded this one — that is information, not an error to retry.
 
 ## Mail discipline (act-then-mark)
 
