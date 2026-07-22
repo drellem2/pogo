@@ -8,18 +8,22 @@ import (
 	"testing"
 )
 
-// buildIndex returns a MEMORY.md-shaped body whose total size is at least
-// wantBytes, built from realistic index lines "- [Title N](fileN.md) — hook".
-// The first line is deliberately the longest so tests can assert the fattest
-// line is surfaced.
-func buildIndex(wantBytes int) []byte {
+// buildIndex returns a MEMORY.md-shaped body whose estimated token cost is at
+// least wantTokens, built from realistic index lines "- [Title N](fileN.md) —
+// hook". The first line is deliberately the heaviest so tests can assert the
+// fattest line is surfaced.
+//
+// It grows by TOKENS, not bytes, because tokens are what the threshold compares
+// against; sizing a fixture in bytes is what made the original check untestable
+// against real behaviour.
+func buildIndex(wantTokens int) []byte {
 	var b strings.Builder
 	b.WriteString("# Memory index\n\n")
 	// A deliberately fat first line — a hook that grew into a paragraph.
 	b.WriteString("- [The one that grew into a paragraph](fat.md) — " +
 		strings.Repeat("this hook kept accreting clauses and never got trimmed, ", 8) + "\n")
 	i := 0
-	for b.Len() < wantBytes {
+	for EstimateTokens([]byte(b.String())) < wantTokens {
 		fmt.Fprintf(&b, "- [Memory %d](file-%d.md) — a reasonably sized one-line hook for entry %d\n", i, i, i)
 		i++
 	}
@@ -32,14 +36,14 @@ func buildIndex(wantBytes int) []byte {
 // one. See [[a-check-needs-a-positive-control]].
 func TestPositiveControl_FiresOverThreshold(t *testing.T) {
 	// One byte past the cap: unambiguously over the warn threshold.
-	data := buildIndex(HarnessReadCapBytes + 1)
-	if len(data) <= WarnThresholdBytes() {
-		t.Fatalf("fixture too small: %d bytes, want > threshold %d", len(data), WarnThresholdBytes())
+	data := buildIndex(HarnessReadCapTokens + 1)
+	if EstimateTokens(data) <= WarnThresholdTokens() {
+		t.Fatalf("fixture too small: ~%d tokens, want > threshold %d", EstimateTokens(data), WarnThresholdTokens())
 	}
 	r := Check("MEMORY.md", data)
 	if !r.Approaching {
-		t.Fatalf("positive control FAILED: check did not fire on a %d-byte index (threshold %d, cap %d) — a check that cannot fire is worthless",
-			r.SizeBytes, r.ThresholdBytes, r.CapBytes)
+		t.Fatalf("positive control FAILED: check did not fire on a ~%d-token index (threshold %d, cap %d) — a check that cannot fire is worthless",
+			r.EstTokens, r.ThresholdTokens, r.CapTokens)
 	}
 	if len(r.FattestLines) == 0 {
 		t.Fatalf("fired but named no fat lines; acceptance requires naming the longest index lines, not just a total")
@@ -49,15 +53,15 @@ func TestPositiveControl_FiresOverThreshold(t *testing.T) {
 // TestNamesTheFattestLines: on firing, the longest index line must be surfaced
 // first, so the fix has a concrete target.
 func TestNamesTheFattestLines(t *testing.T) {
-	data := buildIndex(HarnessReadCapBytes + 1)
+	data := buildIndex(HarnessReadCapTokens + 1)
 	r := Check("MEMORY.md", data)
 	if !r.Approaching {
 		t.Fatal("expected firing")
 	}
 	// Longest-first ordering.
 	for i := 1; i < len(r.FattestLines); i++ {
-		if r.FattestLines[i-1].Bytes < r.FattestLines[i].Bytes {
-			t.Fatalf("fattest lines not sorted longest-first: %d before %d", r.FattestLines[i-1].Bytes, r.FattestLines[i].Bytes)
+		if r.FattestLines[i-1].Tokens < r.FattestLines[i].Tokens {
+			t.Fatalf("fattest lines not sorted heaviest-first: %d before %d", r.FattestLines[i-1].Tokens, r.FattestLines[i].Tokens)
 		}
 	}
 	if !strings.Contains(r.FattestLines[0].Text, "grew into a paragraph") {
@@ -69,30 +73,53 @@ func TestNamesTheFattestLines(t *testing.T) {
 // positive control, per the ordering the acceptance demands).
 func TestSilentUnderThreshold(t *testing.T) {
 	// Comfortably under the warn threshold.
-	data := buildIndex(WarnThresholdBytes() / 2)
-	if len(data) >= WarnThresholdBytes() {
-		t.Fatalf("healthy fixture unexpectedly large: %d bytes", len(data))
+	data := buildIndex(WarnThresholdTokens() / 2)
+	if EstimateTokens(data) >= WarnThresholdTokens() {
+		t.Fatalf("healthy fixture unexpectedly large: ~%d tokens", EstimateTokens(data))
 	}
 	r := Check("MEMORY.md", data)
 	if r.Approaching {
-		t.Fatalf("false positive: fired on a healthy %d-byte index (threshold %d)", r.SizeBytes, r.ThresholdBytes)
+		t.Fatalf("false positive: fired on a healthy ~%d-token index (threshold %d)", r.EstTokens, r.ThresholdTokens)
 	}
 	if len(r.FattestLines) != 0 {
 		t.Fatalf("healthy index should not name fat lines; got %d", len(r.FattestLines))
 	}
 }
 
-// TestBoundaryAtThreshold: at exactly the threshold we warn (>=), one byte under
-// we do not. Pins the comparison so an off-by-one can't silently flip it.
+// TestBoundaryAtThreshold: at exactly the threshold we warn (>=), one token
+// under we do not. Pins the comparison so an off-by-one can't silently flip it.
+//
+// The fixture is built from a body of single-token-per-line filler so the
+// estimate lands on an exact, controllable count.
 func TestBoundaryAtThreshold(t *testing.T) {
-	th := WarnThresholdBytes()
-	at := Check("m", make([]byte, th))
-	if !at.Approaching {
-		t.Fatalf("at exactly the threshold (%d) the check must fire", th)
+	th := WarnThresholdTokens()
+	// "x\n" costs tokensPerAlphaChar + tokensPerLinePrefix per line; find the
+	// smallest body whose estimate reaches exactly the threshold.
+	grow := func(target int) []byte {
+		var b strings.Builder
+		for EstimateTokens([]byte(b.String())) < target {
+			b.WriteString("word\n")
+		}
+		return []byte(b.String())
 	}
-	under := Check("m", make([]byte, th-1))
-	if under.Approaching {
-		t.Fatalf("one byte under the threshold (%d) the check must stay silent", th-1)
+	at := grow(th)
+	if got := EstimateTokens(at); got < th {
+		t.Fatalf("fixture construction failed: %d < %d", got, th)
+	}
+	if !Check("m", at).Approaching {
+		t.Fatalf("at/over the threshold (%d tokens) the check must fire", th)
+	}
+	// Trim back until strictly under the threshold; it must go silent.
+	body := string(at)
+	for EstimateTokens([]byte(body)) >= th {
+		idx := strings.LastIndex(strings.TrimSuffix(body, "\n"), "\n")
+		if idx < 0 {
+			break
+		}
+		body = body[:idx+1]
+	}
+	if Check("m", []byte(body)).Approaching {
+		t.Fatalf("under the threshold (~%d tokens < %d) the check must stay silent", EstimateTokens([]byte(body)), th)
 	}
 }
 
@@ -103,19 +130,19 @@ func TestBoundaryAtThreshold(t *testing.T) {
 // a changed limit.
 func TestThresholdTracksTheLimit(t *testing.T) {
 	// The live derivation must equal cap * fraction.
-	if got, want := WarnThresholdBytes(), int(float64(HarnessReadCapBytes)*WarnFraction); got != want {
+	if got, want := WarnThresholdTokens(), int(float64(HarnessReadCapTokens)*WarnFraction); got != want {
 		t.Fatalf("live threshold %d != derived %d — threshold is not tracking the cap", got, want)
 	}
 	// Both sides of a changed limit: a smaller cap yields a smaller warn point,
 	// a larger cap a larger one. Same body, different cap => different verdict.
-	body := make([]byte, 21000) // between 80% of 25000 (=20000) and 80% of 30000 (=24000)
+	tokens := 21000 // between 80% of 25000 (=20000) and 80% of 30000 (=24000)
 	lowerCap := 25000
 	higherCap := 30000
-	if !(len(body) >= int(float64(lowerCap)*WarnFraction)) {
-		t.Fatalf("with cap %d, a %d-byte file should be over the warn point", lowerCap, len(body))
+	if !(tokens >= int(float64(lowerCap)*WarnFraction)) {
+		t.Fatalf("with cap %d, a %d-token file should be over the warn point", lowerCap, tokens)
 	}
-	if len(body) >= int(float64(higherCap)*WarnFraction) {
-		t.Fatalf("with cap %d, a %d-byte file should be UNDER the warn point — the warn point failed to track the raised limit", higherCap, len(body))
+	if tokens >= int(float64(higherCap)*WarnFraction) {
+		t.Fatalf("with cap %d, a %d-token file should be UNDER the warn point — the warn point failed to track the raised limit", higherCap, tokens)
 	}
 }
 
@@ -125,7 +152,7 @@ func TestThresholdTracksTheLimit(t *testing.T) {
 func TestCheckFileDoesNotModify(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "MEMORY.md")
-	orig := buildIndex(HarnessReadCapBytes + 1)
+	orig := buildIndex(HarnessReadCapTokens + 1)
 	if err := os.WriteFile(path, orig, 0o644); err != nil {
 		t.Fatal(err)
 	}
