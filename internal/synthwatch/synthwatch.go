@@ -39,6 +39,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/drellem2/pogo/internal/claude"
 	"github.com/drellem2/pogo/internal/events"
 	"github.com/drellem2/pogo/internal/synthfail"
 )
@@ -55,6 +56,17 @@ const (
 	// indistinguishable from a suppression that never happened.
 	EventRestartSuppressed = "synthetic_failure_restart_suppressed"
 )
+
+// AuthEpisodeKind is the details.kind value this watcher stamps on the generic
+// claude.IncidentEpisodeClearedEvent it emits at every episode close. The
+// synthetic-failure-turn class is dominated by, and named for, the expired-auth
+// case (mg-18d0/mg-ed45), so "auth" is this source's discriminator on the shared
+// incident_episode_cleared type. It is the AUTH half of the notification arc: the
+// pogo-reminders notifier (mg-e0f6) binds one event type and coalesces every
+// incident class by kind, so this stamp lets it group the fleet's auth
+// self-reports without any reader-side change (mg-55b2 contract). Minting a new
+// KIND value is expected; minting a new EVENT TYPE is not — reuse the const.
+const AuthEpisodeKind = "auth"
 
 // DefaultInterval is the minimum gap between scans of one agent. The fleet's
 // nudge cadence is */10, so a failing agent produces a fresh turn every ten
@@ -121,9 +133,18 @@ type Watcher struct {
 	// failing holds the current verdict for every agent currently in the class
 	// — the live episode roster.
 	failing map[string]synthfail.Report
-	// roster accumulates every agent that was failing during the open episode,
-	// so the clear mail can name them all.
-	roster map[string]synthfail.Report
+	// roster accumulates every agent (keyed by bare name) that was failing during
+	// the open episode, so the clear mail can name them all AND the episode-close
+	// incident event can carry their event-log identities.
+	roster map[string]Target
+	// episodeID is a stable per-episode id, stamped from the first agent to open
+	// the episode; openedAt is its open time. Both are captured at close into the
+	// incident_episode_cleared event's window (the roster+window the notifier
+	// coalesces on) and reset when the episode closes. This is the coordinator
+	// state usagelimit.go holds; without it the emit would have to reconstruct the
+	// window from per-agent atoms — the reconstruction mg-e0f6 warned against.
+	episodeID string
+	openedAt  time.Time
 	// lastScan rate-limits per-agent scans to Interval.
 	lastScan map[string]time.Time
 }
@@ -144,7 +165,7 @@ func New(opts Options) *Watcher {
 	return &Watcher{
 		opts:     opts,
 		failing:  map[string]synthfail.Report{},
-		roster:   map[string]synthfail.Report{},
+		roster:   map[string]Target{},
 		lastScan: map[string]time.Time{},
 	}
 }
@@ -227,7 +248,15 @@ func (w *Watcher) observe(t Target, rep synthfail.Report, now time.Time) {
 		_, already := w.failing[t.Name]
 		newEpisode := len(w.failing) == 0
 		w.failing[t.Name] = rep
-		w.roster[t.Name] = rep
+		w.roster[t.Name] = t
+		if newEpisode {
+			// Stamp the episode window from the first agent to open it, exactly as
+			// usagelimit's OnHit does. (firstAgent, openedAt) is unique because
+			// episodes are sequential — a new one opens only after the prior fully
+			// closed — so this id is stable and deterministic under the test clock.
+			w.episodeID = makeEpisodeID(identityOr(t.Identity, t.Name), now)
+			w.openedAt = now
+		}
 		w.mu.Unlock()
 
 		if already {
@@ -305,15 +334,68 @@ func (w *Watcher) clear(name string, now time.Time) {
 		w.mu.Unlock()
 		return
 	}
-	roster := make([]string, 0, len(w.roster))
-	for n := range w.roster {
-		roster = append(roster, n)
+	// Episode closed: the last failing agent recovered or departed. Capture the
+	// roster and window under the lock — this is the ONE close point where they
+	// are already in hand (the mg-e0f6 bound: emit from the coordinator's real
+	// close, never reconstruct the window from per-agent atoms). names feed the
+	// clear mail (bare, for `pogo agent diagnose`); identities feed the incident
+	// event (event-log identity, the shape the notifier matches senders against).
+	names := make([]string, 0, len(w.roster))
+	identities := make([]string, 0, len(w.roster))
+	for n, t := range w.roster {
+		names = append(names, n)
+		identities = append(identities, identityOr(t.Identity, t.Name))
 	}
-	w.roster = map[string]synthfail.Report{}
+	episodeID := w.episodeID
+	openedAt := w.openedAt
+	w.roster = map[string]Target{}
+	w.episodeID = ""
+	w.openedAt = time.Time{}
 	w.mu.Unlock()
 
-	sort.Strings(roster)
-	w.sendMail(clearMail(roster, now))
+	sort.Strings(names)
+	// The generic incident_episode_cleared event (mg-55b2 contract), emitted at
+	// EVERY auth-episode close. It carries the structured roster+window the
+	// pogo-reminders notifier (mg-e0f6) coalesces on, so the fleet's auth
+	// self-reports collapse to ONE notification instead of swarming — the exact
+	// 2026-07-22 founding case. Same event TYPE and details SHAPE as
+	// usagelimit.go's emitter; only details.kind differs ("auth"). Emitted after
+	// the per-agent EventCleared and after the lock is dropped, mirroring the
+	// usage-limit coordinator.
+	w.opts.Emit(episodeClearedEvent(episodeID, identities, openedAt, now))
+	w.sendMail(clearMail(names, now))
+}
+
+// makeEpisodeID builds a stable per-episode id from the opening agent and the
+// episode's open time, byte-identical in shape to usagelimit.go's. Episodes are
+// sequential, so (firstAgent, openedAt) is unique; deriving it from the injected
+// clock keeps it deterministic under test.
+func makeEpisodeID(firstAgent string, openedAt time.Time) string {
+	return fmt.Sprintf("ep-%d-%s", openedAt.UTC().UnixNano(), firstAgent)
+}
+
+// episodeClearedEvent builds the structured incident_episode_cleared event for an
+// auth-episode close. It mirrors usagelimit.go's episodeClearedEvent exactly —
+// same event type (claude.IncidentEpisodeClearedEvent, reused, not re-minted),
+// same Agent ("pogod"), same RFC3339Nano timestamps, same details field names and
+// nesting — changing only details.kind to AuthEpisodeKind. The roster is emitted
+// sorted so the on-disk record is deterministic. Do not diverge this shape from
+// usagelimit.go's or from mg-e0f6's reader without updating both.
+func episodeClearedEvent(episodeID string, roster []string, openedAt, closedAt time.Time) events.Event {
+	ids := append([]string(nil), roster...)
+	sort.Strings(ids)
+	return events.Event{
+		EventType: claude.IncidentEpisodeClearedEvent,
+		Agent:     "pogod",
+		Timestamp: closedAt.UTC().Format(time.RFC3339Nano),
+		Details: map[string]any{
+			"kind":       AuthEpisodeKind,
+			"episode_id": episodeID,
+			"roster":     ids,
+			"opened_at":  openedAt.UTC().Format(time.RFC3339Nano),
+			"closed_at":  closedAt.UTC().Format(time.RFC3339Nano),
+		},
+	}
 }
 
 func (w *Watcher) page(t Target, rep synthfail.Report) {
