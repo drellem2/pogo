@@ -353,8 +353,8 @@ func TestUsageLimitCoordinator_FlapThenSustained(t *testing.T) {
 }
 
 // A genuine episode close emits exactly one structured
-// usage_limit_episode_cleared event carrying the stable episode_id, the full
-// roster (sorted), and the opened_at/closed_at window — the mg-e0f6 contract.
+// incident_episode_cleared event carrying details.kind, the stable episode_id, the
+// full roster (sorted), and the opened_at/closed_at window — the mg-e0f6 contract.
 func TestUsageLimitCoordinator_EmitsEpisodeClearedEvent(t *testing.T) {
 	sink := &mailSink{}
 	c, h, es := newHeldCoordinator(sink.send)
@@ -378,8 +378,11 @@ func TestUsageLimitCoordinator_EmitsEpisodeClearedEvent(t *testing.T) {
 		t.Fatalf("expected exactly one episode-cleared event at close, got %d", es.count())
 	}
 	ev := es.at(0)
-	if ev.EventType != UsageLimitEpisodeClearedEvent {
-		t.Errorf("event_type = %q, want %q", ev.EventType, UsageLimitEpisodeClearedEvent)
+	if ev.EventType != IncidentEpisodeClearedEvent {
+		t.Errorf("event_type = %q, want %q", ev.EventType, IncidentEpisodeClearedEvent)
+	}
+	if got, want := ev.Details["kind"], UsageLimitEpisodeKind; got != want {
+		t.Errorf("details.kind = %v, want %q", got, want)
 	}
 	if ev.Agent != "pogod" {
 		t.Errorf("agent = %q, want pogod", ev.Agent)
@@ -413,7 +416,8 @@ func TestUsageLimitCoordinator_EmitsEpisodeClearedEvent(t *testing.T) {
 // THE CASE mg-e0f6 flagged: the release-not-recovery close. The last flagged
 // agent exits WITHOUT recovering — modal_hook's ctx.Done path calls
 // OnUsageLimitClear (this OnClear) but emits NO per-agent usage_limit_cleared
-// atom. The structured episode event MUST still fire, or the notifier sees an
+// atom (the per-agent atom retains its own name; only the coordinator's
+// coalesced episode event was generalized to incident_episode_cleared). The structured episode event MUST still fire, or the notifier sees an
 // episode that never closes. A build that emitted the episode event only from
 // the per-agent recovery path (emitUsageLimitCleared) would pass every test
 // above and fail THIS one.
@@ -434,8 +438,8 @@ func TestUsageLimitCoordinator_ReleaseNotRecoveryEmitsEpisodeEvent(t *testing.T)
 		t.Fatalf("release-not-recovery close must emit exactly one episode event, got %d", es.count())
 	}
 	ev := es.at(0)
-	if ev.EventType != UsageLimitEpisodeClearedEvent {
-		t.Errorf("event_type = %q, want %q", ev.EventType, UsageLimitEpisodeClearedEvent)
+	if ev.EventType != IncidentEpisodeClearedEvent {
+		t.Errorf("event_type = %q, want %q", ev.EventType, IncidentEpisodeClearedEvent)
 	}
 	roster, _ := ev.Details["roster"].([]string)
 	if len(roster) != 1 || roster[0] != "cat-mg-dead" {

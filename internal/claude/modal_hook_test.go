@@ -525,9 +525,19 @@ func TestModalHook_UsageLimit_ClearsOnResume(t *testing.T) {
 // the limit, then EXITS while still flagged: the modal hook's ctx.Done path
 // releases the flag and notifies the coordinator (OnUsageLimitClear) WITHOUT
 // emitting a per-agent usage_limit_cleared atom. The coordinator's episode close
-// must still emit the structured usage_limit_episode_cleared event — otherwise
+// must still emit the structured incident_episode_cleared event — otherwise
 // the notifier sees an episode that never closes. This is the assertion that a
 // build emitting the episode event only from the recovery path would fail.
+//
+// The event_type and details.kind are asserted as LITERAL strings, not via the
+// UsageLimitEpisodeClearedEvent constant, on purpose (mg-55b2): this test is the
+// contract control. The generic event type shared by all incident sources is the
+// string "incident_episode_cleared" carrying details.kind="usage_limit"; binding
+// the assertion to the emitter's own constant would silently follow any future
+// rename and could never catch a divergence from the agreed wire contract. Pinned
+// to the literals, this test FAILS against the pre-rename emitter (which emitted
+// "usage_limit_episode_cleared" with no kind) — which is the one thing it exists
+// to prove it can do.
 func TestModalHook_UsageLimit_ReleaseNotRecoveryEmitsEpisodeEvent(t *testing.T) {
 	clock := &fakeClock{now: time.Unix(1_700_000_000, 0)}
 	rig := newTestRig(clock.Now)
@@ -588,8 +598,16 @@ func TestModalHook_UsageLimit_ReleaseNotRecoveryEmitsEpisodeEvent(t *testing.T) 
 		t.Fatalf("release-not-recovery close emitted no structured episode event")
 	}
 	ev := es.at(0)
-	if ev.EventType != UsageLimitEpisodeClearedEvent {
-		t.Errorf("event_type = %q, want %q", ev.EventType, UsageLimitEpisodeClearedEvent)
+	// Assert the exact wire string, not the emitter's constant: the generic event
+	// type shared by every incident source (mg-55b2). A rename that diverged from
+	// this literal must turn this line red.
+	if ev.EventType != "incident_episode_cleared" {
+		t.Errorf("event_type = %q, want %q", ev.EventType, "incident_episode_cleared")
+	}
+	// The kind discriminator must be present and identify the usage-limit source, so
+	// one reader binding one type can tell usage-limit / auth / stall apart.
+	if kind, _ := ev.Details["kind"].(string); kind != "usage_limit" {
+		t.Errorf("details.kind = %q, want %q", kind, "usage_limit")
 	}
 	roster, _ := ev.Details["roster"].([]string)
 	if len(roster) != 1 || roster[0] != "cat-test" {

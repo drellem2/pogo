@@ -603,21 +603,22 @@ The agent flagged by a prior `usage_limit_hit` recovered: its event log advanced
 {"schema_version":1,"timestamp":"2026-07-06T22:05:00.000000000Z","event_type":"usage_limit_cleared","agent":"cat-mg-7ffa","work_item_id":"mg-7ffa","details":{"matcher":"rate-limit-options"}}
 ```
 
-#### `usage_limit_episode_cleared`
+#### `incident_episode_cleared`
 
-pogod's fleet usage-limit coordinator ([usagelimit.go](../internal/claude/usagelimit.go), mg-8d04) closed a **fleet-wide episode** — the coalesced view the per-agent `usage_limit_hit`/`usage_limit_cleared` atoms above cannot reconstruct on their own. Where those atoms are per-agent and carry no roster or episode window, this one carries the coordinator's OWN notion of the episode: the full affected roster and the open/close window, computed in pogod's memory and otherwise rendered only as prose into the operator clear mail. It exists so a downstream notifier can coalesce usage-limit incident self-reports without re-deriving coordinator semantics (the flap-gate, the release-not-recovery close) from raw atoms — a reconstruction that is unsafe precisely because those semantics never reach the log as atoms.
+pogod's fleet incident coordinators closed a **fleet-wide episode** — the coalesced view the per-agent atoms above cannot reconstruct on their own. This event type is **generic**: it is emitted by every fleet-incident coordinator (usage-limit via [usagelimit.go](../internal/claude/usagelimit.go), auth via mg-8cdb, stall), discriminated by `details.kind`, so a downstream notifier binds ONE event type and one string to coalesce every incident class without a per-class reader config to keep in sync (mg-8d04 emitted this class-specific as `usage_limit_episode_cleared`; mg-55b2 generalized the name and added `kind` before more consumers bound the class-specific string). Where the per-agent atoms are per-agent and carry no roster or episode window, this one carries the coordinator's OWN notion of the episode: the full affected roster and the open/close window, computed in pogod's memory and otherwise rendered only as prose into the operator clear mail. It exists so a downstream notifier can coalesce incident self-reports without re-deriving coordinator semantics (the flap-gate, the release-not-recovery close) from raw atoms — a reconstruction that is unsafe precisely because those semantics never reach the log as atoms.
 
 Emitted at **every** coordinator episode close, by **any** path — including the release-not-recovery case where the last flagged agent EXITS while still limited (that path emits no per-agent `usage_limit_cleared` atom, yet the episode still closes, so this event still fires). It is NOT emitted for a flap: a hit/clear pair that never outlived the coordinator's hold-down is a non-episode to the coordinator, so it produces neither the clear mail nor this event. One event per genuine episode. Additive — no `schema_version` bump.
 
 - **Required envelope:** `schema_version`, `timestamp` (= `closed_at`), `event_type`, `agent` (always `"pogod"`), `details`
 - **`details` fields:**
+  - `kind` (string, required): the incident class this episode belongs to — `"usage_limit"` (this coordinator), `"auth"` (mg-8cdb), or the stall source's kind. The discriminator a single-type reader keys on.
   - `episode_id` (string, required): stable per-episode id, derived from the opening agent + open time
   - `roster` (array of string, required): the full set of agent identities limited during the episode, sorted
   - `opened_at` (string, required): RFC3339 timestamp of the first agent's hit (episode window start)
   - `closed_at` (string, required): RFC3339 timestamp of the last agent's clear/release (episode window end)
 
 ```json
-{"schema_version":1,"timestamp":"2026-07-06T22:05:00.000000000Z","event_type":"usage_limit_episode_cleared","agent":"pogod","details":{"episode_id":"ep-1704566400000000000-cat-mg-7ffa","roster":["cat-mg-7ffa","cat-mg-aaaa"],"opened_at":"2026-07-06T18:20:00.000000000Z","closed_at":"2026-07-06T22:05:00.000000000Z"}}
+{"schema_version":1,"timestamp":"2026-07-06T22:05:00.000000000Z","event_type":"incident_episode_cleared","agent":"pogod","details":{"kind":"usage_limit","episode_id":"ep-1704566400000000000-cat-mg-7ffa","roster":["cat-mg-7ffa","cat-mg-aaaa"],"opened_at":"2026-07-06T18:20:00.000000000Z","closed_at":"2026-07-06T22:05:00.000000000Z"}}
 ```
 
 #### `sentinel_drift`

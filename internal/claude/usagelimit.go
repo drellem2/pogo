@@ -28,17 +28,26 @@ import (
 	"github.com/drellem2/pogo/internal/events"
 )
 
-// UsageLimitEpisodeClearedEvent is the event_type emitted to events.log at every
-// coordinator episode close (mg-8d04). It is the structured per-episode roster +
-// window that the pogo-reminders notifier (mg-e0f6) consumes to coalesce
-// usage-limit incident self-reports WITHOUT reconstructing coordinator semantics
-// (the flap-gate, the release-not-recovery close) from raw per-agent atoms — a
-// reconstruction that is unsafe because the roster and open/close window live
-// only in this coordinator's memory and are otherwise rendered only as prose into
-// the clear mail. The two sides meet at this contract: the details shape
-// (episode_id, roster, opened_at, closed_at) is fixed — do not change field names
-// or nesting without updating mg-e0f6.
-const UsageLimitEpisodeClearedEvent = "usage_limit_episode_cleared"
+// IncidentEpisodeClearedEvent is the event_type emitted to events.log at every
+// coordinator episode close (mg-8d04, generalized mg-55b2). It is GENERIC: all
+// three episode sources (usage-limit here, auth via mg-8cdb, stall) emit this one
+// type, discriminated by details.kind, so the pogo-reminders notifier (mg-e0f6)
+// binds a SINGLE string and coalesces every incident class without a per-class
+// reader config to remember. It is the structured per-episode roster + window that
+// the notifier consumes to coalesce incident self-reports WITHOUT reconstructing
+// coordinator semantics (the flap-gate, the release-not-recovery close) from raw
+// per-agent atoms — a reconstruction that is unsafe because the roster and
+// open/close window live only in this coordinator's memory and are otherwise
+// rendered only as prose into the clear mail. The two sides meet at this contract:
+// the details shape (kind, episode_id, roster, opened_at, closed_at) is fixed — do
+// not change field names or nesting without updating mg-e0f6.
+const IncidentEpisodeClearedEvent = "incident_episode_cleared"
+
+// UsageLimitEpisodeKind is the details.kind value this coordinator stamps on its
+// IncidentEpisodeClearedEvent. It identifies the usage-limit source; the auth
+// emitter (mg-8cdb) stamps kind:"auth" and the stall source its own kind, all on
+// the same event type so one reader binding one string can tell them apart.
+const UsageLimitEpisodeKind = "usage_limit"
 
 // DefaultUsageLimitHoldDown is how long a fleet-wide usage-limit episode must
 // stay open before its hit mail fires. It exists to suppress sub-second flaps
@@ -89,7 +98,7 @@ type usageLimitCoordinator struct {
 	// Episode identity + window, set when a new episode opens (OnHit) and cleared
 	// when it closes (OnClear). episodeID is a stable per-episode id; openedAt is
 	// the first agent's hit time (the episode window start). Both are carried into
-	// the usage_limit_episode_cleared event at close.
+	// the incident_episode_cleared event at close.
 	episodeID string
 	openedAt  time.Time
 
@@ -271,9 +280,10 @@ func makeEpisodeID(firstAgent string, openedAt time.Time) string {
 	return fmt.Sprintf("ep-%d-%s", openedAt.UTC().UnixNano(), firstAgent)
 }
 
-// episodeClearedEvent builds the structured usage_limit_episode_cleared event for
-// a coordinator episode close. The roster is emitted sorted by agent id so the
-// on-disk record is deterministic. The details shape is the mg-e0f6 contract.
+// episodeClearedEvent builds the structured incident_episode_cleared event for a
+// coordinator episode close. The roster is emitted sorted by agent id so the
+// on-disk record is deterministic. details.kind identifies this as the usage-limit
+// source of the generic incident event. The details shape is the mg-e0f6 contract.
 func episodeClearedEvent(episodeID string, roster []agentLimitInfo, openedAt, closedAt time.Time) events.Event {
 	ids := make([]string, 0, len(roster))
 	for _, a := range roster {
@@ -281,10 +291,11 @@ func episodeClearedEvent(episodeID string, roster []agentLimitInfo, openedAt, cl
 	}
 	sort.Strings(ids)
 	return events.Event{
-		EventType: UsageLimitEpisodeClearedEvent,
+		EventType: IncidentEpisodeClearedEvent,
 		Agent:     "pogod",
 		Timestamp: closedAt.UTC().Format(time.RFC3339Nano),
 		Details: map[string]any{
+			"kind":       UsageLimitEpisodeKind,
 			"episode_id": episodeID,
 			"roster":     ids,
 			"opened_at":  openedAt.UTC().Format(time.RFC3339Nano),
