@@ -17,7 +17,7 @@ When the provider's usage limit is hit, Claude Code renders a rate-limit-options
 
 ### How you find out
 
-- **One coalesced mail to `human` at the start of an episode** (subject `usage limit hit — fleet episode started`). An "episode" is one fleet-wide limit event: the first affected agent triggers the mail; additional agents that hit the same limit join the episode **silently** (no per-agent mail storm). No action is required at hit time.
+- **One coalesced mail to `human` at the start of an episode** (subject `usage limit hit — fleet episode started`). An "episode" is one fleet-wide limit event: the first affected agent arms the mail; additional agents that hit the same limit join the episode **silently** (no per-agent mail storm). No action is required at hit time. The hit mail is held for a short **hold-down** (~45s) after the episode opens and fires only if the episode is still open when it elapses: an episode that opens and clears inside the hold-down — a sub-second flap — pages nobody at all, and sends no clear mail either (mg-4904). A genuine episode outlasts the hold-down and pages exactly once, as before.
 - **`pogo status`** marks affected agents with `⚠ rate-limited` in the agent rows; `pogo agent list` appends `rate-limited`.
 - **`pogo agent diagnose <name>`** reports `Health: rate_limited` — a distinct condition that outranks `stalled`/`idle`, so a limit wait is never mistaken for a genuine wedge. `--json` carries `rate_limited` and `rate_limited_since`.
 - The `usage_limit_hit` / `usage_limit_cleared` events land in `~/.pogo/events.log` (see [event-log.md](event-log.md)) with `{agent, work_item_id, timestamp}` — filter with `jq 'select(.event_type=="usage_limit_hit")'`.
