@@ -16,6 +16,7 @@
 package claude
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"sort"
@@ -24,7 +25,20 @@ import (
 	"time"
 
 	"github.com/drellem2/pogo/internal/client"
+	"github.com/drellem2/pogo/internal/events"
 )
+
+// UsageLimitEpisodeClearedEvent is the event_type emitted to events.log at every
+// coordinator episode close (mg-8d04). It is the structured per-episode roster +
+// window that the pogo-reminders notifier (mg-e0f6) consumes to coalesce
+// usage-limit incident self-reports WITHOUT reconstructing coordinator semantics
+// (the flap-gate, the release-not-recovery close) from raw per-agent atoms — a
+// reconstruction that is unsafe because the roster and open/close window live
+// only in this coordinator's memory and are otherwise rendered only as prose into
+// the clear mail. The two sides meet at this contract: the details shape
+// (episode_id, roster, opened_at, closed_at) is fixed — do not change field names
+// or nesting without updating mg-e0f6.
+const UsageLimitEpisodeClearedEvent = "usage_limit_episode_cleared"
 
 // DefaultUsageLimitHoldDown is how long a fleet-wide usage-limit episode must
 // stay open before its hit mail fires. It exists to suppress sub-second flaps
@@ -70,6 +84,14 @@ type usageLimitCoordinator struct {
 	roster map[string]agentLimitInfo // every agent limited during the open episode
 	send   func(to, from, subject, body string) error
 	now    func() time.Time
+	emit   func(ev events.Event) // structured event sink (events.Emit in production)
+
+	// Episode identity + window, set when a new episode opens (OnHit) and cleared
+	// when it closes (OnClear). episodeID is a stable per-episode id; openedAt is
+	// the first agent's hit time (the episode window start). Both are carried into
+	// the usage_limit_episode_cleared event at close.
+	episodeID string
+	openedAt  time.Time
 
 	// Hold-down state (mg-4904). When an episode opens, the hit mail is not sent
 	// immediately: a timer is armed for holdDown, and the mail fires only if the
@@ -87,24 +109,29 @@ type usageLimitCoordinator struct {
 }
 
 func newUsageLimitCoordinator(send func(to, from, subject, body string) error, now func() time.Time) *usageLimitCoordinator {
-	return newUsageLimitCoordinatorWithHoldDown(send, now, DefaultUsageLimitHoldDown, nil)
+	return newUsageLimitCoordinatorWithHoldDown(send, now, DefaultUsageLimitHoldDown, nil, nil)
 }
 
 // newUsageLimitCoordinatorWithHoldDown is the seam for tests: it takes an
-// explicit hold-down and an injectable timer factory. A nil after uses
-// time.AfterFunc. Production goes through newUsageLimitCoordinator.
-func newUsageLimitCoordinatorWithHoldDown(send func(to, from, subject, body string) error, now func() time.Time, holdDown time.Duration, after func(d time.Duration, f func()) stoppableTimer) *usageLimitCoordinator {
+// explicit hold-down, an injectable timer factory, and an injectable structured
+// event sink. A nil after uses time.AfterFunc; a nil emit uses events.Emit.
+// Production goes through newUsageLimitCoordinator.
+func newUsageLimitCoordinatorWithHoldDown(send func(to, from, subject, body string) error, now func() time.Time, holdDown time.Duration, after func(d time.Duration, f func()) stoppableTimer, emit func(ev events.Event)) *usageLimitCoordinator {
 	if now == nil {
 		now = time.Now
 	}
 	if after == nil {
 		after = func(d time.Duration, f func()) stoppableTimer { return time.AfterFunc(d, f) }
 	}
+	if emit == nil {
+		emit = func(ev events.Event) { events.Emit(context.Background(), ev) }
+	}
 	return &usageLimitCoordinator{
 		active:   map[string]agentLimitInfo{},
 		roster:   map[string]agentLimitInfo{},
 		send:     send,
 		now:      now,
+		emit:     emit,
 		holdDown: holdDown,
 		after:    after,
 	}
@@ -134,6 +161,8 @@ func (c *usageLimitCoordinator) OnHit(agentID, workItemID string, when time.Time
 		// live episode land in the `ok` early-return above and never re-arm.
 		c.opener = info
 		c.hitSent = false
+		c.openedAt = when
+		c.episodeID = makeEpisodeID(info.agentID, when)
 		c.timer = c.after(c.holdDown, c.fireHoldDown)
 	}
 }
@@ -189,30 +218,78 @@ func (c *usageLimitCoordinator) OnClear(agentID string, when time.Time) {
 		c.timer = nil
 	}
 
-	// A flap: the episode closed before its hit mail ever fired. Send neither
-	// mail — an orphan "cleared" for an episode nobody was told about would be
-	// worse than silence — and reset for the next episode.
+	// A flap: the episode closed before its hit mail ever fired. To the
+	// coordinator this hit/clear pair was a NON-episode, so it emits neither the
+	// clear mail nor the structured episode event — an orphan "cleared" for an
+	// episode nobody was told about would be worse than silence. Reset for the
+	// next episode.
 	if !c.hitSent {
 		c.roster = map[string]agentLimitInfo{}
+		c.episodeID = ""
+		c.openedAt = time.Time{}
 		c.mu.Unlock()
 		return
 	}
 
-	// A genuine episode: its hit already paged, so it gets its one clear mail.
+	// A genuine episode close by ANY path — normal recovery OR the
+	// release-not-recovery case where the last flagged agent exited (modal_hook's
+	// ctx.Done calls OnUsageLimitClear without emitting a per-agent
+	// usage_limit_cleared atom). Both funnel here, so emitting the structured
+	// episode event from this single close point is exactly what makes the
+	// notifier see EVERY episode close, including the one that leaves no clear
+	// atom behind (mg-8d04 / mg-e0f6).
 	roster := make([]agentLimitInfo, 0, len(c.roster))
 	for _, v := range c.roster {
 		roster = append(roster, v)
 	}
+	episodeID := c.episodeID
+	openedAt := c.openedAt
 	c.roster = map[string]agentLimitInfo{}
 	c.hitSent = false
+	c.episodeID = ""
+	c.openedAt = time.Time{}
 	send := c.send
+	emit := c.emit
 	c.mu.Unlock()
 
+	if emit != nil {
+		emit(episodeClearedEvent(episodeID, roster, openedAt, when))
+	}
 	if send != nil {
 		subject, body := clearMail(roster, when)
 		if err := send("human", "pogod", subject, body); err != nil {
 			log.Printf("usage-limit: failed to send clear mail: %v", err)
 		}
+	}
+}
+
+// makeEpisodeID builds a stable per-episode id from the opening agent and the
+// episode's open time. Episodes are sequential (a new one opens only after the
+// prior one fully closed), so (firstAgent, openedAt) is unique; deriving it from
+// the injected clock keeps it deterministic under test.
+func makeEpisodeID(firstAgent string, openedAt time.Time) string {
+	return fmt.Sprintf("ep-%d-%s", openedAt.UTC().UnixNano(), firstAgent)
+}
+
+// episodeClearedEvent builds the structured usage_limit_episode_cleared event for
+// a coordinator episode close. The roster is emitted sorted by agent id so the
+// on-disk record is deterministic. The details shape is the mg-e0f6 contract.
+func episodeClearedEvent(episodeID string, roster []agentLimitInfo, openedAt, closedAt time.Time) events.Event {
+	ids := make([]string, 0, len(roster))
+	for _, a := range roster {
+		ids = append(ids, a.agentID)
+	}
+	sort.Strings(ids)
+	return events.Event{
+		EventType: UsageLimitEpisodeClearedEvent,
+		Agent:     "pogod",
+		Timestamp: closedAt.UTC().Format(time.RFC3339Nano),
+		Details: map[string]any{
+			"episode_id": episodeID,
+			"roster":     ids,
+			"opened_at":  openedAt.UTC().Format(time.RFC3339Nano),
+			"closed_at":  closedAt.UTC().Format(time.RFC3339Nano),
+		},
 	}
 }
 

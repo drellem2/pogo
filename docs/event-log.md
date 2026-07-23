@@ -603,6 +603,23 @@ The agent flagged by a prior `usage_limit_hit` recovered: its event log advanced
 {"schema_version":1,"timestamp":"2026-07-06T22:05:00.000000000Z","event_type":"usage_limit_cleared","agent":"cat-mg-7ffa","work_item_id":"mg-7ffa","details":{"matcher":"rate-limit-options"}}
 ```
 
+#### `usage_limit_episode_cleared`
+
+pogod's fleet usage-limit coordinator ([usagelimit.go](../internal/claude/usagelimit.go), mg-8d04) closed a **fleet-wide episode** — the coalesced view the per-agent `usage_limit_hit`/`usage_limit_cleared` atoms above cannot reconstruct on their own. Where those atoms are per-agent and carry no roster or episode window, this one carries the coordinator's OWN notion of the episode: the full affected roster and the open/close window, computed in pogod's memory and otherwise rendered only as prose into the operator clear mail. It exists so a downstream notifier can coalesce usage-limit incident self-reports without re-deriving coordinator semantics (the flap-gate, the release-not-recovery close) from raw atoms — a reconstruction that is unsafe precisely because those semantics never reach the log as atoms.
+
+Emitted at **every** coordinator episode close, by **any** path — including the release-not-recovery case where the last flagged agent EXITS while still limited (that path emits no per-agent `usage_limit_cleared` atom, yet the episode still closes, so this event still fires). It is NOT emitted for a flap: a hit/clear pair that never outlived the coordinator's hold-down is a non-episode to the coordinator, so it produces neither the clear mail nor this event. One event per genuine episode. Additive — no `schema_version` bump.
+
+- **Required envelope:** `schema_version`, `timestamp` (= `closed_at`), `event_type`, `agent` (always `"pogod"`), `details`
+- **`details` fields:**
+  - `episode_id` (string, required): stable per-episode id, derived from the opening agent + open time
+  - `roster` (array of string, required): the full set of agent identities limited during the episode, sorted
+  - `opened_at` (string, required): RFC3339 timestamp of the first agent's hit (episode window start)
+  - `closed_at` (string, required): RFC3339 timestamp of the last agent's clear/release (episode window end)
+
+```json
+{"schema_version":1,"timestamp":"2026-07-06T22:05:00.000000000Z","event_type":"usage_limit_episode_cleared","agent":"pogod","details":{"episode_id":"ep-1704566400000000000-cat-mg-7ffa","roster":["cat-mg-7ffa","cat-mg-aaaa"],"opened_at":"2026-07-06T18:20:00.000000000Z","closed_at":"2026-07-06T22:05:00.000000000Z"}}
+```
+
 #### `sentinel_drift`
 
 pogod's prompt-ready sentinel drift detector ([sentineldrift.go](../internal/agent/sentineldrift.go), mg-ce4c, fast-follow to pogo#76 / PR #77) declared a **fleet-wide** ready-gate sentinel stale: the fraction of spawns MISSING their prompt-ready sentinel within a rolling window crossed the alert threshold. The gates are hardcoded UI-string sentinels scraped from harness PTY output — the Claude initial-nudge gate (`initial-nudge`) and Cursor's trust-dialog hook (`trust-dialog`) — and when a harness UI change makes one stop matching, the gate silently degrades (a ~60s per-spawn cold-start tax for Claude; unguarded dialog dismissal for Cursor). A single missed spawn is noise; a windowed run of them means the sentinel drifted. The detector aggregates in-process (pogod is the single fleet process), so the count is fleet-wide without reading the log back. Rate-limited to one event per sentinel per drift episode (not per spawn). The paired signal is a mail to the coordinator — a log line alone is not a signal on this host. Additive — no `schema_version` bump.

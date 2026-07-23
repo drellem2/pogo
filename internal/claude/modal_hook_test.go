@@ -521,6 +521,92 @@ func TestModalHook_UsageLimit_ClearsOnResume(t *testing.T) {
 	}
 }
 
+// End-to-end proof of the release-not-recovery close (mg-8d04). An agent hits
+// the limit, then EXITS while still flagged: the modal hook's ctx.Done path
+// releases the flag and notifies the coordinator (OnUsageLimitClear) WITHOUT
+// emitting a per-agent usage_limit_cleared atom. The coordinator's episode close
+// must still emit the structured usage_limit_episode_cleared event — otherwise
+// the notifier sees an episode that never closes. This is the assertion that a
+// build emitting the episode event only from the recovery path would fail.
+func TestModalHook_UsageLimit_ReleaseNotRecoveryEmitsEpisodeEvent(t *testing.T) {
+	clock := &fakeClock{now: time.Unix(1_700_000_000, 0)}
+	rig := newTestRig(clock.Now)
+	// Events stale 6m: past UsageLimitSuspectStaleness (5m), under EventStaleness.
+	rig.tracker.set("cat-test", clock.Now().Add(-6*time.Minute))
+
+	// A real coordinator sits behind the modal hook's usage-limit callbacks, with
+	// a controllable hold-down and a capturing structured-event sink.
+	sink := &mailSink{}
+	h := &timerHarness{}
+	es := &eventSink{}
+	coord := newUsageLimitCoordinatorWithHoldDown(sink.send, clock.Now, 45*time.Second, h.after, es.emit)
+
+	deps := rig.deps("cat-test")
+	deps.OnUsageLimitHit = func(agentID, workItemID string, when time.Time) {
+		coord.OnHit(agentID, workItemID, when)
+	}
+	deps.OnUsageLimitClear = func(agentID string, when time.Time) {
+		coord.OnClear(agentID, when)
+	}
+
+	prev := setEventsStalePollIntervalForTest(20 * time.Millisecond)
+	defer setEventsStalePollIntervalForTest(prev)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel() // safety net; the explicit cancel() below is the release trigger
+	go RunModalHook(ctx, deps, testMatchers())
+	if !waitFor(t, time.Second, func() bool {
+		rig.mu.Lock()
+		ok := rig.scanner != nil
+		rig.mu.Unlock()
+		return ok
+	}) {
+		t.Fatalf("scanner never subscribed")
+	}
+
+	// The wedge: rate-limit modal visible + event log stale -> suspected hit.
+	rig.writeOutput([]byte(RateLimitMarker + "\n"))
+	if !waitFor(t, 2*time.Second, func() bool { return h.isArmed() }) {
+		t.Fatalf("hit never reached the coordinator (hold-down never armed)")
+	}
+	if !waitFor(t, 2*time.Second, func() bool { return rig.isRateLimited() }) {
+		t.Fatalf("agent never flagged rate-limited after the hit")
+	}
+	// The hold-down elapses with the episode still open: it is a genuine episode.
+	h.fire()
+
+	// Exactly one atom emitted so far: the usage_limit_hit. No clear atom yet.
+	if got := atomic.LoadInt32(&rig.eventCount); got != 1 {
+		t.Fatalf("expected exactly the hit atom before release, got %d events", got)
+	}
+
+	// The agent exits while STILL flagged. ctx.Done -> release the flag and notify
+	// the coordinator, but emit NO per-agent usage_limit_cleared atom.
+	cancel()
+
+	if !waitFor(t, 2*time.Second, func() bool { return es.count() >= 1 }) {
+		t.Fatalf("release-not-recovery close emitted no structured episode event")
+	}
+	ev := es.at(0)
+	if ev.EventType != UsageLimitEpisodeClearedEvent {
+		t.Errorf("event_type = %q, want %q", ev.EventType, UsageLimitEpisodeClearedEvent)
+	}
+	roster, _ := ev.Details["roster"].([]string)
+	if len(roster) != 1 || roster[0] != "cat-test" {
+		t.Errorf("roster = %v, want [cat-test]", roster)
+	}
+	// Prove it took the RELEASE path, not recovery: no per-agent clear atom was
+	// emitted (emitUsageLimitCleared would have pushed eventCount to 2).
+	if !rig.isRateLimited() { // flag released by the ctx.Done path
+		// expected: released
+	} else {
+		t.Errorf("release path should have cleared the rate-limited flag")
+	}
+	if got := atomic.LoadInt32(&rig.eventCount); got != 1 {
+		t.Errorf("release path must emit no per-agent clear atom; event count = %d, want 1 (hit only)", got)
+	}
+}
+
 // The marker quoted in a transcript while the event log stays fresh must NOT
 // trip the hit gate — the ~5m staleness requirement is what disambiguates a
 // real wedge from an agent that merely prints the phrase (reviewer gate).

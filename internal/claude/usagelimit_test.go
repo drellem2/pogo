@@ -6,7 +6,33 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/drellem2/pogo/internal/events"
 )
+
+// eventSink captures structured events the coordinator emits, for assertions.
+type eventSink struct {
+	mu     sync.Mutex
+	events []events.Event
+}
+
+func (s *eventSink) emit(ev events.Event) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.events = append(s.events, ev)
+}
+
+func (s *eventSink) count() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.events)
+}
+
+func (s *eventSink) at(i int) events.Event {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.events[i]
+}
 
 // mailSink captures coordinator mails for assertions.
 type mailSink struct {
@@ -83,6 +109,15 @@ func (h *timerHarness) after(_ time.Duration, f func()) stoppableTimer {
 	return t
 }
 
+// isArmed reports whether a hold-down timer is currently armed (an episode has
+// opened). Read under lock so a test goroutine can poll it while the coordinator
+// arms from another goroutine.
+func (h *timerHarness) isArmed() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.armed != nil
+}
+
 // fire simulates the hold-down elapsing: it invokes the armed timer's callback
 // unless it was already stopped (i.e. the episode cleared first).
 func (h *timerHarness) fire() {
@@ -94,20 +129,21 @@ func (h *timerHarness) fire() {
 	}
 }
 
-// newHeldCoordinator builds a coordinator with a controllable hold-down timer.
-// The hold-down duration is irrelevant to the fake (the test drives firing
-// explicitly), so any non-zero value is fine.
-func newHeldCoordinator(send func(to, from, subject, body string) error) (*usageLimitCoordinator, *timerHarness) {
+// newHeldCoordinator builds a coordinator with a controllable hold-down timer
+// and a capturing structured-event sink. The hold-down duration is irrelevant to
+// the fake (the test drives firing explicitly), so any non-zero value is fine.
+func newHeldCoordinator(send func(to, from, subject, body string) error) (*usageLimitCoordinator, *timerHarness, *eventSink) {
 	h := &timerHarness{}
-	c := newUsageLimitCoordinatorWithHoldDown(send, fixedNow(), 45*time.Second, h.after)
-	return c, h
+	es := &eventSink{}
+	c := newUsageLimitCoordinatorWithHoldDown(send, fixedNow(), 45*time.Second, h.after, es.emit)
+	return c, h, es
 }
 
 // A single agent hitting and clearing produces exactly one hit + one clear
 // mail, both to human.
 func TestUsageLimitCoordinator_SingleAgentHitAndClear(t *testing.T) {
 	sink := &mailSink{}
-	c, h := newHeldCoordinator(sink.send)
+	c, h, _ := newHeldCoordinator(sink.send)
 	now := fixedNow()()
 
 	c.OnHit("cat-mg-7ffa", "mg-7ffa", now)
@@ -151,7 +187,7 @@ func TestUsageLimitCoordinator_SingleAgentHitAndClear(t *testing.T) {
 // clear mail that lists BOTH agents in the roster.
 func TestUsageLimitCoordinator_CoalescesFleetEpisode(t *testing.T) {
 	sink := &mailSink{}
-	c, h := newHeldCoordinator(sink.send)
+	c, h, _ := newHeldCoordinator(sink.send)
 	now := fixedNow()()
 
 	c.OnHit("cat-mg-aaaa", "mg-aaaa", now)
@@ -187,7 +223,7 @@ func TestUsageLimitCoordinator_CoalescesFleetEpisode(t *testing.T) {
 // mail — the roster is reset between episodes.
 func TestUsageLimitCoordinator_SecondEpisodeAfterClear(t *testing.T) {
 	sink := &mailSink{}
-	c, h := newHeldCoordinator(sink.send)
+	c, h, _ := newHeldCoordinator(sink.send)
 	now := fixedNow()()
 
 	c.OnHit("cat-a", "", now)
@@ -228,7 +264,7 @@ func TestUsageLimitCoordinator_ClearUnknownAgentNoop(t *testing.T) {
 // 07-22. This is the case a sustained-only test cannot prove: it passes today.
 func TestUsageLimitCoordinator_SubSecondFlapEmitsNoMail(t *testing.T) {
 	sink := &mailSink{}
-	c, h := newHeldCoordinator(sink.send)
+	c, h, _ := newHeldCoordinator(sink.send)
 	base := fixedNow()()
 
 	// gaps mirror the observed 23:21 / 23:47 / 23:54 spacing; the exact offsets
@@ -258,7 +294,7 @@ func TestUsageLimitCoordinator_SubSecondFlapEmitsNoMail(t *testing.T) {
 // suppressing a page that should fire.
 func TestUsageLimitCoordinator_SustainedEpisodePagesOnce(t *testing.T) {
 	sink := &mailSink{}
-	c, h := newHeldCoordinator(sink.send)
+	c, h, _ := newHeldCoordinator(sink.send)
 	now := fixedNow()()
 
 	c.OnHit("cat-real", "mg-real", now)
@@ -289,7 +325,7 @@ func TestUsageLimitCoordinator_SustainedEpisodePagesOnce(t *testing.T) {
 // state (hitSent / opener / timer) leaking between episodes.
 func TestUsageLimitCoordinator_FlapThenSustained(t *testing.T) {
 	sink := &mailSink{}
-	c, h := newHeldCoordinator(sink.send)
+	c, h, _ := newHeldCoordinator(sink.send)
 	now := fixedNow()()
 
 	// Flap: opens and closes inside the hold-down -> zero mails.
@@ -313,6 +349,148 @@ func TestUsageLimitCoordinator_FlapThenSustained(t *testing.T) {
 	}
 	if strings.Contains(clear.body, "cat-flap") {
 		t.Errorf("clear must not carry the earlier flapped agent, got:\n%s", clear.body)
+	}
+}
+
+// A genuine episode close emits exactly one structured
+// usage_limit_episode_cleared event carrying the stable episode_id, the full
+// roster (sorted), and the opened_at/closed_at window — the mg-e0f6 contract.
+func TestUsageLimitCoordinator_EmitsEpisodeClearedEvent(t *testing.T) {
+	sink := &mailSink{}
+	c, h, es := newHeldCoordinator(sink.send)
+	now := fixedNow()()
+	closed := now.Add(time.Hour)
+
+	c.OnHit("cat-mg-bbbb", "mg-bbbb", now)
+	c.OnHit("cat-mg-aaaa", "mg-aaaa", now.Add(time.Minute)) // joins the same episode
+	h.fire()                                                // episode outlives the hold-down
+	if es.count() != 0 {
+		t.Fatalf("no episode event should fire before the episode closes, got %d", es.count())
+	}
+
+	c.OnClear("cat-mg-bbbb", closed)
+	if es.count() != 0 {
+		t.Fatalf("episode still open (one agent active), no event yet, got %d", es.count())
+	}
+	c.OnClear("cat-mg-aaaa", closed) // last agent clears -> episode closes
+
+	if es.count() != 1 {
+		t.Fatalf("expected exactly one episode-cleared event at close, got %d", es.count())
+	}
+	ev := es.at(0)
+	if ev.EventType != UsageLimitEpisodeClearedEvent {
+		t.Errorf("event_type = %q, want %q", ev.EventType, UsageLimitEpisodeClearedEvent)
+	}
+	if ev.Agent != "pogod" {
+		t.Errorf("agent = %q, want pogod", ev.Agent)
+	}
+	wantTS := closed.UTC().Format(time.RFC3339Nano)
+	if ev.Timestamp != wantTS {
+		t.Errorf("timestamp = %q, want %q (closed_at)", ev.Timestamp, wantTS)
+	}
+
+	// episode_id is stable: derived from the opening agent + open time.
+	wantID := "ep-" + fmt.Sprint(now.UTC().UnixNano()) + "-cat-mg-bbbb"
+	if got := ev.Details["episode_id"]; got != wantID {
+		t.Errorf("episode_id = %v, want %q", got, wantID)
+	}
+	// roster is the FULL affected set, sorted.
+	roster, ok := ev.Details["roster"].([]string)
+	if !ok {
+		t.Fatalf("roster is %T, want []string", ev.Details["roster"])
+	}
+	if len(roster) != 2 || roster[0] != "cat-mg-aaaa" || roster[1] != "cat-mg-bbbb" {
+		t.Errorf("roster = %v, want [cat-mg-aaaa cat-mg-bbbb] (sorted)", roster)
+	}
+	if got, want := ev.Details["opened_at"], now.UTC().Format(time.RFC3339Nano); got != want {
+		t.Errorf("opened_at = %v, want %q", got, want)
+	}
+	if got, want := ev.Details["closed_at"], closed.UTC().Format(time.RFC3339Nano); got != want {
+		t.Errorf("closed_at = %v, want %q", got, want)
+	}
+}
+
+// THE CASE mg-e0f6 flagged: the release-not-recovery close. The last flagged
+// agent exits WITHOUT recovering — modal_hook's ctx.Done path calls
+// OnUsageLimitClear (this OnClear) but emits NO per-agent usage_limit_cleared
+// atom. The structured episode event MUST still fire, or the notifier sees an
+// episode that never closes. A build that emitted the episode event only from
+// the per-agent recovery path (emitUsageLimitCleared) would pass every test
+// above and fail THIS one.
+func TestUsageLimitCoordinator_ReleaseNotRecoveryEmitsEpisodeEvent(t *testing.T) {
+	sink := &mailSink{}
+	c, h, es := newHeldCoordinator(sink.send)
+	now := fixedNow()()
+	closed := now.Add(90 * time.Minute)
+
+	c.OnHit("cat-mg-dead", "mg-dead", now)
+	h.fire() // episode outlives the hold-down: it is a genuine episode
+
+	// The agent exits while still flagged: the coordinator is released (OnClear),
+	// no per-agent clear atom precedes it. This empties the active set -> close.
+	c.OnClear("cat-mg-dead", closed)
+
+	if es.count() != 1 {
+		t.Fatalf("release-not-recovery close must emit exactly one episode event, got %d", es.count())
+	}
+	ev := es.at(0)
+	if ev.EventType != UsageLimitEpisodeClearedEvent {
+		t.Errorf("event_type = %q, want %q", ev.EventType, UsageLimitEpisodeClearedEvent)
+	}
+	roster, _ := ev.Details["roster"].([]string)
+	if len(roster) != 1 || roster[0] != "cat-mg-dead" {
+		t.Errorf("roster = %v, want [cat-mg-dead]", roster)
+	}
+	if got, want := ev.Details["closed_at"], closed.UTC().Format(time.RFC3339Nano); got != want {
+		t.Errorf("closed_at = %v, want %q", got, want)
+	}
+}
+
+// A flap is a NON-episode to the coordinator (it never outlived the hold-down),
+// so it emits neither a clear mail NOR a structured episode event. The event
+// must reflect the coordinator's own notion of an episode, not raw atom pairs.
+func TestUsageLimitCoordinator_FlapEmitsNoEpisodeEvent(t *testing.T) {
+	sink := &mailSink{}
+	c, _, es := newHeldCoordinator(sink.send)
+	now := fixedNow()()
+
+	c.OnHit("cat-flap", "mg-flap", now)
+	c.OnClear("cat-flap", now.Add(time.Second)) // closes inside the hold-down
+
+	if es.count() != 0 {
+		t.Fatalf("a flap must emit no episode event, got %d:\n%+v", es.count(), es.events)
+	}
+	if sink.count() != 0 {
+		t.Fatalf("a flap must emit no mail either, got %d", sink.count())
+	}
+}
+
+// Two sequential episodes get distinct episode_ids and non-leaking rosters.
+func TestUsageLimitCoordinator_DistinctEpisodeIDs(t *testing.T) {
+	sink := &mailSink{}
+	c, h, es := newHeldCoordinator(sink.send)
+	now := fixedNow()()
+
+	c.OnHit("cat-a", "", now)
+	h.fire()
+	c.OnClear("cat-a", now.Add(time.Hour))
+
+	c.OnHit("cat-b", "", now.Add(2*time.Hour))
+	h.fire()
+	c.OnClear("cat-b", now.Add(3*time.Hour))
+
+	if es.count() != 2 {
+		t.Fatalf("expected two episode events, got %d", es.count())
+	}
+	id0 := es.at(0).Details["episode_id"]
+	id1 := es.at(1).Details["episode_id"]
+	if id0 == id1 {
+		t.Errorf("sequential episodes must have distinct ids, both were %v", id0)
+	}
+	// Episode 2 must not carry episode 1's agent.
+	r1, _ := es.at(1).Details["roster"].([]string)
+	if len(r1) != 1 || r1[0] != "cat-b" {
+		t.Errorf("episode 2 roster = %v, want [cat-b]", r1)
 	}
 }
 
