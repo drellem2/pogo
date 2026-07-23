@@ -84,7 +84,7 @@ func (s *Scheduler) handleAck(w http.ResponseWriter, r *http.Request) {
 		agentName = r.URL.Query().Get("agent")
 	}
 
-	res, err := s.Ack(agentName, id, req.Token, time.Now())
+	res, err := s.Ack(agentName, id, req.Token, s.clock())
 	if err != nil {
 		switch {
 		case errors.Is(err, ErrScheduleNotFound):
@@ -134,7 +134,7 @@ func (s *Scheduler) handleList(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		entry, err := s.addFromRequest(req, time.Now())
+		entry, err := s.addFromRequest(req, s.clock())
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return

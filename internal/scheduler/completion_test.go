@@ -483,6 +483,13 @@ func TestAckHTTP(t *testing.T) {
 	mux := http.NewServeMux()
 	s.RegisterHandlers(mux)
 	base := time.Date(2026, 7, 22, 0, 0, 0, 0, time.UTC)
+	// Pin the handler's clock to the fixture instead of the wall clock. Without
+	// this the ack path (api.go handleAck) would compare the fire's age against
+	// time.Now(), so the fixed `base` above ages past AckStaleWindow a day after
+	// this test was written and the 200 assertion below rots into a 409. `base`
+	// is now an arbitrary instant, not a live calendar assumption — the test
+	// passes on any date it runs (mg-a35b).
+	s.SetClock(func() time.Time { return base })
 	addFiring(t, s, "pm-pogo", "sweep", base)
 	s.Tick(context.Background(), base)
 	e, _ := s.Get("pm-pogo", "sweep")
@@ -533,5 +540,53 @@ func TestAckHTTP(t *testing.T) {
 	}
 	if stats.StallThreshold != DefaultStallThreshold {
 		t.Errorf("StallThreshold = %d, want %d", stats.StallThreshold, DefaultStallThreshold)
+	}
+}
+
+// TestAckHTTPFreshnessWindow proves the ack freshness window (AckStaleWindow) is
+// enforced against the scheduler's injected clock, not the real calendar date.
+// The same fire fixture must ack 200 when "now" sits inside the window and 409
+// when "now" is deliberately advanced past it — and both assertions hold on ANY
+// date the suite runs, because the handler reads s.now() (which this test pins)
+// rather than time.Now(). This is the regression guard for the mg-a35b class:
+// the age that trips the 409 is constructed here by moving the clock, never by
+// the wall clock drifting past a hardcoded fixture.
+func TestAckHTTPFreshnessWindow(t *testing.T) {
+	s := newSchedulerForTest(t, &recorder{})
+	mux := http.NewServeMux()
+	s.RegisterHandlers(mux)
+
+	base := time.Date(2026, 7, 22, 0, 0, 0, 0, time.UTC)
+	now := base
+	s.SetClock(func() time.Time { return now })
+
+	post := func(id, agent, token string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("POST", "/scheduler/schedules/"+id+"/ack",
+			strings.NewReader(`{"agent":"`+agent+`","token":"`+token+`"}`))
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// Fire "fresh" at base, ack it one minute later — comfortably inside the
+	// 24h window regardless of what today's date is.
+	addFiring(t, s, "pm-pogo", "fresh", base)
+	s.Tick(context.Background(), base)
+	fresh, _ := s.Get("pm-pogo", "fresh")
+	now = base.Add(time.Minute)
+	if rec := post("fresh", "pm-pogo", fresh.PendingToken); rec.Code != http.StatusOK {
+		t.Fatalf("in-window ack = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+
+	// Fire "stale" at base, then advance the injected clock one minute past
+	// AckStaleWindow before acking. The token is valid; only its age is out of
+	// bounds, so the handler must return 409 — and it does so because we moved
+	// the clock, not because the machine's date changed.
+	addFiring(t, s, "pm-pogo", "stale", base)
+	s.Tick(context.Background(), base)
+	stale, _ := s.Get("pm-pogo", "stale")
+	now = base.Add(AckStaleWindow + time.Minute)
+	if rec := post("stale", "pm-pogo", stale.PendingToken); rec.Code != http.StatusConflict {
+		t.Errorf("aged-past-window ack = %d, want 409: %s", rec.Code, rec.Body.String())
 	}
 }

@@ -419,6 +419,15 @@ type Scheduler struct {
 	// Configurable so tests can pin it.
 	SkipWindow time.Duration
 
+	// now is the scheduler's notion of the current wall time. It is time.Now
+	// in production; the HTTP handlers read it (rather than calling time.Now
+	// directly) so a test can pin "now" relative to its fixture's base and the
+	// ack freshness window stops depending on the real calendar date. Without
+	// this seam a handler test that hardcodes a fire time rots the moment that
+	// fixture ages past AckStaleWindow — the same hardcoded-fact class as
+	// mg-2894/mg-4e12. Install a fixed clock with SetClock.
+	now func() time.Time
+
 	mu      sync.Mutex
 	entries map[entryKey]*Entry
 }
@@ -437,6 +446,7 @@ func New(path string, deliverer Deliverer) (*Scheduler, error) {
 		store:     st,
 		deliverer: deliverer,
 		logPath:   EventLogPath(path),
+		now:       time.Now,
 		entries:   make(map[entryKey]*Entry, len(loaded)),
 	}
 	for _, e := range loaded {
@@ -445,6 +455,30 @@ func New(path string, deliverer Deliverer) (*Scheduler, error) {
 		s.entries[entryKey{Agent: entry.Agent, ID: entry.ID}] = &entry
 	}
 	return s, nil
+}
+
+// SetClock overrides the scheduler's notion of "now" for the HTTP handlers.
+// Production never calls it (New defaults to time.Now); tests use it to pin the
+// wall clock to their fixture's base so time-relative handler logic — chiefly
+// the ack freshness window — is exercised against a controlled instant instead
+// of the real calendar date. A nil clock restores time.Now.
+func (s *Scheduler) SetClock(now func() time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if now == nil {
+		now = time.Now
+	}
+	s.now = now
+}
+
+// clock returns the current wall time from the installed clock, read under the
+// lock so it is safe against a concurrent SetClock. Handlers call this instead
+// of time.Now directly so the ack freshness window is testable.
+func (s *Scheduler) clock() time.Time {
+	s.mu.Lock()
+	now := s.now
+	s.mu.Unlock()
+	return now()
 }
 
 // SetLiveness installs the agent-liveness checker used to garbage-collect stale
