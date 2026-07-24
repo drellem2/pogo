@@ -71,10 +71,16 @@ func TestIsEphemeralPath(t *testing.T) {
 		t.Errorf("/private/tmp path should be ephemeral")
 	}
 
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip("no home dir")
-	}
+	// A synthetic home, NOT os.UserHomeDir(). isEphemeralPath is pure string
+	// work (plus gitgc.DefaultPolecatsDir, which derives from $HOME), so no
+	// such directory needs to exist — and reading the machine's real home made
+	// the assertions below depend on where that home happens to live. Once
+	// TestMain re-pointed HOME at a throwaway tree under the OS temp dir
+	// (mg-5336), every path built from it matched the tempRoots rule and the
+	// "nested inside a worktree is NOT ephemeral" case failed for a reason
+	// that has nothing to do with the polecats rule it exists to test.
+	home := "/Users/pogo-test-home"
+	t.Setenv("HOME", home)
 	polecatRoot := filepath.Join(home, ".pogo", "polecats", "d999")
 	if !isEphemeralPath(polecatRoot) {
 		t.Errorf("polecat worktree root %s should be ephemeral", polecatRoot)
