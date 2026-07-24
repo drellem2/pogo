@@ -604,6 +604,37 @@ outward-facing and stays human-gated.
 - **Arming.** The runner is skipped entirely when `gh` is not on PATH. Without
   it every lookup is indeterminate, and reporting an environment gap as a wall
   of findings would get the detector muted before the run that matters.
+- **Authentication (mg-03ea).** Being on PATH is not enough — a `gh` that runs
+  but cannot authenticate also returns indeterminate for every carrier. launchd
+  execs pogod directly, without a shell, so the daemon inherits an environment
+  with no `GH_TOKEN` and every lookup failed with "populate the GH_TOKEN
+  environment variable". `internal/ghtoken` repairs this at pogod startup, and
+  `pogo check-teardown` calls it too so the CLI works from cron as well as from
+  a terminal: when the environment has no token, a **user shell** is asked for
+  one (`zsh -c` sources `~/.zshenv` on every invocation, so the secret stays
+  where it already lives). The token is never written to a plist, a log, or an
+  error message — pogod logs only *where* the token came from. Sibling of
+  `internal/pathenv`: that one fixes children that cannot be **found** under
+  launchd, this one fixes children that run and cannot **authenticate**. The
+  value is read once at startup, so a rotated token needs a pogod restart; the
+  failure mode is a return to indeterminate, which is reported, never mistaken
+  for closed.
+
+  Because every unit test in the package injects its lookup, they all pass just
+  as happily when the real `gh` is unauthenticated. The guard against a silent
+  re-break is therefore a **live control** that calls the real `gh` under a
+  reproduction of launchd's minimal environment, against two issues whose state
+  is externally known, and keeps the *failing* arm permanently:
+
+  ```
+  POGO_GH_TEARDOWN_CONTROL=1 go test ./internal/ghteardown/ -run TeardownTokenControl -v
+  ```
+
+  The raw arm must report `89=indeterminate 91=indeterminate` (the bug, still
+  reproducible without the repair) and the repaired arm `89=closed 91=miss`. It
+  needs network and a credential, so it is opt-in rather than part of
+  `./test.sh`. A detector that only ever returns indeterminate must not be
+  trusted as passing — that is what this control exists to make impossible.
 
 ```toml
 [gh_teardown]

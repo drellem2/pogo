@@ -27,6 +27,7 @@ import (
 	"github.com/drellem2/pogo/internal/config"
 	"github.com/drellem2/pogo/internal/events"
 	"github.com/drellem2/pogo/internal/ghteardown"
+	"github.com/drellem2/pogo/internal/ghtoken"
 	"github.com/drellem2/pogo/internal/gitceiling"
 	"github.com/drellem2/pogo/internal/gitgc"
 	"github.com/drellem2/pogo/internal/memcheck"
@@ -842,6 +843,16 @@ Exit status is 0 when nothing is actionable, 1 when any miss or indeterminate
 carrier is found (so it can gate a schedule or CI step).`,
 		Args: cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
+			// Every verdict this command renders comes from a `gh` call, so an
+			// unauthenticated gh turns the whole report into indeterminates.
+			// In an authed shell this is a no-op; run from launchd, cron, or any
+			// other minimal environment it is the difference between an answer
+			// and a blind one (mg-03ea). Warned, not fatal — gh can also be
+			// authenticated by `gh auth login`, which this cannot see.
+			if res := ghtoken.Ensure(); !res.OK() {
+				fmt.Fprintf(os.Stderr, "warning: %s\n", res)
+			}
+
 			src := ghteardown.MGSource{IncludeArchived: teardownArchived}
 			carriers, err := src.Carriers()
 			if err != nil {

@@ -32,6 +32,7 @@ import (
 	"github.com/drellem2/pogo/internal/driftwatch"
 	"github.com/drellem2/pogo/internal/driver"
 	"github.com/drellem2/pogo/internal/ghteardown"
+	"github.com/drellem2/pogo/internal/ghtoken"
 	"github.com/drellem2/pogo/internal/gitceiling"
 	"github.com/drellem2/pogo/internal/health"
 	"github.com/drellem2/pogo/internal/heartbeat"
@@ -996,6 +997,15 @@ Flags:
 	if err := pathenv.Ensure(); err != nil {
 		fmt.Printf("Warning: could not augment PATH: %v\n", err)
 	}
+
+	// Repair GH_TOKEN for the same reason and in the same breath (mg-03ea).
+	// pathenv fixes children that cannot be FOUND under launchd's minimal env;
+	// this fixes children that are found, run, and cannot AUTHENTICATE. Without
+	// it every `gh` call pogod makes exits with "populate the GH_TOKEN
+	// environment variable", which is why the gh-issue teardown detector below
+	// reported every carrier as indeterminate on every run. Logged
+	// existence-only: the value never reaches the log.
+	log.Printf("pogod: %s", ghtoken.Ensure())
 
 	// Bound every git repository lookup at POGO_HOME, before anything shells out
 	// to git or spawns an agent. Every repo pogod manages (polecats/*,
