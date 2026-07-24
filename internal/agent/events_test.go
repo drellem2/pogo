@@ -219,6 +219,9 @@ func TestEmitsAgentCrashedOnNonZeroExit(t *testing.T) {
 }
 
 func TestEmitsAgentRestartedOnRespawn(t *testing.T) {
+	// The event under test only exists if the respawn happens, and Respawn's
+	// park backstop can veto it from the host's live state dir.
+	isolateParkState(t)
 	path := useTempEventLog(t)
 	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {

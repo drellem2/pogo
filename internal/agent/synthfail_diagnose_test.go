@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -125,25 +124,16 @@ func respawnableAgent(name string) *Agent {
 	return &Agent{Name: name, Type: TypeCrew, RestartOnCrash: true, Dir: "/tmp/agents/" + name}
 }
 
-// isolateParkState re-points HOME (and POGO_HOME under it) at a throwaway tree
-// so the respawn gate's park check reads a clean state dir.
-//
-// The gate's FIRST guard is Agent.ShouldRespawn — RestartOnCrash && !IsParked
-// — and IsParked stats $POGO_HOME/agents/<name>/.parked, falling back to
-// $HOME/.pogo. The tests below name real crew agents, so without this they
-// read the developer's LIVE park flags: parking pm-dealdesk for real turned
+// The tests below call isolateParkState (testmain_test.go) because the respawn
+// gate's FIRST guard is Agent.ShouldRespawn — RestartOnCrash && !IsParked —
+// and they name real crew agents. Without it they read the developer's LIVE
+// park flags: parking pm-dealdesk for real turned
 // TestShouldRespawnAgent_WedgedAgentStillRespawns red on an unchanged tree,
 // and it failed with "refused to respawn a genuinely wedged agent" while the
-// scanner had never run at all. The scannerCalls assertion in each test is
-// what turns that short-circuit from a misleading message into a visible one:
-// a gate that never reached the scanner has not exercised the fixture verdict,
-// whatever its boolean answer happens to be.
-func isolateParkState(t *testing.T) {
-	t.Helper()
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("POGO_HOME", filepath.Join(home, ".pogo"))
-}
+// scanner had never run at all (mg-6092). The scannerCalls assertion in each
+// test is what turns that short-circuit from a misleading message into a
+// visible one: a gate that never reached the scanner has not exercised the
+// fixture verdict, whatever its boolean answer happens to be.
 
 func TestShouldRespawnAgent_SuppressedWhenFailingEveryTurn(t *testing.T) {
 	isolateParkState(t)

@@ -328,6 +328,10 @@ func TestMayorStartSpawnPolecat(t *testing.T) {
 // TestCrewRestartOnCrash verifies that crew agents (like the mayor) are
 // restarted when they exit unexpectedly.
 func TestCrewRestartOnCrash(t *testing.T) {
+	// A restart contract asserted against the host's live park flags is not a
+	// contract: a stray ~/.pogo/agents/crasher/.parked makes Respawn refuse and
+	// this test reports a broken supervisor that is working fine (mg-e8e7).
+	isolateParkState(t)
 	socketDir, err := os.MkdirTemp("/tmp", "pogo-restart-sock-")
 	if err != nil {
 		t.Fatal(err)
@@ -448,6 +452,11 @@ func TestRestartOnCrashFlagDrivesBranching(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			// Both directions of this table need a clean park tree, and the
+			// "stays down" rows need it most: a park flag also makes an agent
+			// stay down, so without isolation those two rows can pass while the
+			// RestartOnCrash branch they exist to pin is broken (mg-e8e7).
+			isolateParkState(t)
 			socketDir, err := os.MkdirTemp("/tmp", "pogo-roc-sock-")
 			if err != nil {
 				t.Fatal(err)
@@ -530,6 +539,9 @@ func TestRestartOnCrashFlagDrivesBranching(t *testing.T) {
 // restart_on_crash agents in the registry so the supervisor can bring
 // them back per the always-on contract.
 func TestStopRespawnsRestartOnCrashAgent(t *testing.T) {
+	// Stop's own branch is `RestartOnCrash && !IsParked(name)`, so the host's
+	// park state decides which side of mg-dbf4's fix this test exercises.
+	isolateParkState(t)
 	socketDir, err := os.MkdirTemp("/tmp", "pogo-stop-restart-sock-")
 	if err != nil {
 		t.Fatal(err)
