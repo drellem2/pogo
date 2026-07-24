@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -124,7 +125,28 @@ func respawnableAgent(name string) *Agent {
 	return &Agent{Name: name, Type: TypeCrew, RestartOnCrash: true, Dir: "/tmp/agents/" + name}
 }
 
+// isolateParkState re-points HOME (and POGO_HOME under it) at a throwaway tree
+// so the respawn gate's park check reads a clean state dir.
+//
+// The gate's FIRST guard is Agent.ShouldRespawn — RestartOnCrash && !IsParked
+// — and IsParked stats $POGO_HOME/agents/<name>/.parked, falling back to
+// $HOME/.pogo. The tests below name real crew agents, so without this they
+// read the developer's LIVE park flags: parking pm-dealdesk for real turned
+// TestShouldRespawnAgent_WedgedAgentStillRespawns red on an unchanged tree,
+// and it failed with "refused to respawn a genuinely wedged agent" while the
+// scanner had never run at all. The scannerCalls assertion in each test is
+// what turns that short-circuit from a misleading message into a visible one:
+// a gate that never reached the scanner has not exercised the fixture verdict,
+// whatever its boolean answer happens to be.
+func isolateParkState(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("POGO_HOME", filepath.Join(home, ".pogo"))
+}
+
 func TestShouldRespawnAgent_SuppressedWhenFailingEveryTurn(t *testing.T) {
+	isolateParkState(t)
 	r := &Registry{}
 	scanner := &fixedScanner{rep: failingReport()}
 	r.SetTranscriptScanner(scanner)
@@ -144,11 +166,19 @@ func TestShouldRespawnAgent_SuppressedWhenFailingEveryTurn(t *testing.T) {
 	if by.Reason != synthfail.ReasonAuthFailed {
 		t.Errorf("suppression reason = %q, want %q — a silent suppression is indistinguishable from a missing one", by.Reason, synthfail.ReasonAuthFailed)
 	}
+	// Suppressed for the RIGHT reason: the transcript was actually read. A
+	// short-circuit on a stray park flag also returns respawn=false, and would
+	// look identical here without this.
+	if scanner.calls != 1 {
+		t.Errorf("scanner calls = %d, want 1: the suppression must come from the transcript verdict, not from a guard that ran before it", scanner.calls)
+	}
 }
 
 func TestShouldRespawnAgent_WedgedAgentStillRespawns(t *testing.T) {
+	isolateParkState(t)
 	r := &Registry{}
-	r.SetTranscriptScanner(&fixedScanner{rep: synthfail.Report{State: synthfail.StateQuiet, Files: 2}})
+	scanner := &fixedScanner{rep: synthfail.Report{State: synthfail.StateQuiet, Files: 2}}
+	r.SetTranscriptScanner(scanner)
 
 	respawn, by := r.ShouldRespawnAgent(respawnableAgent("pm-dealdesk"))
 
@@ -157,6 +187,13 @@ func TestShouldRespawnAgent_WedgedAgentStillRespawns(t *testing.T) {
 	}
 	if by.Reason != "" {
 		t.Errorf("reported a suppression reason (%q) for an agent that was not suppressed", by.Reason)
+	}
+	// The yes has to come from the SCANNER. Before isolateParkState this test
+	// answered no with scanner.calls == 0, because the host had a real .parked
+	// flag for pm-dealdesk and the gate never got past ShouldRespawn — the
+	// StateQuiet fixture was never on the code path the failure blamed.
+	if scanner.calls != 1 {
+		t.Errorf("scanner calls = %d, want 1: the fixture verdict never reached the gate, so this test proved nothing about StateQuiet", scanner.calls)
 	}
 }
 
@@ -171,6 +208,7 @@ func TestShouldRespawnAgent_DegradesWithoutEvidence(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			isolateParkState(t)
 			r := &Registry{}
 			if tc.scanner != nil {
 				r.SetTranscriptScanner(tc.scanner)
@@ -186,6 +224,11 @@ func TestShouldRespawnAgent_DegradesWithoutEvidence(t *testing.T) {
 }
 
 func TestShouldRespawnAgent_DoesNotOverrideParkOrRestartOnCrash(t *testing.T) {
+	// Isolated for the same reason as its siblings, and here it also keeps the
+	// scanner.calls == 0 assertion honest: a stray park flag short-circuits the
+	// gate too, so the test would pass without RestartOnCrash=false ever being
+	// the thing that stopped it.
+	isolateParkState(t)
 	r := &Registry{}
 	// A scanner that would suppress, to prove the gate is ADDITIVE: it can only
 	// ever turn a yes into a no, never a no into a yes.
