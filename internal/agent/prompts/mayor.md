@@ -235,15 +235,16 @@ Look for:
   pogo agent stop <name>
   echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] {{.Coordinator}} pogo schedule rm mail-check-<work-item-id> --agent <name> (cleanup-reason: dead)" >> ~/.pogo/agents/{{.Coordinator}}/sweep.log
   pogo schedule rm mail-check-<work-item-id>   # see {{.Worker}} template step 2
-  mg unclaim <work-item-id>
+  mg unclaim <work-item-id>                    # usually already done by the stop; see below
   ```
+  Since mg-fb13, `pogo agent stop` releases the stopped {{.Worker}}'s claim itself, so the item is normally back in `available/` before you get here. Run the `mg unclaim` anyway: it is idempotent, and "not claimed, so there is nothing to release" is the confirmation you want. If it instead reports the item as still claimed and the release fails, that is the `work_item_claim_release_failed` case — the item is stranded under a dead pid and nothing else will recover it.
 - **Dead {{.Worker}}s**: Exited with errors. Their work items may need re-dispatch. Log the removal to your sweep.log first (mg-8e5d cleanup-overextension investigation):
   ```bash
   echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] {{.Coordinator}} pogo schedule rm mail-check-<work-item-id> --agent <name> (cleanup-reason: dead)" >> ~/.pogo/agents/{{.Coordinator}}/sweep.log
   pogo schedule rm mail-check-<work-item-id>   # see {{.Worker}} template step 2
   mg unclaim <work-item-id>
   ```
-  `mg unclaim <id>` returns the dead agent's work item to available status; `pogo schedule rm` clears the orphan schedule so pogod doesn't keep delivering mail-check nudges to a non-existent agent.
+  `mg unclaim <id>` returns the dead agent's work item to available status — a no-op when `pogo agent stop` already released it (mg-fb13), but the check costs nothing and a dead agent you never stopped through pogod still needs it; `pogo schedule rm` clears the orphan schedule so pogod doesn't keep delivering mail-check nudges to a non-existent agent.
 
 - **Refinery queue**: Check for pending merges that may be stuck or stalled:
   ```bash
@@ -593,11 +594,11 @@ When an agent seems stuck, follow this process:
    - Second: check recent output with `pogo agent output <name>` — look for error messages or loops.
    - Third: stop the agent and re-dispatch the work item with retry context:
      ```bash
-     pogo agent stop <name>
-     mg unclaim <work-item-id>
+     pogo agent stop <name>          # also releases the {{.Worker}}'s claim (mg-fb13)
+     mg unclaim <work-item-id>       # idempotent confirmation; expect "nothing to release"
      ```
 
-4. **For dead agents**: The OS process is gone but the agent is still registered. This can happen after OOM kills or crashes. Stop the agent to clean up the registration, then unclaim the work item.
+4. **For dead agents**: The OS process is gone but the agent is still registered. This can happen after OOM kills or crashes. Stop the agent to clean up the registration — that releases its claim too — and confirm with `mg unclaim <work-item-id>` before re-dispatching.
 
 ## What You Don't Do
 

@@ -293,6 +293,47 @@ An agent marked a work item done via `mg done`.
 {"schema_version":1,"timestamp":"2026-04-25T10:22:45.000000000Z","event_type":"work_item_completed","agent":"cat-mg-0241","work_item_id":"mg-0241","details":{"result":{"branch":"polecat-mg-0241"}}}
 ```
 
+#### `work_item_claim_released`
+
+pogod released a stopped polecat's claim, returning its work item to
+`available/` (mg-fb13). Emitted by the agent registry, not by `mg` — the two
+events below are the only ones in this section whose actor is the daemon rather
+than the CLI, and `agent` is the stopped polecat's identity, not pogod's.
+
+Emitted only when a claim was actually held at stop time, so it marks work that
+was interrupted rather than finished. A polecat stopped after its own `mg done`
+(or after pogod recorded done on its behalf at merge — see `refinery_merged`)
+holds no claim and emits nothing here. Additive — no `schema_version` bump.
+
+- **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent`, `work_item_id`, `details`
+- **`details` fields:**
+  - `pid` (int, required): pid of the stopped polecat — the pid the claim would otherwise have been stranded under
+  - `reason` (string, required): why the claim was released. `"agent_stopped"` is the only v1 value.
+
+```json
+{"schema_version":1,"timestamp":"2026-07-26T13:40:12.000000000Z","event_type":"work_item_claim_released","agent":"cat-mg-0241","work_item_id":"mg-0241","repo":"/Users/daniel/dev/pogo","details":{"pid":48213,"reason":"agent_stopped"}}
+```
+
+#### `work_item_claim_release_failed`
+
+The release above was attempted and failed, so the work item **is** stranded in
+`claimed/` under a pid that no longer exists. Nothing downstream will recover it
+on its own: claimed items are never dispatched, and the stall watcher only scans
+`available/`. Treat this as the page-worthy case and run `mg unclaim <id>`.
+
+The stop itself still succeeded — the process is already gone by the time the
+release runs, so a failure here does not fail the teardown. Additive — no
+`schema_version` bump.
+
+- **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent`, `work_item_id`, `details`
+- **`details` fields:**
+  - `pid` (int, required): pid of the stopped polecat
+  - `error` (string, required): the failure, including `mg`'s own message when it produced one
+
+```json
+{"schema_version":1,"timestamp":"2026-07-26T13:40:12.000000000Z","event_type":"work_item_claim_release_failed","agent":"cat-mg-0241","work_item_id":"mg-0241","details":{"pid":48213,"error":"mg unclaim mg-0241: permission denied"}}
+```
+
 ### Inter-agent communication
 
 #### `mail_sent`

@@ -399,6 +399,12 @@ type Registry struct {
 	startVerifyDelay       time.Duration
 	startVerifyMaxAttempts int
 
+	// claimReleaser returns a stopped polecat's mg work item to available/ so a
+	// mid-flight stop does not strand the claim under a dead pid (mg-fb13). Nil
+	// means the default MGClaimReleaser — the release happens without any
+	// wiring, so a caller that never calls SetClaimReleaser still gets it.
+	claimReleaser ClaimReleaser
+
 	// draining, when true, makes handleSpawnPolecat refuse to dispatch new
 	// polecats — the drain half of the pogo self-deploy path (mg-cae1 /
 	// mg-6afa). Only pogod knows its children and controls dispatch, so the
@@ -1041,6 +1047,11 @@ func (r *Registry) Remove(name string) {
 // For agents with RestartOnCrash=false — and for parked agents, whose
 // respawn the supervisor will refuse — Stop() owns teardown and removes
 // the agent from the registry once the process is gone.
+//
+// On the teardown paths (and only those) a polecat's mg work item is unclaimed,
+// so a polecat stopped MID-FLIGHT does not strand its claim under a dead pid
+// (mg-fb13). The respawn path above deliberately keeps the claim: that agent is
+// coming back on the same item. See releasePolecatClaim.
 func (r *Registry) Stop(name string, timeout time.Duration) error {
 	agent := r.Get(name)
 	if agent == nil {
@@ -1057,6 +1068,10 @@ func (r *Registry) Stop(name string, timeout time.Duration) error {
 	if !agent.alive() {
 		agent.Cleanup()
 		r.Remove(name)
+		// The reported mg-fb13 symptom was exactly this state — a work item
+		// claimed by a pid that no longer existed — so clearing the stale
+		// registration has to clear the stale claim with it.
+		r.releasePolecatClaim(agent)
 		log.Printf("agent %s: stopped (cleared stale registration; process already dead)", name)
 		return nil
 	}
@@ -1098,6 +1113,11 @@ func (r *Registry) Stop(name string, timeout time.Duration) error {
 
 	agent.Cleanup()
 	r.Remove(name)
+	// Release the work-item claim last, once teardown is committed. A polecat
+	// stopped mid-flight — before it reached `mg done` — would otherwise leave its
+	// claim behind under a dead pid, invisible to dispatch and to stall-watch
+	// (mg-fb13). Scoped to this agent's own WorkItemID: never a sweep.
+	r.releasePolecatClaim(agent)
 	log.Printf("agent %s: stopped", name)
 	return nil
 }
