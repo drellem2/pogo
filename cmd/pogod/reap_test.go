@@ -297,6 +297,107 @@ func TestDeferredBackstop_FireAfterExitIsNoop(t *testing.T) {
 	}
 }
 
+// TestDeferredBackstop_CompletedItemIsReapedWithoutEscalation covers mg-7746's
+// consequence for PR-flow polecats: they finish their flow, call `mg done`, and
+// then STAY ALIVE because their protocol tells them to wait for the mayor. At
+// the deadline the process is still there, but the work is finished — reap it
+// to free the slot, and do NOT report it as a polecat that never completed.
+func TestDeferredBackstop_CompletedItemIsReapedWithoutEscalation(t *testing.T) {
+	reg := &fakeReaper{agents: map[string]*agent.Agent{
+		"1234": {Name: "1234", WorkItemID: "mg-1234", Type: agent.TypePolecat},
+	}}
+	var escalations []string
+	backstop, fire := newTestBackstop(reg, &escalations)
+	var probed string
+	backstop.workItemDone = func(id string) (bool, error) { probed = id; return true, nil }
+
+	mr := &refinery.MergeRequest{ID: "mr-42", Branch: "polecat-mg-1234", Author: "mg-1234", TargetRef: "integ", PRFlow: true}
+	reapMergedPolecat(reg, mr, func(string, string) error { return nil }, backstop)
+	fire()
+
+	if probed != "mg-1234" {
+		t.Errorf("expected the backstop to probe work item mg-1234, got %q", probed)
+	}
+	if len(reg.stopped) != 1 || reg.stopped[0] != "1234" {
+		t.Errorf("a completed-but-lingering polecat must still be reaped to free its slot, got %v", reg.stopped)
+	}
+	if len(escalations) != 0 {
+		t.Errorf("no escalation for a polecat whose work item is done, got %v", escalations)
+	}
+}
+
+// TestDeferredBackstop_ProbeErrorEscalatesConservatively: an unreadable work
+// item is "unknown", not "finished". The escalation must still go out.
+func TestDeferredBackstop_ProbeErrorEscalatesConservatively(t *testing.T) {
+	reg := &fakeReaper{agents: map[string]*agent.Agent{
+		"1234": {Name: "1234", WorkItemID: "mg-1234", Type: agent.TypePolecat},
+	}}
+	var escalations []string
+	backstop, fire := newTestBackstop(reg, &escalations)
+	backstop.workItemDone = func(string) (bool, error) { return false, errors.New("mg unavailable") }
+
+	mr := &refinery.MergeRequest{ID: "mr-42", Branch: "polecat-mg-1234", Author: "mg-1234", TargetRef: "integ", PRFlow: true}
+	reapMergedPolecat(reg, mr, func(string, string) error { return nil }, backstop)
+	fire()
+
+	if len(escalations) != 1 || escalations[0] != "mg-1234" {
+		t.Errorf("expected a conservative escalation when the item state is unknown, got %v", escalations)
+	}
+}
+
+// TestReapMergedPolecat_PRFlowSkipsAutoDone is the mg-7746 unit-level guard:
+// PRFlow alone (no --defer-done) must be enough to keep the polecat alive and
+// the work item claimed.
+func TestReapMergedPolecat_PRFlowSkipsAutoDone(t *testing.T) {
+	reg := &fakeReaper{agents: map[string]*agent.Agent{
+		"1234": {Name: "1234", WorkItemID: "mg-1234", Type: agent.TypePolecat},
+	}}
+	var escalations []string
+	backstop, _ := newTestBackstop(reg, &escalations)
+
+	completeCalled := false
+	mr := &refinery.MergeRequest{
+		ID: "mr-42", Branch: "polecat-mg-1234", Author: "mg-1234",
+		TargetRef: "daed-101-integration", PRFlow: true,
+	}
+	reapMergedPolecat(reg, mr, func(string, string) error { completeCalled = true; return nil }, backstop)
+
+	if completeCalled {
+		t.Error("PR flow: mg done must NOT be called — completion is the PR, not the integration merge")
+	}
+	if len(reg.stopped) != 0 {
+		t.Errorf("PR flow: polecat must NOT be stopped before it opens the PR, got %v", reg.stopped)
+	}
+	backstop.mu.Lock()
+	_, armed := backstop.timers["1234"]
+	backstop.mu.Unlock()
+	if !armed {
+		t.Error("PR flow: backstop must be armed so a stalled polecat cannot hold its slot forever")
+	}
+}
+
+// TestReapMergedPolecat_ResultRecordsTargetAndOmitsPRFlow pins the sidecar
+// shape the mayor's classification reads.
+func TestReapMergedPolecat_ResultRecordsTargetAndOmitsPRFlow(t *testing.T) {
+	reg := &fakeReaper{agents: map[string]*agent.Agent{
+		"1234": {Name: "1234", WorkItemID: "mg-1234", Type: agent.TypePolecat},
+	}}
+	var got string
+	mr := &refinery.MergeRequest{ID: "mr-42", Branch: "polecat-mg-1234", Author: "mg-1234", TargetRef: "main"}
+	reapMergedPolecat(reg, mr, func(_, resultJSON string) error { got = resultJSON; return nil }, nil)
+
+	var result map[string]any
+	if err := json.Unmarshal([]byte(got), &result); err != nil {
+		t.Fatalf("result sidecar is not valid JSON: %v (%q)", err, got)
+	}
+	if result["target"] != "main" {
+		t.Errorf("expected target=main in the result sidecar, got %q", got)
+	}
+	if _, ok := result["pr_flow"]; ok {
+		t.Errorf("pr_flow must be absent on a default-branch merge, got %q", got)
+	}
+}
+
 // TestDeferredBackstop_NilIsSafe guards the nil-backstop path used by the
 // non-defer reap tests and any pogod build where the backstop is not wired.
 func TestDeferredBackstop_NilIsSafe(t *testing.T) {

@@ -357,6 +357,35 @@ func CompleteMGWorkItem(id, resultJSON string) error {
 	return nil
 }
 
+// MGWorkItemDone reports whether a work item has reached a terminal state
+// (done or archived). pogod's defer-done backstop uses it to tell a polecat
+// that finished its post-merge flow but is still alive — the polecat protocol
+// tells it to stay up until the mayor stops it — from one that genuinely never
+// completed. Without the distinction, every PR-flow polecat would draw a
+// "never called mg done" escalation 15 minutes after merging (mg-7746).
+//
+// An unparseable or failing lookup returns an error; callers should treat that
+// as "unknown" and fall back to the conservative path rather than assuming
+// completion.
+func MGWorkItemDone(id string) (bool, error) {
+	if id == "" {
+		return false, fmt.Errorf("work item id is required")
+	}
+	cmd := execCommand("mg", "show", id, "--json")
+	cmd.Stderr = nil
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return false, fmt.Errorf("mg show %s failed: %s (%w)", id, strings.TrimSpace(string(out)), err)
+	}
+	var item struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(out, &item); err != nil {
+		return false, fmt.Errorf("mg show %s: unparseable JSON: %w", id, err)
+	}
+	return item.Status == "done" || item.Status == "archived", nil
+}
+
 // execCommand is a variable for testability.
 var execCommand = execCommandFunc
 
