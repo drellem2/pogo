@@ -1921,6 +1921,31 @@ func (a *Agent) handleAttach(conn net.Conn) {
 		a.attachMu.Unlock()
 	}()
 
+	// Close the connection when the agent process goes away, so an attached
+	// user is detached at the moment the agent dies rather than being left
+	// staring at a frozen screen.
+	//
+	// Without this the socket stays open forever: Cleanup closes the PTY master
+	// and retires the listener but never touches established attach conns, and
+	// readAttachInput below is parked in a read that nothing wakes. The user
+	// only discovers the agent is gone on their next keystroke, which fails the
+	// master.Write below and drops the connection then — observed directly in
+	// TestAttachConnClosesWhenAgentExits. That is the detach half of mg-9b5b:
+	// come back after a long attach, touch a key (or merely refocus the window,
+	// which with focus reporting armed *is* a keystroke: `\x1b[I`), and you are
+	// detached with no explanation. Crew agents respawn and polecats are stopped
+	// on merge, so the longer the attach the likelier the agent underneath it
+	// has already been replaced.
+	connDone := make(chan struct{})
+	defer close(connDone)
+	go func() {
+		select {
+		case <-a.done:
+			conn.Close()
+		case <-connDone:
+		}
+	}()
+
 	// Read input from conn and forward to PTY master.
 	// New clients send a leading FrameTypeResize byte to enter framed mode;
 	// legacy clients send raw bytes. See attach_proto.go for the wire format.

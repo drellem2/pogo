@@ -1208,7 +1208,13 @@ adds are keyed on (agent, id), so nothing stacks duplicates.`,
 		Short: "Attach terminal to a running agent",
 		Long: `Connect your terminal to a running agent's PTY via its unix domain socket.
 The agent's output streams to your terminal and your input goes to the agent.
-Detach with Ctrl-\ to leave the agent running and restore your terminal.`,
+Detach with Ctrl-\ to leave the agent running and restore your terminal.
+
+Detaching restores both your terminal's input modes and any display modes the
+agent's TUI turned on (alternate screen, mouse and focus reporting, cursor
+visibility), so the shell prompt you return to is clean. If the agent exits or
+is restarted while you are attached, the attach ends on its own rather than
+leaving you on a frozen screen.`,
 		Args: cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			info, err := client.GetAgent(args[0])
@@ -1219,6 +1225,10 @@ Detach with Ctrl-\ to leave the agent running and restore your terminal.`,
 			if err := client.AttachAgent(info.SocketPath); err != nil {
 				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
 			}
+			// Say so explicitly. A detach can be the user's Ctrl-\ or the agent
+			// going away underneath them (respawn, stop); silence made the
+			// second case read as "my terminal broke" (mg-9b5b).
+			fmt.Printf("Detached from agent %s.\n", info.Name)
 		},
 	}
 

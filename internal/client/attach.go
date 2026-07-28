@@ -25,6 +25,28 @@ import (
 // a stray Ctrl-\ into the agent's TUI and leave the user stuck attached).
 const detachByte = 0x1c
 
+// attachIO is the terminal AttachAgent drives. Production wiring is the
+// process's real stdin/stdout plus golang.org/x/term; tests substitute pipes
+// and stubs so the attach path — including the detach-time terminal restore —
+// can be exercised end to end without a controlling tty.
+type attachIO struct {
+	in      *os.File
+	out     io.Writer
+	makeRaw func(fd int) (*term.State, error)
+	restore func(fd int, st *term.State) error
+	getSize func(fd int) (cols, rows int, err error)
+}
+
+func stdAttachIO() attachIO {
+	return attachIO{
+		in:      os.Stdin,
+		out:     os.Stdout,
+		makeRaw: term.MakeRaw,
+		restore: term.Restore,
+		getSize: term.GetSize,
+	}
+}
+
 // AttachAgent connects the current terminal to a running agent's PTY
 // via its unix domain socket. Returns when the connection closes or
 // the user presses the detach key (Ctrl-\); see detachByte.
@@ -35,18 +57,22 @@ const detachByte = 0x1c
 // mode, after which input bytes are wrapped in data frames and
 // SIGWINCH-triggered resizes ride the same channel.
 func AttachAgent(socketPath string) error {
+	return attachAgent(socketPath, stdAttachIO())
+}
+
+func attachAgent(socketPath string, tio attachIO) error {
 	conn, err := net.Dial("unix", socketPath)
 	if err != nil {
 		return fmt.Errorf("connect to agent socket: %w", err)
 	}
 	defer conn.Close()
 
-	stdinFd := int(os.Stdin.Fd())
-	oldState, err := term.MakeRaw(stdinFd)
+	stdinFd := int(tio.in.Fd())
+	oldState, err := tio.makeRaw(stdinFd)
 	if err != nil {
 		return fmt.Errorf("set raw mode: %w", err)
 	}
-	defer term.Restore(stdinFd, oldState)
+	defer tio.restore(stdinFd, oldState)
 
 	// Serialize writes to conn — stdin forwarding and SIGWINCH propagation
 	// run in separate goroutines and must not interleave bytes inside a frame.
@@ -65,7 +91,7 @@ func AttachAgent(socketPath string) error {
 	// still send the frame, with 0×0 dimensions: the server treats 0×0 as
 	// "size unknown — keep the current winsize", so framed mode is
 	// established unambiguously and the agent keeps its spawn-time default.
-	cols, rows, gerr := term.GetSize(stdinFd)
+	cols, rows, gerr := tio.getSize(stdinFd)
 	if gerr != nil {
 		cols, rows = 0, 0
 	}
@@ -84,7 +110,7 @@ func AttachAgent(socketPath string) error {
 	go func() {
 		defer func() { done <- struct{}{} }()
 		for range sigCh {
-			cols, rows, err := term.GetSize(stdinFd)
+			cols, rows, err := tio.getSize(stdinFd)
 			if err != nil {
 				continue
 			}
@@ -102,7 +128,7 @@ func AttachAgent(socketPath string) error {
 		defer func() { done <- struct{}{} }()
 		buf := make([]byte, 4096)
 		for {
-			n, err := os.Stdin.Read(buf)
+			n, err := tio.in.Read(buf)
 			if n > 0 {
 				forward, detach := splitDetach(buf[:n])
 				if len(forward) > 0 {
@@ -120,13 +146,37 @@ func AttachAgent(socketPath string) error {
 		}
 	}()
 
-	// conn → stdout (raw PTY output, no framing on this direction)
+	// conn → stdout (raw PTY output, no framing on this direction).
+	//
+	// The same bytes are teed into termState, which watches for the DEC private
+	// modes the agent's TUI turns on (alt screen, mouse, focus reporting, …) so
+	// the detach below can turn them back off. Nothing is filtered on the way
+	// through: the agent's output must reach the terminal byte-for-byte or its
+	// TUI renders wrong.
+	tstate := newTermState()
+	outDone := make(chan struct{})
 	go func() {
+		defer close(outDone)
 		defer func() { done <- struct{}{} }()
-		io.Copy(os.Stdout, conn)
+		io.Copy(io.MultiWriter(tio.out, tstate), conn)
 	}()
 
 	<-done
+
+	// Stop the output pump before restoring. Detach and PTY output race: bytes
+	// that land after the restore sequence would re-arm the very modes we just
+	// cleared, and a half-written escape sequence flushed after it would be the
+	// stray control characters this fix exists to prevent. Closing the conn
+	// unblocks the copy; the deferred Close is left in place for the early
+	// error returns above.
+	conn.Close()
+	<-outDone
+
+	// Hand the terminal back the way the agent's TUI would have on a clean
+	// exit. term.Restore (deferred above) only puts termios back — it cannot
+	// touch emulator-side state, which is what leaves control characters in the
+	// shell prompt after a detach. See termstate.go.
+	tio.out.Write(tstate.restoreSequence())
 	return nil
 }
 
