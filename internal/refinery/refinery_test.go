@@ -2160,3 +2160,157 @@ func runOut(t *testing.T, dir string, name string, args ...string) string {
 	}
 	return string(out)
 }
+
+// --- PR-flow classification (mg-7746) ---
+
+// TestSubmitDerivesPRFlowFromTarget is the submit-side half of mg-7746: the
+// refinery must work out for itself whether a merge target is the repo's
+// default branch or an integration branch. Three separate work items merged,
+// were marked done, and left no PR because the distinction depended on the
+// submitter remembering a flag — so it is derived here, not requested.
+func TestSubmitDerivesPRFlowFromTarget(t *testing.T) {
+	originDir := initBareOrigin(t, "main")
+	// Carve an integration branch off main, as a --branch dispatch does.
+	run(t, originDir, "git", "branch", "daed-101-integration", "main")
+
+	statePath := filepath.Join(t.TempDir(), "refinery.json")
+	r, err := New(Config{
+		Enabled:      true,
+		PollInterval: time.Hour,
+		WorktreeDir:  t.TempDir(),
+		StatePath:    statePath,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	integID, err := r.Submit(MergeRequest{
+		RepoPath:  originDir,
+		Branch:    "polecat-mg-1234",
+		TargetRef: "daed-101-integration",
+		Author:    "mg-1234",
+	})
+	if err != nil {
+		t.Fatalf("submit integration-branch MR: %v", err)
+	}
+	if got := r.Get(integID); got == nil || !got.PRFlow {
+		t.Fatalf("expected PRFlow=true for a target that is not the default branch, got %+v", got)
+	}
+
+	defaultID, err := r.Submit(MergeRequest{
+		RepoPath:  originDir,
+		Branch:    "polecat-mg-5678",
+		TargetRef: "main",
+		Author:    "mg-5678",
+	})
+	if err != nil {
+		t.Fatalf("submit default-branch MR: %v", err)
+	}
+	if got := r.Get(defaultID); got == nil || got.PRFlow {
+		t.Fatalf("expected PRFlow=false for a merge onto the default branch, got %+v", got)
+	}
+
+	// PRFlow must round-trip through the state file, or a pogod restart
+	// between submit and merge would resurrect the original bug.
+	r2, err := New(Config{
+		Enabled:      true,
+		PollInterval: time.Hour,
+		WorktreeDir:  t.TempDir(),
+		StatePath:    statePath,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := r2.Get(integID); got == nil || !got.PRFlow {
+		t.Fatalf("expected PRFlow=true to survive a restart, got %+v", got)
+	}
+	if got := r2.Get(defaultID); got == nil || got.PRFlow {
+		t.Fatalf("expected PRFlow=false to survive a restart, got %+v", got)
+	}
+}
+
+// TestSubmitPRFlowIgnoresSubmitterClaim: PRFlow is derived, so a submitter
+// cannot force a default-branch merge to be treated as PR flow (which would
+// leave the item claimed forever) or hide a genuine integration merge.
+func TestSubmitPRFlowIgnoresSubmitterClaim(t *testing.T) {
+	originDir := initBareOrigin(t, "main")
+	run(t, originDir, "git", "branch", "integ", "main")
+	r, err := New(Config{
+		Enabled:      true,
+		PollInterval: time.Hour,
+		WorktreeDir:  t.TempDir(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	id, err := r.Submit(MergeRequest{
+		RepoPath: originDir, Branch: "b1", TargetRef: "main", Author: "mg-1", PRFlow: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := r.Get(id); got.PRFlow {
+		t.Error("a submitter's PRFlow=true must not survive for a default-branch target")
+	}
+
+	id2, err := r.Submit(MergeRequest{
+		RepoPath: originDir, Branch: "b2", TargetRef: "integ", Author: "mg-2", PRFlow: false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := r.Get(id2); !got.PRFlow {
+		t.Error("a submitter's PRFlow=false must not hide an integration-branch target")
+	}
+}
+
+// TestSubmitAutoCreatedTargetIsPRFlow: --auto-create-target carves the target
+// off the default branch, which by construction makes it an integration branch.
+func TestSubmitAutoCreatedTargetIsPRFlow(t *testing.T) {
+	originDir := initBareOrigin(t, "main")
+	r, err := New(Config{
+		Enabled:      true,
+		PollInterval: time.Hour,
+		WorktreeDir:  t.TempDir(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := r.Submit(MergeRequest{
+		RepoPath:            originDir,
+		Branch:              "polecat-mg-1234",
+		TargetRef:           "brand-new-integration",
+		Author:              "mg-1234",
+		AutoCreateTargetRef: true,
+	})
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	if got := r.Get(id); got == nil || !got.PRFlow {
+		t.Fatalf("an auto-created target branched off the default is PR flow, got %+v", got)
+	}
+}
+
+// TestDetectDefaultBranchPrefersRemoteOverCheckout guards the detection change
+// mg-7746 depends on. A working clone parked on a feature branch used to report
+// that branch as the repo default (local HEAD), which would have made every
+// merge to main look like an integration step.
+func TestDetectDefaultBranchPrefersRemoteOverCheckout(t *testing.T) {
+	originDir := initBareOrigin(t, "main")
+	clone := t.TempDir()
+	run(t, clone, "git", "clone", originDir, ".")
+	run(t, clone, "git", "config", "user.email", "test@test.com")
+	run(t, clone, "git", "config", "user.name", "Test")
+	run(t, clone, "git", "checkout", "-b", "some-feature")
+	// Drop origin/HEAD, the state a long-lived clone often ends up in.
+	run(t, clone, "git", "update-ref", "-d", "refs/remotes/origin/HEAD")
+
+	got, err := detectDefaultBranch(clone)
+	if err != nil {
+		t.Fatalf("detectDefaultBranch: %v", err)
+	}
+	if got != "main" {
+		t.Errorf("default branch = %q, want main (local HEAD is some-feature — the checkout must not decide this)", got)
+	}
+}

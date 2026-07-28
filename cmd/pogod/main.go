@@ -1227,6 +1227,10 @@ Flags:
 			log.Printf("refinery: failed to mail coordinator defer-done backstop escalation: %v", err)
 		}
 	})
+	// Let the backstop tell "finished its flow but is still alive waiting to be
+	// stopped" (the normal end state for a PR-flow polecat) from "stalled and
+	// never completed". Both get reaped; only the latter escalates (mg-7746).
+	deferBackstop.workItemDone = client.MGWorkItemDone
 
 	// Build the synthetic-failure-turn detector (mg-8cdb, from mg-18d0's
 	// finding). It reads each running agent's harness session transcript and
@@ -1678,7 +1682,17 @@ Flags:
 				// polecats the event-driven stop above misses (e.g. a merge
 				// resolved while pogod was down).
 				subject := fmt.Sprintf("MERGED: %s (branch=%s)", mr.ID, mr.Branch)
-				body := fmt.Sprintf("Merge request %s succeeded.\nBranch: %s\nAuthor: %s", mr.ID, mr.Branch, mr.Author)
+				body := fmt.Sprintf("Merge request %s succeeded.\nBranch: %s\nTarget: %s\nAuthor: %s", mr.ID, mr.Branch, mr.TargetRef, mr.Author)
+				// Say plainly which kind of merge this was. The mayor has to
+				// tell "merged to the default branch, done" from "merged to an
+				// integration branch, PR still pending" and was previously left
+				// to infer it (mg-7746).
+				if mr.PRFlow {
+					body += fmt.Sprintf("\nPR flow: YES — %s is an integration branch, not the repo default."+
+						"\nThis merge is NOT completion: the author still has to open the PR to the default branch."+
+						"\nThe work item stays claimed and the polecat keeps running; it calls `mg done` itself once the PR is open.",
+						mr.TargetRef)
+				}
 				// Surface deploy failures to the mayor so the runtime gap (merged
 				// commit but stale binary) gets remediated. The merge has already
 				// landed — only the post-merge deploy hook failed.

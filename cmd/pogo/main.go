@@ -2855,13 +2855,19 @@ origin (catches typos like "fam-45" instead of "feat-45"). Pass
 --auto-create-target to opt into having the refinery create the target ref
 from the repo's default branch when it is missing.
 
-By default, the moment a polecat's branch merges pogod records the work item
-done and stops the polecat. A --branch (PR-flow) polecat that still has
-post-merge work — opening the PR, running verify checks, mailing the PR URL —
-gets killed mid-flow. Pass --defer-done to make the polecat own its own
-lifecycle: pogod skips the auto-done/auto-stop, and the polecat calls
-'mg done' itself once its full flow finishes. A bounded backstop still reaps
-and escalates a deferred polecat that never completes.
+When the merge lands on the repo's default branch, the moment it succeeds pogod
+records the work item done and stops the polecat.
+
+When --target names anything else, the refinery treats the merge as a PR-flow
+integration step: the deliverable is a PR from that integration branch to the
+default branch, which the author has not opened yet. pogod skips the
+auto-done/auto-stop, leaves the work item claimed, and the polecat calls
+'mg done' itself once its full flow finishes. This is detected from --target,
+not requested — no flag needed. A bounded backstop still reaps and escalates a
+deferred polecat that never completes.
+
+--defer-done forces that same deferral for a merge onto the default branch, for
+an author that owns post-merge work anyway.
 
 Example:
   pogo refinery submit polecat-a3f --repo=/path/to/repo`,
@@ -2893,7 +2899,7 @@ Example:
 	cmdRefinerySubmit.Flags().StringVar(&submitTarget, "target", "main", "Target ref to merge into")
 	cmdRefinerySubmit.Flags().StringVar(&submitAuthor, "author", "", "Author agent name")
 	cmdRefinerySubmit.Flags().BoolVar(&submitAutoCreateTarget, "auto-create-target", false, "Create the target ref from the repo's default branch if it doesn't exist (off by default; safer to fail loudly on typos)")
-	cmdRefinerySubmit.Flags().BoolVar(&submitDeferDone, "defer-done", false, "Skip pogod's auto-done/auto-stop at merge so the polecat owns its post-merge lifecycle and calls 'mg done' itself (a bounded backstop reaps a deferred polecat that never completes)")
+	cmdRefinerySubmit.Flags().BoolVar(&submitDeferDone, "defer-done", false, "Skip pogod's auto-done/auto-stop at merge so the polecat owns its post-merge lifecycle and calls 'mg done' itself (already implied when --target is not the repo's default branch; a bounded backstop reaps a deferred polecat that never completes)")
 
 	var cmdRefineryStatus = &cobra.Command{
 		Use:   "status",
@@ -2999,6 +3005,11 @@ Use this for a quick health check of the refinery. For per-MR details use
 				fmt.Printf("Target:    %s\n", mr.TargetRef)
 				fmt.Printf("Author:    %s\n", mr.Author)
 				fmt.Printf("Status:    %s\n", mr.Status)
+				if mr.PRFlow {
+					fmt.Printf("PR flow:   yes — %s is an integration branch, not the repo default.\n", mr.TargetRef)
+					fmt.Printf("           Merging is an integration step, not completion: the author still\n")
+					fmt.Printf("           has to open the PR and call 'mg done' itself.\n")
+				}
 				if mr.AlreadyMerged {
 					fmt.Printf("Note:      branch had already landed on the target — resolved as merged without re-running gates\n")
 				}

@@ -20,6 +20,12 @@ type SubmitRequest struct {
 	// so a --branch (PR-flow) polecat can finish its post-merge work (open the
 	// PR, verify, mail) and call `mg done` itself (gh drellem2/pogo #81).
 	// Default false.
+	//
+	// It is only needed to force deferral for a merge onto the *default*
+	// branch. A TargetRef that is not the default branch is classified as PR
+	// flow by Submit and deferred regardless of this field (mg-7746) — the
+	// deferral must not depend on a caller remembering a flag. There is
+	// deliberately no way to request PR flow from here: it is derived.
 	DeferDone bool `json:"defer_done,omitempty"`
 }
 

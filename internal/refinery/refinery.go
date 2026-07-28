@@ -122,7 +122,21 @@ type MergeRequest struct {
 	// finishes. A bounded backstop reaps + escalates a deferred polecat that
 	// never completes, so this does not regress the gh #34/#35 slot guarantees.
 	// Off by default — the auto-done/auto-stop path stays the default.
-	DeferDone  bool      `json:"defer_done,omitempty"`
+	DeferDone bool `json:"defer_done,omitempty"`
+	// PRFlow marks a merge request whose target is an *integration* branch
+	// rather than the repo's default branch (mg-7746). Such a merge is one step
+	// of a pull-request flow: the deliverable is a PR from the integration
+	// branch to the default branch, which the submitting polecat has not opened
+	// yet. Completion is that PR, not this merge — so pogod's reap path treats
+	// PRFlow exactly like DeferDone: no auto-done, no auto-stop, bounded
+	// backstop armed.
+	//
+	// Derived by Submit from the repo's default branch, never taken from the
+	// submitter: the bug this fixes went unnoticed for three occurrences
+	// precisely because it depended on a caller remembering to pass a flag.
+	// When the default branch cannot be determined the field stays false and
+	// the historic fast path applies.
+	PRFlow     bool      `json:"pr_flow,omitempty"`
 	SubmitTime time.Time `json:"submit_time"`
 	DoneTime   time.Time `json:"done_time,omitempty"`
 	Error      string    `json:"error,omitempty"`
@@ -378,6 +392,11 @@ func (r *Refinery) Submit(req MergeRequest) (string, error) {
 		req.TargetRef = "main"
 	}
 
+	// Resolve the repo's default branch once: it decides both where an
+	// auto-created target ref is carved from and whether this merge is a
+	// PR-flow integration step (see PRFlow).
+	defaultBranch, defaultBranchErr := detectDefaultBranch(req.RepoPath)
+
 	// Validate target ref before acquiring lock (shells out to git).
 	if err := validateTargetRef(req.RepoPath, req.TargetRef); err != nil {
 		if !req.AutoCreateTargetRef {
@@ -387,10 +406,10 @@ func (r *Refinery) Submit(req MergeRequest) (string, error) {
 		// If the default branch *also* can't be located, surface the
 		// original validation error — auto-create is a convenience, not
 		// a way to paper over a broken repo.
-		sourceRef, derr := detectDefaultBranch(req.RepoPath)
-		if derr != nil {
-			return "", fmt.Errorf("auto-create target_ref %q: detect default branch: %w (original: %v)", req.TargetRef, derr, err)
+		if defaultBranchErr != nil {
+			return "", fmt.Errorf("auto-create target_ref %q: detect default branch: %w (original: %v)", req.TargetRef, defaultBranchErr, err)
 		}
+		sourceRef := defaultBranch
 		if sourceRef == req.TargetRef {
 			return "", err
 		}
@@ -401,6 +420,21 @@ func (r *Refinery) Submit(req MergeRequest) (string, error) {
 		if rverr := validateTargetRef(req.RepoPath, req.TargetRef); rverr != nil {
 			return "", fmt.Errorf("auto-created target_ref %q but post-validation failed: %w", req.TargetRef, rverr)
 		}
+	}
+
+	// Classify the merge (mg-7746). A target that is not the repo's default
+	// branch is an integration branch, so merging is an intermediate step of a
+	// PR flow and NOT completion. Always derived, never trusted from the
+	// submitter — the whole failure mode this fixes was a caller not passing a
+	// flag. If the default branch is unknowable, keep the historic fast path:
+	// guessing "PR flow" for every merge in an odd repo would strand items
+	// claimed on the backstop instead.
+	req.PRFlow = false
+	if defaultBranchErr != nil {
+		log.Printf("refinery: could not determine the default branch of %s (%v) — treating target %q as completion (no PR-flow deferral)", req.RepoPath, defaultBranchErr, req.TargetRef)
+	} else if req.TargetRef != defaultBranch {
+		req.PRFlow = true
+		log.Printf("refinery: MR for branch %s targets integration branch %q (default is %q) — PR flow: the merge is an integration step, completion is the PR the author still has to open (mg-7746)", req.Branch, req.TargetRef, defaultBranch)
 	}
 
 	r.mu.Lock()
@@ -495,8 +529,14 @@ func validateTargetRef(repoPath, targetRef string) error {
 }
 
 // detectDefaultBranch returns the default branch name for repoPath. It tries
-// origin/HEAD first (working clones with a populated remote), then HEAD itself
-// (bare repos used in tests). Returns an error only when neither lookup works.
+// origin/HEAD first (working clones with a populated remote), then asks origin
+// directly, then falls back to local HEAD (bare repos used in tests, and clones
+// with no remote at all). Returns an error only when no lookup works.
+//
+// The remote probe matters because local HEAD is a poor proxy for "the repo
+// default": in a working clone it is simply whatever branch is checked out, so
+// a clone parked on a feature branch would report that branch as the default
+// and every merge to main would look like a PR-flow integration step (mg-7746).
 func detectDefaultBranch(repoPath string) (string, error) {
 	out, err := exec.Command("git", "-C", repoPath, "symbolic-ref", "--short", "refs/remotes/origin/HEAD").CombinedOutput()
 	if err == nil {
@@ -504,6 +544,9 @@ func detectDefaultBranch(repoPath string) (string, error) {
 		if rest, ok := strings.CutPrefix(s, "origin/"); ok && rest != "" {
 			return rest, nil
 		}
+	}
+	if ref, ok := remoteDefaultBranch(repoPath); ok {
+		return ref, nil
 	}
 	out, err = exec.Command("git", "-C", repoPath, "symbolic-ref", "--short", "HEAD").CombinedOutput()
 	if err == nil {
@@ -513,6 +556,34 @@ func detectDefaultBranch(repoPath string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("could not determine default branch for %s", repoPath)
+}
+
+// remoteDefaultBranch asks origin which branch its HEAD points at. Used when
+// refs/remotes/origin/HEAD is absent locally — it is only written by `git
+// clone` and is easily lost. GIT_TERMINAL_PROMPT=0 so an auth-required HTTPS
+// remote fails fast rather than hanging on stdin under launchd.
+func remoteDefaultBranch(repoPath string) (string, bool) {
+	cmd := exec.Command("git", "-C", repoPath, "ls-remote", "--symref", "origin", "HEAD")
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", false
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		rest, ok := strings.CutPrefix(strings.TrimSpace(line), "ref:")
+		if !ok {
+			continue
+		}
+		// Format: "ref: refs/heads/main\tHEAD"
+		fields := strings.Fields(rest)
+		if len(fields) < 2 || fields[1] != "HEAD" {
+			continue
+		}
+		if name, ok := strings.CutPrefix(fields[0], "refs/heads/"); ok && name != "" {
+			return name, true
+		}
+	}
+	return "", false
 }
 
 // createTargetRef creates targetRef pointing at sourceRef in repoPath. In a

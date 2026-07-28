@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"sync"
 	"time"
@@ -58,16 +59,30 @@ func reapMergedPolecat(reg polecatReaper, mr *refinery.MergeRequest, complete fu
 		return
 	}
 
-	// --defer-done (gh #81): the polecat owns its own post-merge lifecycle. It
-	// still has work to do after the merge lands — open the PR, run verify
-	// checks, mail the PR URL — and calls `mg done` itself when that flow
-	// finishes. Skip the auto-done + auto-stop below, which would kill it
-	// mid-flow (the exact bug #81 fixes), and arm a bounded backstop so a
-	// deferred polecat that never ends its lifecycle is still reaped +
-	// escalated. The backstop is disarmed by the OnExit hook when the polecat's
-	// process ends (it completed cleanly and freed its slot).
-	if mr.DeferDone {
-		log.Printf("refinery: merged polecat %s submitted --defer-done — skipping auto-done/auto-stop; polecat owns its lifecycle (gh #81)", a.Name)
+	// The polecat owns its own post-merge lifecycle in two cases:
+	//
+	//   - --defer-done (gh #81): the submitter asked for it explicitly.
+	//   - PR flow (mg-7746): the merge landed on an *integration* branch, not
+	//     the repo's default branch. That is an intermediate step — the
+	//     deliverable is a PR to the default branch that the polecat has not
+	//     opened yet — so this merge is categorically not completion. Derived
+	//     by the refinery from the target ref rather than requested, because
+	//     three separate items (mg-74ee, mg-6579, this one) merged, were marked
+	//     done, and left no PR precisely because nobody passed the flag.
+	//
+	// Either way the polecat still has work to do after the merge lands — open
+	// the PR, run verify checks, mail the PR URL — and calls `mg done` itself
+	// when that flow finishes. Skip the auto-done + auto-stop below, which
+	// would kill it mid-flow, and arm a bounded backstop so a deferred polecat
+	// that never ends its lifecycle is still reaped + escalated. The backstop
+	// is disarmed by the OnExit hook when the polecat's process ends (it
+	// completed cleanly and freed its slot).
+	if mr.DeferDone || mr.PRFlow {
+		reason := "submitted --defer-done (gh #81)"
+		if mr.PRFlow {
+			reason = fmt.Sprintf("merged into integration branch %q, not the repo default — PR still pending (mg-7746)", mr.TargetRef)
+		}
+		log.Printf("refinery: merged polecat %s %s — skipping auto-done/auto-stop; polecat owns its lifecycle", a.Name, reason)
 		if backstop != nil {
 			backstop.arm(a.Name, mr)
 		}
@@ -79,10 +94,17 @@ func reapMergedPolecat(reg polecatReaper, mr *refinery.MergeRequest, complete fu
 	// before its next poll. If the polecat won the race after all, the
 	// call fails with an already-done error — harmless. Keyed on mr.Author,
 	// which is the mg work-item id.
-	result, _ := json.Marshal(map[string]string{
+	//
+	// `target` is recorded because the mayor's classification logic reads it to
+	// tell an integration-branch merge from a completed one; omitting it made a
+	// documented signal actively misleading (mg-7746). `pr_flow` is only ever
+	// written when true, so its absence means "not PR flow" rather than "this
+	// writer didn't know".
+	result, _ := json.Marshal(map[string]any{
 		"branch":       mr.Branch,
 		"mr":           mr.ID,
 		"completed_by": "refinery",
+		"target":       mr.TargetRef,
 	})
 	if err := complete(mr.Author, string(result)); err != nil {
 		log.Printf("refinery: mg done %s on merged polecat's behalf failed (may already be done): %v", mr.Author, err)
@@ -126,6 +148,16 @@ type deferredBackstop struct {
 	reg      polecatReaper
 	escalate func(mr *refinery.MergeRequest)
 
+	// workItemDone reports whether the deferred polecat's work item reached a
+	// terminal state. A polecat that opened its PR, mailed it, and called
+	// `mg done` is told by its own protocol to stay alive until the mayor
+	// stops it — so a live process at the deadline does NOT imply an unfinished
+	// flow. Consulted before escalating so that common, healthy case is reaped
+	// quietly rather than reported as a failure (mg-7746). Nil (or an error
+	// from the probe) means "unknown", and the conservative escalate-anyway
+	// path applies.
+	workItemDone func(id string) (bool, error)
+
 	// afterFunc schedules f to run after d and returns a stoppable handle.
 	// Defaults to time.AfterFunc; tests inject a fake for deterministic firing.
 	afterFunc func(d time.Duration, f func()) backstopTimer
@@ -133,7 +165,9 @@ type deferredBackstop struct {
 
 // newDeferredBackstop builds a backstop that reaps via reg and escalates via
 // the given mailer. escalate may be nil (reap without a mail — the process is
-// still freed).
+// still freed). The caller sets workItemDone if it wants completed-but-lingering
+// polecats distinguished from stalled ones; leaving it nil keeps the
+// conservative escalate-on-every-fire behaviour.
 func newDeferredBackstop(timeout time.Duration, reg polecatReaper, escalate func(mr *refinery.MergeRequest)) *deferredBackstop {
 	return &deferredBackstop{
 		timeout:   timeout,
@@ -201,11 +235,31 @@ func (b *deferredBackstop) fire(name string, mr *refinery.MergeRequest) {
 		log.Printf("refinery: defer-done backstop for polecat %s fired but the polecat was already gone — no action (gh #81)", name)
 		return
 	}
-	log.Printf("refinery: defer-done backstop FIRED for polecat %s — merged but did not complete within %s; reaping + escalating (gh #34/#35 slot protection, gh #81)", name, b.timeout)
+
+	// Did the polecat actually finish? A PR-flow polecat that opened its PR and
+	// called `mg done` is instructed to stay alive until the mayor stops it, so
+	// "still running" is not evidence of a stalled flow. Reap it either way —
+	// slot protection is the point — but only escalate when the work is
+	// genuinely incomplete (mg-7746).
+	completed := false
+	if b.workItemDone != nil && mr.Author != "" {
+		done, err := b.workItemDone(mr.Author)
+		if err != nil {
+			log.Printf("refinery: defer-done backstop could not read the state of work item %s (%v) — escalating conservatively", mr.Author, err)
+		} else {
+			completed = done
+		}
+	}
+
+	if completed {
+		log.Printf("refinery: defer-done backstop fired for polecat %s — work item %s is already done, so its post-merge flow completed; reaping the lingering process to free its slot, no escalation (mg-7746)", name, mr.Author)
+	} else {
+		log.Printf("refinery: defer-done backstop FIRED for polecat %s — merged but did not complete within %s; reaping + escalating (gh #34/#35 slot protection, gh #81)", name, b.timeout)
+	}
 	if err := b.reg.Stop(a.Name, mergedPolecatStopTimeout); err != nil {
 		log.Printf("refinery: defer-done backstop failed to stop lingering polecat %s: %v", a.Name, err)
 	}
-	if b.escalate != nil {
+	if !completed && b.escalate != nil {
 		b.escalate(mr)
 	}
 }
