@@ -180,3 +180,146 @@ launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.pogo.recovery.plis
 | Check status | `launchctl list \| grep com.pogo.recovery` |
 | View logs | `tail -f ~/Library/Logs/pogo/recovery.log` |
 | Inspect queue | `ls ~/.pogo/recovery/queue ~/.pogo/recovery/processed ~/.pogo/recovery/failed` |
+
+## Nightly Deploy Agent (`com.pogo.deploy`)
+
+A **third** launchd job, and deliberately not a mode of either of the other two.
+It fires once a day at 03:00 local and runs `~/.pogo/bin/pogo-deploy.sh`, which
+decides whether to hand off to `scripts/pogo-self-deploy redeploy`.
+
+### Why it has to be a launchd job
+
+`pogo-self-deploy` cannot call itself. Its first line is `assert_out_of_band`
+(mg-1bbf): it refuses any caller inside `pogod`'s process tree, because the
+`launchctl kickstart -k` it ends with kills that tree — including the caller,
+mid-deploy, with nothing left running to report what happened. Every crew agent
+and every polecat is such a descendant, so *no agent can ever redeploy*. That is
+the gap this job closes: launchd parents it, so it clears the guard by
+construction.
+
+Before it existed, the only redeploy path was a human running the script by
+hand. Merged `pogod` work sat inert for days at a time — not because anything
+was broken, but because nothing scheduled was allowed to run it.
+
+### Why it is NOT `com.pogo.recovery`
+
+Recovery is the tier-3 safety net: it bounces a wedged `pogod` and nothing else
+(no build, no install). mg-cf48 examined extending it to redeploy and recommended
+**against** it — a deploy holding recovery's lock through `do_prove` silently
+drops genuine recovery requests, and recovery's 5-minute stale-lock reclaim would
+kickstart a live deploy mid-build. Worse, the two have opposite preconditions:
+recovery needs `pogod` unresponsive, the deploy's drain needs it responsive
+enough to report, so a deploy on recovery's trigger would refuse in exactly
+recovery's design case.
+
+So: two labels, two plists, two logs, two lock directories. Nothing is shared.
+
+### Install
+
+```bash
+pogo service install-deploy      # pogo service uninstall-deploy to remove
+```
+
+Idempotent. It does **not** clone the build checkout — the runner does that on
+its first real run, keeping a network operation out of an install an operator
+may be running because the box is already unhealthy.
+
+### What the runner does (and refuses to do)
+
+`pogo-deploy.sh` is a trigger, not a deployer. Every gate that matters already
+lives in `pogo-self-deploy`; anything here that starts to look like deploy logic
+belongs there instead. In order:
+
+1. **Window guard.** If the local hour is outside `[02:00, 05:00)`, log the
+   reason and exit 0. `StartCalendarInterval` does not promise 03:00 — it
+   promises the job *runs*. A mac asleep at 03:00 gets the fire delivered on the
+   next wake, which may be 09:14 when Daniel opens the lid, or 14:30 mid-demo. A
+   redeploy bounces the whole fleet, so a deferred fire is dropped rather than
+   honoured late. The window is a **range** and not an instant for the opposite
+   failure: too narrow and the job never deploys at all, which looks identical
+   to a job that was never installed.
+2. **Lock.** `~/.pogo/deploy.lock.d`, its own, never recovery's. A redeploy can
+   legitimately run for an hour while the drain waits on polecats; a second fire
+   must not start a competing drain.
+3. **Tools.** `mg` and `pogo` are resolved to **absolute paths**, and `mg` only
+   after an identity check. On macOS `/usr/bin/mg` is the Micro-Emacs editor; it
+   satisfies `command -v mg`, panics headless, and delivers no alert at all
+   (mg-015f, mg-dd5f). The alert path is resolved *first*, before anything that
+   can fail — a job whose first failure is "I cannot tell you about failures" is
+   the silent nightly all over again.
+4. **`GH_TOKEN` at run time**, matched out of `~/.zshenv` one line at a time and
+   `eval`'d alone — never sourced wholesale (that file's `export PATH=` would
+   strip `go` and reproduce the 07-23 `go: command not found` failure), and
+   **never** in the plist: `~/Library/LaunchAgents` is world-readable. The value
+   is never logged.
+5. **Safe sync** of `~/.pogo/deploy-src` — a **dedicated** checkout, never
+   `~/dev/pogo`. The dev tree is a place a human works; a 03:00
+   fetch/checkout/merge there can land on a half-finished edit or an in-progress
+   rebase. Even in the dedicated tree a **dirty** working copy aborts rather than
+   resets (a reset would destroy the evidence of whatever made it dirty), and a
+   **diverged** tree aborts too — `--ff-only`, because merging would deploy
+   commits nobody meant to build.
+6. **Drift gate.** `pogo-self-deploy check` is read-only and never acts. If its
+   verdict is `clean`, log it and exit 0 **without bouncing**: a fleet-wide
+   bounce costs every agent its session, and doing it for a no-op is strictly
+   worse than not running. The verdict is reused rather than recomputed here so
+   this stays a trigger and not a rival deployer with its own idea of "current" —
+   notably, `check`'s notion of clean already covers CLI drift (mg-ddf1).
+7. **Redeploy**: `pogo-self-deploy redeploy --yes`. `--yes` because `confirm()`
+   exits 3 without a tty. **Never `--force`** — the two things it overrides are
+   killing live polecats and bouncing a fleet whose idleness could not be
+   established, and neither is a call an unattended 03:00 job gets to make. The
+   flag is not passed, not plumbed, and not settable by env; `pogo-deploy_test.sh`
+   asserts it.
+8. **Outcome.** Exit 0 → wait out a grace period and re-read the mail-check
+   schedules, alerting on any that existed before the bounce and did not come
+   back. Non-zero → mail `pm-pogo` **and** `human`, and stop. Each code names a
+   different operator response; **exit 9 is `do_prove` RED**, which runs after
+   the build and *before* the kickstart — the running `pogod` was never touched,
+   so it is a clean negative control rather than an outage, and the correct
+   response is emphatically not to retry with `--force`.
+
+### Plist contract
+
+| Key | Value | Why |
+|-----|-------|-----|
+| `StartCalendarInterval` | `Hour=3, Minute=0` | 03:00 local, the off-hours window disruptive fleet ops were already moved into. A `StartInterval` would fire relative to *load* time, so the "nightly" would drift into the working day every time someone reinstalled it. |
+| `RunAtLoad` | `false` | Installing or reloading the job must never bounce the fleet as a side effect. This is the one key that differs in spirit from `com.pogo.recovery`, where `true` is harmless. |
+| `KeepAlive` | `false` | One-shot per fire. The runner exits on every no-drift night; `true` would relaunch it in a loop. |
+| `ProcessType` | `Background` | It reacts to a clock, not to interactive latency. |
+| `StandardOutPath` / `StandardErrorPath` | `~/Library/Logs/pogo/pogo-deploy.log` | Its own log. Deploy history must not be interleaved with recovery bounces. |
+| `EnvironmentVariables.PATH` | Same value as `com.pogo.recovery` (via `launchdPath()`) | Must resolve **both** `go` (`/opt/homebrew/bin`) and `mg`/`pogo` (`~/go/bin`). launchd's default PATH has neither, and the 07-23 manual redeploy died on `go: command not found` for exactly this. |
+| `EnvironmentVariables.POGO_DEPLOY_SRC` | `~/.pogo/deploy-src` | Bound here so the plist and the script cannot disagree about which tree is built. Must never name a developer working tree. |
+| `EnvironmentVariables.GH_TOKEN` | **absent, deliberately** | `~/Library/LaunchAgents` is world-readable. The runner sources the token at run time instead. |
+
+### Runner env overrides
+
+All optional; the defaults are the production values.
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `POGO_DEPLOY_SRC` | `~/.pogo/deploy-src` | The dedicated build checkout. |
+| `POGO_DEPLOY_REMOTE` | origin of `~/dev/pogo` | Clone URL, used once to bootstrap the checkout. |
+| `POGO_DEPLOY_WINDOW` | `2-5` | Half-open local-hour range in which a fire is honoured. |
+| `POGO_DEPLOY_SKIP_WINDOW` | unset | `1` bypasses the window guard. For controls only. |
+| `POGO_DEPLOY_NOW` | unset | `HH` override for the window guard. Tests only. |
+| `POGO_DEPLOY_GRACE` | `120` | Seconds before the post-bounce mail-check re-read. |
+| `POGO_DEPLOY_ZSHENV` | `~/.zshenv` | Where `GH_TOKEN` is read from. |
+| `POGO_DEPLOY_ALERT_TO` | `pm-pogo` | First alert recipient; `human` is always copied. |
+
+### Managing the deploy agent
+
+| Action | Command |
+|--------|---------|
+| Install / reinstall | `pogo service install-deploy` |
+| Remove | `pogo service uninstall-deploy` |
+| Check status | `launchctl list \| grep com.pogo.deploy` |
+| Run it now, gates and all | `POGO_DEPLOY_SKIP_WINDOW=1 ~/.pogo/bin/pogo-deploy.sh` |
+| Rehearse without deploying | `POGO_DEPLOY_SKIP_WINDOW=1 ~/.pogo/bin/pogo-deploy.sh --dry-run` |
+| View logs | `tail -f ~/Library/Logs/pogo/pogo-deploy.log` |
+
+Note that running it by hand from a terminal is **out of band** and therefore
+allowed — but it is also not the environment it runs in nightly. To reproduce
+the launchd environment, use `env -i PATH=<the plist's PATH> HOME=$HOME`; an
+interactive shell hides exactly the two failures (`go` off PATH, `GH_TOKEN`
+missing) this job was shaped around.

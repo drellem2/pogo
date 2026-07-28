@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- A THIRD job, deliberately not com.pogo.recovery (mg-cf48 / mg-42ac).
+         Recovery is the tier-3 safety net that bounces a wedged pogod; a deploy
+         rebuilds it from main. Folding the deploy into recovery would make every
+         emergency restart also a rebuild — the opposite of a safety net. -->
+    <key>Label</key>
+    <string>com.pogo.deploy</string>
+    <key>ProgramArguments</key>
+    <array>
+        <!-- Update YOUR_USERNAME, or use `pogo service install-deploy`. -->
+        <string>/Users/YOUR_USERNAME/.pogo/bin/pogo-deploy.sh</string>
+    </array>
+    <!-- 03:00 local. A redeploy bounces the ENTIRE fleet, so it belongs in the
+         off-hours window Daniel already moved disruptive fleet ops into.
+         StartCalendarInterval is not a guarantee of 03:00: if the mac is asleep
+         launchd defers the fire and delivers it on the next wake, which may be
+         mid-workday. pogo-deploy.sh's own window guard drops those late fires —
+         the schedule proposes, the runner disposes. -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>3</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+    <!-- RunAtLoad=false: installing or reloading the job must never trigger a
+         fleet-wide bounce as a side effect. The only trigger is the clock. -->
+    <key>RunAtLoad</key>
+    <false/>
+    <!-- One-shot per fire. KeepAlive=true would relaunch it in a loop the
+         moment it exited — and this one exits on every no-drift night. -->
+    <key>KeepAlive</key>
+    <false/>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>StandardOutPath</key>
+    <string>/Users/YOUR_USERNAME/Library/Logs/pogo/pogo-deploy.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/YOUR_USERNAME/Library/Logs/pogo/pogo-deploy.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- Copied verbatim from com.pogo.recovery's PATH. It has to resolve
+             BOTH go (/opt/homebrew/bin — the 07-23 manual redeploy died on
+             "go: command not found" with a thinner PATH) and mg / pogo /
+             pogo-self-deploy (~/go/bin). launchd's default PATH has neither. -->
+        <key>PATH</key>
+        <string>/Users/YOUR_USERNAME/.local/bin:/Users/YOUR_USERNAME/go/bin:/Users/YOUR_USERNAME/.pogo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>/Users/YOUR_USERNAME</string>
+        <key>POGO_HOME</key>
+        <string>/Users/YOUR_USERNAME/.pogo</string>
+        <!-- The DEDICATED build checkout. Never /Users/YOUR_USERNAME/dev/pogo:
+             that is a working tree a human edits, and a 03:00 fetch/checkout/
+             merge in it can collide with a half-finished change. -->
+        <key>POGO_DEPLOY_SRC</key>
+        <string>/Users/YOUR_USERNAME/.pogo/deploy-src</string>
+        <!-- NO GH_TOKEN HERE, EVER. ~/Library/LaunchAgents is world-readable;
+             a token in this file is a token every process on the box can read.
+             pogo-deploy.sh sources it from ~/.zshenv at run time instead. -->
+    </dict>
+</dict>
+</plist>

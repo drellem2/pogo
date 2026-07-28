@@ -38,6 +38,14 @@ bash scripts/pogo-self-deploy_live_test.sh
 echo "Testing pogo-self-deploy SIGINT interrupt-safety control"
 bash scripts/pogo-self-deploy_sigint_test.sh
 
+# The nightly redeploy TRIGGER (mg-42ac). Pure-helper tests only — sourcing the
+# runner cannot fire a deploy, and every case here is a refusal: the two skips
+# (outside-window, no-drift) and the aborts (dirty tree, diverged tree, no
+# token). All of them fail the same visible way — a nightly that deploys
+# nothing — so the suite exists to tell them apart.
+echo "Testing pogo-deploy nightly trigger"
+bash scripts/pogo-deploy_test.sh
+
 echo "Testing build.sh"
 bash build_test.sh
 

@@ -614,6 +614,45 @@ chicken-and-egg.`,
 		},
 	}
 
+	var cmdServiceInstallDeploy = &cobra.Command{
+		Use:   "install-deploy",
+		Short: "Install the nightly redeploy LaunchAgent (com.pogo.deploy)",
+		Long: `Install com.pogo.deploy — the launchd job that fires ~/.pogo/bin/pogo-deploy.sh daily at 03:00 local to rebuild and redeploy pogod from main.
+
+The job exists because scripts/pogo-self-deploy cannot call itself: its first
+line refuses any caller inside pogod's process tree (the kickstart -k it ends
+with would kill that caller mid-deploy), and every crew agent and polecat is
+such a descendant. A LaunchAgent is parented by launchd, so it clears the guard.
+
+The runner is a trigger, not a deployer. It gates on a 02:00-05:00 window (so a
+fire deferred by sleep is dropped, not honoured mid-workday), syncs a DEDICATED
+checkout at ~/.pogo/deploy-src (never the developer's working tree), skips
+entirely when there is no drift, and then hands off to pogo-self-deploy with
+--yes and never --force. A do_prove RED aborts before the restart and alerts.
+
+Deliberately separate from ` + "`pogo service install-recovery`" + `: recovery is the
+tier-3 safety net that bounces a wedged pogod, and folding a rebuild-from-main
+into it would make every emergency restart a deploy.`,
+		Args: cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			if err := service.InstallDeploy(); err != nil {
+				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+			}
+		},
+	}
+
+	var cmdServiceUninstallDeploy = &cobra.Command{
+		Use:   "uninstall-deploy",
+		Short: "Remove the nightly redeploy LaunchAgent (com.pogo.deploy)",
+		Long:  `Stop and remove com.pogo.deploy. The build checkout under ~/.pogo/deploy-src is left in place.`,
+		Args:  cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			if err := service.UninstallDeploy(); err != nil {
+				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+			}
+		},
+	}
+
 	var cmdServiceUninstall = &cobra.Command{
 		Use:   "uninstall",
 		Short: "Remove the pogo system service",
@@ -2744,6 +2783,8 @@ branches; work items and mail live in mg/macguffin (the task-store CLI).`,
 	cmdService.AddCommand(cmdServiceStatus)
 	cmdService.AddCommand(cmdServiceInstallRecovery)
 	cmdService.AddCommand(cmdServiceUninstallRecovery)
+	cmdService.AddCommand(cmdServiceInstallDeploy)
+	cmdService.AddCommand(cmdServiceUninstallDeploy)
 	cmdService.AddCommand(cmdServiceReconcile)
 	cmdService.AddCommand(cmdServiceCheckDrift)
 	rootCmd.AddCommand(cmdService)

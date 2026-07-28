@@ -1,0 +1,283 @@
+package service
+
+import (
+	"bytes"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"text/template"
+)
+
+// The nightly deploy agent (mg-42ac, designed under mg-b7d0) is the out-of-tree
+// TRIGGER for scripts/pogo-self-deploy. It exists because that script cannot
+// call itself: its first line is an ancestry guard that refuses any caller
+// inside pogod's process tree (mg-1bbf), and every crew agent and polecat is
+// such a descendant. A LaunchAgent is parented by launchd, so it clears the
+// guard by construction.
+//
+// It is a THIRD job, not a mode of com.pogo.recovery. Recovery is the tier-3
+// safety net that bounces a wedged pogod; a deploy rebuilds it from main. Fold
+// them together and every emergency restart becomes a rebuild from whatever is
+// on main at that moment — which is the last thing you want from the mechanism
+// you reach for when the box is already broken (mg-cf48 declined exactly this).
+//
+// Kept distinct from Install() and InstallRecovery() for the same reason those
+// two are distinct from each other: each of the three has to be installable on
+// a box where the other two are broken.
+
+const deployLabel = "com.pogo.deploy"
+
+// deployPlistTemplate mirrors the in-repo scripts/launchd/com.pogo.deploy.plist
+// with host-specific paths bound in.
+//
+// Two keys carry the load-bearing decisions:
+//
+// RunAtLoad=false — installing or reloading this job must never bounce the
+// fleet as a side effect. com.pogo.recovery sets it true because draining a
+// leftover queue at login is harmless; here the equivalent would be a full
+// rebuild+restart every time an operator reran the installer.
+//
+// PATH — copied from launchdPath(), the same helper the daemon and recovery
+// plists use, so all three agree by construction. It has to resolve BOTH `go`
+// (/opt/homebrew/bin) and mg/pogo (~/go/bin): the 07-23 manual redeploy failed
+// outright with "go: command not found" under a thinner PATH.
+//
+// There is deliberately NO GH_TOKEN key. ~/Library/LaunchAgents is
+// world-readable, so a token here is a token every process on the box can read;
+// pogo-deploy.sh sources it from ~/.zshenv at run time instead.
+const deployPlistTemplate = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{{.Label}}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{{.ScriptPath}}</string>
+    </array>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>{{.Hour}}</integer>
+        <key>Minute</key>
+        <integer>{{.Minute}}</integer>
+    </dict>
+    <key>RunAtLoad</key>
+    <false/>
+    <key>KeepAlive</key>
+    <false/>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>StandardOutPath</key>
+    <string>{{.LogDir}}/pogo-deploy.log</string>
+    <key>StandardErrorPath</key>
+    <string>{{.LogDir}}/pogo-deploy.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>{{.Path}}</string>
+        <key>HOME</key>
+        <string>{{.Home}}</string>
+        <key>POGO_HOME</key>
+        <string>{{.PogoHome}}</string>
+        <key>POGO_DEPLOY_SRC</key>
+        <string>{{.DeploySrc}}</string>
+    </dict>
+</dict>
+</plist>
+`
+
+// deployHour / deployMinute — 03:00 local, the off-hours window Daniel already
+// moved disruptive fleet ops into. Constants rather than options: a deploy that
+// can be scheduled at any hour is a deploy that will eventually be scheduled
+// during the working day, and the runner's own window guard is written against
+// this number.
+const (
+	deployHour   = 3
+	deployMinute = 0
+)
+
+type deployData struct {
+	Label      string
+	ScriptPath string
+	DeploySrc  string
+	LogDir     string
+	Path       string
+	Home       string
+	PogoHome   string
+	Hour       int
+	Minute     int
+}
+
+func deployPlistPath() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, "Library", "LaunchAgents", deployLabel+".plist")
+}
+
+// deployScriptInstallPath — where install-deploy copies the bundled runner.
+// Out of the repo on purpose: the job must keep working while the checkout it
+// builds from is mid-fetch, mid-checkout, or broken.
+func deployScriptInstallPath() string {
+	return filepath.Join(pogoHome(), "bin", "pogo-deploy.sh")
+}
+
+// deploySrcDir — the DEDICATED checkout the nightly builds from, never the
+// developer's working tree. ~/dev/pogo is a place a human works; a 03:00
+// fetch/checkout/merge there can land on a half-finished edit or an in-progress
+// rebase. The nightly gets its own tree that nothing else writes to, so "dirty"
+// there means something genuinely unexplained and is treated as an abort.
+func deploySrcDir() string {
+	if d := os.Getenv("POGO_DEPLOY_SRC"); d != "" {
+		return d
+	}
+	return filepath.Join(pogoHome(), "deploy-src")
+}
+
+// findDeployScriptSource locates the bundled pogo-deploy.sh. Mirrors
+// findRecoveryScriptSource: prefer the in-repo copy so `go run ./cmd/pogo`
+// works from a checkout, then fall back to a sibling of the running binary.
+func findDeployScriptSource() (string, error) {
+	candidates := []string{}
+	if exe, err := os.Executable(); err == nil {
+		dir := filepath.Dir(exe)
+		candidates = append(candidates,
+			filepath.Join(dir, "..", "scripts", "launchd", "pogo-deploy.sh"),
+			filepath.Join(dir, "scripts", "launchd", "pogo-deploy.sh"),
+		)
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		candidates = append(candidates, filepath.Join(cwd, "scripts", "launchd", "pogo-deploy.sh"))
+	}
+	if env := os.Getenv("POGO_DEPLOY_SCRIPT"); env != "" {
+		candidates = append([]string{env}, candidates...)
+	}
+	for _, c := range candidates {
+		if _, err := os.Stat(c); err == nil {
+			if abs, err := filepath.Abs(c); err == nil {
+				return abs, nil
+			}
+			return c, nil
+		}
+	}
+	return "", fmt.Errorf("pogo-deploy.sh not found in any of: %v (set POGO_DEPLOY_SCRIPT to override)", candidates)
+}
+
+// renderDeployPlist materializes the template against the current host.
+func renderDeployPlist() (string, deployData, error) {
+	home, _ := os.UserHomeDir()
+	data := deployData{
+		Label:      deployLabel,
+		ScriptPath: deployScriptInstallPath(),
+		DeploySrc:  deploySrcDir(),
+		LogDir:     logDir(),
+		Path:       launchdPath(),
+		Home:       home,
+		PogoHome:   pogoHome(),
+		Hour:       deployHour,
+		Minute:     deployMinute,
+	}
+	tmpl, err := template.New("deploy-plist").Parse(deployPlistTemplate)
+	if err != nil {
+		return "", data, err
+	}
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, data); err != nil {
+		return "", data, err
+	}
+	return buf.String(), data, nil
+}
+
+// InstallDeploy sets up the nightly deploy agent: copies pogo-deploy.sh into
+// ~/.pogo/bin/, writes the plist, and bootstraps it. Idempotent.
+//
+// It does NOT create or populate the deploy checkout. The runner clones it on
+// first use, which keeps a network operation out of an install that an operator
+// may be running precisely because the box is unhealthy.
+func InstallDeploy() error {
+	if runtime.GOOS != "darwin" {
+		return fmt.Errorf("deploy agent is macOS-only (GOOS=%s)", runtime.GOOS)
+	}
+
+	src, err := findDeployScriptSource()
+	if err != nil {
+		return err
+	}
+
+	for _, d := range []string{filepath.Dir(deployScriptInstallPath()), logDir()} {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			return fmt.Errorf("failed to create %s: %w", d, err)
+		}
+	}
+
+	scriptBytes, err := os.ReadFile(src)
+	if err != nil {
+		return fmt.Errorf("failed to read %s: %w", src, err)
+	}
+	dst := deployScriptInstallPath()
+	if err := os.WriteFile(dst, scriptBytes, 0755); err != nil {
+		return fmt.Errorf("failed to write %s: %w", dst, err)
+	}
+
+	rendered, data, err := renderDeployPlist()
+	if err != nil {
+		return err
+	}
+	plistPath := deployPlistPath()
+	if err := os.MkdirAll(filepath.Dir(plistPath), 0755); err != nil {
+		return fmt.Errorf("failed to create %s: %w", filepath.Dir(plistPath), err)
+	}
+	existing, _ := os.ReadFile(plistPath)
+	if string(existing) != rendered {
+		if err := os.WriteFile(plistPath, []byte(rendered), 0644); err != nil {
+			return fmt.Errorf("failed to write %s: %w", plistPath, err)
+		}
+	}
+
+	target := fmt.Sprintf("gui/%d", os.Getuid())
+	exec.Command("launchctl", "bootout", target, plistPath).Run() // best-effort
+	out, err := exec.Command("launchctl", "bootstrap", target, plistPath).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("launchctl bootstrap failed: %s: %w", string(out), err)
+	}
+
+	fmt.Printf("Deploy agent installed: %s\n", plistPath)
+	fmt.Printf("Script:   %s\n", dst)
+	fmt.Printf("Checkout: %s (cloned on first run)\n", data.DeploySrc)
+	fmt.Printf("Schedule: %02d:%02d local, daily\n", data.Hour, data.Minute)
+	fmt.Printf("Logs:     %s/pogo-deploy.log\n", data.LogDir)
+	return nil
+}
+
+// UninstallDeploy removes the deploy plist and stops the agent. The checkout
+// under ~/.pogo/deploy-src is left in place: it is a git tree, it may hold the
+// evidence of whatever made an operator uninstall the job, and re-cloning it is
+// cheap next time.
+func UninstallDeploy() error {
+	if runtime.GOOS != "darwin" {
+		return fmt.Errorf("deploy agent is macOS-only (GOOS=%s)", runtime.GOOS)
+	}
+	plistPath := deployPlistPath()
+	if _, err := os.Stat(plistPath); os.IsNotExist(err) {
+		return fmt.Errorf("deploy agent not installed at %s", plistPath)
+	}
+	target := fmt.Sprintf("gui/%d", os.Getuid())
+	exec.Command("launchctl", "bootout", target, plistPath).Run() // best-effort
+	if err := os.Remove(plistPath); err != nil {
+		return fmt.Errorf("failed to remove %s: %w", plistPath, err)
+	}
+	fmt.Printf("Deploy agent removed: %s\n", plistPath)
+	fmt.Printf("Checkout under %s left in place.\n", deploySrcDir())
+	return nil
+}
+
+// DeployStatus reports whether the deploy plist is on disk.
+func DeployStatus() (installed bool, path string) {
+	if runtime.GOOS != "darwin" {
+		return false, ""
+	}
+	p := deployPlistPath()
+	_, err := os.Stat(p)
+	return err == nil, p
+}
