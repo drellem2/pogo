@@ -51,3 +51,10 @@ bash build_test.sh
 
 echo "Testing changelog fragment assembler"
 bash scripts/assemble-changelog_test.sh
+
+# The work-item scope guard (mg-f1d5). Every case runs against a stub `mg` and a
+# fixture worktree in a temp dir, so the suite never reads the developer's live
+# ~/.macguffin. The load-bearing case is the opt-in one: a guard that blocked an
+# agent nobody opted in for would be ripped out of every fleet within the hour.
+echo "Testing work-item scope guard"
+bash scripts/mg-scope-guard_test.sh
