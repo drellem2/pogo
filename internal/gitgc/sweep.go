@@ -39,36 +39,6 @@ type Options struct {
 	// classified by its owner (classifyTree), a ref by its own name. The
 	// worktree phases had disagreed about which — see classifyTree.
 	LivePolecats map[string]bool
-	// OwnerVerdicts carries what the CALLER has POSITIVELY established about
-	// each polecat's DEATH, keyed by polecat name exactly as LivePolecats is.
-	// It is consulted on one path only: a worktree whose `git status` FAILED,
-	// where it decides between reclaiming an orphan and refusing to destroy
-	// files we could not read (gh #97, and see RemoveWorktree).
-	//
-	// A missing key is the zero value, OwnerUnproven, which REFUSES. That
-	// default is the design and not a gap: absence from the live set is not
-	// evidence of death — a caller has it whenever it did not look, or looked
-	// with an instrument that failed — so only an explicit entry may license
-	// destroying an unreadable tree.
-	//
-	// # Why it is passed IN and never looked up
-	//
-	// Death evidence lives in the agent registry and its witness store, and
-	// this package is deliberately free of any dependency on either (see the
-	// package comment). So the verdict is an input:
-	//
-	//   - cmd/pogod fills it from the polecat witness, mapping WitnessDead —
-	//     the store's one positive-evidence-of-death verdict — to OwnerGone
-	//     and every other verdict to OwnerUnproven.
-	//   - cmd/pogo leaves it nil, and so degrades to OwnerUnproven for every
-	//     worktree, BY CONSTRUCTION rather than by anyone remembering.
-	//
-	// That degradation is the point. It holds regardless of how good the CLI's
-	// LIVENESS set becomes, because liveness evidence and death evidence are
-	// different facts: knowing who is alive never tells you that a particular
-	// absent name is dead. An operator who wants an unreadable tree collected
-	// from the CLI has --force, which says so explicitly.
-	OwnerVerdicts map[string]WorktreeOwner
 	// Tickets, when non-nil, supplies work-item states directly. When nil,
 	// Sweep loads them via LoadTicketIndex (`mg list`). Injecting a map
 	// keeps Sweep unit-testable without the mg binary.
@@ -226,12 +196,6 @@ func Sweep(opts Options) (Result, error) {
 			})
 			continue
 		}
-		// What the caller has POSITIVELY established about this owner's death.
-		// Not-live is not dead: the liveness gate above only says this name is
-		// absent from the live set, and absence is exactly what a caller has
-		// when its instrument failed. A missing entry is OwnerUnproven.
-		verdict := opts.OwnerVerdicts[owner]
-
 		// A concluded ticket says the WORK was accepted; it does not say the
 		// tree is empty — and it says nothing whatever when `git status` could
 		// not be READ. Both are RemoveWorktree's guard to decide (mg-ee02,
@@ -243,7 +207,7 @@ func Sweep(opts Options) (Result, error) {
 		// reports exactly what an apply would do — and so the log line can name
 		// the status failure rather than the ticket state. It is the guard's
 		// own function, so the two cannot drift.
-		chk := checkWorktreeRemoval(wt.Path, verdict)
+		chk := checkWorktreeRemoval(wt.Path, OwnerUnproven)
 		if chk.Refusal != nil && !opts.Force {
 			kept := WorktreeAction{Path: wt.Path, Owner: owner, Branch: wt.Branch}
 			// A refusal with no arm in refusalReason cannot happen today, but a
@@ -277,7 +241,7 @@ func Sweep(opts Options) (Result, error) {
 			if opts.Force {
 				rerr = removeWorktreeFn(opts.Repo, wt.Path)
 			} else {
-				rerr = RemoveWorktree(opts.Repo, wt.Path, verdict)
+				rerr = RemoveWorktree(opts.Repo, wt.Path, OwnerUnproven)
 			}
 			if rerr != nil {
 				// A refusal here rather than a failure means the tree changed
@@ -416,27 +380,14 @@ func refusalReason(err error) (string, bool) {
 	if errors.As(err, &dwe) {
 		return fmt.Sprintf("%d uncommitted change(s) — rerun with --force to discard", dwe.Total), true
 	}
-	var rwe *RecentlyWrittenWorktreeError
-	if errors.As(err, &rwe) {
-		return fmt.Sprintf("git status could not be read (%v), and the tree was written to %s ago — "+
-			"too recent to act on the evidence that its owner is dead; rerun with --force to discard",
-			rwe.Err, humanAge(rwe.Age)), true
-	}
-	var uee *UnenumerableWorktreeError
-	if errors.As(err, &uee) {
-		return fmt.Sprintf("git status could not be read (%v) and the tree cannot be listed either (%v), "+
-			"so there is no timestamp to check its owner's death against — rerun with --force to discard",
-			uee.Err, uee.WalkErr), true
-	}
 	var uwe *UndeterminedWorktreeError
 	if errors.As(err, &uwe) {
-		// The age is REPORTED here and decides nothing. This arm — no death
-		// evidence — is one of the two permanent ones (see quietWindow for the
-		// scope), so the line has to carry whatever a human needs to clear the
-		// pin in one read; nothing else ever will.
-		return fmt.Sprintf("git status could not be read (%v), and nothing has established that the owner "+
-			"is dead%s — rerun with --force to discard",
-			uwe.Err, untouchedClause(uwe.Untouched, uwe.UntouchedKnown)), true
+		// The age is REPORTED and decides nothing — this keep is permanent and
+		// unconditional, so the line has to carry whatever a human needs to
+		// clear the pin in one read, because nothing else ever will.
+		return fmt.Sprintf("git status could not be read (%v)%s — refusing to act on a tree we could "+
+			"not read; rerun with --force to discard", uwe.Err,
+			untouchedClause(uwe.Untouched, uwe.UntouchedKnown)), true
 	}
 	return "", false
 }
@@ -451,16 +402,26 @@ func refusalReason(err error) (string, bool) {
 // where git had errored, and the discarded error appeared nowhere. A forensic
 // log that names an innocent cause is worse than silence — a missing line
 // prompts investigation, a plausible one ends it.
+//
+// Since cannot-tell became an unconditional refusal, exactly one route reaches
+// here with a failed status: the operator's --force. That is the whole reason
+// the force flag is a parameter rather than inferred — the line has to say the
+// removal happened because a human overrode a refusal, not because anything was
+// established about the tree.
 func removalReason(why string, statusErr error, force bool) string {
 	if statusErr == nil {
 		return why
 	}
-	if force {
-		return fmt.Sprintf("%s; git status could not be read (%v) — removed anyway because --force was given",
-			why, statusErr)
+	if !force {
+		// Unreachable: without --force a failed status always refuses above.
+		// Report it rather than printing the ticket state alone, because if
+		// this ever does fire, the ticket state is exactly the innocent reason
+		// gh #97 was about.
+		return fmt.Sprintf("%s; git status could not be read (%v) — removed WITHOUT --force, "+
+			"which should not be reachable; treat this line as a bug report", why, statusErr)
 	}
-	return fmt.Sprintf("%s; git status could not be read (%v) — removed on positive evidence that the owner "+
-		"is dead, with nothing having written to the tree in the last %s", why, statusErr, humanAge(quietWindow))
+	return fmt.Sprintf("%s; git status could not be read (%v) — removed anyway because --force was given",
+		why, statusErr)
 }
 
 // classifyTree decides the ticket state governing a worktree DIRECTORY, and

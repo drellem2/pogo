@@ -273,13 +273,19 @@ type UndeterminedWorktreeError struct {
 	// Untouched is how long the tree has gone unwritten, and UntouchedKnown
 	// whether it could be established at all.
 	//
-	// This refusal is PERMANENT — there is no drain, and a tree kept here is
-	// kept until a human acts (see quietWindow). Age is reported so that the
-	// human whose judgement the case was carved out for can make the call
-	// cheaply: "untouched 30 days" is what turns a pinned worktree from a
-	// mystery into a decision. It is deliberately a REPORT and never an input
-	// to this refusal — the moment age started deciding, it would be
-	// authorising a deletion.
+	// This refusal is PERMANENT and unconditional — nothing collects a tree it
+	// could not read, under any ownership and at any age. So the age is a pure
+	// REPORT: it is the signal a human deciding whether to reclaim asked for
+	// ("untouched 30 days" turns a pinned worktree from a mystery into a
+	// decision), and it decides nothing itself.
+	//
+	// That split is load-bearing rather than stylistic. Every attempt to let
+	// this number ACT — a drain, then a veto — failed on the same rock, and the
+	// second failure is the subtler one worth recording here: a veto that
+	// expires does not resolve the contradiction it was built for, it just
+	// stops being able to see it. Absence of evidence is not evidence of
+	// absence. Because the age only ever prints, the worst it can now do is
+	// print an unhelpful number; it cannot be blind in a way that costs files.
 	Untouched      time.Duration
 	UntouchedKnown bool
 }
@@ -322,117 +328,6 @@ func humanAge(d time.Duration) string {
 
 func (e *UndeterminedWorktreeError) Unwrap() error { return e.Err }
 
-// RecentlyWrittenWorktreeError reports a removal refused by the mtime VETO: git
-// could not read the tree, the caller DOES hold positive evidence that its
-// owner is dead — and something wrote to the tree anyway, inside quietWindow.
-//
-// Death evidence plus a file written ninety seconds ago is a contradiction, and
-// it resolves in favour of the files: a recent write means something is
-// happening that our death evidence did not capture. See quietWindow for why a
-// timestamp is allowed to forbid a removal here and never to authorise one.
-type RecentlyWrittenWorktreeError struct {
-	Path string
-	// Err is the underlying `git status` failure — the reason we are in the
-	// cannot-tell arm at all.
-	Err error
-	// Age is how long ago the newest write inside the tree happened, and
-	// Window the quiet period it fell short of.
-	Age    time.Duration
-	Window time.Duration
-}
-
-func (e *RecentlyWrittenWorktreeError) Error() string {
-	return fmt.Sprintf("worktree %s: cannot determine whether it holds uncommitted work (%v), "+
-		"and it was written to %s ago — inside the %s quiet window, which contradicts the evidence "+
-		"that its owner is dead; refusing to remove", e.Path, e.Err, humanAge(e.Age), humanAge(e.Window))
-}
-
-func (e *RecentlyWrittenWorktreeError) Unwrap() error { return e.Err }
-
-// UnenumerableWorktreeError reports a removal refused because the tree could
-// neither be read by git NOR listed on the filesystem, so the mtime veto has
-// nothing to evaluate.
-//
-// This is a cannot-tell ABOUT the cannot-tell, and it gets its own refusal
-// rather than degrading to the worktree root's own mtime. Root mtime is
-// measurably blind to edits below it — a live agent editing pkg/deep/work.go
-// leaves it untouched — so falling back to it would mean deleting on a signal
-// measured not to fire. Refusing costs one pinned worktree in a rare shape.
-type UnenumerableWorktreeError struct {
-	Path string
-	// Err is the `git status` failure; WalkErr is the separate filesystem
-	// failure that stopped us listing the tree. Both are reported because they
-	// are usually different faults, and an operator needs to see which is which.
-	Err     error
-	WalkErr error
-}
-
-func (e *UnenumerableWorktreeError) Error() string {
-	return fmt.Sprintf("worktree %s: cannot determine whether it holds uncommitted work (%v) "+
-		"and cannot list its files either (%v), so there is no timestamp to check the owner's "+
-		"death against; refusing to remove", e.Path, e.Err, e.WalkErr)
-}
-
-func (e *UnenumerableWorktreeError) Unwrap() error { return e.Err }
-
-// quietWindow is how recently a worktree must have been written to for the
-// mtime VETO to fire. It is a veto threshold and NOTHING ELSE. The asymmetry
-// underneath it is the reason this package may use a timestamp at all:
-//
-//	mtime RECENT -> something is writing.  SOUND. Nobody writes a tree nobody holds.
-//	mtime OLD    -> nobody holds it.       UNSOUND. A live agent on a long build, a
-//	                                       CI wait, or a long model turn touches
-//	                                       nothing for hours.
-//
-// So a timestamp may FORBID a deletion and may never AUTHORISE one. Nothing
-// anywhere collects BECAUSE a tree is old: the cannot-tell arm still requires
-// positive evidence of death (OwnerGone), and this window may only overrule
-// that evidence, never substitute for it.
-//
-// # There is deliberately NO DRAIN (pm-pogo, ruled and then WITHDRAWN)
-//
-// A drain was proposed — "reclaim later once dead AND old AND previously
-// refused" — and withdrawn. Nothing here should be extended so as to build one.
-//
-// SCOPE, because the three refusal arms do not behave alike and a flat claim
-// either way is false:
-//
-//   - The REFUSE-AND-REPORT arms — OwnerUnproven (no death evidence) and
-//     unenumerable (no timestamp to check) — are PERMANENT. They never age into
-//     a collection at any age, and that is the withdrawn drain's population.
-//     This is the case carved out for human judgement.
-//   - The VETO arm is a DELAY, not a permanent refusal. A tree refused for a
-//     recent write is collected on a later sweep once it goes quiet. That is
-//     not the drain returning: positive death evidence already authorises that
-//     removal, and the veto only ever SUBTRACTS from what it authorised. Age
-//     never becomes the reason; it stops being a reason to refuse.
-//
-// Two reasons for the withdrawal, both worth having in front of you before you
-// reach for a timer on the first population:
-//
-//   - Age is not emptiness. A 30-day-old irreplaceable.go is exactly as
-//     unrecoverable as a 30-second-old one; the clock does not make it cheaper
-//     to destroy. The triage measured exactly that file sitting in two of the
-//     four cannot-tell shapes — mg-ee02's loss shape, simply aged.
-//   - Refuse-and-report exists PRECISELY because we cannot tell. Appending
-//     "…but delete it anyway after T" does not resolve the uncertainty; it
-//     waits out our patience with it, and reinstates automatic deletion for the
-//     one case carved out for human judgement.
-//
-// What replaces it is reporting: every refusal names how long the tree has been
-// untouched, so the human whose judgement this was carved out for can make the
-// call cheaply. That is the whole value of "GC on file timestamp" without a
-// timestamp ever authorising a deletion. The leak on the permanent arms is
-// accepted deliberately — a visible pin a human can clear is a categorically
-// better failure than an invisible deletion they cannot, and `pogo gc --apply
-// --force` is the way out.
-//
-// A day is chosen to clear the longest plausible quiet period of a LIVE agent
-// (a long build, a CI wait, a long model turn — minutes to an hour) by a wide
-// margin. Lengthening it costs nothing but disk; shortening it trades safety
-// for disk.
-const quietWindow = 24 * time.Hour
-
 // newestWrite reports the modification time of the most recently written thing
 // inside worktreeDir, and an error when the tree cannot be ENUMERATED — which
 // is a different and worse answer than "nothing has been written", and is why
@@ -449,85 +344,66 @@ const quietWindow = 24 * time.Hour
 //	root mtime after deep edit:       720h old   <- blind to active work
 //	root mtime after ROOT-level add:  0s old     <- fires
 //
-// A live agent editing pkg/deep/work.go leaves root mtime untouched. Anyone
-// replacing this walk with an os.Stat of the root for speed re-opens gh #97.
+// A live agent editing pkg/deep/work.go leaves root mtime untouched. Since the
+// veto was withdrawn nothing DECIDES on this number, so the cost of getting it
+// wrong is now a misleading report rather than a deleted file — but the report
+// is the thing a human clears a permanent pin on, so "untouched 30 days" for a
+// tree somebody is working in is still a wrong answer to a real question.
 //
-// # EACCES on .git and EACCES on the ROOT are OPPOSITE cases
+// # Two shapes that read alike and are not: EACCES on .git vs on the ROOT
 //
-// They are one keystroke apart and they get contrary treatment. Both names are
-// written here so that nobody collapses them again — pm-pogo's own first draft
-// of the ruling did, which is how the distinction got caught:
+// One keystroke apart, and they behave differently. Both names are written here
+// so that nobody collapses them; pm-pogo's first draft of the cannot-enumerate
+// ruling did, which is how the distinction got caught.
 //
-//	SHAPE                     WALK        VETO
-//	damaged .git pointer      full        full — newest-file mtime readable
-//	EACCES on the .git FILE   full        full — .git is a pointer file in a
-//	                                      linked worktree; the tree still lists
-//	truncated index           full        full — the index lives in the admin
+//	SHAPE                     WALK        AGE REPORT
+//	damaged .git pointer      full        measured
+//	EACCES on the .git FILE   full        measured — .git is a pointer FILE in a
+//	                                      linked worktree, and reading its mtime
+//	                                      needs SEARCH on the parent, not READ on
+//	                                      the file; the root is still 0755
+//	truncated index           full        measured — the index lives in the admin
 //	                                      dir, outside the worktree
-//	EACCES on the worktree    root only   NONE — see UnenumerableWorktreeError.
-//	ROOT                                  Refuse; do NOT fall back to root mtime.
+//	EACCES on the worktree    root only   NOT MEASURABLE — reported as unknown
+//	ROOT
 //
 // So "the filesystem is broken exactly when git is" is FALSE: in three of the
-// four shapes the whole tree walks and the untracked file is visible.
+// four shapes the whole tree walks and the untracked file is visible. The fourth
+// is not a second decision — the removal was already refused — only a line that
+// has to admit it has no age to offer.
 //
 // # HAZARD: the signal is disturbed by the event it adjudicates
 //
-// The damage that makes `git status` fail can itself refresh mtime, and it does
-// so unevenly. Corrupting a worktree's .git pointer WRITES A FILE INSIDE THE
-// TREE, so a freshly-damaged tree looks freshly worked-on (0s). chmod damage
-// moves ctime, not mtime, and a truncated index lives outside the worktree
-// entirely — so both of those look cold. Pointer damage looks ALIVE and
-// permission damage looks DEAD, for reasons that have nothing to do with
-// whether anyone is alive. This is the correlated-failure structure of gh #97
-// one layer out: the signal is perturbed by the same event it is being asked to
-// adjudicate.
+// Kept because it survives the veto's withdrawal, in weakened form. The damage
+// that makes `git status` fail can itself move mtime, unevenly: corrupting a
+// worktree's .git pointer WRITES A FILE INSIDE THE TREE, so a freshly-damaged
+// tree looks freshly worked-on (0s). chmod damage moves ctime, not mtime
+// (measured on APFS; POSIX agrees, but that is one platform), and a truncated
+// index lives outside the worktree entirely — so both of those look cold.
 //
-// It does not sink the veto, because the veto's failure mode is OVER-REFUSING —
-// a refreshed clock produces a false veto, i.e. we decline to collect something
-// we could have collected. The veto never causes a deletion; at worst it fails
-// to prevent one that ownership already authorised.
+// THE RESIDUE, a property rather than a defect to fix: the reported age's
+// TRUSTWORTHINESS VARIES BY DAMAGE SHAPE, for reasons unrelated to liveness. It
+// is worst where the damage writes into the tree and best where the tree looks
+// abandoned for unrelated reasons — the opposite of the distribution you would
+// design. Anyone extending this — a second signal, a per-shape rule, and above
+// all anyone reaching for "just check the timestamp" to decide something —
+// needs that fact first, and should read RemoveWorktree on why two attempts to
+// let this number act were withdrawn.
 //
-// THE RESIDUE, which is a property and not a defect to fix: the veto's strength
-// VARIES BY DAMAGE SHAPE, for reasons unrelated to liveness. It is STRONGEST
-// where the damage writes into the tree (pointer damage) and WEAKEST exactly
-// where the tree looks abandoned for reasons that have nothing to do with
-// whether anyone is alive (chmod, truncated index) — which is the opposite of
-// the distribution you would design. Anyone extending the veto — a second
-// signal, a shorter window, a per-shape rule — needs that fact first.
-//
-// # Why .git is COUNTED, stated as a trade rather than left implicit
-//
-// Excluding .git from this walk is tempting and was tried on this branch. It
-// measures agent writes more precisely, and it dissolves the pointer-damage
-// half of the perturbation outright: a damaged tree would stop looking freshly
-// worked-on. What it does NOT dissolve is the other half — chmod and truncated
-// index still look cold — so it buys a cleaner signal in one shape and leaves
-// the residue above intact.
-//
-// It is not taken, for two reasons:
-//
-//   - It converts a SAFE failure into an unsafe one. Counting .git over-refuses
-//     a tree whose pointer was just damaged; excluding it collects a tree that
-//     a live process may be touching through git alone. We arrive here only
-//     when the witness says PROVABLY DEAD, and the veto's entire job is to
-//     catch a witness that is wrong — so the writes it should be most alert to
-//     are exactly the ones an exclusion drops.
-//   - The ruling's reassurance is ABOUT the refreshed clock: "the veto's
-//     failure mode is over-refusing, which is the safe direction; a refreshed
-//     clock produces a false veto." Excluding .git removes the very behaviour
-//     that reasoning blesses, so it cannot be adopted on the strength of it.
-//
-// The cost is real and is accepted: a pointer-damaged, otherwise-cold, dead
-// owner's tree is pinned for one window before it collects. If that pin is ever
-// measured to matter, revisit it as a trade — with this comment — rather than
-// as an obvious cleanup.
+// .git is COUNTED in the walk, which is why pointer damage reports 0s. That was
+// a load-bearing safety decision while the veto existed; with the veto gone it
+// is only a reporting choice, and a defensible one either way — excluding .git
+// would report agent writes more precisely, at the cost of separating two
+// EACCES shapes that currently stay cleanly apart. Left as-is rather than
+// churned a third time; revisit deliberately, not as an obvious cleanup.
 func newestWrite(worktreeDir string) (time.Time, error) {
 	var newest time.Time
 	err := filepath.WalkDir(worktreeDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			// A directory we cannot read. We cannot list the files, so we
-			// cannot veto on their timestamps; say so rather than reporting a
-			// maximum over the part we happened to see.
+			// A directory we cannot read. Report no age at all rather than a
+			// maximum over the part we happened to see — a partial walk would
+			// silently answer "untouched 30 days" about a tree whose recently
+			// written half was unreadable.
 			return err
 		}
 		info, ierr := d.Info()
@@ -593,60 +469,43 @@ func checkWorktreeRemoval(worktreeDir string, owner WorktreeOwner) worktreeRemov
 		return worktreeRemovalCheck{}
 	}
 
-	// --- cannot tell -----------------------------------------------------
-	// The age is established first because it is REPORTED on every arm below,
-	// including the ones where it decides nothing. On the two PERMANENT arms
-	// (OwnerUnproven, unenumerable) it is a pure output and the only thing a
-	// human has to act on the pin with; on the veto arm alone it is also an
-	// input. See quietWindow for why those arms differ and why neither is the
-	// withdrawn drain.
+	// --- cannot tell: ONE RULE, NO EXCEPTIONS, NO CLOCK -------------------
+	//
+	// If we could not read the tree, we do not act on it. Not under any
+	// ownership, not at any age. See RemoveWorktree's doc for why the
+	// discriminators this arm used to have — first death evidence, then an
+	// mtime veto on top of it — were both withdrawn.
+	//
+	// The age is measured only to be REPORTED. A walk that fails is therefore
+	// not a second kind of refusal: the answer was already "refuse", and all
+	// that changes is that the line has to say the age could not be measured
+	// rather than name one.
 	newest, werr := newestWrite(worktreeDir)
-	age, ageKnown := time.Since(newest), werr == nil
-
-	if owner != OwnerGone {
-		// Nothing has established that this tree is unowned. Refuse, and say
-		// WHY — reporting a status failure as "dirty" would be a different and
-		// false claim. A tree we could not list is refused here too, and for
-		// the same reason; it just cannot say how long it has been quiet.
-		return worktreeRemovalCheck{
-			Refusal: &UndeterminedWorktreeError{
-				Path: worktreeDir, Err: err, Untouched: age, UntouchedKnown: ageKnown,
-			},
-			StatusErr: err,
-		}
+	return worktreeRemovalCheck{
+		Refusal: &UndeterminedWorktreeError{
+			Path: worktreeDir, Err: err,
+			Untouched: time.Since(newest), UntouchedKnown: werr == nil,
+		},
+		StatusErr: err,
 	}
-
-	// Positive evidence of death. A timestamp is now allowed to FORBID — and
-	// only to forbid.
-	if !ageKnown {
-		// EACCES on the worktree ROOT, and it is the one shape where the veto
-		// would fail OPEN rather than over-refuse: we would be adjudicating on
-		// root mtime, which is measured blind to edits below it, so the veto
-		// would stay silent while an agent was actively working. A guard whose
-		// failure mode inverts by shape is not one guard; it is two, and only
-		// one of them is safe. So this is its own refusal.
-		return worktreeRemovalCheck{
-			Refusal:   &UnenumerableWorktreeError{Path: worktreeDir, Err: err, WalkErr: werr},
-			StatusErr: err,
-		}
-	}
-	if age < quietWindow {
-		return worktreeRemovalCheck{
-			Refusal:   &RecentlyWrittenWorktreeError{Path: worktreeDir, Err: err, Age: age, Window: quietWindow},
-			StatusErr: err,
-		}
-	}
-	return worktreeRemovalCheck{StatusErr: err}
 }
 
 // WorktreeOwner is what the CALLER has established about whether anything
-// still owns a worktree. It is the discriminator for the cannot-tell case,
-// and it has to come from the caller: gitgc is deliberately free of any
-// dependency on the agent registry (see the package comment), and liveness
-// lives there.
+// still owns a worktree. It was the discriminator for the cannot-tell case.
 //
-// The zero value is the conservative arm. A caller that establishes nothing
-// gets preservation, which is the direction that cannot lose files.
+// # It NO LONGER DISCRIMINATES ANYTHING (gh #97)
+//
+// Stated first, because a parameter whose documentation explains its importance
+// while the code ignores it is precisely the failure this ticket is about.
+// Cannot-tell now refuses unconditionally, so no arm of RemoveWorktree reads
+// this value; every ownership reaches the same outcome on every path.
+//
+// It is retained rather than deleted because that is a separable decision:
+// mg-4d45 shipped it as public API, cmd/pogod's exit hook passes it with its own
+// reasoning attached, and removing it is a change to that ticket's surface
+// rather than to this one's behaviour. Retiring it is a follow-up, and if you
+// are reading this because you are about to add a caller — do not. There is
+// nothing here for a new caller to influence.
 type WorktreeOwner int
 
 const (
@@ -654,8 +513,13 @@ const (
 	// unowned. It may hold the in-flight work of a real agent.
 	OwnerUnproven WorktreeOwner = iota
 	// OwnerGone: liveness has been positively excluded — no live agent owns
-	// this tree and none is coming back for it. Only pass this when you have
-	// actually checked; it licenses destroying files that cannot be read.
+	// this tree and none is coming back for it.
+	//
+	// This used to license destroying files that could not be read. It does
+	// not any more: positive evidence of death turned out to be exactly the
+	// evidence a recent write CONTRADICTS, and the veto built to catch that
+	// contradiction could only expire rather than resolve it. See
+	// RemoveWorktree.
 	OwnerGone
 )
 
@@ -744,36 +608,57 @@ func WorktreeDirty(worktreeDir string) (bool, []string, error) {
 // to protect is worse than no guard, because it also looks like one.
 //
 // The fix is not to invert the default globally; blanket fail-closed would
-// re-open gh #31. The discriminator is OWNERSHIP, which is knowable
-// independently of git:
+// re-open gh #31. The discriminator chosen was OWNERSHIP, which is knowable
+// independently of git.
 //
-//   - OwnerUnproven — cannot-tell REFUSES, with an *UndeterminedWorktreeError
-//     that names the status failure. The files may be someone's in-flight
-//     work, and a pinned worktree is recoverable by a human where deleted
-//     files are not.
-//   - OwnerGone — cannot-tell RECLAIMS. Nobody is coming back for an orphan's
-//     files, and leaking worktrees is its own defect.
+// # That discriminator was WITHDRAWN too (gh #97). Cannot-tell now always refuses
 //
-// OwnerGone means POSITIVE evidence of death, never merely absence from a live
-// set. Absence is what a caller has when it has not looked, or has looked with
-// an instrument that failed; mapping it to OwnerGone would put every tree the
-// caller cannot see about into the destructive arm, which is the shape this
-// whole guard exists to refuse.
+// mg-4d45's OwnerGone arm reclaimed an unreadable tree on positive evidence
+// that its owner was dead. gh #97 pushed on that arm twice and it did not hold
+// either time; both attempts are recorded because the second failure is subtle
+// enough to be re-invented.
+//
+// FIRST: a proposed DRAIN — reclaim once dead AND old AND previously refused —
+// which would have bounded the pin refusing creates. Withdrawn, because age is
+// not emptiness: a 30-day-old irreplaceable.go is exactly as unrecoverable as a
+// 30-second-old one, and "delete it anyway after T" does not resolve the
+// uncertainty, it waits out our patience with it.
+//
+// SECOND: an mtime VETO, refusing even under OwnerGone when the tree had been
+// written to recently. That one was well motivated — death evidence CAN be
+// wrong, and a recent write is evidence against it, so the contradiction
+// resolved in favour of the files. It was withdrawn on what the expiry means:
+//
+//	A tree written 25 hours ago and one written 23 hours ago are in the same
+//	state. The only thing that changed is our window. Collecting at T+24h is
+//	not "we established it was safe" — it is "we stopped being able to see the
+//	objection." Absence of evidence is not evidence of absence, one layer in
+//	from where that sentence killed the drain. Expiry is not resolution.
+//
+// So the rule is now singular, and every special case is a consequence of it
+// rather than a clause in it:
+//
+//	readable tree + concluded ticket  -> collect, as ever (the common case)
+//	CANNOT-TELL                       -> REFUSE AND REPORT, always
+//
+// The cannot-enumerate case needs no separate rule: "we cannot list the files
+// so we cannot judge their timestamps" is subsumed by "we cannot read the tree
+// so we do not act on it." Ownership needs no rule either — see WorktreeOwner,
+// which no longer discriminates anything.
+//
+// mtime keeps exactly one job: it is REPORTED beside the refusal, so a human
+// deciding whether to reclaim has the signal (`untouched 30 days`). It
+// authorises nothing and vetoes nothing, so it cannot be blind in a way that
+// costs files — the worst it can do is print an unhelpful number.
+//
+// THE COST, stated rather than glossed: more pinned worktrees, and they never
+// self-clear. A pinned tree also pins its branch (phase 2 keeps a branch that is
+// still checked out). That is the price of the position and it is paid
+// knowingly — a visible pin a human can clear beats an invisible deletion they
+// cannot, and `pogo gc --apply --force` is the way out.
 //
 // An ABSENT directory is not cannot-tell: there are no files to protect, so
-// removal proceeds under either ownership and the registration still gets
-// dropped.
-//
-// # The mtime VETO on the OwnerGone arm (gh #97)
-//
-// Death evidence is not the last word on the cannot-tell arm. Even with it,
-// removal is refused when the tree was written to inside quietWindow
-// (*RecentlyWrittenWorktreeError), or when the tree cannot be listed at all so
-// there is no timestamp to check (*UnenumerableWorktreeError). A timestamp may
-// forbid a deletion here and may never authorise one — see quietWindow, which
-// carries the asymmetry, records that the proposed DRAIN was withdrawn, and
-// scopes which refusals are permanent (the two without death evidence or
-// without a readable timestamp) and which is merely a delay (the veto's own).
+// removal proceeds and the registration still gets dropped.
 //
 // Dropping the registration is load-bearing, not incidental: it is what frees
 // the polecat's branch for deletion (git refuses to delete a branch checked

@@ -35,12 +35,11 @@ func damageGitPointer(t *testing.T, wtPath string) {
 // abandoned rather than freshly written, which is what an ORPHAN actually looks
 // like on disk.
 //
-// Test fixtures build a worktree milliseconds before asserting on it, so
-// without this every fixture trips the mtime veto (gh #97) — the veto refuses a
-// cannot-tell removal when the tree was written to inside gitgc's quiet window,
-// even with positive evidence that the owner is dead. That is the veto working:
-// a tree written to a moment ago is not an abandoned one, and a test that
-// wanted an abandoned tree has to build one.
+// Nothing DECIDES on this any more — cannot-tell refuses unconditionally since
+// gh #97 — so ageing a fixture never changes an outcome. It changes what the
+// refusal REPORTS, which is the whole remaining job of mtime here, and a test
+// asserting "untouched 30 days" needs a tree that has plausibly been sitting
+// for thirty days rather than for four milliseconds.
 func ageTree(t *testing.T, wtPath string, age time.Duration) {
 	t.Helper()
 	when := time.Now().Add(-age)
@@ -105,30 +104,57 @@ func TestCannotTellRefusedWhenOwnerUnproven(t *testing.T) {
 	}
 }
 
-// TestCannotTellReclaimedWhenOwnerGone is the other half, and it is not
-// optional: a fix that only refuses converts a data-loss bug into a worktree
-// leak, and unreaped worktrees are a real problem in this repo (gh #31).
+// TestCannotTellRefusedUnderEVERYOwnership is what mg-4d45's
+// TestCannotTellReclaimedWhenOwnerGone became (gh #97).
 //
-// When liveness has been positively excluded, nobody is coming back for these
-// files and the orphan is genuinely garbage.
-func TestCannotTellReclaimedWhenOwnerGone(t *testing.T) {
-	r := newTestRepo(t)
-	r.branch("polecat-orphan")
-	wtPath := r.worktree("polecat-orphan")
-	dirty(t, wtPath, "leftover.go", "package leftover\n")
+// That test asserted the other half of mg-4d45's design: an unreadable tree
+// whose owner was PROVABLY DEAD was reclaimed, on the reasoning that nobody is
+// coming back for an orphan's files and that leaking worktrees is its own
+// defect (gh #31). The reasoning was sound and the arm is gone anyway, because
+// the evidence it rested on does not survive contact with the case it governs:
+// death evidence is exactly what a recent write contradicts, and a veto built
+// to catch that contradiction can only expire, never resolve it.
+//
+// So this now asserts the inverse, and asserts it across BOTH ownerships in one
+// loop, because that is the point: ownership no longer discriminates here. If a
+// future change re-introduces an OwnerGone arm on the cannot-tell path, this
+// goes red rather than silently permitting it.
+//
+// The cost is real and is accepted: the gh #31 orphan this used to reclaim is
+// now pinned until a human clears it or --force takes it.
+func TestCannotTellRefusedUnderEVERYOwnership(t *testing.T) {
+	for _, owner := range []WorktreeOwner{OwnerUnproven, OwnerGone} {
+		t.Run(owner.String(), func(t *testing.T) {
+			r := newTestRepo(t)
+			r.branch("polecat-orphan")
+			wtPath := r.worktree("polecat-orphan")
+			leftover := dirty(t, wtPath, "leftover.go", "package leftover\n")
 
-	damageGitPointer(t, wtPath)
-	// An orphan is a tree nobody has touched in a long time. Fixtures build one
-	// in milliseconds, so age it — otherwise the mtime veto refuses on the
-	// grounds that something just wrote to it, which is a true statement about
-	// the fixture and a false one about the situation it stands for (gh #97).
-	ageTree(t, wtPath, 2*quietWindow)
+			damageGitPointer(t, wtPath)
+			// Aged well past any window a veto could ever have used, so the
+			// refusal cannot be mistaken for "it was recently written".
+			ageTree(t, wtPath, 30*24*time.Hour)
 
-	if err := RemoveWorktree(r.dir, wtPath, OwnerGone); err != nil {
-		t.Fatalf("an orphan whose owner is gone must still be reclaimable: %v", err)
-	}
-	if _, err := os.Stat(wtPath); !os.IsNotExist(err) {
-		t.Fatalf("worktree dir should be gone, stat gave: %v", err)
+			err := RemoveWorktree(r.dir, wtPath, owner)
+			if err == nil {
+				t.Fatal("a tree we could not read must be refused under EVERY ownership; got nil")
+			}
+			var uwe *UndeterminedWorktreeError
+			if !errors.As(err, &uwe) {
+				t.Fatalf("want *UndeterminedWorktreeError, got %T: %v", err, err)
+			}
+			// The age is REPORTED. It is the only thing a human has to decide
+			// the pin with, since nothing will ever clear it automatically.
+			if !uwe.UntouchedKnown {
+				t.Error("the age must be measured and reported on a permanent refusal")
+			}
+			if !strings.Contains(err.Error(), "untouched 30 days") {
+				t.Errorf("refusal must report how long the tree has been untouched, got: %v", err)
+			}
+			if _, serr := os.Stat(leftover); serr != nil {
+				t.Fatalf("THE WORK WAS DESTROYED under %s: %v", owner, serr)
+			}
+		})
 	}
 }
 
