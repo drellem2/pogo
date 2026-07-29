@@ -78,8 +78,9 @@ func TestSweepRefusesCannotTellWorktree(t *testing.T) {
 	}
 
 	// The branch is still checked out in the tree we kept, so it must be kept
-	// too, and said to be kept for that reason. This is the honest cost of the
-	// refusal, and it is what the drain (quietWindow) exists to bound.
+	// too, and said to be kept for that reason. This is the honest, accepted
+	// cost of the refusal: a pin nothing reclaims automatically, cleared by a
+	// human or by --force. A visible pin beats an invisible deletion.
 	br := findBranchAction(res.BranchesKept, "polecat-damaged")
 	if br == nil || br.Reason != "checked out in a worktree" {
 		t.Errorf("branch of a kept worktree should be kept as checked out, got %+v", br)
@@ -337,8 +338,8 @@ func TestSweepCannotTellUnenumerableRefuses(t *testing.T) {
 // missing line prompts investigation, a plausible one ends it.
 //
 // Both outcomes are asserted, because both are reachable and both used to lie
-// by omission: the refusal (which did not log at all) and the drain (which
-// logged only the ticket state).
+// by omission: the refusal (which did not log at all) and the death-evidenced
+// removal (which logged only the ticket state).
 func TestSweepCannotTellLogNeverNamesAnInnocentReason(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
