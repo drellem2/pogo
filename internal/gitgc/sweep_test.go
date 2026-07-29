@@ -61,12 +61,32 @@ func (r *testRepo) branch(name string) {
 	r.git("branch", name)
 }
 
-// worktree registers a worktree at <repo>/../wt-<name> for branch.
+// worktree registers a worktree for branch at the PRODUCTION-shaped path — a
+// directory under a polecats dir whose basename is the owning polecat's name,
+// as `git worktree add <polecats>/<name> -b polecat-<name>` builds it at spawn.
+// The basename is load-bearing since mg-dd92: it is what the liveness gate
+// reads. A helper that parked worktrees at an arbitrary path would make every
+// liveness assertion in this file a statement about a layout production never
+// produces.
 func (r *testRepo) worktree(branch string) string {
 	r.t.Helper()
-	path := filepath.Join(filepath.Dir(r.dir), "wt-"+branch)
+	return r.worktreeOwnedBy(BranchSuffix(branch), branch)
+}
+
+// worktreeOwnedBy registers a worktree at <polecats>/<owner> checked out on
+// branch — which may be a FOREIGN branch, i.e. one whose name does not embed
+// owner. That divergence is the whole subject of gh #94, so it has to be
+// expressible here.
+func (r *testRepo) worktreeOwnedBy(owner, branch string) string {
+	r.t.Helper()
+	path := filepath.Join(r.polecatsDir(), owner)
 	r.git("worktree", "add", "-q", path, branch)
 	return path
+}
+
+// polecatsDir is this repo's stand-in for ~/.pogo/polecats.
+func (r *testRepo) polecatsDir() string {
+	return filepath.Join(filepath.Dir(r.dir), "polecats")
 }
 
 func TestListPolecatBranchesAndWorktrees(t *testing.T) {

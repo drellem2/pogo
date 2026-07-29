@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/drellem2/pogo/internal/gitgc"
 	"github.com/drellem2/pogo/internal/testsandbox"
 )
 
@@ -685,6 +686,17 @@ func TestHandleSpawnPolecat_WorktreeTrueCreatesWorktree(t *testing.T) {
 	}
 	if _, err := os.Stat(expectedWorktree); err != nil {
 		t.Errorf("expected worktree at %s: %v", expectedWorktree, err)
+	}
+	// The path's BASENAME is the polecat's name, and that is now load-bearing
+	// rather than cosmetic: since gh #94 the git GC decides whether a worktree
+	// is occupied by reading the name back off the path and looking it up in
+	// its live set. A spawn that named the directory anything else would make
+	// every live polecat invisible to that gate and get its tree deleted
+	// mid-task — so this is asserted here, at the one place that writes the
+	// path, against the exact function that reads it.
+	if got := gitgc.PolecatNameForWorktree(a.WorktreeDir); got != a.Name {
+		t.Errorf("gitgc reads worktree %q as belonging to polecat %q, but it belongs to %q — "+
+			"the git GC liveness gate keys on this basename (gh #94)", a.WorktreeDir, got, a.Name)
 	}
 }
 

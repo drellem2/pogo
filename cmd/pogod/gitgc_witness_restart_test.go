@@ -66,12 +66,14 @@ func (r *polecatRepo) git(args ...string) string {
 }
 
 // addPolecatWorktree creates branch polecat-<name> and checks it out in a
-// worktree, mirroring a live polecat's layout. The sweep keys its exclusion on
-// the branch's suffix, which is <name>.
+// worktree at <polecats>/<name>, mirroring a live polecat's layout exactly.
+// The basename is not decorative: since gh #94 the sweep keys its liveness
+// exclusion on the worktree's PATH, so a fixture parked anywhere else would be
+// making claims about a layout production never builds.
 func (r *polecatRepo) addPolecatWorktree(name string) string {
 	r.t.Helper()
 	branch := gitgc.BranchPrefix + name
-	path := filepath.Join(filepath.Dir(r.dir), "wt-"+name)
+	path := filepath.Join(filepath.Dir(r.dir), "polecats", name)
 	r.git("branch", branch)
 	r.git("worktree", "add", "-q", path, branch)
 	return path
@@ -172,7 +174,7 @@ func TestLivePolecatSet_WitnessGuardsDoneButRunningWorktreeAcrossRestart(t *test
 	}
 	// Kept for the RIGHT reason — the live-polecat guard, not some unrelated
 	// in-flight classification that would mask a broken guard.
-	if len(res.WorktreesKept) != 1 || res.WorktreesKept[0].Reason != "live polecat" {
+	if len(res.WorktreesKept) != 1 || res.WorktreesKept[0].Reason != "live polecat 0130" {
 		t.Fatalf("want the worktree kept as a live polecat, got %+v", res.WorktreesKept)
 	}
 }

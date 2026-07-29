@@ -66,6 +66,62 @@ In the `onExit` callback (cmd/pogod/main.go):
 
 On pogod startup, run `git worktree prune` on repos with known worktrees. This handles the case where pogod crashed and left stale worktrees behind.
 
+## Ownership: the path names the polecat, the branch does not
+
+The garbage collector (`internal/gitgc`, run by pogod on a ticker and by
+`pogo gc`) reclaims concluded polecats' worktrees. Deciding *whether a worktree
+is still in use* is the one question it must never get wrong, and there are two
+strings that look like they answer it:
+
+| String | Answers | Sound key for |
+|---|---|---|
+| the worktree's **path basename** (`~/.pogo/polecats/<name>`) | whose tree this is | removing a **directory** |
+| the checked-out **branch's** `polecat-` suffix | whose work this is | deleting a **ref** |
+
+They agree only while a polecat stays on the branch it was spawned on. A
+polecat that checks out a *foreign* branch — which the review and QA roles are
+instructed to do, and which anyone fixing conflicts on an existing PR will do —
+makes them disagree.
+
+The GC used to read liveness off the **branch** (gh #94). A live polecat on a
+foreign branch was therefore invisible to the liveness gate: it inherited the
+foreign, concluded ticket's state, its worktree was removed **mid-task**, and
+freeing its branch waived the branch-deletion guard so the ref went too. The
+agent kept running, `pogo agent list` kept reporting it healthy, and the work
+survived only because the commit was still loose in the shared object store — a
+`git gc --prune=now` would have finished the job.
+
+**The rule now:** worktree liveness is keyed on the path
+(`gitgc.PolecatNameForWorktree`), branch deletion on the branch suffix. Neither
+substitutes for the other. This makes the spawn-time path layout load-bearing:
+`~/.pogo/polecats/<name>` is not a convention, it is the record of who owns the
+tree, and a spawn that named the directory anything else would make every live
+polecat invisible to the gate again.
+
+The inverse failure is not traded away. A polecat that has exited is in no live
+set under any key, so a normal exit still reaps its tree — the GC's ability to
+collect is asserted by a control in the same test as the fix
+(`TestSweepKeepsLivePolecatOnForeignBranch`).
+
+## Reading the GC log
+
+The sweep logs one line per action. Before gh #94 it logged counts only, so a
+removal in a multi-megabyte pogod log was a bare number and "did the GC take my
+worktree, and why" could not be answered after the fact.
+
+```
+pogod: git GC /Users/x/dev/pogo — removed worktree /Users/x/.pogo/polecats/caa65 (owner caa65, branch polecat-dccb): ticket archived
+pogod: git GC /Users/x/dev/pogo — kept worktree /Users/x/.pogo/polecats/beef (owner beef, branch polecat-beef): 3 uncommitted change(s) — rerun with --force to discard
+```
+
+Each line names the repo swept, what happened, which tree, **whose** tree
+(`owner`), what was checked out in it (`branch`), and the reason. `owner` and
+`branch` are printed separately on purpose: when they differ you are looking at
+exactly the situation gh #94 was about.
+
+Only *actions* log — removals, and trees deliberately preserved. A
+kept-because-live line per polecat per tick would be noise.
+
 ## What changes
 
 ### internal/agent/api.go — handleSpawnPolecat

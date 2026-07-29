@@ -16,11 +16,23 @@ type Options struct {
 	// TargetBranch is the merge target a *done* ticket's branch must be
 	// merged into before deletion. Empty defaults to DefaultTargetBranch.
 	TargetBranch string
-	// LivePolecats is the do-not-touch set, keyed by polecat name (which
-	// equals a branch's "polecat-" suffix and its worktree basename).
-	// pogod fills this from its agent registry so a sweep never disturbs a
-	// running polecat — even one whose worktree was unlinked at refinery
-	// submit time and so is no longer git-checked-out.
+	// LivePolecats is the do-not-touch set, keyed by polecat NAME. pogod
+	// fills it from its agent registry unioned with the restart-surviving
+	// polecat witness (mg-0130), so a sweep never disturbs a running polecat
+	// — including one that outlived the pogod that spawned it, and one whose
+	// worktree was unlinked at refinery submit time and so is no longer
+	// git-checked-out.
+	//
+	// A polecat's name reaches this set from TWO independent directions, and
+	// conflating them is what caused gh #94:
+	//
+	//   - a worktree's PATH basename — whose tree this is. The only sound key
+	//     for "may I delete this directory" (see PolecatNameForWorktree).
+	//   - a branch's "polecat-" suffix — whose work this is. The sound key
+	//     for "may I delete this ref", used in phase 2.
+	//
+	// They agree only while a polecat stays on its own branch. Phase 1 must
+	// use the first and phase 2 the second; neither substitutes for the other.
 	LivePolecats map[string]bool
 	// Tickets, when non-nil, supplies work-item states directly. When nil,
 	// Sweep loads them via LoadTicketIndex (`mg list`). Injecting a map
@@ -56,6 +68,13 @@ func (o Options) logf(format string, args ...any) {
 	}
 }
 
+// removeWorktreeFn is the worktree-removal call the sweep makes, indirected so
+// a test can force the FAILED-removal branch. A failed removal is otherwise
+// unreachable from a test — it needs git and os.RemoveAll to both lose to the
+// filesystem — and it is the branch the freed-flag ordering turns on
+// (mg-dd92). Production always uses RemoveWorktreeForce.
+var removeWorktreeFn = RemoveWorktreeForce
+
 // BranchAction records the GC decision for one polecat branch.
 type BranchAction struct {
 	Branch string
@@ -66,9 +85,31 @@ type BranchAction struct {
 
 // WorktreeAction records the GC decision for one polecat worktree.
 type WorktreeAction struct {
-	Path   string
+	Path string
+	// Owner is the polecat the worktree BELONGS to, derived from Path (see
+	// PolecatNameForWorktree). It is what the liveness gate is keyed on, and
+	// it is recorded separately from Branch because the two differ in exactly
+	// the case gh #94 was about — reading a removal line without it cannot
+	// tell you whose tree was taken.
+	Owner  string
 	Branch string
 	Reason string
+}
+
+// String renders one worktree action for an operator: whose tree it was, what
+// was checked out in it, and why the sweep decided what it decided. It is the
+// unit of a GC log line, and it is exported because the caller that writes
+// those lines (cmd/pogod) is what has to be tested for actually carrying them.
+func (a WorktreeAction) String() string {
+	owner := a.Owner
+	if owner == "" {
+		owner = "unknown"
+	}
+	branch := a.Branch
+	if branch == "" {
+		branch = "none"
+	}
+	return fmt.Sprintf("%s (owner %s, branch %s): %s", a.Path, owner, branch, a.Reason)
 }
 
 // Result is the outcome of a sweep.
@@ -125,17 +166,28 @@ func Sweep(opts Options) (Result, error) {
 		if wt.Main || wt.Bare || !wt.IsPolecat() {
 			continue
 		}
-		name := BranchSuffix(wt.Branch)
-		if opts.LivePolecats[name] {
-			res.WorktreesKept = append(res.WorktreesKept, WorktreeAction{
-				Path: wt.Path, Branch: wt.Branch, Reason: "live polecat",
-			})
+		// WHOSE tree this is, not what is checked out in it. These differ
+		// whenever a polecat works a foreign branch, and reading liveness off
+		// the branch is what deleted a live polecat's tree in gh #94.
+		owner := PolecatNameForWorktree(wt.Path)
+		if opts.LivePolecats[owner] {
+			kept := WorktreeAction{
+				Path: wt.Path, Owner: owner, Branch: wt.Branch, Reason: "live polecat " + owner,
+			}
+			res.WorktreesKept = append(res.WorktreesKept, kept)
 			continue
 		}
+		// Ticket state stays keyed on the checked-out branch. It answers a
+		// different question from liveness — "has this work concluded", not
+		// "is anyone using this directory" — and it is only ever reached for a
+		// tree whose owner is already established as not live, so it cannot
+		// reach a running polecat. Re-keying it too would strand every
+		// worktree whose basename resolves to no work item, which is the
+		// symmetric defect: never reaping a dead tree.
 		_, state := tickets.BranchState(wt.Branch)
 		if !state.Concluded() {
 			res.WorktreesKept = append(res.WorktreesKept, WorktreeAction{
-				Path: wt.Path, Branch: wt.Branch, Reason: "ticket " + state.String(),
+				Path: wt.Path, Owner: owner, Branch: wt.Branch, Reason: "ticket " + state.String(),
 			})
 			continue
 		}
@@ -146,24 +198,36 @@ func Sweep(opts Options) (Result, error) {
 		// decision an apply would make.
 		if !opts.Force {
 			if isDirty, files, derr := WorktreeDirty(wt.Path); derr == nil && isDirty {
-				res.WorktreesKept = append(res.WorktreesKept, WorktreeAction{
-					Path: wt.Path, Branch: wt.Branch,
+				kept := WorktreeAction{
+					Path: wt.Path, Owner: owner, Branch: wt.Branch,
 					Reason: fmt.Sprintf("%d uncommitted change(s) — rerun with --force to discard", len(files)),
-				})
-				opts.logf("kept worktree %s (%s): %d uncommitted change(s)", wt.Path, wt.Branch, len(files))
+				}
+				res.WorktreesKept = append(res.WorktreesKept, kept)
+				opts.logf("kept worktree %s", kept.String())
 				continue
 			}
 		}
-		freed[wt.Branch] = true
-		action := WorktreeAction{Path: wt.Path, Branch: wt.Branch, Reason: "ticket " + state.String()}
+		action := WorktreeAction{Path: wt.Path, Owner: owner, Branch: wt.Branch, Reason: "ticket " + state.String()}
 		if opts.DryRun {
-			opts.logf("would remove worktree %s (%s)", wt.Path, wt.Branch)
+			// A dry run reports what an apply WOULD do, so the branch is
+			// treated as freed for phase 2's benefit — no removal is attempted
+			// and none can fail.
+			freed[wt.Branch] = true
+			opts.logf("would remove worktree %s", action.String())
 		} else {
-			if err := RemoveWorktreeForce(opts.Repo, wt.Path); err != nil {
+			if err := removeWorktreeFn(opts.Repo, wt.Path); err != nil {
 				res.Errors = append(res.Errors, fmt.Sprintf("remove worktree %s: %v", wt.Path, err))
 				continue
 			}
-			opts.logf("removed worktree %s (%s)", wt.Path, wt.Branch)
+			// Marked freed only AFTER the removal actually succeeded. Setting
+			// it up front survived a failed removal and told phase 2 the
+			// branch was no longer checked out when it still was, so the
+			// sweep went on to attempt a deletion git was always going to
+			// refuse — reporting an error instead of the correct "kept:
+			// checked out in a worktree" (mg-dd92; code-read, never
+			// reproduced in the wild).
+			freed[wt.Branch] = true
+			opts.logf("removed worktree %s", action.String())
 		}
 		res.WorktreesRemoved = append(res.WorktreesRemoved, action)
 	}
@@ -295,26 +359,26 @@ func sweepOrphanDirs(opts Options, tickets TicketIndex, registered map[string]bo
 		branch := BranchPrefix + name
 		if opts.LivePolecats[name] {
 			res.WorktreesKept = append(res.WorktreesKept, WorktreeAction{
-				Path: path, Branch: branch, Reason: "orphan dir, live polecat",
+				Path: path, Owner: name, Branch: branch, Reason: "orphan dir, live polecat " + name,
 			})
 			continue
 		}
 		_, state := tickets.BranchState(branch)
 		if !state.Concluded() {
 			res.WorktreesKept = append(res.WorktreesKept, WorktreeAction{
-				Path: path, Branch: branch, Reason: "orphan dir, ticket " + state.String(),
+				Path: path, Owner: name, Branch: branch, Reason: "orphan dir, ticket " + state.String(),
 			})
 			continue
 		}
-		action := WorktreeAction{Path: path, Branch: branch, Reason: "orphan dir, ticket " + state.String()}
+		action := WorktreeAction{Path: path, Owner: name, Branch: branch, Reason: "orphan dir, ticket " + state.String()}
 		if opts.DryRun {
-			opts.logf("would remove orphan dir %s (%s)", path, branch)
+			opts.logf("would remove orphan dir %s", action.String())
 		} else {
 			if err := os.RemoveAll(path); err != nil {
 				res.Errors = append(res.Errors, fmt.Sprintf("remove orphan dir %s: %v", path, err))
 				continue
 			}
-			opts.logf("removed orphan dir %s (%s)", path, branch)
+			opts.logf("removed orphan dir %s", action.String())
 		}
 		res.WorktreesRemoved = append(res.WorktreesRemoved, action)
 	}
@@ -338,7 +402,7 @@ func (r Result) Summary() string {
 	if len(r.WorktreesRemoved) > 0 {
 		fmt.Fprintf(&b, "  worktrees %s:\n", verb)
 		for _, w := range sortedWorktrees(r.WorktreesRemoved) {
-			fmt.Fprintf(&b, "    %s (%s)\n", w.Path, w.Branch)
+			fmt.Fprintf(&b, "    %s\n", w.String())
 		}
 	}
 	if len(r.BranchesDeleted) > 0 {
