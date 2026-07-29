@@ -1124,6 +1124,28 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		return
 	}
 
+	// Dispatch gate: refuse to put a worker on a work item whose assignee gates
+	// it away from automatic execution — "human" (a person must do this by hand)
+	// or "parked" (deliberately set aside). This is the mg-4798 ruling: the rule
+	// was already enforced in Go where work is WATCHED (internal/stallwatch) and
+	// merely DESCRIBED in prose where work is DISPATCHED, which is to say it was
+	// not enforced at all on the path that matters. The predicate is shared, not
+	// restated — see dispatchgate.go and config.IsDispatchGated.
+	//
+	// 409, not 503: unlike the drain above this is not a retryable "later". The
+	// request conflicts with the item's own state, and retrying it unchanged will
+	// be refused identically forever — the caller has to reassign the item or
+	// pick a different one.
+	//
+	// Placed with the drain gate, before ValidateAgentName and every side effect,
+	// so a refused dispatch leaves no worktree, agent dir, or prompt file behind
+	// (mg-ef80). It fails OPEN on a missing item or absent --id, which is a
+	// deliberate and documented limit — see MGDispatchGate.DispatchGated.
+	if refusal := r.dispatchGateRefusal(spawnReq.Id); refusal != "" {
+		failPolecatSpawn(w, spawnReq, http.StatusConflict, refusal)
+		return
+	}
+
 	// Validate before the worktree, agent dir, and expanded prompt file get
 	// created — a rejected name should leave nothing behind (mg-ef80).
 	if err := ValidateAgentName(spawnReq.Name); err != nil {

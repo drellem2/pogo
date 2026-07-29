@@ -72,8 +72,19 @@ var (
 // IS the store. Here the blast radius of forgetting is releasing a live agent's
 // claim out from under it, so the default has to be the safe one.
 func (m MGClaimReleaser) storeRoot() string {
-	if m.Root != "" {
-		return m.Root
+	return macguffinStoreRoot(m.Root)
+}
+
+// macguffinStoreRoot resolves the macguffin store root, honouring an explicit
+// override first. It carries the rationale documented on
+// MGClaimReleaser.storeRoot above, and is package-level because the dispatch
+// gate (dispatchgate.go) reads the same store and must inherit the same
+// test-safe default — a second copy of this resolution would be free to
+// disagree, and the way it would disagree is by reaching the live ~/.macguffin
+// from a test binary.
+func macguffinStoreRoot(override string) string {
+	if override != "" {
+		return override
 	}
 	if testing.Testing() {
 		testStoreOnce.Do(func() {

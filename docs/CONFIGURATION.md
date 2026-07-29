@@ -239,6 +239,37 @@ That is because `assignee` carries two incompatible meanings:
 manual-QA items that way precisely so no worker is dispatched at them. So the
 detectors test "is this gated?", never "is this assigned to the coordinator?".
 
+**The gate is enforced at dispatch, not just at detection (mg-4798).**
+`non_dispatchable_assignees` governs two different paths, and it is worth being
+precise about which is which:
+
+| Path | Question | Effect of a gated assignee |
+|---|---|---|
+| stall-watch (`internal/stallwatch`) | what to **watch** | no nudge about the item |
+| `pogo agent spawn-polecat` (`internal/agent`) | what to **dispatch** | **the spawn is refused, HTTP 409** |
+
+Until mg-4798 was built, only the first existed. The second was a *sentence in a
+prompt template* — `mayor.md` asserted that a `--assignee=human` item "won't be
+dispatched" — so the actual guarantee was that an agent had read and retained a
+paragraph, and `pogo agent spawn-polecat --id <a human-assigned item>` would
+spawn a worker without complaint. Both paths now read one predicate,
+`config.IsDispatchGated`, so the vocabulary cannot mean one thing to the watcher
+and another to the dispatcher.
+
+The refusal is `409 Conflict`, deliberately **not** the retryable `503` the
+redeploy drain uses: retrying an unchanged request will be refused identically
+forever. Reassign the item or clear its assignee. The refusal is recorded as an
+`agent_spawn_failed` event carrying the reason, so a gap in the spawn record can
+be read back to its cause.
+
+**What the dispatch gate does not do.** It **fails open** when it cannot answer:
+no `--id` (which is optional by design), an id absent from the store, or an
+unreadable store all dispatch normally, the last with a loud log line. It stops a
+coordinator dispatching a gated item it read out of `available/` — the actual
+failure mode — and is not a proof that no worker can reach gated work. Failing
+closed was rejected because `--id` is optional and because one bad path in
+macguffin would then halt the whole fleet.
+
 **Why `parked` is a separate sentinel and not a convention about `human`
 (mg-a3a2).** Until mg-a3a2, `human` was the only value that silenced these
 detectors, so it accumulated three incompatible senses in one queue: *gated on

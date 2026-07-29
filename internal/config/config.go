@@ -253,6 +253,45 @@ var DefaultFastPriorities = []string{"high"}
 // Kept as a var because a slice cannot be a const; treat it as read-only.
 var DefaultNonDispatchableAssignees = []string{"human", "parked"}
 
+// IsDispatchGated reports whether assignee names a non-dispatchable executor —
+// whether an item carrying it is gated away from AUTOMATIC dispatch. gates is
+// the configured vocabulary; empty falls back to
+// DefaultNonDispatchableAssignees, so the zero value is the safe default rather
+// than "nothing is gated".
+//
+// Matching is case-insensitive and whitespace-trimmed, so a "Human" or
+// " human " frontmatter value still gates — mirroring the priority vocabulary.
+// Unassigned ("") is NOT gated: an item nobody owns is the ordinary
+// dispatchable case, and it is the one the fleet runs on.
+//
+// This lives here, beside the vocabulary it tests, because it has two callers
+// that must never disagree:
+//
+//   - internal/stallwatch decides what to WATCH with it (watchedForDispatch).
+//   - internal/agent decides what to DISPATCH with it (handleSpawnPolecat).
+//
+// Those two answering differently is precisely the defect mg-4798 named: one
+// rule enforced in Go on the path that watches, and described only in prose on
+// the path that dispatches. A rule belongs in the executable path, and a rule
+// with two implementations has already begun to drift. One function, both
+// callers, no second copy — so a change to the gate vocabulary cannot leave the
+// dispatcher honouring the old one.
+func IsDispatchGated(assignee string, gates []string) bool {
+	a := strings.ToLower(strings.TrimSpace(assignee))
+	if a == "" {
+		return false
+	}
+	if len(gates) == 0 {
+		gates = DefaultNonDispatchableAssignees
+	}
+	for _, g := range gates {
+		if a == strings.ToLower(strings.TrimSpace(g)) {
+			return true
+		}
+	}
+	return false
+}
+
 // Config holds pogo daemon configuration.
 type Config struct {
 	Port            int

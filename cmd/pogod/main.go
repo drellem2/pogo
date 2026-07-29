@@ -1157,6 +1157,22 @@ Flags:
 	// Configure agent command templates and the harness providers.
 	agentRegistry.SetCommandConfig(&cfg.Agents)
 
+	// Arm the dispatch gate with the configured non-dispatchable vocabulary, so
+	// `pogo agent spawn-polecat` refuses a work item gated to a human or parked
+	// (mg-4798). The vocabulary is read from [stallwatch] because that is where
+	// the key already lives and both consumers must agree on it — one list, one
+	// predicate (config.IsDispatchGated), two enforcement points. A daemon that
+	// never reaches this line still gates the defaults; this only applies an
+	// operator's `non_dispatchable_assignees` override.
+	//
+	// Deliberately NOT behind stallWatchArmed: the gate is not a detector and has
+	// nothing to do with whether a coordinator is being watched. Tying it to that
+	// would silently disable it on every sandbox and unconfigured daemon, which
+	// is the class of gap mg-da48 and mg-6c4b were both about.
+	agentRegistry.SetDispatchGate(agent.MGDispatchGate{
+		Gates: cfg.StallWatch.NonDispatchableAssignees,
+	})
+
 	// Role names were resolved by pinAndResolveRoles above, before any consumer
 	// could read one. cfg here is the post-pin config.
 	coordinator := cfg.Agents.CoordinatorName()

@@ -88,6 +88,76 @@ func ListFrom(root string, statuses ...string) ([]WorkItem, error) {
 	return items, nil
 }
 
+// FindFrom returns the single work item with the given id from a workspace
+// root, searching the status directories in the order listed in statusDirs
+// (available, claimed, done) and stopping at the first hit. The bool reports
+// whether it was found; a missing item is not an error, because "no such item"
+// is a routine answer for a caller holding an id from an unknown source.
+//
+// This exists because ListFrom is the wrong primitive for a by-id question in
+// two ways. It parses every item in every scanned directory to answer about
+// one, and — the load-bearing half — its ".md" suffix filter cannot see
+// claimed/ at all: a claim renames the file to <id>.md.<pid> (see
+// agent.claimHeld, which learned this the same way). A by-id lookup built on
+// ListFrom would therefore report a claimed item as absent, silently, which is
+// exactly the shape of failure a gate must not have.
+//
+// Lookup is a direct stat of <dir>/<id>.md first, falling back to a prefix scan
+// only on a miss — so the common case costs one open and the claimed/ case
+// still resolves.
+func FindFrom(root, id string) (WorkItem, bool, error) {
+	// An empty id would build "<dir>/.md"; a separator or ".." in one would let
+	// a caller's unvalidated string walk out of the workspace. Neither is a
+	// legal macguffin id, so both are "not found" rather than a read.
+	if id == "" || strings.ContainsAny(id, `/\`) || id == ".." {
+		return WorkItem{}, false, nil
+	}
+	for _, sd := range statusDirs {
+		dir := filepath.Join(root, sd.dir)
+		item, err := parseWorkItem(filepath.Join(dir, id+".md"), sd.status)
+		if err == nil {
+			return item, true, nil
+		}
+		// Miss on the exact name. In claimed/ the file carries a .<pid> suffix,
+		// so fall back to a scan for <id>.md* before giving up on this status.
+		name, ok, err := findByPrefix(dir, id+".md")
+		if err != nil {
+			return WorkItem{}, false, err
+		}
+		if !ok {
+			continue
+		}
+		item, err = parseWorkItem(filepath.Join(dir, name), sd.status)
+		if err != nil {
+			continue // present but unparseable — same treatment as ListFrom
+		}
+		return item, true, nil
+	}
+	return WorkItem{}, false, nil
+}
+
+// findByPrefix returns the first entry in dir whose name starts with prefix. A
+// missing directory is not an error — an absent claimed/ or done/ simply holds
+// no items.
+func findByPrefix(dir, prefix string) (string, bool, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		if strings.HasPrefix(e.Name(), prefix) {
+			return e.Name(), true, nil
+		}
+	}
+	return "", false, nil
+}
+
 // statusRequested reports whether a status directory should be scanned given
 // the caller's filter. An empty filter selects every status.
 func statusRequested(status string, filter []string) bool {

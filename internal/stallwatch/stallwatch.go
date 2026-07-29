@@ -472,17 +472,14 @@ func (w *Watcher) watchedForDispatch(assignee string) bool {
 // isDispatchGated reports whether an assignee names a non-dispatchable executor
 // (default: "human", "parked"). Matching is case-insensitive and whitespace-trimmed, so a
 // "Human" or " human " frontmatter value still gates, mirroring isFastPriority.
+//
+// The implementation lives in config.IsDispatchGated because stall-watch is no
+// longer its only caller: the spawn handler enforces the same gate at the
+// dispatch point (internal/agent.handleSpawnPolecat, mg-4798). This method stays
+// as the Watcher-shaped spelling that binds it to this watcher's configured
+// vocabulary — it must not grow a second copy of the rule.
 func (w *Watcher) isDispatchGated(assignee string) bool {
-	a := strings.ToLower(strings.TrimSpace(assignee))
-	if a == "" {
-		return false
-	}
-	for _, g := range w.cfg.NonDispatchableAssignees {
-		if a == strings.ToLower(strings.TrimSpace(g)) {
-			return true
-		}
-	}
-	return false
+	return config.IsDispatchGated(assignee, w.cfg.NonDispatchableAssignees)
 }
 
 // tryFire enforces a per-category cooldown. It returns true and records the

@@ -405,6 +405,13 @@ type Registry struct {
 	// wiring, so a caller that never calls SetClaimReleaser still gets it.
 	claimReleaser ClaimReleaser
 
+	// dispatchGate refuses to dispatch a polecat onto a work item whose assignee
+	// gates it away from automatic execution (mg-4798). Nil means the default
+	// MGDispatchGate, which enforces config.DefaultNonDispatchableAssignees — so
+	// the gate holds without any wiring, and a caller that never calls
+	// SetDispatchGate still gets it. See dispatchgate.go.
+	dispatchGate DispatchGate
+
 	// draining, when true, makes handleSpawnPolecat refuse to dispatch new
 	// polecats — the drain half of the pogo self-deploy path (mg-cae1 /
 	// mg-6afa). Only pogod knows its children and controls dispatch, so the
