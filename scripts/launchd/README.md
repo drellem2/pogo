@@ -241,12 +241,25 @@ belongs there instead. In order:
 2. **Lock.** `~/.pogo/deploy.lock.d`, its own, never recovery's. A redeploy can
    legitimately run for an hour while the drain waits on polecats; a second fire
    must not start a competing drain.
-3. **Tools.** `mg` and `pogo` are resolved to **absolute paths**, and `mg` only
-   after an identity check. On macOS `/usr/bin/mg` is the Micro-Emacs editor; it
-   satisfies `command -v mg`, panics headless, and delivers no alert at all
-   (mg-015f, mg-dd5f). The alert path is resolved *first*, before anything that
-   can fail — a job whose first failure is "I cannot tell you about failures" is
-   the silent nightly all over again.
+3. **Tools.** `mg`, `pogo` and `git` are resolved to **absolute paths**, and `mg`
+   and `git` only after the candidate proves itself by **running**. On macOS
+   `/usr/bin/mg` is the Micro-Emacs editor; it satisfies `command -v mg`, panics
+   headless, and delivers no alert at all (mg-015f, mg-dd5f). The alert path is
+   resolved *first*, before anything that can fail — a job whose first failure is
+   "I cannot tell you about failures" is the silent nightly all over again.
+
+   `git` was the one primitive still trusted on sight, pinned to `/usr/bin/git`;
+   it is now checked by execution like the others (mg-b72a). That path is the
+   Xcode Command Line Tools shim, and a damaged install behind it makes it fail
+   *every* call — `git --version` included — with `unable to locate xcodebuild`
+   and exit 71, while staying executable and on `PATH`. So each candidate must
+   print `git version` before it is accepted, a real Homebrew/local git is
+   preferred, and the shim stays in the list so a CLT-only box still deploys.
+   `GIT=` pins one explicitly and is health-checked too. **No such breakage has
+   been reproduced here** — this is a consistency change, and on a host whose
+   only git is a healthy `/usr/bin/git` its whole effect is that a future broken
+   shim would abort once with an alert instead of failing separately inside every
+   `git` call in `sync_src`.
 4. **`GH_TOKEN` at run time**, matched out of `~/.zshenv` one line at a time and
    `eval`'d alone — never sourced wholesale (that file's `export PATH=` would
    strip `go` and reproduce the 07-23 `go: command not found` failure), and
@@ -305,6 +318,7 @@ All optional; the defaults are the production values.
 | `POGO_DEPLOY_NOW` | unset | `HH` override for the window guard. Tests only. |
 | `POGO_DEPLOY_GRACE` | `120` | Seconds before the post-bounce mail-check re-read. |
 | `POGO_DEPLOY_ZSHENV` | `~/.zshenv` | Where `GH_TOKEN` is read from. |
+| `GIT` | first candidate that prints `git version` | Pins a specific git. Still checked by execution — a pin that cannot run is the same outage as no pin. |
 | `POGO_DEPLOY_ALERT_TO` | `pm-pogo` | First alert recipient; `human` is always copied. |
 
 ### Managing the deploy agent

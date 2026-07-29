@@ -48,6 +48,29 @@
 # `pogo-self-deploy` are addressed by absolute path too. A wrapper that alerts
 # via a binary it did not verify is a wrapper with no alert path.
 #
+# ...AND AN ABSOLUTE PATH IS NOT A WORKING BINARY (mg-b72a)
+# ----------------------------------------------------------
+# The identity check above is really an EXECUTION check: `mg` is accepted only
+# after it runs and prints something only macguffin prints. `git` was the one
+# primitive that did not get the same treatment — it was pinned to /usr/bin/git
+# on the reasoning that git ships in /usr/bin on every macOS. It does; but
+# /usr/bin/git is the Xcode Command Line Tools SHIM, and a shim is not a git.
+# When the install behind it is damaged the shim fails EVERY invocation,
+# `git --version` included, with "unable to locate xcodebuild" and exit 71 —
+# while staying executable, staying on PATH, and remaining indistinguishable
+# from a healthy git to `-x` and to `command -v`.
+#
+# So `git` is now resolved the way `mg` already was: candidates in order, each
+# required to prove itself by actually RUNNING. This is a CONSISTENCY change and
+# is justified as one — `git` was the lone primitive trusted on sight. No such
+# breakage has been reproduced on this host, and the change is deliberately
+# modest here: where the only git present is a healthy /usr/bin/git the
+# candidate list collapses to that one path, and the sole difference is that a
+# broken shim would abort once, loudly, with an alert, instead of failing
+# separately inside every clone/fetch/rev-parse in sync_src. It changes which
+# git runs only on a host that has more than one — a Homebrew box — and there it
+# deploys instead of aborting.
+#
 # GH_TOKEN IS SOURCED AT RUNTIME, NEVER FROM THE PLIST
 # ----------------------------------------------------
 # ~/Library/LaunchAgents is world-readable; a token in the plist is a token on
@@ -70,6 +93,7 @@
 #   POGO_DEPLOY_ALERT_TO     first alert recipient (pm-pogo)
 #   POGO_DEPLOY_SKIP_WINDOW  set to 1 to bypass the window guard (controls only)
 #   POGO_DEPLOY_NOW          "HH" override for the window guard (tests only)
+#   GIT                      pin a specific git (still checked by execution)
 
 set -u
 
@@ -86,9 +110,11 @@ DEPLOY_REF="${POGO_DEPLOY_REF:-main}"
 STALE_LOCK_MIN="${POGO_DEPLOY_STALE_LOCK_MIN:-180}"
 DRY_RUN=false
 
-# Absolute paths to the stable primitives. `git` and `curl` are in /usr/bin on
-# every macOS; MG and POGO_CLI are resolved (and identity-checked) at run time.
-GIT="${GIT:-/usr/bin/git}"
+# GIT, MG and POGO_CLI are all resolved at run time and all checked by RUNNING
+# the candidate, never by trusting its path. GIT is seeded from the environment
+# when an operator pins one, and that pin is health-checked like any other
+# candidate: a pinned path that cannot run is the same outage as no pin at all.
+GIT="${GIT:-}"
 MG=""
 POGO_CLI=""
 
@@ -164,6 +190,48 @@ resolve_mg() {
         return 0
     done
     err "mg: no macguffin 'mg' among ${cands[*]} — refusing bare 'mg' (that is /usr/bin/mg, the EDITOR)"
+    return 1
+}
+
+# `git`, resolved by EXECUTION rather than by existence, for the reason in the
+# header: /usr/bin/git is the Command Line Tools shim, and a damaged CLT leaves
+# it executable, on PATH, and unable to complete a single call. `-x` and
+# `command -v` both say yes about it. Requiring "git version" on stdout is the
+# cheapest question that only a working git can answer.
+#
+# A real Homebrew/local git is preferred over the shim because the shim is the
+# fragile one, but the shim stays in the list so a CLT-only box still deploys.
+# On a host where it is the only git present, this list has exactly one entry
+# and the preference never comes up.
+#
+# Factored out from resolve_git so the tests can substitute a list of fakes. On
+# a host with a healthy git the real list can never produce a rejection, and an
+# execution check that has only ever been exercised against a working binary has
+# not been tested at all.
+git_candidates() {
+    local -a cands=()
+    [ -n "${GIT:-}" ] && cands+=("$GIT")
+    cands+=("/opt/homebrew/bin/git" "/usr/local/bin/git" "/usr/bin/git")
+    local onpath; onpath="$(command -v git 2>/dev/null)"
+    [ -n "$onpath" ] && cands+=("$onpath")
+    printf '%s\n' "${cands[@]}"
+}
+
+resolve_git() {
+    local cand
+    local -a cands=()
+    while IFS= read -r cand; do
+        [ -n "$cand" ] && cands+=("$cand")
+    done < <(git_candidates)
+
+    for cand in "${cands[@]}"; do
+        [ -x "$cand" ] || continue
+        "$cand" --version 2>/dev/null | grep -q '^git version' || continue
+        GIT="$cand"
+        log "git: resolved working git at $GIT ($("$cand" --version 2>/dev/null))"
+        return 0
+    done
+    err "git: no WORKING git among ${cands[*]:-<none>} — a present-but-broken /usr/bin/git (damaged Xcode CLT) fails every call with exit 71, so existence proves nothing"
     return 1
 }
 
@@ -388,7 +456,13 @@ main() {
     while [ $# -gt 0 ]; do
         case "$1" in
             --dry-run) DRY_RUN=true ;;
-            -h|--help) sed -n '2,80p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+            # Bounded by the `set -u` sentinel, not by a line number. The header
+            # is long and grows, and a hardcoded range starts truncating --help
+            # mid-thought the first time anybody documents anything — the old
+            # '2,80p' had already drifted and was cutting the ENV list off in
+            # the middle of itself. The `s///p` prints only lines that were
+            # comments, so the sentinel and the blank line before it drop out.
+            -h|--help) sed -n '2,/^set -u/p' "${BASH_SOURCE[0]}" | sed -n 's/^# \{0,1\}//p'; exit 0 ;;
             *) err "unknown flag: $1"; exit 2 ;;
         esac
         shift
@@ -421,6 +495,24 @@ main() {
     # tell you about failures" is the silent nightly all over again.
     resolve_mg   || { err "no alert path — refusing to run unattended"; exit 1; }
     resolve_pogo || log "pogo CLI unresolved — the post-bounce schedule check will be skipped"
+    # After resolve_mg, so a git failure has somewhere to be reported; before
+    # sync_src, which is the first thing that needs git.
+    resolve_git || {
+        alert "[pogo-deploy] ABORTED: no working git" \
+"The nightly redeploy could not find a git that RUNS, so it could not sync its
+checkout. Nothing was deployed and the running pogod is untouched.
+
+One cause that presents this way is a damaged Xcode Command Line Tools install:
+/usr/bin/git is the CLT shim, and when the install behind it is broken it fails
+every call — 'git --version' included — with 'unable to locate xcodebuild' and
+exit 71. Existence checks pass; the binary just cannot work.
+
+  log: $HOME/Library/Logs/pogo/pogo-deploy.log
+  fix: install or repair a git and confirm 'git --version' prints a version
+       (xcode-select --install, or brew install git). Pin one for this job with
+       GIT=/path/to/git if several are installed."
+        exit 1
+    }
     load_gh_token || {
         alert "[pogo-deploy] ABORTED: no GH_TOKEN" \
 "The nightly redeploy could not obtain GH_TOKEN from $ZSHENV, so any gh call in
