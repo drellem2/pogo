@@ -323,3 +323,32 @@ func branchList(t *testing.T, r *testRepo) map[string]bool {
 	}
 	return set
 }
+
+// TestSummaryItemisesKeptWorktrees is the `pogo gc` half of diagnosability.
+// The command's help promises a worktree holding uncommitted work is "KEPT and
+// reported"; the summary reported it as a count. A preserved tree pins its
+// branch until someone acts on it, so a count tells an operator a branch is
+// stuck without telling them which tree to go rescue.
+func TestSummaryItemisesKeptWorktrees(t *testing.T) {
+	r := newTestRepo(t)
+	r.branch("polecat-aaaa")
+	wt := r.worktree("polecat-aaaa")
+	if err := os.WriteFile(filepath.Join(wt, "unmerged.txt"), []byte("work"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := Sweep(Options{
+		Repo:         r.dir,
+		TargetBranch: "main",
+		Tickets:      TicketIndex{"mg-aaaa": TicketArchived},
+	})
+	if err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	summary := res.Summary()
+	for _, want := range []string{wt, "owner aaaa", "branch polecat-aaaa", "uncommitted change"} {
+		if !strings.Contains(summary, want) {
+			t.Errorf("gc summary missing %q — the operator cannot tell which tree to rescue.\n%s", want, summary)
+		}
+	}
+}

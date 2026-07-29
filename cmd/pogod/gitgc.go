@@ -45,6 +45,17 @@ func startGitGC(ctx context.Context, reg *agent.Registry, cfg config.GitGCConfig
 	}()
 }
 
+// loadTicketIndexFn is the work-item lookup a sweep runs on, indirected so a
+// test can drive runGitGCSweep end to end. It is the FIRST thing the sweep
+// does and it shells out to `mg`, which a sandboxed test cannot reach — so
+// without this seam the sweep returns at "cannot load work items" and nothing
+// below it, including the Logf wiring, is reachable from a test at all. That
+// unreachability is how the wiring came to have zero coverage in round 1 of
+// this ticket's review: deleting the Logf line left the whole package green.
+// Same shape as gitgc.removeWorktreeFn. Production always uses
+// gitgc.LoadTicketIndex.
+var loadTicketIndexFn = gitgc.LoadTicketIndex
+
 // runGitGCSweep performs one GC pass over every repo known to pogod:
 // repos listed in config plus the source repo of every registered agent.
 // The live-polecat set is passed as the do-not-touch exclusion so a sweep
@@ -54,7 +65,7 @@ func runGitGCSweep(reg *agent.Registry, cfg config.GitGCConfig) {
 	if len(repos) == 0 {
 		return
 	}
-	tickets, err := gitgc.LoadTicketIndex()
+	tickets, err := loadTicketIndexFn()
 	if err != nil {
 		log.Printf("pogod: git GC skipped — cannot load work items: %v", err)
 		return

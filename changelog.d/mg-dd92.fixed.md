@@ -29,3 +29,10 @@
   always going to refuse — reporting an error in place of the correct "kept:
   checked out in a worktree". Found by code read during the gh #94 triage and
   never observed in the wild.
+
+- **`pogo gc` now itemises the worktrees it KEPT, not just the ones it removed
+  (mg-dd92).** `pogo gc --help` promises a worktree holding uncommitted work is
+  "KEPT and reported"; the summary reported it as a count, while pogod's log
+  emitted the full line. A preserved tree pins its branch until someone acts on
+  it, so a count told an operator a branch was stuck without telling them which
+  tree to go rescue.

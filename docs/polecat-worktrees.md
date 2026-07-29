@@ -103,6 +103,29 @@ set under any key, so a normal exit still reaps its tree — the GC's ability to
 collect is asserted by a control in the same test as the fix
 (`TestSweepKeepsLivePolecatOnForeignBranch`).
 
+### Where the two phases still differ, and why
+
+Liveness is now owner-keyed everywhere. **Ticket-state classification is not**,
+and the two worktree phases disagree on it:
+
+- **Phase 1** (registered worktrees) classifies by the **checked-out branch**.
+- **Phase 1b** (orphan dirs — no `.git`, no registration) has no branch to
+  read, so it classifies by the **owner** it derives from the directory name.
+
+For the same directory name with the same dead owner, those can reach opposite
+conclusions: a registered tree parked on a foreign, still-in-flight branch is
+kept, while the identically-named orphan dir is removed. The two sets are
+disjoint within a sweep, so nothing contradicts itself — but the consequence is
+real: a dead polecat's tree can be pinned indefinitely by a foreign ticket that
+never concludes, and which way it goes depends on whether git still holds the
+registration.
+
+Phase 1's direction is the conservative one (it keeps, and no data is lost),
+which is why it was left alone when the liveness key moved. Re-keying it to the
+owner would strand every worktree whose basename resolves to no work item —
+the symmetric defect, never reaping a dead tree. Tracked as a follow-up rather
+than folded in; see mg-bdda.
+
 ## Reading the GC log
 
 The sweep logs one line per action. Before gh #94 it logged counts only, so a

@@ -405,6 +405,18 @@ func (r Result) Summary() string {
 			fmt.Fprintf(&b, "    %s\n", w.String())
 		}
 	}
+	// Kept worktrees are itemised, not just counted. `pogo gc --help` promises
+	// a worktree holding uncommitted work is "KEPT and reported", and a
+	// preserved tree pins its branch until someone acts on it — so a bare
+	// count tells an operator a branch is stuck without telling them which
+	// tree to go rescue. pogod's log has always emitted the full line for
+	// these; the CLI summary was the half that only counted.
+	if len(r.WorktreesKept) > 0 {
+		fmt.Fprintf(&b, "  worktrees kept:\n")
+		for _, w := range sortedWorktrees(r.WorktreesKept) {
+			fmt.Fprintf(&b, "    %s\n", w.String())
+		}
+	}
 	if len(r.BranchesDeleted) > 0 {
 		fmt.Fprintf(&b, "  branches %s:\n", delVerb)
 		for _, br := range sortedBranches(r.BranchesDeleted) {
