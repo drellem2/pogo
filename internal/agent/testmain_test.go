@@ -55,8 +55,21 @@ func TestMain(m *testing.M) {
 	sandboxEventLog = filepath.Join(sb.Root, "events.log")
 	events.SetLogPathForTesting(sandboxEventLog)
 
+	// The sentinel-drift alert sink is redirected for the same reason and is
+	// NOT covered by either of the above (mg-54f8). nudgereadylog_test.go drives
+	// the real prompt-ready gate all the way to its deadline arm, which records a
+	// genuine MISS on the initial-nudge key of the process-global detector. Three
+	// such fixtures exist and driftMinSamples is 4, so this package is one test —
+	// or one `-count=2`, which accumulates in the same process — from crossing the
+	// threshold and running defaultDriftAlert, whose loud half MAILS THE FLEET
+	// COORDINATOR. The event half would land in sandboxEventLog and the mail in
+	// the sandbox MG_ROOT, so the envelope above contains the damage; what it does
+	// not do is stop a unit test from manufacturing a fleet drift alarm at all.
+	restoreDriftSink := StubDriftSinkForTesting()
+
 	code := m.Run()
 
+	restoreDriftSink()
 	events.SetLogPathForTesting("")
 	down()
 	os.Exit(code)
@@ -75,5 +88,18 @@ func TestPackageIsolationIsEstablished(t *testing.T) {
 	if got := ParkFilePath("pm-dealdesk"); !sandbox.Contains(got) {
 		t.Errorf("ParkFilePath(pm-dealdesk) = %s, want a path under the sandbox root %s; "+
 			"the package is resolving park state through the real home", got, sandbox.Root)
+	}
+
+	// And the half no environment variable can pin: the drift sink is an
+	// in-process function value, so nothing in the sandbox envelope prevents a
+	// ready-gate miss run from reaching the coordinator's real inbox. Asserted by
+	// asking which sink is installed rather than by tripping the threshold — a
+	// control of that shape would send the mail it exists to prevent.
+	if DriftSinkIsProductionForTesting() {
+		t.Error("the process-global sentinel-drift sink is still the production " +
+			"one: this package drives the real prompt-ready gate to its deadline " +
+			"arm, so a run of misses can cross the drift threshold and mail the " +
+			"fleet coordinator from a unit test. TestMain must call " +
+			"StubDriftSinkForTesting.")
 	}
 }
