@@ -10,26 +10,31 @@ import (
 
 // Start-verification / auto-renudge defaults (mg-feb3).
 //
-// After the initial nudge is delivered, a healthy polecat's FIRST protocol
-// action is `mg claim <work-item>`, which moves the item out of the available/
-// queue. Under a concurrent spawn wave a CPU-starved node/Ink process can miss
-// that kickoff: WaitForReady's idle gate misreads starvation-silence as
+// Under a concurrent spawn wave a CPU-starved node/Ink process can miss the
+// kickoff nudge: WaitForReady's idle gate misreads starvation-silence as
 // input-loop-ready (nudge.go: IsIdle is just "time since last PTY write"), so
 // the nudge is delivered before Claude Code is listening, piles in the kernel
 // input buffer, and Ink absorbs it as one paste block whose CR never
-// re-tokenizes as a submit (mg-ce61). The agent is alive+running but never
-// claims its item.
+// re-tokenizes as a submit (mg-ce61). The agent is alive+running but never acts.
 //
 // The mayor's manual workaround was a post-spawn "unstarted polecat" check that
 // nudged "1" if the item was still available ~30-60s later. This watcher
-// productizes that into a pogod daemon guarantee: watch for the HARD
-// started-signal (the work item leaving available/) and, if it is still absent,
-// re-deliver a bare submit terminator (CR) to flush the paste-buffered kickoff.
-// It is failure-mode-agnostic — it recovers the wedge whether the cause is the
-// false-idle gate, a stale prompt-ready sentinel (mg-ce4c), or the paste
-// pileup — and gates on the claim signal (NOT output quiescence), because the
-// whole bug is that an idle heuristic misreads starvation-silence, so a
+// productizes that into a pogod daemon guarantee: watch for a started-signal
+// and, if it is still absent, re-deliver a bare submit terminator (CR) to flush
+// the paste-buffered kickoff. It is failure-mode-agnostic — it recovers the
+// wedge whether the cause is the false-idle gate, a stale prompt-ready sentinel
+// (mg-ce4c), or the paste pileup — and never gates on output quiescence, because
+// the whole bug is that an idle heuristic misreads starvation-silence, so a
 // quiescence-based re-check would reproduce the same false-idle failure.
+//
+// WHICH SIGNAL, AND WHY IT CHANGED (mg-7254). The original hard signal was the
+// work item leaving available/ — the polecat's own `mg claim`, which proved the
+// kickoff had been ACCEPTED rather than merely that a composer had rendered.
+// pogod now claims at spawn, before the process exists, so that signal is true
+// from the first instant of every --id dispatch and proves nothing about the
+// agent. See Registry.startedSignal for the branch that keeps the claim signal
+// where it is still meaningful, and mg-7d6d for the wedge the remaining fallback
+// does not catch.
 const (
 	// DefaultStartVerifyDelay is how long to wait after a nudge before checking
 	// whether the agent has started. Longer than the settle windows so a
@@ -38,20 +43,24 @@ const (
 
 	// DefaultStartVerifyMaxAttempts bounds the auto-renudge retries. Each attempt
 	// waits DefaultStartVerifyDelay, checks the started-signal, and (only if the
-	// item is still unclaimed) delivers one bare CR. Bounded so a genuinely dead
+	// agent is still provably unstarted) delivers one bare CR. Bounded so a dead
 	// agent — or one whose work item was cancelled out from under it — does not
 	// draw an unbounded stream of stray keystrokes.
 	DefaultStartVerifyMaxAttempts = 3
 )
 
-// StartVerifier reports whether a freshly spawned polecat has begun its work.
-// started is true once the agent's mg work item has left the available/ queue
-// (been claimed) — the polecat's first protocol action and the HARD
-// started-signal the auto-renudge watcher gates on. A non-nil error means the
-// mg state could not be read; the watcher treats that as inconclusive and does
-// NOT renudge (renudging blind risks injecting a stray char into a working
-// agent). pogod backs this with a macguffin-backed query; unit tests substitute
-// a closure. See internal/workitem and the mg-feb3 ticket.
+// StartVerifier reports whether a freshly spawned polecat's mg work item has
+// left the available/ queue. A non-nil error means the mg state could not be
+// read; the watcher treats that as inconclusive and does NOT renudge (renudging
+// blind risks injecting a stray char into a working agent). pogod backs this
+// with a macguffin-backed query; unit tests substitute a closure. See
+// internal/workitem and the mg-feb3 ticket.
+//
+// This is EVIDENCE OF A START only where the polecat is the thing that claims.
+// Since mg-7254 pogod claims at spawn, so the watcher consults this verifier
+// only for agents whose claim it did not take (Agent.ClaimedAtSpawn false) —
+// see Registry.startedSignal. A nil verifier still disables auto-renudge
+// entirely, which is how a bare registry and a daemon-wide fault are reported.
 type StartVerifier func(workItemID string) (started bool, err error)
 
 // SetStartVerifier installs the start-verification query used by the post-spawn
@@ -93,10 +102,10 @@ func (r *Registry) startVerifyMaxAttemptsOrDefault() int {
 // re-delivers a bare submit terminator to flush a paste-buffered kickoff. It
 // runs on the initial-nudge goroutine after the kickoff nudge is delivered.
 //
-// It gates on the HARD started-signal — the agent's mg work item leaving
-// available/ — whenever the agent carries a work item id. When it does not, it
-// falls back to the READY-COMPOSER signal (mg-c33e); see startedSignal below
-// for both, and for the cases where it still declines outright.
+// It gates on the strongest signal the agent admits of: the work item leaving
+// available/ where that is still the polecat's own act, otherwise the
+// READY-COMPOSER signal (mg-c33e). See startedSignal below for the choice, and
+// for the cases where it declines outright.
 //
 // The renudge is a bare CR (a.Nudge("") writes only the provider's
 // SubmitTerminator), the payload least likely to corrupt a working agent's
@@ -113,7 +122,7 @@ func (r *Registry) verifyStartAndRenudge(a *Agent) {
 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		// Wait out the start window, but abandon at once if the agent exits —
-		// there is no PTY to renudge and no work will ever be claimed.
+		// there is no PTY to renudge and no work will ever be done.
 		select {
 		case <-a.done:
 			return
@@ -157,11 +166,14 @@ func (r *Registry) verifyStartAndRenudge(a *Agent) {
 //
 // Two signals, strongest first:
 //
-//   - work_item_unclaimed — the item leaving available/. The polecat's first
-//     protocol action, and the strongest available: it proves the kickoff nudge
-//     was ACCEPTED, not merely that a composer rendered.
+//   - work_item_unclaimed — the item leaving available/. The strongest signal
+//     when it applies: it proves the kickoff nudge was ACCEPTED, not merely that
+//     a composer rendered. Since mg-7254 it applies only where pogod did NOT
+//     claim at spawn, because otherwise the item leaves available/ before the
+//     process exists and the signal is about pogod rather than the polecat.
 //   - no_ready_composer — the provider's prompt-ready sentinel has never
-//     appeared. Used when there is no work item, which mg-c33e exists to close:
+//     appeared. Used when there is no work item — which mg-c33e exists to close
+//     — and, since mg-7254, for every dispatch pogod claimed for:
 //     `--no-worktree` dispatch commonly carries no `--id` (it is optional), and
 //     mg-560d proved that gap is load-bearing. Such a spawn's cwd is a
 //     brand-new ~/.pogo/agents/<name>/, untrusted, so Claude Code raises the
@@ -171,6 +183,13 @@ func (r *Registry) verifyStartAndRenudge(a *Agent) {
 //     dismisses that dialog (dialog → composer at t=0.7s, nudge accepted). So
 //     the recovery net could have rescued those polecats and, before this
 //     change, declined to.
+//
+// The fallback is WEAKER than the claim signal, in a specific and nameable way
+// that mg-7254 traded for ownership rather than resolved: it catches a composer
+// that never rendered, but not the mg-ce61 paste-buffer wedge, where the
+// composer DID render and WaitForReady latched promptReadySeen before this
+// watcher ran. Tracked as mg-7d6d. Do not read the paragraphs below as a claim
+// that the fallback covers everything the claim signal did.
 //
 // The fallback is a STRUCTURAL observation of the screen, not the
 // output-quiescence heuristic the package doc rejects at length. Quiescence
