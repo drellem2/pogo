@@ -50,6 +50,16 @@ set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$HERE/.." && pwd)"
 
+# The sandbox port reservation and the daemon-ownership proof (mg-3412). This
+# file and pogo-self-deploy_live_test.sh both stand up a throwaway pogod, and
+# both used to pick its port by walking 17731-17799 from the bottom asking "did
+# anything answer?" — the SAME range from the SAME end. So they collided with
+# each other and with themselves under fleet load, and the loser drove the
+# winner's daemon. Sharing the allocator is what makes the reservation mean
+# something: a lock only one of the two honoured would not be a lock.
+# shellcheck source=/dev/null
+source "$HERE/lib/sandbox-daemon.sh"
+
 RESULTS_FILE=$(mktemp)
 SANDBOX=$(mktemp -d)
 POGOD_PID=""
@@ -59,6 +69,7 @@ cleanup() {
     # out the machine's live daemon and every agent poller with it.
     [ -n "$POGOD_PID" ] && kill "$POGOD_PID" 2>/dev/null
     [ -n "$POGOD_PID" ] && wait "$POGOD_PID" 2>/dev/null
+    sandbox_port_release
     # Make the tree writable before removing it: any `go` call under the sandbox
     # HOME materialises the toolchain module into $SANDBOX/home/go/pkg/mod, which
     # Go marks 0444 by design, so a plain `rm -rf` fails "Permission denied"
@@ -83,8 +94,7 @@ fail() { echo "FAIL: $1"; echo "FAIL: $1" >> "$RESULTS_FILE" || { echo "LEDGER W
 # after the override would re-download the whole module cache into $SANDBOX.
 echo "Building pogod into the sandbox..."
 if ! (cd "$REPO_ROOT" && go build -o "$SANDBOX/pogod" ./cmd/pogod); then
-    fail "could not build cmd/pogod — the interrupt-safety control cannot run"
-    exit 1
+    sandbox_setup_fail "could not build cmd/pogod — the interrupt-safety control cannot run"
 fi
 
 # --- sandbox: a real pogod that cannot reach the real fleet ------------------
@@ -98,32 +108,17 @@ export POGO_HOME="$SANDBOX/home/.pogo"
 export POGO_AGENT_AUTOSTART=false
 mkdir -p "$HOME" "$XDG_CONFIG_HOME"
 
-# A spare port, probed free. Never the default 10000: that is the live daemon.
-PORT=""
-for candidate in $(seq 17731 17799); do
-    if ! curl -sf --max-time 1 "http://127.0.0.1:$candidate/agents/drain" >/dev/null 2>&1; then
-        PORT="$candidate"; break
-    fi
-done
-if [ -z "$PORT" ]; then
-    fail "no free port in 17731-17799 for the sandbox daemon"
-    exit 1
-fi
-
-"$SANDBOX/pogod" -port "$PORT" > "$SANDBOX/pogod.log" 2>&1 &
-POGOD_PID=$!
-
+# A PRIVATE port, RESERVED, and a daemon PROVEN to be the one we started
+# (mg-3412). Not a probe: the window between "nothing answered" and "our pogod
+# bound it" is where two concurrent runs both decide they own 17731, one pogod
+# dies on the bind, and the survivor's daemon answers the loser's readiness
+# check. A control that then asserts on drain state is asserting on someone
+# else's — and a failure of THIS file reads as an interrupt-safety regression.
+sandbox_port_reserve
+PORT="$SANDBOX_PORT"
 URL="http://127.0.0.1:$PORT"
-up=false
-for _ in $(seq 1 80); do
-    if curl -sf --max-time 2 "$URL/agents/drain" >/dev/null 2>&1; then up=true; break; fi
-    sleep 0.25
-done
-if ! $up; then
-    fail "sandbox pogod never answered on $URL"
-    sed 's/^/  pogod: /' "$SANDBOX/pogod.log"
-    exit 1
-fi
+sandbox_daemon_start "$SANDBOX/pogod" "$PORT" "$SANDBOX/pogod.log" /agents/drain
+POGOD_PID="$SANDBOX_DAEMON_PID"
 
 # Point the driver's own primitives at the sandbox daemon, then source it.
 # main() will NOT run because BASH_SOURCE != $0. dr_state below reads /agents/drain
