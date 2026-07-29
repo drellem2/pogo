@@ -140,6 +140,34 @@ Two rules that fall out of it:
   an unverified claim, and a later edit can drop it with every other test in the
   package still green. That is exactly how all three tickets shipped.
 
+### The isolation is enforced, not suggested (`mg-457b`)
+
+The two sections above used to be advice, and advice is opt-in. On 2026-07-29 the
+tree held **56 test suites and 8 adopters**, and **nothing failed** for the other
+48 — a suite written next month read the developer's live state unless its author
+recalled a helper they may never have seen. All four measured instances of the
+defect (`mg-6092`, `mg-e8e7`, `mg-5336`, `mg-3412`) are authors who did not set
+out to read live state at all.
+
+So `TestEveryTestSuiteRoutesThroughTheIsolation`, in
+`internal/testsandbox/adoption_test.go`, walks the tree on every `go test ./...`
+and fails when a suite neither adopts nor is named in
+`internal/testsandbox/adoption-ledger.txt`. It is a **test** rather than a CI step
+on purpose: it fails locally, before the merge queue, where the author of the new
+suite can still act on it.
+
+The unit of adoption is the **test binary** — a Go package is one entry however
+many `_test.go` files it holds, and a shell suite is one file.
+
+**The ledger is a ratchet, not an allowlist.** The same check fails when a
+ledgered suite has since adopted (delete the line) or no longer exists — so
+converting a suite is a one-line deletion, and the list can only get shorter.
+There is no "this one needs live state" marker, because no suite in this
+repository has been found to need one; if you believe yours is the exception,
+say so on a work item where somebody can read the argument.
+
+If the check names your new suite, adopt the isolation. **Do not add a line.**
+
 ### Code Style
 
 - All Go code must be formatted with `gofmt`. The CI pipeline checks this.

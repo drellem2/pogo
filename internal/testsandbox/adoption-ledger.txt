@@ -1,0 +1,88 @@
+# Test suites that do NOT yet route through the packaged test isolation.
+#
+# Filed with the ratchet in adoption_test.go (mg-457b). Read that file first;
+# this one is only the list.
+#
+# THIS IS A RATCHET, NOT AN ALLOWLIST. It may only shrink.
+#
+#   - Converting a suite MUST delete its line here. The check fails if a
+#     ledgered suite has since adopted, so the list cannot rust into an
+#     allowlist nobody can honestly shorten.
+#   - A suite that is renamed or deleted MUST have its line deleted too. Same
+#     check, same reason.
+#   - When the last line goes, delete the file and the ledger lookup with it.
+#
+# THERE IS EXACTLY ONE ACCEPTED REASON FOR A LINE HERE, and it is historical:
+# the suite existed on 2026-07-29, when adoption was still opt-in and nothing
+# failed for skipping it. Every one of the 48 below is that. The backlog is
+# mg-5551.
+#
+# "This suite genuinely needs the developer's live state" is NOT an accepted
+# reason, and there is no separate opt-out marker for it, because no suite in
+# this repository has been found to need one — the four measured instances of
+# the defect (mg-6092, mg-e8e7, mg-5336, mg-3412) were all four authors who did
+# not intend to read live state at all. A suite that believes it is the
+# exception should say so on a work item, where somebody can read the argument,
+# rather than in a file whose whole job is to get shorter.
+#
+# IF YOU ARE HERE BECAUSE YOU WROTE A NEW SUITE: adopt the isolation. Do not add
+# a line.
+#
+#   Go     — a TestMain calling testsandbox.Main("<pkg>"), plus one test calling
+#            testsandbox.Verify. See internal/driver/testmain_test.go.
+#   shell  — source "$HERE/pogo-sandbox" and call pogo_sandbox_isolate before
+#            the first command that can reach $HOME. See
+#            scripts/pogo-self-deploy_sigint_test.sh.
+#
+# Paths are repo-relative: a directory for a Go package (the isolation is
+# established once per test binary, so a package is one entry no matter how many
+# _test.go files it holds), a file for a shell suite. Keep them sorted.
+
+build_test.sh
+cmd/pogo
+cmd/pogod
+cmd/pose
+internal/ackwatch
+internal/agenttest
+internal/claude
+internal/client
+internal/closingref
+internal/codex
+internal/config
+internal/credexpiry
+internal/cursor
+internal/deafwatch
+internal/diagnostics
+internal/driftwatch
+internal/events
+internal/freshen
+internal/ghteardown
+internal/ghtoken
+internal/gitceiling
+internal/gitgc
+internal/heartbeat
+internal/hookselfactivate
+internal/memcheck
+internal/pathenv
+internal/pi
+internal/platform/sleep
+internal/providers
+internal/reaper
+internal/reconcile
+internal/refinery
+internal/scheduler
+internal/search
+internal/selfdrift
+internal/server
+internal/service
+internal/stallwatch
+internal/synthfail
+internal/synthwatch
+internal/workitem
+internal/xref
+scripts/assemble-changelog_test.sh
+scripts/changelog-coverage_test.sh
+scripts/mg-scope-guard_test.sh
+scripts/pogo-deploy_test.sh
+scripts/pogo-self-deploy_test.sh
+shell/bashrc_test.sh
