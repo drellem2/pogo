@@ -27,6 +27,7 @@ import (
 
 	"github.com/drellem2/pogo/internal/ackwatch"
 	"github.com/drellem2/pogo/internal/agent"
+	"github.com/drellem2/pogo/internal/claude"
 	"github.com/drellem2/pogo/internal/client"
 	"github.com/drellem2/pogo/internal/config"
 	"github.com/drellem2/pogo/internal/credexpiry"
@@ -866,7 +867,14 @@ func newStallNudgerWithTimeout(reg *agent.Registry, mail func(to, from, subject,
 		if reg != nil {
 			a := reg.Get(agentName)
 			if a != nil && a.Status == agent.StatusRunning {
-				err := a.NudgeWithMode(message, agent.NudgeWaitIdle, ptyTimeout)
+				// NudgeWake, not NudgeWithMode: a stall fire is the canonical
+				// WAKE — an automated nudge whose only purpose is to rouse an
+				// agent that is not doing anything — so it is subject to the
+				// wake-cycle policy (internal/agent/wakepolicy.go). A suppressed
+				// wake returns an error and takes the mail road below, exactly
+				// like a busy PTY: the policy suppresses the terminal write, not
+				// the notice.
+				err := a.NudgeWake(message, agent.NudgeWaitIdle, ptyTimeout, "")
 				if err == nil {
 					return stallwatch.Delivery{Channel: stallwatch.DeliveryPTY}, nil
 				}
@@ -1197,6 +1205,14 @@ Flags:
 		agentRegistry.RegisterProvider(p)
 	}
 	agentRegistry.SetDefaultProvider(cfg.Agents.Provider)
+
+	// Install the wake-cycle policy's limit-episode query (mg-8184). This is the
+	// composition root doing the wiring on purpose: internal/agent ASKS
+	// internal/claude at the moment it is about to wake an agent, and
+	// internal/claude never learns that a nudge path exists. Pull, not push —
+	// which is what keeps the fleet usage-limit coordinator report-only while
+	// its state still suppresses a useless wake into a wedged harness.
+	agent.SetLimitEpisodeQuery(claude.UsageLimitEpisodeOpen)
 
 	// Wire the post-spawn start-verification watcher (mg-feb3): after the initial
 	// nudge, pogod checks whether a polecat actually claimed its work item and, if

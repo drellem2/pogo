@@ -367,6 +367,35 @@ An agent sent macguffin mail (`mg mail send`).
 {"schema_version":1,"timestamp":"2026-04-25T10:15:30.000000000Z","event_type":"nudge_sent","agent":"mayor","details":{"to":"crew-arch","message":"check your mail","delivery":"pty","mode":"idle"}}
 ```
 
+#### `nudge_suppressed`
+
+The wake-cycle policy declined an automated WAKE before it reached the PTY
+(mg-8184). It is the counterpart of `nudge_sent`: between the two, every wake
+pogod decided on leaves exactly one record, so "no nudge_sent" is never
+ambiguous between *declined* and *never attempted*.
+
+Only **wakes** pass through the policy — the stall watcher's fire and a
+scheduler fire landing on a live PTY. Spawn kickoffs and operator nudges
+(`pogo nudge`) are not governed and never produce this event.
+
+A suppressed wake is not a lost message: callers with a durable channel fall
+back to mail. What was suppressed is the terminal write.
+
+- **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent`, `details`
+- **`details` fields:**
+  - `to` (string, required): target agent identity
+  - `message` (string, required): the wake text that was not written
+  - `rule` (string, required): which rule declined —
+    `"limit_episode"` (the agent, or the fleet, is inside a known provider
+    limit episode) or `"wake_silence_once"` (an earlier wake already spoke into
+    this unbroken silence)
+  - `reason` (string, required): the human-readable detail behind the rule
+  - `fire_token` (string, optional): correlation id, as for `nudge_sent`
+
+```json
+{"schema_version":1,"timestamp":"2026-07-29T11:15:30.000000000Z","event_type":"nudge_suppressed","agent":"pogod","details":{"to":"crew-mayor","message":"stall-watch: work piling up","rule":"limit_episode","reason":"usage-limit episode ep-1753-cat-mg-7ffa open since 2026-07-29T10:40:00Z (3 agent(s) rate-limited)"}}
+```
+
 ### Scheduler
 
 #### `scheduler_fire_delivered`
