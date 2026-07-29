@@ -169,24 +169,165 @@ load_gh_token "$WORK/notoken" >/dev/null 2>&1 \
 unset GH_TOKEN
 
 # ---------------------------------------------------------------------------
+# resolve_git — a WORKING git, not merely a present one (mg-b72a)
+# ---------------------------------------------------------------------------
+# `mg` has always been proved by running it; `git` was pinned to /usr/bin/git on
+# the reasoning that git ships in /usr/bin on every macOS. It does — but that
+# path is the Command Line Tools SHIM, and a damaged install behind it makes it
+# fail every call, `git --version` included, with "unable to locate xcodebuild"
+# and exit 71, while remaining executable and on PATH. `-x` and `command -v`
+# cannot tell that binary from a healthy one.
+#
+# These assertions are therefore all about the gap between "exists" and "runs",
+# and they are HERMETIC: the candidate list is substituted for fakes, so the
+# verdicts below do not depend on the health of this host's git. That matters
+# more than it sounds. On any host with a working git the real candidate list
+# can never produce a rejection, so a suite that only ever ran against the real
+# list would report green whether or not the execution check existed at all.
+FAKEBIN="$WORK/fakebin"; mkdir -p "$FAKEBIN"
+
+# Reproduces the real failure exactly: exit 71, diagnostic on stderr, and
+# NOTHING on stdout.
+cat > "$FAKEBIN/brokengit" <<'EOF'
+#!/bin/sh
+echo "Error loading required libraries. git: error: unable to locate xcodebuild" >&2
+exit 71
+EOF
+# A subtler impostor: exits 0, says nothing. Proves the test is the version
+# string and not merely the exit status.
+cat > "$FAKEBIN/silentgit" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+cat > "$FAKEBIN/workinggit" <<'EOF'
+#!/bin/sh
+[ "$1" = "--version" ] && { echo "git version 9.9.9"; exit 0; }
+exit 0
+EOF
+chmod +x "$FAKEBIN/brokengit" "$FAKEBIN/silentgit" "$FAKEBIN/workinggit"
+
+SAVED_GIT="${GIT:-}"
+REAL_GIT_CANDIDATES="$(declare -f git_candidates)"
+# Substitute the candidate list. Everything until the restore below is decided
+# entirely by the fakes.
+fake_candidates() { printf '%s\n' "$@"; }
+
+[ -x "$FAKEBIN/brokengit" ] \
+    && pass "resolve_git premise: the broken fake IS executable (so -x cannot catch it)" \
+    || fail "broken fake is not executable"
+"$FAKEBIN/brokengit" --version >"$WORK/bg.out" 2>/dev/null; RC=$?
+[ "$RC" -eq 71 ] && [ ! -s "$WORK/bg.out" ] \
+    && pass "resolve_git premise: the broken fake reproduces exit 71 with empty stdout" \
+    || fail "broken fake does not reproduce the failure (rc=$RC)"
+
+# THE decisive assertion. If the execution check were removed — if resolve_git
+# went back to accepting the first candidate that exists — this returns 0 and
+# this test goes red. It cannot be satisfied by the host's git being healthy,
+# because the host's git is not in this list.
+GIT=""
+git_candidates() { fake_candidates "$FAKEBIN/brokengit"; }
+resolve_git >/dev/null 2>&1 \
+    && fail "resolve_git ACCEPTED a git that exits 71 — existence was treated as health" \
+    || pass "resolve_git REFUSES a list whose only git is present-but-broken (exit 71)"
+
+# ...and it must be a refusal, not a silent fallthrough that leaves the caller
+# holding a path it will discover is dead three git calls later.
+GIT=""
+git_candidates() { fake_candidates "$FAKEBIN/brokengit"; }
+resolve_git >/dev/null 2>&1
+[ -z "$GIT" ] && pass "a failed resolve_git leaves GIT unset rather than pointing at the broken candidate" \
+    || fail "resolve_git set GIT=$GIT despite failing"
+
+# A broken candidate ahead of a working one is SKIPPED, not fatal — the shim
+# staying in the list is what keeps a CLT-only box deploying.
+GIT=""
+git_candidates() { fake_candidates "$FAKEBIN/brokengit" "$FAKEBIN/workinggit"; }
+resolve_git >/dev/null 2>&1 && [ "$GIT" = "$FAKEBIN/workinggit" ] \
+    && pass "resolve_git steps over an executable-but-broken candidate to a working one" \
+    || fail "resolve_git did not fall through to the working git (GIT=$GIT)"
+
+# Exiting 0 is not proof of anything; printing a version is.
+GIT=""
+git_candidates() { fake_candidates "$FAKEBIN/silentgit" "$FAKEBIN/workinggit"; }
+resolve_git >/dev/null 2>&1 && [ "$GIT" = "$FAKEBIN/workinggit" ] \
+    && pass "resolve_git rejects a candidate that exits 0 but prints no version" \
+    || fail "resolve_git accepted a silent candidate (GIT=$GIT)"
+
+eval "$REAL_GIT_CANDIDATES"   # back to the real candidate list
+
+# An operator pin that works is honoured verbatim — the escape hatch for a box
+# with several gits installed. This one goes through the real list, whose first
+# entry is $GIT.
+GIT="$FAKEBIN/workinggit"
+resolve_git >/dev/null 2>&1 && [ "$GIT" = "$FAKEBIN/workinggit" ] \
+    && pass "resolve_git honours a working operator-pinned \$GIT" || fail "resolve_git ignored a valid pin"
+
+# And unpinned resolution on this host must still land on a git that runs.
+GIT=""
+resolve_git >/dev/null 2>&1 && [ -n "$GIT" ] \
+    && "$GIT" --version 2>/dev/null | grep -q '^git version' \
+    && pass "resolve_git resolves a working git on this host with no pin at all" || fail "resolve_git unpinned"
+
+# Ratchets: the pin must not come back, and the resolver must actually be called
+# — an unreferenced resolve_git is a health check nobody runs.
+grep -qE '^[[:space:]]*GIT="\$\{GIT:-/usr/bin/git\}"' "$RUNNER" \
+    && fail "the runner has gone back to hardcoding /usr/bin/git" \
+    || pass "the runner does not hardcode /usr/bin/git (existence is not a health check)"
+grep -qE '^[[:space:]]*resolve_git[[:space:]]*\|\|' "$RUNNER" \
+    && pass "main() actually calls resolve_git and handles its failure" \
+    || fail "resolve_git is defined but never called"
+
+GIT="$SAVED_GIT"
+
+# ---------------------------------------------------------------------------
+# --help — bounded by the `set -u` sentinel, not by a line number
+# ---------------------------------------------------------------------------
+# The header is the documentation, and it grows. A hardcoded `sed -n '2,80p'`
+# had already drifted past the end of the ENV list, so --help was truncating
+# mid-list — the silent kind of doc rot, since the output still looks complete.
+HELP="$(bash "$RUNNER" --help 2>&1)"; RC=$?
+[ "$RC" -eq 0 ] && pass "--help exits 0" || fail "--help exit was $RC"
+printf '%s' "$HELP" | grep -q 'POGO_DEPLOY_SRC' \
+    && pass "--help reaches the start of the ENV list" || fail "--help lost the ENV list"
+printf '%s' "$HELP" | grep -q 'POGO_DEPLOY_NOW' \
+    && pass "--help reaches the LAST ENV entry (the truncation this replaces)" \
+    || fail "--help is still truncating the ENV list"
+printf '%s' "$HELP" | grep -q '^set -u' \
+    && fail "--help leaked the sentinel line into its output" \
+    || pass "--help stops at the sentinel without printing it"
+printf '%s' "$HELP" | grep -qE '^(HOME|SRC|GIT)=' \
+    && fail "--help ran past the header into shell code" || pass "--help prints the header only, no shell code"
+grep -qE "sed -n '2,[0-9]+p'" "$RUNNER" \
+    && fail "--help is bounded by a line number again (it will drift again)" \
+    || pass "--help is bounded by the sentinel, not a line number"
+
+# ---------------------------------------------------------------------------
 # sync_src — never clobber, never diverge
 # ---------------------------------------------------------------------------
+# These tests need a git that works, and they used to name one: `GIT=/usr/bin/git`
+# in the fixture, with the repo fixtures calling a bare `git` off PATH. That made
+# the suite's verdict depend on the health of one hardcoded host path — the very
+# assumption the block above exists to reject — and on a box whose CLT shim was
+# broken these tests would have gone red for a reason that has nothing to do with
+# clobbering or divergence. Resolve once, use the result everywhere (mg-b72a).
+resolve_git >/dev/null 2>&1 || { echo "FATAL: no working git for the sync_src tests"; exit 1; }
+
 mkrepo() {
     local d="$1"
-    git init --quiet -b main "$d"
-    git -C "$d" config user.email t@t; git -C "$d" config user.name t
-    echo one > "$d/f"; git -C "$d" add f; git -C "$d" commit --quiet -m one
+    "$GIT" init --quiet -b main "$d"
+    "$GIT" -C "$d" config user.email t@t; "$GIT" -C "$d" config user.name t
+    echo one > "$d/f"; "$GIT" -C "$d" add f; "$GIT" -C "$d" commit --quiet -m one
 }
 UPSTREAM="$WORK/upstream"
 mkrepo "$UPSTREAM"
 
 # Fresh clone, then a clean fast-forward: the ordinary night.
-SRC="$WORK/src"; GIT=/usr/bin/git; DEPLOY_REF=main
+SRC="$WORK/src"; DEPLOY_REF=main
 POGO_DEPLOY_REMOTE="$UPSTREAM"; DEPLOY_REMOTE="$UPSTREAM"
 sync_src >/dev/null 2>&1 && pass "sync_src bootstraps the dedicated checkout on first run" || fail "sync_src bootstrap"
-echo two > "$UPSTREAM/f"; git -C "$UPSTREAM" commit --quiet -am two
+echo two > "$UPSTREAM/f"; "$GIT" -C "$UPSTREAM" commit --quiet -am two
 sync_src >/dev/null 2>&1 \
-    && [ "$(git -C "$SRC" rev-parse HEAD)" = "$(git -C "$UPSTREAM" rev-parse main)" ] \
+    && [ "$("$GIT" -C "$SRC" rev-parse HEAD)" = "$("$GIT" -C "$UPSTREAM" rev-parse main)" ] \
     && pass "sync_src fast-forwards the checkout to origin/main" || fail "sync_src ff"
 
 # A DIRTY tree aborts and is left EXACTLY as it was. This is the clobber guard:
@@ -198,13 +339,13 @@ echo local-edit > "$SRC/f"
 BEFORE="$(cat "$SRC/f")"
 sync_src >/dev/null 2>&1 && fail "sync_src proceeded on a DIRTY tree" || pass "sync_src ABORTS on a dirty tree rather than resetting it"
 [ "$(cat "$SRC/f")" = "$BEFORE" ] && pass "sync_src left the dirty edit untouched (no clobber)" || fail "sync_src clobbered a local edit"
-git -C "$SRC" checkout --quiet -- f
+"$GIT" -C "$SRC" checkout --quiet -- f
 
 # A DIVERGED tree aborts too: merging would deploy commits nobody meant to
 # build, and resetting would erase them. --ff-only refuses both.
-echo local-commit > "$SRC/g"; git -C "$SRC" add g
-git -C "$SRC" -c user.email=t@t -c user.name=t commit --quiet -m local
-echo three > "$UPSTREAM/f"; git -C "$UPSTREAM" commit --quiet -am three
+echo local-commit > "$SRC/g"; "$GIT" -C "$SRC" add g
+"$GIT" -C "$SRC" -c user.email=t@t -c user.name=t commit --quiet -m local
+echo three > "$UPSTREAM/f"; "$GIT" -C "$UPSTREAM" commit --quiet -am three
 sync_src >/dev/null 2>&1 && fail "sync_src merged a DIVERGED tree" || pass "sync_src ABORTS on divergence (--ff-only, never a reset)"
 [ -f "$SRC/g" ] && pass "sync_src preserved the diverging commit for inspection" || fail "sync_src destroyed local commits"
 
