@@ -15,7 +15,7 @@ import (
 // gitdir that does not exist.
 //
 // This is deliberately NOT the same damage as
-// TestWorktreeDirtyUnclassifiableProceeds, which DELETES .git and so produces
+// TestWorktreeDirtyUnclassifiableIsRefused, which DELETES .git and so produces
 // the pre-gh#88 "stripped pointer" shape. That shape is the one mg-ee02's doc
 // comment described. The whole point of mg-4d45 is that the predicate admitted
 // a much wider population than that comment claimed, so the control has to
@@ -162,6 +162,11 @@ func TestCannotTellRefusedUnderEVERYOwnership(t *testing.T) {
 // matter most in the other direction: the common case is a clean tree at a
 // polecat's exit, and it must still reap. If it stopped, every polecat exit
 // would leak a worktree and pin its branch.
+//
+// It loops both ownerships for the same reason the refusal test does: ownership
+// discriminates nothing, so OwnerGone is dormant API rather than a live input
+// (see WorktreeOwner). Naming it here is a control against an arm coming back,
+// not a claim that it selects anything.
 func TestCleanStillReapsUnderBothOwnerships(t *testing.T) {
 	for _, owner := range []WorktreeOwner{OwnerUnproven, OwnerGone} {
 		t.Run(owner.String(), func(t *testing.T) {
@@ -187,6 +192,9 @@ func TestCleanStillReapsUnderBothOwnerships(t *testing.T) {
 //
 // There are no files to protect in an absent directory. "There is nothing
 // here" and "there may be something here I cannot read" are different facts.
+//
+// Both ownerships again, and again because neither is read: OwnerGone appears
+// here as dormant API under test, not as a governing value (see WorktreeOwner).
 func TestAbsentWorktreeIsNotCannotTell(t *testing.T) {
 	r := newTestRepo(t)
 	missing := filepath.Join(r.dir, "..", "never-existed")

@@ -51,20 +51,29 @@ func cleanupAgentWorktree(
 		return worktreeNone
 	}
 
-	// OwnerUnproven, not OwnerGone — and the distinction is worth stating,
-	// because this hook fires AFTER the process has exited, so a naive read of
-	// "liveness" would answer GONE here and reap (mg-4d45).
+	// The ownership argument CHANGES NOTHING, and that is the first thing to
+	// know about it. Since gh #97 RemoveWorktree ignores its WorktreeOwner
+	// entirely — every ownership reaches the same outcome on every path — so
+	// OwnerGone is dormant API rather than the other half of a live decision.
+	// Nothing in production constructs it: this hook and both gitgc sweep
+	// call sites all pass OwnerUnproven. If you arrived here to pass OwnerGone
+	// because some comment made the distinction sound load-bearing, there is
+	// nothing for it to influence; see gitgc.WorktreeOwner.
 	//
-	// The process being dead is not the question. This tree belonged to an
-	// agent that was RUNNING until moments ago; its files are that agent's
-	// in-flight work, and an exit — normal, crashed, or force-stopped — says
-	// nothing about whether the work was saved. Exactly one exit route
-	// reaches this hook with work still in the tree, and it is the route that
-	// cost us a 201-line race test.
+	// The reasoning behind the value is kept because it is what would be at
+	// stake if a discriminator ever came back, not because it selects a branch
+	// today. This hook fires AFTER the process has exited, so a naive read of
+	// "liveness" would answer GONE here and reap (mg-4d45). The process being
+	// dead is not the question. This tree belonged to an agent that was
+	// RUNNING until moments ago; its files are that agent's in-flight work,
+	// and an exit — normal, crashed, or force-stopped — says nothing about
+	// whether the work was saved. Exactly one exit route reaches this hook
+	// with work still in the tree, and it is the route that cost us a 201-line
+	// race test.
 	//
-	// OwnerGone belongs where liveness has been positively excluded AND the
-	// work has been accounted for: the gitgc sweep, which gates on
-	// LivePolecats and a concluded ticket before it removes anything.
+	// What actually saves that tree is not this argument but the two rules
+	// RemoveWorktree applies unconditionally: a dirty tree is PRESERVED, and a
+	// tree it could not read is REFUSED and reported. Both are handled below.
 	err := gitgc.RemoveWorktree(sourceRepo, worktreeDir, gitgc.OwnerUnproven)
 
 	var dwe *gitgc.DirtyWorktreeError

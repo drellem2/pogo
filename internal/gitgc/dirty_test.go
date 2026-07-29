@@ -220,21 +220,31 @@ func TestRemoveWorktreeIdempotentOnMissingDir(t *testing.T) {
 	}
 }
 
-// TestWorktreeDirtyUnclassifiableProceeds pinned the hole mg-ee02 left open.
-// mg-4d45 narrowed that hole, so this test now pins the narrowed version.
+// TestWorktreeDirtyUnclassifiableIsRefused pinned the hole mg-ee02 left open.
+// mg-4d45 narrowed that hole with an ownership discriminator; gh #97 closed it
+// outright, so this pins the CLOSED version — and the name no longer says
+// "Proceeds", because it does not.
 //
 // A legacy worktree whose .git pointer was stripped (the pre-gh#88 unlink
 // shape) cannot be asked whether it is dirty — `git status` fails outright.
-// Reclaiming it is still correct WHEN ITS OWNER IS GONE: those orphans would
-// otherwise accumulate forever with nothing able to prove them clean, which
-// regresses gh #31.
+// mg-4d45 held that reclaiming it was still correct WHEN ITS OWNER WAS GONE,
+// because those orphans would otherwise accumulate forever with nothing able to
+// prove them clean, which regresses gh #31. That arm is withdrawn: death
+// evidence is exactly what a recent write contradicts, and the veto built to
+// catch the contradiction could only expire rather than resolve it.
 //
-// What changed is that reclaiming is no longer automatic. It is now licensed
-// by OwnerGone rather than by the status call happening to fail, because "any
-// status error" turned out to be a far wider population than "a tree git can
-// no longer see" — see TestCannotTellRefusedWhenOwnerUnproven for the member
-// of that population that was losing files.
-func TestWorktreeDirtyUnclassifiableProceeds(t *testing.T) {
+// So OwnerGone licenses nothing here, and nothing anywhere else either —
+// RemoveWorktree ignores its WorktreeOwner on every path, and the value is
+// dormant API rather than a live discriminator (see WorktreeOwner). This test
+// passes it deliberately, as the harshest input available: the case mg-4d45
+// would have reclaimed must refuse, so re-introducing an ownership arm goes red
+// here rather than landing silently.
+//
+// See TestCannotTellRefusedWhenOwnerUnproven for the member of the "any status
+// error" population that was losing files, and
+// TestCannotTellRefusedUnderEVERYOwnership for the full reasoning and the
+// gh #31 leak this deliberately accepts.
+func TestWorktreeDirtyUnclassifiableIsRefused(t *testing.T) {
 	r := newTestRepo(t)
 	r.branch("polecat-unlinked")
 	wtPath := r.worktree("polecat-unlinked")

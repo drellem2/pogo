@@ -564,11 +564,20 @@ const (
 	// OwnerGone: liveness has been positively excluded — no live agent owns
 	// this tree and none is coming back for it.
 	//
+	// DORMANT, AND UNREACHABLE IN PRODUCTION (gh #97). Nothing outside tests
+	// constructs this value — both gitgc sweep call sites and cmd/pogod's exit
+	// hook pass OwnerUnproven — and no arm of RemoveWorktree reads it, so
+	// passing it would change nothing if they did.
+	//
 	// This used to license destroying files that could not be read. It does
 	// not any more: positive evidence of death turned out to be exactly the
 	// evidence a recent write CONTRADICTS, and the veto built to catch that
 	// contradiction could only expire rather than resolve it. See
 	// RemoveWorktree.
+	//
+	// The tests that still name it are deliberate controls, not callers: they
+	// feed the harshest input available so that re-introducing an ownership
+	// arm goes red instead of silently landing.
 	OwnerGone
 )
 
