@@ -207,7 +207,7 @@ func Sweep(opts Options) (Result, error) {
 		// reports exactly what an apply would do — and so the log line can name
 		// the status failure rather than the ticket state. It is the guard's
 		// own function, so the two cannot drift.
-		chk := checkWorktreeRemoval(wt.Path, OwnerUnproven)
+		chk := checkWorktreeRemoval(wt.Path)
 		if chk.Refusal != nil && !opts.Force {
 			kept := WorktreeAction{Path: wt.Path, Owner: owner, Branch: wt.Branch}
 			// A refusal with no arm in refusalReason cannot happen today, but a
