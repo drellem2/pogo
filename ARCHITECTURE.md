@@ -322,7 +322,73 @@ skip_on_retry = true   # bypass gates on attempts > 1 (cost-saving when
                        # fetched from main)
 pr_mode       = true   # push the rebased branch back so open GitHub PRs
                        # read "merged" (see below)
+timeout       = "60m"  # bound on a single gate run; "0" removes the bound
 ```
+
+**Telling a slow gate from a dead one.** Quality gates are the one step that can
+run for tens of minutes, and the step used to log on entry and not again until it
+produced a result. From outside, a gate running for thirty minutes and a gate
+whose runner died thirty minutes ago produced *identical* evidence — and the two
+call for opposite responses (wait / intervene). On 2026-07-29 an operator read
+that silence as a hang, re-submitted a branch that had in fact merged, and the
+failed re-submit reopened a work item whose work had landed (mg-8595).
+
+Every gate now runs under a **heartbeat**, emitted by the goroutine running it,
+**every 30 seconds** (`gateHeartbeatInterval`):
+
+```
+refinery: MR mr-abc step=quality-gates gate=./build.sh (1/2) alive elapsed=12m0s
+          heartbeat=24/30s gate_output_lines=412 last_output=3s ago
+```
+
+The same record is persisted on the merge request and rendered by `pogo refinery
+show <id>` (and carried in `--json` under `progress`), which matters because the
+dead-runner case is exactly the case where the writing process is gone and the
+state file is the only reader left.
+
+Two signals are reported **separately**, because they answer different questions
+and collapsing them would rebuild the ambiguity:
+
+| Signal | Written by | A dead runner | A hung gate subprocess |
+|---|---|---|---|
+| `heartbeat` / `beats` | the goroutine running the gate | **cannot emit it** — goes stale | keeps beating |
+| `output_lines` / `last_output` | the gate's own subprocess | frozen | **cannot emit it** — freezes |
+
+So a stale heartbeat proves the runner is gone; a fresh heartbeat plus climbing
+output proves the gate is slow, not stuck; and a fresh heartbeat with a silent
+gate is reported *as unresolved*, bounded by the timeout, rather than guessed at.
+`pogo refinery show` prints that reading as a `Verdict:` line.
+
+Nothing here is derived from **workspace state** — file mtimes, lock files,
+worktree contents. That was the trap in the original misdiagnosis: a frozen
+worktree mtime felt like corroboration, but a long test suite *reads* files
+rather than writing them, so workspace state looks the same for a healthy slow
+gate and a dead one. Two observations that cannot discriminate are not two
+pieces of evidence.
+
+**Gate timeout.** A single gate is bounded at 60 minutes by default
+(`[gates] timeout`, or `"0"` to remove the bound). The bound exists so a
+genuinely hung gate fails instead of waiting forever; it ships *with* the
+heartbeat deliberately, because a timeout alone would only convert
+"indistinguishable" into "killed arbitrarily". A killed gate reports what it was
+observed doing — elapsed time, lines produced, how long it had been silent — and
+says how to raise the bound. The gate runs in its own **process group** and the
+whole group is killed: `sh -c` forks rather than execs for anything compound, so
+killing the shell alone would leave the real work running and holding the output
+pipe, stalling the very runner that carries the heartbeat.
+
+**Cancelling a merge.** `pogo refinery cancel <id>` reaches a **processing** MR,
+not only a queued one — previously it refused anything but `queued`, the state
+least in need of it, which left a hung gate with no recovery short of restarting
+pogod. The two cases are reported as different things, because they are: a queued
+MR is removed and resolved as `cancelled` immediately, while a processing MR has
+its running gate killed and stops at the next step boundary. The second is a
+*request*, not a result — an MR that had already pushed to the target has landed,
+and cancel does not pretend otherwise, so callers must poll for the real status.
+A cancelled MR fires **neither** `OnMerged` nor `OnFailed` and does not count
+against its author's failure streak: it did not fail on its merits, and firing
+`OnFailed` would reopen a work item on an operator's action rather than on a
+defect in the branch.
 
 **PR mode.** The refinery rebases before merging, so a branch's original SHAs never land verbatim on the target — GitHub would show any open PR for the branch as "closed" rather than "merged". With `pr_mode = true`, the refinery asks `gh pr view` whether an open PR exists for the branch and, if so, force-pushes (`--force-with-lease`) the rebased branch back to origin after gates pass and before the ff-merge push — realigning the PR head with exactly the gate-tested commits, so GitHub marks the PR merged when the tip lands. The path is fail-soft end to end: if the `gh` lookup or the push-back fails (missing `gh`, no network, someone pushed to the PR branch mid-merge), the merge proceeds normally and the PR merely reads "closed" — the pre-`pr_mode` status quo.
 
@@ -669,7 +735,7 @@ The log is the durable observability spine: it survives `pogod` restarts, makes 
 Writers:
 
 - **pogod / agent supervisor** emits `agent_spawned`, `agent_stopped`, `agent_crashed`, `agent_restarted`, `polecat_spawned`, `polecat_completed`.
-- **refinery** emits `refinery_merge_attempted`, `refinery_merged`, `refinery_merge_failed`.
+- **refinery** emits `refinery_merge_attempted`, `refinery_merged`, `refinery_merge_failed`, `refinery_merge_cancelled`.
 - **mg** (via the `pogo events emit` CLI bridge) mirrors `work_item_claimed`, `work_item_completed`, and `mail_sent` from macguffin into the same log so a single tail shows the full system narrative.
 
 Emission is best-effort and non-blocking. Lines under 512 bytes rely on POSIX `O_APPEND` atomicity; longer lines take an advisory `flock`. Disk-full or write errors are logged to stderr and swallowed — the event log never blocks or crashes a calling code path. The writer (`internal/events`) is the single entry point; macguffin remains the source of truth for work item state, the event log is purely observational.

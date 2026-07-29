@@ -168,6 +168,41 @@ func emitRecoveryLost(mr *MergeRequest, err error) {
 	})
 }
 
+// emitMergeCancelled writes a refinery_merge_cancelled event for a merge an
+// operator stopped.
+//
+// It is deliberately NOT a refinery_merge_failed. A cancelled merge did not
+// fail on its merits, and an event log that says otherwise is the same class of
+// defect as the one mg-8595 documents: a record that cannot separate two states
+// needing opposite responses. Anything counting merge failures — an author's
+// failure streak, a reliability trend — would otherwise be counting operator
+// actions as branch defects.
+func emitMergeCancelled(mr *MergeRequest, attempt int, stage string, gateOutput string) {
+	if stage == "" {
+		stage = "unknown"
+	}
+	details := map[string]any{
+		"merge_request_id": mr.ID,
+		"branch":           mr.Branch,
+		"target":           mr.TargetRef,
+		"attempt":          attempt,
+		// stage names where the pipeline stopped, so a cancel that landed
+		// during the gates is distinguishable from one that landed between
+		// attempts.
+		"stage": stage,
+	}
+	if gateOutput != "" {
+		details["gate_output_truncated"] = truncate(gateOutput, gateOutputCap)
+	}
+	events.Emit(context.Background(), events.Event{
+		EventType:  "refinery_merge_cancelled",
+		Agent:      "refinery",
+		WorkItemID: workItemIDFromAuthor(mr.Author),
+		Repo:       mr.RepoPath,
+		Details:    details,
+	})
+}
+
 // emitMergeFailed writes a refinery_merge_failed event for a failed attempt.
 // terminal=true means the refinery has given up on this MR (no more retries).
 func emitMergeFailed(mr *MergeRequest, attempt int, stage string, err error, terminal bool, gateOutput string) {

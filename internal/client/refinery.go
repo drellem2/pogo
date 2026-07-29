@@ -117,22 +117,29 @@ func PruneWorktrees() ([]refinery.PruneResult, error) {
 	return results, nil
 }
 
-// CancelMerge cancels a queued merge request, removing it from the queue.
-func CancelMerge(id string) error {
+// CancelMerge cancels a merge request. A queued MR is removed from the queue;
+// a processing one has its running gate killed and stops at the next step
+// boundary. The returned response says which happened — the caller must not
+// treat the second as a final status (see refinery.CancelOutcome).
+func CancelMerge(id string) (*refinery.CancelResponse, error) {
 	body, err := json.Marshal(refinery.CancelRequest{ID: id})
 	if err != nil {
-		return err
+		return nil, err
 	}
 	r, err := http.Post(serverURL+"/refinery/cancel", "application/json", bytes.NewReader(body))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer r.Body.Close()
 	if r.StatusCode != http.StatusOK {
 		msg, _ := io.ReadAll(r.Body)
-		return fmt.Errorf("cancel failed: %s", string(msg))
+		return nil, fmt.Errorf("cancel failed: %s", string(msg))
 	}
-	return nil
+	var resp refinery.CancelResponse
+	if err := json.NewDecoder(r.Body).Decode(&resp); err != nil {
+		return nil, fmt.Errorf("cancel succeeded but the response was unreadable: %w", err)
+	}
+	return &resp, nil
 }
 
 // SubmitMerge submits a branch to the refinery merge queue.

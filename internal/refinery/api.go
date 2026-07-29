@@ -151,13 +151,35 @@ func (r *Refinery) handleCancel(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	if err := r.Cancel(cancelReq.ID); err != nil {
+	outcome, err := r.Cancel(cancelReq.ID)
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
+	// A processing MR is not cancelled yet, only asked to stop, so the
+	// response says which of the two happened rather than reporting both as
+	// "cancelled".
+	resp := CancelResponse{ID: cancelReq.ID, Outcome: outcome, Status: "cancelled"}
+	if outcome == CancelRequestedInFlight {
+		resp.Status = "cancel_requested"
+		resp.Note = InFlightCancelNote
+	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"id": cancelReq.ID, "status": "cancelled"})
+	json.NewEncoder(w).Encode(resp)
+}
+
+// CancelResponse is the JSON body returned by POST /refinery/cancel.
+type CancelResponse struct {
+	ID string `json:"id"`
+	// Outcome distinguishes a queued MR removed outright from a processing one
+	// asked to stop. See CancelOutcome.
+	Outcome CancelOutcome `json:"outcome"`
+	// Status is "cancelled" when the MR is already terminal, and
+	// "cancel_requested" when the outcome is not yet decided.
+	Status string `json:"status"`
+	// Note carries the caller-facing explanation for the undecided case.
+	Note string `json:"note,omitempty"`
 }
 
 func (r *Refinery) handleMR(w http.ResponseWriter, req *http.Request) {

@@ -550,6 +550,28 @@ A merge attempt failed. Whether this is terminal depends on `attempt` and the co
 {"schema_version":1,"timestamp":"2026-04-25T10:23:05.000000000Z","event_type":"refinery_merge_failed","agent":"refinery","work_item_id":"mg-0241","repo":"/Users/daniel/dev/pogo","details":{"merge_request_id":"mr-9482","branch":"polecat-mg-0241","target":"main","attempt":1,"stage":"test","reason":"./test.sh exited with status 1","terminal":false,"gate_output_truncated":"--- FAIL: TestEventEmit ..."}}
 ```
 
+#### `refinery_merge_cancelled`
+
+An operator stopped a merge with `pogo refinery cancel`, and the pipeline gave up at `stage`. Emitted only for a merge that had already started processing — a queued MR cancelled before it ran never reaches the pipeline and emits nothing.
+
+This is deliberately **not** a `refinery_merge_failed`. A cancelled merge did not fail on its merits, and anything counting merge failures (an author's failure streak, a reliability trend) would otherwise count operator actions as branch defects. There is no `reason` or `terminal` field: the reason is always cancellation, and a cancel is always terminal for the attempt (mg-8595).
+
+Note that a cancel is a request, not a guaranteed outcome. If the merge had already pushed to the target before the cancel landed, the MR resolves as `merged` and a `refinery_merged` event is emitted instead of this one.
+
+- **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent`, `repo`, `details`
+- **Optional envelope:** `work_item_id`
+- **`details` fields:**
+  - `merge_request_id` (string, required)
+  - `branch` (string, required)
+  - `target` (string, required)
+  - `attempt` (int, required): attempt number in flight when the cancel took effect
+  - `stage` (string, required): where the pipeline stopped — the failing-stage vocabulary of `refinery_merge_failed` plus `"before-attempt"`, meaning the cancel landed between attempts rather than inside a gate
+  - `gate_output_truncated` (string, optional): up to 1 KB of gate output captured before the kill
+
+```json
+{"schema_version":1,"timestamp":"2026-07-29T21:44:02.000000000Z","event_type":"refinery_merge_cancelled","agent":"refinery","work_item_id":"mg-8595","repo":"/Users/daniel/dev/pogo","details":{"merge_request_id":"mr-9482","branch":"polecat-8595","target":"main","attempt":1,"stage":"build","gate_output_truncated":"=== Running: ./build.sh ===\n"}}
+```
+
 #### `refinery_mr_lost`
 
 Restart recovery could not carry an in-flight merge request forward (branch deleted from origin, remote unreachable, worktree setup failed). The MR moves to the state file's lost list; `refinery show <id>` answers HTTP 410 with `status=lost` so the author can resubmit. See docs/refinery-persistence-design.md (mg-abfd).

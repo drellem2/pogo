@@ -85,6 +85,13 @@ func (r *Refinery) processMerge(mr *MergeRequest) (string, string, bool, error) 
 	var gateOutput string
 	startTime := time.Now()
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		// Cancellation is honoured at attempt boundaries as well as inside the
+		// gate, so a cancel that arrives during a git step still takes effect
+		// rather than being swallowed until the next gate starts.
+		if r.cancelWasRequested() {
+			emitMergeCancelled(mr, attempt, "before-attempt", gateOutput)
+			return gateOutput, "", false, cancelledMergeError("before-attempt")
+		}
 		if attempt > 1 {
 			log.Printf("refinery: MR %s step=retry attempt=%d/%d", mr.ID, attempt, maxAttempts)
 		}
@@ -111,6 +118,13 @@ func (r *Refinery) processMerge(mr *MergeRequest) (string, string, bool, error) 
 			// DeployError + event but does not unwind the merge.
 			deployErr := r.runDeploy(wtDir, mr)
 			return gateOutput, deployErr, false, nil
+		}
+
+		// A cancelled gate must not be retried: the retry loop exists to
+		// absorb races with other merges, not to defeat an operator.
+		if isCancelled(attemptErr) || r.cancelWasRequested() {
+			emitMergeCancelled(mr, attempt, stage, gateOutput)
+			return gateOutput, "", false, cancelledMergeError(stage)
 		}
 
 		retryRemaining := attempt < maxAttempts && isRetryable(attemptErr)
@@ -189,8 +203,8 @@ func (r *Refinery) attemptMerge(wtDir string, mr *MergeRequest, attempt int, ski
 		log.Printf("refinery: MR %s step=quality-gates attempt=%d skipped (skip_on_retry=true)", mr.ID, attempt)
 		gateOutput = "(quality gates skipped on retry — skip_on_retry=true)"
 	} else {
-		log.Printf("refinery: MR %s step=quality-gates attempt=%d", mr.ID, attempt)
-		out, gates, qerr := r.runQualityGates(wtDir, mr.RepoPath)
+		log.Printf("refinery: MR %s step=quality-gates attempt=%d heartbeat_every=%s", mr.ID, attempt, r.gateHeartbeat())
+		out, gates, qerr := r.runQualityGates(r.gateContext(), wtDir, mr.RepoPath, mr)
 		gateOutput = out
 		if qerr != nil {
 			return gateOutput, gateStage(gates), "", fmt.Errorf("quality gate: %w", qerr)
@@ -543,19 +557,42 @@ func fixRemoteURL(wtDir, repoPath string) error {
 // Checks for per-repo .pogo/refinery.toml first, then falls back to defaults.
 // Returns combined output, the slice of gates run up to and including the
 // failing one (or all of them on success), and any error.
-func (r *Refinery) runQualityGates(wtDir, repoPath string) (string, []string, error) {
-	gates := r.loadGateConfig(wtDir, repoPath)
+//
+// Every gate runs under a gateWatch, which emits a heartbeat on a bounded
+// interval for as long as the gate runs (mg-8595). This is the step that can
+// take tens of minutes; before the watch existed it logged on entry and not
+// again until it produced a result, which is indistinguishable from a hang
+// from outside for the whole run.
+//
+// ctx cancellation kills the running gate, which is how an in-flight merge
+// request becomes cancellable. mr may be nil in unit tests; the watch then
+// logs without persisting.
+func (r *Refinery) runQualityGates(ctx context.Context, wtDir, repoPath string, mr *MergeRequest) (string, []string, error) {
+	cfg := r.loadConfig(wtDir, repoPath)
+	gates := cfg.Gates
+	if len(gates) == 0 {
+		gates = defaultGateCommands(wtDir)
+	}
 	if len(gates) == 0 {
 		// No gates configured — pass by default
 		return "(no quality gates configured)", nil, nil
 	}
+	timeout := cfg.gateTimeout()
 
 	var allOutput strings.Builder
 	var ran []string
-	for _, gate := range gates {
+	for i, gate := range gates {
 		allOutput.WriteString(fmt.Sprintf("=== Running: %s ===\n", gate))
 		ran = append(ran, gate)
-		output, err := runGate(wtDir, gate)
+
+		var deadline time.Time
+		if timeout > 0 {
+			deadline = time.Now().Add(timeout)
+		}
+		watch := startGateWatch(r, mr, "quality-gates", gate, i+1, len(gates), deadline)
+		output, err := runGate(ctx, wtDir, gate, timeout, watch)
+		watch.finish()
+
 		allOutput.WriteString(output)
 		allOutput.WriteString("\n")
 		if err != nil {
@@ -575,7 +612,12 @@ func (r *Refinery) loadGateConfig(wtDir, repoPath string) []string {
 	if len(cfg.Gates) > 0 {
 		return cfg.Gates
 	}
-	// Fall back to common scripts
+	return defaultGateCommands(wtDir)
+}
+
+// defaultGateCommands returns the conventional gate scripts present in a
+// worktree, used when no per-repo config names any.
+func defaultGateCommands(wtDir string) []string {
 	var defaults []string
 	for _, script := range []string{"./build.sh", "./test.sh"} {
 		if _, err := os.Stat(filepath.Join(wtDir, script)); err == nil {
@@ -607,6 +649,9 @@ func (r *Refinery) loadConfig(wtDir, repoPath string) refineryConfig {
 	if !wt.PRMode {
 		wt.PRMode = orig.PRMode
 	}
+	if !wt.GateTimeoutSet {
+		wt.GateTimeout, wt.GateTimeoutSet = orig.GateTimeout, orig.GateTimeoutSet
+	}
 	return wt
 }
 
@@ -617,6 +662,13 @@ type refineryConfig struct {
 	MaxAttempts      int  // [gates] max_attempts — 0 means use defaultMaxAttempts
 	SkipGatesOnRetry bool // [gates] skip_on_retry — bypass gates on attempt > 1
 	PRMode           bool // pr_mode — push rebased branch back so open PRs read merged
+	// GateTimeout is the [gates] timeout bound on a single gate run; 0 means
+	// no bound. GateTimeoutSet distinguishes "configured as 0" (deliberately
+	// unbounded) from "not configured" (use defaultGateTimeout) — without it
+	// the two are the same zero value and an omitted key would remove the
+	// bound instead of taking the default.
+	GateTimeout    time.Duration
+	GateTimeoutSet bool
 }
 
 // parseRefineryToml reads a .pogo/refinery.toml and extracts gate commands.
@@ -697,6 +749,15 @@ func parseRefineryConfig(path string) refineryConfig {
 			}
 		case section == "gates" && key == "skip_on_retry":
 			cfg.SkipGatesOnRetry = parseTomlBool(val)
+		case section == "gates" && key == "timeout":
+			// An unreadable value leaves GateTimeoutSet false, so the default
+			// bound stays in force. A typo must not silently remove the bound.
+			if d, ok := parseGateTimeout(val); ok {
+				cfg.GateTimeout = d
+				cfg.GateTimeoutSet = true
+			} else {
+				log.Printf("refinery: ignoring unreadable [gates] timeout %q in %s — keeping the %s default", val, path, defaultGateTimeout)
+			}
 		case key == "pr_mode":
 			// Accepted top-level or under [gates] — the ticket and design
 			// doc cite both spellings (mg-b828).
@@ -728,14 +789,6 @@ func (r *Refinery) DeployCommand(repoPath string) string {
 }
 
 // runGate executes a single quality gate command in the worktree directory.
-func runGate(wtDir, command string) (string, error) {
-	cmd := exec.Command("sh", "-c", command)
-	cmd.Dir = wtDir
-	cmd.Env = append(os.Environ(), "POGO_REFINERY=1")
-
-	output, err := cmd.CombinedOutput()
-	return string(output), err
-}
 
 // hasAlternates reports whether the git repo at dir has an alternates file,
 // which indicates the clone shares its object store with another repo via

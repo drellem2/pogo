@@ -217,6 +217,21 @@ Most "pogod is misbehaving" situations are better solved by **filing an mg (a wo
 - A plugin behaves stalely after you edited its source. → Most plugins reload on file change; if not, fix the plugin's reload path rather than bouncing the daemon.
 - A polecat hangs or misbehaves. → Stop that polecat (`pogo agent stop <name>`); pogod itself is fine.
 - Refinery is slow or backed up. → Inspect with `pogo refinery list`; queue throughput is not a daemon-restart problem.
+- **A merge request has sat in `processing` for a long time.** → Ask the merge
+  request, not the process table: `pogo refinery show <mr-id>` prints a
+  `Verdict:` line reading the running gate's heartbeat. `ALIVE and working`
+  means the gate is slow and **waiting is correct** — do not re-submit the
+  branch. `DEAD` means the runner is gone and waiting will not help.
+  `ALIVE, gate silent` means it cannot be told from outside, and names the
+  timeout that bounds the wait. Heartbeats land every 30 seconds, so a record
+  older than ~90 seconds is stale rather than merely quiet.
+
+  **Do not re-submit a branch on a guess.** On 2026-07-29 a slow gate was read
+  as a hung one from log silence alone; the branch had in fact merged, the
+  redundant re-submit failed against a deleted remote branch, and the failure
+  **reopened a work item whose work had landed** (mg-8595). If a gate really is
+  stuck, `pogo refinery cancel <mr-id>` now reaches a processing MR — that is
+  the recovery path, not a pogod restart.
 - Logs look noisy. → Filter `~/Library/Logs/pogo/pogod.log`. pogod appends across restarts (crash evidence survives) and rotates the file itself at startup once it exceeds 10 MiB — the prior chunk is `pogod.log.1` (up to `.3`). No manual rotation needed; never truncate the live file mid-run.
 - An mg you expected to appear didn't. → It's almost certainly an mg routing/visibility issue, not a pogod liveness issue.
 
