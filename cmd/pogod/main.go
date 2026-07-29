@@ -1167,8 +1167,10 @@ Flags:
 	agentRegistry.SetCommandConfig(&cfg.Agents)
 
 	// Arm the dispatch gate with the configured non-dispatchable vocabulary, so
-	// `pogo agent spawn-polecat` refuses a work item gated to a human or parked
-	// (mg-4798). The vocabulary is read from [stallwatch] because that is where
+	// `pogo agent spawn-polecat` refuses a work item gated to a human, parked, or
+	// blocked on a named agent (mg-4798, mg-6fb0 — the `blocked:<agent>` shape is
+	// structural and gates whatever this vocabulary says). The vocabulary is read
+	// from [stallwatch] because that is where
 	// the key already lives and both consumers must agree on it — one list, one
 	// predicate (config.IsDispatchGated), two enforcement points. A daemon that
 	// never reaches this line still gates the defaults; this only applies an
@@ -1524,7 +1526,12 @@ Flags:
 			cfg.StallWatch.NudgeCooldown, cfg.StallWatch.PriorityWakeEnabled,
 			cfg.StallWatch.HighPriorityWakeDelay, cfg.StallWatch.HighPriorityWakeCooldown,
 			strings.Join(cfg.StallWatch.FastPriorities, ","),
-			strings.Join(cfg.StallWatch.NonDispatchableAssignees, ","))
+			// The `blocked:<agent>` shape (mg-6fb0) gates alongside the
+			// vocabulary and is not IN it, so printing the list alone would
+			// understate what this daemon enforces — an operator reading the
+			// startup line to find out what gates would read a false answer.
+			strings.Join(cfg.StallWatch.NonDispatchableAssignees, ",")+
+				","+config.BlockedAssigneePrefix+"<agent>")
 	}
 
 	// Build the drift-check runner (mg-345b): the DETECTION backstop that rides

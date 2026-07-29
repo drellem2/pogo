@@ -255,3 +255,82 @@ func TestParseFrontmatterLine(t *testing.T) {
 		}
 	}
 }
+
+// TestTagList pins the split that lets a consumer ask about ONE tag. The
+// dispatch-gate advisory (mg-6fb0) reads `blocked-on-*` out of this, so a split
+// that silently produced the whole line as a single tag would make the advisory
+// permanently quiet — a warning that never fires being the failure mode the
+// ticket named explicitly.
+func TestTagList(t *testing.T) {
+	tests := []struct {
+		name string
+		tags string
+		want []string
+	}{
+		// The post-parseFrontmatterLine form (brackets already stripped) — this
+		// is what ListFrom actually hands to a consumer.
+		{"parsed form", "pogo, ops, blocked-on-daniel",
+			[]string{"pogo", "ops", "blocked-on-daniel"}},
+		// The raw frontmatter form, for a hand-built WorkItem.
+		{"raw bracketed form", "[pogo, ops, blocked-on-daniel]",
+			[]string{"pogo", "ops", "blocked-on-daniel"}},
+		{"single tag", "pogo", []string{"pogo"}},
+		{"quoted tags", `"pogo", 'ops'`, []string{"pogo", "ops"}},
+		{"ragged spacing", "  pogo ,  ops  ", []string{"pogo", "ops"}},
+		{"empty entries dropped", "pogo, , ops,", []string{"pogo", "ops"}},
+
+		// Both spellings of "no tags".
+		{"empty value", "", nil},
+		{"empty list", "[]", nil},
+		{"only separators", " , , ", nil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := WorkItem{Tags: tt.tags}.TagList()
+			if len(got) != len(tt.want) {
+				t.Fatalf("TagList(%q) = %v, want %v", tt.tags, got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("TagList(%q)[%d] = %q, want %q", tt.tags, i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+// TestTagListReadsFromParsedFile is the end-to-end half: a real work-item file
+// through parseWorkItem and out as individual tags. The two-step (frontmatter
+// parse, then split) is where a format assumption could rot silently, so it is
+// tested against a file rather than a struct literal.
+func TestTagListReadsFromParsedFile(t *testing.T) {
+	dir := t.TempDir()
+	avail := filepath.Join(dir, "available")
+	if err := os.MkdirAll(avail, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	content := "---\nid: mg-tag1\ntype: task\n" +
+		"tags: [pogo, ops, blocked-on-daniel]\nassignee: pm-pogo\n---\n# titled\n"
+	if err := os.WriteFile(filepath.Join(avail, "mg-tag1.md"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	items, err := ListFrom(dir, "available")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("got %d items, want 1", len(items))
+	}
+	got := items[0].TagList()
+	want := []string{"pogo", "ops", "blocked-on-daniel"}
+	if len(got) != len(want) {
+		t.Fatalf("TagList() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("TagList()[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}

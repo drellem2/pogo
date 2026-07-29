@@ -106,6 +106,23 @@ func (m MGDispatchGate) DispatchGated(workItemID string) (string, bool) {
 	if config.IsDispatchGated(item.Assignee, m.Gates) {
 		return item.Assignee, true
 	}
+	// Not gated — the spawn proceeds. But if the item DECLARES a block in the
+	// only channel that existed before the `blocked:<agent>` shape (mg-6fb0), say
+	// so on the way past. This is the harm moment: a polecat is about to be put
+	// on work whose author wrote down that it is waiting on someone. It does not
+	// refuse, because a tag is not a gate and making it one would split the gate
+	// across two channels — the thing mg-6fb0 explicitly declined to do.
+	if tag, ok := config.BlockIntentMismatch(item.Assignee, item.TagList(), m.Gates); ok {
+		suggest := config.SuggestBlockedAssignee(tag)
+		if suggest == "" {
+			suggest = "--depends, if it is waiting on another work item"
+		} else {
+			suggest = "--assignee=" + suggest
+		}
+		log.Printf("dispatch gate: work item %s is tagged %q but its assignee %q does not gate "+
+			"dispatch — DISPATCHING ANYWAY (a tag is not a gate); if it is genuinely blocked, %s",
+			workItemID, tag, item.Assignee, suggest)
+	}
 	return "", false
 }
 
@@ -146,6 +163,24 @@ func (r *Registry) dispatchGateRefusal(workItemID string) string {
 	assignee, gated := r.getDispatchGate().DispatchGated(workItemID)
 	if !gated {
 		return ""
+	}
+	// The `blocked:<agent>` shape gets its own sentence (mg-6fb0). It gates for a
+	// reason the sentinel vocabulary cannot state — the item is waiting on a NAMED
+	// agent — and a refusal that flattened it to "non_dispatchable_assignees" would
+	// throw away the one thing the author took the trouble to record. The way out
+	// is different too: an item blocked on mayor is not "done by hand or
+	// unparked", it is unblocked by mayor.
+	if who, ok := config.BlockedOn(assignee); ok {
+		if who == "" {
+			return fmt.Sprintf("work item %s is assigned to %q — the `blocked:<agent>` shape, which "+
+				"gates it away from automatic dispatch, but it names no agent. Rewrite it as "+
+				"blocked:<agent> so the item says who it is waiting on, or clear the assignee to "+
+				"dispatch a worker onto it", workItemID, assignee)
+		}
+		return fmt.Sprintf("work item %s is assigned to %q: it is BLOCKED ON %s, not merely owned by "+
+			"them, and the `blocked:` shape gates it away from automatic dispatch. Ask %s to unblock "+
+			"it, then reassign or clear the assignee to dispatch a worker onto it",
+			workItemID, assignee, who, who)
 	}
 	return fmt.Sprintf("work item %s is assigned to %q, which is gated away from automatic "+
 		"dispatch (non_dispatchable_assignees); it must be done by hand or unparked. "+

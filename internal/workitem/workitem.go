@@ -26,6 +26,31 @@ type WorkItem struct {
 	ModTime time.Time `json:"mod_time,omitempty"`
 }
 
+// TagList splits the raw `tags:` frontmatter value into individual tags. mg
+// writes it as an inline YAML sequence — `tags: [pogo, ops, blocked-on-daniel]`
+// — and parseWorkItem keeps it verbatim, so every consumer that wants one tag
+// rather than the whole line would otherwise re-derive this split.
+// parseFrontmatterLine already strips a balanced pair of brackets; stripping
+// again here is harmless and means the method also works on a hand-built
+// WorkItem. Surrounding quotes are stripped, empty entries dropped, and both
+// `tags: []` and a missing tags line yield nil.
+func (w WorkItem) TagList() []string {
+	raw := strings.TrimSpace(w.Tags)
+	if strings.HasPrefix(raw, "[") && strings.HasSuffix(raw, "]") {
+		raw = raw[1 : len(raw)-1]
+	}
+	var tags []string
+	for _, t := range strings.Split(raw, ",") {
+		t = strings.TrimSpace(t)
+		t = strings.Trim(t, `"'`)
+		t = strings.TrimSpace(t)
+		if t != "" {
+			tags = append(tags, t)
+		}
+	}
+	return tags
+}
+
 // workspaceDir returns the macguffin workspace root.
 func workspaceDir() string {
 	home, _ := os.UserHomeDir()

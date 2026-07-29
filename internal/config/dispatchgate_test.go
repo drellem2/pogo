@@ -44,6 +44,42 @@ func TestIsDispatchGated(t *testing.T) {
 		// A gate value must match whole, not as a substring — "human" must not
 		// gate an agent called "human-review-bot".
 		{"substring does not gate", "human-review-bot", nil, false},
+
+		// The `blocked:<agent>` SHAPE (mg-6fb0). One rule covering every agent
+		// name that will ever exist, which is why it is a shape and not a
+		// roster: mg-4bd4's defect was a list that stopped watching work the
+		// day a new agent was hired, and none of these needed a config line.
+		{"blocked on a named agent gates", "blocked:mayor", nil, true},
+		{"blocked on a pm gates", "blocked:pm-pogo", nil, true},
+		{"blocked on an agent that does not exist yet gates", "blocked:some-future-crew", nil, true},
+		{"blocked on daniel gates", "blocked:daniel", nil, true},
+
+		// ...and the same normalization the sentinels get, because the value is
+		// hand-edited frontmatter as often as it is CLI-written.
+		{"blocked shape is case-insensitive", "Blocked:Mayor", nil, true},
+		{"blocked shape tolerates padding", "  blocked: mayor  ", nil, true},
+
+		// A bare `blocked:` gates. The author wrote "blocked"; refusing to gate
+		// on a truncated agent name would fail in the unsafe direction.
+		{"bare blocked prefix gates", "blocked:", nil, true},
+
+		// The shape is a STRUCTURAL rule, not a vocabulary entry, so replacing
+		// the vocabulary does not switch it off. This is the property that keeps
+		// it from being "a third magic value" — a config that drops both
+		// defaults still gates a blocked item.
+		{"shape survives a replaced vocabulary", "blocked:mayor", []string{"legal-review"}, true},
+		{"shape survives a vocabulary with neither default", "blocked:daniel", []string{"x"}, true},
+
+		// The negative half, and it is the half that matters: the shape must not
+		// have widened the gate onto ordinary ownership. mg-bf5e's
+		// `--assignee=mayor` is STILL dispatchable, which is correct by design —
+		// an item owned by mayor and not gated is dispatchable, and the repair
+		// was to give the filer a way to say the other thing, not to gate on
+		// ownership.
+		{"an owner named like the shape is not gated", "blocked", nil, false},
+		{"a hyphen is not the shape", "blocked-on-daniel", nil, false},
+		{"the tag idiom does not gate", "blocked-on-mayor", nil, false},
+		{"the shape does not gate a mid-string colon", "pm:blocked:mayor", nil, false},
 	}
 
 	for _, tt := range tests {
