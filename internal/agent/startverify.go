@@ -238,8 +238,8 @@ func (r *Registry) startedSignal(a *Agent) (started func() (bool, error), reason
 	// schedule behind it. Restoring a hard started-signal needs a way to observe
 	// the polecat's own first protocol action — a claim pid re-stamp, which
 	// macguffin has no command for today, or some other first-turn observable —
-	// and that is a design decision with its own acceptance criteria, tracked
-	// separately rather than invented inside this change.
+	// and that is a design decision with its own acceptance criteria. Tracked as
+	// mg-7d6d rather than invented inside this change.
 	if a.ClaimedAtSpawn {
 		log.Printf("agent %s: pogod holds the claim on %s from spawn (mg-7254), so the claim is not "+
 			"evidence this agent started — start-verification falls back to the WEAKER ready-composer "+
