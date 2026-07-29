@@ -2979,15 +2979,14 @@ branch is not deletable until the worktree goes.
 A worktree whose "git status" cannot be READ AT ALL — a damaged .git, a bad
 permission, an unmounted volume — is likewise kept, and the report says the
 status could not be read rather than naming the ticket state. gc will not
-destroy files it could not look at: status fails precisely when the working
-files are least reproducible. Reclaiming one needs positive evidence that the
-owning polecat is dead, which only pogod's sweep holds; from this command the
-answer is always to keep, and --force is how you overrule it.
+destroy files it could not look at, under any circumstances but an explicit
+--force: status fails precisely when the working files are least reproducible.
 
 Such a worktree is never reclaimed automatically, however long it sits — a
 30-day-old uncommitted file is exactly as unrecoverable as a 30-second-old one.
 The report says how long each kept tree has been untouched so the decision is
-yours to make, and cheap to make.
+yours to make, and cheap to make. That is the whole use gc makes of a file
+timestamp: it informs you, and it decides nothing.
 
 By default gc only reports what it would do; pass --apply to make changes.`,
 		Args: cobra.NoArgs,

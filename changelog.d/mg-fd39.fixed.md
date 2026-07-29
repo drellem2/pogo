@@ -10,55 +10,42 @@
   when `.git` is damaged or the disk is unhappy, which is when the working files
   are least reproducible.
 
-  The sweep now routes through the guard. An unreadable worktree is **kept and
-  reported** unless the caller has passed **positive evidence that its owner is
-  dead**; a pinned worktree is recoverable by a human where deleted files are
-  not. `--force` still discards, unchanged — an operator's explicit `--force` is
-  a positive reason.
+  The sweep now routes through the guard, and an unreadable worktree is **kept
+  and reported**: a pinned worktree is recoverable by a human where deleted files
+  are not. `--force` still discards, unchanged — an operator's explicit
+  `--force` is a positive reason, and is now the only route by which such a tree
+  is ever removed.
 
-- **Death evidence is passed in, never inferred from absence (mg-fd39).** The
-  new `gitgc.Options.OwnerVerdicts` carries it, keyed by polecat name. pogod
-  fills it from the polecat witness, mapping **only** `WitnessDead` — the
-  store's one positive-evidence verdict — to `OwnerGone`; `WitnessNoRecord` and
-  `WitnessUnreadable` both refuse. Absence from the live set is what a caller
-  has when it did not look, or looked with an instrument that failed, so it
-  never licenses a removal. `pogo gc` leaves the field unset and so degrades to
-  "refuse" **by construction** rather than by anyone remembering: knowing who is
-  alive never establishes that a particular absent name is dead.
+- **A tree we could not read is never collected — under any ownership, at any
+  age (mg-fd39).** Two narrower designs were tried and withdrawn, and both are
+  worth knowing about because both are tempting. A **drain** — reclaim once
+  dead *and* old *and* previously refused — fell to *age is not emptiness*: a
+  30-day-old `irreplaceable.go` is exactly as unrecoverable as a 30-second-old
+  one. An **mtime veto** — refuse, even with death evidence, when the tree was
+  written to recently — replaced it and fell to something subtler: death
+  evidence is precisely what a recent write contradicts, and a veto that
+  *expires* has not resolved that contradiction, it has stopped being able to
+  see it. *Absence of evidence is not evidence of absence*, one layer in.
 
-- **A timestamp can now forbid a deletion, and still never authorise one
-  (mg-fd39).** Even with positive death evidence, an unreadable worktree written
-  to within the last day is refused — death evidence plus a file written ninety
-  seconds ago is a contradiction, and it resolves in favour of the files.
-  Nothing collects *because* a tree is old; that would delete a live agent's
-  work for the crime of thinking hard.
-
-  The check **walks** the tree and never stats its root, because root mtime was
-  measured blind to edits below it: a live agent editing `pkg/deep/work.go`
-  leaves it untouched. A worktree whose contents cannot be listed at all gets
-  its own refusal instead of falling back to that blind signal — everywhere else
-  the veto fails by over-refusing, which is safe, but there it would fail to
-  fire *while an agent is working*, and a guard whose failure mode inverts by
-  shape is two guards of which only one is safe.
+  So the rule is singular, and the cannot-enumerate case needs no clause of its
+  own: *if we cannot read the tree, we do not act on it.* `pogo gc --apply
+  --force` remains the operator's way to overrule it.
 
 - **A refused worktree reports how long it has been untouched (mg-fd39).**
-  `kept: … untouched 30 days` is what makes an operator's decision cheap. A
-  proposed *drain* — reclaim once dead **and** old **and** previously refused —
-  was withdrawn, and the arms it would have covered are permanent: a worktree
-  refused for **lack of death evidence**, or because its tree could not be
-  listed, is never reclaimed automatically at any age. There the age is a
-  **report and never an input**, because a 30-day-old `irreplaceable.go` is
-  exactly as unrecoverable as a 30-second-old one. The resulting pin is
-  deliberate — a visible pin a human can clear is a categorically better failure
-  than an invisible deletion they cannot, and `pogo gc --apply --force` is the
-  way out.
+  `kept: … untouched 30 days` is what makes an operator's decision cheap, and
+  reporting is now mtime's **only** job here: it authorises nothing and vetoes
+  nothing, so the worst it can do is print an unhelpful number rather than lose
+  a file. The age comes from a **walk** and never from the worktree root's
+  mtime, which was measured blind to edits below it — a live agent editing
+  `pkg/deep/work.go` leaves the root untouched, and an operator told "untouched
+  30 days" about that tree would clear the pin on the strength of it. Where the
+  tree cannot be listed at all, the line says the age is unknown rather than
+  omitting it.
 
-  The **veto** arm is the exception and is a delay rather than a permanent
-  refusal: a tree held back for a recent write collects on a later sweep once it
-  goes quiet. That is not the drain returning — positive evidence of death
-  already authorised that removal, and the veto only ever *subtracts* from what
-  it authorised. Age never becomes the reason; it stops being a reason to
-  refuse.
+  **The cost is accepted deliberately: more pins, and they never self-clear.** A
+  pinned worktree pins its branch too. A visible pin a human can clear is a
+  categorically better failure than an invisible deletion they cannot, and every
+  attempt to bound the pin automatically failed on the same rock.
 
 - **The GC log stops naming an innocent reason for a destructive act (mg-fd39,
   gh #97).** The per-action log shipped as gh #94's remedy — *the* way to find

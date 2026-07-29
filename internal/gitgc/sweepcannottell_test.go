@@ -16,6 +16,12 @@ import (
 // drove a status-failing worktree through Sweep, which is precisely why the
 // bypass was invisible to a green suite. A guard is only as good as its
 // narrowest caller, so the caller is what gets tested here.
+//
+// The rule these all pin is now singular: IF WE COULD NOT READ THE TREE, WE DO
+// NOT ACT ON IT. No ownership arm, no clock, no exceptions but the operator's
+// explicit --force. Two earlier designs put a condition on that — a drain, then
+// an mtime veto — and both were withdrawn; see RemoveWorktree for why. mtime
+// survives with exactly one job, which is to be REPORTED.
 
 // sweptCannotTell builds a concluded, non-live polecat worktree holding an
 // untracked file, then breaks `git status` inside it for real. It returns the
@@ -40,10 +46,6 @@ func archivedTickets(name string) TicketIndex {
 // worktree whose `git status` errors. Before this fix the sweep force-removed
 // it — the untracked file was destroyed, the directory went, and phase 2 then
 // deleted the branch ref, so the work was unreachable by any route.
-//
-// Nothing here establishes that the owner is DEAD. Absence from LivePolecats is
-// not that evidence: it is what a caller has when it did not look, or looked
-// with an instrument that failed. So the sweep must keep.
 func TestSweepRefusesCannotTellWorktree(t *testing.T) {
 	r, wtPath, precious := sweptCannotTell(t, "damaged")
 
@@ -79,8 +81,8 @@ func TestSweepRefusesCannotTellWorktree(t *testing.T) {
 
 	// The branch is still checked out in the tree we kept, so it must be kept
 	// too, and said to be kept for that reason. This is the honest, accepted
-	// cost of the refusal: a pin nothing reclaims automatically, cleared by a
-	// human or by --force. A visible pin beats an invisible deletion.
+	// cost: a pin nothing reclaims automatically, cleared by a human or by
+	// --force. A visible pin beats an invisible deletion.
 	br := findBranchAction(res.BranchesKept, "polecat-damaged")
 	if br == nil || br.Reason != "checked out in a worktree" {
 		t.Errorf("branch of a kept worktree should be kept as checked out, got %+v", br)
@@ -90,71 +92,56 @@ func TestSweepRefusesCannotTellWorktree(t *testing.T) {
 	}
 }
 
-// TestSweepCannotTellOwnerVerdictSplit is the discriminator itself. The same
-// tree, the same unreadable status, two verdicts, two outcomes — and the split
-// is what keeps the fix from converting a data-loss bug into an unbounded leak.
+// TestSweepCannotTellRefusalReportsAgeAndNeverActsOnIt pins the two halves that
+// replaced everything the age used to decide.
 //
-// The OwnerGone tree is aged, because death evidence alone does not license the
-// removal; see TestSweepCannotTellVetoedByRecentWrite for the other condition.
-func TestSweepCannotTellOwnerVerdictSplit(t *testing.T) {
-	for _, tc := range []struct {
-		name     string
-		verdicts map[string]WorktreeOwner
-		removed  bool
-	}{
-		{"owner-gone", map[string]WorktreeOwner{"damaged": OwnerGone}, true},
-		{"owner-unproven", map[string]WorktreeOwner{"damaged": OwnerUnproven}, false},
-		// A name the caller said nothing about is the zero value, and the zero
-		// value refuses. This is the arm that catches a caller which simply
-		// never filled the map in — cmd/pogo, by construction.
-		{"absent-from-map", map[string]WorktreeOwner{}, false},
-		{"nil-map", nil, false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			r, wtPath, precious := sweptCannotTell(t, "damaged")
-			ageTree(t, wtPath, 2*quietWindow)
+// A drain was proposed — reclaim once dead AND old AND previously refused — and
+// withdrawn: age is not emptiness, and a 30-day-old irreplaceable.go is exactly
+// as unrecoverable as a 30-second-old one. An mtime veto replaced it and was
+// withdrawn in turn, on a subtler point: a veto that expires has not resolved
+// the contradiction it was built for, it has stopped being able to see it.
+//
+// So a 30-day-old unreadable tree is KEPT — the age bought nothing — and the
+// line SAYS "untouched 30 days", because that is the signal a human needs to
+// clear a pin that nothing else will ever clear.
+func TestSweepCannotTellRefusalReportsAgeAndNeverActsOnIt(t *testing.T) {
+	r, wtPath, precious := sweptCannotTell(t, "damaged")
+	ageTree(t, wtPath, 30*24*time.Hour)
 
-			res, err := Sweep(Options{
-				Repo:          r.dir,
-				TargetBranch:  "main",
-				Tickets:       archivedTickets("damaged"),
-				OwnerVerdicts: tc.verdicts,
-			})
-			if err != nil {
-				t.Fatalf("Sweep: %v", err)
-			}
-
-			_, statErr := os.Stat(precious)
-			gone := os.IsNotExist(statErr)
-			if gone != tc.removed {
-				t.Fatalf("file removed = %v, want %v (removed=%+v kept=%+v)",
-					gone, tc.removed, res.WorktreesRemoved, res.WorktreesKept)
-			}
-			if tc.removed && findWorktreeAction(res.WorktreesRemoved, wtPath) == nil {
-				t.Errorf("removal not reported: %+v", res.WorktreesRemoved)
-			}
-			if !tc.removed && findWorktreeAction(res.WorktreesKept, wtPath) == nil {
-				t.Errorf("refusal not reported: %+v", res.WorktreesKept)
-			}
-		})
+	res, err := Sweep(Options{
+		Repo:         r.dir,
+		TargetBranch: "main",
+		Tickets:      archivedTickets("damaged"),
+	})
+	if err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if _, serr := os.Stat(precious); serr != nil {
+		t.Fatalf("age must not license a removal — the file is gone: %v", serr)
+	}
+	kept := findWorktreeAction(res.WorktreesKept, wtPath)
+	if kept == nil {
+		t.Fatalf("a 30-day-old unreadable tree must still be KEPT: removed=%+v", res.WorktreesRemoved)
+	}
+	if !strings.Contains(kept.Reason, "untouched 30 days") {
+		t.Errorf("a permanent refusal must report the age so a human can act on it, got: %s", kept.Reason)
 	}
 }
 
-// TestSweepCannotTellVetoedByRecentWrite is the mtime VETO, and the asymmetry
-// it rests on is the whole reason a timestamp appears in this package at all:
+// TestSweepCannotTellAgeIsMeasuredByWalkingNotStattingTheRoot pins the one
+// property of the age REPORT that is easy to lose to an optimisation.
 //
-//	mtime RECENT -> something is writing   SOUND
-//	mtime OLD    -> nobody holds it        UNSOUND
+// The worktree root's mtime is not a cheap approximation of the tree's; it is a
+// different quantity answering a different question, and it was measured blind
+// to the case that matters. A live agent editing pkg/deep/work.go leaves root
+// mtime untouched, so an operator reading "untouched 30 days" off the root
+// would be told a tree is abandoned while somebody is working in it — and would
+// clear the pin on the strength of it.
 //
-// So a timestamp may FORBID and may never AUTHORISE. Here it forbids: we hold
-// positive evidence that the owner is dead, and something wrote to the tree
-// anyway. That is a contradiction, and it resolves in favour of the files.
-//
-// The write is deliberately DEEP. The worktree root's own mtime does not move
-// when pkg/deep/work.go is edited, so a veto that statted the root would be
-// blind to exactly the live agent it exists to protect.
-func TestSweepCannotTellVetoedByRecentWrite(t *testing.T) {
-	r, wtPath, precious := sweptCannotTell(t, "damaged")
+// This mattered more when the age drove a veto. It still matters, because a
+// report that a human acts on is not decoration.
+func TestSweepCannotTellAgeIsMeasuredByWalkingNotStattingTheRoot(t *testing.T) {
+	r, wtPath, _ := sweptCannotTell(t, "damaged")
 	deep := filepath.Join(wtPath, "pkg", "deep")
 	if err := os.MkdirAll(deep, 0755); err != nil {
 		t.Fatal(err)
@@ -164,8 +151,8 @@ func TestSweepCannotTellVetoedByRecentWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Everything is old...
-	ageTree(t, wtPath, 2*quietWindow)
+	// Everything is thirty days old...
+	ageTree(t, wtPath, 30*24*time.Hour)
 	rootBefore := modTime(t, wtPath)
 	// ...except one file deep in the tree, which somebody just wrote.
 	now := time.Now()
@@ -177,129 +164,40 @@ func TestSweepCannotTellVetoedByRecentWrite(t *testing.T) {
 	}
 
 	res, err := Sweep(Options{
-		Repo:          r.dir,
-		TargetBranch:  "main",
-		Tickets:       archivedTickets("damaged"),
-		OwnerVerdicts: map[string]WorktreeOwner{"damaged": OwnerGone},
-	})
-	if err != nil {
-		t.Fatalf("Sweep: %v", err)
-	}
-
-	if _, serr := os.Stat(precious); serr != nil {
-		t.Fatalf("death evidence must NOT override a tree somebody is still writing to: %v", serr)
-	}
-	kept := findWorktreeAction(res.WorktreesKept, wtPath)
-	if kept == nil {
-		t.Fatalf("vetoed worktree missing from WorktreesKept: %+v", res.WorktreesKept)
-	}
-	if !strings.Contains(kept.Reason, "written to") {
-		t.Errorf("veto reason must say the tree was written to recently, got: %s", kept.Reason)
-	}
-}
-
-// TestSweepCannotTellVetoOverRefusesOnPointerDamage pins the HAZARD, and pins
-// which DIRECTION it is allowed to fail in.
-//
-// The damage that makes `git status` fail can itself refresh mtime, unevenly:
-// corrupting a worktree's .git pointer WRITES A FILE INSIDE THE TREE, so a
-// freshly-damaged tree looks freshly worked-on, while chmod damage moves ctime
-// and a truncated index lives outside the tree — both of those look cold. The
-// signal is perturbed by the same event it is being asked to adjudicate.
-//
-// The veto therefore over-refuses here: an otherwise stone-cold tree is kept
-// because its pointer was damaged a moment ago. That is the SAFE direction and
-// it is asserted deliberately — a refreshed clock costs us a collection we could
-// have made, never a file. The tempting "fix" is to exclude .git from the walk,
-// which would trade this safe over-refusal for collecting a tree that looks
-// live, so the test exists to make that trade fail loudly rather than silently.
-func TestSweepCannotTellVetoOverRefusesOnPointerDamage(t *testing.T) {
-	r, wtPath, precious := sweptCannotTell(t, "damaged")
-	ageTree(t, wtPath, 30*24*time.Hour)
-
-	// Re-touch ONLY .git, exactly as the damage event itself does. Every file
-	// an agent could have written is 30 days old.
-	now := time.Now()
-	if err := os.Chtimes(filepath.Join(wtPath, ".git"), now, now); err != nil {
-		t.Fatal(err)
-	}
-
-	res, err := Sweep(Options{
-		Repo:          r.dir,
-		TargetBranch:  "main",
-		Tickets:       archivedTickets("damaged"),
-		OwnerVerdicts: map[string]WorktreeOwner{"damaged": OwnerGone},
-	})
-	if err != nil {
-		t.Fatalf("Sweep: %v", err)
-	}
-	if _, serr := os.Stat(precious); serr != nil {
-		t.Fatalf("the veto must fail toward KEEPING: %v", serr)
-	}
-	if findWorktreeAction(res.WorktreesKept, wtPath) == nil {
-		t.Errorf("over-refusal not reported as a keep: removed=%+v", res.WorktreesRemoved)
-	}
-}
-
-// TestSweepCannotTellRefusalReportsAge pins what REPLACED the drain.
-//
-// A drain was proposed — reclaim once dead AND old AND previously refused — and
-// withdrawn: age is not emptiness, and a 30-day-old irreplaceable.go is exactly
-// as unrecoverable as a 30-second-old one. So THIS refusal — the OwnerUnproven
-// arm, the case carved out for human judgement — is permanent at any age, and
-// what the age buys is a human's decision instead of a machine's: the line has
-// to say how long the tree has been untouched, or the operator holding a pinned
-// worktree has no cheap way to judge it.
-//
-// Scope, because the arms differ: the veto arm is NOT permanent (see
-// TestSweepCannotTellOwnerVerdictSplit/owner-gone, which has to age its fixture
-// for the removal to happen). That is not the drain returning — death evidence
-// authorises there, and the veto only subtracts from what it authorised.
-//
-// The other half is asserted too — that the age DECIDES nothing here. A tree
-// aged well past the veto window is still kept, because nothing established
-// that its owner is dead.
-func TestSweepCannotTellRefusalReportsAge(t *testing.T) {
-	r, wtPath, precious := sweptCannotTell(t, "damaged")
-	ageTree(t, wtPath, 30*24*time.Hour)
-
-	res, err := Sweep(Options{
 		Repo:         r.dir,
 		TargetBranch: "main",
 		Tickets:      archivedTickets("damaged"),
-		// No verdict: OwnerUnproven, the case carved out for human judgement.
 	})
 	if err != nil {
 		t.Fatalf("Sweep: %v", err)
 	}
-	if _, serr := os.Stat(precious); serr != nil {
-		t.Fatalf("age must not drain a refusal — the file is gone: %v", serr)
-	}
 	kept := findWorktreeAction(res.WorktreesKept, wtPath)
 	if kept == nil {
-		t.Fatalf("a 30-day-old unreadable tree must still be KEPT: removed=%+v", res.WorktreesRemoved)
+		t.Fatalf("worktree missing from WorktreesKept: %+v", res.WorktreesKept)
 	}
-	if !strings.Contains(kept.Reason, "untouched 30 days") {
-		t.Errorf("a permanent refusal must report the age so a human can act on it, got: %s", kept.Reason)
+	if strings.Contains(kept.Reason, "30 days") {
+		t.Errorf("the age was read off the ROOT, which is blind to edits below it — "+
+			"an operator would be told this abandoned while someone is working in it: %s", kept.Reason)
+	}
+	if !strings.Contains(kept.Reason, "untouched 0s") {
+		t.Errorf("the age must come from the newest file in a WALK of the tree, got: %s", kept.Reason)
 	}
 }
 
-// TestSweepCannotTellUnenumerableRefuses covers the one shape where the veto
-// could fail open: the worktree root is stat-able but its contents cannot be
-// enumerated, so there is no newest-file mtime to check.
+// TestSweepCannotTellUnenumerableStillRefusesAndSaysSo covers the shape where
+// the worktree root is stat-able but its contents cannot be listed.
 //
-// The alternative is to degrade to the ROOT directory's mtime, and that was
-// measured to be blind to edits below it — a live agent editing pkg/deep/work.go
-// leaves root mtime untouched (see TestSweepCannotTellVetoedByRecentWrite,
-// which asserts exactly that). Deleting on a signal measured not to fire is
-// worse than pinning one worktree in a rare shape, so a tree we cannot list is
-// its own refusal: a cannot-tell about the cannot-tell.
-func TestSweepCannotTellUnenumerableRefuses(t *testing.T) {
+// It needs no rule of its own any more: "we cannot list the files" is subsumed
+// by "we cannot read the tree, so we do not act on it", and it was only ever a
+// separate case because an earlier design had a veto that would have had
+// nothing to adjudicate on. What is left is a REPORTING obligation — the line
+// must say the age could not be measured, rather than omit it and read as
+// though the tree were fresh.
+func TestSweepCannotTellUnenumerableStillRefusesAndSaysSo(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("running as root: chmod cannot make a directory unreadable")
 	}
 	r, wtPath, precious := sweptCannotTell(t, "damaged")
-	ageTree(t, wtPath, 2*quietWindow)
 
 	if err := os.Chmod(wtPath, 0o000); err != nil {
 		t.Fatal(err)
@@ -311,10 +209,9 @@ func TestSweepCannotTellUnenumerableRefuses(t *testing.T) {
 	}
 
 	res, err := Sweep(Options{
-		Repo:          r.dir,
-		TargetBranch:  "main",
-		Tickets:       archivedTickets("damaged"),
-		OwnerVerdicts: map[string]WorktreeOwner{"damaged": OwnerGone},
+		Repo:         r.dir,
+		TargetBranch: "main",
+		Tickets:      archivedTickets("damaged"),
 	})
 	if err != nil {
 		t.Fatalf("Sweep: %v", err)
@@ -324,8 +221,8 @@ func TestSweepCannotTellUnenumerableRefuses(t *testing.T) {
 	if kept == nil {
 		t.Fatalf("an unlistable tree must be kept, not removed (removed=%+v)", res.WorktreesRemoved)
 	}
-	if !strings.Contains(kept.Reason, "cannot be listed") {
-		t.Errorf("reason must say the tree could not be listed, got: %s", kept.Reason)
+	if !strings.Contains(kept.Reason, "age unknown") {
+		t.Errorf("a refusal that could not measure the age must SAY so rather than omit it, got: %s", kept.Reason)
 	}
 	os.Chmod(wtPath, 0o755)
 	if _, serr := os.Stat(precious); serr != nil {
@@ -344,39 +241,26 @@ func TestSweepCannotTellUnenumerableRefuses(t *testing.T) {
 // missing line prompts investigation, a plausible one ends it.
 //
 // Both outcomes are asserted, because both are reachable and both used to lie
-// by omission: the refusal (which did not log at all) and the death-evidenced
-// removal (which logged only the ticket state).
+// by omission: the refusal (which did not log at all) and the --force removal
+// (which logged only the ticket state).
 func TestSweepCannotTellLogNeverNamesAnInnocentReason(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
-		aged  bool
-		want  string
+		force bool
 		verb  string
-		gone  bool
-		verds map[string]WorktreeOwner
 	}{
-		{
-			name: "refused", aged: false, verb: "kept worktree ", gone: false,
-			want: "git status could not be read",
-		},
-		{
-			name: "removed-anyway", aged: true, verb: "removed worktree ", gone: true,
-			want:  "git status could not be read",
-			verds: map[string]WorktreeOwner{"damaged": OwnerGone},
-		},
+		{name: "refused", force: false, verb: "kept worktree "},
+		{name: "removed-under-force", force: true, verb: "removed worktree "},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			r, wtPath, _ := sweptCannotTell(t, "damaged")
-			if tc.aged {
-				ageTree(t, wtPath, 2*quietWindow)
-			}
+			r, _, _ := sweptCannotTell(t, "damaged")
 			var lines []string
 			if _, err := Sweep(Options{
-				Repo:          r.dir,
-				TargetBranch:  "main",
-				Tickets:       archivedTickets("damaged"),
-				OwnerVerdicts: tc.verds,
-				Logf:          func(f string, a ...any) { lines = append(lines, fmt.Sprintf(f, a...)) },
+				Repo:         r.dir,
+				TargetBranch: "main",
+				Tickets:      archivedTickets("damaged"),
+				Force:        tc.force,
+				Logf:         func(f string, a ...any) { lines = append(lines, fmt.Sprintf(f, a...)) },
 			}); err != nil {
 				t.Fatalf("Sweep: %v", err)
 			}
@@ -386,7 +270,7 @@ func TestSweepCannotTellLogNeverNamesAnInnocentReason(t *testing.T) {
 				t.Fatalf("no %q line; a cannot-tell decision must reach the log. log was:\n%s",
 					tc.verb, strings.Join(lines, "\n"))
 			}
-			if !strings.Contains(line, tc.want) {
+			if !strings.Contains(line, "git status could not be read") {
 				t.Errorf("line must say the status could not be read, got: %s", line)
 			}
 			// The killer: the reason must not be JUST the ticket state. That
@@ -400,13 +284,14 @@ func TestSweepCannotTellLogNeverNamesAnInnocentReason(t *testing.T) {
 	}
 }
 
-// TestSweepForceStillDiscardsCannotTell pins the escape hatch. An operator's
-// explicit --force is a positive reason to discard, and it must not change:
-// without it a refused tree pins its branch with no way for a human to say "yes
-// I know, take it". It is also what bounds the leak this fix introduces.
+// TestSweepForceStillDiscardsCannotTell pins the escape hatch, which is now the
+// ONLY route by which an unreadable worktree is ever removed. An operator's
+// explicit --force is a positive reason to discard, and without it a refused
+// tree pins its branch with no way for a human to say "yes, I know, take it".
+// It is also the whole of what bounds the leak this design accepts.
 //
 // The log line still has to be honest about it, so --force names the status
-// failure too — the operator gets what they asked for AND a true record.
+// failure too: the operator gets what they asked for AND a true record.
 func TestSweepForceStillDiscardsCannotTell(t *testing.T) {
 	r, wtPath, precious := sweptCannotTell(t, "damaged")
 

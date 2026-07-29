@@ -221,36 +221,27 @@ status` **errored** was force-removed and the line said `ticket archived`, with
 the status error appearing nowhere. A missing line prompts investigation; a
 plausible one ends it.
 
-Three shapes now appear, and the reason tells you which you are holding:
+Two shapes now appear, and the reason tells you which you are holding:
 
 ```
-… kept worktree …/polecats/beef (owner beef, branch polecat-beef): git status could not be read (status …: fatal: not a git repository: /nonexistent/garbage), and nothing has established that the owner is dead (untouched 30 days) — rerun with --force to discard
-… kept worktree …/polecats/beef (owner beef, branch polecat-beef): git status could not be read (…), and the tree was written to 4m ago — too recent to act on the evidence that its owner is dead; rerun with --force to discard
-… removed worktree …/polecats/beef (owner beef, branch polecat-beef): owner's ticket archived; git status could not be read (…) — removed on positive evidence that the owner is dead, with nothing having written to the tree in the last 24h
+… kept worktree …/polecats/beef (owner beef, branch polecat-beef): git status could not be read (status …: fatal: not a git repository: /nonexistent/garbage) (untouched 30 days) — refusing to act on a tree we could not read; rerun with --force to discard
+… removed worktree …/polecats/beef (owner beef, branch polecat-beef): owner's ticket archived; git status could not be read (…) — removed anyway because --force was given
 ```
 
-The first is the common one and it is a **permanent** keep: nothing established
-that the polecat is dead, so the tree is pinned until a human clears it or
-`--force` takes it. `untouched 30 days` is there to make that decision cheap —
-on this line the age is reported and never acted on, and no amount of it will
-ever turn this keep into a deletion.
+The first is the outcome for **every** unreadable tree: if we could not read it,
+we do not act on it — under any ownership and at any age. It is a **permanent**
+keep, pinned until a human clears it or `--force` takes it. `untouched 30 days`
+is there to make that decision cheap; the age is reported and never acted on,
+and no amount of it will turn this keep into a deletion.
 
-The second is the mtime **veto**: we *do* hold positive evidence the owner is
-dead, and something wrote to the tree anyway. That is a contradiction, and it
-resolves in favour of the files. **Unlike the first, this one is a delay** — a
-tree held here becomes the third line on a later sweep once it goes quiet. That
-is not a timer earning the right to delete: the death evidence had already
-authorised the removal, and the veto only ever subtracts from what it
-authorised.
+The second is the only removal on this path, and it exists because a human asked
+for it. Note that it names the status failure too: a removal line you can
+reconstruct the whole decision from is the point — the ticket state, the
+instrument that failed, and the fact that an operator overrode a refusal.
 
-The third is the only removal on this path, and note that it names the status
-failure too. A removal line you can reconstruct the whole decision from is the
-point — the ticket state, the instrument that failed, and the evidence acted on.
-
-A fourth, rarer keep says `the tree cannot be listed either (…)`: git could not
-read it and neither could we, so there is no timestamp to check. That refuses
-rather than falling back to the worktree root's mtime, which is measurably blind
-to edits below it.
+Where the worktree's contents cannot be listed at all, the same keep says
+`age unknown — the tree could not be listed` rather than omitting the age, which
+would otherwise read as though the tree were fresh.
 
 ## What changes
 

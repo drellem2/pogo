@@ -252,11 +252,12 @@ func TestWorktreeDirtyUnclassifiableProceeds(t *testing.T) {
 	if isDirty {
 		t.Error("an unclassifiable worktree must not be reported dirty")
 	}
-	// Age it so it looks like the abandoned orphan it stands for; a
-	// milliseconds-old tree is refused by the mtime veto (gh #97, see ageTree).
-	ageTree(t, wtPath, 2*quietWindow)
-	if err := RemoveWorktree(r.dir, wtPath, OwnerGone); err != nil {
-		t.Errorf("an unclassifiable worktree whose owner is gone must still be reclaimable: %v", err)
+	// Since gh #97 an unclassifiable tree is refused under EVERY ownership —
+	// including OwnerGone, which used to reclaim it here. See
+	// TestCannotTellRefusedUnderEVERYOwnership for the reasoning and for the
+	// gh #31 leak this deliberately accepts.
+	if err := RemoveWorktree(r.dir, wtPath, OwnerGone); err == nil {
+		t.Error("an unclassifiable worktree must now be refused even when its owner is gone")
 	}
 }
 
