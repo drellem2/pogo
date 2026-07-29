@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"text/template"
 )
@@ -46,7 +47,15 @@ const deployLabel = "com.pogo.deploy"
 //
 // There is deliberately NO GH_TOKEN key. ~/Library/LaunchAgents is
 // world-readable, so a token here is a token every process on the box can read;
-// pogo-deploy.sh sources it from ~/.zshenv at run time instead.
+// pogo-deploy.sh sources it from a shell init file at run time instead.
+//
+// POGO_DEPLOY_ZSHENV names WHICH file that is — a path, never the value. The
+// runner's own default is ~/.zshenv, which is the principled choice (it is the
+// one zsh init file a non-interactive shell sources) but not always the true
+// one: plenty of boxes keep the export in ~/.zshrc. A missing GH_TOKEN is a hard
+// abort in the runner, so a token one file over produces a nightly that alerts
+// and deploys nothing, every night — the exact silent-nightly failure this job
+// was installed to end (mg-36e3). Bind whichever file actually defines it.
 const deployPlistTemplate = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -84,6 +93,8 @@ const deployPlistTemplate = `<?xml version="1.0" encoding="UTF-8"?>
         <string>{{.PogoHome}}</string>
         <key>POGO_DEPLOY_SRC</key>
         <string>{{.DeploySrc}}</string>
+        <key>POGO_DEPLOY_ZSHENV</key>
+        <string>{{.ZshEnv}}</string>
     </dict>
 </dict>
 </plist>
@@ -103,6 +114,7 @@ type deployData struct {
 	Label      string
 	ScriptPath string
 	DeploySrc  string
+	ZshEnv     string
 	LogDir     string
 	Path       string
 	Home       string
@@ -133,6 +145,47 @@ func deploySrcDir() string {
 		return d
 	}
 	return filepath.Join(pogoHome(), "deploy-src")
+}
+
+// ghTokenExport matches the one line the runner cares about. It greps for this
+// exact shape and evals that line alone rather than sourcing the file, so
+// detection here has to agree with the runner's grep or the plist would bind a
+// file the runner then reads nothing out of.
+var ghTokenExport = regexp.MustCompile(`(?m)^[[:space:]]*export[[:space:]]+GH_TOKEN=`)
+
+// deployZshEnvCandidates — shell init files that may carry the export, in
+// preference order. ~/.zshenv first because it is the correct place for a
+// variable a non-interactive job depends on; the rest because it is routinely
+// not where the token actually is.
+func deployZshEnvCandidates() []string {
+	home, _ := os.UserHomeDir()
+	return []string{
+		filepath.Join(home, ".zshenv"),
+		filepath.Join(home, ".zshrc"),
+		filepath.Join(home, ".zprofile"),
+	}
+}
+
+// deployZshEnv picks the file the runner should read GH_TOKEN out of, returning
+// the first candidate that actually contains the export and falling back to
+// ~/.zshenv (the runner's own default) when none do — a wrong-but-documented
+// path produces the runner's clear "no export GH_TOKEN= line in X" alert, which
+// is a better failure than an empty setting that reads as intentional.
+//
+// This reads the file only to test for the export's PRESENCE. The value is never
+// captured, returned, or written to the plist; the runner reads it at run time.
+func deployZshEnv() string {
+	cands := deployZshEnvCandidates()
+	for _, c := range cands {
+		b, err := os.ReadFile(c)
+		if err != nil {
+			continue
+		}
+		if ghTokenExport.Match(b) {
+			return c
+		}
+	}
+	return cands[0]
 }
 
 // findDeployScriptSource locates the bundled pogo-deploy.sh. Mirrors
@@ -171,6 +224,7 @@ func renderDeployPlist() (string, deployData, error) {
 		Label:      deployLabel,
 		ScriptPath: deployScriptInstallPath(),
 		DeploySrc:  deploySrcDir(),
+		ZshEnv:     deployZshEnv(),
 		LogDir:     logDir(),
 		Path:       launchdPath(),
 		Home:       home,
@@ -245,6 +299,7 @@ func InstallDeploy() error {
 	fmt.Printf("Deploy agent installed: %s\n", plistPath)
 	fmt.Printf("Script:   %s\n", dst)
 	fmt.Printf("Checkout: %s (cloned on first run)\n", data.DeploySrc)
+	fmt.Printf("GH_TOKEN: read at run time from %s\n", data.ZshEnv)
 	fmt.Printf("Schedule: %02d:%02d local, daily\n", data.Hour, data.Minute)
 	fmt.Printf("Logs:     %s/pogo-deploy.log\n", data.LogDir)
 	return nil

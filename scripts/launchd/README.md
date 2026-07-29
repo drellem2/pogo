@@ -241,17 +241,34 @@ belongs there instead. In order:
 2. **Lock.** `~/.pogo/deploy.lock.d`, its own, never recovery's. A redeploy can
    legitimately run for an hour while the drain waits on polecats; a second fire
    must not start a competing drain.
-3. **Tools.** `mg` and `pogo` are resolved to **absolute paths**, and `mg` only
-   after an identity check. On macOS `/usr/bin/mg` is the Micro-Emacs editor; it
-   satisfies `command -v mg`, panics headless, and delivers no alert at all
-   (mg-015f, mg-dd5f). The alert path is resolved *first*, before anything that
-   can fail — a job whose first failure is "I cannot tell you about failures" is
-   the silent nightly all over again.
-4. **`GH_TOKEN` at run time**, matched out of `~/.zshenv` one line at a time and
-   `eval`'d alone — never sourced wholesale (that file's `export PATH=` would
-   strip `go` and reproduce the 07-23 `go: command not found` failure), and
-   **never** in the plist: `~/Library/LaunchAgents` is world-readable. The value
-   is never logged.
+3. **Tools.** `mg`, `pogo` and `git` are all resolved to **absolute paths**, and
+   `mg` and `git` only after the candidate proves itself. On macOS `/usr/bin/mg`
+   is the Micro-Emacs editor; it satisfies `command -v mg`, panics headless, and
+   delivers no alert at all (mg-015f, mg-dd5f). The alert path is resolved
+   *first*, before anything that can fail — a job whose first failure is "I
+   cannot tell you about failures" is the silent nightly all over again.
+
+   `git` is checked by **execution**, not existence (mg-36e3). `/usr/bin/git` is
+   the Xcode Command Line Tools shim, and on a host with a damaged Xcode it fails
+   *every* call — `git --version` included — with `unable to locate xcodebuild`
+   and exit 71. It is executable, it is on `PATH`, and it cannot clone. So a real
+   Homebrew/local git is preferred and each candidate must print `git version`
+   before it is accepted; the shim stays in the list so a CLT-only box still
+   deploys. `GIT=` pins one explicitly and is health-checked too.
+4. **`GH_TOKEN` at run time**, matched one line at a time out of the shell init
+   file named by `POGO_DEPLOY_ZSHENV` and `eval`'d alone — never sourced
+   wholesale (that file's `export PATH=` would strip `go` and reproduce the 07-23
+   `go: command not found` failure), and **never** in the plist:
+   `~/Library/LaunchAgents` is world-readable. The value is never logged.
+
+   `install-deploy` binds that variable to whichever of `~/.zshenv`, `~/.zshrc`,
+   `~/.zprofile` actually contains the `export GH_TOKEN=` line, preferring
+   `.zshenv` (mg-36e3). `.zshenv` is the principled home — it is the one zsh init
+   file a *non-interactive* shell sources — but it is routinely not where the
+   token is, and a missing `GH_TOKEN` is a hard abort, so a token one file over
+   produced a nightly that alerted every night about a secret that was on disk
+   the whole time. Only the **path** is bound; the value is still read at run
+   time.
 5. **Safe sync** of `~/.pogo/deploy-src` — a **dedicated** checkout, never
    `~/dev/pogo`. The dev tree is a place a human works; a 03:00
    fetch/checkout/merge there can land on a half-finished edit or an in-progress
@@ -290,6 +307,7 @@ belongs there instead. In order:
 | `StandardOutPath` / `StandardErrorPath` | `~/Library/Logs/pogo/pogo-deploy.log` | Its own log. Deploy history must not be interleaved with recovery bounces. |
 | `EnvironmentVariables.PATH` | Same value as `com.pogo.recovery` (via `launchdPath()`) | Must resolve **both** `go` (`/opt/homebrew/bin`) and `mg`/`pogo` (`~/go/bin`). launchd's default PATH has neither, and the 07-23 manual redeploy died on `go: command not found` for exactly this. |
 | `EnvironmentVariables.POGO_DEPLOY_SRC` | `~/.pogo/deploy-src` | Bound here so the plist and the script cannot disagree about which tree is built. Must never name a developer working tree. |
+| `EnvironmentVariables.POGO_DEPLOY_ZSHENV` | the init file that defines `export GH_TOKEN=` (`~/.zshenv`, else `~/.zshrc`, else `~/.zprofile`) | A **path**, never the value. Bound because the runner hard-aborts without the token and reads exactly one file; a host that keeps the export in `.zshrc` would otherwise alert every night about a token already on disk (mg-36e3). |
 | `EnvironmentVariables.GH_TOKEN` | **absent, deliberately** | `~/Library/LaunchAgents` is world-readable. The runner sources the token at run time instead. |
 
 ### Runner env overrides
@@ -304,7 +322,8 @@ All optional; the defaults are the production values.
 | `POGO_DEPLOY_SKIP_WINDOW` | unset | `1` bypasses the window guard. For controls only. |
 | `POGO_DEPLOY_NOW` | unset | `HH` override for the window guard. Tests only. |
 | `POGO_DEPLOY_GRACE` | `120` | Seconds before the post-bounce mail-check re-read. |
-| `POGO_DEPLOY_ZSHENV` | `~/.zshenv` | Where `GH_TOKEN` is read from. |
+| `POGO_DEPLOY_ZSHENV` | `~/.zshenv` (the plist binds the file that actually defines the export) | Which shell init file `GH_TOKEN` is read from. |
+| `GIT` | first candidate that prints `git version` | Pins a specific git. Still health-checked — a pin that cannot run is the same outage as no pin. |
 | `POGO_DEPLOY_ALERT_TO` | `pm-pogo` | First alert recipient; `human` is always copied. |
 
 ### Managing the deploy agent

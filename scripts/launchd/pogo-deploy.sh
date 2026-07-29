@@ -48,6 +48,23 @@
 # `pogo-self-deploy` are addressed by absolute path too. A wrapper that alerts
 # via a binary it did not verify is a wrapper with no alert path.
 #
+# ...BUT AN ABSOLUTE PATH IS NOT A WORKING BINARY (mg-36e3)
+# ---------------------------------------------------------
+# The same discipline applied to `git` produced the opposite bug. git was pinned
+# to /usr/bin/git on the reasoning that git ships in /usr/bin on every macOS. It
+# does — but /usr/bin/git is the Command Line Tools SHIM, and a damaged or
+# half-installed Xcode makes it fail EVERY invocation, `git --version` included,
+# with "Error loading required libraries ... unable to locate xcodebuild" and
+# exit 71. On such a box this job cannot clone, cannot fetch and cannot read a
+# rev, so sync_src aborts and the nightly alerts and deploys nothing — night
+# after night, which is precisely the silent-nightly failure this file exists to
+# end. Observed on Daniel's box, where /usr/local/bin/git 2.40.0 was fine and
+# only the shim was broken.
+#
+# So git is resolved like mg: candidates in order, each required to prove itself
+# by actually RUNNING. Existence is not the test — the broken shim is executable,
+# on PATH, and satisfies every check short of execution.
+#
 # GH_TOKEN IS SOURCED AT RUNTIME, NEVER FROM THE PLIST
 # ----------------------------------------------------
 # ~/Library/LaunchAgents is world-readable; a token in the plist is a token on
@@ -64,7 +81,10 @@
 #   POGO_DEPLOY_REMOTE       clone URL used to create it if absent
 #   POGO_DEPLOY_BOOTSTRAP_REPO  repo to read the origin URL from ($HOME/dev/pogo)
 #   POGO_DEPLOY_WINDOW       "START-END" local hours, half-open (default "2-5")
-#   POGO_DEPLOY_ZSHENV       file to read GH_TOKEN from ($HOME/.zshenv)
+#   POGO_DEPLOY_ZSHENV       file to read GH_TOKEN from ($HOME/.zshenv; the
+#                            installed plist binds whichever init file actually
+#                            defines the export)
+#   GIT                      pin a specific git (still health-checked)
 #   POGO_DEPLOY_GRACE        seconds to wait before the post-bounce check (120)
 #   POGO_DEPLOY_LOCK_DIR     mutual-exclusion dir
 #   POGO_DEPLOY_ALERT_TO     first alert recipient (pm-pogo)
@@ -86,9 +106,11 @@ DEPLOY_REF="${POGO_DEPLOY_REF:-main}"
 STALE_LOCK_MIN="${POGO_DEPLOY_STALE_LOCK_MIN:-180}"
 DRY_RUN=false
 
-# Absolute paths to the stable primitives. `git` and `curl` are in /usr/bin on
-# every macOS; MG and POGO_CLI are resolved (and identity-checked) at run time.
-GIT="${GIT:-/usr/bin/git}"
+# GIT, MG and POGO_CLI are all resolved (and checked by execution) at run time.
+# GIT is seeded from the environment when an operator pins one, and that value is
+# still health-checked rather than trusted — a pinned path that cannot run is the
+# same outage as an unpinned one.
+GIT="${GIT:-}"
 MG=""
 POGO_CLI=""
 
@@ -164,6 +186,34 @@ resolve_mg() {
         return 0
     done
     err "mg: no macguffin 'mg' among ${cands[*]} — refusing bare 'mg' (that is /usr/bin/mg, the EDITOR)"
+    return 1
+}
+
+# `git`, resolved by EXECUTION rather than by existence. See the header note: a
+# broken Command Line Tools shim at /usr/bin/git is executable, is on PATH, and
+# fails every call with exit 71 — so -x and `command -v` both say yes about a
+# binary that cannot clone. Requiring "git version" on stdout is the cheapest
+# check that the thing actually works.
+#
+# A real Homebrew/local git is preferred over the shim because the shim is the
+# fragile one, but the shim stays in the list so a box with only CLT installed
+# still deploys. An operator-pinned $GIT is tried first and health-checked too.
+resolve_git() {
+    local cand
+    local -a cands=()
+    [ -n "${GIT:-}" ] && cands+=("$GIT")
+    cands+=("/opt/homebrew/bin/git" "/usr/local/bin/git" "/usr/bin/git")
+    cand="$(command -v git 2>/dev/null)"
+    [ -n "$cand" ] && cands+=("$cand")
+
+    for cand in "${cands[@]}"; do
+        [ -x "$cand" ] || continue
+        "$cand" --version 2>/dev/null | grep -q '^git version' || continue
+        GIT="$cand"
+        log "git: resolved working git at $GIT ($("$cand" --version 2>/dev/null))"
+        return 0
+    done
+    err "git: no WORKING git among ${cands[*]} — note a present-but-broken /usr/bin/git (damaged Xcode CLT) fails every call with exit 71, so existence proves nothing"
     return 1
 }
 
@@ -388,7 +438,11 @@ main() {
     while [ $# -gt 0 ]; do
         case "$1" in
             --dry-run) DRY_RUN=true ;;
-            -h|--help) sed -n '2,80p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+            # Bounded by the `set -u` sentinel rather than a line number: the
+            # header is long and grows, and a hardcoded range silently starts
+            # truncating --help mid-sentence the first time somebody documents
+            # something (it had already drifted past the ENV list).
+            -h|--help) sed -n '2,/^set -u/p' "${BASH_SOURCE[0]}" | sed '/^set -u/d' | sed 's/^# \{0,1\}//'; exit 0 ;;
             *) err "unknown flag: $1"; exit 2 ;;
         esac
         shift
@@ -421,6 +475,24 @@ main() {
     # tell you about failures" is the silent nightly all over again.
     resolve_mg   || { err "no alert path — refusing to run unattended"; exit 1; }
     resolve_pogo || log "pogo CLI unresolved — the post-bounce schedule check will be skipped"
+    # After resolve_mg, so a git failure can actually be reported; before
+    # sync_src, which is the first thing that needs git.
+    resolve_git || {
+        alert "[pogo-deploy] ABORTED: no working git" \
+"The nightly redeploy could not find a git that RUNS, so it could not sync its
+checkout. Nothing was deployed and the running pogod is untouched.
+
+The usual cause is a damaged Xcode Command Line Tools install: /usr/bin/git is
+the CLT shim, and when Xcode is broken it fails every call — 'git --version'
+included — with 'unable to locate xcodebuild' and exit 71. Existence checks pass;
+the binary just cannot work.
+
+  log: $HOME/Library/Logs/pogo/pogo-deploy.log
+  fix: install or repair a real git (xcode-select --install, or brew install git)
+       and confirm 'git --version' prints a version. Pin one for this job with
+       GIT=/path/to/git if several are installed."
+        exit 1
+    }
     load_gh_token || {
         alert "[pogo-deploy] ABORTED: no GH_TOKEN" \
 "The nightly redeploy could not obtain GH_TOKEN from $ZSHENV, so any gh call in

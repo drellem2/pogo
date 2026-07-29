@@ -144,6 +144,99 @@ func TestDeployIsNotRecovery(t *testing.T) {
 	}
 }
 
+// TestDeployZshEnvFindsTheTokenFile covers the second reason this job can run
+// nightly and deploy nothing (mg-36e3). The runner treats a missing GH_TOKEN as
+// a hard abort, and reads it from ONE file. ~/.zshenv is the principled default
+// — the only zsh init file a non-interactive shell sources — but on a real box
+// the export routinely lives in ~/.zshrc, and then the nightly alerts every
+// night about a token that was on disk the whole time.
+//
+// Preference order matters as much as detection: when .zshenv does define the
+// token it must win, because that is the file that works in every context.
+func TestDeployZshEnvFindsTheTokenFile(t *testing.T) {
+	tokenLine := "export GH_TOKEN=sometoken\n"
+
+	tests := []struct {
+		name  string
+		files map[string]string
+		want  string
+	}{
+		{
+			name:  "token in .zshrc only — the observed case",
+			files: map[string]string{".zshenv": ". \"$HOME/.cargo/env\"\n", ".zshrc": "# rc\n" + tokenLine},
+			want:  ".zshrc",
+		},
+		{
+			name:  ".zshenv wins when it also defines the token",
+			files: map[string]string{".zshenv": tokenLine, ".zshrc": tokenLine},
+			want:  ".zshenv",
+		},
+		{
+			name:  "indented export is still an export",
+			files: map[string]string{".zshenv": "# nothing\n", ".zshrc": "  export GH_TOKEN=x\n"},
+			want:  ".zshrc",
+		},
+		{
+			name:  "a commented-out export does not count",
+			files: map[string]string{".zshenv": "# export GH_TOKEN=old\n", ".zshrc": tokenLine},
+			want:  ".zshrc",
+		},
+		{
+			name:  "falls back to .zshenv when nothing defines it",
+			files: map[string]string{".zshenv": "# nothing\n", ".zshrc": "# nothing\n"},
+			want:  ".zshenv",
+		},
+		{
+			name:  "token in .zprofile",
+			files: map[string]string{".zprofile": tokenLine},
+			want:  ".zprofile",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			for name, body := range tc.files {
+				if err := os.WriteFile(filepath.Join(home, name), []byte(body), 0644); err != nil {
+					t.Fatalf("write %s: %v", name, err)
+				}
+			}
+			got := deployZshEnv()
+			if got != filepath.Join(home, tc.want) {
+				t.Errorf("deployZshEnv() = %q; want %s", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRenderDeployPlistBindsZshEnvPathNotSecret pins that the plist carries the
+// PATH to the token file and never the token. The whole reason GH_TOKEN is read
+// at run time is that ~/Library/LaunchAgents is world-readable; binding the file
+// location is what makes that indirection work on a box whose token is not in
+// the default file, and it must not become a shortcut to binding the value.
+func TestRenderDeployPlistBindsZshEnvPathNotSecret(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.WriteFile(filepath.Join(home, ".zshrc"), []byte("export GH_TOKEN=supersecretvalue\n"), 0644); err != nil {
+		t.Fatalf("write .zshrc: %v", err)
+	}
+
+	rendered, data, err := renderDeployPlist()
+	if err != nil {
+		t.Fatalf("renderDeployPlist: %v", err)
+	}
+	if data.ZshEnv != filepath.Join(home, ".zshrc") {
+		t.Errorf("ZshEnv = %q; want the file that actually defines the token", data.ZshEnv)
+	}
+	if !strings.Contains(rendered, "<key>POGO_DEPLOY_ZSHENV</key>") {
+		t.Error("plist does not bind POGO_DEPLOY_ZSHENV: the runner would fall back to ~/.zshenv and abort nightly on a token it could have found")
+	}
+	if strings.Contains(rendered, "supersecretvalue") {
+		t.Error("rendered plist contains the TOKEN VALUE — a world-readable LaunchAgent must hold only the path")
+	}
+}
+
 // TestFindDeployScriptSourceHonorsOverride keeps the installer testable and
 // gives an operator a way out when the bundled copy cannot be located (a `go
 // install`ed pogo has no scripts/ sibling).

@@ -169,6 +169,67 @@ load_gh_token "$WORK/notoken" >/dev/null 2>&1 \
 unset GH_TOKEN
 
 # ---------------------------------------------------------------------------
+# resolve_git — a WORKING git, not merely a present one (mg-36e3)
+# ---------------------------------------------------------------------------
+# git used to be pinned to /usr/bin/git, since git ships in /usr/bin on every
+# macOS. It does — but that path is the Command Line Tools SHIM, and a damaged
+# Xcode makes it fail every call, `git --version` included, with "unable to
+# locate xcodebuild" and exit 71. On such a box the nightly cannot clone, cannot
+# fetch and cannot read a rev: sync_src aborts, the job alerts, and nothing
+# deploys — the silent nightly all over again, from a binary that passes every
+# check short of running it.
+#
+# So these tests are all about the difference between "exists" and "runs". A
+# fake that is executable and on PATH but broken must be REJECTED.
+FAKEBIN="$WORK/fakebin"; mkdir -p "$FAKEBIN"
+# Reproduces the real failure: exit 71, diagnostic on stderr, nothing on stdout.
+cat > "$FAKEBIN/brokengit" <<'EOF'
+#!/bin/sh
+echo "Error loading required libraries. git: error: unable to locate xcodebuild" >&2
+exit 71
+EOF
+cat > "$FAKEBIN/workinggit" <<'EOF'
+#!/bin/sh
+[ "$1" = "--version" ] && { echo "git version 9.9.9"; exit 0; }
+exit 0
+EOF
+chmod +x "$FAKEBIN/brokengit" "$FAKEBIN/workinggit"
+
+SAVED_GIT="${GIT:-}"
+
+# The core regression. The old `GIT="${GIT:-/usr/bin/git}"` would have taken this
+# path verbatim and failed on the very first clone.
+GIT="$FAKEBIN/brokengit"
+[ -x "$FAKEBIN/brokengit" ] \
+    && pass "resolve_git premise: the broken fake IS executable (so -x cannot catch it)" \
+    || fail "broken fake is not executable"
+resolve_git >/dev/null 2>&1 \
+    && [ "$GIT" != "$FAKEBIN/brokengit" ] \
+    && pass "resolve_git REJECTS a pinned-but-broken git and falls through to a working one" \
+    || fail "resolve_git accepted a broken git, or found no working git at all"
+"$GIT" --version 2>/dev/null | grep -q '^git version' \
+    && pass "resolve_git left GIT pointing at a git that actually runs" || fail "resolved GIT does not run"
+
+# An operator pin that works is honoured verbatim — that is the escape hatch for
+# a box with several gits installed.
+GIT="$FAKEBIN/workinggit"
+resolve_git >/dev/null 2>&1 && [ "$GIT" = "$FAKEBIN/workinggit" ] \
+    && pass "resolve_git honours a working operator-pinned \$GIT" || fail "resolve_git ignored a valid pin"
+
+# Unpinned resolution must still land on a working git.
+GIT=""
+resolve_git >/dev/null 2>&1 && [ -n "$GIT" ] \
+    && "$GIT" --version 2>/dev/null | grep -q '^git version' \
+    && pass "resolve_git resolves a working git with no pin at all" || fail "resolve_git unpinned"
+
+# And the runner must not reintroduce the pin.
+grep -qE '^[[:space:]]*GIT="\$\{GIT:-/usr/bin/git\}"' "$RUNNER" \
+    && fail "the runner has gone back to hardcoding /usr/bin/git" \
+    || pass "the runner does not hardcode /usr/bin/git (existence is not a health check)"
+
+GIT="$SAVED_GIT"
+
+# ---------------------------------------------------------------------------
 # sync_src — never clobber, never diverge
 # ---------------------------------------------------------------------------
 mkrepo() {
@@ -181,7 +242,11 @@ UPSTREAM="$WORK/upstream"
 mkrepo "$UPSTREAM"
 
 # Fresh clone, then a clean fast-forward: the ordinary night.
-SRC="$WORK/src"; GIT=/usr/bin/git; DEPLOY_REF=main
+# GIT comes from resolve_git, not a hardcoded /usr/bin/git: on a box with a
+# damaged Xcode CLT the pinned shim fails every call, and these tests then fail
+# for a reason that has nothing to do with what they are checking (mg-36e3).
+SRC="$WORK/src"; DEPLOY_REF=main
+resolve_git >/dev/null 2>&1 || { echo "FATAL: no working git for the sync_src tests"; exit 1; }
 POGO_DEPLOY_REMOTE="$UPSTREAM"; DEPLOY_REMOTE="$UPSTREAM"
 sync_src >/dev/null 2>&1 && pass "sync_src bootstraps the dedicated checkout on first run" || fail "sync_src bootstrap"
 echo two > "$UPSTREAM/f"; git -C "$UPSTREAM" commit --quiet -am two
