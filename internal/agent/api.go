@@ -845,10 +845,18 @@ func (r *Registry) handleNudge(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// Determine mode and timeout
-	mode := NudgeWaitIdle
-	if nudgeReq.Mode == string(NudgeImmediate) {
+	// Determine mode and timeout. The default is confirmed delivery: an
+	// unspecified mode used to mean "wait for idle and assume", which reported
+	// success for messages that were never delivered and could not reach a busy
+	// agent at all (mg-ebee). NudgeConfirm degrades to exactly that behaviour
+	// for agents with no receipt signal, so old clients keep working and new
+	// ones get proof.
+	mode := NudgeConfirm
+	switch nudgeReq.Mode {
+	case string(NudgeImmediate):
 		mode = NudgeImmediate
+	case string(NudgeWaitIdle):
+		mode = NudgeWaitIdle
 	}
 	timeout := DefaultNudgeTimeout
 	if nudgeReq.Timeout > 0 {

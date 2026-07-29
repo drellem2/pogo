@@ -130,6 +130,13 @@ type Agent struct {
 	// a.mu.
 	provider *Provider
 
+	// receiptFile is where this agent's harness appends one record per prompt
+	// it SUBMITS (see receipt.go). Set at spawn only when pogod installed a
+	// submission-receipt hook it could resolve; empty means this agent cannot
+	// prove delivery, and the confirm nudge mode degrades to wait-idle for it.
+	// Immutable after construction; safe to read without a.mu.
+	receiptFile string
+
 	// outputBuf holds recent output for monitoring.
 	outputBuf *RingBuffer
 
@@ -854,6 +861,15 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 	if req.PromptFile != "" {
 		injectedEnv = append(injectedEnv, "POGO_AGENT_PROMPT="+req.PromptFile)
 	}
+
+	// Install the harness's prompt-submission hook and tell the hook process
+	// where to append. "" means this agent cannot prove delivery, and nudges to
+	// it fall back to wait-idle (see receipthook.go).
+	receiptFile := installReceiptHook(provider, req.Name, req.Dir)
+	if receiptFile != "" {
+		injectedEnv = append(injectedEnv, "POGO_SUBMIT_RECEIPT="+receiptFile)
+	}
+
 	cmd.Env = append(os.Environ(), append(injectedEnv, req.Env...)...)
 
 	// Deliver the persona prompt to a ContextFile-injection provider (Codex
@@ -900,6 +916,7 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 		cmd:            cmd,
 		nudge:          nudge,
 		provider:       provider,
+		receiptFile:    receiptFile,
 		outputBuf:      NewRingBuffer(64 * 1024), // 64KB rolling buffer
 		attachConns:    make(map[io.Writer]struct{}),
 		socketPath:     filepath.Join(r.socketDir, req.Name+".sock"),
@@ -1225,6 +1242,16 @@ func (r *Registry) Respawn(name string) (*Agent, error) {
 	if old.PromptFile != "" {
 		injectedEnv = append(injectedEnv, "POGO_AGENT_PROMPT="+old.PromptFile)
 	}
+
+	// A restart is a new process with a new prompt history, so the receipt is
+	// re-installed and reset: the counts the old process accumulated belong to
+	// a harness that no longer exists, and comparing against them would make
+	// the first nudge after a restart wait on a number that can never move.
+	receiptFile := installReceiptHook(old.provider, old.Name, old.Dir)
+	if receiptFile != "" {
+		injectedEnv = append(injectedEnv, "POGO_SUBMIT_RECEIPT="+receiptFile)
+	}
+
 	cmd.Env = append(os.Environ(), injectedEnv...)
 
 	// A restart re-resolves to the agent's OWN provider (carried on old.provider
@@ -1265,6 +1292,7 @@ func (r *Registry) Respawn(name string) (*Agent, error) {
 		cmd:            cmd,
 		nudge:          nudge,
 		provider:       provider,
+		receiptFile:    receiptFile,
 		outputBuf:      NewRingBuffer(64 * 1024),
 		attachConns:    make(map[io.Writer]struct{}),
 		socketPath:     filepath.Join(r.socketDir, old.Name+".sock"),

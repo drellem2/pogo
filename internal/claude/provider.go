@@ -58,6 +58,11 @@ var Provider = agent.Provider{
 	// ~/.claude/projects/<slug-of-cwd>/. internal/synthfail reads it to
 	// distinguish a wedged agent from one failing every turn locally.
 	SessionTranscriptGlob: SessionTranscriptGlob,
+
+	// Claude Code's UserPromptSubmit hook fires once per submitted prompt,
+	// which is the receipt a PTY write cannot produce for itself. It is what
+	// lets a nudge be confirmed instead of assumed (mg-ebee).
+	SubmitReceiptHook: InstallSubmitReceiptHook,
 }
 
 // SessionTranscriptGlob returns the home-relative glob matching the Claude Code

@@ -28,10 +28,44 @@ const (
 	// harness is also quiet during pre-TUI startup (mg-ce61). When the
 	// provider declares no sentinel, it falls back to NudgeWaitIdle semantics.
 	NudgeWaitReady NudgeMode = "wait-ready"
+
+	// NudgeConfirm delivers immediately and then proves delivery from the
+	// harness's own submission receipts, escalating on absence. See
+	// Agent.deliverConfirmed. It is the default for the nudge API and the
+	// scheduler; it degrades to NudgeWaitIdle when the agent has no receipt
+	// signal, so an agent spawned before the hook existed behaves exactly as
+	// it did before.
+	NudgeConfirm NudgeMode = "confirm"
 )
 
 // DefaultNudgeTimeout is how long to wait for idle before giving up.
 const DefaultNudgeTimeout = 30 * time.Second
+
+// receiptPollInterval is how often the confirm path re-reads the receipt file.
+const receiptPollInterval = 100 * time.Millisecond
+
+// minConfirmStep floors each escalation step's window, so a caller passing a
+// very short timeout still gives the harness a realistic chance to submit
+// before the next step fires.
+const minConfirmStep = 1500 * time.Millisecond
+
+var (
+	// ErrNudgeQueued means the message was written to a harness that was
+	// mid-turn, and no submission receipt arrived before the deadline. The
+	// bytes are in a live input queue and will most likely be submitted when
+	// the turn ends — but pogod did not see it happen, so it will not claim it
+	// did. Nothing is retried in this state: Claude Code queues a prompt typed
+	// mid-turn legitimately, so a resend would deliver the same instruction
+	// twice, and an agent acting twice on one instruction is worse than one
+	// that acted late.
+	ErrNudgeQueued = errors.New("nudge queued mid-turn but not confirmed")
+
+	// ErrNudgeUnconfirmed means the escalation ran to the end — the message,
+	// then a bare return, then the message again — and the harness never
+	// recorded a submission. Nobody received it. This is the outcome that used
+	// to be reported as success.
+	ErrNudgeUnconfirmed = errors.New("nudge not confirmed by the agent")
+)
 
 // IsIdle returns true if no output has been written to the agent's PTY
 // for at least the given duration. An agent with no output yet (just spawned)
@@ -231,6 +265,18 @@ func (a *Agent) NudgeWithModeCorrelated(msg string, mode NudgeMode, timeout time
 		return nil
 	}
 
+	// Confirmed delivery, when this agent can prove receipt. Without a receipt
+	// signal there is nothing to escalate against, so it degrades to the
+	// wait-idle path below — an agent spawned before the hook existed, or under
+	// a provider that installs none, behaves exactly as it always did.
+	if mode == NudgeConfirm {
+		if !a.hasReceiptSignal() {
+			mode = NudgeWaitIdle
+		} else {
+			return a.deliverConfirmed(msg, timeout, corr)
+		}
+	}
+
 	if mode == NudgeWaitReady && a.nudge.PromptReadySentinel != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
@@ -263,6 +309,17 @@ func (a *Agent) NudgeWithModeCorrelated(msg string, mode NudgeMode, timeout time
 		// A per-spawn log line was invisible for the whole #76 episode; this
 		// turns a fleet-wide run of misses into one loud alert (mg-ce4c).
 		RecordInitialNudgeReady(a.ProviderID(), a.nudge.PromptReadySentinel, seen)
+
+		// The ready gate proves the composer rendered; it does not prove the
+		// kickoff landed. Orc measured Claude still losing input a second after
+		// it had finished painting, and this is the nudge a polecat's entire
+		// existence hangs on — a dropped one is a polecat that claims nothing
+		// and sits until somebody notices. Confirm it when we can. The budget
+		// restarts here: the ready wait is over, and a full escalation cycle is
+		// what the remaining question needs.
+		if a.hasReceiptSignal() {
+			return a.deliverConfirmed(msg, DefaultNudgeTimeout, corr)
+		}
 
 		if err := a.Nudge(msg); err != nil {
 			return err
@@ -297,6 +354,141 @@ func (a *Agent) NudgeWithModeCorrelated(msg string, mode NudgeMode, timeout time
 	return nil
 }
 
+// midTurn reports whether the agent is currently producing output — the state
+// a working agent is in, and the state whose negation wait-idle demands.
+//
+// It is deliberately NOT !IsIdle(). IsIdle answers false for an agent that has
+// never written anything at all, which is a just-spawned harness — the single
+// most important case for the escalation below, since the startup drop is the
+// failure Orc measured. Reading that as "mid-turn" would switch the escalation
+// off at exactly the moment it is needed. Silence is not a turn.
+func (a *Agent) midTurn() bool {
+	last := a.outputBuf.LastWriteTime()
+	if last.IsZero() {
+		return false
+	}
+	return time.Since(last) < a.nudge.IdleThreshold
+}
+
+// hasReceiptSignal reports whether this agent can prove delivery. It is set at
+// spawn, and only when pogod installed a submission-receipt hook it could
+// actually resolve — never inferred from the receipt file's existence, because
+// a hook that was never installed and a hook that has fired zero times look
+// identical on disk, and escalating against the first would resend a message
+// the agent received perfectly well.
+func (a *Agent) hasReceiptSignal() bool {
+	return a.receiptFile != ""
+}
+
+// awaitSubmit polls the receipt file until the count exceeds before, the window
+// expires, or the agent exits. Returns the new count and whether it moved.
+func (a *Agent) awaitSubmit(before int, window time.Duration) (int, bool) {
+	deadline := time.Now().Add(window)
+	for {
+		n, err := CountSubmits(a.receiptFile)
+		if err == nil && n > before {
+			return n, true
+		}
+		if !time.Now().Before(deadline) {
+			return before, false
+		}
+		select {
+		case <-a.done:
+			return before, false
+		case <-time.After(receiptPollInterval):
+		}
+	}
+}
+
+// deliverConfirmed writes msg to the PTY and then proves the harness submitted
+// it, escalating on absence rather than assuming success.
+//
+// The escalation order is the whole design and is not interchangeable:
+//
+//  1. The message. If a receipt arrives, done — the overwhelmingly common case,
+//     and one that costs nothing extra.
+//  2. A BARE RETURN. The measured failure is not usually a lost message; it is
+//     a lost submit, leaving the text sitting unsent in the composer. A return
+//     carries no content, so it submits whatever is loaded and CANNOT duplicate
+//     anything. That is why it goes first.
+//  3. The message again — only now, when a bare return has proved there was
+//     nothing loaded to submit.
+//  4. Refuse. Return ErrNudgeUnconfirmed instead of a success nobody can check.
+//
+// A mid-turn agent stops after step 1 with ErrNudgeQueued: its harness queues
+// the prompt legitimately, so absence of a receipt means "not yet", not "lost",
+// and steps 2–3 would double-deliver.
+//
+// Note what this does NOT do: it never waits for idle. That precondition is the
+// negation of the state a working agent is in, which is why a busy agent was
+// unreachable. The guarantee wait-idle was standing in for — "do not type into
+// a harness that will not process it" — is now carried by the receipt itself,
+// which is a direct observation of processing rather than a proxy for it.
+func (a *Agent) deliverConfirmed(msg string, timeout time.Duration, corr string) error {
+	before, err := CountSubmits(a.receiptFile)
+	if err != nil {
+		return fmt.Errorf("read submission receipts for %q: %w", a.Name, err)
+	}
+
+	// Sampled BEFORE typing: the write echoes back through the tty and would
+	// make every agent look mid-turn a moment later.
+	busy := a.midTurn()
+
+	step := timeout
+	if !busy {
+		// Three steps share the budget; a mid-turn agent has only one step and
+		// spends the whole window waiting for the turn to end.
+		step = timeout / 3
+		if step < minConfirmStep {
+			step = minConfirmStep
+		}
+	}
+
+	if err := a.Nudge(msg); err != nil {
+		return err
+	}
+	if _, ok := a.awaitSubmit(before, step); ok {
+		emitNudgeSent(a, msg, "confirm", corr)
+		return nil
+	}
+
+	if busy {
+		emitNudgeUnconfirmed(a, msg, "queued", corr)
+		return fmt.Errorf("nudge to %q: written to a mid-turn harness and no submission "+
+			"receipt within %s; not retrying, because a prompt typed mid-turn is queued "+
+			"legitimately and a resend would deliver it twice: %w",
+			a.Name, timeout, ErrNudgeQueued)
+	}
+
+	// Step 2: bare return. Submits loaded-but-unsent text; carries no content,
+	// so it cannot duplicate an already-delivered message.
+	log.Printf("agent %s: no submission receipt for nudge after %s; sending a bare return",
+		a.Name, step)
+	if err := a.Nudge(""); err != nil {
+		return fmt.Errorf("bare return to %q: %w", a.Name, err)
+	}
+	if _, ok := a.awaitSubmit(before, step); ok {
+		log.Printf("agent %s: bare return submitted the loaded message", a.Name)
+		emitNudgeSent(a, msg, "confirm-bare-return", corr)
+		return nil
+	}
+
+	// Step 3: the message again. The bare return proved nothing was loaded.
+	log.Printf("agent %s: bare return submitted nothing; resending the message", a.Name)
+	if err := a.Nudge(msg); err != nil {
+		return fmt.Errorf("resend to %q: %w", a.Name, err)
+	}
+	if _, ok := a.awaitSubmit(before, step); ok {
+		emitNudgeSent(a, msg, "confirm-resend", corr)
+		return nil
+	}
+
+	emitNudgeUnconfirmed(a, msg, "refused", corr)
+	return fmt.Errorf("nudge to %q: no submission receipt after the message, a bare "+
+		"return, and a resend within %s — the agent did not receive it: %w",
+		a.Name, timeout, ErrNudgeUnconfirmed)
+}
+
 // emitNudgeSent records a nudge_sent event for a successful PTY delivery.
 // Sender is "pogod" — the process actually writing the bytes — since the
 // originating agent identity isn't plumbed through this call site in v1.
@@ -317,6 +509,30 @@ func emitNudgeSent(a *Agent, msg, mode, corr string) {
 	}
 	events.Emit(context.Background(), events.Event{
 		EventType: "nudge_sent",
+		Agent:     "pogod",
+		Details:   details,
+	})
+}
+
+// emitNudgeUnconfirmed records a delivery pogod could NOT prove. It exists
+// because the alternative — a nudge that fails quietly into a caller's error
+// string — is the same shape of invisibility that let 647 delivered fires sit
+// alongside a fleet where nothing consumed them: outcome is only auditable if
+// it is in the log next to the successes. outcome is "queued" (written to a
+// mid-turn harness, not retried) or "refused" (escalated to the end, nothing).
+func emitNudgeUnconfirmed(a *Agent, msg, outcome, corr string) {
+	details := map[string]any{
+		"to":       a.eventAgent(),
+		"message":  msg,
+		"delivery": "pty",
+		"mode":     "confirm",
+		"outcome":  outcome,
+	}
+	if corr != "" {
+		details["fire_token"] = corr
+	}
+	events.Emit(context.Background(), events.Event{
+		EventType: "nudge_unconfirmed",
 		Agent:     "pogod",
 		Details:   details,
 	})

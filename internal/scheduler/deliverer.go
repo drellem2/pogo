@@ -53,20 +53,26 @@ func (p *PogodDeliverer) Deliver(ctx context.Context, entry Entry, fireTime time
 				// silence, none inside a known limit episode. Pass the
 				// completion token as the correlation id so nudge_sent (or
 				// nudge_suppressed) joins to scheduler_fire_completed (mg-a754).
-				if err := a.NudgeWake(body, agent.NudgeWaitIdle, agent.DefaultNudgeTimeout, entry.PendingToken); err == nil {
+				//
+				// The mode is NudgeConfirm, not NudgeWaitIdle: a scheduled fire
+				// lands on a WORKING agent by design — pm-pogo's 09:00 sweep
+				// died on "still producing output after 30s" and only ran
+				// because the mail fallback caught it — and wait-idle's
+				// precondition is the negation of that state (mg-ebee).
+				err := a.NudgeWake(body, agent.NudgeConfirm, agent.DefaultNudgeTimeout, entry.PendingToken)
+				if !mailAfterNudge(err) {
 					return nil
-				} else {
-					// Log and fall through to mail — better to deliver late
-					// via mail than drop the fire entirely. A policy decline
-					// says so in its own words rather than borrowing "nudge
-					// failed": nothing failed, the wake was declined, and a
-					// recipient reading its own fire deserves the difference.
-					note := "[scheduler] nudge failed: " + err.Error()
-					if errors.Is(err, agent.ErrWakeSuppressed) {
-						note = "[scheduler] terminal wake suppressed: " + err.Error()
-					}
-					return p.sendMail(entry.Agent, subject, body+"\n\n"+note)
 				}
+				// Log and fall through to mail — better to deliver late via
+				// mail than drop the fire entirely. A policy decline says so in
+				// its own words rather than borrowing "nudge failed": nothing
+				// failed, the wake was declined, and a recipient reading its own
+				// fire deserves the difference.
+				note := "[scheduler] nudge failed: " + err.Error()
+				if errors.Is(err, agent.ErrWakeSuppressed) {
+					note = "[scheduler] terminal wake suppressed: " + err.Error()
+				}
+				return p.sendMail(entry.Agent, subject, body+"\n\n"+note)
 			}
 		}
 		// Agent not running — fall back to mail so the schedule is durable
@@ -75,6 +81,33 @@ func (p *PogodDeliverer) Deliver(ctx context.Context, entry Entry, fireTime time
 	default:
 		return fmt.Errorf("scheduler: unsupported delivery %q", entry.Delivery)
 	}
+}
+
+// mailAfterNudge decides whether a fire whose PTY nudge returned err still
+// needs the mail fallback.
+//
+// Everything except one case does. The exception is ErrNudgeQueued: the message
+// was typed into a live harness that was mid-turn, and pogod did not see it
+// submitted before the deadline. Its bytes are in a real input queue and will
+// almost certainly be processed when the turn ends — so mailing it too would
+// put the same instruction in front of the agent twice. An agent acting twice
+// on one instruction is a worse outcome than one that acts late, which is the
+// same judgement that puts the bare return ahead of the resend in the nudge
+// escalation itself.
+//
+// This is not a silent success: the nudge path emits nudge_unconfirmed for
+// exactly this outcome, so a fire that ended here is visible in the event log
+// next to the ones that were confirmed, rather than indistinguishable from
+// them.
+//
+// ErrWakeSuppressed is NOT the exception and must not become one: a suppressed
+// wake wrote nothing at all, so mail is the only delivery rather than a second
+// one — which is the property mg-8184 built the suppression against.
+func mailAfterNudge(err error) bool {
+	if err == nil {
+		return false
+	}
+	return !errors.Is(err, agent.ErrNudgeQueued)
 }
 
 func (p *PogodDeliverer) sendMail(to, subject, body string) error {

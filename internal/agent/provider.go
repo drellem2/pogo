@@ -118,6 +118,21 @@ type Provider struct {
 	// StateUnavailable and every consumer degrades to its pre-detector
 	// behaviour; absence is never read as "no failures".
 	SessionTranscriptGlob func(workdir string) string
+
+	// SubmitReceiptHook installs this harness's prompt-submission hook into an
+	// agent's working directory. dir is that directory; hookCommand is the
+	// command line the harness should run on every submitted prompt (pogod
+	// supplies it fully resolved, and passes the receipt file's location to the
+	// agent's environment as POGO_SUBMIT_RECEIPT).
+	//
+	// nil means "this harness cannot report its own submissions", which is a
+	// supported answer, not a gap: the confirm nudge mode degrades to wait-idle
+	// for such an agent and behaves exactly as pogo did before receipts
+	// existed. Returning an error says the same thing for one spawn — pogod
+	// logs it and carries on unconfirmed rather than failing the spawn, because
+	// a harness that starts without a receipt is strictly better than one that
+	// does not start.
+	SubmitReceiptHook func(dir, hookCommand string) error
 }
 
 // PromptInjectionKind enumerates the strategies for delivering a persona prompt

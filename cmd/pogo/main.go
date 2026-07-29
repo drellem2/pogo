@@ -1957,14 +1957,28 @@ A --body-file that cannot be read is an error, never an empty body.`,
 
 	// Nudge command — top-level for convenience
 	var nudgeImmediate bool
+	var nudgeWaitIdle bool
 	var nudgeTimeout int
 	var cmdNudge = &cobra.Command{
 		Use:   "nudge <name> <message>",
 		Short: "Send a message to an agent via PTY",
 		Long: `Send text to an agent's PTY via pogod.
 
-By default, waits for the agent to be idle (no PTY output for 2s) before
-delivering the message. Use --immediate to write directly without waiting.
+By default, delivers immediately and then CONFIRMS delivery from the agent's own
+prompt-submission receipts. If no receipt arrives, pogod escalates — a bare
+return first (which submits text left unsent in the composer and cannot
+duplicate anything), then the message again — and if the agent still records
+nothing, the nudge FAILS rather than reporting a success nobody can check.
+
+  --wait-idle  the previous behaviour: wait for the agent to stop producing
+               output, then write and assume it landed. Note that a working
+               agent is producing output by definition, so this mode cannot
+               reach a busy one.
+  --immediate  write once and return, with no precondition and no confirmation.
+
+Agents whose harness reports no submissions (a provider with no receipt hook, or
+an agent spawned before the hook existed) fall back to --wait-idle behaviour
+automatically.
 
 If the agent is not running, falls back to sending the message via gt mail.`,
 		Args: cobra.MinimumNArgs(2),
@@ -1973,8 +1987,11 @@ If the agent is not running, falls back to sending the message via gt mail.`,
 			message := strings.Join(args[1:], " ")
 
 			opts := &client.NudgeOpts{
-				Mode:    "wait-idle",
+				Mode:    "confirm",
 				Timeout: nudgeTimeout,
+			}
+			if nudgeWaitIdle {
+				opts.Mode = "wait-idle"
 			}
 			if nudgeImmediate {
 				opts.Mode = "immediate"
@@ -2005,8 +2022,42 @@ If the agent is not running, falls back to sending the message via gt mail.`,
 			}
 		},
 	}
-	cmdNudge.Flags().BoolVarP(&nudgeImmediate, "immediate", "i", false, "Write directly to PTY without waiting for idle")
-	cmdNudge.Flags().IntVarP(&nudgeTimeout, "timeout", "T", 30, "Seconds to wait for agent idle (wait-idle mode)")
+	cmdNudge.Flags().BoolVarP(&nudgeImmediate, "immediate", "i", false, "Write directly to PTY with no precondition and no confirmation")
+	cmdNudge.Flags().BoolVar(&nudgeWaitIdle, "wait-idle", false, "Wait for the agent to go quiet, then write and assume delivery (pre-confirmation behaviour)")
+	cmdNudge.Flags().IntVarP(&nudgeTimeout, "timeout", "T", 30, "Seconds to spend confirming delivery (or waiting for idle in --wait-idle mode)")
+
+	// Harness-invoked hooks. Not for humans: pogod registers these in an
+	// agent's harness settings at spawn and the harness runs them, so they are
+	// hidden from help and hold themselves to the contract a hook must meet.
+	var cmdHook = &cobra.Command{
+		Use:    "hook",
+		Short:  "Harness-invoked hook endpoints (registered by pogod, not run by hand)",
+		Hidden: true,
+	}
+	var cmdHookPromptSubmit = &cobra.Command{
+		Use:   "prompt-submit",
+		Short: "Record that the agent submitted a prompt",
+		Long: `Append one submission receipt for the current agent.
+
+pogod registers this as the harness's UserPromptSubmit hook and passes the
+receipt file's location in POGO_SUBMIT_RECEIPT. The receipt is what lets a nudge
+be confirmed rather than assumed — see 'pogo nudge --help'.
+
+This command ALWAYS succeeds and always prints nothing. A hook that exits
+non-zero blocks the agent's prompt, and a hook that writes to stdout has its
+output injected into the agent's context: a delivery receipt must never be able
+to break, or edit, the delivery it is reporting on.`,
+		Args: cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			if path := os.Getenv("POGO_SUBMIT_RECEIPT"); path != "" {
+				if err := agent.RecordSubmit(path); err != nil {
+					// stderr only: it is not fed back into the agent's context.
+					fmt.Fprintf(os.Stderr, "pogo hook prompt-submit: %v\n", err)
+				}
+			}
+		},
+	}
+	cmdHook.AddCommand(cmdHookPromptSubmit)
 
 	// Scheduler commands. Talks to pogod's /scheduler/* endpoints. The daemon
 	// drives fires off the heartbeat tick, so schedules persist across
@@ -3066,6 +3117,7 @@ report; it is safe from anywhere and never acts.`,
 	cmdAgent.AddCommand(cmdAgentPrompt)
 	rootCmd.AddCommand(cmdAgent)
 	rootCmd.AddCommand(cmdNudge)
+	rootCmd.AddCommand(cmdHook)
 	rootCmd.AddCommand(cmdSchedule)
 
 	// Project commands
