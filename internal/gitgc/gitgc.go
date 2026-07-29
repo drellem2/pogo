@@ -727,7 +727,9 @@ func WorktreeDirty(worktreeDir string) (bool, []string, error) {
 // (*RecentlyWrittenWorktreeError), or when the tree cannot be listed at all so
 // there is no timestamp to check (*UnenumerableWorktreeError). A timestamp may
 // forbid a deletion here and may never authorise one — see quietWindow, which
-// carries the asymmetry and the reason the refused set still drains.
+// carries the asymmetry, and which also records that the proposed DRAIN was
+// withdrawn: a refusal is permanent and reports its age rather than ageing into
+// a collection.
 //
 // Dropping the registration is load-bearing, not incidental: it is what frees
 // the polecat's branch for deletion (git refuses to delete a branch checked
