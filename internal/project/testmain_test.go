@@ -2,76 +2,59 @@ package project
 
 import (
 	"os"
-	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/drellem2/pogo/internal/config"
 	"github.com/drellem2/pogo/internal/search"
+	"github.com/drellem2/pogo/internal/testsandbox"
 )
 
-// sandboxHome is the throwaway $HOME TestMain installs for the whole package.
-// Tests that need to assert on hermeticity compare against it; tests that want
-// a tree of their own still call t.Setenv("HOME", t.TempDir()) on top.
-var sandboxHome string
-
-// TestMain clears any ambient POGO_HOME (e.g. exported by the developer's
-// shell) before the package's tests run. Since mg-3dc3 every pogo state path
-// derives from $POGO_HOME (falling back to $HOME/.pogo), and most tests
-// isolate themselves by re-pointing HOME at a temp dir — an inherited
-// POGO_HOME would defeat that isolation and leak test writes into the real
-// state dir. Tests that exercise POGO_HOME semantics set it explicitly via
-// t.Setenv.
+// sandbox is the package's private, CHECKED envelope, established by TestMain
+// before a single test runs. See internal/testsandbox: HOME, XDG_CONFIG_HOME,
+// POGO_HOME and MG_ROOT are pinned under a throwaway root, read back out of the
+// process, and refused if any of them resolves onto the developer's live tree.
 //
-// Clearing POGO_HOME alone was not enough, and that gap is what mg-5336
-// closes. With POGO_HOME unset the state root becomes $HOME/.pogo, so a test
-// that never re-points HOME does not just READ the developer's live state dir
-// — this package WRITES to it. Init() (project.go) resolves
-// projectFile = config.PogoHome()/ProjectFileName, then os.MkdirAll's that
-// home and os.Create's the file; Add/Visit/SaveProjects os.WriteFile it and
-// RemoveSaveFile deletes it. Every unisolated caller — setUp in
-// project_test.go, and the Init() calls in evict_test.go, indexer_test.go and
-// registry_test.go — therefore created directories and files inside the real
-// ~/.pogo of whoever ran `go test`. The only reason the operator's real
-// projects.json survived is that those tests each assign ProjectFileName a
-// "projects-…-test.json" name first; a future test that calls Init() before
-// setting it inherits the "projects.json" default (Init's own fallback) and
-// overwrites the live registry. That is a silent state corruption, not a red
-// test, so TestMain now re-points HOME at a throwaway tree, making
-// hermeticity the package default rather than something each new test has to
-// remember. Same structural fix as mg-6092 and mg-e8e7 in internal/agent.
-func TestMain(m *testing.M) {
-	os.Unsetenv("POGO_HOME")
+// This package WRITES. Init() (project.go) resolves projectFile as
+// config.PogoHome()/ProjectFileName, then MkdirAll's that home and Create's the
+// file; Add/Visit/SaveProjects WriteFile it and RemoveSaveFile deletes it. Every
+// unisolated caller — setUp in project_test.go, and the Init() calls in
+// evict_test.go, indexer_test.go and registry_test.go — therefore created
+// directories and files inside the real ~/.pogo of whoever ran `go test`. The
+// only reason the operator's projects.json survived is that those tests each
+// assign ProjectFileName a "projects-…-test.json" name first; a test that calls
+// Init() before setting it inherits the "projects.json" default and overwrites
+// the live registry. That is silent state corruption, not a red test. mg-5336.
+//
+// mg-5336 fixed it by hand, and correctly, with os.Unsetenv("POGO_HOME") plus
+// os.Setenv("HOME", os.MkdirTemp(...)). What it could not fix is that the
+// isolation was still built at the call site: nothing checked that the override
+// took, that the value did not resolve back onto the real tree, or that the
+// other two variables were pinned at all. mg-0941 moves the envelope behind
+// testsandbox so the next test written here inherits it.
+var sandbox *testsandbox.Sandbox
 
-	home, err := os.MkdirTemp("", "pogo-project-home")
-	if err != nil {
-		panic("create temp home dir: " + err.Error())
-	}
-	sandboxHome = home
-	os.Setenv("HOME", home)
+func TestMain(m *testing.M) {
+	sb, down := testsandbox.Main("project")
+	sandbox = sb
 
 	code := m.Run()
 
-	os.RemoveAll(home)
+	down()
 	os.Exit(code)
 }
 
 // TestStateRootIsSandboxed is the positive control for the isolation above: it
 // asserts that the state root the package actually writes through resolves
 // under the throwaway tree, not under the machine's real home. Without it the
-// isolation is an unverified claim — a later edit could drop the Setenv and
-// every other test in the package would still pass, quietly writing to
-// ~/.pogo again.
+// isolation is an unverified claim — a later edit could drop it and every other
+// test in the package would still pass, quietly writing to ~/.pogo again.
 func TestStateRootIsSandboxed(t *testing.T) {
-	under := func(path string) bool {
-		return path == sandboxHome ||
-			strings.HasPrefix(filepath.Clean(path), sandboxHome+string(filepath.Separator))
-	}
+	testsandbox.Verify(t, sandbox)
 
-	if got := config.PogoHome(); !under(got) {
-		t.Errorf("PogoHome() = %s, want a path under the sandbox home %s; the "+
-			"package is resolving state through the real home", got, sandboxHome)
+	if got := config.PogoHome(); !sandbox.Contains(got) {
+		t.Errorf("PogoHome() = %s, want a path under the sandbox root %s; the package is "+
+			"resolving state through the real home", got, sandbox.Root)
 	}
 
 	origName := ProjectFileName
@@ -80,10 +63,9 @@ func TestStateRootIsSandboxed(t *testing.T) {
 	Init()
 	defer RemoveSaveFile()
 
-	if !under(projectFile) {
-		t.Errorf("projectFile = %s, want a path under the sandbox home %s; "+
-			"Init() would write the registry into the real ~/.pogo",
-			projectFile, sandboxHome)
+	if !sandbox.Contains(projectFile) {
+		t.Errorf("projectFile = %s, want a path under the sandbox root %s; Init() would "+
+			"write the registry into the real ~/.pogo", projectFile, sandbox.Root)
 	}
 }
 

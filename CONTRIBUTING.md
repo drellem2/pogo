@@ -50,7 +50,7 @@ pogo_sandbox_curl "register the mail-check" -- \
     -d "{\"id\":\"mail-check-$(pogo_sandbox_name pa)\",\"agent\":\"$(pogo_sandbox_name pa)\",...}"
 ```
 
-For a suite that is not written in shell:
+For a suite that is not written in shell, the whole command can be wrapped:
 
 ```bash
 scripts/pogo-sandbox run -- go test ./internal/agent/...
@@ -76,6 +76,46 @@ What it guarantees, and *checks* rather than assumes:
 
 Never weaken an assertion to make it fit the harness. If conversion appears to
 need that, the assertion is telling you something — stop and ask.
+
+### Writing a Go test that touches pogo state: use `internal/testsandbox`
+
+`scripts/pogo-sandbox run --` is the cheap whole-command version and it works
+today. `internal/testsandbox` is the per-test version, and it is what a Go suite
+should be written against — the same four variables, the same symlink
+resolution, the same refusal, raised through `t.Fatal` and `os.Exit(99)` instead
+of a shell banner (`mg-0941`).
+
+```go
+func TestMain(m *testing.M) {
+    sb, down := testsandbox.Main("mypkg")  // pinned AND proven, or exit 99
+    code := m.Run()
+    down()
+    os.Exit(code)
+}
+
+func TestSomething(t *testing.T) {
+    home := testsandbox.Isolate(t).Home    // a tree of this test's own
+}
+```
+
+Do **not** hand-roll `t.Setenv("HOME", t.TempDir())`. It is correct Go and it is
+still isolation-by-remembering — nothing checks that the override took, that the
+other three variables were pinned alongside it, or that the value does not
+resolve back onto the developer's tree. All three of `mg-6092`, `mg-e8e7` and
+`mg-5336` were hand-rolled fixes that left the next instance available.
+
+Two rules that fall out of it:
+
+- **`POGO_HOME` is always set under the sandbox.** `config.PogoHome()` reads it
+  *first* and only falls back to `$HOME/.pogo`, so a test that repoints `HOME`
+  alone no longer moves the state root with it. If a test needs a synthetic home
+  (`internal/project`'s `TestIsEphemeralPath` does), pin `POGO_HOME` next to it.
+- **Give each package a positive control.** One test that calls
+  `testsandbox.Verify(t, sandbox)` and then asserts that the path the package
+  actually writes through — `config.PogoHome()`, `resolvePluginPath()`,
+  `ParkFilePath(...)` — satisfies `sandbox.Contains`. Without it the isolation is
+  an unverified claim, and a later edit can drop it with every other test in the
+  package still green. That is exactly how all three tickets shipped.
 
 ### Code Style
 

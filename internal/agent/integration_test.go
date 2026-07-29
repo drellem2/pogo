@@ -6,15 +6,14 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/drellem2/pogo/internal/testsandbox"
 )
 
 // TestMayorPromptResolution verifies that the mayor prompt resolves correctly
 // when installed to ~/.pogo/agents/mayor.md.
 func TestMayorPromptResolution(t *testing.T) {
-	origHome := os.Getenv("HOME")
-	tmpHome := t.TempDir()
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
+	testsandbox.Isolate(t)
 
 	// Before install, should fail
 	_, err := ResolveMayorPrompt()
@@ -63,10 +62,7 @@ func TestMayorPromptResolution(t *testing.T) {
 
 // TestInstallPromptsIdempotent verifies that install skips existing files.
 func TestInstallPromptsIdempotent(t *testing.T) {
-	origHome := os.Getenv("HOME")
-	tmpHome := t.TempDir()
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
+	testsandbox.Isolate(t)
 
 	// First install
 	r1, err := InstallPrompts(InstallOpts{})
@@ -92,10 +88,7 @@ func TestInstallPromptsIdempotent(t *testing.T) {
 
 // TestInstallPromptsForce verifies --force overwrites existing files.
 func TestInstallPromptsForce(t *testing.T) {
-	origHome := os.Getenv("HOME")
-	tmpHome := t.TempDir()
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
+	tmpHome := testsandbox.Isolate(t).Home
 
 	// First install
 	InstallPrompts(InstallOpts{})
@@ -123,10 +116,7 @@ func TestInstallPromptsForce(t *testing.T) {
 // TestPolecatTemplateExpansion verifies the shipped polecat template
 // expands correctly with work item variables.
 func TestPolecatTemplateExpansion(t *testing.T) {
-	origHome := os.Getenv("HOME")
-	tmpHome := t.TempDir()
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
+	testsandbox.Isolate(t)
 
 	InstallPrompts(InstallOpts{})
 
@@ -217,10 +207,7 @@ func TestPolecatTemplateExpansion(t *testing.T) {
 //
 // This tests the spawn/lifecycle path without requiring macguffin or the refinery.
 func TestMayorStartSpawnPolecat(t *testing.T) {
-	origHome := os.Getenv("HOME")
-	tmpHome := t.TempDir()
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
+	testsandbox.Isolate(t)
 
 	// Install prompts
 	if _, err := InstallPrompts(InstallOpts{}); err != nil {
@@ -331,7 +318,7 @@ func TestCrewRestartOnCrash(t *testing.T) {
 	// A restart contract asserted against the host's live park flags is not a
 	// contract: a stray ~/.pogo/agents/crasher/.parked makes Respawn refuse and
 	// this test reports a broken supervisor that is working fine (mg-e8e7).
-	isolateParkState(t)
+	testsandbox.Isolate(t)
 	socketDir, err := os.MkdirTemp("/tmp", "pogo-restart-sock-")
 	if err != nil {
 		t.Fatal(err)
@@ -456,7 +443,7 @@ func TestRestartOnCrashFlagDrivesBranching(t *testing.T) {
 			// "stays down" rows need it most: a park flag also makes an agent
 			// stay down, so without isolation those two rows can pass while the
 			// RestartOnCrash branch they exist to pin is broken (mg-e8e7).
-			isolateParkState(t)
+			testsandbox.Isolate(t)
 			socketDir, err := os.MkdirTemp("/tmp", "pogo-roc-sock-")
 			if err != nil {
 				t.Fatal(err)
@@ -541,7 +528,7 @@ func TestRestartOnCrashFlagDrivesBranching(t *testing.T) {
 func TestStopRespawnsRestartOnCrashAgent(t *testing.T) {
 	// Stop's own branch is `RestartOnCrash && !IsParked(name)`, so the host's
 	// park state decides which side of mg-dbf4's fix this test exercises.
-	isolateParkState(t)
+	testsandbox.Isolate(t)
 	socketDir, err := os.MkdirTemp("/tmp", "pogo-stop-restart-sock-")
 	if err != nil {
 		t.Fatal(err)

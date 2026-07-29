@@ -79,8 +79,16 @@ func TestIsEphemeralPath(t *testing.T) {
 	// (mg-5336), every path built from it matched the tempRoots rule and the
 	// "nested inside a worktree is NOT ephemeral" case failed for a reason
 	// that has nothing to do with the polecats rule it exists to test.
+	//
+	// POGO_HOME is pinned alongside HOME because DefaultPolecatsDir derives from
+	// config.PogoHome(), which reads POGO_HOME FIRST and only falls back to
+	// $HOME/.pogo. Under the package sandbox (mg-0941) POGO_HOME is always set,
+	// so a test that repoints HOME alone no longer moves the polecats dir with
+	// it — which is the same asymmetry that made mg-5336 possible, seen from the
+	// other side.
 	home := "/Users/pogo-test-home"
 	t.Setenv("HOME", home)
+	t.Setenv("POGO_HOME", filepath.Join(home, ".pogo"))
 	polecatRoot := filepath.Join(home, ".pogo", "polecats", "d999")
 	if !isEphemeralPath(polecatRoot) {
 		t.Errorf("polecat worktree root %s should be ephemeral", polecatRoot)

@@ -6,6 +6,8 @@ import (
 	"sort"
 	"testing"
 	"time"
+
+	"github.com/drellem2/pogo/internal/testsandbox"
 )
 
 // writePrompt is a small helper for tests that need a prompt file with
@@ -22,8 +24,7 @@ func writePrompt(t *testing.T, dir, name, content string) string {
 // TestAutoStartAgents_StartsOnlyFlaggedPrompts verifies that AutoStartAgents
 // spawns agents whose prompt declares auto_start = true and ignores the rest.
 func TestAutoStartAgents_StartsOnlyFlaggedPrompts(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	testsandbox.Isolate(t)
 
 	// Pin a coordinator name that differs from the mayor.md file stem, so the
 	// "registered under the display name, not the file stem" assertion below
@@ -91,8 +92,7 @@ func TestAutoStartAgents_StartsOnlyFlaggedPrompts(t *testing.T) {
 // TestAutoStartAgents_Idempotent verifies that running auto-start twice (e.g.
 // after a pogod restart-while-running) does not double-start an agent.
 func TestAutoStartAgents_Idempotent(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	testsandbox.Isolate(t)
 	setCoordinator(t, "ringmaster") // display name ≠ file stem; see the test above
 
 	if err := InitPromptDirs(); err != nil {
@@ -127,8 +127,7 @@ func TestAutoStartAgents_Idempotent(t *testing.T) {
 // auto_start = true: parked agents stay dormant across pogod restarts until
 // explicitly woken (mg-41e1).
 func TestAutoStartAgents_SkipsParked(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	testsandbox.Isolate(t)
 
 	if err := InitPromptDirs(); err != nil {
 		t.Fatalf("InitPromptDirs: %v", err)
@@ -157,8 +156,7 @@ func TestAutoStartAgents_SkipsParked(t *testing.T) {
 // TestAutoStartAgents_NoPromptDir verifies the scan returns no results (and
 // does not panic) when ~/.pogo/agents/ does not exist.
 func TestAutoStartAgents_NoPromptDir(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	testsandbox.Isolate(t)
 
 	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
@@ -176,8 +174,7 @@ func TestAutoStartAgents_NoPromptDir(t *testing.T) {
 // in alphabetical order by name. Order isn't load-bearing for correctness,
 // but a stable order keeps logs and tests predictable.
 func TestAutoStartAgents_AlphabeticalOrder(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	testsandbox.Isolate(t)
 	setCoordinator(t, "ringmaster") // display name ≠ file stem; see the test above
 
 	if err := InitPromptDirs(); err != nil {
@@ -219,8 +216,7 @@ func TestAutoStartAgents_AlphabeticalOrder(t *testing.T) {
 // frontmatter (i.e. the historical default) are not auto-started — the
 // frontmatter must explicitly opt in.
 func TestAutoStartAgents_NoFrontmatterDoesNotStart(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	testsandbox.Isolate(t)
 	setCoordinator(t, "ringmaster") // display name ≠ file stem; see the test above
 
 	if err := InitPromptDirs(); err != nil {

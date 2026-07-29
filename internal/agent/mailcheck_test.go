@@ -5,6 +5,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/drellem2/pogo/internal/testsandbox"
 )
 
 // fakeMailCheckRegistrar records RegisterMailCheck calls so tests can assert
@@ -61,8 +63,7 @@ func (f *fakeScheduleFailureReporter) recorded() []scheduleFailure {
 // registry name (the identity pogod delivers nudges to and reaps under) with a
 // mail-check-<work-item-id> schedule id.
 func TestSpawnPolecatRegistersMailCheck(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	testsandbox.Isolate(t)
 
 	writeTemplate(t, "plainpc", "# plain polecat\nbody {{.Id}}\n")
 
@@ -105,8 +106,7 @@ func TestSpawnPolecatRegistersMailCheck(t *testing.T) {
 // without a work item id (e.g. a no-worktree in-place dispatch) still gets a
 // specific, reap-matchable mail-check schedule keyed on its agent name.
 func TestSpawnPolecatMailCheckFallsBackToName(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	testsandbox.Isolate(t)
 
 	writeTemplate(t, "noidpc", "# polecat no id\nbody\n")
 
@@ -144,8 +144,7 @@ func TestSpawnPolecatMailCheckFallsBackToName(t *testing.T) {
 // silent: the failure is reported as schedule_register_failed telemetry —
 // louder, but still non-fatal (mg-6fe0).
 func TestSpawnPolecatMailCheckFailureNonFatal(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	testsandbox.Isolate(t)
 
 	writeTemplate(t, "errpc", "# polecat\nbody {{.Id}}\n")
 
@@ -197,8 +196,7 @@ func TestSpawnPolecatMailCheckFailureNonFatal(t *testing.T) {
 // a schedule_register_failed report with reason "nil_registrar", event-only,
 // while the spawn stays non-fatal.
 func TestSpawnPolecatNilRegistrarReportsFailure(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	testsandbox.Isolate(t)
 
 	writeTemplate(t, "nilregpc", "# polecat\nbody {{.Id}}\n")
 
@@ -239,8 +237,7 @@ func TestSpawnPolecatNilRegistrarReportsFailure(t *testing.T) {
 // registry with no registrar (unit tests, or a daemon with the scheduler
 // disabled) spawns polecats without panicking.
 func TestSpawnPolecatNoMailCheckRegistrar(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	testsandbox.Isolate(t)
 
 	writeTemplate(t, "bareepc", "# polecat\nbody {{.Id}}\n")
 

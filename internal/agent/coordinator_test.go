@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/drellem2/pogo/internal/config"
+	"github.com/drellem2/pogo/internal/testsandbox"
 )
 
 // setCoordinator sets the process-wide coordinator name for the duration of a
@@ -57,8 +58,7 @@ func TestTitleFirst(t *testing.T) {
 // drop-ins, and no coordinator placeholder must not produce a synthesized
 // file.
 func TestSynthesizeExtendsPromptNoPlaceholderStillBailsOut(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	testsandbox.Isolate(t)
 	if err := InitPromptDirs(); err != nil {
 		t.Fatal(err)
 	}
@@ -80,8 +80,7 @@ func TestSynthesizeExtendsPromptNoPlaceholderStillBailsOut(t *testing.T) {
 // {{.Coordinator}} placeholder is synthesized with the configured name, even
 // without an extends directive or drop-ins.
 func TestSynthesizeExtendsPromptSubstitutesCoordinator(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	testsandbox.Isolate(t)
 	setCoordinator(t, "boss")
 	if err := InitPromptDirs(); err != nil {
 		t.Fatal(err)
@@ -122,8 +121,7 @@ func TestSynthesizeExtendsPromptSubstitutesCoordinator(t *testing.T) {
 // mayor.md file) and renders the shipped prompts without leftover
 // placeholders under both the default and a renamed coordinator.
 func TestSynthesizePromptResolvesConfiguredCoordinator(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	testsandbox.Isolate(t)
 	if _, err := InstallPrompts(InstallOpts{}); err != nil {
 		t.Fatal(err)
 	}
@@ -166,8 +164,7 @@ func TestSynthesizePromptResolvesConfiguredCoordinator(t *testing.T) {
 // under the configured coordinator name (so autostart and `pogo agent start`
 // address the coordinator correctly) while the category label stays "mayor".
 func TestListPromptsCoordinatorName(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	testsandbox.Isolate(t)
 	setCoordinator(t, "boss")
 	if err := InitPromptDirs(); err != nil {
 		t.Fatal(err)
@@ -219,8 +216,7 @@ func TestExpandTemplateCoordinatorVar(t *testing.T) {
 // a renamed coordinator: the configured name maps to the mayor.md prompt
 // file, and the agent receives a synthesized prompt with the name substituted.
 func TestStartCrewAgentCoordinatorRename(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	testsandbox.Isolate(t)
 	setCoordinator(t, "boss")
 	if err := InitPromptDirs(); err != nil {
 		t.Fatal(err)
@@ -256,8 +252,7 @@ func TestStartCrewAgentCoordinatorRename(t *testing.T) {
 // config.GuardRunningCoordinator refuses renames against, and the coordinator's
 // exit clears it so a stopped coordinator can still be renamed.
 func TestSpawnRecordsRunningCoordinator(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	testsandbox.Isolate(t)
 	setCoordinator(t, "mayor")
 
 	reg, err := NewRegistry(shortSocketDir(t))
