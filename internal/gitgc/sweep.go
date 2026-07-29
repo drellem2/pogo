@@ -430,9 +430,10 @@ func refusalReason(err error) (string, bool) {
 	}
 	var uwe *UndeterminedWorktreeError
 	if errors.As(err, &uwe) {
-		// The age is REPORTED here and decides nothing. This keep is permanent
-		// — there is no drain (see quietWindow) — so the line has to carry
-		// whatever a human needs to clear it in one read.
+		// The age is REPORTED here and decides nothing. This arm — no death
+		// evidence — is one of the two permanent ones (see quietWindow for the
+		// scope), so the line has to carry whatever a human needs to clear the
+		// pin in one read; nothing else ever will.
 		return fmt.Sprintf("git status could not be read (%v), and nothing has established that the owner "+
 			"is dead%s — rerun with --force to discard",
 			uwe.Err, untouchedClause(uwe.Untouched, uwe.UntouchedKnown)), true

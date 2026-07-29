@@ -232,11 +232,16 @@ Three shapes now appear, and the reason tells you which you are holding:
 The first is the common one and it is a **permanent** keep: nothing established
 that the polecat is dead, so the tree is pinned until a human clears it or
 `--force` takes it. `untouched 30 days` is there to make that decision cheap —
-it is reported and never acted on. Nothing ages into a deletion.
+on this line the age is reported and never acted on, and no amount of it will
+ever turn this keep into a deletion.
 
 The second is the mtime **veto**: we *do* hold positive evidence the owner is
 dead, and something wrote to the tree anyway. That is a contradiction, and it
-resolves in favour of the files.
+resolves in favour of the files. **Unlike the first, this one is a delay** — a
+tree held here becomes the third line on a later sweep once it goes quiet. That
+is not a timer earning the right to delete: the death evidence had already
+authorised the removal, and the veto only ever subtracts from what it
+authorised.
 
 The third is the only removal on this path, and note that it names the status
 failure too. A removal line you can reconstruct the whole decision from is the

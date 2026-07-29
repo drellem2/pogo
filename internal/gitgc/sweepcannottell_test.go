@@ -245,10 +245,16 @@ func TestSweepCannotTellVetoOverRefusesOnPointerDamage(t *testing.T) {
 //
 // A drain was proposed — reclaim once dead AND old AND previously refused — and
 // withdrawn: age is not emptiness, and a 30-day-old irreplaceable.go is exactly
-// as unrecoverable as a 30-second-old one. So the refusal is PERMANENT, and
+// as unrecoverable as a 30-second-old one. So THIS refusal — the OwnerUnproven
+// arm, the case carved out for human judgement — is permanent at any age, and
 // what the age buys is a human's decision instead of a machine's: the line has
 // to say how long the tree has been untouched, or the operator holding a pinned
 // worktree has no cheap way to judge it.
+//
+// Scope, because the arms differ: the veto arm is NOT permanent (see
+// TestSweepCannotTellOwnerVerdictSplit/owner-gone, which has to age its fixture
+// for the removal to happen). That is not the drain returning — death evidence
+// authorises there, and the veto only subtracts from what it authorised.
 //
 // The other half is asserted too — that the age DECIDES nothing here. A tree
 // aged well past the veto window is still kept, because nothing established
