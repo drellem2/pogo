@@ -25,13 +25,19 @@ import (
 // collapse before matching; this brings Claude in line.
 var trustDialogMarker = regexp.MustCompile(`(?i)safetycheck`)
 
+// collapse removes ALL whitespace from s. Both predicates below match against
+// collapsed text — see trustDialogMarker for why the whitespace must go, and
+// composerReady for why the sentinels are collapsed too rather than only the
+// output.
+func collapse(s string) string {
+	return strings.Join(strings.Fields(s), "")
+}
+
 // matchesTrustDialog reports whether PTY output contains Claude's trust dialog.
 // It strips ANSI escapes and then all whitespace before matching — see
 // trustDialogMarker for why the whitespace must go.
 func matchesTrustDialog(output []byte) bool {
-	clean := agent.StripANSI(output)
-	collapsed := strings.Join(strings.Fields(string(clean)), "")
-	return trustDialogMarker.MatchString(collapsed)
+	return trustDialogMarker.MatchString(collapse(string(agent.StripANSI(output))))
 }
 
 // composerReady reports whether Claude's composer has rendered, which proves
@@ -43,6 +49,20 @@ func matchesTrustDialog(output []byte) bool {
 // second copy, so there is ONE definition of "Claude's composer is up" and a
 // harness reword only has to be tracked in one place. The alternates are
 // deliberately spaceless — see DefaultNudgeProfile.PromptReadyAlternates.
+//
+// Both the output and each sentinel are collapsed before matching, so a marker
+// matches whichever way the TUI spaced it. That is not cosmetic: the set mixes
+// spellings on purpose — the primary sentinel is spaced ("? for shortcuts")
+// because that is how older Claude Code drew it, while the alternates are
+// spaceless because v2.1.x positions the footer with per-word cursor-column
+// moves. Matching raw, each spelling only ever hit its own era's rendering.
+// Collapsing both sides makes every sentinel cover both. Same trap as
+// gh#76 / mg-d06a, and the same fix.
+//
+// The set already spans the composer->turn transition — "shift+tabtocycle" and
+// "?forshortcuts" are mode-bar markers, not properties of an EMPTY composer — so
+// claude's half of mg-9270 is composerScanBytes, not a new sentinel. cursor,
+// whose gate rested on a single placeholder that a turn REPLACES, needed both.
 //
 // This is the hook's false-positive guard, and extending the watch window
 // (below) makes it load-bearing. trustDialogMarker matches on PTY *text*, and
@@ -57,9 +77,9 @@ func matchesTrustDialog(output []byte) bool {
 // cursor.composerReady was added for; Claude is exposed to it the moment the
 // window grows.
 func composerReady(output []byte) bool {
-	clean := string(agent.StripANSI(output))
+	collapsed := collapse(string(agent.StripANSI(output)))
 	for _, s := range readySentinels() {
-		if s != "" && strings.Contains(clean, s) {
+		if s != "" && strings.Contains(collapsed, collapse(s)) {
 			return true
 		}
 	}
@@ -72,6 +92,26 @@ func readySentinels() []string {
 	p := agent.DefaultNudgeProfile
 	return append([]string{p.PromptReadySentinel}, p.PromptReadyAlternates...)
 }
+
+// composerScanBytes is how much PTY output each poll scans.
+//
+// It is the WHOLE ring, deliberately, and not a smaller slice of it. This gate
+// used to read 8KB out of a 64KB ring, and a marker it misses is not a marker it
+// gets to see again: a burst larger than the read hides the composer from every
+// single tick, so the gate never closes and the hook polls out its full 60s
+// budget — which is precisely the window in which an echoed kickoff prompt
+// mentioning a "safety check" can match trustDialogMarker. Reading everything
+// still retained removes the burst's ability to hide the marker rather than
+// betting on a bigger guess (mg-9270).
+//
+// Widening is safe because BOTH predicates read this same buffer and
+// composerReady is checked first: any composer evidence in the window beats any
+// dialog evidence in the same window, which is the ordering the gate already
+// relies on. Cost is a 64KB copy plus one StripANSI pass per 250ms poll, for at
+// most one spawn's cold-start budget — and a healthy spawn exits on its first or
+// second tick. Claude's Ink TUI repaints continuously, so it is the provider
+// most able to produce the burst in the first place.
+const composerScanBytes = agent.OutputRingBytes
 
 // TrustDialogPollInterval is how often to check PTY output for the trust dialog.
 // 250ms matches codex and cursor: the dialog is dismissed promptly rather than
@@ -129,7 +169,7 @@ func watchForTrustDialog(a *agent.Agent, budget, poll time.Duration) {
 			// Agent exited mid-watch: inconclusive, not a ready-gate result.
 			return
 		case <-ticker.C:
-			output := a.RecentOutput(8192)
+			output := a.RecentOutput(composerScanBytes)
 			if len(output) == 0 {
 				continue
 			}

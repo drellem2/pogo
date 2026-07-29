@@ -375,7 +375,7 @@ func runProbe(t *testing.T, tee *teeBuf, ptmx *os.File, transcriptGlob string, p
 		// The token never reached the session transcript inside the window.
 		// Distinguish "still sitting in the composer" (the paste-detection
 		// failure mode) from "vanished entirely" by looking for it on screen.
-		if bytes.Contains(collapse(agent.StripANSI(tee.snapshot())), []byte(token)) {
+		if strings.Contains(collapse(string(agent.StripANSI(tee.snapshot()))), token) {
 			res.Result = "not-submitted"
 			res.Notes = "token rendered on screen but absent from session transcript: retained in composer"
 		} else {
@@ -491,10 +491,6 @@ func renderYAML(version, workdir string, profile agent.NudgeProfile, rs []probeR
 	fmt.Fprintf(&b, "  conclusion: %q\n", conclusion)
 	fmt.Fprintf(&b, "  recommended_action: %q\n", action)
 	return b.String()
-}
-
-func collapse(b []byte) []byte {
-	return []byte(strings.Join(strings.Fields(string(b)), ""))
 }
 
 func tail(b []byte, n int) string {
