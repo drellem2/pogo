@@ -73,6 +73,23 @@ Follow these steps exactly, in order. Skipping any step is a failure.
    **If the status is not `claimed`:** run `mg claim {{.Id}}` yourself and mail the
    {{.Coordinator}}. pogod's claim-at-spawn failed open, which means the item is sitting in
    `available/` where it is indistinguishable from work nobody started.
+{{if .ClaimRestampCmd}}
+   **Then re-stamp the claim to your own PID, before anything else:**
+   ```bash
+   {{.ClaimRestampCmd}}
+   ```
+   This is not bookkeeping — it is the **only hard evidence pogod has that you executed a
+   turn**, and it is the reason this step comes first. pogod watches you for 25 seconds after
+   sending your kickoff prompt. If the claim PID is still pogod's own, it concludes the prompt
+   never reached you and re-delivers a bare Enter to flush it. That recovery exists because a
+   kickoff nudge can pile up in the kernel input buffer and be absorbed as one unsubmitted
+   paste block (mg-ce61): your session looks healthy, the composer is rendered, and no turn
+   ever runs. 75 {{.Worker}}s have needed that Enter; 73 were rescued by it.
+
+   The re-stamp does **not** move the work item. It renames the claim from pogod's PID to
+   yours *inside* `claimed/`, so you own it at every instant and no second {{.Worker}} can be
+   dispatched onto it. Re-running it is harmless.
+{{end}}
 
 2. **Register a mail-check schedule with pogod** so the {{.Coordinator}} can reach you mid-task. {{.WorkerTitle}}s are not on pogod's nudge cycle — without this step, you won't notice incoming mail until your work is done. Use **`pogo schedule`** (the daemon-side scheduler) so the mail-check survives host sleep / NTP steps / pogod restarts; do **not** use your harness's in-process scheduler{{if eq .Provider "claude"}} (Claude Code's `CronCreate`){{end}} for this — it silently drops fires during sleep:
 

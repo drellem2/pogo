@@ -198,12 +198,32 @@ type TemplateVars struct {
 	// ("claude") at expansion time — never empty-string, which would
 	// silently hide gated blocks.
 	Provider string
+
+	// ClaimRestampCmd is the complete command, work-item argument included, that a
+	// polecat runs as its first protocol action to re-stamp its work item's claim
+	// from pogod's pid to its own — the act pogod's HARD started-signal observes
+	// (mg-7d6d). Templates gate the step behind `{{if .ClaimRestampCmd}}` and render
+	// the command with `{{.ClaimRestampCmd}}`.
+	//
+	// It carries the id already substituted because text/template does NOT re-expand
+	// a value it substitutes: a stored "mg reclaim {{.Id}}" would reach the polecat
+	// as that literal string. See claimRestampCmdFor.
+	//
+	// EMPTY MEANS OMIT THE STEP, and the emptiness is load-bearing rather than a
+	// default. The command it names is additive in macguffin (mg-bb43); on an mg
+	// that lacks it the step would fail every polecat's step 1, and pogod's
+	// matching verifier is left unwired so the signal falls back instead. Both
+	// halves come off one capability probe at startup — see
+	// agent.SetClaimRestampCommand and claimrestamp.go. Left empty by callers, it
+	// is filled from the process-wide ClaimRestampCommand() at expansion time.
+	ClaimRestampCmd string
 }
 
 // withDefaults returns vars with Coordinator (and CoordinatorTitle) defaulted
 // from the process-wide coordinator name, Worker (and WorkerTitle) from the
-// process-wide worker name, and Provider defaulted to DefaultProviderID when
-// the caller left them empty.
+// process-wide worker name, Provider defaulted to DefaultProviderID, and
+// ClaimRestampCmd from the process-wide ClaimRestampCommand() — when the caller
+// left them empty.
 func withDefaults(vars TemplateVars) TemplateVars {
 	if vars.Coordinator == "" {
 		vars.Coordinator = CoordinatorName()
@@ -219,6 +239,9 @@ func withDefaults(vars TemplateVars) TemplateVars {
 	}
 	if vars.Provider == "" {
 		vars.Provider = DefaultProviderID
+	}
+	if vars.ClaimRestampCmd == "" {
+		vars.ClaimRestampCmd = claimRestampCmdFor(vars.Id)
 	}
 	return vars
 }

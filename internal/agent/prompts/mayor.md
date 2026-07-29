@@ -238,7 +238,17 @@ Look for:
 
   **Claim status is no longer the started-signal, and this is the most important change to how you diagnose a slow start.** pogod claims the item at spawn (mg-7254), so `mg list --status=claimed` shows the {{.Worker}}'s item claimed from the instant it was dispatched, whether or not the {{.Worker}} ever ran a turn. Checking it tells you **nothing** about whether the {{.Worker}} started. It is a signal that now always reads healthy — the worst kind to keep consulting out of habit.
 
-  What to read instead: pogod falls back to the **ready-composer** signal for these dispatches, so `auto_renudge` events still tell you a recovery is in progress, and `pogo agent diagnose <name>` reads the process. Be aware the fallback is **weaker** than the retired claim signal: it catches a harness whose composer never rendered, but not the paste-buffered-CR wedge (mg-ce61), where the composer *did* render and the {{.Worker}} still never acted. A {{.Worker}} silently wedged that way now draws no `auto_renudge` at all, so a dispatch that has produced no output and no mail after a few minutes is worth a manual look even with a clean event log.
+  What to read instead: `auto_renudge` events tell you a recovery is in progress, and `pogo agent diagnose <name>` reads the process. **Which started-signal drew the event is in `details.reason`, and it is the thing to check**, because two of the three are hard and one is not:
+
+  - `claim_pid_not_restamped` — hard (mg-7d6d). The {{.Worker}}'s step 1 re-stamps the claim from pogod's PID to its own, so an unchanged PID means it has executed no turn. This is the signal that catches the paste-buffered-CR wedge (mg-ce61), where the composer *did* render and the {{.Worker}} still never acted.
+  - `work_item_unclaimed` — hard. Only for dispatches pogod's claim-at-spawn did not cover.
+  - `no_ready_composer` — **weaker**, and its presence is itself a fact about the host. It catches a harness whose composer never rendered but *not* the mg-ce61 wedge. A claimed-at-spawn dispatch falls back to it only when this machine's `mg` cannot re-stamp a claim (macguffin mg-bb43); pogod says which at startup:
+
+    ```bash
+    grep 'claim-pid re-stamp' ~/.pogo/pogod.log | tail -1
+    ```
+
+    If that line reports the hard signal **OFF**, a {{.Worker}} wedged by mg-ce61 draws no `auto_renudge` at all, and a dispatch with no output and no mail after a few minutes is worth a manual look even with a clean event log. The remedy is a macguffin that can re-stamp plus a pogod restart — not a change to how you dispatch.
 
   Watch the recovery rather than pre-empting it:
   ```bash

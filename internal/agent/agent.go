@@ -415,6 +415,14 @@ type Registry struct {
 	// pogod wires it to a macguffin-backed query; nil (bare registry, unit
 	// tests) disables auto-renudge, so the initial nudge stands on its own.
 	startVerifier StartVerifier
+	// claimRestampVerifier, when set, reports whether a polecat has re-stamped
+	// its work item's claim to its own pid — the HARD started-signal restored by
+	// mg-7d6d for dispatches whose claim pogod took at spawn, where startVerifier
+	// above proves nothing (mg-7254). nil means the re-stamp mechanism is
+	// unavailable and those dispatches keep the weaker ready-composer fallback;
+	// see claimrestamp.go on why installing it unconditionally would renudge
+	// every healthy polecat.
+	claimRestampVerifier ClaimRestampVerifier
 	// startVerifyDelay / startVerifyMaxAttempts override the auto-renudge
 	// timing. Zero means use the package defaults; only tests set these so they
 	// don't have to wait the real 25s window. Immutable once agents spawn.
