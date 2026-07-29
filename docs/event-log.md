@@ -541,7 +541,7 @@ A merge attempt failed. Whether this is terminal depends on `attempt` and the co
   - `branch` (string, required)
   - `target` (string, required)
   - `attempt` (int, required)
-  - `stage` (string, required): which pipeline stage failed — `"fetch"`, `"rebase"`, `"closing-ref-check"`, `"protected-path-check"`, `"build"`, `"test"`, `"push"`, `"unknown"`
+  - `stage` (string, required): which pipeline stage failed — `"fetch"`, `"rebase"`, `"closing-ref-check"`, `"build"`, `"test"`, `"push"`, `"unknown"`
   - `reason` (string, required): short error summary, single line, ≤ 200 chars
   - `terminal` (bool, required): `true` if the refinery has given up (no more retries); `false` if another attempt will follow
   - `gate_output_truncated` (string, optional): up to 1 KB of gate stderr/stdout for quick triage. Full output remains in the in-memory MR record (or persisted history once recommendation §1 lands).

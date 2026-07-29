@@ -930,34 +930,6 @@ from `internal/refinery/refinery.go:499` — not a layered or optional pattern.
 The only knob is `MacguffinDir`: set it empty to disable the gate entirely.
 There is no per-project, per-repo, or per-branch toggle.
 
-**Protected paths (hardcoded, no bypass).** After the rebase and before the
-quality gates, the refinery refuses any branch whose diff touches a path listed
-in `.protected-paths` — read from the **target ref**, never from the branch
-under merge, so a branch cannot exempt itself by editing the list. The list file
-protects its own path implicitly. Syntax is one pattern per line with `#`
-comments: `dir/**` for a subtree, an exact repo-relative path, or a
-single-segment glob (`hooks/*.sh`). An unrecognised pattern **fails the merge**
-rather than being skipped — a red line that silently matches nothing is worse
-than none. A repo with no list has no protected paths and merges normally.
-
-The check is not a quality gate and `[gates] skip_on_retry` does not bypass it;
-it fails with stage `protected-path-check`. **There is deliberately no
-authorisation mechanism** — no flag, label, CODEOWNERS rule, or marker file. On
-this machine every agent holds a `GH_TOKEN` authenticating as the repo owner and
-runs with `--dangerously-skip-permissions`, so anything an agent can read the
-rules for it can also produce, and an approval mechanism would be an opt-out
-with extra steps. A change to a protected path lands by hand-push from the
-owner, which never enters the refinery.
-
-This lives in the refinery rather than in GitHub Actions because the refinery is
-the process that performs the write: it runs `git merge --ff-only` and
-`git push origin main` directly, without opening a PR (the merge that motivated
-this, MR `mr-d9kmdoqtjv1m5em5h9og`, logged `step=pr-close skipped: no PR for
-branch polecat-1935`). `on: pull_request` never fires for that route,
-`on: push` fires after the write, and branch protection would block the
-refinery's own push. Source: `internal/refinery/protectedpath_gate.go` (mg-6c4b,
-incident mg-2a50).
-
 The companion convention is the `polecat-qa` prompt template
 (`internal/agent/prompts/templates/polecat-qa.md`), which scripts the polecat
 that completes a QA item — verifying the source work item's acceptance criteria

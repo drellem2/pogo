@@ -172,8 +172,8 @@ What this changed and what it did not:
 - **Not changed:** the worker default, which stays `pogocat`. mg-2c17 reverses
   the coordinator half of mg-ce47 only.
 - **Not changed:** `internal/agent/prompts/**` and `internal/agent/templates/**`,
-  which carry `{{.Coordinator}}` placeholders rather than the literal name and
-  are a protected path the refinery refuses.
+  which carry `{{.Coordinator}}` placeholders rather than the literal name, so
+  there was nothing in them to rename.
 
 The cosmetic residue recorded in §4 — a coordinator named `ringmaster` reading
 `mayor.md` — is gone with it.

@@ -140,9 +140,9 @@ move on. A `gh` failure must not abort the sweep.
 
 `sources` is per-PM config, so this fixes **the PMs that exist**. The baseline
 that would fix *every* PM — including ones not yet instantiated — is
-`internal/agent/prompts/pm/pm-template.md`, a shipped prompt under
-`.protected-paths`: the refinery refuses any branch touching it, with no bypass,
-and it lands only by hand-push from the repo owner (mg-6c4b, incident mg-2a50).
+`internal/agent/prompts/pm/pm-template.md`, which this change does not touch:
+it is separate work, and shipped prompts are owned by the coordinator together
+with pm-pogo as pogo SME.
 
 So a PM instantiated after this doc was written inherits the original blind spot
 until the baseline change lands, and gets it only if whoever scaffolds it copies

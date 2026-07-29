@@ -33,8 +33,8 @@
 
   **Config only; the baseline is untouched and still carries the gap.**
   `internal/agent/prompts/pm/pm-template.md` is the home that would fix every PM
-  including ones not yet instantiated, and it is a `.protected-paths` red line
-  the refinery refuses with no bypass (mg-6c4b, incident mg-2a50) — it lands by
-  hand-push from the repo owner. So a PM scaffolded later inherits the original
-  blind spot unless whoever scaffolds it copies the `sources` entry. The doc
+  including ones not yet instantiated, and it is deliberately left for separate
+  work rather than folded into a config change. So a PM scaffolded later
+  inherits the original blind spot unless whoever scaffolds it copies the
+  `sources` entry. The doc
   states that asymmetry rather than letting the fix read as complete.
