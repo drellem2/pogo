@@ -65,6 +65,39 @@
 # pogod that can be really killed, since the bug is what a real curl returns when
 # nothing is listening.
 #
+# HERMETIC OR NOTHING: WHY SETUP FAILS SEPARATELY FROM ASSERTIONS (mg-3412)
+# -------------------------------------------------------------------------
+# Everything below reads and mutates state through a sandbox daemon, so its
+# verdict is only worth what that sandbox's isolation is worth. It was worth
+# nothing under fleet load: the port was PROBED rather than reserved, every
+# concurrent run walked the same range from the same end, and the loser's pogod
+# died on its bind while the readiness curl was answered by the winner's. The
+# controls then ran to completion against a stranger's daemon and produced
+# fourteen assertion failures — including verbatim fail-open findings — about a
+# tree that was provably fine (polecat-4469's branch, resubmitted unchanged,
+# merged clean).
+#
+# Two changes close it, and neither touches an assertion:
+#
+#   * The sandbox is now ISOLATED BY CONSTRUCTION. scripts/lib/sandbox-daemon.sh
+#     reserves the port atomically and refuses to proceed until the daemon
+#     answering it has been PROVEN to be the process this run started. Every
+#     schedule and agent name below is namespaced to this run ($SBX), so nothing
+#     registered here can be confused with — or collide with — a name a real
+#     fleet holds. `mail-check-pa` used to be one of them.
+#
+#   * Infrastructure now fails AS infrastructure. Standing up the sandbox, and
+#     every write this file makes to it, goes through sandbox_setup_fail /
+#     sbx_curl and ends the run at the point of failure with its own banner and
+#     its own exit code — never as a FAIL: line. The incident's first line
+#     already said "could not remove ... from the sandbox daemon"; the next
+#     thirteen buried it, and the diagnosis that followed was wrong.
+#
+# The direction NOT taken, deliberately: no assertion was weakened, none was
+# deleted, and nothing retries. This file gates its own merge, so a change that
+# made it pass more easily would make that merge pass more easily too — which is
+# the one trade mg-3412 forbids outright.
+#
 # RUNNING AGAINST A PREBUILT ARTIFACT ($POGO_LIVE_CONTROL_POGOD) — mg-bfe5
 # ----------------------------------------------------------------------
 # By default this file builds its own pogod from $REPO_ROOT, which is what the
@@ -105,6 +138,13 @@ set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$HERE/.." && pwd)"
 
+# The sandbox port reservation and the daemon-ownership proof (mg-3412). Sourced
+# before anything else so sandbox_setup_fail is available to every step below,
+# including the builds — a control that cannot build its own daemon has an
+# infrastructure problem, not an assertion result.
+# shellcheck source=/dev/null
+source "$HERE/lib/sandbox-daemon.sh"
+
 RESULTS_FILE=$(mktemp)
 SANDBOX=$(mktemp -d)
 POGOD_PID=""
@@ -114,6 +154,9 @@ cleanup() {
     # out the machine's live daemon and every agent poller with it.
     [ -n "$POGOD_PID" ] && kill "$POGOD_PID" 2>/dev/null
     [ -n "$POGOD_PID" ] && wait "$POGOD_PID" 2>/dev/null
+    # Hand the port back. Held until here on purpose: §5 kills the daemon and §8
+    # starts a fresh one on the SAME port, so the claim has to outlive both.
+    sandbox_port_release
     # Make the tree writable before removing it. Any `go` call under the sandbox
     # HOME (installed_bin's `go env`, installed_rev's `go version -m`) materialises
     # the go.mod toolchain module into $SANDBOX/home/go/pkg/mod, and Go marks the
@@ -178,20 +221,17 @@ if [ -n "${POGO_LIVE_CONTROL_POGOD:-}" ]; then
     # specific artifact, and quietly testing a DIFFERENT binary than the one
     # about to be deployed is precisely the fail-open this ticket exists to close.
     if [ ! -x "$POGO_LIVE_CONTROL_POGOD" ]; then
-        fail "POGO_LIVE_CONTROL_POGOD=$POGO_LIVE_CONTROL_POGOD is not an executable — refusing to fall back to a source build and report on the wrong binary"
-        exit 1
+        sandbox_setup_fail "POGO_LIVE_CONTROL_POGOD=$POGO_LIVE_CONTROL_POGOD is not an executable — refusing to fall back to a source build and report on the wrong binary"
     fi
     echo "Using prebuilt artifact: $POGO_LIVE_CONTROL_POGOD"
     if ! cp "$POGO_LIVE_CONTROL_POGOD" "$SANDBOX/pogod"; then
-        fail "could not copy $POGO_LIVE_CONTROL_POGOD into the sandbox — the live control cannot run"
-        exit 1
+        sandbox_setup_fail "could not copy $POGO_LIVE_CONTROL_POGOD into the sandbox — the live control cannot run"
     fi
     chmod +x "$SANDBOX/pogod"
 else
     echo "Building pogod into the sandbox..."
     if ! (cd "$REPO_ROOT" && go build -o "$SANDBOX/pogod" ./cmd/pogod); then
-        fail "could not build cmd/pogod — the live control cannot run"
-        exit 1
+        sandbox_setup_fail "could not build cmd/pogod — the live control cannot run"
     fi
 fi
 
@@ -208,20 +248,17 @@ fi
 # the one about to be deployed is the fail-open this file exists to close.
 if [ -n "${POGO_LIVE_CONTROL_POGO:-}" ]; then
     if [ ! -x "$POGO_LIVE_CONTROL_POGO" ]; then
-        fail "POGO_LIVE_CONTROL_POGO=$POGO_LIVE_CONTROL_POGO is not an executable — refusing to fall back to a source build and report on the wrong CLI"
-        exit 1
+        sandbox_setup_fail "POGO_LIVE_CONTROL_POGO=$POGO_LIVE_CONTROL_POGO is not an executable — refusing to fall back to a source build and report on the wrong CLI"
     fi
     echo "Using prebuilt CLI artifact: $POGO_LIVE_CONTROL_POGO"
     if ! cp "$POGO_LIVE_CONTROL_POGO" "$SANDBOX/pogo"; then
-        fail "could not copy $POGO_LIVE_CONTROL_POGO into the sandbox — the drain-gate control cannot run"
-        exit 1
+        sandbox_setup_fail "could not copy $POGO_LIVE_CONTROL_POGO into the sandbox — the drain-gate control cannot run"
     fi
     chmod +x "$SANDBOX/pogo"
 else
     echo "Building the pogo CLI into the sandbox..."
     if ! (cd "$REPO_ROOT" && go build -o "$SANDBOX/pogo" ./cmd/pogo); then
-        fail "could not build cmd/pogo — the drain-gate control cannot run"
-        exit 1
+        sandbox_setup_fail "could not build cmd/pogo — the drain-gate control cannot run"
     fi
 fi
 
@@ -232,8 +269,7 @@ fi
 # re-implementing `ps -o lstart=` parsing in shell — see its header.
 echo "Building the witness fixture writer into the sandbox..."
 if ! (cd "$REPO_ROOT" && go build -o "$SANDBOX/witnessfixture" ./scripts/witnessfixture); then
-    fail "could not build scripts/witnessfixture — the drain-gate control cannot stage a live polecat"
-    exit 1
+    sandbox_setup_fail "could not build scripts/witnessfixture — the drain-gate control cannot stage a live polecat"
 fi
 
 # --- sandbox: a real pogod that cannot reach the real fleet ------------------
@@ -249,33 +285,65 @@ export POGO_HOME="$SANDBOX/home/.pogo"
 export POGO_AGENT_AUTOSTART=false
 mkdir -p "$HOME" "$XDG_CONFIG_HOME"
 
-# A spare port, probed free. Never the default 10000: that is the live daemon.
-PORT=""
-for candidate in $(seq 17731 17799); do
-    if ! curl -sf --max-time 1 "http://127.0.0.1:$candidate/scheduler/schedules" >/dev/null 2>&1; then
-        PORT="$candidate"; break
-    fi
-done
-if [ -z "$PORT" ]; then
-    fail "no free port in 17731-17799 for the sandbox daemon"
-    exit 1
-fi
-
-"$SANDBOX/pogod" -port "$PORT" > "$SANDBOX/pogod.log" 2>&1 &
-POGOD_PID=$!
-BOOT_T0=$(date +%s)
-
+# A PRIVATE port, RESERVED — not a fixed number, and not a probe (mg-3412). The
+# old loop walked 17731-17799 from the bottom asking "did anything answer?", so
+# every concurrent run picked the same candidate, one pogod lost the bind and
+# died, and the readiness curl below was answered by the survivor — after which
+# this file spent thirteen assertions interrogating another run's daemon. See
+# scripts/lib/sandbox-daemon.sh for the reservation and the ownership proof; the
+# short version is that neither the port nor the daemon is taken on trust now.
+sandbox_port_reserve
+PORT="$SANDBOX_PORT"
 URL="http://127.0.0.1:$PORT"
-up=false
-for _ in $(seq 1 80); do
-    if curl -sf --max-time 2 "$URL/scheduler/schedules" >/dev/null 2>&1; then up=true; break; fi
-    sleep 0.25
-done
-if ! $up; then
-    fail "sandbox pogod never answered on $URL"
-    sed 's/^/  pogod: /' "$SANDBOX/pogod.log"
-    exit 1
+
+BOOT_T0=$(date +%s)
+sandbox_daemon_start "$SANDBOX/pogod" "$PORT" "$SANDBOX/pogod.log" /scheduler/schedules
+POGOD_PID="$SANDBOX_DAEMON_PID"
+
+# A freshly booted pogod holds nothing. If this one holds a schedule, the daemon
+# answering our reserved port is not the daemon we think it is — and the whole
+# file's premise (that it reads back exactly what it registered) is already void.
+# Cheap, and independent of lsof: it interrogates the STATE rather than the
+# process table, so it still bites where the ownership proof cannot look.
+if [ -n "$(curl -sf --max-time 5 "$URL/scheduler/schedules" 2>/dev/null | grep -o '"id":"[^"]*"')" ]; then
+    sandbox_setup_fail "the daemon on $URL already holds schedules — a just-booted sandbox pogod holds none, so this is not our daemon and nothing below would be measuring the tree under test" "$SANDBOX/pogod.log"
 fi
+
+# Every schedule and agent name this file registers is namespaced to THIS RUN
+# (mg-3412's second ask). It used to register `mail-check-pa`, `mail-check-mayor`
+# and friends — names a real fleet holds — so a control reading fleet state by
+# name had no way to tell its own sandbox's `pa` from the machine's, and the
+# failure that produced looked exactly like the crew-loss regression the control
+# exists to catch. A run token makes every name here one no live fleet could ever
+# hold, and makes two concurrent runs' names disjoint even if the isolation above
+# were somehow defeated.
+#
+# The `mail-check-` PREFIX stays, and must: extract_mail_check_ids keys on it, so
+# it is part of the seam under test, not part of the naming. Only the identity
+# after it is ours to choose.
+SBX="sbxlive-$$"
+
+# sbx_curl DESC -- <curl args> — every write THIS FILE makes to the sandbox
+# daemon, and nothing else (mg-3412's third ask).
+#
+# These calls are scaffolding: they stage the state an assertion is then made
+# about. When one fails, the state was never staged, so the assertions that
+# follow are not measuring what their text claims — which is exactly how a
+# "could not remove mail-check-pa from the sandbox daemon" turned into thirteen
+# further lines announcing that fail-open controls had stopped working. So a
+# staging failure ends the run as infrastructure, at the point of failure.
+#
+# It is NOT used for anything the code under test does. The driver's own curls
+# (schedules_body, drain_probe, drain_post) still run exactly as shipped, and
+# their failures are still the controls' verdicts — §5 kills the daemon precisely
+# to make them fail. Guarding the scaffolding is not the same as guarding the
+# instrument, and only the first is done here.
+sbx_curl() {
+    local desc="$1"; shift
+    [ "$1" = "--" ] && shift
+    curl -sf --max-time 10 "$@" >/dev/null 2>&1 \
+        || sandbox_setup_fail "$desc — the sandbox daemon on $URL did not accept it, so the state the controls below assert on was never staged"
+}
 
 # Point the driver's own primitives at the sandbox daemon, then source it.
 # main() will NOT run because BASH_SOURCE != $0. From here on, every call below
@@ -307,15 +375,25 @@ assert_out_of_band() { :; }
 # (pa, pm-pogo, pm-onethird, pm-dealdesk, architect, mayor). Plus a sweep, which
 # is exactly what made the live outage invisible — agents kept LOOKING scheduled
 # because their sweeps survived. The parser must not be fooled by it.
-CREW="pa pm-pogo pm-onethird pm-dealdesk architect mayor"
-for a in $CREW; do
-    curl -sf -X POST "$URL/scheduler/schedules" -H 'Content-Type: application/json' \
-        -d "{\"id\":\"mail-check-$a\",\"agent\":\"$a\",\"cron\":\"*/10 * * * *\",\"delivery\":\"nudge\",\"message\":\"check mail\"}" \
-        >/dev/null || fail "could not register mail-check-$a on the sandbox daemon"
+# The SHAPE of the real roster — six crew loops — under names only this run can
+# hold. The shape is what the parser and the slack arithmetic reason about; the
+# identities never were, and borrowing the fleet's made this control's state
+# indistinguishable from the fleet's own (mg-3412).
+CREW=""
+for a in pa pm-pogo pm-onethird pm-dealdesk architect mayor; do
+    CREW="$CREW $SBX-$a"
 done
-curl -sf -X POST "$URL/scheduler/schedules" -H 'Content-Type: application/json' \
-    -d '{"id":"sweep-morning","agent":"pm-pogo","cron":"0 9 * * *","delivery":"nudge","message":"sweep"}' \
-    >/dev/null || fail "could not register the decoy sweep"
+CREW="${CREW# }"
+SBX_PA="$SBX-pa"          # the crew agent whose unexplained loss control 3 turns on
+SBX_SWEEP="$SBX-sweep-morning"
+for a in $CREW; do
+    sbx_curl "could not register mail-check-$a on the sandbox daemon" -- \
+        -X POST "$URL/scheduler/schedules" -H 'Content-Type: application/json' \
+        -d "{\"id\":\"mail-check-$a\",\"agent\":\"$a\",\"cron\":\"*/10 * * * *\",\"delivery\":\"nudge\",\"message\":\"check mail\"}"
+done
+sbx_curl "could not register the decoy sweep" -- \
+    -X POST "$URL/scheduler/schedules" -H 'Content-Type: application/json' \
+    -d "{\"id\":\"$SBX_SWEEP\",\"agent\":\"$SBX-pm-pogo\",\"cron\":\"0 9 * * *\",\"delivery\":\"nudge\",\"message\":\"sweep\"}"
 
 # ===========================================================================
 # 1. SEAM — the live curl + parse half, against a body Go really emitted.
@@ -384,9 +462,11 @@ esac
 # polecats) -> 5 >= 7-2 -> OK. Silence, over a crew agent gone mute for hours.
 # The allowance cat-noloop never earned paid for pa's loss. Assertion (c) below
 # pins that arithmetic in place so nobody has to take the claim on faith.
-curl -sf -X POST "$URL/scheduler/schedules" -H 'Content-Type: application/json' \
-    -d '{"id":"mail-check-cat-loop","agent":"cat-loop","cron":"*/10 * * * *","delivery":"nudge","message":"check mail"}' \
-    >/dev/null || fail "could not register the force-killed polecat's mail-check"
+SBX_CATLOOP="$SBX-cat-loop"
+SBX_CATNOLOOP="$SBX-cat-noloop"
+sbx_curl "could not register the force-killed polecat's mail-check" -- \
+    -X POST "$URL/scheduler/schedules" -H 'Content-Type: application/json' \
+    -d "{\"id\":\"mail-check-$SBX_CATLOOP\",\"agent\":\"$SBX_CATLOOP\",\"cron\":\"*/10 * * * *\",\"delivery\":\"nudge\",\"message\":\"check mail\"}"
 
 # The pre-bounce world, read through the driver's own primitive from the live
 # daemon: six crew loops + cat-loop's. cat-noloop is absent BY BEING ABSENT —
@@ -396,20 +476,24 @@ SLACK_PRE_IDS="$(printf '%s' "$SLACK_PRE_BODY" | extract_mail_check_ids)"
 
 # The pre-kickstart drain snapshot: exactly what the driver captures at
 # scripts/pogo-self-deploy's step 1 and hands to step 5 after the bounce.
-SLACK_SNAP='{"draining":true,"count":2,"polecats":[{"name":"cat-noloop","pid":222,"work_item_id":"mg-noloop","worktree_dir":"'"$SANDBOX/wt-noloop"'","source_repo":"'"$SANDBOX"'"},{"name":"cat-loop","pid":111,"work_item_id":"mg-loop","worktree_dir":"'"$SANDBOX/wt-loop"'","source_repo":"'"$SANDBOX"'"}]}'
+SLACK_SNAP='{"draining":true,"count":2,"polecats":[{"name":"'"$SBX_CATNOLOOP"'","pid":222,"work_item_id":"mg-noloop","worktree_dir":"'"$SANDBOX/wt-noloop"'","source_repo":"'"$SANDBOX"'"},{"name":"'"$SBX_CATLOOP"'","pid":111,"work_item_id":"mg-loop","worktree_dir":"'"$SANDBOX/wt-loop"'","source_repo":"'"$SANDBOX"'"}]}'
 
 # (a) Slack is granted by NAME, off the live body: one schedule, not two polecats.
 SLACK_IDS="$(expected_lost_mail_checks "$SLACK_PRE_BODY" "$SLACK_SNAP")"
-[ "$SLACK_IDS" = "mail-check-cat-loop" ] \
+[ "$SLACK_IDS" = "mail-check-$SBX_CATLOOP" ] \
     && pass "slack off the LIVE body names exactly the one schedule that died with a polecat (2 dead, 1 loop)" \
-    || fail "slack from the live body is '$(printf '%s' "$SLACK_IDS" | tr '\n' ' ')', expected just mail-check-cat-loop"
+    || fail "slack from the live body is '$(printf '%s' "$SLACK_IDS" | tr '\n' ' ')', expected just mail-check-$SBX_CATLOOP"
 
 # Now perform the loss, for real, through the daemon's own endpoint: cat-loop's
 # schedule goes because cat-loop is dead (legitimate), and pa's goes for no
 # reason anyone can name (the outage).
-for gone in mail-check-cat-loop mail-check-pa; do
-    curl -sf -X DELETE "$URL/scheduler/schedules/$gone" >/dev/null \
-        || fail "could not remove $gone from the sandbox daemon"
+# THE LINE THE mg-3412 INCIDENT FAILED ON. It was a `fail`, so a sandbox that had
+# never been ours produced an assertion failure here and thirteen cascading ones
+# after it — none of which was about the tree. It is staging, so it is staging
+# that stops the run now.
+for gone in "mail-check-$SBX_CATLOOP" "mail-check-$SBX_PA"; do
+    sbx_curl "could not remove $gone from the sandbox daemon" -- \
+        -X DELETE "$URL/scheduler/schedules/$gone"
 done
 
 # (b) THE ASSERTION THIS TICKET EXISTS FOR. Same call the redeployer makes, same
@@ -418,12 +502,12 @@ done
 # tell you who to go nudge.
 OUT_SLACK="$(MAIL_CHECK_TIMEOUT=2 verify_mail_checks_restored "$SLACK_PRE_IDS" "$SLACK_IDS" 2>&1)"
 case "$OUT_SLACK" in
-    *"post-check: FAILED"*"LOST: mail-check-pa"*)
-        pass "mg-ea3e: a real crew loss beside a no-mail-check polecat's death reports RED and NAMES mail-check-pa" ;;
+    *"post-check: FAILED"*"LOST: mail-check-$SBX_PA"*)
+        pass "mg-ea3e: a real crew loss beside a no-mail-check polecat's death reports RED and NAMES mail-check-$SBX_PA" ;;
     *"post-check: OK"*)
         fail "mg-ea3e REGRESSION: the crew loss was absorbed by the dead polecats' allowance — SILENT MISS: $OUT_SLACK" ;;
     *)
-        fail "mg-ea3e: expected RED naming mail-check-pa, got: $OUT_SLACK" ;;
+        fail "mg-ea3e: expected RED naming mail-check-$SBX_PA, got: $OUT_SLACK" ;;
 esac
 
 # (c) ...and the counterfactual, so the control above is provably driving the
@@ -441,9 +525,9 @@ else
 fi
 
 # Restore the six crew loops for control 4. cat-loop stays gone — it is dead.
-curl -sf -X POST "$URL/scheduler/schedules" -H 'Content-Type: application/json' \
-    -d '{"id":"mail-check-pa","agent":"pa","cron":"*/10 * * * *","delivery":"nudge","message":"check mail"}' \
-    >/dev/null || fail "could not restore mail-check-pa"
+sbx_curl "could not restore mail-check-$SBX_PA" -- \
+    -X POST "$URL/scheduler/schedules" -H 'Content-Type: application/json' \
+    -d "{\"id\":\"mail-check-$SBX_PA\",\"agent\":\"$SBX_PA\",\"cron\":\"*/10 * * * *\",\"delivery\":\"nudge\",\"message\":\"check mail\"}"
 [ "$(mail_check_ids)" = "$LIVE_PRE" ] \
     || fail "fleet not restored to the six crew mail-checks — control 4 below cannot mean what it says"
 
@@ -468,9 +552,9 @@ else
 
     # The decoy must have survived, or "count went to 0" proves nothing about
     # mail-checks specifically — it would just mean the scheduler emptied.
-    printf '%s' "$(curl -sf "$URL/scheduler/schedules")" | grep -q '"id":"sweep-morning"' \
+    printf '%s' "$(curl -sf "$URL/scheduler/schedules")" | grep -q "\"id\":\"$SBX_SWEEP\"" \
         && pass "the reap took the mail-checks and left the sweep (the count fell for the RIGHT reason)" \
-        || fail "sweep-morning also vanished — the count reaching 0 is not evidence about mail-checks"
+        || fail "$SBX_SWEEP also vanished — the count reaching 0 is not evidence about mail-checks"
 
     # THE ASSERTION mg-c02d EXISTS FOR. Same call the redeployer makes at step
     # 5, against a daemon whose fleet really is gone.
@@ -565,9 +649,18 @@ dr_run() {
     echo $?
 }
 dr_state() { curl -sf --max-time 5 "$URL/agents/drain" 2>/dev/null | json_bool draining; }
+# Staging, not measurement: this puts the daemon into the state a control is
+# about to assert ON, so a POST that does not land means the control below is
+# measuring something other than what its text says. Infrastructure (mg-3412).
+# dr_state above is deliberately NOT guarded — reading the daemon back is the
+# verdict, and §5 kills it on purpose.
+sbx_drain_set() {
+    sbx_curl "could not set draining=$1 on the sandbox daemon" -- \
+        -X POST "$URL/agents/drain" -H 'Content-Type: application/json' \
+        -d "{\"draining\":$1}"
+}
 
-curl -sf -X POST "$URL/agents/drain" -H 'Content-Type: application/json' \
-    -d '{"draining":false}' >/dev/null 2>&1
+sbx_drain_set false
 # (a) precondition
 [ "$(dr_state)" = "false" ] \
     && pass "drain-restore precondition: the sandbox daemon is dispatching (draining=false) before the run" \
@@ -592,8 +685,7 @@ eval "$DR_REAL_BODY"   # put the real trap body back
     || fail "expected the redeploy to exit 4 from do_build, got $DR_RC_RED — the window under test was never entered"
 
 # (d) THE ASSERTION THIS TICKET EXISTS FOR. Same scenario, real trap.
-curl -sf -X POST "$URL/agents/drain" -H 'Content-Type: application/json' \
-    -d '{"draining":false}' >/dev/null 2>&1
+sbx_drain_set false
 DR_RC="$(dr_run)"
 if [ "$(dr_state)" = "false" ]; then
     pass "mg-8b48: the trap restores dispatch (draining=false) after a build that failed post-drain (rc=$DR_RC)"
@@ -610,8 +702,7 @@ fi
 # false`, which would leave this case at false). It canNOT tell a correct restore
 # from no trap at all — both end at true. That is what (b) and (d) are for, and
 # this assertion leans on them rather than pretending to stand alone.
-curl -sf -X POST "$URL/agents/drain" -H 'Content-Type: application/json' \
-    -d '{"draining":true}' >/dev/null 2>&1
+sbx_drain_set true
 dr_run >/dev/null
 [ "$(dr_state)" = "true" ] \
     && pass "mg-8b48: a pre-existing drain is RESTORED, not cleared — the trap restores state, it does not assert it" \
@@ -622,8 +713,7 @@ dr_run >/dev/null
 # phase rather than a no-op this script always undoes. Reach that boundary with
 # the trap armed and confirm drain is still ON, so (d) is a consequence of the
 # FAILURE and not of the script simply always ending at draining=false.
-curl -sf -X POST "$URL/agents/drain" -H 'Content-Type: application/json' \
-    -d '{"draining":false}' >/dev/null 2>&1
+sbx_drain_set false
 (
     DRAIN_PRIOR=false
     DRAIN_ARMED=true
@@ -735,8 +825,7 @@ sink_mail_count() {
 #     useless, because an alert that fires on every failure tells you nothing
 #     about the one failure that is otherwise invisible.
 SINK_BEFORE_HEALTHY="$(sink_mail_count)"
-curl -sf -X POST "$URL/agents/drain" -H 'Content-Type: application/json' \
-    -d '{"draining":false}' >/dev/null 2>&1
+sbx_drain_set false
 SINK_RC_QUIET="$(dr_run)"
 SINK_AFTER_HEALTHY="$(sink_mail_count)"
 [ "$SINK_RC_QUIET" = "4" ] \
@@ -764,8 +853,7 @@ sink_stall_run() {
     ) >/dev/null 2>&1
     echo $?
 }
-curl -sf -X POST "$URL/agents/drain" -H 'Content-Type: application/json' \
-    -d '{"draining":false}' >/dev/null 2>&1
+sbx_drain_set false
 SINK_BEFORE="$(sink_mail_count)"
 SINK_RC="$(sink_stall_run)"
 SINK_AFTER="$(sink_mail_count)"
@@ -801,8 +889,7 @@ sink_unknown_run() {
     ) >/dev/null 2>&1
     echo $?
 }
-curl -sf -X POST "$URL/agents/drain" -H 'Content-Type: application/json' \
-    -d '{"draining":false}' >/dev/null 2>&1
+sbx_drain_set false
 UNK_BEFORE="$("$MG" mail list "$COORDINATOR" --all --json 2>/dev/null | grep -Fc "FLEET STATE UNKNOWN" || true)"
 UNK_RC="$(sink_unknown_run)"
 UNK_AFTER="$("$MG" mail list "$COORDINATOR" --all --json 2>/dev/null | grep -Fc "FLEET STATE UNKNOWN" || true)"
@@ -833,8 +920,7 @@ force_unknown_run() {
     ) >/dev/null 2>&1
     echo $?
 }
-curl -sf -X POST "$URL/agents/drain" -H 'Content-Type: application/json' \
-    -d '{"draining":false}' >/dev/null 2>&1
+sbx_drain_set false
 FORCE_RC="$(force_unknown_run)"
 [ "$FORCE_RC" = "4" ] \
     && pass "mg-65b2: --force OVERRIDES the unknown-state refusal — the run proceeds past the drain (and then fails in do_build, exit 4, which is the next step and unreachable from exit 7)" \
@@ -1145,22 +1231,19 @@ rm -f "$GATE_WITNESS"
 #     satisfy all of them while breaking every deploy. This is the one that says
 #     the fix is a discrimination and not a brick. A fresh daemon on the same
 #     port — §5's is gone and its port is free.
-"$SANDBOX/pogod" -port "$GATE_PORT" > "$SANDBOX/pogod-gate.log" 2>&1 &
-POGOD_PID=$!    # hand it to the EXIT trap; nothing else kills it
-GATE_UP=false
-for _ in $(seq 1 80); do
-    if curl -sf --max-time 2 "http://127.0.0.1:$GATE_PORT/agents/drain" >/dev/null 2>&1; then GATE_UP=true; break; fi
-    sleep 0.25
-done
-if $GATE_UP; then
-    pass "drain-gate precondition: a real pogod is answering /agents/drain again on port $GATE_PORT"
-    GATE_HEALTHY="$(gate_drain_wait)"
-    [ "$GATE_HEALTHY" = "0|0" ] \
-        && pass "NEGATIVE: a HEALTHY drain still drains — a real pogod reporting 0 polecats quiesces (rc 0). The refusals above are conditional, not a gate welded shut" \
-        || fail "a healthy live pogod reporting an empty fleet returned '$GATE_HEALTHY' — the fix broke the ordinary deploy path"
-else
-    fail "could not restart pogod for the negative control — 'a healthy drain still drains' is unproven, so the refusals above could be unconditional"
-fi
+# Same reservation, same ownership proof as the first boot — the port is still
+# ours (the claim is released only by the EXIT trap), and a successor daemon has
+# to be shown to be OURS for exactly the reason the first one did. The old form
+# accepted whatever answered the port, which under load was another run's daemon:
+# a live one, reporting a fleet that was not ours, into a control that reads
+# "$GATE_HEALTHY" as a statement about this tree (mg-3412).
+sandbox_daemon_start "$SANDBOX/pogod" "$GATE_PORT" "$SANDBOX/pogod-gate.log" /agents/drain
+POGOD_PID="$SANDBOX_DAEMON_PID"    # hand it to the EXIT trap; nothing else kills it
+pass "drain-gate precondition: a real pogod is answering /agents/drain again on port $GATE_PORT"
+GATE_HEALTHY="$(gate_drain_wait)"
+[ "$GATE_HEALTHY" = "0|0" ] \
+    && pass "NEGATIVE: a HEALTHY drain still drains — a real pogod reporting 0 polecats quiesces (rc 0). The refusals above are conditional, not a gate welded shut" \
+    || fail "a healthy live pogod reporting an empty fleet returned '$GATE_HEALTHY' — the fix broke the ordinary deploy path"
 
 echo ""
 # Backstop to the write guard above: the ledger must be readable and non-empty

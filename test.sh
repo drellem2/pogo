@@ -31,6 +31,18 @@ bash scripts/pogo-self-deploy_test.sh
 echo "Testing pogo-self-deploy live mail-check control"
 bash scripts/pogo-self-deploy_live_test.sh
 
+# The control on the control's SANDBOX (mg-3412). The live suite above is only
+# worth its isolation, and under four concurrent polecats that isolation failed:
+# it drove another run's daemon and reported 14 assertion failures — including
+# verbatim fail-open findings — about a tree that was provably fine. This file
+# breaks the sandbox on purpose and asserts the result comes back as a SETUP
+# failure with no PASS:, no FAIL: and no PROVED: token, so a broken sandbox can
+# never again be read as a regression (or hand do_prove a deploy gate). It runs
+# AFTER the live suite deliberately: that run passing is the positive direction
+# this file therefore does not have to pay 60s to restate.
+echo "Testing the live control's sandbox isolation and setup-failure reporting"
+bash scripts/pogo-self-deploy_live_setup_test.sh
+
 # The deploy script's SIGINT interrupt-safety control (mg-e201). Relocated OUT of
 # the live_test.sh artifact gate (do_prove's comsub) because it tests the DEPLOY
 # SCRIPT's INT trap, not the pogod detector, and its own-process-group Ctrl-C model
