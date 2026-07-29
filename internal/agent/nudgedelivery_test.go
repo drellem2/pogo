@@ -473,12 +473,12 @@ func TestMidTurnIsNotTheNegationOfIdle(t *testing.T) {
 	if a.IsIdle(a.nudge.IdleThreshold) {
 		t.Fatal("an agent with no output has no measurable quiet period")
 	}
-	if a.midTurn() {
+	if a.MidTurn() {
 		t.Fatal("an agent that has never written anything is not mid-turn")
 	}
 
 	a.outputBuf.Write([]byte("working"))
-	if !a.midTurn() {
+	if !a.MidTurn() {
 		t.Fatal("an agent that just wrote is mid-turn")
 	}
 }

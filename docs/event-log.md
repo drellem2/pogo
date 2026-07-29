@@ -360,7 +360,7 @@ An agent sent macguffin mail (`mg mail send`).
   - `to` (string, required): target agent identity
   - `message` (string, required): the nudge text
   - `delivery` (string, required): `"pty"` (delivered to live session) or `"mail_fallback"` (target not running, queued as mail)
-  - `mode` (string, optional): `"idle"` (default) or `"immediate"`
+  - `mode` (string, optional): how delivery was established — `"idle"` (waited for quiescence, then wrote and assumed), `"immediate"` (wrote with no precondition), `"ready"` (initial nudge, past the prompt-ready gate), or one of the confirmed-delivery outcomes: `"confirm"` (the message alone drew a submission receipt), `"confirm-bare-return"` (a bare return submitted text the harness had left unsent), `"confirm-resend"` (the message had to be sent twice). The last three are the only values that mean the AGENT reported receiving it; the rest mean pogod wrote bytes. See mg-ebee.
   - `fire_token` (string, optional): correlation id, present when the nudge carries a scheduler fire. Joins to `scheduler_fire_delivered` and `scheduler_fire_completed` on the same value.
 
 ```json
@@ -370,9 +370,10 @@ An agent sent macguffin mail (`mg mail send`).
 #### `nudge_suppressed`
 
 The wake-cycle policy declined an automated WAKE before it reached the PTY
-(mg-8184). It is the counterpart of `nudge_sent`: between the two, every wake
-pogod decided on leaves exactly one record, so "no nudge_sent" is never
-ambiguous between *declined* and *never attempted*.
+(mg-8184). It is the counterpart of `nudge_sent`: between the two — and
+`nudge_unconfirmed` below — every wake pogod decided on leaves exactly one
+record, so "no nudge_sent" is never ambiguous between *declined*, *attempted
+but unprovable*, and *never attempted*.
 
 Only **wakes** pass through the policy — the stall watcher's fire and a
 scheduler fire landing on a live PTY. Spawn kickoffs and operator nudges
@@ -396,6 +397,38 @@ back to mail. What was suppressed is the terminal write.
 {"schema_version":1,"timestamp":"2026-07-29T11:15:30.000000000Z","event_type":"nudge_suppressed","agent":"pogod","details":{"to":"crew-mayor","message":"stall-watch: work piling up","rule":"limit_episode","reason":"usage-limit episode ep-1753-cat-mg-7ffa open since 2026-07-29T10:40:00Z (3 agent(s) rate-limited)"}}
 ```
 
+#### `nudge_unconfirmed`
+
+A nudge in confirmed-delivery mode that pogod could **not** prove landed. Added
+by mg-ebee, and it exists so that an unproven delivery sits in the log next to
+the proven ones rather than vanishing into a caller's error string — the same
+invisibility that let 771 `nudge_sent` records coexist with a fleet where
+nothing consumed them (see "The 2026-07-22 outage" below).
+
+Distinct from `nudge_suppressed`: there, nothing was written and the decision
+was pogod's. Here the bytes went out and the *agent* did not report receiving
+them.
+
+- **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent`, `details`
+- **`details` fields:**
+  - `to` (string, required): target agent identity
+  - `message` (string, required): the nudge text
+  - `delivery` (string, required): always `"pty"` — the bytes were written
+  - `mode` (string, required): always `"confirm"`
+  - `outcome` (string, required):
+    - `"queued"` — written to a harness that was **mid-turn**. Claude Code takes such a prompt and acts on it but fires no `UserPromptSubmit` for it, so the receipt cannot move: pogod can neither confirm nor deny, and does not retry (a resend would deliver the instruction twice). The scheduler deliberately withholds its mail fallback for this outcome alone. See `docs/investigations/confirmed-nudge-delivery-2026-07-29.md`.
+    - `"refused"` — the full escalation ran (the message, a bare return, the message again) and the harness recorded nothing. **Nobody received it.** This is the outcome that used to be reported as success.
+  - `fire_token` (string, optional): as for `nudge_sent`.
+
+```json
+{"schema_version":1,"timestamp":"2026-07-29T09:00:14.000000000Z","event_type":"nudge_unconfirmed","agent":"pogod","details":{"to":"crew-pm-pogo","message":"run the morning sweep","delivery":"pty","mode":"confirm","outcome":"queued","fire_token":"9f3c1ab2"}}
+```
+
+Additive — no `schema_version` bump. A reader that counts only `nudge_sent`
+keeps working, but it is now counting *confirmed* deliveries plus the legacy
+write-and-hope modes, and `nudge_unconfirmed` is where the rest went.
+
+### Scheduler
 ### Scheduler
 
 #### `scheduler_fire_delivered`

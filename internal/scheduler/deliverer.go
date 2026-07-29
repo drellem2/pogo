@@ -87,13 +87,14 @@ func (p *PogodDeliverer) Deliver(ctx context.Context, entry Entry, fireTime time
 // needs the mail fallback.
 //
 // Everything except one case does. The exception is ErrNudgeQueued: the message
-// was typed into a live harness that was mid-turn, and pogod did not see it
-// submitted before the deadline. Its bytes are in a real input queue and will
-// almost certainly be processed when the turn ends — so mailing it too would
-// put the same instruction in front of the agent twice. An agent acting twice
-// on one instruction is a worse outcome than one that acts late, which is the
-// same judgement that puts the bare return ahead of the resend in the nudge
-// escalation itself.
+// was typed into a harness that was mid-turn, which Claude Code takes and acts
+// on but emits no UserPromptSubmit receipt for. It was measured answering such
+// a prompt while pogod's receipt sat unmoved (see ErrNudgeQueued), so the
+// missing receipt is a blind spot, not a lost message — and mailing a second
+// copy would put the same instruction in front of the agent twice. An agent
+// acting twice on one instruction is a worse outcome than one that acts late,
+// which is the same judgement that puts the bare return ahead of the resend in
+// the nudge escalation itself.
 //
 // This is not a silent success: the nudge path emits nudge_unconfirmed for
 // exactly this outcome, so a fire that ended here is visible in the event log

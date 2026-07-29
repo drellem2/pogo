@@ -42,13 +42,23 @@
   4. **Refuse.** `ErrNudgeUnconfirmed`, naming what was tried, instead of a
      success nobody can check.
 
-  A **mid-turn** agent stops after step 1 with `ErrNudgeQueued`: Claude queues a
-  prompt typed mid-turn legitimately, so no receipt means "not yet", not "lost",
-  and steps 2–3 would deliver it twice. `midTurn` is deliberately not
-  `!IsIdle()` — `IsIdle` answers false for an agent that has never written
-  anything, which is a just-spawned harness, and reading that as "mid-turn"
-  would switch the escalation off in exactly the case the startup drop lives in.
-  Silence is not a turn.
+  A **mid-turn** agent stops after step 1 with `ErrNudgeQueued`, and the live
+  measurement changed why. Against a real Claude mid-output, the message **is**
+  taken and acted on — the probe asked for "PONG" and got it — but **no
+  `UserPromptSubmit` fires for a prompt taken while a turn is in flight**. One
+  run watched the receipt for four minutes past the end of the turn; it never
+  moved, while the answer had been on screen throughout. So the receipt is
+  *blind* to mid-turn delivery, not evidence against it, and a resend would
+  deliver the instruction twice — measured, in the same session, by resending
+  and watching it arrive a second time. Orc's §5.2 gives the same rule a
+  different reason ("Claude queues the prompt legitimately"); on this build the
+  prompt is neither queued nor lost but taken immediately, which makes the rule
+  load-bearing rather than precautionary.
+
+  `MidTurn` is deliberately not `!IsIdle()` — `IsIdle` answers false for an
+  agent that has never written anything, which is a just-spawned harness, and
+  reading that as "mid-turn" would switch the escalation off in exactly the case
+  the startup drop lives in. Silence is not a turn.
 
   **What replaces wait-idle's guarantee.** The wait-idle path is unchanged and
   still reachable (`pogo nudge --wait-idle`, API `mode: "wait-idle"`). What it
@@ -84,12 +94,23 @@
   2026-07-22 log recording 647 successful deliveries into a fleet where nothing
   consumed them is the shape of failure this is meant to close.
 
+  **The busy case is improved, not closed, and the difference is written down.**
+  Before: nothing was written at all and the caller got an error. Now: the
+  message is written, Claude takes it, and pogod says plainly that it cannot
+  verify that. What is gone is the third possibility — reporting success for a
+  message nobody can check. Verifying mid-turn delivery needs a second signal
+  (the session transcript, which `Provider.SessionTranscriptGlob` already
+  locates); that is a follow-up, and it is named as one rather than implied.
+
   **Demonstrated red first.** `internal/agent/nudgedelivery_test.go` proves both
   failures on the unfixed tree before proving the fix — including a control that
   rules out a deaf fake by landing the same message with `--immediate` and
-  watching it arrive, so the empty witness cannot be explained away. Verified
-  live against a real disposable Claude agent mid-output, not only against
-  fakes: see `docs/investigations/confirmed-nudge-delivery-2026-07-29.md`.
+  watching it arrive, so the empty witness cannot be explained away. Then
+  verified live against a real disposable Claude mid-output, not only against
+  fakes: `internal/providers/nudgedelivery_live_test.go` (opt-in,
+  `POGO_LIVE_CLAUDE=1`), with every number and the mid-turn finding above
+  recorded in `docs/investigations/confirmed-nudge-delivery-2026-07-29.md` so a
+  skip in CI does not quietly become "never observed".
 
   New: `pogo hook prompt-submit` (hidden; harness-invoked), `pogo nudge
   --wait-idle`, `Provider.SubmitReceiptHook`, `agent.NudgeConfirm`,

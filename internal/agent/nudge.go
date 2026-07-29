@@ -51,14 +51,24 @@ const minConfirmStep = 1500 * time.Millisecond
 
 var (
 	// ErrNudgeQueued means the message was written to a harness that was
-	// mid-turn, and no submission receipt arrived before the deadline. The
-	// bytes are in a live input queue and will most likely be submitted when
-	// the turn ends — but pogod did not see it happen, so it will not claim it
-	// did. Nothing is retried in this state: Claude Code queues a prompt typed
-	// mid-turn legitimately, so a resend would deliver the same instruction
-	// twice, and an agent acting twice on one instruction is worse than one
-	// that acted late.
-	ErrNudgeQueued = errors.New("nudge queued mid-turn but not confirmed")
+	// mid-turn and no submission receipt arrived. It is the one outcome pogod
+	// cannot resolve either way, and the measurements behind that are worth
+	// stating precisely (docs/investigations/confirmed-nudge-delivery-2026-07-29.md):
+	//
+	// Against a real Claude Code mid-turn, the message IS accepted and acted on
+	// — the probe asked for "PONG" and got it — but no UserPromptSubmit hook
+	// fires for a prompt taken while a turn is in flight. The receipt is
+	// therefore BLIND to mid-turn delivery, not evidence against it. Waiting
+	// longer does not help: a run watched the receipt for four minutes past the
+	// end of the turn and it never moved, while the answer had been on screen
+	// the whole time.
+	//
+	// So this is neither a success nor a failure, and pogod claims neither.
+	// Nothing is retried: the message very probably landed, and a resend would
+	// deliver one instruction twice — measured, in the same session, by
+	// resending and watching it arrive a second time. An agent acting twice on
+	// one instruction is a worse outcome than one that acted late.
+	ErrNudgeQueued = errors.New("nudge written mid-turn; harness emits no receipt for it")
 
 	// ErrNudgeUnconfirmed means the escalation ran to the end — the message,
 	// then a bare return, then the message again — and the harness never
@@ -354,7 +364,7 @@ func (a *Agent) NudgeWithModeCorrelated(msg string, mode NudgeMode, timeout time
 	return nil
 }
 
-// midTurn reports whether the agent is currently producing output — the state
+// MidTurn reports whether the agent is currently producing output — the state
 // a working agent is in, and the state whose negation wait-idle demands.
 //
 // It is deliberately NOT !IsIdle(). IsIdle answers false for an agent that has
@@ -362,7 +372,7 @@ func (a *Agent) NudgeWithModeCorrelated(msg string, mode NudgeMode, timeout time
 // most important case for the escalation below, since the startup drop is the
 // failure Orc measured. Reading that as "mid-turn" would switch the escalation
 // off at exactly the moment it is needed. Silence is not a turn.
-func (a *Agent) midTurn() bool {
+func (a *Agent) MidTurn() bool {
 	last := a.outputBuf.LastWriteTime()
 	if last.IsZero() {
 		return false
@@ -378,6 +388,14 @@ func (a *Agent) midTurn() bool {
 // the agent received perfectly well.
 func (a *Agent) hasReceiptSignal() bool {
 	return a.receiptFile != ""
+}
+
+// ReceiptFile returns where this agent's harness records the prompts it
+// submits, or "" when this agent cannot prove delivery at all. Exported so
+// diagnostics — and the live control in internal/providers — can read the same
+// number the confirm path reads, rather than a second opinion about it.
+func (a *Agent) ReceiptFile() string {
+	return a.receiptFile
 }
 
 // awaitSubmit polls the receipt file until the count exceeds before, the window
@@ -415,9 +433,10 @@ func (a *Agent) awaitSubmit(before int, window time.Duration) (int, bool) {
 //     nothing loaded to submit.
 //  4. Refuse. Return ErrNudgeUnconfirmed instead of a success nobody can check.
 //
-// A mid-turn agent stops after step 1 with ErrNudgeQueued: its harness queues
-// the prompt legitimately, so absence of a receipt means "not yet", not "lost",
-// and steps 2–3 would double-deliver.
+// A mid-turn agent stops after step 1 with ErrNudgeQueued. Claude Code takes
+// the prompt — it was measured answering one typed into the middle of a turn —
+// but emits no UserPromptSubmit for it, so absence of a receipt is a blind spot
+// rather than evidence, and steps 2–3 would re-deliver a message that landed.
 //
 // Note what this does NOT do: it never waits for idle. That precondition is the
 // negation of the state a working agent is in, which is why a busy agent was
@@ -432,16 +451,17 @@ func (a *Agent) deliverConfirmed(msg string, timeout time.Duration, corr string)
 
 	// Sampled BEFORE typing: the write echoes back through the tty and would
 	// make every agent look mid-turn a moment later.
-	busy := a.midTurn()
+	busy := a.MidTurn()
 
-	step := timeout
-	if !busy {
-		// Three steps share the budget; a mid-turn agent has only one step and
-		// spends the whole window waiting for the turn to end.
-		step = timeout / 3
-		if step < minConfirmStep {
-			step = minConfirmStep
-		}
+	// Three escalation steps share the budget. A mid-turn agent gets one of
+	// them and no more: the harness emits no receipt for a mid-turn prompt at
+	// all, so a longer wait cannot turn that outcome into a confirmation — it
+	// only blocks the caller. The one step is still worth spending, because
+	// MidTurn can read true for an agent that merely blinked a spinner, and
+	// that agent's receipt does arrive.
+	step := timeout / 3
+	if step < minConfirmStep {
+		step = minConfirmStep
 	}
 
 	if err := a.Nudge(msg); err != nil {
@@ -454,10 +474,11 @@ func (a *Agent) deliverConfirmed(msg string, timeout time.Duration, corr string)
 
 	if busy {
 		emitNudgeUnconfirmed(a, msg, "queued", corr)
-		return fmt.Errorf("nudge to %q: written to a mid-turn harness and no submission "+
-			"receipt within %s; not retrying, because a prompt typed mid-turn is queued "+
-			"legitimately and a resend would deliver it twice: %w",
-			a.Name, timeout, ErrNudgeQueued)
+		return fmt.Errorf("nudge to %q: written to a harness that was mid-turn, which "+
+			"emits no submission receipt for such a prompt (%s); pogod can neither "+
+			"confirm nor deny delivery and will not retry, because the message very "+
+			"probably landed and a resend would deliver it twice: %w",
+			a.Name, step, ErrNudgeQueued)
 	}
 
 	// Step 2: bare return. Submits loaded-but-unsent text; carries no content,
