@@ -2955,6 +2955,14 @@ on startup and on a periodic ticker. Branches and worktrees of in-flight
 work items, of currently-running polecats, and anything that cannot be
 positively classified are always kept.
 
+A worktree is classified by the work item of the polecat that OWNS it — the
+directory's name — not by whatever branch happens to be checked out inside it;
+a branch is classified by its own name. So a dead polecat's tree is reclaimed
+even while it sits on someone else's unconcluded branch, and that branch is
+merely un-checked-out, not deleted. When a directory name resolves to no work
+item at all (a legacy or hand-made worktree), the checked-out branch decides
+instead and the report says so.
+
 A worktree holding uncommitted work is KEPT and reported, even when its work
 item has concluded — a concluded ticket means the work was accepted, not that
 the tree is empty, and uncommitted files are unmerged by definition (mg-ee02).

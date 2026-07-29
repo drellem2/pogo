@@ -103,28 +103,60 @@ set under any key, so a normal exit still reaps its tree — the GC's ability to
 collect is asserted by a control in the same test as the fix
 (`TestSweepKeepsLivePolecatOnForeignBranch`).
 
-### Where the two phases still differ, and why
+### Ticket state follows the same rule (mg-bdda)
 
-Liveness is now owner-keyed everywhere. **Ticket-state classification is not**,
-and the two worktree phases disagree on it:
+The rule above was applied to *liveness* first and left ticket-state
+classification split. Phase 1 (registered worktrees) classified by the
+**checked-out branch**; phase 1b (orphan dirs — no `.git`, no registration) has
+no branch to read and classified by the **owner** from the directory name. For
+one dead owner and one directory name they reached opposite conclusions, and
+the only thing deciding which was whether git still held the registration:
 
-- **Phase 1** (registered worktrees) classifies by the **checked-out branch**.
-- **Phase 1b** (orphan dirs — no `.git`, no registration) has no branch to
-  read, so it classifies by the **owner** it derives from the directory name.
+```
+owner 0047 (mg-0047 archived, dead), tree parked on foreign in-flight polecat-a773
 
-For the same directory name with the same dead owner, those can reach opposite
-conclusions: a registered tree parked on a foreign, still-in-flight branch is
-kept, while the identically-named orphan dir is removed. The two sets are
-disjoint within a sweep, so nothing contradicts itself — but the consequence is
-real: a dead polecat's tree can be pinned indefinitely by a foreign ticket that
-never concludes, and which way it goes depends on whether git still holds the
-registration.
+  registered worktree -> KEPT     "ticket in-flight"            <- inherited from a773
+  orphan dir          -> REMOVED  "orphan dir, ticket archived"
+```
 
-Phase 1's direction is the conservative one (it keeps, and no data is lost),
-which is why it was left alone when the liveness key moved. Re-keying it to the
-owner would strand every worktree whose basename resolves to no work item —
-the symmetric defect, never reaping a dead tree. Tracked as a follow-up rather
-than folded in; see mg-bdda.
+The two sets are disjoint within a sweep, so nothing contradicted itself, but a
+dead polecat's tree could be pinned forever by a foreign ticket that never
+concludes — and a `git worktree prune` between two sweeps flipped the verdict
+on the same files.
+
+**Both phases now classify by the owner** (`TicketIndex.OwnerState`,
+`gitgc.classifyTree`), because the owner is what the *directory* is a fact
+about: the tree was made for that polecat's work and nothing else will come
+back to it. Reaping it loses nothing. The ref keeps its own gate — phase 2
+still classifies branches by `BranchState` — so removing a tree parked on an
+unconcluded foreign branch merely un-checks-it-out, leaving every commit
+reachable, while uncommitted files are held back by the dirty guard (mg-ee02).
+
+**The branch is now a fallback, not a second gate.** An owner-only rule would
+strand every worktree whose basename resolves to no work item — legacy layouts,
+hand-made review trees — which is the symmetric defect gh #94 warned against:
+never reaping a dead tree. When the owner resolves to nothing the branch
+decides instead, and the log line says so:
+
+```
+… (owner workshop, branch polecat-aaaa): branch's ticket archived (owner "workshop" resolves to no work item)
+```
+
+It is deliberately *not* an additional must-also-be-concluded condition; that
+direction would preserve the indefinite pin. The cost is one direction becoming
+more conservative: a tree whose owner is still in flight is now kept even if the
+branch inside it has concluded, which is right — a respawn lands on that same
+path.
+
+#### Why phase 1b has no dirty guard
+
+mg-ee02 added a `WorktreeDirty` check to phase 1 only, and phase 1b still
+`os.RemoveAll`s. That is the answer, not an oversight: `WorktreeDirty` shells
+out to `git -C <path> status`, and an orphan dir has no `.git` by construction —
+that is what makes it an orphan and what gets it past the still-linked check.
+There is no index and no HEAD to compare its files against, so "uncommitted" is
+not a property the directory has. The owner's concluded ticket is the only
+signal available about the leftovers.
 
 ## Reading the GC log
 

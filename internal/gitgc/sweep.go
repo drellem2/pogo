@@ -33,6 +33,10 @@ type Options struct {
 	//
 	// They agree only while a polecat stays on its own branch. Phase 1 must
 	// use the first and phase 2 the second; neither substitutes for the other.
+	//
+	// TICKET STATE now follows the same division (mg-bdda): a directory is
+	// classified by its owner (classifyTree), a ref by its own name. The
+	// worktree phases had disagreed about which — see classifyTree.
 	LivePolecats map[string]bool
 	// Tickets, when non-nil, supplies work-item states directly. When nil,
 	// Sweep loads them via LoadTicketIndex (`mg list`). Injecting a map
@@ -177,17 +181,12 @@ func Sweep(opts Options) (Result, error) {
 			res.WorktreesKept = append(res.WorktreesKept, kept)
 			continue
 		}
-		// Ticket state stays keyed on the checked-out branch. It answers a
-		// different question from liveness — "has this work concluded", not
-		// "is anyone using this directory" — and it is only ever reached for a
-		// tree whose owner is already established as not live, so it cannot
-		// reach a running polecat. Re-keying it too would strand every
-		// worktree whose basename resolves to no work item, which is the
-		// symmetric defect: never reaping a dead tree.
-		_, state := tickets.BranchState(wt.Branch)
+		// Ticket state is keyed on the OWNER, like liveness and like phase 1b
+		// (mg-bdda). The branch answers only when the owner cannot.
+		state, why := classifyTree(tickets, owner, wt.Branch)
 		if !state.Concluded() {
 			res.WorktreesKept = append(res.WorktreesKept, WorktreeAction{
-				Path: wt.Path, Owner: owner, Branch: wt.Branch, Reason: "ticket " + state.String(),
+				Path: wt.Path, Owner: owner, Branch: wt.Branch, Reason: why,
 			})
 			continue
 		}
@@ -207,7 +206,7 @@ func Sweep(opts Options) (Result, error) {
 				continue
 			}
 		}
-		action := WorktreeAction{Path: wt.Path, Owner: owner, Branch: wt.Branch, Reason: "ticket " + state.String()}
+		action := WorktreeAction{Path: wt.Path, Owner: owner, Branch: wt.Branch, Reason: why}
 		if opts.DryRun {
 			// A dry run reports what an apply WOULD do, so the branch is
 			// treated as freed for phase 2's benefit — no removal is attempted
@@ -326,6 +325,57 @@ func Sweep(opts Options) (Result, error) {
 	return res, nil
 }
 
+// classifyTree decides the ticket state governing a worktree DIRECTORY, and
+// returns it with the reason line an operator reads out of the GC log.
+//
+// # Why the owner and not the branch (mg-bdda)
+//
+// mg-dd92 moved worktree LIVENESS to the owner — the path basename — but left
+// ticket-state classification split: phase 1 read it off the CHECKED-OUT
+// BRANCH while phase 1b, which has no branch to read, read it off the
+// directory name. For one dead owner and one directory name the two reached
+// opposite conclusions, decided purely by whether git still held the
+// registration:
+//
+//	registered worktree, owner 0047 (archived), parked on foreign in-flight
+//	polecat-a773  -> KEPT  ("ticket in-flight")
+//	orphan dir,     owner 0047, registration gone
+//	              -> REMOVED ("orphan dir, ticket archived")
+//
+// The sets are disjoint within a sweep so nothing self-contradicted, but the
+// consequence was real: a dead polecat's tree could be pinned forever by a
+// foreign ticket that never concludes, and `git worktree prune` flipping one
+// registration flipped the verdict.
+//
+// The owner is the sound key because it is the one the DIRECTORY is a fact
+// about — the tree was created for that polecat's work and nothing else will
+// ever come back to it. The branch is a fact about the REF, and the ref has
+// its own gate: phase 2 classifies branches by BranchState, so removing a tree
+// parked on an unconcluded foreign branch un-checks-out that branch without
+// deleting it. Commits stay reachable, and uncommitted files are held back
+// separately by the dirty guard (mg-ee02). Nothing is lost by reaping the
+// directory.
+//
+// # The branch is the fallback, not a second gate
+//
+// Keying on the owner alone would strand every worktree whose basename
+// resolves to no work item — legacy layouts, hand-made worktrees — which is
+// the symmetric defect the whole of gh #94 was warned against: never reaping a
+// dead tree. So an unresolvable owner defers to the branch rather than
+// silently becoming "unknown, keep forever". That is the ONLY thing the branch
+// decides here. It is deliberately not an additional must-also-be-concluded
+// condition: that direction would preserve the indefinite pin this exists to
+// remove.
+func classifyTree(tickets TicketIndex, owner, branch string) (TicketState, string) {
+	if id, state := tickets.OwnerState(owner); id != "" {
+		return state, "owner's ticket " + state.String()
+	}
+	// The owner resolves to no work item at all. Say so, and let the branch
+	// answer — an explicit fallback, not an accidental "unknown".
+	_, state := tickets.BranchState(branch)
+	return state, fmt.Sprintf("branch's ticket %s (owner %q resolves to no work item)", state, owner)
+}
+
 // sweepOrphanDirs scans opts.PolecatsDir for orphaned polecat directories
 // and removes the eligible ones (see the phase 1b comment in Sweep).
 // Eligibility mirrors the worktree phase: never a live polecat, never an
@@ -363,14 +413,27 @@ func sweepOrphanDirs(opts Options, tickets TicketIndex, registered map[string]bo
 			})
 			continue
 		}
-		_, state := tickets.BranchState(branch)
+		// Keyed on the owner, which here is all there is — and since mg-bdda
+		// that is the same key the registered-worktree phase uses, so the two
+		// phases can no longer reach opposite verdicts about the same dead
+		// owner (see classifyTree). The reported Branch is the one this owner
+		// WOULD have; it is not read from anything.
+		_, state := tickets.OwnerState(name)
 		if !state.Concluded() {
 			res.WorktreesKept = append(res.WorktreesKept, WorktreeAction{
-				Path: path, Owner: name, Branch: branch, Reason: "orphan dir, ticket " + state.String(),
+				Path: path, Owner: name, Branch: branch, Reason: "orphan dir, owner's ticket " + state.String(),
 			})
 			continue
 		}
-		action := WorktreeAction{Path: path, Owner: name, Branch: branch, Reason: "orphan dir, ticket " + state.String()}
+		action := WorktreeAction{Path: path, Owner: name, Branch: branch, Reason: "orphan dir, owner's ticket " + state.String()}
+		// No WorktreeDirty guard here, unlike phase 1 (mg-ee02) — and that is
+		// the answer, not an oversight. WorktreeDirty shells out to `git -C
+		// <path> status`, and an orphan dir has no .git by construction (that
+		// is what makes it an orphan and what got it past the check above), so
+		// the call can only ever fail. There is no index and no HEAD to
+		// compare these files against: "uncommitted" is not a property this
+		// directory has. What it holds is unclassifiable leftovers, and the
+		// only signal available about them is the owner's concluded ticket.
 		if opts.DryRun {
 			opts.logf("would remove orphan dir %s", action.String())
 		} else {

@@ -110,18 +110,21 @@ var retrySuffixes = []string{"-retry", "-redo", "-new", "-fix", "-r3", "-r2", "-
 // hexToken matches a 4-hex-character macguffin work-item code.
 var hexToken = regexp.MustCompile(`[0-9a-f]{4}`)
 
-// candidateIDs derives the macguffin work-item IDs a polecat branch might
-// correspond to, most-specific first. Pogo's polecat/branch naming has
-// drifted across many releases — `polecat-<id>`, `polecat-mg-<id>`,
-// `polecat-cat-mg-<id>`, single-letter `polecat-p<id>` / `polecat-r<id>`,
-// and `-r`/`-fix` retry suffixes all occur in the wild — so several
-// spellings are generated and the caller resolves the first that exists.
+// candidateIDs derives the macguffin work-item IDs a polecat NAME might
+// correspond to, most-specific first. The name is the polecat's registry
+// name — equivalently a branch's `polecat-` suffix or a worktree directory's
+// basename, which are two spellings of the same string.
 //
-// Because every form a polecat branch takes embeds its 4-hex ticket code,
-// recovering that code is reliable; a branch that yields no resolvable
+// Pogo's polecat/branch naming has drifted across many releases —
+// `polecat-<id>`, `polecat-mg-<id>`, `polecat-cat-mg-<id>`, single-letter
+// `polecat-p<id>` / `polecat-r<id>`, and `-r`/`-fix` retry suffixes all occur
+// in the wild — so several spellings are generated and the caller resolves the
+// first that exists.
+//
+// Because every form a polecat name takes embeds its 4-hex ticket code,
+// recovering that code is reliable; a name that yields no resolvable
 // candidate is simply left classified TicketUnknown and therefore kept.
-func candidateIDs(branch string) []string {
-	suffix := BranchSuffix(branch)
+func candidateIDs(suffix string) []string {
 	if suffix == "" {
 		return nil
 	}
@@ -176,14 +179,34 @@ func candidateIDs(branch string) []string {
 	return out
 }
 
-// BranchState resolves the work item behind a polecat branch and returns
-// its ID and lifecycle state. If no candidate ID resolves against the
-// index it returns ("", TicketUnknown) — the safe, keep-the-branch answer.
-func (idx TicketIndex) BranchState(branch string) (id string, state TicketState) {
-	for _, c := range candidateIDs(branch) {
+// OwnerState resolves the work item behind a polecat NAME — a worktree
+// directory's basename, or an orphan dir's name — and returns its ID and
+// lifecycle state. If no candidate ID resolves against the index it returns
+// ("", TicketUnknown), the safe answer that keeps the tree.
+//
+// This is the key the worktree phases classify on (mg-bdda). It answers "has
+// the work this TREE was created for concluded", which is the question a
+// directory's fate turns on; BranchState answers "has the work this REF holds
+// concluded", which is the question a ref's fate turns on. They differ
+// whenever a polecat checks out a foreign branch, and the two phases used to
+// pick different ones for the same decision.
+func (idx TicketIndex) OwnerState(name string) (id string, state TicketState) {
+	for _, c := range candidateIDs(name) {
 		if st, ok := idx[c]; ok {
 			return c, st
 		}
 	}
 	return "", TicketUnknown
+}
+
+// BranchState resolves the work item behind a polecat branch and returns
+// its ID and lifecycle state. If no candidate ID resolves against the
+// index it returns ("", TicketUnknown) — the safe, keep-the-branch answer.
+//
+// A polecat branch is `polecat-` + a polecat name, so this is OwnerState
+// applied to the suffix; the two are one resolver deliberately, so a naming
+// spelling that resolves for a branch cannot fail to resolve for the
+// identically-named directory.
+func (idx TicketIndex) BranchState(branch string) (id string, state TicketState) {
+	return idx.OwnerState(BranchSuffix(branch))
 }
