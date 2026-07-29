@@ -2494,6 +2494,45 @@ func TestMayorPromptIncludesStallWatch(t *testing.T) {
 	}
 }
 
+// TestMayorPromptHandlesAckWatchMail locks in the mayor's half of the
+// completion-deficit detector (mg-1935). pogod mails the finding; if the mayor
+// prompt does not say what to do with it, the alert reaches an inbox and stops
+// there — which is the bug the detector was built to fix, reproduced one level
+// up. The routing is only as good as the reader.
+//
+// Two specifics are load-bearing and easy to lose in an edit:
+//
+//   - `--immediate`. A default nudge waits for 2s of PTY silence, and the agent
+//     this detector finds is spinning, so the silence never arrives. The default
+//     nudge cannot reach exactly the agent that needs reaching.
+//   - "health=healthy proves nothing here". The heartbeat check in §3a and
+//     `pogo agent diagnose` both reported healthy throughout the observed
+//     incident, because a working spinner is itself PTY output. A mayor that
+//     closes the finding on a healthy diagnose has learnt the wrong lesson.
+func TestMayorPromptHandlesAckWatchMail(t *testing.T) {
+	data, err := defaultPrompts.ReadFile("prompts/mayor.md")
+	if err != nil {
+		t.Fatalf("read mayor.md: %v", err)
+	}
+	s := string(data)
+
+	if !strings.Contains(s, "ack-watch") {
+		t.Error("mayor.md: expected guidance for `ack-watch` mail — an alert nobody reads is the bug one level up")
+	}
+	if !strings.Contains(s, "pogo check-acks") {
+		t.Error("mayor.md: expected `pogo check-acks` to re-confirm a finding")
+	}
+	if !strings.Contains(s, "--immediate") {
+		t.Error("mayor.md: expected `pogo nudge --immediate` — the default nudge cannot reach a spinning agent")
+	}
+	if !strings.Contains(s, "health=healthy") {
+		t.Error("mayor.md: expected the warning that health=healthy proves nothing for this class")
+	}
+	if !strings.Contains(s, "FLEET DEFICIT") {
+		t.Error("mayor.md: expected the cohort-wide case to be distinguished from a per-agent fault")
+	}
+}
+
 // TestMayorPromptIncludesDispatchDontImplement locks in the requirement that
 // the mayor prompt carries a standalone `## Dispatch, don't implement` callout
 // near the top, restating that mayor coordinates and polecats execute. Daniel's

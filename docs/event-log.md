@@ -573,6 +573,52 @@ The teardown detector could not READ the work-item store, so it audited nothing 
 {"schema_version":1,"timestamp":"2026-07-21T01:15:00.000000000Z","event_type":"gh_teardown_watch_error","agent":"pogod","details":{"error":"listing done work items: mg --root ... : command not found"}}
 ```
 
+#### `ack_watch_fired`
+
+pogod's scheduler-completion deficit detector ([internal/ackwatch](../internal/ackwatch/ackwatch.go), mg-1935) sampled the ack counters `scheduler_fire_completed` maintains and found at least one schedule completing far fewer of its fires than its directly comparable peers, so it mailed `notify_to` (`mayor` by default). It exists because those counters already recorded the fault and nothing consumed them: on 2026-07-29 `mail-check-pm-pogo` read 270/757 against ~751/757 for three peers on an identical cadence, had done so for its entire run, and was found only by a human reading `pogo schedule list` and comparing rows. Every liveness instrument said healthy — a working spinner is itself PTY output, so no output-based check can fire on a spinning agent.
+
+The comparison is **cross-agent**, never against a schedule's own history: the motivating agent was always broken and had no regression to show. A finding needs a rate both far below the peer median and below an absolute floor. **Report-only** — pogod never nudges, restarts, or unregisters anything on this signal. Emitted once per sample that mailed; unchanged findings are re-raised only after `renotify_after`, so this is not one-per-interval. See [CONFIGURATION.md](CONFIGURATION.md) §"The scheduler-completion deficit detector (ack-watch)".
+
+- **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent` (always `"pogod"`), `details`
+- **`details` fields:**
+  - `deficit_count` (int, required): per-schedule findings — one agent far below its peers
+  - `fleet_count` (int, required): whole cohorts below the floor. Everyone at 40% on the same cadence is a **scheduler or fleet** fault (suspect the ack path, an auth outage, or pogod itself), and reporting it as N per-agent alerts would name N innocent agents and bury the one fact that matters
+  - `scanned` (int, required): schedules offered to the detector
+  - `eligible` (int, required): how many were actually evaluated. The gap between `scanned` and `eligible` is coverage, not health — a schedule with a fresh counter, too few fires, or no comparable peers is **unjudged**
+  - `schedules` (array of string, required): the schedule ids named, so the log answers "which one" without opening the mail. Cohort findings appear as `cohort:<kind>/<cadence>`
+  - `notified` (string, required): comma-separated mailboxes the notice was sent to
+  - `escalated` (bool, required): true when a finding had stood past `escalate_after` and `human` was copied as well. The coordinator is itself a crew agent and can have the very defect reported (mg-d385), so an alert routed only there can reach nobody
+  - `mail_error_<mailbox>` (string, optional): one key per recipient the notice could NOT be delivered to; the event is still emitted so a detected deficit is never lost to a down mail channel
+
+```json
+{"schema_version":1,"timestamp":"2026-07-29T06:30:00.000000000Z","event_type":"ack_watch_fired","agent":"pogod","details":{"deficit_count":1,"fleet_count":0,"scanned":6,"eligible":4,"schedules":["mail-check-pm-pogo"],"notified":"mayor","escalated":false}}
+```
+
+#### `ack_watch_suppressed`
+
+The deficit detector declined to evaluate this sample because the counters are not representative yet: a recent `system_wake` (post-sleep replay makes stale acks expected) or a pogod restart inside the settle window. Both are the same class of known-benign event and share one mechanism rather than getting one each.
+
+Emitted rather than staying silent for the reason this whole package exists: a deliberate silence and a clean scan are otherwise the same absence in the log. Registering a schedule with an existing `--id` also **zeroes its counters**, and every crew agent re-registers on startup — with a nightly redeploy (mg-42ac) that would be a scheduled false-positive storm, so the suppression is load-bearing rather than defensive.
+
+- **`details` fields:**
+  - `reason` (string, required): what suppressed it and how long ago
+  - `scanned` (int, required): schedules that went unevaluated
+
+```json
+{"schema_version":1,"timestamp":"2026-07-29T03:05:00.000000000Z","event_type":"ack_watch_suppressed","agent":"pogod","details":{"reason":"pogod restart 4m0s ago — counters are not representative until 30m0s has elapsed","scanned":6}}
+```
+
+#### `ack_watch_error`
+
+The deficit detector could not READ the scheduler state, so it evaluated nothing this sample. Emitted instead of `ack_watch_fired`, for the same reason `gh_teardown_watch_error` is: an unreadable source and a clean scan otherwise render identically, and conflating them is how a detector goes quietly blind.
+
+- **`details` fields:**
+  - `error` (string, required): why scheduler state could not be read
+
+```json
+{"schema_version":1,"timestamp":"2026-07-29T06:30:00.000000000Z","event_type":"ack_watch_error","agent":"pogod","details":{"error":"schedule list failed (503): scheduler unavailable"}}
+```
+
 #### `synthetic_failure_detected`
 
 pogod's synthetic-failure-turn detector ([internal/synthwatch](../internal/synthwatch/synthwatch.go), mg-8cdb) read the agent's harness session transcript and found it answering turns **locally** and failing them: turns attributed to a synthetic model, with zero tokens in and out, flagged as API errors. The agent is alive and consuming every nudge on time; it accomplishes nothing with them. Detection is structural (synthetic model + zero usage + error flag), never a message string.

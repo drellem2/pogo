@@ -19,6 +19,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/drellem2/pogo/internal/ackwatch"
 	"github.com/drellem2/pogo/internal/agent"
 	"github.com/drellem2/pogo/internal/cli"
 	"github.com/drellem2/pogo/internal/client"
@@ -944,6 +945,84 @@ carrier is found (so it can gate a schedule or CI step).`,
 	}
 	cmdCheckTeardown.Flags().BoolVar(&teardownArchived, "archived", false,
 		"Also scan archived carriers (slower: one network lookup per carrier)")
+
+	// check-acks: the completion-deficit detector (mg-1935). The on-demand half
+	// of the standing runner in pogod; same detector, same fixture-free inputs.
+	var cmdCheckAcks = &cobra.Command{
+		Use:   "check-acks",
+		Short: "Report schedules completing far fewer of their fires than their peers (never acts)",
+		Long: `Read the scheduler's completion counters and report any schedule completing far
+fewer of its fires than its directly comparable peers.
+
+The counters have existed since mg-a754 — ` + "`pogo schedule list`" + ` even renders a
+` + "`⚠ N unacked`" + ` marker — and until now nothing read them. On 2026-07-29 at 01:52
+the table read:
+
+    mail-check-architect     751/757
+    mail-check-pa            753/757
+    mail-check-pm-onethird   751/757
+    mail-check-pm-pogo       270/757   <-- 36%
+
+pm-pogo had been completing about a third of its mail-check fires FOR ITS ENTIRE
+RUN, and the only path to noticing was a human reading that table and comparing
+rows. Every liveness instrument said healthy: process alive, health=healthy,
+last-activity 0s ago. Claude Code's working spinner is itself PTY output, so no
+output-based check can fire on a spinning agent. The completion ratio is the one
+number that saw through it, because it measures completed WORK rather than
+liveness.
+
+The comparison is CROSS-AGENT, not against a schedule's own history: pm-pogo was
+always broken, so there was no regression for a self-comparison to find. A
+schedule is judged only against peers of the same kind, on the same cadence,
+with a comparable number of fires since registration — and it must be both far
+below that peer median AND below an absolute floor.
+
+Three things are deliberately NOT reported:
+
+  fresh counters     registering a schedule with an existing --id replaces the
+                     entry and zeroes its counters, and every crew agent
+                     re-registers on startup. With a nightly redeploy that would
+                     otherwise flag the whole crew every morning.
+  too few fires      a handful of fires is not a sample.
+  no peers           a schedule with nothing comparable to compare against is
+                     UNJUDGED, and says so, rather than being reported as clean.
+
+A recent ` + "`system_wake`" + ` suppresses the whole report: post-sleep replay makes
+stale acks expected.
+
+REPORTS ONLY — it never nudges, restarts, or unregisters anything. Note that a
+default ` + "`pogo nudge`" + ` cannot reach the agent this typically finds: it waits for
+2s of PTY silence that a spinner never delivers. Use ` + "`--immediate`" + `.
+
+Exit status is 0 when nothing is actionable, 1 when any deficit is found.`,
+		Args: cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			entries, err := client.ListSchedules("")
+			if err != nil {
+				// Scheduler state we could not read is not "no findings".
+				// Silence here would be this detector reproducing, inside
+				// itself, the failure it was built to catch.
+				cli.ExitWithError(jsonOutput, fmt.Sprintf("cannot read scheduler state: %v", err), cli.ExitError)
+			}
+
+			now := time.Now()
+			snap := ackwatch.Snapshot{Now: now, Samples: ackwatch.SampleEntries(entries, now)}
+			if p, perr := scheduler.DefaultPath(); perr == nil {
+				snap.LastDisruption, snap.DisruptionReason = ackwatch.LastDisruption(scheduler.EventLogPath(p), now)
+			}
+			rep := ackwatch.Detect(snap, ackwatch.DefaultParams())
+
+			if jsonOutput {
+				cli.PrintJSON(rep)
+			} else {
+				fmt.Print(rep.Render())
+			}
+
+			if rep.Actionable() {
+				os.Exit(cli.ExitError)
+			}
+		},
+	}
 
 	// check-commit-body: the closing-keyword adjacency detector (mg-2627).
 	// Sibling of check-teardown — that one catches an issue left OPEN, this one
@@ -2773,6 +2852,7 @@ branches; work items and mail live in mg/macguffin (the task-store CLI).`,
 	// pick up the new grant.
 	rootCmd.AddCommand(newCredentialCmd(&jsonOutput))
 	rootCmd.AddCommand(cmdCheckTeardown)
+	rootCmd.AddCommand(cmdCheckAcks)
 	rootCmd.AddCommand(cmdCheckCommitBody)
 	cmdServer.AddCommand(cmdServerStart)
 	cmdServer.AddCommand(cmdServerStop)

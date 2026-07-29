@@ -651,6 +651,108 @@ any miss or indeterminate carrier is found, so it can gate a schedule or CI step
 
 Source of truth: `internal/ghteardown/`.
 
+## The scheduler-completion deficit detector (ack-watch)
+
+Since mg-a754 every scheduler fire carries a completion token and the agent
+redeems it with `pogo schedule ack` when the fire's work is done. The scheduler
+keeps `fires_delivered` / `fires_completed` / `unacked_streak` on each persisted
+entry, and `pogo schedule list` renders them. **Nothing read them.**
+
+On 2026-07-29 at 01:52 the table read:
+
+```
+mail-check-architect     751/757
+mail-check-pa            753/757
+mail-check-pm-onethird   751/757
+mail-check-pm-pogo       270/757   <-- 36%
+```
+
+`pm-pogo` had been completing about a third of its mail-check fires **for its
+entire run**, and the only path to noticing was a human reading that table and
+comparing rows. Every liveness instrument said healthy — process alive,
+`pogo agent diagnose` reporting `health=healthy` with last-activity 0s ago, PTY
+output flowing. Claude Code's working spinner *is* PTY output, so no
+output-based stall check can fire on a spinning agent. The completion ratio is
+the one number that saw through it, because it measures **completed work**
+rather than liveness.
+
+`pogo check-acks` runs the detector on demand; pogod runs the same one on a
+coarse heartbeat interval and mails `mayor`. Both are **report-only** — neither
+nudges, restarts, nor unregisters anything.
+
+- **The comparison is cross-agent, not self-historical.** `pm-pogo` was always
+  broken; there was no regression for a self-comparison to find. A schedule is
+  judged only against **peers**: same kind, same cadence, and a comparable
+  number of fires since registration. 36% against ~99% on an identical cadence
+  is a per-agent fault; everyone at 40% is a scheduler or fleet fault, and is
+  reported once as a `FLEET DEFICIT` rather than as N per-agent alerts.
+- **Two gates, not one.** A finding needs a rate **both** far below the peer
+  median (`min_gap`, 20 points) **and** below an absolute floor (75%). They are
+  tuned together: since a median cannot exceed 1, the floor would be dead weight
+  if `1 - min_gap <= floor`. At the defaults the floor is what actually decides
+  for a high-performing cohort, which is every healthy cohort observed.
+- **Re-registration zeroes the counter, and that is load-bearing.** Registering
+  a schedule with an existing `--id` *replaces* the entry, resetting
+  `fires_delivered`/`fires_completed` to zero. Every crew agent re-registers its
+  mail-check on startup, and mg-42ac made the redeploy nightly — so a naive
+  absolute-floor rule would flag the whole crew every morning. Measured
+  2026-07-29 03:03: `mail-check-mayor 6/7` before re-registration, `—` after,
+  with one `pogo schedule` call in between. The detector treats a reset counter
+  as what it is — a known-benign event after which the ratio is
+  unrepresentative — via the same mechanism that handles `system_wake`. It does
+  **not** try to preserve the counter across re-registration: a preserved ratio
+  would mix fires from before and after a cadence or prompt change and describe
+  no single regime.
+- **Suppression.** A `system_wake` inside the settle window (30m) suppresses the
+  whole report — post-sleep replay makes stale acks expected — as does the first
+  30 minutes after a pogod restart. Both emit an `ack_watch_suppressed` event, so
+  a deliberate silence is distinguishable from a clean scan.
+- **What is deliberately not judged.** Schedules with a fresh counter, with
+  fewer than 20 fires, that are not recurring, or with no comparable cohort are
+  reported as **not judged** with a count per reason. They are unjudged, not
+  healthy — a detector that lets "nothing measurable" read as "nothing wrong"
+  reproduces the bug it was built to end.
+- **Never-acked.** A schedule with hundreds of fires and zero acks *is* a
+  finding when the majority of its peers do ack — deliberately going beyond
+  `scheduler.Entry.CompletionTracked`'s "untracked = unknown", because the
+  cohort supplies the evidence that acking is expected here. A cohort where
+  **nobody** has ever acked stays unknown; `pogo schedule completion` reports the
+  tracked count for that case.
+- **Routing.** Findings go to `notify_to` (`mayor`): the remedy is
+  `pogo nudge <agent> --immediate` or a doctor restart, which is coordination
+  work. A **standing** finding also copies `human` after `escalate_after` (24h,
+  shorter than gh-teardown's 72h) — the coordinator is itself a crew agent and
+  can have the exact defect being reported (mg-d385, the same night), so an
+  alert routed only to the patient reaches nobody.
+- **Notification policy.** Findings are fingerprinted by **identity**, not by
+  rate: a ratio drifting from 36% to 34% is the same finding and must not
+  re-mail. A changed set mails at once; an unchanged set waits `renotify_after`.
+
+```toml
+[ack_watch]
+enabled = true             # default true; inert when no cohort can be formed
+interval = "30m"           # coarse sample cadence (default 30m)
+renotify_after = "6h"      # unchanged findings re-mail after this (default 6h)
+notify_to = "mayor"        # mailbox findings go to (default mayor)
+escalate_after = "24h"     # one standing finding also copies `human` after this
+                           # (default 24h; negative disables, zero means default)
+```
+
+Exit status of `pogo check-acks` is 0 when nothing is actionable and 1 when any
+deficit is found, so it can gate a schedule or CI step.
+
+A default `pogo nudge` cannot reach the agent this typically finds: it waits for
+2s of PTY silence, and a spinner guarantees that silence never arrives. Use
+`pogo nudge <agent> --immediate`.
+
+The detector's statistical knobs (`min_fires`, `min_peers`, `scale_band`,
+`min_gap`, `floor`, `settle_after`) are compiled-in defaults in
+`ackwatch.Params` rather than config keys — they are tuned against a specific
+observation and a wrong value produces either a false-positive storm or silence,
+neither of which should be one line of TOML away.
+
+Source of truth: `internal/ackwatch/`.
+
 ## Agent registry
 
 Each agent has a directory under `~/.pogo/agents/<name>/` holding its prompt,

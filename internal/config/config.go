@@ -177,6 +177,25 @@ const (
 	// clearing is a different fact from the miss itself, and that one IS a
 	// human's to know.
 	DefaultGHTeardownEscalateAfter = 72 * time.Hour
+
+	// DefaultAckWatchInterval is how often pogod's completion-deficit detector
+	// samples the scheduler's ack counters (mg-1935). Coarse: the condition is a
+	// RATE over hundreds of fires, so it moves by fractions of a point per tick
+	// and cannot be missed by sampling half-hourly. Rides the heartbeat, not a
+	// launchd timer, for the usual reason (mg-50e0).
+	DefaultAckWatchInterval = 30 * time.Minute
+	// DefaultAckWatchRenotify is how long an UNCHANGED set of completion
+	// findings stays quiet before being raised again.
+	DefaultAckWatchRenotify = 6 * time.Hour
+	// DefaultAckWatchNotifyTo is the mailbox completion findings go to. The
+	// mayor: the remedy is `pogo nudge <agent> --immediate` or a doctor restart,
+	// which is coordination work rather than a human-only decision.
+	DefaultAckWatchNotifyTo = "mayor"
+	// DefaultAckWatchEscalateAfter is how long ONE finding may persist before
+	// `human` is copied as well. Shorter than the gh-teardown equivalent because
+	// the coordinator is itself a crew agent and can have the exact defect being
+	// reported (mg-d385) — an alert routed only to the patient reaches nobody.
+	DefaultAckWatchEscalateAfter = 24 * time.Hour
 )
 
 // DefaultFastPriorities is the set of WorkItem.Priority values that trigger the
@@ -258,6 +277,7 @@ type Config struct {
 	DriftWatch DriftWatchConfig
 	CredExpiry CredExpiryConfig
 	GHTeardown GHTeardownConfig
+	AckWatch   AckWatchConfig
 	// Source is the path of the highest-precedence config file Load read, or
 	// "" when no config file was found and everything is defaults + env. pogod
 	// uses this to gate crew auto-start: a daemon with no config file is
@@ -506,6 +526,44 @@ type GHTeardownConfig struct {
 	EscalateAfter time.Duration
 }
 
+// AckWatchConfig configures pogod's scheduler-completion DEFICIT detector
+// (mg-1935): the heartbeat-driven runner that reads the ack counters the
+// scheduler has kept since mg-a754 and alerts when one schedule is completing
+// far fewer of its fires than its directly comparable peers.
+//
+// It exists because that signal already existed and nothing consumed it. On
+// 2026-07-29 a crew agent had been completing 36% of its mail-check fires for
+// its entire run — 270/757 against ~751/757 for three peers on the identical
+// cadence — and the only path to noticing was a human reading `pogo schedule
+// list` and comparing rows. Every liveness instrument said healthy, because a
+// spinning agent emits PTY output forever without accomplishing anything.
+//
+// The detector's tuning knobs live in internal/ackwatch (see its Params); this
+// config carries only the runner's cadence and routing, matching how the other
+// heartbeat detectors are configured.
+//
+// REPORT-ONLY: it mails NotifyTo and never nudges, restarts, or unregisters
+// anything.
+type AckWatchConfig struct {
+	// Enabled turns the runner on. Defaults to true. It is inert on any daemon
+	// with too few comparable schedules to form a cohort, so leaving it on is
+	// safe for sandboxes and single-agent hosts.
+	Enabled bool
+	// Interval is the COARSE gap between samples. Zero falls back to
+	// DefaultAckWatchInterval.
+	Interval time.Duration
+	// RenotifyAfter is how long an unchanged finding set stays quiet before
+	// being mailed again. Zero falls back to DefaultAckWatchRenotify.
+	RenotifyAfter time.Duration
+	// NotifyTo is the mailbox findings are reported to. Empty falls back to
+	// DefaultAckWatchNotifyTo (`mayor`).
+	NotifyTo string
+	// EscalateAfter is how long ONE finding may persist unbroken before the
+	// notice also goes to `human`. Zero falls back to
+	// DefaultAckWatchEscalateAfter; a NEGATIVE value disables escalation.
+	EscalateAfter time.Duration
+}
+
 // AgentsConfig holds agent command configuration.
 type AgentsConfig struct {
 	// Provider selects the agent harness ("claude", "codex", "pi", "cursor"). Resolved
@@ -642,6 +700,7 @@ type parsedConfig struct {
 	driftWatchEnabledSet   bool
 	credExpiryEnabledSet   bool
 	ghTeardownEnabledSet   bool
+	ackWatchEnabledSet     bool
 	// sources are the files that were read, lowest precedence first.
 	sources []string
 }
@@ -708,6 +767,13 @@ func Load() *Config {
 			RenotifyAfter: DefaultGHTeardownRenotify,
 			NotifyTo:      DefaultGHTeardownNotifyTo,
 			EscalateAfter: DefaultGHTeardownEscalateAfter,
+		},
+		AckWatch: AckWatchConfig{
+			Enabled:       true,
+			Interval:      DefaultAckWatchInterval,
+			RenotifyAfter: DefaultAckWatchRenotify,
+			NotifyTo:      DefaultAckWatchNotifyTo,
+			EscalateAfter: DefaultAckWatchEscalateAfter,
 		},
 	}
 
@@ -803,6 +869,23 @@ func Load() *Config {
 		// escalation off, so it must survive the merge like any other override.
 		if fileCfg.GHTeardown.EscalateAfter != 0 {
 			cfg.GHTeardown.EscalateAfter = fileCfg.GHTeardown.EscalateAfter
+		}
+		if fileCfg.ackWatchEnabledSet {
+			cfg.AckWatch.Enabled = fileCfg.AckWatch.Enabled
+		}
+		if fileCfg.AckWatch.Interval > 0 {
+			cfg.AckWatch.Interval = fileCfg.AckWatch.Interval
+		}
+		if fileCfg.AckWatch.RenotifyAfter > 0 {
+			cfg.AckWatch.RenotifyAfter = fileCfg.AckWatch.RenotifyAfter
+		}
+		if fileCfg.AckWatch.NotifyTo != "" {
+			cfg.AckWatch.NotifyTo = fileCfg.AckWatch.NotifyTo
+		}
+		// Non-zero, not >0: a negative value is the documented way to turn
+		// escalation off, so it must survive the merge like any other override.
+		if fileCfg.AckWatch.EscalateAfter != 0 {
+			cfg.AckWatch.EscalateAfter = fileCfg.AckWatch.EscalateAfter
 		}
 		if fileCfg.stallWatchEnabledSet {
 			cfg.StallWatch.Enabled = fileCfg.StallWatch.Enabled
@@ -1321,6 +1404,26 @@ func parseConfigFileInto(cfg *parsedConfig, path string) error {
 			case "blind_renotify":
 				if d, err := time.ParseDuration(unquotedVal); err == nil {
 					cfg.CredExpiry.BlindRenotify = d
+				}
+			}
+		case "ack_watch":
+			switch key {
+			case "enabled":
+				cfg.AckWatch.Enabled = val == "true"
+				cfg.ackWatchEnabledSet = true
+			case "interval":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.AckWatch.Interval = d
+				}
+			case "renotify_after":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.AckWatch.RenotifyAfter = d
+				}
+			case "notify_to":
+				cfg.AckWatch.NotifyTo = unquotedVal
+			case "escalate_after":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.AckWatch.EscalateAfter = d
 				}
 			}
 		case "gh_teardown":

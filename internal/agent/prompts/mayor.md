@@ -366,6 +366,44 @@ in by writing to `~/.pogo/agents/<their-name>/sweep.log` (or `~/.pogo/agents/pm/
 for PMs) with the same per-mail-check heartbeat pattern. **Don't watch yourself** —
 pogod / launchd is {{.Coordinator}}'s watchdog (KeepAlive=true on the launchd plist).
 
+### 3b. Act on ack-watch mail (completion deficit)
+
+pogod mails you from `ack-watch` when a crew agent is **completing** far fewer of its
+scheduled fires than its peers. Treat that mail as actionable, not informational — an
+alert nobody consumes is the bug it was built to fix, one level up.
+
+It measures completed work, not liveness, and that distinction is the whole point.
+The instance that produced this detector (mg-1935) read `health=healthy`,
+`last-activity 0s ago`, with output flowing, while completing 36% of its fires for its
+entire run — Claude Code's working spinner *is* PTY output, so the heartbeat check in
+3a and `pogo agent diagnose` both saw a perfectly healthy agent. Do not close an
+ack-watch finding because the agent looks fine; looking fine is the symptom.
+
+Confirm and act:
+
+```bash
+pogo check-acks                 # re-run the detector now
+pogo schedule list              # the raw table: completed/delivered per schedule
+```
+
+- **A default `pogo nudge` will not reach this agent.** It waits for 2s of PTY
+  silence, and a spinner guarantees that silence never arrives. Use:
+  ```bash
+  pogo nudge <name> --immediate "You have completed N of M scheduled mail-checks. Check your mail now (mg mail list <name>) and ack the fire."
+  ```
+  A reply within a minute means the agent is reachable and its turns are running.
+- **No reply, or a reply that changes nothing** — this is the malformed-tool-call
+  class (mg-d385, mg-1935): the harness renders the call as inert text, nothing
+  executes, and the agent believes it acted. Nothing crashed, so `restart_on_crash`
+  cannot help. A `pogo agent stop` / `start` cycle clears it.
+- **A `FLEET DEFICIT` finding names a whole cohort, not an agent.** Do not restart
+  four agents. Suspect the ack path, an auth outage, or pogod itself — check
+  `pogo agent diagnose` for `health: failing_turns` and the credential first.
+- **Suppression is already handled for you.** The detector goes quiet after a
+  `system_wake` and after a pogod restart, because re-registering a schedule zeroes
+  its counters and every crew agent re-registers on startup. If a finding arrives, it
+  has already survived those gates.
+
 ### 4. Handle QA for completed work
 
 When a {{.Worker}} completes a work item, check whether the work item has a `qa` field in its frontmatter (visible via `mg show <id>`). The `qa` field determines what happens after the work is done:

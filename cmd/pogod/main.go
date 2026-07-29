@@ -25,6 +25,7 @@ import (
 	"github.com/nightlyone/lockfile"
 	"golang.org/x/net/netutil"
 
+	"github.com/drellem2/pogo/internal/ackwatch"
 	"github.com/drellem2/pogo/internal/agent"
 	"github.com/drellem2/pogo/internal/client"
 	"github.com/drellem2/pogo/internal/config"
@@ -1556,6 +1557,50 @@ Flags:
 		}
 	}
 
+	// Build the scheduler-completion deficit detector (mg-1935): the READER the
+	// ack counters never had. mg-a754 gave every fire a completion signal and
+	// `pogo schedule list` even renders `⚠ N unacked`, but nothing consumed it —
+	// so a crew agent sat at 36% completion for its entire run and the only path
+	// to noticing was a human comparing rows in that table.
+	//
+	// It compares each schedule to its PEERS (same kind, same cadence,
+	// comparable fire count) rather than to its own history, because the agent
+	// that motivated this was always broken and had no regression to see. See
+	// internal/ackwatch.
+	//
+	// Armed only when the scheduler loaded — without it there is nothing to
+	// sample. StartedAt suppresses the report for one settle window after this
+	// process starts, on the same footing as a system_wake: a restart is when
+	// agents re-register their mail-checks and zero their counters, and mg-42ac
+	// made that nightly. REPORT-ONLY.
+	var ackWatcher *ackwatch.Watcher
+	if cfg.AckWatch.Enabled && sched != nil {
+		schedulerLog := scheduler.EventLogPath(schedPath)
+		ackWatcher = ackwatch.New(ackwatch.Options{
+			Enabled: true,
+			Source: func(now time.Time) (ackwatch.Snapshot, error) {
+				at, reason := ackwatch.LastDisruption(schedulerLog, now)
+				return ackwatch.Snapshot{
+					Now:              now,
+					Samples:          ackwatch.SampleEntries(sched.List(""), now),
+					LastDisruption:   at,
+					DisruptionReason: reason,
+				}, nil
+			},
+			Mail:          client.SendMGMail,
+			Interval:      cfg.AckWatch.Interval,
+			RenotifyAfter: cfg.AckWatch.RenotifyAfter,
+			NotifyTo:      cfg.AckWatch.NotifyTo,
+			EscalateAfter: cfg.AckWatch.EscalateAfter,
+			StartedAt:     time.Now(),
+		})
+		log.Printf("pogod: ack-watch enabled (interval=%s renotify=%s notify_to=%s escalate_after=%s, report-only)",
+			cfg.AckWatch.Interval, cfg.AckWatch.RenotifyAfter,
+			cfg.AckWatch.NotifyTo, cfg.AckWatch.EscalateAfter)
+	} else if cfg.AckWatch.Enabled {
+		log.Printf("pogod: ack-watch NOT armed — the scheduler did not load, so there are no completion counters to read")
+	}
+
 	// Drive both heartbeat-piggybacked subsystems from a single OnTick. The
 	// scheduler runs inline (it stores absolute fire times, so a clock jump is
 	// absorbed in the same goroutine). The stall watcher runs in a goroutine so
@@ -1594,6 +1639,14 @@ Flags:
 		// delay the next tick. Report-only.
 		if teardownWatcher != nil {
 			go teardownWatcher.Check(now)
+		}
+		// The completion-deficit detector rides the same tick and throttles
+		// itself to a COARSE interval. In a goroutine because a finding shells
+		// out to `mg mail send`, which must never delay a tick. Report-only: it
+		// mails, and it has no seam through which it could nudge or restart the
+		// agent it names.
+		if ackWatcher != nil {
+			go ackWatcher.Check(now)
 		}
 		// The synthetic-failure-turn detector rides the same tick and throttles
 		// itself to synthwatch.DefaultInterval. In a goroutine because it reads
