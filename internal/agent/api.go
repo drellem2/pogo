@@ -904,12 +904,24 @@ var ErrPromptNotFound = errors.New("prompt file not found")
 // PromptNotFoundError carries the missing prompt path so callers can surface
 // it (e.g. in a structured 404 response body). errors.Is(err, ErrPromptNotFound)
 // still matches.
+//
+// Searched lists every candidate path the lookup tried, in order, when there
+// was more than one — the coordinator resolves against agents/mayor.md and
+// agents/crew/<name>.md both (see crewPromptPath). It exists so the message
+// names the path the operator actually configured and not only the mechanism
+// file they never touched (mg-4469). Path stays the primary candidate, so the
+// structured 404 body keeps its single-path shape.
 type PromptNotFoundError struct {
-	Path string
+	Path     string
+	Searched []string
 }
 
 func (e *PromptNotFoundError) Error() string {
-	return fmt.Sprintf("prompt file not found: %s (run 'pogo agent prompt install' to install defaults)", e.Path)
+	paths := e.Path
+	if len(e.Searched) > 0 {
+		paths = strings.Join(e.Searched, ", ")
+	}
+	return fmt.Sprintf("prompt file not found: %s (run 'pogo agent prompt install' to install defaults)", paths)
 }
 
 func (e *PromptNotFoundError) Unwrap() error { return ErrPromptNotFound }

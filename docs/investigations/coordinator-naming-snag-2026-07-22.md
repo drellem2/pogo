@@ -94,6 +94,13 @@ coordinator named after a shipped crew agent (`[agents] coordinator = "doctor"`)
 makes `crew/doctor.md` unreachable, and the error names a path the user never
 touched. Narrow; no population currently hits it.
 
+*Carried by mg-d489 and fixed in mg-4469, without touching the split: the
+coordinator arm now falls through to `crew/<name>.md` when `mayor.md` is
+absent, a not-found error names every path searched, and a live collision is
+logged naming the crew prompt it shadowed. The precedence above is unchanged —
+when both files exist, `mayor.md` still wins, because the name is the
+coordinator's.*
+
 Cosmetic residue: under the `ringmaster` default the coordinator is named
 `ringmaster` but reads `mayor.md`, and the minimal scaffold says so out loud.
 Accurate, confusing.

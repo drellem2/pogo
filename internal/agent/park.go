@@ -183,18 +183,59 @@ func (a *Agent) ShouldRespawn() bool {
 
 // crewPromptPath returns the on-disk prompt file for a crew agent name (the
 // coordinator's mayor.md lives in PromptDir, everyone else's under crew/).
-// Returns a *PromptNotFoundError when the file is missing.
+// Returns a *PromptNotFoundError, naming every path it searched, when none of
+// the candidates exist.
+//
+// The split is deliberate and stays: the file name is mechanism and does not
+// move, while the agent name that maps to it follows [agents] coordinator —
+// which is exactly what makes the mg-ce47 default flip a no-op for prompt
+// resolution (both `mayor` and `ringmaster` resolve to agents/mayor.md).
+//
+// What the coordinator arm no longer does is stat exactly one path (mg-4469).
+// It used to, so a coordinator pinned to a name that also has a shipped crew
+// prompt — [agents] coordinator = "doctor" — failed with `prompt file not
+// found: agents/mayor.md`, naming a file the operator never configured and
+// never mentioned. Now the arm falls THROUGH to crew/<name>.md when the
+// coordinator file is absent, and when it is present says out loud which crew
+// prompt the collision made unreachable instead of dropping it in silence.
 func crewPromptPath(name string) (string, error) {
-	var promptFile string
-	if name == CoordinatorName() {
-		promptFile = filepath.Join(PromptDir(), "mayor.md")
-	} else {
-		promptFile = filepath.Join(CrewPromptDir(), name+".md")
+	crewFile := filepath.Join(CrewPromptDir(), name+".md")
+	if name != CoordinatorName() {
+		if !promptFileExists(crewFile) {
+			return "", &PromptNotFoundError{Path: crewFile}
+		}
+		return crewFile, nil
 	}
-	if _, err := os.Stat(promptFile); os.IsNotExist(err) {
-		return "", &PromptNotFoundError{Path: promptFile}
+
+	coordFile := filepath.Join(PromptDir(), "mayor.md")
+	coordOK, crewOK := promptFileExists(coordFile), promptFileExists(crewFile)
+	switch {
+	case coordOK && crewOK:
+		// The name belongs to the coordinator — that is the policy half of the
+		// split and it is not up for negotiation here — so mayor.md still wins.
+		// The crew prompt is genuinely unreachable under this config; log it
+		// rather than let the operator discover it as an agent that silently
+		// runs the wrong prompt.
+		log.Printf("agent %s: [agents] coordinator = %q collides with the crew prompt %s; "+
+			"the coordinator prompt %s wins and that crew prompt is unreachable "+
+			"(rename it, or pick a coordinator name no crew prompt uses)",
+			name, name, crewFile, coordFile)
+		return coordFile, nil
+	case coordOK:
+		return coordFile, nil
+	case crewOK:
+		return crewFile, nil
 	}
-	return promptFile, nil
+	return "", &PromptNotFoundError{Path: coordFile, Searched: []string{coordFile, crewFile}}
+}
+
+// promptFileExists reports whether a prompt file is present. Only a
+// not-exist error counts as absent: a file that stats with EACCES is there,
+// and a fallback that treated it as missing would quietly resolve to a
+// different prompt over a permissions problem.
+func promptFileExists(path string) bool {
+	_, err := os.Stat(path)
+	return !os.IsNotExist(err)
 }
 
 // Park puts a crew agent into supported dormancy: it pauses (removes and

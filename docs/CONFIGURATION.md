@@ -101,6 +101,17 @@ so user prompts containing other `{{` sequences are untouched. Two things stay
 fixed regardless of the name: the prompt file path `~/.pogo/agents/mayor.md`,
 and the `"mayor"` category label in `pogo agent prompt list --json`.
 
+**Naming the coordinator after a crew agent shadows that crew prompt.** A name
+is one address, so `coordinator = "doctor"` makes `doctor` the coordinator, and
+`~/.pogo/agents/crew/doctor.md` is then unreachable — nothing can start it. The
+collision is not silent: prompt resolution logs which crew prompt the
+coordinator name shadowed and which file won, so the fix (rename the crew
+prompt, or pick a coordinator name no crew prompt uses) is in the log rather
+than left to be discovered. If `~/.pogo/agents/mayor.md` is absent, the
+coordinator falls through to `crew/<name>.md` rather than failing on a path
+nobody configured, and a lookup that finds nothing names every path it tried
+(mg-4469).
+
 ## Worker name
 
 The worker role (the disposable per-task agents) is called "pogocat" by default.
