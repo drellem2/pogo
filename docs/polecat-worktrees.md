@@ -158,6 +158,42 @@ There is no index and no HEAD to compare its files against, so "uncommitted" is
 not a property the directory has. The owner's concluded ticket is the only
 signal available about the leftovers.
 
+## Who counts as live: two sources, one answer
+
+The ownership rule above says which *string* names a worktree's owner. A
+separate question is where the set of live owners comes from, and it has bitten
+twice.
+
+There are two sources and **neither is complete alone**:
+
+| Source | Complete when | Blind when |
+|---|---|---|
+| pogod's in-memory **registry** | pogod has run continuously since the polecat spawned | after a pogod restart — permanently, for every survivor, because the registry has no adopt/reattach path (mg-13a3) |
+| the persisted **polecat witness** (`~/.pogo/polecat-witness.json`) | the polecat was spawned by any pogod on this box | the witness was never written or was dropped at exit |
+
+A restart is not exotic and the survivors are not exotic either: every polecat's
+normal end state is `mg done` followed by *staying alive* until the mayor stops
+it. In that window its ticket reads concluded while its process and tree are
+still in use — and worktree removal, unlike branch deletion, has **no merge
+gate**, so the live set is the tree's only guard. A registry-only live set after
+a restart is therefore an empty guard on exactly the population that needs it
+(mg-0130).
+
+**The rule:** the live set is the registry **unioned with** the witness, and a
+witnessed polecat counts as live on `Alive` *or* `Unreadable` — never proving it
+is ours is a reason to keep the tree, not to reclaim it. A witness that is on
+disk but unreadable is **not** an empty fleet: both callers decline to sweep
+(pogod skips the pass, `pogo gc` exits nonzero) rather than sweep against a set
+they know is missing survivors.
+
+That union lives in **`agent.LivePolecatSet`**, called by both `cmd/pogod`'s
+sweep and `pogo gc`. It was originally written in `cmd/pogod` only, and `pogo
+gc` — the manual entry point to the same `gitgc.Sweep` — kept its own
+registry-only copy, so the restart hole survived one caller over and `pogo gc
+--apply` would take a running polecat's tree (mg-1403). Two independent defects
+in one gate is an argument about the gate's shape rather than its key: there is
+now one definition, and a third caller gets the same answer by construction.
+
 ## Reading the GC log
 
 The sweep logs one line per action. Before gh #94 it logged counts only, so a

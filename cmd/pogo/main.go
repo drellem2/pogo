@@ -2963,6 +2963,12 @@ merely un-checked-out, not deleted. When a directory name resolves to no work
 item at all (a legacy or hand-made worktree), the checked-out branch decides
 instead and the report says so.
 
+"Currently-running" is read from pogod's registry unioned with the persisted
+polecat witness, so a polecat that outlived the pogod that spawned it is still
+protected — pogod's registry forgets those on restart, and the witness is what
+remembers them. If that witness is on disk but unreadable, gc refuses to sweep
+rather than treat it as an empty fleet.
+
 A worktree holding uncommitted work is KEPT and reported, even when its work
 item has concluded — a concluded ticket means the work was accepted, not that
 the tree is empty, and uncommitted files are unmerged by definition (mg-ee02).
@@ -2977,19 +2983,20 @@ By default gc only reports what it would do; pass --apply to make changes.`,
 			if err != nil {
 				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
 			}
-			// Exclude live polecats from the sweep. Best-effort: if pogod
-			// is unreachable, ticket status and git's checked-out-branch
-			// protection still guard in-flight work.
-			live := map[string]bool{}
-			if agents, lerr := client.ListAgents(); lerr == nil {
-				for _, a := range agents {
-					if a.Type == agent.TypePolecat {
-						live[a.Name] = true
-					}
+			// Exclude live polecats from the sweep.
+			live, notes, lerr := gcLivePolecats()
+			if lerr != nil {
+				cli.ExitWithError(jsonOutput, fmt.Sprintf(
+					"cannot read the polecat witness: %v\n"+
+						"refusing to sweep — an unreadable witness is not an empty fleet, and a "+
+						"worktree removal has no merge gate to catch the mistake (mg-1403).", lerr),
+					cli.ExitError)
+			}
+			if !jsonOutput && len(notes) > 0 {
+				for _, n := range notes {
+					fmt.Println(n)
 				}
-			} else if !jsonOutput {
-				fmt.Printf("warning: could not reach pogod for the live-polecat list (%v);\n"+
-					"         relying on ticket status and git checkout state only.\n\n", lerr)
+				fmt.Println()
 			}
 			// Best-effort: without a resolvable home dir the orphan-dir
 			// scan is skipped and gc still sweeps branches and worktrees.

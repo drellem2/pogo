@@ -152,50 +152,20 @@ func gitGCRepos(reg *agent.Registry, cfg config.GitGCConfig) []string {
 }
 
 // livePolecatSet returns the names of every polecat a sweep must treat as live
-// and therefore never disturb. A polecat's name equals its branch's "polecat-"
-// suffix and its worktree basename, so gitgc.Sweep matches exclusions directly
-// against it.
+// and therefore never disturb: this pogod's registry, unioned with the
+// restart-surviving polecat witness.
 //
-// It unions TWO sources, because neither is complete alone (mg-0130):
-//
-//   - the in-memory registry — authoritative while pogod has run continuously,
-//     but EMPTY after a restart, permanently, because the registry has no
-//     adopt/reattach path (mg-13a3);
-//   - the persisted polecat witness — which survives a restart and answers on
-//     (pid, start_time), so a polecat that outlived the pogod that spawned it
-//     stays protected.
-//
-// Without the witness union a restart empties the live set while startGitGC's
-// startup sweep runs, and a polecat whose ticket is already done but whose
-// process is still alive — every polecat's NORMAL end state (`mg done`, then
-// await the mayor's stop) — loses its sole worktree guard. Worktree removal is
-// gated on the live set alone, with no merge gate to catch the mistake, unlike
-// branch deletion; so the worktree is removed out from under a running polecat.
-//
-// A witnessed polecat counts as live when its process is provably ours
-// (WitnessAlive) OR when its identity cannot be established (WitnessUnreadable):
-// the asymmetry favours keeping a running polecat's work over reclaiming a dead
-// one's disk, matching the mail-check reaper, which likewise never reaps on
-// Unreadable (registryLiveness). WitnessDead and WitnessNoRecord add nothing —
-// a provably-dead polecat is exactly what the sweep exists to clean up.
-//
-// A witness READ error is returned, not swallowed: the caller must skip the
-// sweep rather than sweep against a live set it knows is missing survivors.
+// The union itself lives in agent.LivePolecatSet, which is where the whole
+// argument for it is written down (mg-0130) and, since mg-1403, where `pogo gc`
+// gets the same answer from. This function is only the registry projection —
+// pogod holds a *Registry, the CLI holds pogod's /agents reply, and the shared
+// function takes the one thing both can produce: the names.
 func livePolecatSet(reg *agent.Registry) (map[string]bool, error) {
-	live := map[string]bool{}
+	var names []string
 	for _, a := range reg.List() {
 		if a.Type == agent.TypePolecat {
-			live[a.Name] = true
+			names = append(names, a.Name)
 		}
 	}
-	verdicts, err := agent.WitnessedPolecatVerdicts()
-	if err != nil {
-		return nil, err
-	}
-	for name, v := range verdicts {
-		if v == agent.WitnessAlive || v == agent.WitnessUnreadable {
-			live[name] = true
-		}
-	}
-	return live, nil
+	return agent.LivePolecatSet(names)
 }
