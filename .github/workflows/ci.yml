@@ -107,12 +107,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history + tags: the changelog coverage check resolves its
+          # default range from the most recent tag (mg-7904).
+          fetch-depth: 0
 
       - name: Run Bash shell integration tests
         run: shell/bashrc_test.sh
 
       - name: Run changelog fragment assembler tests
         run: scripts/assemble-changelog_test.sh
+
+      - name: Run changelog coverage tests
+        run: scripts/changelog-coverage_test.sh
 
   version-check:
     if: false  # Disabled — re-enable by removing this line

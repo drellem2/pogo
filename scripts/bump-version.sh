@@ -23,7 +23,7 @@ source "$SCRIPT_DIR/lib/common.sh"
 
 # Usage message
 usage() {
-    echo "Usage: $0 <version> [--commit] [--tag] [--push]"
+    echo "Usage: $0 <version> [--commit] [--tag] [--push] [--ack-changelog-gaps]"
     echo ""
     echo "Bump version across all Pogo components."
     echo ""
@@ -32,6 +32,11 @@ usage() {
     echo "  --commit         Automatically create a git commit"
     echo "  --tag            Create annotated git tag (requires --commit)"
     echo "  --push           Push commit and tag to origin (requires --tag)"
+    echo "  --ack-changelog-gaps"
+    echo "                   Proceed even though some mg-ids in the release range"
+    echo "                   have no changelog entry. The ids are printed either"
+    echo "                   way; this flag records that you saw them and chose to"
+    echo "                   ship anyway (mg-7904)."
     echo ""
     echo "Examples:"
     echo "  $0 0.2.0                        # Update versions and show diff"
@@ -89,6 +94,7 @@ main() {
     AUTO_COMMIT=false
     AUTO_TAG=false
     AUTO_PUSH=false
+    ACK_GAPS=false
 
     # Parse flags
     shift
@@ -102,6 +108,9 @@ main() {
                 ;;
             --push)
                 AUTO_PUSH=true
+                ;;
+            --ack-changelog-gaps)
+                ACK_GAPS=true
                 ;;
             *)
                 echo -e "${RED}Error: Unknown option '$1'${NC}"
@@ -149,6 +158,34 @@ main() {
             exit 1
         fi
     fi
+
+    # 0. CHANGELOG COVERAGE (mg-7904).
+    #    assemble-changelog.sh's LOUD-EMPTY guard only refuses a changelog with
+    #    ZERO entries — a weaker property than CONTRIBUTING's per-change rule.
+    #    Under that guard alone a cut ships a changelog describing part of the
+    #    release, silently. This reports the ids in the range that nothing
+    #    describes and requires an explicit acknowledgement to proceed, so the
+    #    number reaches whoever is CUTTING rather than whoever is merging.
+    echo "Checking changelog coverage for the release range..."
+    COVERAGE_STATUS=0
+    "$SCRIPT_DIR/changelog-coverage.sh" || COVERAGE_STATUS=$?
+    if [ "$COVERAGE_STATUS" -eq 1 ]; then
+        if [ "$ACK_GAPS" = true ]; then
+            echo ""
+            echo -e "${YELLOW}Proceeding with known changelog gaps (--ack-changelog-gaps).${NC}"
+            echo -e "${YELLOW}The release will ship without entries for the ids listed above.${NC}"
+        else
+            echo ""
+            echo -e "${RED}Error: refusing to cut a release with undescribed changes.${NC}" >&2
+            echo -e "${RED}  Either write the missing changelog.d/ fragments, or re-run with${NC}" >&2
+            echo -e "${RED}  --ack-changelog-gaps to ship anyway.${NC}" >&2
+            exit 1
+        fi
+    elif [ "$COVERAGE_STATUS" -ne 0 ]; then
+        echo -e "${RED}Error: changelog coverage check failed (exit $COVERAGE_STATUS)${NC}" >&2
+        exit 1
+    fi
+    echo ""
 
     echo "Updating version files..."
 

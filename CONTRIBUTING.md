@@ -143,6 +143,34 @@ file per change makes the collision structurally impossible. See
 at release time via `scripts/assemble-changelog.sh`, which **refuses to cut an
 empty changelog** (no fragments and an empty `[Unreleased]` → non-zero exit).
 
+**Checking that the rule was actually followed (mg-7904).** The empty-changelog
+refusal above checks a *weaker* property than this section states. The rule is a
+fragment **per change**; the guard only fires at **zero** entries. When that gap
+was measured, 95 mg-ids had shipped in `feat:`/`fix:` commits since v0.5.0 and 51
+had fragments — and the guard passed, because 51 is not zero. A cut would have
+proceeded and shipped a changelog describing part of the release, silently.
+
+`scripts/changelog-coverage.sh` checks the rule instead:
+
+```bash
+./scripts/changelog-coverage.sh                      # since the most recent tag
+./scripts/changelog-coverage.sh --range v0.5.0..HEAD --json
+```
+
+It names its population — distinct mg-ids in `feat:`/`fix:` commit subjects in
+the range — and reports, in separate buckets, how many are described by a
+fragment, by a hand-written `[Unreleased]` entry, or not at all. It exits
+non-zero when anything is undescribed, and `bump-version.sh` runs it before
+assembling: an undescribed id **refuses the cut** unless you pass
+`--ack-changelog-gaps`, which ships anyway and says so. The gap is reported to
+whoever is *cutting* rather than whoever is *merging* — a per-commit gate at the
+coverage this was written under would fail on work unrelated to the gap.
+
+A passing guard is evidence about the property it checks, never about the rule it
+was written to enforce. `scripts/changelog-coverage_test.sh` therefore leads with
+a positive control: the check is shown to **fail** on a range with a known-missing
+fragment before any passing case is trusted.
+
 Two things the script does **not** do, which the releaser must:
 
 - **Run the upgrade smoke first if the release changes a role-name default.**

@@ -64,6 +64,14 @@ bash build_test.sh
 echo "Testing changelog fragment assembler"
 bash scripts/assemble-changelog_test.sh
 
+# Changelog coverage (mg-7904). The assembler's LOUD-EMPTY guard checks a weaker
+# property (non-empty) than CONTRIBUTING's rule (a fragment per change), so it
+# passes while a release ships describing only part of itself. The load-bearing
+# case here is the POSITIVE CONTROL: the check is shown to FAIL on a range with
+# a known-missing fragment before any passing case is trusted.
+echo "Testing changelog coverage check"
+bash scripts/changelog-coverage_test.sh
+
 # The work-item scope guard (mg-f1d5). Every case runs against a stub `mg` and a
 # fixture worktree in a temp dir, so the suite never reads the developer's live
 # ~/.macguffin. The load-bearing case is the opt-in one: a guard that blocked an
