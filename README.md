@@ -62,7 +62,14 @@ Pogo coordinates through [macguffin](https://github.com/drellem2/macguffin). Wor
 ```sh
 mg new "fix the auth token refresh bug"   # file work
 mg list                                    # available → claimed → done
+pogo status --assignee=human               # the dashboard, narrowed to your queue
 ```
+
+`pogo status` is a read-only dashboard over agents, work items and the refinery
+queue. `--assignee` narrows the **work-item** section only — agents and merge
+requests carry no assignee, so they stay in full and the output says so. Use
+`--assignee=none` for items nobody has been given. Matching is exact and
+case-insensitive.
 
 ## Default workflow: coding
 

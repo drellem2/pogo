@@ -50,6 +50,14 @@ func TestMain(m *testing.M) {
 // can't leak in; POGO_PORT points the client at the stub server.
 func runPogo(t *testing.T, handler http.HandlerFunc, args ...string) (stdout, stderr string, exitCode int) {
 	t.Helper()
+	return runPogoEnv(t, handler, nil, args...)
+}
+
+// runPogoEnv is runPogo with extra environment entries appended after the
+// isolation ones, so a test can (for example) put a stub `mg` at the front of
+// PATH. Entries are "KEY=value" and win over the defaults below.
+func runPogoEnv(t *testing.T, handler http.HandlerFunc, extraEnv []string, args ...string) (stdout, stderr string, exitCode int) {
+	t.Helper()
 	ts := httptest.NewServer(handler)
 	t.Cleanup(ts.Close)
 	port := ts.Listener.Addr().(*net.TCPAddr).Port
@@ -63,6 +71,7 @@ func runPogo(t *testing.T, handler http.HandlerFunc, args ...string) (stdout, st
 		// temp HOME above instead of the developer's real ~/.pogo (mg-3dc3).
 		"POGO_HOME=",
 	)
+	cmd.Env = append(cmd.Env, extraEnv...)
 	var outBuf, errBuf bytes.Buffer
 	cmd.Stdout = &outBuf
 	cmd.Stderr = &errBuf
