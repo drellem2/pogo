@@ -120,6 +120,51 @@ func (r *testRig) pmCount() int {
 	return len(r.pmNotifications)
 }
 
+// startHook runs RunModalHook for the duration of the test and guarantees the
+// watcher is fully stopped before the test returns: the registered cleanup
+// cancels the context and then JOINS the hook's goroutines. It also waits for
+// the scanner subscription so callers can write output immediately.
+//
+// The join is the load-bearing part (mg-d578). Every case here used to start the
+// hook with a bare `go RunModalHook(...)` and only `defer cancel()` — signalling
+// the watcher to stop without waiting for it. Watchers therefore outlived their
+// test and kept running (and logging) during the next one, so a matcher
+// goroutine still executing its startup path could read package state that the
+// following test was concurrently writing. That is what made
+// TestModalHook_Case3_RateLimitFiresOnEventsStale fail ~2 runs in 3 under -race
+// while passing alone: the reported race was always Case3's write against a
+// leaked reader from Case1 or Case2. Removing the shared global fixes the one
+// known instance; joining here is what stops the next one from being invisible.
+//
+// The returned cancel may be called by the test itself when cancellation is the
+// behaviour under test (see the release-not-recovery case); cleanup's second
+// cancel is a no-op.
+func (r *testRig) startHook(t *testing.T, deps ModalHookDeps, matchers []ModalMatcher) context.CancelFunc {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		RunModalHook(ctx, deps, matchers)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Errorf("modal hook did not exit within 5s of cancel — watcher leaked into the next test")
+		}
+	})
+	if !waitFor(t, time.Second, func() bool {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		return r.scanner != nil
+	}) {
+		t.Fatalf("scanner never subscribed")
+	}
+	return cancel
+}
+
 // fakeTracker is an in-memory ActivityTracker with a controllable clock.
 type fakeTracker struct {
 	mu       sync.Mutex
@@ -170,7 +215,11 @@ func waitFor(t *testing.T, timeout time.Duration, fn func() bool) bool {
 }
 
 // testMatchers gives all test cases the same shape — short timeouts so the
-// suite runs fast without time.Sleep'ing 20 minutes.
+// suite runs fast without time.Sleep'ing 20 minutes. The events-stale poll
+// interval is shrunk here, on the matcher, rather than by mutating a
+// package-level var: the table is per-test state built before the watcher's
+// goroutines exist, so there is nothing for a concurrent test to race with
+// (mg-d578).
 func testMatchers() []ModalMatcher {
 	return []ModalMatcher{
 		{
@@ -190,6 +239,7 @@ func testMatchers() []ModalMatcher {
 				Mode:                ModeEventsStale,
 				EventStaleness:      20 * time.Minute,
 				UsageLimitStaleness: UsageLimitSuspectStaleness,
+				PollInterval:        20 * time.Millisecond,
 			},
 		},
 	}
@@ -204,19 +254,7 @@ func TestModalHook_Case1_RatingDialogFires(t *testing.T) {
 	rig := newTestRig(clock.Now)
 	rig.tracker.set("cat-test", clock.Now())
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	done := make(chan struct{})
-	go func() { RunModalHook(ctx, rig.deps("cat-test"), testMatchers()); close(done) }()
-	// Wait for the watcher's Subscribe to be installed before writing.
-	if !waitFor(t, time.Second, func() bool {
-		rig.mu.Lock()
-		ok := rig.scanner != nil
-		rig.mu.Unlock()
-		return ok
-	}) {
-		t.Fatalf("scanner never subscribed")
-	}
+	rig.startHook(t, rig.deps("cat-test"), testMatchers())
 
 	rig.writeOutput([]byte("Some preamble\n" + RatingDialogMarker + "\n"))
 	// The idle gate measures its window on the injected clock (mg-872b), so
@@ -242,18 +280,7 @@ func TestModalHook_Case2_RatingDialogMentionedNoFalsePositive(t *testing.T) {
 	rig := newTestRig(clock.Now)
 	rig.tracker.set("cat-test", clock.Now())
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	done := make(chan struct{})
-	go func() { RunModalHook(ctx, rig.deps("cat-test"), testMatchers()); close(done) }()
-	if !waitFor(t, time.Second, func() bool {
-		rig.mu.Lock()
-		ok := rig.scanner != nil
-		rig.mu.Unlock()
-		return ok
-	}) {
-		t.Fatalf("scanner never subscribed")
-	}
+	rig.startHook(t, rig.deps("cat-test"), testMatchers())
 
 	// The idle gate measures its window on the injected clock (mg-872b): the
 	// fire condition is deps.Now()-lastChunk >= IdleAfterMarker. Here the
@@ -294,24 +321,10 @@ func TestModalHook_Case3_RateLimitFiresOnEventsStale(t *testing.T) {
 	// Set last-seen to ~21m ago so the gate trips immediately.
 	rig.tracker.set("cat-test", clock.Now().Add(-21*time.Minute))
 
-	// Override the events-stale poll interval to something fast for the test
-	// (we can't mock the ticker without exposing internals — pull-knob: lower
-	// the poll interval globally for tests).
-	prev := setEventsStalePollIntervalForTest(20 * time.Millisecond)
-	defer setEventsStalePollIntervalForTest(prev)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	done := make(chan struct{})
-	go func() { RunModalHook(ctx, rig.deps("cat-test"), testMatchers()); close(done) }()
-	if !waitFor(t, time.Second, func() bool {
-		rig.mu.Lock()
-		ok := rig.scanner != nil
-		rig.mu.Unlock()
-		return ok
-	}) {
-		t.Fatalf("scanner never subscribed")
-	}
+	// The fast poll interval comes from testMatchers()'s own matcher table
+	// (mg-d578); nothing package-level is written here, which is why this case no
+	// longer races against watchers left over from the preceding tests.
+	rig.startHook(t, rig.deps("cat-test"), testMatchers())
 
 	rig.writeOutput([]byte("What do you want to do?\n  1: " + RateLimitMarker + "\n  2: ...\n"))
 
@@ -335,20 +348,7 @@ func TestModalHook_Case4_RateLimitNoFireWhenEventsRecent(t *testing.T) {
 	rig := newTestRig(clock.Now)
 	rig.tracker.set("cat-test", clock.Now()) // events are fresh
 
-	prev := setEventsStalePollIntervalForTest(20 * time.Millisecond)
-	defer setEventsStalePollIntervalForTest(prev)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go RunModalHook(ctx, rig.deps("cat-test"), testMatchers())
-	if !waitFor(t, time.Second, func() bool {
-		rig.mu.Lock()
-		ok := rig.scanner != nil
-		rig.mu.Unlock()
-		return ok
-	}) {
-		t.Fatalf("scanner never subscribed")
-	}
+	rig.startHook(t, rig.deps("cat-test"), testMatchers())
 
 	rig.writeOutput([]byte(RateLimitMarker + "\n"))
 	// Keep emitting fresh activity for ~200ms, well past several poll cycles.
@@ -371,20 +371,7 @@ func TestModalHook_Case5_UserInvokedNoFire(t *testing.T) {
 	rig := newTestRig(clock.Now)
 	rig.tracker.set("cat-test", clock.Now())
 
-	prev := setEventsStalePollIntervalForTest(20 * time.Millisecond)
-	defer setEventsStalePollIntervalForTest(prev)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go RunModalHook(ctx, rig.deps("cat-test"), testMatchers())
-	if !waitFor(t, time.Second, func() bool {
-		rig.mu.Lock()
-		ok := rig.scanner != nil
-		rig.mu.Unlock()
-		return ok
-	}) {
-		t.Fatalf("scanner never subscribed")
-	}
+	rig.startHook(t, rig.deps("cat-test"), testMatchers())
 
 	rig.writeOutput([]byte(RateLimitMarker + "\n"))
 	// Simulate user inspecting the menu for 100ms while reasoning loop keeps
@@ -413,20 +400,7 @@ func TestModalHook_Case6_RateLimitQuotedNoFire(t *testing.T) {
 	rig := newTestRig(clock.Now)
 	rig.tracker.set("cat-test", clock.Now())
 
-	prev := setEventsStalePollIntervalForTest(20 * time.Millisecond)
-	defer setEventsStalePollIntervalForTest(prev)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go RunModalHook(ctx, rig.deps("cat-test"), testMatchers())
-	if !waitFor(t, time.Second, func() bool {
-		rig.mu.Lock()
-		ok := rig.scanner != nil
-		rig.mu.Unlock()
-		return ok
-	}) {
-		t.Fatalf("scanner never subscribed")
-	}
+	rig.startHook(t, rig.deps("cat-test"), testMatchers())
 
 	rig.writeOutput([]byte("Agent narration: today I will think about \"" + RateLimitMarker + "\" as a phrase.\n"))
 	for i := 0; i < 8; i++ {
@@ -449,20 +423,7 @@ func TestModalHook_UsageLimit_HitOnStaleEvents(t *testing.T) {
 	// Events stale 6m: past UsageLimitSuspectStaleness (5m), under EventStaleness (20m).
 	rig.tracker.set("cat-test", clock.Now().Add(-6*time.Minute))
 
-	prev := setEventsStalePollIntervalForTest(20 * time.Millisecond)
-	defer setEventsStalePollIntervalForTest(prev)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go RunModalHook(ctx, rig.deps("cat-test"), testMatchers())
-	if !waitFor(t, time.Second, func() bool {
-		rig.mu.Lock()
-		ok := rig.scanner != nil
-		rig.mu.Unlock()
-		return ok
-	}) {
-		t.Fatalf("scanner never subscribed")
-	}
+	rig.startHook(t, rig.deps("cat-test"), testMatchers())
 
 	rig.writeOutput([]byte("What do you want to do?\n  1: " + RateLimitMarker + "\n"))
 
@@ -491,20 +452,7 @@ func TestModalHook_UsageLimit_ClearsOnResume(t *testing.T) {
 	rig := newTestRig(clock.Now)
 	rig.tracker.set("cat-test", clock.Now().Add(-6*time.Minute))
 
-	prev := setEventsStalePollIntervalForTest(20 * time.Millisecond)
-	defer setEventsStalePollIntervalForTest(prev)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go RunModalHook(ctx, rig.deps("cat-test"), testMatchers())
-	if !waitFor(t, time.Second, func() bool {
-		rig.mu.Lock()
-		ok := rig.scanner != nil
-		rig.mu.Unlock()
-		return ok
-	}) {
-		t.Fatalf("scanner never subscribed")
-	}
+	rig.startHook(t, rig.deps("cat-test"), testMatchers())
 
 	rig.writeOutput([]byte(RateLimitMarker + "\n"))
 	if !waitFor(t, 2*time.Second, func() bool { return rig.hits() >= 1 }) {
@@ -559,20 +507,9 @@ func TestModalHook_UsageLimit_ReleaseNotRecoveryEmitsEpisodeEvent(t *testing.T) 
 		coord.OnClear(agentID, when)
 	}
 
-	prev := setEventsStalePollIntervalForTest(20 * time.Millisecond)
-	defer setEventsStalePollIntervalForTest(prev)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel() // safety net; the explicit cancel() below is the release trigger
-	go RunModalHook(ctx, deps, testMatchers())
-	if !waitFor(t, time.Second, func() bool {
-		rig.mu.Lock()
-		ok := rig.scanner != nil
-		rig.mu.Unlock()
-		return ok
-	}) {
-		t.Fatalf("scanner never subscribed")
-	}
+	// startHook's cleanup is the safety net; the explicit cancel() below is the
+	// release trigger this case exists to exercise.
+	cancel := rig.startHook(t, deps, testMatchers())
 
 	// The wedge: rate-limit modal visible + event log stale -> suspected hit.
 	rig.writeOutput([]byte(RateLimitMarker + "\n"))
@@ -633,20 +570,7 @@ func TestModalHook_UsageLimit_QuotedMarkerNoHit(t *testing.T) {
 	rig := newTestRig(clock.Now)
 	rig.tracker.set("cat-test", clock.Now()) // events fresh
 
-	prev := setEventsStalePollIntervalForTest(20 * time.Millisecond)
-	defer setEventsStalePollIntervalForTest(prev)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go RunModalHook(ctx, rig.deps("cat-test"), testMatchers())
-	if !waitFor(t, time.Second, func() bool {
-		rig.mu.Lock()
-		ok := rig.scanner != nil
-		rig.mu.Unlock()
-		return ok
-	}) {
-		t.Fatalf("scanner never subscribed")
-	}
+	rig.startHook(t, rig.deps("cat-test"), testMatchers())
 
 	rig.writeOutput([]byte("narration: I will think about \"" + RateLimitMarker + "\" now.\n"))
 	for i := 0; i < 8; i++ {
@@ -739,18 +663,7 @@ func TestModalHook_ColumnMoveRatingDialogFires(t *testing.T) {
 	rig := newTestRig(clock.Now)
 	rig.tracker.set("cat-test", clock.Now())
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	done := make(chan struct{})
-	go func() { RunModalHook(ctx, rig.deps("cat-test"), testMatchers()); close(done) }()
-	if !waitFor(t, time.Second, func() bool {
-		rig.mu.Lock()
-		ok := rig.scanner != nil
-		rig.mu.Unlock()
-		return ok
-	}) {
-		t.Fatalf("scanner never subscribed")
-	}
+	rig.startHook(t, rig.deps("cat-test"), testMatchers())
 
 	rig.writeOutput([]byte(columnMoveRatingFooter))
 	clock.Advance(200 * time.Millisecond)

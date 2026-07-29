@@ -80,6 +80,21 @@ type IdleGatePolicy struct {
 	IdleAfterMarker time.Duration // for ModeScannerIdle
 	EventStaleness  time.Duration // for ModeEventsStale
 
+	// PollInterval is how often a ModeEventsStale matcher re-evaluates its
+	// gate. Zero means defaultEventsStalePollInterval.
+	//
+	// This is per-matcher configuration rather than a package-level knob on
+	// purpose (mg-d578). It used to be a mutable global that tests shrank via a
+	// setEventsStalePollIntervalForTest helper, which made the whole package's
+	// -race signal useless: dispatchEventsStale reads the interval once at
+	// goroutine start, so any watcher still spinning up when the next test
+	// restored the global was an unsynchronised read/write pair. That was a
+	// genuine data race — in test fixtures, not in the production path — and it
+	// failed the suite 2 runs in 3, training everyone to re-run. Config that
+	// travels with the matcher cannot be raced on: the table is built before the
+	// watcher's goroutines exist and never written afterwards.
+	PollInterval time.Duration // for ModeEventsStale
+
 	// UsageLimitStaleness, when > 0, enables a second, earlier stage on a
 	// ModeEventsStale matcher: while the marker is recently visible and the
 	// agent's event log has been stale for longer than this (shorter than
@@ -147,18 +162,11 @@ const dismissalCooldown = 5 * time.Minute
 // resolved by other means (user picked an option, agent restarted, etc.).
 const markerRecency = 60 * time.Second
 
-// eventsStalePollInterval is how often the events-stale matcher re-checks
-// its gate while armed. Mutable (via setEventsStalePollIntervalForTest) so
-// tests can run the dispatcher fast without sleeping 30s per case.
-var eventsStalePollInterval = 30 * time.Second
-
-// setEventsStalePollIntervalForTest swaps the poll interval. Returns the
-// previous value so callers can defer-restore it. Tests only.
-func setEventsStalePollIntervalForTest(d time.Duration) time.Duration {
-	prev := eventsStalePollInterval
-	eventsStalePollInterval = d
-	return prev
-}
+// defaultEventsStalePollInterval is how often an events-stale matcher re-checks
+// its gate while armed, when the matcher does not set IdleGate.PollInterval.
+// Tests shrink it per-matcher (see IdleGatePolicy.PollInterval) rather than by
+// mutating a shared global.
+const defaultEventsStalePollInterval = 30 * time.Second
 
 // scanBufBytes is the size of the per-watcher sliding output buffer. Must
 // comfortably exceed the longest marker; 8 KiB is plenty.
@@ -477,7 +485,11 @@ func dispatchScannerIdle(ctx context.Context, idx int, m ModalMatcher, scanner *
 }
 
 func dispatchEventsStale(ctx context.Context, idx int, m ModalMatcher, scanner *modalScanner, deps ModalHookDeps) {
-	ticker := time.NewTicker(eventsStalePollInterval)
+	poll := m.IdleGate.PollInterval
+	if poll <= 0 {
+		poll = defaultEventsStalePollInterval
+	}
+	ticker := time.NewTicker(poll)
 	defer ticker.Stop()
 	var lastDismissed time.Time
 
