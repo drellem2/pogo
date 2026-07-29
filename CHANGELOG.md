@@ -10,6 +10,81 @@ is the curated, human-readable summary kept in sync at each release cut.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-29
+
+### Changed
+
+- **The `type` → worker-template map moved from prose into Go, and it is now
+  CLOSED (mg-9a04).** The routing table that decides whether a work item gets
+  the builder, the architect, or the QA worker existed only as a markdown table
+  in `internal/agent/prompts/mayor.md`. Nothing in Go knew it, so the guarantee
+  that a `type: design` item reached `polecat-architect` rather than the build
+  worker was that an agent had read and retained a three-row table 170 lines
+  from the command it modifies — the mg-4798 defect one rule over from the
+  dispatch gate mg-ebb0 fixed. The map now lives in
+  `internal/agent/templateroute.go` beside that gate, is enforced at
+  `handleSpawnPolecat`, and is the only place a template is chosen: the CLI's
+  `--template` default (a second, contradicting implementation) is gone.
+
+  **`pogo agent spawn-polecat` with no `--template` no longer defaults to the
+  build worker.** It routes `design` → `polecat-architect` and `qa` →
+  `polecat-qa`; every other type — `scoping`, `audit`, `bug`, and the default
+  bare `task` — selects *no* template and the spawn is refused with `409` naming
+  the type and the flag that gets past it. Dispatching the general-purpose
+  builder is now something you say (`--template=polecat`), not something that
+  happens because nothing else matched. The two misroutes are not symmetric: a
+  design item sent to a build worker implements something nobody decided and the
+  refinery merges it — silent, and it lands code — while a build item sent to an
+  architect costs one loud, harmless cycle. Defaulting to build converted the
+  loud failure into the silent one.
+
+  An explicit `--template` still wins outright, so hand dispatch is unchanged and
+  the gh-issue stage templates (`polecat-triage`, `polecat-build-pr`,
+  `polecat-review`), which route on a body marker rather than on `type`, pass
+  through untouched. Callers that relied on the old implicit default must now
+  pass `--template=polecat`.
+
+### Fixed
+
+- **git GC no longer deletes a live polecat's worktree when it works a foreign
+  branch (gh #94, mg-dd92).** The sweep decided whether a worktree was occupied
+  from the polecat name embedded in the branch *checked out inside it*, never
+  from the worktree's path — whose basename is the polecat that owns the tree.
+  A live polecat on any branch but its own was therefore invisible to the
+  liveness gate: it inherited the foreign, concluded ticket's state, its
+  worktree was removed mid-task, and freeing its branch waived the branch guard
+  so the ref went too. The agent kept running and `pogo agent list` kept
+  reporting it healthy; the work survived only while the commit was still loose
+  in the shared object store. Liveness is now keyed on the worktree **path**
+  (`gitgc.PolecatNameForWorktree`) and branch deletion on the branch suffix —
+  they answer different questions and neither substitutes for the other. Not a
+  v0.6.0 regression: the branch-keyed check has been present since `gitgc`
+  existed. A normal polecat exit still reaps its tree; the test that inverts the
+  reproduction carries that control in the same sweep.
+
+- **git GC says what it removed and why (gh #94, mg-dd92).** The sweep already
+  assembled path, owner, branch and reason for every decision and logged only
+  counts, so a removal in a multi-megabyte pogod log was a bare number and "did
+  the GC take my worktree" was unanswerable for any past incident. Every
+  destructive action — and every tree deliberately preserved — now logs a line
+  naming the repo, the tree, its owner, the branch checked out in it, and the
+  reason. `pogo gc`'s summary carries the same detail. Keeps are not logged per
+  tick; only actions.
+
+- **A failed worktree removal no longer tells the branch phase the branch was
+  freed (mg-dd92).** `freed[branch]` was set before removal was attempted and
+  survived a failure, so the sweep went on to attempt a branch deletion git was
+  always going to refuse — reporting an error in place of the correct "kept:
+  checked out in a worktree". Found by code read during the gh #94 triage and
+  never observed in the wild.
+
+- **`pogo gc` now itemises the worktrees it KEPT, not just the ones it removed
+  (mg-dd92).** `pogo gc --help` promises a worktree holding uncommitted work is
+  "KEPT and reported"; the summary reported it as a count, while pogod's log
+  emitted the full line. A preserved tree pins its branch until someone acts on
+  it, so a count told an operator a branch was stuck without telling them which
+  tree to go rescue.
+
 ## [0.6.0] - 2026-07-29
 
 ### Added
@@ -1664,6 +1739,8 @@ is the curated, human-readable summary kept in sync at each release cut.
 - **Changelog entries are now fragments in `changelog.d/`, not a shared
   `CHANGELOG.md` tail (mg-d917).** Every change used to append to the same
   `## [Unreleased]
+
+## [0.7.0] - 2026-07-29
 
 ## [0.6.0] - 2026-07-29` lines, so any two concurrent branches collided there when
   the refinery rebased onto `main` — the dominant recorded merge-conflict cause
@@ -4565,7 +4642,9 @@ Early patch release.
 Initial tagged release of Pogo: multi-repo discovery, indexing, and
 cross-project zoekt search (`lsp`, `pose`, `pogo`, `pogod`).
 
-[Unreleased]: https://github.com/drellem2/pogo/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/drellem2/pogo/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/drellem2/pogo/compare/v0.6.0...v0.7.0
+[0.6.0]: https://github.com/drellem2/pogo/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/drellem2/pogo/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/drellem2/pogo/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/drellem2/pogo/compare/v0.2.2...v0.3.0
