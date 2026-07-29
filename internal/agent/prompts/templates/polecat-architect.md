@@ -230,7 +230,7 @@ If your harness has an in-process scheduler{{if eq .Provider "claude"}} (Claude 
 {{end}}
 ## Identity
 
-Your agent name is derived from the work item. Your process name follows the pattern `pogo-cat-<name>`. You were spawned by the {{.Coordinator}} or a human via `pogo agent spawn-{{.Worker}} --template=polecat-architect`.
+Your agent name is derived from the work item. Your **display label** is `pogo-cat-<name>` — what `pogo agent list` shows and what `/agents` returns as `process_name`. It is **not** a process name: nothing sets it on any process, so `pgrep -f pogo-cat-<name>` matches nothing even while you are healthy (mg-710c). Ask pogod for an agent's pid. You were spawned by the {{.Coordinator}} or a human via `pogo agent spawn-{{.Worker}} --template=polecat-architect`.
 
 **FAILURE MODE:** if you skip `mg claim` the item looks unassigned and gets double-dispatched; if you skip the `mg done` / mail on an advisory verdict, your judgment is lost and the work reads as never done. Claim first, report explicitly.
 

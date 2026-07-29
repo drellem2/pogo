@@ -717,18 +717,28 @@ Work item transitions and mail sends are mirrored into `~/.pogo/events.log` via 
     └── search/            # Zoekt index (existing)
 ```
 
-## Process Naming
+## Agent Display Labels
 
-Process names are the agent identity system. No registry, no UUID, no database.
+Agent names are the identity system — no UUID, no database. Each agent also gets a
+**display label** derived from its name, which is what a human sees.
 
 | Pattern | Meaning | Example |
 |---------|---------|---------|
 | `pogo-crew-<name>` | Long-running crew agent | `pogo-crew-arch` |
 | `pogo-cat-<id>` | Ephemeral polecat | `pogo-cat-a3f` |
 | `pogo-crew-<coordinator>` | The coordinator (a crew agent; default: mayor) | `pogo-crew-mayor` |
-| `pogod` | The daemon | `pogod` |
+| `pogod` | The daemon (this one really is the process) | `pogod` |
 
-Discovery: `pgrep -a pogo-crew` lists all crew. `pgrep -a pogo-cat` lists all polecats. `pogo agent list` wraps this with formatted output.
+The label is human-facing: `pogo agent list` and `pogo agent info` render it, `/agents`
+returns it as `process_name`, and it is injected into the agent's environment as
+`POGO_PROCESS_NAME`. **It is not a process name.** Nothing sets it on any process —
+agents are spawned as their harness command (`claude`, `codex`, a test's fake-agent),
+and a harness that `exec`s replaces even that argv. `pgrep -f pogo-crew-mayor` against
+a live, healthy mayor matches nothing (measured, mg-710c).
+
+Discovery therefore goes through pogod's registry, not the process table: `pogo agent
+list`, or `/agents` for the recorded pid. Never grep the process table for these
+strings — the result is always empty, and empty reads as "the agent is gone" (mg-de08).
 
 ## API Surface
 

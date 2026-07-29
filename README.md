@@ -30,7 +30,7 @@ On error, rerun `pogo install` or `pogo doctor --check`.
 
 ## Working with agents
 
-`pgrep pogo-crew` lists crew; `pgrep pogo-cat` lists polecats (disposable worker agents). `pogo agent list` formats this. The coordinator's agent name is `mayor` by default (workers default to `pogocat`); both are configurable via `[agents] coordinator` / `[agents] worker`.
+`pogo agent list` lists crew and polecats (disposable worker agents); it reads pogod's registry, not the process table. The coordinator's agent name is `mayor` by default (workers default to `pogocat`); both are configurable via `[agents] coordinator` / `[agents] worker`.
 
 ```sh
 pogo agent list                         # what's running

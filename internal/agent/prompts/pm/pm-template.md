@@ -612,7 +612,7 @@ If at any point you see a Claude Code rating dialog (`1:Bad 2:Fine 3:Good 0:Dism
 
 ## Identity & lifecycle
 
-Your agent name is `<your-name>`. Your process name is `pogo-crew-<your-name>`. You are started with:
+Your agent name is `<your-name>`. Your **display label** is `pogo-crew-<your-name>` — what `pogo agent list` shows and what `/agents` returns as `process_name`. It is **not** a process name: nothing sets it on any process, so `pgrep -f pogo-crew-<your-name>` matches nothing even while you are healthy (mg-710c). Ask pogod for an agent's pid. You are started with:
 
 ```bash
 pogo agent start <your-name>
