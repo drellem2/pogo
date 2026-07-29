@@ -47,14 +47,25 @@ func (p *PogodDeliverer) Deliver(ctx context.Context, entry Entry, fireTime time
 		if p.Registry != nil {
 			a := p.Registry.Get(entry.Agent)
 			if a != nil && a.Status == agent.StatusRunning {
-				// Pass the completion token as the nudge's correlation id so
-				// nudge_sent joins to scheduler_fire_completed (mg-a754).
-				if err := a.NudgeWithModeCorrelated(body, agent.NudgeWaitIdle, agent.DefaultNudgeTimeout, entry.PendingToken); err == nil {
+				// NudgeWake, not NudgeWithModeCorrelated: a fire landing on a
+				// live PTY is a WAKE, so it passes through the wake-cycle
+				// policy (internal/agent/wakepolicy.go) — one wake per unbroken
+				// silence, none inside a known limit episode. Pass the
+				// completion token as the correlation id so nudge_sent (or
+				// nudge_suppressed) joins to scheduler_fire_completed (mg-a754).
+				if err := a.NudgeWake(body, agent.NudgeWaitIdle, agent.DefaultNudgeTimeout, entry.PendingToken); err == nil {
 					return nil
 				} else {
 					// Log and fall through to mail — better to deliver late
-					// via mail than drop the fire entirely.
-					return p.sendMail(entry.Agent, subject, body+"\n\n[scheduler] nudge failed: "+err.Error())
+					// via mail than drop the fire entirely. A policy decline
+					// says so in its own words rather than borrowing "nudge
+					// failed": nothing failed, the wake was declined, and a
+					// recipient reading its own fire deserves the difference.
+					note := "[scheduler] nudge failed: " + err.Error()
+					if errors.Is(err, agent.ErrWakeSuppressed) {
+						note = "[scheduler] terminal wake suppressed: " + err.Error()
+					}
+					return p.sendMail(entry.Agent, subject, body+"\n\n"+note)
 				}
 			}
 		}

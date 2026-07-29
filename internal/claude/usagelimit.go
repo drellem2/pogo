@@ -272,6 +272,42 @@ func (c *usageLimitCoordinator) OnClear(agentID string, when time.Time) {
 	}
 }
 
+// episodeOpen reports whether a fleet usage-limit episode is currently open,
+// with a short detail naming it.
+//
+// It is a READ. The coordinator answers a question and reaches nowhere; the
+// caller (the wake-cycle policy in internal/agent, via the query pogod installs)
+// decides what to do with the answer. That direction is the whole reason this
+// accessor is safe to add to a report-only detector: pull, not push. Nothing
+// here learns that a nudge path exists.
+//
+// "Open" is len(active) > 0 — at least one agent is currently flagged
+// rate-limited — which deliberately INCLUDES an episode still inside its
+// hold-down. The hold-down (mg-4904) governs whether a HUMAN is paged, and a
+// sub-second flap is not worth a bedtime mail. This asks a different question:
+// is an agent wedged on the modal right now? During the hold-down the answer is
+// yes, and the cost of being wrong is one wake that does not happen.
+func (c *usageLimitCoordinator) episodeOpen() (bool, string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.active) == 0 {
+		return false, ""
+	}
+	detail := fmt.Sprintf("%d agent(s) rate-limited", len(c.active))
+	if c.episodeID != "" {
+		detail = fmt.Sprintf("usage-limit episode %s open since %s (%s)",
+			c.episodeID, c.openedAt.UTC().Format(time.RFC3339), detail)
+	}
+	return true, detail
+}
+
+// UsageLimitEpisodeOpen answers the wake-cycle policy's pull question against
+// the process-wide coordinator. pogod installs it via agent.SetLimitEpisodeQuery
+// at startup; this package holds no reference to the nudge path in return.
+func UsageLimitEpisodeOpen() (bool, string) {
+	return defaultUsageLimitCoordinator().episodeOpen()
+}
+
 // makeEpisodeID builds a stable per-episode id from the opening agent and the
 // episode's open time. Episodes are sequential (a new one opens only after the
 // prior one fully closed), so (firstAgent, openedAt) is unique; deriving it from

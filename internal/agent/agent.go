@@ -187,6 +187,14 @@ type Agent struct {
 	// than agent_crashed.
 	stopRequested bool
 
+	// lastWakeAt is when a WAKE nudge was last DELIVERED to this agent's PTY —
+	// the whole per-agent state of the wake-cycle policy (see wakepolicy.go).
+	// Guarded by wakeMu rather than mu on purpose: the policy is evaluated on
+	// the nudge path, which goes on to take mu to write the PTY, and the two
+	// locks must not nest.
+	wakeMu     sync.Mutex
+	lastWakeAt time.Time
+
 	mu sync.Mutex
 }
 
