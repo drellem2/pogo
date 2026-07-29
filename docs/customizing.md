@@ -418,19 +418,35 @@ An environment override exists for the file-count ceiling
 Every polecat runs in an isolated git worktree on its own
 `polecat-<agent-name>` branch — named after the agent name passed to
 `spawn-polecat`, not the work item id (`spawn-polecat abea --id=mg-abea`
-gets branch `polecat-abea`). `gitgc` relies on this: a polecat's name equals
-its branch's `polecat-` suffix *and* its worktree basename. When a polecat exits — normally or abnormally — pogod removes that
-worktree. But branches accumulate, and a worktree can still leak if pogod
-itself dies mid-polecat. pogo garbage-collects both, plus orphaned polecat
-directories under `~/.pogo/polecats` — dirs no longer in `git worktree
-list` whose files were never deleted because the exit cleanup never got to
-run (gh #31).
+gets branch `polecat-abea`, in a worktree at `~/.pogo/polecats/abea`). When
+a polecat exits — normally or abnormally — pogod removes that worktree. But
+branches accumulate, and a worktree can still leak if pogod itself dies
+mid-polecat. pogo garbage-collects both, plus orphaned polecat directories
+under `~/.pogo/polecats` — dirs no longer in `git worktree list` whose files
+were never deleted because the exit cleanup never got to run (gh #31).
 
 The collector (`internal/gitgc`) only ever touches artifacts whose work
 item has **concluded**: an archived ticket's branch is deleted
 unconditionally; a done ticket's branch is deleted once it is merged into
 `main`. Branches of in-flight work, of currently-running polecats, and
 anything whose work item cannot be positively identified are always kept.
+
+**A worktree is in use when a live agent owns its directory** — not when its
+checked-out branch happens to match `polecat-<name>`. The distinction is
+load-bearing: a polecat dispatched to fix or rebase an existing pull request
+*must* check out that PR's head branch, because that is the only way to
+update a PR in place. Its worktree is still `~/.pogo/polecats/<its-name>`,
+and that path is what the collector matches against pogod's live agents.
+Consequently:
+
+- a live polecat's worktree is never removed, whatever branch is inside it;
+- a branch checked out in any surviving worktree is never deleted;
+- a worktree holding a branch belonging to some *other* polecat is kept even
+  when nobody is live — that other ticket's conclusion says nothing about
+  whether this directory is finished with.
+
+Every removal is logged individually, naming the worktree path or branch and
+the reason, rather than only a count.
 
 pogod runs it automatically — once on startup (catching anything leaked
 while pogod was down) and then on a periodic ticker. Tune it with a

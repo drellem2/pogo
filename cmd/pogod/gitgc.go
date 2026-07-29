@@ -79,12 +79,14 @@ func runGitGCSweep(reg *agent.Registry, cfg config.GitGCConfig) {
 		log.Printf("pogod: git GC skipped — cannot read polecat witness: %v", err)
 		return
 	}
+	liveWorktrees := livePolecatWorktrees(reg)
 	for _, repo := range repos {
 		res, err := gitgc.Sweep(gitgc.Options{
-			Repo:         repo,
-			LivePolecats: live,
-			Tickets:      tickets,
-			PolecatsDir:  polecatsDir,
+			Repo:          repo,
+			LivePolecats:  live,
+			LiveWorktrees: liveWorktrees,
+			Tickets:       tickets,
+			PolecatsDir:   polecatsDir,
 		})
 		if err != nil {
 			log.Printf("pogod: git GC sweep of %s failed: %v", repo, err)
@@ -93,11 +95,33 @@ func runGitGCSweep(reg *agent.Registry, cfg config.GitGCConfig) {
 		if len(res.BranchesDeleted) > 0 || len(res.WorktreesRemoved) > 0 || len(res.Errors) > 0 {
 			log.Printf("pogod: git GC %s — deleted %d branches, removed %d worktrees, %d errors",
 				repo, len(res.BranchesDeleted), len(res.WorktreesRemoved), len(res.Errors))
+			// Then name each one. The counts alone are what made mg-3b7c take a
+			// log grep plus a polecat's own incident report to diagnose: "removed
+			// 1 worktrees" does not say WHICH tree vanished, and the agent whose
+			// tree it was gets no signal at all. A destructive action should be
+			// legible from the log that records it.
+			for _, w := range res.WorktreesRemoved {
+				log.Printf("pogod: git GC %s removed worktree %s (branch %s) — %s",
+					repo, w.Path, orNone(w.Branch), w.Reason)
+			}
+			for _, b := range res.BranchesDeleted {
+				log.Printf("pogod: git GC %s deleted branch %s (work item %s) — %s",
+					repo, b.Branch, orNone(b.ID), b.Reason)
+			}
 			for _, e := range res.Errors {
 				log.Printf("pogod: git GC %s error: %s", repo, e)
 			}
 		}
 	}
+}
+
+// orNone renders an empty optional field as a word rather than a blank gap in
+// the middle of a log line.
+func orNone(s string) string {
+	if s == "" {
+		return "none"
+	}
+	return s
 }
 
 // gitGCRepos returns the deduplicated set of repositories to sweep:
@@ -167,4 +191,26 @@ func livePolecatSet(reg *agent.Registry) (map[string]bool, error) {
 		}
 	}
 	return live, nil
+}
+
+// livePolecatWorktrees returns the worktree DIRECTORY of every polecat in the
+// registry, which is what gitgc uses to decide a tree is in use. pogod has
+// known this all along — it records WorktreeDir at spawn and logs it ("polecat
+// <name>: created worktree at <path>") — but never handed it to the sweep,
+// which was left inferring occupancy from the checked-out branch instead and
+// deleted a running polecat's tree because of it (mg-3b7c).
+//
+// Registry-only on purpose: the persisted witness records names and PIDs, not
+// paths, so it cannot answer this. That gap is closed inside gitgc, which
+// re-derives <PolecatsDir>/<name> for every live NAME — covering the polecat
+// that outlived the pogod which spawned it, whose registry entry is gone.
+// Exited agents are excluded; their trees are what the sweep is for.
+func livePolecatWorktrees(reg *agent.Registry) map[string]bool {
+	paths := map[string]bool{}
+	for _, a := range reg.List() {
+		if a.Type == agent.TypePolecat && a.Status != agent.StatusExited && a.WorktreeDir != "" {
+			paths[a.WorktreeDir] = true
+		}
+	}
+	return paths
 }
