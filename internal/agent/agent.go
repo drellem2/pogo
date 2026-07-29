@@ -97,6 +97,13 @@ type Agent struct {
 	// running-agent token cost to the right item without grepping events.
 	WorkItemID string `json:"work_item_id,omitempty"`
 
+	// ClaimedAtSpawn records that pogod took this agent's work-item claim before
+	// the process started (mg-7254), which makes the claim useless as evidence
+	// that the AGENT has done anything. start-verification reads this to avoid
+	// mistaking pogod's own claim for the polecat's first protocol action; see
+	// Registry.startedSignal.
+	ClaimedAtSpawn bool `json:"claimed_at_spawn,omitempty"`
+
 	// RateLimited is set by the modal watcher when the agent is suspected to
 	// have hit a provider usage limit — the rate-limit-options modal is visible
 	// and the agent's event log has been stale past the usage-limit threshold
@@ -426,6 +433,14 @@ type Registry struct {
 	// the gate holds without any wiring, and a caller that never calls
 	// SetDispatchGate still gets it. See dispatchgate.go.
 	dispatchGate DispatchGate
+
+	// workItemClaimer takes a dispatched polecat's work item out of available/
+	// BEFORE its process starts, so ownership no longer depends on the polecat
+	// reaching its own `mg claim` step — which requires a model-API turn, and so
+	// never happened at all for a polecat wedged on 529s (mg-7254). Nil means the
+	// default MGWorkItemClaimer; like the gate above, the claim holds without any
+	// wiring. See spawnclaim.go.
+	workItemClaimer WorkItemClaimer
 
 	// workItemTyper reads a work item's `type` marker so handleSpawnPolecat can
 	// route it through the closed type→template map when no --template was
@@ -779,6 +794,7 @@ type SpawnRequest struct {
 	InitialNudge   string   // if set, pogod sends this nudge after spawn to bypass the CLI interactive prompt
 	RestartOnCrash bool     // if true, pogod respawns this agent when it exits unexpectedly
 	WorkItemID     string   // mg work item id this agent is assigned to (polecats); empty for crew/general agents
+	ClaimedAtSpawn bool     // pogod claimed WorkItemID before this process started (mg-7254); retires the claim as a started-signal
 
 	// Provider is the harness descriptor resolved for this one spawn. The
 	// handlers that build the command from a provider's template
@@ -918,6 +934,7 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 		SourceRepo:     req.SourceRepo,
 		RestartOnCrash: req.RestartOnCrash,
 		WorkItemID:     req.WorkItemID,
+		ClaimedAtSpawn: req.ClaimedAtSpawn,
 		master:         master,
 		cmd:            cmd,
 		nudge:          nudge,

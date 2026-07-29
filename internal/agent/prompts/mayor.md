@@ -96,7 +96,11 @@ You don't usually execute work — you coordinate and dispatch. But you'll occas
 
   Parking is also not the answer to an item you simply haven't dispatched yet. An undispatched item alarming is the detector working; it resolves by being dispatched.
 
-Don't `mg claim` to "block" a ticket from {{.Worker}}s. If you don't intend to do the work yourself, leave it `available` and let the dispatch loop pick it up.
+Don't `mg claim` to "block" a ticket from {{.Worker}}s. If you don't intend to do the work yourself, leave it `available` and let the dispatch loop pick it up. Since mg-7254 this is enforced, not merely advised: **pogod claims the work item itself at spawn**, before the {{.Worker}}'s process starts, so a pre-claimed item makes `spawn-polecat` refuse with a 409 naming the conflict. Claiming to reserve something now blocks the dispatch you were reserving it for.
+
+That also means two things you no longer have to hold in your head. **You cannot double-dispatch an item**: the claim is a `rename(2)` out of `available/`, so the second spawn is refused by the store rather than by your remembering to run `pogo agent list` first. And **`available` now means what it says** — a dispatched item leaves the queue immediately, so a stall-watch or priority-wake report of an unclaimed item is no longer something a healthy {{.Worker}} could be silently working. If you see one, treat it as real.
+
+The converse is the case to watch: a stranded claim — a dead {{.Worker}}'s item still in `claimed/` — now REFUSES the re-dispatch instead of silently allowing a second worker. That is the `mg unclaim <id>` in the recovery steps below doing load-bearing work rather than being a tidy-up.
 
 ## User setup is configuration, not a platform change
 
@@ -230,20 +234,24 @@ Look for:
      ```
   As a fallback, also check `mg list --status=done` for items whose {{.Worker}}s have already exited — these may have been missed if mail delivery lagged. Same cleanup ordering applies (stop, schedule rm, archive).
 
-- **Unstarted {{.Worker}}s — pogod recovers these. Do not nudge inside its window.** A {{.Worker}} that was spawned but has not claimed its work item is the daemon's job, not yours (mg-feb3). pogod watches for the HARD started-signal — the item leaving `available/` — and while it is still absent re-delivers a bare submit terminator to flush the paste-buffered kickoff: **3 attempts, 25s apart, so a ~75s budget**, emitting one `auto_renudge` event each. That is this step's old manual `pogo nudge <name> "1"` at ~30-60s, productized — and it fires earlier, on a stronger signal, than you can.
+- **Unstarted {{.Worker}}s — pogod recovers these. Do not nudge inside its window.** A {{.Worker}} that was spawned but never began is the daemon's job, not yours (mg-feb3). pogod re-delivers a bare submit terminator to flush the paste-buffered kickoff: **3 attempts, 25s apart, so a ~75s budget**, emitting one `auto_renudge` event each. That is this step's old manual `pogo nudge <name> "1"` at ~30-60s, productized — and it fires earlier than you can.
 
-  Check claimed status via `mg list --status=claimed` — if the {{.Worker}}'s item is still `available`, it hasn't started yet. Watch the recovery rather than pre-empting it:
+  **Claim status is no longer the started-signal, and this is the most important change to how you diagnose a slow start.** pogod claims the item at spawn (mg-7254), so `mg list --status=claimed` shows the {{.Worker}}'s item claimed from the instant it was dispatched, whether or not the {{.Worker}} ever ran a turn. Checking it tells you **nothing** about whether the {{.Worker}} started. It is a signal that now always reads healthy — the worst kind to keep consulting out of habit.
+
+  What to read instead: pogod falls back to the **ready-composer** signal for these dispatches, so `auto_renudge` events still tell you a recovery is in progress, and `pogo agent diagnose <name>` reads the process. Be aware the fallback is **weaker** than the retired claim signal: it catches a harness whose composer never rendered, but not the paste-buffered-CR wedge (mg-ce61), where the composer *did* render and the {{.Worker}} still never acted. A {{.Worker}} silently wedged that way now draws no `auto_renudge` at all, so a dispatch that has produced no output and no mail after a few minutes is worth a manual look even with a clean event log.
+
+  Watch the recovery rather than pre-empting it:
   ```bash
   pogo events list --since=10m --type=auto_renudge --json | jq -r 'select(.details.work_item_id=="<work-item-id>")'
   ```
 
-  **Nudging inside the ~75s window costs you twice.** Your keystroke lands in an agent that may be mid-recovery — the daemon sends a *bare* CR precisely because a stray `1` can corrupt a working agent's input — and it makes the outcome unreadable: a {{.Worker}} that claims after you nudged says nothing about whether the daemon recovered it, so the workaround silently validates itself and the real number is never learned.
+  **Nudging inside the ~75s window costs you twice.** Your keystroke lands in an agent that may be mid-recovery — the daemon sends a *bare* CR precisely because a stray `1` can corrupt a working agent's input — and it makes the outcome unreadable: a {{.Worker}} that starts after you nudged says nothing about whether the daemon recovered it, so the workaround silently validates itself and the real number is never learned.
 
-  **Still unclaimed at ~90s is a finding, not a slow start.** The budget is spent by then and the daemon has stopped by design; it will not try again. Diagnose it, and say what you saw — how many `auto_renudge` attempts fired, and whether an `agent_unwatched` event says none could. In production 75 real {{.Worker}}s have needed this recovery: 72 claimed after the first CR, one after the second, and **two spent the whole budget without starting** — one of those was eventually rescued ~9 minutes later by its own mail-check schedule fire, the other never claimed at all. The daemon is the recovery for ~97% of these, not a guarantee for all of them, and the exhausted case is exactly where you are still needed.
+  **Still unstarted at ~90s is a finding, not a slow start.** The budget is spent by then and the daemon has stopped by design; it will not try again. Diagnose it, and say what you saw — how many `auto_renudge` attempts fired, and whether an `agent_unwatched` event says none could. In production 75 real {{.Worker}}s have needed this recovery: 72 started after the first CR, one after the second, and **two spent the whole budget without starting** — one of those was eventually rescued ~9 minutes later by its own mail-check schedule fire, the other never claimed at all. The daemon is the recovery for ~97% of these, not a guarantee for all of them, and the exhausted case is exactly where you are still needed.
 
   **Three cases pogod does not cover at all.** Each announces itself with an `agent_unwatched` event, so look for it instead of assuming coverage:
   - `reason=no_start_verifier` — **daemon-wide**: nothing spawned on this pogod gets start-verification. That is an incident in its own right; a spawn wave under it has no recovery net whatsoever.
-  - `reason=no_ready_signal` — this spawn carries no `--id` **and** its provider declares no prompt-ready marker. Re-dispatch with `--id <work-item>` to get the strong claim signal back.
+  - `reason=no_ready_signal` — this spawn carries no `--id` **and** its provider declares no prompt-ready marker. Nothing observable to gate on at all. Note that re-dispatching with `--id` no longer buys back a *strong* signal: since mg-7254 the claim is pogod's, so an `--id` dispatch is watched on the same ready-composer fallback described above.
   - mg state unreadable (logged as `start-verify query for <id> failed`) — the watcher calls that inconclusive and stops early rather than renudging blind. No event; it is a log line only.
 
   In those cases, and after the budget is exhausted, the manual kick is still the tool:

@@ -63,10 +63,22 @@ Your worktree at `{{.WorktreeDir}}` is a git worktree that **shares the
 
 Follow these steps exactly, in order. Skipping any step is a failure.
 
-1. **Claim the work item** (prevents duplicate work):
+1. **Confirm you own the work item.** pogod claimed `{{.Id}}` for you at spawn, before your
+   process started (mg-7254), so this step is a check rather than an action:
    ```bash
-   mg claim {{.Id}}
+   mg show {{.Id}} | grep '^Status:'    # expect: claimed
    ```
+   Do **not** run `mg claim {{.Id}}` on the happy path — it now fails with `already claimed`,
+   and that failure is the mechanism working, not a problem to solve.
+
+   Claiming used to be your job here, and that made ownership depend on you completing a
+   model-API turn. A {{.Worker}} wedged on `529 Overloaded` runs, looks healthy, and never
+   reaches this line — so the item stayed in `available/`, stall-watch reported it as
+   neglected, and nothing structural stopped a second {{.Worker}} being dispatched onto it.
+
+   **If the status is not `claimed`:** run `mg claim {{.Id}}` yourself and mail the
+   {{.Coordinator}}. pogod's claim-at-spawn failed open, which means the item is sitting in
+   `available/` where it is indistinguishable from work nobody started.
 
 2. **Register a mail-check schedule with pogod.** This matters double for you: the modify ↔ review loop runs over mail — the builder {{.Worker}} mails you when fixes are pushed, and without this schedule you will never notice. Use **`pogo schedule`** (the daemon-side scheduler) so the mail-check survives host sleep / NTP steps / pogod restarts; do **not** use your harness's in-process scheduler{{if eq .Provider "claude"}} (Claude Code's `CronCreate`){{end}} for this — it silently drops fires during sleep:
 
@@ -207,6 +219,6 @@ If your harness has an in-process scheduler{{if eq .Provider "claude"}} (Claude 
 
 Your agent name is derived from the work item. Your **display label** is `pogo-cat-<name>` — what `pogo agent list` shows and what `/agents` returns as `process_name`. It is **not** a process name: nothing sets it on any process, so `pgrep -f pogo-cat-<name>` matches nothing even while you are healthy (mg-710c). Ask pogod for an agent's pid. You were spawned by the {{.Coordinator}} or a human via `pogo agent spawn-polecat --template=polecat-review`.
 
-FAILURE MODE: If you complete the review but skip `mg claim` or the terminal `mg done`, the verdict is lost. Calling `mg done` mid-loop — after a round-1 or round-2 fail — is also a failure: it marks the review complete while the loop is still open. `mg done` fires exactly once, on pass or on the round-3 cap. And never `gh pr review` — same-identity reviews are rejected by GitHub; `gh pr comment` is your only PR channel.
+FAILURE MODE: If you complete the review but skip the terminal `mg done`, the verdict is lost — pogod holds the claim for you (step 1), but only you can close the item. Calling `mg done` mid-loop — after a round-1 or round-2 fail — is also a failure: it marks the review complete while the loop is still open. `mg done` fires exactly once, on pass or on the round-3 cap. And never `gh pr review` — same-identity reviews are rejected by GitHub; `gh pr comment` is your only PR channel.
 
 CRITICAL: Never exit on your own. Exiting prematurely orphans the modify ↔ review loop — the builder mails findings-fixed to a dead mailbox and the {{.Coordinator}} never gets a verdict. The {{.Coordinator}} will terminate your process when the loop is complete.

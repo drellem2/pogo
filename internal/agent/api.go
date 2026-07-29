@@ -1414,6 +1414,34 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		nudgeMsg = "You are now running. Begin your assigned task."
 	}
 
+	// Ownership: take the work item's claim BEFORE the process exists (mg-7254).
+	//
+	// Claiming was the polecat's own step 1, which made it contingent on the
+	// polecat completing a model-API turn. A polecat wedged on 529 Overloaded
+	// runs, looks healthy, and never reaches the step — so the item stayed in
+	// available/, stall-watch reported it as neglected, nothing but the
+	// dispatcher's memory prevented a second dispatch onto it, and `mg done`
+	// would have refused it at the very end.
+	//
+	// Placed here, last of the fallible steps and immediately before the spawn,
+	// for two reasons that pull the same way. Before the spawn: a claim we cannot
+	// take must mean a process that never starts, so no agent can ever run
+	// believing it owns an item it does not. Last: only ONE failure path follows
+	// this point, so there is exactly one place that has to give the claim back,
+	// rather than a rollback obligation threaded through every earlier return.
+	//
+	// A conflict is 409 like the gates above — the request conflicts with the
+	// item's own state and retrying it unchanged is refused identically forever.
+	// Everything else about a failed claim fails open; see
+	// MGWorkItemClaimer.ClaimForSpawn for why the two directions differ.
+	claimVerdict, claimRefusal := r.claimForSpawn(spawnReq)
+	if claimRefusal != "" {
+		os.Remove(promptFile)
+		cleanupFailedPolecatSpawn(sourceRepo, worktreeDir, branchName)
+		failPolecatSpawn(w, spawnReq, http.StatusConflict, claimRefusal)
+		return
+	}
+
 	a, err := r.Spawn(SpawnRequest{
 		Name:           spawnReq.Name,
 		Type:           TypePolecat,
@@ -1426,11 +1454,22 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		InitialNudge:   nudgeMsg,
 		RestartOnCrash: ResolveRestartOnCrash(promptFile, TypePolecat),
 		WorkItemID:     spawnReq.Id,
+		// Tell start-verification that the claim it used to gate on is ours, not
+		// the polecat's (mg-7254). Without this the watcher would read pogod's
+		// own spawn-time claim as "the polecat started" on every dispatch and
+		// silently retire the mg-feb3 recovery net.
+		ClaimedAtSpawn: claimVerdict.Outcome == ClaimTaken,
 		Provider:       provider,
 	})
 	if err != nil {
 		os.Remove(promptFile) // Clean up temp file on spawn failure
 		cleanupFailedPolecatSpawn(sourceRepo, worktreeDir, branchName)
+		// The only failure path after the claim, and therefore the only one that
+		// has to give it back. A claim left behind here would strand the item in
+		// claimed/ with no worker on it — dispatch skips claimed items and
+		// stall-watch does not look there, so it would be lost in the mirror
+		// image of the state the claim was added to prevent (mg-7254).
+		r.releaseSpawnClaim(claimVerdict, spawnReq)
 		failPolecatSpawn(w, spawnReq, spawnErrStatus(err), err.Error())
 		return
 	}

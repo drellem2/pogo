@@ -199,7 +199,23 @@ func (r *Registry) startedSignal(a *Agent) (started func() (bool, error), reason
 		return nil, "", false
 	}
 
-	if a.WorkItemID != "" {
+	// The claim signal is only evidence of a START when the POLECAT is what took
+	// the claim. Since mg-7254 pogod claims the work item itself, before the
+	// process exists, so for those dispatches "the item left available/" is true
+	// from the first instant and says nothing whatever about the agent.
+	//
+	// This flag is load-bearing in the most dangerous direction: without it the
+	// watcher reads pogod's own claim as "started" on every dispatch carrying an
+	// --id, concludes there is nothing to recover, and the mg-feb3 auto-renudge
+	// silently stops firing — a recovery net that rescued 73 of 75 real polecats,
+	// gone with no log line and no event. That is strictly worse than the bug
+	// mg-7254 fixed, so it is refused explicitly rather than left to be noticed.
+	//
+	// The claim signal is kept for dispatches where pogod did NOT take the claim
+	// (a fail-open claim, or any caller spawning through Registry.Spawn directly):
+	// there the polecat is still the only thing that can claim, so the signal
+	// means what it always meant.
+	if a.WorkItemID != "" && !a.ClaimedAtSpawn {
 		return func() (bool, error) { return verifier(a.WorkItemID) }, reasonWorkItemUnclaimed, true
 	}
 
@@ -208,9 +224,33 @@ func (r *Registry) startedSignal(a *Agent) (started func() (bool, error), reason
 		return nil, "", false
 	}
 
-	log.Printf("agent %s: no work item id — start-verification falls back to the ready-composer signal "+
-		"(a screen that never renders a composer draws a recovery CR); re-dispatch with --id <work-item> for the stronger claim signal",
-		a.Name)
+	// Falling back to the ready-composer signal. Be exact about what that costs,
+	// because the two ways of arriving here have different remedies and because
+	// the fallback is WEAKER than the claim signal in a specific, nameable way:
+	// it catches a harness whose composer never rendered, but not the
+	// paste-buffered-CR wedge of mg-ce61 — there the composer DID render, so
+	// WaitForReady latched promptReadySeen before this watcher ran and the signal
+	// reports "started" for an agent that never acted.
+	//
+	// That residual gap is real and it is not fixed here: mg-7254 traded it for
+	// ownership, on the grounds that an unclaimed item fails silently and
+	// unboundedly while a missed start-verification still has the mail-check
+	// schedule behind it. Restoring a hard started-signal needs a way to observe
+	// the polecat's own first protocol action — a claim pid re-stamp, which
+	// macguffin has no command for today, or some other first-turn observable —
+	// and that is a design decision with its own acceptance criteria, tracked
+	// separately rather than invented inside this change.
+	if a.ClaimedAtSpawn {
+		log.Printf("agent %s: pogod holds the claim on %s from spawn (mg-7254), so the claim is not "+
+			"evidence this agent started — start-verification falls back to the WEAKER ready-composer "+
+			"signal: a composer that never renders draws a recovery CR, but a paste-buffered kickoff "+
+			"(mg-ce61) will not, because the composer rendered before the nudge was absorbed",
+			a.Name, a.WorkItemID)
+	} else {
+		log.Printf("agent %s: no work item id — start-verification falls back to the ready-composer signal "+
+			"(a screen that never renders a composer draws a recovery CR); re-dispatch with --id <work-item> for the stronger claim signal",
+			a.Name)
+	}
 	return func() (bool, error) { return a.sawPromptReady(), nil }, reasonNoReadyComposer, true
 }
 
