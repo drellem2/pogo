@@ -286,15 +286,30 @@ Use --json for the raw structured response.`,
 	var statusLive bool
 	var statusInterval time.Duration
 	var statusTag string
+	var statusAssignee string
 
 	// renderStatus fetches the current dashboard state and returns it as a
 	// fully-formatted text frame. In JSON mode it prints directly and returns
 	// "". The whole frame is built into a buffer before returning so live mode
 	// can write it to the terminal in a single flicker-free update.
 	renderStatus := func() string {
+		// statusFilter describes an active --assignee filter to a machine
+		// consumer, so it can tell "no work items" from "none matched" without
+		// having been told a filter was applied. AppliesTo names the sections
+		// the filter actually reached — agents and refinery entries have no
+		// assignee, so they are listed in full and are not in it.
+		type statusFilter struct {
+			Assignee  string   `json:"assignee"`
+			AppliesTo []string `json:"applies_to"`
+			Matched   int      `json:"matched"`
+		}
+		// WorkItems is a pointer so that an active filter can emit the key
+		// with an empty value ("filtered to nothing") while an absent filter
+		// keeps today's behaviour of omitting it entirely.
 		type statusReport struct {
+			Filter    *statusFilter           `json:"filter,omitempty"`
 			Agents    []agent.AgentInfo       `json:"agents"`
-			WorkItems string                  `json:"work_items,omitempty"`
+			WorkItems *string                 `json:"work_items,omitempty"`
 			Refinery  *refinery.Status        `json:"refinery,omitempty"`
 			Queue     []refinery.MergeRequest `json:"refinery_queue,omitempty"`
 		}
@@ -307,14 +322,33 @@ Use --json for the raw structured response.`,
 			report.Agents = agents
 		}
 
-		// Work items via mg list
+		// Work items via mg list. What is fetched does NOT depend on
+		// --assignee: the filter is applied to the rendered result below, so
+		// the dashboard reads exactly the same thing with or without it.
 		mgArgs := []string{"list"}
 		if statusTag != "" {
 			mgArgs = append(mgArgs, "--tag", statusTag)
 		}
 		mgOut, mgErr := exec.Command("mg", mgArgs...).CombinedOutput()
+		workItems := ""
 		if mgErr == nil {
-			report.WorkItems = strings.TrimSpace(string(mgOut))
+			workItems = strings.TrimSpace(string(mgOut))
+		}
+
+		filtering := statusAssignee != ""
+		wantAssignee := canonicalAssignee(statusAssignee)
+		matched := 0
+		if filtering {
+			workItems, matched = filterWorkItemsByAssignee(workItems, statusAssignee)
+			report.Filter = &statusFilter{
+				Assignee:  wantAssignee,
+				AppliesTo: []string{"work_items"},
+				Matched:   matched,
+			}
+			// Always present under a filter, even when it selected nothing.
+			report.WorkItems = &workItems
+		} else if workItems != "" {
+			report.WorkItems = &workItems
 		}
 
 		// Refinery
@@ -342,8 +376,19 @@ Use --json for the raw structured response.`,
 			fmt.Fprintf(&b, "pogo status --live  (every %s, Ctrl-C to quit)\n\n", statusInterval)
 		}
 
+		// A filter that reaches one section of three has to say so, or an
+		// empty work-item list beside a full agent list reads as a fleet that
+		// is idle rather than a view that is narrowed.
+		if filtering {
+			fmt.Fprintf(&b, "Filter: assignee=%s  (work items only; agents and refinery have no assignee and are shown in full)\n\n", wantAssignee)
+		}
+
 		// Agents section
-		fmt.Fprintln(&b, "=== Agents ===")
+		if filtering {
+			fmt.Fprintln(&b, "=== Agents (unfiltered) ===")
+		} else {
+			fmt.Fprintln(&b, "=== Agents ===")
+		}
 		if agentErr != nil {
 			fmt.Fprintf(&b, "  (unavailable: %s)\n", agentErr)
 		} else if len(agents) == 0 {
@@ -376,20 +421,32 @@ Use --json for the raw structured response.`,
 		fmt.Fprintln(&b)
 
 		// Work items section
-		fmt.Fprintln(&b, "=== Work Items ===")
+		if filtering {
+			fmt.Fprintf(&b, "=== Work Items (assignee=%s) ===\n", wantAssignee)
+		} else {
+			fmt.Fprintln(&b, "=== Work Items ===")
+		}
 		if mgErr != nil {
 			fmt.Fprintln(&b, "  (unavailable: mg not found)")
-		} else if report.WorkItems == "" {
+		} else if filtering && matched == 0 {
+			// Stated as a count, not as "no work items": a filter that
+			// matched nothing is a different fact from an empty backlog.
+			fmt.Fprintf(&b, "  0 matching assignee=%s.\n", wantAssignee)
+		} else if workItems == "" {
 			fmt.Fprintln(&b, "  No work items.")
 		} else {
-			for _, line := range strings.Split(report.WorkItems, "\n") {
+			for _, line := range strings.Split(workItems, "\n") {
 				fmt.Fprintf(&b, "  %s\n", line)
 			}
 		}
 		fmt.Fprintln(&b)
 
 		// Refinery section
-		fmt.Fprintln(&b, "=== Refinery ===")
+		if filtering {
+			fmt.Fprintln(&b, "=== Refinery (unfiltered) ===")
+		} else {
+			fmt.Fprintln(&b, "=== Refinery ===")
+		}
 		if refErr != nil {
 			fmt.Fprintf(&b, "  (unavailable: %s)\n", refErr)
 		} else {
@@ -429,6 +486,24 @@ Use --json for the raw structured response.`,
 
 Use --live for a continuously updating view (like watch), refreshed every
 --interval (default 2s; must be positive).
+
+--assignee narrows the WORK ITEM section and nothing else:
+
+    pogo status --assignee=human    # what is waiting on you
+    pogo status --assignee=none     # items nobody has been given
+    pogo status --assignee=parked
+
+Agents and refinery merge requests carry no assignee, so they are shown in
+full; the output says so on its face, and names the filter in the work-item
+header, so a short list next to a busy fleet cannot be misread as an idle one.
+Matching is exact and case-insensitive — not substring. 'human' also matches
+items assigned to your OS username, which is how mg renders them; 'none'
+selects items with no assignee at all (an item assigned to the literal word
+"none" is therefore not selectable).
+
+The filter applies per refresh under --live, and is carried in --json as a
+"filter" object; under a filter "work_items" is always present, empty when
+nothing matched, so a consumer never has to know a filter was applied.
 
 With --json a single snapshot is printed as one indented JSON object.
 Combining --live with --json emits a stream of such objects on stdout — one
@@ -3047,6 +3122,7 @@ branches; work items and mail live in mg/macguffin (the task-store CLI).`,
 	cmdStatus.Flags().BoolVar(&statusLive, "live", false, "Continuously refresh the dashboard (like watch)")
 	cmdStatus.Flags().DurationVar(&statusInterval, "interval", 2*time.Second, "Refresh interval for --live mode (must be > 0)")
 	cmdStatus.Flags().StringVar(&statusTag, "tag", "", "Filter work items by tag")
+	cmdStatus.Flags().StringVar(&statusAssignee, "assignee", "", "Filter work items by assignee, exact and case-insensitive ('human' for your own queue, 'none' for unassigned). Agents and refinery are never filtered.")
 	rootCmd.AddCommand(cmdStatus)
 	cmdDoctor.Flags().BoolVar(&doctorCheck, "check", false, "Run quick health checks without starting the doctor agent")
 	rootCmd.AddCommand(cmdDoctor)
