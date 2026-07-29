@@ -1,0 +1,161 @@
+# docs/investigations/nudge-claude-code-workaround.md §3 protocol, executed by mg-68c8.
+# Regenerate: POGO_CLAUDE_SUBMITDELAY_E2E=1 go test ./internal/claude/ -run TestClaudeSubmitDelayStillRequired -v -timeout 30m
+claude_version: "2.1.220 (Claude Code)"
+test_date: "2026-07-29T05:42:35Z"
+host_os: "darwin"
+pty_size: "200x50"
+workdir: "/private/var/folders/4n/9xszbbx91_jb05tp4h48w2340000gn/T/TestClaudeSubmitDelayStillRequired1902708997/001"
+profile:
+  submit_delay: "50ms"
+  submit_terminator: "\r"
+  idle_threshold: "2s"
+probe_body_bytes: 82  # chunk size matters — see probeBodySuffix
+test_runs:
+  - variant: A
+    iter: 1
+    result: not-submitted
+    latency_ms: 0
+    pty_bytes: 935
+    notes: "token rendered on screen but absent from session transcript: retained in composer"
+  - variant: B
+    iter: 1
+    result: submitted
+    latency_ms: 303
+    pty_bytes: 2759
+  - variant: A
+    iter: 2
+    result: not-submitted
+    latency_ms: 0
+    pty_bytes: 969
+    notes: "token rendered on screen but absent from session transcript: retained in composer"
+  - variant: B
+    iter: 2
+    result: submitted
+    latency_ms: 303
+    pty_bytes: 2947
+  - variant: A
+    iter: 3
+    result: not-submitted
+    latency_ms: 0
+    pty_bytes: 969
+    notes: "token rendered on screen but absent from session transcript: retained in composer"
+  - variant: B
+    iter: 3
+    result: submitted
+    latency_ms: 304
+    pty_bytes: 2939
+  - variant: A
+    iter: 4
+    result: not-submitted
+    latency_ms: 0
+    pty_bytes: 969
+    notes: "token rendered on screen but absent from session transcript: retained in composer"
+  - variant: B
+    iter: 4
+    result: submitted
+    latency_ms: 304
+    pty_bytes: 2817
+  - variant: A
+    iter: 5
+    result: not-submitted
+    latency_ms: 0
+    pty_bytes: 969
+    notes: "token rendered on screen but absent from session transcript: retained in composer"
+  - variant: B
+    iter: 5
+    result: submitted
+    latency_ms: 302
+    pty_bytes: 2884
+  - variant: A
+    iter: 6
+    result: not-submitted
+    latency_ms: 0
+    pty_bytes: 969
+    notes: "token rendered on screen but absent from session transcript: retained in composer"
+  - variant: B
+    iter: 6
+    result: submitted
+    latency_ms: 300
+    pty_bytes: 2977
+  - variant: A
+    iter: 7
+    result: not-submitted
+    latency_ms: 0
+    pty_bytes: 969
+    notes: "token rendered on screen but absent from session transcript: retained in composer"
+  - variant: B
+    iter: 7
+    result: submitted
+    latency_ms: 304
+    pty_bytes: 2852
+  - variant: A
+    iter: 8
+    result: not-submitted
+    latency_ms: 0
+    pty_bytes: 969
+    notes: "token rendered on screen but absent from session transcript: retained in composer"
+  - variant: B
+    iter: 8
+    result: submitted
+    latency_ms: 304
+    pty_bytes: 2906
+  - variant: A
+    iter: 9
+    result: not-submitted
+    latency_ms: 0
+    pty_bytes: 969
+    notes: "token rendered on screen but absent from session transcript: retained in composer"
+  - variant: B
+    iter: 9
+    result: submitted
+    latency_ms: 302
+    pty_bytes: 3007
+  - variant: A
+    iter: 10
+    result: not-submitted
+    latency_ms: 0
+    pty_bytes: 969
+    notes: "token rendered on screen but absent from session transcript: retained in composer"
+  - variant: B
+    iter: 10
+    result: submitted
+    latency_ms: 304
+    pty_bytes: 2872
+summary:
+  variant_a_submit_rate: "0/10"
+  variant_b_submit_rate: "10/10"
+  conclusion: "bug-still-present"
+  recommended_action: "keep"
+
+# Supplementary sweep — NOT part of the §3 protocol, and not produced by the
+# committed test. Measured by hand during the same session on the same harness
+# build, after the pilot run showed a 32-byte single write submitting while an
+# 85-byte one did not. Content was held uniform (token + 'x' padding, no
+# punctuation) so the write's byte count was the only variable. Recorded here
+# because it is the reason a short-probe re-test would reach the OPPOSITE
+# conclusion from the one above.
+chunk_size_sweep:
+  method: "single write of N bytes (body + \\r) into the settled composer; submission read from the session transcript"
+  results:
+    - {bytes: 16, result: submitted}
+    - {bytes: 24, result: submitted}
+    - {bytes: 32, result: submitted}
+    - {bytes: 40, result: submitted}
+    - {bytes: 48, result: submitted}
+    - {bytes: 56, result: submitted}
+    - {bytes: 58, result: submitted}
+    - {bytes: 60, result: submitted}
+    - {bytes: 62, result: submitted}
+    - {bytes: 63, result: submitted}
+    - {bytes: 64, result: not-submitted}
+    - {bytes: 65, result: not-submitted}
+    - {bytes: 72, result: not-submitted}
+    - {bytes: 80, result: not-submitted}
+  threshold_bytes: 64
+  note: >-
+    Sharp boundary, no grey zone: every write of <= 63 bytes submitted and every
+    write of >= 64 bytes did not. So the paste heuristic on 2.1.220 keys on the
+    SIZE of the read() chunk, not on elapsed time between keystrokes. Real nudge
+    bodies are a message plus the scheduler's "[scheduler id=... due=... fired=...]"
+    metadata line and are far past 64 bytes, which is why the delay is
+    load-bearing for production traffic.
