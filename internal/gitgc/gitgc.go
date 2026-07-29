@@ -20,10 +20,12 @@ package gitgc
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/drellem2/pogo/internal/config"
 )
@@ -277,6 +279,208 @@ func (e *UndeterminedWorktreeError) Error() string {
 
 func (e *UndeterminedWorktreeError) Unwrap() error { return e.Err }
 
+// RecentlyWrittenWorktreeError reports a removal refused by the mtime VETO: git
+// could not read the tree, the caller DOES hold positive evidence that its
+// owner is dead — and something wrote to the tree anyway, inside quietWindow.
+//
+// Death evidence plus a file written ninety seconds ago is a contradiction, and
+// it resolves in favour of the files: a recent write means something is
+// happening that our death evidence did not capture. See quietWindow for why a
+// timestamp is allowed to forbid a removal here and never to authorise one.
+type RecentlyWrittenWorktreeError struct {
+	Path string
+	// Err is the underlying `git status` failure — the reason we are in the
+	// cannot-tell arm at all.
+	Err error
+	// Age is how long ago the newest write inside the tree happened, and
+	// Window the quiet period it fell short of.
+	Age    time.Duration
+	Window time.Duration
+}
+
+func (e *RecentlyWrittenWorktreeError) Error() string {
+	return fmt.Sprintf("worktree %s: cannot determine whether it holds uncommitted work (%v), "+
+		"and it was written to %s ago — inside the %s quiet window, which contradicts the evidence "+
+		"that its owner is dead; refusing to remove", e.Path, e.Err, e.Age.Round(time.Second), e.Window)
+}
+
+func (e *RecentlyWrittenWorktreeError) Unwrap() error { return e.Err }
+
+// UnenumerableWorktreeError reports a removal refused because the tree could
+// neither be read by git NOR listed on the filesystem, so the mtime veto has
+// nothing to evaluate.
+//
+// This is a cannot-tell ABOUT the cannot-tell, and it gets its own refusal
+// rather than degrading to the worktree root's own mtime. Root mtime is
+// measurably blind to edits below it — a live agent editing pkg/deep/work.go
+// leaves it untouched — so falling back to it would mean deleting on a signal
+// measured not to fire. Refusing costs one pinned worktree in a rare shape.
+type UnenumerableWorktreeError struct {
+	Path string
+	// Err is the `git status` failure; WalkErr is the separate filesystem
+	// failure that stopped us listing the tree. Both are reported because they
+	// are usually different faults, and an operator needs to see which is which.
+	Err     error
+	WalkErr error
+}
+
+func (e *UnenumerableWorktreeError) Error() string {
+	return fmt.Sprintf("worktree %s: cannot determine whether it holds uncommitted work (%v) "+
+		"and cannot list its files either (%v), so there is no timestamp to check the owner's "+
+		"death against; refusing to remove", e.Path, e.Err, e.WalkErr)
+}
+
+func (e *UnenumerableWorktreeError) Unwrap() error { return e.Err }
+
+// quietWindow is how long a worktree must go UNWRITTEN before positive evidence
+// of its owner's death is allowed to license destroying files git could not
+// read. It is both halves of the design in one constant, and the asymmetry
+// underneath it is the reason this package can use a timestamp at all:
+//
+//	mtime RECENT -> something is writing.  SOUND. Nobody writes a tree nobody holds.
+//	mtime OLD    -> nobody holds it.       UNSOUND. A live agent on a long build, a
+//	                                       CI wait, or a long model turn touches
+//	                                       nothing for hours.
+//
+// So a timestamp may FORBID a deletion and may never AUTHORISE one. Nothing
+// here collects BECAUSE a tree is old: the cannot-tell arm still requires
+// positive evidence of death (OwnerGone), and this window is only allowed to
+// overrule that evidence, never to substitute for it. A design that collected
+// on age alone would delete a live agent's work for the crime of thinking hard.
+//
+// Read forwards it is the VETO: even with death evidence, a tree written to
+// within the window is refused. Read backwards it is the DRAIN — the reason the
+// refused set is a delay rather than an unbounded leak. A tree that is
+// cannot-tell, death-evidenced and untouched for a full day is the safest
+// collection candidate this sweep has; a refusal today becomes a collection
+// tomorrow with no operator action and no persisted state.
+//
+// A day is chosen to clear the longest plausible quiet period of a LIVE agent
+// (a long build, a CI wait, a long model turn — minutes to an hour) by a wide
+// margin, while still bounding the pin at roughly one day. Shortening it trades
+// safety for disk; `--force` is the operator's way to not wait.
+const quietWindow = 24 * time.Hour
+
+// newestWrite reports the modification time of the most recently written thing
+// inside worktreeDir, and an error when the tree cannot be ENUMERATED — which
+// is a different and worse answer than "nothing has been written", and is why
+// the two are separate returns.
+//
+// Availability was measured rather than assumed across the shapes that make
+// `git status` fail: a damaged .git pointer, EACCES on .git and a truncated
+// index all leave the whole tree walkable, so "the filesystem is broken exactly
+// when git is" is false. Only EACCES on the worktree ROOT defeats the walk, and
+// that is the case this error return exists for.
+//
+// git's own bookkeeping is skipped. A `.git` entry is not agent work, and its
+// mtime moves for reasons that have nothing to do with whether anyone is alive
+// — corrupting a worktree's .git pointer writes a file INSIDE the tree, which
+// would otherwise make a freshly-damaged tree look freshly worked-on.
+func newestWrite(worktreeDir string) (time.Time, error) {
+	var newest time.Time
+	err := filepath.WalkDir(worktreeDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			// A directory we cannot read. We cannot list the files, so we
+			// cannot veto on their timestamps; say so rather than reporting a
+			// maximum over the part we happened to see.
+			return err
+		}
+		if d.Name() == ".git" && path != worktreeDir {
+			if d.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		info, ierr := d.Info()
+		if ierr != nil {
+			// One entry that vanished or cannot be stat'ed mid-walk is not an
+			// enumeration failure; the tree still lists. Skip it — a missing
+			// mtime cannot raise the maximum, and refusing on it would pin a
+			// tree for a race with its own teardown.
+			return nil
+		}
+		if mt := info.ModTime(); mt.After(newest) {
+			newest = mt
+		}
+		return nil
+	})
+	if err != nil {
+		return time.Time{}, err
+	}
+	return newest, nil
+}
+
+// worktreeRemovalCheck is the decision RemoveWorktree makes, computed WITHOUT
+// removing anything. It is split out so the GC sweep can report in a dry run
+// exactly what an apply would do, and can name the real reason in its log,
+// while the decision itself still has exactly one implementation.
+type worktreeRemovalCheck struct {
+	// Refusal is the error RemoveWorktree would return, or nil to proceed.
+	Refusal error
+	// StatusErr is the `git status` failure whenever dirtiness could not be
+	// determined — including when we proceed anyway on positive death evidence.
+	// It is kept for the log: reporting only the ticket state on that path
+	// names an innocent reason for a destructive act, and a forensic log that
+	// names an innocent cause is worse than silence, because a missing line
+	// prompts investigation and a plausible one ends it (gh #97).
+	StatusErr error
+}
+
+// checkWorktreeRemoval applies RemoveWorktree's guard without acting on it.
+// See RemoveWorktree for the reasoning behind each arm.
+func checkWorktreeRemoval(worktreeDir string, owner WorktreeOwner) worktreeRemovalCheck {
+	if worktreeDir == "" {
+		return worktreeRemovalCheck{}
+	}
+	// An absent directory holds nothing to protect. Checked BEFORE the status
+	// call so it never reaches the cannot-tell arm: "there are no files" and
+	// "there may be files I cannot read" are different facts, and only the
+	// second one deserves a refusal.
+	if _, err := os.Stat(worktreeDir); os.IsNotExist(err) {
+		return worktreeRemovalCheck{}
+	}
+
+	isDirty, files, err := WorktreeDirty(worktreeDir)
+	if err == nil {
+		if isDirty {
+			shown := files
+			if len(shown) > dirtyFileListCap {
+				shown = shown[:dirtyFileListCap]
+			}
+			return worktreeRemovalCheck{
+				Refusal: &DirtyWorktreeError{Path: worktreeDir, Files: shown, Total: len(files)},
+			}
+		}
+		return worktreeRemovalCheck{}
+	}
+
+	// --- cannot tell -----------------------------------------------------
+	if owner != OwnerGone {
+		// Nothing has established that this tree is unowned. Refuse, and say
+		// WHY — reporting a status failure as "dirty" would be a different and
+		// false claim.
+		return worktreeRemovalCheck{
+			Refusal:   &UndeterminedWorktreeError{Path: worktreeDir, Err: err},
+			StatusErr: err,
+		}
+	}
+	// Positive evidence of death. A timestamp is now allowed to FORBID.
+	newest, werr := newestWrite(worktreeDir)
+	if werr != nil {
+		return worktreeRemovalCheck{
+			Refusal:   &UnenumerableWorktreeError{Path: worktreeDir, Err: err, WalkErr: werr},
+			StatusErr: err,
+		}
+	}
+	if age := time.Since(newest); age < quietWindow {
+		return worktreeRemovalCheck{
+			Refusal:   &RecentlyWrittenWorktreeError{Path: worktreeDir, Err: err, Age: age, Window: quietWindow},
+			StatusErr: err,
+		}
+	}
+	return worktreeRemovalCheck{StatusErr: err}
+}
+
 // WorktreeOwner is what the CALLER has established about whether anything
 // still owns a worktree. It is the discriminator for the cannot-tell case,
 // and it has to come from the caller: gitgc is deliberately free of any
@@ -389,12 +593,27 @@ func WorktreeDirty(worktreeDir string) (bool, []string, error) {
 //     that names the status failure. The files may be someone's in-flight
 //     work, and a pinned worktree is recoverable by a human where deleted
 //     files are not.
-//   - OwnerGone — cannot-tell RECLAIMS, exactly as before. Nobody is coming
-//     back for an orphan's files, and leaking worktrees is its own defect.
+//   - OwnerGone — cannot-tell RECLAIMS. Nobody is coming back for an orphan's
+//     files, and leaking worktrees is its own defect.
+//
+// OwnerGone means POSITIVE evidence of death, never merely absence from a live
+// set. Absence is what a caller has when it has not looked, or has looked with
+// an instrument that failed; mapping it to OwnerGone would put every tree the
+// caller cannot see about into the destructive arm, which is the shape this
+// whole guard exists to refuse.
 //
 // An ABSENT directory is not cannot-tell: there are no files to protect, so
 // removal proceeds under either ownership and the registration still gets
 // dropped.
+//
+// # The mtime VETO on the OwnerGone arm (gh #97)
+//
+// Death evidence is not the last word on the cannot-tell arm. Even with it,
+// removal is refused when the tree was written to inside quietWindow
+// (*RecentlyWrittenWorktreeError), or when the tree cannot be listed at all so
+// there is no timestamp to check (*UnenumerableWorktreeError). A timestamp may
+// forbid a deletion here and may never authorise one — see quietWindow, which
+// carries the asymmetry and the reason the refused set still drains.
 //
 // Dropping the registration is load-bearing, not incidental: it is what frees
 // the polecat's branch for deletion (git refuses to delete a branch checked
@@ -404,29 +623,10 @@ func RemoveWorktree(sourceRepo, worktreeDir string, owner WorktreeOwner) error {
 	if worktreeDir == "" {
 		return nil
 	}
-	// An absent directory holds nothing to protect. Checked BEFORE the status
-	// call so it never reaches the cannot-tell arm: "there are no files" and
-	// "there may be files I cannot read" are different facts, and only the
-	// second one deserves a refusal.
-	if _, err := os.Stat(worktreeDir); os.IsNotExist(err) {
-		return RemoveWorktreeForce(sourceRepo, worktreeDir)
+	if chk := checkWorktreeRemoval(worktreeDir, owner); chk.Refusal != nil {
+		return chk.Refusal
 	}
-
-	isDirty, files, err := WorktreeDirty(worktreeDir)
-	switch {
-	case err == nil && isDirty:
-		shown := files
-		if len(shown) > dirtyFileListCap {
-			shown = shown[:dirtyFileListCap]
-		}
-		return &DirtyWorktreeError{Path: worktreeDir, Files: shown, Total: len(files)}
-	case err != nil && owner != OwnerGone:
-		// Cannot tell, and nothing has established that this tree is unowned.
-		// Refuse, and say WHY — reporting a status failure as "dirty" would
-		// be a different and false claim.
-		return &UndeterminedWorktreeError{Path: worktreeDir, Err: err}
-	}
-	return RemoveWorktreeForce(sourceRepo, worktreeDir)
+	return removeWorktreeFn(sourceRepo, worktreeDir)
 }
 
 // RemoveWorktreeForce removes a worktree regardless of uncommitted work. It is
@@ -434,9 +634,23 @@ func RemoveWorktree(sourceRepo, worktreeDir string, owner WorktreeOwner) error {
 // hatch that keeps preservation from becoming an unbounded leak: without a way
 // to reclaim a dirty tree, a refused worktree would pin its branch forever.
 //
-// Callers must have a positive reason to discard work. Two do: a spawn that
-// failed before the agent ever ran (internal/agent), and an operator who
-// asked for it explicitly (`pogo gc --apply --force`).
+// # Who calls it, checked rather than remembered (gh #97)
+//
+// Two callers, and both are legitimate:
+//
+//   - RemoveWorktree itself, as its executor — reached only once the guard has
+//     cleared the removal, or when the directory is already absent. That is not
+//     an override; it is the doing half of a decision made above it.
+//   - an operator who asked for it explicitly (`pogo gc --apply --force`),
+//     which the GC sweep routes straight here.
+//
+// This comment used also to name internal/agent's failed-spawn cleanup. That
+// was stale in both directions: cleanupFailedPolecatSpawn inlines its own `git
+// worktree remove --force` plus os.RemoveAll and does not call this at all,
+// while the sweep — which the comment did not name — used to call it directly,
+// AROUND the guard, which is the defect gh #97 reports. A documented mechanism
+// that does not exist is how the next reader concludes a call site is
+// legitimate, so the list is now the checked one.
 //
 // The `git worktree remove` step is best-effort: it drops the registration
 // when the worktree is still linked (the normal case since the submit-time

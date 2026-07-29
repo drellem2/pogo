@@ -1,11 +1,13 @@
 package gitgc
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 // Options configures a single GC sweep.
@@ -38,6 +40,36 @@ type Options struct {
 	// classified by its owner (classifyTree), a ref by its own name. The
 	// worktree phases had disagreed about which — see classifyTree.
 	LivePolecats map[string]bool
+	// OwnerVerdicts carries what the CALLER has POSITIVELY established about
+	// each polecat's DEATH, keyed by polecat name exactly as LivePolecats is.
+	// It is consulted on one path only: a worktree whose `git status` FAILED,
+	// where it decides between reclaiming an orphan and refusing to destroy
+	// files we could not read (gh #97, and see RemoveWorktree).
+	//
+	// A missing key is the zero value, OwnerUnproven, which REFUSES. That
+	// default is the design and not a gap: absence from the live set is not
+	// evidence of death — a caller has it whenever it did not look, or looked
+	// with an instrument that failed — so only an explicit entry may license
+	// destroying an unreadable tree.
+	//
+	// # Why it is passed IN and never looked up
+	//
+	// Death evidence lives in the agent registry and its witness store, and
+	// this package is deliberately free of any dependency on either (see the
+	// package comment). So the verdict is an input:
+	//
+	//   - cmd/pogod fills it from the polecat witness, mapping WitnessDead —
+	//     the store's one positive-evidence-of-death verdict — to OwnerGone
+	//     and every other verdict to OwnerUnproven.
+	//   - cmd/pogo leaves it nil, and so degrades to OwnerUnproven for every
+	//     worktree, BY CONSTRUCTION rather than by anyone remembering.
+	//
+	// That degradation is the point. It holds regardless of how good the CLI's
+	// LIVENESS set becomes, because liveness evidence and death evidence are
+	// different facts: knowing who is alive never tells you that a particular
+	// absent name is dead. An operator who wants an unreadable tree collected
+	// from the CLI has --force, which says so explicitly.
+	OwnerVerdicts map[string]WorktreeOwner
 	// Tickets, when non-nil, supplies work-item states directly. When nil,
 	// Sweep loads them via LoadTicketIndex (`mg list`). Injecting a map
 	// keeps Sweep unit-testable without the mg binary.
@@ -72,11 +104,16 @@ func (o Options) logf(format string, args ...any) {
 	}
 }
 
-// removeWorktreeFn is the worktree-removal call the sweep makes, indirected so
-// a test can force the FAILED-removal branch. A failed removal is otherwise
-// unreachable from a test — it needs git and os.RemoveAll to both lose to the
-// filesystem — and it is the branch the freed-flag ordering turns on
-// (mg-dd92). Production always uses RemoveWorktreeForce.
+// removeWorktreeFn is the worktree-removal EXECUTOR, indirected so a test can
+// force the FAILED-removal branch. A failed removal is otherwise unreachable
+// from a test — it needs git and os.RemoveAll to both lose to the filesystem —
+// and it is the branch the freed-flag ordering turns on (mg-dd92). Production
+// always uses RemoveWorktreeForce.
+//
+// It sits UNDER RemoveWorktree's guard rather than beside it (gh #97): the
+// sweep reaches it through RemoveWorktree on the normal path and directly only
+// for opts.Force, so overriding this var still covers both. Moving the seam
+// above the guard would silently un-test the branch mg-dd92 added.
 var removeWorktreeFn = RemoveWorktreeForce
 
 // BranchAction records the GC decision for one polecat branch.
@@ -190,23 +227,42 @@ func Sweep(opts Options) (Result, error) {
 			})
 			continue
 		}
+		// What the caller has POSITIVELY established about this owner's death.
+		// Not-live is not dead: the liveness gate above only says this name is
+		// absent from the live set, and absence is exactly what a caller has
+		// when its instrument failed. A missing entry is OwnerUnproven.
+		verdict := opts.OwnerVerdicts[owner]
+
 		// A concluded ticket says the WORK was accepted; it does not say the
-		// tree is empty. Uncommitted files here are unmerged by definition,
-		// so keep them and say so rather than GC-ing them away (mg-ee02).
-		// Checked before the dry-run branch so a dry run reports the same
-		// decision an apply would make.
-		if !opts.Force {
-			if isDirty, files, derr := WorktreeDirty(wt.Path); derr == nil && isDirty {
-				kept := WorktreeAction{
-					Path: wt.Path, Owner: owner, Branch: wt.Branch,
-					Reason: fmt.Sprintf("%d uncommitted change(s) — rerun with --force to discard", len(files)),
-				}
-				res.WorktreesKept = append(res.WorktreesKept, kept)
-				opts.logf("kept worktree %s", kept.String())
-				continue
+		// tree is empty — and it says nothing whatever when `git status` could
+		// not be READ. Both are RemoveWorktree's guard to decide (mg-ee02,
+		// mg-4d45); phase 1 used to run its own dirty check and then call
+		// RemoveWorktreeForce around the guard, so a status error was treated
+		// identically to a clean tree and the files went (gh #97).
+		//
+		// The decision is taken here, before the dry-run branch, so a dry run
+		// reports exactly what an apply would do — and so the log line can name
+		// the status failure rather than the ticket state. It is the guard's
+		// own function, so the two cannot drift.
+		chk := checkWorktreeRemoval(wt.Path, verdict)
+		if chk.Refusal != nil && !opts.Force {
+			kept := WorktreeAction{Path: wt.Path, Owner: owner, Branch: wt.Branch}
+			// A refusal with no arm in refusalReason cannot happen today, but a
+			// silently EMPTY reason on a preserved tree is the one failure mode
+			// this whole ticket is about, so fall back to the error itself
+			// rather than to nothing.
+			var named bool
+			if kept.Reason, named = refusalReason(chk.Refusal); !named {
+				kept.Reason = chk.Refusal.Error()
 			}
+			res.WorktreesKept = append(res.WorktreesKept, kept)
+			opts.logf("kept worktree %s", kept.String())
+			continue
 		}
-		action := WorktreeAction{Path: wt.Path, Owner: owner, Branch: wt.Branch, Reason: why}
+		action := WorktreeAction{
+			Path: wt.Path, Owner: owner, Branch: wt.Branch,
+			Reason: removalReason(why, chk.StatusErr, opts.Force),
+		}
 		if opts.DryRun {
 			// A dry run reports what an apply WOULD do, so the branch is
 			// treated as freed for phase 2's benefit — no removal is attempted
@@ -214,8 +270,29 @@ func Sweep(opts Options) (Result, error) {
 			freed[wt.Branch] = true
 			opts.logf("would remove worktree %s", action.String())
 		} else {
-			if err := removeWorktreeFn(opts.Repo, wt.Path); err != nil {
-				res.Errors = append(res.Errors, fmt.Sprintf("remove worktree %s: %v", wt.Path, err))
+			// --force goes straight to the executor: an operator's explicit
+			// --force is a positive reason to discard, and that must not
+			// change. Everything else goes THROUGH the guard, which re-runs
+			// its check immediately before destroying anything.
+			var rerr error
+			if opts.Force {
+				rerr = removeWorktreeFn(opts.Repo, wt.Path)
+			} else {
+				rerr = RemoveWorktree(opts.Repo, wt.Path, verdict)
+			}
+			if rerr != nil {
+				// A refusal here rather than a failure means the tree changed
+				// between the check above and the removal — someone wrote to
+				// it, or git broke — and the guard said no on the second look.
+				// That is a keep, not an error, and reporting it as an error
+				// would put a preserved tree in the wrong half of the report.
+				if reason, refused := refusalReason(rerr); refused {
+					kept := WorktreeAction{Path: wt.Path, Owner: owner, Branch: wt.Branch, Reason: reason}
+					res.WorktreesKept = append(res.WorktreesKept, kept)
+					opts.logf("kept worktree %s", kept.String())
+					continue
+				}
+				res.Errors = append(res.Errors, fmt.Sprintf("remove worktree %s: %v", wt.Path, rerr))
 				continue
 			}
 			// Marked freed only AFTER the removal actually succeeded. Setting
@@ -323,6 +400,64 @@ func Sweep(opts Options) (Result, error) {
 	}
 
 	return res, nil
+}
+
+// refusalReason renders a removal refusal as the reason line an operator reads
+// out of the GC report, and reports whether err WAS a refusal at all. A false
+// second return means a genuine failure, which belongs in Result.Errors — the
+// two must not be conflated, because one preserved a tree on purpose and the
+// other failed to remove one.
+//
+// Each arm names a DIFFERENT fact, because they are different facts and the
+// operator's next move differs: "there are N uncommitted files" sends them to
+// look at the files; "git status could not be read" sends them to look at the
+// worktree's .git. A single shared wording would send them to the wrong place.
+func refusalReason(err error) (string, bool) {
+	var dwe *DirtyWorktreeError
+	if errors.As(err, &dwe) {
+		return fmt.Sprintf("%d uncommitted change(s) — rerun with --force to discard", dwe.Total), true
+	}
+	var rwe *RecentlyWrittenWorktreeError
+	if errors.As(err, &rwe) {
+		return fmt.Sprintf("git status could not be read (%v), and the tree was written to %s ago — "+
+			"too recent to act on the evidence that its owner is dead; it collects once it has been "+
+			"quiet for %s, or now with --force",
+			rwe.Err, rwe.Age.Round(time.Second), rwe.Window), true
+	}
+	var uee *UnenumerableWorktreeError
+	if errors.As(err, &uee) {
+		return fmt.Sprintf("git status could not be read (%v) and the tree cannot be listed either (%v), "+
+			"so there is no timestamp to check its owner's death against — rerun with --force to discard",
+			uee.Err, uee.WalkErr), true
+	}
+	var uwe *UndeterminedWorktreeError
+	if errors.As(err, &uwe) {
+		return fmt.Sprintf("git status could not be read (%v), and nothing has established that the owner "+
+			"is dead — rerun with --force to discard", uwe.Err), true
+	}
+	return "", false
+}
+
+// removalReason renders the reason line for a worktree the sweep DID remove.
+//
+// When the removal happened despite a `git status` that failed, the status
+// failure is named alongside the ticket state — because naming the ticket state
+// alone is a false report of why the files went. That is the second half of
+// gh #97: the log line shipped as gh #94's remedy read "removed worktree <path>
+// (owner damaged, branch polecat-damaged): ticket archived" on exactly the path
+// where git had errored, and the discarded error appeared nowhere. A forensic
+// log that names an innocent cause is worse than silence — a missing line
+// prompts investigation, a plausible one ends it.
+func removalReason(why string, statusErr error, force bool) string {
+	if statusErr == nil {
+		return why
+	}
+	if force {
+		return fmt.Sprintf("%s; git status could not be read (%v) — removed anyway because --force was given",
+			why, statusErr)
+	}
+	return fmt.Sprintf("%s; git status could not be read (%v) — removed on positive evidence that the owner "+
+		"is dead, the tree having been quiet for at least %s", why, statusErr, quietWindow)
 }
 
 // classifyTree decides the ticket state governing a worktree DIRECTORY, and

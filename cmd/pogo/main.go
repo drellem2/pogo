@@ -2976,6 +2976,14 @@ Pass --force to reclaim those too; it DISCARDS the uncommitted work, so rescue
 anything you want first. A kept worktree keeps its branch checked out, so that
 branch is not deletable until the worktree goes.
 
+A worktree whose "git status" cannot be READ AT ALL — a damaged .git, a bad
+permission, an unmounted volume — is likewise kept, and the report says the
+status could not be read rather than naming the ticket state. gc will not
+destroy files it could not look at: status fails precisely when the working
+files are least reproducible. Reclaiming one needs positive evidence that the
+owning polecat is dead, which only pogod's sweep holds; from this command the
+answer is always to keep, and --force is how you overrule it.
+
 By default gc only reports what it would do; pass --apply to make changes.`,
 		Args: cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
@@ -3001,6 +3009,20 @@ By default gc only reports what it would do; pass --apply to make changes.`,
 			// Best-effort: without a resolvable home dir the orphan-dir
 			// scan is skipped and gc still sweeps branches and worktrees.
 			polecatsDir, _ := gitgc.DefaultPolecatsDir()
+			// OwnerVerdicts is deliberately NOT set (gh #97). It carries
+			// positive evidence that a polecat is DEAD, and it is the only
+			// thing that lets a sweep destroy a worktree whose `git status`
+			// failed. Leaving it nil degrades every such worktree to
+			// OwnerUnproven, which REFUSES — by construction, rather than by
+			// anyone remembering to keep it that way.
+			//
+			// This is not a limitation waiting to be improved. It holds no
+			// matter how good the live set above becomes: knowing who is alive
+			// never establishes that a particular absent name is dead, and
+			// those are the two different facts. An operator at a terminal who
+			// wants an unreadable tree reclaimed says so with --force; pogod,
+			// which runs unattended and does hold the death evidence, is the
+			// caller that fills this in.
 			res, err := gitgc.Sweep(gitgc.Options{
 				Repo:         repo,
 				LivePolecats: live,
