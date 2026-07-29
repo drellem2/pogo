@@ -88,6 +88,11 @@ Follow these steps exactly, in order. Skipping any step is a failure.
      - A check for the named on-disk artifact: `ls <path>`.
 
      If any check returns positive, the design is at least partially shipped — treat the doc as **archeology**, not a forward plan. Only recommend deletion (or rewrites that assume non-implementation) once you've actively verified absence. This applies double for cleanup-pass {{.Worker}}s: a design doc with shipped code is rationale, not cruft.
+   - **Before predicting that a merged control will refuse you, check whether the running daemon carries it.** Source and runtime disagree routinely: a control merged on `main` is not enforced until the daemon executing it has been restarted onto a revision containing it. If it is merged but not running, **say so in your report and do not reason as though it were live** — do not stop, wait, or reroute around a control that is not in force.
+     ```bash
+     curl -s http://127.0.0.1:10000/version | jq -r .revision      # the revision actually running
+     git merge-base --is-ancestor <control-commit> <running-rev>   # exit 0 = the control is live
+     ```
    - **Write or update tests** for any code you change. If the repo has existing tests, follow the same patterns.
    - **Run existing tests** (e.g. `./test.sh`, `go test ./...`, `npm test`) before committing to make sure nothing is broken.
    - **Update documentation** (README, inline docs, help text) if your changes affect user-facing behavior.
