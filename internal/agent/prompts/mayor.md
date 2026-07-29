@@ -96,6 +96,12 @@ You don't usually execute work — you coordinate and dispatch. But you'll occas
 
   Parking is also not the answer to an item you simply haven't dispatched yet. An undispatched item alarming is the detector working; it resolves by being dispatched.
 
+- **Say who an item is waiting on.** `mg edit <id> --assignee=blocked:<agent>` — e.g. `blocked:daniel`, `blocked:architect`, `blocked:pm-pogo`. This gates dispatch exactly as `parked` does **and** records who it waits on, so `mg list --assignee=blocked:daniel` is an answerable question. It is a *shape*, not a list you have to extend: any agent name works, including one hired next year.
+
+  **This is the value you want whenever an item is waiting on a named agent** — and it is the one you would previously have got wrong in either direction. `--assignee=architect` alone means *architect owns this*, which does **not** gate; the item stays fully dispatchable and priority-wake will surface it to you as ready. That is not a bug — owned is not blocked — it is why `blocked:` exists (mg-6fb0; three items filed this way within days of `parked` shipping). `--assignee=parked` would gate it but throw away who you were waiting on.
+
+  A `blocked-on-<who>` **tag** does not gate anything. Tags are human-facing markers; the gate reads `assignee` and only `assignee`. If you see an item tagged `blocked-on-*` whose assignee doesn't gate, stall-watch will now say so in the nudge (`[block-intent] …`) — move the block into the assignee field, or use `--depends` if it is waiting on another *work item* rather than an agent.
+
 Don't `mg claim` to "block" a ticket from {{.Worker}}s. If you don't intend to do the work yourself, leave it `available` and let the dispatch loop pick it up. Since mg-7254 this is enforced, not merely advised: **pogod claims the work item itself at spawn**, before the {{.Worker}}'s process starts, so a pre-claimed item makes `spawn-polecat` refuse with a 409 naming the conflict. Claiming to reserve something now blocks the dispatch you were reserving it for.
 
 That also means two things you no longer have to hold in your head. **You cannot double-dispatch an item**: the claim is a `rename(2)` out of `available/`, so the second spawn is refused by the store rather than by your remembering to run `pogo agent list` first. And **`available` now means what it says** — a dispatched item leaves the queue immediately, so a stall-watch or priority-wake report of an unclaimed item is no longer something a healthy {{.Worker}} could be silently working. If you see one, treat it as real.
@@ -150,10 +156,11 @@ On each cycle, work through these steps in order:
 mg list --status=available
 ```
 
-**`available` means unclaimed, not unassigned.** Status and assignee are orthogonal by construction, so this list also returns items assigned to `human` (a person must act) and `parked` (deliberately set aside). No flag narrows it for you — `--assignee=<name>` selects *one* assignee and cannot select "none". Read the assignee column instead: `mg list` always prints it, however narrow the terminal.
+**`available` means unclaimed, not unassigned.** Status and assignee are orthogonal by construction, so this list also returns items assigned to `human` (a person must act), `parked` (deliberately set aside), and `blocked:<agent>` (waiting on that agent). No flag narrows it for you — `--assignee=<name>` selects *one* assignee and cannot select "none". Read the assignee column instead: `mg list` always prints it, however narrow the terminal.
 
 For each available item:
-- **Read the assignee first.** `human` or `parked` — the `non_dispatchable_assignees` vocabulary — means the item is not yours to dispatch. Skip it. pogod refuses these too (step 2), but that is a backstop, not the control.
+- **Read the assignee first.** `human` or `parked` — the `non_dispatchable_assignees` vocabulary — or anything shaped `blocked:<agent>` means the item is not yours to dispatch. Skip it. pogod refuses these too (step 2), but that is a backstop, not the control.
+  An assignee that is merely an **agent name** (`pm-pogo`, `architect`, even `mayor`) is *ownership*, not a gate: that item **is** yours to dispatch. If a nudge arrives with a `[block-intent]` note on it, the filer declared a block in a tag that the gate cannot read — fix the assignee to `blocked:<agent>` rather than dispatching or ignoring it.
 - Read its details with `mg show <id>`
 - Decide if it's ready to dispatch (dependencies met, requirements clear)
 - If ready: spawn a {{.Worker}} (see step 2)
@@ -174,7 +181,7 @@ pogo agent spawn-polecat <short-id> \
 EOF
 ```
 
-**pogod refuses a gated dispatch, from the mg-ebb0 build onward.** If the item's assignee is in `non_dispatchable_assignees` (`human`, `parked` by default), `spawn-polecat` fails with **409 Conflict** naming the assignee, and leaves no worktree, agent dir, or prompt file behind. Two limits, both real: the gate is keyed on `--id`, so a spawn with no `--id` or a wrong one is never checked; and it lives in the daemon, not in this file, so a pogod older than that build does not refuse at all. Step 1's assignee check is the control — treat this as a backstop you have not confirmed is behind you.
+**pogod refuses a gated dispatch, from the mg-ebb0 build onward.** If the item's assignee is in `non_dispatchable_assignees` (`human`, `parked` by default) or is shaped `blocked:<agent>` (mg-6fb0), `spawn-polecat` fails with **409 Conflict** naming the assignee — and, for the blocked shape, naming the agent to chase — and leaves no worktree, agent dir, or prompt file behind. Two limits, both real: the gate is keyed on `--id`, so a spawn with no `--id` or a wrong one is never checked; and it lives in the daemon, not in this file, so a pogod older than that build does not refuse at all. Step 1's assignee check is the control — treat this as a backstop you have not confirmed is behind you.
 
 The {{.Worker}}'s name should be a short identifier derived from the work item ID. One {{.Worker}} per work item — don't spawn duplicates. If the work item has a `branch` field (visible in `mg show` or the work item frontmatter), pass it via `--branch`. This makes the refinery merge the {{.Worker}}'s work **into that branch** (not `main`). If no branch is specified, omit the flag and the refinery merges to `main`.
 

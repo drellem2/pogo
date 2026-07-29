@@ -263,14 +263,21 @@ func (w *Watcher) checkUnclaimedItems(now time.Time) {
 		"stall-watch: %d available work item(s) have sat unclaimed for over %s — claim or dispatch them: %s",
 		len(stale), w.cfg.UnclaimedItemAgeThreshold, strings.Join(ids, ", "))
 
-	w.fire(categoryUnclaimedItems, msg, map[string]any{
+	advisory, advisedIDs := w.blockIntentAdvisory(stale)
+	msg += advisory
+
+	details := map[string]any{
 		"category":           categoryUnclaimedItems,
 		"watched_agent":      w.cfg.Agent,
 		"item_count":         len(stale),
 		"item_ids":           ids,
 		"age_threshold":      w.cfg.UnclaimedItemAgeThreshold.String(),
 		"oldest_age_seconds": now.Sub(oldestModTime(stale)).Seconds(),
-	})
+	}
+	if len(advisedIDs) > 0 {
+		details["block_intent_mismatch_ids"] = advisedIDs
+	}
+	w.fire(categoryUnclaimedItems, msg, details)
 }
 
 // checkPriorityWake delivers the priority-aware fast wake (gh drellem2/pogo
@@ -328,7 +335,10 @@ func (w *Watcher) checkPriorityWake(now time.Time, items []workitem.WorkItem) {
 		"priority-wake: %d high-priority work item(s) are ready and unclaimed — claim or dispatch now: %s",
 		len(ready), strings.Join(ids, ", "))
 
-	w.fire(categoryPriorityWake, msg, map[string]any{
+	advisory, advisedIDs := w.blockIntentAdvisory(ready)
+	msg += advisory
+
+	details := map[string]any{
 		"category":       categoryPriorityWake,
 		"watched_agent":  w.cfg.Agent,
 		"item_count":     len(ready),
@@ -337,7 +347,11 @@ func (w *Watcher) checkPriorityWake(now time.Time, items []workitem.WorkItem) {
 		"wake_cooldown":  w.cfg.HighPriorityWakeCooldown.String(),
 		"fast_priority":  strings.Join(w.cfg.FastPriorities, ","),
 		"oldest_age_sec": now.Sub(oldestModTime(ready)).Seconds(),
-	})
+	}
+	if len(advisedIDs) > 0 {
+		details["block_intent_mismatch_ids"] = advisedIDs
+	}
+	w.fire(categoryPriorityWake, msg, details)
 
 	// Collapse the ~30s poll for the follow-up check so pogod re-samples the
 	// queue promptly (e.g. to notice the item got claimed, or that more urgent
@@ -480,6 +494,55 @@ func (w *Watcher) watchedForDispatch(assignee string) bool {
 // vocabulary — it must not grow a second copy of the rule.
 func (w *Watcher) isDispatchGated(assignee string) bool {
 	return config.IsDispatchGated(assignee, w.cfg.NonDispatchableAssignees)
+}
+
+// blockIntentAdvisory returns a sentence to append to a nudge when one of the
+// items it is about DECLARES a block in its tags while its assignee leaves it
+// dispatchable, plus the ids it named. Both are empty when nothing mismatches,
+// which is the ordinary case.
+//
+// This fires exactly where the ambiguity does its damage: the moment stall-watch
+// tells the coordinator an item is ready to dispatch. The item is watched
+// correctly — `blocked-on-daniel` is a tag, and tags do not gate (see
+// config.BlockTagPrefix for why that stays true) — so nothing here changes what
+// is watched or what fires. It adds one sentence naming the contradiction the
+// coordinator would otherwise have to spot by reading tags it has no reason to
+// read.
+//
+// Advice, not a gate: the nudge still fires, the item is still dispatchable, and
+// the coordinator still decides. mg-6fb0 ruled the repair is the
+// `blocked:<agent>` shape and this is the interim that keeps working afterwards,
+// because what it catches is someone still writing the old idiom.
+func (w *Watcher) blockIntentAdvisory(items []workitem.WorkItem) (string, []string) {
+	type mismatch struct{ id, tag, suggest string }
+	var found []mismatch
+	var ids []string
+	for _, it := range items {
+		tag, ok := config.BlockIntentMismatch(it.Assignee, it.TagList(), w.cfg.NonDispatchableAssignees)
+		if !ok {
+			continue
+		}
+		found = append(found, mismatch{id: it.ID, tag: tag, suggest: config.SuggestBlockedAssignee(tag)})
+		ids = append(ids, it.ID)
+	}
+	if len(found) == 0 {
+		return "", nil
+	}
+
+	parts := make([]string, len(found))
+	for i, m := range found {
+		// A `blocked-on-mg-1234` tag names another ITEM, and `mg new --depends`
+		// already expresses that — pointing the reader at the assignee field for
+		// it would be wrong advice, so SuggestBlockedAssignee declines and the
+		// sentence changes rather than the check going quiet.
+		fix := "if it is waiting on another item, express that with --depends"
+		if m.suggest != "" {
+			fix = "if it is genuinely waiting, set --assignee=" + m.suggest
+		}
+		parts[i] = fmt.Sprintf("%s is tagged %s but its assignee does not gate dispatch — %s",
+			m.id, m.tag, fix)
+	}
+	return " [block-intent] " + strings.Join(parts, "; ") + ".", ids
 }
 
 // tryFire enforces a per-category cooldown. It returns true and records the

@@ -197,3 +197,147 @@ func TestDispatchGateDefaultRootIsTestSafe(t *testing.T) {
 		t.Fatalf("macguffinStoreRoot() = %q under a test binary — that is the LIVE store", root)
 	}
 }
+
+// gateStoreTagged builds a store fixture whose items carry tags as well as an
+// assignee, for the block-intent advisory (mg-6fb0).
+func gateStoreTagged(t *testing.T, id, assignee, tags string) string {
+	t.Helper()
+	root := t.TempDir()
+	avail := filepath.Join(root, "work", "available")
+	if err := os.MkdirAll(avail, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := "---\nid: " + id + "\ntype: task\ntags: [" + tags + "]\nassignee: " + assignee + "\n---\n# " + id + "\n"
+	if err := os.WriteFile(filepath.Join(avail, id+".md"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+// TestSpawnPolecatRefusedForBlockedShape is the positive control for the
+// `blocked:<agent>` shape at the DISPATCH point (mg-6fb0). mg-4798's ruling was
+// that the gate belongs in the executable path, and there are two such paths
+// reading one predicate; a shape honoured by stall-watch but not here would be
+// exactly the drift the shared predicate exists to prevent.
+//
+// It also asserts the refusal SAYS the right thing. An item blocked on mayor is
+// not "done by hand or unparked" — it is unblocked by mayor — and the one thing
+// the author took the trouble to record is who that is. A refusal that flattened
+// the shape into the generic non_dispatchable_assignees sentence would throw
+// that away at the moment it is most useful.
+func TestSpawnPolecatRefusedForBlockedShape(t *testing.T) {
+	for _, tc := range []struct{ name, assignee, wantWho string }{
+		{"blocked on the coordinator", "blocked:mayor", "mayor"},
+		{"blocked on a crew agent", "blocked:pm-pogo", "pm-pogo"},
+		{"blocked on a person", "blocked:daniel", "daniel"},
+		{"blocked on an agent hired tomorrow", "blocked:some-future-crew", "some-future-crew"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := newDrainTestRegistry(t)
+			reg.SetDispatchGate(MGDispatchGate{
+				Root: gateStore(t, map[string]string{"mg-blk": tc.assignee}),
+			})
+
+			rr := spawnPolecatFor(t, reg, "mg-blk")
+			if rr.Code != http.StatusConflict {
+				t.Fatalf("spawn on a %q item: status = %d, want 409", tc.assignee, rr.Code)
+			}
+			body := rr.Body.String()
+			for _, want := range []string{"mg-blk", tc.assignee, tc.wantWho, "BLOCKED ON"} {
+				if !strings.Contains(body, want) {
+					t.Errorf("refusal must contain %q, got: %q", want, body)
+				}
+			}
+			if a := reg.Get("cat-gate"); a != nil {
+				t.Error("a refused dispatch registered an agent anyway")
+			}
+		})
+	}
+}
+
+// TestSpawnPolecatBlockedShapeSurvivesAConfiguredVocabulary: the shape is a
+// structural rule, not a denylist entry, so a deployment that replaces
+// non_dispatchable_assignees does not switch it off. This is the property that
+// distinguishes it from "a third magic value" — the thing mg-6fb0 was filed to
+// avoid building.
+func TestSpawnPolecatBlockedShapeSurvivesAConfiguredVocabulary(t *testing.T) {
+	reg := newDrainTestRegistry(t)
+	reg.SetDispatchGate(MGDispatchGate{
+		Root:  gateStore(t, map[string]string{"mg-blk": "blocked:mayor"}),
+		Gates: []string{"legal-review"}, // neither default present
+	})
+
+	if rr := spawnPolecatFor(t, reg, "mg-blk"); rr.Code != http.StatusConflict {
+		t.Errorf("the blocked shape must gate whatever the configured vocabulary is: status = %d", rr.Code)
+	}
+}
+
+// TestSpawnPolecatBareBlockedPrefixIsGatedAndNamed: `blocked:` with nothing
+// after it gates — the author wrote "blocked", and failing to gate on a truncated
+// agent name would fail in the unsafe direction — but the refusal says the agent
+// is missing rather than pretending to name one.
+func TestSpawnPolecatBareBlockedPrefixIsGatedAndNamed(t *testing.T) {
+	reg := newDrainTestRegistry(t)
+	reg.SetDispatchGate(MGDispatchGate{
+		Root: gateStore(t, map[string]string{"mg-bare": "blocked:"}),
+	})
+
+	rr := spawnPolecatFor(t, reg, "mg-bare")
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("bare `blocked:` must gate: status = %d", rr.Code)
+	}
+	if body := rr.Body.String(); !strings.Contains(body, "names no agent") {
+		t.Errorf("refusal should say the shape names nobody, got: %q", body)
+	}
+}
+
+// TestDispatchGateWarnsOnBlockIntentMismatch is the positive control for the
+// advisory at the harm moment: a polecat is about to be put on an item whose
+// author wrote down that it is waiting on someone.
+//
+// It DOES NOT refuse, and that is the ruling, not an oversight — a tag is not a
+// gate, and making it one would split the gate across two channels. So this
+// asserts both halves: the dispatch proceeds, and the log says why it perhaps
+// should not have.
+func TestDispatchGateWarnsOnBlockIntentMismatch(t *testing.T) {
+	logged := captureLog(t)
+
+	g := MGDispatchGate{Root: gateStoreTagged(t, "mg-a96c", "pm-pogo", "pogo, blocked-on-daniel-confirm")}
+	assignee, gated := g.DispatchGated("mg-a96c")
+	if gated {
+		t.Fatalf("a tag must not gate; got gated=true (assignee %q)", assignee)
+	}
+
+	out := logged()
+	for _, want := range []string{"mg-a96c", "blocked-on-daniel-confirm", "pm-pogo", "blocked:daniel-confirm"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("dispatch-gate warning missing %q\ngot: %s", want, out)
+		}
+	}
+}
+
+// TestDispatchGateQuietOnLegitimateItems is the negative half. The advisory
+// riding on ordinary owned work would be noise — pm-template files every ticket
+// with `--assignee=pm-<name>` — and the case that matters most is the last one:
+// the repair the advisory recommends must not trip the advisory.
+func TestDispatchGateQuietOnLegitimateItems(t *testing.T) {
+	for _, tc := range []struct{ name, assignee, tags string }{
+		{"ordinary owned item", "pm-pogo", "pogo, cli"},
+		{"unassigned item", "", "pogo"},
+		{"a tag that merely mentions blocking", "pm-pogo", "unblocked, blocking"},
+		{"already gated to human", "human", "pogo, blocked-on-daniel"},
+		{"already parked", "parked", "pogo, blocked-on-mg-01f7"},
+		{"already using the shape", "blocked:daniel", "pogo, blocked-on-daniel"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logged := captureLog(t)
+
+			g := MGDispatchGate{Root: gateStoreTagged(t, "mg-quiet", tc.assignee, tc.tags)}
+			g.DispatchGated("mg-quiet")
+
+			if strings.Contains(logged(), "does not gate") {
+				t.Errorf("advisory fired on a legitimate item (%s): %s", tc.name, logged())
+			}
+		})
+	}
+}

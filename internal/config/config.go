@@ -288,6 +288,71 @@ var DefaultFastPriorities = []string{"high"}
 // Kept as a var because a slice cannot be a const; treat it as read-only.
 var DefaultNonDispatchableAssignees = []string{"human", "parked"}
 
+// BlockedAssigneePrefix introduces the one SHAPE the gate recognises alongside
+// the sentinel vocabulary above: `blocked:<agent>` gates dispatch AND names who
+// the item is waiting on.
+//
+// Why a shape and not a third sentinel (mg-6fb0). The vocabulary above answers
+// "do not execute this automatically" with two stated reasons. It could not
+// express a third one that three agents reached for within days of mg-a3a2
+// shipping — BLOCKED ON A NAMED AGENT. A filer with that intent had to choose:
+//
+//	assignee=<agent>   keeps WHO, loses the GATE   (mg-bb43, mg-779b, mg-bf5e)
+//	assignee=parked    keeps the GATE, loses WHO
+//
+// That is the surviving case of the third sense the comment above named and
+// removed only one instance of: filed-here-for-lack-of-an-alternative. It is not
+// a prediction — someone already invented a channel to say what the field could
+// not, and `blocked-on-daniel` / `blocked-on-daniel-confirm` tags exist in the
+// store (mg-cf48, mg-e925, mg-a96c), with `mg archive` taught to respect them
+// (mg-3c53). The intent was being expressed; the gate just could not hear it.
+//
+// This satisfies the growth condition the comment above states — "it only grows
+// if someone invents a second meaning for 'do not execute this automatically'" —
+// and *blocked on a named agent* is exactly such a meaning. Crucially it grows by
+// ONE SHAPE, not by a roster: `blocked:mayor`, `blocked:pm-pogo` and
+// `blocked:some-agent-hired-next-year` all gate with no config line and no code
+// change, so mg-4bd4 (an allowlist that stops watching work the day an agent is
+// added) cannot recur through this door.
+//
+// Two properties worth stating because they are choices, not consequences:
+//
+//   - The shape is INDEPENDENT of the configured vocabulary. Replacing
+//     non_dispatchable_assignees does not turn it off, because it is a structural
+//     rule about how the field is written rather than a value in a denylist. A
+//     deployment that drops "parked" still gates `blocked:mayor`.
+//   - `blocked:` with nothing after it still gates. The author wrote the word
+//     "blocked"; refusing to gate on a typo'd or truncated agent name would fail
+//     in the unsafe direction. BlockedOn reports it as a blocked shape with an
+//     empty agent so a caller that wants to complain about it can.
+//
+// This is ADDITIVE and nothing was migrated (mg-6fb0's sequencing hazard,
+// measured before the change: zero of the 8 then-`human` items carried a
+// `blocked-on-*` tag, so anything that stopped reading "human" would have
+// stranded all eight as dispatchable). "human" and "parked" read exactly as they
+// did before.
+const BlockedAssigneePrefix = "blocked:"
+
+// BlockedOn reports whether assignee is written in the `blocked:<agent>` shape,
+// and returns the agent it names. The prefix match is case-insensitive and
+// whitespace-trimmed on both sides of the colon, mirroring IsDispatchGated, so a
+// value hand-edited to `Blocked: mayor` reads the same as `blocked:mayor` — the
+// frontmatter parser splits on the FIRST colon, so the whole of
+// `assignee: blocked:mayor` arrives here as one value. The agent name
+// is returned as written rather than lowercased, because its only consumers are
+// messages and `mg list --assignee=` queries.
+//
+// A bare `blocked:` returns ("", true) — a blocked shape naming nobody. That is
+// deliberate: see BlockedAssigneePrefix for why it still gates.
+func BlockedOn(assignee string) (string, bool) {
+	a := strings.TrimSpace(assignee)
+	if len(a) < len(BlockedAssigneePrefix) ||
+		!strings.EqualFold(a[:len(BlockedAssigneePrefix)], BlockedAssigneePrefix) {
+		return "", false
+	}
+	return strings.TrimSpace(a[len(BlockedAssigneePrefix):]), true
+}
+
 // IsDispatchGated reports whether assignee names a non-dispatchable executor —
 // whether an item carrying it is gated away from AUTOMATIC dispatch. gates is
 // the configured vocabulary; empty falls back to
@@ -311,7 +376,16 @@ var DefaultNonDispatchableAssignees = []string{"human", "parked"}
 // with two implementations has already begun to drift. One function, both
 // callers, no second copy — so a change to the gate vocabulary cannot leave the
 // dispatcher honouring the old one.
+//
+// Two rules, not one list (mg-6fb0). An assignee gates if it is a sentinel in
+// the vocabulary OR is written in the `blocked:<agent>` shape. The shape is
+// checked first and does not consult gates at all — see BlockedAssigneePrefix
+// for why a shape rather than a third magic value, and why a replaced vocabulary
+// does not switch it off.
 func IsDispatchGated(assignee string, gates []string) bool {
+	if _, ok := BlockedOn(assignee); ok {
+		return true
+	}
 	a := strings.ToLower(strings.TrimSpace(assignee))
 	if a == "" {
 		return false

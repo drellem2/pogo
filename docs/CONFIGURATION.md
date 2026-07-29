@@ -251,6 +251,10 @@ That is because `assignee` carries two incompatible meanings:
 | *(empty)* | unowned | dispatch a worker |
 | `human` | **execution gate** — a person must do this by hand | never dispatch |
 | `parked` | **execution gate** — deliberately set aside, nobody is expected to act on it now | never dispatch |
+| `blocked:<agent>` | **execution gate** — waiting on a *named* agent (`blocked:mayor`, `blocked:daniel`) | never dispatch; ask that agent |
+
+The last row is a **shape**, not a value in `non_dispatchable_assignees` — see
+["blocked:&lt;agent&gt;"](#blockedagent--the-one-shape-the-gate-recognises) below.
 
 `--assignee=human` is a *gate wearing an assignment's clothes*: `mayor.md` files
 manual-QA items that way precisely so no worker is dispatched at them. So the
@@ -350,6 +354,80 @@ for "do not execute this automatically", and then it changes by a config line.
 watched. Guessing wrong costs one nudge about an item the coordinator cannot
 dispatch — loud and self-correcting. The old default guessed the other way and
 paid in silence, which is indistinguishable from having no stalls.
+
+#### `blocked:<agent>` — the one shape the gate recognises
+
+    mg edit <id> --assignee=blocked:mayor     # gates dispatch AND says who it waits on
+
+`blocked:<agent>` is the only value the gate matches by **shape** rather than by
+membership in `non_dispatchable_assignees`. It gates exactly as `human` and
+`parked` do, and additionally records *who the item is waiting on* — so
+`mg list --assignee=blocked:mayor` is an answerable question in the same way
+`--assignee=parked` became one.
+
+**Why a shape and not a third sentinel (mg-6fb0).** Within days of `parked`
+shipping, three items were filed with an agent name as the assignee — `pm-pogo`
+(mg-bb43), mg-779b, `mayor` (mg-bf5e) — each meaning *blocked pending this
+agent*, and each correctly getting **no gate**: an item merely owned by mayor
+*is* dispatchable. The gap was that "blocked on a named agent" could not be said
+at all. A filer with that intent had to choose:
+
+| what they wrote | what they kept | what they lost |
+|---|---|---|
+| `assignee=<agent>` | **who** | the gate |
+| `assignee=parked` | the **gate** | who |
+
+That is not a prediction — agents had already invented a channel for it. The
+tags `blocked-on-daniel`, `blocked-on-daniel-confirm` and `blocked-on-redeploy`
+exist in the store (mg-cf48, mg-e925, mg-a96c), and `mg archive` was taught to
+respect them (mg-3c53). The intent was being expressed; the gate could not hear
+it.
+
+Three properties are deliberate:
+
+- **One shape, not a roster.** `blocked:mayor`, `blocked:pm-anyone` and
+  `blocked:an-agent-hired-next-year` all gate with no config line and no code
+  change. An *allowlist of agents* would have to be edited every time the crew
+  grows — that is mg-4bd4's defect, and this door does not reopen it.
+- **Independent of the configured vocabulary.** Replacing
+  `non_dispatchable_assignees` does not switch the shape off, because it is a
+  structural rule about how the field is written rather than an entry in a
+  denylist. A deployment that drops `parked` still gates `blocked:mayor`.
+- **Additive; nothing was migrated.** `human` and `parked` read exactly as
+  before. Measured before the change: zero of the eight then-`human` items
+  carried a `blocked-on-*` tag, so any change that *stopped* reading `human`
+  would have stranded all eight as dispatchable. There is no window in which the
+  queue is unguarded.
+
+A bare `blocked:` still gates — the author wrote "blocked", and declining to gate
+on a truncated agent name would fail in the unsafe direction. The refusal says
+the value names nobody and asks for it to be rewritten, rather than quietly
+inventing an agent to blame.
+
+**The gate reads `assignee`, and only `assignee`.** The `blocked-on-*` tags stay
+what they are — human-facing markers — and are **never** consulted for gating.
+Moving the gate onto tags would split it across two channels and forfeit the
+property that makes the field worth reading: `mg list --assignee=…` is the single
+answerable question about whether an item is dispatchable.
+
+**The block-intent advisory.** Because the old tag idiom still exists, both paths
+say so when an item *declares* a block in its tags while its assignee leaves it
+dispatchable:
+
+- stall-watch appends `[block-intent] mg-xxxx is tagged blocked-on-daniel but its
+  assignee does not gate dispatch — if it is genuinely waiting, set
+  --assignee=blocked:daniel` to the nudge it was already sending, and stamps
+  `block_intent_mismatch_ids` into the event.
+- `spawn-polecat` logs the same contradiction at the dispatch point and
+  **dispatches anyway**.
+
+It is advice, not a gate — a tag is not a gate, and making it one would be the
+two-channel split just rejected. It fires only on the contradiction (declared
+block + dispatchable assignee), never on ordinary ownership: `pm-template` files
+every ticket with `--assignee=pm-<name>`, so an advisory on any named assignee
+would ride on nearly every nudge and be trained away within a day. A
+`blocked-on-mg-1234` tag names another *work item*, so the advice there points at
+`mg new --depends`, not at the assignee field.
 
 ### Priority wake
 
