@@ -42,7 +42,18 @@ var mgCreatedID = regexp.MustCompile(`\b(mg-[0-9a-f]+)\b`)
 // work/claimed/<id>.md.<pid>, nothing in available/.
 func mgNewClaimed(t *testing.T, root, title string) string {
 	t.Helper()
-	out, err := exec.Command("mg", "--root", root, "new", title).CombinedOutput()
+	// --no-repo, for the reason mg-8595 gave the two fixtures it fixed: these
+	// items are about nothing. They exist to put the sandbox store into a
+	// claimed state, and nothing under test reads the item's repo field.
+	//
+	// This package is the "noted, not fixed" half of that commit, and the note
+	// is worth keeping because the reason it passed is not the reason it was
+	// right. TestMain pins HOME under a throwaway root, so mg's ~-relative
+	// guard did not recognise the real ephemeral tree it was standing in and
+	// recorded the doomed cwd — a polecat's ~/.pogo/polecats/<id> — in SILENCE
+	// rather than refusing it. Same call shape, same wrong path, alarm
+	// disconnected. Audited and closed under mg-1eb6.
+	out, err := exec.Command("mg", "--root", root, "new", "--no-repo", title).CombinedOutput()
 	if err != nil {
 		t.Fatalf("mg new: %v: %s", err, out)
 	}

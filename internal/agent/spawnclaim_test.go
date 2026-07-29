@@ -35,7 +35,10 @@ import (
 // mid-flight, this one models the moment before a polecat exists.
 func mgNewAvailable(t *testing.T, root, title string) string {
 	t.Helper()
-	out, err := exec.Command("mg", "--root", root, "new", title).CombinedOutput()
+	// --no-repo for the reason spelled out at mgNewClaimed in
+	// claimrelease_test.go: the fixture is about nothing, and letting mg resolve
+	// a repo from the cwd records a path pogo deletes at reap (mg-1eb6).
+	out, err := exec.Command("mg", "--root", root, "new", "--no-repo", title).CombinedOutput()
 	if err != nil {
 		t.Fatalf("mg new: %v: %s", err, out)
 	}
