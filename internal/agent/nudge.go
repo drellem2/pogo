@@ -305,9 +305,17 @@ func (a *Agent) NudgeWithModeCorrelated(msg string, mode NudgeMode, timeout time
 				log.Printf("agent %s: prompt-ready sentinel seen but PTY never settled "+
 					"within %s; delivering nudge anyway", a.Name, timeout)
 			} else {
-				log.Printf("agent %s: prompt-ready sentinel %q not seen within %s; "+
-					"delivering nudge best-effort (sentinel may be stale)",
-					a.Name, a.nudge.PromptReadySentinel, timeout)
+				// Name the alternates as well as the primary sentinel, and name
+				// them by VALUE. Reporting only the primary conflated two causes
+				// that need opposite repairs (mg-01d3): a binary that predates
+				// PromptReadyAlternates entirely — fix by redeploying — and one
+				// where the alternates are present but none matched — fix the
+				// matcher; a redeploy changes nothing. An empty alternates list
+				// prints as [], which IS the stale-binary signature, so the two
+				// are tellable apart from the log line alone.
+				log.Printf("agent %s: prompt-ready sentinel %q (alternates %q) not seen "+
+					"within %s; delivering nudge best-effort (sentinel may be stale)",
+					a.Name, a.nudge.PromptReadySentinel, a.nudge.PromptReadyAlternates, timeout)
 			}
 		}
 
