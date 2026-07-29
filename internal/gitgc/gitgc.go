@@ -344,7 +344,7 @@ type RecentlyWrittenWorktreeError struct {
 func (e *RecentlyWrittenWorktreeError) Error() string {
 	return fmt.Sprintf("worktree %s: cannot determine whether it holds uncommitted work (%v), "+
 		"and it was written to %s ago — inside the %s quiet window, which contradicts the evidence "+
-		"that its owner is dead; refusing to remove", e.Path, e.Err, humanAge(e.Age), e.Window)
+		"that its owner is dead; refusing to remove", e.Path, e.Err, humanAge(e.Age), humanAge(e.Window))
 }
 
 func (e *RecentlyWrittenWorktreeError) Unwrap() error { return e.Err }
@@ -473,11 +473,39 @@ const quietWindow = 24 * time.Hour
 // to prevent one that ownership already authorised.
 //
 // THE RESIDUE, which is a property and not a defect to fix: the veto's strength
-// VARIES BY DAMAGE SHAPE, for reasons unrelated to liveness. Anyone extending
-// the veto — a second signal, a shorter window, a per-shape rule — needs that
-// fact first. In particular, do not "fix" the pointer-damage case by excluding
-// .git from this walk: that trades a safe over-refusal for a live-looking tree
-// being collected, which is the direction that costs files. .git is counted.
+// VARIES BY DAMAGE SHAPE, for reasons unrelated to liveness. It is STRONGEST
+// where the damage writes into the tree (pointer damage) and WEAKEST exactly
+// where the tree looks abandoned for reasons that have nothing to do with
+// whether anyone is alive (chmod, truncated index) — which is the opposite of
+// the distribution you would design. Anyone extending the veto — a second
+// signal, a shorter window, a per-shape rule — needs that fact first.
+//
+// # Why .git is COUNTED, stated as a trade rather than left implicit
+//
+// Excluding .git from this walk is tempting and was tried on this branch. It
+// measures agent writes more precisely, and it dissolves the pointer-damage
+// half of the perturbation outright: a damaged tree would stop looking freshly
+// worked-on. What it does NOT dissolve is the other half — chmod and truncated
+// index still look cold — so it buys a cleaner signal in one shape and leaves
+// the residue above intact.
+//
+// It is not taken, for two reasons:
+//
+//   - It converts a SAFE failure into an unsafe one. Counting .git over-refuses
+//     a tree whose pointer was just damaged; excluding it collects a tree that
+//     a live process may be touching through git alone. We arrive here only
+//     when the witness says PROVABLY DEAD, and the veto's entire job is to
+//     catch a witness that is wrong — so the writes it should be most alert to
+//     are exactly the ones an exclusion drops.
+//   - The ruling's reassurance is ABOUT the refreshed clock: "the veto's
+//     failure mode is over-refusing, which is the safe direction; a refreshed
+//     clock produces a false veto." Excluding .git removes the very behaviour
+//     that reasoning blesses, so it cannot be adopted on the strength of it.
+//
+// The cost is real and is accepted: a pointer-damaged, otherwise-cold, dead
+// owner's tree is pinned for one window before it collects. If that pin is ever
+// measured to matter, revisit it as a trade — with this comment — rather than
+// as an obvious cleanup.
 func newestWrite(worktreeDir string) (time.Time, error) {
 	var newest time.Time
 	err := filepath.WalkDir(worktreeDir, func(path string, d fs.DirEntry, err error) error {
