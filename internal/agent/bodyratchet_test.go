@@ -20,6 +20,18 @@ package agent
 // sweep is not: new violations fail at the moment of authoring, existing ones
 // are grandfathered until they are swept.
 //
+// SWEPT (mg-fdbc). All 40 grandfathered lines are gone and the inventory below
+// is empty, so the three counts above have inverted: the corpus now teaches
+// --body-file with a quoted heredoc 40 times and --body="..." zero times. The
+// sweep was only worth doing because the ratchet had already stopped the
+// inflow — order matters here, and doing it the other way round would have
+// decayed inside a month. Two lines resisted the mechanical substitution
+// because their bodies must interpolate a shell variable ($tag/$days/$ahead in
+// pm/pm-template.md, $BRANCH in templates/polecat-build-pr.md); a quoted
+// heredoc would emit those literally and an unquoted one is the original bug,
+// so both were rewritten as printf-into-stdin, which keeps the values in argv
+// slots where no shell can reach them.
+//
 // WHAT COUNTS AS A VIOLATION — EXAMPLE LINES ONLY. A bare grep for `--body="`
 // is the wrong predicate in both directions: it fires on a template that
 // documents "never use `--body=`" — punishing the very prose that fixes this —
@@ -57,13 +69,18 @@ import (
 	"testing"
 )
 
-// bodyRatchet is the frozen inventory of grandfathered `--body="` example
-// lines, by path. Two properties make a hard-coded literal tolerable here, and
-// both must keep holding:
+// bodyRatchet is the inventory of grandfathered `--body="` example lines, by
+// path. IT IS NOW EMPTY: mg-fdbc swept all 40, and the entries came out in the
+// same commit as the templates, because this ratchet enforces TIGHTENING and
+// not merely a ceiling (see the second loop in checkBodyRatchet). Leftover
+// headroom is exactly how a swept file silently re-accumulates.
+//
+// Two properties made a hard-coded literal tolerable, and both still hold:
 //
 //   - It is MONOTONICALLY DECREASING. Every entry may shrink and none may grow;
-//     an entry that reaches zero is deleted. Shrinking is the goal, so the
-//     literal's only legitimate motion is toward its own deletion.
+//     an entry that reaches zero is deleted. Shrinking was the goal, so the
+//     literal's only legitimate motion was toward its own deletion — which is
+//     where it has now arrived.
 //   - Raising an entry is not a remedy the failure message offers. The message
 //     names --body-file with a quoted heredoc and says so explicitly. If the
 //     inventory can be grown to silence the test, the ratchet is decorative.
@@ -71,27 +88,24 @@ import (
 // Paths, not a bare count: a count is arbitrary and tells an author nothing.
 // bodyRatchetTotal below is a deliberate second edit site, so raising a number
 // cannot be done as a one-character diff that reads as noise in review.
-// The total is 40, not the architect's 62 and not grep's 58. The three numbers
-// measure different things and only one of them is the predicate: 62 counted
-// every mention, grep counts the raw token including prose, and 40 is what this
-// tree actually TEACHES on an example line. The zero that matters is unchanged
-// under all three — there is no safe example anywhere in the corpus.
-var bodyRatchet = map[string]int{
-	"crew/doctor.md":                 3,
-	"mayor.md":                       15,
-	"pm/pm-template.md":              3,
-	"templates/polecat-architect.md": 1,
-	"templates/polecat-build-pr.md":  4,
-	"templates/polecat-qa.md":        2,
-	"templates/polecat-review.md":    6,
-	"templates/polecat-triage.md":    4,
-	"templates/polecat.md":           2,
-}
+//
+// THE COUNT WAS 40, AND 62 AND 58 WERE ALSO CORRECT. Three numbers circulated
+// and they measured different populations: 62 counted every mention (the
+// architect's script-walk), a raw grep for the token counted 58 because it
+// includes prose, and 40 was what this tree actually TAUGHT on an example line
+// — the predicate this file implements. Do not "fix" one of them to match
+// another. The load-bearing number was always the one they agreed on: ZERO
+// safe examples anywhere in the corpus. That is the number this sweep moved.
+//
+// EMPTY IS NOW THE INVENTORY. A file that appears here again is not a sweep
+// being undone; it is a new unsafe example that should have been written with
+// --body-file - and a quoted heredoc instead.
+var bodyRatchet = map[string]int{}
 
 // bodyRatchetTotal must equal the sum of bodyRatchet. It exists only to make
 // raising an entry require two edits that agree — a speed bump on the one
 // change this file is built to discourage.
-const bodyRatchetTotal = 40
+const bodyRatchetTotal = 0
 
 // safeIdiom is the remedy every failure message carries. An author who trips
 // the ratchet must not have to go looking for what to do instead.

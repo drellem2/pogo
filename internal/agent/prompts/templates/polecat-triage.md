@@ -79,7 +79,9 @@ Follow these steps exactly, in order. Skipping any step is a failure.
    ```
    Note who filed it, what they asked for, what behavior they observed vs expected, and anything decided in the comments. Then post a brief acknowledgment so the reporter sees a response quickly — one sentence, nothing more:
    ```bash
-   gh issue comment <n> --repo <owner>/<repo> --body "Thanks — looking into this."
+   gh issue comment <n> --repo <owner>/<repo> --body-file - <<'EOF'
+   Thanks — looking into this.
+   EOF
    ```
    This ack is the **only** write to the issue during triage. Your substantive reply is drafted in step 8 (`proposed_public_reply`) and posted by others after the human decision — never by you.
 
@@ -98,7 +100,9 @@ Follow these steps exactly, in order. Skipping any step is a failure.
 
 6. **Consult the product PM (pm-pogo) — synchronous, before finalizing.** The PM owns the recommendation quality bar; a recommendation that skips this step is incomplete. Mail your draft:
    ```bash
-   mg mail send pm-pogo --from=$POGO_AGENT_NAME --subject="triage consult: {{.Id}} (<owner>/<repo>#<n>)" --body="<your draft recommendation>"
+   mg mail send pm-pogo --from=$POGO_AGENT_NAME --subject="triage consult: {{.Id}} (<owner>/<repo>#<n>)" --body-file - <<'EOF'
+   <your draft recommendation>
+   EOF
    ```
    Then wait for the reply — this consult is synchronous per pm-pogo's standing offer. Check your inbox periodically (`mg mail list {{.Id}}`; your step-2 schedule also fires every 10 minutes). Use the wait productively: tighten evidence, re-check duplicates. If no reply after ~2 hours, mail the {{.Coordinator}} that your consult is pending and hold — do **not** finalize without PM input, and do not spam repeat mails.
 
@@ -116,7 +120,9 @@ Follow these steps exactly, in order. Skipping any step is a failure.
 
    Then mail the {{.Coordinator}} the compressed packet:
    ```bash
-   mg mail send {{.Coordinator}} --from=$POGO_AGENT_NAME --subject="triage: <owner>/<repo>#<n> — <verdict>" --body="<verdict + kind, 1-3 sentence rationale, key evidence (file:line), effort, main risk, open questions, proposed public reply, PM consult outcome>"
+   mg mail send {{.Coordinator}} --from=$POGO_AGENT_NAME --subject="triage: <owner>/<repo>#<n> — <verdict>" --body-file - <<'EOF'
+   <verdict + kind, 1-3 sentence rationale, key evidence (file:line), effort, main risk, open questions, proposed public reply, PM consult outcome>
+   EOF
    ```
 
 9. **Stay alive.** Do NOT exit. After reporting, wait for the {{.Coordinator}} to stop you. If the {{.Coordinator}} or PM sends a follow-up question (e.g. clarify a finding for the human gate), act on it immediately — your investigation context is why you stay running.
@@ -159,7 +165,9 @@ If your harness has an in-process scheduler{{if eq .Provider "claude"}} (Claude 
 - **Reaching another agent — prefer mail for asks; reserve nudges for system events.** Mail (`mg mail send <to> --from=$POGO_AGENT_NAME --subject="..." --body="..."`) carries an explicit sender so recipients can route, reply, and prioritize correctly. Use nudges only when sender attribution doesn't apply (cron-fired prompts, mail-check loops, system-level signals from pogod).
 - **If stuck, mail the {{.Coordinator}}:**
   ```bash
-  mg mail send {{.Coordinator}} --from=$POGO_AGENT_NAME --subject="stuck on {{.Id}}" --body="<what you tried and what's blocking you>"
+  mg mail send {{.Coordinator}} --from=$POGO_AGENT_NAME --subject="stuck on {{.Id}}" --body-file - <<'EOF'
+  <what you tried and what's blocking you>
+  EOF
   ```
 {{if eq .Provider "claude"}}- **Dismiss mid-session Claude Code modals immediately.** If at any point you see a Claude Code rating dialog (`1:Bad 2:Fine 3:Good 0:Dismiss`) or rate-limit-options modal (`Stop and wait for limit to reset`), respond with `0` or `1` respectively and continue your work. pogod's modal watcher (mg-4421) will dismiss either modal automatically if you don't notice it; the directive is a belt-and-suspenders fallback.
 {{end}}

@@ -108,12 +108,14 @@ Follow these steps exactly, in order. Skipping any step is a failure.
    ```bash
    gh pr create --base {{if .Branch}}{{.Branch}}{{else}}main{{end}} --head "$BRANCH" \
        --title "<work item title>" \
-       --body "<summary of the change>
+       --body-file - <<'EOF'
+   <summary of the change>
 
    Resolves <owner>/<repo>#<n>
 
    Approved triage recommendation: <triage ticket id or pointer from your ticket body>
-   Work item: {{.Id}}"
+   Work item: {{.Id}}
+   EOF
    ```
 
    Capture the PR URL/number from the output — you need it for the announcement mail and for `gh pr comment` in the review loop. If a PR for this branch already exists (`gh pr view "$BRANCH"` succeeds), do not open a second one — reuse it.
@@ -121,10 +123,15 @@ Follow these steps exactly, in order. Skipping any step is a failure.
 6. **Announce the PR.** Mail the {{.Coordinator}} and the review ticket's owner (the reviewer {{.Worker}}'s mail address is its work item id — your ticket body or `depends` chain names the review ticket):
 
    ```bash
-   mg mail send {{.Coordinator}} --from=$POGO_AGENT_NAME --subject="PR open for {{.Id}}" \
-       --body="PR <url> open for branch $BRANCH (issue <owner>/<repo>#<n>). Entering review loop."
-   mg mail send <review-ticket-id> --from=$POGO_AGENT_NAME --subject="PR ready for review: {{.Id}}" \
-       --body="PR <url>, branch $BRANCH, issue <owner>/<repo>#<n>. Triage recommendation: <pointer>."
+   # Both bodies interpolate $BRANCH, so they are composed with printf and fed on
+   # stdin: a QUOTED heredoc would keep $BRANCH literal, and an unquoted one carries
+   # exactly the --body="..." hazard. printf keeps the value in an argv slot instead.
+   printf 'PR %s open for branch %s (issue <owner>/<repo>#<n>). Entering review loop.\n' \
+       "<url>" "$BRANCH" |
+     mg mail send {{.Coordinator}} --from=$POGO_AGENT_NAME --subject="PR open for {{.Id}}" --body-file -
+   printf 'PR %s, branch %s, issue <owner>/<repo>#<n>. Triage recommendation: <pointer>.\n' \
+       "<url>" "$BRANCH" |
+     mg mail send <review-ticket-id> --from=$POGO_AGENT_NAME --subject="PR ready for review: {{.Id}}" --body-file -
    ```
 
    If no review ticket is named anywhere in your ticket, mail only the {{.Coordinator}} — dispatching the reviewer is the coordinator's job, not yours.
@@ -179,7 +186,9 @@ If your harness has an in-process scheduler{{if eq .Provider "claude"}} (Claude 
 - **Reaching another agent — prefer mail for asks; reserve nudges for system events.** Mail (`mg mail send <to> --from=$POGO_AGENT_NAME --subject="..." --body="..."`) carries an explicit sender so recipients can route, reply, and prioritize correctly. Use nudges only when sender attribution doesn't apply (cron-fired prompts, mail-check loops, system-level signals from pogod).
 - **If stuck, mail the {{.Coordinator}}:**
   ```bash
-  mg mail send {{.Coordinator}} --from=$POGO_AGENT_NAME --subject="stuck on {{.Id}}" --body="<what you tried and what's blocking you>"
+  mg mail send {{.Coordinator}} --from=$POGO_AGENT_NAME --subject="stuck on {{.Id}}" --body-file - <<'EOF'
+  <what you tried and what's blocking you>
+  EOF
   ```
 {{if eq .Provider "claude"}}- **Dismiss mid-session Claude Code modals immediately.** If at any point you see a Claude Code rating dialog (`1:Bad 2:Fine 3:Good 0:Dismiss`) or rate-limit-options modal (`Stop and wait for limit to reset`), respond with `0` or `1` respectively and continue your work. pogod's modal watcher (mg-4421) will dismiss either modal automatically if you don't notice it; the directive is a belt-and-suspenders fallback.
 {{end}}

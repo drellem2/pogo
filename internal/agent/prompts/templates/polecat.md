@@ -135,7 +135,9 @@ Follow these steps exactly, in order. Skipping any step is a failure.
 
    **If failed:** mail the {{.Coordinator}} with failure details. Do NOT call `mg done`.
    ```bash
-   mg mail send {{.Coordinator}} --from=$POGO_AGENT_NAME --subject="merge failed for {{.Id}}" --body="<failure details from refinery>"
+   mg mail send {{.Coordinator}} --from=$POGO_AGENT_NAME --subject="merge failed for {{.Id}}" --body-file - <<'EOF'
+   <failure details from refinery>
+   EOF
    ```
 
 8. **Stay alive.** Do NOT exit. After completing steps 1–7, wait for the {{.Coordinator}} to stop you. The {{.Coordinator}} will verify your work was merged before terminating your process. If the {{.Coordinator}} sends you a message (e.g., asking for a fix or retry), act on it immediately.
@@ -193,7 +195,9 @@ If your harness has an in-process scheduler{{if eq .Provider "claude"}} (Claude 
 - **Reaching another agent — prefer mail for asks; reserve nudges for system events.** Mail (`mg mail send <to> --from=$POGO_AGENT_NAME --subject="..." --body="..."`) carries an explicit sender so recipients can route, reply, and prioritize correctly. Use nudges only when sender attribution doesn't apply (cron-fired prompts, mail-check loops, system-level signals from pogod).
 - **If stuck, mail the {{.Coordinator}}:**
   ```bash
-  mg mail send {{.Coordinator}} --from=$POGO_AGENT_NAME --subject="stuck on {{.Id}}" --body="<what you tried and what's blocking you>"
+  mg mail send {{.Coordinator}} --from=$POGO_AGENT_NAME --subject="stuck on {{.Id}}" --body-file - <<'EOF'
+  <what you tried and what's blocking you>
+  EOF
   ```
 {{if eq .Provider "claude"}}- **Dismiss mid-session Claude Code modals immediately.** If at any point you see a Claude Code rating dialog (`1:Bad 2:Fine 3:Good 0:Dismiss`) or rate-limit-options modal (`Stop and wait for limit to reset`), respond with `0` or `1` respectively and continue your work. pogod's modal watcher (mg-4421) will dismiss either modal automatically if you don't notice it; the directive is a belt-and-suspenders fallback.
 {{end}}
