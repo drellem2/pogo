@@ -392,9 +392,23 @@ func (e *UnenumerableWorktreeError) Unwrap() error { return e.Err }
 // # There is deliberately NO DRAIN (pm-pogo, ruled and then WITHDRAWN)
 //
 // A drain was proposed — "reclaim later once dead AND old AND previously
-// refused" — and withdrawn. A refused worktree is refused permanently; it never
-// ages into a collection, and nothing here should be extended so that it does.
-// Two reasons, both worth having in front of you before you reach for a timer:
+// refused" — and withdrawn. Nothing here should be extended so as to build one.
+//
+// SCOPE, because the three refusal arms do not behave alike and a flat claim
+// either way is false:
+//
+//   - The REFUSE-AND-REPORT arms — OwnerUnproven (no death evidence) and
+//     unenumerable (no timestamp to check) — are PERMANENT. They never age into
+//     a collection at any age, and that is the withdrawn drain's population.
+//     This is the case carved out for human judgement.
+//   - The VETO arm is a DELAY, not a permanent refusal. A tree refused for a
+//     recent write is collected on a later sweep once it goes quiet. That is
+//     not the drain returning: positive death evidence already authorises that
+//     removal, and the veto only ever SUBTRACTS from what it authorised. Age
+//     never becomes the reason; it stops being a reason to refuse.
+//
+// Two reasons for the withdrawal, both worth having in front of you before you
+// reach for a timer on the first population:
 //
 //   - Age is not emptiness. A 30-day-old irreplaceable.go is exactly as
 //     unrecoverable as a 30-second-old one; the clock does not make it cheaper
@@ -408,9 +422,10 @@ func (e *UnenumerableWorktreeError) Unwrap() error { return e.Err }
 // What replaces it is reporting: every refusal names how long the tree has been
 // untouched, so the human whose judgement this was carved out for can make the
 // call cheaply. That is the whole value of "GC on file timestamp" without a
-// timestamp ever authorising a deletion. The leak is accepted deliberately — a
-// visible pin a human can clear is a categorically better failure than an
-// invisible deletion they cannot, and `pogo gc --apply --force` is the way out.
+// timestamp ever authorising a deletion. The leak on the permanent arms is
+// accepted deliberately — a visible pin a human can clear is a categorically
+// better failure than an invisible deletion they cannot, and `pogo gc --apply
+// --force` is the way out.
 //
 // A day is chosen to clear the longest plausible quiet period of a LIVE agent
 // (a long build, a CI wait, a long model turn — minutes to an hour) by a wide
@@ -580,10 +595,11 @@ func checkWorktreeRemoval(worktreeDir string, owner WorktreeOwner) worktreeRemov
 
 	// --- cannot tell -----------------------------------------------------
 	// The age is established first because it is REPORTED on every arm below,
-	// including the ones where it decides nothing. A refusal here is permanent
-	// (there is no drain — see quietWindow), so the age is what a human needs
-	// to act on it. Note the direction of the dependency: age is an output on
-	// the OwnerUnproven arm and an input only to the veto.
+	// including the ones where it decides nothing. On the two PERMANENT arms
+	// (OwnerUnproven, unenumerable) it is a pure output and the only thing a
+	// human has to act on the pin with; on the veto arm alone it is also an
+	// input. See quietWindow for why those arms differ and why neither is the
+	// withdrawn drain.
 	newest, werr := newestWrite(worktreeDir)
 	age, ageKnown := time.Since(newest), werr == nil
 
@@ -755,9 +771,9 @@ func WorktreeDirty(worktreeDir string) (bool, []string, error) {
 // (*RecentlyWrittenWorktreeError), or when the tree cannot be listed at all so
 // there is no timestamp to check (*UnenumerableWorktreeError). A timestamp may
 // forbid a deletion here and may never authorise one — see quietWindow, which
-// carries the asymmetry, and which also records that the proposed DRAIN was
-// withdrawn: a refusal is permanent and reports its age rather than ageing into
-// a collection.
+// carries the asymmetry, records that the proposed DRAIN was withdrawn, and
+// scopes which refusals are permanent (the two without death evidence or
+// without a readable timestamp) and which is merely a delay (the veto's own).
 //
 // Dropping the registration is load-bearing, not incidental: it is what frees
 // the polecat's branch for deletion (git refuses to delete a branch checked

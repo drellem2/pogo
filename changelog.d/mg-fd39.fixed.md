@@ -41,13 +41,24 @@
   fire *while an agent is working*, and a guard whose failure mode inverts by
   shape is two guards of which only one is safe.
 
-- **A refused worktree reports how long it has been untouched, and is never
-  reclaimed automatically (mg-fd39).** `kept: … untouched 30 days` is what makes
-  an operator's decision cheap. The age is a **report and never an input**: a
-  30-day-old `irreplaceable.go` is exactly as unrecoverable as a 30-second-old
-  one, so nothing ages into a collection. The resulting pin is deliberate — a
-  visible pin a human can clear is a categorically better failure than an
-  invisible deletion they cannot, and `pogo gc --apply --force` is the way out.
+- **A refused worktree reports how long it has been untouched (mg-fd39).**
+  `kept: … untouched 30 days` is what makes an operator's decision cheap. A
+  proposed *drain* — reclaim once dead **and** old **and** previously refused —
+  was withdrawn, and the arms it would have covered are permanent: a worktree
+  refused for **lack of death evidence**, or because its tree could not be
+  listed, is never reclaimed automatically at any age. There the age is a
+  **report and never an input**, because a 30-day-old `irreplaceable.go` is
+  exactly as unrecoverable as a 30-second-old one. The resulting pin is
+  deliberate — a visible pin a human can clear is a categorically better failure
+  than an invisible deletion they cannot, and `pogo gc --apply --force` is the
+  way out.
+
+  The **veto** arm is the exception and is a delay rather than a permanent
+  refusal: a tree held back for a recent write collects on a later sweep once it
+  goes quiet. That is not the drain returning — positive evidence of death
+  already authorised that removal, and the veto only ever *subtracts* from what
+  it authorised. Age never becomes the reason; it stops being a reason to
+  refuse.
 
 - **The GC log stops naming an innocent reason for a destructive act (mg-fd39,
   gh #97).** The per-action log shipped as gh #94's remedy — *the* way to find
