@@ -34,3 +34,127 @@ item are the anchor.
 | [redeploy-drain-2026-07-17.md](redeploy-drain-2026-07-17.md) | What `pogo-self-deploy`'s drain actually does: waits or kills? — read for f206's unattended-redeploy arming decision | Answered — the drain WAITS (1800s, fails closed) and never kills; `--force`'s "kill" is measured to be mg-61a0's PTY accident, not `kickstart -k`. Fact-finding only, no fix (mg-46a4) |
 | [registry-absent-while-alive-2026-07-17.md](registry-absent-while-alive-2026-07-17.md) | Root cause: the registry reports a live agent ABSENT after any pogod restart it outlived (no lock window); a live polecat's mail-check is then reaped — reproduced end-to-end | Reproduced — only an accidental PTY hangup prevents it; invariant pinned by test, harness-independent fix deferred (mg-61a0) |
 | [renudge-efficacy-2026-07-14.md](renudge-efficacy-2026-07-14.md) | Efficacy of the bare-CR auto-renudge against a real Claude Code paste-buffered kickoff wedge; head-to-head vs. the field-confirmed `"1"`+CR | Verified — bare CR recovers 8/8, `"1"`+CR 5/5; bare CR preferred (no stray char), no `"1"` fallback needed (mg-feb3) |
+
+## Audit of recommendations and verdicts — 2026-07-29 (mg-d489)
+
+Every doc above was read against one question: **it reached a conclusion — is anything
+carrying that conclusion forward?** A conclusion reached in a doc lives outside the
+work-item store, which is where conclusions go missing. Two ways they go missing:
+
+- **Unfiled recommendation** — the doc recommends work and nobody filed it.
+- **Orphaned answer** — the doc answers a question some ticket body still asks, unamended.
+
+Both were proven, from one document, before this audit ran.
+`recovery-trigger-restart-not-redeploy-2026-07-23.md` produced each once: its verdict
+(*"Do not widen `pogo-recovery.sh`"*) was an orphaned answer — mg-cf48's body still asked
+it, and polecat mg-6d09 was dispatched to re-derive a decision already shipped — and its
+closing *"Recommend a separate design item. Not built here."* sat unfiled for six days
+(now mg-75ec, the only consumer-facing item in the whole self-deploy arc). Both are fixed;
+they are why the predicate was believed worth running.
+
+### Method, and what it cost
+
+    docs/investigations/*.md                                  : 31
+    grep -ilE 'recommend|do not|verdict|ruling'                : 26   <- candidates
+    read, and found to carry a real conclusion                 : 23
+    grep false positives                                       :  3
+
+**A grep cannot tell a recommendation from a mention of one, and 3 of 26 were mentions.**
+`README.md` matched on the verdicts it *quotes* from other docs — it is this index, and
+holds no conclusion of its own. `pi-nudge-calibration.md` matched on a quoted Cursor TUI
+string (`Do not trust`). `bridget-fork-2026-05-09.md` cites an architect ruling made
+elsewhere (mg-7921) and records work already done. **3/26 is a tight predicate, not a
+loose one** — a tighter next pass would gain little and would risk dropping docs whose
+recommendation is a single line in a §Scope section, which is where two of this pass's
+four findings were.
+
+### Results
+
+| Doc | Conclusion (one line) | Status | Action |
+|---|---|---|---|
+| architect-crew-agent-evaluation-2026-07-17 | NO — do not lift `crew/architect.md`; ship mg-945c's `polecat-architect` instead | Carried | none — rec 2 → mg-564c, rec 4 → mg-738f, rec 1/3 honoured |
+| bridget-fork-2026-05-09 | *(cites a ruling, makes none)* | **False positive** | none |
+| claude-explore-integration | Option 3 — no config needed today; an MCP wrapper without a semantic index is cargo-culting | Carried | none — deliberately unfiled with a named trigger (*"raise it if observed Explore behaviour is poor"*) |
+| codex-e2e-validation | Phase 3D passes; two auth items are Daniel's | Carried | none — mg-4bb2 (`decision1-resolved`), item 2 → mg-b31b |
+| coordinator-naming-snag-2026-07-22 | Real, fixed, and it never hit Daniel's box or a fresh install — only a harness hardcoding `mayor` while writing no config | **Mixed — 3 actions** | filed **mg-4469**, filed **mg-2c17**; appended to **mg-04ce**; pointer for **mg-ace6** blocked (below) |
+| credential-expiry-mechanism-2026-07-23 | The grant's 30d lifetime was reached, not revoked — next death `2026-08-21T21:31Z` | Carried | none — rec 1 → mg-7024, rec 4 → `docs/operations.md` |
+| cursor-nudge-calibration | An offline e2e is not achievable at proportionate cost for the `agent` binary | Carried | none — mg-c146; follow-up is mg-cdb6 |
+| deaf-survivor-off-by-default-2026-07-17 | Fixed — `diagnose` now judges a CONFIGURED **and RUNNING** agent | **Unfiled** | filed **mg-032b** — the excluded population it named ("an agent nobody runs `diagnose` against") never got a ticket |
+| fleet-auth-expiry-2026-07-22 | CONFIRMED — credential expiry, not a wedge; the SPOF was real but not the cause | Carried | none — rec 1 → mg-8cdb, recs 3–4 → mg-1935 |
+| investigation-mg-06f2 | Tickets archived `done` before the refinery confirmed the merge | Carried | none — Fix 2 → mg-34da, Fix 1 shipped (`cmd/pogod/main.go` auto-reopen), Fix 3 is the live polecat protocol; Fix 5 was optional and remains unbuilt **by choice** |
+| launch-readiness-audit-2026-03-21 | No hard blockers; two areas NEEDS_REVIEW | Carried | none — all three "Should Fix Soon" resolved (worktree race mg-0779/mg-0d09; `GateOutput` now written under `r.mu`; history capped by `MaxHistoryLen`) |
+| launchd-nondemand-spawn-postreboot-2026-07-21 | Post-reboot, both `StartInterval` and `StartCalendarInterval` fire — sleep is the trigger, not the machine | Carried | none — the "cheap next measurement" is mg-01f7 |
+| nudge-claude-code-workaround | Candidate 1 is a real workaround whose necessity is empirically testable; candidate 2 is not a workaround at all | **Unfiled** | filed **mg-68c8** — §3's protocol was specified, mg-09b6 archived with *"polecat runs section 3"* as its next action, and nobody ran it |
+| orphaned-polecat-2026-07-17 | A human resolves an `AgentUnknown`; survivors are surfaced, deliberately not counted | Carried | none — mg-0b77; the adjacent `cleanup_orphans` defect it reported → mg-a558 |
+| phantom-polecats-from-go-test-2026-07-17 | Fixed both halves: the store is test-safe by default, and the kill alert is re-verifiable at read time | Carried | none — mg-da48; the recurrence → mg-b399 |
+| pi-nudge-calibration | *(matched a quoted TUI string)* | **False positive** | none |
+| pogod-shutdown-stops-nothing-2026-07-17 | The `defer StopAll` was unreachable on every exit path; deleted, hangup documented in its place | Carried | none — mg-6b66. Residue below. |
+| polecat-witness-2026-07-17 | The reap no longer concludes death from two absences | Carried | none — mg-13a3; the gitgc follow-up it split off → mg-0130 |
+| pty-investigation-2026-05-09 | PTY at 0×0 → Ink falls back to 80×24 and renders at the wrong size | Carried | none — mg-5564 |
+| recovery-trigger-restart-not-redeploy-2026-07-23 | It already exists; **recommended AGAINST** widening restart to redeploy | Carried | none — the two proven instances, both already fixed (mg-cf48, mg-75ec) |
+| redeploy-drain-2026-07-17 | The drain WAITS (1800s, fails closed) and never kills | Carried | none — §5(a) → mg-0b77/mg-65b2, §5(b) → mg-8b48, §6.3 → mg-f206 |
+| refinery-rebase-regate-2026-07-17 | It DOES re-gate; `skip_on_retry` is a latent hole and OFF for pogo | Carried | none — *"No ticket filed"* is the doc's own reasoned choice, on a config pogo does not use |
+| renudge-efficacy-2026-07-14 | Bare CR recovers 8/8; no `"1"` fallback needed | Carried | none — the live-wave follow-up gate is mg-eb54 |
+| spawn-polecat-rc0-and-poisoned-branch-2026-07-17 | rc=0 **REFUTED** — it is the harness's `&` + bare `wait`; the other two defects are real and fixed | Carried | none — mg-d22a; the refutation is recorded in both bodies that relied on it (mg-eb54, mg-3c32) |
+| wake-watcher-mechanism-confirmed-2026-07-21 | CONFIRMED — parent death is the sole mechanism; question closed | Carried | none — mg-c3a6; "inert until redeploy" resolved by mg-42ac/mg-b7d0 |
+| README.md | *(this index; quotes others' verdicts)* | **False positive** | none |
+
+### Filed
+
+| Item | From | Why it had no carrier |
+|---|---|---|
+| **mg-032b** | deaf-survivor §"populations this fix excludes" | `MailCheckMissing`'s only consumer is `pogo agent diagnose <name>` — verified today, one call site. mg-1935 (ackwatch) is adjacent but reads schedules that **exist**; an agent with no mail-check has no counter row. Detectable, never announced. |
+| **mg-4469** | coordinator-naming §4 | `crewPromptPath`'s name-equality branch has no fallback, so `[agents] coordinator = "doctor"` makes `crew/doctor.md` unreachable and the error names a path the user never touched. Latent — no population hits it — which is when it is cheap. |
+| **mg-2c17** | coordinator-naming §"What is still open" | Daniel's *"make mayor the default"* reverses the authorized mg-ce47. Mayor correctly declined to act; the contradiction has lived in a `human` mail thread since 2026-07-22 with no work item. `assignee=human`. |
+| **mg-68c8** | nudge-claude-code §3/§5 | The 50ms `SubmitDelay` is still shipped and still inherited rather than measured; the protocol to settle it was written and archived unrun. |
+| **mg-d878** | *(found by this audit's own remedy)* | See below. |
+
+### Amended
+
+**mg-04ce** — its Constraints section said creating `/Users/daniel/config.toml` *"would actively
+break his install."* The investigation it commissioned refuted that (`PogoHome()` normalizes a
+`POGO_HOME` equal to `$HOME`, so the path is never a config layer; and layering is key-by-key).
+Appended, not rewritten.
+
+### One pointer could not be written — and the blocker is now the finding
+
+**mg-ace6** ("stall-watch not gated on `cfg.Source`", pogo#75, shelved) is **fixed** — `stallWatchArmed`
+gates on `cfg.Source`, commit `3f79fac` (mg-fdd5) is an ancestor of `origin/main`, and
+`cmd/pogod/stallwatch_gate_test.go` is the regression test its body asks for. Both acceptance
+criteria are met. Its body still reads as an open bug.
+
+`mg edit mg-ace6 --append-body-file` is **refused**: the item carries the `gh-issue` tag and its body
+predates the carrier block, and `reconcileWorkflowMarkers` validates the effective tag set against the
+resulting body on every write. There is no append-only escape — `leadingWorkflow` requires the
+`workflow:` line to open the body's leading block, so a carrier block inside appended text is
+`misplaced` and refused outright. **41 of 92 `gh-issue` items are in this state; 7 are still live.**
+Filed as **mg-d878** (macguffin). The pointer went to pm-pogo by mail; mg-ace6's body was **not**
+rewritten, because capture-then-rewrite is what mg-f326 exists to prevent.
+
+### Reported, deliberately not filed
+
+- **`pogod`'s `defer lock.Unlock()` (`cmd/pogod/main.go`) is dead for exactly mg-6b66's reason** —
+  SIGTERM has no handler and the only other exit is `log.Fatal`, so it never runs. The doc named it
+  ("out of scope for this ticket, but it is the same fact"). Checked before dismissing: it is
+  **harmless**, because `nightlyone/lockfile`'s `TryLock` deletes a lockfile whose recorded pid is
+  dead. Cosmetic residue of a deletion that stopped one line short.
+- **`docs/` outside `investigations/` was not swept.** Out of scope for this pass by instruction. No
+  claim is made about it either way.
+
+### Bound — read this before treating the table as a clean bill of health
+
+**This pass covers answers that landed in a DOC.** Mayor's population is larger: *a record that
+framed a question and was never amended when the answer landed elsewhere.* The half where the answer
+landed in **another ticket** has no structural signal and no terminating predicate — mg-cf48 was
+correctly `done`, correctly tagged, and owed no successor, and no type check, tag check or `mg` guard
+catches that shape. **That half stays open.** A clean docs audit says nothing about it.
+
+Two instances of it were seen in passing while working this ticket and are recorded here rather than
+chased, because each needs a judgement its owner should make:
+
+- **mg-18d0** (`done`) says the stale-heartbeat→restart rung is *"still missing, still worth
+  building."* No successor carries it. Whether it should be built is genuinely open — mg-18d0 itself
+  argues it must be justified on its own merits and not on the 07-22 outage.
+- **mg-eb54**'s title says the wave verify *PASSED*; the architect gate ruling at the foot of the same
+  body downgrades that and names three unmet conditions. Both are in the body; only one is in the
+  title, and the title is what a queue listing shows.
