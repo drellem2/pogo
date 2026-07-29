@@ -386,6 +386,67 @@ func MGWorkItemDone(id string) (bool, error) {
 	return item.Status == "done" || item.Status == "archived", nil
 }
 
+// PostMergeWorkTag is how a work item DECLARES that merging its branch is a
+// step rather than completion (mg-d86e).
+//
+// The refinery cannot know whether a merge finishes a ticket; the ticket knows.
+// Merging is a good completion signal for the common case, where the branch IS
+// the deliverable — and a wrong one whenever real work follows the merge: a
+// release that still has to tag and publish, a change that must be verified in
+// its installed state, anything with a post-merge external side effect. On
+// 2026-07-29 two release items (mg-ca3c, mg-9f17) merged, were marked done by
+// pogod, and had their polecats stopped before either reached the tag step. Both
+// releases read as complete from every angle and neither existed.
+//
+// The declaration is a plain tag rather than a new item field for the same
+// reasons macguffin's `declares-remainder` is one: `mg list --tag=post-merge-work`
+// finds every outstanding one, `mg show` renders it, `mg edit --add-tags` reaches
+// an item that already exists, and no schema changes. It composes with
+// `declares-remainder` rather than duplicating it — that tag says "something ELSE
+// must carry this forward", this one says "THIS item is not finished yet".
+//
+// Unlike `pogo refinery submit --defer-done`, which the submitting polecat must
+// remember to pass, this marker is set by the FILER, at filing time, on the item
+// that knows. A polecat that never learns the flag exists still cannot be
+// truncated.
+const PostMergeWorkTag = "post-merge-work"
+
+// MGWorkItemDeclaresPostMergeWork reports whether a work item carries
+// PostMergeWorkTag. pogod's merge-completion path consults it before marking an
+// item done and stopping its polecat (mg-d86e).
+//
+// Matching is case-folded and space-trimmed, as macguffin's own tag predicates
+// are: a generous match can at worst leave an item to be completed by the
+// polecat itself (the pre-gh #35 behaviour, with a bounded backstop), while a
+// stingy one silently truncates a ticket, which is the defect this exists to
+// close.
+//
+// A failing or unparseable lookup returns an error rather than false, and
+// callers must treat that as "cannot tell" — never as "no declaration".
+func MGWorkItemDeclaresPostMergeWork(id string) (bool, error) {
+	if id == "" {
+		return false, fmt.Errorf("work item id is required")
+	}
+	cmd := execCommand("mg", "show", id, "--json")
+	cmd.Stderr = nil
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return false, fmt.Errorf("mg show %s failed: %s (%w)", id, strings.TrimSpace(string(out)), err)
+	}
+	var item struct {
+		Tags []string `json:"tags"`
+	}
+	if err := json.Unmarshal(out, &item); err != nil {
+		return false, fmt.Errorf("mg show %s: unparseable JSON: %w", id, err)
+	}
+	for _, t := range item.Tags {
+		if strings.EqualFold(strings.TrimSpace(t), PostMergeWorkTag) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // execCommand is a variable for testability.
 var execCommand = execCommandFunc
 

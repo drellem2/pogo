@@ -79,7 +79,7 @@ func TestReapMergedPolecat_StopsPolecatAndMarksDone(t *testing.T) {
 	}
 
 	mr := &refinery.MergeRequest{ID: "mr-42", Branch: "polecat-mg-1234", Author: "mg-1234"}
-	reapMergedPolecat(reg, mr, complete, nil)
+	reapMergedPolecat(reg, mr, complete, postMergeVerdict{}, nil)
 
 	if completedID != "mg-1234" {
 		t.Errorf("expected mg done for work-item id mg-1234, got %q", completedID)
@@ -104,7 +104,7 @@ func TestReapMergedPolecat_IgnoresEmptyAuthor(t *testing.T) {
 	reapMergedPolecat(reg, &refinery.MergeRequest{ID: "mr-1", Branch: "b"}, func(string, string) error {
 		called = true
 		return nil
-	}, nil)
+	}, postMergeVerdict{}, nil)
 	if called || len(reg.stopped) != 0 {
 		t.Errorf("expected no action for authorless MR (complete=%v, stopped=%v)", called, reg.stopped)
 	}
@@ -119,7 +119,7 @@ func TestReapMergedPolecat_IgnoresUnknownAuthor(t *testing.T) {
 	reapMergedPolecat(reg, &refinery.MergeRequest{ID: "mr-1", Branch: "b", Author: "mg-gone"}, func(string, string) error {
 		called = true
 		return nil
-	}, nil)
+	}, postMergeVerdict{}, nil)
 	if called || len(reg.stopped) != 0 {
 		t.Errorf("expected no action for unknown author (complete=%v, stopped=%v)", called, reg.stopped)
 	}
@@ -133,7 +133,7 @@ func TestReapMergedPolecat_IgnoresCrewAuthor(t *testing.T) {
 	reapMergedPolecat(reg, &refinery.MergeRequest{ID: "mr-1", Branch: "b", Author: "mayor"}, func(string, string) error {
 		called = true
 		return nil
-	}, nil)
+	}, postMergeVerdict{}, nil)
 	if called || len(reg.stopped) != 0 {
 		t.Errorf("expected no action for crew author (complete=%v, stopped=%v)", called, reg.stopped)
 	}
@@ -147,7 +147,7 @@ func TestReapMergedPolecat_StopsEvenWhenDoneFails(t *testing.T) {
 	}}
 	complete := func(string, string) error { return errors.New("mg done failed: already done") }
 
-	reapMergedPolecat(reg, &refinery.MergeRequest{ID: "mr-1", Branch: "b", Author: "mg-1234"}, complete, nil)
+	reapMergedPolecat(reg, &refinery.MergeRequest{ID: "mr-1", Branch: "b", Author: "mg-1234"}, complete, postMergeVerdict{}, nil)
 
 	if len(reg.stopped) != 1 || reg.stopped[0] != "1234" {
 		t.Errorf("expected Stop(1234) despite mg done failure, got %v", reg.stopped)
@@ -161,7 +161,7 @@ func TestReapMergedPolecat_StopFailureIsNonFatal(t *testing.T) {
 		},
 		stopErr: errors.New("agent wedged"),
 	}
-	reapMergedPolecat(reg, &refinery.MergeRequest{ID: "mr-1", Branch: "b", Author: "mg-1234"}, func(string, string) error { return nil }, nil)
+	reapMergedPolecat(reg, &refinery.MergeRequest{ID: "mr-1", Branch: "b", Author: "mg-1234"}, func(string, string) error { return nil }, postMergeVerdict{}, nil)
 	// Must not panic; the mayor's backstop picks up the still-running polecat.
 	if len(reg.stopped) != 1 {
 		t.Errorf("expected one Stop attempt, got %v", reg.stopped)
@@ -233,7 +233,7 @@ func TestReapMergedPolecat_DeferDoneArmsBackstopAndSkipsAutoStop(t *testing.T) {
 	complete := func(string, string) error { completeCalled = true; return nil }
 
 	mr := &refinery.MergeRequest{ID: "mr-42", Branch: "polecat-mg-1234", Author: "mg-1234", DeferDone: true}
-	reapMergedPolecat(reg, mr, complete, backstop)
+	reapMergedPolecat(reg, mr, complete, postMergeVerdict{}, backstop)
 
 	if completeCalled {
 		t.Error("defer-done: mg done must NOT be called at merge — the polecat calls it itself")
@@ -260,7 +260,7 @@ func TestDeferredBackstop_FiresReapsAndEscalates(t *testing.T) {
 	backstop, fire := newTestBackstop(reg, &escalations)
 
 	mr := &refinery.MergeRequest{ID: "mr-42", Branch: "polecat-mg-1234", Author: "mg-1234", DeferDone: true}
-	reapMergedPolecat(reg, mr, func(string, string) error { return nil }, backstop)
+	reapMergedPolecat(reg, mr, func(string, string) error { return nil }, postMergeVerdict{}, backstop)
 
 	// The polecat never exits: the deadline elapses.
 	fire()
@@ -291,7 +291,7 @@ func TestDeferredBackstop_CleanCompletionDisarms(t *testing.T) {
 	backstop, fire := newTestBackstop(reg, &escalations)
 
 	mr := &refinery.MergeRequest{ID: "mr-42", Branch: "polecat-mg-1234", Author: "mg-1234", DeferDone: true}
-	reapMergedPolecat(reg, mr, func(string, string) error { return nil }, backstop)
+	reapMergedPolecat(reg, mr, func(string, string) error { return nil }, postMergeVerdict{}, backstop)
 
 	// The polecat finishes its post-merge flow and its process exits — the
 	// OnExit hook disarms the backstop. Its `mg done` already moved the item out
@@ -321,7 +321,7 @@ func TestDeferredBackstop_FireAfterExitIsNoop(t *testing.T) {
 	backstop, fire := newTestBackstop(reg, &escalations)
 
 	mr := &refinery.MergeRequest{ID: "mr-42", Branch: "polecat-mg-1234", Author: "mg-1234", DeferDone: true}
-	reapMergedPolecat(reg, mr, func(string, string) error { return nil }, backstop)
+	reapMergedPolecat(reg, mr, func(string, string) error { return nil }, postMergeVerdict{}, backstop)
 
 	// Process is gone from the registry, but cancel has not run yet.
 	delete(reg.agents, "1234")
@@ -350,7 +350,7 @@ func TestDeferredBackstop_CompletedItemIsReapedWithoutEscalation(t *testing.T) {
 	backstop.workItemDone = func(id string) (bool, error) { probed = id; return true, nil }
 
 	mr := &refinery.MergeRequest{ID: "mr-42", Branch: "polecat-mg-1234", Author: "mg-1234", TargetRef: "integ", PRFlow: true}
-	reapMergedPolecat(reg, mr, func(string, string) error { return nil }, backstop)
+	reapMergedPolecat(reg, mr, func(string, string) error { return nil }, postMergeVerdict{}, backstop)
 	fire()
 
 	if probed != "mg-1234" {
@@ -375,7 +375,7 @@ func TestDeferredBackstop_ProbeErrorEscalatesConservatively(t *testing.T) {
 	backstop.workItemDone = func(string) (bool, error) { return false, errors.New("mg unavailable") }
 
 	mr := &refinery.MergeRequest{ID: "mr-42", Branch: "polecat-mg-1234", Author: "mg-1234", TargetRef: "integ", PRFlow: true}
-	reapMergedPolecat(reg, mr, func(string, string) error { return nil }, backstop)
+	reapMergedPolecat(reg, mr, func(string, string) error { return nil }, postMergeVerdict{}, backstop)
 	fire()
 
 	if len(escalations) != 1 || escalations[0] != "mg-1234" {
@@ -398,7 +398,7 @@ func TestReapMergedPolecat_PRFlowSkipsAutoDone(t *testing.T) {
 		ID: "mr-42", Branch: "polecat-mg-1234", Author: "mg-1234",
 		TargetRef: "daed-101-integration", PRFlow: true,
 	}
-	reapMergedPolecat(reg, mr, func(string, string) error { completeCalled = true; return nil }, backstop)
+	reapMergedPolecat(reg, mr, func(string, string) error { completeCalled = true; return nil }, postMergeVerdict{}, backstop)
 
 	if completeCalled {
 		t.Error("PR flow: mg done must NOT be called — completion is the PR, not the integration merge")
@@ -422,7 +422,7 @@ func TestReapMergedPolecat_ResultRecordsTargetAndOmitsPRFlow(t *testing.T) {
 	}}
 	var got string
 	mr := &refinery.MergeRequest{ID: "mr-42", Branch: "polecat-mg-1234", Author: "mg-1234", TargetRef: "main"}
-	reapMergedPolecat(reg, mr, func(_, resultJSON string) error { got = resultJSON; return nil }, nil)
+	reapMergedPolecat(reg, mr, func(_, resultJSON string) error { got = resultJSON; return nil }, postMergeVerdict{}, nil)
 
 	var result map[string]any
 	if err := json.Unmarshal([]byte(got), &result); err != nil {
@@ -469,7 +469,7 @@ func TestDeferredBackstop_DeathBetweenMergeAndDoneReleasesClaim(t *testing.T) {
 	reapMergedPolecat(reg, mr, func(string, string) error {
 		t.Error("PR flow: mg done must not be called at merge")
 		return nil
-	}, backstop)
+	}, postMergeVerdict{}, backstop)
 
 	// The death: the process ends on its own, mid-flow. OnExit calls cancel.
 	backstop.cancel(reg.agents["1234"])
@@ -509,7 +509,7 @@ func TestDeferredBackstop_ExitWithNoClaimHeldIsQuiet(t *testing.T) {
 	backstop, _ := newTestBackstop(reg, &escalations)
 
 	mr := &refinery.MergeRequest{ID: "mr-42", Branch: "polecat-mg-1234", Author: "mg-1234", TargetRef: "integration", PRFlow: true}
-	reapMergedPolecat(reg, mr, func(string, string) error { return nil }, backstop)
+	reapMergedPolecat(reg, mr, func(string, string) error { return nil }, postMergeVerdict{}, backstop)
 	backstop.cancel(reg.agents["1234"])
 
 	if len(escalations) != 0 {
@@ -531,7 +531,7 @@ func TestDeferredBackstop_FailedReleaseStillEscalates(t *testing.T) {
 	backstop, _ := newTestBackstop(reg, &escalations)
 
 	mr := &refinery.MergeRequest{ID: "mr-42", Branch: "polecat-mg-1234", Author: "mg-1234", DeferDone: true}
-	reapMergedPolecat(reg, mr, func(string, string) error { return nil }, backstop)
+	reapMergedPolecat(reg, mr, func(string, string) error { return nil }, postMergeVerdict{}, backstop)
 	backstop.cancel(reg.agents["1234"])
 
 	if len(escalations) != 1 || escalations[0] != "death:mg-1234" {

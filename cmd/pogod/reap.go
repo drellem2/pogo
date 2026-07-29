@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/drellem2/pogo/internal/agent"
+	"github.com/drellem2/pogo/internal/client"
 	"github.com/drellem2/pogo/internal/refinery"
 )
 
@@ -38,6 +39,69 @@ type polecatReaper interface {
 	ReleaseClaimAfterExit(a *agent.Agent) (bool, error)
 }
 
+// postMergeVerdict is the answer to the one question the refinery cannot answer
+// for itself: does merging this branch COMPLETE its work item, or is the merge a
+// step with work after it? Declared is true only when something said so; Reason
+// carries the human-readable why, which both the log line and the coordinator's
+// MERGED mail print.
+//
+// The zero value means "merging completes it" — the common case, and the
+// behaviour every caller had before mg-d86e.
+type postMergeVerdict struct {
+	Declared bool
+	Reason   string
+}
+
+// resolvePostMergeWork asks the WORK ITEM whether merging completes it
+// (mg-d86e), by way of the declares probe (client.MGWorkItemDeclaresPostMergeWork
+// in production, injectable here).
+//
+// It is deliberately a separate step from reapMergedPolecat: pogod's OnMerged
+// hook needs the same answer twice — once for the reap decision, once for the
+// wording of the MERGED mail it sends the coordinator — and asking the store
+// once means the two can never disagree.
+//
+// It answers the zero verdict, without probing, for everything the reap path
+// would ignore anyway (no author, no such agent, a crew author) and for MRs
+// already deferred by other means. Probing there would at best waste an `mg
+// show` and at worst mislabel a crew-authored merge, since a crew agent's name
+// is not a work-item id.
+//
+// A probe that FAILS declares post-merge work. That direction is deliberate:
+// the whole defect this closes is a completion asserted without the standing to
+// assert it, and an unreadable item gives no standing. The cost of being wrong
+// this way is bounded — the polecat keeps running, calls `mg done` itself as its
+// own protocol tells it to, and the defer-done backstop reaps and escalates it
+// within deferDoneBackstopTimeout if it does not. The cost of being wrong the
+// other way is a ticket silently truncated, which nothing catches.
+func resolvePostMergeWork(reg polecatReaper, mr *refinery.MergeRequest, declares func(id string) (bool, error)) postMergeVerdict {
+	if mr == nil || mr.Author == "" || declares == nil {
+		return postMergeVerdict{}
+	}
+	if a := reg.GetByWorkItemOrName(mr.Author); a == nil || a.Type != agent.TypePolecat {
+		return postMergeVerdict{}
+	}
+	if mr.DeferDone || mr.PRFlow {
+		return postMergeVerdict{}
+	}
+	declared, err := declares(mr.Author)
+	if err != nil {
+		return postMergeVerdict{
+			Declared: true,
+			Reason: fmt.Sprintf("owns an item that could not be read (%s: %v) — declining to complete it, "+
+				"because an unreadable item is not evidence of completion (mg-d86e)", mr.Author, err),
+		}
+	}
+	if !declared {
+		return postMergeVerdict{}
+	}
+	return postMergeVerdict{
+		Declared: true,
+		Reason: fmt.Sprintf("declares post-merge work on its item %s (tag %q): merging is a STEP, not completion (mg-d86e)",
+			mr.Author, client.PostMergeWorkTag),
+	}
+}
+
 // reapMergedPolecat implements the event-driven polecat stop (gh #35): the
 // moment the refinery reports a successful merge, pogod records the work item
 // as done on the polecat's behalf and stops the polecat, instead of leaving
@@ -52,7 +116,7 @@ type polecatReaper interface {
 //
 // Only polecats are stopped: crew agents (or a human) can author MRs too, but
 // their lifecycle is not tied to a single work item.
-func reapMergedPolecat(reg polecatReaper, mr *refinery.MergeRequest, complete func(id, resultJSON string) error, backstop *deferredBackstop) {
+func reapMergedPolecat(reg polecatReaper, mr *refinery.MergeRequest, complete func(id, resultJSON string) error, postMerge postMergeVerdict, backstop *deferredBackstop) {
 	if mr.Author == "" {
 		return
 	}
@@ -65,7 +129,7 @@ func reapMergedPolecat(reg polecatReaper, mr *refinery.MergeRequest, complete fu
 		return
 	}
 
-	// The polecat owns its own post-merge lifecycle in two cases:
+	// The polecat owns its own post-merge lifecycle in three cases:
 	//
 	//   - --defer-done (gh #81): the submitter asked for it explicitly.
 	//   - PR flow (mg-7746): the merge landed on an *integration* branch, not
@@ -75,18 +139,31 @@ func reapMergedPolecat(reg polecatReaper, mr *refinery.MergeRequest, complete fu
 	//     by the refinery from the target ref rather than requested, because
 	//     three separate items (mg-74ee, mg-6579, this one) merged, were marked
 	//     done, and left no PR precisely because nobody passed the flag.
+	//   - The WORK ITEM declares it (mg-d86e): the item carries the
+	//     post-merge-work tag, or could not be read to tell. The two cases above
+	//     both depend on the SUBMITTER knowing this merge is not the end — the
+	//     flag is passed at submit time, the target ref is chosen at submit
+	//     time — and a release polecat merging a version bump to main gets both
+	//     wrong while doing exactly what its ticket said. mg-ca3c and mg-9f17
+	//     each merged, were marked done, and were stopped before the tag step;
+	//     both releases read as complete and neither existed.
 	//
-	// Either way the polecat still has work to do after the merge lands — open
-	// the PR, run verify checks, mail the PR URL — and calls `mg done` itself
-	// when that flow finishes. Skip the auto-done + auto-stop below, which
-	// would kill it mid-flow, and arm a bounded backstop so a deferred polecat
-	// that never ends its lifecycle is still reaped + escalated. The backstop
-	// is disarmed by the OnExit hook when the polecat's process ends (it
-	// completed cleanly and freed its slot).
-	if mr.DeferDone || mr.PRFlow {
-		reason := "submitted --defer-done (gh #81)"
-		if mr.PRFlow {
+	// In every case the polecat still has work to do after the merge lands —
+	// open the PR, push the tag, run verify checks, mail the result — and calls
+	// `mg done` itself when that flow finishes. Skip the auto-done + auto-stop
+	// below, which would kill it mid-flow, and arm a bounded backstop so a
+	// deferred polecat that never ends its lifecycle is still reaped +
+	// escalated. The backstop is disarmed by the OnExit hook when the polecat's
+	// process ends (it completed cleanly and freed its slot).
+	if mr.DeferDone || mr.PRFlow || postMerge.Declared {
+		var reason string
+		switch {
+		case mr.PRFlow:
 			reason = fmt.Sprintf("merged into integration branch %q, not the repo default — PR still pending (mg-7746)", mr.TargetRef)
+		case mr.DeferDone:
+			reason = "submitted --defer-done (gh #81)"
+		default:
+			reason = postMerge.Reason
 		}
 		log.Printf("refinery: merged polecat %s %s — skipping auto-done/auto-stop; polecat owns its lifecycle", a.Name, reason)
 		if backstop != nil {

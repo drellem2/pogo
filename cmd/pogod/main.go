@@ -1837,12 +1837,20 @@ Flags:
 			mergeQueue.SetOnMerged(func(mr *refinery.MergeRequest) {
 				log.Printf("refinery: merged %s (branch=%s, author=%s)", mr.ID, mr.Branch, mr.Author)
 
+				// Ask the WORK ITEM whether merging completes it before
+				// acting as though it does (mg-d86e). Resolved here, once,
+				// rather than inside the reap: the mail below has to say the
+				// same thing the reap decided, and two probes could disagree.
+				// Synchronous — it is one local `mg show` — and a no-op for
+				// merges the reap path ignores anyway.
+				postMerge := resolvePostMergeWork(agentRegistry, mr, client.MGWorkItemDeclaresPostMergeWork)
+
 				// Event-driven polecat stop (gh #35): mark the work item
 				// done and stop the merged polecat now instead of waiting
 				// for the mayor's next coordination cycle. Run async — the
 				// stop can block up to its SIGTERM timeout and this
 				// callback fires on the refinery loop.
-				go reapMergedPolecat(agentRegistry, mr, client.CompleteMGWorkItem, deferBackstop)
+				go reapMergedPolecat(agentRegistry, mr, client.CompleteMGWorkItem, postMerge, deferBackstop)
 
 				// Mail the coordinator so it can archive the work item and
 				// handle QA. The mayor's reap loop stays as a backstop for
@@ -1859,6 +1867,17 @@ Flags:
 						"\nThis merge is NOT completion: the author still has to open the PR to the default branch."+
 						"\nThe work item stays claimed and the polecat keeps running; it calls `mg done` itself once the PR is open.",
 						mr.TargetRef)
+				}
+				// Same obligation for an item that declared its own remainder
+				// (mg-d86e). Without this line the mail reads as unqualified
+				// success on exactly the tickets whose work has not happened
+				// yet — which is how two releases were reported complete with
+				// no tag, and why the mail is not evidence on its own.
+				if postMerge.Declared {
+					body += fmt.Sprintf("\nCompletion: NOT THIS MERGE — %s"+
+						"\nThe work item stays claimed and the polecat keeps running; it calls `mg done` itself once its remaining work finishes."+
+						"\nDo NOT archive this item on the strength of this mail: check its acceptance criteria.",
+						postMerge.Reason)
 				}
 				// Surface deploy failures to the mayor so the runtime gap (merged
 				// commit but stale binary) gets remediated. The merge has already
