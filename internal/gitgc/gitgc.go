@@ -486,7 +486,13 @@ type worktreeRemovalCheck struct {
 
 // checkWorktreeRemoval applies RemoveWorktree's guard without acting on it.
 // See RemoveWorktree for the reasoning behind each arm.
-func checkWorktreeRemoval(worktreeDir string, owner WorktreeOwner) worktreeRemovalCheck {
+//
+// It deliberately does NOT take an ownership verdict. It used to, and every arm
+// stopped reading it when the cannot-tell arm was ruled away — a parameter no
+// callee reads is the same defect as a doc naming a mechanism that does not
+// exist, so it is gone here rather than threaded through. RemoveWorktree still
+// accepts one because that is mg-4d45's public API; retiring it is a follow-up.
+func checkWorktreeRemoval(worktreeDir string) worktreeRemovalCheck {
 	if worktreeDir == "" {
 		return worktreeRemovalCheck{}
 	}
@@ -707,11 +713,11 @@ func WorktreeDirty(worktreeDir string) (bool, []string, error) {
 // the polecat's branch for deletion (git refuses to delete a branch checked
 // out in a worktree), which is why Sweep processes worktrees before branches.
 // TestRemoveWorktreeFreesCheckedOutBranch guards it.
-func RemoveWorktree(sourceRepo, worktreeDir string, owner WorktreeOwner) error {
+func RemoveWorktree(sourceRepo, worktreeDir string, _ WorktreeOwner) error {
 	if worktreeDir == "" {
 		return nil
 	}
-	if chk := checkWorktreeRemoval(worktreeDir, owner); chk.Refusal != nil {
+	if chk := checkWorktreeRemoval(worktreeDir); chk.Refusal != nil {
 		return chk.Refusal
 	}
 	return removeWorktreeFn(sourceRepo, worktreeDir)
