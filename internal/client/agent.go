@@ -411,6 +411,33 @@ func DiagnoseAgent(name string) (*agent.DiagnoseInfo, error) {
 	return &info, nil
 }
 
+// MailLoopReport returns the fleet-wide read of which agents have no mail-check
+// schedule — the same judgement DiagnoseAgent reports per agent, asked of every
+// agent at once (mg-032b).
+//
+// A 503 is returned as an error rather than as an empty report: pogod answers
+// it when it has no basis to judge, and a caller that rendered that as "nothing
+// missing" would be doing exactly what this whole feature exists to prevent.
+func MailLoopReport() (*agent.MailLoopReport, error) {
+	r, err := http.Get(serverURL + "/agents/mail-loops")
+	if err != nil {
+		return nil, err
+	}
+	defer r.Body.Close()
+	if r.StatusCode == http.StatusServiceUnavailable {
+		body, _ := io.ReadAll(r.Body)
+		return nil, fmt.Errorf("pogod cannot judge mail loops: %s", strings.TrimSpace(string(body)))
+	}
+	if r.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("pogod returned %s for /agents/mail-loops", r.Status)
+	}
+	var rep agent.MailLoopReport
+	if err := json.NewDecoder(r.Body).Decode(&rep); err != nil {
+		return nil, err
+	}
+	return &rep, nil
+}
+
 // GetAgentOutput returns recent output from an agent.
 // If plain is true, ANSI escape sequences are stripped server-side.
 func GetAgentOutput(name string, plain bool) (string, error) {
