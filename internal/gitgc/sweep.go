@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"time"
 )
 
 // Options configures a single GC sweep.
@@ -420,9 +419,8 @@ func refusalReason(err error) (string, bool) {
 	var rwe *RecentlyWrittenWorktreeError
 	if errors.As(err, &rwe) {
 		return fmt.Sprintf("git status could not be read (%v), and the tree was written to %s ago — "+
-			"too recent to act on the evidence that its owner is dead; it collects once it has been "+
-			"quiet for %s, or now with --force",
-			rwe.Err, rwe.Age.Round(time.Second), rwe.Window), true
+			"too recent to act on the evidence that its owner is dead; rerun with --force to discard",
+			rwe.Err, humanAge(rwe.Age)), true
 	}
 	var uee *UnenumerableWorktreeError
 	if errors.As(err, &uee) {
@@ -432,8 +430,12 @@ func refusalReason(err error) (string, bool) {
 	}
 	var uwe *UndeterminedWorktreeError
 	if errors.As(err, &uwe) {
+		// The age is REPORTED here and decides nothing. This keep is permanent
+		// — there is no drain (see quietWindow) — so the line has to carry
+		// whatever a human needs to clear it in one read.
 		return fmt.Sprintf("git status could not be read (%v), and nothing has established that the owner "+
-			"is dead — rerun with --force to discard", uwe.Err), true
+			"is dead%s — rerun with --force to discard",
+			uwe.Err, untouchedClause(uwe.Untouched, uwe.UntouchedKnown)), true
 	}
 	return "", false
 }
@@ -457,7 +459,7 @@ func removalReason(why string, statusErr error, force bool) string {
 			why, statusErr)
 	}
 	return fmt.Sprintf("%s; git status could not be read (%v) — removed on positive evidence that the owner "+
-		"is dead, the tree having been quiet for at least %s", why, statusErr, quietWindow)
+		"is dead, with nothing having written to the tree in the last %s", why, statusErr, quietWindow)
 }
 
 // classifyTree decides the ticket state governing a worktree DIRECTORY, and

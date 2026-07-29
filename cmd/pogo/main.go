@@ -2984,6 +2984,11 @@ files are least reproducible. Reclaiming one needs positive evidence that the
 owning polecat is dead, which only pogod's sweep holds; from this command the
 answer is always to keep, and --force is how you overrule it.
 
+Such a worktree is never reclaimed automatically, however long it sits — a
+30-day-old uncommitted file is exactly as unrecoverable as a 30-second-old one.
+The report says how long each kept tree has been untouched so the decision is
+yours to make, and cheap to make.
+
 By default gc only reports what it would do; pass --apply to make changes.`,
 		Args: cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {

@@ -29,17 +29,25 @@
 - **A timestamp can now forbid a deletion, and still never authorise one
   (mg-fd39).** Even with positive death evidence, an unreadable worktree written
   to within the last day is refused — death evidence plus a file written ninety
-  seconds ago is a contradiction, and it resolves in favour of the files. The
-  check walks the tree rather than statting its root, because root mtime is
-  measurably blind to edits below it: a live agent editing `pkg/deep/work.go`
-  leaves it untouched. A tree that cannot be listed at all gets its own refusal
-  instead of falling back to that blind signal.
+  seconds ago is a contradiction, and it resolves in favour of the files.
+  Nothing collects *because* a tree is old; that would delete a live agent's
+  work for the crime of thinking hard.
 
-  Read the other way, the same window is the **drain**: a refused tree that is
-  cannot-tell, death-evidenced and quiet for a day collects on a later sweep
-  with no operator action and no persisted state, which is what keeps the
-  refusal a delay rather than an unbounded leak. Nothing collects *because* it
-  is old — that would delete a live agent's work for the crime of thinking hard.
+  The check **walks** the tree and never stats its root, because root mtime was
+  measured blind to edits below it: a live agent editing `pkg/deep/work.go`
+  leaves it untouched. A worktree whose contents cannot be listed at all gets
+  its own refusal instead of falling back to that blind signal — everywhere else
+  the veto fails by over-refusing, which is safe, but there it would fail to
+  fire *while an agent is working*, and a guard whose failure mode inverts by
+  shape is two guards of which only one is safe.
+
+- **A refused worktree reports how long it has been untouched, and is never
+  reclaimed automatically (mg-fd39).** `kept: … untouched 30 days` is what makes
+  an operator's decision cheap. The age is a **report and never an input**: a
+  30-day-old `irreplaceable.go` is exactly as unrecoverable as a 30-second-old
+  one, so nothing ages into a collection. The resulting pin is deliberate — a
+  visible pin a human can clear is a categorically better failure than an
+  invisible deletion they cannot, and `pogo gc --apply --force` is the way out.
 
 - **The GC log stops naming an innocent reason for a destructive act (mg-fd39,
   gh #97).** The per-action log shipped as gh #94's remedy — *the* way to find
