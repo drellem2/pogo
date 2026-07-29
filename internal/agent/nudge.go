@@ -138,9 +138,12 @@ func (a *Agent) markPromptReady() {
 }
 
 // hasReadySignal reports whether this agent's provider declares any
-// prompt-ready marker at all. A provider without one (e.g. Codex, whose
-// ratatui composer has no stable marker — see NudgeProfile.PromptReadySentinel)
-// gives the start-verify fallback nothing to observe.
+// prompt-ready marker at all. A provider without one gives the start-verify
+// fallback nothing to observe. Every provider pogo ships declares one today
+// (Codex was the last holdout, measured under mg-86e7) — this stays because
+// PromptReadySentinel is optional in the Provider contract, so a
+// newly-added or out-of-tree provider can still arrive without one. See
+// NudgeProfile.PromptReadySentinel.
 func (a *Agent) hasReadySignal() bool {
 	if a.nudge.PromptReadySentinel != "" {
 		return true

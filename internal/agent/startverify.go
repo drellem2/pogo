@@ -209,8 +209,10 @@ func (r *Registry) verifyStartAndRenudge(a *Agent) {
 //   - crew agents. They never carry a work item by design, are long-lived, and
 //     are respawned and nudged on their own cycle. This is the same
 //     polecat-vs-crew seam reportUnwatched already draws.
-//   - no prompt-ready marker declared by the provider (e.g. Codex, whose
-//     ratatui composer has no stable marker). Nothing to observe.
+//   - no prompt-ready marker declared by the provider. Nothing to observe.
+//     Every provider pogo ships declares one today — Codex, long the example
+//     here, was measured under mg-86e7 — but the field stays optional in the
+//     Provider contract, so this arm still guards a new or out-of-tree provider.
 func (r *Registry) startedSignal(a *Agent) (started func() (bool, error), reason string, ok bool) {
 	verifier := r.getStartVerifier()
 	if verifier == nil {

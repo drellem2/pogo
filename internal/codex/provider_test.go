@@ -128,6 +128,18 @@ func TestProviderNudgeValues(t *testing.T) {
 		SubmitTerminator:    "\r",
 		SubmitDelay:         50 * time.Millisecond,
 		IdleThreshold:       2 * time.Second,
+		// Measured under mg-86e7 against a live Codex CLI 0.132.0. These were
+		// empty for most of Codex's life in pogo — WaitForReady fell back to
+		// pure wait-idle — because the obvious candidate (the composer
+		// placeholder) turned out to rotate between five strings. Each marker
+		// appears in a spaced and a spaceless form on purpose; see
+		// TestReadySentinelsAreCollapseSafe.
+		PromptReadySentinel: "/model to change",
+		PromptReadyAlternates: []string{
+			"/modeltochange",
+			">_ OpenAI Codex (v",
+			">_OpenAICodex(v",
+		},
 	}
 	if !reflect.DeepEqual(Provider.Nudge, want) {
 		t.Errorf("Provider.Nudge = %+v, want %+v", Provider.Nudge, want)
