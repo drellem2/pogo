@@ -202,6 +202,10 @@ pogo agent spawn "fix the auth bug"
         ▼
    Agent runs
    - confirms it owns the item (mg show)
+   - re-stamps the claim to its own pid
+     (mg reclaim, mg-7d6d) — a rename inside
+     claimed/, and pogod's hard evidence that
+     this agent executed a turn
    - does the work
    - pushes branch
    - marks done (mg done)
@@ -227,7 +231,8 @@ Work flows through macguffin:
    - Crew work: `mg mail send crew-arch --subject="look at gt-a3f"`
    - Polecat work: `pogo agent spawn --item=gt-a3f`
 3. **pogod** claims the item at spawn, before the polecat's process starts: `mg claim gt-a3f` (mg-7254). A second dispatch onto an already-claimed item is refused — the claim is an atomic rename, so the store enforces single ownership rather than the dispatcher remembering to check.
-4. **Agent** completes work: `mg done gt-a3f`
+4. **Agent** re-stamps the claim to its own pid as its first act: `mg reclaim gt-a3f` (mg-7d6d). Ownership does not change hands — the re-stamp is a rename *within* `claimed/`, so the item is never back in `available/` — but the pid does, and that is pogod's only hard evidence that the agent executed a turn rather than being wedged with an unsubmitted kickoff. It engages only where `mg` supports it; pogod probes at startup and falls back to a weaker screen-based signal otherwise.
+5. **Agent** completes work: `mg done gt-a3f`
 
 There is no "sling" command. Spawning a polecat with a work item is the assignment. Mailing a crew member is the assignment. The mechanisms are macguffin primitives, not orchestration abstractions.
 

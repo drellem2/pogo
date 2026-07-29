@@ -890,7 +890,7 @@ pogod's prompt-ready sentinel drift detector ([sentineldrift.go](../internal/age
 
 #### `auto_renudge`
 
-pogod's post-spawn start-verification watcher ([startverify.go](../internal/agent/startverify.go), mg-feb3, gh drellem2/macguffin#24) re-delivered a bare submit terminator (CR) to a freshly spawned polecat because its mg work item was still unclaimed after the start-verify window. Under a concurrent spawn wave a CPU-starved harness can miss the initial kickoff nudge (the false-idle gate delivers it before Claude Code is listening; it piles in the kernel input buffer and Ink absorbs it as one paste block whose CR never re-tokenizes as a submit — mg-ce61), leaving the agent alive but never claiming its item. The watcher gates on the HARD started-signal (the item leaving `available/`), never on output quiescence, and retries a bounded number of times; one event is emitted per delivered CR. A run of these on the same spawn wave is the productized-recovery footprint of the init-stall. Additive — no `schema_version` bump.
+pogod's post-spawn start-verification watcher ([startverify.go](../internal/agent/startverify.go), mg-feb3, gh drellem2/macguffin#24) re-delivered a bare submit terminator (CR) to a freshly spawned polecat because its mg work item was still unclaimed after the start-verify window. Under a concurrent spawn wave a CPU-starved harness can miss the initial kickoff nudge (the false-idle gate delivers it before Claude Code is listening; it piles in the kernel input buffer and Ink absorbs it as one paste block whose CR never re-tokenizes as a submit — mg-ce61), leaving the agent alive but never claiming its item. The watcher gates on a HARD started-signal — originally the item leaving `available/`, and since mg-7d6d the claim PID moving off pogod's own for dispatches pogod claimed at spawn — never on output quiescence, and retries a bounded number of times; one event is emitted per delivered CR. A run of these on the same spawn wave is the productized-recovery footprint of the init-stall. Additive — no `schema_version` bump.
 
 - **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent` (always `"pogod"`), `details`
 - **`details` fields:**
@@ -898,15 +898,23 @@ pogod's post-spawn start-verification watcher ([startverify.go](../internal/agen
   - `work_item_id` (string, required): the mg work item that was still unclaimed, e.g. `"mg-feb3"`. **Empty string** on the `no_ready_composer` path — a spawn with no `--id` is exactly what that signal exists for.
   - `attempt` (int, required): 1-based attempt index for this CR
   - `max_attempts` (int, required): the bounded retry ceiling
-  - `reason` (string, required): which started-signal reported the agent unstarted — `"work_item_unclaimed"` (the strong claim signal: the item is still in `available/`) or `"no_ready_composer"` (the fallback: the provider's prompt-ready sentinel has never appeared in this agent's PTY output)
+  - `reason` (string, required): which started-signal reported the agent unstarted — one of three, and **two of them are hard**:
+    - `"claim_pid_not_restamped"` (mg-7d6d): the work item's claim is still stamped with pogod's own PID. The polecat's step 1 re-stamps it to its own, so an unchanged PID is positive evidence that no turn ran. Used for dispatches pogod claimed at spawn, where `work_item_unclaimed` proves nothing.
+    - `"work_item_unclaimed"`: the strong claim signal — the item is still in `available/`. Since mg-7254 this applies only where pogod did *not* claim at spawn.
+    - `"no_ready_composer"`: the **fallback** — the provider's prompt-ready sentinel has never appeared in this agent's PTY output.
 
 Since mg-c33e a polecat spawned with **no** `--id` is watched on the `no_ready_composer` fallback rather than declined. `--no-worktree` dispatch commonly carries no `--id` (it is optional), and mg-560d proved that gap load-bearing for drellem2/macguffin#25: such a spawn's cwd is a brand-new `~/.pogo/agents/<name>/`, untrusted, so Claude Code raises the workspace-trust dialog every time. The dialog renders no composer, the ready sentinel never matches, and the kickoff nudge is never delivered — and 560d measured that a bare CR, precisely what this watcher sends, dismisses it (dialog → composer at t=0.7s, nudge accepted).
+
+**Reading `reason` is how you tell a hard detection from a heuristic one, and it is worth doing.** The `no_ready_composer` fallback catches a harness whose composer never rendered but *not* the mg-ce61 paste-buffer wedge, where the composer *did* render, `promptReadySeen` latched before the watcher ran, and the agent still never acted. mg-7254 opened that gap by moving the claim to pogod at spawn; mg-7d6d closed it with `claim_pid_not_restamped`.
+
+That arm is **capability-gated**: it needs `mg reclaim` (macguffin mg-bb43), which is additive and may not be installed. On a host without it, a claimed-at-spawn dispatch falls back to `no_ready_composer` and an mg-ce61 wedge draws no `auto_renudge` at all. pogod says which state it is in once at startup — `grep 'claim-pid re-stamp' ~/.pogo/pogod.log` — so the absence of a recovery net is never inferred from silence. Both halves of the mechanism (the verifier and the polecat prompt step) come off that one probe and cannot be enabled separately.
 
 The fallback is a *structural* observation of the screen ("has a composer ever rendered"), not the output-quiescence heuristic the watcher deliberately avoids: quiescence misreads a CPU-starved harness as ready because it is quiet *because* it is starved, whereas a starved process, a loading spinner and the trust dialog all render no composer and so all read correctly as unstarted. The sighting is latched, so a bounded output buffer scrolling the marker away cannot flip a working agent back to unstarted.
 
 ```json
 {"schema_version":1,"timestamp":"2026-07-14T00:05:00.000000000Z","event_type":"auto_renudge","agent":"pogod","details":{"to":"cat-feb3","work_item_id":"mg-feb3","attempt":1,"max_attempts":3,"reason":"work_item_unclaimed"}}
 {"schema_version":1,"timestamp":"2026-07-21T00:05:25.000000000Z","event_type":"auto_renudge","agent":"pogod","details":{"to":"cat-c33e","work_item_id":"","attempt":1,"max_attempts":3,"reason":"no_ready_composer"}}
+{"schema_version":1,"timestamp":"2026-07-30T01:14:25.000000000Z","event_type":"auto_renudge","agent":"pogod","details":{"to":"cat-7d6d","work_item_id":"mg-7d6d","attempt":1,"max_attempts":3,"reason":"claim_pid_not_restamped"}}
 ```
 
 #### `agent_unwatched`

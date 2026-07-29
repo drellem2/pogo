@@ -1231,6 +1231,21 @@ Flags:
 		agentRegistry.SetStartVerifier(newStartVerifier(filepath.Join(home, ".macguffin", "work")))
 	}
 
+	// Restore the HARD started-signal for dispatches pogod claims at spawn
+	// (mg-7d6d). The verifier above cannot serve them: pogod's own claim satisfies
+	// it from the first instant, so it falls back to the ready-composer signal,
+	// which misses the mg-ce61 paste-buffer wedge the recovery net exists for. The
+	// polecat's first protocol action re-stamps the claim to its own pid, and this
+	// verifier watches that pid.
+	//
+	// The signal needs an additive macguffin subcommand that may not be installed
+	// (macguffin mg-bb43), so this probes for it and engages only if it is there,
+	// wiring the verifier and the polecat prompt step together — see
+	// EnableClaimRestampSignal on why neither half is reachable alone. The empty
+	// bin resolves to "mg" on PATH, the same default MGWorkItemClaimer uses, so the
+	// probe cannot test a different binary from the one that took the claim.
+	agentRegistry.EnableClaimRestampSignal("", os.Getpid())
+
 	// Validate the command binary for each agent type exists on PATH. Each type
 	// can select a different provider via [agents.<type>] provider, so resolve
 	// per type. An empty configured command means "use the provider's default
