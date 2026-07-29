@@ -321,7 +321,13 @@ note "work:   $WORK_REPO"
 # -----------------------------------------------------------------------------
 step "6. polecat handles a trivial work item"
 
-WI_OUT="$(cd "$WORK_REPO" && mg new --type=task --priority=medium "smoke trivial work" 2>&1)"
+# --repo, not --no-repo, and not the cwd: this item IS about a repo — $WORK_REPO
+# is the checkout the spawn below hands the polecat. It was filed by cd-ing there
+# and letting mg resolve the repo from the cwd, which is the shape that blocked
+# the merge queue from the two Go fixtures mg-8595 fixed. It survived only
+# because $SANDBOX is a mktemp path rather than one of the ephemeral pogo trees
+# mg refuses; naming the repo does not depend on that (mg-1eb6).
+WI_OUT="$(mg new --type=task --priority=medium --repo="$WORK_REPO" "smoke trivial work" 2>&1)"
 WI_ID="$(printf '%s' "$WI_OUT" | grep -oE 'mg-[a-f0-9]+' | head -1)"
 [ -n "$WI_ID" ] || { hard "could not create work item: $WI_OUT"; WI_ID=""; }
 
