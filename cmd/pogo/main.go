@@ -3013,20 +3013,6 @@ By default gc only reports what it would do; pass --apply to make changes.`,
 			// Best-effort: without a resolvable home dir the orphan-dir
 			// scan is skipped and gc still sweeps branches and worktrees.
 			polecatsDir, _ := gitgc.DefaultPolecatsDir()
-			// OwnerVerdicts is deliberately NOT set (gh #97). It carries
-			// positive evidence that a polecat is DEAD, and it is the only
-			// thing that lets a sweep destroy a worktree whose `git status`
-			// failed. Leaving it nil degrades every such worktree to
-			// OwnerUnproven, which REFUSES — by construction, rather than by
-			// anyone remembering to keep it that way.
-			//
-			// This is not a limitation waiting to be improved. It holds no
-			// matter how good the live set above becomes: knowing who is alive
-			// never establishes that a particular absent name is dead, and
-			// those are the two different facts. An operator at a terminal who
-			// wants an unreadable tree reclaimed says so with --force; pogod,
-			// which runs unattended and does hold the death evidence, is the
-			// caller that fills this in.
 			res, err := gitgc.Sweep(gitgc.Options{
 				Repo:         repo,
 				LivePolecats: live,
