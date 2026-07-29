@@ -459,7 +459,7 @@ func removalReason(why string, statusErr error, force bool) string {
 			why, statusErr)
 	}
 	return fmt.Sprintf("%s; git status could not be read (%v) — removed on positive evidence that the owner "+
-		"is dead, with nothing having written to the tree in the last %s", why, statusErr, quietWindow)
+		"is dead, with nothing having written to the tree in the last %s", why, statusErr, humanAge(quietWindow))
 }
 
 // classifyTree decides the ticket state governing a worktree DIRECTORY, and

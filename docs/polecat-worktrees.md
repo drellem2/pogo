@@ -213,6 +213,40 @@ exactly the situation gh #94 was about.
 Only *actions* log — removals, and trees deliberately preserved. A
 kept-because-live line per polecat per tick would be noise.
 
+### When `git status` could not be read (gh #97)
+
+The reason field above is the whole forensic value of the line, so it must never
+name an innocent cause for a destructive act. It used to: a worktree whose `git
+status` **errored** was force-removed and the line said `ticket archived`, with
+the status error appearing nowhere. A missing line prompts investigation; a
+plausible one ends it.
+
+Three shapes now appear, and the reason tells you which you are holding:
+
+```
+… kept worktree …/polecats/beef (owner beef, branch polecat-beef): git status could not be read (status …: fatal: not a git repository: /nonexistent/garbage), and nothing has established that the owner is dead (untouched 30 days) — rerun with --force to discard
+… kept worktree …/polecats/beef (owner beef, branch polecat-beef): git status could not be read (…), and the tree was written to 4m ago — too recent to act on the evidence that its owner is dead; rerun with --force to discard
+… removed worktree …/polecats/beef (owner beef, branch polecat-beef): owner's ticket archived; git status could not be read (…) — removed on positive evidence that the owner is dead, with nothing having written to the tree in the last 24h
+```
+
+The first is the common one and it is a **permanent** keep: nothing established
+that the polecat is dead, so the tree is pinned until a human clears it or
+`--force` takes it. `untouched 30 days` is there to make that decision cheap —
+it is reported and never acted on. Nothing ages into a deletion.
+
+The second is the mtime **veto**: we *do* hold positive evidence the owner is
+dead, and something wrote to the tree anyway. That is a contradiction, and it
+resolves in favour of the files.
+
+The third is the only removal on this path, and note that it names the status
+failure too. A removal line you can reconstruct the whole decision from is the
+point — the ticket state, the instrument that failed, and the evidence acted on.
+
+A fourth, rarer keep says `the tree cannot be listed either (…)`: git could not
+read it and neither could we, so there is no timestamp to check. That refuses
+rather than falling back to the worktree root's mtime, which is measurably blind
+to edits below it.
+
 ## What changes
 
 ### internal/agent/api.go — handleSpawnPolecat
