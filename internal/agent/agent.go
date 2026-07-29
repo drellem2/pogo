@@ -1103,7 +1103,7 @@ func (r *Registry) Stop(name string, timeout time.Duration) error {
 		// The reported mg-fb13 symptom was exactly this state — a work item
 		// claimed by a pid that no longer existed — so clearing the stale
 		// registration has to clear the stale claim with it.
-		r.releasePolecatClaim(agent)
+		r.releasePolecatClaim(agent, "agent_stopped")
 		log.Printf("agent %s: stopped (cleared stale registration; process already dead)", name)
 		return nil
 	}
@@ -1149,7 +1149,7 @@ func (r *Registry) Stop(name string, timeout time.Duration) error {
 	// stopped mid-flight — before it reached `mg done` — would otherwise leave its
 	// claim behind under a dead pid, invisible to dispatch and to stall-watch
 	// (mg-fb13). Scoped to this agent's own WorkItemID: never a sweep.
-	r.releasePolecatClaim(agent)
+	r.releasePolecatClaim(agent, "agent_stopped")
 	log.Printf("agent %s: stopped", name)
 	return nil
 }

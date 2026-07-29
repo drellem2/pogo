@@ -30,6 +30,12 @@ const deferDoneBackstopTimeout = 15 * time.Minute
 type polecatReaper interface {
 	GetByWorkItemOrName(id string) *agent.Agent
 	Stop(name string, timeout time.Duration) error
+	// ReleaseClaimAfterExit returns the work item of a polecat that ended its
+	// own process to available/, reporting whether a held claim was actually
+	// released. Registry.Stop covers the polecats pogod tears down; this covers
+	// the deferred polecat that dies on its own between merge and `mg done`
+	// (mg-c8d5).
+	ReleaseClaimAfterExit(a *agent.Agent) (bool, error)
 }
 
 // reapMergedPolecat implements the event-driven polecat stop (gh #35): the
@@ -97,9 +103,15 @@ func reapMergedPolecat(reg polecatReaper, mr *refinery.MergeRequest, complete fu
 	//
 	// `target` is recorded because the mayor's classification logic reads it to
 	// tell an integration-branch merge from a completed one; omitting it made a
-	// documented signal actively misleading (mg-7746). `pr_flow` is only ever
-	// written when true, so its absence means "not PR flow" rather than "this
-	// writer didn't know".
+	// documented signal actively misleading (mg-7746).
+	//
+	// There is deliberately no `pr_flow` key, and there never can be one: this
+	// writer is only reached on the completion path, because a PR-flow merge
+	// returns above without calling `mg done` at all. A sidecar written HERE is
+	// by construction a default-branch completion. The PR-flow half of the
+	// classification lives on the merge request instead (`pogo refinery show
+	// <id> --json`), which is where the refinery records it. mg-c8d5 corrects
+	// the docs that claimed otherwise.
 	result, _ := json.Marshal(map[string]any{
 		"branch":       mr.Branch,
 		"mr":           mr.ID,
@@ -138,15 +150,35 @@ type backstopTimer interface {
 //     mayor, so a deferred polecat can never silently LINGER holding its slot
 //     (the gh #34/#35 regression this backstop exists to prevent).
 //
+// A third outcome was unhandled until mg-c8d5: the polecat DIES between the
+// merge and `mg done`. cancel() disarmed the timer on any process exit, so that
+// death drew no escalation and — because a self-exit never goes through
+// Registry.Stop — left the work item stranded in claimed/ under a dead pid, the
+// mg-fb13 leak through the one door mg-fb13 did not close. cancel() now settles
+// the exit instead of merely disarming it.
+//
 // All state is guarded by mu; arm/cancel/fire are safe to call concurrently
 // (arm runs on the refinery loop's reap goroutine, cancel on the OnExit hook,
 // fire on the timer goroutine).
 type deferredBackstop struct {
-	mu       sync.Mutex
-	timeout  time.Duration
-	timers   map[string]backstopTimer // keyed by registry name (bare id)
+	mu      sync.Mutex
+	timeout time.Duration
+	timers  map[string]backstopTimer // keyed by registry name (bare id)
+	// merged snapshots the MergeRequest each armed polecat merged, keyed like
+	// timers. fire() carries its own copy in the timer closure; cancel() needs
+	// one too, because the death path escalates with the same context and runs
+	// off a hook that only knows the agent.
+	merged   map[string]*refinery.MergeRequest
 	reg      polecatReaper
 	escalate func(mr *refinery.MergeRequest)
+
+	// escalateDeath reports a deferred polecat that DIED after its merge landed
+	// and before its work item left claimed/ — a merged branch whose post-merge
+	// flow (PR creation, verify, mail) never finished and whose item pogod has
+	// just returned to available/. Distinct from escalate, which reports the
+	// opposite failure: a polecat that stayed alive too long. Nil disables the
+	// mail; the release still happens (mg-c8d5).
+	escalateDeath func(mr *refinery.MergeRequest, a *agent.Agent, released bool, releaseErr error)
 
 	// workItemDone reports whether the deferred polecat's work item reached a
 	// terminal state. A polecat that opened its PR, mailed it, and called
@@ -172,6 +204,7 @@ func newDeferredBackstop(timeout time.Duration, reg polecatReaper, escalate func
 	return &deferredBackstop{
 		timeout:   timeout,
 		timers:    make(map[string]backstopTimer),
+		merged:    make(map[string]*refinery.MergeRequest),
 		reg:       reg,
 		escalate:  escalate,
 		afterFunc: func(d time.Duration, f func()) backstopTimer { return time.AfterFunc(d, f) },
@@ -193,24 +226,77 @@ func (b *deferredBackstop) arm(name string, mr *refinery.MergeRequest) {
 	// Snapshot the MR: the caller's *mr may be mutated/pruned after arm returns,
 	// but the escalation, minutes later, must report the state at merge time.
 	mrCopy := *mr
+	b.merged[name] = &mrCopy
 	b.timers[name] = b.afterFunc(b.timeout, func() { b.fire(name, &mrCopy) })
 	log.Printf("refinery: armed defer-done backstop for polecat %s — reaps + escalates if it does not complete within %s (gh #81)", name, b.timeout)
 }
 
-// cancel disarms the backstop for name. Called from pogod's OnExit hook when a
-// polecat's process ends: a gone process has freed its slot, so there is
-// nothing left to reap. Safe to call for a name that was never armed (the
-// common case — most polecats are not --defer-done).
-func (b *deferredBackstop) cancel(name string) {
-	if b == nil {
+// cancel disarms the backstop for a polecat whose process has ended, and then
+// settles what that exit meant. Called from pogod's OnExit hook. Safe to call
+// for an agent that was never armed (the common case — most polecats are not
+// deferred), in which case it does nothing at all.
+//
+// Disarming alone was the whole of this function until mg-c8d5, and it treated
+// every exit as a clean completion. It is not: an armed polecat has merged and
+// been left running precisely because it still owes work, so its process ending
+// is only good news if the work item actually left claimed/. See settleExit.
+func (b *deferredBackstop) cancel(a *agent.Agent) {
+	if b == nil || a == nil {
 		return
 	}
+	name := a.Name
 	b.mu.Lock()
-	defer b.mu.Unlock()
-	if t, ok := b.timers[name]; ok {
+	t, armed := b.timers[name]
+	mr := b.merged[name]
+	if armed {
 		t.Stop()
 		delete(b.timers, name)
-		log.Printf("refinery: disarmed defer-done backstop for polecat %s (completed cleanly, gh #81)", name)
+		delete(b.merged, name)
+	}
+	b.mu.Unlock()
+	if !armed {
+		return
+	}
+	log.Printf("refinery: disarmed defer-done backstop for polecat %s — its process ended (gh #81)", name)
+	b.settleExit(a, mr)
+}
+
+// settleExit decides what a deferred polecat's OWN exit meant, and is the
+// deferred-death half of the claim-leak fix (mg-c8d5).
+//
+// The question is not "did the process end" — cancel already knows that — but
+// "did it end having handed its work item on". A polecat in this lane merged,
+// was deliberately not auto-done'd, and owes a PR plus its own `mg done`. Two
+// endings look identical to OnExit:
+//
+//   - It finished: `mg done` moved the item out of claimed/, the mayor stopped
+//     it (or it exited), and there is nothing to clean up.
+//   - It died mid-flow: crash, OOM, harness failure, an operator kill. The
+//     branch is merged, the PR is not open, and the item sits in claimed/ under
+//     a pid that no longer exists — never dispatched again, and invisible to
+//     stall-watch, which only scans available/.
+//
+// The claim file is what tells them apart, so that is what is asked. The
+// release is scoped to this polecat's own work item and is a no-op when the
+// claim is not held, which also makes the ordinary mayor-initiated stop quiet:
+// that path goes through Registry.Stop, which has already released.
+//
+// Only a claim that was actually stranded (or one we failed to release)
+// escalates. Escalating on every deferred exit would page the mayor for every
+// clean PR-flow completion and for every agent lost to a fleet drain.
+func (b *deferredBackstop) settleExit(a *agent.Agent, mr *refinery.MergeRequest) {
+	released, err := b.reg.ReleaseClaimAfterExit(a)
+	if !released && err == nil {
+		log.Printf("refinery: deferred polecat %s exited with no claim held on %s — its post-merge flow completed (gh #81)", a.Name, a.WorkItemID)
+		return
+	}
+	if err != nil {
+		log.Printf("refinery: deferred polecat %s DIED holding the claim on %s and the release FAILED: %v — the item is stranded in claimed/ under a dead pid; release it by hand with `mg unclaim %s` (mg-c8d5)", a.Name, a.WorkItemID, err, a.WorkItemID)
+	} else {
+		log.Printf("refinery: deferred polecat %s DIED between its merge and `mg done` — released the claim on %s so the item returns to available/ (mg-c8d5)", a.Name, a.WorkItemID)
+	}
+	if b.escalateDeath != nil {
+		b.escalateDeath(mr, a, released, err)
 	}
 }
 
@@ -227,6 +313,7 @@ func (b *deferredBackstop) fire(name string, mr *refinery.MergeRequest) {
 		return
 	}
 	delete(b.timers, name)
+	delete(b.merged, name)
 	b.mu.Unlock()
 
 	a := b.reg.GetByWorkItemOrName(name)

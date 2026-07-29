@@ -189,21 +189,42 @@ func (r *Registry) getClaimReleaser() ClaimReleaser {
 	return c
 }
 
+// ReleaseClaimAfterExit returns the work item of a polecat that ended its OWN
+// process to available/, and reports whether a held claim was actually released.
+//
+// Registry.Stop already covers the polecats pogod tears down (mg-fb13), but a
+// polecat that exits by itself never goes through Stop. That door did not matter
+// much while a merged polecat was auto-stopped at merge; since gh #92 the
+// deferred/PR-flow lane — where the polecat is deliberately left running to end
+// its own lifecycle — is the DEFAULT path, so a polecat that dies after its
+// merge lands but before `mg done` is now an ordinary way to strand a claim in
+// claimed/ under a dead pid. Same leak as mg-fb13, through the one exit mg-fb13
+// did not close (mg-c8d5).
+//
+// The caller does not have to establish that the item is still claimed: the
+// releaser probes claimed/ first, so calling this for a polecat that completed
+// normally is a (false, nil) no-op.
+func (r *Registry) ReleaseClaimAfterExit(a *Agent) (bool, error) {
+	return r.releasePolecatClaim(a, "agent_exited_before_done")
+}
+
 // releasePolecatClaim returns a stopped polecat's work item to available/.
 //
 // Called from Registry.Stop on the paths that actually tear the agent down, and
 // deliberately NOT on the path that leaves a restart_on_crash agent in the
 // registry for the supervisor to respawn: that agent comes back on the same work
 // item, so releasing its claim would hand the item to a second worker while the
-// first restarts.
+// first restarts. ReleaseClaimAfterExit above adds the self-exit door.
 //
 // Best-effort by design. The process is already gone by the time this runs, so a
 // failure here must not fail the stop — that would trade a stranded work item for
 // a stranded registry entry. It is made loud instead, in the log and in the event
 // stream, because the whole failure mode this fixes was one nobody could see.
-func (r *Registry) releasePolecatClaim(a *Agent) {
+// The (released, err) pair is returned for callers that decide something further
+// on the outcome; Stop ignores it and relies on the logging and events here.
+func (r *Registry) releasePolecatClaim(a *Agent, reason string) (bool, error) {
 	if a == nil || a.Type != TypePolecat || a.WorkItemID == "" {
-		return
+		return false, nil
 	}
 	released, err := r.getClaimReleaser().ReleaseClaim(a.WorkItemID)
 	if err != nil {
@@ -221,12 +242,12 @@ func (r *Registry) releasePolecatClaim(a *Agent) {
 				"error": err.Error(),
 			},
 		})
-		return
+		return false, err
 	}
 	if !released {
 		// Not claimed at stop time: the polecat completed its own lifecycle, or
 		// pogod recorded `mg done` on its behalf before stopping it. Nothing to do.
-		return
+		return false, nil
 	}
 	log.Printf("agent %s: released the claim on work item %s; it is back in available/ (mg-fb13)", a.Name, a.WorkItemID)
 	events.Emit(context.Background(), events.Event{
@@ -236,7 +257,8 @@ func (r *Registry) releasePolecatClaim(a *Agent) {
 		Repo:       a.SourceRepo,
 		Details: map[string]any{
 			"pid":    a.PID,
-			"reason": "agent_stopped",
+			"reason": reason,
 		},
 	})
+	return true, nil
 }
