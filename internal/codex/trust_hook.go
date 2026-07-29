@@ -44,6 +44,32 @@ const TrustDialogPollInterval = 250 * time.Millisecond
 
 // TrustDialogTimeout bounds how long after spawn the hook watches for the
 // dialog before giving up.
+//
+// DELIBERATELY STILL A FIXED WALL-CLOCK BOUND, and that is a known defect —
+// the same shape drellem2/pogo#91 removed from claude (and, in the same change,
+// from cursor). It is left here rather than widened because the guard that makes
+// a widened window safe does not exist for Codex.
+//
+// claude and cursor both gate their watch on a composer-ready marker: the moment
+// the composer renders, the hook returns without sending anything. That gate is
+// what lets the window grow without risking a stray keypress, because
+// trustDialogMarker matches on PTY *text* and the harness echoes the task into
+// the TUI — a work item whose body merely quotes this dialog matches the marker.
+// While the window is short the hook has almost always expired before the echo;
+// widen it and the hook is still watching when the echo arrives, and on an
+// already-trusted directory (Registry.Respawn re-enters the same Dir, and Codex
+// persists trust in ~/.codex/config.toml) it would match the echo and press
+// Enter into a live composer.
+//
+// Codex has no such marker to gate on: Provider.Nudge.PromptReadySentinel is
+// empty, because its ratatui composer has no stable ready string (see the
+// PromptReadySentinel doc in internal/agent/provider.go and
+// docs/investigations/codex-nudge-calibration.md). Establishing one is an
+// empirical job against a live Codex CLI, not a code change — so widening this
+// bound is blocked on that measurement, not on writing the loop.
+//
+// Follow-up: mg-86e7. Do not simply raise this number; that moves the failure
+// rather than removing it, which is the whole finding of #91.
 const TrustDialogTimeout = 12 * time.Second
 
 // TrustDialogHook is the Codex provider's PostSpawnHook. It auto-accepts

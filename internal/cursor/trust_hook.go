@@ -79,7 +79,23 @@ const TrustDialogPollInterval = 250 * time.Millisecond
 
 // TrustDialogTimeout bounds how long after spawn the hook watches for the
 // dialog before giving up.
-const TrustDialogTimeout = 12 * time.Second
+//
+// It is Cursor's own cold-start budget, not an independent guess. The previous
+// value was a fixed 12s, and that shape was the defect fixed for Claude in
+// drellem2/pogo#91: the hook starts at spawn and gives up N seconds later, so on
+// a CPU-starved host under concurrent spawns the dialog can render AFTER the
+// hook has returned. Nothing then dismisses it — the composer never appears, the
+// ready sentinel never matches, and the polecat hangs until a human answers the
+// dialog by hand. A fixed wall-clock bound is the same SHAPE of defect as the
+// one it is trying to catch, so a bigger number would move the failure rather
+// than remove it.
+//
+// Sourcing the bound from initialNudgeTimeout means there is ONE cold-start
+// budget rather than two that disagree. Watching longer is close to free because
+// composerReady returns the hook early on every healthy spawn — the full budget
+// is only ever spent when neither marker appears, which is the drift signature
+// recorded at the deadline below.
+const TrustDialogTimeout = initialNudgeTimeout
 
 // trustDialogAccept is the key that accepts the dialog.
 //
@@ -96,13 +112,22 @@ const trustDialogAccept = "a"
 // Cursor's workspace-trust dialog by scanning PTY output and pressing "a", so a
 // polecat is not blocked at startup in its fresh worktree.
 //
-// It mirrors codex.TrustDialogHook — the same spawn-scoped, poll-and-dismiss
-// shape — because Cursor needs the same treatment for an analogous dialog. The
-// dialog renders ~0.7s after spawn and the composer settles ~2.3s after it is
-// dismissed; the 250ms poll clears it well inside the initial-task path.
+// It mirrors claude.TrustDialogHook — the same spawn-scoped, poll-and-dismiss
+// shape, bounded by the same provider's own cold-start budget — because Cursor
+// needs the same treatment for an analogous dialog. The dialog renders ~0.7s
+// after spawn and the composer settles ~2.3s after it is dismissed; the 250ms
+// poll clears it well inside the initial-task path.
 func TrustDialogHook(a *agent.Agent) {
-	deadline := time.After(TrustDialogTimeout)
-	ticker := time.NewTicker(TrustDialogPollInterval)
+	watchForTrustDialog(a, TrustDialogTimeout, TrustDialogPollInterval)
+}
+
+// watchForTrustDialog is TrustDialogHook's body with the timing injected, so
+// tests can drive the real loop against a real PTY on a millisecond budget
+// instead of waiting out the production one. Mirrors claude's split for the
+// same reason.
+func watchForTrustDialog(a *agent.Agent, budget, poll time.Duration) {
+	deadline := time.After(budget)
+	ticker := time.NewTicker(poll)
 	defer ticker.Stop()
 
 	for {
