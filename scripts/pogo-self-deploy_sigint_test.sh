@@ -39,9 +39,9 @@
 # drain_post true mutates it, and on SIGINT the EXIT trap's restore_drain curls
 # it back to the prior value. The final assertion — dispatch really was restored
 # on the way out — can only be read from a live daemon. So this file stands up a
-# real pogod in a sandbox pinned to a throwaway HOME/XDG/POGO_HOME and a spare
-# port, exactly as live_test.sh does, so it cannot see or touch the live fleet.
-# It needs neither the pogo CLI nor the mail-check roster nor the artifact
+# real pogod in a sandbox pinned to a throwaway HOME/XDG/POGO_HOME/MG_ROOT and a
+# spare port, exactly as live_test.sh does, so it cannot see or touch the live
+# fleet. It needs neither the pogo CLI nor the mail-check roster nor the artifact
 # discipline of that file — only a daemon that answers /agents/drain and a git
 # fixture whose HEAD has diverged from its deploy ref (so the redeploy really
 # reaches the drain window rather than short-circuiting as "nothing owed").
@@ -50,32 +50,42 @@ set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$HERE/.." && pwd)"
 
-# The sandbox port reservation and the daemon-ownership proof (mg-3412). This
-# file and pogo-self-deploy_live_test.sh both stand up a throwaway pogod, and
-# both used to pick its port by walking 17731-17799 from the bottom asking "did
-# anything answer?" — the SAME range from the SAME end. So they collided with
-# each other and with themselves under fleet load, and the loser drove the
-# winner's daemon. Sharing the allocator is what makes the reservation mean
-# something: a lock only one of the two honoured would not be a lock.
+# The packaged sandbox (mg-78a5), not lib/sandbox-daemon.sh directly.
+#
+# This file used to take the port allocator from the library and hand-roll the
+# rest of the envelope: its own mktemp root, its own HOME/XDG/POGO_HOME exports,
+# its own kill-and-rm cleanup. That is the shape four tickets were already filed
+# for (mg-6092, mg-e8e7, mg-5336, mg-3412) — isolation re-derived at the call
+# site is isolation somebody has to REMEMBER — and this copy had already drifted
+# from the one next door in a way that mattered: it never pinned MG_ROOT, so the
+# real cmd_redeploy it drives resolves `mg` against $HOME/.macguffin, and the
+# only reason the live mail store stayed untouched was that the run aborts before
+# the driver's first send. A control whose isolation depends on where the code
+# under test happens to stop is not isolated; it is lucky.
+#
+# Sharing the ALLOCATOR was already the point (a lock only one of two callers
+# honours is not a lock — mg-3412). Sharing the whole envelope is the same
+# argument carried to its end: pogo_sandbox_isolate CHECKS what the exports above
+# only asserted, refusing a HOME/POGO_HOME/MG_ROOT that resolves onto the
+# developer's tree before a single assertion runs.
 # shellcheck source=/dev/null
-source "$HERE/lib/sandbox-daemon.sh"
+source "$HERE/pogo-sandbox"
 
 RESULTS_FILE=$(mktemp)
-SANDBOX=$(mktemp -d)
-POGOD_PID=""
+# The private root, vetted before anything is written into it. No environment
+# variable moves yet: the go build below must run under the REAL HOME (see the
+# note above it), so pogo_sandbox_isolate comes after it.
+pogo_sandbox_create sigint
+SANDBOX="$POGO_SANDBOX_DIR"
 
 cleanup() {
-    # Kill by PID only. An unanchored `pkill -f pogod` on this box would take
-    # out the machine's live daemon and every agent poller with it.
-    [ -n "$POGOD_PID" ] && kill "$POGOD_PID" 2>/dev/null
-    [ -n "$POGOD_PID" ] && wait "$POGOD_PID" 2>/dev/null
-    sandbox_port_release
-    # Make the tree writable before removing it: any `go` call under the sandbox
-    # HOME materialises the toolchain module into $SANDBOX/home/go/pkg/mod, which
-    # Go marks 0444 by design, so a plain `rm -rf` fails "Permission denied"
-    # (mg-e91e). chmod clears the read-only bit so the removal completes.
-    chmod -R u+w "$SANDBOX" 2>/dev/null
-    rm -rf "$SANDBOX"
+    # Kills the sandbox daemon BY PID (an unanchored `pkill -f pogod` on this box
+    # would take out the machine's live daemon and every agent poller with it),
+    # hands the port claim back, and removes the root — chmod'ing it writable
+    # first, because any `go` call under the sandbox HOME materialises Go's module
+    # cache there and Go marks it 0444 by design (mg-e91e). All four steps now
+    # live in pogo_sandbox_down rather than being restated here.
+    pogo_sandbox_down
     rm -f "$RESULTS_FILE"
 }
 trap cleanup EXIT
@@ -94,19 +104,20 @@ fail() { echo "FAIL: $1"; echo "FAIL: $1" >> "$RESULTS_FILE" || { echo "LEDGER W
 # after the override would re-download the whole module cache into $SANDBOX.
 echo "Building pogod into the sandbox..."
 if ! (cd "$REPO_ROOT" && go build -o "$SANDBOX/pogod" ./cmd/pogod); then
-    sandbox_setup_fail "could not build cmd/pogod — the interrupt-safety control cannot run"
+    pogo_sandbox_fail "could not build cmd/pogod — the interrupt-safety control cannot run"
 fi
 
 # --- sandbox: a real pogod that cannot reach the real fleet ------------------
-# POGO_HOME must be pinned explicitly: this box exports POGO_HOME=$HOME from a
-# stale profile, so setting HOME alone leaks onto the live ~/.pogo. Likewise
-# XDG_CONFIG_HOME (config.toml is layered). POGO_AGENT_AUTOSTART=false so the
-# sandbox daemon starts no crew.
-export HOME="$SANDBOX/home"
-export XDG_CONFIG_HOME="$SANDBOX/xdg"
-export POGO_HOME="$SANDBOX/home/.pogo"
-export POGO_AGENT_AUTOSTART=false
-mkdir -p "$HOME" "$XDG_CONFIG_HOME"
+# HOME, XDG_CONFIG_HOME, POGO_HOME and MG_ROOT are pinned under the private root
+# AND THEN PROVEN not to resolve onto the developer's — see pogo_sandbox_isolate.
+# All four are needed and all four are checked: this box exports POGO_HOME=$HOME
+# from a stale profile, so setting HOME alone leaks onto the live ~/.pogo
+# (mg-5336); config.toml is layered, so XDG_CONFIG_HOME alone leaks the real user
+# config; and `mg` resolves its store as --root > $MG_ROOT > $HOME/.macguffin, so
+# the real cmd_redeploy driven below would otherwise reach the live mail store
+# the moment it sends anything. POGO_AGENT_AUTOSTART=false (also set there) keeps
+# the sandbox daemon from starting a crew.
+pogo_sandbox_isolate
 
 # A PRIVATE port, RESERVED, and a daemon PROVEN to be the one we started
 # (mg-3412). Not a probe: the window between "nothing answered" and "our pogod
@@ -114,11 +125,9 @@ mkdir -p "$HOME" "$XDG_CONFIG_HOME"
 # dies on the bind, and the survivor's daemon answers the loser's readiness
 # check. A control that then asserts on drain state is asserting on someone
 # else's — and a failure of THIS file reads as an interrupt-safety regression.
-sandbox_port_reserve
-PORT="$SANDBOX_PORT"
-URL="http://127.0.0.1:$PORT"
-sandbox_daemon_start "$SANDBOX/pogod" "$PORT" "$SANDBOX/pogod.log" /agents/drain
-POGOD_PID="$SANDBOX_DAEMON_PID"
+pogo_sandbox_daemon "$SANDBOX/pogod" /agents/drain
+PORT="$POGO_SANDBOX_PORT"
+URL="$POGO_SANDBOX_URL"
 
 # Point the driver's own primitives at the sandbox daemon, then source it.
 # main() will NOT run because BASH_SOURCE != $0. dr_state below reads /agents/drain
@@ -162,8 +171,13 @@ dr_state() { curl -sf --max-time 5 "$URL/agents/drain" 2>/dev/null | json_bool d
 # way a human ever enters this path, so it gets an assertion rather than an
 # argument. Driven with a real signal against a real daemon.
 # ===========================================================================
-curl -sf -X POST "$URL/agents/drain" -H 'Content-Type: application/json' \
-    -d '{"draining":false}' >/dev/null 2>&1
+# SCAFFOLDING, so it fails as scaffolding (mg-78a5). The final assertion reads
+# `draining` back and calls a non-false value an interrupt-safety regression, so
+# a staging call that silently did not land would produce that verdict about a
+# precondition that was never established. pogo_sandbox_curl ends the run as
+# INFRASTRUCTURE instead — the whole distinction mg-3412 was filed for.
+pogo_sandbox_curl "could not reset the sandbox daemon to draining=false before the interrupt control" -- \
+    -X POST "$URL/agents/drain" -H 'Content-Type: application/json' -d '{"draining":false}'
 #
 # This drives the REAL cmd_redeploy with the REAL trap wiring the driver
 # installs — it does not restate the trap setup here. A control that hand-rolled
@@ -260,7 +274,10 @@ fi
     && pass "SIGINT in the drain window restores dispatch on the way out (Ctrl-C cannot strand the fleet either)" \
     || fail "SIGINT left the live daemon at draining=$(dr_state) — an aborted deploy strands the fleet exactly like a failed build"
 
-# Leave the daemon dispatching for anything downstream.
+# Leave the daemon dispatching for anything downstream. Deliberately NOT
+# pogo_sandbox_curl: nothing below asserts on it, so it stages nothing, and a
+# failure here after the verdict has been reached would replace a real FAIL with
+# exit 99. Guarding the scaffolding is not guarding everything that looks like it.
 curl -sf -X POST "$URL/agents/drain" -H 'Content-Type: application/json' \
     -d '{"draining":false}' >/dev/null 2>&1
 

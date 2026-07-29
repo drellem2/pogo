@@ -77,6 +77,29 @@ What it guarantees, and *checks* rather than assumes:
 Never weaken an assertion to make it fit the harness. If conversion appears to
 need that, the assertion is telling you something — stop and ask.
 
+Three things that only show up when a suite is converted (`mg-b4a5`):
+
+- **"Build before `isolate`" does not cover a build in a CHILD.** The rule exists
+  because Go resolves `GOMODCACHE`/`GOCACHE`/`GOPATH` off `$HOME`, so a build
+  after the override re-downloads the whole module cache into the sandbox. A
+  control that *spawns* something which builds cannot obey it by ordering. Read
+  the three paths under the real `HOME` and export them before `pogo_sandbox_isolate`
+  instead. They are build caches, not pogo state: none of the four pinned
+  variables is reachable through them.
+- **Do not let `POGO_SANDBOX_ROOT` reach a child that makes its own sandbox.**
+  `pogo_sandbox_create` honours it, so an exported one puts parent and child in
+  one directory — where the child's `isolate` finds a non-empty `POGO_HOME` and
+  its teardown `rm -rf`s the root the parent is still using. `unset` it once
+  yours has been created.
+- **Converting a control that breaks the harness on purpose: only the
+  scaffolding goes inside the envelope.** The break itself must stay in its own
+  subshell or process, because the refusal under test *is* `exit 99` and
+  in-process it would end the file at that assertion. `scripts/pogo-self-deploy_live_setup_test.sh`
+  is the worked example: its root, its fake binaries and its `HOME` are the
+  harness's; its three deliberate breaks are not, and it never reserves a port or
+  starts a daemon of its own, so nothing its own setup depends on is a thing it
+  deliberately breaks.
+
 ### Writing a Go test that touches pogo state: use `internal/testsandbox`
 
 `scripts/pogo-sandbox run --` is the cheap whole-command version and it works
