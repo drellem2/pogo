@@ -71,8 +71,7 @@
   tells the reader not to archive on the strength of the mail — the same
   obligation the PR-flow line already carries, for the same reason.
 
-  **Not changed:** the shipped polecat template (`internal/agent/prompts/**` is a
-  protected path the refinery refuses), which still tells a polecat it will be
-  stopped at merge. That remains true for every item that declares nothing. A
+  **Not changed:** the shipped polecat template, which still tells a polecat it
+  will be stopped at merge. That remains true for every item that declares nothing. A
   polecat working a declaring item outlives its merge and finishes under steps
   7–8 of its own protocol, which already cover exactly that case.

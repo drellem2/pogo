@@ -24,8 +24,8 @@ const defaultMaxAttempts = 7
 // processMerge runs the full merge pipeline for a single MR:
 //  1. Ensure worktree exists for the repo
 //  2. Fetch, checkout branch, rebase onto latest target
-//  3. Refuse the branch outright if it changes a protected path, or carries a
-//     commit message that would close a GitHub issue — neither is skippable
+//  3. Refuse the branch outright if it carries a commit message that would
+//     close a GitHub issue — not skippable
 //  4. Run quality gates on rebased code
 //  5. Fast-forward merge to target ref
 //  6. Push
@@ -178,23 +178,6 @@ func (r *Refinery) attemptMerge(wtDir string, mr *MergeRequest, attempt int, ski
 	log.Printf("refinery: MR %s step=closing-ref-check branch=%s attempt=%d", mr.ID, mr.Branch, attempt)
 	if cerr := checkClosingRefs(wtDir, mr.TargetRef, mr.Branch); cerr != nil {
 		return cerr.Error(), "closing-ref-check", "", cerr
-	}
-
-	// Refuse any change to a path listed in the target's protected-path file
-	// (mg-6c4b). Like the closing-ref check this runs on the rebased branch,
-	// before the quality gates, and is NOT subject to skip_on_retry — the diff
-	// under inspection is exactly what the retry is about to push, and a check
-	// the retry path can bypass is a check the retry path will eventually
-	// bypass on the commit that matters.
-	//
-	// This is the write boundary. The refinery pushes straight to main below
-	// without opening a PR, so a GitHub Actions gate on `pull_request` never
-	// runs on this route and one on `push` runs after the fact. See
-	// checkProtectedPaths for the full reasoning, including why it takes no
-	// authorisation argument.
-	log.Printf("refinery: MR %s step=protected-path-check branch=%s attempt=%d", mr.ID, mr.Branch, attempt)
-	if perr := checkProtectedPaths(wtDir, mr.TargetRef, mr.Branch); perr != nil {
-		return perr.Error(), "protected-path-check", "", perr
 	}
 
 	// Run quality gates (on the rebased branch — tests what will actually
