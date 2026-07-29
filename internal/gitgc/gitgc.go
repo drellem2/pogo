@@ -357,7 +357,10 @@ func (e *UndeterminedWorktreeError) Unwrap() error { return e.Err }
 // ruling did, which is how the distinction got caught.
 //
 //	SHAPE                     WALK        AGE REPORT
-//	damaged .git pointer      full        measured
+//	damaged .git pointer      full        measured — and ACCURATE only because
+//	                                      .git is excluded below; counting it
+//	                                      reported `untouched 0s` for a
+//	                                      month-cold tree
 //	EACCES on the .git FILE   full        measured — .git is a pointer FILE in a
 //	                                      linked worktree, and reading its mtime
 //	                                      needs SEARCH on the parent, not READ on
@@ -372,30 +375,61 @@ func (e *UndeterminedWorktreeError) Unwrap() error { return e.Err }
 // is not a second decision — the removal was already refused — only a line that
 // has to admit it has no age to offer.
 //
-// # HAZARD: the signal is disturbed by the event it adjudicates
+// # HAZARD: the signal is disturbed by the event it reports on
 //
-// Kept because it survives the veto's withdrawal, in weakened form. The damage
-// that makes `git status` fail can itself move mtime, unevenly: corrupting a
-// worktree's .git pointer WRITES A FILE INSIDE THE TREE, so a freshly-damaged
-// tree looks freshly worked-on (0s). chmod damage moves ctime, not mtime
-// (measured on APFS; POSIX agrees, but that is one platform), and a truncated
-// index lives outside the worktree entirely — so both of those look cold.
+// pm-pogo required this hazard to live in the code rather than a mail archive,
+// so that the next person reaching for "just check the timestamp" meets it
+// here. That requirement got STRONGER when the veto was withdrawn, not weaker:
+// the number used to be a second layer under a guard, and it is now the only
+// signal an operator has about a pin nothing else will ever clear.
 //
-// THE RESIDUE, a property rather than a defect to fix: the reported age's
-// TRUSTWORTHINESS VARIES BY DAMAGE SHAPE, for reasons unrelated to liveness. It
-// is worst where the damage writes into the tree and best where the tree looks
-// abandoned for unrelated reasons — the opposite of the distribution you would
-// design. Anyone extending this — a second signal, a per-shape rule, and above
-// all anyone reaching for "just check the timestamp" to decide something —
-// needs that fact first, and should read RemoveWorktree on why two attempts to
-// let this number act were withdrawn.
+// The damage that makes `git status` fail can itself move mtime, unevenly.
+// Corrupting a worktree's .git pointer WRITES A FILE INSIDE THE TREE. chmod
+// damage moves ctime, not mtime. A truncated index lives outside the worktree
+// entirely. So the same tree, abandoned for the same month, reads differently
+// depending on how it broke — for reasons that have nothing to do with whether
+// anyone is alive.
 //
-// .git is COUNTED in the walk, which is why pointer damage reports 0s. That was
-// a load-bearing safety decision while the veto existed; with the veto gone it
-// is only a reporting choice, and a defensible one either way — excluding .git
-// would report agent writes more precisely, at the cost of separating two
-// EACCES shapes that currently stay cleanly apart. Left as-is rather than
-// churned a third time; revisit deliberately, not as an obvious cleanup.
+// Excluding .git (below) removes the one shape where that produced a wrong
+// number. THE RESIDUE, a property rather than a defect to fix: this signal is
+// perturbed by the event it reports on, and the perturbation is structural
+// rather than filesystem-specific — a damage event that writes anywhere else
+// inside the tree would land in the report the same way, and nothing here can
+// distinguish "an agent wrote this" from "the failure wrote this". Anyone
+// adding a second signal, a per-shape rule, or above all anyone proposing to
+// let this number DECIDE something, needs that fact first — and should read
+// RemoveWorktree on why two attempts to let it act were withdrawn.
+//
+// Measurement caveat kept rather than dropped: the chmod-moves-ctime row was
+// measured on APFS/macOS only. POSIX agrees, but that is one platform. The
+// pointer-damage row does NOT depend on it — that one is the damage event
+// writing a file, which is platform-independent.
+//
+// .git is EXCLUDED from the walk, and the history of that decision is the
+// reason to state it rather than leave it to the code:
+//
+//	counted  -> pointer damage reports `untouched 0s` for a month-cold tree
+//	excluded -> every enumerable shape reports the truth; nothing else changes
+//
+// It was COUNTED while the veto existed, deliberately: there, a refreshed clock
+// made the veto OVER-refuse, which was the safe direction, and a write arriving
+// through git alone was exactly the kind a veto hunting a wrong death-verdict
+// should not drop. That reasoning died with the veto. What is left is a number
+// a human reads, and on the pointer-damage shape — the shape gh #97 was
+// reproduced with — counting .git makes it wrong in the direction that
+// DISCOURAGES reclamation: the operator sees `untouched 0s`, concludes someone
+// is working, and leaves a dead tree pinned. It is the only signal they have.
+//
+// So this is not a trade. Measured across all four shapes, excluding .git is
+// right on one row and identical on the other three
+// (TestReportedAgeAcrossCannotTellShapes pins all four).
+//
+// SCOPE, so nobody widens this by accident: in a LINKED worktree — every
+// polecat tree, and all the sweep ever walks — .git is a static pointer FILE,
+// so skipping it discards nothing an agent wrote. In a MAIN worktree .git is a
+// busy directory and this function cannot tell the difference. Skipping is
+// correct for this caller; a future caller pointed at a main worktree is a
+// different question and should be answered before reusing this.
 func newestWrite(worktreeDir string) (time.Time, error) {
 	var newest time.Time
 	err := filepath.WalkDir(worktreeDir, func(path string, d fs.DirEntry, err error) error {
@@ -405,6 +439,15 @@ func newestWrite(worktreeDir string) (time.Time, error) {
 			// silently answer "untouched 30 days" about a tree whose recently
 			// written half was unreadable.
 			return err
+		}
+		if d.Name() == ".git" && path != worktreeDir {
+			// git's own bookkeeping is not agent work, and its mtime moves for
+			// reasons unrelated to whether anyone is alive — including the
+			// damage event itself. See the SCOPE note above before widening.
+			if d.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
 		}
 		info, ierr := d.Info()
 		if ierr != nil {
