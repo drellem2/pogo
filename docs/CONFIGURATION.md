@@ -14,6 +14,12 @@ sweep. A PM crew prompt (`crew/pm-<name>.md`) composes by extending the shared
 drop a new `<name>.toml` and a matching `crew/pm-<name>.md` stub.
 See [docs/prompt-customization.md](prompt-customization.md).
 
+`sources` is the per-PM extension point: entries there are scanned *in addition
+to* the baseline in `pm-template.md`, and the list is the source of truth — a
+source in the list is scanned, one that is not is skipped. One entry has a spec
+of its own, because it closes a gap the baseline cannot see: `"open-prs"`, the
+open-PR pass — see [docs/pm-open-pr-pass.md](pm-open-pr-pass.md).
+
 ## Prompt templates
 
 Agent behavior is defined by prompt files under `internal/agent/prompts/` —
