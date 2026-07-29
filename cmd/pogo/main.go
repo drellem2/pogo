@@ -36,6 +36,7 @@ import (
 	"github.com/drellem2/pogo/internal/reconcile"
 	"github.com/drellem2/pogo/internal/refinery"
 	"github.com/drellem2/pogo/internal/scheduler"
+	"github.com/drellem2/pogo/internal/selfdrift"
 	"github.com/drellem2/pogo/internal/service"
 	"github.com/drellem2/pogo/internal/synthfail"
 	"github.com/drellem2/pogo/internal/version"
@@ -1092,26 +1093,87 @@ suppresses only the reference it names.`,
 		},
 	}
 
+	var statusRepo string
+	var statusRef string
+	var statusNoDrift bool
 	var cmdServiceStatus = &cobra.Command{
 		Use:   "status",
-		Short: "Check if the pogo system service is installed",
-		Args:  cobra.NoArgs,
+		Short: "Whether the service is installed, and whether the daemon is running the code you think it is",
+		Long: `Report two things about this installation:
+
+  1. whether the pogo system service (launchd/systemd) is installed, and
+  2. REVISION DRIFT — the three-way running / installed / main comparison.
+
+The second half is the one that answers "am I running what I think I am
+running?", and until mg-75ec it had no shipped surface at all. pogod does NOT
+self-install: nothing rebuilds the binary when a change merges and nothing
+restarts the daemon when the binary is replaced, so an installation drifts from
+its own source silently. The fleet's own answer to this lives in
+scripts/pogo-self-deploy, which is a repo file — anyone who installed pogo with
+` + "`go install`" + ` has no copy of it and so could not see drift at all.
+
+The three axes:
+
+  running pogod     what the LIVE daemon self-reports via GET /version. Read
+                    from the process, never from the file: ` + "`go install`" + ` rewrites
+                    the on-disk binary underneath a running daemon, and that
+                    divergence is exactly the drift being looked for.
+  installed pogod   the vcs stamp baked into the pogod binary on disk.
+  installed pogo    the same for the CLI. It is not optional cargo: a ` + "`pogo`" + `
+                    older than the ` + "`pogod`" + ` it talks to is a protocol mismatch
+                    waiting to happen, and a check that reads only the daemon
+                    reports health it has not measured.
+
+  main HEAD         what the source repo says should be running.
+
+WITHOUT A CHECKOUT the third axis is simply unavailable, and the report says so
+rather than refusing to answer: running-vs-installed is still fully measurable,
+and a daemon still running code that has already been replaced on disk is real
+drift that needs no repo, no git and no network to establish. Pass --repo (or
+set POGO_REPO) to a pogo checkout to get all three.
+
+A REVISION IS EVIDENCE, NOT TRUTH. A binary with no vcs stamp, or one stamped
+with a commit that does not exist in the checkout, is reported as UNKNOWN — not
+as clean and not as behind. Both would be claims about ancestry the check never
+measured. An unstamped binary in particular does not get a "rebuild" verdict:
+the rebuild would be unstamped too and the drift would never clear.
+
+REPORT-ONLY. This command never builds, installs, restarts, or reconciles
+anything. Its exit status is 0 whether or not drift is found, so existing
+callers keep working; read the "status" field of --json to gate on it.`,
+		Args: cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
 			installed, path := service.Status()
+			var report *selfdrift.Report
+			if !statusNoDrift {
+				r := selfdrift.Check(selfdrift.HostDeps(statusRepo), statusRef)
+				report = &r
+			}
 			if jsonOutput {
-				cli.PrintJSON(map[string]interface{}{
+				out := map[string]interface{}{
 					"installed": installed,
 					"path":      path,
-				})
-			} else {
-				if installed {
-					fmt.Printf("Service installed: %s\n", path)
-				} else {
-					fmt.Println("Service not installed.")
 				}
+				if report != nil {
+					out["drift"] = report
+				}
+				cli.PrintJSON(out)
+				return
+			}
+			if installed {
+				fmt.Printf("Service installed: %s\n", path)
+			} else {
+				fmt.Println("Service not installed.")
+			}
+			if report != nil {
+				fmt.Println()
+				fmt.Print(report.Text())
 			}
 		},
 	}
+	cmdServiceStatus.Flags().StringVar(&statusRepo, "repo", "", "pogo source checkout to compare against (default $POGO_REPO, else the checkout you are standing in)")
+	cmdServiceStatus.Flags().StringVar(&statusRef, "ref", selfdrift.DefaultRef, "git ref in the source checkout whose HEAD the install should match")
+	cmdServiceStatus.Flags().BoolVar(&statusNoDrift, "no-drift", false, "skip the revision-drift check and report only whether the service is installed")
 
 	// Agent commands
 	var cmdAgent = &cobra.Command{

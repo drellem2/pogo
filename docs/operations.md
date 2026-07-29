@@ -285,6 +285,74 @@ When tier 3 itself fails — recovery agent not installed, queue dir unwritable,
 
 A job that stays at `runs = 0` while showing `pended nondemand spawn` is **not armed**: launchd is accepting the trigger and never dispatching it. No plist edit fixes that — the job only runs via an explicit `launchctl kickstart`, which defeats the purpose of tier 3. See mg-6e82.
 
+## Am I running what I think I am running? (`pogo service status`)
+
+`pogod` **does not self-install.** Nothing rebuilds the binary when a change
+merges, and nothing restarts the daemon when the binary is replaced. So every
+pogo installation drifts from its own source silently — the merge lands, the
+daemon keeps running whatever it was started with, and until mg-75ec no shipped
+surface said so.
+
+`pogo service status` now answers it, in three axes:
+
+```
+$ pogo service status
+Service installed: /Users/you/Library/LaunchAgents/com.pogo.daemon.plist
+
+revision drift (repo: /Users/you/dev/pogo, ref: main)
+  running pogod   : 023fab52d19a…  (http://localhost:10000/version)
+  installed pogod : 023fab52d19a…  (/Users/you/go/bin/pogod)
+  installed pogo  : 023fab52d19a…  (/Users/you/go/bin/pogo)
+  main HEAD       : e4a406c5a58f…
+  status          : drift
+  action          : BUILD + RESTART owed: running == installed, both behind main HEAD e4a406c5a58f. …
+```
+
+- **running pogod** is read from the live process (`GET /version`), never from
+  the file. `go install` rewrites the on-disk binary underneath a running
+  daemon, and that divergence is precisely the drift being looked for.
+- **installed pogo** is not optional cargo. A `pogo` older than the `pogod` it
+  talks to is a protocol mismatch waiting to happen, and a check that reads only
+  the daemon reports health it has not measured — that is how the CLI once sat
+  three days behind `main` while the check called the box clean (mg-ddf1).
+- **main HEAD** needs a source checkout. `--repo PATH` or `$POGO_REPO`, else the
+  checkout you are standing in.
+
+**Without a checkout you still get an answer.** The `main` axis is reported
+unavailable, with the reason, and the other two are still compared: a daemon
+running code that `go install` has already replaced on disk is real drift, and
+establishing it needs no repo, no git, and no network. That is the normal
+consumer case, not a degraded one.
+
+**A revision is evidence, not truth.** A binary with no vcs stamp, or one
+stamped with a commit the checkout has never heard of, reports `status:
+unknown` — not clean, and not behind. Both would be claims about ancestry the
+check never measured. The unstamped case in particular is *not* given a
+"rebuild" verdict: the rebuild would be unstamped too, so the drift would never
+clear, and you would have a reconcile loop against an artifact that is not
+broken.
+
+**Report-only, and exit 0 either way.** The command never builds, installs,
+restarts, or reconciles. It exits 0 whether or not it finds drift, so existing
+callers are unaffected; gate on the `status` field of `--json` instead:
+
+```bash
+pogo --json service status | jq -r .drift.status    # clean | drift | unknown
+pogo service status --no-drift                      # skip the check entirely
+```
+
+**Fleet-side, `scripts/pogo-self-deploy check` prints the same three-way** and
+the two agree by construction (verified against a live drifted daemon on
+2026-07-29: both reported `023fab5` running/installed against `e4a406c` on
+main). The script is the redeployer's read-only half and can also *act*
+(`redeploy`); this command only ever reports. If you have the repo, either is
+fine. If you do not — which is every consumer — this is the one you have.
+
+Note this is a different question from `pogo service check-drift`, which
+compares `[reconcile]` **host artifacts** (plists, scripts) against their repo
+sources. Same word, different axis: that one is about files pogo generates, this
+one is about the binaries pogo *is*.
+
 ## GitHub branch protection on main (rulesets)
 
 Since 2026-07-05 (mg-f7a3), `main` in **drellem2/pogo** (ruleset `main-require-pr`, id 18534732) and **drellem2/macguffin** (id 18534735) is protected by a GitHub ruleset per the gh-issue workflow design (`docs/design/gh-issue-workflow-design.md` §3):
