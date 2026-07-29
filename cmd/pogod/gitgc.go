@@ -91,12 +91,29 @@ func runGitGCSweep(reg *agent.Registry, cfg config.GitGCConfig) {
 		log.Printf("pogod: git GC skipped — cannot read polecat witness: %v", err)
 		return
 	}
+	// Positive evidence of DEATH, which is a different fact from the live set
+	// above and is used on a different path: it is the only thing that lets the
+	// sweep reclaim a worktree whose `git status` FAILED (gh #97). pogod is the
+	// caller that can establish it, because the witness store is what holds it.
+	//
+	// A read error degrades to nil rather than aborting. nil means
+	// OwnerUnproven for every worktree, i.e. strictly more refusals, so the
+	// failure direction is preservation — and the sweep has already returned
+	// above if the same store was unreadable for the live set, which is the
+	// direction that could lose work.
+	ownerVerdicts, err := agent.PolecatOwnerVerdicts()
+	if err != nil {
+		log.Printf("pogod: git GC — cannot read polecat witness for death evidence (%v); "+
+			"every worktree whose git status fails will be KEPT this pass", err)
+		ownerVerdicts = nil
+	}
 	for _, repo := range repos {
 		res, err := gitgc.Sweep(gitgc.Options{
-			Repo:         repo,
-			LivePolecats: live,
-			Tickets:      tickets,
-			PolecatsDir:  polecatsDir,
+			Repo:          repo,
+			LivePolecats:  live,
+			OwnerVerdicts: ownerVerdicts,
+			Tickets:       tickets,
+			PolecatsDir:   polecatsDir,
 			// One line per ACTION, not just the counts below. The sweep
 			// already assembles path, owner, branch and reason for every
 			// decision and used to throw all of it away — so a removal in a

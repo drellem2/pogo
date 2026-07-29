@@ -2,10 +2,12 @@ package gitgc
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // damageGitPointer makes `git status` fail inside wtPath FOR REAL — no stub,
@@ -26,6 +28,30 @@ func damageGitPointer(t *testing.T, wtPath string) {
 	}
 	if _, _, err := WorktreeDirty(wtPath); err == nil {
 		t.Fatal("setup did not produce a genuine git status failure; this is not the cannot-tell case")
+	}
+}
+
+// ageTree backdates every file and directory in wtPath so the tree looks
+// abandoned rather than freshly written, which is what an ORPHAN actually looks
+// like on disk.
+//
+// Test fixtures build a worktree milliseconds before asserting on it, so
+// without this every fixture trips the mtime veto (gh #97) — the veto refuses a
+// cannot-tell removal when the tree was written to inside gitgc's quiet window,
+// even with positive evidence that the owner is dead. That is the veto working:
+// a tree written to a moment ago is not an abandoned one, and a test that
+// wanted an abandoned tree has to build one.
+func ageTree(t *testing.T, wtPath string, age time.Duration) {
+	t.Helper()
+	when := time.Now().Add(-age)
+	err := filepath.WalkDir(wtPath, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		return os.Chtimes(path, when, when)
+	})
+	if err != nil {
+		t.Fatalf("ageTree %s: %v", wtPath, err)
 	}
 }
 
@@ -92,6 +118,11 @@ func TestCannotTellReclaimedWhenOwnerGone(t *testing.T) {
 	dirty(t, wtPath, "leftover.go", "package leftover\n")
 
 	damageGitPointer(t, wtPath)
+	// An orphan is a tree nobody has touched in a long time. Fixtures build one
+	// in milliseconds, so age it — otherwise the mtime veto refuses on the
+	// grounds that something just wrote to it, which is a true statement about
+	// the fixture and a false one about the situation it stands for (gh #97).
+	ageTree(t, wtPath, 2*quietWindow)
 
 	if err := RemoveWorktree(r.dir, wtPath, OwnerGone); err != nil {
 		t.Fatalf("an orphan whose owner is gone must still be reclaimable: %v", err)
