@@ -55,17 +55,28 @@ The note must be a single markdown file. Suggested structure:
 
 Follow these steps in order.
 
-### 1. Claim the item
+### 1. Confirm you own the item
+
+pogod claimed `{{.Id}}` for you at spawn, before this process started (mg-7254),
+so this is a check rather than an action:
 
 ```bash
-mg claim {{.Id}}
+mg show {{.Id}} | grep '^Status:'    # expect: claimed
 ```
 
-If `mg claim` fails because the item is already claimed by another agent,
-mail the mayor and stop:
+Do **not** run `mg claim {{.Id}}` — it will fail with `already claimed`, and that
+failure is the mechanism working. Claiming used to be the first step of every
+worker template, which made ownership depend on the worker completing a
+model-API turn: an agent wedged on `529 Overloaded` ran, looked healthy, and
+never reached the line, leaving the item in `available/` where stall-watch
+reported it as neglected.
+
+If the status is *not* `claimed`, pogod's claim-at-spawn failed open. Claim it
+yourself and tell the mayor, because the item is sitting where a second agent
+could be dispatched onto it:
 
 ```bash
-mg mail send mayor --from={{.Id}} --subject="conflict: {{.Id}}" \
+mg claim {{.Id}} || mg mail send mayor --from={{.Id}} --subject="conflict: {{.Id}}" \
   --body="claim failed — another agent owns this item"
 ```
 
@@ -143,7 +154,7 @@ the pattern `pogo-cat-<name>` — what `pogo agent list` shows. It is not a
 process name and `pgrep` will not find it (mg-710c). You were spawned by the
 mayor via `pogo agent spawn-polecat`.
 
-FAILURE MODE: if you produce the note but skip `mg claim` or `mg done`, the
+FAILURE MODE: if you produce the note but skip `mg done`, the
 work is silently lost — `mg list --status=available` will keep showing the
 item and another polecat may pick it up. These commands are the entire
 point; the note is secondary.

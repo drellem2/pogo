@@ -73,7 +73,9 @@ All coordination state lives in a single global macguffin tree (`~/.macguffin/`)
 
 macguffin is global, not per-project. A work item references a repo path in its body; pogo resolves it. This keeps the coordination layer simple — agents check one place for work, not N project directories. Pogo already provides the project-awareness layer via `lsp` and `pose`.
 
-Agents interact with state through the `mg` CLI, the same way a human would. There is no internal API for "agent claims work" — the agent runs `mg claim <id>` like anyone else.
+Agents interact with state through the `mg` CLI, the same way a human would. There is no internal API for state changes — an agent runs `mg claim <id>`, `mg done <id>` and the rest like anyone else.
+
+One exception, and it is a deliberate one: **pogod claims a polecat's work item on its behalf at spawn** (mg-7254). It still does so by shelling out to `mg claim` — the CLI remains the only writer — but the *actor* is the daemon rather than the worker. Leaving the claim to the polecat made ownership depend on the polecat completing a model-API turn, so a worker wedged on a 529 ran for half an hour with its item still in `available/`: invisible to stall-watch, unprotected against a second dispatch, and destined to fail at `mg done`, which refuses an item that was never claimed. Ownership cannot depend on the owner being able to act.
 
 ### Prompt files are configuration
 
@@ -193,8 +195,13 @@ pogo agent spawn "fix the auth bug"
    pogod spawns pogo-cat-<id>
         │
         ▼
+   pogod claims the work item (mg claim, mg-7254)
+   - before the process starts, so the item never
+     sits in available/ under a working polecat
+        │
+        ▼
    Agent runs
-   - claims work item (mg claim)
+   - confirms it owns the item (mg show)
    - does the work
    - pushes branch
    - marks done (mg done)
@@ -219,7 +226,7 @@ Work flows through macguffin:
 2. **Coordinator** (or human) decides who should do it:
    - Crew work: `mg mail send crew-arch --subject="look at gt-a3f"`
    - Polecat work: `pogo agent spawn --item=gt-a3f`
-3. **Agent** claims the item: `mg claim gt-a3f`
+3. **pogod** claims the item at spawn, before the polecat's process starts: `mg claim gt-a3f` (mg-7254). A second dispatch onto an already-claimed item is refused — the claim is an atomic rename, so the store enforces single ownership rather than the dispatcher remembering to check.
 4. **Agent** completes work: `mg done gt-a3f`
 
 There is no "sling" command. Spawning a polecat with a work item is the assignment. Mailing a crew member is the assignment. The mechanisms are macguffin primitives, not orchestration abstractions.

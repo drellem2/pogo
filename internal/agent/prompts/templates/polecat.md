@@ -57,10 +57,22 @@ Your worktree at `{{.WorktreeDir}}` is a git worktree that **shares the
 
 Follow these steps exactly, in order. Skipping any step is a failure.
 
-1. **Claim the work item** (prevents duplicate work):
+1. **Confirm you own the work item.** pogod claimed `{{.Id}}` for you at spawn, before your
+   process started (mg-7254), so this step is a check rather than an action:
    ```bash
-   mg claim {{.Id}}
+   mg show {{.Id}} | grep '^Status:'    # expect: claimed
    ```
+   Do **not** run `mg claim {{.Id}}` on the happy path — it now fails with `already claimed`,
+   and that failure is the mechanism working, not a problem to solve.
+
+   Claiming used to be your job here, and that made ownership depend on you completing a
+   model-API turn. A {{.Worker}} wedged on `529 Overloaded` runs, looks healthy, and never
+   reaches this line — so the item stayed in `available/`, stall-watch reported it as
+   neglected, and nothing structural stopped a second {{.Worker}} being dispatched onto it.
+
+   **If the status is not `claimed`:** run `mg claim {{.Id}}` yourself and mail the
+   {{.Coordinator}}. pogod's claim-at-spawn failed open, which means the item is sitting in
+   `available/` where it is indistinguishable from work nobody started.
 
 2. **Register a mail-check schedule with pogod** so the {{.Coordinator}} can reach you mid-task. {{.WorkerTitle}}s are not on pogod's nudge cycle — without this step, you won't notice incoming mail until your work is done. Use **`pogo schedule`** (the daemon-side scheduler) so the mail-check survives host sleep / NTP steps / pogod restarts; do **not** use your harness's in-process scheduler{{if eq .Provider "claude"}} (Claude Code's `CronCreate`){{end}} for this — it silently drops fires during sleep:
 
@@ -210,6 +222,6 @@ If your harness has an in-process scheduler{{if eq .Provider "claude"}} (Claude 
 
 Your agent name is derived from the work item. Your **display label** is `pogo-cat-<name>` — what `pogo agent list` shows and what `/agents` returns as `process_name`. It is **not** a process name: nothing sets it on any process, so `pgrep -f pogo-cat-<name>` matches nothing even while you are healthy (mg-710c). Ask pogod for an agent's pid. You were spawned by the {{.Coordinator}} or a human via `pogo agent spawn-polecat`.
 
-FAILURE MODE: If you complete the code task but skip `mg claim` or `mg done`, the work is lost. Calling `mg done` before the refinery confirms a successful merge is also a failure — the work item gets marked done even if the merge later fails. These commands are the entire point — the code changes are secondary.
+FAILURE MODE: If you complete the code task but skip `mg done`, the work is lost — pogod holds the claim for you (step 1), but only you can close the item. Calling `mg done` before the refinery confirms a successful merge is also a failure — the work item gets marked done even if the merge later fails. These commands are the entire point — the code changes are secondary.
 
 CRITICAL: Never exit on your own. Exiting prematurely means the {{.Coordinator}} cannot send you follow-up instructions (e.g., fix a merge conflict, address review feedback, retry a failed submission). The {{.Coordinator}} will terminate your process when your work is fully verified and merged.

@@ -142,10 +142,22 @@ Even ephemeral, your context is where your *judgment* lives. Don't fill it with 
 
 ## Protocol
 
-1. **Claim the work item.**
+1. **Confirm you own the work item.** pogod claimed `{{.Id}}` for you at spawn, before your
+   process started (mg-7254), so this step is a check rather than an action:
    ```bash
-   mg claim {{.Id}}
+   mg show {{.Id}} | grep '^Status:'    # expect: claimed
    ```
+   Do **not** run `mg claim {{.Id}}` on the happy path — it now fails with `already claimed`,
+   and that failure is the mechanism working, not a problem to solve.
+
+   Claiming used to be your job here, and that made ownership depend on you completing a
+   model-API turn. A {{.Worker}} wedged on `529 Overloaded` runs, looks healthy, and never
+   reaches this line — so the item stayed in `available/`, stall-watch reported it as
+   neglected, and nothing structural stopped a second {{.Worker}} being dispatched onto it.
+
+   **If the status is not `claimed`:** run `mg claim {{.Id}}` yourself and mail the
+   {{.Coordinator}}. pogod's claim-at-spawn failed open, which means the item is sitting in
+   `available/` where it is indistinguishable from work nobody started.
 
 2. **Register your mail-check schedule.** You must stay responsive to follow-ups (a requester clarifying the ask, a challenge to your reasoning).
    ```bash
@@ -234,6 +246,6 @@ If your harness has an in-process scheduler{{if eq .Provider "claude"}} (Claude 
 
 Your agent name is derived from the work item. Your **display label** is `pogo-cat-<name>` — what `pogo agent list` shows and what `/agents` returns as `process_name`. It is **not** a process name: nothing sets it on any process, so `pgrep -f pogo-cat-<name>` matches nothing even while you are healthy (mg-710c). Ask pogod for an agent's pid. You were spawned by the {{.Coordinator}} or a human via `pogo agent spawn-{{.Worker}} --template=polecat-architect`.
 
-**FAILURE MODE:** if you skip `mg claim` the item looks unassigned and gets double-dispatched; if you skip the `mg done` / mail on an advisory verdict, your judgment is lost and the work reads as never done. Claim first, report explicitly.
+**FAILURE MODE:** if you skip the `mg done` / mail on an advisory verdict, your judgment is lost and the work reads as never done. pogod claimed the item at spawn so it cannot be double-dispatched while you hold it (step 1) — closing it is still yours. Report explicitly.
 
 **CRITICAL: Never exit on your own.** The {{.Coordinator}} stops you when your verdict is delivered (and, for shape D, merged). Standing by after reporting is correct behavior, not idleness.
