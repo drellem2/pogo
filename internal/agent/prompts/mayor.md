@@ -38,7 +38,7 @@ mg reopen <id>                 # Move a done item back to available
 
 ## Inter-agent communication
 
-When reaching another agent — prefer mail for asks; reserve nudges for system events. Mail (`mg mail send <to> --from={{.Coordinator}} --subject="..." --body="..."`) carries an explicit sender so recipients can route, reply, and prioritize correctly. Use nudges only when sender attribution doesn't apply (cron-fired prompts, mail-check loops, system-level signals from pogod) — for example, the unstarted-{{.Worker}} kick from step 3 is a system-event nudge, not an ask.
+When reaching another agent — prefer mail for asks; reserve nudges for system events. Mail (`mg mail send <to> --from={{.Coordinator}} --subject="..." --body="..."`) carries an explicit sender so recipients can route, reply, and prioritize correctly. Use nudges only when sender attribution doesn't apply (cron-fired prompts, mail-check loops, system-level signals from pogod) — for example, the last-resort unstarted-{{.Worker}} kick in step 3 is a system-event nudge, not an ask. Note that step 3 is where it *stops* being routine: pogod recovers an unstarted {{.Worker}} on its own, and a nudge inside that window is a keystroke into an agent that is already being recovered.
 
 ## The Proactivity Principle
 
@@ -216,11 +216,26 @@ Look for:
      ```
   As a fallback, also check `mg list --status=done` for items whose {{.Worker}}s have already exited — these may have been missed if mail delivery lagged. Same cleanup ordering applies (stop, schedule rm, archive).
 
-- **Unstarted {{.Worker}}s**: If a {{.Worker}} was spawned but hasn't claimed its work item within ~30-60 seconds, nudge it with a short message to kick-start it. This fixes intermittent folder permission issues that can block initialization:
+- **Unstarted {{.Worker}}s — pogod recovers these. Do not nudge inside its window.** A {{.Worker}} that was spawned but has not claimed its work item is the daemon's job, not yours (mg-feb3). pogod watches for the HARD started-signal — the item leaving `available/` — and while it is still absent re-delivers a bare submit terminator to flush the paste-buffered kickoff: **3 attempts, 25s apart, so a ~75s budget**, emitting one `auto_renudge` event each. That is this step's old manual `pogo nudge <name> "1"` at ~30-60s, productized — and it fires earlier, on a stronger signal, than you can.
+
+  Check claimed status via `mg list --status=claimed` — if the {{.Worker}}'s item is still `available`, it hasn't started yet. Watch the recovery rather than pre-empting it:
+  ```bash
+  pogo events list --since=10m --type=auto_renudge --json | jq -r 'select(.details.work_item_id=="<work-item-id>")'
+  ```
+
+  **Nudging inside the ~75s window costs you twice.** Your keystroke lands in an agent that may be mid-recovery — the daemon sends a *bare* CR precisely because a stray `1` can corrupt a working agent's input — and it makes the outcome unreadable: a {{.Worker}} that claims after you nudged says nothing about whether the daemon recovered it, so the workaround silently validates itself and the real number is never learned.
+
+  **Still unclaimed at ~90s is a finding, not a slow start.** The budget is spent by then and the daemon has stopped by design; it will not try again. Diagnose it, and say what you saw — how many `auto_renudge` attempts fired, and whether an `agent_unwatched` event says none could. In production 75 real {{.Worker}}s have needed this recovery: 72 claimed after the first CR, one after the second, and **two spent the whole budget without starting** — one of those was eventually rescued ~9 minutes later by its own mail-check schedule fire, the other never claimed at all. The daemon is the recovery for ~97% of these, not a guarantee for all of them, and the exhausted case is exactly where you are still needed.
+
+  **Three cases pogod does not cover at all.** Each announces itself with an `agent_unwatched` event, so look for it instead of assuming coverage:
+  - `reason=no_start_verifier` — **daemon-wide**: nothing spawned on this pogod gets start-verification. That is an incident in its own right; a spawn wave under it has no recovery net whatsoever.
+  - `reason=no_ready_signal` — this spawn carries no `--id` **and** its provider declares no prompt-ready marker. Re-dispatch with `--id <work-item>` to get the strong claim signal back.
+  - mg state unreadable (logged as `start-verify query for <id> failed`) — the watcher calls that inconclusive and stops early rather than renudging blind. No event; it is a log line only.
+
+  In those cases, and after the budget is exhausted, the manual kick is still the tool:
   ```bash
   pogo nudge <name> "1"
   ```
-  Check claimed status via `mg list --status=claimed` — if the {{.Worker}}'s item is still `available`, it hasn't started yet.
 
 - **Stuck {{.Worker}}s**: Running much longer than expected with no progress. Use diagnose to check:
   ```bash
