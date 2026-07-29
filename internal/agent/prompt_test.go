@@ -299,7 +299,7 @@ func TestShippedBuildPRTemplateProtocol(t *testing.T) {
 		"gh pr comment",
 		// The no-self-submit rule must be stated explicitly.
 		"Never run `pogo refinery submit` yourself",
-		"Refinery submission happens later, by the ringmaster",
+		"Refinery submission happens later, by the " + DefaultCoordinatorName,
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("expanded polecat-build-pr.md: expected %q", want)
@@ -3143,10 +3143,13 @@ func TestLoadDropInsIgnoresNonMarkdown(t *testing.T) {
 // TestSynthesizePromptMayorAppendsDropIns confirms that `pogo agent prompt
 // show <coordinator>` (the show-side caller) renders the coordinator body plus
 // any dropins/<coordinator>/*.md fragments, frontmatter stripped. The prompt
-// file stays mayor.md, but it resolves under the coordinator's display name
-// (default "ringmaster"), and drop-ins are keyed by that name.
+// file stays mayor.md, but it resolves under the coordinator's display name,
+// and drop-ins are keyed by that name. The coordinator is pinned to a name
+// that differs from the file stem so the test proves that, rather than passing
+// on a coincidence when the shipped default happens to be "mayor".
 func TestSynthesizePromptMayorAppendsDropIns(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	setCoordinator(t, "ringmaster")
 	if err := InitPromptDirs(); err != nil {
 		t.Fatal(err)
 	}

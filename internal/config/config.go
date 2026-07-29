@@ -54,7 +54,16 @@ const DefaultProvider = "claude"
 // to this value: the default-migration guard (see migrate.go) pins their
 // historical coordinator name into config.toml, so this flip only sets the
 // default for fresh installs. See mg-71ea, mg-ce47.
-const DefaultCoordinator = "ringmaster"
+//
+// mg-ce47 flipped this to "ringmaster"; mg-2c17 flipped it back, on the
+// instruction of the same person who authorized mg-ce47. It is a naming
+// decision and nothing else: the coordinator's prompt filename is a frozen
+// constant that does NOT follow this name, so "mayor", "ringmaster", and any
+// configured name all resolve to agents/mayor.md (mg-04ce). Restoring "mayor"
+// removes the cosmetic mismatch of a coordinator named "ringmaster" reading
+// mayor.md. The worker default stays "pogocat" — mg-2c17 reverses the
+// coordinator half of mg-ce47 only.
+const DefaultCoordinator = "mayor"
 
 // DefaultWorker (the worker role's display-name default, "pogocat") is
 // declared in migrate.go alongside the role-default migration table that
@@ -371,7 +380,7 @@ type StallWatchConfig struct {
 	// Enabled turns the watcher on. Defaults to true.
 	Enabled bool
 	// Agent is the macguffin agent name to watch. Empty falls back to
-	// DefaultStallWatchAgent ("ringmaster").
+	// DefaultStallWatchAgent ("mayor").
 	Agent string
 	// UnclaimedItemAgeThreshold is how long an available work item assigned to
 	// (or unassigned and pickup-expected by) Agent may sit before a nudge.
@@ -686,7 +695,7 @@ type AgentsConfig struct {
 	// Load() fills it in.
 	Provider string
 	// Coordinator is the coordinator agent's name ([agents] coordinator).
-	// Empty is treated as DefaultCoordinator ("ringmaster"); Load() fills it in.
+	// Empty is treated as DefaultCoordinator ("mayor"); Load() fills it in.
 	// Prefer CoordinatorName() over reading the field so zero-value configs
 	// (tests, callers that skip Load) still resolve to the default.
 	Coordinator string
@@ -754,7 +763,7 @@ func (c *AgentsConfig) AgentCommand(agentType string) string {
 }
 
 // CoordinatorName returns the configured coordinator agent name, falling back
-// to DefaultCoordinator ("ringmaster") when unset. Safe on a zero-value AgentsConfig.
+// to DefaultCoordinator ("mayor") when unset. Safe on a zero-value AgentsConfig.
 func (c *AgentsConfig) CoordinatorName() string {
 	if c != nil && c.Coordinator != "" {
 		return c.Coordinator

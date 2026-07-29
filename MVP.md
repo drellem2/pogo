@@ -193,7 +193,7 @@ Agent identity = prompt file. No registry, no database, no schema.
 
 ### 3. Coordinator
 
-The coordinator (default: ringmaster, configurable via `[agents] coordinator`; workers default to pogocat via `[agents] worker`) is a crew agent. Its only special property is its prompt file, which gives it conventions for:
+The coordinator (default: mayor, configurable via `[agents] coordinator`; workers default to pogocat via `[agents] worker`) is a crew agent. Its only special property is its prompt file, which gives it conventions for:
 
 - Periodically checking `mg list --status=available` for unassigned work
 - Spawning polecats via `pogo agent spawn` for ready items
@@ -203,7 +203,7 @@ The coordinator (default: ringmaster, configurable via `[agents] coordinator`; w
 
 The coordinator is NOT special code. It's a prompt file that says "you are the coordinator" and has access to the same CLI tools as everyone else. If the coordinator prompt is bad, you edit `~/.pogo/agents/mayor.md`. If you want a different coordination strategy, write a different prompt.
 
-**Bootstrap:** pogod auto-starts the coordinator on boot via the `auto_start = true` flag in `mayor.md`'s TOML frontmatter — the same mechanism used by any crew agent. `pogo agent start ringmaster` still works for manual restarts.
+**Bootstrap:** pogod auto-starts the coordinator on boot via the `auto_start = true` flag in `mayor.md`'s TOML frontmatter — the same mechanism used by any crew agent. `pogo agent start mayor` still works for manual restarts.
 
 ### 4. Refinery
 
@@ -254,7 +254,7 @@ Agent-to-agent wakeup. Delivered via PTY — no tmux dependency.
 
 ```bash
 pogo nudge <agent-name> "message"     # Send text to agent's session
-pogo nudge ringmaster "new work available"
+pogo nudge mayor "new work available"
 pogo nudge arch "check your mail"
 ```
 

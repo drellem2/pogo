@@ -58,12 +58,12 @@ Environment variables (`POGO_PORT`, `POGO_AGENT_COMMAND`, `POGO_AGENT_PROVIDER`,
 
 ## Coordinator name
 
-The coordinator role is called "ringmaster" by default, but the name is policy, not
+The coordinator role is called "mayor" by default, but the name is policy, not
 mechanism — rename it with:
 
 ```toml
 [agents]
-coordinator = "boss"   # default "ringmaster"
+coordinator = "boss"   # default "mayor"
 ```
 
 **A running coordinator is never renamed.** Whatever config resolves to, if a
@@ -957,7 +957,7 @@ See [docs/customizing.md](customizing.md).
 ## Role default-migration guard
 
 pogo never writes `config.toml` on its own, and the role-name defaults
-(`coordinator = "ringmaster"`, `worker = "pogocat"`) live only in code — `Load()`
+(`coordinator = "mayor"`, `worker = "pogocat"`) live only in code — `Load()`
 fills them in-memory from a const when the key is absent. So the common existing
 install has **no `[agents]` role keys on disk**. That is normally fine, but it
 means the day a future pogo release changes a shipped default, every existing

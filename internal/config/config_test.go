@@ -1110,8 +1110,11 @@ func TestCoordinatorDefault(t *testing.T) {
 	if cfg.Agents.Coordinator != DefaultCoordinator {
 		t.Errorf("coordinator = %q, want %q", cfg.Agents.Coordinator, DefaultCoordinator)
 	}
-	if got := cfg.Agents.CoordinatorName(); got != "ringmaster" {
-		t.Errorf("CoordinatorName() = %q, want ringmaster", got)
+	// Bare literal on purpose: this is the tripwire that says WHICH name ships.
+	// Comparing against DefaultCoordinator here would make the test follow any
+	// future flip of the const instead of catching it (mg-ce47, mg-2c17).
+	if got := cfg.Agents.CoordinatorName(); got != "mayor" {
+		t.Errorf("CoordinatorName() = %q, want mayor", got)
 	}
 }
 

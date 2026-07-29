@@ -209,11 +209,13 @@ fi
 
 # Pin the coordinator's NAME to "mayor". mayor.md is mechanism (the file name
 # stays put), but the coordinator agent's name comes from [agents] coordinator
-# and defaults to DefaultCoordinatorName — "ringmaster", not "mayor". Without
-# this, every "mayor" the script names resolves as an ordinary crew agent and
-# is looked up at crew/mayor.md, which pogo init never scaffolds: `pogo agent
-# start mayor` fails with "prompt file not found" and the crew legs of the
-# suite (steps 3 and 8) can never run. Writing the config is also what enables
+# and defaults to DefaultCoordinatorName — which mg-2c17 restored to "mayor",
+# though mg-ce47 had it at "ringmaster" and a future flip could move it again.
+# The pin makes the suite independent of that: without a coordinator named
+# "mayor", every "mayor" the script names resolves as an ordinary crew agent
+# and is looked up at crew/mayor.md, which pogo init never scaffolds: `pogo
+# agent start mayor` fails with "prompt file not found" and the crew legs of
+# the suite (steps 3 and 8) can never run. Writing the config is also what enables
 # pogod's prompt refresh + crew auto-start, so this exercises the production
 # path rather than a config-less one no deployment uses.
 mkdir -p "$HOME/.config/pogo"

@@ -30,15 +30,15 @@ On error, rerun `pogo install` or `pogo doctor --check`.
 
 ## Working with agents
 
-`pgrep pogo-crew` lists crew; `pgrep pogo-cat` lists polecats (disposable worker agents). `pogo agent list` formats this. The coordinator's agent name is `ringmaster` by default (workers default to `pogocat`); both are configurable via `[agents] coordinator` / `[agents] worker`.
+`pgrep pogo-crew` lists crew; `pgrep pogo-cat` lists polecats (disposable worker agents). `pogo agent list` formats this. The coordinator's agent name is `mayor` by default (workers default to `pogocat`); both are configurable via `[agents] coordinator` / `[agents] worker`.
 
 ```sh
 pogo agent list                         # what's running
-pogo agent status ringmaster            # one agent's state
-pogo agent attach ringmaster            # live PTY session (detach: ~.)
-pogo nudge ringmaster "check for work"  # inject text without attaching
+pogo agent status mayor                 # one agent's state
+pogo agent attach mayor                 # live PTY session (detach: ~.)
+pogo nudge mayor "check for work"       # inject text without attaching
 pogo agent spawn "add retry logic"      # one-off polecat
-mg mail send ringmaster --subject="priority change" --body="pause feature work"
+mg mail send mayor --subject="priority change" --body="pause feature work"
 ```
 
 | | Crew | Polecat |
@@ -53,7 +53,7 @@ The display label is human-facing — it is what `pogo agent list` shows and wha
 sets it on any process, so `pgrep -f pogo-crew-arch` matches nothing. To find an
 agent's pid, ask pogod.
 
-Behavior is prompt-defined. Edit `~/.pogo/agents/mayor.md` to change dispatch. Add a crew agent with `~/.pogo/agents/crew/<name>.md` + `pogo agent start <name>`. Polecats re-read `~/.pogo/agents/templates/polecat.md` each spawn. Crew with `auto_start = true` start at boot (default ringmaster).
+Behavior is prompt-defined. Edit `~/.pogo/agents/mayor.md` to change dispatch. Add a crew agent with `~/.pogo/agents/crew/<name>.md` + `pogo agent start <name>`. Polecats re-read `~/.pogo/agents/templates/polecat.md` each spawn. Crew with `auto_start = true` start at boot (default mayor).
 
 ## Coordination: macguffin
 

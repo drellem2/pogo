@@ -29,7 +29,7 @@ Pogo is an operating system for agent-first development. It combines project dis
 │  pose, mg    │     │ │ crew-arch   │ │
 │              │     │ │ crew-ops    │ │
 │              │     │ │ cat-a3f     │ │
-│              │     │ │ ringmaster  │ │
+│              │     │ │ mayor       │ │
 │              │     │ └─────────────┘ │
 └──────────────┘     └────────┬────────┘
                               │
@@ -65,7 +65,7 @@ Two agent types, distinguished by naming convention and lifecycle:
 - **Crew** (`pogo-crew-<name>`): Long-running. The daemon restarts them on crash. They handoff to fresh sessions when context fills. They push directly to main.
 - **Polecat** (`pogo-cat-<id>`): Ephemeral. Spawned for a single task. Exit on completion. Submit work to the refinery merge queue.
 
-The coordinator (default: ringmaster; configurable via `[agents] coordinator`, as workers are via `[agents] worker`) is a crew agent. There is no special coordinator code — just a prompt file that says "you coordinate work."
+The coordinator (default: mayor; configurable via `[agents] coordinator`, as workers are via `[agents] worker`) is a crew agent. There is no special coordinator code — just a prompt file that says "you coordinate work."
 
 ### The filesystem is the coordination layer
 
@@ -709,7 +709,7 @@ Process names are the agent identity system. No registry, no UUID, no database.
 |---------|---------|---------|
 | `pogo-crew-<name>` | Long-running crew agent | `pogo-crew-arch` |
 | `pogo-cat-<id>` | Ephemeral polecat | `pogo-cat-a3f` |
-| `pogo-crew-<coordinator>` | The coordinator (a crew agent; default: ringmaster) | `pogo-crew-ringmaster` |
+| `pogo-crew-<coordinator>` | The coordinator (a crew agent; default: mayor) | `pogo-crew-mayor` |
 | `pogod` | The daemon | `pogod` |
 
 Discovery: `pgrep -a pogo-crew` lists all crew. `pgrep -a pogo-cat` lists all polecats. `pogo agent list` wraps this with formatted output.

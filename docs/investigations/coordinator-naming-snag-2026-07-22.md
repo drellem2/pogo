@@ -151,3 +151,35 @@ Daniel's "make mayor the default" instruction reverses the authorized mg-ce47.
 That contradiction is unresolved and is his to rule on — mayor has correctly
 declined to act on it. Nothing in this investigation depends on which way it
 goes: both names resolve to `agents/mayor.md`.
+
+### Resolved 2026-07-29 (mg-2c17)
+
+Ruled in favour of Daniel's instruction: **`DefaultCoordinator` /
+`DefaultCoordinatorName` are `mayor` again**, and the public docs mg-e726
+migrated say `mayor`. The refusal above was right on 2026-07-22 — an agent must
+not silently undo an authorized change — and stopped being right once the
+authorizer of mg-ce47 and the person asking for the reversal were recognised as
+the same person. The real failure was refusing without converting the question
+into anything answerable: it lived in a `human` mail thread for seven days with
+no work item, which is the fleet's documented way to lose a finding (mg-eb54).
+
+What this changed and what it did not:
+
+- **Changed:** the shipped coordinator NAME, and every doc that quoted it.
+- **Not changed:** prompt resolution. §3 above still holds unedited — the prompt
+  filename is a frozen constant, so `mayor`, `ringmaster`, and any configured
+  name all resolve to `agents/mayor.md`. No population's behaviour moved.
+- **Not changed:** the worker default, which stays `pogocat`. mg-2c17 reverses
+  the coordinator half of mg-ce47 only.
+- **Not changed:** `internal/agent/prompts/**` and `internal/agent/templates/**`,
+  which carry `{{.Coordinator}}` placeholders rather than the literal name and
+  are a protected path the refinery refuses.
+
+The cosmetic residue recorded in §4 — a coordinator named `ringmaster` reading
+`mayor.md` — is gone with it.
+
+One consequence worth knowing when reading the migration guard: the shipped
+coordinator default and the frozen legacy name the guard pins are now the same
+string (`mayor`), so the coordinator no longer demonstrates the guard. The
+worker (`pogocat` shipped, `polecat` pinned) still does, and
+`scripts/upgrade-smoke.sh` says so where it asserts.

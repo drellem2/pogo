@@ -25,9 +25,11 @@ var defaultPrompts embed.FS
 // DefaultCoordinatorName is the coordinator agent's default name. It is kept
 // equal to config.DefaultCoordinator; the literal is repeated here as the
 // resolution floor so prompt handling never depends on config having been
-// loaded. When config.DefaultCoordinator flips (mg-ce47), this mirror flips
-// with it to preserve that equality.
-const DefaultCoordinatorName = "ringmaster"
+// loaded. When config.DefaultCoordinator flips (mg-ce47 to "ringmaster",
+// mg-2c17 back to "mayor"), this mirror flips with it to preserve that
+// equality. The prompt FILENAME does not follow either name — it is frozen at
+// mayor.md, so every coordinator name resolves to the same file (mg-04ce).
+const DefaultCoordinatorName = "mayor"
 
 // coordinatorPlaceholder is the token shipped prompts use where the
 // coordinator's name belongs; coordinatorTitlePlaceholder is its
@@ -79,7 +81,7 @@ var coordinatorName = DefaultCoordinatorName
 
 // SetCoordinatorName sets the process-wide coordinator agent name from
 // configuration ([agents] coordinator). An empty name resets to the default
-// ("ringmaster").
+// ("mayor").
 func SetCoordinatorName(name string) {
 	if name == "" {
 		name = DefaultCoordinatorName

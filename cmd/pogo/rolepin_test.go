@@ -34,6 +34,24 @@ func restoreRoleNames(t *testing.T) {
 	})
 }
 
+// The agent package documents DefaultCoordinatorName / DefaultWorkerName as
+// mirrors of config.DefaultCoordinator / config.DefaultWorker — repeated
+// literals, because agent cannot import config (config is agent's dependency,
+// not the reverse). Nothing enforced that equality until mg-2c17, which flipped
+// the coordinator default back to "mayor" and had to update both sides by hand.
+// A drifted mirror is silent: prompt synthesis would resolve one name while the
+// daemon started an agent under the other. This is the cheapest possible guard.
+func TestRoleNameMirrorsMatchConfigDefaults(t *testing.T) {
+	if agent.DefaultCoordinatorName != config.DefaultCoordinator {
+		t.Errorf("agent.DefaultCoordinatorName = %q, config.DefaultCoordinator = %q — the mirrors must be kept equal",
+			agent.DefaultCoordinatorName, config.DefaultCoordinator)
+	}
+	if agent.DefaultWorkerName != config.DefaultWorker {
+		t.Errorf("agent.DefaultWorkerName = %q, config.DefaultWorker = %q — the mirrors must be kept equal",
+			agent.DefaultWorkerName, config.DefaultWorker)
+	}
+}
+
 // The v0.3.0 -> v0.4.0 upgrade regression (mg-bc47), `pogo install` side. main()
 // resolves role names from config.Load() at startup, which fills a role-key-less
 // [agents] with the live Default* consts. `pogo install` must pin the frozen

@@ -1,6 +1,6 @@
 # Customizing pogo
 
-Pogo's defaults — a coding ringmaster (the coordinator, set via `[agents]
+Pogo's defaults — a coding mayor (the coordinator, set via `[agents]
 coordinator`), a pogocat (a disposable worker agent, set via `[agents] worker`)
 that opens a feature branch, and a refinery (the merge queue)
 that merges to `main` — are one specific shape. The pieces underneath
@@ -284,7 +284,7 @@ nudge_on_start = "Read the task and produce a research note for {{.Id}}."
 
 1. `mg claim {{.Id}}` — fail loudly if someone else owns it.
 2. Do the research. Write the note to `$NOTES_DIR/research-notes-{{.Id}}.md`.
-3. Mail the coordinator: `mg mail send ringmaster --from={{.Id}} --subject="note-filed: {{.Id}}" --body="..."`
+3. Mail the coordinator: `mg mail send mayor --from={{.Id}} --subject="note-filed: {{.Id}}" --body="..."`
 4. `mg done {{.Id}} --result='{"note":"research-notes-{{.Id}}.md"}'`
 5. Wait for the coordinator to stop you. **Do not exit on your own.**
 ```

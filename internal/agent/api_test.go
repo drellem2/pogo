@@ -261,6 +261,10 @@ func TestHandleStart_MayorFallbackNudge(t *testing.T) {
 	if err := os.WriteFile(mayorPath, []byte("# mayor\n"), 0644); err != nil {
 		t.Fatalf("write mayor prompt: %v", err)
 	}
+	// Start under a coordinator name that differs from the mayor.md file stem,
+	// so this proves the fallback keys off the coordinator's configured name
+	// rather than coincidentally matching the filename.
+	setCoordinator(t, "ringmaster")
 
 	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {

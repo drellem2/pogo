@@ -3,7 +3,16 @@
 # upgrade-smoke.sh — live v0.3.0 -> v0.4.0 upgrade smoke for the role-rename
 # migration guard. This is the release gate for any pogo version that ships a
 # change to a role-name default (mg-ce47 flipped coordinator mayor->ringmaster
-# and worker polecat->pogocat).
+# and worker polecat->pogocat; mg-2c17 flipped the coordinator half back, so the
+# shipped defaults are mayor/pogocat today).
+#
+# NOTE on what still diverges. The guard is only observable where the SHIPPED
+# default differs from the FROZEN legacy name it pins. Since mg-2c17 the
+# coordinator default is "mayor" — the same string the guard pins — so the
+# coordinator assertions below no longer distinguish a pinned install from a
+# fresh one. The WORKER (legacy "polecat", shipped "pogocat") still does, and it
+# is what gives Phases A/B/C their teeth. The coordinator assertions are kept as
+# cheap regression cover, not as the divergence proof.
 #
 # The guard (internal/config/migrate.go) pins the frozen legacy role names into
 # an existing install's config.toml so the flip only reaches fresh installs. The
@@ -263,8 +272,11 @@ fi
 #
 # The mirror image of Phase A: a machine with no config.toml and no stamped
 # prompts is a FRESH install and is meant to adopt the new defaults. If this
-# phase passed with mayor/polecat the guard would be pinning everywhere and the
-# flip would be dead code.
+# phase passed with the frozen legacy names throughout, the guard would be
+# pinning everywhere and the flip would be dead code. Since mg-2c17 the
+# coordinator default and the pinned legacy name are both "mayor", so the WORKER
+# ("pogocat" fresh vs "polecat" pinned) is the assertion that carries that proof
+# — see C4 against A6.
 #
 # It also proves the flip moves DISPLAY prose only. Under the new defaults the
 # worker is called a "pogocat" in prose while every load-bearing identifier
@@ -282,20 +294,23 @@ OUT_C="$(in_sandbox "$SB_C" "$PORT_C" "$BIN_DIR/pogo" install)"
 printf '%s\n' "$OUT_C" | sed 's/^/    | /'
 kill_daemon_on "$PORT_C"
 
-expect_contains "C1 fresh install resolves coordinator to 'ringmaster'" "$OUT_C" "pogo agent start ringmaster"
-expect_absent   "C2 fresh install never names 'mayor'"                  "$OUT_C" "mayor"
+expect_contains "C1 fresh install resolves coordinator to 'mayor'"      "$OUT_C" "pogo agent start mayor"
+expect_absent   "C2 fresh install never names 'ringmaster'"             "$OUT_C" "ringmaster"
 
-PROSE_C="$(in_sandbox "$SB_C" "$PORT_C" "$BIN_DIR/pogo" agent prompt show ringmaster)"
-expect_contains "C3 fresh prose names the coordinator 'ringmaster'"     "$PROSE_C" "You are the ringmaster —"
+PROSE_C="$(in_sandbox "$SB_C" "$PORT_C" "$BIN_DIR/pogo" agent prompt show mayor)"
+expect_contains "C3 fresh prose names the coordinator 'mayor'"          "$PROSE_C" "You are the mayor —"
 expect_contains "C4 fresh prose names the worker 'pogocat'"             "$PROSE_C" "spawn pogocats (disposable worker agents)"
 
 # --- frozen worker identifiers, observed on the live binary under the NEW defaults
 
 # The coordinator prompt FILE is always mayor.md; only the agent NAME it starts
 # under follows [agents] coordinator (mechanism vs policy, prompt.go ListPrompts).
+# With the mg-2c17 default the name and the stem coincide, so these two say less
+# than they did; the filename-does-not-follow-the-name property is proved against
+# a genuinely renamed coordinator by TestSynthesizePromptResolvesConfiguredCoordinator.
 LS_C="$(ls "$SB_C/state/agents")"
 expect_contains "C5 coordinator prompt file stays mayor.md"             "$LS_C" "mayor.md"
-expect_absent   "C6 no ringmaster.md — the filename does not follow the name" "$LS_C" "ringmaster.md"
+expect_absent   "C6 no ringmaster.md left behind by the mg-ce47 flip"   "$LS_C" "ringmaster.md"
 
 LS_TMPL_C="$(ls "$SB_C/state/agents/templates")"
 expect_contains "C7 worker template stays templates/polecat.md"         "$LS_TMPL_C" "polecat.md"

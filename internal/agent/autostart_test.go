@@ -25,6 +25,13 @@ func TestAutoStartAgents_StartsOnlyFlaggedPrompts(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 
+	// Pin a coordinator name that differs from the mayor.md file stem, so the
+	// "registered under the display name, not the file stem" assertion below
+	// keeps discriminating no matter what the shipped default happens to be.
+	// Under the mg-2c17 default ("mayor") the two coincide, and asserting on
+	// the default alone would pass even if the code keyed off the stem.
+	setCoordinator(t, "ringmaster")
+
 	if err := InitPromptDirs(); err != nil {
 		t.Fatalf("InitPromptDirs: %v", err)
 	}
@@ -53,7 +60,7 @@ func TestAutoStartAgents_StartsOnlyFlaggedPrompts(t *testing.T) {
 	}
 
 	// The top-level mayor.md prompt is registered under the coordinator's
-	// display name (default "ringmaster" post-flip), not the file stem.
+	// display name (pinned to "ringmaster" above), not the file stem.
 	if got["ringmaster"] != AutoStartStatusStarted {
 		t.Errorf("coordinator status = %q, want %q (results=%v)", got["ringmaster"], AutoStartStatusStarted, results)
 	}
@@ -86,6 +93,7 @@ func TestAutoStartAgents_StartsOnlyFlaggedPrompts(t *testing.T) {
 func TestAutoStartAgents_Idempotent(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
+	setCoordinator(t, "ringmaster") // display name ≠ file stem; see the test above
 
 	if err := InitPromptDirs(); err != nil {
 		t.Fatalf("InitPromptDirs: %v", err)
@@ -170,6 +178,7 @@ func TestAutoStartAgents_NoPromptDir(t *testing.T) {
 func TestAutoStartAgents_AlphabeticalOrder(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
+	setCoordinator(t, "ringmaster") // display name ≠ file stem; see the test above
 
 	if err := InitPromptDirs(); err != nil {
 		t.Fatalf("InitPromptDirs: %v", err)
@@ -212,6 +221,7 @@ func TestAutoStartAgents_AlphabeticalOrder(t *testing.T) {
 func TestAutoStartAgents_NoFrontmatterDoesNotStart(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
+	setCoordinator(t, "ringmaster") // display name ≠ file stem; see the test above
 
 	if err := InitPromptDirs(); err != nil {
 		t.Fatalf("InitPromptDirs: %v", err)

@@ -808,7 +808,7 @@ func resolveAgentProvider(id string) *agent.Provider {
 // present (cfg.Source set). The cfg.Source gate mirrors the prompt-refresh /
 // crew-auto-start gate in main(): an unconfigured daemon never auto-starts a
 // coordinator, so arming the watcher would nudge a coordinator (default
-// "ringmaster") this process never launched — spurious nudges and durable-mail
+// "mayor") this process never launched — spurious nudges and durable-mail
 // noise on every isolated/CI/sandbox daemon (gh drellem2/pogo #75). Only watch a
 // coordinator the daemon would actually start.
 func stallWatchArmed(cfg *config.Config) bool {
@@ -1446,7 +1446,7 @@ Flags:
 	// Gate arming on cfg.Source, exactly as prompt refresh and crew auto-start
 	// are below (see the cfg.Source == "" branch): an unconfigured daemon never
 	// auto-starts a coordinator, so arming the watcher would nudge a coordinator
-	// (default "ringmaster") that this process never launched — spurious nudges
+	// (default "mayor") that this process never launched — spurious nudges
 	// and durable-mail noise on every isolated/CI/sandbox daemon (gh drellem2/pogo
 	// #75). Only watch a coordinator the daemon would actually start.
 	var stallWatcher *stallwatch.Watcher
