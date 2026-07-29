@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os/exec"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -131,7 +132,9 @@ func newDriftDetector() *driftDetector {
 // record adds one ready-gate outcome under key and, on a miss, evaluates
 // whether the windowed miss rate has crossed the threshold. If it has — and the
 // key is not within its dedup cooldown — it fires meta's alert. The alert sink
-// is invoked outside the lock (it does I/O: an event append and a mail send).
+// is invoked outside the lock (it does I/O: an event append and a mail send),
+// but is READ under it, so StubDriftSinkForTesting's swap cannot race a
+// concurrent recorder (see the note there).
 func (d *driftDetector) record(key string, missed bool, meta driftMeta) {
 	now := d.now()
 
@@ -172,10 +175,11 @@ func (d *driftDetector) record(key string, missed bool, meta driftMeta) {
 			}
 		}
 	}
+	sink := d.alert
 	d.mu.Unlock()
 
 	if fire != nil {
-		d.alert(*fire)
+		sink(*fire)
 	}
 }
 
@@ -270,5 +274,86 @@ func mailDriftAlert(a DriftAlert) {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		log.Printf("sentinel-drift: mail to %s failed: %v: %s",
 			coordinator, err, strings.TrimSpace(string(out)))
+	}
+}
+
+// StubDriftSinkForTesting replaces the process-global detector's alert sink with
+// one that swallows alerts, and returns a func restoring the previous sink.
+// Intended for TestMain in any package whose tests drive a REAL ready gate.
+//
+// Why this exists as an exported seam (mg-54f8). The record helpers above are
+// called from production code in internal/cursor and internal/claude, so the
+// tests that drive those hook loops — internal/{cursor,claude}/trust_hook_race_test.go
+// (mg-8792 / pogo#91) and this package's own nudge-timeout tests — feed real
+// misses into the process-global detector. When a key's windowed miss fraction
+// crosses driftThreshold, defaultDriftAlert MAILS THE COORDINATOR. Nothing about
+// a `go test` run makes that mail wrong-by-construction from the sink's point of
+// view; it is a real threshold crossing, and the blast radius is the fleet rather
+// than the package.
+//
+// Before this seam existed the suites were safe only ARITHMETICALLY: the cursor
+// trust-dialog key ran one miss against three confirmations (0.25, threshold
+// 0.5) and this package's initial-nudge key ran three misses against
+// driftMinSamples of 4 — safe by ONE test, and `-count=2` accumulates in the
+// same process because the detector is a process-global. One more deadline-arm
+// fixture on either side mails the fleet coordinator from a unit test. A stub
+// installed before m.Run makes that structurally impossible instead of
+// unlikely.
+//
+// The swap is written under the detector's mutex and record() reads the sink
+// under the same mutex, so this cannot become the mg-d578 defect — a test-only
+// global written while a watcher goroutine from a previous test is still
+// recording. TestMain installs it once before any test runs and restores after
+// m.Run, so in practice there is no concurrent write at all; the locking is
+// there so a per-test caller is safe too.
+//
+// Assertions about alert CONTENT belong on a scoped detector, not on this stub —
+// see sentineldrift_test.go, which swaps readyDrift wholesale for one with a
+// fake clock and a capturing sink.
+func StubDriftSinkForTesting() (restore func()) {
+	return readyDrift.setAlert(func(a DriftAlert) {
+		// Not silent: a suite that crosses the threshold has said something
+		// about its own fixtures, and this is the only trace of it. It goes
+		// nowhere near the coordinator or the durable spine.
+		log.Printf("sentinel-drift: alert suppressed by the test stub "+
+			"(provider=%s gate=%s missed=%d/%d)", a.Provider, a.Gate, a.Missed, a.Total)
+	})
+}
+
+// DriftSinkIsProductionForTesting reports whether the process-global detector
+// would run defaultDriftAlert — the sink that emits sentinel_drift and mails the
+// coordinator.
+//
+// This is what lets each provider package assert its own isolation WITHOUT
+// tripping the threshold to find out. A control that proved the point by
+// recording four misses and checking nothing was mailed would, on the day
+// TestMain's install got dropped, send exactly the mail it exists to prevent.
+// Asking about the sink costs nothing and is safe when the answer is bad.
+//
+// The comparison is on code pointers, which reflect documents as not necessarily
+// unique — the linker may merge identical functions. That can only ever make this
+// over-report (a different-but-identical sink reading as production), never
+// under-report: the same top-level func always yields the same pointer, so an
+// actually-installed defaultDriftAlert cannot slip past. Over-reporting fails a
+// control loudly; under-reporting would be the silent version, and this predicate
+// exists to not be silent.
+func DriftSinkIsProductionForTesting() bool {
+	readyDrift.mu.Lock()
+	defer readyDrift.mu.Unlock()
+	return reflect.ValueOf(readyDrift.alert).Pointer() ==
+		reflect.ValueOf(defaultDriftAlert).Pointer()
+}
+
+// setAlert swaps the detector's alert sink and returns a restore func.
+func (d *driftDetector) setAlert(sink func(DriftAlert)) (restore func()) {
+	d.mu.Lock()
+	prev := d.alert
+	d.alert = sink
+	d.mu.Unlock()
+
+	return func() {
+		d.mu.Lock()
+		d.alert = prev
+		d.mu.Unlock()
 	}
 }
