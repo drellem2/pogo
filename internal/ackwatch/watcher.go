@@ -241,6 +241,37 @@ func (w *Watcher) sample(now time.Time) {
 		w.lastPrint = ""
 		w.firstSeen = nil
 		w.mu.Unlock()
+
+		// A control that correctly declined to fire must SAY so, once, with the
+		// circumstances — otherwise a silent correct outcome and a control that
+		// is not running are the same observation, and the next editor removes
+		// this package as dead weight (mg-ddf7).
+		//
+		// That is not hypothetical here. On the 2026-07-29 storm night the right
+		// answer was silence and the detector would have produced it; the only
+		// evidence the design worked is that two agents happened to notice the
+		// burst and reason about it, which is not a property of the system. The
+		// counts are what make the line worth writing: "eligible 3 of 41" and
+		// "eligible 41 of 41" are both no-findings, and only one of them is a
+		// clean bill of health.
+		//
+		// It is emitted on EVERY clear sample rather than only on transitions.
+		// Interval is coarse (30m), the event is one line, and a transition-only
+		// emit would go quiet during exactly the long calm stretch in which a
+		// reader most needs to know the control is still alive — reproducing the
+		// bug one level up.
+		w.emit(events.Event{
+			EventType: "ack_watch_clear",
+			Agent:     "pogod",
+			Details: map[string]any{
+				"scanned":               rep.Scanned,
+				"eligible":              rep.Eligible,
+				"skipped_fresh":         rep.SkippedFresh,
+				"skipped_few_fires":     rep.SkippedFewFires,
+				"skipped_not_recurring": rep.SkippedNotRecurring,
+				"skipped_no_peers":      rep.SkippedNoPeers,
+			},
+		})
 		return
 	}
 

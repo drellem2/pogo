@@ -692,6 +692,28 @@ Emitted rather than staying silent for the reason this whole package exists: a d
 {"schema_version":1,"timestamp":"2026-07-29T03:05:00.000000000Z","event_type":"ack_watch_suppressed","agent":"pogod","details":{"reason":"pogod restart 4m0s ago — counters are not representative until 30m0s has elapsed","scanned":6}}
 ```
 
+#### `ack_watch_clear`
+
+The deficit detector ran, evaluated everything it was able to, and found nothing to report (mg-ddf7). Mail-silent, log-loud: **when a control correctly declines to fire, it says so once, with the circumstances.**
+
+It exists because a silent correct outcome and a control that is not running are the **same observation**. On the 2026-07-29 storm night — 7 polecats against a guideline of 3–5, 15–16 agents firing per hour — the right answer was silence, and this detector would have produced it; nothing anywhere would have recorded that it considered the burst and declined. The only evidence the design worked was that two agents happened to notice the burst and reason about it, which is not a property of the system. At the time of writing this fleet's 60 MB event log contained **zero** `ack_watch_*` events of any kind, and there was no way to tell that from a fleet that had simply been healthy.
+
+The coverage counts are what make the line worth writing, and why they are not optional: `eligible 3` of `scanned 41` and `eligible 41` of `scanned 41` are both no-findings, and only the second is a clean bill of health. Read the skip reasons as **coverage, not health** — an unjudged schedule is unjudged, not well.
+
+Emitted on **every** clear sample rather than only on transitions. `interval` is coarse (30m by default), the event is one line, and a transition-only emit would go quiet during exactly the long calm in which a reader most needs to know the control is still alive — reproducing this package's own bug one level up. Distinct from `ack_watch_suppressed` on purpose: "we declined to look" and "we looked and found nothing" are the two observations this package exists to keep apart.
+
+- **`details` fields:**
+  - `scanned` (int, required): schedules offered to the detector
+  - `eligible` (int, required): how many were actually judged
+  - `skipped_fresh` (int, required): counter reset (registration or re-registration) too recently to describe anything
+  - `skipped_few_fires` (int, required): under `min_fires` — a handful of fires is not a sample. This is the gate that silences a storm of freshly-spawned polecats, and it does so by fire count rather than by understanding the mechanism
+  - `skipped_not_recurring` (int, required): one-shot or unparseable cron, so no rate is well-defined
+  - `skipped_no_peers` (int, required): nothing comparable to compare against, or a cohort in which nobody acks. **Unjudged, not healthy** — and note that an agent alone on its cadence (the mayor, on 30m) is permanently in this bucket
+
+```json
+{"schema_version":1,"timestamp":"2026-07-29T22:30:00.000000000Z","event_type":"ack_watch_clear","agent":"pogod","details":{"scanned":41,"eligible":3,"skipped_fresh":6,"skipped_few_fires":29,"skipped_not_recurring":1,"skipped_no_peers":2}}
+```
+
 #### `ack_watch_error`
 
 The deficit detector could not READ the scheduler state, so it evaluated nothing this sample. Emitted instead of `ack_watch_fired`, for the same reason `gh_teardown_watch_error` is: an unreadable source and a clean scan otherwise render identically, and conflating them is how a detector goes quietly blind.
