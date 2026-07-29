@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"time"
 
@@ -85,6 +86,16 @@ func runGitGCSweep(reg *agent.Registry, cfg config.GitGCConfig) {
 			LivePolecats: live,
 			Tickets:      tickets,
 			PolecatsDir:  polecatsDir,
+			// One line per ACTION, not just the counts below. The sweep
+			// already assembles path, owner, branch and reason for every
+			// decision and used to throw all of it away — so a removal in a
+			// multi-megabyte log was a bare number, and "did the GC take my
+			// worktree, and why" was unanswerable after the fact for any past
+			// incident (gh #94). Only actions log: a keep-because-live line
+			// per polecat per tick would be pure noise, and the two decisions
+			// worth reading — something was destroyed, something dirty was
+			// preserved — are exactly the ones the sweep emits.
+			Logf: gitGCLogf(repo),
 		})
 		if err != nil {
 			log.Printf("pogod: git GC sweep of %s failed: %v", repo, err)
@@ -97,6 +108,15 @@ func runGitGCSweep(reg *agent.Registry, cfg config.GitGCConfig) {
 				log.Printf("pogod: git GC %s error: %s", repo, e)
 			}
 		}
+	}
+}
+
+// gitGCLogf returns the per-action logger for one repo's sweep, tagging every
+// line with the repo so a multi-repo sweep stays readable and greppable
+// alongside the summary line runGitGCSweep already emits.
+func gitGCLogf(repo string) func(string, ...any) {
+	return func(format string, args ...any) {
+		log.Printf("pogod: git GC %s — %s", repo, fmt.Sprintf(format, args...))
 	}
 }
 

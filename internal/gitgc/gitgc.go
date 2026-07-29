@@ -85,6 +85,42 @@ func BranchSuffix(branch string) string {
 	return strings.TrimPrefix(branch, BranchPrefix)
 }
 
+// PolecatNameForWorktree returns the name of the polecat that OWNS a worktree
+// — the only fact a GC sweep may use to decide whether that worktree is in
+// use. It is the path's basename, because a polecat's worktree is created at
+// `<polecats dir>/<name>` at spawn time (internal/agent/api.go) and nothing
+// ever moves it.
+//
+// # Why the path and not the branch (gh #94, mg-dd92)
+//
+// The sweep used to read liveness off `BranchSuffix(wt.Branch)`: the polecat
+// name embedded in the branch CHECKED OUT INSIDE the worktree. Those two
+// strings agree for a polecat that stays on its own branch and disagree the
+// moment one does not — and checking out a foreign branch is something our own
+// shipped review and QA roles are instructed to do. When they disagree, the
+// live polecat is invisible to the liveness gate: its worktree is removed out
+// from under it mid-task, and the freeing of its branch waives the phase-2
+// guard so the ref goes too. The agent keeps running and `pogo agent list`
+// keeps reporting it healthy; the work survives only if the commit is still
+// loose in the shared object store.
+//
+// The branch is a fact about what the polecat is WORKING ON. The path is a
+// fact about WHOSE TREE THIS IS. Only the second one answers "may I delete
+// this directory", so only the second one is consulted here — the branch is
+// deliberately not retained as a fallback, because an OR would re-admit
+// exactly the signal that made a live tree look dead.
+//
+// The inverse failure is real too and is not traded away: a polecat that has
+// exited is not in the live set under any key, so its tree is still reaped on
+// the next sweep. See TestSweepKeepsLivePolecatOnForeignBranch, whose control
+// is a normal exit collecting as it always did.
+func PolecatNameForWorktree(path string) string {
+	if path == "" {
+		return ""
+	}
+	return filepath.Base(filepath.Clean(path))
+}
+
 // Worktree is one entry of `git worktree list`.
 type Worktree struct {
 	Path     string // absolute path of the worktree directory
