@@ -355,3 +355,129 @@ func modTime(t *testing.T, path string) time.Time {
 	}
 	return fi.ModTime()
 }
+
+// TestReportedAgeAcrossCannotTellShapes pins the number an operator acts on,
+// across every shape that makes `git status` fail.
+//
+// Nothing held these before. newestWrite's doc made a positive per-shape claim
+// and no test reached it — a comment asserting behaviour nothing exercises is a
+// mild version of what this whole ticket is about. They matter more since the
+// veto was withdrawn: the age is no longer a second layer under a guard, it is
+// the ONLY signal about a pin that nothing will ever clear automatically, so a
+// wrong number here is a dead tree left pinned or a live one cleared.
+//
+// The pointer-damage row is the one with history. While .git was counted in the
+// walk it reported `untouched 0s` for a tree abandoned for a month, because
+// corrupting the pointer writes a file inside the tree — wrong in the direction
+// that discourages reclamation, on the shape gh #97 was reproduced with.
+func TestReportedAgeAcrossCannotTellShapes(t *testing.T) {
+	const month = 30 * 24 * time.Hour
+	for _, tc := range []struct {
+		name      string
+		damage    func(t *testing.T, wtPath string)
+		wantInMsg string
+		rootPerm  bool // damage makes the root unreadable; restore before asserting
+	}{
+		{
+			name:      "damaged-git-pointer",
+			damage:    func(t *testing.T, wt string) { damageGitPointer(t, wt) },
+			wantInMsg: "untouched 30 days",
+		},
+		{
+			name: "eacces-on-dotgit",
+			damage: func(t *testing.T, wt string) {
+				gitFile := filepath.Join(wt, ".git")
+				if err := os.Chmod(gitFile, 0o000); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { os.Chmod(gitFile, 0o644) })
+				if _, _, err := WorktreeDirty(wt); err == nil {
+					t.Skip("filesystem does not enforce file permissions here")
+				}
+			},
+			// chmod moves ctime, not mtime, so this shape reads correctly
+			// whether or not .git is counted. It is the control that shows the
+			// pointer-damage row is about the WRITE, not about permissions.
+			wantInMsg: "untouched 30 days",
+		},
+		{
+			name: "truncated-index",
+			damage: func(t *testing.T, wt string) {
+				// A linked worktree's index lives in the ADMIN dir named by the
+				// .git pointer, not in the worktree — which is why this shape
+				// reads cold: the damage never touches the tree at all.
+				b, err := os.ReadFile(filepath.Join(wt, ".git"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				var gitdir string
+				if _, err := fmt.Sscanf(string(b), "gitdir: %s", &gitdir); err != nil {
+					t.Fatalf("parsing .git pointer %q: %v", b, err)
+				}
+				if err := os.WriteFile(filepath.Join(gitdir, "index"), []byte("GARBAGE"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				if _, _, err := WorktreeDirty(wt); err == nil {
+					t.Skip("a truncated index did not make git status fail here")
+				}
+			},
+			wantInMsg: "untouched 30 days",
+		},
+		{
+			name: "eacces-on-worktree-root",
+			damage: func(t *testing.T, wt string) {
+				damageGitPointer(t, wt)
+				if err := os.Chmod(wt, 0o000); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { os.Chmod(wt, 0o755) })
+				if _, err := os.ReadDir(wt); err == nil {
+					t.Skip("filesystem does not enforce directory permissions here")
+				}
+			},
+			// The tree cannot be listed, so there is no age to report — and the
+			// line must SAY that rather than omit it, which would read as fresh.
+			wantInMsg: "age unknown",
+			rootPerm:  true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if os.Geteuid() == 0 {
+				t.Skip("running as root: chmod cannot restrict access")
+			}
+			r := newTestRepo(t)
+			r.branch("polecat-shape")
+			wtPath := r.worktreeOwnedBy("shape", "polecat-shape")
+			precious := dirty(t, wtPath, "irreplaceable.go", "package wip\n")
+
+			// Age the CONTENTS first, so every shape starts from a tree that has
+			// genuinely been cold for a month; then break it.
+			ageTree(t, wtPath, month)
+			tc.damage(t, wtPath)
+
+			res, err := Sweep(Options{
+				Repo:         r.dir,
+				TargetBranch: "main",
+				Tickets:      TicketIndex{"mg-shape": TicketArchived},
+			})
+			if err != nil {
+				t.Fatalf("Sweep: %v", err)
+			}
+			if tc.rootPerm {
+				os.Chmod(wtPath, 0o755)
+			}
+
+			kept := findWorktreeAction(res.WorktreesKept, wtPath)
+			if kept == nil {
+				t.Fatalf("every cannot-tell shape must be KEPT; removed=%+v", res.WorktreesRemoved)
+			}
+			if !strings.Contains(kept.Reason, tc.wantInMsg) {
+				t.Errorf("reported age is wrong for this shape:\n  want substring: %s\n  got reason:     %s",
+					tc.wantInMsg, kept.Reason)
+			}
+			if _, serr := os.Stat(precious); serr != nil {
+				t.Fatalf("THE WORK WAS DESTROYED: %v", serr)
+			}
+		})
+	}
+}

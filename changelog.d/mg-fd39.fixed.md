@@ -40,7 +40,15 @@
   `pkg/deep/work.go` leaves the root untouched, and an operator told "untouched
   30 days" about that tree would clear the pin on the strength of it. Where the
   tree cannot be listed at all, the line says the age is unknown rather than
-  omitting it.
+  omitting it, which would read as fresh.
+
+  git's own bookkeeping is excluded from that walk, because the damage event can
+  otherwise land in the number it perturbs: corrupting a worktree's `.git`
+  pointer writes a file *inside* the tree, so a month-cold worktree reported
+  `untouched 0s` — wrong in the direction that discourages reclamation, on the
+  very shape gh #97 was reproduced with. Measured across all four ways `git
+  status` can fail, excluding it is right on that row and identical on the other
+  three.
 
   **The cost is accepted deliberately: more pins, and they never self-clear.** A
   pinned worktree pins its branch too. A visible pin a human can clear is a
