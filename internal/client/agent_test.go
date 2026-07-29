@@ -185,3 +185,71 @@ func TestCompleteMGWorkItem_BuildsMGDoneCommand(t *testing.T) {
 		t.Errorf("command (no result) = %v, want %v", got, want)
 	}
 }
+
+// fakeMGShow makes `mg show <id> --json` print out, or fail when out is empty.
+func fakeMGShow(t *testing.T, out string) {
+	t.Helper()
+	old := execCommand
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		if out == "" {
+			return exec.Command("false")
+		}
+		return exec.Command("printf", "%s", out)
+	}
+	t.Cleanup(func() { execCommand = old })
+}
+
+// TestMGWorkItemDeclaresPostMergeWork reads the marker that tells pogod a merge
+// is a STEP rather than completion (mg-d86e). The declaring fixture is the tag
+// list mg-ca3c would have carried: a real release ticket whose merge was
+// treated as completion, so the tag it still owed was never pushed.
+func TestMGWorkItemDeclaresPostMergeWork(t *testing.T) {
+	cases := []struct {
+		name string
+		tags string
+		want bool
+	}{
+		{"declared", `["pogo","release","post-merge-work"]`, true},
+		{"undeclared", `["pogo","bug"]`, false},
+		{"no tags at all", `[]`, false},
+		// Case and stray whitespace resolve TOWARD the declaration: being
+		// generous can at worst leave an item for its polecat to complete,
+		// while being stingy truncates the ticket silently.
+		{"case and space folded", `["  Post-Merge-Work "]`, true},
+		// The neighbouring declaration must not be mistaken for this one:
+		// declares-remainder says something ELSE must carry the work forward.
+		{"declares-remainder is a different property", `["declares-remainder"]`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fakeMGShow(t, `{"id":"mg-ca3c","status":"claimed","tags":`+tc.tags+`}`)
+			got, err := MGWorkItemDeclaresPostMergeWork("mg-ca3c")
+			if err != nil {
+				t.Fatalf("MGWorkItemDeclaresPostMergeWork: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("tags %s -> %v, want %v", tc.tags, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestMGWorkItemDeclaresPostMergeWork_ErrorsAreNotFalse keeps "I could not read
+// the item" distinct from "the item declares nothing". Collapsing them would
+// hand pogod a confident no on exactly the lookups that failed, which is the
+// mg-d86e failure shape one layer down.
+func TestMGWorkItemDeclaresPostMergeWork_ErrorsAreNotFalse(t *testing.T) {
+	fakeMGShow(t, "")
+	if _, err := MGWorkItemDeclaresPostMergeWork("mg-ca3c"); err == nil {
+		t.Error("a failing mg show must return an error, not a confident false")
+	}
+
+	fakeMGShow(t, "not json at all")
+	if _, err := MGWorkItemDeclaresPostMergeWork("mg-ca3c"); err == nil {
+		t.Error("unparseable output must return an error, not a confident false")
+	}
+
+	if _, err := MGWorkItemDeclaresPostMergeWork(""); err == nil {
+		t.Error("an empty work-item id must be an error")
+	}
+}

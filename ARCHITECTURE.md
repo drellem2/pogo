@@ -289,6 +289,18 @@ loop (woken by submit, or every poll_interval as backstop):
 
 This is **derived, never requested**. Three work items (mg-74ee, mg-6579, mg-7746) merged, were marked done, and left no PR because the deferral depended on a caller passing `--defer-done`; the classification now lives where the target ref is known. `--defer-done` remains for the other direction — forcing deferral on a default-branch merge.
 
+**When a merge is *not* completion (the item says so).** The two mechanisms above both depend on the **submitter** knowing the merge is not the end: the flag is passed at submit time, the target ref is chosen at submit time. A release ticket defeats both. It merges a version bump to the default branch — correctly, with no flag — and everything it actually promises (tag, artifacts, verification) happens *after*. On 2026-07-29 mg-ca3c (pogo v0.7.0) and mg-9f17 (macguffin v0.3.0) each merged, were marked done, and had their polecats stopped before the tag step. Both releases read as complete from `mg show`, the result sidecar, the `MERGED` mail, and CI; `git describe` still said `v0.6.0`.
+
+The refinery cannot know whether a merge completes a ticket — **the ticket knows**. A work item tagged `post-merge-work` declares that merging it is a *step*, and pogod's `OnMerged` hook reads that tag (`mg show <id> --json`) before acting. A declaring item takes the same lane as `--defer-done`: merge, mail, item stays **claimed**, polecat keeps running, bounded backstop armed. The declaration is set by the **filer**, on the item, so a polecat that never learns the flag exists still cannot be truncated:
+
+```bash
+mg new --title="Cut v0.8.0" --tags=release,post-merge-work ...
+mg edit mg-XXXX --add-tags=post-merge-work    # on an item that already exists
+mg list --tag=post-merge-work                 # every outstanding one
+```
+
+An item pogod **cannot read** takes the same lane as a declaring one. "I could not read the ticket" is not evidence that the merge completed it, and the cost of being wrong that way is a truncated ticket nothing catches; the cost of being wrong the other way is one backstop window (mg-d86e). This composes with macguffin's `declares-remainder` rather than duplicating it: that tag says something *else* must carry the work forward, this one says *this* item is not finished yet.
+
 **Where a coordinator reads the classification after the fact.** `pr_flow` lives on the **merge request** (`pogo refinery show <id> --json`), and only there. The result sidecar records `target`, and it is written on the completion path only — a PR-flow merge returns before the sidecar writer, because pogod does not run `mg done` on that path at all. So a sidecar written by the refinery is by construction a default-branch completion, and there is no `pr_flow` key in it to read. This paragraph previously claimed the sidecar carried `pr_flow` "when true"; it never did (mg-c8d5).
 
 **When a deferred polecat dies instead of finishing.** A polecat left running to end its own lifecycle can die between the merge and its `mg done` — and a process that exits on its own never goes through `Registry.Stop`, which is where a stopped polecat's work-item claim is released (mg-fb13). The `OnExit` hook therefore does not merely disarm the backstop: it asks whether the item is still in `claimed/`, releases it if so, and mails the mayor that a merged branch is short a PR. An exit with no claim held is a completion and stays silent, so the ordinary mayor-initiated stop and the fleet drain do not page anyone. This was a survivable gap while auto-stop-at-merge was the norm; PR flow is the default path now, so the reachable surface grew (mg-c8d5).

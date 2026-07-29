@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -38,14 +39,20 @@ func gitRun(t *testing.T, dir string, args ...string) {
 
 // prFlowFixture is a bare origin with a default branch, optionally an
 // integration branch carved off it, and a polecat branch holding one commit.
+//
+// workItem is the fixture's work-item id, carried so a suite can build the
+// scenario around a REAL item from the audit trail rather than around this
+// file's own (mg-d86e uses mg-ca3c and mg-9f17, the two releases that were
+// reported complete with no tag).
 type prFlowFixture struct {
 	origin        string // what a polecat passes as --repo
 	defaultBranch string
 	integration   string
 	polecatBranch string
+	workItem      string
 }
 
-func newPRFlowFixture(t *testing.T, defaultBranch, integration string) prFlowFixture {
+func newPRFlowFixture(t *testing.T, workItem, defaultBranch, integration string) prFlowFixture {
 	t.Helper()
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not found")
@@ -69,17 +76,19 @@ func newPRFlowFixture(t *testing.T, defaultBranch, integration string) prFlowFix
 		base = integration
 	}
 
-	gitRun(t, work, "checkout", "-b", "polecat-mg-7746", "origin/"+base)
+	branch := "polecat-" + workItem
+	gitRun(t, work, "checkout", "-b", branch, "origin/"+base)
 	os.WriteFile(filepath.Join(work, "feature.txt"), []byte("work\n"), 0644)
 	gitRun(t, work, "add", ".")
-	gitRun(t, work, "commit", "-m", "feat: polecat work (mg-7746)")
-	gitRun(t, work, "push", "origin", "polecat-mg-7746")
+	gitRun(t, work, "commit", "-m", "feat: polecat work ("+workItem+")")
+	gitRun(t, work, "push", "origin", branch)
 
 	return prFlowFixture{
 		origin:        origin,
 		defaultBranch: defaultBranch,
 		integration:   integration,
-		polecatBranch: "polecat-mg-7746",
+		polecatBranch: branch,
+		workItem:      workItem,
 	}
 }
 
@@ -89,16 +98,20 @@ type mergeOutcome struct {
 	completedResult string
 	stopped         []string
 	armed           bool
+	postMerge       postMergeVerdict
 }
 
 // runMergeThroughReap submits the fixture's polecat branch at targetRef, runs a
 // real refinery loop until the MR resolves, and reports what reapMergedPolecat
-// did — the exact wiring pogod uses in main.go.
-func runMergeThroughReap(t *testing.T, fx prFlowFixture, targetRef string) (mergeOutcome, *refinery.MergeRequest) {
+// did — the exact wiring pogod uses in main.go, including the work-item probe
+// resolved before the reap (mg-d86e). declares may be nil, which is what pogod
+// does when no probe is configured: nothing is declared and the fast path runs.
+func runMergeThroughReap(t *testing.T, fx prFlowFixture, targetRef string, declares func(string) (bool, error)) (mergeOutcome, *refinery.MergeRequest) {
 	t.Helper()
 
+	bareName := strings.TrimPrefix(fx.workItem, "mg-")
 	reg := &fakeReaper{agents: map[string]*agent.Agent{
-		"7746": {Name: "7746", WorkItemID: "mg-7746", Type: agent.TypePolecat},
+		bareName: {Name: bareName, WorkItemID: fx.workItem, Type: agent.TypePolecat},
 	}}
 	var escalations []string
 	backstop, _ := newTestBackstop(reg, &escalations)
@@ -125,7 +138,9 @@ func runMergeThroughReap(t *testing.T, fx prFlowFixture, targetRef string) (merg
 
 	resolved := make(chan *refinery.MergeRequest, 1)
 	r.SetOnMerged(func(mr *refinery.MergeRequest) {
-		reapMergedPolecat(reg, mr, complete, backstop)
+		postMerge := resolvePostMergeWork(reg, mr, declares)
+		out.postMerge = postMerge
+		reapMergedPolecat(reg, mr, complete, postMerge, backstop)
 		resolved <- mr
 	})
 	failed := make(chan *refinery.MergeRequest, 1)
@@ -135,7 +150,7 @@ func runMergeThroughReap(t *testing.T, fx prFlowFixture, targetRef string) (merg
 		RepoPath:  fx.origin,
 		Branch:    fx.polecatBranch,
 		TargetRef: targetRef,
-		Author:    "mg-7746",
+		Author:    fx.workItem,
 	})
 	if err != nil {
 		t.Fatalf("submit: %v", err)
@@ -150,7 +165,7 @@ func runMergeThroughReap(t *testing.T, fx prFlowFixture, targetRef string) (merg
 	case mr := <-resolved:
 		out.stopped = reg.stopped
 		backstop.mu.Lock()
-		_, out.armed = backstop.timers["7746"]
+		_, out.armed = backstop.timers[bareName]
 		backstop.mu.Unlock()
 		return out, mr
 	case mr := <-failed:
@@ -166,8 +181,8 @@ func runMergeThroughReap(t *testing.T, fx prFlowFixture, targetRef string) (merg
 // is the PR to the default branch, which the polecat has not opened yet. The
 // refinery must NOT mark the item done and must NOT stop the polecat.
 func TestPRFlowMerge_LeavesWorkItemClaimed(t *testing.T) {
-	fx := newPRFlowFixture(t, "main", "daed-101-integration")
-	out, mr := runMergeThroughReap(t, fx, fx.integration)
+	fx := newPRFlowFixture(t, "mg-7746", "main", "daed-101-integration")
+	out, mr := runMergeThroughReap(t, fx, fx.integration, nil)
 
 	if !mr.PRFlow {
 		t.Errorf("MR merged into integration branch %q (default is %q) but PRFlow=false — the refinery cannot tell PR flow from completion",
@@ -189,8 +204,8 @@ func TestPRFlowMerge_LeavesWorkItemClaimed(t *testing.T) {
 // when the merge lands on the repo's default branch there is no PR pending, so
 // the refinery's mg done IS correct completion and must be preserved.
 func TestDefaultBranchMerge_StillMarksDone(t *testing.T) {
-	fx := newPRFlowFixture(t, "main", "")
-	out, mr := runMergeThroughReap(t, fx, "main")
+	fx := newPRFlowFixture(t, "mg-7746", "main", "")
+	out, mr := runMergeThroughReap(t, fx, "main", nil)
 
 	if mr.PRFlow {
 		t.Errorf("merge into the default branch %q was misclassified as PR flow", mr.TargetRef)
@@ -211,8 +226,8 @@ func TestDefaultBranchMerge_StillMarksDone(t *testing.T) {
 // result sidecar, and the refinery omitted both — turning a documented
 // secondary signal into a misleading one.
 func TestDefaultBranchMerge_ResultRecordsTarget(t *testing.T) {
-	fx := newPRFlowFixture(t, "main", "")
-	out, _ := runMergeThroughReap(t, fx, "main")
+	fx := newPRFlowFixture(t, "mg-7746", "main", "")
+	out, _ := runMergeThroughReap(t, fx, "main", nil)
 
 	var result map[string]any
 	if err := json.Unmarshal([]byte(out.completedResult), &result); err != nil {

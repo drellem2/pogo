@@ -142,7 +142,7 @@ func deathWindow(t *testing.T, root, id string, escalations *[]string) (*agent.R
 	reapMergedPolecat(reg, mr, func(string, string) error {
 		t.Error("PR flow: pogod must not run mg done at merge — the polecat owes a PR first")
 		return nil
-	}, backstop)
+	}, postMergeVerdict{}, backstop)
 
 	if got := mgItemStatus(t, root, id); got != "claimed" {
 		t.Fatalf("precondition: %s should still be claimed after a PR-flow merge, got %q", id, got)

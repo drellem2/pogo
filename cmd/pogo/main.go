@@ -3189,6 +3189,17 @@ deferred polecat that never completes.
 --defer-done forces that same deferral for a merge onto the default branch, for
 an author that owns post-merge work anyway.
 
+Both of those depend on the SUBMITTER knowing the merge is not the end. A work
+item can declare it instead, which is what a release ticket needs — it merges a
+version bump to the default branch with no flag, and its tag, artifacts and
+verification all come after:
+
+  mg edit <id> --add-tags=post-merge-work
+
+pogod reads that tag at merge time and takes the same lane: the work item stays
+claimed, the polecat keeps running and calls 'mg done' itself, and the bounded
+backstop still applies. Set it when you FILE the item, not when you submit.
+
 Example:
   pogo refinery submit polecat-a3f --repo=/path/to/repo`,
 		Args: cobra.ExactArgs(1),
