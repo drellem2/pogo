@@ -197,7 +197,18 @@ func scratchStore(t *testing.T, title, body string) string {
 		return string(out)
 	}
 	run("init")
-	created := run("new", "--type=task", "--tags=gh-issue", "--title="+title, "--body="+body)
+	// --no-repo because this fixture carrier is about a gh issue, not about a
+	// checkout: everything the detector reads comes from the `gh:` ref in the
+	// body, never from the item's repo field. Without it, mg resolves the repo
+	// from cwd — which under `go test` is the package directory, and that sits
+	// inside an ephemeral pogo tree for both callers that matter (a polecat's
+	// ~/.pogo/polecats/<id> and the refinery's ~/.pogo/refinery/worktrees/<repo>),
+	// where mg refuses to record a path that would outlive the filing.
+	//
+	// Same root cause as the fix in cmd/pogod/deferreddeath_test.go, and hidden
+	// the same way: this package's `ok` was a cache hit, so the test only ran —
+	// and only failed — once a change invalidated it (mg-8595).
+	created := run("new", "--type=task", "--tags=gh-issue", "--no-repo", "--title="+title, "--body="+body)
 
 	// Take the id from the "Created mg-XXXX:" prefix only — the title of a
 	// replay fixture legitimately contains other mg ids, and a greedy match

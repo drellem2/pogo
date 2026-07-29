@@ -54,7 +54,20 @@ var mgNewID = regexp.MustCompile(`\b(mg-[0-9a-f]+)\b`)
 // the store in the state a polecat mid-flow leaves it in.
 func mgClaimedItem(t *testing.T, root, title string) string {
 	t.Helper()
-	out, err := exec.Command("mg", "--root", root, "new", title).CombinedOutput()
+	// --no-repo because these fixture items are about nothing: they exist to
+	// put the sandbox store into a claimed state. Without it, mg resolves the
+	// repo from the current directory, and `go test` runs with the package
+	// directory as cwd — which is inside an ephemeral pogo tree for every
+	// caller that matters (a polecat's ~/.pogo/polecats/<id>, and the
+	// refinery's ~/.pogo/refinery/worktrees/<repo>), where mg refuses to
+	// record a repo path that will outlive the filing.
+	//
+	// This test therefore could not pass under the refinery at all, and said
+	// so only when Go actually ran it: the merge gate had a CACHED `ok` for
+	// this package, so any change touching internal/refinery (which
+	// cmd/pogod imports) invalidated the cache and surfaced the failure as if
+	// it were new. Found while merging mg-8595.
+	out, err := exec.Command("mg", "--root", root, "new", "--no-repo", title).CombinedOutput()
 	if err != nil {
 		t.Fatalf("mg new: %v: %s", err, out)
 	}
