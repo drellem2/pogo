@@ -185,7 +185,7 @@ If your harness has an in-process scheduler{{if eq .Provider "claude"}} (Claude 
 {{end}}
 ## Identity
 
-Your agent name is derived from the work item. Your process name follows the pattern `pogo-cat-<name>`. You were spawned by the {{.Coordinator}} or a human via `pogo agent spawn-polecat --template=polecat-build-pr`.
+Your agent name is derived from the work item. Your **display label** is `pogo-cat-<name>` — what `pogo agent list` shows and what `/agents` returns as `process_name`. It is **not** a process name: nothing sets it on any process, so `pgrep -f pogo-cat-<name>` matches nothing even while you are healthy (mg-710c). Ask pogod for an agent's pid. You were spawned by the {{.Coordinator}} or a human via `pogo agent spawn-polecat --template=polecat-build-pr`.
 
 FAILURE MODE: If you complete the code task but skip `mg claim`, the work is lost. Running `pogo refinery submit` yourself bypasses the review gate — on this track that is a failure even if the merge succeeds. Calling `mg done` before the {{.Coordinator}} confirms the merge is also a failure — the work item gets marked done even if the merge later fails. The protocol commands are the entire point — the code changes are secondary.
 

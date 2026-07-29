@@ -138,9 +138,10 @@ mg mail send mayor --from={{.Id}} --subject="stuck: {{.Id}}" \
 
 ## Identity
 
-Your agent name is derived from the work item ID. Your process name follows
-the pattern `pogo-cat-<name>`. You were spawned by the mayor via
-`pogo agent spawn-polecat`.
+Your agent name is derived from the work item ID. Your display label follows
+the pattern `pogo-cat-<name>` — what `pogo agent list` shows. It is not a
+process name and `pgrep` will not find it (mg-710c). You were spawned by the
+mayor via `pogo agent spawn-polecat`.
 
 FAILURE MODE: if you produce the note but skip `mg claim` or `mg done`, the
 work is silently lost — `mg list --status=available` will keep showing the

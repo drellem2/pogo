@@ -196,7 +196,7 @@ If your harness has an in-process scheduler{{if eq .Provider "claude"}} (Claude 
 {{end}}
 ## Identity
 
-Your agent name is derived from the work item. Your process name follows the pattern `pogo-cat-<name>`. You were spawned by the {{.Coordinator}} or a human via `pogo agent spawn-polecat --template=polecat-review`.
+Your agent name is derived from the work item. Your **display label** is `pogo-cat-<name>` — what `pogo agent list` shows and what `/agents` returns as `process_name`. It is **not** a process name: nothing sets it on any process, so `pgrep -f pogo-cat-<name>` matches nothing even while you are healthy (mg-710c). Ask pogod for an agent's pid. You were spawned by the {{.Coordinator}} or a human via `pogo agent spawn-polecat --template=polecat-review`.
 
 FAILURE MODE: If you complete the review but skip `mg claim` or the terminal `mg done`, the verdict is lost. Calling `mg done` mid-loop — after a round-1 or round-2 fail — is also a failure: it marks the review complete while the loop is still open. `mg done` fires exactly once, on pass or on the round-3 cap. And never `gh pr review` — same-identity reviews are rejected by GitHub; `gh pr comment` is your only PR channel.
 

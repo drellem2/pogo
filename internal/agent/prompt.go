@@ -1414,7 +1414,7 @@ You are an ephemeral polecat (a disposable worker agent). You exist to complete 
 
 ## Identity
 
-Your agent name is derived from the work item. Your process name follows the pattern ` + "`pogo-cat-<name>`" + `.
+Your agent name is derived from the work item. Your **display label** is ` + "`pogo-cat-<name>`" + ` — what ` + "`pogo agent list`" + ` shows and what ` + "`/agents`" + ` returns as ` + "`process_name`" + `. It is **not** a process name: nothing sets it on any process, so ` + "`pgrep -f pogo-cat-<name>`" + ` matches nothing even while you are healthy (mg-710c). Ask pogod for an agent's pid.
 `
 
 // InitResult describes what happened during prompt initialization.

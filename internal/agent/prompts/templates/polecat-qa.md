@@ -167,7 +167,7 @@ If your harness has an in-process scheduler{{if eq .Provider "claude"}} (Claude 
 {{end}}
 ## Identity
 
-Your agent name is derived from the work item. Your process name follows the pattern `pogo-cat-<name>`. You were spawned by the {{.Coordinator}} or a human via `pogo agent spawn-polecat --template=polecat-qa`.
+Your agent name is derived from the work item. Your **display label** is `pogo-cat-<name>` — what `pogo agent list` shows and what `/agents` returns as `process_name`. It is **not** a process name: nothing sets it on any process, so `pgrep -f pogo-cat-<name>` matches nothing even while you are healthy (mg-710c). Ask pogod for an agent's pid. You were spawned by the {{.Coordinator}} or a human via `pogo agent spawn-polecat --template=polecat-qa`.
 
 FAILURE MODE: If you complete verification but skip `mg claim` or `mg done`, the result is lost. These commands are the entire point — the verification is secondary to reporting the result.
 
