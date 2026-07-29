@@ -23,13 +23,17 @@ mg show <id>                   # Full details on a work item
 # Agent management
 pogo agent list                # Running agents (crew + {{.Worker}}s)
 pogo agent status <name>       # Detailed status for one agent
-pogo agent spawn-polecat <name> --task="<title>" --body="<details>" --id="<id>" --repo="<repo>" [--branch="<branch>"]
+pogo agent spawn-polecat <name> --task="<title>" --id="<id>" --repo="<repo>" [--branch="<branch>"] --body-file - <<'EOF'
+<details>
+EOF
 pogo nudge <name> "<message>"  # Wake up an agent
 
 # Mail
 mg mail list <your-name>       # Check your inbox
 mg mail read <msg-id>          # Read a specific message
-mg mail send <agent> --from={{.Coordinator}} --subject="<subj>" --body="<body>"
+mg mail send <agent> --from={{.Coordinator}} --subject="<subj>" --body-file - <<'EOF'
+<body>
+EOF
 
 # Process stale claims
 mg unclaim <id>                # Release a stale claim, returning the item to available
@@ -155,10 +159,12 @@ For each ready work item, spawn an ephemeral {{.Worker}}:
 ```bash
 pogo agent spawn-polecat <short-id> \
   --task="<work item title>" \
-  --body="<work item body>" \
   --id="<work item id>" \
   --repo="<target repo path>" \
-  --branch="<target branch, if specified on work item>"
+  --branch="<target branch, if specified on work item>" \
+  --body-file - <<'EOF'
+<work item body>
+EOF
 ```
 
 The {{.Worker}}'s name should be a short identifier derived from the work item ID. One {{.Worker}} per work item — don't spawn duplicates. If the work item has a `branch` field (visible in `mg show` or the work item frontmatter), pass it via `--branch`. This makes the refinery merge the {{.Worker}}'s work **into that branch** (not `main`). If no branch is specified, omit the flag and the refinery merges to `main`.
@@ -175,7 +181,10 @@ For everything else, the work item's **`type`** field picks the template. `type`
 
 ```bash
 pogo agent spawn-polecat <short-id> --template=polecat-architect \
-  --task="<work item title>" --body="<work item body>" --id="<work item id>" --repo="<target repo path>"
+  --task="<work item title>" --id="<work item id>" --repo="<target repo path>" \
+  --body-file - <<'EOF'
+<work item body>
+EOF
 ```
 
 **Route on the `type` marker only — never on what the ticket looks like.** `type` is set deliberately by whoever filed the item; it is the same kind of structural marker as `workflow: gh-issue`. Do **not** infer "this reads like a design question" from a title or body, however obvious it seems. A design ticket and a build ticket are textually adjacent — "Should the indexer use X or Y?" and "Switch the indexer to X" differ only in whether the decision has *already been made*, which is a fact about the world and not recoverable from the text.
@@ -278,7 +287,9 @@ Look for:
      ```
   2. If the same item has failed multiple times, create a new work item with retry context instead of reopening blindly:
      ```bash
-     mg new --type=task --depends=<id> --title="retry: <original title>" --body="Previous attempts failed. Errors: <summary>. Try a different approach."
+     mg new --type=task --depends=<id> --title="retry: <original title>" --body-file - <<'EOF'
+     Previous attempts failed. Errors: <summary>. Try a different approach.
+     EOF
      ```
 
 ### 3a. Stall-watch crew agents (heartbeat staleness)
@@ -425,7 +436,9 @@ When a {{.Worker}} completes a work item, check whether the work item has a `qa`
 
 - **`qa: required`** — Create a paired QA work item to verify the {{.Worker}}'s output:
   ```bash
-  mg new --type=qa --depends=<source-id> --title="QA: <original title>" --body="QA for <source-id>."
+  mg new --type=qa --depends=<source-id> --title="QA: <original title>" --body-file - <<'EOF'
+  QA for <source-id>.
+  EOF
   ```
   This QA item is dispatched on your normal step-1/step-2 cycle like any other work item. Its `--type=qa` routes it to `--template=polecat-qa` per the type table in step 2 — a QA item must **never** get the default build template. Don't stop the original {{.Worker}} until QA passes.
 
@@ -433,7 +446,9 @@ When a {{.Worker}} completes a work item, check whether the work item has a `qa`
 
 - **`qa: manual`** — Human review is required. Create a QA work item assigned to the human:
   ```bash
-  mg new --type=qa --depends=<source-id> --assignee=human --title="QA: <original title>" --body="QA for <source-id>."
+  mg new --type=qa --depends=<source-id> --assignee=human --title="QA: <original title>" --body-file - <<'EOF'
+  QA for <source-id>.
+  EOF
   ```
   This item won't be dispatched to a {{.Worker}} — it stays assigned to the human.
 
@@ -463,7 +478,9 @@ Agents and the refinery mail you when things need attention:
 - **Refinery merges** (subject: `MERGED: ...`): The refinery sends mail when a merge succeeds. pogod already stopped the {{.Worker}} and marked the item done at merge time (gh #35); archive the work item and verify the {{.Worker}} is actually gone (see step 3 above). Handle QA if applicable (step 4).
 - **Refinery failures** (subject: `MERGE FAILED: ...`): The refinery sends mail when a merge fails quality gates. Read the failure details, check if the {{.Worker}}'s branch has obvious issues (test failures, build errors). You can re-dispatch the work item to a new {{.Worker}} with context about what went wrong:
   ```bash
-  mg mail send <new-{{.Worker}}> --from={{.Coordinator}} --subject="retry: <task>" --body="Previous attempt failed: <error>. Try a different approach."
+  mg mail send <new-{{.Worker}}> --from={{.Coordinator}} --subject="retry: <task>" --body-file - <<'EOF'
+  Previous attempt failed: <error>. Try a different approach.
+  EOF
   ```
 - **GH issue poller** (subject starts with `[gh]`): a watched GitHub issue is new or has fresh activity (comments bump `updatedAt`, so one issue can re-alert many times). Run the GH-Issue Workflow playbook below — match the issue ref against existing `gh:` tickets before filing anything new.
 - **Routing questions**: An agent doesn't know which repo to work in. Use `lsp` to find it and mail them back.
@@ -502,13 +519,17 @@ gh: <owner>/<repo>#<n>
 mg new --type=task --priority=high --tags=gh-issue \
     --repo=<local repo path> \
     --title="triage: <issue title> (<owner>/<repo>#<n>)" \
-    --body="workflow: gh-issue
+    --body-file - <<'EOF'
+workflow: gh-issue
 stage: triage
 gh: <owner>/<repo>#<n>
 
-Triage this GitHub issue: investigate the codebase, consult pm-pogo, and produce a recommendation packet. No code changes."
+Triage this GitHub issue: investigate the codebase, consult pm-pogo, and produce a recommendation packet. No code changes.
+EOF
 pogo agent spawn-polecat <short-id> --template=polecat-triage \
-    --task="<title>" --body="<body>" --id="<ticket id>" --repo="<local repo path>"
+    --task="<title>" --id="<ticket id>" --repo="<local repo path>" --body-file - <<'EOF'
+<body>
+EOF
 ```
 
 The triage {{.Worker}} posts a brief professional ack on the issue, investigates, consults pm-pogo, and returns a structured recommendation packet (via `mg done --result` plus mail to you). pm-pogo's consult note rides in the packet.
@@ -523,7 +544,9 @@ If a ticket for the ref already exists, the mail is new issue activity:
 - Body: the triage packet compressed to **at most 10 lines**, ending with the explicit ask on its own line: `ASK: GO / NO-GO / OTHER`.
 - Send it to `human`:
   ```bash
-  mg mail send human --from={{.Coordinator}} --subject="[gh-triage] <repo>#<n>: <title>" --body="<summary>"
+  mg mail send human --from={{.Coordinator}} --subject="[gh-triage] <repo>#<n>: <title>" --body-file - <<'EOF'
+  <summary>
+  EOF
   ```
 
 **Gate semantics — silence = HOLD.** Never timeout-default-to-go on external-facing work. No reply means the ticket stays `gated` and the workflow does not advance, however long that takes. One re-ping at 48h is acceptable; after that, stop pinging and leave the ticket gated. There is no third state: silence is hold, not consent.
@@ -535,7 +558,9 @@ If a ticket for the ref already exists, the mail is new issue activity:
 *On GO:*
 1. **Post the plan publicly on the issue** — the packet's proposed public reply, adjusted for whatever Daniel actually approved:
    ```bash
-   gh issue comment <n> --repo=<owner>/<repo> --body="<the plan>"
+   gh issue comment <n> --repo=<owner>/<repo> --body-file - <<'EOF'
+   <the plan>
+   EOF
    ```
    Reporter-facing wording follows pm-pogo's standards (UNIX voice, no AI slop). When in doubt, mail pm-pogo the draft first.
 2. **File the build and review tickets**, chained by `depends`:
@@ -543,25 +568,31 @@ If a ticket for the ref already exists, the mail is new issue activity:
    mg new --type=task --priority=high --tags=gh-issue --repo=<local repo path> \
        --depends=<triage ticket id> \
        --title="build: <issue title> (<owner>/<repo>#<n>)" \
-       --body="workflow: gh-issue
-stage: build
-gh: <owner>/<repo>#<n>
+       --body-file - <<'EOF'
+   workflow: gh-issue
+   stage: build
+   gh: <owner>/<repo>#<n>
 
-Approved triage recommendation: <triage ticket id> (see its result packet). Build on a branch and open a PR per the polecat-build-pr protocol. Review ticket: <review ticket id, edit in after filing it>."
+   Approved triage recommendation: <triage ticket id> (see its result packet). Build on a branch and open a PR per the polecat-build-pr protocol. Review ticket: <review ticket id, edit in after filing it>.
+   EOF
    mg new --type=task --priority=high --tags=gh-issue --repo=<local repo path> \
        --depends=<build ticket id> \
        --title="review: <issue title> (<owner>/<repo>#<n>)" \
-       --body="workflow: gh-issue
-stage: review
-gh: <owner>/<repo>#<n>
+       --body-file - <<'EOF'
+   workflow: gh-issue
+   stage: review
+   gh: <owner>/<repo>#<n>
 
-Review the PR from <build ticket id> against the approved triage recommendation (<triage ticket id>)."
+   Review the PR from <build ticket id> against the approved triage recommendation (<triage ticket id>).
+   EOF
    ```
 3. **Dispatch the build {{.Worker}} now** (`--template=polecat-build-pr`). Hold the review ticket until the PR exists (transition 4). The triage ticket is complete — archive it on your normal sweep.
 
 *On NO-GO:* post an **honest, reasoned close comment** on the issue (pm-pogo wording standards apply), then close it:
 ```bash
-gh issue comment <n> --repo=<owner>/<repo> --body="<why not, honestly>"
+gh issue comment <n> --repo=<owner>/<repo> --body-file - <<'EOF'
+<why not, honestly>
+EOF
 gh issue close <n> --repo=<owner>/<repo>
 ```
 Shelve the workflow tickets (`mg shelve <triage ticket id>` shelves dependents too) and mail `human` a one-line confirmation. An honest close is a product feature — never ghost the reporter, and never dress a no-go up as "later."

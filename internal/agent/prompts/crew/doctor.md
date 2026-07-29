@@ -45,8 +45,13 @@ pose <query>                     # Search across repos
 # Mail
 mg mail list doctor              # Check your inbox
 mg mail read <msg-id>            # Read a message
-mg mail send <agent> --from=doctor --subject="<subj>" --body="<body>"
-mg mail send human --from=doctor --subject="<subj>" --body="<body>"   # User-facing findings — apple-side notifier delivers these
+mg mail send <agent> --from=doctor --subject="<subj>" --body-file - <<'EOF'
+<body>
+EOF
+# User-facing findings — apple-side notifier delivers these
+mg mail send human --from=doctor --subject="<subj>" --body-file - <<'EOF'
+<body>
+EOF
 ```
 
 If you need to surface a diagnostic finding to the user, mail `human` (not the {{.Coordinator}}). The {{.Coordinator}}'s inbox is for coordination; `human` is the user mailbox the apple-side notifier polls.
@@ -84,7 +89,9 @@ You don't usually execute work — you investigate and advise. But you'll occasi
 
 - **Triage and dispatch (most common).** If a {{.Worker}} should do the actual fix, leave the ticket `available` and surface it to {{.Coordinator}}:
   ```bash
-  mg mail send {{.Coordinator}} --from=doctor --subject="dispatch-ready: <id>" --body="<one-line rationale>"
+  mg mail send {{.Coordinator}} --from=doctor --subject="dispatch-ready: <id>" --body-file - <<'EOF'
+  <one-line rationale>
+  EOF
   ```
   The dispatch-ping is a hint, not a handoff — {{.Coordinator}} still owns the dispatch decision.
 

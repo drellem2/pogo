@@ -186,7 +186,9 @@ Example:
 ```bash
 mg mail send {{.Coordinator}} --from=<your-name> \
     --subject="dispatch-ready: mg-XXXX (high prio)" \
-    --body="mg-XXXX is filed, no blockers, ready to dispatch. Brief context: <one line>."
+    --body-file - <<'EOF'
+mg-XXXX is filed, no blockers, ready to dispatch. Brief context: <one line>.
+EOF
 ```
 
 The ping is a hint; {{.Coordinator}} still owns the dispatch decision and may hold or
@@ -250,7 +252,9 @@ You don't usually execute work — you observe activity, file tickets, and shape
 
 - **Triage and dispatch (most common).** If a {{.Worker}} should do the work, leave the ticket `available` and surface it to {{.Coordinator}} (this is the same dispatch-ping pattern from "Pinging {{.Coordinator}} for time-sensitive tickets" above):
   ```bash
-  mg mail send {{.Coordinator}} --from=<your-name> --subject="dispatch-ready: <id>" --body="<one-line rationale>"
+  mg mail send {{.Coordinator}} --from=<your-name> --subject="dispatch-ready: <id>" --body-file - <<'EOF'
+  <one-line rationale>
+  EOF
   ```
   The dispatch-ping is a hint, not a handoff — {{.Coordinator}} still owns the dispatch decision and may hold or sequence as appropriate.
 
@@ -365,10 +369,16 @@ for repo in <repos>; do
   if [ "$ahead" -ge 50 ] || [ "$days" -ge 30 ]; then
     # Dedup: skip if an open release-cut ticket already exists for this repo.
     mg list --tag=release-cut --status=open 2>/dev/null | grep -q "$slug" && continue
-    mg new --title="release-cut: $slug — main is $ahead commits ahead of $tag (${days}d)" \
-           --assignee=pm-<your-name> \
-           --tag=release-cut \
-           --body="Latest release $tag is ${days} days old; origin/main is ${ahead} commits ahead. Cut a new release with scripts/bump-version.sh X.Y.Z --commit --tag --push (semver: patch for CI/doc-only, minor otherwise). Tag push triggers .github/workflows/release.yml. Thresholds (50 commits / 30 days) are tunable in pm-template.md."
+    # This body interpolates $tag/$days/$ahead, so it is composed with printf and
+    # fed on stdin: a quoted heredoc would not expand them, and an UNQUOTED one
+    # carries exactly the --body="..." hazard. printf keeps the values in argv
+    # slots, so no shell metacharacter in a tag name can reach the command line.
+    printf 'Latest release %s is %s days old; origin/main is %s commits ahead. Cut a new release with scripts/bump-version.sh X.Y.Z --commit --tag --push (semver: patch for CI/doc-only, minor otherwise). Tag push triggers .github/workflows/release.yml. Thresholds (50 commits / 30 days) are tunable in pm-template.md.\n' \
+           "$tag" "$days" "$ahead" |
+      mg new --title="release-cut: $slug — main is $ahead commits ahead of $tag (${days}d)" \
+             --assignee=pm-<your-name> \
+             --tag=release-cut \
+             --body-file -
   fi
 done
 ```
