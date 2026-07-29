@@ -51,6 +51,27 @@ const personaRuleHeader = "---\n" +
 // uses its appearance to prove there is no trust dialog left to dismiss.
 const promptReadySentinel = "Plan, search, build anything"
 
+// initialNudgeTimeout is Cursor's cold-start budget: how long the spawn path is
+// willing to wait for the composer to appear.
+//
+// Cursor is a Node CLI; the trust dialog renders ~0.7s from spawn and the
+// composer settles ~3.0s. 30s is a generous upper bound.
+//
+// Two consumers, deliberately — Provider.Nudge.InitialNudgeTimeout, and
+// TrustDialogTimeout, which bounds how long TrustDialogHook watches for the
+// dialog. They must be the SAME number rather than two independent guesses: the
+// hook is what unblocks the composer, so it must not stop watching before the
+// spawn path stops waiting. See TrustDialogTimeout for what a hook that gives
+// up first costs.
+//
+// It is a const rather than `TrustDialogTimeout = Provider.Nudge.InitialNudgeTimeout`
+// because Provider's initializer references TrustDialogHook, whose body reads
+// TrustDialogTimeout — Go's initialization-dependency analysis is transitive
+// through function bodies, so sourcing the timeout from Provider would be an
+// initialization cycle. (claude has no such problem: its bound comes from
+// agent.DefaultNudgeProfile, another package.)
+const initialNudgeTimeout = 30 * time.Second
+
 // Provider is the Cursor CLI harness descriptor.
 //
 // Prompt injection uses the ContextFile strategy, because Cursor has no
@@ -143,10 +164,10 @@ var Provider = agent.Provider{
 		NeedsInitialNudge: false,
 
 		// Unused while NeedsInitialNudge is false; retained as the measured
-		// calibration record should the nudge path ever be needed again.
-		// Cursor is a Node CLI: the trust dialog renders ~0.7s from spawn and
-		// the composer settles ~3.0s. 30s is a generous upper bound.
-		InitialNudgeTimeout: 30 * time.Second,
+		// calibration record should the nudge path ever be needed again. It is
+		// also the bound TrustDialogTimeout is sourced from, so it is live even
+		// with the nudge path off — see initialNudgeTimeout.
+		InitialNudgeTimeout: initialNudgeTimeout,
 
 		// A carriage return submits the Cursor composer.
 		SubmitTerminator: "\r",

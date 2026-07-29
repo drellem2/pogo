@@ -1,4 +1,4 @@
-package claude
+package cursor
 
 import (
 	"bytes"
@@ -14,32 +14,50 @@ import (
 
 // These tests drive the REAL hook loop against a REAL Agent on a REAL PTY —
 // agent.Registry.Spawn forks a scripted shell whose output timing we control to
-// the tenth of a second. Only the timing budget is injected (watchForTrustDialog
-// takes it as a parameter) so the loop can be exercised on a sub-second budget
-// instead of the production one.
+// the tenth of a second. Only the timing budget is injected
+// (watchForTrustDialog takes it as a parameter) so the loop can be exercised on
+// a sub-second budget instead of the production one.
+//
+// They are the cursor half of drellem2/pogo#91 and mirror
+// internal/claude/trust_hook_race_test.go deliberately: the defect being removed
+// is the same shape in both providers, so it is worth being able to diff the two
+// files and see the same four controls.
 //
 // What this reproduces and what it does not: the mechanism is faithful — a
 // dialog that renders after the hook's budget has elapsed is never dismissed —
 // and TestLateRenderingDialogIsNeverDismissed is the positive control that
-// fails-by-design under the old fixed-guess shape. What is NOT reproduced here
-// is the production trigger: a genuinely CPU-starved host under concurrent
-// spawns pushing the real Claude Code TUI past 8 seconds. That race was not
-// constructed; the dialog is not even reachable on this machine (~/.claude.json
-// carries a blanket "/" entry with hasTrustDialogAccepted: true). The scripted
-// delay stands in for the starvation, not the other way round.
+// fails-by-design under the old fixed-guess shape. What is NOT reproduced is the
+// production trigger: a genuinely CPU-starved host under concurrent spawns
+// pushing the real Cursor TUI past 12 seconds. The scripted delay stands in for
+// the starvation, not the other way round.
 
 const (
-	// dialogLine is the real Claude Code trust-dialog prompt.
-	dialogLine = "Quick safety check: Is this a project you created or one you trust?"
-	// answeredMarker is printed by the script only after it reads a line from
+	// dialogLine is the real Cursor trust-dialog header (2026.07.09-a3815c0).
+	dialogLine = "Workspace Trust Required"
+	// composerLine is the real composer placeholder — promptReadySentinel as
+	// Cursor draws it.
+	composerLine = "> " + promptReadySentinel
+	// answeredMarker is printed by the script only after it reads a byte from
 	// the PTY — i.e. only if the hook actually answered the dialog.
 	answeredMarker = "POGO-DIALOG-ANSWERED"
 )
 
+// readOneByte makes the scripted shell able to observe Cursor's accept key.
+//
+// It is needed here and not in claude's equivalent because the two providers
+// answer with different keys: claude sends "\r", which ICRNL turns into a
+// newline and so completes an ordinary canonical-mode `read`. Cursor sends the
+// bare "a" accelerator (see trustDialogAccept) with no terminator, and a
+// canonical-mode read would block forever waiting for a newline that never
+// comes. Dropping the line discipline to min=1 makes a single byte readable,
+// which is what the hook actually sends.
+const readOneByte = "stty -icanon min 1 time 0 2>/dev/null\n" +
+	"dd bs=1 count=1 >/dev/null 2>&1\n"
+
 // spawnScripted forks `sh -c script` on a real PTY under a real Registry and
 // returns the live Agent. The provider is a copy of the real one with both
-// lifecycle hooks removed and the initial nudge disabled, so the only thing
-// touching this PTY is the hook the test drives itself.
+// lifecycle hooks removed, so the only thing touching this PTY is the hook the
+// test drives itself.
 func spawnScripted(t *testing.T, name, script string) *agent.Agent {
 	t.Helper()
 
@@ -97,23 +115,23 @@ func sawWithin(a *agent.Agent, want string, timeout time.Duration) bool {
 func lateDialogScript(delay string) string {
 	return "sleep " + delay + "\n" +
 		"printf '" + dialogLine + "\\n'\n" +
-		"read -r _\n" +
+		readOneByte +
 		"printf '" + answeredMarker + "\\n'\n" +
 		"sleep 30\n"
 }
 
-// TestLateRenderingDialogIsNeverDismissed is the POSITIVE CONTROL for
-// drellem2/macguffin#25: it reproduces the defect rather than the fix.
+// TestLateRenderingDialogIsNeverDismissed is the POSITIVE CONTROL for the
+// cursor half of drellem2/pogo#91: it reproduces the defect rather than the fix.
 //
 // The hook is given a budget SHORTER than the dialog's render delay — which is
-// exactly what a fixed 8s wall-clock guess becomes on a host loaded enough to
-// push the TUI past it. The hook returns, the dialog renders into an empty
-// room, and nothing ever answers it. That is the stall CloverRoss hit 3/3: no
-// composer, ready-sentinel never matches, kickoff prompt never delivered.
+// exactly what a fixed 12s wall-clock guess becomes on a host loaded enough to
+// push the TUI past it. The hook returns, the dialog renders into an empty room,
+// and nothing ever answers it. No composer follows, so the readiness sentinel
+// never matches and the polecat is stalled until a human answers by hand.
 //
 // If this test ever starts failing — i.e. a too-short budget still gets the
-// dialog dismissed — the mechanism described in the ticket is wrong and the
-// rest of this file is resting on a bad premise.
+// dialog dismissed — the mechanism is wrong and the rest of this file is resting
+// on a bad premise.
 func TestLateRenderingDialogIsNeverDismissed(t *testing.T) {
 	a := spawnScripted(t, "late-ctl", lateDialogScript("0.7"))
 
@@ -122,20 +140,20 @@ func TestLateRenderingDialogIsNeverDismissed(t *testing.T) {
 
 	// The dialog does render — the script is not broken, the hook just wasn't
 	// watching any more.
-	if !sawWithin(a, "safety check", 3*time.Second) {
+	if !sawWithin(a, dialogLine, 3*time.Second) {
 		t.Fatal("script never rendered the dialog: the control proves nothing")
 	}
 	if sawWithin(a, answeredMarker, 1*time.Second) {
 		t.Error("dialog was answered after the hook's budget expired — the " +
-			"late-render mechanism in drellem2/macguffin#25 does not hold")
+			"late-render mechanism this fix is built on does not hold")
 	}
 }
 
-// TestLateRenderingDialogIsDismissedWithinTheNudgeBudget is the same scenario
-// with the shipped shape: a budget tied to the initial-nudge cold-start budget
-// rather than an independent 8s guess. The dialog renders late and is still
-// dismissed.
-func TestLateRenderingDialogIsDismissedWithinTheNudgeBudget(t *testing.T) {
+// TestLateRenderingDialogIsDismissedWithinTheColdStartBudget is the same
+// scenario with the shipped shape: a budget tied to the provider's own
+// cold-start budget rather than an independent 12s guess. The dialog renders
+// late and is still dismissed.
+func TestLateRenderingDialogIsDismissedWithinTheColdStartBudget(t *testing.T) {
 	a := spawnScripted(t, "late-fix", lateDialogScript("0.7"))
 
 	watchForTrustDialog(a, 5*time.Second, 50*time.Millisecond)
@@ -147,11 +165,11 @@ func TestLateRenderingDialogIsDismissedWithinTheNudgeBudget(t *testing.T) {
 }
 
 // TestHookReturnsEarlyOnceComposerIsUp pins the early exit. Watching for the
-// full 60s budget would be a real cost if the hook always spent it; it does not,
-// because a rendered composer resolves the hook immediately.
+// full cold-start budget would be a real cost if the hook always spent it; it
+// does not, because a rendered composer resolves the hook immediately.
 func TestHookReturnsEarlyOnceComposerIsUp(t *testing.T) {
 	a := spawnScripted(t, "early-out",
-		"printf '? for shortcuts\\n'\nsleep 30\n")
+		"printf '"+composerLine+"\\n'\nsleep 30\n")
 
 	start := time.Now()
 	watchForTrustDialog(a, 10*time.Second, 50*time.Millisecond)
@@ -163,12 +181,49 @@ func TestHookReturnsEarlyOnceComposerIsUp(t *testing.T) {
 	}
 }
 
+// TestEchoedTaskIsNotTypedInto is why composerReady had to come with the longer
+// window. TestEchoedTaskLooksLikeTheTrustDialog already pins the two predicates
+// against strings; this drives the actual loop against a real PTY and asserts
+// that nothing is sent.
+//
+// trustDialogMarker matches PTY *text*, and Cursor echoes the argv-delivered
+// task into the TUI. A task that merely quotes the dialog matches. At the old
+// 12s budget the hook had usually expired before the echo; at the cold-start
+// budget it is still watching. On an already-trusted workspace (Respawn
+// re-enters the same Dir; Cursor persists trust per workspace) there is no
+// dialog to find — so an unguarded hook would match the echo and type a stray
+// "a" into the live composer, corrupting the next nudge.
+func TestEchoedTaskIsNotTypedInto(t *testing.T) {
+	echoed := "Investigate the dialog offering [a] Trust this workspace"
+
+	// Precondition: the echoed task really does look like the dialog.
+	if !matchesTrustDialog([]byte(echoed)) {
+		t.Fatal("precondition changed: the echoed task no longer matches " +
+			"trustDialogMarker — if the marker got stricter this guard may be " +
+			"redundant, but verify before deleting composerReady")
+	}
+
+	a := spawnScripted(t, "echo-guard",
+		"printf '"+composerLine+"\\n'\n"+
+			"printf '"+echoed+"\\n'\n"+
+			readOneByte+
+			"printf 'POGO-TYPED-INTO-COMPOSER\\n'\n"+
+			"sleep 30\n")
+
+	watchForTrustDialog(a, 3*time.Second, 50*time.Millisecond)
+
+	if sawWithin(a, "POGO-TYPED-INTO-COMPOSER", 1*time.Second) {
+		t.Error("hook sent the accept key into a live composer after matching " +
+			"the echoed task — composerReady must gate it off")
+	}
+}
+
 // TestWatchTerminatesWhenTheAgentExits is the NEGATIVE-SIDE control the rest of
 // this file needs to mean anything.
 //
 // Every other test here proves the hook FIRES. All of them pass just as well on
 // an implementation that never stops — and "never stops" is the specific cost of
-// this fix: the budget went from a fixed 8s to the 60s initial-nudge budget, and
+// this fix: the budget went from a fixed 12s to the 30s cold-start budget, and
 // the hook runs once per spawn. A watcher that outlives its agent is a goroutine
 // leak that compounds with every spawn, so the widened window is only safe if
 // agent exit ends the watch.
@@ -213,39 +268,19 @@ func TestWatchTerminatesWhenTheAgentExits(t *testing.T) {
 	}
 }
 
-// TestEchoedPromptIsNotTypedInto is why composerReady had to come with the
-// longer window.
-//
-// trustDialogMarker matches PTY *text*, and Claude echoes its kickoff prompt
-// into the TUI. A prompt that merely mentions a "safety check" matches. At the
-// old 8s budget the hook had almost always expired before the prompt was
-// echoed; at the initial-nudge budget it is still watching. On an already-
-// trusted worktree (Respawn re-enters the same Dir; Claude persists trust per
-// path) there is no dialog to find — so an unguarded hook would match the echo
-// and press Enter into the live composer, submitting a half-typed nudge.
-//
-// The composer is up here, so the hook must return without sending anything.
-func TestEchoedPromptIsNotTypedInto(t *testing.T) {
-	echoed := "Investigate the Quick safety check dialog and report back"
-
-	// Precondition: the echoed prompt really does look like the dialog.
-	if !matchesTrustDialog([]byte(echoed)) {
-		t.Fatal("precondition changed: the echoed prompt no longer matches " +
-			"trustDialogMarker — if the marker got stricter this guard may be " +
-			"redundant, but verify before deleting composerReady")
+// TestTrustDialogTimeoutIsTheColdStartBudget is the regression pin for the
+// cursor half of drellem2/pogo#91. The bug was a fixed wall-clock guess that
+// could expire before a loaded host rendered the dialog. The bound must be the
+// provider's own cold-start budget, so there is one timeout concept rather than
+// two that disagree.
+func TestTrustDialogTimeoutIsTheColdStartBudget(t *testing.T) {
+	if want := Provider.Nudge.InitialNudgeTimeout; TrustDialogTimeout != want {
+		t.Errorf("TrustDialogTimeout = %v, want the cold-start budget %v — the "+
+			"hook that unblocks the composer must not stop watching before the "+
+			"spawn path stops waiting for it", TrustDialogTimeout, want)
 	}
-
-	a := spawnScripted(t, "echo-guard",
-		"printf '? for shortcuts\\n'\n"+
-			"printf '"+echoed+"\\n'\n"+
-			"read -r _\n"+
-			"printf 'POGO-TYPED-INTO-COMPOSER\\n'\n"+
-			"sleep 30\n")
-
-	watchForTrustDialog(a, 3*time.Second, 50*time.Millisecond)
-
-	if sawWithin(a, "POGO-TYPED-INTO-COMPOSER", 1*time.Second) {
-		t.Error("hook pressed Enter into a live composer after matching the " +
-			"echoed prompt — composerReady must gate it off")
+	if TrustDialogTimeout <= 12*time.Second {
+		t.Errorf("TrustDialogTimeout = %v: back at or below the fixed 12s that "+
+			"let a late-rendering dialog go undismissed", TrustDialogTimeout)
 	}
 }
