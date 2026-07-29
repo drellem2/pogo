@@ -19,6 +19,13 @@ type fakeReaper struct {
 	agents  map[string]*agent.Agent
 	stopped []string
 	stopErr error
+
+	// releaseHeld models the store: the ids whose claim is still held at exit.
+	// ReleaseClaimAfterExit reports (false, nil) for anything not in here,
+	// exactly as MGClaimReleaser does when claimed/ has no file for the id.
+	releaseHeld map[string]bool
+	released    []string
+	releaseErr  error
 }
 
 func (f *fakeReaper) GetByWorkItemOrName(id string) *agent.Agent {
@@ -39,6 +46,21 @@ func (f *fakeReaper) GetByWorkItemOrName(id string) *agent.Agent {
 func (f *fakeReaper) Stop(name string, timeout time.Duration) error {
 	f.stopped = append(f.stopped, name)
 	return f.stopErr
+}
+
+func (f *fakeReaper) ReleaseClaimAfterExit(a *agent.Agent) (bool, error) {
+	if a == nil || a.WorkItemID == "" {
+		return false, nil
+	}
+	f.released = append(f.released, a.WorkItemID)
+	if f.releaseErr != nil {
+		return false, f.releaseErr
+	}
+	if !f.releaseHeld[a.WorkItemID] {
+		return false, nil
+	}
+	delete(f.releaseHeld, a.WorkItemID)
+	return true, nil
 }
 
 // TestReapMergedPolecat_StopsPolecatAndMarksDone is the gh #48 regression: the
@@ -163,14 +185,27 @@ func (t *fakeBackstopTimer) Stop() bool {
 }
 
 // newTestBackstop builds a deferredBackstop whose timers never fire on their
-// own — the returned func fires the most recently armed one on demand. escalate
-// increments *escalations. This lets each test drive both directions of the
-// acceptance control without real wall-clock time.
+// own — the returned func fires the most recently armed one on demand. This
+// lets each test drive every direction of the acceptance control without real
+// wall-clock time.
+//
+// BOTH escalation kinds land in *escalations: the linger escalation as the bare
+// work-item id, the deferred-death escalation (mg-c8d5) prefixed "death:". They
+// share a slice so that a test asserting "nothing was escalated" keeps meaning
+// that after a second escalation path was added — a separate recorder would
+// have let the new path fire unnoticed through every existing negative control.
 func newTestBackstop(reg polecatReaper, escalations *[]string) (*deferredBackstop, func()) {
 	var last *fakeBackstopTimer
 	b := newDeferredBackstop(15*time.Minute, reg, func(mr *refinery.MergeRequest) {
 		*escalations = append(*escalations, mr.Author)
 	})
+	b.escalateDeath = func(mr *refinery.MergeRequest, a *agent.Agent, released bool, releaseErr error) {
+		id := a.WorkItemID
+		if mr != nil && mr.Author != "" {
+			id = mr.Author
+		}
+		*escalations = append(*escalations, "death:"+id)
+	}
 	b.afterFunc = func(d time.Duration, f func()) backstopTimer {
 		last = &fakeBackstopTimer{fn: f}
 		return last
@@ -259,14 +294,17 @@ func TestDeferredBackstop_CleanCompletionDisarms(t *testing.T) {
 	reapMergedPolecat(reg, mr, func(string, string) error { return nil }, backstop)
 
 	// The polecat finishes its post-merge flow and its process exits — the
-	// OnExit hook disarms the backstop.
-	backstop.cancel("1234")
+	// OnExit hook disarms the backstop. Its `mg done` already moved the item out
+	// of claimed/, which is why reg holds no claim for it.
+	backstop.cancel(reg.agents["1234"])
 	// A late timer fire (already-disarmed) must do nothing.
 	fire()
 
 	if len(reg.stopped) != 0 {
 		t.Errorf("clean completion: polecat must NOT be reaped, got stopped=%v", reg.stopped)
 	}
+	// Covers the death escalation too: newTestBackstop funnels both into
+	// `escalations`, prefixed, so "no escalation" means neither kind fired.
 	if len(escalations) != 0 {
 		t.Errorf("clean completion: no escalation expected, got %v", escalations)
 	}
@@ -404,5 +442,125 @@ func TestDeferredBackstop_NilIsSafe(t *testing.T) {
 	var b *deferredBackstop
 	// None of these must panic.
 	b.arm("1234", &refinery.MergeRequest{Author: "mg-1234"})
-	b.cancel("1234")
+	b.cancel(&agent.Agent{Name: "1234", WorkItemID: "mg-1234"})
+	b.cancel(nil)
+}
+
+// TestDeferredBackstop_DeathBetweenMergeAndDoneReleasesClaim is the mg-c8d5
+// regression, and the THIRD direction of the acceptance control the first two
+// left out: the deferred polecat neither completes nor lingers — it DIES, after
+// its branch merged and before `mg done`.
+//
+// Before the fix, cancel() disarmed the timer on any process exit and returned.
+// A self-exit never goes through Registry.Stop, which is the only place that
+// released a claim, so the work item stayed in claimed/ under a dead pid:
+// undispatchable, and invisible to stall-watch, which scans available/ only.
+// The window is small in the --defer-done lane and unremarkable in the PR-flow
+// lane, which #92 made the DEFAULT for a merged polecat.
+func TestDeferredBackstop_DeathBetweenMergeAndDoneReleasesClaim(t *testing.T) {
+	reg := &fakeReaper{
+		agents:      map[string]*agent.Agent{"1234": {Name: "1234", WorkItemID: "mg-1234", Type: agent.TypePolecat}},
+		releaseHeld: map[string]bool{"mg-1234": true}, // never reached mg done
+	}
+	var escalations []string
+	backstop, fire := newTestBackstop(reg, &escalations)
+
+	mr := &refinery.MergeRequest{ID: "mr-42", Branch: "polecat-mg-1234", Author: "mg-1234", TargetRef: "integration", PRFlow: true}
+	reapMergedPolecat(reg, mr, func(string, string) error {
+		t.Error("PR flow: mg done must not be called at merge")
+		return nil
+	}, backstop)
+
+	// The death: the process ends on its own, mid-flow. OnExit calls cancel.
+	backstop.cancel(reg.agents["1234"])
+
+	if len(reg.released) != 1 || reg.released[0] != "mg-1234" {
+		t.Fatalf("deferred death: expected the claim on mg-1234 to be released, got %v", reg.released)
+	}
+	if reg.releaseHeld["mg-1234"] {
+		t.Error("deferred death: mg-1234 is still claimed — it is stranded under a dead pid")
+	}
+	if len(escalations) != 1 || escalations[0] != "death:mg-1234" {
+		t.Errorf("deferred death: expected one death escalation for mg-1234, got %v", escalations)
+	}
+	// The process is already gone: reaping it would be a second stop of a dead
+	// agent, not slot protection.
+	if len(reg.stopped) != 0 {
+		t.Errorf("deferred death: nothing to stop, got stopped=%v", reg.stopped)
+	}
+	// And the disarmed timer must not resurrect any of this later.
+	fire()
+	if len(escalations) != 1 {
+		t.Errorf("deferred death: a late timer fire must be inert, got %v", escalations)
+	}
+}
+
+// TestDeferredBackstop_ExitWithNoClaimHeldIsQuiet is the negative control that
+// keeps the fix above from becoming a pager. Two ordinary endings leave no claim
+// held: the polecat ran `mg done` itself, or the mayor stopped it and
+// Registry.Stop released on the way down (mg-fb13). Neither is a death, and
+// neither may escalate.
+func TestDeferredBackstop_ExitWithNoClaimHeldIsQuiet(t *testing.T) {
+	reg := &fakeReaper{
+		agents:      map[string]*agent.Agent{"1234": {Name: "1234", WorkItemID: "mg-1234", Type: agent.TypePolecat}},
+		releaseHeld: map[string]bool{}, // already out of claimed/
+	}
+	var escalations []string
+	backstop, _ := newTestBackstop(reg, &escalations)
+
+	mr := &refinery.MergeRequest{ID: "mr-42", Branch: "polecat-mg-1234", Author: "mg-1234", TargetRef: "integration", PRFlow: true}
+	reapMergedPolecat(reg, mr, func(string, string) error { return nil }, backstop)
+	backstop.cancel(reg.agents["1234"])
+
+	if len(escalations) != 0 {
+		t.Errorf("an exit with no claim held is a completion, not a death; got escalations=%v", escalations)
+	}
+}
+
+// TestDeferredBackstop_FailedReleaseStillEscalates: a release that ERRORS is the
+// one case worth paging hardest about — the item is stranded and pogod could not
+// unstrand it, so a human has to run `mg unclaim`. Silence here would recreate
+// the invisible failure mg-fb13 was filed for.
+func TestDeferredBackstop_FailedReleaseStillEscalates(t *testing.T) {
+	reg := &fakeReaper{
+		agents:      map[string]*agent.Agent{"1234": {Name: "1234", WorkItemID: "mg-1234", Type: agent.TypePolecat}},
+		releaseHeld: map[string]bool{"mg-1234": true},
+		releaseErr:  errors.New("mg unclaim: store is locked"),
+	}
+	var escalations []string
+	backstop, _ := newTestBackstop(reg, &escalations)
+
+	mr := &refinery.MergeRequest{ID: "mr-42", Branch: "polecat-mg-1234", Author: "mg-1234", DeferDone: true}
+	reapMergedPolecat(reg, mr, func(string, string) error { return nil }, backstop)
+	backstop.cancel(reg.agents["1234"])
+
+	if len(escalations) != 1 || escalations[0] != "death:mg-1234" {
+		t.Errorf("a failed claim release must escalate, got %v", escalations)
+	}
+}
+
+// TestDeferredBackstop_UnarmedExitTouchesNothing: cancel runs from the OnExit
+// hook for EVERY agent in the fleet, the overwhelming majority of which never
+// merged anything. An agent that was never armed must not have its claim probed
+// or released — that would turn a lifecycle hook into a fleet-wide unclaim
+// sweep, which is precisely the blast radius mg-fb13 refused.
+func TestDeferredBackstop_UnarmedExitTouchesNothing(t *testing.T) {
+	reg := &fakeReaper{
+		agents:      map[string]*agent.Agent{"9999": {Name: "9999", WorkItemID: "mg-9999", Type: agent.TypePolecat}},
+		releaseHeld: map[string]bool{"mg-9999": true},
+	}
+	var escalations []string
+	backstop, _ := newTestBackstop(reg, &escalations)
+
+	backstop.cancel(reg.agents["9999"])
+
+	if len(reg.released) != 0 {
+		t.Errorf("an unarmed agent's exit must not touch any claim, got released=%v", reg.released)
+	}
+	if !reg.releaseHeld["mg-9999"] {
+		t.Error("a mid-flight polecat that never merged must keep its claim on exit")
+	}
+	if len(escalations) != 0 {
+		t.Errorf("an unarmed exit must not escalate, got %v", escalations)
+	}
 }

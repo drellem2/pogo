@@ -1265,6 +1265,35 @@ Flags:
 	// stopped" (the normal end state for a PR-flow polecat) from "stalled and
 	// never completed". Both get reaped; only the latter escalates (mg-7746).
 	deferBackstop.workItemDone = client.MGWorkItemDone
+	// The other failure ending: the deferred polecat DIES between its merge and
+	// its `mg done`. Its claim is released by settleExit (a self-exit never goes
+	// through Registry.Stop, so nothing else would), and the mayor is told —
+	// the branch is merged but the PR it owed is not open (mg-c8d5).
+	deferBackstop.escalateDeath = func(mr *refinery.MergeRequest, a *agent.Agent, released bool, releaseErr error) {
+		id, branch, mrID := a.WorkItemID, "", ""
+		if mr != nil {
+			if mr.Author != "" {
+				id = mr.Author
+			}
+			branch, mrID = mr.Branch, mr.ID
+		}
+		subject := fmt.Sprintf("DEFERRED POLECAT DIED POST-MERGE: %s never reached mg done", id)
+		claimLine := fmt.Sprintf("The claim was released; %s is back in available/ and can be re-dispatched.", id)
+		if releaseErr != nil {
+			claimLine = fmt.Sprintf("RELEASING THE CLAIM FAILED (%v) — %s is STRANDED in claimed/ under a dead pid, "+
+				"where dispatch will not see it and stall-watch does not look. Release it by hand: `mg unclaim %s`.",
+				releaseErr, id, id)
+		}
+		body := fmt.Sprintf("A deferred (PR-flow or --defer-done) polecat's process ended while it still held the claim on its work item.\n"+
+			"That means it died AFTER its branch merged and BEFORE `mg done` — the merge landed, the pull request it owed did not.\n\n"+
+			"Work item: %s\nAgent: %s\nBranch: %s\nMR: %s\n\n"+
+			"%s\n\n"+
+			"Check whether the PR was opened before re-dispatching; the branch is already merged into its target.",
+			id, a.Name, branch, mrID, claimLine)
+		if err := client.SendMGMail(coordinator, "refinery", subject, body); err != nil {
+			log.Printf("refinery: failed to mail coordinator deferred-death escalation: %v", err)
+		}
+	}
 
 	// Build the synthetic-failure-turn detector (mg-8cdb, from mg-18d0's
 	// finding). It reads each running agent's harness session transcript and
@@ -1297,10 +1326,13 @@ Flags:
 		synthwatch.DefaultInterval)
 
 	agentRegistry.SetOnExit(func(a *agent.Agent, err error) {
-		// Disarm any defer-done backstop for this polecat: its process has
-		// ended, so the slot is free and there is nothing left to reap (gh #81).
-		// A no-op for the vast majority of agents, which are not --defer-done.
-		deferBackstop.cancel(a.Name)
+		// Settle any defer-done backstop for this polecat: its process has
+		// ended, so the slot is free and there is nothing left to reap (gh #81)
+		// — but if it ended while still holding its work-item claim, it died
+		// between its merge and `mg done`, and the claim is released and the
+		// mayor told (mg-c8d5). A no-op for the vast majority of agents, which
+		// are not deferred.
+		deferBackstop.cancel(a)
 
 		// Consult the synthetic-failure-turn detector BEFORE respawning
 		// (mg-8cdb). An agent whose transcript shows it failing every turn
