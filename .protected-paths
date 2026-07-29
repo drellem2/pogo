@@ -1,0 +1,38 @@
+# Protected paths — the refinery refuses to merge any branch that changes one.
+#
+# Read by internal/refinery/protectedpath_gate.go, from the TARGET ref (main),
+# never from the branch under merge. A branch cannot exempt itself by editing
+# this file, because editing this file is itself refused.
+#
+# THERE IS NO BYPASS. No flag, no label, no CODEOWNERS approval, no marker
+# file. On this machine every agent holds a GH_TOKEN authenticating as the repo
+# owner, so any token an agent could present is one an agent could forge; an
+# authorisation mechanism here would be an opt-out with extra steps. A change
+# to a protected path lands by hand-push from Daniel, which never enters the
+# refinery. See the WHY NO BYPASS comment in protectedpath_gate.go.
+#
+# Syntax: one pattern per line, `#` comments, blank lines ignored.
+#
+#   dir/**        the whole subtree
+#   dir/file.md   one exact repo-relative path
+#   dir/*.sh      a single path segment glob
+#
+# An unrecognised pattern fails the gate rather than being skipped — a red line
+# that silently matches nothing is worse than no red line at all.
+#
+# This file lives at the repo root and NOT under .pogo/, which is gitignored
+# here and in most repos pogo manages. An untracked list is invisible to the
+# gate (it reads git, not the working tree) and would silently protect nothing.
+# TestShippedProtectedListIsParseable asserts it is tracked, so the mistake
+# cannot be made quietly.
+
+# Shipped agent prompt templates. Daniel's red line: mg-2a50 is the incident in
+# which the refinery merged a +38-line edit to mayor.md (a3f0efa, mg-1935) with
+# nothing objecting, while three other prompt tickets sat correctly frozen
+# awaiting his authorisation.
+internal/agent/prompts/**
+internal/agent/templates/**
+
+# This file. Listed for the reader's benefit; the gate protects it implicitly
+# whether or not this line is present, so deleting the line does not unlock it.
+.protected-paths
