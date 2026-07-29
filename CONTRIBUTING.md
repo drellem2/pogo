@@ -27,6 +27,56 @@ gate, where a `go install` would overwrite the machine's installed `pogod` with
 an unreviewed branch build. Pass `--install` when you actually want the binaries
 on your `PATH`, or set `POGO_BUILD_DIR` to redirect the output directory.
 
+### Writing a test that touches pogo state: use `scripts/pogo-sandbox`
+
+A test must never read or write the developer's live `~/.pogo`, the live daemon,
+or the live fleet. Four separate tickets were filed for that one defect
+(`mg-6092`, `mg-e8e7`, `mg-5336`, `mg-3412`) because every suite re-derived its
+isolation by hand, and the fourth gates every merge: under fleet load it drove
+another run's daemon and reported **fourteen assertion failures**, including
+verbatim fail-open findings, about a tree that was provably fine.
+
+So do not hand-roll the overrides. Source the packaged harness:
+
+```bash
+source "$REPO_ROOT/scripts/pogo-sandbox"
+pogo_sandbox_create mytest        # a private root; no env change yet
+trap pogo_sandbox_down EXIT
+# ...build anything that needs the real HOME (Go resolves GOMODCACHE off it)...
+pogo_sandbox_isolate              # HOME/XDG_CONFIG_HOME/POGO_HOME/MG_ROOT pinned AND checked
+pogo_sandbox_daemon "$POGO_SANDBOX_DIR/pogod" /scheduler/schedules
+pogo_sandbox_curl "register the mail-check" -- \
+    -X POST "$POGO_SANDBOX_URL/scheduler/schedules" -H 'Content-Type: application/json' \
+    -d "{\"id\":\"mail-check-$(pogo_sandbox_name pa)\",\"agent\":\"$(pogo_sandbox_name pa)\",...}"
+```
+
+For a suite that is not written in shell:
+
+```bash
+scripts/pogo-sandbox run -- go test ./internal/agent/...
+scripts/pogo-sandbox run --daemon ./bin/pogod -- ./my_test.sh
+```
+
+What it guarantees, and *checks* rather than assumes:
+
+- **A private home that cannot be the developer's.** All four of `HOME`,
+  `XDG_CONFIG_HOME`, `POGO_HOME` and `MG_ROOT` are pinned and then resolved
+  through symlinks; any one landing on, above, or below the real `~/.pogo` is
+  refused. All four are needed: this box exports `POGO_HOME=$HOME` from a stale
+  profile, so setting `HOME` alone still writes the live tree.
+- **A private port**, reserved atomically and proven to belong to the process
+  this run started — never probed for.
+- **Names no live fleet holds.** `pogo_sandbox_name` mints them, and
+  `pogo_sandbox_curl` *refuses* a write whose schedule or agent identity does not
+  carry the run's token — so re-introducing a write to `mail-check-pa` is a
+  failure, not a habit lapse.
+- **A setup failure that cannot be read as a regression.** Any of the above ends
+  the run with a `SETUP FAILURE` banner and **exit 99**, distinct from the
+  assertion tally's 1, before a single assertion runs.
+
+Never weaken an assertion to make it fit the harness. If conversion appears to
+need that, the assertion is telling you something — stop and ask.
+
 ### Code Style
 
 - All Go code must be formatted with `gofmt`. The CI pipeline checks this.

@@ -87,9 +87,9 @@
 #     fleet holds. `mail-check-pa` used to be one of them.
 #
 #   * Infrastructure now fails AS infrastructure. Standing up the sandbox, and
-#     every write this file makes to it, goes through sandbox_setup_fail /
-#     sbx_curl and ends the run at the point of failure with its own banner and
-#     its own exit code — never as a FAIL: line. The incident's first line
+#     every write this file makes to it, goes through pogo_sandbox_fail /
+#     pogo_sandbox_curl and ends the run at the point of failure with its own
+#     banner and its own exit code — never as a FAIL: line. The first line
 #     already said "could not remove ... from the sandbox daemon"; the next
 #     thirteen buried it, and the diagnosis that followed was wrong.
 #
@@ -138,33 +138,37 @@ set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$HERE/.." && pwd)"
 
-# The sandbox port reservation and the daemon-ownership proof (mg-3412). Sourced
-# before anything else so sandbox_setup_fail is available to every step below,
-# including the builds — a control that cannot build its own daemon has an
-# infrastructure problem, not an assertion result.
+# The packaged sandbox (mg-78a5). Sourced before anything else so
+# pogo_sandbox_fail is available to every step below, including the builds — a
+# control that cannot build its own daemon has an infrastructure problem, not an
+# assertion result.
+#
+# This file used to hand-roll its own isolation: its own HOME/XDG/POGO_HOME
+# exports, its own `SBX=` run token, its own sbx_curl. So did three other suites,
+# and four tickets were filed for the same defect (mg-6092, mg-e8e7, mg-5336,
+# mg-3412) because isolation re-derived at each call site is isolation somebody
+# has to REMEMBER. scripts/pogo-sandbox is that envelope packaged, and it CHECKS
+# rather than assumes: a HOME that resolves onto the developer's, or a write that
+# names a schedule this run did not mint, is refused before any assertion runs.
 # shellcheck source=/dev/null
-source "$HERE/lib/sandbox-daemon.sh"
+source "$HERE/pogo-sandbox"
 
 RESULTS_FILE=$(mktemp)
-SANDBOX=$(mktemp -d)
-POGOD_PID=""
+# The private root. No environment variable moves yet: the Go builds below must
+# run under the REAL HOME (see the note above them), and pogo_sandbox_isolate is
+# called after them.
+pogo_sandbox_create live
+SANDBOX="$POGO_SANDBOX_DIR"
 
 cleanup() {
-    # Kill by PID only. An unanchored `pkill -f pogod` on this box would take
-    # out the machine's live daemon and every agent poller with it.
-    [ -n "$POGOD_PID" ] && kill "$POGOD_PID" 2>/dev/null
-    [ -n "$POGOD_PID" ] && wait "$POGOD_PID" 2>/dev/null
-    # Hand the port back. Held until here on purpose: §5 kills the daemon and §8
-    # starts a fresh one on the SAME port, so the claim has to outlive both.
-    sandbox_port_release
-    # Make the tree writable before removing it. Any `go` call under the sandbox
-    # HOME (installed_bin's `go env`, installed_rev's `go version -m`) materialises
-    # the go.mod toolchain module into $SANDBOX/home/go/pkg/mod, and Go marks the
-    # module cache 0444 by design — so a plain `rm -rf` fails "Permission denied"
-    # on every file and litters /var/folders each redeploy (mg-e91e). chmod clears
-    # the read-only bit so the removal actually completes.
-    chmod -R u+w "$SANDBOX" 2>/dev/null
-    rm -rf "$SANDBOX"
+    # Kills the sandbox daemon BY PID (an unanchored `pkill -f pogod` on this box
+    # would take out the machine's live daemon and every agent poller with it),
+    # hands the port claim back — held until here on purpose, since §5 kills the
+    # daemon and §8 starts a fresh one on the SAME port — and removes the root,
+    # chmod'ing it writable first because any `go` call under the sandbox HOME
+    # materialises Go's module cache there and Go marks it 0444 by design
+    # (mg-e91e).
+    pogo_sandbox_down
     rm -f "$RESULTS_FILE"
 }
 trap cleanup EXIT
@@ -221,17 +225,17 @@ if [ -n "${POGO_LIVE_CONTROL_POGOD:-}" ]; then
     # specific artifact, and quietly testing a DIFFERENT binary than the one
     # about to be deployed is precisely the fail-open this ticket exists to close.
     if [ ! -x "$POGO_LIVE_CONTROL_POGOD" ]; then
-        sandbox_setup_fail "POGO_LIVE_CONTROL_POGOD=$POGO_LIVE_CONTROL_POGOD is not an executable — refusing to fall back to a source build and report on the wrong binary"
+        pogo_sandbox_fail "POGO_LIVE_CONTROL_POGOD=$POGO_LIVE_CONTROL_POGOD is not an executable — refusing to fall back to a source build and report on the wrong binary"
     fi
     echo "Using prebuilt artifact: $POGO_LIVE_CONTROL_POGOD"
     if ! cp "$POGO_LIVE_CONTROL_POGOD" "$SANDBOX/pogod"; then
-        sandbox_setup_fail "could not copy $POGO_LIVE_CONTROL_POGOD into the sandbox — the live control cannot run"
+        pogo_sandbox_fail "could not copy $POGO_LIVE_CONTROL_POGOD into the sandbox — the live control cannot run"
     fi
     chmod +x "$SANDBOX/pogod"
 else
     echo "Building pogod into the sandbox..."
     if ! (cd "$REPO_ROOT" && go build -o "$SANDBOX/pogod" ./cmd/pogod); then
-        sandbox_setup_fail "could not build cmd/pogod — the live control cannot run"
+        pogo_sandbox_fail "could not build cmd/pogod — the live control cannot run"
     fi
 fi
 
@@ -248,17 +252,17 @@ fi
 # the one about to be deployed is the fail-open this file exists to close.
 if [ -n "${POGO_LIVE_CONTROL_POGO:-}" ]; then
     if [ ! -x "$POGO_LIVE_CONTROL_POGO" ]; then
-        sandbox_setup_fail "POGO_LIVE_CONTROL_POGO=$POGO_LIVE_CONTROL_POGO is not an executable — refusing to fall back to a source build and report on the wrong CLI"
+        pogo_sandbox_fail "POGO_LIVE_CONTROL_POGO=$POGO_LIVE_CONTROL_POGO is not an executable — refusing to fall back to a source build and report on the wrong CLI"
     fi
     echo "Using prebuilt CLI artifact: $POGO_LIVE_CONTROL_POGO"
     if ! cp "$POGO_LIVE_CONTROL_POGO" "$SANDBOX/pogo"; then
-        sandbox_setup_fail "could not copy $POGO_LIVE_CONTROL_POGO into the sandbox — the drain-gate control cannot run"
+        pogo_sandbox_fail "could not copy $POGO_LIVE_CONTROL_POGO into the sandbox — the drain-gate control cannot run"
     fi
     chmod +x "$SANDBOX/pogo"
 else
     echo "Building the pogo CLI into the sandbox..."
     if ! (cd "$REPO_ROOT" && go build -o "$SANDBOX/pogo" ./cmd/pogo); then
-        sandbox_setup_fail "could not build cmd/pogo — the drain-gate control cannot run"
+        pogo_sandbox_fail "could not build cmd/pogo — the drain-gate control cannot run"
     fi
 fi
 
@@ -269,21 +273,20 @@ fi
 # re-implementing `ps -o lstart=` parsing in shell — see its header.
 echo "Building the witness fixture writer into the sandbox..."
 if ! (cd "$REPO_ROOT" && go build -o "$SANDBOX/witnessfixture" ./scripts/witnessfixture); then
-    sandbox_setup_fail "could not build scripts/witnessfixture — the drain-gate control cannot stage a live polecat"
+    pogo_sandbox_fail "could not build scripts/witnessfixture — the drain-gate control cannot stage a live polecat"
 fi
 
 # --- sandbox: a real pogod that cannot reach the real fleet ------------------
-# POGO_HOME must be pinned explicitly: this box exports POGO_HOME=$HOME from a
-# stale profile, so setting HOME alone leaks onto the live ~/.pogo. Likewise
-# XDG_CONFIG_HOME — config.toml is layered and would otherwise be read from the
-# real user config. With no config file pogod starts no crew (belt and braces:
-# POGO_AGENT_AUTOSTART=false), which is what makes every agent below "gone" and
-# so gives us a real reap to observe.
-export HOME="$SANDBOX/home"
-export XDG_CONFIG_HOME="$SANDBOX/xdg"
-export POGO_HOME="$SANDBOX/home/.pogo"
-export POGO_AGENT_AUTOSTART=false
-mkdir -p "$HOME" "$XDG_CONFIG_HOME"
+# HOME, XDG_CONFIG_HOME, POGO_HOME and MG_ROOT are pinned under the private root
+# AND THEN PROVEN not to resolve onto the developer's — see pogo_sandbox_isolate.
+# All four are needed and all four are checked: this box exports POGO_HOME=$HOME
+# from a stale profile, so setting HOME alone leaks onto the live ~/.pogo
+# (mg-5336); config.toml is layered, so XDG_CONFIG_HOME alone leaks the real user
+# config; and mg roots off $HOME, so a control that sends mail would otherwise
+# land it in the live ~/.macguffin. With no config file pogod starts no crew
+# (belt and braces: POGO_AGENT_AUTOSTART=false, also set there), which is what
+# makes every agent below "gone" and so gives us a real reap to observe.
+pogo_sandbox_isolate
 
 # A PRIVATE port, RESERVED — not a fixed number, and not a probe (mg-3412). The
 # old loop walked 17731-17799 from the bottom asking "did anything answer?", so
@@ -292,39 +295,38 @@ mkdir -p "$HOME" "$XDG_CONFIG_HOME"
 # this file spent thirteen assertions interrogating another run's daemon. See
 # scripts/lib/sandbox-daemon.sh for the reservation and the ownership proof; the
 # short version is that neither the port nor the daemon is taken on trust now.
-sandbox_port_reserve
-PORT="$SANDBOX_PORT"
-URL="http://127.0.0.1:$PORT"
-
 BOOT_T0=$(date +%s)
-sandbox_daemon_start "$SANDBOX/pogod" "$PORT" "$SANDBOX/pogod.log" /scheduler/schedules
-POGOD_PID="$SANDBOX_DAEMON_PID"
+pogo_sandbox_daemon "$SANDBOX/pogod" /scheduler/schedules
+PORT="$POGO_SANDBOX_PORT"
+URL="$POGO_SANDBOX_URL"
 
 # A freshly booted pogod holds nothing. If this one holds a schedule, the daemon
 # answering our reserved port is not the daemon we think it is — and the whole
 # file's premise (that it reads back exactly what it registered) is already void.
 # Cheap, and independent of lsof: it interrogates the STATE rather than the
 # process table, so it still bites where the ownership proof cannot look.
-if [ -n "$(curl -sf --max-time 5 "$URL/scheduler/schedules" 2>/dev/null | grep -o '"id":"[^"]*"')" ]; then
-    sandbox_setup_fail "the daemon on $URL already holds schedules — a just-booted sandbox pogod holds none, so this is not our daemon and nothing below would be measuring the tree under test" "$SANDBOX/pogod.log"
-fi
+pogo_sandbox_assert_no_schedules
 
 # Every schedule and agent name this file registers is namespaced to THIS RUN
-# (mg-3412's second ask). It used to register `mail-check-pa`, `mail-check-mayor`
-# and friends — names a real fleet holds — so a control reading fleet state by
-# name had no way to tell its own sandbox's `pa` from the machine's, and the
-# failure that produced looked exactly like the crew-loss regression the control
-# exists to catch. A run token makes every name here one no live fleet could ever
-# hold, and makes two concurrent runs' names disjoint even if the isolation above
-# were somehow defeated.
+# (mg-3412's second ask; the guard that ENFORCES it is mg-78a5's). It used to
+# register `mail-check-pa`, `mail-check-mayor` and friends — names a real fleet
+# holds — so a control reading fleet state by name had no way to tell its own
+# sandbox's `pa` from the machine's, and the failure that produced looked exactly
+# like the crew-loss regression the control exists to catch. A run token makes
+# every name here one no live fleet could ever hold, and makes two concurrent
+# runs' names disjoint even if the isolation above were somehow defeated.
+#
+# The token is no longer a convention this file has to keep: pogo_sandbox_curl
+# below REFUSES a write whose schedule or agent identity does not carry it, so
+# re-introducing `mail-check-pa` is a setup failure rather than a habit lapse.
 #
 # The `mail-check-` PREFIX stays, and must: extract_mail_check_ids keys on it, so
 # it is part of the seam under test, not part of the naming. Only the identity
 # after it is ours to choose.
-SBX="sbxlive-$$"
+SBX="$POGO_SANDBOX_TOKEN"
 
-# sbx_curl DESC -- <curl args> — every write THIS FILE makes to the sandbox
-# daemon, and nothing else (mg-3412's third ask).
+# Every write THIS FILE makes to the sandbox daemon goes through
+# pogo_sandbox_curl, and nothing else (mg-3412's third ask).
 #
 # These calls are scaffolding: they stage the state an assertion is then made
 # about. When one fails, the state was never staged, so the assertions that
@@ -338,12 +340,6 @@ SBX="sbxlive-$$"
 # their failures are still the controls' verdicts — §5 kills the daemon precisely
 # to make them fail. Guarding the scaffolding is not the same as guarding the
 # instrument, and only the first is done here.
-sbx_curl() {
-    local desc="$1"; shift
-    [ "$1" = "--" ] && shift
-    curl -sf --max-time 10 "$@" >/dev/null 2>&1 \
-        || sandbox_setup_fail "$desc — the sandbox daemon on $URL did not accept it, so the state the controls below assert on was never staged"
-}
 
 # Point the driver's own primitives at the sandbox daemon, then source it.
 # main() will NOT run because BASH_SOURCE != $0. From here on, every call below
@@ -387,11 +383,11 @@ CREW="${CREW# }"
 SBX_PA="$SBX-pa"          # the crew agent whose unexplained loss control 3 turns on
 SBX_SWEEP="$SBX-sweep-morning"
 for a in $CREW; do
-    sbx_curl "could not register mail-check-$a on the sandbox daemon" -- \
+    pogo_sandbox_curl "could not register mail-check-$a on the sandbox daemon" -- \
         -X POST "$URL/scheduler/schedules" -H 'Content-Type: application/json' \
         -d "{\"id\":\"mail-check-$a\",\"agent\":\"$a\",\"cron\":\"*/10 * * * *\",\"delivery\":\"nudge\",\"message\":\"check mail\"}"
 done
-sbx_curl "could not register the decoy sweep" -- \
+pogo_sandbox_curl "could not register the decoy sweep" -- \
     -X POST "$URL/scheduler/schedules" -H 'Content-Type: application/json' \
     -d "{\"id\":\"$SBX_SWEEP\",\"agent\":\"$SBX-pm-pogo\",\"cron\":\"0 9 * * *\",\"delivery\":\"nudge\",\"message\":\"sweep\"}"
 
@@ -464,7 +460,7 @@ esac
 # pins that arithmetic in place so nobody has to take the claim on faith.
 SBX_CATLOOP="$SBX-cat-loop"
 SBX_CATNOLOOP="$SBX-cat-noloop"
-sbx_curl "could not register the force-killed polecat's mail-check" -- \
+pogo_sandbox_curl "could not register the force-killed polecat's mail-check" -- \
     -X POST "$URL/scheduler/schedules" -H 'Content-Type: application/json' \
     -d "{\"id\":\"mail-check-$SBX_CATLOOP\",\"agent\":\"$SBX_CATLOOP\",\"cron\":\"*/10 * * * *\",\"delivery\":\"nudge\",\"message\":\"check mail\"}"
 
@@ -492,7 +488,7 @@ SLACK_IDS="$(expected_lost_mail_checks "$SLACK_PRE_BODY" "$SLACK_SNAP")"
 # after it — none of which was about the tree. It is staging, so it is staging
 # that stops the run now.
 for gone in "mail-check-$SBX_CATLOOP" "mail-check-$SBX_PA"; do
-    sbx_curl "could not remove $gone from the sandbox daemon" -- \
+    pogo_sandbox_curl "could not remove $gone from the sandbox daemon" -- \
         -X DELETE "$URL/scheduler/schedules/$gone"
 done
 
@@ -525,7 +521,7 @@ else
 fi
 
 # Restore the six crew loops for control 4. cat-loop stays gone — it is dead.
-sbx_curl "could not restore mail-check-$SBX_PA" -- \
+pogo_sandbox_curl "could not restore mail-check-$SBX_PA" -- \
     -X POST "$URL/scheduler/schedules" -H 'Content-Type: application/json' \
     -d "{\"id\":\"mail-check-$SBX_PA\",\"agent\":\"$SBX_PA\",\"cron\":\"*/10 * * * *\",\"delivery\":\"nudge\",\"message\":\"check mail\"}"
 [ "$(mail_check_ids)" = "$LIVE_PRE" ] \
@@ -655,7 +651,7 @@ dr_state() { curl -sf --max-time 5 "$URL/agents/drain" 2>/dev/null | json_bool d
 # dr_state above is deliberately NOT guarded — reading the daemon back is the
 # verdict, and §5 kills it on purpose.
 sbx_drain_set() {
-    sbx_curl "could not set draining=$1 on the sandbox daemon" -- \
+    pogo_sandbox_curl "could not set draining=$1 on the sandbox daemon" -- \
         -X POST "$URL/agents/drain" -H 'Content-Type: application/json' \
         -d "{\"draining\":$1}"
 }
@@ -1011,13 +1007,7 @@ fi   # resolve_mg
 # 0, an unreachable daemon reports the whole fleet lost; if it ever reads as OK,
 # the check is decoration. Proven here against a genuinely dead process, not a
 # stubbed curl.
-kill "$POGOD_PID" 2>/dev/null
-wait "$POGOD_PID" 2>/dev/null
-POGOD_PID=""
-for _ in $(seq 1 40); do
-    curl -sf --max-time 1 "$URL/scheduler/schedules" >/dev/null 2>&1 || break
-    sleep 0.25
-done
+pogo_sandbox_daemon_kill
 
 DEAD_IDS="$(mail_check_ids)"; DEAD_RC=$?
 [ "$DEAD_IDS" = "?" ] && [ "$DEAD_RC" -ne 0 ] \
@@ -1237,8 +1227,7 @@ rm -f "$GATE_WITNESS"
 # accepted whatever answered the port, which under load was another run's daemon:
 # a live one, reporting a fleet that was not ours, into a control that reads
 # "$GATE_HEALTHY" as a statement about this tree (mg-3412).
-sandbox_daemon_start "$SANDBOX/pogod" "$GATE_PORT" "$SANDBOX/pogod-gate.log" /agents/drain
-POGOD_PID="$SANDBOX_DAEMON_PID"    # hand it to the EXIT trap; nothing else kills it
+pogo_sandbox_daemon "$SANDBOX/pogod" /agents/drain "$SANDBOX/pogod-gate.log"
 pass "drain-gate precondition: a real pogod is answering /agents/drain again on port $GATE_PORT"
 GATE_HEALTHY="$(gate_drain_wait)"
 [ "$GATE_HEALTHY" = "0|0" ] \

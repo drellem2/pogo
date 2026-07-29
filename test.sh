@@ -22,6 +22,18 @@ bash shell/bashrc_test.sh
 echo "Testing pogo-self-deploy driver"
 bash scripts/pogo-self-deploy_test.sh
 
+# The packaged test isolation itself (mg-78a5). FOUR tickets were filed for one
+# defect — a test reading the developer's live ~/.pogo, live daemon or live fleet
+# (mg-6092, mg-e8e7, mg-5336, mg-3412) — because every suite re-derived its
+# isolation by hand. scripts/pogo-sandbox is that envelope packaged; this file
+# breaks each of its guarantees on purpose and asserts the result comes back as a
+# SETUP failure with no PASS:, no FAIL: and no PROVED: line. It runs BEFORE the
+# live suite because the live suite now depends on it: an isolation that is
+# broken should be reported here, by name, rather than as a live-control
+# cascade.
+echo "Testing the packaged test isolation (scripts/pogo-sandbox)"
+bash scripts/pogo-sandbox_test.sh
+
 # The live control for the mg-de08 mail-check post-check (mg-c02d). Stands up a
 # sandboxed pogod and drives the ASSEMBLED verify path — the unit test above
 # only proves the pure classifier can fail. Costs ~40s (pogod holds its

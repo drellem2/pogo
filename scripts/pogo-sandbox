@@ -1,0 +1,553 @@
+#!/usr/bin/env bash
+# =============================================================================
+# pogo-sandbox — PACKAGED TEST ISOLATION (mg-78a5)
+# =============================================================================
+#
+#   source "$REPO_ROOT/scripts/pogo-sandbox"
+#   pogo_sandbox_create live          # a private root; NO env change yet
+#   ...build the binaries under the real HOME...
+#   pogo_sandbox_isolate              # HOME/XDG/POGO_HOME pinned, and PROVEN private
+#   pogo_sandbox_daemon "$POGO_SANDBOX_DIR/pogod" /scheduler/schedules
+#   trap pogo_sandbox_down EXIT
+#
+# or, for a test that is not written in shell:
+#
+#   scripts/pogo-sandbox run -- go test ./internal/agent/...
+#
+# WHY THIS FILE EXISTS
+# --------------------
+# FOUR tickets have been filed for ONE defect — a test reading the developer's
+# live ~/.pogo, live daemon, or live fleet instead of a fixture:
+#
+#   mg-6092   a test reading live ~/.pogo park state
+#   mg-e8e7   seven respawn tests reading the host's live park state
+#   mg-5336   the project and driver suites writing to the real ~/.pogo
+#   mg-3412   scripts/pogo-self-deploy_live_test.sh, which gates EVERY merge
+#
+# Each fix was correct and each left the next instance available, because every
+# one of them re-derived isolation by hand at the call site. Isolation done by
+# hand is isolation done by REMEMBERING, and the record says four teams in a row
+# did not. mg-3412 is what that costs at the far end: a suite that binds a port
+# and reads fleet state BY NAME produced fourteen assertion failures — including
+# verbatim fail-open security findings — about a tree that was provably fine. It
+# cost a merge and fifteen minutes of wrong diagnosis.
+#
+# So the unit of reuse here is not a helper for the parts that are tedious. It is
+# the whole envelope, and every guarantee in it is CHECKED rather than
+# constructed-and-assumed:
+#
+#   1. A PRIVATE HOME THAT CANNOT BE THE DEVELOPER'S. HOME, XDG_CONFIG_HOME and
+#      POGO_HOME are pinned under a throwaway root, and then each one is RESOLVED
+#      THROUGH SYMLINKS and refused if it lands on, above, or below the real
+#      ~/.pogo. POGO_HOME is pinned separately from HOME on purpose: this box
+#      exports POGO_HOME=$HOME from a stale profile, so a test that sets only
+#      HOME still writes to the live tree — which is mg-5336 exactly.
+#
+#   2. A PRIVATE PORT THAT CANNOT COLLIDE. Delegated to lib/sandbox-daemon.sh:
+#      an O_EXCL reservation rather than a probe, plus a proof that the process
+#      answering the port is the one this run started. mg-3412 drew 17731 while
+#      another run held it, and spent the rest of the file interrogating a
+#      stranger's daemon.
+#
+#   3. NAMES NO LIVE FLEET COULD HOLD — and, more to the point, no way to use a
+#      name that IS one. Every write through pogo_sandbox_curl has its schedule
+#      and agent identities checked against this run's token, so registering
+#      `mail-check-pa` (which mg-3412's suite really did, and really removed and
+#      restored) is refused at the write boundary. Namespacing you have to
+#      remember is the thing that failed four times; this one refuses.
+#
+#   4. A SETUP FAILURE THAT CANNOT BE READ AS A REGRESSION. Everything above
+#      ends the run through sandbox_setup_fail: a distinct banner, a distinct
+#      exit code (99), and an explicit statement that the run makes NO claim
+#      about the tree. mg-3412's cascade printed fourteen assertion failures
+#      downstream of one setup failure; that single property would have
+#      prevented the misdiagnosis outright.
+#
+# WHAT IT DELIBERATELY DOES NOT DO
+# --------------------------------
+# It does not retry, and it must never learn to: a control that reruns itself on
+# failure converts a real regression into a merged one. It does not soften any
+# caller's assertion — it fails EARLIER and LOUDER, never later and quieter. And
+# it makes no attempt to sandbox things it cannot check; where a guarantee cannot
+# be verified it is not claimed (see pogo_sandbox_daemon's note on lsof).
+#
+# See scripts/pogo-sandbox_test.sh, which breaks each guarantee on purpose and
+# reads back what comes out. A harness observed only making tests pass has not
+# been observed working.
+# =============================================================================
+
+# Idempotent: a suite may source this and a library it already sourced.
+if [ -z "${POGO_SANDBOX_SOURCED:-}" ]; then
+POGO_SANDBOX_SOURCED=1
+
+POGO_SANDBOX_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# The port reservation, the daemon-ownership proof, and sandbox_setup_fail
+# (mg-3412). Kept as its own file: it is the layer that has already shipped and
+# is already directly exercised by pogo-self-deploy_live_setup_test.sh.
+# shellcheck source=/dev/null
+. "$POGO_SANDBOX_SCRIPT_DIR/lib/sandbox-daemon.sh"
+
+# THE REAL ONES, CAPTURED BEFORE ANYTHING CAN OVERRIDE THEM. Every check below
+# compares against these, so they have to be read at source time — after
+# pogo_sandbox_isolate has run there is no way left to ask what the developer's
+# home was, and a check that reads the value it just wrote checks nothing.
+POGO_SANDBOX_REAL_HOME="${HOME:-}"
+POGO_SANDBOX_REAL_POGO_HOME="${POGO_HOME:-$POGO_SANDBOX_REAL_HOME/.pogo}"
+
+# Set by the lifecycle functions. Globals rather than stdout for the same reason
+# sandbox-daemon.sh uses globals: these functions can END THE RUN, and
+# `X="$(pogo_sandbox_create)"` would run that exit inside a command substitution
+# — killing the subshell, handing the caller an empty string, and carrying on
+# into the cascade this file exists to prevent.
+POGO_SANDBOX_DIR=""
+POGO_SANDBOX_TOKEN=""
+POGO_SANDBOX_PORT=""
+POGO_SANDBOX_URL=""
+POGO_SANDBOX_PID=""
+POGO_SANDBOX_LOG=""
+POGO_SANDBOX_READY=""
+POGO_SANDBOX_ISOLATED=""
+
+# pogo_sandbox_fail MSG [LOGFILE] — end the run as INFRASTRUCTURE, loudly.
+# The whole of guarantee 4; see sandbox_setup_fail for the banner and the rc.
+pogo_sandbox_fail() { sandbox_setup_fail "$@"; }
+
+# ---------------------------------------------------------------------------
+# path helpers — everything here resolves SYMLINKS, because the interesting
+# failure is the one where $root/home is a link to the developer's home and
+# every string comparison says the sandbox is private.
+# ---------------------------------------------------------------------------
+pogo_sandbox__realpath() {
+    local p="$1" d b
+    if [ -d "$p" ]; then
+        (cd "$p" 2>/dev/null && pwd -P) || printf '%s' "$p"
+        return 0
+    fi
+    d="$(dirname "$p")"; b="$(basename "$p")"
+    if [ -d "$d" ]; then
+        printf '%s/%s' "$(cd "$d" && pwd -P)" "$b"
+    else
+        printf '%s' "$p"
+    fi
+}
+
+# pogo_sandbox__under CHILD PARENT — true if CHILD is PARENT or lives inside it.
+pogo_sandbox__under() {
+    local child="$1" parent="$2"
+    [ -n "$child" ] && [ -n "$parent" ] || return 1
+    [ "$child" = "$parent" ] && return 0
+    case "$child" in "$parent"/*) return 0 ;; esac
+    return 1
+}
+
+# pogo_sandbox__reject_live_path PATH WHAT — end the run if PATH is, contains, or
+# sits inside the developer's home or live pogo state. Symlinks resolved first:
+# the whole point is the case where the string looks private and the inode is not.
+pogo_sandbox__reject_live_path() {
+    local path="$1" what="$2" resolved real_home real_pogo
+    resolved="$(pogo_sandbox__realpath "$path")"
+    real_home="$(pogo_sandbox__realpath "$POGO_SANDBOX_REAL_HOME")"
+    real_pogo="$(pogo_sandbox__realpath "$POGO_SANDBOX_REAL_POGO_HOME")"
+
+    if [ "$resolved" = "$real_home" ] || pogo_sandbox__under "$real_home" "$resolved"; then
+        pogo_sandbox_fail "$what ($path) resolves to $resolved, which IS the developer's home ($real_home) or contains it. Refusing: this directory is removed at teardown."
+    fi
+    if [ "$resolved" = "$real_pogo" ] || pogo_sandbox__under "$real_pogo" "$resolved" \
+        || pogo_sandbox__under "$resolved" "$real_pogo"; then
+        pogo_sandbox_fail "$what ($path) resolves to $resolved, which is the developer's live pogo state ($real_pogo), contains it, or lives inside it. Refusing: this directory is removed at teardown."
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# 1. the root and the run token
+# ---------------------------------------------------------------------------
+
+# pogo_sandbox_create [LABEL] — make a private root and mint this run's name
+# token. Sets $POGO_SANDBOX_DIR and $POGO_SANDBOX_TOKEN. Changes NO environment
+# variable: callers that must build binaries under the real HOME (Go resolves
+# GOMODCACHE off $HOME, and building after the override re-downloads the whole
+# module cache into the sandbox — minutes of network, and a cache that is
+# read-only by design and so defeats the teardown) do that between create and
+# isolate.
+pogo_sandbox_create() {
+    local label="${1:-sbx}" root
+
+    root="${POGO_SANDBOX_ROOT:-}"
+    if [ -n "$root" ]; then
+        mkdir -p "$root" 2>/dev/null \
+            || pogo_sandbox_fail "could not create the caller-supplied sandbox root POGO_SANDBOX_ROOT=$root"
+    else
+        root="$(mktemp -d 2>/dev/null)" \
+            || pogo_sandbox_fail "mktemp -d failed — there is no private root to build a sandbox in"
+    fi
+    [ -n "$root" ] && [ -d "$root" ] \
+        || pogo_sandbox_fail "the sandbox root ($root) does not exist after creation"
+    [ -w "$root" ] \
+        || pogo_sandbox_fail "the sandbox root $root is not writable — nothing below could stage the state it asserts on"
+
+    # THE FIRST CHECK, AND THE ONE WITH TEETH IN THE OTHER DIRECTION. Teardown
+    # does `rm -rf` on this root, so a root that resolves onto the developer's
+    # home would not merely READ live state — it would delete it. The isolate
+    # checks below run too late to help: an EXIT trap installed between create
+    # and isolate fires on the very setup failure they raise. So the root is
+    # vetted here, before it is stored anywhere anything could remove it from.
+    pogo_sandbox__reject_live_path "$root" "the sandbox root"
+
+    POGO_SANDBOX_DIR="$root"
+
+    # The token is what makes guarantee 3 checkable. It has to be unique per run
+    # (two concurrent runs must not be able to name the same schedule) and it has
+    # to be a string no live fleet would ever hold — hence the `sbx` prefix and
+    # the hex, rather than a bare pid, which reads like a number a human might
+    # pick. $$ alone is not enough: pids recycle, and a leaked lock outliving a
+    # recycled pid is exactly the ambiguity the port lockdir has to prune around.
+    POGO_SANDBOX_TOKEN="$(printf 'sbx%s%04x%04x' "$label" "$(( $$ & 0xffff ))" "$(( RANDOM & 0xffff ))")"
+    return 0
+}
+
+# pogo_sandbox_name BASE — a name namespaced to this run.
+# `pogo_sandbox_name pa` is a name only this process can hold; `pa` is a name the
+# machine's crew holds right now.
+pogo_sandbox_name() {
+    [ -n "$POGO_SANDBOX_TOKEN" ] \
+        || pogo_sandbox_fail "pogo_sandbox_name was called before pogo_sandbox_create — there is no run token to namespace with, and an un-namespaced name is how a control ends up removing the live fleet's mail-check-pa"
+    printf '%s-%s' "$POGO_SANDBOX_TOKEN" "$1"
+}
+
+# pogo_sandbox_is_private NAME — true if NAME belongs to this run.
+pogo_sandbox_is_private() {
+    [ -n "$POGO_SANDBOX_TOKEN" ] || return 1
+    case "$1" in *"$POGO_SANDBOX_TOKEN"*) return 0 ;; esac
+    return 1
+}
+
+# ---------------------------------------------------------------------------
+# 2. the private home
+# ---------------------------------------------------------------------------
+
+# pogo_sandbox_isolate — pin HOME / XDG_CONFIG_HOME / POGO_HOME under the root,
+# then PROVE none of them can reach the developer's state. Ends the run if any
+# check fails.
+#
+# The three variables are set separately and checked separately because they fail
+# separately. HOME alone leaks POGO_HOME on this box (a stale profile exports
+# POGO_HOME=$HOME) and leaks config.toml through XDG (config is layered, so the
+# real user config is read even under a private HOME — mg-cf9e).
+pogo_sandbox_isolate() {
+    local var val resolved real_home real_pogo root
+
+    [ -n "$POGO_SANDBOX_DIR" ] \
+        || pogo_sandbox_fail "pogo_sandbox_isolate was called before pogo_sandbox_create — there is no private root to point HOME at"
+
+    real_home="$(pogo_sandbox__realpath "$POGO_SANDBOX_REAL_HOME")"
+    real_pogo="$(pogo_sandbox__realpath "$POGO_SANDBOX_REAL_POGO_HOME")"
+    root="$(pogo_sandbox__realpath "$POGO_SANDBOX_DIR")"
+
+    export HOME="$POGO_SANDBOX_DIR/home"
+    export XDG_CONFIG_HOME="$POGO_SANDBOX_DIR/xdg"
+    export POGO_HOME="$POGO_SANDBOX_DIR/home/.pogo"
+    # Belt to the no-config-file braces: with no config.toml pogod starts no crew,
+    # but a caller that stages one should still not get the machine's fleet.
+    export POGO_AGENT_AUTOSTART=false
+    # A sandbox that reaches the live mail store is not a sandbox: stallwatch and
+    # the mg client root off the real $HOME unless told otherwise, so a control
+    # that sends mail would land it in ~/.macguffin/mail (mg-9a1c).
+    export MG_ROOT="$POGO_SANDBOX_DIR/home/.macguffin"
+
+    mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$POGO_HOME" 2>/dev/null \
+        || pogo_sandbox_fail "could not create the sandbox HOME/XDG_CONFIG_HOME/POGO_HOME under $POGO_SANDBOX_DIR"
+
+    for var in HOME XDG_CONFIG_HOME POGO_HOME MG_ROOT; do
+        eval "val=\"\$$var\""
+        resolved="$(pogo_sandbox__realpath "$val")"
+
+        # The check that catches the symlinked root, which is the only shape in
+        # which this goes wrong quietly: every string here reads as a private
+        # path right up until something follows the link.
+        if pogo_sandbox__under "$resolved" "$real_pogo" || pogo_sandbox__under "$real_pogo" "$resolved"; then
+            pogo_sandbox_fail "the sandbox's \$$var resolves to $resolved, which is the developer's live pogo state ($real_pogo) or contains it — the tests would be reading and WRITING the machine's real ~/.pogo, which is mg-6092/mg-e8e7/mg-5336 verbatim"
+        fi
+        if [ "$resolved" = "$real_home" ] || pogo_sandbox__under "$real_home" "$resolved"; then
+            pogo_sandbox_fail "the sandbox's \$$var resolves to $resolved, which is the developer's home ($real_home) or contains it — this is not a sandbox"
+        fi
+        if ! pogo_sandbox__under "$resolved" "$root"; then
+            pogo_sandbox_fail "the sandbox's \$$var resolves to $resolved, which is outside the sandbox root $root — it was not created by this run and nothing here owns its contents"
+        fi
+    done
+
+    # A just-created POGO_HOME holds nothing. If this one holds something, it is
+    # not the directory we think it is — and the cheapest moment to learn that is
+    # now, not from a control asserting on park state it did not stage.
+    if [ -n "$(ls -A "$POGO_HOME" 2>/dev/null)" ]; then
+        pogo_sandbox_fail "the sandbox POGO_HOME ($POGO_HOME) is not empty — a freshly created one is, so this directory predates this run and its contents are somebody else's state"
+    fi
+
+    POGO_SANDBOX_ISOLATED=1
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# 3. the private daemon
+# ---------------------------------------------------------------------------
+
+# pogo_sandbox_daemon BIN READY_PATH [LOGFILE] — reserve a port (once per run)
+# and start a pogod that has been PROVEN to be ours. Sets $POGO_SANDBOX_PORT,
+# $POGO_SANDBOX_URL, $POGO_SANDBOX_PID, $POGO_SANDBOX_LOG.
+#
+# Safe to call again after pogo_sandbox_daemon_kill: the port reservation is held
+# until teardown on purpose, so a control that kills its daemon to prove what a
+# dead one reports can start a successor on the SAME port without racing anyone
+# for it.
+pogo_sandbox_daemon() {
+    local bin="$1" ready="$2" log="${3:-}"
+
+    [ -n "$POGO_SANDBOX_DIR" ] \
+        || pogo_sandbox_fail "pogo_sandbox_daemon was called before pogo_sandbox_create"
+    [ -n "$POGO_SANDBOX_ISOLATED" ] \
+        || pogo_sandbox_fail "pogo_sandbox_daemon was called before pogo_sandbox_isolate — a daemon started under the developer's HOME would read, spawn from, and write to the live ~/.pogo whatever port it bound"
+    [ -x "$bin" ] \
+        || pogo_sandbox_fail "the sandbox daemon binary ($bin) is missing or not executable"
+
+    if [ -z "$POGO_SANDBOX_PORT" ]; then
+        sandbox_port_reserve
+        POGO_SANDBOX_PORT="$SANDBOX_PORT"
+        POGO_SANDBOX_URL="http://127.0.0.1:$POGO_SANDBOX_PORT"
+    fi
+
+    POGO_SANDBOX_LOG="${log:-$POGO_SANDBOX_DIR/pogod.log}"
+    POGO_SANDBOX_READY="$ready"
+    sandbox_daemon_start "$bin" "$POGO_SANDBOX_PORT" "$POGO_SANDBOX_LOG" "$ready"
+    POGO_SANDBOX_PID="$SANDBOX_DAEMON_PID"
+    return 0
+}
+
+# pogo_sandbox_daemon_kill — stop the sandbox daemon and do not return until the
+# port has actually gone quiet. Keeps the reservation (see above). Safe to call
+# twice.
+#
+# The readiness path is polled rather than `/`, because a control that kills its
+# daemon to observe what a DEAD one reports needs the endpoint it will read to be
+# the endpoint proven silent — `/` 404s on a perfectly live pogod, so a poll
+# against it would return at once and hand the control a daemon still answering.
+pogo_sandbox_daemon_kill() {
+    local i
+    [ -n "$POGO_SANDBOX_PID" ] || return 0
+    kill "$POGO_SANDBOX_PID" 2>/dev/null
+    wait "$POGO_SANDBOX_PID" 2>/dev/null
+    POGO_SANDBOX_PID=""
+    for i in $(seq 1 40); do
+        curl -sf --max-time 1 "$POGO_SANDBOX_URL${POGO_SANDBOX_READY:-/}" >/dev/null 2>&1 || return 0
+        sleep 0.25
+    done
+    return 0
+}
+
+# pogo_sandbox_assert_no_schedules — a just-booted sandbox pogod holds nothing.
+# Independent of lsof and of the process table: it interrogates the STATE, so it
+# still bites where the ownership proof cannot look (another user's socket).
+pogo_sandbox_assert_no_schedules() {
+    [ -n "$POGO_SANDBOX_URL" ] || return 0
+    if [ -n "$(curl -sf --max-time 5 "$POGO_SANDBOX_URL/scheduler/schedules" 2>/dev/null | grep -o '"id":"[^"]*"')" ]; then
+        pogo_sandbox_fail "the daemon on $POGO_SANDBOX_URL already holds schedules — a just-booted sandbox pogod holds none, so this is not our daemon and nothing below would be measuring the tree under test" "$POGO_SANDBOX_LOG"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# 4. writes to the sandbox, with the name guard
+# ---------------------------------------------------------------------------
+
+# pogo_sandbox_curl DESC -- <curl args> — stage state in the sandbox daemon.
+#
+# Two jobs, and they are the two halves of mg-3412's cascade:
+#
+#   * A failed staging call ends the run as INFRASTRUCTURE. These calls are
+#     scaffolding; when one fails the state was never staged, so every assertion
+#     after it is measuring something other than what its text claims. The
+#     incident's first line was "could not remove mail-check-pa from the sandbox
+#     daemon" and the next thirteen buried it.
+#
+#   * A staging call may only name THIS RUN's schedules and agents. The identity
+#     in `{"id":...}` / `{"agent":...}`, and the trailing path segment of a
+#     /scheduler/schedules/<id> URL, must carry the run token. So the literal
+#     write mg-3412 performed — removing and restoring a schedule named
+#     `mail-check-pa`, which is a real crew loop — is refused HERE, at the write
+#     boundary, rather than being left to whoever remembers.
+#
+# It is NOT for anything the code under test does. The driver's own curls run
+# exactly as shipped and their failures are still the control's verdict — a
+# control that kills its daemon needs those to fail. Guarding the scaffolding is
+# not guarding the instrument, and only the first is done here.
+pogo_sandbox_curl() {
+    local desc="$1"; shift
+    [ "${1:-}" = "--" ] && shift
+    pogo_sandbox__assert_private_args "$desc" "$@"
+    curl -sf --max-time 10 "$@" >/dev/null 2>&1 \
+        || pogo_sandbox_fail "$desc — the sandbox daemon on $POGO_SANDBOX_URL did not accept it, so the state the controls below assert on was never staged"
+}
+
+# pogo_sandbox__assert_private_args DESC ARGS... — refuse a write that names
+# anything outside this run. Deliberately conservative about WHAT it inspects
+# (schedule/agent identities and the schedules-collection path) and absolute
+# about the verdict once it finds one: an identity that does not carry the token
+# is a name some live fleet may hold, and there is no safe way to guess which.
+pogo_sandbox__assert_private_args() {
+    local desc="$1"; shift
+    local arg name tail names
+
+    [ -n "$POGO_SANDBOX_TOKEN" ] || return 0
+
+    for arg in "$@"; do
+        case "$arg" in
+            */scheduler/schedules/*)
+                tail="${arg##*/scheduler/schedules/}"
+                if [ -n "$tail" ] && ! pogo_sandbox_is_private "$tail"; then
+                    pogo_sandbox__name_fail "$desc" "$tail" "the URL path"
+                fi
+                ;;
+        esac
+        case "$arg" in
+            *'"id"'*|*'"agent"'*)
+                names="$(printf '%s' "$arg" \
+                    | grep -oE '"(id|agent)"[[:space:]]*:[[:space:]]*"[^"]*"' \
+                    | sed -e 's/.*"\([^"]*\)"$/\1/')"
+                while IFS= read -r name; do
+                    [ -n "$name" ] || continue
+                    pogo_sandbox_is_private "$name" && continue
+                    pogo_sandbox__name_fail "$desc" "$name" "the request body"
+                done <<<"$names"
+                ;;
+        esac
+    done
+}
+
+pogo_sandbox__name_fail() {
+    local desc="$1" name="$2" where="$3"
+    pogo_sandbox_fail "$desc — refused: $where names '$name', which is not namespaced to this run (token '$POGO_SANDBOX_TOKEN'). A sandbox write may only touch names this run minted, because a real fleet can hold the others: mg-3412's suite removed and restored a schedule literally called 'mail-check-pa'. Use \"\$(pogo_sandbox_name <base>)\"."
+}
+
+# ---------------------------------------------------------------------------
+# teardown
+# ---------------------------------------------------------------------------
+
+# pogo_sandbox_down — kill the daemon, release the port claim, remove the root.
+# Safe from an EXIT trap and safe to call twice.
+pogo_sandbox_down() {
+    if [ -n "$POGO_SANDBOX_PID" ]; then
+        kill "$POGO_SANDBOX_PID" 2>/dev/null
+        wait "$POGO_SANDBOX_PID" 2>/dev/null
+        POGO_SANDBOX_PID=""
+    fi
+    sandbox_port_release
+    if [ -n "$POGO_SANDBOX_DIR" ] && [ -d "$POGO_SANDBOX_DIR" ]; then
+        # Re-vetted at the moment of removal, not just at creation: the root may
+        # have GAINED a link to live state while the run was using it, and this
+        # is the last instant before an rm -rf that cannot be taken back.
+        pogo_sandbox__reject_live_path "$POGO_SANDBOX_DIR" "the sandbox root being torn down"
+        # Any `go` call under the sandbox HOME materialises the toolchain module
+        # into $root/home/go/pkg/mod, and Go marks the module cache 0444 by
+        # design — so a plain rm -rf fails "Permission denied" on every file and
+        # litters the temp dir each run (mg-e91e).
+        chmod -R u+w "$POGO_SANDBOX_DIR" 2>/dev/null
+        rm -rf "$POGO_SANDBOX_DIR"
+    fi
+    POGO_SANDBOX_DIR=""
+}
+
+# pogo_sandbox_up BIN READY_PATH [LABEL] — create + isolate + daemon, for the
+# common case where nothing has to be built under the real HOME first.
+pogo_sandbox_up() {
+    local bin="$1" ready="$2" label="${3:-sbx}"
+    pogo_sandbox_create "$label"
+    pogo_sandbox_isolate
+    pogo_sandbox_daemon "$bin" "$ready"
+}
+
+fi  # POGO_SANDBOX_SOURCED
+
+# =============================================================================
+# EXECUTABLE FRONT END
+# =============================================================================
+# For tests that are not written in shell. `run` is the one that matters: it puts
+# a command inside the same envelope the shell API gives, so a Go suite becomes
+# hermetic without every _test.go re-deriving the override set — which is what
+# mg-6092, mg-e8e7 and mg-5336 each did by hand.
+#
+# Setup failures keep their exit code here too, so a caller can still tell "the
+# suite never ran" from "the suite ran and found something" (99 vs whatever the
+# command exits).
+# =============================================================================
+pogo_sandbox__usage() {
+    cat <<'USAGE'
+pogo-sandbox — packaged test isolation for pogo (mg-78a5)
+
+  scripts/pogo-sandbox run [--daemon BIN] [--ready PATH] [--label NAME] -- CMD [ARGS...]
+      Run CMD with a private HOME/XDG_CONFIG_HOME/POGO_HOME/MG_ROOT (and, with
+      --daemon, a private pogod on a reserved port, exported as POGO_PORT).
+      Exits with CMD's status; exits 99 if the sandbox could not be established.
+
+  scripts/pogo-sandbox env [--label NAME]
+      Print the sandbox environment as `export` lines. The caller owns the root
+      it prints (POGO_SANDBOX_DIR) and must remove it.
+
+  source scripts/pogo-sandbox
+      The shell API: pogo_sandbox_create / _isolate / _daemon / _name / _curl /
+      _down. See the header of this file.
+USAGE
+}
+
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+    set -u
+    pogo_sandbox__main() {
+        local mode="${1:-}"; shift || true
+        local daemon_bin="" ready="/scheduler/schedules" label="sbx" rc=0
+
+        case "$mode" in
+            run)
+                while [ $# -gt 0 ]; do
+                    case "$1" in
+                        --daemon) daemon_bin="${2:-}"; shift 2 ;;
+                        --ready)  ready="${2:-}"; shift 2 ;;
+                        --label)  label="${2:-}"; shift 2 ;;
+                        --)       shift; break ;;
+                        *)        pogo_sandbox__usage >&2; exit 2 ;;
+                    esac
+                done
+                [ $# -gt 0 ] || { pogo_sandbox__usage >&2; exit 2; }
+
+                pogo_sandbox_create "$label"
+                trap pogo_sandbox_down EXIT
+                pogo_sandbox_isolate
+                if [ -n "$daemon_bin" ]; then
+                    pogo_sandbox_daemon "$daemon_bin" "$ready"
+                    export POGO_PORT="$POGO_SANDBOX_PORT"
+                fi
+                export POGO_SANDBOX_DIR POGO_SANDBOX_TOKEN POGO_SANDBOX_PORT POGO_SANDBOX_URL
+                "$@" || rc=$?
+                exit "$rc"
+                ;;
+            env)
+                while [ $# -gt 0 ]; do
+                    case "$1" in
+                        --label) label="${2:-}"; shift 2 ;;
+                        *)       pogo_sandbox__usage >&2; exit 2 ;;
+                    esac
+                done
+                pogo_sandbox_create "$label"
+                pogo_sandbox_isolate
+                printf 'export HOME=%s\n' "$HOME"
+                printf 'export XDG_CONFIG_HOME=%s\n' "$XDG_CONFIG_HOME"
+                printf 'export POGO_HOME=%s\n' "$POGO_HOME"
+                printf 'export MG_ROOT=%s\n' "$MG_ROOT"
+                printf 'export POGO_AGENT_AUTOSTART=false\n'
+                printf 'export POGO_SANDBOX_DIR=%s\n' "$POGO_SANDBOX_DIR"
+                printf 'export POGO_SANDBOX_TOKEN=%s\n' "$POGO_SANDBOX_TOKEN"
+                ;;
+            -h|--help|help|"")
+                pogo_sandbox__usage ;;
+            *)
+                pogo_sandbox__usage >&2; exit 2 ;;
+        esac
+    }
+    pogo_sandbox__main "$@"
+fi
