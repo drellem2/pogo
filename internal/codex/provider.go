@@ -18,6 +18,83 @@ import (
 	"github.com/drellem2/pogo/internal/agent"
 )
 
+// promptReadySentinel is Codex's status-box "change the model" hint — the
+// measured "input loop ready" marker. Codex draws a status box once the composer
+// is up:
+//
+//	╭────────────────────────────────────────────╮
+//	│ >_ OpenAI Codex (v0.132.0)                 │
+//	│                                            │
+//	│ model:       gpt-5.5   /model to change    │
+//	│ directory:   /private/var/…/worktree       │
+//	│ permissions: YOLO mode                     │
+//	╰────────────────────────────────────────────╯
+//
+// It is absent for as long as the directory-trust dialog is up (that dialog
+// blocks the TUI and paints nothing else) and appears ~190ms into a spawn that
+// has no dialog to clear. Measured against a live Codex CLI 0.132.0: present
+// 8/8 where the composer is up (5 already-trusted spawns + 3 after dismissal),
+// absent 5/5 with the dialog up and never dismissed. See
+// docs/investigations/codex-nudge-calibration.md.
+//
+// This slice and not another: the composer PLACEHOLDER rotates between at least
+// five strings ("Explain this codebase", "Use /skills to list available
+// skills", "Run /review on my current changes", "Find and fix a bug in
+// @filename", "Summarize recent commits"), so it is unusable as a sentinel —
+// measuring once would have picked one and shipped a marker that matched a fifth
+// of the time. The status box is stable, and this slice of it carries no model
+// name and no version number, so neither a model default change nor a Codex
+// upgrade breaks it.
+//
+// Two consumers: Provider.Nudge.PromptReadySentinel, and TrustDialogHook, which
+// uses its appearance to prove there is no trust dialog left to dismiss.
+const promptReadySentinel = "/model to change"
+
+// promptReadyAlternates are the additional accepted ready-markers.
+//
+// Two independent markers, each in two render forms. The second marker
+// (">_ OpenAI Codex (v") is the status box's title line, so a reword of the
+// model hint alone still leaves a match; it is cut before the version digits so
+// a Codex upgrade does not silently un-match it.
+//
+// The spaceless duplicates are the gh#76 / mg-d06a space-collapse insurance.
+// agent/nudge.go matches these RAW against StripANSI output, and Codex renders
+// this box with real spaces today — but it draws the trust dialog's body
+// glyph-by-glyph with cursor positioning, which makes those spaces vanish
+// ("untrusted contents" -> "untrustedcontents"). The box and the dialog take
+// different render paths today; if the box ever moves onto the dialog's, the
+// spaced forms stop matching and every spawn would silently pay the full
+// initialNudgeTimeout as dead time. Listing both forms costs two strings and
+// removes that failure mode. (TrustDialogHook's composerReady does not depend on
+// this: it collapses both sides — see composerReady.)
+var promptReadyAlternates = []string{
+	"/modeltochange",
+	">_ OpenAI Codex (v",
+	">_OpenAICodex(v",
+}
+
+// initialNudgeTimeout is Codex's cold-start budget: how long the spawn path is
+// willing to wait for the composer to appear.
+//
+// Codex is a native Rust binary and renders its TUI to first-quiet in
+// ~0.2-0.3s, so 30s is a generous upper bound; the nudge actually fires at
+// ~IdleThreshold once the composer is idle.
+//
+// Two consumers, deliberately — Provider.Nudge.InitialNudgeTimeout, and
+// TrustDialogTimeout, which bounds how long TrustDialogHook watches for the
+// dialog. They must be the SAME number rather than two independent guesses: the
+// hook is what unblocks the composer, so it must not stop watching before the
+// spawn path stops waiting. See TrustDialogTimeout for what a hook that gives up
+// first costs.
+//
+// It is a const rather than `TrustDialogTimeout = Provider.Nudge.InitialNudgeTimeout`
+// because Provider's initializer references TrustDialogHook, whose body reads
+// TrustDialogTimeout — Go's initialization-dependency analysis is transitive
+// through function bodies, so sourcing the timeout from Provider would be an
+// initialization cycle. Same shape as internal/cursor. (claude has no such
+// problem: its bound comes from agent.DefaultNudgeProfile, another package.)
+const initialNudgeTimeout = 30 * time.Second
+
 // Provider is the OpenAI Codex CLI harness descriptor.
 //
 // Prompt injection uses the ContextFile strategy: pogo writes the persona
@@ -75,8 +152,10 @@ var Provider = agent.Provider{
 		// Codex is a native binary and renders its TUI to first-quiet in
 		// ~0.2-0.3s — far faster than Claude/Ink's cold start. 30s is a
 		// generous upper bound; the nudge actually fires at ~IdleThreshold
-		// once the composer is idle.
-		InitialNudgeTimeout: 30 * time.Second,
+		// once the composer is idle. Shared with TrustDialogTimeout so the
+		// hook that unblocks the composer cannot stop watching before this
+		// path stops waiting for it — see initialNudgeTimeout.
+		InitialNudgeTimeout: initialNudgeTimeout,
 
 		// A carriage return submits the Codex composer (verified: a split
 		// write ending in "\r" drives the TUI into its Working state).
@@ -101,6 +180,16 @@ var Provider = agent.Provider{
 		// hook's worst-case dismiss latency (~1.3s), so the nudge reliably
 		// lands in the ready composer. See docs/investigations/codex-nudge-calibration.md.
 		IdleThreshold: 2 * time.Second,
+
+		// Codex's status box renders "model: <name>  /model to change" once the
+		// composer is up, and paints nothing while the trust dialog blocks the
+		// TUI — which makes it a precise "input loop ready" marker. It was
+		// measured (mg-86e7), not guessed: for most of Codex's life in pogo
+		// this was empty and WaitForReady fell back to pure wait-idle, because
+		// the obvious candidate — the composer placeholder — turned out to
+		// rotate between five strings. See promptReadySentinel.
+		PromptReadySentinel:   promptReadySentinel,
+		PromptReadyAlternates: promptReadyAlternates,
 	},
 
 	// PostSpawnHook auto-accepts Codex's directory-trust dialog; SessionHook is

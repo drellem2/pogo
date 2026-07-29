@@ -208,8 +208,17 @@ type NudgeProfile struct {
 	// Ink's input loop exists. The bytes then pile in the kernel input buffer
 	// and Ink reads the whole spawn-cluster as one paste-mode block that the
 	// submit never re-tokenizes, wedging the agent (mg-ce61). An empty
-	// sentinel falls back to pure wait-idle behavior (e.g. Codex, whose
-	// ratatui composer has no equivalent stable marker).
+	// sentinel falls back to pure wait-idle behavior.
+	//
+	// Every provider pogo ships now declares one. Codex was the last holdout,
+	// and was cited here for a long time as the harness with no equivalent
+	// stable marker. That was true of the obvious candidate — its composer
+	// placeholder rotates between at least five strings — but not of its TUI:
+	// the status box carries a stable "/model to change" hint, measured under
+	// mg-86e7. Finding a marker is an empirical job against a live harness
+	// rather than a reading of its source; see
+	// docs/investigations/codex-nudge-calibration.md for the shape of that
+	// measurement.
 	PromptReadySentinel string
 
 	// PromptReadyAlternates are additional accepted ready-markers: WaitForReady

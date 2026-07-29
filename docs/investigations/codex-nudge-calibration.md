@@ -1,9 +1,11 @@
 # Codex CLI provider — nudge calibration & integration findings
 
-**Status:** calibration record for Phase 3B (mg-7f76). Evidence for the
-`codex.Provider` values in `internal/codex/provider.go`.
+**Status:** calibration record for Phase 3B (mg-7f76), extended 2026-07-29 with
+the composer-ready measurement (mg-86e7). Evidence for the `codex.Provider`
+values in `internal/codex/provider.go`.
 **Harness measured:** OpenAI Codex CLI **0.132.0** (`codex-cli 0.132.0`,
-`macos-aarch64`), spawned in a PTY at pogo's default 200×50 winsize.
+`macos-aarch64`), spawned in a PTY at pogo's default 200×50 winsize. Both passes
+measured the same version.
 **Predecessor:** `docs/design/multi-provider-architecture-survey.md` §3 Phase 3B.
 
 The survey flagged the Codex nudge dialect as "the one genuine unknown" and
@@ -22,6 +24,7 @@ every measured dimension. The calibrated `NudgeProfile`:
 | `SubmitTerminator` | `\r` | **`\r`** | A carriage return submits the composer. |
 | `SubmitDelay` | 50ms | **50ms** | Codex has paste-burst detection — a combined `body+\r` write does not submit. Split write required. |
 | `IdleThreshold` | 2s | **2s** | Not a steady-state value — set by the spawn-time trust-dialog race (see below). |
+| `PromptReadySentinel` | `? for shortcuts` | **`/model to change`** | The status box's model hint. Added mg-86e7; **was empty** until then — see "Composer-ready marker" below for why the first pass concluded there was none. |
 
 Plus two integration findings that are **not** `NudgeProfile` fields but are
 load-bearing for the provider:
@@ -118,6 +121,82 @@ whitespace before matching its marker — see `matchesTrustDialog`.
 No `SessionHook` is needed: Codex surfaces no mid-session modal requiring a
 keystroke (the quota/rate-limit notice is an inline message; command approvals
 are bypassed by the command flag).
+
+### Composer-ready marker → `PromptReadySentinel`, and the widened trust window
+
+**Added 2026-07-29 (mg-86e7), against the same Codex CLI 0.132.0.** This section
+supersedes the original finding that Codex's ratatui composer had no stable ready
+marker. It has one; the first pass looked at the wrong part of the screen.
+
+Method: `pty.StartWithSize` at pogo's 200×50 default, capturing all PTY output
+through `agent.StripANSI`, across three spawn shapes — an untrusted directory
+with the dialog never dismissed, an untrusted directory with `\r` sent at 1.5s,
+and an already-trusted directory (the `Registry.Respawn` shape, pre-seeded via
+`$CODEX_HOME/config.toml` so the real `~/.codex` was never touched).
+
+**The trap.** The obvious candidate is the composer placeholder, and it is
+unusable: it **rotates**. Five different strings were observed across spawns —
+`Explain this codebase`, `Use /skills to list available skills`, `Run /review on
+my current changes`, `Find and fix a bug in @filename`, `Summarize recent
+commits`. A single measurement would have picked one and shipped a sentinel that
+matched a fifth of the time, which is worse than none: a sentinel that
+*usually* misses makes every spawn pay the full `InitialNudgeTimeout` as dead
+time, silently. Measuring three times is what caught this.
+
+**The marker.** Once the composer is up, Codex draws a persistent status box:
+
+```
+╭────────────────────────────────────────────╮
+│ >_ OpenAI Codex (v0.132.0)                 │
+│                                            │
+│ model:       gpt-5.5   /model to change    │
+│ directory:   /private/var/…/worktree       │
+│ permissions: YOLO mode                     │
+╰────────────────────────────────────────────╯
+```
+
+`/model to change` is the sentinel, with `>_ OpenAI Codex (v` as an independent
+alternate. Both are cut to carry **no model name and no version digits**, so
+neither a changed model default nor a Codex upgrade un-matches them.
+
+Results, sentinels scored in their **shipping form** (raw substring against
+`StripANSI` output, which is what `agent/nudge.go` does):
+
+| Spawn shape | n | `/model to change` | `>_ OpenAI Codex (v` |
+|---|---|---|---|
+| already-trusted dir, no dialog | 5 | present 5/5 | present 5/5 |
+| dialog up, never dismissed | 5 | **absent 5/5** | **absent 5/5** |
+| dialog dismissed → composer | 3 | present 3/3 | present 3/3 |
+
+The absence row is the load-bearing one: the dialog blocks the TUI and paints
+nothing else, so the box cannot appear while dismissal is still owed. First
+sighting is **~190ms** into a spawn with no dialog to clear.
+
+The box is **content-sized, not terminal-relative**: it measured 60 columns at
+both 200×50 and 80×24, grew to 73 for a deliberately long model name, and
+overflowed rather than re-wrapped at 60×20. So `/model to change` never wraps and
+the marker holds at any winsize.
+
+**Space-collapse insurance (gh#76 / mg-d06a).** The status box renders with real
+spaces; the trust dialog body does not (Codex draws that glyph-by-glyph, so
+`"untrusted contents"` → `"untrustedcontents"`). The two take different render
+paths today. Because `nudge.go` matches sentinels raw, the set carries a
+spaceless duplicate of each marker — `/modeltochange`, `>_OpenAICodex(v` — so
+that if the box ever moves onto the dialog's render path the sentinel does not
+silently stop matching. `codex.composerReady` sidesteps the question entirely by
+collapsing both sides. `TestReadySentinelsAreCollapseSafe` pins the rule.
+
+**What this unblocked.** Two things that had been waiting on it:
+
+- `TrustDialogTimeout` was a fixed 12s — the same defect shape
+  drellem2/pogo#91 removed from claude and cursor. It is now sourced from
+  `initialNudgeTimeout`, the provider's own cold-start budget. Widening the
+  window was only safe once `composerReady` existed to gate it, because
+  `trustDialogMarker` matches PTY *text* and the harness echoes the nudged task
+  into the TUI — a work item quoting the dialog matches the marker, and on an
+  already-trusted directory an unguarded hook would press Enter into a live
+  composer. (mg-86e7's own ticket body trips the marker.)
+- `WaitForReady` no longer falls back to pure wait-idle for Codex.
 
 ### Persona injection → `AGENTS.override.md` + `project_doc_max_bytes`
 
