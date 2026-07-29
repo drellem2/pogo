@@ -481,6 +481,7 @@ func (r *Registry) RegisterHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/agents/spawn-polecat", r.handleSpawnPolecat)
 	mux.HandleFunc("/agents/drain", r.handleDrain)
 	mux.HandleFunc("/agents/prompts", r.handlePrompts)
+	mux.HandleFunc("/agents/mail-loops", r.handleMailLoops)
 	mux.HandleFunc("/agents/{name}", r.handleAgent)
 	mux.HandleFunc("/agents/{name}/park", r.handlePark)
 	mux.HandleFunc("/agents/{name}/wake", r.handleWake)

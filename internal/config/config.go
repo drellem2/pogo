@@ -196,6 +196,32 @@ const (
 	// the coordinator is itself a crew agent and can have the exact defect being
 	// reported (mg-d385) — an alert routed only to the patient reaches nobody.
 	DefaultAckWatchEscalateAfter = 24 * time.Hour
+
+	// DefaultDeafWatchInterval is how often pogod's missing-mail-loop announcer
+	// samples the registry (mg-032b). Finer than the ack-watch cadence because
+	// the condition is a BOOLEAN state rather than a rate: there is no averaging
+	// to wait for, and the hold-down — not the sampling interval — is what keeps
+	// it quiet. Rides the heartbeat, not a launchd timer (mg-50e0).
+	DefaultDeafWatchInterval = 5 * time.Minute
+	// DefaultDeafWatchHoldDown is how long an agent must be observed with no
+	// mail-check schedule, unbroken, before it is announced. Spawn and schedule
+	// registration are not simultaneous, and a redeploy re-runs that gap for the
+	// whole fleet; without a hold-down every restart would announce everyone.
+	// Same mechanism, same reason, as mg-4904's hold-down on usage-limit hits.
+	DefaultDeafWatchHoldDown = 15 * time.Minute
+	// DefaultDeafWatchRenotify is how long an UNCHANGED roster of unreachable
+	// agents stays quiet before being raised again.
+	DefaultDeafWatchRenotify = 6 * time.Hour
+	// DefaultDeafWatchNotifyTo is the mailbox announcements go to. The mayor:
+	// re-registering a mail-check, and deciding whether the agent also needs a
+	// restart, is coordination work.
+	DefaultDeafWatchNotifyTo = "mayor"
+	// DefaultDeafWatchEscalateAfter is how long a finding may persist before
+	// `human` is copied as well. Note that this detector ALSO escalates
+	// immediately — regardless of this value — when the roster names NotifyTo
+	// itself: mailing an agent that has no mail loop about its own missing mail
+	// loop is not a weaker alert, it is no alert at all.
+	DefaultDeafWatchEscalateAfter = 24 * time.Hour
 )
 
 // DefaultFastPriorities is the set of WorkItem.Priority values that trigger the
@@ -317,6 +343,7 @@ type Config struct {
 	CredExpiry CredExpiryConfig
 	GHTeardown GHTeardownConfig
 	AckWatch   AckWatchConfig
+	DeafWatch  DeafWatchConfig
 	// Source is the path of the highest-precedence config file Load read, or
 	// "" when no config file was found and everything is defaults + env. pogod
 	// uses this to gate crew auto-start: a daemon with no config file is
@@ -603,6 +630,55 @@ type AckWatchConfig struct {
 	EscalateAfter time.Duration
 }
 
+// DeafWatchConfig configures pogod's missing-mail-loop ANNOUNCER (mg-032b): the
+// heartbeat-driven runner that applies `pogo agent diagnose`'s own mail-loop
+// judgement to the whole registry and mails when an agent has no way to be
+// woken.
+//
+// It exists because that judgement already existed and only one thing consumed
+// it. mg-de08 taught diagnose to report `health=no_mail_loop`; mg-738f widened
+// it to the deaf survivor — an auto_start=false agent that is running with its
+// mail loop dead underneath it — and said in its own closing section that the
+// fault was thereby DETECTABLE but never ANNOUNCED, because the only reader was
+// `pogo agent diagnose <name>`: a subcommand that takes as an argument the name
+// the operator does not know to type. An agent with no mail loop is unreachable
+// by every coordination path the fleet has, while looking perfectly healthy.
+//
+// The detector's mechanics live in internal/deafwatch; this config carries the
+// runner's cadence, hold-down and routing, matching how the other heartbeat
+// detectors are configured.
+//
+// REPORT-ONLY: it mails NotifyTo and never registers a schedule, nudges, or
+// restarts. Re-registering the loop on the agent's behalf would hide WHY it
+// vanished, which is the part worth knowing.
+type DeafWatchConfig struct {
+	// Enabled turns the runner on. Defaults to true. It is inert on a daemon
+	// with no mail-check provider (scheduler disabled) — that case reports as
+	// an error rather than as a clean fleet — so leaving it on is safe.
+	Enabled bool
+	// Interval is the gap between samples. Zero falls back to
+	// DefaultDeafWatchInterval.
+	Interval time.Duration
+	// HoldDown is how long a missing mail loop must persist, unbroken, before
+	// it is announced. Zero falls back to DefaultDeafWatchHoldDown. A NEGATIVE
+	// value disables the hold-down entirely, which only tests should do:
+	// without it, every restart announces the whole fleet in the gap between
+	// spawn and schedule registration.
+	HoldDown time.Duration
+	// RenotifyAfter is how long an unchanged roster stays quiet before being
+	// mailed again. Zero falls back to DefaultDeafWatchRenotify.
+	RenotifyAfter time.Duration
+	// NotifyTo is the mailbox announcements are sent to. Empty falls back to
+	// DefaultDeafWatchNotifyTo (`mayor`).
+	NotifyTo string
+	// EscalateAfter is how long a finding may persist unbroken before the
+	// notice also goes to `human`. Zero falls back to
+	// DefaultDeafWatchEscalateAfter; a NEGATIVE value disables the AGE-based
+	// escalation. It does NOT disable the immediate escalation when the roster
+	// names NotifyTo itself — that one is not a matter of patience.
+	EscalateAfter time.Duration
+}
+
 // AgentsConfig holds agent command configuration.
 type AgentsConfig struct {
 	// Provider selects the agent harness ("claude", "codex", "pi", "cursor"). Resolved
@@ -740,6 +816,7 @@ type parsedConfig struct {
 	credExpiryEnabledSet   bool
 	ghTeardownEnabledSet   bool
 	ackWatchEnabledSet     bool
+	deafWatchEnabledSet    bool
 	// sources are the files that were read, lowest precedence first.
 	sources []string
 }
@@ -813,6 +890,14 @@ func Load() *Config {
 			RenotifyAfter: DefaultAckWatchRenotify,
 			NotifyTo:      DefaultAckWatchNotifyTo,
 			EscalateAfter: DefaultAckWatchEscalateAfter,
+		},
+		DeafWatch: DeafWatchConfig{
+			Enabled:       true,
+			Interval:      DefaultDeafWatchInterval,
+			HoldDown:      DefaultDeafWatchHoldDown,
+			RenotifyAfter: DefaultDeafWatchRenotify,
+			NotifyTo:      DefaultDeafWatchNotifyTo,
+			EscalateAfter: DefaultDeafWatchEscalateAfter,
 		},
 	}
 
@@ -925,6 +1010,30 @@ func Load() *Config {
 		// escalation off, so it must survive the merge like any other override.
 		if fileCfg.AckWatch.EscalateAfter != 0 {
 			cfg.AckWatch.EscalateAfter = fileCfg.AckWatch.EscalateAfter
+		}
+		if fileCfg.deafWatchEnabledSet {
+			cfg.DeafWatch.Enabled = fileCfg.DeafWatch.Enabled
+		}
+		if fileCfg.DeafWatch.Interval > 0 {
+			cfg.DeafWatch.Interval = fileCfg.DeafWatch.Interval
+		}
+		// Non-zero, not >0: a negative hold_down is the documented way to turn
+		// the hold-down off, so it must survive the merge like any other
+		// override.
+		if fileCfg.DeafWatch.HoldDown != 0 {
+			cfg.DeafWatch.HoldDown = fileCfg.DeafWatch.HoldDown
+		}
+		if fileCfg.DeafWatch.RenotifyAfter > 0 {
+			cfg.DeafWatch.RenotifyAfter = fileCfg.DeafWatch.RenotifyAfter
+		}
+		if fileCfg.DeafWatch.NotifyTo != "" {
+			cfg.DeafWatch.NotifyTo = fileCfg.DeafWatch.NotifyTo
+		}
+		// Non-zero, not >0: a negative value is the documented way to turn
+		// age-based escalation off, so it must survive the merge like any other
+		// override.
+		if fileCfg.DeafWatch.EscalateAfter != 0 {
+			cfg.DeafWatch.EscalateAfter = fileCfg.DeafWatch.EscalateAfter
 		}
 		if fileCfg.stallWatchEnabledSet {
 			cfg.StallWatch.Enabled = fileCfg.StallWatch.Enabled
@@ -1463,6 +1572,30 @@ func parseConfigFileInto(cfg *parsedConfig, path string) error {
 			case "escalate_after":
 				if d, err := time.ParseDuration(unquotedVal); err == nil {
 					cfg.AckWatch.EscalateAfter = d
+				}
+			}
+		case "deaf_watch":
+			switch key {
+			case "enabled":
+				cfg.DeafWatch.Enabled = val == "true"
+				cfg.deafWatchEnabledSet = true
+			case "interval":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.DeafWatch.Interval = d
+				}
+			case "hold_down":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.DeafWatch.HoldDown = d
+				}
+			case "renotify_after":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.DeafWatch.RenotifyAfter = d
+				}
+			case "notify_to":
+				cfg.DeafWatch.NotifyTo = unquotedVal
+			case "escalate_after":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.DeafWatch.EscalateAfter = d
 				}
 			}
 		case "gh_teardown":

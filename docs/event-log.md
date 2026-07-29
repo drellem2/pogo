@@ -619,6 +619,60 @@ The deficit detector could not READ the scheduler state, so it evaluated nothing
 {"schema_version":1,"timestamp":"2026-07-29T06:30:00.000000000Z","event_type":"ack_watch_error","agent":"pogod","details":{"error":"schedule list failed (503): scheduler unavailable"}}
 ```
 
+#### `deaf_watch_fired`
+
+pogod's missing-mail-loop announcer ([internal/deafwatch](../internal/deafwatch/deafwatch.go), mg-032b) found at least one agent with **no `mail-check-<name>` schedule** that has stayed that way past the hold-down, and mailed `notify_to` (`mayor` by default). Such an agent can be mailed and nothing will ever wake it to read the mail; every coordination path this fleet has runs through mail, so it is unreachable while its process is alive and every liveness instrument reads green.
+
+It exists because the judgement already existed and had exactly one reader. `pogo agent diagnose <name>` has reported `health=no_mail_loop` since mg-de08 and covered the deaf-survivor population since mg-738f — but that is a subcommand taking the agent's **name** as an argument, and not knowing which name to type is precisely what this fault looks like from outside. The verdict here is the SAME one (`agent.Registry.MailLoopReport` runs diagnose's own `mailLoopFor`), asked of the whole registry on a clock. **Report-only** — pogod never registers a schedule, nudges, or restarts on this signal; re-registering the loop would hide *why* it vanished. Emitted once per sample that mailed; an unchanged roster is re-raised only after `renotify_after`. Disjoint from `ack_watch_fired`, which reads schedules that *exist*. Additive — no `schema_version` bump.
+
+- **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent` (always `"pogod"`), `details`
+- **`details` fields:**
+  - `episode_id` (string, required): stable per-episode id, derived from the first agent in the roster + open time. Matches the `incident_episode_cleared` event emitted when the episode closes
+  - `count` (int, required): agents announced in this notice
+  - `agents` (array of string, required): the bare agent names, sorted — the argument the operator could not construct. This is the field that makes the log answer "which one" without opening the mail
+  - `identities` (array of string, required): the same agents as event-log identities (`crew-<name>`), the shape a notifier matches senders against
+  - `scanned` (int, required): agents in the registry
+  - `judged` (int, required): how many of them diagnose had standing to judge. The gap is coverage, not health — polecats (mg-e633/mg-6fe0 own their registration path), configured-but-stopped agents, and agents whose prompt tree could not be read are deliberately **unjudged**. `judged: 0` is not an all-clear
+  - `notified` (string, required): comma-separated mailboxes the notice was sent to
+  - `escalated` (bool, required): true when `human` was copied as well
+  - `coordinator` (bool, required): true when the roster names `notify_to` itself, which escalates **immediately** regardless of `escalate_after`. Mailing an agent that has no mail loop about its own missing mail loop is not a weaker alert, it is no alert; the coordinator is itself a crew agent and has had the fleet's defects before its peers (mg-d385)
+  - `mail_error_<mailbox>` (string, optional): one key per recipient the notice could NOT be delivered to; the event is still emitted so a detected fault is never lost to a down mail channel
+
+```json
+{"schema_version":1,"timestamp":"2026-07-29T06:30:00.000000000Z","event_type":"deaf_watch_fired","agent":"pogod","details":{"episode_id":"ep-1785477600000000000-doctor","count":1,"agents":["doctor"],"identities":["crew-doctor"],"scanned":6,"judged":4,"notified":"mayor","escalated":false,"coordinator":false}}
+```
+
+#### `deaf_watch_pending`
+
+An agent was observed with no mail-check schedule and is inside the hold-down window: seen, not yet announced. Spawn and schedule registration are not simultaneous, and a nightly redeploy (mg-42ac) re-runs that gap for the whole fleet — without a hold-down every restart would announce everyone, and a health signal that cries wolf gets ignored (mg-738f's own reasoning, which is how the fleet ended up back where mg-de08 started).
+
+Emitted once per entry into the window, not per sample. It exists so "we saw it and waited" is distinguishable in the log from "we never saw it" — the two are the same absence otherwise, and a loop that repairs itself inside the window produces no other record at all.
+
+- **`details` fields:**
+  - `target` (string, required): the bare agent name
+  - `identity` (string, required): its event-log identity
+  - `hold_down` (string, required): the window it must outlast to be announced
+  - `why` (string, required): the fixed explanation of what is being waited out
+
+```json
+{"schema_version":1,"timestamp":"2026-07-29T06:05:00.000000000Z","event_type":"deaf_watch_pending","agent":"pogod","details":{"target":"doctor","identity":"crew-doctor","hold_down":"15m0s","why":"no mail-check schedule; waiting out the hold-down before announcing, because spawn and registration are not simultaneous"}}
+```
+
+#### `deaf_watch_error`
+
+The announcer could not JUDGE the fleet, so it evaluated nothing this sample — typically a pogod whose scheduler did not load, leaving the registry with no mail-check provider. Emitted instead of staying silent for the same reason `ack_watch_error` is, and with an extra edge here: this detector's entire subject is a fault that is invisible unless something outside reports it, so a version of it that goes quietly blind reproduces its own bug one level up.
+
+Also emitted with `phase: "clear"` when the all-clear mail could not be delivered.
+
+- **`details` fields:**
+  - `error` (string, required): why the fleet could not be judged
+  - `phase` (string, optional): `"clear"` when the failure was in delivering the all-clear rather than in sampling
+  - `to` (string, optional): the mailbox that could not be reached, with `phase: "clear"`
+
+```json
+{"schema_version":1,"timestamp":"2026-07-29T06:30:00.000000000Z","event_type":"deaf_watch_error","agent":"pogod","details":{"error":"agent: no mail-check provider installed; diagnose has no basis to judge mail loops"}}
+```
+
 #### `synthetic_failure_detected`
 
 pogod's synthetic-failure-turn detector ([internal/synthwatch](../internal/synthwatch/synthwatch.go), mg-8cdb) read the agent's harness session transcript and found it answering turns **locally** and failing them: turns attributed to a synthetic model, with zero tokens in and out, flagged as API errors. The agent is alive and consuming every nudge on time; it accomplishes nothing with them. Detection is structural (synthetic model + zero usage + error flag), never a message string.
@@ -698,7 +752,7 @@ Emitted at **every** coordinator episode close, by **any** path — including th
 
 - **Required envelope:** `schema_version`, `timestamp` (= `closed_at`), `event_type`, `agent` (always `"pogod"`), `details`
 - **`details` fields:**
-  - `kind` (string, required): the incident class this episode belongs to — `"usage_limit"` (usagelimit.go), `"auth"` (synthwatch.go, mg-b8c8), or the stall source's kind. The discriminator a single-type reader keys on.
+  - `kind` (string, required): the incident class this episode belongs to — `"usage_limit"` (usagelimit.go), `"auth"` (synthwatch.go, mg-b8c8), `"deaf_agent"` (deafwatch.go, mg-032b — the last agent with no mail-check schedule got one back), or the stall source's kind. The discriminator a single-type reader keys on.
   - `episode_id` (string, required): stable per-episode id, derived from the opening agent + open time
   - `roster` (array of string, required): the full set of agent identities limited during the episode, sorted
   - `opened_at` (string, required): RFC3339 timestamp of the first agent's hit (episode window start)

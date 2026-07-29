@@ -1025,6 +1025,65 @@ Exit status is 0 when nothing is actionable, 1 when any deficit is found.`,
 		},
 	}
 
+	// check-mailloops: the missing-mail-loop reader (mg-032b). The on-demand
+	// half of the standing announcer in pogod; same judgement, asked of the
+	// whole fleet at once instead of one name at a time.
+	var cmdCheckMailLoops = &cobra.Command{
+		Use:   "check-mailloops",
+		Short: "Report agents with no mail-check schedule — they can be mailed but never woken (never acts)",
+		Long: `Report every agent that has NO mail-check schedule. Such an agent can be
+mailed, and nothing will ever wake it to read the mail — it is unreachable by
+every coordination path the fleet has, while looking perfectly healthy.
+
+This is the same judgement ` + "`pogo agent diagnose <name>`" + ` has reported as
+health=no_mail_loop since mg-de08, asked of every agent at once. That difference
+is the point. Until mg-032b the ONLY consumer was that per-agent subcommand,
+which takes the agent's NAME as an argument — and not knowing which name to type
+is exactly what a silently-unreachable agent looks like from the outside. The
+fault was detectable, never announced.
+
+pogod now also announces it on its heartbeat (see [deaf_watch] in
+docs/CONFIGURATION.md); this command is for when you want the answer now.
+
+WHO IS NOT JUDGED, deliberately:
+
+  polecats            they register their own loop at spawn (mg-e633) with
+                      their own escalation path (mg-6fe0); coverage is the
+                      witness, not this.
+  stopped agents      a configured agent that is not running is owed nothing.
+  unreadable prompts  if the prompt tree cannot be read the agent cannot be
+                      classified, and a false RED costs more than silence.
+
+Those exclusions mean a small "judged" count is normal. A report that judged
+NOTHING says so in as many words rather than printing an all-clear, and a pogod
+with no basis to judge at all is an ERROR here, not an empty list.
+
+REPORTS ONLY — it never registers a schedule, nudges, or restarts. Re-registering
+the loop on the agent's behalf would hide WHY it vanished, and that is the part
+worth knowing.
+
+Exit status is 0 when every judged agent has a loop, 1 when any agent is
+unreachable.`,
+		Args: cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			rep, err := client.MailLoopReport()
+			if err != nil {
+				// A fleet we could not judge is not a reachable fleet.
+				// Silence here would be this detector reproducing, inside
+				// itself, the failure it was built to catch.
+				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+			}
+			if jsonOutput {
+				cli.PrintJSON(rep)
+			} else {
+				fmt.Print(rep.Render())
+			}
+			if rep.Actionable() {
+				os.Exit(cli.ExitError)
+			}
+		},
+	}
+
 	// check-commit-body: the closing-keyword adjacency detector (mg-2627).
 	// Sibling of check-teardown — that one catches an issue left OPEN, this one
 	// catches an issue closed by accident. Same workflow surface, opposite
@@ -2915,6 +2974,7 @@ branches; work items and mail live in mg/macguffin (the task-store CLI).`,
 	rootCmd.AddCommand(newCredentialCmd(&jsonOutput))
 	rootCmd.AddCommand(cmdCheckTeardown)
 	rootCmd.AddCommand(cmdCheckAcks)
+	rootCmd.AddCommand(cmdCheckMailLoops)
 	rootCmd.AddCommand(cmdCheckCommitBody)
 	cmdServer.AddCommand(cmdServerStart)
 	cmdServer.AddCommand(cmdServerStop)

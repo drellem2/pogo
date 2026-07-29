@@ -30,6 +30,7 @@ import (
 	"github.com/drellem2/pogo/internal/client"
 	"github.com/drellem2/pogo/internal/config"
 	"github.com/drellem2/pogo/internal/credexpiry"
+	"github.com/drellem2/pogo/internal/deafwatch"
 	"github.com/drellem2/pogo/internal/driftwatch"
 	"github.com/drellem2/pogo/internal/driver"
 	"github.com/drellem2/pogo/internal/ghteardown"
@@ -1617,6 +1618,39 @@ Flags:
 		log.Printf("pogod: ack-watch NOT armed — the scheduler did not load, so there are no completion counters to read")
 	}
 
+	// Build the missing-mail-loop ANNOUNCER (mg-032b). `pogo agent diagnose`
+	// has judged this correctly since mg-de08 and completely since mg-738f, and
+	// until now it was the only consumer: a subcommand that takes the agent's
+	// NAME as an argument, which is the one thing an operator cannot know when
+	// the fault is that an agent silently stopped answering. This runner applies
+	// the SAME judgement (agent.Registry.MailLoopReport -> diagnose's own
+	// mailLoopFor) across the whole registry and mails, so the fault is
+	// observable from OUTSIDE the agent that failed.
+	//
+	// It is armed independently of the scheduler variable because its source
+	// asks the REGISTRY, not the scheduler — but the registry can only answer
+	// once SetMailCheckProvider has been called, which happens on the scheduler
+	// path above. Without it MailLoopReport returns an error, which the watcher
+	// records as deaf_watch_error rather than as a clean fleet. REPORT-ONLY.
+	var deafWatcher *deafwatch.Watcher
+	if cfg.DeafWatch.Enabled && agentRegistry != nil {
+		deafWatcher = deafwatch.New(deafwatch.Options{
+			Enabled:       true,
+			Source:        deafwatch.RegistrySource(agentRegistry),
+			Mail:          client.SendMGMail,
+			Interval:      cfg.DeafWatch.Interval,
+			HoldDown:      cfg.DeafWatch.HoldDown,
+			RenotifyAfter: cfg.DeafWatch.RenotifyAfter,
+			NotifyTo:      cfg.DeafWatch.NotifyTo,
+			EscalateAfter: cfg.DeafWatch.EscalateAfter,
+		})
+		log.Printf("pogod: deaf-watch enabled (interval=%s hold_down=%s renotify=%s notify_to=%s escalate_after=%s, report-only)",
+			cfg.DeafWatch.Interval, cfg.DeafWatch.HoldDown, cfg.DeafWatch.RenotifyAfter,
+			cfg.DeafWatch.NotifyTo, cfg.DeafWatch.EscalateAfter)
+	} else if cfg.DeafWatch.Enabled {
+		log.Printf("pogod: deaf-watch NOT armed — the agent registry did not load, so there is nothing to judge")
+	}
+
 	// Drive both heartbeat-piggybacked subsystems from a single OnTick. The
 	// scheduler runs inline (it stores absolute fire times, so a clock jump is
 	// absorbed in the same goroutine). The stall watcher runs in a goroutine so
@@ -1663,6 +1697,14 @@ Flags:
 		// agent it names.
 		if ackWatcher != nil {
 			go ackWatcher.Check(now)
+		}
+		// The missing-mail-loop announcer rides the same tick and throttles
+		// itself to a coarse interval. In a goroutine because an announcement
+		// shells out to `mg mail send`, which must never delay a tick.
+		// Report-only: it mails, and it has no seam through which it could
+		// register a schedule, nudge, or restart the agent it names.
+		if deafWatcher != nil {
+			go deafWatcher.Check(now)
 		}
 		// The synthetic-failure-turn detector rides the same tick and throttles
 		// itself to synthwatch.DefaultInterval. In a goroutine because it reads

@@ -202,6 +202,20 @@ So, explicitly, **my new bar excludes:**
   **detectable**, not **announced**. That gap is real and it is inherited from
   mg-de08, not introduced here.
 
+  **CLOSED by mg-032b (2026-07-29).** pogod now applies this exact judgement —
+  the same `mailLoopFor`, via `agent.Registry.MailLoopReport`, not a second
+  implementation of it — across the whole registry on its heartbeat and mails
+  when an agent has stayed unreachable past a 15-minute hold-down;
+  `pogo check-mailloops` runs the same read on demand. The bar this bullet set
+  is met: the fault is observable from outside the agent that failed, and the
+  notice supplies the agent name that could not be typed. Every exclusion named
+  above is inherited rather than re-derived, so the cry-wolf guarantee holds. One
+  rule is specific to announcing rather than detecting: a finding that names the
+  notify mailbox itself escalates to `human` immediately, because mailing an
+  agent with no mail loop about its own missing mail loop is not a weaker alert,
+  it is no alert. See `internal/deafwatch/` and CONFIGURATION.md §"The
+  missing-mail-loop announcer (deaf-watch)".
+
 A **fourth** recurrence is what the first bullet and the last bullet are for. If
 one arrives, it will arrive in one of them.
 

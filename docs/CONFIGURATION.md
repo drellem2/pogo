@@ -795,6 +795,91 @@ neither of which should be one line of TOML away.
 
 Source of truth: `internal/ackwatch/`.
 
+## The missing-mail-loop announcer (deaf-watch)
+
+An agent with no `mail-check-<name>` schedule can be mailed, and **nothing will
+ever wake it to read the mail**. Every coordination path this fleet has runs
+through mail, so such an agent is unreachable — while its process is alive, its
+PTY output is flowing, and every liveness instrument reads green. mg-de08 spent
+two hours of a fleet-wide mail outage on exactly that.
+
+`pogo agent diagnose <name>` has reported this as `health=no_mail_loop` since
+mg-de08, and mg-738f widened it to the **deaf survivor**: an `auto_start=false`
+agent someone turned on, running with its loop dead underneath it. Both were
+correct. Until mg-032b neither was **loud**: the only consumer was a subcommand
+that takes the agent's *name* as an argument, and not knowing which name to type
+is what this fault looks like from the outside. It was detectable, never
+announced.
+
+pogod now applies the **same** judgement across the whole registry on its
+heartbeat and mails. `pogo check-mailloops` runs the same read on demand. Both
+are **report-only**.
+
+- **The judgement is not re-derived.** The source is
+  `agent.Registry.MailLoopReport`, which runs diagnose's own `mailLoopFor` over
+  every agent. Two implementations of "who is owed a mail loop" would drift, and
+  the announcer would start reporting REDs `diagnose` denies.
+- **Who is not judged, deliberately.** Polecats (they register their own loop at
+  spawn, mg-e633, and escalate on failure, mg-6fe0); a configured agent that is
+  not running ("not there" is not a fault); an agent whose prompt tree cannot be
+  read. That last one is the cry-wolf guard mg-738f argued for: a wrong "yes"
+  costs a false RED, and a health signal that cries wolf gets ignored.
+- **A hold-down, not an instant alarm.** A missing loop must persist unbroken for
+  `hold_down` (15m) before it is announced. Spawn and schedule registration are
+  not simultaneous, and a nightly redeploy (mg-42ac) re-runs that gap for the
+  whole fleet — without the hold-down every restart would announce everyone. A
+  loop that comes back **resets** the clock rather than accumulating toward one.
+  Same mechanism, same reasoning, as mg-4904's hold-down on usage-limit hits.
+  Each entry into the window emits `deaf_watch_pending`, so "saw it and waited"
+  is distinguishable from "never saw it".
+- **"Could not look" is never an all-clear.** A pogod with no mail-check provider
+  (scheduler failed to load) emits `deaf_watch_error` and evaluates nothing;
+  `GET /agents/mail-loops` answers **503**, not `200` with an empty list; and
+  `pogo check-mailloops` exits non-zero with the reason. A report that judged
+  nothing says so in as many words.
+- **Routing, and the one rule unique to this detector.** Findings go to
+  `notify_to` (`mayor`) — re-registering a loop and deciding whether the agent
+  also needs a restart is coordination work. A standing finding also copies
+  `human` after `escalate_after` (24h). **But a finding that names `notify_to`
+  itself escalates immediately**, regardless of `escalate_after`: mailing an
+  agent that has no mail loop about its own missing mail loop is not a weaker
+  alert, it is *no* alert. The coordinator is itself a crew agent and has had the
+  fleet's defects before its peers (mg-d385).
+- **Episodes.** While at least one agent is unreachable an episode is open; a
+  changed roster mails at once, an unchanged one waits `renotify_after`. On close
+  the all-clear goes to **everyone who was alarmed**, and a generic
+  `incident_episode_cleared{kind:"deaf_agent"}` event carries the roster and
+  window (the mg-55b2 contract) so the notifier coalesces the close into one
+  notification instead of a swarm.
+- **It never registers the loop for you.** Doing so would paper over *why* the
+  loop vanished — a reap, a failed registration, a manual `pogo schedule rm` —
+  and that is the part worth knowing.
+
+```toml
+[deaf_watch]
+enabled = true             # default true
+interval = "5m"            # sample cadence (default 5m; the condition is a
+                           # boolean state, not a rate — nothing to average)
+hold_down = "15m"          # a missing loop must persist this long before it is
+                           # announced (default 15m; negative disables — tests only)
+renotify_after = "6h"      # an unchanged roster re-mails after this (default 6h)
+notify_to = "mayor"        # mailbox announcements go to (default mayor)
+escalate_after = "24h"     # a standing finding also copies `human` after this
+                           # (default 24h; negative disables AGE-based escalation
+                           # only — a deaf `notify_to` still escalates at once)
+```
+
+Exit status of `pogo check-mailloops` is 0 when every judged agent has a loop and
+1 when any agent is unreachable, so it can gate a schedule or CI step.
+
+`deaf-watch` and `ack-watch` are **disjoint**, not redundant: ack-watch reads
+schedules that *exist* and compares completion rates, so an agent with no
+schedule at all has no counter row, joins no cohort, and disappears from it
+silently. ack-watch catches "registered and not completing"; deaf-watch catches
+"never registered, or reaped".
+
+Source of truth: `internal/deafwatch/`, `internal/agent/mailloop_report.go`.
+
 ## Agent registry
 
 Each agent has a directory under `~/.pogo/agents/<name>/` holding its prompt,
