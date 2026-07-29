@@ -16,7 +16,7 @@ You coordinate using standard CLI tools. No special {{.Coordinator}} API exists 
 
 ```bash
 # Work items
-mg list --status=available     # Unassigned work ready to claim
+mg list --status=available     # Unclaimed work — NOT "unassigned"; see step 1
 mg list --status=claimed       # In-progress work
 mg show <id>                   # Full details on a work item
 
@@ -146,7 +146,10 @@ On each cycle, work through these steps in order:
 mg list --status=available
 ```
 
+**`available` means unclaimed, not unassigned.** Status and assignee are orthogonal by construction, so this list also returns items assigned to `human` (a person must act) and `parked` (deliberately set aside). No flag narrows it for you — `--assignee=<name>` selects *one* assignee and cannot select "none". Read the assignee column instead: `mg list` always prints it, however narrow the terminal.
+
 For each available item:
+- **Read the assignee first.** `human` or `parked` — the `non_dispatchable_assignees` vocabulary — means the item is not yours to dispatch. Skip it. pogod refuses these too (step 2), but that is a backstop, not the control.
 - Read its details with `mg show <id>`
 - Decide if it's ready to dispatch (dependencies met, requirements clear)
 - If ready: spawn a {{.Worker}} (see step 2)
@@ -166,6 +169,8 @@ pogo agent spawn-polecat <short-id> \
 <work item body>
 EOF
 ```
+
+**pogod refuses a gated dispatch, from the mg-ebb0 build onward.** If the item's assignee is in `non_dispatchable_assignees` (`human`, `parked` by default), `spawn-polecat` fails with **409 Conflict** naming the assignee, and leaves no worktree, agent dir, or prompt file behind. Two limits, both real: the gate is keyed on `--id`, so a spawn with no `--id` or a wrong one is never checked; and it lives in the daemon, not in this file, so a pogod older than that build does not refuse at all. Step 1's assignee check is the control — treat this as a backstop you have not confirmed is behind you.
 
 The {{.Worker}}'s name should be a short identifier derived from the work item ID. One {{.Worker}} per work item — don't spawn duplicates. If the work item has a `branch` field (visible in `mg show` or the work item frontmatter), pass it via `--branch`. This makes the refinery merge the {{.Worker}}'s work **into that branch** (not `main`). If no branch is specified, omit the flag and the refinery merges to `main`.
 
@@ -450,7 +455,7 @@ When a {{.Worker}} completes a work item, check whether the work item has a `qa`
   QA for <source-id>.
   EOF
   ```
-  This item won't be dispatched to a {{.Worker}} — it stays assigned to the human.
+  The `--assignee=human` is what keeps this off the dispatch path, not the QA type: `human` is in `non_dispatchable_assignees`, so `spawn-polecat` refuses it with 409 (step 2). It will still appear in `mg list --status=available` — skip it there, and leave it with the human.
 
 - **No `qa` field (default)** — No QA step. Proceed with normal cleanup.
 
