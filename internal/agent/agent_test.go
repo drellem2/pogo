@@ -9,6 +9,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/drellem2/pogo/internal/testsandbox"
 )
 
 func TestSpawnAndNudge(t *testing.T) {
@@ -702,7 +704,7 @@ func TestOnExitCallback(t *testing.T) {
 func TestRespawn(t *testing.T) {
 	// Respawn's park backstop reads $HOME/.pogo/agents/respawn-test/.parked;
 	// a host that happens to carry that flag fails this test on unchanged code.
-	isolateParkState(t)
+	testsandbox.Isolate(t)
 	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
@@ -932,7 +934,7 @@ func TestWorkItemIDOmittedWhenEmpty(t *testing.T) {
 // is respawned by pogod's onExit handler — the work item link must survive so
 // spend tracking and the agent registry stay correct after the restart.
 func TestWorkItemIDPreservedAcrossRespawn(t *testing.T) {
-	isolateParkState(t)
+	testsandbox.Isolate(t)
 	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)

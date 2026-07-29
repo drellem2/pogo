@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/drellem2/pogo/internal/events"
+	"github.com/drellem2/pogo/internal/testsandbox"
 )
 
 // useTempEventLog redirects events.Emit to a temp file for the duration of
@@ -221,7 +222,7 @@ func TestEmitsAgentCrashedOnNonZeroExit(t *testing.T) {
 func TestEmitsAgentRestartedOnRespawn(t *testing.T) {
 	// The event under test only exists if the respawn happens, and Respawn's
 	// park backstop can veto it from the host's live state dir.
-	isolateParkState(t)
+	testsandbox.Isolate(t)
 	path := useTempEventLog(t)
 	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {

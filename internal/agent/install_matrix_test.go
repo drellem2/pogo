@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/drellem2/pogo/internal/testsandbox"
 )
 
 // TestInstallMatrix is the end-to-end install→edit→update matrix from
@@ -103,10 +105,7 @@ func TestInstallMatrix(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			origHome := os.Getenv("HOME")
-			tmpHome := t.TempDir()
-			os.Setenv("HOME", tmpHome)
-			t.Cleanup(func() { os.Setenv("HOME", origHome) })
+			tmpHome := testsandbox.Isolate(t).Home
 
 			// Pin the backup timestamp so .bak.<ts> assertions are
 			// deterministic. Cases that don't produce a backup are

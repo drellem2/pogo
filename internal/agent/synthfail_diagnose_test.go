@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/drellem2/pogo/internal/synthfail"
+	"github.com/drellem2/pogo/internal/testsandbox"
 )
 
 // Tests for mg-8cdb: diagnose reports the synthetic-failure-turn class, and the
@@ -124,8 +125,8 @@ func respawnableAgent(name string) *Agent {
 	return &Agent{Name: name, Type: TypeCrew, RestartOnCrash: true, Dir: "/tmp/agents/" + name}
 }
 
-// The tests below call isolateParkState (testmain_test.go) because the respawn
-// gate's FIRST guard is Agent.ShouldRespawn — RestartOnCrash && !IsParked —
+// The tests below call testsandbox.Isolate (internal/testsandbox) because the
+// respawn gate's FIRST guard is Agent.ShouldRespawn — RestartOnCrash && !IsParked —
 // and they name real crew agents. Without it they read the developer's LIVE
 // park flags: parking pm-dealdesk for real turned
 // TestShouldRespawnAgent_WedgedAgentStillRespawns red on an unchanged tree,
@@ -136,7 +137,7 @@ func respawnableAgent(name string) *Agent {
 // fixture verdict, whatever its boolean answer happens to be.
 
 func TestShouldRespawnAgent_SuppressedWhenFailingEveryTurn(t *testing.T) {
-	isolateParkState(t)
+	testsandbox.Isolate(t)
 	r := &Registry{}
 	scanner := &fixedScanner{rep: failingReport()}
 	r.SetTranscriptScanner(scanner)
@@ -165,7 +166,7 @@ func TestShouldRespawnAgent_SuppressedWhenFailingEveryTurn(t *testing.T) {
 }
 
 func TestShouldRespawnAgent_WedgedAgentStillRespawns(t *testing.T) {
-	isolateParkState(t)
+	testsandbox.Isolate(t)
 	r := &Registry{}
 	scanner := &fixedScanner{rep: synthfail.Report{State: synthfail.StateQuiet, Files: 2}}
 	r.SetTranscriptScanner(scanner)
@@ -178,7 +179,7 @@ func TestShouldRespawnAgent_WedgedAgentStillRespawns(t *testing.T) {
 	if by.Reason != "" {
 		t.Errorf("reported a suppression reason (%q) for an agent that was not suppressed", by.Reason)
 	}
-	// The yes has to come from the SCANNER. Before isolateParkState this test
+	// The yes has to come from the SCANNER. Before the sandbox this test
 	// answered no with scanner.calls == 0, because the host had a real .parked
 	// flag for pm-dealdesk and the gate never got past ShouldRespawn — the
 	// StateQuiet fixture was never on the code path the failure blamed.
@@ -198,7 +199,7 @@ func TestShouldRespawnAgent_DegradesWithoutEvidence(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			isolateParkState(t)
+			testsandbox.Isolate(t)
 			r := &Registry{}
 			if tc.scanner != nil {
 				r.SetTranscriptScanner(tc.scanner)
@@ -218,7 +219,7 @@ func TestShouldRespawnAgent_DoesNotOverrideParkOrRestartOnCrash(t *testing.T) {
 	// scanner.calls == 0 assertion honest: a stray park flag short-circuits the
 	// gate too, so the test would pass without RestartOnCrash=false ever being
 	// the thing that stopped it.
-	isolateParkState(t)
+	testsandbox.Isolate(t)
 	r := &Registry{}
 	// A scanner that would suppress, to prove the gate is ADDITIVE: it can only
 	// ever turn a yes into a no, never a no into a yes.

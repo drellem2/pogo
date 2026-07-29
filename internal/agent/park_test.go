@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/drellem2/pogo/internal/testsandbox"
 )
 
 // fakePauser is a SchedulePauser recorder for park/wake tests.
@@ -32,8 +34,7 @@ func (f *fakePauser) RestoreForAgent(entries []json.RawMessage) (int, error) {
 // whose crew agents spawn as plain `cat` processes.
 func newParkTestRegistry(t *testing.T) *Registry {
 	t.Helper()
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	testsandbox.Isolate(t)
 	if err := InitPromptDirs(); err != nil {
 		t.Fatalf("InitPromptDirs: %v", err)
 	}
@@ -188,8 +189,7 @@ func TestWake_NotParked(t *testing.T) {
 // pogod OnExit hook uses: restart_on_crash respawns unless a park flag is on
 // disk at exit time.
 func TestShouldRespawn_SuppressedWhenParked(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	testsandbox.Isolate(t)
 
 	a := &Agent{Name: "sleepy", RestartOnCrash: true}
 	if !a.ShouldRespawn() {
@@ -270,8 +270,7 @@ func TestRespawn_RefusesParked(t *testing.T) {
 
 // TestListParked enumerates park flags on disk.
 func TestListParked(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	testsandbox.Isolate(t)
 
 	if got, err := ListParked(); err != nil || len(got) != 0 {
 		t.Fatalf("ListParked on empty home = %v, %v; want empty, nil", got, err)

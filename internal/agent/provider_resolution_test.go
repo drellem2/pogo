@@ -5,6 +5,8 @@ import (
 	"reflect"
 	"testing"
 	"time"
+
+	"github.com/drellem2/pogo/internal/testsandbox"
 )
 
 // providerConfig is a test AgentCommandConfig with controllable per-type
@@ -301,7 +303,7 @@ func TestSpawnNilProviderUsesBuiltinDefaults(t *testing.T) {
 // registry's global default (mg-b31b acceptance bar 9). The fleet default is
 // claude; the agent was spawned as codex and must restart as codex.
 func TestRespawnKeepsResolvedProvider(t *testing.T) {
-	isolateParkState(t)
+	testsandbox.Isolate(t)
 	reg, _, codexP := newResolutionRegistry(t)
 	defer reg.StopAll(2 * time.Second)
 	reg.SetDefaultProvider("claude") // fleet default is claude, NOT codex

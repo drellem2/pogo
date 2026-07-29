@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/drellem2/pogo/internal/driver"
+	"github.com/drellem2/pogo/internal/testsandbox"
 )
 
 // TestDiscoverNewReposSkipsProtectedHomeDir is the mg-5cd6 regression guard: a
@@ -19,12 +20,11 @@ func TestDiscoverNewReposSkipsProtectedHomeDir(t *testing.T) {
 	Init()
 	defer RemoveSaveFile()
 
-	home := t.TempDir()
+	home := testsandbox.Isolate(t).Home
 	// discoverNewRepos registers the ~/dev repo, and the search plugin then
 	// indexes it from a background goroutine that writes <repo>/.pogo/search.
 	// Drain that before home is torn down (mg-36d9).
 	drainSearch(t)
-	t.Setenv("HOME", home)
 
 	// A repo under ~/Documents (protected) and one under ~/dev (normal).
 	protectedRepo := filepath.Join(home, "Documents", "secret-repo")
@@ -63,8 +63,7 @@ func TestSearchAndCreateRefusesProtectedHomeDir(t *testing.T) {
 	Init()
 	defer RemoveSaveFile()
 
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	home := testsandbox.Isolate(t).Home
 
 	// Point TMPDIR at a sibling dir so ~/Desktop is not itself seen as an
 	// ephemeral (temp) path — otherwise the ephemeral guard in searchAndCreate

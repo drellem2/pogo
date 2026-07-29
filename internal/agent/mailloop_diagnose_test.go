@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/drellem2/pogo/internal/testsandbox"
 )
 
 // fakeMailChecks is a MailCheckProvider backed by a set of agent identities
@@ -22,8 +24,7 @@ func (f fakeMailChecks) HasMailCheck(identity string) bool { return f.have[ident
 // wrong about who is owed a mail loop.
 func sandboxDesiredState(t *testing.T, name string, autoStart bool) {
 	t.Helper()
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	home := testsandbox.Isolate(t).Home
 	t.Setenv("POGO_HOME", filepath.Join(home, ".pogo"))
 	if err := InitPromptDirs(); err != nil {
 		t.Fatalf("InitPromptDirs: %v", err)
@@ -289,8 +290,7 @@ func TestDiagnose_MailLoopRedDoesNotMaskRateLimit(t *testing.T) {
 // two disagree is an agent that can be running while pogod does not expect it:
 // exactly the population whose dead mail loop diagnose could not report.
 func TestIsConfiguredAgent(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	home := testsandbox.Isolate(t).Home
 	t.Setenv("POGO_HOME", filepath.Join(home, ".pogo"))
 	if err := InitPromptDirs(); err != nil {
 		t.Fatalf("InitPromptDirs: %v", err)
@@ -347,8 +347,7 @@ func TestIsConfiguredAgent(t *testing.T) {
 // TestIsExpectedAgent covers the shared predicate directly — the one source of
 // truth both the reap and diagnose read.
 func TestIsExpectedAgent(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	home := testsandbox.Isolate(t).Home
 	t.Setenv("POGO_HOME", filepath.Join(home, ".pogo"))
 	if err := InitPromptDirs(); err != nil {
 		t.Fatalf("InitPromptDirs: %v", err)

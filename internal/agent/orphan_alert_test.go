@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/drellem2/pogo/internal/testsandbox"
 )
 
 // The LOUD half, asserted rather than assumed (mg-0b77).
@@ -97,8 +99,7 @@ func TestMailOrphanAlert_ActuallySendsMail(t *testing.T) {
 // the wiring needs its own control. A test per half plus an untested join is
 // two green halves and a silent gap where the fix was supposed to be.
 func TestDefaultOrphanAlert_EmitsAndMails(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	home := testsandbox.Isolate(t).Home
 	t.Setenv("POGO_HOME", filepath.Join(home, ".pogo"))
 	record := fakeMG(t)
 

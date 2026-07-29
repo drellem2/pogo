@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/drellem2/pogo/internal/testsandbox"
 )
 
 // TestMergeTOMLDropInsAbsentDir confirms that an absent drop-in directory is
@@ -294,8 +296,7 @@ func TestMergeTOMLDropInsEmptyDropinDir(t *testing.T) {
 // replaced (not appended) by a same-named key in a drop-in under
 // dropins/pm/<instance>/.
 func TestSynthesizeExtendsPromptTOMLDropIns(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	testsandbox.Isolate(t)
 
 	if err := InitPromptDirs(); err != nil {
 		t.Fatal(err)

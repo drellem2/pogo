@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/drellem2/pogo/internal/config"
+	"github.com/drellem2/pogo/internal/testsandbox"
 )
 
 func TestValidateAgentName(t *testing.T) {
@@ -187,7 +188,7 @@ func TestHandleStartRejectsOverlongName(t *testing.T) {
 	// Hermetic HOME: the name must be refused before the prompt lookup, so a
 	// regression that moved the check later would otherwise fail against the
 	// developer's real ~/.pogo with a confusing 404.
-	t.Setenv("HOME", t.TempDir())
+	testsandbox.Isolate(t)
 
 	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
@@ -213,8 +214,7 @@ func TestHandleStartRejectsOverlongName(t *testing.T) {
 // TestHandleSpawnPolecatRejectsOverlongName also guards that the rejection
 // happens before any side effects: no worktree, no agent dir, no prompt file.
 func TestHandleSpawnPolecatRejectsOverlongName(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	testsandbox.Isolate(t)
 	if err := InitPromptDirs(); err != nil {
 		t.Fatalf("InitPromptDirs: %v", err)
 	}

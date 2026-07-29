@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/drellem2/pogo/internal/gitgc"
+	"github.com/drellem2/pogo/internal/testsandbox"
 )
 
 func TestExpandTemplate(t *testing.T) {
@@ -439,11 +440,7 @@ func TestExpandTemplateInvalidSyntax(t *testing.T) {
 }
 
 func TestListPrompts(t *testing.T) {
-	// Save and restore HOME
-	origHome := os.Getenv("HOME")
-	tmpHome := t.TempDir()
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
+	tmpHome := testsandbox.Isolate(t).Home
 
 	// Create the directory structure
 	agentsDir := filepath.Join(tmpHome, ".pogo", "agents")
@@ -484,10 +481,7 @@ func TestListPrompts(t *testing.T) {
 }
 
 func TestResolveCrewPrompt(t *testing.T) {
-	origHome := os.Getenv("HOME")
-	tmpHome := t.TempDir()
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
+	tmpHome := testsandbox.Isolate(t).Home
 
 	crewDir := filepath.Join(tmpHome, ".pogo", "agents", "crew")
 	os.MkdirAll(crewDir, 0755)
@@ -508,10 +502,7 @@ func TestResolveCrewPrompt(t *testing.T) {
 }
 
 func TestResolveTemplate(t *testing.T) {
-	origHome := os.Getenv("HOME")
-	tmpHome := t.TempDir()
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
+	tmpHome := testsandbox.Isolate(t).Home
 
 	tmplDir := filepath.Join(tmpHome, ".pogo", "agents", "templates")
 	os.MkdirAll(tmplDir, 0755)
@@ -716,10 +707,7 @@ func TestInstalledPromptHashTOML(t *testing.T) {
 }
 
 func TestInstallPromptsUpdatesStaleFiles(t *testing.T) {
-	origHome := os.Getenv("HOME")
-	tmpHome := t.TempDir()
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
+	tmpHome := testsandbox.Isolate(t).Home
 
 	// First install — should install files
 	result, err := InstallPrompts(InstallOpts{})
@@ -780,10 +768,7 @@ func TestInstallPromptsUpdatesStaleFiles(t *testing.T) {
 }
 
 func TestInstallPromptsUpdatesUnstampedFiles(t *testing.T) {
-	origHome := os.Getenv("HOME")
-	tmpHome := t.TempDir()
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
+	tmpHome := testsandbox.Isolate(t).Home
 
 	// Create pre-existing files without hash stamps (simulates old install).
 	// Pre-create one file from each shipped subdirectory so the "stale →
@@ -825,10 +810,7 @@ func TestInstallPromptsUpdatesUnstampedFiles(t *testing.T) {
 }
 
 func TestInstallPromptsCrewWithExistingTemplatesDir(t *testing.T) {
-	origHome := os.Getenv("HOME")
-	tmpHome := t.TempDir()
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
+	tmpHome := testsandbox.Isolate(t).Home
 
 	// Simulate user who already has templates/ dir but no crew/ dir
 	agentsDir := filepath.Join(tmpHome, ".pogo", "agents")
@@ -865,10 +847,7 @@ func TestInstallPromptsCrewWithExistingTemplatesDir(t *testing.T) {
 // changed since install. The install must skip (the embed hasn't moved,
 // so there is nothing new to write) and must not produce a .dist sidecar.
 func TestInstallPromptsConflictMatrixSkipsWhenEmbedUnchanged(t *testing.T) {
-	origHome := os.Getenv("HOME")
-	tmpHome := t.TempDir()
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
+	tmpHome := testsandbox.Isolate(t).Home
 
 	if _, err := InstallPrompts(InstallOpts{}); err != nil {
 		t.Fatalf("first InstallPrompts: %v", err)
@@ -940,10 +919,7 @@ func TestInstallPromptsConflictMatrixSkipsWhenEmbedUnchanged(t *testing.T) {
 // Expectation: canonical file is preserved untouched, the new embed is
 // written to <name>.dist, and the conflict is reported in the result.
 func TestInstallPromptsConflictMatrixWritesDistOnUserEditAndEmbedChange(t *testing.T) {
-	origHome := os.Getenv("HOME")
-	tmpHome := t.TempDir()
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
+	tmpHome := testsandbox.Isolate(t).Home
 
 	agentsDir := filepath.Join(tmpHome, ".pogo", "agents")
 	if err := os.MkdirAll(agentsDir, 0755); err != nil {
@@ -1068,10 +1044,7 @@ func installFreshThenEditMayor(t *testing.T, tmpHome string) (string, []byte) {
 // result.Backups, and writes pre-overwrite content to the backup so users
 // can recover their edits.
 func TestInstallPromptsForceBackupOnUserEdit(t *testing.T) {
-	origHome := os.Getenv("HOME")
-	tmpHome := t.TempDir()
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
+	tmpHome := testsandbox.Isolate(t).Home
 
 	suffix := withFixedNow(t)
 
@@ -1127,10 +1100,7 @@ func TestInstallPromptsForceBackupOnUserEdit(t *testing.T) {
 // result.Backups is empty even though the canonical was user-edited (the same
 // fixture that produces a backup in TestInstallPromptsForceBackupOnUserEdit).
 func TestInstallPromptsForceNoBackupSkipsBackup(t *testing.T) {
-	origHome := os.Getenv("HOME")
-	tmpHome := t.TempDir()
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
+	tmpHome := testsandbox.Isolate(t).Home
 
 	suffix := withFixedNow(t)
 
@@ -1166,10 +1136,7 @@ func TestInstallPromptsForceNoBackupSkipsBackup(t *testing.T) {
 // for a fresh install + immediate --force run, every file is pristine, so
 // Backups must be empty.
 func TestInstallPromptsForceSkipsBackupForPristine(t *testing.T) {
-	origHome := os.Getenv("HOME")
-	tmpHome := t.TempDir()
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
+	tmpHome := testsandbox.Isolate(t).Home
 
 	withFixedNow(t)
 
@@ -1208,10 +1175,7 @@ func TestInstallPromptsForceSkipsBackupForPristine(t *testing.T) {
 // TestCheckPromptDriftCleanInstall verifies that immediately after
 // InstallPrompts, no prompt is reported as drifted.
 func TestCheckPromptDriftCleanInstall(t *testing.T) {
-	origHome := os.Getenv("HOME")
-	tmpHome := t.TempDir()
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
+	testsandbox.Isolate(t)
 
 	if _, err := InstallPrompts(InstallOpts{}); err != nil {
 		t.Fatalf("InstallPrompts: %v", err)
@@ -1230,10 +1194,7 @@ func TestCheckPromptDriftCleanInstall(t *testing.T) {
 // the live prompt file carries an out-of-date hash stamp because the
 // embedded version has advanced. Drift must be reported as "stale".
 func TestCheckPromptDriftDetectsStale(t *testing.T) {
-	origHome := os.Getenv("HOME")
-	tmpHome := t.TempDir()
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
+	tmpHome := testsandbox.Isolate(t).Home
 
 	if _, err := InstallPrompts(InstallOpts{}); err != nil {
 		t.Fatalf("InstallPrompts: %v", err)
@@ -1277,10 +1238,7 @@ func TestCheckPromptDriftDetectsStale(t *testing.T) {
 // drift reasons: the live file simply isn't there yet, or it exists but has
 // no hash stamp (e.g. user hand-edited and stripped it).
 func TestCheckPromptDriftDetectsMissingAndUnstamped(t *testing.T) {
-	origHome := os.Getenv("HOME")
-	tmpHome := t.TempDir()
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
+	tmpHome := testsandbox.Isolate(t).Home
 
 	if _, err := InstallPrompts(InstallOpts{}); err != nil {
 		t.Fatalf("InstallPrompts: %v", err)
@@ -1336,10 +1294,7 @@ func driftReasonFor(t *testing.T, rel string) string {
 // canonical that advice is a silent no-op (install declines, writes .dist), so a
 // label-only test would reproduce the bug exactly.
 func TestCheckPromptDriftEditedVsStaleRemediesWork(t *testing.T) {
-	origHome := os.Getenv("HOME")
-	tmpHome := t.TempDir()
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
+	tmpHome := testsandbox.Isolate(t).Home
 
 	if _, err := InstallPrompts(InstallOpts{}); err != nil {
 		t.Fatalf("InstallPrompts: %v", err)
@@ -1991,10 +1946,7 @@ func TestEmbeddedDoctorOnDemand(t *testing.T) {
 }
 
 func TestInitPromptsDefault(t *testing.T) {
-	origHome := os.Getenv("HOME")
-	tmpHome := t.TempDir()
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
+	tmpHome := testsandbox.Isolate(t).Home
 
 	result, err := InitPrompts(false, false)
 	if err != nil {
@@ -2036,10 +1988,7 @@ func TestInitPromptsDefault(t *testing.T) {
 }
 
 func TestInitPromptsRefusesExistingFiles(t *testing.T) {
-	origHome := os.Getenv("HOME")
-	tmpHome := t.TempDir()
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
+	testsandbox.Isolate(t)
 
 	// First init succeeds.
 	if _, err := InitPrompts(false, false); err != nil {
@@ -2060,10 +2009,7 @@ func TestInitPromptsRefusesExistingFiles(t *testing.T) {
 }
 
 func TestInitPromptsForceOverwrites(t *testing.T) {
-	origHome := os.Getenv("HOME")
-	tmpHome := t.TempDir()
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
+	tmpHome := testsandbox.Isolate(t).Home
 
 	// Pre-populate with a customized mayor.
 	agentsDir := filepath.Join(tmpHome, ".pogo", "agents")
@@ -2107,10 +2053,7 @@ func TestInitPromptsForceOverwrites(t *testing.T) {
 }
 
 func TestInitPromptsMinimal(t *testing.T) {
-	origHome := os.Getenv("HOME")
-	tmpHome := t.TempDir()
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
+	tmpHome := testsandbox.Isolate(t).Home
 
 	result, err := InitPrompts(false, true)
 	if err != nil {
@@ -2155,11 +2098,7 @@ func TestInitPromptsMinimal(t *testing.T) {
 
 func TestInitPromptsRefusalIsAtomic(t *testing.T) {
 	// If only one of the planned files exists, the whole operation should still
-	// refuse — no partial writes that would create a half-installed profile.
-	origHome := os.Getenv("HOME")
-	tmpHome := t.TempDir()
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
+	tmpHome := testsandbox.Isolate(t).Home
 
 	agentsDir := filepath.Join(tmpHome, ".pogo", "agents")
 	os.MkdirAll(filepath.Join(agentsDir, "templates"), 0755)
@@ -2800,10 +2739,7 @@ func TestDefaultPromptsUseProactivityPrinciple(t *testing.T) {
 // TestSynthesizeExtendsPrompt covers the PM crew-loader directive that lets a
 // crew prompt redirect to a shared template plus a per-instance TOML config.
 func TestSynthesizeExtendsPrompt(t *testing.T) {
-	origHome := os.Getenv("HOME")
-	tmpHome := t.TempDir()
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
+	testsandbox.Isolate(t)
 
 	if err := InitPromptDirs(); err != nil {
 		t.Fatal(err)
@@ -2878,10 +2814,7 @@ func TestSynthesizeExtendsPrompt(t *testing.T) {
 // TestSynthesizeExtendsPromptNoDirective verifies that a crew prompt without
 // the directive returns "" so the caller uses the original file as-is.
 func TestSynthesizeExtendsPromptNoDirective(t *testing.T) {
-	origHome := os.Getenv("HOME")
-	tmpHome := t.TempDir()
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
+	testsandbox.Isolate(t)
 
 	if err := InitPromptDirs(); err != nil {
 		t.Fatal(err)
@@ -2904,10 +2837,7 @@ func TestSynthesizeExtendsPromptNoDirective(t *testing.T) {
 // stamp added by InstallPrompts to the template (HTML-comment) and config
 // (TOML-comment) does not leak into the synthesized prompt.
 func TestSynthesizeExtendsPromptStripsHashStamps(t *testing.T) {
-	origHome := os.Getenv("HOME")
-	tmpHome := t.TempDir()
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
+	testsandbox.Isolate(t)
 
 	if err := InitPromptDirs(); err != nil {
 		t.Fatal(err)
@@ -2952,10 +2882,7 @@ func TestSynthesizeExtendsPromptStripsHashStamps(t *testing.T) {
 // TestSynthesizeExtendsPromptMissingFiles verifies that referenced template or
 // config files that don't exist surface as errors (not silent fallthrough).
 func TestSynthesizeExtendsPromptMissingFiles(t *testing.T) {
-	origHome := os.Getenv("HOME")
-	tmpHome := t.TempDir()
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
+	testsandbox.Isolate(t)
 
 	if err := InitPromptDirs(); err != nil {
 		t.Fatal(err)
@@ -2976,8 +2903,7 @@ func TestSynthesizeExtendsPromptMissingFiles(t *testing.T) {
 // contains both template + config, and the InitialNudge comes from the
 // template's frontmatter (not the redirecting crew file).
 func TestStartCrewAgentResolvesExtendsDirective(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	tmpHome := testsandbox.Isolate(t).Home
 
 	if err := InitPromptDirs(); err != nil {
 		t.Fatal(err)
@@ -3042,10 +2968,7 @@ func TestStartCrewAgentResolvesExtendsDirective(t *testing.T) {
 }
 
 func TestInitPromptDirs(t *testing.T) {
-	origHome := os.Getenv("HOME")
-	tmpHome := t.TempDir()
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
+	tmpHome := testsandbox.Isolate(t).Home
 
 	if err := InitPromptDirs(); err != nil {
 		t.Fatal(err)
@@ -3066,7 +2989,7 @@ func TestInitPromptDirs(t *testing.T) {
 // TestLoadDropInsAbsentDir confirms that a missing drop-in directory is not
 // an error — drop-ins are an opt-in customization slot.
 func TestLoadDropInsAbsentDir(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testsandbox.Isolate(t)
 	got, err := LoadDropIns("mayor")
 	if err != nil {
 		t.Fatalf("LoadDropIns: %v", err)
@@ -3080,7 +3003,7 @@ func TestLoadDropInsAbsentDir(t *testing.T) {
 // lexical filename order (the systemd / cron.d convention) so users can use
 // numeric prefixes to control composition.
 func TestLoadDropInsLexicalOrder(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testsandbox.Isolate(t)
 	dir := DropInDir("mayor")
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		t.Fatal(err)
@@ -3116,7 +3039,7 @@ func TestLoadDropInsLexicalOrder(t *testing.T) {
 // subdirectories are skipped — keeps the directory safe to use as a notes
 // area as long as customizations end in .md.
 func TestLoadDropInsIgnoresNonMarkdown(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testsandbox.Isolate(t)
 	dir := DropInDir("mayor")
 	if err := os.MkdirAll(filepath.Join(dir, "subdir"), 0755); err != nil {
 		t.Fatal(err)
@@ -3148,7 +3071,7 @@ func TestLoadDropInsIgnoresNonMarkdown(t *testing.T) {
 // that differs from the file stem so the test proves that, rather than passing
 // on a coincidence when the shipped default happens to be "mayor".
 func TestSynthesizePromptMayorAppendsDropIns(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testsandbox.Isolate(t)
 	setCoordinator(t, "ringmaster")
 	if err := InitPromptDirs(); err != nil {
 		t.Fatal(err)
@@ -3188,7 +3111,7 @@ func TestSynthesizePromptMayorAppendsDropIns(t *testing.T) {
 // inline the template + config, then append any drop-ins keyed by the crew
 // agent name (the user-facing name, not the underlying template).
 func TestSynthesizePromptCrewWithExtends(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testsandbox.Isolate(t)
 	if err := InitPromptDirs(); err != nil {
 		t.Fatal(err)
 	}
@@ -3233,7 +3156,7 @@ func TestSynthesizePromptCrewWithExtends(t *testing.T) {
 // drop-ins for templates land before expansion (so fragment text can also
 // reference template vars if it wants to).
 func TestSynthesizePromptTemplateExpandsStubs(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testsandbox.Isolate(t)
 	if err := InitPromptDirs(); err != nil {
 		t.Fatal(err)
 	}
@@ -3276,7 +3199,7 @@ func TestSynthesizePromptTemplateExpandsStubs(t *testing.T) {
 // TestSynthesizePromptUnknownName confirms that an unknown prompt name
 // produces an error so `pogo agent prompt show <unknown>` exits non-zero.
 func TestSynthesizePromptUnknownName(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testsandbox.Isolate(t)
 	if err := InitPromptDirs(); err != nil {
 		t.Fatal(err)
 	}
@@ -3290,7 +3213,7 @@ func TestSynthesizePromptUnknownName(t *testing.T) {
 // crew → template precedence — a name that exists as both a crew prompt and
 // a template resolves to the crew prompt first.
 func TestSynthesizePromptResolutionPriority(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testsandbox.Isolate(t)
 	if err := InitPromptDirs(); err != nil {
 		t.Fatal(err)
 	}
@@ -3321,7 +3244,7 @@ func TestSynthesizePromptResolutionPriority(t *testing.T) {
 // wiring, mayor-side and crew-side drop-ins would only be visible via
 // `pogo agent prompt show`, not at spawn.
 func TestSynthesizeExtendsPromptDropInsOnly(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testsandbox.Isolate(t)
 	if err := InitPromptDirs(); err != nil {
 		t.Fatal(err)
 	}
@@ -3378,7 +3301,7 @@ func TestSynthesizeExtendsPromptDropInsOnly(t *testing.T) {
 // crew prompt picks up drop-ins keyed on the crew agent's filename stem,
 // applied after the template+config inline.
 func TestSynthesizeExtendsPromptExtendsAndDropIns(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testsandbox.Isolate(t)
 	if err := InitPromptDirs(); err != nil {
 		t.Fatal(err)
 	}
@@ -3431,7 +3354,7 @@ func TestSynthesizeExtendsPromptExtendsAndDropIns(t *testing.T) {
 // loader honors lexical filename ordering (the systemd / cron.d convention)
 // so users can sequence customizations with numeric prefixes.
 func TestSynthesizeExtendsPromptDropInsLexicalOrder(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testsandbox.Isolate(t)
 	if err := InitPromptDirs(); err != nil {
 		t.Fatal(err)
 	}
@@ -3472,7 +3395,7 @@ func TestSynthesizeExtendsPromptDropInsLexicalOrder(t *testing.T) {
 // drop-in directory is treated identically to an absent one — no synthesized
 // file, return "" so the caller falls back to the original prompt.
 func TestSynthesizeExtendsPromptEmptyDropInDir(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testsandbox.Isolate(t)
 	if err := InitPromptDirs(); err != nil {
 		t.Fatal(err)
 	}
@@ -3502,7 +3425,7 @@ func TestSynthesizeExtendsPromptEmptyDropInDir(t *testing.T) {
 // drop-ins from dropins/<basename>/*.md to the template body before
 // {{.Var}} expansion, so fragment text can also reference template vars.
 func TestExpandTemplateAppliesDropIns(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testsandbox.Isolate(t)
 	if err := InitPromptDirs(); err != nil {
 		t.Fatal(err)
 	}
@@ -3542,7 +3465,7 @@ func TestExpandTemplateAppliesDropIns(t *testing.T) {
 // drop-in pathway when the directory is absent — preserves the legacy
 // behavior for templates without customizations.
 func TestExpandTemplateNoDropIns(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testsandbox.Isolate(t)
 	if err := InitPromptDirs(); err != nil {
 		t.Fatal(err)
 	}
@@ -3565,7 +3488,7 @@ func TestExpandTemplateNoDropIns(t *testing.T) {
 // concatenated in lexical order — the spawn-time mirror of
 // TestLoadDropInsLexicalOrder for the polecat path.
 func TestExpandTemplateMultipleDropIns(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testsandbox.Isolate(t)
 	if err := InitPromptDirs(); err != nil {
 		t.Fatal(err)
 	}
@@ -3605,7 +3528,7 @@ func TestExpandTemplateMultipleDropIns(t *testing.T) {
 // design contract: drop-ins are wholly user-owned; install never reads or
 // writes there.
 func TestInstallPromptsDoesNotTouchDropIns(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testsandbox.Isolate(t)
 	if err := InitPromptDirs(); err != nil {
 		t.Fatal(err)
 	}
@@ -3645,7 +3568,7 @@ func TestInstallPromptsDoesNotTouchDropIns(t *testing.T) {
 // strict-but-narrow — it scaffolds shipped templates without disturbing
 // user-authored drop-ins.
 func TestInitPromptsDoesNotTouchDropIns(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testsandbox.Isolate(t)
 	if err := InitPromptDirs(); err != nil {
 		t.Fatal(err)
 	}

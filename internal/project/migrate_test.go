@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/drellem2/pogo/internal/testsandbox"
 )
 
 // TestMigrateLegacyProjectFile covers the one-time projects.json migration
@@ -11,8 +13,7 @@ import (
 // registry moves into the normalized $HOME/.pogo, and an existing canonical
 // file is never clobbered.
 func TestMigrateLegacyProjectFile(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	home := testsandbox.Isolate(t).Home
 	t.Setenv("POGO_HOME", home) // legacy layout normalized to $HOME/.pogo
 
 	origName := ProjectFileName

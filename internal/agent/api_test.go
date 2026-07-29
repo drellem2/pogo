@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/drellem2/pogo/internal/testsandbox"
 )
 
 // catCommandConfig is a test AgentCommandConfig that runs `cat` for any
@@ -223,8 +225,7 @@ func startAgentViaAPI(t *testing.T, reg *Registry, name string) *Agent {
 // TestHandleStart_NudgeOnStartFromFrontmatter verifies that handleStart
 // uses nudge_on_start from a prompt file's TOML frontmatter when present.
 func TestHandleStart_NudgeOnStartFromFrontmatter(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	testsandbox.Isolate(t)
 
 	if err := InitPromptDirs(); err != nil {
 		t.Fatalf("InitPromptDirs: %v", err)
@@ -251,8 +252,7 @@ func TestHandleStart_NudgeOnStartFromFrontmatter(t *testing.T) {
 // TestHandleStart_MayorFallbackNudge verifies that the mayor without
 // frontmatter still receives the legacy coordination-loop nudge.
 func TestHandleStart_MayorFallbackNudge(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	testsandbox.Isolate(t)
 
 	if err := InitPromptDirs(); err != nil {
 		t.Fatalf("InitPromptDirs: %v", err)
@@ -317,8 +317,7 @@ func wedgeDeadCrewViaPrompt(t *testing.T, reg *Registry, name string) *Agent {
 // bypasses by calling reg.Spawn directly. The literal recovery from the issue:
 // no systemctl restart, no manual registry surgery.
 func TestHandleStart_RecoversWedgedCrewAgent(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	testsandbox.Isolate(t)
 
 	if err := InitPromptDirs(); err != nil {
 		t.Fatalf("InitPromptDirs: %v", err)
@@ -354,8 +353,7 @@ func TestHandleStart_RecoversWedgedCrewAgent(t *testing.T) {
 // TestStopClearsDeadRestartAgent calls reg.Stop directly; this covers the HTTP
 // status mapping (204 No Content, not 404).
 func TestHandleStop_ClearsWedgedCrewAgent(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	testsandbox.Isolate(t)
 
 	if err := InitPromptDirs(); err != nil {
 		t.Fatalf("InitPromptDirs: %v", err)
@@ -390,8 +388,7 @@ func TestHandleStop_ClearsWedgedCrewAgent(t *testing.T) {
 // prompt (actionable: install prompts) from a missing endpoint
 // (actionable: rebuild pogod).
 func TestHandleStart_PromptNotFoundStructured(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	testsandbox.Isolate(t)
 
 	if err := InitPromptDirs(); err != nil {
 		t.Fatalf("InitPromptDirs: %v", err)
@@ -439,8 +436,7 @@ func TestHandleStart_PromptNotFoundStructured(t *testing.T) {
 // TestHandleStart_CrewFallbackNudge verifies that a crew agent without
 // frontmatter receives the legacy generic mail-checking nudge.
 func TestHandleStart_CrewFallbackNudge(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	testsandbox.Isolate(t)
 
 	if err := InitPromptDirs(); err != nil {
 		t.Fatalf("InitPromptDirs: %v", err)
@@ -497,8 +493,7 @@ func writeTemplate(t *testing.T, name, content string) {
 // TestHandleSpawnPolecat_NudgeOnStartFromFrontmatter verifies that the polecat's
 // initial nudge comes from the template's frontmatter when set.
 func TestHandleSpawnPolecat_NudgeOnStartFromFrontmatter(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	testsandbox.Isolate(t)
 
 	writeTemplate(t, "fronted", "+++\nnudge_on_start = \"custom polecat nudge\"\n+++\nbody {{.Id}}\n")
 
@@ -525,8 +520,7 @@ func TestHandleSpawnPolecat_NudgeOnStartFromFrontmatter(t *testing.T) {
 // templates/polecat.md frontmatter behave identically to the previous
 // hardcoded "...for this work item: <id>" message.
 func TestHandleSpawnPolecat_NudgeOnStartTemplateExpanded(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	testsandbox.Isolate(t)
 
 	writeTemplate(t, "templated", "+++\nnudge_on_start = \"work item: {{.Id}}\"\n+++\nbody\n")
 
@@ -551,8 +545,7 @@ func TestHandleSpawnPolecat_NudgeOnStartTemplateExpanded(t *testing.T) {
 // TestHandleSpawnPolecat_FallbackNudge verifies that a template without a
 // nudge_on_start field still produces the legacy work-item nudge.
 func TestHandleSpawnPolecat_FallbackNudge(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	testsandbox.Isolate(t)
 
 	writeTemplate(t, "plainpc", "# plain polecat\nbody {{.Id}}\n")
 
@@ -580,8 +573,7 @@ func TestHandleSpawnPolecat_FallbackNudge(t *testing.T) {
 // exists" (gh #27). The failure is triggered via an unparseable
 // nudge_on_start template, which errors after the worktree/branch exist.
 func TestHandleSpawnPolecat_FailureCleansUpBranch(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	tmpHome := testsandbox.Isolate(t).Home
 
 	workDir, _ := makeRepoWithOrigin(t)
 
@@ -628,8 +620,7 @@ func TestHandleSpawnPolecat_FailureCleansUpBranch(t *testing.T) {
 // worktree=false in the template's frontmatter prevents worktree creation
 // even when a Repo is supplied.
 func TestHandleSpawnPolecat_WorktreeFalseSkipsCreation(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	tmpHome := testsandbox.Isolate(t).Home
 
 	workDir, _ := makeRepoWithOrigin(t)
 
@@ -669,8 +660,7 @@ func TestHandleSpawnPolecat_WorktreeFalseSkipsCreation(t *testing.T) {
 // TestHandleSpawnPolecat_WorktreeTrueCreatesWorktree verifies that
 // worktree=true in frontmatter (the default) creates the isolated worktree.
 func TestHandleSpawnPolecat_WorktreeTrueCreatesWorktree(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	tmpHome := testsandbox.Isolate(t).Home
 
 	workDir, _ := makeRepoWithOrigin(t)
 
@@ -701,8 +691,7 @@ func TestHandleSpawnPolecat_WorktreeTrueCreatesWorktree(t *testing.T) {
 // TestHandleSpawnPolecat_WorktreeDefaultWhenRepoSet verifies the legacy
 // behavior is preserved when a template declares no worktree field.
 func TestHandleSpawnPolecat_WorktreeDefaultWhenRepoSet(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	tmpHome := testsandbox.Isolate(t).Home
 
 	workDir, _ := makeRepoWithOrigin(t)
 
@@ -732,8 +721,7 @@ func TestHandleSpawnPolecat_WorktreeDefaultWhenRepoSet(t *testing.T) {
 // when a Repo is supplied and the template asks for a worktree, and that the
 // polecat is instead anchored at its ~/.pogo/agents/<name>/ home dir (gh #17).
 func TestHandleSpawnPolecat_NoWorktreeFlagSkipsCreation(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	tmpHome := testsandbox.Isolate(t).Home
 
 	workDir, _ := makeRepoWithOrigin(t)
 
@@ -788,8 +776,7 @@ func TestHandleSpawnPolecat_NoWorktreeFlagSkipsCreation(t *testing.T) {
 // lifts the implicit --repo requirement: a spawn with no Repo at all succeeds
 // (gh #17, the primary driver — editing files that aren't under a git repo).
 func TestHandleSpawnPolecat_NoWorktreeNoRepoSucceeds(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	tmpHome := testsandbox.Isolate(t).Home
 
 	writeTemplate(t, "nowtnorepo", "# in-place polecat, no repo\n")
 
@@ -819,8 +806,7 @@ func TestHandleSpawnPolecat_NoWorktreeNoRepoSucceeds(t *testing.T) {
 // template variable reflects the flag so templates can gate refinery-submit
 // instructions on it (refinery:NO posture).
 func TestHandleSpawnPolecat_NoWorktreeVarExposed(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	tmpHome := testsandbox.Isolate(t).Home
 
 	writeTemplate(t, "nowtvar",
 		"# polecat\n{{if .NoWorktree}}MODE: in-place at {{.WorktreeDir}}{{else}}MODE: worktree{{end}}\n")
@@ -855,8 +841,7 @@ func TestHandleSpawnPolecat_NoWorktreeVarExposed(t *testing.T) {
 // TestHandleSpawnPolecat_FrontmatterStrippedFromBody verifies that the
 // frontmatter block does not leak into the rendered prompt file.
 func TestHandleSpawnPolecat_FrontmatterStrippedFromBody(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	testsandbox.Isolate(t)
 
 	writeTemplate(t, "stripfm", "+++\nnudge_on_start = \"go\"\n+++\nID is {{.Id}}\n")
 
@@ -892,8 +877,7 @@ func TestHandleSpawnPolecat_FrontmatterStrippedFromBody(t *testing.T) {
 // SpawnPolecatAPIRequest.Id flows through to Agent.WorkItemID and surfaces in
 // the AgentInfo JSON returned by the spawn endpoint and the registry list.
 func TestHandleSpawnPolecat_WorkItemIDPlumbedFromRequest(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	testsandbox.Isolate(t)
 
 	writeTemplate(t, "wi", "# polecat\n")
 
@@ -931,8 +915,7 @@ func TestHandleSpawnPolecat_WorkItemIDPlumbedFromRequest(t *testing.T) {
 // when no Id is supplied, and is omitted from JSON output rather than serialized
 // as "".
 func TestHandleSpawnPolecat_WorkItemIDEmptyWhenNoId(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	testsandbox.Isolate(t)
 
 	writeTemplate(t, "noid", "# polecat\n")
 
@@ -979,8 +962,7 @@ func providerTestRegistry(t *testing.T, tmpHome string) *Registry {
 // (tier 1) selects the harness for that one spawn — the mixed-fleet headline
 // (mg-b31b acceptance bar 3).
 func TestHandleSpawnPolecat_ProviderFlag(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	tmpHome := testsandbox.Isolate(t).Home
 	writeTemplate(t, "flagpc", "# polecat\n")
 
 	reg := providerTestRegistry(t, tmpHome)
@@ -1000,8 +982,7 @@ func TestHandleSpawnPolecat_ProviderFlag(t *testing.T) {
 // template frontmatter (tier 2) selects the harness when no --provider flag
 // is given (mg-b31b acceptance bar 2).
 func TestHandleSpawnPolecat_ProviderFrontmatter(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	tmpHome := testsandbox.Isolate(t).Home
 	writeTemplate(t, "fmpc", "+++\nprovider = \"codex\"\n+++\n# polecat\n")
 
 	reg := providerTestRegistry(t, tmpHome)
@@ -1020,8 +1001,7 @@ func TestHandleSpawnPolecat_ProviderFrontmatter(t *testing.T) {
 // flag overrides a conflicting provider: frontmatter key (precedence wiring,
 // mg-b31b acceptance bar 4).
 func TestHandleSpawnPolecat_ProviderFlagBeatsFrontmatter(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	tmpHome := testsandbox.Isolate(t).Home
 	writeTemplate(t, "bothpc", "+++\nprovider = \"claude\"\n+++\n# polecat\n")
 
 	reg := providerTestRegistry(t, tmpHome)
@@ -1041,8 +1021,7 @@ func TestHandleSpawnPolecat_ProviderFlagBeatsFrontmatter(t *testing.T) {
 // spawned with no --provider flag and no provider: frontmatter resolves to the
 // built-in default (claude) — unchanged pre-mg-b31b behavior (bar 7).
 func TestHandleSpawnPolecat_DefaultProviderBackwardCompat(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	tmpHome := testsandbox.Isolate(t).Home
 	writeTemplate(t, "defpc", "# polecat\n")
 
 	reg := providerTestRegistry(t, tmpHome)
@@ -1061,8 +1040,7 @@ func TestHandleSpawnPolecat_DefaultProviderBackwardCompat(t *testing.T) {
 // --provider value fails the spawn with a clear 400 before any side effects —
 // never a silent wrong-provider spawn (mg-b31b acceptance bar 8).
 func TestHandleSpawnPolecat_UnknownProviderFailsFast(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	tmpHome := testsandbox.Isolate(t).Home
 	writeTemplate(t, "badpc", "# polecat\n")
 
 	reg := providerTestRegistry(t, tmpHome)

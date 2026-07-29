@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/drellem2/pogo/internal/config"
+	"github.com/drellem2/pogo/internal/testsandbox"
 )
 
 // The store is test-safe BY DEFAULT, and this file is the control (mg-da48).
@@ -57,8 +58,7 @@ func unsandboxed(t *testing.T) {
 // most direct form: with no override, running under `go test`, the path must not
 // be the one pogod uses. Everything else in this file is a consequence.
 func TestWitnessPathNeverResolvesToTheLiveStoreUnderTest(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	home := testsandbox.Isolate(t).Home
 	t.Setenv("POGO_HOME", filepath.Join(home, ".pogo"))
 	unsandboxed(t)
 
@@ -114,8 +114,7 @@ func TestExplicitOverrideStillWins(t *testing.T) {
 // and earned the mayor a `kill`. The assertion is that the live store is not
 // merely correct afterwards — it was never created at all.
 func TestSpawningAgentDoesNotTouchTheLiveStore(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	home := testsandbox.Isolate(t).Home
 	t.Setenv("POGO_HOME", filepath.Join(home, ".pogo"))
 	unsandboxed(t)
 

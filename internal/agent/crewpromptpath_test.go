@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/drellem2/pogo/internal/testsandbox"
 )
 
 // promptPathSandbox gives a test its own HOME/POGO_HOME with the prompt dirs
@@ -14,7 +16,7 @@ import (
 // one the case wrote itself.
 func promptPathSandbox(t *testing.T) {
 	t.Helper()
-	isolateParkState(t)
+	testsandbox.Isolate(t)
 	if err := InitPromptDirs(); err != nil {
 		t.Fatalf("InitPromptDirs: %v", err)
 	}
