@@ -109,7 +109,12 @@ func TestWatcherMailsTheMayorOnADeficit(t *testing.T) {
 	}
 }
 
-func TestWatcherIsSilentOnAHealthyFleet(t *testing.T) {
+// A healthy fleet is MAIL-silent but not LOG-silent: the control records that it
+// ran and declined. Before mg-ddf7 this path emitted nothing, which made "ran,
+// considered everything, found nothing" indistinguishable from "was never wired
+// up" — and this fleet's events log contains zero ack_watch_* events of any
+// kind, so that ambiguity was live rather than theoretical.
+func TestWatcherIsMailSilentButRecordsTheClearRunOnAHealthyFleet(t *testing.T) {
 	w, mail, ev := newTestWatcher(t, Options{
 		Source: fixtureSource([]Sample{
 			mailCheck("architect", 751, 757),
@@ -121,8 +126,114 @@ func TestWatcherIsSilentOnAHealthyFleet(t *testing.T) {
 	if mail.count() != 0 {
 		t.Errorf("healthy fleet mailed %d time(s)", mail.count())
 	}
-	if len(ev.types()) != 0 {
-		t.Errorf("healthy fleet emitted %v", ev.types())
+	if types := ev.types(); len(types) != 1 || types[0] != "ack_watch_clear" {
+		t.Fatalf("events = %v, want [ack_watch_clear]", types)
+	}
+	d := ev.evs[0].Details
+	if d["scanned"] != 3 || d["eligible"] != 3 {
+		t.Errorf("want scanned=3 eligible=3, got scanned=%v eligible=%v", d["scanned"], d["eligible"])
+	}
+}
+
+// The storm case, which is the one the event exists for. A burst of fresh
+// short-lived schedules is correctly NOT judged — too few fires, counters too
+// young, no comparable peers — and the resulting silence is the right answer.
+// Without the counts alongside it, that silence reads as a clean bill of health
+// for 40 schedules of which 3 were actually looked at.
+func TestWatcherClearEventDistinguishesJudgedFromMerelyUnjudged(t *testing.T) {
+	samples := []Sample{
+		mailCheck("architect", 751, 757),
+		mailCheck("pa", 753, 757),
+		mailCheck("pm-onethird", 751, 757),
+	}
+	// Twelve polecats spawned into the storm: eligible-looking but unjudgeable.
+	for _, name := range []string{"c76a", "f00a", "86e7", "8595", "2fcc", "fd39",
+		"8792", "bce0", "d631", "7254", "ebee", "d578"} {
+		s := mailCheck(name, 0, 6) // six fires, none acked
+		s.CreatedAt = base.Add(-time.Hour)
+		samples = append(samples, s)
+	}
+	w, mail, ev := newTestWatcher(t, Options{Source: fixtureSource(samples)})
+	w.Check(base)
+
+	if mail.count() != 0 {
+		t.Fatalf("a burst of under-sampled schedules must not mail; got %d", mail.count())
+	}
+	types := ev.types()
+	if len(types) != 1 || types[0] != "ack_watch_clear" {
+		t.Fatalf("events = %v, want [ack_watch_clear]", types)
+	}
+	d := ev.evs[0].Details
+	if d["scanned"] != 15 {
+		t.Errorf("want scanned=15, got %v", d["scanned"])
+	}
+	if d["eligible"] != 3 {
+		t.Errorf("want eligible=3 — the twelve polecats are under MinFires, got %v", d["eligible"])
+	}
+	if d["skipped_few_fires"] != 12 {
+		t.Errorf("want skipped_few_fires=12, got %v", d["skipped_few_fires"])
+	}
+	// The whole point: the record must let a reader tell these apart. 3 of 15 is
+	// not an all-clear, and the difference is only visible because the counts
+	// ride the event.
+	if d["scanned"] == d["eligible"] {
+		t.Error("scanned must not equal eligible here, or the test proves nothing")
+	}
+}
+
+// A clear run is recorded on EVERY sample, not only when the fleet transitions
+// from deficient to healthy. A transition-only emit goes quiet during exactly
+// the long calm in which a reader most needs to know the control is still alive.
+func TestWatcherRecordsEveryClearRunNotOnlyTransitions(t *testing.T) {
+	w, _, ev := newTestWatcher(t, Options{
+		Interval: time.Minute,
+		Source: fixtureSource([]Sample{
+			mailCheck("architect", 751, 757),
+			mailCheck("pa", 753, 757),
+			mailCheck("pm-onethird", 751, 757),
+		}),
+	})
+	w.Check(base)
+	w.Check(base.Add(2 * time.Minute))
+	w.Check(base.Add(4 * time.Minute))
+
+	types := ev.types()
+	if len(types) != 3 {
+		t.Fatalf("want one ack_watch_clear per sample, got %v", types)
+	}
+	for i, ty := range types {
+		if ty != "ack_watch_clear" {
+			t.Fatalf("event %d = %q, want ack_watch_clear", i, ty)
+		}
+	}
+}
+
+// A suppressed report and a clear report are DIFFERENT events. Collapsing them
+// would be this package's own bug: "we declined to look" and "we looked and
+// found nothing" are the two observations it exists to keep apart.
+func TestWatcherSuppressedAndClearAreDistinctEvents(t *testing.T) {
+	healthy := []Sample{
+		mailCheck("architect", 751, 757),
+		mailCheck("pa", 753, 757),
+		mailCheck("pm-onethird", 751, 757),
+	}
+	w, _, ev := newTestWatcher(t, Options{
+		Interval: time.Minute,
+		Source: func(now time.Time) (Snapshot, error) {
+			snap := Snapshot{Now: now, Samples: healthy}
+			if now.Equal(base) {
+				snap.LastDisruption = now.Add(-time.Minute)
+				snap.DisruptionReason = "system_wake"
+			}
+			return snap, nil
+		},
+	})
+	w.Check(base)                      // just woken: suppressed
+	w.Check(base.Add(2 * time.Minute)) // settled: clear
+
+	types := ev.types()
+	if len(types) != 2 || types[0] != "ack_watch_suppressed" || types[1] != "ack_watch_clear" {
+		t.Fatalf("events = %v, want [ack_watch_suppressed ack_watch_clear]", types)
 	}
 }
 

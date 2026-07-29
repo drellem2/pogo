@@ -1,6 +1,7 @@
 package ackwatch
 
 import (
+	"sort"
 	"time"
 
 	"github.com/drellem2/pogo/internal/events"
@@ -36,6 +37,59 @@ func SampleEntries(entries []scheduler.Entry, ref time.Time) []Sample {
 		})
 	}
 	return out
+}
+
+// ReadFireTimeline reads the delivery/completion timeline out of logPath,
+// restricted to [since, until). A zero until means "up to the end of the log".
+//
+// The persisted counters cannot answer the population question, so this is the
+// one reader that must exist: see the header of populations.go for why (the
+// short version is that a re-registration zeroes the counters, and the nightly
+// redeploy guarantees one, so a storm's deficit is erased by the restart that
+// follows it and only the events log retains it).
+//
+// Two reads rather than one unfiltered read: events.Filter carries a single
+// Type, and this log is tens of megabytes on a live box, most of it neither
+// event.
+func ReadFireTimeline(logPath string, since, until time.Time) ([]FireEvent, error) {
+	var out []FireEvent
+	for kind, evType := range map[FireEventKind]string{
+		FireDelivered: "scheduler_fire_delivered",
+		FireCompleted: "scheduler_fire_completed",
+	} {
+		evs, err := events.ReadFiltered(logPath, events.Filter{SinceMin: since, Type: evType})
+		if err != nil {
+			return nil, err
+		}
+		for _, ev := range evs {
+			at, perr := time.Parse(time.RFC3339Nano, ev.Timestamp)
+			if perr != nil {
+				continue
+			}
+			if !until.IsZero() && !at.Before(until) {
+				continue
+			}
+			out = append(out, FireEvent{
+				At:    at,
+				Kind:  kind,
+				Agent: detailString(ev.Details, "to"),
+				ID:    detailString(ev.Details, "schedule_id"),
+				Token: detailString(ev.Details, "fire_token"),
+			})
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].At.Before(out[j].At) })
+	return out, nil
+}
+
+// detailString reads a string detail, tolerating absence and a non-string
+// value. A malformed line must not abort a measurement over a whole log.
+func detailString(details map[string]any, key string) string {
+	if details == nil {
+		return ""
+	}
+	s, _ := details[key].(string)
+	return s
 }
 
 // DisruptionWindow is how far back LastDisruption looks for a suppressing

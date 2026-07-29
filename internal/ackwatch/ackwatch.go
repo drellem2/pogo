@@ -29,7 +29,38 @@
 // it measures COMPLETED WORK rather than liveness. This package is the reader
 // it never had.
 //
-// # Why the comparison is cross-agent
+// # WHAT THIS MEASURES: delivery, not diligence
+//
+// Read as a measure of an agent's diligence, this number produces alerts in
+// exactly the direction that discredits the tool — and mg-ddf7 established by
+// measurement that the diligence reading is not merely unsafe but arithmetically
+// empty. For any schedule,
+//
+//	FiresCompleted/FiresDelivered  ==  1/mean_attention_gap  -  outstanding/delivered
+//
+// exactly, where the attention gap is deliveries per ack cycle. That held to zero
+// error across all 114 schedules in this fleet's event log. The ratio IS the
+// reciprocal of the agent's turn length measured in cadence periods, corrected
+// for where you stopped looking. There is no residual term left over for
+// diligence to live in.
+//
+// The consequence is not subtle: an agent whose turns run longer than its
+// cadence CANNOT score 100%, however perfectly it behaves. On the 2026-07-29
+// storm night `pa` acked every single token it was handed and read 83%, with a
+// longest unacked run of 9 — nine fires delivered into one turn, eight of whose
+// tokens the scheduler itself superseded before pa could see them. The mayor
+// read 29/37 on the same night for the same reason, having acked every token it
+// was handed including one that arrived in a mail body after its nudge failed
+// the idle gate.
+//
+// So the number to read for the failure this package exists to catch is
+// UnackedStreak — the run length — because it is the statistic that does not
+// saturate: a busy-but-healthy agent's run is bounded by its own turn length,
+// and a wedged agent's climbs without bound (202, for the mayor, during the
+// 2026-07-22 outage). See populations.go, and
+// docs/investigations/ack-deficit-populations-2026-07-30.md for the full record.
+//
+// # Why the comparison is cross-agent — and the alternative that was REJECTED
 //
 // pm-pogo was always broken, from its first fire. A detector that compared an
 // agent to its OWN history would have flagged nothing — there was no regression
@@ -39,6 +70,63 @@
 // schedule to its PEERS — same kind, same cadence, comparable fire count — and
 // the whole-cohort case is reported separately (see Report.Fleet) rather than
 // as N per-agent findings.
+//
+// REJECTED ALTERNATIVE: compare a schedule against its own history.
+// REASON: bursty delivery then becomes a false-positive generator, because the
+// ratio is an inverted attention gap (above) and an agent's attention gap moves
+// whenever its workload does. Every such false positive would look EXACTLY like
+// the pm-pogo 36% incident that motivated this package — a plateau at a low
+// rate, on a live-looking agent — so the failure mode of the cheaper design is
+// indistinguishable from the fault the expensive design exists to find. That is
+// why the cross-agent comparison is not a nicety to be simplified away later:
+// it is what makes the metric usable at all.
+//
+// This paragraph is here, rather than only in mg-ddf7, because it explains a
+// CHOICE rather than describing behaviour, and that is precisely the class of
+// note a later editor deletes as redundant.
+//
+// # The denominator: already deliveries, not dues — and the repair that would
+// # have made it worse
+//
+// A recurring proposal is "count fires DELIVERED, not fires DUE — a batch of
+// eight is ONE delivery". Measured (mg-ddf7): the denominator already counts
+// deliveries. scheduler.Tick collapses every missed period into a single fire
+// and calls recordDeliveryLocked once, so across this fleet's whole log 60830
+// due periods produced 54021 deliveries — 6809 dues, 11%, already collapsed.
+// Changing FiresDelivered to count deliveries is a no-op, and anyone who lands
+// it will believe they fixed something.
+//
+// The batching that actually hurts is not several dues collapsing into one fire.
+// It is several genuinely separate deliveries landing inside one agent turn,
+// where only the newest token is redeemable.
+//
+// REJECTED ALTERNATIVE: exclude superseded fires from the denominator — count
+// one ackable opportunity per batch.
+// REASON: it is CIRCULAR. A fire is superseded precisely when nothing acked it
+// before the next arrived, so this subtracts the deficit from its own
+// denominator; what remains is completed/(completed+outstanding), a function of
+// the ack COUNT alone. Any schedule with 20 acks then reads >= 95% whether the
+// agent is perfect or wedged. Measured against the one true positive in this
+// fleet's history, it lifts pm-pogo's calm-window reading from 50% to 97% and
+// its peer gap from 50 points to 1 — the finding disappears. That is the
+// mg-7254 failure (a signal pinned HEALTHY, producing false calm) substituted
+// for this one (pinned UNHEALTHY, producing false noise); both end with the
+// detector being ignored. Pinned by
+// TestSplit_ExcludingBatchedFires_IsCircular_AndPinsTheSignalHealthy.
+//
+// The same objection rules out raising Floor or MinGap to quiet a storm: that
+// converts noise into silence without ever restoring the signal's ability to
+// vary. A repair has to un-pin the signal, not move the threshold it is read at.
+//
+// # When this control correctly declines to fire, it says so
+//
+// A silent correct outcome and a control that is not running are the same
+// observation. On the 2026-07-29 storm night this detector would correctly have
+// raised nothing, and nothing anywhere would have recorded that it considered
+// the burst and declined — so the quiet reads as absence, and the next editor
+// removes the guard as dead weight. Watcher.sample therefore emits
+// ack_watch_clear on the no-findings path, carrying the coverage counts, for the
+// same reason ack_watch_suppressed exists on the suppressed path.
 //
 // # Why an absolute floor as well
 //

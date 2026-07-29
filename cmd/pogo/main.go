@@ -1024,6 +1024,11 @@ carrier is found (so it can gate a schedule or CI step).`,
 
 	// check-acks: the completion-deficit detector (mg-1935). The on-demand half
 	// of the standing runner in pogod; same detector, same fixture-free inputs.
+	var (
+		checkAcksPopulations bool
+		checkAcksSince       string
+		checkAcksUntil       string
+	)
 	var cmdCheckAcks = &cobra.Command{
 		Use:   "check-acks",
 		Short: "Report schedules completing far fewer of their fires than their peers (never acts)",
@@ -1070,9 +1075,36 @@ REPORTS ONLY — it never nudges, restarts, or unregisters anything. Note that a
 default ` + "`pogo nudge`" + ` cannot reach the agent this typically finds: it waits for
 2s of PTY silence that a spinner never delivers. Use ` + "`--immediate`" + `.
 
-Exit status is 0 when nothing is actionable, 1 when any deficit is found.`,
+Exit status is 0 when nothing is actionable, 1 when any deficit is found.
+
+--populations answers a different question: not WHICH schedule is deficient but
+WHAT MECHANISM produced the deficit. Three can, and they have opposite remedies:
+
+  batched      several fires delivered inside one agent turn. Each new fire's
+               token supersedes the last, so only one is redeemable however
+               diligent the agent is.
+  token-less   a fire delivered carrying no token. Nothing to ack, so the
+               deficit is unclosable BY THE AGENT — a token-lifetime change
+               would not touch it.
+  boundary     a fire outstanding at the moment you looked. Bounded at one per
+               schedule, so it is negligible against a long history and the
+               entire reading against a short one. Not a property of the agent.
+
+It reads events.log rather than the counters, because a re-registration zeroes
+the counters and the nightly redeploy guarantees one — so a deficit accumulated
+during a storm is erased by the restart that follows it, and the live table
+always reads calm. Validate against storm data, not calm data: a fix verified on
+a quiet fleet is verified in the conditions where the metric was never wrong.
+
+    pogo check-acks --populations --since 2026-07-29T15:00:00Z --until 2026-07-29T23:00:00Z
+
+--populations never exits non-zero: it is a measurement, not a verdict.`,
 		Args: cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
+			if checkAcksPopulations {
+				runAckPopulations(checkAcksSince, checkAcksUntil, jsonOutput)
+				return
+			}
 			entries, err := client.ListSchedules("")
 			if err != nil {
 				// Scheduler state we could not read is not "no findings".
@@ -1099,6 +1131,12 @@ Exit status is 0 when nothing is actionable, 1 when any deficit is found.`,
 			}
 		},
 	}
+	cmdCheckAcks.Flags().BoolVar(&checkAcksPopulations, "populations", false,
+		"split the deficit by mechanism (batched / token-less / boundary) from events.log")
+	cmdCheckAcks.Flags().StringVar(&checkAcksSince, "since", "",
+		"RFC3339 start of the measured window (default: 7 days ago); --populations only")
+	cmdCheckAcks.Flags().StringVar(&checkAcksUntil, "until", "",
+		"RFC3339 end of the measured window (default: end of log); --populations only")
 
 	// check-mailloops: the missing-mail-loop reader (mg-032b). The on-demand
 	// half of the standing announcer in pogod; same judgement, asked of the

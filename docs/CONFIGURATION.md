@@ -773,6 +773,24 @@ nudges, restarts, nor unregisters anything.
   reported as **not judged** with a count per reason. They are unjudged, not
   healthy — a detector that lets "nothing measurable" read as "nothing wrong"
   reproduces the bug it was built to end.
+- **A correct silence is recorded too.** A sample that ran and found nothing
+  emits `ack_watch_clear` with `scanned`, `eligible` and the four skip counts
+  (mg-ddf7). A silent correct outcome and a control that is not running are
+  otherwise the same observation — and `eligible 3 of 41` and `eligible 41 of 41`
+  are both no-findings, of which only one is a clean bill of health. Emitted on
+  every clear sample, not only on transitions.
+- **What the ratio actually measures — read this before tuning anything.**
+  `FiresCompleted/FiresDelivered` is *exactly* the reciprocal of the agent's mean
+  attention gap in cadence periods (measured to zero residual across 114
+  schedules, mg-ddf7). An agent whose turns run longer than its cadence therefore
+  **cannot** score 100%, however diligent: on the 2026-07-29 storm night `pa`
+  acked every token it was handed and read 83%. Read the deficit as **delivery,
+  not diligence**, and read `⚠ N unacked` — the run length — for the wedge this
+  detector exists to catch, because it is the statistic that does not saturate.
+  `pogo check-acks --populations` splits any deficit by mechanism. Two repairs
+  have already been rejected with reasons recorded in `internal/ackwatch`; see
+  [ack-deficit-populations-2026-07-30.md](investigations/ack-deficit-populations-2026-07-30.md)
+  before proposing a third, and validate it against storm data rather than calm.
 - **Never-acked.** A schedule with hundreds of fires and zero acks *is* a
   finding when the majority of its peers do ack — deliberately going beyond
   `scheduler.Entry.CompletionTracked`'s "untracked = unknown", because the
