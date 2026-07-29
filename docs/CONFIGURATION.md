@@ -936,6 +936,46 @@ that completes a QA item — verifying the source work item's acceptance criteri
 and reporting pass/fail. The refinery's gate enforces the existence and
 completion of the QA item independently of which polecat actually runs it.
 
+**Gate progress and timeout (`[gates] timeout`).** A running gate emits a
+heartbeat **every 30 seconds** — to pogod's log and to the merge request's
+`progress` field — so a gate that is merely slow is distinguishable from one
+whose runner has died. Check it without restarting anything:
+
+```bash
+pogo refinery show <mr-id>            # the Verdict: line reads the record for you
+pogo refinery show <mr-id> --json | jq .progress
+```
+
+`Verdict:` says one of three things: `ALIVE and working` (heartbeat fresh, gate
+producing output — wait), `DEAD` (no heartbeat for more than 3 intervals — the
+runner is gone, waiting will not help), or `ALIVE, gate silent` (the runner is
+fine but the gate has said nothing, which cannot be resolved from outside — the
+line reports that honestly and names the timeout that bounds it).
+
+A single gate is bounded at **60 minutes** by default. Override per repo in
+`<repo>/.pogo/refinery.toml`:
+
+```toml
+[gates]
+timeout = "90m"   # Go duration, or a bare number of minutes
+# timeout = "0"   # remove the bound entirely (a gate then runs until pogod stops)
+```
+
+An unreadable value (`timeout = "eventually"`) logs a warning and keeps the
+default bound rather than silently removing it. A timed-out gate fails the MR
+with what was observed while it ran — elapsed time, lines of output produced,
+how long it had been silent — so a bound set too low is diagnosable rather than
+mysterious. See ARCHITECTURE.md §"Telling a slow gate from a dead one" for why
+the heartbeat and the timeout ship together.
+
+**Cancelling.** `pogo refinery cancel <mr-id>` works on a **processing** merge
+request as well as a queued one. A queued MR is removed immediately; a
+processing one has its running gate killed and stops at the next step boundary —
+that is a request, not a final status, so poll `pogo refinery show <mr-id>` for
+the outcome. An MR that had already pushed to the target still resolves as
+`merged`. A cancelled MR does not count as a failure for its author and does not
+reopen its work item.
+
 ## `pogo install`
 
 `pogo install` is one-step setup: start pogod, run `mg init`, and install the

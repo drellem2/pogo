@@ -3447,6 +3447,10 @@ Use this for a quick health check of the refinery. For per-MR details use
 				if mr.Error != "" {
 					fmt.Printf("Error:     %s\n", mr.Error)
 				}
+				// The progress block answers "is this gate slow or dead?" —
+				// printed before the gate output, since it is what an operator
+				// is looking for while the MR is still in flight.
+				fmt.Print(formatMRProgress(mr.Progress, time.Now()))
 				if mr.GateOutput != "" {
 					fmt.Printf("\n--- Gate Output ---\n%s\n", mr.GateOutput)
 				}
@@ -3493,21 +3497,35 @@ This reclaims disk space and keeps the refinery worktree clones tidy.`,
 
 	var cmdRefineryCancel = &cobra.Command{
 		Use:   "cancel <mr-id>",
-		Short: "Cancel a queued merge request",
-		Long: `Remove a merge request from the queue without merging.
+		Short: "Cancel a queued merge request, or stop a processing one",
+		Long: `Stop a merge request.
 
-Only queued (not yet processing) merge requests can be cancelled.
+A QUEUED merge request is removed from the queue and resolved as cancelled
+immediately.
+
+A PROCESSING merge request has its running quality gate killed; the pipeline
+then stops at the next step boundary. That is a request, not a result: if the
+merge had already pushed to the target it has landed and still resolves as
+merged. Poll 'pogo refinery show <id>' for the outcome — the printed status
+says which of the two happened.
+
+An already-finished merge request (merged, failed, cancelled) cannot be
+cancelled.
 
 Example:
   pogo refinery cancel mr-abc123`,
 		Args: cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			id := args[0]
-			if err := client.CancelMerge(id); err != nil {
+			resp, err := client.CancelMerge(id)
+			if err != nil {
 				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
 			}
 			if jsonOutput {
-				cli.PrintJSON(map[string]string{"id": id, "status": "cancelled"})
+				cli.PrintJSON(resp)
+			} else if resp.Outcome == refinery.CancelRequestedInFlight {
+				fmt.Printf("Cancel requested for merge request %s\n", id)
+				fmt.Printf("  %s\n", resp.Note)
 			} else {
 				fmt.Printf("Cancelled merge request %s\n", id)
 			}

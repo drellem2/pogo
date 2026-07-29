@@ -153,6 +153,13 @@ type MergeRequest struct {
 	DeployError      string `json:"deploy_error,omitempty"`
 	FailureCount     int    `json:"failure_count"`
 	ThresholdReached bool   `json:"threshold_reached,omitempty"`
+	// Progress is the liveness record for the long-running step this MR is in
+	// (quality-gates). It is refreshed on a bounded interval by the goroutine
+	// running that step, so a reader can tell a gate that is running from one
+	// whose runner is gone — see StepProgress for what each field does and
+	// does not discriminate. Nil before the gates start; retained afterwards
+	// with EndTime set, as the record of how long they took.
+	Progress *StepProgress `json:"progress,omitempty"`
 }
 
 // OnMerged is called when a branch is successfully merged.
@@ -207,6 +214,18 @@ type Refinery struct {
 	// nowFunc is used for time-based pruning; defaults to time.Now.
 	// Override in tests to control time.
 	nowFunc func() time.Time
+
+	// heartbeatInterval overrides gateHeartbeatInterval. Zero means use the
+	// package default; tests set it short so a beat is observable.
+	heartbeatInterval time.Duration
+
+	// gateCancel cancels the quality gate running for r.processing, and
+	// cancelRequested records that someone asked for it. Both are cleared
+	// when processing ends. They are what lets Cancel reach a processing MR
+	// instead of refusing it — see Cancel.
+	gateCancel      context.CancelFunc
+	gateCtx         context.Context
+	cancelRequested bool
 
 	// wakeCh wakes the queue loop ahead of the poll tick. Buffered with
 	// capacity 1 so signalling never blocks and concurrent signals collapse
@@ -739,18 +758,39 @@ func (r *Refinery) AuthorFailureCount(author string) int {
 	return r.failureCounts[author]
 }
 
-// Cancel removes a queued merge request from the queue without merging.
-// Returns an error if the MR is not found or is not in a cancellable state.
-func (r *Refinery) Cancel(id string) error {
+// Cancel stops a merge request. A queued MR is removed from the queue and
+// resolved as cancelled immediately. A processing MR has its running quality
+// gate killed and stops at the next step boundary — see CancelOutcome for why
+// those two are reported as different things.
+//
+// Reaching a processing MR is the third item of mg-8595: cancel used to refuse
+// anything not queued, which meant it worked only on the state least in need
+// of it, and a genuinely hung gate had no recovery short of restarting pogod.
+// It is best-effort by nature — a merge that has already pushed to the target
+// has landed, and Cancel will not pretend otherwise.
+//
+// Returns an error if the MR is not found or has already finished.
+func (r *Refinery) Cancel(id string) (CancelOutcome, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	mr, ok := r.byID[id]
 	if !ok {
-		return fmt.Errorf("merge request %q not found", id)
+		return "", fmt.Errorf("merge request %q not found", id)
+	}
+	if mr.Status == StatusProcessing {
+		if r.processing != mr || r.gateCancel == nil {
+			// Persisted as processing but not actually in flight here — a
+			// restart recovery case. Nothing to kill, and claiming otherwise
+			// would be a lie.
+			return "", fmt.Errorf("merge request %q reads as processing but is not in flight in this "+
+				"daemon (likely recovered from a restart); it will be resolved by the recovery probe", id)
+		}
+		r.requestInFlightCancelLocked(mr)
+		return CancelRequestedInFlight, nil
 	}
 	if mr.Status != StatusQueued {
-		return fmt.Errorf("merge request %q has status %q and cannot be cancelled", id, mr.Status)
+		return "", fmt.Errorf("merge request %q has status %q, which is already final and cannot be cancelled", id, mr.Status)
 	}
 
 	// Remove from queue.
@@ -767,7 +807,7 @@ func (r *Refinery) Cancel(id string) error {
 	r.saveStateLocked()
 
 	log.Printf("refinery: cancelled MR %s branch=%s author=%s", mr.ID, mr.Branch, mr.Author)
-	return nil
+	return CancelRemovedFromQueue, nil
 }
 
 // processNext takes the next queued item and processes it.
@@ -786,6 +826,7 @@ func (r *Refinery) processNext() {
 
 	r.mu.Lock()
 	mr.Status = StatusProcessing
+	r.beginProcessingLocked()
 	r.saveStateLocked()
 	r.mu.Unlock()
 
@@ -794,11 +835,20 @@ func (r *Refinery) processNext() {
 	gateOutput, deployErr, alreadyMerged, err := r.processMerge(mr)
 
 	r.mu.Lock()
+	r.endProcessingLocked()
 	mr.GateOutput = gateOutput
 	mr.DeployError = deployErr
 	mr.AlreadyMerged = alreadyMerged
 	mr.DoneTime = time.Now()
-	if err != nil {
+	if isCancelled(err) {
+		// Cancelled, not failed. Neither the author's failure streak nor the
+		// failed callback applies: the merge did not fail on its merits, and
+		// firing onFailed here would reopen a work item on an operator
+		// action rather than on a defect in the branch (mg-8595).
+		mr.Status = StatusCancelled
+		mr.Error = err.Error()
+		log.Printf("refinery: MR %s cancelled mid-flight branch=%s author=%s (%v)", mr.ID, mr.Branch, mr.Author, err)
+	} else if err != nil {
 		mr.Status = StatusFailed
 		mr.Error = err.Error()
 		if mr.Author != "" {
@@ -829,10 +879,13 @@ func (r *Refinery) processNext() {
 	onFailed := r.onFailed
 	r.mu.Unlock()
 
-	// Fire callbacks outside the lock
-	if err != nil && onFailed != nil {
+	// Fire callbacks outside the lock. A cancelled MR fires neither: it did
+	// not merge, and it did not fail on its merits.
+	switch {
+	case isCancelled(err):
+	case err != nil && onFailed != nil:
 		onFailed(mr)
-	} else if err == nil && onMerged != nil {
+	case err == nil && onMerged != nil:
 		onMerged(mr)
 	}
 }
