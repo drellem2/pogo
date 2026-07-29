@@ -83,6 +83,12 @@ func TestComposerReady(t *testing.T) {
 		{"spaceless shortcuts marker", "?forshortcuts", true},
 		{"placeholder fallback", "❯ Try\"fix the failing test\"", true},
 		{"with ANSI", "\x1b[2m? for shortcuts\x1b[0m", true},
+		// Collapsing both sides means each sentinel covers both renderings, not
+		// just the era it was captured in: the spaced primary now matches a
+		// column-move footer, and the spaceless alternates now match a spaced one.
+		{"primary sentinel drawn with per-word column moves", "?\x1b[4Gfor\x1b[8Gshortcuts", true},
+		{"mode-cycle marker drawn spaced", "bypass permissions on (shift+tab to cycle)", true},
+		{"placeholder fallback drawn spaced", "❯ Try \"fix the failing test\"", true},
 		{"trust dialog up — no composer", "Quick safety check: Is this a project you trust?", false},
 		{"loading spinner", "  ✻ Welcome to Claude Code", false},
 		{"empty", "", false},
@@ -107,6 +113,58 @@ func TestComposerReadyReusesTheNudgeSentinels(t *testing.T) {
 				"hook and the initial nudge must agree on what 'composer is "+
 				"up' means", s)
 		}
+	}
+}
+
+// TestComposerReadySentinelsSurviveSpaceCollapse pins the collapse on both
+// sides of the match.
+//
+// The set deliberately mixes spellings — the primary sentinel is spaced because
+// that is how older Claude Code drew it, the alternates are spaceless because
+// v2.1.x positions the footer with per-word cursor-column moves. Matched raw,
+// each spelling only ever hit its own era's rendering, and a silently
+// non-matching sentinel costs the full InitialNudgeTimeout on every spawn
+// (gh#76 / mg-d06a). Every sentinel must match both ways.
+func TestComposerReadySentinelsSurviveSpaceCollapse(t *testing.T) {
+	for _, s := range readySentinels() {
+		if s == "" {
+			t.Error("empty sentinel in the ready set: it would match everything")
+			continue
+		}
+		if !composerReady([]byte("prefix " + s + " suffix")) {
+			t.Errorf("composerReady rejects its own sentinel %q as spelled", s)
+		}
+		if !composerReady([]byte("prefix" + collapse(s) + "suffix")) {
+			t.Errorf("composerReady rejects sentinel %q once the TUI's per-word "+
+				"column moves have eaten its spaces — sentinels must be matched "+
+				"against collapsed text", s)
+		}
+	}
+	// The dialog must still fail the gate, or collapsing has swallowed the
+	// distinction the hook exists to draw.
+	if composerReady([]byte(dialogLine)) {
+		t.Error("a composer sentinel matched the trust dialog: the gate would " +
+			"stop the hook from ever dismissing it")
+	}
+}
+
+// TestComposerScanReadsTheWholeRing is the pin for claude's half of mg-9270.
+//
+// The gate read 8KB out of a 64KB ring, and a marker a tick misses is not one it
+// is offered again. Claude's Ink TUI repaints continuously, so it is the provider
+// most able to push 8KB between two 250ms polls; when it does, the composer is
+// hidden from every tick, the gate never closes, and the hook watches its full
+// 60s budget with the echoed kickoff prompt in view. The read must be the whole
+// retained buffer, sourced from the ring's own constant so the two cannot drift.
+func TestComposerScanReadsTheWholeRing(t *testing.T) {
+	if composerScanBytes != agent.OutputRingBytes {
+		t.Errorf("composerScanBytes = %d, want the ring's own capacity %d — a "+
+			"literal here goes stale the day the ring is resized",
+			composerScanBytes, agent.OutputRingBytes)
+	}
+	if composerScanBytes <= 8192 {
+		t.Errorf("composerScanBytes = %d: back at or below the 8KB read that let "+
+			"a burst hide the composer from every poll", composerScanBytes)
 	}
 }
 

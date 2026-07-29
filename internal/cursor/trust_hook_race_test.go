@@ -98,11 +98,14 @@ func spawnScripted(t *testing.T, name, script string) *agent.Agent {
 	return a
 }
 
-// sawWithin polls the agent's PTY output for want until timeout.
+// sawWithin polls the agent's PTY output for want until timeout. It reads the
+// same width the hook does — a helper that reads less can be blinded by a burst
+// exactly as the gate was in mg-9270, and TestBurstCannotHideTheComposerFromTheGate
+// scripts a burst on purpose.
 func sawWithin(a *agent.Agent, want string, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		if bytes.Contains(agent.StripANSI(a.RecentOutput(8192)), []byte(want)) {
+		if bytes.Contains(agent.StripANSI(a.RecentOutput(composerScanBytes)), []byte(want)) {
 			return true
 		}
 		time.Sleep(20 * time.Millisecond)
@@ -218,6 +221,122 @@ func TestEchoedTaskIsNotTypedInto(t *testing.T) {
 	}
 }
 
+// burstFiller is one line of PTY noise: 60 bytes carrying no marker either
+// predicate looks for. 200 of them is ~12KB — comfortably over the 8KB the gate
+// used to read, and comfortably under the 64KB ring, so the placeholder printed
+// before the burst is pushed out of the old read window while still being
+// retained by the buffer. That gap is the whole defect.
+const burstFiller = "BURST-FILLER-0123456789-abcdefghijklmnopqrstuvwxyz-BURSTFILL"
+
+// TestBurstCannotHideTheComposerFromTheGate drives the real loop against a real
+// PTY over the shape of mg-9270.
+//
+// The gate is fed one read per tick. The composer placeholder is not a permanent
+// screen feature — Cursor replaces it when a turn starts — so a marker a tick
+// misses is a marker no tick sees again. Script the placeholder, then ~12KB of
+// output on top of it, and under the old 8KB read EVERY tick is looking at a
+// window the placeholder has already scrolled out of. The gate never closes; the
+// hook watches its whole budget with the echoed task in view; and the echoed task
+// here quotes the dialog, which is the production consequence — a stray "a" typed
+// into a live composer.
+//
+// The premise is asserted both ways before the hook runs, so a test that passes
+// says something: the placeholder must be invisible at 8KB and visible at the
+// shipped width. Reverting composerScanBytes to 8192 fails this test.
+func TestBurstCannotHideTheComposerFromTheGate(t *testing.T) {
+	echoed := "Investigate the dialog offering [a] Trust this workspace"
+
+	// Precondition: the echoed task really does look like the dialog, so the
+	// only thing standing between the hook and a keystroke is the gate.
+	if !matchesTrustDialog([]byte(echoed)) {
+		t.Fatal("precondition changed: the echoed task no longer matches " +
+			"trustDialogMarker — this test would prove nothing")
+	}
+
+	a := spawnScripted(t, "burst-gate",
+		"printf '"+composerLine+"\\n'\n"+
+			"i=0; while [ $i -lt 200 ]; do printf '%s\\n' '"+burstFiller+"'; i=$((i+1)); done\n"+
+			"printf '"+echoed+"\\n'\n"+
+			readOneByte+
+			"printf 'POGO-TYPED-INTO-COMPOSER\\n'\n"+
+			"sleep 30\n")
+
+	// The echoed task is printed last, so seeing it means the whole burst has
+	// landed and the buffer has stopped moving. Waiting for it is what makes the
+	// premise assertions below deterministic rather than a race with the script.
+	if !sawWithin(a, echoed, 10*time.Second) {
+		t.Fatalf("script never got through the burst; PTY tail:\n%s",
+			agent.StripANSI(a.RecentOutput(2048)))
+	}
+
+	// Premise, side one: at the old width the placeholder is GONE. This is the
+	// defect, reproduced — every tick of the old loop saw this view.
+	if composerReady(a.RecentOutput(8192)) {
+		t.Fatal("premise broken: the burst did not push the composer placeholder " +
+			"out of an 8KB read, so this test is not exercising mg-9270 — grow " +
+			"burstFiller or the loop count")
+	}
+	// Premise, side two: the ring still HAS it, so the fix has something to find.
+	// Deliberately asked for at the RING's capacity rather than at
+	// composerScanBytes — this is a fact about the buffer, not about the gate's
+	// choice, so narrowing the gate must fail the assertions below rather than
+	// quietly invalidating the premise here.
+	if !composerReady(a.RecentOutput(agent.OutputRingBytes)) {
+		t.Fatal("premise broken: the placeholder is not in the full ring either — " +
+			"the burst overflowed 64KB and no read width could recover it")
+	}
+
+	start := time.Now()
+	watchForTrustDialog(a, 3*time.Second, 50*time.Millisecond)
+	elapsed := time.Since(start)
+
+	// The gate closed: the hook resolved on an early tick instead of watching
+	// the burst-obscured screen for its whole budget.
+	if elapsed > 1500*time.Millisecond {
+		t.Errorf("hook watched for %v of a 3s budget: the gate never closed, "+
+			"which is the burst hiding the composer from every poll", elapsed)
+	}
+	// And the consequence the gate exists to prevent did not happen.
+	if sawWithin(a, "POGO-TYPED-INTO-COMPOSER", 1*time.Second) {
+		t.Error("hook sent the accept key into a live composer: with the " +
+			"placeholder hidden by the burst, the echoed task was all it could " +
+			"see, and it acted on it")
+	}
+}
+
+// TestPostTurnComposerSatisfiesTheGate drives the real loop over the OTHER half
+// of mg-9270: the transition itself.
+//
+// Once Cursor's first turn starts, the pre-turn placeholder is gone from the
+// screen for good and "Add a follow-up" is in its place. A hook that only knows
+// the pre-turn spelling has nothing left to match on a respawn into an
+// already-trusted workspace, so it watches out its full 30s budget with the
+// echoed task in view. The post-turn placeholder must close the gate on its own.
+func TestPostTurnComposerSatisfiesTheGate(t *testing.T) {
+	echoed := "Investigate the dialog offering [a] Trust this workspace"
+
+	// No pre-turn placeholder anywhere: the turn has already replaced it.
+	a := spawnScripted(t, "post-turn",
+		"printf '> Add a follow-up\\n'\n"+
+			"printf '"+echoed+"\\n'\n"+
+			readOneByte+
+			"printf 'POGO-TYPED-INTO-COMPOSER\\n'\n"+
+			"sleep 30\n")
+
+	start := time.Now()
+	watchForTrustDialog(a, 3*time.Second, 50*time.Millisecond)
+	elapsed := time.Since(start)
+
+	if elapsed > 1500*time.Millisecond {
+		t.Errorf("hook watched for %v of a 3s budget with a post-turn composer "+
+			"on screen: the gate does not recognise the placeholder Cursor shows "+
+			"for all but the first moments of a run", elapsed)
+	}
+	if sawWithin(a, "POGO-TYPED-INTO-COMPOSER", 1*time.Second) {
+		t.Error("hook sent the accept key into a live post-turn composer")
+	}
+}
+
 // TestWatchTerminatesWhenTheAgentExits is the NEGATIVE-SIDE control the rest of
 // this file needs to mean anything.
 //
@@ -257,11 +376,11 @@ func TestWatchTerminatesWhenTheAgentExits(t *testing.T) {
 
 	// Guard the premise: if the script had rendered a composer marker the hook
 	// would have returned via composerReady and this test would prove nothing.
-	if composerReady(a.RecentOutput(8192)) {
+	if composerReady(a.RecentOutput(composerScanBytes)) {
 		t.Error("premise broken: the scripted agent rendered a composer-ready " +
 			"marker, so the early return proves nothing about agent exit")
 	}
-	if matchesTrustDialog(a.RecentOutput(8192)) {
+	if matchesTrustDialog(a.RecentOutput(composerScanBytes)) {
 		t.Error("premise broken: the scripted agent rendered something matching " +
 			"the trust-dialog marker, so the early return proves nothing about " +
 			"agent exit")

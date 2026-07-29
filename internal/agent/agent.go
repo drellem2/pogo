@@ -940,7 +940,7 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 		nudge:          nudge,
 		provider:       provider,
 		receiptFile:    receiptFile,
-		outputBuf:      NewRingBuffer(64 * 1024), // 64KB rolling buffer
+		outputBuf:      NewRingBuffer(OutputRingBytes), // 64KB rolling buffer
 		attachConns:    make(map[io.Writer]struct{}),
 		socketPath:     filepath.Join(r.socketDir, req.Name+".sock"),
 		done:           make(chan struct{}),
@@ -1316,7 +1316,7 @@ func (r *Registry) Respawn(name string) (*Agent, error) {
 		nudge:          nudge,
 		provider:       provider,
 		receiptFile:    receiptFile,
-		outputBuf:      NewRingBuffer(64 * 1024),
+		outputBuf:      NewRingBuffer(OutputRingBytes),
 		attachConns:    make(map[io.Writer]struct{}),
 		socketPath:     filepath.Join(r.socketDir, old.Name+".sock"),
 		done:           make(chan struct{}),

@@ -206,9 +206,26 @@ loop is up:
 `PromptReadySentinel` is the `Plan, search, build anything` slice. It is absent
 during the loading banner and the trust dialog, which makes it a precise
 "input loop ready" signal. Caveat: after the first turn the placeholder becomes
-`→ Add a follow-up`, so the sentinel matches only *before* any turn. That is
-exactly and only where pogo uses it (`NudgeWaitReady` is the initial-nudge mode;
-mid-session nudges use `NudgeWaitIdle`), so the narrowing is harmless.
+`→ Add a follow-up`, so the sentinel matches only *before* any turn.
+
+**The narrowing is harmless for the nudge and was NOT harmless for the
+trust-dialog gate** — this paragraph used to claim it was harmless outright, and
+mg-9270 is the correction. For the nudge the claim holds: `NudgeWaitReady` is the
+initial-nudge mode and mid-session nudges use `NudgeWaitIdle`, so nothing waits on
+the pre-turn placeholder after a turn has started. But `TrustDialogHook`'s
+`composerReady` keyed off the same lone string while polling every 250ms, which
+made the placeholder a *window* rather than a screen feature: a spawn whose
+composer→turn transition fell between two polls left no tick that ever saw it, so
+the gate never closed and the hook watched out its whole 30s budget with the
+echoed task in view — the one window in which a task body quoting the dialog can
+match `trustDialogMarker`. A burst larger than the hook's 8KB read out of the 64KB
+ring did the same thing.
+
+`composerReady` therefore accepts **both** placeholders (`cursor.composerReadySentinels`)
+and reads the whole ring (`cursor.composerScanBytes`). The post-turn placeholder
+proves the composer at least as well as the pre-turn one: a running turn means
+nothing modal is in the way. Both entries are matched against collapsed text so
+neither depends on how Cursor spaces them — the gh#76 / mg-d06a trap.
 
 `InitialNudgeTimeout` is 30s — an order of magnitude over the worst observed
 startup.
