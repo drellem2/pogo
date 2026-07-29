@@ -281,6 +281,19 @@ failure mode — and is not a proof that no worker can reach gated work. Failing
 closed was rejected because `--id` is optional and because one bad path in
 macguffin would then halt the whole fleet.
 
+**The gate's twin, which fails the other way (mg-9a04).** Sitting immediately
+beside it in `handleSpawnPolecat` is the type→template router: with no
+`--template`, the work item's `type` selects the worker template through a
+**closed** map (`design` → `polecat-architect`, `qa` → `polecat-qa`), and any
+other type — `scoping`, `audit`, `bug`, bare `task` — selects **none** and the
+spawn is refused with the same `409`. That table had the same history as this
+gate: it existed only as prose in `mayor.md`, so the routing guarantee was again
+that an agent had read and retained a paragraph. The two directions differ
+because the costs do: refusing a *dispatchable* item wastes work and can halt the
+fleet on one bad file, while guessing a *template* wrong sends a design item to a
+builder that implements it and merges it. Full rules in
+[customizing.md](customizing.md#template-routing-is-closed).
+
 **Why `parked` is a separate sentinel and not a convention about `human`
 (mg-a3a2).** Until mg-a3a2, `human` was the only value that silenced these
 detectors, so it accumulated three incompatible senses in one queue: *gated on

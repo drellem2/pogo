@@ -427,6 +427,12 @@ type Registry struct {
 	// SetDispatchGate still gets it. See dispatchgate.go.
 	dispatchGate DispatchGate
 
+	// workItemTyper reads a work item's `type` marker so handleSpawnPolecat can
+	// route it through the closed type→template map when no --template was
+	// given (mg-9a04). Nil means the default MGWorkItemTyper — like the gate
+	// above, the routing holds without any wiring. See templateroute.go.
+	workItemTyper WorkItemTyper
+
 	// draining, when true, makes handleSpawnPolecat refuse to dispatch new
 	// polecats — the drain half of the pogo self-deploy path (mg-cae1 /
 	// mg-6afa). Only pogod knows its children and controls dispatch, so the

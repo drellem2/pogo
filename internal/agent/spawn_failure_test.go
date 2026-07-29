@@ -117,7 +117,7 @@ func TestSpawnPolecat_SuccessEmitsNoSpawnFailedEvent(t *testing.T) {
 	logPath := useTempEventLog(t)
 	reg := newDrainTestRegistry(t)
 
-	rr := spawnPolecat(t, reg, SpawnPolecatAPIRequest{Name: "cat-ok-d22a", Id: "mg-d22a"})
+	rr := spawnPolecat(t, reg, SpawnPolecatAPIRequest{Name: "cat-ok-d22a", Id: "mg-d22a", Template: BuildWorkerTemplate})
 	if rr.Code != http.StatusCreated {
 		t.Skipf("spawn did not succeed in this environment (status %d); "+
 			"the negative assertion needs a successful spawn to be meaningful", rr.Code)
@@ -196,6 +196,10 @@ func TestSpawnPolecat_FailedWorktreeAddRollsBackItsBranch(t *testing.T) {
 		Name: "cat-rollback",
 		Id:   "mg-d22a",
 		Repo: workDir,
+		// Explicit, so the type→template router (mg-9a04) is not what stops
+		// this spawn: the subject here is worktree rollback, and the spawn has
+		// to reach worktree creation for the test to prove anything.
+		Template: BuildWorkerTemplate,
 	})
 	if rr.Code == http.StatusCreated {
 		t.Fatal("spawn unexpectedly succeeded; the worktree target was supposed to be blocked")
@@ -242,9 +246,10 @@ func TestSpawnPolecat_FailedWorktreeAddKeepsAPreexistingBranch(t *testing.T) {
 	runGit(t, workDir, "checkout", "-q", "main")
 
 	rr := spawnPolecat(t, reg, SpawnPolecatAPIRequest{
-		Name: "cat-precious",
-		Id:   "mg-d22a",
-		Repo: workDir,
+		Name:     "cat-precious",
+		Id:       "mg-d22a",
+		Repo:     workDir,
+		Template: BuildWorkerTemplate, // reach worktree creation; see cat-rollback
 	})
 	if rr.Code == http.StatusCreated {
 		t.Fatal("spawn succeeded onto a branch holding unmerged work")
@@ -361,9 +366,10 @@ func TestSpawnPolecat_StaleOrphanBranchNoLongerBlocksDispatch(t *testing.T) {
 	runGit(t, workDir, "branch", branch, "main")
 
 	rr := spawnPolecat(t, reg, SpawnPolecatAPIRequest{
-		Name: "cat-d22a",
-		Id:   "mg-d22a",
-		Repo: workDir,
+		Name:     "cat-d22a",
+		Id:       "mg-d22a",
+		Repo:     workDir,
+		Template: BuildWorkerTemplate, // reach worktree creation; see cat-rollback
 	})
 
 	// Guard against a vacuous pass: if the spawn died before it ever tried the

@@ -1893,6 +1893,18 @@ Example:
 		Long: `Spawn an ephemeral polecat (a disposable worker agent) using a prompt template from ~/.pogo/agents/templates/.
 The template is expanded with the provided variables and used as the agent's prompt file.
 
+TEMPLATE SELECTION IS CLOSED. Omit --template and the work item named by --id is
+routed on its ` + "`type`" + ` field through a fixed map (design -> polecat-architect,
+qa -> polecat-qa). A type that is not in that map — scoping, audit, bug, or a
+bare task — selects NO template and the spawn is REFUSED with a 409 naming the
+type. It does not fall back to the build worker: a design item silently built
+and merged is worse than a dispatch that stops and says why.
+
+Pass --template explicitly to override the map and dispatch anything at any
+template, including --template=polecat for the general-purpose build worker.
+That override is for a person (or a coordinator acting by hand); an automated
+caller that supplies no --template gets the refusal.
+
 The body comes from --body-file (read verbatim from a file, "-" for stdin) or
 --body (inline); the two are mutually exclusive. --body-file is the default
 idiom — reach for it first:
@@ -1944,7 +1956,12 @@ A --body-file that cannot be read is an error, never an empty body.`,
 			}
 		},
 	}
-	cmdAgentSpawnPolecat.Flags().StringVar(&spawnPolecatTemplate, "template", "polecat", "Template name (from ~/.pogo/agents/templates/)")
+	// No default. A `"polecat"` default here would be a SECOND implementation of
+	// the routing decision — and the wrong one, because it reaches pogod as an
+	// explicit template and is therefore indistinguishable from a human typing
+	// --template=polecat. Sending "" is what lets the closed type→template map
+	// in internal/agent/templateroute.go see that no override was given (mg-9a04).
+	cmdAgentSpawnPolecat.Flags().StringVar(&spawnPolecatTemplate, "template", "", "Worker template name (from ~/.pogo/agents/templates/); omit to route on the work item's `type` — an unrouted type is REFUSED, not defaulted to the build worker")
 	cmdAgentSpawnPolecat.Flags().StringVar(&spawnPolecatTask, "task", "", "Work item title ({{.Task}})")
 	cmdAgentSpawnPolecat.Flags().StringVar(&spawnPolecatBodyFile, "body-file", "", "PREFERRED: read the work item body ({{.Body}}) verbatim from a file (\"-\" for stdin) — on stdin, use a quoted heredoc <<'EOF'; mutually exclusive with --body")
 	cmdAgentSpawnPolecat.Flags().StringVar(&spawnPolecatBody, "body", "", "Inline shortcut for the work item body ({{.Body}}); the shell expands backticks and $VARS in it — prefer --body-file; mutually exclusive with --body-file")

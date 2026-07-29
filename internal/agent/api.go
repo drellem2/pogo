@@ -68,8 +68,13 @@ type StartAPIRequest struct {
 // SpawnPolecatAPIRequest is the JSON body for POST /agents/spawn-polecat.
 // Spawns a polecat from a template with variable expansion.
 type SpawnPolecatAPIRequest struct {
-	Name     string   `json:"name"`               // Agent name (e.g., short ID)
-	Template string   `json:"template"`           // Template name (default: "polecat")
+	Name string `json:"name"` // Agent name (e.g., short ID)
+	// Template names the worker template explicitly and, when set, wins
+	// outright — the hand-dispatch override. Empty means "route it": the work
+	// item's `type` is looked up in the CLOSED map in templateroute.go, and an
+	// unrouted type produces no template and refuses the spawn. There is no
+	// default (mg-9a04).
+	Template string   `json:"template,omitempty"`
 	Task     string   `json:"task,omitempty"`     // Work item title
 	Body     string   `json:"body,omitempty"`     // Work item body
 	Id       string   `json:"id,omitempty"`       // Work item ID
@@ -1174,10 +1179,28 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		return
 	}
 
-	// Default template name
-	tmplName := spawnReq.Template
-	if tmplName == "" {
-		tmplName = "polecat"
+	// Template routing: the work item's `type` marker picks the worker template,
+	// through the CLOSED map in templateroute.go. This is the mg-4798 boundary
+	// one rule over from the dispatch gate above — the routing table lived only
+	// as a markdown table in mayor.md, so the guarantee that a `type: design`
+	// item reached the architect was that an agent had read and retained prose.
+	//
+	// There is no default. An explicit --template wins outright (the
+	// hand-dispatch override); otherwise an unrouted type produces NO template
+	// and the spawn is refused. The old `if tmplName == "" { tmplName =
+	// "polecat" }` fallback is exactly what had to go: it turned every unrouted
+	// type into a silent build dispatch, and a design item silently built and
+	// merged is strictly worse than a dispatch that stops and names the type.
+	//
+	// 409, matching the dispatch gate: retrying the identical request is refused
+	// identically forever. The caller has to pass --template or fix the item's
+	// type. Placed here, after ValidateAgentName and before the worktree, agent
+	// dir, and expanded prompt file, so a refused dispatch still leaves nothing
+	// behind (mg-ef80).
+	tmplName, tmplRefusal := r.resolveDispatchTemplate(spawnReq)
+	if tmplRefusal != "" {
+		failPolecatSpawn(w, spawnReq, http.StatusConflict, tmplRefusal)
+		return
 	}
 
 	// Resolve template path

@@ -183,9 +183,11 @@ nudge naming its work item, and immediately knows what to do.
 
 ## 2. Custom polecat templates
 
-Polecat templates live under `~/.pogo/agents/templates/`. The coordinator decides
-which template to use when it spawns a polecat (`spawn-polecat --template=<name>`,
-defaulting to `polecat`). Each template is a markdown file with the same
+Polecat templates live under `~/.pogo/agents/templates/`. Which template a spawn
+gets is decided by `pogo agent spawn-polecat`, and **there is no default** — see
+[Template routing is closed](#template-routing-is-closed) below. Either name one
+with `--template=<name>`, or omit it and let the work item's `type` route through
+a fixed map that refuses rather than guesses. Each template is a markdown file with the same
 frontmatter convention as crew prompts, plus access to a few template variables
 that get expanded per-spawn:
 
@@ -199,6 +201,49 @@ that get expanded per-spawn:
 | `{{.WorktreeDir}}` | Polecat's working directory: its isolated worktree, or its `~/.pogo/agents/<name>/` home dir under `--no-worktree` |
 | `{{.NoWorktree}}` | `true` when spawned with `--no-worktree` (in-place, refinery:NO) |
 | `{{.Provider}}` | Resolved harness provider id (`claude`, `codex`, `pi`, `cursor`; defaults to `claude`). Gate harness-specific guidance with `{{if eq .Provider "claude"}}...{{end}}` — the shipped templates use this to drop Claude-Code-isms (CronCreate, rating-modal dismissal) under other harnesses. Drop-in fragments can use it too. |
+
+### Template routing is closed
+
+`pogo agent spawn-polecat` picks a template one of two ways, and neither of them
+is a default:
+
+1. **`--template=<name>` wins outright.** This is the hand-dispatch override — a
+   person, or a coordinator acting by hand, can put any template on any item.
+   The gh-issue stage templates (`polecat-triage`, `polecat-build-pr`,
+   `polecat-review`) come through here: they route on the `workflow: gh-issue`
+   body marker and a stage, not on `type`.
+2. **Otherwise the work item named by `--id` is routed on its `type` field**,
+   through a fixed map in `internal/agent/templateroute.go`:
+
+   | `type` | template |
+   |---|---|
+   | `design` | `polecat-architect` |
+   | `qa` | `polecat-qa` |
+   | anything else | **none — the spawn is refused, HTTP 409** |
+
+**The map is closed, and that is the point (mg-9a04).** A type it does not
+know — `scoping`, `audit`, `bug`, or the default bare `task` — selects *no*
+template, and the dispatch is refused with a message naming the type and the
+flag that gets past it. It does **not** fall back to the build worker.
+
+The reason is that the two misroutes are not symmetric. A design item sent to a
+build worker implements something nobody decided, opens a PR, and the refinery
+merges it — **silent, and it lands code**. A build item sent to an architect
+returns a recommendation and costs one cycle — loud and harmless. A default is a
+guess, and defaulting to build converts the loud failure into the silent one. So
+dispatching the general-purpose builder is something you *say*
+(`--template=polecat`), never something that happens because nothing else
+matched.
+
+Note the direction is the opposite of the [dispatch gate](CONFIGURATION.md), which
+fails **open**. That gate answers "may this item be dispatched at all", where
+guessing wrong refuses legitimate work and one unreadable store halts the fleet.
+This one answers "which worker does it get", where guessing wrong lands the wrong
+kind of work in `main`.
+
+Adding a route is a code change plus a test, not a config key: every entry is a
+claim that a whole template's worth of instructions is the right thing to hand
+that kind of work.
 
 ### The `worktree` knob
 

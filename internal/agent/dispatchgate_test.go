@@ -34,7 +34,12 @@ func gateStore(t *testing.T, items map[string]string) string {
 
 func spawnPolecatFor(t *testing.T, reg *Registry, id string) *httptest.ResponseRecorder {
 	t.Helper()
-	body, err := json.Marshal(SpawnPolecatAPIRequest{Name: "cat-gate", Id: id})
+	// An explicit template, so the CLOSED type→template router (mg-9a04) is
+	// never what refuses these spawns. The fixture items carry `type: task`,
+	// which is deliberately unrouted; without this the gate tests below would be
+	// asserting the router's behaviour and the gate would go unobserved again —
+	// the exact failure mode this file was written to end.
+	body, err := json.Marshal(SpawnPolecatAPIRequest{Name: "cat-gate", Id: id, Template: BuildWorkerTemplate})
 	if err != nil {
 		t.Fatal(err)
 	}

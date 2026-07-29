@@ -1182,6 +1182,14 @@ Flags:
 		Gates: cfg.StallWatch.NonDispatchableAssignees,
 	})
 
+	// And the routing half, beside the gate it sits next to (mg-9a04): a spawn
+	// with no --template routes on the work item's `type` through the closed map
+	// in internal/agent/templateroute.go, refusing rather than defaulting when
+	// the type is unrouted. Explicit, even though MGWorkItemTyper{} is already
+	// the zero-value default, so the two halves of the dispatch decision are
+	// visible in one place rather than one being wired and one being implicit.
+	agentRegistry.SetWorkItemTyper(agent.MGWorkItemTyper{})
+
 	// Role names were resolved by pinAndResolveRoles above, before any consumer
 	// could read one. cfg here is the post-pin config.
 	coordinator := cfg.Agents.CoordinatorName()
