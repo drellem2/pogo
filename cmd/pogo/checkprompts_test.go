@@ -31,6 +31,7 @@ import (
 
 	"github.com/drellem2/pogo/internal/agent"
 	"github.com/drellem2/pogo/internal/promptcli"
+	"github.com/drellem2/pogo/internal/providers"
 )
 
 // liveChecker discovers both surfaces from real binaries. It skips only the mg
@@ -41,7 +42,11 @@ func liveChecker(t *testing.T) (*promptcli.Checker, []string) {
 	if err != nil {
 		t.Fatalf("discovering CLI surfaces: %v", err)
 	}
-	return &promptcli.Checker{Surfaces: surfaces, Omissions: PromptCLIOmissions()}, missing
+	return &promptcli.Checker{
+		Surfaces:  surfaces,
+		Omissions: PromptCLIOmissions(),
+		Values:    PromptCLIValues(),
+	}, missing
 }
 
 // TestShippedPromptsMatchTheCLISurface is the gate. Every `mg …` / `pogo …`
@@ -58,15 +63,15 @@ func liveChecker(t *testing.T) (*promptcli.Checker, []string) {
 // check found them the first time it was pointed at the corpus.
 func TestShippedPromptsMatchTheCLISurface(t *testing.T) {
 	checker, missing := liveChecker(t)
-	findings, files, err := promptcli.CheckFS(checker, agent.DefaultPromptsFS())
+	rep, err := promptcli.CheckFS(checker, agent.DefaultPromptsFS())
 	if err != nil {
 		t.Fatalf("walking the prompt corpus: %v", err)
 	}
-	if files == 0 {
+	if rep.Files == 0 {
 		// An empty corpus passes every assertion below while checking nothing.
 		t.Fatal("no prompt files were read; the check would pass vacuously")
 	}
-	for _, f := range findings {
+	for _, f := range rep.Findings {
 		t.Errorf("%s\n    %s", f, strings.TrimSpace(f.Evidence))
 	}
 	if len(missing) > 0 {
@@ -74,7 +79,14 @@ func TestShippedPromptsMatchTheCLISurface(t *testing.T) {
 			strings.Join(missing, ", "), strings.Join(missing, "/"))
 	}
 	t.Logf("checked %d prompt files against %d command paths",
-		files, len(checker.Surfaces["pogo"].Paths()))
+		rep.Files, len(checker.Surfaces["pogo"].Paths()))
+	// mg-9324's real output. Logged rather than asserted: the honest number is
+	// whatever it is, and pinning it would make an unrelated prompt edit fail
+	// this test. TestValueCoverageIsReportedAndMostlyEmpty is where the shape of
+	// the census is actually asserted.
+	t.Logf("flag values: %d checkable %v; %d NOT CHECKED %v",
+		len(rep.Coverage.Checked), rep.Coverage.Checked,
+		len(rep.Coverage.Unchecked), rep.Coverage.Unchecked)
 }
 
 // ---------------------------------------------------------------------------
@@ -126,6 +138,26 @@ func TestPreFixDefectsAreFlaggedAgainstTheRealSurface(t *testing.T) {
 			rule:    promptcli.RuleBadOmission,
 			subject: "pogo agent spawn-polecat --template",
 		},
+		{
+			// mg-9324's own example. Every token is a real flag; `closed` is
+			// refused and `done` is the spelling. This is the case mg-21b1's
+			// check passed by design.
+			name:    "mg-9324 refused --status value",
+			root:    "mg",
+			body:    "```bash\nmg list --tag=<tag> --status=closed --json\n```\n",
+			rule:    promptcli.RuleUnknownFlagValue,
+			subject: "mg list --status",
+		},
+		{
+			// pm/pm-template.md:422 as it shipped until mg-9324, and the worse
+			// of the two the check found on its first run: the refusal sat
+			// behind `2>/dev/null`, so the dedup guard silently never fired.
+			name:    "mg-9324 --status=open behind a swallowed stderr",
+			root:    "mg",
+			body:    "```bash\nmg list --tag=release-cut --status=open 2>/dev/null | grep -q \"$slug\"\n```\n",
+			rule:    promptcli.RuleUnknownFlagValue,
+			subject: "mg list --status",
+		},
 	}
 
 	for _, tc := range cases {
@@ -162,6 +194,18 @@ func TestCorrectedFormsAreCleanAgainstTheRealSurface(t *testing.T) {
 		{"mg-159a corrected", "| anything else — bare `task`, `scoping`, `audit`, `bug`, or no `type` at all | " +
 			"**unmapped: no template is selected and the spawn is refused with a 409 naming the type.** " +
 			"Pass `--template=polecat` explicitly. |\n"},
+		{"mg-9324 corrected: the accepted spelling, and no --status at all",
+			"```bash\nmg list --status=done --json\nmg list --repo=/tmp/x\n```\n"},
+		{"mg-9324: a placeholder value asserts nothing",
+			"```bash\nmg list --status=<status> --tag=$TAG\n```\n"},
+		{
+			// The reason PromptCLIValues resolves --provider through
+			// providers.Resolve instead of its help text: `cursor` is accepted
+			// and the help text omits it. Believing the help text would report
+			// this correct line as a defect.
+			"mg-9324: a provider the flag's own help text forgot to list",
+			"```bash\npogo agent spawn-polecat cat-1 --template=polecat --provider=cursor\n```\n",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -169,6 +213,138 @@ func TestCorrectedFormsAreCleanAgainstTheRealSurface(t *testing.T) {
 				t.Errorf("expected no findings, got %v", got)
 			}
 		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// mg-9324: the coverage census, and the measurement behind it
+// ---------------------------------------------------------------------------
+
+// TestValueCoverageIsReportedAndMostlyEmpty asserts the ticket's actual finding
+// rather than the feature: the legal values of a flag are NOT declared anywhere
+// machine-readable, so the value arm covers a small minority of the values the
+// corpus writes, and the report has to say which ones.
+//
+// It pins the SHAPE, not the numbers — the counts move with any prompt edit, and
+// a test that fails when someone adds a `--tag=` to a prompt would be noise. The
+// numbers go to the log, where they are the thing to read.
+func TestValueCoverageIsReportedAndMostlyEmpty(t *testing.T) {
+	checker, missing := liveChecker(t)
+	if len(missing) > 0 {
+		t.Skipf("%s not on PATH", strings.Join(missing, ", "))
+	}
+	rep, err := promptcli.CheckFS(checker, agent.DefaultPromptsFS())
+	if err != nil {
+		t.Fatalf("walking the prompt corpus: %v", err)
+	}
+	cov := rep.Coverage
+	t.Logf("mg-9324 census: %d of %d value-bearing flags in the corpus can be judged",
+		len(cov.Checked), len(cov.Checked)+len(cov.Unchecked))
+	t.Logf("  checkable: %v", cov.Checked)
+	t.Logf("  NOT CHECKED (%d): %v", len(cov.Unchecked), cov.Unchecked)
+
+	// The census must not be empty on either side. An empty Unchecked would mean
+	// the check believes it judged every value it saw, which is false and is the
+	// exact failure this ticket family keeps hitting. An empty Checked would mean
+	// the value arm is inert and the positive control below is vacuous.
+	if len(cov.Unchecked) == 0 {
+		t.Error("no unchecked values reported: either the census broke or the check " +
+			"is claiming a coverage it does not have")
+	}
+	if len(cov.Checked) == 0 {
+		t.Error("no checkable values reported: the value arm is inert")
+	}
+	// The uncovered set is the majority, and saying so out loud is the finding.
+	// If this ever flips, the class became closable and the doc comments in
+	// promptcli.ParseFlagSpecs and PromptCLIValues are stale.
+	if len(cov.Checked) > len(cov.Unchecked) {
+		t.Errorf("coverage flipped to a majority (%d checked vs %d not): the "+
+			"'values are not machine-readable' finding no longer holds, and the "+
+			"comments asserting it need rewriting", len(cov.Checked), len(cov.Unchecked))
+	}
+	// Every entry in the registry must still resolve a legal set. A FromHelp rule
+	// whose flag stopped declaring an enumeration goes quietly inert otherwise.
+	for _, r := range PromptCLIValues() {
+		if r.Accepts != nil {
+			continue
+		}
+		node, ok := checker.Surfaces[r.Path[0]].Lookup(r.Path)
+		if !ok {
+			t.Errorf("%q is not in the discovered surface", strings.Join(r.Path, " "))
+			continue
+		}
+		if len(node.FlagSpecs[r.Flag].Values) == 0 {
+			t.Errorf("%s --%s: the rule reads its legal set from the help text, and the "+
+				"help text no longer declares one — the rule is inert",
+				strings.Join(r.Path, " "), r.Flag)
+		}
+	}
+}
+
+// TestProviderHelpTextIsNotAuthoritative pins the measurement that decided this
+// ticket's design, against the real tool.
+//
+// `pogo agent spawn-polecat --provider` DECLARES `(claude, codex, pi)`. Its help
+// text is hand-written prose, providers.Resolve is the code that refuses, and the
+// two disagree: Resolve accepts `cursor`. A value-checker that trusted declared
+// enumerations would be wrong on 1 of the 4 that exist in either tool, in the
+// direction that reports correct prompts as defects — which is why PromptCLIValues
+// routes this flag through Resolve and requires every entry to name its source.
+//
+// NOT FIXED HERE, and the reason is worth reading, because it is the same shape
+// one level up. TestSpawnPolecat_ProviderHelpListsPi (main_test.go, gh #29)
+// exists precisely to stop this help text going stale — its comment says it
+// "must enumerate every registered provider" — and it enforces that with
+// `strings.Contains(out, "(claude, codex, pi)")`. A literal. So when `cursor` was
+// registered the guard kept passing, and today it would REJECT the corrected
+// string `(claude, codex, pi, cursor)`, which does not contain that substring.
+// The guard against the stale list is now what pins it. Fixing that is gh #29's
+// business, not mg-9324's; it is noted here because it is the best available
+// evidence that a hand-written enumeration cannot be trusted even when someone
+// has already tried to protect it.
+//
+// If the help text is brought up to date, this test should be DELETED along with
+// the divergence, not silenced: the design reason survives it (a hand-written
+// list can drift again), but the worked example would no longer be live and
+// claiming it was would be the same sin.
+func TestProviderHelpTextIsNotAuthoritative(t *testing.T) {
+	checker, _ := liveChecker(t)
+	node, ok := checker.Surfaces["pogo"].Lookup([]string{"pogo", "agent", "spawn-polecat"})
+	if !ok {
+		t.Fatal("pogo agent spawn-polecat missing from the discovered surface")
+	}
+	declared := map[string]bool{}
+	for _, v := range node.FlagSpecs["provider"].Values {
+		declared[v] = true
+	}
+	if len(declared) == 0 {
+		t.Fatalf("--provider declares no enumeration; usage = %q", node.FlagSpecs["provider"].Usage)
+	}
+	var undeclared []string
+	for _, p := range providers.All() {
+		if _, ok := providers.Resolve(p.ID); !ok {
+			t.Errorf("providers.All lists %q but Resolve refuses it", p.ID)
+		}
+		if !declared[p.ID] {
+			undeclared = append(undeclared, p.ID)
+		}
+	}
+	if len(undeclared) == 0 {
+		t.Skip("the help text now lists every provider Resolve accepts; the " +
+			"divergence closed, and the worked example in PromptCLIValues " +
+			"and promptcli.ParseFlagSpecs should be retired with it")
+	}
+	t.Logf("--provider declares %v but Resolve also accepts %v — a declared "+
+		"enumeration is a claim, not a legal-value set",
+		node.FlagSpecs["provider"].Values, undeclared)
+
+	// And the consequence, stated as behaviour: a correct invocation using one of
+	// the undeclared-but-accepted ids must not be flagged.
+	for _, id := range undeclared {
+		body := "```bash\npogo agent spawn-polecat cat-1 --provider=" + id + "\n```\n"
+		if got := checker.CheckFile("provider.md", body); len(got) != 0 {
+			t.Errorf("--provider=%s is accepted by Resolve but was flagged: %v", id, got)
+		}
 	}
 }
 
@@ -223,6 +399,41 @@ func TestFixtureSurfaceFactsAreReal(t *testing.T) {
 	} else if !node.TakesArgs {
 		t.Error("pogo schedule takes an <agent> positional; the fixture surface assumes so")
 	}
+	// mg-9324: the hermetic fixture pastes `mg list --status`'s usage string in
+	// verbatim. This is the one place that checks the paste still matches the
+	// tool — if macguffin renames a status, the fixture's copy goes stale and the
+	// value arm starts judging against a set the tool no longer has.
+	if !skipMG {
+		node, ok := checker.Surfaces["mg"].Lookup([]string{"mg", "list"})
+		if !ok {
+			t.Error("mg list missing from the discovered surface")
+		} else {
+			spec := node.FlagSpecs["status"]
+			if !spec.TakesValue {
+				t.Error("mg list --status takes a value; the whole value arm assumes so")
+			}
+			legal := map[string]bool{}
+			for _, v := range spec.Values {
+				legal[v] = true
+			}
+			if len(legal) == 0 {
+				t.Errorf("mg list --status declares no enumeration; usage = %q", spec.Usage)
+			}
+			// `done` is the accepted spelling and the negative control.
+			if !legal["done"] {
+				t.Errorf("`done` is not among the declared statuses %v; the negative "+
+					"control in internal/promptcli assumes it is", spec.Values)
+			}
+			// `closed` and `open` are the two refused spellings the corpus used.
+			for _, bad := range []string{"closed", "open"} {
+				if legal[bad] {
+					t.Errorf("%q is now an accepted status: mg-9324's positive control "+
+						"has stopped being a defect and the fixtures should be retired", bad)
+				}
+			}
+		}
+	}
+
 	// A pure group: `pogo service start` must stay reportable.
 	if node, ok := checker.Surfaces["pogo"].Lookup([]string{"pogo", "service"}); !ok {
 		t.Error("pogo service missing from the discovered surface")

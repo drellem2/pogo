@@ -24,6 +24,7 @@ import (
 	"github.com/drellem2/pogo/internal/agent"
 	"github.com/drellem2/pogo/internal/cli"
 	"github.com/drellem2/pogo/internal/promptcli"
+	"github.com/drellem2/pogo/internal/providers"
 )
 
 // PromptCLIOmissions is the omission registry: the questions `--help` cannot
@@ -45,6 +46,59 @@ func PromptCLIOmissions() []promptcli.OmissionRule {
 		Why: "the type→template map is closed (internal/agent/templateroute.go): an unmapped " +
 			"type selects no template and pogod refuses the spawn with a 409. Mapped types are " +
 			strings.Join(agent.MappedTypes(), ", "),
+	}}
+}
+
+// PromptCLIValues is the value registry: the flags whose accepted VALUES the
+// check can answer for, each backed by the thing that does the refusing (mg-9324).
+//
+// Two entries, and the shortness is the finding rather than a placeholder. Of
+// the 153 value-bearing flags across `mg` and `pogo`, four declare a parseable
+// enumeration anywhere machine-readable, and one of those four is stale in the
+// direction that invents false findings — see promptcli.ParseFlagSpecs for the
+// full measurement and why `--provider`'s `(claude, codex, pi)` cannot be
+// believed. Everything not listed here is UNCHECKED and is reported as such by
+// the coverage census.
+//
+// The registry does NOT restate any value list. Each entry points at the source:
+//
+//   - `mg list --status` reads the enumeration out of the flag's own help text,
+//     which macguffin GENERATES from `listStatusValues` — the same slice
+//     `isValidListStatus` rejects against (cmd/mg/list.go:32-41,183). The
+//     projection cannot drift from the validator, so parsing it is sound.
+//   - `pogo agent spawn-polecat --provider` calls providers.Resolve, the function
+//     that decides. Its help text says `(claude, codex, pi)` and MISSES `cursor`,
+//     which Resolve accepts — so the callable source is not merely preferable
+//     here, it is the only correct one.
+//
+// `mg edit --priority` / `mg new --priority` are deliberately absent. Both
+// declare `low, medium, high` and both validate it, but as two independent
+// hand-written copies (cmd/mg/edit.go:266-270, new.go:211) with the help string
+// a third. There is no projection to read, so registering it would make this
+// file the fourth copy — exactly what the doc comment forbids.
+func PromptCLIValues() []promptcli.ValueRule {
+	return []promptcli.ValueRule{{
+		Path:     []string{"mg", "list"},
+		Flag:     "status",
+		FromHelp: true,
+		Why: "macguffin renders this flag's help text from listStatusValues, the same slice " +
+			"isValidListStatus rejects against, so the two cannot drift",
+	}, {
+		Path: []string{"pogo", "agent", "spawn-polecat"},
+		Flag: "provider",
+		Accepts: func(v string) bool {
+			_, ok := providers.Resolve(v)
+			return ok
+		},
+		Legal: func() []string {
+			var ids []string
+			for _, p := range providers.All() {
+				ids = append(ids, p.ID)
+			}
+			return ids
+		},
+		Why: "providers.Resolve is the function that decides, and it accepts one more id " +
+			"than the flag's own help text lists",
 	}}
 }
 
@@ -115,27 +169,50 @@ Each failed quietly at the moment of use, and mg-4bb9 shows why reading cannot
 catch these: a confident false claim FORECLOSES the --help that would correct
 it. Silence makes a reader look; a wrong answer stops them.
 
+  mg-9324  pm-template.md said ` + "`mg list --status=closed`" + `. ` + "`--status`" + ` is real and
+           ` + "`closed`" + ` is a plausible string, so the flag-surface check passed it;
+           ` + "`done`" + ` is the accepted spelling.
+
 IT NEVER RUNS THE EXTRACTED COMMANDS. The corpus contains
 ` + "`mg archive --days=0`" + `, ` + "`mg reopen <id>`" + ` and ` + "`pogo agent stop <name>`" + `; a control
 that executed its fixtures would destroy the store it runs in. The only process
 it starts is ` + "`<binary> <path...> --help`" + `, which cobra answers before it reaches
 any command's body. It verifies that a flag EXISTS, never that it works.
 
-WHAT IT CHECKS, in four shapes:
+WHAT IT CHECKS, in five shapes:
 
   unknown-flag        a flag the command does not accept
   unknown-subcommand  a subcommand a command group does not have
   false-absence       the prompt says something does not exist, and it does
   bad-omission        the prompt says to leave off a flag the CLI refuses to
                       default (registry-backed; see PromptCLIOmissions)
+  unknown-flag-value  the flag exists and the VALUE is refused, e.g.
+                      ` + "`mg list --status=closed`" + ` where the spelling is ` + "`done`" + `
+                      (registry-backed; see PromptCLIValues)
+
+FLAG VALUES ARE MOSTLY UNCHECKABLE, and the report says so every run. Legal
+values are not declared anywhere machine-readable: of the 153 value-bearing
+flags across the two tools, FOUR spell out a parseable enumeration, and one of
+those four is already stale in the direction that invents false findings
+(` + "`--provider`" + ` lists ` + "`claude, codex, pi`" + ` and omits ` + "`cursor`" + `, which
+providers.Resolve accepts). cobra has nothing better to offer: ValidArgs
+describes positionals, and ` + "`RegisterFlagCompletionFunc`" + ` is called zero times
+in either tool, so ` + "`__complete`" + ` answers every flag with "ask the filesystem".
+
+So a value is judged only where a registry entry names the code that does the
+refusing, and every run prints a census of the value-bearing flags it could NOT
+judge. Read that census. A value-checker blind to most values is worse than
+none — it converts "unchecked" into "checked and fine".
 
 WHAT IT DOES NOT CHECK, deliberately:
 
-  flag VALUES         ` + "`--status=closed`" + ` is a legal-looking value mg rejects, and
-                      finding that out means running the command.
   git / gh / jq       not our tools and not our surface to pin.
   bare flag mentions  a flag named with no command around it has no command to
                       be checked against.
+  workflows           every token can be legal and the workflow still have no
+                      mechanism behind it (mg-d8ea: no work item has a closed-at
+                      field, so no spelling of ` + "`mg list`" + ` can filter on one).
+                      Out of scope here and not detectable from a help page.
 
 A correction that QUOTES the claim it withdraws is not a defect. Mark it with
 ` + "`<!-- promptcli:retracted -->`" + ` in the paragraph, or write it in the past tense;
@@ -149,31 +226,49 @@ Exit status is 0 when the corpus is clean, 1 when anything is reported.`,
 			if err != nil {
 				cli.ExitWithError(*jsonOutput, err.Error(), cli.ExitError)
 			}
-			checker := &promptcli.Checker{Surfaces: surfaces, Omissions: PromptCLIOmissions()}
-			findings, files, err := promptcli.CheckFS(checker, agent.DefaultPromptsFS())
+			checker := &promptcli.Checker{
+				Surfaces:  surfaces,
+				Omissions: PromptCLIOmissions(),
+				Values:    PromptCLIValues(),
+			}
+			rep, err := promptcli.CheckFS(checker, agent.DefaultPromptsFS())
 			if err != nil {
 				cli.ExitWithError(*jsonOutput, err.Error(), cli.ExitError)
 			}
 
 			if *jsonOutput {
 				cli.PrintJSON(map[string]any{
-					"files_checked":    files,
+					"files_checked":    rep.Files,
 					"surfaces_checked": surfaceNames(surfaces),
 					"surfaces_missing": missing,
-					"findings":         findings,
+					"findings":         rep.Findings,
+					"values_checked":   rep.Coverage.Checked,
+					"values_unchecked": rep.Coverage.Unchecked,
 				})
 			} else {
-				for _, f := range findings {
+				for _, f := range rep.Findings {
 					fmt.Println(f)
 					if f.Evidence != "" {
 						fmt.Printf("    %s\n", strings.TrimSpace(f.Evidence))
 					}
 				}
-				if len(findings) == 0 {
+				if len(rep.Findings) == 0 {
 					fmt.Printf("clean: %d prompt files, surfaces %s\n",
-						files, strings.Join(surfaceNames(surfaces), " + "))
+						rep.Files, strings.Join(surfaceNames(surfaces), " + "))
 				} else {
-					fmt.Printf("\n%d finding(s) across %d prompt files\n", len(findings), files)
+					fmt.Printf("\n%d finding(s) across %d prompt files\n", len(rep.Findings), rep.Files)
+				}
+				// The census, always, clean or not. A value-checker that reports
+				// only its findings reads as though it judged every value it saw;
+				// this is the half that says what it could not judge.
+				cov := rep.Coverage
+				fmt.Printf("\nflag values: %d checkable, %d NOT CHECKED (no rule names a source for the legal set)\n",
+					len(cov.Checked), len(cov.Unchecked))
+				for _, s := range cov.Checked {
+					fmt.Printf("    checked      %s\n", s)
+				}
+				for _, s := range cov.Unchecked {
+					fmt.Printf("    unchecked    %s\n", s)
 				}
 				for _, m := range missing {
 					// Not an all-clear. Say which half of the corpus went
@@ -182,7 +277,7 @@ Exit status is 0 when the corpus is clean, 1 when anything is reported.`,
 						"warning: %s is not on PATH, so no `%s …` invocation was checked\n", m, m)
 				}
 			}
-			if len(findings) > 0 {
+			if len(rep.Findings) > 0 {
 				os.Exit(cli.ExitError)
 			}
 		},

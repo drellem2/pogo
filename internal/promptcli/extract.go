@@ -174,10 +174,21 @@ type Invocation struct {
 	// Path names a command group. Empty otherwise.
 	Unresolved string
 	Flags      []string // long flag names, without "--", in order of appearance
-	Raw        string
+	// Values are the flag=value pairs the invocation writes, for the flags the
+	// resolved command declares as value-bearing. Judged only where a ValueRule
+	// names a source for the legal set; counted either way, so the coverage
+	// census can say what went unjudged.
+	Values []FlagValue
+	Raw    string
 	// Skipped is set when a placeholder stood where a command name belongs, so
 	// neither the path nor its flags can be judged.
 	Skipped bool
+}
+
+// FlagValue is one `--flag=value` (or `--flag value`) the prompt writes.
+type FlagValue struct {
+	Flag  string
+	Value string
 }
 
 var (
@@ -271,6 +282,7 @@ func parseOne(line int, root, rest string, surf *Surface) Invocation {
 		break
 	}
 
+	node, _ := surf.Lookup(inv.Path)
 	for ; i < len(toks); i++ {
 		tok := toks[i]
 		fm := reFlagToken.FindStringSubmatch(tok)
@@ -281,8 +293,31 @@ func parseOne(line int, root, rest string, surf *Surface) Invocation {
 			continue
 		}
 		inv.Flags = append(inv.Flags, fm[1])
+
+		// `--flag=value` carries its own value. The separated `--flag value`
+		// form is read only for a flag the command DECLARES as value-bearing:
+		// without that, `pogo refinery show mr-7 --json` would book `mr-7`'s
+		// neighbour as a value of a boolean flag and inflate the census with
+		// pairs that cannot have a wrong value.
+		if eq := strings.Index(tok, "="); eq >= 0 {
+			inv.Values = append(inv.Values, FlagValue{fm[1], cleanValue(tok[eq+1:])})
+			continue
+		}
+		if node == nil || !node.FlagSpecs[fm[1]].TakesValue {
+			continue
+		}
+		if i+1 < len(toks) && !strings.HasPrefix(toks[i+1], "-") {
+			inv.Values = append(inv.Values, FlagValue{fm[1], cleanValue(toks[i+1])})
+		}
 	}
 	return inv
+}
+
+// cleanValue strips the shell and prose punctuation a value picks up from the
+// page it was written on: quoting, and the comma or semicolon that ends the
+// clause an inline span sits in.
+func cleanValue(s string) string {
+	return strings.Trim(s, "\"'`;,")
 }
 
 // ---------------------------------------------------------------------------

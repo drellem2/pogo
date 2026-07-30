@@ -43,7 +43,16 @@ func fixtureSurfaces() map[string]*Surface {
 		"append-body", "append-body-file", "body", "body-file", "body-hash",
 		"if-unchanged", "title", "assignee", "add-tags", "priority", "help", "root",
 	})
-	mg.Add([]string{"mg", "list"}, nil, []string{"all", "archived", "assignee", "json", "repo", "shelved", "status", "tag", "wide", "help", "root"})
+	list := mg.Add([]string{"mg", "list"}, nil, []string{"all", "archived", "assignee", "json", "repo", "shelved", "status", "tag", "wide", "help", "root"})
+	// mg-9324: `--status` is the one flag in the corpus whose legal values are
+	// recoverable, because macguffin renders this exact string from the slice its
+	// validator rejects against. Copied verbatim from `mg list --help` so the
+	// hermetic fixture exercises the real parse; cmd/pogo's live test is what
+	// stops it drifting from the tool.
+	list.FlagSpecs = ParseFlagSpecs("Flags:\n" +
+		"      --status string     filter by status (available, claimed, pending, done, shelved, archived)\n" +
+		"      --tag string        filter by tag\n" +
+		"      --wide              do not fit lines to the terminal width\n")
 	mg.Add([]string{"mg", "show"}, nil, []string{"body-hash", "if-unchanged", "json", "help", "root"})
 	mg.Add([]string{"mg", "spend"}, nil, []string{"by", "json", "rebuild", "since", "total", "window", "help", "root"})
 	mg.Add([]string{"mg", "shelve"}, nil, []string{"tag", "help", "root"})
@@ -93,6 +102,12 @@ func fixtureChecker() *Checker {
 				return fixtureMappedTypes[strings.ToLower(strings.TrimSpace(scope))]
 			},
 			Why: "the type→template map is closed; an unmapped type selects no template and the spawn is refused with a 409",
+		}},
+		Values: []ValueRule{{
+			Path:     []string{"mg", "list"},
+			Flag:     "status",
+			FromHelp: true,
+			Why:      "macguffin renders the help text from the slice its validator rejects against",
 		}},
 	}
 }
@@ -191,6 +206,67 @@ func TestMustFlag_mg159a_OmitTemplateForAnUnmappedType(t *testing.T) {
 		if strings.Contains(f.Evidence, "polecat-architect") || strings.Contains(f.Evidence, "polecat-qa") {
 			t.Errorf("flagged a correct routing row: %s", f)
 		}
+	}
+}
+
+// TestMustFlag_mg9324_RefusedFlagValue is the fifth shape and the one the
+// accept-surface cannot see: every token is a real flag, and the VALUE is
+// refused. `--status` exists and `closed` is a plausible string, so mg-21b1's
+// check passed this line while `mg` rejects it with `invalid status "closed"`.
+//
+// The first two are the ticket's own example. The third and fourth are what this
+// check found on its first run over the live corpus, both in pm-template.md, and
+// the fourth is the one that mattered: it sat behind `2>/dev/null` in a dedup
+// guard, so the refusal was invisible, the empty stdout made `grep -q` find
+// nothing, and a duplicate release-cut ticket was filed every sweep.
+func TestMustFlag_mg9324_RefusedFlagValue(t *testing.T) {
+	cases := []struct{ name, body string }{
+		{"the ticket's example, = form", "```bash\nmg list --tag=x --status=closed --json\n```\n"},
+		{"the same value, separated form", "```bash\nmg list --status closed\n```\n"},
+		{"found live at pm-template.md:336", "```bash\nfor repo in <repos>; do mg list --repo=$repo --status=open; done\n```\n"},
+		{"found live at pm-template.md:422", "```bash\nmg list --tag=release-cut --status=open 2>/dev/null | grep -q \"$slug\"\n```\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := findingsFor(t, tc.body)
+			if !hasRule(got, RuleUnknownFlagValue, "mg list --status") {
+				t.Fatalf("refused value not flagged; findings:%s", dump(got))
+			}
+			// The finding is useless without the accepted spelling in it.
+			for _, f := range got {
+				if f.Rule == RuleUnknownFlagValue && strings.Contains(f.Detail, "available, claimed, pending, done") {
+					return
+				}
+			}
+			t.Errorf("the finding should name the accepted values; got:%s", dump(got))
+		})
+	}
+}
+
+// TestValueCoverageNamesWhatItCouldNotJudge is the census, and it is the point
+// of the ticket rather than a nicety. A value-bearing flag with no rule must go
+// UNFLAGGED and be reported UNCHECKED — never silently dropped, which is how
+// "unchecked" becomes "checked and fine".
+func TestValueCoverageNamesWhatItCouldNotJudge(t *testing.T) {
+	// `--assignee` is value-bearing, and nothing anywhere declares its legal
+	// set: it is a free-text person name. `--tag` likewise.
+	_, cov := fixtureChecker().checkFile("fixture.md",
+		"```bash\nmg list --status=done --assignee=mayor --tag=urgent\n```\n")
+
+	want := map[string]bool{"mg list --assignee": true, "mg list --tag": true}
+	for _, s := range cov.Unchecked {
+		delete(want, s)
+	}
+	if len(want) != 0 {
+		t.Errorf("these value-bearing flags went unreported: %v (census: %v)", want, cov.Unchecked)
+	}
+	if len(cov.Checked) != 1 || cov.Checked[0] != "mg list --status" {
+		t.Errorf("checked = %v, want exactly [mg list --status]", cov.Checked)
+	}
+	// A boolean flag has no value and must not pad the census.
+	_, cov2 := fixtureChecker().checkFile("fixture.md", "```bash\nmg list --wide --json\n```\n")
+	if len(cov2.Checked)+len(cov2.Unchecked) != 0 {
+		t.Errorf("boolean flags entered the census: %+v", cov2)
 	}
 }
 
@@ -310,6 +386,25 @@ func TestMustNotFlag(t *testing.T) {
 				"no `pogo refinery submit`, and no `mg done` until the verdict lands.\n",
 		},
 		{
+			// mg-9324's negative arm: the accepted spelling, in both forms.
+			"accepted flag value",
+			"```bash\nmg list --status=done --json\nmg list --status available\n```\n",
+		},
+		{
+			// A placeholder is not a claim about a value. The prompt is telling
+			// the reader to substitute, and asserts nothing that can be wrong.
+			"placeholder flag values",
+			"```bash\nmg list --status=<status>\nmg list --status=$STATUS\n" +
+				"mg list --status={{.Something}}\n```\n",
+		},
+		{
+			// A value-bearing flag no rule covers is UNCHECKED, not clean-by-fiat
+			// and not flagged. `mg list --assignee=nobody-by-that-name` is very
+			// likely wrong and this check cannot know it; the census says so.
+			"value-bearing flag with no rule",
+			"```bash\nmg list --assignee=mayor --tag=release-cut --repo=/tmp/x\n```\n",
+		},
+		{
 			// Out of scope by design: not our tools, not our surface to pin.
 			"non-pogo commands",
 			"```bash\ngh issue close 41 --comment \"done\"\ngit rebase --onto main\njq -r .status\n```\n",
@@ -370,6 +465,11 @@ func TestNegativeArmIsNotVacuous(t *testing.T) {
 			"heredoc terminator removed, so the body is read as commands",
 			"```bash\nmg mail send mayor --from=x\nmg frobnicate --with-a-flag\n```\n",
 			RuleUnknownSubcommand,
+		},
+		{
+			"placeholder value replaced by a literal refused one",
+			"```bash\nmg list --status=closed\n```\n",
+			RuleUnknownFlagValue,
 		},
 	}
 	for _, tc := range cases {
@@ -436,6 +536,114 @@ Global Flags:
 	}
 	if !takesArgs {
 		t.Errorf("`<mr-id>` in the usage line should mark the command as taking positionals")
+	}
+}
+
+// TestDeclaredValuesRejectsProse is the guard on the whole value arm, and the
+// asymmetry it protects is the reason declaredValues is strict.
+//
+// Finding no enumeration costs a value that goes unchecked and is REPORTED as
+// unchecked. Finding a wrong one costs a false finding against a correct prompt,
+// which is the thing this package exists to stop people doing to prompts. Those
+// are not the same price, so every ambiguous shape must resolve to "nothing".
+//
+// Every string below is real: taken from the 401 flag lines of `mg --help` and
+// `pogo --help`, which between them contain ~150 parentheticals, of which
+// exactly two are value sets.
+func TestDeclaredValuesRejectsProse(t *testing.T) {
+	accept := []struct {
+		usage string
+		want  string
+	}{
+		{"filter by status (available, claimed, pending, done, shelved, archived)",
+			"available,claimed,pending,done,shelved,archived"},
+		{"priority level: low, medium, high", "low,medium,high"},
+		{"priority level: low, medium, high (default: medium)", "low,medium,high"},
+		{"Harness provider for this polecat (claude, codex, pi); overrides config", "claude,codex,pi"},
+	}
+	for _, tc := range accept {
+		if got := strings.Join(declaredValues(tc.usage), ","); got != tc.want {
+			t.Errorf("declaredValues(%q)\n got %q\nwant %q", tc.usage, got, tc.want)
+		}
+	}
+
+	reject := []string{
+		// Comma lists that are prose, not values. The `e.g.` one is the sharpest:
+		// it is a list of EXAMPLES, and reading it as exhaustive would flag every
+		// legal duration it does not happen to mention.
+		"flag claimed items older than this (e.g. 12h, 2d) (default 24h0m0s)",
+		"add tags (comma-separated or repeated)",
+		"estimated token budget (integer; --budget=0 unsets)",
+		"workspace root directory (overrides $MG_ROOT; default ~/.macguffin)",
+		"work item ID prefix (e.g. 'po-' gives po-a3f) (default \"mg-\")",
+		"filter by assignee (use 'human' for current user)",
+		"filter by repository path (substring match)",
+		"archive done items older than this many days (sweep form only) (default 7)",
+		"read the new body verbatim from a file (\"-\" for stdin); mutually exclusive with --body",
+		"emit events as NDJSON (already the default; accepted for consistency)",
+		// A MIXED list: `tag:<value>` is not a bare token, so the whole list is
+		// rejected rather than partially believed. Half a value set would flag
+		// `--group-by=tag:release` — a correct invocation.
+		"partition axis: status, repo, tag, tag:<value>, assignee, priority, age (default \"status\")",
+		// One item is not a set.
+		"new body (markdown)",
+		"help for list",
+	}
+	for _, usage := range reject {
+		if got := declaredValues(usage); got != nil {
+			t.Errorf("declaredValues(%q) = %v, want nil — a wrong value set flags correct prompts", usage, got)
+		}
+	}
+}
+
+// TestParseFlagSpecsSplitsDeclarationFromUsage covers the column split, which is
+// what makes every value assertion above reachable from a real help page.
+func TestParseFlagSpecsSplitsDeclarationFromUsage(t *testing.T) {
+	specs := ParseFlagSpecs("Usage:\n  mg list [flags]\n\nFlags:\n" +
+		"      --all               include archived and shelved items\n" +
+		"  -a, --archived          include archived items\n" +
+		"  -h, --help              help for list\n" +
+		"      --status string     filter by status (available, claimed, done)\n" +
+		"      --tag string        filter by tag\n" +
+		"\nGlobal Flags:\n" +
+		"      --root string   workspace root directory (overrides $MG_ROOT)\n")
+
+	if got := len(specs); got != 6 {
+		t.Errorf("parsed %d flags, want 6: %v", got, specs)
+	}
+	// A boolean has no value, so it can never have a wrong one.
+	if specs["all"].TakesValue || specs["archived"].TakesValue {
+		t.Error("a flag with no type token does not take a value")
+	}
+	// `-h, --help   help for list` must not read `help` as its type token: only
+	// the 2+ space column gap separates a declaration from its usage text.
+	if specs["help"].TakesValue {
+		t.Errorf("--help read as value-bearing; usage parsed as %q", specs["help"].Usage)
+	}
+	if !specs["status"].TakesValue || !specs["root"].TakesValue {
+		t.Error("a flag with a type token takes a value")
+	}
+	if got := strings.Join(specs["status"].Values, ","); got != "available,claimed,done" {
+		t.Errorf("status values = %q", got)
+	}
+	if specs["tag"].Values != nil || specs["root"].Values != nil {
+		t.Error("flags whose usage declares no enumeration must carry none")
+	}
+	// A `--x` merely MENTIONED in another flag's usage is not a declaration.
+	if _, ok := specs["budget"]; ok {
+		t.Error("a cross-referenced flag became a spec")
+	}
+}
+
+// TestParseFlagSpecsFoldsWrappedUsage guards the case where the enumeration is
+// at the tail of a usage string long enough to wrap: dropping the continuation
+// line silently turns a checkable flag into an unchecked one.
+func TestParseFlagSpecsFoldsWrappedUsage(t *testing.T) {
+	specs := ParseFlagSpecs("Flags:\n" +
+		"      --status string   a very long explanation that cobra had to wrap onto\n" +
+		"                        the next line (available, claimed, done)\n")
+	if got := strings.Join(specs["status"].Values, ","); got != "available,claimed,done" {
+		t.Errorf("wrapped enumeration lost: values = %q, usage = %q", got, specs["status"].Usage)
 	}
 }
 
