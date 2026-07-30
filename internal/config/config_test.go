@@ -940,6 +940,7 @@ unclaimed_item_age_threshold = "3m"
 unread_mail_age_threshold = "4m"
 max_unread_mail_count = 9
 nudge_cooldown = "90s"
+repeat_backoff_cap = "45m"
 priority_wake_enabled = false
 high_priority_wake_delay = "10s"
 high_priority_wake_cooldown = "90s"
@@ -982,6 +983,29 @@ non_dispatchable_assignees = ["human", "legal-review"]
 	}
 	if cfg.StallWatch.NudgeCooldown != 90*time.Second {
 		t.Errorf("cooldown = %v, want 90s", cfg.StallWatch.NudgeCooldown)
+	}
+	if cfg.StallWatch.RepeatBackoffCap != 45*time.Minute {
+		t.Errorf("repeat backoff cap = %v, want 45m", cfg.StallWatch.RepeatBackoffCap)
+	}
+}
+
+// TestStallWatchRepeatBackoffCapDefault: an existing deployment has no
+// repeat_backoff_cap key, so the per-item backoff has to be correct with the
+// config file untouched — mg-1693 is a bug fix, not an opt-in feature.
+func TestStallWatchRepeatBackoffCapDefault(t *testing.T) {
+	dir := t.TempDir()
+	os.Setenv("XDG_CONFIG_HOME", dir)
+	defer os.Unsetenv("XDG_CONFIG_HOME")
+
+	cfg := Load()
+	if cfg.StallWatch.RepeatBackoffCap != DefaultStallRepeatBackoffCap {
+		t.Errorf("repeat backoff cap = %v, want default %v",
+			cfg.StallWatch.RepeatBackoffCap, DefaultStallRepeatBackoffCap)
+	}
+	if DefaultStallRepeatBackoffCap <= DefaultStallNudgeCooldown ||
+		DefaultStallRepeatBackoffCap <= DefaultHighPriorityWakeCooldown {
+		t.Errorf("the default cap (%v) must exceed both base cooldowns or escalation is a no-op",
+			DefaultStallRepeatBackoffCap)
 	}
 }
 

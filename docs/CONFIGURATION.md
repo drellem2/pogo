@@ -210,8 +210,9 @@ its loop has stopped draining work. Two thresholds: an `available` work item
 the mayor owns (assigned to it, or unassigned) sitting unclaimed past an age
 limit, and the mayor's `new/` maildir holding an over-age message or more than
 a count ceiling. On a cross it sends one nudge per offending batch and appends a
-`stall_watch_fired` event to `~/.pogo/events.log`; a per-category cooldown caps
-the nudge rate. Running in pogod's *independent* heartbeat is the point — a
+`stall_watch_fired` event to `~/.pogo/events.log`; a **per-item** escalating
+cooldown caps the nudge rate (see "Repeat suppression" below). Running in
+pogod's *independent* heartbeat is the point — a
 watcher inside the mayor's own loop can't catch that loop skipping its own
 check-work / check-mail steps (gh drellem2/macguffin #12). Configure under
 `[stall_watch]` in `config.toml`:
@@ -224,7 +225,8 @@ agent = "mayor"                         # which agent to watch (default: the
 unclaimed_item_age_threshold = "10m"    # Threshold A
 unread_mail_age_threshold = "10m"       # Threshold B (age)
 max_unread_mail_count = 5               # Threshold B (count)
-nudge_cooldown = "5m"                   # min gap between same-category nudges
+nudge_cooldown = "5m"                   # gap before the SECOND notice about an item
+repeat_backoff_cap = "4h"               # ceiling on the doubling repeat backoff
 
 # Assignees that mean "do NOT dispatch this" — see "Ownership vs execution".
 non_dispatchable_assignees = ["human", "parked"]  # everything else is watched
@@ -232,9 +234,47 @@ non_dispatchable_assignees = ["human", "parked"]  # everything else is watched
 # Priority wake (gh #61): a high-priority available item skips the 10m gate.
 priority_wake_enabled = true            # default true
 high_priority_wake_delay = "30s"        # min age before a high-priority item wakes
-high_priority_wake_cooldown = "3m"      # min gap between priority-wake nudges
+high_priority_wake_cooldown = "3m"      # gap before the 2nd notice about an item
 fast_priorities = ["high"]              # Priority values that trigger the wake
 ```
+
+### Repeat suppression is per item, and it backs off
+
+Both work-item cooldowns are keyed on the **(category, item)** pair, not on the
+category. The first notice about an item is immediate; each repeat about that
+*same* item waits twice as long as the last — 3m, 6m, 12m, 24m… — up to
+`repeat_backoff_cap`. A heartbeat tick on which every offending item is still
+inside its own backoff sends nothing at all, and each nudge names only the items
+that are actually due, marking any it has raised before with `[repeat] … (notice
+#N)`.
+
+This matters because the coordinator legitimately *holds* items — behind its
+polecat cap, a snooze, a sequencing decision. Keyed per category (as it was
+before mg-1693) the cooldown suppressed repeats of a *kind of alert* rather than
+repeats *about a given item*, which broke it in both directions:
+
+- A held item was re-detected and re-notified every cooldown, indefinitely. On
+  the night of 2026-07-30, `mg-61f4` drew 22 notices and `mg-0e24` 27 — 212
+  item-notices across 29 items in four hours. **Detection was correct in every
+  one of those fires**; only the repetition was wrong, which is why the fix is
+  here and not in the detector. Making detection stricter would have suppressed
+  true positives — and a correct detector with a broken repeat-suppressor is
+  indistinguishable from an over-firing detector unless you count *per item*.
+- A genuinely new item arriving mid-cooldown was silently swallowed by the held
+  item's timer. That half was never in the noise complaint, and it was a miss,
+  not a nuisance.
+
+Repeats back off rather than stopping outright so a genuinely forgotten item
+still resurfaces; at the 4h default a held item settles to roughly one notice
+per four hours. Setting `repeat_backoff_cap` at or below a category's base
+cooldown disables the escalation and leaves a flat per-item cooldown. The state
+is in-process, so a pogod restart re-notifies each held item once — deliberate,
+since a restart is also when the coordinator's own picture of what it was
+holding is gone.
+
+`stall_watch_fired` events carry `repeat_counts` (item → notice number),
+`backoff_suppressed_ids`, and `next_backoff` so the repetition stays countable
+per item without hand-correlating ids across fires.
 
 ### Ownership vs execution — which items the work-item detectors watch
 
@@ -444,9 +484,10 @@ and carries a priority in `fast_priorities` bypasses the 10m gate and is deliver
 `high_priority_wake_delay` — via the **same wait-idle nudge**, so a busy agent is
 never interrupted (the write lands at its next turn boundary) and an idle agent
 is woken at once. A dedicated `high_priority_wake_cooldown` keeps an item that
-stays available (e.g. it can't be dispatched yet) from re-nudging every tick;
-blocked (`pending/`) and already-claimed (`claimed/`) items are never scanned, so
-they cannot loop-nudge either. When the wake is disabled, high-priority items
+stays available (e.g. it can't be dispatched yet) from re-nudging every tick —
+per item and escalating, so it also cannot re-nudge every cooldown forever (see
+"Repeat suppression is per item"); blocked (`pending/`) and already-claimed
+(`claimed/`) items are never scanned, so they cannot loop-nudge either. When the wake is disabled, high-priority items
 fall back to the standard 10m gate — disabling it never silences them.
 
 This is a sanctioned system-event nudge (gh #33), not a producer-attributed ask:
