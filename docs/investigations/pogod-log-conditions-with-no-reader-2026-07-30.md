@@ -252,3 +252,30 @@ to the mechanism sitting next to it, and it stayed that way for seven days becau
 line reporting it was correct, actionable, and addressed to nobody.
 
 **A2 is the next ticket and is larger than this one was.**
+
+---
+
+## Successor — added 2026-07-30 (mg-342d)
+
+The remainder was carried and mostly closed the same night. **A2–A15: 12 wired, 2 declined with
+reasons** (A8 as Class C mislabelled here; A12 as an always-true precondition with no transition and
+no remedy). Disposition per row, the positive controls, and one correction to §4 are in the companion
+record:
+
+**`docs/investigations/pogod-condition-annunciation-2026-07-30.md`**
+
+Two findings there bear on this document specifically, so they are named here rather than only there:
+
+- **A3's second listed site is unreachable.** `deaf-watch NOT armed` is guarded on
+  `agentRegistry != nil`, and pogod `os.Exit(1)`s if the registry fails to build. A3's severity claim
+  stands; it is carried by the ack-watch half plus deaf-watch's existing `deaf_watch_error` record.
+- **§6's A2 hedge is now closed.** *"The coordinator will not be woken to read it, only mailed"* was
+  right and is no longer true: the wake rides the heartbeat, which drives the scheduler rather than
+  depending on it, so the coordinator is actively nudged on the A2 boot. Measured against a live
+  daemon with the scheduler confirmed down.
+
+What §6 predicted correctly and remains open: a scheduler that **loads and then silently stops
+firing** is a different fault with no decision point inside pogod, and it needs a positive
+out-of-process instrument rather than an in-process notifier. Named, argued, deliberately not built.
+
+The enumeration above stays the authority on the conditions. Nothing in it has been rewritten.

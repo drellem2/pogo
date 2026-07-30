@@ -55,6 +55,26 @@ bash scripts/pogo-self-deploy_live_test.sh
 echo "Testing the live control's sandbox isolation and setup-failure reporting"
 bash scripts/pogo-self-deploy_live_setup_test.sh
 
+# The pogod condition annunciator's live controls (mg-342d). The MERGE-TIME
+# SUBSET — the negative control plus A2, the enumeration's own highest severity —
+# because those are the two that decide whether any of the rest mean anything, and
+# the full file is 15 daemon boots.
+#
+# NEG first, and it is not a formality: every positive control in that file also
+# passes against an annunciator that mails unconditionally, so without a clean
+# boot proving silence the other twenty assertions are uninterpretable. A2 then
+# forces a corrupt schedules.json and asserts the notice ARRIVES in a real
+# maildir, is SUPPRESSED on the next boot with the condition still live, is
+# CLEARED when it resolves, mails again immediately on recurrence, and — with the
+# scheduler confirmed down — that the coordinator is actively WOKEN.
+#
+# It is here rather than only on demand because mg-342d's whole subject is alarms
+# nobody reads, and a control nobody runs is the same defect wearing a test's
+# clothes. The remaining rows (A4/A7/A11, A5, A9, A10, A14) are run with
+# `scripts/pogo-condition-controls.sh` — ~3 minutes, not every merge.
+echo "Testing the pogod condition annunciator (live controls: negative + A2)"
+bash scripts/pogo-condition-controls.sh NEG A2
+
 # The deploy script's SIGINT interrupt-safety control (mg-e201). Relocated OUT of
 # the live_test.sh artifact gate (do_prove's comsub) because it tests the DEPLOY
 # SCRIPT's INT trap, not the pogod detector, and its own-process-group Ctrl-C model

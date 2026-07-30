@@ -63,7 +63,7 @@ func TestRunGitGCSweepLogsTheAction(t *testing.T) {
 	}
 	defer reg.StopAll(2 * time.Second)
 
-	runGitGCSweep(reg, config.GitGCConfig{Enabled: true, Repos: []string{repo.dir}})
+	runGitGCSweep(reg, config.GitGCConfig{Enabled: true, Repos: []string{repo.dir}}, "")
 
 	// Precondition: the sweep actually ran and actually removed something. A
 	// sweep that did nothing would satisfy no assertion below for the right
@@ -121,7 +121,7 @@ func TestRunGitGCSweepLogsForeignBranchRemovalDistinctly(t *testing.T) {
 	}
 	defer reg.StopAll(2 * time.Second)
 
-	runGitGCSweep(reg, config.GitGCConfig{Enabled: true, Repos: []string{repo.dir}})
+	runGitGCSweep(reg, config.GitGCConfig{Enabled: true, Repos: []string{repo.dir}}, "")
 
 	line := findLogLine(logged(), "removed worktree")
 	if line == "" {
