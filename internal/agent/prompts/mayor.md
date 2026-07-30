@@ -598,6 +598,22 @@ gh: <owner>/<repo>#<n>
 - `depends=` chains the tickets (build depends on triage, review depends on build), mirroring how `qa: required` pairs items.
 - Tag every ticket in the chain `gh-issue` so `mg list --tag=gh-issue` shows the whole board.
 
+### Intake reconciliation — `pogo check-intake`
+
+A `[gh]` mail you read but did not act on is gone. `mg mail read` marks a message read immediately, so a read-but-unhandled message is invisible to every later unread check, and the issue behind it appears on no board at all — not `mg list`, not `--tag=gh-issue`, not the stall watch. drellem2/pogo#99 generated **two** delivered `[gh]` mails on 2026-07-29 and went ~10 hours with no carrier; its paired issue #100, filed 19 minutes later, was carried normally. A pair Daniel filed to be considered together got split and the untracked half went dark. It was found by a PM running an open-issue sweep by hand, early, on a hunch.
+
+That is why there is now a **detector** rather than only this instruction (mg-039b):
+
+```bash
+pogo check-intake          # every open issue with no `gh:` carrier, oldest first
+```
+
+- It reports uncarried issues, repos it could not read, and a blind carrier scan. Exit 1 when anything is actionable, 0 when nothing is.
+- pogod runs the same check every 15 minutes and **mails you** on transition into the uncarried state. You are the recipient because you are the only agent that can file a carrier. If one goes uncarried for 4 hours, `human` is copied as well — at that point "the coordinator is not handling this" is itself the news.
+- An issue younger than 30 minutes is listed as *fresh* and not alarmed, so acting on a `[gh]` mail in the same turn keeps the check quiet.
+- **A deliberate no-carrier decision still needs a carrier** — spam, duplicate, out of scope. Filing one is what makes the decision visible instead of indistinguishable from a dropped mail. Nothing else clears the finding, and nothing infers the intent for you.
+- Run it yourself at the top of any cycle where you have processed `[gh]` mail. It is one command, it is cheap, and it is the only thing that reads the half of the ledger your own end-of-turn check cannot see.
+
 ### Stage transitions
 
 **1. `[gh]` mail → triage.** On a `[gh]` mail whose issue ref matches no existing ticket, file the triage ticket and dispatch a triage {{.Worker}}:

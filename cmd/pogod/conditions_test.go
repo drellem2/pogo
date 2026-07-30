@@ -94,8 +94,10 @@ func enumerationDisposition() []enumerationRow {
 				"measurement, not an annunciation of a boot-time capability check."},
 
 		{row: "A13", wired: true,
-			why:   "gh-issue teardown detector NOT armed. The one row NOT routed to the coordinator: [gh_teardown] notify_to is a deliberately-chosen mailbox for this subsystem's findings (mg-b586) and its not-armed condition belongs to the same reader",
-			conds: []pogodCondition{conditionTeardownNotArmed("pm-pogo", "exec: gh not found")}},
+			why: "gh-issue detectors NOT armed. The one row NOT routed to the coordinator: [gh_teardown] notify_to is a deliberately-chosen mailbox for this subsystem's findings (mg-b586) and its not-armed condition belongs to the same reader. TWO conditions on the one row (mg-039b): a missing `gh` is one fault, but the teardown and intake detectors report to different mailboxes by design, so one notice would leave one reader uninformed",
+			conds: []pogodCondition{
+				conditionTeardownNotArmed("pm-pogo", "exec: gh not found"),
+				conditionIntakeNotArmed("mayor", "exec: gh not found")}},
 
 		{row: "A14", wired: true,
 			why:   "log rotation failed — the post-mortem log the other thirteen fall back to may be lost or unbounded",

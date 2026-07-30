@@ -27,6 +27,7 @@ import (
 	"github.com/drellem2/pogo/internal/completion"
 	"github.com/drellem2/pogo/internal/config"
 	"github.com/drellem2/pogo/internal/events"
+	"github.com/drellem2/pogo/internal/ghintake"
 	"github.com/drellem2/pogo/internal/ghteardown"
 	"github.com/drellem2/pogo/internal/ghtoken"
 	"github.com/drellem2/pogo/internal/gitceiling"
@@ -1021,6 +1022,158 @@ carrier is found (so it can gate a schedule or CI step).`,
 	}
 	cmdCheckTeardown.Flags().BoolVar(&teardownArchived, "archived", false,
 		"Also scan archived carriers (slower: one network lookup per carrier)")
+
+	// check-intake: the gh-issue INTAKE detector (mg-039b). Sibling of
+	// check-teardown at the other end of the same workflow — that one catches a
+	// carrier that finished while its issue stayed open, this one catches an issue
+	// that never got a carrier at all. The on-demand half of the standing runner
+	// in pogod; same detector, same inputs.
+	var (
+		intakeRepos []string
+		intakeGrace time.Duration
+	)
+	var cmdCheckIntake = &cobra.Command{
+		Use:   "check-intake",
+		Short: "Report open GitHub issues that no work item carries a `gh:` ref for (never files anything)",
+		Long: `Reconcile the OPEN issues on the watched repos against the ` + "`gh:`" + ` carrier markers
+in the work-item store, and report the issues nothing is tracking.
+
+This exists because a delivered ` + "`[gh]`" + ` mail can be dropped with nothing noticing.
+drellem2/pogo#99 was filed 2026-07-29 at 18:53:58Z. The poller mailed the
+coordinator 46 seconds later, and again 20 minutes after that when Daniel
+commented. Both mails were delivered. Neither produced a work item, and the issue
+went ~10 hours with no carrier — invisible to ` + "`mg list`" + `, to
+` + "`mg list --tag=gh-issue`" + `, and to every other board the fleet reads. Its paired
+issue #100, filed 19 minutes later, WAS carried, so a pair filed to be considered
+together got split and the untracked half went dark. It surfaced only because a PM
+ran an open-issue sweep by hand, early, on a hunch.
+
+Neither the poller nor mail delivery failed. What failed was follow-through, and
+the coordinator prompt already prescribes the discipline that would have prevented
+it. Prescribing it was not sufficient: there was no detector, only an instruction.
+The set difference is trivially computable and nothing computed it.
+
+The predicate is the ` + "`gh:`" + ` BODY MARKER, at any work-item status including
+archived and shelved. Deliberately not the ` + "`gh-issue`" + ` tag (a carrier filed
+without the tag is still a carrier, and treating it as absent would produce a
+finding nobody could clear) and deliberately not a title match (titles drift; the
+marker is a declaration). A ref counts only on a structural line — one that starts
+with ` + "`gh:`" + `, outside blockquotes and outside fenced code blocks — so prose
+citing an issue does not make an item its carrier.
+
+Findings come in four kinds:
+
+  uncarried    an open issue past the grace window with no carrier. The finding
+               this exists to produce.
+  unreadable   a watched repo whose open-issue list could NOT be fetched. NOT
+               clean: a failed list and a repo with no open issues look identical
+               to a careless check, so an unreadable repo is reported rather than
+               counted as covered.
+  blind scan   the carrier scan examined ZERO work items. Reported as blindness
+               rather than as "every open issue is uncarried", which is what
+               joining against an empty carrier set would produce — a wall of
+               findings that is entirely an artefact of the scan.
+  fresh        an uncarried issue still inside --grace. Listed, never alarmed: an
+               issue filed 90 seconds ago is a mail in flight, not a dropped one.
+
+REPORTS ONLY. It never files a work item and never comments on an issue — what an
+issue IS (triage, duplicate, out of scope, a question) is a judgement, and that
+stays with the coordinator.
+
+The watch list comes from --repo if given, else from the issue poller's own state
+directory (` + "`$POGO_HOME/gh-issues/seen-<owner>-<repo>.json`" + `) so the two halves of
+this reconciliation cannot drift, else from a built-in default. The report says
+which.
+
+Exit status is 0 when nothing is actionable, 1 when any uncarried issue,
+unreadable repo, or blind scan is found (so it can gate a schedule or CI step).`,
+		Args: cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			// Every issue list this command renders comes from a `gh` call, so an
+			// unauthenticated gh turns the whole report into unreadable repos. In an
+			// authed shell this is a no-op; run from launchd, cron, or any other
+			// minimal environment it is the difference between an answer and a blind
+			// one (mg-03ea). Warned, not fatal — gh can also be authenticated by
+			// `gh auth login`, which this cannot see.
+			if res := ghtoken.Ensure(); !res.OK() {
+				fmt.Fprintf(os.Stderr, "warning: %s\n", res)
+			}
+
+			stateDir := filepath.Join(config.PogoHome(), ghintake.PollerStateDirName)
+			repos, repoSrc := ghintake.ResolveRepos(intakeRepos, stateDir)
+
+			src := ghintake.MGSource{}
+			inv, err := ghintake.Collect(repos, ghintake.GHOpenIssues, src.Carriers, src.Statuses())
+			if err != nil {
+				// A store we could not read is not "no carriers" — that would turn
+				// every open issue into a finding. Fail loudly instead.
+				fmt.Fprintf(os.Stderr, "cannot read work-item store: %v\n", err)
+				os.Exit(cli.ExitError)
+			}
+
+			// grace <= 0 is the documented "report immediately" setting, and Detect
+			// reads it that way, so the flag value passes through unmassaged.
+			grace := intakeGrace
+			rep := ghintake.Detect(inv, time.Now(), grace)
+
+			if jsonOutput {
+				type outFinding struct {
+					Issue  string `json:"issue"`
+					Title  string `json:"title,omitempty"`
+					Author string `json:"author,omitempty"`
+					URL    string `json:"url,omitempty"`
+					AgeSec int    `json:"age_seconds"`
+				}
+				conv := func(fs []ghintake.Finding) []outFinding {
+					out := make([]outFinding, 0, len(fs))
+					for _, f := range fs {
+						out = append(out, outFinding{
+							Issue: f.Issue.Ref(), Title: f.Issue.Title,
+							Author: f.Issue.Author, URL: f.Issue.URL,
+							AgeSec: int(f.Age.Seconds()),
+						})
+					}
+					return out
+				}
+				repoErrs := make([]map[string]string, 0, len(rep.RepoErrors))
+				for _, e := range rep.RepoErrors {
+					repoErrs = append(repoErrs, map[string]string{"repo": e.Repo, "detail": e.Detail})
+				}
+				itemErrs := make([]map[string]string, 0, len(rep.ItemErrors))
+				for _, e := range rep.ItemErrors {
+					itemErrs = append(itemErrs, map[string]string{"item": e.ID, "detail": e.Detail})
+				}
+				cli.PrintJSON(map[string]interface{}{
+					"repos":            rep.Repos,
+					"repo_source":      repoSrc,
+					"statuses":         rep.Statuses,
+					"items_scanned":    rep.ItemsScanned,
+					"carrier_refs":     rep.CarrierRefs,
+					"scanned":          rep.Scanned,
+					"carried":          rep.Carried,
+					"uncarried_count":  len(rep.Uncarried),
+					"uncarried":        conv(rep.Uncarried),
+					"fresh":            conv(rep.Fresh),
+					"unreadable_repos": repoErrs,
+					"unreadable_items": itemErrs,
+					"blind_store":      rep.BlindStore,
+					"grace_seconds":    int(grace.Seconds()),
+					"actionable":       rep.Actionable(),
+				})
+			} else {
+				fmt.Print(rep.Render())
+				fmt.Printf("watch list from %s.\n", repoSrc)
+			}
+
+			if rep.Actionable() {
+				os.Exit(cli.ExitError)
+			}
+		},
+	}
+	cmdCheckIntake.Flags().StringSliceVar(&intakeRepos, "repo", nil,
+		"Watched repo as owner/name (repeatable); default is discovered from the poller's state directory")
+	cmdCheckIntake.Flags().DurationVar(&intakeGrace, "grace", config.DefaultGHIntakeGrace,
+		"How long an open issue may go uncarried before it counts as a finding (0 or less: report immediately)")
 
 	// check-acks: the completion-deficit detector (mg-1935). The on-demand half
 	// of the standing runner in pogod; same detector, same fixture-free inputs.
@@ -3182,6 +3335,7 @@ branches; work items and mail live in mg/macguffin (the task-store CLI).`,
 	// pick up the new grant.
 	rootCmd.AddCommand(newCredentialCmd(&jsonOutput))
 	rootCmd.AddCommand(cmdCheckTeardown)
+	rootCmd.AddCommand(cmdCheckIntake)
 	rootCmd.AddCommand(cmdCheckAcks)
 	rootCmd.AddCommand(cmdCheckMailLoops)
 	rootCmd.AddCommand(cmdCheckCommitBody)

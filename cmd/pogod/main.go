@@ -34,6 +34,7 @@ import (
 	"github.com/drellem2/pogo/internal/deafwatch"
 	"github.com/drellem2/pogo/internal/driftwatch"
 	"github.com/drellem2/pogo/internal/driver"
+	"github.com/drellem2/pogo/internal/ghintake"
 	"github.com/drellem2/pogo/internal/ghteardown"
 	"github.com/drellem2/pogo/internal/ghtoken"
 	"github.com/drellem2/pogo/internal/gitceiling"
@@ -1770,6 +1771,72 @@ Flags:
 		}
 	}
 
+	// Build the gh-issue INTAKE detector (mg-039b): the reconciliation nobody
+	// computed. The sibling above audits the workflow's LAST step; this one audits
+	// its FIRST — for every OPEN issue on a watched repo, does a work item exist
+	// carrying that issue's `gh:` marker?
+	//
+	// It exists because a delivered `[gh]` mail can be dropped with nothing
+	// noticing. drellem2/pogo#99 generated two delivered mails on 2026-07-29 and
+	// went ~10 hours with no carrier; its paired issue #100 was carried normally,
+	// so a pair filed to be considered together was split and the untracked half
+	// was invisible to every listing the fleet runs. It surfaced only because a PM
+	// ran an open-issue sweep by hand, early, on a hunch. The coordinator prompt
+	// already prescribes the discipline that would have prevented it — prescribing
+	// it was not sufficient, because there was no detector, only an instruction.
+	//
+	// Reports to the COORDINATOR rather than the PM (unlike the teardown detector):
+	// the remedy is to file a carrier and dispatch triage, and that is the only
+	// agent that does either. `human` is copied only once one issue has gone
+	// uncarried past escalate_after, when "the coordinator is not handling this" has
+	// itself become the news — which is also the answer to what happens if the
+	// coordinator is down. REPORT-ONLY: it mails and never files or comments.
+	//
+	// Armed only when `gh` is actually available. Without it EVERY repo lookup
+	// fails, and the runner would faithfully report an environment gap as a wall of
+	// unreadable repos — noise that would get the detector muted before the run
+	// that matters. A missing gh is a precondition, not a finding.
+	var intakeWatcher *ghintake.Watcher
+	if cfg.GHIntake.Enabled {
+		if _, err := exec.LookPath("gh"); err != nil {
+			log.Printf("pogod: gh-issue intake detector NOT armed — `gh` not on PATH (%v); "+
+				"open issues will not be reconciled against carriers", err)
+			// A13's second consequence — see conditionIntakeNotArmed. Routed to this
+			// subsystem's own mailbox for the same reason A13 is, falling back to the
+			// coordinator if notify_to was explicitly blanked.
+			intakeTo := cfg.GHIntake.NotifyTo
+			if intakeTo == "" {
+				intakeTo = coordinator
+			}
+			conditions.Raise(conditionIntakeNotArmed(intakeTo, err.Error()), time.Now())
+		} else {
+			conditions.Clear(rowA13IntakeNotArmed, time.Now())
+			// The watch list is resolved ONCE at build time rather than per sample:
+			// it comes from the poller's state directory, and a repo added there
+			// mid-run is picked up on the next pogod restart. Resolving it per sample
+			// would mean a directory read on every tick for a list that changes
+			// perhaps twice a year.
+			stateDir := filepath.Join(config.PogoHome(), ghintake.PollerStateDirName)
+			repos, repoSrc := ghintake.ResolveRepos(cfg.GHIntake.Repos, stateDir)
+			src := ghintake.MGSource{}
+			intakeWatcher = ghintake.New(ghintake.Options{
+				Enabled: true,
+				Source: func() (ghintake.Inventory, error) {
+					return ghintake.Collect(repos, ghintake.GHOpenIssues, src.Carriers, src.Statuses())
+				},
+				Mail:          client.SendMGMail,
+				Interval:      cfg.GHIntake.Interval,
+				Grace:         cfg.GHIntake.Grace,
+				RenotifyAfter: cfg.GHIntake.RenotifyAfter,
+				NotifyTo:      cfg.GHIntake.NotifyTo,
+				EscalateAfter: cfg.GHIntake.EscalateAfter,
+			})
+			log.Printf("pogod: gh-issue intake detector enabled (interval=%s grace=%s renotify=%s notify_to=%s escalate_after=%s repos=%v from %s, report-only)",
+				cfg.GHIntake.Interval, cfg.GHIntake.Grace, cfg.GHIntake.RenotifyAfter,
+				cfg.GHIntake.NotifyTo, cfg.GHIntake.EscalateAfter, repos, repoSrc)
+		}
+	}
+
 	// Build the scheduler-completion deficit detector (mg-1935): the READER the
 	// ack counters never had. mg-a754 gave every fire a completion signal and
 	// `pogo schedule list` even renders `⚠ N unacked`, but nothing consumed it —
@@ -1909,6 +1976,14 @@ Flags:
 		// delay the next tick. Report-only.
 		if teardownWatcher != nil {
 			go teardownWatcher.Check(now)
+		}
+		// The gh-issue INTAKE detector rides the same tick on its own coarse
+		// interval. In a goroutine because it scans every work item in the store
+		// via `mg show` and lists issues over the network — neither must delay the
+		// next tick. Report-only: it mails, and it has no seam through which it
+		// could file a work item or comment on an issue.
+		if intakeWatcher != nil {
+			go intakeWatcher.Check(now)
 		}
 		// The completion-deficit detector rides the same tick and throttles
 		// itself to a COARSE interval. In a goroutine because a finding shells
