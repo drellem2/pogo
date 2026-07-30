@@ -21,5 +21,6 @@ doubt, the code is the source of truth.
 | [rating-dialog-watcher-design.md](rating-dialog-watcher-design.md) | Auto-dismissing Claude Code's mid-session rating dialog | Shipped (mg-4421, `internal/claude/modal_hook.go`); archeology |
 | [roadmap-utility-design.md](roadmap-utility-design.md) | An `mg-roadmap` utility over `mg spend` for budget-aware planning | Proposal — not implemented (mg-3069) |
 | [sandbox-design.md](sandbox-design.md) | Defence-in-depth sandboxing for polecat processes | Proposal — not implemented (mg-72bf) |
+| [sleep-resilience-design.md](sleep-resilience-design.md) | Scheduling that survives host sleep: clock-jump `system_wake` detection, per-cadence replay policy, why `pogo schedule` is canonical over an in-harness cron | Shipped (mg-283e, mg-bcfa, mg-2f79, mg-baf6/mg-ef30); kept for §2/§4 rationale and §3's declined-cause calibration record |
 | [spend-tracking-design.md](spend-tracking-design.md) | Token-spend tracking: `mg spend`, the spend store, `Agent.WorkItemID` | Shipped; archeology |
 | [stall-watch-design.md](stall-watch-design.md) | pogod-side nudges when an agent's work piles up | Shipped (mg-b971, `internal/stallwatch/`) |

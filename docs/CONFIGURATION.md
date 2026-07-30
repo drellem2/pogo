@@ -202,6 +202,12 @@ default `--replay once` is at-most-once, firing once after a long sleep then
 rescheduling forward. Source of truth: `internal/scheduler/`; run
 `pogo schedule --help` for the full flag set.
 
+`once` is the default, not the only right answer — which policy a cadence wants
+(`once` for sweeps and mail-checks, `skip` for pollers, `count` for counted batch
+jobs) is a per-cadence choice. That table, and the argument for why it belongs in
+the agent layer rather than a generic replay engine, is §2 of
+[design/sleep-resilience-design.md](design/sleep-resilience-design.md#2-replay-policy-per-cron-default-at-most-once-catch-up).
+
 ## Stall watcher
 
 A passive watcher inside pogod that rides the heartbeat loop and nudges the
