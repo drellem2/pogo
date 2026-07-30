@@ -4440,3 +4440,134 @@ func TestPromptsTeachHoldInstrumentByReleaseCondition(t *testing.T) {
 		}
 	}
 }
+
+// The `mg edit` body-write affordance (mg-4bb9).
+//
+// mayor.md, pm/pm-template.md and crew/doctor.md all carried, verbatim:
+//
+//	`mg edit <id> --body="<new body>"` replaces the body wholesale — there is
+//	no append/comment subcommand. To leave a note for a future actor without
+//	rewriting the body, mail them.
+//
+// Both halves were wrong, and each was wrong in a way that caused damage:
+//
+//   - `--append-body` and `--append-body-file` exist. `mg edit --help` opens
+//     with a banner naming `--append-body-file` as the right instrument for
+//     adding to a body. Because this file answered the question first,
+//     nothing sent anyone to that banner — a confident false claim forecloses
+//     the `--help` that would have corrected it, which silence would not.
+//   - The recommended alternative — mail — IS the mail-vs-body failure.
+//     mg-8a12's scope and mg-ddf4's strongest evidence both went by mail and
+//     had to be appended to the bodies afterwards; mg-ddf4's own body carries
+//     the diagnosis ("This was in mail and not in the ticket, which is the
+//     same defect the ticket is about").
+//
+// So the prompts taught the more dangerous of two available operations on the
+// grounds that the safer one did not exist. What makes the append safer is
+// three properties, and the test pins all three because each is a distinct
+// rewrite failure it does not have: it composes against the body on disk
+// (mg-f326's lost update), it cannot author the leading `# ` heading that IS
+// the title (mg-bac6's rename), and it is exempt from the workflow-tag
+// refusal a full rewrite hits.
+//
+// The absence assertions are written against the ASSERTION form ("there is no
+// append/comment subcommand"), not the phrase, because the fixed text quotes
+// the old claim when explaining why it was replaced.
+func TestPromptsTeachAppendBodyRatherThanWholesaleRewrite(t *testing.T) {
+	// The three prompts whose agents edit a body they did not just author.
+	// The six templates/ worker prompts are deliberately out of scope and
+	// pinned as such below: none of them mentions `mg edit` at all.
+	bodyEditors := []string{
+		"prompts/mayor.md",
+		"prompts/pm/pm-template.md",
+		"prompts/crew/doctor.md",
+	}
+
+	for _, path := range bodyEditors {
+		data, err := defaultPrompts.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		body := string(data)
+
+		for _, want := range []string{
+			// The affordance, in the form that is actually safe to run: a
+			// quoted heredoc into `--append-body-file -`. The quoting is not
+			// decoration — an unquoted <<EOF expands $VAR and backticks
+			// before mg sees them, which is the `--body="..."` bug reintroduced.
+			"mg edit <id> --append-body-file - <<'EOF'",
+			"Quote the heredoc.",
+			// Property 1: composes against the body on disk, so it cannot
+			// lose a concurrent write. mg-f326 is the incident.
+			"composes against the body on disk at write time",
+			"mg-f326",
+			// Property 2: an append lands below the prose, so it cannot
+			// author the leading heading — and that heading is the title.
+			"it can never author the body's leading `# ` heading",
+			"that heading *is* the title",
+			// Property 3: exempt from the workflow-tag refusal a full
+			// rewrite hits on an item already carrying the tag.
+			"exempt from the workflow-tag refusal",
+			// The rewrite is reserved, not forbidden — and when it is
+			// genuinely the shape, it names the version it read.
+			"Reserve `--body-file` for a genuine full rewrite",
+			"mg show <id> --body-hash",
+			"--if-unchanged=",
+			// `mg show <id> --body` does not exist; mg-9fc8 is the incident
+			// where its usage error became the stored body. A prompt that
+			// sends agents to read a body owes them the flag that works.
+			"mg show <id> --json | jq -r .body",
+			"mg-9fc8",
+			// Mail keeps its real job and loses the one it could not do.
+			"a note the next actor must act on belongs in the ticket",
+			"mg-8a12",
+			"mg-ddf4",
+			// Why the fix matters more than the flag list.
+			"a confident false claim in a prompt is worse than silence",
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("%s: missing `mg edit` body-write guidance %q (mg-4bb9)", path, want)
+			}
+		}
+
+		// The regression itself, in both halves. Either one returning means
+		// an agent is being told the append does not exist.
+		if strings.Contains(body, "there is no append/comment subcommand") {
+			t.Errorf("%s: re-asserts that `mg edit` has no append subcommand; `--append-body-file` exists and is the documented instrument (mg-4bb9)", path)
+		}
+		if strings.Contains(body, "replaces the body wholesale") {
+			t.Errorf("%s: describes the wholesale replace as the only body write (mg-4bb9)", path)
+		}
+		// Mail must not be offered as the way to avoid rewriting a body:
+		// that is the mg-8a12 / mg-ddf4 failure, recommended.
+		if strings.Contains(body, "without rewriting the body, mail them") {
+			t.Errorf("%s: recommends mail as the alternative to rewriting a body — that is the mail-vs-body failure the append flag avoids (mg-4bb9)", path)
+		}
+	}
+
+	// Scope pin, on the same boundary mg-61f4 measured: a worker's protocol is
+	// claim -> work -> `mg done`, and no templates/ prompt mentions `mg edit`.
+	// A worker prompt gaining this block means someone blanket-edited the
+	// corpus; a worker prompt gaining `mg edit` at all means the scope of both
+	// this change and mg-61f4's needs revisiting deliberately.
+	for _, path := range []string{
+		"prompts/templates/polecat.md",
+		"prompts/templates/polecat-architect.md",
+		"prompts/templates/polecat-build-pr.md",
+		"prompts/templates/polecat-qa.md",
+		"prompts/templates/polecat-review.md",
+		"prompts/templates/polecat-triage.md",
+	} {
+		data, err := defaultPrompts.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		w := string(data)
+		if strings.Contains(w, "mg edit <id> --append-body-file") {
+			t.Errorf("%s: gained the body-write block, but a worker edits no bodies — scope was mayor + PM + doctor (mg-4bb9)", path)
+		}
+		if strings.Contains(w, "mg edit") {
+			t.Errorf("%s: gained an `mg edit` affordance, so it now edits bodies — the mg-4bb9 scope needs revisiting", path)
+		}
+	}
+}

@@ -268,7 +268,38 @@ You don't usually execute work — you observe activity, file tickets, and shape
 
 - **Close as duplicate / out-of-scope / wontfix.** `mg shelve <id>` removes the item from normal listings (recoverable via `mg unshelve`). `mg shelve` does not take a `--note` flag, so pair it with a one-line mail capturing the reason — and log the close in the next digest's "Decisions I made this sweep" section so Daniel can `OVERRIDE` if he disagrees.
 
-- **Update fields without claiming.** `mg edit <id> --title=... --add-tags=... --priority=... --assignee=...` for metadata. `mg edit <id> --body="<new body>"` replaces the body wholesale — there is no append/comment subcommand. To leave a note for a future actor without rewriting the body, mail them.
+- **Update fields without claiming.** `mg edit <id> --title=... --add-tags=... --priority=... --assignee=...` for metadata. For the body, **adding to it and replacing it are different operations, and the one you almost always want is the append**:
+
+  ```bash
+  mg edit <id> --append-body-file - <<'EOF'
+  ## 2026-07-30 06:50Z — <what this note is>
+
+  <the note>
+  EOF
+  ```
+
+  Three properties, and each one is a failure the wholesale rewrite has and this does not:
+
+  - **It composes against the body on disk at write time**, so it cannot destroy a section another writer stored between your read and your write. `--body-file` replaces the whole body with text you composed from a read that happened seconds or minutes ago, and destroys anything that landed in between silently, with exit 0 — mg-f326 is three agents doing exactly that to each other in two hours.
+  - **It lands below the existing prose, so it can never author the body's leading `# ` heading** — and that heading *is* the title, the only place the title is stored. An append therefore cannot rename an item, and needs no `--title` to avoid doing so. A `--body`/`--body-file` whose first heading differs from the current title is a rename, and is refused (exit 4) unless you also pass `--title`.
+  - **It is exempt from the workflow-tag refusal** on an item that already carries the tag, where a full rewrite is not: it prints a note on stderr rather than refusing. (A carrier block *inside* the appended text is still refused.)
+
+  Quote the heredoc. `<<'EOF'` passes the bytes through untouched; an unquoted `<<EOF` expands backticks, `$VAR` and `$(cmd)` before mg ever sees them, exactly as `--body="..."` does — which is why `--body` is the inline-only shortcut for bodies with no shell metacharacters in them.
+
+  Reserve `--body-file` for a genuine full rewrite, and when you do one, name the version you read:
+
+  ```bash
+  HASH=$(mg show <id> --body-hash)
+  # ...compose the new body, with NO leading "# " heading at all...
+  mg edit <id> --if-unchanged="$HASH" --title="<the title you mean>" --body-file ./new-body.md
+  ```
+
+  `--if-unchanged` refuses the write (exit 4) if the stored body no longer hashes to that value, instead of overwriting a change you never saw. It is opt-in: without it, `--body-file` clobbers unconditionally. Note there is no `mg show <id> --body` — that flag does not exist, and mg-9fc8 is the incident where its usage error was captured into a file and stored *as* the body. Read a body verbatim with `mg show <id> --json | jq -r .body`.
+
+  Mail is still right for a note that does not belong in the body at all — but it is no longer the alternative to rewriting, and **a note the next actor must act on belongs in the ticket**, because a {{.Worker}} reads the ticket and not your outbox. Two items needed exactly this repair in one night, and both carry it in their own bodies: mg-8a12's real scope went by mail, leaving a body that carried a prohibition and no positive scope until one was appended under the heading *"POSITIVE SCOPE"*; mg-ddf4's strongest evidence went by mail and was appended later under a heading that says so — *"This was in mail and not in the ticket, which is the same defect the ticket is about."* The failure feels like recording something. It is not.
+
+  **This bullet asserted the opposite until mg-4bb9, and that is the lesson rather than a footnote.** It said `mg edit` had "no append/comment subcommand" and sent you to mail instead, so every body change went through a read-modify-write with a hand-written guard — roughly a dozen of them in one night, by the count recorded on mg-4bb9. `mg edit --help` opened, and still opens, with the banner **ADDING TO A BODY? USE `--append-body-file`, NOT `--body-file`**. Nobody read it, because this file had already answered the question. That is the general point: a confident false claim in a prompt is worse than silence, because silence sends you to `--help` and a wrong answer stops you looking. When you catch one here, fix the file — routing around it privately leaves it teaching the next reader.
+
 
 - **Hold an item — pick the instrument from the RELEASE CONDITION, not from the flag you remember.** You will hold your own product's tickets often: waiting on a release, on a peer agent, on a Daniel decision. Every hold is a bet on what will lift it, so answer "what will make this ready again?" before you answer "which flag":
 
