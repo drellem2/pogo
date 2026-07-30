@@ -3395,7 +3395,20 @@ Use this for a quick health check of the refinery. For per-MR details use
 				fmt.Printf("Running: %t\n", status.Running)
 				fmt.Printf("Poll:    %s\n", status.PollInterval)
 				fmt.Printf("Queue:   %d\n", status.QueueLen)
-				fmt.Printf("History: %d\n", status.HistoryLen)
+				// History is printed with the retention that bounds it, so the
+				// count is never read as a total. When the cap has bitten the
+				// line says so outright; when the cap is unknown it says that
+				// too rather than implying there is none.
+				switch status.HistoryTruncation() {
+				case refinery.HistoryTruncationAtCap:
+					fmt.Printf("History: %d  (retained: %s — AT CAP, older merges pruned; see 'pogo refinery history --since')\n",
+						status.HistoryLen, status.RetentionSummary())
+				case refinery.HistoryTruncationUnknown:
+					fmt.Printf("History: %d  (retention: %s — truncation UNKNOWN)\n",
+						status.HistoryLen, status.RetentionSummary())
+				default:
+					fmt.Printf("History: %d  (retained: %s)\n", status.HistoryLen, status.RetentionSummary())
+				}
 			}
 		},
 	}
@@ -3424,23 +3437,51 @@ Use this for a quick health check of the refinery. For per-MR details use
 		},
 	}
 
+	var historySince string
 	var cmdRefineryHistory = &cobra.Command{
 		Use:   "history",
-		Short: "Show completed merge requests with status",
-		Args:  cobra.NoArgs,
+		Short: "Show completed merge requests with status (retained window; --since reads the durable event log)",
+		Long: `Print completed merge requests, oldest first.
+
+By default this reads the refinery's RETAINED history, which is bounded: the
+refinery deletes entries past its count/age caps, so the default output is a
+window and not an archive. When the cap has bitten, a note saying so is written
+to stderr — stdout is unchanged, so pipes are unaffected.
+
+The cap is a COUNT (100 by default), so the window's age moves with merge
+volume: at ~20 merges/hour it is under a day. This is why "no failures in
+history" is not the same claim as "no failures".
+
+--since <duration|date> answers the wider question from the durable event log
+(~/.pogo/events.log and its rotated files) instead, reconstructing one row per
+merge request. stdout has the same shape either way, so the same jq pipeline
+works with or without the flag. There is deliberately no --all or --limit 0:
+history behind the cap is deleted, not hidden, so an unbounded flag over the
+retained window would return the same truncated answer while looking like it
+had widened it.
+
+If the event log cannot reach back as far as --since asks (records rotated
+away), the command prints what it has, says TRUNCATED on stderr, and EXITS
+NON-ZERO — so a consumer under 'set -e' fails loudly rather than reading a
+short answer as an empty one.
+
+Examples:
+  pogo refinery history                       # retained window, cap stated if it bit
+  pogo refinery history --since=30d           # from the durable event log
+  pogo refinery history --since=2026-07-01    # from a date
+  pogo refinery history --since=30d --json | jq -r '.[] | select(.status=="failed") | .branch'`,
+		Args: cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
-			history, err := client.GetRefineryHistory()
-			if err != nil {
-				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
-			}
-			if jsonOutput {
-				cli.PrintJSON(history)
-			} else {
-				if len(history) == 0 {
+			printRows := func(rows []refinery.MergeRequest) {
+				if jsonOutput {
+					cli.PrintJSON(rows)
+					return
+				}
+				if len(rows) == 0 {
 					fmt.Println("No merge history.")
 					return
 				}
-				for _, mr := range history {
+				for _, mr := range rows {
 					line := fmt.Sprintf("%-12s  branch=%-30s  author=%-15s  status=%-10s  done=%s",
 						mr.ID, mr.Branch, mr.Author, string(mr.Status), mr.DoneTime.Format("2006-01-02 15:04"))
 					if mr.Error != "" {
@@ -3449,8 +3490,58 @@ Use this for a quick health check of the refinery. For per-MR details use
 					fmt.Println(line)
 				}
 			}
+
+			if historySince != "" {
+				since, err := parseSince(historySince)
+				if err != nil {
+					cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+				}
+				logPath, err := events.LogPath()
+				if err != nil {
+					cli.ExitWithError(jsonOutput, "could not resolve event log path: "+err.Error(), cli.ExitError)
+				}
+				w, err := refinery.HistoryFromLog(logPath, since)
+				if err != nil {
+					cli.ExitWithError(jsonOutput, "read event log: "+err.Error(), cli.ExitError)
+				}
+				printRows(w.Requests)
+				fmt.Fprintf(os.Stderr, "refinery history --since=%s: %s\n", historySince, w.CoverageNote())
+				if !w.Complete {
+					// The result is short for a reason the caller cannot see in
+					// stdout. Exiting non-zero is what stops it being read as a
+					// complete answer.
+					os.Exit(cli.ExitError)
+				}
+				return
+			}
+
+			history, err := client.GetRefineryHistory()
+			if err != nil {
+				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+			}
+			printRows(history)
+
+			// State the bound whenever it bit — and say so explicitly when the
+			// bound cannot be read, because falling silent there is
+			// indistinguishable from "not truncated" and is the original
+			// defect. Retention is read from the running daemon rather than
+			// from a constant here, so the number printed cannot drift from the
+			// number enforced.
+			status, serr := client.GetRefineryStatus()
+			switch {
+			case serr != nil:
+				fmt.Fprintf(os.Stderr, "refinery history: showing %d retained merge requests; the retention cap could not be read (%v), so whether this window is TRUNCATED is UNKNOWN — use --since=<duration|date> for the durable event log\n",
+					len(history), serr)
+			case status.HistoryTruncation() == refinery.HistoryTruncationUnknown:
+				fmt.Fprintf(os.Stderr, "refinery history: showing %d retained merge requests; this pogod does not report its retention cap (it predates mg-e9ee), so whether this window is TRUNCATED is UNKNOWN — use --since=<duration|date> for the durable event log\n",
+					len(history))
+			case status.HistoryTruncation() == refinery.HistoryTruncationAtCap:
+				fmt.Fprintf(os.Stderr, "refinery history: showing %d of an unknown total — retention is %s and prunes DESTRUCTIVELY, so older merge requests are not here and are not recoverable from the refinery. Use --since=<duration|date> to read the durable event log.\n",
+					len(history), status.RetentionSummary())
+			}
 		},
 	}
+	cmdRefineryHistory.Flags().StringVar(&historySince, "since", "", "reconstruct from the durable event log instead: duration (720h, 30d) or date (2026-07-01, RFC3339)")
 
 	var cmdRefineryShow = &cobra.Command{
 		Use:   "show <mr-id>",

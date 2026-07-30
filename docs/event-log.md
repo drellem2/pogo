@@ -493,6 +493,10 @@ exists to separate.
 
 ### Refinery
 
+These events are the **only** durable record of a completed merge. The refinery's in-memory history is pruned destructively past `MaxHistoryLen` (100) / `MaxHistoryAge` (7d), and because the count cap bites first at any real merge rate, `pogo refinery history` sees under a day. `pogo refinery history --since=<duration|date>` reconstructs merge requests from these events instead (`refinery.HistoryFromLog`), which is how a question about last week gets an answer at all.
+
+That reader states its own bound: it reports whether the log reaches back as far as was asked, and the CLI exits non-zero when it does not. The bound is real — rotation discards the oldest chunk once all `maxRotatedFiles` slots are full — so a reconstruction that claimed completeness unconditionally would be the same defect one layer up (mg-e9ee).
+
 #### `refinery_merge_attempted`
 
 The refinery picked a merge request off the queue and started its pipeline (fetch, rebase, run gates).
@@ -523,6 +527,7 @@ The refinery successfully merged a branch (gates passed, fast-forward push to ta
   - `target` (string, required)
   - `merge_commit` (string, required): SHA of the merge commit (or fast-forwarded HEAD)
   - `attempt` (int, required): attempt number that succeeded (`0` when no merge attempt ran: restart recovery found the merge already pushed, or the branch was already merged at processing time)
+  - `author` (string, required since mg-e9ee): submitting agent (e.g. `"cat-mg-0241"`). Carried on the outcome events, not only on `refinery_merge_attempted`, so a reader reconstructing history from the log can name the author of a merge whose attempt event has rotated out from under it. It is not the same string as `work_item_id`, which is the author with any `cat-` prefix stripped.
   - `duration_seconds` (number, optional): total time from `refinery_merge_attempted` (attempt 1) to merge
   - `already_merged` (bool, optional): `true` when the branch had already landed on the target before processing began (a re-submitted branch, gh #34) — the MR resolved as merged without running gates or pushing, and no `refinery_merge_attempted` event precedes this one
 
@@ -541,6 +546,7 @@ A merge attempt failed. Whether this is terminal depends on `attempt` and the co
   - `branch` (string, required)
   - `target` (string, required)
   - `attempt` (int, required)
+  - `author` (string, required since mg-e9ee): submitting agent — see `refinery_merged`
   - `stage` (string, required): which pipeline stage failed — `"fetch"`, `"rebase"`, `"closing-ref-check"`, `"build"`, `"test"`, `"push"`, `"unknown"`
   - `reason` (string, required): short error summary, single line, ≤ 200 chars
   - `terminal` (bool, required): `true` if the refinery has given up (no more retries); `false` if another attempt will follow
@@ -565,6 +571,7 @@ Note that a cancel is a request, not a guaranteed outcome. If the merge had alre
   - `branch` (string, required)
   - `target` (string, required)
   - `attempt` (int, required): attempt number in flight when the cancel took effect
+  - `author` (string, required since mg-e9ee): submitting agent — see `refinery_merged`
   - `stage` (string, required): where the pipeline stopped — the failing-stage vocabulary of `refinery_merge_failed` plus `"before-attempt"`, meaning the cancel landed between attempts rather than inside a gate
   - `gate_output_truncated` (string, optional): up to 1 KB of gate output captured before the kill
 

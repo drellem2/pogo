@@ -48,8 +48,10 @@ func TestMayorStep3FailedOnDoneItemsRequiresNoLaterMerge(t *testing.T) {
 		// The action: report, don't mutate.
 		"**A hit is something to REPORT, not to act on.**",
 		"Reopening is for a case someone has confirmed, never for a bare detection.",
-		// A positive-showing instrument, not a bounded window.
-		"pogo refinery history | grep <branch>",
+		// A positive-showing instrument, not a bounded window — and since
+		// mg-e9ee the window it shows must itself be scoped, because the
+		// default one is capped at 100 rows.
+		"pogo refinery history --since=30d | grep <branch>",
 		"pogo refinery history | tail",
 		// The measurement that makes the rule credible to a reader.
 		"all ten failed MRs in history had also merged",
@@ -172,14 +174,39 @@ func mayorPromptBody(t *testing.T) string {
 // mayorRefineryClassifier extracts the jq program from the step-3 refinery
 // cross-reference snippet. The program is single-quoted in the shell, and
 // contains no single quotes of its own, so the closing quote delimits it.
+//
+// The pipe is located rather than the whole command line matched literally, so
+// the window the prompt asks for (`--since=30d` today) can be retuned without
+// this extraction silently failing to find the classifier it is meant to test.
+// What the command IS is asserted separately, right below.
 func mayorRefineryClassifier(t *testing.T) string {
 	t.Helper()
 	body := mayorPromptBody(t)
-	const marker = "pogo refinery history --json | jq -r '"
-	i := strings.Index(body, marker)
-	if i < 0 {
-		t.Fatalf("prompts/mayor.md: no `%s` snippet; step 3 must ship a runnable classifier, not prose alone", marker)
+	// Anchored at the step-3 section: the prompt pipes several other commands
+	// into jq, and matching the pipe alone would extract whichever came first.
+	const anchor = "A failed MR is not evidence the work is missing."
+	a := strings.Index(body, anchor)
+	if a < 0 {
+		t.Fatalf("prompts/mayor.md: step-3 refinery cross-reference not found (missing %q)", anchor)
 	}
+	const marker = "--json | jq -r '"
+	rel := strings.Index(body[a:], marker)
+	if rel < 0 {
+		t.Fatalf("prompts/mayor.md: no `pogo refinery history … %s` snippet after %q; step 3 must ship a runnable classifier, not prose alone", marker, anchor)
+	}
+	i := a + rel
+	// The invocation must be `pogo refinery history`, and it must be scoped:
+	// the unscoped form reads a window the refinery prunes at 100 entries, over
+	// which the classifier's empty output means nothing (mg-e9ee).
+	lineStart := strings.LastIndex(body[:i], "\n") + 1
+	invocation := strings.TrimSpace(body[lineStart:i])
+	if !strings.HasPrefix(invocation, "pogo refinery history") {
+		t.Fatalf("prompts/mayor.md: the classifier is piped from %q, not from `pogo refinery history`", invocation)
+	}
+	if !strings.Contains(invocation, "--since=") {
+		t.Fatalf("prompts/mayor.md: the classifier reads %q — an unscoped window the refinery prunes at 100 entries, over which empty output cannot distinguish \"no orphaned failures\" from \"the orphaned failure aged out\" (mg-e9ee). It must pass --since.", invocation)
+	}
+
 	rest := body[i+len(marker):]
 	j := strings.Index(rest, "'")
 	if j < 0 {

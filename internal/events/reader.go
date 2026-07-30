@@ -60,20 +60,39 @@ func ParseLine(line []byte) (Event, error) {
 // log's append-only, best-effort spirit).
 //
 // If path does not exist, returns (nil, nil) to mean "no events yet".
+//
+// This materializes every match. A caller that scans the whole log to answer a
+// question about a subset (a reconstruction, an aggregate) should use ScanFile
+// instead and keep only what it needs — the live log runs to tens of MB.
 func ReadFiltered(path string, f Filter) ([]Event, error) {
+	var out []Event
+	err := ScanFile(path, func(ev Event) {
+		if f.Match(ev) {
+			out = append(out, ev)
+		}
+	})
+	return out, err
+}
+
+// ScanFile streams path top-to-bottom, calling visit once per well-formed
+// event in file order. Malformed lines are reported on stderr and skipped, as
+// in ReadFiltered; a nonexistent path is (nil) — "no events yet", not an error.
+//
+// This is the streaming form of ReadFiltered: it never holds more than one
+// event, so a caller can walk the whole log without materializing it.
+func ScanFile(path string, visit func(Event)) error {
 	file, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, nil
+			return nil
 		}
-		return nil, err
+		return err
 	}
 	defer file.Close()
 
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 
-	var out []Event
 	lineNum := 0
 	for scanner.Scan() {
 		lineNum++
@@ -86,15 +105,52 @@ func ReadFiltered(path string, f Filter) ([]Event, error) {
 			fmt.Fprintf(os.Stderr, "events: skipping malformed line %d: %v\n", lineNum, perr)
 			continue
 		}
-		if !f.Match(ev) {
-			continue
+		visit(ev)
+	}
+	return scanner.Err()
+}
+
+// LogFiles returns every log file that currently exists for path, oldest
+// records first: the highest-numbered surviving rotated file down to path.1,
+// then the live log last. A caller that walks all of them sees the log's full
+// surviving history in chronological order.
+//
+// Rotation only ever discards the OLDEST chunk (see rotate), so whatever these
+// files hold is a contiguous suffix of history by time. That is what lets a
+// reader state its coverage honestly: the oldest record across these files is a
+// true floor, and every record after it is present.
+func LogFiles(path string) []string {
+	var out []string
+	for i := maxRotatedFiles; i >= 1; i-- {
+		p := fmt.Sprintf("%s.%d", path, i)
+		if _, err := os.Stat(p); err == nil {
+			out = append(out, p)
 		}
-		out = append(out, ev)
 	}
-	if err := scanner.Err(); err != nil {
-		return out, err
+	if _, err := os.Stat(path); err == nil {
+		out = append(out, path)
 	}
-	return out, nil
+	return out
+}
+
+// LogSpilled reports whether rotation may have DISCARDED records for path — the
+// difference between "the log starts here" and "the log was cut off here".
+//
+// It is the question a reader must answer before claiming coverage. When false,
+// nothing has ever been dropped, so the oldest surviving record is the beginning
+// of recorded history and a window reaching further back is still fully
+// answered: there was nothing there to miss. When true, the oldest surviving
+// record is only a floor and anything before it is unknowable.
+//
+// The test is whether the last retained slot (path.maxRotatedFiles) is
+// occupied, because rotate() deletes that slot to make room. This can say
+// "spilled" one rotation early — the slot is filled before the next rotation
+// drops it — which understates coverage. That direction is deliberate: a reader
+// that wrongly believes it saw everything is the failure this exists to prevent,
+// and a reader that wrongly doubts itself merely says so out loud.
+func LogSpilled(path string) bool {
+	_, err := os.Stat(fmt.Sprintf("%s.%d", path, maxRotatedFiles))
+	return err == nil
 }
 
 // FormatPretty renders ev as a single human-readable line:

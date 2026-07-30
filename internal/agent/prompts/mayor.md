@@ -317,9 +317,10 @@ Look for:
 
   > A done item is a candidate only if a `failed` MR exists for its branch **and** no `merged` MR exists for that same branch afterwards.
 
-  Compare per branch rather than eyeballing the list. Do not encode a count threshold — `merged >= 1` is the property, and a branch may legitimately take several attempts:
+  Compare per branch rather than eyeballing the list, and **scope the window deliberately with `--since`**. Do not encode a count threshold — `merged >= 1` is the property, and a branch may legitimately take several attempts:
   ```bash
-  pogo refinery history --json | jq -r '
+  set -o pipefail
+  pogo refinery history --since=30d --json | jq -r '
     group_by(.branch)[]
     | {branch: .[0].branch, author: .[0].author,
        failed: ([.[] | select(.status == "failed")] | length),
@@ -327,7 +328,13 @@ Look for:
     | select(.failed > 0 and .merged == 0)
     | "\(.author)\t\(.branch)\tfailed=\(.failed)\tmerged=\(.merged)"'
   ```
-  Empty output is the expected, healthy answer: every failure was retried and landed. To check a single branch by hand, use a **positive-showing** instrument — `pogo refinery history | grep <branch>` shows every row that branch has. Never judge a branch by `pogo refinery history | tail`: a bounded window can put the merge one line below the cut, which reads as "not in history" and is this same defect with the sign flipped.
+  **`--since` is what makes empty output mean anything, and it is not optional here.** Bare `pogo refinery history` reads the refinery's *retained* window, which the refinery prunes destructively at 100 entries — under a day at ~20 merges/hour (mg-e9ee). Over that window "empty" cannot distinguish *no orphaned failures* from *the orphaned failure is row 101*, and the whole point of this check is work that was lost, which is exactly the case where nobody is watching and the row ages out. `--since` answers from the durable event log instead.
+
+  So state the bound when you report the result. **Empty output means healthy *within the window you asked for*** — that is a real answer only because you named the window; it is not a claim about all of history. And `--since` **exits non-zero** if the event log cannot reach back that far, which is why the recipe sets `pipefail`: a truncated answer fails the pipeline instead of printing short and looking clean. If it does fail, say so rather than reporting "nothing to reopen".
+
+  **Expect false positives from the grouping key, and confirm before reporting a hit as lost work.** The classifier groups by `.branch`, so a retry submitted under a *different* branch name splits into two groups and the failed one looks orphaned. Measured over a 30-day window on 2026-07-30 (mg-e9ee), both hits were this: `mg-a9bb` and `mg-abea` each failed on `polecat-mg-<id>` — a branch name that never existed on origin — then merged as `polecat-<id>`. Both items are `archived` with their commits on `main`. So on the widened window the recipe's false-positive rate was 2/2, which is exactly why the confirmation step below is not optional and why a hit is reported rather than acted on.
+
+  To check a single branch by hand, use a **positive-showing** instrument — `pogo refinery history --since=30d | grep <branch>` shows every row that branch has. Never judge a branch by `pogo refinery history | tail`: a bounded window can put the merge one line below the cut, which reads as "not in history" and is this same defect with the sign flipped. **A bounded *window* does the same thing to the whole check** — mg-2ca3 fixed the `tail` version of this and then ran its own check over the capped window, one layer up. That is why the instrument now says its bound out loud in every case: stderr states the coverage whether or not it bit, because "no bound stated" and "no bound" are indistinguishable to a reader.
 
   **A hit is something to REPORT, not to act on.** `mg reopen` returns completed work to `available`, where step 2's dispatch loop hands it to a fresh {{.Worker}} that redoes work already on the target branch — so a wrong detection here does not produce a wrong report, it produces duplicated work against `main`. This is a heuristic running unattended, and a remedy's destructiveness should be proportional to the detector's confidence: **surface the candidate, let a human or a deliberate follow-up decide.** Put it in your cycle summary with its evidence — the failed MR id, the absence of any later `merged` row for that branch, and the item's current status — and confirm the work is genuinely missing before touching the item:
   ```bash
@@ -714,10 +721,12 @@ All refinery log lines are prefixed with `refinery:`. To find logs for a specifi
 
 You can also query refinery state via the CLI (these talk to pogod for you):
 ```bash
-pogo refinery history   # completed merges (success + failure)
-pogo refinery queue     # pending merges
+pogo refinery history             # completed merges, RETAINED window only (pruned at 100 entries)
+pogo refinery history --since=30d # completed merges from the durable event log; exits non-zero if it can't cover the window
+pogo refinery queue               # pending merges (not capped — the queue is drained, never pruned)
 pogo refinery show <id> # single MR details (includes gate output)
 ```
+`history` without `--since` is a window, not an archive: the refinery deletes entries past its count/age caps, so **a short result never means "that is all that happened"**. It prints the cap on stderr when the cap has bitten. Any question about more than the last day wants `--since`.
 
 ## Troubleshooting Stalled Agents
 

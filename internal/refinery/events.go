@@ -77,6 +77,12 @@ func emitMerged(mr *MergeRequest, attempt int, mergeCommit string, durationSec f
 		"target":           mr.TargetRef,
 		"merge_commit":     mergeCommit,
 		"attempt":          attempt,
+		// author is carried on the outcome events, not only on
+		// refinery_merge_attempted, so HistoryFromLog can name the author of a
+		// merge whose attempt event has rotated out from under it. work_item_id
+		// is close but not the same string — it is the author with any "cat-"
+		// prefix stripped.
+		"author": mr.Author,
 	}
 	if durationSec > 0 {
 		details["duration_seconds"] = durationSec
@@ -186,6 +192,7 @@ func emitMergeCancelled(mr *MergeRequest, attempt int, stage string, gateOutput 
 		"branch":           mr.Branch,
 		"target":           mr.TargetRef,
 		"attempt":          attempt,
+		"author":           mr.Author,
 		// stage names where the pipeline stopped, so a cancel that landed
 		// during the gates is distinguishable from one that landed between
 		// attempts.
@@ -214,6 +221,7 @@ func emitMergeFailed(mr *MergeRequest, attempt int, stage string, err error, ter
 		"branch":           mr.Branch,
 		"target":           mr.TargetRef,
 		"attempt":          attempt,
+		"author":           mr.Author,
 		"stage":            stage,
 		"reason":           summarizeReason(err),
 		"terminal":         terminal,

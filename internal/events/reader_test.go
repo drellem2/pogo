@@ -3,6 +3,7 @@ package events
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -313,5 +314,101 @@ func TestFollowExitsOnStop(t *testing.T) {
 func TestParseLineRejectsGarbage(t *testing.T) {
 	if _, err := ParseLine([]byte("not json")); err == nil {
 		t.Error("ParseLine should reject non-JSON")
+	}
+}
+
+func TestScanFileStreamsInOrderAndSkipsMalformed(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.log")
+	mustWriteEvents(t, path, []Event{
+		{EventType: "a", Agent: "x", Timestamp: "2026-04-25T10:00:00.000000000Z"},
+		{EventType: "b", Agent: "y", Timestamp: "2026-04-25T11:00:00.000000000Z"},
+	})
+	// Append a malformed line and a well-formed one after it: the bad line must
+	// be skipped without aborting the scan.
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("{not json\n" + `{"event_type":"c","agent":"z","timestamp":"2026-04-25T12:00:00.000000000Z","details":{}}` + "\n"); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	var seen []string
+	if err := ScanFile(path, func(ev Event) { seen = append(seen, ev.EventType) }); err != nil {
+		t.Fatalf("ScanFile: %v", err)
+	}
+	if got := strings.Join(seen, ","); got != "a,b,c" {
+		t.Errorf("want a,b,c in file order, got %q", got)
+	}
+}
+
+func TestScanFileMissingPathIsNotAnError(t *testing.T) {
+	called := false
+	if err := ScanFile(filepath.Join(t.TempDir(), "nope.log"), func(Event) { called = true }); err != nil {
+		t.Errorf("missing path should mean 'no events yet', got %v", err)
+	}
+	if called {
+		t.Error("visit should not be called for a missing log")
+	}
+}
+
+// TestLogFilesChronologicalOrder pins the ordering contract LogFiles exists for:
+// the highest-numbered rotated file is the OLDEST, so a caller walking the
+// returned slice sees history forwards.
+func TestLogFilesChronologicalOrder(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.log")
+
+	if got := LogFiles(path); len(got) != 0 {
+		t.Errorf("no files yet, got %v", got)
+	}
+
+	for _, p := range []string{path, path + ".1", path + ".3"} {
+		if err := os.WriteFile(p, []byte("{}\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := LogFiles(path)
+	want := []string{path + ".3", path + ".1", path}
+	if len(got) != len(want) {
+		t.Fatalf("want %v, got %v", want, got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("position %d: want %s, got %s", i, want[i], got[i])
+		}
+	}
+}
+
+// TestLogSpilledOnlyWhenTheLastSlotIsOccupied is the distinction a coverage
+// claim rests on: an unrotated (or partly rotated) log has discarded nothing, so
+// its first record is a beginning, not a cut.
+func TestLogSpilledOnlyWhenTheLastSlotIsOccupied(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.log")
+
+	if LogSpilled(path) {
+		t.Error("no log at all has not spilled")
+	}
+	if err := os.WriteFile(path, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if LogSpilled(path) {
+		t.Error("a live log with no rotated files has not spilled")
+	}
+	for i := 1; i < maxRotatedFiles; i++ {
+		if err := os.WriteFile(fmt.Sprintf("%s.%d", path, i), []byte("{}\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if LogSpilled(path) {
+			t.Fatalf("slot .%d filled but the last slot (.%d) is empty; nothing has been discarded yet", i, maxRotatedFiles)
+		}
+	}
+	if err := os.WriteFile(fmt.Sprintf("%s.%d", path, maxRotatedFiles), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !LogSpilled(path) {
+		t.Errorf("the last retained slot (.%d) is occupied; the next rotation drops it, so coverage is no longer guaranteed", maxRotatedFiles)
 	}
 }
