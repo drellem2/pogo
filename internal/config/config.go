@@ -286,6 +286,9 @@ var DefaultFastPriorities = []string{"high"}
 // config line rather than a code change.
 //
 // Kept as a var because a slice cannot be a const; treat it as read-only.
+//
+// This list is not the whole gate: the gate is this list PLUS the `blocked:`
+// shape — see BlockedAssigneePrefix below.
 var DefaultNonDispatchableAssignees = []string{"human", "parked"}
 
 // BlockedAssigneePrefix introduces the one SHAPE the gate recognises alongside
