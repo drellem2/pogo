@@ -406,6 +406,55 @@ whole group is killed: `sh -c` forks rather than execs for anything compound, so
 killing the shell alone would leave the real work running and holding the output
 pipe, stalling the very runner that carries the heartbeat.
 
+**Gates that write tracked files.** A gate is an arbitrary command run inside the
+refinery's own clone, and nothing stops it writing tracked files — a regenerated
+JSON record, a lockfile, a coverage report, a checked-in generated fixture.
+Every git step after the gate then refuses: the target checkout, the ff-merge,
+and the rebase on the next attempt all decline to touch a tree with unstaged
+changes. Measured on mg-48dd (2026-07-30): the gate finished at 12:01:05, the
+rebase failed at 12:01:08, and the only thing that ran in between was the gate.
+
+The failure used to surface as git's own message — `cannot rebase: You have
+unstaged changes. Please commit or stash them.` — which is **wrong twice**. It
+names a worktree the author cannot see (the refinery's clone, not their polecat
+worktree), and its advice is dangerous when followed: "stash them" applied by a
+coordinator guessing whose changes those are can stash the real diff and merge an
+empty change. The author has no reachable fix at all; they never wrote those
+bytes. A clean polecat worktree is equally consistent with *fixed* and with
+*never the cause*, and the message pushes a reader toward the first — it did,
+and cost a whole debugging cycle.
+
+**Rebasing before the gates was already the order, and it is not sufficient.**
+mg-393f was filed on the premise that gates run before the rebase; they do not —
+`attemptMerge` rebases first precisely so gates test what will land. That helps
+attempt 1's rebase and nothing after it: the target checkout and ff-merge still
+follow the gate within the same attempt, and a retry rebases again on a tree the
+first attempt's gate already dirtied. Ordering cannot fix a step that must run
+*after* the gate by construction, which is why the fix is to clean the tree
+rather than to move the rebase.
+
+Two things changed (`internal/refinery/gatedirt.go`, mg-393f):
+
+- The refinery **discards tracked modifications in its own checkout** at the two
+  points the pipeline needs it clean: on entry to each attempt (debris from a
+  previous attempt, or from a previous MR reusing this clone) and immediately
+  after the gates, before the target checkout. Everything the merge needs comes
+  from `origin`, so discarding tracked changes in this clone cannot lose work.
+  **Untracked files are deliberately left alone** — they never block git, and
+  they are where gates keep build caches. When anything was discarded, the paths
+  are logged and appended to the MR's gate output, so the record says *this
+  repo's gate writes tracked files* rather than leaving the next reader to
+  reconstruct it from timestamps.
+- A dirty tree that reaches a git step **anyway** no longer relays git's
+  message. The refinery names the paths, names the configured gate commands as
+  the writer, states whether the branch touches any of those paths (if not:
+  "this is NOT your change"), and says outright that committing or stashing
+  cannot fix it. git's own output is quoted with its **advice lines removed** —
+  keeping the file list, dropping "commit or stash", because quoting it verbatim
+  reintroduces the exact instruction the message exists to withdraw. The
+  classification is made from the tree, not from git's wording, which differs per
+  step and per git version.
+
 **Cancelling a merge.** `pogo refinery cancel <id>` reaches a **processing** MR,
 not only a queued one — previously it refused anything but `queued`, the state
 least in need of it, which left a hung gate with no recovery short of restarting
