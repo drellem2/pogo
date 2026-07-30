@@ -201,6 +201,16 @@ Even ephemeral, your context is where your *judgment* lives. Don't fill it with 
      pogo refinery submit "$BRANCH" --repo={{.Repo}} --author={{.Id}} --target={{if .Branch}}{{.Branch}}{{else}}main{{end}}
      ```
      Poll the refinery (`pogo refinery show <id> --json | jq -r .status`) with a bash loop as the base {{.Worker}} does. Do NOT self-merge; the refinery merges.
+{{if .Branch}}
+     **Your target `{{.Branch}}` is not the repo's default branch, so the merge is a step, not completion.** The refinery classifies it as PR flow: pogod will not mark your item done and will not stop you (mg-7746), because the deliverable is the pull request from `{{.Branch}}` to the default branch and nobody else opens it. Open it yourself, reusing an open one if another {{.Worker}} already landed on this branch:
+     ```bash
+     BASE=$(gh repo view --json defaultBranchRef -q .defaultBranchRef.name)
+     PR=$(gh pr list --head {{.Branch}} --base "$BASE" --state open --json url -q '.[0].url')
+     [ -n "$PR" ] || gh pr create --base "$BASE" --head {{.Branch}} \
+         --title '<what the branch delivers>' --body 'Work item: {{.Id}} — see the branch log for what it delivers.'
+     ```
+     `gh pr create` prints the URL it opened — capture it from the output, or from `$PR` if you reused an existing one. `--body` is single-quoted deliberately: single quotes reach argv unmangled, a double-quoted body is expanded by the shell first (mg-d91f). If `$BASE` is `{{.Branch}}` there is no PR to open and pogod has already completed you. If you cannot open the PR, mail the {{.Coordinator}} with the exact error and do NOT `mg done` — a silent deferral is reaped and escalated by a 15-minute backstop.
+{{end}}
 
 5. **Produce your output.**
    - **Shapes A/B (advisory):** Mail the requester (the `--from` on the ask, or the ticket owner) AND the {{.Coordinator}} a compressed, structured verdict — the decision/CONFIRM/FLAG up front, then rationale, evidence (`file:line`), trade-offs, **the questions you noticed that nobody asked**, and anything you could not check. Then record it on the ticket:
@@ -210,7 +220,7 @@ Even ephemeral, your context is where your *judgment* lives. Don't fill it with 
      The `unchecked` field is not optional decoration — if it is empty, you are claiming you verified every load-bearing thing you said. Make sure that is true.
 
      The `measured` field is where "Count the population before you rule on it" lands. If your verdict proposes reusing or scoping by any predicate, rule, gate, or bar, it needs an entry here carrying **both** the count and the stationarity — or an entry saying you could not get the count, with the recommendation marked provisional. An empty `measured` on a verdict that reuses a predicate is the failure this rule exists to catch.
-   - **Shape D (artifact):** On merge, `mg done {{.Id}} --result="{\"branch\": \"$BRANCH\"}"` — the branch you read in step 4, not one you composed. On refinery failure, mail the {{.Coordinator}} and do NOT `mg done`.
+   - **Shape D (artifact):** On merge, {{if .Branch}}open the PR first (step 4), then `mg done {{.Id}} --result="{\"branch\": \"$BRANCH\", \"target\": \"{{.Branch}}\", \"pr\": \"$PR\"}"`{{else}}`mg done {{.Id}} --result="{\"branch\": \"$BRANCH\"}"`{{end}} — the branch you read in step 4, not one you composed. On refinery failure, mail the {{.Coordinator}} and do NOT `mg done`.
 
 6. **Stay alive.** Do NOT exit — not after the verdict. You are waiting for the {{.Coordinator}} to stop you, or for a follow-up (clarify a finding, re-check after a change) — your loaded design context is exactly why you stay running. If the {{.Coordinator}} sends an abort, acknowledge and stand by; cleanup is the {{.Coordinator}}'s job.
 

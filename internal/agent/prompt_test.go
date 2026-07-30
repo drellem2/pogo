@@ -3713,6 +3713,122 @@ func TestShippedPolecatTemplatesTeachBranchObservation(t *testing.T) {
 	}
 }
 
+// renderShippedTemplate expands an embedded shipped template with the given
+// vars, defaults applied, and returns the rendered prompt.
+func renderShippedTemplate(t *testing.T, tmplName string, vars TemplateVars) string {
+	t.Helper()
+	data, err := defaultPrompts.ReadFile(tmplName)
+	if err != nil {
+		t.Fatalf("read embedded %s: %v", tmplName, err)
+	}
+	_, body, err := parsePromptFrontmatterBytes(data)
+	if err != nil {
+		t.Fatalf("parse frontmatter %s: %v", tmplName, err)
+	}
+	tmpl, err := template.New(tmplName).Parse(body)
+	if err != nil {
+		t.Fatalf("parse template %s: %v", tmplName, err)
+	}
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, withDefaults(vars)); err != nil {
+		t.Fatalf("execute template %s: %v", tmplName, err)
+	}
+	return buf.String()
+}
+
+// TestBranchPolecatTemplatesInstructPRCreate closes the gap mg-7746 opened
+// (mg-78d2).
+//
+// mg-7746 taught the refinery that a merge onto an integration branch is a PR
+// -flow STEP, not completion: pogod stops marking the work item done and stops
+// stopping the polecat, because the deliverable is the pull request from that
+// branch to the repo default and the polecat has not opened it. That made ROOM
+// for the PR — it did not fill it. No shipped template told a `--branch`
+// polecat to run `gh pr create`, and the base template's step-6 note still
+// promised it would be stopped and completed at the merge, which is exactly
+// false on that path. The observable outcome was a polecat that deferred,
+// waited to be stopped, was reaped by the 15-minute backstop, and escalated to
+// the mayor as a manual-recovery alert — the deferral alerted on rather than
+// filled.
+//
+// `.Branch` is the only signal a template gets, and it is the right one: it is
+// non-empty exactly when the spawner passed `--branch`, which is what makes the
+// submit target something other than `main`. The assertion runs both ways
+// deliberately — an unset `.Branch` must NOT grow PR instructions, because the
+// overwhelming majority of dispatches merge to the default branch, where the
+// merge IS completion and a PR step would be a fabricated obligation.
+func TestBranchPolecatTemplatesInstructPRCreate(t *testing.T) {
+	// Every shipped template whose protocol both submits to the refinery and
+	// honours `--target={{if .Branch}}...`. polecat-build-pr.md is excluded on
+	// purpose: that track never submits to the refinery, so its merge is never
+	// the PR-flow merge — it opens its PR before the merge, not after.
+	for _, tmplName := range []string{
+		"prompts/templates/polecat.md",
+		"prompts/templates/polecat-architect.md",
+	} {
+		base := TemplateVars{Id: "mg-abea", Repo: "/path/to/repo", WorktreeDir: "/path/to/worktree", Provider: "claude"}
+
+		withBranch := base
+		withBranch.Branch = "daed-101-integration"
+		got := renderShippedTemplate(t, tmplName, withBranch)
+		if !strings.Contains(got, "gh pr create") {
+			t.Errorf("%s: rendered with --branch=%q but never says `gh pr create` — "+
+				"a PR-flow polecat's completion is deferred for a PR nothing tells it to open (mg-78d2)",
+				tmplName, withBranch.Branch)
+		}
+		// The head must be the integration branch the refinery merged into, not
+		// the polecat's own already-merged feature branch.
+		if !strings.Contains(got, "--head "+withBranch.Branch) {
+			t.Errorf("%s: PR must be opened from the integration branch %q — "+
+				"the polecat's own branch is already merged into it", tmplName, withBranch.Branch)
+		}
+		// The base must be OBSERVED. Naming it would be a claim that can rot,
+		// the same defect mg-d39e fixed for the branch name.
+		if !strings.Contains(got, "gh repo view --json defaultBranchRef") {
+			t.Errorf("%s: must read the default branch with "+
+				"`gh repo view --json defaultBranchRef`, not assume it", tmplName)
+		}
+
+		noBranch := renderShippedTemplate(t, tmplName, base)
+		if strings.Contains(noBranch, "gh pr create") {
+			t.Errorf("%s: rendered with no --branch (target is the default branch, so the "+
+				"merge IS completion) but still instructs `gh pr create` — that is an "+
+				"invented obligation on the common path", tmplName)
+		}
+	}
+}
+
+// TestBranchPolecatTemplateDropsTheAutoStopPromise is the other half of
+// mg-78d2: it is not enough to ADD the PR step, the contradicting sentence has
+// to go.
+//
+// polecat.md's step-6 note tells the polecat that pogod marks its item done and
+// stops it the instant the merge lands. On the PR-flow path pogod does neither,
+// by design (mg-7746) — so a `--branch` polecat that believed the note would
+// read its own survival as a pogod malfunction and wait to be stopped, which is
+// the precise behaviour that ends in the backstop escalation.
+func TestBranchPolecatTemplateDropsTheAutoStopPromise(t *testing.T) {
+	const tmplName = "prompts/templates/polecat.md"
+	base := TemplateVars{Id: "mg-abea", Repo: "/path/to/repo", WorktreeDir: "/path/to/worktree", Provider: "claude"}
+	// The load-bearing clause of the note, quoted from the default rendering so
+	// this test fails if the note is reworded rather than silently passing.
+	const autoStopPromise = "it marks your work item done on your behalf"
+
+	if got := renderShippedTemplate(t, tmplName, base); !strings.Contains(got, autoStopPromise) {
+		t.Fatalf("%s: default rendering no longer contains %q — this test is pinned to that "+
+			"wording; update both halves together", tmplName, autoStopPromise)
+	}
+
+	withBranch := base
+	withBranch.Branch = "daed-101-integration"
+	got := renderShippedTemplate(t, tmplName, withBranch)
+	if strings.Contains(got, autoStopPromise) {
+		t.Errorf("%s: rendered with --branch=%q still promises pogod completes and stops it at "+
+			"the merge — on the PR-flow path it does neither (mg-7746/mg-78d2)",
+			tmplName, withBranch.Branch)
+	}
+}
+
 // TestArchitectTemplateNoticesRatherThanRules pins the design constraint that
 // is the entire reason polecat-architect.md ships in the shape it does
 // (mg-564c, from the mg-945c design).

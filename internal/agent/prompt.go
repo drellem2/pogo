@@ -560,13 +560,21 @@ func synthesizePolecatTemplate(path, basename string, vars TemplateVars) (string
 // sections gated by `{{if .RecentCommits}}` show their no-context shape.
 // Provider is the default ("claude") so the preview matches what a real
 // Claude polecat receives, including `{{if eq .Provider "claude"}}` blocks.
+//
+// Branch stays empty for the same reason RecentCommits does: it is the field
+// that selects between two different post-merge protocols, and an unset Branch
+// is the shape the overwhelming majority of dispatches get. It used to be
+// "main", which rendered `--target=main` correctly but made `{{if .Branch}}`
+// true — so once the PR-flow branch existed (mg-78d2) the preview would have
+// told every reader their target was an integration branch when it was the repo
+// default. To preview the PR-flow shape, spawn with `--branch` and read the
+// rendered prompt.
 func PreviewTemplateVars() TemplateVars {
 	return TemplateVars{
 		Task:        "(preview) example task title",
 		Body:        "(preview) example body",
 		Id:          "preview",
 		Repo:        "/path/to/repo",
-		Branch:      "main",
 		WorktreeDir: "/path/to/worktree",
 		Provider:    DefaultProviderID,
 	}
