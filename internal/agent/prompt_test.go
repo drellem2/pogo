@@ -4696,3 +4696,147 @@ func TestPromptsDoNotAssertADeadLogPath(t *testing.T) {
 		}
 	}
 }
+
+// The roadmap-regeneration inputs must be invocations the CLI accepts (mg-d8ea).
+//
+// pm-template.md's "Regenerate roadmap.md each sweep" block is the shared role
+// definition for EVERY PM — per-product config only supplies repos and tags —
+// and it feeds the roadmap's Trajectory and Recently-shipped sections. Two of
+// the four commands in it were refused by the CLI outright:
+//
+//	mg spend --by item --tag=<x> --since 7d --json   # exit 2: unknown flag: --tag
+//	mg list --tag=<x> --status=closed --since 7d     # exit 1 / exit 2
+//
+// `mg spend` has no `--tag` flag at all; the one-tag-with-item-breakdown view
+// is a SELECTOR on --by (`--by tag:<x>`), which is why a flag-shaped guess
+// fails. `mg list` has neither a `--since` nor a `closed` status — the closed
+// status is `done`, and there is no closed-at field, so the 7-day window has
+// to be applied client-side.
+//
+// What makes this worth pinning rather than fixing once: the failure mode that
+// actually occurred was the silent one. roadmap.md@7d07714 reported throughput
+// ("28 merges, one release, five polecats still working") and carried no token
+// totals and no tag-level bottleneck figures — the two things the skeleton at
+// the bottom of this same section specifies. The section was produced without
+// the per-item data and said nothing about the omission, and it read as an
+// editorial choice because the prose that filled the space was good. Auditing
+// this by reading roadmaps would conclude the section was fine.
+//
+// This is the third shipped prompt in one night instructing an invocation the
+// CLI rejects (mg-159a: `--template` omitted where the daemon 409s; mg-4bb9:
+// `mg edit` has no append subcommand). All three were found by someone running
+// the command rather than reading the prompt. This test is the narrow control
+// for one of them; the general one — extracting fenced `mg …` invocations from
+// internal/agent/prompts/** and asserting each parses against the current CLI —
+// is not filed and belongs to whoever owns prompt tooling.
+func TestPMTemplateRoadmapInputsAreAcceptedInvocations(t *testing.T) {
+	data, err := defaultPrompts.ReadFile("prompts/pm/pm-template.md")
+	if err != nil {
+		t.Fatalf("read pm-template.md: %v", err)
+	}
+	body := string(data)
+
+	for _, want := range []string{
+		// The two spend views, in the accepted form. Both are wanted: the
+		// bare --by tag places the product against its siblings, --by tag:<x>
+		// says which items inside it spent the budget.
+		"mg spend --by tag            --since 7d --json",
+		"mg spend --by tag:<your-tag> --since 7d --json",
+		// Why the wrong shape is reachable from memory: it looks like a
+		// filter flag, and it is a selector on --by.
+		"selector on `--by`, not a filter flag",
+		"There is no `--tag` flag on `mg spend` at all",
+		"unknown flag: --tag",
+		// The closed-work read, and both halves of what was wrong with it.
+		"mg list --tag=<your-tag> --status=done --json",
+		"has no `--since`, and the closed status is `done`, not `closed`",
+		// The client-side window, with the proxy named honestly rather than
+		// presented as a closed-at timestamp.
+		"select(.mtime[:10] >= $cutoff)",
+		"`mtime` is normally the close, but it moves if anyone edits the item afterwards",
+		// The instruction that closes the silent-degradation path. A PM that
+		// hits a refusal must say so in the section, not paper over it.
+		"do not improvise an invocation and do not drop the section silently",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("pm-template.md: missing roadmap-input guidance %q (mg-d8ea)", want)
+		}
+	}
+
+	// The regressions themselves — scoped to the COMMANDS in the fenced block,
+	// not the whole document and not the fence's comments. Correct text has to
+	// QUOTE each refused invocation in order to explain why it is refused, and
+	// it does so at both levels: the prose beneath the fence says
+	// "`--status=closed` exits 1", and mg-21b1's comment inside the fence says
+	// "`--by item --tag=…` exits non-zero". A substring check against either
+	// scores the correction as the defect — the same trap mg-4bb9 hit and
+	// solved by asserting against the assertion form.
+	//
+	// The discriminator here is structural rather than phrasal, because
+	// prescription and quotation live in syntactically different places: a
+	// command a PM is told to RUN is a non-comment line inside the ```bash
+	// fence. Everything else — prose, and `#` lines within the fence — is
+	// commentary about commands. This is the same line `pogo check-prompts`
+	// draws when it extracts invocations, which is why that gate and this test
+	// agree on the fixed block instead of fighting over it.
+	inputs := roadmapInputCommands(t, body)
+	for _, bad := range []struct{ frag, why string }{
+		{"--by item", "`mg spend --by item` cannot be narrowed to one tag; the per-item view within a tag is the `--by tag:<x>` selector"},
+		{"--tag=<your-tag> --since", "`mg spend` has no --tag flag at all (exit 2: unknown flag: --tag)"},
+		{"--status=closed", "`mg list` has no `closed` status; it is `done` (exit 1: invalid status)"},
+	} {
+		if strings.Contains(inputs, bad.frag) {
+			t.Errorf("pm-template.md: roadmap input block runs a refused invocation containing %q — %s (mg-d8ea)", bad.frag, bad.why)
+		}
+	}
+
+	// `mg list --since` in any spacing, on any line of the block. The flag does
+	// not exist on that command (exit 2), and the 7-day window is the caller's
+	// job — which is why the block must reach for `date`/`jq` instead.
+	if regexp.MustCompile(`mg list[^\n]*--since`).MatchString(inputs) {
+		t.Error("pm-template.md: roadmap input block passes --since to `mg list`, which has no such flag — window client-side on mtime (mg-d8ea)")
+	}
+	if !strings.Contains(inputs, "jq -c --arg cutoff") {
+		t.Error("pm-template.md: roadmap input block no longer windows recently-shipped client-side; `mg list` cannot do it server-side (mg-d8ea)")
+	}
+}
+
+// roadmapInputCommands returns the non-comment lines of the first ```bash fence
+// inside pm-template.md's "Regenerate roadmap.md each sweep" section — the
+// commands a PM is instructed to RUN, with the `#` lines that merely discuss
+// commands stripped out.
+//
+// Both exclusions are load-bearing. Dropping the prose keeps the paragraph that
+// explains a refusal from reading as the refusal; dropping in-fence comments
+// does the same for mg-21b1's note naming `--by item --tag=…` as non-zero,
+// three lines above the corrected invocation.
+//
+// It fails the test rather than returning empty if the section, the fence, or
+// the expected commands cannot be found: an absence assertion that passes
+// because it was handed an empty string is worse than no assertion, since it
+// reports the prompt clean having examined nothing.
+func roadmapInputCommands(t *testing.T, body string) string {
+	t.Helper()
+
+	const heading = "### Regenerate roadmap.md each sweep"
+	start := strings.Index(body, heading)
+	if start < 0 {
+		t.Fatalf("pm-template.md: section %q not found — the roadmap-input assertions examined nothing (mg-d8ea)", heading)
+	}
+	m := regexp.MustCompile("(?s)```bash\n(.*?)\n```").FindStringSubmatch(body[start:])
+	if m == nil {
+		t.Fatalf("pm-template.md: no ```bash fence under %q — the roadmap-input assertions examined nothing (mg-d8ea)", heading)
+	}
+
+	var cmds []string
+	for _, line := range strings.Split(m[1], "\n") {
+		if trimmed := strings.TrimSpace(line); trimmed != "" && !strings.HasPrefix(trimmed, "#") {
+			cmds = append(cmds, line)
+		}
+	}
+	out := strings.Join(cmds, "\n")
+	if !strings.Contains(out, "mg spend") || !strings.Contains(out, "mg list") {
+		t.Fatalf("pm-template.md: the fence under %q is not the input block (no mg spend / mg list command lines):\n%s", heading, m[1])
+	}
+	return out
+}
