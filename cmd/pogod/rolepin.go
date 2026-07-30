@@ -24,11 +24,20 @@ import (
 //
 // A pin failure is logged, never fatal: an unpinnable config.toml must not stop
 // the daemon from booting.
-func pinAndResolveRoles(cfg *config.Config) *config.Config {
+//
+// The pin error is RETURNED as well as logged (mg-342d, enumeration row A10).
+// The caller annunciates it to the coordinator, and it cannot be annunciated
+// here: resolving the coordinator's name is one of the things this function
+// does, so at the moment the pin fails there is no addressee yet. Returning it
+// keeps the decision point honest — the condition is captured where it happens
+// and delivered as soon as there is somebody to deliver it to.
+func pinAndResolveRoles(cfg *config.Config) (*config.Config, error) {
+	var pinErr error
 	if cfg.Source != "" {
 		pinned, pinRes, err := config.PinAndLoad(true)
 		cfg = pinned
 		if err != nil {
+			pinErr = err
 			log.Printf("pogod: role-default pin failed: %v", err)
 		} else if len(pinRes.Pinned) > 0 {
 			log.Printf("pogod: pinned current role default(s) [%s] in %s",
@@ -51,5 +60,5 @@ func pinAndResolveRoles(cfg *config.Config) *config.Config {
 	// mailbox, schedule id, or agent-type key.
 	agent.SetCoordinatorName(cfg.Agents.Coordinator)
 	agent.SetWorkerName(cfg.Agents.Worker)
-	return cfg
+	return cfg, pinErr
 }

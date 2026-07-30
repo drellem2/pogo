@@ -1,11 +1,14 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/drellem2/pogo/internal/events"
 )
 
 // wtRepo builds a real git repo with a polecat worktree, standing in for the
@@ -184,5 +187,105 @@ func TestCleanupAgentWorktreeKeepsUndeterminable(t *testing.T) {
 	}
 	if !strings.Contains(gotBody, "pogo gc") {
 		t.Errorf("body must say how to reclaim the tree, got:\n%s", gotBody)
+	}
+}
+
+// TestCleanupAgentWorktreeRecordsAnUndeliveredNotice is enumeration row A15's
+// positive control (mg-342d).
+//
+// A15 is the one row in mg-c3f0's Class A whose fix is NOT a mail, and the reason
+// is that mail is the thing that failed. Reacting to a failed send by sending
+// another mail is a retry wearing an alarm's clothes: it fails the same way for
+// the same reason. mg-c3f0's meta-finding named this exact shape — 12
+// notification sites degrade to log.Printf when their send fails, so pogod.log is
+// not only where UNROUTED conditions go, it is where ROUTED ones go to die.
+//
+// worktreecleanup.go emitted no events at all before this, so a preserved
+// worktree whose notice was lost left nothing behind but a log line: the tree
+// pinned its branch indefinitely and no query anywhere could find out. The fix is
+// to make the failure STRUCTURED rather than louder, which is what the six
+// watcher packages already do with their mail_error field.
+//
+// TestCleanupAgentWorktreeSurvivesMailFailure above covers the other half: the
+// WORK survives a failed notification. This covers the record of it.
+func TestCleanupAgentWorktreeRecordsAnUndeliveredNotice(t *testing.T) {
+	spine := filepath.Join(t.TempDir(), "events.log")
+	events.SetLogPathForTesting(spine)
+	t.Cleanup(func() { events.SetLogPathForTesting("") })
+
+	for _, tc := range []struct {
+		name    string
+		outcome string
+		setup   func(t *testing.T, wt string)
+		want    worktreeCleanupOutcome
+	}{
+		{
+			name:    "preserved",
+			outcome: "preserved",
+			setup: func(t *testing.T, wt string) {
+				if err := os.WriteFile(filepath.Join(wt, "wip.go"), []byte("package wip\n"), 0644); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: worktreePreserved,
+		},
+		{
+			name:    "undetermined",
+			outcome: "undetermined",
+			setup: func(t *testing.T, wt string) {
+				// A present but corrupt .git pointer: `git status` fails, so
+				// dirtiness cannot be determined and the tree is KEPT.
+				if err := os.WriteFile(filepath.Join(wt, ".git"), []byte("gitdir: /nonexistent\n"), 0644); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: worktreeUndetermined,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo, wt := wtRepo(t)
+			tc.setup(t, wt)
+			mail := func(to, from, subject, body string) error {
+				return errors.New("mg mail send failed: no such mailbox")
+			}
+			if got := cleanupAgentWorktree("cat-a15", repo, wt, "mayor", mail); got != tc.want {
+				t.Fatalf("outcome = %v, want %v", got, tc.want)
+			}
+
+			found, err := events.ReadFiltered(spine, events.Filter{
+				Type: "worktree_notice_undelivered",
+			})
+			if err != nil {
+				t.Fatalf("reading the spine: %v", err)
+			}
+			var ev *events.Event
+			for i := range found {
+				if found[i].Details["outcome"] == tc.outcome {
+					ev = &found[i]
+				}
+			}
+			if ev == nil {
+				t.Fatalf("a %s-worktree notice failed to send and left NOTHING on the event "+
+					"spine. The tree now pins its branch and no query can find out why — "+
+					"which is mg-c3f0's meta-finding verbatim: pogod.log is where routed "+
+					"conditions go to die. Events found: %+v", tc.outcome, found)
+			}
+			if ev.Agent != "mayor" {
+				t.Errorf("event attributed to %q, want the addressee that did NOT hear (mayor) — "+
+					"the open question is what the coordinator was never told", ev.Agent)
+			}
+			if ev.Details["row"] != "A15" {
+				t.Errorf("row = %v, want A15 so the enumeration and the daemon can be reconciled",
+					ev.Details["row"])
+			}
+			if s, _ := ev.Details["mail_error"].(string); !strings.Contains(s, "no such mailbox") {
+				t.Errorf("mail_error = %q, want the underlying send failure — a record that the "+
+					"notice was lost without saying WHY is a record nobody can act on", s)
+			}
+			if ev.Details["worktree"] != wt {
+				t.Errorf("worktree = %v, want %s: the whole point is naming the tree that is "+
+					"being preserved unannounced", ev.Details["worktree"], wt)
+			}
+		})
 	}
 }

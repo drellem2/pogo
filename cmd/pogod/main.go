@@ -58,6 +58,19 @@ import (
 )
 
 var agentRegistry *agent.Registry
+
+// conditions annunciates the pogod conditions enumerated as rows A2..A15 in
+// docs/investigations/pogod-log-conditions-with-no-reader-2026-07-30.md — the
+// ones with an actor who could act and, until mg-342d, no channel to reach them.
+//
+// It is a package-level var for the same reason agentRegistry is: the decision
+// points are spread from main's first statement (log rotation) to the heartbeat
+// tick (own-heartbeat write) to the git GC timer, and threading an annunciator
+// through all of them would mean changing every signature on the way. Every
+// method is nil-receiver-safe, so a decision point reached before main arms it —
+// or in a test that does not care — is a no-op rather than a panic.
+var conditions *conditionAnnunciator
+
 var mergeQueue *refinery.Refinery
 var sched *scheduler.Scheduler
 var srv *server.Server
@@ -795,11 +808,21 @@ func registerHandlers() {
 // descriptor via the providers registry. An unknown id logs a warning and
 // falls back to Claude so a stale or mistyped config never wedges daemon
 // startup.
-func resolveAgentProvider(id string) *agent.Provider {
+//
+// The fallback is right and the silence was not — enumeration row A7 (mg-342d).
+// An unknown provider id is not a crash, which is exactly what makes it
+// expensive: the fleet comes up and runs on a harness nobody asked for, and every
+// behavioural difference that causes gets debugged as a prompt or model problem.
+// `notify` is the addressee that can act on it (empty disables annunciation, for
+// call sites that run before a coordinator name exists).
+func resolveAgentProvider(id, notify string) *agent.Provider {
 	p, ok := providers.Resolve(id)
 	if !ok {
 		log.Printf("WARNING: unknown agent provider %q in config; falling back to %q",
 			id, p.ID)
+		conditions.Raise(conditionUnknownProvider(notify, id, p.ID, "config"), time.Now())
+	} else {
+		conditions.Clear(rowA7ProviderPrefix+id, time.Now())
 	}
 	return p
 }
@@ -1150,7 +1173,7 @@ Flags:
 	// the next restart, leaving boot 1's coordinator a stray agent with an
 	// orphaned mailbox. Pinning here and re-loading means boot 1 already sees
 	// the pinned names.
-	cfg = pinAndResolveRoles(cfg)
+	cfg, rolePinErr := pinAndResolveRoles(cfg)
 
 	// Second, config-aware PATH repair pass: [agents] extra_path lets a
 	// deployment point pogod at harness runtimes the automatic probe in
@@ -1195,6 +1218,51 @@ Flags:
 	// Role names were resolved by pinAndResolveRoles above, before any consumer
 	// could read one. cfg here is the post-pin config.
 	coordinator := cfg.Agents.CoordinatorName()
+
+	// Arm the condition annunciator (mg-342d) — rows A2..A15 of
+	// docs/investigations/pogod-log-conditions-with-no-reader-2026-07-30.md, the
+	// conditions mg-c3f0 found to have an actor who could act and no channel to
+	// reach them. It has to be built HERE, at the first line where a coordinator
+	// name exists, because the addressee is the whole mechanism: earlier than
+	// this there is nobody to mail, and everything below this line is a decision
+	// point that used to end in log.Printf and nothing else.
+	//
+	// The two conditions that occur BEFORE this line are captured rather than
+	// dropped, and raised immediately below (log rotation at the very top of
+	// main, and the role-default pin inside pinAndResolveRoles). Capturing an
+	// early condition and annunciating it at the first moment there is a reader
+	// is a different thing from tailing a log for it: the value is still the one
+	// the emitter held, unparsed.
+	conditions = newConditionAnnunciator(
+		conditionNoticesPath(),
+		client.SendMGMail,
+		func(name, message string) error {
+			if agentRegistry == nil {
+				return fmt.Errorf("no agent registry")
+			}
+			a := agentRegistry.Get(name)
+			if a == nil {
+				return fmt.Errorf("agent %s is not running", name)
+			}
+			return a.Nudge(message)
+		},
+	)
+
+	// A14 — log rotation. Deferred from main's first statement (see rotErr
+	// above), because rotation runs before config is even loaded.
+	if rotErr != nil {
+		conditions.Raise(conditionLogRotationFailed(coordinator, rotErr.Error()), time.Now())
+	} else {
+		conditions.Clear(rowA14LogRotation, time.Now())
+	}
+
+	// A10 — role-default pin. Deferred from pinAndResolveRoles, which cannot
+	// annunciate its own failure: resolving the addressee is one of its jobs.
+	if rolePinErr != nil {
+		conditions.Raise(conditionRolePinFailed(coordinator, rolePinErr.Error()), time.Now())
+	} else {
+		conditions.Clear(rowA10RolePin, time.Now())
+	}
 
 	// Register every known harness provider into the registry, then set the
 	// global default. Before mg-b31b a single provider was resolved here, once,
@@ -1254,7 +1322,7 @@ Flags:
 	// template". Dedupe so an identical command is only checked once.
 	checkedCmds := map[string]bool{}
 	for _, agentType := range []string{"crew", "polecat"} {
-		typeProvider := resolveAgentProvider(cfg.Agents.AgentProvider(agentType))
+		typeProvider := resolveAgentProvider(cfg.Agents.AgentProvider(agentType), coordinator)
 		typeCmd := cfg.Agents.AgentCommand(agentType)
 		if typeCmd == "" {
 			typeCmd = typeProvider.CommandTemplate
@@ -1384,6 +1452,16 @@ Flags:
 				time.Sleep(2 * time.Second)
 				if _, rerr := agentRegistry.Respawn(a.Name); rerr != nil {
 					log.Printf("agent %s: restart failed: %v", a.Name, rerr)
+					// A6 (mg-342d). The respawn is ONE-SHOT: nothing tries
+					// again, so a crew agent whose restart failed is simply
+					// gone, and until now the only trace was this line. There
+					// is no stall to detect and no missed ack to count for an
+					// agent that is not running at all.
+					conditions.Raise(conditionRestartFailed(coordinator, a.Name, rerr.Error()), time.Now())
+					conditions.flush()
+				} else {
+					conditions.Clear(rowA6RestartPrefix+a.Name, time.Now())
+					conditions.flush()
 				}
 			}()
 		} else {
@@ -1452,7 +1530,12 @@ Flags:
 	schedPath, err := scheduler.DefaultPath()
 	if err != nil {
 		log.Printf("pogod: scheduler disabled (cannot resolve home dir): %v", err)
+		// A2, second site (mg-342d). Same consequence as a load failure — no
+		// schedule fires for anyone — so it gets the same severity and its own
+		// suppression key.
+		conditions.Raise(conditionSchedulerNoHome(coordinator, err.Error()), time.Now())
 	} else {
+		conditions.Clear(rowA2SchedulerNoHome, time.Now())
 		// Wire the schedule-register failure reporter FIRST, independent of
 		// whether the scheduler below actually loads. If scheduler.New fails, the
 		// mail-check registrar is never installed and every polecat spawn takes
@@ -1469,7 +1552,23 @@ Flags:
 		s, err := scheduler.New(schedPath, deliverer)
 		if err != nil {
 			log.Printf("pogod: scheduler load failed (%s): %v", schedPath, err)
+			// A2 — the enumeration's own highest severity (mg-342d). No
+			// mail-check schedule fires for ANYONE, so the fleet loses its
+			// proactive channel wholesale and the two watchers that exist to
+			// detect fleet deafness are disabled by the same fault.
+			//
+			// This is the one condition that asks for a WAKE as well as a mail,
+			// and the reason is the reason mg-c3f0 stopped here: mail is
+			// deliverable (client.SendMGMail shells out to `mg`, no scheduler
+			// involved) but the coordinator's mail-check loop is itself a
+			// schedule, so it will never be prompted to look. The nudge rides
+			// the heartbeat, which drives the scheduler rather than depending on
+			// it — see conditionWaker for why that makes this detector not dead
+			// by its own fault, and for the narrower failure class (a scheduler
+			// that loaded and then silently stopped) that this does NOT cover.
+			conditions.Raise(conditionSchedulerLoadFailed(coordinator, schedPath, err.Error()), time.Now())
 		} else {
+			conditions.Clear(rowA2SchedulerLoad, time.Now())
 			// Install the liveness checker so Tick garbage-collects
 			// mail-check-* schedules whose target agent is gone (gh
 			// drellem2/macguffin #15). Backed by the agent registry AND the
@@ -1635,7 +1734,26 @@ Flags:
 		if _, err := exec.LookPath("gh"); err != nil {
 			log.Printf("pogod: gh-issue teardown detector NOT armed — `gh` not on PATH (%v); "+
 				"done carriers will not be checked against their issues", err)
+			// A13 (mg-342d). The ONE row that does not go to the coordinator:
+			// this subsystem already has a deliberately-chosen mailbox for its
+			// findings ([gh_teardown] notify_to, mg-b586), and its not-armed
+			// condition belongs to the same reader as those findings.
+			//
+			// A missing `gh` is a precondition rather than a finding — which is
+			// exactly why the watcher refuses to arm — but it is a precondition
+			// that can BREAK, and under launchd it has: PATH in the daemon's
+			// environment is not PATH in a shell, so `gh` working when you type
+			// it proves nothing. The transition is what is worth mailing.
+			// Falls back to the coordinator if notify_to was explicitly blanked:
+			// an unroutable notice is louder than a lost one, but a routable one
+			// is better than both.
+			teardownTo := cfg.GHTeardown.NotifyTo
+			if teardownTo == "" {
+				teardownTo = coordinator
+			}
+			conditions.Raise(conditionTeardownNotArmed(teardownTo, err.Error()), time.Now())
 		} else {
+			conditions.Clear(rowA13TeardownNotArmed, time.Now())
 			src := ghteardown.MGSource{}
 			teardownWatcher = ghteardown.New(ghteardown.Options{
 				Enabled:       true,
@@ -1692,8 +1810,17 @@ Flags:
 		log.Printf("pogod: ack-watch enabled (interval=%s renotify=%s notify_to=%s escalate_after=%s, report-only)",
 			cfg.AckWatch.Interval, cfg.AckWatch.RenotifyAfter,
 			cfg.AckWatch.NotifyTo, cfg.AckWatch.EscalateAfter)
+		conditions.Clear(rowA3AckWatchNotArmed, time.Now())
 	} else if cfg.AckWatch.Enabled {
 		log.Printf("pogod: ack-watch NOT armed — the scheduler did not load, so there are no completion counters to read")
+		// A3 (mg-342d). The watcher that exists to notice "fires are being
+		// DELIVERED but not COMPLETED" — the exact shape of the 23h30m outage of
+		// 2026-07-22 — silently off, disabled by the failure it would have
+		// caught. See conditionAckWatchNotArmed for why A3's other listed site
+		// (`deaf-watch NOT armed`) is NOT wired: that branch is unreachable in
+		// production, and the deaf-watch degradation that actually happens under
+		// A2 is already on the event spine as deaf_watch_error.
+		conditions.Raise(conditionAckWatchNotArmed(coordinator), time.Now())
 	}
 
 	// Build the missing-mail-loop ANNOUNCER (mg-032b). `pogo agent diagnose`
@@ -1746,7 +1873,22 @@ Flags:
 	hb.OnTick = func(now time.Time) {
 		if err := reaper.WriteHeartbeat(pogodHeartbeatPath); err != nil {
 			log.Printf("pogod: failed to write own heartbeat %s: %v", pogodHeartbeatPath, err)
+			// A11 (mg-342d). This one is rate-limit-critical: the tick is every
+			// ~30s, so without the annunciator's per-condition floor this would
+			// mail ~2900 times a day. The floor is why it is safe to wire at all.
+			conditions.Raise(conditionHeartbeatWriteFailed(coordinator, pogodHeartbeatPath, err.Error()), now)
+			conditions.flush()
+		} else {
+			conditions.Clear(rowA11HeartbeatWrite, now)
+			conditions.flush()
 		}
+		// Deliver any queued PTY wake (A2). Queued rather than sent inline
+		// because the wake-needing conditions are detected during startup,
+		// before crew auto-start — at the moment A2 is known there is no
+		// coordinator process to nudge yet. This tick is also the proof that the
+		// wake channel does not depend on the failed subsystem: the heartbeat
+		// drives the scheduler (`if sched != nil` below), not the reverse.
+		conditions.retryWakes(now)
 		if sched != nil {
 			sched.Tick(context.Background(), now)
 		}
@@ -1814,7 +1956,7 @@ Flags:
 	// Start the polecat git garbage collector: a startup sweep plus a
 	// periodic ticker that deletes stale polecat-* branches and reclaims
 	// leaked worktrees once their work items have concluded. mg-30d5.
-	startGitGC(hbCtx, agentRegistry, cfg.GitGC)
+	startGitGC(hbCtx, agentRegistry, cfg.GitGC, coordinator)
 
 	// Start the tier-1 heartbeat reaper: a goroutine (NOT a LaunchAgent — the
 	// wedge in mg-50e0 means we cannot rely on being spawned) that kickstarts
@@ -2035,7 +2177,13 @@ Flags:
 		// stamps make this a no-op when nothing changed.
 		if installRes, err := agent.InstallPrompts(agent.InstallOpts{}); err != nil {
 			log.Printf("pogod: prompt refresh failed: %v", err)
+			// A4 (mg-342d), and strictly worse than the A1 that started this:
+			// A1 is one prompt declined for a REASON (local edits pogod must not
+			// overwrite), A4 is every prompt staying stale for no reason at all —
+			// and before this it got less annunciation than A1 did.
+			conditions.Raise(conditionPromptRefreshFailed(coordinator, err.Error()), time.Now())
 		} else {
+			conditions.Clear(rowA4PromptRefresh, time.Now())
 			for _, line := range promptRefreshLogLines(installRes) {
 				log.Print(line)
 			}
@@ -2072,10 +2220,24 @@ Flags:
 				switch res.Status {
 				case agent.AutoStartStatusStarted:
 					log.Printf("pogod: auto-started %s", res.Name)
+					conditions.Clear(rowA5AutoStartPrefix+res.Name, time.Now())
 				case agent.AutoStartStatusSkippedRunning:
 					log.Printf("pogod: %s already running, skipping auto-start", res.Name)
+					conditions.Clear(rowA5AutoStartPrefix+res.Name, time.Now())
 				case agent.AutoStartStatusFailed:
 					log.Printf("pogod: auto-start of %s failed: %s", res.Name, res.Error)
+					// A5 (mg-342d), the row the enumeration flagged as genuinely
+					// hard. When the agent that failed to start is NOT the
+					// coordinator, this is solved: the coordinator is mailed and
+					// can start it. When it IS the coordinator, the actor and the
+					// casualty are the same process and there is no in-fleet
+					// reader by construction — the mail still goes to its
+					// maildir, where it is read on the first mail-check after the
+					// coordinator next starts, and the notice says plainly that
+					// nobody read it at the time. See conditionAutoStartFailed
+					// for why the answer is NOT to fall back to `human`.
+					conditions.Raise(conditionAutoStartFailed(
+						coordinator, res.Name, res.Error, res.Name == coordinator), time.Now())
 				}
 			}
 		}
@@ -2089,6 +2251,18 @@ Flags:
 	// loop — trading mg-de08 for the orphan-nudge accumulation the reap exists
 	// to prevent (mg-de08 PART B).
 	gcGate.markAutoStartComplete(time.Now())
+
+	// Close out the boot's annunciation: persist the transition store and put the
+	// counts on the log and the event spine (mg-342d).
+	//
+	// This runs on EVERY boot, including the clean ones, and that is the point.
+	// It is the answer to "how would you know the annunciator itself had stopped
+	// working" — a daemon that boots and emits no pogod_condition_summary is a
+	// daemon where this mechanism is not running at all, which is a different and
+	// checkable shape from a daemon with no conditions to report. A notifier that
+	// can only be observed when it fires is a notifier whose silence means
+	// nothing.
+	conditions.report()
 
 	// Serve HTTP (blocks until shutdown). Explicit server instead of bare
 	// http.Serve so a slow or hung client can't pin a goroutine forever,

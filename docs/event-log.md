@@ -936,6 +936,128 @@ Crew agents never carry a work item by design and are exempt, so this event alwa
 
 > `"no_work_item_id"` was this field's value between mg-2437 and mg-c33e. Log lines predating mg-c33e carry it; it is no longer emitted.
 
+#### `pogod_condition`
+
+One annunciation decision by pogod's condition annunciator (mg-342d, `cmd/pogod/conditionnotify.go`)
+for a condition enumerated in
+[pogod-log-conditions-with-no-reader-2026-07-30.md](investigations/pogod-log-conditions-with-no-reader-2026-07-30.md)
+§4 rows A2–A15 — the conditions found to have an actor who could act and no channel to reach them.
+Disposition of every row is in
+[pogod-condition-annunciation-2026-07-30.md](investigations/pogod-condition-annunciation-2026-07-30.md).
+
+**Emitted on EVERY raise, including the SUPPRESSED ones, and that is the point.** A live condition
+produces a steady stream of `reason: "suppressed"`, so "quiet on purpose" is distinguishable from
+"the notifier stopped working" — a stopped notifier stops emitting *and* stops suppressing, while a
+live condition that is not being suppressed shows up as a run of `reason: "new", notified: false`.
+Reading `notified` alone would lose that distinction, which is the defect this whole line of work
+descends from, one level up.
+
+- **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent` (the **addressee**, not
+  `"pogod"` — the condition is something that agent has to deal with, so `pogo events --agent <name>`
+  shows it in their history), `details`
+- **`details` fields:**
+  - `condition` (string, required): the stable suppression key, e.g. `"scheduler_load_failed"`, or
+    subject-scoped as `"autostart_failed:doctor"` / `"gitgc_sweep_failed:/path/to/repo"`
+  - `row` (string, required): the enumeration row it carries, `"A2"`–`"A15"`. This is how the
+    investigation and the running daemon get reconciled without grepping code
+  - `addressee` (string, required): where it was sent. Empty only with `reason: "unroutable"`
+  - `notified` (bool, required): whether a mail actually went out on this occurrence
+  - `reason` (string, required): why this occurrence did or did not mail —
+    `"new"` (transition INTO the condition), `"changed"` (a materially different failure, so the
+    recipient's problem is not the one they were told about), `"unresolved"` (still live past the 24h
+    renotify window), `"readdressed"` (the coordinator was renamed, so the previously-notified
+    mailbox is now unread by anyone), `"suppressed"` (still live, deliberately quiet),
+    `"unroutable"` (**no addressee resolved — never guess a name**; mail to a name no agent reads is
+    silently accepted into a phantom mailbox and lost), `"woken"` / `"wake_abandoned"` (see below)
+  - `detail` (string, optional): the underlying cause, usually the error string
+  - `mail_error` (string, optional): present only when the send failed. A failed send is **not**
+    recorded as delivered, so the next occurrence retries — there is no path where a clean-looking
+    state file claims an announcement that never happened
+  - `tries` (int, optional): present on `"woken"` / `"wake_abandoned"`
+
+**`"woken"` and `"wake_abandoned"` belong to A2 alone.** Every agent's mail-check loop is a
+`pogo schedule` entry, so when the scheduler fails to load the coordinator can be *mailed* but never
+*prompted to read*. A2 therefore also queues a PTY nudge, retried on the heartbeat — which drives the
+scheduler rather than depending on it, so the wake survives the fault it reports. A wake that never
+lands within 30 minutes is abandoned as `"wake_abandoned"` and logged as *mailed-but-not-woken*: the
+notice is still in the maildir, and the degradation says so rather than going quiet.
+
+```json
+{"schema_version":1,"timestamp":"2026-07-30T04:06:00.000000000Z","event_type":"pogod_condition","agent":"mayor","details":{"condition":"scheduler_load_failed","row":"A2","addressee":"mayor","notified":true,"reason":"new","detail":"scheduler.New(/Users/daniel/.pogo/schedules.json): parse: invalid character 't'"}}
+{"schema_version":1,"timestamp":"2026-07-30T04:06:00.000000000Z","event_type":"pogod_condition","agent":"mayor","details":{"condition":"scheduler_load_failed","row":"A2","addressee":"mayor","notified":true,"reason":"woken","tries":1}}
+{"schema_version":1,"timestamp":"2026-07-30T04:18:00.000000000Z","event_type":"pogod_condition","agent":"mayor","details":{"condition":"scheduler_load_failed","row":"A2","addressee":"mayor","notified":false,"reason":"suppressed"}}
+```
+
+#### `pogod_condition_cleared`
+
+A condition annunciated by `pogod_condition` is no longer present, so the annunciator has **forgotten**
+it. Forgetting is load-bearing rather than tidiness: without it a condition that broke, was fixed, and
+broke again would be suppressed by its own resolved history — a failure that produces no symptom at
+all. A recurrence after a clear mails immediately.
+
+- **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent` (the last addressee),
+  `details`
+- **`details` fields:** `condition` (string), `row` (string), `first_seen` (RFC3339 string — how long
+  the condition was live), `cleared_at` (RFC3339 string)
+
+```json
+{"schema_version":1,"timestamp":"2026-07-30T04:20:00.000000000Z","event_type":"pogod_condition_cleared","agent":"mayor","details":{"condition":"scheduler_load_failed","row":"A2","first_seen":"2026-07-30T04:06:00+01:00","cleared_at":"2026-07-30T04:20:00+01:00"}}
+```
+
+#### `pogod_condition_summary`
+
+The condition annunciator's per-boot roll-up, emitted **on every boot including the clean ones**.
+
+That is the whole reason it exists, and it is not a convenience. A notifier observable only when it
+fires is a notifier whose silence means nothing — so a daemon that boots and emits **no** summary is a
+daemon where the annunciator is not running, which is a checkable and different shape from a daemon
+with nothing to report. `scripts/pogo-condition-controls.sh`'s negative control asserts this
+specifically.
+
+- **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent` (always `"pogod"`),
+  `details`
+- **`details` fields:**
+  - `mailed` (int, required), `suppressed` (int, required)
+  - `failed` (int, required): notices that could not be sent. **Non-zero means an actionable
+    condition reached nobody**, and the matching log line is prefixed `⚠`
+  - `live` (int, required) and `conditions` ([]string, required): the conditions still live after this
+    boot, as `id(row)`, sorted
+
+```json
+{"schema_version":1,"timestamp":"2026-07-30T04:06:00.000000000Z","event_type":"pogod_condition_summary","agent":"pogod","details":{"mailed":2,"suppressed":0,"failed":0,"live":2,"conditions":["ackwatch_not_armed(A3)","scheduler_load_failed(A2)"]}}
+{"schema_version":1,"timestamp":"2026-07-30T04:20:00.000000000Z","event_type":"pogod_condition_summary","agent":"pogod","details":{"mailed":0,"suppressed":0,"failed":0,"live":0,"conditions":[]}}
+```
+
+#### `worktree_notice_undelivered`
+
+An exited agent's worktree was PRESERVED (it held uncommitted work) or KEPT (`git status` failed, so
+dirtiness could not be determined) and **the notice to the coordinator could not be delivered** —
+enumeration row A15 (mg-342d).
+
+**This row is an event and not a mail, deliberately.** A15 is not "a condition with no channel"; it is
+"the channel itself failed", and mailing about a failed mail is a retry wearing an alarm's clothes —
+it fails the same way for the same reason. Before this, `worktreecleanup.go` emitted no events at all,
+so a preserved worktree whose notice was lost left nothing but a log line: the tree pinned its branch
+indefinitely and no query could find out why. **A non-empty result here means a worktree is being
+preserved that nobody was told about**, and it is the query to run when a branch cannot be deleted for
+no apparent reason.
+
+- **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent` (the addressee that did
+  **not** hear — the open question is what the coordinator was never told), `details`
+- **`details` fields:**
+  - `row` (string, required): always `"A15"`
+  - `exited_agent` (string, required): whose worktree it was
+  - `worktree` (string, required): the path still on disk, pinning its branch
+  - `outcome` (string, required): `"preserved"` (there IS uncommitted work here) or `"undetermined"`
+    (we could not look — a distinct fact, and reporting it as the first would send someone to rescue
+    files that may not exist)
+  - `mail_error` (string, required): the underlying send failure. A record that a notice was lost
+    without saying why is a record nobody can act on
+
+```json
+{"schema_version":1,"timestamp":"2026-07-30T04:06:00.000000000Z","event_type":"worktree_notice_undelivered","agent":"mayor","details":{"row":"A15","exited_agent":"cat-mg-8c66","worktree":"/Users/daniel/.pogo/polecats/8c66","outcome":"preserved","mail_error":"mg mail send failed: no such mailbox"}}
+```
+
 ## Worked example: a polecat merge cycle
 
 The lines below show the canonical event sequence for a successful polecat run. Times are illustrative.

@@ -20,7 +20,11 @@ import (
 // The GC logic lives in internal/gitgc as a self-contained library; pogod
 // only supplies the live-polecat exclusion set and the set of repos to
 // sweep. See mg-30d5.
-func startGitGC(ctx context.Context, reg *agent.Registry, cfg config.GitGCConfig) {
+// notify is the mailbox that hears when the sweep degrades — enumeration row A9
+// (mg-342d). A9's severity is not any single missed sweep; it is that the failure
+// mode is UNBOUNDED GROWTH of branches and worktrees with no symptom at all until
+// a disk fills or `git branch` becomes unusable. Empty disables annunciation.
+func startGitGC(ctx context.Context, reg *agent.Registry, cfg config.GitGCConfig, notify string) {
 	if !cfg.Enabled {
 		log.Printf("pogod: git GC disabled")
 		return
@@ -31,7 +35,7 @@ func startGitGC(ctx context.Context, reg *agent.Registry, cfg config.GitGCConfig
 	}
 	log.Printf("pogod: git GC enabled (interval %s)", interval)
 	go func() {
-		runGitGCSweep(reg, cfg) // startup sweep
+		runGitGCSweep(reg, cfg, notify) // startup sweep
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
@@ -39,7 +43,7 @@ func startGitGC(ctx context.Context, reg *agent.Registry, cfg config.GitGCConfig
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				runGitGCSweep(reg, cfg)
+				runGitGCSweep(reg, cfg, notify)
 			}
 		}
 	}()
@@ -60,7 +64,7 @@ var loadTicketIndexFn = gitgc.LoadTicketIndex
 // repos listed in config plus the source repo of every registered agent.
 // The live-polecat set is passed as the do-not-touch exclusion so a sweep
 // can never disturb a running polecat's branch or worktree.
-func runGitGCSweep(reg *agent.Registry, cfg config.GitGCConfig) {
+func runGitGCSweep(reg *agent.Registry, cfg config.GitGCConfig, notify string) {
 	repos := gitGCRepos(reg, cfg)
 	if len(repos) == 0 {
 		return
@@ -68,8 +72,14 @@ func runGitGCSweep(reg *agent.Registry, cfg config.GitGCConfig) {
 	tickets, err := loadTicketIndexFn()
 	if err != nil {
 		log.Printf("pogod: git GC skipped — cannot load work items: %v", err)
+		// A9 (mg-342d). A total stop, and the safe direction — deciding a branch
+		// is abandoned without knowing which work items exist would delete live
+		// work (mg-0130) — but a total stop nonetheless, on every repo, silently.
+		conditions.Raise(conditionGitGCNoTicketIndex(notify, err.Error()), time.Now())
+		conditions.flush()
 		return
 	}
+	conditions.Clear(rowA9TicketIndex, time.Now())
 	// Orphan polecat dirs (files left behind with no .git when a polecat's
 	// exit cleanup never ran — e.g. pogod died mid-polecat, gh #31) are only
 	// reachable through the polecats-dir scan; scanning on every repo's sweep
@@ -80,6 +90,9 @@ func runGitGCSweep(reg *agent.Registry, cfg config.GitGCConfig) {
 	polecatsDir, err := gitgc.DefaultPolecatsDir()
 	if err != nil {
 		log.Printf("pogod: git GC orphan-dir scan disabled: %v", err)
+		conditions.Raise(conditionGitGCOrphanScan(notify, err.Error()), time.Now())
+	} else {
+		conditions.Clear(rowA9OrphanScan, time.Now())
 	}
 	live, err := livePolecatSet(reg)
 	if err != nil {
@@ -89,8 +102,11 @@ func runGitGCSweep(reg *agent.Registry, cfg config.GitGCConfig) {
 		// it as "no polecats live" would delete a running polecat's work. Skip
 		// the sweep, exactly as an unreadable ticket index does above (mg-0130).
 		log.Printf("pogod: git GC skipped — cannot read polecat witness: %v", err)
+		conditions.Raise(conditionGitGCNoWitness(notify, err.Error()), time.Now())
+		conditions.flush()
 		return
 	}
+	conditions.Clear(rowA9PolecatWitness, time.Now())
 	// No death-evidence input is passed, and that is deliberate rather than
 	// missing (gh #97). pogod CAN establish positive evidence of death from the
 	// polecat witness, and an earlier revision of this fix fed it in so that a
@@ -119,8 +135,12 @@ func runGitGCSweep(reg *agent.Registry, cfg config.GitGCConfig) {
 		})
 		if err != nil {
 			log.Printf("pogod: git GC sweep of %s failed: %v", repo, err)
+			// A9, per repo (mg-342d). Keyed on the repo so one persistently
+			// broken repo cannot suppress the alarm for a newly broken one.
+			conditions.Raise(conditionGitGCSweepFailed(notify, repo, err.Error()), time.Now())
 			continue
 		}
+		conditions.Clear(rowA9SweepFailedPrefix+repo, time.Now())
 		if len(res.BranchesDeleted) > 0 || len(res.WorktreesRemoved) > 0 || len(res.Errors) > 0 {
 			log.Printf("pogod: git GC %s — deleted %d branches, removed %d worktrees, %d errors",
 				repo, len(res.BranchesDeleted), len(res.WorktreesRemoved), len(res.Errors))
@@ -129,6 +149,9 @@ func runGitGCSweep(reg *agent.Registry, cfg config.GitGCConfig) {
 			}
 		}
 	}
+	// Persist whatever this sweep raised or cleared. The sweep runs on a ticker,
+	// long after startup's report() has flushed, so it has to flush its own.
+	conditions.flush()
 }
 
 // gitGCLogf returns the per-action logger for one repo's sweep, tagging every

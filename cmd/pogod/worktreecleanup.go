@@ -1,10 +1,12 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
 
+	"github.com/drellem2/pogo/internal/events"
 	"github.com/drellem2/pogo/internal/gitgc"
 )
 
@@ -104,6 +106,7 @@ func cleanupAgentWorktree(
 				agentName, worktreeDir, dwe, worktreeDir, sourceRepo)
 			if mErr := mail(coordinator, "pogod", subject, body); mErr != nil {
 				log.Printf("agent %s: failed to mail preserved-worktree notice: %v", agentName, mErr)
+				emitWorktreeNoticeUndelivered(agentName, coordinator, worktreeDir, "preserved", mErr)
 			}
 		}
 		return worktreePreserved
@@ -130,6 +133,7 @@ func cleanupAgentWorktree(
 				agentName, worktreeDir, uwe, worktreeDir, worktreeDir, sourceRepo)
 			if mErr := mail(coordinator, "pogod", subject, body); mErr != nil {
 				log.Printf("agent %s: failed to mail undetermined-worktree notice: %v", agentName, mErr)
+				emitWorktreeNoticeUndelivered(agentName, coordinator, worktreeDir, "undetermined", mErr)
 			}
 		}
 		return worktreeUndetermined
@@ -140,4 +144,41 @@ func cleanupAgentWorktree(
 		log.Printf("agent %s: removed worktree %s", agentName, worktreeDir)
 		return worktreeReaped
 	}
+}
+
+// emitWorktreeNoticeUndelivered records a preserved/undetermined-worktree notice
+// that could not be delivered — enumeration row A15 (mg-342d).
+//
+// THIS ROW IS DELIBERATELY AN EVENT AND NOT A MAIL, and it is the one row where
+// that is the right answer. A15 is not "a condition with no channel"; it is "the
+// channel itself failed". Reacting to a failed mail send by sending another mail
+// is a retry dressed as an alarm, and it fails the same way for the same reason —
+// exactly the shape mg-c3f0's meta-finding described, where 12 notification
+// sites degrade to log.Printf when their send fails and pogod.log becomes the
+// place routed conditions go to die.
+//
+// So the fix is to make the failure STRUCTURED rather than louder.
+// worktreecleanup.go emitted no events at all before this: a preserved worktree
+// whose notice was lost left nothing behind but a log line, so the tree pinned
+// its branch indefinitely with no record anywhere a query could reach. The six
+// watcher packages already do exactly this — they attach mail_error to an event
+// rather than only logging it — and this brings the two ad-hoc sites here up to
+// that standard.
+//
+// Observable as: `pogo events --type worktree_notice_undelivered`. A non-empty
+// result means a worktree is being preserved that nobody was told about.
+func emitWorktreeNoticeUndelivered(agentName, to, worktreeDir, outcome string, mailErr error) {
+	events.Emit(context.Background(), events.Event{
+		EventType: "worktree_notice_undelivered",
+		// Attributed to the addressee that did NOT hear, not to the exited
+		// agent: the open question is what the coordinator was never told.
+		Agent: to,
+		Details: map[string]any{
+			"row":          "A15",
+			"exited_agent": agentName,
+			"worktree":     worktreeDir,
+			"outcome":      outcome,
+			"mail_error":   mailErr.Error(),
+		},
+	})
 }

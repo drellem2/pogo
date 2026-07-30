@@ -68,7 +68,7 @@ func TestPinAndResolveRoles_V030ConfigResolvesLegacyNamesOnFirstBoot(t *testing.
 	agent.SetCoordinatorName(cfg.Agents.Coordinator)
 	agent.SetWorkerName(cfg.Agents.Worker)
 
-	cfg = pinAndResolveRoles(cfg)
+	cfg, _ = pinAndResolveRoles(cfg)
 
 	// Bare literals throughout: comparing against Default* would make this test
 	// follow a future flip instead of catching it.
@@ -114,7 +114,7 @@ func TestPinAndResolveRoles_AlreadyPinnedIsIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cfg := pinAndResolveRoles(config.Load())
+	cfg, _ := pinAndResolveRoles(config.Load())
 	if cfg.Agents.Coordinator != "mayor" || agent.CoordinatorName() != "mayor" {
 		t.Errorf("coordinator = %q / %q, want mayor", cfg.Agents.Coordinator, agent.CoordinatorName())
 	}
@@ -150,7 +150,7 @@ func TestPinAndResolveRoles_NoConfigNeitherPinsNorCreatesOne(t *testing.T) {
 		t.Fatal("precondition: stamped prompt should make IsExistingInstall() true")
 	}
 
-	cfg := pinAndResolveRoles(config.Load())
+	cfg, _ := pinAndResolveRoles(config.Load())
 
 	if cfg.Agents.Coordinator != config.DefaultCoordinator {
 		t.Errorf("coordinator = %q, want the live default %q (no config to pin from)",
@@ -194,7 +194,7 @@ func TestPinAndResolveRoles_PartialPogoHomeConfigDoesNotDropThePin(t *testing.T)
 		t.Fatal(err)
 	}
 
-	cfg := pinAndResolveRoles(config.Load())
+	cfg, _ := pinAndResolveRoles(config.Load())
 
 	if cfg.Agents.Coordinator != "mayor" {
 		t.Errorf("cfg coordinator = %q, want mayor — pogod would auto-start %q and kill the running mayor",
@@ -252,7 +252,7 @@ func TestPinAndResolveRoles_RefusesToRenameARunningCoordinator(t *testing.T) {
 		t.Fatalf("precondition: Load() coordinator = %q, want the configured %q", got, "ringmaster")
 	}
 
-	cfg := pinAndResolveRoles(config.Load())
+	cfg, _ := pinAndResolveRoles(config.Load())
 
 	if cfg.Agents.Coordinator != "mayor" {
 		t.Errorf("cfg coordinator = %q, want mayor — a running coordinator must never be renamed", cfg.Agents.Coordinator)
@@ -285,7 +285,7 @@ func TestPinAndResolveRoles_StoppedCoordinatorIsRenamable(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cfg := pinAndResolveRoles(config.Load())
+	cfg, _ := pinAndResolveRoles(config.Load())
 
 	if cfg.Agents.Coordinator != "boss" {
 		t.Errorf("cfg coordinator = %q, want boss — a stopped coordinator must remain renamable", cfg.Agents.Coordinator)
