@@ -527,12 +527,16 @@ This is the one file you may push directly (see "What you may NOT do" rule 2). T
 
 ```bash
 # Trajectory: 7-day spend rolled up by tag and by item, scoped to your product.
-mg spend --by tag    --since 7d --json
-mg spend --by item   --tag=<your-tag> --since 7d --json
+# The per-item breakdown for ONE tag is `--by tag:<tag>`; there is no --tag flag
+# on `mg spend`, and `--by item --tag=…` exits non-zero (mg-d8ea).
+mg spend --by tag           --since 7d --json
+mg spend --by tag:<your-tag> --since 7d --json
 
 # Now / Next / Backlog / Recent: open + recently-closed work for your product.
+# `mg list` has no time window and no `closed` status — the closed status is
+# `done`, and you bound the window yourself off each item's `mtime` (mg-21b1).
 mg list --tag=<your-tag> --json
-mg list --tag=<your-tag> --status=closed --since 7d --json
+mg list --tag=<your-tag> --status=done --json
 ```
 
 Bucket items into Now (claimed / in-flight), Next (open + ready, no blocking deps), Later (proposals you haven't filed yet), Backlog (open but no near-term plan), Recently shipped (closed within 7d). Trajectory is a short macro read off `mg spend` — throughput, total tokens, the one or two tag-level bottlenecks you can name.

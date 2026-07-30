@@ -81,7 +81,7 @@ Don't burn it on bulk research. Large file reads, repo-wide greps, web searches,
 
 ## Common Issues
 
-- **pogod not running**: `pogo server start` or `pogo service install && pogo service start`
+- **pogod not running**: `pogo server start` for a foreground/one-off start, or `pogo service install` to install *and* start the launchd/systemd service — the install loads the unit and health-checks the daemon, so there is nothing to start afterwards. Confirm with `pogo service status`. (`pogo service` has no `start` subcommand; this line named one until mg-21b1.)
 - **Stale work items**: `mg unclaim <id>` releases a stale claim, returning the item to available
 - **Refinery failures**: Check `pogo refinery history` for error details
 - **Missing prompts**: `pogo agent prompt install` reinstalls default prompts

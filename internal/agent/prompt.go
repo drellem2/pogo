@@ -22,6 +22,23 @@ import (
 //go:embed prompts
 var defaultPrompts embed.FS
 
+// DefaultPromptsFS returns the shipped prompt corpus rooted at the prompts
+// directory, so paths read like "mayor.md" and "templates/polecat.md".
+//
+// Exported for controls that read the corpus as data rather than to render it:
+// promptcli's CLI-surface check (mg-21b1) walks every shipped prompt looking
+// for `mg …` / `pogo …` invocations the tools would reject. Callers get a
+// read-only fs.FS over the binary's own embed, which is the same bytes the
+// installer writes — no on-disk copy to go stale.
+func DefaultPromptsFS() fs.FS {
+	sub, err := fs.Sub(defaultPrompts, "prompts")
+	if err != nil {
+		// Unreachable: the directory is embedded at compile time.
+		panic("agent: embedded prompts unreadable: " + err.Error())
+	}
+	return sub
+}
+
 // DefaultCoordinatorName is the coordinator agent's default name. It is kept
 // equal to config.DefaultCoordinator; the literal is repeated here as the
 // resolution floor so prompt handling never depends on config having been
