@@ -187,6 +187,36 @@ const (
 	// human's to know.
 	DefaultGHTeardownEscalateAfter = 72 * time.Hour
 
+	// DefaultGHIntakeInterval is how often pogod's gh-issue INTAKE detector
+	// reconciles open issues against `gh:` carriers (mg-039b). Much finer than
+	// the teardown detector's hour, because the two race different clocks: a
+	// teardown miss leaves a work item behind to be found, an intake miss leaves
+	// nothing at all, and drellem2/pogo#99 spent ten hours in that state.
+	DefaultGHIntakeInterval = 15 * time.Minute
+	// DefaultGHIntakeGrace is how long an open issue may exist with no carrier
+	// before it counts as a finding. Not zero: the poller mails within ~60s of an
+	// issue being filed and the coordinator needs a turn to read it and file the
+	// carrier, so alarming inside that window would fire on every new issue.
+	DefaultGHIntakeGrace = 30 * time.Minute
+	// DefaultGHIntakeRenotify is how long an UNCHANGED set of intake findings
+	// stays quiet. A full day, because notification is on TRANSITION into the
+	// uncarried state; this is only the backstop for a state nobody cleared, and
+	// an issue uncarried for a week must not cost a mail per sample.
+	DefaultGHIntakeRenotify = 24 * time.Hour
+	// DefaultGHIntakeNotifyTo is the mailbox intake findings go to: the
+	// COORDINATOR, not the PM and not `human`. Filing a carrier and dispatching
+	// triage are things only the coordinator does, and the failure being detected
+	// is a coordinator failure — a dropped `[gh]` mail — so this closes the loop
+	// on the agent whose omission created the gap.
+	DefaultGHIntakeNotifyTo = "mayor"
+	// DefaultGHIntakeEscalateAfter is how long ONE uncarried issue may persist
+	// before `human` is copied as well. Far shorter than the teardown detector's
+	// 72h: an uncarried issue is a reporter waiting with no acknowledgement and
+	// no record anywhere. This is also the answer to "what if the coordinator is
+	// down" — the detector does not need it alive to be useful, only to be
+	// sufficient.
+	DefaultGHIntakeEscalateAfter = 4 * time.Hour
+
 	// DefaultAckWatchInterval is how often pogod's completion-deficit detector
 	// samples the scheduler's ack counters (mg-1935). Coarse: the condition is a
 	// RATE over hundreds of fires, so it moves by fractions of a point per tick
@@ -428,6 +458,7 @@ type Config struct {
 	DriftWatch DriftWatchConfig
 	CredExpiry CredExpiryConfig
 	GHTeardown GHTeardownConfig
+	GHIntake   GHIntakeConfig
 	AckWatch   AckWatchConfig
 	DeafWatch  DeafWatchConfig
 	// Source is the path of the highest-precedence config file Load read, or
@@ -678,6 +709,67 @@ type GHTeardownConfig struct {
 	EscalateAfter time.Duration
 }
 
+// GHIntakeConfig configures pogod's gh-issue INTAKE detector (mg-039b): the
+// heartbeat-driven runner that reconciles the OPEN issues on the watched repos
+// against the `gh:` carrier markers in the work-item store, and reports the
+// issues nothing is tracking.
+//
+// It exists because a delivered `[gh]` mail can be dropped with nothing noticing.
+// drellem2/pogo#99 was filed 2026-07-29 18:53:58Z; the poller mailed the
+// coordinator 46 seconds later and again 20 minutes after that, both delivered,
+// and no carrier existed for ~10 hours. Its paired issue #100 was processed
+// normally, so a pair filed to be considered together was split and the untracked
+// half was invisible to every board the fleet reads. It surfaced only because a PM
+// ran an open-issue sweep by hand, early, on a hunch.
+//
+// The shipped coordinator prompt already prescribes the discipline that would have
+// prevented it (act-then-mark, end-of-turn unread check). Prescribing it was
+// evidently not sufficient — there was no detector, only an instruction. The set
+// difference between open issues and carried refs is trivially computable and
+// nothing computed it.
+//
+// Sibling of GHTeardownConfig at the opposite end of the same workflow: that one
+// catches a carrier that finished while its issue stayed open, this one catches an
+// issue that never got a carrier. The intake end is the more dangerous, because a
+// teardown miss at least leaves a work item behind.
+//
+// REPORT-ONLY: it mails NotifyTo and never files a work item or comments on an
+// issue. What an issue IS (triage, duplicate, out of scope) is a judgement and it
+// stays with the coordinator.
+type GHIntakeConfig struct {
+	// Enabled turns the runner on. Defaults to true; it is additionally armed
+	// only when the `gh` CLI is available, since without it every repo lookup
+	// fails and the runner would report an environment gap as a wall of
+	// unreadable repos.
+	Enabled bool
+	// Interval is the COARSE gap between samples. Zero falls back to
+	// DefaultGHIntakeInterval.
+	Interval time.Duration
+	// Grace is how long an open issue may exist with no carrier before it counts.
+	// Zero falls back to DefaultGHIntakeGrace; a NEGATIVE value disables the
+	// window so every uncarried issue counts immediately.
+	Grace time.Duration
+	// RenotifyAfter is how long an unchanged set of findings stays quiet before
+	// being mailed again. Zero falls back to DefaultGHIntakeRenotify.
+	RenotifyAfter time.Duration
+	// NotifyTo is the mailbox findings are reported to. Empty falls back to
+	// DefaultGHIntakeNotifyTo (`mayor`) — the agent that can actually file the
+	// carrier. Routing this to `human` would land it in a maildir carrying ~990
+	// unread messages, where it could only be forwarded back.
+	NotifyTo string
+	// EscalateAfter is how long ONE uncarried issue may persist unbroken before
+	// the notice also goes to `human`. Zero falls back to
+	// DefaultGHIntakeEscalateAfter; a NEGATIVE value disables escalation.
+	EscalateAfter time.Duration
+	// Repos is the explicit watch list, as `owner/name` strings. Empty means
+	// "discover it", which reads the issue poller's own state directory
+	// (`$POGO_HOME/gh-issues/seen-<owner>-<repo>.json`) so the two halves of the
+	// reconciliation cannot drift: a repo added to the poller is covered on the
+	// next sample with no second edit to forget. With neither, a built-in default
+	// applies. See internal/ghintake.ResolveRepos.
+	Repos []string
+}
+
 // AckWatchConfig configures pogod's scheduler-completion DEFICIT detector
 // (mg-1935): the heartbeat-driven runner that reads the ack counters the
 // scheduler has kept since mg-a754 and alerts when one schedule is completing
@@ -901,6 +993,7 @@ type parsedConfig struct {
 	driftWatchEnabledSet   bool
 	credExpiryEnabledSet   bool
 	ghTeardownEnabledSet   bool
+	ghIntakeEnabledSet     bool
 	ackWatchEnabledSet     bool
 	deafWatchEnabledSet    bool
 	// sources are the files that were read, lowest precedence first.
@@ -969,6 +1062,14 @@ func Load() *Config {
 			RenotifyAfter: DefaultGHTeardownRenotify,
 			NotifyTo:      DefaultGHTeardownNotifyTo,
 			EscalateAfter: DefaultGHTeardownEscalateAfter,
+		},
+		GHIntake: GHIntakeConfig{
+			Enabled:       true,
+			Interval:      DefaultGHIntakeInterval,
+			Grace:         DefaultGHIntakeGrace,
+			RenotifyAfter: DefaultGHIntakeRenotify,
+			NotifyTo:      DefaultGHIntakeNotifyTo,
+			EscalateAfter: DefaultGHIntakeEscalateAfter,
 		},
 		AckWatch: AckWatchConfig{
 			Enabled:       true,
@@ -1079,6 +1180,31 @@ func Load() *Config {
 		// escalation off, so it must survive the merge like any other override.
 		if fileCfg.GHTeardown.EscalateAfter != 0 {
 			cfg.GHTeardown.EscalateAfter = fileCfg.GHTeardown.EscalateAfter
+		}
+		if fileCfg.ghIntakeEnabledSet {
+			cfg.GHIntake.Enabled = fileCfg.GHIntake.Enabled
+		}
+		if fileCfg.GHIntake.Interval > 0 {
+			cfg.GHIntake.Interval = fileCfg.GHIntake.Interval
+		}
+		// Non-zero, not >0: a negative grace is the documented way to alarm on
+		// every uncarried issue immediately, so it must survive the merge.
+		if fileCfg.GHIntake.Grace != 0 {
+			cfg.GHIntake.Grace = fileCfg.GHIntake.Grace
+		}
+		if fileCfg.GHIntake.RenotifyAfter > 0 {
+			cfg.GHIntake.RenotifyAfter = fileCfg.GHIntake.RenotifyAfter
+		}
+		if fileCfg.GHIntake.NotifyTo != "" {
+			cfg.GHIntake.NotifyTo = fileCfg.GHIntake.NotifyTo
+		}
+		// Non-zero, not >0: a negative value is the documented way to turn
+		// escalation off.
+		if fileCfg.GHIntake.EscalateAfter != 0 {
+			cfg.GHIntake.EscalateAfter = fileCfg.GHIntake.EscalateAfter
+		}
+		if len(fileCfg.GHIntake.Repos) > 0 {
+			cfg.GHIntake.Repos = fileCfg.GHIntake.Repos
 		}
 		if fileCfg.ackWatchEnabledSet {
 			cfg.AckWatch.Enabled = fileCfg.AckWatch.Enabled
@@ -1703,6 +1829,32 @@ func parseConfigFileInto(cfg *parsedConfig, path string) error {
 				if d, err := time.ParseDuration(unquotedVal); err == nil {
 					cfg.GHTeardown.EscalateAfter = d
 				}
+			}
+		case "gh_intake":
+			switch key {
+			case "enabled":
+				cfg.GHIntake.Enabled = val == "true"
+				cfg.ghIntakeEnabledSet = true
+			case "interval":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.GHIntake.Interval = d
+				}
+			case "grace":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.GHIntake.Grace = d
+				}
+			case "renotify_after":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.GHIntake.RenotifyAfter = d
+				}
+			case "notify_to":
+				cfg.GHIntake.NotifyTo = unquotedVal
+			case "escalate_after":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.GHIntake.EscalateAfter = d
+				}
+			case "repos":
+				cfg.GHIntake.Repos = parseStringArray(val)
 			}
 		case "agents":
 			switch key {

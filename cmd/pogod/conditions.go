@@ -35,6 +35,7 @@ const (
 	rowA10RolePin          = "role_pin_failed"
 	rowA11HeartbeatWrite   = "pogod_heartbeat_write_failed"
 	rowA13TeardownNotArmed = "ghteardown_not_armed"
+	rowA13IntakeNotArmed   = "ghintake_not_armed"
 	rowA14LogRotation      = "log_rotation_failed"
 
 	rowA9TicketIndex       = "gitgc_no_ticket_index"
@@ -452,6 +453,56 @@ func conditionTeardownNotArmed(to, detail string) pogodCondition {
 				"     ~/Library/LaunchAgents/com.pogo.daemon.plist (or re-run `pogo service\n"+
 				"     install`, which writes a PATH that includes the usual locations) and reload.\n"+
 				"  3. Confirm with `pogo events --type gh_teardown_report` after the next boot.",
+			detail),
+	}
+}
+
+// conditionIntakeNotArmed — A13's second consequence (mg-039b). Same root cause as
+// conditionTeardownNotArmed, a `gh` that pogod cannot reach, and the same
+// deviation from the routing rule for the same reason: the gh-issue INTAKE
+// detector has a deliberately-chosen mailbox for its findings ([gh_intake]
+// notify_to, the coordinator by default), and its not-armed condition belongs to
+// the same reader as those findings.
+//
+// It is a SEPARATE condition rather than a sentence added to A13's body, because
+// the two detectors have different readers by design — the teardown detector
+// reports to the PM, the intake detector to the coordinator — and one root cause
+// with two affected readers needs two notices or one of them learns nothing. The
+// row number is shared because the fault is one fault; the pattern of several
+// conditions on a single row is already established by A9's four.
+//
+// What it costs is worse than A13's, which is why it is worth its own notice: a
+// disarmed teardown detector leaves a done work item behind for someone to find,
+// while a disarmed intake detector leaves nothing at all — the whole point of
+// mg-039b is that an uncarried issue is invisible to every listing the fleet runs.
+func conditionIntakeNotArmed(to, detail string) pogodCondition {
+	return pogodCondition{
+		ID:     rowA13IntakeNotArmed,
+		Row:    "A13",
+		To:     to,
+		Detail: detail,
+		Subject: "[pogod] gh-issue INTAKE detector NOT ARMED — `gh` is not on the daemon's PATH; " +
+			"open issues are not being reconciled against carriers",
+		Body: conditionBody("A13",
+			"The gh-issue intake detector is enabled but did not arm, because `gh` is not\n"+
+				"reachable on pogod's PATH.",
+			"Nothing is reconciling the OPEN issues on the watched repos against the `gh:`\n"+
+				"  carrier markers in the work-item store. A `[gh]` mail that is delivered and then\n"+
+				"  dropped leaves no trace: the issue appears in no `mg list`, no `--tag=gh-issue`\n"+
+				"  board, and no stall watch, so a reporter waits with no acknowledgement and\n"+
+				"  nothing notices. That is measured, not hypothetical — drellem2/pogo#99 went ~10\n"+
+				"  hours uncarried on 2026-07-29 and was found only because a PM ran a sweep by hand\n"+
+				"  on a hunch. This is a PATH fault, not a config choice, and PATH under launchd is\n"+
+				"  not the PATH in your shell — `gh` working when you type it proves nothing about\n"+
+				"  the daemon.",
+			"1. `launchctl print gui/$(id -u)/com.pogo.daemon | grep -A2 PATH` — compare against\n"+
+				"     where `gh` actually is (`command -v gh`).\n"+
+				"  2. Fix EnvironmentVariables.PATH in\n"+
+				"     ~/Library/LaunchAgents/com.pogo.daemon.plist (or re-run `pogo service\n"+
+				"     install`, which writes a PATH that includes the usual locations) and reload.\n"+
+				"  3. In the meantime run the check by hand: `pogo check-intake`. It is the same\n"+
+				"     detector, and it will tell you immediately whether anything is uncarried.\n"+
+				"  4. Confirm with `pogo events --type gh_intake_watch_fired` after the next boot.",
 			detail),
 	}
 }

@@ -790,6 +790,135 @@ any miss or indeterminate carrier is found, so it can gate a schedule or CI step
 
 Source of truth: `internal/ghteardown/`.
 
+## The gh-issue intake detector
+
+The sibling of the teardown detector at the **other end** of the same workflow.
+That one catches a carrier that finished while its issue stayed open; this one
+catches an issue that never got a carrier at all.
+
+A delivered `[gh]` mail can be dropped with nothing noticing. drellem2/pogo#99
+was filed 2026-07-29 at 18:53:58Z; the poller mailed the coordinator 46 seconds
+later, and again 20 minutes after that when Daniel commented. Both mails were
+delivered. Neither produced a work item, and the issue went **~10 hours** with no
+carrier — invisible to `mg list`, to `mg list --tag=gh-issue`, and to every other
+board the fleet reads. Its paired issue #100, filed 19 minutes later, *was*
+carried, so a pair filed to be considered together got split and the untracked
+half went dark. It surfaced only because a PM ran an open-issue sweep by hand,
+early, on a hunch.
+
+Neither the poller nor mail delivery failed. What failed was follow-through, and
+the coordinator prompt already names the failure mode and prescribes the fix
+(`mg mail read` marks a message read immediately, so act-then-mark plus an
+end-of-turn unread check). **Prescribing it was not sufficient — there was no
+detector, only an instruction.** The set difference between open issues and
+carried refs is trivially computable and nothing computed it.
+
+`pogo check-intake` runs it on demand; pogod runs the same detector on a coarse
+heartbeat interval. Both are **report-only** — neither files a work item nor
+comments on an issue, because what an issue *is* (triage, duplicate, out of
+scope, a question) is a judgement that stays with the coordinator.
+
+- **The predicate** is the `gh:` **body marker**, at any work-item status
+  including archived and shelved. Deliberately not the `gh-issue` tag (a carrier
+  filed without the tag is still a carrier, and treating it as absent produces a
+  finding nobody can clear) and deliberately not a title match (titles drift; the
+  marker is a declaration, and it is the state carrier the playbook defines). For
+  intake the question is only "does a carrier exist at all", so an archived
+  carrier answers it yes.
+- **A ref counts only on a structural line**: one starting with `gh:`, outside
+  blockquotes and outside fenced code blocks. Prose citing an issue does not make
+  an item its carrier — mg-039b's own body quotes the marker syntax and cites #99
+  repeatedly, and a loose parse would have let the ticket silence its own
+  positive control.
+- **Both blind spots are named outcomes, not silences.** A failed `gh issue list`
+  yields no issues, which folded into the scan would read as "no open issues,
+  nothing uncarried, all clear" — so an unreadable repo is reported as a finding.
+  A carrier scan that examined **zero** work items yields no carriers, which
+  folded in would read as "every open issue is uncarried" — a wall of findings
+  that is entirely an artefact of the scan, so it is reported as a **blind scan**
+  instead. Opposite shapes (one silently clean, one loudly wrong), identical
+  consequence: the detector stops being trusted.
+- **Grace window.** An issue younger than `grace` (30m) is listed as **fresh**
+  but never alarmed. The poller mails within ~60s of an issue being filed and the
+  coordinator needs a turn to read it and file the carrier; alarming inside that
+  window would fire on every new issue, and a detector that fires on the happy
+  path gets muted. A negative `grace` reports immediately.
+- **Ambiguous short ids are resolved, not reported.** Short ids are 4 hex digits,
+  so the store collides: 12 pairs of archived twins in different monthly
+  partitions already share an id, and `mg show <id>` refuses to guess between
+  them. The first real run of this scan died on exactly that. The refusal is
+  resolvable — the error names the colliding paths and mg accepts
+  `<id>@<partition>` — so a collision is retried per partition and both twins'
+  refs count. Anything still unreadable is listed as a **coverage gap** but is not
+  actionable on its own: an item whose body cannot be read is an item whose
+  marker cannot be seen, so it can only cause a *false* uncarried finding, never
+  silence about a real one. Total blindness is a different fact and stays
+  actionable via the blind-scan finding.
+- **Notification policy is by condition, not by message.** A changed set of
+  findings mails immediately — a newly uncarried issue is news. An unchanged set
+  stays quiet until `renotify_after` (24h), so an issue uncarried for a week costs
+  one mail a day rather than one a sample. Crossing the escalation threshold is
+  itself a change and mails at once, so a slow renotify interval cannot postpone
+  escalation.
+- **Routing: the coordinator, not the PM and not `human`.** This is where the
+  intake detector parts company with its sibling. The remedy for an uncarried
+  issue is to file a carrier and dispatch triage, and the coordinator is the only
+  agent that does either — "alarm the agent that can act". `human` would land it
+  in a maildir carrying ~990 unread messages, where it could only be forwarded
+  back. There is an added reason here: the failure being detected *is* a
+  coordinator failure, so mailing the coordinator closes the loop on the agent
+  whose dropped mail created the gap.
+- **What happens if the coordinator is down.** The notice does not evaporate: mg
+  mail is a durable maildir, so it waits, and the finding is recomputed from live
+  state every interval regardless of who read what. But a durable notice nobody
+  acts on is still an uncarried issue, so once a **single** issue has gone
+  uncarried for `escalate_after` (4h — far shorter than the teardown detector's
+  72h, because an uncarried issue is a reporter waiting with no acknowledgement
+  and no record anywhere) the notice also copies `human`. At that point "the
+  coordinator is not handling this" has become the news. Escalation ages each
+  issue separately, so a new finding cannot reset an older one's clock.
+- **The watch list** comes from `repos` if set, else from the issue poller's own
+  state directory (`$POGO_HOME/gh-issues/seen-<owner>-<repo>.json`), else from a
+  built-in default. Reading the poller's state rather than duplicating its list is
+  the point: a repo added to the poller is covered on the next pogod restart with
+  no second edit to forget. It reads *state*, not the sent ledger — so a poller
+  that is stopped, wedged, or has never delivered a mail still yields a correct
+  watch list. The report says which source it used.
+- **Why not in the poller?** The poller holds the *sent* side of the ledger, which
+  is a real argument for putting the reconciliation there, and it was declined for
+  three reasons. The sent ledger is the **wrong population** — what matters is not
+  "did we mail about this" but "does a carrier exist for this open issue", and
+  GitHub's open-issue list is authoritative. The poller is a standalone utility in
+  another repo, deliberately kept a dumb transport. And decisively: it would make
+  the poller responsible for the coordinator's follow-through while giving it no
+  way to notice its own, where pogod already has the durable mail, condition
+  annunciation, and escalation path this needs.
+- **Arming.** Skipped entirely when `gh` is not on PATH, since every repo lookup
+  would fail and the runner would report an environment gap as a wall of
+  unreadable repos. That state raises the A13 condition
+  (`ghintake_not_armed`) to the intake mailbox — a separate notice from the
+  teardown detector's on the same row, because one root cause with two readers
+  needs two notices or one reader learns nothing.
+
+```toml
+[gh_intake]
+enabled = true             # default true; skipped when `gh` is unavailable
+interval = "15m"           # coarse sample cadence (default 15m)
+grace = "30m"              # how long an issue may go uncarried before it counts
+                           # (default 30m; negative reports immediately)
+renotify_after = "24h"     # unchanged findings re-mail after this (default 24h)
+notify_to = "mayor"        # mailbox findings go to (default mayor, the ACTOR)
+escalate_after = "4h"      # one uncarried issue also copies `human` after this
+                           # (default 4h; negative disables, zero means default)
+repos = ["drellem2/pogo"]  # explicit watch list; empty means discover it
+```
+
+Exit status of `pogo check-intake` is 0 when nothing is actionable and 1 when any
+uncarried issue, unreadable repo, or blind scan is found, so it can gate a
+schedule or CI step.
+
+Source of truth: `internal/ghintake/`.
+
 ## The scheduler-completion deficit detector (ack-watch)
 
 Since mg-a754 every scheduler fire carries a completion token and the agent
