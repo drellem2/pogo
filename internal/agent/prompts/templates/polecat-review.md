@@ -123,8 +123,9 @@ Follow these steps exactly, in order. Skipping any step is a failure.
 
    1. **QA — build and tests actually run.** Never verdict from reading alone:
       - Run the project's build and test suite (e.g. `./build.sh`, `./test.sh`, `go test ./...`) and confirm they pass on the PR head.
+      - **Predict the outcome before the run.** For any check you run to detect a defect, write down what you expect — pass or fail, and the exit code if there is one — before running it, then record both. A mismatch is a finding about the instrument. A prediction made before the run cannot be fitted to the result afterwards.
       - Exercise the change: if it adds CLI commands or flags, run them; if it changes output formats, look at the output; try the edge cases the spec mentions.
-      - Check that the PR includes tests for the new behavior, following the repo's existing test patterns.
+      - Check that the PR includes tests for the new behavior, following the repo's existing test patterns. **A control the PR adds is untested until it has been made to fail** — where the claim is "this now catches X", exhibit the failing case. And if the PR's test set was fitted to the defects its author already knew, say so and try one case they never saw; such a set passes every row and reads as thorough.
    2. **Architecture — fits the codebase it lands in.**
       - Read the `docs/design/*` docs relevant to the touched area and check the change is consistent with recorded design decisions.
       - Check codebase conventions: package layout, naming, error handling, logging, test style. The diff should read like the code around it.

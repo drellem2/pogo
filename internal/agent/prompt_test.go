@@ -5159,3 +5159,112 @@ func TestPromptsDoNotAnchorAKillToAHardcodedBinaryPath(t *testing.T) {
 		}
 	}
 }
+
+// PREDICT-THE-OUTCOME-BEFORE-THE-RUN, in the two templates whose worker runs
+// checks against work someone else did (mg-04c3).
+//
+// The evidence: mg-218d ran sixteen mutations against a documentation control,
+// each row carrying the exit code PREDICTED BEFORE THE RUN. Sixteen of sixteen
+// matched, so no row was a post-hoc expectation. That is the missing half of "a
+// control must be able to fail" — a positive control proves the instrument can
+// speak; a prediction made first cannot be fitted to the result afterwards.
+//
+// The failure mode it catches is not fraud. It is a test set quietly drawn
+// around the answer its author already had, which is invisible afterwards
+// because every row passes and the write-up reads as thorough. pm-onethird's
+// assessment is that it would have caught the second and third controls in that
+// same audit lineage.
+//
+// Why the templates rather than a brief: the same argument as mg-2530. A rule
+// written into an individual brief lives in one author's path and is bypassed by
+// whoever is moving fastest. The templates are the one place every worker of
+// that kind passes.
+func TestQAAndReviewTemplatesPredictOutcomesBeforeRunning(t *testing.T) {
+	// Both templates carry the prediction rule and the mismatch verdict. The
+	// exit code is named specifically: "what do you expect" invites a mood,
+	// "pass or fail, and the exit code" invites a record.
+	for _, path := range []string{
+		"prompts/templates/polecat-qa.md",
+		"prompts/templates/polecat-review.md",
+	} {
+		data, err := defaultPrompts.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		body := string(data)
+
+		for _, want := range []string{
+			// 1. Predict, then run, then record both.
+			"Predict the outcome before the run",
+			"pass or fail, and the exit code if there is one",
+			// The verdict on a mismatch — otherwise the reader silently
+			// corrects the prediction and the discipline evaporates.
+			"A mismatch is a finding about the instrument",
+			// Why the ORDER is the whole mechanism.
+			"cannot be fitted to the result afterwards",
+			// 2. A control must be exhibited failing. Matched on the tail the
+			// two templates share — they open the clause differently ("this
+			// check now catches X" / "this now catches X"), and asserting
+			// either literal silently checks only one of the two files.
+			`now catches X", exhibit the failing case`,
+			// 3. A fitted battery must be declared, and extended past the
+			// author's known answers.
+			"never saw",
+			"reads as thorough",
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("%s: missing predict-before-run discipline %q (mg-04c3)", path, want)
+			}
+		}
+	}
+
+	// polecat-qa.md owns the fuller statement: it is the template whose entire
+	// deliverable is a verdict on someone else's work, so all three rules land
+	// there in full rather than compressed into a review lens.
+	qa, err := defaultPrompts.ReadFile("prompts/templates/polecat-qa.md")
+	if err != nil {
+		t.Fatalf("read polecat-qa.md: %v", err)
+	}
+	qaBody := string(qa)
+	for _, want := range []string{
+		"A control that has never been made to fail is not a tested control",
+		"If a battery was fitted to a known set of defects, say so",
+	} {
+		if !strings.Contains(qaBody, want) {
+			t.Errorf("polecat-qa.md: missing predict-before-run discipline %q (mg-04c3)", want)
+		}
+	}
+
+	// It is a working instruction, not a gate. Nothing can verify that a
+	// prediction was made before a run, so a template that refuses on it would
+	// be enforcing an unobservable — and a refusal a worker cannot satisfy gets
+	// routed around, taking the cheap useful part with it.
+	for _, forbid := range []string{
+		"do not proceed until you have predicted",
+		"refuse to report a verdict unless",
+	} {
+		if strings.Contains(strings.ToLower(qaBody), forbid) {
+			t.Errorf("polecat-qa.md: turned the prediction rule into a gate (%q); no mechanism can verify a prediction preceded a run (mg-04c3)", forbid)
+		}
+	}
+
+	// The scope pin. The build, PR-build, triage and architect templates were
+	// deliberately left alone: most build work has no battery at all, and a
+	// template that talks past its reader gets skimmed — which would cost the
+	// rules that ARE aimed at that reader. Generalising this into polecat.md
+	// needs its own argument, not a blanket edit.
+	for _, path := range []string{
+		"prompts/templates/polecat.md",
+		"prompts/templates/polecat-build-pr.md",
+		"prompts/templates/polecat-triage.md",
+		"prompts/templates/polecat-architect.md",
+	} {
+		data, err := defaultPrompts.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		if strings.Contains(string(data), "Predict the outcome before the run") {
+			t.Errorf("%s: gained the predict-before-run rule, but the mg-04c3 scope was QA + review; a build worker usually has no battery to fit, and generalising this needs a separate argument (mg-04c3)", path)
+		}
+	}
+}

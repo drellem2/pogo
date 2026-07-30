@@ -126,12 +126,24 @@ Follow these steps exactly, in order. Skipping any step is a failure.
    # or: npm test
    ```
 
+   **Predict the outcome before the run.** For any check you are running to detect a defect, write
+   down first what you expect it to do — pass or fail, and the exit code if there is one — then run
+   it and record both. A mismatch is a finding about the instrument. This costs nothing and it is
+   the only thing that separates a battery from a description: a prediction made before the run
+   cannot be fitted to the result afterwards, and one written down after it is worth nothing.
+
 7. **Verify behavior matches spec.** Go beyond just running tests:
    - Read the spec/acceptance criteria from the source work item.
    - Confirm each criterion is met by the implementation.
    - If the change adds CLI commands or flags, try running them.
    - If the change modifies output formats, verify the output.
    - Check edge cases mentioned in the spec.
+   - **A control that has never been made to fail is not a tested control.** Where the deliverable
+     is "this check now catches X", exhibit the failing case — X present, check fails — not only the
+     passing run.
+   - **If a battery was fitted to a known set of defects, say so**, and write at least one case its
+     author never saw. A test set quietly drawn around the answer its author already had is
+     invisible afterwards: every row passes and the write-up reads as thorough.
 
 8. **Report your result.**
 
