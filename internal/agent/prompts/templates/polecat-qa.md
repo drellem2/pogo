@@ -126,34 +126,44 @@ Follow these steps exactly, in order. Skipping any step is a failure.
    # or: npm test
    ```
 
-   **Predict the outcome before the run.** For any check you are running to detect a defect, write
-   down first what you expect it to do — pass or fail, and the exit code if there is one — then run
-   it and record both. A mismatch is a finding about the instrument. This costs nothing and it is
-   the only thing that separates a battery from a description: a prediction made before the run
-   cannot be fitted to the result afterwards, and one written down after it is worth nothing.
-
 7. **Verify behavior matches spec.** Go beyond just running tests:
    - Read the spec/acceptance criteria from the source work item.
    - Confirm each criterion is met by the implementation.
    - If the change adds CLI commands or flags, try running them.
    - If the change modifies output formats, verify the output.
    - Check edge cases mentioned in the spec.
-   - **A control that has never been made to fail is not a tested control.** Where the deliverable
-     is "this check now catches X", exhibit the failing case — X present, check fails — not only the
-     passing run.
-   - **If a battery was fitted to a known set of defects, say so**, and write at least one case its
-     author never saw. A test set quietly drawn around the answer its author already had is
-     invisible afterwards: every row passes and the write-up reads as thorough.
+
+   **Evidence discipline — four habits, one idea: a claim about your own work is worth what it cost
+   to make.** None of them is a gate; nothing verifies that a prediction preceded a run, that a
+   measurement was taken, or that a near-miss was disclosed. What they change is what you write down
+   before you look.
+
+   - **Predict the outcome before the run.** For any check you run to detect a defect, write down
+     first what it should do — pass or fail, and the exit code if there is one — then run it and
+     record both. A mismatch is a finding about the instrument, and the order is the whole
+     mechanism: a prediction made before the run cannot be fitted to the result afterwards.
+   - **Make the control fail, then try to disarm it.** Where the deliverable is "this
+     now catches X", exhibit the failing case — X present, check fails — not only the passing run.
+     Where the check reads a baseline, fixture, or expected-output file anyone may legitimately
+     regenerate, regenerate it and show the check still fires: a guard that a sanctioned refresh
+     silently disarms passes every test it has and protects nothing thereafter, and
+     the disarming looks like maintenance. And a battery fitted to defects its author already knew
+     has to say so and gain a case they never saw, because such a set passes every row and
+     reads as thorough.
    - **List the brief's "do not X" constraints and check each BY MEASUREMENT.** A precise
-     instruction produces a precise *claim* of compliance and nothing more: mg-a893's acceptance
-     said "do not over-correct" and its commit asserted "AND NOT OVER-CORRECTED", sitting next to
-     the over-correction mg-c6bc then found. The deliverable's own statement that it complied
-     carries no evidential weight — quote what you measured, not what it claimed.
-   - **Look hardest where the deliverable's self-assessment does NOT point.** An incomplete
-     self-attack list is the observed failure mode, not a false one: mg-7d75 pre-filed an attack on
-     itself naming two sections, neither over the line, and the one broken claim was the row its
-     list omitted. The model is mg-5800 on mg-41aa, the day's one clean verdict — that repair closed
-     its own weakest link by measurement instead of defending it in prose.
+     instruction hands the author the exact words for a precise *claim* of compliance and nothing
+     more — mg-a893's acceptance said in terms "do not over-correct", and its commit
+     asserted "AND NOT OVER-CORRECTED", sitting next to the over-correction mg-c6bc then found.
+     Such a claim carries no evidential weight — quote what you measured, not what it claimed.
+   - **Weigh a self-accusation; discount a compliance claim.** "We did not do X" is free to produce
+     and satisfies whoever asked for not-X, while "we caught ourselves doing X" invites scrutiny of
+     the admitter's own work, so nobody says it unless it happened — which makes it strong evidence,
+     including about the rest of the same document. So look hardest where the deliverable's
+     self-assessment does NOT point: an incomplete self-attack list is the observed failure mode, not a false one.
+     And record your own near-misses — what you got wrong and corrected, what nearly shipped:
+     a report naming what went wrong carries information; one saying everything went to plan carries none.
+     The model is mg-5800 on mg-41aa — a repair that closed its own
+     weakest link by measurement instead of defending it in prose.
 
 8. **Report your result.**
 

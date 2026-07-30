@@ -5160,142 +5160,56 @@ func TestPromptsDoNotAnchorAKillToAHardcodedBinaryPath(t *testing.T) {
 	}
 }
 
-// PREDICT-THE-OUTCOME-BEFORE-THE-RUN, in the two templates whose worker runs
-// checks against work someone else did (mg-04c3).
+// THE EVIDENCE DISCIPLINE — one section in the two templates whose worker
+// verdicts on work someone else did (mg-0d85, folding mg-04c3 and mg-c742 in
+// with two additions). Four habits, one idea: a claim about your own work is
+// worth what it cost to make.
 //
-// The evidence: mg-218d ran sixteen mutations against a documentation control,
-// each row carrying the exit code PREDICTED BEFORE THE RUN. Sixteen of sixteen
-// matched, so no row was a post-hoc expectation. That is the missing half of "a
-// control must be able to fail" — a positive control proves the instrument can
-// speak; a prediction made first cannot be fitted to the result afterwards.
+// 1. PREDICT BEFORE THE RUN (mg-04c3). mg-218d ran sixteen mutations against a
+// documentation control with each row's exit code predicted before the run;
+// sixteen of sixteen matched, so no row was a post-hoc expectation. That is the
+// missing half of "a control must be able to fail" — a positive control proves
+// the instrument can speak, and a prediction made first cannot be fitted to the
+// result afterwards. The failure mode is not fraud but a test set quietly drawn
+// around the answer its author already had, invisible afterwards because every
+// row passes and the write-up reads as thorough.
 //
-// The failure mode it catches is not fraud. It is a test set quietly drawn
-// around the answer its author already had, which is invisible afterwards
-// because every row passes and the write-up reads as thorough. pm-onethird's
-// assessment is that it would have caught the second and third controls in that
-// same audit lineage.
+// 2. MAKE THE CONTROL FAIL, THEN TRY TO DISARM IT. The second half is the
+// addition: mg-16eb fired its control, regenerated both baseline tables with the
+// instrument's own --emit-baseline, spliced them back verbatim, and fired the
+// control again — exit 1 before, exit 1 after. That answers "is this guard
+// defeated by a legitimate refresh?", the question that retires guards quietly
+// when nobody asks it: a guard a sanctioned regeneration disarms passes every
+// test it has and protects nothing thereafter, and the disarming looks like
+// maintenance.
 //
-// Why the templates rather than a brief: the same argument as mg-2530. A rule
-// written into an individual brief lives in one author's path and is bypassed by
-// whoever is moving fastest. The templates are the one place every worker of
-// that kind passes.
-func TestQAAndReviewTemplatesPredictOutcomesBeforeRunning(t *testing.T) {
-	// Both templates carry the prediction rule and the mismatch verdict. The
-	// exit code is named specifically: "what do you expect" invites a mood,
-	// "pass or fail, and the exit code" invites a record.
-	for _, path := range []string{
-		"prompts/templates/polecat-qa.md",
-		"prompts/templates/polecat-review.md",
-	} {
-		data, err := defaultPrompts.ReadFile(path)
-		if err != nil {
-			t.Fatalf("read %s: %v", path, err)
-		}
-		body := string(data)
-
-		for _, want := range []string{
-			// 1. Predict, then run, then record both.
-			"Predict the outcome before the run",
-			"pass or fail, and the exit code if there is one",
-			// The verdict on a mismatch — otherwise the reader silently
-			// corrects the prediction and the discipline evaporates.
-			"A mismatch is a finding about the instrument",
-			// Why the ORDER is the whole mechanism.
-			"cannot be fitted to the result afterwards",
-			// 2. A control must be exhibited failing. Matched on the tail the
-			// two templates share — they open the clause differently ("this
-			// check now catches X" / "this now catches X"), and asserting
-			// either literal silently checks only one of the two files.
-			`now catches X", exhibit the failing case`,
-			// 3. A fitted battery must be declared, and extended past the
-			// author's known answers.
-			"never saw",
-			"reads as thorough",
-		} {
-			if !strings.Contains(body, want) {
-				t.Errorf("%s: missing predict-before-run discipline %q (mg-04c3)", path, want)
-			}
-		}
-	}
-
-	// polecat-qa.md owns the fuller statement: it is the template whose entire
-	// deliverable is a verdict on someone else's work, so all three rules land
-	// there in full rather than compressed into a review lens.
-	qa, err := defaultPrompts.ReadFile("prompts/templates/polecat-qa.md")
-	if err != nil {
-		t.Fatalf("read polecat-qa.md: %v", err)
-	}
-	qaBody := string(qa)
-	for _, want := range []string{
-		"A control that has never been made to fail is not a tested control",
-		"If a battery was fitted to a known set of defects, say so",
-	} {
-		if !strings.Contains(qaBody, want) {
-			t.Errorf("polecat-qa.md: missing predict-before-run discipline %q (mg-04c3)", want)
-		}
-	}
-
-	// It is a working instruction, not a gate. Nothing can verify that a
-	// prediction was made before a run, so a template that refuses on it would
-	// be enforcing an unobservable — and a refusal a worker cannot satisfy gets
-	// routed around, taking the cheap useful part with it.
-	for _, forbid := range []string{
-		"do not proceed until you have predicted",
-		"refuse to report a verdict unless",
-	} {
-		if strings.Contains(strings.ToLower(qaBody), forbid) {
-			t.Errorf("polecat-qa.md: turned the prediction rule into a gate (%q); no mechanism can verify a prediction preceded a run (mg-04c3)", forbid)
-		}
-	}
-
-	// The scope pin. The build, PR-build, triage and architect templates were
-	// deliberately left alone: most build work has no battery at all, and a
-	// template that talks past its reader gets skimmed — which would cost the
-	// rules that ARE aimed at that reader. Generalising this into polecat.md
-	// needs its own argument, not a blanket edit.
-	for _, path := range []string{
-		"prompts/templates/polecat.md",
-		"prompts/templates/polecat-build-pr.md",
-		"prompts/templates/polecat-triage.md",
-		"prompts/templates/polecat-architect.md",
-	} {
-		data, err := defaultPrompts.ReadFile(path)
-		if err != nil {
-			t.Fatalf("read %s: %v", path, err)
-		}
-		if strings.Contains(string(data), "Predict the outcome before the run") {
-			t.Errorf("%s: gained the predict-before-run rule, but the mg-04c3 scope was QA + review; a build worker usually has no battery to fit, and generalising this needs a separate argument (mg-04c3)", path)
-		}
-	}
-}
-
-// EVERY "do not X" IN A BRIEF GETS "verify X did not happen, BY MEASUREMENT" in
-// the paired audit, in the two templates whose worker audits work someone else
-// did (mg-c742). Companion to mg-04c3, which sits immediately above.
+// 3. MEASURE EVERY "do not X" (mg-c742). An instruction reliably produces the
+// SENTENCE about the risk, not the avoidance of it — the more precisely a brief
+// names a failure mode, the more precisely a deliverable can assert it was
+// avoided, with no more evidence behind the assertion. mg-a893's acceptance said
+// in terms "do not over-correct"; its commit asserts "AND NOT OVER-CORRECTED",
+// sitting next to the over-correction mg-c6bc then found. The author did not
+// volunteer that cover; the instruction supplied the words.
 //
-// The finding is counterintuitive: an instruction reliably produces the
-// SENTENCE about the risk, not the avoidance of it. pm-onethird's formulation —
-// "the more precisely a brief names a failure mode, the more precisely a
-// deliverable can assert it was avoided, with no more evidence behind the
-// assertion." So escalating brief wording is not a mitigation and may be
-// actively counterproductive: it hands the author the exact words to claim
-// compliance in.
+// 4. WEIGH A SELF-ACCUSATION, DISCOUNT A COMPLIANCE CLAIM. The asymmetry is why
+// this is not symmetric advice: a compliance claim is free to produce and
+// satisfies whoever asked for not-X, while an admission of X invites scrutiny of
+// the admitter's own work, so nobody makes it unless it happened. An auditor
+// recording that its own reproduce16eb.py printed "0 figures ... unreproduced"
+// unconditionally — on a run where one of seven had not reproduced — was the day
+// that made the point. Hence: look where the self-assessment does NOT point
+// (mg-7d75 pre-filed an attack naming two sections, neither over the line, and
+// the one broken claim was the row its list omitted), and ask for near-misses
+// rather than compliance.
 //
-// The decisive instance, because the naming was ours: mg-a893's acceptance said
-// in terms "Do not over-correct", and its commit message asserts "AND NOT
-// OVER-CORRECTED" — sitting next to the over-correction mg-c6bc then found. The
-// author did not volunteer that cover; the instruction supplied the words.
-//
-// A brief instructs; an audit detects; they are not substitutes. Same placement
-// argument as mg-04c3 and mg-0e24: a rule in the author's path is bypassed by
-// whoever is moving fastest — and here, worse, it is *answered* rather than
-// bypassed.
-func TestQAAndReviewTemplatesCheckDoNotConstraintsByMeasurement(t *testing.T) {
-	// Both templates carry the rule, the no-evidential-weight verdict on a
-	// self-report, and the instruction to look where the self-assessment does
-	// not point. Every literal below is written IDENTICALLY in the two files on
-	// purpose: mg-04c3's own first run caught a defect in itself because the
-	// two templates opened a shared clause differently, so a shared assertion
+// Why the templates rather than a brief: the same argument as mg-2530. A rule in
+// one author's brief is bypassed by whoever is moving fastest — and a "do not X"
+// is worse than bypassed, it is *answered*. The templates are the one place every
+// worker of that kind passes.
+func TestQAAndReviewTemplatesCarryTheEvidenceDiscipline(t *testing.T) {
+	// Every literal below is written IDENTICALLY in the two files on purpose:
+	// mg-04c3's own first run caught a defect in itself because the two
+	// templates opened a shared clause differently, so a shared assertion
 	// silently checked only one of them.
 	for _, path := range []string{
 		"prompts/templates/polecat-qa.md",
@@ -5308,32 +5222,82 @@ func TestQAAndReviewTemplatesCheckDoNotConstraintsByMeasurement(t *testing.T) {
 		body := string(data)
 
 		for _, want := range []string{
-			// 1. Enumerate the constraints, and check them by measuring.
+			// The four are one section, and the section says what it is for.
+			"Evidence discipline — four habits, one idea",
+
+			// 1. Predict, then run, then record both. The exit code is named
+			// specifically: "what do you expect" invites a mood, "pass or
+			// fail, and the exit code" invites a record.
+			"Predict the outcome before the run",
+			"pass or fail, and the exit code if there is one",
+			// The verdict on a mismatch — otherwise the reader silently
+			// corrects the prediction and the discipline evaporates.
+			"A mismatch is a finding about the instrument",
+			// Why the ORDER is the whole mechanism.
+			"cannot be fitted to the result afterwards",
+
+			// 2. A control must be exhibited failing. Matched on the tail the
+			// two templates share — they open the clause differently ("the
+			// deliverable is" / "the PR's claim is"), and asserting either
+			// literal silently checks only one of the two files.
+			`now catches X", exhibit the failing case`,
+			// The recovery demonstration: regenerate the baseline the way
+			// anyone legitimately would, and show the guard still fires.
+			"regenerate it and show the check still fires",
+			// Why a defeated guard is invisible rather than noisy.
+			"the disarming looks like maintenance",
+			// A fitted battery must be declared and extended past the
+			// author's known answers.
+			"never saw",
+			"reads as thorough",
+
+			// 3. Enumerate the "do not X" constraints, and check by measuring.
 			`do not X" constraints and check each BY MEASUREMENT`,
-			// 2. The deliverable's own claim of not-X is unevidenced until
-			// then — without this the rule is satisfied by reading the commit
+			// The deliverable's own claim of not-X is unevidenced until then —
+			// without this the rule is satisfied by reading the commit
 			// message, which is exactly what failed.
 			"carries no evidential weight",
 			"quote what you measured, not what it claimed",
-			// 3. Where to look. An incomplete self-attack list is the observed
+
+			// 4. The asymmetry that makes self-accusation informative and
+			// self-praise worthless — stated, not assumed, because it is the
+			// reason the advice is one-sided.
+			"we caught ourselves doing X",
+			"including about the rest of the same document",
+			// Where to look. An incomplete self-attack list is the observed
 			// failure mode, so the self-assessment directs attention AWAY.
 			"self-assessment does NOT point",
 			// Matched from "self-attack" rather than from "An incomplete",
 			// which wraps mid-phrase in polecat-qa.md — the same defect
 			// mg-04c3's own first run caught in itself.
 			"self-attack list is the observed failure mode, not a false one",
+			// And what the worker owes about its own process.
+			"record your own near-misses",
+			"carries information; one saying everything went to plan carries none",
 		} {
 			if !strings.Contains(body, want) {
-				t.Errorf("%s: missing measure-the-do-nots discipline %q (mg-c742)", path, want)
+				t.Errorf("%s: missing evidence discipline %q (mg-0d85)", path, want)
 			}
+		}
+
+		// One section, not four paragraphs bolted on in sequence. The whole
+		// point of the fold is that a template every worker of its type reads
+		// gets skimmed when it accretes; a second "Evidence discipline" heading
+		// means the next addition appended instead of merging.
+		if got := strings.Count(body, "Evidence discipline"); got != 1 {
+			t.Errorf("%s: %d evidence-discipline sections, want exactly 1 — the four habits are one idea and were folded into one section on purpose (mg-0d85)", path, got)
+		}
+		if got := strings.Count(body, "Predict the outcome before the run"); got != 1 {
+			t.Errorf("%s: %d copies of the predict-before-run rule, want exactly 1 — it lives in the evidence-discipline section, not also inline in a step (mg-0d85)", path, got)
 		}
 	}
 
-	// polecat-qa.md owns the fuller statement, as with mg-04c3: it is the
-	// template whose entire deliverable is a verdict on someone else's work. It
-	// carries the two worked instances — the claim that sat next to its own
-	// violation, and the one clean verdict of that day, which got there by
-	// closing its weakest link by measurement rather than defending it in prose.
+	// polecat-qa.md owns the fuller statement: it is the template whose entire
+	// deliverable is a verdict on someone else's work, so the worked instances
+	// land there rather than compressed into a review lens — the claim that sat
+	// next to its own violation, and the one clean verdict of that day, which
+	// got there by closing its weakest link by measurement rather than defending
+	// it in prose.
 	qa, err := defaultPrompts.ReadFile("prompts/templates/polecat-qa.md")
 	if err != nil {
 		t.Fatalf("read polecat-qa.md: %v", err)
@@ -5344,29 +5308,35 @@ func TestQAAndReviewTemplatesCheckDoNotConstraintsByMeasurement(t *testing.T) {
 		"weakest link by measurement instead of defending it in prose",
 	} {
 		if !strings.Contains(qaBody, want) {
-			t.Errorf("polecat-qa.md: missing measure-the-do-nots discipline %q (mg-c742)", want)
+			t.Errorf("polecat-qa.md: missing evidence discipline %q (mg-0d85)", want)
 		}
 	}
 
-	// Not a gate. Nothing can mechanically verify that a measurement was made,
-	// so a template that refuses on it would be enforcing an unobservable — and
-	// a refusal a worker cannot satisfy gets routed around, taking the cheap
-	// useful part with it. Its value is that it changes what the auditor looks
-	// for.
+	// None of the four is a gate. Nothing can verify that a prediction preceded
+	// a run, that a measurement was taken, or that a near-miss was disclosed, so
+	// a template refusing on any of them would be enforcing an unobservable —
+	// and a refusal a worker cannot satisfy gets routed around, taking the cheap
+	// useful part with it. Their value is that they change what the worker
+	// writes down before they look.
 	for _, forbid := range []string{
+		"do not proceed until you have predicted",
+		"refuse to report a verdict unless",
 		"do not report a verdict until you have measured",
 		"refuse to verdict unless",
+		"do not report a verdict until you have disclosed",
 	} {
 		if strings.Contains(strings.ToLower(qaBody), forbid) {
-			t.Errorf("polecat-qa.md: turned the measure-the-do-nots rule into a gate (%q); no mechanism can verify a measurement was made (mg-c742)", forbid)
+			t.Errorf("polecat-qa.md: turned the evidence discipline into a gate (%q); nothing can verify a prediction preceded a run, a measurement was taken, or a near-miss was disclosed (mg-0d85)", forbid)
 		}
 	}
 
-	// The scope pin, matching mg-04c3's. The default, PR-build, triage and
-	// architect templates were deliberately left alone: this is an auditor's
-	// rule, aimed at a reader who is checking someone else's compliance claim,
-	// and a template that talks past its reader gets skimmed. Widening it into
-	// polecat.md needs its own argument, not a blanket edit.
+	// The scope pin, inherited from mg-04c3 and mg-c742 and unchanged by the
+	// fold. The default, PR-build, triage and architect templates were
+	// deliberately left alone: this is an auditor's section, aimed at a reader
+	// checking someone else's compliance claim, and most build work has no
+	// battery to fit at all. A template that talks past its reader gets skimmed,
+	// which would cost the rules that ARE aimed at that reader. Widening this
+	// into polecat.md needs its own argument, not a blanket edit.
 	for _, path := range []string{
 		"prompts/templates/polecat.md",
 		"prompts/templates/polecat-build-pr.md",
@@ -5377,8 +5347,14 @@ func TestQAAndReviewTemplatesCheckDoNotConstraintsByMeasurement(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read %s: %v", path, err)
 		}
-		if strings.Contains(string(data), "constraints and check each BY MEASUREMENT") {
-			t.Errorf("%s: gained the measure-the-do-nots rule, but the mg-c742 scope was QA + review; this is an auditor's rule and widening it into a build worker's template needs a separate argument (mg-c742)", path)
+		for _, forbid := range []string{
+			"Evidence discipline",
+			"Predict the outcome before the run",
+			"constraints and check each BY MEASUREMENT",
+		} {
+			if strings.Contains(string(data), forbid) {
+				t.Errorf("%s: gained %q, but the evidence-discipline scope is QA + review; widening it to a build worker's template needs a separate argument (mg-0d85)", path, forbid)
+			}
 		}
 	}
 }
