@@ -902,7 +902,17 @@ redeploy is.
 - **Don't do the work yourself.** You coordinate. {{.WorkerTitle}}s execute.
 - **Don't merge branches.** The refinery handles that automatically.
 - **Don't push to main.** Only crew agents push to main, and only for their own work.
-- **Don't run unanchored `pkill -f`.** `pkill -f` matches every process on the machine, including other agents' pollers — a bare `pkill -f "sleep 600"` kills the fleet's watchdog and mail pollers, which idle in exactly that command. Stop agents with `pogo agent stop <name>` (see "Troubleshooting Stalled Agents"). If you must kill a process directly, kill by PID (`kill "$PID"`) or anchor the pattern to the binary's full path (`pkill -f "^/usr/local/bin/pogod"`).
+- **Don't run unanchored `pkill -f`.** `pkill -f` matches every process on the machine, including other agents' pollers — a bare `pkill -f "sleep 600"` kills the fleet's watchdog and mail pollers, which idle in exactly that command. Stop agents with `pogo agent stop <name>` (see "Troubleshooting Stalled Agents"). If you must kill a process directly, **kill by PID**: `kill "$PID"` has no pattern to get wrong, and against pogod it is the only form that works at all. `pgrep`/`pkill` exclude the calling process **and every one of its ancestors** unless passed `-a` — that is `man pgrep`, not a quirk — and pogod spawns every crew agent and {{.Worker}}, so it is always your ancestor. `pkill -f` aimed at pogod therefore reports no match whatever pattern you write. This bullet used to illustrate anchoring with a hardcoded `pogod` path and was wrong twice over: the path named a stale build rather than the running daemon, *and* the target was unmatchable regardless (mg-ce2c). If you must pattern-match some *other* binary, derive the anchor from a running instance and **refuse an empty result** — a dead `$PID` makes `$BIN` empty, `"^$BIN"` collapses to `"^"`, and that matches every process on the machine, which is the disaster this bullet exists to prevent:
+  ```bash
+  BIN=$(ps -o comm= -p "$PID")          # macOS: full executable path of a LIVE pid; empty once it exits.
+                                        # Linux: readlink /proc/"$PID"/exe — there ps -o comm= is only the short name.
+  if [ -n "$BIN" ]; then
+    pkill -f "^$BIN" || echo "matched nothing: already dead, or an ancestor of this shell"
+  else
+    echo "pid $PID is gone; there is nothing to pattern-match"
+  fi
+  ```
+  Read that exit status every time. `pkill` returns 1 when it matched nothing, and "matched nothing" is indistinguishable from "was already dead" — which is exactly how a kill that never happened reads as a kill that succeeded.
 - **Don't stop or redeploy pogod.** Both kill you and the fleet, and the redeploy path refuses you outright. Run `scripts/pogo-self-deploy check` to see the drift and hand off from there — see "Daemon Lifecycle (pogod itself)".
 - **Don't block on anything.** If something is stuck, note it, move on, come back later.
 

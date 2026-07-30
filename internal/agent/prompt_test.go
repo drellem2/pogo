@@ -4840,3 +4840,126 @@ func roadmapInputCommands(t *testing.T, body string) string {
 	}
 	return out
 }
+
+// The anchored-`pkill` example named a binary nothing was running (mg-ce2c).
+//
+// mayor.md and crew/doctor.md both closed their unanchored-`pkill` warning with
+// `pkill -f "^/usr/local/bin/pogod"` as the how-to-anchor-it example. Measured
+// on 2026-07-30, that pattern matched nothing and exited 1. Two independent
+// reasons, and the second is the one that makes a fresher literal useless:
+//
+//  1. The path was stale. `/usr/local/bin/pogod` EXISTS — a Mar-20 build — so an
+//     `ls` check confirms it, while `which pogod` and the running daemon
+//     (pid 57196) were both `~/go/bin/pogod`. That is worse than an ordinary
+//     dead path: the obvious verification agrees with the wrong answer.
+//
+//  2. pogod is unmatchable by `pkill` from any agent, at any path. `man pgrep`:
+//     "-a  Include process ancestors in the match list. By default, the current
+//     pgrep or pkill process and all of its ancestors are excluded." pogod
+//     spawns every crew agent and polecat, so it is always an ancestor of the
+//     shell running the `pkill`. Measured: `pgrep -f .` enumerated 889 of 907
+//     processes and omitted pogod, this shell, its claude process, and launchd —
+//     the whole ancestor chain — while `pgrep -a -x pogod` returned 57196.
+//     So correcting the literal alone would have shipped an example that still
+//     silently does nothing.
+//
+// The failure shape is why this is pinned rather than patched: `pkill` exits 1
+// on no match, and "matched nothing" is indistinguishable from "was already
+// dead". An agent mid-incident reads the anchored kill as having worked.
+//
+// The replacement's own hazard is pinned too, because it is worse than what it
+// replaces. `pkill -f "^$(ps -o comm= -p "$PID")"` looks like the obvious
+// de-hardcoding fix, but `ps` prints nothing for a pid that has already exited,
+// the pattern collapses to `"^"`, and that matches everything: measured at 894
+// of 907 processes, i.e. the entire fleet. A stale literal fails safe; the naive
+// derivation fails catastrophically, and precisely in the common case — chasing
+// a process that is already gone. So the guard is part of the pin, not a
+// stylistic nicety.
+func TestPromptsDoNotAnchorAKillToAHardcodedBinaryPath(t *testing.T) {
+	var entries []string
+	if err := fs.WalkDir(defaultPrompts, "prompts", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() {
+			entries = append(entries, path)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("walk prompts: %v", err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("no shipped prompts found; the sweep below would pass vacuously")
+	}
+
+	for _, path := range entries {
+		data, err := defaultPrompts.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		body := string(data)
+
+		// The stale binary, struck from every shipped prompt so a copy-paste
+		// cannot reintroduce it.
+		if strings.Contains(body, "/usr/local/bin/pogod") {
+			t.Errorf("%s: anchors to /usr/local/bin/pogod, a stale build that still exists (so `ls` confirms it) while the daemon runs from ~/go/bin/pogod — the anchored kill matches nothing and reads as success (mg-ce2c)", path)
+		}
+
+		// The defect CLASS, not just the one literal: an anchor opening with a
+		// hardcoded absolute path. The legitimate forms expand a variable
+		// first — `^{{.WorktreeDir}}/...` in the polecat templates, or `^$BIN`
+		// derived at run time — so neither trips this.
+		if strings.Contains(body, `pkill -f "^/`) {
+			t.Errorf("%s: anchors a pkill to a hardcoded absolute path; derive it from a running instance instead, because a path written into a prompt is the claim that rots and this one did (mg-ce2c)", path)
+		}
+
+		// Any prompt shipping the derived form must ship the empty-guard with
+		// it. Unguarded, an exited $PID empties $BIN and "^$BIN" becomes "^",
+		// which matched 894 of 907 processes when measured.
+		if strings.Contains(body, `pkill -f "^$BIN"`) && !strings.Contains(body, `[ -n "$BIN" ]`) {
+			t.Errorf("%s: uses pkill -f \"^$BIN\" without a [ -n \"$BIN\" ] guard; a dead $PID makes $BIN empty and \"^\" matches every process on the machine (mg-ce2c)", path)
+		}
+	}
+
+	// The two prompts that carried the defect now carry the replacement.
+	for _, path := range []string{"prompts/mayor.md", "prompts/crew/doctor.md"} {
+		data, err := defaultPrompts.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		body := string(data)
+
+		for _, want := range []string{
+			// Derived, not asserted.
+			`ps -o comm= -p "$PID"`,
+			// The guard, and the reason it exists.
+			`[ -n "$BIN" ]`,
+			`"^"`,
+			// The ancestor exclusion — the half that makes any literal useless.
+			"ancestors",
+			"`-a`",
+			// A no-match is not evidence of a kill.
+			"returns 1 when it matched nothing",
+			// Linux is answered rather than assumed: `ps -o comm=` there is the
+			// short name, not a path, so the recipe would be wrong aimed at it.
+			`readlink /proc/"$PID"/exe`,
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("%s: missing kill-anchor guidance %q (mg-ce2c)", path, want)
+			}
+		}
+
+		// The surrounding warning is load-bearing and must survive the edit: an
+		// unanchored `pkill -f "sleep 600"` has previously killed the fleet's
+		// mail pollers, which idle in exactly that command.
+		for _, keep := range []string{
+			`pkill -f "sleep 600"`,
+			`kill "$PID"`,
+			"pogo agent stop <name>",
+		} {
+			if !strings.Contains(body, keep) {
+				t.Errorf("%s: dropped %q from the unanchored-pkill warning; that paragraph is why the fleet's pollers are still alive (mg-ce2c)", path, keep)
+			}
+		}
+	}
+}

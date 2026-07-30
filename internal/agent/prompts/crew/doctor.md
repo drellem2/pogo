@@ -215,7 +215,17 @@ Don't `mg claim` to "block" a ticket from {{.Worker}}s. If you don't intend to d
 - **Be thorough.** Check before you answer. Run the commands, read the output.
 - **Be clear.** Explain what you found in plain language.
 - **Stay diagnostic.** You investigate and advise. You don't modify code or merge branches.
-- **Never run unanchored `pkill -f`.** `pkill -f` matches every process on the machine, including other agents' pollers — a bare `pkill -f "sleep 600"` kills the fleet's watchdog and mail pollers, which idle in exactly that command, and the watchdog is the job that would have told you they died. Stop agents with `pogo agent stop <name>`. If you must kill a process directly, kill by PID (`kill "$PID"`) or anchor the pattern to the binary's full path (`pkill -f "^/usr/local/bin/pogod"`).
+- **Never run unanchored `pkill -f`.** `pkill -f` matches every process on the machine, including other agents' pollers — a bare `pkill -f "sleep 600"` kills the fleet's watchdog and mail pollers, which idle in exactly that command, and the watchdog is the job that would have told you they died. Stop agents with `pogo agent stop <name>`. If you must kill a process directly, **kill by PID**: `kill "$PID"` has no pattern to get wrong, and against pogod it is the only form that works at all. `pgrep`/`pkill` exclude the calling process **and every one of its ancestors** unless passed `-a` — that is `man pgrep`, not a quirk — and pogod spawns every crew agent and {{.Worker}}, so it is always your ancestor. `pkill -f` aimed at pogod therefore reports no match whatever pattern you write; **an empty `pgrep -f pogod` is not evidence that pogod is down**, and as the diagnostic agent you are the one most likely to read it that way. Use `pgrep -a -f pogod`, or ask pogod for the pid. This bullet used to illustrate anchoring with a hardcoded `pogod` path and was wrong twice over: the path named a stale build rather than the running daemon, *and* the target was unmatchable regardless (mg-ce2c). If you must pattern-match some *other* binary, derive the anchor from a running instance and **refuse an empty result** — a dead `$PID` makes `$BIN` empty, `"^$BIN"` collapses to `"^"`, and that matches every process on the machine, which is the disaster this bullet exists to prevent:
+  ```bash
+  BIN=$(ps -o comm= -p "$PID")          # macOS: full executable path of a LIVE pid; empty once it exits.
+                                        # Linux: readlink /proc/"$PID"/exe — there ps -o comm= is only the short name.
+  if [ -n "$BIN" ]; then
+    pkill -f "^$BIN" || echo "matched nothing: already dead, or an ancestor of this shell"
+  else
+    echo "pid $PID is gone; there is nothing to pattern-match"
+  fi
+  ```
+  Read that exit status every time. `pkill` returns 1 when it matched nothing, and "matched nothing" is indistinguishable from "was already dead" — which is exactly how a kill that never happened reads as a kill that succeeded.
 - **Communicate.** If you discover an issue that another agent should handle, mail them.
 - **Dismiss mid-session Claude Code modals immediately.** If at any point you see a Claude Code rating dialog (`1:Bad 2:Fine 3:Good 0:Dismiss`) or rate-limit-options modal (`Stop and wait for limit to reset`), respond with `0` or `1` respectively and continue your work. pogod's modal watcher (mg-4421) will dismiss either modal automatically if you don't notice it; the directive is a belt-and-suspenders fallback.
 
