@@ -2283,16 +2283,92 @@ func TestTriageTemplateInvestigateAndRecommendOnly(t *testing.T) {
 		t.Error("polecat-triage.md: expected the pm-pogo consult step")
 	}
 
-	// Structured recommendation keys in the mg done result, per pm-pogo's
-	// authoritative format (owner of the quality bar).
-	for _, key := range []string{`"workflow"`, `"issue"`, `"kind"`, `"recommendation"`, `"proposed_approach"`, `"effort"`, `"open_questions"`, `"checked"`, `"reproduced"`, `"duplicates"`, `"proposed_public_reply"`} {
+	// Structured recommendation keys in the packet, per pm-pogo's authoritative
+	// format (owner of the quality bar). `remainder` is mg-1912's addition: it
+	// is what the coordinator turns into the successor at the gate, so a packet
+	// without it leaves the coordinator inventing one.
+	for _, key := range []string{`"workflow"`, `"issue"`, `"kind"`, `"recommendation"`, `"proposed_approach"`, `"effort"`, `"open_questions"`, `"checked"`, `"reproduced"`, `"duplicates"`, `"remainder"`, `"proposed_public_reply"`} {
 		if !strings.Contains(s, key) {
-			t.Errorf("polecat-triage.md: expected %s key in the structured mg done result", key)
+			t.Errorf("polecat-triage.md: expected %s key in the structured recommendation packet", key)
 		}
 	}
 	// The full verdict vocabulary, including the polite already-works close.
 	if !strings.Contains(s, "implement|wontfix|needs-info|duplicate|already-works") {
 		t.Error("polecat-triage.md: expected the full recommendation vocabulary")
+	}
+
+	// mg-1912: the packet must NOT be recorded with `mg done --result` on the
+	// triage ticket. That ticket carries `declares-remainder` (mg emits the tag
+	// from a body leading `stage: triage`), and `mg done` refuses a declared
+	// item that names no successor — the successor being the build ticket, filed
+	// after the human gate. The guard runs before the sidecar is written, so the
+	// refusal discarded the packet outright. The packet goes on the ticket body,
+	// where there is no such precondition; the coordinator lifts it into
+	// `--result` at transition 3, when a successor finally exists.
+	//
+	// Asserted end to end against a real store by
+	// TestTriagePacketIsWrittenBeforeAnySuccessorExists; asserted here as text
+	// so a reworded step 8 that drops the mechanism is caught by the fast suite
+	// too.
+	if strings.Contains(s, "mg done {{.Id}} --result") {
+		t.Error("polecat-triage.md: step 8 must not record the packet with " +
+			"`mg done {{.Id}} --result` — the triage ticket declares a remainder and " +
+			"no successor exists before the gate, so that call is refused (exit 4) " +
+			"BEFORE any sidecar is written and the packet is lost (mg-1912)")
+	}
+	if !strings.Contains(s, "```json triage-packet") {
+		t.Error("polecat-triage.md: expected the packet to be appended to the work " +
+			"item body in a fenced ```json triage-packet block — that is the marker " +
+			"mayor.md's transition-3 extractor keys on (mg-1912)")
+	}
+	if !strings.Contains(s, "--append-body-file") {
+		t.Error("polecat-triage.md: expected `mg edit --append-body-file` to write the " +
+			"packet; it composes against the body on disk, so it cannot clobber the " +
+			"coordinator's `stage:` edits (mg-1912)")
+	}
+	if !strings.Contains(s, "Never invent a successor id") {
+		t.Error("polecat-triage.md: expected the anti-fabrication rule — mg refuses a " +
+			"successor naming no item, but a real-but-wrong id is accepted silently " +
+			"and gates a live item on a ticket that can never complete (mg-1912)")
+	}
+}
+
+// TestMayorRetiresTheTriageTicketWithTheWorkersOwnPacket is the consumer half of
+// mg-1912. The triage worker's packet now lands on the triage ticket body, so
+// mayor.md must (a) point the build worker at that block rather than at a result
+// sidecar that did not exist, and (b) lift the block into `--result` when it
+// retires the ticket with `--successor` at transition 3 — the first moment a
+// successor exists. Without (b) the relocation would cost the control-plane
+// record; without (a) the packet is written and unfindable, which is the same
+// defect wearing a different hat.
+func TestMayorRetiresTheTriageTicketWithTheWorkersOwnPacket(t *testing.T) {
+	data, err := defaultPrompts.ReadFile("prompts/mayor.md")
+	if err != nil {
+		t.Fatalf("read mayor.md: %v", err)
+	}
+	s := string(data)
+
+	if strings.Contains(s, "(see its result packet)") {
+		t.Error("mayor.md: the build ticket body still points at the triage ticket's " +
+			"`result packet`, which nothing wrote before the gate; point it at the " +
+			"fenced json triage-packet block on the triage ticket body (mg-1912)")
+	}
+	if !strings.Contains(s, "json triage-packet") {
+		t.Error("mayor.md: expected the json triage-packet marker — both the build " +
+			"ticket's pointer and transition 3's extractor depend on it (mg-1912)")
+	}
+	if !strings.Contains(s, `--successor=<build ticket id> --result="$PACKET"`) {
+		t.Error("mayor.md: transition 3 must retire the triage ticket with the " +
+			"worker's own extracted packet (`--result=\"$PACKET\"`), so the sidecar " +
+			"records what the worker wrote rather than a coordinator paraphrase — the " +
+			"coordinator does not have the packet as JSON any other way (mg-1912)")
+	}
+	// The worker no longer attempts `mg done` on the triage ticket, so mayor.md
+	// must not tell the coordinator it merely *failed*: it is never tried.
+	if strings.Contains(s, "cannot have succeeded on a ticket carrying the tag") {
+		t.Error("mayor.md: the retirement note still describes the triage worker's " +
+			"own `mg done` as having been attempted and refused; it is no longer " +
+			"attempted at all (mg-1912)")
 	}
 }
 
@@ -4593,13 +4669,19 @@ func TestPromptsTeachAppendBodyRatherThanWholesaleRewrite(t *testing.T) {
 	// A worker prompt gaining this block means someone blanket-edited the
 	// corpus; a worker prompt gaining `mg edit` at all means the scope of both
 	// this change and mg-61f4's needs revisiting deliberately.
+	//
+	// polecat-triage.md is the one deliberate revision, made under mg-1912 and
+	// listed separately below rather than dropped from the pin. Its protocol is
+	// NOT claim -> work -> `mg done`: `mg done` is refused on a triage ticket
+	// (it declares a remainder and the successor is filed after the human gate),
+	// so the recommendation packet has nowhere to go but the item's own body.
+	// One append, on its own item, is the whole affordance.
 	for _, path := range []string{
 		"prompts/templates/polecat.md",
 		"prompts/templates/polecat-architect.md",
 		"prompts/templates/polecat-build-pr.md",
 		"prompts/templates/polecat-qa.md",
 		"prompts/templates/polecat-review.md",
-		"prompts/templates/polecat-triage.md",
 	} {
 		data, err := defaultPrompts.ReadFile(path)
 		if err != nil {
@@ -4611,6 +4693,29 @@ func TestPromptsTeachAppendBodyRatherThanWholesaleRewrite(t *testing.T) {
 		}
 		if strings.Contains(w, "mg edit") {
 			t.Errorf("%s: gained an `mg edit` affordance, so it now edits bodies — the mg-4bb9 scope needs revisiting", path)
+		}
+	}
+
+	// The triage carve-out, pinned as narrowly as it was granted. The ratchet's
+	// actual protection is what survives here: an append cannot destroy a
+	// section it never saw, and `--body-file` on a live ticket can and has
+	// (mg-f326). A triage worker that gained the wholesale rewrite would be
+	// racing the coordinator's `stage:` edits on the same body.
+	triage, err := defaultPrompts.ReadFile("prompts/templates/polecat-triage.md")
+	if err != nil {
+		t.Fatalf("read polecat-triage.md: %v", err)
+	}
+	tw := string(triage)
+	if !strings.Contains(tw, "mg edit {{.Id}} --append-body-file") {
+		t.Error("polecat-triage.md: lost the `mg edit {{.Id}} --append-body-file` packet " +
+			"write; it is the only durable home for a triage recommendation, since " +
+			"`mg done` is refused on the ticket before the gate (mg-1912)")
+	}
+	for _, banned := range []string{"mg edit {{.Id}} --body-file", "mg edit {{.Id}} --body="} {
+		if strings.Contains(tw, banned) {
+			t.Errorf("polecat-triage.md: gained %q — a wholesale body rewrite on a ticket "+
+				"the coordinator is also editing (mg-f326, mg-4bb9). The append is the "+
+				"only body write in scope for this worker", banned)
 		}
 	}
 }

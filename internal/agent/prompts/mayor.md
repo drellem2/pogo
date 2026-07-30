@@ -686,7 +686,7 @@ pogo agent spawn-polecat <short-id> --template=polecat-triage \
 EOF
 ```
 
-The triage {{.Worker}} posts a brief professional ack on the issue, investigates, consults pm-pogo, and returns a structured recommendation packet (via `mg done --result` plus mail to you). pm-pogo's consult note rides in the packet.
+The triage {{.Worker}} posts a brief professional ack on the issue, investigates, consults pm-pogo, and returns a structured recommendation packet. It writes that packet as a fenced `json triage-packet` block **on the triage ticket's own body** and mails you the compressed version; it does **not** `mg done` the ticket, because the successor it would have to name does not exist until you file the build ticket at transition 3. So the packet is on the record from the moment triage ends, and the ticket is still `claimed` when you reach the gate. pm-pogo's consult note rides in the packet.
 
 If a ticket for the ref already exists, the mail is new issue activity:
 - `stage: gated` → likely Daniel's gate reply on the issue itself (see the reply-channel note in transition 2). Read the new comments (`gh issue view <n> --repo=<owner>/<repo> --comments`) and process them as a gate decision (transition 3).
@@ -727,7 +727,7 @@ If a ticket for the ref already exists, the mail is new issue activity:
    stage: build
    gh: <owner>/<repo>#<n>
 
-   Approved triage recommendation: <triage ticket id> (see its result packet). Build on a branch and open a PR per the polecat-build-pr protocol. Review ticket: <review ticket id, edit in after filing it>.
+   Approved triage recommendation: <triage ticket id> — run `mg show <triage ticket id>` and read the fenced json triage-packet block on its body (step 3 below also copies it to its result sidecar). Build on a branch and open a PR per the polecat-build-pr protocol. Review ticket: <review ticket id, edit in after filing it>.
    EOF
    # The build ticket's --depends=<triage ticket id> is what holds it until the triage
    # ticket is retired in step 3 — it lands in pending/, not available/, and cannot be
@@ -750,15 +750,20 @@ If a ticket for the ref already exists, the mail is new issue activity:
    Review the PR from <build ticket id> against the approved triage recommendation (<triage ticket id>).
    EOF
    ```
-3. **Retire the triage ticket, then dispatch the build {{.Worker}}** — in that order, because the second does not work until the first has run:
-   ```bash
-   mg done <triage ticket id> --successor=<build ticket id>
-   ```
+3. **Retire the triage ticket, then dispatch the build {{.Worker}}** — in that order, because the second does not work until the first has run. Lift the {{.Worker}}'s packet out of the triage ticket body and hand it straight to `--result`, so the sidecar records the JSON the {{.Worker}} actually wrote rather than a summary you re-typed:
+   ````bash
+   PACKET=$(mg show <triage ticket id> --json | jq -r .body |
+       awk '/^```json triage-packet$/{f=1;next} /^```$/{f=0} f')
+   printf '%s' "$PACKET" | jq -e . >/dev/null || echo 'no parseable triage-packet block — retire without --result and say so'
+   mg done <triage ticket id> --successor=<build ticket id> --result="$PACKET"
+   ````
    Then dispatch the build {{.Worker}} (`--template=polecat-build-pr`), and hold the review ticket until the PR exists (transition 4). Archive the triage ticket on your normal sweep.
+
+   **`--result` here is a copy, not the original.** The packet is already durable on the triage ticket body — that is where the triage {{.Worker}} put it, and that is what survived the hours this ticket spent gated. This step promotes it into `<triage ticket id>.result.json` so the control-plane record exists too. If the extraction comes back empty, retire the ticket anyway with `--successor` alone and mail the {{.Worker}} (if alive) or `human`: a missing packet is news, and it is not a reason to leave a decided ticket claimed.
 
    **`--successor` is not optional, and `mg done` is where it bites — not `mg archive`.** A ticket whose body leads with `stage: triage` is filed carrying a `declares-remainder` tag; mg emits it from the carrier block on **any** type, `--type=task` included, because a triage is a workflow position rather than a type. `mg done` then refuses a declared item that names no successor, and `mg archive` refuses anything that is not already done — so a bare archive is never the first gate you hit, and "archive it on your sweep" alone cannot retire this ticket. The build ticket is the successor and it exists by now: you filed it one step ago, which is why this step is here and not earlier.
 
-   **It is still yours to retire.** The triage {{.Worker}}'s own `mg done` (transition 1) cannot have succeeded on a ticket carrying the tag — at that point no successor existed to name. So the ticket is still `claimed` when you reach this line; `mg done` does not check *who* holds the claim, only that the item is claimed, so this call is yours to make.
+   **It is still yours to retire.** No `mg done` on the triage ticket could have succeeded before this line: at transition 1 no successor existed to name, which is why the triage {{.Worker}} is told not to attempt it and to put its packet on the ticket body instead. So the ticket is still `claimed` when you reach here; `mg done` does not check *who* holds the claim, only that the item is claimed, so this call is yours to make.
 
    **Check the promotion line.** The same command runs the pending sweep and should print `Promoted <build ticket id>: ... (pending → available)`. That is the build ticket's `--depends` gate opening. If you do not see it, the dispatch in the next sentence will fail — fix the gate before spawning a {{.Worker}} for an item still in `pending/`.
 
