@@ -324,8 +324,8 @@ func diagnoseAgentAt(a *Agent, now time.Time, windows []CronWindow, mailLoop mai
 
 	// An agent past its stall threshold is only a genuine wedge when its idle
 	// is not explained by waiting between cron firings: a cron-driven crew
-	// agent (e.g. doctor's */30 mail-check) produces no PTY output for the
-	// whole between-cron gap, which is by design (mg-5b23).
+	// agent (e.g. the coordinator's */30 mail-check backstop) produces no PTY
+	// output for the whole between-cron gap, which is by design (mg-5b23).
 	idlePastThreshold := !lastWrite.IsZero() && idleDur >= threshold
 	cronCovered := idlePastThreshold && withinCronInterval(now, windows)
 	stalled := idlePastThreshold && !cronCovered
