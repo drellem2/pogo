@@ -542,6 +542,20 @@ a load average of 214 against ~7.5 of 10 cores in use, because Darwin counts
 I/O waiters in that figure. The load average is carried as context and decided
 on by nothing.
 
+**Where the measurement can be taken is part of the answer.** The rate is only
+as good as the precision of the CPU column it differenced, and that is a
+property of the host. `internal/proctable` owns the read for both this and the
+refinery's gate watch, and reports the resolution alongside the rows:
+`linux-procfs` (10ms, `/proc/<pid>/stat` `utime+stime` in USER_HZ ticks) and
+`darwin-ps` (10ms, BSD `ps`'s `MM:SS.ss`) both resolve sub-second windows;
+procps `ps` prints whole seconds only, so a fallback `<goos>-ps` source needs a
+multi-second window. Below a source's `MinWindow` the difference is not a small
+number, it is **zero** — for a saturated host exactly as much as an idle one —
+so `Sample.Unresolvable` and `StepProgress.CPUUnavailable` carry the reason
+instead, and both records name the source they were taken with. Reporting that
+quantised zero as a measurement is how the signal went silently blind on Linux
+while reading correctly on the machine it was written on (mg-79e3).
+
 The same measurement gates dispatch — see **Dispatch gates** below.
 
 **Cancelling a merge.** `pogo refinery cancel <id>` reaches a **processing** MR,

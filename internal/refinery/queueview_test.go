@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/drellem2/pogo/internal/proctable"
 )
 
 // TestQueueWithProcessingIncludesTheInFlightRequest is the omission mg-0c51 was
@@ -167,14 +169,34 @@ func TestDequeueStampsStartTime(t *testing.T) {
 // Both arms are required. A measurement that only ever reports "busy" is the
 // defect described in mg-1b8c's lineage: a view that always reads healthy
 // cannot report the state it exists to report.
+//
+// # Which environments this runs in
+//
+// The measurement differences the host's CPU-time column, so it is only as
+// good as that column's precision — 10ms on darwin and on any Linux with a
+// readable /proc, whole seconds where only procps `ps` is available. At a
+// 400ms heartbeat the last of those cannot separate a spinning gate from a
+// sleeping one, and every assertion below would be made against a quantised
+// zero. That is exactly what happened to this test in CI from 11:17 on
+// 2026-07-30 (mg-79e3).
+//
+// So the environment is checked FIRST and named in the output. Where the
+// measurement is supported the full discrimination is asserted, unweakened.
+// Where it is not, the record must carry the reason — which is itself asserted
+// — and the numeric arms are skipped rather than lowered, because a number
+// this host cannot produce is not a number to assert on.
 func TestGateWatchMeasuresARealSubtreesCPU(t *testing.T) {
 	if testing.Short() {
 		t.Skip("runs real gates for a couple of seconds")
 	}
 
+	const heartbeat = 400 * time.Millisecond
+	t.Logf("process-table source: %s; gate heartbeat %s", procSource, heartbeat)
+	supported := procSource.CanResolve(heartbeat)
+
 	run := func(gate string) *StepProgress {
 		t.Helper()
-		r := newProgressTestRefinery(t, 400*time.Millisecond)
+		r := newProgressTestRefinery(t, heartbeat)
 		wtDir := t.TempDir()
 		writeGateConfig(t, wtDir, "quality_gate = "+quoteTOML(gate))
 		mr := &MergeRequest{ID: "mr-cpu", Status: StatusProcessing}
@@ -194,14 +216,33 @@ func TestGateWatchMeasuresARealSubtreesCPU(t *testing.T) {
 	// as process churn — this arm has to prove the CPU path, not the churn
 	// fallback.
 	busy := run(`(while :; do :; done) & spinner=$!; sleep 2; kill $spinner; exit 0`)
-	t.Logf("busy gate: pid=%d cores=%.2f procs=%d churn=%d window=%s unavailable=%q",
-		busy.GatePID, busy.CPUCores, busy.CPUProcs, busy.CPUChurn, busy.CPUWindow, busy.CPUUnavailable)
+	t.Logf("busy gate: pid=%d source=%s cores=%.2f procs=%d churn=%d window=%s unavailable=%q",
+		busy.GatePID, busy.CPUSource, busy.CPUCores, busy.CPUProcs, busy.CPUChurn, busy.CPUWindow, busy.CPUUnavailable)
 	if busy.GatePID == 0 {
 		t.Error("the gate's pid must be recorded — without it there is no subtree to measure")
 	}
+	if busy.CPUSource != procSource.Name {
+		t.Errorf("the record must name its instrument, got %q want %q", busy.CPUSource, procSource.Name)
+	}
+
+	if !supported {
+		// The unsupported path is asserted, not waved through. A host that
+		// cannot measure must produce UNKNOWN with a stated reason; if it
+		// produced a number here, the number would be the quantised zero this
+		// whole change exists to stop being reported as idle.
+		if busy.Subtree() != SubtreeUnknown {
+			t.Errorf("%s cannot resolve a %s window, so the record must be UNKNOWN, got %v (cores=%.2f)",
+				procSource, heartbeat, busy.Subtree(), busy.CPUCores)
+		}
+		if !strings.Contains(busy.CPUUnavailable, procSource.Name) {
+			t.Errorf("an unmeasurable environment must name itself in the reason, got %q", busy.CPUUnavailable)
+		}
+		t.Skipf("subtree CPU is not measurable here: %s", busy.CPUUnavailable)
+	}
+
 	if busy.CPUSampledAt.IsZero() {
-		t.Fatalf("a 2s gate at a 400ms heartbeat must produce a CPU measurement, got unavailable=%q",
-			busy.CPUUnavailable)
+		t.Fatalf("a 2s gate at a %s heartbeat must produce a CPU measurement on %s, got unavailable=%q",
+			heartbeat, procSource, busy.CPUUnavailable)
 	}
 	if busy.CPUCores < 0.5 {
 		t.Errorf("a spinning gate measured %.2f cores; the subtree walk is not finding the work", busy.CPUCores)
@@ -213,11 +254,11 @@ func TestGateWatchMeasuresARealSubtreesCPU(t *testing.T) {
 	// The negative arm. A sleeping gate consumes nothing, and the record must
 	// be willing to say so.
 	idle := run(`sleep 2`)
-	t.Logf("idle gate: pid=%d cores=%.2f procs=%d churn=%d window=%s unavailable=%q",
-		idle.GatePID, idle.CPUCores, idle.CPUProcs, idle.CPUChurn, idle.CPUWindow, idle.CPUUnavailable)
+	t.Logf("idle gate: pid=%d source=%s cores=%.2f procs=%d churn=%d window=%s unavailable=%q",
+		idle.GatePID, idle.CPUSource, idle.CPUCores, idle.CPUProcs, idle.CPUChurn, idle.CPUWindow, idle.CPUUnavailable)
 	if idle.CPUSampledAt.IsZero() {
-		t.Fatalf("a 2s gate at a 400ms heartbeat must produce a CPU measurement, got unavailable=%q",
-			idle.CPUUnavailable)
+		t.Fatalf("a 2s gate at a %s heartbeat must produce a CPU measurement on %s, got unavailable=%q",
+			heartbeat, procSource, idle.CPUUnavailable)
 	}
 	if idle.Subtree() != SubtreeIdle {
 		t.Errorf("a sleeping gate must classify as idle (cores=%.2f churn=%d) — the measurement is "+
@@ -226,6 +267,51 @@ func TestGateWatchMeasuresARealSubtreesCPU(t *testing.T) {
 	if busy.CPUCores <= idle.CPUCores {
 		t.Errorf("a computing gate (%.2f cores) must measure higher than a sleeping one (%.2f cores)",
 			busy.CPUCores, idle.CPUCores)
+	}
+}
+
+// TestGateWatchRefusesToMeasureBelowTheHostsResolution runs the unsupported
+// path EVERYWHERE, by standing in a coarse process-table source. It is the
+// half that the skip above cannot cover on a machine where the measurement
+// works, and it pins the distinction the whole signal rests on: a window the
+// host cannot resolve must yield "no measurement, and here is why", never the
+// 0.00 cores that renders as a quiet, healthy-looking idle gate.
+func TestGateWatchRefusesToMeasureBelowTheHostsResolution(t *testing.T) {
+	if testing.Short() {
+		t.Skip("runs a real gate")
+	}
+	prev := procSource
+	procSource = proctable.Source{Name: "coarse-ps", Resolution: time.Second}
+	t.Cleanup(func() { procSource = prev })
+
+	r := newProgressTestRefinery(t, 200*time.Millisecond)
+	wtDir := t.TempDir()
+	writeGateConfig(t, wtDir, `quality_gate = `+quoteTOML(`(while :; do :; done) & spinner=$!; sleep 1; kill $spinner; exit 0`))
+	mr := &MergeRequest{ID: "mr-coarse", Status: StatusProcessing}
+	r.byID[mr.ID] = mr
+	if _, _, err := r.runQualityGates(context.Background(), wtDir, wtDir, mr); err != nil {
+		t.Fatalf("gate should have passed: %v", err)
+	}
+	p := mr.Progress
+	t.Logf("coarse-source gate: cores=%.2f unavailable=%q summary=%q", p.CPUCores, p.CPUUnavailable, p.CPUSummary())
+
+	if p.Subtree() != SubtreeUnknown {
+		t.Errorf("a 200ms window on a whole-second CPU column must classify as unknown, got %v (cores=%.2f)",
+			p.Subtree(), p.CPUCores)
+	}
+	if p.CPUCores != 0 || !p.CPUSampledAt.IsZero() {
+		t.Errorf("an unmeasurable window must carry no numbers, got cores=%.2f sampled=%v", p.CPUCores, p.CPUSampledAt)
+	}
+	for _, want := range []string{"coarse-ps", "1s", "5s"} {
+		if !strings.Contains(p.CPUUnavailable, want) {
+			t.Errorf("the reason must mention %q so a reader can act on it, got %q", want, p.CPUUnavailable)
+		}
+	}
+	if strings.Contains(p.CPUSummary(), "idle") {
+		t.Errorf("an unmeasurable subtree must never render as idle: %q", p.CPUSummary())
+	}
+	if p.CPUSource != "coarse-ps" {
+		t.Errorf("CPUSource = %q, want coarse-ps", p.CPUSource)
 	}
 }
 

@@ -6,46 +6,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/drellem2/pogo/internal/proctable"
 )
-
-func TestParseCPUTime(t *testing.T) {
-	cases := []struct {
-		in   string
-		want time.Duration
-		ok   bool
-	}{
-		{"0:01.25", 1250 * time.Millisecond, true},
-		{"169:10.30", 169*time.Minute + 10300*time.Millisecond, true},
-		{"12:34:56", 12*time.Hour + 34*time.Minute + 56*time.Second, true},
-		{"2-03:04:05", 2*24*time.Hour + 3*time.Hour + 4*time.Minute + 5*time.Second, true},
-		{"", 0, false},
-		{"garbage", 0, false},
-		{"1:2:3:4", 0, false},
-	}
-	for _, c := range cases {
-		got, ok := parseCPUTime(c.in)
-		if ok != c.ok {
-			t.Errorf("parseCPUTime(%q) ok=%v, want %v", c.in, ok, c.ok)
-			continue
-		}
-		if ok && got != c.want {
-			t.Errorf("parseCPUTime(%q) = %s, want %s", c.in, got, c.want)
-		}
-	}
-}
-
-func TestParsePSRow(t *testing.T) {
-	row, ok := parsePSRow("  1234   567 0:12.50")
-	if !ok {
-		t.Fatal("expected a parse")
-	}
-	if row.pid != 1234 || row.ppid != 567 || row.cpu != 12500*time.Millisecond {
-		t.Errorf("got %+v", row)
-	}
-	if _, ok := parsePSRow("nonsense"); ok {
-		t.Error("expected no parse for a short line")
-	}
-}
 
 // table builds a snapshot pair from (pid, ppid, cpuSecondsBefore, cpuSecondsAfter).
 type proc struct {
@@ -279,25 +242,121 @@ func TestReadRespectsContextCancellation(t *testing.T) {
 	}
 }
 
-// TestReadRealHost exercises the real `ps` path. It asserts shape, not values:
-// what the host is doing while the suite runs is not ours to predict.
+// TestReadRealHost exercises the real process-table path. It asserts shape,
+// not values: what the host is doing while the suite runs is not ours to
+// predict.
+//
+// The one value it does assert — that SOMETHING is using CPU on a host that is
+// currently running this test — is the assertion that went red across CI from
+// 11:17 on 2026-07-30 (mg-79e3), and it is kept. What changed is that the
+// window is now chosen from the host's measured CPU-time resolution instead of
+// being hardcoded at 200ms, so the test measures over a window this host can
+// actually answer. Where no such window exists the test says so and skips,
+// rather than asserting a number the environment cannot produce.
 func TestReadRealHost(t *testing.T) {
-	r := &Reader{Roots: []int{1}, Window: 200 * time.Millisecond}
+	src := proctable.Current()
+	t.Logf("process-table source: %s", src)
+
+	window := 200 * time.Millisecond
+	if !src.CanResolve(window) {
+		window = src.MinWindow()
+	}
+	// A window this wide is no longer a unit test, and a source that needs one
+	// cannot support the sub-second measurements the refinery's gate watch
+	// takes either. Naming the environment is the report; a zero would not be.
+	if window > 2*time.Second {
+		t.Skipf("no usable measurement here: %s, so the shortest trustworthy window is %s",
+			src, src.MinWindow())
+	}
+
+	r := &Reader{Roots: []int{1}, Window: window}
 	s, err := r.Read(context.Background())
 	if err != nil {
 		t.Fatalf("Read: %v", err)
 	}
+	t.Logf("sample over %s: %s", window, s)
 	if s.Cores <= 0 {
 		t.Errorf("Cores = %d", s.Cores)
 	}
 	if s.FleetCores < 0 || s.ExternalCores < 0 {
 		t.Errorf("negative cores: %+v", s)
 	}
+	if s.Source != src.Name {
+		t.Errorf("Source = %q, want %q — a sample must name the instrument it was taken with", s.Source, src.Name)
+	}
+	if !s.Resolved() {
+		t.Fatalf("Read reported the window as unresolvable despite choosing it from the source: %s", s.Unresolvable)
+	}
 	// Rooted at pid 1, essentially everything is a descendant.
 	if !s.Attributed {
 		t.Error("Attributed = false rooted at pid 1")
 	}
 	if s.UsedCores() == 0 {
-		t.Error("UsedCores = 0 on a host that is running this test")
+		t.Errorf("UsedCores = 0 on a host that is running this test (source %s, window %s)", src, s.Window)
+	}
+}
+
+// TestReadOnAHostTooCoarseToMeasure is the other half, and it runs everywhere.
+// It is what keeps the skip in TestReadRealHost honest: a source whose CPU
+// column cannot resolve the window must produce a REASON, not the zeros that
+// read as an idle host. Those zeros are what a dispatch guard would have acted
+// on, and "the fleet is using nothing" and "I cannot tell" call for opposite
+// decisions.
+func TestReadOnAHostTooCoarseToMeasure(t *testing.T) {
+	// A host whose processes really are burning CPU...
+	procs := []proc{{pid: 100, ppid: 1, before: 0, at: 4}, {pid: 200, ppid: 1, before: 0, at: 2}}
+	snap, _ := snapshots(procs, 400*time.Millisecond)
+	r := &Reader{
+		Roots: []int{100},
+		// The snapshot stamps are 400ms apart; the real wait is short because
+		// the arithmetic under test is driven by the stamps, not the sleep.
+		Window:   time.Millisecond,
+		Source:   proctable.Source{Name: "coarse-ps", Resolution: time.Second},
+		snapshot: snap,
+		loadavg:  func() float64 { return 1.5 },
+		cores:    10,
+	}
+	s, err := r.Read(context.Background())
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if s.Resolved() {
+		t.Fatal("a 400ms window on a whole-second column was reported as a measurement")
+	}
+	if !strings.Contains(s.Unresolvable, "coarse-ps") || !strings.Contains(s.Unresolvable, "400ms") {
+		t.Errorf("the reason must name the source and the window, got %q", s.Unresolvable)
+	}
+	if s.Source != "coarse-ps" {
+		t.Errorf("Source = %q, want coarse-ps", s.Source)
+	}
+	// The context that is still true is still reported; the numbers that would
+	// be fabrications are not.
+	if s.Cores != 10 || s.LoadAvg1 != 1.5 {
+		t.Errorf("host context must survive an unresolvable sample: %+v", s)
+	}
+	if s.FleetCores != 0 || s.ExternalCores != 0 || s.Attributed {
+		t.Errorf("an unresolvable sample must not carry attribution numbers: %+v", s)
+	}
+	if !strings.Contains(s.String(), "unmeasurable") {
+		t.Errorf("an unresolvable sample must not render as a reading: %q", s.String())
+	}
+}
+
+// TestReadStampsTheSourceOnEverySample keeps the environment on the record.
+// This failure was undiagnosable from the CI log precisely because no sample
+// said where it came from.
+func TestReadStampsTheSourceOnEverySample(t *testing.T) {
+	snap, _ := snapshots([]proc{{pid: 100, ppid: 1, before: 0, at: 1}}, time.Second)
+	r := &Reader{Roots: []int{100}, Window: time.Millisecond, snapshot: snap,
+		loadavg: func() float64 { return 0 }, cores: 4}
+	s, err := r.Read(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Source == "" {
+		t.Error("a sample with no named source cannot be told from one taken with a broken instrument")
+	}
+	if !s.Resolved() {
+		t.Errorf("a 1s window must resolve on this host: %s", s.Unresolvable)
 	}
 }

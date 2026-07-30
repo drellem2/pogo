@@ -1,12 +1,10 @@
 package refinery
 
 import (
-	"context"
 	"fmt"
-	"os/exec"
-	"strconv"
-	"strings"
 	"time"
+
+	"github.com/drellem2/pogo/internal/proctable"
 )
 
 // This file measures the OTHER half of gate liveness: whether the gate's
@@ -55,6 +53,19 @@ import (
 //     asymmetry is deliberate.
 //   - No sample => say so. An unmeasurable subtree must not be reported as an
 //     idle one.
+//
+// # Where this can be measured, and what happens where it cannot
+//
+// The rate is only as good as the precision of the CPU column it differences,
+// and that is a property of the HOST, not of this code. internal/proctable
+// picks the most precise source available and reports its resolution;
+// procSource below is that answer. On darwin and on any Linux with a readable
+// /proc the resolution is 10ms, so the heartbeat cadence resolves work
+// comfortably. Where only procps `ps` is available the column is whole seconds
+// and a sub-second window cannot separate a spinning subtree from a sleeping
+// one — so the sampler publishes the reason instead of the 0.00 it would
+// otherwise compute. That zero, reported as a measurement, is precisely how
+// this signal went silently blind in CI (mg-79e3).
 
 // subtreeIdleCores is the rate below which a subtree is called idle. A window
 // of one heartbeat interval at 0.02 cores is ~0.6 CPU-seconds — comfortably
@@ -70,90 +81,23 @@ type procRow struct {
 	CPU  time.Duration // cumulative CPU time consumed by this process
 }
 
-// psTimeout bounds the process-table read. The gate this measures runs on a
-// host that may be under heavy contention — that is precisely when a refinery
-// gets looked at — and an unbounded exec would let the sampler hang. A hung
-// sampler must degrade to "no measurement", which the record reports honestly,
-// rather than stall anything.
-const psTimeout = 10 * time.Second
+// procSource is the process-table source in force, and — the part that
+// matters — the precision of its CPU column. A var so a test can stand in a
+// coarse source and check that the sampler reports "cannot measure here"
+// rather than a fabricated zero.
+var procSource = proctable.Current()
 
 // psSnapshot reads the process table. Replaced in tests.
 var psSnapshot = func() ([]procRow, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), psTimeout)
-	defer cancel()
-	// -A is the POSIX spelling of "every process" and is accepted by both the
-	// BSD ps on darwin and procps on Linux; the trailing "=" on each field
-	// suppresses the header so the output is pure data.
-	out, err := exec.CommandContext(ctx, "ps", "-Ao", "pid=,ppid=,pgid=,time=").Output()
+	rows, err := proctable.Read()
 	if err != nil {
-		if ctx.Err() != nil {
-			return nil, fmt.Errorf("ps did not return within %s", psTimeout)
-		}
-		return nil, fmt.Errorf("ps: %w", err)
+		return nil, err
 	}
-	return parsePS(string(out)), nil
-}
-
-// parsePS turns `ps -Ao pid=,ppid=,pgid=,time=` output into rows, skipping
-// anything it cannot read rather than failing the whole sample: one malformed
-// line must not cost the measurement.
-func parsePS(out string) []procRow {
-	var rows []procRow
-	for _, line := range strings.Split(out, "\n") {
-		f := strings.Fields(line)
-		if len(f) < 4 {
-			continue
-		}
-		pid, err1 := strconv.Atoi(f[0])
-		ppid, err2 := strconv.Atoi(f[1])
-		pgid, err3 := strconv.Atoi(f[2])
-		cpu, ok := parseCPUTime(f[3])
-		if err1 != nil || err2 != nil || err3 != nil || !ok {
-			continue
-		}
-		rows = append(rows, procRow{PID: pid, PPID: ppid, PGID: pgid, CPU: cpu})
+	out := make([]procRow, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, procRow{PID: r.PID, PPID: r.PPID, PGID: r.PGID, CPU: r.CPU})
 	}
-	return rows
-}
-
-// parseCPUTime reads the ps TIME column: [[DD-]HH:]MM:SS[.ff].
-func parseCPUTime(s string) (time.Duration, bool) {
-	days := 0
-	if i := strings.Index(s, "-"); i >= 0 {
-		d, err := strconv.Atoi(s[:i])
-		if err != nil {
-			return 0, false
-		}
-		days = d
-		s = s[i+1:]
-	}
-	parts := strings.Split(s, ":")
-	if len(parts) < 2 || len(parts) > 3 {
-		return 0, false
-	}
-	var hours, mins int
-	secs := parts[len(parts)-1]
-	if len(parts) == 3 {
-		h, err := strconv.Atoi(parts[0])
-		if err != nil {
-			return 0, false
-		}
-		hours = h
-	}
-	m, err := strconv.Atoi(parts[len(parts)-2])
-	if err != nil {
-		return 0, false
-	}
-	mins = m
-	sec, err := strconv.ParseFloat(secs, 64)
-	if err != nil {
-		return 0, false
-	}
-	total := float64(days)*86400 + float64(hours)*3600 + float64(mins)*60 + sec
-	if total < 0 {
-		return 0, false
-	}
-	return time.Duration(total * float64(time.Second)), true
+	return out, nil
 }
 
 // subtreeSample is one reading of the CPU consumed by a gate's process

@@ -32,24 +32,33 @@
 //
 // # How the measurement is taken
 //
-// Two `ps` snapshots of cumulative per-process CPU time, separated by a
-// window, differenced and divided by the window. That yields cores-in-use over
-// that window. It is deliberately not `ps`'s own %CPU column, which is a
-// lifetime average on Linux and a decaying one on Darwin — neither answers
-// "what is happening right now", which is the question a gate or a dispatch
-// decision is asking.
+// Two snapshots of cumulative per-process CPU time, separated by a window,
+// differenced and divided by the window. That yields cores-in-use over that
+// window. It is deliberately not `ps`'s own %CPU column, which is a lifetime
+// average on Linux and a decaying one on Darwin — neither answers "what is
+// happening right now", which is the question a gate or a dispatch decision is
+// asking.
+//
+// # Where it can be measured
+//
+// A differenced rate is only as good as the precision of the column it
+// differenced, and that precision is a property of the HOST. internal/proctable
+// picks the best available source and states its resolution: 10ms on darwin and
+// on any Linux with a readable /proc, whole seconds where only procps `ps` is
+// available. Below a source's minimum window the difference is not a small
+// number, it is zero — for a saturated host exactly as much as an idle one.
+// Sample.Unresolvable carries that case, and it is the difference between
+// "the fleet is using nothing" and "this host cannot tell me". Reporting the
+// first when the second is true is how a dispatch guard goes blind (mg-79e3).
 package hostload
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"fmt"
-	"os/exec"
 	"runtime"
-	"strconv"
-	"strings"
 	"time"
+
+	"github.com/drellem2/pogo/internal/proctable"
 )
 
 // DefaultWindow is how long a sample observes the host for. Long enough that
@@ -93,7 +102,21 @@ type Sample struct {
 	// FleetCores is 0 because nothing could be attributed, which is not the
 	// same fact as "the fleet is idle" and must not be read as one.
 	Attributed bool `json:"attributed"`
+
+	// Source names the process-table reader and the precision of its CPU
+	// column. Carried on every sample so a reading states the environment it
+	// was taken in — this class of failure is invisible until it does.
+	Source string `json:"source,omitempty"`
+	// Unresolvable is set when Window was too short for Source's resolution to
+	// separate work from none. The core figures are then quantisation noise
+	// rather than a measurement, and must not be read as "nothing is running".
+	Unresolvable string `json:"unresolvable,omitempty"`
 }
+
+// Resolved reports whether the sample's numbers are a measurement at all.
+// A caller deciding on cores must check this: an unresolvable sample reports
+// zeros that mean "cannot tell", not "idle".
+func (s Sample) Resolved() bool { return s.Unresolvable == "" }
 
 // UsedCores is total CPU in use over the window, fleet and otherwise.
 func (s Sample) UsedCores() float64 { return s.FleetCores + s.ExternalCores }
@@ -121,6 +144,9 @@ func (s Sample) FleetSaturation() float64 {
 // String renders the sample as one line, with the load average last and
 // labelled, so it cannot be mistaken for the decision number.
 func (s Sample) String() string {
+	if !s.Resolved() {
+		return fmt.Sprintf("host load unmeasurable: %s", s.Unresolvable)
+	}
 	if !s.Attributed {
 		return fmt.Sprintf("fleet unattributed (no fleet root found), host using %.1f of %d cores "+
 			"(loadavg %.2f, context only)", s.UsedCores(), s.Cores, s.LoadAvg1)
@@ -179,11 +205,23 @@ type Reader struct {
 	Roots []int
 	// Window overrides DefaultWindow.
 	Window time.Duration
+	// Source overrides the detected process-table source. Zero value means
+	// proctable.Current(). Exported so a test can assert what this reader does
+	// on a host whose CPU column is too coarse for the window it was given —
+	// a state no test can create on the machine it happens to run on.
+	Source proctable.Source
 
 	// snapshot and loadavg are test seams.
 	snapshot psSnapshot
 	loadavg  func() float64
 	cores    int
+}
+
+func (r *Reader) source() proctable.Source {
+	if r.Source.Resolution > 0 {
+		return r.Source
+	}
+	return proctable.Current()
 }
 
 func (r *Reader) window() time.Duration {
@@ -241,6 +279,22 @@ func (r *Reader) Read(ctx context.Context) (Sample, error) {
 		return Sample{}, fmt.Errorf("hostload: non-positive sample window %s", elapsed)
 	}
 
+	src := r.source()
+	if reason := src.CannotResolve(elapsed); reason != "" {
+		// Not a small measurement — no measurement. Every per-process
+		// difference quantises to zero over a window this short, so the cores
+		// figures would read as an idle host whatever the host is doing.
+		// Returning the reason instead is the whole point of the field.
+		return Sample{
+			Time:         t1,
+			Window:       elapsed,
+			Cores:        r.numCores(),
+			LoadAvg1:     r.load(),
+			Source:       src.Name,
+			Unresolvable: reason,
+		}, nil
+	}
+
 	fleetPIDs, attributed := fleetSubtree(second, r.Roots)
 
 	var fleetCPU, externalCPU time.Duration
@@ -279,6 +333,7 @@ func (r *Reader) Read(ctx context.Context) (Sample, error) {
 		FleetProcs:    fleetProcs,
 		LoadAvg1:      r.load(),
 		Attributed:    attributed,
+		Source:        src.Name,
 	}, nil
 }
 
@@ -323,77 +378,20 @@ func fleetSubtree(rows map[int]procRow, roots []int) (map[int]bool, bool) {
 	return set, live > 0
 }
 
-// readPS snapshots every process's cumulative CPU time.
+// readPS snapshots every process's cumulative CPU time. The reading itself —
+// and, critically, its precision — belongs to internal/proctable: the same
+// question is asked by the refinery's gate watch, and two readers that
+// disagree about how finely CPU time can be read is how one of them ends up
+// reporting a zero it cannot justify.
 func readPS() (map[int]procRow, time.Time, error) {
-	out, err := exec.Command("ps", "-Ao", "pid=,ppid=,time=").Output()
+	table, err := proctable.Read()
 	at := time.Now()
 	if err != nil {
 		return nil, at, err
 	}
-	rows := make(map[int]procRow, 512)
-	sc := bufio.NewScanner(bytes.NewReader(out))
-	sc.Buffer(make([]byte, 64*1024), 1024*1024)
-	for sc.Scan() {
-		if row, ok := parsePSRow(sc.Text()); ok {
-			rows[row.pid] = row
-		}
+	rows := make(map[int]procRow, len(table))
+	for _, r := range table {
+		rows[r.PID] = procRow{pid: r.PID, ppid: r.PPID, cpu: r.CPU}
 	}
-	return rows, at, sc.Err()
-}
-
-// parsePSRow reads one `pid ppid time` line.
-func parsePSRow(line string) (procRow, bool) {
-	f := strings.Fields(line)
-	if len(f) < 3 {
-		return procRow{}, false
-	}
-	pid, err := strconv.Atoi(f[0])
-	if err != nil {
-		return procRow{}, false
-	}
-	ppid, err := strconv.Atoi(f[1])
-	if err != nil {
-		return procRow{}, false
-	}
-	cpu, ok := parseCPUTime(f[2])
-	if !ok {
-		return procRow{}, false
-	}
-	return procRow{pid: pid, ppid: ppid, cpu: cpu}, true
-}
-
-// parseCPUTime reads `ps`'s cumulative-time column: [[dd-]hh:]mm:ss[.ff].
-func parseCPUTime(s string) (time.Duration, bool) {
-	days := 0
-	if dash := strings.IndexByte(s, '-'); dash >= 0 {
-		d, err := strconv.Atoi(s[:dash])
-		if err != nil {
-			return 0, false
-		}
-		days = d
-		s = s[dash+1:]
-	}
-	parts := strings.Split(s, ":")
-	if len(parts) < 2 || len(parts) > 3 {
-		return 0, false
-	}
-	// Seconds (with optional fraction) are always last.
-	secs, err := strconv.ParseFloat(parts[len(parts)-1], 64)
-	if err != nil {
-		return 0, false
-	}
-	mins, err := strconv.Atoi(parts[len(parts)-2])
-	if err != nil {
-		return 0, false
-	}
-	hours := 0
-	if len(parts) == 3 {
-		h, err := strconv.Atoi(parts[0])
-		if err != nil {
-			return 0, false
-		}
-		hours = h
-	}
-	total := float64(days*86400+hours*3600+mins*60) + secs
-	return time.Duration(total * float64(time.Second)), true
+	return rows, at, nil
 }

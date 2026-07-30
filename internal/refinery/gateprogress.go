@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/drellem2/pogo/internal/hostload"
+	"github.com/drellem2/pogo/internal/proctable"
 )
 
 // gateHeartbeatInterval is the bounded interval on which a running quality
@@ -121,6 +122,13 @@ type StepProgress struct {
 	// CPUUnavailable states why no measurement exists, so "could not measure"
 	// is never rendered as "measured, and idle".
 	CPUUnavailable string `json:"cpu_unavailable,omitempty"`
+	// CPUSource names the process-table source the numbers came from and the
+	// precision of its CPU column. Recorded because whether this measurement
+	// works at all is a property of the host: the same gate reads 1.00 cores
+	// where the column is in hundredths and 0.00 where it is in whole seconds,
+	// and a record that does not name its instrument cannot be told apart from
+	// one taken with a broken one (mg-79e3).
+	CPUSource string `json:"cpu_source,omitempty"`
 }
 
 // SubtreeState is what the CPU measurement says about the gate's processes.
@@ -590,6 +598,16 @@ func (w *gateWatch) sampleCPU(now time.Time) {
 		w.publishCPU(cur, cpuReading{Unavailable: fmt.Sprintf("first sample of two (a rate needs two, %s apart)", w.interval)})
 		return
 	}
+	// A window shorter than the host's CPU-time resolution can support does
+	// not yield a small number — it yields zero, for a spinning subtree and a
+	// sleeping one alike. Publishing that zero would make the signal report
+	// "idle" on every gate on such a host, which is the one answer it must
+	// never invent. Keep cur as the baseline so a later, wider window can
+	// still produce a rate.
+	if reason := procSource.CannotResolve(activity.Window); reason != "" {
+		w.publishCPU(cur, cpuReading{Unavailable: reason})
+		return
+	}
 	w.publishCPU(cur, cpuReading{At: now, Activity: activity})
 }
 
@@ -757,6 +775,7 @@ func (w *gateWatch) snapshot(now time.Time, final bool) *StepProgress {
 // record. Called with the refinery lock held (or on a detached record).
 func (w *gateWatch) applyCPU(p *StepProgress) {
 	p.GatePID = int(w.pid.Load())
+	p.CPUSource = procSource.Name
 	w.cpuMu.Lock()
 	c := w.cpu
 	w.cpuMu.Unlock()
@@ -809,12 +828,12 @@ func (w *gateWatch) finish() {
 	// whole record exists to provide.
 	select {
 	case <-w.cpuDone:
-	case <-time.After(psTimeout + time.Second):
+	case <-time.After(proctable.ReadTimeout + time.Second):
 	}
 	close(w.loadStop)
 	select {
 	case <-w.loadDone:
-	case <-time.After(psTimeout + time.Second):
+	case <-time.After(proctable.ReadTimeout + time.Second):
 	}
 	w.snapshot(time.Now(), true)
 }

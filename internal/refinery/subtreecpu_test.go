@@ -2,40 +2,12 @@ package refinery
 
 import (
 	"errors"
-	"fmt"
 	"os"
 	"os/exec"
 	"syscall"
 	"testing"
 	"time"
 )
-
-func TestParseCPUTime(t *testing.T) {
-	cases := []struct {
-		in   string
-		want time.Duration
-		ok   bool
-	}{
-		{"0:00.02", 20 * time.Millisecond, true},
-		{"1:30", 90 * time.Second, true},
-		{"168:35.92", 168*time.Minute + 35*time.Second + 920*time.Millisecond, true},
-		{"2:03:04", 2*time.Hour + 3*time.Minute + 4*time.Second, true},
-		{"3-02:00:00", 74 * time.Hour, true},
-		{"", 0, false},
-		{"nope", 0, false},
-		{"1:2:3:4", 0, false},
-	}
-	for _, c := range cases {
-		got, ok := parseCPUTime(c.in)
-		if ok != c.ok {
-			t.Errorf("parseCPUTime(%q) ok=%v, want %v", c.in, ok, c.ok)
-			continue
-		}
-		if ok && got != c.want {
-			t.Errorf("parseCPUTime(%q) = %v, want %v", c.in, got, c.want)
-		}
-	}
-}
 
 // fakePS installs a canned process table for the duration of a test.
 func fakePS(t *testing.T, rows []procRow) {
@@ -262,16 +234,5 @@ func TestSampleSubtreeSurfacesPSFailure(t *testing.T) {
 	t.Cleanup(func() { psSnapshot = prev })
 	if _, err := sampleSubtree(500, time.Now()); err == nil {
 		t.Fatal("expected an error when the process table cannot be read")
-	}
-}
-
-func TestParsePSSkipsMalformedLines(t *testing.T) {
-	out := fmt.Sprintf("  1 0 1 0:01.00\ngarbage\n  2 1 x 0:02.00\n  3 1 3 0:03.00\n")
-	rows := parsePS(out)
-	if len(rows) != 2 {
-		t.Fatalf("parsePS kept %d rows, want 2: %v", len(rows), rows)
-	}
-	if rows[0].PID != 1 || rows[1].PID != 3 {
-		t.Errorf("unexpected rows: %v", rows)
 	}
 }
