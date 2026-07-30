@@ -172,6 +172,7 @@ For each ready work item, spawn an ephemeral {{.Worker}}:
 
 ```bash
 pogo agent spawn-polecat <short-id> \
+  --template="<see the type table below — required for a `task` item>" \
   --task="<work item title>" \
   --id="<work item id>" \
   --repo="<target repo path>" \
@@ -185,7 +186,7 @@ EOF
 
 The {{.Worker}}'s name should be a short identifier derived from the work item ID. One {{.Worker}} per work item — don't spawn duplicates. If the work item has a `branch` field (visible in `mg show` or the work item frontmatter), pass it via `--branch`. This makes the refinery merge the {{.Worker}}'s work **into that branch** (not `main`). If no branch is specified, omit the flag and the refinery merges to `main`.
 
-Work items whose body starts with `workflow: gh-issue` are issue-track tickets: dispatch them with the stage-specific template — `--template=polecat-triage`, `--template=polecat-build-pr`, or `--template=polecat-review` — per the GH-Issue Workflow playbook below, never with the default template.
+Work items whose body starts with `workflow: gh-issue` are issue-track tickets: dispatch them with the stage-specific template — `--template=polecat-triage`, `--template=polecat-build-pr`, or `--template=polecat-review` — per the GH-Issue Workflow playbook below. They are never routed on `type`; an explicit stage `--template` is always required.
 
 For everything else, the work item's **`type`** field picks the template. `type` is a column in the `mg list --status=available` output you already read in step 1, and a field in `mg list --json`:
 
@@ -193,7 +194,9 @@ For everything else, the work item's **`type`** field picks the template. `type`
 |---|---|
 | `design` | `--template=polecat-architect` |
 | `qa` | `--template=polecat-qa` |
-| anything else (default `task`) | default {{.Worker}} — omit `--template` |
+| anything else — bare `task`, `scoping`, `audit`, `bug`, or no `type` at all | **unmapped: no template is selected and the spawn is refused with a 409 naming the type.** Pass `--template=polecat` explicitly to dispatch the build {{.Worker}} by hand. |
+
+**The map is closed and there is no default (mg-9a04).** It lives in `internal/agent/templateroute.go`, not in this file, and pogod consults it on every `spawn-polecat` that carries no `--template`. An unmapped type does **not** fall back to the build {{.Worker}} — the dispatch is refused, with a message naming the type and the flag that gets past it. `task` is the default `type` and by far the most common, so **most of your dispatches need an explicit `--template=polecat`**; omitting it is the 409, not the happy path. An explicit `--template` always wins and is never routed, which is the hand-dispatch override this table's third row points you at.
 
 ```bash
 pogo agent spawn-polecat <short-id> --template=polecat-architect \
@@ -205,7 +208,7 @@ EOF
 
 **Route on the `type` marker only — never on what the ticket looks like.** `type` is set deliberately by whoever filed the item; it is the same kind of structural marker as `workflow: gh-issue`. Do **not** infer "this reads like a design question" from a title or body, however obvious it seems. A design ticket and a build ticket are textually adjacent — "Should the indexer use X or Y?" and "Switch the indexer to X" differ only in whether the decision has *already been made*, which is a fact about the world and not recoverable from the text.
 
-That is why the default is the build {{.Worker}} and the architect is strictly opt-in: the two misroutes are not symmetric.
+That is why the map refuses an unmapped type rather than defaulting to the build {{.Worker}}, and why the architect is strictly opt-in: the two misroutes are not symmetric.
 
 - **design item → build {{.Worker}}**: it implements something nobody decided, opens a PR, and the refinery merges it. The design question gets answered by whatever the {{.Worker}} happened to build. **Silent, and it lands code.**
 - **build item → architect {{.Worker}}**: the architect mails back "yes, do the obvious thing" and the item is done. One wasted cycle. **Loud and harmless.**
@@ -470,7 +473,7 @@ When a {{.Worker}} completes a work item, check whether the work item has a `qa`
   QA for <source-id>.
   EOF
   ```
-  This QA item is dispatched on your normal step-1/step-2 cycle like any other work item. Its `--type=qa` routes it to `--template=polecat-qa` per the type table in step 2 — a QA item must **never** get the default build template. Don't stop the original {{.Worker}} until QA passes.
+  This QA item is dispatched on your normal step-1/step-2 cycle like any other work item. `qa` is one of the two routed types, so `--type=qa` selects `--template=polecat-qa` on its own per the type table in step 2 — this is one of the few dispatches you do *not* have to name a template for. A QA item must **never** get the build template. Don't stop the original {{.Worker}} until QA passes.
 
 - **`qa: auto`** — The {{.Worker}} can self-verify its own work. No separate QA item is needed. Proceed with normal cleanup.
 

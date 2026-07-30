@@ -3964,8 +3964,9 @@ func TestArchitectTemplateDefersPRReviewToReviewTemplate(t *testing.T) {
 // is silent: a design item sent to the build polecat gets implemented, PR'd,
 // and MERGED — the design question answered by whatever got built. A build
 // item sent to the architect wastes one loud, harmless cycle. A rule that
-// guesses trades the cheap loud failure for the expensive silent one, so the
-// default stays `polecat` and architect is strictly opt-in.
+// guesses trades the cheap loud failure for the expensive silent one, so an
+// unmapped type is REFUSED rather than defaulted and architect is strictly
+// opt-in.
 //
 // These strings are load-bearing. If the wording changes, update this test
 // deliberately — do not let the constraint erode into "detect design-shaped
@@ -3999,10 +4000,24 @@ func TestMayorRoutesOnTypeMarkerNotInference(t *testing.T) {
 		}
 	}
 
-	// The default must remain opt-in. If the architect ever becomes the
-	// default for un-typed work, the silent failure mode above is live.
-	if !strings.Contains(body, "anything else (default `task`)") {
-		t.Error("mayor.md: type table must name the default `task` route; architect stays opt-in")
+	// There is no default, and the table must say so. mg-9a04 closed the map
+	// in Go — an unmapped type selects NO template and the spawn is refused
+	// with a 409 — but deliberately left this table promising the build
+	// worker, on a premise (a Daniel gate on prompt edits) that turned out not
+	// to exist. mg-159a is that repair. `task` is the default type and the
+	// most common one, so the row this pins covers the ordinary dispatch, not
+	// an edge case: a coordinator that follows the old prose gets a 409 on
+	// nearly everything it sends.
+	for _, want := range []string{
+		"the spawn is refused with a 409 naming the type",
+		"Pass `--template=polecat` explicitly",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("mayor.md: type table must state the closed-map behaviour, missing %q", want)
+		}
+	}
+	if strings.Contains(body, "anything else (default `task`)") {
+		t.Error("mayor.md: type table reverted to the pre-mg-9a04 claim that an unmapped type falls back to the build worker; the Go map refuses it (mg-159a)")
 	}
 }
 
@@ -4023,8 +4038,13 @@ func TestMayorDispatchesQAItemsToQATemplate(t *testing.T) {
 	if !strings.Contains(body, "mg new --type=qa") {
 		t.Fatal("mayor.md: expected step 4 to create QA items with --type=qa")
 	}
-	if !strings.Contains(body, "never** get the default build template") {
-		t.Error("mayor.md: step-4 QA prose must forbid the default build template for QA items")
+	// "default" is deliberately absent: since mg-9a04 closed the routing map
+	// there is no default template at all, and mg-159a struck the word from
+	// mayor.md. The prohibition it guarded — a QA item must not land on the
+	// build worker — is unchanged, so this pin stays, narrowed to the wording
+	// that is actually true.
+	if !strings.Contains(body, "never** get the build template") {
+		t.Error("mayor.md: step-4 QA prose must forbid the build template for QA items")
 	}
 	// The regression: prose that hands QA off to the generic dispatch path
 	// without naming the template it lands on.

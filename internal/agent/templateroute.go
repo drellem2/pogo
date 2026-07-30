@@ -30,9 +30,11 @@ import (
 // # Why the map is CLOSED, which is the load-bearing half
 //
 // An unmapped type produces NO template and refuses the dispatch. It does not
-// fall back to the build worker. That is the opposite of what the prose said
-// ("anything else (default `task`) — omit --template") and it is deliberate,
-// because the two misroutes are not symmetric:
+// fall back to the build worker. That is the opposite of what mayor.md's prose
+// used to say ("anything else (default `task`) — omit --template"), and it is
+// deliberate. That prose shipped wrong for as long as it took mg-159a to
+// correct it; the table now states this refusal, and prompt_test.go pins it.
+// The reversal stands because the two misroutes are not symmetric:
 //
 //   - A design item sent to a build worker implements something nobody decided,
 //     opens a PR, and the refinery merges it. The design question gets answered
