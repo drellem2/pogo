@@ -450,6 +450,13 @@ type Registry struct {
 	// platform rule. See dispatchpairing.go.
 	dispatchPairingGate DispatchPairingGate
 
+	// loadGate refuses to dispatch a worker onto a host the fleet is already
+	// using most of (mg-1b8c). Nil means the default HostLoadGate, which
+	// measures — so the gate holds without any wiring. Unlike the two gates
+	// above it fails OPEN on a failed or unattributable measurement, and its
+	// refusal is retryable. See dispatchload.go.
+	loadGate LoadGate
+
 	// workItemClaimer takes a dispatched polecat's work item out of available/
 	// BEFORE its process starts, so ownership no longer depends on the polecat
 	// reaching its own `mg claim` step — which requires a model-API turn, and so

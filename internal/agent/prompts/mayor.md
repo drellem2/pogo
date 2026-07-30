@@ -780,6 +780,19 @@ When deciding whether to spawn a {{.Worker}}:
 - **Check dependencies.** If a work item depends on another that isn't done, skip it.
 - **Repo awareness.** Use `lsp` to find the target repo path for work items that reference a project name.
 - **Don't over-spawn.** If many {{.Worker}}s are already running, wait for some to finish before adding more. A reasonable limit is 3-5 concurrent {{.Worker}}s.
+- **Count the resource, not the {{.Worker}}s.** The limit above is about slots, and a slot count cannot see what is in the slots. Read the host before filling one:
+
+  ```bash
+  pogo host load          # fleet cores held, non-fleet cores, and whether a spawn would be refused
+  ```
+
+  `spawn-polecat` consults the same measurement and answers **503** when the fleet already holds most of the host. That 503 is a **later, not a no** — the item is fine, the host is busy. Hold it, re-check, and dispatch when `pogo host load` clears. Do not reassign it, do not shelve it, and do not treat it as a failed dispatch.
+
+  **Do not substitute `uptime` for this.** Measured on this host (mg-1b8c): a load average of **214** against roughly **7.5 of 10 cores actually in use**, because Darwin counts I/O waiters in that number, and a share of it was a VPN client and the system indexer — not ours at all. `uptime` is a fine reason to go and look; it is not a number to decide on, and holding a slot on a reading of 184 starves the queue whenever the host does I/O.
+
+  Two things this closes, both measured the same night. A gate's wall-clock inflates **1.8x to 6.8x** when the host is full, which is enough to push a gate through a fixed timeout and produce a **merge failure that reads as a defect in a branch that is fine**. And the contention does not need two heavy {{.Worker}}s — **one is enough**: a single {{.Worker}} self-parallelised into three compute processes held ~5.7 of 10 cores, which any count of agents reads as an idle box.
+
+  **A timeout on a saturated host is UNKNOWN, not failure.** `pogo refinery show` now prints a `Host:` line, and a timeout error on a contended host says so in as many words. When you see one, re-run before you read it as a defect in the change — and tell the {{.Worker}} that, because it will not know.
 
 ## The Refinery
 

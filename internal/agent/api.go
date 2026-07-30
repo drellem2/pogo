@@ -485,6 +485,7 @@ func (r *Registry) RegisterHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/agents/start", r.handleStart)
 	mux.HandleFunc("/agents/spawn-polecat", r.handleSpawnPolecat)
 	mux.HandleFunc("/agents/drain", r.handleDrain)
+	mux.HandleFunc("/hostload", r.handleHostLoad)
 	mux.HandleFunc("/agents/prompts", r.handlePrompts)
 	mux.HandleFunc("/agents/mail-loops", r.handleMailLoops)
 	mux.HandleFunc("/agents/{name}", r.handleAgent)
@@ -1195,6 +1196,30 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 	// dispatch must leave no worktree, agent dir, or prompt file behind (mg-ef80).
 	if refusal := r.dispatchPairingRefusal(spawnReq.Id); refusal != "" {
 		failPolecatSpawn(w, spawnReq, http.StatusConflict, refusal)
+		return
+	}
+
+	// Load gate: refuse to add a worker to a host the fleet is already using
+	// most of (mg-1b8c). The two gates above ask whether THIS ITEM may be
+	// dispatched; this one asks whether this HOST can take another worker, and
+	// nothing before it measured that. The shipped concurrency rule counts
+	// workers, and a count of workers is blind to what is in them — measured
+	// here, identical gate work took 11.5s on a host with capacity and 78.5s
+	// on a saturated one, which is enough to push a gate through a fixed
+	// timeout and turn contention into a merge failure against an innocent
+	// branch.
+	//
+	// 503, with the drain gate's semantics rather than the conflict gates':
+	// the item is fine and the same request retried later succeeds. It is
+	// placed after them because "this item may not be dispatched at all" is a
+	// more useful answer than "not now", and a caller should get the permanent
+	// answer when both apply.
+	//
+	// Fails OPEN on an unreadable or unattributable sample — see
+	// loadGateRefusal for why refusing on missing information would be worse
+	// than not gating at all.
+	if refusal := r.loadGateRefusal(); refusal != "" {
+		failPolecatSpawn(w, spawnReq, http.StatusServiceUnavailable, refusal)
 		return
 	}
 

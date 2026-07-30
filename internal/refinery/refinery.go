@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/drellem2/pogo/internal/config"
+	"github.com/drellem2/pogo/internal/hostload"
 )
 
 // DefaultPollInterval is how often the refinery checks for new merge requests
@@ -272,6 +273,13 @@ type Refinery struct {
 	// package default; tests set it short so a beat is observable.
 	heartbeatInterval time.Duration
 
+	// loadSampler measures how much of the host the fleet is holding while a
+	// gate runs, so a slow gate can be told apart from a slow change. Nil
+	// disables sampling entirely — the gate still runs and still reports
+	// everything it reported before, it just says nothing about the host.
+	// See setLoadSampler.
+	loadSampler hostload.Sampler
+
 	// gateCancel cancels the quality gate running for r.processing, and
 	// cancelRequested records that someone asked for it. Both are cleared
 	// when processing ends. They are what lets Cancel reach a processing MR
@@ -323,7 +331,23 @@ func New(cfg Config) (*Refinery, error) {
 			return nil, err
 		}
 	}
+	// The refinery runs inside pogod, and every agent on this host is a
+	// descendant of that process, so our own pid is the fleet root. Attribution
+	// is by subtree rather than by agent on purpose: the instance that prompted
+	// this was ONE polecat that had forked three compute processes, and any
+	// count of agents reads that as an idle host.
+	r.loadSampler = &hostload.Reader{Roots: []int{os.Getpid()}}
 	return r, nil
+}
+
+// setLoadSampler replaces the host-load sampler, or disables sampling when
+// nil. Tests use it to feed a known host rather than the one they run on: a
+// saturated host and an idle one are both states a test needs and neither is
+// one it can create.
+func (r *Refinery) setLoadSampler(s hostload.Sampler) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.loadSampler = s
 }
 
 // loadState restores persisted state from cfg.StatePath. A missing file is a

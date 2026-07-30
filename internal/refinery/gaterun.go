@@ -10,6 +10,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/drellem2/pogo/internal/hostload"
 )
 
 // defaultGateTimeout bounds how long a single quality gate may run before it
@@ -44,6 +46,12 @@ type gateTimeoutError struct {
 	OutputLines int
 	SilentFor   time.Duration
 	EverSpoke   bool
+	// Contention is what the host was doing while the gate ran. A timeout
+	// reached on a saturated host and a timeout reached on an idle one are the
+	// same event with opposite meanings, and until this was recorded nothing
+	// downstream could tell them apart — mg-1b8c's measured instance was a
+	// gate on track to exceed a 45-minute timeout doing ~17 minutes of work.
+	Contention hostload.Summary
 }
 
 func (e *gateTimeoutError) Error() string {
@@ -54,10 +62,33 @@ func (e *gateTimeoutError) Error() string {
 	} else {
 		observed = "it produced no output at all"
 	}
-	return fmt.Sprintf("gate %q exceeded its %s timeout after %s and was killed — %s. "+
+	return fmt.Sprintf("gate %q exceeded its %s timeout after %s and was killed — %s. %s"+
 		"If this gate is legitimately slower than %s, raise [gates] timeout in .pogo/refinery.toml "+
 		"(or set it to \"0\" to remove the bound); if it is genuinely stuck, this is the intended outcome.",
-		e.Gate, roundDur(e.Timeout), roundDur(e.Elapsed), observed, roundDur(e.Timeout))
+		e.Gate, roundDur(e.Timeout), roundDur(e.Elapsed), observed, e.contentionClause(), roundDur(e.Timeout))
+}
+
+// contentionClause states what the host was doing, and says out loud what a
+// timeout under contention does and does not establish.
+//
+// The kill still happens and the merge still fails: a control that stops
+// failing when the host is busy is a control that can be silenced by making
+// the host busy. What changes is that the failure no longer reads as a verdict
+// on the branch when the evidence does not support one.
+func (e *gateTimeoutError) contentionClause() string {
+	if e.Contention.Samples == 0 {
+		return ""
+	}
+	if !e.Contention.Contended() {
+		return fmt.Sprintf("The host was not saturated while this ran (%s), so the elapsed time "+
+			"is about this gate. ", e.Contention.Report())
+	}
+	return fmt.Sprintf("TIMED OUT ON A CONTENDED HOST — %s. This gate was competing for CPU for most "+
+		"of its run, so the timeout is evidence about the host as much as about the branch: it does "+
+		"NOT establish that this change is slow or broken, and it does not establish that it is fine "+
+		"either. The kill stands, because a timeout that could be silenced by loading the host would "+
+		"not be a bound at all. Re-run on a quieter host before reading this as a defect in the change. ",
+		e.Contention.Report())
 }
 
 // gateOutputWriter accumulates a gate's combined output while reporting every
@@ -153,6 +184,7 @@ func runGate(ctx context.Context, wtDir, command string, timeout time.Duration, 
 			OutputLines: w.outputLines(),
 			SilentFor:   silentFor,
 			EverSpoke:   everSpoke,
+			Contention:  w.contention(),
 		}
 	}
 	if err != nil && ctx.Err() != nil && errors.Is(context.Cause(ctx), errCancelRequested) {

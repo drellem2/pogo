@@ -1,11 +1,14 @@
 package refinery
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/drellem2/pogo/internal/hostload"
 )
 
 // gateHeartbeatInterval is the bounded interval on which a running quality
@@ -78,6 +81,12 @@ type StepProgress struct {
 	// HeartbeatInterval is the cadence Heartbeat is written on, as a duration
 	// string. Present so staleness is judgeable from the record alone.
 	HeartbeatInterval string `json:"heartbeat_interval"`
+	// Contention summarises what the host was doing while this gate ran. It
+	// is what separates "this change is slow" from "this host was full", a
+	// distinction elapsed time alone cannot make: mg-1b8c measured identical
+	// work taking 11.5s on a host with capacity and 90.3s on a saturated one.
+	// Nil when sampling is unavailable or has not produced a sample yet.
+	Contention *hostload.Summary `json:"contention,omitempty"`
 	// OutputLines counts newline-terminated lines the gate has produced;
 	// LastOutput is when it last produced any bytes at all. Zero and zero
 	// mean the gate has said nothing since it started.
@@ -282,9 +291,15 @@ func (p *StepProgress) Diagnosis(now time.Time) string {
 	// computing. Either one alone is confidently wrong in a case that happens
 	// routinely (see subtreecpu.go).
 	if p.OutputFresh(now) {
+		// The contention note matters here as much as in the silent cases, and
+		// for a different reason: this is the shape of the run that prompted
+		// mg-1b8c. A gate talking steadily and healthily, on track to blow a
+		// timeout, purely because it is sharing the host. Nothing about
+		// "ALIVE and working" would tell a reader that.
 		return fmt.Sprintf("ALIVE and working: runner heartbeat is %s old, gate has produced %s, "+
-			"last %s ago, running %s. Slow, not hung — waiting is correct.",
-			roundDur(p.HeartbeatAge(now)), plural(p.OutputLines, "line"), roundDur(now.Sub(p.LastOutput)), elapsed)
+			"last %s ago, running %s. Slow, not hung — waiting is correct.%s",
+			roundDur(p.HeartbeatAge(now)), plural(p.OutputLines, "line"), roundDur(now.Sub(p.LastOutput)),
+			elapsed, p.contentionNote())
 	}
 
 	// Silent. Describe the silence precisely, then let the process table
@@ -301,15 +316,15 @@ func (p *StepProgress) Diagnosis(now time.Time) string {
 	switch p.Subtree() {
 	case SubtreeBusy:
 		return fmt.Sprintf("ALIVE and computing: %s, and %s — but its process subtree is %s. "+
-			"Silence here is a gate that logs at boundaries, not a stall. Waiting is correct.",
-			beat, silence, p.CPUSummary())
+			"Silence here is a gate that logs at boundaries, not a stall. Waiting is correct.%s",
+			beat, silence, p.CPUSummary(), p.contentionNote())
 	case SubtreeIdle:
 		return fmt.Sprintf("SUSPECT: %s, %s, AND its process subtree is %s. "+
 			"Silent and idle together is the shape of a stall — but it is not proof: a process "+
 			"blocked on I/O, on a lock, or sleeping between phases is idle and healthy. "+
 			"Look closer (ps the subtree, check the gate's log) before intervening; killing a "+
-			"healthy gate is destructive, waiting on a hung one only costs time. %s",
-			beat, silence, p.CPUSummary(), p.timeoutNote(now))
+			"healthy gate is destructive, waiting on a hung one only costs time.%s %s",
+			beat, silence, p.CPUSummary(), p.contentionNote(), p.timeoutNote(now))
 	case SubtreeGone:
 		return fmt.Sprintf("SUSPECT: %s, %s, and the gate process (pid %d) is GONE from the process "+
 			"table. The runner is still beating, so this should resolve on its own within a beat "+
@@ -319,9 +334,43 @@ func (p *StepProgress) Diagnosis(now time.Time) string {
 		return fmt.Sprintf("ALIVE but UNDETERMINED: %s, %s, and its process subtree could not be "+
 			"measured (%s) — so whether the gate is working or stuck cannot be told from here. "+
 			"Output staleness ALONE does not settle it: a healthy gate was observed silent for "+
-			"8m31s while burning four cores, so a long silence is not evidence of a stall. %s",
-			beat, silence, p.CPUSummary(), p.timeoutNote(now))
+			"8m31s while burning four cores, so a long silence is not evidence of a stall.%s %s",
+			beat, silence, p.CPUSummary(), p.contentionNote(), p.timeoutNote(now))
 	}
+}
+
+// contentionNote appends what the HOST was doing, and only when the host was
+// full for most of the run.
+//
+// # How this differs from the subtree measurement next to it
+//
+// CPUCores (mg-0c51) asks "is this gate computing?", rooted at the gate's own
+// pid. This asks "was there any CPU to compute WITH?", rooted at the fleet.
+// They answer different questions and the pair is worth more than either:
+//
+//   - Against SubtreeBusy, contention explains a long elapsed time without
+//     implicating the change.
+//   - Against SubtreeIdle it matters most, and is the reason this clause is
+//     attached there. A saturated host starves a runnable process, and a
+//     starved process consumes almost no CPU — so it measures as IDLE while
+//     being perfectly healthy. Reading "silent and idle" as a stall is exactly
+//     the wrong call on a full host, and without this line nothing in the
+//     verdict would say so.
+//
+// Not attached to SubtreeGone: a missing process is not something a busy host
+// explains.
+//
+// The silence in the ordinary case is deliberate. A note on every verdict
+// trains a reader to skip it, and the number is only load-bearing when it
+// changes the reading. When it is absent, elapsed time means what it always
+// meant.
+func (p *StepProgress) contentionNote() string {
+	if p == nil || p.Contention == nil || !p.Contention.Contended() {
+		return ""
+	}
+	return " HOST CONTENTION: " + p.Contention.Report() +
+		" Elapsed time here is partly the host, so it is weaker evidence about this change than usual," +
+		" and a low subtree CPU reading may be this gate being starved rather than stalled."
 }
 
 // timeoutNote states how long the unresolvable case can last, so the answer
@@ -403,6 +452,19 @@ type gateWatch struct {
 	// alive; a late one is read as a dead runner, so it must not depend on
 	// anything outside this process.
 	cpuDone chan struct{}
+
+	// load samples the HOST while the gate runs; tracker accumulates them.
+	// Distinct from the subtree sampler above and asking a different question:
+	// that one measures whether this gate is computing, this one measures
+	// whether there was CPU available to compute with. On its own goroutine
+	// for the same reason cpuDone's is, and the reason is worth restating —
+	// the beat is the one thing a dead runner cannot fake, so it must not be
+	// made to wait on an exec of `ps`. A wedged or slow sampler costs the
+	// contention record and nothing else.
+	load     hostload.Sampler
+	tracker  *hostload.Tracker
+	loadStop chan struct{}
+	loadDone chan struct{}
 }
 
 // cpuReading is the beat goroutine's latest verdict on the gate's subtree.
@@ -439,6 +501,10 @@ func startGateWatch(r *Refinery, mr *MergeRequest, step, gate string, index, cou
 		stop:     make(chan struct{}),
 		done:     make(chan struct{}),
 		cpuDone:  make(chan struct{}),
+		load:     r.hostLoadSampler(),
+		tracker:  &hostload.Tracker{},
+		loadStop: make(chan struct{}),
+		loadDone: make(chan struct{}),
 	}
 	now := time.Now()
 	if r != nil && mr != nil {
@@ -459,7 +525,18 @@ func startGateWatch(r *Refinery, mr *MergeRequest, step, gate string, index, cou
 	}
 	go w.run()
 	go w.runCPU()
+	go w.runLoad()
 	return w
+}
+
+// hostLoadSampler returns the sampler in force, or nil when sampling is off.
+func (r *Refinery) hostLoadSampler() hostload.Sampler {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.loadSampler
 }
 
 // setPID publishes the gate shell's process id. Until it is set there is no
@@ -551,6 +628,75 @@ func (w *gateWatch) run() {
 			w.beat()
 		}
 	}
+}
+
+// runLoad samples the host for as long as the gate runs and folds each sample
+// into the MR's contention record.
+//
+// It takes the first sample immediately rather than after one interval: a gate
+// that dies early still leaves an answer to "what was the host doing", and
+// with a 30-second beat the alternative is a whole interval of nothing.
+func (w *gateWatch) runLoad() {
+	defer close(w.loadDone)
+	if w.load == nil {
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		<-w.loadStop
+		cancel()
+	}()
+
+	// Sample no faster than the heartbeat, and never faster than the window a
+	// sample needs to observe. The heartbeat is deliberately short in tests
+	// (milliseconds); without the floor those runs would exec `ps` in a tight
+	// loop, which is both slow and a way of measuring the observer.
+	every := w.interval
+	if every < hostload.DefaultWindow {
+		every = hostload.DefaultWindow
+	}
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		w.sampleLoad(ctx)
+		select {
+		case <-w.loadStop:
+			return
+		case <-t.C:
+		}
+	}
+}
+
+// sampleLoad takes one host sample and records it. Failures are dropped: a
+// missing contention record makes a gate no worse off than it was before this
+// existed, and failing a merge over an observability call would be a strictly
+// worse trade.
+func (w *gateWatch) sampleLoad(ctx context.Context) {
+	s, err := w.load.Read(ctx)
+	if err != nil {
+		return
+	}
+	w.tracker.Add(s)
+	if w.r == nil || w.mr == nil {
+		return
+	}
+	sum := w.tracker.Summary()
+	w.r.mu.Lock()
+	defer w.r.mu.Unlock()
+	if w.mr.Progress == nil {
+		return
+	}
+	w.mr.Progress.Contention = &sum
+	w.r.saveStateLocked()
+}
+
+// contention returns what the host has been doing for this gate's lifetime.
+func (w *gateWatch) contention() hostload.Summary {
+	if w == nil {
+		return hostload.Summary{}
+	}
+	return w.tracker.Summary()
 }
 
 // beat records one proof of life: refresh the persisted record and log a
@@ -657,12 +803,17 @@ func (w *gateWatch) finish() {
 	}
 	close(w.stop)
 	<-w.done
-	// The sampler is joined too — but with a bound, because it may be inside a
-	// `ps` that is not returning. Trading a hung gate for a hung runner would
+	// Both samplers are joined — but with a bound, because either may be inside
+	// a `ps` that is not returning. Trading a hung gate for a hung runner would
 	// take the heartbeat down with it, and the heartbeat is the thing this
 	// whole record exists to provide.
 	select {
 	case <-w.cpuDone:
+	case <-time.After(psTimeout + time.Second):
+	}
+	close(w.loadStop)
+	select {
+	case <-w.loadDone:
 	case <-time.After(psTimeout + time.Second):
 	}
 	w.snapshot(time.Now(), true)

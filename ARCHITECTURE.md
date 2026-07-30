@@ -236,6 +236,52 @@ Work flows through macguffin:
 
 There is no "sling" command. Spawning a polecat with a work item is the assignment. Mailing a crew member is the assignment. The mechanisms are macguffin primitives, not orchestration abstractions.
 
+### Dispatch gates
+
+`pogo agent spawn-polecat` is the one chokepoint every item passes through
+before any worker touches it, whoever filed it. Three gates sit there, above
+every side effect, so a refused dispatch leaves no worktree, agent dir, or
+prompt file behind. They ask different questions and fail in different
+directions:
+
+| Gate | Question | Answer | Default |
+|---|---|---|---|
+| **Assignee** | May this item be executed automatically at all? | **409** — permanent; retrying unchanged is refused forever | enforces `human` / `parked` / `blocked:<agent>` |
+| **Pairing** | Has the obligation this item's repo puts on it been discharged? | **409** — permanent until the pair is filed | inert; one deployment's config |
+| **Host load** | Can this **host** take another worker right now? | **503** — a *later*; the same request succeeds once the host clears | enforces, measuring |
+
+The first two are about the item. The third is about the machine, and nothing
+before it measured that.
+
+**Why the third exists.** The concurrency rule is "a reasonable limit is 3-5
+concurrent workers", and a count of slots cannot see what is in them. Measured
+(mg-1b8c): identical gate work took **11.5s** on a host with capacity and
+**78.5s** on a full one, enough to push a gate through a fixed timeout and
+produce a merge failure attributed to a branch that was fine. The live instance
+was **one** worker that had self-parallelised into three compute processes
+holding ~5.7 of 10 cores — which any count of agents reads as an idle box. So
+the gate counts the **resource**, via `internal/hostload`'s process-subtree
+attribution, and refuses above `FleetHeavyAt` (half the cores held by the fleet).
+
+**What it deliberately does not read.** Not the load average — measured at 214
+against ~7.5 of 10 cores actually in use, because Darwin counts I/O waiters, so
+a guard keyed on it refuses to dispatch while cores sit idle. Not total host
+CPU — a VPN client and the system indexer held cores that pausing fleet work
+would not give back, and gating on them hands an unrelated process a veto over
+the fleet's dispatch. Not a count of agents, for the reason above.
+
+**It does not predict cost.** Nothing on a work item declares one; per-repo
+history is wrong in exactly the expensive cases; and a filer-set marker depends
+on somebody remembering, where an observation of the host does not. The gate
+makes the weaker claim the evidence supports: what the fleet holds *now*.
+
+**It fails open**, unlike the two above it — an unreadable or unattributable
+sample proceeds. Refusing work on missing information stalls the queue for a
+reason nobody downstream can check or clear.
+
+`pogo host load` reports the same numbers from the same gate, so a
+coordinator's plan and pogod's enforcement cannot disagree.
+
 ### Inter-Agent Communication
 
 Two channels:
@@ -375,18 +421,31 @@ show <id>` (and carried in `--json` under `progress`), which matters because the
 dead-runner case is exactly the case where the writing process is gone and the
 state file is the only reader left.
 
-Two signals are reported **separately**, because they answer different questions
-and collapsing them would rebuild the ambiguity:
+Four signals are reported **separately**, because they answer different
+questions and collapsing them would rebuild the ambiguity:
 
-| Signal | Written by | A dead runner | A hung gate subprocess |
-|---|---|---|---|
-| `heartbeat` / `beats` | the goroutine running the gate | **cannot emit it** — goes stale | keeps beating |
-| `output_lines` / `last_output` | the gate's own subprocess | frozen | **cannot emit it** — freezes |
+| Signal | Written by | Answers | A dead runner | A hung gate subprocess |
+|---|---|---|---|---|
+| `heartbeat` / `beats` | the goroutine running the gate | is the runner alive? | **cannot emit it** — goes stale | keeps beating |
+| `output_lines` / `last_output` | the gate's own subprocess | is the gate talking? | frozen | **cannot emit it** — freezes |
+| `cpu_cores` / `cpu_procs` (mg-0c51) | a sampler over the gate's process subtree | is the gate *computing*? | n/a | reads idle |
+| `contention` (mg-1b8c) | a sampler over the fleet's process subtree | was there CPU to compute *with*? | n/a | unaffected |
 
 So a stale heartbeat proves the runner is gone; a fresh heartbeat plus climbing
 output proves the gate is slow, not stuck; and a fresh heartbeat with a silent
-gate is reported *as unresolved*, bounded by the timeout, rather than guessed at.
+gate is resolved by the subtree reading rather than guessed at — a real gate was
+observed silent for 8m31s while a descendant burned 3.9 cores, so output
+staleness alone is confidently wrong in a case that happens routinely.
 `pogo refinery show` prints that reading as a `Verdict:` line.
+
+**The last two are easy to confuse and answer opposite halves of one question.**
+`cpu_cores` is rooted at the gate's own pid; `contention` is rooted at pogod. The
+pair matters most in the case each would get wrong alone: **a saturated host
+starves a runnable process, and a starved process consumes almost no CPU**, so a
+perfectly healthy gate reads as *silent and idle* — the shape of a stall — for as
+long as the host stays full. The verdict therefore names the host contention on
+that branch and offers starvation as the alternative reading, so the two
+measurements cannot combine into a confident wrong answer.
 
 Nothing here is derived from **workspace state** — file mtimes, lock files,
 worktree contents. That was the trap in the original misdiagnosis: a frozen
@@ -454,6 +513,36 @@ Two things changed (`internal/refinery/gatedirt.go`, mg-393f):
   reintroduces the exact instruction the message exists to withdraw. The
   classification is made from the tree, not from git's wording, which differs per
   step and per git version.
+
+**Host contention.** Elapsed time answers "how long did this take", not "how
+long *should* it have taken", and on a shared host those are different
+questions. Measured on the fleet's 10-core box (mg-1b8c): identical work took
+**11.5s** with capacity and **78.5s** with the host full — a **6.8x** inflation
+of something the branch under test had no part in. Left unmeasured, that pushes
+a gate through a fixed timeout and produces a merge failure that reads as a
+defect in the change.
+
+So a running gate **samples the host** and carries the summary on its progress
+record — the fourth signal in the table above. `pogo refinery show` prints a
+`Host:` line for every sampled run — saturated *or* not, because "the host was
+quiet" and "we did not look" are different claims — and a timeout reached on a
+saturated host says so in its error text, with the numbers.
+
+The kill still happens and the merge still fails. A bound that could be
+silenced by loading the host would not be a bound. What changes is the reading:
+the failure no longer implies a verdict on the branch when the evidence does
+not support one.
+
+The measurement is `internal/hostload`: per-process CPU time differenced over a
+window and attributed to the fleet **by process subtree** from pogod. Subtree
+rather than agent count is the whole point — the instance that prompted it was
+one agent with three compute children, and any count of agents reads that as an
+idle host. It is deliberately **not** the load average: measured the same night,
+a load average of 214 against ~7.5 of 10 cores in use, because Darwin counts
+I/O waiters in that figure. The load average is carried as context and decided
+on by nothing.
+
+The same measurement gates dispatch — see **Dispatch gates** below.
 
 **Cancelling a merge.** `pogo refinery cancel <id>` reaches a **processing** MR,
 not only a queued one — previously it refused anything but `queued`, the state

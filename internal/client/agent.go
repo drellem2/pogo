@@ -180,6 +180,29 @@ func NudgeAgent(name, message string, opts *NudgeOpts) error {
 	return nil
 }
 
+// GetHostLoad asks pogod what share of this host the fleet is holding.
+//
+// It goes through pogod rather than measuring locally on purpose: pogod is the
+// process every agent descends from, so it is the only vantage point where
+// "the fleet's share" is a well-defined subtree, and it is the same gate the
+// spawn path consults.
+func GetHostLoad() (*agent.HostLoadResponse, error) {
+	r, err := http.Get(serverURL + "/hostload")
+	if err != nil {
+		return nil, err
+	}
+	defer r.Body.Close()
+	if r.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(r.Body)
+		return nil, fmt.Errorf("host load: %s: %s", r.Status, strings.TrimSpace(string(b)))
+	}
+	var resp agent.HostLoadResponse
+	if err := json.NewDecoder(r.Body).Decode(&resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
 // SpawnPolecat asks pogod to spawn a polecat from a template.
 func SpawnPolecat(req agent.SpawnPolecatAPIRequest) (*agent.AgentInfo, error) {
 	body, err := json.Marshal(req)

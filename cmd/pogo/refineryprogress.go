@@ -56,6 +56,19 @@ func formatMRProgress(p *refinery.StepProgress, now time.Time) string {
 		fmt.Fprintf(&b, "Timeout:   %s (in %s)\n", p.TimeoutAt.Format("15:04:05"),
 			p.TimeoutAt.Sub(now).Round(time.Second))
 	}
+	if c := p.Contention; c != nil && c.Samples > 0 {
+		// Printed for every sampled run, contended or not, because the useful
+		// reading of "this gate took 40 minutes" needs to know the host was
+		// quiet just as much as it needs to know the host was full. An absent
+		// line here would mean "not measured", and that is a third thing.
+		state := "host had capacity"
+		if c.Contended() {
+			state = "HOST SATURATED"
+		}
+		fmt.Fprintf(&b, "Host:      %s — fleet %.1f of %d cores (peak %.1f, %d procs), non-fleet %.1f, over %d samples\n",
+			state, c.MeanFleetCores, c.Cores, c.PeakFleetCores, c.PeakFleetProcs,
+			c.MeanExternalCores, c.Samples)
+	}
 	fmt.Fprintf(&b, "Verdict:   %s\n", p.Diagnosis(now))
 	return b.String()
 }

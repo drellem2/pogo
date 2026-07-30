@@ -341,6 +341,11 @@ func newProgressTestRefinery(t *testing.T, interval time.Duration) *Refinery {
 		t.Fatal(err)
 	}
 	r.heartbeatInterval = interval
+	// Host sampling off by default: a gate test asserting on progress records
+	// should not also be execing `ps` against whatever the machine running the
+	// suite happens to be doing. Tests that are about contention inject a
+	// known host with setLoadSampler.
+	r.setLoadSampler(nil)
 	return r
 }
 

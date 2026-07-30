@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/drellem2/pogo/internal/hostload"
 	"github.com/drellem2/pogo/internal/refinery"
 )
 
@@ -151,5 +152,92 @@ func TestFormatMRProgressSilentGateIsReportedAsUnresolved(t *testing.T) {
 func TestFormatMRProgressNoRecord(t *testing.T) {
 	if out := formatMRProgress(nil, time.Now()); out != "" {
 		t.Errorf("no progress record should render nothing, got:\n%s", out)
+	}
+}
+
+// TestFormatMRProgressSeparatesASlowHostFromASlowChange is the operator-facing
+// half of mg-1b8c. Two gates, identical in every respect a reader could see
+// before this change — same command, same elapsed time, same output, same
+// heartbeat — and one of them was competing with the rest of the fleet for a
+// full host the whole time.
+//
+// The distinction has to be visible without reading the process table, for the
+// same reason mg-8595's did: by the time anyone reads `refinery show`, the run
+// is often over and the process table no longer holds the answer.
+func TestFormatMRProgressSeparatesASlowHostFromASlowChange(t *testing.T) {
+	now := time.Now()
+	started := now.Add(-40 * time.Minute)
+
+	base := func(c *hostload.Summary) string {
+		return formatMRProgress(&refinery.StepProgress{
+			Step:              "quality-gates",
+			Gate:              "./build.sh",
+			StartTime:         started,
+			Heartbeat:         now.Add(-3 * time.Second),
+			Beats:             80,
+			HeartbeatInterval: "30s",
+			OutputLines:       900,
+			LastOutput:        now.Add(-2 * time.Second),
+			Contention:        c,
+		}, now)
+	}
+
+	var loaded, quiet hostload.Tracker
+	for i := 0; i < 40; i++ {
+		loaded.Add(hostload.Sample{Cores: 10, FleetCores: 8.1, ExternalCores: 1.5,
+			FleetProcs: 11, LoadAvg1: 140, Attributed: true})
+		quiet.Add(hostload.Sample{Cores: 10, FleetCores: 0.9, ExternalCores: 0.7,
+			FleetProcs: 8, LoadAvg1: 3, Attributed: true})
+	}
+	ls, qs := loaded.Summary(), quiet.Summary()
+
+	onFullHost, onQuietHost := base(&ls), base(&qs)
+
+	if !strings.Contains(onFullHost, "HOST SATURATED") {
+		t.Errorf("a gate that ran on a full host must say so:\n%s", onFullHost)
+	}
+	if !strings.Contains(onFullHost, "fleet 8.1 of 10 cores") {
+		t.Errorf("the numbers must be printed, not just the verdict:\n%s", onFullHost)
+	}
+	if !strings.Contains(onQuietHost, "host had capacity") {
+		t.Errorf("a gate that ran on a quiet host must say so positively — absence would mean "+
+			"\"not measured\", which is a third thing:\n%s", onQuietHost)
+	}
+	if strings.Contains(onQuietHost, "HOST SATURATED") {
+		t.Errorf("a quiet host was reported as saturated:\n%s", onQuietHost)
+	}
+	// Both ran for the same 40 minutes: the elapsed time is not what separates
+	// them, and must not be.
+	if !strings.Contains(onFullHost, "40m0s") || !strings.Contains(onQuietHost, "40m0s") {
+		t.Errorf("fixtures must share an elapsed time:\n%s\n---\n%s", onFullHost, onQuietHost)
+	}
+}
+
+// TestFormatMRProgressSaysNothingWhenNothingWasMeasured. An unsampled run must
+// not gain a host line — "the host was fine" and "we did not look" are
+// different claims and only one of them is true here.
+func TestFormatMRProgressSaysNothingWhenNothingWasMeasured(t *testing.T) {
+	now := time.Now()
+	out := formatMRProgress(&refinery.StepProgress{
+		Step:              "quality-gates",
+		Gate:              "./build.sh",
+		StartTime:         now.Add(-5 * time.Minute),
+		Heartbeat:         now,
+		HeartbeatInterval: "30s",
+	}, now)
+	if strings.Contains(out, "Host:") {
+		t.Errorf("an unsampled run must print no host line:\n%s", out)
+	}
+
+	empty := &hostload.Summary{}
+	out = formatMRProgress(&refinery.StepProgress{
+		Step:              "quality-gates",
+		StartTime:         now.Add(-5 * time.Minute),
+		Heartbeat:         now,
+		HeartbeatInterval: "30s",
+		Contention:        empty,
+	}, now)
+	if strings.Contains(out, "Host:") {
+		t.Errorf("a zero-sample contention record must print no host line:\n%s", out)
 	}
 }
