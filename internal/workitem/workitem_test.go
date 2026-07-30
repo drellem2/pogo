@@ -444,3 +444,92 @@ func TestListAllFromSeesClaimedItems(t *testing.T) {
 		t.Error("ListAllFrom() dropped an ordinary available item")
 	}
 }
+
+// TestPendingIsReachableOnlyByName pins both halves of adding pending/ to
+// statusDirs, and they are equally load-bearing.
+//
+// pending/ holds items mg has parked because a gate on them has not opened —
+// most often an unmet `depends:`. Those are FILED items, so a caller SEARCHING
+// the store must be able to reach them; the dispatch-pairing gate is exactly
+// such a caller, and a pre-filed pair lives in pending/ by construction.
+//
+// But every caller written before pending/ existed says "all" and means
+// available+claimed+done. If an unfiltered scan started returning parked items,
+// each of those callers would silently begin counting work nobody can start.
+// So: reachable by naming it, invisible otherwise.
+func TestPendingIsReachableOnlyByName(t *testing.T) {
+	root := t.TempDir()
+	for _, d := range []string{"available", "claimed", "done", "pending"} {
+		if err := os.MkdirAll(filepath.Join(root, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeItem(t, filepath.Join(root, "available", "mg-open.md"), "---\nid: mg-open\n---\n# open\n")
+	writeItem(t, filepath.Join(root, "pending", "mg-park.md"),
+		"---\nid: mg-park\ndepends: [mg-open]\n---\n# parked on an unmet dependency\n")
+
+	has := func(items []WorkItem, id string) bool {
+		for _, it := range items {
+			if it.ID == id {
+				return true
+			}
+		}
+		return false
+	}
+
+	// An unfiltered scan, on both readers, must not have moved.
+	for _, tc := range []struct {
+		name  string
+		items []WorkItem
+	}{
+		{"ListFrom", mustList(t, func() ([]WorkItem, error) { return ListFrom(root) })},
+		{"ListAllFrom", mustList(t, func() ([]WorkItem, error) { return ListAllFrom(root) })},
+	} {
+		if has(tc.items, "mg-park") {
+			t.Errorf("%s() with no filter returned a pending item; every existing caller "+
+				"means available+claimed+done by \"all\" and would silently start "+
+				"counting work nobody can start", tc.name)
+		}
+		if !has(tc.items, "mg-open") {
+			t.Errorf("%s() with no filter lost an ordinary available item", tc.name)
+		}
+	}
+
+	// Named explicitly, it is there — and carries the right status.
+	named := mustList(t, func() ([]WorkItem, error) { return ListAllFrom(root, "available", "pending") })
+	if !has(named, "mg-park") {
+		t.Fatal(`ListAllFrom(root, "available", "pending") did not return the pending item, ` +
+			"so a pre-filed pair parked on its target reads as never filed")
+	}
+	for _, it := range named {
+		if it.ID == "mg-park" && it.Status != "pending" {
+			t.Errorf("mg-park status = %q, want pending", it.Status)
+		}
+	}
+	if !has(named, "mg-open") {
+		t.Error(`ListAllFrom(root, "available", "pending") dropped the available item`)
+	}
+
+	// FindFrom is a by-id lookup used by two dispatch gates to decide whether an
+	// item may be executed. It searched available+claimed+done before pending/
+	// became reachable and must still: a gate that started resolving parked items
+	// would change its verdict for a reason unrelated to why pending/ was added.
+	if _, found, err := FindFrom(root, "mg-park"); err != nil {
+		t.Fatal(err)
+	} else if found {
+		t.Error("FindFrom() now resolves pending items; its callers include two " +
+			"dispatch gates and were not reviewed for that change")
+	}
+	if _, found, err := FindFrom(root, "mg-open"); err != nil || !found {
+		t.Errorf("FindFrom() lost an ordinary available item: found=%v err=%v", found, err)
+	}
+}
+
+func mustList(t *testing.T, f func() ([]WorkItem, error)) []WorkItem {
+	t.Helper()
+	items, err := f()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return items
+}

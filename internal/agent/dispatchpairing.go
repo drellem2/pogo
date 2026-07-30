@@ -84,8 +84,9 @@ type MGDispatchPairingGate struct {
 //     independent on purpose.
 //   - It checks that a pair EXISTS, never that it is any good. An audit ticket
 //     filed to satisfy the gate and then shelved unread satisfies it.
-//   - Items in shelved/, pending/ and archive/ are not scanned as candidate
-//     pairs. A shelved audit is a dropped obligation, not a discharged one.
+//   - Items in shelved/ and archive/ are not scanned as candidate pairs. A
+//     shelved audit is a dropped obligation, not a discharged one. pending/ IS
+//     scanned — see pairCandidateStatuses.
 func (m MGDispatchPairingGate) PairingUnmet(workItemID string) (string, bool) {
 	if workItemID == "" || len(m.Cfg.Repos) == 0 {
 		return "", false
@@ -131,7 +132,7 @@ func (m MGDispatchPairingGate) PairingUnmet(workItemID string) (string, bool) {
 	}
 
 	// Covered. From here a failure to answer is a refusal, not a pass.
-	candidates, err := workitem.ListAllFrom(workRoot)
+	candidates, err := workitem.ListAllFrom(workRoot, pairCandidateStatuses...)
 	if err != nil {
 		return fmt.Sprintf("work item %s is in %s, whose items owe a paired item tagged %s before "+
 			"dispatch, and the macguffin store at %s could not be scanned to check: %v. "+
@@ -156,6 +157,25 @@ func (m MGDispatchPairingGate) PairingUnmet(workItemID string) (string, bool) {
 		item.Repo, firstOr(m.Cfg.PairTags, "pair"), targetID, targetID,
 		waiverAdvice(m.Cfg.WaiverTags)), true
 }
+
+// pairCandidateStatuses are the statuses an item may hold and still count as a
+// FILED pair.
+//
+// `pending` is the load-bearing one, and leaving it out made the gate refuse
+// the very items it was built to let through. The canonical pair is filed with
+// `depends: [<target>]`, and mg parks an item whose depends are unmet in
+// pending/ until `mg schedule` promotes it. So a pair filed correctly — in
+// advance, referencing a target that by definition is not done yet — is in
+// pending/ for exactly the window the gate runs in. A scan that skipped it read
+// "pre-filed" as "never filed" and refused a dispatch whose obligation was
+// discharged. That is the false-refusal direction, and it is the expensive one:
+// a missed case is one unaudited item, a false refusal stops every correctly
+// paired item in the repo, which is every one of them.
+//
+// shelved/ and archive/ stay out, and the asymmetry is the point. Pending is a
+// pair waiting for its turn; shelved is a pair someone dropped. Counting a
+// shelved audit would let an obligation be discharged by abandoning it.
+var pairCandidateStatuses = []string{"available", "claimed", "done", "pending"}
 
 // waiverAdvice renders the opt-out half of a refusal. A deployment that
 // configured no waiver tags has no opt-out, and the message says so rather than

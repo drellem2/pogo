@@ -587,8 +587,55 @@ recoverable from the artifacts.
   halves are independent on purpose.
 - **Quality.** It checks that a pair *exists*, never that it is any good. A pair
   filed to satisfy the gate and then shelved unread satisfies it.
-- **Shelved, pending and archived items** are not scanned as candidate pairs; a
-  shelved pair is a dropped obligation, not a discharged one.
+- **Shelved and archived items** are not scanned as candidate pairs; a shelved
+  pair is a dropped obligation, not a discharged one. `pending/` **is** scanned
+  — see below.
+
+### Which statuses count as a filed pair
+
+`available`, `claimed`, `done` and **`pending`**.
+
+`pending` is the load-bearing one. The canonical pair is filed with
+`depends: [<target>]`, and `mg` parks an item whose depends are unmet in
+`pending/` until `mg schedule` promotes it. The target of a pairing obligation is
+by definition not done — it has not been dispatched yet — so **a correctly
+pre-filed pair sits in `pending/` for exactly the window this gate runs in.** A
+scan that skipped it read *pre-filed* as *never filed* and refused the very
+dispatches the gate was built to permit.
+
+`shelved/` and `archive/` stay out, and the asymmetry is the point: pending is a
+pair waiting its turn, shelved is a pair somebody dropped. If shelving counted, an
+obligation could be discharged by abandoning it.
+
+### The escape hatch: `--pairing-override`
+
+```bash
+pogo agent spawn-polecat cat-1234 --id mg-1234 \
+    --pairing-override="the audit is mg-9999, filed under a tag this config does not name"
+```
+
+A refusal with no override becomes a **wedge** the first time the marker is wrong
+— a repo named too broadly, a pair filed under a tag `pair_tags` does not list —
+and a wedge under time pressure gets resolved by disarming the gate. A cheap,
+loud override is what keeps the gate armed.
+
+- **It is a string, not a boolean.** A bare `--force` records that someone
+  overrode the gate and loses the only thing a later reader needs: what they knew
+  that the gate did not. An empty or whitespace value is not an override.
+- **It is recorded.** Each use emits a `dispatch_pairing_overridden` event
+  carrying the item, the stated reason, **and the bypassed refusal verbatim**.
+  Those answer different questions — the reason is what the operator believed,
+  the refusal is what the gate objected to, and only both together distinguish a
+  config bug from an unaudited deliverable that shipped anyway.
+- **It overrides this gate only.** The assignee gate, the type→template map, the
+  drain gate and the load gate are untouched.
+
+`waiver_tags` remains the other opt-out and they are not interchangeable: a
+waiver tag says *this item never owed a pair* and lives on the item permanently;
+an override says *this item owes one and I am dispatching anyway*, and lives in
+the event log. Note that `waiver_tags` is itself optional, so a deployment that
+sets `repos` without it has **no** item-side opt-out — `--pairing-override` is
+then the only way out, which is why it does not depend on configuration.
 
 ### Choosing `pair_tags`
 

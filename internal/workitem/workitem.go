@@ -80,13 +80,23 @@ func workspaceDir() string {
 }
 
 // statusDirs maps directory names to work item status values.
+//
+// byDefault says whether a scan with no explicit status filter reads the
+// directory. It exists for pending/, which holds items mg has parked because a
+// gate on them has not opened — most often an unmet `depends:`. Those are FILED
+// items and a search of the store must be able to reach them, but they are not
+// part of the working set, and every caller predating this field means
+// available+claimed+done when it says "all". So pending/ is reachable only by
+// naming it, and no existing caller's results move.
 var statusDirs = []struct {
-	dir    string
-	status string
+	dir       string
+	status    string
+	byDefault bool
 }{
-	{"available", "available"},
-	{"claimed", "claimed"},
-	{"done", "done"},
+	{"available", "available", true},
+	{"claimed", "claimed", true},
+	{"done", "done", true},
+	{"pending", "pending", false},
 }
 
 // List reads work items from the macguffin workspace, optionally filtered to
@@ -179,6 +189,14 @@ func FindFrom(root, id string) (WorkItem, bool, error) {
 		return WorkItem{}, false, nil
 	}
 	for _, sd := range statusDirs {
+		// Default statuses only, matching what this function searched before
+		// pending/ was added to statusDirs. A by-id lookup that started
+		// returning parked items would change the answer every existing caller
+		// gets — including two dispatch gates — for a reason unrelated to why
+		// pending/ became reachable.
+		if !sd.byDefault {
+			continue
+		}
 		dir := filepath.Join(root, sd.dir)
 		item, err := parseWorkItem(filepath.Join(dir, id+".md"), sd.status)
 		if err == nil {
@@ -235,14 +253,27 @@ func findByPrefix(dir, prefix string) (string, bool, error) {
 }
 
 // statusRequested reports whether a status directory should be scanned given
-// the caller's filter. An empty filter selects every status.
+// the caller's filter. An empty filter selects every DEFAULT status — see
+// statusDirs.byDefault for why "all" does not mean "every directory on disk".
 func statusRequested(status string, filter []string) bool {
 	if len(filter) == 0 {
-		return true
+		return statusIsDefault(status)
 	}
 	for _, s := range filter {
 		if s == status {
 			return true
+		}
+	}
+	return false
+}
+
+// statusIsDefault reports whether a status is in the set an unfiltered scan
+// reads. An unknown status is not, so adding a directory to statusDirs cannot
+// silently widen an existing caller.
+func statusIsDefault(status string) bool {
+	for _, sd := range statusDirs {
+		if sd.status == status {
+			return sd.byDefault
 		}
 	}
 	return false

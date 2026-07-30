@@ -89,6 +89,17 @@ type SpawnPolecatAPIRequest struct {
 	// variable. Used for in-place edits to files that aren't under a git repo
 	// (e.g. runtime crew prompt mirrors). No Repo is required when set.
 	NoWorktree bool `json:"no_worktree,omitempty"`
+	// PairingOverride dispatches an item whose paired-item obligation is unmet,
+	// and states why. It is the deliberate-act escape hatch from the pairing
+	// gate (see dispatchpairing.go) and it is NOT a boolean: a bare --force
+	// records that someone overrode the gate and loses the only thing a later
+	// reader needs, which is what they knew that the gate did not. An empty
+	// string is not an override.
+	//
+	// It overrides the PAIRING gate alone. The assignee gate, the template map,
+	// the drain and the load gate are unaffected — an override that quietly
+	// widened to every check would be a different and much larger flag.
+	PairingOverride string `json:"pairing_override,omitempty"`
 }
 
 // DrainAPIRequest is the JSON body for POST /agents/drain. Toggling drain mode
@@ -1194,9 +1205,24 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 	// 409 and placed with the gates above, for the same reasons: retrying it
 	// unchanged is refused identically until the pair is filed, and a refused
 	// dispatch must leave no worktree, agent dir, or prompt file behind (mg-ef80).
+	//
+	// The refusal is overridable, and has to be. A gate whose marker is wrong —
+	// a repo added too broadly, a pair filed under a tag the config does not
+	// name — becomes a wedge with no way out but a config edit, and the first
+	// time that happens under time pressure the lesson learned is "disarm the
+	// gate". --pairing-override is the deliberate act that dispatches anyway,
+	// and it costs a written reason, recorded as an event beside the refusal it
+	// bypassed. Overriding is meant to be cheap; overriding SILENTLY is not
+	// possible.
 	if refusal := r.dispatchPairingRefusal(spawnReq.Id); refusal != "" {
-		failPolecatSpawn(w, spawnReq, http.StatusConflict, refusal)
-		return
+		if override := strings.TrimSpace(spawnReq.PairingOverride); override != "" {
+			emitPolecatPairingOverridden(spawnReq, override, refusal)
+			log.Printf("dispatch pairing: OVERRIDDEN for %s by explicit request: %s (refusal was: %s)",
+				spawnReq.Id, override, refusal)
+		} else {
+			failPolecatSpawn(w, spawnReq, http.StatusConflict, refusal)
+			return
+		}
 	}
 
 	// Load gate: refuse to add a worker to a host the fleet is already using
@@ -1579,6 +1605,35 @@ func emitPolecatSpawnFailed(spawnReq SpawnPolecatAPIRequest, status int, reason 
 			"agent_name":  spawnReq.Name,
 			"status_code": status,
 			"reason":      reason,
+		},
+	})
+}
+
+// emitPolecatPairingOverridden records a dispatch that went ahead over an unmet
+// pairing obligation. It is the other half of the escape hatch: the flag makes
+// the override possible, this makes it visible.
+//
+// It carries the refusal VERBATIM as well as the reason, because those answer
+// different questions. The reason is what the person believed; the refusal is
+// what the gate actually objected to. A reader who has only the reason cannot
+// tell an override of "the pair is filed under a tag the config does not name"
+// from an override of "there is no pair and we shipped anyway" — and those are
+// a config bug and an unaudited deliverable respectively.
+func emitPolecatPairingOverridden(spawnReq SpawnPolecatAPIRequest, reason, refusal string) {
+	actor := "pogod"
+	if spawnReq.Name != "" {
+		actor = "cat-" + spawnReq.Name
+	}
+	events.Emit(context.Background(), events.Event{
+		EventType:  "dispatch_pairing_overridden",
+		Agent:      actor,
+		WorkItemID: spawnReq.Id,
+		Repo:       spawnReq.Repo,
+		Details: map[string]any{
+			"agent_type": string(TypePolecat),
+			"agent_name": spawnReq.Name,
+			"reason":     reason,
+			"refusal":    refusal,
 		},
 	})
 }

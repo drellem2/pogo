@@ -17,7 +17,8 @@ type pairingItem struct {
 	repo    string
 	tags    []string
 	depends []string
-	// status picks the directory: "available" (default), "claimed", or "done".
+	// status picks the directory: "available" (default), "claimed", "done",
+	// "pending" or "shelved".
 	status string
 	// claimed writes the file under the `<id>.md.<pid>` name a claim leaves
 	// behind, which is the name workitem.ListFrom cannot see.
@@ -163,6 +164,171 @@ func TestSpawnPolecatAllowedWhenPairExists(t *testing.T) {
 				t.Errorf("pairing gate refused an item whose pair IS filed: %s", rr.Body.String())
 			}
 		})
+	}
+}
+
+// TestSpawnPolecatAllowedWhenPairIsPending is the arm the first cut of this gate
+// got wrong, and it is the one that matters most in practice.
+//
+// A pair is filed with `depends: [<target>]`. mg parks an item whose depends are
+// unmet in pending/ until `mg schedule` promotes it. The target of a pairing
+// obligation is by definition not done — it has not even been dispatched yet —
+// so a CORRECTLY pre-filed pair is in pending/ for exactly the window this gate
+// runs in. Measured on the live store the morning this was written: three of the
+// five items in pending/ were pre-filed onethird audits, and every one of them
+// would have read as never filed.
+//
+// The consequence is the expensive direction. A missed case is one unaudited
+// item; a gate that refuses every correctly paired item refuses every item in
+// the repo, and the lesson operators learn from that is to disarm the gate.
+func TestSpawnPolecatAllowedWhenPairIsPending(t *testing.T) {
+	root := pairingStore(t,
+		pairingItem{id: "mg-41aa", repo: onethirdRepo, tags: []string{"onethird", "audit-repair"}},
+		// mg-5800 as it actually sits on disk: pre-filed, depends on its target,
+		// and parked in pending/ because that target is not done.
+		pairingItem{
+			id: "mg-5800", repo: onethirdRepo, status: "pending",
+			tags:    []string{"onethird", "audit", "independent-audit", "mg-41aa-followup"},
+			depends: []string{"mg-41aa"},
+		},
+	)
+	reg := newDrainTestRegistry(t)
+	reg.SetDispatchPairingGate(MGDispatchPairingGate{Root: root, Cfg: onethirdPolicy()})
+
+	if rr := spawnPolecatFor(t, reg, "mg-41aa"); rr.Code == http.StatusConflict {
+		t.Fatalf("pairing gate refused an item whose pair is pre-filed and parked in pending/: %s\n"+
+			"pending/ is where a correctly pre-filed pair LIVES — refusing here refuses "+
+			"every properly paired item in the repo", rr.Body.String())
+	}
+}
+
+// TestSpawnPolecatPairingShelvedPairDoesNotSatisfy is the boundary on the fix
+// above, and it must be asserted separately or "scan pending/" slides into "scan
+// everything". Pending is a pair waiting its turn; shelved is a pair somebody
+// dropped. If shelving counted, an obligation could be discharged by abandoning
+// it — which is the failure this gate exists to prevent, reachable by one
+// command.
+func TestSpawnPolecatPairingShelvedPairDoesNotSatisfy(t *testing.T) {
+	root := pairingStore(t,
+		pairingItem{id: "mg-a3d4", repo: onethirdRepo, tags: []string{"onethird", "research"}},
+		pairingItem{
+			id: "mg-5630", repo: onethirdRepo, status: "shelved",
+			tags:    []string{"onethird", "independent-audit"},
+			depends: []string{"mg-a3d4"},
+		},
+	)
+	reg := newDrainTestRegistry(t)
+	reg.SetDispatchPairingGate(MGDispatchPairingGate{Root: root, Cfg: onethirdPolicy()})
+
+	if rr := spawnPolecatFor(t, reg, "mg-a3d4"); rr.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 — a SHELVED pair is a dropped obligation, "+
+			"not a discharged one", rr.Code)
+	}
+}
+
+// TestSpawnPolecatPairingOverrideDispatches is the escape hatch mg-2530 required,
+// and the reason it is required is not that the obligation is optional. It is
+// that a refusal with no override becomes a wedge the first time the marker is
+// wrong — a repo named too broadly, a pair filed under a tag the config does not
+// list — and a wedge under time pressure gets resolved by disarming the gate. A
+// cheap, loud override is what keeps the gate armed.
+func TestSpawnPolecatPairingOverrideDispatches(t *testing.T) {
+	logPath := useTempEventLog(t)
+	root := pairingStore(t, pairingItem{
+		id: "mg-a3d4", repo: onethirdRepo, tags: []string{"onethird", "research"},
+	})
+	reg := newDrainTestRegistry(t)
+	reg.SetDispatchPairingGate(MGDispatchPairingGate{Root: root, Cfg: onethirdPolicy()})
+
+	// Same item, same store, same gate as TestSpawnPolecatRefusedWhenPairIsMissing
+	// — which asserts this exact spawn is refused. The only difference is the
+	// override, so a pass here cannot be the gate having gone quiet.
+	rr := spawnPolecat(t, reg, SpawnPolecatAPIRequest{
+		Name: "cat-gate", Id: "mg-a3d4", Template: BuildWorkerTemplate,
+		PairingOverride: "audit is mg-9999, filed under the wrong tag; fixing the config separately",
+	})
+	if rr.Code == http.StatusConflict {
+		t.Fatalf("--pairing-override did not get past the pairing gate: %s", rr.Body.String())
+	}
+
+	// Permitted is only half of it. An override nobody can find afterwards is
+	// indistinguishable from a gate that did not fire.
+	ev := findEvent(readEventLines(t, logPath), "dispatch_pairing_overridden", "cat-cat-gate")
+	if ev == nil {
+		t.Fatal("the override left no dispatch_pairing_overridden event: " +
+			"an unrecorded override is the silent bypass this gate exists to end")
+	}
+	if ev["work_item_id"] != "mg-a3d4" {
+		t.Errorf("event work_item_id = %v, want mg-a3d4", ev["work_item_id"])
+	}
+	details, _ := ev["details"].(map[string]any)
+	if reason, _ := details["reason"].(string); !strings.Contains(reason, "wrong tag") {
+		t.Errorf("event details.reason = %q, want the operator's stated reason", reason)
+	}
+	// The refusal too, verbatim: the reason is what the operator believed, the
+	// refusal is what the gate actually objected to, and a reader needs both to
+	// tell a config bug from an unaudited deliverable.
+	if refusal, _ := details["refusal"].(string); !strings.Contains(refusal, "PAIRED") {
+		t.Errorf("event details.refusal = %q, want the bypassed refusal verbatim", refusal)
+	}
+}
+
+// TestSpawnPolecatPairingOverrideMustCarryAReason — whitespace is not a reason,
+// and neither is an absent flag. If an empty value overrode the gate, then every
+// caller that does not set the field overrides it, which is every caller.
+func TestSpawnPolecatPairingOverrideMustCarryAReason(t *testing.T) {
+	for _, override := range []string{"", "   ", "\t\n"} {
+		t.Run(fmt.Sprintf("%q", override), func(t *testing.T) {
+			root := pairingStore(t, pairingItem{
+				id: "mg-a3d4", repo: onethirdRepo, tags: []string{"onethird", "research"},
+			})
+			reg := newDrainTestRegistry(t)
+			reg.SetDispatchPairingGate(MGDispatchPairingGate{Root: root, Cfg: onethirdPolicy()})
+			rr := spawnPolecat(t, reg, SpawnPolecatAPIRequest{
+				Name: "cat-gate", Id: "mg-a3d4", Template: BuildWorkerTemplate,
+				PairingOverride: override,
+			})
+			if rr.Code != http.StatusConflict {
+				t.Fatalf("status = %d, want 409 — %q is not a stated reason", rr.Code, override)
+			}
+		})
+	}
+}
+
+// TestSpawnPolecatPairingOverrideDoesNotWidenToOtherGates. The override names one
+// gate and must move one gate. An override that quietly became "dispatch this
+// item no matter what any check says" is a much larger flag than the one anybody
+// asked for, and the assignee gate is the one it would most plausibly swallow —
+// it sits immediately above, refuses with the same 409, and answers a question
+// nobody delegated to this flag.
+func TestSpawnPolecatPairingOverrideDoesNotWidenToOtherGates(t *testing.T) {
+	root := pairingStore(t, pairingItem{
+		id: "mg-a3d4", repo: onethirdRepo, tags: []string{"onethird", "research"},
+	})
+	// Assign the item to `human`, which the assignee gate refuses.
+	item := filepath.Join(root, "work", "available", "mg-a3d4.md")
+	b, err := os.ReadFile(item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(item, []byte(strings.Replace(string(b),
+		"priority: high", "assignee: human\npriority: high", 1)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reg := newDrainTestRegistry(t)
+	reg.SetDispatchGate(MGDispatchGate{Root: root})
+	reg.SetDispatchPairingGate(MGDispatchPairingGate{Root: root, Cfg: onethirdPolicy()})
+
+	rr := spawnPolecat(t, reg, SpawnPolecatAPIRequest{
+		Name: "cat-gate", Id: "mg-a3d4", Template: BuildWorkerTemplate,
+		PairingOverride: "pair obligation waived deliberately",
+	})
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 — --pairing-override overrode the ASSIGNEE gate, "+
+			"which it does not name and was never given", rr.Code)
+	}
+	if body := rr.Body.String(); !strings.Contains(body, "human") {
+		t.Errorf("refusal is not the assignee gate's: %s", body)
 	}
 }
 

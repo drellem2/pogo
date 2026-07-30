@@ -2184,6 +2184,7 @@ Example:
 	var spawnPolecatEnv []string
 	var spawnPolecatProvider string
 	var spawnPolecatNoWorktree bool
+	var spawnPolecatPairingOverride string
 	var cmdAgentSpawnPolecat = &cobra.Command{
 		Use:   "spawn-polecat <name>",
 		Short: "Spawn a polecat from a prompt template",
@@ -2242,6 +2243,8 @@ A --body-file that cannot be read is an error, never an empty body.`,
 				Env:        spawnPolecatEnv,
 				Provider:   spawnPolecatProvider,
 				NoWorktree: spawnPolecatNoWorktree,
+
+				PairingOverride: spawnPolecatPairingOverride,
 			})
 			if err != nil {
 				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
@@ -2268,6 +2271,9 @@ A --body-file that cannot be read is an error, never an empty body.`,
 	cmdAgentSpawnPolecat.Flags().StringSliceVarP(&spawnPolecatEnv, "env", "e", nil, "Additional environment variables (KEY=VALUE)")
 	cmdAgentSpawnPolecat.Flags().StringVar(&spawnPolecatProvider, "provider", "", "Harness provider for this polecat (claude, codex, pi); overrides config and template frontmatter")
 	cmdAgentSpawnPolecat.Flags().BoolVar(&spawnPolecatNoWorktree, "no-worktree", false, "Skip git worktree creation (no --repo required); polecat edits in-place from ~/.pogo/agents/<name>/ with a refinery:NO posture ({{.NoWorktree}})")
+	// A string, not a bool, and the help text says why: the reason is the
+	// deliverable. See SpawnPolecatAPIRequest.PairingOverride.
+	cmdAgentSpawnPolecat.Flags().StringVar(&spawnPolecatPairingOverride, "pairing-override", "", "Dispatch over an unmet paired-item requirement (see [dispatch_pairing]), stating WHY in the value; the reason and the refusal it bypassed are recorded as a dispatch_pairing_overridden event. Overrides that gate only")
 
 	// Nudge command — top-level for convenience
 	var nudgeImmediate bool
