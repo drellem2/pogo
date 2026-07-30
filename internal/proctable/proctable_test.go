@@ -261,11 +261,39 @@ func TestReadReadsTheRealProcessTable(t *testing.T) {
 	if mine.PPID <= 0 {
 		t.Errorf("this process reported ppid %d", mine.PPID)
 	}
-	// A Go test binary that has reached this line has run the scheduler, the
-	// GC and a directory walk. Zero CPU time for it means the CPU column is
-	// not being read at all.
-	if mine.CPU <= 0 {
-		t.Errorf("this process reported %v of CPU time; the CPU column is not being read", mine.CPU)
+
+	// The column has to ADVANCE, not merely be present. A cumulative CPU
+	// figure that never moves is indistinguishable from one that is not being
+	// read at all, and "not being read" is exactly the failure this package
+	// exists to prevent. So burn a known amount of CPU and require the reading
+	// to change — which is also the only operation the callers ever perform on
+	// this column.
+	//
+	// Asserting a non-zero absolute value instead would be wrong: this suite
+	// runs in a few milliseconds, so a freshly started test binary can hold
+	// genuinely zero whole ticks of CPU on a 10ms-resolution source.
+	src := Current()
+	spin(2 * src.MinWindow())
+	after, err := Read()
+	if err != nil {
+		t.Fatalf("second Read: %v", err)
+	}
+	var mineAfter Row
+	for _, r := range after {
+		if r.PID == self {
+			mineAfter = r
+		}
+	}
+	if mineAfter.CPU <= mine.CPU {
+		t.Errorf("this process burned CPU for %s and its cumulative CPU column went %v -> %v; "+
+			"%s is not reporting work", 2*src.MinWindow(), mine.CPU, mineAfter.CPU, src)
+	}
+}
+
+// spin burns CPU in this process for d.
+func spin(d time.Duration) {
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
 	}
 }
 

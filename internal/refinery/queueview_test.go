@@ -163,12 +163,23 @@ func TestDequeueStampsStartTime(t *testing.T) {
 
 // TestGateWatchMeasuresARealSubtreesCPU is the end-to-end positive control for
 // the signal the CLI now prints. It runs two real gates through the real
-// runner — one that computes, one that sleeps — and asserts the persisted
-// record separates them.
+// runner — one that computes, one that sleeps — and asserts the records
+// separate them.
 //
 // Both arms are required. A measurement that only ever reports "busy" is the
 // defect described in mg-1b8c's lineage: a view that always reads healthy
 // cannot report the state it exists to report.
+//
+// # It reads the record WHILE the gate runs, and that is not incidental
+//
+// The signal exists for a live gate: a coordinator polling `pogo refinery
+// queue` mid-merge, asking whether the thing it is waiting on is computing or
+// stopped. The SEALED record of a finished gate honestly reports
+// `SubtreeGone`, because by then the process is gone — so whether an assertion
+// on the sealed record saw a live subtree came down to whether the last
+// heartbeat landed before or after the gate exited. On darwin it did; on Linux
+// it did not, and the CI log showed `cores=0.00 procs=0 churn=3` — an empty
+// subtree, classified gone, read as a failure of the measurement (mg-79e3).
 //
 // # Which environments this runs in
 //
@@ -177,14 +188,11 @@ func TestDequeueStampsStartTime(t *testing.T) {
 // readable /proc, whole seconds where only procps `ps` is available. At a
 // 400ms heartbeat the last of those cannot separate a spinning gate from a
 // sleeping one, and every assertion below would be made against a quantised
-// zero. That is exactly what happened to this test in CI from 11:17 on
-// 2026-07-30 (mg-79e3).
-//
-// So the environment is checked FIRST and named in the output. Where the
+// zero. So the environment is checked FIRST and named in the output. Where the
 // measurement is supported the full discrimination is asserted, unweakened.
-// Where it is not, the record must carry the reason — which is itself asserted
-// — and the numeric arms are skipped rather than lowered, because a number
-// this host cannot produce is not a number to assert on.
+// Where it is not, the records must carry the reason — which is itself
+// asserted — and the numeric arms are skipped rather than lowered, because a
+// number this host cannot produce is not a number to assert on.
 func TestGateWatchMeasuresARealSubtreesCPU(t *testing.T) {
 	if testing.Short() {
 		t.Skip("runs real gates for a couple of seconds")
@@ -194,20 +202,68 @@ func TestGateWatchMeasuresARealSubtreesCPU(t *testing.T) {
 	t.Logf("process-table source: %s; gate heartbeat %s", procSource, heartbeat)
 	supported := procSource.CanResolve(heartbeat)
 
-	run := func(gate string) *StepProgress {
+	// run executes a gate and returns every progress record the refinery
+	// published while it was still running.
+	run := func(gate string) []StepProgress {
 		t.Helper()
 		r := newProgressTestRefinery(t, heartbeat)
 		wtDir := t.TempDir()
 		writeGateConfig(t, wtDir, "quality_gate = "+quoteTOML(gate))
 		mr := &MergeRequest{ID: "mr-cpu", Status: StatusProcessing}
 		r.byID[mr.ID] = mr
-		if _, _, err := r.runQualityGates(context.Background(), wtDir, wtDir, mr); err != nil {
-			t.Fatalf("gate %q should have passed: %v", gate, err)
+
+		done := make(chan error, 1)
+		go func() {
+			_, _, err := r.runQualityGates(context.Background(), wtDir, wtDir, mr)
+			done <- err
+		}()
+
+		var seen []StepProgress
+		poll := time.NewTicker(heartbeat / 4)
+		defer poll.Stop()
+		for {
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatalf("gate %q should have passed: %v", gate, err)
+				}
+				if len(seen) == 0 {
+					t.Fatalf("gate %q published no record while it ran", gate)
+				}
+				return seen
+			case <-poll.C:
+				r.mu.Lock()
+				if mr.Progress != nil && mr.Progress.EndTime.IsZero() {
+					seen = append(seen, *mr.Progress)
+				}
+				r.mu.Unlock()
+			}
 		}
-		if mr.Progress == nil {
-			t.Fatalf("gate %q left no progress record", gate)
+	}
+
+	// settled keeps the readings taken over a window in which the subtree
+	// neither gained nor lost a process. Churn counts as work by design — a
+	// gate forking short-lived workers IS working — so the startup and
+	// teardown windows say "busy" for both arms and can discriminate nothing.
+	// Excluding them is what forces each arm to prove itself on the CPU path,
+	// which is the path that was blind.
+	settled := func(rs []StepProgress) []StepProgress {
+		var out []StepProgress
+		for _, p := range rs {
+			if !p.CPUSampledAt.IsZero() && p.CPUProcs > 0 && p.CPUChurn == 0 {
+				out = append(out, p)
+			}
 		}
-		return mr.Progress
+		return out
+	}
+	peak := func(rs []StepProgress) float64 {
+		hi := 0.0
+		for _, p := range rs {
+			if p.CPUCores > hi {
+				hi = p.CPUCores
+			}
+		}
+		return hi
 	}
 
 	// A gate whose real work happens in a DESCENDANT: `sh -c` forks for a
@@ -215,14 +271,18 @@ func TestGateWatchMeasuresARealSubtreesCPU(t *testing.T) {
 	// uses shell builtins only, so the work shows up as CPU time rather than
 	// as process churn — this arm has to prove the CPU path, not the churn
 	// fallback.
-	busy := run(`(while :; do :; done) & spinner=$!; sleep 2; kill $spinner; exit 0`)
-	t.Logf("busy gate: pid=%d source=%s cores=%.2f procs=%d churn=%d window=%s unavailable=%q",
-		busy.GatePID, busy.CPUSource, busy.CPUCores, busy.CPUProcs, busy.CPUChurn, busy.CPUWindow, busy.CPUUnavailable)
-	if busy.GatePID == 0 {
+	busyRecords := run(`(while :; do :; done) & spinner=$!; sleep 2; kill $spinner; exit 0`)
+	last := busyRecords[len(busyRecords)-1]
+	t.Logf("busy gate: pid=%d source=%s readings=%d", last.GatePID, last.CPUSource, len(busyRecords))
+	for _, p := range busyRecords {
+		t.Logf("  busy: cores=%.2f procs=%d churn=%d window=%s unavailable=%q",
+			p.CPUCores, p.CPUProcs, p.CPUChurn, p.CPUWindow, p.CPUUnavailable)
+	}
+	if last.GatePID == 0 {
 		t.Error("the gate's pid must be recorded — without it there is no subtree to measure")
 	}
-	if busy.CPUSource != procSource.Name {
-		t.Errorf("the record must name its instrument, got %q want %q", busy.CPUSource, procSource.Name)
+	if last.CPUSource != procSource.Name {
+		t.Errorf("the record must name its instrument, got %q want %q", last.CPUSource, procSource.Name)
 	}
 
 	if !supported {
@@ -230,43 +290,58 @@ func TestGateWatchMeasuresARealSubtreesCPU(t *testing.T) {
 		// cannot measure must produce UNKNOWN with a stated reason; if it
 		// produced a number here, the number would be the quantised zero this
 		// whole change exists to stop being reported as idle.
-		if busy.Subtree() != SubtreeUnknown {
+		if last.Subtree() != SubtreeUnknown {
 			t.Errorf("%s cannot resolve a %s window, so the record must be UNKNOWN, got %v (cores=%.2f)",
-				procSource, heartbeat, busy.Subtree(), busy.CPUCores)
+				procSource, heartbeat, last.Subtree(), last.CPUCores)
 		}
-		if !strings.Contains(busy.CPUUnavailable, procSource.Name) {
-			t.Errorf("an unmeasurable environment must name itself in the reason, got %q", busy.CPUUnavailable)
+		if !strings.Contains(last.CPUUnavailable, procSource.Name) {
+			t.Errorf("an unmeasurable environment must name itself in the reason, got %q", last.CPUUnavailable)
 		}
-		t.Skipf("subtree CPU is not measurable here: %s", busy.CPUUnavailable)
+		t.Skipf("subtree CPU is not measurable here: %s", last.CPUUnavailable)
 	}
 
-	if busy.CPUSampledAt.IsZero() {
-		t.Fatalf("a 2s gate at a %s heartbeat must produce a CPU measurement on %s, got unavailable=%q",
-			heartbeat, procSource, busy.CPUUnavailable)
+	busy := settled(busyRecords)
+	if len(busy) == 0 {
+		t.Fatalf("a 2s gate at a %s heartbeat produced no settled measurement on %s (last unavailable=%q)",
+			heartbeat, procSource, last.CPUUnavailable)
 	}
-	if busy.CPUCores < 0.5 {
-		t.Errorf("a spinning gate measured %.2f cores; the subtree walk is not finding the work", busy.CPUCores)
+	busyPeak := peak(busy)
+	if busyPeak < 0.5 {
+		t.Errorf("a spinning gate peaked at %.2f cores across %d settled readings; "+
+			"the subtree walk is not finding the work", busyPeak, len(busy))
 	}
-	if busy.Subtree() != SubtreeBusy {
-		t.Errorf("a spinning gate must classify as busy, got %v", busy.Subtree())
+	sawBusy := false
+	for _, p := range busy {
+		if p.Subtree() == SubtreeBusy {
+			sawBusy = true
+		}
+	}
+	if !sawBusy {
+		t.Errorf("a spinning gate must classify as busy in at least one of its %d settled readings", len(busy))
 	}
 
 	// The negative arm. A sleeping gate consumes nothing, and the record must
-	// be willing to say so.
-	idle := run(`sleep 2`)
-	t.Logf("idle gate: pid=%d source=%s cores=%.2f procs=%d churn=%d window=%s unavailable=%q",
-		idle.GatePID, idle.CPUSource, idle.CPUCores, idle.CPUProcs, idle.CPUChurn, idle.CPUWindow, idle.CPUUnavailable)
-	if idle.CPUSampledAt.IsZero() {
-		t.Fatalf("a 2s gate at a %s heartbeat must produce a CPU measurement on %s, got unavailable=%q",
-			heartbeat, procSource, idle.CPUUnavailable)
+	// be willing to say so — on EVERY settled reading, not merely one, because
+	// a measurement that reports busy unconditionally would still satisfy an
+	// "at least one" test.
+	idleRecords := run(`sleep 2`)
+	for _, p := range idleRecords {
+		t.Logf("  idle: cores=%.2f procs=%d churn=%d window=%s unavailable=%q",
+			p.CPUCores, p.CPUProcs, p.CPUChurn, p.CPUWindow, p.CPUUnavailable)
 	}
-	if idle.Subtree() != SubtreeIdle {
-		t.Errorf("a sleeping gate must classify as idle (cores=%.2f churn=%d) — the measurement is "+
-			"reporting busy unconditionally", idle.CPUCores, idle.CPUChurn)
+	idle := settled(idleRecords)
+	if len(idle) == 0 {
+		t.Fatalf("a 2s sleeping gate at a %s heartbeat produced no settled measurement on %s", heartbeat, procSource)
 	}
-	if busy.CPUCores <= idle.CPUCores {
+	for _, p := range idle {
+		if p.Subtree() != SubtreeIdle {
+			t.Errorf("a sleeping gate must classify as idle (cores=%.2f churn=%d procs=%d) — the "+
+				"measurement is reporting busy unconditionally", p.CPUCores, p.CPUChurn, p.CPUProcs)
+		}
+	}
+	if idlePeak := peak(idle); busyPeak <= idlePeak {
 		t.Errorf("a computing gate (%.2f cores) must measure higher than a sleeping one (%.2f cores)",
-			busy.CPUCores, idle.CPUCores)
+			busyPeak, idlePeak)
 	}
 }
 

@@ -192,11 +192,15 @@ func TestSubtreeCPUOnALiveBusyProcess(t *testing.T) {
 			_ = cmd.Wait()
 		}()
 
-		t0 := time.Now()
-		prev, err := sampleSubtree(cmd.Process.Pid, t0)
-		if err != nil {
-			t.Fatalf("sample: %v", err)
-		}
+		// Wait for the subtree to stop changing shape before the window opens.
+		// Process churn counts as work BY DESIGN — a gate forking short-lived
+		// workers is working — so a window that straddles the shell forking its
+		// child reports "busy" for a process that has only just started, and
+		// the sleeping arm below would pass or fail on how quickly the fork
+		// happened to land. Until mg-79e3 the `ps` exec took long enough to
+		// hide this; a /proc read returns in well under a millisecond, so the
+		// settle has to be explicit.
+		prev := settleSubtree(t, cmd.Process.Pid)
 		time.Sleep(1500 * time.Millisecond)
 		t1 := time.Now()
 		cur, err := sampleSubtree(cmd.Process.Pid, t1)
@@ -226,6 +230,43 @@ func TestSubtreeCPUOnALiveBusyProcess(t *testing.T) {
 	if busy, _ = run(`sleep 30`); busy {
 		t.Error("a sleeping subtree was measured as busy")
 	}
+}
+
+// settleSubtree samples until the subtree's process set repeats, and returns
+// that sample. It fails the test rather than returning an unsettled one: a
+// measurement window that opens mid-fork measures the fork, not the work.
+func settleSubtree(t *testing.T, pid int) *subtreeSample {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	prev, err := sampleSubtree(pid, time.Now())
+	if err != nil {
+		t.Fatalf("sample: %v", err)
+	}
+	for time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+		cur, err := sampleSubtree(pid, time.Now())
+		if err != nil {
+			t.Fatalf("sample: %v", err)
+		}
+		if samePIDSet(prev.CPU, cur.CPU) {
+			return cur
+		}
+		prev = cur
+	}
+	t.Fatalf("the subtree of pid %d never settled", pid)
+	return nil
+}
+
+func samePIDSet(a, b map[int]time.Duration) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for pid := range a {
+		if _, ok := b[pid]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func TestSampleSubtreeSurfacesPSFailure(t *testing.T) {
