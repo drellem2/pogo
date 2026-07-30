@@ -648,6 +648,21 @@ is the curated, human-readable summary kept in sync at each release cut.
   `internal/agent/prompts/**` or `internal/agent/templates/**` merges like any
   other branch.
 
+  **If you deployed `v0.7.0`, this takes a working control away from you.**
+  `v0.7.0` shipped the gate wired into `attemptMerge` and a tracked
+  `.protected-paths` list, so on any deployment running that release the
+  refinery genuinely refused branches touching `internal/agent/prompts/**`,
+  `internal/agent/templates/**`, and `.protected-paths` itself. Upgrading to
+  `v0.8.0` removes that refusal: **branches the gate used to refuse now merge**,
+  with no warning and no log line, because the stage that produced the refusal
+  no longer exists. If you were relying on it to hold a red line, nothing in
+  this release replaces it — see *ownership, not enforcement* below, which is a
+  routing rule among the people who run this repo and not a mechanism you
+  inherit. **`.protected-paths` is now inert.** In this repo the file is
+  deleted outright; if you keep a copy of it in your own tree it is
+  present-but-ignored, since no code reads it any more. Editing it, extending
+  it, or adding it back protects nothing.
+
   **The premise was never checked with the repo owner.** The gate was built to
   enforce a "red line" on shipped prompts and templates that existed only as
   prose in the bodies of successive work items, reasoned from by three agents
@@ -668,11 +683,15 @@ is the curated, human-readable summary kept in sync at each release cut.
   unreviewed prompt edit" is a named owner rather than a refusal, and the
   question was answered rather than abandoned.
 
-  Timing, because it decides whether the gate ever refused anything: it merged
-  as `47b5d48` while the running pogod was still on `023fab5`, so it was code on
-  `main` that no live process had loaded, and the removal was cut to land before
-  the redeploy that would have loaded it. `v0.7.0`'s changelog entry for the gate
-  is left standing as released history rather than rewritten.
+  Timing, and what it does and does not settle: the gate merged as `47b5d48`
+  while the pogod running on this machine was still on `023fab5`, and the
+  removal was cut to land before the redeploy that would have loaded it — so on
+  **this** box the gate never refused a single merge. That is a fact about one
+  deployment's restart schedule, not about the gate. It explains why the removal
+  was invisible from here; it says nothing about anyone who deployed `v0.7.0`
+  and did load it, for whom the paragraph above applies in full. `v0.7.0`'s
+  changelog entry for the gate is left standing as released history rather than
+  rewritten.
 
   `scripts/mg-scope-guard.sh` is untouched — it is a separate, unwired, opt-in
   per-task mechanism.
