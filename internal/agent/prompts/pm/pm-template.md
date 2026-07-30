@@ -526,20 +526,30 @@ This is the one file you may push directly (see "What you may NOT do" rule 2). T
 **Inputs.** Pull data from `mg` rather than re-deriving from raw repos:
 
 ```bash
-# Trajectory: 7-day spend rolled up by tag and by item, scoped to your product.
+# Trajectory: 7-day spend across all tags, then per-item within yours.
 # The per-item breakdown for ONE tag is `--by tag:<tag>`; there is no --tag flag
 # on `mg spend`, and `--by item --tag=…` exits non-zero (mg-d8ea).
-mg spend --by tag           --since 7d --json
+mg spend --by tag            --since 7d --json
 mg spend --by tag:<your-tag> --since 7d --json
 
-# Now / Next / Backlog / Recent: open + recently-closed work for your product.
-# `mg list` has no time window and no `closed` status — the closed status is
-# `done`, and you bound the window yourself off each item's `mtime` (mg-21b1).
+# Now / Next / Backlog: open work for your product.
 mg list --tag=<your-tag> --json
-mg list --tag=<your-tag> --status=done --json
+
+# Recently shipped. `mg list` has no time window and no `closed` status — the
+# closed status is `done`, and you bound the window yourself off `mtime`
+# (mg-21b1). See the caveat below: mtime is a proxy for the close, not the close.
+mg list --tag=<your-tag> --status=done --json \
+  | jq -c --arg cutoff "$(date -u -v-7d +%F)" 'select(.mtime[:10] >= $cutoff)'
 ```
 
-Bucket items into Now (claimed / in-flight), Next (open + ready, no blocking deps), Later (proposals you haven't filed yet), Backlog (open but no near-term plan), Recently shipped (closed within 7d). Trajectory is a short macro read off `mg spend` — throughput, total tokens, the one or two tag-level bottlenecks you can name.
+**Two of these have a shape you will get wrong from memory, and the CLI refuses the wrong shape rather than approximating it.** Run them before you write the section that consumes them.
+
+- **The per-item spend breakdown is a selector on `--by`, not a filter flag.** It is `--by tag:<your-tag>`. There is no `--tag` flag on `mg spend` at all — `mg spend --by item --tag=<x>` exits 2 with `unknown flag: --tag`. `--by tag` (all tags, no item detail) and `--by tag:<x>` (one tag, with item breakdown) are different views, and you want both: the first tells you where the product sits against its siblings, the second tells you which items inside it consumed the budget.
+- **`mg list` has no `--since`, and the closed status is `done`, not `closed`.** `--status=closed` exits 1 (`invalid status`); `--since 7d` exits 2 (`unknown flag`). There is no closed-at field to sort on either, so the 7-day window is yours to apply — `mtime` is the closest proxy. Be aware of what that proxy is: for a done item `mtime` is normally the close, but it moves if anyone edits the item afterwards, so a stale item that got a tag fix last night reads as freshly shipped. Day granularity (`[:10]`) is deliberate — it sidesteps the mixed UTC/offset timestamp formats in that field, and a roadmap bucket does not need the hours. (`date -u -v-7d` is BSD/macOS `date`; on GNU it is `date -u -d '7 days ago'`.)
+
+If one of these refuses, **do not improvise an invocation and do not drop the section silently** — that is how the Trajectory section shipped throughput with no token totals and no tag-level bottleneck for at least one regeneration cycle (mg-d8ea), reading as an editorial choice because the prose around the hole was good. Say in the section which input you could not get.
+
+Bucket items into Now (claimed / in-flight), Next (open + ready, no blocking deps), Later (proposals you haven't filed yet), Backlog (open but no near-term plan), Recently shipped (done within 7d). Trajectory is a short macro read off `mg spend` — throughput, total tokens, the one or two tag-level bottlenecks you can name.
 
 **Render** to `<your-product-repo>/docs/roadmap.md` using this skeleton (copy-pasteable; fill in real values):
 
