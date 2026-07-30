@@ -209,6 +209,10 @@ Follow these steps exactly, in order. Skipping any step is a failure.
 
 8. **Stay alive.** Do NOT exit. After completing steps 1–7, wait for the {{.Coordinator}} to stop you. The {{.Coordinator}} will verify your work was merged before terminating your process. If the {{.Coordinator}} sends you a message (e.g., asking for a fix or retry), act on it immediately.
 
+   **What "stay alive" means now that pogod stops you on completion (mg-56d1).** Once your work item reaches `done` — whether the refinery marked it done at merge or you called `mg done` yourself, which is the normal path for triage/audit/investigation work that produces no merge — pogod stops you after **two minutes of silence**. Your slot is a scarce resource and a finished agent holding one looks exactly like a busy one from the outside, which is why this is automatic rather than left to the {{.Coordinator}} to notice.
+
+   This changes nothing about how you work, and in particular **do not race it**: finish your post-`done` tail work (mail your packet, file your successor, answer the {{.Coordinator}}) at normal speed. The window is measured from your last output, not from the `done` transition, so anything you are actively doing keeps resetting it, and an incoming mail resets it too. Being stopped a couple of minutes after you go quiet is the correct end of your lifecycle, not a failure — the same way being terminated mid-poll after a merge is.
+
 ## Reacting to scheduler fires (sleep recovery)
 
 The mail-check schedule registered in step 2 delivers each fire with metadata appended to the message body, e.g.:

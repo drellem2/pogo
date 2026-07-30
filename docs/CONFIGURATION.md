@@ -1165,6 +1165,92 @@ silently. ack-watch catches "registered and not completing"; deaf-watch catches
 
 Source of truth: `internal/deafwatch/`, `internal/agent/mailloop_report.go`.
 
+## The done-item polecat reaper (done-reap)
+
+Every automatic polecat teardown pogod had was keyed on **merge**: the refinery's
+`OnMerged` hook marks the item done, stops the polecat, and lets the exit hook
+remove its worktree and mail-check schedule (gh #35). That is the right hook for a
+build polecat, whose deliverable *is* a branch. It reaches nothing else.
+
+**Triage, audit-only and investigation polecats produce no merge.** They finish by
+calling `mg done` themselves, often with a `--result` and a mail, and the refinery
+never hears about them:
+
+```
+merge-producing polecat  ->  refinery merges  ->  pogod stops it, marks done   (automatic)
+non-merge polecat        ->  calls `mg done`  ->  nothing whatsoever           (was manual)
+```
+
+So they held a concurrency slot until a coordinator noticed. Measured 2026-07-30:
+`d764` finished its triage, delivered its packet, filed its successor, went idle,
+and sat on one of five slots for **7m16s** while two high-priority items were
+queued and undispatchable. Nothing would have ended it but a human. And the loss
+is invisible in the instrument operators actually read — `pogo agent list` reports
+`status=running`, only `pogo agent diagnose` reports `idle` — so a slot held by a
+finished agent looks exactly like healthy saturation. Same family as mg-18d0:
+**the list reports liveness, never productivity.**
+
+- **It keys on the WORK ITEM, not the merge.** The condition is the item reaching
+  a terminal state (`done`/`archived`). Merge is one path there, `mg done` is the
+  other, and `done` is the general fact both produce — so the merge hook is
+  untouched (it has obligations this does not: writing the completion, honouring
+  `--defer-done`/PR-flow/`post-merge-work`, arming the deferred backstop) and this
+  is a second, independent detector on the general condition. Extending the merge
+  hook would have been the smaller change and would have fixed nothing, because
+  the polecats that leak are the ones the refinery never sees.
+- **It polls; it is not event-driven.** `mg done` runs in the *polecat's* own
+  process against the macguffin store, and macguffin gives pogod no callback —
+  `OnMerged` exists only because the refinery lives inside pogod. `done` can be
+  observed but not delivered. One `mg show --json` per live polecat on the
+  heartbeat tick, same shape as every other detector here.
+- **`done` alone is NOT the condition — it is `done` AND quiet.** The polecat
+  protocol tells a polecat to call `mg done` and then stay alive until stopped,
+  and work legitimately follows that call: mailing a verdict packet, filing a
+  successor, answering a coordinator follow-up. Stopping on the `done` write alone
+  would kill it mid-sentence, which is strictly worse than the leak — a lost
+  verdict is unrecoverable, a held slot is merely expensive.
+- **A grace period, not an explicit "I am finished" signal.** A signal the polecat
+  must remember to send fails for exactly the polecats that most need stopping:
+  the ones that ran off the end of their protocol. mg-ddf7 measured that failure
+  mode on an instructed step a third of agents simply never performed. A grace
+  period asks the polecat for nothing.
+- **The grace is measured from the last PTY write, not from the `done`
+  transition.** A timer from the transition cannot tell a polecat that is still
+  typing from one that stopped; PTY quiescence can. It also self-extends in the
+  case that motivated the question: an incoming coordinator mail is delivered as a
+  PTY nudge and the answer is more output, so a polecat handling a follow-up keeps
+  resetting its own clock and is reaped only once it goes quiet again.
+- **A polecat with its item still `claimed` is untouchable, at any idle time.**
+  Item state is the gate; idleness only qualifies it. That is why the healthy
+  42-minute idle polecat mid-work survives structurally rather than by tuning, and
+  it is the acceptance control the mechanism is required to pass — one that cannot
+  tell the two apart is worse than the manual sweep, because it kills working
+  agents.
+- **A polecat that has never written to its PTY is skipped.** Its idle time is
+  *unmeasurable*, not zero: it may be seconds into spawn, or wedged before its
+  first turn (mg-ce61).
+- **An unreadable item leaves the polecat running.** A store pogod could not read
+  is not evidence of completion — the same direction, for the same reason, as the
+  `post-merge-work` probe (mg-d86e).
+- **It acts, and that is all it does.** This is the one heartbeat detector here
+  that is not report-only: it stops a process whose work is provably concluded. It
+  has no seam through which it could mark an item, mail, nudge, or spawn, and it
+  never escalates — a completed triage is not a fault. The teardown that follows
+  (worktree removal, mail-check reaping) is the ordinary `OnExit` path, so
+  non-merge polecats have always had their mail-check schedule reaped; that half
+  was never the gap.
+
+```toml
+[done_reap]
+enabled = true             # default true
+idle_grace = "2m"          # a done polecat must be quiet on its PTY this long
+                           # before it is stopped (default 2m; negative removes
+                           # the window entirely — tests only, since a zero-grace
+                           # reaper stops a polecat mid-mail)
+```
+
+Source of truth: `cmd/pogod/donereap.go`, `internal/agent/polecatactivity.go`.
+
 ## Agent registry
 
 Each agent has a directory under `~/.pogo/agents/<name>/` holding its prompt,

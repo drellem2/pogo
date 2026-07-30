@@ -278,6 +278,13 @@ const (
 	// itself: mailing an agent that has no mail loop about its own missing mail
 	// loop is not a weaker alert, it is no alert at all.
 	DefaultDeafWatchEscalateAfter = 24 * time.Hour
+
+	// DefaultDoneReapIdleGrace is how long a polecat whose work item has reached
+	// a terminal state must be quiet on its PTY before pogod stops it (mg-56d1).
+	// See cmd/pogod/donereap.go for why the condition is item-done AND idle
+	// rather than item-done alone, and why the grace is measured from the last
+	// PTY write rather than from the `done` transition.
+	DefaultDoneReapIdleGrace = 2 * time.Minute
 )
 
 // DefaultFastPriorities is the set of WorkItem.Priority values that trigger the
@@ -478,6 +485,7 @@ type Config struct {
 	GHIntake   GHIntakeConfig
 	AckWatch   AckWatchConfig
 	DeafWatch  DeafWatchConfig
+	DoneReap   DoneReapConfig
 	// Source is the path of the highest-precedence config file Load read, or
 	// "" when no config file was found and everything is defaults + env. pogod
 	// uses this to gate crew auto-start: a daemon with no config file is
@@ -885,6 +893,31 @@ type DeafWatchConfig struct {
 	EscalateAfter time.Duration
 }
 
+// DoneReapConfig configures pogod's done-item polecat reaper (mg-56d1): the
+// heartbeat-driven runner that stops a polecat whose work item has reached a
+// terminal state and which has gone quiet, regardless of whether that
+// completion came from a merge or from the polecat's own `mg done`.
+//
+// It exists because every automatic teardown in the daemon was keyed on MERGE,
+// and triage / audit-only / investigation polecats produce no merge: they called
+// `mg done` and then held a concurrency slot until a coordinator noticed. The
+// mechanics live in cmd/pogod/donereap.go, which also documents why the
+// condition is item-done AND idle rather than item-done alone.
+//
+// ACTING, not report-only — the one detector here that is. It stops a process
+// whose work is provably concluded; it cannot mark an item, mail, nudge, or
+// spawn.
+type DoneReapConfig struct {
+	// Enabled turns the reaper on. Defaults to true.
+	Enabled bool
+	// IdleGrace is how long a done polecat must be quiet on its PTY before it is
+	// stopped. Zero falls back to DefaultDoneReapIdleGrace. A NEGATIVE value
+	// removes the grace entirely, which only a test should ask for: without it a
+	// polecat is stopped the instant its item goes done, mid-mail if that is
+	// where it happens to be.
+	IdleGrace time.Duration
+}
+
 // AgentsConfig holds agent command configuration.
 type AgentsConfig struct {
 	// Provider selects the agent harness ("claude", "codex", "pi", "cursor"). Resolved
@@ -1024,6 +1057,7 @@ type parsedConfig struct {
 	ghIntakeEnabledSet     bool
 	ackWatchEnabledSet     bool
 	deafWatchEnabledSet    bool
+	doneReapEnabledSet     bool
 	// sources are the files that were read, lowest precedence first.
 	sources []string
 }
@@ -1114,6 +1148,10 @@ func Load() *Config {
 			RenotifyAfter: DefaultDeafWatchRenotify,
 			NotifyTo:      DefaultDeafWatchNotifyTo,
 			EscalateAfter: DefaultDeafWatchEscalateAfter,
+		},
+		DoneReap: DoneReapConfig{
+			Enabled:   true,
+			IdleGrace: DefaultDoneReapIdleGrace,
 		},
 	}
 
@@ -1275,6 +1313,14 @@ func Load() *Config {
 		// override.
 		if fileCfg.DeafWatch.EscalateAfter != 0 {
 			cfg.DeafWatch.EscalateAfter = fileCfg.DeafWatch.EscalateAfter
+		}
+		if fileCfg.doneReapEnabledSet {
+			cfg.DoneReap.Enabled = fileCfg.DoneReap.Enabled
+		}
+		// Non-zero, not >0: a negative idle_grace is the documented way to remove
+		// the grace window, so it must survive the merge like any other override.
+		if fileCfg.DoneReap.IdleGrace != 0 {
+			cfg.DoneReap.IdleGrace = fileCfg.DoneReap.IdleGrace
 		}
 		if fileCfg.stallWatchEnabledSet {
 			cfg.StallWatch.Enabled = fileCfg.StallWatch.Enabled
@@ -1844,6 +1890,16 @@ func parseConfigFileInto(cfg *parsedConfig, path string) error {
 			case "escalate_after":
 				if d, err := time.ParseDuration(unquotedVal); err == nil {
 					cfg.DeafWatch.EscalateAfter = d
+				}
+			}
+		case "done_reap":
+			switch key {
+			case "enabled":
+				cfg.DoneReap.Enabled = val == "true"
+				cfg.doneReapEnabledSet = true
+			case "idle_grace":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.DoneReap.IdleGrace = d
 				}
 			}
 		case "gh_teardown":
