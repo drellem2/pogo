@@ -205,11 +205,23 @@ Even ephemeral, your context is where your *judgment* lives. Don't fill it with 
      **Your target `{{.Branch}}` is not the repo's default branch, so the merge is a step, not completion.** The refinery classifies it as PR flow: pogod will not mark your item done and will not stop you (mg-7746), because the deliverable is the pull request from `{{.Branch}}` to the default branch and nobody else opens it. Open it yourself, reusing an open one if another {{.Worker}} already landed on this branch:
      ```bash
      BASE=$(gh repo view --json defaultBranchRef -q .defaultBranchRef.name)
-     PR=$(gh pr list --head {{.Branch}} --base "$BASE" --state open --json url -q '.[0].url')
-     [ -n "$PR" ] || gh pr create --base "$BASE" --head {{.Branch}} \
-         --title '<what the branch delivers>' --body 'Work item: {{.Id}} — see the branch log for what it delivers.'
+     gh pr list --head {{.Branch}} --base "$BASE" --state open --json url -q '.[0].url'
      ```
-     `gh pr create` prints the URL it opened — capture it from the output, or from `$PR` if you reused an existing one. `--body` is single-quoted deliberately: single quotes reach argv unmangled, a double-quoted body is expanded by the shell first (mg-d91f). If `$BASE` is `{{.Branch}}` there is no PR to open and pogod has already completed you. If you cannot open the PR, mail the {{.Coordinator}} with the exact error and do NOT `mg done` — a silent deferral is reaped and escalated by a 15-minute backstop.
+     If that prints a URL, that is your PR — reuse it, do not open a second one. If it prints nothing, open it. The body goes in on **stdin under a quoted heredoc**, never as an inline double-quoted `--body`: the shell expands that before `gh` ever sees it, and `<<'EOF'` is what keeps backticks and `$`-signs literal (mg-d91f).
+     ```bash
+     gh pr create --base "$BASE" --head {{.Branch}} \
+         --title "<what the branch delivers>" \
+         --body-file - <<'EOF'
+     <what this branch delivers>
+
+     Work item: {{.Id}}
+     EOF
+     ```
+     Keep the `--title` plain prose — no backticks and no `$`, which the shell expands even inside double quotes. If you want either, assign the title to a single-quoted variable first and pass that.
+
+     **Capture the URL** — the one `gh pr create` printed, or the one you reused — and set `PR=<that url>` before the `mg done` in step 5. An unset `$PR` there records `"pr": ""` on the exact path that opened a PR, which is a sidecar asserting a deliverable it does not have (the mg-c8d5 defect, one file over).
+
+     If `$BASE` is `{{.Branch}}` there is no PR to open and pogod has already completed you. If you cannot open the PR, mail the {{.Coordinator}} with the exact error and do NOT `mg done` — a silent deferral is reaped and escalated by a 15-minute backstop.
 {{end}}
 
 5. **Produce your output.**

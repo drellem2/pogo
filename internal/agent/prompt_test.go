@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"text/template"
@@ -3794,6 +3795,67 @@ func TestBranchPolecatTemplatesInstructPRCreate(t *testing.T) {
 			t.Errorf("%s: rendered with no --branch (target is the default branch, so the "+
 				"merge IS completion) but still instructs `gh pr create` — that is an "+
 				"invented obligation on the common path", tmplName)
+		}
+	}
+}
+
+// TestBranchPolecatTemplatesAssignEveryShellVarTheyInterpolate is pm-pogo's
+// blocking SME finding on mg-78d2, turned into a control.
+//
+// polecat-architect.md shipped its PR step as:
+//
+//	PR=$(gh pr list ... -q '.[0].url')     # set only when one already exists
+//	[ -n "$PR" ] || gh pr create ...       # the CREATE path assigns nothing
+//
+// and then interpolated `$PR` into the result sidecar. So the sidecar recorded
+// `"pr": ""` precisely when a PR had just been opened — the first polecat on any
+// integration branch, i.e. the common case. That is the mg-c8d5 defect verbatim
+// (a record claiming a field it never carries) reintroduced one file over, in the
+// same diff that documents mg-c8d5.
+//
+// The generalized invariant is cheap and catches the whole class: a shipped
+// template may not interpolate a shell variable it never assigns on any path.
+// It is deliberately not scoped to `$PR` — the next one will have a different
+// name, and the defect is the missing assignment, not the identifier.
+func TestBranchPolecatTemplatesAssignEveryShellVarTheyInterpolate(t *testing.T) {
+	// Vars whose value legitimately arrives from outside the template:
+	// $POGO_AGENT_NAME is exported by pogod at spawn; $BRANCH is read via
+	// `git rev-parse` in an earlier step (the mg-d39e observe-don't-name rule);
+	// $PID is a placeholder the reader fills from `pogo agent list` in a
+	// pkill-safety example that is illustrative, not a runnable recipe.
+	//
+	// The exemptions are named one at a time on purpose. The moment this list
+	// grows a wildcard it stops being able to fail, and $PR — the var the SME
+	// caught — has to keep failing when it is unassigned.
+	suppliedByTheReader := map[string]bool{"BRANCH": true, "POGO_AGENT_NAME": true, "PID": true}
+
+	// Bare $NAME and ${NAME}, uppercase only: lowercase would sweep in prose and
+	// jq/shell idioms, and every var these templates teach is uppercase.
+	ref := regexp.MustCompile(`\$\{?([A-Z][A-Z0-9_]*)\}?`)
+
+	for _, tmplName := range []string{
+		"prompts/templates/polecat.md",
+		"prompts/templates/polecat-architect.md",
+	} {
+		got := renderShippedTemplate(t, tmplName, TemplateVars{
+			Id: "mg-abea", Repo: "/path/to/repo", WorktreeDir: "/path/to/worktree",
+			Provider: "claude", Branch: "daed-101-integration",
+		})
+		for _, m := range ref.FindAllStringSubmatch(got, -1) {
+			name := m[1]
+			if suppliedByTheReader[name] || name == "EOF" {
+				continue
+			}
+			// An assignment is `NAME=` at a word boundary — covers `PR=$(...)`,
+			// `PR=<the url ...>` and `BASE=$(...)` alike. The backtick is in the
+			// class because an assignment the template teaches in PROSE (``set
+			// `PR=<url>` before the mg done``) is still the template telling the
+			// reader to assign it, which is what the check is asking about.
+			if !regexp.MustCompile("(^|[\\s;(`])" + name + "=").MatchString(got) {
+				t.Errorf("%s: interpolates $%s but never assigns it — an unset var "+
+					"expands to the empty string, so whatever reads it records a value "+
+					"it does not have (mg-78d2, the mg-c8d5 class)", tmplName, name)
+			}
 		}
 	}
 }

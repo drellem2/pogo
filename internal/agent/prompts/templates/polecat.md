@@ -184,7 +184,7 @@ Follow these steps exactly, in order. Skipping any step is a failure.
    Work item: {{.Id}}
    EOF
    ```
-   `gh pr create` prints the URL it opened — capture it. Cite issues as `Refs owner/repo#N` in the body; a closing keyword would shut the issue the moment the PR merges.
+   Keep the `--title` plain prose — no backticks and no `$`, which the shell expands even inside double quotes. If you want either, assign the title to a single-quoted variable first and pass that. Cite issues as `Refs owner/repo#N` in the body; a closing keyword would shut the issue the moment the PR merges.
 
    Then mark the work item done, recording the PR so the {{.Coordinator}} can see the deliverable exists without going to look:
    ```bash
