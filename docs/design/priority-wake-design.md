@@ -56,7 +56,8 @@ priority pass (`checkPriorityWake`):
   `newStallNudger` in `cmd/pogod/main.go`) — so a **busy agent is never
   interrupted** and an idle one is woken at once.
 - A dedicated **`high_priority_wake_cooldown`** (default 3m, separate from the
-  standard `nudge_cooldown`) gates repeats.
+  standard `nudge_cooldown`) gates repeats — **per item**, and doubling up to
+  `repeat_backoff_cap` (mg-1693; see below).
 - On a fire, pogod's `heartbeat.Nudge` is invoked (via the optional `FastPoll`
   hook) to collapse the next ~30s poll for a prompt follow-up sweep. It cannot
   storm the loop: `FastPoll` runs only on an actual fire, and the cooldown
@@ -79,6 +80,28 @@ Two structural guarantees, both asserted by tests:
 2. **The dedicated cooldown** caps a ready-but-undispatchable item to one nudge
    per `high_priority_wake_cooldown`, not one per heartbeat tick.
 
+### Correction (mg-1693): guarantee 2 was the wrong bound
+
+Guarantee 2 as originally written is true and was not enough, and the gap is
+worth keeping visible because the reasoning is the kind that repeats. It bounds
+nudges *per tick* and says nothing about the total, so "cannot loop-nudge" was
+argued from a rate limit that a **permanently** held item simply outlasts: one
+nudge per 3m, forever, is a loop. Worse, the cooldown was keyed on the category
+rather than the item, so the bound applied to the *alert kind*, and nothing
+recorded that the coordinator had already been told about a specific item.
+
+Measured on the live host on 2026-07-30: `mg-61f4` drew 22 notices in about four
+hours, `mg-0e24` 27, `mg-7c95` 22 — every one a correct detection of a genuinely
+ready, high-priority, undispatched item the mayor was holding behind its
+five-polecat cap. This is the wake traffic that read as a false-positive problem
+and is not one.
+
+The repaired bound is per **item** and *escalating*: first notice immediate,
+each repeat about that item doubling out to `repeat_backoff_cap`. That bounds
+the total, not just the rate, which is what "cannot loop-nudge" needed to mean.
+Structural guarantee 1 is unaffected and still holds. See
+[stall-watch-design.md](stall-watch-design.md) §Cooldown.
+
 ## Tests (W-4)
 
 `internal/stallwatch/stallwatch_test.go`:
@@ -87,7 +110,10 @@ Two structural guarantees, both asserted by tests:
   delay but far under the 10m gate fires a `priority_wake` nudge.
 - `TestPriorityWakeRespectsWakeDelay` — younger than the delay does not fire.
 - `TestPriorityWakeCooldownPreventsLoopNudge` — a stuck available item nudges
-  once per cooldown across many ticks (review point **b**).
+  once per cooldown across many ticks (review point **b**). See
+  `internal/stallwatch/repeatbackoff_test.go` for the mg-1693 half this test does
+  not cover: `TestHeldItemStopsRenotifyingForever` bounds the TOTAL over a long
+  window, which is what this per-tick assertion left open.
 - `TestBlockedOrClaimedHighPriorityDoesNotWake` — `pending/` and `claimed/`
   high-priority items never wake (review point **b**).
 - `TestTenMinuteGateStillAppliesToNonHighPriority` — non-high items keep the 10m

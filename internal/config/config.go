@@ -142,6 +142,23 @@ const (
 	// high-priority item which stays available — e.g. the coordinator can't
 	// dispatch it yet — does not re-nudge every heartbeat tick.
 	DefaultHighPriorityWakeCooldown = 3 * time.Minute
+	// DefaultStallRepeatBackoffCap is the ceiling on the per-item repeat backoff
+	// (see stallwatch.repeatCooldown). The FIRST notice about an item is never
+	// delayed — this bounds only how far apart REPEAT notices about an item the
+	// coordinator has already been told about can grow.
+	//
+	// Sized against the defect it exists to stop: with the cooldown keyed per
+	// category rather than per item, a deliberately-held item re-notified every
+	// cooldown forever — mg-61f4 drew 22 notices in a 4h20m window and mg-0e24
+	// drew 27 (mg-1693). At a 4h cap the same held item settles to ~1 notice per
+	// 4h, which is quiet enough not to train the reader to discount the channel
+	// and still loud enough that a genuinely forgotten item resurfaces the same
+	// day.
+	//
+	// Setting this equal to (or below) the category's base cooldown disables
+	// escalation and restores a flat per-item cooldown — still a fix for the
+	// per-category keying, just without the backoff.
+	DefaultStallRepeatBackoffCap = 4 * time.Hour
 	// DefaultDriftCheckInterval is how often pogod's drift-check runner samples
 	// the [reconcile] mirrors from the heartbeat OnTick loop (mg-345b). It is
 	// deliberately COARSE — far larger than the ~30s heartbeat tick — because the
@@ -471,7 +488,18 @@ type StallWatchConfig struct {
 	MaxUnreadMailCount int
 	// NudgeCooldown is the minimum gap between two nudges for the same
 	// threshold category. Zero falls back to DefaultStallNudgeCooldown.
+	//
+	// For the two work-item categories this is the BASE of a per-item backoff,
+	// not a flat per-category gate: it is the gap before the SECOND notice about
+	// a given item, and each further repeat about that same item doubles up to
+	// RepeatBackoffCap. A different item is never gated by it. See
+	// stallwatch.repeatCooldown.
 	NudgeCooldown time.Duration
+	// RepeatBackoffCap bounds the per-item repeat backoff for both work-item
+	// categories. Zero falls back to DefaultStallRepeatBackoffCap (4h). Setting
+	// it at or below the category's base cooldown yields a flat per-item
+	// cooldown with no escalation.
+	RepeatBackoffCap time.Duration
 
 	// PriorityWakeEnabled turns on the priority-aware fast wake (gh
 	// drellem2/pogo #61): a ready, watched, high-priority available item
@@ -947,6 +975,7 @@ func Load() *Config {
 			UnreadMailAgeThreshold:    DefaultUnreadMailAgeThreshold,
 			MaxUnreadMailCount:        DefaultMaxUnreadMailCount,
 			NudgeCooldown:             DefaultStallNudgeCooldown,
+			RepeatBackoffCap:          DefaultStallRepeatBackoffCap,
 			// Priority wake is default-on for the watched coordinator (gh #61).
 			PriorityWakeEnabled:      true,
 			HighPriorityWakeDelay:    DefaultHighPriorityWakeDelay,
@@ -1138,6 +1167,9 @@ func Load() *Config {
 		}
 		if fileCfg.StallWatch.NudgeCooldown > 0 {
 			cfg.StallWatch.NudgeCooldown = fileCfg.StallWatch.NudgeCooldown
+		}
+		if fileCfg.StallWatch.RepeatBackoffCap > 0 {
+			cfg.StallWatch.RepeatBackoffCap = fileCfg.StallWatch.RepeatBackoffCap
 		}
 		if fileCfg.priorityWakeEnabledSet {
 			cfg.StallWatch.PriorityWakeEnabled = fileCfg.StallWatch.PriorityWakeEnabled
@@ -1578,6 +1610,10 @@ func parseConfigFileInto(cfg *parsedConfig, path string) error {
 			case "nudge_cooldown":
 				if d, err := time.ParseDuration(unquotedVal); err == nil {
 					cfg.StallWatch.NudgeCooldown = d
+				}
+			case "repeat_backoff_cap":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.StallWatch.RepeatBackoffCap = d
 				}
 			case "priority_wake_enabled":
 				cfg.StallWatch.PriorityWakeEnabled = val == "true"

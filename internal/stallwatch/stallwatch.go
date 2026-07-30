@@ -15,8 +15,26 @@
 //     MaxUnreadMailCount messages have accumulated.
 //
 // On a threshold cross the watcher fires one nudge per offending batch and
-// appends a `stall_watch_fired` event to ~/.pogo/events.log. A per-category
-// cooldown keeps a persistent backlog from producing one nudge per tick.
+// appends a `stall_watch_fired` event to ~/.pogo/events.log.
+//
+// Repeat suppression is keyed PER ITEM, not per category, and escalates. The
+// first notice about an item is immediate; each repeat about that same item
+// waits twice as long as the last, up to RepeatBackoffCap. A tick where every
+// offending item is still inside its own backoff produces no nudge at all.
+//
+// The per-item keying is the load-bearing part. Keyed per category (as it was
+// until mg-1693), the cooldown suppressed repeats of a KIND of alert rather
+// than repeats about a given item, which broke it in both directions: an item
+// the coordinator was deliberately holding — behind a concurrency cap, a
+// snooze, a sequencing call — was re-detected and re-notified every cooldown
+// forever (mg-61f4 drew 22 notices in one night, mg-0e24 27), while a genuinely
+// new item arriving mid-cooldown was silently swallowed by the held item's
+// timer. Detection was correct in every one of those fires; only the
+// repeat-suppressor was wrong. Note what that looks like from outside: a
+// correct detector with a broken repeat-suppressor is indistinguishable from an
+// over-firing detector unless you count per item — so the fix must not be to
+// make detection stricter, and the emitted event now carries per-item repeat
+// counts so the distinction stays countable.
 //
 // Why pogod rather than an Ocean-side watcher: if the mayor's loop is dropping
 // its own check-work / check-mail steps (prompt drift, LLM cycle-skip), a
@@ -40,8 +58,9 @@ import (
 	"github.com/drellem2/pogo/internal/workitem"
 )
 
-// Category labels identify the two threshold checks. They key the per-category
-// cooldown and are stamped into the emitted event's details.
+// Category labels identify the three threshold checks. They form the first half
+// of the cooldown key — paired with an item id for the two work-item categories,
+// used alone for mail — and are stamped into the emitted event's details.
 const (
 	categoryUnclaimedItems = "unclaimed_items"
 	categoryUnreadMail     = "unread_mail"
@@ -123,8 +142,22 @@ type Watcher struct {
 	emit     Emitter
 	fastPoll func()
 
-	mu        sync.Mutex
-	lastNudge map[string]time.Time
+	mu sync.Mutex
+	// lastNudge records when each cooldown key last fired and how many times it
+	// has fired. Work-item categories key it per (category, item id) so a
+	// deliberately-held item cannot hold the whole category's cooldown; the
+	// mail category, which has no item identity, keys it by category alone. See
+	// fireKey and repeatCooldown.
+	lastNudge map[string]fireRecord
+}
+
+// fireRecord is the per-key cooldown state: when the key last fired, and how
+// many notices it has produced. count drives the repeat backoff — it is the
+// difference between "tell me about this item" and "tell me about this item for
+// the twenty-second time".
+type fireRecord struct {
+	last  time.Time
+	count int
 }
 
 // New builds a Watcher from cfg and opts, applying defaults for any zero
@@ -144,6 +177,9 @@ func New(cfg config.StallWatchConfig, opts Options) *Watcher {
 	}
 	if cfg.NudgeCooldown <= 0 {
 		cfg.NudgeCooldown = config.DefaultStallNudgeCooldown
+	}
+	if cfg.RepeatBackoffCap <= 0 {
+		cfg.RepeatBackoffCap = config.DefaultStallRepeatBackoffCap
 	}
 	// Priority-wake defaults. PriorityWakeEnabled is intentionally NOT defaulted
 	// here: New() cannot tell an unset bool from an explicit false, so the
@@ -188,7 +224,7 @@ func New(cfg config.StallWatchConfig, opts Options) *Watcher {
 		nudge:     opts.Nudge,
 		emit:      emit,
 		fastPoll:  opts.FastPoll,
-		lastNudge: make(map[string]time.Time),
+		lastNudge: make(map[string]fireRecord),
 	}
 }
 
@@ -245,38 +281,42 @@ func (w *Watcher) checkUnclaimedItems(now time.Time) {
 			stale = append(stale, it)
 		}
 	}
-	if len(stale) == 0 {
-		return
-	}
-
-	if !w.tryFire(categoryUnclaimedItems, now, w.cfg.NudgeCooldown) {
-		return
-	}
-
 	sort.Slice(stale, func(i, j int) bool { return stale[i].ID < stale[j].ID })
-	ids := make([]string, len(stale))
-	for i, it := range stale {
+
+	// Per-item cooldown. Items still inside their own backoff are dropped here,
+	// and a tick where every stale item is cooling down produces no nudge at
+	// all — which is the whole point: a queue the coordinator is deliberately
+	// holding goes quiet instead of re-reporting itself every cooldown.
+	due, sel := w.selectDue(categoryUnclaimedItems, stale, now, w.cfg.NudgeCooldown)
+	if len(due) == 0 {
+		return
+	}
+
+	ids := make([]string, len(due))
+	for i, it := range due {
 		ids[i] = it.ID
 	}
 
 	msg := fmt.Sprintf(
 		"stall-watch: %d available work item(s) have sat unclaimed for over %s — claim or dispatch them: %s",
-		len(stale), w.cfg.UnclaimedItemAgeThreshold, strings.Join(ids, ", "))
+		len(due), w.cfg.UnclaimedItemAgeThreshold, strings.Join(ids, ", "))
 
-	advisory, advisedIDs := w.blockIntentAdvisory(stale)
+	advisory, advisedIDs := w.blockIntentAdvisory(due)
 	msg += advisory
+	msg += sel.repeatNotice()
 
 	details := map[string]any{
 		"category":           categoryUnclaimedItems,
 		"watched_agent":      w.cfg.Agent,
-		"item_count":         len(stale),
+		"item_count":         len(due),
 		"item_ids":           ids,
 		"age_threshold":      w.cfg.UnclaimedItemAgeThreshold.String(),
-		"oldest_age_seconds": now.Sub(oldestModTime(stale)).Seconds(),
+		"oldest_age_seconds": now.Sub(oldestModTime(due)).Seconds(),
 	}
 	if len(advisedIDs) > 0 {
 		details["block_intent_mismatch_ids"] = advisedIDs
 	}
+	sel.stampDetails(details)
 	w.fire(categoryUnclaimedItems, msg, details)
 }
 
@@ -293,10 +333,12 @@ func (w *Watcher) checkUnclaimedItems(now time.Time) {
 //   - Only available/ is listed. An item with unmet deps sits in pending/ and
 //     an already-claimed item in claimed/, so neither is ever seen here — a
 //     blocked or claimed high-priority item cannot trigger a wake at all.
-//   - The dedicated HighPriorityWakeCooldown gates repeats, so a ready
-//     high-priority item that simply stays available (e.g. the coordinator
-//     can't dispatch it yet) draws at most one nudge per cooldown, not one per
-//     heartbeat tick.
+//   - The dedicated HighPriorityWakeCooldown gates repeats PER ITEM and
+//     escalates, so a ready high-priority item that simply stays available
+//     (e.g. the coordinator can't dispatch it yet) draws one nudge, then one a
+//     cooldown later, then one at twice that, out to RepeatBackoffCap — not one
+//     per heartbeat tick, and not one per cooldown forever. This is the
+//     category mg-1693 was measured on; see selectDue.
 func (w *Watcher) checkPriorityWake(now time.Time, items []workitem.WorkItem) {
 	if !w.cfg.PriorityWakeEnabled {
 		return
@@ -317,40 +359,44 @@ func (w *Watcher) checkPriorityWake(now time.Time, items []workitem.WorkItem) {
 			ready = append(ready, it)
 		}
 	}
-	if len(ready) == 0 {
-		return
-	}
-
-	if !w.tryFire(categoryPriorityWake, now, w.cfg.HighPriorityWakeCooldown) {
-		return
-	}
-
 	sort.Slice(ready, func(i, j int) bool { return ready[i].ID < ready[j].ID })
-	ids := make([]string, len(ready))
-	for i, it := range ready {
+
+	// Per-item cooldown — see the same call in checkUnclaimedItems. This is the
+	// category the mg-1693 measurement was dominated by: the three worst
+	// offenders (mg-61f4, mg-0e24, mg-7c95) were all ready high-priority items
+	// the coordinator was holding on purpose behind its polecat cap.
+	due, sel := w.selectDue(categoryPriorityWake, ready, now, w.cfg.HighPriorityWakeCooldown)
+	if len(due) == 0 {
+		return
+	}
+
+	ids := make([]string, len(due))
+	for i, it := range due {
 		ids[i] = it.ID
 	}
 
 	msg := fmt.Sprintf(
 		"priority-wake: %d high-priority work item(s) are ready and unclaimed — claim or dispatch now: %s",
-		len(ready), strings.Join(ids, ", "))
+		len(due), strings.Join(ids, ", "))
 
-	advisory, advisedIDs := w.blockIntentAdvisory(ready)
+	advisory, advisedIDs := w.blockIntentAdvisory(due)
 	msg += advisory
+	msg += sel.repeatNotice()
 
 	details := map[string]any{
 		"category":       categoryPriorityWake,
 		"watched_agent":  w.cfg.Agent,
-		"item_count":     len(ready),
+		"item_count":     len(due),
 		"item_ids":       ids,
 		"wake_delay":     w.cfg.HighPriorityWakeDelay.String(),
 		"wake_cooldown":  w.cfg.HighPriorityWakeCooldown.String(),
 		"fast_priority":  strings.Join(w.cfg.FastPriorities, ","),
-		"oldest_age_sec": now.Sub(oldestModTime(ready)).Seconds(),
+		"oldest_age_sec": now.Sub(oldestModTime(due)).Seconds(),
 	}
 	if len(advisedIDs) > 0 {
 		details["block_intent_mismatch_ids"] = advisedIDs
 	}
+	sel.stampDetails(details)
 	w.fire(categoryPriorityWake, msg, details)
 
 	// Collapse the ~30s poll for the follow-up check so pogod re-samples the
@@ -545,11 +591,169 @@ func (w *Watcher) blockIntentAdvisory(items []workitem.WorkItem) (string, []stri
 	return " [block-intent] " + strings.Join(parts, "; ") + ".", ids
 }
 
-// tryFire enforces a per-category cooldown. It returns true and records the
-// fire time when a nudge is allowed, false when the category is still cooling
-// down. The caller passes the cooldown so each category can have its own — the
-// priority wake recovers faster (HighPriorityWakeCooldown) than the standard
-// stall categories (NudgeCooldown).
+// fireKey builds the cooldown map key for a category/item pair. An empty item
+// yields the bare category key, which is what the mail category uses — it has
+// no item identity to key on.
+//
+// The separator is a NUL because it cannot appear in either a category constant
+// or a work-item id, so no (category, item) pair can collide with another.
+func fireKey(category, item string) string {
+	if item == "" {
+		return category
+	}
+	return category + "\x00" + item
+}
+
+// repeatCooldown returns the gap required before the (count+1)-th notice about
+// a key that has already fired count times: the base cooldown doubled once per
+// prior repeat, ceilinged at capDur.
+//
+// The FIRST notice about an item is never delayed (count == 0 never reaches
+// here — selectDue fires immediately on a missing record). The escalation only
+// governs how often the watcher repeats itself about an item the coordinator
+// has demonstrably already been told about.
+//
+// Doubling rather than a flat long cooldown keeps the second notice prompt — a
+// genuine stall that the coordinator missed the first time is re-raised one
+// base cooldown later, not four hours later — while a persistently-held item
+// walks itself out to the cap within a handful of notices.
+func repeatCooldown(base, capDur time.Duration, count int) time.Duration {
+	if base <= 0 {
+		return capDur
+	}
+	if capDur < base {
+		// A cap at or below the base disables escalation: every repeat waits
+		// exactly one base cooldown. This is the documented escape hatch back
+		// to a flat per-item cooldown.
+		return base
+	}
+	d := base
+	for i := 1; i < count; i++ {
+		d *= 2
+		if d >= capDur {
+			return capDur
+		}
+	}
+	return d
+}
+
+// selection is the outcome of one selectDue call: what got through, what was
+// held back by its own backoff, and how many notices each surviving item has
+// now drawn. It exists so a fire can REPORT its own suppression — the mg-1693
+// defect was invisible for a night because the log recorded fires but never
+// counted them per item, and a fix that is equally uncountable would only move
+// the blind spot.
+type selection struct {
+	// repeats maps item id -> total notices including this one, for items on
+	// their second or later notice. First-time items are omitted.
+	repeats map[string]int
+	// suppressed lists the candidate ids held back by their own backoff.
+	suppressed []string
+	// nextBackoff is the longest gap now applied to any item in this fire.
+	nextBackoff time.Duration
+}
+
+// stampDetails records the selection on an event's details map, so
+// events.log can be counted per item the way mg-1693 had to be measured by
+// hand. Absent keys mean "nothing to report" rather than zero.
+func (s selection) stampDetails(details map[string]any) {
+	if len(s.repeats) > 0 {
+		details["repeat_counts"] = s.repeats
+	}
+	if len(s.suppressed) > 0 {
+		details["backoff_suppressed_ids"] = s.suppressed
+		details["backoff_suppressed_count"] = len(s.suppressed)
+	}
+	if s.nextBackoff > 0 {
+		details["next_backoff"] = s.nextBackoff.String()
+	}
+}
+
+// repeatNotice returns a sentence naming the items in this nudge that the
+// watcher has reported before, or "" when every item is new to the reader.
+//
+// The reader needs this to tell a fresh stall from a re-raise. Without it a
+// repeat is textually identical to a first notice, which is the property that
+// teaches a coordinator to discount the channel.
+func (s selection) repeatNotice() string {
+	if len(s.repeats) == 0 {
+		return ""
+	}
+	ids := make([]string, 0, len(s.repeats))
+	for id := range s.repeats {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	parts := make([]string, len(ids))
+	for i, id := range ids {
+		parts[i] = fmt.Sprintf("%s (notice #%d)", id, s.repeats[id])
+	}
+	return fmt.Sprintf(" [repeat] already reported: %s — backing off, next notice about these no sooner than %s.",
+		strings.Join(parts, ", "), s.nextBackoff)
+}
+
+// selectDue applies the per-item cooldown to a category's candidate items and
+// returns the subset that may be notified now, plus a selection describing what
+// was held back.
+//
+// It also PRUNES: any key under this category whose item is no longer a
+// candidate is forgotten. That does two jobs. It bounds the map — otherwise
+// every id ever seen accumulates for the life of the process — and it makes an
+// item that leaves available/ and later comes back read as new, which is
+// correct: a claimed-then-released item is a fresh event, not a continuation of
+// the old one. Callers must therefore call this even when candidates is empty,
+// which is why neither work-item check early-returns on an empty candidate set
+// anymore.
+//
+// Note the state is in-process: a pogod restart forgets every backoff and the
+// next tick re-notifies each held item once. That is deliberate — a restart is
+// exactly when a coordinator's in-memory picture of what it was holding is also
+// gone.
+func (w *Watcher) selectDue(category string, candidates []workitem.WorkItem, now time.Time, base time.Duration) ([]workitem.WorkItem, selection) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	live := make(map[string]bool, len(candidates))
+	for _, it := range candidates {
+		live[fireKey(category, it.ID)] = true
+	}
+	prefix := category + "\x00"
+	for k := range w.lastNudge {
+		if strings.HasPrefix(k, prefix) && !live[k] {
+			delete(w.lastNudge, k)
+		}
+	}
+
+	sel := selection{repeats: make(map[string]int)}
+	var due []workitem.WorkItem
+	for _, it := range candidates {
+		key := fireKey(category, it.ID)
+		rec, seen := w.lastNudge[key]
+		if seen && now.Sub(rec.last) < repeatCooldown(base, w.cfg.RepeatBackoffCap, rec.count) {
+			sel.suppressed = append(sel.suppressed, it.ID)
+			continue
+		}
+		rec.last = now
+		rec.count++
+		w.lastNudge[key] = rec
+		due = append(due, it)
+		if rec.count > 1 {
+			sel.repeats[it.ID] = rec.count
+		}
+		if next := repeatCooldown(base, w.cfg.RepeatBackoffCap, rec.count); next > sel.nextBackoff {
+			sel.nextBackoff = next
+		}
+	}
+	if len(sel.repeats) == 0 {
+		sel.repeats = nil
+	}
+	return due, sel
+}
+
+// tryFire enforces a per-category cooldown. It is used only by the unread-mail
+// check, which watches a single aggregate condition with no per-item identity
+// to key on — the two work-item categories use selectDue's per-item cooldown
+// instead (mg-1693).
 //
 // Recording before the nudge attempt means a failed delivery still counts
 // toward the cooldown, so a wedged recipient is not hammered every tick. Be
@@ -569,10 +773,14 @@ func (w *Watcher) blockIntentAdvisory(items []workitem.WorkItem) (string, []stri
 func (w *Watcher) tryFire(category string, now time.Time, cooldown time.Duration) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if last, ok := w.lastNudge[category]; ok && now.Sub(last) < cooldown {
+	key := fireKey(category, "")
+	if rec, ok := w.lastNudge[key]; ok && now.Sub(rec.last) < cooldown {
 		return false
 	}
-	w.lastNudge[category] = now
+	rec := w.lastNudge[key]
+	rec.last = now
+	rec.count++
+	w.lastNudge[key] = rec
 	return true
 }
 

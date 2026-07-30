@@ -107,10 +107,56 @@ only when the PTY nudge returned an error, i.e. only when nothing was written.
 ### Cooldown
 
 Each category (`unclaimed_items`, `unread_mail`, `priority_wake`) has its own
-cooldown keyed in a mutex-guarded map. A persistent backlog therefore produces
-one nudge per `nudge_cooldown` window per category, not one per heartbeat tick.
-The fire time is recorded *before* the nudge attempt, so a failed delivery still
-consumes the cooldown rather than hammering a wedged recipient every tick.
+cooldown keyed in a mutex-guarded map. The fire time is recorded *before* the
+nudge attempt, so a failed delivery still consumes the cooldown rather than
+hammering a wedged recipient every tick.
+
+For the two **work-item** categories the map key is the `(category, item)` pair
+and the gap escalates: the first notice about an item is immediate, each repeat
+about that same item waits twice as long as the last, ceilinged at
+`repeat_backoff_cap` (4h). Each nudge names only the items actually due, and a
+tick on which every offending item is still inside its own backoff sends
+nothing. `unread_mail` is a single aggregate condition with no item identity, so
+it keeps a flat per-category cooldown.
+
+#### Why the key is the item, not the category (mg-1693)
+
+Keyed on the category alone, the cooldown suppressed repeats of a *kind of
+alert* rather than repeats *about a given item* — and nothing recorded that the
+coordinator had already seen an item and decided to wait. That broke in both
+directions:
+
+- An item held **on purpose** (behind the polecat cap, a snooze, a sequencing
+  call) was re-detected and re-notified every cooldown, indefinitely. Measured
+  on the live host on 2026-07-30: 87 fires carrying **212 item-notices across 29
+  items**, `mg-61f4` 22 times, `mg-0e24` 27, `mg-7c95` 22 — all items the mayor
+  was deliberately holding at its five-polecat cap.
+- A genuinely **new** item arriving mid-cooldown was swallowed by the held
+  item's timer. That half never showed up as noise, because a miss is silent.
+
+The trap worth naming, because it is where this bug pushes a reader: **the
+detection was correct in every one of those 212 notices.** It presents as a
+false-positive problem, so the natural repair is to make detection stricter —
+which would suppress true positives and leave the actual mechanism in place. A
+correct detector with a broken repeat-suppressor is indistinguishable from an
+over-firing detector unless you count *per item*, which is why
+`stall_watch_fired` now stamps `repeat_counts` and `backoff_suppressed_ids`.
+
+**Backoff rather than one-and-done.** Never re-notifying a held item would risk a
+genuinely forgotten one going quiet forever; the doubling keeps the safety net —
+a held item settles to about one notice per 4h — while removing the training
+effect, which is the second-order cost that actually matters. A coordinator that
+has seen `mg-61f4` twenty-one times learns the wake means nothing, and the
+twenty-second one, about genuinely neglected work, reads identically. Repeats
+are also marked `[repeat] … (notice #N)` in the message text so a re-raise is not
+textually identical to a first notice.
+
+State is in-process, so a pogod restart forgets every backoff and re-notifies
+each held item once. Deliberate: a restart is exactly when the coordinator's own
+memory of what it was holding is gone too. A coordinator-clearable
+already-notified set was the alternative considered and declined — it adds
+surface (a new command, a new failure mode where the set is never cleared) to buy
+what the cap already provides.
 
 **The cooldown is a rate limiter, not a retry queue** — the distinction is
 load-bearing and easy to get backwards. A failed nudge is never queued or
@@ -123,13 +169,14 @@ the mail fallback — not a retry — is the fix.
 
 The check runs in a goroutine off `OnTick`: a wait-idle nudge can block up to
 `DefaultNudgeTimeout` (30s), and the heartbeat goroutine must not stall the
-scheduler sweep. The per-category cooldown + mutex make overlapping checks safe.
+scheduler sweep. The cooldown map + mutex make overlapping checks safe.
 
 ## Configuration
 
 `[stall_watch]` in `~/.config/pogo/config.toml`. Defaults (in
 `internal/config`): enabled, agent `mayor`, both age thresholds 10m, max unread
-5, cooldown 5m — matching the gh #12 spec's 600s/5/300s.
+5, cooldown 5m — matching the gh #12 spec's 600s/5/300s — plus a 4h
+`repeat_backoff_cap` (mg-1693) the spec did not contemplate.
 
 ```toml
 [stall_watch]
@@ -139,6 +186,7 @@ unclaimed_item_age_threshold = "10m"
 unread_mail_age_threshold = "10m"
 max_unread_mail_count = 5
 nudge_cooldown = "5m"
+repeat_backoff_cap = "4h"
 ```
 
 ### Deviation from the gh #12 spec shape

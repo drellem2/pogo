@@ -600,7 +600,7 @@ Restart recovery could not carry an in-flight merge request forward (branch dele
 
 #### `stall_watch_fired`
 
-pogod's stall watcher (gh drellem2/macguffin #12) crossed a work-pile-up threshold for the watched agent (the coordinator, `mayor` by default) and emitted a nudge. One event per offending batch per heartbeat tick, rate-limited by a per-category cooldown. See [stall-watch-design.md](design/stall-watch-design.md).
+pogod's stall watcher (gh drellem2/macguffin #12) crossed a work-pile-up threshold for the watched agent (the coordinator, `mayor` by default) and emitted a nudge. One event per offending batch per heartbeat tick. Rate-limited by a **per-item** escalating cooldown for the two work-item categories and a flat per-category cooldown for `unread_mail` (mg-1693). See [stall-watch-design.md](design/stall-watch-design.md).
 
 - **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent` (always `"pogod"`), `details`
 - **`details` fields:**
@@ -617,6 +617,16 @@ pogod's stall watcher (gh drellem2/macguffin #12) crossed a work-pile-up thresho
   - For `unclaimed_items`: `item_count` (int), `item_ids` ([]string), `age_threshold` (string), `oldest_age_seconds` (float)
   - For `unread_mail`: `unread_count` (int), `max_count` (int), `oldest_age_seconds` (float), `age_threshold` (string), `over_count` (bool), `over_age` (bool)
   - For `priority_wake`: `item_count` (int), `item_ids` ([]string), `wake_delay` (string), `wake_cooldown` (string), `fast_priority` (string), `oldest_age_sec` (float)
+  - For both work-item categories (mg-1693, all optional — absent means "nothing to report"): `repeat_counts` (map item id → notice number, present only for items on their 2nd or later notice), `backoff_suppressed_ids` ([]string) and `backoff_suppressed_count` (int) for candidates that were detected but held back by their own backoff, and `next_backoff` (string), the longest gap now applied to any item in this fire.
+
+**Counting stall notices PER ITEM, not per fire (mg-1693).** `item_ids` is the field that matters when asking whether the watcher is over-firing, and until mg-1693 nothing in this event let you tell the two failure modes apart. The cooldown was keyed per *category*, so an item the coordinator was deliberately holding got re-detected and re-notified every cooldown forever: on 2026-07-30, 87 fires carried **212 item-notices across 29 items**, with `mg-61f4` appearing 22 times and `mg-0e24` 27. Every one of those detections was **correct** — the items really were available, high-priority and undispatched. Reading it as an over-firing detector (fire count) rather than a broken repeat-suppressor (per-item count) would have led to tightening detection and losing true positives. **A correct detector with a broken repeat-suppressor is indistinguishable from an over-firing detector unless you count per item.** To count that way:
+
+```bash
+jq -r 'select(.event_type=="stall_watch_fired") | .details.item_ids // [] | .[]' \
+  ~/.pogo/events.log | sort | uniq -c | sort -rn | head
+```
+
+Records from mg-1693 onward carry `repeat_counts`, so the same question is answerable from a single event rather than by correlating ids across fires.
 
 **Reading `nudge_error` on records from before 2026-07-17 (mg-79dc):** it meant only "the PTY nudge failed", and the nudge was then **dropped** — there was no mail fallback for a running-but-busy agent. On 2026-07-17, 18 of 47 fires (~38%) carried one, every single instance reading `still producing output after 30s ... context deadline exceeded`. Those fires happened and were never heard, which matters when reasoning backwards from mayor's inbox: **an absent stall notice in that era is not evidence the detector did not fire.** mg-4bd4 concluded the work-item detectors had "never been able to fire on real work" from exactly that absence; the events log falsifies it. Records from mg-79dc onward carry `nudge_delivery`, so a fire that took the durable road is visible as such rather than looking like a failure.
 

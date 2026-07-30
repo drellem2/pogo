@@ -114,6 +114,24 @@ func writeItemIn(t *testing.T, workRoot, statusDir, id, assignee, priority strin
 	}
 }
 
+// removeItem deletes a work item from a status directory, modelling an item
+// that has left the queue entirely.
+func removeItem(t *testing.T, workRoot, statusDir, id string) {
+	t.Helper()
+	if err := os.Remove(filepath.Join(workRoot, statusDir, id+".md")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// movePriorityItem models a work item transitioning between status directories
+// (available -> claimed and back), which is how a held item stops and restarts
+// being a stall-watch candidate.
+func movePriorityItem(t *testing.T, workRoot, fromDir, toDir, id, assignee, priority string, modTime time.Time) {
+	t.Helper()
+	removeItem(t, workRoot, fromDir, id)
+	writeItemIn(t, workRoot, toDir, id, assignee, priority, modTime)
+}
+
 // writeMail writes a message into the agent's new/ maildir with the given mtime.
 func writeMail(t *testing.T, mailRoot, agent, name string, modTime time.Time) {
 	t.Helper()
