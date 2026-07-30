@@ -473,8 +473,19 @@ Use --json for the raw structured response.`,
 			if !refStatus.Enabled {
 				state = "disabled"
 			}
-			fmt.Fprintf(&b, "  Status: %s  |  Queue: %d  |  History: %d  |  Poll: %s\n",
-				state, refStatus.QueueLen, refStatus.HistoryLen, refStatus.PollInterval)
+			// "In flight" is stated separately from the pending count. A
+			// pending count alone cannot tell a refinery grinding through a
+			// merge from one that has stopped, and the dashboard used to show
+			// only the count and the pending rows (mg-0c51).
+			inFlight := "none"
+			if refStatus.Processing != "" {
+				inFlight = refStatus.Processing
+				if !refStatus.ProcessingSince.IsZero() {
+					inFlight += fmt.Sprintf(" (%s)", time.Since(refStatus.ProcessingSince).Round(time.Second))
+				}
+			}
+			fmt.Fprintf(&b, "  Status: %s  |  In flight: %s  |  Pending: %d  |  History: %d  |  Poll: %s\n",
+				state, inFlight, refStatus.QueueLen, refStatus.HistoryLen, refStatus.PollInterval)
 		}
 		if queueErr == nil && len(queue) > 0 {
 			fmt.Fprintln(&b)
@@ -484,8 +495,13 @@ Use --json for the raw structured response.`,
 				if author == "" {
 					author = "-"
 				}
-				fmt.Fprintf(&b, "  %-8s  %-20s  branch=%-30s  author=%-15s  age=%s\n",
+				fmt.Fprintf(&b, "  %-10s  %-20s  branch=%-30s  author=%-15s  age=%s\n",
 					mr.Status, mr.ID, mr.Branch, author, age)
+				if mr.Status == refinery.StatusProcessing {
+					for _, l := range progressLines(&mr, time.Now()) {
+						fmt.Fprintf(&b, "              %s\n", l)
+					}
+				}
 			}
 		}
 
@@ -3686,7 +3702,24 @@ Use this for a quick health check of the refinery. For per-MR details use
 				fmt.Printf("Enabled: %t\n", status.Enabled)
 				fmt.Printf("Running: %t\n", status.Running)
 				fmt.Printf("Poll:    %s\n", status.PollInterval)
-				fmt.Printf("Queue:   %d\n", status.QueueLen)
+				// Queue counts PENDING requests only; the in-flight one is
+				// reported on its own line. Printing the count alone made a
+				// refinery chewing through a merge and one that had stopped
+				// produce identical output (mg-0c51).
+				fmt.Printf("Queue:   %d pending\n", status.QueueLen)
+				switch {
+				case status.Processing != "":
+					inFlight := ""
+					if !status.ProcessingSince.IsZero() {
+						inFlight = fmt.Sprintf(", in flight for %s", time.Since(status.ProcessingSince).Round(time.Second))
+					}
+					fmt.Printf("Active:  %s%s  — 'pogo refinery queue' shows what its gate is doing\n",
+						status.Processing, inFlight)
+				case status.QueueLen > 0:
+					fmt.Printf("Active:  none — %d pending with nothing being processed\n", status.QueueLen)
+				default:
+					fmt.Printf("Active:  none\n")
+				}
 				// History is printed with the retention that bounds it, so the
 				// count is never read as a total. When the cap has bitten the
 				// line says so outright; when the cap is unknown it says that
@@ -3707,8 +3740,28 @@ Use this for a quick health check of the refinery. For per-MR details use
 
 	var cmdRefineryQueue = &cobra.Command{
 		Use:   "queue",
-		Short: "Show pending merge requests",
-		Args:  cobra.NoArgs,
+		Short: "Show the merge pipeline: the request in flight, then the pending ones",
+		Long: `Print the refinery pipeline — the merge request being processed right
+now, followed by the ones waiting behind it.
+
+The in-flight request is listed with status=processing and, under it, what its
+current quality gate is doing: elapsed time, how much output it has produced
+and how long ago, and how much CPU its process subtree is consuming.
+
+Those last two are a PAIR and neither alone is an answer. A healthy gate was
+observed silent for 8m31s of a 10m run while a descendant burned four cores —
+so a stale last_output does not mean stopped. Conversely a subtree consuming no
+CPU may simply be blocked on I/O or a lock. Read them together:
+
+  silent + burning CPU   the gate is computing between log statements — wait
+  talking                the gate is visibly working — wait
+  silent + idle CPU      the shape of a stall — LOOK CLOSER before intervening
+  silent + unmeasurable  the view cannot tell; it says so rather than guessing
+
+If nothing is in flight while requests are pending, that is printed outright:
+it is the arrangement that used to be indistinguishable from a busy refinery,
+because the row that was moving was the one row this command did not list.`,
+		Args: cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
 			queue, err := client.GetRefineryQueue()
 			if err != nil {
@@ -3716,16 +3769,9 @@ Use this for a quick health check of the refinery. For per-MR details use
 			}
 			if jsonOutput {
 				cli.PrintJSON(queue)
-			} else {
-				if len(queue) == 0 {
-					fmt.Println("No pending merges.")
-					return
-				}
-				for _, mr := range queue {
-					fmt.Printf("%-12s  branch=%-30s  author=%-15s  status=%-10s  submitted=%s\n",
-						mr.ID, mr.Branch, mr.Author, string(mr.Status), mr.SubmitTime.Format("2006-01-02 15:04"))
-				}
+				return
 			}
+			fmt.Print(formatQueue(queue, time.Now()))
 		},
 	}
 
@@ -3884,8 +3930,18 @@ Examples:
 				}
 				fmt.Printf("Repo:      %s\n", mr.RepoPath)
 				fmt.Printf("Submitted: %s\n", mr.SubmitTime.Format("2006-01-02 15:04:05"))
+				if !mr.StartTime.IsZero() {
+					fmt.Printf("Started:   %s\n", mr.StartTime.Format("2006-01-02 15:04:05"))
+				}
 				if !mr.DoneTime.IsZero() {
 					fmt.Printf("Done:      %s\n", mr.DoneTime.Format("2006-01-02 15:04:05"))
+				}
+				// A queued MR says where it is in line. "Queued for 30
+				// minutes" alone reads as ignored; "waiting, 1 ahead, and
+				// that one is mid-gate" reads as a serialized queue working
+				// normally — which is what it was (mg-0c51).
+				if mr.Status == refinery.StatusQueued {
+					fmt.Print(formatQueuePosition(mr.ID, time.Now()))
 				}
 				if mr.Error != "" {
 					fmt.Printf("Error:     %s\n", mr.Error)

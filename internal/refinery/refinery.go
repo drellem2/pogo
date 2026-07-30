@@ -138,6 +138,12 @@ type MergeRequest struct {
 	// the historic fast path applies.
 	PRFlow     bool      `json:"pr_flow,omitempty"`
 	SubmitTime time.Time `json:"submit_time"`
+	// StartTime is when this request left the queue and became the in-flight
+	// one. Zero while it is still pending. It is persisted, so it survives a
+	// restart and still answers "how long has this been going" afterwards —
+	// and it is separate from Progress.StartTime, which times the current
+	// GATE, not the whole merge.
+	StartTime  time.Time `json:"start_time,omitempty"`
 	DoneTime   time.Time `json:"done_time,omitempty"`
 	Error      string    `json:"error,omitempty"`
 	GateOutput string    `json:"gate_output,omitempty"`
@@ -751,13 +757,42 @@ func (r *Refinery) Stop() {
 	r.mu.Unlock()
 }
 
-// Queue returns a snapshot of queued merge requests.
+// Queue returns a snapshot of PENDING merge requests. It deliberately excludes
+// the one being processed — callers that want the whole pipeline want
+// QueueWithProcessing.
 func (r *Refinery) Queue() []MergeRequest {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	out := make([]MergeRequest, len(r.queue))
 	for i, mr := range r.queue {
 		out[i] = *mr
+	}
+	return out
+}
+
+// QueueWithProcessing returns the whole pipeline: the in-flight merge request
+// first (Status is StatusProcessing and carries its Progress record), then the
+// pending ones in order.
+//
+// This is what /refinery/queue serves, and the omission it fixes is mg-0c51. A
+// busy refinery used to render as a static list of `status=queued` rows with
+// nothing running — byte-for-byte identical to a wedged one, and identical
+// across repeated polls, because the row that was actually moving was the one
+// row not in the list. An operator who nearly reported a stall was looking at a
+// gate that was two minutes into a healthy run.
+//
+// The in-flight row leads rather than trails so that "something is happening"
+// is the first thing read, and so a pending row's position in the slice is its
+// position in the line.
+func (r *Refinery) QueueWithProcessing() []MergeRequest {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]MergeRequest, 0, len(r.queue)+1)
+	if r.processing != nil {
+		out = append(out, *r.processing)
+	}
+	for _, mr := range r.queue {
+		out = append(out, *mr)
 	}
 	return out
 }
@@ -819,6 +854,15 @@ type Status struct {
 	// duration string ("168h0m0s").
 	MaxHistoryLen *int    `json:"max_history_len,omitempty"`
 	MaxHistoryAge *string `json:"max_history_age,omitempty"`
+
+	// Processing is the ID of the merge request being worked on right now,
+	// empty when the refinery is idle. QueueLen counts only PENDING requests
+	// and never includes it, so QueueLen alone cannot tell a refinery that is
+	// chewing through a merge from one that has stopped — which is exactly the
+	// pair of states mg-0c51 was filed about.
+	Processing string `json:"processing,omitempty"`
+	// ProcessingSince is when that merge request entered processing.
+	ProcessingSince time.Time `json:"processing_since,omitempty"`
 }
 
 // HistoryTruncation is what a client can say about whether history is complete.
@@ -870,7 +914,7 @@ func (r *Refinery) GetStatus() Status {
 	defer r.mu.Unlock()
 	maxLen := r.cfg.MaxHistoryLen
 	maxAge := r.cfg.MaxHistoryAge.String()
-	return Status{
+	st := Status{
 		Enabled:       r.cfg.Enabled,
 		Running:       r.cancel != nil,
 		PollInterval:  r.cfg.PollInterval.String(),
@@ -879,6 +923,11 @@ func (r *Refinery) GetStatus() Status {
 		MaxHistoryLen: &maxLen,
 		MaxHistoryAge: &maxAge,
 	}
+	if r.processing != nil {
+		st.Processing = r.processing.ID
+		st.ProcessingSince = r.processing.StartTime
+	}
+	return st
 }
 
 // AuthorFailureCount returns the current consecutive failure count for an author.
@@ -1043,6 +1092,7 @@ func (r *Refinery) dequeue() *MergeRequest {
 
 	mr := r.queue[0]
 	r.queue = r.queue[1:]
+	mr.StartTime = time.Now()
 	r.processing = mr
 	r.saveStateLocked()
 	return mr

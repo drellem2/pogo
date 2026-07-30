@@ -371,7 +371,20 @@ Look for:
   ```bash
   pogo refinery queue
   ```
-  If a merge request has been queued for an unusually long time, check the refinery logs for errors. An empty queue is normal — it means the refinery is caught up.
+  An empty queue is normal — it means the refinery is caught up.
+
+  **A queue that does not move is not evidence of a stall.** Merges are serialized: a request behind an in-flight one is *waiting*, and a gate can legitimately run for tens of minutes. Since mg-0c51 the output tells you which it is, so read the verdict rather than the row count:
+
+  | What you see | What it means | What to do |
+  |---|---|---|
+  | `status=processing` row, `ALIVE and working` / `ALIVE and computing` | the gate is producing output, or is silent but its processes are burning CPU | **wait** — the queued rows behind it are queued, not ignored |
+  | `status=processing` row, `SUSPECT` | the gate is silent AND its process subtree is doing nothing | look closer: `ps` the subtree, read the gate's own log. This is **not** authority to kill it — a process blocked on I/O or a lock is idle and healthy |
+  | `status=processing` row, `ALIVE but UNDETERMINED` | the process table could not be read | the view cannot answer; do not guess in either direction |
+  | `NOTHING IN FLIGHT` banner with pending rows | nothing is being processed | this is the real stall shape — check `pogo refinery status` for a stopped or disabled refinery |
+
+  Two things NOT to escalate on. **`last_output=Ns ago` on its own is not a liveness signal**: a healthy gate was measured silent for 8m31s of a 10m run while burning ~3.9 cores, so a rule keyed on output staleness fires on ordinary work. And **`heartbeat=N/30s` in the daemon log is a tick counter, not a health field** — it increments identically whether the gate is computing or wedged.
+
+  Escalating on a healthy gate is destructive (it kills the run mid-flight and re-queues the work); waiting on a hung one only costs time. Prefer waiting.
 
 - **Refinery failures on done items**: A work item may be in `done/` status but the refinery rejected its branch. This happens when a {{.Worker}} exits after a merge failure without calling `mg done` — but can also occur due to races or bugs. On each cycle, cross-reference refinery history against `mg list --status=done`.
 
@@ -816,9 +829,10 @@ You can also query refinery state via the CLI (these talk to pogod for you):
 ```bash
 pogo refinery history             # completed merges, RETAINED window only (pruned at 100 entries)
 pogo refinery history --since=30d # completed merges from the durable event log; exits non-zero if it can't cover the window
-pogo refinery queue               # pending merges (not capped — the queue is drained, never pruned)
-pogo refinery show <id> # single MR details (includes gate output)
+pogo refinery queue               # the IN-FLIGHT merge and what its gate is doing, then the pending ones
+pogo refinery show <id> # single MR details (gate output; queue position for a pending one)
 ```
+`queue` leads with the merge being processed right now and prints its gate's elapsed time, output age, and process-subtree CPU. Those last two are a pair — neither alone separates a slow gate from a stopped one — so read the verdict line under the row, not the row count. The queue itself is not capped: it is drained, never pruned.
 `history` without `--since` is a window, not an archive: the refinery deletes entries past its count/age caps, so **a short result never means "that is all that happened"**. It prints the cap on stderr when the cap has bitten. Any question about more than the last day wants `--since`.
 
 ## Troubleshooting Stalled Agents

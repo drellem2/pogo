@@ -81,7 +81,7 @@ mg list --status=claimed         # In-progress work
 mg show <id>                     # Full details on a work item
 
 # Refinery
-pogo refinery queue              # Pending merges
+pogo refinery queue              # In-flight merge + its gate's liveness, then pending merges
 pogo refinery history            # Completed merges
 pogo refinery show <id>          # Single MR details
 

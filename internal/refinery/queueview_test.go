@@ -1,0 +1,334 @@
+package refinery
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+)
+
+// TestQueueWithProcessingIncludesTheInFlightRequest is the omission mg-0c51 was
+// filed about. Queue() lists only pending requests, so a refinery grinding
+// through a merge served the same array as one that had stopped — and served it
+// unchanged across polls, because the row that was moving was the row that was
+// not in the list.
+func TestQueueWithProcessingIncludesTheInFlightRequest(t *testing.T) {
+	r := newProgressTestRefinery(t, time.Hour)
+	active := &MergeRequest{ID: "mr-active", Branch: "b-active", Status: StatusProcessing, StartTime: time.Now()}
+	r.processing = active
+	r.queue = []*MergeRequest{
+		{ID: "mr-1", Branch: "b-1", Status: StatusQueued},
+		{ID: "mr-2", Branch: "b-2", Status: StatusQueued},
+	}
+
+	if got := len(r.Queue()); got != 2 {
+		t.Errorf("Queue() must stay pending-only, got %d rows", got)
+	}
+
+	full := r.QueueWithProcessing()
+	if len(full) != 3 {
+		t.Fatalf("QueueWithProcessing() returned %d rows, want 3", len(full))
+	}
+	if full[0].ID != "mr-active" || full[0].Status != StatusProcessing {
+		t.Errorf("the in-flight request must lead the list, got %s/%s", full[0].ID, full[0].Status)
+	}
+	if full[1].ID != "mr-1" || full[2].ID != "mr-2" {
+		t.Errorf("pending order must be preserved, got %s then %s", full[1].ID, full[2].ID)
+	}
+}
+
+// TestQueueWithProcessingIdleRefinery is the control: with nothing in flight,
+// the list is exactly the pending ones. If it were not, "nothing is running"
+// could never be distinguished from "something is".
+func TestQueueWithProcessingIdleRefinery(t *testing.T) {
+	r := newProgressTestRefinery(t, time.Hour)
+	r.queue = []*MergeRequest{{ID: "mr-1", Status: StatusQueued}}
+	full := r.QueueWithProcessing()
+	if len(full) != 1 || full[0].Status != StatusQueued {
+		t.Fatalf("idle refinery should list only pending rows, got %+v", full)
+	}
+	for _, mr := range full {
+		if mr.Status == StatusProcessing {
+			t.Error("an idle refinery must not report anything as processing")
+		}
+	}
+}
+
+// TestQueueEndpointServesTheInFlightRequest checks the wire, not just the
+// method: the CLI reads /refinery/queue and it is the endpoint that was
+// omitting the row.
+func TestQueueEndpointServesTheInFlightRequest(t *testing.T) {
+	r := newProgressTestRefinery(t, time.Hour)
+	r.processing = &MergeRequest{ID: "mr-active", Status: StatusProcessing}
+	r.queue = []*MergeRequest{{ID: "mr-1", Status: StatusQueued}}
+
+	mux := http.NewServeMux()
+	r.RegisterHandlers(mux)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/refinery/queue")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	// The shape must stay an array of merge requests: existing --json
+	// consumers key off .status, which already carries the distinction.
+	var got []MergeRequest
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("queue response is no longer a merge-request array: %v", err)
+	}
+	if len(got) != 2 || got[0].ID != "mr-active" || got[0].Status != StatusProcessing {
+		t.Fatalf("endpoint did not serve the in-flight request first, got %+v", got)
+	}
+}
+
+// TestStatusReportsWhatIsInFlight covers the summary view. QueueLen counts
+// pending requests only, so on its own it cannot separate a busy refinery from
+// a stopped one — both can report "Queue: 2".
+func TestStatusReportsWhatIsInFlight(t *testing.T) {
+	r := newProgressTestRefinery(t, time.Hour)
+	r.queue = []*MergeRequest{{ID: "mr-1"}, {ID: "mr-2"}}
+
+	idle := r.GetStatus()
+	if idle.Processing != "" {
+		t.Errorf("an idle refinery must report nothing in flight, got %q", idle.Processing)
+	}
+
+	started := time.Now().Add(-3 * time.Minute)
+	r.processing = &MergeRequest{ID: "mr-active", Status: StatusProcessing, StartTime: started}
+	busy := r.GetStatus()
+	if busy.Processing != "mr-active" {
+		t.Errorf("a busy refinery must name what is in flight, got %q", busy.Processing)
+	}
+	if !busy.ProcessingSince.Equal(started) {
+		t.Errorf("ProcessingSince = %v, want %v", busy.ProcessingSince, started)
+	}
+	if busy.QueueLen != idle.QueueLen {
+		t.Error("QueueLen must keep counting pending requests only")
+	}
+	// The whole point: the two statuses must not look the same TO A CLIENT.
+	// Compared as JSON rather than as structs — Status carries pointer fields,
+	// so struct inequality would hold on pointer identity alone and the
+	// assertion would pass without proving anything.
+	idleJSON, _ := json.Marshal(idle)
+	busyJSON, _ := json.Marshal(busy)
+	if string(idleJSON) == string(busyJSON) {
+		t.Fatalf("busy and idle statuses serialise identically — the summary cannot tell them apart: %s", busyJSON)
+	}
+}
+
+// TestHeldMergeRequestDropsItsInFlightStamp checks the one path that returns a
+// dequeued request to the queue. A queued row still carrying StartTime would
+// report "in flight for 40m" while sitting in line — the same class of untruth
+// as omitting the in-flight row in the first place.
+func TestHeldMergeRequestDropsItsInFlightStamp(t *testing.T) {
+	r := newProgressTestRefinery(t, time.Hour)
+	mr := &MergeRequest{ID: "mr-held", Status: StatusProcessing, StartTime: time.Now().Add(-40 * time.Minute)}
+	r.processing = mr
+	r.holdMergeRequest(mr, "mg-qa")
+
+	if !mr.StartTime.IsZero() {
+		t.Errorf("a re-queued request must not keep its in-flight stamp, got %v", mr.StartTime)
+	}
+	if r.GetStatus().Processing != "" {
+		t.Error("a held request must not still be reported as in flight")
+	}
+	for _, q := range r.QueueWithProcessing() {
+		if q.Status == StatusProcessing {
+			t.Errorf("held request %s is still listed as processing", q.ID)
+		}
+	}
+}
+
+// TestDequeueStampsStartTime checks the field the "in flight for N" line reads.
+func TestDequeueStampsStartTime(t *testing.T) {
+	r := newProgressTestRefinery(t, time.Hour)
+	r.queue = []*MergeRequest{{ID: "mr-1", Status: StatusQueued}}
+	before := time.Now()
+	mr := r.dequeue()
+	if mr == nil {
+		t.Fatal("dequeue returned nothing")
+	}
+	if mr.StartTime.Before(before) {
+		t.Errorf("dequeue must stamp StartTime, got %v", mr.StartTime)
+	}
+}
+
+// TestGateWatchMeasuresARealSubtreesCPU is the end-to-end positive control for
+// the signal the CLI now prints. It runs two real gates through the real
+// runner — one that computes, one that sleeps — and asserts the persisted
+// record separates them.
+//
+// Both arms are required. A measurement that only ever reports "busy" is the
+// defect described in mg-1b8c's lineage: a view that always reads healthy
+// cannot report the state it exists to report.
+func TestGateWatchMeasuresARealSubtreesCPU(t *testing.T) {
+	if testing.Short() {
+		t.Skip("runs real gates for a couple of seconds")
+	}
+
+	run := func(gate string) *StepProgress {
+		t.Helper()
+		r := newProgressTestRefinery(t, 400*time.Millisecond)
+		wtDir := t.TempDir()
+		writeGateConfig(t, wtDir, "quality_gate = "+quoteTOML(gate))
+		mr := &MergeRequest{ID: "mr-cpu", Status: StatusProcessing}
+		r.byID[mr.ID] = mr
+		if _, _, err := r.runQualityGates(context.Background(), wtDir, wtDir, mr); err != nil {
+			t.Fatalf("gate %q should have passed: %v", gate, err)
+		}
+		if mr.Progress == nil {
+			t.Fatalf("gate %q left no progress record", gate)
+		}
+		return mr.Progress
+	}
+
+	// A gate whose real work happens in a DESCENDANT: `sh -c` forks for a
+	// compound command, so only a subtree walk finds the CPU. The spin loop
+	// uses shell builtins only, so the work shows up as CPU time rather than
+	// as process churn — this arm has to prove the CPU path, not the churn
+	// fallback.
+	busy := run(`(while :; do :; done) & spinner=$!; sleep 2; kill $spinner; exit 0`)
+	t.Logf("busy gate: pid=%d cores=%.2f procs=%d churn=%d window=%s unavailable=%q",
+		busy.GatePID, busy.CPUCores, busy.CPUProcs, busy.CPUChurn, busy.CPUWindow, busy.CPUUnavailable)
+	if busy.GatePID == 0 {
+		t.Error("the gate's pid must be recorded — without it there is no subtree to measure")
+	}
+	if busy.CPUSampledAt.IsZero() {
+		t.Fatalf("a 2s gate at a 400ms heartbeat must produce a CPU measurement, got unavailable=%q",
+			busy.CPUUnavailable)
+	}
+	if busy.CPUCores < 0.5 {
+		t.Errorf("a spinning gate measured %.2f cores; the subtree walk is not finding the work", busy.CPUCores)
+	}
+	if busy.Subtree() != SubtreeBusy {
+		t.Errorf("a spinning gate must classify as busy, got %v", busy.Subtree())
+	}
+
+	// The negative arm. A sleeping gate consumes nothing, and the record must
+	// be willing to say so.
+	idle := run(`sleep 2`)
+	t.Logf("idle gate: pid=%d cores=%.2f procs=%d churn=%d window=%s unavailable=%q",
+		idle.GatePID, idle.CPUCores, idle.CPUProcs, idle.CPUChurn, idle.CPUWindow, idle.CPUUnavailable)
+	if idle.CPUSampledAt.IsZero() {
+		t.Fatalf("a 2s gate at a 400ms heartbeat must produce a CPU measurement, got unavailable=%q",
+			idle.CPUUnavailable)
+	}
+	if idle.Subtree() != SubtreeIdle {
+		t.Errorf("a sleeping gate must classify as idle (cores=%.2f churn=%d) — the measurement is "+
+			"reporting busy unconditionally", idle.CPUCores, idle.CPUChurn)
+	}
+	if busy.CPUCores <= idle.CPUCores {
+		t.Errorf("a computing gate (%.2f cores) must measure higher than a sleeping one (%.2f cores)",
+			busy.CPUCores, idle.CPUCores)
+	}
+}
+
+// TestCPUSummaryNeverCallsAnUnmeasuredSubtreeIdle guards the distinction that
+// makes the signal safe to act on: "could not measure" and "measured, idle"
+// lead to opposite decisions and must never render as one another.
+func TestCPUSummaryNeverCallsAnUnmeasuredSubtreeIdle(t *testing.T) {
+	unmeasured := &StepProgress{CPUUnavailable: "gate process not started yet"}
+	if unmeasured.Subtree() != SubtreeUnknown {
+		t.Errorf("an unsampled record must classify as unknown, got %v", unmeasured.Subtree())
+	}
+	s := unmeasured.CPUSummary()
+	if !strings.Contains(s, "UNKNOWN") || !strings.Contains(s, "not started yet") {
+		t.Errorf("an unmeasured subtree must say so, and why: %q", s)
+	}
+	if strings.Contains(s, "idle") {
+		t.Errorf("an unmeasured subtree must never render as idle: %q", s)
+	}
+
+	measured := &StepProgress{CPUSampledAt: time.Now(), CPUProcs: 1, CPUWindow: "30s"}
+	if measured.Subtree() != SubtreeIdle {
+		t.Errorf("a zero-CPU sample must classify as idle, got %v", measured.Subtree())
+	}
+	if !strings.Contains(measured.CPUSummary(), "idle") {
+		t.Errorf("a measured idle subtree must say idle, got %q", measured.CPUSummary())
+	}
+
+	gone := &StepProgress{CPUSampledAt: time.Now(), CPUProcs: 0}
+	if gone.Subtree() != SubtreeGone {
+		t.Errorf("an empty subtree means the process is gone, got %v", gone.Subtree())
+	}
+}
+
+// TestApplyCPUClearsAStaleRate checks that a measurement which becomes
+// unavailable takes its numbers with it. A rate left behind after the sampler
+// starts failing would be read as current, which is the same class of error as
+// reporting a heartbeat from a dead runner.
+func TestApplyCPUClearsAStaleRate(t *testing.T) {
+	w := &gateWatch{interval: 30 * time.Second}
+	w.pid.Store(4856)
+	p := &StepProgress{}
+
+	w.cpu = cpuReading{At: time.Now(), Activity: subtreeActivity{Cores: 3.9, Procs: 2, Window: 30 * time.Second}}
+	w.applyCPU(p)
+	if p.CPUCores != 3.9 || p.CPUSampledAt.IsZero() || p.GatePID != 4856 {
+		t.Fatalf("measurement was not recorded: %+v", p)
+	}
+
+	w.cpu = cpuReading{Unavailable: "reading the process table failed: ps: boom"}
+	w.applyCPU(p)
+	if !p.CPUSampledAt.IsZero() || p.CPUCores != 0 || p.CPUProcs != 0 || p.CPUWindow != "" {
+		t.Errorf("a lost measurement must clear the numbers, got %+v", p)
+	}
+	if p.CPUUnavailable == "" {
+		t.Error("a lost measurement must carry the reason")
+	}
+	if p.Subtree() != SubtreeUnknown {
+		t.Errorf("a cleared measurement must classify as unknown, got %v", p.Subtree())
+	}
+}
+
+// TestASlowProcessTableDoesNotDelayTheHeartbeat guards the ordering hazard the
+// CPU signal introduces. Reading the process table shells out to `ps`, and a
+// loaded host — exactly the condition under which someone inspects a refinery —
+// can make that slow. If the sampler ran on the heartbeat goroutine, a slow ps
+// would delay beats, a delayed beat reads as a DEAD runner, and the fix for a
+// blind view would have manufactured a false alarm in the one case it matters.
+func TestASlowProcessTableDoesNotDelayTheHeartbeat(t *testing.T) {
+	if testing.Short() {
+		t.Skip("real timing")
+	}
+	prev := psSnapshot
+	psSnapshot = func() ([]procRow, error) {
+		time.Sleep(2 * time.Second)
+		return nil, errors.New("ps was slow")
+	}
+	t.Cleanup(func() { psSnapshot = prev })
+
+	r := newProgressTestRefinery(t, 100*time.Millisecond)
+	wtDir := t.TempDir()
+	writeGateConfig(t, wtDir, `quality_gate = "sleep 1"`)
+	mr := &MergeRequest{ID: "mr-slow-ps", Status: StatusProcessing}
+	r.byID[mr.ID] = mr
+	if _, _, err := r.runQualityGates(context.Background(), wtDir, wtDir, mr); err != nil {
+		t.Fatalf("gate should have passed: %v", err)
+	}
+
+	// A 1s gate at a 100ms cadence beats ~10 times. Anything near zero means
+	// the sampler is on the beat path.
+	if mr.Progress.Beats < 5 {
+		t.Errorf("heartbeat stalled behind the process-table read: %d beats in ~1s at a 100ms interval",
+			mr.Progress.Beats)
+	}
+	// And the failure is reported, not silently rendered as an idle subtree.
+	if mr.Progress.Subtree() != SubtreeUnknown {
+		t.Errorf("a failed process-table read must classify as unknown, got %v", mr.Progress.Subtree())
+	}
+	if !strings.Contains(mr.Progress.CPUUnavailable, "ps was slow") {
+		t.Errorf("the reason must be carried, got %q", mr.Progress.CPUUnavailable)
+	}
+}
+
+// quoteTOML renders a shell command as a TOML basic string.
+func quoteTOML(s string) string {
+	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(s) + `"`
+}

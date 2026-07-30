@@ -109,8 +109,10 @@ func TestFormatMRProgressFinishedRecord(t *testing.T) {
 }
 
 // TestFormatMRProgressSilentGateIsReportedAsUnresolved covers the case the
-// instrument genuinely cannot settle. Reporting it as "working" would rebuild
-// the ambiguity; reporting it as dead would be a false alarm.
+// instrument genuinely cannot settle: the runner is beating, the gate is
+// silent, and the process subtree could not be measured. Reporting it as
+// "working" would rebuild the ambiguity; reporting it as dead would be a false
+// alarm; reporting it as idle would invent a measurement that was never taken.
 func TestFormatMRProgressSilentGateIsReportedAsUnresolved(t *testing.T) {
 	now := time.Now()
 	out := formatMRProgress(&refinery.StepProgress{
@@ -121,13 +123,20 @@ func TestFormatMRProgressSilentGateIsReportedAsUnresolved(t *testing.T) {
 		Beats:             50,
 		HeartbeatInterval: "30s",
 		TimeoutAt:         now.Add(35 * time.Minute),
+		CPUUnavailable:    "reading the process table failed: ps: exit status 1",
 	}, now)
 
-	if !strings.Contains(out, "ALIVE, gate silent") {
-		t.Errorf("a silent gate under a live runner should be named as such, got:\n%s", out)
+	if !strings.Contains(out, "ALIVE but UNDETERMINED") {
+		t.Errorf("a silent, unmeasurable gate under a live runner should be named as such, got:\n%s", out)
 	}
 	if !strings.Contains(out, "cannot be told from here") {
 		t.Errorf("the verdict must admit what it cannot resolve, got:\n%s", out)
+	}
+	if !strings.Contains(out, "reading the process table failed") {
+		t.Errorf("the verdict must say WHY there is no measurement, got:\n%s", out)
+	}
+	if strings.Contains(out, "idle") {
+		t.Errorf("an unmeasured subtree must never be reported as an idle one, got:\n%s", out)
 	}
 	if strings.Contains(out, "DEAD") {
 		t.Errorf("a live runner must not be reported as dead, got:\n%s", out)

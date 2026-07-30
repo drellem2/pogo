@@ -101,7 +101,12 @@ func (r *Refinery) handleQueue(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(r.Queue())
+	// The in-flight request leads the list. It used to be omitted, which made
+	// a busy refinery serve the same static array of queued rows as a wedged
+	// one (mg-0c51). The shape is unchanged — still an array of merge requests
+	// — so existing consumers keep working; the new row is distinguished by
+	// its status field, which they already read.
+	json.NewEncoder(w).Encode(r.QueueWithProcessing())
 }
 
 func (r *Refinery) handleHistory(w http.ResponseWriter, req *http.Request) {
