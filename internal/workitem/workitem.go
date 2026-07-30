@@ -32,6 +32,24 @@ type WorkItem struct {
 	// stall watcher uses to age unclaimed `available` items. Populated by
 	// ListFrom; zero when the file could not be stat'd.
 	ModTime time.Time `json:"mod_time,omitempty"`
+	// CompletedAt is when the item was marked done, taken from the mtime of its
+	// sibling `<id>.result.json`. Populated only for items in done/, and zero
+	// when no result file exists.
+	//
+	// IT IS NOT ModTime, AND THE DIFFERENCE IS LOAD-BEARING. `mg done` RENAMES
+	// the item file into done/, and a rename preserves mtime — so for a done
+	// item that was never body-edited, ModTime equals its CREATION time, hours
+	// or days before completion. Measured on the live store: every audit item
+	// checked had ModTime == its `created:` frontmatter to the second, while the
+	// sibling result.json was written at the moment of the merge. A consumer
+	// that aged a done item by ModTime would be measuring how long ago it was
+	// FILED and reporting it as how long ago it FINISHED.
+	//
+	// Zero is a real answer and must not be read as "just now" or "long ago": an
+	// item completed without a result file has no recorded completion time at
+	// all. Callers should count those separately rather than fold them into
+	// either verdict.
+	CompletedAt time.Time `json:"completed_at,omitempty"`
 }
 
 // TagList splits the raw `tags:` frontmatter value into individual tags. mg
@@ -158,6 +176,9 @@ func listFrom(root string, includeClaimSuffixed bool, statuses ...string) ([]Wor
 			if info, err := e.Info(); err == nil {
 				item.ModTime = info.ModTime()
 			}
+			if sd.status == "done" {
+				item.CompletedAt = resultFileTime(dir, e.Name())
+			}
 			items = append(items, item)
 		}
 	}
@@ -218,6 +239,31 @@ func FindFrom(root, id string) (WorkItem, bool, error) {
 		return item, true, nil
 	}
 	return WorkItem{}, false, nil
+}
+
+// resultFileTime returns the mtime of the `<id>.result.json` that mg writes
+// beside a completed item, or the zero time when there is none.
+//
+// The result file is written at `mg done`, so its mtime is the completion
+// instant — unlike the item file's own mtime, which a rename carries over from
+// filing time. `<id>` is taken from the item file's NAME rather than from its
+// `id:` frontmatter, so an item whose frontmatter is missing or disagrees with
+// its filename still resolves to the file actually sitting next to it. A claim
+// suffix (`<id>.md.<pid>`) is stripped too, for the case of a claimed-looking
+// name that ended up in done/.
+func resultFileTime(dir, entryName string) time.Time {
+	base := entryName
+	if i := strings.Index(base, ".md"); i >= 0 {
+		base = base[:i]
+	}
+	if base == "" {
+		return time.Time{}
+	}
+	info, err := os.Stat(filepath.Join(dir, base+".result.json"))
+	if err != nil {
+		return time.Time{}
+	}
+	return info.ModTime()
 }
 
 // itemFileName reports whether a directory entry names a work item file.
