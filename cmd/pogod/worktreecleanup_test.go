@@ -15,9 +15,18 @@ import (
 // state a live polecat is in at exit.
 func wtRepo(t *testing.T) (repo string, worktree string) {
 	t.Helper()
-	dir := t.TempDir()
-	if real, err := filepath.EvalSymlinks(dir); err == nil {
-		dir = real
+	base := t.TempDir()
+	if real, err := filepath.EvalSymlinks(base); err == nil {
+		base = real
+	}
+	// Repo and worktree are siblings INSIDE the directory this test was handed.
+	// They used to be siblings inside filepath.Dir(t.TempDir()) — the testing
+	// package's own MkdirTemp root, which it creates, owns and rm -rf's. A test
+	// is given `001`, not the directory `001` sits in, and nothing documents
+	// that entries may be created alongside it (mg-5561).
+	dir := filepath.Join(base, "repo")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
 	}
 	run := func(args ...string) {
 		t.Helper()
@@ -26,7 +35,7 @@ func wtRepo(t *testing.T) (repo string, worktree string) {
 			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
 			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
 		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, out)
+			t.Fatalf("git %v: %v\n%s%s", args, err, out, worktreeAdminState(dir))
 		}
 	}
 	run("init", "-q", "-b", "main")
@@ -38,9 +47,140 @@ func wtRepo(t *testing.T) (repo string, worktree string) {
 	run("add", "seed.txt")
 	run("commit", "-qm", "seed")
 	run("branch", "polecat-cat1")
-	wt := filepath.Join(filepath.Dir(dir), "wt-cat1")
+	wt := filepath.Join(base, "wt-cat1")
 	run("worktree", "add", "-q", wt, "polecat-cat1")
 	return dir, wt
+}
+
+// worktreeAdminState renders git's linked-worktree bookkeeping for repo, so a
+// failed setup command carries the evidence about it instead of only its exit
+// status.
+//
+// mg-5561: CI has seen `wtRepo` die inside `git worktree add` with
+//
+//	fatal: could not open '.git/worktrees/wt-cat1/locked' for writing:
+//	       No such file or directory
+//
+// That is a narrow and checkable claim. builtin/worktree.c creates
+// .git/worktrees/<name> with mkdir and, a few statements later, writes a
+// `locked` sentinel into it under the comment "lock the incomplete repo so
+// prune won't delete it". ENOENT on that write means the directory git had
+// just created successfully was gone by the time it wrote the guard — the one
+// window the guard exists to close. Something removed it.
+//
+// WHAT WAS RULED OUT, so the next reader does not repeat it: none of the git
+// commands wtRepo itself runs prunes a stale `.git/worktrees` entry (init,
+// add, commit, branch, status, worktree add and gc --auto were each measured
+// against a planted entry, and all left it alone); the package runs no test in
+// parallel; a shim recording every git invocation of this package showed the
+// only prunes are internal/gitgc's own, on their own repos, seconds earlier;
+// and the same shim over the whole `go test ./...` (4,417 invocations) showed
+// no prune or `worktree remove` ever aimed at another test's repo. No Go code
+// in this repo removes `.git/worktrees/*`. Sending git a signal in that window
+// does make it delete the directory — but git then dies of the signal, which
+// Go reports as "signal: …", not the exit status 128 actually observed.
+//
+// So the remover is still unidentified, and the reason it is unidentified is
+// that the artifact carried no evidence: an exit status, a git message, and
+// nothing about the directory the message is about. This is diagnosis, not
+// defence. It removes nothing, retries nothing and guards nothing; it only
+// makes the next occurrence say who.
+func worktreeAdminState(repo string) string {
+	var b strings.Builder
+	b.WriteString("\n--- linked-worktree bookkeeping for " + repo + " (mg-5561) ---\n")
+
+	gitPath := filepath.Join(repo, ".git")
+	switch fi, err := os.Lstat(gitPath); {
+	case err != nil:
+		b.WriteString(".git: " + err.Error() + "\n")
+	case fi.IsDir():
+		b.WriteString(".git: directory\n")
+	default:
+		b.WriteString(".git: " + fi.Mode().String() + " (not a directory)\n")
+	}
+
+	adminDir := filepath.Join(gitPath, "worktrees")
+	entries, err := os.ReadDir(adminDir)
+	switch {
+	case os.IsNotExist(err):
+		// The state the CI failure implies: git's own bookkeeping directory is
+		// not there. Named explicitly because "absent" and "present but empty"
+		// are different facts about who removed what.
+		b.WriteString(".git/worktrees: ABSENT\n")
+	case err != nil:
+		b.WriteString(".git/worktrees: " + err.Error() + "\n")
+	case len(entries) == 0:
+		b.WriteString(".git/worktrees: present, EMPTY\n")
+	default:
+		for _, e := range entries {
+			b.WriteString(".git/worktrees/" + e.Name() + ": ")
+			inner, ierr := os.ReadDir(filepath.Join(adminDir, e.Name()))
+			if ierr != nil {
+				b.WriteString(ierr.Error() + "\n")
+				continue
+			}
+			names := make([]string, 0, len(inner))
+			for _, f := range inner {
+				names = append(names, f.Name())
+			}
+			b.WriteString("[" + strings.Join(names, " ") + "]\n")
+		}
+	}
+
+	out, err := exec.Command("git", "-C", repo, "worktree", "list", "--porcelain").CombinedOutput()
+	if err != nil {
+		b.WriteString("git worktree list: " + err.Error() + "\n")
+	}
+	b.WriteString("git worktree list --porcelain:\n" + string(out))
+
+	parent := filepath.Dir(repo)
+	if siblings, serr := os.ReadDir(parent); serr == nil {
+		names := make([]string, 0, len(siblings))
+		for _, s := range siblings {
+			names = append(names, s.Name())
+		}
+		b.WriteString("contents of " + parent + ": [" + strings.Join(names, " ") + "]\n")
+	}
+	return b.String()
+}
+
+// TestWorktreeAdminStateReportsTheVanishedDirectory keeps the mg-5561
+// diagnostic honest.
+//
+// A diagnostic nobody exercises is a comment that compiles. This one exists for
+// a failure seen once, in CI, on Linux — so the only chance it will be right on
+// the day it fires is a test that stages the state it describes and reads what
+// it says. Both arms matter: the healthy repo must report the registration it
+// has (or the helper could be a constant), and the stripped repo must report
+// ABSENT in so many words (or a reader gets the same silence the original
+// artifact gave).
+func TestWorktreeAdminStateReportsTheVanishedDirectory(t *testing.T) {
+	repo, wt := wtRepo(t)
+
+	healthy := worktreeAdminState(repo)
+	if !strings.Contains(healthy, ".git/worktrees/wt-cat1: [") {
+		t.Errorf("a live registration must be itemised, got:\n%s", healthy)
+	}
+	if !strings.Contains(healthy, wt) {
+		t.Errorf("the registration listing must name the worktree path %s, got:\n%s", wt, healthy)
+	}
+	if strings.Contains(healthy, "ABSENT") {
+		t.Errorf("a healthy repo must not be reported as missing its bookkeeping, got:\n%s", healthy)
+	}
+
+	// The state the CI failure implies: git's bookkeeping directory gone while
+	// the registration it described is still being created.
+	if err := os.RemoveAll(filepath.Join(repo, ".git", "worktrees")); err != nil {
+		t.Fatal(err)
+	}
+	stripped := worktreeAdminState(repo)
+	if !strings.Contains(stripped, ".git/worktrees: ABSENT") {
+		t.Errorf("the whole point is saying that git's own bookkeeping directory is not there — "+
+			"without it the next occurrence is again an exit status and no evidence. Got:\n%s", stripped)
+	}
+	if !strings.Contains(stripped, ".git: directory") {
+		t.Errorf("the report must distinguish a missing worktrees/ from a missing .git, got:\n%s", stripped)
+	}
 }
 
 // TestCleanupAgentWorktreePreservesDirty is the end-to-end control for
