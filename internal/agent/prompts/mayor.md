@@ -729,6 +729,11 @@ If a ticket for the ref already exists, the mail is new issue activity:
 
    Approved triage recommendation: <triage ticket id> (see its result packet). Build on a branch and open a PR per the polecat-build-pr protocol. Review ticket: <review ticket id, edit in after filing it>.
    EOF
+   # The build ticket's --depends=<triage ticket id> is what holds it until the triage
+   # ticket is retired in step 3 — it lands in pending/, not available/, and cannot be
+   # dispatched from there. The gate opens on the triage ticket reaching done/ OR
+   # archive/ (both are scanned), so archiving it later never re-gates the build.
+   #
    # No --depends on the build ticket: on this track the build ticket stays claimed
    # through review (you submit its branch to the refinery yourself on pass, transition 5),
    # so a hard dependency would never clear — the review ticket would sit in pending/ and
@@ -745,7 +750,17 @@ If a ticket for the ref already exists, the mail is new issue activity:
    Review the PR from <build ticket id> against the approved triage recommendation (<triage ticket id>).
    EOF
    ```
-3. **Dispatch the build {{.Worker}} now** (`--template=polecat-build-pr`). Hold the review ticket until the PR exists (transition 4). The triage ticket is complete — archive it on your normal sweep.
+3. **Retire the triage ticket, then dispatch the build {{.Worker}}** — in that order, because the second does not work until the first has run:
+   ```bash
+   mg done <triage ticket id> --successor=<build ticket id>
+   ```
+   Then dispatch the build {{.Worker}} (`--template=polecat-build-pr`), and hold the review ticket until the PR exists (transition 4). Archive the triage ticket on your normal sweep.
+
+   **`--successor` is not optional, and `mg done` is where it bites — not `mg archive`.** A ticket whose body leads with `stage: triage` is filed carrying a `declares-remainder` tag; mg emits it from the carrier block on **any** type, `--type=task` included, because a triage is a workflow position rather than a type. `mg done` then refuses a declared item that names no successor, and `mg archive` refuses anything that is not already done — so a bare archive is never the first gate you hit, and "archive it on your sweep" alone cannot retire this ticket. The build ticket is the successor and it exists by now: you filed it one step ago, which is why this step is here and not earlier.
+
+   **It is still yours to retire.** The triage {{.Worker}}'s own `mg done` (transition 1) cannot have succeeded on a ticket carrying the tag — at that point no successor existed to name. So the ticket is still `claimed` when you reach this line; `mg done` does not check *who* holds the claim, only that the item is claimed, so this call is yours to make.
+
+   **Check the promotion line.** The same command runs the pending sweep and should print `Promoted <build ticket id>: ... (pending → available)`. That is the build ticket's `--depends` gate opening. If you do not see it, the dispatch in the next sentence will fail — fix the gate before spawning a {{.Worker}} for an item still in `pending/`.
 
 *On NO-GO:* post an **honest, reasoned close comment** on the issue (pm-pogo wording standards apply), then close it:
 ```bash
