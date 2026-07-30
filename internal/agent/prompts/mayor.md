@@ -784,12 +784,25 @@ mg archive <id>
 
 ### Refinery logs
 
-When diagnosing merge failures, the refinery logs every pipeline step with structured key=value fields (MR ID, branch, step name). Logs are written to pogod's stderr:
+When diagnosing merge failures, the refinery logs every pipeline step with structured key=value fields (MR ID, branch, step name). The lines go to pogod's stdout/stderr, so **where they land is wherever the service manager was told to redirect them — ask it, don't assume a path.** A literal path written here is exactly the claim that rots silently, and this paragraph shipped a nonexistent one for weeks (mg-f766).
 
-- **Service mode** (launchd/systemd): `~/.local/share/pogo/logs/pogo.err.log` (stderr), `~/.local/share/pogo/logs/pogo.log` (stdout)
-- **Manual mode** (`pogo server start`): logs appear in the terminal that started pogod
+- **Service mode, macOS/launchd** — the installed plist is the authority. Both stdout and stderr point at the *same* file:
+  ```bash
+  plist=$(pogo service status | sed -n 's/^Service installed: //p')
+  grep -A1 StandardOutPath "$plist"      # today: ~/Library/Logs/pogo/pogod.log
+  grep refinery: ~/Library/Logs/pogo/pogod.log | grep <mr-id>
+  ```
+- **Service mode, Linux/systemd** — the generated unit sets no `StandardOutput`, so there is **no log file**; output goes to the journal:
+  ```bash
+  journalctl --user -u pogo.service | grep refinery: | grep <mr-id>
+  ```
+- **Manual mode** (`pogo server start`): logs appear in the terminal that started pogod — again no file.
 
-All refinery log lines are prefixed with `refinery:`. To find logs for a specific merge request, grep for its MR ID. The failure mail you receive includes the error message and quality gate output, but the log file shows the full step-by-step trace (worktree, fetch, checkout, rebase, quality-gates, merge, push).
+No `pogo` subcommand prints the log location, so the plist/journal above is the only non-rotting way to ask for it.
+
+**An empty grep is evidence only once you know the thing you grepped exists.** `grep <mr-id> <path>` against a missing file, and `journalctl -u` against the wrong unit, both print nothing and exit quietly — indistinguishable from "the refinery logged nothing about this MR", which is the wrong conclusion to reach mid-diagnosis of a stuck merge. Confirm the file (`ls -l`) or the unit first. On macOS also note pogod rotates its log at startup past 10 MiB: lines from an older run are in `pogod.log.1` (up to `.3`), not in `pogod.log`.
+
+All refinery log lines are prefixed with `refinery:`. To find logs for a specific merge request, grep for its MR ID. The failure mail you receive includes the error message and quality gate output, but the log shows the full step-by-step trace (worktree, fetch, checkout, rebase, quality-gates, merge, push).
 
 You can also query refinery state via the CLI (these talk to pogod for you):
 ```bash

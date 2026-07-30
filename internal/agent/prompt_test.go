@@ -2,6 +2,7 @@ package agent
 
 import (
 	"bytes"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -4568,6 +4569,130 @@ func TestPromptsTeachAppendBodyRatherThanWholesaleRewrite(t *testing.T) {
 		}
 		if strings.Contains(w, "mg edit") {
 			t.Errorf("%s: gained an `mg edit` affordance, so it now edits bodies — the mg-4bb9 scope needs revisiting", path)
+		}
+	}
+}
+
+// Log paths in a diagnostic section (mg-f766).
+//
+// mayor.md's "Refinery logs" section sent readers to
+// `~/.local/share/pogo/logs/pogo.err.log`, and doctor.md's quick reference
+// carried the same string. That directory does not exist on macOS: pogod's log
+// dir is `logDir()` in internal/service, unconditionally
+// `$HOME/Library/Logs/pogo`, with no GOOS switch. mg-9aa0 moved it and this
+// paragraph was not moved with it — while `.dist:751` in the SAME file already
+// referred to `~/Library/Logs/pogo/pogo-deploy.log`, so one file shipped two
+// log roots, one of which resolves to nothing.
+//
+// What makes it worth a pin rather than a one-line correction is the failure
+// SHAPE. The same section tells you to grep that file for an MR ID, so the
+// symptom is not "no such file" — it is an empty grep, which is
+// indistinguishable from "the refinery logged nothing about this MR". That is a
+// false negative manufactured by the instrument, at the one moment it costs
+// most: mid-diagnosis of a merge that appears stuck. It fired live on
+// 2026-07-30 against mr-d9lc2natjv1tur4p9bb0 (two empty results; the real log
+// was found by accident), and the next step from "the refinery is not logging"
+// is plausibly a redundant re-submit — which has previously reopened an
+// already-merged item.
+//
+// So the pins are:
+//   - the dead path is absent from EVERY shipped prompt, not just the two that
+//     carried it, so a copy-paste cannot reintroduce it;
+//   - the replacement is DISCOVERABLE rather than asserted. A hard-coded path
+//     in a prompt is the class of claim that rots silently, and this one
+//     already did. `pogo service status` prints the plist/unit path on both
+//     platforms (cmd/pogo/main.go and internal/service both print
+//     "Service installed: %s"), so the plist can be read for the real value;
+//   - Linux is answered too. The line was labelled "(launchd/systemd)", and
+//     substituting the macOS path would be the same defect aimed at Linux
+//     users. systemdUnitTemplate sets no StandardOutput/StandardError at all,
+//     so on Linux there is no log FILE — output goes to the journal. A prompt
+//     naming any file path for systemd would be wrong;
+//   - the false-negative reasoning travels with the text. Without it the
+//     correction is just a newer literal, and the next reader has no reason to
+//     distrust an empty grep.
+func TestPromptsDoNotAssertADeadLogPath(t *testing.T) {
+	var entries []string
+	if err := fs.WalkDir(defaultPrompts, "prompts", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() {
+			entries = append(entries, path)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("walk prompts: %v", err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("no shipped prompts found; the sweep below would pass vacuously")
+	}
+
+	// The dead path, struck from every shipped prompt. Both filenames it was
+	// asserted with are included: the section named pogo.err.log for stderr and
+	// pogo.log for stdout, and neither exists under any root — the launchd
+	// plist points BOTH streams at one pogod.log.
+	for _, path := range entries {
+		data, err := defaultPrompts.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		body := string(data)
+		for _, dead := range []string{
+			".local/share/pogo/logs",
+			"pogo.err.log",
+		} {
+			if strings.Contains(body, dead) {
+				t.Errorf("%s: asserts the nonexistent log path %q; pogod's log dir is service.logDir() = $HOME/Library/Logs/pogo, and an empty grep against a missing file is indistinguishable from \"the refinery logged nothing\" (mg-f766)", path, dead)
+			}
+		}
+	}
+
+	// The replacement, in the two prompts that route an agent to pogod's log.
+	for _, path := range []string{"prompts/mayor.md", "prompts/crew/doctor.md"} {
+		data, err := defaultPrompts.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		body := string(data)
+		for _, want := range []string{
+			// Discoverable, not asserted: ask the service manager.
+			`pogo service status | sed -n 's/^Service installed: //p'`,
+			"StandardOutPath",
+			// Linux is a different instrument, not a different path.
+			"journalctl --user -u pogo.service",
+			// The macOS value is still named, as the "today" reading rather
+			// than as the authority — an agent mid-diagnosis should not have
+			// to run two commands before its first grep.
+			"~/Library/Logs/pogo/pogod.log",
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("%s: missing log-location guidance %q (mg-f766)", path, want)
+			}
+		}
+		// The reasoning, without which the fix is just a fresher literal.
+		if !strings.Contains(body, "empty grep") {
+			t.Errorf("%s: must say an empty grep is not evidence until the file is known to exist — that false negative is the whole defect (mg-f766)", path)
+		}
+	}
+
+	mayor, err := defaultPrompts.ReadFile("prompts/mayor.md")
+	if err != nil {
+		t.Fatalf("read mayor.md: %v", err)
+	}
+	body := string(mayor)
+	for _, want := range []string{
+		// pogod rotates its log at startup past 10 MiB (internal/service/
+		// logrotate.go), so "grepped pogod.log, found nothing" has a second
+		// innocent explanation besides a wrong path.
+		"pogod.log.1",
+		// No CLI reports the log location — PogodLogPath() has no command
+		// surface. Saying so is what stops the next reader hunting for one and
+		// settling for a hard-coded path again.
+		"No `pogo` subcommand prints the log location",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("mayor.md: missing %q from the refinery-logs section (mg-f766)", want)
 		}
 	}
 }

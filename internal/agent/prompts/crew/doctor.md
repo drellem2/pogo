@@ -34,9 +34,15 @@ pogo refinery queue              # Pending merges
 pogo refinery history            # Completed merges
 pogo refinery show <id>          # Single MR details
 
-# Logs
-# Service mode: ~/.local/share/pogo/logs/pogo.err.log
-# Manual mode: logs appear in the terminal that started pogod
+# Logs — ask the service manager where they land; don't assume a path (mg-f766).
+# macOS/launchd: the installed plist is the authority for the log file.
+plist=$(pogo service status | sed -n 's/^Service installed: //p')
+grep -A1 StandardOutPath "$plist"   # today: ~/Library/Logs/pogo/pogod.log
+# Linux/systemd: the unit sets no StandardOutput, so there is NO log file.
+journalctl --user -u pogo.service
+# Manual mode (pogo server start): logs appear in that terminal — no file.
+# An empty grep proves nothing until you have confirmed the file exists: a
+# missing path and "pogod logged nothing" look identical.
 
 # Projects
 lsp --json                       # All registered repos
