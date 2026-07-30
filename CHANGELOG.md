@@ -10,6 +10,2844 @@ is the curated, human-readable summary kept in sync at each release cut.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-07-30
+
+### Added
+
+- **`pogo check-intake` reconciles open GitHub issues against `gh:` carriers — a
+  delivered-then-dropped `[gh]` mail is now detected, not merely warned about
+  (mg-039b).**
+  drellem2/pogo#99 was filed 2026-07-29 at 18:53:58Z. The poller mailed the
+  coordinator **46 seconds later**, and again 20 minutes after that when Daniel
+  commented. Both mails were delivered. Neither produced a work item, and the
+  issue went **~10 hours** with no carrier — invisible to `mg list`, to
+  `mg list --tag=gh-issue`, and to every other board the fleet reads. Its paired
+  issue #100, filed 19 minutes later, *was* carried (mg-2fcc), so a pair Daniel
+  explicitly filed to be considered together got split and the untracked half went
+  dark. It surfaced only because a PM ran an open-issue sweep by hand, early, on a
+  hunch; waiting for 09:00 would have made it ~14 hours.
+
+  **Not a poller defect and not a delivery defect.** Both worked. The shipped
+  coordinator prompt already names the failure mode — `mg mail read` marks a
+  message read immediately, so a read-but-unhandled message is invisible to every
+  later unread check — and already prescribes act-then-mark plus an end-of-turn
+  check. **Prescribing it was not sufficient.** There was no detector, only an
+  instruction. The reconciliation is trivially computable — open issues minus
+  carried refs — and nothing computed it.
+
+  `pogo check-intake` and a pogod heartbeat runner (`internal/ghintake`) now do.
+  Both are **report-only**: neither files a work item nor comments on an issue,
+  because what an issue *is* (triage, duplicate, out of scope, a question) is a
+  judgement that stays with the coordinator. Sibling of `pogo check-teardown` at
+  the opposite end of the same workflow — that one catches a carrier that finished
+  while its issue stayed open, this one catches an issue that never got a carrier.
+  The intake end is the more dangerous: a teardown miss at least leaves a work item
+  behind to be found.
+
+  **The predicate is the `gh:` body marker, at any status including archived.**
+  Deliberately not the `gh-issue` tag — a carrier filed without the tag is still a
+  carrier, and treating it as absent produces a finding nobody can clear by doing
+  the right thing. Deliberately not a title match; pm-pogo's hand sweep noted that
+  distinction, and the marker is the state carrier the playbook defines. A ref
+  counts only on a **structural** line: one starting with `gh:`, outside
+  blockquotes and outside fenced code blocks. That is not pedantry — mg-039b's own
+  body quotes the marker syntax and cites #99 repeatedly, and a loose parse would
+  have let the ticket silence the positive control it was filed to produce.
+
+  **Both blind spots are named outcomes rather than silences, and they fail in
+  opposite directions.** A failed `gh issue list` yields no issues, which folded
+  into the scan reads as "no open issues, nothing uncarried, all clear" — the
+  detector reporting a clean bill of health precisely when it can see least, so an
+  unreadable repo is a finding. A carrier scan that examined **zero** work items
+  yields no carriers, which folded in reads as "every open issue is uncarried" — a
+  wall of findings that is entirely an artefact of the scan and would get the
+  detector muted before the run that matters, so it is reported as a **blind
+  scan**. One silently clean, one loudly wrong; identical consequence.
+
+  **Measured against real current state, and the number is zero.** 5 open issues
+  across `drellem2/pogo` and `drellem2/macguffin`, all 5 carried, 0 uncarried; a
+  carrier population of 29 distinct refs across 2 035 work items in all six
+  statuses. That is a fact about 2026-07-30, not a validation — which is why both
+  arms are pinned by a full-stack test against a real `mg` store: file a carrier
+  for #100 only and the check reports #99; file #99's carrier and the identical
+  scan goes quiet.
+
+  **Ambiguous short ids are resolved, not reported.** The first real run died on
+  `mg show mg-3119: ambiguous_id` — 4-hex short ids collide, and 12 pairs of
+  archived twins in different monthly partitions already share one. Aborting the
+  scan on it made the detector permanently blind on the only store it has, which
+  is strictly worse than the failure it was built to catch. The refusal is
+  resolvable (the error names the colliding paths; mg accepts `<id>@<partition>`),
+  so a collision is retried per partition and both twins' refs count. Coverage went
+  from 2 023 items with 24 unreadable to 2 035 with none. Anything still unreadable
+  is listed as a coverage gap but is **not** actionable alone: an item whose body
+  cannot be read is an item whose marker cannot be seen, so it can only cause a
+  *false* uncarried finding, never silence about a real one.
+
+  **Where it runs, and why not in the poller.** The poller holds the *sent* side of
+  the ledger, which is a genuine argument for putting the check there. Declined for
+  three reasons: the sent ledger is the **wrong population** (what matters is
+  whether a carrier exists for an open issue, not whether we mailed about it, and
+  GitHub's open-issue list is authoritative); the poller is a standalone utility in
+  another repo, deliberately kept a dumb transport; and decisively, it would make
+  the poller responsible for the coordinator's follow-through while giving it no
+  way to notice its own. pogod already hosts the sibling detectors and already has
+  the durable mail, condition annunciation, and escalation path this needs.
+
+  **Alarms the agent that can act.** Findings go to the **coordinator**, not
+  `pm-pogo` (the teardown detector's mailbox) and not `human` — that maildir
+  carries ~990 unread. The remedy is to file a carrier and dispatch triage, and the
+  coordinator is the only agent that does either. There is an added reason here:
+  the failure being detected *is* a coordinator failure, so this closes the loop on
+  the agent whose dropped mail created the gap.
+
+  **What happens if the coordinator is down** is stated rather than left implicit.
+  The notice does not evaporate: mg mail is a durable maildir, so it waits, and the
+  finding is recomputed from live state every interval regardless of who read what.
+  But a durable notice nobody acts on is still an uncarried issue, so once a
+  **single** issue has gone uncarried for `escalate_after` (4h — far shorter than
+  the teardown detector's 72h, because an uncarried issue is a reporter waiting
+  with no acknowledgement and no record anywhere) `human` is copied as well. The
+  detector does not need the coordinator alive to be useful, only to be sufficient.
+
+  **Rate-limited by condition, not by message.** A changed set of findings mails
+  immediately — a newly uncarried issue is news. An unchanged set stays quiet until
+  `renotify_after` (24h), so an issue uncarried for a week costs one mail a day
+  rather than one per 15-minute sample. Crossing the escalation threshold is itself
+  a change and mails at once, so a slow renotify interval cannot postpone
+  escalation; and escalation ages each issue separately, so a new finding cannot
+  reset an older one's clock — precisely the bug that would let the forgotten case
+  stay forgotten. A 30-minute grace window keeps the detector off the happy path:
+  the poller mails within ~60s of an issue being filed, so alarming inside that
+  window would fire on every new issue.
+
+  Config: `[gh_intake]` (`enabled`, `interval`, `grace`, `renotify_after`,
+  `notify_to`, `escalate_after`, `repos`). The watch list defaults to discovery
+  from the issue poller's own state directory
+  (`$POGO_HOME/gh-issues/seen-<owner>-<repo>.json`), so a repo added to the poller
+  is covered with no second edit to forget; it reads *state*, not the sent ledger,
+  so a stopped or wedged poller still yields a correct list. A missing `gh`
+  disarms the runner and raises the A13 condition `ghintake_not_armed` to the
+  intake mailbox — a separate notice from the teardown detector's on the same row,
+  because one root cause with two readers needs two notices or one reader learns
+  nothing. See `docs/CONFIGURATION.md` "The gh-issue intake detector".
+
+- **Shipped prompts are now checked against the real CLI surface, and the first
+  run found two more wrong invocations (mg-21b1).** `pogo check-prompts` extracts
+  every `mg …` / `pogo …` invocation the prompt corpus instructs and checks each
+  subcommand and flag against the accept-surface of the tool itself. It is the
+  newest of the `check-*` family and keeps their posture: reports, never acts.
+
+  It exists because three shipped prompts in one night each told their reader to
+  run something the CLI rejects, and **all three were found by someone RUNNING
+  the command — never by reading the prompt**. mg-159a said to omit `--template`
+  for a bare `task` item, which the closed routing map refuses with a 409 on the
+  *ordinary* dispatch. mg-4bb9 said `mg edit` has no append subcommand and to
+  mail the note instead, when `--append-body-file` exists and `mg edit --help`
+  *opens* by recommending it. mg-d8ea said `mg spend --by item --tag=<tag>`,
+  which exits with `unknown flag: --tag`. Each fixed separately, each found by
+  accident; nothing checked prompt prose against the tool it describes, so a
+  wrong invocation shipped and every reader inherited it with no reason to doubt
+  it. mg-4bb9 is the sharpest case and shows why reading cannot catch these: **a
+  confident false claim forecloses the `--help` that would correct it.** Silence
+  makes a reader look; a wrong answer stops them.
+
+  **It never runs the extracted commands.** The corpus contains
+  `mg archive --days=0`, `mg reopen <id>` and `pogo agent stop <name>`; a control
+  that executed its fixtures would destroy the store it runs in. The only process
+  it starts is `<binary> <path…> --help`, which cobra answers by returning
+  `flag.ErrHelp` before `ValidateArgs` and before any `PersistentPreRun` — so it
+  cannot reach a command's body whatever path precedes it. It verifies that a
+  flag *exists*, never that it works.
+
+  Four defect shapes, because the three fixtures are not all the same shape:
+  `unknown-flag` and `unknown-subcommand` (mg-d8ea), `false-absence` — the prompt
+  says a thing does not exist and it does (mg-4bb9) — and `bad-omission`, for a
+  flag the CLI refuses to default (mg-159a). The last cannot come from `--help`,
+  since cobra prints nothing about conditional requirement, so it is a small
+  registry with one entry that calls `agent.TemplateForType` — the same closed map
+  `handleSpawnPolecat` consults, not a second copy of it.
+
+  **What the first run found, on the whole 9-file corpus.** Three, of which
+  mg-d8ea was the only one already known:
+
+  - `pm/pm-template.md:531` — `mg spend --by item --tag=<tag>` (mg-d8ea, filed
+    and still unclaimed). Fixed here to `--by tag:<tag>`, which is the form that
+    gives one tag with its item breakdown.
+  - `pm/pm-template.md:535` — `mg list --tag=… --status=closed --since 7d`. **Two
+    faults in one line, neither previously reported**: `mg list` has no `--since`
+    flag, and `closed` is not one of its statuses (`done` is). This is the same
+    copy-pasteable block as mg-d8ea, three lines below it, so a PM regenerating
+    the roadmap hit two failures in a row.
+  - `crew/doctor.md:78` — `pogo service install && pogo service start`. There is
+    no `pogo service start`; the install loads the unit and health-checks the
+    daemon, so there is nothing to start afterwards. This one is in the *"pogod
+    not running"* row of the doctor's Common Issues table — the line it reaches
+    for when the daemon is already down.
+
+  The ticket predicted "a fourth is a matter of time". There were two, and the
+  check found them the first time it was pointed at the corpus.
+
+  **Both arms are proved on text that actually shipped.** A check that has only
+  been seen to pass on the current prompts proves nothing — the current prompts
+  are the population it was written against. So each of the three pre-fix
+  defects is pinned as a fixture from git and must be flagged, against the
+  hand-built surface *and* against the real discovered one; and each corrected
+  form must be clean. Four false-positive sources were decided deliberately
+  rather than left to chance:
+
+  - **template variables** are rendered, not stripped, because
+    `pogo agent spawn-{{.Worker}}` resolves to a real subcommand and stripping
+    invents a phantom one. Control actions are deleted so *both* arms of
+    `{{if eq .Provider "claude"}}` stay in scope; evaluating with one provider
+    would leave the other permanently unchecked.
+  - **placeholders** (`<id>`, `$VAR`) are never validated, and a placeholder
+    standing where a command name belongs skips the whole invocation.
+  - **quoted-for-retraction** claims are suppressed, by an explicit
+    `<!-- promptcli:retracted -->` marker or by past-tense phrasing. mg-4bb9's own
+    fix necessarily contains the false claim as a quotation, and an
+    absence-predicate that scores a careful correction worse than the sloppy
+    original teaches people to delete the explanation. A *prohibition* is not a
+    denial either: polecat-triage.md's "no `gh pr create`, no `pogo refinery
+    submit`" is a list of things not to do, and every one of them exists.
+  - **non-pogo commands** (`git`, `gh`, `jq`) are out of scope: not our tools, not
+    our surfaces to pin.
+
+  **The surface is discovered from a binary built from the revision under check,
+  never the one on PATH.** That is load-bearing, and it was nearly a bug in this
+  change: while it was being written the installed `pogo` had no `check-intake`
+  and the source three commits back did, so a PATH-based check would have
+  reported `mayor.md`'s *correct* instruction as a defect. Same trap as reasoning
+  about a merged control the running daemon does not carry.
+
+  **Not checked, deliberately and stated rather than implied.** Flag *values* are
+  out of scope — `--status=closed` looks legal and is refused, and finding that
+  out means running the command, which is the one thing this will not do. That
+  fault was caught here by hand while verifying the `--since` finding, not by the
+  check. A flag named with no command around it has nothing to be checked
+  against. And a misspelled subcommand of a *runnable* group (`pogo schedule`,
+  which also takes an `<agent>` positional) is not reported, because a false
+  positive on a correct instruction is the more expensive error. Where `mg` is
+  not installed the report says which half of the corpus went unjudged rather
+  than printing an all-clear.
+
+- **`pogo status --assignee` answers "what is waiting on me" in one command
+  (mg-589d).** The dashboard's work-item section is the part that grows without
+  bound — the dispatch-gated backlog alone is a dozen-plus items — so the thing
+  most often wanted was the thing hardest to see. `pogo status --assignee=human`
+  now shows just your queue; `--assignee=none` shows the items nobody has been
+  given. Matching is **exact and case-insensitive**, not substring: the values
+  in use are `human`, `parked` and empty, and a substring match on those buys
+  nothing and surprises. `human` also finds items assigned to your OS username,
+  because that is how `mg` renders them.
+
+  The filter reaches **one section of three**, and the output says so rather
+  than leaving it to be inferred: agents and refinery merge requests carry no
+  assignee, so they are listed in full, under `=== Agents (unfiltered) ===` and
+  `=== Refinery (unfiltered) ===`, with a `Filter:` line above them naming the
+  scope. A filter that quietly applied to one section would make a narrowed
+  work-item list next to a busy fleet read as an idle fleet. When nothing
+  matches, the section says `0 matching assignee=<value>` — a count, not
+  `No work items.`, because a filter that selected nothing is a different fact
+  from an empty backlog.
+
+  `--json` carries the filter as a `filter` object (`assignee`, `applies_to`,
+  `matched`) and keeps `work_items` present-but-empty when nothing matched, so
+  a consumer never has to know a filter was applied to parse the result.
+  `--live` applies it per refresh. Without the flag every byte of both the text
+  frame and the JSON object is what it was before — asserted, not assumed.
+
+  Filtering happens on the rendered result, not by pushing `--assignee` down
+  into `mg list`: the dashboard fetches exactly the same bytes with or without
+  the flag, and the matching rules above are stated here rather than inherited
+  from whatever `mg` happens to do.
+
+- **The shipped prompts now teach which hold instrument fits which release
+  condition, so a timed hold stops being expressed with the one instrument that
+  structurally cannot be released (mg-61f4).** Three work items were held for a
+  03:00 restart with `--assignee=parked` plus an "unpark immediately after" note
+  in the title. `parked` is `config.IsDispatchGated` — one predicate with two
+  enforcement points — so it blocks **watching** as well as dispatch: pogod
+  cannot see a parked item at all, and **nothing scheduled can ever release a
+  park.** Two of the three were high priority. They were released only because
+  crew agents independently boot-scanned `mg list` after the restart and one of
+  them acted.
+
+  The mechanism was not missing. `mg snooze` had shipped, and its driver — the
+  `mg-schedule-sweep` schedule running `mg schedule` every 15 minutes — was
+  live. What was missing was any statement that it exists: `snooze` appeared in
+  **zero** shipped prompts, against seven mentions of `parked` in `mayor.md`
+  alone. So three agents did not weigh `snooze` against `parked` and choose
+  wrong; nothing had ever told any of them `snooze` was there. That measurement
+  is what makes this a prompt change rather than a process reminder, and it
+  applies to every consumer, not just this box.
+
+  `internal/agent/prompts/mayor.md`, `prompts/pm/pm-template.md`, and
+  `prompts/crew/doctor.md` now carry the five-row instrument table from
+  architect's mg-3ebe design: a timestamp or duration → `mg snooze --until` /
+  `--for`; another item completing → `--depends`; a named agent → the
+  `blocked:<agent>` shape from mg-6fb0; a person's decision → `human`; not
+  currently work → `parked`. The top two rows are the only holds anything will
+  ever open, and the table says so.
+
+  Three points in it are load-bearing rather than decorative:
+
+  - **`human` and `parked` stay separate rows.** Collapsing them is the mg-4ad1
+    defect — an operational hold wearing `human` promotes itself into a decision
+    Daniel was never asked to make.
+  - **`blocked:<agent>` is the row nearest the misuse**, and `mayor.md` says so:
+    mg-78d2 was *"mayor owns prompt content with pm-pogo as SME"*, precisely a
+    named-agent hold, and it was parked instead — keeping the gate and discarding
+    the name of whoever had to act.
+  - **That `parked` and `human` have no driver is correct, not a gap.** pogod's
+    blindness to a parked item is the same predicate that stops dispatch, so
+    anything given sight of parked items in order to release them could also
+    **dispatch** them. Both rejected mechanisms are named as rejected so they are
+    not re-proposed as improvements: no park-sweeper, and no warning that sniffs
+    "until"/"after" in a title — a park is legitimately titled with temporal
+    words all the time, so that guard rots on the next phrasing and fires on the
+    rows that are already right.
+
+  `mayor.md` also states what became of the undesigned crew boot-scan that
+  released the three parks. It is **ACCEPTED, with its scope narrowed to
+  indefinite holds only**: once every timed hold is a `snooze` or a `depends`,
+  the `*/15` sweep releases it and nothing with a deadline depends on a
+  boot-scan at all. What still depends on it is the three indefinite rows, which
+  have no release time, so the redundancy degrading cannot make them late. The
+  fix was removing the dependency, not watching it better — and the boot-scan
+  must never again be the release path for a hold that has a deadline.
+
+  The sentence that was already shipped and unread is kept and pointed at as the
+  lesson: *"parking buys silence, not disappearance. Say why in the body, since
+  nothing ages a parked item back into the alert channel."*
+
+  **Scope, stated because both directions are a real error.** The six worker
+  templates under `prompts/templates/` are deliberately untouched: none mentions
+  `mg new`, `mg edit`, or `--assignee` as an affordance, so a worker files no
+  holds and a table there is noise. The three edited prompts all do file holds —
+  the coordinator files them; `pm-template.md` had no hold guidance at all — zero
+  mentions of `parked`, `snooze`, `blocked:` or `depends:` — while parked
+  PM-owned tickets exist; and a diagnostic hold is characteristically temporal
+  ("recheck after the next boot"), which is exactly the misuse. Which *agent*
+  parked a given item is not claimed anywhere here: `creator` is the unix user
+  and no field records who set an assignee (mg-ddf4), so an earlier draft's
+  per-agent count was withdrawn at SME review as unsupportable by the store.
+  `prompt_test.go` pins the table in the three, and pins its **absence** from the
+  six along with the `--assignee=` affordance whose arrival would mean the scope
+  needs revisiting.
+
+  **No behaviour change** — `mg snooze`, `mg schedule`, and the assignee gate are
+  all untouched. Consumers on a hand-edited `mayor.md` receive this in
+  `mayor.md.dist` until that canonical is reconciled; mg-8bcb tracks the local
+  reconcile.
+
+- **The dispatch gate learns one SHAPE — `assignee: blocked:<agent>` — so an item
+  can say *who* it is waiting on without giving up the gate (mg-6fb0).**
+  `blocked:mayor`, `blocked:daniel`, `blocked:pm-anyone` gate dispatch exactly as
+  `human` and `parked` do, and additionally record who the item waits on, so
+  `mg list --assignee=blocked:daniel` is an answerable question in the same way
+  `--assignee=parked` became one under mg-a3a2. Both enforcement points read it
+  through the one predicate they already share (`config.IsDispatchGated`):
+  stall-watch stops nudging about it, and `pogo agent spawn-polecat` refuses with
+  409 — naming the agent to chase, because "blocked on mayor" is not resolved by
+  the generic "done by hand or unparked".
+
+  **The gap was narrower than the ticket's diagnosis, and the ruling reversed
+  half of it.** The filing argued `assignee` should stop gating and the signal
+  move elsewhere. It doesn't, and it didn't: mg-a3a2 was already the
+  make-it-declared move (`human` and `parked` are two readable sentinels, each
+  separately queryable), and the denylist is deliberate — an allowlist of
+  dispatchable agents would have to enumerate the roster and would stop watching
+  work the day a new agent is hired, which is mg-4bd4's defect exactly. What was
+  actually missing is that **blocked-on-a-NAMED-agent could not be said at all**.
+  All three recurrences (mg-bb43, mg-779b, mg-bf5e) set an agent name and got no
+  gate — which is *correct*: an item merely owned by mayor is dispatchable. The
+  filer's only options were `assignee=<agent>` (keeps who, loses the gate) or
+  `assignee=parked` (keeps the gate, loses who).
+
+  **A shape, not a longer list, and that distinction is the whole fix.**
+  `blocked:` matches structurally, so every agent name that will ever exist gates
+  with no config line and no code change — mg-4bd4 cannot recur through this
+  door. It is also independent of `non_dispatchable_assignees`: a deployment that
+  replaces the vocabulary still gates `blocked:mayor`, because the rule is about
+  how the field is written rather than which values are listed. A bare `blocked:`
+  still gates (the author wrote "blocked"; declining on a truncated name would
+  fail unsafe) and the refusal says it names nobody rather than inventing an
+  agent.
+
+  **Additive, and the sequencing hazard was measured before the change, not
+  after.** Zero of the eight then-`human` items carried a `blocked-on-*` tag, so
+  anything that *stopped* reading `human` would have stranded all eight as
+  dispatchable. `human` and `parked` read exactly as before, nothing was
+  backfilled, and there is no window in which the queue is unguarded.
+
+- **Both paths now say when an item declares a block the gate cannot hear
+  (mg-6fb0).**
+  Agents had already invented a channel for "blocked on X" before the field could
+  express it — `blocked-on-daniel`, `blocked-on-daniel-confirm`,
+  `blocked-on-redeploy` exist in the store (mg-cf48, mg-e925, mg-a96c) and
+  `mg archive` was taught to respect them (mg-3c53). Those tags stay
+  human-facing markers and are **never** consulted for gating: moving the gate
+  onto tags would split it across two channels and forfeit `mg list --assignee=…`
+  as the single answerable question. Instead, when an item declares a block in
+  its tags *while its assignee leaves it dispatchable*, stall-watch appends
+  `[block-intent] mg-xxxx is tagged blocked-on-daniel but its assignee does not
+  gate dispatch — if it is genuinely waiting, set --assignee=blocked:daniel` to
+  the nudge it was already sending (plus `block_intent_mismatch_ids` in the
+  event), and the dispatch gate logs the same contradiction and **dispatches
+  anyway**. Advice, not a gate.
+
+  **It fires on the contradiction, never on ownership.** The ticket asked for a
+  warning on any named assignee on an `available` item; that would fire on nearly
+  the whole queue, because `pm-template` files every ticket with
+  `--assignee=pm-<name>` and an owned item is legitimately dispatchable. What
+  separates "owner" from "intended block" is that the author said so — and today
+  they say it in a tag. mg-a96c carries `assignee: pm-pogo` with
+  `blocked-on-daniel-confirm` and is the live positive control. A
+  `blocked-on-mg-1234` tag names another work item, so the advice there points at
+  `mg new --depends`, not at the assignee field.
+
+  **Positive control both ways, in one test each.** The shape is demonstrated
+  gating at both enforcement points and the advisory demonstrated firing, beside
+  the cases that must stay quiet — ordinary ownership, `human`, `parked`, and
+  `blocked:<agent>` itself, since an interim check that flagged the repair it
+  recommends would be worse than no check.
+
+  **Population report, named.** At the time of the change **0 of the 15
+  `available` items carried a non-gating assignee** — the population is 8 `human`
+  and 7 `parked`, and no other value appears. The three cited instances had all
+  since left `available` (mg-bb43 done, mg-779b re-set to `parked`, mg-bf5e
+  archived still holding `assignee: mayor`). So the silent backlog is empty
+  today, which is what makes "additive, backfill nothing" free rather than a
+  deferred migration — and is why the interim check earns its place: the
+  measurement says the next instance has not been filed yet, not that the shape
+  stopped recurring.
+
+- **`pogo doctor --check` now measures auto-memory health on THREE axes, not
+  just index SIZE — and one of the two new axes is one the size check read
+  BACKWARDS (mg-cb71).**
+  A memory store fails in three ways. All three are invisible from inside the
+  session that has them, and only the first was measured:
+
+  | failure | why it is invisible | measured before |
+  |---|---|---|
+  | over-cap truncation | the dropped entries never arrive | yes |
+  | an unindexed note | nothing points at it | **no** |
+  | a stale hook | it reads as current | **no** |
+
+  The middle one was not merely unmeasured. A size check reads it as an
+  **improvement**, because dropping a hook makes `MEMORY.md` smaller — the
+  instrument moved the wrong way at the exact moment a note became unrecallable.
+
+  **`memory index parity`** asserts that every `*.md` in a memory dir is
+  referenced by the index beside it. Measured across all 16 memory dirs on the
+  development box: **16 unreferenced notes in 3 dirs**, the other 13 at exact
+  parity. Written, costing disk, unreachable by recall. One concrete cost found
+  while measuring: a 1352-byte note describing `mayor.md` git drift sat
+  unrecallable on disk while that exact drift was being re-diagnosed from
+  scratch.
+
+  Shipping this as a bare count would have made it unusable, because **deliberate
+  non-indexing is a correct action that produces a parity "defect"** — two of the
+  16 were a hook dropped on purpose (it asserted an open review for an
+  since-archived item) and a 127KB working scratch queue that should never have a
+  hook. A note opts out with `index: none` in its frontmatter; opt-outs are
+  reported separately and never counted as defects, so a reader can tell a clean
+  store from one that silenced itself.
+
+  **`memory index staleness`** resolves the work-item IDs named in tense-bearing
+  index lines and compares. Of 6 candidate lines on the box, the 2 genuinely
+  stale ones now fire — a hook still presenting a **shelved** item as "blocked",
+  and another still presenting an **archived** audit as "Piece 2 blocked".
+
+  The predicate is **consistency, not keywords**, because a keyword filter gets
+  the third resolvable line wrong: `(superseded) … RESOLVED … mg-ba0b done.`
+  names an archived item and is *correctly maintained*. Flagging it would be
+  worse than silence — the natural response to a "stale" verdict is deleting the
+  hook, so a false positive destroys a correct memory. Hence four suppressions,
+  each calibrated against real lines: the line must not record its own
+  resolution; `OPEN:` keeps its colon (a bare `open` matches filenames like
+  `project_..._open.md`); word boundaries stop `unblocked` matching `blocked`,
+  which is the opposite claim; and the assertion must sit within 60 characters of
+  the ID — measured at 13 and 17 for the stale pair versus 109 and 222 for
+  generic guidance whose ID is a trailing citation.
+
+  **An unresolvable ID is silent, never stale.** Short-ID lookup genuinely fails
+  on a real box — `mg show mg-3119` is ambiguous across two archived twins (exit
+  4) and `mg-zzzz` is not found (exit 3) — so an ambiguous or missing result
+  suppresses its whole line.
+
+  **A blind resolver is no longer reported as health.** The required positive
+  control caught this check shipping the very bug it was written to prevent:
+  macOS ships `/usr/bin/mg`, an unrelated micro-emacs clone, so a PATH check
+  alone said "available" while every lookup failed, no hook fired, and the axis
+  passed clean. An availability probe cannot catch that — the wrong binary *is*
+  available. The honest signal is the hit rate, so lookups attempted with zero
+  resolved now warns `cannot check` and says so explicitly.
+
+  Both checks are **detect-only**, like the size axis (mg-15c0): auto-appending
+  hooks would index a working scratch queue, and auto-deleting a "stale" hook is
+  the destructive move the suppressions exist to avoid. Both walk the same
+  `memcheck.Locate` population as the size check, so they cover
+  `~/.pogo/agents/*/*/memory` and every harness glob from the provider registry
+  rather than a hard-coded dotdir (mg-5a06).
+
+- **`pogo check-acks --populations` splits an ack deficit by the MECHANISM that
+  produced it — and the measurement rejects both repairs the ticket arrived with
+  (mg-ddf7).**
+  mg-ddf7 required, in order: fix the denominator to count fires **delivered**
+  rather than **due**, re-measure the three candidate deficit populations against
+  the corrected count, and only then design a fix — validated against **storm**
+  data, not calm. Full record in
+  [`docs/investigations/ack-deficit-populations-2026-07-30.md`](docs/investigations/ack-deficit-populations-2026-07-30.md).
+
+  **The denominator already counted deliveries.** `scheduler.Tick` collapses every
+  missed cron period into a single fire and calls `recordDeliveryLocked` once, so
+  across this fleet's log 60 830 due periods produced 54 021 deliveries — 6 809
+  dues, 11%, already collapsed. Landing "count deliveries" is a no-op, and the
+  risk is specific: an editor lands it, sees the number not move, and concludes
+  the mechanism is not understood. The proof is now in `internal/ackwatch`.
+
+  **The three populations, measured over the token era** (4 378 delivered, 3 475
+  completed, deficit 903): **batched 815 (90.3%), token-less 0 (0.0%), boundary 88
+  (9.7%), unattributed 0.** The split is exhaustive over every window tried.
+  Architect's token-less population is **refuted as a live mechanism** — all
+  15 741 of them predate completion tokens, the last one ten minutes (one cadence
+  period) before the first token-carrying fire. mg-a754 shipping the token closed
+  it; the instrument still distinguishes the two cases at runtime, because a
+  token-less fire *after* that boundary would be a scheduler defect no
+  token-lifetime change would touch.
+
+  **Populations 1 and 3 turned out to be one quantity, and it is the whole
+  metric.** For every schedule, exactly:
+
+      completed/delivered  ==  1/mean_attention_gap  -  outstanding/delivered
+
+  Residual **0.000000000000 across all 114 schedules** — algebra, not a fit. So
+  the completion ratio *is* the reciprocal of the agent's turn length in cadence
+  periods, and there is **no residual term for diligence to live in**. An agent
+  whose turns run longer than its cadence cannot score 100% however diligent: on
+  the 2026-07-29 storm night `pa` acked every token it was handed and read 83%,
+  nine fires having landed in one turn with eight tokens superseded before it
+  could look. 2fcc's correction is confirmed (r = **−0.818** against the attention
+  gap, +0.242 against traffic) and the paraphrase it corrected is refuted — and
+  the **mayor**, the busiest agent on the box, holds the two worst rows while
+  being permanently `skipped_no_peers` because it is alone on its cadence.
+
+  **Storm validation, which is what the ticket insisted on.** In **calm** the
+  metric works: pm-pogo at 50% against a 100% peer median, 50 points clear, and
+  the detector fires correctly. In **storm** it inverts: the crew compresses into
+  an 11-point band and `pa` (healthy) and `pm-pogo` are indistinguishable at
+  83%/83%, while innocent short-lived polecats pin at 0–12% and are silenced only
+  by `MinFires` — a gate that knows nothing about the mechanism. `c76a` (67%,
+  below the floor) escaped a false positive solely because `ScaleBand` left it a
+  peer short. The detection cushion for an innocent agent shrinks from 25 points
+  to 11 exactly as the population inside it grows from 5 schedules to ~40.
+
+  **Both candidate repairs rejected, with reasons recorded in ackwatch's own
+  notes** rather than only in the ticket. Excluding superseded fires from the
+  denominator is **circular** — a fire is superseded precisely when nothing acked
+  it in time — leaving `completed/(completed+outstanding)`, a function of the ack
+  count alone: any schedule with 20 acks reads ≥95% whether the agent is perfect
+  or wedged, and pm-pogo's calm finding goes from a 50-point gap to 1. That
+  substitutes mg-7254's failure (pinned HEALTHY, false calm) for this one (pinned
+  UNHEALTHY, false noise); both end with the detector ignored. Raising `Floor` or
+  `MinGap` is rejected for the same reason: it converts noise into silence without
+  restoring information. Pinned by
+  `TestSplit_ExcludingBatchedFires_IsCircular_AndPinsTheSignalHealthy`.
+
+  **Designed and deliberately not landed:** judge the ack **interval in time**
+  rather than the ratio in fires. Since `rate == cadence / mean-ack-interval`, the
+  ratio is cadence-normalised by construction and saturates; the interval does
+  not. That un-pins the signal instead of moving the threshold it is read at, and
+  it incidentally frees an agent alone on its cadence from being unjudgeable.
+  Swapping the judged statistic changes what the detector alerts on, so it gets
+  its own ticket and its own storm validation.
+
+  **Reads events.log, not the counters, and that is load-bearing.** A
+  re-registration zeroes a schedule's counters and the nightly redeploy guarantees
+  one, so a deficit accumulated during a storm is erased by the restart that
+  follows it — `pogo schedule completion` read 96.6% hours after the storm above,
+  with pm-pogo's deficit zeroed out of existence. Every reading off the live table
+  is a quiet-afternoon reading, which is the one regime in which this metric was
+  never wrong.
+
+- **The ack-watch detector now records the samples where it correctly found
+  nothing (mg-ddf7).**
+  `Watcher.sample` emitted `ack_watch_error`, `ack_watch_suppressed` and
+  `ack_watch_fired` — and nothing at all on the found-nothing path, so a silent
+  correct outcome and a control that is not running were the same observation. Not
+  hypothetical: on the 2026-07-29 storm night silence was the right answer and
+  this detector would have produced it, with nothing anywhere recording that it
+  considered the burst and declined; the only evidence the design worked was that
+  two agents happened to notice, which is not a property of the system. The live
+  60 MB event log contained **zero** `ack_watch_*` events of any kind.
+
+  It now emits **`ack_watch_clear`** carrying `scanned`, `eligible` and the four
+  skip reasons, because `eligible 3 of 41` and `eligible 41 of 41` are both
+  no-findings and only the second is a clean bill of health. On every clear sample
+  rather than every transition: the interval is coarse (30m), the event is one
+  line, and a transition-only emit would go quiet during exactly the long calm in
+  which a reader most needs to know the control is still alive. Kept distinct from
+  `ack_watch_suppressed` — "we declined to look" and "we looked and found nothing"
+  are the two observations this package exists to keep apart.
+
+### Changed
+
+- **The coordinator stops shadowing pogod's first-start recovery (mg-eb54).**
+  Since mg-feb3 the daemon has recovered a polecat whose kickoff nudge never
+  took: it watches for the hard started-signal (the work item leaving
+  `available/`) and re-delivers a bare submit terminator, 3 attempts 25s apart —
+  a ~75s budget. The coordinator prompt nevertheless still carried the manual
+  workaround that mechanism replaced: nudge `"1"` at ~30-60s if the item is
+  still unclaimed. That is *inside* the daemon's window, and it is not a
+  harmless belt-and-braces. The manual payload is a stray `1` where the daemon
+  deliberately sends a bare CR, so it lands as a character in an agent that may
+  be mid-recovery; and a polecat that claims after a manual nudge tells you
+  nothing about whether the daemon works, so the workaround kept its own
+  evidence from ever being collected. The prompt now names the budget, tells the
+  coordinator to stay out of it, and defines what to do when it is spent.
+
+- **The manual kick survives as an exception path, because the daemon is not a
+  guarantee (mg-eb54).** Retiring the routine nudge is not the same as deleting
+  the fallback, and pogod's own event log says why: across 75 real polecats that
+  needed this recovery, 72 claimed after the first CR and one after the second,
+  but **two spent the whole 3-attempt budget without starting** — one was
+  eventually rescued nine minutes later by its own mail-check schedule fire, the
+  other never claimed at all. The watcher also declines outright in three named
+  cases it announces with an `agent_unwatched` event or a log line: no start
+  verifier wired daemon-wide, a spawn carrying neither `--id` nor a provider
+  prompt-ready marker, and an unreadable mg state (where it stops rather than
+  renudging blind — `internal/agent/startverify.go` names the coordinator's own
+  check as the fallback for exactly that case). The prompt now enumerates all
+  three, and treats *still unclaimed at ~90s* as a reportable finding rather
+  than something to paper over.
+
+- **The ~75s figure is pinned to the constants that produce it (mg-eb54).**
+  `TestRenudgeBudget_PromptMatchesConstants` derives the prompt's stated budget
+  from `DefaultStartVerifyDelay` × `DefaultStartVerifyMaxAttempts`, so tuning
+  either knob fails in the package being edited instead of silently leaving the
+  coordinator waiting out a window that already closed — or nudging into one
+  that has not. A companion test proves the ratchet fires, on the drifted number
+  and on a reintroduction of the retired ~30-60s wording, and that the corrected
+  prose still passes.
+
+- **No `MAX-2` concurrent-spawn cap was removed, because none was ever shipped
+  (mg-eb54).** The cap this work was filed to retire does not appear in any
+  prompt in the tree, in any historical revision of the coordinator prompt, or
+  in the deployed copies under `~/.pogo/agents/`. It existed as a runtime
+  operating convention held in a PM agent's memory file. Retiring it is a
+  fleet-state change, not a repository one, and nothing here does it.
+
+### Removed
+
+- **The refinery's protected-path gate is removed, premise and all (mg-8cfe,
+  reverting mg-6c4b).** `internal/refinery/protectedpath_gate.go`, its call site
+  in `attemptMerge`, the `.protected-paths` list, the `protected-path-check`
+  stage and the gate's tests are gone. A branch touching
+  `internal/agent/prompts/**` or `internal/agent/templates/**` merges like any
+  other branch.
+
+  **The premise was never checked with the repo owner.** The gate was built to
+  enforce a "red line" on shipped prompts and templates that existed only as
+  prose in the bodies of successive work items, reasoned from by three agents
+  over a day and never confirmed. Asked directly, Daniel's answer was that there
+  is no such red line — *"Remove the gate this is an overcorrection"*, and
+  *"There is absolutely no red line for prompt file edits"* (2026-07-29). The
+  mechanism was sound; the fact it enforced was not one.
+
+  **Removed rather than softened, deliberately.** No warning mode, no allowlist,
+  no label-based bypass. What was called an overcorrection is the mechanism, not
+  its strictness setting, and a weakened gate is still the thing that was asked
+  to go.
+
+  **What replaces it is ownership, not enforcement.** Prompt and template edits
+  are owned by the coordinator (`mayor`) in conjunction with `pm-pogo` as pogo
+  SME. That is a routing rule about who decides, held by the people who decide,
+  not a check at the write boundary — so the answer to "what stops the next
+  unreviewed prompt edit" is a named owner rather than a refusal, and the
+  question was answered rather than abandoned.
+
+  Timing, because it decides whether the gate ever refused anything: it merged
+  as `47b5d48` while the running pogod was still on `023fab5`, so it was code on
+  `main` that no live process had loaded, and the removal was cut to land before
+  the redeploy that would have loaded it. `v0.7.0`'s changelog entry for the gate
+  is left standing as released history rather than rewritten.
+
+  `scripts/mg-scope-guard.sh` is untouched — it is a separate, unwired, opt-in
+  per-task mechanism.
+
+### Fixed
+
+- **The prompt-ready timeout log names the alternates, so a stale binary and a
+  non-matching alternate stop looking identical (mg-01d3).** When the readiness
+  gate times out, `NudgeWithModeCorrelated` logged the primary
+  `PromptReadySentinel` and nothing else — never `PromptReadyAlternates`. The
+  message therefore under-determined the cause across two repairs that are
+  **opposites**: a binary predating the alternates entirely needs a redeploy and
+  has a perfectly good matcher, while a binary whose alternates are present but
+  not matching needs the matcher fixed and gains nothing from a redeploy. One
+  host logged the line 299 times in a day with no way to tell which it was, and
+  a diagnostic that cannot separate "your build is old" from "your logic is
+  wrong" sends the operator to the wrong repair. The message now carries the
+  alternates by value alongside the sentinel.
+
+  The alternates are printed as a **list, not a description**, so an empty one
+  renders as `[]` rather than vanishing from the message — "no alternates
+  configured" is precisely the stale-binary signature, and a fix that only
+  printed populated lists would have left that case reading exactly as it did
+  before. Both cases are pinned by tests, including the empty-list control.
+
+  Diagnostics only: the matching logic, the sentinel set and the timeout are
+  untouched, and the tests assert the gate still times out and still delivers
+  the nudge best-effort. The readiness gate itself remains drellem2/pogo#91.
+
+- **`pogo gc` no longer forgets restart-surviving polecats (mg-1403).** The
+  command built its do-not-touch set from pogod's `/agents` alone — the
+  in-memory registry, which is **empty after a pogod restart, permanently**,
+  because it has no adopt/reattach path. So `pogo gc --apply` run after a
+  restart would remove the worktree (and delete the branch) of a polecat that
+  was still running: mg-0130's defect, which was fixed in pogod's own sweep,
+  surviving one caller over. The live set now unions the persisted polecat
+  witness exactly as pogod's sweep does, so a polecat that outlived the pogod
+  that spawned it stays protected. The population at risk was every polecat in
+  its normal end state — ticket `done`, process still alive awaiting the mayor's
+  stop — and worktree removal has no merge gate, so the live set was the only
+  guard it had.
+
+  The failure was also **silent**: `gc` warned when pogod was *unreachable*, but
+  a restarted pogod answers perfectly well, with an amnesiac registry. Polecats
+  protected by the witness alone are now named in the output, and if the witness
+  file is on disk but unreadable, `gc` refuses to sweep rather than read it as an
+  empty fleet.
+
+- **The live-polecat set has one definition instead of one per caller
+  (mg-1403).** It moved to `agent.LivePolecatSet`, which pogod's sweep and
+  `pogo gc` both call. Two independent defects in one gate (mg-0130, then this)
+  is an argument about the gate's shape rather than its key, and a per-caller
+  copy of "who is alive" is what let the second one exist.
+
+- **The coordinator's shipped prompt stops telling it to make a dispatch the
+  daemon refuses (mg-159a).** `internal/agent/prompts/mayor.md`'s step-2 type
+  table said an unmapped type — "anything else (default `task`)" — gets the
+  build worker with `--template` omitted. mg-9a04 moved that routing map into Go
+  and **closed** it: an unmapped type selects no template and the spawn is
+  refused with a 409. `task` is the default type and by far the most common, so
+  the prompt was wrong about the *ordinary* dispatch, not an edge case — a
+  coordinator following its own instructions gets a 409 on nearly everything it
+  sends, and has to diagnose the contradiction between its prompt and the daemon
+  before it can dispatch at all.
+
+  mg-9a04 left the prose in place on the belief that editing shipped prompts was
+  Daniel-gated, and promised a follow-up that was never filed. The gate did not
+  exist (mg-8cfe) and was removed at `78e7ab2`, so the false table shipped
+  unticketed until now.
+
+  The table's third row now names the refusal and the flag that gets past it
+  (`--template=polecat`), the step-2 spawn snippet carries `--template` instead
+  of omitting it, and the surrounding routing doctrine — route on the `type`
+  marker, never on what the ticket looks like, because design→build is silent
+  and lands code while build→architect is loud and harmless — is unchanged; it
+  is the reason the map is closed. `prompt_test.go`'s pin on the old row is
+  **updated, not deleted**: it now asserts the refusal wording and fails if the
+  pre-mg-9a04 claim returns.
+
+  **No behaviour change.** The Go map was right; only the prose was wrong.
+  `docs/customizing.md` already described the closed map correctly, and a sweep
+  of `internal/agent/prompts/**` found no other statement that an unmapped or
+  default type falls back to the build worker.
+
+- **stall-watch's repeat suppressor is keyed per ITEM, not per category, so a
+  deliberately-held item stops re-notifying forever (mg-1693).** `tryFire` keyed
+  its cooldown map on `lastNudge[category]` — the alert *kind*, not the item. So
+  the cooldown suppressed repeats of a category of alert rather than repeats
+  about a given item, and nothing recorded that the coordinator had already seen
+  an item and decided to wait.
+
+  **Measured on the live host, post-mg-7254 boundary (2026-07-30T02:06:05Z):**
+  87 `stall_watch_fired` events carrying **212 item-notices across 29 items** —
+  `mg-0e24` 27, `mg-61f4` 22, `mg-7c95` 22, `mg-f766` 21. (The ticket's earlier
+  count, 154 across 27, was the same window measured four hours earlier; it kept
+  growing while the ticket sat.) All are items mayor was holding on purpose at
+  its five-polecat cap. This is the wake traffic mayor had been reporting all
+  night.
+
+  **The detection was correct in every one of those 212 notices**, and that is
+  the load-bearing part of the diagnosis. It presents as a false-positive
+  problem, so the natural repair is to make detection stricter — which would
+  have suppressed true positives while leaving the mechanism in place. A correct
+  detector with a broken repeat-suppressor is indistinguishable from an
+  over-firing detector unless you count *per item*. Detection is unchanged here;
+  not one item that fired before will stop being detected.
+
+  The same key broke it in the other direction too, which was never in the noise
+  complaint because a miss is silent: a genuinely **new** item arriving during a
+  held item's cooldown was swallowed by that item's timer.
+
+  **The fix.** The cooldown map is keyed on the `(category, item)` pair and the
+  gap escalates: the first notice about an item is immediate, each repeat about
+  that same item waits twice as long as the last — 3m, 6m, 12m, 24m… — ceilinged
+  at a new `repeat_backoff_cap` (default 4h). Each nudge names only the items
+  actually due, and a heartbeat tick on which every offending item is still
+  inside its own backoff sends nothing at all. Over the measured window a held
+  item now draws 7 notices instead of ~86.
+
+  `unread_mail` is deliberately left on the flat per-category cooldown: it is a
+  single aggregate condition with no item identity to key on.
+
+  **Backoff rather than one-and-done**, which the ticket asked be decided
+  explicitly rather than by default. Never re-notifying risks a genuinely
+  forgotten item going quiet forever; the doubling keeps that safety net — a
+  held item settles to about one notice per 4h — while removing the training
+  effect, which is the cost that actually matters. A coordinator that has seen
+  `mg-61f4` twenty-one times learns the wake means nothing, and the twenty-second
+  one, about genuinely neglected work, reads identically. Repeats are now marked
+  `[repeat] mg-61f4 (notice #4) — backing off…` in the message, so a re-raise is
+  not textually identical to a first notice. A coordinator-clearable
+  already-notified set was considered and declined: it adds a command and a
+  failure mode where the set is never cleared, to buy what the cap provides.
+
+  **Made countable.** `stall_watch_fired` now carries `repeat_counts` (item →
+  notice number), `backoff_suppressed_ids`/`backoff_suppressed_count`, and
+  `next_backoff`. The defect survived a night because the event recorded fires
+  but never counted them per item; a fix that was equally uncountable would only
+  have moved the blind spot. `docs/event-log.md` carries the `jq` recipe.
+
+  Item state is pruned when an item leaves `available/`, which bounds the map and
+  makes a claimed-then-released item read as a fresh event rather than inheriting
+  the backoff it had accumulated. State is in-process, so a pogod restart
+  re-notifies each held item once — deliberate: a restart is also when the
+  coordinator's own picture of what it was holding is gone.
+
+  **The design doc that argued this could not happen is corrected, not quietly
+  patched.** `priority-wake-design.md` §"Why it cannot loop-nudge a stuck item"
+  guarantee 2 read: "caps a ready-but-undispatchable item to one nudge per
+  `high_priority_wake_cooldown`, not one per heartbeat tick." True, and the wrong
+  bound — it limits the *rate* and says nothing about the *total*, and one nudge
+  per 3m forever is a loop. The doc now says so. The test named for that
+  guarantee, `TestPriorityWakeCooldownPreventsLoopNudge`, asserted exactly the
+  per-tick bound and passed throughout — which is why the new tests bound the
+  total over a long window instead.
+
+  Verified by mutation: reverting the key to the category alone, removing the
+  escalation, and removing the prune each fail a distinct set of the new tests in
+  `internal/stallwatch/repeatbackoff_test.go`.
+
+  Out of scope, per the ticket: `mg-d764` (drellem2/pogo#99) is the ownership and
+  staleness half and is separately in flight.
+
+- **The remaining three `mg new` callers name the repo they mean, so the class
+  mg-8595 unblocked cannot re-block the queue from a different file (mg-1eb6).**
+  mg-0b57 made `mg new` refuse to record a repo path inside `~/.pogo/polecats` or
+  `~/.pogo/refinery/worktrees` — pogo deletes those when the owning agent is
+  reaped, so an item filed against one outlives its own repo and fails only when
+  somebody finally dispatches it. `7a95348` (mg-8595) fixed the two callers that
+  were failing the gate. The audit this ticket asked for found **five callers in
+  the whole tree**, so **three were left**:
+
+  - `internal/agent`'s `mgNewClaimed` and `mgNewAvailable` — `--no-repo`. These
+    passed, and the reason they passed is not the reason they were right: that
+    package's `TestMain` pins `HOME` under a throwaway root, so mg's
+    `~`-relative guard did not recognise the real polecat worktree it was
+    standing in and recorded the doomed cwd in **silence** instead of refusing
+    it. Same call shape, same wrong path, alarm disconnected.
+  - `scripts/test-e2e.sh` — `--repo="$WORK_REPO"`, because this item genuinely is
+    about a repo: `$WORK_REPO` is the checkout the spawn two lines later hands
+    the polecat. It filed by `cd`-ing there and letting mg resolve the repo from
+    the cwd, and survived only because `$SANDBOX` is a `mktemp` path rather than
+    one of the trees mg refuses.
+
+  **The guard is untouched, and was re-checked after the change** from inside a
+  polecat worktree: an omitted `--repo` still exits 2 with the refusal naming
+  `~/.pogo/polecats`. `--allow-ephemeral-repo` would also have made every one of
+  these pass and is used nowhere.
+
+- **What the audit found nothing of, stated so the next reader does not re-run it
+  (mg-1eb6).** No production code path files a work item: every non-test `mg`
+  invocation in the tree is `mail send`, `list`, `show`, `done`, `archive`,
+  `reopen` or `init`. Verification was `go test -count=1`, not `./build.sh`
+  alone — cwd is not part of go's test-cache key while these tests depend on cwd
+  at runtime, so a cached `ok` reports green for a test that cannot pass here,
+  which is exactly how this survived local runs for as long as it did.
+
+  Left alone as a different question, not silence: the `mg new` examples in
+  `install.sh`, `pogo`'s help text and the shipped prompt corpora omit `--repo`,
+  but crew agents run from `~/.pogo/agents/<name>`, which is not one of the
+  refused trees. Teaching the flag in the corpus is a corpus decision of the
+  kind `bodyratchet_test.go` exists to enforce, and belongs to whoever owns that
+  ratchet.
+
+- **The coordinator's step-3 health check stops telling it to reopen completed,
+  merged work (mg-2ca3).** `internal/agent/prompts/mayor.md`'s refinery
+  cross-reference said: if a `done` item's branch "shows as failed in refinery
+  history", reopen it so it can be re-dispatched. That predicate tests for a
+  **row** when the property is a **relationship**. The refinery appends every
+  attempt to history, so one transient gate failure leaves a permanent
+  `status=failed` row even after the branch merges seconds later — and
+  retry-then-merge is the ordinary case, not the exception.
+
+  Measured against this machine's history on 2026-07-30: ten failed MRs exist,
+  and **all ten later merged.** The rule's hit rate on real data was 0/10 and
+  its false-positive rate 10/10. Following it would have returned nine `done`
+  items and one `archived` item — all with code on `main` — to `available`,
+  where the same prompt's step-2 dispatch loop hands them to fresh workers that
+  redo landed work. So a false positive here does not produce a wrong *report*,
+  it produces duplicated work against `main`; and because the action reads as
+  diligence, a coordinator that ran the check and reopened ten items would have
+  reported having repaired something.
+
+  Two independent defects, both fixed:
+
+  - **The condition.** It is now stated as a relationship — flag only if a
+    `failed` MR exists for the branch **and** no `merged` MR exists for that
+    same branch — and the section ships a runnable classifier
+    (`pogo refinery history --json | jq …`) that groups by branch and compares
+    counts. No count threshold is encoded: `merged >= 1` is the property, and a
+    branch may legitimately take several attempts. Empty output is named as the
+    expected healthy answer.
+  - **The action.** A heuristic running unattended reports; it does not mutate.
+    The remedy is now to surface the candidate with its evidence (the failed MR
+    id, the absence of any later `merged` row, the item's status) and confirm
+    the work is genuinely missing — `pogo refinery show`, plus a `git log main`
+    check for the work-item id — before touching anything. `mg reopen` is
+    reserved for a case someone has confirmed.
+
+  The section already contained a "do not reopen blindly" caution; it was simply
+  keyed to **repeat failure** instead of to **whether the work had landed**. The
+  fix re-points that caution rather than bolting a second condition beside it,
+  so the section no longer contains both a blind reopen and a warning against
+  blind reopens.
+
+  Also corrected in the same paragraph: the surrounding text had the coordinator
+  reading history by eye. A **positive-showing** instrument is now specified —
+  `pogo refinery history | grep <branch>`, never `| tail`. A bounded window put
+  a merged MR one line below the cut and read as "not in history", which is this
+  same defect with the sign flipped.
+
+  **No behaviour change.** The refinery was right; only the instruction was
+  wrong. New tests pin both halves and exercise **both arms**: the jq program is
+  extracted from the shipped prompt and executed against a fixture built from
+  the real failed-then-merged rows (`polecat-ebee`, `polecat-1eb6`,
+  `polecat-3122`) plus constructed failed-with-no-merge cases — no such case
+  exists in real history, which is why a rule verified only against the happy
+  path is what shipped. Over that same fixture the old predicate flags six
+  branches and the new one flags three; the three it drops are exactly the
+  retries that landed.
+
+- **Twelve more pogod conditions now reach an agent who can act, instead of only a log
+  no agent reads — including the three the enumeration rated worse than the one it
+  fixed (mg-342d).**
+  mg-c3f0 fixed A1 of fifteen enumerated conditions that have an identifiable actor and
+  no channel to reach them, and left A2–A15. Three of the remainder were rated **more
+  severe than the one it fixed**, and all three are self-concealing: each disables or
+  bypasses the channel that would have reported it. **A2** (`scheduler load failed`)
+  stops every mail-check schedule for every agent at once. **A3** (`ack-watch NOT
+  armed`) silently disables the fleet-deafness watcher *by the same failure it would
+  have caught*. **A4** (`prompt refresh failed`) leaves **every** prompt stale, which is
+  strictly worse than A1 and got less annunciation than A1 did. Disposition of all
+  fifteen rows is in
+  [`docs/investigations/pogod-condition-annunciation-2026-07-30.md`](docs/investigations/pogod-condition-annunciation-2026-07-30.md).
+
+  **12 wired, 2 declined with reasons, 1 residue named rather than absorbed.** Wired:
+  A2 (both sites), A3, A4, A5, A6, A7, A9 (four sites), A10, A11, A13, A14, A15.
+
+  **One rule for routing: the configured coordinator** — except A13, which keeps
+  `[gh_teardown] notify_to`, a mailbox chosen deliberately for that subsystem in
+  mg-b586. The rows the enumeration marks *human* or *platform* (A4, A7, A10, A11, A14)
+  go to the coordinator too, and the reason is measured, not asserted: `human` is a
+  mailbox holding **988 unread** against **0** for the coordinator, so addressing it
+  writes down an intention rather than reaching anyone. The coordinator can act on every
+  row here — file a work item, dispatch a polecat, escalate to a human *with context*.
+  Pinned by test: no condition may route to `human`.
+
+  **A2 is mailed *and* woken, which closes mg-c3f0 §6's hedge.** That section stopped at
+  *"mailing the coordinator works, but the coordinator will not be woken to read it,
+  only mailed"* — true, because every agent's mail-check loop is itself a `pogo
+  schedule` entry. So A2 also queues a PTY nudge. That nudge is **not dead by the same
+  fault**, and this is the load-bearing measurement: `client.SendMGMail` shells out to
+  `mg`, and pogod's heartbeat *drives* the scheduler rather than depending on it
+  (`OnTick` reads `if sched != nil`), so with a nil scheduler both mail and heartbeat
+  keep working. The wake is queued rather than sent inline because A2 is known during
+  startup, *before* crew auto-start — at that moment there is no coordinator process to
+  nudge — and it is retried on the heartbeat until it lands. A wake that never lands
+  within 30 minutes is abandoned **loudly** as *mailed-but-not-woken*, with the notice
+  still in the maildir.
+
+  **A5's conclusion, unhedged.** When the agent that failed to auto-start is not the
+  coordinator, this is solved. When it **is** the coordinator, the actor and the
+  casualty are the same process and there is no in-fleet reader by construction: the
+  mail still goes to the coordinator's mailbox, because it is not lost — it is read on
+  the first mail-check after that agent next starts, which is when the information
+  becomes actionable — and the notice says plainly that nothing read it at the time,
+  names the window to audit, and says a recurrence is an out-of-process supervision gap
+  rather than a coordinator bug. It does **not** fall back to `human` (that would look
+  like escalation and be silence) and does **not** synthesise a second addressee. It
+  also does not hand out `pogo agent start <coordinator>`, because by the time anyone
+  reads it that agent is already running. Pinned by test.
+
+  **A15 is an event, not a mail, and deliberately so.** A15 *is* a mail failure — the
+  preserved/undetermined-worktree notice could not be delivered — so reacting to it with
+  another mail is a retry wearing an alarm's clothes, failing the same way for the same
+  reason. `worktreecleanup.go` previously emitted no events at all, so a preserved
+  worktree whose notice was lost left nothing but a log line while the tree pinned its
+  branch indefinitely. It now emits `worktree_notice_undelivered` with the tree, the
+  outcome, and the underlying `mail_error` — the same shape the six watcher packages
+  already use.
+
+  **Declined, with reasons, because an enumeration that shrinks silently is how the
+  remainder gets lost a second time.** **A8** (`POGO_HOME too deep to hold unix
+  sockets`) is Class C mislabelled as Class A: pogod picks an alternate socket dir and
+  says the sockets are still unique to that POGO_HOME, so nothing degrades — and it is
+  invariant for a given POGO_HOME, so annunciating it would create a permanent standing
+  alarm clearable only by moving POGO_HOME. **A12** (`platform sleep shim unavailable`)
+  is an always-true precondition on any host without the shim: it would fire at every
+  boot forever and never clear, which is a condition with no transition, and no agent
+  can install a platform shim. A test fails if any of A1–A15 is neither wired nor
+  declined-with-a-reason.
+
+  **Also found: A3's second listed site cannot fire.** `deaf-watch NOT armed` is guarded
+  on `agentRegistry != nil`, and pogod `os.Exit(1)`s if the registry fails to build
+  hundreds of lines earlier — so the branch is unreachable and its stated reason ("the
+  agent registry did not load") names no reachable state. A3's severity claim stands; it
+  is carried by the ack-watch half plus deaf-watch's existing `deaf_watch_error` spine
+  record, so A2's notice names the deaf-watch consequence instead of raising a second
+  alarm for it.
+
+  **One shared mechanism rather than fourteen copies, against mg-c3f0 §6 — and the
+  reason it argued the other way does not apply.** §6 recommended routing these through
+  the six existing watcher packages. Those sample a live subsystem on an interval, and
+  **A2–A15 are not pollable**: the scheduler either loaded on this boot or it did not,
+  and by the time an interval elapses the only trace is the log line nobody reads. These
+  are boot-time and decision-point facts, so they need A1's shape (know it where it
+  happens; remember across restarts, because **the restart is the tick**). Given that,
+  fourteen bespoke notifiers would be fourteen chances to get the suppression wrong —
+  and the suppression is what decides whether the alarm survives being real. So: one
+  transition store (`~/.pogo/pogod-conditions.json`), one mailer seam, one event
+  contract, three lines per decision point.
+
+  **A hard floor of one mail per condition per hour, which A1's mechanism does not
+  need.** A1 fingerprints the content hash of a `.dist` sidecar, stable by construction.
+  These fingerprints are **error strings** — they carry pids, ports, temp paths and byte
+  offsets — so a churning fingerprint would read as "materially changed" on every
+  occurrence and mail every boot, or for A11 every 30 seconds. Renotify is **24h** (not
+  A1's 72h: these are outages with mechanical remedies, not judgements about which local
+  edits are load-bearing), and the clock runs from the last **delivery**, not the last
+  occurrence — otherwise a condition recurring faster than the window would never reach
+  a reminder at all. Every wired condition also **clears** on its healthy path, so a
+  condition that broke, was fixed, and broke again is not suppressed by its own resolved
+  history.
+
+  **It can fail loudly, five ways.** A `pogod_condition` event fires on **every** raise
+  including the suppressed ones, so a stopped notifier reads as a run of
+  `reason:new, notified:false` rather than looking like a healthy fleet. A failed send is
+  **never** recorded as delivered, so it retries and every attempt carries `mail_error`.
+  A `pogod_condition_summary` fires on **every boot including the clean ones** — so a
+  boot with no summary means the mechanism is not running, which is a checkable and
+  different shape from nothing being wrong. An unresolvable addressee is logged `⚠ … has
+  NO ADDRESSEE` and counted as a failure rather than guessed at. And every store failure
+  biases toward **noise, never silence**, bounded by an in-process shadow so that a
+  corrupt store cannot turn a 30-second condition into a mail storm.
+
+  **Verified by forcing each condition against a live daemon, not by reading the code** —
+  A1's whole history is a correct, loud, well-worded log line nobody received.
+  `scripts/pogo-condition-controls.sh` runs a real pogod in a proven-private sandbox,
+  breaks nine of the wired conditions for real, and reads the mail back out of a real
+  maildir with `mg mail list` / `mg mail read`. **21 assertions, all green**, and three
+  directions per condition rather than one: the **positive** (the mail arrives at the
+  named actor — and separately, that the forcing actually reproduced the condition, so
+  "I failed to break anything" is diagnosed as an instrument failure rather than
+  reported as a missing notice), the **negative** (a clean boot raises nothing and mails
+  nobody — without which a notifier that fires unconditionally passes every positive
+  control in the file), and **suppression** (a second boot with the condition still live
+  must not mail again). The A2 control additionally observes the coordinator being woken
+  *with the scheduler confirmed down*, and A11's measures that four more heartbeat ticks
+  produce no further mail. Five wired rows have no live control — the forcing, not the
+  delivery, is what is unreachable from outside the process — and the script **prints
+  that list on every run** rather than leaving it in prose.
+
+  **The residue, named rather than absorbed.** A scheduler that **loads and then
+  silently stops firing** is a different fault from `scheduler.New` returning an error:
+  it has no decision point inside pogod at all, and nothing here detects it. That needs
+  a **positive out-of-process instrument** — "at least one mail-check has acked in the
+  last N minutes", not `grep "scheduler load failed"`, because an errored or empty grep
+  returns the same token as a healthy one — living outside pogod's process tree for the
+  reason `com.pogo.deploy` and `com.pogo.recovery` do, and **proved against an injected
+  failure before it is trusted**: `scheduler load failed` has fired **0 times ever** on
+  this box, so any detector built for it is unfalsified by construction. It is not built
+  here and mg-342d does not claim it.
+
+- **The shipped coordinator prompt stops filing a gh-issue review ticket that
+  can never be claimed (mg-4999).** `internal/agent/prompts/mayor.md`'s
+  gh-issue workflow filed the review ticket with
+  `--depends=<build ticket id>`. On that track the build ticket stays claimed
+  through the whole review loop — the coordinator submits the builder's branch
+  to the refinery itself on pass (transition 5), so the build ticket is not
+  done until *after* review succeeds. Meanwhile macguffin puts an item whose
+  dependencies are unmet into `pending/`, and `Claim` refuses anything whose
+  status is not `available`. So the review ticket sat in `pending/`, the review
+  worker could not claim it, review never happened, the build ticket never
+  became done, and the dependency never cleared. A deadlock, and the reason the
+  flag was removed by hand on this machine on 2026-07-17.
+
+  The dependency is dropped and the reasoning is recorded inline so it survives
+  the next prompt refresh. Dispatch ordering was never relying on the flag
+  anyway: step 3 already holds the review ticket by hand and transition 4
+  dispatches it only once the PR exists. The `gh:` ref and the body cross-link
+  remain as the soft build↔review link. The `--depends=<triage ticket id>` on
+  the *build* ticket is untouched and correct — triage genuinely completes
+  before build starts.
+
+  **Why this survived 13 days.** The only machine running the gh-issue track is
+  the one carrying an out-of-tree fix for it, so the defect was invisible
+  exactly where it would have been detected. The successful gh-issue runs on
+  that box worked *because* of the local edit; "it works here" was not evidence
+  it worked anywhere. Every other consumer installing this prompt got the
+  deadlock.
+
+  *Bound on the claim:* the circularity is derived from the shipped playbook's
+  own transitions and from `pending` placement being a live status, not
+  reproduced by running the gh-issue track end-to-end against a clean install.
+
+  **How this surfaced.** The fix existed only as an in-place edit to
+  `~/.pogo/agents/mayor.md`, which made that file diverge from its install
+  stamp. Every prompt refresh since then hit the install matrix's conflict cell,
+  declined to update the canonical, and diverted 13 days of shipped prompt
+  improvements to `mayor.md.dist` — logging a warning at each boot. Landing the
+  fix upstream is what lets the canonical be replaced by a genuine install with
+  nothing lost, so the conflict stops recurring rather than being re-managed
+  after every deploy.
+
+  **One note for anyone diagnosing a `DECLINED` prompt sync.** A file's stamp
+  having `embed == body` does *not* mean it is unedited. `stampedContent` writes
+  the two fields equal at install time, and a later in-place edit changes the
+  body without rewriting the stamp — so equality records provenance at install,
+  not current cleanliness. The only valid test is recomputing the body hash,
+  which is what the install matrix does. Relatedly, diffing a diverged canonical
+  against its `.dist` sidecar characterises the wrong thing: it conflates the
+  local edit with every shipped change since, and a local *deletion* shows up on
+  the `.dist` side where it is indistinguishable from a shipped improvement.
+  Diff against the embedded template at the commit matching the stamped
+  `body_hash` instead — here that turned a 368-line diff into a 7-line hunk, and
+  was what surfaced the deletion at all.
+
+- **The shipped prompts stop asserting that `mg edit` has no append subcommand,
+  so agents stop being routed onto the wholesale body rewrite that
+  `--append-body-file` exists to prevent (mg-4bb9).**
+  `internal/agent/prompts/mayor.md`, `prompts/pm/pm-template.md` and
+  `prompts/crew/doctor.md` all carried the same sentence, verbatim, in their
+  ticket-lifecycle sections: *"`mg edit <id> --body="<new body>"` replaces the
+  body wholesale — there is no append/comment subcommand. To leave a note for a
+  future actor without rewriting the body, mail them."*
+
+  Both halves were wrong, and each was wrong in a way that had already caused
+  damage.
+
+  `--append-body` and `--append-body-file` exist, and `mg edit --help` opens
+  with a banner naming the second as the instrument for adding to a body:
+  **ADDING TO A BODY? USE `--append-body-file`, NOT `--body-file`.** Nobody read
+  that banner, because the prompt had already answered the question. That is the
+  reason this matters more than a stale flag list: **a confident false claim in
+  a prompt is worse than silence, because silence sends you to `--help` and a
+  wrong answer stops you looking.** The prompts now say so in as many words.
+
+  The recommended alternative was the second failure. Putting a note for a
+  future actor in *mail* rather than the body is a diagnosed defect in its own
+  right, and two items needed exactly that repair in one night — both of which
+  now carry the repair in their own bodies. mg-8a12's real scope went by mail,
+  leaving a body that carried a prohibition and no positive scope until one was
+  appended under a "POSITIVE SCOPE" heading. mg-ddf4's strongest evidence went
+  by mail and was appended afterwards under a heading that states the diagnosis
+  outright: *"This was in mail and not in the ticket, which is the same defect
+  the ticket is about."* A polecat reads the ticket, not the coordinator's
+  outbox.
+
+  The replacement text gives the append with a quoted heredoc as the default
+  form, and pins the three properties that make it the safer operation — each
+  one a distinct rewrite failure it does not have:
+
+  - It **composes against the body on disk at write time**, so it cannot destroy
+    a section another writer stored between your read and your write. mg-f326 is
+    three agents doing exactly that to each other in two hours, every write
+    exiting 0.
+  - It **lands below the prose, so it can never author the body's leading `# `
+    heading** — and that heading *is* the title, the only place a title is
+    stored. An append therefore cannot rename an item, which is the mg-bac6
+    hazard in both of its directions.
+  - It is **exempt from the workflow-tag refusal** on an item that already
+    carries the tag, where a full rewrite is not.
+
+  `--body-file` is reserved rather than forbidden: when a full rewrite genuinely
+  is the shape, the prompts now show it naming the version it read
+  (`mg show <id> --body-hash` into `mg edit --if-unchanged=`), which refuses with
+  exit 4 instead of overwriting a change the author never saw. They also record
+  that `mg show <id> --body` does **not** exist — mg-9fc8 is the incident where
+  that flag's usage error was captured into a file and stored *as* the body — and
+  give `mg show <id> --json | jq -r .body` as the read that works. Mail keeps the
+  job it is still right for: a note that does not belong in the body at all.
+
+  Verified by use before the text was written, not by reading `--help`:
+  `mg edit mg-4bb9 --append-body-file -` grew that item's body from 109 to 131
+  lines with its `# ` heading count still 1, its title and assignee untouched,
+  exit 0, and no body backup written (an append overwrites nothing, so there is
+  nothing to back up).
+
+  One claim from the ticket was **dropped rather than shipped**: that the
+  read-modify-writes produced a duplicate `# ` heading on mg-78c0 / mg-78d2 /
+  mg-a3d4 when `--body-file` re-prepended the stored title. It does not
+  reproduce against the current binary — a rewrite with a matching leading
+  heading, with `--title`, and with no heading at all each yield exactly one
+  `# ` heading, and all three items presently have one. It may well have
+  happened; it is not a mechanism this change can demonstrate, so it is not
+  asserted in three shipped prompts. The rest of the recorded cost (roughly a
+  dozen full-body rewrites in one night, each with a hand-written guard) is
+  attributed to the count on mg-4bb9 rather than restated as measurement.
+
+  `prompt_test.go` pins the affordance and all three properties in the three
+  prompts, pins the *absence* of both halves of the old claim, and pins the
+  scope: no `templates/` worker prompt mentions `mg edit` at all, so a worker
+  gaining one means this change's boundary — and mg-61f4's, which measured the
+  same boundary — needs revisiting deliberately. Verified by falsification: with
+  the prompt edits stashed, the test reports 57 failures.
+
+  No behaviour change. `mg` is a separate tool and is untouched; this is prompt
+  text and its regression test.
+
+- **The trust-hook tests can no longer mail the fleet coordinator — the drift
+  sink is stubbed for whole test binaries, so the guarantee is structural rather
+  than arithmetic (mg-54f8).**
+  `watchForTrustDialog`'s deadline arm calls `agent.RecordTrustDialogReady`, which
+  feeds the process-global sentinel-drift detector. When a key's windowed miss
+  fraction crosses `driftThreshold`, `defaultDriftAlert` emits a durable
+  `sentinel_drift` event **and mails the fleet coordinator** — deliberately,
+  because nobody reads our logs. mg-8792 added the first tests that drive that
+  real hook loop in `internal/cursor` (`internal/claude` already had them), so
+  `go test` began exercising the production sink.
+
+  **What the old safety actually was.** Arithmetic, not architecture, and the
+  numbers are thinner than the mail's blast radius deserves:
+
+  - `internal/cursor` — 1 deadline-arm miss against 3 confirmations: **0.25**
+    against a 0.5 threshold. The mg-d631 reviewer's phrasing was "only a couple
+    of deadline-arm cases wide"; a second such fixture is 2/5, a third is 3/6 and
+    it fires.
+  - `internal/agent` — `nudgereadylog_test.go` drives the real prompt-ready gate
+    to its deadline arm three times, all misses, against a `driftMinSamples` of
+    **4**. Safe by ONE test, and that is measured rather than reasoned: a fourth
+    fixture of the same shape fires an alert carrying
+    `missed=4 total=4 fraction=1` on the `default/initial-nudge` key. Because the
+    detector is a process-global, `-count=2` reaches the same place without any
+    new fixture at all — the window does not reset between runs of the same
+    binary.
+
+  Empirically the live `~/.pogo/events.log` still holds **zero** `sentinel_drift`
+  lines, and a full `internal/cursor` + `internal/claude` run appends none — the
+  margin held. It just was not held by anything.
+
+  **The fix.** `agent.StubDriftSinkForTesting()` swaps the process-global
+  detector's alert sink for one that swallows (and logs) alerts, returning a
+  restore func. `TestMain` in `internal/cursor`, `internal/claude` and
+  `internal/agent` installs it before a single test runs, so no test in those
+  binaries — present or future, at any `-count` — can reach the mail path. This is
+  the convention `sentineldrift_test.go` already used per-test, lifted to where
+  the provider packages can reach it; alert-*content* assertions still belong on a
+  scoped detector with a fake clock, which is unchanged.
+
+  **The control does not have to fire to prove itself.** Each package asserts
+  `!agent.DriftSinkIsProductionForTesting()`. A control that instead recorded four
+  misses and checked that nothing was mailed would, on the day a `TestMain` install
+  got dropped, send exactly the mail it exists to prevent. Asking the detector
+  which sink it holds is safe when the answer is bad — and
+  `TestDriftSinkPredicateDetectsTheProductionSink` installs `defaultDriftAlert`
+  deliberately (invoking nothing) to prove the predicate can recognise it, because
+  a predicate that always answered "not production" would leave all three package
+  controls green and every suite exposed.
+
+  **It is not the mg-d578 defect wearing a new hat.** That ticket's flake was a
+  test-only global written by one test while a goroutine leaked from a previous
+  test still read it — and a swappable sink is exactly that shape. So the sink is
+  written under the detector's mutex *and* read under it (`record` now captures it
+  into a local before unlocking, then calls it outside the lock as before).
+  `TestDriftSinkSwapIsRaceFreeAgainstRecord` makes that falsifiable, and it is
+  verified by mutation in both directions: dropping the lock in `setAlert` gives
+  repeated `WARNING: DATA RACE` under `-race`, restoring the pre-fix
+  outside-the-lock read of `d.alert` gives one, and the shipped code is clean over
+  `-count=5`.
+
+  **Scope, stated rather than implied.** Three test binaries are covered: the two
+  that drive the trust-dialog hook and the one that drives the prompt-ready gate.
+  `internal/codex` is not, because its default suite never reaches a record helper
+  — it spawns with no `InitialNudge`, and the e2e test that does deliver one is
+  opt-in behind `POGO_CODEX_E2E=1`. Other packages that spawn through
+  `agent.Registry` (`cmd/pogod`, `internal/service`) reach a record helper at most
+  once or twice per run, far under `driftMinSamples`; they are safe by the same
+  arithmetic this ticket removed for the named three, and the seam is one `TestMain`
+  line away if that changes. The alternative — defaulting the detector to a no-op
+  and having pogod install the production sink explicitly — would be
+  default-safe everywhere, but it puts the fleet's only drift signal one forgotten
+  wiring call from silence, which is the failure mode the detector was built to
+  escape.
+
+  No shipped behaviour changes: production still installs `defaultDriftAlert` and
+  still mails on a genuine fleet-wide drift crossing.
+
+- **A polecat that completes without a merge is now stopped, so a finished agent
+  stops holding a concurrency slot indefinitely (mg-56d1).** Every automatic
+  polecat teardown pogod had was keyed on **merge**: the refinery's `OnMerged`
+  hook marks the item done, stops the polecat, and lets the exit hook remove its
+  worktree and mail-check schedule (gh #35). Triage, audit-only and investigation
+  polecats merge nothing — they finish by calling `mg done` themselves — so the
+  refinery never heard about them and nothing stopped them.
+
+      merge-producing polecat  ->  refinery merges  ->  stopped, marked done   (automatic)
+      non-merge polecat        ->  calls `mg done`   ->  nothing whatsoever     (was manual)
+
+  **Measured 2026-07-30 06:17Z:** `d764` finished its triage, delivered its
+  packet, filed its successor `mg-9863`, went `idle`, and held one of five slots
+  for **7m16s** (uptime 28m50s) while two high-priority items sat queued and
+  undispatchable. A coordinator ended it by hand. The whole night was
+  capacity-bound at 5 concurrent against a 7–10 item queue, so the loss is
+  throughput, not tidiness — and it is invisible in the instrument operators
+  actually read: `pogo agent list` says `status=running`, only `pogo agent
+  diagnose` says `idle`. A slot held by a finished agent looks exactly like
+  healthy saturation. Same family as mg-18d0 and the `failing_turns` case: **the
+  list reports liveness, never productivity.**
+
+  **The signal is the WORK ITEM reaching a terminal state (`done`/`archived`),
+  not the merge** — the ticket asked this be stated rather than assumed. Merge is
+  one path to `done`, `mg done` is the other, and `done` is the general fact both
+  produce. The merge hook is therefore left exactly as it was: it carries
+  obligations this reaper does not (writing the completion, honouring
+  `--defer-done` / PR-flow / `post-merge-work`, arming the deferred backstop),
+  and extending it would have been the smaller change while fixing nothing here,
+  because the polecats that leak are precisely the ones the refinery never sees.
+  This is a second, independent detector on the general condition.
+
+  **It polls, and is not event-driven — said plainly because the merge path is.**
+  `mg done` runs in the *polecat's* own process, as a separate `mg` binary
+  against the macguffin store; pogod is not in that call path and macguffin
+  offers it no callback. `OnMerged` exists only because the refinery lives inside
+  pogod. So `done` can be observed but not delivered: one `mg show --json` per
+  live polecat on the heartbeat tick, the same shape as every other detector in
+  `cmd/pogod`. Calling it event-driven would be a claim the wiring cannot
+  support.
+
+  **`done` alone is NOT sufficient, and the condition is a conjunction: item
+  terminal AND the polecat quiet on its PTY for `idle_grace` (default 2m).** The
+  polecat protocol tells a polecat to call `mg done` and then stay alive until
+  the coordinator stops it, and work legitimately follows that call — mailing a
+  verdict packet, filing a successor, answering a follow-up. `LivePolecatSet`'s
+  own doc already named done-but-alive as "every polecat's NORMAL end state".
+  Stopping on the `done` write alone would kill a polecat mid-sentence, which is
+  strictly worse than the leak it closes: a lost verdict is unrecoverable, a held
+  slot is merely expensive.
+
+  **A grace period, not an explicit "I am finished" signal** — the other half the
+  ticket asked be decided rather than guessed. A signal the polecat must remember
+  to send fails for exactly the polecats that most need stopping: the ones that
+  ran off the end of their protocol. mg-ddf7 measured that failure mode on an
+  instructed step a third of agents never performed. A grace period asks the
+  polecat for nothing.
+
+  **The grace is measured from the last PTY write, not from the `done`
+  transition,** and that choice handles the post-`done`-work case for free. A
+  timer from the transition cannot tell a polecat that is still typing from one
+  that stopped; PTY quiescence can. It also self-extends in the case that
+  prompted the question: an incoming coordinator mail arrives as a PTY nudge and
+  the answer is more output, so a polecat mid-exchange keeps resetting its own
+  clock and is reaped only once it goes quiet again.
+
+  **Both acceptance arms are proved against real processes and a real macguffin
+  store**, from a single `Check` on a single registry, so the discrimination is a
+  property of the mechanism and not of the fixture
+  (`cmd/pogod/donereap_live_test.go`):
+
+  - **Positive** — a polecat whose item was marked `done` by `mg done`, with no
+    merge anywhere in the test and no `MergeRequest` in existence, is stopped:
+    its process is confirmed exited, it is out of the registry, and
+    `PolecatCount()` — the readout the dispatcher's concurrency cap is derived
+    from — drops by one. The freed slot is asserted, not the `Stop` call.
+  - **Negative** — a polecat that is merely `idle` with its item still `claimed`
+    survives, across repeated passes, and its item is still in `claimed/`
+    afterwards. That is `e9ee` on the night in question, healthy and mid-work at
+    42 minutes. A second test winds the same fixture back so *neither* item is
+    done, confirms nothing is reaped, then runs `mg done` on one and watches the
+    same reaper on the same registry change its answer — nothing changed but the
+    item's state. `donereap_test.go` additionally pins that no idle duration
+    (3m, 1h, 24h) reaps a claimed item.
+
+  A polecat that has never written to its PTY is skipped: its idle time is
+  *unmeasurable*, not zero — seconds into spawn and wedged-before-first-turn
+  (mg-ce61) are indistinguishable there. An unreadable work item leaves the
+  polecat running, the same direction and for the same reason as the
+  `post-merge-work` probe (mg-d86e): a store we could not read is not evidence of
+  completion.
+
+  **The reaper acts and does nothing else.** It is the one heartbeat detector
+  here that is not report-only, and its authority is bounded to stopping a
+  polecat whose work is provably concluded — it cannot mark an item, mail, nudge,
+  or spawn, and it never escalates, because a completed triage is not a fault.
+  `RestartSuppressed` (mg-18d0/mg-8cdb) is not in tension with it: stopping a
+  finished polecat without replacing it is the end of a lifecycle, not
+  remediation.
+
+  **Two facts the ticket asked for, reported as of 2026-07-30 08:30Z:**
+
+  1. **Non-merge polecats DO get a mail-check schedule, and the reaping half was
+     never a no-op.** pogod auto-registers `mail-check-<work-item-id>` for
+     *every* polecat at spawn (mg-e633, `registerPolecatMailCheck`), with no
+     merge involvement; all four live polecats had theirs
+     (`mail-check-mg-21b1/-56d1/-6653/-f766` in `pogo schedule list`). The
+     `pogo schedule rm mail-check-mg-d764` that reported *not found* did so
+     because pogod's `OnExit` hook had already reaped it
+     (`RemoveMailChecksForAgent`, `cmd/pogod/main.go`) when the hand-stopped
+     process exited — that path fires on every polecat exit regardless of merge.
+     So the schedule half needed no change; the missing half was purely the stop.
+  2. **Population right now: zero.** All four live polecats (`21b1`, `56d1`,
+     `6653`, `f766`) hold items in `claimed`; no `done` item currently has a live
+     agent. That is a fact about this moment, not a validation of anything — the
+     `d764` instance seven minutes earlier is what the mechanism is built
+     against, and the negative arm is what keeps these four safe.
+
+  Configurable via `[done_reap] enabled` / `idle_grace`; `docs/CONFIGURATION.md`
+  carries the section, `ARCHITECTURE.md` the rationale next to the merge-reap it
+  deliberately does not extend. `mayor.md` gains the case it had no instruction
+  for — its existing fallback covers an item that is `done` with the polecat
+  already *exited* and the mail lagging; this is the **inverse**, `done` with the
+  agent still alive — and `polecat.md`'s "stay alive" step now says what the
+  two-minute window means and that a polecat should not race it.
+
+  **Not live until pogod restarts onto a revision carrying this.** The running
+  daemon at the time of writing was `d31297f`, twelve commits behind `main`.
+
+- **pogod claims a polecat's work item at spawn, so a dispatched item never sits
+  in `available/` while a healthy polecat works it (mg-7254).** Claiming was the
+  polecat's own step 1, which made ownership contingent on the polecat completing
+  a model-API turn. **The claim was not skipped — it was unreachable.** The
+  polecat dispatched for this ticket proved it: spawned ~20:43Z on 2026-07-29, it
+  recorded `synthetic_failure_detected` with `failing_turns=2` against `API Error:
+  529 Overloaded` and executed no turn at all for 27 minutes, while priority-wake
+  fired on its item seven times. Polecat `86e7` had done the same an hour earlier.
+
+  An unclaimed-but-worked item is invisible to every ownership check the fleet
+  has, because all of them read item status: stall-watch scans `available/` only
+  and reports the item as neglected; nothing structural prevents a second
+  dispatch onto it; and `mg done` refuses an item that is not in `claimed/`, so
+  the failure surfaces at the very end, after all the work.
+
+  pogod already knows the work-item id at spawn — it arrives as `--id` — so it now
+  takes the claim itself, converting a convention someone must remember into a
+  mechanism (the move `registerPolecatMailCheck` made for the mail-check loop in
+  mg-e633).
+
+- **A second dispatch onto a claimed item is refused with a 409, by the store
+  rather than by the dispatcher's memory (mg-7254).** `mg claim` is a `rename(2)`
+  out of `available/`, so two concurrent spawns of one item cannot both succeed:
+  exactly one wins and the loser is refused with a message naming the item, `pogo
+  agent list`, and `mg unclaim`. Previously the only thing preventing two polecats
+  on one item — duplicated branches, a merge race, one of them discovering
+  mid-flight that its work was redundant — was the dispatcher remembering to check
+  first.
+
+- **The claim is taken before the process starts, and given back if the spawn
+  fails (mg-7254).** Ordering is the point, not an implementation detail: a claim
+  we cannot take must mean a process that never starts, so no agent can ever run
+  believing it owns an item it does not. It sits last among the fallible steps, so
+  exactly one failure path follows it and exactly one place has to release. A
+  claim stranded in `claimed/` with no worker on it would be the mirror image of
+  the bug — skipped by dispatch *and* unseen by stall-watch.
+
+  A **conflict** fails closed; **not-found** and an **unreadable store** fail
+  open, loudly, on the same reasoning `MGDispatchGate` documents (`--id` is
+  optional by design, and one bad path in macguffin must not halt the fleet). The
+  discriminator is macguffin's frozen exit-code contract (3 = not_found,
+  4 = conflict), not error-text matching.
+
+- **Start-verification stops reading pogod's own claim as the polecat's first
+  action (mg-7254).** This is the part that nearly shipped silently. The mg-feb3
+  auto-renudge gated on the hard started-signal *"the work item left
+  `available/`"* — sound only while the polecat was the thing that claimed. With
+  claim-at-spawn that signal is true from the first instant of every dispatch
+  carrying an `--id`, so the watcher would have concluded there was nothing to
+  recover, on every spawn, forever. No log line, no event, no failing test: a
+  recovery net that rescued 73 of 75 real polecats, gone by side effect.
+
+  Agents now carry `ClaimedAtSpawn`, and those fall back to the ready-composer
+  signal while dispatches pogod did *not* claim for keep the hard claim signal.
+  **The residual gap is stated rather than papered over:** the fallback catches a
+  composer that never rendered but not the paste-buffered-CR wedge of mg-ce61,
+  where the composer *did* render. Restoring a hard started-signal needs a way to
+  observe the polecat's own first protocol action — a claim-pid re-stamp, which
+  macguffin has no command for today — and is tracked as **mg-7d6d** rather than
+  invented here.
+
+- **A `--branch` polecat is now told to open the pull request its completion is
+  being deferred for (mg-78d2).** mg-7746 taught the refinery that a merge onto
+  an integration branch is a step and not completion: pogod stops marking the
+  work item `done` and stops stopping the polecat, because the deliverable is
+  the PR from that branch to the repo default and the polecat has not opened it.
+  That made room for the PR. Nothing filled it — no shipped prompt mentioned
+  `gh pr create`, and `polecat.md`'s step-6 note still promised the polecat it
+  would be completed and stopped the moment its branch landed, which is exactly
+  false on that path.
+
+  So the observable behaviour of the fix was a polecat that merged, deferred,
+  read its own survival as a pogod malfunction, waited to be stopped, and was
+  reaped fifteen minutes later by the bounded backstop and escalated to the
+  coordinator as a manual-recovery alert. Every part of that worked as designed.
+  The deferral was *alerted on* rather than *filled*, and the PR still did not
+  exist.
+
+  `polecat.md` and `polecat-architect.md` now carry a post-merge PR step, gated
+  on the same `--branch` signal that chose the non-default merge target in the
+  first place:
+
+  ```bash
+  BASE=$(gh repo view --json defaultBranchRef -q .defaultBranchRef.name)
+  gh pr list --head <integration-branch> --base "$BASE" --state open --json url -q '.[0].url'
+  # nothing printed? open it, body on stdin under a quoted heredoc
+  gh pr create --base "$BASE" --head <integration-branch> --title "..." --body-file - <<'EOF'
+  ...
+  EOF
+  PR=<the url gh printed, or the one you reused>
+  mg done <id> --result="{\"branch\": \"$BRANCH\", \"target\": \"<integration-branch>\", \"pr\": \"$PR\"}"
+  ```
+
+  Capture is an explicit step in both templates rather than a clever one-liner,
+  because the clever one-liner was wrong: SME review caught a first draft where
+  `PR` was assigned only on the *reuse* branch, so the sidecar recorded
+  `"pr": ""` on the exact path that had just opened a PR — a record asserting a
+  field it does not carry, which is the mg-c8d5 defect reintroduced one file
+  over. A test now rejects any shipped template that interpolates a shell
+  variable it never assigns, named generally because the next one will not be
+  called `PR`.
+
+  Four details are load-bearing. The base is **read**, not named — naming it
+  would be the same rot mg-d39e removed from branch names, and reading it also
+  detects the `--branch=<default>` case, where the merge really was completion
+  and there is no PR to open. An already-open PR is **reused**, because several
+  polecats can land on one integration branch and only the first of them opens
+  it. And a polecat that *cannot* open the PR is told to mail the coordinator
+  with the error and hold, rather than call `mg done` — an item left claimed with
+  a report attached is recoverable, and a silent deferral is the failure the step
+  exists to prevent.
+
+  A dispatch with no `--branch` renders exactly as before: its merge target is
+  the default branch, the merge *is* completion, and a PR step there would be an
+  invented obligation. `pogo agent prompt show` previews that common shape now —
+  its stub vars used to set `Branch: "main"`, harmless while the field only chose
+  a `--target`, but enough to make every preview claim the reader's target was an
+  integration branch once a protocol hung off it.
+
+- **A polecat wedged by the paste-buffered-CR failure draws its `auto_renudge`
+  recovery again, on a hard started-signal rather than a heuristic (mg-7d6d).**
+  mg-7254 moved the work-item claim to pogod at spawn, which retired the signal
+  mg-feb3's auto-renudge gated on — *the item left `available/`* — because pogod's
+  own claim satisfies it from the first instant of every `--id` dispatch. mg-7254
+  did not hide that: it fell those dispatches back to the ready-composer signal
+  and named the residue. The residue was specific and it was the whole point of the
+  recovery net: **the fallback catches a harness whose composer never rendered, and
+  the mg-ce61 wedge is one where the composer *does* render.** `WaitForReady`
+  latches `promptReadySeen`, the kickoff piles in the kernel input buffer as one
+  paste block whose CR never re-tokenizes, and the watcher reports "started" for an
+  agent that never acted. 75 real polecats have needed that recovery; 73 were
+  rescued by it.
+
+  The signal is now **the claim PID**. pogod claims with its own pid, a macguffin
+  claim file is named `<id>.md.<pid>`, and the polecat's step 1 re-stamps the claim
+  to its own pid — so "started" means *the claim pid is no longer pogod's*. That is
+  a positive observation of the agent's own first protocol action rather than the
+  absence of one. pm-pogo ruled for it on the failure mode, not the elegance: a
+  spurious renudge is cheap, a missed wedge is what mg-feb3 exists to prevent.
+
+  mg-7254's ownership guarantee holds by construction. A re-stamp is a rename
+  *within* `claimed/`, so the item is never in `available/` at any point and no
+  second dispatch can fit through — which is also why `mg unclaim` + `mg claim` is
+  not an acceptable implementation of it, and the test asserts the status directly
+  rather than trusting the code.
+
+- **The new signal is capability-gated on a probe, and both halves of it can only
+  be switched on together (mg-7d6d).** Re-stamping a held claim needs a macguffin
+  command that does not exist yet — `mg claim` requires the item to be `available` —
+  so it is filed additively as macguffin **mg-bb43** (`mg reclaim <id> --pid`).
+  Until that lands, no polecat can re-stamp.
+
+  So pogod probes for it (`mg reclaim --help` exits 0) and engages only if it is
+  there, and the probe drives both the verifier and the polecat prompt step through
+  one entry point. **Half of this mechanism is a defect in either direction.** The
+  verifier alone gates on a re-stamp no polecat is told to perform: every healthy
+  agent reads unstarted and draws three recovery CRs and three `auto_renudge` rows
+  per dispatch — an event stream of pure false positives, which is worse than the
+  gap it replaces because it also destroys the signal an operator reads. The prompt
+  step alone is a command nothing observes. Neither state is reachable.
+
+  Because the gate is an observation rather than a config flag, installing a
+  macguffin with `mg reclaim` activates the hard signal on the next pogod restart,
+  with nothing to remember and nothing to flip.
+
+- **pogod says at startup which started-signal its polecats are watched on, and
+  `auto_renudge` says which one fired (mg-7d6d).** The failure this guards is
+  silence: mg-7254's gap went unnoticed until someone thought to look for it, and
+  an operator wondering why a wedged polecat drew no recovery should not have to
+  read source to find out. One startup log line names the state and the remedy, and
+  the event's `reason` detail now distinguishes `claim_pid_not_restamped` (hard)
+  from `work_item_unclaimed` (hard) and `no_ready_composer` (the fallback, whose
+  presence on a claimed-at-spawn dispatch is itself a fact about the host's mg).
+
+  A store-root disagreement is refused rather than answered for the same reason. An
+  absent `claimed/` directory means the verifier is reading a different store than
+  the one the claim went into; read as "no claim held" it would report *every*
+  polecat on the daemon as started and switch the detector off in silence, so it is
+  an error the watcher declines on and logs.
+
+- **`mayor.md` stops carrying the human-in-the-loop stopgap as the answer
+  (mg-7d6d).** It told the coordinator that a silently wedged dispatch draws no
+  event, so a dispatch with no output and no mail was worth a manual look. That was
+  the interim. It now routes on the `reason` detail, names which signals are hard,
+  and gives the one-line check for whether this host's hard signal is on.
+
+- **A running quality gate now proves it is running, every 30 seconds
+  (mg-8595).** The step logged on entry and not again until it produced a
+  result. For a fast gate that is fine; for a slow one it was
+  indistinguishable from a hang for as long as it ran — and the two call for
+  opposite responses. On 2026-07-29 an operator read thirty minutes of silence
+  as a hung gate, re-submitted the branch, and the re-submit failed because the
+  real merge had already succeeded — which **reopened a work item whose work
+  had landed**. The gates were simply slow.
+
+  Every gate now runs under a heartbeat emitted by the goroutine running it: a
+  log line, and a `progress` record persisted on the merge request and rendered
+  by `pogo refinery show <id>`. The persistence is not incidental — the
+  dead-runner case is exactly the case where the writing process is gone, so
+  the state file is the only reader left. `pogo refinery show` reads the record
+  into a one-line `Verdict:`; **no process table required**, which is what
+  misled the original diagnosis.
+
+- **The runner's liveness and the gate's own output are reported separately
+  (mg-8595).** A dead runner cannot emit a heartbeat; a hung gate subprocess
+  cannot emit output while its runner keeps beating. So the pair separates
+  *three* states the old instrument collapsed into one: runner gone (heartbeat
+  stale), gate working (heartbeat fresh, output climbing), and gate silent under
+  a live runner (heartbeat fresh, no output). The third is reported **as
+  unresolved** — "whether the gate is working or stuck cannot be told from
+  here" — rather than guessed at, and the timeout is named as the bound on it.
+
+  Nothing in the record is derived from **workspace state**. That was the trap:
+  the original misdiagnosis was reinforced by a frozen worktree mtime, which
+  felt like a second piece of evidence and was not — a long test suite *reads*
+  files rather than writing them, so a frozen mtime is exactly what a healthy
+  slow gate looks like. Two observations that both look identical under either
+  hypothesis add confidence and no information. Any signal built on workspace
+  state would reproduce the defect with extra steps.
+
+- **A gate is bounded at 60 minutes, and a killed gate says what it was
+  observed doing (mg-8595).** Configurable per repo (`[gates] timeout`, or
+  `"0"` to remove the bound); an unreadable value keeps the default rather than
+  silently removing it. The bound ships *with* the heartbeat deliberately —
+  alone it would only convert "indistinguishable" into "killed arbitrarily" —
+  so the failure names elapsed time, lines produced, and how long the gate had
+  been silent, plus how to raise the bound.
+
+  The gate runs in its own process group and the whole group is killed. `sh -c`
+  forks rather than execs for anything compound, so killing the shell alone left
+  the real work running and holding the output pipe open: a timeout that should
+  have taken effect at once instead stalled for the full pipe-drain delay, and
+  the killed work kept using the worktree it had been told to stop using.
+
+- **`pogo refinery cancel` reaches a processing merge request (mg-8595).** It
+  previously refused anything but `queued` — the state least in need of it —
+  which meant a genuinely hung gate had no recovery short of restarting pogod.
+  The two cases stay distinguishable rather than both reporting "cancelled": a
+  queued MR is removed and resolved immediately, while a processing MR has its
+  running gate killed and stops at the next step boundary. The second is a
+  **request, not a result** — an MR that had already pushed to the target has
+  landed, and cancel does not pretend otherwise.
+
+  A cancelled MR fires neither `OnMerged` nor `OnFailed` and does not count
+  against its author's failure streak. It did not fail on its merits, and firing
+  `OnFailed` would reopen a work item on an operator's action — the precise harm
+  the originating incident caused by hand.
+
+- **The Codex trust-dialog hook stops giving up at a fixed 12 seconds, and Codex
+  finally has a measured composer-ready marker (mg-86e7, refs drellem2/pogo#91).**
+  This is the last of the three providers to lose the fixed wall-clock
+  trust-dialog bound. claude's half landed at `d8e8a2b` (mg-ea45) and cursor's at
+  `a815c10` (mg-8792); codex was left owing, and this is that debt.
+
+  **Why it was owed rather than folded in.** The bound was never the hard part —
+  the GUARD was. claude and cursor both gate the watch on a composer-ready
+  marker, so the moment the composer renders the hook returns without sending
+  anything. That gate is what makes a widened window safe: `trustDialogMarker`
+  matches on PTY *text*, and the harness echoes the nudged task into the TUI, so
+  a work item whose body merely quotes the dialog matches the marker. While the
+  window was short the hook had almost always expired before the echo arrived;
+  widen it and the hook is still watching, and on an already-trusted directory
+  (`Registry.Respawn` re-enters the same `Dir`, and Codex persists trust in
+  `~/.codex/config.toml`) it would match the echo and press Enter into a live
+  composer. Codex had no marker to gate on, so widening first would have shipped
+  the widened window with no false-positive guard.
+
+  **The marker existed; the first pass looked at the wrong part of the screen.**
+  `PromptReadySentinel` had been empty since Codex landed, documented as "its
+  ratatui composer has no stable ready string". Measured against a live Codex CLI
+  0.132.0 at pogo's 200×50 default, the composer PLACEHOLDER indeed has none — it
+  **rotates** between at least five strings (`Explain this codebase`, `Use
+  /skills to list available skills`, `Run /review on my current changes`, `Find
+  and fix a bug in @filename`, `Summarize recent commits`). Measuring once would
+  have picked one and shipped a sentinel that matched a fifth of the time, which
+  is worse than none: a sentinel that usually misses makes every spawn pay the
+  full `InitialNudgeTimeout` as dead time, silently. But the status box Codex
+  draws beside it is stable, and `/model to change` is a slice of it carrying no
+  model name and no version digits. Present 8/8 where the composer is up (5
+  already-trusted spawns + 3 after dismissal), **absent 5/5** with the dialog up
+  and never dismissed — the dialog blocks the TUI and paints nothing else, which
+  is what makes the guard sound. First sighting ~190ms. The box is content-sized
+  rather than terminal-relative (60 columns at both 200×50 and 80×24, 73 for a
+  long model name), so the marker never wraps. Full measurement in
+  `docs/investigations/codex-nudge-calibration.md`.
+
+  **What changed:**
+
+  - `internal/codex`: `TrustDialogTimeout` is sourced from the provider's own
+    `initialNudgeTimeout` (12s fixed -> 30s cold-start budget), the loop body is
+    split into a timing-injectable `watchForTrustDialog` the way claude's and
+    cursor's are, a `composerReady` gate returns the hook early, and the deadline
+    arm now records the sentinel-drift signature. The six race controls are
+    ported from `internal/cursor`.
+  - `internal/codex`: `Provider.Nudge.PromptReadySentinel` is set, so
+    `WaitForReady` no longer falls back to pure wait-idle for Codex.
+  - Each marker is listed in a spaced **and** a spaceless form. `agent/nudge.go`
+    matches sentinels raw, and Codex draws the trust dialog glyph-by-glyph with
+    cursor positioning (spaces vanish under `StripANSI`) while drawing the status
+    box with real spaces. If the box ever moves onto the dialog's render path the
+    spaced form would silently stop matching — the gh#76 / mg-d06a trap.
+    `TestReadySentinelsAreCollapseSafe` pins the rule;
+    `codex.composerReady` sidesteps it by collapsing both sides.
+  - `internal/agent`: three doc comments citing Codex as the example of a
+    provider with no stable ready marker are corrected. The code arms they
+    describe stay — `PromptReadySentinel` is still optional in the `Provider`
+    contract, so a new or out-of-tree provider can arrive without one — but every
+    provider pogo ships now declares one.
+
+- **The Cursor trust-dialog hook stops giving up at a fixed 12 seconds, and the
+  Claude hook's widened window is finally proved to end when its agent does
+  (mg-8792, refs drellem2/pogo#91).**
+  A trust dialog that renders after the watching hook has already returned is
+  never dismissed, and the stall is *permanent*: the dialog renders with no
+  composer, so the readiness sentinel never matches, the kickoff prompt is never
+  delivered, and the polecat sits there until a human answers by hand. That is
+  the failure CloverRoss reported 3-in-3 from an Ocean droplet, and their
+  `pogo nudge <id> "1"` rescue was literally answering the dialog — option 1,
+  *"Yes, I trust this folder"*.
+
+  **The bound was the bug, not its value.** A fixed wall-clock timeout set at
+  spawn is the same shape of defect as the one it is trying to catch, so a bigger
+  number moves the failure rather than removing it. Both hooks now take their
+  bound from the provider's own cold-start budget — the one the spawn path is
+  already willing to wait for the composer — so there is ONE budget rather than
+  two that disagree, and the hook that unblocks the composer cannot stop watching
+  before the spawn path stops waiting for it.
+
+  **What was already shipped, and what this adds.** Claude's half landed at
+  `d8e8a2b` (mg-ea45): the bound moved to `DefaultNudgeProfile.InitialNudgeTimeout`
+  and a `composerReady` gate came with it. This change adds the control that
+  half was missing and takes the cursor sibling:
+
+  - `internal/cursor`: `TrustDialogTimeout` is sourced from the provider's
+    `initialNudgeTimeout` (12s fixed -> 30s cold-start budget), the loop body is
+    split into a timing-injectable `watchForTrustDialog` the way claude's is, and
+    the four race controls are ported.
+  - `internal/claude` **and** `internal/cursor`: a positive control proving the
+    watcher terminates on agent exit.
+
+  **Why that last one is not a formality.** Every other test in both race files
+  proves the hook *fires*, and all of them pass just as well on an implementation
+  that never stops — which is exactly the cost of this fix, because the window
+  grew and the hook runs once per spawn. A watcher that outlives its agent is a
+  goroutine leak that compounds. The new control drives a scripted agent that
+  renders neither marker under a 90-second budget the test will not sit through,
+  so a prompt return can only have come from the `a.Done()` arm, and it asserts
+  the premise both ways rather than trusting it. Verified by mutation: deleting
+  that arm fails it in both packages, and restoring the fixed 12s fails the
+  cursor bound pin.
+
+  **The widened window is closed by the composer-ready gate, not by the clock.**
+  `trustDialogMarker` matches PTY *text*, and both harnesses echo the task into
+  the TUI — a work item whose body merely quotes the dialog matches. A short
+  window hid that by expiring before the echo arrived; a longer one does not. So
+  the gate is what makes the window safe: the moment the composer renders the
+  hook returns without sending anything, which also means a healthy spawn never
+  pays the longer budget at all.
+
+  **`internal/codex` deliberately still carries its fixed 12s**, and that is
+  recorded in the code rather than left to be rediscovered. Codex has no
+  composer-ready marker to gate on — `Provider.Nudge.PromptReadySentinel` is
+  empty because its ratatui composer has no stable ready string — so widening its
+  window would remove the timing failure by introducing the keypress-into-a-live-
+  composer failure the gate exists to prevent. Establishing a Codex ready marker
+  is an empirical job against a live CLI, not a code change; it is owed as
+  **mg-86e7**.
+
+  **drellem2/pogo#91 stays open.** It closes when CloverRoss confirms their
+  3-in-3 became 0-in-3, not when this lands — as promised on the issue.
+
+- **The composer-ready gate stops being able to miss the marker it is watching
+  for, in both the Cursor and Claude trust-dialog hooks (mg-9270).**
+  The gate is what makes those hooks' widened watch windows safe: it is checked
+  before the dialog marker on every tick, and a tick that sees the composer
+  returns without sending a keystroke. But it was fed an 8KB read out of a 64KB
+  ring, polled every 250ms, looking for a marker that is only on screen for a
+  *window* — Cursor **replaces** "Plan, search, build anything" with
+  "Add a follow-up" the moment the first turn starts. So a marker a tick missed
+  was a marker no tick was offered again. If more than 8KB of PTY output landed
+  between two polls across the composer→turn transition, the gate never closed,
+  and the hook watched out its full budget with the echoed task in view — which
+  is precisely the window in which a work item whose body merely *quotes* the
+  dialog matches `trustDialogMarker` and gets a stray `a` (or Enter) typed into a
+  live composer.
+
+  **Not a regression; a cost that grew.** The ordering guarantee always held, and
+  both providers shipped this shape. What changed was the consequence: mg-8792
+  and mg-ea45 widened the bounds (claude 8s→60s, cursor 12s→30s), so a gate that
+  failed to close went from a short exposure to a long one. This is advisory 1
+  from the mg-d631 review of drellem2/pogo#101, recorded rather than left to
+  evaporate with the PR.
+
+  - **Widen the read.** Both hooks now scan `composerScanBytes`, sourced from the
+    new exported `agent.OutputRingBytes` rather than a literal, so the read width
+    and the ring capacity cannot drift apart. Widening is safe *because* both
+    predicates read the same buffer and `composerReady` is checked first: any
+    composer evidence in the window beats any dialog evidence in the same window,
+    which is the ordering the gate already rested on.
+  - **Put the post-turn placeholder in the ready set.** `cursor.composerReady`
+    now reads a set, `composerReadySentinels`, the way claude's has read
+    `DefaultNudgeProfile.PromptReadyAlternates` all along. That also fixes the
+    reword-brittleness flagged separately in the same review: cursor's gate rested
+    on ONE exact string. Claude needed no new sentinel — `shift+tabtocycle` and
+    `?forshortcuts` are mode-bar markers, not properties of an *empty* composer,
+    so its set already spanned the transition; the read width was its whole half.
+  - **Every sentinel is now matched against collapsed text on both sides.** This
+    is the gh#76 / mg-d06a caveat, which has bitten this exact subsystem once: TUIs
+    position footer text with per-word cursor-column moves, so inter-word spaces
+    vanish under `StripANSI`. Collapsing the needle as well as the haystack means
+    each marker covers both renderings instead of only the era it was captured in
+    — claude's spaced primary sentinel now matches a column-move footer, and its
+    spaceless alternates now match a spaced one.
+
+  **Proved by mutation, not by assertion count.** Each provider gets a real-PTY
+  test that scripts the composer marker, then ~12KB of output on top of it — over
+  the old 8KB read, under the 64KB ring, so the marker is pushed out of the old
+  window while still being retained by the buffer. The premise is asserted *both
+  ways* before the hook runs (invisible at 8KB, present at `agent.OutputRingBytes`)
+  and deliberately reads the ring's capacity rather than the gate's chosen width,
+  so narrowing the gate fails the real assertion instead of quietly invalidating
+  the premise. Restoring the 8KB read makes both tests fail with the production
+  consequence — *"hook sent the accept key into a live composer"* — and dropping
+  cursor's post-turn sentinel fails a second real-PTY test that scripts a
+  post-turn composer with no pre-turn placeholder anywhere.
+
+  **`internal/codex` is untouched and still reads 8KB.** It has no composer-ready
+  gate to blind: `Provider.Nudge.PromptReadySentinel` is empty because its ratatui
+  composer has no stable ready string, which is also why its window is still a
+  fixed 12s. Establishing that marker is the empirical job already owed as
+  **mg-86e7**; widening codex's read before it exists would change nothing.
+
+- **The `--body="` ratchet stops punishing the prose that warns against `--body="`,
+  and stops deciding by nesting depth (mg-a9f7).**
+  The mg-d91f ratchet's whole design premise is that prose is exempt — its header
+  says so at `internal/agent/bodyratchet_test.go`: *"An example line is one inside a
+  fenced code block, or indented far enough to be an indented code block. Prose and
+  comments are exempt on purpose."* The implementation classified an example line as
+  `strings.HasPrefix(line, "    ")`, which is not that property. Four leading spaces
+  is where every sentence inside a nested list already sits, so a prose sentence
+  containing the literal was counted as *teaching* the hazard purely on account of
+  how deeply nested the list it appeared in happened to be.
+
+  Measured on the shipped corpus with the same sentence inserted at each template's
+  own continuation column: the old predicate flagged it in
+  `templates/polecat-architect.md`, whose steps indent to 5 columns, and passed it in
+  `templates/polecat.md`, which indents to 3. **Identical text, opposite verdicts, and
+  the only difference was list depth.** Polecat 78d2 hit this during mg-78d2 and
+  reworded around it — correct for a polecat in someone else's file, and the reason it
+  was found at all, but the next author to document the hazard inside a nested list
+  meets the same wall with no reason to expect it.
+
+  **Fixed by implementing the rule a markdown renderer actually uses, not by widening
+  an exemption.** An exemption naming prose patterns reproduces the defect with more
+  steps — the next sentence phrased differently is punished again — and it would leave
+  the header describing a property the code does not have. Two properties now decide
+  it, and neither can be moved by nesting depth: indentation is measured **relative to
+  the enclosing list item's content column**, so a continuation line is a continuation
+  at any depth; and an indented code block **cannot interrupt a paragraph**, so it has
+  to open after a blank line. A run-on indented sentence is prose.
+
+  Bare `{{...}}` template-directive lines are skipped rather than treated as markdown.
+  This is not cosmetic: `{{if .Branch}}` sits at column 0 in the middle of step 4 of
+  `polecat-architect.md`, and letting it close the enclosing list item put every
+  following line back at base 0 — re-creating the same bug one paragraph further down
+  the file. It did, until it was measured.
+
+  **Both directions are pinned, and on the real corpus.** The threshold was *not*
+  raised — raising it to 5 would have been the wrong fix, and the pre-existing test
+  that builds its indented example at exactly 4 spaces still passes, which is what
+  distinguishes the two. Beyond that: prose is inserted into **all 403 list items** of
+  every shipped template at each item's own content column and the tree stays green;
+  an unsafe indented example is inserted at those same 403 depths and **403/403 are
+  caught**. Either control alone is satisfiable by a broken scanner — one that never
+  classifies anything as an indented example passes the exemption half, and the old
+  whitespace predicate passed the catching half — so they are only worth anything
+  together. Neither test carries an anchor string: the property is about depth, so the
+  tests find the depths instead of being told them.
+
+  No prompt content changed. mg-d91f deliberately separated the ratchet from the
+  template sweep, and this keeps that separation.
+
+- **The nightly deploy job resolves `git` by running it, like every other tool it uses (mg-b72a).**
+  `scripts/launchd/pogo-deploy.sh` proves `mg` and `pogo` by executing the candidate, but
+  pinned `GIT=/usr/bin/git` on the reasoning that git ships in `/usr/bin` on every macOS.
+  It does — but that path is the Xcode Command Line Tools *shim*, and a damaged install
+  behind it makes it fail every invocation, `git --version` included, with
+  `unable to locate xcodebuild` and exit 71, while staying executable and on `PATH`. `-x`
+  and `command -v` cannot tell it from a healthy git. `git` is now resolved the way `mg`
+  already was: candidates in order, each required to print `git version` before it is
+  accepted, preferring a real Homebrew/local git while keeping the shim as a fallback so a
+  CLT-only box still deploys. An operator-pinned `$GIT` is still honoured, and now
+  health-checked too. **This is a consistency change; no such breakage has been reproduced.**
+  On a host whose only git is a healthy `/usr/bin/git` the candidate list collapses to that
+  one path, and the only behavioural difference is that a broken shim would abort once, with
+  an alert, instead of failing separately inside every clone/fetch/rev-parse in `sync_src`.
+
+- **`scripts/pogo-deploy_test.sh` stops depending on the health of the host's Xcode install (mg-b72a).**
+  The suite hardcoded `GIT=/usr/bin/git` and called a bare `git` off `PATH` for its repo
+  fixtures, so its verdict rested on exactly the assumption the runner now refuses to make.
+  It resolves one git and uses it throughout, and the new `resolve_git` assertions run
+  against **fakes**: an executable binary that reproduces the shim's exit 71 with empty
+  stdout, and one that exits 0 while printing nothing. Substituting the candidate list is
+  what makes them mean something — on a host with a working git the real list can never
+  produce a rejection, so a check exercised only against the real list would report green
+  whether or not it existed.
+
+- **`--help` stops truncating the runner's own documentation (mg-b72a).**
+  It printed a hardcoded `sed -n '2,80p'` line range, which had already drifted and was
+  cutting the ENV list off mid-list — doc rot of the quiet kind, since the output still
+  looks complete. The header is now bounded by the `set -u` sentinel that ends it.
+
+- **A dead polecat's worktree is reclaimed on ITS OWN work item, not on
+  whatever branch is checked out inside it (mg-bdda).** The GC's two worktree
+  phases classified ticket state from different strings: phase 1 read the
+  checked-out branch of a registered worktree, phase 1b read the directory name
+  of an orphan dir. For one dead owner and one directory name they reached
+  opposite verdicts, decided purely by whether git still held the worktree
+  registration — owner `0047` archived and dead, tree parked on foreign
+  in-flight `polecat-a773`, was KEPT while the identically-named orphan dir was
+  removed. A `git worktree prune` between two sweeps flipped the answer on the
+  same files, and a dead tree could be pinned indefinitely by a foreign ticket
+  that never concludes.
+
+  Both phases now key on the **owner** — the directory's name, the same key
+  `mg-dd92` moved liveness to. That is what the directory is a fact about: the
+  tree was created for that polecat's work and nothing else comes back to it.
+  Nothing is lost by reaping it, because the ref keeps its own gate (phase 2
+  still classifies branches by their own name), so a tree parked on an
+  unconcluded foreign branch is merely un-checked-out with every commit still
+  reachable, and uncommitted files are held back by the mg-ee02 dirty guard.
+
+  **The branch is now a fallback, not a second gate.** Keying on the owner
+  alone would strand every worktree whose basename resolves to no work item —
+  legacy layouts, hand-made review trees — which is the symmetric defect gh #94
+  warned against: never reaping a dead tree. When the owner resolves to nothing,
+  the branch decides and the GC line says which key it used (`branch's ticket
+  archived (owner "workshop" resolves to no work item)`). It is deliberately not
+  a must-*also*-be-concluded condition; that direction would preserve the pin
+  this removes.
+
+  One direction becomes more conservative as a result: a tree whose owner is
+  still in flight is now kept even when the branch inside it has concluded, since
+  a respawn for that work item lands on the same path.
+
+  Phase 1b's lack of a `WorktreeDirty` guard is now stated rather than implicit:
+  `WorktreeDirty` shells out to `git status`, and an orphan dir has no `.git` by
+  construction, so there is no index or HEAD to call its files "uncommitted"
+  against.
+
+- **A declined prompt sync now reaches the agent whose prompt was declined, instead
+  of only a log no agent reads (mg-c3f0).**
+  `pogod` has always reported this condition correctly — it names the file, names
+  the `.dist` sidecar, states the remedy, and links the doc (mg-f86c). It reported
+  it at **every boot for seven days**, and nobody acted, because `pogod.log` is on
+  no agent's schedule. The mayor ran 13-day-stale guidance the whole time and it was
+  found by accident, by the architect reading a log while writing an unrelated design
+  (mg-3ebe item 5). **The message was never the defect; the channel was.** An alarm
+  with no reader is worse than silence, because the system genuinely reports the
+  problem and therefore *audits as instrumented*.
+
+  Full enumeration of every pogod log condition with an actor who never hears —
+  15 of ~90, ranked, plus the ones that already have a channel and the ones that
+  correctly have none — in
+  [`docs/investigations/pogod-log-conditions-with-no-reader-2026-07-30.md`](docs/investigations/pogod-log-conditions-with-no-reader-2026-07-30.md).
+
+  **Addressed to the agent that can act, resolved the way `ListPrompts` resolves it.**
+  `mayor.md` → the **configured coordinator name**, not the literal `"mayor"`: the file
+  is always `mayor.md` (mechanism) but the agent it starts as follows
+  `[agents] coordinator` (policy), so a hardcoded name would misroute on any consumer
+  who renamed it — and mail to a name no agent reads is silently accepted into a
+  phantom mailbox and lost, which would recreate this defect with extra steps.
+  `crew/<n>.md` → `<n>`. Everything else — `templates/polecat*.md`,
+  `pm/pm-template.md`, nested or empty stems — falls back to the coordinator and is
+  marked unowned. No branch synthesizes a name from a path it did not recognize.
+
+  **Not `human`, and the reason is measured rather than asserted.** The `human`
+  maildir holds **988 unread** — 23% of the fleet's entire 4279 — against **0** for
+  `mayor`, **0** for `doctor`, and **10** for the worst of 269 crew-shaped mailboxes.
+  Routing a fleet condition to `human` looks instrumented and is not. Surfaced en
+  route and not previously noted: **839 polecat mailboxes hold 3016 unread**, so
+  mailing an *affected agent* is only a read channel when that agent is standing, not
+  ephemeral.
+
+  **Rate-limited by condition, not by message, and it has to be on disk.** A declined
+  sync is a steady state, not an event: `InstallPrompts` leaves the user-edited
+  canonical untouched, so it keeps its **old** embed stamp, so the next boot compares
+  the same stale stamp against the same shipped embed and declines again. The conflict
+  set is re-derived identically at every boot — which is why the log line fired seven
+  times — and in-process memory cannot suppress it, because **the process restart is
+  the tick.** `~/.pogo/prompt-sync-notices.json` therefore records, per path, the
+  **content hash of the `.dist`** plus the last delivery time. It mails on first sight,
+  on a *changed* declined update (the divergence grew, so the recipient's merge job is
+  bigger than the one they were told about), and then at most once per **72h** while
+  unreconciled. A reconciled conflict is **forgotten**, so a recurrence is a fresh
+  transition rather than inheriting a stale quiet window. 72h and not daily because
+  reconciling a prompt is a judgement about which local edits are load-bearing, not a
+  command to run — a nag arriving faster than the work can be scheduled trains the
+  recipient to filter it, which is the original failure mode one level up.
+
+  **No log tailer.** pogod knows it declined the sync at the moment it declined it, so
+  this runs at the decision point from the `InstallResult` already in hand. It runs
+  **before** the crew auto-start sweep, which is load-bearing rather than incidental:
+  the notice is in the affected agent's maildir *before that agent starts*, so it hears
+  on its very first mail-check of the boot that declined its prompt.
+
+  **It can fail loudly — three ways.** A `prompt_sync_declined` event goes on the spine
+  for **every** conflict on **every** boot, suppressed ones included, so a notifier that
+  has quietly stopped reads as a run of `notified:false, reason:new` rather than looking
+  identical to a fleet with no conflicts. A **failed send is never recorded as
+  delivered**, so the next boot retries — there is no path where a clean-looking state
+  file claims an announcement that never happened. And every state-store failure biases
+  toward **noise, never silence**: a corrupt or unreadable file makes the notifier forget
+  and re-announce, costing at worst a duplicate mail, because failing toward silence is
+  the defect being fixed.
+
+  The mail states the remedy as a **decision, not a command** — it shows `diff -u` and
+  deliberately does not hand out `cp <f>.dist <f>`. The only reason the canonical file
+  was preserved is that its local edits might be load-bearing; a paste-ready copy-over
+  would hand out the single destructive action this mechanism exists to prevent, with
+  the daemon's authority behind it. Pinned by test, as is the renamed-coordinator
+  misroute this could have shipped with.
+
+  **The logging is untouched.** mg-f86c already made the line correct and the fix is
+  live; architect's first draft recommended improving it and withdrew that after reading
+  the code. Reconciling the one currently-stale file is mg-4999 and stays separate —
+  it clears today's instance and leaves the class defect alone.
+
+- **`internal/claude`'s 2-in-3 `-race` flake was a race in the test fixtures, not
+  in the modal watcher — and the production path is now proved race-free rather
+  than assumed to be (mg-d578).**
+  `TestModalHook_Case3_RateLimitFiresOnEventsStale` failed **10 of 15** full-package
+  runs under `go test -race` on a pristine tree, and passed when run alone. After
+  this change it fails **0 of 20**. Both numbers are measured on the full package
+  under `-race`; a single green run is not evidence about a 2-in-3 flake.
+
+  **What it actually was.** Every one of the ten failures was the same single
+  race, and the report named it precisely: a **write** by
+  `setEventsStalePollIntervalForTest` (the test-only knob) against a **previous
+  read** of `eventsStalePollInterval` by `dispatchEventsStale`, in a goroutine
+  created by `TestModalHook_Case1_...` (7 of 10) or `Case2_...` (3 of 10) — the
+  *preceding* tests. Two fixture defects had to meet:
+
+  - The poll interval was a mutable package-level `var` that existed only so tests
+    could shrink 30s to 20ms. `dispatchEventsStale` reads it once at goroutine
+    start, so the read is racy against any other test's `defer`-restore.
+  - Every case started the watcher with a bare `go RunModalHook(...)` and only
+    `defer cancel()` — **signalling** the watcher to stop without **waiting** for
+    it. Watchers therefore outlived their test and kept running into the next one,
+    which is how a Case1 goroutine's startup read met Case3's write.
+
+  Case3 was blamed because it happened to be the test holding the baton when the
+  detector fired, not because it was at fault.
+
+  **The fix does not serialise anything.** `-p 1`, dropping parallelism, or a
+  mutex around the knob would each have made the suite green while hiding a real
+  data race exactly as well as they hid this one. Instead the shared state is
+  gone: the poll interval moved onto `IdleGatePolicy.PollInterval`, per-matcher
+  config that is built before the watcher's goroutines exist and never written
+  afterwards, with `defaultEventsStalePollInterval` (30s, unchanged) as the
+  production value. The `var` and its test-only setter are deleted. A new
+  `rig.startHook` helper starts the watcher and, on cleanup, cancels **and joins**
+  it — so no future case can leak a watcher into its successor, and it fails loudly
+  if a watcher does not exit within 5s of cancel.
+
+  **The production path is race-free, and that is a measurement.** The verdict
+  "it was only the fixtures" is the comfortable one, and the fixture race was
+  reported against Case3 regardless of which goroutine truly raced — so removing
+  it would quiet the package whether or not `modal_hook.go` was clean. The new
+  `TestModalHook_ProductionPathRaceControl` closes that gap: four watchers running
+  the real `DefaultModalMatchers` (only the poll cadence overridden, on a copy —
+  never the shipped slice in place), sharing one real `eventsActivityTracker` and
+  one real `usageLimitCoordinator`, with production-shaped ANSI modal output
+  written in a tight loop while extra goroutines hammer `MarkerVisible` /
+  `MarkerLastSeen` / `LastChunk` and the tracker's `ingest`/`LastSeen`/`Touch`.
+  It asserts the dismissal path, the suspected-usage-limit stage, the event
+  emitters and the coordinator's episode close all actually executed, so a watcher
+  that quietly idled cannot pass as "no race found".
+
+  **Verified by mutation, not by passing.** Deleting `MarkerVisible`'s
+  `s.mu.Lock()` makes the control fail under `-race` with repeated
+  `WARNING: DATA RACE` reports naming `modalScanner.Write` against
+  `modalScanner.MarkerVisible`; restoring the lock returns it to green. The
+  control can therefore detect the class of defect it is asserting the absence of.
+
+  No shipped behaviour changes: production reads the same 30s cadence, now from a
+  constant instead of a variable nothing in production ever wrote.
+
+- **A work item can declare that merging is not completion, and the refinery
+  stops truncating the tickets whose work comes after the merge (mg-d86e).**
+  pogod's merge-success path marked the authoring polecat's work item `done` and
+  stopped the process the moment a branch landed (gh #35). That is right for the
+  common case, where the branch **is** the deliverable, and wrong whenever the
+  merge is a step: a release still has to tag and publish, a change may have to
+  be verified in its installed state, an announcement or an issue close happens
+  afterwards. For those the completion was premature by construction, and
+  because the same path also stopped the agent, the remaining work could not
+  happen even in principle.
+
+  Measured twice in ten minutes on 2026-07-29: **mg-ca3c** (pogo v0.7.0) and
+  **mg-9f17** (macguffin v0.3.0). Both merged a version bump to `main`, both were
+  marked done, both polecats were stopped before the tag step, and neither
+  release existed. The end state read as success from every angle — `mg show`
+  said `done`, the result sidecar said `completed_by: refinery`, the refinery
+  mailed `MERGED`, CI was green on the bump commit — while `git describe` still
+  said `v0.6.0`. It was caught only because a human checked the tag instead of
+  believing the mail. This is worse than a missed step, because the completion is
+  positively wrong rather than absent: an item left `claimed` shows up in every
+  sweep, whereas `done` + sidecar + `MERGED` mail is an assertion of success that
+  suppresses exactly the checks that would catch it.
+
+  **The refinery cannot know whether a merge completes a ticket; the ticket
+  knows.** An item tagged `post-merge-work` now declares that merging it is a
+  step, and pogod reads that tag before acting on the merge. A declaring item
+  takes the lane `--defer-done` and PR flow already use: the refinery merges and
+  mails as usual, the item stays `claimed`, the polecat keeps running and calls
+  `mg done` itself, and the bounded 15-minute backstop still reaps and escalates
+  one that never ends its lifecycle.
+
+  ```bash
+  mg new --title="Cut v0.8.0" --tags=release,post-merge-work ...
+  mg edit mg-XXXX --add-tags=post-merge-work   # on an item that already exists
+  mg list --tag=post-merge-work                # every outstanding one
+  ```
+
+  The declaration is set by the **filer**, on the item, which is the point.
+  `--defer-done` and PR-flow classification both depend on the *submitter*
+  knowing this merge is not the end — one is a flag passed at submit time, the
+  other is inferred from a target ref chosen at submit time — and a release
+  polecat merging a version bump to the default branch gets both wrong while
+  doing exactly what its ticket said. A tag was chosen over an item-schema field
+  for the same reasons macguffin's `declares-remainder` is one: `mg list --tag=`
+  finds every outstanding one, `mg show` renders it, `mg edit --add-tags` reaches
+  an item that already exists, and an operator can retract it. It **composes**
+  with `declares-remainder` rather than duplicating it — that tag says something
+  *else* must carry the work forward, this one says *this* item is not finished.
+
+  **An item pogod cannot read takes the same lane as a declaring one.** "I could
+  not read the ticket" is not evidence that the merge completed it, and this
+  whole defect is a completion asserted without the standing to assert it. The
+  cost of declining wrongly is bounded — the polecat completes itself as its own
+  protocol already tells it to, and the backstop catches it inside 15 minutes;
+  the cost of completing wrongly is a silently truncated ticket that nothing
+  catches. The two are not symmetric, so they are not treated symmetrically.
+
+  **Event-driven completion is not removed, and the tests prove it in both
+  directions.** The negative half — a declaring item survives its own merge — is
+  worth nothing on its own, because it passes just as well with the completion
+  path deleted, which would re-open the polecat leak gh #35 exists to close. So
+  every case is run against the same probe and asserted both ways: `mg-ca3c` and
+  `mg-9f17` survive their merges, and `mg-bdda` (an ordinary fix that merged the
+  same day) is still auto-completed and stopped, with the probe recorded as
+  actually consulted. Two of those cases run end to end against a real bare
+  origin, a real refinery loop, and a real fast-forward merge, because the
+  mg-7746 version of this bug survived a passing unit suite.
+
+  The coordinator's `MERGED` mail now says so too. A declaring item's mail
+  carries a `Completion: NOT THIS MERGE` line naming the item and the tag, and
+  tells the reader not to archive on the strength of the mail — the same
+  obligation the PR-flow line already carries, for the same reason.
+
+  **Not changed:** the shipped polecat template, which still tells a polecat it
+  will be stopped at merge. That remains true for every item that declares nothing. A
+  polecat working a declaring item outlives its merge and finishes under steps
+  7–8 of its own protocol, which already cover exactly that case.
+
+- **The PM roadmap block gains the 7-day window it asks for, and stops letting a
+  refused input degrade the Trajectory section silently (mg-d8ea).**
+  mg-21b1's `pogo check-prompts` landed ~30s earlier and corrected the two
+  refused invocations in `internal/agent/prompts/pm/pm-template.md` — it could
+  not enable that gate without fixing the corpus it fails on. This change keeps
+  main's corrections and adds the parts a flag-surface check cannot supply.
+
+  **The window is now an invocation rather than an instruction to improvise.**
+  Main says the closed status is `done` and that you bound the window yourself
+  off `mtime`, which is true and leaves the PM to invent the pipeline at the
+  moment it is regenerating a Daniel-facing artifact. There is no closed-at
+  field on a work item at all — `mg list --json` emits `created` and `mtime` and
+  nothing else temporal — so this is not a flag anyone forgot; it cannot be done
+  server-side in any spelling, and it is the reason `Recently shipped (last 7d)`
+  had no mechanism behind it. The block now carries the `date`/`jq` form,
+  verified on live data (76 done items tagged `pogo`, 69 inside the window).
+
+  **`mtime` is named as the proxy it is.** For a done item it is normally the
+  close, but it moves if anyone edits the item afterwards, so a stale item that
+  got a tag fix last night reads as freshly shipped. Day granularity (`[:10]`)
+  is deliberate: it sidesteps the mixed UTC/offset formats in that field, and a
+  roadmap bucket does not need the hours.
+
+  **The silent path is closed in prose, which is the part that actually
+  failed.** `pogo-private/docs/roadmap.md@7d07714` (2026-07-29T17:05, the last
+  regeneration) has a `## Trajectory` section reporting throughput — "28 merges,
+  one release, five polecats still working" — and no token totals and no
+  tag-level bottleneck figures, both of which the skeleton at the bottom of this
+  same template section specifies. The section was produced without the per-item
+  data and said nothing about the omission. What filled the space was dense,
+  specific prose, so the gap reads as an editorial choice; anyone auditing this
+  by reading roadmaps would have concluded the section was fine. The template
+  now says: on a refusal, name in the section which input you could not get,
+  rather than improvising an invocation or dropping the section. A corrected
+  flag does not fix that — the next refused input for any other reason
+  reproduces it.
+
+  **Two faults in this block, two detectability classes.** `--tag`/`--since` are
+  unknown flags (exit 2, cobra); `--status=closed` is a legal-looking value mg
+  rejects (exit 1, structured JSON error). `pogo check-prompts` documents the
+  second as deliberately out of scope — finding it means running the command,
+  not reading `--help` — so the `done`-vs-`closed` half of `:535` is pinned here
+  by test rather than by the gate. Both errors go to stderr, so neither poisons
+  a `--json` pipeline; the failure is a PM seeing an error and deciding what to
+  do, which is exactly what went wrong.
+
+  `prompt_test.go` pins the accepted forms, the client-side window, the `mtime`
+  caveat, the anti-silent-degradation instruction, and the absence of all three
+  refused shapes. The absence assertions are scoped to the ```bash fence rather
+  than the file, because the prose has to QUOTE each refused invocation to
+  explain it — the same trap mg-4bb9 hit, and the same distinction
+  `check-prompts` draws with its `promptcli:retracted` marker. The extractor
+  fails the test rather than returning empty if the fence moves, since an
+  absence assertion handed an empty string reports the prompt clean having
+  examined nothing.
+
+- **`pogo refinery history` stops silently truncating, and gains `--since` to
+  read past the cap (mg-e9ee).** The command was capped at 100 rows with no way
+  to see further and no indication the cap had bitten. Measured on this machine
+  2026-07-30 05:24Z: `pogo refinery history | grep -c '^mr-'` → 100, `--json`
+  → 100, and `--help` listed no `--limit`, `--all`, `--since`, or pagination.
+
+  **The cap is not a display limit — the rows are deleted.** `pruneHistoryLocked`
+  removes entries past `MaxHistoryLen` (100) / `MaxHistoryAge` (7d) from the
+  in-memory history and persists the deletion. Because the count cap bites first
+  at any real merge rate, the retained window is time-shaped without being
+  time-bounded: measured, 100 rows spanning 19 hours. So the flag the ticket
+  asked for could not be built the way it was framed. A `--limit 0`/`--all` over
+  the retained window would have returned the same 100 rows *while looking like
+  it had widened them* — the defect wearing the fix's clothes. There is
+  deliberately no `--all` and no `--limit`.
+
+  What the durable record is: the event log. `~/.pogo/events.log` holds 1533
+  `refinery_merged` + 608 `refinery_merge_failed` + 2 `refinery_merge_cancelled`
+  — 2141 completions against history's 100, a 21× window — and
+  `docs/event-log.md` already designated it "the durable observability spine …
+  survives pogod restarts (unlike the in-memory refinery history)".
+
+  Three changes:
+
+  - **`--since <duration|date>`** reconstructs one row per merge request from the
+    event log and its surviving rotated files (`refinery.HistoryFromLog`).
+    Accepts `7d`/`30d` as well as Go durations and absolute dates; rejects zero,
+    negative, and future bounds, whose only possible output is an empty window.
+    The default path is unchanged and still bounded, so the common interactive
+    case stays fast. **stdout has the same shape either way** — the same `jq`
+    pipeline works with or without the flag, so widening the window does not
+    mean rewriting the consumer.
+  - **The cap is stated whenever it bites.** `pogo refinery history` writes
+    "showing N of an unknown total — retention caps this at 100 entries / 168h
+    and prunes DESTRUCTIVELY" to stderr; stdout is untouched, so pipes are
+    unaffected. `pogo refinery status` prints history alongside the retention
+    that bounds it. Both read the cap from the **running daemon** (new
+    `max_history_len`/`max_history_age` in the status payload) rather than from a
+    constant in the client, so the number printed cannot drift from the number
+    enforced. If the retention cannot be read, the notice says truncation is
+    UNKNOWN — it does not fall silent.
+  - **`--since` fails loudly rather than answering short.** The reconstruction
+    reports whether the log reaches back as far as was asked, and the command
+    exits non-zero when it does not, with `TRUNCATED` on stderr. A consumer that
+    cannot tell whether it saw everything is back where it started, so the
+    signal is in the exit code where `pipefail` catches it — not only in prose.
+    The coverage line is printed **whether or not the bound bit**: "no bound
+    stated" and "no bound" are indistinguishable to a reader, which is the
+    original defect in one sentence.
+
+  Coverage is decided by whether records were **discarded**, not by where the
+  log happens to start (`events.LogSpilled`). An unrotated log has dropped
+  nothing, so its first record is a beginning and a window reaching further back
+  misses nothing — reporting TRUNCATED there would cry wolf on every fresh
+  install and train readers to ignore the one signal that matters. The test can
+  err one rotation early, understating coverage; that direction is deliberate.
+
+  **The consumer is fixed too.** `internal/agent/prompts/mayor.md`'s step-3
+  orphaned-failure check — the one mg-2ca3 repaired — ran its relationship query
+  over the capped window and documented empty output as "the expected, healthy
+  answer". Over 100 rows, empty cannot distinguish *no orphaned failures* from
+  *the orphaned failure is row 101*, and the check exists to catch work that was
+  lost, which is exactly the case where nobody is watching and the row ages out.
+  The recipe now uses `--since=30d` with `set -o pipefail`, and the claim is
+  corrected: empty means healthy **within the window you named**. mg-2ca3's own
+  warning — *"never judge a branch by `pogo refinery history | tail`: a bounded
+  window can put the merge one line below the cut"* — is now extended to the
+  window itself, because that commit diagnosed the defect at one layer and
+  reproduced it at the next.
+
+  **What the widened window found, measured 2026-07-30.** The default window
+  reports zero orphaned failures; `--since=30d` over 2141 reconstructed MRs
+  reports two, `mg-a9bb` and `mg-abea`. **Both are false positives, and the mode
+  is worth naming**: the classifier groups by `.branch`, so a retry submitted
+  under a *different* branch name splits into two groups and the failed half
+  looks orphaned. Each failed on `polecat-mg-<id>` — a branch that never existed
+  on origin — then merged as `polecat-<id>`. Both items are `archived` with their
+  commits on `main`. So the widened detector's first real run was 2/2 false, and
+  that is now documented in the prompt beside the recipe: a detector that cries
+  wolf on first use is worth no more than the blind one it replaced, and
+  mg-2ca3's report-don't-act discipline is what keeps this from having reopened
+  two landed items. The grouping key is a separate defect and is not changed
+  here.
+
+  **Also fixed:** `refinery_merged`, `refinery_merge_failed`, and
+  `refinery_merge_cancelled` now carry `author` in `details`. Only
+  `refinery_merge_attempted` did, so a reconstruction whose attempt event had
+  rotated out could not name the author (`work_item_id` is close but not the same
+  string — it is the author with any `cat-` prefix stripped). `History()`'s doc
+  comment claimed "most recent first" when the code returns append order,
+  oldest first; a wrong ordering claim is precisely what sends a reader to
+  `| tail`.
+
+  **Checked, per the ticket:** the cap is history-only. `queue` returns the whole
+  queue and is drained rather than pruned; the `lost` list is uncapped; the
+  pruned-ID ring is bounded but already honest — it is what lets
+  `refinery show` answer "pruned from history" instead of a bare "not found".
+  Noted and not changed: `MaxHistoryLen`/`MaxHistoryAge` are not plumbed from
+  config (only `PollInterval` is), so retention is hard-coded. A knob would not
+  have fixed this — an operator raising the cap to 10000 still gets a silent
+  truncation at 10000.
+
+- **The `internal/agent` workspace fixture stops manufacturing 394 git processes
+  and 130 detached background git daemons to establish a commit count — and a
+  fixture git failure now prints its own diagnosis instead of costing a day
+  (mg-ea0c).**
+  `TestFreshenWorkspaceAlertsOnDirtyStaleCheckout` failed one CI job with
+  `fatal: bad tree object 018d7985…` / `error: remote unpack failed: eof before
+  pack header was fully read`, and was green on rerun of the identical commit.
+
+  **Rate, measured before any change.** **1 in 87** CI `test`-job executions since
+  the test landed on 2026-07-21 — every attempt of every `CI` run enumerated; the
+  window's three other `test` failures are all `TestAckHTTP`, unrelated. Locally
+  **0 in 134**: 0/30 with `-count=30` in-suite, 0/96 across 8 concurrent workers
+  driving a fixture mirror, 0/8 full `go test ./...` in the CI shape. A single
+  green run is not evidence about a 1-in-87 flake, and neither is 134 of them —
+  which is why the verdict below rests on the error text rather than on runs.
+
+  **Not mg-d578, and not fixed by it.** That one was 10-of-15 under `-race` in
+  `internal/claude` and turned out to be fixture state. This is CI-only,
+  not race-flagged, in a different package, and is an object disappearing.
+
+  **What the error text means — established by mutation, not by reading.** Four
+  mutations were applied to a byte-identical rebuild of the fixture, each to the
+  same object the CI log named, and pushed. A **deleted** object reproduces the CI
+  pair *and prints nothing else*. Truncated to 0 bytes adds `object file … is
+  empty`; 8 bytes zeroed says `loose object … is corrupt`; `chmod 000` says
+  `unable to open loose object …: Permission denied`; and a clean push under
+  `ulimit -n 12` **succeeds**. `open_loose_object` prints for every errno except
+  ENOENT, so the silence was the whole diagnosis: **that object was absent from
+  the sender's store at push time** — not truncated, not corrupt, not unopenable,
+  not an fd problem.
+
+  **Which object, and what that eliminates.** Tree OIDs here are content-addressed
+  over deterministic content, so the OID is reproducible: it is the tree of
+  **commit 75 of 129**, mid-loop — no boundary artifact. git is exonerated twice
+  over. `gc --auto` estimates loose objects by sampling `objects/17`, which this
+  fixture leaves **empty**, so it declines *even at `gc.auto=1`* (measured), and
+  the publisher had 0 packs so `too_many_packs` cannot fire either. More
+  decisively, by push time that tree is **reachable from `main`**, and git never
+  prunes reachable objects. ENOSPC is out because all 129 commits succeeded;
+  git-side fd exhaustion is out because it would have printed a line that is
+  absent. **Verdict: environmental — and the deleter is NOT identified.** One CI
+  log does not contain enough to name it, and that is stated as a limit rather
+  than filled in with a plausible story.
+
+  **Fixed without a retry.** A retry would convert this into a slow pass and
+  destroy the evidence that something is killing git subprocesses on that runner,
+  which is worth knowing regardless of this test. Instead:
+
+  - `advance()` builds its commits with **one `git fast-import`** rather than an
+    `add`+`commit` pair each. Measured for `advance(129)`: **394 git processes →
+    9**, and the test drops from ~5.3s to ~0.4s. The window between writing that
+    object and reading it shrinks from ~2 seconds to one process's lifetime.
+  - **Fixture git no longer forks detached background daemons.** `git commit`,
+    `fetch` and `push` each end by forking `git maintenance run --auto --detach`,
+    which daemonizes and outlives its parent; `advance(129)` left **130** of them
+    running against a repo the test was still driving. `maintenance.auto=false`
+    stops the fork — `gc.auto=0` does **not**, each daemon still forks and only
+    then declines (both measured). A push's *remote* half runs under the bare
+    origin's own config, so that one needed the setting written into origin.
+    Measured detached-maintenance trace records for `advance(129)`: **260 → 0**.
+  - **A fixture git failure now names its own mechanism.** `gitFailureForensics`
+    probes every OID in git's output and reports PRESENT-with-size versus ABSENT,
+    distinguishing a missing object from a missing fanout directory, plus
+    loose/pack counts and `fsck`. It never retries and never softens the failure.
+
+  **After.** 30 runs of the formerly-flaky test in **13.5s** (was **159.0s** for
+  the same 30), 3 clean full-`internal/agent` runs, and `./build.sh` exit 0
+  including all 43 shell assertions. None of that is evidence of a cure and is not
+  offered as any — the flake never reproduced locally to begin with.
+
+  **Verified by mutation, and honest about what it claims.** Emptying
+  `fixtureGitArgs` reddens the trace test (`2 records, want 0`); dropping origin's
+  own setting reddens it too (`4 records`); dropping `reset --hard` reddens the
+  fixture-coherence test; and making the forensics blind to absence reddens the
+  discriminator test — each mutation hitting only its own test. The trace test
+  carries a **positive control** that runs the same commands *without* the
+  suppression and requires the daemon to appear, so it fails for "the suppression
+  broke" rather than passing vacuously if git's behaviour or trace format changes.
+  The load reduction **narrows exposure** — fewer processes, a shorter window, and
+  this test stops being a load source for its neighbours — but it does not prove a
+  cure for an unidentified external deleter, and no local run can at a 1-in-87
+  base rate. Full trail in
+  `docs/investigations/git-object-vanished-mid-fixture-2026-07-29.md`.
+
+  No shipped behaviour changes: the edits are confined to
+  `internal/agent/workspace_test.go`.
+
+- **The refinery-logs section stops sending the coordinator to a directory that
+  does not exist, so an empty grep stops being indistinguishable from "the
+  refinery logged nothing about this MR" (mg-f766).**
+  `internal/agent/prompts/mayor.md` — and `prompts/crew/doctor.md`, which
+  carried the same string in its diagnostic quick reference — said:
+
+      - **Service mode** (launchd/systemd): `~/.local/share/pogo/logs/pogo.err.log` (stderr),
+        `~/.local/share/pogo/logs/pogo.log` (stdout)
+
+  That directory does not exist, and neither filename exists under any root.
+  pogod's log dir is `service.logDir()`, unconditionally
+  `$HOME/Library/Logs/pogo` with no GOOS switch, and the launchd plist points
+  **both** `StandardOutPath` and `StandardErrorPath` at one `pogod.log` — so the
+  stdout/stderr split the prompt described was wrong too. mg-9aa0 moved the log
+  dir and this paragraph was not moved with it, while `.dist:751` in the *same
+  file* already referred to `~/Library/Logs/pogo/pogo-deploy.log`: one shipped
+  prompt, two log roots, one of which resolves to nothing.
+
+  **The reason this outranks a stale-path cleanup is the failure shape.** The
+  same section tells you to grep that file for an MR ID, so the symptom is not
+  `No such file or directory` — it is:
+
+      $ grep "<mr-id>" ~/.local/share/pogo/logs/pogo.err.log
+      (nothing)
+
+  An empty grep against a missing file is indistinguishable from *"the refinery
+  logged nothing about this MR."* That is a false negative manufactured by the
+  instrument, at the moment it costs most: mid-diagnosis of a merge that appears
+  stuck. It fired live on 2026-07-30 against `mr-d9lc2natjv1tur4p9bb0` — two
+  empty results, and the real log was found only because
+  `~/Library/Logs/pogo/pogod.log` had been grepped earlier in the session for an
+  unrelated reason. Without that accident the next step from "the refinery is not
+  logging" is plausibly a redundant re-submit of an MR that was simply queued
+  behind another one, and a redundant re-submit has previously reopened an
+  already-merged item. (The MR was not stuck: the refinery is serialized and it
+  was queued behind `polecat-4999`, which the real log showed alive in
+  `./test.sh`.)
+
+  **The replacement is discoverable rather than asserted**, because a hard-coded
+  path in a prompt is the class of claim that rots silently and this one already
+  had. `pogo service status` prints `Service installed: <path>` on both platforms
+  (`cmd/pogo/main.go:1489`, `internal/service/service.go:507` and `:673`), so the
+  installed plist can be read for the real value instead of trusting a literal:
+
+      plist=$(pogo service status | sed -n 's/^Service installed: //p')
+      grep -A1 StandardOutPath "$plist"      # today: ~/Library/Logs/pogo/pogod.log
+
+  The macOS value is still named as the *today* reading, so an agent mid-diagnosis
+  does not have to run two commands before its first grep — but the plist is
+  named as the authority.
+
+  **Linux is answered rather than assumed.** The line was labelled
+  *"(launchd/systemd)"*, so substituting the macOS path would have been the same
+  defect aimed at Linux users. `systemdUnitTemplate` sets no `StandardOutput` or
+  `StandardError` at all, so on Linux there is **no log file** — output goes to
+  the journal, and any file path a prompt named for systemd would be wrong:
+
+      journalctl --user -u pogo.service | grep refinery: | grep <mr-id>
+
+  There is no `pogo` subcommand that prints the log location — `PogodLogPath()`
+  has no command surface — and the prompt now says so, which is what stops the
+  next reader hunting for one and settling for a hard-coded path again.
+
+  The false-negative reasoning ships with the text, without which the fix is just
+  a fresher literal: **an empty grep is evidence only once you know the thing you
+  grepped exists.** Two ways to get nothing are named — a missing file and the
+  wrong `journalctl -u` unit — plus a third that survives a correct path: pogod
+  rotates its log at startup past 10 MiB, so lines from an older run are in
+  `pogod.log.1` (up to `.3`), not in `pogod.log`.
+
+  **Verified by running the documented recipe, not by reading the diff.** The
+  commands as written in the prompt resolve the plist to
+  `/Users/daniel/Library/Logs/pogo/pogod.log` and return **14 `refinery:` lines**
+  for `mr-d9lc2natjv1tur4p9bb0` — the real MR whose diagnosis exposed this — from
+  `queued` through `merged successfully`. `prompt_test.go` strikes the dead path
+  from **every** shipped prompt rather than the two that carried it, so a
+  copy-paste cannot reintroduce it, and pins the discovery commands, the journal
+  form, and the empty-grep reasoning. Verified by falsification: with the two
+  prompt edits stashed, the test reports 16 failures.
+
+  **Audited but not changed** — every other asserted path in `mayor.md` resolves
+  on this box, with two exceptions left for their owners rather than folded into
+  this diff:
+
+  - `mayor.md:314` asserts a **third** log root,
+    `grep 'claim-pid re-stamp' ~/.pogo/pogod.log`, which also does not exist. The
+    line it looks for is real and lives in `~/Library/Logs/pogo/pogod.log`. Same
+    defect, different section (the mg-7d6d started-signal triage); reported to
+    the coordinator rather than fixed here.
+  - `mayor.md:897`'s anchored-`pkill` example uses `/usr/local/bin/pogod`, while
+    pogod is at `~/go/bin/pogod` on this box. It is illustrative rather than
+    asserted and it fails safe (an anchor that matches nothing kills nothing),
+    so it is reported, not corrected.
+
+  No behaviour change: prompt text and its regression test.
+
+- **The GC sweep no longer destroys a worktree it could not read (mg-fd39,
+  gh #97).** Phase 1 ran its own dirty check and called `RemoveWorktreeForce`,
+  so the cannot-tell guard built into `RemoveWorktree` never ran and a `git
+  status` that **errored** was treated identically to one reporting **clean**.
+  The error was discarded, never inspected and never logged. Reproduced on the
+  shipped tree: a damaged `.git` pointer and an EACCES on `.git` each destroyed
+  an untracked file, took the worktree directory, and then let phase 2 delete
+  the branch ref — so the work was unreachable by any route. The correlation is
+  what made this the worst arm to fail open on: `git status` fails precisely
+  when `.git` is damaged or the disk is unhappy, which is when the working files
+  are least reproducible.
+
+  The sweep now routes through the guard, and an unreadable worktree is **kept
+  and reported**: a pinned worktree is recoverable by a human where deleted files
+  are not. `--force` still discards, unchanged — an operator's explicit
+  `--force` is a positive reason, and is now the only route by which such a tree
+  is ever removed.
+
+- **A tree we could not read is never collected — under any ownership, at any
+  age (mg-fd39).** Two narrower designs were tried and withdrawn, and both are
+  worth knowing about because both are tempting. A **drain** — reclaim once
+  dead *and* old *and* previously refused — fell to *age is not emptiness*: a
+  30-day-old `irreplaceable.go` is exactly as unrecoverable as a 30-second-old
+  one. An **mtime veto** — refuse, even with death evidence, when the tree was
+  written to recently — replaced it and fell to something subtler: death
+  evidence is precisely what a recent write contradicts, and a veto that
+  *expires* has not resolved that contradiction, it has stopped being able to
+  see it. *Absence of evidence is not evidence of absence*, one layer in.
+
+  So the rule is singular, and the cannot-enumerate case needs no clause of its
+  own: *if we cannot read the tree, we do not act on it.* `pogo gc --apply
+  --force` remains the operator's way to overrule it.
+
+- **A refused worktree reports how long it has been untouched (mg-fd39).**
+  `kept: … untouched 30 days` is what makes an operator's decision cheap, and
+  reporting is now mtime's **only** job here: it authorises nothing and vetoes
+  nothing, so the worst it can do is print an unhelpful number rather than lose
+  a file. The age comes from a **walk** and never from the worktree root's
+  mtime, which was measured blind to edits below it — a live agent editing
+  `pkg/deep/work.go` leaves the root untouched, and an operator told "untouched
+  30 days" about that tree would clear the pin on the strength of it. Where the
+  tree cannot be listed at all, the line says the age is unknown rather than
+  omitting it, which would read as fresh.
+
+  git's own bookkeeping is excluded from that walk, because the damage event can
+  otherwise land in the number it perturbs: corrupting a worktree's `.git`
+  pointer writes a file *inside* the tree, so a month-cold worktree reported
+  `untouched 0s` — wrong in the direction that discourages reclamation, on the
+  very shape gh #97 was reproduced with. Measured across all four ways `git
+  status` can fail, excluding it is right on that row and identical on the other
+  three.
+
+  **The cost is accepted deliberately: more pins, and they never self-clear.** A
+  pinned worktree pins its branch too. A visible pin a human can clear is a
+  categorically better failure than an invisible deletion they cannot, and every
+  attempt to bound the pin automatically failed on the same rock.
+
+- **The GC log stops naming an innocent reason for a destructive act (mg-fd39,
+  gh #97).** The per-action log shipped as gh #94's remedy — *the* way to find
+  out whether the GC took your worktree and why — reported `removed worktree
+  <path> (owner damaged, branch polecat-damaged): ticket archived` on exactly
+  the path where `git status` had errored, with the discarded error appearing
+  nowhere. A forensic log that names an innocent cause is worse than silence: a
+  missing line prompts investigation, a plausible one ends it. Cannot-tell
+  outcomes now say the status could not be read, and refusals reach the log
+  alongside removals instead of only being counted.
+
+### Documentation
+
+- **`gitgc.OwnerGone` is labelled dormant at every site that names it, instead
+  of load-bearing at some of them (mg-2ab3).** gh #97 withdrew the ownership arm
+  of the cannot-tell rule, so `RemoveWorktree` ignores its `WorktreeOwner` on
+  every path and nothing in production constructs `OwnerGone` — both gitgc sweep
+  call sites and `cmd/pogod`'s exit hook pass `OwnerUnproven`. Two comments still
+  described the withdrawn distinction in the present tense, and one of them sat
+  at the exact call site a future caller would read first: *"OwnerGone belongs
+  where liveness has been positively excluded … the gitgc sweep, which gates on
+  LivePolecats and a concluded ticket before it removes anything."* The sweep
+  does not do that.
+
+  Keeping a dormant mechanism is defensible; keeping it under a description the
+  code does not honour is not — a dormant mechanism labelled dormant is honest
+  inventory, while the same mechanism labelled load-bearing is a trap with a
+  maintainer's signature on it, because the next reader defers to the label
+  instead of reading the calls. The decision here is **keep and label**, not
+  retire: the parameter is mg-4d45's public surface, and deleting it is that
+  ticket's call rather than a side effect of this one. Every one of the 16
+  `OwnerGone` references was accounted for, and the tests that still name it now
+  say what they are — controls that go red if an ownership arm returns, not
+  callers. `TestWorktreeDirtyUnclassifiableProceeds` is renamed
+  `TestWorktreeDirtyUnclassifiableIsRefused`, since it asserts a refusal.
+
+- **The PM sweep gets a specified open-PR pass, so a PR nothing is carrying
+  stops reading as a healthy one (mg-91cc).** New
+  [docs/pm-open-pr-pass.md](docs/pm-open-pr-pass.md) specifies a per-repo,
+  per-sweep pass over open pull requests, enabled per PM with `"open-prs"` in
+  the `sources` array of `~/.pogo/agents/pm/<name>.toml`. For each open PR it
+  asks two questions the baseline never asked — is its head an ancestor of
+  `origin/main`, and does a work item track it in **any** of the six statuses —
+  and routes the answer to one of four dispositions: in flight, landed-but-open
+  (close, reap the branch), stranded (file a carrier), superseded (close naming
+  what landed). Never merge or close on a guess, and closing routes through the
+  coordinator because it is outward-facing.
+
+  **The listing half was never the gap.** The baseline's per-repo GitHub loop
+  has run `gh pr list` since the template shipped (mg-1897, firmed by mg-b1e7),
+  and that defaults to `--state open`. What was absent is the *disposition*: from
+  a listing alone, an in-flight PR, one whose work already landed, one nothing
+  will ever pick up, and one a competing PR superseded are indistinguishable,
+  and the two cross-checks that tell them apart are run by no baseline source —
+  `gh issue list` does not return PRs, and `mg list` has no row for a PR no work
+  item tracks. The doc says so explicitly so the stale "open PRs are unlisted"
+  framing does not get repeated.
+
+  Both motivating instances were live on 2026-07-29. **gh#93** was MERGEABLE
+  with green CI, its head `c48b055` not an ancestor of `origin/main`, and its
+  `mg-36e3` absent from every status — the PR was the only place that work
+  existed, and since the refinery merges from work items, nothing was ever going
+  to pick it up. **gh#95** was the gh#94 implementation that did not land, left
+  open, and it **misled the gh#97 reporter into walking back a correct finding**
+  against `ownedByLive` / `polecatDirOwner`, symbols that do not exist on `main`.
+  That is the generalisable cost: an open PR reads as the state of the world to
+  someone outside the fleet, so an unlanded one left open is a false claim about
+  the product, published.
+
+  **Config only; the baseline is untouched and still carries the gap.**
+  `internal/agent/prompts/pm/pm-template.md` is the home that would fix every PM
+  including ones not yet instantiated, and it is deliberately left for separate
+  work rather than folded into a config change. So a PM scaffolded later
+  inherits the original blind spot unless whoever scaffolds it copies the
+  `sources` entry. The doc
+  states that asymmetry rather than letting the fix read as complete.
+
+- **The coordinator prompt learns pogod's own lifecycle, and every agent stops
+  being told a falsehood about its own name (mg-96ad).** Two corrections to the
+  shipped prompt corpus, both about things an agent could previously only get
+  wrong.
+
+  **Daemon lifecycle.** `internal/agent/prompts/mayor.md` documented restarting
+  *agents* thoroughly and restarting *pogod* not at all — the one operation the
+  coordinator would look up and the one place it was absent. The new section
+  separates **restart** (bounce the daemon; same binary, activates zero merged
+  commits; `pogo server start`/`stop`/`status`, and there is no `pogo server
+  restart`) from **redeploy** (rebuild, reinstall, restart — the only thing that
+  moves pogod onto merged code). It then states what is reachable: `scripts/
+  pogo-self-deploy check` is safe from anywhere and never acts; drift usually
+  needs no action because `com.pogo.deploy` redeploys nightly at 03:00 where it
+  is installed; self-redeploy is impossible because `assert_out_of_band` refuses
+  any caller pogod spawned; hand-off to `human` is the exception, with a stated
+  trigger and `~/Library/Logs/pogo/pogo-deploy.log` as the evidence to carry.
+
+  **It points at the guard rather than restating it.** The refusal message in
+  `assert_out_of_band` already explains itself, including why the redeploy is
+  legitimate even when the caller is not. A second copy in a prompt is a copy
+  that can drift from the one that actually fires (mg-1bbf is the incident where
+  the constraint existed in prose and nothing enforced it). The stop surfaces
+  get the opposite treatment for the opposite reason: `pogo server stop` and
+  `launchctl kickstart -k` are **unguarded**, so the prompt says so plainly and
+  says that documentation informs rather than enforces.
+
+  **`pogo-crew-<name>` is a display label, not a process name.** mg-ccd1 fixed
+  the docs half; the prompt half is fixed here, at all ten sites — `mayor.md`,
+  `crew/doctor.md`, `pm/pm-template.md`, all six polecat templates, and the
+  Go-embedded minimal template in `prompt.go` that a walk of `prompts/` cannot
+  see. Nothing sets these strings on any process, so `pgrep -f pogo-crew-mayor`
+  against a live mayor matches nothing — and the failure is not that the lookup
+  is unavailable but that it *succeeds and returns empty*, which reads as "the
+  agent is gone" (mg-710c, mg-de08). `ARCHITECTURE.md`'s "Process Naming"
+  section, `README.md`'s `pgrep pogo-crew` discovery line and the research-triage
+  example template carried the same claim and are corrected too.
+
+  **The deliverable is the ratchet, not the sweep.** This claim has been counted
+  four times by three agents at three, five and thirteen sites, and each sweep
+  found sites the previous enumeration missed — every number a fact about the
+  search rather than the corpus. `TestProcessNameClaim_ShippedPromptsHoldTheLine`
+  makes the allowed count zero with no grandfathered inventory, and ships with
+  two refutation controls: one pinning the exoneration boundary (the corrected
+  prose must pass, or the check punishes its own remedy) and one reintroducing
+  the claim into a copy of the real prompt tree to show the guard fires there
+  and not only on a hand-built fixture.
+
+- **`pogo gc --help` stops listing an unmounted volume among the worktrees it
+  keeps (mg-d8bd).** The help text named three ways a `git status` can fail to be
+  readable — a damaged `.git`, a bad permission, an unmounted volume — and said
+  all three are kept and reported as unreadable. The third does not hold in the
+  presentation where the mount takes the directory with it:
+  `checkWorktreeRemoval` stats the worktree first and short-circuits on an absent
+  directory, deliberately, so that "there are no files" never reaches the
+  cannot-tell arm. In that shape gc proceeds rather than keeping.
+
+  The clause is **dropped, not replaced**. The gh #97 triage asked that the
+  unmounted-volume shape be left unestablished, because simulating a mount means
+  real system state on a live machine and nobody has measured it — so stating
+  what *does* happen there would be the same defect wearing new clothes. The
+  other two cases are correct and stay. No behaviour change: an unestablished
+  shape asserted as fact in user-facing help is the same failure as a confident
+  wrong log line, and the fix is to stop asserting it.
+
+- **The coordinator stops being told that `--status=available` means unassigned
+  (mg-df42).** `mg list --status=available     # Unassigned work ready to claim`
+  described a filter the command does not apply. Status and assignee are
+  orthogonal by construction, so that listing returns items assigned to `human`
+  and `parked` too — measured, not inferred: the live queue answers it with
+  `assignee: human` and `assignee: parked` rows. Nor is there a flag that
+  narrows it, because `--assignee=<name>` selects *one* assignee and cannot
+  select "none". The comment now says `Unclaimed work — NOT "unassigned"`, and
+  step 1 — where the coordinator actually reads the list and decides what to
+  dispatch — says what to do instead: read the assignee column, which `mg list`
+  always prints, and skip `human`/`parked` before spawning anything.
+
+  Fixed in the prose, deliberately, and **not** in `mg list`. Filtering the CLI
+  was option (a) of the mg-4798 ruling and was rejected on five independent
+  grounds — ARCHITECTURE.md M2 ("the CLI is convenience, not gatekeeper"), the
+  orthogonality itself, a shipped tested contract at `main_test.go:873`, and
+  that it fixes nothing for pogo's real consumers, which read `available/`
+  directly. The comment was the thing that was wrong.
+
+- **The dispatch guarantee names what enforces it, and admits where it does not
+  reach (mg-df42).** The `qa: manual` step asserted that a `--assignee=human` QA
+  item "won't be dispatched to a {{.Worker}}" — an automatic outcome stated
+  bare, with nothing named that produces it. That is now true rather than
+  hopeful, because mg-ebb0 landed the gate in Go at the dispatch point
+  (`e4a406c`): an assignee in `non_dispatchable_assignees` makes `spawn-polecat`
+  fail with **409 Conflict**, naming the assignee, before any worktree or agent
+  dir is created. The line now says so, and points at step 2 where the gate is
+  described once.
+
+  It also states the gate's two limits, because a sentence that is true only
+  because of a guard elsewhere decays the moment the guard moves. The gate is
+  keyed on `--id`, so a spawn with no `--id` or a wrong one is never checked;
+  and it lives in the daemon, not in the template, so a pogod predating that
+  build does not refuse at all. That is not hypothetical at the time of writing:
+  the running pogod is `023fab5`, and `git merge-base --is-ancestor e4a406c
+  023fab5` exits non-zero — the gate is merged but not yet live. So the template
+  puts the control in step 1's assignee check and calls the daemon gate a
+  backstop the coordinator has not confirmed is behind it, which reads correctly
+  both before the next deploy and after it.
+
+- **A polecat is told to check the running daemon before predicting that a
+  merged control will refuse it (mg-e785).** mg-96ad reported itself BLOCKED at
+  submit by a gate that was never in force: it read the gate's source on
+  `origin/main`, concluded a submit would be refused, and waited for another
+  work item instead. The gate was merged at `47b5d48`; the pogod actually
+  running was `023fab5`, which does not contain it, so a submit would have gone
+  through at any point that day. The polecat did not fail to *find* the daemon —
+  it never occurred to it that source and runtime could disagree. The polecat
+  template now carries the method and the two commands that answer it
+  (`GET /version` for the running revision, `git merge-base --is-ancestor` for
+  whether a control is in it), and says what to do with the answer: if the
+  control is merged but not running, report that and stop reasoning as though it
+  were live.
+
+- **It is a template line, not a dispatch-body line, and it names no control
+  (mg-e785).** mg-91cc got the same sentence typed into its dispatch body and
+  behaved correctly; mg-96ad did not get it and did not. The difference was
+  whether the dispatcher remembered to type it, which is not a property of
+  polecats. A template line reaches every future polecat and depends on nobody.
+  For the same reason the sentence is phrased as a method rather than as a fact
+  about a particular gate: a line naming the gate mg-96ad tripped over would
+  have been stale within six hours, because mg-8cfe reverted that gate the same
+  day.
+
+- **A guard keeps it in exactly one place (mg-e785).**
+  `TestRunningDaemonCheck_HasExactlyOneHome` fails if no shipped prompt states
+  the rule, if more than one does, or if the one that does is not the polecat
+  template; a companion pins the two commands to the same file as the claim.
+  Prompts are written by copying prompts, and a rule restated in two templates
+  goes stale in one of them — leaving a polecat reading text where it should be
+  reading the daemon. Both failure directions are exercised against a copy of
+  the real prompt tree, so the guard is shown to fire on the corpus it guards.
+
+- **The shipped prompt corpus stops teaching `--body="..."`, and the ratchet
+  that permitted it is emptied in the same commit (mg-fdbc).** Every one of the
+  40 grandfathered example lines in `internal/agent/prompts/` is converted to
+  `--body-file -` with a **quoted** heredoc, and `bodyRatchet` — the frozen
+  inventory shipped by mg-d91f — goes from nine entries to none.
+
+  **The counts inverted, which is the whole point.** The architect's walk
+  (mg-e0ca) found the gradient at its source: the corpus taught the unsafe
+  inline form dozens of times and both safe forms zero times, and an agent does
+  not learn its idioms from `--help`, it copies them from its own prompt. Both
+  binaries grew `--body-file` months ago (mg-7850, mg-8380) and neither fix
+  moved the number. After this sweep the corpus teaches `--body-file -` with
+  `<<'EOF'` 40 times and `--body="..."` zero times.
+
+  **Three numbers were in circulation and all three were right.** 62 counted
+  every *mention*, a raw grep counted 58 because it includes prose, and 40 is
+  what the tree actually **taught** on an example line — the predicate
+  `scanBodyExamples` implements. They measure different populations; the header
+  now says so, so nobody "fixes" one to match another. The load-bearing figure
+  was always the one they agreed on, and it is the one that moved.
+
+  **This had to be a two-file diff.** The ratchet is path-keyed and enforces
+  *tightening*, not merely a ceiling: a swept file whose entry is not lowered in
+  the same commit fails the suite by name. That is deliberate — leftover
+  headroom is exactly how a swept file silently re-accumulates — and it means
+  the same control that catches a new violation also catches a *partial* sweep.
+
+  **Two lines refused the mechanical substitution, and saying so matters more
+  than hiding it.** The release-cut hook in `pm/pm-template.md` interpolates
+  `$tag`/`$days`/`$ahead`, and the PR announcement in
+  `templates/polecat-build-pr.md` interpolates `$BRANCH`. A quoted heredoc would
+  emit those literally and an unquoted `<<EOF` expands exactly like
+  `--body="..."` — it is the original bug wearing the fix's clothes. Both are
+  rewritten as `printf ... | mg ... --body-file -`, which keeps the values in
+  argv slots where no shell parses them.
+
+  **The order was the argument, not the sweep.** Before mg-d91f the inflow (~80
+  new unsafe lines in 30 days) exceeded the entire standing stock, so a sweep
+  alone would have decayed inside a month. The ratchet stopped the inflow first;
+  this is the cheap bounded cleanup that became possible afterwards. The
+  positive control was run on the swept tree rather than assumed: an unsafe line
+  re-added to `templates/polecat-qa.md` makes the guard fire and name the file.
+
+  **What this does not fix.** `mayor.md` still instructs the coordinator to
+  "preserve the rest of the body when rewriting" — the capture-then-rewrite
+  mandate behind tonight's lost updates. That sentence is *prose*, and the
+  ratchet exempts prose on purpose (documenting the hazard must not be punished
+  by the check that exists to reduce it), so this sweep leaves it byte-identical
+  and does not claim it closed. `mg edit --append-body-file` (mg-f326) is the
+  replacement it should point at; that is a separate scoping decision.
+
 ## [0.7.0] - 2026-07-29
 
 ### Changed
@@ -1739,6 +4577,8 @@ is the curated, human-readable summary kept in sync at each release cut.
 - **Changelog entries are now fragments in `changelog.d/`, not a shared
   `CHANGELOG.md` tail (mg-d917).** Every change used to append to the same
   `## [Unreleased]
+
+## [0.8.0] - 2026-07-30
 
 ## [0.7.0] - 2026-07-29
 
@@ -4642,7 +7482,8 @@ Early patch release.
 Initial tagged release of Pogo: multi-repo discovery, indexing, and
 cross-project zoekt search (`lsp`, `pose`, `pogo`, `pogod`).
 
-[Unreleased]: https://github.com/drellem2/pogo/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/drellem2/pogo/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/drellem2/pogo/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/drellem2/pogo/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/drellem2/pogo/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/drellem2/pogo/compare/v0.4.0...v0.5.0
