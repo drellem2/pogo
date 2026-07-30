@@ -143,13 +143,15 @@ Follow these steps exactly, in order. Skipping any step is a failure.
      record both. A mismatch is a finding about the instrument, and the order is the whole
      mechanism: a prediction made before the run cannot be fitted to the result afterwards.
    - **Make the control fail, then try to disarm it.** Where the deliverable is "this
-     now catches X", exhibit the failing case — X present, check fails — not only the passing run.
-     Where the check reads a baseline, fixture, or expected-output file anyone may legitimately
-     regenerate, regenerate it and show the check still fires: a guard that a sanctioned refresh
-     silently disarms passes every test it has and protects nothing thereafter, and
-     the disarming looks like maintenance. And a battery fitted to defects its author already knew
-     has to say so and gain a case they never saw, because such a set passes every row and
-     reads as thorough.
+     now catches X", exhibit the failing case — X present, check fails — and name the change under which
+     its answer would DIFFER: a property invariant under the failure it guards cannot catch that failure
+     however loudly it fires, and a check scoped narrower than the defect cannot see it by construction —
+     widen the check, do not add another at the same scope. Where the check reads a baseline, fixture, or
+     expected-output file anyone may legitimately regenerate, regenerate it and show the check still fires,
+     on a RE-RUN as well as a first pass: a guard a sanctioned refresh or a second pass disarms passes
+     every test it has and protects nothing thereafter, and the disarming looks like maintenance. And a
+     battery fitted to defects its author already knew has to say so and gain a case they never saw,
+     because such a set passes every row and reads as thorough.
    - **List the brief's "do not X" constraints and check each BY MEASUREMENT.** A precise
      instruction hands the author the exact words for a precise *claim* of compliance and nothing
      more — mg-a893's acceptance said in terms "do not over-correct", and its commit

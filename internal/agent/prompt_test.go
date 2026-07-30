@@ -5266,9 +5266,38 @@ func TestQAAndReviewTemplatesCarryTheEvidenceDiscipline(t *testing.T) {
 			// deliverable is" / "the PR's claim is"), and asserting either
 			// literal silently checks only one of the two files.
 			`now catches X", exhibit the failing case`,
+			// The half that "prove it can fire" was missing. Three checks in
+			// one evening PASSED the fire test while being blind to the defect
+			// they guarded: a figure gate that passes when the figure a reader
+			// reads is wrong, because it is a presence test and the correction
+			// prints the value twice (mg-8a5c); a repair's own "43 rows, 0
+			// label change(s)", which HOLDS on an artifact where every row
+			// reads [FAIL], because it measures label stability rather than
+			// correctness (mg-d0e2); and per-section checkers all green while
+			// a quotation is struck in section 4 and asserted live in section
+			// 0 (mg-7dd3). Every one of them could be made to fire. Each
+			// measures a property INVARIANT under the failure it guards, so
+			// firing proves nothing about that failure — hence the second
+			// half: name the change under which the ANSWER would move.
+			"name the change under which",
+			"answer would DIFFER",
+			"a property invariant under the failure it guards cannot catch that failure",
+			"however loudly it fires",
+			// mg-7dd3's half, which invariance alone does not cover: a
+			// per-section checker cannot see a cross-section strike BY
+			// CONSTRUCTION. The remedy is the check's scope; a second checker
+			// at the same scope is the same blindness twice.
+			"a check scoped narrower than the defect cannot see it by construction",
+			"widen the check, do not add another at the same scope",
 			// The recovery demonstration: regenerate the baseline the way
 			// anyone legitimately would, and show the guard still fires.
 			"regenerate it and show the check still fires",
+			// The same concern one step later in time, from mg-a318, whose
+			// audit instrument was made to tell the truth on a re-run rather
+			// than only against a fresh tree. A check that passes on first
+			// pass only quietly stops meaning anything, exactly as a guard a
+			// sanctioned refresh disarms does.
+			"on a RE-RUN as well as a first pass",
 			// Why a defeated guard is invisible rather than noisy.
 			"the disarming looks like maintenance",
 			// A fitted battery must be declared and extended past the
@@ -5337,6 +5366,27 @@ func TestQAAndReviewTemplatesCarryTheEvidenceDiscipline(t *testing.T) {
 			t.Errorf("%s: %d copies of the predict-before-run rule, want exactly 1 — it lives in the evidence-discipline section, not also inline in a step (mg-0d85)", path, got)
 		}
 
+		// Five bullets, counted structurally rather than trusted from the
+		// heading. mg-ae41's invariance and scope clauses EXTEND the
+		// fires-check bullet; a sixth sibling was the wrong shape, because the
+		// section was consolidated at net +10 lines for four rules (mg-0d85)
+		// and corrected once since (mg-1023), and a template every worker of
+		// its type reads gets skimmed once it accretes.
+		nextStep := regexp.MustCompile(`^\d+\. `)
+		bullets := 0
+		for _, line := range strings.Split(body[strings.Index(body, "Evidence discipline"):], "\n") {
+			trimmed := strings.TrimSpace(line)
+			if nextStep.MatchString(trimmed) {
+				break
+			}
+			if strings.HasPrefix(trimmed, "- **") {
+				bullets++
+			}
+		}
+		if bullets != 5 {
+			t.Errorf("%s: %d evidence-discipline bullets, want exactly 5 — a new lesson extends the rule it belongs to; the section must not accrete a sixth (mg-ae41)", path, bullets)
+		}
+
 		// The refuted first version must not come back, and must not sit
 		// beside its own correction. mg-622f shipped mg-db09's TL_n(β) column
 		// as the MODEL of a control; mg-2060 had already measured the
@@ -5396,6 +5446,10 @@ func TestQAAndReviewTemplatesCarryTheEvidenceDiscipline(t *testing.T) {
 		// that one was reported.
 		"do not report a verdict until you have found a control",
 		"refuse to verdict without a control",
+		// Nor is mg-ae41's clause gateable: nothing can verify that an
+		// invariance question was asked, only that an answer was written down.
+		"do not report a verdict until you have named the change",
+		"refuse to verdict unless the check",
 	} {
 		if strings.Contains(strings.ToLower(qaBody), forbid) {
 			t.Errorf("polecat-qa.md: turned the evidence discipline into a gate (%q); nothing can verify a prediction preceded a run, a measurement was taken, a near-miss was disclosed, or a control family was sought (mg-0d85, mg-622f)", forbid)
