@@ -486,6 +486,9 @@ type Config struct {
 	AckWatch   AckWatchConfig
 	DeafWatch  DeafWatchConfig
 	DoneReap   DoneReapConfig
+	// DispatchPairing declares repos whose items owe a paired work item before
+	// dispatch. Zero value = no repos = inert. See dispatchpairing.go.
+	DispatchPairing DispatchPairingConfig
 	// Source is the path of the highest-precedence config file Load read, or
 	// "" when no config file was found and everything is defaults + env. pogod
 	// uses this to gate crew auto-start: a daemon with no config file is
@@ -1358,6 +1361,23 @@ func Load() *Config {
 		if len(fileCfg.StallWatch.NonDispatchableAssignees) > 0 {
 			cfg.StallWatch.NonDispatchableAssignees = fileCfg.StallWatch.NonDispatchableAssignees
 		}
+
+		// [dispatch_pairing] has no code-side defaults to preserve — the zero
+		// value is "no repos, gate inert" — so every field is copied whenever the
+		// file names it. An explicitly empty `repos = []` therefore turns the gate
+		// off, which is the only way an operator can say that.
+		if len(fileCfg.DispatchPairing.Repos) > 0 {
+			cfg.DispatchPairing.Repos = fileCfg.DispatchPairing.Repos
+		}
+		if len(fileCfg.DispatchPairing.RequireTags) > 0 {
+			cfg.DispatchPairing.RequireTags = fileCfg.DispatchPairing.RequireTags
+		}
+		if len(fileCfg.DispatchPairing.PairTags) > 0 {
+			cfg.DispatchPairing.PairTags = fileCfg.DispatchPairing.PairTags
+		}
+		if len(fileCfg.DispatchPairing.WaiverTags) > 0 {
+			cfg.DispatchPairing.WaiverTags = fileCfg.DispatchPairing.WaiverTags
+		}
 	}
 
 	// Environment variables override config file
@@ -1802,6 +1822,17 @@ func parseConfigFileInto(cfg *parsedConfig, path string) error {
 				cfg.StallWatch.FastPriorities = parseStringArray(val)
 			case "non_dispatchable_assignees":
 				cfg.StallWatch.NonDispatchableAssignees = parseStringArray(val)
+			}
+		case "dispatch_pairing":
+			switch key {
+			case "repos":
+				cfg.DispatchPairing.Repos = parseStringArray(val)
+			case "require_tags":
+				cfg.DispatchPairing.RequireTags = parseStringArray(val)
+			case "pair_tags":
+				cfg.DispatchPairing.PairTags = parseStringArray(val)
+			case "waiver_tags":
+				cfg.DispatchPairing.WaiverTags = parseStringArray(val)
 			}
 		case "reaper":
 			switch key {

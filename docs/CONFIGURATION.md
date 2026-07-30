@@ -509,6 +509,102 @@ Source of truth: `internal/stallwatch/`; see
 [docs/design/stall-watch-design.md](design/stall-watch-design.md) and
 [docs/design/priority-wake-design.md](design/priority-wake-design.md).
 
+## Dispatch pairing — items that owe a paired work item
+
+**Off by default, everywhere.** `[dispatch_pairing]` is empty unless a
+deployment fills it in, and an empty repo list means the gate never fires. This
+section is a *mechanism*; the policy it carries is one deployment's business.
+
+The mechanism: **an item in a declared repository may not be dispatched until a
+second work item exists that references it and carries a declared marker tag.**
+`pogo agent spawn-polecat` refuses with **409** and a message naming the item,
+the repo that put it in scope, how to file the pair, and how to waive.
+
+```toml
+[dispatch_pairing]
+# Repos whose items owe a pair. Empty (the default) = the gate is inert.
+# A path covers itself and everything beneath it, on path boundaries — so
+# /r/prog does NOT cover /r/prog_v2.
+repos = ["/Users/daniel/research/onethird_program"]
+
+# Which items in those repos owe one. EMPTY MEANS EVERY ITEM — see below.
+require_tags = []
+
+# The marker a paired item carries. Required: a rule with no pair_tags can
+# never be satisfied, so it is reported and NOT enforced rather than
+# deadlocking the repo.
+pair_tags = ["independent-audit"]
+
+# The visible opt-out. An item carrying one of these dispatches. Empty means
+# the repo has no opt-out at all.
+waiver_tags = ["audit-waived"]
+```
+
+### Why the obligation is default-on inside a covered repo
+
+`require_tags = []` means *every* item in the repo owes a pair. That is
+deliberate. The rule this was built for — a research ticket owes a pre-filed
+independent audit — existed in writing, was agreed by everyone involved, and was
+missed **twice in two days** anyway. An over-filed pair costs one `mg shelve`; a
+missed one reached the program's state document both times. Requiring a positive
+act to *create* the obligation is the thing that failed, so the obligation exists
+by default and the **opt-out** is the positive act.
+
+Set `require_tags` if you want the narrower repo+tag shape instead.
+
+### Why it routes on `repo`, and not on who filed the item
+
+The rule failed twice because it lived in one agent's **filing checklist**: any
+ticket that agent did not file bypassed it silently, by construction. A guard
+owned by one filer cannot catch a filing that filer did not do. Dispatch is the
+one place every item passes through before any worker touches it.
+
+A filer-set marker (the `qa:` field shape) was considered and rejected for this
+gate — not because filers are unreliable, but because a marker still requires
+**someone to remember something at filing time**, which is the dependency being
+removed. `repo:` is written by `mg` from the filing context; the gate reads it,
+and nobody has to remember anything.
+
+Note for anyone extending this: routing on *who filed* an item is not merely
+undesirable, it is **unimplementable here**. Every agent on the host runs as one
+unix identity and `creator` records that identity, so authorship is not
+recoverable from the artifacts.
+
+### The two failure directions
+
+| Situation | Direction | Why |
+|---|---|---|
+| No `--id`, item not in the store, store unreadable, `[dispatch_pairing]` empty | **Open** — dispatches | `--id` is optional by design; a gate that halted the whole fleet over one repo's policy is worse than the miss |
+| Item **is** covered, and the store scan then fails | **Closed** — refuses | "I could not check" is not "there is nothing to check". Blast radius is one repository |
+
+### What it does not cover
+
+- **A spawn with no `--id`.** Nothing links it to a work item, so there is no
+  repo to route on.
+- **Work that never passes through dispatch.** A deliverable produced by an agent
+  working directly, or by a human, reaches the repo without a spawn. No gate at
+  dispatch can see it — that half belongs to the owning PM's sweep, and the two
+  halves are independent on purpose.
+- **Quality.** It checks that a pair *exists*, never that it is any good. A pair
+  filed to satisfy the gate and then shelved unread satisfies it.
+- **Shelved, pending and archived items** are not scanned as candidate pairs; a
+  shelved pair is a dropped obligation, not a discharged one.
+
+### Choosing `pair_tags`
+
+The tag does double duty: it marks a paired item, **and** it exempts an item from
+owing one (otherwise an audit ticket filed into a covered repo would owe its own
+audit forever). So it must be a *tight* marker. If a program uses its pair tag
+loosely — `audit` on anything that touches the audit process — every
+loosely-tagged item becomes exempt and the gate goes quiet exactly where the
+program is busiest.
+
+A pair is recognised by either reference channel the store already uses:
+`depends: [mg-1234]`, or a tag containing the id (`mg-1234-followup`).
+
+Source of truth: `internal/config/dispatchpairing.go` (policy vocabulary and
+predicates) and `internal/agent/dispatchpairing.go` (the gate).
+
 ## Heartbeat reaper (tier 1)
 
 A goroutine inside pogod that watches a declared list of launchd jobs and

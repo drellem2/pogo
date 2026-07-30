@@ -18,6 +18,14 @@ type WorkItem struct {
 	Type     string `json:"type,omitempty"`
 	Priority string `json:"priority,omitempty"`
 	Tags     string `json:"tags,omitempty"`
+	// Repo is the `repo:` frontmatter value — the repository the item's work
+	// belongs to. Read by the dispatch-pairing gate, which routes on the repo an
+	// item names rather than on anything a filer has to remember to set.
+	Repo string `json:"repo,omitempty"`
+	// Depends is the raw `depends:` frontmatter value, kept verbatim exactly as
+	// Tags is. mg writes it as an inline YAML sequence — `depends: [mg-1234]`.
+	// Use DependsList for the split form.
+	Depends string `json:"depends,omitempty"`
 	// ModTime is the work item file's last-modified time. It is the best
 	// available proxy for how long an item has sat in its current status
 	// directory (mg rewrites/moves the file on status transitions), which the
@@ -35,20 +43,34 @@ type WorkItem struct {
 // WorkItem. Surrounding quotes are stripped, empty entries dropped, and both
 // `tags: []` and a missing tags line yield nil.
 func (w WorkItem) TagList() []string {
-	raw := strings.TrimSpace(w.Tags)
+	return splitInlineList(w.Tags)
+}
+
+// DependsList splits the raw `depends:` frontmatter value into individual work
+// item ids, with the same normalization TagList applies to `tags:` — the two
+// fields are written in the same inline-sequence shape by mg, so they are split
+// by the same code rather than by two copies that can disagree. Both
+// `depends: []` and a missing depends line yield nil.
+func (w WorkItem) DependsList() []string {
+	return splitInlineList(w.Depends)
+}
+
+// splitInlineList splits one raw inline YAML sequence value into its entries.
+func splitInlineList(raw string) []string {
+	raw = strings.TrimSpace(raw)
 	if strings.HasPrefix(raw, "[") && strings.HasSuffix(raw, "]") {
 		raw = raw[1 : len(raw)-1]
 	}
-	var tags []string
+	var out []string
 	for _, t := range strings.Split(raw, ",") {
 		t = strings.TrimSpace(t)
 		t = strings.Trim(t, `"'`)
 		t = strings.TrimSpace(t)
 		if t != "" {
-			tags = append(tags, t)
+			out = append(out, t)
 		}
 	}
-	return tags
+	return out
 }
 
 // workspaceDir returns the macguffin workspace root.
@@ -83,6 +105,25 @@ func List(statuses ...string) ([]WorkItem, error) {
 // at a test workspace or an alternate root rather than the default
 // ~/.macguffin/work.
 func ListFrom(root string, statuses ...string) ([]WorkItem, error) {
+	return listFrom(root, false, statuses...)
+}
+
+// ListAllFrom is ListFrom plus the items ListFrom cannot see: a claim renames
+// the file to `<id>.md.<pid>`, so ListFrom's ".md" suffix filter silently drops
+// every item in claimed/. That is harmless for its two existing callers, which
+// both ask only for "available" — but it is not harmless for a caller that is
+// SEARCHING the store for an item, because "claimed" would come back as "absent"
+// and the caller would conclude the item does not exist.
+//
+// The dispatch-pairing gate is exactly such a caller: it refuses a dispatch when
+// no paired item can be found, so an audit ticket that someone happened to be
+// working on would read as never filed. ListFrom's behaviour is left alone
+// rather than widened, so nothing that depends on the narrow filter changes.
+func ListAllFrom(root string, statuses ...string) ([]WorkItem, error) {
+	return listFrom(root, true, statuses...)
+}
+
+func listFrom(root string, includeClaimSuffixed bool, statuses ...string) ([]WorkItem, error) {
 	var items []WorkItem
 	for _, sd := range statusDirs {
 		if !statusRequested(sd.status, statuses) {
@@ -97,7 +138,7 @@ func ListFrom(root string, statuses ...string) ([]WorkItem, error) {
 			return nil, err
 		}
 		for _, e := range entries {
-			if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
+			if e.IsDir() || !itemFileName(e.Name(), includeClaimSuffixed) {
 				continue
 			}
 			item, err := parseWorkItem(filepath.Join(dir, e.Name()), sd.status)
@@ -159,6 +200,16 @@ func FindFrom(root, id string) (WorkItem, bool, error) {
 		return item, true, nil
 	}
 	return WorkItem{}, false, nil
+}
+
+// itemFileName reports whether a directory entry names a work item file.
+// `<id>.md` always counts; `<id>.md.<pid>` — the name a claim leaves behind —
+// counts only when the caller asked to see claimed items.
+func itemFileName(name string, includeClaimSuffixed bool) bool {
+	if strings.HasSuffix(name, ".md") {
+		return true
+	}
+	return includeClaimSuffixed && strings.Contains(name, ".md.")
 }
 
 // findByPrefix returns the first entry in dir whose name starts with prefix. A
@@ -235,6 +286,10 @@ func parseWorkItem(path, status string) (WorkItem, error) {
 			item.Priority = val
 		case "tags":
 			item.Tags = val
+		case "repo":
+			item.Repo = val
+		case "depends":
+			item.Depends = val
 		}
 	}
 
