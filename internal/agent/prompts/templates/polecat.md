@@ -140,7 +140,7 @@ Follow these steps exactly, in order. Skipping any step is a failure.
 
 6. **Wait for merge result** — poll refinery using a bash while-loop.
 
-   **Note:** on a successful merge, pogod stops you the moment the merge lands (event-driven, gh #35) — it marks your work item done on your behalf, so being terminated mid-poll after a merge is the normal happy path, not an error. Steps 7–8 below only apply if you outlive the merge (e.g. pogod restarted mid-merge).
+   **Note:** {{if .Branch}}your target is `{{.Branch}}`, **not** the repo's default branch, so the refinery classifies this merge as PR flow and pogod deliberately does **not** mark your item done and does **not** stop you when it lands (mg-7746). Surviving the merge is the normal path here, not a pogod failure — expect to carry straight on into step 7, which is where your actual deliverable gets produced.{{else}}on a successful merge, pogod stops you the moment the merge lands (event-driven, gh #35) — it marks your work item done on your behalf, so being terminated mid-poll after a merge is the normal happy path, not an error. Steps 7–8 below only apply if you outlive the merge (e.g. pogod restarted mid-merge).{{end}}
    ```bash
    # Poll in a bash loop — do NOT add another cron, scheduled task, or pogo nudge for this.
    # The mail-check cron from step 2 is the only background trigger you should have.
@@ -161,12 +161,45 @@ Follow these steps exactly, in order. Skipping any step is a failure.
    - **`lost`** — the refinery lost this MR across a pogod restart (the branch is intact on origin). Resubmit **once** with the same step-5 command, capture the new MR ID, and go back to polling. If the resubmitted MR also comes back `lost`, stop resubmitting and mail the mayor instead.
    - **empty/`null` (not found)** — the MR ID is unknown to the refinery (or was pruned from history — the error text will say "pruned" if so). Do not spin on it and do not improvise: mail the mayor (`mg mail send mayor --from=$POGO_AGENT_NAME --subject="refinery lost track of my MR" --body="MR <id> for branch $BRANCH: refinery show returns not-found"`) and hold per step 8 — stay alive and wait for instructions.
 
-7. **If merged:** mark the work item done:
+7. **If merged:**{{if .Branch}} **open the pull request, then** mark the work item done. The merge you just watched land was a *step*: it put your commits on the integration branch `{{.Branch}}`, and your deliverable is the PR from there to the repo's default branch, which nobody has opened. Nothing else opens it for you — the refinery defers your completion precisely so that you can (mg-7746), and if you skip this the only thing that happens is a 15-minute backstop reaping you and paging the {{.Coordinator}} for manual recovery.
+
+   First read the base branch rather than assuming it, and confirm this really is PR flow:
+   ```bash
+   BASE=$(gh repo view --json defaultBranchRef -q .defaultBranchRef.name)
+   echo "$BASE"
+   ```
+   If `$BASE` **is** `{{.Branch}}`, your target was the default branch after all: there is no PR to open, this merge *was* completion, and pogod has already marked you done — skip to step 8.
+
+   Otherwise open the PR. Reuse an open one if it exists: several {{.Worker}}s can land on the same integration branch and only the first of them opens its PR.
+   ```bash
+   gh pr list --head {{.Branch}} --base "$BASE" --state open --json url -q '.[0].url'
+   ```
+   If that prints a URL, that is your PR — reuse it, do not open a second one. If it prints nothing, open it. The body goes in on **stdin with a quoted heredoc**, never as `--body="..."`: a double-quoted body is expanded by the shell before `gh` sees it, and `<<'EOF'` is what keeps backticks and `$`-signs literal (mg-d91f).
+   ```bash
+   gh pr create --base "$BASE" --head {{.Branch}} \
+       --title "<what the integration branch delivers>" \
+       --body-file - <<'EOF'
+   <summary of what this branch delivers, including anything merged into it before you>
+
+   Work item: {{.Id}}
+   EOF
+   ```
+   `gh pr create` prints the URL it opened — capture it. Cite issues as `Refs owner/repo#N` in the body; a closing keyword would shut the issue the moment the PR merges.
+
+   Then mark the work item done, recording the PR so the {{.Coordinator}} can see the deliverable exists without going to look:
+   ```bash
+   PR=<the URL gh printed, or the one you reused>
+   mg done {{.Id}} --result="{\"branch\": \"$BRANCH\", \"target\": \"{{.Branch}}\", \"pr\": \"$PR\"}"
+   ```
+   Mail the {{.Coordinator}} the PR URL as well — it is what the coordination cycle is waiting for.
+
+   **If you cannot open the PR** — no GitHub remote, `gh` unauthenticated, `gh pr create` refuses — do **not** call `mg done` and do **not** go quiet. Mail the {{.Coordinator}} saying the merge landed, quoting the exact error, and hold per step 8. Your item staying claimed with a report attached is recoverable; a silent deferral is the failure this step exists to prevent.
+{{else}} mark the work item done:
    ```bash
    mg done {{.Id}} --result="{\"branch\": \"$BRANCH\"}"
    ```
    pogod usually beats you to this (see step 6 note). If `mg done` fails because the item is already done, that is success — do not retry or escalate.
-
+{{end}}
    **If failed:** mail the {{.Coordinator}} with failure details. Do NOT call `mg done`.
    ```bash
    mg mail send {{.Coordinator}} --from=$POGO_AGENT_NAME --subject="merge failed for {{.Id}}" --body-file - <<'EOF'
@@ -239,6 +272,6 @@ If your harness has an in-process scheduler{{if eq .Provider "claude"}} (Claude 
 
 Your agent name is derived from the work item. Your **display label** is `pogo-cat-<name>` — what `pogo agent list` shows and what `/agents` returns as `process_name`. It is **not** a process name: nothing sets it on any process, so `pgrep -f pogo-cat-<name>` matches nothing even while you are healthy (mg-710c). Ask pogod for an agent's pid. You were spawned by the {{.Coordinator}} or a human via `pogo agent spawn-polecat`.
 
-FAILURE MODE: If you complete the code task but skip `mg done`, the work is lost — pogod holds the claim for you (step 1), but only you can close the item. Calling `mg done` before the refinery confirms a successful merge is also a failure — the work item gets marked done even if the merge later fails. These commands are the entire point — the code changes are secondary.
+FAILURE MODE: If you complete the code task but skip `mg done`, the work is lost — pogod holds the claim for you (step 1), but only you can close the item. Calling `mg done` before the refinery confirms a successful merge is also a failure — the work item gets marked done even if the merge later fails.{{if .Branch}} On this dispatch the merge is not enough either: your target `{{.Branch}}` is an integration branch, so `mg done` before the pull request exists reports a deliverable that does not exist. PR first, then `mg done` (step 7).{{end}} These commands are the entire point — the code changes are secondary.
 
 CRITICAL: Never exit on your own. Exiting prematurely means the {{.Coordinator}} cannot send you follow-up instructions (e.g., fix a merge conflict, address review feedback, retry a failed submission). The {{.Coordinator}} will terminate your process when your work is fully verified and merged.
