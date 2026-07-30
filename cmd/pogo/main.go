@@ -3075,6 +3075,15 @@ Exits with code 1 if any critical check fails (--check mode only).`,
 				var approaching []memcheck.Result
 				var offParity []memcheck.ParityResult
 				var staleHooks []memcheck.StaleHook
+				// The size and parity axes report separately, but a reader
+				// near the cap needs each one to know about the other: they
+				// compete, and whichever is read alone implies a resolution
+				// that abandons the other (mg-1b2f). These carry the coupling
+				// across, keyed by index path since both axes walk the same
+				// population.
+				sizeByPath := map[string]memcheck.Result{}
+				unrefByPath := map[string]int{}
+				lineCostByPath := map[string]int{}
 				checked, parityChecked, notesChecked, optedOut := 0, 0, 0, 0
 				idsTried, idsResolved := 0, 0
 				for _, mf := range memFiles {
@@ -3083,8 +3092,12 @@ Exits with code 1 if any critical check fails (--check mode only).`,
 						continue
 					}
 					checked++
+					sizeByPath[mf] = res
 					if res.Approaching {
 						approaching = append(approaching, res)
+					}
+					if data, rerr := os.ReadFile(mf); rerr == nil {
+						lineCostByPath[mf] = memcheck.IndexLineCostChars(data)
 					}
 					if p, perr := memcheck.CheckParity(mf); perr == nil {
 						parityChecked++
@@ -3092,6 +3105,7 @@ Exits with code 1 if any critical check fails (--check mode only).`,
 						optedOut += len(p.OptedOut)
 						if !p.InParity {
 							offParity = append(offParity, p)
+							unrefByPath[mf] = len(p.Unreferenced)
 						}
 					}
 					if rep, serr := memcheck.StaleCheckFile(mf, resolve); serr == nil {
@@ -3131,9 +3145,17 @@ Exits with code 1 if any critical check fails (--check mode only).`,
 								"READ TOOL: ~%d tokens, at/over the %d-token warn threshold (%.0f%% of the %d-token cap). Past %d tokens a read is refused or paginated. Token counts are ESTIMATED (±~11%%), so treat this as a margin warning, not a deadline",
 								res.EstTokens, res.ThresholdTokens, memcheck.WarnFraction*100, res.CapTokens, res.CapTokens)
 						}
+						// If parity fires on this same index, say so HERE. A
+						// reader told only "compact" resolves it the cheapest
+						// way available, and the cheapest way to shrink an
+						// index is to stop hooking notes (mg-1b2f).
+						tension := memcheck.SizeParityTension(unrefByPath[res.Path], lineCostByPath[res.Path])
+						if tension != "" {
+							tension = " " + tension
+						}
 						warn("memory index size", fmt.Sprintf(
-							"%s (%d chars, ~%d tokens, %dB) — %s. The harness announces the truncation, but an agent cannot notice entries that were never injected. Compact it deliberately (never auto — verify the entry count and links). Heaviest index lines: %s",
-							res.Path, res.Chars, res.EstTokens, res.SizeBytes, which, strings.Join(fat, " | ")))
+							"%s (%d chars, ~%d tokens, %dB) — %s. The harness announces the truncation, but an agent cannot notice entries that were never injected. Compact it deliberately (never auto — verify the entry count and links).%s Heaviest index lines: %s",
+							res.Path, res.Chars, res.EstTokens, res.SizeBytes, which, tension, strings.Join(fat, " | ")))
 					}
 				}
 				// 7b. INDEX/FILE PARITY. A note the index does not name is
@@ -3156,10 +3178,20 @@ Exits with code 1 if any critical check fails (--check mode only).`,
 						if len(names) > 8 {
 							names = append(names[:8:8], fmt.Sprintf("… and %d more", len(p.Unreferenced)-8))
 						}
+						// The remedy is budget-dependent, so it is computed
+						// rather than fixed prose. Near the cap "add a hook
+						// for each" is an instruction that cannot be followed
+						// alongside the size warn, and a reader handed two
+						// impossible instructions satisfies the cheaper one by
+						// leaving the notes unreachable (mg-1b2f).
+						remedy := memcheck.ParityRemedy(
+							len(p.Unreferenced),
+							sizeByPath[p.IndexPath].HeadroomChars(),
+							lineCostByPath[p.IndexPath])
 						warn("memory index parity", fmt.Sprintf(
-							"%s — %d of %d note(s) NOT referenced by the index: %s. They are on disk and unreachable by recall: nothing points at them, so the agent that wrote them cannot recall them either. Add a hook for each, or declare the note deliberately unindexed with '%s' in its frontmatter (a working scratch file legitimately has no hook). Never auto-append hooks%s",
+							"%s — %d of %d note(s) NOT referenced by the index: %s. They are on disk and unreachable by recall: nothing points at them, so the agent that wrote them cannot recall them either. %s Or declare a note deliberately unindexed with '%s' in its frontmatter (a working scratch file legitimately has no hook). Never auto-append hooks%s",
 							p.IndexPath, len(p.Unreferenced), p.Notes, strings.Join(names, ", "),
-							memcheck.UnindexedMarker, optedOutNote(len(p.OptedOut))))
+							remedy, memcheck.UnindexedMarker, optedOutNote(len(p.OptedOut))))
 					}
 				}
 
