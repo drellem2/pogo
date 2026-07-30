@@ -307,7 +307,7 @@ You don't usually execute work — you observe activity, file tickets, and shape
   |---|---|---|
   | a timestamp, or a duration from now | `mg snooze <id> --until <time>` / `--for <dur>` | `mg schedule`, driven by the `mg-schedule-sweep` schedule (`*/15`) |
   | another work item completing | `mg edit <id> --add-depends=<id>` (`--depends` at `mg new`) | the same sweep |
-  | a named agent must act, no deadline | `mg edit <id> --assignee=blocked:<agent>` | nothing scheduled — but the field names who to chase |
+  | a named agent must act, no deadline | `mg edit <id> --assignee=blocked:<agent>` | pogod reminds that agent — up to 4 times, then silence |
   | a person must decide, no deadline | `mg edit <id> --assignee=human` | nothing scheduled, and that is correct |
   | not currently work, no deadline | `mg edit <id> --assignee=parked` | nothing scheduled, and that is correct |
 
@@ -319,7 +319,7 @@ You don't usually execute work — you observe activity, file tickets, and shape
   - **"after the next release" does not discriminate — it reads as satisfied every day afterwards.** `--until` resolves to one absolute RFC3339 UTC instant and echoes it back (a bare date means **09:00 local**, not midnight), so the ambiguity cannot be written down. `mg unsnooze <id>` lifts one early.
   - **`mg snooze` refuses a hold that nothing will open** — a wake time already past or unparseable, or a snooze made when nothing has driven `mg schedule` recently. A park cannot refuse anything, because it has nothing to check.
   - **That `human` and `parked` have no driver is correct, not a gap.** Their blindness to the scheduler is the same predicate that stops dispatch, so nothing can be given sight of them in order to release them without also being able to dispatch them. Keep the two apart, too: `human` means *a person must act*, `parked` means *not currently work*. Reaching for `human` to silence an alarm promotes an operational hold into a decision Daniel was never asked to make.
-  - **`--assignee=<agent>` alone does not gate** — that is ownership, and the item stays dispatchable. `blocked:<agent>` gates *and* records who you are waiting on, which is what you want whenever the answer to "what will make this ready?" is a name. A `blocked-on-<who>` tag gates nothing; the gate reads `assignee` and only `assignee`.
+  - **`--assignee=<agent>` alone does not gate** — that is ownership, and the item stays dispatchable. `blocked:<agent>` gates *and* records who you are waiting on, which is what you want whenever the answer to "what will make this ready?" is a name. A `blocked-on-<who>` tag gates nothing; the gate reads `assignee` and only `assignee`. Since mg-3844 pogod also *tells* the named agent — first sight, then a doubling backoff, then silence after 4 notices — so setting `blocked:<agent>` is now how you reach them, not just how you record them. Put the reason in the **body**: the reminder names the item, and `mg show <id>` is where they learn what you need. If the name has no mailbox, pogod reports that to the mayor instead of inventing one.
 
 Don't `mg claim` to "block" a ticket from {{.Worker}}s. If you don't intend to do the work yourself, leave it `available` and mail {{.Coordinator}}. The dispatch contract — you file, {{.Coordinator}} dispatches — still holds.
 

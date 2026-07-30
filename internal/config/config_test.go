@@ -989,6 +989,89 @@ non_dispatchable_assignees = ["human", "legal-review"]
 	}
 }
 
+// TestBlockedReminderDefaults: the reminder is a gap fix, not an opt-in
+// feature, so an existing deployment with no [stall_watch] keys must get it on
+// (mg-3844). Its numeric knobs must also default to something that fires.
+func TestBlockedReminderDefaults(t *testing.T) {
+	dir := t.TempDir()
+	os.Setenv("XDG_CONFIG_HOME", dir)
+	defer os.Unsetenv("XDG_CONFIG_HOME")
+
+	cfg := Load()
+	if !cfg.StallWatch.BlockedReminderEnabled {
+		t.Error("blocked reminder should default to enabled")
+	}
+	if cfg.StallWatch.BlockedReminderCooldown != DefaultBlockedReminderCooldown {
+		t.Errorf("cooldown = %v, want default %v",
+			cfg.StallWatch.BlockedReminderCooldown, DefaultBlockedReminderCooldown)
+	}
+	if cfg.StallWatch.BlockedReminderMaxNotices != DefaultBlockedReminderMaxNotices {
+		t.Errorf("max notices = %d, want default %d",
+			cfg.StallWatch.BlockedReminderMaxNotices, DefaultBlockedReminderMaxNotices)
+	}
+	if DefaultBlockedReminderMaxNotices < 1 {
+		t.Errorf("a cap of %d silences the FIRST notice, which is the one the gap is about",
+			DefaultBlockedReminderMaxNotices)
+	}
+}
+
+// TestBlockedReminderConfigFile pins the three knobs through the flat-TOML
+// parser, including the two values a naive merge would eat: an explicit
+// `false`, and a NEGATIVE max-notices, which is the documented spelling of "no
+// cap" and must not be replaced by the default (see the `!= 0` merge test).
+func TestBlockedReminderConfigFile(t *testing.T) {
+	dir := t.TempDir()
+	os.Setenv("XDG_CONFIG_HOME", dir)
+	defer os.Unsetenv("XDG_CONFIG_HOME")
+
+	pogoDir := filepath.Join(dir, "pogo")
+	os.MkdirAll(pogoDir, 0755)
+	os.WriteFile(filepath.Join(pogoDir, "config.toml"), []byte(`
+[stall_watch]
+blocked_reminder_enabled = false
+blocked_reminder_cooldown = "20m"
+blocked_reminder_max_notices = -1
+`), 0644)
+
+	cfg := Load()
+	if cfg.StallWatch.BlockedReminderEnabled {
+		t.Error("blocked reminder should be disabled by config file")
+	}
+	if cfg.StallWatch.BlockedReminderCooldown != 20*time.Minute {
+		t.Errorf("cooldown = %v, want 20m", cfg.StallWatch.BlockedReminderCooldown)
+	}
+	if cfg.StallWatch.BlockedReminderMaxNotices != -1 {
+		t.Errorf("max notices = %d, want -1 (no cap) — a `> 0` merge test would "+
+			"silently turn an explicit request for unlimited notices into %d",
+			cfg.StallWatch.BlockedReminderMaxNotices, DefaultBlockedReminderMaxNotices)
+	}
+}
+
+// TestBlockedReminderSurvivesUnrelatedKeys mirrors
+// TestStallWatchUnrelatedKeysDontDisableIt: a [stall_watch] section that names
+// only another key must leave the reminder on.
+func TestBlockedReminderSurvivesUnrelatedKeys(t *testing.T) {
+	dir := t.TempDir()
+	os.Setenv("XDG_CONFIG_HOME", dir)
+	defer os.Unsetenv("XDG_CONFIG_HOME")
+
+	pogoDir := filepath.Join(dir, "pogo")
+	os.MkdirAll(pogoDir, 0755)
+	os.WriteFile(filepath.Join(pogoDir, "config.toml"), []byte(`
+[stall_watch]
+nudge_cooldown = "2m"
+`), 0644)
+
+	cfg := Load()
+	if !cfg.StallWatch.BlockedReminderEnabled {
+		t.Error("blocked reminder should remain enabled when only nudge_cooldown is set")
+	}
+	if cfg.StallWatch.BlockedReminderMaxNotices != DefaultBlockedReminderMaxNotices {
+		t.Errorf("max notices = %d, want default %d",
+			cfg.StallWatch.BlockedReminderMaxNotices, DefaultBlockedReminderMaxNotices)
+	}
+}
+
 // TestStallWatchRepeatBackoffCapDefault: an existing deployment has no
 // repeat_backoff_cap key, so the per-item backoff has to be correct with the
 // config file untouched — mg-1693 is a bug fix, not an opt-in feature.

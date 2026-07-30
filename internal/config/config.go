@@ -159,6 +159,33 @@ const (
 	// escalation and restores a flat per-item cooldown — still a fix for the
 	// per-category keying, just without the backoff.
 	DefaultStallRepeatBackoffCap = 4 * time.Hour
+	// DefaultBlockedReminderCooldown is the BASE of the per-item backoff for the
+	// blocked-reminder (mg-3844) — the gap before the SECOND notice to an agent
+	// named by a `blocked:<agent>` assignee. The FIRST notice is never delayed,
+	// which is the load-bearing half: the failure this fixes is a named agent who
+	// never learned a decision was owed at all, and only a first notice fixes
+	// that. A cadence merely accelerates it.
+	//
+	// Deliberately an hour rather than the 5-minute stall cooldown. The recipient
+	// of a stall nudge is the coordinator, whose response is a dispatch it can
+	// make in seconds; the recipient of a blocked-reminder is an agent being
+	// asked to make a DECISION, which is not faster for being asked twice an hour.
+	DefaultBlockedReminderCooldown = 1 * time.Hour
+	// DefaultBlockedReminderMaxNotices bounds how many notices one blocked item
+	// may draw before the reminder goes quiet about it for good.
+	//
+	// This is the stop condition mayor asked for in mg-3844, and it is a COUNT
+	// rather than a longer backoff on purpose. RepeatBackoffCap bounds the RATE;
+	// it does not terminate. A hold left in place for a week still draws a notice
+	// every cap-interval forever, which is the mg-1693 shape re-created on a new
+	// recipient — and worse here, because a blocked agent may be waiting on
+	// purpose and has no way to say "I know" other than clearing a block it is
+	// not ready to clear.
+	//
+	// Four notices under a doubling backoff span ~7h (0, +1h, +2h, +4h). That is
+	// long past the point where "the agent never knew" is a live explanation, and
+	// everything after it is nagging an agent who has already decided to wait.
+	DefaultBlockedReminderMaxNotices = 4
 	// DefaultDriftCheckInterval is how often pogod's drift-check runner samples
 	// the [reconcile] mirrors from the heartbeat OnTick loop (mg-345b). It is
 	// deliberately COARSE — far larger than the ~30s heartbeat tick — because the
@@ -570,6 +597,28 @@ type StallWatchConfig struct {
 	// or any owning agent such as pm-<name> — IS watched. Empty falls back to
 	// DefaultNonDispatchableAssignees (["human", "parked"]).
 	NonDispatchableAssignees []string
+
+	// BlockedReminderEnabled turns on the blocked-reminder (mg-3844): an item
+	// whose assignee is written `blocked:<agent>` reminds THAT AGENT that a
+	// decision is owed. It is a different signal to a different recipient from
+	// the two dispatch nudges above, and it is the only check here whose
+	// population is the GATED items rather than the watched ones.
+	//
+	// It applies to `blocked:<agent>` and to nothing else. `parked` and `human`
+	// stay silent, because their silence is the point — see
+	// stallwatch.checkBlockedReminders.
+	//
+	// Because New() cannot distinguish an unset bool from an explicit false, the
+	// production default (true) is applied by Load(), not New(); a hand-built
+	// config must set this field to activate the reminder.
+	BlockedReminderEnabled bool
+	// BlockedReminderCooldown is the base of the blocked-reminder's per-item
+	// backoff. Zero falls back to DefaultBlockedReminderCooldown.
+	BlockedReminderCooldown time.Duration
+	// BlockedReminderMaxNotices caps how many notices one blocked item may draw
+	// before the reminder goes quiet about it permanently. Zero falls back to
+	// DefaultBlockedReminderMaxNotices; a negative value means no cap.
+	BlockedReminderMaxNotices int
 }
 
 // GitGCConfig configures pogod's periodic polecat git garbage collector.
@@ -1052,15 +1101,19 @@ type parsedConfig struct {
 	gitgcEnabledSet        bool
 	stallWatchEnabledSet   bool
 	priorityWakeEnabledSet bool
-	agentsAutoStartSet     bool
-	reaperEnabledSet       bool
-	driftWatchEnabledSet   bool
-	credExpiryEnabledSet   bool
-	ghTeardownEnabledSet   bool
-	ghIntakeEnabledSet     bool
-	ackWatchEnabledSet     bool
-	deafWatchEnabledSet    bool
-	doneReapEnabledSet     bool
+	// blockedReminderEnabledSet mirrors priorityWakeEnabledSet: without it an
+	// explicit `blocked_reminder_enabled = false` is indistinguishable from the
+	// key being absent, and the layer merge would restore the default `true`.
+	blockedReminderEnabledSet bool
+	agentsAutoStartSet        bool
+	reaperEnabledSet          bool
+	driftWatchEnabledSet      bool
+	credExpiryEnabledSet      bool
+	ghTeardownEnabledSet      bool
+	ghIntakeEnabledSet        bool
+	ackWatchEnabledSet        bool
+	deafWatchEnabledSet       bool
+	doneReapEnabledSet        bool
 	// sources are the files that were read, lowest precedence first.
 	sources []string
 }
@@ -1110,8 +1163,12 @@ func Load() *Config {
 			PriorityWakeEnabled:      true,
 			HighPriorityWakeDelay:    DefaultHighPriorityWakeDelay,
 			HighPriorityWakeCooldown: DefaultHighPriorityWakeCooldown,
-			FastPriorities:           DefaultFastPriorities,
-			NonDispatchableAssignees: DefaultNonDispatchableAssignees,
+
+			BlockedReminderEnabled:    true,
+			BlockedReminderCooldown:   DefaultBlockedReminderCooldown,
+			BlockedReminderMaxNotices: DefaultBlockedReminderMaxNotices,
+			FastPriorities:            DefaultFastPriorities,
+			NonDispatchableAssignees:  DefaultNonDispatchableAssignees,
 		},
 		DriftWatch: DriftWatchConfig{
 			Enabled:  true,
@@ -1360,6 +1417,19 @@ func Load() *Config {
 		}
 		if len(fileCfg.StallWatch.NonDispatchableAssignees) > 0 {
 			cfg.StallWatch.NonDispatchableAssignees = fileCfg.StallWatch.NonDispatchableAssignees
+		}
+		if fileCfg.blockedReminderEnabledSet {
+			cfg.StallWatch.BlockedReminderEnabled = fileCfg.StallWatch.BlockedReminderEnabled
+		}
+		if fileCfg.StallWatch.BlockedReminderCooldown > 0 {
+			cfg.StallWatch.BlockedReminderCooldown = fileCfg.StallWatch.BlockedReminderCooldown
+		}
+		// Not `> 0`: a negative value is the documented way to say "no cap", and a
+		// `> 0` test would silently discard it in favour of the default — turning
+		// an explicit request for unlimited notices into four. Zero still falls
+		// through to the default, which is what "unset" looks like in flat TOML.
+		if fileCfg.StallWatch.BlockedReminderMaxNotices != 0 {
+			cfg.StallWatch.BlockedReminderMaxNotices = fileCfg.StallWatch.BlockedReminderMaxNotices
 		}
 
 		// [dispatch_pairing] has no code-side defaults to preserve — the zero
@@ -1822,6 +1892,19 @@ func parseConfigFileInto(cfg *parsedConfig, path string) error {
 				cfg.StallWatch.FastPriorities = parseStringArray(val)
 			case "non_dispatchable_assignees":
 				cfg.StallWatch.NonDispatchableAssignees = parseStringArray(val)
+			case "blocked_reminder_enabled":
+				cfg.StallWatch.BlockedReminderEnabled = val == "true"
+				cfg.blockedReminderEnabledSet = true
+			case "blocked_reminder_cooldown":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.StallWatch.BlockedReminderCooldown = d
+				}
+			case "blocked_reminder_max_notices":
+				// Negative is accepted — it is the "no cap" spelling. Only an
+				// unparseable value is ignored.
+				if n, err := strconv.Atoi(unquotedVal); err == nil {
+					cfg.StallWatch.BlockedReminderMaxNotices = n
+				}
 			}
 		case "dispatch_pairing":
 			switch key {

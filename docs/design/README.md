@@ -8,6 +8,7 @@ doubt, the code is the source of truth.
 | Doc | Covers | Status |
 |-----|--------|--------|
 | [agent-state-machine-design.md](agent-state-machine-design.md) | Explicit agent health states (Starting / idle / stalled) for `pogo agent diagnose` | Proposal — not implemented (mg-2ba0) |
+| [blocked-reminder-design.md](blocked-reminder-design.md) | Why a `blocked:<agent>` hold now notifies the agent it names, why that is not the rejected park-sweeper, and why `parked`/`human` stay silent | Shipped (mg-3844, `internal/stallwatch/blockedreminder.go`) |
 | [bridget-integration-design.md](bridget-integration-design.md) | Discord per-channel agent integration via a fork of `cloverross/bridget` | Proposal (mg-7921); see [investigations/bridget-fork-2026-05-09.md](../investigations/bridget-fork-2026-05-09.md) |
 | [declarative-orchestration.md](declarative-orchestration.md) | Declarative TOML agent roles vs imperative prompt files | Shipped — Phase 1+2 (`auto_start`, `restart_on_crash`, `nudge_on_start`); kept for the why-TOML-not-X rationale |
 | [harness-provider-research.md](harness-provider-research.md) | Phase 1: which harness/model provider to add next (recommends OpenAI Codex) | Research; Codex provider since shipped (`internal/codex/`) |
