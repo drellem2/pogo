@@ -150,7 +150,54 @@ type MergeRequest struct {
 	// merge itself still succeeded (Status remains StatusMerged); deploy
 	// failure is surfaced for diagnostics, not rolled back. Empty when no
 	// deploy was configured or the deploy succeeded.
-	DeployError      string `json:"deploy_error,omitempty"`
+	DeployError string `json:"deploy_error,omitempty"`
+	// MergedSHA is the commit the branch actually landed as on the target ref
+	// — the tip of the target after the fast-forward, as observed by the
+	// refinery immediately after it pushed.
+	//
+	// The refinery always knew this value and used to throw it away: it went
+	// into the merged event, the PR-close comment and the deploy hook's
+	// worktree, and never onto the MergeRequest, so no actor downstream of the
+	// merge could name the commit (mg-6879). That is the gap that made
+	// post-merge work impossible to place anywhere but the authoring worker:
+	// the worker's own `git rev-parse` was the only reachable answer, and the
+	// worker is the one actor guaranteed not to outlive the merge.
+	//
+	// On the already-merged no-op path this is the branch tip, which the probe
+	// has just confirmed is an ancestor of the target — i.e. still the commit
+	// the branch's content landed as. Empty only when git could not be asked.
+	MergedSHA string `json:"merged_sha,omitempty"`
+	// PostMergeTag names a git tag the REFINERY creates on MergedSHA and pushes
+	// after a successful merge, when the submitter declares one
+	// (`--post-merge-tag`). It exists because of a constraint that no other
+	// actor satisfies (mg-6879).
+	//
+	// A release cut has to tag the commit its own version bump landed as. That
+	// requires seeing the merged SHA and outliving the merge, and the two
+	// obvious candidates each have exactly one of those properties: the
+	// authoring polecat sees the SHA but is reaped when its merge lands, while
+	// a pre-merge script (bump-version.sh --tag, mg-cef7) outlives the merge
+	// but can only tag a SHA the refinery is about to rewrite in its rebase.
+	// So the naive fix for either defect is the other defect. The refinery has
+	// both properties — it computes MergedSHA and it lives in pogod — which is
+	// why the step belongs here rather than in the worker's sequence.
+	//
+	// Running it inside the merge pipeline (see processMerge) also removes the
+	// race rather than deferring it: the whole step completes before OnMerged
+	// fires, so there is no window in which the reap can land between the merge
+	// and the tag.
+	PostMergeTag string `json:"post_merge_tag,omitempty"`
+	// PostMergeError is set when a declared post-merge step ran and failed. The
+	// merge itself still succeeded (Status stays StatusMerged) — the tag is
+	// pushed after the branch has landed on origin and nothing unwinds it.
+	//
+	// It is load-bearing rather than diagnostic, which is what separates it
+	// from DeployError: pogod's reap consults it and refuses to mark the work
+	// item done when it is set (see resolvePostMergeWork). The defect this
+	// closes was silent — an item read `done` with exit_code=0 while its
+	// deliverable did not exist — so a post-merge step that fails must not be
+	// able to resolve as completion.
+	PostMergeError   string `json:"post_merge_error,omitempty"`
 	FailureCount     int    `json:"failure_count"`
 	ThresholdReached bool   `json:"threshold_reached,omitempty"`
 	// Progress is the liveness record for the long-running step this MR is in
@@ -409,6 +456,15 @@ func (r *Refinery) Submit(req MergeRequest) (string, error) {
 	}
 	if req.TargetRef == "" {
 		req.TargetRef = "main"
+	}
+	// Reject a malformed post-merge tag now, while the submitter is still
+	// running and a retry costs nothing. The same mistake caught after the
+	// merge lands costs a half-finished release, because the merge is not
+	// unwound (mg-6879).
+	if req.PostMergeTag != "" {
+		if ok, why := validTagName(req.PostMergeTag); !ok {
+			return "", fmt.Errorf("post_merge_tag %q is not a valid git tag name: %s", req.PostMergeTag, why)
+		}
 	}
 
 	// Resolve the repo's default branch once: it decides both where an
@@ -906,14 +962,17 @@ func (r *Refinery) processNext() {
 
 	log.Printf("refinery: processing MR %s branch=%s", mr.ID, mr.Branch)
 
-	gateOutput, deployErr, alreadyMerged, err := r.processMerge(mr)
+	outcome, err := r.processMerge(mr)
 
 	r.mu.Lock()
 	r.endProcessingLocked()
-	mr.GateOutput = gateOutput
-	mr.DeployError = deployErr
-	mr.AlreadyMerged = alreadyMerged
+	mr.GateOutput = outcome.GateOutput
+	mr.DeployError = outcome.DeployError
+	mr.PostMergeError = outcome.PostMergeError
+	mr.MergedSHA = outcome.MergedSHA
+	mr.AlreadyMerged = outcome.AlreadyMerged
 	mr.DoneTime = time.Now()
+	alreadyMerged := outcome.AlreadyMerged
 	if isCancelled(err) {
 		// Cancelled, not failed. Neither the author's failure streak nor the
 		// failed callback applies: the merge did not fail on its merits, and
@@ -940,9 +999,15 @@ func (r *Refinery) processNext() {
 			delete(r.failureCounts, mr.Author)
 		}
 		if alreadyMerged {
-			log.Printf("refinery: MR %s resolved as already merged (no-op) branch=%s author=%s", mr.ID, mr.Branch, mr.Author)
+			log.Printf("refinery: MR %s resolved as already merged (no-op) branch=%s author=%s sha=%s", mr.ID, mr.Branch, mr.Author, mr.MergedSHA)
 		} else {
-			log.Printf("refinery: MR %s merged successfully branch=%s author=%s", mr.ID, mr.Branch, mr.Author)
+			log.Printf("refinery: MR %s merged successfully branch=%s author=%s sha=%s", mr.ID, mr.Branch, mr.Author, mr.MergedSHA)
+		}
+		// The merge succeeded and its declared follow-on did not. Say so at
+		// merged-level volume: the status stays "merged", so a reader keying
+		// only off status would otherwise see unqualified success (mg-6879).
+		if mr.PostMergeError != "" {
+			log.Printf("refinery: MR %s merged but its POST-MERGE STEP FAILED branch=%s author=%s: %s — the work item will NOT be marked done", mr.ID, mr.Branch, mr.Author, mr.PostMergeError)
 		}
 	}
 	r.history = append(r.history, mr)

@@ -27,6 +27,17 @@ type SubmitRequest struct {
 	// deferral must not depend on a caller remembering a flag. There is
 	// deliberately no way to request PR flow from here: it is derived.
 	DeferDone bool `json:"defer_done,omitempty"`
+	// PostMergeTag asks the REFINERY to create this git tag on the commit the
+	// merge lands as, and push it, before the author's reap can fire
+	// (mg-6879). Empty means no post-merge step.
+	//
+	// This is the opposite instrument to DeferDone. DeferDone leaves the
+	// post-merge work with the author and merely stops it being killed;
+	// PostMergeTag moves the work to an actor that both sees the merged SHA
+	// and outlives the author. Use DeferDone for work only the author can do
+	// (open a PR from its branch, mail its report); use this for work that
+	// just needs the merged commit.
+	PostMergeTag string `json:"post_merge_tag,omitempty"`
 }
 
 // RegisterHandlers registers refinery API endpoints on the given mux,
@@ -121,6 +132,7 @@ func (r *Refinery) handleSubmit(w http.ResponseWriter, req *http.Request) {
 		Author:              submitReq.Author,
 		AutoCreateTargetRef: submitReq.AutoCreateTargetRef,
 		DeferDone:           submitReq.DeferDone,
+		PostMergeTag:        submitReq.PostMergeTag,
 	}
 
 	id, err := r.Submit(mr)

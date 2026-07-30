@@ -154,6 +154,51 @@ func emitDeployFailed(mr *MergeRequest, err error, output string) {
 	})
 }
 
+// emitPostMergeTagged writes a refinery_post_merge_tagged event when the
+// refinery has created and pushed a declared post-merge tag. It names the SHA
+// so the log answers "what did v0.8.0 land on" without a git round-trip —
+// which is the question that went unanswerable when the tag step lived in a
+// worker that was reaped before performing it (mg-6879).
+func emitPostMergeTagged(mr *MergeRequest, tag, sha string) {
+	events.Emit(context.Background(), events.Event{
+		EventType:  "refinery_post_merge_tagged",
+		Agent:      "refinery",
+		WorkItemID: workItemIDFromAuthor(mr.Author),
+		Repo:       mr.RepoPath,
+		Details: map[string]any{
+			"merge_request_id": mr.ID,
+			"repo":             mr.RepoPath,
+			"tag":              tag,
+			"merged_sha":       sha,
+			"target_ref":       mr.TargetRef,
+		},
+	})
+}
+
+// emitPostMergeTagFailed writes a refinery_post_merge_tag_failed event when a
+// declared post-merge tag could not be created or pushed. The merge has
+// already landed; this is the record that its deliverable has not, and it is
+// paired with pogod refusing to complete the work item.
+func emitPostMergeTagFailed(mr *MergeRequest, tag, sha string, err error) {
+	details := map[string]any{
+		"merge_request_id": mr.ID,
+		"repo":             mr.RepoPath,
+		"tag":              tag,
+		"target_ref":       mr.TargetRef,
+		"reason":           summarizeReason(err),
+	}
+	if sha != "" {
+		details["merged_sha"] = sha
+	}
+	events.Emit(context.Background(), events.Event{
+		EventType:  "refinery_post_merge_tag_failed",
+		Agent:      "refinery",
+		WorkItemID: workItemIDFromAuthor(mr.Author),
+		Repo:       mr.RepoPath,
+		Details:    details,
+	})
+}
+
 // emitRecoveryLost writes a refinery_mr_lost event when restart recovery
 // could not resolve an in-flight MR (branch deleted, remote unreachable).
 // The MR moves to the lost list; `refinery show` answers 410/status=lost so

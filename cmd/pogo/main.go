@@ -3565,6 +3565,7 @@ report; it is safe from anywhere and never acts.`,
 	var submitAuthor string
 	var submitAutoCreateTarget bool
 	var submitDeferDone bool
+	var submitPostMergeTag string
 	var cmdRefinerySubmit = &cobra.Command{
 		Use:   "submit <branch>",
 		Short: "Submit a branch to the merge queue",
@@ -3603,6 +3604,25 @@ pogod reads that tag at merge time and takes the same lane: the work item stays
 claimed, the polecat keeps running and calls 'mg done' itself, and the bounded
 backstop still applies. Set it when you FILE the item, not when you submit.
 
+All three of those keep the AUTHOR as the actor and only stop it being killed.
+That is right for work only the author can do — opening a PR from its branch,
+mailing its own report — and wrong for work that just needs the merged commit,
+because the author cannot know that commit until the refinery has written it and
+cannot be relied on to still be alive afterwards.
+
+--post-merge-tag moves such a step to the refinery instead of protecting the
+author while it does it. The refinery creates the tag on the commit the merge
+actually landed as and pushes it, before the author's reap can fire:
+
+  pogo refinery submit polecat-a3f --repo=/path/to/repo --post-merge-tag=v0.8.0
+
+Use it for a release cut. Tagging from the worker's own sequence has to happen
+either before the merge (dangling the tag off a SHA the refinery rewrites when
+it rebases) or after it (racing the reap) — the refinery is the only actor that
+both sees the merged SHA and outlives the worker. If the tag cannot be pushed,
+the merge still stands but the work item is NOT marked done and the mayor is
+mailed, so a half-finished release can never read as complete.
+
 Example:
   pogo refinery submit polecat-a3f --repo=/path/to/repo`,
 		Args: cobra.ExactArgs(1),
@@ -3618,6 +3638,7 @@ Example:
 				Author:              submitAuthor,
 				AutoCreateTargetRef: submitAutoCreateTarget,
 				DeferDone:           submitDeferDone,
+				PostMergeTag:        submitPostMergeTag,
 			})
 			if err != nil {
 				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
@@ -3634,6 +3655,7 @@ Example:
 	cmdRefinerySubmit.Flags().StringVar(&submitAuthor, "author", "", "Author agent name")
 	cmdRefinerySubmit.Flags().BoolVar(&submitAutoCreateTarget, "auto-create-target", false, "Create the target ref from the repo's default branch if it doesn't exist (off by default; safer to fail loudly on typos)")
 	cmdRefinerySubmit.Flags().BoolVar(&submitDeferDone, "defer-done", false, "Skip pogod's auto-done/auto-stop at merge so the polecat owns its post-merge lifecycle and calls 'mg done' itself (already implied when --target is not the repo's default branch; a bounded backstop reaps a deferred polecat that never completes)")
+	cmdRefinerySubmit.Flags().StringVar(&submitPostMergeTag, "post-merge-tag", "", "Have the REFINERY create this git tag on the commit the merge lands as and push it, before the author is reaped (use for release cuts — the refinery is the only actor that both sees the merged SHA and outlives the author; a failure here blocks auto-done and mails the mayor)")
 
 	var cmdRefineryStatus = &cobra.Command{
 		Use:   "status",
@@ -3837,6 +3859,28 @@ Examples:
 				}
 				if mr.AlreadyMerged {
 					fmt.Printf("Note:      branch had already landed on the target — resolved as merged without re-running gates\n")
+				}
+				if mr.MergedSHA != "" {
+					fmt.Printf("Merged as: %s\n", mr.MergedSHA)
+				}
+				// Print the post-merge step in both directions (mg-6879). A
+				// declared-but-failed step is the one case where Status reads
+				// "merged" and the deliverable does not exist, so it must be
+				// visible next to the status rather than inferable from its
+				// absence.
+				if mr.PostMergeTag != "" {
+					switch {
+					case mr.PostMergeError != "":
+						fmt.Printf("Tag:       %s — NOT CREATED: %s\n", mr.PostMergeTag, mr.PostMergeError)
+						fmt.Printf("           The merge landed; its deliverable did not. The work item is\n")
+						fmt.Printf("           deliberately NOT done — do not archive it on 'merged' alone.\n")
+					case mr.Status == refinery.StatusMerged:
+						fmt.Printf("Tag:       %s (created by the refinery on %s and pushed to origin)\n", mr.PostMergeTag, mr.MergedSHA)
+					default:
+						fmt.Printf("Tag:       %s (declared; the refinery creates it on the merged commit)\n", mr.PostMergeTag)
+					}
+				} else if mr.PostMergeError != "" {
+					fmt.Printf("Post-merge: FAILED — %s\n", mr.PostMergeError)
 				}
 				fmt.Printf("Repo:      %s\n", mr.RepoPath)
 				fmt.Printf("Submitted: %s\n", mr.SubmitTime.Format("2006-01-02 15:04:05"))
