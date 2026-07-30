@@ -2123,8 +2123,21 @@ Flags:
 				// handle QA. The mayor's reap loop stays as a backstop for
 				// polecats the event-driven stop above misses (e.g. a merge
 				// resolved while pogod was down).
+				// A failed post-merge step is loud in the SUBJECT, not buried in
+				// the body. The merge succeeded, so a subject-scanning reader
+				// would otherwise file this next to every other MERGED mail
+				// while the release it describes is half-finished (mg-6879).
 				subject := fmt.Sprintf("MERGED: %s (branch=%s)", mr.ID, mr.Branch)
+				if mr.PostMergeError != "" {
+					subject = fmt.Sprintf("MERGED but POST-MERGE STEP FAILED: %s (branch=%s)", mr.ID, mr.Branch)
+				}
 				body := fmt.Sprintf("Merge request %s succeeded.\nBranch: %s\nTarget: %s\nAuthor: %s", mr.ID, mr.Branch, mr.TargetRef, mr.Author)
+				// Name the commit. Every question about a merge downstream of
+				// this mail ("was the tag on the right SHA", "what shipped")
+				// starts here, and the SHA used to be unreachable (mg-6879).
+				if mr.MergedSHA != "" {
+					body += fmt.Sprintf("\nMerged SHA: %s", mr.MergedSHA)
+				}
 				// Say plainly which kind of merge this was. The mayor has to
 				// tell "merged to the default branch, done" from "merged to an
 				// integration branch, PR still pending" and was previously left
@@ -2151,6 +2164,25 @@ Flags:
 				// landed — only the post-merge deploy hook failed.
 				if mr.DeployError != "" {
 					body += fmt.Sprintf("\nDeploy: FAILED — %s", mr.DeployError)
+				}
+				// The post-merge step the refinery performed on the author's
+				// behalf (mg-6879). Reported in both directions: the success
+				// line is the record that the deliverable exists, which is what
+				// makes "merged" trustworthy for a release cut, and the failure
+				// line is an explicit ask because nothing else will chase it —
+				// the work item is deliberately NOT done, so the 15-minute
+				// backstop is the only other actor and it reports a stalled
+				// polecat rather than a missing tag.
+				if mr.PostMergeTag != "" && mr.PostMergeError == "" {
+					body += fmt.Sprintf("\nPost-merge tag: %s pushed to origin at %s (performed by the refinery, not the polecat).", mr.PostMergeTag, mr.MergedSHA)
+				}
+				if mr.PostMergeError != "" {
+					body += fmt.Sprintf("\n\nPOST-MERGE STEP FAILED — %s"+
+						"\nThe merge LANDED and is not unwound; its follow-on step did not run to completion."+
+						"\nThe work item is deliberately NOT marked done and the polecat is still running."+
+						"\nACTION NEEDED: fix the step by hand (for a tag: confirm which commit should carry it, then create and push it), or re-dispatch."+
+						"\nDo NOT archive this item — `merged` here does not mean the deliverable exists.",
+						mr.PostMergeError)
 				}
 				if err := client.SendMGMail(coordinator, "refinery", subject, body); err != nil {
 					log.Printf("refinery: failed to mail coordinator: %v", err)

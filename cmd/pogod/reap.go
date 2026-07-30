@@ -75,10 +75,30 @@ type postMergeVerdict struct {
 // within deferDoneBackstopTimeout if it does not. The cost of being wrong the
 // other way is a ticket silently truncated, which nothing catches.
 func resolvePostMergeWork(reg polecatReaper, mr *refinery.MergeRequest, declares func(id string) (bool, error)) postMergeVerdict {
-	if mr == nil || mr.Author == "" || declares == nil {
+	if mr == nil || mr.Author == "" {
 		return postMergeVerdict{}
 	}
 	if a := reg.GetByWorkItemOrName(mr.Author); a == nil || a.Type != agent.TypePolecat {
+		return postMergeVerdict{}
+	}
+	// The refinery performed a declared post-merge step and it FAILED
+	// (mg-6879). The merge landed, so the MR reads "merged" and every
+	// status-keyed reader sees success — but the deliverable does not exist,
+	// which is the exact shape of the defect that let a release be reported
+	// complete with no tag. Refuse to complete the item.
+	//
+	// Checked before every other signal, including the declares == nil guard
+	// below: this verdict needs no probe, and it must not be suppressible by a
+	// missing one.
+	if mr.PostMergeError != "" {
+		return postMergeVerdict{
+			Declared: true,
+			Reason: fmt.Sprintf("the refinery's declared post-merge step FAILED after the merge landed (%s) — "+
+				"the branch is on %s but its deliverable does not exist, so this merge is not completion (mg-6879)",
+				mr.PostMergeError, mr.TargetRef),
+		}
+	}
+	if declares == nil {
 		return postMergeVerdict{}
 	}
 	if mr.DeferDone || mr.PRFlow {
@@ -158,6 +178,11 @@ func reapMergedPolecat(reg polecatReaper, mr *refinery.MergeRequest, complete fu
 	if mr.DeferDone || mr.PRFlow || postMerge.Declared {
 		var reason string
 		switch {
+		case mr.PostMergeError != "":
+			// Outranks the others: whatever lane this MR was in, a failed
+			// post-merge step is the most important thing about it (mg-6879).
+			reason = fmt.Sprintf("merged as %s but its declared post-merge step FAILED (%s) — deliverable missing",
+				mr.MergedSHA, mr.PostMergeError)
 		case mr.PRFlow:
 			reason = fmt.Sprintf("merged into integration branch %q, not the repo default — PR still pending (mg-7746)", mr.TargetRef)
 		case mr.DeferDone:
@@ -189,12 +214,24 @@ func reapMergedPolecat(reg polecatReaper, mr *refinery.MergeRequest, complete fu
 	// classification lives on the merge request instead (`pogo refinery show
 	// <id> --json`), which is where the refinery records it. mg-c8d5 corrects
 	// the docs that claimed otherwise.
-	result, _ := json.Marshal(map[string]any{
+	// `merged_sha` and `post_merge_tag` record what actually landed, so the
+	// closed item answers "which commit is this" and "did the tag get pushed"
+	// without a git round-trip. Reaching this writer at all means any declared
+	// post-merge step succeeded — the guard above returns otherwise — so the
+	// tag named here is one the refinery has confirmed on origin (mg-6879).
+	sidecar := map[string]any{
 		"branch":       mr.Branch,
 		"mr":           mr.ID,
 		"completed_by": "refinery",
 		"target":       mr.TargetRef,
-	})
+	}
+	if mr.MergedSHA != "" {
+		sidecar["merged_sha"] = mr.MergedSHA
+	}
+	if mr.PostMergeTag != "" {
+		sidecar["post_merge_tag"] = mr.PostMergeTag
+	}
+	result, _ := json.Marshal(sidecar)
 	if err := complete(mr.Author, string(result)); err != nil {
 		log.Printf("refinery: mg done %s on merged polecat's behalf failed (may already be done): %v", mr.Author, err)
 	}

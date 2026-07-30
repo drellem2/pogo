@@ -45,16 +45,14 @@ const defaultMaxAttempts = 7
 // and (when a deploy hook runs) refinery_deploy_* events. Emission is
 // best-effort and never propagates errors — see internal/events.Emit.
 //
-// Returns the captured gate output, a deploy error string (empty when no
-// deploy ran or it succeeded — populates MergeRequest.DeployError), whether
-// the branch was found already merged (see the guard below — populates
-// MergeRequest.AlreadyMerged), and the merge error (nil on success). Deploy
-// failure does NOT cause processMerge to return an error: the merge has
-// already landed remotely.
-func (r *Refinery) processMerge(mr *MergeRequest) (string, string, bool, error) {
+// Returns a mergeResult describing what landed, and the merge error (nil on
+// success). Neither a deploy failure nor a post-merge step failure causes a
+// non-nil error: both run after the branch has landed remotely, and the merge
+// is not unwound.
+func (r *Refinery) processMerge(mr *MergeRequest) (mergeResult, error) {
 	wtDir, err := r.ensureWorktree(mr.RepoPath)
 	if err != nil {
-		return "", "", false, fmt.Errorf("worktree setup: %w", err)
+		return mergeResult{}, fmt.Errorf("worktree setup: %w", err)
 	}
 
 	// Already-merged guard (gh #34): a polecat whose poll loop lost track of
@@ -70,7 +68,20 @@ func (r *Refinery) processMerge(mr *MergeRequest) (string, string, bool, error) 
 		log.Printf("refinery: MR %s branch=%s already merged into origin/%s — resolving as merged without re-running gates (no-op)", mr.ID, mr.Branch, mr.TargetRef)
 		emitMerged(mr, 0, sha, 0, true)
 		gateOutput := fmt.Sprintf("(branch already merged into origin/%s — quality gates, push, and deploy skipped)", mr.TargetRef)
-		return gateOutput, "", true, nil
+		// The post-merge step is NOT skipped here, unlike gates/push/deploy.
+		// Those are skipped because repeating them would be a no-op; the tag is
+		// skipped only if it already exists, which runPostMergeSteps decides for
+		// itself. A resubmit-after-losing-track (gh #34) is precisely the case
+		// where the branch landed but the declared tag may never have been
+		// pushed, so refusing to try here would reproduce the half-cut release
+		// this exists to prevent (mg-6879).
+		postMergeErr := r.runPostMergeSteps(wtDir, mr, sha)
+		return mergeResult{
+			GateOutput:     gateOutput,
+			PostMergeError: postMergeErr,
+			MergedSHA:      sha,
+			AlreadyMerged:  true,
+		}, nil
 	} else if probeErr != nil {
 		log.Printf("refinery: MR %s already-merged probe inconclusive (%v) — proceeding with merge", mr.ID, probeErr)
 	}
@@ -90,7 +101,7 @@ func (r *Refinery) processMerge(mr *MergeRequest) (string, string, bool, error) 
 		// rather than being swallowed until the next gate starts.
 		if r.cancelWasRequested() {
 			emitMergeCancelled(mr, attempt, "before-attempt", gateOutput)
-			return gateOutput, "", false, cancelledMergeError("before-attempt")
+			return mergeResult{GateOutput: gateOutput}, cancelledMergeError("before-attempt")
 		}
 		if attempt > 1 {
 			log.Printf("refinery: MR %s step=retry attempt=%d/%d", mr.ID, attempt, maxAttempts)
@@ -117,14 +128,26 @@ func (r *Refinery) processMerge(mr *MergeRequest) (string, string, bool, error) 
 			// so they reflect the just-merged code. Failure is reported via
 			// DeployError + event but does not unwind the merge.
 			deployErr := r.runDeploy(wtDir, mr)
-			return gateOutput, deployErr, false, nil
+			// Perform the post-merge protocol the submitter declared, against
+			// the SHA that just landed (mg-6879). This runs INSIDE the merge
+			// pipeline on purpose: processNext fires OnMerged only after
+			// processMerge returns, so the step is complete before the reap can
+			// observe the merge at all. Deferring the reap would have left a
+			// window; finishing the work first leaves none.
+			postMergeErr := r.runPostMergeSteps(wtDir, mr, sha)
+			return mergeResult{
+				GateOutput:     gateOutput,
+				DeployError:    deployErr,
+				PostMergeError: postMergeErr,
+				MergedSHA:      sha,
+			}, nil
 		}
 
 		// A cancelled gate must not be retried: the retry loop exists to
 		// absorb races with other merges, not to defeat an operator.
 		if isCancelled(attemptErr) || r.cancelWasRequested() {
 			emitMergeCancelled(mr, attempt, stage, gateOutput)
-			return gateOutput, "", false, cancelledMergeError(stage)
+			return mergeResult{GateOutput: gateOutput}, cancelledMergeError(stage)
 		}
 
 		retryRemaining := attempt < maxAttempts && isRetryable(attemptErr)
@@ -134,11 +157,11 @@ func (r *Refinery) processMerge(mr *MergeRequest) (string, string, bool, error) 
 			log.Printf("refinery: MR %s attempt %d failed (will retry): %v", mr.ID, attempt, attemptErr)
 			continue
 		}
-		return gateOutput, "", false, attemptErr
+		return mergeResult{GateOutput: gateOutput}, attemptErr
 	}
 	finalErr := fmt.Errorf("merge failed after %d attempts", maxAttempts)
 	emitMergeFailed(mr, maxAttempts, "unknown", finalErr, true, gateOutput)
-	return gateOutput, "", false, finalErr
+	return mergeResult{GateOutput: gateOutput}, finalErr
 }
 
 // attemptMerge runs a single fetch→rebase→gates→merge→push cycle. Returns

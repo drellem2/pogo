@@ -196,7 +196,7 @@ func TestCancelDuringGitStepStopsAtTheNextBoundary(t *testing.T) {
 	r.requestInFlightCancelLocked(mr)
 	r.mu.Unlock()
 
-	_, _, _, err = r.processMerge(mr)
+	_, err = r.processMerge(mr)
 	if !isCancelled(err) {
 		t.Fatalf("processMerge must report cancellation, got: %v", err)
 	}
