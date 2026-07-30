@@ -2995,23 +2995,23 @@ Exits with code 1 if any critical check fails (--check mode only).`,
 				}
 			}
 
-			// 6. Macguffin available
+			// 6. Macguffin available, and no stale claims. The count comes
+			// from mg's machine-readable listing, never the rendered one —
+			// see staleclaims.go for why counting rendered lines made every
+			// clean store report exactly one claimed item (mg-b13b).
 			if _, err := exec.LookPath("mg"); err != nil {
 				warn("macguffin (mg)", "not found in PATH (install: go install github.com/drellem2/macguffin/cmd/mg@latest)")
+			} else if count, err := claimedWorkItemCount(); err != nil {
+				// mg is installed but the store could not be listed; an
+				// uninitialised MG_ROOT is the ordinary cause and is not a
+				// pogo health problem. Say the claims went UNCHECKED rather
+				// than only "installed": a detector that quietly stopped
+				// running reads exactly like one with nothing to report.
+				pass("macguffin (mg)", "installed — claimed items NOT checked: "+err.Error())
+			} else if count == 0 {
+				pass("macguffin (mg)", "no stale claims")
 			} else {
-				// Check for stale claimed items
-				mgOut, mgErr := exec.Command("mg", "list", "--status=claimed").CombinedOutput()
-				if mgErr != nil {
-					pass("macguffin (mg)", "installed")
-				} else {
-					items := strings.TrimSpace(string(mgOut))
-					if items == "" {
-						pass("macguffin (mg)", "no stale claims")
-					} else {
-						count := len(strings.Split(items, "\n"))
-						warn("macguffin (mg)", fmt.Sprintf("%d claimed work item(s) — check for stale claims", count))
-					}
-				}
+				warn("macguffin (mg)", fmt.Sprintf("%d claimed work item(s) — check for stale claims", count))
 			}
 
 			// 7. Auto-memory index health, on THREE axes.
