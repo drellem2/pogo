@@ -4405,6 +4405,12 @@ func TestPromptsTeachHoldInstrumentByReleaseCondition(t *testing.T) {
 			// The three items, so the rule arrives with its own evidence.
 			"03:00 restart",
 			"unpark immediately after",
+			// mg-3844: the third row's "what opens it" cell was
+			// "nothing scheduled — but the field names who to chase", which stopped
+			// being true when the blocked-reminder shipped. A table that describes a
+			// mechanism it no longer has is the archeology trap — the reader stops
+			// looking because the file already answered.
+			"pogod reminds that agent",
 		} {
 			if !strings.Contains(body, want) {
 				t.Errorf("%s: missing hold-instrument guidance %q", path, want)
@@ -4452,9 +4458,52 @@ func TestPromptsTeachHoldInstrumentByReleaseCondition(t *testing.T) {
 		"typed field, not prose",
 		"does not discriminate",
 		"refuses a hold that nothing will open",
+		// mg-3844. These four sit immediately next to "do not file a
+		// park-sweeper", and they are here because that sentence without them
+		// reads as forbidding the reminder too. The boundary has to travel with
+		// the rule or the next reader re-derives it — which is what mg-3844 was.
+		"is NOT that sweeper",
+		// The reminder does not release: it prompts the party the field already
+		// names, which is the DESIGNED release path, not a bypass.
+		"prompts the designed release path rather than bypassing it",
+		// The property that makes it buildable where a sweeper is not.
+		"carries a recipient",
+		// The exclusion mayor asked for: an intentional silence must not become
+		// noise. Without this a later reader "fixes" the asymmetry.
+		"deliberately excluded from the reminder",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("mayor.md: missing hold doctrine %q", want)
+		}
+	}
+
+	// The reminder's operator-facing facts, which mayor.md owns because the
+	// coordinator is who receives the unreachable-blocker notice. Each is a
+	// thing an agent would otherwise get wrong: reading the notice as a dispatch
+	// request, expecting the nag to continue forever, or front-loading the block
+	// reason into a title that never reaches the blocker.
+	for _, want := range []string{
+		"Since mg-3844 the field also TELLS them.",
+		"not as \"dispatch this\"",
+		"stops after 4 notices whether or not the block clears",
+		"Put the reason in the BODY, not the title.",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("mayor.md: missing blocked-reminder guidance %q (mg-3844)", want)
+		}
+	}
+
+	// The claim the table's third row USED to make. It is false since the
+	// reminder shipped, and a stale cell here is exactly the archeology trap
+	// mg-3844 itself had to dig through — a confident wrong answer stops the
+	// reader looking.
+	for _, path := range holdFilers {
+		data, err := defaultPrompts.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		if strings.Contains(string(data), "nothing scheduled — but the field names who to chase") {
+			t.Errorf("%s: still claims the `blocked:` row notifies nobody; mg-3844 shipped the reminder", path)
 		}
 	}
 

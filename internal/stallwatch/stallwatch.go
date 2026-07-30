@@ -198,6 +198,13 @@ func New(cfg config.StallWatchConfig, opts Options) *Watcher {
 	if len(cfg.NonDispatchableAssignees) == 0 {
 		cfg.NonDispatchableAssignees = config.DefaultNonDispatchableAssignees
 	}
+	// BlockedReminderEnabled is NOT defaulted here, for the same reason
+	// PriorityWakeEnabled is not: New() cannot tell an unset bool from an
+	// explicit false. config.Load() sets the production default (true); a
+	// zero-value config leaves the reminder off. Its numeric knobs resolve
+	// lazily in blockedReminderCooldown/blockedReminderMaxNotices, because the
+	// max-notices knob has a meaningful negative value ("no cap") that a
+	// `<= 0 -> default` normalisation here would destroy.
 
 	workRoot := opts.WorkRoot
 	mailRoot := opts.MailRoot
@@ -258,6 +265,14 @@ func (w *Watcher) checkUnclaimedItems(now time.Time) {
 	// longer waits out the idle-coordinator polling gap. This scans the same
 	// listing, so it is nearly free.
 	w.checkPriorityWake(now, items)
+
+	// Blocked-reminder (mg-3844). Reads the SAME listing over the DISJOINT
+	// population: every item the two dispatch checks skip because
+	// `blocked:<agent>` gates it. Its recipient is the named agent, not the
+	// coordinator, so it cannot become a dispatch nudge by another name — see
+	// checkBlockedReminders for why that distinction holds and why `parked` and
+	// `human` are deliberately not in its population.
+	w.checkBlockedReminders(now, items)
 
 	// Standard unclaimed-item stall: an assigned available item aged past the
 	// 10-min threshold. When the priority wake is active it OWNS fast-priority
@@ -799,7 +814,20 @@ func (w *Watcher) tryFire(category string, now time.Time, cooldown time.Duration
 // an error here is a HARD failure — every channel was tried and none carried
 // the message. It is no longer the routine busy-agent case.
 func (w *Watcher) fire(category, message string, details map[string]any) {
-	delivery, err := w.nudge(w.cfg.Agent, message)
+	w.fireTo(w.cfg.Agent, category, message, details)
+}
+
+// fireTo is fire with an explicit recipient. Every dispatch-shaped notice goes
+// to w.cfg.Agent (the coordinator) and uses fire; the blocked-reminder
+// (mg-3844) is the one check whose recipient is read out of the work item
+// rather than the config, because `blocked:<agent>` is the only gated assignee
+// that names one. The recipient is stamped into the event so a notice sent to
+// somebody other than the watched agent is countable as such.
+func (w *Watcher) fireTo(recipient, category, message string, details map[string]any) {
+	if recipient != w.cfg.Agent {
+		details["nudge_recipient"] = recipient
+	}
+	delivery, err := w.nudge(recipient, message)
 	if err != nil {
 		details["nudge_error"] = err.Error()
 	}
