@@ -144,6 +144,16 @@ Follow these steps exactly, in order. Skipping any step is a failure.
    - **If a battery was fitted to a known set of defects, say so**, and write at least one case its
      author never saw. A test set quietly drawn around the answer its author already had is
      invisible afterwards: every row passes and the write-up reads as thorough.
+   - **List the brief's "do not X" constraints and check each BY MEASUREMENT.** A precise
+     instruction produces a precise *claim* of compliance and nothing more: mg-a893's acceptance
+     said "do not over-correct" and its commit asserted "AND NOT OVER-CORRECTED", sitting next to
+     the over-correction mg-c6bc then found. The deliverable's own statement that it complied
+     carries no evidential weight — quote what you measured, not what it claimed.
+   - **Look hardest where the deliverable's self-assessment does NOT point.** An incomplete
+     self-attack list is the observed failure mode, not a false one: mg-7d75 pre-filed an attack on
+     itself naming two sections, neither over the line, and the one broken claim was the row its
+     list omitted. The model is mg-5800 on mg-41aa, the day's one clean verdict — that repair closed
+     its own weakest link by measurement instead of defending it in prose.
 
 8. **Report your result.**
 

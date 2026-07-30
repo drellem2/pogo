@@ -5268,3 +5268,117 @@ func TestQAAndReviewTemplatesPredictOutcomesBeforeRunning(t *testing.T) {
 		}
 	}
 }
+
+// EVERY "do not X" IN A BRIEF GETS "verify X did not happen, BY MEASUREMENT" in
+// the paired audit, in the two templates whose worker audits work someone else
+// did (mg-c742). Companion to mg-04c3, which sits immediately above.
+//
+// The finding is counterintuitive: an instruction reliably produces the
+// SENTENCE about the risk, not the avoidance of it. pm-onethird's formulation —
+// "the more precisely a brief names a failure mode, the more precisely a
+// deliverable can assert it was avoided, with no more evidence behind the
+// assertion." So escalating brief wording is not a mitigation and may be
+// actively counterproductive: it hands the author the exact words to claim
+// compliance in.
+//
+// The decisive instance, because the naming was ours: mg-a893's acceptance said
+// in terms "Do not over-correct", and its commit message asserts "AND NOT
+// OVER-CORRECTED" — sitting next to the over-correction mg-c6bc then found. The
+// author did not volunteer that cover; the instruction supplied the words.
+//
+// A brief instructs; an audit detects; they are not substitutes. Same placement
+// argument as mg-04c3 and mg-0e24: a rule in the author's path is bypassed by
+// whoever is moving fastest — and here, worse, it is *answered* rather than
+// bypassed.
+func TestQAAndReviewTemplatesCheckDoNotConstraintsByMeasurement(t *testing.T) {
+	// Both templates carry the rule, the no-evidential-weight verdict on a
+	// self-report, and the instruction to look where the self-assessment does
+	// not point. Every literal below is written IDENTICALLY in the two files on
+	// purpose: mg-04c3's own first run caught a defect in itself because the
+	// two templates opened a shared clause differently, so a shared assertion
+	// silently checked only one of them.
+	for _, path := range []string{
+		"prompts/templates/polecat-qa.md",
+		"prompts/templates/polecat-review.md",
+	} {
+		data, err := defaultPrompts.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		body := string(data)
+
+		for _, want := range []string{
+			// 1. Enumerate the constraints, and check them by measuring.
+			`do not X" constraints and check each BY MEASUREMENT`,
+			// 2. The deliverable's own claim of not-X is unevidenced until
+			// then — without this the rule is satisfied by reading the commit
+			// message, which is exactly what failed.
+			"carries no evidential weight",
+			"quote what you measured, not what it claimed",
+			// 3. Where to look. An incomplete self-attack list is the observed
+			// failure mode, so the self-assessment directs attention AWAY.
+			"self-assessment does NOT point",
+			// Matched from "self-attack" rather than from "An incomplete",
+			// which wraps mid-phrase in polecat-qa.md — the same defect
+			// mg-04c3's own first run caught in itself.
+			"self-attack list is the observed failure mode, not a false one",
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("%s: missing measure-the-do-nots discipline %q (mg-c742)", path, want)
+			}
+		}
+	}
+
+	// polecat-qa.md owns the fuller statement, as with mg-04c3: it is the
+	// template whose entire deliverable is a verdict on someone else's work. It
+	// carries the two worked instances — the claim that sat next to its own
+	// violation, and the one clean verdict of that day, which got there by
+	// closing its weakest link by measurement rather than defending it in prose.
+	qa, err := defaultPrompts.ReadFile("prompts/templates/polecat-qa.md")
+	if err != nil {
+		t.Fatalf("read polecat-qa.md: %v", err)
+	}
+	qaBody := string(qa)
+	for _, want := range []string{
+		`asserted "AND NOT OVER-CORRECTED"`,
+		"weakest link by measurement instead of defending it in prose",
+	} {
+		if !strings.Contains(qaBody, want) {
+			t.Errorf("polecat-qa.md: missing measure-the-do-nots discipline %q (mg-c742)", want)
+		}
+	}
+
+	// Not a gate. Nothing can mechanically verify that a measurement was made,
+	// so a template that refuses on it would be enforcing an unobservable — and
+	// a refusal a worker cannot satisfy gets routed around, taking the cheap
+	// useful part with it. Its value is that it changes what the auditor looks
+	// for.
+	for _, forbid := range []string{
+		"do not report a verdict until you have measured",
+		"refuse to verdict unless",
+	} {
+		if strings.Contains(strings.ToLower(qaBody), forbid) {
+			t.Errorf("polecat-qa.md: turned the measure-the-do-nots rule into a gate (%q); no mechanism can verify a measurement was made (mg-c742)", forbid)
+		}
+	}
+
+	// The scope pin, matching mg-04c3's. The default, PR-build, triage and
+	// architect templates were deliberately left alone: this is an auditor's
+	// rule, aimed at a reader who is checking someone else's compliance claim,
+	// and a template that talks past its reader gets skimmed. Widening it into
+	// polecat.md needs its own argument, not a blanket edit.
+	for _, path := range []string{
+		"prompts/templates/polecat.md",
+		"prompts/templates/polecat-build-pr.md",
+		"prompts/templates/polecat-triage.md",
+		"prompts/templates/polecat-architect.md",
+	} {
+		data, err := defaultPrompts.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		if strings.Contains(string(data), "constraints and check each BY MEASUREMENT") {
+			t.Errorf("%s: gained the measure-the-do-nots rule, but the mg-c742 scope was QA + review; this is an auditor's rule and widening it into a build worker's template needs a separate argument (mg-c742)", path)
+		}
+	}
+}
