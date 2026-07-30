@@ -310,6 +310,20 @@ func TestGateWatchMeasuresARealSubtreesCPU(t *testing.T) {
 		t.Errorf("a spinning gate peaked at %.2f cores across %d settled readings; "+
 			"the subtree walk is not finding the work", busyPeak, len(busy))
 	}
+	// And an upper bound, because the rate has to be RIGHT and not merely
+	// non-zero. This gate holds exactly one spinner, so ~1.0 cores is the
+	// physical answer and anything near twice that is the instrument, not the
+	// work — a CPU column too coarse for the window reports nothing for
+	// several windows and then a whole tick at once, which reads as a
+	// multi-core burst. Without this bound the test is blind to precision loss
+	// in the direction that inflates, and precision loss is what put it in CI
+	// (mg-79e3).
+	const oneSpinnerCeiling = 2.0
+	if busyPeak > oneSpinnerCeiling {
+		t.Errorf("a gate holding ONE spinner peaked at %.2f cores over %s windows; "+
+			"%s is over-reporting, most likely quantising work into bursts",
+			busyPeak, heartbeat, procSource)
+	}
 	sawBusy := false
 	for _, p := range busy {
 		if p.Subtree() == SubtreeBusy {
