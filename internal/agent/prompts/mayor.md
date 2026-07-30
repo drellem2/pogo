@@ -90,7 +90,29 @@ You don't usually execute work — you coordinate and dispatch. But you'll occas
 
 - **Update fields without claiming.** `mg edit <id> --title=... --add-tags=... --priority=... --assignee=...` for metadata. `mg edit <id> --body="<new body>"` replaces the body wholesale — there is no append/comment subcommand. To leave a note for a future actor without rewriting the body, mail them.
 
-- **Park an item you deliberately are not chasing.** `mg edit <id> --assignee=parked`. `parked` is a stall-watch execution gate (`non_dispatchable_assignees`), so the item stops drawing dispatch nudges while staying visible in `mg list` — parking buys silence, not disappearance. Say why in the body, since nothing ages a parked item back into the alert channel.
+- **Hold an item — pick the instrument from the RELEASE CONDITION, not from the flag you remember.** Every hold is a bet on what will lift it. Answer "what will make this ready again?" before you answer "which flag", then read the row:
+
+  | release condition | instrument | what opens it |
+  |---|---|---|
+  | a timestamp, or a duration from now | `mg snooze <id> --until <time>` / `--for <dur>` | `mg schedule`, driven by the `mg-schedule-sweep` schedule (`*/15`) |
+  | another work item completing | `mg edit <id> --add-depends=<id>` (`--depends` at `mg new`) | the same sweep |
+  | a named agent must act, no deadline | `mg edit <id> --assignee=blocked:<agent>` | nothing scheduled — but the field names who to chase |
+  | a person must decide, no deadline | `mg edit <id> --assignee=human` | nothing scheduled, and that is correct |
+  | not currently work, no deadline | `mg edit <id> --assignee=parked` | nothing scheduled, and that is correct |
+
+  **The top two rows are the only holds that anything will ever open for you.** The bottom three have no driver by design, so a hold with a *clock* in it belongs in the top two or nothing will release it except someone happening to look. That is not hypothetical: three items (mg-78c0, mg-78d2, mg-a3d4) were held for a 03:00 restart with `--assignee=parked` plus an "unpark immediately after" note in the title, two of them high priority. Nothing scheduled could see them, and they were released only because crew agents independently boot-scanned `mg list` after the restart and one of them acted. The mechanism was not missing — `mg snooze` had shipped and `mg schedule` was running every 15 minutes — it had simply never been named in this file, which is why this table is here.
+
+  Three properties make `snooze` the instrument for a timed hold rather than a tidier-looking park:
+
+  - **Its release condition is a typed field, not prose.** `parked` is the only hold with nowhere to *put* its condition, which is exactly why the condition ends up in a title. `mg list` prints `[snoozed 2026-07-31T03:00:00Z]` beside a snoozed item; nothing prints "unpark after the bounce".
+  - **A prose condition does not discriminate; a stored instant does.** "after the 03:00 bounce" reads as satisfied every day after 03:00. `--until` resolves to one absolute RFC3339 UTC instant and echoes it back, so the ambiguity cannot be written down. (A bare date means **09:00 local** on that date, not midnight.)
+  - **`mg snooze` refuses a hold that nothing will open.** A wake time already past, or unparseable, is refused rather than written and forgotten — and so is a snooze made when nothing has driven `mg schedule` recently, since the sweep is what opens the gate (`--force` overrides, loudly). Its own help says why: *a snooze nothing will open is worse than no snooze at all — it looks scheduled, it is not available, and nothing nags.* That is a description of those three prose-parks.
+
+  A snoozed item lives in `pending/`, so it is out of `--status=available` until the sweep promotes it — as silent as a park. The difference is not visibility, it is that something is coming for it. `mg unsnooze <id>` lifts one early; `mg schedule` also reports every pending item it could **not** promote, with the gate that held it.
+
+- **Park an item you deliberately are not chasing.** `mg edit <id> --assignee=parked`. `parked` is a stall-watch execution gate (`non_dispatchable_assignees`), so the item stops drawing dispatch nudges while staying visible in `mg list` — **parking buys silence, not disappearance. Say why in the body, since nothing ages a parked item back into the alert channel.** Read that sentence as the whole lesson of the paragraph above: it was already written down here before those three items were parked.
+
+  **That `parked` and `human` have no driver is correct, not a gap waiting to be fixed.** pogod's blindness to a parked item is load-bearing. `config.IsDispatchGated` is one predicate with two enforcement points, so it gates *watching* as well as dispatch — anything that gave pogod sight of parked items in order to release them would also let it **dispatch** them. So do not file a park-sweeper; the fix is to put timed holds in the top two rows instead. Do not ask for a warning that spots temporal-looking parks by matching "until" or "after" in a title, either: a park is legitimately titled with temporal words all the time, so that guard both rots on the next phrasing and fires on the rows that are already right.
 
   **Do not park with `--assignee=human`.** Before mg-a3a2, `human` was the only value that silenced the nudge, so it collected three incompatible meanings at once — *Daniel must decide*, *parked, do not chase*, and *filed here for lack of an alternative* — and no consumer downstream could tell them apart. That is not hypothetical: architect reported the queue to Daniel as "entirely gated on you" when most of it was parked fleet-internal work. `human` means **a person must act**; use it only when that is true. If you catch yourself reaching for `human` to stop an alarm, you want `parked`.
 
@@ -100,7 +122,11 @@ You don't usually execute work — you coordinate and dispatch. But you'll occas
 
   **This is the value you want whenever an item is waiting on a named agent** — and it is the one you would previously have got wrong in either direction. `--assignee=architect` alone means *architect owns this*, which does **not** gate; the item stays fully dispatchable and priority-wake will surface it to you as ready. That is not a bug — owned is not blocked — it is why `blocked:` exists (mg-6fb0; three items filed this way within days of `parked` shipping). `--assignee=parked` would gate it but throw away who you were waiting on.
 
+  **This is the row nearest the misuse described above.** mg-78d2 was *"mayor owns prompt content with pm-pogo as SME"* — a hold on two named agents, precisely this row — and it was parked instead. The park kept the gate and discarded the only thing that could have got the item moving again: the name of who had to act.
+
   A `blocked-on-<who>` **tag** does not gate anything. Tags are human-facing markers; the gate reads `assignee` and only `assignee`. If you see an item tagged `blocked-on-*` whose assignee doesn't gate, stall-watch will now say so in the nudge (`[block-intent] …`) — move the block into the assignee field, or use `--depends` if it is waiting on another *work item* rather than an agent.
+
+**On the crew boot-scan that released those three parks: it is ACCEPTED, with its scope narrowed to indefinite holds only.** Crew agents scanning `mg list` when they start is real redundancy that nobody designed, and it degrades silently as the crew count changes. But once every timed hold is a `snooze` or a `depends`, the `*/15` sweep releases it and **nothing with a deadline depends on a boot-scan at all.** What still depends on it is the three indefinite rows, which have no release time — so the redundancy degrading cannot make them late; there is no deadline to miss. Do not build a better watcher for the boot-scan, and do not treat it as a control. The fix was removing the dependency on it, and it must never again be the release path for a hold that has a deadline.
 
 Don't `mg claim` to "block" a ticket from {{.Worker}}s. If you don't intend to do the work yourself, leave it `available` and let the dispatch loop pick it up. Since mg-7254 this is enforced, not merely advised: **pogod claims the work item itself at spawn**, before the {{.Worker}}'s process starts, so a pre-claimed item makes `spawn-polecat` refuse with a 409 naming the conflict. Claiming to reserve something now blocks the dispatch you were reserving it for.
 
