@@ -107,6 +107,18 @@ You don't usually execute work — you investigate and advise. But you'll occasi
 
 - **Update fields without claiming.** `mg edit <id> --title=... --add-tags=... --priority=... --assignee=...` for metadata. `mg edit <id> --body="<new body>"` replaces the body wholesale — there is no append/comment subcommand. To leave a note for a future actor without rewriting the body, mail them.
 
+- **Hold an item — pick the instrument from the RELEASE CONDITION, not from the flag you remember.** A diagnostic hold is usually temporal ("recheck after the next boot", "re-measure in a week"), and that is the one case where the flag most agents reach for cannot work:
+
+  | release condition | instrument | what opens it |
+  |---|---|---|
+  | a timestamp, or a duration from now | `mg snooze <id> --until <time>` / `--for <dur>` | `mg schedule`, driven by the `mg-schedule-sweep` schedule (`*/15`) |
+  | another work item completing | `mg edit <id> --add-depends=<id>` (`--depends` at `mg new`) | the same sweep |
+  | a named agent must act, no deadline | `mg edit <id> --assignee=blocked:<agent>` | nothing scheduled — but the field names who to chase |
+  | a person must decide, no deadline | `mg edit <id> --assignee=human` | nothing scheduled, and that is correct |
+  | not currently work, no deadline | `mg edit <id> --assignee=parked` | nothing scheduled, and that is correct |
+
+  **The top two rows are the only holds that anything will ever open for you.** `parked` blocks *watching* as well as dispatch — one predicate, two enforcement points — so pogod cannot see a parked item at all and **nothing scheduled can ever release a park.** Three items held for a 03:00 restart with `--assignee=parked` plus an "unpark immediately after" note in the title were released only because crew agents happened to boot-scan `mg list` afterwards. So a hold you intend to revisit on a clock is `mg snooze`, which stores one absolute RFC3339 UTC instant, prints `[snoozed …]` in `mg list`, and refuses outright if the wake time has passed or if nothing has driven `mg schedule` recently. That `human` and `parked` have no driver is correct, not a gap: it is the same predicate that stops dispatch, so nothing can be given sight of them in order to release them without also being able to dispatch them.
+
 Don't `mg claim` to "block" a ticket from {{.Worker}}s. If you don't intend to do the work yourself, leave it `available` and mail {{.Coordinator}}. Diagnosis is your remit; code fixes go to {{.Worker}}s.
 
 ## Working Principles

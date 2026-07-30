@@ -4283,3 +4283,160 @@ func TestMayorDispatchesQAItemsToQATemplate(t *testing.T) {
 		t.Error("mayor.md: step-4 QA prose reverted to the generic-dispatch wording that routed QA items to the build template (mg-7150)")
 	}
 }
+
+// The hold-instrument table (mg-61f4, from architect's mg-3ebe design).
+//
+// Three items (mg-78c0, mg-78d2, mg-a3d4) were held for a 03:00 restart with
+// `--assignee=parked` plus an "unpark immediately after" note in the title.
+// `parked` is `config.IsDispatchGated`, one predicate with two enforcement
+// points, so it blocks WATCHING as well as dispatch: pogod cannot see a parked
+// item at all and nothing scheduled can ever release a park. Two of the three
+// were high priority. They were released only because crew agents
+// independently boot-scanned `mg list` after the restart and one acted.
+//
+// The reframe that makes this a prompt change rather than a process reminder is
+// a measurement: `snooze` appeared in ZERO shipped prompts, while `parked`
+// appeared 7 times in mayor.md. So three agents did not weigh `snooze` against
+// `parked` and choose wrong — nothing had ever told any of them `snooze`
+// exists. The mechanism had shipped (`mg snooze`) and its driver was running
+// (`mg-schedule-sweep`, */15); only the guidance was missing.
+//
+// These strings are load-bearing. In particular:
+//   - `human` and `parked` must stay SEPARATE rows. Collapsing them is the
+//     mg-4ad1 defect: an operational hold wearing `human` promotes itself into
+//     a decision Daniel was never asked to make.
+//   - "no driver" for the bottom three rows must read as CORRECT, not as a gap.
+//     Giving pogod sight of parked items in order to release them would also
+//     let it DISPATCH them — it is the same predicate.
+//   - the rejected mechanisms (a park-sweeper, a keyword sniff on
+//     "until"/"after" in a title) are named as rejected so they are not
+//     re-proposed as improvements.
+func TestPromptsTeachHoldInstrumentByReleaseCondition(t *testing.T) {
+	// Every prompt whose agent can SET a hold. Measured, not assumed: the six
+	// templates/ worker prompts mention neither `mg new` nor `mg edit` nor
+	// `--assignee` as an affordance — a worker's protocol is claim -> work ->
+	// `mg done`, so it has no hold to file and a table there would be noise
+	// (the opposite error to mg-710c's under-scoping, which missed three
+	// prompts that DID assert the thing).
+	holdFilers := []string{
+		// the coordinator files holds; all 7 `parked` mentions live here
+		"prompts/mayor.md",
+		// PMs park their own product's tickets, and this file previously had
+		// zero mentions of `parked`, `snooze`, `blocked:` or `depends:` — no
+		// hold guidance at all. Which AGENT parked a given item is deliberately
+		// not claimed anywhere in this change: `creator` is the unix user and no
+		// field records who set an assignee (mg-ddf4), so the justification is
+		// the guidance gap plus the existence of parked PM-owned tickets.
+		"prompts/pm/pm-template.md",
+		// files sub-tickets and edits assignees, so it holds the affordance that
+		// produced the failure; and a diagnostic hold is characteristically
+		// temporal ("recheck after the next boot"), which is the misuse itself.
+		"prompts/crew/doctor.md",
+	}
+
+	// The table itself, plus the sentence that decides which row to read.
+	for _, path := range holdFilers {
+		data, err := defaultPrompts.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		body := string(data)
+
+		for _, want := range []string{
+			// Choose by release condition, not by remembered flag.
+			"pick the instrument from the RELEASE CONDITION",
+			// All five rows. `human` and `parked` are distinct (mg-4ad1).
+			"| a timestamp, or a duration from now | `mg snooze <id> --until <time>` / `--for <dur>` |",
+			"| another work item completing | `mg edit <id> --add-depends=<id>`",
+			"| a named agent must act, no deadline | `mg edit <id> --assignee=blocked:<agent>` |",
+			"| a person must decide, no deadline | `mg edit <id> --assignee=human` |",
+			"| not currently work, no deadline | `mg edit <id> --assignee=parked` |",
+			// The driver, named — a snooze with nothing driving the sweep is
+			// the failure the instrument itself refuses.
+			"mg-schedule-sweep",
+			// The load-bearing distinction between the top two rows and the
+			// bottom three.
+			"The top two rows are the only holds that anything will ever open for you.",
+			// No driver is correct, not a gap.
+			"and that is correct",
+			// The three items, so the rule arrives with its own evidence.
+			"03:00 restart",
+			"unpark immediately after",
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("%s: missing hold-instrument guidance %q", path, want)
+			}
+		}
+
+		// The regression that produced the failure: a prompt that offers
+		// `--assignee=parked` and never names the timed instrument.
+		if !strings.Contains(body, "mg snooze") {
+			t.Errorf("%s: names no timed hold instrument; `snooze` in zero shipped prompts is what mg-61f4 fixed", path)
+		}
+	}
+
+	// mayor.md owns the doctrine half: why the bottom rows CANNOT have a
+	// driver, and what happened to the undesigned boot-scan redundancy.
+	mayor, err := defaultPrompts.ReadFile("prompts/mayor.md")
+	if err != nil {
+		t.Fatalf("read mayor.md: %v", err)
+	}
+	body := string(mayor)
+
+	for _, want := range []string{
+		// The sentence that was already shipped and unread — the whole lesson
+		// in one line. It predates the failure it describes.
+		"parking buys silence, not disappearance",
+		"nothing ages a parked item back into the alert channel",
+		// Why pogod's blindness must stay: one predicate, two enforcement
+		// points. This is the reason a park-sweeper is the wrong answer.
+		"`config.IsDispatchGated` is one predicate with two enforcement points",
+		"would also let it **dispatch** them",
+		// Both rejected mechanisms, named as rejected.
+		"do not file a park-sweeper",
+		"rots on the next phrasing",
+		// The row nearest the misuse.
+		"This is the row nearest the misuse described above.",
+		"mg-78d2",
+		// The boot-scan call: ACCEPTED, scope narrowed to indefinite holds,
+		// and the fix is removing the dependency rather than watching it.
+		"it is ACCEPTED, with its scope narrowed to indefinite holds only",
+		"nothing with a deadline depends on a boot-scan at all",
+		"cannot make them late",
+		"Do not build a better watcher for the boot-scan",
+		"The fix was removing the dependency on it",
+		// Why `snooze` beats a park for a timed hold, all three properties.
+		"typed field, not prose",
+		"does not discriminate",
+		"refuses a hold that nothing will open",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("mayor.md: missing hold doctrine %q", want)
+		}
+	}
+
+	// The scope pin. A worker template gaining this table means someone
+	// blanket-edited the corpus; a worker cannot file a hold, so the table
+	// there is noise. If a worker prompt ever GAINS an `mg edit --assignee`
+	// affordance, this assertion is the thing to revisit deliberately.
+	for _, path := range []string{
+		"prompts/templates/polecat.md",
+		"prompts/templates/polecat-architect.md",
+		"prompts/templates/polecat-build-pr.md",
+		"prompts/templates/polecat-qa.md",
+		"prompts/templates/polecat-review.md",
+		"prompts/templates/polecat-triage.md",
+	} {
+		data, err := defaultPrompts.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		w := string(data)
+		if strings.Contains(w, "pick the instrument from the RELEASE CONDITION") {
+			t.Errorf("%s: gained the hold-instrument table, but a worker files no holds — scope was mayor + PM + doctor (mg-61f4)", path)
+		}
+		if strings.Contains(w, "mg edit <id> --assignee=") {
+			t.Errorf("%s: gained an assignee-editing affordance, which makes it a hold filer — the mg-61f4 table's scope needs revisiting", path)
+		}
+	}
+}

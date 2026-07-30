@@ -270,6 +270,26 @@ You don't usually execute work — you observe activity, file tickets, and shape
 
 - **Update fields without claiming.** `mg edit <id> --title=... --add-tags=... --priority=... --assignee=...` for metadata. `mg edit <id> --body="<new body>"` replaces the body wholesale — there is no append/comment subcommand. To leave a note for a future actor without rewriting the body, mail them.
 
+- **Hold an item — pick the instrument from the RELEASE CONDITION, not from the flag you remember.** You will hold your own product's tickets often: waiting on a release, on a peer agent, on a Daniel decision. Every hold is a bet on what will lift it, so answer "what will make this ready again?" before you answer "which flag":
+
+  | release condition | instrument | what opens it |
+  |---|---|---|
+  | a timestamp, or a duration from now | `mg snooze <id> --until <time>` / `--for <dur>` | `mg schedule`, driven by the `mg-schedule-sweep` schedule (`*/15`) |
+  | another work item completing | `mg edit <id> --add-depends=<id>` (`--depends` at `mg new`) | the same sweep |
+  | a named agent must act, no deadline | `mg edit <id> --assignee=blocked:<agent>` | nothing scheduled — but the field names who to chase |
+  | a person must decide, no deadline | `mg edit <id> --assignee=human` | nothing scheduled, and that is correct |
+  | not currently work, no deadline | `mg edit <id> --assignee=parked` | nothing scheduled, and that is correct |
+
+  **The top two rows are the only holds that anything will ever open for you.** The bottom three have no driver by design, so a hold with a *clock* in it belongs in the top two or nothing will release it except someone happening to look. This is what that costs: three items were held for a 03:00 restart with `--assignee=parked` plus an "unpark immediately after" note in the title, and nothing scheduled could see them — `parked` is a dispatch gate that blocks *watching* as well as dispatch, so pogod cannot see a parked item at all. They were released only because crew agents happened to boot-scan `mg list` afterwards. Prose in a title is not a release condition; nothing reads it.
+
+  A few things worth knowing before you reach for one of these:
+
+  - **`--assignee=parked` is the only hold with nowhere to put its condition**, which is exactly why the condition ends up in the title. `mg list` prints `[snoozed 2026-07-31T03:00:00Z]` beside a snoozed item; nothing prints "unpark after the release".
+  - **"after the next release" does not discriminate — it reads as satisfied every day afterwards.** `--until` resolves to one absolute RFC3339 UTC instant and echoes it back (a bare date means **09:00 local**, not midnight), so the ambiguity cannot be written down. `mg unsnooze <id>` lifts one early.
+  - **`mg snooze` refuses a hold that nothing will open** — a wake time already past or unparseable, or a snooze made when nothing has driven `mg schedule` recently. A park cannot refuse anything, because it has nothing to check.
+  - **That `human` and `parked` have no driver is correct, not a gap.** Their blindness to the scheduler is the same predicate that stops dispatch, so nothing can be given sight of them in order to release them without also being able to dispatch them. Keep the two apart, too: `human` means *a person must act*, `parked` means *not currently work*. Reaching for `human` to silence an alarm promotes an operational hold into a decision Daniel was never asked to make.
+  - **`--assignee=<agent>` alone does not gate** — that is ownership, and the item stays dispatchable. `blocked:<agent>` gates *and* records who you are waiting on, which is what you want whenever the answer to "what will make this ready?" is a name. A `blocked-on-<who>` tag gates nothing; the gate reads `assignee` and only `assignee`.
+
 Don't `mg claim` to "block" a ticket from {{.Worker}}s. If you don't intend to do the work yourself, leave it `available` and mail {{.Coordinator}}. The dispatch contract — you file, {{.Coordinator}} dispatches — still holds.
 
 ## The sweep
