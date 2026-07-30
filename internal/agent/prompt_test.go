@@ -319,6 +319,48 @@ func TestShippedBuildPRTemplateProtocol(t *testing.T) {
 	}
 }
 
+// TestMayorGHIssueTriageRetirement pins the retirement step for the gh-issue
+// triage ticket (mg-7c95). The playbook used to close its GO branch with "The
+// triage ticket is complete — archive it on your normal sweep", which is not a
+// followable instruction: a body leading with `stage: triage` is filed carrying
+// a `declares-remainder` tag on ANY type, `mg archive` refuses an item that is
+// not done, and `mg done` refuses a declared item that names no successor. So
+// both halves refuse and the sweep never retires the ticket. The `mg done
+// --successor` line is the only form that works, and it must keep naming the
+// build ticket — which is also what promotes that ticket out of pending/.
+func TestMayorGHIssueTriageRetirement(t *testing.T) {
+	data, err := defaultPrompts.ReadFile("prompts/mayor.md")
+	if err != nil {
+		t.Fatalf("read embedded mayor.md: %v", err)
+	}
+	body := string(data)
+
+	for _, want := range []string{
+		// The command, with the successor named.
+		"mg done <triage ticket id> --successor=<build ticket id>",
+		// The why, without which the flag reads as optional ceremony.
+		"declares-remainder",
+		// Which gate actually bites, so nobody re-derives it from `mg archive`.
+		"`mg done` is where it bites",
+		// The dependency mechanism the build ticket relies on.
+		"done/ OR\n   # archive/ (both are scanned)",
+		// The observable confirmation that the gate opened.
+		"(pending → available)",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("mayor.md: expected %q", want)
+		}
+	}
+
+	// The bare-archive instruction must not come back. It is not merely
+	// incomplete — followed literally it refuses twice and retires nothing.
+	if strings.Contains(body, "The triage ticket is complete — archive it on your normal sweep") {
+		t.Errorf("mayor.md: the bare-archive triage retirement instruction is back; " +
+			"`mg archive` refuses an item that is not done, and `mg done` refuses " +
+			"a declares-remainder item with no --successor")
+	}
+}
+
 // TestExpandTemplateProviderDefault pins the fail-safe: an empty Provider
 // defaults to "claude" at expansion time, so Claude-gated blocks stay visible
 // for callers that predate the field (never silently hidden by an
