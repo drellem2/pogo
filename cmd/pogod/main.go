@@ -1208,6 +1208,23 @@ Flags:
 		Gates: cfg.StallWatch.NonDispatchableAssignees,
 	})
 
+	// The pairing half of the same chokepoint (mg-0e24): refuse to dispatch an
+	// item whose repository requires a paired item that was never filed. Unlike
+	// the gate above, this one carries NO shipped policy — cfg.DispatchPairing is
+	// empty unless a deployment names repos under [dispatch_pairing], and an
+	// empty repo list makes the gate inert. Wired unconditionally anyway, so
+	// whether it enforces is a question about this host's config.toml and not
+	// about which branch of pogod's startup ran.
+	agentRegistry.SetDispatchPairingGate(agent.MGDispatchPairingGate{
+		Cfg: cfg.DispatchPairing,
+	})
+	if len(cfg.DispatchPairing.Repos) > 0 {
+		log.Printf("dispatch pairing armed: items in %v owe a paired item tagged %v before dispatch "+
+			"(require_tags=%v waiver_tags=%v)",
+			cfg.DispatchPairing.Repos, cfg.DispatchPairing.PairTags,
+			cfg.DispatchPairing.RequireTags, cfg.DispatchPairing.WaiverTags)
+	}
+
 	// And the routing half, beside the gate it sits next to (mg-9a04): a spawn
 	// with no --template routes on the work item's `type` through the closed map
 	// in internal/agent/templateroute.go, refusing rather than defaulting when

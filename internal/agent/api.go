@@ -1172,6 +1172,32 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		return
 	}
 
+	// Pairing gate: refuse to put a worker on a work item whose REPOSITORY
+	// requires a paired item — one filed in advance that references this one —
+	// when no such item exists (mg-0e24). Same chokepoint as the assignee gate,
+	// a different question: not "may this be executed" but "has the obligation
+	// its repo puts on it been discharged".
+	//
+	// It is here because the rule it enforces was already written down, already
+	// agreed, and was missed twice anyway — it lived in one agent's filing
+	// checklist, so every ticket that agent did not file bypassed it silently. A
+	// guard owned by one filer cannot catch a filing that filer did not do.
+	// Dispatch is the one place every item passes regardless of author.
+	//
+	// Inert by default and everywhere: the policy is one deployment's
+	// configuration ([dispatch_pairing] in config.toml), not shipped behaviour.
+	// See dispatchpairing.go for the platform/configuration split, and for the
+	// two failure directions — open until the item is known to be covered, closed
+	// after.
+	//
+	// 409 and placed with the gates above, for the same reasons: retrying it
+	// unchanged is refused identically until the pair is filed, and a refused
+	// dispatch must leave no worktree, agent dir, or prompt file behind (mg-ef80).
+	if refusal := r.dispatchPairingRefusal(spawnReq.Id); refusal != "" {
+		failPolecatSpawn(w, spawnReq, http.StatusConflict, refusal)
+		return
+	}
+
 	// Validate before the worktree, agent dir, and expanded prompt file get
 	// created — a rejected name should leave nothing behind (mg-ef80).
 	if err := ValidateAgentName(spawnReq.Name); err != nil {

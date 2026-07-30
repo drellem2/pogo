@@ -334,3 +334,113 @@ func TestTagListReadsFromParsedFile(t *testing.T) {
 		}
 	}
 }
+
+// TestParsesRepoAndDepends — both fields are new (mg-0e24) and both are read by
+// the dispatch-pairing gate, so both are pinned against a real file rather than
+// a struct literal. `repo:` is the field the gate ROUTES on; getting it wrong
+// silently means the gate covers nothing.
+func TestParsesRepoAndDepends(t *testing.T) {
+	dir := t.TempDir()
+	avail := filepath.Join(dir, "available")
+	if err := os.MkdirAll(avail, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeItem(t, filepath.Join(avail, "mg-rd01.md"), `---
+id: mg-rd01
+type: task
+depends: [mg-aaaa, mg-bbbb]
+tags: [onethird, research]
+repo: /Users/daniel/research/onethird_program
+---
+# a research ticket
+`)
+
+	items, err := ListFrom(dir, "available")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("got %d items, want 1", len(items))
+	}
+	if got, want := items[0].Repo, "/Users/daniel/research/onethird_program"; got != want {
+		t.Errorf("Repo = %q, want %q", got, want)
+	}
+	got := items[0].DependsList()
+	want := []string{"mg-aaaa", "mg-bbbb"}
+	if len(got) != len(want) {
+		t.Fatalf("DependsList() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("DependsList()[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+
+	// An empty depends list and a missing line both yield nil, matching TagList.
+	writeItem(t, filepath.Join(avail, "mg-rd02.md"), "---\nid: mg-rd02\ndepends: []\n---\n# none\n")
+	writeItem(t, filepath.Join(avail, "mg-rd03.md"), "---\nid: mg-rd03\n---\n# none\n")
+	items, err = ListFrom(dir, "available")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, it := range items {
+		if it.ID == "mg-rd01" {
+			continue
+		}
+		if d := it.DependsList(); d != nil {
+			t.Errorf("%s: DependsList() = %v, want nil", it.ID, d)
+		}
+	}
+}
+
+// TestListAllFromSeesClaimedItems is the reason ListAllFrom exists. A claim
+// renames the file to `<id>.md.<pid>`, and ListFrom's ".md" suffix filter drops
+// it — so a caller SEARCHING the store would read "claimed" as "absent". For the
+// dispatch-pairing gate that means refusing an item whose pair is filed and
+// merely being worked on, which is a false refusal that looks exactly like the
+// gate working correctly.
+func TestListAllFromSeesClaimedItems(t *testing.T) {
+	root := t.TempDir()
+	for _, d := range []string{"available", "claimed", "done"} {
+		if err := os.MkdirAll(filepath.Join(root, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeItem(t, filepath.Join(root, "available", "mg-open.md"), "---\nid: mg-open\n---\n# open\n")
+	writeItem(t, filepath.Join(root, "claimed", "mg-held.md.4242"), "---\nid: mg-held\n---\n# held\n")
+
+	// The existing narrow reader is unchanged: it still cannot see the claim.
+	narrow, err := ListFrom(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, it := range narrow {
+		if it.ID == "mg-held" {
+			t.Fatal("ListFrom() now returns claim-suffixed items; its documented " +
+				"behaviour changed, and its callers were not reviewed for it")
+		}
+	}
+
+	all, err := ListAllFrom(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawHeld, sawOpen bool
+	for _, it := range all {
+		switch it.ID {
+		case "mg-held":
+			sawHeld = true
+			if it.Status != "claimed" {
+				t.Errorf("mg-held status = %q, want claimed", it.Status)
+			}
+		case "mg-open":
+			sawOpen = true
+		}
+	}
+	if !sawHeld {
+		t.Error("ListAllFrom() did not return the claimed item")
+	}
+	if !sawOpen {
+		t.Error("ListAllFrom() dropped an ordinary available item")
+	}
+}

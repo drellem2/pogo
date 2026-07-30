@@ -442,6 +442,14 @@ type Registry struct {
 	// SetDispatchGate still gets it. See dispatchgate.go.
 	dispatchGate DispatchGate
 
+	// dispatchPairingGate refuses to dispatch a polecat onto a work item whose
+	// repository requires a paired work item that has not been filed (mg-0e24).
+	// Nil means the default MGDispatchPairingGate, which names no repos and so
+	// enforces nothing — unlike dispatchGate above, whose default enforces. The
+	// difference is deliberate: this gate carries one deployment's policy, not a
+	// platform rule. See dispatchpairing.go.
+	dispatchPairingGate DispatchPairingGate
+
 	// workItemClaimer takes a dispatched polecat's work item out of available/
 	// BEFORE its process starts, so ownership no longer depends on the polecat
 	// reaching its own `mg claim` step — which requires a model-API turn, and so
