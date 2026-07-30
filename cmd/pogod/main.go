@@ -8,6 +8,7 @@ import _ "net/http/pprof"
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -2240,7 +2241,16 @@ Flags:
 				// Polecats use their work item ID as the author field.
 				if mr.Author != "" {
 					if err := client.ReopenMGWorkItem(mr.Author); err != nil {
-						log.Printf("refinery: failed to reopen work item %s: %v", mr.Author, err)
+						if errors.Is(err, client.ErrMGWorkItemNotDone) {
+							// The item never left claimed/ — a live polecat still
+							// owns it, which is the state the reopen wanted. All 18
+							// of these in one 50,603-line log were this outcome
+							// (mg-5d3f); reporting it as a failure taught readers
+							// to skip error lines.
+							log.Printf("refinery: work item %s already claimed (in progress), no reopen needed", mr.Author)
+						} else {
+							log.Printf("refinery: failed to reopen work item %s: %v", mr.Author, err)
+						}
 					} else {
 						log.Printf("refinery: reopened work item %s after merge failure", mr.Author)
 					}

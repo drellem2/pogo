@@ -921,9 +921,44 @@ func gitCmdOutput(dir string, args ...string) (string, error) {
 	output, err := cmd.CombinedOutput()
 	out := strings.TrimSpace(string(output))
 	if err != nil {
-		log.Printf("refinery: git %v failed: %s: %v", args, out, err)
+		if note, benign := benignGitOutcome(out); benign {
+			log.Printf("refinery: git %v: %s (expected outcome)", args, note)
+		} else {
+			log.Printf("refinery: git %v failed: %s: %v", args, out, err)
+		}
 	}
 	return out, err
+}
+
+// benignGitOutcomes maps a git failure's COMPLETE output text to a plain-words
+// description of the expected outcome it represents. The key is matched by
+// exact string equality against gitCmdOutput's trimmed combined output — not
+// against the command, and not against a prefix.
+//
+// That distinction is the whole point, not a detail (mg-5d3f). The refinery
+// calls `git rebase --abort` unconditionally to clear crash debris, so the
+// abort fails on every clean clone: 245 of these landed in one 50,603-line log,
+// all of them reading `git [rebase --abort] failed`, none of them an error.
+// Benign lines at error level teach a reader to skip error lines.
+//
+// Suppressing by COMMAND would silence the whole class, so a genuinely new
+// `rebase --abort` failure — a concurrent git process holding .git/index.lock
+// is a real one the refinery can hit, since gitgc and agents touch the same
+// worktrees — would be swallowed on the day it first appeared. Matching the
+// full text silences only the outcome measured to be benign; any other wording
+// fails the equality test and still logs as a failure, which is where a new
+// variant belongs. The safe form self-invalidates when the world changes.
+//
+// Add an entry only for an outcome measured to be benign in every occurrence.
+var benignGitOutcomes = map[string]string{
+	"fatal: no rebase in progress": "no rebase in progress, nothing to abort",
+}
+
+// benignGitOutcome reports whether git output is a known expected outcome
+// rather than a failure, returning the description to log in its place.
+func benignGitOutcome(out string) (string, bool) {
+	note, ok := benignGitOutcomes[out]
+	return note, ok
 }
 
 // authFailurePatterns match git stderr emitted when a remote requires

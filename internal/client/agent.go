@@ -3,6 +3,7 @@ package client
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -347,15 +348,43 @@ func ArchiveMGDoneItems() (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
+// ErrMGWorkItemNotDone reports that mg reopen refused because the item was
+// never done — it is still claimed and in progress. The refinery reopens a work
+// item after a failed merge so the author can retry, and a live polecat's item
+// is claimed already, so the refusal means the item is in exactly the state the
+// reopen wanted. Callers use errors.Is to log it as an expected outcome instead
+// of a failure (mg-5d3f).
+var ErrMGWorkItemNotDone = errors.New("work item is not done, it is already claimed (in progress)")
+
+// alreadyClaimedOutput returns mg reopen's COMPLETE output for the "still
+// claimed" refusal on the given id. ReopenMGWorkItem compares mg's trimmed
+// output to this by exact string equality — the id is the message's only
+// variable field, so binding it keeps the comparison a full-message match
+// rather than a prefix or a substring.
+//
+// Deliberately exact, per mg-5d3f: matching loosely (on "reopen failed", or on
+// the leading "Error: <id>:") would classify every future reopen refusal as
+// benign, including ones that are not. Any other wording — a missing item, a
+// corrupt store, a permissions problem — fails this comparison and is reported
+// as a failure, which is where an unmeasured outcome belongs.
+func alreadyClaimedOutput(id string) string {
+	return fmt.Sprintf("Error: %s: not done — it is already claimed (in progress).", id)
+}
+
 // ReopenMGWorkItem calls mg reopen to move a done work item back to claimed/.
-// Returns nil if the reopen succeeds. Non-fatal errors (e.g. item not in done/)
-// are returned as errors for the caller to log.
+// Returns nil if the reopen succeeds. Non-fatal errors are returned as errors
+// for the caller to log; the "already claimed (in progress)" refusal wraps
+// ErrMGWorkItemNotDone so callers can tell it from a real failure.
 func ReopenMGWorkItem(id string) error {
 	cmd := execCommand("mg", "reopen", id)
 	cmd.Stderr = nil
-	out, err := cmd.CombinedOutput()
+	raw, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("mg reopen failed: %s (%w)", strings.TrimSpace(string(out)), err)
+		out := strings.TrimSpace(string(raw))
+		if out == alreadyClaimedOutput(id) {
+			return fmt.Errorf("%w: %s", ErrMGWorkItemNotDone, out)
+		}
+		return fmt.Errorf("mg reopen failed: %s (%w)", out, err)
 	}
 	return nil
 }
