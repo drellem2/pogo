@@ -608,8 +608,13 @@ If a ticket for the ref already exists, the mail is new issue activity:
 
    Approved triage recommendation: <triage ticket id> (see its result packet). Build on a branch and open a PR per the polecat-build-pr protocol. Review ticket: <review ticket id, edit in after filing it>.
    EOF
+   # No --depends on the build ticket: on this track the build ticket stays claimed
+   # through review (you submit its branch to the refinery yourself on pass, transition 5),
+   # so a hard dependency would never clear — the review ticket would sit in pending/ and
+   # the review {{.Worker}} could not claim it. Dispatch ordering is gated by hand instead
+   # (step 3 holds the review ticket; transition 4 dispatches it only once the PR exists).
+   # The gh: ref and the body cross-link below are the soft build<->review link.
    mg new --type=task --priority=high --tags=gh-issue --repo=<local repo path> \
-       --depends=<build ticket id> \
        --title="review: <issue title> (<owner>/<repo>#<n>)" \
        --body-file - <<'EOF'
    workflow: gh-issue
