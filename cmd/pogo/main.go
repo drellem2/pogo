@@ -83,6 +83,21 @@ func showRawPromptFile(name string, jsonOut bool) {
 	cli.ExitWithError(jsonOut, fmt.Sprintf("prompt %q not found (checked %s, crew/, templates/)", name, agent.CoordinatorName()), cli.ExitError)
 }
 
+// optedOutNote renders the parity opt-out count as a clause, or "" when there is
+// nothing to say.
+//
+// It is always shown next to a parity result, pass or warn, because the opt-out
+// is the reason this check is shippable at all: deliberate non-indexing is a
+// CORRECT action that produces a parity "defect", and a reader who cannot see
+// how many notes claimed the opt-out cannot tell a clean store from a store that
+// silenced itself (mg-cb71).
+func optedOutNote(n int) string {
+	if n == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" (%d deliberately unindexed, not counted)", n)
+}
+
 func main() {
 
 	// Bound every git repository lookup at POGO_HOME before any subcommand runs.
@@ -2999,7 +3014,23 @@ Exits with code 1 if any critical check fails (--check mode only).`,
 				}
 			}
 
-			// 7. Auto-memory indexes approaching a harness cliff.
+			// 7. Auto-memory index health, on THREE axes.
+			//
+			// A memory store fails in three ways, all of them invisible from
+			// inside the session that has them, and only the first is a question
+			// about size (mg-cb71):
+			//
+			//   OVER-CAP TRUNCATION  the dropped entries never arrive.
+			//   AN UNINDEXED NOTE    nothing points at it.
+			//   A STALE HOOK         it reads as current.
+			//
+			// The size axis alone does not merely miss the other two — on the
+			// unindexed-note axis it reads the failure as an IMPROVEMENT, because
+			// dropping a hook makes MEMORY.md smaller. All three share one walk
+			// over memcheck.Locate; each reports as its own check so a warn on one
+			// axis cannot be read as a verdict on the others.
+			//
+			// 7a. Auto-memory indexes approaching a harness cliff.
 			// There are TWO cliffs in two different units, and this checks
 			// both (mg-9a89): session-start AUTO-INJECTION truncates at 25000
 			// CHARACTERS, and the READ TOOL refuses past 25000 TOKENS. The
@@ -3020,8 +3051,16 @@ Exits with code 1 if any critical check fails (--check mode only).`,
 				// from a literal inside memcheck — so this check covers
 				// whichever harnesses are in play rather than Claude alone.
 				memFiles := memcheck.Locate(home, providers.MemoryIndexGlobs())
+				// One walk, three axes. The resolver is built once so its
+				// memo cache spans every index: the same work-item id
+				// recurs across memory dirs and each lookup is a process
+				// spawn.
+				resolve := memcheck.NewMgResolver()
 				var approaching []memcheck.Result
-				checked := 0
+				var offParity []memcheck.ParityResult
+				var staleHooks []memcheck.StaleHook
+				checked, parityChecked, notesChecked, optedOut := 0, 0, 0, 0
+				idsTried, idsResolved := 0, 0
 				for _, mf := range memFiles {
 					res, cerr := memcheck.CheckFile(mf)
 					if cerr != nil {
@@ -3031,7 +3070,21 @@ Exits with code 1 if any critical check fails (--check mode only).`,
 					if res.Approaching {
 						approaching = append(approaching, res)
 					}
+					if p, perr := memcheck.CheckParity(mf); perr == nil {
+						parityChecked++
+						notesChecked += p.Notes
+						optedOut += len(p.OptedOut)
+						if !p.InParity {
+							offParity = append(offParity, p)
+						}
+					}
+					if rep, serr := memcheck.StaleCheckFile(mf, resolve); serr == nil {
+						staleHooks = append(staleHooks, rep.Hooks...)
+						idsTried += rep.Attempted
+						idsResolved += rep.Resolved
+					}
 				}
+				memcheck.SortHooks(staleHooks)
 				if checked == 0 {
 					// No auto-memory indexes on this machine — nothing to warn
 					// about, and their absence is not itself a problem.
@@ -3065,6 +3118,68 @@ Exits with code 1 if any critical check fails (--check mode only).`,
 						warn("memory index size", fmt.Sprintf(
 							"%s (%d chars, ~%d tokens, %dB) — %s. The harness announces the truncation, but an agent cannot notice entries that were never injected. Compact it deliberately (never auto — verify the entry count and links). Heaviest index lines: %s",
 							res.Path, res.Chars, res.EstTokens, res.SizeBytes, which, strings.Join(fat, " | ")))
+					}
+				}
+				// 7b. INDEX/FILE PARITY. A note the index does not name is
+				// written, costs disk, and is unreachable by recall — and this is
+				// the axis where a size check moves the WRONG WAY, since dropping
+				// a hook makes MEMORY.md smaller. The opt-out count is reported
+				// alongside so a reader can see deliberate non-indexing is
+				// accounted for rather than folded silently into the defects.
+				// DETECT ONLY, for the same reason as the size axis: appending
+				// missing hooks unattended would index working scratch files.
+				if parityChecked == 0 {
+					pass("memory index parity", "no MEMORY.md indexes found")
+				} else if len(offParity) == 0 {
+					pass("memory index parity", fmt.Sprintf(
+						"%d note(s) across %d index(es) all referenced%s",
+						notesChecked, parityChecked, optedOutNote(optedOut)))
+				} else {
+					for _, p := range offParity {
+						names := p.Unreferenced
+						if len(names) > 8 {
+							names = append(names[:8:8], fmt.Sprintf("… and %d more", len(p.Unreferenced)-8))
+						}
+						warn("memory index parity", fmt.Sprintf(
+							"%s — %d of %d note(s) NOT referenced by the index: %s. They are on disk and unreachable by recall: nothing points at them, so the agent that wrote them cannot recall them either. Add a hook for each, or declare the note deliberately unindexed with '%s' in its frontmatter (a working scratch file legitimately has no hook). Never auto-append hooks%s",
+							p.IndexPath, len(p.Unreferenced), p.Notes, strings.Join(names, ", "),
+							memcheck.UnindexedMarker, optedOutNote(len(p.OptedOut))))
+					}
+				}
+
+				// 7c. STALE TENSE-BEARING ASSERTIONS. An index line asserting a
+				// live state about a work item that has since gone terminal reads
+				// as current and is wrong. The predicate is CONSISTENCY, not the
+				// presence of a tense word: a line that records its own resolution
+				// is maintained, and an id that does not resolve UNIQUELY stays
+				// silent rather than stale. That silence is deliberate — the
+				// natural response to a "stale" verdict is deleting the hook, so a
+				// false positive destroys a correct memory (mg-cb71).
+				// "Could not look" must never render as "nothing stale". There are
+				// two distinct ways to be blind, and the second bit during
+				// verification of this very check: macOS ships /usr/bin/mg, an
+				// unrelated micro-emacs clone, so a PATH check alone reported
+				// "available" while every lookup failed and the axis passed clean.
+				if !memcheck.MgAvailable() {
+					warn("memory index staleness", "cannot check: no 'mg' on PATH, so no index hook's work-item status could be resolved. This is NOT a report that the hooks are current")
+				} else if idsTried > 0 && idsResolved == 0 {
+					warn("memory index staleness", fmt.Sprintf(
+						"cannot check: all %d work-item id lookup(s) failed, so no hook could be assessed. The 'mg' on PATH may be a different program of the same name, or its workspace may be unreachable. This is NOT a report that the hooks are current", idsTried))
+				} else if checked == 0 {
+					pass("memory index staleness", "no MEMORY.md indexes found")
+				} else if len(staleHooks) == 0 {
+					pass("memory index staleness", fmt.Sprintf(
+						"no index hook in %d index(es) asserts an open state about a done/archived/shelved work item (%d of %d work-item id(s) resolved)",
+						checked, idsResolved, idsTried))
+				} else {
+					for _, h := range staleHooks {
+						text := h.Text
+						if len(text) > 160 {
+							text = text[:160] + "…"
+						}
+						warn("memory index staleness", fmt.Sprintf(
+							"%s:%d asserts %q but %s — the hook reads as current and is not. REWRITE it to record the outcome rather than deleting it; the note it points at may still be worth recalling. Line: %s",
+							h.IndexPath, h.Line, h.Assertion, strings.Join(h.Items, ", "), text))
 					}
 				}
 			}
