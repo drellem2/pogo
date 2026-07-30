@@ -2039,6 +2039,15 @@ Flags:
 			for _, line := range promptRefreshLogLines(installRes) {
 				log.Print(line)
 			}
+			// The log lines above are correct and were never read: pogod.log is
+			// on no agent's schedule, so a declined sync fired every boot for
+			// seven days while the mayor ran stale guidance (mg-c3f0). Mail the
+			// agent whose prompt was declined, here at the decision point,
+			// while we still hold the conflict set in-process — and note that
+			// this runs BEFORE the auto-start sweep below, so the notice is
+			// already in that agent's maildir when it starts.
+			notifyPromptSyncConflicts(installRes, coordinator, agent.PromptDir(),
+				promptSyncNoticesPath(), time.Now(), client.SendMGMail)
 		}
 
 		// The role-default pin used to live here, between prompt refresh and
