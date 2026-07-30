@@ -26,7 +26,8 @@ const defaultMaxAttempts = 7
 //  2. Fetch, checkout branch, rebase onto latest target
 //  3. Refuse the branch outright if it carries a commit message that would
 //     close a GitHub issue — not skippable
-//  4. Run quality gates on rebased code
+//  4. Run quality gates on rebased code, then discard anything they wrote to
+//     tracked files in the refinery's own checkout (gatedirt.go)
 //  5. Fast-forward merge to target ref
 //  6. Push
 //  7. Fast-forward the source checkout's target branch (iff clean and on
@@ -185,9 +186,17 @@ func (r *Refinery) attemptMerge(wtDir string, mr *MergeRequest, attempt int, ski
 		return "", "fetch", "", fmt.Errorf("fetch: %s: %w", out, gerr)
 	}
 
+	// Clear anything a previous attempt's gate (or a previous MR's, this clone
+	// is reused) left modified in the tracked tree. Without this the checkout
+	// and rebase below fail on writes the author never made — see gatedirt.go.
+	r.discardGateSideEffectsAt(wtDir, mr, attempt, "attempt-entry")
+
 	// Checkout the branch fresh from origin
 	log.Printf("refinery: MR %s step=checkout-branch branch=%s attempt=%d", mr.ID, mr.Branch, attempt)
 	if out, gerr := gitCmdOutput(wtDir, "checkout", "-B", mr.Branch, "origin/"+mr.Branch); gerr != nil {
+		if dirtErr := r.classifyGateDirt(wtDir, mr, "checkout branch", out); dirtErr != nil {
+			return "", "fetch", "", dirtErr
+		}
 		return "", "fetch", "", fmt.Errorf("checkout branch: %s: %w", out, gerr)
 	}
 
@@ -196,8 +205,18 @@ func (r *Refinery) attemptMerge(wtDir string, mr *MergeRequest, attempt int, ski
 	// time they reach the refinery.
 	log.Printf("refinery: MR %s step=rebase target=%s attempt=%d", mr.ID, mr.TargetRef, attempt)
 	if out, gerr := gitCmdOutput(wtDir, "rebase", "origin/"+mr.TargetRef); gerr != nil {
+		// A dirty tree is the one rebase failure that is never the author's
+		// doing: this clone is private to the refinery, so whatever is modified
+		// in it was written by a gate. Say that, instead of relaying git's
+		// "commit or stash them" at someone who has nothing to commit.
+		// Classified BEFORE the abort, because the abort's own reset erases the
+		// evidence the message is built from. (mg-393f)
+		dirtErr := r.classifyGateDirt(wtDir, mr, "rebase onto "+mr.TargetRef, out)
 		// Abort the failed rebase to leave worktree in a clean state
 		gitCmdOutput(wtDir, "rebase", "--abort")
+		if dirtErr != nil {
+			return "", "rebase", "", dirtErr
+		}
 		rebaseErr := fmt.Errorf("rebase onto %s: %s: %w", mr.TargetRef, out, gerr)
 		// "invalid upstream" can be transient — e.g. the target branch
 		// hasn't been fetched yet or the ref is missing from the clone.
@@ -231,6 +250,16 @@ func (r *Refinery) attemptMerge(wtDir string, mr *MergeRequest, attempt int, ski
 		gateOutput = out
 		if qerr != nil {
 			return gateOutput, gateStage(gates), "", fmt.Errorf("quality gate: %w", qerr)
+		}
+		// The gate has just run arbitrary commands in this checkout. If any of
+		// them wrote a tracked file — a regenerated record, a lockfile, a
+		// coverage report — the target checkout and ff-merge below would both
+		// refuse, and on the next attempt so would the rebase. Discard the
+		// writes here and record them on the MR, so the gate's own output is
+		// the thing named rather than the author's non-existent local changes.
+		// (mg-393f)
+		if discarded := r.discardGateSideEffectsAt(wtDir, mr, attempt, "post-gate"); len(discarded) > 0 {
+			gateOutput += gateWriteNote(discarded)
 		}
 	}
 
@@ -270,12 +299,18 @@ func (r *Refinery) attemptMerge(wtDir string, mr *MergeRequest, attempt int, ski
 	}
 	log.Printf("refinery: MR %s step=reset-target target=%s attempt=%d", mr.ID, mr.TargetRef, attempt)
 	if out, gerr := gitCmdOutput(wtDir, "checkout", "-B", mr.TargetRef, "origin/"+mr.TargetRef); gerr != nil {
+		if dirtErr := r.classifyGateDirt(wtDir, mr, "checkout target "+mr.TargetRef, out); dirtErr != nil {
+			return gateOutput, "fetch", "", dirtErr
+		}
 		return gateOutput, "fetch", "", &retryableError{fmt.Errorf("reset target %s to origin: %s: %w", mr.TargetRef, out, gerr)}
 	}
 
 	// Fast-forward merge — guaranteed to work if target hasn't moved since fetch
 	log.Printf("refinery: MR %s step=merge branch=%s attempt=%d", mr.ID, mr.Branch, attempt)
 	if out, gerr := gitCmdOutput(wtDir, "merge", "--ff-only", mr.Branch); gerr != nil {
+		if dirtErr := r.classifyGateDirt(wtDir, mr, "merge --ff-only "+mr.Branch, out); dirtErr != nil {
+			return gateOutput, "merge", "", dirtErr
+		}
 		return gateOutput, "rebase", "", &retryableError{fmt.Errorf("merge (ff-only): %s: %w", out, gerr)}
 	}
 
