@@ -652,6 +652,154 @@ A pair is recognised by either reference channel the store already uses:
 Source of truth: `internal/config/dispatchpairing.go` (policy vocabulary and
 predicates) and `internal/agent/dispatchpairing.go` (the gate).
 
+## Audit successors — merged audits that nothing answered
+
+**Off by default, everywhere.** `[audit_successor]` is empty unless a deployment
+fills it in, and an empty repo list means the detector examines nothing.
+
+**This is a DETECTOR, not a gate.** It refuses nothing, blocks nothing, and has
+no caller at dispatch. It reports on one line of `pogo doctor --check`, and the
+line is a `warn` — never a `fail`, so it never changes doctor's exit code.
+
+### What it covers, and why it is the shape it is
+
+`[dispatch_pairing]` above enforces that a paired audit **exists at dispatch**,
+and states its own limit: *it checks that a pair exists, never that it is any
+good; an audit filed to satisfy the gate and then shelved unread satisfies it.*
+
+That residue was covered by one agent remembering to read each audit as it
+merged. On 2026-07-30 that produced three successor tickets filed by hand — every
+one of which would otherwise have existed only in a commit message, where nothing
+acts on it.
+
+**The rule: an audit that MERGES with no successor inside a bounded window is a
+computable failure.** A successor is another work item that references the audit
+(`depends: [mg-1234]`, or a tag containing the id), or a clean verdict recorded
+on the audit itself. It needs nobody to remember, and it fires on exactly the
+case the gate cannot see.
+
+It is a detector rather than a gate deliberately. A gate on this event would have
+to decide whether an audit's findings **warrant** a successor, which is a
+judgement and not mechanically decidable. What *is* decidable is that nothing
+happened at all. Do not grow it into a refusal.
+
+```toml
+[audit_successor]
+# Repos whose merged audits are checked. Empty (the default) = inert.
+# Same path matching as [dispatch_pairing]: covers itself and everything
+# beneath it, on path boundaries.
+repos = ["/Users/daniel/research/onethird_program"]
+
+# What marks an item whose deliverable is FINDINGS. Required — empty means
+# inert, because with no marker every merged item in the repo would read as an
+# audit owing a successor. Use the same tight marker as pair_tags.
+audit_tags = ["independent-audit"]
+
+# Carried BY THE AUDIT to record that it found nothing to repair. Optional;
+# empty means a successor ticket is the only way to answer an audit.
+clean_verdict_tags = ["audit-clean"]
+
+# Grace period after the merge. Default 4h — see the calibration below.
+window = "4h"
+```
+
+### The window, and what it was calibrated against
+
+A window is a judgement, and an uncalibrated one is a number somebody invented.
+This one was measured against **2026-07-30 in the onethird program**, whose store
+held 30 items tagged `independent-audit`, 27 of them merged. Merge time was taken
+from each item's `<id>.result.json` mtime, successor time from the successor's
+`created:`:
+
+| | |
+|---|---|
+| Merged audits examined | 27 |
+| Produced a successor | 23 |
+| First successor within 20 min | 21 of those 23 |
+| Two slowest | 2h04m (mg-6653), 2h05m (mg-f7bc) |
+| Produced nothing | 4 |
+
+**4h is a little under twice the slowest successor actually observed.** That
+leaves room for a lag half again as bad as the worst real one before a healthy
+audit is reported, and still fires inside the working day the audit merged in —
+which matters, because the person who can act on it is the one who still
+remembers the audit.
+
+That day is a usable positive control precisely because it is dense: audits
+merged roughly hourly and repairs followed within minutes, so a silent one stands
+out against the day's own pattern rather than against a threshold picked from
+nothing. `TestCalibration_2026_07_30` replays every row above and fails if the
+window drops below an observed healthy lag. Recalibrate against a comparable day
+if the cadence changes; do not tune this to make a report go away.
+
+### Two limits, stated rather than left to be discovered
+
+1. **A recorded clean verdict is an artifact anyone can produce cheaply.**
+   Tagging an unread audit `audit-clean` silences this detector exactly as filing
+   an unread audit satisfies the pairing gate. This moves the proxy one step
+   closer to *merged-and-acted-on* without reaching it. The `doctor` line says so
+   on its face, so a reader does not have to rediscover it. The step is worth
+   taking only because a successor ticket cannot express a genuinely clean audit
+   at all.
+2. **It detects after the fact rather than preventing.** By the time it fires the
+   audit has merged and the window has elapsed. It buys nothing at the moment of
+   the merge; it buys that the omission is findable afterwards by someone who was
+   not watching. That is the right shape for a failure mode whose symptom is
+   silence.
+
+### It converts a filing race into a fallback
+
+Two duties bound to two events seconds apart — a dispatcher's successor duty at
+AUDIT-MERGE, a product owner's pre-file duty at FILE — and on 2026-07-30 both
+fired and produced duplicate tickets. **The agreed line is that the product owner
+files the repair, the dispatcher does not, and this detector observes the
+silence.** Neither party has to be fast.
+
+**What that line costs, and this detector does NOT cover:** the non-filer is
+often the second reader and may hold findings the owner's ticket lacks (this
+happened — four findings, filed separately as mg-f8fa). This sees whether *a*
+successor exists, never whether it carries everything the audit found. **Reading
+the audit and mailing what you find stays human and stays explicit.**
+
+### What else it does not cover
+
+- **Non-audit items.** Deliberately not widened: the signal is specific to a
+  ticket whose deliverable is findings, and an untagged repo-wide check would
+  report most of the repo as failing.
+- **Whether a successor is any good.** Same class of residue the pairing gate
+  has, one level along.
+- **Audits with no recorded completion time.** `mg done` *renames* the item file,
+  and a rename preserves mtime, so a done item's own mtime is its **filing**
+  time. The merge instant comes from the sibling `<id>.result.json`; an item
+  without one cannot be aged and is counted as `no recorded completion time`
+  rather than folded into either verdict.
+- **Shelved successors.** A shelved successor is a dropped one — same asymmetry
+  the pairing gate draws. `pending/` counts: a successor parked behind an unmet
+  `depends:` is filed and will run.
+
+### Where it reports
+
+One line on `pogo doctor --check`, named `audit successors`:
+
+```
+! audit successors  2 merged audit(s) answered by NOTHING after 4h: mg-f1b2
+  (silent 11h17m, merged 2026-07-30 06:43Z), mg-3c24 (silent 10h39m, merged
+  2026-07-30 07:21Z). Read each one and file a repair ticket referencing it …
+  27 merged audit(s) examined: 23 answered by a successor, 0 by a recorded
+  clean verdict, 2 still inside the 4h window, 0 with no recorded completion
+  time
+```
+
+A checklist someone reads on purpose, rather than a maildir already carrying
+hundreds of unread notices. The line renders on **every** run, including when the
+detector is unconfigured or could not read the store — in both cases it says so
+outright, because a detector whose subject is silence must never report its own
+silence as a clean result.
+
+Source of truth: `internal/config/auditsuccessor.go` (policy vocabulary,
+predicates and the calibrated window), `internal/auditwatch/` (the scan) and
+`cmd/pogo/auditsuccessors.go` (the rendered line).
+
 ## Heartbeat reaper (tier 1)
 
 A goroutine inside pogod that watches a declared list of launchd jobs and

@@ -21,6 +21,7 @@ import (
 
 	"github.com/drellem2/pogo/internal/ackwatch"
 	"github.com/drellem2/pogo/internal/agent"
+	"github.com/drellem2/pogo/internal/auditwatch"
 	"github.com/drellem2/pogo/internal/cli"
 	"github.com/drellem2/pogo/internal/client"
 	"github.com/drellem2/pogo/internal/closingref"
@@ -3034,6 +3035,27 @@ Exits with code 1 if any critical check fails (--check mode only).`,
 				pass("macguffin (mg)", "no stale claims")
 			} else {
 				warn("macguffin (mg)", fmt.Sprintf("%d claimed work item(s) — check for stale claims", count))
+			}
+
+			// 6b. Audits that merged and were answered by nothing (mg-28b7).
+			//
+			// A DETECTOR, not a gate: it reports and never refuses, and it never
+			// sets hasFail. See auditsuccessors.go for why it renders here rather
+			// than as mail, and internal/auditwatch for what it cannot see.
+			//
+			// It reads the store directly rather than shelling out to mg — unlike
+			// the stale-claim count above — because the question is a JOIN across
+			// the whole store (every done audit against every item that might
+			// reference it) and there is no mg query that expresses it.
+			{
+				asCfg := config.Load().AuditSuccessor
+				asRep, asErr := auditwatch.Scan(auditwatch.DefaultRoot(), asCfg, time.Now())
+				asStatus, asDetail := auditSuccessorLine(asRep, asErr, asCfg, time.Now())
+				if asStatus == "warn" {
+					warn(auditSuccessorCheckName, asDetail)
+				} else {
+					pass(auditSuccessorCheckName, asDetail)
+				}
 			}
 
 			// 7. Auto-memory index health, on THREE axes.

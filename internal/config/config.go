@@ -516,6 +516,10 @@ type Config struct {
 	// DispatchPairing declares repos whose items owe a paired work item before
 	// dispatch. Zero value = no repos = inert. See dispatchpairing.go.
 	DispatchPairing DispatchPairingConfig
+	// AuditSuccessor declares repos whose merged audits must be answered by a
+	// successor inside a window. Zero value = no repos = inert. This is a
+	// DETECTOR and never refuses anything — see auditsuccessor.go.
+	AuditSuccessor AuditSuccessorConfig
 	// Source is the path of the highest-precedence config file Load read, or
 	// "" when no config file was found and everything is defaults + env. pogod
 	// uses this to gate crew auto-start: a daemon with no config file is
@@ -1448,6 +1452,23 @@ func Load() *Config {
 		if len(fileCfg.DispatchPairing.WaiverTags) > 0 {
 			cfg.DispatchPairing.WaiverTags = fileCfg.DispatchPairing.WaiverTags
 		}
+
+		// [audit_successor] has no code-side defaults to preserve either — the
+		// zero value is "no repos, detector inert". Window is the one exception:
+		// zero means unset and AuditWindow() supplies the calibrated default, so
+		// only a positive value is copied.
+		if len(fileCfg.AuditSuccessor.Repos) > 0 {
+			cfg.AuditSuccessor.Repos = fileCfg.AuditSuccessor.Repos
+		}
+		if len(fileCfg.AuditSuccessor.AuditTags) > 0 {
+			cfg.AuditSuccessor.AuditTags = fileCfg.AuditSuccessor.AuditTags
+		}
+		if len(fileCfg.AuditSuccessor.CleanVerdictTags) > 0 {
+			cfg.AuditSuccessor.CleanVerdictTags = fileCfg.AuditSuccessor.CleanVerdictTags
+		}
+		if fileCfg.AuditSuccessor.Window > 0 {
+			cfg.AuditSuccessor.Window = fileCfg.AuditSuccessor.Window
+		}
 	}
 
 	// Environment variables override config file
@@ -1916,6 +1937,23 @@ func parseConfigFileInto(cfg *parsedConfig, path string) error {
 				cfg.DispatchPairing.PairTags = parseStringArray(val)
 			case "waiver_tags":
 				cfg.DispatchPairing.WaiverTags = parseStringArray(val)
+			}
+		case "audit_successor":
+			switch key {
+			case "repos":
+				cfg.AuditSuccessor.Repos = parseStringArray(val)
+			case "audit_tags":
+				cfg.AuditSuccessor.AuditTags = parseStringArray(val)
+			case "clean_verdict_tags":
+				cfg.AuditSuccessor.CleanVerdictTags = parseStringArray(val)
+			case "window":
+				// An unparseable or non-positive window falls through to
+				// DefaultAuditSuccessorWindow rather than to zero. Zero would mean
+				// "report every merged audit the instant it lands", which is the
+				// loudest possible reading of a typo.
+				if d, err := time.ParseDuration(unquotedVal); err == nil && d > 0 {
+					cfg.AuditSuccessor.Window = d
+				}
 			}
 		case "reaper":
 			switch key {

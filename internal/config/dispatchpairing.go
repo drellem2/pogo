@@ -161,14 +161,34 @@ func PairingOwed(repo string, tags []string, cfg DispatchPairingConfig) (coverin
 //
 // A candidate never pairs with itself.
 func PairingSatisfiedBy(candidateID string, candidateTags, candidateDepends []string, targetID string, pairTags []string) bool {
-	target := strings.TrimSpace(targetID)
-	if target == "" || len(pairTags) == 0 {
-		return false
-	}
-	if strings.EqualFold(strings.TrimSpace(candidateID), target) {
+	if strings.TrimSpace(targetID) == "" || len(pairTags) == 0 {
 		return false
 	}
 	if !HasAnyTag(candidateTags, pairTags) {
+		return false
+	}
+	return referencesItem(candidateID, candidateTags, candidateDepends, targetID)
+}
+
+// referencesItem reports whether a candidate work item points at targetID
+// through either channel the store uses: `depends: [mg-1234]`, or a tag
+// containing the id (`mg-1234-followup`). An item never references itself.
+//
+// Extracted so the dispatch-pairing gate and the audit-successor detector
+// (auditsuccessor.go) cannot drift apart on what "references" means. They ask
+// opposite-direction questions — does a PAIR exist in advance, did a SUCCESSOR
+// follow — but if the detector recognised fewer channels than the gate it would
+// report as unanswered an audit whose successor the gate would have accepted,
+// and the two would contradict each other over the same two files.
+//
+// Tag matching is on substring, deliberately loose: an mg id is distinctive
+// enough that a false positive means somebody wrote that id on purpose.
+func referencesItem(candidateID string, candidateTags, candidateDepends []string, targetID string) bool {
+	target := strings.TrimSpace(targetID)
+	if target == "" {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(candidateID), target) {
 		return false
 	}
 	for _, d := range candidateDepends {
