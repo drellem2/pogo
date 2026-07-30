@@ -8,8 +8,13 @@ set -e
 # This script handles version bumping for Pogo releases.
 # It updates the version constant in internal/version/version.go.
 #
-# QUICK START:
+# QUICK START (from a clean `main`):
 #   ./scripts/bump-version.sh X.Y.Z --commit --tag --push
+#
+# OFF `main` (a polecat / any branch the refinery will merge) use --commit ONLY,
+# and tag the MERGED sha after the merge lands (mg-cef7). --tag REFUSES off main:
+# the refinery re-commits what it merges, so a pre-merge tag dangles off a commit
+# no branch contains, and a pushed release tag cannot be unpublished.
 #
 # WHAT IT UPDATES:
 #   - internal/version/version.go  - CLI version constant
@@ -30,7 +35,11 @@ usage() {
     echo "Arguments:"
     echo "  <version>        Semantic version (e.g., 0.2.0, 1.0.0)"
     echo "  --commit         Automatically create a git commit"
-    echo "  --tag            Create annotated git tag (requires --commit)"
+    echo "  --tag            Create annotated git tag (requires --commit)."
+    echo "                   REFUSED off 'main': the refinery re-commits what it"
+    echo "                   merges, so a pre-merge tag dangles off a commit no"
+    echo "                   branch contains (mg-cef7). Off main, use --commit and"
+    echo "                   tag the MERGED sha after the merge lands."
     echo "  --push           Push commit and tag to origin (requires --tag)"
     echo "  --ack-changelog-gaps"
     echo "                   Proceed even though some mg-ids in the release range"
@@ -41,11 +50,15 @@ usage() {
     echo "Examples:"
     echo "  $0 0.2.0                        # Update versions and show diff"
     echo "  $0 0.2.0 --commit               # Update versions and commit"
-    echo "  $0 0.2.0 --commit --tag         # Update, commit, and tag"
-    echo "  $0 0.2.0 --commit --tag --push  # Full release preparation"
+    echo "  $0 0.2.0 --commit --tag         # Update, commit, and tag (main only)"
+    echo "  $0 0.2.0 --commit --tag --push  # Full release preparation (main only)"
     echo ""
-    echo "Recommended release command:"
+    echo "Recommended release command, from a clean 'main':"
     echo "  $0 X.Y.Z --commit --tag --push"
+    echo ""
+    echo "On any other branch (the refinery will re-commit the merge, so a"
+    echo "pre-merge tag would dangle — mg-cef7):"
+    echo "  $0 X.Y.Z --commit    # then tag the MERGED sha once the merge lands"
     exit 1
 }
 
@@ -64,24 +77,29 @@ get_current_version() {
     grep 'Version = ' internal/version/version.go | sed 's/.*"\(.*\)".*/\1/'
 }
 
-# Update CHANGELOG.md: move [Unreleased] to [version]
+# Update CHANGELOG.md: move [Unreleased] to [version], and maintain the
+# link-reference block.
+#
+# This used to be one unanchored sed (mg-cef7):
+#
+#     sed_i "s/## \[Unreleased\]/## [Unreleased]\n\n## [$version] - $date/"
+#
+# which emitted the heading but NO `[X.Y.Z]:` compare link — so the version
+# rendered as literal text in the published changelog — and, because `s///`
+# replaces the first match on EVERY matching line, also injected a spurious
+# heading into any entry whose prose MENTIONS `## [Unreleased]`. Both failures
+# were silent and both recurred on every cut. The logic now lives in
+# scripts/roll-changelog.sh, which is anchored, emits the link references, and
+# REFUSES rather than producing a half-formed entry.
 update_changelog() {
     local version=$1
-    local date=$(date +%Y-%m-%d)
 
     if [ ! -f "CHANGELOG.md" ]; then
         echo -e "${YELLOW}Warning: CHANGELOG.md not found, skipping${NC}"
         return
     fi
 
-    # Check if there's an [Unreleased] section
-    if ! grep -q "## \[Unreleased\]" CHANGELOG.md; then
-        echo -e "${YELLOW}Warning: No [Unreleased] section in CHANGELOG.md${NC}"
-        echo -e "${YELLOW}You may need to manually update CHANGELOG.md${NC}"
-        return
-    fi
-
-    sed_i "s/## \[Unreleased\]/## [Unreleased]\n\n## [$version] - $date/" CHANGELOG.md
+    "$SCRIPT_DIR/roll-changelog.sh" "$version"
 }
 
 # Main script
@@ -137,6 +155,42 @@ main() {
     if [ ! -f "internal/version/version.go" ]; then
         echo -e "${RED}Error: Must run from repository root${NC}"
         exit 1
+    fi
+
+    # DANGLING-TAG GATE (mg-cef7).
+    #
+    # `--tag` tags the LOCAL commit this script just made. That is correct only
+    # if that commit is the one that lands on `main`. Off `main` it is not: the
+    # branch goes through the refinery, which RE-COMMITS what it merges (v0.7.0's
+    # merged commit 4112875 carries committer "pogo refinery"), so the tagged SHA
+    # is not the SHA on `main` and the tag dangles off a commit no branch
+    # contains. `--push`'s `git push origin main` is wrong off `main` for the same
+    # reason. A release tag is externally visible and force-pushing does not
+    # unpublish it, so this refuses rather than warns.
+    #
+    # There is deliberately no override. The correct action off `main` — tag the
+    # MERGED SHA after the merge lands — is always available and is printed
+    # below; an override's only use would be to produce the broken artifact.
+    CURRENT_BRANCH_LABEL="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
+    if [ "$AUTO_TAG" = true ]; then
+        if [ "$CURRENT_BRANCH_LABEL" != "main" ]; then
+            echo -e "${RED}Error: refusing --tag on branch '$CURRENT_BRANCH_LABEL' (not main).${NC}" >&2
+            echo -e "${RED}  --tag would tag the local pre-merge commit. This branch goes through${NC}" >&2
+            echo -e "${RED}  the refinery, which RE-COMMITS what it merges, so the tagged SHA is${NC}" >&2
+            echo -e "${RED}  not the SHA that lands on main and the tag would dangle off a commit${NC}" >&2
+            echo -e "${RED}  no branch contains. A pushed release tag cannot be unpublished.${NC}" >&2
+            echo "" >&2
+            echo -e "${YELLOW}  Do this instead — bump here, tag the MERGED commit afterwards:${NC}" >&2
+            echo -e "${YELLOW}    ./scripts/bump-version.sh $NEW_VERSION --commit${NC}" >&2
+            echo -e "${YELLOW}    # push, submit to the refinery, wait for the merge, then on the${NC}" >&2
+            echo -e "${YELLOW}    # MERGED sha (note: the tagging step must be done by something${NC}" >&2
+            echo -e "${YELLOW}    # that OUTLIVES the merge — see CONTRIBUTING.md 'Releases'):${NC}" >&2
+            echo -e "${YELLOW}    git fetch origin main${NC}" >&2
+            echo -e "${YELLOW}    git tag -a v$NEW_VERSION -m 'Release v$NEW_VERSION' origin/main${NC}" >&2
+            echo -e "${YELLOW}    git push origin v$NEW_VERSION${NC}" >&2
+            echo -e "${YELLOW}    git ls-remote --tags origin | grep -q 'v$NEW_VERSION' || echo 'TAG NOT PUBLISHED'${NC}" >&2
+            exit 1
+        fi
     fi
 
     # Get current version
@@ -206,6 +260,16 @@ main() {
     echo "  • CHANGELOG.md"
     update_changelog "$NEW_VERSION"
 
+    # 4. PROVE the roll produced a well-formed link-reference block (mg-cef7).
+    #    roll-changelog.sh emitting the link is one thing; the file being
+    #    CONSISTENT afterwards is another, and the whole class of defect here is
+    #    a cut that succeeds and ships a wrong artifact. This compares the
+    #    heading SET against the link-reference SET — never the counts, which
+    #    misdiagnose (see the header of changelog-links.sh). set -e aborts the
+    #    cut on any finding.
+    echo "  • verifying changelog link references"
+    "$SCRIPT_DIR/changelog-links.sh"
+
     echo ""
     echo -e "${GREEN}✓ Version updated to $NEW_VERSION${NC}"
     echo ""
@@ -269,17 +333,47 @@ Generated by scripts/bump-version.sh"
             git push origin "v$NEW_VERSION"
             echo -e "${GREEN}✓ Pushed to origin${NC}"
             echo ""
-            echo -e "${GREEN}Release v$NEW_VERSION initiated!${NC}"
-            echo "GitHub Actions will build artifacts when the tag is pushed."
+            # Verify against the REMOTE (mg-cef7). A local tag proves nothing
+            # about what was published, and the release workflow triggers on the
+            # pushed tag — so an unpublished tag is a silently un-cut release.
+            if git ls-remote --tags origin 2>/dev/null | grep -q "refs/tags/v$NEW_VERSION\$"; then
+                echo -e "${GREEN}✓ Tag v$NEW_VERSION confirmed on origin${NC}"
+                echo ""
+                echo -e "${GREEN}Release v$NEW_VERSION initiated!${NC}"
+                echo "GitHub Actions will build artifacts when the tag is pushed."
+            else
+                echo -e "${RED}✗ Tag v$NEW_VERSION is NOT on origin — the release did not trigger.${NC}" >&2
+                echo -e "${RED}  Re-run: git push origin v$NEW_VERSION${NC}" >&2
+                exit 1
+            fi
         elif [ "$AUTO_TAG" = true ]; then
             echo "Next steps:"
             echo "  git push origin main"
             echo "  git push origin v$NEW_VERSION"
+            echo "  git ls-remote --tags origin | grep v$NEW_VERSION   # confirm it published"
+        elif [ "$CURRENT_BRANCH_LABEL" != "main" ]; then
+            # Off main the tag MUST come after the merge, on the merged sha — and
+            # the merging worker cannot do it: pogod stops a polecat within ~3s of
+            # merge success, so any post-merge step it still intends loses that
+            # race (both v0.8.0 cut attempts did). Hand the step to something that
+            # outlives the merge.
+            echo "Next steps (on branch '$CURRENT_BRANCH_LABEL' — do NOT tag this commit):"
+            echo "  git push origin $CURRENT_BRANCH_LABEL"
+            echo "  pogo refinery submit $CURRENT_BRANCH_LABEL --repo=<repo> --target=main"
+            echo ""
+            echo "Then, once the merge has LANDED, tag the MERGED sha. This step"
+            echo "outlives the merging worker, so it belongs to a coordinator or a"
+            echo "separately-dispatched follow-up — not to whoever ran this script:"
+            echo "  git fetch origin main"
+            echo "  git tag -a v$NEW_VERSION -m 'Release v$NEW_VERSION' origin/main"
+            echo "  git push origin v$NEW_VERSION"
+            echo "  git ls-remote --tags origin | grep v$NEW_VERSION   # confirm it published"
         else
             echo "Next steps:"
             echo "  git push origin main"
             echo "  git tag -a v$NEW_VERSION -m 'Release v$NEW_VERSION'"
             echo "  git push origin v$NEW_VERSION"
+            echo "  git ls-remote --tags origin | grep v$NEW_VERSION   # confirm it published"
         fi
     else
         echo "Review the changes above."

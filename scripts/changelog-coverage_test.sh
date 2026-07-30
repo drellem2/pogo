@@ -53,6 +53,9 @@ make_repo() {
     git -C "$d" config user.email "test@example.com"
     git -C "$d" config user.name "Test"
     git -C "$d" config commit.gpgsign false
+    # The link-reference block is part of a real changelog, and since mg-cef7 it
+    # is load-bearing: roll-changelog.sh derives the compare base and the
+    # previous tag from `[Unreleased]:` and REFUSES a cut without it.
     cat > "$d/CHANGELOG.md" <<'EOF'
 # Changelog
 
@@ -63,6 +66,9 @@ make_repo() {
 ### Added
 
 - prior release entry (mg-0000).
+
+[Unreleased]: https://github.com/drellem2/pogo/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/drellem2/pogo/releases/tag/v0.5.0
 EOF
     echo seed > "$d/seed.txt"
     git -C "$d" add -A
@@ -256,7 +262,8 @@ T="$(mktemp -d)"
 make_repo "$T"
 mkdir -p "$T/internal/version" "$T/scripts/lib"
 printf 'package version\n\nconst Version = "0.5.0"\n' > "$T/internal/version/version.go"
-cp "$COVERAGE" "$BUMP" "$SCRIPT_DIR/assemble-changelog.sh" "$T/scripts/"
+cp "$COVERAGE" "$BUMP" "$SCRIPT_DIR/assemble-changelog.sh" \
+   "$SCRIPT_DIR/roll-changelog.sh" "$SCRIPT_DIR/changelog-links.sh" "$T/scripts/"
 cp "$SCRIPT_DIR/lib/common.sh" "$T/scripts/lib/"
 # One described change so assembly has something to emit — otherwise the
 # separate LOUD-EMPTY guard fires and we would not be testing THIS gate.
