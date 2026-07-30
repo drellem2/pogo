@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // QAGateResult represents the outcome of a QA gate check.
@@ -153,6 +154,10 @@ func (r *Refinery) holdMergeRequest(mr *MergeRequest, qaItemID string) {
 	defer r.mu.Unlock()
 	mr.Status = StatusHeld
 	mr.Error = fmt.Sprintf("held: QA item %s not yet done", qaItemID)
+	// It is not in flight any more, so it must not keep the stamp that says
+	// it is: a queued row reporting "in flight for 40m" would be the same
+	// class of untruth as the omission this stamp exists to fix (mg-0c51).
+	mr.StartTime = time.Time{}
 	// Put it back at the end of the queue so other MRs can proceed.
 	r.queue = append(r.queue, mr)
 	if r.processing == mr {

@@ -132,7 +132,16 @@ func runGate(ctx context.Context, wtDir, command string, timeout time.Duration, 
 	cmd.Stdout = out
 	cmd.Stderr = out
 
-	err := cmd.Run()
+	// Start/Wait rather than Run so the gate's pid can be published the moment
+	// it exists. The pid roots the process-subtree CPU measurement, which is
+	// the half of the liveness signal that output staleness cannot supply
+	// (mg-0c51) — without it a silent-but-computing gate is indistinguishable
+	// from a hung one.
+	var err error
+	if err = cmd.Start(); err == nil {
+		w.setPID(cmd.Process.Pid)
+		err = cmd.Wait()
+	}
 	output := out.buf.String()
 
 	if err != nil && deadlineCause != nil && errors.Is(deadlineCause.Err(), context.DeadlineExceeded) {

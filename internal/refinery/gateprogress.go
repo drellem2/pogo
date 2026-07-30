@@ -3,6 +3,7 @@ package refinery
 import (
 	"fmt"
 	"log"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -45,6 +46,13 @@ const heartbeatStaleAfter = 3
 //   - HeartbeatInterval is carried in the record so a reader can judge
 //     staleness without consulting this source file. A timestamp with no
 //     stated cadence is not enough to call anything stale.
+//   - CPUCores measures whether the gate's process subtree is actually
+//     computing (see subtreecpu.go). It is the field that rescues a healthy
+//     gate whose OutputLines have been frozen for minutes — a real one was
+//     observed silent for 8m31s while a descendant burned 3.9 cores. Output
+//     staleness ALONE cannot tell that gate from a hung one, so treating
+//     LastOutput as the liveness answer is a mistake this record must not
+//     let a reader make (mg-0c51).
 //
 // Nothing here is derived from the workspace's *state* (file mtimes, lock
 // files, worktree contents). Any such signal reproduces the original defect
@@ -79,6 +87,127 @@ type StepProgress struct {
 	// zero when no timeout is configured. Present so an operator deciding
 	// whether to wait knows how long waiting can possibly last.
 	TimeoutAt time.Time `json:"timeout_at,omitempty"`
+
+	// GatePID is the pid of the shell the gate runs under, zero before it
+	// starts. The subtree measured below is rooted here.
+	GatePID int `json:"gate_pid,omitempty"`
+	// CPUSampledAt is when the subtree measurement below was taken. ZERO means
+	// there is no measurement — which is a different statement from an idle
+	// subtree and must be reported as such. CPUUnavailable says why.
+	CPUSampledAt time.Time `json:"cpu_sampled_at,omitempty"`
+	// CPUCores is CPU-seconds consumed by the gate's process subtree per wall
+	// second over CPUWindow: 3.9 means the subtree was burning about four
+	// cores. It is a RATE measured between two samples, not `ps -o %cpu`,
+	// which on Linux is a lifetime average and would keep reporting a subtree
+	// as busy long after it wedged.
+	CPUCores float64 `json:"cpu_cores,omitempty"`
+	// CPUProcs is how many processes were in the subtree when it was sampled;
+	// CPUChurn is how many appeared or vanished since the previous sample.
+	// Churn is carried because a gate forking short-lived workers can do heavy
+	// work with CPUCores near zero.
+	CPUProcs int `json:"cpu_procs,omitempty"`
+	CPUChurn int `json:"cpu_churn,omitempty"`
+	// CPUWindow is the wall time the rate spans, as a duration string.
+	CPUWindow string `json:"cpu_window,omitempty"`
+	// CPUUnavailable states why no measurement exists, so "could not measure"
+	// is never rendered as "measured, and idle".
+	CPUUnavailable string `json:"cpu_unavailable,omitempty"`
+}
+
+// SubtreeState is what the CPU measurement says about the gate's processes.
+type SubtreeState int
+
+const (
+	// SubtreeUnknown means no usable measurement — the sampler failed, or not
+	// enough samples have been taken yet to form a rate. It is NOT "idle".
+	SubtreeUnknown SubtreeState = iota
+	// SubtreeBusy means the subtree performed measurable work. This is a
+	// positive proof of computation and is what lets a SILENT gate be called
+	// healthy.
+	SubtreeBusy
+	// SubtreeIdle means the subtree performed no measurable work. It is
+	// grounds for a closer look, never for automatic intervention: a process
+	// blocked on I/O or a lock is idle and healthy.
+	SubtreeIdle
+	// SubtreeGone means the gate's process no longer exists.
+	SubtreeGone
+)
+
+// Subtree classifies the recorded CPU measurement.
+func (p *StepProgress) Subtree() SubtreeState {
+	if p == nil || p.CPUSampledAt.IsZero() {
+		return SubtreeUnknown
+	}
+	if p.CPUProcs == 0 {
+		return SubtreeGone
+	}
+	if p.CPUCores >= subtreeIdleCores || p.CPUChurn > 0 {
+		return SubtreeBusy
+	}
+	return SubtreeIdle
+}
+
+// CPUSummary renders the subtree measurement as one short phrase, including
+// the case where there is none.
+func (p *StepProgress) CPUSummary() string {
+	if p == nil {
+		return "no record"
+	}
+	switch p.Subtree() {
+	case SubtreeUnknown:
+		reason := p.CPUUnavailable
+		if reason == "" {
+			reason = "not sampled yet"
+		}
+		return "UNKNOWN (" + reason + ")"
+	case SubtreeGone:
+		return "process gone"
+	case SubtreeBusy:
+		s := fmt.Sprintf("%.1f cores busy, %s over %s", p.CPUCores, plural(p.CPUProcs, "proc"), p.CPUWindow)
+		if p.CPUChurn > 0 {
+			s += fmt.Sprintf(", %s churned", plural(p.CPUChurn, "proc"))
+		}
+		return s
+	default:
+		return fmt.Sprintf("idle (%.2f cores, %s, over %s)", p.CPUCores, plural(p.CPUProcs, "proc"), p.CPUWindow)
+	}
+}
+
+// OutputAge returns how long the gate has been silent and whether it has ever
+// spoken.
+func (p *StepProgress) OutputAge(now time.Time) (time.Duration, bool) {
+	if p == nil || p.LastOutput.IsZero() {
+		return 0, false
+	}
+	return now.Sub(p.LastOutput), true
+}
+
+// minOutputFreshWindow floors the freshness window below. Silence shorter than
+// this carries no information about anything — every gate is silent between two
+// consecutive lines — so treating it as evidence would be noise. It matters
+// because the window is otherwise derived from the heartbeat cadence, which
+// tests compress to milliseconds.
+const minOutputFreshWindow = 5 * time.Second
+
+// OutputFresh reports whether the gate produced bytes recently enough that its
+// own output proves it is working, without consulting the process table.
+//
+// The window is the one used for heartbeat staleness, floored at
+// minOutputFreshWindow. There is deliberately no ALERT attached to falling
+// outside it: a real gate was observed silent for 8m31s of a 10m run while
+// burning four cores, so "silent for longer than N" fires on healthy work and
+// an alert that fires on healthy work trains its reader to ignore it. Falling
+// outside this window only means the answer has to come from somewhere else.
+func (p *StepProgress) OutputFresh(now time.Time) bool {
+	age, spoke := p.OutputAge(now)
+	if !spoke {
+		return false
+	}
+	window := p.staleWindow()
+	if window < minOutputFreshWindow {
+		window = minOutputFreshWindow
+	}
+	return age <= window
 }
 
 // Elapsed returns how long the gate has been running, or how long it ran if
@@ -148,16 +277,51 @@ func (p *StepProgress) Diagnosis(now time.Time) string {
 			roundDur(p.HeartbeatAge(now)), heartbeatStaleAfter, p.HeartbeatInterval)
 	}
 	// The runner is alive. Whether the gate under it is making progress is a
-	// separate question, answered by the gate's own output.
-	if p.OutputLines == 0 && p.LastOutput.IsZero() {
-		return fmt.Sprintf("ALIVE, gate silent: runner heartbeat is %s old, but the gate has produced "+
-			"no output in %s. The runner is not dead; whether the gate is working or stuck cannot be "+
-			"told from here — a silent gate looks the same either way. %s",
-			roundDur(p.HeartbeatAge(now)), elapsed, p.timeoutNote(now))
+	// separate question, and it takes TWO signals to answer: the gate's own
+	// output, and — when that has gone quiet — whether its processes are
+	// computing. Either one alone is confidently wrong in a case that happens
+	// routinely (see subtreecpu.go).
+	if p.OutputFresh(now) {
+		return fmt.Sprintf("ALIVE and working: runner heartbeat is %s old, gate has produced %s, "+
+			"last %s ago, running %s. Slow, not hung — waiting is correct.",
+			roundDur(p.HeartbeatAge(now)), plural(p.OutputLines, "line"), roundDur(now.Sub(p.LastOutput)), elapsed)
 	}
-	return fmt.Sprintf("ALIVE and working: runner heartbeat is %s old, gate has produced %s, "+
-		"last %s ago, running %s. Slow, not hung — waiting is correct.",
-		roundDur(p.HeartbeatAge(now)), plural(p.OutputLines, "line"), roundDur(now.Sub(p.LastOutput)), elapsed)
+
+	// Silent. Describe the silence precisely, then let the process table
+	// decide what it means.
+	var silence string
+	if age, spoke := p.OutputAge(now); spoke {
+		silence = fmt.Sprintf("the gate has produced %s but has been silent for %s of its %s",
+			plural(p.OutputLines, "line"), roundDur(age), elapsed)
+	} else {
+		silence = fmt.Sprintf("the gate has produced no output at all in %s", elapsed)
+	}
+	beat := fmt.Sprintf("runner heartbeat is %s old", roundDur(p.HeartbeatAge(now)))
+
+	switch p.Subtree() {
+	case SubtreeBusy:
+		return fmt.Sprintf("ALIVE and computing: %s, and %s — but its process subtree is %s. "+
+			"Silence here is a gate that logs at boundaries, not a stall. Waiting is correct.",
+			beat, silence, p.CPUSummary())
+	case SubtreeIdle:
+		return fmt.Sprintf("SUSPECT: %s, %s, AND its process subtree is %s. "+
+			"Silent and idle together is the shape of a stall — but it is not proof: a process "+
+			"blocked on I/O, on a lock, or sleeping between phases is idle and healthy. "+
+			"Look closer (ps the subtree, check the gate's log) before intervening; killing a "+
+			"healthy gate is destructive, waiting on a hung one only costs time. %s",
+			beat, silence, p.CPUSummary(), p.timeoutNote(now))
+	case SubtreeGone:
+		return fmt.Sprintf("SUSPECT: %s, %s, and the gate process (pid %d) is GONE from the process "+
+			"table. The runner is still beating, so this should resolve on its own within a beat "+
+			"or two; if it does not, the runner is waiting on something that will not return. %s",
+			beat, silence, p.GatePID, p.timeoutNote(now))
+	default:
+		return fmt.Sprintf("ALIVE but UNDETERMINED: %s, %s, and its process subtree could not be "+
+			"measured (%s) — so whether the gate is working or stuck cannot be told from here. "+
+			"Output staleness ALONE does not settle it: a healthy gate was observed silent for "+
+			"8m31s while burning four cores, so a long silence is not evidence of a stall. %s",
+			beat, silence, p.CPUSummary(), p.timeoutNote(now))
+	}
 }
 
 // timeoutNote states how long the unresolvable case can last, so the answer
@@ -215,9 +379,40 @@ type gateWatch struct {
 	lines      atomic.Int64
 	lastOutput atomic.Int64 // UnixNano; 0 means the gate has emitted nothing
 
+	// pid is the gate shell's process id, published by runGate the moment it
+	// starts. Atomic because the beat goroutine reads it while the exec path
+	// writes it.
+	pid atomic.Int64
+
+	// prevSample and cpu belong to the SAMPLER goroutine and are read by
+	// snapshot, so they are mutex-guarded. prevSample is the previous
+	// process-table reading (a rate needs two); cpu is the latest derived
+	// measurement, folded into the persisted record by snapshot.
+	cpuMu      sync.Mutex
+	prevSample *subtreeSample
+	cpu        cpuReading
+
 	interval time.Duration
 	stop     chan struct{}
 	done     chan struct{}
+	// cpuDone closes when the sampler goroutine has stopped. The sampler runs
+	// SEPARATELY from the beat because reading the process table shells out to
+	// `ps`, and a `ps` that is slow — which is most likely exactly when a host
+	// is loaded enough for someone to be inspecting the refinery — must never
+	// delay the heartbeat. The heartbeat is the proof that the runner is
+	// alive; a late one is read as a dead runner, so it must not depend on
+	// anything outside this process.
+	cpuDone chan struct{}
+}
+
+// cpuReading is the beat goroutine's latest verdict on the gate's subtree.
+// Unavailable is set when there is no measurement, and is deliberately a
+// REASON rather than a bool: "could not measure" and "measured, idle" lead to
+// opposite actions and must never collapse into one another.
+type cpuReading struct {
+	At          time.Time
+	Activity    subtreeActivity
+	Unavailable string
 }
 
 // gateHeartbeat returns the heartbeat interval in force, honouring a test
@@ -243,6 +438,7 @@ func startGateWatch(r *Refinery, mr *MergeRequest, step, gate string, index, cou
 		interval: interval,
 		stop:     make(chan struct{}),
 		done:     make(chan struct{}),
+		cpuDone:  make(chan struct{}),
 	}
 	now := time.Now()
 	if r != nil && mr != nil {
@@ -262,7 +458,72 @@ func startGateWatch(r *Refinery, mr *MergeRequest, step, gate string, index, cou
 		r.mu.Unlock()
 	}
 	go w.run()
+	go w.runCPU()
 	return w
+}
+
+// setPID publishes the gate shell's process id. Until it is set there is no
+// subtree to measure, and the record says so rather than reporting idle.
+func (w *gateWatch) setPID(pid int) {
+	if w == nil {
+		return
+	}
+	w.pid.Store(int64(pid))
+}
+
+// runCPU samples the gate's process subtree until stopped. It is its own
+// goroutine so that a slow `ps` costs a CPU number and never a heartbeat.
+func (w *gateWatch) runCPU() {
+	defer close(w.cpuDone)
+	t := time.NewTicker(w.interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-w.stop:
+			return
+		case now := <-t.C:
+			w.sampleCPU(now)
+		}
+	}
+}
+
+// sampleCPU takes one process-table reading and folds it against the previous
+// one, publishing the result for snapshot to pick up.
+func (w *gateWatch) sampleCPU(now time.Time) {
+	pid := int(w.pid.Load())
+	if pid <= 0 {
+		w.publishCPU(nil, cpuReading{Unavailable: "gate process not started yet"})
+		return
+	}
+	w.cpuMu.Lock()
+	prev := w.prevSample
+	w.cpuMu.Unlock()
+
+	// The `ps` exec happens OUTSIDE the lock: it is the slow part, and holding
+	// a lock across it would put the delay back on whatever reads the record.
+	cur, err := sampleSubtree(pid, now)
+	if err != nil {
+		w.publishCPU(nil, cpuReading{Unavailable: "reading the process table failed: " + err.Error()})
+		return
+	}
+	activity, ok := compareSubtree(prev, cur)
+	if !ok {
+		// One sample cannot make a rate. Saying "first sample of two" is the
+		// honest report; saying "idle" would be a fabrication.
+		w.publishCPU(cur, cpuReading{Unavailable: fmt.Sprintf("first sample of two (a rate needs two, %s apart)", w.interval)})
+		return
+	}
+	w.publishCPU(cur, cpuReading{At: now, Activity: activity})
+}
+
+// publishCPU stores the sampler's latest reading and the sample it was derived
+// from. A nil sample clears the baseline, so the next reading reports "first
+// sample of two" rather than diffing across a gap of unknown width.
+func (w *gateWatch) publishCPU(sample *subtreeSample, reading cpuReading) {
+	w.cpuMu.Lock()
+	defer w.cpuMu.Unlock()
+	w.prevSample = sample
+	w.cpu = reading
 }
 
 // sawOutput records that the gate produced bytes. Called on every write from
@@ -314,7 +575,7 @@ func (w *gateWatch) snapshot(now time.Time, final bool) *StepProgress {
 	}
 
 	if w.r == nil || w.mr == nil {
-		return &StepProgress{
+		p := &StepProgress{
 			Step:              "quality-gates",
 			StartTime:         now,
 			Heartbeat:         now,
@@ -322,6 +583,8 @@ func (w *gateWatch) snapshot(now time.Time, final bool) *StepProgress {
 			OutputLines:       lines,
 			LastOutput:        last,
 		}
+		w.applyCPU(p)
+		return p
 	}
 
 	w.r.mu.Lock()
@@ -332,6 +595,7 @@ func (w *gateWatch) snapshot(now time.Time, final bool) *StepProgress {
 	}
 	p.OutputLines = lines
 	p.LastOutput = last
+	w.applyCPU(p)
 	if final {
 		p.EndTime = now
 	} else {
@@ -341,6 +605,29 @@ func (w *gateWatch) snapshot(now time.Time, final bool) *StepProgress {
 	w.r.saveStateLocked()
 	cp := *p
 	return &cp
+}
+
+// applyCPU copies the beat goroutine's latest subtree measurement onto the
+// record. Called with the refinery lock held (or on a detached record).
+func (w *gateWatch) applyCPU(p *StepProgress) {
+	p.GatePID = int(w.pid.Load())
+	w.cpuMu.Lock()
+	c := w.cpu
+	w.cpuMu.Unlock()
+	if c.At.IsZero() {
+		// No measurement. Clear the numbers along with the timestamp so a
+		// stale rate can never be read as current, and carry the reason.
+		p.CPUSampledAt = time.Time{}
+		p.CPUCores, p.CPUProcs, p.CPUChurn, p.CPUWindow = 0, 0, 0, ""
+		p.CPUUnavailable = c.Unavailable
+		return
+	}
+	p.CPUSampledAt = c.At
+	p.CPUCores = c.Activity.Cores
+	p.CPUProcs = c.Activity.Procs
+	p.CPUChurn = c.Activity.Churn
+	p.CPUWindow = roundDur(c.Activity.Window).String()
+	p.CPUUnavailable = ""
 }
 
 // line renders the heartbeat log line. It reports the runner's liveness and
@@ -359,8 +646,8 @@ func (w *gateWatch) line(p *StepProgress, now time.Time) string {
 	if !p.LastOutput.IsZero() {
 		outputAge = roundDur(now.Sub(p.LastOutput)).String() + " ago"
 	}
-	return fmt.Sprintf("MR %s step=%s gate=%s alive elapsed=%s heartbeat=%d/%s gate_output_lines=%d last_output=%s",
-		id, p.Step, gate, roundDur(p.Elapsed(now)), p.Beats, p.HeartbeatInterval, p.OutputLines, outputAge)
+	return fmt.Sprintf("MR %s step=%s gate=%s alive elapsed=%s heartbeat=%d/%s gate_output_lines=%d last_output=%s gate_cpu=%s",
+		id, p.Step, gate, roundDur(p.Elapsed(now)), p.Beats, p.HeartbeatInterval, p.OutputLines, outputAge, p.CPUSummary())
 }
 
 // finish stops the beat goroutine and seals the record with a final count.
@@ -370,6 +657,14 @@ func (w *gateWatch) finish() {
 	}
 	close(w.stop)
 	<-w.done
+	// The sampler is joined too — but with a bound, because it may be inside a
+	// `ps` that is not returning. Trading a hung gate for a hung runner would
+	// take the heartbeat down with it, and the heartbeat is the thing this
+	// whole record exists to provide.
+	select {
+	case <-w.cpuDone:
+	case <-time.After(psTimeout + time.Second):
+	}
 	w.snapshot(time.Now(), true)
 }
 
