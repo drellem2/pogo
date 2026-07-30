@@ -5202,21 +5202,30 @@ func TestPromptsDoNotAnchorAKillToAHardcodedBinaryPath(t *testing.T) {
 // the one broken claim was the row its list omitted), and ask for near-misses
 // rather than compliance.
 //
-// 5. HOLD THE RIVAL HYPOTHESIS LITERALLY CONSTANT (mg-622f). The first four make
-// a CLAIM falsifiable before you look; this one makes an ATTRIBUTION falsifiable,
-// and the failure it prevents — a true observation credited to the wrong cause —
-// is one no amount of care in measuring the observation will catch. mg-db09 was
-// asked which of two properties, semisimplicity or multiplicity-freeness, carried
-// the claim that a path algebra "is canonically an endomorphism algebra". Rather
-// than compare two algebras differing in dimension, symmetry and presentation —
-// where any difference could carry the effect — it ran TL_n(β) at β = 3, 2, 1, 0:
-// the branching graph MEASURED to be the same multiplicity-free graph at every β,
-// 132 path pairs at n=6 at every β, only the parameter moving, and the conclusion
-// then holding at two values (132 of 132) and not the other two (99 and 42 of
-// 132). That is what makes "branching alone does not carry the conclusion" a fact
-// rather than an inference. The invariant has to be REPORTED, not merely
-// arranged: otherwise the reader takes the control on trust, which is the thing
-// the design existed to avoid.
+// 5. MEASURE THE HELD-CONSTANT CAUSE IN EVERY CELL (mg-622f, corrected by
+// mg-1023). The first four make a CLAIM falsifiable before you look; this one
+// makes an ATTRIBUTION falsifiable, and the failure it prevents — a true
+// observation credited to the wrong cause — is one no amount of care in measuring
+// the observation will catch.
+//
+// The worked instance is CAUTIONARY, and it is the reason the rule reads
+// "MEASURE" rather than "hold constant". mg-622f shipped this bullet teaching
+// mg-db09's TL_n(β) column as a model of control design: β = 3, 2, 1, 0, the
+// branching graph asserted to be the same multiplicity-free graph at every β, 132
+// path pairs at n=6 at every β, and the conclusion then holding at two values and
+// not the other two. mg-2060 had already refuted it. Measuring the branching graph
+// under the definition mg-db09 itself quotes — vertices the irreducibles, edges
+// the restriction multiplicities — the vertex set DIFFERS across the column
+// (1,1,2,2,3,3 irreducibles at n=1..6 for β=0 against 1,2,2,3,3,4 for β=3) and
+// multiplicities reach 2 ([L(4,1):L(3,0)] = 2 and [L(6,2):L(5,1)] = 2 at β=1,
+// three more at β=0). Multiplicity-freeness varied down the column in exact step
+// with semisimplicity — precisely what the design needed it not to do.
+//
+// The 132 path pairs DID match at every β, which is what made the column look
+// controlled. That is the sharp half of the rule: a single matching statistic is
+// not the invariant, and matching one number is not holding the object fixed. An
+// asserted invariant is not a control either — hence the measurement has to be
+// taken in every cell and REPORTED, not arranged and described.
 //
 // Why the templates rather than a brief: the same argument as mg-2530. A rule in
 // one author's brief is bypassed by whoever is moving fastest — and a "do not X"
@@ -5294,21 +5303,23 @@ func TestQAAndReviewTemplatesCarryTheEvidenceDiscipline(t *testing.T) {
 			// 5. The other four make a CLAIM falsifiable; this one makes an
 			// ATTRIBUTION falsifiable. The failure it prevents is a true
 			// observation credited to the wrong cause, which no amount of
-			// care in measuring the observation catches. LITERALLY is
-			// upper-cased for the same reason BY MEASUREMENT is: "comparable"
-			// and "similar" are what the weak design already believes it did.
-			"one of two causes only from a family holding the other LITERALLY constant",
-			// Half the rule. A control nobody can see was applied is a
-			// control the reader takes on trust.
-			"report the invariant",
-			// The worked instance (mg-db09): one parameter moves, the rival
-			// hypothesis is pinned by measurement at every value of it, and
-			// the answer still changes — so "branching alone does not carry
-			// the conclusion" is a fact rather than an inference. Matched on
+			// care in measuring the observation catches. MEASURE and IN EVERY
+			// CELL are upper-cased for the same reason BY MEASUREMENT is:
+			// "held constant" is what the weak design already believes it did,
+			// and mg-622f's own worked instance believed exactly that.
+			"MEASURE the held-constant one under the definition in play",
+			"IN EVERY CELL, and report the measurement",
+			// Half the rule. A control nobody measured is a control the
+			// reader takes on trust — which is how the refuted instance
+			// below got published as a model of control design.
+			"An asserted invariant is not a control",
+			// The sharp half, and the one that would have caught mg-622f:
+			// the 132 path pairs DID match at every β while the branching
+			// graph differed, so the column looked controlled. Matched on
 			// fragments that survive polecat-qa.md's line wrapping.
-			"mg-db09 ran TL_n(β) at β=3,2,1,0",
-			"132 path pairs at n=6 at every β",
-			"the conclusion held at two values, not the other two",
+			"is not a control — and a single",
+			"matching statistic is not the invariant",
+			"TL_n(β) matched 132 path pairs, not its graph",
 		} {
 			if !strings.Contains(body, want) {
 				t.Errorf("%s: missing evidence discipline %q (mg-0d85)", path, want)
@@ -5324,6 +5335,27 @@ func TestQAAndReviewTemplatesCarryTheEvidenceDiscipline(t *testing.T) {
 		}
 		if got := strings.Count(body, "Predict the outcome before the run"); got != 1 {
 			t.Errorf("%s: %d copies of the predict-before-run rule, want exactly 1 — it lives in the evidence-discipline section, not also inline in a step (mg-0d85)", path, got)
+		}
+
+		// The refuted first version must not come back, and must not sit
+		// beside its own correction. mg-622f shipped mg-db09's TL_n(β) column
+		// as the MODEL of a control; mg-2060 had already measured the
+		// branching graph and found the vertex set differed at every step
+		// where semisimplicity did. A template asserting both the claim and
+		// its correction is worse than either alone — a later reader builds
+		// on whichever they reach first — so this is a replacement, checked
+		// as one (mg-1023).
+		for _, gone := range []string{
+			"holding the other LITERALLY constant",
+			"and report the invariant",
+			"mg-db09 ran TL_n(β) at β=3,2,1,0",
+			"same multiplicity-free branching",
+			"132 path pairs at n=6 at every β",
+			"the conclusion held at two values, not the other two",
+		} {
+			if strings.Contains(body, gone) {
+				t.Errorf("%s: still carries the refuted attribution rule %q — mg-2060 measured the branching graph mg-db09 asserted constant and the vertex set differed (1,1,2,2,3,3 irreducibles at β=0 against 1,2,2,3,3,4 at β=3, multiplicities reaching 2); only the 132 path pairs matched. It is the cautionary case, never the model (mg-1023)", path, gone)
+			}
 		}
 	}
 
@@ -5393,7 +5425,9 @@ func TestQAAndReviewTemplatesCarryTheEvidenceDiscipline(t *testing.T) {
 			"constraints and check each BY MEASUREMENT",
 			// Same pin for mg-622f's addition, stated in its own brief:
 			// widening the attribution rule into polecat.md needs its own
-			// argument, not a ride on this one.
+			// argument, not a ride on this one. Pinned on the corrected
+			// wording, since the original was withdrawn (mg-1023).
+			"MEASURE the held-constant one",
 			"holding the other LITERALLY constant",
 		} {
 			if strings.Contains(string(data), forbid) {

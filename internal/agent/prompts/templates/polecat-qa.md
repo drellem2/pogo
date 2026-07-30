@@ -164,9 +164,9 @@ Follow these steps exactly, in order. Skipping any step is a failure.
      a report naming what went wrong carries information; one saying everything went to plan carries none.
      The model is mg-5800 on mg-41aa — a repair that closed its own
      weakest link by measurement instead of defending it in prose.
-   - **Credit an effect to one of two causes only from a family holding the other LITERALLY constant,
-     and report the invariant.** mg-db09 ran TL_n(β) at β=3,2,1,0 — same multiplicity-free branching,
-     132 path pairs at n=6 at every β — and the conclusion held at two values, not the other two.
+   - **To credit an effect to one of two causes, MEASURE the held-constant one under the definition in play,
+     IN EVERY CELL, and report the measurement.** An asserted invariant is not a control — and a single
+     matching statistic is not the invariant: TL_n(β) matched 132 path pairs, not its graph (mg-2060).
 
 8. **Report your result.**
 
