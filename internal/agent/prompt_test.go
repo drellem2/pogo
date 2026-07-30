@@ -4199,6 +4199,59 @@ func TestMayorRoutesOnTypeMarkerNotInference(t *testing.T) {
 	}
 }
 
+// TestMayorReviewTicketHasNoBuildDependency pins a deadlock out of the gh-issue
+// workflow (mg-4999): the review ticket must NOT be filed with
+// --depends=<build ticket id>.
+//
+// The dependency cannot clear on this track. macguffin files an item whose
+// dependencies are unmet into pending/, and Claim refuses any item whose status
+// is not "available" — so a dependent review ticket is unclaimable until the
+// build ticket is done. But the build ticket is not done until after review
+// passes: transition 5 has the coordinator submit the builder's branch to the
+// refinery itself, and the refinery archives the item on merge. So review waits
+// on build, build waits on review, and the review worker can never claim its
+// ticket.
+//
+// Nothing was relying on the flag for ordering. Step 3 holds the review ticket
+// by hand and transition 4 dispatches it only once the PR exists — the ordering
+// is explicit in the prose, not derived from the dependency graph.
+//
+// The --depends on the *build* ticket is a different case and must stay: triage
+// genuinely completes and is marked done before build begins, so that one
+// clears normally. This test pins the asymmetry, which is the part that looks
+// like an inconsistency to a later reader and invites a "fix" that restores the
+// deadlock.
+func TestMayorReviewTicketHasNoBuildDependency(t *testing.T) {
+	data, err := defaultPrompts.ReadFile("prompts/mayor.md")
+	if err != nil {
+		t.Fatalf("read mayor.md: %v", err)
+	}
+	body := string(data)
+
+	if strings.Contains(body, "--depends=<build ticket id>") {
+		t.Error("mayor.md: gh-issue review ticket is filed with --depends=<build ticket id>; the build ticket stays claimed through review, so the dependency never clears and the review worker can never claim the ticket (mg-4999)")
+	}
+
+	// The build ticket's dependency on triage is correct and must not be
+	// collaterally removed by a future sweep reading this test as "the
+	// gh-issue track uses no dependencies".
+	if !strings.Contains(body, "--depends=<triage ticket id>") {
+		t.Error("mayor.md: gh-issue build ticket must keep --depends=<triage ticket id>; triage completes before build starts, so that dependency does clear")
+	}
+
+	// The reasoning travels with the prompt. Without it the flag reads as an
+	// oversight and gets restored — which is how it survived only as an
+	// out-of-tree edit to ~/.pogo/agents/mayor.md until mg-4999.
+	for _, want := range []string{
+		"No --depends on the build ticket",
+		"the review ticket would sit in pending/",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("mayor.md: missing the rationale for omitting --depends on the review ticket, %q", want)
+		}
+	}
+}
+
 // TestMayorDispatchesQAItemsToQATemplate guards a live bug this rule fixed
 // (mg-7150): mayor.md's step-4 QA prose used to say a `--type=qa` item "will be
 // dispatched to a new polecat like any other work item" — i.e. the DEFAULT
