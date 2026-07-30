@@ -1923,6 +1923,24 @@ Flags:
 		log.Printf("pogod: deaf-watch NOT armed — the agent registry did not load, so there is nothing to judge")
 	}
 
+	// The done-item polecat reaper (mg-56d1): completion frees a slot, however
+	// completion happened. The merge hook above covers polecats whose deliverable
+	// is a branch; this covers the triage / audit / investigation polecats that
+	// produce no merge, call `mg done` themselves, and until now held a slot
+	// until a coordinator noticed. See cmd/pogod/donereap.go for why the
+	// condition is item-done AND idle, and why it polls rather than hooks.
+	//
+	// The only ACTING detector on this tick. Its action is bounded to stopping a
+	// polecat whose work is provably concluded.
+	var doneReap *doneReaper
+	if cfg.DoneReap.Enabled && agentRegistry != nil {
+		doneReap = newDoneReaper(agentRegistry, client.MGWorkItemDone, cfg.DoneReap.IdleGrace)
+		log.Printf("pogod: done-item polecat reaper enabled (idle_grace=%s) — a polecat whose item reaches done is stopped once it goes quiet, merge or no merge (mg-56d1)",
+			cfg.DoneReap.IdleGrace)
+	} else if cfg.DoneReap.Enabled {
+		log.Printf("pogod: done-item polecat reaper NOT armed — the agent registry did not load, so there is nothing to reap")
+	}
+
 	// Drive both heartbeat-piggybacked subsystems from a single OnTick. The
 	// scheduler runs inline (it stores absolute fire times, so a clock jump is
 	// absorbed in the same goroutine). The stall watcher runs in a goroutine so
@@ -2021,6 +2039,16 @@ Flags:
 		// the alert shells out to `mg mail send`, which must never delay a tick.
 		if agentRegistry != nil {
 			go agentRegistry.ReportOrphanedPolecats()
+		}
+		// Stop polecats whose work item has concluded and which have gone quiet
+		// (mg-56d1). In a goroutine because it shells out to `mg show` once per
+		// live polecat and then to Stop, which blocks on SIGTERM — neither must
+		// delay the next tick. It self-serialises, so overlapping ticks cannot
+		// issue a duplicate Stop. Deliberately NOT throttled to a coarser
+		// interval than the tick: the whole cost of this defect is measured in
+		// slot-seconds, and the grace window already bounds how eagerly it acts.
+		if doneReap != nil {
+			go doneReap.Check(now)
 		}
 	}
 

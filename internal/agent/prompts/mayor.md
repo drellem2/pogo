@@ -300,6 +300,14 @@ Look for:
      ```
   As a fallback, also check `mg list --status=done` for items whose {{.Worker}}s have already exited — these may have been missed if mail delivery lagged. Same cleanup ordering applies (stop, schedule rm, archive).
 
+- **Completed {{.Worker}}s that never merged anything — pogod stops these too now (mg-56d1).** Triage, audit-only and investigation {{.Worker}}s produce no merge: they finish by calling `mg done` themselves and there is no `MERGED:` mail for them at all. That used to leave them holding a concurrency slot until you noticed — measured at 7m16s for `d764` on 2026-07-30, with two high-priority items queued and undispatchable.
+
+  pogod now stops **any** {{.Worker}} whose work item has reached `done`/`archived` once it has been quiet on its PTY for two minutes, merge or no merge, and the OnExit path reaps its worktree and mail-check schedule as usual. The condition is the ITEM's state, not the merge — so this covers both classes and you are the backstop for neither more nor less than before.
+
+  Two consequences for your sweep:
+  - A {{.Worker}} legitimately works *after* `mg done` (mailing a verdict packet, filing a successor). The two-minute quiet window is what protects that, and an incoming mail from you resets it — so a {{.Worker}} you are mid-conversation with will not be reaped out from under the exchange.
+  - The case this closes is the **inverse** of the fallback above: there, the {{.Worker}} had exited and the mail lagged. Here the item is `done` and the agent is still alive. If you find one that pogod has not stopped after a few minutes of idle, that is worth reporting — the reaper is either disabled (`[done_reap] enabled = false`) or not running.
+
 - **Unstarted {{.Worker}}s — pogod recovers these. Do not nudge inside its window.** A {{.Worker}} that was spawned but never began is the daemon's job, not yours (mg-feb3). pogod re-delivers a bare submit terminator to flush the paste-buffered kickoff: **3 attempts, 25s apart, so a ~75s budget**, emitting one `auto_renudge` event each. That is this step's old manual `pogo nudge <name> "1"` at ~30-60s, productized — and it fires earlier than you can.
 
   **Claim status is no longer the started-signal, and this is the most important change to how you diagnose a slow start.** pogod claims the item at spawn (mg-7254), so `mg list --status=claimed` shows the {{.Worker}}'s item claimed from the instant it was dispatched, whether or not the {{.Worker}} ever ran a turn. Checking it tells you **nothing** about whether the {{.Worker}} started. It is a signal that now always reads healthy — the worst kind to keep consulting out of habit.
