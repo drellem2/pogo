@@ -309,16 +309,37 @@ Look for:
   ```
   If a merge request has been queued for an unusually long time, check the refinery logs for errors. An empty queue is normal — it means the refinery is caught up.
 
-- **Refinery failures on done items**: A work item may be in `done/` status but the refinery rejected its branch. This happens when a {{.Worker}} exits after a merge failure without calling `mg done` — but can also occur due to races or bugs. On each cycle, check refinery history for failures:
+- **Refinery failures on done items**: A work item may be in `done/` status but the refinery rejected its branch. This happens when a {{.Worker}} exits after a merge failure without calling `mg done` — but can also occur due to races or bugs. On each cycle, cross-reference refinery history against `mg list --status=done`.
+
+  **A failed MR is not evidence the work is missing.** The refinery records every attempt, so a transient gate failure leaves a permanent `status=failed` row even when the branch merges seconds later — and retry-then-merge is the ordinary case, not the exception. Measured on 2026-07-30 (mg-2ca3): all ten failed MRs in history had also merged, so a rule keyed on the *presence* of a failed row would have flagged ten items and been wrong about all ten.
+
+  So the condition is a **relationship, not a row**:
+
+  > A done item is a candidate only if a `failed` MR exists for its branch **and** no `merged` MR exists for that same branch afterwards.
+
+  Compare per branch rather than eyeballing the list. Do not encode a count threshold — `merged >= 1` is the property, and a branch may legitimately take several attempts:
   ```bash
-  pogo refinery history
+  pogo refinery history --json | jq -r '
+    group_by(.branch)[]
+    | {branch: .[0].branch, author: .[0].author,
+       failed: ([.[] | select(.status == "failed")] | length),
+       merged: ([.[] | select(.status == "merged")] | length)}
+    | select(.failed > 0 and .merged == 0)
+    | "\(.author)\t\(.branch)\tfailed=\(.failed)\tmerged=\(.merged)"'
   ```
-  Cross-reference with `mg list --status=done`. If a done item's branch shows as failed in refinery history:
+  Empty output is the expected, healthy answer: every failure was retried and landed. To check a single branch by hand, use a **positive-showing** instrument — `pogo refinery history | grep <branch>` shows every row that branch has. Never judge a branch by `pogo refinery history | tail`: a bounded window can put the merge one line below the cut, which reads as "not in history" and is this same defect with the sign flipped.
+
+  **A hit is something to REPORT, not to act on.** `mg reopen` returns completed work to `available`, where step 2's dispatch loop hands it to a fresh {{.Worker}} that redoes work already on the target branch — so a wrong detection here does not produce a wrong report, it produces duplicated work against `main`. This is a heuristic running unattended, and a remedy's destructiveness should be proportional to the detector's confidence: **surface the candidate, let a human or a deliberate follow-up decide.** Put it in your cycle summary with its evidence — the failed MR id, the absence of any later `merged` row for that branch, and the item's current status — and confirm the work is genuinely missing before touching the item:
+  ```bash
+  pogo refinery show <mr-id>                       # why it failed
+  git -C <repo> log --oneline main | grep '<id>'   # did the work land anyway? (commits carry the work-item id)
+  ```
+  Reopening is for a case someone has confirmed, never for a bare detection. Once you have positively established that the work is **not** on the target branch:
   1. Reopen the item so it can be re-dispatched:
      ```bash
      mg reopen <id>
      ```
-  2. If the same item has failed multiple times, create a new work item with retry context instead of reopening blindly:
+  2. If that branch has already failed repeatedly with no merge, create a new work item with retry context instead of reopening again — an identical re-dispatch fails the same way:
      ```bash
      mg new --type=task --depends=<id> --title="retry: <original title>" --body-file - <<'EOF'
      Previous attempts failed. Errors: <summary>. Try a different approach.
