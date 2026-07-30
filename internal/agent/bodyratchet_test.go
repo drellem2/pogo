@@ -133,25 +133,126 @@ type bodyViolation struct {
 	Text string
 }
 
+// listMarkerRE matches a bullet or ordered-list marker together with the
+// whitespace that follows it. The display width of the WHOLE match is the item's
+// content indent — the column its prose starts at, and the column an indented
+// code block inside it would be measured from.
+var listMarkerRE = regexp.MustCompile(`^[ \t]*([-*+]|\d{1,9}[.)])[ \t]+`)
+
+// columnWidth is the rendered width of s with markdown's 4-column tab stops.
+func columnWidth(s string) int {
+	w := 0
+	for _, r := range s {
+		if r == '\t' {
+			w += 4 - w%4
+		} else {
+			w++
+		}
+	}
+	return w
+}
+
+// indentWidth is the rendered width of s's leading whitespace.
+func indentWidth(s string) int {
+	return columnWidth(s[:len(s)-len(strings.TrimLeft(s, " \t"))])
+}
+
 // scanBodyExamples reports body-flag violations on the EXAMPLE lines of a
-// markdown file. An example line is one inside a fenced code block, or indented
-// far enough to be an indented code block. Prose and comments are exempt on
-// purpose (see the file header): documenting the hazard must not be punished by
-// the check that exists to reduce it.
+// markdown file. An example line is one inside a fenced code block, or inside an
+// indented code block. Prose and comments are exempt on purpose (see the file
+// header): documenting the hazard must not be punished by the check that exists
+// to reduce it.
+//
+// AN INDENTED CODE BLOCK IS NOT "FOUR SPACES OF WHITESPACE" (mg-a9f7). It used
+// to be tested that way, and the exemption above was therefore a lie: a prose
+// sentence sitting at >= 4-space indent — which is where every sentence inside a
+// nested list sits — was scanned as an example. The identical warning against
+// `--body="` was a violation in templates/polecat-architect.md, whose blocks are
+// at 5-space indent inside a nested list, and clean in templates/polecat.md,
+// whose lists are at 3. Whether you were allowed to document the hazard depended
+// on the nesting depth you documented it in.
+//
+// So the two properties an actual markdown renderer uses are implemented here
+// instead, and neither one can be moved by nesting depth:
+//
+//   - Indentation is RELATIVE to the enclosing container. A line one column
+//     right of its list item's content column is a continuation of that item,
+//     not a code block, however deep the item is. A code block needs 4 columns
+//     past the content indent.
+//   - A code block CANNOT INTERRUPT A PARAGRAPH. It has to open after a blank
+//     line. An indented run-on line of prose is prose.
+//
+// Deliberately NOT the fix: a wider exemption list. Naming prose patterns to be
+// skipped reproduces the same defect with more steps — the next sentence phrased
+// differently is punished again — and it would leave the header describing a
+// property the code does not have.
 func scanBodyExamples(src string) []bodyViolation {
 	var out []bodyViolation
 	inFence := false
+	inIndentedCode := false
+	prevBlank := true // the top of the document opens a block, like a blank line
+	var containers []int
 	for i, line := range strings.Split(src, "\n") {
 		trimmed := strings.TrimSpace(line)
 
 		if strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~") {
 			inFence = !inFence
+			// A fence ends the block it closes, so the line after it may open an
+			// indented code block without an intervening blank.
+			prevBlank = true
 			continue // the fence marker itself is never an example line
 		}
 
-		indented := strings.HasPrefix(line, "    ") || strings.HasPrefix(line, "\t")
-		if !inFence && !indented {
-			continue // prose
+		if !inFence {
+			if trimmed == "" {
+				// A blank line does not close an indented code block (they may
+				// contain blank lines) but it is what lets the next one open.
+				prevBlank = true
+				continue
+			}
+
+			// A bare Go-template directive is not markdown. These sit at column 0
+			// even in the middle of a deeply nested list — `{{if .Branch}}` on its
+			// own line inside step 4 of templates/polecat-architect.md is the real
+			// instance — so letting one close the enclosing list item would put
+			// every following line back at base 0 and re-create the bug this
+			// function exists to fix, one paragraph further down the file.
+			if strings.HasPrefix(trimmed, "{{") && strings.HasSuffix(trimmed, "}}") {
+				continue
+			}
+
+			indent := indentWidth(line)
+
+			// Close any list item whose content column this line starts left of.
+			for len(containers) > 0 && indent < containers[len(containers)-1] {
+				containers = containers[:len(containers)-1]
+			}
+			base := 0
+			if len(containers) > 0 {
+				base = containers[len(containers)-1]
+			}
+
+			// An indented code block runs while lines stay 4+ columns past the
+			// enclosing content column, and can only START after a blank line.
+			if inIndentedCode {
+				inIndentedCode = indent >= base+4
+			}
+			if !inIndentedCode && prevBlank && indent >= base+4 {
+				inIndentedCode = true
+			}
+
+			// A list marker opens a new container for the lines that follow. Not
+			// inside a code block: there, `- x` is content, not structure.
+			if !inIndentedCode {
+				if m := listMarkerRE.FindString(line); m != "" {
+					containers = append(containers, columnWidth(m))
+				}
+			}
+			prevBlank = false
+
+			if !inIndentedCode {
+				continue // prose
+			}
 		}
 		if strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, ">") {
 			continue // comment
@@ -403,6 +504,203 @@ func TestBodyExampleScanner_CatchesExampleLines(t *testing.T) {
 			t.Errorf("line %d: want kind inline-body, got %q", v.Line, v.Kind)
 		}
 	}
+}
+
+// TestBodyExampleScanner_ProseInANestedListIsNotAnExample is the mg-a9f7
+// regression, and it is the pair of the test above: the same corpus of prose must
+// be exempt at every nesting depth, and the same examples must be caught at every
+// nesting depth. Assert BOTH — a scanner that stopped flagging prose by simply
+// giving up on indented blocks would pass a one-sided test while letting real
+// indented violations through, which is why the case above constructs its
+// indented example at exactly 4 spaces.
+//
+// The concrete bite: templates/polecat-architect.md documents this hazard inside a
+// numbered step, so its lines sit at 5-space indent; templates/polecat.md
+// documents it at 3. The old predicate flagged the first and passed the second on
+// identical text.
+func TestBodyExampleScanner_ProseInANestedListIsNotAnExample(t *testing.T) {
+	// Every sentence here is prose, and every one of them is indented 4+ columns.
+	const doc = "" +
+		"1. **Do the work.**\n" +
+		"\n" +
+		"   - **Mail the coordinator.** Never as an inline `--body=\"...\"`: the\n" +
+		"     shell expands it before `mg` sees it. This continuation line sits at\n" +
+		"     5 columns and is still prose.\n" +
+		"\n" +
+		"     A second paragraph of that same list item, also mentioning\n" +
+		"     --body=\"the hazard\", is prose too.\n" +
+		"\n" +
+		"       - Nested one level deeper, where --body=\"...\" is still only\n" +
+		"         being described.\n"
+
+	if got := scanBodyExamples(doc); len(got) != 0 {
+		t.Errorf("prose must be exempt at any nesting depth, got %d violation(s): %+v", len(got), got)
+	}
+
+	// The other direction, at the same depth: a genuine indented code block inside
+	// that list item — 4 columns past the item's content indent, after a blank
+	// line — is still an example, and is still caught.
+	const taught = "" +
+		"1. **Do the work.**\n" +
+		"\n" +
+		"   - **Mail the coordinator.** Like so:\n" +
+		"\n" +
+		"         mg mail send mayor --from=me --subject=s --body=\"taught here\"\n"
+
+	got := scanBodyExamples(taught)
+	if len(got) != 1 {
+		t.Fatalf("want 1 violation (indented example inside a list item), got %d: %+v", len(got), got)
+	}
+	if got[0].Kind != "inline-body" {
+		t.Errorf("line %d: want kind inline-body, got %q", got[0].Line, got[0].Kind)
+	}
+}
+
+// TestBodyExampleScanner_IndentedCodeCannotInterruptAProseParagraph pins the
+// second half of the rule. A run-on prose line that happens to be indented is not
+// an indented code block in any renderer — a code block has to open after a blank
+// line — and the fix must not depend on a raised indent threshold, which is what
+// a one-sided reading of the test above would suggest.
+func TestBodyExampleScanner_IndentedCodeCannotInterruptAProseParagraph(t *testing.T) {
+	const doc = "Never pass a body inline. A wrapped sentence like\n" +
+		"                    this one, mentioning --body=\"x\" while deeply\n" +
+		"indented, is a paragraph continuation and not a code block.\n"
+
+	if got := scanBodyExamples(doc); len(got) != 0 {
+		t.Errorf("an indented paragraph continuation is prose, got: %+v", got)
+	}
+
+	// Same text, same indent, but after a blank line: now it IS a code block, and
+	// the threshold has not moved off 4.
+	const opened = "Never pass a body inline.\n" +
+		"\n" +
+		"    mg mail send mayor --from=me --subject=s --body=\"x\"\n"
+
+	if got := scanBodyExamples(opened); len(got) != 1 {
+		t.Fatalf("a 4-column indented block after a blank line is an example, got %d: %+v", len(got), got)
+	}
+}
+
+// TestBodyRatchet_ProseIsExemptAtEveryListDepthInTheRealCorpus is the mg-a9f7
+// control run against the thing it guards, for the reason the file header gives:
+// a scanner only ever observed on a hand-built fixture has not been shown to
+// behave on the real tree. The synthetic tests above pin the rule; this one pins
+// that the rule survives contact with the shipped templates.
+//
+// It writes the same warning sentence into every list item of every template, at
+// that item's own content column, and requires the tree to stay green. Before the
+// fix this failed on templates/polecat-architect.md — whose steps put their prose
+// at 5 columns — and passed on templates/polecat.md, at 3. There is no anchor
+// string here on purpose: the property is about depth, so the test finds the
+// depths rather than being told them.
+func TestBodyRatchet_ProseIsExemptAtEveryListDepthInTheRealCorpus(t *testing.T) {
+	const prose = "The body goes in under a quoted heredoc, never as an inline " +
+		"`--body=\"...\"`: the shell expands that before the tool sees it."
+
+	root := os.DirFS("prompts")
+	var files []string
+	err := fs.WalkDir(root, ".", func(path string, d fs.DirEntry, err error) error {
+		if err == nil && !d.IsDir() && strings.HasSuffix(path, ".md") {
+			files = append(files, path)
+		}
+		return err
+	})
+	if err != nil {
+		t.Fatalf("walking prompts: %v", err)
+	}
+	if len(files) == 0 {
+		t.Fatal("no templates found — this control would pass vacuously")
+	}
+
+	depths := 0
+	for _, path := range files {
+		data, err := fs.ReadFile(root, path)
+		if err != nil {
+			t.Fatalf("reading %s: %v", path, err)
+		}
+		var out []string
+		inFence := false
+		for _, line := range strings.Split(string(data), "\n") {
+			out = append(out, line)
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~") {
+				inFence = !inFence
+				continue
+			}
+			if inFence {
+				continue // a `- x` inside a code block is content, not a list item
+			}
+			if m := listMarkerRE.FindString(line); m != "" {
+				out = append(out, strings.Repeat(" ", columnWidth(m))+prose)
+				depths++
+			}
+		}
+		if got := scanBodyExamples(strings.Join(out, "\n")); len(got) != 0 {
+			t.Errorf("%s: documenting the hazard inside a list item must be allowed at every depth; got %d violation(s):\n%+v",
+				path, len(got), got)
+		}
+	}
+	if depths < 20 {
+		t.Errorf("only %d list items perturbed across %d templates — too few to have exercised deep nesting", depths, len(files))
+	}
+}
+
+// TestBodyRatchet_ExamplesAreCaughtAtEveryListDepthInTheRealCorpus is the other
+// direction of the control above, and the reason to believe the prose exemption
+// was not bought by blinding the scanner. It inserts a genuine indented code
+// block — 4 columns past the item's content column, after a blank line, which is
+// what a renderer would set as code — into the same list items the test above
+// filled with prose, and requires every single one to be caught.
+//
+// Both tests must hold at once. One alone is satisfiable by a broken scanner: a
+// predicate that never classifies anything as an indented example passes the
+// exemption test, and the old whitespace predicate passed this one.
+func TestBodyRatchet_ExamplesAreCaughtAtEveryListDepthInTheRealCorpus(t *testing.T) {
+	const unsafe = "mg mail send mayor --from=me --subject=s --body=\"taught at depth\""
+
+	root := os.DirFS("prompts")
+	inserted, caught := 0, 0
+	err := fs.WalkDir(root, ".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasSuffix(path, ".md") {
+			return err
+		}
+		data, err := fs.ReadFile(root, path)
+		if err != nil {
+			return err
+		}
+		var out []string
+		inFence := false
+		want := 0
+		for _, line := range strings.Split(string(data), "\n") {
+			out = append(out, line)
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~") {
+				inFence = !inFence
+				continue
+			}
+			if inFence {
+				continue
+			}
+			if m := listMarkerRE.FindString(line); m != "" {
+				out = append(out, "", strings.Repeat(" ", columnWidth(m)+4)+unsafe)
+				want++
+			}
+		}
+		got := scanBodyExamples(strings.Join(out, "\n"))
+		if len(got) != want {
+			t.Errorf("%s: inserted %d indented unsafe examples at list depth, scanner caught %d", path, want, len(got))
+		}
+		inserted += want
+		caught += len(got)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking prompts: %v", err)
+	}
+	if inserted == 0 {
+		t.Fatal("no examples inserted — this control would pass vacuously")
+	}
+	t.Logf("caught %d/%d indented examples across the shipped templates", caught, inserted)
 }
 
 // TestBodyExampleScanner_SingleQuotedBodyIsNotAViolation records the boundary.
