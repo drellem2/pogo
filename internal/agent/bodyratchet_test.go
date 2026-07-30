@@ -118,9 +118,13 @@ const safeIdiom = "use --body-file - with a QUOTED heredoc:\n" +
 	"  Do NOT add to the bodyRatchet inventory — it may only shrink."
 
 // inlineBodyRE matches an inline double-quoted body value: --body="..." or
-// --body "...". Single quotes are deliberately NOT matched — `--body='...'`
-// reaches argv unmangled and is not the defect. --body-file cannot match: the
-// character after "body" is a hyphen.
+// --body "...". Single quotes are deliberately NOT matched, and that is a SCOPE
+// BOUNDARY, not an endorsement: flagging `--body='...'` is the false positive
+// that refuted the metacharacter gate (cmd/pogo/bodymetachar_test.go, case C).
+// The single-quoted form has its own silent-corruption mode — see
+// TestBodyExampleScanner_SingleQuotedBodyIsNotAViolation for what it does and
+// does not protect. --body-file cannot match: the character after "body" is a
+// hyphen.
 var inlineBodyRE = regexp.MustCompile(`--body(=|\s+)"`)
 
 // heredocRE captures the delimiter of a heredoc redirect and whether it was
@@ -703,10 +707,33 @@ func TestBodyRatchet_ExamplesAreCaughtAtEveryListDepthInTheRealCorpus(t *testing
 	t.Logf("caught %d/%d indented examples across the shipped templates", caught, inserted)
 }
 
-// TestBodyExampleScanner_SingleQuotedBodyIsNotAViolation records the boundary.
-// --body='...' reaches argv unmangled — it is safe, just awkward for bodies
-// that contain single quotes. Flagging it would be the false positive that
-// refuted the metacharacter gate (see cmd/pogo/bodymetachar_test.go, case C).
+// TestBodyExampleScanner_SingleQuotedBodyIsNotAViolation records the boundary:
+// `--body='...'` is OUT OF THIS SCANNER'S SCOPE, which is not the same thing as
+// being safe. It protects $ and backticks. What breaks it is the apostrophe, and
+// which way it breaks is decided by the PARITY of the apostrophe count —
+// measured under both zsh and bash (mg-ff5c):
+//
+//	odd   --body='the polecat's PR flow'   -> "unmatched '", exit 1.   LOUD.
+//	even  --body='don't do it, it's fine'  -> exit 0.                  SILENT.
+//
+// The even case does two things, and the second is the worse one: the
+// apostrophes are STRIPPED from the content, and the value is WORD-SPLIT across
+// separate argv slots — argv becomes --body=dont | do | it, | its fine. So the
+// callee does not receive a mangled body, it receives a truncated body plus junk
+// positional arguments, at exit 0.
+//
+// That makes it safe only for content with NO apostrophes, which is not a
+// property anyone tracks while writing prose. It is the --body=" defect with a
+// different trigger character: --body=" eats $ and backticks, --body=' eats
+// apostrophes and the argv shape. `--body-file - <<'EOF'` is the idiom with no
+// character class that breaks it, and it stays the remedy in safeIdiom.
+//
+// The scanner must nonetheless NOT flag this form: doing so is the false
+// positive that refuted the metacharacter gate (see cmd/pogo/bodymetachar_test.go,
+// case C), so this boundary is deliberate and this test should keep passing. A
+// green ratchet here means "not measured by this predicate", never "blessed" —
+// polecat 78d2 read it as the latter during the mg-78d2 review and wrote a
+// single-quoted prose --title on that basis.
 func TestBodyExampleScanner_SingleQuotedBodyIsNotAViolation(t *testing.T) {
 	const doc = "```bash\nmg mail send mayor --from=me --subject=s --body='literal `backticks` here'\n```\n"
 	if got := scanBodyExamples(doc); len(got) != 0 {
