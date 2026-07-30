@@ -4595,13 +4595,7 @@ is the curated, human-readable summary kept in sync at each release cut.
 
 - **Changelog entries are now fragments in `changelog.d/`, not a shared
   `CHANGELOG.md` tail (mg-d917).** Every change used to append to the same
-  `## [Unreleased]
-
-## [0.8.0] - 2026-07-30
-
-## [0.7.0] - 2026-07-29
-
-## [0.6.0] - 2026-07-29` lines, so any two concurrent branches collided there when
+  `## [Unreleased]` lines, so any two concurrent branches collided there when
   the refinery rebased onto `main` — the dominant recorded merge-conflict cause
   (4 of the 5 conflicts the refinery ever recorded were this one file, all at
   MAX-2 concurrency, and the rate scales with concurrency). Each change now

@@ -104,6 +104,19 @@ bash scripts/assemble-changelog_test.sh
 echo "Testing changelog coverage check"
 bash scripts/changelog-coverage_test.sh
 
+# Release-roll + link references (mg-cef7). Two silent, recurring release-path
+# defects: update_changelog() emitted the `## [X.Y.Z]` heading with NO
+# `[X.Y.Z]:` compare link (three cuts in a row — Markdown renders the unlinked
+# version as LITERAL TEXT, so it degrades a published artifact and reads as a
+# typo), and its unanchored sed also injected a spurious heading into any entry
+# whose prose mentions `## [Unreleased]` (the heading count rose by TWO per cut).
+# The load-bearing case is Test 9: on the input that actually occurred, the
+# set-based check must report DUPLICATE HEADINGS and must NOT report missing link
+# references — the count check's misdiagnosis, whose obvious remedy would have
+# entrenched the corruption by giving the spurious headings link targets.
+echo "Testing changelog release-roll and link references"
+bash scripts/roll-changelog_test.sh
+
 # The work-item scope guard (mg-f1d5). Every case runs against a stub `mg` and a
 # fixture worktree in a temp dir, so the suite never reads the developer's live
 # ~/.macguffin. The load-bearing case is the opt-in one: a guard that blocked an

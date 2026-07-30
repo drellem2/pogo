@@ -433,7 +433,17 @@ for repo in <repos>; do
     # fed on stdin: a quoted heredoc would not expand them, and an UNQUOTED one
     # carries exactly the --body="..." hazard. printf keeps the values in argv
     # slots, so no shell metacharacter in a tag name can reach the command line.
-    printf 'Latest release %s is %s days old; origin/main is %s commits ahead. Cut a new release with scripts/bump-version.sh X.Y.Z --commit --tag --push (semver: patch for CI/doc-only, minor otherwise). Tag push triggers .github/workflows/release.yml. Thresholds (50 commits / 30 days) are tunable in pm-template.md.\n' \
+    # The body prescribes --commit WITHOUT --tag, and puts the tag AFTER the
+    # merge, on the merged sha (mg-cef7). This read "--commit --tag --push" until
+    # mg-cef7: off main that tags the local PRE-MERGE commit, and the refinery
+    # re-commits what it merges, so the tag dangles off a commit no branch
+    # contains. bump-version.sh now REFUSES --tag off main, so the old one-liner
+    # prescribed a command the script rejects. It also names the TAG as a
+    # separate obligation with its own owner: pogod stops a polecat within ~3s of
+    # merge success, so the merging worker cannot tag its own merge no matter how
+    # clearly it is instructed — both v0.8.0 attempts lost that race and left the
+    # item done with no tag.
+    printf 'Latest release %s is %s days old; origin/main is %s commits ahead. Semver: patch for CI/doc-only, minor otherwise.\n\nStep 1 (the release-cut worker): scripts/bump-version.sh X.Y.Z --commit  -- NOTE: no --tag. Off main, --tag tags the pre-merge commit and the refinery re-commits what it merges, so the tag would dangle off a commit no branch contains. bump-version.sh refuses it.\n\nStep 2 (NOT the merging worker -- a coordinator or a follow-up dispatch): after the merge LANDS, tag the merged sha:\n  git fetch origin main && git tag -a vX.Y.Z -m "Release vX.Y.Z" origin/main && git push origin vX.Y.Z\nThen CONFIRM against the remote, because a local tag proves nothing:\n  git ls-remote --tags origin | grep vX.Y.Z\nStep 2 cannot be done by whoever merges step 1: pogod stops a polecat within ~3s of merge success, and both v0.8.0 cut attempts were reaped before tagging, leaving the work item done with no tag in existence. Assign it an owner that outlives the merge.\n\nThe tag push is what triggers .github/workflows/release.yml -- until step 2 is confirmed, no release exists. Thresholds (50 commits / 30 days) are tunable in pm-template.md.\n' \
            "$tag" "$days" "$ahead" |
       mg new --title="release-cut: $slug — main is $ahead commits ahead of $tag (${days}d)" \
              --assignee=pm-<your-name> \
@@ -444,7 +454,14 @@ done
 ```
 
 The hook only **files** the ticket; the actual version bump + tag push stays
-with the release-cut {{.Worker}} or Daniel. Surfacing as a ticket is the right
+with the release-cut {{.Worker}} or Daniel. Note that the ticket body splits the
+cut into **two steps with two owners** (mg-cef7): the bump/merge, and the
+post-merge tag on the merged sha. They cannot be the same owner — pogod stops a
+{{.Worker}} within ~3s of merge success, so the one who merges is dead before it
+can tag, and an instruction cannot beat a reap. When you file this ticket,
+either plan to run step 2 yourself once the merge lands, or file it as its own
+work item so the obligation has an owner; then verify with
+`git ls-remote --tags origin`, never a local `git tag -l`. Surfacing as a ticket is the right
 granularity — never auto-tag.
 
 **Additional sources are listed in your config under `sources`.** Apply each one. Examples:

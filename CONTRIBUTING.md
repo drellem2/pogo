@@ -264,15 +264,66 @@ Versioning is semver: **patch** for CI / docs / chore-only changes, **minor**
 otherwise; reserve major for breaking CLI changes. Prereleases use a
 `vX.Y.Z-<suffix>` form and surface as GitHub prereleases automatically.
 
-**Cutting a release.** From a clean main with the change you want to ship:
+**Cutting a release from a clean `main`.** With the change you want to ship:
 
 ```bash
 ./scripts/bump-version.sh X.Y.Z --commit --tag --push
 ```
 
 This assembles the `changelog.d/` fragments into `CHANGELOG.md`, bumps
-`internal/version/version.go`, rolls `CHANGELOG.md`, commits, tags, and pushes.
-The release workflow does the rest.
+`internal/version/version.go`, rolls `CHANGELOG.md` (heading **and** compare link
+references), commits, tags, pushes, and confirms the tag reached `origin`. The
+release workflow does the rest.
+
+**Cutting a release from any other branch — do NOT pass `--tag` (mg-cef7).**
+`--tag` tags the local commit the script just made. Off `main` that commit does
+not survive: the branch goes through the refinery, which **re-commits what it
+merges** (v0.7.0's merged commit `4112875` carries committer *"pogo refinery"*),
+so the tagged SHA is not the SHA on `main` and the tag dangles off a commit no
+branch contains. `bump-version.sh` **refuses** `--tag` off `main` rather than
+warning, because a pushed release tag is externally visible and force-pushing
+does not unpublish it. Instead:
+
+```bash
+./scripts/bump-version.sh X.Y.Z --commit    # bump + changelog only, no tag
+git push origin "$BRANCH"
+pogo refinery submit "$BRANCH" --repo=<repo> --target=main
+# ...then, AFTER the merge lands, on the MERGED sha:
+git fetch origin main
+git tag -a vX.Y.Z -m 'Release vX.Y.Z' origin/main
+git push origin vX.Y.Z
+git ls-remote --tags origin | grep vX.Y.Z      # a LOCAL tag proves nothing
+```
+
+**The post-merge tag needs an owner that outlives the merge.** Moving the tag
+after the merge is the correct fix for the dangling tag, and it creates a second
+problem: the merging worker cannot perform it. pogod stops a polecat on merge
+success — measured at ~3s for the v0.8.0 cut — so any post-merge step the worker
+still intends loses a race it does not know about. Both v0.8.0 cut attempts
+(`mg-3685`, `mg-e084`) were correctly instructed, both merged, both were reaped
+before tagging, and both work items read `done` with **no tag in existence**;
+each was recovered only because a coordinator happened to run
+`git ls-remote --tags origin` afterwards. So the tagging step belongs to a
+coordinator or a separately-dispatched follow-up, never to the worker whose merge
+closes the ticket — and the verification must query the **remote**, since neither
+recovery had a local tag either. Automating this (refinery-side tag-on-merge, or
+a follow-up ticket filed at bump time) is not yet done.
+
+**Verifying the changelog's link references.** A version heading with no
+`[X.Y.Z]:` link reference does not error — Markdown renders `[0.8.0]` as literal
+text in the published changelog:
+
+```bash
+./scripts/changelog-links.sh
+```
+
+`bump-version.sh` runs this after rolling, so a cut that produced an unlinked
+heading aborts. It compares the heading **set** against the link-reference set
+and names the unmatched version and direction; it never reports a difference of
+counts. That distinction is load-bearing — see the header of
+`scripts/changelog-links.sh` for the measured case where the count formulation
+fired correctly and diagnosed the wrong object, and the obvious remedy would have
+entrenched the corruption it was reporting.
 
 **Adding a changelog entry (per change, not per release).** Do **not** append to
 `CHANGELOG.md` — write a fragment file instead: `changelog.d/<slug>.<category>.md`
