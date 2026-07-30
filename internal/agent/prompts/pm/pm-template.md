@@ -332,8 +332,11 @@ A sweep has three phases: **gather**, **decide**, **report**.
 **Baseline (every sweep, every PM):**
 
 ```bash
-# Open / recently-closed work in your product
-for repo in <repos>; do mg list --repo=$repo --status=open; done
+# Open / recently-closed work in your product. No --status: the default listing
+# is already active items + done, which is exactly this. There is no `open`
+# status — the accepted values are available, claimed, pending, done, shelved,
+# archived — and `--status=open` is REFUSED, not ignored.
+for repo in <repos>; do mg list --repo=$repo; done
 for tag in <tags_any>; do mg list --tag=$tag; done
 
 # Items with new comments since last sweep
@@ -418,8 +421,14 @@ for repo in <repos>; do
                                  || date -d "$pub" +%s 2>/dev/null || echo 0) ) / 86400 ))
 
   if [ "$ahead" -ge 50 ] || [ "$days" -ge 30 ]; then
-    # Dedup: skip if an open release-cut ticket already exists for this repo.
-    mg list --tag=release-cut --status=open 2>/dev/null | grep -q "$slug" && continue
+    # Dedup: skip if a still-open release-cut ticket already exists for this
+    # repo. --status takes ONE value and has no "not done" spelling, so the
+    # not-done filter is applied to the JSON. This read `--status=open` until
+    # mg-9324: that is a refused value, `2>/dev/null` hid the error, and the
+    # empty stdout made grep find nothing — so the dedup never fired and a
+    # duplicate got filed every sweep.
+    mg list --tag=release-cut --json 2>/dev/null \
+      | jq -r 'select(.status != "done") | .title' | grep -q "$slug" && continue
     # This body interpolates $tag/$days/$ahead, so it is composed with printf and
     # fed on stdin: a quoted heredoc would not expand them, and an UNQUOTED one
     # carries exactly the --body="..." hazard. printf keeps the values in argv

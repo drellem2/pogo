@@ -22,6 +22,10 @@ const (
 	// RuleBadOmission: the prompt tells you to leave off a flag the CLI refuses
 	// to default. mg-159a (omit `--template` for a bare `task`).
 	RuleBadOmission = "bad-omission"
+	// RuleUnknownFlagValue: the flag exists and the VALUE is refused. mg-9324
+	// (`mg list --status=closed`, where the accepted spelling is `done`).
+	// Reported only for a flag a ValueRule covers; see ValueRule and Coverage.
+	RuleUnknownFlagValue = "unknown-flag-value"
 )
 
 // Finding is one prompt statement the CLI contradicts.
@@ -63,16 +67,122 @@ type OmissionRule struct {
 	Why string
 }
 
-// Checker holds the CLI surfaces and the omission registry a check runs with.
+// ValueRule answers the other question `--help` cannot: is this flag's VALUE
+// accepted?
+//
+// mg-9324's finding is that the legal values are essentially not declared
+// anywhere machine-readable — 4 of 153 value-bearing flags spell out an
+// enumeration, and one of those four is stale in the direction that invents
+// false findings. ParseFlagSpecs has the measurement. So this is a registry for
+// the same reason OmissionRule is one, and it carries the same obligation:
+//
+// EVERY ENTRY MUST NAME THE CODE THAT DOES THE REFUSING, never a second copy of
+// the value list. A registry that restates the values is a list that drifts, and
+// a drifted value list flags correct prompts.
+//
+// Two sources are sound, in this order of preference:
+//
+//   - Accepts: the tool's own accepting function, called directly. Available for
+//     `pogo`, because it is this binary. Cannot drift at all.
+//   - FromHelp: the enumeration in the flag's own usage string, read at check
+//     time — sound only where the tool GENERATES that string from its validator,
+//     which the entry's Why must state with the file and line. `mg list
+//     --status` qualifies: macguffin renders it from the same
+//     `listStatusValues` slice it rejects against. `--provider` does NOT, and is
+//     the worked example of why this field needs justifying.
+//
+// A value-bearing flag with no entry here is NOT CHECKED, and is reported by
+// name in Coverage.Unchecked. That reporting is the point: the failure mode of
+// this ticket family is a partial check that converts "unchecked" into "checked
+// and fine".
+type ValueRule struct {
+	Path []string // {"mg","list"}
+	Flag string   // "status", without the dashes
+	// Accepts reports whether the tool accepts this value, by calling the code
+	// that decides. Takes precedence over FromHelp when both are set.
+	Accepts func(value string) bool
+	// FromHelp takes the legal set from the flag's declared enumeration.
+	FromHelp bool
+	// Legal names the accepted values for the finding text. Optional when
+	// FromHelp supplies them.
+	Legal func() []string
+	// Why is quoted into the finding, and must justify the source.
+	Why string
+}
+
+// Coverage is the census mg-9324 exists to produce: which of the value-bearing
+// flags the corpus actually writes a value for could be judged, and which could
+// not. Unchecked is the honest half — a value-checker silently blind to most
+// values is worse than none.
+type Coverage struct {
+	// Checked and Unchecked are "mg list --status" strings, sorted and deduped.
+	Checked   []string
+	Unchecked []string
+}
+
+// Checker holds the CLI surfaces and the rule registries a check runs with.
 type Checker struct {
 	Surfaces  map[string]*Surface
 	Omissions []OmissionRule
+	Values    []ValueRule
+}
+
+// valueRule finds the rule covering a flag on a command path, if any.
+func (c *Checker) valueRule(path []string, flag string) *ValueRule {
+	for i := range c.Values {
+		r := &c.Values[i]
+		if r.Flag == flag && len(r.Path) == len(path) && pathPrefix(r.Path, path) {
+			return r
+		}
+	}
+	return nil
+}
+
+// legalValues resolves a rule's accepted set for reporting, preferring what the
+// tool itself will say over anything written here.
+func (c *Checker) legalValues(r *ValueRule, node *Node) []string {
+	if r.Legal != nil {
+		if v := r.Legal(); len(v) > 0 {
+			return v
+		}
+	}
+	if r.FromHelp && node != nil {
+		return node.FlagSpecs[r.Flag].Values
+	}
+	return nil
+}
+
+// accepts asks the rule's source whether a value is legal. The second result is
+// false when the source could not answer — a FromHelp rule whose flag has
+// stopped declaring an enumeration, which must go unjudged rather than reported.
+func (c *Checker) accepts(r *ValueRule, node *Node, value string) (ok, answered bool) {
+	if r.Accepts != nil {
+		return r.Accepts(value), true
+	}
+	legal := c.legalValues(r, node)
+	if len(legal) == 0 {
+		return false, false
+	}
+	for _, v := range legal {
+		if strings.EqualFold(v, value) {
+			return true, true
+		}
+	}
+	return false, true
 }
 
 // CheckFile runs every rule over one prompt's text.
 func (c *Checker) CheckFile(name, text string) []Finding {
+	f, _ := c.checkFile(name, text)
+	return f
+}
+
+// checkFile is CheckFile plus the coverage census, which only a corpus-wide
+// caller has any use for.
+func (c *Checker) checkFile(name, text string) ([]Finding, Coverage) {
 	rendered := Render(text)
 	var out []Finding
+	var cov Coverage
 
 	abs, omits := extractProseClaims(rendered, c.Surfaces)
 
@@ -124,6 +234,41 @@ func (c *Checker) CheckFile(name, text string) []Finding {
 				Subject:  strings.Join(inv.Path, " ") + " --" + f,
 				Detail:   fmt.Sprintf("%q accepts no --%s", strings.Join(inv.Path, " "), f),
 				Evidence: inv.Raw,
+			})
+		}
+
+		// --- R5: what the prompt tells you to PASS ----------------------
+		for _, fv := range inv.Values {
+			if !node.Flags[fv.Flag] {
+				continue // already reported as an unknown flag
+			}
+			subject := strings.Join(inv.Path, " ") + " --" + fv.Flag
+			rule := c.valueRule(inv.Path, fv.Flag)
+			if rule == nil {
+				cov.Unchecked = append(cov.Unchecked, subject)
+				continue
+			}
+			cov.Checked = append(cov.Checked, subject)
+			// A placeholder is not a claim about a value. `--status=<status>`
+			// and `--status=$STATUS` tell the reader to substitute, and the
+			// prompt asserts nothing that could be wrong.
+			if fv.Value == "" || isPlaceholder(fv.Value) {
+				continue
+			}
+			ok, answered := c.accepts(rule, node, fv.Value)
+			if !answered || ok {
+				continue
+			}
+			detail := fmt.Sprintf("%q refuses --%s=%s", strings.Join(inv.Path, " "), fv.Flag, fv.Value)
+			if legal := c.legalValues(rule, node); len(legal) > 0 {
+				detail += "; it accepts " + strings.Join(legal, ", ")
+			}
+			if rule.Why != "" {
+				detail += " (" + rule.Why + ")"
+			}
+			out = append(out, Finding{
+				File: name, Line: inv.Line, Rule: RuleUnknownFlagValue,
+				Subject: subject, Detail: detail, Evidence: inv.Raw,
 			})
 		}
 	}
@@ -207,7 +352,46 @@ func (c *Checker) CheckFile(name, text string) []Finding {
 	}
 
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Line < out[j].Line })
-	return dedupe(out)
+	return dedupe(out), cov
+}
+
+// merge folds another file's census in.
+func (c *Coverage) merge(o Coverage) {
+	c.Checked = append(c.Checked, o.Checked...)
+	c.Unchecked = append(c.Unchecked, o.Unchecked...)
+}
+
+// normalize sorts and dedupes both halves, and drops from Unchecked anything
+// that some other invocation proved checkable — the same flag can be written
+// with a placeholder in one prompt and a rule-covered value in another, and it
+// is covered either way.
+func (c *Coverage) normalize() {
+	c.Checked = sortUnique(c.Checked)
+	checked := map[string]bool{}
+	for _, s := range c.Checked {
+		checked[s] = true
+	}
+	var un []string
+	for _, s := range sortUnique(c.Unchecked) {
+		if !checked[s] {
+			un = append(un, s)
+		}
+	}
+	c.Unchecked = un
+}
+
+func sortUnique(in []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, s := range in {
+		if seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // dedupe collapses the same defect reported twice. A sentence can match more
@@ -267,11 +451,22 @@ func pathPrefix(short, long []string) bool {
 	return true
 }
 
-// CheckFS runs the check over every .md file in a prompt corpus and returns the
-// findings plus the number of files read.
-func CheckFS(c *Checker, root fs.FS) ([]Finding, int, error) {
-	var out []Finding
-	n := 0
+// Report is what a corpus check produces: the findings, and the coverage census
+// saying which value-bearing flags it was able to judge.
+//
+// Coverage is not decoration. mg-9324's mandate is that the UNCOVERED count is
+// the real output, because a value-checker blind to most values converts
+// "unchecked" into "checked and fine" — the failure mode of this whole ticket
+// family. Every caller that prints findings must print the census too.
+type Report struct {
+	Files    int
+	Findings []Finding
+	Coverage Coverage
+}
+
+// CheckFS runs the check over every .md file in a prompt corpus.
+func CheckFS(c *Checker, root fs.FS) (Report, error) {
+	var rep Report
 	err := fs.WalkDir(root, ".", func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -283,15 +478,19 @@ func CheckFS(c *Checker, root fs.FS) ([]Finding, int, error) {
 		if err != nil {
 			return err
 		}
-		n++
-		out = append(out, c.CheckFile(path, string(data))...)
+		rep.Files++
+		findings, cov := c.checkFile(path, string(data))
+		rep.Findings = append(rep.Findings, findings...)
+		rep.Coverage.merge(cov)
 		return nil
 	})
+	out := rep.Findings
 	sort.SliceStable(out, func(i, j int) bool {
 		if out[i].File != out[j].File {
 			return out[i].File < out[j].File
 		}
 		return out[i].Line < out[j].Line
 	})
-	return out, n, err
+	rep.Coverage.normalize()
+	return rep, err
 }
