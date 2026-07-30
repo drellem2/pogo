@@ -706,7 +706,15 @@ func (r *Refinery) Queue() []MergeRequest {
 	return out
 }
 
-// History returns a snapshot of completed merge requests (most recent first).
+// History returns a snapshot of retained completed merge requests, OLDEST
+// FIRST (append order, as pruneHistoryLocked's own comment says).
+//
+// It is not an archive and must not be read as one. Entries past
+// MaxHistoryLen / MaxHistoryAge have been deleted by pruneHistoryLocked, so a
+// short result means "this is what is retained", never "this is all that
+// happened" — and because the cap is a count, the truncation point moves with
+// merge volume rather than sitting at a stable age. Use HistoryFromLog to ask
+// about a window wider than retention.
 func (r *Refinery) History() []MergeRequest {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -736,18 +744,84 @@ type Status struct {
 	PollInterval string `json:"poll_interval"`
 	QueueLen     int    `json:"queue_len"`
 	HistoryLen   int    `json:"history_len"`
+	// MaxHistoryLen and MaxHistoryAge report the retention that BOUNDS
+	// HistoryLen. They are reported so a client can say "showing 100 of a
+	// window that stops at 100" instead of printing 100 rows that look like all
+	// of them — HistoryLen alone cannot distinguish a full window from a
+	// truncated one, which is the whole defect in mg-e9ee.
+	//
+	// The client reads these rather than referencing DefaultMaxHistoryLen so
+	// the number it prints is the running daemon's, an observation, and not a
+	// constant the client hopes still matches.
+	//
+	// They are POINTERS so that "this daemon did not report a cap" is a
+	// distinct value from "this daemon has no cap". A client talking to a pogod
+	// older than mg-e9ee decodes nil, and must say the truncation state is
+	// UNKNOWN — a zero decoded as "no cap" would put the silence straight back,
+	// which is the failure this field exists to remove. A negative
+	// MaxHistoryLen means that dimension genuinely does not prune. Age is a
+	// duration string ("168h0m0s").
+	MaxHistoryLen *int    `json:"max_history_len,omitempty"`
+	MaxHistoryAge *string `json:"max_history_age,omitempty"`
+}
+
+// HistoryTruncation is what a client can say about whether history is complete.
+type HistoryTruncation int
+
+const (
+	// HistoryTruncationUnknown means the daemon did not report its retention,
+	// so whether rows are missing cannot be determined. It is NOT "not
+	// truncated": a client must say so rather than fall silent.
+	HistoryTruncationUnknown HistoryTruncation = iota
+	// HistoryTruncationNone means retention was reported and has not bitten.
+	HistoryTruncationNone
+	// HistoryTruncationAtCap means the count cap has bitten: completed merge
+	// requests have been DELETED to make room (see pruneHistoryLocked), so they
+	// are gone from the refinery and only the event log still has them.
+	HistoryTruncationAtCap
+)
+
+// HistoryTruncation classifies the retained window against the reported cap.
+func (s Status) HistoryTruncation() HistoryTruncation {
+	if s.MaxHistoryLen == nil {
+		return HistoryTruncationUnknown
+	}
+	if *s.MaxHistoryLen > 0 && s.HistoryLen >= *s.MaxHistoryLen {
+		return HistoryTruncationAtCap
+	}
+	return HistoryTruncationNone
+}
+
+// RetentionSummary renders the retention bound as one short phrase, or says
+// plainly that it was not reported.
+func (s Status) RetentionSummary() string {
+	if s.MaxHistoryLen == nil {
+		return "not reported by this pogod"
+	}
+	age := "no age cap"
+	if s.MaxHistoryAge != nil && *s.MaxHistoryAge != "" {
+		age = *s.MaxHistoryAge
+	}
+	if *s.MaxHistoryLen <= 0 {
+		return fmt.Sprintf("no count cap / %s", age)
+	}
+	return fmt.Sprintf("max %d entries / %s", *s.MaxHistoryLen, age)
 }
 
 // GetStatus returns the current refinery status.
 func (r *Refinery) GetStatus() Status {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	maxLen := r.cfg.MaxHistoryLen
+	maxAge := r.cfg.MaxHistoryAge.String()
 	return Status{
-		Enabled:      r.cfg.Enabled,
-		Running:      r.cancel != nil,
-		PollInterval: r.cfg.PollInterval.String(),
-		QueueLen:     len(r.queue),
-		HistoryLen:   len(r.history),
+		Enabled:       r.cfg.Enabled,
+		Running:       r.cancel != nil,
+		PollInterval:  r.cfg.PollInterval.String(),
+		QueueLen:      len(r.queue),
+		HistoryLen:    len(r.history),
+		MaxHistoryLen: &maxLen,
+		MaxHistoryAge: &maxAge,
 	}
 }
 

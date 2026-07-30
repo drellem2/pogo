@@ -39,7 +39,13 @@ func GetRefineryQueue() ([]refinery.MergeRequest, error) {
 	return queue, nil
 }
 
-// GetRefineryHistory returns completed merge requests (most recent first).
+// GetRefineryHistory returns the RETAINED completed merge requests, oldest
+// first.
+//
+// The refinery prunes history destructively past its count/age caps, so this is
+// a window and not an archive. A caller that needs a wider window must read the
+// event log (refinery.HistoryFromLog); a caller that needs to know whether this
+// window is truncated must read Status.HistoryTruncated.
 func GetRefineryHistory() ([]refinery.MergeRequest, error) {
 	r, err := http.Get(serverURL + "/refinery/history")
 	if err != nil {
