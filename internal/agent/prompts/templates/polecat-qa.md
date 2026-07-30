@@ -133,10 +133,10 @@ Follow these steps exactly, in order. Skipping any step is a failure.
    - If the change modifies output formats, verify the output.
    - Check edge cases mentioned in the spec.
 
-   **Evidence discipline — four habits, one idea: a claim about your own work is worth what it cost
+   **Evidence discipline — five habits, one idea: a claim about your own work is worth what it cost
    to make.** None of them is a gate; nothing verifies that a prediction preceded a run, that a
-   measurement was taken, or that a near-miss was disclosed. What they change is what you write down
-   before you look.
+   measurement was taken, that a near-miss was disclosed, or that a control family was sought. What
+   they change is what you write down before you look.
 
    - **Predict the outcome before the run.** For any check you run to detect a defect, write down
      first what it should do — pass or fail, and the exit code if there is one — then run it and
@@ -164,6 +164,9 @@ Follow these steps exactly, in order. Skipping any step is a failure.
      a report naming what went wrong carries information; one saying everything went to plan carries none.
      The model is mg-5800 on mg-41aa — a repair that closed its own
      weakest link by measurement instead of defending it in prose.
+   - **Credit an effect to one of two causes only from a family holding the other LITERALLY constant,
+     and report the invariant.** mg-db09 ran TL_n(β) at β=3,2,1,0 — same multiplicity-free branching,
+     132 path pairs at n=6 at every β — and the conclusion held at two values, not the other two.
 
 8. **Report your result.**
 
