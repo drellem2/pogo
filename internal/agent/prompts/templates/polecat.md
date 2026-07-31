@@ -122,6 +122,10 @@ Follow these steps exactly, in order. Skipping any step is a failure.
      curl -s http://127.0.0.1:10000/version | jq -r .revision      # the revision actually running
      git merge-base --is-ancestor <control-commit> <running-rev>   # exit 0 = the control is live
      ```
+   - **A remedy is an artifact of the same kind as the defect, so it is subject to that defect.**
+     Enumerate the ways your own fix could exhibit the defect it remedies, and check each. Expect this
+     even when the repair WORKED — a fix that demonstrably works is where the enumeration gets skipped.
+     Nothing verifies the enumeration was honest; what it changes is what you look at before you commit.
    - **Write or update tests** for any code you change. If the repo has existing tests, follow the same patterns.
    - **Run existing tests** (e.g. `./test.sh`, `go test ./...`, `npm test`) before committing to make sure nothing is broken.
    - **Update documentation** (README, inline docs, help text) if your changes affect user-facing behavior.

@@ -162,6 +162,9 @@ Follow these steps exactly, in order. Skipping any step is a failure.
      the admitter's own work, so nobody says it unless it happened — which makes it strong evidence,
      including about the rest of the same document. So look hardest where the deliverable's
      self-assessment does NOT point: an incomplete self-attack list is the observed failure mode, not a false one.
+     Where the deliverable is a repair that list has a required entry — whether its author enumerated how the
+     fix itself could exhibit the defect it remedies. Whether that enumeration HAPPENED is a different question
+     from whether the fix is correct, and only the first tests the discipline; ask it of a repair that worked.
      And record your own near-misses — what you got wrong and corrected, what nearly shipped:
      a report naming what went wrong carries information; one saying everything went to plan carries none.
      The model is mg-5800 on mg-41aa — a repair that closed its own

@@ -5325,6 +5325,24 @@ func TestQAAndReviewTemplatesCarryTheEvidenceDiscipline(t *testing.T) {
 			// which wraps mid-phrase in polecat-qa.md — the same defect
 			// mg-04c3's own first run caught in itself.
 			"self-attack list is the observed failure mode, not a false one",
+			// The entry a repair's self-attack list is required to have, and
+			// the one an auditor cannot get from the diff: a remedy is an
+			// artifact of the same kind as the defect, so a fix that reproduces
+			// its own defect inside itself passes every check aimed at the
+			// original. Whether the ENUMERATION happened and whether the fix is
+			// correct are different questions, and only the first tests the
+			// discipline — so the correct-fix case must be named explicitly,
+			// since that is the case in which the check gets skipped (mg-2375).
+			// Matched on fragments contiguous in BOTH files: polecat-qa.md
+			// wraps this clause across three lines and polecat-review.md keeps
+			// it on one, so a literal spanning a qa line break would check only
+			// the review template and pass while qa said nothing.
+			"is a repair that list has a required entry",
+			"whether its author enumerated how the",
+			"fix itself could exhibit the defect it remedies",
+			"Whether that enumeration HAPPENED is a different question",
+			"from whether the fix is correct",
+			"only the first tests the discipline; ask it of a repair that worked",
 			// And what the worker owes about its own process.
 			"record your own near-misses",
 			"carries information; one saying everything went to plan carries none",
@@ -5487,6 +5505,101 @@ func TestQAAndReviewTemplatesCarryTheEvidenceDiscipline(t *testing.T) {
 			if strings.Contains(string(data), forbid) {
 				t.Errorf("%s: gained %q, but the evidence-discipline scope is QA + review; widening it to a build worker's template needs a separate argument (mg-0d85)", path, forbid)
 			}
+		}
+	}
+}
+
+// The repairer's half of mg-2375, which is the half the auditor templates cannot
+// reach: the enumeration has to happen while the fix is being built, and the
+// worker building it reads polecat.md — agent.BuildWorkerTemplate, the
+// general-purpose build worker every repair item routes to.
+//
+// mg-0d85 fenced polecat.md off from the auditor section on the grounds that a
+// template talking past its reader gets skimmed. That fence is intact and still
+// checked above: what lands here is not the evidence-discipline section, it is
+// one rule addressed to the worker doing the repair, which is a different reader
+// with a different job.
+//
+// The evidence is a lineage of repairs each reproducing its own defect inside its
+// own remedy — a per-return deletion test that pushed the error it measured down
+// one level, a summary-vs-rows check that shipped as x == x, a census implemented
+// as a multiset. The last two are the sharp ones: the requirement's author wrote
+// the requirement and still shipped an implementation that could not fail. Two
+// levels above this one held the general form and did not transfer it — 4 of 5
+// briefs filed from it lacked the rule, and the one that carried it was the one
+// it had been handed directly.
+func TestBuildTemplateCarriesTheRemedyIsTheSameKindRule(t *testing.T) {
+	data, err := defaultPrompts.ReadFile("prompts/templates/polecat.md")
+	if err != nil {
+		t.Fatalf("read polecat.md: %v", err)
+	}
+	body := string(data)
+
+	for _, want := range []string{
+		// The claim the rule rests on, stated rather than left implicit: it is
+		// WHY a fix deserves the scrutiny its target got, not a reminder to be
+		// careful.
+		"A remedy is an artifact of the same kind as the defect, so it is subject to that defect",
+		// Enumerate and check EACH — one plausible way considered and dismissed
+		// is the failure mode, not a weak version of compliance.
+		"Enumerate the ways your own fix could exhibit the defect it remedies, and check each",
+		// The case that gets skipped, named explicitly because it is the case
+		// every instance in the lineage was in: the repair WORKED. A rule that
+		// reads as "check your fix works" is already covered by the tests and
+		// would carry nothing.
+		"Expect this",
+		"even when the repair WORKED",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("polecat.md: missing the remedy-is-the-same-kind rule %q (mg-2375)", want)
+		}
+	}
+
+	// General form only, checked structurally rather than trusted. A named
+	// hazard is the failure this rule exists to prevent: it covers the instance
+	// the reader could already picture and makes the whole class look handled,
+	// so the reader enumerates the one example and stops. Naming an instance
+	// here would be that failure committed by the rule against itself, which is
+	// why this is a check and not a comment.
+	rule := body[strings.Index(body, "A remedy is an artifact of the same kind"):]
+	if end := strings.Index(rule, "\n   - **"); end >= 0 {
+		rule = rule[:end]
+	}
+	if id := regexp.MustCompile(`mg-[0-9a-f]{4}`).FindString(rule); id != "" {
+		t.Errorf("polecat.md: the remedy rule names the instance %s; it must stay in general form — a named hazard covers the case the reader could already picture and makes the class look handled, which is the failure the rule exists to prevent (mg-2375)", id)
+	}
+
+	// Not a gate, for the same reason none of the auditor's five is: nothing can
+	// verify that an enumeration happened, still less that it was honest. A
+	// template refusing to let a worker commit until they assert one would be
+	// enforcing an unobservable, and would buy an assertion — which is the
+	// evidential nothing the "do not X" rule already exists to discount.
+	for _, forbid := range []string{
+		"do not commit until you have enumerated",
+		"do not commit until you enumerate",
+		"refuse to commit unless",
+		"do not submit until you have enumerated",
+	} {
+		if strings.Contains(strings.ToLower(body), forbid) {
+			t.Errorf("polecat.md: turned the remedy rule into a gate (%q); nothing verifies that an enumeration happened or that it was honest, and a refusal a worker cannot satisfy gets routed around (mg-2375)", forbid)
+		}
+	}
+
+	// The auditor's half is one clause inside an existing bullet, not a sibling
+	// of it — pinned as a count so a later edit that "adds the repairer rule to
+	// the QA template too" fails here rather than quietly making the section
+	// six. The bullet count itself is checked in
+	// TestQAAndReviewTemplatesCarryTheEvidenceDiscipline.
+	for _, path := range []string{
+		"prompts/templates/polecat-qa.md",
+		"prompts/templates/polecat-review.md",
+	} {
+		auditor, err := defaultPrompts.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		if strings.Contains(string(auditor), "Enumerate the ways your own fix could exhibit") {
+			t.Errorf("%s: gained the repairer's imperative form of the rule; the auditor's job is to check whether the enumeration HAPPENED, and the repairer's form belongs in polecat.md where the repair is done (mg-2375)", path)
 		}
 	}
 }
