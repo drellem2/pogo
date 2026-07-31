@@ -5300,6 +5300,23 @@ func TestQAAndReviewTemplatesCarryTheEvidenceDiscipline(t *testing.T) {
 			"on a RE-RUN as well as a first pass",
 			// Why a defeated guard is invisible rather than noisy.
 			"the disarming looks like maintenance",
+			// The same question at the last point on the path: does the
+			// failure reach the EXIT CODE. A runner had
+			// `python3 -B selftest.py | tee out_selftest.txt`; under `set -e`
+			// a pipeline's status is its last command's and `tee` always
+			// exits 0, so when its self-test went red it printed six
+			// `*** FAILED ***` lines and exited 0. Not an anecdote — 23 of 63
+			// `run_all.sh` in the arc pipe to `tee` and exactly 1 sets
+			// `pipefail`. Printing failures and exiting non-zero are
+			// trivially separated by a pipe, so "the check CAN fail" does not
+			// imply "the runner reports it". Matched on fragments contiguous
+			// in BOTH files: polecat-qa.md wraps this clause across three
+			// lines and polecat-review.md keeps it on one.
+			"positive control is not that its self-test CAN fail but that the RUNNER EXITS NON-ZERO",
+			"pipeline's status is its LAST command's",
+			"and `tee` always exits 0",
+			"23 of 63 `run_all.sh` (1 sets",
+			"print `*** FAILED ***` and exit 0",
 			// A fitted battery must be declared and extended past the
 			// author's known answers.
 			"never saw",

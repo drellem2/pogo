@@ -150,8 +150,10 @@ Follow these steps exactly, in order. Skipping any step is a failure.
      expected-output file anyone may legitimately regenerate, regenerate it and show the check still fires,
      on a RE-RUN as well as a first pass: a guard a sanctioned refresh or a second pass disarms passes
      every test it has and protects nothing thereafter, and the disarming looks like maintenance. And a
-     battery fitted to defects its author already knew has to say so and gain a case they never saw,
-     because such a set passes every row and reads as thorough.
+     runner's positive control is not that its self-test CAN fail but that the RUNNER EXITS NON-ZERO — a
+     pipeline's status is its LAST command's and `tee` always exits 0, so 23 of 63 `run_all.sh` (1 sets
+     `pipefail`) print `*** FAILED ***` and exit 0. And a battery fitted to defects its author already knew
+     has to say so and gain a case they never saw, because such a set passes every row and reads as thorough.
    - **List the brief's "do not X" constraints and check each BY MEASUREMENT.** A precise
      instruction hands the author the exact words for a precise *claim* of compliance and nothing
      more — mg-a893's acceptance said in terms "do not over-correct", and its commit
