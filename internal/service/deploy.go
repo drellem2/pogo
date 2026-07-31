@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"text/template"
 )
 
@@ -58,12 +59,16 @@ const deployPlistTemplate = `<?xml version="1.0" encoding="UTF-8"?>
         <string>{{.ScriptPath}}</string>
     </array>
     <key>StartCalendarInterval</key>
-    <dict>
-        <key>Hour</key>
-        <integer>{{.Hour}}</integer>
-        <key>Minute</key>
-        <integer>{{.Minute}}</integer>
-    </dict>
+    <array>
+{{- range .Hours}}
+        <dict>
+            <key>Hour</key>
+            <integer>{{.}}</integer>
+            <key>Minute</key>
+            <integer>{{$.Minute}}</integer>
+        </dict>
+{{- end}}
+    </array>
     <key>RunAtLoad</key>
     <false/>
     <key>KeepAlive</key>
@@ -89,15 +94,26 @@ const deployPlistTemplate = `<?xml version="1.0" encoding="UTF-8"?>
 </plist>
 `
 
-// deployHour / deployMinute — 03:00 local, the off-hours window Daniel already
-// moved disruptive fleet ops into. Constants rather than options: a deploy that
-// can be scheduled at any hour is a deploy that will eventually be scheduled
-// during the working day, and the runner's own window guard is written against
-// this number.
-const (
-	deployHour   = 3
-	deployMinute = 0
-)
+// deployHours / deployMinute — 03:00 local and two RETRY fires behind it, inside
+// the off-hours window Daniel already moved disruptive fleet ops into. Constants
+// rather than options: a deploy that can be scheduled at any hour is a deploy
+// that will eventually be scheduled during the working day, and the runner's own
+// window guard is written against these numbers.
+//
+// The 04:00 and 05:00 fires exist because of mg-8f7e: on 2026-07-31 the 03:00
+// run exited 7 (the drain timed out with three polecats still working) and the
+// next attempt was 24 hours away, so ~24h of merges stayed inert. They are
+// RETRIES, not extra deploy opportunities — pogo-deploy.sh records the night's
+// outcome and a later fire proceeds only when the earlier one stalled on the
+// drain, which is the one failure a retry can fix. Every other outcome (success,
+// build failure, control-suite RED) settles the night on the first attempt, so
+// the extra fires cost one log line and no second bounce.
+//
+// They are also cheap when the first attempt is still running: pogo-deploy.sh
+// takes a lock and a fire that finds it held exits 0.
+var deployHours = []int{3, 4, 5}
+
+const deployMinute = 0
 
 type deployData struct {
 	Label      string
@@ -107,8 +123,23 @@ type deployData struct {
 	Path       string
 	Home       string
 	PogoHome   string
-	Hour       int
+	Hours      []int
 	Minute     int
+}
+
+// retryFireList renders the fires after the first one, for the installer's
+// summary. "Schedule: 03:00 local, daily" on its own now understates the job —
+// an operator who reads it and then sees three fires in the plist has to work
+// out whether that is a bug.
+func retryFireList(hours []int, minute int) string {
+	if len(hours) < 2 {
+		return "none"
+	}
+	parts := make([]string, 0, len(hours)-1)
+	for _, h := range hours[1:] {
+		parts = append(parts, fmt.Sprintf("%02d:%02d", h, minute))
+	}
+	return strings.Join(parts, ", ")
 }
 
 func deployPlistPath() string {
@@ -175,7 +206,7 @@ func renderDeployPlist() (string, deployData, error) {
 		Path:       launchdPath(),
 		Home:       home,
 		PogoHome:   pogoHome(),
-		Hour:       deployHour,
+		Hours:      deployHours,
 		Minute:     deployMinute,
 	}
 	tmpl, err := template.New("deploy-plist").Parse(deployPlistTemplate)
@@ -245,7 +276,8 @@ func InstallDeploy() error {
 	fmt.Printf("Deploy agent installed: %s\n", plistPath)
 	fmt.Printf("Script:   %s\n", dst)
 	fmt.Printf("Checkout: %s (cloned on first run)\n", data.DeploySrc)
-	fmt.Printf("Schedule: %02d:%02d local, daily\n", data.Hour, data.Minute)
+	fmt.Printf("Schedule: %02d:%02d local, daily (retry fires at %s — see mg-8f7e)\n",
+		data.Hours[0], data.Minute, retryFireList(data.Hours, data.Minute))
 	fmt.Printf("Logs:     %s/pogo-deploy.log\n", data.LogDir)
 	return nil
 }

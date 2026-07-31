@@ -184,8 +184,12 @@ launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.pogo.recovery.plis
 ## Nightly Deploy Agent (`com.pogo.deploy`)
 
 A **third** launchd job, and deliberately not a mode of either of the other two.
-It fires once a day at 03:00 local and runs `~/.pogo/bin/pogo-deploy.sh`, which
-decides whether to hand off to `scripts/pogo-self-deploy redeploy`.
+It fires at 03:00 local — and again at 04:00 and 05:00, as retries — running
+`~/.pogo/bin/pogo-deploy.sh`, which decides whether to hand off to
+`scripts/pogo-self-deploy redeploy`. **At most one deploy happens per night**:
+the later fires exist only so that a run which gave up waiting for the fleet to
+quiesce gets another chance before morning, instead of the next attempt being
+24 hours away (mg-8f7e).
 
 ### Why it has to be a launchd job
 
@@ -230,18 +234,36 @@ may be running because the box is already unhealthy.
 lives in `pogo-self-deploy`; anything here that starts to look like deploy logic
 belongs there instead. In order:
 
-1. **Window guard.** If the local hour is outside `[02:00, 05:00)`, log the
+1. **Window guard.** If the local hour is outside `[02:00, 06:00)`, log the
    reason and exit 0. `StartCalendarInterval` does not promise 03:00 — it
    promises the job *runs*. A mac asleep at 03:00 gets the fire delivered on the
    next wake, which may be 09:14 when Daniel opens the lid, or 14:30 mid-demo. A
    redeploy bounces the whole fleet, so a deferred fire is dropped rather than
    honoured late. The window is a **range** and not an instant for the opposite
    failure: too narrow and the job never deploys at all, which looks identical
-   to a job that was never installed.
+   to a job that was never installed. It widened from `2-5` to `2-6` with
+   mg-8f7e, because the drain budget is now derived from the distance to the
+   window's end — the window's width *is* the deploy's patience.
 2. **Lock.** `~/.pogo/deploy.lock.d`, its own, never recovery's. A redeploy can
-   legitimately run for an hour while the drain waits on polecats; a second fire
-   must not start a competing drain.
-3. **Tools.** `mg`, `pogo` and `git` are resolved to **absolute paths**, and `mg`
+   legitimately run for two hours while the drain waits on polecats; a second
+   fire must not start a competing drain. With three fires a night this is no
+   longer a rare case — it is the normal outcome when the 03:00 attempt is still
+   draining at 04:00, and the right one.
+3. **Retry gate** (mg-8f7e). The night's outcome is recorded in
+   `~/.pogo/deploy-attempt.stamp` as `<date> <attempts> <last_rc>`. A later fire
+   proceeds only when the earlier one exited **7** (drain stalled) — the one
+   failure a retry can fix, because it is a statement about how busy the fleet
+   was and nothing was built or bounced. Every other outcome settles the night:
+   re-running a failed build reproduces the failure and mails a duplicate alert.
+   An absent or unparseable record reads as "first attempt", so a corrupt stamp
+   costs at most one extra attempt rather than silently disabling the nightly.
+4. **Drain budget** (mg-8f7e). `--drain-timeout` is computed, not fixed:
+   `(seconds until the window closes) - POGO_DEPLOY_RESERVE`, capped at
+   `POGO_DEPLOY_MAX_DRAIN`. A 03:00 fire gets 2h where the script's own default
+   would have given 30 minutes. If under `POGO_DEPLOY_MIN_DRAIN` remains, the
+   fire skips entirely — a drain that cannot finish has still stopped dispatch
+   for its whole length and delivered nothing.
+5. **Tools.** `mg`, `pogo` and `git` are resolved to **absolute paths**, and `mg`
    and `git` only after the candidate proves itself by **running**. On macOS
    `/usr/bin/mg` is the Micro-Emacs editor; it satisfies `command -v mg`, panics
    headless, and delivers no alert at all (mg-015f, mg-dd5f). The alert path is
@@ -260,43 +282,56 @@ belongs there instead. In order:
    only git is a healthy `/usr/bin/git` its whole effect is that a future broken
    shim would abort once with an alert instead of failing separately inside every
    `git` call in `sync_src`.
-4. **`GH_TOKEN` at run time**, matched out of `~/.zshenv` one line at a time and
+6. **`GH_TOKEN` at run time**, matched out of `~/.zshenv` one line at a time and
    `eval`'d alone — never sourced wholesale (that file's `export PATH=` would
    strip `go` and reproduce the 07-23 `go: command not found` failure), and
    **never** in the plist: `~/Library/LaunchAgents` is world-readable. The value
    is never logged.
-5. **Safe sync** of `~/.pogo/deploy-src` — a **dedicated** checkout, never
+7. **Safe sync** of `~/.pogo/deploy-src` — a **dedicated** checkout, never
    `~/dev/pogo`. The dev tree is a place a human works; a 03:00
    fetch/checkout/merge there can land on a half-finished edit or an in-progress
    rebase. Even in the dedicated tree a **dirty** working copy aborts rather than
    resets (a reset would destroy the evidence of whatever made it dirty), and a
    **diverged** tree aborts too — `--ff-only`, because merging would deploy
    commits nobody meant to build.
-6. **Drift gate.** `pogo-self-deploy check` is read-only and never acts. If its
+8. **Drift gate.** `pogo-self-deploy check` is read-only and never acts. If its
    verdict is `clean`, log it and exit 0 **without bouncing**: a fleet-wide
    bounce costs every agent its session, and doing it for a no-op is strictly
    worse than not running. The verdict is reused rather than recomputed here so
    this stays a trigger and not a rival deployer with its own idea of "current" —
    notably, `check`'s notion of clean already covers CLI drift (mg-ddf1).
-7. **Redeploy**: `pogo-self-deploy redeploy --yes`. `--yes` because `confirm()`
+9. **Redeploy**: `pogo-self-deploy redeploy --yes --drain-timeout <budget>`.
+   `--yes` because `confirm()`
    exits 3 without a tty. **Never `--force`** — the two things it overrides are
    killing live polecats and bouncing a fleet whose idleness could not be
    established, and neither is a call an unattended 03:00 job gets to make. The
    flag is not passed, not plumbed, and not settable by env; `pogo-deploy_test.sh`
    asserts it.
-8. **Outcome.** Exit 0 → wait out a grace period and re-read the mail-check
+10. **Outcome.** Exit 0 → wait out a grace period and re-read the mail-check
    schedules, alerting on any that existed before the bounce and did not come
-   back. Non-zero → mail `pm-pogo` **and** `human`, and stop. Each code names a
-   different operator response; **exit 9 is `do_prove` RED**, which runs after
-   the build and *before* the kickstart — the running `pogod` was never touched,
-   so it is a clean negative control rather than an outage, and the correct
-   response is emphatically not to retry with `--force`.
+   back. Non-zero → mail `pm-pogo` **and** `human`, and stop — unless a retry is
+   really coming, in which case the attempt emits an event and the mail waits
+   for the night's last chance (three identical REDs would be the cost of having
+   retries at all).
+
+   Each code names a different operator response, and the alert now carries the
+   **remedy for the code it actually got** (mg-8f7e). It used to carry one
+   paragraph, about exit 9, under every code — so the 07-31 exit 7 told its
+   reader the control suite had gone RED and "the artifact is the problem", for
+   a failure that never reaches the build. The advice that followed was right by
+   accident, which is worse than wrong: a reader who trusts the reasoning goes
+   and reads a build log that does not exist. **Exit 9 is `do_prove` RED**, which
+   runs after the build and *before* the kickstart — the running `pogod` was
+   never touched, so it is a clean negative control rather than an outage.
+   **Exit 7 is a stalled drain** — nothing was built and nothing was bounced, and
+   it is a statement about how long the fleet's work takes, not about the
+   artifact. Neither is a reason to retry with `--force`.
 
 ### Plist contract
 
 | Key | Value | Why |
 |-----|-------|-----|
-| `StartCalendarInterval` | `Hour=3, Minute=0` | 03:00 local, the off-hours window disruptive fleet ops were already moved into. A `StartInterval` would fire relative to *load* time, so the "nightly" would drift into the working day every time someone reinstalled it. |
+| `StartCalendarInterval` | **array** of `Hour=3, 4, 5` at `Minute=0` | 03:00 local, the off-hours window disruptive fleet ops were already moved into, plus two retry fires (mg-8f7e). A `StartInterval` would fire relative to *load* time, so the "nightly" would drift into the working day every time someone reinstalled it. The later fires are retries, not extra deploy opportunities: the runner's retry gate settles the night on anything but a stalled drain, and a fire that lands while an attempt is still running takes no lock and exits 0. Every hour must sit inside the runner's window guard — `internal/service` asserts it. |
 | `RunAtLoad` | `false` | Installing or reloading the job must never bounce the fleet as a side effect. This is the one key that differs in spirit from `com.pogo.recovery`, where `true` is harmless. |
 | `KeepAlive` | `false` | One-shot per fire. The runner exits on every no-drift night; `true` would relaunch it in a loop. |
 | `ProcessType` | `Background` | It reacts to a clock, not to interactive latency. |
@@ -313,9 +348,15 @@ All optional; the defaults are the production values.
 |----------|---------|---------|
 | `POGO_DEPLOY_SRC` | `~/.pogo/deploy-src` | The dedicated build checkout. |
 | `POGO_DEPLOY_REMOTE` | origin of `~/dev/pogo` | Clone URL, used once to bootstrap the checkout. |
-| `POGO_DEPLOY_WINDOW` | `2-5` | Half-open local-hour range in which a fire is honoured. |
+| `POGO_DEPLOY_WINDOW` | `2-6` | Half-open local-hour range in which a fire is honoured. Also the source of the drain budget: the width of this window is how patient the deploy is allowed to be. |
 | `POGO_DEPLOY_SKIP_WINDOW` | unset | `1` bypasses the window guard. For controls only. |
-| `POGO_DEPLOY_NOW` | unset | `HH` override for the window guard. Tests only. |
+| `POGO_DEPLOY_NOW` | unset | `HH` override for the clock (window guard and drain budget). Minutes and seconds read as zero under it. Tests only. |
+| `POGO_DEPLOY_DATE` | unset | `YYYY-MM-DD` override for which night a fire belongs to. Tests only. |
+| `POGO_DEPLOY_RESERVE` | `1200` | Seconds of the window held back for the build, `do_prove`, the kickstart and verification — everything the run still owes after the drain returns. |
+| `POGO_DEPLOY_MAX_DRAIN` | `7200` | Ceiling on one drain. Nothing dispatches while `draining=true`, so unbounded patience trades a missed deploy for a night of no work. |
+| `POGO_DEPLOY_MIN_DRAIN` | `600` | Floor. Below this a fire skips rather than start a drain it cannot finish. |
+| `POGO_DEPLOY_FIRE_HOURS` | `3 4 5` | The plist's fire hours, ascending. Used only to answer "will a retry follow?" so the RED alert can say so truthfully. |
+| `POGO_DEPLOY_STAMP` | `$POGO_HOME/deploy-attempt.stamp` | Where the night's outcome is recorded for the retry gate. |
 | `POGO_DEPLOY_GRACE` | `120` | Seconds before the post-bounce mail-check re-read. |
 | `POGO_DEPLOY_ZSHENV` | `~/.zshenv` | Where `GH_TOKEN` is read from. |
 | `GIT` | first candidate that prints `git version` | Pins a specific git. Still checked by execution — a pin that cannot run is the same outage as no pin. |

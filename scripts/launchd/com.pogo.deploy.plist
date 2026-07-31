@@ -13,19 +13,44 @@
         <!-- Update YOUR_USERNAME, or use `pogo service install-deploy`. -->
         <string>/Users/YOUR_USERNAME/.pogo/bin/pogo-deploy.sh</string>
     </array>
-    <!-- 03:00 local. A redeploy bounces the ENTIRE fleet, so it belongs in the
-         off-hours window Daniel already moved disruptive fleet ops into.
-         StartCalendarInterval is not a guarantee of 03:00: if the mac is asleep
-         launchd defers the fire and delivers it on the next wake, which may be
-         mid-workday. pogo-deploy.sh's own window guard drops those late fires —
-         the schedule proposes, the runner disposes. -->
+    <!-- 03:00 local, plus two RETRY fires. A redeploy bounces the ENTIRE fleet,
+         so it belongs in the off-hours window Daniel already moved disruptive
+         fleet ops into. StartCalendarInterval is not a guarantee of 03:00: if
+         the mac is asleep launchd defers the fire and delivers it on the next
+         wake, which may be mid-workday. pogo-deploy.sh's own window guard drops
+         those late fires — the schedule proposes, the runner disposes.
+
+         04:00 and 05:00 are RETRIES, not extra deploy opportunities (mg-8f7e).
+         On 2026-07-31 the 03:00 run exited 7 — the drain timed out with three
+         polecats still working — and the next attempt was 24 hours away, so a
+         day of merges stayed inert. pogo-deploy.sh records the night's outcome
+         and a later fire proceeds ONLY when the earlier one stalled on the
+         drain, which is the one failure a retry can fix. Success, a build
+         failure or a control-suite RED all settle the night on the first
+         attempt; the extra fires then cost one log line and no second bounce.
+         A fire that lands while an attempt is still running takes no lock and
+         exits 0. -->
     <key>StartCalendarInterval</key>
-    <dict>
-        <key>Hour</key>
-        <integer>3</integer>
-        <key>Minute</key>
-        <integer>0</integer>
-    </dict>
+    <array>
+        <dict>
+            <key>Hour</key>
+            <integer>3</integer>
+            <key>Minute</key>
+            <integer>0</integer>
+        </dict>
+        <dict>
+            <key>Hour</key>
+            <integer>4</integer>
+            <key>Minute</key>
+            <integer>0</integer>
+        </dict>
+        <dict>
+            <key>Hour</key>
+            <integer>5</integer>
+            <key>Minute</key>
+            <integer>0</integer>
+        </dict>
+    </array>
     <!-- RunAtLoad=false: installing or reloading the job must never trigger a
          fleet-wide bounce as a side effect. The only trigger is the clock. -->
     <key>RunAtLoad</key>

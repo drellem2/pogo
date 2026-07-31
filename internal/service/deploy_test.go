@@ -1,6 +1,8 @@
 package service
 
 import (
+	"encoding/xml"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -44,25 +46,82 @@ func TestRenderDeployPlistHasNoSecrets(t *testing.T) {
 	}
 }
 
-// TestRenderDeployPlistSchedulesOffHours pins 03:00. A redeploy bounces every
-// agent on the box; the hour is not a preference, it is the reason the job is
-// tolerable at all. It also pins that the schedule is a StartCalendarInterval
-// rather than a StartInterval — an interval job fires N seconds after load
-// regardless of wall-clock time, which is how a "nightly" ends up running at
-// 14:30 on the day somebody reinstalls it.
+// TestRenderDeployPlistSchedulesOffHours pins 03:00 and the two retry fires
+// behind it. A redeploy bounces every agent on the box; the hours are not a
+// preference, they are the reason the job is tolerable at all. It also pins
+// that the schedule is a StartCalendarInterval rather than a StartInterval — an
+// interval job fires N seconds after load regardless of wall-clock time, which
+// is how a "nightly" ends up running at 14:30 on the day somebody reinstalls it.
+//
+// Every hour has to sit inside pogo-deploy.sh's own window guard (2-6). A fire
+// scheduled outside it is dropped by the runner on arrival, so a plist and a
+// guard that disagree produce a job that appears scheduled and never deploys —
+// the failure the guard's own tests exist to keep distinguishable.
 func TestRenderDeployPlistSchedulesOffHours(t *testing.T) {
 	rendered, data, err := renderDeployPlist()
 	if err != nil {
 		t.Fatalf("renderDeployPlist: %v", err)
 	}
-	if data.Hour != 3 || data.Minute != 0 {
-		t.Errorf("schedule = %02d:%02d; want 03:00 (the off-hours window disruptive fleet ops were moved into)", data.Hour, data.Minute)
+	want := []int{3, 4, 5}
+	if len(data.Hours) != len(want) {
+		t.Fatalf("schedule has %d fires (%v); want %v — 03:00 plus the mg-8f7e retries", len(data.Hours), data.Hours, want)
+	}
+	for i, h := range want {
+		if data.Hours[i] != h {
+			t.Errorf("fire %d = %02d:00; want %02d:00", i, data.Hours[i], h)
+		}
+	}
+	if data.Minute != 0 {
+		t.Errorf("minute = %d; want 0", data.Minute)
+	}
+	// The window guard is half-open [2,6): every fire must be >= 2 and < 6.
+	for _, h := range data.Hours {
+		if h < 2 || h >= 6 {
+			t.Errorf("fire at %02d:00 falls outside pogo-deploy.sh's window guard [2,6) — launchd would fire it and the runner would drop it, so the job would look scheduled and deploy nothing", h)
+		}
+	}
+	// Ascending order is load-bearing: next_fire_hour in the runner walks the
+	// list and returns the first entry after the current hour, so an unsorted
+	// list makes the RED alert promise a retry that already happened.
+	for i := 1; i < len(data.Hours); i++ {
+		if data.Hours[i] <= data.Hours[i-1] {
+			t.Errorf("fire hours %v are not strictly ascending — the runner's next_fire_hour walk assumes they are", data.Hours)
+		}
 	}
 	if !strings.Contains(rendered, "<key>StartCalendarInterval</key>") {
 		t.Error("plist has no StartCalendarInterval — a wall-clock schedule is what makes this off-hours")
 	}
 	if strings.Contains(rendered, "<key>StartInterval</key>") {
 		t.Error("plist uses StartInterval: that fires relative to load time, not the clock, so the 'nightly' would drift into the working day")
+	}
+	// The retries only exist if launchd is actually given more than one fire.
+	// A <dict> here renders one schedule and silently drops the rest.
+	if strings.Count(rendered, "<key>Hour</key>") != len(want) {
+		t.Errorf("plist renders %d Hour keys; want %d — StartCalendarInterval must be an <array> of dicts for launchd to schedule every fire",
+			strings.Count(rendered, "<key>Hour</key>"), len(want))
+	}
+}
+
+// TestRenderDeployPlistIsWellFormedXML is the check that the template edit did
+// not break the file for launchd. The plist is assembled by string template, so
+// a mismatched or unclosed tag compiles, renders, installs, and is then rejected
+// by launchctl at bootstrap — leaving a job that is "installed" and never fires.
+// mg-8f7e turned a single <dict> schedule into an <array> of them by hand, which
+// is exactly the edit that gets this wrong.
+func TestRenderDeployPlistIsWellFormedXML(t *testing.T) {
+	rendered, _, err := renderDeployPlist()
+	if err != nil {
+		t.Fatalf("renderDeployPlist: %v", err)
+	}
+	dec := xml.NewDecoder(strings.NewReader(rendered))
+	for {
+		_, err := dec.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("rendered plist is not well-formed XML: %v\n\n%s", err, rendered)
+		}
 	}
 }
 
