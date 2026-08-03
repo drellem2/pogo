@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- A FOURTH job, and a deliberately DISPOSABLE one (mg-3888).
+         com.pogo.daemon runs pogod, com.pogo.recovery bounces a wedged one,
+         com.pogo.deploy rebuilds it nightly. This one exists to break a single
+         deadlock ONCE: every deployed binary carries a vcs stamp from another
+         repository, and classify_drift aborts the nightly on that stamp BEFORE
+         reaching the `go install` that would clear it.
+
+         It is a NEW label rather than a mode of com.pogo.deploy because it is
+         not a deploy policy — it is a one-time repair with a different ordering
+         (install first, THEN hand off to the redeploy). Folding it into the
+         nightly would leave a permanent install-before-classify path in the job
+         that runs every night, to fix a state that should never recur. The
+         runner deletes this plist and boots itself out when it finishes. -->
+    <key>Label</key>
+    <string>com.pogo.stampfix</string>
+    <key>ProgramArguments</key>
+    <array>
+        <!-- Update YOUR_USERNAME (see scripts/launchd/README.md). -->
+        <string>/Users/YOUR_USERNAME/.pogo/bin/pogo-stampfix.sh</string>
+    </array>
+    <!-- FIRE_HOUR / FIRE_MINUTE are placeholders: the installer sets them a few
+         minutes into the future, because the authoring agent must be gone before
+         the job runs. The redeploy ends in `launchctl kickstart -k
+         com.pogo.daemon`, which kills pogod's entire process tree — every crew
+         agent and polecat, including whichever one installed this. That is
+         expected and is precisely why the fire is scheduled rather than
+         immediate.
+
+         StartCalendarInterval, not RunAtLoad: RunAtLoad=true would fire the
+         moment the job is bootstrapped, i.e. while the installing agent is still
+         running, bouncing the fleet out from under it mid-write. A calendar fire
+         gives the installer time to exit first.
+
+         A calendar entry with only Hour+Minute repeats DAILY, which is not what
+         this job means. Two things make that harmless: the runner's sentinel
+         file turns any later fire into an immediate exit 0, and the runner
+         deletes this plist and boots the label out on its way past. The sentinel
+         is the guarantee; the self-removal is the tidiness. -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>FIRE_HOUR</integer>
+        <key>Minute</key>
+        <integer>FIRE_MINUTE</integer>
+    </dict>
+    <!-- RunAtLoad=false: bootstrapping this job must never bounce the fleet as a
+         side effect of being installed. The only trigger is the clock. -->
+    <key>RunAtLoad</key>
+    <false/>
+    <!-- KeepAlive=true would relaunch it the instant it exited — an endless
+         fleet-wide bounce loop. This job exits on every path, including success. -->
+    <key>KeepAlive</key>
+    <false/>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>StandardOutPath</key>
+    <string>/Users/YOUR_USERNAME/Library/Logs/pogo/pogo-stampfix.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/YOUR_USERNAME/Library/Logs/pogo/pogo-stampfix.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- Copied from com.pogo.deploy, and load-bearing for the same reasons.
+             It has to resolve BOTH go (/opt/homebrew/bin — the 2026-07-23 manual
+             redeploy died on "go: command not found" with a thinner PATH) and
+             mg / pogo / pogo-self-deploy (~/go/bin). launchd's default PATH has
+             neither. The runner re-resolves all three by identity anyway, but a
+             PATH that already works means those checks never have to fall back. -->
+        <key>PATH</key>
+        <string>/Users/YOUR_USERNAME/.local/bin:/Users/YOUR_USERNAME/go/bin:/Users/YOUR_USERNAME/.pogo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>/Users/YOUR_USERNAME</string>
+        <key>POGO_HOME</key>
+        <string>/Users/YOUR_USERNAME/.pogo</string>
+        <!-- The DEDICATED build checkout, whose .git is a real DIRECTORY. Never a
+             polecat worktree: a worktree's .git is a FILE, go build does not
+             follow that pointer, and it stamps whatever real repo lies above —
+             which is how the foreign stamp this job clears got there. The runner
+             asserts this rather than trusting it. -->
+        <key>POGO_DEPLOY_SRC</key>
+        <string>/Users/YOUR_USERNAME/.pogo/deploy-src</string>
+        <!-- NOTE: POGO_AGENT_NAME is deliberately absent and must stay absent.
+             Its presence is one of the two things assert_out_of_band refuses, and
+             the runner checks for it up front so a wrong caller changes nothing. -->
+    </dict>
+</dict>
+</plist>

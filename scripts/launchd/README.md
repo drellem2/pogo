@@ -378,3 +378,191 @@ allowed — but it is also not the environment it runs in nightly. To reproduce
 the launchd environment, use `env -i PATH=<the plist's PATH> HOME=$HOME`; an
 interactive shell hides exactly the two failures (`go` off PATH, `GH_TOKEN`
 missing) this job was shaped around.
+
+## One-Shot Stamp Fix (`com.pogo.stampfix`)
+
+A **fourth** job, and the only deliberately **disposable** one. It exists to
+break a single deadlock **once**, and it deletes itself on the way out.
+
+### The deadlock
+
+Every deployed binary carried a vcs stamp naming a commit from a *different*
+repository:
+
+```
+installed pogod: c28e26e28921...  <FOREIGN — no such commit in ~/.pogo/deploy-src>
+installed pogo : c28e26e28921...  <FOREIGN — no such commit in ~/.pogo/deploy-src>
+```
+
+`pogo-self-deploy redeploy` runs `classify_drift` before it does anything, and
+`classify_drift` returns 1 on a foreign stamp — so `cmd_redeploy` exits at the
+gate, **before** reaching the `go install` that is the only thing which would
+clear that stamp. `--force` and `--skip-drain` both act *after* the gate, which
+is why neither helps. The nightly `com.pogo.deploy` aborted on this every night
+from 2026-07-29 onward.
+
+The break is to run the `go install` **outside** the script, so that by the time
+`redeploy` runs, the stamp it would have refused is already gone. Nothing in
+`pogo-self-deploy` is patched or bypassed — it is handed a tree it accepts.
+
+### How the stamp got foreign in the first place
+
+A `go install` run from a **polecat worktree**. A worktree's `.git` is a *file*
+(a gitdir pointer), and `go build` does not follow it — it walks *up* until it
+finds a real `.git` directory, finds `~/.pogo`, and stamps that repo's commit.
+Measured directly:
+
+```
+$ cd ~/.pogo/polecats/3888 && go build -o /tmp/pogod ./cmd/pogod
+$ go version -m /tmp/pogod | grep vcs.revision
+    vcs.revision=e957ced765fd...   # <- ~/.pogo's HEAD
+$ git rev-parse HEAD
+e7d13f0c654b...                    # <- the worktree's actual HEAD
+```
+
+So the runner asserts `$POGO_DEPLOY_SRC/.git` is a real **directory** rather than
+trusting it, and refuses outright on a worktree. **Never build or install pogo
+binaries from a polecat worktree.**
+
+### Why the install and the redeploy are one job
+
+Splitting them opens the mg-49bc protocol-mismatch window. `go install` rewrites
+both binaries but bounces nothing, so between the install and the restart the
+on-disk `pogo` CLI is new while the running `pogod` is old, and new subcommands
+404 against it. Doing the install now and leaving the restart to the 03:00
+nightly would hold that window open for hours. They run back to back, with only
+the stamp verification between them.
+
+### Why it is a launchd job and not an agent
+
+Same reason as `com.pogo.deploy`: `assert_out_of_band` refuses any caller that is
+a descendant of `pogod` **or** has `POGO_AGENT_NAME` set. Every agent is both. A
+LaunchAgent is parented by launchd and carries neither, so it passes the guard
+*by construction* — and it survives the `launchctl kickstart -k` for the same
+reason, because launchd owns it and `pogod` does not. An agent authors and
+installs this job; **launchd runs it**.
+
+The runner refuses an agent caller *up front*, before the `go install`, so a
+wrong caller changes nothing at all. (Refusing afterwards would leave the
+binaries rewritten with no restart coming — the mismatch window, held open.)
+
+### One-shot, and fail-closed
+
+- **One-shot.** A sentinel (`~/.pogo/stampfix-mg-3888.ran`) is written **before**
+  the redeploy, and any later fire that sees it exits 0. Before rather than after
+  on purpose: the redeploy takes minutes and bounces the fleet, and a second
+  calendar fire landing mid-bounce must not start a second one. The cost is that
+  a *failed* run does not retry itself — the safe direction, since a repeating
+  fleet-wide bounce is worse than a stalled one.
+- **Fail-closed.** The fleet is bounced only if the stamp is *verifiably* fixed.
+  If `go install` succeeds but the binaries still name a commit `deploy-src` does
+  not have, the runner exits without redeploying: a bounce would cost the fleet
+  and leave the deadlock in place anyway.
+- **`--skip-drain` is required, not a convenience.** The daemon being replaced
+  predates `/agents/drain`, and `pogo-self-deploy`'s drain precondition turns that
+  answer into a hard `exit 6`.
+
+### If the redeploy fails after a successful install
+
+The window is open but **not indefinitely**, and this is the reassuring property
+of the ordering: once the stamp is cleared the deadlock is broken *permanently*.
+`classify_drift` stops returning 1, so the 03:00 nightly — which had been failing
+at exactly that gate — reclassifies as `RESTART owed` and finishes the restart on
+its own. A failed redeploy degrades to "the nightly completes it tonight", not
+"stuck until a human intervenes".
+
+Rollback pair (the previously running 0.5.0 binaries):
+`~/.pogo/rollback-pogo-2026-07-30/{pogo,pogod}`.
+
+### Install
+
+The fire time is set a few minutes into the future, because **the installing
+agent must be gone before the job runs** — the redeploy ends in a
+`launchctl kickstart -k` that kills `pogod`'s entire process tree, including
+whichever agent installed this. That is expected, and is why the fire is
+scheduled rather than immediate (`RunAtLoad` is `false`).
+
+```bash
+mkdir -p ~/.pogo/bin ~/Library/Logs/pogo
+cp scripts/launchd/pogo-stampfix.sh ~/.pogo/bin/pogo-stampfix.sh
+chmod +x ~/.pogo/bin/pogo-stampfix.sh
+
+# Fire 5 minutes out, in LOCAL time (StartCalendarInterval is local).
+sed -e "s/YOUR_USERNAME/$USER/g" \
+    -e "s/FIRE_HOUR/$(date -v+5M +%H)/" -e "s/FIRE_MINUTE/$(date -v+5M +%M)/" \
+    scripts/launchd/com.pogo.stampfix.plist > ~/Library/LaunchAgents/com.pogo.stampfix.plist
+plutil -lint ~/Library/LaunchAgents/com.pogo.stampfix.plist
+launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.pogo.stampfix.plist
+```
+
+`plutil -lint` is in the snippet because an unsubstituted placeholder is the one
+mistake here that produces a job which simply never fires: the literal
+`FIRE_HOUR` lints as `Hex digit in non-hex <integer>` (its `F` and `E` are hex
+digits), so linting turns a silent no-op into an install-time error. The
+zero-padded output of `date +%H` needs no stripping — `<integer>09</integer>`
+parses as `9`, not as octal (verified with `plutil -extract`).
+
+### Rehearsing it
+
+A one-shot is otherwise a script whose first execution is also its only test, and
+this one's untested half ends in a fleet-wide bounce. `POGO_STAMPFIX_DRY_RUN=1`
+runs everything that *can* be rehearsed — tool resolution, the worktree and
+dirty-tree refusals, the `go install`, and the fail-closed stamp verification —
+then stops at the bounce and prints the command it would have run. Point `GOBIN`
+at a scratch directory and it touches nothing the fleet uses:
+
+```bash
+git clone ~/.pogo/deploy-src /tmp/stampfix-rehearsal
+mkdir -p /tmp/stampfix-gobin
+env -u POGO_AGENT_NAME GOBIN=/tmp/stampfix-gobin \
+    POGO_DEPLOY_SRC=/tmp/stampfix-rehearsal \
+    POGO_STAMPFIX_DRY_RUN=1 ~/.pogo/bin/pogo-stampfix.sh
+```
+
+It writes no sentinel, sends no mail and removes no plist — a rehearsal that
+armed the one-shot guard would block the real run it was meant to de-risk.
+
+Two things make the rehearsal usable *and* safe:
+
+- **The caller check is waived in dry-run, and only there.** It exists because a
+  caller inside `pogod`'s tree cannot survive the bounce to finish the second
+  step; dry-run performs no bounce, so there is no second step to be cut off
+  from — and the agent authoring this job is exactly who needs to rehearse it.
+- **`GOBIN` must not be the live one.** Dry-run skips the bounce but still runs a
+  *real* `go install`, so with a default `GOBIN` it would land on top of the
+  running `pogod` — a "rehearsal" that silently performs the riskiest half of the
+  real thing. The runner compares the install target against the directory the
+  live `pogod` was exec'd from and refuses:
+
+      ERROR: DRY RUN refusing: the install target is /Users/you/go/bin, which is
+      where the RUNNING pogod lives.
+
+  Docs telling you to set `GOBIN` are not a mechanism; that check is.
+  `POGO_STAMPFIX_ALLOW_LIVE_GOBIN=1` overrides it when overwriting them is
+  genuinely intended.
+
+### Runner env overrides
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `POGO_DEPLOY_SRC` | `~/.pogo/deploy-src` | The checkout to build. Must have a real `.git` **directory**. |
+| `POGO_STAMPFIX_DRY_RUN` | unset | Do everything except the bounce. |
+| `POGO_STAMPFIX_SENTINEL` | `~/.pogo/stampfix-mg-3888.ran` | One-shot marker. |
+| `POGO_STAMPFIX_ALERT_TO` | `mayor` | Coordinator mailbox (`human` is always mailed too). |
+| `POGO_STAMPFIX_ALLOW_LIVE_GOBIN` | unset | Let a dry-run install over the live binaries. |
+| `POGO_STAMPFIX_NO_SELF_REMOVE` | unset | Keep the job loaded after it runs. |
+| `POGO_STAMPFIX_PLIST` | `~/Library/LaunchAgents/com.pogo.stampfix.plist` | What self-removal deletes. |
+
+### Managing it
+
+| Action | Command |
+|--------|---------|
+| Check status | `launchctl list \| grep com.pogo.stampfix` |
+| View logs | `tail -f ~/Library/Logs/pogo/pogo-stampfix.log` |
+| Cancel before it fires | `launchctl bootout gui/$(id -u)/com.pogo.stampfix && rm ~/Library/LaunchAgents/com.pogo.stampfix.plist` |
+| Re-arm after a failed run | `rm ~/.pogo/stampfix-mg-3888.ran`, then re-install |
+| Confirm the fix landed | `~/.pogo/deploy-src/scripts/pogo-self-deploy check --repo ~/.pogo/deploy-src` |
+
+Once it has run successfully this job has no further purpose: it removes its own
+plist and boots its label out. The sentinel is left behind on purpose, as the
+record that it ran.
