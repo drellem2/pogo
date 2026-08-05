@@ -54,6 +54,7 @@ import (
 	"github.com/drellem2/pogo/internal/service"
 	"github.com/drellem2/pogo/internal/stallwatch"
 	"github.com/drellem2/pogo/internal/synthwatch"
+	"github.com/drellem2/pogo/internal/wedgewatch"
 	"github.com/drellem2/pogo/internal/workitem"
 
 	pogoPlugin "github.com/drellem2/pogo/pkg/plugin"
@@ -1941,6 +1942,51 @@ Flags:
 		log.Printf("pogod: deaf-watch NOT armed — the agent registry did not load, so there is nothing to judge")
 	}
 
+	// Build the WEDGED-AGENT detector (mg-fc8d). On 2026-08-04 twelve polecats
+	// and the doctor crew agent sat at a Claude Code login prompt for thirteen
+	// hours; on 2026-08-05 it recurred for seven. Roughly twenty agent-hours of
+	// nothing, and every liveness instrument in this daemon read healthy for the
+	// whole of both windows — because the agents were ANIMATING. Claude Code
+	// redraws a spinner while parked at a prompt, so `last-activity` (PTY
+	// writes) said "just now" forever, the process was alive so status said
+	// running, and CPU was near zero, which is also what a legitimately blocked
+	// agent looks like.
+	//
+	// This runner reads what none of those instruments read: the CONTENT of each
+	// agent's PTY, and the agent's own declared work counter beside its process
+	// uptime. See internal/wedgewatch for why the cross-check gates on that
+	// counter being frozen rather than on the raw ratio, and why a 401 shortly
+	// after a connectivity failure is ONE signature rather than a revoked
+	// credential.
+	//
+	// REPORT-ONLY, and unusually strictly: no mail, because mg-fc8d item (3) —
+	// escalating a fleet-level wedge OUTSIDE the wedged party — is an
+	// alerting-policy decision reserved to Daniel and is deliberately not built.
+	// The findings go to the event log and to this daemon's log; wiring a
+	// recipient is a later, separate change.
+	var wedgeWatcher *wedgewatch.Watcher
+	if cfg.WedgeWatch.Enabled && agentRegistry != nil {
+		wedgeWatcher = wedgewatch.New(wedgewatch.Options{
+			Enabled:       true,
+			Source:        wedgewatch.RegistrySource(agentRegistry, wedgewatch.SystemCredential),
+			Interval:      cfg.WedgeWatch.Interval,
+			RenotifyAfter: cfg.WedgeWatch.RenotifyAfter,
+			Thresholds: wedgewatch.Thresholds{
+				MarkerHoldDown:    cfg.WedgeWatch.MarkerHoldDown,
+				FreezeHoldDown:    cfg.WedgeWatch.FreezeHoldDown,
+				MinUptime:         cfg.WedgeWatch.MinUptime,
+				Ratio:             cfg.WedgeWatch.Ratio,
+				CoincidenceWindow: cfg.WedgeWatch.CoincidenceWindow,
+			},
+		})
+		log.Printf("pogod: wedge-watch enabled (interval=%s marker_hold_down=%s freeze_hold_down=%s "+
+			"min_uptime=%s ratio=%.0fx coincidence_window=%s, report-only, NOT routed — mg-fc8d item 3 is unruled)",
+			cfg.WedgeWatch.Interval, cfg.WedgeWatch.MarkerHoldDown, cfg.WedgeWatch.FreezeHoldDown,
+			cfg.WedgeWatch.MinUptime, cfg.WedgeWatch.Ratio, cfg.WedgeWatch.CoincidenceWindow)
+	} else if cfg.WedgeWatch.Enabled {
+		log.Printf("pogod: wedge-watch NOT armed — the agent registry did not load, so there are no PTYs to read")
+	}
+
 	// The done-item polecat reaper (mg-56d1): completion frees a slot, however
 	// completion happened. The merge hook above covers polecats whose deliverable
 	// is a branch; this covers the triage / audit / investigation polecats that
@@ -2036,6 +2082,18 @@ Flags:
 		// register a schedule, nudge, or restart the agent it names.
 		if deafWatcher != nil {
 			go deafWatcher.Check(now)
+		}
+		// The wedged-agent detector rides the same tick and throttles itself to
+		// a coarse interval. In a goroutine because it scans every agent's PTY
+		// ring and, when an auth symptom appears, shells out to `security` for
+		// the credential's expiry — which can block on a keychain
+		// authorization prompt and must never delay a tick. Report-only, and
+		// with no mail seam at all: see the wiring above for why.
+		if wedgeWatcher != nil {
+			go func(now time.Time) {
+				wedgeWatcher.Check(now)
+				logWedgeFindings(wedgeWatcher, now)
+			}(now)
 		}
 		// The synthetic-failure-turn detector rides the same tick and throttles
 		// itself to synthwatch.DefaultInterval. In a goroutine because it reads

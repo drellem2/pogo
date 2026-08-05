@@ -306,6 +306,48 @@ const (
 	// loop is not a weaker alert, it is no alert at all.
 	DefaultDeafWatchEscalateAfter = 24 * time.Hour
 
+	// DefaultWedgeWatchInterval is how often pogod's wedged-agent detector
+	// samples every agent's PTY and uptime (mg-fc8d). Same cadence as
+	// deaf-watch and for the same reason: the hold-downs, not the sampling
+	// rate, are what keep it quiet. Rides the heartbeat, not a launchd timer
+	// (mg-50e0) — which for a wedge detector would be a particularly complete
+	// joke to get wrong.
+	DefaultWedgeWatchInterval = 5 * time.Minute
+	// DefaultWedgeWatchMarkerHoldDown is how long a KNOWN dead-end marker must
+	// sit beside a stalled agent before it is reported. It is not zero because
+	// an agent WRITING about the wedge — a ticket, a changelog, the detector
+	// itself — puts every enumerated string into its own PTY. mg-4421 hit the
+	// same wall with the rating dialog and solved it with an idle gate.
+	DefaultWedgeWatchMarkerHoldDown = 10 * time.Minute
+	// DefaultWedgeWatchFreezeHoldDown is how long the agent's own work counter
+	// must hold ONE unchanged value before the un-enumerated case is reported.
+	// Sized to span at least two mail-check fires at the fleet's 10-minute
+	// cadence: a merely-idle agent still runs a turn on every fire, which moves
+	// the counter, so surviving several fires unchanged means the fires are
+	// being absorbed without running anything.
+	DefaultWedgeWatchFreezeHoldDown = 30 * time.Minute
+	// DefaultWedgeWatchMinUptime keeps young agents out of the report. Spawn is
+	// the noisiest part of an agent's life.
+	DefaultWedgeWatchMinUptime = time.Hour
+	// DefaultWedgeWatchRatio is mg-fc8d's "orders of magnitude below" test as a
+	// number: uptime must be at least this many times the frozen declared
+	// counter. The two live signatures were 13h44m beside "3m 2s" (280x) and 7h
+	// beside "2m 56s" (143x).
+	DefaultWedgeWatchRatio = 20.0
+	// DefaultWedgeWatchCoincidenceWindow is how long a connectivity failure
+	// keeps a later 401 explained as ONE signature rather than two.
+	//
+	// The choice is deliberately asymmetric. Too SHORT and a refresh that
+	// failed inside an outage is reported as a poisoned credential, which pages
+	// a human for a re-login that fixes nothing — the exact error the doctor's
+	// correction to mg-fc8d exists to prevent. Too LONG and a genuine
+	// revocation is reported as an outage artifact, whose handling is "wait for
+	// the network", which fails visibly and immediately. Prefer long.
+	DefaultWedgeWatchCoincidenceWindow = 2 * time.Hour
+	// DefaultWedgeWatchRenotify is how long an UNCHANGED roster of wedged
+	// agents stays quiet before the finding is emitted again.
+	DefaultWedgeWatchRenotify = 6 * time.Hour
+
 	// DefaultDoneReapIdleGrace is how long a polecat whose work item has reached
 	// a terminal state must be quiet on its PTY before pogod stops it (mg-56d1).
 	// See cmd/pogod/donereap.go for why the condition is item-done AND idle
@@ -512,6 +554,7 @@ type Config struct {
 	GHIntake   GHIntakeConfig
 	AckWatch   AckWatchConfig
 	DeafWatch  DeafWatchConfig
+	WedgeWatch WedgeWatchConfig
 	DoneReap   DoneReapConfig
 	// DispatchPairing declares repos whose items owe a paired work item before
 	// dispatch. Zero value = no repos = inert. See dispatchpairing.go.
@@ -949,6 +992,67 @@ type DeafWatchConfig struct {
 	EscalateAfter time.Duration
 }
 
+// WedgeWatchConfig configures pogod's wedged-agent DETECTOR (mg-fc8d): the
+// heartbeat-driven runner that reads every agent's PTY for known dead-end
+// states and cross-checks each agent's own declared work counter against its
+// process uptime.
+//
+// It exists because on 2026-08-04 twelve polecats and the doctor crew agent sat
+// at a login prompt for thirteen hours, and again for seven on 2026-08-05, with
+// every liveness instrument pogo has reading healthy throughout. The agents were
+// ANIMATING: Claude Code redraws a spinner while parked at a prompt, so
+// `last-activity` — which tracks PTY writes — read "just now" for the whole
+// window, the process was alive so status read running, and CPU was near zero,
+// which is also what a legitimately blocked agent looks like.
+//
+// The mechanics live in internal/wedgewatch, including why the counter/uptime
+// cross-check gates on the counter being FROZEN rather than on the raw ratio (a
+// ratio-only rule fires on every healthy agent at the start of every turn), and
+// why a 401 shortly after a connectivity failure is treated as ONE signature
+// rather than as a revoked credential.
+//
+// REPORT-ONLY, and more strictly than its siblings: there is no NotifyTo and no
+// EscalateTo here, because mg-fc8d's item (3) — escalating a fleet-level wedge
+// OUTSIDE the wedged party — is an alerting-policy decision reserved to Daniel
+// and unruled at the time of writing. The runner emits events and exposes its
+// findings; it holds no seam through which it could pick a recipient, nudge,
+// dismiss, stop or re-dispatch anything.
+type WedgeWatchConfig struct {
+	// Enabled turns the runner on. Defaults to true; it is inert on a daemon
+	// with no agent registry, and reports that case as an error rather than as
+	// a clean fleet, so leaving it on is safe.
+	Enabled bool
+	// Interval is the gap between samples. Zero falls back to
+	// DefaultWedgeWatchInterval.
+	Interval time.Duration
+	// MarkerHoldDown is how long a known dead-end marker must sit beside a
+	// stalled agent before it is reported. Zero falls back to
+	// DefaultWedgeWatchMarkerHoldDown. A NEGATIVE value removes the hold-down,
+	// which only tests should do: without it, any agent writing about the wedge
+	// reports itself.
+	MarkerHoldDown time.Duration
+	// FreezeHoldDown is how long the declared work counter must hold one
+	// unchanged value before the un-enumerated case is reported. Zero falls
+	// back to DefaultWedgeWatchFreezeHoldDown; NEGATIVE removes it, which only
+	// tests should do — without it every healthy agent reports at the start of
+	// every turn.
+	FreezeHoldDown time.Duration
+	// MinUptime is the process-age floor below which no cross-check finding is
+	// made. Zero falls back to DefaultWedgeWatchMinUptime; NEGATIVE removes it.
+	MinUptime time.Duration
+	// Ratio is how many times the frozen declared counter uptime must exceed.
+	// Zero or negative falls back to DefaultWedgeWatchRatio.
+	Ratio float64
+	// CoincidenceWindow is how long a connectivity failure keeps a later 401
+	// explained as the same event. Zero falls back to
+	// DefaultWedgeWatchCoincidenceWindow. See that constant for why the
+	// trade-off is deliberately asymmetric.
+	CoincidenceWindow time.Duration
+	// RenotifyAfter is how long an unchanged roster stays quiet before the
+	// finding is emitted again. Zero falls back to DefaultWedgeWatchRenotify.
+	RenotifyAfter time.Duration
+}
+
 // DoneReapConfig configures pogod's done-item polecat reaper (mg-56d1): the
 // heartbeat-driven runner that stops a polecat whose work item has reached a
 // terminal state and which has gone quiet, regardless of whether that
@@ -1117,6 +1221,7 @@ type parsedConfig struct {
 	ghIntakeEnabledSet        bool
 	ackWatchEnabledSet        bool
 	deafWatchEnabledSet       bool
+	wedgeWatchEnabledSet      bool
 	doneReapEnabledSet        bool
 	// sources are the files that were read, lowest precedence first.
 	sources []string
@@ -1212,6 +1317,16 @@ func Load() *Config {
 			RenotifyAfter: DefaultDeafWatchRenotify,
 			NotifyTo:      DefaultDeafWatchNotifyTo,
 			EscalateAfter: DefaultDeafWatchEscalateAfter,
+		},
+		WedgeWatch: WedgeWatchConfig{
+			Enabled:           true,
+			Interval:          DefaultWedgeWatchInterval,
+			MarkerHoldDown:    DefaultWedgeWatchMarkerHoldDown,
+			FreezeHoldDown:    DefaultWedgeWatchFreezeHoldDown,
+			MinUptime:         DefaultWedgeWatchMinUptime,
+			Ratio:             DefaultWedgeWatchRatio,
+			CoincidenceWindow: DefaultWedgeWatchCoincidenceWindow,
+			RenotifyAfter:     DefaultWedgeWatchRenotify,
 		},
 		DoneReap: DoneReapConfig{
 			Enabled:   true,
@@ -1377,6 +1492,34 @@ func Load() *Config {
 		// override.
 		if fileCfg.DeafWatch.EscalateAfter != 0 {
 			cfg.DeafWatch.EscalateAfter = fileCfg.DeafWatch.EscalateAfter
+		}
+		if fileCfg.wedgeWatchEnabledSet {
+			cfg.WedgeWatch.Enabled = fileCfg.WedgeWatch.Enabled
+		}
+		if fileCfg.WedgeWatch.Interval > 0 {
+			cfg.WedgeWatch.Interval = fileCfg.WedgeWatch.Interval
+		}
+		// Non-zero, not >0: a negative hold-down is the documented way to turn
+		// that hold-down off, so it must survive the merge like any other
+		// override. Only tests should do it — without the hold-downs an agent
+		// merely writing about the wedge reports itself.
+		if fileCfg.WedgeWatch.MarkerHoldDown != 0 {
+			cfg.WedgeWatch.MarkerHoldDown = fileCfg.WedgeWatch.MarkerHoldDown
+		}
+		if fileCfg.WedgeWatch.FreezeHoldDown != 0 {
+			cfg.WedgeWatch.FreezeHoldDown = fileCfg.WedgeWatch.FreezeHoldDown
+		}
+		if fileCfg.WedgeWatch.MinUptime != 0 {
+			cfg.WedgeWatch.MinUptime = fileCfg.WedgeWatch.MinUptime
+		}
+		if fileCfg.WedgeWatch.Ratio > 0 {
+			cfg.WedgeWatch.Ratio = fileCfg.WedgeWatch.Ratio
+		}
+		if fileCfg.WedgeWatch.CoincidenceWindow > 0 {
+			cfg.WedgeWatch.CoincidenceWindow = fileCfg.WedgeWatch.CoincidenceWindow
+		}
+		if fileCfg.WedgeWatch.RenotifyAfter > 0 {
+			cfg.WedgeWatch.RenotifyAfter = fileCfg.WedgeWatch.RenotifyAfter
 		}
 		if fileCfg.doneReapEnabledSet {
 			cfg.DoneReap.Enabled = fileCfg.DoneReap.Enabled
@@ -2042,6 +2185,40 @@ func parseConfigFileInto(cfg *parsedConfig, path string) error {
 			case "escalate_after":
 				if d, err := time.ParseDuration(unquotedVal); err == nil {
 					cfg.DeafWatch.EscalateAfter = d
+				}
+			}
+		case "wedge_watch":
+			switch key {
+			case "enabled":
+				cfg.WedgeWatch.Enabled = val == "true"
+				cfg.wedgeWatchEnabledSet = true
+			case "interval":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.WedgeWatch.Interval = d
+				}
+			case "marker_hold_down":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.WedgeWatch.MarkerHoldDown = d
+				}
+			case "freeze_hold_down":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.WedgeWatch.FreezeHoldDown = d
+				}
+			case "min_uptime":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.WedgeWatch.MinUptime = d
+				}
+			case "ratio":
+				if f, err := strconv.ParseFloat(unquotedVal, 64); err == nil {
+					cfg.WedgeWatch.Ratio = f
+				}
+			case "coincidence_window":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.WedgeWatch.CoincidenceWindow = d
+				}
+			case "renotify_after":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.WedgeWatch.RenotifyAfter = d
 				}
 			}
 		case "done_reap":
