@@ -176,12 +176,28 @@ func TestPolecatTemplateExpansion(t *testing.T) {
 		"pogo schedule $POGO_AGENT_NAME", // pogod scheduler CLI, bare agent name
 		"--cron \"*/10 * * * *\"",        // 10-minute cadence
 		"--id mail-check-gt-a3f",         // idempotent registration key (work item id)
-		"mg mail list gt-a3f",            // expanded message body
+		"mg mail list $POGO_AGENT_NAME",  // mailbox — the AGENT NAME, see below
 	}
 	for _, check := range scheduleChecks {
 		if !strings.Contains(expanded, check) {
 			t.Errorf("expanded template missing mail-check schedule instruction %q", check)
 		}
+	}
+
+	// The mailbox must NOT be built from Id — the same shape as the branch
+	// assertion twenty lines up, and the same lesson learned twice. This one
+	// used to demand "mg mail list gt-a3f", pinning the mg-aa96 defect in place:
+	// mail is addressed to the AGENT NAME (correspondents reply to
+	// `--from=$POGO_AGENT_NAME`), so a mailbox built from Id was wrong on every
+	// dispatch whose agent name was not the id minus "mg-". Unlike the branch
+	// case there is nothing to notice downstream: `mg mail list` on a never-used
+	// mailbox prints "no mail has ever been delivered to it" and exits 0,
+	// identical to an empty inbox. All eight polecats live on 2026-08-05 were
+	// reading the wrong one.
+	if strings.Contains(expanded, "mg mail list gt-a3f") {
+		t.Errorf("expanded template builds the mailbox from Id (%q); "+
+			"mail arrives under the agent name and the wrong-mailbox poll is "+
+			"indistinguishable from an empty inbox (mg-aa96)", "mg mail list gt-a3f")
 	}
 
 	// Verify guidance against additional schedules is still present — only the

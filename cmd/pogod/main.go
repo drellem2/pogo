@@ -395,8 +395,8 @@ func (m mailCheckRegistrar) addAndVerify(entry scheduler.Entry, agentName, sched
 // the persistent post-retry path, not this reporter's (mg-6fe0).
 type scheduleRegisterFailureReporter struct{ logPath string }
 
-func (r scheduleRegisterFailureReporter) ReportScheduleRegisterFailed(agentName, mailbox, reason string) {
-	scheduler.EmitScheduleRegisterFailedTo(r.logPath, agentName, scheduler.MailCheckIDPrefix+mailbox, reason)
+func (r scheduleRegisterFailureReporter) ReportScheduleRegisterFailed(agentName, scheduleKey, reason string) {
+	scheduler.EmitScheduleRegisterFailedTo(r.logPath, agentName, scheduler.MailCheckIDPrefix+scheduleKey, reason)
 }
 
 // schedulerStallWindows implements agent.StallScheduleProvider against the

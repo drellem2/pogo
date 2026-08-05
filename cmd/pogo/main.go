@@ -3546,6 +3546,9 @@ branches; work items and mail live in mg/macguffin (the task-store CLI).`,
 	rootCmd.AddCommand(cmdCheckIntake)
 	rootCmd.AddCommand(cmdCheckAcks)
 	rootCmd.AddCommand(cmdCheckMailLoops)
+	// check-strandedmail (mg-aa96): the residue a repointed mail-check leaves —
+	// mail already delivered to the mailbox nobody polls any more.
+	rootCmd.AddCommand(newCheckStrandedMailCmd(&jsonOutput))
 	rootCmd.AddCommand(cmdCheckCommitBody)
 	rootCmd.AddCommand(newCheckPromptsCmd(&jsonOutput))
 	rootCmd.AddCommand(newCheckStalenessCmd(&jsonOutput))

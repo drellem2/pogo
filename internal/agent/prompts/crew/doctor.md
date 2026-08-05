@@ -101,6 +101,17 @@ pose <query>                     # Search across repos
 
 # Mail
 mg mail list doctor              # Check your inbox
+pogo check-strandedmail          # Mail sitting in a mailbox NO live mail-check reads.
+                                 # A mail-check that fires perfectly into the wrong
+                                 # mailbox satisfies every other reachability check
+                                 # you have — and repointing it only changes where
+                                 # that agent looks NEXT, orphaning what already
+                                 # arrived. Findings name the sender and subject and
+                                 # print the `mg mail read <box>/<id> --force` that
+                                 # opens each. Corrections are the traffic at risk.
+                                 # Reading is only half the recovery: if the intended
+                                 # recipient is still running, tell the SENDER to
+                                 # re-send to the agent name (mg-aa96).
 mg mail read <msg-id>            # Read a message
 mg mail send <agent> --from=doctor --subject="<subj>" --body-file - <<'EOF'
 <body>

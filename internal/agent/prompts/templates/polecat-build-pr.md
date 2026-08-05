@@ -99,10 +99,10 @@ Follow these steps exactly, in order. Skipping any step is a failure.
    ```bash
    pogo schedule $POGO_AGENT_NAME --cron "*/10 * * * *" --id mail-check-{{.Id}} \
        --replay once \
-       --message "Check your mail with mg mail list {{.Id}} and handle any unread messages."
+       --message "Check your mail with mg mail list $POGO_AGENT_NAME and handle any unread messages."
    ```
 
-   Confirm with `pogo schedule list --agent $POGO_AGENT_NAME` — you should see exactly one entry. pogod already auto-registers this schedule for you at spawn (mg-e633), so this command is a safe re-confirm; the `--id` is keyed on your work item id, so re-running it replaces the same `(agent, id)` entry rather than stacking duplicates. The {{.Coordinator}} will `pogo schedule rm mail-check-{{.Id}}` when stopping you, so you don't need to clean up yourself. This is the **only** background schedule you should register.
+   Confirm with `pogo schedule list --agent $POGO_AGENT_NAME` — you should see exactly one entry. pogod already auto-registers this schedule for you at spawn (mg-e633), so this command is a safe re-confirm; the `--id` is keyed on your work item id, so re-running it replaces the same `(agent, id)` entry rather than stacking duplicates. **The mailbox is `$POGO_AGENT_NAME`, not your work item id** — the two are different strings, and mail reaches you under your AGENT NAME (that is the identity `--from=$POGO_AGENT_NAME` puts on your replies, so it is where answers come back). Getting this wrong is invisible from your side: `mg mail list` on a mailbox nobody ever wrote to prints "no mail has ever been delivered to it" and exits 0, which reads exactly like an empty inbox — eight polecats polled the wrong one for hours on that. `pogo schedule` now refuses a mail-check naming any mailbox but its own agent, so a mismatch fails loudly at registration instead (mg-aa96). The {{.Coordinator}} will `pogo schedule rm mail-check-{{.Id}}` when stopping you, so you don't need to clean up yourself. This is the **only** background schedule you should register.
 
    *Why `pogo schedule` and not an in-process scheduler?* A harness in-process scheduler{{if eq .Provider "claude"}} (such as Claude Code's `CronCreate`){{end}} lives inside this harness session and has no notion of wall-clock time across sleep — if the host suspends for an hour, every fire that should have happened in that window is silently dropped. `pogo schedule` stores the next fire time on disk and replays through sleep; see "Reacting to scheduler fires" below for the policy.
 
@@ -182,7 +182,7 @@ Follow these steps exactly, in order. Skipping any step is a failure.
 The mail-check schedule registered in step 2 delivers each fire with metadata appended to the message body, e.g.:
 
 ```
-Check your mail with mg mail list mg-XXXX and handle any unread messages.
+Check your mail with mg mail list <your-agent-name> and handle any unread messages.
 
 [scheduler id=mail-check-mg-XXXX due=2026-05-03T09:00:00Z fired=2026-05-03T09:00:14Z]
 ```

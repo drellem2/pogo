@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/drellem2/pogo/internal/agent"
 	"github.com/drellem2/pogo/internal/scheduler"
 )
 
@@ -124,5 +125,71 @@ func TestMailCheckRegistrar_PersistentFailureEscalates(t *testing.T) {
 	}
 	if want := "pc-dark/" + scheduler.MailCheckIDPrefix + "wi-dark"; escalations[0] != want {
 		t.Errorf("escalation = %q, want %q", escalations[0], want)
+	}
+}
+
+// TestMailCheckRegistrar_SpawnMessagePassesTheMailboxGuard is the join between
+// the two halves of the mg-aa96 fix. Part 1 changed what pogod registers
+// (mailbox = agent name); part 2 made the scheduler refuse a mail-check pointed
+// anywhere else. Wiring the REAL message builder into the REAL registrar and
+// the REAL scheduler is what proves the two agree — a guard that rejected the
+// message the fix now ships would take every polecat's reachability channel
+// down at spawn.
+//
+// What it does NOT prove is that part 1 is still in place: it builds the
+// message itself rather than going through registerPolecatMailCheck, so a
+// regression there is caught by TestSpawnPolecatRegistersMailCheck (agent
+// package) and its production consequence by the sibling test below.
+//
+// The fixture's agent name and work item deliberately differ, in exactly the
+// shape the live fleet had: agent "waa96" working "mg-aa96".
+func TestMailCheckRegistrar_SpawnMessagePassesTheMailboxGuard(t *testing.T) {
+	s, err := scheduler.New(filepath.Join(t.TempDir(), "schedules.json"), nil)
+	if err != nil {
+		t.Fatalf("scheduler.New: %v", err)
+	}
+	m := mailCheckRegistrar{sched: s}
+
+	const name, workItem = "waa96", "mg-aa96"
+	if err := m.RegisterMailCheck(name, workItem, agent.PolecatMailCheckCron, agent.PolecatMailCheckMessage(name)); err != nil {
+		t.Fatalf("the message pogod registers at spawn was refused by the mailbox guard: %v", err)
+	}
+	got, ok := s.Get(name, scheduler.MailCheckIDPrefix+workItem)
+	if !ok {
+		t.Fatal("entry absent after a registration that reported success")
+	}
+	mailbox, found := scheduler.MailCheckMailbox(got.Message)
+	if !found || mailbox != name {
+		t.Errorf("registered message reads mailbox %q (found=%v), want the agent name %q", mailbox, found, name)
+	}
+}
+
+// TestMailCheckRegistrar_RejectsWorkItemDerivedMailbox is the positive control
+// for the test above: the same registrar, the same scheduler, the same work
+// item — only the mailbox reverts to the pre-mg-aa96 work-item-derived form.
+// Registration must now FAIL. Without this, the test above would pass just as
+// happily if the guard were removed entirely.
+func TestMailCheckRegistrar_RejectsWorkItemDerivedMailbox(t *testing.T) {
+	s, err := scheduler.New(filepath.Join(t.TempDir(), "schedules.json"), nil)
+	if err != nil {
+		t.Fatalf("scheduler.New: %v", err)
+	}
+	var escalations int
+	m := mailCheckRegistrar{sched: s, escalate: func(string, string) { escalations++ }}
+
+	const name, workItem = "waa96", "mg-aa96"
+	err = m.RegisterMailCheck(name, workItem, agent.PolecatMailCheckCron, agent.PolecatMailCheckMessage(workItem))
+	if err == nil {
+		t.Fatal("registrar accepted the pre-mg-aa96 work-item-derived mailbox; the polecat would poll `aa96` while its mail arrives in `waa96`, and would read that as having no mail")
+	}
+	if _, ok := s.Get(name, scheduler.MailCheckIDPrefix+workItem); ok {
+		t.Error("a refused mail-check must not be left registered")
+	}
+	// The registrar treats it as a persistent failure, which is the intended
+	// landing: a polecat with no working reachability channel escalates to the
+	// mayor and lands in schedule_register_failed telemetry, instead of running
+	// for an hour on an inbox nobody writes to.
+	if escalations != 1 {
+		t.Errorf("escalate called %d times, want 1 — a refused mail-check leaves the polecat unreachable and must be loud", escalations)
 	}
 }

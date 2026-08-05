@@ -15,8 +15,13 @@ const PolecatMailCheckCron = "*/10 * * * *"
 // mail-check fire. It tells the polecat to drain its inbox and act on the
 // builder<->reviewer review-loop traffic (reviewer findings, re-review
 // requests) that would otherwise sit unread — the silent-stall this schedule
-// exists to prevent (mg-e633). mailbox is the identity the polecat reads mail
-// under (its work item id, or its agent name when no work item is set).
+// exists to prevent (mg-e633).
+//
+// mailbox MUST be the polecat's AGENT NAME, not its work item id. Mail reaches
+// a polecat under the identity its correspondents address, and the protocol has
+// them reply to `--from=$POGO_AGENT_NAME`. Deriving this from the work item
+// instead sent all eight polecats running on 2026-08-05 to a mailbox nobody
+// writes to, invisibly — see internal/scheduler/mailbox.go (mg-aa96).
 func PolecatMailCheckMessage(mailbox string) string {
 	return fmt.Sprintf(
 		"Check your mail with `mg mail list %s` and handle any unread messages — "+
@@ -69,11 +74,12 @@ type MailCheckRegistrar interface {
 // path, which the registrar adapter owns (mg-6fe0).
 type ScheduleRegisterFailureReporter interface {
 	// ReportScheduleRegisterFailed records that a polecat's mail-check schedule
-	// could not be registered. mailbox is the schedule-id key (the work item id,
-	// or the agent name when the spawn carried none); reason is a short,
+	// could not be registered. scheduleKey is the schedule-id key (the work item
+	// id, or the agent name when the spawn carried none) — NOT the mailbox,
+	// which is always the agent name (mg-aa96); reason is a short,
 	// machine-stable cause so a reader can tell the two live suspects apart (a
 	// benign startup nil registrar vs. a transient persist-IO failure).
-	ReportScheduleRegisterFailed(agentName, mailbox, reason string)
+	ReportScheduleRegisterFailed(agentName, scheduleKey, reason string)
 }
 
 // SetMailCheckRegistrar installs the scheduler adapter used by spawn-polecat to
@@ -102,7 +108,7 @@ func (r *Registry) SetScheduleRegisterFailureReporter(rep ScheduleRegisterFailur
 	r.scheduleRegisterFailureReporter = rep
 }
 
-func (r *Registry) reportScheduleRegisterFailed(agentName, mailbox, reason string) {
+func (r *Registry) reportScheduleRegisterFailed(agentName, scheduleKey, reason string) {
 	r.mu.RLock()
 	rep := r.scheduleRegisterFailureReporter
 	r.mu.RUnlock()
@@ -113,12 +119,25 @@ func (r *Registry) reportScheduleRegisterFailed(agentName, mailbox, reason strin
 		log.Printf("polecat %s: mail-check schedule registration failed (%s); no failure reporter wired", agentName, reason)
 		return
 	}
-	rep.ReportScheduleRegisterFailed(agentName, mailbox, reason)
+	rep.ReportScheduleRegisterFailed(agentName, scheduleKey, reason)
 }
 
 // registerPolecatMailCheck registers the mail-check loop for a freshly spawned
-// polecat. workItemID falls back to the agent name when the spawn carried no
-// work item id, so every polecat gets a specific, reap-matchable schedule id.
+// polecat.
+//
+// Two identities are in play here and they are NOT interchangeable, which is
+// the whole of mg-aa96:
+//
+//   - the schedule KEY (mail-check-<workItemID>) names the unit of work, and
+//     falls back to the agent name when the spawn carried no work item id, so
+//     every polecat gets a specific, reap-matchable schedule id;
+//   - the MAILBOX is always the agent name, because that is the identity mail
+//     is addressed to (the protocol replies to --from=$POGO_AGENT_NAME).
+//
+// Collapsing the second into the first is what pointed all eight polecats
+// running on 2026-08-05 at a mailbox nobody writes to, with no error to notice.
+// Scheduler.Add now refuses a mail-check whose message names a mailbox other
+// than its agent, so this pairing cannot silently drift again.
 //
 // Registration stays NON-fatal to the spawn (the polecat is already running),
 // but it is no longer best-effort-and-silent: a mail-check loop is a polecat's
@@ -135,17 +154,17 @@ func (r *Registry) reportScheduleRegisterFailed(agentName, mailbox, reason strin
 //     the mayor before returning; a non-nil error here means the entry is
 //     genuinely absent after that. Record it so the telemetry is complete.
 func (r *Registry) registerPolecatMailCheck(agentName, workItemID string) {
-	mailbox := workItemID
-	if mailbox == "" {
-		mailbox = agentName
+	scheduleKey := workItemID
+	if scheduleKey == "" {
+		scheduleKey = agentName
 	}
 	reg := r.getMailCheckRegistrar()
 	if reg == nil {
-		r.reportScheduleRegisterFailed(agentName, mailbox, "nil_registrar")
+		r.reportScheduleRegisterFailed(agentName, scheduleKey, "nil_registrar")
 		return
 	}
-	if err := reg.RegisterMailCheck(agentName, mailbox, PolecatMailCheckCron, PolecatMailCheckMessage(mailbox)); err != nil {
+	if err := reg.RegisterMailCheck(agentName, scheduleKey, PolecatMailCheckCron, PolecatMailCheckMessage(agentName)); err != nil {
 		log.Printf("polecat %s: mail-check schedule registration failed after verify+retry: %v", agentName, err)
-		r.reportScheduleRegisterFailed(agentName, mailbox, "register_error: "+err.Error())
+		r.reportScheduleRegisterFailed(agentName, scheduleKey, "register_error: "+err.Error())
 	}
 }

@@ -1462,6 +1462,42 @@ silently. ack-watch catches "registered and not completing"; deaf-watch catches
 
 Source of truth: `internal/deafwatch/`, `internal/agent/mailloop_report.go`.
 
+### `pogo check-strandedmail` — mail in a mailbox nobody reads
+
+A third disjoint question, and the one neither of the above can ask. deaf-watch
+asks whether an agent can be **woken**; ack-watch asks whether its schedule is
+**completing**. Both are satisfied by a mail-check that fires perfectly into the
+wrong mailbox — which is what every polecat had before mg-aa96, when the message
+body derived the mailbox from the **work item** while correspondents address the
+**agent name** (`--from=$POGO_AGENT_NAME`).
+
+Registration now refuses that mismatch (`Entry.Validate`, see
+`internal/scheduler/mailbox.go`), but a refusal only governs schedules registered
+from now on. **Repointing an existing one only changes where the agent looks
+next**: everything already delivered to the abandoned box stays there, and the
+repoint turns a misdelivery into an orphan — mail exists, nobody reads it,
+nothing says so, which is the same shape as the bug it fixes. The 2026-08-05
+sweep of the live fleet found one such message, an urgent correction to a builder
+mid-flight.
+
+`pogo check-strandedmail` takes every live mail-check, derives the mailbox it
+*would* have read under the old work-item form, and asks `mg mail list --json`
+whether anything unread is sitting in it. Findings name the sender and subject —
+**corrections** are the traffic most at risk, because they are sent off-cadence
+to an agent already working — and print the exact `mg mail read <box>/<id>
+--force` that opens each one. `--force` is required rather than decorative: mg
+refuses a cross-box read without it, and nobody running this report is the
+abandoned mailbox.
+
+It **reports only**. Re-delivering would mean `mg mail send` writing a new
+message under a new `From`, and a correction whose provenance is a lie is worse
+than one that arrived late; if the recipient is still running, the original
+sender must re-send. A sweep with no mail-checks to judge says so rather than
+printing an all-clear. Exit status is 0 when nothing is stranded and 1 when
+anything is, so it can gate a schedule or CI step.
+
+Source of truth: `internal/strandedmail/`, `cmd/pogo/checkstrandedmail.go`.
+
 ## The wedged-agent detector (wedge-watch)
 
 On 2026-08-04 twelve polecats and the doctor crew agent sat at a Claude Code

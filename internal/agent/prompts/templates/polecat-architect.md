@@ -178,9 +178,9 @@ Even ephemeral, your context is where your *judgment* lives. Don't fill it with 
 
 2. **Register your mail-check schedule.** You must stay responsive to follow-ups (a requester clarifying the ask, a challenge to your reasoning).
    ```bash
-   pogo schedule $POGO_AGENT_NAME --cron "*/10 * * * *" --id mail-check-{{.Id}} --replay once --message "Check your mail with mg mail list {{.Id}} and handle any unread messages."
+   pogo schedule $POGO_AGENT_NAME --cron "*/10 * * * *" --id mail-check-{{.Id}} --replay once --message "Check your mail with mg mail list $POGO_AGENT_NAME and handle any unread messages."
    ```
-   Confirm exactly one entry with `pogo schedule list --agent $POGO_AGENT_NAME`. pogod may auto-register this at spawn; the {{.Coordinator}} removes it on stop.{{if eq .Provider "claude"}} (As a Claude Code agent, if the schedule isn't present, register it with a `CronCreate` every-10-minutes job running `mg mail list {{.Id}}`.){{end}}
+   Confirm exactly one entry with `pogo schedule list --agent $POGO_AGENT_NAME`. pogod may auto-register this at spawn; the {{.Coordinator}} removes it on stop. **The mailbox is `$POGO_AGENT_NAME`, not your work item id** — mail reaches you under your agent name (that is what `--from=$POGO_AGENT_NAME` puts on your replies), and polling the wrong one is invisible: `mg mail list` on a never-used mailbox prints "no mail has ever been delivered to it" and exits 0, exactly like an empty inbox. `pogo schedule` now refuses a mail-check naming any mailbox but its own agent (mg-aa96).{{if eq .Provider "claude"}} (As a Claude Code agent, if the schedule isn't present, register it with a `CronCreate` every-10-minutes job running `mg mail list $POGO_AGENT_NAME`.){{end}}
 
 3. **Understand the task and its design context — by looking.** Read the ticket in full. Then read the *stated* design before the code as-found: `ARCHITECTURE.md`, any `docs/` design notes or ADRs, and the top-of-file doc comments for the subsystem in question. This step is not preamble — it is the entire difference between a ruling and a guess. If the stated design doesn't cover your question, **that gap is itself a finding**: report that nobody has decided this yet, rather than quietly deciding it from priors.
 
@@ -241,7 +241,7 @@ Even ephemeral, your context is where your *judgment* lives. Don't fill it with 
 The mail-check schedule from step 2 delivers each fire with metadata appended:
 
 ```
-Check your mail with mg mail list mg-XXXX and handle any unread messages.
+Check your mail with mg mail list <your-agent-name> and handle any unread messages.
 
 [scheduler id=mail-check-mg-XXXX due=2026-05-03T09:00:00Z fired=2026-05-03T09:00:14Z]
 ```

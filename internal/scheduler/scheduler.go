@@ -252,6 +252,17 @@ func (e *Entry) Validate() error {
 	default:
 		return fmt.Errorf("scheduler: unknown kind %q (want mail-check|sweep|gate-lift|other)", e.Kind)
 	}
+	// A mail-check must send its agent to its OWN mailbox. Validate runs after
+	// applyDefaults in Add, so Kind is already backfilled from the
+	// "mail-check-" id prefix for callers that don't set it (the `pogo
+	// schedule` CLI) as well as those that do (pogod's spawn registrar) — both
+	// registration paths are covered by this one check. See mailbox.go for why
+	// a wrong mailbox cannot be noticed from inside the agent (mg-aa96).
+	if e.Kind == KindMailCheck {
+		if err := validateMailCheckMailbox(e.Agent, e.Message); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

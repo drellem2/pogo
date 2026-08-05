@@ -43,13 +43,13 @@ type fakeScheduleFailureReporter struct {
 }
 
 type scheduleFailure struct {
-	agent, mailbox, reason string
+	agent, scheduleKey, reason string
 }
 
-func (f *fakeScheduleFailureReporter) ReportScheduleRegisterFailed(agentName, mailbox, reason string) {
+func (f *fakeScheduleFailureReporter) ReportScheduleRegisterFailed(agentName, scheduleKey, reason string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.calls = append(f.calls, scheduleFailure{agentName, mailbox, reason})
+	f.calls = append(f.calls, scheduleFailure{agentName, scheduleKey, reason})
 }
 
 func (f *fakeScheduleFailureReporter) recorded() []scheduleFailure {
@@ -62,6 +62,13 @@ func (f *fakeScheduleFailureReporter) recorded() []scheduleFailure {
 // polecat auto-registers its mail-check loop, addressed to the polecat's bare
 // registry name (the identity pogod delivers nudges to and reaps under) with a
 // mail-check-<work-item-id> schedule id.
+//
+// It also holds the mg-aa96 line, which is why the fixture's name ("pc-plain")
+// and work item ("wi-42") deliberately disagree: the schedule ID keys on the
+// WORK ITEM, but the mailbox in the message must be the AGENT NAME, because
+// that is what correspondents address (`--from=$POGO_AGENT_NAME`). Registering
+// the work item as the mailbox is what sent eight live polecats to an inbox
+// nobody writes to, and reading it back looked exactly like having no mail.
 func TestSpawnPolecatRegistersMailCheck(t *testing.T) {
 	testsandbox.Isolate(t)
 
@@ -97,8 +104,11 @@ func TestSpawnPolecatRegistersMailCheck(t *testing.T) {
 	if c.cron != PolecatMailCheckCron {
 		t.Errorf("mail-check cron = %q, want %q", c.cron, PolecatMailCheckCron)
 	}
-	if !strings.Contains(c.message, "mg mail list wi-42") {
-		t.Errorf("mail-check message %q should tell the polecat to read `mg mail list wi-42`", c.message)
+	if !strings.Contains(c.message, "mg mail list pc-plain") {
+		t.Errorf("mail-check message %q should send the polecat to its AGENT-NAME mailbox `mg mail list pc-plain` — that is where its mail is addressed (mg-aa96)", c.message)
+	}
+	if strings.Contains(c.message, "mg mail list wi-42") {
+		t.Errorf("mail-check message %q derives the mailbox from the work item id; mail sent to pc-plain would never be seen, and the wrong-mailbox poll is indistinguishable from an empty inbox (mg-aa96)", c.message)
 	}
 }
 
@@ -179,8 +189,8 @@ func TestSpawnPolecatMailCheckFailureNonFatal(t *testing.T) {
 	if calls[0].agent != "pc-err" {
 		t.Errorf("report agent = %q, want %q", calls[0].agent, "pc-err")
 	}
-	if calls[0].mailbox != "wi-err" {
-		t.Errorf("report mailbox = %q, want %q", calls[0].mailbox, "wi-err")
+	if calls[0].scheduleKey != "wi-err" {
+		t.Errorf("report scheduleKey = %q, want %q", calls[0].scheduleKey, "wi-err")
 	}
 	if !strings.HasPrefix(calls[0].reason, "register_error:") {
 		t.Errorf("report reason = %q, want a register_error: prefix", calls[0].reason)
@@ -228,8 +238,8 @@ func TestSpawnPolecatNilRegistrarReportsFailure(t *testing.T) {
 	if calls[0].reason != "nil_registrar" {
 		t.Errorf("report reason = %q, want %q", calls[0].reason, "nil_registrar")
 	}
-	if calls[0].agent != "pc-nilreg" || calls[0].mailbox != "wi-nilreg" {
-		t.Errorf("report = %+v, want agent=pc-nilreg mailbox=wi-nilreg", calls[0])
+	if calls[0].agent != "pc-nilreg" || calls[0].scheduleKey != "wi-nilreg" {
+		t.Errorf("report = %+v, want agent=pc-nilreg scheduleKey=wi-nilreg", calls[0])
 	}
 }
 
@@ -261,11 +271,12 @@ func TestSpawnPolecatNoMailCheckRegistrar(t *testing.T) {
 
 // TestPolecatMailCheckMessageMentionsReviewLoop guards the message contract:
 // the nudge must both point at the mailbox and tell the polecat to act on the
-// builder<->reviewer review-loop traffic this schedule exists to unblock.
+// builder<->reviewer review-loop traffic this schedule exists to unblock. The
+// argument is an AGENT NAME — see the doc comment on PolecatMailCheckMessage.
 func TestPolecatMailCheckMessageMentionsReviewLoop(t *testing.T) {
-	msg := PolecatMailCheckMessage("mg-e633")
-	if !strings.Contains(msg, "mg mail list mg-e633") {
-		t.Errorf("message %q should reference `mg mail list mg-e633`", msg)
+	msg := PolecatMailCheckMessage("we633")
+	if !strings.Contains(msg, "mg mail list we633") {
+		t.Errorf("message %q should reference `mg mail list we633`", msg)
 	}
 	if !strings.Contains(strings.ToLower(msg), "review") {
 		t.Errorf("message %q should mention the review loop (reviewer findings / re-review)", msg)

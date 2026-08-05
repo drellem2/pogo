@@ -2171,18 +2171,24 @@ func TestInitPromptsRefusalIsAtomic(t *testing.T) {
 	}
 }
 
+// polecatMailCheckTemplates is every template that prescribes a mail-check
+// schedule. Kept as one list so a new polecat template cannot be added with a
+// mailbox rule of its own.
+var polecatMailCheckTemplates = []string{
+	"prompts/templates/polecat.md",
+	"prompts/templates/polecat-qa.md",
+	"prompts/templates/polecat-triage.md",
+	"prompts/templates/polecat-review.md",
+	"prompts/templates/polecat-architect.md",
+	"prompts/templates/polecat-build-pr.md",
+}
+
 // TestPolecatTemplatesIncludeMailCheckCron locks in the requirement that
 // every polecat template instructs the agent to register a mail-check cron at
 // startup. Without this, polecats won't proactively read mail and the mayor
 // can't reach them mid-task. See work item mg-c1d3.
 func TestPolecatTemplatesIncludeMailCheckCron(t *testing.T) {
-	templates := []string{
-		"prompts/templates/polecat.md",
-		"prompts/templates/polecat-qa.md",
-		"prompts/templates/polecat-triage.md",
-		"prompts/templates/polecat-review.md", "prompts/templates/polecat-architect.md",
-	}
-	for _, path := range templates {
+	for _, path := range polecatMailCheckTemplates {
 		data, err := defaultPrompts.ReadFile(path)
 		if err != nil {
 			t.Fatalf("read %s: %v", path, err)
@@ -2191,11 +2197,51 @@ func TestPolecatTemplatesIncludeMailCheckCron(t *testing.T) {
 		if !strings.Contains(s, "CronCreate") {
 			t.Errorf("%s: expected CronCreate instruction in template", path)
 		}
-		if !strings.Contains(s, "mg mail list {{.Id}}") {
-			t.Errorf("%s: expected the cron prompt to call `mg mail list {{.Id}}`", path)
+		if !strings.Contains(s, "mg mail list") {
+			t.Errorf("%s: expected the mail-check prompt to call `mg mail list`", path)
 		}
 		if !strings.Contains(s, "*/10 * * * *") {
 			t.Errorf("%s: expected the cron schedule `*/10 * * * *` (every 10 minutes)", path)
+		}
+	}
+}
+
+// TestPolecatTemplatesReadTheAgentNameMailbox is the regression guard for
+// mg-aa96, and it is deliberately the INVERSE of what this file asserted
+// before: the old assertion REQUIRED `mg mail list {{.Id}}`, which is the
+// defect written down as a contract. A polecat's mail is addressed to its agent
+// name — the protocol has correspondents reply to `--from=$POGO_AGENT_NAME` —
+// while {{.Id}} is the work item. The two agree only when the agent name is
+// exactly the work item id minus "mg-", which is how this survived: it looked
+// right on every polecat named that way.
+//
+// It cannot be caught downstream. `mg mail list` on a mailbox nothing was ever
+// delivered to prints "no mail has ever been delivered to it" and exits 0 —
+// byte-identical to a healthy empty inbox. On 2026-08-05 all eight running
+// polecats were mismatched; one sat on an unread mayor correction retracting a
+// false premise in its own brief.
+func TestPolecatTemplatesReadTheAgentNameMailbox(t *testing.T) {
+	for _, path := range polecatMailCheckTemplates {
+		data, err := defaultPrompts.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		s := string(data)
+		if strings.Contains(s, "mg mail list {{.Id}}") {
+			t.Errorf("%s: prescribes `mg mail list {{.Id}}` — that reads a mailbox derived from the WORK ITEM, "+
+				"while mail is addressed to the AGENT NAME. The poll would silently return "+
+				"\"no mail has ever been delivered to it\" forever (mg-aa96). Use $POGO_AGENT_NAME.", path)
+		}
+		if !strings.Contains(s, "mg mail list $POGO_AGENT_NAME") {
+			t.Errorf("%s: expected the mail-check prompt to read `mg mail list $POGO_AGENT_NAME` — "+
+				"the same source as the `--from=$POGO_AGENT_NAME` replies come back on, so the two cannot disagree (mg-aa96)", path)
+		}
+		// The schedule id stays keyed on the work item: it names the unit of
+		// work and is what the coordinator removes on stop. Only the MAILBOX
+		// moved. Asserting both halves is what stops a future edit from
+		// "fixing" the mismatch by collapsing the id onto the agent name too.
+		if !strings.Contains(s, "--id mail-check-{{.Id}}") {
+			t.Errorf("%s: expected the schedule id to stay keyed on the work item (`--id mail-check-{{.Id}}`)", path)
 		}
 	}
 }
