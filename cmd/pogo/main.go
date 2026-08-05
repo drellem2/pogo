@@ -2830,6 +2830,7 @@ With --check, runs a deterministic health checklist and exits:
 The --check mode verifies:
   - Is pogod running?
   - Is the system service installed?
+  - Does every installed launchd plist match the plist this build renders?
   - Are required tools installed (git, go, the configured agent harness)?
   - Are repos configured?
   - Are agent prompts installed?
@@ -2913,6 +2914,22 @@ Exits with code 1 if any critical check fails (--check mode only).`,
 				pass("system service", svcPath)
 			} else {
 				warn("system service", "not installed (run 'pogo service install')")
+			}
+
+			// 2b. The installed plists vs the plists this build renders
+			// (mg-fc99). `service.Status()` above answers "is there a file
+			// there", which is the question that let mg-8f7e ship a plist
+			// nobody installed: the file was there, five days stale, and the
+			// two retry fires the shipped code believed in did not exist. A
+			// fire that never happens writes no log line, so the installed
+			// plist is the only witness. See launchagentdrift.go.
+			{
+				laStatus, laDetail := launchAgentActivationLine(service.AuditLaunchAgents(), service.LaunchAgentsSupported())
+				if laStatus == "warn" {
+					warn(launchAgentCheckName, laDetail)
+				} else {
+					pass(launchAgentCheckName, laDetail)
+				}
 			}
 
 			// 3. Required tools. git and go are hard requirements. The agent
