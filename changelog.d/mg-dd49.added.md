@@ -91,9 +91,33 @@
   non-dotfile is reported per-file rather than raised, so one stray file cannot
   silence the detector.
 
-  **Report-only, and not armed by itself.** Like every `check-*` command it never
+  **A detector you cannot switch on until the fault clears is not yet a
+  detector.** `check-staleness` ships inside `pogo`, and `pogo` only becomes
+  current when the nightly redeploy runs — the exact mechanism whose failure it
+  detects. The recursion is not hypothetical: while this was being written the
+  installed binary answered `unknown command "check-staleness"`, because it was
+  six days and 52 commits behind. So `scripts/check-staleness.sh` runs the
+  witness **from source**, applying mg-2894's rule literally — tracked files go
+  live at MERGE, compiled binaries only at DEPLOY. It resolves the checkout from
+  its own path rather than `$PWD`, and it **refuses** to fall back to an
+  installed `pogo` even when `go` is missing, because a silent fallback would
+  look like it worked while reporting whatever the last successful deploy left
+  behind. It is deliberately thin: every judgement stays in `internal/staleness`,
+  since a shell reimplementation would be a second copy of the decision free to
+  drift from the one under test.
+
+  Its suite's load-bearing case is a **poisoned `pogo`** first on PATH, asserted
+  by both a marker file and the exit status — either alone passes against a
+  fallback that happens to agree. The suite was shown to fail: against a runner
+  edited to `exec pogo check-staleness`, five of nine assertions go red,
+  including both halves of that one.
+
+  **Report-only, and still not armed.** Like every `check-*` command it never
   installs, rebuilds or reconciles, and nothing runs it on a schedule until
-  someone arms it — see `docs/operations.md` for the `pogo schedule` line.
+  someone arms it — see `docs/operations.md` for the `pogo schedule` line, which
+  points at the script in a checkout rather than at the installed binary. The
+  arming gap is tracked as a class on mg-75f9, alongside mg-7ff8, mg-bd92 and
+  mg-fc99: four detectors that read as done at merge and were inert on the box.
 
   **Siblings it does not replace.** `pogo service status` covers the running
   daemon's revision. mg-fc99 checks the installed plist's fire hours against the
