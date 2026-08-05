@@ -100,6 +100,14 @@ type SpawnPolecatAPIRequest struct {
 	// the drain and the load gate are unaffected — an override that quietly
 	// widened to every check would be a different and much larger flag.
 	PairingOverride string `json:"pairing_override,omitempty"`
+	// StrandedOverride dispatches an item that already has pushed, unmerged work
+	// on a polecat branch, and states why. Same shape and same reasoning as
+	// PairingOverride: not a boolean, because what a later reader needs is what
+	// the overrider knew that the gate did not. An empty string is not an
+	// override.
+	//
+	// It overrides the STRANDED-WORK gate alone. See strandedgate.go.
+	StrandedOverride string `json:"stranded_override,omitempty"`
 }
 
 // DrainAPIRequest is the JSON body for POST /agents/drain. Toggling drain mode
@@ -1225,6 +1233,44 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		}
 	}
 
+	// Stranded-work gate: refuse to put a worker on an item that already has
+	// pushed, unmerged work sitting on a polecat branch (mg-b468). The two gates
+	// above ask whether this item MAY be dispatched; this one asks whether it
+	// NEEDS to be, and the answer is no when the work is already written and only
+	// needs merging.
+	//
+	// It is here because stopping a wedged polecat returns its item to available/
+	// without consulting the branch, so a finished item re-enters the pool looking
+	// unstarted. On 2026-08-05 the re-dispatch went out three minutes after the
+	// stop and spent its life duplicating 1026 lines; five more items were one
+	// dispatch away from silently destroying a pre-registration control. Dispatch
+	// is the harm moment, so it is where the refusal has to be.
+	//
+	// It consults nothing about liveness on purpose. "A polecat is running" is the
+	// PRECONDITION for stranded work, not evidence against it — the re-dispatch is
+	// the running polecat.
+	//
+	// 409 and placed with the conflict gates, for their reasons: retrying it
+	// unchanged is refused identically until the branch is merged or abandoned,
+	// and a refused dispatch must leave no worktree, agent dir, or prompt file
+	// behind (mg-ef80). Fails OPEN on a repo it cannot scan — see
+	// GitStrandedWorkGate.StrandedFindings.
+	//
+	// Overridable, and it has to be: attribution is heuristic (a branch name or a
+	// commit-subject id), so a false positive is possible and must not become a
+	// wedge with no way out. --stranded-override costs a written reason, recorded
+	// as an event beside the refusal it bypassed.
+	if refusal := r.strandedWorkRefusal(spawnReq.Id, spawnReq.Repo, spawnReq.Branch); refusal != "" {
+		if override := strings.TrimSpace(spawnReq.StrandedOverride); override != "" {
+			emitPolecatStrandedOverridden(spawnReq, override, refusal)
+			log.Printf("dispatch stranded-work: OVERRIDDEN for %s by explicit request: %s (refusal was: %s)",
+				spawnReq.Id, override, refusal)
+		} else {
+			failPolecatSpawn(w, spawnReq, http.StatusConflict, refusal)
+			return
+		}
+	}
+
 	// Load gate: refuse to add a worker to a host the fleet is already using
 	// most of (mg-1b8c). The two gates above ask whether THIS ITEM may be
 	// dispatched; this one asks whether this HOST can take another worker, and
@@ -1626,6 +1672,29 @@ func emitPolecatPairingOverridden(spawnReq SpawnPolecatAPIRequest, reason, refus
 	}
 	events.Emit(context.Background(), events.Event{
 		EventType:  "dispatch_pairing_overridden",
+		Agent:      actor,
+		WorkItemID: spawnReq.Id,
+		Repo:       spawnReq.Repo,
+		Details: map[string]any{
+			"agent_type": string(TypePolecat),
+			"agent_name": spawnReq.Name,
+			"reason":     reason,
+			"refusal":    refusal,
+		},
+	})
+}
+
+// emitPolecatStrandedOverridden records a dispatch that went ahead over the
+// stranded-work gate, with the reason its caller gave. Mirrors
+// emitPolecatPairingOverridden: overriding is meant to be cheap, overriding
+// SILENTLY is not possible.
+func emitPolecatStrandedOverridden(spawnReq SpawnPolecatAPIRequest, reason, refusal string) {
+	actor := "pogod"
+	if spawnReq.Name != "" {
+		actor = "cat-" + spawnReq.Name
+	}
+	events.Emit(context.Background(), events.Event{
+		EventType:  "dispatch_stranded_work_overridden",
 		Agent:      actor,
 		WorkItemID: spawnReq.Id,
 		Repo:       spawnReq.Repo,

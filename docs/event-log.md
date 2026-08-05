@@ -334,6 +334,59 @@ release runs, so a failure here does not fail the teardown. Additive — no
 {"schema_version":1,"timestamp":"2026-07-26T13:40:12.000000000Z","event_type":"work_item_claim_release_failed","agent":"cat-mg-0241","work_item_id":"mg-0241","details":{"pid":48213,"error":"mg unclaim mg-0241: permission denied"}}
 ```
 
+#### `work_item_stranded_push`
+
+A stopped polecat's work item went back to `available/` **with pushed work
+behind it** (mg-b468). The item now describes itself as unstarted while its
+output sits on a branch, and the next dispatch will re-derive it.
+
+Emitted alongside `work_item_claim_released`, never instead of it: the claim
+release still happens, because refusing it would strand the item in `claimed/`
+under a dead pid — a worse failure (see `work_item_claim_release_failed`). This
+event is the record that the return to `available/` is a lie about the item's
+state.
+
+**Absence is not a clean bill of health.** The check runs `git cherry` against
+the repo's target ref, and a repo it cannot read produces a log line rather than
+an event. Additive — no `schema_version` bump.
+
+- **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent`, `work_item_id`, `repo`, `details`
+- **`details` fields:**
+  - `branch` (string, required): the polecat branch carrying the work
+  - `ref` (string, required): the ref the commits were read from — `refs/remotes/origin/<branch>` when pushed, `refs/heads/<branch>` when the polecat committed but never pushed
+  - `pushed` (bool, required): whether `ref` was a remote-tracking ref. `false` is the **more** urgent case: git-gc reaps the worktree holding the only copy
+  - `target` (string, required): the ref the branch was compared against
+  - `disposition` (string, required): `"resubmit"` or `"pre_registration"`. The second means an unmerged commit whose subject begins `predictions:` — a re-dispatch that branches from the target destroys the control it records, and the resulting artifact looks valid
+  - `unmerged` (int, required): how many commits the target does not have
+  - `reason` (string, required): the claim-release reason this accompanies, e.g. `"agent_stopped"`
+  - `summary` (string, required): the one-line finding, including the remedy
+
+```json
+{"schema_version":1,"timestamp":"2026-08-05T09:55:02.000000000Z","event_type":"work_item_stranded_push","agent":"cat-9a19","work_item_id":"mg-9a19","repo":"/Users/daniel/dev/pogo","details":{"branch":"polecat-9a19","ref":"refs/remotes/origin/polecat-9a19","pushed":true,"target":"refs/remotes/origin/main","disposition":"resubmit","unmerged":1,"reason":"agent_stopped","summary":"polecat-9a19 has 1 unmerged commit(s) on refs/remotes/origin/main ..."}}
+```
+
+#### `dispatch_stranded_work_overridden`
+
+A dispatch went ahead over the stranded-work gate's refusal, with a stated
+reason (`pogo agent spawn-polecat --stranded-override="<why>"`). The gate
+attributes a branch to a work item heuristically — a commit-subject id, or the
+item's id-suffix in the branch name — so it can be wrong, and a refusal with no
+way past it becomes a wedge that gets resolved by disarming the gate. This event
+is what keeps the override from being silent. Additive — no `schema_version`
+bump.
+
+- **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent`, `work_item_id`, `details`
+- **Optional envelope:** `repo`
+- **`details` fields:**
+  - `agent_type` (string, required): always `"polecat"` in v1
+  - `agent_name` (string, required): the name of the polecat that was dispatched anyway
+  - `reason` (string, required): the operator's stated why — what they knew that the gate did not
+  - `refusal` (string, required): the bypassed refusal verbatim, so a reader can tell a bad attribution from a real duplication
+
+```json
+{"schema_version":1,"timestamp":"2026-08-05T09:58:11.000000000Z","event_type":"dispatch_stranded_work_overridden","agent":"cat-a9a19","work_item_id":"mg-9a19","repo":"/Users/daniel/dev/pogo","details":{"agent_type":"polecat","agent_name":"a9a19","reason":"branch is a stale duplicate; the real work merged as 9072f34","refusal":"work item mg-9a19 already has PUSHED, UNMERGED work: ..."}}
+```
+
 ### Inter-agent communication
 
 #### `mail_sent`
