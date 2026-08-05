@@ -140,7 +140,9 @@ immediately, and wakes nobody. Prefer long.
 | 401, no connectivity evidence, credential **unreadable** | `unknown` | `investigate` |
 | connectivity failure, no auth symptom | `network_down` | `await_network_recovery` |
 | rating dialog / rate-limit modal | `modal_wedge` | mg-4421 owns it |
-| frozen counter, nothing enumerated | `unknown` | `investigate` |
+| frozen counter, nothing enumerated, host **saturated** | `host_oversubscribed` | `reduce_load_do_not_intervene` |
+| frozen counter, nothing enumerated, host **unmeasurable** | `unknown` | `investigate` |
+| frozen counter, nothing enumerated, host has **headroom** | `unknown` | `investigate` |
 
 The first two rows need **opposite** handling — leave alone versus stop and
 re-dispatch — so a guess between them is worse than a shrug, and the middle rows
@@ -173,6 +175,62 @@ The detector therefore names a **recovery condition** (connectivity returning)
 and no remedy. Shipping "detect ENOTFOUND → nudge" would be worse than shipping
 nothing: it would be trusted, and it would be 968-for-0.
 
+## 3a. The third false-healthy state: CPU starvation
+
+There are **three** states that look identical to every instrument this fleet
+has, not two:
+
+```
+WEDGED at a dead prompt  -> spinner redraws, last-activity "just now", no progress
+CPU-STARVED              -> genuinely working,  last-activity "just now", no progress
+HEALTHY and working      -> last-activity "just now", progress
+```
+
+The counter cross-check separates the first from the third, and *mostly*
+separates the second too — a starved agent's counter advances honestly, because
+it really has been working for forty minutes; it has just achieved almost
+nothing. But a starved agent **between turns** has a frozen counter for the same
+reason a wedged one does. On 2026-08-05 pm-onethird watched thirteen polecats
+sit at `last-activity: just now` for hours during a load event (1-minute average
+300 on a 10-core box) with plain local `git log --oneline -2` calls timing out at
+120s and then 180s.
+
+**The remedies are opposite again.** A wedged agent needs intervention; a
+starved one needs to be **left alone** and the load reduced. Waking or
+restarting a starved agent destroys real work and adds to the load that caused
+the symptom.
+
+So when the **only** evidence is a frozen counter — nothing enumerated on
+screen, nothing the host's CPU could not explain — and the host is measurably
+saturated, the verdict is `host_oversubscribed` /
+`reduce_load_do_not_intervene`: *degraded, not wedged*. Saturation does **not**
+reinterpret an enumerated finding; a login prompt is not caused by CPU
+contention, and letting a load spike excuse a real auth wedge would give the
+thirteen-hour case an alibi.
+
+**The instrument is deliberately not the load average**, which is the number the
+incident was reported in. `internal/hostload` disqualified it with a measurement
+on this very box (mg-1b8c): a load average of 214 coincided with roughly 7.5 of
+10 cores actually in use, because Darwin's load average counts
+uninterruptible-sleep tasks as well as runnable ones — and part of what it
+counted (a VPN extension at ~0.9 cores, the system indexer at ~0.3) was not the
+fleet's work at all. Keying on it would report a full box whenever something was
+doing heavy I/O, which excuses a real wedge. The number decided on is **used
+cores against core count**, at hostload's own `SaturatedAt` threshold. That
+measure's own limit is inherited and stated: consumed CPU is bounded by the core
+count, so it detects "the host is full" and cannot say how far past full.
+
+**An unmeasurable host is not an idle one.** Below its source's resolution
+hostload's differenced figure is zero for a saturated host exactly as much as
+for an idle one (`Sample.Unresolvable`, mg-79e3). That case reports
+`unknown` / `investigate` with the reasoning saying starvation *could not be
+ruled out* — never a wedge verdict reached as though the host had been checked.
+
+This is a state pogo **creates for itself**: the 2026-08-05 event was seven
+polecats in one Go repo each running `build.sh`, which runs the full test suite
+twice (filed as mg-3977, per-repo dispatch cap, and mg-da30, double test run).
+That is an argument for measuring it rather than assuming it away.
+
 ## 4. Proving it can fire
 
 A check like this must be proven able to **fire** before it is trusted to stay
@@ -186,6 +244,9 @@ it claims to detect, built from the terminals the strings were read off:
   cross-check alone
 - the event-log fallback when the counter cannot be parsed
 - the split-observation case: one agent's ENOTFOUND explaining another's 401
+- the starved agent, reported as `host_oversubscribed` and **not** as a wedge —
+  plus the precedence control that a saturated host does not excuse a login
+  prompt, and the blind-host control that an unmeasurable box says so
 
 The negative controls are what make the silence mean something: a healthy agent
 whose counter advances is never reported across six simulated hours, and neither
@@ -243,3 +304,8 @@ Whoever rules on item (3) will need to decide at least:
 - **credexpiry (mg-ed45)** *predicts* the scheduled 30-day refresh-grant lapse.
   wedge-watch consults the same field reactively, and only to refute or confirm
   a credential hypothesis — never to warn.
+- **hostload (mg-1b8c)** answers "would pausing *our own* work help", which is
+  what dispatch needs. wedge-watch asks the different question "is there CPU for
+  this agent to make progress with", so it reads the **whole host** rather than
+  the fleet's share: an agent starved by somebody else's compiler is just as
+  starved. Same package, same threshold, different denominator, on purpose.

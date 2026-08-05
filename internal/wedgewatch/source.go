@@ -3,10 +3,12 @@ package wedgewatch
 import (
 	"context"
 	"errors"
+	"os"
 	"time"
 
 	"github.com/drellem2/pogo/internal/agent"
 	"github.com/drellem2/pogo/internal/credexpiry"
+	"github.com/drellem2/pogo/internal/hostload"
 )
 
 // This file is the ONLY place wedgewatch touches live pogo state. The runner in
@@ -36,6 +38,10 @@ var ErrNoRegistry = errors.New("wedgewatch: no agent registry to sample")
 // SystemCredential; tests inject a fixture.
 type CredFunc func(ctx context.Context) CredentialView
 
+// HostFunc yields the host-contention view. Production binds SystemHost; tests
+// inject a fixture.
+type HostFunc func(ctx context.Context) HostView
+
 // RegistrySource adapts an agent registry into a SourceFunc.
 //
 // The credential read is LAZY: cred is called only when some agent in the
@@ -45,7 +51,14 @@ type CredFunc func(ctx context.Context) CredentialView
 // exactly that reason). Reading it on every 5-minute tick regardless would put
 // a blocking, prompt-capable subprocess on pogod's heartbeat to answer a
 // question nobody asked.
-func RegistrySource(reg *agent.Registry, cred CredFunc) SourceFunc {
+//
+// The HOST read is NOT lazy, and the asymmetry is deliberate. Host contention
+// is what separates a wedged agent from a merely CPU-starved one, and those
+// need opposite handling — so the measurement must be present on every finding,
+// including the ones where it rules starvation OUT. It costs one sampling
+// window of wall clock (hostload.DefaultWindow, 1s) on a goroutine that is
+// already off the heartbeat's critical path, and it prompts for nothing.
+func RegistrySource(reg *agent.Registry, cred CredFunc, host HostFunc) SourceFunc {
 	return func(now time.Time) (Snapshot, error) {
 		if reg == nil {
 			return Snapshot{}, ErrNoRegistry
@@ -64,10 +77,18 @@ func RegistrySource(reg *agent.Registry, cred CredFunc) SourceFunc {
 				needCred = hasSig(sigs, SigLoginPrompt) || hasSig(sigs, SigAPI401)
 			}
 		}
+		if len(snap.Agents) == 0 {
+			return snap, nil
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
 		if needCred && cred != nil {
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
 			snap.Cred = cred(ctx)
+		}
+		if host != nil {
+			snap.Host = host(ctx)
+		} else {
+			snap.Host = HostView{Readable: false, Reason: ReasonNoHostSampler}
 		}
 		return snap, nil
 	}
@@ -130,5 +151,69 @@ func credentialFrom(st credexpiry.Status, now time.Time) CredentialView {
 		Readable:      true,
 		RefreshValid:  st.RefreshExpiry.After(now),
 		RefreshExpiry: st.RefreshExpiry,
+	}
+}
+
+// Fixed reason vocabulary for a host view that could not be measured. Drawn
+// from constants so a reason can never carry command output.
+const (
+	// ReasonNoHostSampler means no sampler was wired at all.
+	ReasonNoHostSampler = "no host sampler is wired, so CPU starvation could not be ruled out"
+	// ReasonHostReadFailed means the process table could not be read.
+	ReasonHostReadFailed = "the host's process table could not be read"
+	// ReasonHostUnresolvable means the sample was taken but its numbers are
+	// quantisation noise rather than a measurement — hostload's Unresolvable
+	// case. Treating that as "no CPU in use" is how a guard goes blind
+	// (mg-79e3), so it is reported as UNREADABLE instead.
+	ReasonHostUnresolvable = "the host's CPU column is too coarse for the sampling window; the reading is noise, not a measurement"
+	// ReasonHostNoCores means the core count came back non-positive, leaving no
+	// denominator to compare against.
+	ReasonHostNoCores = "the host reported no logical cores, so there is no denominator for saturation"
+)
+
+// SystemHost measures live host contention through internal/hostload and
+// reduces it to the one fact the classifier is allowed to use: whether the box
+// is full.
+//
+// It reads USED CORES against CORE COUNT, at hostload's own SaturatedAt
+// threshold — deliberately NOT the load average, which is the instrument a
+// reader of the 2026-08-05 incident report ("1-min average 300 on a 10-core
+// box") would reach for. hostload disqualified that one with a measurement on
+// this very host (mg-1b8c): a load average of 214 coincided with roughly 7.5 of
+// 10 cores actually in use, because Darwin's load average counts
+// uninterruptible-sleep tasks as well as runnable ones, and part of what it
+// counted belonged to a VPN extension and the system indexer rather than to the
+// fleet. Deciding on it would report a full box whenever something was doing
+// heavy I/O.
+//
+// It measures the WHOLE host rather than the fleet's share, which is the
+// opposite of what the dispatch guard wants and correct here: dispatch asks
+// "would pausing our own work help", and this asks "is there CPU for this agent
+// to make progress with". An agent starved by someone else's compiler is just
+// as starved.
+func SystemHost(ctx context.Context) HostView {
+	return hostViewFrom((&hostload.Reader{Roots: []int{os.Getpid()}}).Read(ctx))
+}
+
+// hostViewFrom is the pure conversion, split out so tests can drive every
+// outcome without a real host.
+func hostViewFrom(s hostload.Sample, err error) HostView {
+	if err != nil {
+		// Note what is NOT here: err.Error(). A reason is drawn from the fixed
+		// vocabulary above so it cannot carry process output.
+		return HostView{Readable: false, Reason: ReasonHostReadFailed}
+	}
+	if !s.Resolved() {
+		return HostView{Readable: false, Reason: ReasonHostUnresolvable}
+	}
+	if s.Cores <= 0 {
+		return HostView{Readable: false, Reason: ReasonHostNoCores}
+	}
+	used := s.UsedCores()
+	return HostView{
+		Readable:  true,
+		Saturated: used/float64(s.Cores) >= hostload.SaturatedAt,
+		UsedCores: used,
+		Cores:     s.Cores,
 	}
 }

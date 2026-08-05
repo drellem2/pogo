@@ -3,6 +3,7 @@ package wedgewatch
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -39,8 +40,13 @@ func (r *recorder) ofType(t string) []events.Event {
 // test can describe an agent's PTY as a function of how long it has been
 // wedged rather than by pre-building a list of samples.
 type scriptedFleet struct {
-	at   func(now time.Time) ([]Observation, CredentialView)
-	err  error
+	at  func(now time.Time) ([]Observation, CredentialView)
+	err error
+	// host is the contention reading every sample carries. The zero value is
+	// deliberately NOT "healthy host": an unreadable HostView means CPU
+	// starvation could not be ruled out, so a test that wants the ordinary
+	// uncontended case must say so with roomyHost.
+	host HostView
 	seen int
 }
 
@@ -50,8 +56,16 @@ func (s *scriptedFleet) source(now time.Time) (Snapshot, error) {
 	}
 	s.seen++
 	obs, cred := s.at(now)
-	return Snapshot{Now: now, Scanned: len(obs), Agents: obs, Cred: cred}, nil
+	return Snapshot{Now: now, Scanned: len(obs), Agents: obs, Cred: cred, Host: s.host}, nil
 }
+
+// roomyHost is a measured host with plenty of headroom — the reading that
+// positively RULES OUT CPU starvation as an explanation for no progress.
+var roomyHost = HostView{Readable: true, Saturated: false, UsedCores: 1.2, Cores: 10}
+
+// fullHost is the 2026-08-05 load event: a 10-core box with nothing left to
+// give. Agents on it are degraded, not wedged.
+var fullHost = HostView{Readable: true, Saturated: true, UsedCores: 9.8, Cores: 10}
 
 var t0 = time.Date(2026, 8, 4, 8, 0, 0, 0, time.UTC)
 
@@ -78,7 +92,7 @@ func run(t *testing.T, w *Watcher, span, step time.Duration) []Finding {
 // uptime advances; its counter does not.
 func TestTheWedgeFires(t *testing.T) {
 	rec := &recorder{}
-	fleet := &scriptedFleet{at: func(now time.Time) ([]Observation, CredentialView) {
+	fleet := &scriptedFleet{host: roomyHost, at: func(now time.Time) ([]Observation, CredentialView) {
 		return []Observation{{
 			Name:     "teaa9",
 			Identity: "cat-teaa9",
@@ -133,7 +147,7 @@ func TestTheWedgeFiresWithoutAnyEnumeratedMarker(t *testing.T) {
 	// A screen with a frozen counter and a prompt this package has never seen.
 	unknownPrompt := []byte(clr + "Some future dead end nobody has written down yet.\r\n" +
 		dim + "✻" + col(1) + "Baked for 2m 56s" + reset + "\r\n")
-	fleet := &scriptedFleet{at: func(now time.Time) ([]Observation, CredentialView) {
+	fleet := &scriptedFleet{host: roomyHost, at: func(now time.Time) ([]Observation, CredentialView) {
 		return []Observation{{
 			Name: "wfc8d", Identity: "cat-wfc8d", Type: "polecat", Alive: true,
 			Uptime: 7*time.Hour + now.Sub(t0), Output: unknownPrompt, LastOutputAt: now,
@@ -168,7 +182,7 @@ func TestEnumeratedModalsFire(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			fleet := &scriptedFleet{at: func(now time.Time) ([]Observation, CredentialView) {
+			fleet := &scriptedFleet{host: roomyHost, at: func(now time.Time) ([]Observation, CredentialView) {
 				return []Observation{{
 					Name: "a1", Identity: "cat-a1", Type: "polecat", Alive: true,
 					Uptime: 4*time.Hour + now.Sub(t0), Output: tc.pty, LastOutputAt: now,
@@ -192,7 +206,7 @@ func TestEnumeratedModalsFire(t *testing.T) {
 // alone.
 func TestTheMarkerHoldDownIsShorterThanTheFreezeHoldDown(t *testing.T) {
 	mk := func(pty []byte) *Watcher {
-		fleet := &scriptedFleet{at: func(now time.Time) ([]Observation, CredentialView) {
+		fleet := &scriptedFleet{host: roomyHost, at: func(now time.Time) ([]Observation, CredentialView) {
 			return []Observation{{
 				Name: "a1", Identity: "cat-a1", Type: "polecat", Alive: true,
 				Uptime: 8*time.Hour + now.Sub(t0), Output: pty, LastOutputAt: now,
@@ -219,7 +233,7 @@ func TestTheMarkerHoldDownIsShorterThanTheFreezeHoldDown(t *testing.T) {
 // uptime/declared ratio is enormous the whole time.
 func TestAHealthyWorkingAgentIsNeverReported(t *testing.T) {
 	rec := &recorder{}
-	fleet := &scriptedFleet{at: func(now time.Time) ([]Observation, CredentialView) {
+	fleet := &scriptedFleet{host: roomyHost, at: func(now time.Time) ([]Observation, CredentialView) {
 		// A fresh turn every ten minutes: the counter climbs, then resets. This
 		// is what makes the ratio alone useless as a signal — it is above 100
 		// at almost every sample here.
@@ -249,7 +263,7 @@ func TestAHealthyWorkingAgentIsNeverReported(t *testing.T) {
 // pins that deliberately. What saves the detector is the requirement that the
 // agent be STALLED as well, which a working agent never is.
 func TestAnAgentMerelyWritingAboutTheWedgeIsNotReported(t *testing.T) {
-	fleet := &scriptedFleet{at: func(now time.Time) ([]Observation, CredentialView) {
+	fleet := &scriptedFleet{host: roomyHost, at: func(now time.Time) ([]Observation, CredentialView) {
 		elapsed := now.Sub(t0) % (7 * time.Minute)
 		return []Observation{{
 			Name: "author", Identity: "cat-author", Type: "polecat", Alive: true,
@@ -268,7 +282,7 @@ func TestAnAgentMerelyWritingAboutTheWedgeIsNotReported(t *testing.T) {
 // TestAYoungAgentIsNotReported keeps spawn — the noisiest part of an agent's
 // life — out of the report.
 func TestAYoungAgentIsNotReported(t *testing.T) {
-	fleet := &scriptedFleet{at: func(now time.Time) ([]Observation, CredentialView) {
+	fleet := &scriptedFleet{host: roomyHost, at: func(now time.Time) ([]Observation, CredentialView) {
 		return []Observation{{
 			Name: "fresh", Identity: "cat-fresh", Type: "polecat", Alive: true,
 			Uptime: now.Sub(t0), Output: []byte(clr + dim + "Baked for 3m 2s" + reset), LastOutputAt: now,
@@ -303,7 +317,7 @@ func TestASourceThatFailsIsAnErrorNotACleanFleet(t *testing.T) {
 // entry either there is nothing to judge on. That must be an error, not a pass.
 func TestAnUnjudgeableAgentIsReportedAsBlind(t *testing.T) {
 	rec := &recorder{}
-	fleet := &scriptedFleet{at: func(now time.Time) ([]Observation, CredentialView) {
+	fleet := &scriptedFleet{host: roomyHost, at: func(now time.Time) ([]Observation, CredentialView) {
 		return []Observation{{
 			Name: "opaque", Identity: "cat-opaque", Type: "polecat", Alive: true,
 			Uptime: 9 * time.Hour, Output: noCounterPTY(), LastOutputAt: now,
@@ -325,7 +339,7 @@ func TestAnUnjudgeableAgentIsReportedAsBlind(t *testing.T) {
 // path works: no counter, but a stale event log, still yields a finding. A
 // harness rename must make this detector coarser, not silent.
 func TestTheEventLogIsTheFallbackWhenTheCounterCannotBeRead(t *testing.T) {
-	fleet := &scriptedFleet{at: func(now time.Time) ([]Observation, CredentialView) {
+	fleet := &scriptedFleet{host: roomyHost, at: func(now time.Time) ([]Observation, CredentialView) {
 		return []Observation{{
 			Name: "opaque", Identity: "cat-opaque", Type: "polecat", Alive: true,
 			Uptime:         9 * time.Hour,
@@ -345,6 +359,133 @@ func TestTheEventLogIsTheFallbackWhenTheCounterCannotBeRead(t *testing.T) {
 	}
 }
 
+// --- the third false-healthy state: CPU starvation --------------------------
+
+// unknownPromptPTY is a screen with a frozen counter and nothing enumerated on
+// it: the shape shared by a wedge at an unknown prompt and an agent that is
+// simply not being given any CPU.
+func unknownPromptPTY() []byte {
+	return []byte(clr + "waiting…\r\n" + dim + "✻" + col(1) + "Baked for 2m 56s" + reset + "\r\n")
+}
+
+// TestAStarvedAgentIsReportedAsDegradedNotWedged is the positive control for
+// the third false-healthy signature, reported by pm-onethird on 2026-08-05:
+// during a load event (1-min average 300 on a 10-core box) thirteen polecats
+// showed "last-activity: just now" for hours while producing nothing, and plain
+// local `git log --oneline -2` calls timed out at 180s. They were ALIVE AND
+// CRAWLING, not wedged.
+//
+// The remedies are opposite — a wedged agent needs intervention, a starved one
+// needs to be left alone and the load reduced — so this must not come out as a
+// wedge. Waking or restarting a starved agent destroys real work and adds to
+// the load that caused the symptom.
+func TestAStarvedAgentIsReportedAsDegradedNotWedged(t *testing.T) {
+	fleet := &scriptedFleet{host: fullHost, at: func(now time.Time) ([]Observation, CredentialView) {
+		return []Observation{{
+			Name: "crawler", Identity: "cat-crawler", Type: "polecat", Alive: true,
+			Uptime: 6*time.Hour + now.Sub(t0), Output: unknownPromptPTY(), LastOutputAt: now,
+		}}, validCredAt(now)
+	}}
+	w := New(Options{Enabled: true, Source: fleet.source, Emit: (&recorder{}).emit, Interval: 5 * time.Minute})
+
+	findings := run(t, w, 45*time.Minute, 5*time.Minute)
+	if len(findings) != 1 {
+		t.Fatalf("findings = %d, want 1 — a starved agent is a real finding, not a suppressed one; "+
+			"a fleet that assumes its own contention away cannot see the state it creates for itself",
+			len(findings))
+	}
+	f := findings[0]
+	if f.Cause != CauseHostOversubscribed {
+		t.Fatalf("cause = %s, want %s. A starved agent reported as wedged invites the OPPOSITE "+
+			"of the correct handling: waking or restarting it destroys real work and adds load.",
+			f.Cause, CauseHostOversubscribed)
+	}
+	if f.Response != ResponseReduceLoadNotIntervene {
+		t.Errorf("response = %s, want %s", f.Response, ResponseReduceLoadNotIntervene)
+	}
+	if !f.HostSaturated || f.HostCores != 10 {
+		t.Errorf("the finding must carry the measurement it acted on; got saturated=%t cores=%d",
+			f.HostSaturated, f.HostCores)
+	}
+}
+
+// TestSaturationDoesNotExcuseAnEnumeratedDeadEnd pins the precedence rule. A
+// login prompt is not caused by CPU contention, and a busy box during a genuine
+// auth wedge must not let the wedge be filed as "degraded" — that is how the
+// thirteen-hour case gets excused by a load spike that happens to overlap it.
+func TestSaturationDoesNotExcuseAnEnumeratedDeadEnd(t *testing.T) {
+	fleet := &scriptedFleet{host: fullHost, at: func(now time.Time) ([]Observation, CredentialView) {
+		return []Observation{{
+			Name: "teaa9", Identity: "cat-teaa9", Type: "polecat", Alive: true,
+			Uptime: 13*time.Hour + now.Sub(t0), Output: wedgedLoginPTY("3m 2s"), LastOutputAt: now,
+		}}, validCredAt(now)
+	}}
+	w := New(Options{Enabled: true, Source: fleet.source, Emit: (&recorder{}).emit, Interval: 5 * time.Minute})
+
+	findings := run(t, w, 45*time.Minute, 5*time.Minute)
+	if len(findings) != 1 {
+		t.Fatalf("findings = %d, want 1", len(findings))
+	}
+	if findings[0].Cause == CauseHostOversubscribed {
+		t.Fatal("a login prompt was filed as host contention — saturation may only reinterpret " +
+			"the case where NOTHING enumerated is on screen")
+	}
+}
+
+// TestAnUnmeasurableHostSaysStarvationCouldNotBeRuledOut is the
+// absence-as-evidence rule applied to the newest input. A detector that cannot
+// measure the host must not proceed as though the host were idle.
+func TestAnUnmeasurableHostSaysStarvationCouldNotBeRuledOut(t *testing.T) {
+	blind := HostView{Readable: false, Reason: ReasonHostUnresolvable}
+	fleet := &scriptedFleet{host: blind, at: func(now time.Time) ([]Observation, CredentialView) {
+		return []Observation{{
+			Name: "opaque", Identity: "cat-opaque", Type: "polecat", Alive: true,
+			Uptime: 6*time.Hour + now.Sub(t0), Output: unknownPromptPTY(), LastOutputAt: now,
+		}}, validCredAt(now)
+	}}
+	w := New(Options{Enabled: true, Source: fleet.source, Emit: (&recorder{}).emit, Interval: 5 * time.Minute})
+
+	findings := run(t, w, 45*time.Minute, 5*time.Minute)
+	if len(findings) != 1 {
+		t.Fatalf("findings = %d, want 1", len(findings))
+	}
+	f := findings[0]
+	if f.Cause != CauseUnknown {
+		t.Errorf("cause = %s, want %s when the host could not be measured", f.Cause, CauseUnknown)
+	}
+	if !strings.Contains(f.Why, "could not be ruled out") {
+		t.Errorf("the verdict must SAY that starvation could not be ruled out; got %q", f.Why)
+	}
+	if f.HostReadable {
+		t.Error("the finding claims a readable host reading it did not have")
+	}
+}
+
+// TestAMeasuredRoomyHostRulesStarvationOut is the other side: with headroom
+// measured, the un-enumerated case is a genuine unknown and the reasoning says
+// what excluded the alternative. Without this the detector's UNKNOWN would be
+// indistinguishable from "I did not check".
+func TestAMeasuredRoomyHostRulesStarvationOut(t *testing.T) {
+	fleet := &scriptedFleet{host: roomyHost, at: func(now time.Time) ([]Observation, CredentialView) {
+		return []Observation{{
+			Name: "wfc8d", Identity: "cat-wfc8d", Type: "polecat", Alive: true,
+			Uptime: 7*time.Hour + now.Sub(t0), Output: unknownPromptPTY(), LastOutputAt: now,
+		}}, validCredAt(now)
+	}}
+	w := New(Options{Enabled: true, Source: fleet.source, Emit: (&recorder{}).emit, Interval: 5 * time.Minute})
+
+	findings := run(t, w, 45*time.Minute, 5*time.Minute)
+	if len(findings) != 1 {
+		t.Fatalf("findings = %d, want 1", len(findings))
+	}
+	if findings[0].Cause != CauseUnknown {
+		t.Fatalf("cause = %s, want %s", findings[0].Cause, CauseUnknown)
+	}
+	if !strings.Contains(findings[0].Why, "RULES OUT CPU starvation") {
+		t.Errorf("the verdict must say what excluded starvation; got %q", findings[0].Why)
+	}
+}
+
 // --- fleet-wide connectivity memory ----------------------------------------
 
 // TestOneAgentsOutageExplainsAnothers401 is the split-observation case, and the
@@ -356,7 +497,7 @@ func TestTheEventLogIsTheFallbackWhenTheCounterCannotBeRead(t *testing.T) {
 // credential. Here one agent shows the outage and another shows the 401, and
 // the detector must merge them into one signature.
 func TestOneAgentsOutageExplainsAnothers401(t *testing.T) {
-	fleet := &scriptedFleet{at: func(now time.Time) ([]Observation, CredentialView) {
+	fleet := &scriptedFleet{host: roomyHost, at: func(now time.Time) ([]Observation, CredentialView) {
 		return []Observation{
 			{
 				Name: "netless", Identity: "cat-netless", Type: "polecat", Alive: true,
@@ -400,7 +541,7 @@ func TestOneAgentsOutageExplainsAnothers401(t *testing.T) {
 // is how a detector stops being an alert (internal/ackwatch's lesson).
 func TestAnUnchangedRosterStaysQuiet(t *testing.T) {
 	rec := &recorder{}
-	fleet := &scriptedFleet{at: func(now time.Time) ([]Observation, CredentialView) {
+	fleet := &scriptedFleet{host: roomyHost, at: func(now time.Time) ([]Observation, CredentialView) {
 		return []Observation{{
 			Name: "teaa9", Identity: "cat-teaa9", Type: "polecat", Alive: true,
 			Uptime: 13*time.Hour + now.Sub(t0), Output: wedgedLoginPTY("3m 2s"), LastOutputAt: now,
@@ -418,7 +559,7 @@ func TestAnUnchangedRosterStaysQuiet(t *testing.T) {
 func TestRecoveryIsRecorded(t *testing.T) {
 	rec := &recorder{}
 	recovered := t0.Add(50 * time.Minute)
-	fleet := &scriptedFleet{at: func(now time.Time) ([]Observation, CredentialView) {
+	fleet := &scriptedFleet{host: roomyHost, at: func(now time.Time) ([]Observation, CredentialView) {
 		pty := wedgedLoginPTY("3m 2s")
 		if !now.Before(recovered) {
 			// The counter starts moving again: the agent is taking turns.
@@ -451,7 +592,7 @@ func TestTheWatcherHoldsNoMailSeam(t *testing.T) {
 	// mail or notify seam, this list stops matching and the test says why.
 	_ = opts
 	rec := &recorder{}
-	fleet := &scriptedFleet{at: func(now time.Time) ([]Observation, CredentialView) {
+	fleet := &scriptedFleet{host: roomyHost, at: func(now time.Time) ([]Observation, CredentialView) {
 		return []Observation{{
 			Name: "teaa9", Identity: "cat-teaa9", Type: "polecat", Alive: true,
 			Uptime: 13*time.Hour + now.Sub(t0), Output: wedgedLoginPTY("3m 2s"), LastOutputAt: now,
@@ -474,7 +615,7 @@ func TestTheWatcherHoldsNoMailSeam(t *testing.T) {
 // TestDisabledWatcherDoesNothing covers the off switch.
 func TestDisabledWatcherDoesNothing(t *testing.T) {
 	rec := &recorder{}
-	fleet := &scriptedFleet{at: func(now time.Time) ([]Observation, CredentialView) {
+	fleet := &scriptedFleet{host: roomyHost, at: func(now time.Time) ([]Observation, CredentialView) {
 		return []Observation{{
 			Name: "teaa9", Uptime: 13 * time.Hour, Output: wedgedLoginPTY("3m 2s"), LastOutputAt: now,
 		}}, validCredAt(now)
@@ -492,7 +633,7 @@ func TestDisabledWatcherDoesNothing(t *testing.T) {
 // TestIntervalThrottles pins that the runner does not re-sample on every
 // heartbeat tick.
 func TestIntervalThrottles(t *testing.T) {
-	fleet := &scriptedFleet{at: func(now time.Time) ([]Observation, CredentialView) {
+	fleet := &scriptedFleet{host: roomyHost, at: func(now time.Time) ([]Observation, CredentialView) {
 		return nil, CredentialView{}
 	}}
 	w := New(Options{Enabled: true, Source: fleet.source, Emit: (&recorder{}).emit, Interval: 5 * time.Minute})

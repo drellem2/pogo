@@ -59,6 +59,11 @@ type Evidence struct {
 	LastConnFailure time.Time
 	// Cred is the fleet-wide credential reading.
 	Cred CredentialView
+	// Host is the host-contention reading. It reinterprets ONE case — see
+	// Classify's final branches — and is carried on every verdict regardless,
+	// because "the host had headroom" is what positively rules CPU starvation
+	// out.
+	Host HostView
 	// Now is the classification time.
 	Now time.Time
 }
@@ -162,16 +167,64 @@ func Classify(ev Evidence, th Thresholds) Verdict {
 				"its own marker for two months.",
 		}
 
+	// From here down there is NO enumerated dead-end state on screen — the only
+	// evidence is that the agent's own counter has been frozen far below its
+	// uptime. That is the one case host contention can explain, so it is the
+	// only case host contention is allowed to reinterpret. A login prompt or an
+	// ENOTFOUND is not caused by a full CPU, and the branches above never reach
+	// here.
+
+	case ev.Host.Readable && ev.Host.Saturated:
+		return Verdict{
+			Cause:    CauseHostOversubscribed,
+			Response: ResponseReduceLoadNotIntervene,
+			Why: fmt.Sprintf(
+				"DEGRADED, NOT WEDGED. The agent has made no progress and the host has no CPU left to "+
+					"give it: %.1f of %d cores in use. Nothing on screen suggests a dead end, so "+
+					"starvation explains the silence — on 2026-08-05 thirteen polecats read "+
+					"'last-activity: just now' for hours during a load event while plain local `git log` "+
+					"calls timed out at 180s. LEAVE THE AGENT ALONE and reduce the load: waking or "+
+					"restarting it destroys real work and adds to the load that caused this. "+
+					"(Measured as used cores against core count, NOT the load average — a load average "+
+					"of 214 on this box once coincided with 7.5 of 10 cores actually in use, mg-1b8c.)",
+				ev.Host.UsedCores, ev.Host.Cores),
+		}
+
+	case !ev.Host.Readable:
+		return Verdict{
+			Cause:    CauseUnknown,
+			Response: ResponseInvestigate,
+			Why: fmt.Sprintf(
+				"no enumerated dead-end state is on screen, but the agent's own work counter has been "+
+					"frozen far below its process uptime — and HOST CPU COULD NOT BE MEASURED (%s), so "+
+					"CPU starvation could not be ruled out. A starved agent looks identical to a wedged "+
+					"one here and needs the OPPOSITE handling (leave it alone, reduce load), so this "+
+					"stays UNKNOWN. Measure the host, then read the PTY "+
+					"(`pogo agent output <name>`).",
+				hostReason(ev.Host)),
+		}
+
 	default:
 		return Verdict{
 			Cause:    CauseUnknown,
 			Response: ResponseInvestigate,
-			Why: "no enumerated dead-end state is on screen, but the agent's own work counter has been " +
-				"frozen far below its process uptime. This is the case the enumeration cannot cover and " +
-				"the reason the cross-check exists: a prompt nobody has met yet looks exactly like this. " +
-				"Read the PTY (`pogo agent output <name>`) and add whatever is there to DefaultMarkers.",
+			Why: fmt.Sprintf(
+				"no enumerated dead-end state is on screen, but the agent's own work counter has been "+
+					"frozen far below its process uptime — and the host had headroom (%.1f of %d cores "+
+					"in use), which RULES OUT CPU starvation as the explanation. This is the case the "+
+					"enumeration cannot cover and the reason the cross-check exists: a prompt nobody has "+
+					"met yet looks exactly like this. Read the PTY (`pogo agent output <name>`) and add "+
+					"whatever is there to DefaultMarkers.",
+				ev.Host.UsedCores, ev.Host.Cores),
 		}
 	}
+}
+
+func hostReason(h HostView) string {
+	if h.Reason != "" {
+		return h.Reason
+	}
+	return "host load was not sampled"
 }
 
 func connPhrase(direct, remembered bool, ev Evidence, th Thresholds) string {
