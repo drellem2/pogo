@@ -509,6 +509,104 @@ Source of truth: `internal/stallwatch/`; see
 [docs/design/stall-watch-design.md](design/stall-watch-design.md) and
 [docs/design/priority-wake-design.md](design/priority-wake-design.md).
 
+## Dispatch cap — how many workers may enter ONE repository
+
+**On by default, everywhere.** Unlike `[dispatch_pairing]` below, this section
+carries platform behaviour rather than one deployment's policy: what it prevents
+is a property of running a shared test suite concurrently, which every consumer
+with a repo and more than one worker has.
+
+```toml
+[dispatch]
+# Most workers that may be live in ONE repository at once.
+# 0 = unlimited (the gate is disarmed). Default: 3.
+max_polecats_per_repo = 3
+
+# Slots withheld from worker dispatch while the refinery has a merge request
+# for that repo — IN FLIGHT OR QUEUED. 0 = no reservation. Default: 1.
+refinery_reserve = 1
+```
+
+`pogo agent spawn-polecat --repo=<path>` refuses with **503** when the repo is
+full. That is a **later, not a no**: nothing about the work item is wrong, and
+the identical request succeeds once a worker there finishes. It is also
+**repo-scoped** — a dispatch into a different repo is unaffected.
+
+Read the count the daemon will enforce on:
+
+```bash
+pogo host load --repo=/Users/daniel/dev/pogo
+```
+
+### Why per-repo and not per-fleet
+
+The shipped rule counted the fleet: *"a reasonable limit is 3-5 concurrent
+workers"*. mg-3977 measured why the fleet is the wrong denominator. Seven
+workers went into one Go repository on 2026-08-05; the 10-core host reached a
+1-minute load average of **337**, commands began timing out, and the refinery
+stopped starting gates — three merges sat queued **24+ minutes** without one
+beginning.
+
+Five workers across five repositories would have been fine. Five in one Go
+repository is not: every worker verifies itself by running *that repo's* test
+suite, and `go test ./...` parallelises across packages on its own. The unit of
+contention is the repository.
+
+### Why this is not the host load gate
+
+`[dispatch]` and the host load gate (`pogo host load`) are complementary and
+neither subsumes the other. The load gate refuses when the fleet is already
+holding most of the host's CPU — a *measurement of load that has already
+arrived*. Seven concurrent `go test ./...` runs do not saturate the host at the
+moment the seventh is dispatched; they saturate it a minute later, when all
+seven reach their compile phase together. A count is available at dispatch time
+and a sample of the consequence is not.
+
+### Why the refinery gets a reserved slot
+
+The incident was self-defeating rather than merely slow: **the refinery runs the
+same `./build.sh` the workers run**, so the workers verifying their branches
+starved the one process that could merge them. A gate that does start under that
+load can also fail with `signal: terminated`, which reads exactly like a real
+verification failure on somebody else's branch (observed 2026-07-31, mg-069f).
+
+**Queued merges reserve, not only in-flight ones.** Reserving only while a gate
+is running would be close to useless — the starvation is built by workers
+dispatched *before* the gate starts, and by then they cannot be taken back.
+
+**The reserve can never take the last slot.** A `refinery_reserve` greater than
+or equal to `max_polecats_per_repo` floors the effective cap at 1 rather than
+refusing everything: on a repo whose merge queue is almost never empty, refusing
+all dispatch would be a wedge with no way out but a config edit.
+
+**What it cannot do.** It is enforced on the dispatch side only, because that is
+the only side that can be told "not yet" — the refinery cannot evict a worker
+that is already building. This prevents the starvation from forming; it does not
+cure one that has already formed.
+
+### What the count is built from, and where it can be wrong
+
+| Source | Covers | Note |
+|---|---|---|
+| pogod's in-memory registry | workers this daemon spawned | EMPTY after a restart, permanently — the registry has no adopt path (mg-13a3) |
+| the persisted polecat witness | workers that outlived an earlier pogod | records written before mg-3977 carry no repo |
+
+The two are unioned and deduplicated by name. Both failure directions **fail
+open**: an unreadable witness store dispatches anyway (and says the count may be
+missing survivors), and a refinery that cannot be asked reserves nothing.
+Refusing on missing information would halt dispatch into every repo for a reason
+the caller cannot check or clear.
+
+Live workers whose repository is unknown — pre-mg-3977 witness records, and
+`--no-worktree` polecats, which have no repo at all — are **reported but not
+counted**. Attributing one to a repo on a guess would refuse a correct dispatch;
+hiding it would let an undercount look exact.
+
+A `--no-worktree` dispatch is never capped: it runs no repository's test suite.
+
+Source of truth: `internal/config/dispatchcap.go` and
+`internal/agent/dispatchrepocap.go`.
+
 ## Dispatch pairing — items that owe a paired work item
 
 **Off by default, everywhere.** `[dispatch_pairing]` is empty unless a

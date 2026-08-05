@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os/exec"
 	"strings"
 
@@ -187,8 +188,16 @@ func NudgeAgent(name, message string, opts *NudgeOpts) error {
 // process every agent descends from, so it is the only vantage point where
 // "the fleet's share" is a well-defined subtree, and it is the same gate the
 // spawn path consults.
-func GetHostLoad() (*agent.HostLoadResponse, error) {
-	r, err := http.Get(serverURL + "/hostload")
+// repo, when non-empty, additionally asks for that repository's worker
+// occupancy against the per-repo dispatch cap (mg-3977). The host sample and
+// the repo count are independent answers and either can refuse a dispatch on
+// its own.
+func GetHostLoad(repo string) (*agent.HostLoadResponse, error) {
+	u := serverURL + "/hostload"
+	if strings.TrimSpace(repo) != "" {
+		u += "?repo=" + url.QueryEscape(repo)
+	}
+	r, err := http.Get(u)
 	if err != nil {
 		return nil, err
 	}

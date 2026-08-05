@@ -140,7 +140,7 @@ func TestLivePolecatSet_WitnessGuardsDoneButRunningWorktreeAcrossRestart(t *test
 	repo := newPolecatRepo(t)
 	wt := repo.addPolecatWorktree("0130")
 	pid := liveProbeProcess(t)
-	if err := agent.RecordPolecatWitness("0130", pid, "mg-0130"); err != nil {
+	if err := agent.RecordPolecatWitness("0130", pid, "mg-0130", ""); err != nil {
 		t.Fatalf("RecordPolecatWitness: %v", err)
 	}
 

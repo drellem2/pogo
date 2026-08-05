@@ -3,10 +3,13 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 
+	"github.com/drellem2/pogo/internal/agent"
 	"github.com/drellem2/pogo/internal/client"
 )
 
@@ -24,6 +27,7 @@ import (
 // that figure. The load average is printed here, last and labelled, because it
 // is what makes a human look — and it is not what anything decides on.
 func newHostLoadCmd(jsonOutput *bool) *cobra.Command {
+	var repo string
 	cmd := &cobra.Command{
 		Use:   "load",
 		Short: "Report how much of this host's CPU the fleet is holding",
@@ -42,9 +46,15 @@ uninterruptible-sleep tasks as well as runnable ones, so on an I/O-bound host
 it can read many times the core count while cores sit idle. Do not gate on it.
 
 'would_refuse_dispatch' is answered by the same gate 'pogo agent spawn-polecat'
-consults, so this command and the daemon cannot disagree.`,
+consults, so this command and the daemon cannot disagree.
+
+--repo additionally reports that REPOSITORY's worker occupancy against the
+per-repo dispatch cap. That is a separate refusal from the host one and neither
+implies the other: a repo can be full on an idle host, because what saturates is
+one repo's test suite run concurrently rather than the fleet's worker count. Ask
+for it before planning several dispatches into the same repository.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			resp, err := client.GetHostLoad()
+			resp, err := client.GetHostLoad(repo)
 			if err != nil {
 				return err
 			}
@@ -57,6 +67,10 @@ consults, so this command and the daemon cannot disagree.`,
 				fmt.Println("Host load: NOT MEASURED — the sample could not be taken.")
 				fmt.Println("This is missing information, not an idle host.")
 				fmt.Printf("\n%s\n", resp.Advice)
+				// The repo cap is a count, not a sample: it still answers when
+				// the host could not be measured, and suppressing it here would
+				// hide the refusal the caller is most likely about to hit.
+				printRepoOccupancy(os.Stdout, resp.RepoOccupancy)
 				return nil
 			}
 			s := resp.Sample
@@ -76,10 +90,57 @@ consults, so this command and the daemon cannot disagree.`,
 			if resp.WouldRefuseDispatch {
 				fmt.Printf("\n`pogo agent spawn-polecat` would currently be refused with 503 (retryable).\n")
 			}
+			printRepoOccupancy(os.Stdout, resp.RepoOccupancy)
 			return nil
 		},
 	}
+	cmd.Flags().StringVar(&repo, "repo", "",
+		"also report this repository's worker occupancy against the per-repo dispatch cap")
 	return cmd
+}
+
+// printRepoOccupancy renders the per-repo cap's view, or nothing when --repo
+// was not given.
+//
+// It prints the three states the count can be in rather than only the refusal:
+// a disarmed cap, an under-cap repo, and a full one. A command that says nothing
+// when it found nothing is indistinguishable from one that was not asked — and
+// the caller here is deciding whether to dispatch, so silence would read as
+// permission.
+func printRepoOccupancy(w io.Writer, occ *agent.RepoOccupancy) {
+	if occ == nil {
+		return
+	}
+	fmt.Fprintf(w, "\nRepo:       %s\n", occ.Repo)
+	if occ.ConfiguredCap <= 0 {
+		fmt.Fprintf(w, "Cap:        DISARMED (max_polecats_per_repo = 0) — this repo refuses nothing.\n")
+	} else if occ.RefineryReserved > 0 {
+		fmt.Fprintf(w, "Cap:        %d of %d (%d reserved for the refinery, which has work in this repo)\n",
+			occ.Cap, occ.ConfiguredCap, occ.RefineryReserved)
+	} else {
+		fmt.Fprintf(w, "Cap:        %d\n", occ.Cap)
+	}
+	fmt.Fprintf(w, "Workers:    %d", occ.Count)
+	if occ.Count > 0 {
+		fmt.Fprintf(w, " — %s", strings.Join(occ.Polecats, ", "))
+	}
+	fmt.Fprintln(w)
+	if !occ.RefineryKnown {
+		fmt.Fprintf(w, "Refinery:   NOT ASKED — no slot is being reserved. This is missing information,\n"+
+			"            not an idle refinery.\n")
+	}
+	if occ.WitnessErr != "" {
+		fmt.Fprintf(w, "Witness:    UNREADABLE (%s) — polecats that outlived an earlier pogod are\n"+
+			"            missing from this count, which may therefore be low.\n", occ.WitnessErr)
+	}
+	if len(occ.Unattributed) > 0 {
+		fmt.Fprintf(w, "Unattributed: %d live worker(s) with no repo recorded, NOT counted here: %s\n",
+			len(occ.Unattributed), strings.Join(occ.Unattributed, ", "))
+	}
+	if occ.WouldRefuse {
+		fmt.Fprintf(w, "\n`pogo agent spawn-polecat --repo=%s` would currently be refused with 503\n"+
+			"(retryable — a dispatch into a DIFFERENT repo is unaffected).\n", occ.Repo)
+	}
 }
 
 // newHostCmd is the parent for host-level measurements.

@@ -39,7 +39,7 @@ import (
 
 func main() {
 	if len(os.Args) < 3 {
-		fmt.Fprintln(os.Stderr, "usage: witnessfixture <name> <pid> [work-item-id]")
+		fmt.Fprintln(os.Stderr, "usage: witnessfixture <name> <pid> [work-item-id] [source-repo]")
 		os.Exit(2)
 	}
 	pid, err := strconv.Atoi(os.Args[2])
@@ -51,11 +51,18 @@ func main() {
 	if len(os.Args) > 3 {
 		workItem = os.Args[3]
 	}
+	// The source repo is what the per-repo dispatch cap counts a survivor
+	// against (mg-3977). Optional: a fixture with none records an unattributed
+	// polecat, which is a real state the cap has to handle.
+	sourceRepo := ""
+	if len(os.Args) > 4 {
+		sourceRepo = os.Args[4]
+	}
 	// Fails loudly if the pid is not alive: RecordPolecatWitness probes its start
 	// time, and a fixture that silently recorded an unprobeable process would
 	// hand the control a witness the drain reads as DEAD — turning the
 	// "polecats are alive, refuse" assertion into a vacuous pass.
-	if err := agent.RecordPolecatWitness(os.Args[1], pid, workItem); err != nil {
+	if err := agent.RecordPolecatWitness(os.Args[1], pid, workItem, sourceRepo); err != nil {
 		fmt.Fprintf(os.Stderr, "witnessfixture: %v\n", err)
 		os.Exit(1)
 	}

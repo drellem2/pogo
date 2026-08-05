@@ -1271,6 +1271,29 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		}
 	}
 
+	// Per-repo cap: refuse to add a worker to a REPOSITORY that already holds
+	// its allowance (mg-3977). Seven workers went into one Go repo on
+	// 2026-08-05; the 10-core host reached a load average of 337, commands
+	// timed out, and the refinery stopped starting gates — three merges sat
+	// queued 24+ minutes without one beginning. Five workers across five repos
+	// would have been fine, which is why the fleet-wide "3-5 concurrent" rule
+	// this replaces is the wrong shape: the unit of contention is one repo's
+	// test suite, not the worker count.
+	//
+	// Placed BEFORE the load gate below although both are 503 "later"s. This
+	// one is a deterministic count and the other is a sampled measurement that
+	// costs a process walk, so when both would refuse, the caller gets the
+	// cheaper answer and the more actionable one ("this repo already has 3").
+	// It also fires EARLIER in the incident: the CPU those workers will spend
+	// is not in a sample taken at the moment the last of them is dispatched.
+	//
+	// Fails OPEN on an unreadable witness store, and reserves nothing when the
+	// refinery cannot be asked — see RepoOccupancyFor for both directions.
+	if refusal := r.repoCapRefusal(spawnReq.Repo); refusal != "" {
+		failPolecatSpawn(w, spawnReq, http.StatusServiceUnavailable, refusal)
+		return
+	}
+
 	// Load gate: refuse to add a worker to a host the fleet is already using
 	// most of (mg-1b8c). The two gates above ask whether THIS ITEM may be
 	// dispatched; this one asks whether this HOST can take another worker, and
