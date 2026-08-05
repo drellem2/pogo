@@ -385,6 +385,10 @@ sync_src >/dev/null 2>&1
     && pass "sync_src: a diverged tree classifies as 'diverged', NOT as the same thing as dirty" || fail "diverged classified as '$SYNC_CLASS'"
 "$GIT" -C "$SRC" reset --hard --quiet HEAD~1
 
+# main() resolves the probe before it syncs, so the assertions below run against
+# the production path rather than a runner that never looked for one.
+resolve_nc >/dev/null 2>&1 || true
+
 # THE REGRESSION, reproduced. A fetch that cannot reach its remote must NOT come
 # back as dirty-or-diverged. 127.0.0.1:1 is closed on every box, so the probe
 # gets an immediate RST and this stays hermetic and fast — no DNS, no internet.
@@ -402,6 +406,16 @@ sync_src >/dev/null 2>&1; RC=$?
     || fail "a fetch failure blamed the tree"
 [ -n "$SYNC_DETAIL" ] \
     && pass "sync_src: the failing step's stderr is kept verbatim for the alert to print" || fail "SYNC_DETAIL empty on a transport failure"
+
+# ...and on a box where no probe can be proved, THE SAME FETCH FAILURE must stop
+# short of naming the network. This is the safety property the three-valued probe
+# exists for: the runner loses precision, never honesty.
+SAVED_NC_E2E="$NC"; NC=""
+sync_src >/dev/null 2>&1
+[ "$SYNC_CLASS" = "unclassified" ] \
+    && pass "sync_src: with no provable probe the SAME failure is 'unclassified', not 'network' — precision is lost, honesty is not" \
+    || fail "with no probe, the fetch failure was still classified '$SYNC_CLASS'"
+NC="$SAVED_NC_E2E"
 
 SRC="$WORK/src"
 
@@ -455,6 +469,21 @@ i=0
 while [ ! -s "$LISTENER_PORTFILE" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$(( i + 1 )); done
 LISTENER_PORT="$(cat "$LISTENER_PORTFILE" 2>/dev/null)"
 
+# A second listener, for the by-NAME control below.
+LISTENER_PORTFILE2="$WORK/listener2.port"
+python3 - "$LISTENER_PORTFILE2" >/dev/null 2>&1 <<'PY' &
+import socket, sys, time
+s = socket.socket(); s.bind(("127.0.0.1", 0)); s.listen(8)
+open(sys.argv[1], "w").write(str(s.getsockname()[1]))
+time.sleep(120)
+PY
+LISTENER_PID2=$!
+i=0
+while [ ! -s "$LISTENER_PORTFILE2" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$(( i + 1 )); done
+LISTENER_PORT2="$(cat "$LISTENER_PORTFILE2" 2>/dev/null)"
+
+resolve_nc >/dev/null 2>&1 || true
+
 if [ -n "$LISTENER_PORT" ]; then
     probe_tcp 127.0.0.1 "$LISTENER_PORT" 5 \
         && pass "probe_tcp POSITIVE CONTROL: a port that IS listening reads as reachable (without this, every failure is 'the network')" \
@@ -464,19 +493,76 @@ else
 fi
 kill "$LISTENER_PID" 2>/dev/null; wait "$LISTENER_PID" 2>/dev/null
 
-probe_tcp 127.0.0.1 1 5 \
-    && fail "probe_tcp claimed a closed port was reachable" || pass "probe_tcp NEGATIVE CONTROL: a closed port reads as unreachable"
+probe_tcp 127.0.0.1 1 5
+[ "$?" -ne 0 ] && pass "probe_tcp NEGATIVE CONTROL: a closed port does not read as reachable" || fail "probe_tcp claimed a closed port was reachable"
 
-# The timeout is not decoration. An unreachable host does not refuse a SYN, it
-# drops it, and the kernel then waits ~75s — long enough that the alert would
-# arrive after the window it is about. 192.0.2.0/24 is TEST-NET-1 and is
-# guaranteed non-routable, so this blackholes rather than resetting.
+# THE CONTROL THE FIRST VERSION OF THIS PROBE DID NOT HAVE, and the reason it
+# shipped broken. Every assertion above uses 127.0.0.1 — a literal IP — so none
+# of them can fail for the reason the probe actually failed on this box:
+#
+#     /bin/bash 3.2   exec 3<>/dev/tcp/github.com/22    HANGS
+#     /bin/bash 3.2   exec 3<>/dev/tcp/20.26.156.215/22 connects
+#
+# macOS's bash hangs resolving a HOSTNAME in a /dev/tcp redirect. The deploy
+# remote is a hostname, so the probe would have timed out every night and
+# reported "unreachable" — classifying a rejected key, a 5xx and a real outage
+# alike as `network`. A check invariant under the failure it guards fires for
+# nothing, so this one uses a name.
+#
+# `localhost` resolves from /etc/hosts on every box, needs no DNS server, and is
+# a NAME rather than an address — which is exactly the axis under test.
+if [ -n "$LISTENER_PORT2" ]; then
+    probe_tcp localhost "$LISTENER_PORT2" 5 \
+        && pass "probe_tcp reaches a listener addressed by NAME, not just by IP — the case the first version hung on" \
+        || fail "probe_tcp could not reach localhost:$LISTENER_PORT2 by name — it is IP-only, which is how it shipped broken"
+else
+    fail "the by-name control could not start a listener — the probe is unverified on the axis that broke it"
+fi
+kill "$LISTENER_PID2" 2>/dev/null; wait "$LISTENER_PID2" 2>/dev/null
+
+# THE THREE-VALUED CONTRACT. "No answer" must be its own outcome: a probe that
+# merely failed to complete must never be reported as "the network is down",
+# because that is this ticket's defect committed inside its own fix.
+#
+# 192.0.2.0/24 is TEST-NET-1 and guaranteed non-routable, so a SYN to it is
+# dropped rather than refused — the probe gets no answer at all.
+SAVED_NC="$NC"
+NC=""   # no proven primitive: the probe may confirm UP, never assert DOWN
 T0=$(date +%s)
-probe_tcp 192.0.2.1 22 2 && fail "probe_tcp reached TEST-NET-1" || true
+probe_tcp 192.0.2.1 22 2; PRC=$?
 T1=$(date +%s)
+[ "$PRC" -eq 2 ] \
+    && pass "probe_tcp: with no proven primitive, a blackholed host returns 'could not probe' (2) — NOT 'unreachable'" \
+    || fail "probe_tcp returned $PRC for a blackholed host with no proven primitive; 1 here is the misdiagnosis this ticket is about"
 [ $(( T1 - T0 )) -le 8 ] \
     && pass "probe_tcp gives up on a BLACKHOLED host at its timeout ($(( T1 - T0 ))s), not at the kernel's ~75s" \
     || fail "probe_tcp took $(( T1 - T0 ))s against a blackholed host — the timeout is not working"
+probe_tcp 127.0.0.1 1 3; PRC=$?
+[ "$PRC" -eq 2 ] \
+    && pass "probe_tcp: with no proven primitive, even a CLOSED port is 'could not probe' — /dev/tcp's failure is not evidence about the network" \
+    || fail "probe_tcp asserted a definite answer ($PRC) from an unproven primitive"
+NC="$SAVED_NC"
+
+# The PRECISION half, which the controls above deliberately cannot cover. They
+# assert that losing the probe costs no honesty; this asserts the probe is
+# actually PREFERRED when present, because `localhost` resolves out of
+# /etc/hosts and so a /dev/tcp fallback would still pass every by-name
+# assertion above — measured: bash 3.2 refuses localhost:22 in 0s and hangs on
+# github.com:22. Only a real DNS name separates them, and the suite must not
+# need the internet, so the preference is checked directly instead.
+NC_WITNESS="$WORK/nc.used"; rm -f "$NC_WITNESS"
+cat > "$FAKEBIN/witnessnc" <<EOF
+#!/bin/sh
+echo used > "$NC_WITNESS"
+exit 0
+EOF
+chmod +x "$FAKEBIN/witnessnc"
+SAVED_NC="$NC"; NC="$FAKEBIN/witnessnc"
+probe_tcp github.com 22 3 >/dev/null 2>&1
+[ -f "$NC_WITNESS" ] \
+    && pass "probe_tcp USES the resolved nc rather than falling back to /dev/tcp — the fallback hangs on any DNS name on this box" \
+    || fail "probe_tcp ignored the resolved nc and went to /dev/tcp"
+NC="$SAVED_NC"
 
 # ---------------------------------------------------------------------------
 # classify_transport — reachable rules the network OUT
@@ -494,12 +580,22 @@ classify_transport "git@github.com:daniel/pogo.git" >/dev/null 2>&1
     && pass "classify_transport: a REACHABLE endpoint means the failure is at the far end, not the network" \
     || fail "reachable endpoint classified as '$SYNC_CLASS'"
 
-probe_tcp() { return 1; }        # nothing answers
+probe_tcp() { return 1; }        # a DEFINITE refusal
 SYNC_CLASS=""
 classify_transport "git@github.com:daniel/pogo.git" >/dev/null 2>&1
 [ "$SYNC_CLASS" = "network" ] \
-    && pass "classify_transport: an UNREACHABLE endpoint is the network — the 08-05 case" \
+    && pass "classify_transport: a DEFINITELY unreachable endpoint is the network — the 08-05 case" \
     || fail "unreachable endpoint classified as '$SYNC_CLASS'"
+
+# THE DISTINCTION THE FIRST VERSION COLLAPSED. "The probe got no answer" and
+# "the host is down" are different facts, and treating the first as the second
+# is how a broken probe would have blamed the network for every rejected key.
+probe_tcp() { return 2; }        # no answer at all
+SYNC_CLASS=""
+classify_transport "git@github.com:daniel/pogo.git" >/dev/null 2>&1
+[ "$SYNC_CLASS" = "unclassified" ] \
+    && pass "classify_transport: a probe that returns NO ANSWER yields 'unclassified' — no answer is not a no" \
+    || fail "a probe that could not complete was reported as '$SYNC_CLASS' — that asserts a cause it never established"
 
 # The third answer, and the one the ticket asks for by name: when the runner
 # cannot classify it must SAY so and print the error, not fall back to the most

@@ -240,6 +240,7 @@
 #   POGO_DEPLOY_SYNC_BACKOFF   seconds between them, last value repeats ("15 45 120")
 #   POGO_DEPLOY_SYNC_RETRY_BUDGET  ceiling on total backoff sleep, seconds (300)
 #   POGO_DEPLOY_PROBE_TIMEOUT  seconds to wait for the reachability probe (5)
+#   POGO_DEPLOY_NC           pin an nc for the probe (still checked by execution)
 #   GIT                      pin a specific git (still checked by execution)
 
 set -u
@@ -723,27 +724,106 @@ remote_endpoint() {
     printf '%s %s' "$host" "$port"
 }
 
-# probe_tcp HOST PORT [TIMEOUT] — can this box open a TCP connection right now?
+# THE PROBE, AND WHY IT IS NOT JUST A /dev/tcp REDIRECT
+# ------------------------------------------------------
+# This was first written as a bare bash /dev/tcp redirect, on the reasoning that
+# a BUILTIN needs no binary resolved at 03:00 and cannot have an impostor — the
+# same argument the mg-015f / mg-dd5f / mg-b72a sections make about `mg` and
+# `git`. That reasoning was fine and the conclusion was wrong, and it was wrong
+# ON THIS BOX. Measured here:
 #
-# A bash /dev/tcp redirect rather than nc or curl, because it is a BUILTIN: this
-# runs on the path that has to work when everything else is broken, and the file
-# already spends a section (mg-015f / mg-dd5f / mg-b72a) on the cost of trusting
-# an external binary it has not proved. There is nothing to resolve and nothing
-# to be an impostor of.
+#     /bin/bash 3.2.57            exec 3<>/dev/tcp/github.com/22   HANGS
+#     /bin/bash 3.2.57            exec 3<>/dev/tcp/20.26.156.215/22 connects
+#     /usr/bin/nc                 nc -z -w 5 github.com 22          connects
+#     python3, ssh                                                  connect
 #
+# macOS's bash 3.2 hangs resolving a hostname in a /dev/tcp redirect while
+# connecting happily to a literal IP. Since the deploy remote is a HOSTNAME, the
+# probe would have timed out every single time and reported "unreachable" —
+# which would have classified a rejected key, a 5xx and a real outage
+# identically as `network`. That is this ticket's own defect, rebuilt inside its
+# own fix: a component asserting a cause it had not established.
+#
+# It survived the first round of tests because the positive control probed
+# 127.0.0.1 — a literal IP. The control could not fail for the reason the probe
+# actually fails, so it passed while the probe was broken. A check invariant
+# under the failure it guards fires for nothing.
+#
+# So there are two changes. `nc` is resolved by EXECUTION, like every other
+# primitive here, and preferred because it does its own resolution. And the
+# probe now has THREE answers rather than two.
+#
+# probe_tcp HOST PORT [TIMEOUT]:
+#     0  reachable            — a definite yes
+#     1  unreachable          — a definite no, from a primitive that can give one
+#     2  could not probe      — no answer. NOT a no.
+#
+# The third is the whole correction. A timed-out probe, or a primitive that
+# cannot be trusted to distinguish "unreachable" from "I broke", must not
+# produce a verdict — it yields `unclassified`, which prints the underlying
+# error verbatim and names no cause. Concretely: with a proven `nc` the probe
+# can answer all three; with only /dev/tcp it may answer 0 or 2 and NEVER 1,
+# because on a box like this one its failure means nothing about the network.
+NC=""
+NC_FLAGS=""
+
+resolve_nc() {
+    local cand
+    local -a cands=()
+    # -G is macOS's CONNECT timeout. Measured here: `nc -z -w 5` alone does NOT
+    # bound the connect on Darwin — a blackholed host ran 12s past it — while -G
+    # does. Linux's nc has no -G and bounds connects with -w, so the flag is
+    # chosen by OS rather than by parsing an error message.
+    if [ "$(uname -s 2>/dev/null)" = "Darwin" ]; then NC_FLAGS="-G 5"; else NC_FLAGS=""; fi
+    [ -n "${POGO_DEPLOY_NC:-}" ] && cands+=("$POGO_DEPLOY_NC")
+    cands+=("/usr/bin/nc" "/opt/homebrew/bin/nc" "/usr/local/bin/nc")
+    cand="$(command -v nc 2>/dev/null)"
+    [ -n "$cand" ] && cands+=("$cand")
+    for cand in "${cands[@]}"; do
+        [ -x "$cand" ] || continue
+        # Proved by execution, and specifically by its ability to say NO: port 1
+        # on loopback is closed everywhere, so a working nc refuses it with
+        # exit 1 in well under a second. A missing binary exits 127, a
+        # non-executable one 126, and one that cannot parse these flags does not
+        # reach the connect at all — none of which is a 1.
+        "$cand" $NC_FLAGS -w 2 -z 127.0.0.1 1 >/dev/null 2>&1
+        [ "$?" -eq 1 ] || continue
+        NC="$cand"
+        log "nc: resolved a probe that can return a definite refusal at $NC ($NC_FLAGS)"
+        return 0
+    done
+    log "nc: none usable — the reachability probe can confirm a host is UP but will never assert one is DOWN, so a failed sync stays 'unclassified' rather than being called the network"
+    return 1
+}
+
 # The connect runs in a background subshell with a killer beside it, because an
 # unreachable host does not fail fast: a silently-dropped SYN sits in the kernel
 # for ~75s, which would delay the alert past the point of being useful.
 probe_tcp() {
     local host="$1" port="$2" timeout="${3:-5}" p k rc
-    ( exec 3<>"/dev/tcp/$host/$port" ) >/dev/null 2>&1 &
+    if [ -n "$NC" ]; then
+        ( "$NC" $NC_FLAGS -w "$timeout" -z "$host" "$port" ) >/dev/null 2>&1 &
+    else
+        ( exec 3<>"/dev/tcp/$host/$port" ) >/dev/null 2>&1 &
+    fi
     p=$!
     ( sleep "$timeout"; kill -9 "$p" ) >/dev/null 2>&1 &
     k=$!
     wait "$p" 2>/dev/null; rc=$?
     kill "$k" >/dev/null 2>&1
     wait "$k" 2>/dev/null
-    return "$rc"
+    case "$rc" in
+        0) return 0 ;;
+        # Killed by the watchdog. No answer was obtained, from either primitive.
+        137|143) return 2 ;;
+        *)
+            # A non-zero from a PROVEN nc is a real refusal. The same from
+            # /dev/tcp is not evidence of anything: on this box that is what a
+            # resolver failure looks like, and it is indistinguishable from an
+            # unsupported redirect.
+            [ -n "$NC" ] && return 1
+            return 2 ;;
+    esac
 }
 
 # classify_transport URL — sets SYNC_CLASS to `network`, `remote`, or
@@ -755,20 +835,25 @@ probe_tcp() {
 # when there is no endpoint to probe the answer is `unclassified` — not the most
 # likely cause, which is precisely the guess that produced the 08-05 alert.
 classify_transport() {
-    local url="${1:-}" host port
+    local url="${1:-}" host port rc
     read -r host port <<<"$(remote_endpoint "$url")"
     if [ -z "${host:-}" ] || [ -z "${port:-}" ]; then
         SYNC_CLASS=unclassified
         log "sync: no TCP endpoint could be derived from remote '$url' — NOT classifying the failure"
         return 0
     fi
-    if probe_tcp "$host" "$port" "$PROBE_TIMEOUT"; then
-        SYNC_CLASS=remote
-        log "sync: $host:$port ANSWERED a TCP connection — connectivity is up, so the failure is at the far end (auth, permission, or the repository)"
-    else
-        SYNC_CLASS=network
-        log "sync: could not open a TCP connection to $host:$port within ${PROBE_TIMEOUT}s — NETWORK-class failure"
-    fi
+    probe_tcp "$host" "$port" "$PROBE_TIMEOUT"; rc=$?
+    case "$rc" in
+        0)  SYNC_CLASS=remote
+            log "sync: $host:$port ANSWERED a TCP connection — connectivity is up, so the failure is at the far end (auth, permission, or the repository)" ;;
+        1)  SYNC_CLASS=network
+            log "sync: $host:$port REFUSED a TCP connection — NETWORK-class failure" ;;
+        # The correction that matters: no answer is not a no. Naming the network
+        # here on a probe that merely failed to complete would be this ticket's
+        # own defect, committed by its own fix.
+        *)  SYNC_CLASS=unclassified
+            log "sync: the reachability probe for $host:$port returned no answer within ${PROBE_TIMEOUT}s — that is NOT evidence the network is down, so the failure stays unclassified and the error is reported verbatim" ;;
+    esac
 }
 
 # git_step CMD... — run a git step, keep its stderr in SYNC_DETAIL, and still
@@ -1401,6 +1486,10 @@ main() {
     # tell you about failures" is the silent nightly all over again.
     resolve_mg   || { err "no alert path — refusing to run unattended"; exit 1; }
     resolve_pogo || log "pogo CLI unresolved — the post-bounce schedule check will be skipped"
+    # Never fatal. Without it the sync-failure classifier loses only its ability
+    # to assert that a host is DOWN; it can still confirm one is up, and it
+    # reports `unclassified` rather than guessing (mg-0d70).
+    resolve_nc || true
     # After resolve_mg, so a git failure has somewhere to be reported; before
     # sync_src, which is the first thing that needs git.
     resolve_git || {
