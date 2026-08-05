@@ -288,3 +288,82 @@ func TestQueuePositionUnreadableSaysSo(t *testing.T) {
 		t.Errorf("an unreadable pipeline must be reported as unknown, got:\n%s", out)
 	}
 }
+
+// TestQueuePositionCountsOnlyItsOwnRepo is the reporting half of mg-37ad. With
+// merges running in per-repo lanes, a whole-pipeline count would tell an author
+// they are third in line when the two merges in front are for repos that cannot
+// delay them by a second — a more confident version of the confusion this view
+// exists to remove.
+func TestQueuePositionCountsOnlyItsOwnRepo(t *testing.T) {
+	now := time.Now()
+	queue := []refinery.MergeRequest{
+		{ID: "mr-other", RepoPath: "/repos/onethird", Branch: "b-other", Status: refinery.StatusProcessing, StartTime: now.Add(-70 * time.Minute)},
+		{ID: "mr-mine-active", RepoPath: "/repos/pogo", Branch: "b-active", Status: refinery.StatusProcessing, StartTime: now.Add(-2 * time.Minute)},
+		{ID: "mr-mine", RepoPath: "/repos/pogo", Branch: "b-mine", Status: refinery.StatusQueued, SubmitTime: now.Add(-30 * time.Minute)},
+	}
+	out := formatQueuePositionFrom(queue, "mr-mine", now)
+	t.Logf("POSITION:\n%s", out)
+
+	if !strings.Contains(out, "1 merge request ahead in pogo") {
+		t.Errorf("position must be counted within the repo, got:\n%s", out)
+	}
+	if !strings.Contains(out, "mr-mine-active") {
+		t.Errorf("the blocker must be this repo's in-flight merge, got:\n%s", out)
+	}
+	if strings.Contains(out, "mr-other") {
+		t.Errorf("an unrelated repo's merge must not be named as the blocker — it cannot delay this one:\n%s", out)
+	}
+}
+
+// TestQueuePositionWithOtherReposRunning is the state that did not exist before
+// lanes and must not be reported as the alarming one: merges ARE running, none
+// of them is this repo's, and none of them is why this request is waiting.
+func TestQueuePositionWithOtherReposRunning(t *testing.T) {
+	now := time.Now()
+	queue := []refinery.MergeRequest{
+		{ID: "mr-other", RepoPath: "/repos/onethird", Branch: "b-other", Status: refinery.StatusProcessing, StartTime: now.Add(-70 * time.Minute)},
+		{ID: "mr-mine", RepoPath: "/repos/pogo", Branch: "b-mine", Status: refinery.StatusQueued, SubmitTime: now.Add(-5 * time.Minute)},
+	}
+	out := formatQueuePositionFrom(queue, "mr-mine", now)
+	t.Logf("POSITION:\n%s", out)
+
+	if strings.Contains(out, "NOTHING IS IN FLIGHT") {
+		t.Errorf("merges are running; the alarming wording must not be used, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Nothing is in flight for pogo") {
+		t.Errorf("the view must say this repo's lane is idle, got:\n%s", out)
+	}
+	if !strings.Contains(out, "NOT block this one") {
+		t.Errorf("the view must say the other repo's merge is not the blocker, got:\n%s", out)
+	}
+	if !strings.Contains(out, "next up in pogo") {
+		t.Errorf("with an idle lane the request is next up in its own repo, got:\n%s", out)
+	}
+}
+
+// TestQueueListsEveryRunningMergeWithItsRepo covers `pogo refinery queue`. When
+// several merges run at once, a view showing one running row hides the others
+// exactly as the pre-mg-0c51 view hid the only one — and the repo column is
+// what makes "my repo is not blocked, it is just behind" readable at all.
+func TestQueueListsEveryRunningMergeWithItsRepo(t *testing.T) {
+	now := time.Now()
+	queue := []refinery.MergeRequest{
+		{ID: "mr-one", RepoPath: "/repos/onethird", Branch: "b-one", Status: refinery.StatusProcessing, StartTime: now.Add(-70 * time.Minute)},
+		{ID: "mr-two", RepoPath: "/repos/pogo", Branch: "b-two", Status: refinery.StatusProcessing, StartTime: now.Add(-time.Minute)},
+		{ID: "mr-three", RepoPath: "/repos/pogo", Branch: "b-three", Status: refinery.StatusQueued, SubmitTime: now.Add(-time.Minute)},
+	}
+	out := formatQueue(queue, now)
+	t.Logf("QUEUE:\n%s", out)
+
+	for _, want := range []string{"mr-one", "mr-two", "repo=onethird", "repo=pogo"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("queue view is missing %q, got:\n%s", want, out)
+		}
+	}
+	if !strings.Contains(out, "1 merge request ahead in this repo") {
+		t.Errorf("a pending row must be counted against its own repo, got:\n%s", out)
+	}
+	if strings.Contains(out, "NOTHING IN FLIGHT") {
+		t.Errorf("two merges are running; the view must not report an idle refinery:\n%s", out)
+	}
+}

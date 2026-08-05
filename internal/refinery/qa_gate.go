@@ -158,11 +158,12 @@ func (r *Refinery) holdMergeRequest(mr *MergeRequest, qaItemID string) {
 	// it is: a queued row reporting "in flight for 40m" would be the same
 	// class of untruth as the omission this stamp exists to fix (mg-0c51).
 	mr.StartTime = time.Time{}
-	// Put it back at the end of the queue so other MRs can proceed.
+	// Put it back at the end of the queue so other MRs can proceed, and give
+	// up the repo lane it was holding — otherwise a QA hold on one branch
+	// would block every other merge for that repo, which is the serialisation
+	// this design exists to remove, reintroduced one repo at a time.
 	r.queue = append(r.queue, mr)
-	if r.processing == mr {
-		r.processing = nil
-	}
+	r.endLaneLocked(r.laneHoldingLocked(mr.ID))
 	r.saveStateLocked()
 	log.Printf("refinery: MR %s held (QA item %s pending), re-queued", mr.ID, qaItemID)
 }

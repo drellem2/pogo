@@ -336,10 +336,21 @@ The refinery is rigless. It doesn't resolve project references or care how many 
     └── <repo-name>/       # One worktree per remote, created on demand
 ```
 
+Merges run in **lanes, one per repo**. The worktree layout above is why: there
+is exactly one clone per repo, so two merges for the same repo would share a
+working tree and would each rebase onto a target ref the other is about to move.
+Two merges for *different* repos share neither, and serialising them was pure
+cost — gate cost in the slowest repo set merge latency for every repo. A cap
+(`[refinery] max_concurrent_merges`, default 2) bounds how many repos merge at
+once; setting it to 1 is the historic single-slot loop.
+See [docs/design/refinery-concurrency-design.md](docs/design/refinery-concurrency-design.md).
+
 ```
-loop (woken by submit, or every poll_interval as backstop):
-  items = mg list --status=available --tag=merge-ready
-  for each item:
+loop (woken by submit, by a lane finishing, or every poll_interval as backstop):
+  start every queued item whose repo has no merge in flight, up to the cap;
+  each runs on its own goroutine and the loop does NOT wait for it.
+
+  per item:
     branch = item.metadata.branch
     repo = item.metadata.repo
     worktree = ensure_worktree(repo)

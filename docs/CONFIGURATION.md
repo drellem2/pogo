@@ -1909,6 +1909,37 @@ To gate both deliberately on a repo where one calls the other, name them:
 commands = ["./build.sh", "./test.sh"]
 ```
 
+**Per-repo lanes (`[refinery] max_concurrent_merges`).** Merges are partitioned
+into **lanes, one per repo**. Two merge requests for the same repo are never
+processed at the same time — they share the refinery's single clone of that repo
+(`~/.pogo/refinery/worktrees/<repo>`) and each rebases onto a target ref the
+other is about to move. Two merge requests for **different** repos have no such
+relationship and run concurrently.
+
+```toml
+[refinery]
+max_concurrent_merges = 2   # default; 1 = the historic single-slot refinery
+```
+
+The cap bounds how many *different* repos may merge at once. It does not, and
+cannot, allow two merges for one repo to overlap. Raising it buys parallelism
+across more repos at the cost of gate contention: a quality gate is the most
+expensive thing pogod runs, the host is shared with the polecat fleet, and gates
+running against each other inflate one another's wall time until a gate timeout
+starts failing branches that were fine. When that happens the failure says so —
+the contention record on a timed-out gate reports what the host was doing — but
+the cheaper remedy is a lower cap.
+
+Read what is running with `pogo refinery status` (one `Active:` line per lane,
+each naming its repo) or `pogo refinery queue` (running merges lead the list).
+`QueueLen` still counts pending requests only, so it can be 0 while merges run.
+
+Why it exists: with one global slot, gate cost in the slowest repo set merge
+latency for **every** repo. On 2026-08-05 twelve merge requests waited 70 minutes
+behind a single gate, seven of them for a repo the refinery was otherwise idle
+on — including the fixes for that day's outage. See
+[docs/design/refinery-concurrency-design.md](design/refinery-concurrency-design.md).
+
 **QA gate (hardcoded).** Before processing any MR, the refinery scans the
 macguffin workspace (`Config.MacguffinDir`, default `~/.macguffin/work`) for a
 work item with `type: qa` whose `source` matches the MR author (the work-item
@@ -1918,7 +1949,9 @@ ID behind the branch). If a matching QA item sits in a pending state
 only once the matching QA item reaches `done`/`archive`, or when no matching QA
 item exists at all (the gate is opt-in per work item, but always-on as a
 mechanism). This is enforced in code — `internal/refinery/qa_gate.go`, called
-from `internal/refinery/refinery.go:499` — not a layered or optional pattern.
+from `holdForQA` in `internal/refinery/lanes.go` — not a layered or optional
+pattern. A held merge releases its repo's lane, so it does not block other
+merges for the same repo while it waits.
 The only knob is `MacguffinDir`: set it empty to disable the gate entirely.
 There is no per-project, per-repo, or per-branch toggle.
 

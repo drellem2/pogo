@@ -116,7 +116,7 @@ func (r *Refinery) processMerge(mr *MergeRequest) (mergeResult, error) {
 		// Cancellation is honoured at attempt boundaries as well as inside the
 		// gate, so a cancel that arrives during a git step still takes effect
 		// rather than being swallowed until the next gate starts.
-		if r.cancelWasRequested() {
+		if r.cancelWasRequested(mr) {
 			emitMergeCancelled(mr, attempt, "before-attempt", gateOutput)
 			return mergeResult{GateOutput: gateOutput}, cancelledMergeError("before-attempt")
 		}
@@ -180,7 +180,7 @@ func (r *Refinery) processMerge(mr *MergeRequest) (mergeResult, error) {
 
 		// A cancelled gate must not be retried: the retry loop exists to
 		// absorb races with other merges, not to defeat an operator.
-		if isCancelled(attemptErr) || r.cancelWasRequested() {
+		if isCancelled(attemptErr) || r.cancelWasRequested(mr) {
 			emitMergeCancelled(mr, attempt, stage, gateOutput)
 			return mergeResult{GateOutput: gateOutput}, cancelledMergeError(stage)
 		}
@@ -250,7 +250,7 @@ func (r *Refinery) processMerge(mr *MergeRequest) (mergeResult, error) {
 			if backoff > 0 {
 				log.Printf("refinery: MR %s waiting %s before attempt %d (class=%s, budget %s of %s spent)",
 					mr.ID, backoff, attempt+1, disp.Class, backoffSpent.Round(time.Second), networkRetryBudget)
-				if !r.sleepUnlessCancelled(backoff) {
+				if !r.sleepUnlessCancelled(mr, backoff) {
 					emitMergeCancelled(mr, attempt, "retry-backoff", gateOutput)
 					return mergeResult{GateOutput: gateOutput}, cancelledMergeError("retry-backoff")
 				}
@@ -358,12 +358,17 @@ func (r *Refinery) attemptClassSummary(mr *MergeRequest) string {
 }
 
 // sleepUnlessCancelled waits for d, returning false if a cancel was requested
-// while waiting. Backoff must not make a cancel wait out the whole schedule.
-func (r *Refinery) sleepUnlessCancelled(d time.Duration) bool {
+// for mr while waiting. Backoff must not make a cancel wait out the whole
+// schedule.
+//
+// It takes the merge request because cancellation is per-LANE since mg-37ad:
+// several merges can be backing off at once, and each must watch its own lane's
+// cancel rather than any cancel anywhere in the refinery.
+func (r *Refinery) sleepUnlessCancelled(mr *MergeRequest, d time.Duration) bool {
 	const tick = 250 * time.Millisecond
 	deadline := time.Now().Add(d)
 	for time.Now().Before(deadline) {
-		if r.cancelWasRequested() {
+		if r.cancelWasRequested(mr) {
 			return false
 		}
 		remaining := time.Until(deadline)
@@ -372,7 +377,7 @@ func (r *Refinery) sleepUnlessCancelled(d time.Duration) bool {
 		}
 		time.Sleep(remaining)
 	}
-	return !r.cancelWasRequested()
+	return !r.cancelWasRequested(mr)
 }
 
 // summarizeAttemptClasses counts the classes across a set of failed attempts,
@@ -543,7 +548,7 @@ func (r *Refinery) attemptMerge(wtDir string, mr *MergeRequest, attempt int, ski
 		gateOutput = "(quality gates skipped on retry — skip_on_retry=true)"
 	} else {
 		log.Printf("refinery: MR %s step=quality-gates attempt=%d heartbeat_every=%s", mr.ID, attempt, r.gateHeartbeat())
-		out, gates, qerr := r.runQualityGates(r.gateContext(), wtDir, mr.RepoPath, mr)
+		out, gates, qerr := r.runQualityGates(r.gateContext(mr), wtDir, mr.RepoPath, mr)
 		gateOutput = out
 		if qerr != nil {
 			return gateOutput, gateStage(gates), "", false, fmt.Errorf("quality gate: %w", qerr)

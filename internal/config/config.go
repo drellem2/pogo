@@ -1198,6 +1198,12 @@ func (c *AgentsConfig) AgentProvider(agentType string) string {
 type RefineryConfig struct {
 	Enabled      bool
 	PollInterval time.Duration
+	// MaxConcurrentMerges bounds how many merge requests the refinery runs at
+	// once. Merges are partitioned by repo, so two merges for the SAME repo
+	// are never concurrent whatever this is; this caps how many different
+	// repos may merge at the same time. Zero means the refinery's own default.
+	// One restores the historic single-slot behaviour.
+	MaxConcurrentMerges int
 }
 
 // parsedConfig is the intermediate result of reading the config layers.
@@ -1262,6 +1268,9 @@ func Load() *Config {
 		Refinery: RefineryConfig{
 			Enabled:      true,
 			PollInterval: 30 * time.Second,
+			// Left at zero so the refinery package owns the number; see
+			// refinery.DefaultMaxConcurrentMerges for why it is what it is.
+			MaxConcurrentMerges: 0,
 		},
 		GitGC: GitGCConfig{
 			Enabled:  true,
@@ -1380,6 +1389,9 @@ func Load() *Config {
 		}
 		if fileCfg.Refinery.PollInterval > 0 {
 			cfg.Refinery.PollInterval = fileCfg.Refinery.PollInterval
+		}
+		if fileCfg.Refinery.MaxConcurrentMerges > 0 {
+			cfg.Refinery.MaxConcurrentMerges = fileCfg.Refinery.MaxConcurrentMerges
 		}
 		if fileCfg.Heartbeat.Interval > 0 {
 			cfg.Heartbeat.Interval = fileCfg.Heartbeat.Interval
@@ -2003,6 +2015,10 @@ func parseConfigFileInto(cfg *parsedConfig, path string) error {
 			case "poll_interval":
 				if d, err := time.ParseDuration(unquotedVal); err == nil {
 					cfg.Refinery.PollInterval = d
+				}
+			case "max_concurrent_merges":
+				if n, err := strconv.Atoi(val); err == nil && n > 0 {
+					cfg.Refinery.MaxConcurrentMerges = n
 				}
 			}
 		case "search":

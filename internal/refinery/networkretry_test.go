@@ -407,18 +407,33 @@ func TestBackoffIsInterruptedByCancel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !r.sleepUnlessCancelled(5 * time.Millisecond) {
+	mr := &MergeRequest{ID: "mr-backoff", RepoPath: "/repos/alpha", Status: StatusProcessing}
+	markInFlight(r, mr)
+	if !r.sleepUnlessCancelled(mr, 5*time.Millisecond) {
 		t.Fatal("an uncancelled sleep reported cancellation")
 	}
+
+	// A merge backing off in ANOTHER repo's lane must be unaffected. Backoff is
+	// where a merge spends the longest stretch not holding any lock, so it is
+	// the likeliest place for a per-lane cancel to be mistaken for a global one
+	// — and a backoff cut short by someone else's cancel would abandon a retry
+	// the network-class budget exists to spend (mg-e5c2, mg-37ad).
+	other := &MergeRequest{ID: "mr-other-lane", RepoPath: "/repos/beta", Status: StatusProcessing}
+	markInFlight(r, other)
+
 	r.mu.Lock()
-	r.cancelRequested = true
+	r.requestInFlightCancelLocked(r.laneHoldingLocked(mr.ID))
 	r.mu.Unlock()
+
 	start := time.Now()
-	if r.sleepUnlessCancelled(10 * time.Second) {
+	if r.sleepUnlessCancelled(mr, 10*time.Second) {
 		t.Error("a cancelled sleep reported success")
 	}
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Errorf("cancel took %s to interrupt the backoff", elapsed)
+	}
+	if !r.sleepUnlessCancelled(other, 5*time.Millisecond) {
+		t.Error("cancelling one repo's merge also interrupted another repo's backoff")
 	}
 }
 

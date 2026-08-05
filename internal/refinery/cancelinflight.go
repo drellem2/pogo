@@ -32,59 +32,53 @@ const (
 	CancelRequestedInFlight CancelOutcome = "requested_in_flight"
 )
 
-// gateContext returns the context a quality gate should run under. It is the
-// per-MR cancellable context when one is installed, and Background otherwise
-// (tests that call processMerge directly).
-func (r *Refinery) gateContext() context.Context {
+// gateContext returns the context the quality gate for mr should run under. It
+// is that merge's own lane context when one is installed, and Background
+// otherwise (tests that call processMerge directly).
+//
+// It takes the merge request rather than reading one shared field because a
+// cancel must reach exactly one gate. With per-repo lanes a single shared
+// context would make Cancel a broadcast — killing every repo's gate to stop
+// one — and that failure would be silent, since each victim would report
+// itself as cancelled by an operator.
+func (r *Refinery) gateContext(mr *MergeRequest) context.Context {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.gateCtx != nil {
-		return r.gateCtx
+	if mr != nil {
+		if ln := r.laneHoldingLocked(mr.ID); ln != nil && ln.ctx != nil {
+			return ln.ctx
+		}
 	}
 	return context.Background()
 }
 
-// beginProcessing installs a fresh cancellable context for the MR about to be
-// processed. Must be called with mu held.
-func (r *Refinery) beginProcessingLocked() {
-	ctx, cancel := context.WithCancel(context.Background())
-	r.gateCtx, r.gateCancel = ctx, cancel
-	r.cancelRequested = false
-}
-
-// endProcessing tears down the per-MR cancel context and reports whether a
-// cancellation had been requested. Must be called with mu held.
-func (r *Refinery) endProcessingLocked() bool {
-	requested := r.cancelRequested
-	if r.gateCancel != nil {
-		r.gateCancel()
-	}
-	r.gateCtx, r.gateCancel = nil, nil
-	r.cancelRequested = false
-	return requested
-}
-
-// cancelWasRequested reports whether a cancel has been asked for on the
-// in-flight MR. processMerge consults it at every boundary where it would
-// otherwise start more work.
-func (r *Refinery) cancelWasRequested() bool {
+// cancelWasRequested reports whether a cancel has been asked for on mr.
+// processMerge consults it at every boundary where it would otherwise start
+// more work.
+func (r *Refinery) cancelWasRequested(mr *MergeRequest) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.cancelRequested
+	if mr == nil {
+		return false
+	}
+	ln := r.laneHoldingLocked(mr.ID)
+	return ln != nil && ln.cancelRequested
 }
 
-// requestInFlightCancelLocked kills the running gate and records the request.
-// Must be called with mu held.
-func (r *Refinery) requestInFlightCancelLocked(mr *MergeRequest) {
-	r.cancelRequested = true
-	if r.gateCancel != nil {
+// requestInFlightCancelLocked kills the lane's running gate and records the
+// request. Must be called with mu held.
+func (r *Refinery) requestInFlightCancelLocked(ln *lane) {
+	ln.cancelRequested = true
+	if ln.cancel != nil {
 		// context.WithCancelCause would carry the reason, but the gate only
 		// needs to die; the cause is attached where the error is built.
-		r.gateCancel()
+		ln.cancel()
 	}
-	log.Printf("refinery: cancel requested for PROCESSING MR %s branch=%s author=%s — "+
+	mr := ln.mr
+	log.Printf("refinery: cancel requested for PROCESSING MR %s branch=%s author=%s repo-lane=%s — "+
 		"running gate killed, pipeline stops at the next step boundary "+
-		"(an already-pushed merge still resolves as merged)", mr.ID, mr.Branch, mr.Author)
+		"(an already-pushed merge still resolves as merged). Other lanes are unaffected.",
+		mr.ID, mr.Branch, mr.Author, ln.key)
 }
 
 // InFlightCancelNote is the message a caller should show after a

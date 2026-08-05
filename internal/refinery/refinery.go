@@ -61,6 +61,13 @@ type Config struct {
 	// author before the MR is flagged for escalation (ThresholdReached is set).
 	// Zero means use DefaultFailureThreshold. Negative means disable threshold.
 	FailureThreshold int
+	// MaxConcurrentMerges bounds how many merge requests are processed at
+	// once. Merges are partitioned into per-repo lanes (see lanes.go): two
+	// merges for the same repo are never concurrent whatever this is set to,
+	// and this caps how many DIFFERENT repos may merge at the same time.
+	// Zero means DefaultMaxConcurrentMerges. One restores the historic
+	// single-slot refinery exactly.
+	MaxConcurrentMerges int
 	// StatePath is where refinery state (queue, history, lost list) is
 	// persisted so it survives pogod restarts. Empty disables persistence
 	// (used by most unit tests). Default: ~/.pogo/refinery-state.json
@@ -295,15 +302,28 @@ type Refinery struct {
 	byID          map[string]*MergeRequest // all requests by ID
 	failureCounts map[string]int           // consecutive failure count per author
 
-	// processing is the single in-flight item between dequeue and history
-	// append (the queue loop is single-threaded). Tracked so the persisted
-	// snapshot never has an MR in limbo: an item is always in exactly one of
-	// queue, processing, or history.
-	processing *MergeRequest
-	// recovered holds a processing item loaded from the state file. It is
+	// lanes holds the in-flight merge requests, keyed by laneKey — at most one
+	// per repo, at most maxLanes() in total. An item is always in exactly one
+	// of queue, lanes, or history, so the persisted snapshot never has an MR in
+	// limbo.
+	//
+	// This used to be a single `processing *MergeRequest`, because the queue
+	// loop ran one merge at a time for every repo on the host. That is the
+	// serialisation mg-37ad removed: a lane's occupant blocks only merges that
+	// share its git clone and its target ref.
+	lanes map[string]*lane
+	// laneWG counts running lane goroutines so Stop can wait them out. Without
+	// it, cancelling the loop's context would return from Start while merges
+	// were still pushing — and pogod builds a REPLACEMENT Refinery from the
+	// state file on restart, so two refineries would be driving the same clone.
+	laneWG sync.WaitGroup
+	// stopping blocks new dispatches once shutdown has begun. In-flight lanes
+	// are allowed to finish; nothing new is started.
+	stopping bool
+	// recovered holds in-flight items loaded from the state file. They are
 	// resolved (ancestor probe) at the top of Start, once callbacks are
 	// wired — see resolveRecovered.
-	recovered *MergeRequest
+	recovered []*MergeRequest
 	// lost records MRs that restart recovery could not carry forward.
 	lost []LostEntry
 	// pruned is a ring of MR IDs removed from history by pruning, kept so
@@ -332,13 +352,12 @@ type Refinery struct {
 	// See setLoadSampler.
 	loadSampler hostload.Sampler
 
-	// gateCancel cancels the quality gate running for r.processing, and
-	// cancelRequested records that someone asked for it. Both are cleared
-	// when processing ends. They are what lets Cancel reach a processing MR
-	// instead of refusing it — see Cancel.
-	gateCancel      context.CancelFunc
-	gateCtx         context.Context
-	cancelRequested bool
+	// The cancellation handle that lets Cancel reach a PROCESSING merge request
+	// instead of refusing it lives on the lane (see lanes.go), not here. It
+	// used to be one shared context.CancelFunc on the Refinery, which was
+	// correct while exactly one merge could be in flight and would have become
+	// a broadcast the moment a second one could: cancelling one repo's merge
+	// would have killed another repo's gate.
 
 	// wakeCh wakes the queue loop ahead of the poll tick. Buffered with
 	// capacity 1 so signalling never blocks and concurrent signals collapse
@@ -366,6 +385,13 @@ func New(cfg Config) (*Refinery, error) {
 	if cfg.FailureThreshold == 0 {
 		cfg.FailureThreshold = DefaultFailureThreshold
 	}
+	if cfg.MaxConcurrentMerges == 0 {
+		cfg.MaxConcurrentMerges = DefaultMaxConcurrentMerges
+	}
+	if cfg.MaxConcurrentMerges < 1 {
+		return nil, fmt.Errorf("max_concurrent_merges must be at least 1, got %d "+
+			"(1 is the historic single-slot refinery; there is no setting that means 'merge nothing')", cfg.MaxConcurrentMerges)
+	}
 	if err := os.MkdirAll(cfg.WorktreeDir, 0755); err != nil {
 		return nil, fmt.Errorf("create worktree dir: %w", err)
 	}
@@ -373,6 +399,7 @@ func New(cfg Config) (*Refinery, error) {
 		cfg:           cfg,
 		byID:          make(map[string]*MergeRequest),
 		failureCounts: make(map[string]int),
+		lanes:         make(map[string]*lane),
 		done:          make(chan struct{}),
 		nowFunc:       time.Now,
 		wakeCh:        make(chan struct{}, 1),
@@ -425,24 +452,47 @@ func (r *Refinery) loadState() error {
 	}
 
 	// Rebuild in-memory state. byID indexes queue + history + the recovered
-	// processing item so `refinery show` answers correctly from the moment
+	// in-flight items so `refinery show` answers correctly from the moment
 	// the API is up.
-	r.queue = st.Queue
 	r.history = st.History
 	if st.FailureCounts != nil {
 		r.failureCounts = st.FailureCounts
 	}
-	for _, mr := range r.queue {
+
+	// In-flight items come from ProcessingLanes (written since mg-37ad) and
+	// from the single Processing slot (written by every pogod before it). Both
+	// are read so a state file straddling the change loads without loss.
+	// Resolved by resolveRecovered at Start — never blindly re-run: the crash
+	// may have happened after `git push` landed the merge.
+	inFlight := make(map[string]bool)
+	for _, mr := range st.ProcessingLanes {
+		if mr == nil || inFlight[mr.ID] {
+			continue
+		}
+		inFlight[mr.ID] = true
+		r.recovered = append(r.recovered, mr)
+		r.byID[mr.ID] = mr
+	}
+	if st.Processing != nil && !inFlight[st.Processing.ID] {
+		inFlight[st.Processing.ID] = true
+		r.recovered = append(r.recovered, st.Processing)
+		r.byID[st.Processing.ID] = st.Processing
+	}
+
+	// The persisted queue MIRRORS the in-flight items (see saveStateLocked) so
+	// that a pogod predating lanes still finds them. This binary has them from
+	// ProcessingLanes already, so drop the mirror rather than queue a duplicate
+	// of a merge that is about to be recovered.
+	r.queue = make([]*MergeRequest, 0, len(st.Queue))
+	for _, mr := range st.Queue {
+		if mr == nil || inFlight[mr.ID] {
+			continue
+		}
+		r.queue = append(r.queue, mr)
 		r.byID[mr.ID] = mr
 	}
 	for _, mr := range r.history {
 		r.byID[mr.ID] = mr
-	}
-	if st.Processing != nil {
-		// Resolved by resolveRecovered at Start — do not blindly re-run: the
-		// crash may have happened after `git push` landed the merge.
-		r.recovered = st.Processing
-		r.byID[st.Processing.ID] = st.Processing
 	}
 	r.pruned = st.PrunedIDs
 
@@ -454,8 +504,8 @@ func (r *Refinery) loadState() error {
 		}
 	}
 
-	log.Printf("refinery: restored state from %s (queue=%d history=%d lost=%d, in-flight=%v)",
-		r.store.path, len(r.queue), len(r.history), len(r.lost), r.recovered != nil)
+	log.Printf("refinery: restored state from %s (queue=%d history=%d lost=%d in-flight=%d)",
+		r.store.path, len(r.queue), len(r.history), len(r.lost), len(r.recovered))
 	return nil
 }
 
@@ -466,17 +516,37 @@ func (r *Refinery) saveStateLocked() {
 	if r.store == nil {
 		return
 	}
-	processing := r.processing
-	if processing == nil {
-		processing = r.recovered
+	// In-flight items are whatever holds a lane, plus anything still awaiting
+	// the recovery probe (Start has not run resolveRecovered yet).
+	inFlight := r.inFlightLocked()
+	inFlight = append(inFlight, r.recovered...)
+
+	// The queue is written as pending items PLUS a copy of every in-flight
+	// item at the head, marked queued.
+	//
+	// That mirror is the downgrade path, and it is not decoration. A pogod
+	// predating per-repo lanes reads only `processing` (one slot) and `queue`.
+	// Handed a file with three merges in flight it would keep at most one and
+	// silently drop the rest — merge requests lost from a redesign of the thing
+	// that merges. With the mirror it re-queues all three instead, and the
+	// already-merged probe at the top of processMerge (gh #34) makes re-running
+	// one that had landed a no-op. This binary strips the mirror on load.
+	queue := make([]*MergeRequest, 0, len(r.queue)+len(inFlight))
+	for _, mr := range inFlight {
+		cp := *mr
+		cp.Status = StatusQueued
+		cp.StartTime = time.Time{}
+		queue = append(queue, &cp)
 	}
+	queue = append(queue, r.queue...)
+
 	st := &persistedState{
-		Queue:         r.queue,
-		Processing:    processing,
-		History:       r.history,
-		FailureCounts: r.failureCounts,
-		Lost:          r.lost,
-		PrunedIDs:     r.pruned,
+		Queue:           queue,
+		ProcessingLanes: inFlight,
+		History:         r.history,
+		FailureCounts:   r.failureCounts,
+		Lost:            r.lost,
+		PrunedIDs:       r.pruned,
 	}
 	if err := r.store.save(st); err != nil {
 		log.Printf("refinery: failed to persist state: %v", err)
@@ -631,13 +701,28 @@ func (r *Refinery) wake() {
 }
 
 // wakeIfActionable signals the queue loop when the queue still holds an item
-// worth processing now. Held MRs (waiting on a QA gate) don't count — waking
-// for those would busy-loop the gate check; they retry on the poll tick.
+// that could START now. Two kinds of item are deliberately not actionable:
+//
+//   - Held MRs (waiting on a QA gate). Waking for those would busy-loop the
+//     gate check; they retry on the poll tick.
+//   - MRs whose repo lane is already busy, or that have no lane to run in
+//     because concurrency is at its cap. Since mg-37ad the loop's dispatch is
+//     non-blocking, so treating those as actionable would spin the loop hot:
+//     dispatch would start nothing, re-arm the wake, and immediately run again.
+//
+// Both exclusions are the same rule — only re-arm for work the next dispatch
+// could actually pick up.
 func (r *Refinery) wakeIfActionable() {
 	r.mu.Lock()
 	actionable := false
-	for _, mr := range r.queue {
-		if mr.Status != StatusHeld {
+	if !r.stopping && len(r.lanes) < r.maxLanes() {
+		for _, mr := range r.queue {
+			if mr.Status == StatusHeld {
+				continue
+			}
+			if _, busy := r.lanes[laneKey(mr.RepoPath)]; busy {
+				continue
+			}
 			actionable = true
 			break
 		}
@@ -785,10 +870,11 @@ func (r *Refinery) Start(ctx context.Context) {
 	ctx, cancel := context.WithCancel(ctx)
 	r.cancel = cancel
 
-	log.Printf("refinery: started (poll_interval=%s)", r.cfg.PollInterval)
+	log.Printf("refinery: started (poll_interval=%s max_concurrent_merges=%d, one lane per repo)",
+		r.cfg.PollInterval, r.maxLanes())
 
-	// Resolve any in-flight item recovered from the state file before the
-	// first processNext. This runs here rather than in New so the OnMerged/
+	// Resolve any in-flight items recovered from the state file before the
+	// first dispatch. This runs here rather than in New so the OnMerged/
 	// OnFailed callbacks (wired between New and Start) fire for a merge that
 	// landed just before the crash.
 	r.resolveRecovered()
@@ -797,25 +883,55 @@ func (r *Refinery) Start(ctx context.Context) {
 	defer ticker.Stop()
 
 	for {
-		r.processNext()
+		// Start everything that can run now and return; the merges themselves
+		// run on their own goroutines. The loop must not block on a merge —
+		// that block WAS the defect (mg-37ad): a gate for one repo held every
+		// other repo's merges behind it for as long as it ran.
+		r.dispatchReady()
 		r.pruneHistory()
 
-		// Several submits can land while one MR is processing; their wakes
+		// Several submits can land while merges are running; their wakes
 		// collapse into a single buffered signal. Re-arm it here so the loop
 		// drains the queue back-to-back instead of one item per tick.
 		r.wakeIfActionable()
 
 		select {
 		case <-ctx.Done():
-			log.Printf("refinery: stopped")
-			close(r.done)
+			r.shutdown()
 			return
 		case <-ticker.C:
 			// next iteration
 		case <-r.wakeCh:
-			// submitted (or still-queued) work — next iteration now
+			// submitted (or still-queued) work, or a lane just freed up
 		}
 	}
+}
+
+// shutdown stops dispatching and waits for the merges already in flight.
+//
+// It waits rather than cancelling, which preserves exactly what Stop did when
+// the loop was serial: the loop was inside the merge, so stopping the refinery
+// always meant "finish the merge you are on, then stop". A long gate therefore
+// still makes Stop slow — that is the pre-existing cost of not abandoning a
+// merge halfway.
+//
+// Waiting is also what keeps a restart safe. pogod builds a REPLACEMENT
+// Refinery from the state file this one flushes (see SetRefineryStarter), so
+// returning while lanes were still pushing would put two refineries on the same
+// clone with the same branches.
+func (r *Refinery) shutdown() {
+	r.mu.Lock()
+	r.stopping = true
+	inFlight := len(r.lanes)
+	r.mu.Unlock()
+
+	if inFlight > 0 {
+		log.Printf("refinery: stopping — waiting for %d in-flight merge(s) to finish "+
+			"(a merge is never abandoned halfway; this can take as long as its quality gate)", inFlight)
+	}
+	r.laneWG.Wait()
+	log.Printf("refinery: stopped")
+	close(r.done)
 }
 
 // Stop signals the refinery loop to exit and flushes state to disk.
@@ -846,9 +962,16 @@ func (r *Refinery) Queue() []MergeRequest {
 	return out
 }
 
-// QueueWithProcessing returns the whole pipeline: the in-flight merge request
-// first (Status is StatusProcessing and carries its Progress record), then the
-// pending ones in order.
+// QueueWithProcessing returns the whole pipeline: the in-flight merge requests
+// first (Status is StatusProcessing and each carries its Progress record),
+// longest-running first, then the pending ones in order.
+//
+// There can now be more than one in-flight row — one per repo lane — and that
+// is the other half of what mg-37ad fixes. The incident that unparked it was
+// unreadable precisely because the queue could not say WHICH repo was holding
+// things up; a list that leads with every running merge, each identifiable by
+// its branch and repo, is what makes "my repo is not blocked, it is just
+// behind" a thing an operator can see.
 //
 // This is what /refinery/queue serves, and the omission it fixes is mg-0c51. A
 // busy refinery used to render as a static list of `status=queued` rows with
@@ -863,9 +986,10 @@ func (r *Refinery) Queue() []MergeRequest {
 func (r *Refinery) QueueWithProcessing() []MergeRequest {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	out := make([]MergeRequest, 0, len(r.queue)+1)
-	if r.processing != nil {
-		out = append(out, *r.processing)
+	inFlight := r.inFlightLocked()
+	out := make([]MergeRequest, 0, len(r.queue)+len(inFlight))
+	for _, mr := range inFlight {
+		out = append(out, *mr)
 	}
 	for _, mr := range r.queue {
 		out = append(out, *mr)
@@ -931,14 +1055,28 @@ type Status struct {
 	MaxHistoryLen *int    `json:"max_history_len,omitempty"`
 	MaxHistoryAge *string `json:"max_history_age,omitempty"`
 
-	// Processing is the ID of the merge request being worked on right now,
+	// Processing is the ID of the LONGEST-RUNNING in-flight merge request,
 	// empty when the refinery is idle. QueueLen counts only PENDING requests
 	// and never includes it, so QueueLen alone cannot tell a refinery that is
 	// chewing through a merge from one that has stopped — which is exactly the
 	// pair of states mg-0c51 was filed about.
+	//
+	// Since per-repo lanes (mg-37ad) there can be several. This field is kept,
+	// and kept meaning "one of them", so a client older than that change still
+	// reports a busy refinery as busy instead of as idle. It is NOT the whole
+	// answer any more: read InFlight, and read ProcessingCount before
+	// concluding anything about how much is running.
 	Processing string `json:"processing,omitempty"`
 	// ProcessingSince is when that merge request entered processing.
 	ProcessingSince time.Time `json:"processing_since,omitempty"`
+	// ProcessingCount is how many merges are in flight across all lanes.
+	ProcessingCount int `json:"processing_count"`
+	// InFlight is one row per in-flight merge, longest-running first, each
+	// naming the repo whose lane it holds.
+	InFlight []LaneStatus `json:"in_flight,omitempty"`
+	// MaxConcurrentMerges is the lane cap this daemon is running with, so a
+	// reader can tell "nothing else can start" from "nothing else is waiting".
+	MaxConcurrentMerges int `json:"max_concurrent_merges,omitempty"`
 }
 
 // HistoryTruncation is what a client can say about whether history is complete.
@@ -991,17 +1129,29 @@ func (r *Refinery) GetStatus() Status {
 	maxLen := r.cfg.MaxHistoryLen
 	maxAge := r.cfg.MaxHistoryAge.String()
 	st := Status{
-		Enabled:       r.cfg.Enabled,
-		Running:       r.cancel != nil,
-		PollInterval:  r.cfg.PollInterval.String(),
-		QueueLen:      len(r.queue),
-		HistoryLen:    len(r.history),
-		MaxHistoryLen: &maxLen,
-		MaxHistoryAge: &maxAge,
+		Enabled:             r.cfg.Enabled,
+		Running:             r.cancel != nil,
+		PollInterval:        r.cfg.PollInterval.String(),
+		QueueLen:            len(r.queue),
+		HistoryLen:          len(r.history),
+		MaxHistoryLen:       &maxLen,
+		MaxHistoryAge:       &maxAge,
+		MaxConcurrentMerges: r.maxLanes(),
 	}
-	if r.processing != nil {
-		st.Processing = r.processing.ID
-		st.ProcessingSince = r.processing.StartTime
+	inFlight := r.inFlightLocked()
+	st.ProcessingCount = len(inFlight)
+	for _, mr := range inFlight {
+		st.InFlight = append(st.InFlight, LaneStatus{
+			Repo:   laneKey(mr.RepoPath),
+			ID:     mr.ID,
+			Branch: mr.Branch,
+			Author: mr.Author,
+			Since:  mr.StartTime,
+		})
+	}
+	if len(inFlight) > 0 {
+		st.Processing = inFlight[0].ID
+		st.ProcessingSince = inFlight[0].StartTime
 	}
 	return st
 }
@@ -1034,14 +1184,17 @@ func (r *Refinery) Cancel(id string) (CancelOutcome, error) {
 		return "", fmt.Errorf("merge request %q not found", id)
 	}
 	if mr.Status == StatusProcessing {
-		if r.processing != mr || r.gateCancel == nil {
+		ln := r.laneHoldingLocked(id)
+		if ln == nil || ln.cancel == nil {
 			// Persisted as processing but not actually in flight here — a
 			// restart recovery case. Nothing to kill, and claiming otherwise
 			// would be a lie.
 			return "", fmt.Errorf("merge request %q reads as processing but is not in flight in this "+
 				"daemon (likely recovered from a restart); it will be resolved by the recovery probe", id)
 		}
-		r.requestInFlightCancelLocked(mr)
+		// Only this lane's gate is killed. Other repos' merges keep running,
+		// which is the point of giving each lane its own cancel handle.
+		r.requestInFlightCancelLocked(ln)
 		return CancelRequestedInFlight, nil
 	}
 	if mr.Status != StatusQueued {
@@ -1065,126 +1218,30 @@ func (r *Refinery) Cancel(id string) (CancelOutcome, error) {
 	return CancelRemovedFromQueue, nil
 }
 
-// processNext takes the next queued item and processes it.
+// processNext takes the next dispatchable item and processes it TO COMPLETION
+// IN THE CALLING GOROUTINE.
+//
+// The queue loop no longer calls this — it calls dispatchReady, which starts
+// each lane on its own goroutine. This remains as the synchronous single-item
+// entry point, which is what a caller wanting "run one merge and tell me the
+// outcome" needs, and it runs the same lane body the dispatcher does.
 func (r *Refinery) processNext() {
-	mr := r.dequeue()
-	if mr == nil {
+	ln, mr := r.claimLane(nil)
+	if ln == nil {
 		return
 	}
-
-	// QA gate: check if a QA work item exists for this MR's author (work ID).
-	result, qaItemID := r.checkQAGate(mr.Author)
-	if result == QAGateHold {
-		r.holdMergeRequest(mr, qaItemID)
+	if r.holdForQA(ln, mr) {
 		return
 	}
-
-	r.mu.Lock()
-	mr.Status = StatusProcessing
-	r.beginProcessingLocked()
-	r.saveStateLocked()
-	r.mu.Unlock()
-
-	log.Printf("refinery: processing MR %s branch=%s", mr.ID, mr.Branch)
-
-	outcome, err := r.processMerge(mr)
-
-	r.mu.Lock()
-	r.endProcessingLocked()
-	mr.GateOutput = outcome.GateOutput
-	mr.DeployError = outcome.DeployError
-	mr.PostMergeError = outcome.PostMergeError
-	mr.MergedSHA = outcome.MergedSHA
-	mr.AlreadyMerged = outcome.AlreadyMerged
-	mr.DoneTime = time.Now()
-	alreadyMerged := outcome.AlreadyMerged
-	if isCancelled(err) {
-		// Cancelled, not failed. Neither the author's failure streak nor the
-		// failed callback applies: the merge did not fail on its merits, and
-		// firing onFailed here would reopen a work item on an operator
-		// action rather than on a defect in the branch (mg-8595).
-		mr.Status = StatusCancelled
-		mr.Error = err.Error()
-		log.Printf("refinery: MR %s cancelled mid-flight branch=%s author=%s (%v)", mr.ID, mr.Branch, mr.Author, err)
-	} else if err != nil {
-		mr.Status = StatusFailed
-		mr.Error = err.Error()
-		// The author's consecutive-failure streak counts DEFECTS only (mg-e5c2).
-		// The streak feeds an escalation whose advice is "consider stopping the
-		// polecat or reassigning the work item" — advice about the author. A
-		// suppressed-DNS window is not evidence about an author, and on
-		// 2026-08-05 it would have tripped that threshold for ten of them at
-		// once. Infrastructure and contention failures are still recorded, still
-		// mailed, and still fire onFailed; they just do not accumulate into a
-		// verdict on whoever happened to be at the head of the queue.
-		countsAgainstAuthor := mr.FailureClass == "" || mr.FailureClass == ClassDefect
-		if mr.Author != "" && countsAgainstAuthor {
-			r.failureCounts[mr.Author]++
-			mr.FailureCount = r.failureCounts[mr.Author]
-			if r.cfg.FailureThreshold > 0 && mr.FailureCount >= r.cfg.FailureThreshold {
-				mr.ThresholdReached = true
-				log.Printf("refinery: author %s reached failure threshold (%d consecutive failures)", mr.Author, mr.FailureCount)
-			}
-		} else if mr.Author != "" {
-			mr.FailureCount = r.failureCounts[mr.Author]
-			log.Printf("refinery: MR %s failed as %s — NOT counted against author %s's failure streak (still %d); this establishes nothing about the branch",
-				mr.ID, mr.FailureClass, mr.Author, mr.FailureCount)
-		}
-		log.Printf("refinery: REJECTED MR %s branch=%s author=%s status=%s attempts=%d reason=%v (author_failure_streak=%d)",
-			mr.ID, mr.Branch, mr.Author, mr.StatusLabel(), mr.AttemptCount, err, mr.FailureCount)
-	} else {
-		mr.Status = StatusMerged
-		if mr.Author != "" {
-			delete(r.failureCounts, mr.Author)
-		}
-		if alreadyMerged {
-			log.Printf("refinery: MR %s resolved as already merged (no-op) branch=%s author=%s sha=%s", mr.ID, mr.Branch, mr.Author, mr.MergedSHA)
-		} else {
-			log.Printf("refinery: MR %s merged successfully branch=%s author=%s sha=%s", mr.ID, mr.Branch, mr.Author, mr.MergedSHA)
-		}
-		// The merge succeeded and its declared follow-on did not. Say so at
-		// merged-level volume: the status stays "merged", so a reader keying
-		// only off status would otherwise see unqualified success (mg-6879).
-		if mr.PostMergeError != "" {
-			log.Printf("refinery: MR %s merged but its POST-MERGE STEP FAILED branch=%s author=%s: %s — the work item will NOT be marked done", mr.ID, mr.Branch, mr.Author, mr.PostMergeError)
-		}
-	}
-	r.history = append(r.history, mr)
-	r.processing = nil
-	r.pruneHistoryLocked()
-	r.saveStateLocked()
-	onMerged := r.onMerged
-	onFailed := r.onFailed
-	r.mu.Unlock()
-
-	// Fire callbacks outside the lock. A cancelled MR fires neither: it did
-	// not merge, and it did not fail on its merits.
-	switch {
-	case isCancelled(err):
-	case err != nil && onFailed != nil:
-		onFailed(mr)
-	case err == nil && onMerged != nil:
-		onMerged(mr)
-	}
+	r.runLane(ln, mr)
 }
 
-// dequeue removes and returns the first queued item, or nil if empty.
-// The item is tracked as r.processing so the persisted snapshot never has
-// an MR in limbo between queue and history — a crash anywhere after this
-// point resolves it via the recovery probe on next start.
+// dequeue claims the first dispatchable item and returns it, or nil if nothing
+// can start. The item holds a lane from this point on, so the persisted
+// snapshot never has an MR in limbo between queue and history — a crash
+// anywhere after this point resolves it via the recovery probe on next start.
 func (r *Refinery) dequeue() *MergeRequest {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if len(r.queue) == 0 {
-		return nil
-	}
-
-	mr := r.queue[0]
-	r.queue = r.queue[1:]
-	mr.StartTime = time.Now()
-	r.processing = mr
-	r.saveStateLocked()
+	_, mr := r.claimLane(nil)
 	return mr
 }
 

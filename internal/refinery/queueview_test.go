@@ -21,7 +21,7 @@ import (
 func TestQueueWithProcessingIncludesTheInFlightRequest(t *testing.T) {
 	r := newProgressTestRefinery(t, time.Hour)
 	active := &MergeRequest{ID: "mr-active", Branch: "b-active", Status: StatusProcessing, StartTime: time.Now()}
-	r.processing = active
+	markInFlight(r, active)
 	r.queue = []*MergeRequest{
 		{ID: "mr-1", Branch: "b-1", Status: StatusQueued},
 		{ID: "mr-2", Branch: "b-2", Status: StatusQueued},
@@ -65,7 +65,7 @@ func TestQueueWithProcessingIdleRefinery(t *testing.T) {
 // omitting the row.
 func TestQueueEndpointServesTheInFlightRequest(t *testing.T) {
 	r := newProgressTestRefinery(t, time.Hour)
-	r.processing = &MergeRequest{ID: "mr-active", Status: StatusProcessing}
+	markInFlight(r, &MergeRequest{ID: "mr-active", Status: StatusProcessing})
 	r.queue = []*MergeRequest{{ID: "mr-1", Status: StatusQueued}}
 
 	mux := http.NewServeMux()
@@ -102,7 +102,7 @@ func TestStatusReportsWhatIsInFlight(t *testing.T) {
 	}
 
 	started := time.Now().Add(-3 * time.Minute)
-	r.processing = &MergeRequest{ID: "mr-active", Status: StatusProcessing, StartTime: started}
+	markInFlight(r, &MergeRequest{ID: "mr-active", Status: StatusProcessing, StartTime: started})
 	busy := r.GetStatus()
 	if busy.Processing != "mr-active" {
 		t.Errorf("a busy refinery must name what is in flight, got %q", busy.Processing)
@@ -131,7 +131,7 @@ func TestStatusReportsWhatIsInFlight(t *testing.T) {
 func TestHeldMergeRequestDropsItsInFlightStamp(t *testing.T) {
 	r := newProgressTestRefinery(t, time.Hour)
 	mr := &MergeRequest{ID: "mr-held", Status: StatusProcessing, StartTime: time.Now().Add(-40 * time.Minute)}
-	r.processing = mr
+	markInFlight(r, mr)
 	r.holdMergeRequest(mr, "mg-qa")
 
 	if !mr.StartTime.IsZero() {
