@@ -96,6 +96,19 @@ type witnessRecord struct {
 	PID        int       `json:"pid"`
 	StartTime  time.Time `json:"start_time"`
 	WorkItemID string    `json:"work_item_id,omitempty"`
+	// SourceRepo is the repository this polecat's worktree was cut from, and it
+	// is here for the per-repo dispatch cap (mg-3977). The cap counts live
+	// polecats in one repo, and the in-memory registry — its obvious source —
+	// is EMPTY after a pogod restart, permanently, for exactly the reason
+	// mg-0130 records. A cap that read the registry alone would uncap itself on
+	// every redeploy, which is precisely when survivors exist.
+	//
+	// Optional, and its absence is a THIRD state rather than a repo of "". A
+	// record written before this field existed, or by a --no-worktree polecat
+	// that has no repo, cannot be attributed. Such a polecat is reported as
+	// unattributed and is NOT counted against any repo: guessing would refuse a
+	// correct dispatch, and this field is not evidence enough to guess with.
+	SourceRepo string `json:"source_repo,omitempty"`
 }
 
 type witnessOnDisk struct {
@@ -348,7 +361,7 @@ func noteWitnessStart(a *Agent) {
 	if a == nil || a.Type != TypePolecat {
 		return
 	}
-	if err := RecordPolecatWitness(a.Name, a.PID, a.WorkItemID); err != nil {
+	if err := RecordPolecatWitness(a.Name, a.PID, a.WorkItemID, a.SourceRepo); err != nil {
 		log.Printf("witness: %v — a future pogod may have no evidence polecat %s was alive (mg-13a3)", err, a.Name)
 	}
 }
@@ -363,7 +376,10 @@ func noteWitnessStart(a *Agent) {
 // Returns an error WITHOUT writing if the start time cannot be read. See
 // noteWitnessStart: a pid-only record is a false witness, and no record at all
 // is strictly better than one we cannot trust.
-func RecordPolecatWitness(name string, pid int, workItemID string) error {
+// sourceRepo may be empty — a --no-worktree polecat has no repository, and an
+// empty value is stored as "unattributed" rather than as a repo named "". See
+// witnessRecord.SourceRepo.
+func RecordPolecatWitness(name string, pid int, workItemID, sourceRepo string) error {
 	start, ok := procStartFn(pid)
 	if !ok {
 		return fmt.Errorf("witness: cannot read start time for polecat %s (pid=%d) — not recording; "+
@@ -389,6 +405,7 @@ func RecordPolecatWitness(name string, pid int, workItemID string) error {
 		PID:        pid,
 		StartTime:  start,
 		WorkItemID: workItemID,
+		SourceRepo: sourceRepo,
 	})
 	if err := saveWitness(out); err != nil {
 		return fmt.Errorf("witness: cannot persist polecat %s (pid=%d): %w", name, pid, err)
@@ -605,6 +622,48 @@ func WitnessedPolecatVerdicts() (map[string]WitnessVerdict, error) {
 		out[r.Name] = witnessVerdict(r)
 	}
 	return out, nil
+}
+
+// WitnessedPolecatRepos maps each polecat this store cannot rule out as live to
+// the repository it is working in, and separately names the ones whose repo is
+// not recorded.
+//
+// It exists for the per-repo dispatch cap (mg-3977), which must count polecats
+// that outlived the pogod now being asked to dispatch. The verdict filter is
+// the SAME asymmetry LivePolecatSet applies and for the same reason: Alive OR
+// Unreadable both count, because "I could not establish that this process is
+// ours" is not "it is dead", and a cap that quietly dropped the unmeasurable
+// ones would over-dispatch exactly when measurement is failing.
+//
+// unattributed is not an error and not an empty repo. It is the polecats whose
+// record carries no source repo — written before the field existed, or spawned
+// --no-worktree with no repository at all. They are returned so a caller can
+// SAY they exist rather than counting them against a repo it guessed.
+//
+// A read error yields (nil, nil, err). An unreadable store is not an empty
+// fleet, and this function must not let a caller render it as one.
+func WitnessedPolecatRepos() (repos map[string]string, unattributed []string, err error) {
+	witnessMu.Lock()
+	recs, err := loadWitness()
+	witnessMu.Unlock()
+	if err != nil {
+		return nil, nil, fmt.Errorf("witness: cannot read %s: %w", WitnessPath(), err)
+	}
+	repos = make(map[string]string, len(recs))
+	for _, r := range recs {
+		switch witnessVerdict(r) {
+		case WitnessAlive, WitnessUnreadable:
+		default:
+			continue
+		}
+		if strings.TrimSpace(r.SourceRepo) == "" {
+			unattributed = append(unattributed, r.Name)
+			continue
+		}
+		repos[r.Name] = r.SourceRepo
+	}
+	sort.Strings(unattributed)
+	return repos, unattributed, nil
 }
 
 // WitnessStoreExists reports whether the witness file is on disk at all.

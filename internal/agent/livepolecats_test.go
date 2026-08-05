@@ -22,7 +22,7 @@ import (
 func TestLivePolecatSet_UnionsRegistryWithWitness(t *testing.T) {
 	sandboxWitness(t)
 	pid := liveProcess(t)
-	if err := RecordPolecatWitness("survivor", pid, "mg-0130"); err != nil {
+	if err := RecordPolecatWitness("survivor", pid, "mg-0130", ""); err != nil {
 		t.Fatalf("RecordPolecatWitness: %v", err)
 	}
 
@@ -47,7 +47,7 @@ func TestLivePolecatSet_KeepsUnreadableAndDropsDead(t *testing.T) {
 	t.Run("unreadable identity counts as live", func(t *testing.T) {
 		sandboxWitness(t)
 		pid := liveProcess(t)
-		if err := RecordPolecatWitness("murky", pid, "mg-13a3"); err != nil {
+		if err := RecordPolecatWitness("murky", pid, "mg-13a3", ""); err != nil {
 			t.Fatalf("RecordPolecatWitness: %v", err)
 		}
 		// The pid answers signals but its start time cannot be read — alive, but
@@ -75,7 +75,7 @@ func TestLivePolecatSet_KeepsUnreadableAndDropsDead(t *testing.T) {
 		if err := cmd.Start(); err != nil {
 			t.Fatalf("start sleep: %v", err)
 		}
-		if err := RecordPolecatWitness("gone", cmd.Process.Pid, "mg-0d0e"); err != nil {
+		if err := RecordPolecatWitness("gone", cmd.Process.Pid, "mg-0d0e", ""); err != nil {
 			t.Fatalf("RecordPolecatWitness: %v", err)
 		}
 		_ = cmd.Process.Kill()

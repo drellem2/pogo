@@ -137,7 +137,7 @@ func (f *gcFixture) witnessLivePolecat() int {
 		_, _ = cmd.Process.Wait()
 	})
 	pid := cmd.Process.Pid
-	if err := agent.RecordPolecatWitness(f.name, pid, "mg-"+f.name); err != nil {
+	if err := agent.RecordPolecatWitness(f.name, pid, "mg-"+f.name, ""); err != nil {
 		f.t.Fatalf("RecordPolecatWitness: %v", err)
 	}
 	data, err := os.ReadFile(agent.WitnessPath())

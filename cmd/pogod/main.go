@@ -1227,6 +1227,29 @@ Flags:
 			cfg.DispatchPairing.RequireTags, cfg.DispatchPairing.WaiverTags)
 	}
 
+	// The per-repo cap (mg-3977), at the same chokepoint. Unlike the pairing
+	// gate above this one DOES carry shipped policy — config.Load defaults it to
+	// three workers per repo with one slot held for the refinery — because what
+	// it prevents is a property of running a shared test suite concurrently and
+	// not one deployment's program. Wired unconditionally so whether it enforces
+	// is a question about [dispatch] in config.toml, never about which branch of
+	// startup ran.
+	agentRegistry.SetDispatchCap(cfg.DispatchCap)
+	if cfg.DispatchCap.Armed() {
+		log.Printf("dispatch cap armed: at most %d worker(s) per repo, %d slot(s) reserved for the "+
+			"refinery while it has work there", cfg.DispatchCap.MaxPolecatsPerRepo,
+			cfg.DispatchCap.RefineryReserve)
+	} else {
+		log.Printf("dispatch cap DISARMED ([dispatch] max_polecats_per_repo = 0): " +
+			"nothing limits how many workers enter one repo")
+	}
+
+	// The refinery half of that cap. The queue is reached through a THUNK, not
+	// captured by value: an orchestration restart replaces *mergeQueue
+	// (SetRefineryStarter, below), and a closure over the old pointer would
+	// reserve against a refinery nobody is using any more.
+	agentRegistry.SetRefineryActivity(refineryRepoActivity(func() *refinery.Refinery { return mergeQueue }))
+
 	// And the routing half, beside the gate it sits next to (mg-9a04): a spawn
 	// with no --template routes on the work item's `type` through the closed map
 	// in internal/agent/templateroute.go, refusing rather than defaulting when

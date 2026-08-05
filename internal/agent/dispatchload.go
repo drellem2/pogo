@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/drellem2/pogo/internal/hostload"
@@ -156,7 +157,17 @@ type HostLoadResponse struct {
 	// WouldRefuseDispatch is what the spawn path would do with this sample
 	// right now. Served from the SAME gate the spawn path consults, so a
 	// coordinator reading this and pogod refusing a spawn can never disagree.
+	//
+	// It answers for the HOST only. A dispatch can still be refused by the
+	// per-repo cap with this false — see RepoOccupancy, which is populated when
+	// the caller names a repo, and which is the answer to ask for before
+	// planning a batch into one repository (mg-3977).
 	WouldRefuseDispatch bool `json:"would_refuse_dispatch"`
+
+	// RepoOccupancy is the per-repo cap's view, present only when the request
+	// named a repo (GET /hostload?repo=...). Served from the same counter the
+	// spawn path consults, for the reason above.
+	RepoOccupancy *RepoOccupancy `json:"repo_occupancy,omitempty"`
 }
 
 // handleHostLoad serves the host's current fleet-attributable CPU.
@@ -173,6 +184,14 @@ func (r *Registry) handleHostLoad(w http.ResponseWriter, req *http.Request) {
 	}
 	s, ok := r.getLoadGate().DispatchLoad()
 	resp := HostLoadResponse{Sample: s, Measured: ok}
+	// The per-repo cap is independent of the sample: it is a count, and it
+	// answers even when the host could not be measured. Attached whenever a repo
+	// is named so a coordinator planning several dispatches into one repository
+	// reads the same number pogod will refuse on (mg-3977).
+	if repo := strings.TrimSpace(req.URL.Query().Get("repo")); repo != "" {
+		occ := r.RepoOccupancyFor(repo)
+		resp.RepoOccupancy = &occ
+	}
 	if ok {
 		resp.Advice = s.DispatchAdvice()
 		resp.FleetHeavy = s.FleetHeavy()

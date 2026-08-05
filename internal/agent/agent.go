@@ -27,6 +27,7 @@ import (
 
 	"github.com/creack/pty"
 
+	"github.com/drellem2/pogo/internal/config"
 	"github.com/drellem2/pogo/internal/events"
 )
 
@@ -465,6 +466,23 @@ type Registry struct {
 	// above it fails OPEN on a failed or unattributable measurement, and its
 	// refusal is retryable. See dispatchload.go.
 	loadGate LoadGate
+
+	// dispatchCap bounds how many workers may be live in ONE repository, and
+	// holds part of that budget for the refinery (mg-3977). The zero value
+	// disarms it; cmd/pogod installs cfg.DispatchCap, whose default is armed.
+	//
+	// It sits beside loadGate rather than inside it because it answers the
+	// question loadGate cannot answer in time: seven `go test ./...` runs do
+	// not show up in a CPU sample at the moment the seventh is dispatched, they
+	// show up a minute later when all seven compile at once. See
+	// dispatchrepocap.go.
+	dispatchCap config.DispatchCapConfig
+
+	// refineryActivity is how the cap above learns whether the refinery has a
+	// merge request for a repo, so it can hold a slot back. Nil means the
+	// reserve is unenforced — the cap still caps, it simply cannot tell an idle
+	// refinery from one it failed to ask.
+	refineryActivity RefineryActivity
 
 	// workItemClaimer takes a dispatched polecat's work item out of available/
 	// BEFORE its process starts, so ownership no longer depends on the polecat

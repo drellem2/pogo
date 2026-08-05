@@ -155,7 +155,7 @@ func TestWitnessRoundTripsThroughTheDefaultSandbox(t *testing.T) {
 	const name = "cat-default-roundtrip"
 	pid := liveProcess(t)
 
-	if err := RecordPolecatWitness(name, pid, "mg-da48"); err != nil {
+	if err := RecordPolecatWitness(name, pid, "mg-da48", ""); err != nil {
 		t.Fatalf("RecordPolecatWitness through the default sandbox: %v", err)
 	}
 	t.Cleanup(func() { noteWitnessExit(&Agent{Type: TypePolecat, Name: name}) })

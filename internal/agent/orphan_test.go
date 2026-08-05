@@ -75,7 +75,7 @@ func TestOrphanedPolecats_SurvivorIsVisible(t *testing.T) {
 
 	// The polecat's own pogod recorded this before it died. It is the only
 	// thing that survives the restart.
-	if err := RecordPolecatWitness("cat-survivor", pid, "mg-0b77"); err != nil {
+	if err := RecordPolecatWitness("cat-survivor", pid, "mg-0b77", ""); err != nil {
 		t.Fatalf("RecordPolecatWitness: %v", err)
 	}
 
@@ -125,7 +125,7 @@ func TestOrphanedPolecats_RegisteredPolecatIsNotOrphaned(t *testing.T) {
 	reg := newDrainTestRegistry(t)
 	pid := liveProcess(t)
 
-	if err := RecordPolecatWitness("cat-healthy", pid, "mg-healthy"); err != nil {
+	if err := RecordPolecatWitness("cat-healthy", pid, "mg-healthy", ""); err != nil {
 		t.Fatalf("RecordPolecatWitness: %v", err)
 	}
 	// The registry DOES know this one — an ordinary running polecat.
@@ -166,7 +166,7 @@ func TestOrphanedPolecats_RecycledPidIsNotOrphaned(t *testing.T) {
 	reg := newDrainTestRegistry(t)
 	pid := liveProcess(t)
 
-	if err := RecordPolecatWitness("cat-recycled", pid, "mg-recycled"); err != nil {
+	if err := RecordPolecatWitness("cat-recycled", pid, "mg-recycled", ""); err != nil {
 		t.Fatalf("RecordPolecatWitness: %v", err)
 	}
 
@@ -318,7 +318,7 @@ func TestDrainStatus_ReportsUnreachableSurvivors(t *testing.T) {
 	reg := newDrainTestRegistry(t)
 	pid := liveProcess(t)
 
-	if err := RecordPolecatWitness("cat-survivor", pid, "mg-0b77"); err != nil {
+	if err := RecordPolecatWitness("cat-survivor", pid, "mg-0b77", ""); err != nil {
 		t.Fatalf("RecordPolecatWitness: %v", err)
 	}
 
@@ -367,7 +367,7 @@ func TestDrainStatus_HealthyPolecatIsCountedNotOrphaned(t *testing.T) {
 	reg := newDrainTestRegistry(t)
 	pid := liveProcess(t)
 
-	if err := RecordPolecatWitness("cat-healthy", pid, "mg-healthy"); err != nil {
+	if err := RecordPolecatWitness("cat-healthy", pid, "mg-healthy", ""); err != nil {
 		t.Fatalf("RecordPolecatWitness: %v", err)
 	}
 	reg.agents["cat-healthy"] = livePolecat("cat-healthy", "mg-healthy")

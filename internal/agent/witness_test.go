@@ -67,7 +67,7 @@ func TestWitnessAliveWhenOurProcessRuns(t *testing.T) {
 	sandboxWitness(t)
 	pid := liveProcess(t)
 
-	if err := RecordPolecatWitness("cat-alive", pid, "mg-13a3"); err != nil {
+	if err := RecordPolecatWitness("cat-alive", pid, "mg-13a3", ""); err != nil {
 		t.Fatalf("RecordPolecatWitness: %v", err)
 	}
 
@@ -152,7 +152,7 @@ func TestWitnessDeadWhenPidRecycled(t *testing.T) {
 	// The control: with the TRUE identity recorded, this pid reads alive. If
 	// this ever stops holding, the assertion below would pass for the wrong
 	// reason — WitnessDead would be trivially correct and pid-reuse untested.
-	if err := RecordPolecatWitness("cat-recycled", ourPid, ""); err != nil {
+	if err := RecordPolecatWitness("cat-recycled", ourPid, "", ""); err != nil {
 		t.Fatalf("RecordPolecatWitness: %v", err)
 	}
 	if got := PolecatWitness("cat-recycled"); got != WitnessAlive {
@@ -181,7 +181,7 @@ func TestWitnessDeadWhenProcessGone(t *testing.T) {
 		t.Fatalf("start sleep: %v", err)
 	}
 	pid := cmd.Process.Pid
-	if err := RecordPolecatWitness("cat-dead", pid, ""); err != nil {
+	if err := RecordPolecatWitness("cat-dead", pid, "", ""); err != nil {
 		t.Fatalf("RecordPolecatWitness: %v", err)
 	}
 	// Control: alive while it is alive.
@@ -211,7 +211,7 @@ func TestWitnessNoRecordForUnwitnessedAgent(t *testing.T) {
 
 	// A witness for a DIFFERENT polecat must not answer for this one.
 	pid := liveProcess(t)
-	if err := RecordPolecatWitness("cat-other", pid, ""); err != nil {
+	if err := RecordPolecatWitness("cat-other", pid, "", ""); err != nil {
 		t.Fatalf("RecordPolecatWitness: %v", err)
 	}
 	if got := PolecatWitness("cat-nobody"); got != WitnessNoRecord {
@@ -230,7 +230,7 @@ func TestWitnessUnreadableWhenIdentityUnreadable(t *testing.T) {
 	sandboxWitness(t)
 	pid := liveProcess(t)
 
-	if err := RecordPolecatWitness("cat-blind", pid, ""); err != nil {
+	if err := RecordPolecatWitness("cat-blind", pid, "", ""); err != nil {
 		t.Fatalf("RecordPolecatWitness: %v", err)
 	}
 
@@ -257,7 +257,7 @@ func TestRecordRefusesPidWithoutIdentity(t *testing.T) {
 	procStartFn = func(int) (time.Time, bool) { return time.Time{}, false }
 	t.Cleanup(func() { procStartFn = prev })
 
-	if err := RecordPolecatWitness("cat-noid", pid, ""); err == nil {
+	if err := RecordPolecatWitness("cat-noid", pid, "", ""); err == nil {
 		t.Error("RecordPolecatWitness with an unreadable start time returned nil; want an error — " +
 			"recording a pid without an identity creates the false witness this store exists to avoid")
 	}
@@ -273,7 +273,7 @@ func TestWitnessDropRemovesRecord(t *testing.T) {
 	sandboxWitness(t)
 	pid := liveProcess(t)
 
-	if err := RecordPolecatWitness("cat-drop", pid, ""); err != nil {
+	if err := RecordPolecatWitness("cat-drop", pid, "", ""); err != nil {
 		t.Fatalf("RecordPolecatWitness: %v", err)
 	}
 	if got := PolecatWitness("cat-drop"); got != WitnessAlive {
@@ -310,10 +310,10 @@ func TestWitnessRecordReplacedOnRespawn(t *testing.T) {
 	first := liveProcess(t)
 	second := liveProcess(t)
 
-	if err := RecordPolecatWitness("cat-reused", first, ""); err != nil {
+	if err := RecordPolecatWitness("cat-reused", first, "", ""); err != nil {
 		t.Fatalf("RecordPolecatWitness(first): %v", err)
 	}
-	if err := RecordPolecatWitness("cat-reused", second, ""); err != nil {
+	if err := RecordPolecatWitness("cat-reused", second, "", ""); err != nil {
 		t.Fatalf("RecordPolecatWitness(second): %v", err)
 	}
 
@@ -352,7 +352,7 @@ func TestWitnessSurvivesProcessRestart(t *testing.T) {
 	sandboxWitness(t)
 	pid := liveProcess(t)
 
-	if err := RecordPolecatWitness("cat-survivor", pid, "mg-13a3"); err != nil {
+	if err := RecordPolecatWitness("cat-survivor", pid, "mg-13a3", ""); err != nil {
 		t.Fatalf("RecordPolecatWitness: %v", err)
 	}
 
@@ -464,7 +464,7 @@ func TestWitnessStoreExistsSeparatesAbsenceFromZero(t *testing.T) {
 	// genuine ZERO, and it must be distinguishable from the one above — the two
 	// agree on alive_count and disagree on everything that matters.
 	pid := liveProcess(t)
-	if err := RecordPolecatWitness("cat-gone", pid, "mg-x"); err != nil {
+	if err := RecordPolecatWitness("cat-gone", pid, "mg-x", ""); err != nil {
 		t.Fatalf("record: %v", err)
 	}
 	if err := saveWitness(nil); err != nil {
@@ -488,7 +488,7 @@ func TestWitnessStoreExistsSeparatesAbsenceFromZero(t *testing.T) {
 func TestWitnessStoreExistsWithLivePolecat(t *testing.T) {
 	sandboxWitness(t)
 	pid := liveProcess(t)
-	if err := RecordPolecatWitness("cat-live", pid, "mg-live"); err != nil {
+	if err := RecordPolecatWitness("cat-live", pid, "mg-live", ""); err != nil {
 		t.Fatalf("record: %v", err)
 	}
 
@@ -540,7 +540,7 @@ func TestWitnessedPolecatVerdicts_ReportsEachRecordsVerdict(t *testing.T) {
 
 	// A live process whose identity we can read: Alive.
 	alivePid := liveProcess(t)
-	if err := RecordPolecatWitness("alive", alivePid, "mg-0130"); err != nil {
+	if err := RecordPolecatWitness("alive", alivePid, "mg-0130", ""); err != nil {
 		t.Fatalf("record alive: %v", err)
 	}
 	// A process started and then reaped: its pid holds nothing → Dead.
@@ -549,7 +549,7 @@ func TestWitnessedPolecatVerdicts_ReportsEachRecordsVerdict(t *testing.T) {
 		t.Fatalf("start dead: %v", err)
 	}
 	deadPid := dead.Process.Pid
-	if err := RecordPolecatWitness("dead", deadPid, "mg-0130"); err != nil {
+	if err := RecordPolecatWitness("dead", deadPid, "mg-0130", ""); err != nil {
 		t.Fatalf("record dead: %v", err)
 	}
 	_ = dead.Process.Kill()
@@ -584,5 +584,57 @@ func TestWitnessedPolecatVerdicts_ReportsEachRecordsVerdict(t *testing.T) {
 	}
 	if blind["dead"] != WitnessDead {
 		t.Errorf("verdicts[dead] = %v, want %v — a pid that holds nothing is dead regardless of the probe", blind["dead"], WitnessDead)
+	}
+}
+
+// TestWitnessedPolecatReposRoundTrip is the persistence half of the per-repo
+// dispatch cap (mg-3977). The cap counts polecats that outlived the pogod being
+// asked to dispatch, and this store is the only place that survivor's repo can
+// come from — the in-memory registry is EMPTY after a restart, permanently.
+func TestWitnessedPolecatReposRoundTrip(t *testing.T) {
+	sandboxWitness(t)
+	pid := liveProcess(t)
+	if err := RecordPolecatWitness("cat-pogo", pid, "mg-3977", "/Users/daniel/dev/pogo"); err != nil {
+		t.Fatalf("RecordPolecatWitness: %v", err)
+	}
+	// A record written before this field existed, or by a --no-worktree polecat
+	// that has no repository at all. Its absence is a THIRD state, not a repo
+	// named "": counting it against some repo would refuse a correct dispatch.
+	if err := RecordPolecatWitness("cat-legacy", pid, "mg-old", ""); err != nil {
+		t.Fatalf("RecordPolecatWitness: %v", err)
+	}
+
+	repos, unattributed, err := WitnessedPolecatRepos()
+	if err != nil {
+		t.Fatalf("WitnessedPolecatRepos: %v", err)
+	}
+	if got := repos["cat-pogo"]; got != "/Users/daniel/dev/pogo" {
+		t.Errorf("repos[cat-pogo] = %q, want the recorded repo — a survivor the cap cannot attribute "+
+			"is a survivor it will not count", got)
+	}
+	if _, ok := repos["cat-legacy"]; ok {
+		t.Error("a record with no repo was given one; an absent field must not become a repo named \"\"")
+	}
+	if len(unattributed) != 1 || unattributed[0] != "cat-legacy" {
+		t.Errorf("unattributed = %v, want [cat-legacy] — an undercount that does not say so reads as exact",
+			unattributed)
+	}
+}
+
+// TestWitnessedPolecatReposPropagatesReadError: an unreadable store is not an
+// empty fleet, and the cap's caller must be able to tell the difference — it
+// fails open and says the count may be missing survivors, which it cannot do if
+// the error is swallowed here.
+func TestWitnessedPolecatReposPropagatesReadError(t *testing.T) {
+	sandboxWitness(t)
+	if err := os.WriteFile(WitnessPath(), []byte(`{"version":9999,"polecats":[]}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	repos, unattributed, err := WitnessedPolecatRepos()
+	if err == nil {
+		t.Fatal("a store written by a newer pogod read as an empty fleet")
+	}
+	if repos != nil || unattributed != nil {
+		t.Errorf("a failed read returned data: repos=%v unattributed=%v", repos, unattributed)
 	}
 }

@@ -108,7 +108,7 @@ func TestRegistryLiveness_WitnessedPolecatIsNotReaped(t *testing.T) {
 
 	// The polecat's own pogod recorded this before it died. This is the only
 	// thing that survives the restart.
-	if err := agent.RecordPolecatWitness("cat-13a3", pid, "mg-13a3"); err != nil {
+	if err := agent.RecordPolecatWitness("cat-13a3", pid, "mg-13a3", ""); err != nil {
 		t.Fatalf("RecordPolecatWitness: %v", err)
 	}
 
@@ -165,7 +165,7 @@ func TestRegistryLiveness_RecycledPidIsGone(t *testing.T) {
 		t.Fatalf("start sleep: %v", err)
 	}
 	deadPid := cmd.Process.Pid
-	if err := agent.RecordPolecatWitness("cat-recycled", deadPid, "mg-13a3"); err != nil {
+	if err := agent.RecordPolecatWitness("cat-recycled", deadPid, "mg-13a3", ""); err != nil {
 		t.Fatalf("RecordPolecatWitness: %v", err)
 	}
 	_ = cmd.Process.Kill()
@@ -195,7 +195,7 @@ func TestRegistryLiveness_RecycledPidIsGone(t *testing.T) {
 	// start time is not the one we wrote down. The process's history is not
 	// something the probe can observe.
 	otherPid := liveProbeProcess(t)
-	if err := agent.RecordPolecatWitness("cat-recycled2", otherPid, ""); err != nil {
+	if err := agent.RecordPolecatWitness("cat-recycled2", otherPid, "", ""); err != nil {
 		t.Fatalf("RecordPolecatWitness: %v", err)
 	}
 	// Control: with its TRUE identity recorded, that live pid reads UNKNOWN.
@@ -281,7 +281,7 @@ func TestRegistryLiveness_RegistryStillBeatsWitness(t *testing.T) {
 	// to be unreachable — every unreachability argument in this area has been
 	// wrong at least once.
 	pid := liveProbeProcess(t)
-	if err := agent.RecordPolecatWitness("cat-corpse", pid, ""); err != nil {
+	if err := agent.RecordPolecatWitness("cat-corpse", pid, "", ""); err != nil {
 		t.Fatalf("RecordPolecatWitness: %v", err)
 	}
 	if got := agent.PolecatWitness("cat-corpse"); got != agent.WitnessAlive {

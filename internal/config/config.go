@@ -559,6 +559,11 @@ type Config struct {
 	// DispatchPairing declares repos whose items owe a paired work item before
 	// dispatch. Zero value = no repos = inert. See dispatchpairing.go.
 	DispatchPairing DispatchPairingConfig
+	// DispatchCap bounds concurrent workers PER REPOSITORY and reserves part of
+	// that budget for the refinery. Unlike DispatchPairing this ships ARMED —
+	// see dispatchcap.go for why a per-repo bound is platform behaviour and a
+	// per-fleet count is not.
+	DispatchCap DispatchCapConfig
 	// AuditSuccessor declares repos whose merged audits must be answered by a
 	// successor inside a window. Zero value = no repos = inert. This is a
 	// DETECTOR and never refuses anything — see auditsuccessor.go.
@@ -1223,6 +1228,14 @@ type parsedConfig struct {
 	deafWatchEnabledSet       bool
 	wedgeWatchEnabledSet      bool
 	doneReapEnabledSet        bool
+	// dispatchCapMaxSet / dispatchCapReserveSet exist because ZERO is a
+	// meaningful value for both keys and not merely an absent one:
+	// max_polecats_per_repo = 0 disarms the cap, refinery_reserve = 0 drops the
+	// reservation. Merging on `> 0` would silently restore the shipped defaults
+	// and leave an operator who deliberately disarmed the gate looking at a
+	// daemon that still refuses. Same shape as blockedReminderEnabledSet.
+	dispatchCapMaxSet     bool
+	dispatchCapReserveSet bool
 	// sources are the files that were read, lowest precedence first.
 	sources []string
 }
@@ -1254,6 +1267,9 @@ func Load() *Config {
 			Enabled:  true,
 			Interval: DefaultGitGCInterval,
 		},
+		// Ships ARMED (mg-3977). See dispatchcap.go for why a per-repo bound is
+		// platform behaviour rather than one deployment's policy.
+		DispatchCap: DefaultDispatchCapConfig(),
 		Reaper: ReaperConfig{
 			Enabled:       true,
 			Interval:      DefaultReaperInterval,
@@ -1594,6 +1610,17 @@ func Load() *Config {
 		}
 		if len(fileCfg.DispatchPairing.WaiverTags) > 0 {
 			cfg.DispatchPairing.WaiverTags = fileCfg.DispatchPairing.WaiverTags
+		}
+
+		// [dispatch] DOES have code-side defaults to preserve, and zero is a
+		// value rather than an absence for both keys — 0 disarms the cap, 0
+		// drops the refinery reservation. So the merge is gated on the
+		// "key appeared" flags, never on `> 0` (mg-3977).
+		if fileCfg.dispatchCapMaxSet {
+			cfg.DispatchCap.MaxPolecatsPerRepo = fileCfg.DispatchCap.MaxPolecatsPerRepo
+		}
+		if fileCfg.dispatchCapReserveSet {
+			cfg.DispatchCap.RefineryReserve = fileCfg.DispatchCap.RefineryReserve
 		}
 
 		// [audit_successor] has no code-side defaults to preserve either — the
@@ -2068,6 +2095,29 @@ func parseConfigFileInto(cfg *parsedConfig, path string) error {
 				// unparseable value is ignored.
 				if n, err := strconv.Atoi(unquotedVal); err == nil {
 					cfg.StallWatch.BlockedReminderMaxNotices = n
+				}
+			}
+		case "dispatch":
+			switch key {
+			case "max_polecats_per_repo":
+				// A negative value is clamped to 0 (unlimited) rather than
+				// rejected: the two readings of `-1` are "no limit" and "refuse
+				// everything", and only one of those is recoverable without a
+				// second config edit.
+				if n, err := strconv.Atoi(unquotedVal); err == nil {
+					if n < 0 {
+						n = 0
+					}
+					cfg.DispatchCap.MaxPolecatsPerRepo = n
+					cfg.dispatchCapMaxSet = true
+				}
+			case "refinery_reserve":
+				if n, err := strconv.Atoi(unquotedVal); err == nil {
+					if n < 0 {
+						n = 0
+					}
+					cfg.DispatchCap.RefineryReserve = n
+					cfg.dispatchCapReserveSet = true
 				}
 			}
 		case "dispatch_pairing":

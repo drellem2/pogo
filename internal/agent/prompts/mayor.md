@@ -806,8 +806,18 @@ When deciding whether to spawn a {{.Worker}}:
 - **One {{.Worker}} per work item.** Never spawn two agents for the same item.
 - **Check dependencies.** If a work item depends on another that isn't done, skip it.
 - **Repo awareness.** Use `lsp` to find the target repo path for work items that reference a project name.
-- **Don't over-spawn.** If many {{.Worker}}s are already running, wait for some to finish before adding more. A reasonable limit is 3-5 concurrent {{.Worker}}s.
-- **Count the resource, not the {{.Worker}}s.** The limit above is about slots, and a slot count cannot see what is in the slots. Read the host before filling one:
+- **Don't over-spawn, and count PER REPO.** A fleet-wide "3-5 concurrent" limit is the wrong shape and was measured to be so (mg-3977). Five {{.Worker}}s across five repos is fine; **five in one Go repo is not**, because every one of them verifies itself by running that one repo's test suite, and `go test ./...` parallelises across packages on its own. On 2026-08-05 seven {{.Worker}}s went into `/Users/daniel/dev/pogo`: the 10-core box hit a load average of **337**, commands began timing out, and the refinery **stopped starting gates entirely** — three merges sat queued 24+ minutes without one beginning.
+
+  pogod now enforces this rather than asking you to remember it: **at most 3 {{.Worker}}s per repository, with 1 slot held back for the refinery** whenever it has a merge for that repo in flight or queued. Read the count before planning a batch:
+
+  ```bash
+  pogo host load --repo=/Users/daniel/dev/pogo   # workers in that repo, the cap, and whether a spawn would be refused
+  ```
+
+  A cap refusal is a **503 and a later**, exactly like the host one below — and it is **repo-scoped**: a dispatch into a *different* repo is unaffected, so the right response is usually to dispatch elsewhere rather than to wait.
+
+  Two things that made the incident worse, both worth not repeating. **The refinery runs the same `./build.sh` the {{.Worker}}s run**, so {{.Worker}}s verifying their branches starve the process that merges them — which is why a slot is reserved. And **`pogo agent stop` does not kill an agent's compute descendants**: they reparent to launchd and keep running with nobody to collect their results, so shedding load that way keeps the cost and loses the benefit.
+- **Count the resource too, not only the {{.Worker}}s.** The per-repo cap is a count, and a count cannot see what is in the slots. Read the host before filling one:
 
   ```bash
   pogo host load          # fleet cores held, non-fleet cores, and whether a spawn would be refused
