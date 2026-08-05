@@ -115,7 +115,12 @@ func TestDetectorSilentWhenIssueIsClosed(t *testing.T) {
 // mode that would make the detector report the reassuring answer exactly when
 // it has lost the ability to tell — the detector failing in the same silent way
 // as the thing it detects.
-func TestFailedLookupIsIndeterminateNotClean(t *testing.T) {
+//
+// A rate limit is an INSTRUMENT failure (GitHub refused to serve us), so since
+// mg-dd22 it lands under Blocked rather than Indeterminate. The claim this test
+// has always made — not clean, not a miss, actionable, cause preserved — is
+// unchanged; only the bucket that must hold it is now the honest one.
+func TestFailedLookupIsNotCleanAndNotAMiss(t *testing.T) {
 	c := carrier07ba()
 	rep := Detect([]Carrier{c}, func(string, int) (IssueState, error) {
 		return StateUnknown, errors.New("API rate limit exceeded")
@@ -124,17 +129,23 @@ func TestFailedLookupIsIndeterminateNotClean(t *testing.T) {
 	if len(rep.Misses) != 0 {
 		t.Errorf("an unknown state must not be reported as a confirmed miss")
 	}
-	if len(rep.Indeterminate) != 1 {
-		t.Fatalf("want 1 indeterminate finding, got %d — a failed lookup was swallowed", len(rep.Indeterminate))
+	if len(rep.Blocked) != 1 {
+		t.Fatalf("want 1 blocked finding, got %d — a failed lookup was swallowed", len(rep.Blocked))
+	}
+	if len(rep.Indeterminate) != 0 {
+		t.Error("an instrument failure must not be filed as a determination about the carrier")
+	}
+	if got := rep.Blocked[0].Class; got != FailureRateLimit {
+		t.Errorf("class = %q, want %q", got, FailureRateLimit)
 	}
 	if !rep.Actionable() {
-		t.Error("INDETERMINATE MUST BE ACTIONABLE: a detector that cannot see is itself the finding")
+		t.Error("A NO-VERDICT FINDING MUST BE ACTIONABLE: a detector that cannot see is itself the finding")
 	}
-	if d := rep.Indeterminate[0].Detail; !strings.Contains(d, "rate limit") {
+	if d := rep.Blocked[0].Detail; !strings.Contains(d, "rate limit") {
 		t.Errorf("detail %q loses the underlying cause", d)
 	}
-	if body := rep.Render(); !strings.Contains(body, "NOT clean") {
-		t.Errorf("report must state indeterminate is not clean:\n%s", body)
+	if body := rep.Render(); !strings.Contains(body, "NOT CHECKED") {
+		t.Errorf("report must state the carrier was never checked:\n%s", body)
 	}
 }
 

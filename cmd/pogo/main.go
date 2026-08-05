@@ -99,6 +99,16 @@ func optedOutNote(n int) string {
 	return fmt.Sprintf(" (%d deliberately unindexed, not counted)", n)
 }
 
+// exitInstrumentFailure is `pogo check-teardown`'s exit code for a run that
+// reached no verdict for any carrier it scanned (mg-dd22).
+//
+// It is distinct from cli.ExitError on purpose. "The detector found something"
+// and "the detector could not see" demand opposite responses — chase the
+// finding, versus fix the network and re-run — and a schedule that gets the
+// same integer for both will treat a blind run as a result, which is the exact
+// failure this code exists to make impossible.
+const exitInstrumentFailure = 3
+
 func main() {
 
 	// Bound every git repository lookup at POGO_HOME before any subcommand runs.
@@ -972,15 +982,29 @@ Findings come in three kinds:
 
   teardown miss   a done carrier whose issue is still OPEN, with no declaration
                   that it is open on purpose. The finding this exists to produce.
-  indeterminate   the issue's state could NOT be established — gh exited
-                  non-zero, auth expired, rate limit, or the ref names a repo or
-                  issue that no longer resolves. These are NOT clean. A failed
-                  lookup and a closed issue are indistinguishable to a careless
-                  check, so an unreadable answer is reported, never assumed shut.
+  indeterminate   the lookup WORKED and its answer is not a usable state — the
+                  ref names an issue or repo that no longer resolves, or GitHub
+                  reports a state this detector does not model. These are NOT
+                  clean: a failed lookup and a closed issue are indistinguishable
+                  to a careless check, so an unreadable answer is reported, never
+                  assumed shut. Re-running reproduces them.
+  not checked     the lookup FAILED and the carrier was never audited — no
+                  network, no credential, a rate limit. Reported apart from
+                  indeterminate because a failure to measure is not a
+                  measurement (mg-dd22). Network-class failures are retried with
+                  backoff first; auth, rate-limit and unclassified ones are not,
+                  since re-running a repeatable failure only reproduces it.
   declared open   the carrier says why its issue is open deliberately, via a
                   ` + "`gh-open: <reason>`" + ` line in its body. Listed, but not a miss
                   and not an alert — a detector that cries wolf gets muted long
                   before the run that matters.
+
+A run in which NO carrier reached a verdict is reported as a SUSPECTED
+INSTRUMENT FAILURE rather than as a result, and exits ` + fmt.Sprint(exitInstrumentFailure) + `. Twelve carriers
+all failing at once is not what twelve broken carriers look like; it is what a
+broken detector looks like. On 2026-08-04 one network blip did exactly that to a
+batch of 12 — six of which were real teardown misses — and the output was
+indistinguishable from a completed scan.
 
 Scans ` + "`status=done`" + ` by default. Archived carriers are NOT scanned unless
 --archived is passed: this store holds ~80 archived carriers against 2 done
@@ -988,8 +1012,9 @@ ones, and each costs a network round-trip. That is a real coverage gap and it is
 stated rather than hidden — a carrier archived while its issue is still open is
 the most thoroughly forgotten case of all.
 
-Exit status is 0 when nothing is actionable, 1 when any miss or indeterminate
-carrier is found (so it can gate a schedule or CI step).`,
+Exit status is 0 when nothing is actionable, 1 when anything is found, and ` + fmt.Sprint(exitInstrumentFailure) + `
+when the run produced no verdict at all (so a schedule can tell "the check found
+something" from "the check could not run" without parsing the report).`,
 		Args: cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
 			// Every verdict this command renders comes from a `gh` call, so an
@@ -1012,7 +1037,12 @@ carrier is found (so it can gate a schedule or CI step).`,
 				os.Exit(cli.ExitError)
 			}
 
-			rep := ghteardown.Detect(carriers, ghteardown.GHLookup)
+			// RetryingLookup, not the bare GHLookup: this box's network is
+			// ~50% intermittent (mg-0ffc), and an un-retried lookup turns one
+			// blip into a full batch of non-answers (mg-dd22). The CLI and
+			// pogod's watcher ride out a blip identically, so a hand re-run
+			// cannot disagree with the unattended one for want of a retry.
+			rep := ghteardown.Detect(carriers, ghteardown.RetryingLookup(ghteardown.GHLookup))
 
 			if jsonOutput {
 				type outFinding struct {
@@ -1022,6 +1052,10 @@ carrier is found (so it can gate a schedule or CI step).`,
 					Stage   string `json:"stage,omitempty"`
 					State   string `json:"state"`
 					Detail  string `json:"detail,omitempty"`
+					// Class names WHY there is no state, so a consumer can
+					// separate a network blip from an auth gap from a deleted
+					// issue without re-parsing gh's prose (mg-dd22).
+					Class string `json:"class,omitempty"`
 				}
 				conv := func(fs []ghteardown.Finding) []outFinding {
 					out := make([]outFinding, 0, len(fs))
@@ -1030,6 +1064,7 @@ carrier is found (so it can gate a schedule or CI step).`,
 							Carrier: f.Carrier.ID, Issue: f.Carrier.String(),
 							Title: f.Carrier.Title, Stage: f.Carrier.Stage,
 							State: string(f.State), Detail: f.Detail,
+							Class: string(f.Class),
 						})
 					}
 					return out
@@ -1039,14 +1074,28 @@ carrier is found (so it can gate a schedule or CI step).`,
 					"statuses":      src.Statuses(),
 					"miss_count":    len(rep.Misses),
 					"indeterminate": conv(rep.Indeterminate),
+					"not_checked":   conv(rep.Blocked),
 					"misses":        conv(rep.Misses),
 					"declared_open": conv(rep.DeclaredOpen),
 					"actionable":    rep.Actionable(),
+					// A machine consumer must be able to tell a result from a
+					// run that measured nothing WITHOUT counting findings —
+					// counting is exactly what made "12 indeterminate" read as
+					// a completed scan.
+					"instrument_failure": rep.InstrumentFailure(),
+					"failure_classes":    rep.FailureClasses(),
 				})
 			} else {
 				fmt.Print(rep.Render())
 			}
 
+			// A blind run gets its own exit code. Collapsing it into the
+			// ordinary "found something" exit would put the two facts a schedule
+			// most needs to separate — "the detector has findings" and "the
+			// detector cannot see" — behind the same integer.
+			if rep.InstrumentFailure() {
+				os.Exit(exitInstrumentFailure)
+			}
 			if rep.Actionable() {
 				os.Exit(cli.ExitError)
 			}

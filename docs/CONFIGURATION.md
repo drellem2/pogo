@@ -1038,8 +1038,42 @@ outward-facing and stays human-gated.
   fails — expired auth, rate limit, renamed repo, transferred or deleted issue —
   produces no "OPEN" token, so a parse that reads "not open" as closed would
   report every carrier clean at exactly the moment the detector went blind. Only
-  a positive, parsed `CLOSED` clears a carrier; everything else is reported as
-  **indeterminate** and counts as actionable.
+  a positive, parsed `CLOSED` clears a carrier; everything else is reported and
+  counts as actionable.
+- **A failure to measure is not a measurement (mg-dd22).** Keeping "unknown" out
+  of "closed" was necessary and not sufficient. On 2026-08-04 one network blip
+  made all 12 carriers in a batch report `indeterminate` — technically correct
+  and useless: 6 were clean, 6 were real teardown misses, and the report looked
+  like a completed scan. It recurred 13-for-13 fifteen hours later. Two changes:
+
+  - **Network-class failures are retried** with doubling backoff (3 attempts,
+    2s then 4s) before anything is reported. **Only** network-class: auth, rate
+    limits and unclassifiable failures are repeatable, so re-running them
+    reproduces the same error while spending the sample window.
+  - **A non-answer is reported in a different shape from an answer.**
+    `indeterminate` now means the lookup *worked* and its answer is unusable — a
+    determination about the carrier. **`not checked`** means the lookup failed
+    and the carrier was never audited — a fact about us. `pogo check-teardown`
+    prints them under separate headings, `--json` carries `not_checked` and a
+    `class` on every finding (`network`, `auth`, `rate_limit`, `subject`,
+    `unclassified`), and the event log gains `blocked_count` and
+    `failure_classes`. Today's network outage no longer has to be
+    hand-separated from mg-03ea's auth gap by reading `gh`'s error prose.
+
+- **An all-blind run is reported as a broken instrument, not as a result
+  (mg-dd22).** When *no* scanned carrier reaches a verdict, the report leads with
+  `SUSPECTED INSTRUMENT FAILURE`, the mail subject says the run measured nothing
+  instead of carrying a count that reads like a finding, `instrument_failure` is
+  set on the event, and `pogo check-teardown` exits **3** rather than 1 — so a
+  schedule can tell "the detector found something" from "the detector could not
+  run" without parsing the report. N carriers all failing at once is not what N
+  broken carriers look like. It takes 2 scanned carriers to make the claim: from
+  a sample of one, a blind run and a blind carrier are the same observation.
+
+  A blind run also **does not touch the escalation clocks** below. It observed
+  nothing, so it is no evidence that a miss cleared — and on a box whose network
+  is ~50% intermittent (mg-0ffc), letting a blip reset those clocks would be a
+  standing mechanism for keeping a forgotten finding forgotten.
 - **Open on purpose.** A carrier whose issue is legitimately open (waiting on a
   reporter, say) declares it in the carrier body:
 
@@ -1123,8 +1157,10 @@ escalate_after = "72h"     # one unresolved finding also copies `human` after th
                            # (default 72h; negative disables, zero means default)
 ```
 
-Exit status of `pogo check-teardown` is 0 when nothing is actionable and 1 when
-any miss or indeterminate carrier is found, so it can gate a schedule or CI step.
+Exit status of `pogo check-teardown` is **0** when nothing is actionable, **1**
+when anything is found, and **3** when the run reached no verdict at all, so a
+schedule or CI step can gate on findings without treating a blind run as a clean
+one — or as a finding.
 
 Source of truth: `internal/ghteardown/`.
 
