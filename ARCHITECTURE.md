@@ -400,6 +400,12 @@ pr_mode       = true   # push the rebased branch back so open GitHub PRs
 timeout       = "60m"  # bound on a single gate run; "0" removes the bound
 ```
 
+**The default gate list, when a repo names none.** The refinery runs the conventional scripts it finds at the worktree root — `./build.sh` and `./test.sh` — with one exception: **if `build.sh` itself runs `test.sh`, only `./build.sh` is gated** (mg-da30). Listing both is right when they are independent steps and wrong when one calls the other, and on this repo it was the latter: `build.sh` runs `./test.sh`, the gate then ran `./test.sh` again, and every merge paid for the suite twice on the single slot everything else queues behind. Measured from pogod's own gate heartbeats over 49 two-gate merges, the second, redundant gate was **34% of all gate wall-clock** — a median of 2m30s per merge.
+
+The exception is conditional on the nesting rather than a blanket "prefer `./build.sh`", because a blanket rule would not halve the other repos' gates, it would stop testing them: of the seven repos on this fleet carrying both scripts, **five** (`bridget`, `libdig`, `macguffin`, `pogo-sleepwake`, `rent-a-programmer-api`) have a `build.sh` that only compiles. `buildScriptRunsTests` decides it textually, and its two failure directions are not symmetric — an unrecognised invocation form keeps both gates (the status quo, a suite run twice) while a phantom one would drop coverage, so everything from the first `#` on a line is discarded before matching and only executable forms (`./test.sh`, `bash test.sh`) count. A dropped gate is named in the merge's own gate output; a shorter gate list that nothing explains is indistinguishable from coverage quietly going missing.
+
+The saving is smaller than "the suite runs twice" suggests, and the reason is worth knowing: Go's test cache means the second `go test ./...` returns almost everything cached (measured: 0 of 50 packages cached on the first run, 49 on the immediately following one). What the duplicate actually re-paid was `test.sh`'s dozen bash suites, several of which stand up real sandboxed daemons and cache nothing. Any per-repo `[gates] commands` is used verbatim and none of this applies to it.
+
 **Telling a slow gate from a dead one.** Quality gates are the one step that can
 run for tens of minutes, and the step used to log on entry and not again until it
 produced a result. From outside, a gate running for thirty minutes and a gate
