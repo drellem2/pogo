@@ -330,6 +330,14 @@ func printPromptWitness(r staleness.PromptReport) {
 		fmt.Printf("  ok: all %d shipped prompt(s) match the reference.\n", r.Shipped)
 	} else {
 		fmt.Printf("  STALE: %d of %d shipped prompt(s) differ from the reference.\n", len(r.Deltas), r.Shipped)
+		// Say what decided this, in the output and not only in the source. The
+		// line counts on the right are the most legible thing on the screen and
+		// a reader will reach for them; the measurement that produced mg-8bcb's
+		// withdrawn "installed LONGER than main" was exactly a `wc -l` pair, and
+		// it was wrong by one stamp line on the one file that was up to date.
+		fmt.Println("  Decided on a sha256 of each file BODY (install stamp stripped), both directions.")
+		fmt.Println("  The line counts below are for orientation and decided nothing: the ordinary")
+		fmt.Println("  shape of a prompt edit swaps one line for another and no length test can see it.")
 		for _, d := range r.Deltas {
 			fmt.Printf("    %-34s %-14s %s\n", d.Path, d.Kind, d.LineNote())
 		}

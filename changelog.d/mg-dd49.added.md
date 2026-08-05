@@ -43,9 +43,16 @@
   prompt change and is invisible to any length test, and the installed tree is
   not simply an older `main`. That last hazard resolves on measurement — the
   `polecat-build-pr.md` "231 installed vs 230 on `main`" recorded in mg-8bcb is
-  **the install stamp line itself**; the bodies hash identically
-  (`cbd6f88…`), so nothing is ahead of `main` and the bulk-reconcile hazard
-  mg-8bcb is parked on does not exist.
+  **the install stamp line itself**; the bodies hash identically (`cbd6f88…`),
+  so nothing in the installed tree is ahead of `main`. The `wc -l` pair that
+  produced it was off by one stamp line on every file, and only became visible
+  on the one file current enough for +1 to flip the sign — which is why the
+  method matters more than the correction: that instrument would have reported a
+  genuinely edited prompt as clean. **This does not unpark mg-8bcb.** Its stated
+  park is the architect precondition — the running `pogod` is `d31297f`, 52
+  commits behind and without mg-4999's `2a7f3e4` — and the ahead-of-`main`
+  caution was an additional hazard attached later. A secondary blocker is
+  removed; the daemon is still six days stale (pm-pogo, 2026-08-05).
 
   **The reference can itself be stale, and the report says which one it used.**
   `--repo` defaults to the deploy checkout at `~/.pogo/deploy-src`, whose
