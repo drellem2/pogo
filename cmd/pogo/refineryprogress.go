@@ -125,37 +125,42 @@ func formatQueue(queue []refinery.MergeRequest, now time.Time) string {
 		return "No merge requests: nothing in flight, nothing pending.\n"
 	}
 
-	processing := -1
-	for i, mr := range queue {
+	// Merges run in per-repo lanes, so "N ahead" is counted WITHIN a repo. The
+	// whole-pipeline count would tell an author they are fourth in line when
+	// three of the four are for repos that cannot delay them at all — the
+	// serialisation this view now has to stop implying (mg-37ad).
+	inFlight := 0
+	aheadInLane := make(map[string]int, len(queue))
+	seenInLane := make(map[string]int, len(queue))
+	for _, mr := range queue {
+		lane := refinery.RepoLane(mr.RepoPath)
+		aheadInLane[mr.ID] = seenInLane[lane]
+		seenInLane[lane]++
 		if mr.Status == refinery.StatusProcessing {
-			processing = i
-			break
+			inFlight++
 		}
 	}
+	pending := len(queue) - inFlight
 
-	pending := len(queue)
-	if processing >= 0 {
-		pending--
-	}
-
-	for i, mr := range queue {
-		line := fmt.Sprintf("%-12s  branch=%-30s  author=%-15s  status=%-10s  submitted=%s",
-			mr.ID, mr.Branch, mr.Author, mr.StatusLabel(), mr.SubmitTime.Format("2006-01-02 15:04"))
-		if i != processing {
-			// Position in the whole pipeline, so a long-queued row reads as
-			// "waiting behind N" rather than as "ignored". The array is
-			// processing-first, so the index IS the number ahead.
-			line += "  (" + aheadNote(i) + ")"
-		}
-		fmt.Fprintln(&b, line)
-		if i == processing {
+	for i := range queue {
+		mr := queue[i]
+		line := fmt.Sprintf("%-12s  repo=%-16s  branch=%-30s  author=%-15s  status=%-10s  submitted=%s",
+			mr.ID, refinery.RepoLane(mr.RepoPath), mr.Branch, mr.Author, mr.StatusLabel(),
+			mr.SubmitTime.Format("2006-01-02 15:04"))
+		if mr.Status == refinery.StatusProcessing {
+			fmt.Fprintln(&b, line)
 			for _, l := range progressLines(&mr, now) {
 				fmt.Fprintf(&b, "    %s\n", l)
 			}
+			continue
 		}
+		// A long-queued row must read as "waiting behind N in its own repo"
+		// rather than as "ignored".
+		line += "  (" + aheadNote(aheadInLane[mr.ID]) + " in this repo)"
+		fmt.Fprintln(&b, line)
 	}
 
-	if processing < 0 && pending > 0 {
+	if inFlight == 0 && pending > 0 {
 		// The alarming case, stated rather than implied. Before this line
 		// existed, its rendering was identical to the healthy one.
 		fmt.Fprintf(&b, "\nNOTHING IN FLIGHT: %s pending and no merge request is being processed.\n",
@@ -186,31 +191,73 @@ var getRefineryQueue = client.GetRefineryQueue
 // formatQueuePositionFrom is the pure half of formatQueuePosition.
 func formatQueuePositionFrom(queue []refinery.MergeRequest, id string, now time.Time) string {
 	idx := -1
-	var active *refinery.MergeRequest
 	for i := range queue {
 		if queue[i].ID == id {
 			idx = i
-		}
-		if queue[i].Status == refinery.StatusProcessing {
-			active = &queue[i]
+			break
 		}
 	}
 	if idx < 0 {
 		return "Position:  not in the current pipeline — it may have just been picked up or resolved.\n"
 	}
 
+	// Merges run in per-repo lanes, so "ahead of you" means ahead of you IN
+	// YOUR REPO. Counting the whole pipeline would tell an author they are
+	// third in line when the two merges in front are for repos that cannot
+	// delay them by a second — which is a more confident version of the
+	// confusion this whole view exists to remove (mg-37ad).
+	lane := refinery.RepoLane(queue[idx].RepoPath)
+	ahead := 0
+	var active *refinery.MergeRequest
+	var otherLanes int
+	for i := range queue {
+		sameLane := refinery.RepoLane(queue[i].RepoPath) == lane
+		if queue[i].Status == refinery.StatusProcessing {
+			if sameLane {
+				active = &queue[i]
+			} else {
+				otherLanes++
+			}
+		}
+		if i < idx && sameLane {
+			ahead++
+		}
+	}
+
 	var b strings.Builder
-	fmt.Fprintf(&b, "Position:  %s\n", aheadNote(idx))
+	fmt.Fprintf(&b, "Position:  %s%s\n", aheadNote(ahead), inLane(lane))
 	if active == nil {
+		if otherLanes > 0 {
+			// Not the alarming case. Merges ARE running; none of them is this
+			// repo's, and none of them is why this request is waiting.
+			verb := "is"
+			if otherLanes > 1 {
+				verb = "are"
+			}
+			fmt.Fprintf(&b, "           Nothing is in flight for %s. %s %s running in other repos, which do\n",
+				lane, plural(otherLanes, "merge"), verb)
+			fmt.Fprintf(&b, "           NOT block this one — it is waiting for a free lane or the next poll.\n")
+			return b.String()
+		}
 		fmt.Fprintf(&b, "           NOTHING IS IN FLIGHT. Nothing is being processed ahead of this request,\n")
 		fmt.Fprintf(&b, "           so it is not waiting on a merge — check 'pogo refinery status'.\n")
 		return b.String()
 	}
-	fmt.Fprintf(&b, "           Waiting behind %s (%s), which is:\n", active.ID, active.Branch)
+	fmt.Fprintf(&b, "           Waiting behind %s (%s) in the same repo, which is:\n", active.ID, active.Branch)
 	for _, l := range progressLines(active, now) {
 		fmt.Fprintf(&b, "             %s\n", l)
 	}
 	return b.String()
+}
+
+// inLane renders " in <repo>" for a known lane, and nothing for an unknown
+// one. A merge request carrying no repo path would otherwise report its
+// position "in .", which is worse than saying nothing.
+func inLane(lane string) string {
+	if lane == "" || lane == "." {
+		return ""
+	}
+	return " in " + lane
 }
 
 // aheadNote renders a pending request's place in line.

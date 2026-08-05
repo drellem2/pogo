@@ -489,7 +489,20 @@ Use --json for the raw structured response.`,
 			// merge from one that has stopped, and the dashboard used to show
 			// only the count and the pending rows (mg-0c51).
 			inFlight := "none"
-			if refStatus.Processing != "" {
+			if len(refStatus.InFlight) > 0 {
+				parts := make([]string, 0, len(refStatus.InFlight))
+				for _, ln := range refStatus.InFlight {
+					p := fmt.Sprintf("%s[%s]", ln.ID, ln.Repo)
+					if !ln.Since.IsZero() {
+						p += fmt.Sprintf(" (%s)", time.Since(ln.Since).Round(time.Second))
+					}
+					parts = append(parts, p)
+				}
+				inFlight = strings.Join(parts, ", ")
+			} else if refStatus.Processing != "" {
+				// A pogod predating per-repo lanes reports only the single
+				// slot. Fall back to it rather than printing "none" at a
+				// refinery that is busy.
 				inFlight = refStatus.Processing
 				if !refStatus.ProcessingSince.IsZero() {
 					inFlight += fmt.Sprintf(" (%s)", time.Since(refStatus.ProcessingSince).Round(time.Second))
@@ -3859,8 +3872,27 @@ Use this for a quick health check of the refinery. For per-MR details use
 				// refinery chewing through a merge and one that had stopped
 				// produce identical output (mg-0c51).
 				fmt.Printf("Queue:   %d pending\n", status.QueueLen)
+				// Merges run in per-repo lanes, so there can be several
+				// active at once. Each row names the repo whose lane it
+				// holds: an author waiting behind an unrelated repo's gate
+				// could not previously see that from any view, which is half
+				// of what made the 70-minute stall of 2026-08-05 unreadable
+				// (mg-37ad).
 				switch {
+				case len(status.InFlight) > 0:
+					for _, ln := range status.InFlight {
+						age := ""
+						if !ln.Since.IsZero() {
+							age = fmt.Sprintf(", in flight for %s", time.Since(ln.Since).Round(time.Second))
+						}
+						fmt.Printf("Active:  %s  repo=%s  branch=%s%s\n", ln.ID, ln.Repo, ln.Branch, age)
+					}
+					if status.MaxConcurrentMerges > 0 {
+						fmt.Printf("Lanes:   %d of %d busy (one lane per repo) — 'pogo refinery queue' shows what each gate is doing\n",
+							len(status.InFlight), status.MaxConcurrentMerges)
+					}
 				case status.Processing != "":
+					// Older pogod: single slot, no lane detail.
 					inFlight := ""
 					if !status.ProcessingSince.IsZero() {
 						inFlight = fmt.Sprintf(", in flight for %s", time.Since(status.ProcessingSince).Round(time.Second))

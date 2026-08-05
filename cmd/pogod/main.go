@@ -2200,6 +2200,9 @@ Flags:
 		if cfg.Refinery.PollInterval > 0 {
 			refineCfg.PollInterval = cfg.Refinery.PollInterval
 		}
+		if cfg.Refinery.MaxConcurrentMerges > 0 {
+			refineCfg.MaxConcurrentMerges = cfg.Refinery.MaxConcurrentMerges
+		}
 		var refErr error
 		mergeQueue, refErr = refinery.New(refineCfg)
 		if refErr != nil {

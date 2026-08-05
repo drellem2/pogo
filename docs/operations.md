@@ -209,7 +209,7 @@ pogo agent diagnose <name> --json | jq .process_alive   # false ⇒ that process
 
 ### Tier 1 — Don't restart pogod (default)
 
-Most "pogod is misbehaving" situations are better solved by **filing an mg (a work item in macguffin, the task-store CLI) or restarting a specific subcomponent**. A pogod restart is a heavy hammer: it interrupts every running polecat, drops in-flight refinery (the merge queue) work back into the queue, and re-arms every cron and watcher from cold. Reach for it only when the lighter alternatives below don't apply.
+Most "pogod is misbehaving" situations are better solved by **filing an mg (a work item in macguffin, the task-store CLI) or restarting a specific subcomponent**. A pogod restart is a heavy hammer: it interrupts every running polecat, and re-arms every cron and watcher from cold. A *graceful* stop also **waits for every in-flight merge to finish** — a merge is never abandoned halfway, so a restart during a long quality gate blocks for as long as that gate runs. A merge interrupted by a hard stop is resolved on the next start by an ancestor probe (merged if it landed, re-queued at head if it did not), not blindly re-run. Reach for it only when the lighter alternatives below don't apply.
 
 **Symptoms that do NOT warrant a restart** (file an mg or fix in place):
 
@@ -217,6 +217,14 @@ Most "pogod is misbehaving" situations are better solved by **filing an mg (a wo
 - A plugin behaves stalely after you edited its source. → Most plugins reload on file change; if not, fix the plugin's reload path rather than bouncing the daemon.
 - A polecat hangs or misbehaves. → Stop that polecat (`pogo agent stop <name>`); pogod itself is fine.
 - Refinery is slow or backed up. → Inspect with `pogo refinery list`; queue throughput is not a daemon-restart problem.
+- **Merge requests are queued and nothing seems to be moving for MY repo.** →
+  Merges run in **per-repo lanes**, so a queued request is only ever waiting on
+  merges for its own repo. `pogo refinery status` prints one `Active:` line per
+  lane with its repo, and `pogo refinery show <mr-id>` states position *within
+  that repo* — including the case where merges are running but none of them is
+  yours, which is a wait for a free lane and not a blockage. Deep queue spanning
+  several repos is normal and self-clearing; the cap is
+  `[refinery] max_concurrent_merges` (default 2).
 - **A merge request has sat in `processing` for a long time.** → Ask the merge
   request, not the process table: `pogo refinery show <mr-id>` prints a
   `Verdict:` line reading the running gate's heartbeat. `ALIVE and working`

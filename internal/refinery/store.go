@@ -49,16 +49,31 @@ type LostEntry struct {
 // byID is deliberately absent: it is rebuilt from queue+history+processing on
 // load. Callbacks, config, and worktree clones are likewise not persisted.
 type persistedState struct {
-	Version int             `json:"version"`
-	Queue   []*MergeRequest `json:"queue"`
-	// Processing is the single in-flight item (the queue loop is
-	// single-threaded, so there is at most one). On load it is resolved via
-	// the ancestor probe rather than blindly re-run — see resolveRecovered.
-	Processing    *MergeRequest   `json:"processing,omitempty"`
-	History       []*MergeRequest `json:"history"`
-	FailureCounts map[string]int  `json:"failure_counts,omitempty"`
-	Lost          []LostEntry     `json:"lost,omitempty"`
-	PrunedIDs     []string        `json:"pruned_ids,omitempty"`
+	Version int `json:"version"`
+	// Queue is the pending items, PRECEDED BY a queued-looking copy of every
+	// item in ProcessingLanes. That mirror exists for readers that predate
+	// per-repo lanes and would otherwise drop in-flight merges on the floor;
+	// this binary strips it on load. See saveStateLocked for the full argument.
+	Queue []*MergeRequest `json:"queue"`
+	// Processing is the pre-mg-37ad single in-flight slot, written when the
+	// queue loop could only run one merge at a time. It is still READ so a
+	// state file written by an older pogod carries its in-flight merge across
+	// the upgrade; it is no longer WRITTEN. On load it is resolved via the
+	// ancestor probe rather than blindly re-run — see resolveRecovered.
+	Processing *MergeRequest `json:"processing,omitempty"`
+	// ProcessingLanes is every in-flight item, one per repo lane.
+	//
+	// The schema VERSION is deliberately not bumped for this field. A version
+	// bump makes an older pogod refuse the file outright ("newer than this
+	// binary supports"), which would take the merge queue down on any rollback;
+	// the format here stays loadable by those binaries without loss, because
+	// they read the Queue mirror. Additive, and readable both ways, beats
+	// detectable.
+	ProcessingLanes []*MergeRequest `json:"processing_lanes,omitempty"`
+	History         []*MergeRequest `json:"history"`
+	FailureCounts   map[string]int  `json:"failure_counts,omitempty"`
+	Lost            []LostEntry     `json:"lost,omitempty"`
+	PrunedIDs       []string        `json:"pruned_ids,omitempty"`
 }
 
 // store handles persistence of refinery state to a single JSON file.

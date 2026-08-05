@@ -191,9 +191,7 @@ func TestCancelDuringGitStepStopsAtTheNextBoundary(t *testing.T) {
 	// cancel arriving during the fetch/rebase steps leaves behind.
 	r.mu.Lock()
 	mr.Status = StatusProcessing
-	r.processing = mr
-	r.beginProcessingLocked()
-	r.requestInFlightCancelLocked(mr)
+	r.requestInFlightCancelLocked(markInFlightLocked(r, mr))
 	r.mu.Unlock()
 
 	_, err = r.processMerge(mr)

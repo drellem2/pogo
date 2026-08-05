@@ -9,9 +9,14 @@ import (
 	"path/filepath"
 )
 
-// resolveRecovered resolves an in-flight (processing) MR loaded from the
-// state file after a pogod crash or restart. Called from Start, before the
-// first processNext, so callbacks are already wired.
+// resolveRecovered resolves the in-flight MRs loaded from the state file after
+// a pogod crash or restart. Called from Start, before the first dispatch, so
+// callbacks are already wired.
+//
+// There can be more than one since per-repo lanes (mg-37ad). They are resolved
+// one at a time, on this goroutine, before any lane starts — each probe wants
+// exclusive use of its repo's clone (it force-removes rebase debris), and
+// serialising the probes is free next to what they protect.
 //
 // The dangerous crash window is after `git push` landed the merge but before
 // the history append recorded it. Blindly re-running the item would re-run
@@ -29,8 +34,25 @@ import (
 //     the lost list and emit an event so the author can resubmit.
 func (r *Refinery) resolveRecovered() {
 	r.mu.Lock()
-	mr := r.recovered
+	pending := r.recovered
 	r.mu.Unlock()
+
+	// Resolve newest-first so the re-queue-at-head path below leaves the
+	// oldest in-flight merge at the very front of the queue: a merge
+	// interrupted by a restart should not lose its place to one that started
+	// after it.
+	for i := len(pending) - 1; i >= 0; i-- {
+		r.resolveRecoveredOne(pending[i])
+	}
+
+	r.mu.Lock()
+	r.recovered = nil
+	r.saveStateLocked()
+	r.mu.Unlock()
+}
+
+// resolveRecoveredOne resolves a single recovered in-flight merge request.
+func (r *Refinery) resolveRecoveredOne(mr *MergeRequest) {
 	if mr == nil {
 		return
 	}
@@ -38,7 +60,15 @@ func (r *Refinery) resolveRecovered() {
 	merged, sha, probeErr := r.probeAlreadyMerged(mr)
 
 	r.mu.Lock()
-	r.recovered = nil
+	// Drop it from the recovered set before persisting: saveStateLocked writes
+	// r.recovered as in-flight, and an item that has just been resolved into
+	// history must not also be persisted as still running.
+	for i, p := range r.recovered {
+		if p == mr {
+			r.recovered = append(r.recovered[:i], r.recovered[i+1:]...)
+			break
+		}
+	}
 	var fire OnMerged
 	switch {
 	case probeErr != nil:
@@ -88,9 +118,12 @@ func (r *Refinery) resolveRecovered() {
 // leaves an in-progress rebase that would break every subsequent git
 // operation (ensureWorktree only checks that .git exists).
 //
-// Two callers, both on the single-threaded queue path so the clone is
-// exclusively theirs: resolveRecovered (crash-window recovery, above) and
-// processMerge (already-merged guard against double-submits, gh #34).
+// Two callers, and both hold the repo's clone exclusively when they run:
+// resolveRecovered (crash-window recovery, above) runs before any lane starts,
+// and processMerge (already-merged guard against double-submits, gh #34) runs
+// inside a lane, which is per-repo and therefore per-clone. Concurrency across
+// repos does not reach this: the destructive step below force-removes rebase
+// state, and it must never do that under another merge's feet.
 //
 // Returns (merged, branchSHA, error). A non-nil error means the probe itself
 // could not answer (branch deleted, remote unreachable) — recovery moves the
