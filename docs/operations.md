@@ -430,9 +430,14 @@ the prompt half reads git.
 **Length is never the predicate.** The decision is a hash of the file body with
 the install stamp stripped, in both directions. The installed tree is *not*
 simply an older `main`, and a check that only asked "is the installed file
-behind?" would miss a file that is ahead. (The `polecat-build-pr.md` "231
-installed vs 230 on main" anomaly recorded in mg-8bcb turns out to be the
-install stamp line itself: body hashes are identical.)
+behind?" would miss a file that is ahead. The report says so on screen, above
+the counts, because the counts are the most legible thing on it: the
+`polecat-build-pr.md` "231 installed vs 230 on main" anomaly recorded in mg-8bcb
+turns out to be the install stamp line itself (body hashes are identical), and
+that measurement was a `wc -l` pair off by one on every file — visible only on
+the one file current enough for +1 to flip the sign. Note this removes a
+secondary blocker from mg-8bcb and does **not** unpark it; its stated park is
+the still-failing architect precondition on the daemon's revision.
 
 **The reference can itself be stale.** `--repo` defaults to the deploy checkout
 at `~/.pogo/deploy-src`, whose `origin/main` is only as fresh as its last
