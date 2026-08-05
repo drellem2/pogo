@@ -1753,6 +1753,28 @@ your repo's `build.sh` / `test.sh` (or a `.pogo/refinery.toml`). Worktrees and
 logs live under `~/.pogo/refinery/`; disable with `[refinery] enabled = false`.
 See [ARCHITECTURE.md](../ARCHITECTURE.md) §"The Refinery".
 
+**Which scripts get gated (defaults).** With no `[gates] commands` in
+`<repo>/.pogo/refinery.toml`, the refinery gates the conventional scripts
+present at the worktree root — `./build.sh` then `./test.sh` — **except that a
+`build.sh` which itself runs `./test.sh` is gated alone** (mg-da30). Otherwise
+the suite runs twice per merge on the one slot every other merge waits behind;
+measured from pogod's gate heartbeats over 49 such merges, the redundant second
+gate was 34% of all gate wall-clock (median 2m30s per merge). Repos whose
+`build.sh` only compiles are untouched — both scripts still run — and a repo
+that names `commands` explicitly gets exactly what it names. When the default
+drops a script, the merge's gate output says so:
+
+```
+(omitting gate ./test.sh: ./build.sh runs it, and running it twice per merge tests nothing new)
+```
+
+To gate both deliberately on a repo where one calls the other, name them:
+
+```toml
+[gates]
+commands = ["./build.sh", "./test.sh"]
+```
+
 **QA gate (hardcoded).** Before processing any MR, the refinery scans the
 macguffin workspace (`Config.MacguffinDir`, default `~/.macguffin/work`) for a
 work item with `type: qa` whose `source` matches the MR author (the work-item

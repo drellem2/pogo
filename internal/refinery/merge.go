@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -628,8 +629,9 @@ func fixRemoteURL(wtDir, repoPath string) error {
 func (r *Refinery) runQualityGates(ctx context.Context, wtDir, repoPath string, mr *MergeRequest) (string, []string, error) {
 	cfg := r.loadConfig(wtDir, repoPath)
 	gates := cfg.Gates
+	var note string
 	if len(gates) == 0 {
-		gates = defaultGateCommands(wtDir)
+		gates, note = defaultGates(wtDir)
 	}
 	if len(gates) == 0 {
 		// No gates configured — pass by default
@@ -638,6 +640,12 @@ func (r *Refinery) runQualityGates(ctx context.Context, wtDir, repoPath string, 
 	timeout := cfg.gateTimeout()
 
 	var allOutput strings.Builder
+	// A gate the defaults dropped is said out loud in the merge's own output.
+	// A shorter gate list that nothing explains reads as coverage quietly going
+	// missing, which is exactly what it must not be mistaken for.
+	if note != "" {
+		allOutput.WriteString(note + "\n")
+	}
 	var ran []string
 	for i, gate := range gates {
 		allOutput.WriteString(fmt.Sprintf("=== Running: %s ===\n", gate))
@@ -676,13 +684,81 @@ func (r *Refinery) loadGateConfig(wtDir, repoPath string) []string {
 // defaultGateCommands returns the conventional gate scripts present in a
 // worktree, used when no per-repo config names any.
 func defaultGateCommands(wtDir string) []string {
+	gates, _ := defaultGates(wtDir)
+	return gates
+}
+
+// defaultGates returns the conventional gate scripts present in a worktree,
+// plus a note naming any script it deliberately left out and why. The note is
+// empty when nothing was omitted.
+//
+// Listing every conventional script is right when they are independent steps,
+// and wrong when one calls the other: on a repo whose build.sh runs test.sh,
+// gating on both ran the whole suite TWICE on the critical path of every merge
+// (mg-da30). Measured from pogod's own gate heartbeats over 49 two-gate
+// merges, the second run was 34% of all gate wall-clock — a median of 2m30s
+// per merge, on the single slot every other merge queues behind.
+//
+// The fix is deliberately conditional on the nesting rather than a blanket
+// "prefer ./build.sh". Of the seven repos on this fleet carrying both scripts,
+// FIVE have a build.sh that only compiles (bridget, libdig, macguffin,
+// pogo-sleepwake, rent-a-programmer-api) — dropping ./test.sh for those would
+// not halve their gate, it would stop testing them. Only where build.sh is
+// measured to invoke test.sh does the second gate add nothing.
+//
+// The detection's failure directions are asymmetric and it is written to fail
+// the safe way: an unrecognised invocation form keeps both gates (the suite
+// runs twice, as it did before), while a false positive would drop coverage.
+// See buildScriptRunsTests.
+func defaultGates(wtDir string) ([]string, string) {
 	var defaults []string
 	for _, script := range []string{"./build.sh", "./test.sh"} {
 		if _, err := os.Stat(filepath.Join(wtDir, script)); err == nil {
 			defaults = append(defaults, script)
 		}
 	}
-	return defaults
+	if len(defaults) == 2 && buildScriptRunsTests(wtDir) {
+		return defaults[:1], "(omitting gate ./test.sh: ./build.sh runs it, and running it twice per merge tests nothing new)"
+	}
+	return defaults, ""
+}
+
+// testScriptInvocation matches an invocation of ./test.sh in a shell script:
+// `./test.sh`, `bash test.sh`, `sh ./test.sh`. A bare `test.sh` with no path
+// and no interpreter is NOT matched — it does not execute anything, so a line
+// like `echo "run test.sh yourself"` must not read as an invocation.
+var testScriptInvocation = regexp.MustCompile(`(^|[\s;&|(])(\./test\.sh|(ba)?sh\s+(\./)?test\.sh)($|[\s;&|)])`)
+
+// buildScriptRunsTests reports whether the worktree's build.sh invokes
+// ./test.sh, which is what makes gating on both a duplicate run.
+//
+// This is a textual check, and the two ways it can be wrong are not equally
+// costly. A missed invocation leaves both gates listed — the status quo, a
+// suite run twice. A phantom invocation would remove a real gate, so the match
+// requires an executable form and everything from the first `#` on a line is
+// discarded before matching: over-stripping only ever loses a match, and
+// losing a match is the safe direction.
+//
+// Conditional invocations count. This repo's build.sh runs ./test.sh inside
+// `if [ "$skip_tests" = false ]`, and the gate invokes `./build.sh` with no
+// arguments, so the tests run. Trying to decide statically whether a branch is
+// taken would reject that — the real question is whether the two commands
+// overlap at all, and a script that mentions ./test.sh at all is a script the
+// gate cannot assume is independent of it.
+func buildScriptRunsTests(wtDir string) bool {
+	data, err := os.ReadFile(filepath.Join(wtDir, "build.sh"))
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if i := strings.Index(line, "#"); i >= 0 {
+			line = line[:i]
+		}
+		if testScriptInvocation.MatchString(line) {
+			return true
+		}
+	}
+	return false
 }
 
 // loadConfig returns the merged refinery config for a repo. Worktree
