@@ -40,6 +40,32 @@
 // reap must require positive evidence of death, never absence of evidence of
 // life." Closure, likewise, requires positive evidence of closure.
 //
+// # ...and a failure to measure is not a measurement (mg-dd22)
+//
+// Keeping Unknown out of Closed was necessary and it was not sufficient. On
+// 2026-08-04 a single network blip made all 12 carriers in a batch report
+// `indeterminate` — technically correct, and useless: 6 of those carriers were
+// clean and 6 were real teardown misses, and the report gave a reader no way to
+// tell that it had measured nothing at all. It recurred 13-for-13 fifteen hours
+// later, re-burying the same six findings. A report that looks like a completed
+// scan and contains no measurements is worse than an error, because an error
+// stops someone.
+//
+// The repair has two halves, and the second is the load-bearing one:
+//
+//   - A network-class failure is RETRIED with backoff before it is reported
+//     (see Retrying). Only network-class: auth, rate-limit and "we could not
+//     classify it" are repeatable, and re-running a repeatable failure
+//     reproduces it while spending the window.
+//   - A failure to determine is reported in a DIFFERENT SHAPE from a
+//     determination. KindIndeterminate now means "the instrument worked and the
+//     answer is unusable" — a fact about the carrier. KindBlocked means "the
+//     instrument failed and this carrier was never checked" — a fact about us.
+//     And a run in which NO carrier got a verdict is reported as a suspected
+//     instrument failure rather than as a result (Report.InstrumentFailure),
+//     because N carriers all breaking at once is not what broken carriers look
+//     like.
+//
 // # The predicate, and the "open on purpose" problem
 //
 // The predicate is `workflow: gh-issue` + `status=done` + a resolvable `gh:`
@@ -136,10 +162,22 @@ const (
 	// completion whose issue is still open, with no human declaration that it is
 	// open on purpose. This is a teardown miss.
 	KindMiss FindingKind = "teardown_miss"
-	// KindIndeterminate is a carrier whose issue state could not be established.
-	// It is NOT clean and must never be presented as such — it is the shape a
-	// broken detector produces, so it is surfaced loudly enough to be fixed.
+	// KindIndeterminate is a carrier whose issue state could not be established
+	// even though the instrument worked: GitHub answered about this ref and the
+	// answer is not a usable state (no such issue, a state we do not model, a
+	// malformed `gh:` line). It is NOT clean, and it IS a determination — a
+	// repeatable fact about this carrier that a re-run reproduces.
 	KindIndeterminate FindingKind = "indeterminate"
+	// KindBlocked is a carrier that was never determined at all, because the
+	// INSTRUMENT failed — no network, no credential, a rate limit.
+	//
+	// This is separate from KindIndeterminate on purpose, and the separation is
+	// the whole of mg-dd22. On 2026-08-04 one network blip made every carrier
+	// in a batch report `indeterminate`; six of them were genuinely clean and
+	// six were real teardown misses, and nothing in the output could tell them
+	// apart from a carrier that had actually been checked. A failure to measure
+	// must not be reported in the same shape as a measurement.
+	KindBlocked FindingKind = "blocked"
 	// KindDeclaredOpen is a carrier whose issue is open and which carries a
 	// `gh-open:` declaration explaining why. Reported, never mailed.
 	KindDeclaredOpen FindingKind = "declared_open"
@@ -150,17 +188,26 @@ type Finding struct {
 	Carrier Carrier
 	Kind    FindingKind
 	State   IssueState
-	// Detail carries the lookup error for KindIndeterminate, or the human's
-	// stated reason for KindDeclaredOpen. Empty for KindMiss.
+	// Detail carries the lookup error for KindIndeterminate and KindBlocked, or
+	// the human's stated reason for KindDeclaredOpen. Empty for KindMiss.
 	Detail string
+	// Class is why the lookup produced no state, for KindIndeterminate and
+	// KindBlocked. It is what decides which of those two a finding is, and it
+	// is carried onto the finding so a report can name the cause in a word
+	// instead of leaving a reader to parse gh's prose (mg-dd22).
+	Class FailureClass
 }
 
 // Report is the outcome of one full scan.
 type Report struct {
 	// Misses are carriers whose teardown did not run. The reason this package exists.
 	Misses []Finding
-	// Indeterminate are carriers whose issue state could not be established.
+	// Indeterminate are carriers a WORKING instrument could not resolve to a
+	// state. A determination, and a repeatable one.
 	Indeterminate []Finding
+	// Blocked are carriers that were never checked, because the instrument
+	// failed. NOT a determination — see KindBlocked.
+	Blocked []Finding
 	// DeclaredOpen are carriers open on purpose, per an explicit `gh-open:` line.
 	DeclaredOpen []Finding
 	// Scanned is the number of carriers evaluated, so a report can distinguish
@@ -170,8 +217,49 @@ type Report struct {
 }
 
 // Actionable reports whether the scan found anything a human must look at.
-// Indeterminate counts: a detector that cannot see is itself the finding.
-func (r Report) Actionable() bool { return len(r.Misses) > 0 || len(r.Indeterminate) > 0 }
+// Indeterminate and blocked both count: a detector that cannot see is itself
+// the finding.
+func (r Report) Actionable() bool {
+	return len(r.Misses) > 0 || len(r.Indeterminate) > 0 || len(r.Blocked) > 0
+}
+
+// InstrumentFailure reports whether this run should be read as a BROKEN
+// INSTRUMENT rather than as a result: every carrier it scanned came back
+// without a verdict.
+//
+// That is the signature of a detector that has lost its ability to see, not of
+// N simultaneously broken carriers, and mg-dd22 exists because the two rendered
+// identically — twice in 15 hours, the second time re-burying six real findings
+// the first run had already buried. When this is true the run has measured
+// NOTHING, and in particular it is not evidence that a previously-reported
+// finding has cleared.
+//
+// It takes two carriers to say this. With one scanned carrier a no-verdict run
+// and a no-verdict carrier are the same observation, and claiming instrument
+// failure from a sample of one would be inventing the distinction rather than
+// detecting it.
+func (r Report) InstrumentFailure() bool {
+	return r.Scanned >= 2 && len(r.Blocked)+len(r.Indeterminate) == r.Scanned
+}
+
+// FailureClasses lists the distinct causes behind the no-verdict findings, in a
+// stable order, so a report can name what went wrong in a word.
+func (r Report) FailureClasses() []string { return classesOf(r.Blocked, r.Indeterminate) }
+
+func classesOf(groups ...[]Finding) []string {
+	seen := map[FailureClass]bool{}
+	var out []string
+	for _, group := range groups {
+		for _, f := range group {
+			if f.Class != FailureNone && !seen[f.Class] {
+				seen[f.Class] = true
+				out = append(out, string(f.Class))
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
+}
 
 // LookupFunc resolves the current state of one issue. Production binds
 // GHLookup; tests substitute a table so every branch — including the failure
@@ -212,21 +300,31 @@ func Detect(carriers []Carrier, lookup LookupFunc) Report {
 			rep.Misses = append(rep.Misses, Finding{Carrier: c, Kind: KindMiss, State: state})
 		default:
 			// StateUnknown, or any state a future gh version invents. Both land
-			// here rather than being optimistically treated as closed.
+			// here rather than being optimistically treated as closed — but
+			// they do NOT land in the same bucket. The class decides whether
+			// this is a determination about the carrier or a failure of the
+			// instrument to reach one (mg-dd22).
 			detail := "lookup did not return a usable issue state"
+			class := FailureSubject // a state came back; it is just not one we can use
 			if err != nil {
 				detail = err.Error()
+				class = ClassifyLookupError(err)
 			}
-			rep.Indeterminate = append(rep.Indeterminate, Finding{
-				Carrier: c, Kind: KindIndeterminate, State: StateUnknown, Detail: detail,
-			})
+			f := Finding{Carrier: c, State: StateUnknown, Detail: detail, Class: class}
+			if class.Instrument() {
+				f.Kind = KindBlocked
+				rep.Blocked = append(rep.Blocked, f)
+			} else {
+				f.Kind = KindIndeterminate
+				rep.Indeterminate = append(rep.Indeterminate, f)
+			}
 		}
 	}
 
 	// Stable order so repeated scans of an unchanged store produce byte-identical
 	// reports — a report that reshuffles looks like it changed, and a human
 	// watching for change would learn to stop reading it.
-	for _, s := range [][]Finding{rep.Misses, rep.Indeterminate, rep.DeclaredOpen} {
+	for _, s := range [][]Finding{rep.Misses, rep.Indeterminate, rep.Blocked, rep.DeclaredOpen} {
 		sort.SliceStable(s, func(i, j int) bool { return s[i].Carrier.ID < s[j].Carrier.ID })
 	}
 	return rep
@@ -237,6 +335,24 @@ func Detect(carriers []Carrier, lookup LookupFunc) Report {
 // re-derive on demand.
 func (r Report) Render() string {
 	var b strings.Builder
+
+	// The banner comes FIRST and says the run produced no result, because
+	// everything below it is a list of things that were not measured. A reader
+	// who skims the first line must come away knowing this is not a report
+	// about carriers (mg-dd22).
+	if r.InstrumentFailure() {
+		fmt.Fprintf(&b, "SUSPECTED INSTRUMENT FAILURE — this run produced NO verdict for any of the\n"+
+			"%d carrier(s) it scanned. Cause(s): %s.\n\n"+
+			"This is NOT a result. %d carriers all breaking at once is not what a batch of\n"+
+			"broken carriers looks like; it is what a broken detector looks like. Nothing\n"+
+			"below clears, confirms, or refutes any previously reported finding — a real\n"+
+			"teardown miss reported yesterday is still outstanding and is merely invisible\n"+
+			"to this run.\n\n"+
+			"On 2026-08-04 one network blip did exactly this to a batch of 12, of which 6\n"+
+			"were real teardown misses, and the report looked like a completed scan.\n"+
+			"Re-run once the cause below is addressed:\n  pogo check-teardown\n\n",
+			r.Scanned, strings.Join(r.FailureClasses(), ", "), r.Scanned)
+	}
 
 	if len(r.Misses) > 0 {
 		fmt.Fprintf(&b, "TEARDOWN MISS — %d carrier(s) claim done but their issue is still OPEN:\n\n", len(r.Misses))
@@ -255,15 +371,34 @@ func (r Report) Render() string {
 			"  gh-open: <why it is open on purpose>\n\n")
 	}
 
+	if len(r.Blocked) > 0 {
+		fmt.Fprintf(&b, "NOT CHECKED — %d carrier(s) the detector could not reach a verdict on because\n"+
+			"the INSTRUMENT failed. These carriers were not audited; their state is whatever\n"+
+			"it was before this run:\n\n", len(r.Blocked))
+		for _, f := range r.Blocked {
+			fmt.Fprintf(&b, "  %s  %s\n      [%s] %s\n      %s\n\n",
+				f.Carrier.ID, f.Carrier, f.Class, f.Class.Describe(), f.Detail)
+		}
+		b.WriteString("A network-class failure was already retried with backoff before landing here,\n" +
+			"so these survived the retries. Auth, rate-limit and unclassified failures are\n" +
+			"NOT retried inside a run: they are repeatable, and re-running a repeatable\n" +
+			"failure reproduces it while spending the window.\n\n" +
+			"They are listed apart from INDETERMINATE deliberately. An unanswered question\n" +
+			"and an unanswerable one are different facts, and merging them is what let one\n" +
+			"blip mask six real teardown misses on 2026-08-04 (mg-dd22).\n\n")
+	}
+
 	if len(r.Indeterminate) > 0 {
-		fmt.Fprintf(&b, "INDETERMINATE — %d carrier(s) whose issue state could NOT be established:\n\n", len(r.Indeterminate))
+		fmt.Fprintf(&b, "INDETERMINATE — %d carrier(s) whose issue state could NOT be established,\n"+
+			"though the lookup itself worked:\n\n", len(r.Indeterminate))
 		for _, f := range r.Indeterminate {
 			fmt.Fprintf(&b, "  %s  %s\n      %s\n\n", f.Carrier.ID, f.Carrier, f.Detail)
 		}
 		b.WriteString("These are NOT clean. A failed lookup and a closed issue are indistinguishable\n" +
 			"to a careless check, so they are reported rather than assumed shut. Common\n" +
-			"causes: expired gh auth, rate limiting, a transferred or deleted issue, or a\n" +
-			"renamed repo in the carrier's gh: ref.\n\n")
+			"causes: a transferred or deleted issue, a renamed repo in the carrier's gh:\n" +
+			"ref, or a state GitHub has and this detector does not model. Unlike the NOT\n" +
+			"CHECKED section, these are answers — re-running reproduces them.\n\n")
 	}
 
 	if len(r.DeclaredOpen) > 0 {
@@ -286,7 +421,17 @@ func (r Report) Render() string {
 
 // MailSubject renders the one-line summary for the alert channel. Only called
 // when the report is actionable.
+//
+// A run that measured nothing gets a subject that SAYS so, in the first words,
+// rather than a count that reads like a finding. "13 indeterminate" is what
+// arrived twice in 15 hours while six real misses sat underneath it; a subject
+// line is the only part of a notice a filtered reader still sees, and it has to
+// carry the difference between a result and a broken instrument (mg-dd22).
 func (r Report) MailSubject() string {
+	if r.InstrumentFailure() {
+		return fmt.Sprintf("INSTRUMENT FAILURE — no verdict for any of %d carrier(s) (%s); this run measured nothing",
+			r.Scanned, strings.Join(r.FailureClasses(), ", "))
+	}
 	var parts []string
 	if n := len(r.Misses); n > 0 {
 		refs := make([]string, 0, n)
@@ -294,6 +439,9 @@ func (r Report) MailSubject() string {
 			refs = append(refs, f.Carrier.String())
 		}
 		parts = append(parts, fmt.Sprintf("%d gh-issue teardown miss(es): %s", n, strings.Join(refs, ", ")))
+	}
+	if n := len(r.Blocked); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d NOT CHECKED (%s)", n, strings.Join(classesOf(r.Blocked), ", ")))
 	}
 	if n := len(r.Indeterminate); n > 0 {
 		parts = append(parts, fmt.Sprintf("%d indeterminate", n))

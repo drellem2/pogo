@@ -40,9 +40,18 @@ type ghIssue struct {
 // Unknown. "Gone" must never be shortened to "closed": an issue transferred to
 // another repo and still open there is a teardown miss that has merely changed
 // address.
+//
+// Every failure returns a *LookupError carrying its FailureClass (mg-dd22), so
+// a caller can tell "I never reached GitHub" from "GitHub answered about this
+// ref and the answer is unusable" WITHOUT re-reading gh's prose. Those two were
+// the same token until 2026-08-04, when one blip masked six real findings. This
+// function does not retry; wrap it in Retrying (or take RetryingLookup) for
+// that, so the retry policy is one decision made in one place.
 func GHLookup(repo string, number int) (IssueState, error) {
 	if repo == "" || number <= 0 {
-		return StateUnknown, fmt.Errorf("unresolvable gh ref %q#%d — carrier cannot be checked", repo, number)
+		// The instrument is fine; this carrier's own `gh:` line is not.
+		return StateUnknown, lookupErr(FailureSubject,
+			"unresolvable gh ref %q#%d — carrier cannot be checked", repo, number)
 	}
 
 	cmd := exec.Command("gh", "issue", "view", fmt.Sprint(number),
@@ -55,12 +64,17 @@ func GHLookup(repo string, number int) (IssueState, error) {
 		if msg == "" {
 			msg = err.Error()
 		}
-		return StateUnknown, fmt.Errorf("gh issue view %s#%d failed: %s", repo, number, msg)
+		// gh exits 1 for everything, so the class has to be read out of the
+		// message. It is attached HERE, once, at the only place the raw text
+		// exists — rather than left for every reader to re-derive.
+		return StateUnknown, lookupErr(classifyMessage(msg),
+			"gh issue view %s#%d failed: %s", repo, number, msg)
 	}
 
 	var issue ghIssue
 	if err := json.Unmarshal(out, &issue); err != nil {
-		return StateUnknown, fmt.Errorf("gh issue view %s#%d: unparseable output: %w", repo, number, err)
+		return StateUnknown, lookupErr(FailureSubject,
+			"gh issue view %s#%d: unparseable output: %v", repo, number, err)
 	}
 
 	switch strings.ToUpper(strings.TrimSpace(issue.State)) {
@@ -69,8 +83,10 @@ func GHLookup(repo string, number int) (IssueState, error) {
 	case "CLOSED":
 		return StateClosed, nil
 	case "":
-		return StateUnknown, fmt.Errorf("gh issue view %s#%d: no state in response", repo, number)
+		return StateUnknown, lookupErr(FailureSubject,
+			"gh issue view %s#%d: no state in response", repo, number)
 	default:
-		return StateUnknown, fmt.Errorf("gh issue view %s#%d: unrecognised state %q", repo, number, issue.State)
+		return StateUnknown, lookupErr(FailureSubject,
+			"gh issue view %s#%d: unrecognised state %q", repo, number, issue.State)
 	}
 }

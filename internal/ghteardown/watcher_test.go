@@ -292,6 +292,69 @@ func TestAStalledFindingEscalatesToHuman(t *testing.T) {
 	}
 }
 
+// A run that saw NOTHING must not reset the escalation clock on a miss it
+// could not see (mg-dd22).
+//
+// This is the masking failure in its most expensive form. The escalation clock
+// is what guarantees a finding the fleet ignores eventually reaches a human;
+// trackAges rebuilds its map from the CURRENT findings, so a blind run would
+// drop every clock and hand each miss a fresh 72 hours on its return. On a box
+// whose network blips every few days (mg-0ffc), that is not a corner case — it
+// is a standing mechanism for keeping a forgotten finding forgotten.
+//
+// Two carriers, because it takes two to tell a broken instrument from a broken
+// carrier. One is a real miss; the middle run goes blind on both.
+func TestABlindRunDoesNotResetAnEscalationClock(t *testing.T) {
+	mail := &mailRecorder{}
+	clean := Carrier{ID: "mg-clean", Status: "done", Repo: "drellem2/pogo", Number: 93}
+	var blind bool
+	var mu sync.Mutex
+	lookup := func(_ string, number int) (IssueState, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if blind {
+			return StateUnknown, errors.New("error connecting to api.github.com")
+		}
+		if number == 89 {
+			return StateOpen, nil // the real miss
+		}
+		return StateClosed, nil
+	}
+	w := New(Options{
+		Enabled: true, Interval: time.Minute, RenotifyAfter: 24 * time.Hour,
+		EscalateAfter: 72 * time.Hour,
+		Source:        func() ([]Carrier, error) { return []Carrier{carrier07ba(), clean}, nil },
+		Lookup:        lookup, Mail: mail.send, Emit: func(events.Event) {},
+	})
+
+	start := time.Now()
+	w.Check(start) // the miss is first seen here; this is the clock that must survive
+	if !mail.mailed("pm-pogo") {
+		t.Fatal("the miss did not reach the fleet on first sighting")
+	}
+
+	mu.Lock()
+	blind = true
+	mu.Unlock()
+	w.Check(start.Add(1 * time.Hour)) // the blip: no verdict for either carrier
+	last := mail.bodies[len(mail.bodies)-1]
+	if !strings.Contains(last, "SUSPECTED INSTRUMENT FAILURE") {
+		t.Errorf("a run that measured nothing must say so, not report a count:\n%s", last)
+	}
+	if mail.mailed("human") {
+		t.Fatal("a one-hour-old blip escalated to a human")
+	}
+
+	mu.Lock()
+	blind = false
+	mu.Unlock()
+	w.Check(start.Add(73 * time.Hour))
+	if !mail.mailed("human") {
+		t.Errorf("A BLIP RESET THE ESCALATION CLOCK: the miss has been outstanding 73h and never "+
+			"reached `human`; recipients %v", mail.recipients())
+	}
+}
+
 // Escalation ages each FINDING, not the finding-set. A new miss arriving beside
 // an old one changes the set fingerprint, and if that reset the clock the
 // stalest finding — the exact one escalation exists for — would never age.
@@ -447,19 +510,43 @@ func TestUnreadableStoreIsVisible(t *testing.T) {
 	}
 }
 
-// Indeterminate findings alone must still page: a detector that cannot see is
-// itself the finding.
-func TestIndeterminateAlonePages(t *testing.T) {
+// A no-verdict finding alone must still page: a detector that cannot see is
+// itself the finding. An expired credential is instrument-class (mg-03ea's
+// class), so since mg-dd22 the notice must say the carrier was NOT CHECKED
+// rather than presenting the non-answer as a determination.
+func TestANoVerdictFindingAlonePages(t *testing.T) {
 	mail := &mailRecorder{}
 	w := testWatcher(t, []Carrier{carrier07ba()}, func(string, int) (IssueState, error) {
-		return StateUnknown, errors.New("gh auth expired")
+		return StateUnknown, errors.New("gh auth login required: no GH_TOKEN")
 	}, mail)
 	w.Check(time.Now())
 	if mail.count() != 1 {
-		t.Fatalf("indeterminate findings did not page: %d mails", mail.count())
+		t.Fatalf("a no-verdict finding did not page: %d mails", mail.count())
 	}
-	if !strings.Contains(mail.bodies[0], "NOT clean") {
-		t.Error("notice must say indeterminate is not clean")
+	if !strings.Contains(mail.bodies[0], "NOT CHECKED") {
+		t.Errorf("notice must say the carrier was never checked:\n%s", mail.bodies[0])
+	}
+}
+
+// A genuine indeterminate — the instrument worked, the answer is unusable —
+// must still page AND must still be described as a determination that is not
+// clean. This is the arm that keeps the mg-dd22 split from quietly turning into
+// "everything is an instrument failure now".
+func TestGenuineIndeterminateAlonePages(t *testing.T) {
+	mail := &mailRecorder{}
+	w := testWatcher(t, []Carrier{carrier07ba()}, func(string, int) (IssueState, error) {
+		return StateUnknown, errors.New("GraphQL: Could not resolve to an Issue with the number of 89")
+	}, mail)
+	w.Check(time.Now())
+	if mail.count() != 1 {
+		t.Fatalf("a genuine indeterminate did not page: %d mails", mail.count())
+	}
+	body := mail.bodies[0]
+	if !strings.Contains(body, "NOT clean") {
+		t.Errorf("notice must say indeterminate is not clean:\n%s", body)
+	}
+	if strings.Contains(body, "NOT CHECKED") {
+		t.Errorf("a working lookup must not be reported as an instrument failure:\n%s", body)
 	}
 }
 

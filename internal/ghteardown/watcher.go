@@ -118,6 +118,21 @@ type Options struct {
 // the first place. Daily re-notification keeps an unresolved miss costing
 // someone something.
 //
+// # A blind sample is not a sample (mg-dd22)
+//
+// The lookup this runner binds by default retries a network-class failure
+// before giving up, because a detector sampling twice daily against a ~50%
+// intermittent network (mg-0ffc) otherwise turns one blip into a full batch of
+// non-answers. When the retries are exhausted anyway, the run says so in a
+// different shape: the notice leads with SUSPECTED INSTRUMENT FAILURE and its
+// subject line says the run measured nothing, rather than reporting a count
+// that reads like a finding.
+//
+// The escalation clocks survive such a run untouched (see trackAges). A run
+// that could not see a miss has not observed that the miss cleared, and letting
+// a blip reset the clock would make an outage on this box a way to keep a
+// forgotten finding forgotten — the exact failure escalation exists to prevent.
+//
 // # Routing (mg-b586)
 //
 // The same reasoning governs WHO is mailed, not just how often. Findings go to
@@ -162,9 +177,14 @@ type Watcher struct {
 
 // New builds a Watcher, applying defaults for zero-valued options.
 func New(opts Options) *Watcher {
+	// The default lookup RETRIES a network-class failure (mg-dd22). It is the
+	// default rather than something pogod opts into, so the unattended path —
+	// the one that ran blind twice in 15 hours — cannot be the one that forgets.
+	// A caller injecting its own Lookup owns its own retry policy; tests inject
+	// bare functions precisely so they can exercise a single attempt.
 	lookup := opts.Lookup
 	if lookup == nil {
-		lookup = GHLookup
+		lookup = RetryingLookup(GHLookup)
 	}
 	emit := opts.Emit
 	if emit == nil {
@@ -281,10 +301,20 @@ func (w *Watcher) sample(now time.Time) {
 	details := map[string]any{
 		"miss_count":          len(rep.Misses),
 		"indeterminate_count": len(rep.Indeterminate),
+		"blocked_count":       len(rep.Blocked),
 		"declared_open_count": len(rep.DeclaredOpen),
 		"scanned":             rep.Scanned,
 		"notified":            strings.Join(recipients, ","),
 		"escalated":           stalled,
+		// A run that measured nothing is queryable as such in the event log,
+		// not only readable in mail prose. An operator asking "how often does
+		// this detector go blind?" needs a field, not a grep over bodies —
+		// mg-dd22's own recurrence had to be established by re-reading two
+		// mails by hand.
+		"instrument_failure": rep.InstrumentFailure(),
+	}
+	if classes := rep.FailureClasses(); len(classes) > 0 {
+		details["failure_classes"] = strings.Join(classes, ",")
 	}
 	for _, to := range recipients {
 		if err := w.mail(to, mailFrom, subject, body); err != nil {
@@ -306,9 +336,24 @@ func (w *Watcher) sample(now time.Time) {
 func (w *Watcher) trackAges(rep Report, now time.Time) time.Time {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	seen := make(map[string]time.Time, len(rep.Misses)+len(rep.Indeterminate))
+	seen := make(map[string]time.Time, len(rep.Misses)+len(rep.Indeterminate)+len(rep.Blocked))
+
+	// A run that reached no verdict for any carrier is not evidence that a
+	// previously-reported finding cleared — it is evidence the instrument
+	// broke. Carrying the old clocks forward is what stops one network blip
+	// from resetting the 72h escalation clock on a real miss it could not even
+	// see: without this, a blip every few days would keep a permanently
+	// un-actioned miss permanently un-escalated (mg-dd22).
+	if rep.InstrumentFailure() {
+		for k, v := range w.firstSeen {
+			seen[k] = v
+		}
+	}
+
+	// `oldest` is taken only over findings PRESENT in this report, so the
+	// escalation banner always refers to something the reader can see below it.
 	var oldest time.Time
-	for _, group := range [][]Finding{rep.Misses, rep.Indeterminate} {
+	for _, group := range [][]Finding{rep.Misses, rep.Indeterminate, rep.Blocked} {
 		for _, f := range group {
 			key := string(f.Kind) + "|" + f.Carrier.ID
 			at, ok := w.firstSeen[key]
@@ -343,7 +388,7 @@ func (w *Watcher) shouldMail(print string, now time.Time) bool {
 // one.
 func (r Report) fingerprint() string {
 	var b strings.Builder
-	for _, group := range [][]Finding{r.Misses, r.Indeterminate} {
+	for _, group := range [][]Finding{r.Misses, r.Indeterminate, r.Blocked} {
 		for _, f := range group {
 			fmt.Fprintf(&b, "%s|%s|%s\n", f.Carrier.ID, f.Kind, f.Carrier)
 		}

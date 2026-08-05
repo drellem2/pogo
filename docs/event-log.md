@@ -652,7 +652,10 @@ pogod's gh-issue teardown detector (mg-6e57) sampled the `status=done` gh-issue 
 - **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent` (always `"pogod"`), `details`
 - **`details` fields:**
   - `miss_count` (int, required): done carriers whose issue is still open with no `gh-open:` declaration
-  - `indeterminate_count` (int, required): carriers whose issue state could NOT be established (failed `gh` lookup, unresolvable ref). These are **not** clean — an errored lookup and a closed issue are indistinguishable to a careless check, so they are counted separately and reported rather than assumed shut
+  - `indeterminate_count` (int, required): carriers whose issue state could NOT be established **even though the lookup worked** — the ref no longer resolves, or GitHub reports a state the detector does not model. These are **not** clean; an unreadable answer is reported rather than assumed shut. They are determinations, and re-running reproduces them
+  - `blocked_count` (int, required, mg-dd22): carriers that were **never checked** because the instrument failed — no network, no credential, a rate limit. Counted apart from `indeterminate_count` because a failure to measure is not a measurement. On 2026-08-04 one network blip made all 12 carriers in a batch report indeterminate; 6 of them were real teardown misses, and nothing in the output distinguished a masked finding from a real one. Network-class failures are retried with backoff before landing here
+  - `instrument_failure` (bool, required, mg-dd22): true when **no** carrier in the run reached a verdict. This is the signature of a broken detector, not of N broken carriers, and it makes "how often does this go blind?" a query rather than a re-read of old mail — the recurrence in mg-dd22 had to be established by hand. Needs at least 2 scanned carriers: from a sample of one, a blind run and a blind carrier are the same observation
+  - `failure_classes` (string, optional, mg-dd22): comma-separated distinct causes behind the no-verdict findings — `network`, `auth`, `rate_limit`, `subject`, `unclassified`. Exists so today's network outage never again has to be hand-separated from mg-03ea's auth gap by reading `gh`'s error prose
   - `declared_open_count` (int, required): carriers open on purpose per a `gh-open:` body line; reported but never mailed on their own
   - `scanned` (int, required): how many done carriers were evaluated, so "0 findings" can be told apart from "0 carriers examined"
   - `notified` (string, required): comma-separated mailboxes the notice was sent to, so the routing that actually happened is auditable rather than inferred from config
@@ -660,8 +663,11 @@ pogod's gh-issue teardown detector (mg-6e57) sampled the `status=done` gh-issue 
   - `mail_error_<mailbox>` (string, optional): one key per recipient the notice could NOT be delivered to; the event is still emitted so a detected miss is never lost to a down mail channel
 
 ```json
-{"schema_version":1,"timestamp":"2026-07-21T01:15:00.000000000Z","event_type":"gh_teardown_watch_fired","agent":"pogod","details":{"miss_count":1,"indeterminate_count":0,"declared_open_count":1,"scanned":3,"notified":"pm-pogo","escalated":false}}
+{"schema_version":1,"timestamp":"2026-07-21T01:15:00.000000000Z","event_type":"gh_teardown_watch_fired","agent":"pogod","details":{"miss_count":1,"indeterminate_count":0,"blocked_count":0,"instrument_failure":false,"declared_open_count":1,"scanned":3,"notified":"pm-pogo","escalated":false}}
+{"schema_version":1,"timestamp":"2026-08-05T10:56:21.000000000Z","event_type":"gh_teardown_watch_fired","agent":"pogod","details":{"miss_count":0,"indeterminate_count":0,"blocked_count":13,"instrument_failure":true,"failure_classes":"network","declared_open_count":0,"scanned":13,"notified":"pm-pogo","escalated":false}}
 ```
+
+A run whose `instrument_failure` is true **measured nothing**. It is not evidence that a previously reported miss has cleared, and the watcher's escalation clocks are deliberately preserved across it — otherwise a blip every few days would keep an un-actioned finding permanently un-escalated.
 
 #### `gh_teardown_watch_error`
 

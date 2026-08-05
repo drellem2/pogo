@@ -35,11 +35,17 @@ import (
 //     invisible from the ambient shell this test process runs in;
 //  3. include the failing arm PERMANENTLY. The "raw" arm asserts the detector
 //     really does go blind without the repair. Without it, a future regression
-//     that made every arm indeterminate would still be green.
+//     that made every arm blind would still be green.
 //
 // It re-execs this test binary twice into that minimal environment: once
-// without ghtoken.Ensure (expect indeterminate — the bug), once with it (expect
-// real verdicts — the fix).
+// without ghtoken.Ensure (expect a blind, self-labelled run — the bug), once
+// with it (expect real verdicts — the fix).
+//
+// mg-dd22 added the second half of the raw arm's assertion. It is not enough
+// that a blind run fails to produce verdicts; the run must SAY it produced
+// none. `instrument_failure=true` is that claim, and it is the difference
+// between a report a reader can act on and the twelve-line "12 indeterminate"
+// that masked six real teardown misses on 2026-08-04.
 //
 // Network and a real credential are required, so it is opt-in:
 //
@@ -95,17 +101,23 @@ func TestTeardownTokenControl(t *testing.T) {
 	// keyring entry, say), the premise of the control does not hold here and
 	// asserting the failure would be asserting something false. Say so loudly
 	// rather than passing quietly.
-	if !strings.Contains(raw, "indeterminate") {
+	if !strings.Contains(raw, "=blocked") {
 		t.Skipf("this host's gh authenticates without GH_TOKEN, so the blind-detector premise "+
 			"cannot be reproduced here; raw arm reported: %s", raw)
 	}
-	if want := "89=indeterminate 91=indeterminate"; raw != want {
-		t.Fatalf("raw arm: want %q (the bug), got %q", want, raw)
+	// mg-dd22 extends this control. The blind arm must now report TWO things,
+	// not one: each carrier is `blocked` (the instrument failed — not
+	// `indeterminate`, which would claim a determination we never made), and
+	// the RUN is flagged as a suspected instrument failure. Two carriers, zero
+	// verdicts, is the signature of a broken detector, and that signature is
+	// what a reader has to be handed instead of a plausible-looking count.
+	if want := "89=blocked 91=blocked instrument_failure=true"; raw != want {
+		t.Fatalf("raw arm: want %q (the bug, correctly labelled), got %q", want, raw)
 	}
 
 	fixed := runControlArm(t, helperArmFixt, minimal)
 	t.Logf("repaired (ghtoken.Ensure): %s", fixed)
-	if want := "89=closed 91=miss"; fixed != want {
+	if want := "89=closed 91=miss instrument_failure=false"; fixed != want {
 		t.Fatalf("repaired arm: want %q (real verdicts), got %q\n"+
 			"The watcher is still blind under the launchd-minimal environment.", want, fixed)
 	}
@@ -163,7 +175,11 @@ func TestTeardownTokenControlHelper(t *testing.T) {
 		{ID: "control-closed", Title: "known-closed control", Status: "done", Repo: controlRepo, Number: closedIssue},
 		{ID: "control-open", Title: "known-open control", Status: "done", Repo: controlRepo, Number: openIssue},
 	}
-	rep := Detect(carriers, GHLookup)
+	// The production lookup, retries and all — so the arm exercises what pogod
+	// actually runs. A transient blip during the control would otherwise show
+	// up as the auth failure the raw arm is asserting, quietly turning a
+	// network outage into a passing test of the wrong thing.
+	rep := Detect(carriers, RetryingLookup(GHLookup))
 
 	verdict := map[int]string{closedIssue: "closed", openIssue: "closed"} // clean unless classified
 	for _, f := range rep.Misses {
@@ -172,9 +188,13 @@ func TestTeardownTokenControlHelper(t *testing.T) {
 	for _, f := range rep.Indeterminate {
 		verdict[f.Carrier.Number] = "indeterminate"
 	}
+	for _, f := range rep.Blocked {
+		verdict[f.Carrier.Number] = "blocked"
+	}
 	for _, f := range rep.DeclaredOpen {
 		verdict[f.Carrier.Number] = "declared_open"
 	}
 
-	fmt.Printf("%s%d=%s %d=%s\n", verdictPrefix, closedIssue, verdict[closedIssue], openIssue, verdict[openIssue])
+	fmt.Printf("%s%d=%s %d=%s instrument_failure=%t\n", verdictPrefix,
+		closedIssue, verdict[closedIssue], openIssue, verdict[openIssue], rep.InstrumentFailure())
 }
