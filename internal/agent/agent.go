@@ -450,6 +450,15 @@ type Registry struct {
 	// platform rule. See dispatchpairing.go.
 	dispatchPairingGate DispatchPairingGate
 
+	// strandedWorkGate refuses to dispatch a polecat onto a work item that
+	// already has pushed, unmerged work on a polecat branch (mg-b468). Nil means
+	// the default GitStrandedWorkGate, which scans — so the gate holds without any
+	// wiring. Like dispatchGate it fails OPEN when it cannot answer, and unlike
+	// every other gate here it consults nothing about liveness: a running polecat
+	// is the precondition for stranded work, never a reason to stop looking. See
+	// strandedgate.go.
+	strandedWorkGate StrandedWorkGate
+
 	// loadGate refuses to dispatch a worker onto a host the fleet is already
 	// using most of (mg-1b8c). Nil means the default HostLoadGate, which
 	// measures — so the gate holds without any wiring. Unlike the two gates

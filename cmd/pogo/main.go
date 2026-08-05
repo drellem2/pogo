@@ -2186,6 +2186,7 @@ Example:
 	var spawnPolecatProvider string
 	var spawnPolecatNoWorktree bool
 	var spawnPolecatPairingOverride string
+	var spawnPolecatStrandedOverride string
 	var cmdAgentSpawnPolecat = &cobra.Command{
 		Use:   "spawn-polecat <name>",
 		Short: "Spawn a polecat from a prompt template",
@@ -2245,7 +2246,8 @@ A --body-file that cannot be read is an error, never an empty body.`,
 				Provider:   spawnPolecatProvider,
 				NoWorktree: spawnPolecatNoWorktree,
 
-				PairingOverride: spawnPolecatPairingOverride,
+				PairingOverride:  spawnPolecatPairingOverride,
+				StrandedOverride: spawnPolecatStrandedOverride,
 			})
 			if err != nil {
 				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
@@ -2275,6 +2277,10 @@ A --body-file that cannot be read is an error, never an empty body.`,
 	// A string, not a bool, and the help text says why: the reason is the
 	// deliverable. See SpawnPolecatAPIRequest.PairingOverride.
 	cmdAgentSpawnPolecat.Flags().StringVar(&spawnPolecatPairingOverride, "pairing-override", "", "Dispatch over an unmet paired-item requirement (see [dispatch_pairing]), stating WHY in the value; the reason and the refusal it bypassed are recorded as a dispatch_pairing_overridden event. Overrides that gate only")
+	// Also a string, for the same reason. Attribution of a branch to a work item
+	// is heuristic, so this gate can be wrong — and a gate that can be wrong with
+	// no way past it gets disarmed rather than overridden.
+	cmdAgentSpawnPolecat.Flags().StringVar(&spawnPolecatStrandedOverride, "stranded-override", "", "Dispatch over pushed-but-unmerged work already on a polecat branch for this item (mg-b468), stating WHY in the value; the reason and the refusal it bypassed are recorded as a dispatch_stranded_work_overridden event. Overrides that gate only")
 
 	// Nudge command — top-level for convenience
 	var nudgeImmediate bool

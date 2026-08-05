@@ -226,6 +226,21 @@ func (r *Registry) releasePolecatClaim(a *Agent, reason string) (bool, error) {
 	if a == nil || a.Type != TypePolecat || a.WorkItemID == "" {
 		return false, nil
 	}
+
+	// Before the item goes anywhere, say what is on its branch (mg-b468). The
+	// release below returns the item to available/, where it is indistinguishable
+	// from work nobody has started — and for a polecat that pushed before it
+	// wedged, that description is false. This does not block the release and must
+	// not: refusing to release would trade this failure for mg-fb13's, an item
+	// stranded in claimed/ under a dead pid where neither dispatch nor stall-watch
+	// can see it. The item returns to the pool; what stops is the pool being
+	// silent about the branch. The refusal that acts on this lives at dispatch —
+	// see strandedWorkRefusal.
+	//
+	// It runs BEFORE the release rather than after, so the report exists even if
+	// the release fails and returns early below.
+	r.reportStrandedWorkOnRelease(a, reason)
+
 	released, err := r.getClaimReleaser().ReleaseClaim(a.WorkItemID)
 	if err != nil {
 		log.Printf("agent %s: FAILED to release the claim on work item %s: %v — "+

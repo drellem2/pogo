@@ -8,6 +8,7 @@ import (
 
 	"github.com/drellem2/pogo/internal/events"
 	"github.com/drellem2/pogo/internal/gitgc"
+	"github.com/drellem2/pogo/internal/strandedwork"
 )
 
 // TestWorkerRenameFreezesIdentifiers is the WI-5 round-trip guard for the
@@ -50,6 +51,17 @@ func TestWorkerRenameFreezesIdentifiers(t *testing.T) {
 	// orphans every in-flight polecat branch.
 	if gitgc.BranchPrefix != "polecat-" {
 		t.Errorf("BranchPrefix = %q, want polecat- (renaming orphans in-flight polecat branches)", gitgc.BranchPrefix)
+	}
+	// internal/strandedwork carries the same literal by VALUE rather than by
+	// import: internal/agent imports internal/gitgc, so a strandedwork that
+	// imported gitgc back would close a cycle. Two literals free to disagree is
+	// exactly the shape this file exists to police, and the way they would
+	// disagree here is that the stranded-work scan silently stops seeing polecat
+	// branches — a detector that reports "nothing stranded" for every repo.
+	if strandedwork.BranchPrefix != gitgc.BranchPrefix {
+		t.Errorf("strandedwork.BranchPrefix = %q, gitgc.BranchPrefix = %q — the stranded-work "+
+			"scan would enumerate no polecat branches and report every repo clean",
+			strandedwork.BranchPrefix, gitgc.BranchPrefix)
 	}
 
 	// #2 Polecats dir — orphan-sweep reads this dir back from disk.

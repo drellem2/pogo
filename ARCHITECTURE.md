@@ -239,7 +239,7 @@ There is no "sling" command. Spawning a polecat with a work item is the assignme
 ### Dispatch gates
 
 `pogo agent spawn-polecat` is the one chokepoint every item passes through
-before any worker touches it, whoever filed it. Three gates sit there, above
+before any worker touches it, whoever filed it. Four gates sit there, above
 every side effect, so a refused dispatch leaves no worktree, agent dir, or
 prompt file behind. They ask different questions and fail in different
 directions:
@@ -248,12 +248,34 @@ directions:
 |---|---|---|---|
 | **Assignee** | May this item be executed automatically at all? | **409** — permanent; retrying unchanged is refused forever | enforces `human` / `parked` / `blocked:<agent>` |
 | **Pairing** | Has the obligation this item's repo puts on it been discharged? | **409** — permanent until the pair is filed | inert; one deployment's config |
+| **Stranded work** | Does this item already have pushed work a worker would ignore? | **409** — permanent until the branch is merged or abandoned | enforces, scanning |
 | **Host load** | Can this **host** take another worker right now? | **503** — a *later*; the same request succeeds once the host clears | enforces, measuring |
 
-The first two are about the item. The third is about the machine, and nothing
+The first three are about the item. The fourth is about the machine, and nothing
 before it measured that.
 
-**Why the third exists.** The concurrency rule is "a reasonable limit is 3-5
+**Why the third exists.** Stopping a wedged polecat releases its claim and
+returns the item to `available/` without consulting its branch, so an item whose
+worker finished and pushed re-enters the pool describing itself as unstarted
+(mg-b468). On 2026-08-05 a re-dispatch went out three minutes after such a stop
+and spent its life duplicating 1026 lines; five more items carried pushed
+**pre-registration** commits, where a worker starting from the target writes its
+predictions after seeing the results and the artifact is indistinguishable from a
+valid one. The stop side now reports (`work_item_stranded_push`) rather than
+refusing — refusing the claim release would strand the item in `claimed/` under a
+dead pid, which is worse — so the refusal lives here, at the harm moment.
+
+The check (`internal/strandedwork`) answers with **patch identity** (`git
+cherry`), never ancestry: the refinery merges by rebase, so `git log
+main..branch` reports every successfully merged branch as unmerged. It
+distinguishes `resubmit` from `pre_registration` because the two need opposite
+handling, and it consults **no notion of liveness** — a running polecat is the
+precondition for stranded work, not evidence against it, because the re-dispatch
+*is* the running polecat. Attribution of a branch to an item is heuristic (a
+commit-subject id, or the item's id-suffix in the branch name), so the refusal is
+overridable with `--stranded-override="<why>"`, recorded as an event.
+
+**Why the fourth exists.** The concurrency rule is "a reasonable limit is 3-5
 concurrent workers", and a count of slots cannot see what is in them. Measured
 (mg-1b8c): identical gate work took **11.5s** on a host with capacity and
 **78.5s** on a full one, enough to push a gate through a fixed timeout and
@@ -275,7 +297,8 @@ history is wrong in exactly the expensive cases; and a filer-set marker depends
 on somebody remembering, where an observation of the host does not. The gate
 makes the weaker claim the evidence supports: what the fleet holds *now*.
 
-**It fails open**, unlike the two above it — an unreadable or unattributable
+**It fails open**, like the stranded-work gate and unlike the two item gates —
+an unreadable or unattributable
 sample proceeds. Refusing work on missing information stalls the queue for a
 reason nobody downstream can check or clear.
 
