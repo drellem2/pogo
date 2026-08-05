@@ -466,14 +466,40 @@ Exit status is 0 when both halves are clean and 1 when anything is reported —
 ref and an unreadable prompt are all findings; a check that could not run has
 not found its subject healthy.
 
+**Run it from source, not from the installed binary.** `pogo check-staleness`
+detects that installed artifacts have fallen behind source — and it is a
+subcommand of `pogo`, which only becomes current when the nightly redeploy runs.
+That is the exact mechanism whose failure it detects, so a witness reachable only
+through the installed binary cannot be switched on until the fault it detects is
+already fixed. This is not hypothetical: on 2026-08-05 the installed `pogo` was
+six days and 52 commits stale and answered `unknown command "check-staleness"`.
+
+`scripts/check-staleness.sh` is the way around it. It is a tracked file, so it is
+present in every checkout at the merge commit, and it compiles the code sitting
+beside it — a `git pull` arms the witness, with no `go install`, no launchd and
+no redeploy. It **refuses** to fall back to an installed `pogo`, loudly, even
+when `go` is missing; a silent fallback would look like it worked while reporting
+whatever revision the last deploy left behind. All flags pass through:
+
+```bash
+scripts/check-staleness.sh
+scripts/check-staleness.sh --skip-prompts --stamp /tmp/stale.stamp --now 2026-08-04T12:00:00Z
+```
+
 **Report-only, and it is not armed by itself.** Like every `check-*` command it
 never installs, rebuilds or reconciles, and nothing runs it on a schedule until
-someone arms it:
+someone arms it — point the schedule at the script in a checkout, not at the
+installed binary:
 
 ```bash
 pogo schedule doctor --cron "0 8 * * *" --id staleness --replay once \
-    --message "Run 'pogo check-staleness'. If it exits non-zero, mail human with the output."
+    --message "Run '~/dev/pogo/scripts/check-staleness.sh'. If it exits non-zero, mail human with the output."
 ```
+
+The arming gap is tracked as a class on mg-75f9 ("nothing runs check-drift;
+mg-5701 shipped a detector you have to remember to ask"), alongside mg-7ff8,
+mg-bd92 and mg-fc99 — four detectors that read as done at merge and were inert
+on the box.
 
 **Siblings it does not replace.** `pogo service status` covers the running
 daemon's revision (the RUNNING process, not the binary on disk — a deploy can

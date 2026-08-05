@@ -90,6 +90,18 @@ bash scripts/pogo-self-deploy_sigint_test.sh
 echo "Testing pogo-deploy nightly trigger"
 bash scripts/pogo-deploy_test.sh
 
+# The FROM-SOURCE runner for the staleness witness (mg-dd49). The judgement is
+# tested in internal/staleness; what this suite holds is the property that makes
+# the runner worth having — it must never fall back to an installed `pogo`. The
+# witness detects that installed artifacts have fallen behind source, and `pogo`
+# only becomes current when the redeploy runs, so a fallback would report
+# whatever the last successful deploy left behind. The load-bearing case is
+# section 2: a POISONED `pogo` first on PATH, asserted both by its marker file
+# and by the exit status, because either alone passes against a fallback that
+# happens to agree.
+echo "Testing the from-source staleness runner"
+bash scripts/check-staleness_test.sh
+
 echo "Testing build.sh"
 bash build_test.sh
 
