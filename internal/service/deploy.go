@@ -115,6 +115,23 @@ var deployHours = []int{3, 4, 5}
 
 const deployMinute = 0
 
+// DeploySchedule exposes the fire schedule to readers outside this package.
+//
+// The staleness witness (internal/staleness, mg-dd49) needs it to answer "when
+// should the nightly have run?", which is the only way to see a fire that never
+// happened: a deploy that does not fire writes no log line, so the absence can
+// only be read against an expectation. It returns a copy — a detector must not
+// be able to edit the schedule it is checking against.
+//
+// It reports the SHIPPED schedule, not the installed plist's. Those can differ
+// (mg-fc99: the installed plist has one fire where the code declares three) and
+// comparing them is that ticket's job, not this accessor's. For the witness the
+// direction of the difference is safe: a shipped last-hour later than the
+// installed one only makes the witness wait longer before calling a night due.
+func DeploySchedule() (hours []int, minute int) {
+	return append([]int(nil), deployHours...), deployMinute
+}
+
 type deployData struct {
 	Label      string
 	ScriptPath string

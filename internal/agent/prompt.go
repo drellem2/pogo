@@ -612,6 +612,17 @@ func stripPromptHashStamp(data []byte) []byte {
 	return data
 }
 
+// StripPromptStamp is the exported form of stripPromptHashStamp, for callers
+// outside this package that must compare an INSTALLED prompt against a copy
+// that never went through the installer (internal/staleness compares the
+// installed corpus against a git tree). The stamp line is written by
+// InstallPrompts and exists in no source copy, so a comparison that did not
+// strip it would report every file as different — and the definition of which
+// first lines are stamps has to stay in one place, here, next to the writer.
+func StripPromptStamp(data []byte) []byte {
+	return stripPromptHashStamp(data)
+}
+
 // ExpandString runs s through Go text/template using vars. Strings without
 // template syntax are returned unchanged. Used for short snippets like
 // nudge_on_start that should accept the same {{.Id}}/{{.Repo}} variables as
