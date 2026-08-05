@@ -368,6 +368,116 @@ compares `[reconcile]` **host artifacts** (plists, scripts) against their repo
 sources. Same word, different axis: that one is about files pogo generates, this
 one is about the binaries pogo *is*.
 
+## Did the nightly redeploy actually happen? (`pogo check-staleness`)
+
+`pogo service status` above answers *"is the running daemon behind main?"*. It
+does not answer the two questions that let a six-day staleness go unnoticed:
+
+- **Did the mechanism that should have fixed it run at all?**
+- **Are the fleet's PROMPTS what the repo ships?**
+
+Between 2026-07-31 and 2026-08-05 the nightly redeploy did not succeed once.
+Four nights it never fired — the box was powered off through each 03:00 window,
+and launchd replays a missed `StartCalendarInterval` on **wake** but not across
+a **power cycle**, and `RunAtLoad=false` means boot does not stand in for it. The
+fifth night it fired and died one second in on a transient ssh failure. **Nothing
+alarmed on any of the five.** `pogod` served 52-commit-old code and every polecat
+dispatched ran a superseded template; both were found by hand, one by running
+`ls` on a binary and one by a dispatch eating a 409.
+
+```
+$ pogo check-staleness
+redeploy — expectation: a successful deploy every night, settled by 05:00 local + 2h0m0s grace
+  record:       /Users/you/.pogo/deploy-attempt.stamp
+  last due:     2026-08-04
+  MISSED: 4 night(s) due through 2026-08-04 produced no successful redeploy (last record: 2026-07-31, attempt 1, rc 0).
+    2026-08-04  no-fire  no attempt was recorded for this night at all
+    2026-08-03  no-fire  no attempt was recorded for this night at all
+    …
+
+prompts — installed corpus vs a git ref (never this binary's own embed)
+  installed:    /Users/you/.pogo/agents
+  reference:    /Users/you/.pogo/deploy-src @ origin/main = b3efaa2d2410 (committed 2026-07-31T01:55:51+01:00)
+  STALE: 8 of 9 shipped prompt(s) differ from the reference.
+    mayor.md                           differs        installed 578 lines, ref 983 — installed is behind by 405
+    …
+```
+
+**A missed run cannot be detected from the deploy's output.** There is no log
+line for a fire that did not occur, no non-zero exit, no mail — which is exactly
+why four nights passed unnoticed under a runner that alerts loudly when it
+fails. So the witness reads an **expectation** (the deploy schedule and the
+clock) against `~/.pogo/deploy-attempt.stamp`, and a night after the record's
+date with nothing in it *is* the signature of a fire that never happened. Two
+reasons are reported and they send you to different places: `no-fire` (nothing
+recorded — look at launchd and the host's uptime) and `failed` (a record with a
+non-zero rc — read `pogo-deploy.log`).
+
+**The prompt half compares against a git ref, never against this binary's
+embed.** `pogo doctor --check` already compares the installed corpus to the
+running binary's *embedded* copy — and it passed throughout, truthfully: a
+missed redeploy stales the binary and the prompts **together**, and a comparison
+between two artifacts that move as one cannot see either move. That check
+answers "did the installer run since this binary was built". This one answers
+"is what the fleet reads what the repo ships", and only a comparison against the
+repo can.
+
+**Neither half consults this binary's own build or embed.** That is deliberate:
+a staleness alarm that a stale install disables has failed at the first failure
+it exists to catch. The redeploy half reads a text file and a schedule constant;
+the prompt half reads git.
+
+**Length is never the predicate.** The decision is a hash of the file body with
+the install stamp stripped, in both directions. The installed tree is *not*
+simply an older `main`, and a check that only asked "is the installed file
+behind?" would miss a file that is ahead. (The `polecat-build-pr.md` "231
+installed vs 230 on main" anomaly recorded in mg-8bcb turns out to be the
+install stamp line itself: body hashes are identical.)
+
+**The reference can itself be stale.** `--repo` defaults to the deploy checkout
+at `~/.pogo/deploy-src`, whose `origin/main` is only as fresh as its last
+successful fetch — and a failed fetch is one of the things this command is for.
+The resolved commit and its date are printed every run, so read them before
+trusting a clean verdict. Nothing here fetches: a detector that mutates the tree
+it is judging has made itself a participant.
+
+**Constructing the positive control.** An alarm that has only ever been silent
+has not been shown to work, and silence is what those five nights produced. Both
+inputs are flags, so both states are constructible without waiting a night or
+moving the system clock:
+
+```bash
+# RED — the real four-night gap
+printf '2026-07-31 1 0\n' > /tmp/stale.stamp
+pogo check-staleness --stamp /tmp/stale.stamp --now 2026-08-04T12:00:00+01:00 --skip-prompts
+
+# QUIET — same witness, same instant, a night that deployed
+printf '2026-08-04 1 0\n' > /tmp/fresh.stamp
+pogo check-staleness --stamp /tmp/fresh.stamp --now 2026-08-04T12:00:00+01:00 --skip-prompts
+```
+
+Exit status is 0 when both halves are clean and 1 when anything is reported —
+**including when a half could not run**. An unreadable record, an unresolvable
+ref and an unreadable prompt are all findings; a check that could not run has
+not found its subject healthy.
+
+**Report-only, and it is not armed by itself.** Like every `check-*` command it
+never installs, rebuilds or reconciles, and nothing runs it on a schedule until
+someone arms it:
+
+```bash
+pogo schedule doctor --cron "0 8 * * *" --id staleness --replay once \
+    --message "Run 'pogo check-staleness'. If it exits non-zero, mail human with the output."
+```
+
+**Siblings it does not replace.** `pogo service status` covers the running
+daemon's revision (the RUNNING process, not the binary on disk — a deploy can
+replace the file while the old process keeps the lock and keeps serving,
+mg-fa79). mg-fc99 checks the installed plist's fire hours against the schedule
+the code declares, which catches an inert retry *before* a night needs it; this
+command would only see the consequence the next morning. mg-0d70 is about a sync
+failure's alert naming the wrong cause; this command emits no such alert.
+
 ## GitHub branch protection on main (rulesets)
 
 Since 2026-07-05 (mg-f7a3), `main` in **drellem2/pogo** (ruleset `main-require-pr`, id 18534732) and **drellem2/macguffin** (id 18534735) is protected by a GitHub ruleset per the gh-issue workflow design (`docs/design/gh-issue-workflow-design.md` §3):
