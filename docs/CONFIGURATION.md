@@ -1462,6 +1462,129 @@ silently. ack-watch catches "registered and not completing"; deaf-watch catches
 
 Source of truth: `internal/deafwatch/`, `internal/agent/mailloop_report.go`.
 
+## The wedged-agent detector (wedge-watch)
+
+On 2026-08-04 twelve polecats and the doctor crew agent sat at a Claude Code
+login prompt for **thirteen hours**. On 2026-08-05 it recurred for seven. About
+twenty agent-hours of nothing — and every liveness instrument pogo has read
+healthy for the whole of both windows:
+
+```
+pogo agent list
+  teaa9   status=running   uptime=13h44m   last-activity=just now
+```
+
+The agents were not frozen. They were **animating**. Claude Code redraws a
+spinner and an elapsed counter while parked at a prompt, and that redraw is PTY
+output — so `last-activity`, which tracks PTY writes, said "just now" forever;
+the process was alive, so status said running; and CPU was near zero, which is
+also what a legitimately blocked agent looks like. Every instrument was
+measuring the animation. It was found by hand.
+
+pogod now runs two checks on its heartbeat. Both are **report-only**.
+
+- **(1) A PTY-content check for known dead-end states.** `Please run /login`,
+  `API Error: 401`, `Unable to connect to API` / `ENOTFOUND` / `EAI_AGAIN`, the
+  rating dialog, and the rate-limit modal. Matching is whitespace-insensitive
+  against the ANSI-stripped buffer, because Claude Code spaces TUI columns with
+  cursor-move escapes that `StripANSI` deletes rather than replaces — a literal
+  compare is how mg-f36b's watcher logged **zero** dismissals for two months
+  while looking installed.
+- **(2) The agent's own declared work counter, cross-checked against process
+  uptime.** This is the half that matters, because (1) can only recognise a dead
+  end somebody has already met and the enumeration is permanently one incident
+  behind. The live signature on both nights was a 7h+ uptime beside a counter
+  reading **"Baked for 2m 56s"**.
+
+**The cross-check gates on the counter being FROZEN, not on the ratio.** This is
+the part to read before retuning anything. The declared counter measures *one
+turn*, not cumulative work, so a perfectly healthy agent seven hours into its
+life and three seconds into a new turn also shows a tiny counter beside a huge
+uptime — on a ratio-only rule every agent in the fleet reports constantly and
+the detector is muted inside a day. What made 13h44m beside "2m 56s" damning is
+that the counter did not *move*: had it been advancing it would have read 13h,
+and had turns been starting and finishing it would have read a different value
+at every sample. One value, unchanged across a window spanning several
+10-minute mail-check fires, means the fires are being absorbed without running
+anything. `ratio` and `min_uptime` survive as guards, not as the signal.
+
+**A 401 shortly after a connectivity failure is ONE signature, not two.** mg-fc8d
+was *filed* blaming an interrupted `/login` for revoking the OAuth token. That
+was wrong, and the correction is the most important behaviour here: nothing was
+revoked (refresh grant good for 16.5 more days, subscription intact), nobody
+logged in, and every agent resumed on the same credential. A network outage
+swallowed an access-token refresh, and the failed refresh surfaced as
+`401 ... revoked/expired`. Concluding "credential revoked, page the human" from a
+401 alone pages Daniel for a re-login **that fixes nothing** — and since the
+access token turns over roughly every 8h, any outage overlapping a refresh window
+reproduces this, about three chances a day. So a connectivity failure observed
+anywhere in the fleet within `coincidence_window` merges with a later 401 into
+one cause.
+
+**`ENOTFOUND` and a poisoned credential get opposite responses, and an
+unresolvable case says UNKNOWN.** An outage-swallowed refresh wants the agent
+*left alone* until connectivity is observed back — its context is intact.
+A genuinely poisoned credential wants the opposite: stop and re-dispatch, since
+it will never resume. Because those are opposites, the detector refuses to guess:
+a 401 with no connectivity evidence and a credential that is *readable and in
+date* is reported as `unknown` / `investigate`, never as revocation, because the
+credential has actively refuted revocation. A bad credential is named **only**
+when the credential itself says so — the refresh-grant expiry, never the
+8-hour access-token expiry, which is routinely stale on a healthy machine.
+
+**No intervention is named, because none is established.** An early reading held
+that a nudge revived the fleet on 2026-08-05. mayor retracted it with a control:
+968 nudges inside the outage window produced **0** acks, and `crew-doctor` —
+which received no immediate nudge — woke anyway on an ordinary scheduled fire ten
+minutes later. What changed was the network. The detector therefore names a
+*recovery condition* (connectivity returning) and no remedy; a remedy that merely
+correlates with recovery would be worse than none, because it would be trusted.
+
+**"Could not look" is never an all-clear.** A failing source emits
+`wedge_watch_error` and evaluates nothing. An agent whose work counter cannot be
+parsed falls back to event-log staleness, and if that is unavailable too the
+agent is reported as *unjudgeable*, not healthy — a harness that renames its
+status line must make this detector coarser, never silent.
+
+**It is not routed, and that is deliberate.** mg-fc8d's item (3) — escalating a
+fleet-level wedge **outside** the wedged party, to Daniel rather than to an inbox
+inside the failure — is an alerting-policy decision reserved to Daniel and not
+yet ruled. The runner therefore holds **no mail seam at all**: there is no
+`notify_to` to set. Findings go to `wedge_watch_fired` on the event spine and to
+pogod's log, and every emission states that nothing was routed so a reader does
+not assume somebody else was told. This is the item that actually bounds the
+damage: on 2026-08-04 stall-watch fired correctly every five minutes for thirteen
+hours into an inbox that belonged to a wedged agent.
+
+```toml
+[wedge_watch]
+enabled = true                # default true
+interval = "5m"               # sample cadence (default 5m)
+marker_hold_down = "10m"      # a known dead-end marker must sit beside a stalled
+                              # agent this long (default 10m; negative disables —
+                              # tests only. It is not zero because an agent
+                              # WRITING about a marker has it in its own PTY)
+freeze_hold_down = "30m"      # the work counter must hold one unchanged value
+                              # this long for the un-enumerated case (default 30m;
+                              # sized to span two mail-check fires)
+min_uptime = "1h"             # process-age floor (default 1h)
+ratio = "20"                  # uptime must be >= this many times the frozen
+                              # counter (default 20; the live signatures were
+                              # 280x and 143x)
+coincidence_window = "2h"     # a connectivity failure keeps a later 401 explained
+                              # for this long (default 2h — long on purpose)
+renotify_after = "6h"         # an unchanged roster re-emits after this (default 6h)
+```
+
+`wedge-watch` and the **modal watcher** (mg-4421) are disjoint. The modal watcher
+*dismisses* the two enumerated Claude Code modals from inside the PTY stream;
+wedge-watch reports that one is still up beside a stalled agent, which means the
+dismissal did not win. `wedge-watch` and **deaf-watch** are also disjoint:
+deaf-watch catches an agent with no way to be woken, wedge-watch catches one
+being woken and absorbing it.
+
+Source of truth: `internal/wedgewatch/`, `cmd/pogod/wedgelog.go`.
+
 ## The done-item polecat reaper (done-reap)
 
 Every automatic polecat teardown pogod had was keyed on **merge**: the refinery's

@@ -1433,6 +1433,23 @@ func (a *Agent) RecentOutput(n int) []byte {
 	return a.outputBuf.Last(n)
 }
 
+// LastOutputAt reports when the PTY last produced a byte, or the zero time if
+// it never has.
+//
+// This is the raw form of the `last-activity` field in `pogo agent list`, and
+// it is exported for a detector that needs to treat it as EVIDENCE OF
+// ANIMATION rather than evidence of health (mg-fc8d, internal/wedgewatch). A
+// Claude Code session parked at a login prompt redraws its spinner forever, so
+// this timestamp read "just now" for the entire thirteen hours of the
+// 2026-08-04 wedge. Any caller reading it as liveness is reading the wrong
+// thing; callers should say which of the two they mean.
+func (a *Agent) LastOutputAt() time.Time {
+	if a.outputBuf == nil {
+		return time.Time{}
+	}
+	return a.outputBuf.LastWriteTime()
+}
+
 // Subscribe registers w to receive a copy of every PTY-output chunk written
 // after Subscribe returns. The writer is invoked synchronously from the PTY
 // reader goroutine (alongside the attach-conn fanout), so its Write must be
