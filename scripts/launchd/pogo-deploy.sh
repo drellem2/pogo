@@ -61,6 +61,103 @@
 # all rather than a doomed one. Nothing here needs recalibrating when polecats
 # get longer — the window is the thing an operator already reasons about.
 #
+# A SYNC FAILURE IS CLASSIFIED BEFORE IT IS BLAMED, AND RETRIED IF IT IS THE
+# NETWORK (mg-0d70)
+# ---------------------------------------------------------------------------
+# On 2026-08-05 the nightly fired on time and aborted one second in:
+#
+#     ssh: connect to host github.com port 22: Undefined error: 0
+#     fatal: Could not read from remote repository.
+#     02:00:04Z ERROR: sync: git fetch origin failed
+#
+# and mailed Daniel a remedy that read "inspect 'git -C ~/.pogo/deploy-src
+# status' — dirty or diverged aborts by design." The checkout was neither; it was
+# clean and on main. An operator following that remedy finds nothing wrong and
+# concludes the alert was spurious, which is worse than no alert because it
+# spends the reader's trust. Four hours of window went unused for a fault that
+# lasted one second.
+#
+# Two defects, and they are separate:
+#
+# (1) ONE remedy was printed for every way sync_src can fail. sync_src already
+#     knows which of its five steps failed — fetch, clone, porcelain, checkout,
+#     ff-merge — and threw that away. It now records the step in SYNC_CLASS and
+#     the underlying stderr in SYNC_DETAIL, and the alert prints both. "dirty or
+#     diverged" is now said ONLY when the porcelain or the ff-merge actually said
+#     so.
+#
+#     Splitting a transport failure into "the network" and "auth/permission"
+#     needs one more bit, and it is NOT obtained by reading git's English. git
+#     prints "make sure you have the correct access rights" after ANY ssh
+#     failure including a pure connectivity one, and prose matching stops working
+#     the day the tool rewords it (the trap t55ca refused on gh#113). Instead the
+#     runner MEASURES: it parses host and port out of the remote URL and tries to
+#     open a TCP connection. Reachable and the fetch still failed -> not the
+#     network. Unreachable -> the network. No endpoint to probe -> it says it
+#     could not classify and prints the error verbatim rather than guessing.
+#
+#     The probe is a bash /dev/tcp redirect, deliberately: it is a shell builtin,
+#     so it adds no binary to resolve at 03:00 on the path that has to work when
+#     everything else is broken.
+#
+# (2) A network-class abort settled the night. pm-pogo's ruling gives the rule
+#     and the discriminator to encode (see sync_class_retryable):
+#
+#         retry a failure that establishes NOTHING about the tree; do not retry
+#         one that establishes a FACT. Concretely: would re-running plausibly
+#         give a different answer, for a reason UNRELATED TO THE CODE?
+#
+#     So the transport classes retry — the sync never reached the tree, and the
+#     repo state is simply unknown — while `dirty`, `diverged`, `checkout` and
+#     `config` do not, because each is exactly as true in thirty seconds. The
+#     ruling's other examples land where they already were: a build failure and a
+#     do_prove RED are pogo-self-deploy's exits and gate 3 settles the night on
+#     both.
+#
+#     It applies at BOTH layers, and they are independent:
+#
+#       IN-RUN    up to POGO_DEPLOY_SYNC_ATTEMPTS tries with backoff, bounded by
+#                 POGO_DEPLOY_SYNC_RETRY_BUDGET. Needs no second fire, so it
+#                 works against the schedule installed on this box TODAY, and it
+#                 is what would have saved 08-05 — that fault lasted one second.
+#       CROSS-FIRE  a retryable sync abort now exits 10 rather than 1, and gate 3
+#                 reopens the night on it exactly as it does on a stalled drain.
+#                 This half is INERT until mg-fc99 lands: the installed plist has
+#                 StartCalendarInterval as a dict with Hour=3, so nothing fires at
+#                 04:00 to carry it. Landed here anyway because the policy and
+#                 the schedule are two artifacts on two install paths, and the
+#                 whole reason this ticket exists is that landing one and calling
+#                 it done is a mistake this box has already made once.
+#
+#     Time spent in backoff is time taken from the drain, so the budget is
+#     RECOMPUTED after the sync returns. Sleeping for two minutes and then
+#     handing the drain a budget calculated before those two minutes is how a
+#     window-derived number quietly stops being derived from the window.
+#
+# HOW THIS FIX COULD EXHIBIT THE DEFECT IT REMEDIES
+# --------------------------------------------------
+# The defect was naming a cause that had not been established. Three ways the
+# classification above can do the same thing, smaller:
+#
+#   - THE PROBE MEASURES A LATER MOMENT. git failed at T; the probe connects at
+#     T+ε. A blip that ended in between answers, and the runner then reports
+#     `remote` — auth or permission — for what was really the network. Milder
+#     than blaming the checkout, and the same species. The `remote` remedy
+#     therefore says when the measurement was taken rather than presenting it as
+#     a property of the world, and the retry means a blip of that shape usually
+#     ends in a successful sync and no alert at all.
+#
+#   - A TCP HANDSHAKE IS NOT AN SSH SESSION. A captive portal or a middlebox
+#     that accepts the connection and then resets it answers the probe while
+#     breaking git, and lands in `remote`. The probe is a floor on connectivity,
+#     not a proof of it, and the remedy is worded to that.
+#
+#   - A RETRY THAT USUALLY WORKS HIDES A NETWORK THAT USUALLY DOESN'T. Nights
+#     that quietly succeed on attempt 3 would turn a degrading link into a
+#     slower deploy nobody investigates. So a recovered sync LOGS that it was
+#     recovered and how long it took — the same "leave a positive artifact"
+#     argument the ticket makes about fires that did not happen.
+#
 # WHY A LONG SINGLE DRAIN, AND ONLY THEN A RETRY
 # -----------------------------------------------
 # Retries are the weaker half of this and must not be mistaken for the fix.
@@ -139,6 +236,10 @@
 #   POGO_DEPLOY_MIN_DRAIN    floor below which a fire does not attempt at all (600)
 #   POGO_DEPLOY_FIRE_HOURS   the plist's fire hours, for "will a retry follow?" ("3 4 5")
 #   POGO_DEPLOY_STAMP        the night's attempt record ($POGO_HOME/deploy-attempt.stamp)
+#   POGO_DEPLOY_SYNC_ATTEMPTS  total sync tries on a RETRYABLE class (4)
+#   POGO_DEPLOY_SYNC_BACKOFF   seconds between them, last value repeats ("15 45 120")
+#   POGO_DEPLOY_SYNC_RETRY_BUDGET  ceiling on total backoff sleep, seconds (300)
+#   POGO_DEPLOY_PROBE_TIMEOUT  seconds to wait for the reachability probe (5)
 #   GIT                      pin a specific git (still checked by execution)
 
 set -u
@@ -184,6 +285,22 @@ MIN_DRAIN="${POGO_DEPLOY_MIN_DRAIN:-600}"
 # 03:00 to avoid that would add a parse and a failure mode to the path that has
 # to work when everything else is broken.
 FIRE_HOURS="${POGO_DEPLOY_FIRE_HOURS:-3 4 5}"
+
+# The in-run sync retry (mg-0d70). Four attempts at 15s / 45s / 120s is three
+# minutes of patience against a four-hour window — the 08-05 fault lasted one
+# second, and this is sized to cross a blip rather than to wait out an outage.
+# RETRY_BUDGET is the hard ceiling on the sleeping, so the numbers above can be
+# tuned without anyone having to re-derive what the worst case costs the drain.
+SYNC_ATTEMPTS="${POGO_DEPLOY_SYNC_ATTEMPTS:-4}"
+SYNC_BACKOFF="${POGO_DEPLOY_SYNC_BACKOFF:-15 45 120}"
+SYNC_RETRY_BUDGET="${POGO_DEPLOY_SYNC_RETRY_BUDGET:-300}"
+PROBE_TIMEOUT="${POGO_DEPLOY_PROBE_TIMEOUT:-5}"
+
+# Set by sync_src on every exit path. SYNC_CLASS is which STEP failed — the fact
+# the runner actually has — and SYNC_DETAIL is that step's stderr, kept verbatim
+# so the alert can print what was observed instead of what is usually true.
+SYNC_CLASS=""
+SYNC_DETAIL=""
 
 # Where the night's outcome is recorded, so a 04:00 fire knows what the 03:00
 # fire did. Under POGO_HOME, which the plist binds, so the job and an operator
@@ -308,7 +425,7 @@ next_fire_hour() {
 # alert came to claim "did not retry" as an unconditional fact.
 retry_will_follow() {
     local rc="$1" nxt
-    [ "$rc" -eq 7 ] || return 1
+    rc_reopens_night "$rc" || return 1
     nxt="$(next_fire_hour "$(current_hour)")" || return 1
     [ "$(drain_budget "$WINDOW_END" "$RESERVE" "$MAX_DRAIN" "$MIN_DRAIN" "$nxt" 0 0)" -gt 0 ]
 }
@@ -333,6 +450,30 @@ stamp_write() {
 
 stamp_read() { cat "$1" 2>/dev/null || true; }
 
+# rc_reopens_night RC — which recorded outcomes a LATER fire should retry.
+#
+# The same discriminator sync_class_retryable applies, one layer up (mg-0d70):
+# would re-running plausibly give a different answer for a reason unrelated to
+# the code?
+#
+#    7  the drain stalled. The fleet was busy; by 04:00 it may not be.
+#   10  the sync aborted on a class that established nothing — the network was
+#       unreachable, or the far end refused for a reason a TCP handshake cannot
+#       separate from a 5xx. The repo state is simply unknown.
+#
+# Everything else settled the night by establishing something: a build failure, a
+# do_prove RED, a dirty tree and a diverged branch are each exactly as true an
+# hour later, and re-running them mails a duplicate alert for no new information.
+#
+# Exit 10 is THIS runner's code, not pogo-self-deploy's — that script's range
+# ends at 9 and this outcome happens before it is ever invoked.
+rc_reopens_night() {
+    case "${1:-}" in
+        7|10) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 # attempt_disposition TODAY LINE -> first | retry | settled
 attempt_disposition() {
     local today="$1" line="$2" d n rc
@@ -343,7 +484,21 @@ attempt_disposition() {
         ''|*[!0-9]*) echo first; return 0 ;;
     esac
     [ "$d" = "$today" ] || { echo first; return 0; }
-    if [ "$rc" -eq 7 ]; then echo retry; else echo settled; fi
+    if rc_reopens_night "$rc"; then echo retry; else echo settled; fi
+}
+
+# stamp_rc LINE — the exit code the last attempt recorded, or empty. The retry
+# log line names it rather than asserting "exited 7": since mg-0d70 there are two
+# codes that reopen a night, and a message that hardcodes one of them is the same
+# species of defect as an alert that hardcodes one remedy.
+stamp_rc() {
+    local line="$1" rc
+    [ -n "$line" ] || return 1
+    read -r _ _ rc <<<"$line"
+    case "${rc:-}" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    printf '%s' "$rc"
 }
 
 # stamp_attempts LINE TODAY — attempts already made tonight (0 for another night).
@@ -527,35 +682,417 @@ alert() {
 # Even in the dedicated tree, DIRTY ABORTS. It should never be dirty; if it is,
 # something is going on that nobody has explained, and a reset would destroy the
 # evidence of it. Fail loudly, deploy nothing.
+#
+# ---------------------------------------------------------------------------
+# 5a. Classifying a transport failure by MEASUREMENT, not by prose (mg-0d70)
+# ---------------------------------------------------------------------------
+# remote_endpoint URL -> "HOST PORT", non-zero when the URL has no TCP endpoint
+# to probe (a local path, a file:// URL, an empty string). Every form git accepts
+# for a remote is handled by its scheme, which is structure; nothing here reads
+# an error message.
+remote_endpoint() {
+    local url="${1:-}" rest host="" port="" after
+    case "$url" in
+        ssh://*)     rest="${url#ssh://}";     port=22 ;;
+        git+ssh://*) rest="${url#git+ssh://}"; port=22 ;;
+        https://*)   rest="${url#https://}";   port=443 ;;
+        http://*)    rest="${url#http://}";    port=80 ;;
+        git://*)     rest="${url#git://}";     port=9418 ;;
+        ''|file://*|/*|./*|../*) return 1 ;;
+        # scp-like: [user@]host:path. No scheme, so the FIRST colon separates
+        # the host from the path — a port cannot appear in this form.
+        *:*)
+            host="${url%%:*}"
+            host="${host#*@}"
+            [ -n "$host" ] || return 1
+            printf '%s %s' "$host" 22
+            return 0 ;;
+        *) return 1 ;;
+    esac
+    rest="${rest%%/*}"   # drop the path
+    rest="${rest#*@}"    # drop any user
+    case "$rest" in
+        \[*\]*)          # bracketed IPv6, optionally :port
+            host="${rest%%]*}"; host="${host#[}"
+            after="${rest##*]}"
+            case "$after" in :*) port="${after#:}" ;; esac ;;
+        *:*) host="${rest%%:*}"; port="${rest##*:}" ;;
+        *)   host="$rest" ;;
+    esac
+    [ -n "$host" ] || return 1
+    printf '%s %s' "$host" "$port"
+}
+
+# probe_tcp HOST PORT [TIMEOUT] — can this box open a TCP connection right now?
+#
+# A bash /dev/tcp redirect rather than nc or curl, because it is a BUILTIN: this
+# runs on the path that has to work when everything else is broken, and the file
+# already spends a section (mg-015f / mg-dd5f / mg-b72a) on the cost of trusting
+# an external binary it has not proved. There is nothing to resolve and nothing
+# to be an impostor of.
+#
+# The connect runs in a background subshell with a killer beside it, because an
+# unreachable host does not fail fast: a silently-dropped SYN sits in the kernel
+# for ~75s, which would delay the alert past the point of being useful.
+probe_tcp() {
+    local host="$1" port="$2" timeout="${3:-5}" p k rc
+    ( exec 3<>"/dev/tcp/$host/$port" ) >/dev/null 2>&1 &
+    p=$!
+    ( sleep "$timeout"; kill -9 "$p" ) >/dev/null 2>&1 &
+    k=$!
+    wait "$p" 2>/dev/null; rc=$?
+    kill "$k" >/dev/null 2>&1
+    wait "$k" 2>/dev/null
+    return "$rc"
+}
+
+# classify_transport URL — sets SYNC_CLASS to `network`, `remote`, or
+# `unclassified` after a clone/fetch has already failed.
+#
+# The asymmetry is deliberate. A REACHABLE endpoint is a positive measurement,
+# and it rules the network out: the fetch failed for some other reason, which is
+# auth, permission, or the repository. An UNREACHABLE one is the network. And
+# when there is no endpoint to probe the answer is `unclassified` — not the most
+# likely cause, which is precisely the guess that produced the 08-05 alert.
+classify_transport() {
+    local url="${1:-}" host port
+    read -r host port <<<"$(remote_endpoint "$url")"
+    if [ -z "${host:-}" ] || [ -z "${port:-}" ]; then
+        SYNC_CLASS=unclassified
+        log "sync: no TCP endpoint could be derived from remote '$url' — NOT classifying the failure"
+        return 0
+    fi
+    if probe_tcp "$host" "$port" "$PROBE_TIMEOUT"; then
+        SYNC_CLASS=remote
+        log "sync: $host:$port ANSWERED a TCP connection — connectivity is up, so the failure is at the far end (auth, permission, or the repository)"
+    else
+        SYNC_CLASS=network
+        log "sync: could not open a TCP connection to $host:$port within ${PROBE_TIMEOUT}s — NETWORK-class failure"
+    fi
+}
+
+# git_step CMD... — run a git step, keep its stderr in SYNC_DETAIL, and still
+# print it. The log is the operator's primary artifact and losing the ssh line
+# from it to gain it in the mail would be a straight trade, not an improvement.
+git_step() {
+    local f rc
+    f="$(mktemp)" || { SYNC_DETAIL=""; "$@"; return $?; }
+    "$@" 2>"$f"; rc=$?
+    SYNC_DETAIL="$(cat "$f" 2>/dev/null)"
+    [ -s "$f" ] && cat "$f" >&2
+    rm -f "$f"
+    return "$rc"
+}
+
 sync_src() {
+    SYNC_CLASS=""; SYNC_DETAIL=""
+    local remote=""
     if [ ! -d "$SRC/.git" ]; then
-        local remote="$DEPLOY_REMOTE"
+        remote="$DEPLOY_REMOTE"
         if [ -z "$remote" ]; then
             remote="$("$GIT" -C "$BOOTSTRAP_REPO" remote get-url origin 2>/dev/null)"
         fi
-        [ -n "$remote" ] || { err "sync: no clone URL (set POGO_DEPLOY_REMOTE) and could not read origin from $BOOTSTRAP_REPO"; return 1; }
+        if [ -z "$remote" ]; then
+            SYNC_CLASS=config
+            SYNC_DETAIL="no POGO_DEPLOY_REMOTE, and 'git -C $BOOTSTRAP_REPO remote get-url origin' produced nothing"
+            err "sync: no clone URL (set POGO_DEPLOY_REMOTE) and could not read origin from $BOOTSTRAP_REPO"
+            return 1
+        fi
         log "sync: bootstrapping the dedicated checkout at $SRC from $remote"
-        "$GIT" clone --quiet "$remote" "$SRC" || { err "sync: clone failed"; return 1; }
+        if ! git_step "$GIT" clone --quiet "$remote" "$SRC"; then
+            err "sync: clone failed"
+            classify_transport "$remote"
+            return 1
+        fi
     fi
 
-    "$GIT" -C "$SRC" fetch --quiet origin || { err "sync: git fetch origin failed in $SRC"; return 1; }
-
-    if [ -n "$("$GIT" -C "$SRC" status --porcelain 2>/dev/null)" ]; then
-        err "sync: $SRC is DIRTY — refusing to touch it"
-        "$GIT" -C "$SRC" status --short >&2
+    if ! git_step "$GIT" -C "$SRC" fetch --quiet origin; then
+        err "sync: git fetch origin failed in $SRC"
+        remote="$("$GIT" -C "$SRC" remote get-url origin 2>/dev/null)"
+        [ -n "$remote" ] || remote="$DEPLOY_REMOTE"
+        classify_transport "$remote"
         return 1
     fi
 
-    "$GIT" -C "$SRC" checkout --quiet "$DEPLOY_REF" || { err "sync: cannot checkout $DEPLOY_REF in $SRC"; return 1; }
+    if [ -n "$("$GIT" -C "$SRC" status --porcelain 2>/dev/null)" ]; then
+        SYNC_CLASS=dirty
+        SYNC_DETAIL="$("$GIT" -C "$SRC" status --short 2>&1)"
+        err "sync: $SRC is DIRTY — refusing to touch it"
+        printf '%s\n' "$SYNC_DETAIL" >&2
+        return 1
+    fi
+
+    if ! git_step "$GIT" -C "$SRC" checkout --quiet "$DEPLOY_REF"; then
+        SYNC_CLASS=checkout
+        err "sync: cannot checkout $DEPLOY_REF in $SRC"
+        return 1
+    fi
     # --ff-only: a deploy tree that has diverged from origin has commits nobody
     # meant to build. Merging them would deploy them; resetting would erase
     # them. Refuse, and let a human look.
-    if ! "$GIT" -C "$SRC" merge --ff-only --quiet "origin/$DEPLOY_REF"; then
+    if ! git_step "$GIT" -C "$SRC" merge --ff-only --quiet "origin/$DEPLOY_REF"; then
+        SYNC_CLASS=diverged
         err "sync: $SRC has DIVERGED from origin/$DEPLOY_REF — refusing a non-fast-forward"
         return 1
     fi
     log "sync: $SRC at $DEPLOY_REF $("$GIT" -C "$SRC" rev-parse --short HEAD)"
     return 0
+}
+
+# ---------------------------------------------------------------------------
+# 5b. The in-run retry (mg-0d70)
+# ---------------------------------------------------------------------------
+# sync_backoff N LIST — the delay before attempt N+1. The last entry repeats, so
+# a shortened list degrades into a constant rather than into zero.
+sync_backoff() {
+    local n="$1" list="${2:-$SYNC_BACKOFF}" i=1 d last=0
+    for d in $list; do
+        last="$d"
+        [ "$i" -eq "$n" ] && { printf '%s' "$d"; return 0; }
+        i=$(( i + 1 ))
+    done
+    printf '%s' "$last"
+}
+
+# sync_class_retryable CLASS — THE DISCRIMINATOR (pm-pogo's ruling, mg-0d70):
+#
+#     would re-running plausibly give a different answer, for a reason
+#     UNRELATED TO THE CODE? If yes, retry.
+#
+# It is a question about what the failure ESTABLISHED, not about how annoying it
+# was. The split falls exactly where sync_src stops:
+#
+#   RETRYABLE — the transport classes. `network`, `remote` and `unclassified`
+#     all mean the sync never reached the tree, so NOTHING about the repository
+#     state was established. The state is simply unknown and re-asking is how
+#     you find out. `remote` is retryable despite naming the far end, because it
+#     conflates a stable cause (a rejected key) with transient ones the ruling
+#     lists by name (GitHub 5xx, rate limiting) — and a TCP handshake cannot
+#     separate them without reading prose, which this file will not do. Given
+#     that conflation the asymmetry decides it: retrying a genuinely dead key
+#     costs ~3 minutes of a 4-hour window, once, logged; not retrying a 5xx
+#     costs the whole night. That is the same asymmetry the ticket is about.
+#
+#   NOT RETRYABLE — the classes that established a FACT. `dirty` and `diverged`
+#     are statements about the tree, `checkout` about the ref, and `config`
+#     about this box's setup: each is exactly as true in thirty seconds, so a
+#     retry only re-establishes it, burns the window, and risks reading as flake.
+#
+# Note what is NOT in scope here: `do_prove` RED, a build failure and a test
+# failure are pogo-self-deploy's exits, they establish facts, and gate 3's
+# attempt_disposition already settles the night on every one of them.
+sync_class_retryable() {
+    case "${1:-}" in
+        network|remote|unclassified) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# sync_with_retry — the retry itself, under the ruling's three conditions:
+#
+#   1. BOUNDED AND LOGGED PER ATTEMPT. Every attempt logs its own number and
+#      class, the total lands in SYNC_TRIES, and the alert prints it — so
+#      "failed once" and "failed after four attempts" are different sentences in
+#      both places. A retry that hides how hard it tried is a retry that makes
+#      the next incident harder to read than this one was.
+#   2. RETRIES STAY INSIDE THE WINDOW. Backoff is charged against the drain
+#      budget twice over: SYNC_RETRY_BUDGET caps the total, and every individual
+#      sleep is refused if the window would not still afford a drain on the far
+#      side of it. Retries consume the existing allowance; they never extend it.
+#   3. A RETRIED SUCCESS SAYS SO. The winning attempt is named in the log, in an
+#      event, and in mail — see sync_recovery_notice. A silent retry converts a
+#      flaky night into an invisible one, and invisible is how this box's network
+#      came to be the dominant failure mode without anybody having the evidence.
+#
+# SYNC_RETRY_SPENT is left behind for the caller, which owes the drain a budget
+# recomputed against the time this actually took.
+SYNC_RETRY_SPENT=0
+SYNC_TRIES=0
+sync_with_retry() {
+    local attempt=1 delay left
+    SYNC_RETRY_SPENT=0
+    while :; do
+        SYNC_TRIES="$attempt"
+        if sync_src; then
+            [ "$attempt" -gt 1 ] && log "sync: RECOVERED — attempt $attempt of $SYNC_ATTEMPTS succeeded after ${SYNC_RETRY_SPENT}s of backoff. Attempt 1 failed on a transient cause and under the pre-mg-0d70 policy would have ended the night here."
+            return 0
+        fi
+        err "sync: attempt $attempt of $SYNC_ATTEMPTS failed — class=${SYNC_CLASS:-unclassified}"
+        if ! sync_class_retryable "$SYNC_CLASS"; then
+            log "sync: class=${SYNC_CLASS:-unclassified} ESTABLISHED a fact about the tree or this box's setup — re-running would only re-establish it. Not retrying."
+            return 1
+        fi
+        if [ "$attempt" -ge "$SYNC_ATTEMPTS" ]; then
+            err "sync: all $attempt attempts failed over ${SYNC_RETRY_SPENT}s of backoff — this outlasted the runner's patience, so it is an outage rather than a blip"
+            return 1
+        fi
+        delay="$(sync_backoff "$attempt")"
+        if [ $(( SYNC_RETRY_SPENT + delay )) -gt "$SYNC_RETRY_BUDGET" ]; then
+            err "sync: the next backoff (${delay}s) would take the total past the ${SYNC_RETRY_BUDGET}s retry budget — stopping after $attempt attempts"
+            return 1
+        fi
+        # Condition 2, enforced rather than asserted: the sleep is only taken if
+        # the window would still afford a drain once it is over. Retrying past
+        # the point where a deploy could still happen spends the fleet's window
+        # to arrive at the same skip, later and with less of it left.
+        left="$(drain_budget "$WINDOW_END" "$RESERVE" "$MAX_DRAIN" "$MIN_DRAIN")"
+        if [ "$left" -le "$delay" ]; then
+            err "sync: a ${delay}s backoff would leave under ${MIN_DRAIN}s of usable window — retries consume the deploy budget, they do not extend it. Stopping after $attempt attempts."
+            return 1
+        fi
+        log "sync: attempt $attempt failed on a class that established nothing (${SYNC_CLASS}) — retrying in ${delay}s (attempt $(( attempt + 1 )) of $SYNC_ATTEMPTS; ${left}s of window still usable)"
+        sleep "$delay"
+        SYNC_RETRY_SPENT=$(( SYNC_RETRY_SPENT + delay ))
+        attempt=$(( attempt + 1 ))
+    done
+}
+
+# sync_recovery_notice — condition 3. A night that needed retries mails a
+# NOTICE, separately from alert(): alert() always copies `human` because a
+# refused deploy is something Daniel must know by morning, and a night that
+# WORKED is not. This goes to pm-pogo, who is accumulating exactly this evidence
+# — every recovered night is one more data point that the network is the
+# dominant failure mode on this box, and the log alone is what nobody reads.
+sync_recovery_notice() {
+    local n="$1" spent="$2" bf
+    [ "$n" -gt 1 ] || return 0
+    if [ -n "$POGO_CLI" ]; then
+        "$POGO_CLI" events emit --type=deploy_sync_recovered --agent=pogo-deploy \
+            --details="{\"attempts\":$n,\"backoff_s\":$spent}" >/dev/null 2>&1 || true
+    fi
+    [ -n "$MG" ] || return 0
+    bf="$(mktemp)" || return 0
+    cat > "$bf" <<EOF
+Tonight's nightly redeploy synced successfully, but NOT on the first try.
+
+  attempt that won: $n of $SYNC_ATTEMPTS
+  backoff spent:    ${spent}s (charged against the drain budget, not added to it)
+  log:              $HOME/Library/Logs/pogo/pogo-deploy.log
+
+This is not a failure and needs no action. It is recorded because a retry that
+succeeds silently turns a flaky night into an invisible one, and the count of
+these is the evidence for how often this box's network is the thing that breaks
+(mg-0d70, mg-0ffc, mg-dd22). If these become routine, the network is the ticket
+— not the deploy.
+EOF
+    "$MG" mail send "$ALERT_TO" --from=pogo-deploy \
+        --subject="[pogo-deploy] NOTICE: tonight's sync needed $n attempts" --body-file "$bf" >/dev/null 2>&1 \
+        || err "notice: mail to '$ALERT_TO' failed"
+    rm -f "$bf"
+    log "sync: recovery notice mailed to $ALERT_TO (attempt $n won)"
+}
+
+# describe_sync_class CLASS — one line naming what was established, for the
+# alert's subject and summary.
+describe_sync_class() {
+    case "${1:-}" in
+        network)      echo "NETWORK — the remote host could not be reached from this box" ;;
+        remote)       echo "REMOTE — the host answered but the transfer was refused (auth, permission, or the repository)" ;;
+        dirty)        echo "DIRTY CHECKOUT — the deploy tree has uncommitted changes" ;;
+        diverged)     echo "DIVERGED — the deploy tree has commits that are not on the remote" ;;
+        checkout)     echo "CHECKOUT — the deploy ref could not be checked out" ;;
+        config)       echo "CONFIGURATION — no usable clone URL for the dedicated checkout" ;;
+        *)            echo "UNCLASSIFIED — the runner could not establish which of these it was" ;;
+    esac
+}
+
+# remedy_for_sync_class CLASS — what to DO. The 08-05 alert printed the `dirty`
+# paragraph under a `network` failure and sent Daniel to a `git status` that was
+# clean, so the one rule these paragraphs obey is that each sends the reader
+# somewhere the evidence actually points.
+remedy_for_sync_class() {
+    case "${1:-}" in
+        network)
+            cat <<EOF
+This box could NOT open a TCP connection to the remote, measured directly at the
+time of the failure — so the deploy tree is not the place to look. It is neither
+dirty nor diverged; the sync never got far enough to have an opinion about it.
+
+The runner already retried this — $SYNC_TRIES attempts over ${SYNC_RETRY_SPENT}s of backoff — so the
+outage outlasted its patience rather than being a blip it failed to wait out.
+This host's network is independently known to be intermittent (mg-0ffc, mg-dd22).
+
+  ping -c 3 github.com
+  ssh -T git@github.com          # 'successfully authenticated' is the good answer
+  curl -sS -o /dev/null -w '%{http_code}\\n' https://api.github.com
+
+If connectivity is back, nothing needs fixing here — the next fire will carry it.
+EOF
+            ;;
+        remote)
+            cat <<EOF
+This was RETRIED $SYNC_TRIES times over ${SYNC_RETRY_SPENT}s of backoff before the runner gave up,
+so whatever it is outlasted that.
+
+The remote host ANSWERED a TCP connection, measured moments AFTER the transfer
+failed — so the likely cause is authentication, permission, or the repository
+itself rather than connectivity. Two caveats on that, because this is an
+inference and not a proof: a blip that had already ended by the time of the
+probe presents exactly this way, and a middlebox that completes a handshake and
+then resets does too. The probe is a floor on connectivity, not a guarantee.
+
+Note also that git says "make sure you have the correct access rights" for the
+network case too, so the message above is not by itself evidence of a key
+problem. Do NOT go looking at the deploy tree: it is neither dirty nor diverged,
+and the sync never reached the point of inspecting it.
+
+  ssh -T git@github.com
+  ssh-add -l
+  git -C ~/.pogo/deploy-src remote -v
+EOF
+            ;;
+        dirty)
+            cat <<'EOF'
+The dedicated checkout has UNCOMMITTED CHANGES, and the exact ones are printed
+verbatim above. It should never be dirty — nothing but this job writes to it —
+so the interesting question is what put them there. The runner aborts rather
+than resetting precisely so that evidence survives for you to read.
+
+  git -C ~/.pogo/deploy-src status
+  git -C ~/.pogo/deploy-src diff
+EOF
+            ;;
+        diverged)
+            cat <<'EOF'
+The dedicated checkout has commits that are NOT on the remote, so the
+fast-forward was refused. Merging them would deploy commits nobody meant to
+build and resetting would erase them, which is why this aborts instead.
+
+  git -C ~/.pogo/deploy-src log --oneline origin/main..HEAD
+EOF
+            ;;
+        checkout)
+            cat <<'EOF'
+The fetch succeeded and the tree is clean, but the deploy ref could not be
+checked out. The verbatim git error is above; the usual causes are a ref that no
+longer exists on the remote and an index left in a bad state.
+
+  git -C ~/.pogo/deploy-src status
+  git -C ~/.pogo/deploy-src branch -a
+EOF
+            ;;
+        config)
+            cat <<'EOF'
+There is no dedicated checkout yet and the runner could not work out where to
+clone it from: POGO_DEPLOY_REMOTE is unset and the bootstrap repo yielded no
+origin URL. Nothing was fetched and nothing was inspected.
+
+  git -C ~/dev/pogo remote get-url origin
+EOF
+            ;;
+        *)
+            cat <<EOF
+The runner could NOT establish which kind of failure this was, and is telling you
+so rather than naming the most common one. The verbatim error above is the
+evidence; read it before assuming anything about the deploy tree, the network or
+the credentials.
+
+It was still RETRIED ($SYNC_TRIES attempts over ${SYNC_RETRY_SPENT}s): the failure happened at the
+transport step, so the sync never inspected the tree and established nothing
+about it. What it did NOT do is guess a cause to go with that.
+EOF
+            ;;
+    esac
 }
 
 # ---------------------------------------------------------------------------
@@ -596,6 +1133,10 @@ describe_exit() {
         7) echo "drain stalled" ;;
         8) echo "verify_running failed — the new pogod did not come up" ;;
         9) echo "do_prove RED — the control suite refused the artifact BEFORE the restart; the running pogod is UNTOUCHED" ;;
+        # 10 is this runner's own, not pogo-self-deploy's: the sync aborted
+        # before the deploy script was ever invoked, on a class that established
+        # nothing about the tree (mg-0d70).
+        10) echo "sync aborted on a transient class — the repo state was never established, and a later fire retries" ;;
         *) echo "unclassified failure" ;;
     esac
 }
@@ -822,10 +1363,11 @@ main() {
     fi
     trap 'on_exit $?' EXIT
 
-    # --- gate 3: has tonight already been settled? (mg-8f7e) ----------------
-    # The 04:00 and 05:00 fires are retries for ONE failure — a stalled drain.
-    # Every other outcome is settled by the first attempt, because re-running it
-    # reproduces the failure and mails a duplicate alert.
+    # --- gate 3: has tonight already been settled? (mg-8f7e, mg-0d70) -------
+    # The 04:00 and 05:00 fires are retries for the failures that established
+    # NOTHING: a stalled drain (7) and a sync that never reached the tree (10).
+    # Every other outcome is settled by the first attempt, because it established
+    # a fact and re-running it reproduces the failure and mails a duplicate alert.
     local today stamp_line disp
     today="$(deploy_date)"
     stamp_line="$(stamp_read "$STAMP")"
@@ -833,7 +1375,7 @@ main() {
     ATTEMPT_N="$(stamp_attempts "$stamp_line" "$today")"
     case "$disp" in
         first) log "attempt: first of the night ($today)" ;;
-        retry) log "attempt: RETRY $(( ATTEMPT_N + 1 )) — tonight's earlier attempt exited 7 (drain stalled), the one failure a later fire can fix" ;;
+        retry) log "attempt: RETRY $(( ATTEMPT_N + 1 )) — tonight's earlier attempt exited $(stamp_rc "$stamp_line") ($(describe_exit "$(stamp_rc "$stamp_line")")), which established nothing, so a later fire can still fix it" ;;
         settled)
             log "attempt: tonight ($today) is already settled by attempt ${ATTEMPT_N} — its outcome was not a drain stall, so a retry would repeat the same failure and the same alert. Exit 0."
             exit 0 ;;
@@ -889,15 +1431,55 @@ deployed and the running pogod is untouched.
     }
 
     # --- gate 5: safe sync --------------------------------------------------
-    if ! sync_src; then
-        alert "[pogo-deploy] ABORTED: could not sync $SRC" \
+    # The alert names the class the runner ESTABLISHED and prints the underlying
+    # error verbatim (mg-0d70). It used to say "dirty or diverged aborts by
+    # design" under every failure, which on 08-05 sent Daniel to a `git status`
+    # that was clean — an alert that guesses is a detector that lies at exactly
+    # the moment it is read.
+    if ! sync_with_retry; then
+        # Exit 10 when the class established nothing, so a later fire can retry
+        # it the way it already retries a stalled drain; exit 1 when the failure
+        # established a fact and re-running it would only re-establish it.
+        local sync_rc=1
+        sync_class_retryable "$SYNC_CLASS" && sync_rc=10
+        if retry_will_follow "$sync_rc"; then
+            local snxt; snxt="$(next_fire_hour "$(current_hour)")"
+            log "sync: exit $sync_rc after $SYNC_TRIES attempts — class ${SYNC_CLASS:-unclassified} established nothing, so the $(printf '%02d' "$snxt"):00 fire will retry. Not alerting yet."
+            if [ -n "$POGO_CLI" ]; then
+                "$POGO_CLI" events emit --type=deploy_nightly_retry_pending --agent=pogo-deploy \
+                    --details="{\"exit\":$sync_rc,\"sync_class\":\"${SYNC_CLASS:-unclassified}\",\"sync_attempts\":$SYNC_TRIES,\"retry_hour\":$snxt}" >/dev/null 2>&1 || true
+            fi
+            exit "$sync_rc"
+        fi
+        alert "[pogo-deploy] ABORTED: could not sync $SRC — $(describe_sync_class "$SYNC_CLASS")" \
 "The nightly redeploy refused to advance its dedicated checkout. Nothing was
 deployed and the running pogod is untouched. Daniel's dev tree was NOT touched.
 
+  cause:    $(describe_sync_class "$SYNC_CLASS")
   checkout: $SRC
+  attempts: $SYNC_TRIES in this run$([ "$SYNC_RETRY_SPENT" -gt 0 ] && printf ', over %ss of backoff' "$SYNC_RETRY_SPENT")
+  exit:     $sync_rc$([ "$sync_rc" -eq 10 ] && printf ' (retryable class — but no fire is left tonight)')
   log:      $HOME/Library/Logs/pogo/pogo-deploy.log
-  fix:      inspect 'git -C $SRC status' — dirty or diverged aborts by design."
-        exit 1
+
+WHAT THE UNDERLYING TOOL ACTUALLY SAID, verbatim:
+
+${SYNC_DETAIL:-(the failing step produced no output)}
+
+$(remedy_for_sync_class "$SYNC_CLASS")"
+        exit "$sync_rc"
+    fi
+    sync_recovery_notice "$SYNC_TRIES" "$SYNC_RETRY_SPENT"
+
+    # Backoff sleeps come out of the drain's share of the window, so the budget
+    # computed at gate 4 is stale by exactly that much. Recompute rather than
+    # hand the drain a number derived from a clock that has since moved on.
+    if [ "$SYNC_RETRY_SPENT" -gt 0 ]; then
+        budget="$(drain_budget "$WINDOW_END" "$RESERVE" "$MAX_DRAIN" "$MIN_DRAIN")"
+        if [ "$budget" -le 0 ]; then
+            log "budget: the ${SYNC_RETRY_SPENT}s of sync backoff left under ${MIN_DRAIN}s of usable window — not starting a drain that cannot finish. Exit 0."
+            exit 0
+        fi
+        log "budget: recomputed after ${SYNC_RETRY_SPENT}s of sync backoff — drain gets up to ${budget}s"
     fi
 
     local DEPLOY="$SRC/scripts/pogo-self-deploy"
@@ -955,7 +1537,7 @@ $check_out"
         # the night has actually run out of chances.
         if retry_will_follow "$rc"; then
             local nxt; nxt="$(next_fire_hour "$(current_hour)")"
-            log "redeploy: exit 7 (drain stalled) after attempt $(( ATTEMPT_N + 1 )) — the $(printf '%02d' "$nxt"):00 fire will retry. Not alerting yet."
+            log "redeploy: exit $rc ($(describe_exit "$rc")) after attempt $(( ATTEMPT_N + 1 )) — the $(printf '%02d' "$nxt"):00 fire will retry. Not alerting yet."
             dispatch_freeze_note "$rc" "$elapsed"
             if [ -n "$POGO_CLI" ]; then
                 "$POGO_CLI" events emit --type=deploy_nightly_retry_pending --agent=pogo-deploy \
