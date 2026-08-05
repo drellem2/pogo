@@ -198,7 +198,7 @@ func (w *Watcher) sample(now time.Time) {
 	var blind []blindNote
 
 	for _, o := range snap.Agents {
-		f, state := w.inspect(o, snap.Cred, now)
+		f, state := w.inspect(o, snap.Cred, snap.Host, now)
 		switch state.kind {
 		case stateConfirmed:
 			confirmed = append(confirmed, f)
@@ -244,7 +244,7 @@ type blindNote struct {
 }
 
 // inspect judges one agent against both checks and folds the freeze clock.
-func (w *Watcher) inspect(o Observation, cred CredentialView, now time.Time) (Finding, inspectState) {
+func (w *Watcher) inspect(o Observation, cred CredentialView, host HostView, now time.Time) (Finding, inspectState) {
 	hits := ScanMarkers(o.Output, nil)
 	sigs := Signatures(hits)
 
@@ -263,6 +263,11 @@ func (w *Watcher) inspect(o Observation, cred CredentialView, now time.Time) (Fi
 		StalledFor:   stalledFor,
 		StallSource:  stallSource,
 		Animating:    !o.LastOutputAt.IsZero() && now.Sub(o.LastOutputAt) <= w.th.AnimatingWithin,
+
+		HostReadable:  host.Readable,
+		HostSaturated: host.Saturated,
+		HostUsedCores: host.UsedCores,
+		HostCores:     host.Cores,
 	}
 
 	discrepancy, discrepancyWhy := Discrepancy(DiscrepancyInput{
@@ -301,6 +306,7 @@ func (w *Watcher) inspect(o Observation, cred CredentialView, now time.Time) (Fi
 		Signatures:      f.Signatures,
 		LastConnFailure: w.connMemory(),
 		Cred:            cred,
+		Host:            host,
 		Now:             now,
 	}, w.th)
 	f.Cause = v.Cause
@@ -488,19 +494,21 @@ func (w *Watcher) record(snap Snapshot, confirmed []Finding, now time.Time) {
 	rendered := make([]map[string]any, 0, len(confirmed))
 	for _, f := range confirmed {
 		rendered = append(rendered, map[string]any{
-			"name":          f.Name,
-			"identity":      f.identity(),
-			"type":          f.Type,
-			"uptime":        f.Uptime.Round(time.Second).String(),
-			"declared":      f.Declared.Round(time.Second).String(),
-			"declared_read": f.DeclaredRead,
-			"stalled_for":   f.StalledFor.Round(time.Second).String(),
-			"stall_source":  f.StallSource,
-			"animating":     f.Animating,
-			"signatures":    sigStrings(f.Signatures),
-			"cause":         string(f.Cause),
-			"response":      string(f.Response),
-			"why":           f.Why,
+			"name":           f.Name,
+			"identity":       f.identity(),
+			"type":           f.Type,
+			"uptime":         f.Uptime.Round(time.Second).String(),
+			"declared":       f.Declared.Round(time.Second).String(),
+			"declared_read":  f.DeclaredRead,
+			"stalled_for":    f.StalledFor.Round(time.Second).String(),
+			"stall_source":   f.StallSource,
+			"animating":      f.Animating,
+			"signatures":     sigStrings(f.Signatures),
+			"host_readable":  f.HostReadable,
+			"host_saturated": f.HostSaturated,
+			"cause":          string(f.Cause),
+			"response":       string(f.Response),
+			"why":            f.Why,
 		})
 	}
 	details := map[string]any{
@@ -514,6 +522,13 @@ func (w *Watcher) record(snap Snapshot, confirmed []Finding, now time.Time) {
 		// reader who cannot see it cannot check the verdict.
 		"cred_readable":      snap.Cred.Readable,
 		"cred_refresh_valid": snap.Cred.RefreshValid,
+		// Likewise stated on every emission: host headroom is what separates a
+		// wedged agent from a merely starved one, and the two need opposite
+		// handling.
+		"host_readable":   snap.Host.Readable,
+		"host_saturated":  snap.Host.Saturated,
+		"host_used_cores": snap.Host.UsedCores,
+		"host_cores":      snap.Host.Cores,
 		"routed_to": "nobody — mg-fc8d item (3), escalation outside the wedged party, is an " +
 			"alerting-policy decision reserved to Daniel and is deliberately NOT built here",
 	}

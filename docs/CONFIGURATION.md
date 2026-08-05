@@ -1532,6 +1532,25 @@ credential has actively refuted revocation. A bad credential is named **only**
 when the credential itself says so — the refresh-grant expiry, never the
 8-hour access-token expiry, which is routinely stale on a healthy machine.
 
+**A CPU-starved agent is reported as degraded, not wedged.** There are *three*
+states that look identical to every instrument this fleet has: wedged at a dead
+prompt; CPU-starved (genuinely working, achieving nothing); and healthy. On
+2026-08-05 thirteen polecats sat at `last-activity: just now` for hours during a
+load event while plain local `git log` calls timed out at 180s. The remedies are
+opposite yet again — a wedged agent needs intervention, a starved one needs to be
+**left alone** and the load reduced, since waking or restarting it destroys real
+work and adds to the load. So when the only evidence is a frozen counter and the
+host is measurably saturated, the verdict is `host_oversubscribed` /
+`reduce_load_do_not_intervene`. Saturation does **not** reinterpret an enumerated
+finding: a login prompt is not caused by CPU contention. The instrument is
+deliberately **not** the load average — mg-1b8c measured a load average of 214 on
+this box against ~7.5 of 10 cores actually in use, because Darwin counts
+uninterruptible-sleep tasks — but used cores against core count, at
+`hostload.SaturatedAt`. An unmeasurable host reports `unknown` and says
+starvation could not be ruled out. This is a state pogo creates for itself
+(mg-3977, mg-da30), which is an argument for measuring it rather than assuming it
+away.
+
 **No intervention is named, because none is established.** An early reading held
 that a nudge revived the fleet on 2026-08-05. mayor retracted it with a control:
 968 nudges inside the outage window produced **0** acks, and `crew-doctor` —
@@ -1576,12 +1595,21 @@ coincidence_window = "2h"     # a connectivity failure keeps a later 401 explain
 renotify_after = "6h"         # an unchanged roster re-emits after this (default 6h)
 ```
 
+The host reading is taken on **every** sample, unlike the credential (which is
+read lazily, only when an auth symptom appears, because it shells out to
+`security` and can block on a keychain prompt). Host contention is what
+*positively rules starvation out*, so it has to be present on findings where the
+answer is "the box had headroom" as well as on the ones where it is not.
+
 `wedge-watch` and the **modal watcher** (mg-4421) are disjoint. The modal watcher
 *dismisses* the two enumerated Claude Code modals from inside the PTY stream;
 wedge-watch reports that one is still up beside a stalled agent, which means the
 dismissal did not win. `wedge-watch` and **deaf-watch** are also disjoint:
 deaf-watch catches an agent with no way to be woken, wedge-watch catches one
-being woken and absorbing it.
+being woken and absorbing it. And it shares `internal/hostload`'s threshold with
+the dispatch guard but not its denominator: dispatch asks whether pausing *our
+own* work would help, wedge-watch asks whether there is any CPU for this agent to
+progress with, so it reads the whole host.
 
 Source of truth: `internal/wedgewatch/`, `cmd/pogod/wedgelog.go`.
 

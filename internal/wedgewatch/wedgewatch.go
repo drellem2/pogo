@@ -112,6 +112,46 @@
 // "detect ENOTFOUND -> nudge" would be worse than shipping nothing: it would be
 // trusted, and it would be 968-for-0. See ResponseAwaitNetworkRecovery.
 //
+// # The THIRD state: a CPU-starved agent is not a wedged one
+//
+// There are three states that look identical to every instrument this fleet
+// has, not two:
+//
+//	WEDGED at a dead prompt  -> spinner redraws, last-activity "just now", no progress
+//	CPU-STARVED              -> genuinely working,  last-activity "just now", no progress
+//	HEALTHY and working      -> last-activity "just now", progress
+//
+// The counter cross-check separates the first from the third, and mostly
+// separates the second too — a starved agent's counter advances honestly,
+// because it really has been working for forty minutes; it has just achieved
+// almost nothing. But a starved agent BETWEEN turns has a frozen counter for
+// the same reason a wedged one does, and on 2026-08-05 pm-onethird watched
+// thirteen polecats sit at "last-activity: just now" for hours during a load
+// event (1-minute average 300 on a 10-core box) with plain local `git log`
+// calls timing out at 180 seconds.
+//
+// The remedies are opposite AGAIN: a wedged agent needs intervention; a starved
+// one needs to be LEFT ALONE and the load reduced. Waking or restarting a
+// starved agent destroys real work and adds to the load that caused it.
+//
+// So when the ONLY evidence is a frozen counter — no dead-end marker, nothing
+// the host's CPU could not explain — and the host is measurably saturated, the
+// verdict is CauseHostOversubscribed / ResponseReduceLoadNotIntervene:
+// "degraded, not wedged". Saturation does NOT reinterpret an enumerated
+// finding: a login prompt is not caused by CPU contention.
+//
+// The instrument is DELIBERATELY NOT the load average, which is what a reader
+// of the incident would reach for. internal/hostload disqualified it with a
+// measurement (mg-1b8c): a load average of 214 on this very box coincided with
+// ~7.5 of 10 cores in use, because Darwin counts uninterruptible-sleep tasks
+// too, and a chunk of it was not even the fleet's. The number decided on here
+// is used cores against core count, at hostload's own SaturatedAt threshold.
+//
+// This state is one pogo creates for itself — the 2026-08-05 event was seven
+// polecats in one Go repo each running a full double test suite (mg-3977,
+// mg-da30) — which is an argument for measuring it rather than assuming it
+// away.
+//
 // # Report-only, and deliberately unrouted
 //
 // mg-fc8d lists a third item — escalate a fleet-level wedge OUTSIDE the wedged
@@ -268,6 +308,12 @@ const (
 	// watcher owns dismissing these; this package only reports that one is
 	// still up beside a stalled agent, which means that watcher did not win.
 	CauseModalWedge Cause = "modal_wedge"
+	// CauseHostOversubscribed is "degraded, not wedged": the agent has made no
+	// progress and the HOST has no CPU left to give it. This is a real finding
+	// worth reporting and it is NOT a wedge — the agent is fine and the box is
+	// not. Reported rather than suppressed because a fleet that assumes its own
+	// contention away cannot see the state it creates for itself.
+	CauseHostOversubscribed Cause = "host_oversubscribed"
 )
 
 // Response is the recommended handling. It is advice carried on a report, not
@@ -300,7 +346,48 @@ const (
 	ResponseStopAndRedispatch Response = "stop_and_redispatch"
 	// ResponseModalWatcherOwnsIt defers to mg-4421.
 	ResponseModalWatcherOwnsIt Response = "modal_watcher_owns_it"
+	// ResponseReduceLoadNotIntervene is the starved-agent response, and it is
+	// the opposite of intervening: the agent is working and the host is full.
+	// Waking or restarting it destroys real work and adds to the load that
+	// caused the symptom. Reduce the load; leave the agent alone.
+	ResponseReduceLoadNotIntervene Response = "reduce_load_do_not_intervene"
 )
+
+// HostView is what the classifier is allowed to know about host contention.
+//
+// It is a plain struct rather than an internal/hostload import for the same
+// reason CredentialView is: the detector stays pure and its tests build
+// fixtures by hand. source.go does the conversion.
+type HostView struct {
+	// Readable is whether host CPU could be measured AT ALL. False means "I
+	// could not look" — never "there is headroom". An unreadable host cannot
+	// rule CPU starvation out, and the classifier says so rather than
+	// proceeding as though it had.
+	Readable bool
+	// Saturated is whether in-use CPU reached the saturation threshold.
+	//
+	// The number behind this is USED CORES against CORE COUNT, and it is
+	// deliberately NOT the load average — the instrument a reader of the
+	// incident report would reach for first. internal/hostload disqualified
+	// that one with a measurement on this very box (mg-1b8c): a load average of
+	// 214 coincided with roughly 7.5 of 10 cores actually in use, because
+	// Darwin's load average counts uninterruptible-sleep tasks as well as
+	// runnable ones, and part of what it counted was not the fleet's work at
+	// all.
+	//
+	// Note the limit hostload states for this measure and which is inherited
+	// here: CPU time consumed is bounded by the core count, so a host with
+	// twice as many runnable tasks as cores reads exactly the same as one with
+	// a task per core. This detects "the host is full"; it cannot say how far
+	// past full.
+	Saturated bool
+	// UsedCores and Cores are carried so a report states the measurement it
+	// acted on rather than only its conclusion.
+	UsedCores float64
+	Cores     int
+	// Reason explains a non-readable view in fixed language.
+	Reason string
+}
 
 // CredentialView is what the classifier is allowed to know about the
 // credential. It is a plain struct rather than an internal/credexpiry import so
@@ -373,6 +460,10 @@ type Snapshot struct {
 	// Cred is the fleet-wide credential reading, taken once per sample rather
 	// than per agent — there is one credential on the box.
 	Cred CredentialView
+	// Host is the host-contention reading, likewise once per sample. There is
+	// one set of cores on the box, and CPU starvation is a property of it
+	// rather than of any agent.
+	Host HostView
 }
 
 // SourceFunc yields one reading. Production binds a closure over the live agent
@@ -460,6 +551,16 @@ type Finding struct {
 	// property that made the wedge invisible, so it is stated rather than
 	// implied.
 	Animating bool `json:"animating"`
+
+	// HostReadable / HostSaturated / HostUsedCores / HostCores carry the
+	// contention measurement the verdict was reached under. They are on EVERY
+	// finding, not only the oversubscribed ones, because "the host had headroom"
+	// is what rules CPU starvation out — and a reader who cannot see that has to
+	// take the distinction on faith.
+	HostReadable  bool    `json:"host_readable"`
+	HostSaturated bool    `json:"host_saturated"`
+	HostUsedCores float64 `json:"host_used_cores"`
+	HostCores     int     `json:"host_cores"`
 
 	// Signatures are the observable states, sorted. Not a diagnosis.
 	Signatures []Signature `json:"signatures"`

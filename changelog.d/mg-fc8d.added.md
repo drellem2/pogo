@@ -68,6 +68,38 @@
   token, which was valid with 7.7h left during the incident and is routinely
   stale on a healthy machine (`internal/credexpiry`).
 
+  **A CPU-starved agent is reported as degraded, NOT wedged.** There are three
+  states that look identical to every instrument this fleet has, not two: wedged
+  at a dead prompt; CPU-starved (genuinely working, achieving almost nothing);
+  and healthy. On 2026-08-05 pm-onethird watched thirteen polecats sit at
+  `last-activity: just now` for hours during a load event while plain local
+  `git log --oneline -2` calls timed out at 180s. The remedies are opposite yet
+  again — a wedged agent needs intervention, a starved one needs to be **left
+  alone** and the load reduced, since waking or restarting it destroys real work
+  and adds to the load that caused the symptom. So when the only evidence is a
+  frozen counter and the host is measurably saturated, the verdict is
+  `host_oversubscribed` / `reduce_load_do_not_intervene`. Saturation does **not**
+  reinterpret an enumerated finding: a login prompt is not caused by CPU
+  contention, and letting a load spike excuse a real auth wedge would give the
+  thirteen-hour case an alibi.
+
+  **The contention instrument is deliberately not the load average**, which is
+  what the incident was reported in ("1-min average 300 on a 10-core box").
+  `internal/hostload` disqualified that number with a measurement on this very
+  box (mg-1b8c): a load average of 214 coincided with ~7.5 of 10 cores actually
+  in use, because Darwin counts uninterruptible-sleep tasks as well as runnable
+  ones, and part of it belonged to a VPN extension and the system indexer rather
+  than the fleet. Keying on it would report a full box whenever something did
+  heavy I/O — i.e. would excuse a real wedge. The number decided on is used cores
+  against core count at `hostload.SaturatedAt`, over the **whole host** rather
+  than the fleet's share: an agent starved by somebody else's compiler is just as
+  starved. An unmeasurable host (hostload's `Unresolvable` case, mg-79e3, where
+  a differenced figure is zero for a saturated host exactly as much as an idle
+  one) reports `unknown` and says starvation could not be ruled out. This is a
+  state pogo creates for itself — the load event was seven polecats each running
+  a double test suite (mg-3977, mg-da30) — which is an argument for measuring it
+  rather than assuming it away.
+
   **No remedy is named, because none is established.** An early reading held that
   a nudge revived the fleet on 2026-08-05; mayor retracted it with a control —
   968 nudges inside the outage window produced **0** acks, and `crew-doctor`,
@@ -84,7 +116,10 @@
   counter advances is never reported across six simulated hours, and neither is
   an agent **merely writing about the wedge** — which is not hypothetical, since
   the polecat that built this had every enumerated marker in its own PTY for
-  hours. That case is why `marker_hold_down` is not zero.
+  hours. That case is why `marker_hold_down` is not zero. The starved agent has
+  its own controls too: it must come out as `host_oversubscribed`, a saturated
+  host must **not** excuse an enumerated dead end, and an alarming load average
+  beside a host with free cores must not read as saturated.
 
   **Blindness is loud.** A failing source emits `wedge_watch_error` and evaluates
   nothing. An unparseable work counter falls back to event-log staleness; with
