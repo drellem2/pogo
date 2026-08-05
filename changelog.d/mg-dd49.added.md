@@ -94,9 +94,16 @@
   **A detector you cannot switch on until the fault clears is not yet a
   detector.** `check-staleness` ships inside `pogo`, and `pogo` only becomes
   current when the nightly redeploy runs — the exact mechanism whose failure it
-  detects. The recursion is not hypothetical: while this was being written the
-  installed binary answered `unknown command "check-staleness"`, because it was
-  six days and 52 commits behind. So `scripts/check-staleness.sh` runs the
+  detects. The recursion is not hypothetical, and it does not have to be argued
+  — building the negative control for the runner's own suite produced it, from
+  the installed binary, on the box, the same day this merged:
+
+      $ pogo check-staleness
+      Error: unknown command "check-staleness" for "pogo"
+      Run 'pogo --help' for usage.
+
+  Six days and 52 commits behind, refusing the subcommand that had just merged in
+  source. So `scripts/check-staleness.sh` runs the
   witness **from source**, applying mg-2894's rule literally — tracked files go
   live at MERGE, compiled binaries only at DEPLOY. It resolves the checkout from
   its own path rather than `$PWD`, and it **refuses** to fall back to an

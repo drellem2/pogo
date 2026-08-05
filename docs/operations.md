@@ -471,8 +471,14 @@ detects that installed artifacts have fallen behind source — and it is a
 subcommand of `pogo`, which only becomes current when the nightly redeploy runs.
 That is the exact mechanism whose failure it detects, so a witness reachable only
 through the installed binary cannot be switched on until the fault it detects is
-already fixed. This is not hypothetical: on 2026-08-05 the installed `pogo` was
-six days and 52 commits stale and answered `unknown command "check-staleness"`.
+already fixed. This is not hypothetical. On 2026-08-05, the day the witness
+merged, the installed `pogo` was six days and 52 commits stale:
+
+```
+$ pogo check-staleness
+Error: unknown command "check-staleness" for "pogo"
+Run 'pogo --help' for usage.
+```
 
 `scripts/check-staleness.sh` is the way around it. It is a tracked file, so it is
 present in every checkout at the merge commit, and it compiles the code sitting
