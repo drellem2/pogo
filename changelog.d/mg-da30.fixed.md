@@ -29,6 +29,19 @@
   refinery holds a single slot, so this came off the queue every other merge
   waits in.
 
+  **What that 34% is a fraction OF, stated plainly so it cannot be
+  misappropriated: refinery GATE wall-clock, and nothing else.** The duplication
+  lived in the gate's default gate list, never in `build.sh` — `build.sh` runs
+  the suite exactly once and always did. **A polecat running `./build.sh` in its
+  own worktree therefore costs exactly what it cost before**; this changes the
+  per-MERGE cost on the refinery's single slot, not the per-agent cost on the
+  host. A reader who sees "removes a duplicate test suite run" and assumes it
+  applies wherever suites run will overcount the saving, and one already did:
+  the escalation that raised this ticket attributed a 162.7 load average partly
+  to seven polecats "each running the Go suite twice via this defect", which is
+  not what the defect was. Host-side contention from concurrent polecats is
+  mg-3977's dispatch cap, not this.
+
   **It is a third, not a half, and the reason is worth recording.** The ticket
   expected the fix to halve the gate. It does not, because Go's test cache
   makes the second `go test ./...` nearly free — measured on this host, the
