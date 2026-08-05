@@ -350,6 +350,388 @@ sync_src >/dev/null 2>&1 && fail "sync_src merged a DIVERGED tree" || pass "sync
 [ -f "$SRC/g" ] && pass "sync_src preserved the diverging commit for inspection" || fail "sync_src destroyed local commits"
 
 # ---------------------------------------------------------------------------
+# sync_src sets a CLASS, and the class is the step that failed (mg-0d70)
+# ---------------------------------------------------------------------------
+# On 2026-08-05 the nightly aborted one second in on
+#
+#     ssh: connect to host github.com port 22: Undefined error: 0
+#
+# and mailed Daniel "inspect 'git -C ~/.pogo/deploy-src status' — dirty or
+# diverged aborts by design." The checkout was clean and on main. The runner had
+# the fact it needed — sync_src knows perfectly well which of its five steps
+# failed — and threw it away in favour of one paragraph printed under every
+# outcome. These assertions pin the fact being kept.
+SRC="$WORK/src"; DEPLOY_REF=main
+POGO_DEPLOY_REMOTE="$UPSTREAM"; DEPLOY_REMOTE="$UPSTREAM"
+# The divergence fixture above left a local commit in place on purpose; drop it
+# so these assertions start from the ordinary night.
+"$GIT" -C "$SRC" reset --hard --quiet HEAD~1
+sync_src >/dev/null 2>&1
+[ -z "$SYNC_CLASS" ] && pass "sync_src: a SUCCESSFUL sync leaves no failure class behind" || fail "sync_src set SYNC_CLASS=$SYNC_CLASS on success"
+
+echo local-edit > "$SRC/f"
+sync_src >/dev/null 2>&1
+[ "$SYNC_CLASS" = "dirty" ] \
+    && pass "sync_src: a dirty tree classifies as 'dirty' — the ONE case where the 08-05 remedy was the right one" || fail "dirty classified as '$SYNC_CLASS'"
+printf '%s' "$SYNC_DETAIL" | grep -q 'f$' \
+    && pass "sync_src: the dirty class carries the porcelain listing verbatim" || fail "dirty detail empty: $SYNC_DETAIL"
+"$GIT" -C "$SRC" checkout --quiet -- f
+
+echo local-commit > "$SRC/g"; "$GIT" -C "$SRC" add g
+"$GIT" -C "$SRC" -c user.email=t@t -c user.name=t commit --quiet -m local
+echo four > "$UPSTREAM/f"; "$GIT" -C "$UPSTREAM" commit --quiet -am four
+sync_src >/dev/null 2>&1
+[ "$SYNC_CLASS" = "diverged" ] \
+    && pass "sync_src: a diverged tree classifies as 'diverged', NOT as the same thing as dirty" || fail "diverged classified as '$SYNC_CLASS'"
+"$GIT" -C "$SRC" reset --hard --quiet HEAD~1
+
+# THE REGRESSION, reproduced. A fetch that cannot reach its remote must NOT come
+# back as dirty-or-diverged. 127.0.0.1:1 is closed on every box, so the probe
+# gets an immediate RST and this stays hermetic and fast — no DNS, no internet.
+UNREACHABLE="$WORK/unreachable"
+"$GIT" clone --quiet "$UPSTREAM" "$UNREACHABLE" 2>/dev/null
+"$GIT" -C "$UNREACHABLE" remote set-url origin "ssh://git@127.0.0.1:1/nope.git"
+SRC="$UNREACHABLE"
+sync_src >/dev/null 2>&1; RC=$?
+[ "$RC" -ne 0 ] && pass "sync_src: an unreachable remote still fails (the premise of the assertions below)" || fail "sync_src succeeded against an unreachable remote"
+[ "$SYNC_CLASS" = "network" ] \
+    && pass "sync_src: the 08-05 failure classifies as 'network' — the defect was reporting it as dirty-or-diverged" \
+    || fail "an unreachable-remote fetch classified as '$SYNC_CLASS', not network"
+[ "$SYNC_CLASS" != "dirty" ] && [ "$SYNC_CLASS" != "diverged" ] \
+    && pass "sync_src: a fetch failure is NEVER dirty-or-diverged — the tree was never inspected" \
+    || fail "a fetch failure blamed the tree"
+[ -n "$SYNC_DETAIL" ] \
+    && pass "sync_src: the failing step's stderr is kept verbatim for the alert to print" || fail "SYNC_DETAIL empty on a transport failure"
+
+SRC="$WORK/src"
+
+# ---------------------------------------------------------------------------
+# remote_endpoint — classification by STRUCTURE, never by git's English
+# ---------------------------------------------------------------------------
+# git prints "Please make sure you have the correct access rights and the
+# repository exists" after ANY ssh failure, connectivity included, so the
+# message cannot separate (a) from (b) — and a matcher that tried would stop
+# working the day git rewords it (the trap t55ca refused on gh#113). The host
+# and port come out of the URL's SCHEME instead, which is structure.
+[ "$(remote_endpoint 'git@github.com:daniel/pogo.git')" = "github.com 22" ] \
+    && pass "remote_endpoint: the scp-like form used by the real remote -> github.com:22" || fail "scp-like: $(remote_endpoint 'git@github.com:daniel/pogo.git')"
+[ "$(remote_endpoint 'ssh://git@github.com:2222/daniel/pogo.git')" = "github.com 2222" ] \
+    && pass "remote_endpoint: an ssh:// URL with an explicit port" || fail "ssh:// port: $(remote_endpoint 'ssh://git@github.com:2222/daniel/pogo.git')"
+[ "$(remote_endpoint 'ssh://git@github.com/daniel/pogo.git')" = "github.com 22" ] \
+    && pass "remote_endpoint: ssh:// defaults to 22" || fail "ssh:// default: $(remote_endpoint 'ssh://git@github.com/daniel/pogo.git')"
+[ "$(remote_endpoint 'https://github.com/daniel/pogo.git')" = "github.com 443" ] \
+    && pass "remote_endpoint: https:// defaults to 443 (the runner must probe the port git would use)" || fail "https: $(remote_endpoint 'https://github.com/daniel/pogo.git')"
+[ "$(remote_endpoint 'git://github.com/daniel/pogo.git')" = "github.com 9418" ] \
+    && pass "remote_endpoint: git:// defaults to 9418" || fail "git://: $(remote_endpoint 'git://github.com/daniel/pogo.git')"
+[ "$(remote_endpoint 'ssh://git@[fe80::1]:2222/x.git')" = "fe80::1 2222" ] \
+    && pass "remote_endpoint: a bracketed IPv6 host with a port" || fail "ipv6: $(remote_endpoint 'ssh://git@[fe80::1]:2222/x.git')"
+
+# A local path has no endpoint, and saying so is the point: an unprobeable
+# remote must produce "could not classify", not a guess.
+remote_endpoint "/Users/daniel/dev/pogo" >/dev/null \
+    && fail "remote_endpoint invented an endpoint for a local path" || pass "remote_endpoint: a local path has NO endpoint (so the failure stays unclassified rather than guessed)"
+remote_endpoint "" >/dev/null \
+    && fail "remote_endpoint accepted an empty URL" || pass "remote_endpoint: an empty URL has no endpoint"
+remote_endpoint "file:///srv/pogo.git" >/dev/null \
+    && fail "remote_endpoint invented an endpoint for file://" || pass "remote_endpoint: file:// has no endpoint"
+
+# ---------------------------------------------------------------------------
+# probe_tcp — the measurement the classification rests on
+# ---------------------------------------------------------------------------
+# BOTH controls are load-bearing and the POSITIVE one is the one that matters.
+# A probe stuck at "unreachable" would classify every auth failure as a network
+# blip, retry it three times, and mail a network remedy for a rejected key —
+# the 08-05 defect with the blame moved rather than removed. Only a probe that
+# can answer YES can rule the network out.
+LISTENER_PORTFILE="$WORK/listener.port"
+python3 - "$LISTENER_PORTFILE" >/dev/null 2>&1 <<'PY' &
+import socket, sys, time
+s = socket.socket(); s.bind(("127.0.0.1", 0)); s.listen(8)
+open(sys.argv[1], "w").write(str(s.getsockname()[1]))
+time.sleep(120)
+PY
+LISTENER_PID=$!
+i=0
+while [ ! -s "$LISTENER_PORTFILE" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$(( i + 1 )); done
+LISTENER_PORT="$(cat "$LISTENER_PORTFILE" 2>/dev/null)"
+
+if [ -n "$LISTENER_PORT" ]; then
+    probe_tcp 127.0.0.1 "$LISTENER_PORT" 5 \
+        && pass "probe_tcp POSITIVE CONTROL: a port that IS listening reads as reachable (without this, every failure is 'the network')" \
+        || fail "probe_tcp could not reach a local listener on 127.0.0.1:$LISTENER_PORT"
+else
+    fail "probe_tcp positive control could not start a listener (python3 missing?) — the probe is unverified in the direction that matters"
+fi
+kill "$LISTENER_PID" 2>/dev/null; wait "$LISTENER_PID" 2>/dev/null
+
+probe_tcp 127.0.0.1 1 5 \
+    && fail "probe_tcp claimed a closed port was reachable" || pass "probe_tcp NEGATIVE CONTROL: a closed port reads as unreachable"
+
+# The timeout is not decoration. An unreachable host does not refuse a SYN, it
+# drops it, and the kernel then waits ~75s — long enough that the alert would
+# arrive after the window it is about. 192.0.2.0/24 is TEST-NET-1 and is
+# guaranteed non-routable, so this blackholes rather than resetting.
+T0=$(date +%s)
+probe_tcp 192.0.2.1 22 2 && fail "probe_tcp reached TEST-NET-1" || true
+T1=$(date +%s)
+[ $(( T1 - T0 )) -le 8 ] \
+    && pass "probe_tcp gives up on a BLACKHOLED host at its timeout ($(( T1 - T0 ))s), not at the kernel's ~75s" \
+    || fail "probe_tcp took $(( T1 - T0 ))s against a blackholed host — the timeout is not working"
+
+# ---------------------------------------------------------------------------
+# classify_transport — reachable rules the network OUT
+# ---------------------------------------------------------------------------
+# Hermetic: probe_tcp is substituted, so these verdicts do not depend on this
+# host's connectivity. That matters for the same reason the resolve_git fakes do
+# — a suite that only ever ran against a working network could not tell whether
+# the classification existed at all.
+REAL_PROBE="$(declare -f probe_tcp)"
+
+probe_tcp() { return 0; }        # everything answers
+SYNC_CLASS=""
+classify_transport "git@github.com:daniel/pogo.git" >/dev/null 2>&1
+[ "$SYNC_CLASS" = "remote" ] \
+    && pass "classify_transport: a REACHABLE endpoint means the failure is at the far end, not the network" \
+    || fail "reachable endpoint classified as '$SYNC_CLASS'"
+
+probe_tcp() { return 1; }        # nothing answers
+SYNC_CLASS=""
+classify_transport "git@github.com:daniel/pogo.git" >/dev/null 2>&1
+[ "$SYNC_CLASS" = "network" ] \
+    && pass "classify_transport: an UNREACHABLE endpoint is the network — the 08-05 case" \
+    || fail "unreachable endpoint classified as '$SYNC_CLASS'"
+
+# The third answer, and the one the ticket asks for by name: when the runner
+# cannot classify it must SAY so and print the error, not fall back to the most
+# common cause. That fallback is exactly what produced the misleading alert.
+probe_tcp() { return 1; }
+SYNC_CLASS=""
+classify_transport "/Users/daniel/dev/pogo" >/dev/null 2>&1
+[ "$SYNC_CLASS" = "unclassified" ] \
+    && pass "classify_transport: an unprobeable remote yields 'unclassified' — it does not fall back to a guess" \
+    || fail "unprobeable remote classified as '$SYNC_CLASS'"
+
+eval "$REAL_PROBE"
+
+# ---------------------------------------------------------------------------
+# sync_with_retry — the network class retries, everything else settles
+# ---------------------------------------------------------------------------
+# Four hours of window went unused on 08-05 for a fault that lasted one second.
+# The scoping is the same argument the drain retry makes about exit 7: a dirty
+# tree, a diverged branch and a rejected key are all still true thirty seconds
+# later, so retrying them spends the window and mails a duplicate alert. A
+# dropped TCP connection is the one that may not be.
+REAL_SYNC_SRC="$(declare -f sync_src)"
+STUB_CLASS=network
+STUB_SUCCEED_ON=999
+SYNC_CALLS=0
+sync_src() {
+    SYNC_CALLS=$(( SYNC_CALLS + 1 ))
+    SYNC_CLASS="$STUB_CLASS"; SYNC_DETAIL="stub failure"
+    [ "$SYNC_CALLS" -ge "$STUB_SUCCEED_ON" ] && { SYNC_CLASS=""; return 0; }
+    return 1
+}
+SYNC_BACKOFF="0"; SYNC_RETRY_BUDGET=300; SYNC_ATTEMPTS=4
+# Retries are charged against the deploy window (the ruling's condition 2), so
+# these run as if it were 03:00. Without this they would be refused for lack of
+# window — which is itself asserted, below.
+WINDOW_END=6; RESERVE=1200; MAX_DRAIN=7200; MIN_DRAIN=600
+export POGO_DEPLOY_NOW=3
+
+# THE FIX, as an assertion. One transient failure followed by a success must not
+# cost the night.
+STUB_CLASS=network; STUB_SUCCEED_ON=2; SYNC_CALLS=0
+sync_with_retry >/dev/null 2>&1 \
+    && [ "$SYNC_CALLS" -eq 2 ] \
+    && pass "sync_with_retry: a network blip on attempt 1 is RETRIED and the deploy proceeds (the 08-05 night, saved)" \
+    || fail "sync_with_retry did not recover from a single transient failure (calls=$SYNC_CALLS)"
+
+STUB_CLASS=network; STUB_SUCCEED_ON=999; SYNC_CALLS=0
+if sync_with_retry >/dev/null 2>&1; then
+    fail "sync_with_retry succeeded against a permanently failing sync"
+elif [ "$SYNC_CALLS" -eq 4 ]; then
+    pass "sync_with_retry: a sustained outage stops at POGO_DEPLOY_SYNC_ATTEMPTS (4) — patience is bounded, not unlimited"
+else
+    fail "sync_with_retry made $SYNC_CALLS attempts, expected 4"
+fi
+
+# THE DISCRIMINATOR, as pm-pogo ruled it: would re-running plausibly give a
+# different answer for a reason UNRELATED TO THE CODE?
+#
+# The retryable side is the transport classes — the sync never reached the tree,
+# so nothing about the repo state was established and re-asking is how you find
+# out. `remote` is on this side despite naming the far end: it conflates a
+# rejected key with the 5xx and rate-limit cases the ruling lists by name, and a
+# TCP handshake cannot separate them without reading prose. The asymmetry then
+# decides it — retrying a dead key costs one bounded, logged interval; not
+# retrying a 5xx costs the night.
+for c in network remote unclassified; do
+    STUB_CLASS="$c"; STUB_SUCCEED_ON=2; SYNC_CALLS=0
+    sync_with_retry >/dev/null 2>&1
+    [ "$SYNC_CALLS" -eq 2 ] || fail "sync_with_retry did NOT retry '$c' — it established nothing about the tree, so the repo state is simply unknown"
+done
+pass "the discriminator RETRIES network, remote and unclassified — the classes where the sync never reached the tree"
+
+# ...and each class that ESTABLISHED a fact is tried exactly ONCE. Getting this
+# wrong in the permissive direction turns a dirty checkout into four identical
+# failures and a late alert; getting it wrong in the strict direction reinstates
+# the 08-05 defect.
+for c in dirty diverged checkout config; do
+    STUB_CLASS="$c"; STUB_SUCCEED_ON=999; SYNC_CALLS=0
+    sync_with_retry >/dev/null 2>&1
+    [ "$SYNC_CALLS" -eq 1 ] || fail "sync_with_retry retried a '$c' failure ($SYNC_CALLS attempts) — it established a fact and will re-establish it"
+done
+pass "the discriminator does NOT retry dirty, diverged, checkout or config — each established a fact that is as true in 30s"
+
+sync_class_retryable network && sync_class_retryable remote && sync_class_retryable unclassified \
+    && pass "sync_class_retryable: the transport classes are retryable" || fail "sync_class_retryable rejected a transport class"
+sync_class_retryable dirty || sync_class_retryable diverged || sync_class_retryable checkout || sync_class_retryable config \
+    && fail "sync_class_retryable accepted a class that established a fact" \
+    || pass "sync_class_retryable: dirty, diverged, checkout and config are NOT retryable"
+sync_class_retryable "" \
+    && fail "sync_class_retryable accepted an empty class" || pass "sync_class_retryable: an unset class is not retryable (it fails toward the conservative side)"
+
+# CONDITION 2, enforced rather than asserted: retries consume the deploy budget,
+# they do not extend it. At 05:55 there is no window left to spend, so the retry
+# must be refused even though attempts and retry-budget both remain — otherwise
+# the backoff spends the fleet's window to arrive at the same skip, later.
+POGO_DEPLOY_NOW=5; MIN_DRAIN=99999
+STUB_CLASS=network; STUB_SUCCEED_ON=999; SYNC_CALLS=0
+sync_with_retry >/dev/null 2>&1
+[ "$SYNC_CALLS" -eq 1 ] \
+    && pass "sync_with_retry: a retry is REFUSED when the window could not still afford a drain (retries consume the budget, they do not extend it)" \
+    || fail "sync_with_retry retried past the usable window ($SYNC_CALLS attempts)"
+MIN_DRAIN=600; POGO_DEPLOY_NOW=3
+
+# CONDITION 1: "failed once" and "failed after four attempts" must be
+# distinguishable, and the count is what the alert prints.
+STUB_CLASS=network; STUB_SUCCEED_ON=999; SYNC_CALLS=0
+sync_with_retry >/dev/null 2>&1
+[ "$SYNC_TRIES" -eq 4 ] && pass "SYNC_TRIES reports four attempts, so the alert can say how hard it tried" || fail "SYNC_TRIES=$SYNC_TRIES after four attempts"
+STUB_CLASS=dirty; STUB_SUCCEED_ON=999; SYNC_CALLS=0
+sync_with_retry >/dev/null 2>&1
+[ "$SYNC_TRIES" -eq 1 ] && pass "SYNC_TRIES reports ONE attempt for a non-retryable class — the two cases are distinguishable in the alert" || fail "SYNC_TRIES=$SYNC_TRIES after one attempt"
+
+# CONDITION 3: a retried success must NAME the attempt that won. A silent retry
+# converts a flaky night into an invisible one, and the count of recovered
+# nights is the evidence that the network is the dominant failure mode here.
+STUB_CLASS=network; STUB_SUCCEED_ON=3; SYNC_CALLS=0
+RECOVER_LOG="$WORK/recover.log"
+sync_with_retry > "$RECOVER_LOG" 2>&1
+grep -q 'RECOVERED' "$RECOVER_LOG" && grep -q 'attempt 3' "$RECOVER_LOG" \
+    && pass "a recovered sync NAMES the attempt that won (a silent retry makes a flaky night invisible)" \
+    || fail "recovery not named in the log: $(cat "$RECOVER_LOG")"
+STUB_CLASS=network; STUB_SUCCEED_ON=1; SYNC_CALLS=0
+sync_with_retry > "$RECOVER_LOG" 2>&1
+grep -q 'RECOVERED' "$RECOVER_LOG" \
+    && fail "a first-attempt success claimed a recovery — that would inflate the flakiness evidence" \
+    || pass "a first-attempt success reports NO recovery (the evidence counts real retries only)"
+
+# The budget ceiling, independent of the attempt count: backoff is time taken
+# from the drain, and it has to be bounded by something an operator can read off
+# one variable rather than by multiplying the delay list out in their head.
+#
+# Scaled to 1s rather than the production 100s. The property is the ARITHMETIC —
+# stop when the next delay would take the total past the ceiling — and it holds
+# at any scale, whereas a test that sleeps the real numbers spends 100s of every
+# suite run proving something a 1s version proves identically.
+SYNC_BACKOFF="1"; SYNC_RETRY_BUDGET=1; SYNC_ATTEMPTS=9
+STUB_CLASS=network; STUB_SUCCEED_ON=999; SYNC_CALLS=0
+sync_with_retry >/dev/null 2>&1
+[ "$SYNC_CALLS" -eq 2 ] \
+    && pass "sync_with_retry: POGO_DEPLOY_SYNC_RETRY_BUDGET caps the total backoff even when attempts remain" \
+    || fail "retry budget did not cap the backoff (calls=$SYNC_CALLS, expected 2)"
+SYNC_BACKOFF="15 45 120"; SYNC_RETRY_BUDGET=300; SYNC_ATTEMPTS=4
+
+# The production numbers must fit inside the production budget, or the ceiling
+# silently truncates the attempt count and POGO_DEPLOY_SYNC_ATTEMPTS stops
+# meaning what it says.
+[ $(( 15 + 45 + 120 )) -le 300 ] \
+    && pass "the shipped backoff list (15+45+120=180s) fits inside the shipped 300s retry budget" \
+    || fail "the shipped backoff exceeds the shipped retry budget"
+
+# sync_backoff itself: the last entry repeats, so a shortened list degrades into
+# a constant rather than into an unthrottled hammer at zero seconds.
+[ "$(sync_backoff 1 "15 45 120")" = "15" ] && pass "sync_backoff: first retry waits 15s" || fail "sync_backoff 1"
+[ "$(sync_backoff 3 "15 45 120")" = "120" ] && pass "sync_backoff: the third waits 120s" || fail "sync_backoff 3"
+[ "$(sync_backoff 9 "15 45 120")" = "120" ] \
+    && pass "sync_backoff: past the end of the list the last delay repeats (never 0)" || fail "sync_backoff overrun"
+
+eval "$REAL_SYNC_SRC"
+unset POGO_DEPLOY_NOW   # do not leak a fake clock into the assertions below
+
+# ---------------------------------------------------------------------------
+# The alert text — each class gets the paragraph that is TRUE of it
+# ---------------------------------------------------------------------------
+# The same defect remedy_for_exit was fixed for on mg-8f7e, one layer down: one
+# paragraph under every code. Here it sent Daniel to a `git status` that was
+# clean, which is worse than no alert — it spends the reader's trust.
+SNET="$(remedy_for_sync_class network)"; SDIRTY="$(remedy_for_sync_class dirty)"
+SREM="$(remedy_for_sync_class remote)"; SDIV="$(remedy_for_sync_class diverged)"
+SUNC="$(remedy_for_sync_class unclassified)"
+
+printf '%s' "$SNET" | grep -q 'deploy-src status' \
+    && fail "the NETWORK remedy still sends the reader to inspect the checkout — the 08-05 defect, verbatim" \
+    || pass "the NETWORK remedy does NOT send the reader to a 'git status' that is clean"
+printf '%s' "$SNET" | grep -qi 'not the place to look' \
+    && pass "the NETWORK remedy says explicitly that the deploy tree is not the place to look" || fail "network remedy does not rule the tree out"
+printf '%s' "$SDIRTY" | grep -q 'deploy-src status' \
+    && pass "the DIRTY remedy keeps the checkout inspection, where it is the right advice" || fail "dirty remedy lost its inspection step"
+printf '%s' "$SREM" | grep -qi 'ANSWERED a TCP connection' \
+    && pass "the REMOTE remedy states the network was measured UP, so the reader does not chase it" || fail "remote remedy does not report the connectivity measurement"
+# ...and it must not overclaim. The probe runs moments AFTER the failure, so a
+# blip that had already ended reads exactly like an auth problem — the same
+# species of defect as the one being fixed, one size smaller. The remedy has to
+# carry that caveat rather than present an inference as a finding.
+printf '%s' "$SREM" | grep -qi 'floor on connectivity' \
+    && pass "the REMOTE remedy admits the probe is a FLOOR on connectivity, not a proof — it does not overclaim its own measurement" \
+    || fail "remote remedy presents an inference as a finding"
+printf '%s' "$SREM" | grep -qi 'correct access rights' \
+    && pass "the REMOTE remedy warns that git's access-rights wording appears for network failures too" || fail "remote remedy does not warn about the ambiguous git wording"
+printf '%s' "$SUNC" | grep -qi 'could not establish\|rather than naming the most common' \
+    && pass "the UNCLASSIFIED remedy admits it does not know instead of naming the most likely cause" || fail "unclassified remedy guesses"
+
+[ "$SNET" != "$SDIRTY" ] && [ "$SNET" != "$SREM" ] && [ "$SDIRTY" != "$SDIV" ] && [ "$SREM" != "$SUNC" ] \
+    && pass "remedy_for_sync_class: the classes get DIFFERENT paragraphs — one paragraph for all of them is the defect" \
+    || fail "remedy_for_sync_class returns the same text for different classes"
+
+for c in network remote dirty diverged checkout config unclassified ''; do
+    [ -n "$(remedy_for_sync_class "$c")" ] || fail "remedy_for_sync_class '$c' is empty"
+    [ -n "$(describe_sync_class "$c")" ] || fail "describe_sync_class '$c' is empty"
+done
+pass "every sync class, and an empty one, yields a non-empty description and remedy"
+
+case "$(describe_sync_class network)" in *NETWORK*) pass "describe_sync_class names the network" ;; *) fail "describe_sync_class network" ;; esac
+case "$(describe_sync_class dirty)" in *DIRTY*) pass "describe_sync_class names the dirty checkout" ;; *) fail "describe_sync_class dirty" ;; esac
+
+# ---------------------------------------------------------------------------
+# The wiring — same shape as the --force and --drain-timeout checks
+# ---------------------------------------------------------------------------
+# Each of these is a one-line edit away from silently reverting to the 08-05
+# behaviour, with the classifier still present and simply not consulted.
+grep -qE '^[^#]*if ! sync_with_retry' "$RUNNER" \
+    && pass "main() calls sync_with_retry, so a network abort is actually retried" \
+    || fail "main() does not call sync_with_retry — the retry is defined but never reached"
+# Non-comment lines only, for the reason the --force check states below: the
+# header quotes the 08-05 alert verbatim to explain why it was wrong, and a
+# check that cannot tell an explanation from a use has to be deleted the first
+# time somebody documents the rule — after which it is not there for the edit it
+# was written to catch.
+grep -v '^[[:space:]]*#' "$RUNNER" | grep -q 'dirty or diverged aborts by design' \
+    && fail "the unconditional 'dirty or diverged' remedy is back in the runner's alert" \
+    || pass "the unconditional 'dirty or diverged' remedy is gone from the runner's alert (it survives only as the header's account of the defect)"
+grep -q 'remedy_for_sync_class "\$SYNC_CLASS"' "$RUNNER" \
+    && pass "the sync alert prints the remedy for the class it established" || fail "the sync alert does not use remedy_for_sync_class"
+grep -qE '\$\{SYNC_DETAIL:-' "$RUNNER" \
+    && pass "the sync alert prints the underlying error VERBATIM" || fail "the sync alert does not print SYNC_DETAIL"
+# Backoff is time taken from the drain. A budget computed before the sleeping
+# and handed to --drain-timeout after it is a window-derived number that has
+# quietly stopped being derived from the window.
+[ "$(grep -cE '^[^#]*budget="\$\(drain_budget' "$RUNNER")" -ge 2 ] \
+    && pass "the drain budget is RECOMPUTED after the sync backoff, not reused from before it" \
+    || fail "the drain budget is computed only once — backoff time would be double-spent"
+
+# ---------------------------------------------------------------------------
 # missing_ids — the post-bounce mail-check re-check
 # ---------------------------------------------------------------------------
 # On 07-17 the schedules were present right after the bounce and were reaped
@@ -478,6 +860,27 @@ MIN_DRAIN=600
     && pass "attempt_disposition: LAST night's record does not settle tonight" || fail "disposition stale date"
 [ "$(attempt_disposition 2026-07-31 "2026-07-31 1 7")" = "retry" ] \
     && pass "attempt_disposition: tonight's drain stall -> RETRY (the failure a later fire can fix)" || fail "disposition rc=7"
+# Exit 10 — a sync that aborted on a class establishing NOTHING about the tree
+# (mg-0d70). Same discriminator as exit 7, one layer up: the repo state is
+# unknown, so re-asking is how you find out. This half is INERT on this box until
+# mg-fc99 installs the 04:00 and 05:00 fires — the installed plist's
+# StartCalendarInterval is a dict with Hour=3, so there is nothing to carry it.
+[ "$(attempt_disposition 2026-07-31 "2026-07-31 1 10")" = "retry" ] \
+    && pass "attempt_disposition: tonight's transient SYNC abort (10) -> RETRY, the 08-05 failure that cost a whole night" || fail "disposition rc=10"
+[ "$(attempt_disposition 2026-07-31 "2026-07-31 1 1")" = "settled" ] \
+    && pass "attempt_disposition: a NON-retryable sync abort still exits 1 and settles the night (dirty and diverged must not reopen it)" || fail "disposition rc=1"
+rc_reopens_night 7 && rc_reopens_night 10 \
+    && pass "rc_reopens_night: 7 and 10 — the two outcomes that established nothing" || fail "rc_reopens_night 7/10"
+rc_reopens_night 1 || rc_reopens_night 4 || rc_reopens_night 9 || rc_reopens_night 0 \
+    && fail "rc_reopens_night accepted a code that established a fact" \
+    || pass "rc_reopens_night: 0, 1, 4 and 9 settle the night (each established something)"
+case "$(describe_exit 10)" in
+    *sync*) pass "describe_exit 10 names the sync, not the drain — the two retryable codes have different stories" ;;
+    *) fail "describe_exit 10: $(describe_exit 10)" ;;
+esac
+[ "$(describe_exit 10)" != "$(describe_exit 7)" ] \
+    && pass "describe_exit: 7 and 10 are both retryable but get DIFFERENT descriptions" || fail "describe_exit 7 and 10 are identical"
+
 [ "$(attempt_disposition 2026-07-31 "2026-07-31 1 4")" = "settled" ] \
     && pass "attempt_disposition: tonight's BUILD failure -> settled (no duplicate alert)" || fail "disposition rc=4"
 [ "$(attempt_disposition 2026-07-31 "2026-07-31 1 9")" = "settled" ] \
