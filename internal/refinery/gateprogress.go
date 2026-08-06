@@ -131,6 +131,150 @@ type StepProgress struct {
 	CPUSource string `json:"cpu_source,omitempty"`
 }
 
+// Layer names the LEVEL of the system a signal measures. Every number in a
+// StepProgress belongs to exactly one of these, and the defect this attribution
+// exists to prevent is a signal from one layer being read as evidence about
+// another (mg-48d8).
+//
+// The observed instance: a verdict reading "ALIVE and working ... waiting is
+// correct" on the strength of a 33-second-old heartbeat while the gate's own
+// output had been frozen for 26 minutes. The heartbeat is written by the
+// RUNNER; it proves the pogod-side supervisor is alive and says nothing about
+// the process it supervises. A deadlocked gate produces exactly that pair of
+// readings, so a verdict derived from the heartbeat would have printed the same
+// sentence with the same confidence.
+//
+// This is the same shape as mg-fc8d from the other side: an agent wedged at a
+// dead prompt still ANIMATES, so last-activity said "just now" for 13 hours. In
+// both cases the liveness signal belonged to a different layer than the thing
+// being judged, and in both cases nothing in the output said which layer it
+// came from.
+const (
+	// LayerRunner is the pogod-side goroutine supervising the gate. Its
+	// heartbeat proves the SUPERVISOR is alive. It cannot prove anything about
+	// the supervised process — it beats identically for a gate computing at
+	// four cores and a gate deadlocked on a mutex.
+	LayerRunner = "RUNNER"
+	// LayerGate is the supervised process and its descendants. Two independent
+	// signals live here: what it PRINTS, and what its process subtree COMPUTES.
+	// Neither alone settles anything — a healthy gate was observed silent for
+	// 22 minutes, and an idle subtree is also what a process blocked on I/O
+	// looks like — which is why they are reported as two rows and not merged.
+	LayerGate = "GATE"
+	// LayerHost is the machine both of the above run on. It answers "was there
+	// any CPU to compute WITH", which is what separates a starved gate from a
+	// stalled one.
+	LayerHost = "HOST"
+)
+
+// Signal is one measurement, carrying the layer it was taken at.
+//
+// The whole point of the type is that Layer travels with State. A bare "alive"
+// is what got read as a claim about the gate; "RUNNER alive" cannot be.
+type Signal struct {
+	// Layer is one of LayerRunner / LayerGate / LayerHost.
+	Layer string
+	// Name is the instrument: "heartbeat", "stdout", "process subtree", "load".
+	Name string
+	// State is the one-word reading, upper-case when it is the reading that
+	// should stop a skimming reader.
+	State string
+	// Detail carries the numbers the state was derived from, so a reader can
+	// disagree with the state without re-running anything.
+	Detail string
+}
+
+// Signals returns the evidence behind Diagnosis, one row per instrument, each
+// attributed to the layer it measures.
+//
+// It exists so a reader can see the signals DISAGREE. The ticket's own request
+// was for exactly this shape:
+//
+//	RUNNER   alive, heartbeat 33s
+//	GATE     no output for 26m0s
+//
+// — two facts that point in different directions, presented as two facts. The
+// single confident sentence they were collapsed into is what made a deadlock
+// and a slow gate render identically.
+func (p *StepProgress) Signals(now time.Time) []Signal {
+	if p == nil {
+		return nil
+	}
+	out := []Signal{p.runnerSignal(now), p.stdoutSignal(now)}
+	if p.EndTime.IsZero() {
+		// The subtree reading is only about a gate that is still supposed to
+		// have processes. On a finished record it would be a measurement of
+		// nothing, reported in the shape of a measurement.
+		state := map[SubtreeState]string{
+			SubtreeBusy:    "busy",
+			SubtreeIdle:    "IDLE",
+			SubtreeGone:    "GONE",
+			SubtreeUnknown: "UNKNOWN",
+		}[p.Subtree()]
+		out = append(out, Signal{Layer: LayerGate, Name: "process subtree", State: state, Detail: p.CPUSummary()})
+	}
+	if c := p.Contention; c != nil && c.Samples > 0 {
+		state := "has capacity"
+		if c.Contended() {
+			state = "SATURATED"
+		}
+		out = append(out, Signal{Layer: LayerHost, Name: "load", State: state, Detail: c.Report()})
+	}
+	return out
+}
+
+func (p *StepProgress) runnerSignal(now time.Time) Signal {
+	s := Signal{Layer: LayerRunner, Name: "heartbeat"}
+	switch {
+	case !p.EndTime.IsZero():
+		s.State = "n/a"
+		s.Detail = fmt.Sprintf("the gate finished %s ago; a finished record makes no liveness claim",
+			roundDur(now.Sub(p.EndTime)))
+	case p.Heartbeat.IsZero():
+		s.State = "NONE YET"
+		s.Detail = fmt.Sprintf("no beat recorded (interval %s)", p.HeartbeatInterval)
+	case p.RunnerAlive(now):
+		s.State = "alive"
+		s.Detail = fmt.Sprintf("%s old, beat %d, every %s", roundDur(p.HeartbeatAge(now)), p.Beats, p.HeartbeatInterval)
+	default:
+		s.State = "DEAD"
+		s.Detail = fmt.Sprintf("%s old — more than %d intervals of %s",
+			roundDur(p.HeartbeatAge(now)), heartbeatStaleAfter, p.HeartbeatInterval)
+	}
+	return s
+}
+
+func (p *StepProgress) stdoutSignal(now time.Time) Signal {
+	s := Signal{Layer: LayerGate, Name: "stdout"}
+	age, spoke := p.OutputAge(now)
+	switch {
+	case !spoke:
+		s.State = "SILENT"
+		s.Detail = fmt.Sprintf("no output at all in %s", roundDur(p.Elapsed(now)))
+	case p.OutputFresh(now):
+		s.State = "talking"
+		s.Detail = fmt.Sprintf("%s, last %s ago, running %s",
+			plural(p.OutputLines, "line"), roundDur(age), roundDur(p.Elapsed(now)))
+	default:
+		s.State = "SILENT"
+		s.Detail = fmt.Sprintf("%s, but nothing for %s of its %s",
+			plural(p.OutputLines, "line"), roundDur(age), roundDur(p.Elapsed(now)))
+	}
+	return s
+}
+
+// runnerAside is the clause that appends the runner's reading to a verdict
+// about the GATE while denying it any evidential weight there.
+//
+// It is a sentence rather than a footnote because the part of a verdict that
+// travels is its first line — a caveat further down does not reach the reader
+// who forwards the headline.
+func (p *StepProgress) runnerAside(now time.Time) string {
+	return fmt.Sprintf(" (RUNNER: heartbeat %s old — that is the supervisor, which beats the same "+
+		"whether the gate is computing or deadlocked, so it is not evidence here.)",
+		roundDur(p.HeartbeatAge(now)))
+}
+
 // SubtreeState is what the CPU measurement says about the gate's processes.
 type SubtreeState int
 
@@ -276,6 +420,20 @@ func (p *StepProgress) RunnerAlive(now time.Time) bool {
 // record: whether waiting is the right move. It is deliberately explicit
 // about the case it cannot resolve, because the failure this ticket
 // documents was an operator filling such a gap with a guess.
+//
+// # Every verdict names its SUBJECT
+//
+// The headline is "GATE ALIVE and computing", never a bare "ALIVE and
+// working". mg-48d8 was filed against the bare form: it was rendered from the
+// RUNNER's heartbeat while the GATE had been silent for 26 minutes, and it is
+// what a deadlocked gate would have produced too. A verdict that does not say
+// what it is a verdict ABOUT can be read as a verdict about anything, and the
+// thing at issue is always the gate.
+//
+// So: the gate's own evidence leads every sentence, the runner's heartbeat
+// appears as an aside that explicitly disclaims evidential weight, and the
+// signals behind all of it are available separately from Signals() so a reader
+// can watch them disagree rather than take one collapsed sentence on trust.
 func (p *StepProgress) Diagnosis(now time.Time) string {
 	if p == nil {
 		return "no progress record"
@@ -289,7 +447,11 @@ func (p *StepProgress) Diagnosis(now time.Time) string {
 	}
 	elapsed := roundDur(p.Elapsed(now))
 	if !p.RunnerAlive(now) {
-		return fmt.Sprintf("DEAD: no heartbeat for %s, which is more than %d intervals of %s — "+
+		// The one verdict whose subject IS the runner, and it says so. A dead
+		// runner is decisive about the gate for a structural reason — nothing is
+		// left to collect the gate's exit — so this is the single case where a
+		// runner-layer reading may be acted on directly.
+		return fmt.Sprintf("RUNNER DEAD: no heartbeat for %s, which is more than %d intervals of %s — "+
 			"the process running this gate is gone, not slow. Waiting will not help.",
 			roundDur(p.HeartbeatAge(now)), heartbeatStaleAfter, p.HeartbeatInterval)
 	}
@@ -299,19 +461,26 @@ func (p *StepProgress) Diagnosis(now time.Time) string {
 	// computing. Either one alone is confidently wrong in a case that happens
 	// routinely (see subtreecpu.go).
 	if p.OutputFresh(now) {
+		// The gate's own bytes lead. They are the only signal in the record that
+		// the gate itself produced, so they are the only one that can carry a
+		// claim about it; the heartbeat follows as an aside that says so.
+		//
 		// The contention note matters here as much as in the silent cases, and
 		// for a different reason: this is the shape of the run that prompted
 		// mg-1b8c. A gate talking steadily and healthily, on track to blow a
 		// timeout, purely because it is sharing the host. Nothing about
 		// "ALIVE and working" would tell a reader that.
-		return fmt.Sprintf("ALIVE and working: runner heartbeat is %s old, gate has produced %s, "+
-			"last %s ago, running %s. Slow, not hung — waiting is correct.%s",
-			roundDur(p.HeartbeatAge(now)), plural(p.OutputLines, "line"), roundDur(now.Sub(p.LastOutput)),
-			elapsed, p.contentionNote())
+		return fmt.Sprintf("GATE ALIVE and working: the gate itself has produced %s, "+
+			"last %s ago, running %s — its own output, which only the gate can write. "+
+			"Slow, not hung — waiting is correct.%s%s",
+			plural(p.OutputLines, "line"), roundDur(now.Sub(p.LastOutput)), elapsed,
+			p.runnerAside(now), p.contentionNote())
 	}
 
 	// Silent. Describe the silence precisely, then let the process table
-	// decide what it means.
+	// decide what it means. Every branch below leads with the GATE, because the
+	// gate is what is at issue and the runner's beat has already proved only
+	// that there is something left to notice when the gate finishes.
 	var silence string
 	if age, spoke := p.OutputAge(now); spoke {
 		silence = fmt.Sprintf("the gate has produced %s but has been silent for %s of its %s",
@@ -319,31 +488,33 @@ func (p *StepProgress) Diagnosis(now time.Time) string {
 	} else {
 		silence = fmt.Sprintf("the gate has produced no output at all in %s", elapsed)
 	}
-	beat := fmt.Sprintf("runner heartbeat is %s old", roundDur(p.HeartbeatAge(now)))
 
 	switch p.Subtree() {
 	case SubtreeBusy:
-		return fmt.Sprintf("ALIVE and computing: %s, and %s — but its process subtree is %s. "+
-			"Silence here is a gate that logs at boundaries, not a stall. Waiting is correct.%s",
-			beat, silence, p.CPUSummary(), p.contentionNote())
+		return fmt.Sprintf("GATE ALIVE and computing: %s — but its process subtree is %s, "+
+			"which is a measurement of the GATE's own processes. Silence here is a gate that "+
+			"logs at boundaries, not a stall. Waiting is correct.%s%s",
+			silence, p.CPUSummary(), p.runnerAside(now), p.contentionNote())
 	case SubtreeIdle:
-		return fmt.Sprintf("SUSPECT: %s, %s, AND its process subtree is %s. "+
+		return fmt.Sprintf("GATE SUSPECT: %s, AND its process subtree is %s. "+
 			"Silent and idle together is the shape of a stall — but it is not proof: a process "+
 			"blocked on I/O, on a lock, or sleeping between phases is idle and healthy. "+
 			"Look closer (ps the subtree, check the gate's log) before intervening; killing a "+
-			"healthy gate is destructive, waiting on a hung one only costs time.%s %s",
-			beat, silence, p.CPUSummary(), p.contentionNote(), p.timeoutNote(now))
+			"healthy gate is destructive, waiting on a hung one only costs time.%s%s %s",
+			silence, p.CPUSummary(), p.runnerAside(now), p.contentionNote(), p.timeoutNote(now))
 	case SubtreeGone:
-		return fmt.Sprintf("SUSPECT: %s, %s, and the gate process (pid %d) is GONE from the process "+
-			"table. The runner is still beating, so this should resolve on its own within a beat "+
-			"or two; if it does not, the runner is waiting on something that will not return. %s",
-			beat, silence, p.GatePID, p.timeoutNote(now))
+		return fmt.Sprintf("GATE PROCESS GONE — SUSPECT: %s, and the gate process (pid %d) is no "+
+			"longer in the process table. The runner is still beating, which here means it is "+
+			"supervising nothing: this should resolve on its own within a beat or two, and if it "+
+			"does not, the runner is waiting on something that will not return.%s %s",
+			silence, p.GatePID, p.runnerAside(now), p.timeoutNote(now))
 	default:
-		return fmt.Sprintf("ALIVE but UNDETERMINED: %s, %s, and its process subtree could not be "+
+		return fmt.Sprintf("GATE UNDETERMINED (runner ALIVE): %s, and its process subtree could not be "+
 			"measured (%s) — so whether the gate is working or stuck cannot be told from here. "+
 			"Output staleness ALONE does not settle it: a healthy gate was observed silent for "+
-			"8m31s while burning four cores, so a long silence is not evidence of a stall.%s %s",
-			beat, silence, p.CPUSummary(), p.contentionNote(), p.timeoutNote(now))
+			"8m31s while burning four cores, and another for 22 minutes, so a long silence is not "+
+			"evidence of a stall.%s%s %s",
+			silence, p.CPUSummary(), p.runnerAside(now), p.contentionNote(), p.timeoutNote(now))
 	}
 }
 

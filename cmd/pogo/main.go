@@ -305,8 +305,7 @@ Use --json for the raw structured response.`,
 			if !report.Refinery.Enabled {
 				refState = "disabled"
 			}
-			fmt.Printf("refinery: %s  (queue=%d, history=%d, recent_failures=%d)\n",
-				refState, report.Refinery.QueueLength, report.Refinery.HistoryLength, report.Refinery.RecentFailures)
+			fmt.Print(formatHealthRefinery(refState, report.Refinery, time.Now()))
 		},
 	}
 

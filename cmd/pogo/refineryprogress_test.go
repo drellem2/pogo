@@ -49,14 +49,17 @@ func TestFormatMRProgressDistinguishesSlowFromDead(t *testing.T) {
 	if running == died {
 		t.Fatal("a running gate and a dead one must not render identically — that is the defect")
 	}
-	for _, want := range []string{"Running:   10m0s", "Heartbeat: 4s ago", "beat 20, every 30s",
-		"Gate says: 412 lines", "ALIVE and working", "waiting is correct", "Timeout:"} {
+	// Each reading is asserted WITH the layer that owns it. mg-48d8: the
+	// heartbeat is the runner's and the output is the gate's, and a reader who
+	// cannot see which is which reads the first as a claim about the second.
+	for _, want := range []string{"Running:   10m0s", "RUNNER heartbeat", "4s old, beat 20, every 30s",
+		"GATE   stdout", "412 lines, last 5s ago", "ALIVE and working", "waiting is correct", "Timeout:"} {
 		if !strings.Contains(running, want) {
 			t.Errorf("a running gate's output should contain %q, got:\n%s", want, running)
 		}
 	}
-	for _, want := range []string{"Running:   10m0s", "Heartbeat: 10m0s ago", "nothing yet",
-		"DEAD", "Waiting will not help"} {
+	for _, want := range []string{"Running:   10m0s", "RUNNER heartbeat", "DEAD      10m0s old",
+		"no output at all", "Waiting will not help"} {
 		if !strings.Contains(died, want) {
 			t.Errorf("a dead runner's output should contain %q, got:\n%s", want, died)
 		}
@@ -98,8 +101,17 @@ func TestFormatMRProgressFinishedRecord(t *testing.T) {
 	if !strings.Contains(out, "Finished:") {
 		t.Errorf("a finished record should print its end time, got:\n%s", out)
 	}
-	if strings.Contains(out, "Heartbeat:") {
-		t.Errorf("a finished record should not present a heartbeat age as live, got:\n%s", out)
+	// The heartbeat row survives on a finished record but must claim nothing:
+	// it necessarily goes stale once the gates finish, so an age presented as
+	// live would read as a dead runner on every merged MR.
+	if !strings.Contains(out, "RUNNER heartbeat       n/a") {
+		t.Errorf("a finished record's heartbeat must be marked n/a, got:\n%s", out)
+	}
+	if !strings.Contains(out, "makes no liveness claim") {
+		t.Errorf("a finished record must say why its heartbeat means nothing, got:\n%s", out)
+	}
+	if strings.Contains(out, "GATE   process subtree") {
+		t.Errorf("a finished record has no processes to measure and must not print a subtree row, got:\n%s", out)
 	}
 	if strings.Contains(out, "DEAD") {
 		t.Errorf("a finished record must not read as a dead runner, got:\n%s", out)
@@ -127,8 +139,15 @@ func TestFormatMRProgressSilentGateIsReportedAsUnresolved(t *testing.T) {
 		CPUUnavailable:    "reading the process table failed: ps: exit status 1",
 	}, now)
 
-	if !strings.Contains(out, "ALIVE but UNDETERMINED") {
+	// The verdict names the layer it is undetermined ABOUT. "ALIVE but
+	// UNDETERMINED", which this replaces, left the reader to supply the
+	// subject — and the reader supplied the runner, whose heartbeat was fresh
+	// and irrelevant (mg-48d8).
+	if !strings.Contains(out, "GATE UNDETERMINED") {
 		t.Errorf("a silent, unmeasurable gate under a live runner should be named as such, got:\n%s", out)
+	}
+	if !strings.Contains(out, "RUNNER heartbeat       alive") {
+		t.Errorf("the live runner must still be reported, on its own row, got:\n%s", out)
 	}
 	if !strings.Contains(out, "cannot be told from here") {
 		t.Errorf("the verdict must admit what it cannot resolve, got:\n%s", out)
@@ -196,10 +215,10 @@ func TestFormatMRProgressSeparatesASlowHostFromASlowChange(t *testing.T) {
 	if !strings.Contains(onFullHost, "HOST SATURATED") {
 		t.Errorf("a gate that ran on a full host must say so:\n%s", onFullHost)
 	}
-	if !strings.Contains(onFullHost, "fleet 8.1 of 10 cores") {
+	if !strings.Contains(onFullHost, "fleet held 8.1 of 10 cores") {
 		t.Errorf("the numbers must be printed, not just the verdict:\n%s", onFullHost)
 	}
-	if !strings.Contains(onQuietHost, "host had capacity") {
+	if !strings.Contains(onQuietHost, "HOST   load            has capacity") {
 		t.Errorf("a gate that ran on a quiet host must say so positively — absence would mean "+
 			"\"not measured\", which is a third thing:\n%s", onQuietHost)
 	}
@@ -225,8 +244,8 @@ func TestFormatMRProgressSaysNothingWhenNothingWasMeasured(t *testing.T) {
 		Heartbeat:         now,
 		HeartbeatInterval: "30s",
 	}, now)
-	if strings.Contains(out, "Host:") {
-		t.Errorf("an unsampled run must print no host line:\n%s", out)
+	if strings.Contains(out, "HOST") {
+		t.Errorf("an unsampled run must print no host row:\n%s", out)
 	}
 
 	empty := &hostload.Summary{}
@@ -237,7 +256,7 @@ func TestFormatMRProgressSaysNothingWhenNothingWasMeasured(t *testing.T) {
 		HeartbeatInterval: "30s",
 		Contention:        empty,
 	}, now)
-	if strings.Contains(out, "Host:") {
-		t.Errorf("a zero-sample contention record must print no host line:\n%s", out)
+	if strings.Contains(out, "HOST") {
+		t.Errorf("a zero-sample contention record must print no host row:\n%s", out)
 	}
 }

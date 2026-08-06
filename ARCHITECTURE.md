@@ -500,6 +500,29 @@ observed silent for 8m31s while a descendant burned 3.9 cores, so output
 staleness alone is confidently wrong in a case that happens routinely.
 `pogo refinery show` prints that reading as a `Verdict:` line.
 
+**Every signal is printed with the LAYER it measures, and the verdict names the
+layer it is judging** (mg-48d8). The table above is the model; the output used
+not to be. `Heartbeat: 33s ago` sat next to `Gate says: 124 lines, last 26m0s
+ago` with nothing saying that the first is written by the supervisor and the
+second by the thing supervised, and the verdict read `ALIVE and working ...
+Slow, not hung — waiting is correct` — rendered from the heartbeat, about a gate
+that had been silent for 26 minutes. It would have printed the same sentence for
+a deadlock, because a runner beats identically either way. The evidence is now a
+column of `RUNNER` / `GATE` / `HOST` rows, the verdict opens with its subject
+(`GATE ALIVE and computing`, `RUNNER DEAD`), and where the heartbeat appears in a
+verdict about the gate it is explicitly disclaimed as evidence there.
+
+The same mistake was made from the other side on 2026-08-05 with `ps aux | grep
+-i refinery`, which matched eleven of the operator's own shell wrappers at 0.0%
+CPU and was read as a hung gate while the gate was producing output. Hence three
+properties the subtree measurement holds and any replacement must: it finds the
+gate **by ancestry** from the runner's pid and never by matching a command line;
+it **sums the whole subtree**, because the gate's top-level process is a shell
+blocking in `wait(2)` (measured: root 0.0%, child 543.4%); and it has a
+**positive control** — `TestSubtreeGoneIsProvenAgainstARealProcess` finds a real
+process before it is killed and reports it gone afterwards, on the same pid, so
+that a "not found" comes from an instrument shown to be capable of finding.
+
 **The last two are easy to confuse and answer opposite halves of one question.**
 `cpu_cores` is rooted at the gate's own pid; `contention` is rooted at pogod. The
 pair matters most in the case each would get wrong alone: **a saturated host

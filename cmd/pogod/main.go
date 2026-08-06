@@ -559,6 +559,11 @@ func healthFull(w http.ResponseWriter, r *http.Request) {
 		refineryHealth.QueueLength = st.QueueLen
 		refineryHealth.HistoryLength = st.HistoryLen
 		refineryHealth.PollInterval = st.PollInterval
+		// The slot-holder travels with the pending count, never without it
+		// (mg-48d8): the count alone renders a busy refinery and a stopped one
+		// identically, and that is the reading six agents acted on.
+		refineryHealth.Processing = st.Processing
+		refineryHealth.ProcessingSince = st.ProcessingSince
 
 		// Count recent failures from history
 		for _, mr := range mergeQueue.History() {

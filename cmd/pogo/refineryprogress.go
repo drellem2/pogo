@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/drellem2/pogo/internal/client"
+	"github.com/drellem2/pogo/internal/health"
 	"github.com/drellem2/pogo/internal/refinery"
 )
 
@@ -33,44 +34,72 @@ func formatMRProgress(p *refinery.StepProgress, now time.Time) string {
 	fmt.Fprintf(&b, "Gate:      %s\n", gate)
 	fmt.Fprintf(&b, "Running:   %s (started %s)\n", p.Elapsed(now).Round(time.Second),
 		p.StartTime.Format("15:04:05"))
-	if p.EndTime.IsZero() {
-		fmt.Fprintf(&b, "Heartbeat: %s ago — beat %d, every %s\n",
-			p.HeartbeatAge(now).Round(time.Second), p.Beats, p.HeartbeatInterval)
-	} else {
+	if !p.EndTime.IsZero() {
 		fmt.Fprintf(&b, "Finished:  %s\n", p.EndTime.Format("15:04:05"))
-	}
-	if p.LastOutput.IsZero() {
-		fmt.Fprintf(&b, "Gate says: nothing yet (0 lines)\n")
-	} else {
-		fmt.Fprintf(&b, "Gate says: %d lines, last %s ago\n", p.OutputLines,
-			now.Sub(p.LastOutput).Round(time.Second))
-	}
-	// The CPU line is printed for a running gate whether or not the gate is
-	// talking. It is the second half of the pair: output says whether the gate
-	// is TALKING, this says whether it is WORKING, and only together do they
-	// separate a slow gate from a stopped one (mg-0c51).
-	if p.EndTime.IsZero() {
-		fmt.Fprintf(&b, "Gate CPU:  %s\n", p.CPUSummary())
 	}
 	if !p.TimeoutAt.IsZero() && p.EndTime.IsZero() {
 		fmt.Fprintf(&b, "Timeout:   %s (in %s)\n", p.TimeoutAt.Format("15:04:05"),
 			p.TimeoutAt.Sub(now).Round(time.Second))
 	}
-	if c := p.Contention; c != nil && c.Samples > 0 {
-		// Printed for every sampled run, contended or not, because the useful
-		// reading of "this gate took 40 minutes" needs to know the host was
-		// quiet just as much as it needs to know the host was full. An absent
-		// line here would mean "not measured", and that is a third thing.
-		state := "host had capacity"
-		if c.Contended() {
-			state = "HOST SATURATED"
-		}
-		fmt.Fprintf(&b, "Host:      %s — fleet %.1f of %d cores (peak %.1f, %d procs), non-fleet %.1f, over %d samples\n",
-			state, c.MeanFleetCores, c.Cores, c.PeakFleetCores, c.PeakFleetProcs,
-			c.MeanExternalCores, c.Samples)
+	// The evidence, one row per instrument, each labelled with the LAYER it
+	// measures. Before mg-48d8 these were four unlabelled lines — "Heartbeat:
+	// 33s ago" next to "Gate says: 124 lines, last 26m ago" — and the reader was
+	// left to know unaided that the first is written by the supervisor and the
+	// second by the thing being supervised. One did not; the freshness of the
+	// heartbeat was read as the health of the gate.
+	//
+	// Host contention is printed for every sampled run, contended or not,
+	// because the useful reading of "this gate took 40 minutes" needs to know
+	// the host was quiet just as much as it needs to know the host was full. An
+	// absent row would mean "not measured", and that is a third thing.
+	for _, s := range p.Signals(now) {
+		fmt.Fprintln(&b, "  "+signalLine(s))
 	}
 	fmt.Fprintf(&b, "Verdict:   %s\n", p.Diagnosis(now))
 	return b.String()
+}
+
+// signalLine renders one layer-attributed measurement.
+//
+// The layer is the first token on the line and the widths are fixed, so the
+// column of RUNNER / GATE / HOST reads down the page. That column is the whole
+// mechanism: a reader skimming for "is it alive" has to pass the word naming
+// what the aliveness belongs to before reaching the state.
+func signalLine(s refinery.Signal) string {
+	return fmt.Sprintf("%-6s %-15s %-9s %s", s.Layer, s.Name, s.State, s.Detail)
+}
+
+// formatHealthRefinery renders the refinery line of `pogo server status`.
+//
+// The slot-holder is printed BESIDE the pending count and is never omitted,
+// including when there is none — an absent line would read as "not measured",
+// and the whole point is that the reader learns whether anything holds the
+// slot (mg-48d8).
+//
+// The line it replaces was `refinery: running  (queue=11, ...)`. That is
+// byte-identical for a refinery merging steadily and one that has stopped,
+// because the count is of PENDING requests and the request being merged is not
+// among them. Six agents read that arrangement as a fleet-wide stall in a
+// single evening; two of them went on to reason about network causes for a
+// stall that was not happening. It is a defect in the instrument, not in six
+// readers.
+func formatHealthRefinery(state string, r health.Refinery, now time.Time) string {
+	inFlight := "none"
+	if r.Processing != "" {
+		inFlight = r.Processing
+		if !r.ProcessingSince.IsZero() {
+			inFlight += fmt.Sprintf(" for %s", now.Sub(r.ProcessingSince).Round(time.Second))
+		}
+	}
+	line := fmt.Sprintf("refinery: %s  (in flight: %s, pending=%d, history=%d, recent_failures=%d)\n",
+		state, inFlight, r.QueueLength, r.HistoryLength, r.RecentFailures)
+	if r.Processing == "" && r.QueueLength > 0 {
+		// The genuinely alarming arrangement, said outright rather than left to
+		// be inferred from a count. Before this it rendered as the healthy one.
+		line += fmt.Sprintf("          NOTHING IN FLIGHT: %s pending and nothing being merged — "+
+			"see 'pogo refinery queue'.\n", plural(r.QueueLength, "request"))
+	}
+	return line
 }
 
 // formatQueue renders `pogo refinery queue`.
@@ -221,6 +250,12 @@ func progressLines(mr *refinery.MergeRequest, now time.Time) []string {
 	}
 	lines = append(lines, fmt.Sprintf("step=%s gate=%s elapsed=%s", p.Step, gate, p.Elapsed(now).Round(time.Second)))
 	lines = append(lines, fmt.Sprintf("output: %s   |   cpu: %s", out, p.CPUSummary()))
+	// The layer-attributed evidence, so the verdict below can be checked
+	// against the signals it was derived from rather than taken on trust —
+	// and so a reader can see them point in different directions (mg-48d8).
+	for _, s := range p.Signals(now) {
+		lines = append(lines, signalLine(s))
+	}
 	lines = append(lines, "→ "+p.Diagnosis(now))
 	return lines
 }
