@@ -52,8 +52,13 @@ func formatMRAttempts(mr *refinery.MergeRequest) string {
 	}
 
 	for _, a := range mr.Attempts {
+		// .UTC() and a literal Z (mg-0235). An attempt time is read against
+		// the far end's own logs — a GitHub API window, a runner's output —
+		// and those are UTC. A bare local time here silently asks the reader
+		// to apply the host's offset to correlate, which is exactly the step
+		// that has been skipped twice before.
 		fmt.Fprintf(&b, "\n  #%d  %s  stage=%s  class=%s  transport=%s\n",
-			a.Attempt, a.Time.Format("15:04:05"), orUnknown(a.Stage), orUnknown(string(a.Class)), orUnknown(a.Transport))
+			a.Attempt, a.Time.UTC().Format("15:04:05Z"), orUnknown(a.Stage), orUnknown(string(a.Class)), orUnknown(a.Transport))
 		if a.Command != "" {
 			fmt.Fprintf(&b, "      command:   %s\n", a.Command)
 		}

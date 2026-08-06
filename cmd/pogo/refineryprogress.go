@@ -32,13 +32,20 @@ func formatMRProgress(p *refinery.StepProgress, now time.Time) string {
 
 	fmt.Fprintf(&b, "\n--- Progress: %s ---\n", p.Step)
 	fmt.Fprintf(&b, "Gate:      %s\n", gate)
+	// .UTC() and a trailing Z on every clock time here (mg-0235). Bare
+	// "15:04:05" prints whatever Location the value was deserialized into, and
+	// a reader holding a UTC clock read "started 18:51:05" at 18:28 and
+	// concluded the gate had started IN THE FUTURE — which reads as a corrupt
+	// record rather than as a missing zone label, and sent the diagnosis
+	// somewhere it did not need to go. These three lines are also read next to
+	// the Elapsed duration beside them, so they have to agree with it.
 	fmt.Fprintf(&b, "Running:   %s (started %s)\n", p.Elapsed(now).Round(time.Second),
-		p.StartTime.Format("15:04:05"))
+		p.StartTime.UTC().Format("15:04:05Z"))
 	if !p.EndTime.IsZero() {
-		fmt.Fprintf(&b, "Finished:  %s\n", p.EndTime.Format("15:04:05"))
+		fmt.Fprintf(&b, "Finished:  %s\n", p.EndTime.UTC().Format("15:04:05Z"))
 	}
 	if !p.TimeoutAt.IsZero() && p.EndTime.IsZero() {
-		fmt.Fprintf(&b, "Timeout:   %s (in %s)\n", p.TimeoutAt.Format("15:04:05"),
+		fmt.Fprintf(&b, "Timeout:   %s (in %s)\n", p.TimeoutAt.UTC().Format("15:04:05Z"),
 			p.TimeoutAt.Sub(now).Round(time.Second))
 	}
 	// The evidence, one row per instrument, each labelled with the LAYER it

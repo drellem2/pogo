@@ -109,3 +109,27 @@ func firstLine(s string) string {
 	}
 	return ""
 }
+
+// TestAttemptTimesAreUTCAndSaidSo — mg-0235. An attempt time is correlated
+// against the far end's logs, which are UTC; rendering it in whatever offset
+// the record was deserialized into, unlabelled, asks the reader to apply the
+// host's offset silently. That step has been skipped twice.
+func TestAttemptTimesAreUTCAndSaidSo(t *testing.T) {
+	plusOne := time.FixedZone("BST", 3600)
+	at := time.Date(2026, 8, 6, 17, 51, 5, 0, time.UTC).In(plusOne)
+
+	got := formatMRAttempts(&refinery.MergeRequest{
+		Status: refinery.StatusFailed, AttemptCount: 1,
+		Attempts: []refinery.AttemptFailure{{
+			Attempt: 1, Stage: "fetch", Class: refinery.ClassInfrastructure,
+			Transport: "https", Time: at, NotRetriedReason: "not retryable",
+		}},
+	})
+
+	if !strings.Contains(got, "17:51:05Z") {
+		t.Errorf("attempt time is not rendered as labelled UTC:\n%s", got)
+	}
+	if strings.Contains(got, "18:51:05") {
+		t.Errorf("attempt time rendered in the record's stored +01:00 offset:\n%s", got)
+	}
+}

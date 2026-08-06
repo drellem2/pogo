@@ -260,3 +260,50 @@ func TestFormatMRProgressSaysNothingWhenNothingWasMeasured(t *testing.T) {
 		t.Errorf("a zero-sample contention record must print no host row:\n%s", out)
 	}
 }
+
+// TestProgressClockTimesAreUTCAndSaidSo is the behavioural half of the mg-0235
+// recurrence check: the static scan proves the layout carries a Z, this proves
+// the value was actually converted to match it. A layout with the letter Z in
+// it and no .UTC() is worse than a bare one — it labels the host's local clock
+// as UTC and gives the reader nothing to be suspicious about.
+//
+// The failure this reproduces: a reader on a UTC clock read "started 18:51:05"
+// at 18:28 and concluded the gate had started IN THE FUTURE. The fixture below
+// is that reading — a value carrying a +01:00 offset, rendered while `now` is
+// an hour behind its local digits.
+func TestProgressClockTimesAreUTCAndSaidSo(t *testing.T) {
+	plusOne := time.FixedZone("BST", 3600)
+	started := time.Date(2026, 8, 6, 17, 51, 5, 0, time.UTC)
+	now := started.Add(3 * time.Minute)
+
+	out := formatMRProgress(&refinery.StepProgress{
+		Step:              "quality-gates",
+		Gate:              "./build.sh",
+		StartTime:         started.In(plusOne), // as unmarshalled from a stored +01:00 offset
+		Heartbeat:         now,
+		HeartbeatInterval: "30s",
+		TimeoutAt:         started.Add(2 * time.Hour).In(plusOne),
+	}, now)
+
+	if !strings.Contains(out, "started 17:51:05Z") {
+		t.Errorf("start time is not rendered as labelled UTC — a reader holding a UTC clock reads it as an hour in the future:\n%s", out)
+	}
+	if strings.Contains(out, "18:51:05") {
+		t.Errorf("start time rendered in the value's stored +01:00 offset:\n%s", out)
+	}
+	if !strings.Contains(out, "Timeout:   19:51:05Z") {
+		t.Errorf("timeout is not rendered as labelled UTC:\n%s", out)
+	}
+
+	// Finished is on the other branch, so it needs its own reading.
+	done := formatMRProgress(&refinery.StepProgress{
+		Step:              "quality-gates",
+		StartTime:         started.In(plusOne),
+		EndTime:           started.Add(90 * time.Second).In(plusOne),
+		Heartbeat:         now,
+		HeartbeatInterval: "30s",
+	}, now)
+	if !strings.Contains(done, "Finished:  17:52:35Z") {
+		t.Errorf("finish time is not rendered as labelled UTC:\n%s", done)
+	}
+}
