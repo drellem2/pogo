@@ -95,6 +95,14 @@ POGO_SANDBOX_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 POGO_SANDBOX_REAL_HOME="${HOME:-}"
 POGO_SANDBOX_REAL_POGO_HOME="${POGO_HOME:-$POGO_SANDBOX_REAL_HOME/.pogo}"
 
+# The toolchain the real environment resolves, read by pogo_sandbox_isolate at
+# the last instant before the HOME move — NOT at source time, because a caller
+# that only ever creates a root should not pay for a `go env` it never uses. See
+# the toolchain-pin note above pogo_sandbox_isolate for why sharing this, and
+# only this, is the trade that keeps the sandbox private (mg-cdf1).
+POGO_SANDBOX_REAL_GOROOT=""
+POGO_SANDBOX_REAL_GOVERSION=""
+
 # Set by the lifecycle functions. Globals rather than stdout for the same reason
 # sandbox-daemon.sh uses globals: these functions can END THE RUN, and
 # `X="$(pogo_sandbox_create)"` would run that exit inside a command substitution
@@ -167,9 +175,10 @@ pogo_sandbox__reject_live_path() {
 # token. Sets $POGO_SANDBOX_DIR and $POGO_SANDBOX_TOKEN. Changes NO environment
 # variable: callers that must build binaries under the real HOME (Go resolves
 # GOMODCACHE off $HOME, and building after the override re-downloads the whole
-# module cache into the sandbox — minutes of network, and a cache that is
+# MODULE cache into the sandbox — minutes of network, and a cache that is
 # read-only by design and so defeats the teardown) do that between create and
-# isolate.
+# isolate. The other half of that download, the TOOLCHAIN, no longer happens at
+# all: isolate pins it. See the toolchain-pin note in section 2 (mg-cdf1).
 pogo_sandbox_create() {
     local label="${1:-sbx}" root
 
@@ -226,6 +235,93 @@ pogo_sandbox_is_private() {
 # 2. the private home
 # ---------------------------------------------------------------------------
 
+# THE TOOLCHAIN PIN (mg-cdf1). Two halves, run either side of the HOME move,
+# because the fact each half needs only exists on its own side of it.
+#
+# WHAT GOES WRONG WITHOUT IT. Go resolves its module cache off $HOME, so the
+# instant isolate moves HOME that cache is EMPTY. With GOTOOLCHAIN=auto (the
+# default on this box) and `go 1.25.0` in go.mod, the very next `go` call decides
+# it must upgrade and fetches the whole ~70 MB toolchain from Google into a
+# directory teardown deletes. It does not take a build to trigger this: a bare
+# `go env GOBIN` — which scripts/pogo-self-deploy's resolve_mg does on every
+# invocation — is enough. Measured live 2026-08-06 at ~32 KB/s, i.e. ~36 minutes,
+# inside ./test.sh, which IS the refinery gate: three consecutive 60-minute gate
+# timeouts on one merge, each reported as a verdict on the branch under test.
+#
+# WHY IT IS NOT JUST `GOTOOLCHAIN=local`, which is what `go version` suggests.
+# `go version` prints go1.25.0 because GOTOOLCHAIN=auto has ALREADY switched into
+# the cached toolchain module; the toolchain actually INSTALLED here is go1.24.0
+# (/opt/homebrew/Cellar/go/1.24.0/libexec), and go.mod needs 1.25.0. A bare
+# GOTOOLCHAIN=local would trade a slow sandbox for one where every build fails
+# "go.mod requires go >= 1.25.0". So the pin puts the GOROOT the real environment
+# ALREADY resolved onto PATH first, and only then says `local` — naming that one.
+#
+# WHAT IT DOES NOT WEAKEN, which is the half that has to be stated: a fix that
+# bought speed with reach would be worse than the bug it cures. HOME,
+# XDG_CONFIG_HOME, POGO_HOME and MG_ROOT are untouched and still every one of the
+# resolve-checks below runs against them; the sandbox keeps its own empty
+# GOMODCACHE and writes nothing outside the root; and nothing here touches the
+# port, the daemon, or which base_url the driver resolves — the suite's "driver
+# resolves base_url to the sandbox daemon, not the live fleet" assertion is
+# unaffected because it is decided by POGO_HOME and $PORT, neither of which moves.
+# The ONLY thing shared with the real home is the resolved toolchain's own bin
+# directory, EXECUTED and never written. Pointing GOMODCACHE at the real one
+# would also cure the download and was rejected for exactly this reason: the
+# sandbox WRITES to its module cache, and that write would land in the
+# developer's.
+
+# pogo_sandbox__capture_toolchain — read, while $HOME is still the developer's,
+# which toolchain the real environment resolves. After the move there is nothing
+# left to ask: the answer is derived from a cache that is now empty.
+#
+# GOPROXY=off ON THE CAPTURE ITSELF, which is not belt-and-braces: `go env` obeys
+# the same toolchain rule everything else does, so a capture run under a HOME
+# that is ALREADY cold would trigger the exact download this exists to remove —
+# and one caller reaches here in precisely that state, since pogo-sandbox_test.sh
+# runs children under decoy HOMEs on purpose. Refused-network is the honest
+# question here: "which toolchain does this environment ALREADY have?" A cold
+# ambient HOME answers "none", the pin is skipped, and behaviour is what it was.
+pogo_sandbox__capture_toolchain() {
+    local out
+
+    POGO_SANDBOX_REAL_GOROOT=""
+    POGO_SANDBOX_REAL_GOVERSION=""
+
+    # No `go` at all is not an error — not every caller of this harness runs one,
+    # and a sandbox with no toolchain cannot download one either.
+    command -v go >/dev/null 2>&1 || return 0
+
+    # One invocation, so the pair cannot disagree with itself.
+    out="$(GOPROXY=off go env GOROOT GOVERSION 2>/dev/null)" || return 0
+    POGO_SANDBOX_REAL_GOROOT="$(printf '%s\n' "$out" | sed -n 1p)"
+    POGO_SANDBOX_REAL_GOVERSION="$(printf '%s\n' "$out" | sed -n 2p)"
+}
+
+# pogo_sandbox__pin_toolchain — apply the pin under the now-private HOME and
+# PROVE it took, which is the harness's rule and not decoration here: an
+# unproven pin fails as a 36-minute stall an hour downstream, in a gate, wearing
+# the branch's name. The proof runs with GOPROXY=off precisely so that a pin that
+# did NOT take fails in milliseconds instead of reproducing the bug.
+pogo_sandbox__pin_toolchain() {
+    local pinned
+
+    [ -n "${POGO_SANDBOX_REAL_GOVERSION:-}" ] || return 0
+
+    if [ -z "$POGO_SANDBOX_REAL_GOROOT" ] || [ ! -x "$POGO_SANDBOX_REAL_GOROOT/bin/go" ]; then
+        pogo_sandbox_fail "the real environment resolves $POGO_SANDBOX_REAL_GOVERSION but its GOROOT (${POGO_SANDBOX_REAL_GOROOT:-<empty>}) holds no executable go — refusing to enter the sandbox with an unpinned toolchain, because every \`go\` call inside it would then re-download ~70 MB into a HOME this run deletes (mg-cdf1)"
+    fi
+
+    export PATH="$POGO_SANDBOX_REAL_GOROOT/bin:$PATH"
+    export GOTOOLCHAIN=local
+
+    # A cold cache by construction — this HOME was created seconds ago — which is
+    # the only state the bug appears in, so this check is the one that counts.
+    pinned="$(GOPROXY=off go env GOVERSION 2>&1)"
+    if [ "$pinned" != "$POGO_SANDBOX_REAL_GOVERSION" ]; then
+        pogo_sandbox_fail "the sandbox toolchain pin did not take: under the private HOME \`go env GOVERSION\` said '$pinned', the real environment says '$POGO_SANDBOX_REAL_GOVERSION'. Unpinned, the next \`go\` call in this run downloads a toolchain over the network into a directory teardown removes — ~36 minutes measured, inside a 60-minute gate (mg-cdf1)"
+    fi
+}
+
 # pogo_sandbox_isolate — pin HOME / XDG_CONFIG_HOME / POGO_HOME under the root,
 # then PROVE none of them can reach the developer's state. Ends the run if any
 # check fails.
@@ -243,6 +339,9 @@ pogo_sandbox_isolate() {
     real_home="$(pogo_sandbox__realpath "$POGO_SANDBOX_REAL_HOME")"
     real_pogo="$(pogo_sandbox__realpath "$POGO_SANDBOX_REAL_POGO_HOME")"
     root="$(pogo_sandbox__realpath "$POGO_SANDBOX_DIR")"
+
+    # Before the move, for the same reason real_home is read before the move.
+    pogo_sandbox__capture_toolchain
 
     export HOME="$POGO_SANDBOX_DIR/home"
     export XDG_CONFIG_HOME="$POGO_SANDBOX_DIR/xdg"
@@ -282,6 +381,11 @@ pogo_sandbox_isolate() {
     if [ -n "$(ls -A "$POGO_HOME" 2>/dev/null)" ]; then
         pogo_sandbox_fail "the sandbox POGO_HOME ($POGO_HOME) is not empty — a freshly created one is, so this directory predates this run and its contents are somebody else's state"
     fi
+
+    # Last, and deliberately after the checks above rather than among them: the
+    # pin is about what the sandbox COSTS, not about what it can reach, and it
+    # must not be able to satisfy or mask a privacy check.
+    pogo_sandbox__pin_toolchain
 
     POGO_SANDBOX_ISOLATED=1
     return 0
@@ -444,10 +548,12 @@ pogo_sandbox_down() {
         # have GAINED a link to live state while the run was using it, and this
         # is the last instant before an rm -rf that cannot be taken back.
         pogo_sandbox__reject_live_path "$POGO_SANDBOX_DIR" "the sandbox root being torn down"
-        # Any `go` call under the sandbox HOME materialises the toolchain module
-        # into $root/home/go/pkg/mod, and Go marks the module cache 0444 by
-        # design — so a plain rm -rf fails "Permission denied" on every file and
-        # litters the temp dir each run (mg-e91e).
+        # A `go` call under the sandbox HOME materialises modules into
+        # $root/home/go/pkg/mod, and Go marks the module cache 0444 by design —
+        # so a plain rm -rf fails "Permission denied" on every file and litters
+        # the temp dir each run (mg-e91e). Still required after the mg-cdf1
+        # toolchain pin: the pin stops the TOOLCHAIN being fetched here, not the
+        # module cache from being written here.
         chmod -R u+w "$POGO_SANDBOX_DIR" 2>/dev/null
         rm -rf "$POGO_SANDBOX_DIR"
     fi
