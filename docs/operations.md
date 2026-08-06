@@ -531,6 +531,37 @@ the code declares, which catches an inert retry *before* a night needs it; this
 command would only see the consequence the next morning. mg-0d70 is about a sync
 failure's alert naming the wrong cause; this command emits no such alert.
 
+## Is something versioning `$POGO_HOME`? (`pogo doctor --check`)
+
+`$POGO_HOME` can be a git working tree, and on this fleet's host it is: `~/.pogo`
+is the working tree of `drellem2/pogo-config`. That is fine for files that live
+nowhere else — the crew prompts, `bin/pogo-recovery.sh` — and corrosive for the
+files pogo writes itself. `InstallPrompts` rewrites `agents/mayor.md`,
+`agents/crew/doctor.md` and `agents/templates/*.md` on every install, so a repo
+that tracks them can never have a clean tree, and a merge into that repo fights
+the installer over the live prompts the crew is reading.
+
+The `$POGO_HOME version control` row of `pogo doctor --check` reports it:
+
+```
+✓ $POGO_HOME version control  /Users/x/.pogo is not inside a git work tree, so nothing
+                              versions the 10 path(s) pogo writes there
+! $POGO_HOME version control  git work tree /Users/daniel/.pogo (origin …/pogo-config.git)
+                              TRACKS 8 of the 10 path(s) pogo writes under /Users/daniel/.pogo:
+                              agents/mayor.md [install, MODIFIED]; … 8 of them are modified
+                              RIGHT NOW by pogo rather than by hand …
+```
+
+It warns and never fails — the remedy is a machine-local ops action with a blast
+radius, and doctor's exit code is not the place to force it. **Do not fix a
+warning here by committing the modified files**: that records one machine's
+install output as shared truth and re-dirties on the next install.
+
+The decision about what such a repo is for, the measured state of this host, and
+the reconciliation sequence (which never runs `git pull` or `git checkout` in the
+live tree) are in
+[docs/pogo-home-version-control.md](pogo-home-version-control.md).
+
 ## GitHub branch protection on main (rulesets)
 
 Since 2026-07-05 (mg-f7a3), `main` in **drellem2/pogo** (ruleset `main-require-pr`, id 18534732) and **drellem2/macguffin** (id 18534735) is protected by a GitHub ruleset per the gh-issue workflow design (`docs/design/gh-issue-workflow-design.md` §3):

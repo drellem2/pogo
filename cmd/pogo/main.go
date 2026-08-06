@@ -33,6 +33,7 @@ import (
 	"github.com/drellem2/pogo/internal/ghtoken"
 	"github.com/drellem2/pogo/internal/gitceiling"
 	"github.com/drellem2/pogo/internal/gitgc"
+	"github.com/drellem2/pogo/internal/homevcs"
 	"github.com/drellem2/pogo/internal/memcheck"
 	"github.com/drellem2/pogo/internal/providers"
 	"github.com/drellem2/pogo/internal/reconcile"
@@ -2984,6 +2985,21 @@ Exits with code 1 if any critical check fails (--check mode only).`,
 					warn(launchAgentCheckName, laDetail)
 				} else {
 					pass(launchAgentCheckName, laDetail)
+				}
+			}
+
+			// 2c. Is some git repository versioning what pogo writes under
+			// $POGO_HOME (mg-3610)? A second repo whose working tree IS the
+			// pogo home is invisible from inside the pogo repo — nothing here
+			// names it — and if it tracks install output, that tree is
+			// permanently dirty and a pull there conflicts in the live
+			// prompts. Read-only: see internal/homevcs.
+			{
+				hvStatus, hvDetail := homeVCSLine(homevcs.Audit(context.Background()))
+				if hvStatus == "warn" {
+					warn(homeVCSCheckName, hvDetail)
+				} else {
+					pass(homeVCSCheckName, hvDetail)
 				}
 			}
 

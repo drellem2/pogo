@@ -91,6 +91,8 @@ Agent behavior is defined by markdown files in `~/.pogo/agents/`. Changing an ag
 └── mayor.md
 ```
 
+**Prompt files have two provenances, and only one of them has an upstream.** `agents/mayor.md`, `agents/crew/doctor.md`, `agents/templates/*.md` and `agents/pm/pm-template.md` are *install output*: `InstallPrompts` writes them from the binary's embedded copy of `internal/agent/prompts`, so the pogo repo is their source of truth and `pogo check-staleness` is how you ask whether the installed copy is current. Every other prompt in `~/.pogo/agents/` — the crew prompts, the PM stubs — exists only there. Backing up `~/.pogo` with a git repo is reasonable and this host does it, but such a repo must track only the second group: tracking install output makes the working tree permanently dirty and puts a merge in conflict with the installer, in the live files the fleet is reading. `pogo doctor --check` reports the condition (`$POGO_HOME version control`, `internal/homevcs`); the decision and the reconciliation sequence are in [docs/pogo-home-version-control.md](docs/pogo-home-version-control.md).
+
 **Frontmatter is the configuration unit.** Each prompt file may declare structured metadata in a TOML frontmatter block (`+++` fences, Hugo-style) at the top of the file. The fields control how pogod runs the agent:
 
 ```markdown
