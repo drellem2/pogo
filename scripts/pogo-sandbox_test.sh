@@ -345,6 +345,99 @@ grep -q "SETUP FAILURE" "$E2E_OUT" \
     && pass "...and it says so in words: the reader of a failed 03:00 gate is told the run makes no claim about the tree, instead of being handed findings" \
     || fail "the converted live control printed no SETUP FAILURE banner: $(head -10 "$E2E_OUT" | tr '\n' '|')"
 
+# ===========================================================================
+# 7. THE TOOLCHAIN PIN — a private HOME must not cost a toolchain download.
+# ===========================================================================
+# mg-cdf1: the private HOME empties Go's module cache, so with GOTOOLCHAIN=auto
+# and `go 1.25.0` in go.mod the next `go` call — `go env GOBIN`, no build needed —
+# fetches ~70 MB of toolchain into a directory teardown deletes. Measured at
+# ~32 KB/s: ~36 minutes, inside ./test.sh, which is the refinery gate. It cost
+# three consecutive 60-minute gate timeouts on one merge, each reported as a
+# verdict on the branch.
+#
+# Both directions in one child, because the positive alone would prove nothing
+# here: the bug only exists with a COLD cache, and a sandbox HOME created seconds
+# ago is cold by construction — so the unpinned half below is a live reproduction
+# of the defect in the same HOME, not a simulation of it. If Go ever stops
+# needing the fetch, the unpinned half goes quiet and says so.
+#
+# GOPROXY=off throughout: it turns "downloads 70 MB" into "says it would have"
+# in milliseconds. Without it this control would BE the 36-minute stall.
+run_child '
+pogo_sandbox_create t7
+trap pogo_sandbox_down EXIT
+PRE_PATH="$PATH"
+pogo_sandbox_isolate
+cd "'"$REPO_ROOT"'" || exit 1
+echo "REALGO=$POGO_SANDBOX_REAL_GOVERSION"
+echo "TOOLCHAIN=${GOTOOLCHAIN:-<unset>}"
+echo "---PINNED---"
+GOPROXY=off go env GOVERSION 2>&1
+echo "---UNPINNED---"
+env GOPROXY=off GOTOOLCHAIN=auto PATH="$PRE_PATH" go env GOVERSION 2>&1
+echo "---END---"
+'
+[ "$CHILD_RC" -eq 0 ] \
+    && pass "a sandbox that pins its toolchain still isolates cleanly (rc 0) — the pin is checked inside isolate, so a pin that failed to take would have ended the run here" \
+    || fail "the toolchain-pin child exited $CHILD_RC: $(head -20 "$CHILD_OUT" | tr '\n' '|')"
+
+TC_REALGO="$(grep '^REALGO=' "$CHILD_OUT" | head -1 | cut -d= -f2-)"
+TC_PINNED="$(sed -n '/^---PINNED---$/,/^---UNPINNED---$/p' "$CHILD_OUT")"
+TC_UNPINNED="$(sed -n '/^---UNPINNED---$/,/^---END---$/p' "$CHILD_OUT")"
+
+grep -q '^TOOLCHAIN=local$' "$CHILD_OUT" \
+    && pass "isolate exports GOTOOLCHAIN=local — with the resolved GOROOT ahead of it on PATH, so 'local' names the toolchain go.mod actually requires and not the older one installed at /opt/homebrew" \
+    || fail "isolate did not export GOTOOLCHAIN=local: $(grep '^TOOLCHAIN=' "$CHILD_OUT" | head -1)"
+
+# The claim that matters operationally: under the sandbox HOME, with the network
+# refused, `go` still answers — because it never wanted the network.
+if [ -n "$TC_REALGO" ] && printf '%s' "$TC_PINNED" | grep -qF "$TC_REALGO"; then
+    pass "with the pin, a COLD sandbox HOME resolves $TC_REALGO with GOPROXY=off — \`go\` answers without reaching the network at all, which is the whole 36 minutes"
+else
+    fail "with the pin, a cold sandbox HOME did not resolve ${TC_REALGO:-the real toolchain}: $(printf '%s' "$TC_PINNED" | tr '\n' '|')"
+fi
+
+printf '%s' "$TC_PINNED" | grep -qi 'downloading' \
+    && fail "the pinned half still tried to download a toolchain — the pin did not take: $(printf '%s' "$TC_PINNED" | tr '\n' '|')" \
+    || pass "...and it printed no 'downloading' line: nothing is fetched into a HOME that is removed at teardown"
+
+# The positive control on the control. Same cold HOME, pin removed.
+printf '%s' "$TC_UNPINNED" | grep -qi 'downloading go1\.' \
+    && pass "PROVED RED: the same cold HOME WITHOUT the pin does try to download a toolchain — this control is exercising the live defect, not asserting a tautology" \
+    || fail "the unpinned half did NOT attempt a toolchain download, so the pinned half proves nothing: $(printf '%s' "$TC_UNPINNED" | tr '\n' '|')"
+
+# The way the CURE reintroduces the DISEASE, which it did on the first draft.
+# The capture asks `go env` which toolchain is already resolved, and `go env`
+# obeys the same toolchain rule as everything else — so run under an AMBIENT home
+# that is itself cold (§4 and §5 below do exactly that, with decoy HOMEs), the
+# capture starts the very 36-minute fetch it exists to prevent, before the
+# sandbox HOME is even in play. GOPROXY=off on the capture is what stops it, and
+# a cold ambient HOME must simply yield no pin.
+COLD_AMBIENT="$WORK/cold-ambient-home"
+mkdir -p "$COLD_AMBIENT"
+run_child '
+pogo_sandbox_create t7b
+trap pogo_sandbox_down EXIT
+pogo_sandbox_isolate
+echo "TOOLCHAIN=${GOTOOLCHAIN:-<unset>}"
+echo "REALGO=${POGO_SANDBOX_REAL_GOVERSION:-<none>}"
+' HOME="$COLD_AMBIENT" POGO_HOME="$COLD_AMBIENT/.pogo"
+
+[ "$CHILD_RC" -eq 0 ] && grep -q '^TOOLCHAIN=<unset>$' "$CHILD_OUT" \
+    && pass "an ambient HOME with no toolchain of its own yields NO pin (GOTOOLCHAIN left unset) rather than fetching one — nothing to share is not the same as something to download" \
+    || fail "a cold ambient HOME did not decline the pin: rc=$CHILD_RC, $(grep -E '^(TOOLCHAIN|REALGO)=' "$CHILD_OUT" | tr '\n' '|')"
+
+# Asserted on the ZIP, not on the directory. `go env` creates
+# cache/download/golang.org/toolchain/@v/ and takes the .lock BEFORE it discovers
+# the network is refused, so the tree existing proves nothing — it exists either
+# way. The `.zip`/`.zip*.tmp` is the artifact of the transfer itself: it is fd 5
+# in the ticket's lsof, 30.8 MB and growing, and it is absent when nothing is
+# fetched.
+TC_ZIPS=$(find "$COLD_AMBIENT/go/pkg/mod" -name 'v0.0.1-go*.zip*' 2>/dev/null | wc -l | tr -d ' ')
+[ "${TC_ZIPS:-0}" -eq 0 ] \
+    && pass "...and it transferred nothing: zero toolchain .zip/.zip.tmp under that HOME (the .lock is taken either way — the zip is the 70 MB)" \
+    || fail "the harness started a toolchain download into the ambient HOME ($COLD_AMBIENT): $TC_ZIPS zip artifact(s) — the capture is the disease again, one layer earlier"
+
 echo ""
 [ -s "$RESULTS" ] || { echo "ledger unreadable/empty — verdict cannot be trusted"; exit 1; }
 PASS_COUNT=$(grep -c '^PASS:' "$RESULTS" 2>/dev/null || true)
