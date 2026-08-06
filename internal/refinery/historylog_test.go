@@ -536,7 +536,7 @@ func TestOutcomeEventsCarryAuthor(t *testing.T) {
 	mr := &MergeRequest{ID: "mr-a", Branch: "polecat-a", TargetRef: "main", Author: "cat-mg-a", RepoPath: "/repo"}
 
 	emitMerged(mr, 1, "abc123", 1.5, false)
-	emitMergeFailed(mr, 1, "test", errTestGate, true, "")
+	emitMergeFailed(mr, 1, "test", errTestGate, true, "", AttemptFailure{Attempt: 1, Stage: "test", Class: ClassDefect})
 	emitMergeCancelled(mr, 1, "test", "")
 
 	for _, ev := range readEvents(t, path) {

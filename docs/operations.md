@@ -232,6 +232,28 @@ Most "pogod is misbehaving" situations are better solved by **filing an mg (a wo
   **reopened a work item whose work had landed** (mg-8595). If a gate really is
   stuck, `pogo refinery cancel <mr-id>` now reaches a processing MR — that is
   the recovery path, not a pogod restart.
+- **A batch of merge requests all show `failed`.** → Read the STATUS, which now
+  carries the class: `failed(infrastructure)` establishes nothing about the
+  branch and wants a resubmit, while a plain `failed` is a verdict on the code
+  and wants a fix (mg-e5c2). Do not dispatch fixes for a column of
+  `failed(infrastructure)`: on 2026-08-05, thirty-one merge requests failed
+  across three DNS outages and every one of them read as a bare `failed`, which
+  invited thirty-one fixes for defects that did not exist. The confusion runs
+  both ways — a real rebase conflict in the same evening was written off as
+  another network casualty.
+
+  `pogo refinery show <mr-id>` prints one block per failing attempt with its
+  transport, the git command as invoked, and the far end's exact words; a
+  terminal failure always states why no further retry was made. For the shape of
+  a whole incident across merge requests, go to the durable log rather than any
+  one MR — and read **every** transport, because ssh and HTTPS report the same
+  DNS failure in completely different words and the ssh wording (`Undefined
+  error: 0`) names no cause at all:
+
+  ```bash
+  pogo refinery history --since=6h --json |
+    jq -r '.[].attempts[] | "\(.transport)\t\(.raw_error)"' | sort -u
+  ```
 - Logs look noisy. → Filter `~/Library/Logs/pogo/pogod.log`. pogod appends across restarts (crash evidence survives) and rotates the file itself at startup once it exceeds 10 MiB — the prior chunk is `pogod.log.1` (up to `.3`). No manual rotation needed; never truncate the live file mid-run.
 - An mg you expected to appear didn't. → It's almost certainly an mg routing/visibility issue, not a pogod liveness issue.
 

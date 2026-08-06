@@ -204,9 +204,38 @@ type MergeRequest struct {
 	// closes was silent — an item read `done` with exit_code=0 while its
 	// deliverable did not exist — so a post-merge step that fails must not be
 	// able to resolve as completion.
-	PostMergeError   string `json:"post_merge_error,omitempty"`
-	FailureCount     int    `json:"failure_count"`
-	ThresholdReached bool   `json:"threshold_reached,omitempty"`
+	PostMergeError string `json:"post_merge_error,omitempty"`
+	// FailureCount is the AUTHOR's consecutive-failure streak, not this merge's
+	// attempt count. The two were confused during the 2026-08-05 incident, where
+	// every one of thirty-one failures read `failure_count=1` and that was taken
+	// to mean one attempt had been made. It did mean that — but only by accident,
+	// because no retry existed. AttemptCount is the attempt count (mg-e5c2).
+	FailureCount     int  `json:"failure_count"`
+	ThresholdReached bool `json:"threshold_reached,omitempty"`
+	// AttemptCount is how many attempts this merge request took, failed and
+	// successful. Attempts holds one verbatim record per FAILED attempt: the
+	// transport it was made over, the git command as invoked, git's raw output,
+	// the class, and whether a retry followed — and if not, why not.
+	//
+	// "Failed once" and "failed after three attempts" are different records
+	// here, which is the whole point: on 2026-08-05 the log and the mail could
+	// not tell them apart, so nobody could tell whether a retry policy existed.
+	AttemptCount int              `json:"attempt_count,omitempty"`
+	Attempts     []AttemptFailure `json:"attempts,omitempty"`
+	// FailureClass is the classification of the TERMINAL failure, empty on a
+	// merged request. It is the field that separates "your code is wrong" from
+	// "the network hiccuped" without reading the error text — see StatusLabel.
+	FailureClass FailureClass `json:"failure_class,omitempty"`
+	// NotRetriedReason states why no further attempt was made. Always set on a
+	// terminal failure, including the retryable classes that ran out of budget,
+	// so the absence of a retry is legible rather than looking like a policy
+	// that does not exist (mg-e5c2, requirement 3).
+	NotRetriedReason string `json:"not_retried_reason,omitempty"`
+	// RecoveredOnAttempt names the attempt that won when earlier ones failed —
+	// zero when the first attempt succeeded. A retried success that does not say
+	// so turns a flaky host into an invisible one.
+	RecoveredOnAttempt  int     `json:"recovered_on_attempt,omitempty"`
+	RetryBackoffSeconds float64 `json:"retry_backoff_seconds,omitempty"`
 	// Progress is the liveness record for the long-running step this MR is in
 	// (quality-gates). It is refreshed on a bounded interval by the goroutine
 	// running that step, so a reader can tell a gate that is running from one
@@ -214,6 +243,29 @@ type MergeRequest struct {
 	// does not discriminate. Nil before the gates start; retained afterwards
 	// with EndTime set, as the record of how long they took.
 	Progress *StepProgress `json:"progress,omitempty"`
+}
+
+// StatusLabel is the status as a HUMAN reads it, with the failure class folded
+// in: `failed(infrastructure)` rather than a bare `failed` (mg-e5c2).
+//
+// A coordinator triaging a queue sees status first, and on 2026-08-05 thirty-one
+// bare `failed` rows invited dispatching thirty-one fixes for defects that did
+// not exist; only reading each error line prevented it. This is the token that
+// stops that being necessary — `pogo refinery show`, `refinery history` and the
+// failure mail all render this rather than Status.
+//
+// The machine-readable Status field is deliberately UNCHANGED. Every polecat in
+// the fleet polls `pogo refinery show --json | jq -r .status` and breaks out of
+// its wait loop on the literal strings "merged"/"failed"/"lost"; a new token
+// there would leave a polecat spinning through a failure it was supposed to
+// report, which is a worse loss than the triage confusion this fixes. The class
+// travels as its own field (`failure_class`) for machines and inside this label
+// for humans.
+func (m *MergeRequest) StatusLabel() string {
+	if m.Status != StatusFailed || m.FailureClass == "" || m.FailureClass == ClassDefect {
+		return string(m.Status)
+	}
+	return fmt.Sprintf("%s(%s)", m.Status, m.FailureClass)
 }
 
 // OnMerged is called when a branch is successfully merged.
@@ -1057,15 +1109,29 @@ func (r *Refinery) processNext() {
 	} else if err != nil {
 		mr.Status = StatusFailed
 		mr.Error = err.Error()
-		if mr.Author != "" {
+		// The author's consecutive-failure streak counts DEFECTS only (mg-e5c2).
+		// The streak feeds an escalation whose advice is "consider stopping the
+		// polecat or reassigning the work item" — advice about the author. A
+		// suppressed-DNS window is not evidence about an author, and on
+		// 2026-08-05 it would have tripped that threshold for ten of them at
+		// once. Infrastructure and contention failures are still recorded, still
+		// mailed, and still fire onFailed; they just do not accumulate into a
+		// verdict on whoever happened to be at the head of the queue.
+		countsAgainstAuthor := mr.FailureClass == "" || mr.FailureClass == ClassDefect
+		if mr.Author != "" && countsAgainstAuthor {
 			r.failureCounts[mr.Author]++
 			mr.FailureCount = r.failureCounts[mr.Author]
 			if r.cfg.FailureThreshold > 0 && mr.FailureCount >= r.cfg.FailureThreshold {
 				mr.ThresholdReached = true
 				log.Printf("refinery: author %s reached failure threshold (%d consecutive failures)", mr.Author, mr.FailureCount)
 			}
+		} else if mr.Author != "" {
+			mr.FailureCount = r.failureCounts[mr.Author]
+			log.Printf("refinery: MR %s failed as %s — NOT counted against author %s's failure streak (still %d); this establishes nothing about the branch",
+				mr.ID, mr.FailureClass, mr.Author, mr.FailureCount)
 		}
-		log.Printf("refinery: REJECTED MR %s branch=%s author=%s reason=%v (failure_count=%d)", mr.ID, mr.Branch, mr.Author, err, mr.FailureCount)
+		log.Printf("refinery: REJECTED MR %s branch=%s author=%s status=%s attempts=%d reason=%v (author_failure_streak=%d)",
+			mr.ID, mr.Branch, mr.Author, mr.StatusLabel(), mr.AttemptCount, err, mr.FailureCount)
 	} else {
 		mr.Status = StatusMerged
 		if mr.Author != "" {

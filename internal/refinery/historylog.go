@@ -167,13 +167,53 @@ func HistoryFromLog(livePath string, since time.Time) (*HistoryWindow, error) {
 				// non-terminal one is a retry, and treating it as an outcome
 				// would report every branch that ever needed a second attempt
 				// as failed.
-				if v, ok := ev.Details["terminal"].(bool); ok && v {
+				terminal, _ := ev.Details["terminal"].(bool)
+				if terminal {
 					b.mr.Status = StatusFailed
 					b.mr.DoneTime = ts
 					b.terminal = true
 				}
 				if s, ok := ev.Details["reason"].(string); ok {
 					b.mr.Error = s
+				}
+				// Rebuild the per-attempt record from the log (mg-e5c2). This is
+				// the only view that spans merge requests, so it is where a
+				// mixed-transport incident becomes readable: the 2026-08-05
+				// bursts were 20 ssh + 11 https interleaved ~200ms apart, and
+				// every reader who sampled one transport got the mechanism wrong.
+				af := AttemptFailure{
+					Stage:            stringDetail(ev.Details, "stage"),
+					Time:             ts,
+					Transport:        stringDetail(ev.Details, "transport"),
+					Remote:           stringDetail(ev.Details, "remote"),
+					Command:          stringDetail(ev.Details, "git_command"),
+					RawError:         stringDetail(ev.Details, "raw_error"),
+					Class:            FailureClass(stringDetail(ev.Details, "class")),
+					Signal:           stringDetail(ev.Details, "signal"),
+					NotRetriedReason: stringDetail(ev.Details, "not_retried_reason"),
+				}
+				if n, ok := ev.Details["attempt"].(float64); ok {
+					af.Attempt = int(n)
+				}
+				if v, ok := ev.Details["retried"].(bool); ok {
+					af.Retried = v
+				}
+				if n, ok := ev.Details["backoff_seconds"].(float64); ok {
+					af.BackoffSeconds = n
+				}
+				if af.RawError == "" {
+					// Pre-mg-e5c2 records carry only the summarised reason. Keep
+					// it rather than dropping the attempt, and let it be visibly
+					// the summary it is.
+					af.RawError = b.mr.Error
+				}
+				b.mr.Attempts = append(b.mr.Attempts, af)
+				if af.Attempt > b.mr.AttemptCount {
+					b.mr.AttemptCount = af.Attempt
+				}
+				if terminal {
+					b.mr.FailureClass = af.Class
+					b.mr.NotRetriedReason = af.NotRetriedReason
 				}
 			}
 		})
@@ -253,4 +293,13 @@ func (w *HistoryWindow) CoverageNote() string {
 	}
 	return fmt.Sprintf("%d merge requests from the event log; window fully covered (%s)%s.",
 		len(w.Requests), span, suffix)
+}
+
+// stringDetail reads a string field from an event's details, returning "" when
+// absent or of another type. Events written before a field existed simply have
+// no entry — the reconstruction degrades to the older, thinner record rather
+// than failing.
+func stringDetail(details map[string]any, key string) string {
+	s, _ := details[key].(string)
+	return s
 }

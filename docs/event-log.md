@@ -604,9 +604,26 @@ A merge attempt failed. Whether this is terminal depends on `attempt` and the co
   - `reason` (string, required): short error summary, single line, ≤ 200 chars
   - `terminal` (bool, required): `true` if the refinery has given up (no more retries); `false` if another attempt will follow
   - `gate_output_truncated` (string, optional): up to 1 KB of gate stderr/stdout for quick triage. Full output remains in the in-memory MR record (or persisted history once recommendation §1 lands).
+  - `class` (string, since mg-e5c2): `"infrastructure"` (establishes nothing about the branch — network, credentials, or the refinery's own checkout), `"contention"` (lost a race with another merge), `"defect"` (establishes a fact about the branch — a gate verdict, a conflict), or `"unclassified"`. Only `defect` invites dispatching a fix.
+  - `retried` (bool, since mg-e5c2): whether another attempt followed this one
+  - `not_retried_reason` (string, since mg-e5c2): present when `retried` is false — why re-running would give the same answer, or which budget was spent. An absent retry that says nothing is indistinguishable from a policy that does not exist.
+  - `backoff_seconds` (float, since mg-e5c2): the delay slept before the next attempt
+  - `transport` (string, since mg-e5c2): `"ssh"`, `"https"`, `"file"`, `"git"` or `"unknown"` — measured from the clone's origin URL, falling back to the error's own wording
+  - `remote` (string, since mg-e5c2): the origin URL as configured at the moment of failure
+  - `git_command` (string, since mg-e5c2): the git invocation that failed, as invoked
+  - `signal` (string, since mg-e5c2): the evidence that decided `class` — the matched wording, or the stage — so a classification can be audited rather than trusted
+  - `raw_error` (string, since mg-e5c2): git's combined output **verbatim**, up to 768 bytes and not reduced to one line
+
+`raw_error` and `transport` exist because `reason` is a single truncated line, and on 2026-08-05 a set of 31 failures read one line at a time, across one transport, produced two confident wrong mechanisms over several hours (mg-e5c2). 20 of those failures were ssh reporting `Undefined error: 0` — a wording that names no cause — and 11 were HTTPS reporting `Could not resolve host: github.com`, which named it outright. The event log is the only view that spans merge requests, so it is where both halves have to be legible:
+
+```bash
+pogo refinery history --since=6h --json |
+  jq -r '.[].attempts[] | "\(.transport)\t\(.raw_error)"' | sort -u
+```
 
 ```json
-{"schema_version":1,"timestamp":"2026-04-25T10:23:05.000000000Z","event_type":"refinery_merge_failed","agent":"refinery","work_item_id":"mg-0241","repo":"/Users/daniel/dev/pogo","details":{"merge_request_id":"mr-9482","branch":"polecat-mg-0241","target":"main","attempt":1,"stage":"test","reason":"./test.sh exited with status 1","terminal":false,"gate_output_truncated":"--- FAIL: TestEventEmit ..."}}
+{"schema_version":1,"timestamp":"2026-04-25T10:23:05.000000000Z","event_type":"refinery_merge_failed","agent":"refinery","work_item_id":"mg-0241","repo":"/Users/daniel/dev/pogo","details":{"merge_request_id":"mr-9482","branch":"polecat-mg-0241","target":"main","attempt":1,"stage":"test","reason":"./test.sh exited with status 1","terminal":false,"class":"defect","retried":false,"not_retried_reason":"not retryable: the test gate ran on this tree and returned a verdict — re-running establishes the same fact","gate_output_truncated":"--- FAIL: TestEventEmit ..."}}
+{"schema_version":1,"timestamp":"2026-08-05T20:33:21.000000000Z","event_type":"refinery_merge_failed","agent":"refinery","work_item_id":"mg-fc8d","repo":"/Users/daniel/dev/pogo","details":{"merge_request_id":"mr-9483","branch":"polecat-mg-fc8d","target":"main","attempt":1,"stage":"fetch","reason":"fetch: ssh: connect to host github.com port 22: Undefined error: 0","terminal":false,"class":"infrastructure","retried":true,"backoff_seconds":2,"transport":"ssh","remote":"git@github.com:drellem2/pogo.git","git_command":"git fetch origin","signal":"connect to host","raw_error":"ssh: connect to host github.com port 22: Undefined error: 0\nfatal: Could not read from remote repository."}}
 ```
 
 #### `refinery_merge_cancelled`

@@ -2288,10 +2288,20 @@ Flags:
 				}
 			})
 			mergeQueue.SetOnFailed(func(mr *refinery.MergeRequest) {
-				log.Printf("refinery: failed %s (branch=%s, author=%s, error=%s, failure_count=%d)", mr.ID, mr.Branch, mr.Author, mr.Error, mr.FailureCount)
+				log.Printf("refinery: failed %s (branch=%s, author=%s, status=%s, attempts=%d, error=%s, consecutive_author_failures=%d)",
+					mr.ID, mr.Branch, mr.Author, mr.StatusLabel(), mr.AttemptCount, mr.Error, mr.FailureCount)
 
-				subject := fmt.Sprintf("MERGE FAILED: %s (branch=%s)", mr.ID, mr.Branch)
-				body := fmt.Sprintf("Merge request %s failed.\nBranch: %s\nAuthor: %s\nError: %s\nGate output: %s\nConsecutive failures: %d", mr.ID, mr.Branch, mr.Author, mr.Error, mr.GateOutput, mr.FailureCount)
+				// The CLASS goes in the SUBJECT, not only in the body (mg-e5c2).
+				// A subject line is the part of a mail that travels: it is what
+				// shows in a list, and on 2026-08-05 thirty-one identical
+				// "MERGE FAILED" subjects were what invited thirty-one dispatches
+				// for defects that did not exist.
+				subject := fmt.Sprintf("MERGE FAILED (%s): %s (branch=%s)",
+					strings.ToUpper(refineryFailureClassLabel(mr)), mr.ID, mr.Branch)
+				body := fmt.Sprintf("Merge request %s failed.\nBranch: %s\nAuthor: %s\nStatus: %s\n%s\nAttempts: %s\nError: %s\nGate output: %s\nConsecutive failures by this author: %d\n%s",
+					mr.ID, mr.Branch, mr.Author, mr.StatusLabel(), mr.FailureClass.TriageNote(),
+					refineryAttemptSummary(mr), mr.Error, mr.GateOutput, mr.FailureCount,
+					refineryAttemptDetail(mr))
 
 				// Mail the author agent so they can fix and resubmit.
 				if mr.Author != "" {

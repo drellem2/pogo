@@ -97,7 +97,22 @@ func (r *Refinery) processMerge(mr *MergeRequest) (mergeResult, error) {
 
 	var gateOutput string
 	startTime := time.Now()
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
+
+	// Three independent retry budgets, one per retryable class (mg-e5c2). They
+	// are separate on purpose: a network blip must not consume the budget that
+	// exists to absorb a lost race with another merge, and vice versa. The loop
+	// is hard-capped at their sum so a pathological alternation still ends.
+	contentionBudget := maxAttempts
+	netBudget := networkMaxAttempts
+	unclassifiedBudget := defaultUnclassifiedAttempts
+	var contentionUsed, netUsed, unclassifiedUsed int
+	var backoffSpent time.Duration
+	// gatesReached records whether any attempt has got as far as the quality
+	// gates. It gates skip_on_retry — see the call site below.
+	var gatesReached bool
+	hardCap := contentionBudget + netBudget + unclassifiedBudget
+
+	for attempt := 1; attempt <= hardCap; attempt++ {
 		// Cancellation is honoured at attempt boundaries as well as inside the
 		// gate, so a cancel that arrives during a git step still takes effect
 		// rather than being swallowed until the next gate starts.
@@ -106,15 +121,33 @@ func (r *Refinery) processMerge(mr *MergeRequest) (mergeResult, error) {
 			return mergeResult{GateOutput: gateOutput}, cancelledMergeError("before-attempt")
 		}
 		if attempt > 1 {
-			log.Printf("refinery: MR %s step=retry attempt=%d/%d", mr.ID, attempt, maxAttempts)
+			log.Printf("refinery: MR %s step=retry attempt=%d (cap=%d) contention=%d/%d network=%d/%d unclassified=%d/%d backoff_spent=%s",
+				mr.ID, attempt, hardCap, contentionUsed, contentionBudget, netUsed, netBudget, unclassifiedUsed, unclassifiedBudget, backoffSpent.Round(time.Second))
 		}
 
 		emitMergeAttempted(mr, attempt)
 
-		skipGates := skipGatesOnRetry && attempt > 1
-		output, stage, sha, attemptErr := r.attemptMerge(wtDir, mr, attempt, skipGates, cfg.PRMode)
+		// skip_on_retry rests on a premise — "gates already passed on
+		// near-identical code" — which network retries can falsify. Before
+		// mg-e5c2 a fetch failure was terminal, so every retry followed an
+		// attempt that HAD reached the gates. A retried fetch failure has not,
+		// and skipping on `attempt > 1` alone would let a merge whose gates never
+		// ran land ungated. The condition is therefore what the premise actually
+		// claims: gates were reached at least once.
+		skipGates := skipGatesOnRetry && gatesReached
+		output, stage, sha, reached, attemptErr := r.attemptMerge(wtDir, mr, attempt, skipGates, cfg.PRMode)
+		gatesReached = gatesReached || reached
 		gateOutput = output
 		if attemptErr == nil {
+			// A retried success names the attempt that won — the third condition
+			// of pm-pogo's ruling. A silent retry converts a flaky night into an
+			// invisible one, and invisible is how this box's network came to be
+			// the dominant failure mode without anybody holding the evidence.
+			if attempt > 1 {
+				log.Printf("refinery: MR %s RECOVERED on attempt %d after %d failed attempt(s) (%s) — %s of backoff; the earlier failures are recorded on the merge request",
+					mr.ID, attempt, attempt-1, r.attemptClassSummary(mr), backoffSpent.Round(time.Second))
+				r.recordRecovery(mr, attempt, backoffSpent)
+			}
 			emitMerged(mr, attempt, sha, time.Since(startTime).Seconds(), false)
 			// origin/<target> just advanced; refresh the checkout the MR
 			// was submitted from so it doesn't go stale (gh #30).
@@ -152,19 +185,270 @@ func (r *Refinery) processMerge(mr *MergeRequest) (mergeResult, error) {
 			return mergeResult{GateOutput: gateOutput}, cancelledMergeError(stage)
 		}
 
-		retryRemaining := attempt < maxAttempts && isRetryable(attemptErr)
-		emitMergeFailed(mr, attempt, stage, attemptErr, !retryRemaining, gateOutput)
+		// Classify BEFORE deciding, and record the transport and the raw error
+		// whatever the decision is (mg-e5c2).
+		fail, disp := r.describeAttemptFailure(wtDir, attempt, stage, attemptErr)
 
-		if retryRemaining {
-			log.Printf("refinery: MR %s attempt %d failed (will retry): %v", mr.ID, attempt, attemptErr)
+		retry := false
+		reason := disp.Reason
+		var backoff time.Duration
+		switch {
+		case !disp.Retryable:
+			// reason is the classifier's sentence for why re-running would give
+			// the same answer.
+		case disp.Class == ClassInfrastructure:
+			netUsed++
+			next := networkBackoffFor(netUsed)
+			switch {
+			case netUsed >= netBudget:
+				reason = fmt.Sprintf("not retryable: the network retry budget is spent — %d of %d network-class attempts used over %s of backoff. The class is still INFRASTRUCTURE: the outage outlasted the refinery's patience, it is not a verdict on the branch",
+					netUsed, netBudget, backoffSpent.Round(time.Second))
+			case backoffSpent+next > networkRetryBudget:
+				reason = fmt.Sprintf("not retryable: waiting %s more would exceed the %s network retry budget (%s already slept), and this is one serial slot every queued merge waits behind. The class is still INFRASTRUCTURE",
+					next, networkRetryBudget, backoffSpent.Round(time.Second))
+			default:
+				retry, backoff = true, next
+			}
+		case disp.Class == ClassContention:
+			contentionUsed++
+			if contentionUsed >= contentionBudget {
+				reason = fmt.Sprintf("not retryable: the contention retry budget is spent — %d of %d attempts used", contentionUsed, contentionBudget)
+			} else {
+				retry = true
+			}
+		case disp.Class == ClassUnclassified:
+			unclassifiedUsed++
+			if unclassifiedUsed >= unclassifiedBudget {
+				reason = fmt.Sprintf("not retryable: %d of %d unclassified attempts used, and the refinery still cannot place this failure — read the raw error above before reacting", unclassifiedUsed, unclassifiedBudget)
+			} else {
+				retry = true
+			}
+		}
+
+		fail.Retried = retry
+		fail.BackoffSeconds = backoff.Seconds()
+		if !retry {
+			if strings.TrimSpace(reason) == "" {
+				// Never leave the field empty. A blank reason is exactly the
+				// silence mg-e5c2 was filed about: it reads as "no retry policy
+				// exists" rather than as a decision that was made.
+				reason = fmt.Sprintf("not retryable: the refinery classified this as %s and recorded no further reason — read the raw error below", fail.Class)
+			}
+			fail.NotRetriedReason = reason
+		}
+		r.recordAttemptFailure(mr, fail)
+		emitMergeFailed(mr, attempt, stage, attemptErr, !retry, gateOutput, fail)
+
+		// One line per attempt, carrying the class, the transport and whether a
+		// retry followed. Before mg-e5c2 the log said only "attempt N failed",
+		// so "failed once" and "gave up after three" read identically.
+		log.Printf("refinery: MR %s %s", mr.ID, fail.Line())
+		log.Printf("refinery: MR %s attempt %d raw error (verbatim, transport=%s): %v",
+			mr.ID, attempt, transportOrUnknown(fail.Transport), attemptErr)
+
+		if retry {
+			if backoff > 0 {
+				log.Printf("refinery: MR %s waiting %s before attempt %d (class=%s, budget %s of %s spent)",
+					mr.ID, backoff, attempt+1, disp.Class, backoffSpent.Round(time.Second), networkRetryBudget)
+				if !r.sleepUnlessCancelled(backoff) {
+					emitMergeCancelled(mr, attempt, "retry-backoff", gateOutput)
+					return mergeResult{GateOutput: gateOutput}, cancelledMergeError("retry-backoff")
+				}
+				backoffSpent += backoff
+			}
 			continue
 		}
 		return mergeResult{GateOutput: gateOutput}, attemptErr
 	}
-	finalErr := fmt.Errorf("merge failed after %d attempts", maxAttempts)
-	emitMergeFailed(mr, maxAttempts, "unknown", finalErr, true, gateOutput)
+	finalErr := fmt.Errorf("merge failed after %d attempts (hard cap)", hardCap)
+	emitMergeFailed(mr, hardCap, "unknown", finalErr, true, gateOutput, AttemptFailure{
+		Attempt:          hardCap,
+		Stage:            "unknown",
+		Time:             time.Now(),
+		RawError:         finalErr.Error(),
+		Class:            ClassUnclassified,
+		NotRetriedReason: "not retryable: the combined attempt cap was reached",
+	})
 	return mergeResult{GateOutput: gateOutput}, finalErr
 }
+
+// describeAttemptFailure builds the verbatim record for one failing attempt and
+// classifies it. The transport is measured from the clone's origin URL, and
+// only falls back to the error's own wording when the URL cannot be read — see
+// failureclass.go for why the transport is recorded at all.
+func (r *Refinery) describeAttemptFailure(wtDir string, attempt int, stage string, err error) (AttemptFailure, disposition) {
+	fail := AttemptFailure{
+		Attempt:  attempt,
+		Stage:    stage,
+		Time:     time.Now(),
+		RawError: errorText(err),
+	}
+	var step *gitStepError
+	if errors.As(err, &step) {
+		fail.Command = step.cmd
+		if step.raw != "" {
+			fail.RawError = step.raw + "\n" + errorText(err)
+		}
+		if step.step != "" {
+			fail.Stage = step.step
+		}
+	}
+	// Read the remote directly rather than through gitCmdOutput: `config --get`
+	// exits 1 when the key is simply absent, and routing that through the
+	// logging helper would print an error line under a non-error outcome on
+	// every failure in a repo with no origin. Benign lines at error level teach
+	// a reader to skip error lines (mg-5d3f).
+	if out, cerr := exec.Command("git", "-C", wtDir, "config", "--get", "remote.origin.url").Output(); cerr == nil {
+		if remote := strings.TrimSpace(string(out)); remote != "" {
+			fail.Remote = remote
+			fail.Transport, _ = remoteTransport(remote)
+		}
+	}
+	if fail.Transport == "" || fail.Transport == "unknown" {
+		if t := transportFromError(fail.RawError); t != "" {
+			fail.Transport = t
+		}
+	}
+	// Bound what is persisted. Verbatim is the requirement, unbounded is not: a
+	// merge request keeps up to hardCap of these and history retains 100 merge
+	// requests. Transport errors are a few hundred bytes, so the cap is far
+	// above any of them — and when it does bite it says so rather than silently
+	// shortening the evidence.
+	if len(fail.RawError) > rawErrorRecordCap {
+		fail.RawError = truncate(fail.RawError, rawErrorRecordCap) +
+			fmt.Sprintf("\n… (truncated at %d bytes for the persisted record; the full text is in the log line above)", rawErrorRecordCap)
+	}
+	disp := classifyFailure(stage, rawOf(err), err)
+	fail.Class = disp.Class
+	fail.Signal = disp.Signal
+	return fail, disp
+}
+
+// recordAttemptFailure appends the record to the merge request and persists it,
+// so the attempt history survives a pogod restart and is readable from
+// `pogo refinery show` and `--json` without going to the log.
+func (r *Refinery) recordAttemptFailure(mr *MergeRequest, fail AttemptFailure) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	mr.Attempts = append(mr.Attempts, fail)
+	mr.AttemptCount = fail.Attempt
+	mr.FailureClass = fail.Class
+	mr.NotRetriedReason = fail.NotRetriedReason
+	r.saveStateLocked()
+}
+
+// recordRecovery marks the attempt that won after earlier attempts failed.
+func (r *Refinery) recordRecovery(mr *MergeRequest, attempt int, backoffSpent time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	mr.AttemptCount = attempt
+	mr.RecoveredOnAttempt = attempt
+	mr.RetryBackoffSeconds = backoffSpent.Seconds()
+	// The merge succeeded: the failures on the way are history, not a verdict.
+	mr.FailureClass = ""
+	mr.NotRetriedReason = ""
+	r.saveStateLocked()
+}
+
+// attemptClassSummary renders the classes seen so far, e.g. "2x infrastructure".
+func (r *Refinery) attemptClassSummary(mr *MergeRequest) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return summarizeAttemptClasses(mr.Attempts)
+}
+
+// sleepUnlessCancelled waits for d, returning false if a cancel was requested
+// while waiting. Backoff must not make a cancel wait out the whole schedule.
+func (r *Refinery) sleepUnlessCancelled(d time.Duration) bool {
+	const tick = 250 * time.Millisecond
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		if r.cancelWasRequested() {
+			return false
+		}
+		remaining := time.Until(deadline)
+		if remaining > tick {
+			remaining = tick
+		}
+		time.Sleep(remaining)
+	}
+	return !r.cancelWasRequested()
+}
+
+// summarizeAttemptClasses counts the classes across a set of failed attempts,
+// in the order they first appeared.
+func summarizeAttemptClasses(attempts []AttemptFailure) string {
+	if len(attempts) == 0 {
+		return "no failed attempts"
+	}
+	var order []FailureClass
+	counts := map[FailureClass]int{}
+	for _, a := range attempts {
+		if counts[a.Class] == 0 {
+			order = append(order, a.Class)
+		}
+		counts[a.Class]++
+	}
+	parts := make([]string, 0, len(order))
+	for _, c := range order {
+		parts = append(parts, fmt.Sprintf("%dx %s", counts[c], c))
+	}
+	return strings.Join(parts, ", ")
+}
+
+// errorText is err.Error() with a nil guard.
+func errorText(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+// rawOf returns git's verbatim combined output when the error carries it, and
+// the empty string otherwise — the classifier then falls back to the error text.
+func rawOf(err error) string {
+	var step *gitStepError
+	if errors.As(err, &step) {
+		return step.raw
+	}
+	return ""
+}
+
+// gitStepError carries what a failing git step knew and used to throw away: the
+// step name, the command as invoked, and git's combined output VERBATIM.
+//
+// The doubt section of mg-e5c2 asked for exactly this ("capture the failing
+// fetch's actual command as invoked") and it is what makes the classification
+// auditable: a reader can see the wording that was matched rather than trusting
+// the class the refinery assigned.
+type gitStepError struct {
+	step string // pipeline step, e.g. "fetch" or "checkout-branch"
+	cmd  string // git subcommand as invoked, e.g. "fetch origin"
+	raw  string // git's combined stdout+stderr, verbatim
+	msg  string // the sentence the pipeline reports
+	err  error
+}
+
+func (e *gitStepError) Error() string { return e.msg }
+func (e *gitStepError) Unwrap() error { return e.err }
+
+// gitStepFail wraps a failed git invocation. The message keeps the shape the
+// pipeline used before mg-e5c2 ("fetch: <git output>: <err>") so existing
+// readers are unchanged; the structured fields are additions.
+func gitStepFail(step, msg string, args []string, raw string, err error) error {
+	return &gitStepError{
+		step: step,
+		cmd:  "git " + strings.Join(args, " "),
+		raw:  raw,
+		msg:  msg,
+		err:  err,
+	}
+}
+
+// defaultUnclassifiedAttempts bounds retries of failures the refinery could not
+// place. Small on purpose: an unrecognised failure gets the benefit of the
+// doubt once, not a full network budget.
+const defaultUnclassifiedAttempts = 2
 
 // attemptMerge runs a single fetch→rebase→gates→merge→push cycle. Returns
 // the captured gate output, the pipeline stage that ran (or failed), the
@@ -180,11 +464,21 @@ func (r *Refinery) processMerge(mr *MergeRequest) (mergeResult, error) {
 // to origin after gates pass and before the ff-merge push, so GitHub marks
 // the PR "merged" (not "closed") when the tip lands on the target. All
 // failures on that path are soft — see pushBackForPR.
-func (r *Refinery) attemptMerge(wtDir string, mr *MergeRequest, attempt int, skipGates, prMode bool) (output string, stage string, sha string, err error) {
+// gatesReached reports whether this attempt got past the quality-gate phase —
+// either by running the gates and passing, or by legitimately skipping them.
+// processMerge uses it to decide whether skip_on_retry may apply on the NEXT
+// attempt; see the comment at its call site.
+func (r *Refinery) attemptMerge(wtDir string, mr *MergeRequest, attempt int, skipGates, prMode bool) (output string, stage string, sha string, gatesReached bool, err error) {
 	// Fetch latest from origin
 	log.Printf("refinery: MR %s step=fetch branch=%s attempt=%d", mr.ID, mr.Branch, attempt)
 	if out, gerr := gitCmdOutput(wtDir, "fetch", "origin"); gerr != nil {
-		return "", "fetch", "", fmt.Errorf("fetch: %s: %w", out, gerr)
+		// This is the step that failed all thirty-one merges on 2026-08-05, and
+		// the one whose error was returned unclassified and unretried. It reaches
+		// the network before it reaches the tree, so it establishes nothing about
+		// the branch — the classifier decides from git's verbatim output, which
+		// gitStepFail keeps.
+		return "", "fetch", "", false, gitStepFail("fetch", fmt.Sprintf("fetch: %s: %v", out, gerr),
+			[]string{"fetch", "origin"}, out, gerr)
 	}
 
 	// Clear anything a previous attempt's gate (or a previous MR's, this clone
@@ -196,9 +490,10 @@ func (r *Refinery) attemptMerge(wtDir string, mr *MergeRequest, attempt int, ski
 	log.Printf("refinery: MR %s step=checkout-branch branch=%s attempt=%d", mr.ID, mr.Branch, attempt)
 	if out, gerr := gitCmdOutput(wtDir, "checkout", "-B", mr.Branch, "origin/"+mr.Branch); gerr != nil {
 		if dirtErr := r.classifyGateDirt(wtDir, mr, "checkout branch", out); dirtErr != nil {
-			return "", "fetch", "", dirtErr
+			return "", "fetch", "", false, dirtErr
 		}
-		return "", "fetch", "", fmt.Errorf("checkout branch: %s: %w", out, gerr)
+		return "", "fetch", "", false, gitStepFail("checkout-branch", fmt.Sprintf("checkout branch: %s: %v", out, gerr),
+			[]string{"checkout", "-B", mr.Branch, "origin/" + mr.Branch}, out, gerr)
 	}
 
 	// Rebase onto latest target so the branch is a direct descendant of main.
@@ -216,16 +511,17 @@ func (r *Refinery) attemptMerge(wtDir string, mr *MergeRequest, attempt int, ski
 		// Abort the failed rebase to leave worktree in a clean state
 		gitCmdOutput(wtDir, "rebase", "--abort")
 		if dirtErr != nil {
-			return "", "rebase", "", dirtErr
+			return "", "rebase", "", false, dirtErr
 		}
-		rebaseErr := fmt.Errorf("rebase onto %s: %s: %w", mr.TargetRef, out, gerr)
+		rebaseErr := gitStepFail("rebase", fmt.Sprintf("rebase onto %s: %s: %v", mr.TargetRef, out, gerr),
+			[]string{"rebase", "origin/" + mr.TargetRef}, out, gerr)
 		// "invalid upstream" can be transient — e.g. the target branch
 		// hasn't been fetched yet or the ref is missing from the clone.
 		// Treat it as retryable so a fresh fetch gets another chance.
 		if strings.Contains(out, "invalid upstream") {
-			return "", "rebase", "", &retryableError{rebaseErr}
+			return "", "rebase", "", false, &retryableError{rebaseErr}
 		}
-		return "", "rebase", "", rebaseErr
+		return "", "rebase", "", false, rebaseErr
 	}
 
 	// Reject commit messages that would close a GitHub issue by keyword
@@ -234,7 +530,7 @@ func (r *Refinery) attemptMerge(wtDir string, mr *MergeRequest, attempt int, ski
 	// why this is the refinery's job and not only the local hook's.
 	log.Printf("refinery: MR %s step=closing-ref-check branch=%s attempt=%d", mr.ID, mr.Branch, attempt)
 	if cerr := checkClosingRefs(wtDir, mr.TargetRef, mr.Branch); cerr != nil {
-		return cerr.Error(), "closing-ref-check", "", cerr
+		return cerr.Error(), "closing-ref-check", "", false, cerr
 	}
 
 	// Run quality gates (on the rebased branch — tests what will actually
@@ -250,7 +546,7 @@ func (r *Refinery) attemptMerge(wtDir string, mr *MergeRequest, attempt int, ski
 		out, gates, qerr := r.runQualityGates(r.gateContext(), wtDir, mr.RepoPath, mr)
 		gateOutput = out
 		if qerr != nil {
-			return gateOutput, gateStage(gates), "", fmt.Errorf("quality gate: %w", qerr)
+			return gateOutput, gateStage(gates), "", false, fmt.Errorf("quality gate: %w", qerr)
 		}
 		// The gate has just run arbitrary commands in this checkout. If any of
 		// them wrote a tracked file — a regenerated record, a lockfile, a
@@ -296,23 +592,29 @@ func (r *Refinery) attemptMerge(wtDir string, mr *MergeRequest, attempt int, ski
 	// state, so a poisoned/ahead target self-heals instead of aborting. (mg-f1db)
 	log.Printf("refinery: MR %s step=fetch-target target=%s attempt=%d", mr.ID, mr.TargetRef, attempt)
 	if out, gerr := gitCmdOutput(wtDir, "fetch", "origin", mr.TargetRef); gerr != nil {
-		return gateOutput, "fetch", "", &retryableError{fmt.Errorf("fetch target %s: %s: %w", mr.TargetRef, out, gerr)}
+		return gateOutput, "fetch", "", true, &retryableError{gitStepFail("fetch-target",
+			fmt.Sprintf("fetch target %s: %s: %v", mr.TargetRef, out, gerr),
+			[]string{"fetch", "origin", mr.TargetRef}, out, gerr)}
 	}
 	log.Printf("refinery: MR %s step=reset-target target=%s attempt=%d", mr.ID, mr.TargetRef, attempt)
 	if out, gerr := gitCmdOutput(wtDir, "checkout", "-B", mr.TargetRef, "origin/"+mr.TargetRef); gerr != nil {
 		if dirtErr := r.classifyGateDirt(wtDir, mr, "checkout target "+mr.TargetRef, out); dirtErr != nil {
-			return gateOutput, "fetch", "", dirtErr
+			return gateOutput, "fetch", "", true, dirtErr
 		}
-		return gateOutput, "fetch", "", &retryableError{fmt.Errorf("reset target %s to origin: %s: %w", mr.TargetRef, out, gerr)}
+		return gateOutput, "fetch", "", true, &retryableError{gitStepFail("reset-target",
+			fmt.Sprintf("reset target %s to origin: %s: %v", mr.TargetRef, out, gerr),
+			[]string{"checkout", "-B", mr.TargetRef, "origin/" + mr.TargetRef}, out, gerr)}
 	}
 
 	// Fast-forward merge — guaranteed to work if target hasn't moved since fetch
 	log.Printf("refinery: MR %s step=merge branch=%s attempt=%d", mr.ID, mr.Branch, attempt)
 	if out, gerr := gitCmdOutput(wtDir, "merge", "--ff-only", mr.Branch); gerr != nil {
 		if dirtErr := r.classifyGateDirt(wtDir, mr, "merge --ff-only "+mr.Branch, out); dirtErr != nil {
-			return gateOutput, "merge", "", dirtErr
+			return gateOutput, "merge", "", true, dirtErr
 		}
-		return gateOutput, "rebase", "", &retryableError{fmt.Errorf("merge (ff-only): %s: %w", out, gerr)}
+		return gateOutput, "rebase", "", true, &retryableError{gitStepFail("merge-ff-only",
+			fmt.Sprintf("merge (ff-only): %s: %v", out, gerr),
+			[]string{"merge", "--ff-only", mr.Branch}, out, gerr)}
 	}
 
 	// Push to origin
@@ -321,9 +623,12 @@ func (r *Refinery) attemptMerge(wtDir string, mr *MergeRequest, attempt int, ski
 		// Auth failures don't recover on retry — surface the actionable
 		// error immediately rather than burning attempts.
 		if isAuthFailure(out) {
-			return gateOutput, "push", "", formatPushAuthError(out)
+			return gateOutput, "push", "", true, gitStepFail("push", formatPushAuthError(out).Error(),
+				[]string{"push", "origin", mr.TargetRef}, out, gerr)
 		}
-		return gateOutput, "push", "", &retryableError{fmt.Errorf("push: %s: %w", out, gerr)}
+		return gateOutput, "push", "", true, &retryableError{gitStepFail("push",
+			fmt.Sprintf("push: %s: %v", out, gerr),
+			[]string{"push", "origin", mr.TargetRef}, out, gerr)}
 	}
 
 	// Capture the merge commit SHA (HEAD on target after fast-forward).
@@ -331,7 +636,7 @@ func (r *Refinery) attemptMerge(wtDir string, mr *MergeRequest, attempt int, ski
 	// pushed successfully.
 	headSHA, _ := gitCmdOutput(wtDir, "rev-parse", "HEAD")
 
-	return gateOutput, "push", headSHA, nil
+	return gateOutput, "push", headSHA, true, nil
 }
 
 // prLookupTimeout bounds the gh CLI call in openPRNumber so a hung network

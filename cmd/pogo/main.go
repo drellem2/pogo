@@ -3957,8 +3957,15 @@ Examples:
 					return
 				}
 				for _, mr := range rows {
-					line := fmt.Sprintf("%-12s  branch=%-30s  author=%-15s  status=%-10s  done=%s",
-						mr.ID, mr.Branch, mr.Author, string(mr.Status), mr.DoneTime.Format("2006-01-02 15:04"))
+					// StatusLabel, not Status: a bare `failed` is what invited
+					// thirty-one dispatches for defects that did not exist on
+					// 2026-08-05 (mg-e5c2). `failed(infrastructure)` is triageable
+					// without reading the error column.
+					line := fmt.Sprintf("%-12s  branch=%-30s  author=%-15s  status=%-24s  done=%s",
+						mr.ID, mr.Branch, mr.Author, mr.StatusLabel(), mr.DoneTime.Format("2006-01-02 15:04"))
+					if mr.AttemptCount > 1 {
+						line += fmt.Sprintf("  attempts=%d", mr.AttemptCount)
+					}
 					if mr.Error != "" {
 						line += fmt.Sprintf("  error=%s", mr.Error)
 					}
@@ -4034,7 +4041,10 @@ Examples:
 				fmt.Printf("Branch:    %s\n", mr.Branch)
 				fmt.Printf("Target:    %s\n", mr.TargetRef)
 				fmt.Printf("Author:    %s\n", mr.Author)
-				fmt.Printf("Status:    %s\n", mr.Status)
+				fmt.Printf("Status:    %s\n", mr.StatusLabel())
+				if note := mr.FailureClass.TriageNote(); note != "" && mr.Status == refinery.StatusFailed {
+					fmt.Printf("           %s\n", note)
+				}
 				if mr.PRFlow {
 					fmt.Printf("PR flow:   yes — %s is an integration branch, not the repo default.\n", mr.TargetRef)
 					fmt.Printf("           Merging is an integration step, not completion: the author still\n")
@@ -4083,6 +4093,11 @@ Examples:
 				if mr.Error != "" {
 					fmt.Printf("Error:     %s\n", mr.Error)
 				}
+				// The attempt block is what separates "failed once" from "failed
+				// after 3 attempts", and it prints the TRANSPORT and the RAW error
+				// of every failing attempt rather than one normalised summary
+				// (mg-e5c2).
+				fmt.Print(formatMRAttempts(mr))
 				// The progress block answers "is this gate slow or dead?" —
 				// printed before the gate output, since it is what an operator
 				// is looking for while the MR is still in flight.

@@ -16,6 +16,20 @@ const gateOutputCap = 1024
 // events. The schema specifies a single line ≤ 200 chars.
 const reasonCap = 200
 
+// rawErrorCap caps raw_error. Larger than reasonCap and deliberately not a
+// single line: raw_error exists precisely because the one-line summary is what
+// two wrong mechanisms were built out of on 2026-08-05 (mg-e5c2). A transport
+// failure's full text — git's wording plus ssh's or curl's underneath it — fits
+// well inside this; it stays under the 1 KB event budget.
+const rawErrorCap = 768
+
+// rawErrorRecordCap bounds the raw error kept on the merge request itself.
+// Larger than the event's cap because the record is read by a human triaging
+// one failure rather than written to a size-sensitive append-only log, and
+// still bounded because history retains 100 merge requests each holding up to
+// the combined attempt cap of these.
+const rawErrorRecordCap = 4096
+
 // workItemIDFromAuthor derives the work_item_id field from the MR's author.
 // Polecat naming is "cat-<work-item-id>" in some contexts; production submits
 // pass the work item ID directly (e.g. "mg-287e"). Strip the cat- prefix when
@@ -257,7 +271,7 @@ func emitMergeCancelled(mr *MergeRequest, attempt int, stage string, gateOutput 
 
 // emitMergeFailed writes a refinery_merge_failed event for a failed attempt.
 // terminal=true means the refinery has given up on this MR (no more retries).
-func emitMergeFailed(mr *MergeRequest, attempt int, stage string, err error, terminal bool, gateOutput string) {
+func emitMergeFailed(mr *MergeRequest, attempt int, stage string, err error, terminal bool, gateOutput string, fail AttemptFailure) {
 	if stage == "" {
 		stage = "unknown"
 	}
@@ -270,6 +284,40 @@ func emitMergeFailed(mr *MergeRequest, attempt int, stage string, err error, ter
 		"stage":            stage,
 		"reason":           summarizeReason(err),
 		"terminal":         terminal,
+	}
+	// The classification and — above all — the TRANSPORT and the RAW error
+	// (mg-e5c2). `reason` above is one truncated line, and one truncated line
+	// per failure, read across a subset of one transport, is what produced two
+	// confident wrong mechanisms on 2026-08-05. The event log is the only
+	// cross-merge-request view of an incident, so it is the one place that must
+	// carry both transports' wording verbatim:
+	//
+	//	pogo refinery history --since=6h --json |
+	//	  jq -r '.[].attempts[] | "\(.transport)\t\(.raw_error)"' | sort -u
+	if fail.Class != "" {
+		details["class"] = string(fail.Class)
+	}
+	if fail.Transport != "" {
+		details["transport"] = fail.Transport
+	}
+	if fail.Remote != "" {
+		details["remote"] = fail.Remote
+	}
+	if fail.Command != "" {
+		details["git_command"] = fail.Command
+	}
+	if fail.Signal != "" {
+		details["signal"] = fail.Signal
+	}
+	if fail.RawError != "" {
+		details["raw_error"] = truncate(fail.RawError, rawErrorCap)
+	}
+	details["retried"] = fail.Retried
+	if fail.NotRetriedReason != "" {
+		details["not_retried_reason"] = fail.NotRetriedReason
+	}
+	if fail.BackoffSeconds > 0 {
+		details["backoff_seconds"] = fail.BackoffSeconds
 	}
 	if gateOutput != "" {
 		details["gate_output_truncated"] = truncate(gateOutput, gateOutputCap)

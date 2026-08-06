@@ -111,7 +111,7 @@ func formatQueue(queue []refinery.MergeRequest, now time.Time) string {
 
 	for i, mr := range queue {
 		line := fmt.Sprintf("%-12s  branch=%-30s  author=%-15s  status=%-10s  submitted=%s",
-			mr.ID, mr.Branch, mr.Author, string(mr.Status), mr.SubmitTime.Format("2006-01-02 15:04"))
+			mr.ID, mr.Branch, mr.Author, mr.StatusLabel(), mr.SubmitTime.Format("2006-01-02 15:04"))
 		if i != processing {
 			// Position in the whole pipeline, so a long-queued row reads as
 			// "waiting behind N" rather than as "ignored". The array is

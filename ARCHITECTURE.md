@@ -429,6 +429,39 @@ The exception is conditional on the nesting rather than a blanket "prefer `./bui
 
 The saving is smaller than "the suite runs twice" suggests, and the reason is worth knowing: Go's test cache means the second `go test ./...` returns almost everything cached (measured: 0 of 50 packages cached on the first run, 49 on the immediately following one). What the duplicate actually re-paid was `test.sh`'s dozen bash suites, several of which stand up real sandboxed daemons and cache nothing. Any per-repo `[gates] commands` is used verbatim and none of this applies to it.
 
+**Failure classification, and what may be retried (mg-e5c2).** Every failing
+attempt is classified before the refinery decides what to do with it, against
+pm-pogo's ruling from mg-0d70: *retry a failure that establishes nothing about
+the tree; do not retry one that establishes a fact* — concretely, would
+re-running plausibly give a different answer for a reason unrelated to the code?
+
+| class | means | retried |
+|---|---|---|
+| `infrastructure` | establishes nothing about the branch — network/DNS/transport, a remote that refused our credentials, or the refinery's own checkout | network yes, credentials/checkout no |
+| `contention` | the target moved between rebase and push | yes, on `max_attempts` |
+| `defect` | establishes a fact about the branch — gate verdict, rebase conflict, refused commit message | no |
+| `unclassified` | could not be placed | yes, twice |
+
+Network-class retries have their **own** budget (5 attempts, backoff 2s/5s/15s/30s,
+capped at 90s of total sleep) so a blip cannot consume the attempts that exist to
+absorb a lost race. Only `defect` counts against an author's consecutive-failure
+streak, and only `defect` invites dispatching a fix.
+
+`pogo refinery show`, `refinery history` and the failure mail print
+`failed(infrastructure)` rather than a bare `failed`, because the status is what a
+coordinator reads first — thirty-one bare `failed` rows on 2026-08-05 invited
+thirty-one fixes for defects that did not exist. The machine-readable `status`
+field is unchanged (`merged`/`failed`/`lost`) so polecat poll loops still
+terminate; the class travels beside it as `failure_class`.
+
+Every failing attempt records the **transport** and git's **raw output verbatim**,
+never a normalised summary, and a terminal failure always records why no further
+retry was made. Of the 31 failures in that incident, 20 were ssh reporting
+`Undefined error: 0` — which names no cause — and 11 were HTTPS reporting
+`Could not resolve host: github.com`, which named it outright; readers working
+from the ssh subset alone produced two confident wrong mechanisms over several
+hours. See `internal/refinery/failureclass.go`.
+
 **Telling a slow gate from a dead one.** Quality gates are the one step that can
 run for tens of minutes, and the step used to log on entry and not again until it
 produced a result. From outside, a gate running for thirty minutes and a gate
