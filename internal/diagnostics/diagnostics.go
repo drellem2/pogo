@@ -10,6 +10,7 @@ import (
 
 	"github.com/hashicorp/go-hclog"
 
+	"github.com/drellem2/pogo/internal/logging"
 	pogoPlugin "github.com/drellem2/pogo/pkg/plugin"
 )
 
@@ -89,7 +90,7 @@ func New() func() (pogoPlugin.IPogoPlugin, error) {
 
 func createDiagnosticsPlugin() *DiagnosticsPlugin {
 	logger := hclog.New(&hclog.LoggerOptions{
-		Level:      hclog.Info,
+		Level:      logging.Level(),
 		Output:     os.Stderr,
 		JSONFormat: true,
 	})

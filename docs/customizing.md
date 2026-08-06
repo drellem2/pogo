@@ -458,6 +458,36 @@ Two more scope controls need no config:
 An environment override exists for the file-count ceiling
 (`POGO_MAX_FILES_PER_TREE`) and takes precedence over the config file.
 
+## Turning the log volume up or down
+
+`POGO_LOG_LEVEL` sets the threshold for pogod's loggers. Values are hclog's:
+`trace`, `debug`, `info` (the default), `warn`, `error`, `off` — case- and
+whitespace-insensitive. A value pogo cannot parse falls back to `info` rather
+than failing the daemon, so a typo costs you the level you asked for and
+nothing else.
+
+```bash
+POGO_LOG_LEVEL=debug pogo server start
+```
+
+It is an environment variable rather than a `config.toml` key on purpose: it
+works for a daemon started any way at all, including under launchd, where
+nothing sources a shell that could read a config file into the process. It is
+read once when the loggers are built, so changing it takes effect on the next
+pogod start. (A config key with proper reload semantics is tracked separately.)
+
+**What you get at each level.** By default pogod narrates only the indexing
+passes that did something: a re-index that rebuilt a project's index reports
+`Indexed N files for <root>` at info, while a pass that found nothing changed
+says nothing at all. Set `debug` to see every tick — `Reindexing`,
+`Indexed N files for`, and `No content changes detected` for each project on
+each pass. That per-tick narration used to be unconditional and was 98.8% of
+pogod's log output (gh #111).
+
+Failures to read a project's git tree hash — which mean the indexer cannot use
+its fast path for that repo and must hash every file — still warn, but once per
+project per pogod run rather than once per tick.
+
 ## Polecat git garbage collection
 
 Every polecat runs in an isolated git worktree on its own

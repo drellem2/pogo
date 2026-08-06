@@ -19,6 +19,7 @@ import (
 	"github.com/drellem2/pogo/internal/config"
 	"github.com/drellem2/pogo/internal/driver"
 	"github.com/drellem2/pogo/internal/gitgc"
+	"github.com/drellem2/pogo/internal/logging"
 	"github.com/drellem2/pogo/internal/search"
 	pogoPlugin "github.com/drellem2/pogo/pkg/plugin"
 )
@@ -42,7 +43,7 @@ var ProjectFileName string
 var indexRoots []string
 
 var logger = hclog.New(&hclog.LoggerOptions{
-	Level:      hclog.Info,
+	Level:      logging.Level(),
 	Output:     os.Stderr,
 	JSONFormat: true,
 })
