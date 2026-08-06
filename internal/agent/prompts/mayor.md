@@ -391,6 +391,8 @@ Look for:
 
   Two things NOT to escalate on. **`last_output=Ns ago` on its own is not a liveness signal**: a healthy gate was measured silent for 8m31s of a 10m run while burning ~3.9 cores, so a rule keyed on output staleness fires on ordinary work. And **`heartbeat=N/30s` in the daemon log is a tick counter, not a health field** — it increments identically whether the gate is computing or wedged.
 
+  **Before forming any hypothesis about WHY a gate is slow, read what it SAID.** Since mg-9adc `pogo refinery show <id>` prints the running gate's own text under `--- Gate output so far ---` (in `--json`: `output_excerpt` — *not* `last_output`, which is a timestamp). It carries the gate's opening lines as well as its most recent ones, because a gate states what it resolved and what it is about to run in its header, and states its bound explicitly wherever it bit. On 2026-08-05 a hypothesis about a slow gate travelled three agents for over an hour and cost a peer product two tickets; the gate's *first* line refuted it. Do not relay a hypothesis about a running gate without checking this first — a hypothesis formed while the evidence is dark cannot be killed, so it accumulates relays instead of tests, and each relay reads as corroboration.
+
   Escalating on a healthy gate is destructive (it kills the run mid-flight and re-queues the work); waiting on a hung one only costs time. Prefer waiting.
 
 - **Refinery failures on done items**: A work item may be in `done/` status but the refinery rejected its branch. This happens when a {{.Worker}} exits after a merge failure without calling `mg done` — but can also occur due to races or bugs. On each cycle, cross-reference refinery history against `mg list --status=done`.

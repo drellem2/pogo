@@ -1,6 +1,7 @@
 package refinery
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log"
@@ -91,8 +92,28 @@ type StepProgress struct {
 	// OutputLines counts newline-terminated lines the gate has produced;
 	// LastOutput is when it last produced any bytes at all. Zero and zero
 	// mean the gate has said nothing since it started.
+	//
+	// Note what LastOutput is not: it is a TIMESTAMP, and a reader who finds it
+	// in a JSON payload reasonably expects the last output. OutputExcerpt below
+	// is the field that carries the text; the name and type of these two stay
+	// where consumers already expect them (mg-9adc).
 	OutputLines int       `json:"output_lines"`
 	LastOutput  time.Time `json:"last_output,omitempty"`
+	// OutputExcerpt is what the gate has SAID: its opening lines, its most
+	// recent lines, and an explicit count of what falls between them.
+	//
+	// It is the content half of the pair above, and it is a separate signal
+	// rather than a nicety. OutputLines measures VOLUME, and volume cannot
+	// discriminate a compute phase from a hang — a gate stuck at "140 lines,
+	// last 26m ago" reads identically whether those 140 lines end in a passing
+	// suite or in "Building pogod into the sandbox...". While a gate runs this
+	// is the only reachable copy of its text: the full output is assembled and
+	// stored on the MergeRequest only once the gate has finished, which is
+	// precisely when nobody needs it any more.
+	//
+	// Nil on a record written by a pogod that predates this field, which is a
+	// different statement from an excerpt reporting zero lines.
+	OutputExcerpt *GateExcerpt `json:"output_excerpt,omitempty"`
 	// TimeoutAt is when the gate will be killed for exceeding its timeout,
 	// zero when no timeout is configured. Present so an operator deciding
 	// whether to wait knows how long waiting can possibly last.
@@ -607,6 +628,12 @@ type gateWatch struct {
 	lines      atomic.Int64
 	lastOutput atomic.Int64 // UnixNano; 0 means the gate has emitted nothing
 
+	// excerpt keeps a bounded window of the gate's actual TEXT beside the
+	// counters above (mg-9adc). It carries its own small mutex for the same
+	// reason those two are atomic: it sits on the gate's write path and must
+	// not put the refinery's lock there.
+	excerpt *excerptBuffer
+
 	// pid is the gate shell's process id, published by runGate the moment it
 	// starts. Atomic because the beat goroutine reads it while the exec path
 	// writes it.
@@ -676,6 +703,7 @@ func startGateWatch(r *Refinery, mr *MergeRequest, step, gate string, index, cou
 	w := &gateWatch{
 		r:        r,
 		mr:       mr,
+		excerpt:  newExcerptBuffer(),
 		interval: interval,
 		stop:     make(chan struct{}),
 		done:     make(chan struct{}),
@@ -792,15 +820,24 @@ func (w *gateWatch) publishCPU(sample *subtreeSample, reading cpuReading) {
 	w.cpu = reading
 }
 
-// sawOutput records that the gate produced bytes. Called on every write from
-// the gate, so it does no locking and no I/O.
-func (w *gateWatch) sawOutput(newlines int) {
+// sawOutput records that the gate produced bytes: how many lines, when, and —
+// bounded — what they said. Called on every write from the gate, so it does no
+// I/O and touches only its own small lock.
+//
+// Counting happens here rather than in the writer so the count and the text can
+// never disagree about what they were derived from: both are computed from the
+// same bytes in the same call.
+func (w *gateWatch) sawOutput(p []byte) {
 	if w == nil {
 		return
 	}
-	if newlines > 0 {
-		w.lines.Add(int64(newlines))
+	// Count only completed lines, but report freshness on any bytes at all: a
+	// gate writing a progress spinner without newlines is still visibly alive,
+	// which is the property being measured.
+	if n := bytes.Count(p, []byte{'\n'}); n > 0 {
+		w.lines.Add(int64(n))
 	}
+	w.excerpt.write(p)
 	w.lastOutput.Store(time.Now().UnixNano())
 }
 
@@ -917,6 +954,7 @@ func (w *gateWatch) snapshot(now time.Time, final bool) *StepProgress {
 			HeartbeatInterval: w.interval.String(),
 			OutputLines:       lines,
 			LastOutput:        last,
+			OutputExcerpt:     w.excerpt.snapshot(),
 		}
 		w.applyCPU(p)
 		return p
@@ -930,6 +968,7 @@ func (w *gateWatch) snapshot(now time.Time, final bool) *StepProgress {
 	}
 	p.OutputLines = lines
 	p.LastOutput = last
+	p.OutputExcerpt = w.excerpt.snapshot()
 	w.applyCPU(p)
 	if final {
 		p.EndTime = now
@@ -988,6 +1027,7 @@ func (w *gateWatch) readProgress(now time.Time) *StepProgress {
 		w.r.mu.Unlock()
 	}
 	cp.OutputLines = int(w.lines.Load())
+	cp.OutputExcerpt = w.excerpt.snapshot()
 	if nanos := w.lastOutput.Load(); nanos != 0 {
 		cp.LastOutput = time.Unix(0, nanos)
 	} else {
@@ -1041,8 +1081,16 @@ func (w *gateWatch) line(p *StepProgress, now time.Time) string {
 	if !p.LastOutput.IsZero() {
 		outputAge = roundDur(now.Sub(p.LastOutput)).String() + " ago"
 	}
-	return fmt.Sprintf("MR %s step=%s gate=%s alive elapsed=%s heartbeat=%d/%s gate_output_lines=%d last_output=%s gate_cpu=%s",
-		id, p.Step, gate, roundDur(p.Elapsed(now)), p.Beats, p.HeartbeatInterval, p.OutputLines, outputAge, p.CPUSummary())
+	// The gate's most recent line rides along with the counts. A pogod log is
+	// often the first place anyone looks at a slow gate, and a beat that reports
+	// only how MUCH the gate has said leaves the reader to infer content from
+	// volume — which is the inference this whole change exists to stop.
+	last := "-"
+	if l := p.OutputExcerpt.Latest(); l != "" {
+		last = ellipsizeLine(l, 120)
+	}
+	return fmt.Sprintf("MR %s step=%s gate=%s alive elapsed=%s heartbeat=%d/%s gate_output_lines=%d last_output=%s gate_cpu=%s gate_last_line=%q",
+		id, p.Step, gate, roundDur(p.Elapsed(now)), p.Beats, p.HeartbeatInterval, p.OutputLines, outputAge, p.CPUSummary(), last)
 }
 
 // finish stops the beat goroutine and seals the record with a final count.

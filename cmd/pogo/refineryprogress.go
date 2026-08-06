@@ -63,6 +63,22 @@ func formatMRProgress(p *refinery.StepProgress, now time.Time) string {
 		fmt.Fprintln(&b, "  "+signalLine(s))
 	}
 	fmt.Fprintf(&b, "Verdict:   %s\n", p.Diagnosis(now))
+	// The gate's own TEXT, for a gate that is still running — the one place it
+	// is reachable before the merge resolves (mg-9adc). Every row above this
+	// point is metadata ABOUT the output: how many lines, how long ago, at what
+	// CPU. None of them can tell a compute phase from a hang, because none of
+	// them says what the gate was doing when it went quiet.
+	//
+	// Skipped once the record is sealed: `refinery show` prints the gate's full
+	// output below this block for a finished merge, and a bounded excerpt above
+	// an unbounded transcript is noise at best and a second, disagreeing copy at
+	// worst.
+	if p.EndTime.IsZero() {
+		fmt.Fprintln(&b, "\n--- Gate output so far ---")
+		for _, l := range p.OutputExcerpt.Report() {
+			fmt.Fprintln(&b, l)
+		}
+	}
 	return b.String()
 }
 
@@ -304,6 +320,17 @@ func progressLines(mr *refinery.MergeRequest, now time.Time) []string {
 	}
 	lines = append(lines, fmt.Sprintf("step=%s gate=%s elapsed=%s", p.Step, gate, p.Elapsed(now).Round(time.Second)))
 	lines = append(lines, fmt.Sprintf("output: %s   |   cpu: %s", out, p.CPUSummary()))
+	// Two lines of the gate's own words beside the count of them. The count
+	// alone is what a reader has been polling for minutes, and it cannot
+	// distinguish a compute phase from a hang (mg-9adc). The FIRST line is here
+	// as well as the latest because a gate states what it resolved and what it
+	// is about to run in its header, and by the time anyone is watching a slow
+	// gate that header is far outside any tail.
+	if x := p.OutputExcerpt; x.Spoke() {
+		lines = append(lines, fmt.Sprintf("said first:  %s", ellipsize(x.First(), 90)))
+		lines = append(lines, fmt.Sprintf("said latest: %s", ellipsize(x.Latest(), 90)))
+		lines = append(lines, "(these two lines are a summary — 'pogo refinery show "+mr.ID+"' prints the bounded excerpt and states its bound)")
+	}
 	// The layer-attributed evidence, so the verdict below can be checked
 	// against the signals it was derived from rather than taken on trust —
 	// and so a reader can see them point in different directions (mg-48d8).

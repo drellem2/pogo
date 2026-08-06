@@ -307,3 +307,138 @@ func TestProgressClockTimesAreUTCAndSaidSo(t *testing.T) {
 		t.Errorf("finish time is not rendered as labelled UTC:\n%s", done)
 	}
 }
+
+// gateSaid builds an excerpt fixture the way a running gate would have produced
+// it: an opening header, a long silent middle the bound cannot keep, and a
+// recent line.
+func gateSaid(total int) *refinery.GateExcerpt {
+	head := []string{
+		"watchlist consistent: 17 paths; import closure 10 modules; datasets read 1",
+		"=== watched paths changed:",
+		"    .github/workflows/script-controls.yml",
+	}
+	tail := []string{"ok  internal/refinery  12.400s", "ok  internal/hostload  0.310s"}
+	return &refinery.GateExcerpt{
+		Head: head, Tail: tail,
+		HeadLimit: 25, TailLimit: 40, LineBytes: 500,
+		Lines:  total,
+		Elided: total - len(head) - len(tail),
+	}
+}
+
+// TestRefineryShowPrintsWhatARunningGateSaid is the operator-facing half of
+// mg-9adc's positive control. Every row `refinery show` printed before this was
+// metadata ABOUT the gate's output — how many lines, how long ago, at what CPU
+// — and none of them can tell a compute phase from a hang, because none of them
+// says what the gate was doing when it went quiet.
+//
+// The opening line is asserted explicitly, not just "some text": the incident
+// this closes turned on a gate's FIRST line, which a tail of any reasonable
+// size would have dropped 77 minutes in.
+func TestRefineryShowPrintsWhatARunningGateSaid(t *testing.T) {
+	now := time.Now()
+	out := formatMRProgress(&refinery.StepProgress{
+		Step: "quality-gates", Gate: "./scripts/refinery_gate.sh",
+		StartTime: now.Add(-77 * time.Minute), Heartbeat: now.Add(-3 * time.Second),
+		Beats: 154, HeartbeatInterval: "30s",
+		OutputLines: 312, LastOutput: now.Add(-26 * time.Minute),
+		OutputExcerpt: gateSaid(312),
+	}, now)
+	t.Logf("RUNNING GATE:\n%s", out)
+
+	if !strings.Contains(out, "watchlist consistent: 17 paths") {
+		t.Errorf("the gate's OPENING line must be readable while it runs — that line is what "+
+			"refuted the wrong hypothesis, and it is far outside any tail; got:\n%s", out)
+	}
+	if !strings.Contains(out, "ok  internal/refinery  12.400s") {
+		t.Errorf("the gate's most recent line must be readable too, got:\n%s", out)
+	}
+	// The bound, stated. A bounded read that manufactures an absence is its own
+	// defect, and this arc has already been bitten by exactly that.
+	for _, want := range []string{"312 lines so far", "NOT shown", "head 25", "tail 40", "not shown here"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the excerpt must state its bound; %q missing from:\n%s", want, out)
+		}
+	}
+	// And the line numbers, so head-then-tail cannot read as contiguous.
+	if !strings.Contains(out, "  1 | watchlist consistent") || !strings.Contains(out, "312 | ok  internal/hostload") {
+		t.Errorf("kept lines must carry the gate's own numbering, got:\n%s", out)
+	}
+}
+
+// TestRefineryShowSeparatesASilentGateFromAnUnrecordedOne. "The gate has said
+// nothing" and "nothing here captured what it said" lead to opposite actions,
+// and rendering them the same is how a reader concludes a steadily-printing
+// gate is mute.
+func TestRefineryShowSeparatesASilentGateFromAnUnrecordedOne(t *testing.T) {
+	now := time.Now()
+	base := refinery.StepProgress{
+		Step: "quality-gates", Gate: "./build.sh", StartTime: now.Add(-8 * time.Minute),
+		Heartbeat: now.Add(-2 * time.Second), Beats: 16, HeartbeatInterval: "30s",
+	}
+	silent := base
+	silent.OutputExcerpt = &refinery.GateExcerpt{HeadLimit: 25, TailLimit: 40, LineBytes: 500}
+	unrecorded := base // OutputExcerpt stays nil: an older pogod's record
+
+	gotSilent := formatMRProgress(&silent, now)
+	gotUnrecorded := formatMRProgress(&unrecorded, now)
+	if gotSilent == gotUnrecorded {
+		t.Fatal("a gate that said nothing and a record that captured nothing must not render identically")
+	}
+	if !strings.Contains(gotSilent, "NOTHING YET") {
+		t.Errorf("a silent gate's excerpt must report the silence as a measurement, got:\n%s", gotSilent)
+	}
+	if !strings.Contains(gotUnrecorded, "NOT RECORDED") {
+		t.Errorf("a record with no excerpt must say so rather than look silent, got:\n%s", gotUnrecorded)
+	}
+}
+
+// TestFinishedGateGetsNoBoundedExcerpt: once the merge resolves, `refinery
+// show` prints the gate's FULL output. A bounded excerpt above an unbounded
+// transcript adds a second, smaller copy that a skimming reader can mistake for
+// the whole of it.
+func TestFinishedGateGetsNoBoundedExcerpt(t *testing.T) {
+	now := time.Now()
+	out := formatMRProgress(&refinery.StepProgress{
+		Step: "quality-gates", Gate: "./build.sh",
+		StartTime: now.Add(-20 * time.Minute), EndTime: now.Add(-1 * time.Minute),
+		HeartbeatInterval: "30s", OutputLines: 312, OutputExcerpt: gateSaid(312),
+	}, now)
+	if strings.Contains(out, "Gate output so far") {
+		t.Errorf("a finished record must not print a bounded excerpt — the full output follows it; got:\n%s", out)
+	}
+}
+
+// TestQueueViewSaysWhatTheGateSaidNotOnlyHowMuch. `refinery queue` is the view
+// people poll while they wait, and its output row was a pure volume reading:
+// "140 lines, last 26m ago" is byte-identical for a gate mid-suite and a gate
+// wedged at a build step. One line of the gate's own words each end fixes that
+// without turning the row into a transcript.
+func TestQueueViewSaysWhatTheGateSaidNotOnlyHowMuch(t *testing.T) {
+	now := time.Now()
+	out := formatQueue([]refinery.MergeRequest{{
+		ID: "mr-active", Branch: "polecat-9adc", Author: "mg-9adc",
+		Status: refinery.StatusProcessing, SubmitTime: now.Add(-80 * time.Minute),
+		StartTime: now.Add(-78 * time.Minute),
+		Progress: &refinery.StepProgress{
+			Step: "quality-gates", Gate: "./scripts/refinery_gate.sh",
+			StartTime: now.Add(-77 * time.Minute), Heartbeat: now.Add(-3 * time.Second),
+			Beats: 154, HeartbeatInterval: "30s",
+			OutputLines: 312, LastOutput: now.Add(-26 * time.Minute),
+			OutputExcerpt: gateSaid(312),
+		},
+	}}, now)
+	t.Logf("QUEUE:\n%s", out)
+
+	if !strings.Contains(out, "said first:  watchlist consistent: 17 paths") {
+		t.Errorf("the queue row must carry the gate's opening line, got:\n%s", out)
+	}
+	if !strings.Contains(out, "said latest: ok  internal/hostload") {
+		t.Errorf("the queue row must carry the gate's most recent line, got:\n%s", out)
+	}
+	// Two lines are a summary, and a summary that does not say where the rest is
+	// reads as the whole of it.
+	if !strings.Contains(out, "pogo refinery show mr-active") {
+		t.Errorf("the summary must name the command that prints the bounded excerpt, got:\n%s", out)
+	}
+}

@@ -155,10 +155,11 @@ type gateOutputWriter struct {
 
 func (g *gateOutputWriter) Write(p []byte) (int, error) {
 	n, err := g.buf.Write(p)
-	// Report freshness on any bytes at all, and count only completed lines: a
-	// gate that writes a progress spinner without newlines is still visibly
-	// alive, which is the property being measured.
-	g.watch.sawOutput(bytes.Count(p[:n], []byte{'\n'}))
+	// The watch is handed the bytes, not a count derived from them: it keeps a
+	// bounded window of the gate's actual text as well as the counters, and the
+	// text is the half that is unreachable anywhere else until the gate ends
+	// (mg-9adc).
+	g.watch.sawOutput(p[:n])
 	return n, err
 }
 

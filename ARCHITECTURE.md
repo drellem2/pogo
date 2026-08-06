@@ -489,6 +489,7 @@ Every gate now runs under a **heartbeat**, emitted by the goroutine running it,
 ```
 refinery: MR mr-abc step=quality-gates gate=./build.sh (1/2) alive elapsed=12m0s
           heartbeat=24/30s gate_output_lines=412 last_output=3s ago
+          gate_last_line="ok  internal/refinery  12.400s"
 ```
 
 The same record is persisted on the merge request and rendered by `pogo refinery
@@ -496,13 +497,14 @@ show <id>` (and carried in `--json` under `progress`), which matters because the
 dead-runner case is exactly the case where the writing process is gone and the
 state file is the only reader left.
 
-Four signals are reported **separately**, because they answer different
+Five signals are reported **separately**, because they answer different
 questions and collapsing them would rebuild the ambiguity:
 
 | Signal | Written by | Answers | A dead runner | A hung gate subprocess |
 |---|---|---|---|---|
 | `heartbeat` / `beats` | the goroutine running the gate | is the runner alive? | **cannot emit it** — goes stale | keeps beating |
 | `output_lines` / `last_output` | the gate's own subprocess | is the gate talking? | frozen | **cannot emit it** — freezes |
+| `output_excerpt` (mg-9adc) | the gate's own subprocess | *what did it say?* | frozen | frozen, at the words it stopped on |
 | `cpu_cores` / `cpu_procs` (mg-0c51) | a sampler over the gate's process subtree | is the gate *computing*? | n/a | reads idle |
 | `contention` (mg-1b8c) | a sampler over the fleet's process subtree | was there CPU to compute *with*? | n/a | unaffected |
 
@@ -551,6 +553,48 @@ worktree mtime felt like corroboration, but a long test suite *reads* files
 rather than writing them, so workspace state looks the same for a healthy slow
 gate and a dead one. Two observations that cannot discriminate are not two
 pieces of evidence.
+
+**What the gate SAID, not just how much** (mg-9adc). Every signal above is a
+measure of *volume* or *rate*, and volume cannot tell a compute phase from a
+hang: a gate frozen at `140 lines, last 26m ago` reads identically whether those
+lines end in a passing suite or in `Building pogod into the sandbox...`. The
+gate's full output is stored on the merge request — but only once the merge
+resolves, which is exactly when nobody needs it. On 2026-08-05 a hypothesis
+about why a gate was slow travelled across three agents for over an hour and
+cost a peer product two tickets; **the gate's own first line refuted it**, and
+that line was unreachable for the whole window. A window in which the evidence
+is dark does not merely delay the answer, it *selects for stories*: a hypothesis
+that cannot be killed accumulates relays instead of tests, and each relay reads
+as corroboration.
+
+`StepProgress.OutputExcerpt` carries the running gate's text, rendered by `pogo
+refinery show <id>` under `--- Gate output so far ---` and available in `--json`
+under `output_excerpt` (**not** `last_output`, which is a timestamp and reads to
+a JSON consumer like the field that would hold the text). Three properties are
+load-bearing:
+
+- **A head as well as a tail.** "Show me the last N lines" is what everyone asks
+  for and it would have left the incident above fully intact — the refuting line
+  was the gate's *first*, and at minute 77 no tail reaches it. Gates state what
+  they resolved and what they are about to run in a header. The first 25 lines
+  are captured once and never evicted; the last 40 roll.
+- **The bound is stated wherever it bit.** The header says how many lines the
+  gate produced, how many are *not* shown, and what the limits are; the gap
+  between head and tail is printed as a gap; kept lines carry the gate's own
+  line numbers so a head-then-tail cannot read as a contiguous transcript; an
+  over-long line is cut at 500 bytes and says so *in the line*. A bounded read
+  that manufactures an absence is its own defect — this arc has been bitten by a
+  `head -40` on an 81-line mail producing a confident wrong diagnosis.
+- **Silence is a measurement, absence is not.** A gate that has said nothing
+  reports `NOTHING YET — ... nothing was elided`; a record from a pogod that
+  never captured gate text reports `NOT RECORDED`. The two lead to opposite
+  actions, so they must not render the same. An unterminated line — the gate
+  mid-write — is reported separately and labelled, because that is precisely the
+  reading a gate that halted mid-phase leaves behind.
+
+`pogo refinery queue` carries a one-line summary of each end (`said first:` /
+`said latest:`) and names the command that prints the bounded excerpt, because a
+two-line summary that does not say where the rest is reads as the whole of it.
 
 **Gate timeout.** A single gate is bounded at 60 minutes by default
 (`[gates] timeout`, or `"0"` to remove the bound). The bound exists so a
