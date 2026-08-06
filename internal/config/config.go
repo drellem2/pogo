@@ -1748,8 +1748,30 @@ func Load() *Config {
 }
 
 // ServerURL returns the base URL for connecting to the pogo daemon.
+//
+// It targets 127.0.0.1 and NOT "localhost", for the same reason DialAddr does
+// (drellem2/pogo#110). pogod binds 127.0.0.1 (DefaultBind), while on a stock
+// macOS /etc/hosts the name resolves ::1 first — an address pogod never holds
+// and any other process may claim. Whatever claims it becomes pogod for every
+// caller of this function. Go's dual-stack fallback does not save us: it
+// retries the other family on connection REFUSED, and an interloper that
+// accepts and answers wrongly never refuses. A `kubectl port-forward` that
+// landed on ::1:10000 after its IPv4 bind was refused took the pogo control
+// plane down for ~20 minutes on 2026-07-31 while pogod stayed healthy
+// throughout.
+//
+// Both callers want the address rather than the name: internal/client funnels
+// every CLI command through it, and internal/selfdrift's RunningRev reports on
+// the daemon's build identity — under shadowing it read the interloper and
+// reported a healthy daemon as unreachable.
+//
+// The cost is a daemon deliberately configured with a v6-loopback `bind`,
+// which this stops reaching over the name. That configuration is already
+// half-broken: DialAddr — what the spawn-race guard probes — has never found
+// it, so a rival pogod could be started against it. `pogo doctor --check`'s
+// loopback-resolution row reports that case in plain language.
 func (c *Config) ServerURL() string {
-	return fmt.Sprintf("http://localhost:%d", c.Port)
+	return fmt.Sprintf("http://127.0.0.1:%d", c.Port)
 }
 
 // ListenAddr returns the address string for the server to listen on.

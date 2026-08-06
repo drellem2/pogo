@@ -2905,6 +2905,7 @@ With --check, runs a deterministic health checklist and exits:
 
 The --check mode verifies:
   - Is pogod running?
+  - Does "localhost:<port>" reach pogod, or is another process shadowing it?
   - Is the system service installed?
   - Does every installed launchd plist match the plist this build renders?
   - Are required tools installed (git, go, the configured agent harness)?
@@ -2982,6 +2983,27 @@ Exits with code 1 if any critical check fails (--check mode only).`,
 				fail("pogod running", "server is not reachable")
 			} else {
 				pass("pogod running", "")
+			}
+
+			// 1b. Does the loopback NAME reach the daemon check 1 just
+			// probed? pogod binds 127.0.0.1 only, so ::1:<port> is free for
+			// any other process to claim, and whatever claims it answers for
+			// pogod to everything that dials "localhost" — the shape of the
+			// 2026-07-31 outage (drellem2/pogo#110). This row speaks only
+			// when the two addresses disagree; see loopbackresolution.go.
+			{
+				loopCfg := config.Load()
+				bindProbe := probePogod("http://"+loopCfg.DialAddr(), loopbackProbeTimeout)
+				nameProbe := probePogod(fmt.Sprintf("http://localhost:%d", loopCfg.Port), loopbackProbeTimeout)
+				lbStatus, lbDetail := loopbackResolutionLine(bindProbe, nameProbe, loopCfg.Port)
+				switch lbStatus {
+				case "fail":
+					fail(loopbackCheckName, lbDetail)
+				case "warn":
+					warn(loopbackCheckName, lbDetail)
+				case "pass":
+					pass(loopbackCheckName, lbDetail)
+				}
 			}
 
 			// 2. System service installed?
