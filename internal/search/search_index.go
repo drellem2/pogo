@@ -379,7 +379,17 @@ func (g *BasicSearch) ReIndex(path string) {
 	if !fileInfo.IsDir() {
 		path = filepath.Dir(path)
 	}
-	g.logger.Info("Reindexing ", path)
+	// Debug, not Info: a re-index is announced once per project per tick
+	// whether or not the pass finds anything to do, and that narration was
+	// 98.8% of pogod's stderr (gh#111). The pass that actually rebuilds an
+	// index still says so at Info — see serializeProjectIndex.
+	//
+	// The trailing argument is a named field rather than part of the message.
+	// hclog's Info takes msg plus key/value pairs, so `Info("Reindexing ",
+	// path)` emitted {"@message":"Reindexing ","EXTRA_VALUE_AT_END":"<path>"}
+	// — the one thing a reader wants from the line was in neither the message
+	// nor a field they could query.
+	g.logger.Debug("Reindexing", "root", path)
 	g.inflight.Add(1)
 	go func() {
 		defer g.inflight.Add(-1)
@@ -628,7 +638,7 @@ func (g *BasicSearch) serializeProjectIndex(proj *IndexedProject, prev *IndexedP
 	if h, err := gitTreeHash(proj.Root); err == nil {
 		proj.GitTreeHash = h
 	} else {
-		g.logger.Warn("Could not read git tree hash for " + proj.Root + ": " + err.Error())
+		g.warnGitTreeHashOnce(proj.Root, err)
 	}
 
 	// Preserve a skipped-too-large marker; otherwise the project is ready.
@@ -638,13 +648,25 @@ func (g *BasicSearch) serializeProjectIndex(proj *IndexedProject, prev *IndexedP
 	g.mu.Lock()
 	g.projects[proj.Root] = *proj
 	g.mu.Unlock()
-	g.logger.Info("Indexed " + strconv.Itoa(len(proj.Paths)) + " files for " + proj.Root)
+	// Level SPLIT rather than a flat demotion (gh#111). A pass that actually
+	// rebuilt this project's index still reports at Info; a pass that found
+	// nothing to do is the no-op narration and drops to Debug. Demoting both
+	// arms would leave the indexer entirely silent at the default level, so a
+	// daemon that stopped indexing would look identical to one that is idle —
+	// the mg-c3f0 "correct warning nobody hears" failure in miniature.
+	indexedMsg := "Indexed " + strconv.Itoa(len(proj.Paths)) + " files for " + proj.Root
+	if contentChanged {
+		g.logger.Info(indexedMsg)
+	} else {
+		g.logger.Debug(indexedMsg)
+	}
 
 	if !contentChanged {
 		// Verify zoekt index file actually exists before skipping rebuild
 		indexPath := filepath.Join(searchDir, codeSearchIndexFileName)
 		if _, err := os.Lstat(indexPath); err == nil {
-			g.logger.Info("No content changes detected, skipping zoekt rebuild for " + proj.Root)
+			// The skip is the no-op case by definition: Debug.
+			g.logger.Debug("No content changes detected, skipping zoekt rebuild for " + proj.Root)
 			return contentChanged
 		}
 		g.logger.Info("Zoekt index missing, rebuilding for " + proj.Root)
@@ -749,7 +771,7 @@ func (g *BasicSearch) Load(projectRoot string) (*IndexedProject, error) {
 	// branch switches) without relying on a fixed TTL.
 	currentHash, hashErr := gitTreeHash(projectRoot)
 	if hashErr != nil {
-		g.logger.Warn("Could not read git tree hash for " + projectRoot + ": " + hashErr.Error())
+		g.warnGitTreeHashOnce(projectRoot, hashErr)
 	}
 	if hashErr != nil || project.GitTreeHash == "" || project.GitTreeHash != currentHash {
 		if hashErr == nil {

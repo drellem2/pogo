@@ -13,6 +13,7 @@ import (
 	"github.com/hashicorp/go-plugin"
 
 	"github.com/drellem2/pogo/internal/config"
+	"github.com/drellem2/pogo/internal/logging"
 	pogoPlugin "github.com/drellem2/pogo/pkg/plugin"
 )
 
@@ -47,6 +48,55 @@ type BasicSearch struct {
 	// (mg-1236). Guarded by onIndexedMu; invoked from the write goroutine.
 	onIndexedMu sync.RWMutex
 	onIndexed   func(root string, contentChanged bool)
+	// gitHashWarned records the project roots that have already logged the
+	// "Could not read git tree hash" warning in this process. See
+	// warnGitTreeHashOnce for why the warning is deduplicated rather than
+	// demoted, and Evict for why entries are dropped with the project.
+	// Guarded by gitHashWarnedMu, which is never held while g.mu is taken.
+	gitHashWarnedMu sync.Mutex
+	gitHashWarned   map[string]struct{}
+}
+
+// warnGitTreeHashOnce logs a failure to read root's git tree hash at Warn the
+// first time this process sees it for that root, and stays silent for every
+// later failure on the same root (gh#111).
+//
+// The level is deliberately unchanged: the first occurrence is real signal —
+// it means the index cannot use its git fast path for that project and must
+// fall back to hashing every file. What was wrong with the line is that the
+// periodic re-indexer re-emitted it for the same repo on every tick, forever.
+//
+// The dedupe is keyed by PROJECT, not by call site. Both the save path and the
+// load path can fail for the same repo, often in the same pass; a per-site
+// dedupe would still warn twice for one project. Passing the message through a
+// single method is what makes "once" mean once.
+func (g *BasicSearch) warnGitTreeHashOnce(root string, err error) {
+	g.gitHashWarnedMu.Lock()
+	_, seen := g.gitHashWarned[root]
+	if !seen {
+		g.gitHashWarned[root] = struct{}{}
+	}
+	g.gitHashWarnedMu.Unlock()
+	if seen {
+		return
+	}
+	// The message text is unchanged from before the dedupe existed, so
+	// anything already grepping pogod.log for it keeps matching.
+	g.logger.Warn("Could not read git tree hash for " + root + ": " + err.Error())
+}
+
+// forgetGitTreeHashWarning drops root's dedupe entry so a project that comes
+// back reports its first failure again.
+//
+// This is what keeps the map from being a slow leak. pogod runs for weeks and
+// the map lives for the whole process, so an entry per root ever seen — with
+// no matching removal — grows without bound in exactly the long-lived process
+// the dedupe exists to protect. Tied to Evict, the map cannot outgrow
+// g.projects.
+func (g *BasicSearch) forgetGitTreeHashWarning(root string) {
+	g.gitHashWarnedMu.Lock()
+	delete(g.gitHashWarned, root)
+	g.gitHashWarnedMu.Unlock()
 }
 
 // SetOnIndexed registers a callback invoked after each completed index pass
@@ -294,6 +344,9 @@ func (g *BasicSearch) Evict(projectRoot string) {
 	_, existed := g.projects[projectRoot]
 	delete(g.projects, projectRoot)
 	g.mu.Unlock()
+	// Drop the git-hash warning dedupe entry with the project, so the map
+	// cannot accumulate roots the daemon no longer holds.
+	g.forgetGitTreeHashWarning(projectRoot)
 	if existed {
 		g.logger.Info("Evicted project from in-memory index map: " + projectRoot)
 	}
@@ -334,7 +387,7 @@ func (p *IndexedProject) makeSearchDir() (string, error) {
 
 func createBasicSearch() *BasicSearch {
 	logger := hclog.New(&hclog.LoggerOptions{
-		Level:      hclog.Info,
+		Level:      logging.Level(),
 		Output:     os.Stderr,
 		JSONFormat: true,
 	})
@@ -351,6 +404,7 @@ func createBasicSearch() *BasicSearch {
 		projects:        make(map[string]IndexedProject),
 		updater:         nil,
 		maxFilesPerTree: maxF,
+		gitHashWarned:   make(map[string]struct{}),
 	}
 	basicSearch.updater = basicSearch.newProjectUpdater()
 
