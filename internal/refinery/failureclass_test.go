@@ -241,7 +241,7 @@ func TestStatusLabelDistinguishesInfrastructureFromDefect(t *testing.T) {
 // polecat spinning through the failure it was meant to report — a worse loss
 // than the triage confusion. The class travels beside it, not inside it.
 func TestMachineStatusIsUnchanged(t *testing.T) {
-	for _, c := range []FailureClass{ClassInfrastructure, ClassContention, ClassDefect, ClassUnclassified} {
+	for _, c := range allFailureClasses {
 		mr := &MergeRequest{Status: StatusFailed, FailureClass: c}
 		if string(mr.Status) != "failed" {
 			t.Fatalf("machine-readable status for class %s is %q — poll loops key on \"failed\"", c, mr.Status)
@@ -277,7 +277,7 @@ func TestSummarizeAttemptClasses(t *testing.T) {
 // TestEveryClassCarriesATriageNote: a class with no instruction is a token a
 // coordinator has to look up, which is one step short of reading the error line.
 func TestEveryClassCarriesATriageNote(t *testing.T) {
-	for _, c := range []FailureClass{ClassInfrastructure, ClassContention, ClassDefect, ClassUnclassified} {
+	for _, c := range allFailureClasses {
 		if note := c.TriageNote(); note == "" {
 			t.Errorf("class %s has no triage note", c)
 		}

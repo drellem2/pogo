@@ -277,8 +277,7 @@ func (r *Refinery) runLane(ln *lane, mr *MergeRequest) {
 		// once. Infrastructure and contention failures are still recorded, still
 		// mailed, and still fire onFailed; they just do not accumulate into a
 		// verdict on whoever happened to be at the head of the queue.
-		countsAgainstAuthor := mr.FailureClass == "" || mr.FailureClass == ClassDefect
-		if mr.Author != "" && countsAgainstAuthor {
+		if mr.Author != "" && countsAgainstAuthor(mr.FailureClass) {
 			r.failureCounts[mr.Author]++
 			mr.FailureCount = r.failureCounts[mr.Author]
 			if r.cfg.FailureThreshold > 0 && mr.FailureCount >= r.cfg.FailureThreshold {

@@ -81,12 +81,43 @@ const (
 	// branch: a gate verdict, a rebase conflict, a refused commit message. This
 	// is the only class that invites dispatching a fix.
 	ClassDefect FailureClass = "defect"
+	// ClassIndeterminate marks a gate that was KILLED before it returned a
+	// verdict — it timed out. It sits deliberately between the two classes
+	// above and must not be folded into either (mg-e565).
+	//
+	// It is not ClassDefect: the gate never finished, so it has no opinion about
+	// the tree, and the class that means "a fix is warranted" is a claim the
+	// evidence does not support. Polecat z37ad's merge failed at exactly 1h0m0s
+	// three times on a Go toolchain download holding a lock (root cause
+	// mg-cdf1); the message was indistinguishable from a test failure, so it
+	// spent hours believing its own change was at fault.
+	//
+	// It is not ClassInfrastructure either, and that half matters just as much:
+	// infrastructure's triage note says the failure establishes NOTHING about
+	// the branch and invites a straight resubmit. A gate can hang because the
+	// branch made it hang — an infinite loop, a deadlock, a test waiting on
+	// something that never arrives — and clearing the branch on a kill would be
+	// the same error in the opposite direction.
+	//
+	// The honest reading is that the run was cut short and the question is still
+	// open. What was observed is reported alongside it, as several facts that
+	// may disagree, because no single signal settles it: a healthy gate was
+	// measured silent for 22 minutes, and an idle subtree is also what a process
+	// blocked on I/O looks like.
+	ClassIndeterminate FailureClass = "indeterminate"
 	// ClassUnclassified marks a failure the refinery could not place. It is
 	// retried on a small budget — an unrecognised failure might plausibly differ
 	// on a retry — and it is reported as unclassified rather than silently
 	// folded into either of the two classes that carry a triage instruction.
 	ClassUnclassified FailureClass = "unclassified"
 )
+
+// allFailureClasses is every class, for checks that must cover all of them.
+// It lives beside the constants so a class added without a triage note fails a
+// test rather than reaching a coordinator as a bare status.
+var allFailureClasses = []FailureClass{
+	ClassInfrastructure, ClassContention, ClassDefect, ClassIndeterminate, ClassUnclassified,
+}
 
 // TriageNote returns the one-line instruction a coordinator needs on seeing
 // this class in a status. The status is what a queue reader sees first; before
@@ -100,10 +131,32 @@ func (c FailureClass) TriageNote() string {
 		return "CONTENTION — lost a race with another merge. Resubmit; do NOT dispatch a fix."
 	case ClassDefect:
 		return "DEFECT — establishes a fact about the branch. A fix is warranted."
+	case ClassIndeterminate:
+		return "INDETERMINATE — the gate was KILLED at its timeout before it returned a verdict. " +
+			"It did not clear this branch and it did not condemn it. Read the per-layer signals in " +
+			"the error below, which may point different ways, before reacting. Do NOT dispatch a fix " +
+			"on this alone, and do NOT resubmit unchanged without checking the host first."
 	case ClassUnclassified:
 		return "UNCLASSIFIED — the refinery could not establish which class this is. Read the raw error below before reacting."
 	}
 	return ""
+}
+
+// countsAgainstAuthor answers whether a terminal failure of this class should
+// accumulate into the author's consecutive-failure streak.
+//
+// Only a class that establishes a fact about the branch may. The streak feeds
+// an escalation whose advice is "consider stopping the polecat or reassigning
+// the work item" — advice about a person — so a class that establishes no such
+// fact must not reach it. An empty class is a failure recorded before
+// classification existed, and stays counted rather than being silently
+// forgiven.
+//
+// ClassIndeterminate is excluded for the reason mg-e565 was filed: three
+// timeout kills on one merge would have put z37ad within one of that threshold
+// for a Go toolchain download.
+func countsAgainstAuthor(c FailureClass) bool {
+	return c == "" || c == ClassDefect
 }
 
 // AttemptFailure is the record of one failing attempt. One is kept per attempt,
@@ -311,6 +364,25 @@ var verdictStages = map[string]string{
 // stage is the pipeline step that failed; raw is git's combined output verbatim
 // (empty when the failure did not come from git); err is the wrapped error.
 func classifyFailure(stage string, raw string, err error) disposition {
+	// A gate that was KILLED is judged before the stage table, because it
+	// arrives at the SAME stage as a gate that ran (mg-e565). "test" was
+	// therefore enough to make a timeout come out as a verdict on the branch,
+	// with the reason "the test gate ran on this tree and returned a verdict" —
+	// a sentence about an event that did not happen. The distinguishing fact is
+	// the error type, not the stage, and it has to be consulted first.
+	var toErr *gateTimeoutError
+	if errors.As(err, &toErr) {
+		return disposition{
+			Class:     ClassIndeterminate,
+			Retryable: false,
+			Signal:    "gate-timeout stage=" + stage,
+			Reason: "the gate was killed at its timeout, so it never returned a verdict — this is " +
+				"NOT a finding against the branch, and it is not a clearance either. It is not retried " +
+				"automatically because another attempt costs a full timeout of the merge slot and " +
+				"cannot answer the question; the per-layer signals in the error say what was observed",
+		}
+	}
+
 	// A stage that RAN against the tree is judged by that, before any text
 	// matching. Gate output is arbitrary and may contain any wording at all;
 	// letting it reach the network table would make a red test retryable

@@ -52,6 +52,16 @@ type gateTimeoutError struct {
 	// downstream could tell them apart — mg-1b8c's measured instance was a
 	// gate on track to exceed a 45-minute timeout doing ~17 minutes of work.
 	Contention hostload.Summary
+	// Signals is the per-layer evidence as measured at the moment of the kill,
+	// one row per instrument (mg-e565). It is carried into the TERMINAL record
+	// rather than only into the live heartbeat log, because the live view is
+	// gone by the time anyone reads the failure — and the failure is what a
+	// polecat and a triaging coordinator actually see.
+	//
+	// The rows are rendered as rows on purpose. Collapsing them into one
+	// sentence is what made a deadlock and a slow gate render identically, and
+	// no single row settles it in either direction.
+	Signals []Signal
 }
 
 func (e *gateTimeoutError) Error() string {
@@ -62,10 +72,49 @@ func (e *gateTimeoutError) Error() string {
 	} else {
 		observed = "it produced no output at all"
 	}
-	return fmt.Sprintf("gate %q exceeded its %s timeout after %s and was killed — %s. %s"+
+	// The denial leads. A gate timeout used to arrive worded exactly like a red
+	// test, and the part of a failure that travels is its first line — a caveat
+	// further down does not reach the reader who forwards the headline.
+	return fmt.Sprintf("gate %q was KILLED at its %s timeout after %s — THIS IS NOT A VERDICT ON THE BRANCH: "+
+		"the gate never finished, so it neither passed nor failed this change.\n"+
+		"When it was killed, %s. %s%s"+
 		"If this gate is legitimately slower than %s, raise [gates] timeout in .pogo/refinery.toml "+
 		"(or set it to \"0\" to remove the bound); if it is genuinely stuck, this is the intended outcome.",
-		e.Gate, roundDur(e.Timeout), roundDur(e.Elapsed), observed, e.contentionClause(), roundDur(e.Timeout))
+		e.Gate, roundDur(e.Timeout), roundDur(e.Elapsed), observed,
+		e.contentionClause(), e.signalBlock(), roundDur(e.Timeout))
+}
+
+// signalBlock renders the evidence, attributed to the layer each reading was
+// taken at, and says out loud that the rows may disagree.
+//
+// It ends with the two caveats that must not be designed away, both measured
+// on this host: a healthy gate was observed silent for 22 minutes before it
+// printed again, and an idle subtree is also what a process blocked on I/O or
+// on a lock looks like — which is exactly what the incident behind this ticket
+// turned out to be. Anyone reading these rows should be able to reach "I cannot
+// tell yet", because on this evidence that is often the true answer.
+func (e *gateTimeoutError) signalBlock() string {
+	if len(e.Signals) == 0 {
+		// No measurement is not the same as an idle one. Say nothing rather
+		// than render an empty evidence block that reads as evidence.
+		return ""
+	}
+	b := &strings.Builder{}
+	b.WriteString("\nWhat was measured when it was killed — these are separate instruments at " +
+		"different layers and they can disagree; no single one settles it:\n")
+	for _, s := range e.Signals {
+		fmt.Fprintf(b, "  %-6s %-15s %-12s %s\n", s.Layer, s.Name, s.State, s.Detail)
+	}
+	// No figure that could be mistaken for a host measurement appears in this
+	// prose: a run whose host was never sampled must not acquire either an
+	// excuse or an accusation, and a number in a disclaimer reads like one that
+	// was measured (guarded by TestUnsampledTimeoutIsUnchanged).
+	b.WriteString("  (RUNNER is the pogod-side supervisor. It beats identically for a gate computing " +
+		"flat out and one deadlocked on a mutex, so its freshness is not evidence about the gate.)\n" +
+		"  (GATE stdout going quiet does not prove a hang: a healthy gate on this host was measured " +
+		"silent for 22 minutes and then printed. An IDLE subtree does not prove one either — a process " +
+		"blocked on I/O or holding a lock consumes no CPU and looks exactly like this.)\n")
+	return b.String()
 }
 
 // contentionClause states what the host was doing, and says out loud what a
@@ -185,6 +234,7 @@ func runGate(ctx context.Context, wtDir, command string, timeout time.Duration, 
 			SilentFor:   silentFor,
 			EverSpoke:   everSpoke,
 			Contention:  w.contention(),
+			Signals:     w.signals(time.Now()),
 		}
 	}
 	if err != nil && ctx.Err() != nil && errors.Is(context.Cause(ctx), errCancelRequested) {

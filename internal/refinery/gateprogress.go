@@ -942,6 +942,65 @@ func (w *gateWatch) snapshot(now time.Time, final bool) *StepProgress {
 	return &cp
 }
 
+// signals returns the per-layer evidence as of now, for attaching to a
+// TERMINAL failure record (mg-e565).
+//
+// It is deliberately read-only where snapshot() is not. snapshot(now, false)
+// stamps Heartbeat=now and increments Beats, so calling it at the moment of a
+// kill would mint a zero-age heartbeat and then report it as an observation —
+// manufacturing the freshest number in the report out of the act of writing the
+// report. That is a sharper version of the defect mg-48d8 fixed, so this reads
+// the record without touching it.
+func (w *gateWatch) signals(now time.Time) []Signal {
+	if w == nil {
+		return nil
+	}
+	p := w.readProgress(now)
+	if p == nil {
+		return nil
+	}
+	return p.Signals(now)
+}
+
+// readProgress returns a detached copy of the live progress record with the
+// current counters folded in. It mutates nothing.
+func (w *gateWatch) readProgress(now time.Time) *StepProgress {
+	var cp StepProgress
+	if w.r == nil || w.mr == nil {
+		sum := w.contention()
+		cp = StepProgress{
+			Step:              "quality-gates",
+			StartTime:         now,
+			Heartbeat:         now,
+			HeartbeatInterval: w.interval.String(),
+		}
+		if sum.Samples > 0 {
+			cp.Contention = &sum
+		}
+	} else {
+		w.r.mu.Lock()
+		p := w.mr.Progress
+		if p == nil {
+			w.r.mu.Unlock()
+			return nil
+		}
+		cp = *p
+		w.r.mu.Unlock()
+	}
+	cp.OutputLines = int(w.lines.Load())
+	if nanos := w.lastOutput.Load(); nanos != 0 {
+		cp.LastOutput = time.Unix(0, nanos)
+	} else {
+		cp.LastOutput = time.Time{}
+	}
+	// The kill has not been recorded yet, so the subtree row is still a
+	// measurement of processes that existed — which is the reading that
+	// separates a wedged gate from a slow one.
+	cp.EndTime = time.Time{}
+	w.applyCPU(&cp)
+	return &cp
+}
+
 // applyCPU copies the beat goroutine's latest subtree measurement onto the
 // record. Called with the refinery lock held (or on a detached record).
 func (w *gateWatch) applyCPU(p *StepProgress) {

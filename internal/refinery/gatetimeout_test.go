@@ -41,7 +41,11 @@ func TestGateTimeoutKillsAndReportsWhatItSaw(t *testing.T) {
 		t.Errorf("the error must carry what was observed: EverSpoke=%v lines=%d, want true/1", te.EverSpoke, te.OutputLines)
 	}
 	msg := err.Error()
-	for _, want := range []string{"exceeded its 250ms timeout", "produced 1 line ", "silent for", "raise [gates] timeout"} {
+	// The wording became "was KILLED at its <timeout> timeout" in mg-e565, so
+	// the first line denies the verdict reading a gate timeout used to invite.
+	// What this test asserts is unchanged: the bound, the observation and the
+	// operator's way out are all still in the message.
+	for _, want := range []string{"KILLED at its 250ms timeout", "produced 1 line ", "silent for", "raise [gates] timeout"} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("timeout error should contain %q, got: %s", want, msg)
 		}

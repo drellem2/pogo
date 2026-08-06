@@ -64,8 +64,10 @@ func TestTimeoutOnASaturatedHostSaysSo(t *testing.T) {
 	}
 
 	msg := err.Error()
-	// Still a failure, still names the bound and the way to change it.
-	for _, want := range []string{"exceeded its 250ms timeout", "raise [gates] timeout"} {
+	// Still a failure, still names the bound and the way to change it. The
+	// phrasing of the bound became "KILLED at its ..." in mg-e565; the property
+	// asserted here is unchanged.
+	for _, want := range []string{"KILLED at its 250ms timeout", "raise [gates] timeout"} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("the timeout error must still say %q; got: %s", want, msg)
 		}
