@@ -5,7 +5,31 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/drellem2/pogo/internal/refinery"
 )
+
+// formatHistoryRow renders one row of `pogo refinery history`.
+//
+// Extracted from the command body by mg-6f5e so the row a reader actually sees
+// is reachable from a test: this row is where drellem2/pogo#109 was reported,
+// and the two windows that feed it (the retained state file and the --since
+// event log) deserialize their times into different Locations. See
+// refinerytime.go for why the done time is rendered as labelled UTC.
+func formatHistoryRow(mr refinery.MergeRequest) string {
+	// StatusLabel, not Status: a bare `failed` is what invited thirty-one
+	// dispatches for defects that did not exist on 2026-08-05 (mg-e5c2).
+	// `failed(infrastructure)` is triageable without reading the error column.
+	line := fmt.Sprintf("%-12s  branch=%-30s  author=%-15s  status=%-24s  done=%s",
+		mr.ID, mr.Branch, mr.Author, mr.StatusLabel(), refineryTimeMinute(mr.DoneTime))
+	if mr.AttemptCount > 1 {
+		line += fmt.Sprintf("  attempts=%d", mr.AttemptCount)
+	}
+	if mr.Error != "" {
+		line += fmt.Sprintf("  error=%s", mr.Error)
+	}
+	return line
+}
 
 // sinceDateLayouts are the absolute forms accepted by parseSince, tried in
 // order. A bare date is interpreted in the local zone, matching how the rest of

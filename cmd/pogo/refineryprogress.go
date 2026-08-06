@@ -169,7 +169,7 @@ func formatQueue(queue []refinery.MergeRequest, now time.Time) string {
 		mr := queue[i]
 		line := fmt.Sprintf("%-12s  repo=%-16s  branch=%-30s  author=%-15s  status=%-10s  submitted=%s",
 			mr.ID, refinery.RepoLane(mr.RepoPath), mr.Branch, mr.Author, mr.StatusLabel(),
-			mr.SubmitTime.Format("2006-01-02 15:04"))
+			refineryTimeMinute(mr.SubmitTime))
 		if mr.Status == refinery.StatusProcessing {
 			fmt.Fprintln(&b, line)
 			for _, l := range progressLines(&mr, now) {

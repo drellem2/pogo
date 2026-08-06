@@ -4012,19 +4012,7 @@ Examples:
 					return
 				}
 				for _, mr := range rows {
-					// StatusLabel, not Status: a bare `failed` is what invited
-					// thirty-one dispatches for defects that did not exist on
-					// 2026-08-05 (mg-e5c2). `failed(infrastructure)` is triageable
-					// without reading the error column.
-					line := fmt.Sprintf("%-12s  branch=%-30s  author=%-15s  status=%-24s  done=%s",
-						mr.ID, mr.Branch, mr.Author, mr.StatusLabel(), mr.DoneTime.Format("2006-01-02 15:04"))
-					if mr.AttemptCount > 1 {
-						line += fmt.Sprintf("  attempts=%d", mr.AttemptCount)
-					}
-					if mr.Error != "" {
-						line += fmt.Sprintf("  error=%s", mr.Error)
-					}
-					fmt.Println(line)
+					fmt.Println(formatHistoryRow(mr))
 				}
 			}
 
@@ -4131,12 +4119,12 @@ Examples:
 					fmt.Printf("Post-merge: FAILED — %s\n", mr.PostMergeError)
 				}
 				fmt.Printf("Repo:      %s\n", mr.RepoPath)
-				fmt.Printf("Submitted: %s\n", mr.SubmitTime.Format("2006-01-02 15:04:05"))
+				fmt.Printf("Submitted: %s\n", refineryTimeSecond(mr.SubmitTime))
 				if !mr.StartTime.IsZero() {
-					fmt.Printf("Started:   %s\n", mr.StartTime.Format("2006-01-02 15:04:05"))
+					fmt.Printf("Started:   %s\n", refineryTimeSecond(mr.StartTime))
 				}
 				if !mr.DoneTime.IsZero() {
-					fmt.Printf("Done:      %s\n", mr.DoneTime.Format("2006-01-02 15:04:05"))
+					fmt.Printf("Done:      %s\n", refineryTimeSecond(mr.DoneTime))
 				}
 				// A queued MR says where it is in line. "Queued for 30
 				// minutes" alone reads as ignored; "waiting, 1 ahead, and

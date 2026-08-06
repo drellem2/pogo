@@ -348,23 +348,17 @@ func TestUnlabeledTimeLayoutScannerFiresOnItsControl(t *testing.T) {
 	}
 }
 
-// gh109Waiver holds the Format calls that mg-6f5e — the drellem2/pogo#109 fix —
-// owns, and which this ticket is explicitly told not to touch: that fix is at a
-// human go/no-go gate and is reviewed separately.
-//
-// The waiver is expected to be EXHAUSTED, not merely respected: the test below
-// fails if an entry stops matching anything, so when mg-6f5e lands, this map
-// tells you to delete it rather than leaving a permanent hole in the check.
-var gh109Waiver = map[string]int{
-	"main.go:mr.DoneTime":               2, // refinery history + refinery show
-	"main.go:mr.SubmitTime":             1, // refinery show
-	"main.go:mr.StartTime":              1, // refinery show
-	"refineryprogress.go:mr.SubmitTime": 1, // refinery queue
-}
+// The gh109Waiver that stood here held the five refinery history/show/queue
+// Format calls mg-0235 was told not to touch while drellem2/pogo#109 sat at a
+// human go/no-go gate. It was written to be EXHAUSTED rather than respected —
+// an entry matching nothing failed the test — and mg-6f5e landing that fix is
+// the event it was waiting for. Deleted rather than emptied: a waiver map with
+// no entries is an invitation to add one.
 
 // TestCmdPogoTimeLayoutsCarryAZoneDesignator is the recurrence check itself: it
 // runs the scanner over the whole of cmd/pogo and requires the population to be
-// empty apart from the separately gated gh#109 lines.
+// empty. There are no waived lines: since mg-6f5e every rendered time layout in
+// this package carries a zone designator.
 func TestCmdPogoTimeLayoutsCarryAZoneDesignator(t *testing.T) {
 	findings, stats, err := scanUnlabeledTimeLayouts(".")
 	if err != nil {
@@ -377,32 +371,10 @@ func TestCmdPogoTimeLayoutsCarryAZoneDesignator(t *testing.T) {
 		t.Fatalf("only %d time layouts found in cmd/pogo — the scan is not reaching the tree it is meant to cover (%s)", stats.TimeLayouts, stats)
 	}
 
-	remaining := make(map[string]int, len(gh109Waiver))
-	for k, v := range gh109Waiver {
-		remaining[k] = v
-	}
-
-	var unwaived []zoneFinding
 	for _, f := range findings {
-		if remaining[f.key()] > 0 {
-			remaining[f.key()]--
-			continue
-		}
-		unwaived = append(unwaived, f)
-	}
-
-	for _, f := range unwaived {
 		t.Errorf("unlabeled time layout: %s\n"+
 			"    A reader cannot tell which zone these digits are in, and two surfaces rendering\n"+
 			"    from differently-deserialized values will disagree by the host's offset.\n"+
 			"    Fix with the in-tree pattern: v.UTC().Format(\"<layout>Z\").", f)
-	}
-
-	for key, left := range remaining {
-		if left > 0 {
-			t.Errorf("gh109Waiver entry %q expected %d more unlabeled call(s) than the tree has — "+
-				"if mg-6f5e (drellem2/pogo#109) has landed, delete the entry; a waiver that matches "+
-				"nothing is a permanent hole in this check.", key, left)
-		}
 	}
 }
