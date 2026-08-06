@@ -29,7 +29,6 @@ import (
 	"context"
 	"io"
 	"log"
-	"strings"
 	"sync"
 	"time"
 
@@ -713,19 +712,21 @@ func splitDismissal(payload []byte) (body, submit []byte) {
 	return payload, nil
 }
 
-// defaultNotifyPM mails the responsible PM that a rate-limit dismissal fired
-// for an agent. Heuristic per mg-5a3d §6: pm-pogo for pogo-crew agents,
-// pm-onethird for onethird agents. The team field doesn't exist on Agent
-// today, so we route on name substring — best-effort, a wrong route is just
-// an unread inbox item.
+// defaultNotifyPM mails the coordinator that a rate-limit dismissal fired for
+// an agent.
+//
+// mg-5a3d §6 routed this to a PM picked by substring — `pm-pogo`, or
+// `pm-onethird` when the agent id contained "onethird". Both names belong to
+// one machine's fleet (mg-f04b): on any other install the notice went to a
+// mailbox with no reader, and since mg creates a maildir for an unknown name
+// rather than refusing, the delivery looked successful. The coordinator is the
+// mailbox pogo guarantees exists, and it is the agent that can actually chase
+// the in-flight work the dismissal mentions.
 func defaultNotifyPM(agentID, matcherName string) {
 	if matcherName != "rate-limit-options" {
 		return
 	}
-	pm := "pm-pogo"
-	if strings.Contains(strings.ToLower(agentID), "onethird") {
-		pm = "pm-onethird"
-	}
+	pm := agent.CoordinatorName()
 	subject := "rate-limit modal auto-dismissed for " + agentID
 	body := "pogod's modal watcher (mg-4421) dismissed a rate-limit-options modal " +
 		"on agent " + agentID + " after 20m of event-log silence. " +

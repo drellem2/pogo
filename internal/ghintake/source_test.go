@@ -174,9 +174,13 @@ func TestResolveReposPrecedence(t *testing.T) {
 		t.Errorf("discovery must be second: %v from %q", got, src)
 	}
 
+	// Last: nothing configured and no poller state. There is no built-in repo
+	// list to fall through to (mg-f04b — it named pogo's own upstream repos, so
+	// an unconfigured install polled a tracker belonging to someone else), so
+	// the watch list is empty and the SOURCE says which emptiness this is.
 	got, src = ResolveRepos(nil, filepath.Join(dir, "nope"))
-	if len(got) != len(DefaultRepos) || src != "built-in default" {
-		t.Errorf("built-in default must be last: %v from %q", got, src)
+	if len(got) != 0 || src != "no repos configured" {
+		t.Errorf("unconfigured must resolve to nothing: %v from %q", got, src)
 	}
 }
 

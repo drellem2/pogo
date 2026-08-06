@@ -228,7 +228,7 @@
 #   POGO_DEPLOY_ZSHENV       file to read GH_TOKEN from ($HOME/.zshenv)
 #   POGO_DEPLOY_GRACE        seconds to wait before the post-bounce check (120)
 #   POGO_DEPLOY_LOCK_DIR     mutual-exclusion dir
-#   POGO_DEPLOY_ALERT_TO     first alert recipient (pm-pogo)
+#   POGO_DEPLOY_ALERT_TO     first alert recipient (mayor; `human` is always copied)
 #   POGO_DEPLOY_SKIP_WINDOW  set to 1 to bypass the window guard (controls only)
 #   POGO_DEPLOY_NOW          "HH" override for the window guard (tests only)
 #   POGO_DEPLOY_RESERVE      seconds of the window kept back for build+bounce (1200)
@@ -253,7 +253,12 @@ WINDOW="${POGO_DEPLOY_WINDOW:-2-6}"
 ZSHENV="${POGO_DEPLOY_ZSHENV:-$HOME/.zshenv}"
 GRACE="${POGO_DEPLOY_GRACE:-120}"
 LOCK_DIR="${POGO_DEPLOY_LOCK_DIR:-$HOME/.pogo/deploy.lock.d}"
-ALERT_TO="${POGO_DEPLOY_ALERT_TO:-pm-pogo}"
+# The coordinator, not a named PM. This defaulted to `pm-pogo` — an agent that
+# exists on one machine (mg-f04b) — so on any other install the first alert went
+# to a mailbox with no reader, and mg files mail for an unknown name rather than
+# refusing, so the delivery looked fine. A deployment whose PM owns deploys sets
+# POGO_DEPLOY_ALERT_TO. `human` is copied either way.
+ALERT_TO="${POGO_DEPLOY_ALERT_TO:-mayor}"
 DEPLOY_REF="${POGO_DEPLOY_REF:-main}"
 STALE_LOCK_MIN="${POGO_DEPLOY_STALE_LOCK_MIN:-180}"
 DRY_RUN=false
@@ -644,8 +649,8 @@ load_gh_token() {
 # ---------------------------------------------------------------------------
 # Two channels, on purpose. The event is for the digest and is best-effort; the
 # mail is the loud half. `human` is always copied on a RED because a deploy that
-# refused to deploy is a thing Daniel has to know about by morning, and pm-pogo
-# reading it is not the same as Daniel seeing it.
+# refused to deploy is a thing the operator has to know about by morning, and a
+# fleet agent reading it is not the same as the operator seeing it.
 alert() {
     local subject="$1" body="$2" bf rc=0
     err "ALERT: $subject"
@@ -1035,9 +1040,10 @@ sync_with_retry() {
 # sync_recovery_notice — condition 3. A night that needed retries mails a
 # NOTICE, separately from alert(): alert() always copies `human` because a
 # refused deploy is something Daniel must know by morning, and a night that
-# WORKED is not. This goes to pm-pogo, who is accumulating exactly this evidence
-# — every recovered night is one more data point that the network is the
-# dominant failure mode on this box, and the log alone is what nobody reads.
+# WORKED is not. This goes to ALERT_TO alone (the coordinator by default), which
+# is where the evidence accumulates — every recovered night is one more data
+# point about the host's dominant failure mode, and the log alone is what nobody
+# reads.
 sync_recovery_notice() {
     local n="$1" spent="$2" bf
     [ "$n" -gt 1 ] || return 0

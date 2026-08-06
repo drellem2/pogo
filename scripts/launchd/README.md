@@ -309,7 +309,7 @@ belongs there instead. In order:
    asserts it.
 10. **Outcome.** Exit 0 → wait out a grace period and re-read the mail-check
    schedules, alerting on any that existed before the bounce and did not come
-   back. Non-zero → mail `pm-pogo` **and** `human`, and stop — unless a retry is
+   back. Non-zero → mail `$POGO_DEPLOY_ALERT_TO` **and** `human`, and stop — unless a retry is
    really coming, in which case the attempt emits an event and the mail waits
    for the night's last chance (three identical REDs would be the cost of having
    retries at all).
@@ -360,7 +360,7 @@ All optional; the defaults are the production values.
 | `POGO_DEPLOY_GRACE` | `120` | Seconds before the post-bounce mail-check re-read. |
 | `POGO_DEPLOY_ZSHENV` | `~/.zshenv` | Where `GH_TOKEN` is read from. |
 | `GIT` | first candidate that prints `git version` | Pins a specific git. Still checked by execution — a pin that cannot run is the same outage as no pin. |
-| `POGO_DEPLOY_ALERT_TO` | `pm-pogo` | First alert recipient; `human` is always copied. |
+| `POGO_DEPLOY_ALERT_TO` | `mayor` | First alert recipient; `human` is always copied. |
 
 ### Managing the deploy agent
 

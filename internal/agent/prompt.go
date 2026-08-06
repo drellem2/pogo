@@ -81,6 +81,16 @@ const (
 	workerTitlePlaceholder = "{{.WorkerTitle}}"
 )
 
+// smePlaceholder is the token shipped prompts use where the product SME's
+// mailbox belongs. Unlike the coordinator and worker placeholders it has NO
+// default name behind it: the empty string is the shipped value and it means
+// "this deployment has no SME". Polecat templates therefore gate on it —
+// `{{if .SME}}` around the whole consult step — rather than substituting a
+// name into prose that assumes one (mg-f04b). Static prompts get the same
+// plain substitution the other placeholders get, so a static prompt must only
+// use it where an empty expansion still reads correctly.
+const smePlaceholder = "{{.SME}}"
+
 // titleFirst upper-cases the first rune of s (ASCII-oriented; agent names are
 // mailbox/process identifiers, effectively ASCII).
 func titleFirst(s string) string {
@@ -132,6 +142,26 @@ func WorkerName() string {
 	return workerName
 }
 
+// smeName is the process-wide product-SME mailbox. Set once at process start
+// from [agents] sme, alongside the coordinator and worker names. Its zero value
+// is the empty string, which is the shipped default and means "no SME" — see
+// smePlaceholder.
+var smeName string
+
+// SetSMEName sets the process-wide product-SME mailbox from configuration
+// ([agents] sme). Empty means the deployment has no SME, and unlike the
+// coordinator and worker setters that is NOT reset to a default name: there is
+// no name that would be right on an install that never configured one.
+func SetSMEName(name string) {
+	smeName = name
+}
+
+// SMEName returns the process-wide product-SME mailbox, or "" when none is
+// configured.
+func SMEName() string {
+	return smeName
+}
+
 // substituteRoleNames replaces every coordinator and worker placeholder in s
 // with the process-wide role names (and each title placeholder with its
 // capitalized form). Used for static prompts that do not pass through
@@ -142,7 +172,8 @@ func substituteRoleNames(s string) string {
 	s = strings.ReplaceAll(s, coordinatorTitlePlaceholder, titleFirst(cname))
 	wname := WorkerName()
 	s = strings.ReplaceAll(s, workerPlaceholder, wname)
-	return strings.ReplaceAll(s, workerTitlePlaceholder, titleFirst(wname))
+	s = strings.ReplaceAll(s, workerTitlePlaceholder, titleFirst(wname))
+	return strings.ReplaceAll(s, smePlaceholder, SMEName())
 }
 
 // PromptDir returns the root directory for agent prompt files:
@@ -206,6 +237,18 @@ type TemplateVars struct {
 	// expansion time.
 	WorkerTitle string
 
+	// SME is the product subject-matter expert's mailbox ([agents] sme).
+	//
+	// EMPTY MEANS OMIT THE CONSULT, and the emptiness is the shipped default
+	// rather than an accident (mg-f04b). Templates gate the whole step behind
+	// `{{if .SME}}` and address it with `{{.SME}}`; a template that names an
+	// SME unconditionally would send a fresh install's triage worker to a
+	// mailbox that does not exist and then hold it there waiting for a reply.
+	// Left empty by callers, it is filled from the process-wide SMEName() at
+	// expansion time — which is itself empty unless configured, so "unset" and
+	// "no SME" are the same state by construction.
+	SME string
+
 	// Provider is the resolved harness provider id ("claude", "codex", "pi",
 	// "cursor")
 	// the polecat will run under. Templates gate harness-specific guidance
@@ -238,9 +281,9 @@ type TemplateVars struct {
 
 // withDefaults returns vars with Coordinator (and CoordinatorTitle) defaulted
 // from the process-wide coordinator name, Worker (and WorkerTitle) from the
-// process-wide worker name, Provider defaulted to DefaultProviderID, and
-// ClaimRestampCmd from the process-wide ClaimRestampCommand() — when the caller
-// left them empty.
+// process-wide worker name, SME from the process-wide SME mailbox, Provider
+// defaulted to DefaultProviderID, and ClaimRestampCmd from the process-wide
+// ClaimRestampCommand() — when the caller left them empty.
 func withDefaults(vars TemplateVars) TemplateVars {
 	if vars.Coordinator == "" {
 		vars.Coordinator = CoordinatorName()
@@ -253,6 +296,12 @@ func withDefaults(vars TemplateVars) TemplateVars {
 	}
 	if vars.WorkerTitle == "" {
 		vars.WorkerTitle = titleFirst(vars.Worker)
+	}
+	// No empty check for SME: empty is a meaningful value ("no SME"), so an
+	// unset field and a deliberately-cleared one resolve identically to the
+	// process-wide name, which is itself empty by default.
+	if vars.SME == "" {
+		vars.SME = SMEName()
 	}
 	if vars.Provider == "" {
 		vars.Provider = DefaultProviderID

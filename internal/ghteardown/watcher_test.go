@@ -231,9 +231,11 @@ func TestDefaultRoutingGoesToTheFleetNotHuman(t *testing.T) {
 		t.Fatalf("want exactly 1 mail, got %d to %v", mail.count(), mail.recipients())
 	}
 	// A bare literal, not DefaultNotifyTo: comparing against the constant would
-	// make this test FOLLOW a future flip back to `human` instead of catching it.
-	if got := mail.recipients()[0]; got != "pm-pogo" {
-		t.Errorf("default recipient is %q, want the fleet mailbox %q", got, "pm-pogo")
+	// make this test FOLLOW a flip instead of catching it. The literal was
+	// `pm-pogo` until mg-f04b — a PM that exists on one machine, so every other
+	// install mailed a void. The coordinator is the mailbox pogo guarantees.
+	if got := mail.recipients()[0]; got != "mayor" {
+		t.Errorf("default recipient is %q, want the fleet mailbox %q", got, "mayor")
 	}
 	// The load-bearing half: a fleet workflow miss is not a human's decision.
 	if mail.mailed("human") {
@@ -283,7 +285,7 @@ func TestAStalledFindingEscalatesToHuman(t *testing.T) {
 	}
 	// Escalation COPIES the human; it does not silently redirect away from the
 	// fleet, which still owns the remedy.
-	if !mail.mailed("pm-pogo") {
+	if !mail.mailed("mayor") {
 		t.Error("escalation dropped the fleet mailbox")
 	}
 	last := mail.bodies[len(mail.bodies)-1]
@@ -329,7 +331,7 @@ func TestABlindRunDoesNotResetAnEscalationClock(t *testing.T) {
 
 	start := time.Now()
 	w.Check(start) // the miss is first seen here; this is the clock that must survive
-	if !mail.mailed("pm-pogo") {
+	if !mail.mailed("mayor") {
 		t.Fatal("the miss did not reach the fleet on first sighting")
 	}
 

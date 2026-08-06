@@ -60,7 +60,13 @@ const (
 	// urgent items and ONE batched daily digest. An hourly-sampling detector
 	// mailing `human` directly would be a third, unbatched channel bypassing the
 	// discipline the digest exists to enforce.
-	DefaultNotifyTo = "pm-pogo"
+	//
+	// WHICH fleet mailbox is the coordinator's (mg-f04b). The literal here is a
+	// mirror of config.DefaultCoordinator, repeated rather than imported so
+	// this package stays independent of a resolved host layout — the same
+	// posture agent.DefaultCoordinatorName takes. It was `pm-pogo`, one
+	// deployment's product PM, which named an agent no other install has.
+	DefaultNotifyTo = "mayor"
 	// DefaultEscalateTo receives a finding the fleet has demonstrably failed to
 	// clear — see Options.EscalateAfter.
 	DefaultEscalateTo = "human"
@@ -136,7 +142,7 @@ type Options struct {
 // # Routing (mg-b586)
 //
 // The same reasoning governs WHO is mailed, not just how often. Findings go to
-// NotifyTo — a fleet mailbox, `pm-pogo` by default — because a teardown miss is
+// NotifyTo — a fleet mailbox, the coordinator by default — because a teardown miss is
 // a workflow failure the fleet can chase, and a human handed an operational
 // task he can only forward back learns to filter the sender exactly as surely
 // as one mailed too often.

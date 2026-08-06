@@ -224,7 +224,16 @@ const (
 	// A FLEET mailbox, deliberately not `human`: a teardown miss is a workflow
 	// failure the fleet chases, and mailing a human an operational task he can
 	// only forward back to the fleet trains him to filter the sender.
-	DefaultGHTeardownNotifyTo = "pm-pogo"
+	//
+	// WHICH fleet mailbox is the coordinator's, not a named PM's (mg-f04b).
+	// This default was a literal `pm-pogo` — one deployment's product PM — so a
+	// fresh install mailed every teardown finding to an agent that does not
+	// exist on that host, and mg's create-on-send maildir meant nothing
+	// reported the miss. The coordinator is the one fleet mailbox pogo
+	// guarantees, and it is what the three sibling watchers (ackwatch,
+	// deafwatch, ghintake) already default to. A deployment with a PM who owns
+	// the gh-issue workflow names it in [gh_teardown] notify_to.
+	DefaultGHTeardownNotifyTo = DefaultCoordinator
 	// DefaultGHTeardownEscalateAfter is how long ONE unresolved teardown finding
 	// may persist before `human` is copied as well. A miss the fleet is not
 	// clearing is a different fact from the miss itself, and that one IS a
@@ -1099,6 +1108,21 @@ type AgentsConfig struct {
 	// WorkerName() over reading the field so zero-value configs still resolve
 	// to the default. Display-only — it never renames an identifier.
 	Worker string
+	// SME is the mailbox of a product subject-matter expert the gh-issue
+	// triage workflow consults before a recommendation is finalized ([agents]
+	// sme). It is a MAIL TARGET, so it must name an agent that exists.
+	//
+	// EMPTY IS THE SHIPPED DEFAULT AND IT MEANS "no SME" — the consult step is
+	// omitted from the triage prompt entirely rather than addressed to a
+	// guessed name. That emptiness is the point (mg-f04b): the default was
+	// once a literal `pm-pogo`, which exists on exactly one machine, and a
+	// fresh install's triage worker would have mailed a mailbox that does not
+	// exist and then held for two hours waiting for a reply that could never
+	// come. mg mail creates an unread-by-nobody maildir for an unknown name
+	// rather than failing, so nothing would have reported the miss.
+	//
+	// A deployment that has such a PM names it here and gets the consult back.
+	SME string
 	// AutoStart globally gates crew auto-start at pogod boot ([agents]
 	// autostart). Defaults to true. Setting it false keeps a *configured*
 	// daemon from spawning any crew agents, regardless of per-prompt
@@ -1173,6 +1197,17 @@ func (c *AgentsConfig) WorkerName() string {
 		return c.Worker
 	}
 	return DefaultWorker
+}
+
+// SMEName returns the configured product-SME mailbox, or "" when no SME is
+// configured. Unlike CoordinatorName and WorkerName there is no fallback name:
+// the empty string is a meaningful value that switches the consult off. Safe on
+// a zero-value AgentsConfig.
+func (c *AgentsConfig) SMEName() string {
+	if c == nil {
+		return ""
+	}
+	return c.SME
 }
 
 // AgentProvider returns the configured harness provider id for a given agent
@@ -2356,6 +2391,8 @@ func parseConfigFileInto(cfg *parsedConfig, path string) error {
 				cfg.Agents.Coordinator = unquotedVal
 			case "worker":
 				cfg.Agents.Worker = unquotedVal
+			case "sme":
+				cfg.Agents.SME = unquotedVal
 			case "extra_path":
 				cfg.Agents.ExtraPath = parseStringArray(val)
 			}

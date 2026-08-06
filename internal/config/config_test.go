@@ -1542,3 +1542,56 @@ autostart = false
 		t.Errorf("expected malformed POGO_AGENT_AUTOSTART to be ignored, leaving autostart = false from the file")
 	}
 }
+
+// TestSMEConfigFile covers the [agents] sme seam end to end: it parses, and —
+// the half that matters — it resolves to the empty string when nothing sets it.
+//
+// The empty resolution is the whole feature. `sme` names a mail target for the
+// gh-issue triage consult, and that consult used to be a hard-coded `pm-pogo`
+// inside the shipped prompt (mg-f04b). Any fallback name reintroduces the same
+// defect in a new place: mg files mail for an unknown recipient rather than
+// refusing it, so a triage worker would mail a nonexistent agent, wait its two
+// hours, and report a consult that never happened.
+func TestSMEConfigFile(t *testing.T) {
+	dir := t.TempDir()
+	os.Setenv("XDG_CONFIG_HOME", dir)
+	defer os.Unsetenv("XDG_CONFIG_HOME")
+
+	pogoDir := filepath.Join(dir, "pogo")
+	os.MkdirAll(pogoDir, 0755)
+
+	// Unset: no SME, and Load() must not invent one the way it fills in
+	// coordinator and worker.
+	os.WriteFile(filepath.Join(pogoDir, "config.toml"), []byte(`
+[agents]
+coordinator = "boss"
+`), 0644)
+	cfg := Load()
+	if got := cfg.Agents.SMEName(); got != "" {
+		t.Errorf("sme with nothing configured = %q, want \"\" — a fallback name here is a mail target nobody reads", got)
+	}
+
+	// Set: parsed verbatim, and NOT confused with the coordinator.
+	os.WriteFile(filepath.Join(pogoDir, "config.toml"), []byte(`
+[agents]
+coordinator = "boss"
+sme = "pm-example"
+`), 0644)
+	cfg = Load()
+	if got := cfg.Agents.SMEName(); got != "pm-example" {
+		t.Errorf("sme = %q, want pm-example", got)
+	}
+	if cfg.Agents.CoordinatorName() != "boss" {
+		t.Errorf("coordinator = %q, want boss — sme must not overwrite it", cfg.Agents.CoordinatorName())
+	}
+
+	// Safe on a zero value, which is what a caller that skipped Load() holds.
+	var zero AgentsConfig
+	if got := zero.SMEName(); got != "" {
+		t.Errorf("zero-value SMEName() = %q, want \"\"", got)
+	}
+	var nilCfg *AgentsConfig
+	if got := nilCfg.SMEName(); got != "" {
+		t.Errorf("nil SMEName() = %q, want \"\"", got)
+	}
+}

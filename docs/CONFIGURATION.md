@@ -156,6 +156,31 @@ you rename the display. And `--type polecat` on the CLI keeps naming the frozen
 accepted value: the flag documents an identifier, not the display role, so it is
 deliberately *not* driven by the `worker` name.
 
+## The product SME
+
+The gh-issue triage workflow has a consult step: before a triage worker
+finalizes its recommendation, it mails the draft to a product subject-matter
+expert and waits for a reply. That SME is named here, and **there is no default
+name**:
+
+```toml
+[agents]
+sme = "pm-yourproject"   # default "" — no SME, consult step omitted
+```
+
+Unset is the shipped state and it means the consult does not happen: the triage
+prompt renders without the step, and the recommendation packet reports
+`"sme_consulted": false`. That is a stated absence, not a skipped obligation.
+
+**Why there is no fallback name.** `sme` is a mail target, and mail is where a
+wrong name hides. `mg mail send` creates a maildir for an unrecognized recipient
+rather than refusing, so a consult addressed to an agent that does not exist
+succeeds, is never read, and cannot be told apart from one that was answered.
+This setting once *was* a hard-coded `pm-pogo` inside the shipped prompt
+(mg-f04b) — one deployment's PM — so every other install's triage worker mailed
+that void and then held for two hours waiting for the reply. An empty default
+cannot make that mistake; a guessed one can only make it quietly.
+
 ## Crew auto-start
 
 At boot pogod starts every crew agent whose prompt frontmatter says
@@ -1194,7 +1219,7 @@ outward-facing and stays human-gated.
   mailing every interval trains a human to filter the sender, but going
   permanently quiet after one notice is how #89 stayed open for four days.
 - **Routing (mg-b586).** Findings go to `notify_to`, a **fleet** mailbox
-  (`pm-pogo`) rather than `human`. The finding is "our gh-issue workflow's last
+  (the coordinator by default) rather than `human`. The finding is "our gh-issue workflow's last
   step did not run on carrier X" — a workflow failure the fleet chases, not a
   decision a human can action better than the fleet can. The same reasoning that
   set the cadence sets the recipient: a human mailed operational work he can
@@ -1250,7 +1275,8 @@ outward-facing and stays human-gated.
 enabled = true             # default true; skipped when `gh` is unavailable
 interval = "1h"            # coarse sample cadence (default 1h)
 renotify_after = "24h"     # unchanged findings re-mail after this (default 24h)
-notify_to = "pm-pogo"      # mailbox findings go to (default pm-pogo, a FLEET box)
+notify_to = "mayor"        # mailbox findings go to (default mayor, a FLEET box —
+                           # name a PM here if one owns the gh-issue workflow)
 escalate_after = "72h"     # one unresolved finding also copies `human` after this
                            # (default 72h; negative disables, zero means default)
 ```
@@ -1350,8 +1376,12 @@ scope, a question) is a judgement that stays with the coordinator.
   coordinator is not handling this" has become the news. Escalation ages each
   issue separately, so a new finding cannot reset an older one's clock.
 - **The watch list** comes from `repos` if set, else from the issue poller's own
-  state directory (`$POGO_HOME/gh-issues/seen-<owner>-<repo>.json`), else from a
-  built-in default. Reading the poller's state rather than duplicating its list is
+  state directory (`$POGO_HOME/gh-issues/seen-<owner>-<repo>.json`), else it is
+  **empty** and the detector examines nothing. There is no built-in repo list:
+  one used to name pogo's own upstream repos, which meant an install that
+  configured neither source reconciled a stranger's issue tracker against its
+  local work items (mg-f04b). An empty watch list is reported as such, since
+  "examined nothing" and "found nothing" otherwise render identically. Reading the poller's state rather than duplicating its list is
   the point: a repo added to the poller is covered on the next pogod restart with
   no second edit to forget. It reads *state*, not the sent ledger — so a poller
   that is stopped, wedged, or has never delivered a mail still yields a correct
@@ -1382,7 +1412,8 @@ renotify_after = "24h"     # unchanged findings re-mail after this (default 24h)
 notify_to = "mayor"        # mailbox findings go to (default mayor, the ACTOR)
 escalate_after = "4h"      # one uncarried issue also copies `human` after this
                            # (default 4h; negative disables, zero means default)
-repos = ["drellem2/pogo"]  # explicit watch list; empty means discover it
+repos = ["owner/repo"]     # explicit watch list; unset falls back to poller
+                           # state, then to watching nothing
 ```
 
 Exit status of `pogo check-intake` is 0 when nothing is actionable and 1 when any

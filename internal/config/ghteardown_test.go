@@ -11,13 +11,19 @@ import (
 //
 // Bare literals on purpose: comparing against DefaultGHTeardownNotifyTo would
 // make this test follow a future flip back to `human` instead of catching it.
+//
+// The literal was `pm-pogo` until mg-f04b — the fleet mailbox of exactly one
+// deployment. The mg-b586 requirement was "a fleet mailbox, not `human`", and
+// the coordinator is the only fleet mailbox pogo guarantees exists on a fresh
+// install; a named PM is a mailbox with no reader, and mg's create-on-send
+// maildir means nothing anywhere reports that.
 func TestGHTeardownDefaultsToAFleetMailbox(t *testing.T) {
 	layeredSandbox(t) // no config written
 
 	cfg := Load()
 
-	if cfg.GHTeardown.NotifyTo != "pm-pogo" {
-		t.Errorf("notify_to = %q, want %q", cfg.GHTeardown.NotifyTo, "pm-pogo")
+	if cfg.GHTeardown.NotifyTo != "mayor" {
+		t.Errorf("notify_to = %q, want %q", cfg.GHTeardown.NotifyTo, "mayor")
 	}
 	if cfg.GHTeardown.NotifyTo == "human" {
 		t.Error("teardown findings default to `human`: a gh-issue teardown miss is a " +
