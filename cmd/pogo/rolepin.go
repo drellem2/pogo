@@ -14,6 +14,7 @@ func resolveRoles() *config.Config {
 	cfg, _ := config.GuardRunningCoordinator(config.Load())
 	agent.SetCoordinatorName(cfg.Agents.Coordinator)
 	agent.SetWorkerName(cfg.Agents.Worker)
+	agent.SetSMEName(cfg.Agents.SME)
 	return cfg
 }
 
@@ -49,5 +50,6 @@ func pinAndResolveRoles(existing bool) (config.PinResult, *config.RenameRefusal,
 	cfg, refusal := config.GuardRunningCoordinator(cfg)
 	agent.SetCoordinatorName(cfg.Agents.Coordinator)
 	agent.SetWorkerName(cfg.Agents.Worker)
+	agent.SetSMEName(cfg.Agents.SME)
 	return res, refusal, err
 }

@@ -150,7 +150,7 @@ You don't usually execute work — you coordinate and dispatch. But you'll occas
 
   Parking is also not the answer to an item you simply haven't dispatched yet. An undispatched item alarming is the detector working; it resolves by being dispatched.
 
-- **Say who an item is waiting on.** `mg edit <id> --assignee=blocked:<agent>` — e.g. `blocked:daniel`, `blocked:architect`, `blocked:pm-pogo`. This gates dispatch exactly as `parked` does **and** records who it waits on, so `mg list --assignee=blocked:daniel` is an answerable question. It is a *shape*, not a list you have to extend: any agent name works, including one hired next year.
+- **Say who an item is waiting on.** `mg edit <id> --assignee=blocked:<agent>` — e.g. `blocked:human`, `blocked:architect`, `blocked:pm-<project>`. This gates dispatch exactly as `parked` does **and** records who it waits on, so `mg list --assignee=blocked:daniel` is an answerable question. It is a *shape*, not a list you have to extend: any agent name works, including one hired next year.
 
   **Since mg-3844 the field also TELLS them.** pogod mails or nudges the named agent — "these items are BLOCKED ON YOU, this is not a dispatch request" — immediately on first sight, then on a doubling backoff, then stops after 4 notices whether or not the block clears. The cap exists so an agent waiting on purpose is not nagged forever; if you need it to keep asking, the block was probably the wrong instrument and you wanted a `snooze` with a deadline. Two consequences for you:
 
@@ -159,7 +159,7 @@ You don't usually execute work — you coordinate and dispatch. But you'll occas
 
   **This is the value you want whenever an item is waiting on a named agent** — and it is the one you would previously have got wrong in either direction. `--assignee=architect` alone means *architect owns this*, which does **not** gate; the item stays fully dispatchable and priority-wake will surface it to you as ready. That is not a bug — owned is not blocked — it is why `blocked:` exists (mg-6fb0; three items filed this way within days of `parked` shipping). `--assignee=parked` would gate it but throw away who you were waiting on.
 
-  **This is the row nearest the misuse described above.** mg-78d2 was *"mayor owns prompt content with pm-pogo as SME"* — a hold on two named agents, precisely this row — and it was parked instead. The park kept the gate and discarded the only thing that could have got the item moving again: the name of who had to act.
+  **This is the row nearest the misuse described above.** mg-78d2 was *"mayor owns prompt content with the product PM as SME"* — a hold on two named agents, precisely this row — and it was parked instead. The park kept the gate and discarded the only thing that could have got the item moving again: the name of who had to act.
 
   A `blocked-on-<who>` **tag** does not gate anything. Tags are human-facing markers; the gate reads `assignee` and only `assignee`. If you see an item tagged `blocked-on-*` whose assignee doesn't gate, stall-watch will now say so in the nudge (`[block-intent] …`) — move the block into the assignee field, or use `--depends` if it is waiting on another *work item* rather than an agent.
 
@@ -223,7 +223,7 @@ mg list --status=available
 
 For each available item:
 - **Read the assignee first.** `human` or `parked` — the `non_dispatchable_assignees` vocabulary — or anything shaped `blocked:<agent>` means the item is not yours to dispatch. Skip it. pogod refuses these too (step 2), but that is a backstop, not the control.
-  An assignee that is merely an **agent name** (`pm-pogo`, `architect`, even `mayor`) is *ownership*, not a gate: that item **is** yours to dispatch. If a nudge arrives with a `[block-intent]` note on it, the filer declared a block in a tag that the gate cannot read — fix the assignee to `blocked:<agent>` rather than dispatching or ignoring it.
+  An assignee that is merely an **agent name** (a PM's, `architect`, even `mayor`) is *ownership*, not a gate: that item **is** yours to dispatch. If a nudge arrives with a `[block-intent]` note on it, the filer declared a block in a tag that the gate cannot read — fix the assignee to `blocked:<agent>` rather than dispatching or ignoring it.
 - Read its details with `mg show <id>`
 - Decide if it's ready to dispatch (dependencies met, requirements clear)
 - If ready: spawn a {{.Worker}} (see step 2)
@@ -443,7 +443,7 @@ Look for:
 
 A Claude session can wedge mid-conversation (e.g., a hung `ToolSearch` call) while the
 underlying process stays alive — the agent stops producing output but `pogo agent list`
-still shows it running. mg-60ca is the canonical example: pm-pogo's session went silent
+still shows it running. mg-60ca is the canonical example: a crew agent's session went silent
 14 min after start and only resumed after Daniel sent a manual reminder. Restart-on-crash
 doesn't catch this because nothing has crashed.
 
@@ -456,7 +456,7 @@ ls -1 ~/.pogo/agents/pm/*/sweep.log 2>/dev/null
 ```
 
 For each `sweep.log`, read its mtime. The agent name is the parent directory's basename
-(e.g. `~/.pogo/agents/pm/pm-pogo/sweep.log` → agent `pm-pogo`).
+(e.g. `~/.pogo/agents/pm/pm-<project>/sweep.log` → agent `pm-<project>`).
 
 **Suppression:** before nudging or restarting, check for a recent `system_wake` event:
 
@@ -687,7 +687,7 @@ workflow: gh-issue
 stage: triage
 gh: <owner>/<repo>#<n>
 
-Triage this GitHub issue: investigate the codebase, consult pm-pogo, and produce a recommendation packet. No code changes.
+Triage this GitHub issue: investigate the codebase, consult the product SME if this deployment has one, and produce a recommendation packet. No code changes.
 EOF
 pogo agent spawn-polecat <short-id> --template=polecat-triage \
     --task="<title>" --id="<ticket id>" --repo="<local repo path>" --body-file - <<'EOF'
@@ -695,13 +695,13 @@ pogo agent spawn-polecat <short-id> --template=polecat-triage \
 EOF
 ```
 
-The triage {{.Worker}} posts a brief professional ack on the issue, investigates, consults pm-pogo, and returns a structured recommendation packet. It writes that packet as a fenced `json triage-packet` block **on the triage ticket's own body** and mails you the compressed version; it does **not** `mg done` the ticket, because the successor it would have to name does not exist until you file the build ticket at transition 3. So the packet is on the record from the moment triage ends, and the ticket is still `claimed` when you reach the gate. pm-pogo's consult note rides in the packet.
+The triage {{.Worker}} posts a brief professional ack on the issue, investigates, consults the product SME (`[agents] sme`) if one is configured, and returns a structured recommendation packet. It writes that packet as a fenced `json triage-packet` block **on the triage ticket's own body** and mails you the compressed version; it does **not** `mg done` the ticket, because the successor it would have to name does not exist until you file the build ticket at transition 3. So the packet is on the record from the moment triage ends, and the ticket is still `claimed` when you reach the gate. The SME's consult note rides in the packet when there was a consult; a deployment with no `[agents] sme` gets a packet reporting `"sme_consulted": false`, which is a stated absence and not a skipped step.
 
 If a ticket for the ref already exists, the mail is new issue activity:
 - `stage: gated` → likely Daniel's gate reply on the issue itself (see the reply-channel note in transition 2). Read the new comments (`gh issue view <n> --repo=<owner>/<repo> --comments`) and process them as a gate decision (transition 3).
 - Any other stage → read the new comments; if material to the in-flight work, mail them to the {{.Worker}} working the current stage; otherwise no-op with a stated reason.
 
-**2. Triage done → the Daniel gate (`stage: gated`).** When the triage packet arrives, set `stage: gated` and send Daniel the triage + recommendation summary. Summary content standards are owned by pm-pogo (they mail you updates; the standard below is theirs — if their latest mail differs, their mail wins):
+**2. Triage done → the Daniel gate (`stage: gated`).** When the triage packet arrives, set `stage: gated` and send Daniel the triage + recommendation summary. Summary content standards are owned by the product SME where a deployment has one (they mail you updates; the standard below is theirs — if their latest mail differs, their mail wins):
 
 - One issue per mail; subject `[gh-triage] <repo>#<n>: <title>`.
 - Body: the triage packet compressed to **at most 10 lines**, ending with the explicit ask on its own line: `ASK: GO / NO-GO / OTHER`.
@@ -725,7 +725,7 @@ If a ticket for the ref already exists, the mail is new issue activity:
    <the plan>
    EOF
    ```
-   Reporter-facing wording follows pm-pogo's standards (UNIX voice, no AI slop). When in doubt, mail pm-pogo the draft first.
+   Reporter-facing wording follows the house standards (UNIX voice, no AI slop). When in doubt, mail the draft to the product SME (`[agents] sme`) first, if one is configured.
 2. **File the build and review tickets**, chained by `depends`:
    ```bash
    mg new --type=task --priority=high --tags=gh-issue --repo=<local repo path> \
@@ -776,7 +776,7 @@ If a ticket for the ref already exists, the mail is new issue activity:
 
    **Check the promotion line.** The same command runs the pending sweep and should print `Promoted <build ticket id>: ... (pending → available)`. That is the build ticket's `--depends` gate opening. If you do not see it, the dispatch in the next sentence will fail — fix the gate before spawning a {{.Worker}} for an item still in `pending/`.
 
-*On NO-GO:* post an **honest, reasoned close comment** on the issue (pm-pogo wording standards apply), then close it:
+*On NO-GO:* post an **honest, reasoned close comment** on the issue (the same wording standards apply), then close it:
 ```bash
 gh issue comment <n> --repo=<owner>/<repo> --body-file - <<'EOF'
 <why not, honestly>
@@ -785,7 +785,7 @@ gh issue close <n> --repo=<owner>/<repo>
 ```
 Shelve the workflow tickets (`mg shelve <triage ticket id>` shelves dependents too) and mail `human` a one-line confirmation. An honest close is a product feature — never ghost the reporter, and never dress a no-go up as "later."
 
-*On OTHER (questions, reshape):* stay `gated`. Answer or route the question (pm-pogo, the triage {{.Worker}} if still alive, or a fresh triage round), then re-send the summary with the explicit ask.
+*On OTHER (questions, reshape):* stay `gated`. Answer or route the question (the product SME, the triage {{.Worker}} if still alive, or a fresh triage round), then re-send the summary with the explicit ask.
 
 **4. Build → review loop (`stage: build` → `stage: review`).** The build {{.Worker}} pushes `polecat-<build ticket id>`, opens the PR, and mails you "PR open". On that mail: set the build ticket's stage to `review` and dispatch the review {{.Worker}} (`--template=polecat-review`) on the review ticket.
 
@@ -808,12 +808,12 @@ When deciding whether to spawn a {{.Worker}}:
 - **One {{.Worker}} per work item.** Never spawn two agents for the same item.
 - **Check dependencies.** If a work item depends on another that isn't done, skip it.
 - **Repo awareness.** Use `lsp` to find the target repo path for work items that reference a project name.
-- **Don't over-spawn, and count PER REPO.** A fleet-wide "3-5 concurrent" limit is the wrong shape and was measured to be so (mg-3977). Five {{.Worker}}s across five repos is fine; **five in one Go repo is not**, because every one of them verifies itself by running that one repo's test suite, and `go test ./...` parallelises across packages on its own. On 2026-08-05 seven {{.Worker}}s went into `/Users/daniel/dev/pogo`: the 10-core box hit a load average of **337**, commands began timing out, and the refinery **stopped starting gates entirely** — three merges sat queued 24+ minutes without one beginning.
+- **Don't over-spawn, and count PER REPO.** A fleet-wide "3-5 concurrent" limit is the wrong shape and was measured to be so (mg-3977). Five {{.Worker}}s across five repos is fine; **five in one Go repo is not**, because every one of them verifies itself by running that one repo's test suite, and `go test ./...` parallelises across packages on its own. On 2026-08-05 seven {{.Worker}}s went into one Go repo: the 10-core box hit a load average of **337**, commands began timing out, and the refinery **stopped starting gates entirely** — three merges sat queued 24+ minutes without one beginning.
 
   pogod now enforces this rather than asking you to remember it: **at most 3 {{.Worker}}s per repository, with 1 slot held back for the refinery** whenever it has a merge for that repo in flight or queued. Read the count before planning a batch:
 
   ```bash
-  pogo host load --repo=/Users/daniel/dev/pogo   # workers in that repo, the cap, and whether a spawn would be refused
+  pogo host load --repo=<repo path>   # workers in that repo, the cap, and whether a spawn would be refused
   ```
 
   A cap refusal is a **503 and a later**, exactly like the host one below — and it is **repo-scoped**: a dispatch into a *different* repo is unaffected, so the right response is usually to dispatch elsewhere rather than to wait.

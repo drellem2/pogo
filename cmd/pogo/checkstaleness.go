@@ -156,7 +156,7 @@ mutates the tree it is judging has made itself a participant.
 
 WHAT IT DOES NOT JUDGE, and says so every run: files under the corpus
 directories that the ref does not ship. ~/.pogo/agents holds plenty of
-legitimately local material — crew/pm-pogo.md, pm/anti-drift-protocol.md, the
+legitimately local material — the crew/pm-*.md stubs, pm/anti-drift-protocol.md, the
 per-PM .toml configs — and reporting those as findings would train readers to
 skip the report, which is the line a real staleness surfaces on.
 

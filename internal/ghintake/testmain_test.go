@@ -58,18 +58,37 @@ func TestPollerStateDirIsSandboxed(t *testing.T) {
 		t.Fatalf("poller state dir %s is outside the sandbox root %s", stateDir, sandbox.Root)
 	}
 
-	// Nothing has written a seen file there, so discovery must come up empty and
-	// ResolveRepos must fall through to the built-in default rather than to
-	// whatever the host polls.
+	// Nothing has written a seen file there, so discovery must come up empty —
+	// and with no configured list either, the watch list is empty. It is NOT a
+	// built-in repo list: that fallback named pogo's own upstream repos until
+	// mg-f04b, which meant an unconfigured install reconciled a stranger's
+	// issue tracker. The source string is what distinguishes "examined nothing"
+	// from "found nothing", so assert it, not just the emptiness.
 	if got := DiscoverRepos(stateDir); len(got) != 0 {
 		t.Errorf("DiscoverRepos(%s) = %v, want nothing — the sandbox tree has no poller state", stateDir, got)
 	}
 	repos, src := ResolveRepos(nil, stateDir)
-	if src != "built-in default" {
-		t.Errorf("watch-list source = %q, want the built-in default", src)
+	if src != "no repos configured" {
+		t.Errorf("watch-list source = %q, want %q", src, "no repos configured")
 	}
-	if len(repos) != len(DefaultRepos) {
-		t.Errorf("repos = %v, want %v", repos, DefaultRepos)
+	if len(repos) != 0 {
+		t.Errorf("repos = %v, want none — an unconfigured install watches nothing", repos)
+	}
+}
+
+// TestDefaultReposIsEmpty is the guard proper: the fallback must name no repo.
+//
+// It is a separate test from the sandbox check above because the failure it
+// catches is not a test-isolation bug. A default repo list is a working feature
+// on the machine whose repos it names and a silent misfeature everywhere else:
+// pogod polls a tracker its operator has nothing to do with, finds every issue
+// uncarried (they all are — they're strangers' issues), and mails the
+// coordinator a wall of findings that cannot be actioned. Nothing about that
+// reads as misconfiguration from the inside.
+func TestDefaultReposIsEmpty(t *testing.T) {
+	if len(DefaultRepos) != 0 {
+		t.Errorf("DefaultRepos = %v, want empty — a built-in watch list names "+
+			"repos that belong to whoever wrote it, not to whoever installed pogo", DefaultRepos)
 	}
 }
 

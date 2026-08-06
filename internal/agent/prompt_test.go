@@ -2324,13 +2324,24 @@ func TestTriageTemplateInvestigateAndRecommendOnly(t *testing.T) {
 		t.Error("polecat-triage.md: expected the claim-time ack comment step")
 	}
 
-	// Synchronous PM consult before finalizing the recommendation.
-	if !strings.Contains(s, "pm-pogo") {
-		t.Error("polecat-triage.md: expected the pm-pogo consult step")
+	// Synchronous SME consult before finalizing the recommendation — gated on
+	// {{.SME}} being configured, and NOT on any particular agent name. The
+	// literal it used to assert (`pm-pogo`) named one deployment's PM; see
+	// TestShippedPromptsNameNoPersonalFleetAgent for the guard that keeps such
+	// a name out of the corpus (mg-f04b).
+	if !strings.Contains(s, "{{if .SME}}") {
+		t.Error("polecat-triage.md: expected the SME consult step to be gated on {{if .SME}}")
+	}
+	if !strings.Contains(s, "mg mail send {{.SME}}") {
+		t.Error("polecat-triage.md: expected the consult to be addressed to {{.SME}}")
+	}
+	if !strings.Contains(s, "{{else}}") {
+		t.Error("polecat-triage.md: expected an else branch stating the consult was skipped, " +
+			"so an unconfigured SME is a stated absence rather than a silent gap")
 	}
 
-	// Structured recommendation keys in the packet, per pm-pogo's authoritative
-	// format (owner of the quality bar). `remainder` is mg-1912's addition: it
+	// Structured recommendation keys in the packet, per the SME-owned
+	// authoritative format (owner of the quality bar). `remainder` is mg-1912's addition: it
 	// is what the coordinator turns into the successor at the gate, so a packet
 	// without it leaves the coordinator inventing one.
 	for _, key := range []string{`"workflow"`, `"issue"`, `"kind"`, `"recommendation"`, `"proposed_approach"`, `"effort"`, `"open_questions"`, `"checked"`, `"reproduced"`, `"duplicates"`, `"remainder"`, `"proposed_public_reply"`} {

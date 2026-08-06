@@ -57,8 +57,11 @@ func pinAndResolveRoles(cfg *config.Config) (*config.Config, error) {
 	// prompt synthesis or autostart happens — it decides which agent name maps
 	// to the coordinator prompt and what prompts call the role. The worker's
 	// name rides along; it is display-only, feeding prompt prose and never a
-	// mailbox, schedule id, or agent-type key.
+	// mailbox, schedule id, or agent-type key. So does the product SME's
+	// mailbox ([agents] sme), which unlike the other two is empty by default
+	// and gates the triage consult step out entirely when unset (mg-f04b).
 	agent.SetCoordinatorName(cfg.Agents.Coordinator)
 	agent.SetWorkerName(cfg.Agents.Worker)
+	agent.SetSMEName(cfg.Agents.SME)
 	return cfg, pinErr
 }

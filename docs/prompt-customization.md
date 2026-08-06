@@ -39,10 +39,10 @@ extension, no parent directory:
 ├── mayor.md                          # shipped, hash-stamped
 ├── crew/
 │   ├── doctor.md                     # shipped
-│   └── pm-pogo.md                    # shipped (extends pm-template + pm/pogo.toml)
+│   └── pm-yourproject.md             # LOCAL — you write it (extends pm-template)
 ├── pm/
 │   ├── pm-template.md                # shipped
-│   └── pogo.toml                     # shipped per-instance config
+│   └── yourproject.toml              # LOCAL — per-PM-instance config
 ├── templates/
 │   ├── polecat.md                    # shipped
 │   ├── polecat-qa.md                 # shipped
@@ -114,7 +114,7 @@ receive, drop-ins included:
 ```bash
 pogo agent prompt show mayor
 pogo agent prompt show polecat
-pogo agent prompt show pm-pogo
+pogo agent prompt show pm-yourproject
 ```
 
 The output is the synthesized prompt (extends-directive expanded, drop-ins
@@ -147,14 +147,14 @@ crew agent or polecat won't pick up a new drop-in until it's restarted.
 ### Drop-ins and `extends`
 
 A crew prompt that uses the `extends <template> with config <toml>` directive
-(e.g., `crew/pm-pogo.md` extending `pm/pm-template.md` with `pm/pogo.toml`)
+(e.g., `crew/pm-yourproject.md` extending `pm/pm-template.md` with `pm/yourproject.toml`)
 keys drop-ins on the **crew agent's name**, not the underlying template.
-For `crew/pm-pogo.md`, drop in fragments at `dropins/pm-pogo/`. They're
+For `crew/pm-yourproject.md`, drop in fragments at `dropins/pm-yourproject/`. They're
 appended after the template + config are merged, so the fragment is the
 last word.
 
-If you want a customization to apply to *every* PM instance (pm-pogo,
-pm-onethird, pm-lineara, …), edit `~/.pogo/agents/pm/pm-template.md`
+If you want a customization to apply to *every* PM instance, edit
+`~/.pogo/agents/pm/pm-template.md`
 directly — there's no template-level drop-in slot today. That's a
 canonical edit; back it up first ([Backup hygiene](#backup-hygiene)).
 
@@ -168,7 +168,7 @@ canonical edit; back it up first ([Backup hygiene](#backup-hygiene)).
 ## House style
 
 Spawn polecats with `priority=high` only for items tagged `urgent` or
-`bug`. Everything else stays at `medium` until pm-pogo bumps it.
+`bug`. Everything else stays at `medium` until that PM bumps it.
 
 When mailing humans, prefer one paragraph over bullet lists — Daniel reads
 mail on his phone.
@@ -216,19 +216,19 @@ The next polecat spawn picks it up.
 ### Override a single PM's behavior
 
 Drop-ins for a PM are keyed on the crew agent's name (the file under
-`crew/`), not the underlying template. To customize just `pm-pogo`:
+`crew/`), not the underlying template. To customize just one PM:
 
-`~/.pogo/agents/dropins/pm-pogo/30-pogo-specifics.md`:
+`~/.pogo/agents/dropins/pm-yourproject/30-project-specifics.md`:
 
 ```markdown
-## pm-pogo specifics
+## pm-yourproject specifics
 
 Treat any item touching `internal/agent/prompts/` as high-impact: open
 the design doc at `docs/design/prompt-customization-design.md` before triaging.
 ```
 
-This appends only to the `pm-pogo` synthesized prompt. To apply a
-customization to *every* PM at once (pm-pogo, pm-onethird, pm-lineara, …),
+This appends only to that one PM's synthesized prompt. To apply a
+customization to *every* PM at once,
 edit `~/.pogo/agents/pm/pm-template.md` directly — there's no template-level
 drop-in slot today. Back it up first.
 
@@ -245,11 +245,11 @@ drop-in slot today. Back it up first.
 with a fragment like:
 
 ```toml
-# 50-extra-tags.toml — appended onto pm/pogo.toml
+# 50-extra-tags.toml — appended onto pm/yourproject.toml
 tags_any = ["pogo", "macguffin", "pogo-darwin", "rent-a-programmer", "tutorial"]
 ```
 
-Until `mg-6f9f` lands, edit `~/.pogo/agents/pm/pogo.toml` directly and back it
+Until `mg-6f9f` lands, edit `~/.pogo/agents/pm/<project>.toml` directly and back it
 up first (see [Backup hygiene](#backup-hygiene)).
 
 ## Editing the canonical file

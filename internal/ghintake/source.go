@@ -517,9 +517,22 @@ func Collect(repos []string, list IssueLister, carriers CarrierLister, statuses 
 	return inv, nil
 }
 
-// DefaultRepos is the fallback watch list: the repos the gh-issue workflow
-// targets when nothing on the host says otherwise.
-var DefaultRepos = []string{"drellem2/pogo", "drellem2/macguffin"}
+// DefaultRepos is the fallback watch list, and it is deliberately EMPTY: when
+// nothing on the host names a repo, this detector watches nothing.
+//
+// It used to name `drellem2/pogo` and `drellem2/macguffin` — pogo's own
+// upstream repos (mg-f04b). On the machine that wrote them that was invisible,
+// because the poller state directory always answered first. On every other
+// install it was not: a daemon with no [gh_intake] repos and no poller state
+// would reconcile a STRANGER'S issue tracker against its local work items, find
+// that none of those issues had carriers, and mail its coordinator a wall of
+// findings about repos its operator has nothing to do with.
+//
+// Empty is the honest zero value. A deployment that wants intake coverage names
+// its repos in [gh_intake] repos, or runs the issue poller, whose state
+// directory DiscoverRepos reads. ResolveRepos reports "no repos configured" so
+// the absence is stated rather than looking like a clean scan.
+var DefaultRepos []string
 
 // PollerStateDirName is the subdirectory of POGO_HOME in which the issue poller
 // (`poll-gh-issues.sh`, a standalone launchd job in drellem2/pogo-reminders)
@@ -575,12 +588,20 @@ func DiscoverRepos(stateDir string) []string {
 // discovery from the poller's state directory, then DefaultRepos. The second
 // return value names which source was used, so a report can say where its
 // population came from instead of presenting a list as self-evident.
+//
+// With DefaultRepos empty (its shipped value — see there), the last branch
+// returns no repos and says so. An empty watch list and a watch list whose
+// every repo is clean both produce zero findings; only the source string tells
+// them apart, which is why it is returned rather than inferred.
 func ResolveRepos(configured []string, stateDir string) ([]string, string) {
 	if len(configured) > 0 {
 		return configured, "config"
 	}
 	if discovered := DiscoverRepos(stateDir); len(discovered) > 0 {
 		return discovered, "poller state (" + stateDir + ")"
+	}
+	if len(DefaultRepos) == 0 {
+		return nil, "no repos configured"
 	}
 	return append([]string(nil), DefaultRepos...), "built-in default"
 }

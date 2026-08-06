@@ -54,8 +54,9 @@ const (
 
 	// DefaultNotifyTo is the mailbox an uncarried issue is reported to.
 	//
-	// The COORDINATOR, not `human`, and not the PM either — which is where this
-	// package's routing parts company with its sibling ghteardown (`pm-pogo`).
+	// The COORDINATOR, not `human`. (Its sibling ghteardown once defaulted to a
+	// named PM instead; mg-f04b brought that back to the coordinator too, since
+	// the PM in question existed on one machine.)
 	// The remedy for an uncarried issue is to file a carrier and dispatch triage,
 	// and the mayor is the only agent that does either. Routing it anywhere else
 	// would produce a notice whose recipient can only forward it back, and a

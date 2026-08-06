@@ -1256,7 +1256,15 @@ unreadable repo, or blind scan is found (so it can gate a schedule or CI step).`
 				})
 			} else {
 				fmt.Print(rep.Render())
-				fmt.Printf("watch list from %s.\n", repoSrc)
+				if len(repos) == 0 {
+					// An empty watch list and a clean one both render zero
+					// findings. Say which this was, or a check that examined
+					// nothing reads as a check that found nothing (mg-f04b).
+					fmt.Printf("watch list is EMPTY (%s) — nothing was examined. "+
+						"Name repos with --repo, or in [gh_intake] repos.\n", repoSrc)
+				} else {
+					fmt.Printf("watch list from %s.\n", repoSrc)
+				}
 			}
 
 			if rep.Actionable() {
