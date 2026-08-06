@@ -293,10 +293,28 @@ port = 8080
 	}
 }
 
+// TestServerURL pins the ADDRESS, not the name. "localhost" resolves ::1 first
+// on a stock macOS while pogod binds 127.0.0.1, so the name reaches an address
+// pogod never holds and anything else may claim (drellem2/pogo#110).
 func TestServerURL(t *testing.T) {
 	cfg := &Config{Port: 12345}
-	if got := cfg.ServerURL(); got != "http://localhost:12345" {
-		t.Errorf("expected http://localhost:12345, got %s", got)
+	if got := cfg.ServerURL(); got != "http://127.0.0.1:12345" {
+		t.Errorf("expected http://127.0.0.1:12345, got %s", got)
+	}
+	if strings.Contains(cfg.ServerURL(), "localhost") {
+		t.Errorf("ServerURL resolved through the name %q; the CLI must dial the loopback address so a process on ::1:%d cannot impersonate pogod", cfg.ServerURL(), cfg.Port)
+	}
+}
+
+// TestServerURLAgreesWithDialAddr. The two are answers to the same question —
+// "where is pogod" — asked by different layers: DialAddr by the spawn-race
+// guard, ServerURL by every CLI command. They disagreed for the whole of
+// drellem2/pogo#110, which is how the guard could see a free port while the
+// CLI talked to an impostor. Nothing but this test holds them together.
+func TestServerURLAgreesWithDialAddr(t *testing.T) {
+	cfg := &Config{Port: 12345}
+	if want := "http://" + cfg.DialAddr(); cfg.ServerURL() != want {
+		t.Errorf("ServerURL() = %q but DialAddr() implies %q; the probe and the CLI must target the same socket", cfg.ServerURL(), want)
 	}
 }
 

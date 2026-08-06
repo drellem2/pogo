@@ -4,6 +4,18 @@ package health
 
 import "time"
 
+// LivenessBody is the exact body GET /health returns. It is exported because
+// it is the only thing that distinguishes pogod from ANY other process that
+// happens to be answering on the daemon port: a `kubectl port-forward`, an
+// `ssh -L`, a second daemon. A probe that treats "the TCP dial succeeded" or
+// even "HTTP 200" as proof of pogod is exactly what let an interloper on
+// ::1:10000 be read as a healthy pogod for ~20 minutes on 2026-07-31
+// (drellem2/pogo#110), so the loopback-resolution check in `pogo doctor
+// --check` matches on this string. Both the handler and that probe must read
+// it from here — two copies of the literal is one copy that can go stale
+// while the check keeps reporting pass.
+const LivenessBody = "pogo is up and bouncing"
+
 // FullResponse is the JSON response for GET /health/full.
 type FullResponse struct {
 	Pogod    Pogod    `json:"pogod"`

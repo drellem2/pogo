@@ -472,7 +472,11 @@ func (p schedulerMailChecks) HasMailCheck(agentIdentity string) bool {
 
 func healthHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Println("Visited /health")
-	fmt.Fprintf(w, "pogo is up and bouncing")
+	// health.LivenessBody, not a literal: doctor's loopback-resolution check
+	// tells pogod apart from an impersonator by this exact string, and a
+	// second copy here is a copy that can drift while the check keeps
+	// reporting pass (drellem2/pogo#110).
+	fmt.Fprint(w, health.LivenessBody)
 }
 
 // versionInfo is the JSON body of GET /version. It reports the RUNNING
