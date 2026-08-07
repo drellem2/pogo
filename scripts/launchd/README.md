@@ -420,14 +420,17 @@ happened. The install command's own output does not:
 
 ```bash
 pogo service install-deploy
-/usr/libexec/PlistBuddy -c "Print :StartCalendarInterval" \
-    ~/Library/LaunchAgents/com.pogo.deploy.plist        # expect three Hour entries
-launchctl print gui/$UID/com.pogo.deploy | grep -c calendarinterval
+launchctl print gui/$(id -u)/com.pogo.deploy   # expect one
+    # com.apple.launchd.calendarinterval descriptor per fire: Hour 3, 4, 5
 ```
 
-The second read is worth the extra line: the plist on disk is what an installer
-wrote, while `launchctl print` is what launchd actually registered. A plist it
-rejected or only partly parsed is still a perfectly good-looking file.
+**Read it back with `launchctl print`, not with `PlistBuddy`.** This is the one
+place the obvious check is the wrong one. `PlistBuddy` reads the *file*, and a
+corrected file that launchd never reloaded is byte-identical to a working one
+under it — and still does nothing at 04:00. `launchctl print` reports what
+launchd actually registered, which is the thing that has to be true. A file read
+is fine as corroboration; it is not evidence, and it must never be the only
+check a reconciliation is closed on.
 
 Install outside the 02:00–06:00 window, or check `~/.pogo/deploy.lock.d` and
 `pgrep -f pogo-deploy` first. `install-deploy` does `launchctl bootout` before
