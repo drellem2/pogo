@@ -10,8 +10,24 @@ echo "Making test directories"
 mkdir -p _testdata/a-service/.git
 mkdir -p _testdata/b-service/.git
 
-echo "Testing Go packages"
-go test ./...
+# A bare `go test ./...` here inherited Go's default 10-minute per-package
+# timeout (mg-a465, gh#107), and it reached the merge gate: build.sh runs this
+# file, and the refinery gate defaults to ./build.sh. Two things were wrong with
+# that, and only one of them is the number:
+#
+#   the budget      10m was never chosen, it was a default nobody set. On a
+#                   host that has swung between load 1.5 and 174, the slowest
+#                   package here measures 206-217s and the same package has
+#                   gone 81.2s -> 155.1s on load alone.
+#   the report      Go implements -timeout BY PANICKING, so raising the number
+#                   alone would only move the panic. An overrun and a mass
+#                   regression still looked identical, which is #107's actual
+#                   complaint.
+#
+# go-test-budget.sh sets the budget AND classifies the overrun, so a package
+# that ran long is reported as a package that ran long. See that file's header
+# for why 20m and not the 40m the issue suggests.
+bash scripts/go-test-budget.sh ./...
 
 echo "Testing neovim plugin"
 bash nvim/test_nvim.sh
@@ -101,6 +117,16 @@ bash scripts/pogo-deploy_test.sh
 # happens to agree.
 echo "Testing the from-source staleness runner"
 bash scripts/check-staleness_test.sh
+
+# The per-package test budget and its overrun report (mg-a465). The
+# load-bearing case is the POSITIVE CONTROL: a package is made to exceed the
+# budget on purpose and the output must NAME it and the budget rather than
+# ending in an unlabelled goroutine dump. `go test -timeout` alone does not
+# give that — it panics — so without this file the fix looks applied and isn't.
+# Costs 12.1s measured (5s of it deliberate sleeping); the budget is overridable
+# so that control runs in seconds rather than 20 minutes.
+echo "Testing the Go per-package test budget and overrun report"
+bash scripts/go-test-budget_test.sh
 
 echo "Testing build.sh"
 bash build_test.sh
