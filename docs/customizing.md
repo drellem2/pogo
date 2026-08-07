@@ -460,21 +460,55 @@ An environment override exists for the file-count ceiling
 
 ## Turning the log volume up or down
 
-`POGO_LOG_LEVEL` sets the threshold for pogod's loggers. Values are hclog's:
-`trace`, `debug`, `info` (the default), `warn`, `error`, `off` — case- and
-whitespace-insensitive. A value pogo cannot parse falls back to `info` rather
-than failing the daemon, so a typo costs you the level you asked for and
-nothing else.
+`POGO_LOG_LEVEL` sets the threshold for pogod's indexing, diagnostics and
+project loggers. Values are hclog's: `trace`, `debug`, `info` (the default),
+`warn`, `error`, `off` — case- and whitespace-insensitive. A value pogo cannot
+parse falls back to `info` rather than failing the daemon, so a typo costs you
+the level you asked for and nothing else.
+
+It is read once when those loggers are built, so **changing it takes effect on
+the next pogod start** — there is no reload. That is also why it is an
+environment variable rather than a `config.toml` key: a config key that can be
+edited while the daemon runs implies the edit will be picked up, and honouring
+that needs reload machinery this does not have. A config key with proper reload
+semantics is tracked separately.
+
+Not every logger in the daemon is covered. `internal/driver`'s plugin loggers
+are built at `debug` independently of this setting, so `POGO_LOG_LEVEL=warn`
+quiets the indexer but not plugin startup chatter.
+
+### Setting it when you start pogod yourself
 
 ```bash
 POGO_LOG_LEVEL=debug pogo server start
 ```
 
-It is an environment variable rather than a `config.toml` key on purpose: it
-works for a daemon started any way at all, including under launchd, where
-nothing sources a shell that could read a config file into the process. It is
-read once when the loggers are built, so changing it takes effect on the next
-pogod start. (A config key with proper reload semantics is tracked separately.)
+### Setting it under launchd
+
+**The line above does not work for a launchd-managed pogod.** launchd does not
+pass the invoking shell's environment to a job, so a variable exported in your
+shell — or prefixed onto a command — never reaches the daemon. It has to be
+declared in the job's plist, the same way `PATH`, `HOME` and `POGO_HOME` already
+are (see [scripts/launchd/README.md](../scripts/launchd/README.md)).
+
+Add it to the `EnvironmentVariables` dict in
+`scripts/launchd/com.pogo.daemon.plist` — the shipped plist carries a
+commented-out key for this:
+
+```xml
+<key>POGO_LOG_LEVEL</key>
+<string>debug</string>
+```
+
+then reload the job so the new environment is applied:
+
+```bash
+launchctl unload ~/Library/LaunchAgents/com.pogo.daemon.plist
+launchctl load  ~/Library/LaunchAgents/com.pogo.daemon.plist
+```
+
+Editing the plist without reloading changes nothing: launchd hands a job its
+environment at spawn.
 
 **What you get at each level.** By default pogod narrates only the indexing
 passes that did something: a re-index that rebuilt a project's index reports

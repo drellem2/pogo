@@ -1,7 +1,6 @@
 package search
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/hashicorp/go-hclog"
@@ -9,34 +8,35 @@ import (
 	"github.com/drellem2/pogo/pkg/plugin"
 )
 
-// gitHashWarnFor rebuilds the text the two call sites emit for root. git's own
-// error string is the message's one variable field, so — following af0f444's
-// pattern for the reopen refusal — the expected text is constructed from the
-// parts the code owns and the counting helper below matches everything up to
-// that field. It is never a loose substring or a truncated prefix: a
-// differently worded git-hash failure added later is a different line and must
-// not be folded into these counts.
-//
-// TestGitTreeHashWarningKeepsItsFullMessage pins the whole string, git's error
-// included.
+// gitHashWarnFor rebuilds the complete text the two call sites emit for root.
+// git's own error string is the message's one variable field, so — following
+// af0f444's pattern for the reopen refusal — the expected text is constructed
+// from the parts the code owns plus the error the fixture is built to provoke,
+// and compared for equality. Nothing here matches a substring or a prefix, so a
+// differently worded git-hash failure added later is a different line and
+// cannot be folded into these counts.
 func gitHashWarnFor(root, gitErr string) string {
 	return "Could not read git tree hash for " + root + ": " + gitErr
 }
 
-// countGitHashWarnings counts warn-level records reporting a git-tree-hash
-// read failure for exactly root.
+// gitMissingHeadErr is what `git rev-parse HEAD^{tree}` returns for a directory
+// that is not a repo — the failure every fixture here provokes, and the text
+// live pogod.log lines carry. Naming it lets the counting helper compare for
+// equality instead of matching a prefix.
+const gitMissingHeadErr = "exit status 128"
+
+// countGitHashWarnings counts warn-level records reporting a git-tree-hash read
+// failure for exactly root.
+//
+// Equality on the complete message, not a prefix. An earlier version matched
+// with strings.HasPrefix, which was bounded and safe in practice — but it was
+// the one prefix match in a change whose whole subject is that suppressing log
+// lines by prefix silently widens over time. If git ever words this failure
+// differently, equality fails loudly here and in
+// TestGitTreeHashWarningKeepsItsFullMessage together, which is the outcome the
+// house rule wants.
 func countGitHashWarnings(recs []map[string]any, root string) []map[string]any {
-	want := gitHashWarnFor(root, "")
-	var out []map[string]any
-	for _, rec := range recs {
-		if recLevel(rec) != "warn" {
-			continue
-		}
-		if strings.HasPrefix(recMessage(rec), want) {
-			out = append(out, rec)
-		}
-	}
-	return out
+	return findLogged(recs, "warn", gitHashWarnFor(root, gitMissingHeadErr))
 }
 
 // TestGitTreeHashWarningIsOncePerProjectNotPerSite is the acceptance criterion
@@ -167,9 +167,9 @@ func TestGitTreeHashWarningKeepsItsFullMessage(t *testing.T) {
 	quiesceForLogs(t, bs)
 
 	recs := capture.records(t)
-	got := findLogged(recs, "warn", gitHashWarnFor(root, "exit status 128"))
+	got := findLogged(recs, "warn", gitHashWarnFor(root, gitMissingHeadErr))
 	if len(got) != 1 {
 		t.Errorf("want the unchanged %q message, got %d match(es):\n%s",
-			gitHashWarnFor(root, "exit status 128"), len(got), formatRecords(recs))
+			gitHashWarnFor(root, gitMissingHeadErr), len(got), formatRecords(recs))
 	}
 }
