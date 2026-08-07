@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/drellem2/pogo/internal/mgcontract"
 )
 
 // mg-1912: polecat-triage.md told the triage worker to record its recommendation
@@ -46,11 +48,18 @@ const packetFence = "```json triage-packet"
 // is carved out of the package sandbox (see testmain_test.go), so it is already
 // vetted as not resolving onto the developer's live ~/.macguffin — which matters
 // more here than in most tests, since every command below is the real `mg`.
+//
+// The clauses required here are the ones every control in this file uses to
+// build its fixture at all. Each control additionally declares the clause it is
+// actually about; see internal/mgcontract for why the declaration is worth
+// making, and mg-6a0b for what one undeclared dependency cost.
 func mgStore(t *testing.T) string {
 	t.Helper()
-	if _, err := exec.LookPath("mg"); err != nil {
-		t.Skip("mg is not on PATH")
-	}
+	mgcontract.Require(t,
+		mgcontract.NewPrintsTheCreatedID,
+		mgcontract.NewStageTriageDeclaresRemainder,
+		mgcontract.ShowJSONCarriesStatusTagsBody,
+	)
 	if _, err := exec.LookPath("jq"); err != nil {
 		t.Skip("jq is not on PATH")
 	}
@@ -166,6 +175,7 @@ func shippedBashBlock(t *testing.T, prompt, needle string) string {
 // A fix verified only on the has-successor path has not been tested against the
 // defect at all, since the has-successor path is the one that always worked.
 func TestTriagePacketIsWrittenBeforeAnySuccessorExists(t *testing.T) {
+	mgcontract.Require(t, mgcontract.DoneRefusesADeclaredItemWithNoSuccessor)
 	mgStore(t)
 
 	triage := fileItem(t, "triage: probe (o/r#1)",
@@ -288,6 +298,14 @@ func TestTriagePacketIsWrittenBeforeAnySuccessorExists(t *testing.T) {
 // of the caller's payload, on a sidecar parked away from its item, and on one the
 // retry then drops — every way "preserved" can be false while a sidecar exists.
 func TestRefusedDoneKeepsTheResultItWasGiven(t *testing.T) {
+	// The clause this file was reddened for. mg-9259 created the behaviour; this
+	// control asserts pogo's side of it, and mgcontract now carries the
+	// cross-repo half so the next move in mg lands as a named break rather than
+	// as an assertion failure here.
+	mgcontract.Require(t,
+		mgcontract.DoneRefusesADeclaredItemWithNoSuccessor,
+		mgcontract.DoneRefusalPreservesTheResultSidecar,
+	)
 	root := mgStore(t)
 
 	triage := fileItem(t, "triage: probe (o/r#4)",
@@ -463,6 +481,7 @@ func TestTriagePacketReachesTheSidecarAtTheGate(t *testing.T) {
 // structurally against typos and by instruction against carelessness, and this
 // test records which is which rather than implying mg covers both.
 func TestFabricatedSuccessorIsRefusedOnlyWhenTheIDIsUnknown(t *testing.T) {
+	mgcontract.Require(t, mgcontract.DoneRefusesAnUnknownSuccessor)
 	mgStore(t)
 
 	triage := fileItem(t, "triage: probe (o/r#3)",

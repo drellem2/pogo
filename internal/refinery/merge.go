@@ -973,6 +973,13 @@ func (r *Refinery) runQualityGates(ctx context.Context, wtDir, repoPath string, 
 		allOutput.WriteString("\n")
 		if err != nil {
 			allOutput.WriteString(fmt.Sprintf("FAILED: %v\n", err))
+			// Name what failed INSIDE the gate. `./build.sh failed: exit status 1`
+			// is the sentence that travels — onto the MR, into `pogo refinery
+			// show`, into what a polecat is told about its branch — and it names
+			// neither the package nor the cause (mg-216c).
+			if what := summarizeGateFailure(output); what != "" {
+				return allOutput.String(), ran, fmt.Errorf("%s failed [%s]: %w", gate, what, err)
+			}
 			return allOutput.String(), ran, fmt.Errorf("%s failed: %w", gate, err)
 		}
 		allOutput.WriteString("PASSED\n")

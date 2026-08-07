@@ -13,6 +13,7 @@ doubt, the code is the source of truth.
 | [declarative-orchestration.md](declarative-orchestration.md) | Declarative TOML agent roles vs imperative prompt files | Shipped — Phase 1+2 (`auto_start`, `restart_on_crash`, `nudge_on_start`); kept for the why-TOML-not-X rationale |
 | [harness-provider-research.md](harness-provider-research.md) | Phase 1: which harness/model provider to add next (recommends OpenAI Codex) | Research; Codex provider since shipped (`internal/codex/`) |
 | [indexing-strategy.md](indexing-strategy.md) | Timer-driven incremental re-index vs event-based file-watching | Adopted & shipped (mg-5b0d) |
+| [mg-contract.md](mg-contract.md) | How pogo's tests may depend on the `mg` binary across a repo boundary: named clauses instead of unannounced coupling, which tests may be live at all, and the rule against flipping an assertion to match the dependency | Shipped (mg-216c, `internal/mgcontract`) |
 | [mg-domain-audit.md](mg-domain-audit.md) | Whether macguffin's work-item store is domain-neutral (not coding-specific) | Audit; durable orientation, concrete follow-ups filed separately |
 | [multi-provider-architecture-survey.md](multi-provider-architecture-survey.md) | Phase 2: provider-abstraction architecture (design-of-record) | Survey; Codex provider since shipped (`internal/codex/`) |
 | [pa-thread-index-design.md](pa-thread-index-design.md) | pa's local-only, pointer-only thread-index git repo (payloads stay in self-mail) | Shipped (mg-da41, decision mg-9a32); machine-local state, archeology |

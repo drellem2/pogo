@@ -4,16 +4,28 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+
+	"github.com/drellem2/pogo/internal/mgcontract"
 )
 
 // sandboxMgRoot points mg at a throwaway workspace via MG_ROOT so these tests
 // touch no real mailbox. Skips when mg is not installed — this suite runs on
 // machines without the fleet's tooling.
+//
+// The clauses are declared here rather than assumed. This package is where
+// mg-d639 landed: a correct change in mg — an unknown recipient became a
+// refusal instead of a phantom mailbox — turned pogo's main red through THIS
+// file's fixtures, and then through five further sites the whole-gate run
+// found. Both halves of that change are now named contract, so the next move
+// arrives as a break in internal/mgcontract with mg-d639 on it, rather than as
+// a fixture failure in a package whose own code is fine.
 func sandboxMgRoot(t *testing.T) {
 	t.Helper()
-	if _, err := exec.LookPath("mg"); err != nil {
-		t.Skip("mg not on PATH")
-	}
+	mgcontract.Require(t,
+		mgcontract.MailSendCreateRegistersANewMailbox,
+		mgcontract.MailSendRefusesAnUnknownRecipient,
+		mgcontract.MailListJSONReportsUnreadCounts,
+	)
 	t.Setenv("MG_ROOT", mailRoot(t))
 }
 

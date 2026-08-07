@@ -10,6 +10,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/drellem2/pogo/internal/mgcontract"
 )
 
 // mgSandbox builds an isolated macguffin store and returns its root. Every test
@@ -19,9 +21,15 @@ import (
 // but a test that means to exercise the real `mg unclaim` has to say where.
 func mgSandbox(t *testing.T) string {
 	t.Helper()
-	if _, err := exec.LookPath("mg"); err != nil {
-		t.Skip("mg not on PATH; the claim-release path needs the real macguffin CLI")
-	}
+	// What this suite rests on in mg, said out loud: an item can be filed and
+	// its id scraped back, and an unclaim returns it to available/. The second
+	// is the property under test — the releaser's job is that a dead polecat's
+	// work is dispatchable again — and the store's agreement is the only reason
+	// to pay for the real binary here at all. See internal/mgcontract.
+	mgcontract.Require(t,
+		mgcontract.NewPrintsTheCreatedID,
+		mgcontract.UnclaimReturnsTheItemToAvailable,
+	)
 	// Not t.TempDir(): mg writes a git snapshot repo under the root, and the
 	// per-test cleanup of a deep temp path is noisy on failure. A short path
 	// under the socket dir keeps the store beside the rest of the fixture.
