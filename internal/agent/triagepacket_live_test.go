@@ -15,7 +15,7 @@ import (
 // The triage ticket's body leads with `stage: triage`, so mg files it carrying
 // `declares-remainder`; `mg done` then refuses a declared item that names no
 // successor, and the successor is the build ticket, which is not filed until
-// after the human gate. workitem.Done runs that guard BEFORE it writes the
+// after the human gate. workitem.Done ran that guard BEFORE it wrote the
 // sidecar, so the refusal discarded the packet the playbook calls the record of
 // record. There was no ordering of the playbook in which the line worked.
 //
@@ -23,6 +23,14 @@ import (
 // ticket's own body as a fenced `json triage-packet` block, which has no
 // successor precondition, and the coordinator lifts that block into
 // `--result` at transition 3 when it retires the ticket with `--successor`.
+//
+// mg-9259 has since fixed the OTHER half, upstream in mg: the result is written
+// before the guards run, so a refused `mg done` now preserves the payload rather
+// than destroying it. That does not make the relocation above redundant — the
+// refusal still fires, so `mg done --result` is still not a way to REPORT at
+// triage time, and the body block is still what a human reads at the gate. It
+// does mean this file no longer asserts that a refusal costs the packet. It
+// asserts the opposite, deliberately; see TestRefusedDoneKeepsTheResultItWasGiven.
 //
 // These tests run the SHIPPED shell out of the SHIPPED templates against a real
 // `mg` and a real store, rather than restating what the templates ought to say.
@@ -106,10 +114,11 @@ func mgField(t *testing.T, id, jqPath string) string {
 }
 
 // resultSidecars returns every <id>.result.json anywhere in the store. The glob
-// is deliberately store-wide rather than status-scoped: the claim under test is
-// that the refusal writes NO sidecar, and a sidecar stranded in claimed/ would
-// satisfy a done/-only check while still being a packet nobody can find (which
-// is exactly the stray class `mg sidecars` exists to report).
+// is deliberately store-wide rather than status-scoped because WHERE the sidecar
+// sits is itself the assertion (mg-9259): a result is a companion to its item and
+// travels with it, so it is expected beside a claimed item and beside a done one,
+// and "somewhere else entirely" is the failure. A done/-only check could not tell
+// a packet preserved in claimed/ from a packet destroyed.
 func resultSidecars(t *testing.T, root, id string) []string {
 	t.Helper()
 	hits, err := filepath.Glob(filepath.Join(root, "work", "*", id+".result.json"))
@@ -157,7 +166,7 @@ func shippedBashBlock(t *testing.T, prompt, needle string) string {
 // A fix verified only on the has-successor path has not been tested against the
 // defect at all, since the has-successor path is the one that always worked.
 func TestTriagePacketIsWrittenBeforeAnySuccessorExists(t *testing.T) {
-	root := mgStore(t)
+	mgStore(t)
 
 	triage := fileItem(t, "triage: probe (o/r#1)",
 		"workflow: gh-issue\nstage: triage\ngh: o/r#1\n\nTriage this GitHub issue.")
@@ -172,17 +181,24 @@ func TestTriagePacketIsWrittenBeforeAnySuccessorExists(t *testing.T) {
 		t.Fatalf("mg claim: exit %d\n%s", code, out)
 	}
 
-	// ---- the defect, measured ------------------------------------------------
-	// The instruction as it shipped. It cannot succeed and it takes the packet
-	// down with it: the guard runs before the sidecar is written.
+	// ---- the premise, measured -----------------------------------------------
+	// The instruction as it shipped still cannot succeed: `mg done` refuses a
+	// declared item that names no successor, and at this point on the gh-issue
+	// track no id exists that could satisfy it. That refusal is the entire reason
+	// the packet was relocated to the ticket body, so if it ever stops firing the
+	// relocation needs re-arguing rather than silently outliving its cause.
+	//
+	// What the refusal COSTS is no longer part of this test. It used to also
+	// assert that the refusal wrote no sidecar; mg-9259 made a refused `mg done`
+	// preserve the payload, and that guarantee now has its own control in
+	// TestRefusedDoneKeepsTheResultItWasGiven. The two are separate claims from
+	// separate tickets: this one is mg-1912's (the body route works with no
+	// successor in the store), that one is mg-9259's (a refusal costs a retry,
+	// never the work).
 	out, code := sh(t, `mg done `+triage+` --result='{"workflow":"gh-issue","stage":"triage"}'`)
 	if code == 0 {
 		t.Fatalf("mg done --result succeeded on a declared item with no successor; "+
 			"this test's premise is gone and the template guidance needs rereading:\n%s", out)
-	}
-	if hits := resultSidecars(t, root, triage); len(hits) != 0 {
-		t.Fatalf("the refused `mg done` still wrote a sidecar at %v; the packet was "+
-			"assumed lost on refusal and it is not", hits)
 	}
 
 	// ---- the fix, on the no-successor arm ------------------------------------
@@ -242,6 +258,136 @@ func TestTriagePacketIsWrittenBeforeAnySuccessorExists(t *testing.T) {
 	}
 	if strings.Contains(tags, "successor:") {
 		t.Errorf("tags = %q: a successor was named before one could exist", tags)
+	}
+}
+
+// TestRefusedDoneKeepsTheResultItWasGiven pins the guarantee mg-9259 created,
+// which is the one this file used to assert the ABSENCE of.
+//
+// The old assertion here was that a refused `mg done` writes no sidecar. That was
+// never the property being protected — it was the MEASUREMENT OF THE DEFECT that
+// motivated mg-1912's relocation: proof that the sidecar route was unavailable at
+// triage time, so the packet had to go somewhere else. mg-9259 removed the defect,
+// and a measurement of a defect that no longer exists is not a control.
+//
+// Its stated rationale is falsified in both premises, which is why this is pogo's
+// expectation to correct and not mg's behaviour to report. The old comment justified
+// a store-wide glob on the grounds that a sidecar in claimed/ is "a packet nobody
+// can find ... exactly the stray class `mg sidecars` exists to report". Measured
+// against the shipped mg: the refusal PRINTS the sidecar's absolute path and says
+// it survived, and `mg sidecars` does not call it stray — in claimed/, or in
+// available/ after an unclaim. It is a companion to its item, not a stray.
+//
+// The direction settles it. pogo cannot hold as an invariant that its own triage
+// packets are destroyed on refusal; surviving is the property mg-9259 was filed to
+// create, and the old failure message conceded as much ("the packet was assumed
+// lost on refusal and it is not").
+//
+// So this asserts THE WORK SURVIVES, which is strictly stronger than inverting the
+// old check. A bare `len(hits) == 1` would pass on an empty file, on a paraphrase
+// of the caller's payload, on a sidecar parked away from its item, and on one the
+// retry then drops — every way "preserved" can be false while a sidecar exists.
+func TestRefusedDoneKeepsTheResultItWasGiven(t *testing.T) {
+	root := mgStore(t)
+
+	triage := fileItem(t, "triage: probe (o/r#4)",
+		"workflow: gh-issue\nstage: triage\ngh: o/r#4\n\nTriage this GitHub issue.")
+	if tags := mgField(t, triage, ".tags|join(\",\")"); !strings.Contains(tags, "declares-remainder") {
+		t.Fatalf("triage ticket tags = %q, want declares-remainder; without the carrier "+
+			"there is no refusal to preserve a result across", tags)
+	}
+	if out, code := sh(t, "mg claim "+triage); code != 0 {
+		t.Fatalf("mg claim: exit %d\n%s", code, out)
+	}
+
+	// A payload nothing else in the store could produce, so what comes back out is
+	// demonstrably the caller's bytes rather than something mg synthesized.
+	const payload = `{"workflow":"gh-issue","stage":"triage","recommendation":"decline","marker":"p6a0b-only"}`
+	var want map[string]any
+	if err := json.Unmarshal([]byte(payload), &want); err != nil {
+		t.Fatalf("fixture payload is not JSON: %v", err)
+	}
+
+	out, code := sh(t, "mg done "+triage+" --result='"+payload+"'")
+	if code == 0 {
+		t.Fatalf("mg done --result succeeded on a declared item with no successor; the "+
+			"refusal this control measures the COST of is gone:\n%s", out)
+	}
+
+	// Beside the item, in the directory the item is actually in. "Preserved" and
+	// "stranded somewhere a reader of this item will never look" are different
+	// outcomes and a store-wide glob is what tells them apart.
+	hits := resultSidecars(t, root, triage)
+	if len(hits) != 1 {
+		t.Fatalf("want exactly one result sidecar preserved across the refusal, got %v", hits)
+	}
+	if wantPath := filepath.Join(root, "work", "claimed", triage+".result.json"); hits[0] != wantPath {
+		t.Errorf("preserved sidecar at %s, want %s — beside the item, which is still claimed", hits[0], wantPath)
+	}
+
+	// The caller's packet, not a paraphrase of it. Compared decoded rather than
+	// byte-wise so a re-serialization is allowed and a rewrite is not.
+	data, err := os.ReadFile(hits[0])
+	if err != nil {
+		t.Fatalf("read preserved sidecar: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("preserved sidecar is not JSON: %v\n%s", err, data)
+	}
+	for key, wantVal := range want {
+		if got[key] != wantVal {
+			t.Errorf("preserved sidecar[%q] = %v, want %v", key, got[key], wantVal)
+		}
+	}
+
+	// Preserved but unannounced is the hazard the old comment feared, and it would
+	// be a fair one: an operator who watches a command exit non-zero assumes the
+	// payload went with it. The refusal has to say where the packet is. Asserted as
+	// "the message contains the path" rather than on wording, so a reword passes and
+	// dropping the path — the regression that matters — does not.
+	if !strings.Contains(out, hits[0]) {
+		t.Errorf("the refusal does not name the preserved packet's location %s, so an "+
+			"operator has no way to know it survived:\n%s", hits[0], out)
+	}
+
+	// And mg agrees it is not stray, which is the other half of "findable".
+	strays, code := sh(t, "mg sidecars")
+	if code != 0 {
+		t.Fatalf("mg sidecars: exit %d\n%s", code, strays)
+	}
+	if strings.Contains(strays, triage) {
+		t.Errorf("`mg sidecars` reports the preserved packet as stray:\n%s", strays)
+	}
+
+	// The proof of "preserved": the retry carries it through, WITHOUT the caller
+	// re-supplying --result. This is what makes the refusal cost a retry rather
+	// than the work — a sidecar that the successful completion then dropped would
+	// satisfy every check above and still lose the packet.
+	build := fileItem(t, "build: probe (o/r#4)", "workflow: gh-issue\nstage: build\ngh: o/r#4")
+	if out, code := sh(t, "mg done "+triage+" --successor="+build); code != 0 {
+		t.Fatalf("the retry failed: exit %d\n%s", code, out)
+	}
+	hits = resultSidecars(t, root, triage)
+	if len(hits) != 1 {
+		t.Fatalf("want exactly one result sidecar after the retry, got %v", hits)
+	}
+	if wantPath := filepath.Join(root, "work", "done", triage+".result.json"); hits[0] != wantPath {
+		t.Errorf("sidecar at %s after the retry, want %s — it travels with the item", hits[0], wantPath)
+	}
+	data, err = os.ReadFile(hits[0])
+	if err != nil {
+		t.Fatalf("read carried sidecar: %v", err)
+	}
+	got = nil
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("carried sidecar is not JSON: %v\n%s", err, data)
+	}
+	for key, wantVal := range want {
+		if got[key] != wantVal {
+			t.Errorf("after the retry sidecar[%q] = %v, want %v; the packet the refusal "+
+				"preserved did not survive the completion that followed it", key, got[key], wantVal)
+		}
 	}
 }
 
