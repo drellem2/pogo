@@ -20,9 +20,29 @@ package main
 // WHY IT IS NOT REDUNDANT WITH THE `ServerURL` FIX. The companion change in
 // this commit points the CLI at 127.0.0.1, so the CLI stops being fooled. It
 // does not empty the port: everything else that dials the NAME — editor
-// integrations (mg-b36f), a stale `ssh -L`, a forward on a reconfigured port,
-// a second daemon — still is. This check is what makes that condition visible
-// instead of silent, and it is why A ships with B rather than after it.
+// integrations (mg-b36f), a stale `ssh -L`, a forward whose far end is not a
+// daemon — still is. This check is what makes that condition visible instead
+// of silent, and it is why A ships with B rather than after it.
+//
+// EXACTLY WHAT IT DETECTS, AND WHAT IT DOES NOT. It detects a responder on the
+// NAME that is not POGOD-SHAPED. It cannot tell THIS pogod from ANOTHER one.
+// A second pogod bound to a v6 loopback emits health.LivenessBody like any
+// other, so both probes report pogod and the row passes — likewise an `ssh -L`
+// or port-forward whose far end is a real pogod elsewhere. That case is NOT
+// covered, and saying otherwise would be the failure this file argues against
+// one case over: a reader told the row covers a second daemon reads the green
+// line and stops looking. The approved recommendation (mg-e314) promised the
+// broader class in the same words; it over-promised, and this is the correction
+// rather than a quiet narrowing.
+//
+// The row does say what it saw. When both probes answer as pogod but the name
+// landed somewhere other than the bind address, the pass line names that
+// address and states plainly that a dual-stack bind and a second daemon are
+// both consistent with it and that this check does not separate them —
+// evidence the probe already holds, offered without a verdict it cannot
+// support. Separating them needs /version (start_time differs between two
+// daemons on one revision) and carries a dual-stack false positive; that is a
+// feature, not this row, and it is deliberately not built here.
 //
 // WHY THE PROBE MATCHES ON A BODY. "The TCP dial succeeded" and even "HTTP
 // 200" are properties of any listener, not of pogod. The incident is precisely
@@ -180,27 +200,44 @@ func loopbackResolutionLine(bind, name loopbackProbe, port int) (status, detail 
 	// Both answer as pogod. Say which address the name landed on: it is the
 	// difference between "v6 is free and Go fell back" and "pogod is bound
 	// where the name points", and only the second is durable.
-	return "pass", fmt.Sprintf("pogod answers on both %s and %s; the name reached %s",
+	detail = fmt.Sprintf("pogod answers on both %s and %s; the name reached %s",
 		bind.URL, name.URL, loopbackOrUnknown(name.Remote))
+
+	// The name answered as pogod from an address that is NOT the one pogod was
+	// probed on. Two things produce that — a dual-stack bind (0.0.0.0 also
+	// binds [::]) and a SECOND pogod — and this row cannot separate them: the
+	// body match distinguishes pogod-shaped from not-pogod-shaped, never this
+	// pogod from another. Rather than pass in silence or invent a verdict it
+	// cannot support, the line states the observation and names its own limit,
+	// so a reader chasing a second daemon learns here that they must look
+	// elsewhere instead of reading green as an all-clear.
+	if name.Remote != "" && bind.Remote != "" && name.Remote != bind.Remote {
+		detail += fmt.Sprintf(
+			", which is NOT the address pogod was probed on (%s). A dual-stack bind and a SECOND pogod both look like this, and this check does not tell them apart — it distinguishes pogod-shaped responders from other processes, not one pogod from another. If you did not configure a dual-stack bind, compare `/version` start_time on both addresses",
+			bind.Remote)
+	}
+	return "pass", detail
 }
 
 // loopbackShadowDetail writes the failure. It has to carry three things a
 // reader cannot reconstruct: that pogod is HEALTHY (so nobody restarts it),
 // which address is lying, and the one command that names the culprit.
 func loopbackShadowDetail(bind, name loopbackProbe, port int) string {
-	var lead string
+	// Two different failures share this row, and only one of them has a
+	// culprit. Sending an operator to hunt a process on a host where the name
+	// simply never connected wastes exactly the time this row exists to save,
+	// so the remedy is written per branch rather than shared.
 	if name.Remote == "" {
 		// The name never connected at all while the bind address did. Not the
 		// port-forward shape — this is a resolver or /etc/hosts that points
-		// the name somewhere pogod is not.
-		lead = fmt.Sprintf("%s could not be reached at all (%s)", name.URL, loopbackReason(name))
-	} else {
-		lead = fmt.Sprintf("%s reached %s, and the process there is NOT pogod (%s)",
-			name.URL, name.Remote, loopbackReason(name))
+		// the name somewhere pogod is not. There is NO impersonator to find.
+		return fmt.Sprintf(
+			"%s could not be reached at all (%s), while pogod is HEALTHY on %s — do not restart it. Nothing answered on the name, so there is no process to hunt: this is name resolution, not an impersonator. Check what `localhost` resolves to on this host (`/etc/hosts`, then `dns-sd -q localhost`) — anything that dials the name rather than the address will fail the same way until it resolves to %s",
+			name.URL, loopbackReason(name), bind.URL, loopbackOrUnknown(bind.Remote))
 	}
 	return fmt.Sprintf(
-		"%s, while pogod is HEALTHY on %s — do not restart it. Anything that dials the name (editor integrations, `ssh -L`, scripts) is talking to that process instead of the daemon. Identify it with `%s`, and note that pogod binds 127.0.0.1 only, so the impersonator keeps the port until it is stopped",
-		lead, bind.URL, loopbackLsofHint(name.Remote, port))
+		"%s reached %s, and the process there is NOT pogod (%s), while pogod is HEALTHY on %s — do not restart it. Anything that dials the name (editor integrations, `ssh -L`, scripts) is talking to that process instead of the daemon. Identify it with `%s`, and note that pogod binds 127.0.0.1 only, so the impersonator keeps the port until it is stopped",
+		name.URL, name.Remote, loopbackReason(name), bind.URL, loopbackLsofHint(name.Remote, port))
 }
 
 // loopbackLsofHint picks the listener query for the family the name actually

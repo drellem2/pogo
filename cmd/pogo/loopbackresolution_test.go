@@ -73,9 +73,59 @@ func TestLoopbackResolutionLine_UnreachableNameFailsWithoutInventingACulprit(t *
 	if strings.Contains(detail, "is NOT pogod") {
 		t.Errorf("detail describes a process that was never observed; got: %s", detail)
 	}
-	// No family was observed, so the hint must not narrow to one.
-	if !strings.Contains(detail, "lsof -nP -iTCP:10000") {
-		t.Errorf("hint should be family-agnostic when nothing was reached; got: %s", detail)
+	// Nothing answered, so there is no culprit. A remedy that sends an operator
+	// hunting a process on a host whose name simply does not resolve wastes
+	// exactly the time this row exists to save (review round 1, advisory).
+	if !strings.Contains(detail, "no process to hunt") {
+		t.Errorf("detail must say there is nothing to find; got: %s", detail)
+	}
+	if !strings.Contains(detail, "not an impersonator") {
+		t.Errorf("detail must rule the impersonator reading out explicitly; got: %s", detail)
+	}
+	// The remedy must not be the culprit-hunting one. "impersonator" is fine in
+	// the negation above, so this checks the ACTIONS a reader would take.
+	for _, forbidden := range []string{"lsof", "talking to that process", "keeps the port until it is stopped"} {
+		if strings.Contains(detail, forbidden) {
+			t.Errorf("detail sends the reader hunting a process that was never observed (%q); got: %s", forbidden, detail)
+		}
+	}
+}
+
+// TestLoopbackResolutionLine_SecondPogodPassesButSaysSo. A second pogod on the
+// v6 loopback emits health.LivenessBody like any other, so BOTH probes report
+// pogod and this row passes. That case is genuinely not detected — the body
+// match separates pogod-shaped from not-pogod-shaped, never THIS pogod from
+// ANOTHER — and the green line must therefore not read as an all-clear for it
+// (review round 1, blocking). The row states the observation it does hold: the
+// name landed somewhere other than the bind address.
+func TestLoopbackResolutionLine_SecondPogodPassesButSaysSo(t *testing.T) {
+	bind := loopbackProbe{URL: "http://127.0.0.1:10000", Remote: "127.0.0.1:10000", IsPogod: true}
+	name := loopbackProbe{URL: "http://localhost:10000", Remote: "[::1]:10000", IsPogod: true}
+	status, detail := loopbackResolutionLine(bind, name, 10000)
+	if status != "pass" {
+		t.Fatalf("status = %q, want pass — this row cannot tell two pogods apart and must not pretend to", status)
+	}
+	for _, want := range []string{
+		"NOT the address pogod was probed on", // the observation it does hold
+		"SECOND pogod",                        // the case it does not cover, named
+		"does not tell them apart",            // its own limit, stated
+		"start_time",                          // where to actually settle it
+	} {
+		if !strings.Contains(detail, want) {
+			t.Errorf("pass line is missing %q, so a reader chasing a second daemon reads green as an all-clear; got: %s", want, detail)
+		}
+	}
+}
+
+// TestLoopbackResolutionLine_PassStaysQuietWhenTheNameLandsOnTheBindAddress.
+// The caveat above is bought with words on every healthy run if it fires
+// unconditionally. It must appear only when there is something to explain.
+func TestLoopbackResolutionLine_PassStaysQuietWhenTheNameLandsOnTheBindAddress(t *testing.T) {
+	bind := loopbackProbe{URL: "http://127.0.0.1:10000", Remote: "127.0.0.1:10000", IsPogod: true}
+	name := loopbackProbe{URL: "http://localhost:10000", Remote: "127.0.0.1:10000", IsPogod: true}
+	_, detail := loopbackResolutionLine(bind, name, 10000)
+	if strings.Contains(detail, "SECOND pogod") {
+		t.Errorf("the second-daemon caveat fired on an ordinary healthy pass; got: %s", detail)
 	}
 }
 
