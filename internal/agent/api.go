@@ -128,7 +128,27 @@ type DrainAPIRequest struct {
 // live work. Unreachable is the missing half: the survivors this daemon can
 // see (via the mg-13a3 witness) but cannot drain.
 type DrainStatus struct {
-	Draining bool          `json:"draining"`
+	Draining bool `json:"draining"`
+
+	// Count is the polecat population of THIS registry, and it is the number
+	// the driver polls to zero. DETACHED COMPUTE IS DELIBERATELY OUTSIDE IT.
+	//
+	// A process can outlive the polecat that spawned it (measured: python from
+	// a polecat's own script at ~308% CPU for 30+ minutes at ppid=1, under no
+	// polecat). Such a job has no registry entry AND owes the refinery no
+	// merge, so it is invisible to this predicate and to the narrowed
+	// "polecats owing a merge" one alike. That gap is real; it is also RULED,
+	// not overlooked — pm-pogo, 2026-08-07 (mg-797d): the deploy must
+	// EXPLICITLY NOT wait for detached compute. An orphan has already detached
+	// from pogod, so the bounce cannot destroy it and waiting protects nothing;
+	// and the population is multi-hour research compute working as designed, so
+	// a drain that waited on it would wait forever by construction.
+	//
+	// Do not add a third term here to "fix" the omission. The orphan is worth
+	// fixing one layer down, as process lifecycle (mg-55de / mg-56d1), not as
+	// deploy semantics; and the cost of widening this predicate back toward
+	// "all work in flight" is priced on mg-797d by the product that would bear
+	// it.
 	Count    int           `json:"count"`
 	Polecats []PolecatInfo `json:"polecats"`
 
