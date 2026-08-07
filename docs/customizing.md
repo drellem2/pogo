@@ -491,9 +491,11 @@ shell — or prefixed onto a command — never reaches the daemon. It has to be
 declared in the job's plist, the same way `PATH`, `HOME` and `POGO_HOME` already
 are (see [scripts/launchd/README.md](../scripts/launchd/README.md)).
 
-Add it to the `EnvironmentVariables` dict in
-`scripts/launchd/com.pogo.daemon.plist` — the shipped plist carries a
-commented-out key for this:
+Edit **`~/Library/LaunchAgents/com.pogo.daemon.plist`** — the installed copy,
+which is the file launchd actually reads. `scripts/launchd/com.pogo.daemon.plist`
+in this repo is a *template*; editing it has no effect on a running service.
+
+Add to its `EnvironmentVariables` dict:
 
 ```xml
 <key>POGO_LOG_LEVEL</key>
@@ -509,6 +511,21 @@ launchctl load  ~/Library/LaunchAgents/com.pogo.daemon.plist
 
 Editing the plist without reloading changes nothing: launchd hands a job its
 environment at spawn.
+
+> **`pogo service install` will drop this key.** The installer renders the plist
+> from its own built-in template, which carries `PATH`, `HOME`, `POGO_HOME` and
+> `POGO_PLUGIN_PATH` and nothing else, and it overwrites the installed plist
+> whenever the render differs from what is on disk — a hand-added
+> `POGO_LOG_LEVEL` is exactly such a difference. Since the launchd README tells
+> you to re-run the installer after upgrading pogod, this is routine rather than
+> a corner case: **re-add the key and reload after any `pogo service install`,**
+> or the level silently reverts to `info`. Teaching the installer's template to
+> carry the variable is the durable fix and is tracked separately.
+
+If you installed by hand (the `sed`-the-template path in the launchd README
+rather than `pogo service install`), the repo template ships a commented-out
+`POGO_LOG_LEVEL` key, so uncommenting it before the copy sets the level on the
+plist you install.
 
 **What you get at each level.** By default pogod narrates only the indexing
 passes that did something: a re-index that rebuilt a project's index reports

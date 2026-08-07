@@ -40,10 +40,17 @@
         <string>/Users/YOUR_USERNAME/.pogo/plugin</string>
         <!-- Log level for pogod's indexing, diagnostics and project loggers:
              trace, debug, info (the default), warn, error, off. It MUST be set
-             here rather than in your shell — launchd does not pass the invoking
-             shell's environment to a job — and the job must be unloaded and
-             loaded again for a change to apply. Uncomment to turn the volume up
-             or down. See docs/customizing.md.
+             in a plist rather than in your shell — launchd does not pass the
+             invoking shell's environment to a job — and the job must be
+             unloaded and loaded again for a change to apply.
+
+             THIS FILE IS A TEMPLATE. Uncommenting here only affects the MANUAL
+             install path, where this file is sed-copied into
+             ~/Library/LaunchAgents/. `pogo service install` does not read this
+             file at all: it renders its own template, which has no
+             POGO_LOG_LEVEL key and overwrites the installed plist, so on that
+             path add the key to ~/Library/LaunchAgents/com.pogo.daemon.plist
+             and re-add it after every re-install. See docs/customizing.md.
         <key>POGO_LOG_LEVEL</key>
         <string>debug</string>
         -->
