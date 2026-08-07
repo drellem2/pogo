@@ -26,6 +26,65 @@ import (
 // the shared state file with its own (stale) view.
 type RefineryStarter func() (*refinery.Refinery, error)
 
+// AgentStarter re-runs pogod's crew auto-start sweep when transitioning back to
+// ModeFull, and reports what it did. It is the agent-side analogue of
+// RefineryStarter and exists for the same reason: the server package should not
+// own the policy (which prompts are eligible, whether autostart is configured
+// off at all) — only the sequencing.
+//
+// It RE-RUNS THE SWEEP. It does not restore the set that happened to be running
+// before the stop: the desired state is what the prompt frontmatter declares,
+// which is the same rule the boot path applies. AutoStartAgents is idempotent,
+// so an agent that survived the drain is skipped rather than double-started.
+//
+// Polecats are deliberately not covered. They are ephemeral, dispatched per
+// work item, and correctly stay gone — but the report says so out loud rather
+// than letting a bare success imply otherwise.
+type AgentStarter func() AgentStartOutcome
+
+// AgentStartOutcome is what an AgentStarter reports back.
+type AgentStartOutcome struct {
+	// Skipped, when non-empty, is the human-readable reason NO sweep ran —
+	// e.g. `[agents] autostart = false`. It is not an error: a daemon
+	// configured never to spawn a fleet must not acquire a side door into
+	// doing so via a mode round-trip. It is reported so the operator sees
+	// "started nothing, on purpose" instead of "started nothing".
+	Skipped string
+	// Results is the per-prompt outcome of the sweep, empty when Skipped is set.
+	Results []agent.AutoStartResult
+}
+
+// StartReport describes what a transition back to full mode actually brought
+// back. It exists because the CLI used to print "Orchestration restarted" and
+// exit zero whether or not a single agent came back (gh #108): a green return
+// is precisely what the defect produced, so the fix has to name the fleet, not
+// just the mode.
+type StartReport struct {
+	Mode string `json:"mode"`
+	// AlreadyFull means the server was in full mode before the call, so
+	// nothing was stopped and nothing was restarted.
+	AlreadyFull       bool `json:"already_full,omitempty"`
+	RefineryRestarted bool `json:"refinery_restarted"`
+	// AgentsStarted names the crew agents this transition spawned.
+	AgentsStarted []string `json:"agents_started"`
+	// AgentsAlreadyRunning names crew agents the sweep found already up.
+	AgentsAlreadyRunning []string `json:"agents_already_running,omitempty"`
+	// AgentsParked names crew agents left dormant by a park flag — down on
+	// purpose, and reported so they are not read as casualties.
+	AgentsParked []string `json:"agents_parked,omitempty"`
+	// AgentsFailed names crew agents whose spawn errored out. Restoring the
+	// fleet partially is not success and must not read as success.
+	AgentsFailed []AgentStartFailure `json:"agents_failed,omitempty"`
+	// AgentStartSkipped is non-empty when no sweep ran at all, and says why.
+	AgentStartSkipped string `json:"agent_start_skipped,omitempty"`
+}
+
+// AgentStartFailure is one crew agent that did not come back, and why.
+type AgentStartFailure struct {
+	Name  string `json:"name"`
+	Error string `json:"error"`
+}
+
 // Server coordinates subsystem lifecycle and mode transitions.
 type Server struct {
 	// mu guards the fields below and is held only for quick reads/writes —
@@ -40,6 +99,7 @@ type Server struct {
 	refineryCancel context.CancelFunc
 	refineryCfg    *refinery.Config
 	startRefinery  RefineryStarter
+	startAgents    AgentStarter
 
 	// transitionMu serializes mode transitions so overlapping SetMode calls
 	// can't interleave stop/start work (e.g. stopping a refinery instance
@@ -64,6 +124,16 @@ func (s *Server) SetRefineryStarter(fn RefineryStarter) {
 	s.startRefinery = fn
 }
 
+// SetAgentStarter sets the function used to re-run the crew auto-start sweep
+// when transitioning back to ModeFull. Leaving it unset means the transition
+// restarts no agents — and says so in its StartReport rather than reporting a
+// bare success.
+func (s *Server) SetAgentStarter(fn AgentStarter) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.startAgents = fn
+}
+
 // Mode returns the current run mode.
 func (s *Server) Mode() config.RunMode {
 	s.mu.RLock()
@@ -71,8 +141,15 @@ func (s *Server) Mode() config.RunMode {
 	return s.mode
 }
 
-// SetMode transitions the server to the given run mode.
+// SetMode transitions the server to the given run mode. Callers that need to
+// know what a return to full mode actually restored should use
+// StartOrchestration, which returns the report this discards.
 func (s *Server) SetMode(mode config.RunMode) error {
+	if mode == config.ModeFull {
+		_, err := s.StartOrchestration()
+		return err
+	}
+
 	s.transitionMu.Lock()
 	defer s.transitionMu.Unlock()
 
@@ -83,11 +160,21 @@ func (s *Server) SetMode(mode config.RunMode) error {
 	switch mode {
 	case config.ModeIndexOnly:
 		return s.transitionToIndexOnly()
-	case config.ModeFull:
-		return s.transitionToFull()
 	default:
 		return fmt.Errorf("unknown mode: %d", mode)
 	}
+}
+
+// StartOrchestration transitions to full mode and reports what came back —
+// the refinery, and each crew agent by name and outcome.
+func (s *Server) StartOrchestration() (StartReport, error) {
+	s.transitionMu.Lock()
+	defer s.transitionMu.Unlock()
+
+	if s.Mode() == config.ModeFull {
+		return StartReport{Mode: config.ModeFull.String(), AlreadyFull: true}, nil
+	}
+	return s.transitionToFull()
 }
 
 // transitionToIndexOnly stops agents and refinery, keeping indexing alive.
@@ -115,14 +202,19 @@ func (s *Server) transitionToIndexOnly() error {
 	return nil
 }
 
-// transitionToFull restarts agents registry and refinery.
+// transitionToFull restarts the refinery, re-arms crash-respawn, and re-runs
+// the crew auto-start sweep, reporting what came back.
 // Caller must hold s.transitionMu (not s.mu).
-func (s *Server) transitionToFull() error {
+func (s *Server) transitionToFull() (StartReport, error) {
 	log.Printf("server: transitioning to full mode")
 
 	s.mu.RLock()
 	start := s.startRefinery
+	startAgents := s.startAgents
+	agents := s.agents
 	s.mu.RUnlock()
+
+	report := StartReport{Mode: config.ModeFull.String()}
 
 	// Restart refinery if we have a starter function; run it outside the
 	// lock so Mode() checks don't block on startup work.
@@ -131,8 +223,13 @@ func (s *Server) transitionToFull() error {
 		var err error
 		newRef, err = start()
 		if err != nil {
-			return fmt.Errorf("restart refinery: %w", err)
+			// Nothing has been mutated yet — deliberately. The latch stays
+			// set and the mode stays index-only, so a failed transition
+			// leaves the daemon in the state it was already in rather than
+			// half-way between two.
+			return StartReport{Mode: s.Mode().String()}, fmt.Errorf("restart refinery: %w", err)
 		}
+		report.RefineryRestarted = true
 	}
 
 	s.mu.Lock()
@@ -143,7 +240,66 @@ func (s *Server) transitionToFull() error {
 	s.mu.Unlock()
 
 	log.Printf("server: now in full mode")
-	return nil
+
+	// Clear StopAll's shutdown latch HERE: after the drain has returned and
+	// the mode is full, and before the sweep below spawns anything.
+	//
+	// Later would be wrong. Resume bumps the registry generation, invalidating
+	// every respawn scheduled before it — so clearing after the sweep would
+	// leave exactly the agents that crashed during the sweep permanently
+	// unsupervised, in a fleet that reports itself restored.
+	//
+	// Earlier would be wrong for a different reason. The drain's own late
+	// respawn goroutines (scheduled by the OnExit hook, firing 2s after
+	// StopAll returned synchronously) would be re-admitted into a fleet that
+	// is being rebuilt, racing the sweep whose only guard is a check-then-act
+	// on r.Get(name). The generation bump is what makes that impossible rather
+	// than merely unlikely — a stale goroutine holds a stale generation and
+	// loses however late it fires — but the clear still belongs after the
+	// point of no return, not before it: a refinery failure above returns
+	// early, and re-arming crash-respawn for a transition that did not happen
+	// would leave the daemon supervising a fleet it never restarted.
+	if agents != nil {
+		agents.Resume()
+	}
+
+	// Re-run the auto-start sweep. Missing this is the defect gh #108
+	// reported: mode flipped to full, refinery came back, and s.agents was
+	// never touched, so the daemon ran on with no crew and reported success.
+	switch {
+	case startAgents == nil:
+		report.AgentStartSkipped = "no agent starter configured for this server"
+	default:
+		outcome := startAgents()
+		if outcome.Skipped != "" {
+			report.AgentStartSkipped = outcome.Skipped
+		}
+		for _, res := range outcome.Results {
+			switch res.Status {
+			case agent.AutoStartStatusStarted:
+				report.AgentsStarted = append(report.AgentsStarted, res.Name)
+			case agent.AutoStartStatusSkippedRunning:
+				report.AgentsAlreadyRunning = append(report.AgentsAlreadyRunning, res.Name)
+			case agent.AutoStartStatusSkippedParked:
+				report.AgentsParked = append(report.AgentsParked, res.Name)
+			case agent.AutoStartStatusFailed:
+				report.AgentsFailed = append(report.AgentsFailed,
+					AgentStartFailure{Name: res.Name, Error: res.Error})
+			}
+		}
+	}
+
+	log.Printf("server: full mode restored — crew started=%v already_running=%v parked=%v failed=%d%s",
+		report.AgentsStarted, report.AgentsAlreadyRunning, report.AgentsParked,
+		len(report.AgentsFailed), skippedSuffix(report.AgentStartSkipped))
+	return report, nil
+}
+
+func skippedSuffix(reason string) string {
+	if reason == "" {
+		return ""
+	}
+	return " (no auto-start sweep ran: " + reason + ")"
 }
 
 // RequireOrchestration returns middleware that rejects requests with 503
@@ -183,20 +339,22 @@ func (s *Server) handleMode(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleStartOrchestration transitions to full mode, restarting agents and refinery.
+// handleStartOrchestration transitions to full mode, restarting agents and
+// refinery. The response body carries the full StartReport — the client prints
+// it, so an operator sees which agents came back rather than a bare "mode":
+// "full" that is equally true when nothing was restarted (gh #108).
 func (s *Server) handleStartOrchestration(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "", http.StatusMethodNotAllowed)
 		return
 	}
-	if err := s.SetMode(config.ModeFull); err != nil {
+	report, err := s.StartOrchestration()
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{
-		"mode": s.Mode().String(),
-	})
+	json.NewEncoder(w).Encode(report)
 }
 
 // handleStopOrchestration transitions to index-only mode.

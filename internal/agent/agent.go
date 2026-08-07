@@ -370,8 +370,26 @@ type Registry struct {
 
 	// shutdown is set by StopAll to short-circuit any in-flight respawn
 	// goroutines (scheduled by the OnExit hook for restart_on_crash agents)
-	// so the registry can be torn down without an agent coming back.
+	// so the registry can be torn down without an agent coming back. Resume
+	// clears it when the daemon comes back to full mode.
 	shutdown bool
+
+	// generation is bumped every time the shutdown latch CHANGES — set by
+	// StopAll, cleared by Resume. It is the drain barrier: a deferred respawn
+	// goroutine captures the generation it was scheduled in and calls
+	// RespawnFromGeneration, which refuses once the registry has moved on.
+	//
+	// Why a counter and not just the bool: the OnExit hook schedules a respawn
+	// that sleeps 2s before firing (cmd/pogod/main.go), while StopAll returns
+	// synchronously. A goroutine scheduled during teardown therefore fires
+	// AFTER StopAll returned, and a stop->start round-trip inside that window
+	// would clear the latch in time for the stale respawn to land alongside
+	// the fresh auto-start sweep. Clearing the latch cannot close that window
+	// — the window is on the wrong side of the clear. Bumping a generation on
+	// both edges closes it by construction rather than by timing: every
+	// goroutine scheduled at or before the clear holds a stale generation and
+	// loses forever, however late it fires.
+	generation uint64
 
 	// stallSchedules, when set, supplies the recurring cron schedules targeting
 	// an agent so diagnose can suppress the stalled label during normal
@@ -1245,6 +1263,7 @@ func (r *Registry) Stop(name string, timeout time.Duration) error {
 func (r *Registry) StopAll(timeout time.Duration) {
 	r.mu.Lock()
 	r.shutdown = true
+	r.generation++
 	names := make([]string, 0, len(r.agents))
 	for name := range r.agents {
 		names = append(names, name)
@@ -1266,18 +1285,74 @@ func (r *Registry) StopAll(timeout time.Duration) {
 	}
 }
 
+// Resume clears the shutdown latch set by StopAll, so restart_on_crash agents
+// are supervised again. Without it the latch is one-way: StopAll sets it and
+// nothing in the tree ever cleared it, which made crash-respawn permanently
+// inert for the life of the process after one stop-orchestration — silently,
+// because Spawn never consulted the latch, so hand-starting an agent kept
+// working and the fleet read healthy (gh #108).
+//
+// It also bumps the generation, which is the load-bearing half. See the
+// generation field for why clearing the bool alone re-opens the window StopAll
+// closed instead of closing it.
+//
+// Its live caller is Server.transitionToFull (internal/server/server.go),
+// which calls it after transitionToIndexOnly's drain has returned and before
+// the auto-start sweep — so an agent that crashes immediately after being
+// re-spawned is already supervised. Idempotent in effect, but not free: each
+// call invalidates every respawn scheduled before it, so call it once per
+// transition, not defensively.
+func (r *Registry) Resume() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.shutdown = false
+	r.generation++
+}
+
+// Generation returns the registry's current respawn generation. A caller that
+// defers a Respawn (sleeping before it fires) reads this at SCHEDULING time and
+// passes it to RespawnFromGeneration, so a stop that happens in between wins.
+func (r *Registry) Generation() uint64 {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.generation
+}
+
 // Respawn restarts a stopped agent in-place, preserving its name and config.
 // Used by crew monitoring to restart crashed agents.
 //
 // Returns an error without spawning if the registry has been shut down via
 // StopAll — this lets late-firing OnExit respawn goroutines lose cleanly to
 // teardown instead of resurrecting agents the user just stopped.
+//
+// Deferred callers should prefer RespawnFromGeneration: the latch alone cannot
+// stop a goroutine that fires after a stop->start round-trip has already
+// cleared it.
 func (r *Registry) Respawn(name string) (*Agent, error) {
+	return r.respawn(name, 0, false)
+}
+
+// RespawnFromGeneration is Respawn for a caller whose respawn was SCHEDULED
+// earlier and fires later — the 2s-backoff goroutine in pogod's OnExit hook.
+// It respawns only if the registry is still in generation gen, which the caller
+// captured with Generation() at scheduling time. A StopAll or a Resume in
+// between bumps the generation and this call refuses, so a respawn belonging to
+// the pre-stop fleet can never land in the post-restart one.
+func (r *Registry) RespawnFromGeneration(name string, gen uint64) (*Agent, error) {
+	return r.respawn(name, gen, true)
+}
+
+func (r *Registry) respawn(name string, gen uint64, checkGen bool) (*Agent, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	if r.shutdown {
 		return nil, fmt.Errorf("registry shut down")
+	}
+
+	if checkGen && gen != r.generation {
+		return nil, fmt.Errorf("respawn of %q abandoned: scheduled in registry generation %d, now %d "+
+			"(orchestration was stopped and restarted in between)", name, gen, r.generation)
 	}
 
 	// Backstop for the park race: a respawn goroutine scheduled by a crash

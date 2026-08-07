@@ -1500,9 +1500,18 @@ Flags:
 			// fast crash loop doesn't peg the daemon. The agent stays in
 			// the registry and its worktree (if any) is preserved.
 			log.Printf("agent %s (%s) exited unexpectedly, scheduling restart", a.Name, a.Type)
+			// Capture the registry generation HERE, at scheduling time, not
+			// inside the goroutine. The goroutine sleeps 2s before firing
+			// while StopAll returns synchronously, so this respawn can land
+			// after a stop-orchestration has already completed — and, if a
+			// start-orchestration follows inside that window, after the
+			// shutdown latch has been cleared again. Passing the generation
+			// makes this respawn belong to the fleet it was scheduled in: any
+			// stop or start in between refuses it, however late it fires.
+			gen := agentRegistry.Generation()
 			go func() {
 				time.Sleep(2 * time.Second)
-				if _, rerr := agentRegistry.Respawn(a.Name); rerr != nil {
+				if _, rerr := agentRegistry.RespawnFromGeneration(a.Name, gen); rerr != nil {
 					log.Printf("agent %s: restart failed: %v", a.Name, rerr)
 					// A6 (mg-342d). The respawn is ONE-SHOT: nothing tries
 					// again, so a crew agent whose restart failed is simply
@@ -2366,6 +2375,18 @@ Flags:
 
 	// Initialize server coordinator
 	srv = server.New(agentRegistry, mergeQueue)
+	// The agent-side analogue of SetRefineryStarter below: a return to full
+	// mode re-runs the auto-start sweep. Before gh #108 there was no such
+	// hook, so `pogo server start` against an index-only daemon flipped the
+	// mode, brought the refinery back, and left the fleet empty.
+	//
+	// The autostart gate is the same one the boot path applies further down:
+	// a daemon configured never to spawn a fleet must not gain a side door
+	// into doing so through a mode round-trip.
+	srv.SetAgentStarter(agentStarterFor(
+		func() bool { return cfg.Agents.AutoStart },
+		agentRegistry.AutoStartAgents,
+	))
 	if mergeQueue != nil {
 		onMerged := mergeQueue.OnMergedFunc()
 		onFailed := mergeQueue.OnFailedFunc()

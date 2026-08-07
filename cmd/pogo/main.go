@@ -175,8 +175,20 @@ Child commands include start, stop, and status.`,
 	var cmdServerStart = &cobra.Command{
 		Use:   "start",
 		Short: "Start the pogo server",
-		Long:  `Start the pogo server.`,
-		Args:  cobra.MinimumNArgs(0),
+		Long: `Start the pogo server.
+
+If the server is already running in index-only mode (after 'pogo server
+stop-orchestration'), this restarts orchestration instead: the refinery comes
+back, crash-respawn is re-armed, and the crew auto-start sweep is re-run.
+
+It then reports what actually came back, by name — which crew agents started,
+which were already running, which are parked, and which failed. Polecats are
+ephemeral and are never restored; they are re-dispatched per work item.
+
+Crew agents are not restarted when the daemon runs with [agents] autostart =
+false; the output says so rather than reporting an empty success. Exits
+non-zero if any crew agent errored while starting.`,
+		Args: cobra.MinimumNArgs(0),
 		Run: func(cmd *cobra.Command, args []string) {
 			err := client.HealthCheck()
 			if err != nil {
@@ -206,16 +218,30 @@ Child commands include start, stop, and status.`,
 				if !jsonOutput {
 					fmt.Println("Restarting orchestration...")
 				}
-				if err := client.StartOrchestration(); err != nil {
+				report, err := client.StartOrchestration()
+				if err != nil {
 					cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
 				}
 				if jsonOutput {
 					cli.PrintJSON(map[string]interface{}{
 						"status":  "started",
-						"message": "orchestration restarted",
+						"message": orchestrationRestartSummary(report),
+						"report":  report,
 					})
 				} else {
 					fmt.Println("Orchestration restarted")
+					for _, line := range orchestrationRestartLines(report) {
+						fmt.Println("  " + line)
+					}
+				}
+				// A crew agent that ERRORED on spawn is a failure of the
+				// restart, not a detail of it, so the exit code says so —
+				// after the report has been printed, so the operator gets the
+				// names either way. Restoring zero agents because none are
+				// eligible (or because [agents] autostart = false) is not an
+				// error and stays exit 0; that case is reported in words.
+				if len(report.AgentsFailed) > 0 {
+					os.Exit(cli.ExitError)
 				}
 				return
 			}

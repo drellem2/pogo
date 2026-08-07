@@ -226,12 +226,19 @@ func TestHandleStartOrchestration(t *testing.T) {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
 
-	var resp map[string]string
+	// The body is a StartReport since gh #108 — "mode" is still there and
+	// still means the same thing, so pre-existing readers keep working, but
+	// the response now also carries what was and was not restarted.
+	var resp StartReport
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)
 	}
-	if resp["mode"] != "full" {
-		t.Fatalf("expected mode=full, got %s", resp["mode"])
+	if resp.Mode != "full" {
+		t.Fatalf("expected mode=full, got %s", resp.Mode)
+	}
+	if resp.AgentStartSkipped == "" {
+		t.Error("a server with no agent starter must report that it restarted no agents, " +
+			"not return a bare mode")
 	}
 	if s.Mode() != config.ModeFull {
 		t.Fatalf("expected ModeFull after start-orchestration")
