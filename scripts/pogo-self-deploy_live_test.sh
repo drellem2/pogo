@@ -935,7 +935,14 @@ sink_id_matching() {
     "$MG" mail list "$COORDINATOR" --all --json 2>/dev/null | grep -F "$1" | tail -1 \
         | sed -n 's/.*"id":"\([^"]*\)".*/\1/p'
 }
-SINK_ID="$(sink_id_matching "still active")"
+# Matched on "owe the refinery a merge", which is what the timeout subject says
+# since mg-853a narrowed the predicate. The old selector was "still active", and
+# it is worth recording why swapping it was not cosmetic: with the subject
+# changed and the selector left alone, SINK_ID came back empty and this assertion
+# failed reporting a body that had not survived — a true statement about a mail
+# that was never selected. That is the same class of misdirection the alert
+# rewrite exists to remove, in the control rather than in the product.
+SINK_ID="$(sink_id_matching "owe the refinery a merge")"
 # --force: reading a mailbox we do not own is refused without it, and this
 # control is by construction a third party to the coordinator's inbox — which is
 # the entire point of the assertion.
@@ -950,6 +957,19 @@ if [ -n "$SINK_ID" ] \
     pass "the delivered alert carries the WHY (the drain waited) AND the --force guard in its body, not just a subject line — the multi-line body survived --body-file intact"
 else
     fail "the timeout alert arrived but its body did not survive intact — a page with no diagnosis is a louder log line with a mailbox (id=${SINK_ID:-<none>})"
+fi
+
+# mg-853a: the SUBJECT is the part of a mail that travels — it is what gets
+# skimmed, forwarded and triaged, and a hedge that lives only in paragraph three
+# does not exist. So the narrowed predicate has to be in it. Asserted separately
+# from the body check above so a subject regression cannot hide behind an intact
+# body, and stated in the negative too: "still active" is the old claim, and it is
+# now false — the drain clears over active polecats by design.
+if printf '%s' "$SINK_DELIVERED" | grep -q "owe the refinery a merge" \
+   && ! printf '%s' "$SINK_DELIVERED" | grep -q "polecat(s) still active"; then
+    pass "mg-853a: the stall alert names the predicate that actually held the deploy (polecats owing a merge) in the part that travels, and no longer reports it as a busy fleet"
+else
+    fail "mg-853a: the stall alert still describes the stall as active polecats — since the narrowing that is not what held the deploy, and it sends the reader to look for a busy fleet instead of a stuck merge (id=${SINK_ID:-<none>})"
 fi
 
 # The UNKNOWN alert's body, held to the same bar and asserted SEPARATELY (mg-65b2).
@@ -1233,6 +1253,72 @@ GATE_HEALTHY="$(gate_drain_wait)"
 [ "$GATE_HEALTHY" = "0|0" ] \
     && pass "NEGATIVE: a HEALTHY drain still drains — a real pogod reporting 0 polecats quiesces (rc 0). The refusals above are conditional, not a gate welded shut" \
     || fail "a healthy live pogod reporting an empty fleet returned '$GATE_HEALTHY' — the fix broke the ordinary deploy path"
+
+# ===========================================================================
+# 9. THE MERGE-DEBT PREDICATE, AGAINST A REAL DAEMON'S REAL ENCODER (mg-853a)
+# ===========================================================================
+# WHAT THIS OWNS, AND WHAT IT DELIBERATELY DOES NOT. The drain no longer polls
+# the polecat count to zero; it waits for polecats that OWE THE REFINERY A MERGE
+# — a worktree branch pushed to origin and not yet contained in the integration
+# branch. Two halves, two homes:
+#
+#   - the GIT half (does a pushed-unmerged branch read as `owes`, an unpushed one
+#     as `clear`, a landed one as `clear`) is owned by the unit file, which
+#     builds a real bare origin, real clones and real worktrees and asks the
+#     shipping function about them. That is already real git; re-staging it here
+#     would duplicate it without adding a fact.
+#   - the WIRE half is this. Specifically the one case no synthetic fixture
+#     produces: `Polecats []PolecatInfo` is a NIL SLICE on an empty registry, so
+#     a real pogod emits `"polecats":null` — NOT `"polecats":[]`, which is what
+#     every hand-written test body in the unit file contains. A predicate that
+#     coped with `[]` and choked on `null` would pass every unit assertion and
+#     then refuse, or fabricate, on the commonest real body there is: the one a
+#     quiesced box sends every single night.
+#
+# The lesson this file already carries, applied once more: "the failure mode a
+# positive control exists to catch lives in the WIRING — a curl that errors, a
+# count that comes back empty, a classifier handed '' instead of '0'".
+MD_BODY="$(curl -sf --max-time 5 "$URL/agents/drain" 2>/dev/null)"
+case "$MD_BODY" in
+    *'"polecats":null'*)
+        pass "mg-853a precondition: a REAL pogod with an empty registry really does emit \"polecats\":null (a nil slice), not \"[]\" — the shape no hand-written fixture contains" ;;
+    *'"polecats":[]'*)
+        pass "mg-853a precondition: this pogod emits \"polecats\":[] for an empty registry (the assertions below hold either way; the null case is the one unit fixtures miss)" ;;
+    "")
+        fail "mg-853a: could not read /agents/drain off the live sandbox daemon — the wire assertions below would be vacuous" ;;
+    *)
+        fail "mg-853a: the live drain body carries no recognisable polecats field ($MD_BODY) — the predicate reads a field that is not there" ;;
+esac
+
+MD_OBJ="$(printf '%s' "$MD_BODY" | polecat_objects)"
+[ -z "$MD_OBJ" ] \
+    && pass "mg-853a: polecat_objects yields NOTHING from a real empty-registry body — an empty registry produces no polecat to ask git about" \
+    || fail "mg-853a: polecat_objects invented $(printf '%s' "$MD_OBJ" | grep -c '^{') object(s) from an empty real body ($MD_OBJ) — the predicate would run git against a phantom worktree"
+
+MD_DEBT="$(drain_debt "$MD_BODY")"
+[ "$(drain_debt_holders "$MD_DEBT")" = "0" ] \
+    && pass "mg-853a: drain_debt_holders reads 0 off a real empty-registry body — grep -c's no-match exit does not eat the count" \
+    || fail "mg-853a: an empty real body produced $(drain_debt_holders "$MD_DEBT") holder(s) ($MD_DEBT) — every nightly would hold forever"
+
+# The mirror of the assertion above, and the one that stops it being satisfied by
+# a function that always says 0. Same code path, same real body, one real polecat
+# record spliced into it — pointed at THIS repo's own worktree, which is a real
+# git worktree with a real branch. It must be classified, named, and counted.
+MD_RECORD="{\"name\":\"cat-wire\",\"pid\":1,\"work_item_id\":\"mg-wire\",\"worktree_dir\":\"$DR_REPO\",\"source_repo\":\"$DR_REPO\"}"
+# Both encodings are spliced, because which one arrives is the very thing the
+# precondition above had to go and look at. A splice that silently matched
+# neither would leave MD_SPLICED equal to the empty body and this assertion would
+# fail for a reason that has nothing to do with the predicate.
+MD_SPLICED="$(printf '%s' "$MD_BODY" \
+    | sed "s|\"polecats\":null|\"polecats\":[$MD_RECORD]|" \
+    | sed "s|\"polecats\":\[\]|\"polecats\":[$MD_RECORD]|")"
+MD_SPLICED_DEBT="$(drain_debt "$MD_SPLICED")"
+case "$MD_SPLICED_DEBT" in
+    *"cat-wire (mg-wire):"*)
+        pass "mg-853a: a polecat record inside a REAL daemon body is found, classified and NAMED ($MD_SPLICED_DEBT) — the 0 above is a measurement, not a constant" ;;
+    *)
+        fail "mg-853a: a spliced polecat record was not read out of a real body ($MD_SPLICED_DEBT) — the empty-body 0 above proves nothing" ;;
+esac
 
 echo ""
 # Backstop to the write guard above: the ledger must be readable and non-empty
