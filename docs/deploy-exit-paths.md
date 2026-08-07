@@ -83,7 +83,7 @@ come apart on a restart-only deploy, which installs nothing and still bounces.
 | 6 | drain: `down` (HTTP 000) | drain | no | no | pogod did not respond at all; start it and retry. Explicitly not the bootstrap case. |
 | 6 | drain: `stopped` (HTTP 503) | drain | no | no | orchestration is stopped — pogod is UP and refusing `/agents/`; `pogo server start`, then re-run. |
 | 6 | drain: `error:<code>` (any other status) | drain | no | no | the status, and that this branch deliberately does not guess. |
-| 7 | drain stalled: timeout with polecats active | drain | no | no | the count still active and the budget; dispatch restored by the trap; `alert_drain_stalled timeout` mails the sink. |
+| 7 | drain stalled: the budget ran out with polecats still owing the refinery a merge (mg-853a) | drain | no | no | which polecats still hold pushed-but-unmerged work, by name, and the budget; dispatch restored by the trap; `alert_drain_stalled timeout` mails the sink. |
 | 7 | drain stalled: state unreadable (`--force` overrides) | drain | no | no | that the fleet's state could not be established — a different reaction from a timeout (mg-65b2); `alert_drain_stalled unknown`. |
 | 9 | `do_prove`: live control not found | prove | yes/no¹ | no | that a pogod whose detector cannot be proven will not be deployed. |
 | 9 | `do_prove`: no installed pogod / pogo CLI to prove | prove | yes/no¹ | no | which binary is missing, and (for the CLI) that the drain gate shells to it. |

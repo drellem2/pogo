@@ -1464,25 +1464,28 @@ EOF
             ;;
         7)
             cat <<'EOF'
-The DRAIN timed out: polecats were still working when the budget ran out. Note
-what this exit does NOT mean — the build never ran, so there is no artifact to
-suspect and nothing in the build log to read. pogod was never replaced, and
+The DRAIN timed out: when the budget ran out, polecats still OWED THE REFINERY A
+MERGE — work that is pushed to origin and not yet contained in the integration
+branch, which is the one thing a bounce could lose (mg-853a). It does not mean
+polecats were merely still running; since mg-853a a drain can clear with several
+mid-analysis polecats alive, because they hold nothing the refinery is owed.
+
+Note what this exit does NOT mean — the build never ran, so there is no artifact
+to suspect and nothing in the build log to read. pogod was never replaced, and
 pogo-self-deploy's exit trap has already restored dispatch (draining=false).
 
 Nor was the fleet racing the drain: `draining=true` makes pogod refuse new
-polecat dispatch, so the count only falls. Whatever was still running had been
-running before the drain started.
+polecat dispatch, so the set of unmerged branches only shrinks. Whatever still
+owed a merge had been running before the drain started.
 
-This is therefore a statement about how long the fleet's work takes, not about
-the deploy. The drain budget is derived from what remains of the deploy window
-(POGO_DEPLOY_RESERVE / POGO_DEPLOY_MAX_DRAIN), so if it is being exhausted the
-work genuinely outlasts it. Look at what was still running:
+The description line above names the polecats that were still owing, and the
+verbatim block lists them. Start there rather than with a fleet-wide readout:
 
   curl -s http://127.0.0.1:10000/agents/drain | python3 -m json.tool
-  pogo agent list
+  pogo refinery queue
 
-If the same long-lived polecats block it night after night, the question is
-their lifetime, not the budget.
+If the same branches block it night after night, the question is why their merges
+are not landing, not how long their polecats live.
 EOF
             ;;
         130|143)
