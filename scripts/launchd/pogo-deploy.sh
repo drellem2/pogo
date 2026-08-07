@@ -263,9 +263,14 @@ GRACE="${POGO_DEPLOY_GRACE:-120}"
 LOCK_DIR="${POGO_DEPLOY_LOCK_DIR:-$HOME/.pogo/deploy.lock.d}"
 # The coordinator, not a named PM. This defaulted to `pm-pogo` — an agent that
 # exists on one machine (mg-f04b) — so on any other install the first alert went
-# to a mailbox with no reader, and mg files mail for an unknown name rather than
-# refusing, so the delivery looked fine. A deployment whose PM owns deploys sets
-# POGO_DEPLOY_ALERT_TO. `human` is copied either way.
+# to a mailbox with no reader. At the time that was INVISIBLE: mg filed mail for
+# an unknown name rather than refusing, so the delivery looked fine.
+#
+# mg-d639 removed that. An unknown recipient is now refused (no_such_mailbox,
+# exit 3), which turns a silently-undelivered alert into a loud one — an
+# improvement, and the reason register_alert_recipients exists below. A
+# deployment whose PM owns deploys sets POGO_DEPLOY_ALERT_TO. `human` is copied
+# either way.
 ALERT_TO="${POGO_DEPLOY_ALERT_TO:-mayor}"
 DEPLOY_REF="${POGO_DEPLOY_REF:-main}"
 STALE_LOCK_MIN="${POGO_DEPLOY_STALE_LOCK_MIN:-180}"
@@ -552,6 +557,48 @@ resolve_mg() {
     done
     err "mg: no macguffin 'mg' among ${cands[*]} — refusing bare 'mg' (that is /usr/bin/mg, the EDITOR)"
     return 1
+}
+
+# register_alert_recipients — make the alert path DELIVERABLE before it is needed
+# (mg-7dc1).
+#
+# Until mg-d639, `mg mail send` filed mail for any name at all, so an ALERT_TO
+# nobody had ever mailed still reported Delivered — and the comment on ALERT_TO
+# above said so outright. mg-d639 made an unknown recipient a refusal. That is
+# the right change; what it exposed is that this job never provisioned the two
+# names it mails, it just relied on somebody having mailed them first.
+#
+# Registration, not `--create` on the sends. The two are one word apart and the
+# difference is the entire value of mg-d639: --create on a send says "deliver to
+# this name whether or not anyone meant it", so POGO_DEPLOY_ALERT_TO=mayro would
+# quietly mint `mayro` and report success at 03:00 on the one night it mattered.
+# Registering up front leaves the send's refusal meaning what it should — the
+# name is wrong — while guaranteeing the two recipients this job actually has
+# both exist.
+#
+# NEVER FATAL, deliberately. This runs before any deploy work and its failure
+# says nothing about whether the deploy can proceed; the sends are attempted
+# regardless, and alert() already reports each one that fails. Aborting the
+# nightly because a mailbox could not be pre-created would let a provisioning
+# hiccup do what no alert failure does — stop the deploy.
+#
+# `mg mail register` is IDEMPOTENT (exit 0 and no change for a box that exists,
+# and it never touches mail), so this is safe to run on every fire. On this host
+# both boxes already exist and it is a no-op; the case it is for is a fresh
+# install, where nothing else creates them.
+register_alert_recipients() {
+    local who
+    for who in "$ALERT_TO" human; do
+        if "$MG" mail register "$who" >/dev/null 2>&1; then
+            continue
+        fi
+        # Old mg (pre-mg-d639) has no `mail register` subcommand and exits
+        # non-zero on the unknown verb. That build also still files mail for an
+        # unknown name, so the alert path works there without this — say so
+        # rather than implying the alert is broken.
+        err "alert: could not register mailbox '$who' — alerts to it may be refused (mg mail register unavailable or failed); 'human' and '$ALERT_TO' are mailed independently, so the other copy is unaffected"
+    done
+    return 0
 }
 
 # `git`, resolved by EXECUTION rather than by existence, for the reason in the
@@ -1699,6 +1746,10 @@ main() {
     # somewhere to be reported to. A wrapper whose first failure is "I cannot
     # tell you about failures" is the silent nightly all over again.
     resolve_mg   || { err "no alert path — refusing to run unattended"; exit 1; }
+    # Resolving mg proves the alert path can RUN; registering proves it can be
+    # DELIVERED. Since mg-d639 those are different questions, and this job mails
+    # two fixed names that nothing else provisions (mg-7dc1). Non-fatal.
+    register_alert_recipients
     resolve_pogo || log "pogo CLI unresolved — the post-bounce schedule check will be skipped"
     # Never fatal. Without it the sync-failure classifier loses only its ability
     # to assert that a host is DOWN; it can still confirm one is up, and it

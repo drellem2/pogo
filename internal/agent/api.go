@@ -1650,6 +1650,14 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		return
 	}
 
+	// Provision the polecat's mailboxes BEFORE registering the loop that reads
+	// them, because the ordering is the one thing that makes the pair coherent:
+	// the nudge tells the polecat to open two boxes, and since mg-d639 an
+	// unregistered name is a refusal rather than an empty inbox. Registering
+	// first means the first fire of that loop cannot land on a box that does not
+	// exist yet (mg-7dc1).
+	r.registerPolecatMailboxes(spawnReq.Name, spawnReq.Id)
+
 	// Auto-register the polecat's mail-check loop so a builder<->reviewer review
 	// loop can round-trip without the mayor registering schedules by hand
 	// (mg-e633). Addressed to the bare agent name, which is the identity pogod
