@@ -48,7 +48,9 @@ package main
 // 200" are properties of any listener, not of pogod. The incident is precisely
 // a wrong process passing those tests, so a probe built on them would
 // reproduce the defect it is meant to detect, one layer up. The probe requires
-// health.LivenessBody — the one string only pogod emits.
+// health.LivenessBody — the string pogod's /health emits. Note the limit that
+// follows from this and is spelled out above: it identifies pogod-SHAPED
+// responders, so every pogod emits it and it cannot single out this one.
 //
 // WHY THE "NOTHING ANSWERS" CASE RENDERS NOTHING. Check 1 ("pogod running")
 // already says the daemon is down, and a checklist that reports every stopped
@@ -243,6 +245,16 @@ func loopbackShadowDetail(bind, name loopbackProbe, port int) string {
 // loopbackLsofHint picks the listener query for the family the name actually
 // landed on. A -i6TCP query when the shadow is on IPv4 lists nothing, and a
 // remedy that prints nothing reads as "the check was wrong".
+//
+// Its family-agnostic fallback (`-iTCP:<port>`) is currently UNREACHABLE: the
+// sole caller is the has-a-culprit branch of loopbackShadowDetail, which runs
+// only when name.Remote != "", and a remote address recorded by net always
+// splits and parses. It is kept because the alternative is a hint that names
+// the WRONG family if a future caller passes an address from somewhere less
+// well-formed, and a remedy that lists nothing reads as a wrong check. Stated
+// so the empty family is not misread as evidence that this row can emit a
+// familyless hint today — the round-1 test that pinned that form was removed
+// with the branch it covered.
 func loopbackLsofHint(remote string, port int) string {
 	family := ""
 	if host, _, err := net.SplitHostPort(remote); err == nil {
