@@ -190,7 +190,9 @@ It fires at 03:00 local — and again at 04:00 and 05:00, as retries — running
 `scripts/pogo-self-deploy redeploy`. **At most one deploy happens per night**:
 the later fires exist only so that a run which gave up waiting for the fleet to
 quiesce gets another chance before morning, instead of the next attempt being
-24 hours away (mg-8f7e).
+24 hours away (mg-8f7e). They are **not** the mitigation for a connectivity
+outage — three instants two hours apart are swallowed whole by an outage of the
+length this box has actually produced. That is the vigil's job; see gate 7.
 
 ### Why it has to be a launchd job
 
@@ -295,6 +297,44 @@ belongs there instead. In order:
    resets (a reset would destroy the evidence of whatever made it dirty), and a
    **diverged** tree aborts too — `--ff-only`, because merging would deploy
    commits nobody meant to build.
+
+   A sync failure is **classified before it is blamed** (mg-0d70): the runner
+   measures whether the remote's host:port answers a TCP connection rather than
+   reading git's English, and only the classes that established *nothing about
+   the tree* (`network`, `remote`, `unclassified`) are retried. Those retry in
+   **three tiers**, and the third is the one sized for a real outage:
+
+   | Tier | Patience | Bound |
+   |------|----------|-------|
+   | Blip (mg-0d70) | 4 attempts at 15s / 45s / 120s | `POGO_DEPLOY_SYNC_ATTEMPTS`, `POGO_DEPLOY_SYNC_RETRY_BUDGET` |
+   | Vigil (mg-5515) | a probe every 300s, indefinitely | the **window**: it stops when a drain could no longer finish (≈05:30) |
+   | Cross-fire (mg-8f7e) | the 04:00 and 05:00 fires | exit 10 reopens the night |
+
+   The vigil exists because the first and third tiers are both sized for a blip.
+   Three minutes of backoff and three fire *instants* two hours apart spend, in
+   total, about nine minutes of a four-hour window — and the one outage measured
+   on this box ran **2h50m** (2026-08-07, 13:24:30Z → 16:14:52Z), which swallows
+   all three fires. No agent can cover that: an outage of that shape takes every
+   agent on the box out at once. Re-spacing three instants cannot cover 170
+   minutes either, and widening the window to fit more of them would lengthen
+   every drain and push the fleet bounce toward the working day. So the vigil
+   spends the window's *unused* time instead: it keeps probing and deploys the
+   moment connectivity returns.
+
+   Two things follow. A vigil run **holds the lock for hours**, so the later
+   fires find it held and exit 0 (correct — they would have failed identically),
+   and the vigil refreshes the lock's mtime so the stale-lock reclaim cannot fire
+   under a live run. And `SYNC_VIGIL_SPENT` — reported in the log, the alert and
+   the recovery notice — is a probed **lower bound on the outage duration**;
+   mg-5515 had exactly one such measurement and no distribution.
+
+   **What it does not reach.** The vigil's reach is 2h30m from the 03:00 fire
+   (3h30m from a 02:00 wake-fire), which is shorter than the 2h50m that prompted
+   it. An outage of exactly that length starting at exactly 03:00 still costs the
+   night, and no patience fixes that — it ends at 05:50 and `POGO_DEPLOY_RESERVE`
+   alone is 20 minutes. Saving it needs a **wider window**, which is deliberately
+   not chosen here: there is no distribution to size one from. Set
+   `POGO_DEPLOY_SYNC_VIGIL=0` to restore the pre-mg-5515 bound.
 8. **Drift gate.** `pogo-self-deploy check` is read-only and never acts. If its
    verdict is `clean`, log it and exit 0 **without bouncing**: a fleet-wide
    bounce costs every agent its session, and doing it for a no-op is strictly
@@ -358,6 +398,13 @@ All optional; the defaults are the production values.
 | `POGO_DEPLOY_MIN_DRAIN` | `600` | Floor. Below this a fire skips rather than start a drain it cannot finish. |
 | `POGO_DEPLOY_FIRE_HOURS` | `3 4 5` | The plist's fire hours, ascending. Used only to answer "will a retry follow?" so the RED alert can say so truthfully. |
 | `POGO_DEPLOY_STAMP` | `$POGO_HOME/deploy-attempt.stamp` | Where the night's outcome is recorded for the retry gate. |
+| `POGO_DEPLOY_SYNC_ATTEMPTS` | `4` | Blip-tier sync attempts on a class that established nothing. |
+| `POGO_DEPLOY_SYNC_BACKOFF` | `15 45 120` | Blip-tier delays, seconds. The last value repeats, so a shortened list degrades into a constant rather than a hammer at zero. |
+| `POGO_DEPLOY_SYNC_RETRY_BUDGET` | `300` | Ceiling on total **blip-tier** sleeping. Does not bound the vigil — the window does. |
+| `POGO_DEPLOY_SYNC_VIGIL` | `1` | `0` disables the vigil tier, restoring the pre-mg-5515 bound exactly. |
+| `POGO_DEPLOY_SYNC_VIGIL_INTERVAL` | `300` | Seconds between vigil probes. Flat, not geometric: a ramp would sleep through the recovery it exists to catch. |
+| `POGO_DEPLOY_PROBE_TIMEOUT` | `5` | Seconds the reachability probe waits before reporting `unclassified`. |
+| `POGO_DEPLOY_STALE_LOCK_MIN` | `180` | Minutes after which a lock is reclaimed. The vigil refreshes the lock's mtime, so this means "no run has made progress in 180min". |
 | `POGO_DEPLOY_GRACE` | `120` | Seconds before the post-bounce mail-check re-read. |
 | `POGO_DEPLOY_ZSHENV` | `~/.zshenv` | Where `GH_TOKEN` is read from. |
 | `GIT` | first candidate that prints `git version` | Pins a specific git. Still checked by execution — a pin that cannot run is the same outage as no pin. |
