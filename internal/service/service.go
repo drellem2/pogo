@@ -596,9 +596,21 @@ func logTail() string {
 	return string(data)
 }
 
-// verifyLaunchdRunning confirms that launchctl knows about com.pogo.daemon
-// and that pogod is reachable. Polls briefly because launchctl load returns
-// before the child process is actually serving requests.
+// verifyLaunchdRunning confirms that launchctl knows about com.pogo.daemon,
+// that pogod is reachable, and — since mg-ed4a — WHICH REVISION it is running.
+// Polls briefly because launchctl load returns before the child process is
+// actually serving requests.
+//
+// The first two questions are about existence: `launchctl list` says a job is
+// registered, /health says something is listening. Neither says the right thing
+// is listening, and for eight days on this box the answer was that it was not:
+// a healthy pogod on a 2026-07-30 binary, 92 commits behind, passing both of
+// these checks every time they ran. The revision check is the third question.
+//
+// It is REPORT-ONLY and does not affect this function's error. That is mg-ed4a's
+// explicit instruction — installs currently succeed against a stale daemon and
+// something may depend on that, so the observation ships first and the decision
+// to gate on it is a separate change. See internal/service/revision.go.
 func verifyLaunchdRunning() error {
 	listed := false
 	deadline := time.Now().Add(5 * time.Second)
@@ -617,6 +629,7 @@ func verifyLaunchdRunning() error {
 	deadline = time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		if err := client.HealthCheck(); err == nil {
+			reportDaemonRevision("install", restartVerifyTimeout)
 			return nil
 		}
 		time.Sleep(300 * time.Millisecond)
@@ -731,6 +744,21 @@ func Restart() error {
 	}
 }
 
+// restartLaunchd kickstarts com.pogo.daemon, then asks the daemon that comes
+// back WHICH REVISION it is (mg-ed4a).
+//
+// Before that check this function verified nothing at all: `launchctl kickstart`
+// returning 0 means launchd accepted the request, not that a healthy daemon
+// exists afterwards and certainly not that it is running the binary you meant.
+// A kickstart re-execs whatever is on disk, so silently reinstating a stale
+// binary is its NORMAL behaviour when the disk is stale — which is how this box
+// spent eight days healthy and 92 commits behind.
+//
+// REPORT-ONLY: the verdict does not become this function's error. Restart() is
+// what `pogo server start` calls when /health is down, and failing a server
+// start over a revision mismatch would refuse to start a server for a reason
+// that is not about starting one. `pogo service verify-revision` is the same
+// check with an exit code, for callers that want the gate.
 func restartLaunchd() error {
 	plistPath := launchdPlistPath()
 	if _, err := os.Stat(plistPath); os.IsNotExist(err) {
@@ -746,9 +774,14 @@ func restartLaunchd() error {
 			return fmt.Errorf("launchctl load failed: %s (kickstart failed: %s): %w", string(out2), string(out), err2)
 		}
 	}
+	reportDaemonRevision("restart", restartVerifyTimeout)
 	return nil
 }
 
+// restartSystemd gets the same post-restart revision report as the launchd
+// path, on the same report-only terms. `systemctl restart` exiting 0 says the
+// unit was restarted, which is the same not-quite-the-question answer
+// `launchctl kickstart` gives.
 func restartSystemd() error {
 	unitPath := systemdUnitPath()
 	if _, err := os.Stat(unitPath); os.IsNotExist(err) {
@@ -758,6 +791,7 @@ func restartSystemd() error {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("systemctl restart failed: %s: %w", string(out), err)
 	}
+	reportDaemonRevision("restart", restartVerifyTimeout)
 	return nil
 }
 

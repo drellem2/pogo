@@ -177,7 +177,7 @@ func TestRunningRev(t *testing.T) {
 			w.Write([]byte(`{"revision":"deadbeef","go_version":"go1.25.0"}`))
 		}))
 		defer srv.Close()
-		rev, url := runningRev(srv.URL)
+		rev, url := RunningRev(srv.URL)
 		if rev != "deadbeef" {
 			t.Errorf("rev = %q, want deadbeef", rev)
 		}
@@ -191,7 +191,7 @@ func TestRunningRev(t *testing.T) {
 			w.Write([]byte(`{"go_version":"go1.25.0"}`))
 		}))
 		defer srv.Close()
-		if rev, _ := runningRev(srv.URL); rev != RevUnstamped {
+		if rev, _ := RunningRev(srv.URL); rev != RevUnstamped {
 			t.Errorf("rev = %q, want %q", rev, RevUnstamped)
 		}
 	})
@@ -201,7 +201,7 @@ func TestRunningRev(t *testing.T) {
 			http.NotFound(w, r)
 		}))
 		defer srv.Close()
-		if rev, _ := runningRev(srv.URL); rev != RevUnreachable {
+		if rev, _ := RunningRev(srv.URL); rev != RevUnreachable {
 			t.Errorf("rev = %q, want %q", rev, RevUnreachable)
 		}
 	})
@@ -210,7 +210,7 @@ func TestRunningRev(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 		url := srv.URL
 		srv.Close() // free the port, then probe it
-		if rev, _ := runningRev(url); rev != RevUnreachable {
+		if rev, _ := RunningRev(url); rev != RevUnreachable {
 			t.Errorf("rev = %q, want %q", rev, RevUnreachable)
 		}
 	})
@@ -222,7 +222,7 @@ func TestRunningRev(t *testing.T) {
 			w.Write([]byte(`{"revision":"abc"}`))
 		}))
 		defer srv.Close()
-		runningRev(srv.URL + "/")
+		RunningRev(srv.URL + "/")
 		if path != "/version" {
 			t.Errorf("probed %q, want /version", path)
 		}

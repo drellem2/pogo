@@ -40,7 +40,7 @@ const versionTimeout = 3 * time.Second
 // heuristic; the check refuses to guess past it.
 func HostDeps(repoOverride string) Deps {
 	return Deps{
-		RunningRev:   func() (string, string) { return runningRev(config.Load().ServerURL()) },
+		RunningRev:   func() (string, string) { return RunningRev(config.Load().ServerURL()) },
 		InstalledBin: InstalledBin,
 		BinaryRev:    BinaryRev,
 		ResolveRepo:  func() (string, string) { return ResolveRepo(repoOverride) },
@@ -58,13 +58,18 @@ type versionBody struct {
 	Revision string `json:"revision"`
 }
 
-// runningRev asks the live daemon what it is.
+// RunningRev asks the live daemon what it is.
 //
 // UNREACHABLE and UNSTAMPED are kept apart: a daemon that will not talk owes a
 // restart, a daemon that talks but cannot say what it is owes an
 // investigation. Reporting both as "" would make them one state, which is the
 // mg-de08 defect (absence of evidence read as evidence) in miniature.
-func runningRev(baseURL string) (rev, url string) {
+//
+// Exported (mg-ed4a) so internal/revcheck can probe an arbitrary base URL
+// through the same reader the drift report uses. It takes the URL rather than
+// resolving one so a caller aiming at a specific daemon — or a test's httptest
+// server — is not forced through config.Load().
+func RunningRev(baseURL string) (rev, url string) {
 	url = strings.TrimSuffix(baseURL, "/") + "/version"
 	client := &http.Client{Timeout: versionTimeout}
 	resp, err := client.Get(url)
