@@ -782,6 +782,20 @@ type DriftWatchConfig struct {
 	// DefaultDriftCheckInterval. It must be far larger than the heartbeat tick;
 	// the throttle enforces that the runner does not sample every ~30s tick.
 	Interval time.Duration
+	// SelfStaleAfter is N for the revision-staleness check (mg-5bd2): how old
+	// the RUNNING daemon's commit may be before it is reported stale. Zero falls
+	// back to driftwatch.DefaultStaleAfter (7 days). See internal/driftwatch/
+	// revision.go for why the check reads the running binary's own build stamp
+	// instead of the nightly deploy job's exit code.
+	SelfStaleAfter time.Duration
+	// SelfRepo is an OPTIONAL local checkout used only to enrich the staleness
+	// notice with `git rev-list --count <rev>..origin/main`. Leaving it unset
+	// costs the notice one context number and nothing else — the staleness
+	// verdict itself is computed from the binary's own vcs stamp and needs no
+	// repo, no network and no config, because a detector that is inert until
+	// somebody configures it is the failure mode this lineage keeps repeating.
+	// A leading ~ is expanded.
+	SelfRepo string
 }
 
 // CredExpiryConfig configures pogod's credential-expiry WARNER (mg-7024): the
@@ -1463,6 +1477,12 @@ func Load() *Config {
 		}
 		if fileCfg.DriftWatch.Interval > 0 {
 			cfg.DriftWatch.Interval = fileCfg.DriftWatch.Interval
+		}
+		if fileCfg.DriftWatch.SelfStaleAfter > 0 {
+			cfg.DriftWatch.SelfStaleAfter = fileCfg.DriftWatch.SelfStaleAfter
+		}
+		if fileCfg.DriftWatch.SelfRepo != "" {
+			cfg.DriftWatch.SelfRepo = fileCfg.DriftWatch.SelfRepo
 		}
 		if fileCfg.credExpiryEnabledSet {
 			cfg.CredExpiry.Enabled = fileCfg.CredExpiry.Enabled
@@ -2251,6 +2271,12 @@ func parseConfigFileInto(cfg *parsedConfig, path string) error {
 				if d, err := time.ParseDuration(unquotedVal); err == nil {
 					cfg.DriftWatch.Interval = d
 				}
+			case "self_stale_after":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.DriftWatch.SelfStaleAfter = d
+				}
+			case "self_repo":
+				cfg.DriftWatch.SelfRepo = unquotedVal
 			}
 		case "cred_expiry":
 			switch key {

@@ -105,6 +105,32 @@ type Options struct {
 	Mail MailFunc
 	// Emit writes the drift_watch_fired event. Defaults to events.Emit.
 	Emit Emitter
+
+	// Revision reports the RUNNING process's own build stamp for the revision-
+	// staleness check (mg-5bd2). nil disarms that check entirely; pogod passes
+	// BuildRevision. It is a separate check from the mirror drift above and is
+	// armed independently — a daemon with no [reconcile] mirrors still watches
+	// its own revision, because "no mirrors configured" must not silently take
+	// the staleness detector down with it.
+	Revision RevisionFunc
+	// Behind reports how far origin/main is ahead of the running revision. nil
+	// (the default when no repo is configured) simply omits that number from the
+	// notice. It is CONTEXT and never gates the alarm — see revision.go.
+	Behind BehindFunc
+	// BehindRepo is the repo path Behind reads, named in the notice so the
+	// reader knows which working copy the count came from. Cosmetic.
+	BehindRepo string
+	// StaleAfter is N, the age at which the running revision's commit is
+	// reported stale. Zero means DefaultStaleAfter.
+	StaleAfter time.Duration
+	// Renotify is the base gap of the notice backoff. Zero means
+	// DefaultStaleRenotify.
+	Renotify time.Duration
+	// MaxNotices caps how many notices one stale revision may mail. Zero means
+	// DefaultStaleMaxNotices; negative means unbounded (tests only — an
+	// unbounded alarm on a days-long condition is the noise this cap exists to
+	// prevent).
+	MaxNotices int
 }
 
 // Watcher samples the reconcile mirrors on a coarse interval and mails `human`
@@ -117,6 +143,14 @@ type Watcher struct {
 	mail     MailFunc
 	emit     Emitter
 
+	// Revision-staleness check (mg-5bd2). See revision.go.
+	revision   RevisionFunc
+	behind     BehindFunc
+	behindRepo string
+	staleAfter time.Duration
+	renotify   time.Duration
+	maxNotices int
+
 	mu sync.Mutex
 	// lastRun is the wall-clock time of the most recent sample. The coarse
 	// throttle gates on now.Sub(lastRun) >= interval, so the runner samples at
@@ -126,6 +160,20 @@ type Watcher struct {
 	// have to double as "never ran" (a legitimate now could be near the zero
 	// time in a test clock).
 	ran bool
+
+	// staleRev is the revision the notice ratchet below refers to. A different
+	// revision means a new binary is running, so the budget starts over.
+	staleRev string
+	// staleNotices is how many notices have been mailed for staleRev.
+	staleNotices int
+	// lastStaleNotice is when the most recent one went out; the next is due at
+	// lastStaleNotice + renotify*2^(staleNotices-1).
+	lastStaleNotice time.Time
+	// unstampedOnce keeps the "this check is NOT armed" report to one line per
+	// process. A binary with no vcs stamp cannot be dated, and saying so once is
+	// the difference between a declared silence and a silence that reads as a
+	// clean bill of health.
+	unstampedOnce sync.Once
 }
 
 // New builds a Watcher from cfg and opts, applying defaults for a zero interval
@@ -156,32 +204,64 @@ func New(cfg config.DriftWatchConfig, opts Options) *Watcher {
 		emit = func(e events.Event) { events.Emit(context.Background(), e) }
 	}
 
+	staleAfter := opts.StaleAfter
+	if staleAfter <= 0 {
+		staleAfter = DefaultStaleAfter
+	}
+	renotify := opts.Renotify
+	if renotify <= 0 {
+		renotify = DefaultStaleRenotify
+	}
+	maxNotices := opts.MaxNotices
+	if maxNotices == 0 {
+		maxNotices = DefaultStaleMaxNotices
+	}
+
 	return &Watcher{
-		enabled:  cfg.Enabled,
-		interval: interval,
-		mirrors:  opts.Mirrors,
-		check:    check,
-		mail:     opts.Mail,
-		emit:     emit,
+		enabled:    cfg.Enabled,
+		interval:   interval,
+		mirrors:    opts.Mirrors,
+		check:      check,
+		mail:       opts.Mail,
+		emit:       emit,
+		revision:   opts.Revision,
+		behind:     opts.Behind,
+		behindRepo: opts.BehindRepo,
+		staleAfter: staleAfter,
+		renotify:   renotify,
+		maxNotices: maxNotices,
 	}
 }
 
-// Check runs one drift sample for the given wall-clock time, subject to the
-// coarse throttle. It is the integration point for the heartbeat OnTick
-// callback: the heartbeat ticks every ~30s, and Check is a no-op on all but the
-// first tick of each interval.
+// Check runs one sample for the given wall-clock time, subject to the coarse
+// throttle. It is the integration point for the heartbeat OnTick callback: the
+// heartbeat ticks every ~30s, and Check is a no-op on all but the first tick of
+// each interval.
 //
-// It is a no-op when the watcher is disabled, has no mirrors, or has no mailer.
-// Safe to call concurrently with itself, though pogod only ever calls it from a
-// goroutine spawned per heartbeat tick.
+// It runs BOTH checks the runner carries — the [reconcile] mirror drift check
+// and the revision-staleness check (mg-5bd2) — on the same coarse slot. They
+// are armed independently: a daemon with no mirrors still watches its own
+// revision, and a binary with no vcs stamp still watches its mirrors.
+//
+// It is a no-op when the watcher is disabled, has no mailer, or has nothing
+// armed to check. Safe to call concurrently with itself, though pogod only ever
+// calls it from a goroutine spawned per heartbeat tick.
 func (w *Watcher) Check(now time.Time) {
-	if w == nil || !w.enabled || len(w.mirrors) == 0 || w.mail == nil {
+	if w == nil || !w.enabled || w.mail == nil {
+		return
+	}
+	if len(w.mirrors) == 0 && w.revision == nil {
 		return
 	}
 	if !w.due(now) {
 		return
 	}
-	w.sample(now)
+	if len(w.mirrors) > 0 {
+		w.sample(now)
+	}
+	if w.revision != nil {
+		w.sampleRevision(now)
+	}
 }
 
 // due reports whether the coarse interval has elapsed since the last sample and,
