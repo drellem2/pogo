@@ -1607,6 +1607,13 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		failPolecatSpawn(w, spawnReq, http.StatusConflict, claimRefusal)
 		return
 	}
+	// Close the in-flight window on EVERY path out of here, which is what makes a
+	// defer the right shape rather than two calls: an entry left behind makes a
+	// genuinely stranded claim un-adoptable for the life of the daemon, and the
+	// path that would leave it is by definition the one nobody thought about
+	// (mg-790f). After this returns, ownership is answered by the registered agent
+	// on success and by releaseSpawnClaim on failure.
+	defer r.endSpawnClaim(spawnReq.Id)
 
 	a, err := r.Spawn(SpawnRequest{
 		Name:           spawnReq.Name,
@@ -1623,8 +1630,11 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		// Tell start-verification that the claim it used to gate on is ours, not
 		// the polecat's (mg-7254). Without this the watcher would read pogod's
 		// own spawn-time claim as "the polecat started" on every dispatch and
-		// silently retire the mg-feb3 recovery net.
-		ClaimedAtSpawn: claimVerdict.Outcome == ClaimTaken,
+		// silently retire the mg-feb3 recovery net. Held, not == ClaimTaken: an
+		// adopted claim (mg-790f) also names pogod's pid, so reading it as the
+		// polecat's would retire the net for exactly the dispatches that follow a
+		// failed one.
+		ClaimedAtSpawn: claimVerdict.Held(),
 		Provider:       provider,
 	})
 	if err != nil {
