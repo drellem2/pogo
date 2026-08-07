@@ -16,6 +16,23 @@ package main
 // audit-successor line: a detector that grows into a gate through the exit code
 // is still a gate.
 //
+// WHAT IT DOES NOT DO, AND THE CIRCULARITY IN THAT (mg-b201). It reports; it
+// never reconciles, and nothing else does either — no boot hook, no login hook,
+// no step of the nightly redeploy re-asserts an installed plist against the
+// shipped one. Reconciliation is a human running `pogo service install-deploy`,
+// and that is recorded rather than fixed (see scripts/launchd/README.md, "What
+// re-asserts an installed plist against the shipped one").
+//
+// The circularity is the part worth carrying: this row ships inside the `pogo`
+// binary, so it is absent from every build predating it — which is to say the
+// detector for "merged but not installed" is itself subject to being merged but
+// not installed. On 2026-08-07 it was: the box's `pogo` was built 07-30, this
+// check landed after, and `pogo doctor --check` printed no launchd row at all
+// while the deploy plist had drifted to a single fire. Hence the NOT CHECKED
+// state below being said out loud — but note that it cannot cover this case,
+// because a binary without the row emits no row to disclaim. An absent `launchd
+// activation` row means an old binary, not a clean one.
+//
 // WHY THE ROW RENDERS EVEN WHEN CLEAN. A row that appears only on drift is
 // invisible in exactly the way its subject is: you cannot tell "no drift" from
 // "the check stopped running" from "the check was never wired in". The four
