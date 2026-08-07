@@ -1272,6 +1272,41 @@ witness_alive_count() {
 # PROCEEDS (by right — the bounce IS the repair, and strands nothing that is not
 # already stranded), wedged+live REFUSES. The gate blocks exactly when it should
 # and never when it shouldn't.
+#
+# DETACHED COMPUTE IS DELIBERATELY NOT WAITED FOR (ruled 2026-08-07, mg-797d)
+# --------------------------------------------------------------------------
+# What this polls to zero is POLECATS. Compute can OUTLIVE the polecat that
+# started it: architect measured python launched from a polecat's own script
+# still burning ~308% CPU for 30+ minutes at ppid=1, under no polecat at all. So
+# a zero here does not mean "no work in flight" — and once the predicate narrows
+# to polecats that owe the refinery a merge, an orphan holds neither a polecat
+# record nor a merge obligation and falls through BOTH tests.
+#
+# THAT GAP IS REAL AND IT IS NOT AN OVERSIGHT. It was raised deliberately and
+# pm-pogo ruled: the deploy must EXPLICITLY NOT wait for detached compute. Do
+# not add a third term here to close it. The reasons, in the order that decides:
+#
+#   1. Waiting would protect NOTHING. This drain exists so that bouncing pogod
+#      does not destroy in-flight work. An orphan has ALREADY detached from
+#      pogod — that is what ppid=1 means — so the bounce cannot destroy it.
+#      Waiting would trade a real deploy for an imagined risk.
+#   2. It would give the drain a predicate it CANNOT SATISFY. The detached
+#      population is pm-onethird's research jobs — multi-hour combinatorics
+#      searches working exactly as designed, not runaway work. A drain that
+#      waits on compute rather than on merge obligations waits forever by
+#      construction, and the nightly redeploy never bounces again.
+#   3. Nothing here can SEE them anyway. An orphan has no registry entry, and a
+#      process-table scan cannot tell a detached polecat child from any other
+#      python on this box.
+#
+# The orphan is still a defect — a polecat's children should not outlive it —
+# but it is PROCESS-LIFECYCLE work (same family as mg-55de, mg-56d1), not drain
+# work. Coupling a deploy unblocker to a lifecycle redesign is how the unblocker
+# strands.
+#
+# If you are here to widen this back toward "wait for all work in flight", read
+# mg-797d FIRST: pm-onethird priced that widening in advance, in their own
+# product's throughput, and asked to be consulted before it is made.
 DRAIN_UNREADABLE_LIMIT=3   # consecutive unreadable samples before it means something
 DRAIN_UNREADABLE_SLEEP=2   # a blip is re-probed in seconds, not the 15s drain tick
 
@@ -1294,6 +1329,9 @@ drain_wait() {
             ''|*[!0-9]*) ;;   # no sample this tick — handled below
             *)
                 misses=0
+                # Zero POLECATS — not zero work. Detached compute is left out
+                # of this test on purpose (mg-797d); see "DETACHED COMPUTE IS
+                # DELIBERATELY NOT WAITED FOR" above before adding a term here.
                 if [ "$count" -eq 0 ]; then echo 0; return 0; fi
                 if [ "$(date +%s)" -ge "$deadline" ]; then echo "$count"; return 1; fi
                 log "draining: $count polecat(s) still active — waiting..." >&2
