@@ -262,7 +262,7 @@ Most "pogod is misbehaving" situations are better solved by **filing an mg (a wo
   pogo refinery history --since=6h --json |
     jq -r '.[].attempts[] | "\(.transport)\t\(.raw_error)"' | sort -u
   ```
-- Logs look noisy. → Filter `~/Library/Logs/pogo/pogod.log`. pogod appends across restarts (crash evidence survives) and rotates the file itself at startup once it exceeds 10 MiB — the prior chunk is `pogod.log.1` (up to `.3`). No manual rotation needed; never truncate the live file mid-run. The indexer's per-tick narration is at debug and off by default (gh #111); set `POGO_LOG_LEVEL=debug` before starting pogod when you need it, or `warn` to quiet the daemon further. See [customizing.md](customizing.md#turning-the-log-volume-up-or-down).
+- Logs look noisy. → Filter `~/Library/Logs/pogo/pogod.log`. pogod appends across restarts (crash evidence survives) and rotates the file itself at startup once it exceeds 10 MiB — the prior chunk is `pogod.log.1` (up to `.3`). No manual rotation needed; never truncate the live file mid-run. The indexer's per-tick narration is at debug and off by default (gh #111); set `POGO_LOG_LEVEL=debug` when you need it, or `warn` to quiet the daemon further. **On the launchd deployment that variable must go in the job's plist** — `POGO_LOG_LEVEL=debug pogo server start` cannot reach a launchd-managed pogod, since launchd does not pass the invoking shell's environment to a job — and the job must be unloaded and loaded again. See [customizing.md](customizing.md#turning-the-log-volume-up-or-down).
 - An mg you expected to appear didn't. → It's almost certainly an mg routing/visibility issue, not a pogod liveness issue.
 
 **Symptoms that DO warrant escalation** (continue to tier 2):

@@ -4,11 +4,20 @@
 // exposed only -bind and -port, so an operator had no way to turn the volume
 // down — or, more usefully, up. POGO_LOG_LEVEL is that control.
 //
-// It is an environment variable rather than a config key on purpose: it works
-// for a daemon started any way at all, including under launchd where nothing
-// sources a shell, and it needs no reload semantics because it is read once at
-// logger construction. A config key with proper reload behavior is tracked
-// separately (mg-44d6) and is not this.
+// It is an environment variable rather than a config key because it is read
+// once at logger construction and so needs no reload semantics. A config key
+// that can be edited while the daemon runs implies the edit will be picked up,
+// and honoring that needs reload machinery this does not have; that key is
+// tracked separately (mg-44d6) and is not this.
+//
+// Being an env var is not free: under launchd nothing inherits the invoking
+// shell's environment, so a launchd-managed pogod only sees this if it is
+// declared in the job's plist. scripts/launchd/com.pogo.daemon.plist ships a
+// commented-out key for that, and docs/customizing.md says so.
+//
+// This does not reach every logger in the daemon. internal/driver builds its
+// plugin loggers at hclog.Debug independently, so POGO_LOG_LEVEL does not
+// quiet them.
 package logging
 
 import (

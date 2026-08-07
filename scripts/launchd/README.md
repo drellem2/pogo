@@ -93,6 +93,7 @@ The plist must include all of these keys for pogod to behave correctly under lau
 | `EnvironmentVariables.HOME` | User's home dir | launchd sometimes does not set this. |
 | `EnvironmentVariables.POGO_HOME` | `~/.pogo` | Where pogo state, agent metadata, and refinery data live. |
 | `EnvironmentVariables.POGO_PLUGIN_PATH` | `~/.pogo/plugin` | Where pogod looks for plugins. |
+| `EnvironmentVariables.POGO_LOG_LEVEL` | unset (shipped commented out) | Log level for pogod's indexing, diagnostics and project loggers — `trace`, `debug`, `info` (default), `warn`, `error`, `off`. Must be declared here: launchd does not pass the invoking shell's environment to a job, so `POGO_LOG_LEVEL=debug pogo server start` cannot reach a launchd-managed daemon. Unload and load the job after changing it; launchd hands a job its environment at spawn. Does not cover `internal/driver`'s plugin loggers, which are built at `debug` independently. |
 
 ## Managing the Service
 

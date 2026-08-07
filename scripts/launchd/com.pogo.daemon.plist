@@ -38,6 +38,15 @@
         <string>/Users/YOUR_USERNAME/.pogo</string>
         <key>POGO_PLUGIN_PATH</key>
         <string>/Users/YOUR_USERNAME/.pogo/plugin</string>
+        <!-- Log level for pogod's indexing, diagnostics and project loggers:
+             trace, debug, info (the default), warn, error, off. It MUST be set
+             here rather than in your shell — launchd does not pass the invoking
+             shell's environment to a job — and the job must be unloaded and
+             loaded again for a change to apply. Uncomment to turn the volume up
+             or down. See docs/customizing.md.
+        <key>POGO_LOG_LEVEL</key>
+        <string>debug</string>
+        -->
     </dict>
 </dict>
 </plist>

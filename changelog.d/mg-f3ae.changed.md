@@ -31,12 +31,32 @@
   hclog's names, case- and whitespace-insensitive: `trace` `debug` `info`
   `warn` `error` `off`.
 
-  An environment variable rather than a `config.toml` key, deliberately: it
-  works for a daemon started any way at all, **including under launchd, where
-  nothing sources a shell**, and it needs no reload semantics because it is
-  read at construction. A config key with proper reload behaviour is a
-  reasonable thing to want on top of this and is tracked separately (mg-44d6);
-  it is not folded in here.
+  An environment variable rather than a `config.toml` key because it is read
+  once at construction and so **needs no reload semantics**. A config key that
+  can be edited while the daemon runs implies the edit will be picked up, and
+  honouring that needs reload machinery this does not have; that key is tracked
+  separately (mg-44d6) and is not folded in here.
+
+  **Being an env var is not free, and the docs now say so.** The first draft of
+  this change repeated the approved recommendation's claim that an env var
+  "works for a daemon started any way, including under launchd where nothing
+  sources a shell". Both halves of that are wrong, and wrong in the direction
+  that matters: launchd does **not** pass the invoking shell's environment to a
+  job, so `POGO_LOG_LEVEL=debug pogo server start` cannot reach a
+  launchd-managed pogod — the launcher named as the supporting example is the
+  one case needing extra work. And a `config.toml` key needs no shell either;
+  `config.Load()` reads it from disk itself. So the variable must be declared in
+  the job's plist beside `PATH`, `HOME` and `POGO_HOME`, with an unload/load for
+  it to apply. `scripts/launchd/com.pogo.daemon.plist` ships a commented-out key,
+  `scripts/launchd/README.md` documents it in the same table as the others, and
+  both `docs/customizing.md` and `docs/operations.md` say plainly that the
+  shell-prefix form does not reach the shipped deployment. The reload-semantics
+  half of the original rationale is intact and is what is stated above.
+
+  **It does not cover every logger.** `internal/driver` builds its plugin
+  loggers at `hclog.Debug` independently, so `POGO_LOG_LEVEL=warn` quiets the
+  indexer but not plugin startup chatter. The docs say which loggers are in
+  scope rather than claiming the daemon as a whole.
 
   Unparseable input falls back to `info` rather than failing the process.
   `hclog.LevelFromString` answers `NoLevel` for both the empty string and
