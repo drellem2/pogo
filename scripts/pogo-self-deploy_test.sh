@@ -286,7 +286,8 @@ esac
 #
 # So these drive the REAL refusals — not a stub of them — and assert on the
 # record the runner actually reads. Three things per disposition:
-#   1. the exit code says where the run stopped (6: before the build)
+#   1. the exit code says where the run stopped (6: before the build; 12 when a
+#      CONFIRMED `stopped` also means the fleet is down right now — mg-6d2f)
 #   2. `reason` is this refusal's own headline, not another's
 #   3. `installed=no`, which is what stops a remedy asserting an install
 #
@@ -306,19 +307,35 @@ precond_run() (
     # A restore, if one is attempted, fails — which is what happened on
     # 2026-08-07 and is what the disarm assertions below are about.
     drain_post() { echo 000; }
+    # The `stopped` arm CONFIRMS its reading against /server/mode before it says
+    # anything out loud (mg-6d2f), so the mode has to be driven from here. Stub
+    # it, or this file's verdict depends on whatever daemon happens to be
+    # listening on :10000 on the machine running the suite — and on a box whose
+    # pogod is healthy, the confirmed-outage branch would never be reached at
+    # all. $3 defaults to the 08-07 state, which is what every other assertion
+    # in this block is about.
+    PRECOND_STUB_MODE="${3:-index-only}"
+    server_mode() { echo "$PRECOND_STUB_MODE"; }
     trap on_deploy_exit EXIT
     refuse_drain_precondition "$1"
 )
 rec_field() { sed -n "/^--- verbatim ---$/q; s/^$2=//p" "$1" | head -n 1; }
 
+# want_rc per disposition. Three refusals say only WHERE the run stopped and
+# share 6. `stopped`, once confirmed, also says what the world is like right now
+# — the fleet is not dispatching — and that is what 12 carries to the runner,
+# which picks the FLEET DOWN subject off it before it has read the record.
+precond_want_rc() { case "$1" in stopped) echo 12 ;; *) echo 6 ;; esac; }
+
 PRECOND_TMP="$(mktemp -d)"
 for disp in bootstrap down stopped error:500; do
     f="$PRECOND_TMP/rec.${disp//:/_}"
+    want="$(precond_want_rc "$disp")"
     out="$(precond_run "$disp" "$f" 2>&1)"; rc=$?
     printf '%s\n' "$out" > "$PRECOND_TMP/out.${disp//:/_}"
-    [ "$rc" -eq 6 ] \
-        && pass "precond $disp: exits 6 — 'refused before the build', which is all an integer can honestly say" \
-        || fail "precond $disp exited $rc, want 6"
+    [ "$rc" -eq "$want" ] \
+        && pass "precond $disp: exits $want — the most an integer can honestly say about this refusal" \
+        || fail "precond $disp exited $rc, want $want"
     [ -f "$f" ] \
         && pass "precond $disp: wrote a reason record for the runner to read" \
         || fail "precond $disp wrote no reason record"
@@ -406,7 +423,159 @@ for disp in down error_500; do
         *) fail "precond ${disp}: skipped the restore on a path where drain may really be on" ;;
     esac
 done
+
+# --- the confirmed refusal says the fleet is down, in those words (mg-6d2f) -
+# Not a rewording of "orchestration is stopped". The 08-07 alert was accurate
+# and cost 10h39m anyway, because nothing in it distinguished a night when the
+# deploy did not land from a night when nothing was running. The words a reader
+# has to meet are the words that name the second.
+case "$(cat "$PRECOND_TMP/out.stopped")" in
+    *"THE FLEET IS DOWN"*"did not restart it"*)
+        pass "precond stopped: says THE FLEET IS DOWN and that this run did not restart it — the 08-07 sentence that was missing" ;;
+    *) fail "precond stopped: the confirmed outage does not say the fleet is down: $(cat "$PRECOND_TMP/out.stopped")" ;;
+esac
+grep -q "^reason=.*THE FLEET IS DOWN" "$PRECOND_TMP/rec.stopped" \
+    && pass "precond stopped: and it is the HEADLINE, so it survives the process boundary into the RED mail" \
+    || fail "precond stopped: 'THE FLEET IS DOWN' is not the reason line — the runner will not see it"
+
+# --- and it is CONFIRMED, not inferred from three digits (mg-6d2f) ---------
+# THE ARM THAT MATTERS. `stopped` is a hypothesis drawn from a status code, and
+# this whole file's vocabulary exists because "I could not read it" kept getting
+# rendered as a fact. A 503 whose mode endpoint does NOT agree is exactly that
+# case — a middleware above the mux, a proxy in front of the port — and the
+# right answer there is to report both readings and refuse, not to announce an
+# outage that was just not confirmed. Driven by pointing the stub somewhere else.
+for stubbed in full "$MODE_UNREACHABLE"; do
+    f="$PRECOND_TMP/rec.disagree"
+    o="$(precond_run stopped "$f" "$stubbed" 2>&1)"; rc=$?
+    [ "$rc" -eq 6 ] \
+        && pass "precond stopped/mode=$stubbed: exits 6, NOT the 12 that means 'there is an outage right now'" \
+        || fail "precond stopped/mode=$stubbed exited $rc, want 6"
+    case "$o" in
+        *"THE FLEET IS DOWN"*) fail "precond stopped/mode=$stubbed: announced an outage it did not confirm" ;;
+        *) pass "precond stopped/mode=$stubbed: does not narrate an outage the mode endpoint denies" ;;
+    esac
+    case "$o" in
+        *"/server/mode reports '$stubbed'"*)
+            pass "precond stopped/mode=$stubbed: reports BOTH readings — the 503 and what the mode endpoint actually said" ;;
+        *) fail "precond stopped/mode=$stubbed: does not say what /server/mode reported: $o" ;;
+    esac
+done
 rm -rf "$PRECOND_TMP"
+
+# ...and it stays a NARROW claim. The neighbours must not be swept in: a 502 or a
+# 504 says nothing about the run mode, and widening this to 5xx would put a
+# confident outage story on top of a transport failure.
+[ "$(classify_drain_precondition 502)" = "error:502" ] && [ "$(classify_drain_precondition 504)" = "error:504" ] \
+    && pass "drain-precond: 502/504 stay error:<code> — only 503 carries the orchestration meaning" \
+    || fail "drain-precond 5xx neighbours leaked into 'stopped'"
+
+# --- server_mode: the reading verify_running cannot make (mg-6d2f) --------
+# THE DEFECT, for the reader who finds this in a year. verify_running polled
+# /version and nothing else. /version is deliberately NOT behind
+# RequireOrchestration, so a pogod that restarted into index-only mode answers
+# it, reports main's revision, and passes verification — while every /agents,
+# /refinery and /scheduler call returns 503 and the fleet dispatches nothing.
+# That is Daniel's report of the 08-07 night in one sentence: the deploy said it
+# was done and the server was not running.
+#
+# These are the PURE half — base_url is pointed at a stub so the parse and the
+# sentinels can be driven without a daemon. They prove server_mode DISTINGUISHES
+# correctly. They deliberately do NOT prove the wiring; the live control owns
+# that direction, against a real pogod whose mode it really changes.
+# The stub's variable is deliberately NOT named `body`. bash scopes dynamically,
+# so server_mode's own `local body` shadows the caller's for the whole call —
+# including inside a stub the caller defined. A `body` here reads back empty (and
+# under `set -u`, errors), which the driver then classifies as UNREACHABLE: the
+# control would report the sentinel it was written to disprove, for a reason that
+# has nothing to do with the code under test.
+mode_stub() {  # $1: body to serve, or "" to simulate a curl failure
+    local MODE_STUB_BODY="$1"
+    if [ -z "$MODE_STUB_BODY" ]; then
+        curl() { return 22; }
+    else
+        curl() { printf '%s' "$MODE_STUB_BODY"; }
+    fi
+    server_mode
+}
+
+[ "$(mode_stub '{"mode":"full"}')" = "full" ] \
+    && pass "server_mode: full mode parses to 'full'" || fail "server_mode full ($(mode_stub '{"mode":"full"}'))"
+[ "$(mode_stub '{"mode":"index-only"}')" = "index-only" ] \
+    && pass "server_mode: index-only parses to 'index-only' — the state the fleet was in on 08-07" \
+    || fail "server_mode index-only ($(mode_stub '{"mode":"index-only"}'))"
+# THE DISTINCTION THAT MATTERS, and the one this file's whole vocabulary exists
+# for: a daemon that will not talk and a daemon that talks but names no mode are
+# different facts, and neither may render as a mode. If either collapsed to ""
+# the caller's `[ "$mode" = "full" ]` would be false for all three and the
+# operator would be told "index-only" about a box that never answered.
+[ "$(mode_stub '')" = "$MODE_UNREACHABLE" ] \
+    && pass "server_mode: an unreachable daemon yields the UNREACHABLE sentinel, never a mode" \
+    || fail "server_mode unreachable ($(mode_stub ''))"
+[ "$(mode_stub '{"revision":"abc"}')" = "$MODE_UNSTAMPED" ] \
+    && pass "server_mode: a body with no mode field yields UNREPORTED, not an empty string" \
+    || fail "server_mode unstamped ($(mode_stub '{"revision":"abc"}'))"
+# The sentinels can never collide with a real mode — same rule REV_* obey.
+case "$MODE_UNREACHABLE$MODE_UNSTAMPED" in
+    *full*|*index-only*) fail "a MODE_* sentinel contains a real mode name — it could be mistaken for one" ;;
+    *) pass "MODE_* sentinels cannot collide with a real mode string" ;;
+esac
+
+# --- verify_orchestration: RED on index-only, GREEN on full ---------------
+# Both directions, because a check that only ever refuses is a brick and one that
+# only ever passes is decoration. Driven through the real function with
+# server_mode stubbed; ORCHESTRATION_VERIFY_TIMEOUT=0 so the RED does not pay the
+# 60s a real deploy allows for startup.
+vo_run() {  # $1: mode server_mode should report -> echoes "<rc>|<stderr>"
+    (
+        # Captured into a named variable, not read as $1 inside the stub: a `$1`
+        # there is server_mode's own first argument, which is unset.
+        VO_STUB_MODE="$1"
+        server_mode() { echo "$VO_STUB_MODE"; }
+        ORCHESTRATION_VERIFY_TIMEOUT=0
+        local out rc=0
+        out="$(verify_orchestration 2>&1)" || rc=$?
+        printf '%s|%s' "$rc" "$out"
+    )
+}
+
+VO_FULL="$(vo_run full)"
+[ "${VO_FULL%%|*}" = "0" ] \
+    && pass "verify_orchestration: mode=full passes — the check is conditional, not a brick" \
+    || fail "verify_orchestration refused a full-mode daemon ($VO_FULL)"
+
+VO_IDX="$(vo_run index-only)"
+case "$VO_IDX" in
+    1\|*THE\ FLEET\ IS\ DOWN*)
+        pass "verify_orchestration: mode=index-only FAILS and says THE FLEET IS DOWN — the 08-07 state now stops the deploy" ;;
+    0\|*)
+        fail "FAIL-OPEN: verify_orchestration passed an index-only daemon — a deploy would report success over a dead fleet" ;;
+    *)
+        fail "verify_orchestration on index-only returned '$VO_IDX'" ;;
+esac
+# An unreachable daemon must also fail. It is a DIFFERENT fact from index-only
+# and the message names it, but the verdict is the same: not proven up.
+VO_UNK="$(vo_run "$MODE_UNREACHABLE")"
+[ "${VO_UNK%%|*}" = "1" ] \
+    && pass "verify_orchestration: an unreachable daemon fails too — 'could not read it' is not 'it is up'" \
+    || fail "verify_orchestration passed an unreachable daemon ($VO_UNK)"
+
+# --- cmd_redeploy WIRES verify_orchestration in, after verify_running -----
+# The assertions above prove the function can refuse. This one proves the
+# refusal is reachable from the real deploy path — the seam mg-c02d's lesson is
+# about, checked here by source because the live control cannot run a real
+# launchctl kickstart. Order matters and is asserted: verify_running first, so
+# "no pogod at all" and "a pogod that is not serving the fleet" keep their own
+# exit codes instead of collapsing into one.
+SELF_DEPLOY_SRC="$HERE/pogo-self-deploy"
+if grep -q 'verify_running || exit 8' "$SELF_DEPLOY_SRC" \
+   && grep -q 'verify_orchestration || exit 11' "$SELF_DEPLOY_SRC" \
+   && [ "$(grep -n 'verify_running || exit 8' "$SELF_DEPLOY_SRC" | cut -d: -f1)" \
+        -lt "$(grep -n 'verify_orchestration || exit 11' "$SELF_DEPLOY_SRC" | cut -d: -f1)" ]; then
+    pass "cmd_redeploy runs verify_orchestration (exit 11) AFTER verify_running (exit 8) — both checks, in order"
+else
+    fail "cmd_redeploy does not wire verify_running -> verify_orchestration; the post-restart check is back to reading /version alone"
+fi
 
 # --- drain_wait: the gate that used to fail OPEN (mg-65b2) -----------------
 # THE DEFECT, for the reader who finds this in a year. drain_wait used to end
@@ -1557,6 +1726,9 @@ precond_run_body() (
     DRAIN_PRIOR="?"
     DRAIN_ARMED=true
     drain_post() { printf '\n000'; }
+    # The confirmed-outage branch is the one these assertions are about, so pin
+    # the mode rather than inheriting whatever is listening on :10000 (mg-6d2f).
+    server_mode() { echo "index-only"; }
     trap on_deploy_exit EXIT
     refuse_drain_precondition "$1" "$3"
 )

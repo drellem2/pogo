@@ -1175,10 +1175,111 @@ printf '%s' "$R4" | grep -qi 'build' \
 # Every code the wrapper can report must produce something. A missing case arm
 # would empty the remedy section of the alert silently, and an alert that stops
 # explaining itself is indistinguishable from one that never explained itself.
-for c in 1 2 3 4 5 6 7 8 9 42; do
+for c in 1 2 3 4 5 6 7 8 9 11 12 42; do
     [ -n "$(remedy_for_exit "$c")" ] || fail "remedy_for_exit $c is empty"
 done
 pass "remedy_for_exit: every exit code, and an unclassified one, yields a non-empty remedy"
+
+# ---------------------------------------------------------------------------
+# THE FLEET-DOWN BANNER (mg-6d2f) — "outage" must be legible in one line
+# ---------------------------------------------------------------------------
+# THE INCIDENT. On 2026-08-07 the nightly found orchestration already stopped,
+# refused (correctly) to bounce a fleet it could not drain, and exited 6. It
+# mailed pm-pogo and human at 02:00:10Z under the subject
+#
+#     [pogo-deploy] RED: nightly redeploy exited 6
+#
+# which is the same subject a build failure gets, and a build failure can wait
+# until morning. This one could not: the fleet dispatched nothing for 10h39m and
+# the outage ended because Daniel noticed by hand and started the server himself.
+#
+# The alert was sent. It was delivered. It was skimmed as ordinary. So the thing
+# under test here is not whether an alert fires — that already worked — but
+# whether the ONE LINE that travels distinguishes "tonight's deploy did not land"
+# from "nothing is running right now".
+D11="$(describe_exit 11)"; D12="$(describe_exit 12)"
+case "$D11" in *"FLEET DOWN"*) pass "describe_exit 11 leads with FLEET DOWN" ;; *) fail "describe_exit 11: $D11" ;; esac
+case "$D12" in *"FLEET DOWN"*) pass "describe_exit 12 leads with FLEET DOWN" ;; *) fail "describe_exit 12: $D12" ;; esac
+[ "$D11" != "$D12" ] \
+    && pass "describe_exit: 11 and 12 are different outages and get DIFFERENT descriptions" \
+    || fail "describe_exit 11 and 12 are identical — 'came back wrong' and 'never restarted' need opposite reactions"
+# 11 is post-restart, 12 is pre-restart, and which one you have decides whether
+# the binary on disk is the new one. Each description must carry that.
+case "$D11" in *restart*) pass "describe_exit 11 says the restart HAPPENED (the deploy landed; only the mode is wrong)" ;; *) fail "describe_exit 11 does not place itself relative to the restart: $D11" ;; esac
+case "$D12" in *"before the restart"*) pass "describe_exit 12 says it refused BEFORE the restart (nothing was built, nothing bounced)" ;; *) fail "describe_exit 12 does not place itself relative to the restart: $D12" ;; esac
+
+# fleet_is_down — the discriminator, in BOTH directions. A banner that fires on
+# every failure is the generic subject again, so the negative half is the half
+# that keeps it worth something.
+for c in 5 8 11 12; do
+    fleet_is_down "$c" || fail "fleet_is_down $c should be true — the fleet is not dispatching when the script exits $c"
+done
+pass "fleet_is_down: 5, 8, 11 and 12 are outages (kickstart failed / no pogod came back / came back index-only / already stopped)"
+for c in 0 1 2 3 4 6 7 9 10 42; do
+    fleet_is_down "$c" && fail "fleet_is_down $c should be false — the old pogod is still up and dispatching on that exit"
+done
+pass "fleet_is_down: 4, 7, 9 and the rest are NOT outages — the banner is spent only where it is true"
+
+S12="$(alert_subject 12)"; S7="$(alert_subject 7)"
+case "$S12" in
+    *"FLEET DOWN"*) pass "alert_subject(12): the SUBJECT LINE says FLEET DOWN — the part that travels carries the fact" ;;
+    *) fail "alert_subject(12) is still generic: $S12" ;;
+esac
+case "$S7" in
+    *"FLEET DOWN"*) fail "alert_subject(7) shouts FLEET DOWN over a stalled drain — the old pogod is up and dispatching" ;;
+    *"RED"*)        pass "alert_subject(7) stays RED — a missed deploy is not an outage" ;;
+    *) fail "alert_subject(7): $S7" ;;
+esac
+[ "$S12" != "$S7" ] \
+    && pass "alert_subject: an outage and a missed deploy no longer share a subject line" \
+    || fail "alert_subject returns the same subject for exit 12 and exit 7 — this is the 08-07 defect exactly"
+# The code stays in the subject. It is what the operator greps the log for, and
+# the remedy paragraphs are keyed to it.
+case "$S12" in *12*) pass "alert_subject keeps the exit code in the subject (the log and the remedy are keyed to it)" ;; *) fail "alert_subject(12) dropped the code: $S12" ;; esac
+
+# The remedies must be actionable and must not contradict each other about the
+# one fact everything else depends on: was the binary replaced?
+R11="$(remedy_for_exit 11)"; R12="$(remedy_for_exit 12)"
+printf '%s' "$R11" | grep -q 'pogo server start' \
+    && pass "remedy(11) gives the command that ends the outage" || fail "remedy(11) does not say how to start orchestration"
+printf '%s' "$R12" | grep -q 'pogo server start' \
+    && pass "remedy(12) gives the command that ends the outage" || fail "remedy(12) does not say how to start orchestration"
+printf '%s' "$R11" | grep -qi 'do not roll back\|deploy is complete' \
+    && pass "remedy(11) says the deploy itself LANDED — do not roll back a binary that is fine" \
+    || fail "remedy(11) does not tell the operator the install succeeded"
+printf '%s' "$R12" | grep -qi 'nothing was built' \
+    && pass "remedy(12) says nothing was built or bounced — the running pogod is untouched and still behind main" \
+    || fail "remedy(12) does not say the deploy never ran"
+# The 08-07 log ended on 'drain restore FAILED — pogod may STILL be draining',
+# which is a claim about a flag that was never set. On exit 12 the drain flag is
+# a dead end and the remedy must say so rather than send the reader after it.
+printf '%s' "$R12" | grep -qi 'red herring\|never enabled' \
+    && pass "remedy(12) defuses the drain flag — it was never enabled, and chasing it is what 08-07 invited" \
+    || fail "remedy(12) leaves the reader to chase the drain flag"
+[ "$R11" != "$R12" ] \
+    && pass "remedy_for_exit: 11 and 12 get DIFFERENT paragraphs" || fail "remedy 11 and 12 are identical"
+
+# The event carries the fact as DATA. A detector cannot filter on a subject line,
+# and "the fleet is not dispatching" is the first outcome here that something
+# other than a human needs to be able to react to.
+alert_extra() {  # what the RED call site passes as alert()'s $3
+    printf '"exit":%s,"fleet_down":%s' "$1" "$(fleet_is_down "$1" && echo true || echo false)"
+}
+case "$(alert_extra 12)" in
+    *'"fleet_down":true'*) pass "the RED event carries fleet_down=true as structured data, not only in prose" ;;
+    *) fail "alert_extra 12: $(alert_extra 12)" ;;
+esac
+case "$(alert_extra 7)" in
+    *'"fleet_down":false'*) pass "the RED event carries fleet_down=false on a stalled drain" ;;
+    *) fail "alert_extra 7: $(alert_extra 7)" ;;
+esac
+# alert() must actually splice $3 in, and must still emit valid JSON without it.
+grep -q 'extra:+,$extra' "$RUNNER" \
+    && pass "alert() splices its extra fields into the event details (and omits the comma when there are none)" \
+    || fail "alert() does not thread its third argument into the emitted event"
+grep -q 'alert_subject "$rc"' "$RUNNER" \
+    && pass "the RED call site uses alert_subject, not a hard-coded 'RED: nightly redeploy exited' string" \
+    || fail "the RED alert site still hard-codes its subject — the banner would never fire"
 
 # ---------------------------------------------------------------------------
 # dispatch_freeze_note — the cost of waiting, as a number
@@ -1323,6 +1424,10 @@ make_record() {
         DEPLOY_STAGE="drain"; DEPLOY_INSTALLED="no"
         DRAIN_PRIOR="?"; DRAIN_ARMED=true
         drain_post() { printf "\n000"; }
+        # The `stopped` arm confirms its reading against /server/mode before it
+        # announces anything (mg-6d2f). Pin it, or these samples depend on
+        # whatever daemon is listening on :10000 while the suite runs.
+        server_mode() { echo "index-only"; }
         trap on_deploy_exit EXIT
         refuse_drain_precondition "$3" "$4"
     ' _ "$SELF_DEPLOY" "$2" "$1" "${3:-}" >/dev/null 2>&1
@@ -1333,11 +1438,13 @@ make_record() {
 # really answers (internal/server/server.go), so the sample alert below is the
 # mail that a repeat of that night would actually produce.
 make_record stopped "$REC_DIR/stopped" '{"error":"orchestration is stopped","mode":"index-only"}'; RC_STOPPED=$?
-[ "$RC_STOPPED" -eq 6 ] \
-    && pass "reason channel: the real 503 refusal exits 6 and leaves a record" \
-    || fail "503 refusal exited $RC_STOPPED"
-BODY_503="$(SRC="$WORK" GIT=/usr/bin/git ATTEMPT_N=2 red_alert_body 6 0 2026-08-07 5400 "$REC_DIR/stopped")"
-echo "--- ALERT TEXT: exit 6, orchestration stopped (the 2026-08-07 failure) ---"
+# 12, not 6, since mg-6d2f: a CONFIRMED stopped fleet is an outage in progress,
+# and that is the fact the subject line and the banner are keyed off.
+[ "$RC_STOPPED" -eq 12 ] \
+    && pass "reason channel: the real 503 refusal exits 12 (FLEET DOWN) and leaves a record" \
+    || fail "503 refusal exited $RC_STOPPED, want 12"
+BODY_503="$(SRC="$WORK" GIT=/usr/bin/git ATTEMPT_N=2 red_alert_body 12 0 2026-08-07 5400 "$REC_DIR/stopped")"
+echo "--- ALERT TEXT: exit 12, orchestration stopped (the 2026-08-07 failure) ---"
 echo "$BODY_503"
 echo "--- end ---"
 
@@ -1383,13 +1490,15 @@ for d in bootstrap down error:500; do
     eval "echo \"\$BODY_$key\""
     echo "--- end ---"
 done
-# Four failures share exit 6. Four DIFFERENT mails, or the code is still the
-# channel and this whole change bought nothing.
+# THREE failures now share exit 6 — the confirmed `stopped` outage left for 12
+# (mg-6d2f) — and the property is unchanged and is the point: four DIFFERENT
+# mails, or the code is still the channel and this whole change bought nothing.
+# The three that share a code are the sharper half of the claim.
 [ "$BODY_503" != "$BODY_bootstrap" ] && [ "$BODY_503" != "$BODY_down" ] \
     && [ "$BODY_bootstrap" != "$BODY_down" ] && [ "$BODY_down" != "$BODY_error_500" ] \
     && [ "$BODY_bootstrap" != "$BODY_error_500" ] \
-    && pass "alert: the four exit-6 refusals produce four DIFFERENT mails — one code, four stories, told apart" \
-    || fail "two exit-6 refusals produce identical alert bodies"
+    && pass "alert: the four drain refusals produce four DIFFERENT mails — and the three sharing exit 6 are told apart" \
+    || fail "two drain refusals produce identical alert bodies"
 case "$BODY_bootstrap" in
     *"predates the /agents/drain endpoint"*"--skip-drain"*) pass "alert(bootstrap): names the chicken-and-egg AND its remedy" ;;
     *) fail "alert(bootstrap) is missing its own story" ;;
@@ -1408,7 +1517,7 @@ for pair in "bootstrap:orchestration is STOPPED" "down:predates the /agents/drai
     eval "b=\"\$BODY_${pair%%:*}\""
     case "$b" in *"${pair#*:}"*) fail "alert(${pair%%:*}) also tells ${pair#*:}'s story" ;; esac
 done
-pass "alert: no exit-6 mail tells another exit-6 refusal's story"
+pass "alert: no drain-refusal mail tells another refusal's story"
 
 # THE FALLBACK IS REAL, and it must be: a record can be absent (an exit before
 # cmd_redeploy arms one), unwritable, or left by an older deploy script. When it
@@ -1425,6 +1534,34 @@ esac
 case "$BODY_NOREC" in
     *"was installed and started"*) fail "the exit-6 FALLBACK still asserts an install" ;;
     *) pass "alert: even the fallback stops asserting an install for exit 6 (it exits before do_build on every path)" ;;
+esac
+
+# --- the BANNER, and that it is FIRST (mg-6d2f) ----------------------------
+# The subject is what a skim-reader gets; the banner is what the reader who
+# OPENS the mail gets, and a mail client shows the first line in its preview.
+# Both arms, and the position too: burying "the fleet is stopped" under the
+# attempt/drain/elapsed bookkeeping is how the 08-07 alert managed to be sent,
+# delivered, and still cost 10h39m — so "the sentence is present somewhere" is
+# not the property. It has to be line one.
+#
+# This is assertable at all only because the banner lives inside red_alert_body
+# rather than inline at the callsite. While it was inline the only way to see it
+# was to fail a real nightly deploy — which is exactly the reason red_alert_body
+# was made a function in the first place (mg-0155).
+BAN12="$(SRC="$WORK" GIT=/usr/bin/git ATTEMPT_N=0 red_alert_body 12 0 2026-08-07 5400 "$REC_DIR/does-not-exist")"
+BAN7="$(SRC="$WORK" GIT=/usr/bin/git ATTEMPT_N=0 red_alert_body 7 0 2026-08-07 5400 "$REC_DIR/does-not-exist")"
+case "$(printf '%s\n' "$BAN12" | head -n 1)" in
+    *"THE FLEET IS NOT DISPATCHING RIGHT NOW"*)
+        pass "red_alert_body(12): the banner is the FIRST line of the mail — what a preview pane shows" ;;
+    *) fail "red_alert_body(12): line one is not the banner: $(printf '%s\n' "$BAN12" | head -n 1)" ;;
+esac
+case "$BAN12" in
+    *"outage, not a missed deploy"*) pass "red_alert_body(12): the banner names the distinction that was missing on 08-07" ;;
+    *) fail "red_alert_body(12): the banner does not distinguish an outage from a missed deploy" ;;
+esac
+case "$BAN7" in
+    *"THE FLEET IS NOT DISPATCHING"*) fail "red_alert_body(7): banners a stalled drain as an outage — the old pogod is up and dispatching, and a banner on every failure is no banner" ;;
+    *) pass "red_alert_body(7): NO banner — the fleet is still dispatching, so the banner is not spent here" ;;
 esac
 # describe_exit 6 itself, since the stamp-retry log line quotes it directly.
 case "$(describe_exit 6)" in

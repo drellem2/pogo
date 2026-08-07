@@ -810,14 +810,22 @@ load_gh_token() {
 # mail is the loud half. `human` is always copied on a RED because a deploy that
 # refused to deploy is a thing the operator has to know about by morning, and a
 # fleet agent reading it is not the same as the operator seeing it.
+#
+# $3 is optional extra JSON fields for the EVENT (no braces, leading comma
+# omitted). The mail is read by a person and carries its facts in prose; the
+# event is read by code, and a subject string is not something a detector can
+# filter on. mg-6d2f's outcomes are the first that need to be machine-separable
+# from an ordinary failed deploy — "the fleet is not dispatching" and "tonight's
+# deploy did not land" want different reactions, and the subject line is the
+# wrong place for a consumer to look for the difference.
 alert() {
-    local subject="$1" body="$2" bf rc=0
+    local subject="$1" body="$2" extra="${3:-}" bf rc=0
     err "ALERT: $subject"
     printf '%s\n' "$body" >&2
 
     if [ -n "$POGO_CLI" ]; then
         "$POGO_CLI" events emit --type=deploy_nightly_failed --agent=pogo-deploy \
-            --details="{\"subject\":\"$subject\"}" >/dev/null 2>&1 || true
+            --details="{\"subject\":\"$subject\"${extra:+,$extra}}" >/dev/null 2>&1 || true
     fi
     [ -n "$MG" ] || { err "alert: no macguffin resolved — NOTHING WAS MAILED"; return 1; }
 
@@ -1480,6 +1488,14 @@ describe_exit() {
         # before the deploy script was ever invoked, on a class that established
         # nothing about the tree (mg-0d70).
         10) echo "sync aborted on a transient class — the repo state was never established, and a later fire retries" ;;
+        # 11 and 12 are mg-6d2f's, and they name the two halves of "the restart
+        # step did not restart the server" — the failure Daniel reported by hand
+        # after the 08-07 night, having found the fleet stopped and started it
+        # himself. Before them, 11's state passed verification silently (nothing
+        # read the run mode at all) and 12's shared exit 6 with the bootstrap and
+        # not-answering cases.
+        11) echo "FLEET DOWN: pogod restarted but orchestration did NOT start — /agents, /refinery, /scheduler are all 503" ;;
+        12) echo "FLEET DOWN: orchestration was ALREADY stopped, so the deploy refused before the restart — nothing was bounced and nothing was fixed" ;;
         # 130/143 are the shell's, not either script's: SIGINT and SIGTERM during
         # the drain window, converted to exits so the restore trap runs. They
         # rendered as "unclassified failure" until the mg-0155 enumeration asked
@@ -1585,6 +1601,42 @@ what_the_run_changed() {
             echo "The install COMPLETED and pogod WAS bounced (stage '${stg}'). Both the binaries and the process are the new ones, so a failure here is about the new pogod, not about getting it onto the box." ;;
         *) : ;;
     esac
+}
+
+# fleet_is_down RC — does this outcome leave the fleet not dispatching?
+#
+# THE SUBJECT LINE IS THE PART THAT TRAVELS. On 2026-08-07 the alert subject was
+# "[pogo-deploy] RED: nightly redeploy exited 6" — indistinguishable at a glance
+# from a build failure, which is a thing that can wait until morning. A stopped
+# fleet cannot: it cost 10h39m of a dead fleet, ended by the user noticing by
+# hand. Whatever the body says, a reader who skims one line has to come away
+# knowing the difference between "tonight's deploy did not land" and "nothing is
+# running right now."
+#
+# Scoped to the outcomes where the fleet is provably not dispatching when the
+# script exits:
+#   5   the kickstart itself failed after a successful install
+#   8   the restart landed but no pogod came back at main's revision
+#   11  a pogod came back, in index-only mode, dispatching nothing
+#   12  orchestration was already off and this run did not restart it
+#
+# NOT 6, 7 or 9. Those exit with the old pogod alive and dispatching — a missed
+# deploy, not an outage — and putting them under the same banner would spend the
+# banner. A subject that shouts on every failure is the generic subject again.
+fleet_is_down() {
+    case "$1" in
+        5|8|11|12) return 0 ;;
+        *)         return 1 ;;
+    esac
+}
+
+# alert_subject RC — the one line a skim-reader gets.
+alert_subject() {
+    if fleet_is_down "$1"; then
+        echo "[pogo-deploy] FLEET DOWN: nightly redeploy exited $1 and pogod is NOT serving the fleet"
+    else
+        echo "[pogo-deploy] RED: nightly redeploy exited $1"
+    fi
 }
 
 # remedy_for_exit CODE — what to DO about this exit, and why.
@@ -1725,6 +1777,48 @@ restart) — in which case the deploy is the symptom, not the problem. The next
 nightly fire carries the same work.
 EOF
             ;;
+        11)
+            cat <<'EOF'
+THE FLEET IS DOWN RIGHT NOW. The kickstart landed and a pogod came back at main's
+revision — /version answers and every ordinary liveness check on this box reads
+GREEN — but it came back in index-only mode. /agents, /refinery and /scheduler
+are all returning HTTP 503, which means no polecat is being dispatched and no
+merge is running, and none will be until orchestration is started.
+
+This is not a deploy to retry tomorrow; it is an outage to end now:
+
+  curl -s http://127.0.0.1:10000/server/mode      # expect {"mode":"full"}
+  pogo server start
+  curl -s http://127.0.0.1:10000/server/mode      # confirm it took
+
+The binary on disk and the running process are both the NEW one, so once
+orchestration is up the deploy is complete — do not roll back or re-run it.
+EOF
+            ;;
+        12)
+            cat <<'EOF'
+THE FLEET WAS ALREADY DOWN when this deploy started, and this deploy did not fix
+it. pogod is up and answering, but orchestration is stopped: POST /agents/drain
+returned 503 from RequireOrchestration, so the deploy could not drain, refused to
+kickstart -k an unquiesced fleet, and exited before building or restarting
+anything.
+
+The refusal is correct — bouncing without a drain mints polecats that survive the
+kill and hold their claims and worktrees forever. What is NOT correct is the
+state it leaves: no dispatch, no refinery, no scheduler, and a box on which every
+health signal still reads green.
+
+Fix the mode first, then redeploy:
+
+  curl -s http://127.0.0.1:10000/server/mode      # expect {"mode":"full"}
+  pogo server start
+  scripts/pogo-self-deploy redeploy --yes
+
+Nothing was built and nothing was bounced, so the running pogod is untouched and
+still behind main. The drain flag is a red herring here: it was never enabled,
+because the same guard refused the request that would have enabled it.
+EOF
+            ;;
         9)
             cat <<'EOF'
 The control suite went RED BEFORE the kickstart, which means the running pogod
@@ -1758,11 +1852,22 @@ EOF
 # what the run changed come FIRST, above the code-keyed remedy, because they are
 # the two facts that are known to be about THIS failure. The remedy paragraph
 # below them can only speak for everything sharing the exit code.
+#
+# ABOVE ALL OF IT, when the fleet is down: the banner (mg-6d2f). A mail client
+# shows the first line in its preview and a reader who opens it starts there;
+# burying "the fleet is stopped" under six lines of attempt/drain/elapsed
+# bookkeeping is how the 08-07 alert managed to be sent, delivered, and still
+# cost 10h39m.
 red_alert_body() {
     local rc="$1" elapsed="$2" today="$3" budget="$4" file="${5:-}"
     local changed detail
     changed="$(what_the_run_changed "$file")"
     detail="$(deploy_reason_detail "$file")"
+    if fleet_is_down "$rc"; then
+        printf '%s\n\n' 'THE FLEET IS NOT DISPATCHING RIGHT NOW. This is an outage, not a missed deploy —
+no polecat will start and no merge will run until pogod is serving the fleet
+again. The remedy is below; everything between here and it is context.'
+    fi
     printf '%s\n' "The unattended nightly redeploy FAILED, and no fire is left tonight to retry it.
 
   exit $rc:  $(describe_outcome "$rc" "$file")
@@ -2087,8 +2192,20 @@ $check_out"
             fi
             exit "$rc"
         fi
-        alert "[pogo-deploy] RED: nightly redeploy exited $rc" \
-            "$(red_alert_body "$rc" "$elapsed" "$today" "$budget" "$reason_file")"
+        # Subject and event field, not only the body (mg-6d2f). The subject is
+        # the part that travels — a skim-reader has to be able to tell "tonight's
+        # deploy did not land" from "nothing is running right now" — and the
+        # event field is what a detector can filter on, which a subject string
+        # is not. The banner itself lives at the top of red_alert_body.
+        # Hoisted, not inlined into the call. The `&&` an inline
+        # `$(fleet_is_down ... && echo true)` would put on the callsite's last
+        # line is invisible to a reader and indistinguishable, to the probe that
+        # guards this file, from an `|| rc=1` cascade on alert's return value.
+        local fleet_down=false
+        fleet_is_down "$rc" && fleet_down=true
+        alert "$(alert_subject "$rc")" \
+            "$(red_alert_body "$rc" "$elapsed" "$today" "$budget" "$reason_file")" \
+            "\"exit\":$rc,\"fleet_down\":$fleet_down"
         exit "$rc"
     fi
 

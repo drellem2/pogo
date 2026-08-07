@@ -81,8 +81,9 @@ come apart on a restart-only deploy, which installs nothing and still bounces.
 | 4 | a binary's post-install revision != main | build | **partial** | no | which binary, and the two revisions. The install returned 0 over a split pair — the case this loop exists to catch. |
 | 6 | drain: `bootstrap` (HTTP 404) | drain | no | no | this pogod predates `/agents/drain`; re-run with `--skip-drain`. |
 | 6 | drain: `down` (HTTP 000) | drain | no | no | pogod did not respond at all; start it and retry. Explicitly not the bootstrap case. |
-| 6 | drain: `stopped` (HTTP 503) | drain | no | no | orchestration is stopped — pogod is UP and refusing `/agents/`; `pogo server start`, then re-run. |
+| 6 | drain: `stopped` (HTTP 503) that `/server/mode` does NOT confirm | drain | no | no | both readings — the 503 and the mode the daemon reports — and that it refuses rather than narrate an outage it could not confirm (mg-6d2f). |
 | 6 | drain: `error:<code>` (any other status) | drain | no | no | the status, and that this branch deliberately does not guess. |
+| 12 | drain: `stopped` (HTTP 503) **confirmed** `index-only` | drain | no | no | **FLEET DOWN.** Orchestration is stopped right now and this run did not restart it; nothing is dispatching. `pogo server start`, then re-run. The refusal itself is correct — a deploy cannot drain a fleet it cannot reach — but it leaves the outage in place, so it does not exit looking ordinary (mg-6d2f). |
 | 7 | drain stalled: the budget ran out with polecats still owing the refinery a merge (mg-853a) | drain | no | no | which polecats still hold pushed-but-unmerged work, by name, and the budget; dispatch restored by the trap; `alert_drain_stalled timeout` mails the sink. |
 | 7 | drain stalled: state unreadable (`--force` overrides) | drain | no | no | that the fleet's state could not be established — a different reaction from a timeout (mg-65b2); `alert_drain_stalled unknown`. |
 | 9 | `do_prove`: live control not found | prove | yes/no¹ | no | that a pogod whose detector cannot be proven will not be deployed. |
@@ -92,6 +93,7 @@ come apart on a restart-only deploy, which installs nothing and still bounces.
 | 9 | `do_prove`: control passed but showed only one direction | prove | yes/no¹ | no | which of RED/GREEN was not demonstrated. |
 | 5 | `launchctl kickstart` failed | restart | yes/no¹ | **yes** | that pogod may be DOWN, and the commands to check and restore it first. |
 | 8 | `verify_running`: the new pogod never reported main | verify | yes/no¹ | yes | the revision it did report (or "unreachable"). |
+| 11 | `verify_orchestration`: pogod came back, but not in `full` mode | verify | yes/no¹ | yes | **FLEET DOWN.** The mode it did report. `/version` is deliberately unguarded, so an index-only daemon answers it at main's revision and passes `verify_running` — this is the half that check cannot see (mg-6d2f). |
 | 130 | SIGINT during the drain window | drain | no | no | "interrupted (SIGINT) during the drain window"; the trap restores dispatch. |
 | 143 | SIGTERM during the drain window | drain | no | no | "terminated (SIGTERM) during the drain window"; the trap restores dispatch. |
 

@@ -57,9 +57,22 @@
 #                   witness-live -> REFUSE, witness-idle -> PROCEED, double
 #                   absence -> FAIL CLOSED, and a healthy pogod -> still drains.
 #                   mg-65b2's ask.
+#   9. MERGE-DEBT — the drain's narrowed predicate, read off a REAL daemon's
+#                   encoder: an empty registry emits "polecats":null, not "[]",
+#                   which is the one body no hand-written fixture contains.
+#                   mg-853a's ask.
+#  10. RESTART    — "the server came back" is verified by EXERCISE. A real pogod
+#                   is flipped into index-only through its own
+#                   /server/stop-orchestration, and the RED is reproduced live:
+#                   verify_running PASSES a daemon that dispatches nothing,
+#                   because /version is not behind RequireOrchestration. Then
+#                   the fix refuses it, the recovery goes GREEN again, and the
+#                   daemon is really killed and really replaced with both checks
+#                   driven against the successor. mg-6d2f's ask.
 #
-# 6 and 8 drive the REAL cmd_redeploy / drain_wait end-to-end rather than a pure
-# helper, so unlike 1-5 they are controls on the DRIVER, not on the post-check.
+# 6, 8 and 10 drive the REAL cmd_redeploy / drain_wait / verify path end-to-end
+# rather than a pure helper, so unlike 1-5 they are controls on the DRIVER, not
+# on the post-check.
 # They share this file because they need the same thing: a real pogod whose state
 # can be read back after the code under test has moved it — and, for 8, a real
 # pogod that can be really killed, since the bug is what a real curl returns when
@@ -361,6 +374,13 @@ source "$REPO_ROOT/scripts/pogo-self-deploy"
 # function, and pogo-self-deploy_test.sh asserts that wiring is still in place —
 # so neutering it here cannot quietly neuter it there.
 assert_out_of_band() { :; }
+
+# Keep a handle on the REAL running_rev before §6 replaces it with a git read.
+# §9 needs the shipped one — the whole point there is that the deploy's own
+# /version probe cannot see a stopped fleet, and a control that re-implemented
+# the probe would be asserting about its own copy. Captured by `declare -f` so
+# it stays the driver's code, not a paraphrase of it.
+eval "orig_running_rev() $(declare -f running_rev | tail -n +2)"
 
 [ "$(base_url)" = "$URL" ] \
     && pass "driver resolves base_url to the sandbox daemon (not the live fleet)" \
@@ -1342,6 +1362,191 @@ case "$MD_SPLICED_DEBT" in
     *)
         fail "mg-853a: a spliced polecat record was not read out of a real body ($MD_SPLICED_DEBT) — the empty-body 0 above proves nothing" ;;
 esac
+
+# ===========================================================================
+# 10. THE RESTART VERIFIED BY EXERCISE — "did the SERVER come back", live.
+# ===========================================================================
+# THE INCIDENT (mg-6d2f). Daniel, first-hand, the morning after 2026-08-07:
+# "with the pogod restart tonight - it was a bit broken, didnt actually start
+# the server and i had to manually start it." The fleet dispatched nothing from
+# 01:56Z until he intervened at 12:35Z — 10h39m — and no signal on the box said
+# so. pogod was UP the whole time; it had been up since 08-04 and never
+# restarted. What was down was orchestration.
+#
+# THE DEFECT. cmd_redeploy's only post-restart check was verify_running, and
+# verify_running polls /version. /version is deliberately NOT behind
+# RequireOrchestration — the drift check has to be able to read an index-only
+# daemon — so a pogod that comes back in index-only mode answers it, reports
+# main's revision, and PASSES. The deploy then logs "redeploy complete" over a
+# fleet that dispatches nothing. There was no reading anywhere in the script that
+# could tell the two apart.
+#
+# WHY THIS IS IN THE LIVE FILE. The sibling drives verify_orchestration with a
+# stubbed server_mode and proves the decision. That is not this ticket's failure
+# mode. This ticket happened because a REAL /version answers a REAL curl from a
+# REAL daemon whose fleet is stopped — a wiring fact no stub can be wrong about,
+# since a stub returns whatever its author already believed. Same lesson as
+# mg-c02d and mg-65b2, one endpoint over. So: a real pogod, really flipped into
+# index-only through its own HTTP surface, really restarted, and really read
+# back.
+#
+# WHAT IS AND IS NOT EXERCISED. Everything up to and including "a killed pogod is
+# replaced and both checks pass against the successor" is real here. The one
+# thing a sandbox cannot do is `launchctl kickstart -k` on a launchd job it does
+# not own; do_restart's single line is covered by the unit file asserting the
+# wiring, and it is named here so nobody reads this section as more than it is.
+#
+# §8(f) left a healthy pogod on $GATE_PORT. That is the state this needs.
+ORCH_URL="$URL"
+
+# The revision the LIVE daemon reports, read once while it is healthy. Pinning
+# MAIN to it is what makes verify_running's verdict below a statement about the
+# MODE and nothing else: the revision is identical in both halves, which is
+# precisely why /version could never separate them.
+MAIN="$(orig_running_rev)"
+case "$MAIN" in
+    "$REV_UNREACHABLE"|"$REV_UNSTAMPED"|"")
+        fail "the sandbox daemon does not report a usable revision ('$MAIN') — §9's verify_running assertions would be vacuous" ;;
+    *)
+        pass "restart-verify precondition: the live sandbox pogod reports revision $(short "$MAIN") on /version" ;;
+esac
+
+orch_verify() {  # -> "<rc>|<stderr>" from the REAL verify_orchestration
+    (
+        ORCHESTRATION_VERIFY_TIMEOUT=0
+        running_rev() { orig_running_rev; }
+        local out rc=0
+        out="$(verify_orchestration 2>&1)" || rc=$?
+        printf '%s|%s' "$rc" "$out"
+    )
+}
+orch_verify_running() {  # -> rc from the REAL verify_running, against the sandbox
+    (
+        running_rev() { orig_running_rev; }
+        verify_running >/dev/null 2>&1
+    )
+}
+
+# (a) GREEN, LIVE. A healthy pogod reads `full` off a body Go really emitted, and
+#     both checks pass. Without this the REDs below could be unconditional.
+ORCH_MODE_UP="$(server_mode)"
+[ "$ORCH_MODE_UP" = "full" ] \
+    && pass "server_mode reads 'full' off a REAL pogod's /server/mode (the live parse, not a fixture's)" \
+    || fail "server_mode returned '$ORCH_MODE_UP' from a healthy sandbox daemon — the seam does not parse what Go emits"
+ORCH_GREEN="$(orch_verify)"
+[ "${ORCH_GREEN%%|*}" = "0" ] \
+    && pass "GREEN: verify_orchestration passes against a real, serving pogod — the check is conditional, not a brick" \
+    || fail "verify_orchestration refused a healthy live daemon ($ORCH_GREEN) — every deploy would now fail"
+orch_verify_running \
+    && pass "GREEN: verify_running passes too — both halves agree while the fleet really is up" \
+    || fail "verify_running failed against the healthy sandbox daemon; §9's later contrast would be measuring the revision, not the mode"
+
+# (b) THE OUTAGE, STAGED THROUGH THE DAEMON'S OWN SURFACE. Not a stub, not a
+#     kill: /server/stop-orchestration is exactly what put the live fleet into
+#     this state, and afterwards the guarded endpoints really return 503.
+pogo_sandbox_curl "could not stop orchestration on the sandbox daemon" -- \
+    -X POST "$ORCH_URL/server/stop-orchestration"
+ORCH_MODE_DOWN="$(server_mode)"
+[ "$ORCH_MODE_DOWN" = "index-only" ] \
+    && pass "outage staged: the REAL daemon now reports mode=index-only — the 2026-08-07 state, reproduced live" \
+    || fail "could not stage the outage (server_mode says '$ORCH_MODE_DOWN'); nothing below is a control"
+
+# (c) THE RED REPRODUCED, LIVE — the defect itself, against the real wire.
+#     verify_running is unchanged and still returns 0. This is the whole ticket:
+#     the deploy's post-restart check, run verbatim against a pogod serving
+#     nothing, reports success.
+if orch_verify_running; then
+    pass "RED REPRODUCED, LIVE: verify_running PASSES against a pogod that is dispatching NOTHING — /version answers at main's revision through RequireOrchestration's 503s, which is how 'redeploy complete' got logged over a dead fleet"
+else
+    fail "verify_running failed on the index-only daemon — this scenario is not reproducing mg-6d2f, so (d) below proves nothing"
+fi
+# And the guarded surface really is refusing, so the outage is not notional.
+#
+# Through http_status, because drain_post returns BODY then the status on its
+# own final line (mg-08e9) — one hop, two facts. Reading its whole output as a
+# status would compare '{"error":...}\n503' against '503' and report the live
+# 503 as "not 503", which is the control accusing the code of the daemon's own
+# correct answer.
+ORCH_DRAIN_RAW="$(drain_post true)"
+ORCH_DRAIN_CODE="$(http_status "$ORCH_DRAIN_RAW")"
+# The body is the daemon's own account of the same moment, and it is what the
+# refusal quotes into the alert. Assert it arrived, so a regression that drops
+# it again is caught here as well as in the unit file.
+case "$(http_body "$ORCH_DRAIN_RAW")" in
+    *"orchestration is stopped"*)
+        pass "the live 503 carries RequireOrchestration's own words — the body the refusal quotes into the RED mail is real, not a fixture" ;;
+    *) fail "the live 503 body did not name orchestration: $(http_body "$ORCH_DRAIN_RAW")" ;;
+esac
+[ "$ORCH_DRAIN_CODE" = "503" ] \
+    && pass "the guarded surface really refuses: POST /agents/drain returns 503 from a live index-only pogod (the exact status the 08-07 log recorded)" \
+    || fail "POST /agents/drain returned '$ORCH_DRAIN_CODE' from an index-only daemon — expected 503"
+[ "$(classify_drain_precondition "$ORCH_DRAIN_CODE")" = "stopped" ] \
+    && pass "the assembled pre-restart path: a REAL 503 classifies as 'stopped', so the refusal exits 12 instead of an anonymous 6" \
+    || fail "classify_drain_precondition did not read the live 503 as 'stopped'"
+
+# (d) THE FIX, SAME WIRE. verify_orchestration sees what verify_running cannot.
+ORCH_RED="$(orch_verify)"
+case "$ORCH_RED" in
+    1\|*THE\ FLEET\ IS\ DOWN*)
+        # Deliberately NOT proved(). Those tokens are do_prove's, and do_prove
+        # asserts on the presence of one RED and one GREEN — so a §9 that minted
+        # them could satisfy the gate for a §4 that had been deleted. This
+        # section is a control on a different detector and says so by staying out
+        # of that ledger.
+        pass "THE FIX: verify_orchestration REFUSES the same daemon verify_running just passed, and names it — 'THE FLEET IS DOWN'" ;;
+    0\|*)
+        fail "FAIL-OPEN: verify_orchestration passed a live index-only daemon — the deploy would still report success over an outage" ;;
+    *)
+        fail "verify_orchestration against the live index-only daemon returned '$ORCH_RED'" ;;
+esac
+# The message has to carry the remedy, because the reader of it at 03:00 is
+# whoever finds the log at 08:00 and has to end an outage, not diagnose one.
+case "$ORCH_RED" in
+    *"pogo server start"*) pass "the refusal carries the command that ends the outage" ;;
+    *) fail "verify_orchestration's refusal does not say how to fix it: $ORCH_RED" ;;
+esac
+
+# (e) RECOVERY, EXERCISED. Start orchestration back up on the live daemon and
+#     watch the check go GREEN again. A detector that latches RED once it has
+#     fired would satisfy (d) forever and be worthless the following night.
+pogo_sandbox_curl "could not restart orchestration on the sandbox daemon" -- \
+    -X POST "$ORCH_URL/server/start-orchestration"
+ORCH_BACK="$(orch_verify)"
+[ "${ORCH_BACK%%|*}" = "0" ] \
+    && pass "RECOVERY: orchestration restarted on the live daemon and verify_orchestration goes GREEN again — it tracks the fleet's state, it does not latch" \
+    || fail "verify_orchestration stayed RED after orchestration really came back ($ORCH_BACK) — a latched detector fails every subsequent deploy"
+
+# (f) A REAL RESTART, END TO END. The daemon is killed and a successor is started
+#     on the same port — the closest a sandbox gets to the kickstart — and BOTH
+#     checks are driven against the process that came back. This is the
+#     requirement in the ticket: verify a restart brings the daemon back by
+#     exercising it, not by reading the script.
+pogo_sandbox_daemon_kill
+ORCH_DEAD="$(orch_verify)"
+[ "${ORCH_DEAD%%|*}" = "1" ] \
+    && pass "a genuinely dead pogod fails verify_orchestration — 'could not read it' is not 'it came back'" \
+    || fail "verify_orchestration passed against a killed daemon ($ORCH_DEAD) — it would green-light a restart that produced no process at all"
+case "$ORCH_DEAD" in
+    *"$MODE_UNREACHABLE"*) pass "the dead daemon is reported as UNREACHABLE, not as a mode — the two absences stay different facts" ;;
+    *) fail "the dead-daemon refusal did not name the unreachable sentinel: $ORCH_DEAD" ;;
+esac
+
+pogo_sandbox_daemon "$SANDBOX/pogod" /server/mode "$SANDBOX/pogod-orch.log"
+pass "restart exercised: a successor pogod was started and is answering /server/mode on port $POGO_SANDBOX_PORT"
+ORCH_AFTER_RESTART="$(orch_verify)"
+ORCH_RUN_RC=0; orch_verify_running || ORCH_RUN_RC=$?
+if [ "$ORCH_RUN_RC" = "0" ] && [ "${ORCH_AFTER_RESTART%%|*}" = "0" ]; then
+    pass "THE ASK: after a REAL restart, BOTH checks pass against the process that came back — same revision AND serving the fleet. A restart that produces neither, or only the first, is now a failed deploy"
+else
+    fail "after a real restart the post-restart checks did not both pass (verify_running rc=$ORCH_RUN_RC, verify_orchestration=$ORCH_AFTER_RESTART)"
+fi
+# A restarted pogod is ALWAYS in full mode — server.New hard-codes ModeFull and
+# no config key selects index-only. That is what makes exit 11 a safe assertion
+# rather than a policy, and it is asserted here against a real successor rather
+# than taken from the Go source.
+[ "$(server_mode)" = "full" ] \
+    && pass "a freshly restarted pogod comes up in FULL mode with no configuration saying so — the premise exit 11 rests on, measured rather than read" \
+    || fail "a freshly started sandbox pogod is not in full mode ($(server_mode)) — exit 11 would false-RED every night"
 
 echo ""
 # Backstop to the write guard above: the ledger must be readable and non-empty
