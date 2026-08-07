@@ -68,14 +68,16 @@ reads (so it can gate a schedule or CI step).`,
 				if e.Kind != scheduler.KindMailCheck {
 					continue
 				}
-				// Parse the mailbox with the SAME function the registration
+				// Parse the mailboxes with the SAME function the registration
 				// guard uses, so "where does this agent actually look?" has one
-				// answer in this tree rather than two that can drift.
-				polled, _ := scheduler.MailCheckMailbox(e.Message)
+				// answer in this tree rather than two that can drift. ALL of
+				// them, not the first: since mg-4f8c a mail-check names both the
+				// agent name and the work-item box, and taking only the first
+				// would report the second as stranded on every healthy polecat.
 				checks = append(checks, strandedmail.MailCheck{
 					Agent:      e.Agent,
 					ScheduleID: e.ID,
-					Polled:     polled,
+					Polled:     scheduler.MailCheckMailboxes(e.Message),
 				})
 			}
 

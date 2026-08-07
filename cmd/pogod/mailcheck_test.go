@@ -151,16 +151,23 @@ func TestMailCheckRegistrar_SpawnMessagePassesTheMailboxGuard(t *testing.T) {
 	m := mailCheckRegistrar{sched: s}
 
 	const name, workItem = "waa96", "mg-aa96"
-	if err := m.RegisterMailCheck(name, workItem, agent.PolecatMailCheckCron, agent.PolecatMailCheckMessage(name)); err != nil {
+	if err := m.RegisterMailCheck(name, workItem, agent.PolecatMailCheckCron, agent.PolecatMailCheckMessage(name, workItem)); err != nil {
 		t.Fatalf("the message pogod registers at spawn was refused by the mailbox guard: %v", err)
 	}
 	got, ok := s.Get(name, scheduler.MailCheckIDPrefix+workItem)
 	if !ok {
 		t.Fatal("entry absent after a registration that reported success")
 	}
-	mailbox, found := scheduler.MailCheckMailbox(got.Message)
-	if !found || mailbox != name {
-		t.Errorf("registered message reads mailbox %q (found=%v), want the agent name %q", mailbox, found, name)
+	// Both boxes, and the agent's own among them. The agent name is the
+	// identity replies are addressed to; the work-item box is the one a sender
+	// who typed the work item id created, and mg has no registration that would
+	// stop them (mg-4f8c). The guard requires the first; the second is why the
+	// guard is a membership test.
+	if !scheduler.ReadsMailbox(got.Message, name) {
+		t.Errorf("registered message %q never opens the agent's own box %q — mail addressed to it would be invisible", got.Message, name)
+	}
+	if !scheduler.ReadsMailbox(got.Message, workItem) {
+		t.Errorf("registered message %q never opens the work-item box %q — mail already delivered there stays unread (mg-4f8c)", got.Message, workItem)
 	}
 }
 
@@ -178,7 +185,13 @@ func TestMailCheckRegistrar_RejectsWorkItemDerivedMailbox(t *testing.T) {
 	m := mailCheckRegistrar{sched: s, escalate: func(string, string) { escalations++ }}
 
 	const name, workItem = "waa96", "mg-aa96"
-	err = m.RegisterMailCheck(name, workItem, agent.PolecatMailCheckCron, agent.PolecatMailCheckMessage(workItem))
+	// The pre-mg-aa96 message: the mailbox derived from the work item and the
+	// agent name absent entirely. Rendering it by passing workItem as the AGENT
+	// argument is how the bug actually happened — the two identities were
+	// collapsed into one — and PolecatMailCheckMessage then collapses the
+	// now-redundant second name, leaving a message that opens `aa96` and
+	// nothing else.
+	err = m.RegisterMailCheck(name, workItem, agent.PolecatMailCheckCron, agent.PolecatMailCheckMessage(workItem, workItem))
 	if err == nil {
 		t.Fatal("registrar accepted the pre-mg-aa96 work-item-derived mailbox; the polecat would poll `aa96` while its mail arrives in `waa96`, and would read that as having no mail")
 	}

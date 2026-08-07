@@ -3,6 +3,9 @@ package agent
 import (
 	"fmt"
 	"log"
+	"strings"
+
+	"github.com/drellem2/pogo/internal/mailbox"
 )
 
 // PolecatMailCheckCron is the cadence of the mail-check loop auto-registered
@@ -17,18 +20,54 @@ const PolecatMailCheckCron = "*/10 * * * *"
 // requests) that would otherwise sit unread — the silent-stall this schedule
 // exists to prevent (mg-e633).
 //
-// mailbox MUST be the polecat's AGENT NAME, not its work item id. Mail reaches
-// a polecat under the identity its correspondents address, and the protocol has
-// them reply to `--from=$POGO_AGENT_NAME`. Deriving this from the work item
-// instead sent all eight polecats running on 2026-08-05 to a mailbox nobody
-// writes to, invisibly — see internal/scheduler/mailbox.go (mg-aa96).
-func PolecatMailCheckMessage(mailbox string) string {
+// It names BOTH boxes a polecat's mail can be in, because which one holds it is
+// not a property of the polecat (mg-4f8c):
+//
+//   - agentName is the identity correspondents reply to, since the protocol
+//     sends with `--from=$POGO_AGENT_NAME`. Deriving the mailbox from the work
+//     item INSTEAD sent all eight polecats running on 2026-08-05 to a box nobody
+//     writes to, invisibly (mg-aa96).
+//   - workItemID is the box a sender who typed the work item id created, and mg
+//     has NO REGISTRATION — a mailbox springs into existence on first delivery,
+//     so that box is just as real and its mail is just as unread. Repointing at
+//     the agent name alone abandons it.
+//
+// A polecat that reads only one of the two is one misaddressed send away from a
+// silent stall, and the send side has no failure mode to warn it. So the
+// instruction is to read both, every time. workItemID may be empty (a spawn
+// carried none), in which case only the agent name is named.
+func PolecatMailCheckMessage(agentName, workItemID string) string {
+	boxes := fmt.Sprintf("`mg mail list %s`", agentName)
+	why := ""
+	if extra := otherMailbox(agentName, workItemID); extra != "" {
+		boxes = fmt.Sprintf("BOTH `mg mail list %s` AND `mg mail list %s`", agentName, extra)
+		why = " Read both every time: mailboxes are created on first delivery, so your mail is " +
+			"in whichever box your senders happened to type, and reading only one is silent when " +
+			"it is the wrong one. If `mg mail read` refuses a message as a cross-box read, that is " +
+			"NOT a permissions error — it compares against $POGO_AGENT_NAME, which your work-item " +
+			"box is not. It is still your mail: re-run with --force."
+	}
 	return fmt.Sprintf(
-		"Check your mail with `mg mail list %s` and handle any unread messages — "+
+		"Check your mail with %s and handle any unread messages — "+
 			"act on any reviewer findings or re-review requests and mail your reply back; "+
-			"otherwise no-op.",
-		mailbox,
+			"otherwise no-op.%s",
+		boxes, why,
 	)
+}
+
+// otherMailbox returns the work-item mailbox worth naming alongside the agent
+// name, or "" when there is nothing to add — no work item id, or one that
+// canonicalizes to the agent name anyway (the historically-agreeing case, where
+// the agent name is the work item id minus its `mg-` prefix). Naming the same
+// box twice would just be noise in the nudge.
+func otherMailbox(agentName, workItemID string) string {
+	if strings.TrimSpace(workItemID) == "" {
+		return ""
+	}
+	if mailbox.Canonical(workItemID) == mailbox.Canonical(agentName) {
+		return ""
+	}
+	return workItemID
 }
 
 // MailCheckRegistrar registers a per-polecat mail-check schedule at spawn time
@@ -131,13 +170,20 @@ func (r *Registry) reportScheduleRegisterFailed(agentName, scheduleKey, reason s
 //   - the schedule KEY (mail-check-<workItemID>) names the unit of work, and
 //     falls back to the agent name when the spawn carried no work item id, so
 //     every polecat gets a specific, reap-matchable schedule id;
-//   - the MAILBOX is always the agent name, because that is the identity mail
-//     is addressed to (the protocol replies to --from=$POGO_AGENT_NAME).
+//   - the MAILBOX is the agent name, because that is the identity mail is
+//     addressed to (the protocol replies to --from=$POGO_AGENT_NAME).
 //
 // Collapsing the second into the first is what pointed all eight polecats
 // running on 2026-08-05 at a mailbox nobody writes to, with no error to notice.
-// Scheduler.Add now refuses a mail-check whose message names a mailbox other
-// than its agent, so this pairing cannot silently drift again.
+//
+// But the agent name is not the ONLY box that can hold this polecat's mail, and
+// mg-aa96's "the mailbox is the agent name" was too strong (mg-4f8c). mg has no
+// mailbox registration — a box exists because somebody delivered to it — so a
+// correspondent who typed the work item id created a second real box holding
+// real unread mail. Both are therefore named in the message, and Scheduler.Add
+// requires the agent's own box to be among them while permitting the other:
+// the silent mis-pointing stays impossible, and the box mail actually landed in
+// stops being abandoned.
 //
 // Registration stays NON-fatal to the spawn (the polecat is already running),
 // but it is no longer best-effort-and-silent: a mail-check loop is a polecat's
@@ -163,7 +209,7 @@ func (r *Registry) registerPolecatMailCheck(agentName, workItemID string) {
 		r.reportScheduleRegisterFailed(agentName, scheduleKey, "nil_registrar")
 		return
 	}
-	if err := reg.RegisterMailCheck(agentName, scheduleKey, PolecatMailCheckCron, PolecatMailCheckMessage(agentName)); err != nil {
+	if err := reg.RegisterMailCheck(agentName, scheduleKey, PolecatMailCheckCron, PolecatMailCheckMessage(agentName, workItemID)); err != nil {
 		log.Printf("polecat %s: mail-check schedule registration failed after verify+retry: %v", agentName, err)
 		r.reportScheduleRegisterFailed(agentName, scheduleKey, "register_error: "+err.Error())
 	}

@@ -177,6 +177,7 @@ func TestPolecatTemplateExpansion(t *testing.T) {
 		"--cron \"*/10 * * * *\"",        // 10-minute cadence
 		"--id mail-check-gt-a3f",         // idempotent registration key (work item id)
 		"mg mail list $POGO_AGENT_NAME",  // mailbox — the AGENT NAME, see below
+		"mg mail list gt-a3f",            // AND the work-item box, see below
 	}
 	for _, check := range scheduleChecks {
 		if !strings.Contains(expanded, check) {
@@ -184,20 +185,26 @@ func TestPolecatTemplateExpansion(t *testing.T) {
 		}
 	}
 
-	// The mailbox must NOT be built from Id — the same shape as the branch
-	// assertion twenty lines up, and the same lesson learned twice. This one
-	// used to demand "mg mail list gt-a3f", pinning the mg-aa96 defect in place:
-	// mail is addressed to the AGENT NAME (correspondents reply to
+	// Both mailbox names are required, and this assertion has flipped twice.
+	//
+	// It first demanded ONLY "mg mail list gt-a3f", pinning the mg-aa96 defect
+	// in place: mail is addressed to the AGENT NAME (correspondents reply to
 	// `--from=$POGO_AGENT_NAME`), so a mailbox built from Id was wrong on every
-	// dispatch whose agent name was not the id minus "mg-". Unlike the branch
-	// case there is nothing to notice downstream: `mg mail list` on a never-used
-	// mailbox prints "no mail has ever been delivered to it" and exits 0,
-	// identical to an empty inbox. All eight polecats live on 2026-08-05 were
-	// reading the wrong one.
-	if strings.Contains(expanded, "mg mail list gt-a3f") {
-		t.Errorf("expanded template builds the mailbox from Id (%q); "+
-			"mail arrives under the agent name and the wrong-mailbox poll is "+
-			"indistinguishable from an empty inbox (mg-aa96)", "mg mail list gt-a3f")
+	// dispatch whose agent name was not the id minus "mg-", and all eight
+	// polecats live on 2026-08-05 were reading it.
+	//
+	// mg-aa96 then FORBADE the Id form, which was the opposite mistake. mg has
+	// no mailbox registration — a box exists because somebody delivered to it —
+	// so forbidding the work-item box does not stop mail arriving there, it only
+	// guarantees nobody opens it. Both boxes are real; the template names both.
+	//
+	// Unlike the branch assertion twenty lines up, neither error is noticeable
+	// downstream: `mg mail list` on a never-used mailbox and on a genuinely
+	// empty one both exit 0, and both print nothing under --json.
+	if !strings.Contains(expanded, "--force") {
+		t.Error("expanded template does not warn that mg's cross-box read guard fires on the polecat's OWN " +
+			"work-item box and is not a permissions error; a polecat that believes it may not read its own " +
+			"mail leaves it unread (mg-4f8c)")
 	}
 
 	// Verify guidance against additional schedules is still present — only the

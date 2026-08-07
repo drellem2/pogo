@@ -16,6 +16,15 @@ func mailCheckMsg(mailbox string) string {
 		"act on any reviewer findings or re-review requests and mail your reply back; otherwise no-op."
 }
 
+// bothBoxesMsg is the shape mg-4f8c makes standard: a mail-check that opens the
+// agent's own box AND the work-item box, because mg mailboxes have no
+// registration and mail is in whichever one the sender typed.
+func bothBoxesMsg(agent, workItem string) string {
+	return "Check your mail with BOTH `mg mail list " + agent + "` and `mg mail list " + workItem +
+		"`, and handle any unread messages — mailboxes are created on first delivery, so your " +
+		"mail is in whichever box your senders typed."
+}
+
 func newTestScheduler(t *testing.T) *Scheduler {
 	t.Helper()
 	s, err := New(filepath.Join(t.TempDir(), "schedules.json"), nil)
@@ -25,31 +34,44 @@ func newTestScheduler(t *testing.T) *Scheduler {
 	return s
 }
 
-func TestMailCheckMailbox(t *testing.T) {
+func TestMailCheckMailboxes(t *testing.T) {
 	tests := []struct {
 		name    string
 		message string
-		want    string
-		wantOK  bool
+		want    []string
 	}{
-		{"bare invocation", "Check your mail with mg mail list waa96 now", "waa96", true},
-		{"backticked", mailCheckMsg("waa96"), "waa96", true},
-		{"double quoted", `run "mg mail list waa96" please`, "waa96", true},
-		{"trailing comma", "run mg mail list waa96, then reply", "waa96", true},
-		{"trailing period at end", "run mg mail list waa96.", "waa96", true},
-		{"flag before mailbox", "mg mail list --json waa96", "waa96", true},
-		{"work-item form", "Check your mail with mg mail list mg-aa96 and handle it", "mg-aa96", true},
-		{"unexpanded env var", "Check your mail with mg mail list $POGO_AGENT_NAME", "$POGO_AGENT_NAME", true},
-		{"no invocation", "Check your mail and handle any unread messages.", "", false},
-		{"different subcommand", "run mg mail send mayor --from=x", "", false},
-		{"truncated invocation", "run mg mail list", "", false},
-		{"flags only after list", "run mg mail list --json", "", false},
+		{"bare invocation", "Check your mail with mg mail list waa96 now", []string{"waa96"}},
+		{"backticked", mailCheckMsg("waa96"), []string{"waa96"}},
+		{"double quoted", `run "mg mail list waa96" please`, []string{"waa96"}},
+		{"trailing comma", "run mg mail list waa96, then reply", []string{"waa96"}},
+		{"trailing period at end", "run mg mail list waa96.", []string{"waa96"}},
+		{"flag before mailbox", "mg mail list --json waa96", []string{"waa96"}},
+		{"work-item form", "Check your mail with mg mail list mg-aa96 and handle it", []string{"mg-aa96"}},
+		{"unexpanded env var", "Check your mail with mg mail list $POGO_AGENT_NAME", []string{"$POGO_AGENT_NAME"}},
+		{"no invocation", "Check your mail and handle any unread messages.", nil},
+		{"different subcommand", "run mg mail send mayor --from=x", nil},
+		{"truncated invocation", "run mg mail list", nil},
+		{"flags only after list", "run mg mail list --json", nil},
+
+		// mg-4f8c: the parser must see BOTH boxes. Returning only the first is
+		// what would make the guard, and the stranded-mail sweep, blind to the
+		// second — the same one-answer-per-question assumption that caused the
+		// bug in the first place.
+		{"both boxes", bothBoxesMsg("p4f8c", "mg-4f8c"), []string{"p4f8c", "mg-4f8c"}},
+		{"both boxes, work item first", bothBoxesMsg("mg-4f8c", "p4f8c"), []string{"mg-4f8c", "p4f8c"}},
+		{"three boxes", "mg mail list a then mg mail list b then mg mail list c", []string{"a", "b", "c"}},
+		{"second invocation truncated", "mg mail list waa96 and also mg mail list", []string{"waa96"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got, ok := MailCheckMailbox(tc.message)
-			if ok != tc.wantOK || got != tc.want {
-				t.Errorf("MailCheckMailbox(%q) = (%q, %v), want (%q, %v)", tc.message, got, ok, tc.want, tc.wantOK)
+			got := MailCheckMailboxes(tc.message)
+			if len(got) != len(tc.want) {
+				t.Fatalf("MailCheckMailboxes(%q) = %q, want %q", tc.message, got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Fatalf("MailCheckMailboxes(%q) = %q, want %q", tc.message, got, tc.want)
+				}
 			}
 		})
 	}
@@ -147,6 +169,90 @@ func TestAddAcceptsMailCheckOnItsOwnMailbox(t *testing.T) {
 			}
 			if got.Kind != KindMailCheck {
 				t.Errorf("kind = %q, want %q", got.Kind, KindMailCheck)
+			}
+		})
+	}
+}
+
+// TestAddAcceptsTheBothBoxesMailCheck is mg-4f8c's positive control, and it
+// FAILS against mg-aa96's equality guard — which is the point. That guard read
+// "the mailbox is the agent name" as an equality, and so refused the one
+// schedule that opens the box an agent's mail is actually in.
+//
+// mg mailboxes have NO REGISTRATION: a box is created on first delivery, so an
+// inbox is whichever name its SENDERS used, not a property of the agent. Agent
+// ba465's mail was sitting in the work-item box because that is what its
+// correspondents typed. Under equality the only registrable mail-check was one
+// that never opened it, and `mg mail list` reports an abandoned box and an empty
+// one with the same exit code — so the refusal bought nothing and cost the mail.
+func TestAddAcceptsTheBothBoxesMailCheck(t *testing.T) {
+	tests := []struct{ name, agent, workItem string }{
+		{"agent name first", "p4f8c", "mg-4f8c"},
+		{"work-item box first", "mg-4f8c", "p4f8c"}, // same pair, named the other way round
+		{"ba465's shape", "ba465", "mg-a465"},
+		{"a differently-stemmed pair", "g109", "mg-b4cc"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestScheduler(t)
+			agent := tc.agent
+			if agent == "mg-4f8c" {
+				agent = "p4f8c" // the ENTRY is always for the agent; only the message order varies
+			}
+			got, err := s.Add(Entry{
+				Agent:   agent,
+				ID:      MailCheckIDPrefix + "mg-4f8c",
+				Cron:    "*/10 * * * *",
+				Message: bothBoxesMsg(tc.agent, tc.workItem),
+			}, time.Now())
+			if err != nil {
+				t.Fatalf("Add refused a mail-check that reads BOTH %s's own box and its work-item box: %v\n"+
+					"Refusing this is mg-aa96 over-corrected: mailboxes have no registration, so mail already "+
+					"delivered under the other name stays there and this is the only schedule that drains it (mg-4f8c)", agent, err)
+			}
+			if got.Kind != KindMailCheck {
+				t.Errorf("kind = %q, want %q", got.Kind, KindMailCheck)
+			}
+		})
+	}
+}
+
+// TestAddStillRefusesWhenOwnBoxIsMissing pins the half of mg-aa96 that mg-4f8c
+// keeps. Naming EXTRA boxes is now fine; omitting your OWN is not, and adding
+// more wrong ones must not launder the omission into an acceptance. If the
+// membership test were ever loosened to "names at least one box", every row
+// below would register silently and mail sent to the agent would be invisible
+// again.
+func TestAddStillRefusesWhenOwnBoxIsMissing(t *testing.T) {
+	tests := []struct {
+		name    string
+		message string
+	}{
+		{"one wrong box", mailCheckMsg("mg-aa96")},
+		{"two wrong boxes", bothBoxesMsg("mg-aa96", "gc23c")},
+		{"near-miss stem", mailCheckMsg("aa96x")},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestScheduler(t)
+			_, err := s.Add(Entry{
+				Agent:   "waa96",
+				ID:      MailCheckIDPrefix + "mg-aa96",
+				Cron:    "*/10 * * * *",
+				Message: tc.message,
+			}, time.Now())
+			if err == nil {
+				t.Fatal("Add accepted a mail-check that never opens waa96's own box; mail addressed to waa96 would be invisible")
+			}
+			// The refusal has to name every box it DID parse, or the reader
+			// cannot tell which instruction was rejected.
+			for _, box := range MailCheckMailboxes(tc.message) {
+				if !strings.Contains(err.Error(), box) {
+					t.Errorf("refusal %q does not name the parsed mailbox %q", err, box)
+				}
+			}
+			if !strings.Contains(err.Error(), "waa96") {
+				t.Errorf("refusal %q does not name the agent whose box is missing", err)
 			}
 		})
 	}

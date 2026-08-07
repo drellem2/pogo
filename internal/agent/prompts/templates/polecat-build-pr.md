@@ -99,10 +99,17 @@ Follow these steps exactly, in order. Skipping any step is a failure.
    ```bash
    pogo schedule $POGO_AGENT_NAME --cron "*/10 * * * *" --id mail-check-{{.Id}} \
        --replay once \
-       --message "Check your mail with mg mail list $POGO_AGENT_NAME and handle any unread messages."
+       --message "Check your mail with BOTH mg mail list $POGO_AGENT_NAME AND mg mail list {{.Id}}, and handle any unread messages."
    ```
 
-   Confirm with `pogo schedule list --agent $POGO_AGENT_NAME` — you should see exactly one entry. pogod already auto-registers this schedule for you at spawn (mg-e633), so this command is a safe re-confirm; the `--id` is keyed on your work item id, so re-running it replaces the same `(agent, id)` entry rather than stacking duplicates. **The mailbox is `$POGO_AGENT_NAME`, not your work item id** — the two are different strings, and mail reaches you under your AGENT NAME (that is the identity `--from=$POGO_AGENT_NAME` puts on your replies, so it is where answers come back). Getting this wrong is invisible from your side: `mg mail list` on a mailbox nobody ever wrote to prints "no mail has ever been delivered to it" and exits 0, which reads exactly like an empty inbox — eight polecats polled the wrong one for hours on that. `pogo schedule` now refuses a mail-check naming any mailbox but its own agent, so a mismatch fails loudly at registration instead (mg-aa96). The {{.Coordinator}} will `pogo schedule rm mail-check-{{.Id}}` when stopping you, so you don't need to clean up yourself. This is the **only** background schedule you should register.
+   Confirm with `pogo schedule list --agent $POGO_AGENT_NAME` — you should see exactly one entry. pogod already auto-registers this schedule for you at spawn (mg-e633), so this command is a safe re-confirm; the `--id` is keyed on your work item id, so re-running it replaces the same `(agent, id)` entry rather than stacking duplicates. **Read BOTH mailboxes, every time.** mg has no mailbox registration — a box is created on FIRST DELIVERY — so your inbox is whichever name your senders happened to type, and that is not something you can determine from in here. `$POGO_AGENT_NAME` is where replies to your own mail come back (that is what `--from=$POGO_AGENT_NAME` puts on them); `{{.Id}}` is where mail from anyone who addressed your work item landed. Both are real boxes and both can hold unread mail. Reading only one is silent when it is the wrong one: `mg mail list` on a never-used mailbox prints "no mailbox for X yet" and exits 0, a real-but-empty box prints "no unread messages for X" and also exits 0, and under `--json` **both emit nothing at all**. One polecat lost 40 minutes to that, with both ends of its review loop healthy the whole time (mg-4f8c).
+
+   Two more traps in the same area:
+
+   - **A refused cross-box read is NOT a permissions error.** `mg mail read {{.Id}}/<msg-id>` will refuse with `refusing to read ...'s mail as agent "$POGO_AGENT_NAME"` — it compares against your agent name, and your work-item box is not that string. It is still your mail. Re-run with `--force`.
+   - **Never infer the name you SEND to.** `mg mail send` to a name nobody has used creates a brand-new empty box and reports success — there is no such thing as a bad address. Use the `From:` on the mail you are replying to, or `pogo agent list`; confirm with `ls ~/.macguffin/mail/<name>` before an important send. Four mails were lost that way to a one-character slip in a recipient name.
+
+   The {{.Coordinator}} will `pogo schedule rm mail-check-{{.Id}}` when stopping you, so you don't need to clean up yourself. This is the **only** background schedule you should register.
 
    *Why `pogo schedule` and not an in-process scheduler?* A harness in-process scheduler{{if eq .Provider "claude"}} (such as Claude Code's `CronCreate`){{end}} lives inside this harness session and has no notion of wall-clock time across sleep — if the host suspends for an hour, every fire that should have happened in that window is silently dropped. `pogo schedule` stores the next fire time on disk and replays through sleep; see "Reacting to scheduler fires" below for the policy.
 
@@ -182,7 +189,7 @@ Follow these steps exactly, in order. Skipping any step is a failure.
 The mail-check schedule registered in step 2 delivers each fire with metadata appended to the message body, e.g.:
 
 ```
-Check your mail with mg mail list <your-agent-name> and handle any unread messages.
+Check your mail with BOTH mg mail list <your-agent-name> AND mg mail list <your-work-item-id>, and handle any unread messages.
 
 [scheduler id=mail-check-mg-XXXX due=2026-05-03T09:00:00Z fired=2026-05-03T09:00:14Z]
 ```

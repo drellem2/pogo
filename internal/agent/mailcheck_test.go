@@ -104,11 +104,22 @@ func TestSpawnPolecatRegistersMailCheck(t *testing.T) {
 	if c.cron != PolecatMailCheckCron {
 		t.Errorf("mail-check cron = %q, want %q", c.cron, PolecatMailCheckCron)
 	}
+	// The AGENT-NAME box is mandatory (mg-aa96): it is the identity replies are
+	// addressed to, and a message that omits it sends the polecat somewhere its
+	// mail will never arrive — invisibly, because `mg mail list` on a box nobody
+	// wrote to exits 0 like an empty one.
 	if !strings.Contains(c.message, "mg mail list pc-plain") {
 		t.Errorf("mail-check message %q should send the polecat to its AGENT-NAME mailbox `mg mail list pc-plain` — that is where its mail is addressed (mg-aa96)", c.message)
 	}
-	if strings.Contains(c.message, "mg mail list wi-42") {
-		t.Errorf("mail-check message %q derives the mailbox from the work item id; mail sent to pc-plain would never be seen, and the wrong-mailbox poll is indistinguishable from an empty inbox (mg-aa96)", c.message)
+	// The WORK-ITEM box is mandatory too (mg-4f8c). mg-aa96's fix asserted the
+	// inverse of this line — that the work-item box must NOT appear — on the
+	// theory that the mailbox is a property of the agent. It is not: mg has no
+	// mailbox registration, a box is created on first delivery, so a sender who
+	// typed the work item id created a real box holding real unread mail.
+	// Excluding it does not prevent that box existing, it only guarantees
+	// nobody opens it.
+	if !strings.Contains(c.message, "mg mail list wi-42") {
+		t.Errorf("mail-check message %q never opens the work-item box `wi-42`; mail a sender addressed there stays unread forever, and nothing reports it (mg-4f8c)", c.message)
 	}
 }
 
@@ -272,14 +283,62 @@ func TestSpawnPolecatNoMailCheckRegistrar(t *testing.T) {
 // TestPolecatMailCheckMessageMentionsReviewLoop guards the message contract:
 // the nudge must both point at the mailbox and tell the polecat to act on the
 // builder<->reviewer review-loop traffic this schedule exists to unblock. The
-// argument is an AGENT NAME — see the doc comment on PolecatMailCheckMessage.
+// first argument is an AGENT NAME — see the doc comment on
+// PolecatMailCheckMessage.
 func TestPolecatMailCheckMessageMentionsReviewLoop(t *testing.T) {
-	msg := PolecatMailCheckMessage("we633")
+	msg := PolecatMailCheckMessage("we633", "mg-e633")
 	if !strings.Contains(msg, "mg mail list we633") {
 		t.Errorf("message %q should reference `mg mail list we633`", msg)
 	}
 	if !strings.Contains(strings.ToLower(msg), "review") {
 		t.Errorf("message %q should mention the review loop (reviewer findings / re-review)", msg)
+	}
+}
+
+// TestPolecatMailCheckMessageNamesBothBoxes is mg-4f8c's contract on the nudge
+// text. mg has NO mailbox registration — a box exists because somebody
+// delivered to it — so a polecat's mail is in whichever box its senders typed,
+// and there is no way to know which from inside the polecat. Naming only one
+// leaves the other to accumulate unread, and `mg mail list` reports an
+// abandoned box with the same exit code as an empty one, so nothing downstream
+// notices. Reading both is the only instruction that is correct either way.
+func TestPolecatMailCheckMessageNamesBothBoxes(t *testing.T) {
+	msg := PolecatMailCheckMessage("p4f8c", "mg-4f8c")
+	for _, want := range []string{"mg mail list p4f8c", "mg mail list mg-4f8c"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("message %q must instruct `%s`; a polecat that reads only one box is one misaddressed send from a silent stall (mg-4f8c)", msg, want)
+		}
+	}
+	// The cross-box refusal fires on the polecat's OWN work-item box, because
+	// mg compares against $POGO_AGENT_NAME. It reads like a permissions error
+	// and is not one; a polecat that believes it is not allowed to read its own
+	// mail leaves the mail unread, which is the failure this whole message
+	// exists to prevent.
+	if !strings.Contains(msg, "--force") {
+		t.Errorf("message %q must tell the polecat that a refused cross-box read on its own work-item box is not a permissions error and that --force is correct (mg-4f8c)", msg)
+	}
+}
+
+// TestPolecatMailCheckMessageNamesOneBoxWhenTheyCollapse keeps the nudge honest
+// in the two cases where a second name would be noise rather than information:
+// a spawn that carried no work item, and the historically-agreeing case where
+// the agent name IS the work item id minus its `mg-` prefix (which is exactly
+// why mg-aa96's defect survived so long unnoticed).
+func TestPolecatMailCheckMessageNamesOneBoxWhenTheyCollapse(t *testing.T) {
+	for _, tc := range []struct{ name, agent, workItem string }{
+		{"no work item", "we633", ""},
+		{"agent name is the work item stem", "d2f0", "mg-d2f0"},
+		{"same string", "aa96", "aa96"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			msg := PolecatMailCheckMessage(tc.agent, tc.workItem)
+			if got := strings.Count(msg, "mg mail list "); got != 1 {
+				t.Errorf("message names %d mailboxes, want 1 — %q and %q are the same box: %q", got, tc.agent, tc.workItem, msg)
+			}
+			if !strings.Contains(msg, "mg mail list "+tc.agent) {
+				t.Errorf("message %q must name the agent's own box %q", msg, tc.agent)
+			}
+		})
 	}
 }
 
