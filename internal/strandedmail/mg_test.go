@@ -63,8 +63,8 @@ func TestAgainstRealMg(t *testing.T) {
 	}
 
 	checks := []MailCheck{
-		{Agent: "waa96", ScheduleID: "mail-check-mg-aa96", Polled: "waa96"}, // mismatched: `aa96` is abandoned
-		{Agent: "wfc99", ScheduleID: "mail-check-mg-fc99", Polled: "wfc99"}, // healthy: `fc99` never existed
+		{Agent: "waa96", ScheduleID: "mail-check-mg-aa96", Polled: []string{"waa96"}}, // mismatched: `aa96` is abandoned
+		{Agent: "wfc99", ScheduleID: "mail-check-mg-fc99", Polled: []string{"wfc99"}}, // healthy: `fc99` never existed
 	}
 	rep := Detect(checks, boxes, ListMessages)
 
@@ -114,8 +114,8 @@ func TestAgainstRealMgStaysQuietWhenNothingIsStranded(t *testing.T) {
 		t.Fatalf("EnumerateMailboxes: %v", err)
 	}
 	checks := []MailCheck{
-		{Agent: "waa96", ScheduleID: "mail-check-mg-aa96", Polled: "waa96"},
-		{Agent: "wfc99", ScheduleID: "mail-check-mg-fc99", Polled: "wfc99"},
+		{Agent: "waa96", ScheduleID: "mail-check-mg-aa96", Polled: []string{"waa96"}},
+		{Agent: "wfc99", ScheduleID: "mail-check-mg-fc99", Polled: []string{"wfc99"}},
 	}
 	rep := Detect(checks, boxes, ListMessages)
 	if rep.Actionable() {

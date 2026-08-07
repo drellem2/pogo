@@ -59,32 +59,58 @@ type MailCheck struct {
 	// Its suffix is the ABANDONED mailbox candidate: it is the string the
 	// pre-mg-aa96 template put in the message body.
 	ScheduleID string
-	// Polled is the mailbox the schedule's message actually sends the agent to,
-	// as parsed by scheduler.MailCheckMailbox. Empty means the message names no
+	// Polled is EVERY mailbox the schedule's message sends the agent to, as
+	// parsed by scheduler.MailCheckMailboxes. Empty means the message names no
 	// mailbox, in which case the agent reads its own name.
-	Polled string
+	//
+	// It is a list because since mg-4f8c a mail-check names both the agent name
+	// and the work-item box: mg mailboxes have no registration, so mail is in
+	// whichever box the sender typed. A sweep that assumed one polled box would
+	// report the second one as stranded on every correctly-configured polecat —
+	// a false alarm on the healthy majority, which is the reliable way to get a
+	// report ignored.
+	Polled []string
 }
 
-// polledMailbox is where this check actually sends its agent, canonically.
-func (c MailCheck) polledMailbox() string {
-	if strings.TrimSpace(c.Polled) == "" {
-		return scheduler.CanonicalMailbox(c.Agent)
+// polledMailboxes is every box this check actually opens, canonically. A
+// message naming none means the agent reads its own name.
+func (c MailCheck) polledMailboxes() []string {
+	var out []string
+	for _, p := range c.Polled {
+		if strings.TrimSpace(p) == "" {
+			continue
+		}
+		out = append(out, scheduler.CanonicalMailbox(p))
 	}
-	return scheduler.CanonicalMailbox(c.Polled)
+	if len(out) == 0 {
+		return []string{scheduler.CanonicalMailbox(c.Agent)}
+	}
+	return out
+}
+
+// polls reports whether this check opens the named (already canonical) box.
+func (c MailCheck) polls(box string) bool {
+	for _, p := range c.polledMailboxes() {
+		if p == box {
+			return true
+		}
+	}
+	return false
 }
 
 // shadowMailbox is the mailbox this agent's mail-check WOULD have read under the
 // pre-mg-aa96 work-item derivation: the schedule id's suffix. Empty when the id
-// carries no suffix, or when it resolves to the same place the agent already
-// reads (the healthy case, and the historically-agreeing case where the agent
-// name is the work item id minus "mg-").
+// carries no suffix, or when the box is one the agent already reads — which
+// covers the healthy case, the historically-agreeing case (agent name is the
+// work item id minus "mg-"), and, since mg-4f8c, the normal case where the
+// mail-check reads both boxes deliberately.
 func (c MailCheck) shadowMailbox() string {
 	suffix := strings.TrimPrefix(c.ScheduleID, scheduler.MailCheckIDPrefix)
 	if suffix == "" || suffix == c.ScheduleID {
 		return ""
 	}
 	shadow := scheduler.CanonicalMailbox(suffix)
-	if shadow == "" || shadow == c.polledMailbox() {
+	if shadow == "" || c.polls(shadow) {
 		return ""
 	}
 	return shadow
@@ -96,8 +122,10 @@ type Finding struct {
 	Mailbox string `json:"mailbox"`
 	// Unread is what mg reports sitting in it.
 	Unread int `json:"unread"`
-	// Agent is who the mail was for, and Polls is where that agent looks
-	// instead. Both are needed: the whole failure is that these disagree.
+	// Agent is who the mail was for, and Polls is every box that agent looks in
+	// instead, comma-separated. Both are needed: the whole failure is that these
+	// disagree, and after mg-4f8c a healthy mail-check reads more than one box —
+	// so "which boxes DID it open?" is what makes the finding legible.
 	Agent string `json:"agent"`
 	Polls string `json:"polls"`
 	// ScheduleID is the mail-check the shadow was derived from — the audit
@@ -163,7 +191,7 @@ func Detect(checks []MailCheck, boxes []Mailbox, list func(mailbox string) ([]Me
 			Mailbox:    shadow,
 			Unread:     n,
 			Agent:      c.Agent,
-			Polls:      c.polledMailbox(),
+			Polls:      strings.Join(c.polledMailboxes(), ", "),
 			ScheduleID: c.ScheduleID,
 		}
 		if list != nil {

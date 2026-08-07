@@ -13,7 +13,7 @@ import (
 // Repointing alone produced this; the whole point of the sweep is that the
 // repoint's residue is otherwise invisible.
 func TestDetectFindsTheLiveOrphan(t *testing.T) {
-	checks := []MailCheck{{Agent: "wb468", ScheduleID: "mail-check-mg-b468", Polled: "wb468"}}
+	checks := []MailCheck{{Agent: "wb468", ScheduleID: "mail-check-mg-b468", Polled: []string{"wb468"}}}
 	boxes := []Mailbox{
 		{Name: "wb468", Unread: 0, Exists: true},
 		{Name: "b468", Unread: 1, Exists: true},
@@ -64,19 +64,19 @@ func TestDetectStaysSilentOnHealthyFleets(t *testing.T) {
 			// work-item box was never written to. THIS is the case the sweep
 			// must never call stranded — it is the normal post-fix shape.
 			name:   "shadow box never existed",
-			checks: []MailCheck{{Agent: "waa96", ScheduleID: "mail-check-mg-aa96", Polled: "waa96"}},
+			checks: []MailCheck{{Agent: "waa96", ScheduleID: "mail-check-mg-aa96", Polled: []string{"waa96"}}},
 			boxes:  []Mailbox{{Name: "waa96", Unread: 0, Exists: true}},
 		},
 		{
 			name:   "shadow box exists but is genuinely empty",
-			checks: []MailCheck{{Agent: "waa96", ScheduleID: "mail-check-mg-aa96", Polled: "waa96"}},
+			checks: []MailCheck{{Agent: "waa96", ScheduleID: "mail-check-mg-aa96", Polled: []string{"waa96"}}},
 			boxes:  []Mailbox{{Name: "waa96", Unread: 2, Exists: true}, {Name: "aa96", Unread: 0, Exists: true}},
 		},
 		{
 			// The historically-agreeing case: agent name == work item minus
 			// "mg-", so the shadow IS the polled box. Nothing is abandoned.
 			name:   "agent name equals the work item id",
-			checks: []MailCheck{{Agent: "d2f0", ScheduleID: "mail-check-mg-d2f0", Polled: "d2f0"}},
+			checks: []MailCheck{{Agent: "d2f0", ScheduleID: "mail-check-mg-d2f0", Polled: []string{"d2f0"}}},
 			boxes:  []Mailbox{{Name: "d2f0", Unread: 3, Exists: true}},
 		},
 		{
@@ -87,8 +87,36 @@ func TestDetectStaysSilentOnHealthyFleets(t *testing.T) {
 		{
 			// mg strips a leading "mg-", so these are one mailbox, not two.
 			name:   "shadow differs from the polled box only by the mg- prefix",
-			checks: []MailCheck{{Agent: "mg-aa96", ScheduleID: "mail-check-mg-aa96", Polled: "aa96"}},
+			checks: []MailCheck{{Agent: "mg-aa96", ScheduleID: "mail-check-mg-aa96", Polled: []string{"aa96"}}},
 			boxes:  []Mailbox{{Name: "aa96", Unread: 4, Exists: true}},
+		},
+		{
+			// mg-4f8c's shape, and the one that matters most for the sweep's
+			// credibility: the mail-check reads BOTH boxes deliberately, and
+			// the work-item box has unread mail in it. That mail is NOT
+			// stranded — the schedule opens it every ten minutes. A sweep that
+			// took only the first polled box would flag this on every polecat
+			// under the current template, and a report that cries wolf on the
+			// healthy majority is a report nobody reads by the time the real
+			// one arrives.
+			name: "both boxes polled, and the work-item box has mail",
+			checks: []MailCheck{{
+				Agent:      "p4f8c",
+				ScheduleID: "mail-check-mg-4f8c",
+				Polled:     []string{"p4f8c", "mg-4f8c"},
+			}},
+			boxes: []Mailbox{{Name: "p4f8c", Unread: 1, Exists: true}, {Name: "4f8c", Unread: 3, Exists: true}},
+		},
+		{
+			// Same, with the message naming the work-item box first. Order is
+			// prose, not meaning.
+			name: "both boxes polled, work-item box named first",
+			checks: []MailCheck{{
+				Agent:      "p4f8c",
+				ScheduleID: "mail-check-mg-4f8c",
+				Polled:     []string{"mg-4f8c", "p4f8c"},
+			}},
+			boxes: []Mailbox{{Name: "4f8c", Unread: 3, Exists: true}},
 		},
 	}
 	for _, tc := range tests {
@@ -120,7 +148,7 @@ func TestDetectFindsTheWholeFleetsResidue(t *testing.T) {
 	var checks []MailCheck
 	var boxes []Mailbox
 	for _, f := range fleet {
-		checks = append(checks, MailCheck{Agent: f.agent, ScheduleID: "mail-check-" + f.workItem, Polled: f.agent})
+		checks = append(checks, MailCheck{Agent: f.agent, ScheduleID: "mail-check-" + f.workItem, Polled: []string{f.agent}})
 		boxes = append(boxes,
 			Mailbox{Name: f.agent, Unread: 0, Exists: true},
 			Mailbox{Name: strings.TrimPrefix(f.workItem, "mg-"), Unread: 1, Exists: true},
@@ -140,7 +168,7 @@ func TestDetectFindsTheWholeFleetsResidue(t *testing.T) {
 // it is a second problem, not a reason to say the box is fine.
 func TestDetectReportsWhenMessagesCannotBeRead(t *testing.T) {
 	rep := Detect(
-		[]MailCheck{{Agent: "wb468", ScheduleID: "mail-check-mg-b468", Polled: "wb468"}},
+		[]MailCheck{{Agent: "wb468", ScheduleID: "mail-check-mg-b468", Polled: []string{"wb468"}}},
 		[]Mailbox{{Name: "b468", Unread: 1, Exists: true}},
 		func(string) ([]Message, error) { return nil, errors.New("mg exited 1") },
 	)

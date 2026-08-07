@@ -2234,42 +2234,66 @@ func TestPolecatTemplatesIncludeMailCheckCron(t *testing.T) {
 	}
 }
 
-// TestPolecatTemplatesReadTheAgentNameMailbox is the regression guard for
-// mg-aa96, and it is deliberately the INVERSE of what this file asserted
-// before: the old assertion REQUIRED `mg mail list {{.Id}}`, which is the
-// defect written down as a contract. A polecat's mail is addressed to its agent
-// name — the protocol has correspondents reply to `--from=$POGO_AGENT_NAME` —
-// while {{.Id}} is the work item. The two agree only when the agent name is
-// exactly the work item id minus "mg-", which is how this survived: it looked
-// right on every polecat named that way.
+// TestPolecatTemplatesReadBothMailboxes is the regression guard for mg-aa96 as
+// corrected by mg-4f8c. This assertion has now been inverted TWICE, and the
+// reason is worth keeping:
 //
-// It cannot be caught downstream. `mg mail list` on a mailbox nothing was ever
-// delivered to prints "no mail has ever been delivered to it" and exits 0 —
-// byte-identical to a healthy empty inbox. On 2026-08-05 all eight running
-// polecats were mismatched; one sat on an unread mayor correction retracting a
-// false premise in its own brief.
-func TestPolecatTemplatesReadTheAgentNameMailbox(t *testing.T) {
+//   - Originally it REQUIRED `mg mail list {{.Id}}` — the defect written down as
+//     a contract. Mail is addressed to the agent name (correspondents reply to
+//     `--from=$POGO_AGENT_NAME`), so on 2026-08-05 all eight running polecats
+//     polled a box nobody wrote to; one sat on an unread mayor correction
+//     retracting a false premise in its own brief.
+//   - mg-aa96 then FORBADE `mg mail list {{.Id}}`, on the theory that the
+//     mailbox is the agent name. That over-corrected. mg has NO mailbox
+//     registration: a box is created on FIRST DELIVERY, so an inbox is whichever
+//     name its SENDERS used and is not a property of the agent at all. Agent
+//     ba465's mail was in the work-item box because that is what its
+//     correspondents typed, and forbidding that box did not stop the mail
+//     arriving there — it only stopped anyone opening it.
+//
+// So the contract is BOTH, and the test asserts both halves. Neither name can be
+// dropped: an agent that reads only $POGO_AGENT_NAME misses what work-item
+// senders addressed, and one that reads only {{.Id}} is the original 2026-08-05
+// failure. Neither is detectable from inside the agent — `mg mail list` reports a
+// never-used box and a genuinely-empty one with the same exit code, and with
+// identical (empty) `--json` output.
+func TestPolecatTemplatesReadBothMailboxes(t *testing.T) {
 	for _, path := range polecatMailCheckTemplates {
 		data, err := defaultPrompts.ReadFile(path)
 		if err != nil {
 			t.Fatalf("read %s: %v", path, err)
 		}
 		s := string(data)
-		if strings.Contains(s, "mg mail list {{.Id}}") {
-			t.Errorf("%s: prescribes `mg mail list {{.Id}}` — that reads a mailbox derived from the WORK ITEM, "+
-				"while mail is addressed to the AGENT NAME. The poll would silently return "+
-				"\"no mail has ever been delivered to it\" forever (mg-aa96). Use $POGO_AGENT_NAME.", path)
-		}
 		if !strings.Contains(s, "mg mail list $POGO_AGENT_NAME") {
 			t.Errorf("%s: expected the mail-check prompt to read `mg mail list $POGO_AGENT_NAME` — "+
 				"the same source as the `--from=$POGO_AGENT_NAME` replies come back on, so the two cannot disagree (mg-aa96)", path)
 		}
+		if !strings.Contains(s, "mg mail list {{.Id}}") {
+			t.Errorf("%s: expected the mail-check prompt to ALSO read `mg mail list {{.Id}}` — "+
+				"mailboxes are created on first delivery, so mail from anyone who addressed the work "+
+				"item is sitting in that box and nothing else will ever open it (mg-4f8c)", path)
+		}
 		// The schedule id stays keyed on the work item: it names the unit of
-		// work and is what the coordinator removes on stop. Only the MAILBOX
-		// moved. Asserting both halves is what stops a future edit from
-		// "fixing" the mismatch by collapsing the id onto the agent name too.
+		// work and is what the coordinator removes on stop. It is a THIRD
+		// identity, distinct from either mailbox. Asserting it here is what
+		// stops a future edit from "fixing" things by collapsing the id onto
+		// the agent name.
 		if !strings.Contains(s, "--id mail-check-{{.Id}}") {
 			t.Errorf("%s: expected the schedule id to stay keyed on the work item (`--id mail-check-{{.Id}}`)", path)
+		}
+		// The two traps that make every other failure here read as something
+		// else. Without the --force note a polecat meeting the cross-box
+		// refusal on its OWN work-item box concludes it is not allowed to read
+		// its own mail; without the send-side note it invents recipient names
+		// that silently succeed.
+		if !strings.Contains(s, "--force") {
+			t.Errorf("%s: the mail-check section must say that a refused cross-box read on the polecat's own "+
+				"work-item box is not a permissions error and that --force is correct (mg-4f8c)", path)
+		}
+		if !strings.Contains(s, "pogo agent list") {
+			t.Errorf("%s: the mail-check section must tell the polecat to take a recipient name from the mail's "+
+				"From: or `pogo agent list` — `mg mail send` to an unused name creates a phantom box and "+
+				"reports success, so an inferred name fails silently (mg-4f8c)", path)
 		}
 	}
 }
