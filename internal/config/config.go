@@ -65,6 +65,33 @@ const DefaultProvider = "claude"
 // coordinator half of mg-ce47 only.
 const DefaultCoordinator = "mayor"
 
+// DefaultEscalationBox is the mailbox a watcher addresses when its finding has
+// outlived the fleet's chance to clear it and a PERSON has to look. It is
+// "human" — the same box the whole fleet already writes — so a fresh install
+// behaves exactly as it did before this seam existed (mg-65d2).
+//
+// The seam exists because `human` stops being terminal the moment a deployment
+// puts a RELAY in front of it. mg-b17b's representative role does exactly that:
+// the fleet keeps writing `human`, a representative agent OWNS that box as its
+// inbox, reads it, and writes a separate terminal box that the notifier polls.
+// That inversion is deliberate — it moves two readers instead of twenty-one
+// writers — but it turns every escalation into a loop, because deafwatch,
+// ackwatch, ghintake and ghteardown all escalate to `human`, and the finding
+// they most need to deliver is "the representative is deaf". Addressed to
+// `human`, that notice is filed in the inbox of the agent it is reporting as
+// unable to read its inbox.
+//
+// So the escalation target is named separately from the fleet's write target,
+// and a deployment that installs a relay points this at the relay's OUTPUT box.
+// The bypass is then structural rather than a timeout: it does not depend on
+// the relay noticing anything, which is the one thing a wedged relay cannot do.
+//
+// This is one value and not four per-watcher keys on purpose. "Which box does a
+// person actually read" is a fact about the deployment, not a preference of
+// each watcher, and four knobs that must agree are four knobs that can disagree
+// — see mg-b201, where three artifacts declaring one schedule drifted apart.
+const DefaultEscalationBox = "human"
+
 // DefaultWorker (the worker role's display-name default, "pogocat") is
 // declared in migrate.go alongside the role-default migration table that
 // consumes it. The worker seam here — AgentsConfig.Worker, WorkerName(), the
@@ -1117,6 +1144,18 @@ type AgentsConfig struct {
 	// Prefer CoordinatorName() over reading the field so zero-value configs
 	// (tests, callers that skip Load) still resolve to the default.
 	Coordinator string
+	// EscalationBox is the mailbox watcher escalations go to when the fleet has
+	// demonstrably failed to clear a finding ([agents] escalation_box). Empty
+	// is treated as DefaultEscalationBox ("human"); Load() fills it in. Prefer
+	// EscalationBoxName() over reading the field so zero-value configs still
+	// resolve to the default.
+	//
+	// Point this at a TERMINAL box — one no agent reads as its inbox. A
+	// deployment that relays `human` through a representative agent (mg-b17b)
+	// sets this to the representative's OUTPUT box, so "the representative is
+	// deaf" bypasses the representative by construction. See
+	// DefaultEscalationBox for why that loop is the thing this exists to break.
+	EscalationBox string
 	// Worker is the worker role's display name ([agents] worker). Empty is
 	// treated as DefaultWorker ("pogocat"); Load() fills it in. Prefer
 	// WorkerName() over reading the field so zero-value configs still resolve
@@ -1202,6 +1241,21 @@ func (c *AgentsConfig) CoordinatorName() string {
 		return c.Coordinator
 	}
 	return DefaultCoordinator
+}
+
+// EscalationBoxName returns the configured escalation mailbox, falling back to
+// DefaultEscalationBox ("human") when unset. Safe on a zero-value AgentsConfig.
+//
+// Never returns "": a watcher escalation with a blank recipient is a shell
+// command that fails at the point the fleet has already failed, and mg files
+// mail for an unknown name rather than refusing (mg-f04b), so neither a blank
+// nor a wrong name reports itself. Falling back to the box the fleet already
+// writes is the only answer that is wrong in a visible direction.
+func (c *AgentsConfig) EscalationBoxName() string {
+	if c != nil && c.EscalationBox != "" {
+		return c.EscalationBox
+	}
+	return DefaultEscalationBox
 }
 
 // WorkerName returns the configured worker display name, falling back to
@@ -1754,6 +1808,11 @@ func Load() *Config {
 	// [stall_watch] agent was configured.
 	if cfg.Agents.Coordinator == "" {
 		cfg.Agents.Coordinator = DefaultCoordinator
+	}
+	// Default the escalation mailbox to the box the whole fleet already writes,
+	// so an install that has not heard of relays keeps today's behaviour.
+	if cfg.Agents.EscalationBox == "" {
+		cfg.Agents.EscalationBox = DefaultEscalationBox
 	}
 	// Default the worker display name so existing deployments work with no
 	// config change. Display-only; touches no identifier.
@@ -2437,6 +2496,8 @@ func parseConfigFileInto(cfg *parsedConfig, path string) error {
 				cfg.Agents.Provider = unquotedVal
 			case "coordinator":
 				cfg.Agents.Coordinator = unquotedVal
+			case "escalation_box":
+				cfg.Agents.EscalationBox = unquotedVal
 			case "worker":
 				cfg.Agents.Worker = unquotedVal
 			case "sme":

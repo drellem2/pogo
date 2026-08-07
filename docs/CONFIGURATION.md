@@ -181,6 +181,54 @@ This setting once *was* a hard-coded `pm-pogo` inside the shipped prompt
 that void and then held for two hours waiting for the reply. An empty default
 cannot make that mistake; a guessed one can only make it quietly.
 
+## The escalation mailbox
+
+Four watchers — `ackwatch`, `deafwatch`, `ghintake`, `ghteardown` — first mail a
+fleet agent, and then, once a finding has persisted long enough that the fleet
+has demonstrably not cleared it, **also** mail a box where a person will see it.
+That second recipient is named here:
+
+```toml
+[agents]
+escalation_box = "operator"   # default "human"
+```
+
+The default is `human` — the same box the whole fleet already writes — so an
+install that has never heard of this setting escalates exactly where it always
+did. **Most deployments should leave it alone.**
+
+**When to change it: you have put a RELAY in front of `human`.** pogo supports a
+*representative* pattern (designed in mg-b17b, built in mg-65d2) in which a crew
+agent owns `human` as its inbox, reads it, and rewrites what matters into a
+separate terminal box that the desktop notifier polls. The point of that
+inversion is that it moves two READERS instead of twenty-one writers: every
+`mg mail send human` in the fleet — and every one that does not exist yet —
+stays correct, and no prompt or watcher needs re-pointing.
+
+Escalation is the one exception, and it is not a matter of taste. Once a
+representative owns `human`, an escalation reading *"the representative is deaf"*
+is delivered into the inbox of the agent it is reporting as unable to read its
+inbox. The bypass has to be **structural** rather than a timeout, because a
+wedged relay noticing anything is precisely what cannot be relied on. Set this
+to the relay's OUTPUT box and the loop cannot form.
+
+**Point it at a terminal box** — one no agent reads as its inbox. Nothing
+validates that; a mailbox is created on first delivery, so a name that is merely
+plausible is delivered to, filed, and never read, and no instrument tells that
+apart from a working channel (mg-f04b).
+
+**It is one setting and not four.** "Which box does a person actually read" is a
+fact about the deployment, not a per-watcher preference, and four knobs that must
+agree are four knobs that can disagree — mg-b201 is the incident where three
+artifacts declaring one schedule drifted apart. `pogod` resolves the value once
+at startup and hands the same string to all four watchers; the log line for each
+watcher prints its `escalate_to=` so the running value is observable without
+reading config.
+
+Note that a watcher drops the second recipient when it equals the first, so
+setting this to a watcher's `notify_to` disables that watcher's escalation
+rather than double-sending it.
+
 ## Crew auto-start
 
 At boot pogod starts every crew agent whose prompt frontmatter says
