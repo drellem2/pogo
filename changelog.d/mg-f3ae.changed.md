@@ -53,6 +53,23 @@
   shell-prefix form does not reach the shipped deployment. The reload-semantics
   half of the original rationale is intact and is what is stated above.
 
+  The first attempt at *that* fix repeated the same species of error one level
+  down: it told operators to edit `scripts/launchd/com.pogo.daemon.plist` and
+  then reload `~/Library/LaunchAgents/com.pogo.daemon.plist`, which are two
+  different files. The repo plist is a template; the installed copy is what
+  launchd reads. Worse, on the path `scripts/launchd/README.md` calls
+  "Recommended", `pogo service install` never reads the repo plist at all — it
+  renders `launchdPlistTemplate` (`internal/service/service.go`), which carries
+  `PATH`, `HOME`, `POGO_HOME` and `POGO_PLUGIN_PATH` and nothing else — and it
+  overwrites the installed plist whenever the render differs from disk, so a
+  hand-added `POGO_LOG_LEVEL` is dropped by the next install. Since the README
+  tells operators to re-run the installer after upgrading pogod, that is routine.
+  The docs now point at the installed plist, say plainly that re-installing drops
+  the key, and scope the repo template's commented-out key to the manual `sed`
+  install path it actually serves. Teaching `launchdPlistTemplate` to carry the
+  variable is the durable fix, is outside the approved recommendation, and is
+  raised separately rather than taken here.
+
   **It does not cover every logger.** `internal/driver` builds its plugin
   loggers at `hclog.Debug` independently, so `POGO_LOG_LEVEL=warn` quiets the
   indexer but not plugin startup chatter. The docs say which loggers are in
