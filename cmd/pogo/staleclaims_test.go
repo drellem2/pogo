@@ -23,6 +23,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/drellem2/pogo/internal/mgcontract"
 )
 
 // mgEmptyStoreNotice is what `mg list --status=claimed` prints when there is
@@ -256,12 +258,18 @@ func mgRoot(t *testing.T) string {
 // TestRealMG_EmptyStoreContract is the arm the stubs above depend on: against
 // the mg that is actually installed, a clean store prints a human sentence on
 // the rendered stream and NOTHING on the --json one. The first half is why the
-// old count was 1; the second half is why the new one is 0. If mg ever changes
-// either, this fails here rather than silently in the shipped check.
+// old count was 1; the second half is why the new one is 0.
+//
+// Both halves are now DECLARED in internal/mgcontract, which is where a change
+// in mg lands (mg-216c). This file predates that package and named the idea
+// first — "the contract the stub encodes", in the header above — so the two
+// agree by construction: the clauses required here are the sentence this test
+// was already written to protect.
 func TestRealMG_EmptyStoreContract(t *testing.T) {
-	if _, err := exec.LookPath("mg"); err != nil {
-		t.Skip("mg not installed")
-	}
+	mgcontract.Require(t,
+		mgcontract.ListClaimedJSONIsEmptyOnAnEmptyStore,
+		mgcontract.ListClaimedRenderedNoticesAnEmptyStore,
+	)
 	root := mgRoot(t)
 
 	rendered, err := exec.Command("mg", "list", "--status=claimed", "--root="+root).Output()
@@ -292,9 +300,10 @@ func TestRealMG_EmptyStoreContract(t *testing.T) {
 // TestRealMG_ClaimedItemsCounted closes the loop end to end: real mg, real
 // claimed items, and the real `pogo doctor --check` binary reading them.
 func TestRealMG_ClaimedItemsCounted(t *testing.T) {
-	if _, err := exec.LookPath("mg"); err != nil {
-		t.Skip("mg not installed")
-	}
+	mgcontract.Require(t,
+		mgcontract.NewPrintsTheCreatedID,
+		mgcontract.ListClaimedJSONIsEmptyOnAnEmptyStore,
+	)
 	root := mgRoot(t)
 	env := []string{"MG_ROOT=" + root}
 

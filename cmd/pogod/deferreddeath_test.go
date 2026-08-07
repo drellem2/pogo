@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/drellem2/pogo/internal/agent"
+	"github.com/drellem2/pogo/internal/mgcontract"
 	"github.com/drellem2/pogo/internal/refinery"
 )
 
@@ -33,9 +34,14 @@ import (
 // test can reach the developer's live ~/.macguffin.
 func mgSandboxStore(t *testing.T) string {
 	t.Helper()
-	if _, err := exec.LookPath("mg"); err != nil {
-		t.Skip("mg not on PATH; the claim-release path needs the real macguffin CLI")
-	}
+	// The two mg behaviours this file rests on, declared rather than assumed:
+	// the fixture builder scrapes an id out of `mg new`, and the claim the dead
+	// polecat left behind must be gone from a store mg agrees with. See
+	// internal/mgcontract.
+	mgcontract.Require(t,
+		mgcontract.NewPrintsTheCreatedID,
+		mgcontract.UnclaimReturnsTheItemToAvailable,
+	)
 	// Not t.TempDir(): mg writes a git snapshot repo under the root, and macOS
 	// temp paths are long enough to matter for the sockets alongside it.
 	root := filepath.Join(filepath.Dir(shortSocketDir(t)), "mgstore")

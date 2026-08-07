@@ -168,6 +168,48 @@ say so on a work item where somebody can read the argument.
 
 If the check names your new suite, adopt the isolation. **Do not add a line.**
 
+### Writing a test that drives the real `mg`: declare the clause (`mg-216c`)
+
+`mg` lives in another repository and is not pinned. A test that asserts how it
+behaves is a **cross-repo coupling that nothing announces**, and `./build.sh`
+runs `go test ./...` while the refinery gate runs `./build.sh` — so one such
+test takes down every pogo merge. On 2026-08-07 two *correct* macguffin changes
+did exactly that ninety minutes apart, killing five branches that had nothing to
+do with either.
+
+Two questions, in order.
+
+**1. Does this test need the real binary at all?** Keep it live only when the
+cross-binary behaviour *is* what is under test — `internal/strandedmail`'s
+`TestAgainstRealMg` earns it, because a mock keyed on our own struct tags could
+never notice `mg` renaming an NDJSON field, which is that bug's exact shape. If
+`mg` is merely building a fixture, use a stub: `internal/ghintake` is the worked
+example — a shell case statement for the cases, one live control for the wire
+format.
+
+**2. If it stays live, say what it depends on.**
+
+```go
+func TestRefusedDoneKeepsTheResultItWasGiven(t *testing.T) {
+    mgcontract.Require(t, mgcontract.DoneRefusalPreservesTheResultSidecar)
+    ...
+}
+```
+
+`internal/mgcontract` holds the declared contract — one named clause per
+behaviour, with a probe, the `mg` work item that created it, and the pogo tests
+resting on it. When a clause breaks, the dependent tests **skip** (their premise
+is gone, so what they assert next is not a finding about pogo) and
+`TestTheDeclaredMgContractStillHolds` fails **by name**, saying which behaviour
+moved and what else to re-read. The gate is still red — pogo holds a stale
+expectation and somebody must rule on it — but the occurrence costs a glance
+instead of a full-suite hunt.
+
+**Never resolve a break by editing the probe to agree with what `mg` now does.**
+Decide which side is wrong first. A clause rewritten to match the dependency has
+stopped testing anything, and every pogo test behind it is then resting on a
+behaviour nobody checked. See [docs/design/mg-contract.md](docs/design/mg-contract.md).
+
 ### Code Style
 
 - All Go code must be formatted with `gofmt`. The CI pipeline checks this.
