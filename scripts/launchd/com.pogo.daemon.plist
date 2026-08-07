@@ -50,7 +50,8 @@
              file at all: it renders its own template, which has no
              POGO_LOG_LEVEL key and overwrites the installed plist, so on that
              path add the key to ~/Library/LaunchAgents/com.pogo.daemon.plist
-             and re-add it after every re-install. See docs/customizing.md.
+             and re-add it after every re-install. See docs/customizing.md. -->
+        <!--
         <key>POGO_LOG_LEVEL</key>
         <string>debug</string>
         -->
