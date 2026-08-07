@@ -789,7 +789,7 @@ SINK_SUBJ="[deploy-stalled]"
 
 # The coordinator's mailbox must EXIST before the run, because "the box existed"
 # is precisely what mail_alert uses to tell a real delivery from a phantom. This
-# seeding send is also the control on the sandbox itself: if mg cannot write here,
+# seeding is also the control on the sandbox itself: if mg cannot write here,
 # every assertion below is measuring the wrong thing and we want to know now.
 #
 # --create IS THE POINT OF THE SEED, not a workaround for it (mg-d639). This
@@ -1001,11 +1001,27 @@ else
 fi
 
 # (c) THE SINK REFUSES TO CLAIM A DELIVERY IT CANNOT SEE. The recipient name is a
-#     CLAIM about config, and a wrong one does not error: mg creates the mailbox
-#     and reports success, so the alert lands in a phantom nobody reads and the
-#     send looks perfect. That is this ticket's own defect wearing the sink's
-#     clothes, and it is not hypothetical — the live box carries such a phantom
-#     today. mail_alert must call this UNDELIVERED, not OK.
+#     CLAIM about config, and a wrong one is not self-announcing. mail_alert must
+#     call an unaddressable recipient UNDELIVERED, and must say the NAME is what
+#     is wrong — otherwise a renamed coordinator swallows every stall alert
+#     forever. That is this ticket's own defect wearing the sink's clothes, and it
+#     is not hypothetical: the live box carries such a phantom today.
+#
+# WHAT THIS ASSERTS, AND WHY IT IS NO LONGER THE mailbox_created FIELD. This
+# control used to require the string "this send CREATED one", because the only
+# way mg told you about an unknown recipient was mailbox_created:true on a
+# SUCCESSFUL send. mg-d639 changed that: an unknown recipient is now REFUSED
+# (no_such_mailbox, exit 3), so the field never arrives and the old assertion
+# failed against a mail_alert that was doing exactly the right thing. Pinning the
+# control back to that field would pin it to one mg's internals; pinning it to
+# "non-zero" alone would let it pass on mg being absent, which measures nothing.
+#
+# So the property is the OPERATOR-FACING one, which is identical under both mg
+# generations and is the whole point of the check: refused, AND the diagnosis
+# blames the recipient name rather than the message. mail_alert prints that
+# sentence from its no_such_mailbox rung and its mailbox_created rung and from
+# nowhere else — a missing mg, a transport error or a readback miss all return
+# non-zero WITHOUT it, so this still discriminates.
 #
 # A REAL, NON-EMPTY body file: mg rejects an empty one outright ("a body is
 # required"), which would make this assertion pass on the error it was not
@@ -1014,16 +1030,14 @@ SINK_PROBE_BODY="$SANDBOX/sink-probe-body.txt"
 echo "phantom probe body" > "$SINK_PROBE_BODY"
 SINK_PHANTOM_OUT="$(mail_alert "sink-no-such-box-$$" "$SINK_SUBJ phantom probe" "$SINK_PROBE_BODY" 2>&1)"
 SINK_PHANTOM_RC=$?
-# Non-zero is necessary but NOT sufficient: mail_alert returns 1 from several
-# paths (mg absent, send error, readback miss), and a probe that "passes" because
-# mg was missing would be reporting on nothing. Assert the REASON too, so this
-# stays a control on the phantom-mailbox check specifically.
-if [ "$SINK_PHANTOM_RC" -ne 0 ] && printf '%s' "$SINK_PHANTOM_OUT" | grep -q "had NO mailbox"; then
-    pass "mail_alert reports UNDELIVERED, and names the reason, when the recipient had no mailbox — a send that INVENTS the box is not a delivery"
+if [ "$SINK_PHANTOM_RC" -ne 0 ] \
+   && printf '%s' "$SINK_PHANTOM_OUT" | grep -q "had NO mailbox" \
+   && printf '%s' "$SINK_PHANTOM_OUT" | grep -q "the recipient name is wrong"; then
+    pass "mail_alert reports UNDELIVERED, and blames the recipient NAME, when the recipient has no mailbox — neither a send that INVENTS the box nor one mg refuses is a delivery"
 elif [ "$SINK_PHANTOM_RC" -ne 0 ]; then
-    fail "mail_alert refused the phantom send but for the WRONG reason (not the mailbox_created check) — this control is not measuring what it claims: $SINK_PHANTOM_OUT"
+    fail "mail_alert refused the phantom send but did NOT tell the operator the recipient name is wrong — the send is correctly undelivered and the remedy is missing, which is the half that gets a renamed coordinator fixed: $SINK_PHANTOM_OUT"
 else
-    fail "mail_alert reported SUCCESS into a mailbox it had just created — a renamed coordinator would silently swallow every stall alert forever, exactly like the phantom box already sitting on this machine"
+    fail "mail_alert reported SUCCESS for a recipient with no mailbox — a renamed coordinator would silently swallow every stall alert forever, exactly like the phantom box already sitting on this machine"
 fi
 fi   # resolve_mg
 
