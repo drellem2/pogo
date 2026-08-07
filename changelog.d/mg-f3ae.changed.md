@@ -68,7 +68,7 @@
   the key, and scope the repo template's commented-out key to the manual `sed`
   install path it actually serves. Teaching `launchdPlistTemplate` to carry the
   variable is the durable fix, is outside the approved recommendation, and is
-  raised separately rather than taken here.
+  tracked as `mg-b7b7` rather than taken here.
 
   **It does not cover every logger.** `internal/driver` builds its plugin
   loggers at `hclog.Debug` independently, so `POGO_LOG_LEVEL=warn` quiets the

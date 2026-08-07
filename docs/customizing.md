@@ -471,7 +471,7 @@ the next pogod start** — there is no reload. That is also why it is an
 environment variable rather than a `config.toml` key: a config key that can be
 edited while the daemon runs implies the edit will be picked up, and honouring
 that needs reload machinery this does not have. A config key with proper reload
-semantics is tracked separately.
+semantics is tracked separately, as `mg-44d6`.
 
 Not every logger in the daemon is covered. `internal/driver`'s plugin loggers
 are built at `debug` independently of this setting, so `POGO_LOG_LEVEL=warn`
@@ -520,7 +520,7 @@ environment at spawn.
 > you to re-run the installer after upgrading pogod, this is routine rather than
 > a corner case: **re-add the key and reload after any `pogo service install`,**
 > or the level silently reverts to `info`. Teaching the installer's template to
-> carry the variable is the durable fix and is tracked separately.
+> carry the variable is the durable fix and is tracked separately, as `mg-b7b7`.
 
 If you installed by hand (the `sed`-the-template path in the launchd README
 rather than `pogo service install`), the repo template ships a commented-out
