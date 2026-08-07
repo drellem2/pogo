@@ -296,7 +296,13 @@ func TestShippedBuildPRTemplateProtocol(t *testing.T) {
 	for _, want := range []string{
 		// PR creation replaces refinery submission, body links issue + triage rec.
 		"gh pr create",
-		"Resolves <owner>/<repo>#<n>",
+		// The default citation is NEUTRAL. A closing keyword in a PR body
+		// closes the WHOLE issue on merge, and splitting an issue into a
+		// landed part and a deferred part is routine on this track — so the
+		// template's default must be the form that closes nothing (mg-f9e0).
+		"Refs <owner>/<repo>#<n>",
+		// Deliberate closure stays available, but as an acknowledged choice.
+		"Closing-ref-ack: <owner>/<repo>#<n>",
 		"triage recommendation",
 		// Review loop: PR comments plus direct mail to the reviewer.
 		"gh pr comment",
@@ -316,6 +322,28 @@ func TestShippedBuildPRTemplateProtocol(t *testing.T) {
 	// of the submit step without false-positives on the prohibition text.
 	if strings.Contains(out, "pogo refinery submit polecat-") {
 		t.Errorf("expanded polecat-build-pr.md: contains internal-track self-submit command")
+	}
+
+	// The PRESCRIBED body — the heredoc a builder copies — must carry no
+	// closing keyword. "Resolves" appears later in the template, deliberately,
+	// in the acknowledged-closure escape; asserting on the whole document
+	// cannot tell the default from the escape, so this narrows to the block
+	// between `gh pr create` and its heredoc terminator (mg-f9e0).
+	start := strings.Index(out, "gh pr create")
+	if start < 0 {
+		t.Fatal("expanded polecat-build-pr.md: no gh pr create block to inspect")
+	}
+	end := strings.Index(out[start:], "\n   EOF")
+	if end < 0 {
+		t.Fatal("expanded polecat-build-pr.md: gh pr create heredoc is unterminated")
+	}
+	prescribed := out[start : start+end]
+	for _, keyword := range []string{"Resolves", "Closes", "Fixes"} {
+		if strings.Contains(prescribed, keyword) {
+			t.Errorf("expanded polecat-build-pr.md: the prescribed PR body contains the closing keyword %q — "+
+				"it closes the WHOLE issue on merge, and a PR that lands part of an issue is routine here:\n%s",
+				keyword, prescribed)
+		}
 	}
 }
 

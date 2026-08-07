@@ -39,6 +39,12 @@ issues as `Refs owner/repo#N`, or add `Closing-ref-ack: <ref> — <why>` when th
 closure is deliberate. The refinery runs the same check on every merge, so this
 hook is an early warning rather than the guarantee.
 
+The refinery also reads the **pull request body**, not just the commits: a
+`Resolves #N` there closes the whole issue when the PR merges, and no hook can
+see it because it is in no commit. Cite the issue as `Refs owner/repo#N` in PR
+bodies too, and fix a flagged one with `gh pr edit <number> --body-file -` —
+amending and re-pushing does nothing to a PR body.
+
 ## End-to-end smoke test
 
 `scripts/test-e2e.sh` exercises the full loop — `pogo init`, `pogod`, mayor

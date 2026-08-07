@@ -10,11 +10,18 @@ import (
 
 // closingRefRepo builds origin + a clone with one commit on main, and returns
 // the clone dir. Callers add branch commits on top.
+//
+// It also installs a stub `gh` that reports no pull request. The gate asks gh
+// for the branch's PR body (mg-f9e0), and a developer machine with a real,
+// authenticated gh on PATH would otherwise send these commit-message tests out
+// to the network — where the answer depends on someone else's GitHub state.
+// Tests that care about the PR half install their own stub over this one.
 func closingRefRepo(t *testing.T) string {
 	t.Helper()
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not found")
 	}
+	fakeGH(t, `echo 'no pull requests found for branch' >&2; exit 1`)
 	originDir := t.TempDir()
 	run(t, originDir, "git", "init", "--bare", "-b", "main")
 
@@ -133,5 +140,101 @@ func TestClosingRefGateFailsClosedOnUnreadableHistory(t *testing.T) {
 	workDir := closingRefRepo(t)
 	if err := checkClosingRefs(workDir, "main", "branch-that-does-not-exist"); err == nil {
 		t.Fatal("gate passed a range it could not read")
+	}
+}
+
+// cleanBranch puts a branch on workDir whose commits close nothing, so a
+// failure can only have come from the PR body.
+func cleanBranch(t *testing.T, workDir, branch string) {
+	t.Helper()
+	run(t, workDir, "git", "checkout", "-b", branch)
+	commitWithBody(t, workDir, "pr.go", "feat: the change under review\n\nRefs drellem2/pogo#111\n")
+}
+
+// TestClosingRefGateCatchesPRBody is the defect this gate was blind to
+// (mg-f9e0): the shipped build-pr template told every builder to write
+// "Resolves <owner>/<repo>#<n>" in the PR BODY, which closes the whole issue on
+// merge, and the gate read commit messages only. The commits here are clean, so
+// a pass means the gate is still pointed at the wrong artifact.
+func TestClosingRefGateCatchesPRBody(t *testing.T) {
+	workDir := closingRefRepo(t)
+	cleanBranch(t, workDir, "polecat-f9e0")
+	fakeGH(t, `printf '%s\n' '{"number":57,"body":"Adds the config key.\n\nResolves drellem2/pogo#111\n\nWork item: mg-f9e0\n"}'`)
+
+	err := checkClosingRefs(workDir, "main", "polecat-f9e0")
+	if err == nil {
+		t.Fatal("MISS: the refinery would have merged a PR body that closes drellem2/pogo#111")
+	}
+	msg := err.Error()
+	// The report has to name the artifact and the command that edits it. An
+	// author told to amend a commit will go looking for a string that is in no
+	// commit, and conclude the check is broken.
+	for _, want := range []string{"pull request #57 body", "drellem2/pogo#111", "gh pr edit", "Refs owner/repo#N"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("failure message omits %q — an author cannot act on it:\n%s", want, msg)
+		}
+	}
+	if strings.Contains(msg, "amend the message and re-push") {
+		t.Errorf("failure message offers the COMMIT remedy for a PR body:\n%s", msg)
+	}
+}
+
+// TestClosingRefGatePRBodyAckPasses: the escape has to work in the artifact it
+// is written in, or the only way past the gate is to drop the closure the
+// author meant. gh#111's split was released by a human on exactly this
+// judgement; the trailer is where that judgement gets recorded.
+func TestClosingRefGatePRBodyAckPasses(t *testing.T) {
+	workDir := closingRefRepo(t)
+	cleanBranch(t, workDir, "polecat-acked")
+	fakeGH(t, `printf '%s\n' '{"number":57,"body":"Resolves drellem2/pogo#111\n\nClosing-ref-ack: drellem2/pogo#111 — intentional; this PR discharges the issue in full\n"}'`)
+
+	if err := checkClosingRefs(workDir, "main", "polecat-acked"); err != nil {
+		t.Errorf("acknowledged closure rejected — the deliberate path is unavailable:\n%v", err)
+	}
+}
+
+// TestClosingRefGatePRBodyNeutralPasses: `Refs` is the template's default now,
+// so the default path must merge. A gate that bounced it would be reverted.
+func TestClosingRefGatePRBodyNeutralPasses(t *testing.T) {
+	workDir := closingRefRepo(t)
+	cleanBranch(t, workDir, "polecat-neutral")
+	fakeGH(t, `printf '%s\n' '{"number":57,"body":"Adds the config key.\n\nRefs drellem2/pogo#111\n\nWork item: mg-f9e0\n"}'`)
+
+	if err := checkClosingRefs(workDir, "main", "polecat-neutral"); err != nil {
+		t.Errorf("false positive on the template's own default body:\n%v", err)
+	}
+}
+
+// TestClosingRefGatePRBodyFailsSoftOnBrokenGH pins the stated residual rather
+// than leaving it to be discovered. Every internal-track branch has no PR, and
+// a gh that is missing, unauthenticated or offline is not a property of the
+// branch under judgement — so an unreadable PR body must not stop the merge.
+// The log line is the only record that the body went unguarded.
+func TestClosingRefGatePRBodyFailsSoftOnBrokenGH(t *testing.T) {
+	workDir := closingRefRepo(t)
+	cleanBranch(t, workDir, "polecat-nogh")
+	fakeGH(t, `echo "gh: could not determine base repo" >&2; exit 1`)
+
+	if err := checkClosingRefs(workDir, "main", "polecat-nogh"); err != nil {
+		t.Errorf("a broken gh stopped a merge whose commits are clean:\n%v", err)
+	}
+}
+
+// TestClosingRefGateReportsBothArtifacts: a branch can carry the hazard in both
+// places, and a report that stops at the first one sends the author round twice.
+func TestClosingRefGateReportsBothArtifacts(t *testing.T) {
+	workDir := closingRefRepo(t)
+	run(t, workDir, "git", "checkout", "-b", "polecat-both")
+	commitWithBody(t, workDir, "both.go", realIncidentMessage)
+	fakeGH(t, `printf '%s\n' '{"number":57,"body":"Resolves drellem2/pogo#111\n"}'`)
+
+	err := checkClosingRefs(workDir, "main", "polecat-both")
+	if err == nil {
+		t.Fatal("gate passed a branch carrying the hazard in both artifacts")
+	}
+	for _, want := range []string{"drellem2/pogo#89", "pull request #57 body", "drellem2/pogo#111"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("report omits %q — the author fixes one artifact and bounces on the other:\n%s", want, err)
+		}
 	}
 }

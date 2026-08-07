@@ -185,10 +185,68 @@ func TestAckCannotTriggerItself(t *testing.T) {
 // author the string that makes their commit land, the next attempt is
 // --no-verify and the check is decorative.
 func TestReportNamesTheNeutralForm(t *testing.T) {
-	out := Report("commit-msg", Check(realIncidentBody(t)))
+	out := Report(CommitMessage, "commit-msg", Check(realIncidentBody(t)))
 	for _, want := range []string{"Refs drellem2/pogo#89", AckPrefix, "WRAPPED"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("report omits %q:\n%s", want, out)
 		}
+	}
+}
+
+// TestReportRemedyMatchesTheArtifact: the two artifacts are edited by different
+// commands, and a report that tells someone holding a PR body to amend a commit
+// sends them looking for a string that is in no commit. That reads as a broken
+// check, and a check that reads as broken gets routed around (mg-f9e0).
+func TestReportRemedyMatchesTheArtifact(t *testing.T) {
+	findings := Check("Resolves drellem2/pogo#111\n")
+	if len(findings) != 1 {
+		t.Fatalf("want 1 finding, got %d", len(findings))
+	}
+
+	commit := Report(CommitMessage, "commit 1a2b3c4d", findings)
+	if !strings.Contains(commit, "amend the message and re-push") {
+		t.Errorf("commit report does not say to amend:\n%s", commit)
+	}
+	if strings.Contains(commit, "gh pr edit") {
+		t.Errorf("commit report offers the PR remedy:\n%s", commit)
+	}
+
+	pr := Report(PullRequestBody, "pull request #57 body", findings)
+	for _, want := range []string{"gh pr edit", "PULL REQUEST BODY", AckPrefix, "Refs owner/repo#N"} {
+		if !strings.Contains(pr, want) {
+			t.Errorf("PR report omits %q:\n%s", want, pr)
+		}
+	}
+	// The PR tail may mention amending — it says amending does NOT help — but
+	// it must never issue it as the instruction.
+	if strings.Contains(pr, "amend the message and re-push") {
+		t.Errorf("PR report tells the author to amend a commit that does not contain the string:\n%s", pr)
+	}
+}
+
+// TestGHDashFormIsAReference: GitHub links `GH-123` exactly as it links `#123`,
+// and this package claimed to mirror GitHub's rule while covering two of its
+// three reference forms. Nobody here writes GH-123 — which is precisely why one
+// would have sailed through a check everyone believed was complete (mg-f9e0).
+func TestGHDashFormIsAReference(t *testing.T) {
+	f := Check("fix: land the thing\n\nFixes GH-123\n")
+	if len(f) != 1 {
+		t.Fatalf("want 1 finding for the GH- form, got %d: %+v", len(f), f)
+	}
+	if f[0].Ref != "GH-123" {
+		t.Errorf("Ref = %q, want %q", f[0].Ref, "GH-123")
+	}
+
+	// An ack must be able to name the same issue in either spelling: GH-123
+	// and #123 are the same issue in the same repo.
+	for _, ack := range []string{"GH-123", "#123", "gh-123"} {
+		if got := Check("Fixes GH-123\n\n" + AckPrefix + " " + ack + " — intentional\n"); len(got) != 0 {
+			t.Errorf("ack %q did not silence the GH-123 closure: %+v", ack, got)
+		}
+	}
+
+	// The wrap that caused the incident applies to this form too.
+	if got := Check("nobody fixed\nGH-123 in time\n"); len(got) != 1 || !got[0].Wrapped {
+		t.Errorf("wrapped GH- form not reported as a wrap: %+v", got)
 	}
 }

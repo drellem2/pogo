@@ -140,14 +140,26 @@ Follow these steps exactly, in order. Skipping any step is a failure.
        --body-file - <<'EOF'
    <summary of the change>
 
-   Resolves <owner>/<repo>#<n>
+   Refs <owner>/<repo>#<n>
 
    Approved triage recommendation: <triage ticket id or pointer from your ticket body>
    Work item: {{.Id}}
    EOF
    ```
 
-   Capture the PR URL/number from the output — you need it for the announcement mail and for `gh pr comment` in the review loop. If a PR for this branch already exists (`gh pr view "$BRANCH"` succeeds), do not open a second one — reuse it.
+   **Cite the issue as `Refs`, not `Resolves` — and this is not a style preference.** A closing keyword (`Resolves`/`Closes`/`Fixes`) in a PR body closes the **whole** issue the moment the PR merges. GitHub has no way to close part of one. On this track, splitting an issue into a landed part and a deliberately-deferred part is routine — that is what your triage recommendation often scopes you to — and the parenthetical people reach for scopes nothing: a body reading `Resolves #N (item 1)` closed an entire issue here once already, on an external reporter's thread. `Refs` costs one manual close on the days you really did discharge the whole issue; `Resolves` costs a reopen and an explanation to a stranger on the days you did not. The asymmetry is not close.
+
+   **If the PR genuinely discharges the issue ENTIRELY and you mean to close it,** that is a deliberate choice you record rather than a default you inherit — write the keyword *and* acknowledge it per reference in the same body:
+
+   ```
+   Resolves <owner>/<repo>#<n>
+
+   Closing-ref-ack: <owner>/<repo>#<n> — intentional; this PR discharges the issue in full
+   ```
+
+   The refinery inspects the PR body as well as your commit messages (`internal/refinery/closingref_gate.go`), so an unacknowledged closing keyword **fails the merge** — at the {{.Coordinator}}'s submit, long after your review loop closed. The ack is not a formality that silences a check; it is the sentence a reader finds later when they ask who decided to close a stranger's issue.
+
+   Capture the PR URL/number from the output — you need it for the announcement mail and for `gh pr comment` in the review loop. If a PR for this branch already exists (`gh pr view "$BRANCH"` succeeds), do not open a second one — reuse it. To change the body later, `gh pr edit <number> --body-file -`: it is not in any commit, so amending and re-pushing does nothing to it.
 
 6. **Announce the PR.** Mail the {{.Coordinator}} and the review ticket's owner (the reviewer {{.Worker}}'s mail address is its work item id — your ticket body or `depends` chain names the review ticket):
 

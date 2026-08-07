@@ -1815,7 +1815,17 @@ func TestProcessMergePRModePushBack(t *testing.T) {
 	originDir, oldSHA := setupPRModeRepo(t)
 	snapshot := filepath.Join(t.TempDir(), "tip")
 	fakeGHLog(t, fmt.Sprintf(`
-views=$(grep -c '^pr view' "$GH_LOG")
+case "$*" in
+*number,body*)
+  # The closing-ref gate reads the PR BODY before the merge (mg-f9e0). That is
+  # a different query from the state lookups this stub sequences on, so it is
+  # answered here and kept out of the count below — otherwise adding a caller
+  # silently re-labels which lookup is "the pre-merge one".
+  echo '{"number":7,"body":"Refs drellem2/pogo#111"}'
+  exit 0
+  ;;
+esac
+views=$(grep -c 'state' "$GH_LOG")
 if [ "$views" -le 1 ]; then
   # Pre-merge lookup: the PR is open, so the push-back should run.
   echo '{"state":"OPEN","number":7}'

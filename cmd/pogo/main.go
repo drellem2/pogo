@@ -1541,7 +1541,7 @@ suppresses only the reference it names.`,
 			if len(findings) == 0 {
 				return
 			}
-			fmt.Fprint(os.Stderr, closingref.Report(source, findings))
+			fmt.Fprint(os.Stderr, closingref.Report(closingref.CommitMessage, source, findings))
 			os.Exit(cli.ExitError)
 		},
 	}
