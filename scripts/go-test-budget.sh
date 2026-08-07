@@ -57,14 +57,55 @@ set -e
 #   better-instrumented backstop is choosing a better failure, not merely an
 #   earlier one.
 #
-#   Headroom against a loaded host is the thing not to get wrong: too short a
-#   budget converts load into spurious failures, which is the disease mg-6c90
-#   documents (a fixed CPU floor that fails at load 52-106 and passes at load
-#   ~5, on byte-identical binaries). Measured on this host, the slowest
-#   packages are internal/agent at 206-217s and internal/refinery at 81.2s
-#   isolated, rising to 155.1s at load avg ~32 — a 1.9x response to contention
-#   alone. 20m is 5.5x the slowest figure measured here and 2.2x the slowest
-#   figure #107 reports from a live fleet.
+#   HEADROOM, AND WHAT IT IS ON A LOADED HOST — read this before changing 20m.
+#
+#   Too short a budget converts load into spurious failures, which is the
+#   disease mg-6c90 documents (a fixed CPU floor: 13/13 FAIL at load 52-106,
+#   4/4 PASS at load 4.6-5.3, byte-identical binaries). So the number that
+#   matters is not the quiet-host multiple, it is the margin when the box is
+#   busy — and this host has recorded load 174 in a single night.
+#
+#   Quiet host, internal/agent (the slowest package), measured on THIS BRANCH:
+#   268.7s isolated at load ~5 (`go test -count=1`, 2026-08-07). That is 4.5x
+#   under the 20m budget. The comparable triage figures recorded in mg-a465
+#   (206-217s; internal/refinery 81.2s isolated, 155.1s at load ~32) were taken
+#   BEFORE this branch and are now optimistic — attribute them to that run, not
+#   to this one.
+#
+#   Loaded host, and this is an ESTIMATE, not a measurement. The only
+#   load-response pair anyone has measured here is internal/refinery's
+#   81.2s@~7.8 -> 155.1s@~32, which fits runtime ~ load^0.46. Extrapolating
+#   internal/agent with that exponent, from each of the three anchors available:
+#
+#       anchor                                load 100    load 150    load 174
+#       triage, full suite (216.8s@~6)        13.1m 1.5x  15.8m 1.3x  16.9m 1.2x
+#       review, this branch (279.6s@~10)      13.4m 1.5x  16.1m 1.2x  17.3m 1.2x
+#       this branch, isolated (268.7s@~5)     17.7m 1.1x  21.3m 0.9x  22.8m 0.9x
+#
+#   So the honest statement is: the margin at load ~100 is somewhere around
+#   1.1-1.5x, and at the load 150-174 this box has actually recorded, the
+#   slowest package may LEGITIMATELY EXCEED 20m. Not 5.5x. A spurious timeout
+#   on internal/agent under heavy fleet load is an anticipated outcome of this
+#   budget, not a sign that something else broke.
+#
+#   Treat the exponent as rough. It is a two-point fit on one package, pushed
+#   ~5x past its measured range and applied to a different package — and this
+#   branch's own third point does not fit it: internal/refinery measured 99.2s
+#   at load ~5 here against 81.2s at load ~7.8 at triage, i.e. LOWER load and
+#   HIGHER time. Load average does not separate CPU contention from I/O wait,
+#   and these suites spawn processes and PTYs. What is not in doubt is the
+#   direction and the rough size: the real margin is single-digit tens of
+#   percent at high load, not multiples.
+#
+#   20m is kept anyway, deliberately. Raising it to buy margin at load 174
+#   spends the gate budget on a state where the box is failing at everything,
+#   and the 60m gate bound is what should catch that. The point of recording
+#   the above is that the next person to see `TIMEOUT: internal/agent` at load
+#   150 should find it written down as expected — and the report this script
+#   prints tells them to check the load average before reading the dump as a
+#   bug. That is the whole difference between a legible failure and a triage
+#   cycle. If it starts recurring at ordinary load, that is new information and
+#   the number should move then.
 #
 # USAGE:
 #   scripts/go-test-budget.sh ./...            # any `go test` package args
@@ -84,6 +125,59 @@ set -e
 # =============================================================================
 
 budget="${POGO_GO_TEST_TIMEOUT:-20m}"
+
+# The budget is read from the ambient environment, and the merge gate runs in an
+# environment this script does not own. An exported POGO_GO_TEST_TIMEOUT set for
+# some other purpose would silently redefine the gate's budget — and the
+# dangerous direction is DOWNWARD, because a too-small budget does not look like
+# a misconfiguration, it looks like the branch failing (raised in review as
+# mg-a3db advisory 3). A garbage value is the same problem wearing a different
+# hat: `go test` would reject it with a flag error attributed to the run.
+#
+# So: parse it, and refuse a value below the floor unless the caller says out
+# loud that a short budget is what it wants. The suite for this script is the
+# one legitimate sub-floor caller — its positive control has to overrun in
+# seconds — and it opts in explicitly rather than being special-cased here.
+BUDGET_FLOOR_SECONDS=60
+
+budget_seconds="$(awk -v d="$budget" '
+    BEGIN {
+        # A Go duration is one or more <number><unit> pairs (go help testflag).
+        if (d !~ /^([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+$/) { exit 1 }
+        total = 0
+        s = d
+        while (match(s, /^[0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h)/)) {
+            tok = substr(s, 1, RLENGTH)
+            s = substr(s, RLENGTH + 1)
+            match(tok, /[a-z]+$/)
+            u = substr(tok, RSTART)
+            n = substr(tok, 1, RSTART - 1) + 0
+            if (u == "ns")      total += n / 1000000000
+            else if (u == "us") total += n / 1000000
+            else if (u == "ms") total += n / 1000
+            else if (u == "s")  total += n
+            else if (u == "m")  total += n * 60
+            else if (u == "h")  total += n * 3600
+        }
+        printf "%.6f", total
+    }' 2>/dev/null)" || budget_seconds=""
+
+if [ -z "$budget_seconds" ]; then
+    echo "go-test-budget.sh: POGO_GO_TEST_TIMEOUT=\"$budget\" is not a Go duration" >&2
+    echo "  (expected forms: 20m, 90s, 1h30m — see \`go help testflag\`)." >&2
+    exit 2
+fi
+
+if awk -v s="$budget_seconds" -v f="$BUDGET_FLOOR_SECONDS" 'BEGIN { exit !(s < f) }'; then
+    if [ "${POGO_GO_TEST_BUDGET_ALLOW_SHORT:-}" != "1" ]; then
+        echo "go-test-budget.sh: refusing a ${budget} budget — below the ${BUDGET_FLOOR_SECONDS}s floor." >&2
+        echo "  A budget this small does not fail like a misconfiguration, it fails like the" >&2
+        echo "  branch under test, and this script runs on the merge gate. If a short budget is" >&2
+        echo "  deliberate (a control proving an overrun is reported), set" >&2
+        echo "  POGO_GO_TEST_BUDGET_ALLOW_SHORT=1 alongside it." >&2
+        exit 2
+    fi
+fi
 
 # A caller-supplied -timeout would silently win (go takes the last one) and
 # leave the reported budget disagreeing with the enforced one. Refuse instead:
@@ -191,8 +285,11 @@ echo "causes, which need opposite responses —"
 echo "  deadlock     goroutines parked on chan/select/mutex with no progress"
 echo "  loaded host  goroutines progressing, just not fast enough"
 echo "Check the host load average for the window of the run before reading the"
-echo "dump as a bug. On this host the same package has measured 81.2s at load ~8"
-echo "and 155.1s at load ~32 — a 1.9x response to contention alone."
+echo "dump as a bug. Runtime here is strongly load-sensitive: internal/refinery"
+echo "has measured 81.2s at load ~8 and 155.1s at load ~32 — 1.9x on contention"
+echo "alone — and at the load 150+ this host has recorded, the slowest package"
+echo "can exceed this budget legitimately. That case is expected, not a"
+echo "regression; see the headroom table in this script's header."
 echo ""
 echo "Raise ${budget} deliberately, not reflexively: the refinery's 60m gate bound"
 echo "is the outer backstop, and a per-package budget that approaches it stops"

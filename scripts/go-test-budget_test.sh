@@ -157,15 +157,32 @@ EOF
 }
 
 # run_budget <module-dir> <budget-or-empty> [args...] -> stdout+stderr in $OUT, status in $STATUS
+#
+# POGO_GO_TEST_BUDGET_ALLOW_SHORT=1 throughout: every budget here is seconds,
+# which is below the script's 60s floor by design. This suite is the floor's one
+# legitimate exception — a positive control that took 20 minutes to overrun
+# would never be run — and it says so explicitly rather than the script
+# special-casing its own tests. run_budget_raw below deliberately does NOT opt
+# in, so the floor itself can be tested.
 run_budget() {
     local dir=$1 budget=$2
     shift 2
     set +e
     if [ -n "$budget" ]; then
-        OUT="$(cd "$dir" && POGO_GO_TEST_TIMEOUT="$budget" bash "$BUDGET_SH" "$@" 2>&1)"
+        OUT="$(cd "$dir" && POGO_GO_TEST_BUDGET_ALLOW_SHORT=1 POGO_GO_TEST_TIMEOUT="$budget" bash "$BUDGET_SH" "$@" 2>&1)"
     else
-        OUT="$(cd "$dir" && unset POGO_GO_TEST_TIMEOUT && bash "$BUDGET_SH" "$@" 2>&1)"
+        OUT="$(cd "$dir" && POGO_GO_TEST_BUDGET_ALLOW_SHORT=1 && unset POGO_GO_TEST_TIMEOUT && bash "$BUDGET_SH" "$@" 2>&1)"
     fi
+    STATUS=$?
+    set -e
+}
+
+# run_budget_raw <module-dir> <budget> — no ALLOW_SHORT opt-in, for the floor.
+run_budget_raw() {
+    local dir=$1 budget=$2
+    shift 2
+    set +e
+    OUT="$(cd "$dir" && POGO_GO_TEST_TIMEOUT="$budget" bash "$BUDGET_SH" "$@" 2>&1)"
     STATUS=$?
     set -e
 }
@@ -198,19 +215,29 @@ else
     fail "no 'TIMEOUT: 1 package ... budget of 2s' line in the output"
 fi
 
-if printf '%s\n' "$OUT" | grep -q 'example\.com/budgetfixture/slowpkg'; then
-    pass "the report names the package that overran"
+# Everything from the TIMEOUT: header down — i.e. what the CLASSIFIER wrote,
+# with go's own output excluded.
+#
+# Scoping this rather than grepping all of $OUT is not tidiness. Reviewed in
+# round 1 (mg-a3db): "the report names the package that overran" was grepping
+# the whole output, which go's own `FAIL<tab><pkg>` line already satisfies, so
+# the assertion PASSED with the classifier disabled and constrained nothing.
+# An assertion that survives the mutation it exists to catch is decoration.
+REPORT="$(printf '%s\n' "$OUT" | sed -n '/^TIMEOUT: /,$p')"
+
+if printf '%s\n' "$REPORT" | grep -q 'example\.com/budgetfixture/slowpkg'; then
+    pass "the REPORT (not go's own FAIL line) names the package that overran"
 else
-    fail "the report does not name example.com/budgetfixture/slowpkg"
+    fail "the report body does not name example.com/budgetfixture/slowpkg"
 fi
 
-if printf '%s\n' "$OUT" | grep -q 'still running at the budget: TestSleepsPastslowpkgBudget'; then
+if printf '%s\n' "$REPORT" | grep -q 'still running at the budget: TestSleepsPastslowpkgBudget'; then
     pass "the report names the test that was still running"
 else
     fail "the report does not name the still-running test"
 fi
 
-if printf '%s\n' "$OUT" | grep -q 'BUDGET OVERRUN, not a crash'; then
+if printf '%s\n' "$REPORT" | grep -q 'BUDGET OVERRUN, not a crash'; then
     pass "the report says in words that this is not a crash"
 else
     fail "the report does not distinguish an overrun from a crash"
@@ -218,7 +245,7 @@ fi
 
 # The two causes an overrun can have need opposite responses; the report is
 # only useful if it points at the distinction rather than just naming a number.
-if printf '%s\n' "$OUT" | grep -q 'deadlock' && printf '%s\n' "$OUT" | grep -q 'loaded host'; then
+if printf '%s\n' "$REPORT" | grep -q 'deadlock' && printf '%s\n' "$REPORT" | grep -q 'loaded host'; then
     pass "the report names both causes a reader has to tell apart"
 else
     fail "the report does not name the deadlock/loaded-host distinction"
@@ -327,6 +354,56 @@ if [ "$STATUS" -eq 2 ]; then
     pass "the -timeout=VALUE spelling is refused too"
 else
     fail "-timeout=5s was accepted (exit $STATUS)"
+fi
+
+# --- Test 8b: the budget cannot be silently shrunk by the environment --------
+#
+# Raised in review (mg-a3db advisory 3): this script reads its budget from the
+# ambient environment and runs on the merge gate, so a POGO_GO_TEST_TIMEOUT
+# exported for some other purpose would redefine it. Downward is the dangerous
+# direction — a too-small budget fails looking like the branch, not like a
+# misconfiguration.
+echo ""
+echo "Test 8b: a sub-floor or malformed budget is refused"
+run_budget_raw "$OKMOD" 5s ./...
+if [ "$STATUS" -eq 2 ]; then
+    pass "a 5s budget is refused without an explicit opt-in"
+else
+    fail "a 5s budget was accepted (exit $STATUS) — the gate budget can be shrunk silently"
+fi
+if printf '%s\n' "$OUT" | grep -q 'below the 60s floor'; then
+    pass "the refusal names the floor"
+else
+    fail "the refusal does not name the floor"
+fi
+
+run_budget_raw "$OKMOD" banana ./...
+if [ "$STATUS" -eq 2 ]; then
+    pass "a non-duration budget is refused before go test sees it"
+else
+    fail "POGO_GO_TEST_TIMEOUT=banana was not refused (exit $STATUS)"
+fi
+
+# The floor must not reject the value actually shipped, and must accept
+# multi-unit durations rather than only the simple ones.
+run_budget_raw "$OKMOD" 20m ./...
+if [ "$STATUS" -eq 0 ]; then
+    pass "the shipped 20m budget passes the floor"
+else
+    fail "20m was refused (exit $STATUS) — the floor rejects the shipped value"
+fi
+run_budget_raw "$OKMOD" 1h30m ./...
+if [ "$STATUS" -eq 0 ]; then
+    pass "a multi-unit duration (1h30m) parses and passes"
+else
+    fail "1h30m was refused (exit $STATUS) — the duration parser is too narrow"
+fi
+# 90s vs 90m vs 90ms: the parser must not confuse the ms/m/s units.
+run_budget_raw "$OKMOD" 500ms ./...
+if [ "$STATUS" -eq 2 ]; then
+    pass "500ms is read as milliseconds (sub-floor), not as minutes"
+else
+    fail "500ms was accepted (exit $STATUS) — ms is being parsed as m"
 fi
 
 # --- Tests 9-10: WIRING against the real tree --------------------------------

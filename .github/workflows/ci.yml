@@ -33,6 +33,18 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    # The outer backstop, so the per-package budget is not the only bound here
+    # (raised in review as mg-a3db advisory 1). Under the refinery, test.sh sits
+    # inside defaultGateTimeout=60m, which kills with a diagnostic heartbeat
+    # record rather than a panic dump — that argument is why 20m per package is
+    # safe to choose. It did NOT transfer to this call site: outside the gate
+    # there was nothing but GitHub's 360-minute job default, so raising the
+    # per-package worst case from 10m to 20m widened an unbounded window.
+    #
+    # 45m: comfortably above the realistic worst case (one wedged package at its
+    # 20m budget plus the rest of a suite that measures ~4m here), and an order
+    # of magnitude below the 360m default, which is "no bound" in practice.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
