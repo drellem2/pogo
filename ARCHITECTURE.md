@@ -339,6 +339,56 @@ Two channels:
 
 No direct RPC. No shared memory. No pub/sub. No tmux. Agents are processes that read files and run commands. pogod mediates interactive access because it owns their terminals.
 
+### Mail to the human, and the optional representative relay
+
+`human` is the box the whole fleet writes when something needs a person. It is
+addressed from 21 located sites across three repos — Go watchers, prompt files,
+loose shell scripts — plus senders nobody has located, and the population grows
+every time a watcher is added. **Treat the write side as fixed.**
+
+What is *not* fixed is who reads it. A deployment may install a
+**representative**: a crew agent that owns `human` as its inbox, and rewrites
+what matters into a separate terminal box that the desktop notifier polls
+(mg-b17b design, mg-65d2 build). It strips internal identifiers, goes back to a
+sending agent when a mail says what happened but not what it means, coalesces a
+burst about one incident into one message, and may drop what is not worth a
+person's attention.
+
+The topology is deliberately inverted: **move the two readers, not the
+twenty-one writers.** Every `mg mail send human` in this repo stays correct, and
+so does every one that does not exist yet. Nothing in pogo needs to know whether
+a representative is running.
+
+Three properties make it safe, and none of them is optional:
+
+1. **The failure mode is raw delivery, not silence.** A second poller watches
+   `human/new` directly and delivers anything still sitting there after ~15
+   minutes, marked unprocessed. Crew respawn is one-shot (see "Crew Agent"), so
+   without a bypass every representative outage becomes total silence toward the
+   only person who could notice it. A relay whose failure mode is silence is
+   worse than no relay.
+2. **`new/` vs `cur/` is a liveness boundary, not a delivery boundary.** The
+   representative moves a message out of `human/new` the moment it takes
+   ownership — whatever it then decides: forward, hold pending a takeaway, or
+   drop. So "still in `new/`" means exactly one thing: *nobody looked at this*.
+   A deliberate drop is not resurrected by the bypass, and a hold that outlasts
+   the window is not forwarded in its unimproved form.
+3. **Escalations bypass by construction.** See `[agents] escalation_box` in
+   [docs/CONFIGURATION.md](docs/CONFIGURATION.md). Addressed to `human`, a
+   notice reading "the representative is deaf" is filed in the inbox of the
+   agent it is reporting as unable to read its inbox. That bypass cannot be a
+   timeout, because a wedged relay noticing anything is what cannot be relied on.
+
+Property 1 catches a representative that is dead or deaf. It does **not** catch
+one that reads everything, moves it all to `cur/`, and then wedges — that agent
+silences the channel while looking busy, which is the failure `internal/ackwatch`
+exists for. Point `ackwatch` and `deafwatch` at the representative and property 3
+carries their escalations past it.
+
+The relay itself lives outside this repo: the agent is an operator prompt in
+`~/.pogo/agents/crew/`, and the two readers are `pogo-reminders` and `bridget`.
+pogo's only stake in it is `escalation_box`.
+
 ### The Proactivity Principle
 
 Carried forward from Gas Town because it is the most important operational pattern:

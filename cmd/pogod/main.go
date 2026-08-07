@@ -1285,6 +1285,17 @@ Flags:
 	// could read one. cfg here is the post-pin config.
 	coordinator := cfg.Agents.CoordinatorName()
 
+	// Where a watcher escalation goes once the fleet has demonstrably not
+	// cleared the finding — the box a PERSON reads. Resolved once, here, and
+	// passed to all four escalating watchers below, because the four package
+	// defaults ("human" in each) are four copies of one deployment fact and a
+	// deployment that relays `human` has to move all four together or not at
+	// all. See config.DefaultEscalationBox for the loop this breaks: with a
+	// representative agent owning `human`, an escalation reading "the
+	// representative is deaf" would otherwise be delivered into the inbox of
+	// the agent it is reporting as unable to read its inbox (mg-65d2).
+	escalationBox := cfg.Agents.EscalationBoxName()
+
 	// Arm the condition annunciator (mg-342d) — rows A2..A15 of
 	// docs/investigations/pogod-log-conditions-with-no-reader-2026-07-30.md, the
 	// conditions mg-c3f0 found to have an actor who could act and no channel to
@@ -1883,10 +1894,11 @@ Flags:
 				RenotifyAfter: cfg.GHTeardown.RenotifyAfter,
 				NotifyTo:      cfg.GHTeardown.NotifyTo,
 				EscalateAfter: cfg.GHTeardown.EscalateAfter,
+				EscalateTo:    escalationBox,
 			})
-			log.Printf("pogod: gh-issue teardown detector enabled (interval=%s renotify=%s notify_to=%s escalate_after=%s, report-only)",
+			log.Printf("pogod: gh-issue teardown detector enabled (interval=%s renotify=%s notify_to=%s escalate_after=%s escalate_to=%s, report-only)",
 				cfg.GHTeardown.Interval, cfg.GHTeardown.RenotifyAfter,
-				cfg.GHTeardown.NotifyTo, cfg.GHTeardown.EscalateAfter)
+				cfg.GHTeardown.NotifyTo, cfg.GHTeardown.EscalateAfter, escalationBox)
 		}
 	}
 
@@ -1949,10 +1961,11 @@ Flags:
 				RenotifyAfter: cfg.GHIntake.RenotifyAfter,
 				NotifyTo:      cfg.GHIntake.NotifyTo,
 				EscalateAfter: cfg.GHIntake.EscalateAfter,
+				EscalateTo:    escalationBox,
 			})
-			log.Printf("pogod: gh-issue intake detector enabled (interval=%s grace=%s renotify=%s notify_to=%s escalate_after=%s repos=%v from %s, report-only)",
+			log.Printf("pogod: gh-issue intake detector enabled (interval=%s grace=%s renotify=%s notify_to=%s escalate_after=%s escalate_to=%s repos=%v from %s, report-only)",
 				cfg.GHIntake.Interval, cfg.GHIntake.Grace, cfg.GHIntake.RenotifyAfter,
-				cfg.GHIntake.NotifyTo, cfg.GHIntake.EscalateAfter, repos, repoSrc)
+				cfg.GHIntake.NotifyTo, cfg.GHIntake.EscalateAfter, escalationBox, repos, repoSrc)
 		}
 	}
 
@@ -1991,6 +2004,7 @@ Flags:
 			RenotifyAfter: cfg.AckWatch.RenotifyAfter,
 			NotifyTo:      cfg.AckWatch.NotifyTo,
 			EscalateAfter: cfg.AckWatch.EscalateAfter,
+			EscalateTo:    escalationBox,
 			StartedAt:     time.Now(),
 		})
 		log.Printf("pogod: ack-watch enabled (interval=%s renotify=%s notify_to=%s escalate_after=%s, report-only)",
@@ -2034,10 +2048,11 @@ Flags:
 			RenotifyAfter: cfg.DeafWatch.RenotifyAfter,
 			NotifyTo:      cfg.DeafWatch.NotifyTo,
 			EscalateAfter: cfg.DeafWatch.EscalateAfter,
+			EscalateTo:    escalationBox,
 		})
-		log.Printf("pogod: deaf-watch enabled (interval=%s hold_down=%s renotify=%s notify_to=%s escalate_after=%s, report-only)",
+		log.Printf("pogod: deaf-watch enabled (interval=%s hold_down=%s renotify=%s notify_to=%s escalate_after=%s escalate_to=%s, report-only)",
 			cfg.DeafWatch.Interval, cfg.DeafWatch.HoldDown, cfg.DeafWatch.RenotifyAfter,
-			cfg.DeafWatch.NotifyTo, cfg.DeafWatch.EscalateAfter)
+			cfg.DeafWatch.NotifyTo, cfg.DeafWatch.EscalateAfter, escalationBox)
 	} else if cfg.DeafWatch.Enabled {
 		log.Printf("pogod: deaf-watch NOT armed — the agent registry did not load, so there is nothing to judge")
 	}
