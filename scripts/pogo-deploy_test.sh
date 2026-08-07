@@ -1138,6 +1138,216 @@ grep -q -- 'redeploy --yes' "$RUNNER" \
     && pass "the runner passes --yes (confirm() exits 3 without a tty)" || fail "the runner does not pass --yes"
 
 # ---------------------------------------------------------------------------
+# The reason channel, end to end: a real refusal -> the mail an operator gets
+# (mg-0155)
+# ---------------------------------------------------------------------------
+# THIS IS THE POSITIVE CONTROL THE TICKET ASKED FOR, and the shape of it is the
+# point: "a remedy paragraph is only reviewable next to the failure it is
+# claimed to describe." On 2026-08-07 every piece of the 03:00 alert was
+# individually correct — describe_exit 6 returned what its case arm said,
+# remedy_for_exit returned what its heredoc said — and the assembled mail was
+# wrong on every material point. Pieces were what had been reviewed.
+#
+# So: drive the REAL refusals in the REAL deploy script, take the REAL record
+# they leave, and print the REAL alert body the runner would mail. Nothing here
+# is a fixture. If the two scripts ever disagree about the record's format, these
+# fail — which is the only way a channel between two processes stays a channel.
+SELF_DEPLOY="$HERE/pogo-self-deploy"
+REC_DIR="$WORK/reasons"; mkdir -p "$REC_DIR"
+
+# Run one real drain-precondition refusal in a fresh bash (a separate PROCESS,
+# like the nightly, so the record is the only thing that crosses) and leave its
+# record behind.
+make_record() {
+    bash -c '
+        set -u
+        POGO_DEPLOY_REASON_FILE="$2"
+        export POGO_DEPLOY_REASON_FILE
+        # shellcheck source=/dev/null
+        source "$1" >/dev/null 2>&1
+        REASON_FILE="$2"
+        ERR_LOG="$(mktemp)"
+        DEPLOY_STAGE="drain"; DEPLOY_INSTALLED="no"
+        DRAIN_PRIOR="?"; DRAIN_ARMED=true
+        drain_post() { echo 000; }
+        trap on_deploy_exit EXIT
+        refuse_drain_precondition "$3"
+    ' _ "$SELF_DEPLOY" "$2" "$1" >/dev/null 2>&1
+    return $?
+}
+
+# The 2026-08-07 failure itself, first.
+make_record stopped "$REC_DIR/stopped"; RC_STOPPED=$?
+[ "$RC_STOPPED" -eq 6 ] \
+    && pass "reason channel: the real 503 refusal exits 6 and leaves a record" \
+    || fail "503 refusal exited $RC_STOPPED"
+BODY_503="$(SRC="$WORK" GIT=/usr/bin/git ATTEMPT_N=2 red_alert_body 6 0 2026-08-07 5400 "$REC_DIR/stopped")"
+echo "--- ALERT TEXT: exit 6, orchestration stopped (the 2026-08-07 failure) ---"
+echo "$BODY_503"
+echo "--- end ---"
+
+# ARM ONE: the right story appears, and it is the deploy script's own sentence.
+case "$BODY_503" in
+    *"orchestration is STOPPED"*) pass "alert(503): the description is the deploy script's OWN sentence, carried not re-derived" ;;
+    *) fail "alert(503) does not name orchestration" ;;
+esac
+case "$BODY_503" in
+    *"WHAT THIS ATTEMPT CHANGED: NOTHING"*) pass "alert(503): states what the run changed — NOTHING — as a measured field, not an inference from the code" ;;
+    *) fail "alert(503) does not state what the run changed" ;;
+esac
+case "$BODY_503" in
+    *"pogo server start"*) pass "alert(503): carries the one-command remedy, verbatim from the site that knew it" ;;
+    *) fail "alert(503) lost the remedy" ;;
+esac
+
+# ARM TWO: the wrong stories are GONE. Each of these is a line the 03:00 mail
+# actually carried, and each was false.
+for wrong in "post-restart verification failed" \
+             "was installed and started" \
+             "binary on disk is" \
+             "roll the install back"; do
+    case "$BODY_503" in
+        *"$wrong"*) fail "alert(503) still claims: $wrong" ;;
+        *) pass "alert(503) no longer claims '$wrong' — nothing was installed" ;;
+    esac
+done
+
+# The other three dispositions: same code, same runner, different mail.
+for d in bootstrap down error:500; do
+    key="${d//:/_}"
+    make_record "$d" "$REC_DIR/$key"
+    eval "BODY_$key=\"\$(SRC=\"\$WORK\" GIT=/usr/bin/git ATTEMPT_N=0 red_alert_body 6 0 2026-08-07 5400 \"\$REC_DIR/\$key\")\""
+    echo "--- ALERT TEXT: exit 6, disposition $d ---"
+    eval "echo \"\$BODY_$key\""
+    echo "--- end ---"
+done
+# Four failures share exit 6. Four DIFFERENT mails, or the code is still the
+# channel and this whole change bought nothing.
+[ "$BODY_503" != "$BODY_bootstrap" ] && [ "$BODY_503" != "$BODY_down" ] \
+    && [ "$BODY_bootstrap" != "$BODY_down" ] && [ "$BODY_down" != "$BODY_error_500" ] \
+    && [ "$BODY_bootstrap" != "$BODY_error_500" ] \
+    && pass "alert: the four exit-6 refusals produce four DIFFERENT mails — one code, four stories, told apart" \
+    || fail "two exit-6 refusals produce identical alert bodies"
+case "$BODY_bootstrap" in
+    *"predates the /agents/drain endpoint"*"--skip-drain"*) pass "alert(bootstrap): names the chicken-and-egg AND its remedy" ;;
+    *) fail "alert(bootstrap) is missing its own story" ;;
+esac
+case "$BODY_down" in
+    *"not answering"*) pass "alert(down): says pogod did not answer at all" ;;
+    *) fail "alert(down) is missing its own story" ;;
+esac
+case "$BODY_error_500" in
+    *"unexpected HTTP 500"*) pass "alert(error:500): carries the status — all that is known, stated as all that is known" ;;
+    *) fail "alert(error:500) is missing its own story" ;;
+esac
+# ...and none of them borrows another's.
+for pair in "bootstrap:orchestration is STOPPED" "down:predates the /agents/drain" \
+            "error_500:orchestration is STOPPED" "error_500:predates the /agents/drain"; do
+    eval "b=\"\$BODY_${pair%%:*}\""
+    case "$b" in *"${pair#*:}"*) fail "alert(${pair%%:*}) also tells ${pair#*:}'s story" ;; esac
+done
+pass "alert: no exit-6 mail tells another exit-6 refusal's story"
+
+# THE FALLBACK IS REAL, and it must be: a record can be absent (an exit before
+# cmd_redeploy arms one), unwritable, or left by an older deploy script. When it
+# is, the alert falls back to describe_exit rather than going quiet.
+BODY_NOREC="$(SRC="$WORK" GIT=/usr/bin/git ATTEMPT_N=0 red_alert_body 6 0 2026-08-07 5400 "$REC_DIR/does-not-exist")"
+case "$BODY_NOREC" in
+    *"drain precondition refused"*) pass "alert: with NO record, falls back to describe_exit and still says where the run stopped" ;;
+    *) fail "alert without a record lost its description: $BODY_NOREC" ;;
+esac
+case "$BODY_NOREC" in
+    *"WHAT THIS ATTEMPT CHANGED"*) fail "alert without a record asserts what changed — nothing measured that" ;;
+    *) pass "alert: with no record it does NOT assert what the run changed — an unmeasured claim is what this ticket removes" ;;
+esac
+case "$BODY_NOREC" in
+    *"was installed and started"*) fail "the exit-6 FALLBACK still asserts an install" ;;
+    *) pass "alert: even the fallback stops asserting an install for exit 6 (it exits before do_build on every path)" ;;
+esac
+# describe_exit 6 itself, since the stamp-retry log line quotes it directly.
+case "$(describe_exit 6)" in
+    *"post-restart"*) fail "describe_exit 6 still says 'post-restart verification failed'" ;;
+    *"BEFORE the build"*) pass "describe_exit 6 says what is true of all four refusals: it stopped before the build" ;;
+    *) fail "describe_exit 6: $(describe_exit 6)" ;;
+esac
+[ "$(remedy_for_exit 6)" != "$(remedy_for_exit 8)" ] \
+    && pass "remedy_for_exit: 6 and 8 no longer share a paragraph (6 is pre-build, 8 is post-install)" \
+    || fail "remedy_for_exit 6 and 8 are still identical"
+case "$(remedy_for_exit 8)" in
+    *"installed and started"*) pass "remedy_for_exit 8 KEEPS the install paragraph — there the install really did happen" ;;
+    *) fail "remedy_for_exit 8 lost the paragraph that is true of it" ;;
+esac
+
+# what_the_run_changed: the two facts that come apart (see the mg-0155
+# enumeration). A restart-only deploy installs NOTHING and still bounces pogod,
+# so deriving "was the daemon touched?" from "was anything installed?" tells a
+# failed kickstart that the running pogod is untouched. It was down.
+mkrec() { printf 'exit=%s\nstage=%s\ninstalled=%s\nreason=%s\n--- verbatim ---\n%s\n' "$1" "$2" "$3" "$4" "$5" > "$6"; }
+mkrec 5 restart no "launchctl kickstart failed" "launchctl kickstart failed" "$REC_DIR/restartonly"
+CH="$(what_the_run_changed "$REC_DIR/restartonly")"
+case "$CH" in
+    *"pogod WAS bounced"*) pass "what_the_run_changed: a restart-only deploy that fails AT the kickstart reports the bounce" ;;
+    *) fail "restart-only kickstart failure: $CH" ;;
+esac
+case "$CH" in
+    *"exactly as they were"*) fail "what_the_run_changed calls a bounced daemon untouched: $CH" ;;
+    *) pass "what_the_run_changed: does NOT call a bounced daemon untouched — installed=no does not mean nothing happened" ;;
+esac
+mkrec 4 build partial "go install failed" "go install failed" "$REC_DIR/partial"
+case "$(what_the_run_changed "$REC_DIR/partial")" in
+    *"IN PROGRESS"*"revision"*) pass "what_the_run_changed: a failure inside go install reports a possibly-partial GOBIN, and says how to check" ;;
+    *) fail "partial install: $(what_the_run_changed "$REC_DIR/partial")" ;;
+esac
+mkrec 8 verify yes "new pogod did not report main revision within 60s" "..." "$REC_DIR/verifyfail"
+case "$(what_the_run_changed "$REC_DIR/verifyfail")" in
+    *"install COMPLETED and pogod WAS bounced"*) pass "what_the_run_changed: exit 8 reports BOTH — installed and bounced, which is why its remedy may talk about a binary on disk" ;;
+    *) fail "verify failure: $(what_the_run_changed "$REC_DIR/verifyfail")" ;;
+esac
+[ -z "$(what_the_run_changed "$REC_DIR/nothing-here")" ] \
+    && pass "what_the_run_changed: says nothing when nothing measured it (a missing record is not evidence of an untouched box)" \
+    || fail "what_the_run_changed invented a claim from a missing file"
+
+# A malformed record must not take the alerter down with it. An alerting path
+# that fails on bad input goes quiet exactly when something has gone unusually
+# wrong.
+printf 'not a record at all\n\x00\n' > "$REC_DIR/junk" 2>/dev/null
+[ -n "$(SRC="$WORK" GIT=/usr/bin/git ATTEMPT_N=0 red_alert_body 6 0 2026-08-07 5400 "$REC_DIR/junk")" ] \
+    && pass "alert: a malformed record degrades to the fallback instead of producing an empty mail" \
+    || fail "a malformed record produced an empty alert body"
+
+# ---------------------------------------------------------------------------
+# The enumeration is load-bearing (mg-0155)
+# ---------------------------------------------------------------------------
+# docs/deploy-exit-paths.md is a deliverable of the ticket, and a table nothing
+# checks is a table that rots into a fifth generation of the same defect. So:
+# every code the deploy script can exit with must appear in it, and every code in
+# it must be describable. This is what makes "enumerate the whole class" a
+# property of the repo rather than one polecat's good afternoon.
+EXITDOC="$HERE/../docs/deploy-exit-paths.md"
+[ -f "$EXITDOC" ] && pass "the exit-path enumeration exists at docs/deploy-exit-paths.md" \
+    || fail "docs/deploy-exit-paths.md is missing"
+if [ -f "$EXITDOC" ]; then
+    CODES="$(grep -oE '^[^#]*\bexit [0-9]+' "$HERE/pogo-self-deploy" | grep -oE '[0-9]+$' | sort -un)"
+    missing=""
+    for c in $CODES; do
+        grep -qE "^\| $c \|" "$EXITDOC" || missing="$missing $c"
+    done
+    [ -z "$missing" ] \
+        && pass "every exit code pogo-self-deploy can produce has a row in the enumeration ($(echo "$CODES" | tr '\n' ' '))" \
+        || fail "exit codes missing from docs/deploy-exit-paths.md:$missing"
+    undescribed=""
+    for c in $CODES; do
+        [ "$(describe_exit "$c")" = "unclassified failure" ] && undescribed="$undescribed $c"
+    done
+    [ -z "$undescribed" ] \
+        && pass "and describe_exit has a case for each of them — the fallback covers the whole range" \
+        || fail "describe_exit falls through for:$undescribed"
+    grep -q 'installed' "$EXITDOC" && grep -q 'Bounced' "$EXITDOC" \
+        && pass "the enumeration answers BOTH questions per path: was anything installed, and was pogod bounced" \
+        || fail "the enumeration is missing the installed/bounced columns"
+fi
+
+# ---------------------------------------------------------------------------
 echo
 echo "--- Results ---"
 grep -c '^PASS' "$RESULTS_FILE" | sed 's/^/passed: /'

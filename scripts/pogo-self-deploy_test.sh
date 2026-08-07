@@ -264,6 +264,149 @@ esac
     && pass "drain-precond: 500 -> error:500" || fail "drain-precond 500 ($(classify_drain_precondition 500))"
 [ "$(classify_drain_precondition 401)" = "error:401" ] \
     && pass "drain-precond: 401 -> error:401" || fail "drain-precond 401"
+# 503 -> stopped, its OWN disposition (mg-0155). It is the one non-2xx status
+# that names a state rather than raising a question: RequireOrchestration is the
+# only non-test source of a 503 on /agents/drain (handleDrain answers 200/400/405
+# and nothing else), so it means "pogod is not in full mode" and nothing else.
+# It used to fall into error:*, whose whole contract is "we do not know".
+[ "$(classify_drain_precondition 503)" = "stopped" ] \
+    && pass "drain-precond: 503 -> stopped (orchestration is stopped — a NAMED state, not a guess)" \
+    || fail "drain-precond 503 ($(classify_drain_precondition 503))"
+[ "$(classify_drain_precondition 503)" != "error:503" ] \
+    && pass "drain-precond: 503 is no longer swept into the 'we do not know' branch" \
+    || fail "drain-precond 503 still classifies as error:503"
+
+# --- the reason channel: what crosses the process boundary (mg-0155) -------
+# THE DEFECT, for the reader who finds this in a year. Each of these refusals
+# already printed its own correct sentence and then exited 6 — and the unattended
+# runner is a SEPARATE PROCESS that only received the 6. It re-derived a story
+# from that integer and re-derived the wrong one: on 2026-08-07 the RED mail said
+# "post-restart verification failed / the binary on disk is the NEW one" about a
+# run that died at the first step with elapsed 0s and installed nothing.
+#
+# So these drive the REAL refusals — not a stub of them — and assert on the
+# record the runner actually reads. Three things per disposition:
+#   1. the exit code says where the run stopped (6: before the build)
+#   2. `reason` is this refusal's own headline, not another's
+#   3. `installed=no`, which is what stops a remedy asserting an install
+#
+# Both arms throughout. A record that named the right failure while ALSO leaving
+# the wrong ones in place would page just as badly.
+precond_run() (
+    # Run a real refusal the way cmd_redeploy does: reason channel armed, drain
+    # trap armed, exit trap installed. Echoes the record file's path is not
+    # possible from a subshell, so the caller passes one in.
+    export POGO_DEPLOY_REASON_FILE="$2"
+    REASON_FILE="$2"
+    ERR_LOG="$(mktemp)"
+    DEPLOY_STAGE="drain"
+    DEPLOY_INSTALLED="no"
+    DRAIN_PRIOR="?"
+    DRAIN_ARMED=true
+    # A restore, if one is attempted, fails — which is what happened on
+    # 2026-08-07 and is what the disarm assertions below are about.
+    drain_post() { echo 000; }
+    trap on_deploy_exit EXIT
+    refuse_drain_precondition "$1"
+)
+rec_field() { sed -n "/^--- verbatim ---$/q; s/^$2=//p" "$1" | head -n 1; }
+
+PRECOND_TMP="$(mktemp -d)"
+for disp in bootstrap down stopped error:500; do
+    f="$PRECOND_TMP/rec.${disp//:/_}"
+    out="$(precond_run "$disp" "$f" 2>&1)"; rc=$?
+    printf '%s\n' "$out" > "$PRECOND_TMP/out.${disp//:/_}"
+    [ "$rc" -eq 6 ] \
+        && pass "precond $disp: exits 6 — 'refused before the build', which is all an integer can honestly say" \
+        || fail "precond $disp exited $rc, want 6"
+    [ -f "$f" ] \
+        && pass "precond $disp: wrote a reason record for the runner to read" \
+        || fail "precond $disp wrote no reason record"
+    [ "$(rec_field "$f" installed)" = "no" ] \
+        && pass "precond $disp: installed=no — the field that stops the alert asserting an install" \
+        || fail "precond $disp installed=$(rec_field "$f" installed), want no"
+    [ "$(rec_field "$f" stage)" = "drain" ] \
+        && pass "precond $disp: stage=drain" || fail "precond $disp stage=$(rec_field "$f" stage)"
+done
+
+# The reason lines: each names ITS OWN failure. The four are asserted together
+# because "the right story appears" and "the wrong ones do not" are two claims,
+# and a channel that carried all four sentences under every disposition would
+# satisfy the first alone.
+case "$(rec_field "$PRECOND_TMP/rec.bootstrap" reason)" in
+    *"predates the /agents/drain endpoint"*) pass "precond bootstrap: reason names the chicken-and-egg, by name" ;;
+    *) fail "precond bootstrap reason: $(rec_field "$PRECOND_TMP/rec.bootstrap" reason)" ;;
+esac
+case "$(rec_field "$PRECOND_TMP/rec.down" reason)" in
+    *"not answering"*) pass "precond down: reason says pogod did not answer" ;;
+    *) fail "precond down reason: $(rec_field "$PRECOND_TMP/rec.down" reason)" ;;
+esac
+case "$(rec_field "$PRECOND_TMP/rec.stopped" reason)" in
+    *"orchestration is STOPPED"*503*) pass "precond stopped: reason names orchestration AND the 503 that proved it" ;;
+    *) fail "precond stopped reason: $(rec_field "$PRECOND_TMP/rec.stopped" reason)" ;;
+esac
+case "$(rec_field "$PRECOND_TMP/rec.error_500" reason)" in
+    *"unexpected HTTP 500"*) pass "precond error:500: reason carries the STATUS, which is the whole of what is known" ;;
+    *) fail "precond error:500 reason: $(rec_field "$PRECOND_TMP/rec.error_500" reason)" ;;
+esac
+# The wrong-story arm, stated as a matrix: no disposition's reason may name
+# another's cause.
+wrong=0
+for pair in "bootstrap:not answering" "bootstrap:orchestration is STOPPED" \
+            "down:predates" "down:orchestration is STOPPED" \
+            "stopped:predates" "stopped:not answering" \
+            "error_500:predates" "error_500:orchestration is STOPPED"; do
+    r="$(rec_field "$PRECOND_TMP/rec.${pair%%:*}" reason)"
+    case "$r" in *"${pair#*:}"*) fail "precond ${pair%%:*} reason also claims '${pair#*:}': $r"; wrong=1 ;; esac
+done
+[ "$wrong" -eq 0 ] && pass "precond: no disposition's reason line tells another disposition's story"
+
+# reason is the HEADLINE, not the last line. The 503 refusal ends with "confirm
+# with: curl -s .../server/mode"; a channel that took the last err line would
+# describe the outage as a confirmation command.
+case "$(rec_field "$PRECOND_TMP/rec.stopped" reason)" in
+    *"confirm with"*) fail "precond stopped: reason took the LAST err line (the remedy), not the headline" ;;
+    *) pass "precond stopped: reason is the first line of the burst, not the trailing remedy" ;;
+esac
+# ...and the remedy is not lost — it rides in the verbatim block.
+grep -q "pogo server start" "$PRECOND_TMP/rec.stopped" \
+    && pass "precond stopped: the verbatim block carries the one-command remedy" \
+    || fail "precond stopped: verbatim block lost the remedy"
+grep -q "start-orchestration" "$PRECOND_TMP/rec.stopped" \
+    && pass "precond stopped: and the raw endpoint, for a box with no working CLI" \
+    || fail "precond stopped: verbatim block lost the endpoint"
+
+# --- the false-outage line the 503 refusal used to emit (mg-0155) ----------
+# The restore trap is armed BEFORE the enabling POST, deliberately: a POST that
+# times out AFTER pogod set the flag comes back 000, so the ambiguous case must
+# still restore. That reasoning does not reach a status that is NOT ambiguous.
+# On 2026-08-07 the 503 refusal ran the restore anyway, the restore POST hit the
+# same 503, and the run emitted "drain restore FAILED (HTTP 503) — pogod may
+# STILL be draining and dispatching NO polecats. The fleet will look healthy and
+# do nothing." The fleet was never draining, and the command offered as the fix
+# points at the endpoint that is refusing.
+for disp in bootstrap stopped; do
+    o="$(cat "$PRECOND_TMP/out.${disp}")"
+    case "$o" in
+        *"drain restore FAILED"*) fail "precond $disp: still reports a restore failure over a flag it never set" ;;
+        *) pass "precond $disp: no false 'drain restore FAILED / fleet dispatching NO polecats' line" ;;
+    esac
+    case "$o" in
+        *"restore disarmed"*) pass "precond $disp: says WHY it skipped the restore, rather than silently skipping" ;;
+        *) fail "precond $disp: disarmed the restore without saying so" ;;
+    esac
+done
+# The OTHER arm, and it is the one that matters more: `down` and `error:*` must
+# STILL restore. A disarm that fired on every refusal would trade a false alarm
+# for a real fleet-wide outage — dispatch left off with nothing to turn it back
+# on. `down` is precisely the ambiguous case the arming order exists for.
+for disp in down error_500; do
+    case "$(cat "$PRECOND_TMP/out.${disp}")" in
+        *"restoring dispatch"*) pass "precond ${disp}: STILL attempts the restore — the mutation cannot be ruled out here" ;;
+        *) fail "precond ${disp}: skipped the restore on a path where drain may really be on" ;;
+    esac
+done
+rm -rf "$PRECOND_TMP"
 
 # --- drain_wait: the gate that used to fail OPEN (mg-65b2) -----------------
 # THE DEFECT, for the reader who finds this in a year. drain_wait used to end

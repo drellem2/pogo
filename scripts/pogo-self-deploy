@@ -77,7 +77,8 @@
 # ENV overrides: POGO_PORT, POGO_REPO, POGO_DAEMON_LABEL (default
 # com.pogo.daemon), POGO_DEPLOY_REF (default main), LAUNCHCTL, POGO_GOBIN,
 # POGO_DEPLOY_MERGE_TARGETS (the refs a branch must be contained in to count as
-# merged; default "refs/remotes/origin/main refs/remotes/origin/master").
+# merged; default "refs/remotes/origin/main refs/remotes/origin/master"),
+# POGO_DEPLOY_REASON_FILE.
 #
 # WHAT THE DRAIN WAITS FOR (mg-853a)
 # ----------------------------------
@@ -88,6 +89,21 @@
 # deploy; a polecat that pushed and is waiting on the merge queue does. The full
 # argument, including why this script rather than pogod is the site, is at THE
 # DRAIN PREDICATE, beside the code.
+#
+# HOW A FAILURE IS REPORTED (mg-0155)
+#   An exit code says WHERE the run stopped. It does not say WHY, and it must
+#   not be asked to: codes are assigned per site, stories are needed per cause,
+#   and every attempt to carry the second on the first has misreported the next
+#   failure that shared a code. So a `redeploy` writes a reason record — the
+#   failing sentence it already computed, the stage it reached, and whether
+#   anything had been installed by then — to $POGO_DEPLOY_REASON_FILE, and the
+#   unattended runner (scripts/launchd/pogo-deploy.sh) reads THAT into its alert
+#   instead of re-deriving a story from an integer. Unset the variable and
+#   nothing is written; a human at a terminal is already reading the stderr the
+#   record is a copy of.
+#
+#   docs/deploy-exit-paths.md enumerates every exit in this script: what the
+#   operator is told at each, and whether an install had happened by then.
 
 set -u
 
@@ -118,10 +134,120 @@ ASSUME_YES=false
 SKIP_DRAIN=false
 REPO="${POGO_REPO:-}"
 
+# ---------------------------------------------------------------------------
+# The reason channel (mg-0155)
+# ---------------------------------------------------------------------------
+# THE ONE FACT THIS SCRIPT OWNS AND USED TO THROW AWAY. Every refusal below
+# already computes the correct operator-facing sentence — "unexpected HTTP 503
+# from POST /agents/drain; refusing to proceed", "$n polecat(s) still active
+# after ${DRAIN_TIMEOUT}s drain timeout", "go install failed" — writes it to
+# stderr, and then exits with an integer. The unattended runner
+# (scripts/launchd/pogo-deploy.sh) is a separate process; the only thing that
+# crossed the boundary was that integer, so the runner had to RE-DERIVE a
+# sentence from it, and it re-derived the wrong one whenever a code covered more
+# than one cause.
+#
+# That is a generator, not an incident. Exit codes are assigned per SITE; the
+# operator's story is needed per CAUSE. So every new failure path must either
+# reuse a code (and silently inherit a story about a different failure — exit 6
+# on 2026-08-07) or mint a fresh integer plus a hand-written paragraph (mg-0d70's
+# exit 10). Four generations of this defect have now been fixed one exit path at
+# a time: mg-8f7e, mg-65b2, mg-0d70, and 2026-08-07's exit 6.
+#
+# So: carry the reason instead of re-deriving it. Nothing here decides what to
+# say — the refusal sites already did that. This machinery only makes sure the
+# sentence they wrote is the sentence the operator reads.
+#
+# STRUCTURAL, NOT PER-SITE. The record is assembled by an EXIT trap out of two
+# things that accumulate on their own: every line `err` has emitted, and the
+# stage the run had reached. No exit site has to remember to call anything, so a
+# path added next year is covered by having been written at all — which is the
+# property the four point-fixes did not have.
+#
+# POGO_DEPLOY_REASON_FILE — where to write it. Unset (a human at a terminal) and
+# nothing is written: they are reading the stderr this is a copy of.
+REASON_FILE="${POGO_DEPLOY_REASON_FILE:-}"
+# ERR_LOG — a FILE, not an array, because `err` is called from inside command
+# substitutions (witness_alive_count, drain_wait's helpers) whose variable
+# assignments die with the subshell. Appends from a subshell land in the parent's
+# file.
+ERR_LOG=""
+# Where the run got to, and what it had changed by then. These are the two
+# questions the 03:00 alert answered wrongly, so they are fields rather than
+# prose: `installed` is what stops a remedy asserting an install that never
+# happened, whichever code the run exits with.
+DEPLOY_STAGE="startup"
+DEPLOY_INSTALLED="no"     # no | partial | yes
+
 ts()   { date -u +%Y-%m-%dT%H:%M:%SZ; }
 log()  { echo "[$(ts)] $*"; }
-err()  { echo "[$(ts)] ERROR: $*" >&2; }
+# Every err line is tagged with the stage it was emitted in. That tag is what
+# lets the record pick a headline without guessing: see deploy_reason_record.
+err()  { echo "[$(ts)] ERROR: $*" >&2; [ -n "$ERR_LOG" ] && printf '%s\t%s\n' "$DEPLOY_STAGE" "$*" >> "$ERR_LOG"; return 0; }
 short(){ printf '%s' "${1:0:12}"; }
+
+# deploy_stage STAGE — advance the run's stage marker, and say so in the log.
+#
+# The stage is not decoration: it is how the record answers "how far did this run
+# get?" without every exit site being asked to declare it.
+deploy_stage() {
+    DEPLOY_STAGE="$1"
+    log "stage: $1"
+}
+
+# deploy_reason_record CODE — write the record the runner reads. Called from the
+# EXIT trap, so it runs on EVERY exit including 0 and including the signal paths
+# that convert themselves into exits.
+#
+# FORMAT. Single-line `key=value` header, then a separator, then the verbatim
+# stderr transcript. Deliberately not JSON: this script is jq-free on purpose
+# (one fewer dependency in the path that must work when everything else is
+# broken) and the runner reads it with the same seds it uses everywhere else.
+#
+#   exit=6
+#   stage=drain
+#   installed=no
+#   reason=<the FIRST line err emitted — the headline, not the elaboration>
+#   --- verbatim ---
+#   <every err line, in order>
+#
+# CHOOSING THE HEADLINE. reason= is the FIRST err line emitted in the stage the
+# run ENDED in. Two wrong rules were available and both are worth naming, since
+# a headline is the part of an alert that travels:
+#
+#   - the last line overall: every refusal here is written headline-first, cause
+#     then remedy, so the last line is the remedy. The 503 refusal would have
+#     been described to the operator as "confirm with: curl -s .../server/mode".
+#   - the first line overall: some errs are not fatal. report_drain_complete
+#     warns that it could not re-read /agents/drain and the run continues; a
+#     build failure ten minutes later would then be announced under the drain's
+#     warning.
+#
+# Scoping to the final stage takes the first line of the burst that actually
+# ended the run. If that stage emitted nothing (a clean exit, or a failure whose
+# errs were all in an earlier stage), it falls back to the last err line rather
+# than reporting no reason at all.
+deploy_reason_record() {
+    local code="$1" reason="" verbatim=""
+    [ -n "$REASON_FILE" ] || return 0
+    if [ -n "$ERR_LOG" ] && [ -s "$ERR_LOG" ]; then
+        reason="$(awk -v s="$DEPLOY_STAGE" 'index($0, s "\t")==1 { print substr($0, length(s)+2); exit }' "$ERR_LOG")"
+        # awk, not sed: the tag separator is a TAB, and BSD sed on macOS reads
+        # \t in a BRE as a literal 't'.
+        verbatim="$(awk '{ i=index($0,"\t"); if (i>0) print substr($0,i+1); else print }' "$ERR_LOG")"
+        [ -n "$reason" ] || reason="$(printf '%s\n' "$verbatim" | tail -n 1)"
+    fi
+    {
+        printf 'exit=%s\n' "$code"
+        printf 'stage=%s\n' "$DEPLOY_STAGE"
+        printf 'installed=%s\n' "$DEPLOY_INSTALLED"
+        printf 'reason=%s\n' "$reason"
+        printf -- '--- verbatim ---\n'
+        [ -n "$verbatim" ] && printf '%s\n' "$verbatim"
+    } > "$REASON_FILE" 2>/dev/null || true
+    [ -n "$ERR_LOG" ] && rm -f "$ERR_LOG"
+    return 0
+}
 
 # Flat-JSON field extractors — the driver stays jq-free on purpose (one fewer
 # dependency in the path that must work when everything else is broken). Go's
@@ -800,16 +926,22 @@ drain_state() {
     case "$v" in true|false) echo "$v" ;; *) echo "?"; return 1 ;; esac
 }
 
-# restore_drain — the EXIT trap body. Puts dispatch back the way we found it on
-# ANY exit path while armed: the four do_build exits, an unexpected error under
-# set -u, and Ctrl-C/SIGTERM (INT/TERM are trapped too, since a human aborting a
-# deploy mid-drain leaves exactly the same outage as a failed build).
+# restore_drain CODE — half of the EXIT trap body (see on_deploy_exit). Puts
+# dispatch back the way we found it on ANY exit path while armed: the four
+# do_build exits, an unexpected error under set -u, and Ctrl-C/SIGTERM (INT/TERM
+# are trapped too, since a human aborting a deploy mid-drain leaves exactly the
+# same outage as a failed build).
+#
+# CODE is passed in rather than read from `$?`: since mg-0155 the trap does two
+# things, and the second call in a trap body no longer sees the exit status that
+# fired it. The status the operator is told about must be the run's, not the
+# preceding statement's.
 #
 # Deliberately NOT self-healing-by-accident: it reports what it did, and reports
 # LOUDLY when it could not, because a failed restore IS the outage this exists to
 # prevent and the operator needs the one command that fixes it.
 restore_drain() {
-    local code=$? want st
+    local code="${1:-$?}" want st
     $DRAIN_ARMED || return
     DRAIN_ARMED=false   # a restore is attempted exactly once
     want="$DRAIN_PRIOR"
@@ -827,6 +959,35 @@ restore_drain() {
              err "    curl -X POST $(base_url)/agents/drain -H 'Content-Type: application/json' -d '{\"draining\":$want}'"
              ;;
     esac
+}
+
+# disarm_drain_restore WHY — cancel the restore on a path where the enabling
+# POST PROVABLY never mutated anything (mg-0155). Logs what it did and why.
+#
+# The trap is armed BEFORE the POST on purpose, and the comment at the arming
+# site says why: a POST that times out AFTER pogod set the flag comes back
+# "000", so the one status that cannot tell us whether we mutated anything must
+# still restore. That reasoning is about AMBIGUITY, and it does not reach the
+# statuses that are not ambiguous.
+#
+# A 404 means the mux found no `/agents/drain` route to run. A 503 means
+# `RequireOrchestration` returned before the handler was ever entered. On both,
+# the server ANSWERED and the flag was not touched — so the restore has nothing
+# to put back, and its failure line is worse than useless. On 2026-08-07 the 503
+# refusal ran the restore anyway, the restore POST hit the same 503, and the
+# alert carried "drain restore FAILED (HTTP 503) — pogod may STILL be draining
+# and dispatching NO polecats. The fleet will look healthy and do nothing." The
+# fleet was never draining (`{"draining":false}`, mode `full`), and the one
+# command the message offered as the fix is aimed at the very endpoint that is
+# refusing. A false outage report, plus a remedy that cannot work.
+#
+# Narrow ON PURPOSE: only the two statuses whose non-mutation is a property of
+# the server's own routing. `down` and every other `error:*` keep the restore,
+# because "the server answered 500" does not establish what it did first.
+disarm_drain_restore() {
+    $DRAIN_ARMED || return 0
+    DRAIN_ARMED=false
+    log "drain restore disarmed: dispatch was never touched — $1"
 }
 
 # ---------------------------------------------------------------------------
@@ -1160,12 +1321,28 @@ Redeploy by hand when the fleet is idle:
 #   drain      — 2xx: endpoint present, proceed to drain_wait
 #   bootstrap  — 404: server answers but predates the drain endpoint (mg-cae1);
 #                the one-time self-deploy chicken-and-egg (mg-065e)
+#   stopped    — 503: pogod is UP and in index-only mode; orchestration is
+#                stopped (mg-0155)
 #   down       — 000/empty: pogod not answering (connection refused / timeout)
 #   error:<c>  — any other status; refuse rather than guess
+#
+# WHY 503 IS NOT "UNEXPECTED" (mg-0155). It is designed behaviour and it names
+# exactly one state. `RequireOrchestration` (internal/server/server.go) answers
+# 503 with `{"error":"orchestration is stopped"}` for everything under
+# `/agents/`, `/refinery/` and `/scheduler/` whenever the mode is not `full`
+# (cmd/pogod/main.go), and `/agents/drain` is wrapped by it. It is also the ONLY
+# non-test source of a 503 on this route: `handleDrain` itself answers 200, 400
+# or 405 and nothing else, and the other 503s in the agent API belong to
+# `failPolecatSpawn` on `/agents/spawn-polecat`. So a 503 here means pogod was
+# not in full mode — a named state with a one-command remedy — where the
+# `error:*` branch means "we do not know, refuse rather than guess". Sending an
+# operator to guess about a state the daemon just named is the defect, not the
+# absence of a case arm.
 classify_drain_precondition() {
     case "$1" in
         2??)     echo "drain" ;;
         404)     echo "bootstrap" ;;
+        503)     echo "stopped" ;;
         000|"")  echo "down" ;;
         *)       echo "error:$1" ;;
     esac
@@ -1184,6 +1361,98 @@ classify_drain_precondition() {
 # two world-states as one.
 drain_probe() {
     curl -s -w '\n%{http_code}' --max-time 5 "$(base_url)/agents/drain" 2>/dev/null
+}
+
+# refuse_drain_precondition DISPOSITION — report a drain-phase refusal and exit.
+# NEVER RETURNS. All four dispositions exit 6, and that is deliberate (mg-0155).
+#
+# WHAT EXIT 6 IS ALLOWED TO MEAN. "The drain precondition refused, before the
+# build." That is a claim about WHERE the run stopped, which is the most an
+# integer can honestly carry, and it is true of all four dispositions. What it
+# must NOT be asked to carry is WHICH refusal — `bootstrap`, `down`, `stopped`
+# and `error:<c>` need four different operator reactions, and the difference
+# between them travels on the reason channel (deploy_reason_record), not on the
+# code.
+#
+# WHY NOT FOUR CODES. Because that is the fix that has now been made four times.
+# The runner used to render its whole RED alert from the exit code alone, so a
+# code meaning four things forced it to pick one story for all four — and it
+# picked a fifth: `describe_exit 6` said "post-restart verification failed" and
+# handed the reader the exit-8 remedy, "The new pogod was installed and started
+# but did not verify [...] the binary on disk is the NEW one". On 2026-08-07
+# 03:00 that went out over a run that died at the FIRST step, `elapsed: 0s`,
+# with `running == installed == d31297f`: no install, no split-brain, nothing to
+# roll back, and the real cause (orchestration was stopped) visible only in a log
+# line the alert did not carry.
+#
+# Splitting the code would have fixed that instance the way mg-8f7e (per-code
+# remedies), mg-65b2 (a discriminator for alert_drain_stalled) and mg-0d70 (a
+# new code for the transient sync class) each fixed theirs — correctly, and one
+# exit path short of the next one. The generator is that operator-facing text was
+# DERIVED FROM THE CODE, while codes are assigned per SITE and stories are needed
+# per CAUSE. Every new failure path therefore either reuses a code and inherits a
+# story about a different failure, or needs a fresh integer and a hand-written
+# paragraph. Both arms guarantee the next instance.
+#
+# So the sentences below are written once, here, at the only place that knows
+# which refusal this is — and they are what the operator reads, verbatim. See
+# docs/deploy-exit-paths.md for the full enumeration of every exit in this
+# script and what each one leaves behind.
+#
+# EVERY branch here exits BEFORE do_build: nothing is built, installed or
+# restarted and there is nothing to roll back. The record says so in a field
+# (`installed=no`) AND each branch says so in words, because the field is what
+# the runner reasons about and the words are what a human reads.
+refuse_drain_precondition() {
+    local disp="$1"
+    case "$disp" in
+        bootstrap)
+            disarm_drain_restore "HTTP 404 means the mux found no /agents/drain route to run"
+            err "bootstrap: this pogod predates the /agents/drain endpoint (HTTP 404 from mg-cae1's feature)"
+            err "the pogod you are replacing does not yet have the drain feature you are deploying —"
+            err "the one-time self-deploy chicken-and-egg. Nothing to drain via the API."
+            err "re-run with --skip-drain to rebuild+restart without draining (safe when the fleet is idle)."
+            err "this run built nothing, installed nothing and restarted nothing — it changed NOTHING."
+            exit 6
+            ;;
+        down)
+            err "pogod is not answering POST $(base_url)/agents/drain (connection refused / timeout)"
+            err "this is NOT the bootstrap case — the server did not respond at all. Start pogod, then retry."
+            err "this run built nothing, installed nothing and restarted nothing — it changed NOTHING."
+            exit 6
+            ;;
+        stopped)
+            disarm_drain_restore "HTTP 503 is RequireOrchestration answering before the drain handler runs"
+            err "orchestration is STOPPED: POST $(base_url)/agents/drain answered HTTP 503"
+            err "pogod is UP and healthy — it is in index-only mode, so it refuses everything under"
+            err "  /agents/, /refinery/ and /scheduler/ with 503. That is designed behaviour"
+            err "  (RequireOrchestration, internal/server/server.go), not a fault and not a corrupt install."
+            err "this run built nothing, installed nothing and restarted nothing — it changed NOTHING,"
+            err "  and dispatch was never touched, so there is no drain to clear and nothing to roll back."
+            err "restart orchestration, then re-run the redeploy:"
+            err "    pogo server start                      # restarts orchestration when the mode is index-only"
+            err "    curl -sX POST $(base_url)/server/start-orchestration   # the same thing without the CLI"
+            err "confirm with: curl -s $(base_url)/server/mode   # expect {\"mode\":\"full\"}"
+            exit 6
+            ;;
+        error:*)
+            err "unexpected HTTP ${disp#error:} from POST /agents/drain; refusing to proceed"
+            err "the server ANSWERED, so this is neither the bootstrap 404 nor a down pogod, and it is not"
+            err "  the 503 that means orchestration is stopped. This branch is deliberately the one that"
+            err "  does not guess: the status above is the whole of what is known."
+            err "this run built nothing, installed nothing and restarted nothing — it changed NOTHING."
+            exit 6
+            ;;
+        *)
+            # Unreachable via classify_drain_precondition, which emits exactly
+            # the words above. Present so a future disposition cannot fall out
+            # of a case statement into `drain` by silence — the failure mode
+            # this whole function exists to stop.
+            err "internal error: refuse_drain_precondition called with unknown disposition '$disp'"
+            err "this run built nothing, installed nothing and restarted nothing — it changed NOTHING."
+            exit 6
+            ;;
+    esac
 }
 
 # witness_alive_count — consult the SECOND witness (mg-13a3) about whether any
@@ -1815,6 +2084,15 @@ do_build() {
         exit 4
     fi
     rm -rf "$stage"
+    # THE MUTATION POINT (mg-0155). Everything above this line leaves GOBIN
+    # exactly as it found it; everything below has, or may have, written to it.
+    # `partial` is not hedging — go install writes the binaries one at a time, so
+    # a failure inside this call genuinely leaves an unknown subset installed,
+    # and that is the state an operator must be told about rather than have
+    # guessed at in either direction. The alert's "was anything installed?"
+    # sentence is derived from this flag, not from the exit code, which is why a
+    # future exit added anywhere in this function cannot get the answer wrong.
+    DEPLOY_INSTALLED="partial"
     ( cd "$REPO" && go install "${pkgs[@]}" ) || { err "go install failed"; exit 4; }
     # Verify EVERY binary, not just the daemon: an install that silently skipped
     # one is exactly the failure this ticket exists to end, and it is only
@@ -1827,6 +2105,11 @@ do_build() {
         fi
         log "installed $name is now $(short "$now")"
     done
+    # `yes` is claimed only once every binary has been asked and answered main.
+    # A `go install` that returned 0 over a split pair is the failure this loop
+    # exists to catch, so the flag it drives must not be set before it runs —
+    # that would report GOBIN as good on the one path that just proved it is not.
+    DEPLOY_INSTALLED="yes"
 }
 
 # ---------------------------------------------------------------------------
@@ -1969,7 +2252,35 @@ verify_running() {
     done
 }
 
+# on_deploy_exit — the single EXIT trap (mg-0155). Two jobs, in this order:
+# restore dispatch if this run armed it, then write the reason record.
+#
+# The restore runs FIRST so that its own errors — "drain restore FAILED (HTTP
+# ...)" is the loudest line this script can emit — are in the transcript the
+# record carries. A record written before the restore would describe a run that
+# had not finished failing.
+#
+# ONE trap, installed ONCE, at the top of cmd_redeploy. It used to be armed only
+# inside the drain branch, which was correct for a trap whose only job was the
+# restore and is wrong for one that also has to report: the exits BEFORE the
+# drain (bad repo, unresolvable mg, unclassifiable drift, a declined prompt) are
+# exactly the ones an operator is most likely to be told nothing useful about.
+on_deploy_exit() {
+    local code=$?
+    restore_drain "$code"
+    deploy_reason_record "$code"
+}
+
 cmd_redeploy() {
+    # The reason channel, before anything that can fail (mg-0155). ERR_LOG must
+    # exist before the first `err` call or that line is missing from the record,
+    # and the first `err` call is inside assert_out_of_band on the next line.
+    if [ -n "$REASON_FILE" ]; then
+        ERR_LOG="$(mktemp -t pogo-self-deploy-err 2>/dev/null)" || ERR_LOG=""
+    fi
+    trap on_deploy_exit EXIT
+    deploy_stage "startup"
+
     # FIRST, ahead of every other precondition (mg-1bbf). Not because it is the
     # most likely refusal but because it is the only one whose failure mode is
     # the fleet: everything below this line assumes the caller is allowed to
@@ -1999,6 +2310,7 @@ cmd_redeploy() {
     #    predating mg-cae1), and pogod genuinely down. Each has a DIFFERENT
     #    remedy, so they must not collapse into one "is pogod up?" message.
     local snapshot leftover=0
+    deploy_stage "drain"
     if $SKIP_DRAIN; then
         # Operator-directed skip (or the bootstrap remedy). No drain, no fleet
         # quiesce, no snapshot — the kickstart -k below will bounce whatever is
@@ -2017,12 +2329,16 @@ cmd_redeploy() {
         DRAIN_ARMED=true
         # ONLY the EXIT trap restores. INT/TERM merely convert the signal into an
         # exit, because a bash signal handler that RETURNS resumes the script
-        # where it was interrupted: `trap restore_drain EXIT INT TERM` would
+        # where it was interrupted: `trap on_deploy_exit EXIT INT TERM` would
         # restore dispatch on Ctrl-C and then carry on building and kickstarting
         # with the fleet live — a cleanup that fires and then un-fires itself.
         # Routing both through exit gives one restore, on one path, with the
         # signal's status preserved.
-        trap restore_drain EXIT
+        #
+        # The EXIT trap itself is installed at the top of cmd_redeploy (mg-0155)
+        # and is NOT re-installed here: DRAIN_ARMED, not the trap, is what says
+        # whether there is dispatch to put back. Re-installing it would replace a
+        # trap that also writes the reason record with one that only restores.
         trap 'err "interrupted (SIGINT) during the drain window"; exit 130' INT
         trap 'err "terminated (SIGTERM) during the drain window"; exit 143' TERM
         local disp; disp="$(classify_drain_precondition "$(drain_post true)")"
@@ -2098,21 +2414,14 @@ cmd_redeploy() {
                 # Capture the pre-kickstart polecat snapshot for post-bounce cleanup.
                 snapshot="$(curl -sf --max-time 5 "$(base_url)/agents/drain" 2>/dev/null)"
                 ;;
-            bootstrap)
-                err "bootstrap: this pogod predates the /agents/drain endpoint (HTTP 404 from mg-cae1's feature)"
-                err "the pogod you are replacing does not yet have the drain feature you are deploying —"
-                err "the one-time self-deploy chicken-and-egg. Nothing to drain via the API."
-                err "re-run with --skip-drain to rebuild+restart without draining (safe when the fleet is idle)."
-                exit 6
-                ;;
-            down)
-                err "pogod is not answering POST $(base_url)/agents/drain (connection refused / timeout)"
-                err "this is NOT the bootstrap case — the server did not respond at all. Start pogod, then retry."
-                exit 6
-                ;;
-            error:*)
-                err "unexpected HTTP ${disp#error:} from POST /agents/drain; refusing to proceed"
-                exit 6
+            *)
+                # bootstrap | stopped | down | error:<code> — four refusals that
+                # all stop BEFORE the build, each needing a different operator
+                # reaction. They live in one function (mg-0155) because that
+                # function is the only place that knows which one this is, and
+                # what it writes is what the operator reads: the runner carries
+                # the sentence across rather than re-deriving one from the code.
+                refuse_drain_precondition "$disp"   # never returns
                 ;;
         esac
     fi
@@ -2120,6 +2429,7 @@ cmd_redeploy() {
     # 2. Build (only if a build is owed — a restart-only drift skips go install
     #    so we do not pay a rebuild we do not need).
     if $NEEDS_BUILD; then
+        deploy_stage "build"
         do_build
     else
         log "installed already matches main — skipping go install (restart-only)"
@@ -2142,6 +2452,7 @@ cmd_redeploy() {
     #     exactly as it does for a failed build (mg-8b48). A refusal to deploy
     #     therefore leaves the OLD pogod running and the fleet dispatching, which
     #     is the correct resting state for "we could not prove the new one".
+    deploy_stage "prove"
     do_prove
 
     # 3. Restart (always kickstart) and verify the new process is main.
@@ -2162,9 +2473,19 @@ cmd_redeploy() {
     # This is the far edge of the window mg-46a4 identified; past it, a restore
     # POST would be aimed at a DIFFERENT daemon than the one we changed — and if
     # drain had been on before, it would re-drain the fresh fleet.
+    #
+    # DRAIN_ARMED is what disarms the restore; the EXIT trap STAYS (mg-0155).
+    # `trap - EXIT` here used to be belt-and-braces over the same flag, and since
+    # the trap also writes the reason record it would now silence the run's
+    # report over exactly the region where an install HAS happened — exit 8, the
+    # one code whose remedy is allowed to talk about a binary on disk. INT/TERM
+    # are still cleared: their only job was to convert a signal into a
+    # restore-able exit, and there is nothing left to restore.
     DRAIN_ARMED=false
-    trap - EXIT INT TERM
+    trap - INT TERM
+    deploy_stage "restart"
     do_restart
+    deploy_stage "verify"
     verify_running || exit 8
 
     # 4. If a forced bounce killed active polecats, clean up the wreckage.
@@ -2186,8 +2507,10 @@ cmd_redeploy() {
     if [ -n "$mail_pre_body" ] && [ "$leftover" != "0" ] && [ "$leftover" != "?" ]; then
         mail_slack="$(expected_lost_mail_checks "$mail_pre_body" "$snapshot")"
     fi
+    deploy_stage "post-check"
     verify_mail_checks_restored "$mail_pre" "$mail_slack"
 
+    deploy_stage "done"
     log "redeploy complete."
 }
 

@@ -242,6 +242,14 @@
 #   POGO_DEPLOY_PROBE_TIMEOUT  seconds to wait for the reachability probe (5)
 #   POGO_DEPLOY_NC           pin an nc for the probe (still checked by execution)
 #   GIT                      pin a specific git (still checked by execution)
+#
+# HOW THE RED ALERT KNOWS WHAT FAILED (mg-0155). Not from the exit code. This
+# runner passes POGO_DEPLOY_REASON_FILE to pogo-self-deploy, which writes the
+# failing sentence it already computed, the stage it reached, and whether
+# anything had been installed by then; the alert prints THAT. describe_exit /
+# remedy_for_exit remain as the fallback for a run that left no record. See
+# section 7a, and docs/deploy-exit-paths.md for the enumeration of every exit
+# path the deploy script has.
 
 set -u
 
@@ -1204,9 +1212,19 @@ is_clean_verdict() {
 # ---------------------------------------------------------------------------
 # 7. Outcome classification
 # ---------------------------------------------------------------------------
-# The exit codes are pogo-self-deploy's, and each names a DIFFERENT operator
-# response. Collapsing them into "the deploy failed" is what makes a nightly job
-# unactionable at 08:00.
+# THE REASON CHANNEL COMES FIRST (mg-0155). Everything in this section is the
+# FALLBACK. When pogo-self-deploy leaves a reason record, the alert is written
+# from the sentence the deploy script itself computed, because that script is the
+# only process that knew which failure this was; describe_exit is what the alert
+# falls back to when no record was left (an exit before the record was armed, an
+# unwritable path, an older deploy script). See deploy_reason_field.
+#
+# WHY A FALLBACK AND NOT A REPLACEMENT. A code is still worth describing: it says
+# roughly WHERE the run stopped, and that is a real fact even with no reason
+# attached. What it can no longer be asked to do is carry WHICH failure occurred
+# — that is what four generations of this defect were made of (mg-8f7e, mg-65b2,
+# mg-0d70, and 2026-08-07's exit 6). So the descriptions below are deliberately
+# coarse where the code is coarse, and say so.
 #
 # exit 9 (do_prove RED) is the important one and the best one: do_prove runs
 # AFTER the build and BEFORE the kickstart, so a 9 means the running pogod was
@@ -1220,7 +1238,16 @@ describe_exit() {
         3) echo "refused: non-interactive without --yes (a bug in this wrapper — it must pass --yes)" ;;
         4) echo "BUILD FAILED (dirty tree, go install, or the post-install revision check)" ;;
         5) echo "launchctl kickstart failed — pogod may be DOWN" ;;
-        6) echo "post-restart verification failed" ;;
+        # 6 was "post-restart verification failed" until mg-0155, and had never
+        # been that: every exit-6 site is a drain PRECONDITION refusal, reached
+        # before the build. The description sent the 2026-08-07 03:00 reader to
+        # look for a half-installed binary after a run that installed nothing.
+        # It is coarse on purpose now — four refusals share it (this pogod
+        # predates /agents/drain; pogod is not answering; orchestration is
+        # stopped; an unexpected status) and the reason record is what separates
+        # them. What the code alone honestly settles is the part that matters
+        # most: the run stopped before do_build, so nothing was installed.
+        6) echo "drain precondition refused, BEFORE the build — nothing was built, installed or restarted (the reason line says which refusal)" ;;
         7) echo "drain stalled" ;;
         8) echo "verify_running failed — the new pogod did not come up" ;;
         9) echo "do_prove RED — the control suite refused the artifact BEFORE the restart; the running pogod is UNTOUCHED" ;;
@@ -1228,7 +1255,110 @@ describe_exit() {
         # before the deploy script was ever invoked, on a class that established
         # nothing about the tree (mg-0d70).
         10) echo "sync aborted on a transient class — the repo state was never established, and a later fire retries" ;;
+        # 130/143 are the shell's, not either script's: SIGINT and SIGTERM during
+        # the drain window, converted to exits so the restore trap runs. They
+        # rendered as "unclassified failure" until the mg-0155 enumeration asked
+        # for a row per exit path and found two with no story at all — which is
+        # how a launchd shutdown mid-deploy would have been reported.
+        130) echo "INTERRUPTED (SIGINT) during the drain window — aborted from a terminal; dispatch was restored on the way out and nothing was installed" ;;
+        143) echo "TERMINATED (SIGTERM) during the drain window — something killed the deploy (a logout or shutdown will do it); dispatch was restored on the way out and nothing was installed" ;;
         *) echo "unclassified failure" ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# 7a. The reason record (mg-0155)
+# ---------------------------------------------------------------------------
+# pogo-self-deploy writes one of these to $POGO_DEPLOY_REASON_FILE on every exit
+# from `redeploy`. Format, deliberately sed-readable rather than JSON (the deploy
+# path stays jq-free — one fewer dependency in the code that has to work when
+# everything else is broken):
+#
+#   exit=6
+#   stage=drain
+#   installed=no
+#   reason=orchestration is STOPPED: POST http://127.0.0.1:10000/agents/drain answered HTTP 503
+#   --- verbatim ---
+#   <every ERROR line the deploy script emitted, in order>
+#
+# `installed` is the field that ends a specific class of lie. Whether an install
+# happened is a property of how far the run got, not of which code it exited
+# with, and the alert used to infer it from the code — which is how a run with
+# `elapsed: 0s` was reported as "the binary on disk is the NEW one".
+#
+# EVERY READ IS TOTAL. A missing file, an empty file, a key that is not there:
+# all of them yield empty, and every caller treats empty as "fall back". An
+# alerting path that can itself fail on a malformed input is an alerting path
+# that goes quiet exactly when something has gone unusually wrong.
+deploy_reason_field() {
+    local file="$1" key="$2"
+    [ -n "$file" ] && [ -f "$file" ] || return 0
+    # Stop at the separator so a verbatim line that happens to start with
+    # "reason=" cannot be read as the header.
+    sed -n "/^--- verbatim ---$/q; s/^${key}=//p" "$file" 2>/dev/null | head -n 1
+}
+
+# deploy_reason_detail FILE — the verbatim transcript, or empty.
+deploy_reason_detail() {
+    local file="$1"
+    [ -n "$file" ] && [ -f "$file" ] || return 0
+    sed -n '/^--- verbatim ---$/,$p' "$file" 2>/dev/null | sed '1d'
+}
+
+# describe_outcome RC FILE — the alert's one-line description of what happened.
+#
+# The deploy script's own sentence when it left one, describe_exit otherwise.
+# This is the whole mechanism: the text is written once, at the site that knows
+# which failure it is, and carried — not re-derived from an integer by a process
+# that was not there.
+describe_outcome() {
+    local reason; reason="$(deploy_reason_field "$2" reason)"
+    if [ -n "$reason" ]; then printf '%s\n' "$reason"; else describe_exit "$1"; fi
+}
+
+# stage_is_past_kickstart STAGE — did this run reach `launchctl kickstart -k`?
+#
+# The stage names are pogo-self-deploy's, in the order it sets them: startup,
+# drain, build, prove, restart, verify, post-check, done. Everything from
+# `restart` on has bounced the daemon.
+#
+# TWO facts, not one. "Was anything installed" and "was pogod bounced" come
+# apart on a restart-only deploy, which installs nothing and still kills the
+# daemon — so an alert that derives the second from the first tells a kickstart
+# failure that "the running pogod is exactly as it was before". That is the
+# 2026-08-07 defect rebuilt inside its own fix, and it is the reason the
+# enumeration in docs/deploy-exit-paths.md is a deliverable rather than a nicety:
+# writing the table is what found it.
+stage_is_past_kickstart() {
+    case "${1:-}" in
+        restart|verify|post-check|done) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# what_the_run_changed FILE — one line on what state the attempt left behind.
+#
+# Its absence is what let the 03:00 alert assert an install over a run that made
+# none. Empty when there is no record: a sentence about what changed is worth
+# printing only when something measured it.
+what_the_run_changed() {
+    local installed stg bounced
+    installed="$(deploy_reason_field "$1" installed)"
+    stg="$(deploy_reason_field "$1" stage)"
+    [ -n "$installed" ] || return 0
+    if stage_is_past_kickstart "$stg"; then bounced=yes; else bounced=no; fi
+    case "$installed:$bounced" in
+        no:no)
+            echo "NOTHING. The attempt stopped at the '${stg}' stage, before \`go install\` and before the kickstart, so the binaries on disk and the running pogod are both exactly as they were before it started. There is nothing to roll back." ;;
+        no:yes)
+            echo "No install (this was a restart-only deploy — the binaries on disk already matched main), but pogod WAS bounced at the '${stg}' stage. The binaries are unchanged; the process is not the one that was running before. Check it is up: \`curl -s http://127.0.0.1:10000/version\`." ;;
+        partial:*)
+            echo "An install was IN PROGRESS when the attempt stopped (stage '${stg}'), so GOBIN may hold a partial or unverified set. Ask each binary its revision before doing anything else: \`pogod --version\`, \`pogo --version\`." ;;
+        yes:no)
+            echo "The install COMPLETED and every binary was verified at main (stage '${stg}'), but pogod was NOT bounced — the process still running is the old one. The box is in the split state the next successful deploy resolves; it is not an outage." ;;
+        yes:yes)
+            echo "The install COMPLETED and pogod WAS bounced (stage '${stg}'). Both the binaries and the process are the new ones, so a failure here is about the new pogod, not about getting it onto the box." ;;
+        *) : ;;
     esac
 }
 
@@ -1245,6 +1375,14 @@ describe_exit() {
 #
 # So each code gets the paragraph that is true of it. describe_exit says what
 # happened; this says what it means and what to do.
+#
+# AND IT IS STILL ONLY THE FALLBACK HALF (mg-0155). Correct as far as it goes,
+# and it did not go far enough: it assumes one code means one failure, and code 6
+# meant four. A paragraph keyed on an integer can only ever say what everything
+# sharing that integer has in common — so these paragraphs now say exactly that
+# much and no more, and the alert prints the deploy script's own sentence above
+# them. Where a code's paragraph would have to assert something only some of its
+# failures did (an install, a bounce), it says the common part instead.
 # dispatch_freeze_note RC ELAPSED — what the attempt cost the fleet, in seconds.
 #
 # `draining=true` refuses ALL new polecat dispatch, so a drain is not just a late
@@ -1297,7 +1435,22 @@ first and restore service before diagnosing anything else:
   curl -s http://127.0.0.1:10000/version
 EOF
             ;;
-        6|8)
+        6)
+            cat <<'EOF'
+The DRAIN PRECONDITION refused: the deploy asked pogod to stop dispatching and
+did not get an answer it was willing to act on. Note what this exit does NOT
+mean — it happens before `go install`, so nothing was built, nothing was
+installed, nothing was restarted, and there is nothing to roll back. The running
+pogod is the one that was running before the attempt.
+
+Four different refusals share this code and they need four different reactions
+(this pogod predates /agents/drain; pogod is not answering at all; orchestration
+is stopped; some other HTTP status). The description line above is the deploy
+script's own words about which one it was — read it rather than this paragraph,
+which can only say what all four have in common.
+EOF
+            ;;
+        8)
             cat <<'EOF'
 The new pogod was installed and started but did not verify. The binary on disk is
 the NEW one while the process may be missing or unhealthy, so this is the state
@@ -1332,6 +1485,18 @@ If the same long-lived polecats block it night after night, the question is
 their lifetime, not the budget.
 EOF
             ;;
+        130|143)
+            cat <<'EOF'
+The deploy was KILLED mid-drain — not by anything it found, but by a signal. It
+had not reached `go install`, so nothing was built, installed or restarted, and
+its exit trap put dispatch back on the way out. There is nothing to repair.
+
+What is worth knowing is WHO sent it. A SIGTERM at 03:00 with nobody at the
+keyboard usually means the machine was going down (logout, shutdown, a forced
+restart) — in which case the deploy is the symptom, not the problem. The next
+nightly fire carries the same work.
+EOF
+            ;;
         9)
             cat <<'EOF'
 The control suite went RED BEFORE the kickstart, which means the running pogod
@@ -1349,6 +1514,46 @@ running pogod was replaced, and that is the fact everything else depends on:
 EOF
             ;;
     esac
+}
+
+# red_alert_body RC ELAPSED TODAY BUDGET REASON_FILE — the whole RED mail body.
+#
+# A FUNCTION, not a heredoc inline in main(), because of what the ticket asked
+# for: "a remedy paragraph is only reviewable next to the failure it is claimed
+# to describe." While this text was assembled inside main() the only way to see
+# it was to run a nightly deploy and fail it, so what got reviewed was the pieces
+# — and the pieces were individually correct on 2026-08-07, when the assembled
+# mail was wrong on every material point. The tests drive each real failure and
+# print what this returns.
+#
+# ORDER IS THE ARGUMENT. The description (the deploy script's own sentence) and
+# what the run changed come FIRST, above the code-keyed remedy, because they are
+# the two facts that are known to be about THIS failure. The remedy paragraph
+# below them can only speak for everything sharing the exit code.
+red_alert_body() {
+    local rc="$1" elapsed="$2" today="$3" budget="$4" file="${5:-}"
+    local changed detail
+    changed="$(what_the_run_changed "$file")"
+    detail="$(deploy_reason_detail "$file")"
+    printf '%s\n' "The unattended nightly redeploy FAILED, and no fire is left tonight to retry it.
+
+  exit $rc:  $(describe_outcome "$rc" "$file")
+  attempt:   $(( ATTEMPT_N + 1 )) tonight ($today)
+  drain:     up to ${budget}s were allowed
+  elapsed:   ${elapsed}s
+  checkout:  $SRC ($("$GIT" -C "$SRC" rev-parse --short HEAD 2>/dev/null))
+  log:       $HOME/Library/Logs/pogo/pogo-deploy.log"
+    if [ -n "$changed" ]; then
+        printf '\nWHAT THIS ATTEMPT CHANGED: %s\n' "$changed"
+    fi
+    printf '\nDO NOT re-run with --force.\n'
+    if [ -n "$detail" ]; then
+        printf '\nWHAT THE DEPLOY SCRIPT ACTUALLY SAID, verbatim:\n\n%s\n' "$detail"
+    fi
+    printf '\n%s\n' "$(remedy_for_exit "$rc")"
+    local freeze; freeze="$(dispatch_freeze_note "$rc" "$elapsed")"
+    [ -n "$freeze" ] && printf '%s\n' "$freeze"
+    return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -1619,10 +1824,19 @@ $check_out"
     # wrong for the unattended run, which has the whole night and needs it.
     log "redeploy: $DEPLOY redeploy --yes --drain-timeout $budget (repo $SRC)"
     local rc=0 t0 elapsed
+    # The reason channel (mg-0155). One file per attempt, named for the attempt,
+    # so a retry cannot read the earlier fire's record and describe last hour's
+    # failure. Under the log dir rather than /tmp because it is evidence: when an
+    # alert says something surprising, the record it was built from should still
+    # be there in the morning.
+    local reason_file="$HOME/Library/Logs/pogo/pogo-deploy-reason.$today.$(( ATTEMPT_N + 1 ))"
+    mkdir -p "$(dirname "$reason_file")" 2>/dev/null || true
+    rm -f "$reason_file" 2>/dev/null || true
     t0="$(date +%s)"
-    POGO_REPO="$SRC" "$DEPLOY" redeploy --yes --drain-timeout "$budget" || rc=$?
+    POGO_REPO="$SRC" POGO_DEPLOY_REASON_FILE="$reason_file" \
+        "$DEPLOY" redeploy --yes --drain-timeout "$budget" || rc=$?
     elapsed=$(( $(date +%s) - t0 ))
-    log "redeploy: exit $rc after ${elapsed}s — $(describe_exit "$rc")"
+    log "redeploy: exit $rc after ${elapsed}s — $(describe_outcome "$rc" "$reason_file")"
 
     if [ "$rc" -ne 0 ]; then
         # A stall with another fire still to come is not yet a RED. The retry is
@@ -1632,7 +1846,7 @@ $check_out"
         # the night has actually run out of chances.
         if retry_will_follow "$rc"; then
             local nxt; nxt="$(next_fire_hour "$(current_hour)")"
-            log "redeploy: exit $rc ($(describe_exit "$rc")) after attempt $(( ATTEMPT_N + 1 )) — the $(printf '%02d' "$nxt"):00 fire will retry. Not alerting yet."
+            log "redeploy: exit $rc ($(describe_outcome "$rc" "$reason_file")) after attempt $(( ATTEMPT_N + 1 )) — the $(printf '%02d' "$nxt"):00 fire will retry. Not alerting yet."
             dispatch_freeze_note "$rc" "$elapsed"
             if [ -n "$POGO_CLI" ]; then
                 "$POGO_CLI" events emit --type=deploy_nightly_retry_pending --agent=pogo-deploy \
@@ -1641,19 +1855,7 @@ $check_out"
             exit "$rc"
         fi
         alert "[pogo-deploy] RED: nightly redeploy exited $rc" \
-"The unattended nightly redeploy FAILED, and no fire is left tonight to retry it.
-
-  exit $rc:  $(describe_exit "$rc")
-  attempt:   $(( ATTEMPT_N + 1 )) tonight ($today)
-  drain:     up to ${budget}s were allowed
-  elapsed:   ${elapsed}s
-  checkout:  $SRC ($("$GIT" -C "$SRC" rev-parse --short HEAD 2>/dev/null))
-  log:       $HOME/Library/Logs/pogo/pogo-deploy.log
-
-DO NOT re-run with --force.
-
-$(remedy_for_exit "$rc")
-$(dispatch_freeze_note "$rc" "$elapsed")"
+            "$(red_alert_body "$rc" "$elapsed" "$today" "$budget" "$reason_file")"
         exit "$rc"
     fi
 
