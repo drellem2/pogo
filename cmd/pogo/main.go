@@ -1455,9 +1455,21 @@ WHO IS NOT JUDGED, deliberately:
   unreadable prompts  if the prompt tree cannot be read the agent cannot be
                       classified, and a false RED costs more than silence.
 
-Those exclusions mean a small "judged" count is normal. A report that judged
+Those exclusions mean a small "judged" count is normal. Every report NAMES the
+agents it did not judge, whatever the verdict — a clean bill of health over 2 of
+6 agents is a statement about 2 agents, and it says so. A report that judged
 NOTHING says so in as many words rather than printing an all-clear, and a pogod
 with no basis to judge at all is an ERROR here, not an empty list.
+
+The machine-readable reason in --json is coarser than the three categories
+above: it is one of "polecat", "not_running", "not_configured", and the last of
+those covers an unreadable prompt tree as well, because agent.IsConfiguredAgent
+cannot currently tell the two apart. That collapse is tracked separately. The
+reason set is deliberately not more precise than the code can back.
+
+Against a pogod older than this client the unjudged set is absent from the wire
+entirely. That is reported as UNKNOWN — never as zero — because "the daemon did
+not say" and "nobody was excluded" are opposite statements.
 
 REPORTS ONLY — it never registers a schedule, nudges, or restarts. Re-registering
 the loop on the agent's behalf would hide WHY it vanished, and that is the part

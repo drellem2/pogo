@@ -843,17 +843,43 @@ func mailLoopFor(a *Agent, p MailCheckProvider) mailLoopState {
 //   - ANYTHING DIAGNOSE IS NEVER RUN AGAINST. This check is only as loud as its
 //     caller: a diagnose field helps someone already running diagnose. It is
 //     detection, not an alarm.
-func mailLoopJudgeable(a *Agent) bool {
+func mailLoopJudgeable(a *Agent) bool { return mailLoopExclusionFor(a) == "" }
+
+// mailLoopExclusionFor is mailLoopJudgeable's answer with its REASON attached:
+// it returns the reason a is not judged, or "" when a is judged.
+//
+// The predicate and the reason are one function on purpose. A report that names
+// who was excluded has to say why, and a second function computing "why" would
+// be free to disagree with the one computing "whether" — the same drift
+// mailLoopFor exists to prevent one level down (mg-0db1).
+//
+// The reason set is deliberately COARSER than the three categories the doc
+// comment above and `pogo check-mailloops --help` name. IsConfiguredAgent
+// (autostart.go:198-217) returns false BOTH for an unreadable prompt tree and
+// for a genuinely unconfigured agent, so "unreadable prompt tree" is not
+// computable here today; emitting it anyway would be this reader's own failure
+// mode — a disclosure the code cannot back — one level in. That collapse is a
+// real defect and is filed separately; it is not fixed here.
+func mailLoopExclusionFor(a *Agent) MailLoopExclusionReason {
+	if a == nil {
+		return ExclusionNotConfigured
+	}
 	if IsExpectedAgent(a.Name) {
-		return true
+		return ""
 	}
 	// A polecat can never reach the configured branch (it has no prompt), but
 	// say so explicitly rather than resting on that: the exclusion is a decision,
 	// not an accident of naming.
 	if a.Type == TypePolecat {
-		return false
+		return ExclusionPolecat
 	}
-	return a.Alive() && IsConfiguredAgent(a.Name)
+	if !a.Alive() {
+		return ExclusionNotRunning
+	}
+	if !IsConfiguredAgent(a.Name) {
+		return ExclusionNotConfigured
+	}
+	return ""
 }
 
 // NudgeAPIResponse is returned for wait-idle nudges to report delivery status.

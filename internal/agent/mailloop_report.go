@@ -38,22 +38,87 @@ type MailLoopFinding struct {
 	Alive bool `json:"alive"`
 }
 
+// MailLoopExclusionReason names WHY an agent was not judged.
+//
+// The set is deliberately COARSER than the three categories
+// `pogo check-mailloops --help` lists, because IsConfiguredAgent cannot today
+// separate an unreadable prompt tree from a genuinely unconfigured agent — see
+// mailLoopExclusionFor, which is the one place the reason is computed. Emitting
+// a reason the code cannot back would be this command's own defect one level
+// in: a disclosure that sounds precise and is not.
+type MailLoopExclusionReason string
+
+const (
+	// ExclusionPolecat: polecats register their own loop at spawn (mg-e633)
+	// with their own escalation path on failure (mg-6fe0).
+	ExclusionPolecat MailLoopExclusionReason = "polecat"
+	// ExclusionNotRunning: a configured agent that is not running is owed
+	// nothing — "not there" is not a fault.
+	ExclusionNotRunning MailLoopExclusionReason = "not_running"
+	// ExclusionNotConfigured: no readable prompt-tree configuration. This
+	// COLLAPSES "unreadable prompt tree" with "not configured"; the collapse is
+	// a separate defect in IsConfiguredAgent, filed on its own.
+	ExclusionNotConfigured MailLoopExclusionReason = "not_configured"
+)
+
+// Describe renders the reason as the phrase an operator reads. An unrecognised
+// reason renders verbatim rather than as a blank: a newer pogod naming a
+// category this binary does not know must not read as no reason at all.
+func (r MailLoopExclusionReason) Describe() string {
+	switch r {
+	case ExclusionPolecat:
+		return "registers its own mail loop at spawn"
+	case ExclusionNotRunning:
+		return "not running"
+	case ExclusionNotConfigured:
+		return "not configured, or its prompt tree could not be read"
+	case "":
+		return "reason not reported"
+	}
+	return string(r)
+}
+
+// MailLoopExclusion names one agent the report did NOT judge, and why. It is
+// not a finding: nothing here is wrong, and nothing here is an all-clear
+// either. It is the census line that turns "judged 2 of 6" from a number into
+// a statement (mg-0db1).
+type MailLoopExclusion struct {
+	Name   string                  `json:"name"`
+	Type   AgentType               `json:"type"`
+	Reason MailLoopExclusionReason `json:"reason"`
+}
+
 // MailLoopReport is one reading of the fleet's mail-delivery paths: every agent
 // diagnose has standing to judge, and which of them have no way to be woken.
 //
 // Scanned counts every agent in the registry; Judged counts the subset
 // mailLoopJudgeable admits (see its doc comment for who is deliberately NOT
 // judged — polecats, configured-but-not-running agents, and anything with an
-// unreadable prompt tree). Missing is the RED set, sorted by name.
+// unreadable prompt tree). Missing is the RED set, sorted by name; Unjudged is
+// the complement of Judged, also sorted by name.
 //
 // Judged is load-bearing for any consumer that wants to alert: an empty Missing
 // with Judged == 0 means nothing was judged, which is not the same statement as
 // a clean fleet.
+//
+// # Why Unjudged is a POINTER
+//
+// ABSENT and EMPTY must be distinguishable on the wire, and they mean opposite
+// things: an empty list is "every agent was judged", an absent one is "this
+// daemon does not report the set at all". internal/client plain-decodes this
+// struct with no version negotiation, so a plain slice would flatten a pogod
+// too old to send the field into a confident "0 not judged" — this issue's
+// exact defect, reproduced inside its own fix, green, on the fleet that filed
+// it. That is not hypothetical: when this shipped the running pogod was ~93
+// commits behind main. The pointer makes "unknown" unsayable as zero, and the
+// tag carries no `omitempty` so a report that judged everything still puts
+// `"unjudged": []` on the wire (the shape internal/staleness already ships).
 type MailLoopReport struct {
-	Now     time.Time         `json:"now"`
-	Scanned int               `json:"scanned"`
-	Judged  int               `json:"judged"`
-	Missing []MailLoopFinding `json:"missing,omitempty"`
+	Now      time.Time            `json:"now"`
+	Scanned  int                  `json:"scanned"`
+	Judged   int                  `json:"judged"`
+	Missing  []MailLoopFinding    `json:"missing,omitempty"`
+	Unjudged *[]MailLoopExclusion `json:"unjudged"`
 }
 
 // MailLoopReport enumerates the registry and applies diagnose's OWN mail-loop
@@ -87,6 +152,10 @@ func (r *Registry) MailLoopReport() (MailLoopReport, error) {
 	}
 
 	rep := MailLoopReport{Now: time.Now()}
+	// Non-nil from the first line, so a report that judged everything still
+	// serialises `"unjudged": []` — the wire signal that this daemon DOES
+	// report the set and found it empty. See the struct's doc comment.
+	unjudged := []MailLoopExclusion{}
 	for _, a := range r.List() {
 		rep.Scanned++
 		switch mailLoopFor(a, provider) {
@@ -101,9 +170,20 @@ func (r *Registry) MailLoopReport() (MailLoopReport, error) {
 				Status:   a.Status,
 				Alive:    a.Alive(),
 			})
+		default:
+			// mailLoopUnknown. The reason comes from mailLoopExclusionFor —
+			// the same function mailLoopJudgeable is defined in terms of — so
+			// the roster cannot name a reason the predicate would not give.
+			unjudged = append(unjudged, MailLoopExclusion{
+				Name:   a.Name,
+				Type:   a.Type,
+				Reason: mailLoopExclusionFor(a),
+			})
 		}
 	}
 	sort.Slice(rep.Missing, func(i, j int) bool { return rep.Missing[i].Name < rep.Missing[j].Name })
+	sort.Slice(unjudged, func(i, j int) bool { return unjudged[i].Name < unjudged[j].Name })
+	rep.Unjudged = &unjudged
 	return rep, nil
 }
 
@@ -113,6 +193,11 @@ func (r *Registry) MailLoopReport() (MailLoopReport, error) {
 //
 // A report that judged nothing says so in as many words rather than printing
 // the same reassuring line a clean fleet prints.
+//
+// ALL THREE branches end in renderCoverage. The green branch used to be the
+// only one that omitted who-was-not-judged, which is the defect
+// drellem2/pogo#127 reported; routing every branch through one renderer is what
+// makes them structurally incapable of diverging again (mg-0db1).
 func (rep MailLoopReport) Render() string {
 	var b strings.Builder
 	if len(rep.Missing) == 0 {
@@ -120,10 +205,12 @@ func (rep MailLoopReport) Render() string {
 			fmt.Fprintf(&b, "NOTHING JUDGED: %d agent(s) in the registry, none of them judgeable.\n", rep.Scanned)
 			b.WriteString("This is not an all-clear. Polecats, configured-but-stopped agents, and\n")
 			b.WriteString("agents whose prompt tree could not be read are deliberately not judged.\n")
+			rep.renderCoverage(&b)
 			return b.String()
 		}
 		fmt.Fprintf(&b, "All %d judged agent(s) have a mail-check schedule. (%d in the registry.)\n",
 			rep.Judged, rep.Scanned)
+		rep.renderCoverage(&b)
 		return b.String()
 	}
 	fmt.Fprintf(&b, "%d agent(s) have NO mail-check schedule — they can be mailed, and nothing\n"+
@@ -136,6 +223,7 @@ func (rep MailLoopReport) Render() string {
 		fmt.Fprintf(&b, "  %-20s %-8s %s\n", m.Name, m.Type, live)
 	}
 	fmt.Fprintf(&b, "\nJudged %d of %d agents in the registry.\n", rep.Judged, rep.Scanned)
+	rep.renderCoverage(&b)
 	b.WriteString("\nConfirm one:\n")
 	for _, m := range rep.Missing {
 		fmt.Fprintf(&b, "  pogo agent diagnose %s\n", m.Name)
@@ -149,8 +237,54 @@ func (rep MailLoopReport) Render() string {
 	return b.String()
 }
 
+// renderCoverage states WHO was not judged and WHY. Every Render branch calls
+// it, including the green one — a verdict delivered over a subset of the fleet
+// has to name the subset, or "judged 2 of 6, all fine" reads as "the fleet is
+// fine" (drellem2/pogo#127).
+//
+// It has two modes, and the difference between them is the whole point:
+//
+//   - Unjudged SUPPLIED — name every excluded agent and its reason. An empty
+//     supplied list means genuinely nobody was excluded, so there is nothing to
+//     print.
+//   - Unjudged ABSENT — the daemon is older than this binary and does not
+//     report the set. The COUNT is still honest, because Scanned and Judged are
+//     fields every version sends and the count falls out of arithmetic; WHO and
+//     WHY are UNKNOWN and are printed as unknown. This branch must never print
+//     zero: "the daemon did not tell me" and "nobody was excluded" are opposite
+//     statements, and collapsing them is the defect this command was filed for.
+func (rep MailLoopReport) renderCoverage(b *strings.Builder) {
+	if rep.Unjudged == nil {
+		n := rep.Scanned - rep.Judged
+		if n <= 0 {
+			// Every scanned agent was judged — derivable without the field, so
+			// this is a real all-clear on coverage rather than an assumed one.
+			return
+		}
+		fmt.Fprintf(b, "\nNot judged: %d of %d — WHO and WHY are UNKNOWN. This pogod is older than the\n"+
+			"client and does not report the unjudged set, so the verdict above covers %d of\n"+
+			"%d agents and cannot say which. Upgrade pogod, or ask one at a time with\n"+
+			"`pogo agent diagnose <name>`.\n", n, rep.Scanned, rep.Judged, rep.Scanned)
+		return
+	}
+	if len(*rep.Unjudged) == 0 {
+		return
+	}
+	fmt.Fprintf(b, "\nNot judged: %d of %d. This is not a verdict on them — it is who the verdict\n"+
+		"above does NOT cover:\n", len(*rep.Unjudged), rep.Scanned)
+	for _, u := range *rep.Unjudged {
+		fmt.Fprintf(b, "  %-20s %-8s %s\n", u.Name, u.Type, u.Reason.Describe())
+	}
+}
+
 // Actionable reports whether the report found anything worth acting on. It is
 // the CLI's exit-status predicate.
+//
+// The unjudged set deliberately does NOT move it. Everything in that set is
+// excluded on purpose (mg-738f drew the boundary and the cry-wolf guarantee
+// rests on it), so exiting non-zero because a polecat exists would make the
+// command's exit status useless. mg-0db1 changed what the command DISCLOSES,
+// not what it judges — recorded here rather than left as a silence.
 func (rep MailLoopReport) Actionable() bool { return len(rep.Missing) > 0 }
 
 // handleMailLoops serves GET /agents/mail-loops: the FLEET-WIDE read of the
