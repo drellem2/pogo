@@ -378,3 +378,57 @@ allowed — but it is also not the environment it runs in nightly. To reproduce
 the launchd environment, use `env -i PATH=<the plist's PATH> HOME=$HOME`; an
 interactive shell hides exactly the two failures (`go` off PATH, `GH_TOKEN`
 missing) this job was shaped around.
+
+### What re-asserts an installed plist against the shipped one
+
+**Nothing does.** This is the general question mg-fc99 left open and mg-b201
+answers; it is recorded here rather than fixed here, because building an
+auto-reconciler is a decision about blast radius that a drift ticket does not
+get to make on its own.
+
+Merging a change under `scripts/launchd/` changes nothing on any machine. The
+only writer of `~/Library/LaunchAgents/com.pogo.deploy.plist` is `pogo service
+install-deploy`, which a human or an agent has to run. Nothing runs it at boot,
+at login, on a `WatchPaths` event, or as part of the nightly redeploy — so a
+merged schedule and an installed schedule can sit apart indefinitely, and did:
+between 2026-07-31 and 2026-08-07 the box ran a one-fire plist against
+three-fire code, which is what mg-b201 was filed to end.
+
+Two traps sit on the install path, and both have bitten:
+
+1. **The installer writes the schedule *its own build* embeds.** The plist is a
+   Go template with `deployHours` bound in, not a copy of the file in this
+   directory. Running a `pogo` older than the schedule change therefore
+   *reinstalls the old schedule* — and reports success while doing it. On
+   2026-08-07 the `pogo` on `PATH` was built 07-30 and the retry fires landed
+   07-31, so the obvious command would have been a no-op that looked like a fix.
+   Build the binary from the checkout you are installing from, and read back.
+
+2. **The drift detector is inside the same binary, so it is subject to the
+   defect it detects.** `pogo doctor --check` grew a `launchd activation` row
+   (mg-fc99) that compares every managed plist against the one this build would
+   write. It only *reports*; it never reconciles — deliberately, since
+   `install-deploy` rewrites a schedule and `install` bounces the daemon, and
+   neither is something a checklist should do unasked. But the row is absent
+   from any `pogo` predating it, which on 2026-08-07 meant the detector for
+   "merged but not installed" was itself merged but not installed. A doctor run
+   that shows no `launchd activation` row is not a clean bill of health; it is
+   an old binary.
+
+So the reconciliation is manual, and the read-back is the part that proves it
+happened. The install command's own output does not:
+
+```bash
+pogo service install-deploy
+/usr/libexec/PlistBuddy -c "Print :StartCalendarInterval" \
+    ~/Library/LaunchAgents/com.pogo.deploy.plist        # expect three Hour entries
+launchctl print gui/$UID/com.pogo.deploy | grep -c calendarinterval
+```
+
+The second read is worth the extra line: the plist on disk is what an installer
+wrote, while `launchctl print` is what launchd actually registered. A plist it
+rejected or only partly parsed is still a perfectly good-looking file.
+
+Install outside the 02:00–06:00 window, or check `~/.pogo/deploy.lock.d` and
+`pgrep -f pogo-deploy` first. `install-deploy` does `launchctl bootout` before
+`bootstrap`, and booting out a job mid-fire would kill a deploy in progress.

@@ -5,6 +5,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -220,5 +222,162 @@ func TestFindDeployScriptSourceHonorsOverride(t *testing.T) {
 	}
 	if got != script {
 		t.Errorf("findDeployScriptSource() = %q; want the override %q", got, script)
+	}
+}
+
+// TestDeployFireHoursAgreeAcrossEveryArtifactThatCarriesThem is the check
+// mg-b201 was filed for the absence of.
+//
+// THREE artifacts in this repo independently state when the nightly fires, and
+// until this test none of them was compared to the others:
+//
+//	deployHours                          (here — what the installer writes)
+//	scripts/launchd/com.pogo.deploy.plist (the reference copy for a hand-install)
+//	FIRE_HOURS in scripts/launchd/pogo-deploy.sh (what the RUNNER believes)
+//
+// The third one is not documentation. `retry_will_follow` consults FIRE_HOURS to
+// decide whether a failed attempt gets a RED alert, and a runner that believes
+// in a fire the schedule does not have takes the WORST branch available: a
+// stalled drain exits 7, logs "the 04:00 fire will retry. Not alerting yet.",
+// suppresses the alert — and then nothing fires at 04:00. The night fails in
+// silence. That is strictly worse than the pre-retry behaviour, which at least
+// mailed somebody. The divergence buys a silent nightly, which is the exact
+// failure this whole family of tickets exists to end.
+//
+// It is deliberately NOT a check against the installed plist on this box. That
+// comparison is auditLaunchAgent's job and it cannot live in a unit test: the
+// installed copy is machine state, and a test that read it would pass or fail
+// for reasons that have nothing to do with the commit under test. This test
+// pins what the repo SAYS; keeping the box in line with the repo is an install,
+// and nothing performs that install on its own (see AuditLaunchAgents).
+func TestDeployFireHoursAgreeAcrossEveryArtifactThatCarriesThem(t *testing.T) {
+	shippedPlist := readRepoFile(t, "../../scripts/launchd/com.pogo.deploy.plist")
+	runner := readRepoFile(t, "../../scripts/launchd/pogo-deploy.sh")
+
+	// Comments are stripped first: this plist explains its own schedule at
+	// length, and a check that cannot tell an explanation from a declaration
+	// has to be deleted the first time somebody documents the thing it guards.
+	plistHours := parsePlistFireHours(stripXMLComments(shippedPlist))
+	if !sameInts(plistHours, deployHours) {
+		t.Errorf("scripts/launchd/com.pogo.deploy.plist fires at %v; deployHours says %v.\n"+
+			"An operator who hand-installs the in-repo copy gets a different schedule from one who runs `pogo service install-deploy`.", plistHours, deployHours)
+	}
+
+	runnerHours, ok := parseRunnerFireHours(runner)
+	if !ok {
+		t.Fatalf("could not find the FIRE_HOURS default in scripts/launchd/pogo-deploy.sh — if it was renamed, this check stopped guarding anything and must be updated, not dropped")
+	}
+	if !sameInts(runnerHours, deployHours) {
+		t.Errorf("pogo-deploy.sh believes the fires are %v; the schedule this build installs is %v.\n"+
+			"retry_will_follow reads FIRE_HOURS to decide whether to SUPPRESS the RED alert, so a runner that believes in a fire that does not exist turns a failed night into a silent one.", runnerHours, deployHours)
+	}
+}
+
+func readRepoFile(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return string(b)
+}
+
+// stripXMLComments removes <!-- ... --> spans. Unterminated comments are dropped
+// to end-of-file rather than ignored: leaving the tail in would feed commented
+// prose to the Hour scan, which is the failure mode this exists to avoid.
+func stripXMLComments(s string) string {
+	var b strings.Builder
+	for {
+		i := strings.Index(s, "<!--")
+		if i < 0 {
+			b.WriteString(s)
+			return b.String()
+		}
+		b.WriteString(s[:i])
+		rest := s[i+4:]
+		j := strings.Index(rest, "-->")
+		if j < 0 {
+			return b.String()
+		}
+		s = rest[j+3:]
+	}
+}
+
+var plistHourRE = regexp.MustCompile(`(?s)<key>Hour</key>\s*<integer>\s*(\d+)\s*</integer>`)
+
+func parsePlistFireHours(s string) []int {
+	var out []int
+	for _, m := range plistHourRE.FindAllStringSubmatch(s, -1) {
+		n, err := strconv.Atoi(m[1])
+		if err != nil {
+			continue
+		}
+		out = append(out, n)
+	}
+	return out
+}
+
+var runnerFireHoursRE = regexp.MustCompile(`(?m)^FIRE_HOURS="\$\{POGO_DEPLOY_FIRE_HOURS:-([0-9 ]+)\}"`)
+
+func parseRunnerFireHours(s string) ([]int, bool) {
+	m := runnerFireHoursRE.FindStringSubmatch(s)
+	if m == nil {
+		return nil, false
+	}
+	var out []int
+	for _, f := range strings.Fields(m[1]) {
+		n, err := strconv.Atoi(f)
+		if err != nil {
+			return nil, false
+		}
+		out = append(out, n)
+	}
+	return out, true
+}
+
+func sameInts(a, b []int) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// TestDeployFireHourParsersSeeDivergence proves the check above can fail. A
+// consistency test whose parsers silently return nothing passes forever on
+// artifacts that have drifted apart — which is the same defect it was written
+// to catch, one level up.
+func TestDeployFireHourParsersSeeDivergence(t *testing.T) {
+	const plist = `<!-- 04:00 and 05:00 are RETRIES.
+	     <key>Hour</key><integer>9</integer> in a comment is prose, not a fire. -->
+	<key>StartCalendarInterval</key>
+	<array>
+	    <dict><key>Hour</key><integer>3</integer><key>Minute</key><integer>0</integer></dict>
+	    <dict><key>Hour</key><integer>4</integer><key>Minute</key><integer>0</integer></dict>
+	</array>`
+
+	got := parsePlistFireHours(stripXMLComments(plist))
+	if !sameInts(got, []int{3, 4}) {
+		t.Errorf("parsePlistFireHours = %v; want [3 4] — the commented Hour must not count as a fire", got)
+	}
+	if sameInts(got, []int{3, 4, 5}) {
+		t.Error("a two-fire plist compared equal to a three-fire schedule")
+	}
+
+	runnerHours, ok := parseRunnerFireHours("set -u\nFIRE_HOURS=\"${POGO_DEPLOY_FIRE_HOURS:-3 4 5}\"\n")
+	if !ok || !sameInts(runnerHours, []int{3, 4, 5}) {
+		t.Fatalf("parseRunnerFireHours = %v, ok=%v; want [3 4 5], true", runnerHours, ok)
+	}
+	if sameInts(runnerHours, got) {
+		t.Error("a runner believing in three fires compared equal to a two-fire plist — this is exactly the drift that suppresses the RED alert")
+	}
+
+	// A renamed or restructured assignment must be loud, not absent.
+	if _, ok := parseRunnerFireHours("FIRE_HOURS=\"3 4 5\"\n"); ok {
+		t.Error("parseRunnerFireHours matched a form the runner does not use; the check would drift out of contact with the file it guards")
 	}
 }
