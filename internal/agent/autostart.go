@@ -273,8 +273,22 @@ func (r *Registry) AutoStartAgents() []AutoStartResult {
 
 		a, err := r.StartCrewAgent(c.name)
 		if err != nil {
-			// Treat "already running" as skipped rather than failed in case
-			// of a race between Get above and Spawn.
+			// Treat "already running" as skipped rather than failed: the
+			// check-then-act on r.Get above is not atomic with the spawn, and
+			// since `pogo server start` runs this sweep against a daemon whose
+			// boot sweep may still be in flight (mg-060c), losing that race is
+			// routine. The comment here claimed this behaviour long before the
+			// code did it; the agent that was already up was being reported as
+			// a FAILURE, which is what decides the CLI's exit code.
+			if errors.Is(err, ErrAgentAlreadyRunning) {
+				results = append(results, AutoStartResult{
+					Name:     c.name,
+					Path:     c.path,
+					Category: c.category,
+					Status:   AutoStartStatusSkippedRunning,
+				})
+				continue
+			}
 			if errors.Is(err, ErrPromptNotFound) {
 				log.Printf("autostart: %s prompt missing: %v", c.name, err)
 			} else {

@@ -53,7 +53,7 @@ The display label is human-facing — it is what `pogo agent list` shows and wha
 sets it on any process, so `pgrep -f pogo-crew-arch` matches nothing. To find an
 agent's pid, ask pogod.
 
-Behavior is prompt-defined. Edit `~/.pogo/agents/mayor.md` to change dispatch. Add a crew agent with `~/.pogo/agents/crew/<name>.md` + `pogo agent start <name>`. Polecats re-read `~/.pogo/agents/templates/polecat.md` each spawn. Crew with `auto_start = true` start at boot (default mayor).
+Behavior is prompt-defined. Edit `~/.pogo/agents/mayor.md` to change dispatch. Add a crew agent with `~/.pogo/agents/crew/<name>.md` + `pogo agent start <name>`. Polecats re-read `~/.pogo/agents/templates/polecat.md` each spawn. Crew with `auto_start = true` start at boot (default mayor), and `pogo server start` starts any that are missing — including against a daemon that is already running.
 
 ## Coordination: macguffin
 

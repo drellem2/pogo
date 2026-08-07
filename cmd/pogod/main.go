@@ -2380,10 +2380,16 @@ Flags:
 	// hook, so `pogo server start` against an index-only daemon flipped the
 	// mode, brought the refinery back, and left the fleet empty.
 	//
-	// The autostart gate is the same one the boot path applies further down:
-	// a daemon configured never to spawn a fleet must not gain a side door
-	// into doing so through a mode round-trip.
+	// Since mg-060c it also runs when the daemon is ALREADY in full mode, which
+	// is what makes `pogo server start` restore a crashed mayor rather than
+	// print "already running" at a daemon with no coordinator.
+	//
+	// The two gates are the same ones the boot path applies further down — a
+	// config file must exist, and [agents] autostart must be on. A daemon that
+	// deliberately spawns no fleet must not gain a side door into doing so
+	// through the CLI.
 	srv.SetAgentStarter(agentStarterFor(
+		func() bool { return cfg.Source != "" },
 		func() bool { return cfg.Agents.AutoStart },
 		agentRegistry.AutoStartAgents,
 	))
