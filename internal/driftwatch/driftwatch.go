@@ -48,6 +48,7 @@ import (
 	"github.com/drellem2/pogo/internal/config"
 	"github.com/drellem2/pogo/internal/events"
 	"github.com/drellem2/pogo/internal/reconcile"
+	"github.com/drellem2/pogo/internal/staleness"
 )
 
 // mailFrom is the sender stamped on the drift notice. It is not an agent — the
@@ -120,6 +121,32 @@ type Options struct {
 	// BehindRepo is the repo path Behind reads, named in the notice so the
 	// reader knows which working copy the count came from. Cosmetic.
 	BehindRepo string
+
+	// DeployLog reads the nightly deploy log for the DID-NOT-RUN check
+	// (mg-2416). nil disarms that check entirely; pogod passes
+	// FileDeployLog(service.DeployLogPath()). Like the revision check it is
+	// armed independently of the mirrors — see nofire.go.
+	DeployLog DeployLogFunc
+	// DeployLogPath is the path DeployLog reads, named in the notice and the
+	// event so a reader can check the record themselves.
+	DeployLogPath string
+	// DeployInstalled gates the no-fire check on the nightly LaunchAgent
+	// actually being installed. nil means "assume installed" (tests); pogod
+	// passes service.DeployStatus. A host with no nightly has nothing to be
+	// silent, and the check disarms LOUDLY there rather than quietly.
+	DeployInstalled DeployInstalledFunc
+	// Schedule is the expectation the log is judged against. A zero value means
+	// service.DeploySchedule's shipped default is not available to this package,
+	// so pogod must pass it; an empty Hours would make every night due at
+	// midnight + grace, which is wrong but never silent.
+	Schedule staleness.DeploySchedule
+	// NoFireRenotify is the base gap of the no-fire notice backoff. Zero means
+	// DefaultNoFireRenotify.
+	NoFireRenotify time.Duration
+	// NoFireMaxNotices caps how many notices ONE unchanged run of silent nights
+	// may mail. Zero means DefaultNoFireMaxNotices; negative means unbounded
+	// (tests only).
+	NoFireMaxNotices int
 	// StaleAfter is N, the age at which the running revision's commit is
 	// reported stale. Zero means DefaultStaleAfter.
 	StaleAfter time.Duration
@@ -151,6 +178,26 @@ type Watcher struct {
 	renotify   time.Duration
 	maxNotices int
 
+	// Did-not-run check (mg-2416). See nofire.go.
+	deployLog        DeployLogFunc
+	deployLogPath    string
+	deployInstalled  DeployInstalledFunc
+	schedule         staleness.DeploySchedule
+	noFireRenotify   time.Duration
+	noFireMaxNotices int
+	noFireRatchet    noticeRatchet
+	// noFireDisarmedOnce keeps the "no nightly on this host" report to one line
+	// per process, and noFireUnreadableOnce does the same for a log that exists
+	// but cannot be read. Both are DECLARED silences: an unarmed detector and a
+	// healthy host would otherwise be identical.
+	noFireDisarmedOnce   sync.Once
+	noFireUnreadableOnce sync.Once
+
+	// staleRatchet bounds the revision-staleness notices, keyed on the running
+	// revision: a different binary is a different condition and gets a fresh
+	// budget.
+	staleRatchet noticeRatchet
+
 	mu sync.Mutex
 	// lastRun is the wall-clock time of the most recent sample. The coarse
 	// throttle gates on now.Sub(lastRun) >= interval, so the runner samples at
@@ -161,14 +208,6 @@ type Watcher struct {
 	// time in a test clock).
 	ran bool
 
-	// staleRev is the revision the notice ratchet below refers to. A different
-	// revision means a new binary is running, so the budget starts over.
-	staleRev string
-	// staleNotices is how many notices have been mailed for staleRev.
-	staleNotices int
-	// lastStaleNotice is when the most recent one went out; the next is due at
-	// lastStaleNotice + renotify*2^(staleNotices-1).
-	lastStaleNotice time.Time
 	// unstampedOnce keeps the "this check is NOT armed" report to one line per
 	// process. A binary with no vcs stamp cannot be dated, and saying so once is
 	// the difference between a declared silence and a silence that reads as a
@@ -216,20 +255,34 @@ func New(cfg config.DriftWatchConfig, opts Options) *Watcher {
 	if maxNotices == 0 {
 		maxNotices = DefaultStaleMaxNotices
 	}
+	noFireRenotify := opts.NoFireRenotify
+	if noFireRenotify <= 0 {
+		noFireRenotify = DefaultNoFireRenotify
+	}
+	noFireMaxNotices := opts.NoFireMaxNotices
+	if noFireMaxNotices == 0 {
+		noFireMaxNotices = DefaultNoFireMaxNotices
+	}
 
 	return &Watcher{
-		enabled:    cfg.Enabled,
-		interval:   interval,
-		mirrors:    opts.Mirrors,
-		check:      check,
-		mail:       opts.Mail,
-		emit:       emit,
-		revision:   opts.Revision,
-		behind:     opts.Behind,
-		behindRepo: opts.BehindRepo,
-		staleAfter: staleAfter,
-		renotify:   renotify,
-		maxNotices: maxNotices,
+		enabled:          cfg.Enabled,
+		interval:         interval,
+		mirrors:          opts.Mirrors,
+		check:            check,
+		mail:             opts.Mail,
+		emit:             emit,
+		revision:         opts.Revision,
+		behind:           opts.Behind,
+		behindRepo:       opts.BehindRepo,
+		staleAfter:       staleAfter,
+		renotify:         renotify,
+		maxNotices:       maxNotices,
+		deployLog:        opts.DeployLog,
+		deployLogPath:    opts.DeployLogPath,
+		deployInstalled:  opts.DeployInstalled,
+		schedule:         opts.Schedule,
+		noFireRenotify:   noFireRenotify,
+		noFireMaxNotices: noFireMaxNotices,
 	}
 }
 
@@ -238,10 +291,14 @@ func New(cfg config.DriftWatchConfig, opts Options) *Watcher {
 // heartbeat ticks every ~30s, and Check is a no-op on all but the first tick of
 // each interval.
 //
-// It runs BOTH checks the runner carries — the [reconcile] mirror drift check
-// and the revision-staleness check (mg-5bd2) — on the same coarse slot. They
-// are armed independently: a daemon with no mirrors still watches its own
-// revision, and a binary with no vcs stamp still watches its mirrors.
+// It runs ALL THREE checks the runner carries — the [reconcile] mirror drift
+// check, the revision-staleness check (mg-5bd2) and the did-not-run check
+// (mg-2416) — on the same coarse slot. They are armed INDEPENDENTLY, and that
+// independence is load-bearing: a daemon with no mirrors still watches its own
+// revision, a binary with no vcs stamp still watches its mirrors, and a host
+// with neither still watches whether the nightly fired. Each of the three is a
+// different question, and gating any of them on another's input is how a
+// detector ends up inert.
 //
 // It is a no-op when the watcher is disabled, has no mailer, or has nothing
 // armed to check. Safe to call concurrently with itself, though pogod only ever
@@ -250,7 +307,7 @@ func (w *Watcher) Check(now time.Time) {
 	if w == nil || !w.enabled || w.mail == nil {
 		return
 	}
-	if len(w.mirrors) == 0 && w.revision == nil {
+	if len(w.mirrors) == 0 && w.revision == nil && w.deployLog == nil {
 		return
 	}
 	if !w.due(now) {
@@ -261,6 +318,9 @@ func (w *Watcher) Check(now time.Time) {
 	}
 	if w.revision != nil {
 		w.sampleRevision(now)
+	}
+	if w.deployLog != nil {
+		w.sampleNoFire(now)
 	}
 }
 

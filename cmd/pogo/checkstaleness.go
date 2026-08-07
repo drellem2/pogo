@@ -99,6 +99,7 @@ func newCheckStalenessCmd(jsonOutput *bool) *cobra.Command {
 		ref        string
 		promptsDir string
 		stampPath  string
+		logPath    string
 		nowFlag    string
 		skipDeploy bool
 		skipPrompt bool
@@ -205,8 +206,13 @@ its subject healthy.`,
 			hours, minute := service.DeploySchedule()
 			sched := staleness.DeploySchedule{Hours: hours, Minute: minute, Grace: staleness.DefaultGrace}
 
+			if logPath == "" {
+				logPath = service.DeployLogPath()
+			}
+
 			var (
 				deployRep  staleness.DeployReport
+				noFireRep  staleness.NoFireReport
 				promptRep  staleness.PromptReport
 				deployRan  bool
 				promptsRan bool
@@ -218,6 +224,17 @@ its subject healthy.`,
 				line, err := os.ReadFile(stampPath)
 				deployRep = staleness.CheckDeploy(stampPath, string(line), err == nil, now, sched)
 				if !deployRep.Clean() {
+					findings++
+				}
+
+				// The DID-NOT-RUN half (mg-2416), read from the log rather than
+				// the one-line stamp. The stamp can only speak for the most
+				// recent night; the log holds every night it covers, which is
+				// what it takes to name a RUN of silent ones — and the four
+				// nights of 2026-08-01..08-04 are exactly that shape.
+				text, err := os.ReadFile(logPath)
+				noFireRep = staleness.CheckNoFire(logPath, string(text), err == nil, now, sched)
+				if !noFireRep.Clean() {
 					findings++
 				}
 			}
@@ -233,6 +250,7 @@ its subject healthy.`,
 				out := map[string]any{"findings": findings, "now": now.Format(time.RFC3339)}
 				if deployRan {
 					out["redeploy"] = deployRep
+					out["nofire"] = noFireRep
 					out["schedule"] = map[string]any{
 						"hours": hours, "minute": minute, "grace_seconds": int(staleness.DefaultGrace.Seconds()),
 					}
@@ -244,6 +262,8 @@ its subject healthy.`,
 			} else {
 				if deployRan {
 					printDeployWitness(deployRep, sched)
+					fmt.Println()
+					printNoFireWitness(noFireRep)
 				}
 				if promptsRan {
 					if deployRan {
@@ -262,6 +282,7 @@ its subject healthy.`,
 	cmd.Flags().StringVar(&ref, "ref", "origin/main", "Git ref holding the shipped prompt corpus")
 	cmd.Flags().StringVar(&promptsDir, "prompts-dir", "", "Installed prompt corpus to judge (default: ~/.pogo/agents)")
 	cmd.Flags().StringVar(&stampPath, "stamp", "", "Deploy attempt record to read (default: $POGO_DEPLOY_STAMP, else ~/.pogo/deploy-attempt.stamp)")
+	cmd.Flags().StringVar(&logPath, "deploy-log", "", "Deploy log to read the did-not-run witness from (default: ~/Library/Logs/pogo/pogo-deploy.log)")
 	cmd.Flags().StringVar(&nowFlag, "now", "", "RFC3339 instant to judge against instead of the clock — for constructing the positive control")
 	cmd.Flags().BoolVar(&skipDeploy, "skip-redeploy", false, "Do not run the missed-redeploy witness")
 	cmd.Flags().BoolVar(&skipPrompt, "skip-prompts", false, "Do not run the prompt-corpus witness")
@@ -305,6 +326,60 @@ func printDeployWitness(r staleness.DeployReport, sched staleness.DeploySchedule
 		fmt.Println("  The record holds one line, so only the most recent night's outcome is known;")
 		fmt.Println("  earlier nights are judged on the absence of a record, which is the signature")
 		fmt.Println("  of a fire that never happened.")
+	}
+}
+
+// printNoFireWitness renders the DID-NOT-RUN half (mg-2416).
+//
+// It is printed beside the stamp witness rather than folded into it because the
+// two answer different questions from different records, and the difference is
+// the whole reason four nights went unseen. The stamp says how the most recent
+// night ENDED; the log says which nights STARTED. Only the second can name a
+// run of nights on which nothing happened at all.
+func printNoFireWitness(r staleness.NoFireReport) {
+	fmt.Printf("did-not-run — expectation: the job STARTS every night; read from the deploy log, never from an exit code\n")
+	fmt.Printf("  record:       %s\n", r.LogPath)
+	fmt.Printf("  last due:     %s\n", r.LastDueNight)
+
+	switch {
+	case !r.LogFound:
+		fmt.Printf("  NO LOG: nothing has ever been written to %s.\n", r.LogPath)
+		fmt.Println("             On a host with the deploy agent installed the job has never once started.")
+		fmt.Println("             Check: launchctl print gui/$UID/com.pogo.deploy")
+	case r.MissedTotal == 0:
+		fmt.Printf("  ok: %d fire(s) recorded", r.Fires)
+		if r.DryRuns > 0 {
+			fmt.Printf(" (+%d dry run(s), which do not count)", r.DryRuns)
+		}
+		fmt.Println("; every night this log covers had a start line.")
+	default:
+		fmt.Printf("  DID NOT RUN: %d night(s) due through %s have no `pogo-deploy: start` line at all.\n",
+			r.MissedTotal, r.LastDueNight)
+		for _, night := range r.Missed {
+			fmt.Printf("    %s  no-fire  the job never started — there is no exit code to read\n", night)
+		}
+		if r.Truncated {
+			fmt.Printf("    ... %d more (enumeration clipped; the count above is exact)\n", r.MissedTotal-len(r.Missed))
+		}
+		fmt.Println("  Do NOT read `runs` from launchctl as a cross-check: it counts spawns on the CURRENT")
+		fmt.Println("  bootstrap, so re-installing the plist resets it to 0 — measured 0 on this box after")
+		fmt.Println("  seven fires. The log is the only record that dates a night's fire.")
+	}
+
+	if r.Horizon != "" {
+		fmt.Printf("  log covers:   from %s", r.Horizon)
+		if r.EarliestJudged != "" {
+			fmt.Printf(" (oldest night judged: %s)", r.EarliestJudged)
+		}
+		fmt.Println()
+	}
+	if r.HorizonLimited {
+		fmt.Println("  Nights before that are NOT judged either way — this log does not cover them, and a")
+		fmt.Println("  rotated-away night must not be reported as a silent one.")
+	}
+	if r.Unparsed > 0 {
+		fmt.Printf("  UNREADABLE: %d start line(s) carried a timestamp this witness could not parse, so they\n", r.Unparsed)
+		fmt.Println("             could not be credited to any night.")
 	}
 }
 

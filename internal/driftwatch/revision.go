@@ -451,32 +451,12 @@ func (w *Watcher) sampleRevision(now time.Time) {
 // earned a notice).
 //
 // A negative maxNotices means unbounded, which only tests ask for.
+//
+// The backoff itself lives in noticeRatchet (nofire.go), shared with the
+// did-not-run check so the package's two report-only alarms cannot drift apart
+// in how they bound their mail.
 func (w *Watcher) staleNoticeDue(revision string, now time.Time) (notice int, mail bool) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
-	if revision != w.staleRev {
-		w.staleRev = revision
-		w.staleNotices = 0
-		w.lastStaleNotice = time.Time{}
-	}
-
-	if w.staleNotices == 0 {
-		w.staleNotices = 1
-		w.lastStaleNotice = now
-		return 1, true
-	}
-	if w.maxNotices >= 0 && w.staleNotices >= w.maxNotices {
-		return w.staleNotices, false
-	}
-	// gap doubles: notice 1 -> +1x, notice 2 -> +2x, notice 3 -> +4x.
-	gap := w.renotify * (1 << (w.staleNotices - 1))
-	if now.Sub(w.lastStaleNotice) < gap {
-		return w.staleNotices, false
-	}
-	w.staleNotices++
-	w.lastStaleNotice = now
-	return w.staleNotices, true
+	return w.staleRatchet.due(revision, now, w.renotify, w.maxNotices)
 }
 
 // expandHome resolves a leading ~ in a configured repo path.

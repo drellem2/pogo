@@ -52,6 +52,7 @@ import (
 	"github.com/drellem2/pogo/internal/search"
 	"github.com/drellem2/pogo/internal/server"
 	"github.com/drellem2/pogo/internal/service"
+	"github.com/drellem2/pogo/internal/staleness"
 	"github.com/drellem2/pogo/internal/stallwatch"
 	"github.com/drellem2/pogo/internal/synthwatch"
 	"github.com/drellem2/pogo/internal/wedgewatch"
@@ -1747,14 +1748,29 @@ Flags:
 	// vcs stamp instead, so it fires whether the job failed loudly, never fired,
 	// or exited 0 without installing. See internal/driftwatch/revision.go.
 	//
+	// The same runner ALSO carries the DID-NOT-RUN check (mg-2416), which is a
+	// different question from either of the two above and is why neither of them
+	// covered this. Four of the eight nights in that outage (08-01..08-04) were
+	// not failures — the job never started, so there was no `pogo-deploy: start`
+	// line, no exit code and no stamp, and every alarm we owned was downstream of
+	// the job running. The staleness check would eventually have caught the
+	// consequence, at seven days; this catches the cause, on the morning after
+	// the first silent night, by reading the deploy log's start lines against the
+	// schedule. It never consults the run's outcome — that is the whole point —
+	// and notably never reads launchd's `runs` counter, which re-installing the
+	// plist resets to zero and which therefore reads 0 both for a job that just
+	// ran and one that never has. See internal/driftwatch/nofire.go.
+	//
 	// The mirror check is armed only when there are [reconcile] mirrors — no
 	// mirrors means no artifacts to watch, so an unconfigured/sandbox daemon is a
 	// silent no-op on that half. The staleness check is armed UNCONDITIONALLY: it
 	// needs no repo, no network and no config, and gating it on configuration
 	// somebody has to remember to write is precisely how the mg-5701 lineage
 	// keeps shipping detectors that never run. An unstamped binary (any test
-	// build) disarms itself and says so once. The Enabled flag is the off switch
-	// for both.
+	// build) disarms itself and says so once. The no-fire check is armed on any
+	// host where the nightly LaunchAgent is INSTALLED — also no config key, for
+	// the same reason — and disarms loudly where it is not. The Enabled flag is
+	// the off switch for all three.
 	var driftWatcher *driftwatch.Watcher
 	if cfg.DriftWatch.Enabled {
 		mirrors := make([]reconcile.Mirror, 0, len(cfg.Reconcile.Mirrors))
@@ -1770,6 +1786,20 @@ Flags:
 			Mail:       client.SendMGMail,
 			Revision:   driftwatch.BuildRevision,
 			StaleAfter: cfg.DriftWatch.SelfStaleAfter,
+		}
+		// The did-not-run check. The log path comes from internal/service, the
+		// same derivation the installed plist's StandardOutPath is bound from, so
+		// the detector and the installer cannot disagree about which file holds
+		// the record — a detector reading the wrong path finds an empty file, and
+		// an empty deploy log is indistinguishable from a deploy that never fired.
+		deployHours, deployMinute := service.DeploySchedule()
+		opts.DeployLogPath = service.DeployLogPath()
+		opts.DeployLog = driftwatch.FileDeployLog(opts.DeployLogPath)
+		opts.DeployInstalled = service.DeployStatus
+		opts.Schedule = staleness.DeploySchedule{
+			Hours:  deployHours,
+			Minute: deployMinute,
+			Grace:  staleness.DefaultGrace,
 		}
 		// Optional and context-only: the commits-behind number in the notice. It
 		// never gates the alarm, so an unset or unfetched repo costs one line of
@@ -1793,8 +1823,15 @@ Flags:
 		if rev.Stamped() {
 			revDesc = fmt.Sprintf("%s committed %s", rev.Short(), rev.CommitTime.Format(time.RFC3339))
 		}
-		log.Printf("pogod: drift-check runner enabled (mirrors=%d interval=%s, report-only); revision-staleness: running %s, stale_after=%s",
-			len(mirrors), cfg.DriftWatch.Interval, revDesc, staleAfter)
+		// The no-fire half gets its own clause, and says which of the two states
+		// it is in. A detector that logs nothing when it is unarmed is the exact
+		// shape this ticket exists to remove.
+		noFireDesc := fmt.Sprintf("watching %s", opts.DeployLogPath)
+		if installed, _ := service.DeployStatus(); !installed {
+			noFireDesc = "NOT ARMED (" + "no nightly deploy LaunchAgent installed on this host)"
+		}
+		log.Printf("pogod: drift-check runner enabled (mirrors=%d interval=%s, report-only); revision-staleness: running %s, stale_after=%s; deploy-no-fire: %s",
+			len(mirrors), cfg.DriftWatch.Interval, revDesc, staleAfter, noFireDesc)
 	}
 
 	// Build the credential-expiry warner (mg-7024): the standing check that
