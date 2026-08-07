@@ -211,22 +211,8 @@ func Install() error {
 	}
 }
 
-// quiesceCrew tells the running pogod to stop orchestration (agents +
-// refinery) so crew agents can't auto-respawn pogod via RunWithHealthCheck
-// during the launchd handoff. Without this step, a crew agent's `mg`/`pogo`
-// command issued between `pogo server stop` and `launchctl load` will
-// trigger client.StartServer(), which spawns a non-launchd pogod that wins
-// the :10000 bind and silently knocks launchd's pogod out (the deterministic
-// race observed on mg-9cdc, 2026-04-28). No-op if pogod isn't running.
-func quiesceCrew() {
-	if err := client.HealthCheck(); err != nil {
-		return
-	}
-	fmt.Println("Quiescing crew (stopping orchestration)...")
-	if err := client.StopOrchestration(); err != nil {
-		fmt.Printf("  warning: %v (continuing anyway)\n", err)
-	}
-}
+// quiesceCrew and the restore that owes it live in installorchestration.go,
+// alongside the install sequence that borrows fleet-wide dispatch (mg-6515).
 
 // stopRunningPogod best-effort stops a manually-started pogod so launchctl
 // load doesn't immediately exit on lockfile/port collision. If no pogod is
@@ -398,12 +384,19 @@ func parseLaunchctlListPID(output string) (int, bool) {
 }
 
 func installLaunchd() (retErr error) {
+	// restore is what the orchestrated sequence did about the fleet-wide
+	// dispatch it stopped. It is captured here so the failure mail carries
+	// it: the mail is the only artifact a failed install leaves behind, and
+	// "orchestration stopped + no install report" was the signature of the
+	// silent variant (mg-6515).
+	var restore orchestrationRestore
+
 	// Self-report on the way out so a polecat can fire-and-forget the
 	// install (`pogo service install --detach`) and have the post-install
 	// mayor pick up the result via mail.
 	defer func() {
 		if retErr != nil {
-			sendInstallFailureMail(retErr)
+			sendInstallFailureMail(retErr, restore)
 		}
 	}()
 
@@ -442,67 +435,52 @@ func installLaunchd() (retErr error) {
 	// Orchestrated install sequence — prevents the crew/launchd race
 	// (architect's analysis 2026-04-28T11:37Z, mg-ae84). Each step blocks
 	// until the previous one is complete so launchd-pogod boots into a clean
-	// environment with no other process racing to claim :10000.
-	//
-	// Step 1: Quiesce crew. Tell the running pogod to drop crew agents so
-	// they can't issue a `pogo`/`mg` command that auto-respawns a non-launchd
-	// pogod via client.RunWithHealthCheck.
-	quiesceCrew()
-
-	// Step 2: Unload any prior plist. Best-effort — handles the
-	// loaded-and-running, loaded-and-stopped, and loaded-with-stale-config
-	// cases uniformly. Subsumes mg-6095 (idempotency against pre-loaded
-	// plist).
-	if loaded {
-		fmt.Println("Existing service is loaded — unloading before reinstall.")
-		exec.Command("launchctl", "unload", plistPath).Run() // best-effort
+	// environment with no other process racing to claim :10000. The steps
+	// themselves are wired here; the ordering, the quiesce and the restore
+	// that owes it live in runOrchestratedInstall.
+	steps := installSteps{
+		unloadPrior: func() {
+			if loaded {
+				fmt.Println("Existing service is loaded — unloading before reinstall.")
+				exec.Command("launchctl", "unload", plistPath).Run() // best-effort
+			}
+		},
+		stopPogod: stopRunningPogod,
+		drainPort: func() error { return waitForPogodPortDrain(10 * time.Second) },
+		writePlist: func() error {
+			if plistMatches {
+				return nil
+			}
+			if err := os.WriteFile(plistPath, []byte(rendered), 0644); err != nil {
+				return fmt.Errorf("failed to write %s: %w", plistPath, err)
+			}
+			return nil
+		},
+		loadPlist: func() error {
+			if out, err := exec.Command("launchctl", "load", plistPath).CombinedOutput(); err != nil {
+				return fmt.Errorf("launchctl load failed: %s: %w", string(out), err)
+			}
+			return nil
+		},
+		kickstart: func() error {
+			target := kickstartLaunchdTarget()
+			if out, err := exec.Command("launchctl", "kickstart", "-k", target).CombinedOutput(); err != nil {
+				return fmt.Errorf("launchctl kickstart %s failed: %s: %w", target, string(out), err)
+			}
+			return nil
+		},
+		verify: func() error {
+			if err := verifyLaunchdRunning(); err != nil {
+				return fmt.Errorf("service loaded but verification failed: %w", err)
+			}
+			return nil
+		},
 	}
 
-	// Step 3: Stop any pogod still running (manual or formerly-launchd).
-	stopRunningPogod()
-
-	// Step 4: Wait for :10000 to drain. If a stranger holds the port past
-	// the timeout, fail fast — loading the plist now would just produce
-	// another silent launchd-pogod exit.
-	if err := waitForPogodPortDrain(10 * time.Second); err != nil {
+	restore, err = runOrchestratedInstall(liveOrchestrator{}, steps)
+	if err != nil {
 		return err
 	}
-
-	// Step 5: Write plist (if it changed) and load it.
-	if !plistMatches {
-		if err := os.WriteFile(plistPath, []byte(rendered), 0644); err != nil {
-			return fmt.Errorf("failed to write %s: %w", plistPath, err)
-		}
-	}
-	cmd := exec.Command("launchctl", "load", plistPath)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("launchctl load failed: %s: %w", string(out), err)
-	}
-
-	// Step 5b: Force launchd to actually spawn pogod now. On modern macOS,
-	// `launchctl load` of a RunAtLoad job leaves the job in
-	// `pended nondemand spawn = speculative` state — launchd has the plist
-	// registered but defers the initial fork-exec opportunistically and
-	// often indefinitely, so `runs = 0` and `last exit code = (never
-	// exited)` (mg-3963 repro state). kickstart forces the spawn
-	// deterministically so verifyLaunchdRunning's healthcheck window has
-	// a real process to wait for. Same kickstart pattern restartLaunchd
-	// already relies on — without it, the post-load /health poll just
-	// times out against a launchd job that never started.
-	target := kickstartLaunchdTarget()
-	if out, err := exec.Command("launchctl", "kickstart", "-k", target).CombinedOutput(); err != nil {
-		return fmt.Errorf("launchctl kickstart %s failed: %s: %w", target, string(out), err)
-	}
-
-	// Step 6: Verify launchd-pogod is bound and answering on /health.
-	if err := verifyLaunchdRunning(); err != nil {
-		return fmt.Errorf("service loaded but verification failed: %w", err)
-	}
-
-	// Step 7: Crew agents auto-restart under the new pogod via
-	// auto_start=true in their prompt frontmatter (mayor.md, pm-template.md).
-	// pogod boots in ModeFull (server.New), so refinery + agent registry
-	// are already running by the time verifyLaunchdRunning returns.
 
 	fmt.Printf("Service installed: %s\n", plistPath)
 	fmt.Printf("Logs: %s/pogod.log\n", data.LogDir)
@@ -560,10 +538,27 @@ func sendInstallSuccessMail(plistPath, logd string, noChange bool) {
 	sendInstallMail("[install] com.pogo.daemon installed and running", body)
 }
 
-func sendInstallFailureMail(err error) {
-	body := fmt.Sprintf("Error: %v\n\nlaunchctl print:\n%s\n\nLog tail (~%d bytes):\n%s",
-		err, launchctlPrintOutput(), logTailBytes, logTail())
-	sendInstallMail("[install] FAILED com.pogo.daemon", body)
+// sendInstallFailureMail reports a failed install. The orchestration line is
+// second, above the launchctl dump, because it is the part that says whether
+// the FLEET is down as well as the install: a failure after step 1 leaves
+// dispatch stopped, and before mg-6515 the mail said nothing about it at all.
+// The subject changes when dispatch is still down, so the state is visible in
+// a mailbox listing without opening anything.
+func sendInstallFailureMail(err error, restore orchestrationRestore) {
+	body := fmt.Sprintf("Error: %v\n\n%s\n\nlaunchctl print:\n%s\n\nLog tail (~%d bytes):\n%s",
+		err, restore.String(), launchctlPrintOutput(), logTailBytes, logTail())
+	sendInstallMail(installFailureSubject(restore), body)
+}
+
+// installFailureSubject escalates the subject line when the install left
+// fleet-wide dispatch down. A reader skimming a mailbox sees the residual state
+// without opening anything — and the residual state is the part that outlives
+// the failed install.
+func installFailureSubject(restore orchestrationRestore) string {
+	if restore.Attempted && !restore.OK {
+		return "[install] FAILED com.pogo.daemon — ORCHESTRATION STILL STOPPED"
+	}
+	return "[install] FAILED com.pogo.daemon"
 }
 
 func launchctlListOutput() string {

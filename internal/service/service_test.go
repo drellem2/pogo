@@ -286,7 +286,9 @@ func TestQuiesceCrewIsNoOpWhenPogodDown(t *testing.T) {
 	}
 	done := make(chan struct{})
 	go func() {
-		quiesceCrew()
+		if quiesceCrew(liveOrchestrator{}) {
+			t.Error("quiesceCrew claimed it stopped orchestration with no pogod running — the caller would then owe a restore for something it never took")
+		}
 		close(done)
 	}()
 	select {
