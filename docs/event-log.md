@@ -1191,6 +1191,95 @@ no apparent reason.
 {"schema_version":1,"timestamp":"2026-07-30T04:06:00.000000000Z","event_type":"worktree_notice_undelivered","agent":"mayor","details":{"row":"A15","exited_agent":"cat-mg-8c66","worktree":"/Users/daniel/.pogo/polecats/8c66","outcome":"preserved","mail_error":"mg mail send failed: no such mailbox"}}
 ```
 
+### Server run mode
+
+pogod runs in one of two modes. `full` permits agent, refinery and scheduler work; `index-only`
+keeps indexing alive and answers **503 on every `/agents/`, `/refinery/` and `/scheduler/`
+endpoint** (`RequireOrchestration`). The mode is readable on demand at `GET /server/mode`, but a
+reading taken now says nothing about a transition that happened six hours ago — and in index-only
+mode a daemon that dispatches nothing still answers `/version`, still lists its crew, and is
+healthy by every instrument anyone reaches for. The two events below exist so the *transition* is
+an artifact rather than something inferred (mg-293c).
+
+Both events are also written to `pogod.log` as `server: run mode ...` lines. That is deliberate
+duplication, not an oversight: the log line is what an operator tailing the daemon sees, and the
+event is the artifact of record because it does not depend on where the process's stderr was
+pointed. That distinction has already cost a fleet: the transition sites have logged since
+mg-ce65 (2026-03), and four months of `~/Library/Logs/pogo/pogod.log*` contain **zero** such
+lines — including across the 2026-08-07 03:00 window in which `POST /agents/drain` was
+demonstrably answered 503 by `RequireOrchestration`.
+
+#### `server_mode_changed`
+
+pogod's run mode actually changed. Emitted **only on a real transition** — a stop against an
+already-stopped daemon, or a start against an already-full one, changes nothing and records
+nothing. That is what makes the absence of this event evidence: an idle daemon and a stopped one
+are otherwise indistinguishable.
+
+- **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent` (always `"pogod"`), `details`
+- **`details` fields:**
+  - `from` (string, required): the mode before the change — `"full"` or `"index-only"`
+  - `to` (string, required): the mode after the change
+  - `attributed` (bool, required): whether the caller identified itself at all. `false` means the
+    transition happened and nobody can be named for it — a finding, not a gap in the schema
+  - `trigger` (string, required): `"http"` (a mode endpoint), or `"unattributed"` (an in-process
+    `SetMode` with no caller context)
+  - `detail` (string, required): the route or reason, e.g. `"POST /server/stop-orchestration"`
+  - `actor_agent` (string, optional): the caller's `POGO_AGENT_NAME`. Omitted, never blank, when
+    the caller is not an agent
+  - `actor_client` (string, optional): the caller's command, e.g. `"pogo service install"`. Only
+    leading non-flag argv words are captured, so flag values never reach the log
+  - `actor_pid` (int-as-string, optional): the caller's process id
+  - `remote_addr` (string, optional), `user_agent` (string, optional): the HTTP peer
+
+```json
+{"schema_version":1,"timestamp":"2026-08-07T02:00:10.000000000Z","event_type":"server_mode_changed","agent":"pogod","details":{"from":"full","to":"index-only","attributed":true,"trigger":"http","detail":"POST /server/stop-orchestration","actor_agent":"mayor","actor_client":"pogo service install","actor_pid":"4711","remote_addr":"127.0.0.1:52144","user_agent":"Go-http-client/1.1"}}
+```
+
+**Attribution comes from three headers** (`X-Pogo-Agent`, `X-Pogo-Client`, `X-Pogo-Pid`) stamped by
+`internal/client` on the two mode-transition requests. A caller that does not send them — `curl`, or
+a future path that bypasses the client — still produces a record, marked `attributed: false` and
+`[UNATTRIBUTED]` in the log line. The headers exist because Go's default client identifies itself as
+`Go-http-client/1.1` and nothing else; tracing "who stopped orchestration at 02:00Z" on 2026-08-07
+consumed two days across three agents and ended on a leading candidate it could not demonstrate.
+
+Note the call sites are open-ended and the record is written at the **transition**, not at the call.
+pm-pogo enumerated the callers as "the two HTTP handlers" and was corrected the same day by an
+in-tree one nobody had grepped for: `internal/service`'s `quiesceCrew`, which stops fleet-wide
+dispatch as a side effect of installing a launchd job (mg-6515).
+
+To ask who last darked the fleet:
+
+```bash
+pogo events list --type=server_mode_changed --since=24h
+```
+
+Or, for just the transition and the caller:
+
+```bash
+jq -r 'select(.event_type=="server_mode_changed") |
+       "\(.timestamp) \(.details.from) -> \(.details.to)  \(.details.actor_client // "?") \(.details.actor_agent // "")"' \
+  ~/.pogo/events.log
+```
+
+#### `server_mode_boot`
+
+The mode a pogod process started in, emitted unconditionally at server construction. `ModeFull` is
+`iota` = 0 so a fresh process always boots `full` — this event is not there to reveal a surprise but
+so that "which mode did it boot into" is answerable from a record rather than inferred from the
+absence of a transition, which is the inference this pair exists to retire.
+
+- **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent` (always `"pogod"`), `details`
+- **`details` fields:**
+  - `mode` (string, required): `"full"` or `"index-only"`
+  - `trigger` (string, required): always `"startup"`
+  - `detail` (string, required): always `"process start"`
+  - `actor_pid` (int-as-string, required): the daemon's own pid
+
+```json
+{"schema_version":1,"timestamp":"2026-08-07T18:37:28.000000000Z","event_type":"server_mode_boot","agent":"pogod","details":{"mode":"full","trigger":"startup","detail":"process start","actor_pid":"32415"}}
+```
+
 ## Worked example: a polecat merge cycle
 
 The lines below show the canonical event sequence for a successful polecat run. Times are illustrative.

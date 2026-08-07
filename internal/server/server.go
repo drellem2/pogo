@@ -100,6 +100,9 @@ type Server struct {
 	refineryCfg    *refinery.Config
 	startRefinery  RefineryStarter
 	startAgents    AgentStarter
+	// emit is the events sink for mode-transition records; nil means the
+	// package default (events.Emit). See modeaudit.go.
+	emit Emitter
 
 	// transitionMu serializes mode transitions so overlapping SetMode calls
 	// can't interleave stop/start work (e.g. stopping a refinery instance
@@ -107,13 +110,26 @@ type Server struct {
 	transitionMu sync.Mutex
 }
 
-// New creates a Server in ModeFull.
+// New creates a Server in ModeFull and records the boot mode unconditionally.
+//
+// The record is written here, not by the caller, so it cannot be skipped: "which
+// mode did this process boot into" must be answerable from an artifact rather
+// than inferred from the absence of a later transition (mg-293c, requirement 2).
 func New(agents *agent.Registry, ref *refinery.Refinery) *Server {
-	return &Server{
+	return newWithEmitter(agents, ref, nil)
+}
+
+// newWithEmitter is New with an injectable events sink, so tests can observe
+// the boot record that New emits before any setter could be called.
+func newWithEmitter(agents *agent.Registry, ref *refinery.Refinery, emit Emitter) *Server {
+	s := &Server{
 		mode:     config.ModeFull,
 		agents:   agents,
 		refinery: ref,
+		emit:     emit,
 	}
+	s.recordBootMode(s.mode)
+	return s
 }
 
 // SetRefineryStarter sets the function used to restart the refinery loop
@@ -141,12 +157,24 @@ func (s *Server) Mode() config.RunMode {
 	return s.mode
 }
 
-// SetMode transitions the server to the given run mode. Callers that need to
-// know what a return to full mode actually restored should use
-// StartOrchestration, which returns the report this discards.
+// SetMode transitions the server to the given run mode with no caller
+// attribution. Callers that know who asked — every HTTP path does — must use
+// SetModeWithCause; this entry point records the transition as UNATTRIBUTED,
+// which is a finding rather than a formatting choice.
+//
+// Callers that need to know what a return to full mode actually restored should
+// use StartOrchestration, which returns the report this discards.
 func (s *Server) SetMode(mode config.RunMode) error {
+	return s.SetModeWithCause(mode, unattributedCause("direct SetMode call"))
+}
+
+// SetModeWithCause transitions the server to the given run mode, recording what
+// caused the change. A transition that does not change the mode records
+// nothing: the audit trail says "dispatch availability moved", not "somebody
+// asked".
+func (s *Server) SetModeWithCause(mode config.RunMode, cause Cause) error {
 	if mode == config.ModeFull {
-		_, err := s.StartOrchestration()
+		_, err := s.StartOrchestrationWithCause(cause)
 		return err
 	}
 
@@ -159,7 +187,7 @@ func (s *Server) SetMode(mode config.RunMode) error {
 
 	switch mode {
 	case config.ModeIndexOnly:
-		return s.transitionToIndexOnly()
+		return s.transitionToIndexOnly(cause)
 	default:
 		return fmt.Errorf("unknown mode: %d", mode)
 	}
@@ -182,6 +210,12 @@ func (s *Server) SetMode(mode config.RunMode) error {
 // healthy fleet costs a registry lookup per crew prompt and reports them all as
 // already running.
 func (s *Server) StartOrchestration() (StartReport, error) {
+	return s.StartOrchestrationWithCause(unattributedCause("direct StartOrchestration call"))
+}
+
+// StartOrchestrationWithCause is StartOrchestration with caller attribution
+// recorded on the transition. See SetModeWithCause.
+func (s *Server) StartOrchestrationWithCause(cause Cause) (StartReport, error) {
 	s.transitionMu.Lock()
 	defer s.transitionMu.Unlock()
 
@@ -193,12 +227,18 @@ func (s *Server) StartOrchestration() (StartReport, error) {
 			len(report.AgentsFailed), skippedSuffix(report.AgentStartSkipped))
 		return report, nil
 	}
-	return s.transitionToFull()
+	return s.transitionToFull(cause)
 }
 
 // transitionToIndexOnly stops agents and refinery, keeping indexing alive.
 // Caller must hold s.transitionMu (not s.mu).
-func (s *Server) transitionToIndexOnly() error {
+func (s *Server) transitionToIndexOnly(cause Cause) error {
+	// Recorded BEFORE the stop work, not after. This transition disables every
+	// agent, refinery and scheduler endpoint on the daemon, and StopAll can
+	// take its full 5s timeout — a record written afterwards would be missing
+	// for the whole window in which the fleet is already dark, and missing
+	// entirely if the process dies mid-drain.
+	s.recordTransition(config.ModeFull, config.ModeIndexOnly, cause)
 	log.Printf("server: transitioning to index-only mode")
 
 	// Flip the mode first so guarded endpoints start rejecting with 503
@@ -224,7 +264,7 @@ func (s *Server) transitionToIndexOnly() error {
 // transitionToFull restarts the refinery, re-arms crash-respawn, and re-runs
 // the crew auto-start sweep, reporting what came back.
 // Caller must hold s.transitionMu (not s.mu).
-func (s *Server) transitionToFull() (StartReport, error) {
+func (s *Server) transitionToFull(cause Cause) (StartReport, error) {
 	log.Printf("server: transitioning to full mode")
 
 	s.mu.RLock()
@@ -257,6 +297,11 @@ func (s *Server) transitionToFull() (StartReport, error) {
 	s.mode = config.ModeFull
 	s.mu.Unlock()
 
+	// Recorded AFTER the flip, unlike the stop path above, and the asymmetry is
+	// deliberate: the refinery restart above is fallible and returns early
+	// leaving the mode index-only, so a record written before it would claim a
+	// transition that did not happen. This line is the point of no return.
+	s.recordTransition(config.ModeIndexOnly, config.ModeFull, cause)
 	log.Printf("server: now in full mode")
 
 	// Clear StopAll's shutdown latch HERE: after the drain has returned and
@@ -381,7 +426,8 @@ func (s *Server) handleStartOrchestration(w http.ResponseWriter, r *http.Request
 		http.Error(w, "", http.StatusMethodNotAllowed)
 		return
 	}
-	report, err := s.StartOrchestration()
+	report, err := s.StartOrchestrationWithCause(
+		causeFromRequest(r, "POST /server/start-orchestration"))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -396,7 +442,8 @@ func (s *Server) handleStopOrchestration(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "", http.StatusMethodNotAllowed)
 		return
 	}
-	if err := s.SetMode(config.ModeIndexOnly); err != nil {
+	if err := s.SetModeWithCause(config.ModeIndexOnly,
+		causeFromRequest(r, "POST /server/stop-orchestration")); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}

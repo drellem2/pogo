@@ -277,7 +277,7 @@ func GetServerMode() (string, error) {
 // distinguishes the two.
 func StartOrchestration() (server.StartReport, error) {
 	var report server.StartReport
-	resp, err := http.Post(serverURL+"/server/start-orchestration", "application/json", nil)
+	resp, err := postAttributed(serverURL + "/server/start-orchestration")
 	if err != nil {
 		return report, fmt.Errorf("failed to contact server: %w", err)
 	}
@@ -295,7 +295,7 @@ func StartOrchestration() (server.StartReport, error) {
 // StopOrchestration tells pogod to transition to index-only mode,
 // stopping agents and refinery while keeping the server alive.
 func StopOrchestration() error {
-	resp, err := http.Post(serverURL+"/server/stop-orchestration", "application/json", nil)
+	resp, err := postAttributed(serverURL + "/server/stop-orchestration")
 	if err != nil {
 		return fmt.Errorf("failed to contact server: %w", err)
 	}
