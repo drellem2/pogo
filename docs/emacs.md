@@ -93,6 +93,34 @@ All commands are under the configurable prefix (default: `C-c p`):
 | `pogo-kill-buffers-filter` | Filter for which buffers to kill | `nil` |
 | `pogo-mode-line-function` | Custom mode-line format function | `pogo-default-mode-line` |
 | `pogo-debug-log` | Enable debug logging to `*pogo-mode-log*` | `t` |
+| `pogo-daemon-probe-seconds` | Timeout for the pre-spawn `/health` probe | `1` |
+| `pogo-health-check-seconds` | Delay before health-checking a pogod it spawned | `10` |
+| `pogo-max-failure-count` | Start attempts before giving up | `3` |
+
+## Who starts the daemon
+
+Emacs is not pogod's supervisor. If something already owns pogod's lifecycle —
+launchd on macOS, systemd elsewhere, or a `pogo server start` you ran yourself —
+`pogo-mode` connects to that daemon and starts nothing.
+
+Enabling `pogo-mode` probes `GET /health` on `pogo-server-url` first, bounded by
+`pogo-daemon-probe-seconds`, and spawns a pogod only if the probe fails. A pogod
+it does spawn is detached (via `nohup`), so it survives Emacs exiting rather
+than being SIGHUPed along with it.
+
+Two consequences worth knowing:
+
+- **The probe narrows a race; it does not close one.** Two clients can both see
+  an unreachable daemon and both spawn. The guarantee against a second daemon is
+  pogod's own singleton lockfile, which makes the loser exit — not this probe.
+- **On a machine where a service manager owns pogod, the fallback spawn should
+  never fire.** If it does, something stopped the managed daemon. Prefer fixing
+  that (`launchctl print gui/$UID/com.pogo.daemon`) over relying on Emacs to
+  paper over it.
+
+To opt out of the fallback spawn entirely, keep pogod off `exec-path`: with no
+pogod to find, `pogo-mode` connects when a daemon is up and logs that it found
+none when one is not.
 
 ## Projectile Compatibility
 

@@ -16,13 +16,24 @@
 
 ;;; Commentary:
 ;;
-;; ERT tests for pogo.el utility functions.
-;; These tests cover pure functions that do not require a running pogo server.
+;; ERT tests for pogo.el.
+;;
+;; Most of these cover pure functions that need no pogo server.  The block at
+;; the end is different: it exercises the daemon-start path for real, because
+;; the defect it guards (pogo.el spawning a rival pogod beside the one launchd
+;; owns) was invisible to every assertion about configuration.  Those tests
+;; stand up a real listening socket, spawn a real process, and assert on the
+;; operating system's process table.
+;;
+;; They never touch a real pogod and never touch the daemon port.  The
+;; "daemon" is a socket on an ephemeral port; the "pogod" is a throwaway shell
+;; script in a temporary directory, put first on `exec-path'.
 
 ;;; Code:
 
 (require 'ert)
 (require 'cl-lib)
+(require 'request)
 
 ;; Load pogo.el from the same directory
 (let ((dir (file-name-directory (or load-file-name buffer-file-name))))
@@ -439,6 +450,315 @@
     (should (equal (pogo-print-and-return "msg" 42) 42))
     (should (equal (pogo-print-and-return "msg" "hello") "hello"))
     (should (equal (pogo-print-and-return "msg" nil) nil))))
+
+;;; Daemon start path: connect, do not spawn; and detach what you do spawn
+;;
+;; See the block comment at the top of this file for what these do and do not
+;; touch.
+
+(defun pogo-test--wait-until (predicate &optional seconds)
+  "Wait for PREDICATE to return non-nil, up to SECONDS (default 3).
+Return the value PREDICATE produced, or nil on timeout.  Polling beats a
+fixed `sit-for': a spawn and a signal are both asynchronous, and a sleep long
+enough to be reliable on a loaded machine is dead time on an idle one."
+  (let ((deadline (+ (float-time) (or seconds 3)))
+        result)
+    (while (and (not (setq result (funcall predicate)))
+                (< (float-time) deadline))
+      (sit-for 0.05))
+    result))
+
+(defun pogo-test--os-pids-matching (marker)
+  "Return pids from the OS process table whose argv contains MARKER.
+
+Reads `list-system-processes', which is the machine's own process table — not
+`pogo-process', not `pogo-server-started', and not `process-list'.  That is
+deliberate: the code under test used to set every one of those variables
+correctly while still spawning a daemon, and a spawn that Emacs has stopped
+tracking (which is what a detached spawn is) still appears here.
+
+MARKER is a path inside a per-test temporary directory, so the real pogod
+running on this machine can never match it."
+  (let (hits)
+    (dolist (pid (list-system-processes))
+      (let ((args (cdr (assq 'args (process-attributes pid)))))
+        (when (and args (string-search marker args))
+          (push pid hits))))
+    hits))
+
+(defun pogo-test--emacs-pogod-processes ()
+  "Return Emacs subprocesses whose argv mentions pogod."
+  (seq-filter (lambda (proc)
+                (seq-some (lambda (arg) (string-match-p "pogod" arg))
+                          (or (process-command proc) '())))
+              (process-list)))
+
+(defun pogo-test--sighup-like-emacs-exit (pid)
+  "Send PID the SIGHUP that Emacs sends its subprocesses as it exits.
+
+`kill-emacs' reaches `kill_buffer_processes', which signals the subprocess's
+process GROUP rather than the bare pid.  Both forms are sent here so that the
+test cannot pass on a technicality about which one Emacs happens to choose."
+  (ignore-errors (signal-process (- pid) 'SIGHUP))
+  (ignore-errors (signal-process pid 'SIGHUP)))
+
+(defun pogo-test--fake-pogod-script ()
+  "Return the body of a stand-in pogod.
+
+It installs no signal handlers.  That is the property being borrowed: the real
+pogod installs none either, so SIGHUP's default disposition terminates it."
+  (concat "#!/bin/sh\n"
+          "# Stand-in pogod for pogo-test.el. No signal handlers, on purpose.\n"
+          "echo 'stand-in pogod is up'\n"
+          "i=0\n"
+          "while [ $i -lt 120 ]; do sleep 1; i=$((i+1)); done\n"))
+
+(defun pogo-test--call-with-fake-pogod (fn)
+  "Call FN with the path of a stand-in `pogod' placed first on `exec-path'.
+
+Both `exec-path' and PATH are shadowed, because `pogo-start' resolves pogod
+through the former while `nohup' resolves anything left bare through the
+latter.  On the way out, every process the body spawned is killed and the
+pending health-check timer is cancelled — that timer would otherwise fire in
+the middle of a later test and spawn again."
+  (let* ((dir (make-temp-file "pogo-test-bin" t))
+         (fake (expand-file-name "pogod" dir))
+         (exec-path (cons dir exec-path))
+         (process-environment
+          (cons (concat "PATH=" dir path-separator (or (getenv "PATH") ""))
+                process-environment)))
+    (with-temp-file fake (insert (pogo-test--fake-pogod-script)))
+    (set-file-modes fake #o755)
+    (unwind-protect
+        (funcall fn fake)
+      (cancel-function-timers 'pogo-health-check)
+      (dolist (proc (pogo-test--emacs-pogod-processes))
+        (ignore-errors (delete-process proc)))
+      (dolist (pid (pogo-test--os-pids-matching fake))
+        (ignore-errors (signal-process pid 'SIGKILL)))
+      (ignore-errors (delete-directory dir t)))))
+
+(defun pogo-test--start-fake-daemon ()
+  "Start a real listening socket that answers /health, and return it.
+
+Bound to an ephemeral port on the loopback interface: the pogo daemon port is
+never involved, so running this suite on a machine with a live pogod cannot
+disturb it."
+  (make-network-process
+   :name "pogo-test-fake-daemon"
+   :server t
+   :host "127.0.0.1"
+   :service t
+   :family 'ipv4
+   :noquery t
+   :filter
+   (lambda (conn request)
+     (let ((body (if (string-match-p "/health" request)
+                     "{\"status\":\"ok\"}"
+                   "{}")))
+       (ignore-errors
+         (process-send-string
+          conn (concat "HTTP/1.1 200 OK\r\n"
+                       "Content-Type: application/json\r\n"
+                       (format "Content-Length: %d\r\n" (string-bytes body))
+                       "Connection: close\r\n\r\n"
+                       body))
+         (process-send-eof conn))))))
+
+(defun pogo-test--call-with-fake-daemon (fn)
+  "Call FN with `pogo-server-url' pointed at a live stand-in daemon."
+  (let ((server (pogo-test--start-fake-daemon)))
+    (unwind-protect
+        (let ((pogo-server-url
+               (format "http://127.0.0.1:%s" (process-contact server :service))))
+          (funcall fn))
+      (ignore-errors (delete-process server)))))
+
+(ert-deftest pogo-test-enabling-pogo-mode-spawns-nothing-when-a-daemon-answers ()
+  "Enabling `pogo-mode' against a reachable pogod must spawn no second one.
+
+This is the defect.  pogo.el spawned unconditionally at mode enable, so every
+Emacs start put a rival pogod beside the daemon launchd already owns; between
+2026-08-04 and 2026-08-07 that cost 24879 failed launchd spawns on this
+machine.
+
+The assertion is on the OS process table.  Asserting on `pogo-server-started'
+or `pogo-process' would have passed against the broken code, which set both
+of them correctly while spawning.
+
+`pogo-mode' is enabled for real; the whole decision path runs unstubbed.  The
+one stub is `pogo-update-mode-line', which is mode-line rendering and reaches
+the daemon over a different route (/file, via `pogo-visit') that has nothing
+to do with whether a daemon gets spawned."
+  (pogo-test--call-with-fake-pogod
+   (lambda (fake)
+     (pogo-test--call-with-fake-daemon
+      (lambda ()
+        (let ((pogo-auto-discover nil)
+              (pogo-debug-log nil)
+              (pogo-server-started nil)
+              (pogo-failure-count 0)
+              (pogo-process nil))
+          (unwind-protect
+              (cl-letf (((symbol-function 'pogo-update-mode-line) #'ignore))
+                (pogo-mode 1)
+                ;; `start-process' returns only once the child exists, so a
+                ;; spawn is already visible here; the wait only gives a
+                ;; wrongly-spawned pogod room to finish exec and show its argv.
+                (pogo-test--wait-until
+                 (lambda () (pogo-test--os-pids-matching fake)) 1)
+                (should (equal '() (pogo-test--os-pids-matching fake)))
+                (should (equal '() (pogo-test--emacs-pogod-processes)))
+                ;; Supporting, secondary: proves the absence above is the probe
+                ;; succeeding and not the spawn being impossible for some
+                ;; unrelated reason, such as the failure count being spent.
+                (should pogo-server-started))
+            (pogo-mode -1))))))))
+
+(ert-deftest pogo-test-try-start-does-spawn-when-nothing-answers ()
+  "With nothing listening, `pogo-try-start' must still spawn a pogod.
+
+Control for the test above.  Without it, that test would pass just as
+contentedly if a spawn were impossible — no pogod on `exec-path', a spent
+failure count — rather than suppressed, and would then keep passing after the
+probe was removed again."
+  (pogo-test--call-with-fake-pogod
+   (lambda (fake)
+     ;; Port 1 is privileged and unbound: the probe fails at connect, at once.
+     (let ((pogo-server-url "http://127.0.0.1:1")
+           (pogo-debug-log nil)
+           (pogo-server-started nil)
+           (pogo-failure-count 0)
+           (pogo-process nil))
+       (pogo-try-start)
+       (should (pogo-test--wait-until
+                (lambda () (pogo-test--os-pids-matching fake))))))))
+
+(ert-deftest pogo-test-try-start-refuses-once-the-failure-count-is-spent ()
+  "A spent failure count still suppresses the spawn, probe or no probe."
+  (pogo-test--call-with-fake-pogod
+   (lambda (fake)
+     (let ((pogo-server-url "http://127.0.0.1:1")
+           (pogo-debug-log nil)
+           (pogo-server-started nil)
+           (pogo-failure-count pogo-max-failure-count)
+           (pogo-process nil))
+       (pogo-try-start)
+       (pogo-test--wait-until (lambda () (pogo-test--os-pids-matching fake)) 1)
+       (should (equal '() (pogo-test--os-pids-matching fake)))))))
+
+(ert-deftest pogo-test-try-start-still-connects-with-no-pogod-to-spawn ()
+  "With no pogod on `exec-path', a reachable daemon is still adopted.
+
+`pogo-try-start' used to signal before it ever probed: it built
+POGO_PLUGIN_PATH from `(executable-find \"pogod\")' unconditionally, so a
+missing binary aborted the function — including on the path where there was a
+healthy daemon sitting right there to connect to.  docs/emacs.md offers a
+pogod-free `exec-path' as the way to opt out of the fallback spawn, so this
+has to hold."
+  ;; /bin and /usr/bin carry curl (which `request' shells out to) but not
+  ;; pogod, which installs into GOBIN. Skip rather than lie if that is untrue.
+  (let ((exec-path '("/bin" "/usr/bin")))
+    (skip-unless (and (executable-find "curl")
+                      (not (executable-find "pogod"))))
+    (pogo-test--call-with-fake-daemon
+     (lambda ()
+       (let ((pogo-debug-log nil)
+             (pogo-server-started nil)
+             (pogo-failure-count 0)
+             (pogo-process nil))
+         (pogo-try-start)
+         (should pogo-server-started)
+         (should-not pogo-process))))))
+
+(ert-deftest pogo-test-a-spawned-pogod-survives-the-sighup-emacs-sends-on-exit ()
+  "A pogod pogo.el spawns must outlive this Emacs.
+
+On 2026-08-07 an Emacs exit took its child pogod with it and the agent fleet
+went down: pogod's death force-closes the PTY masters it owns, hanging up the
+controlling terminal of every agent it started (mg-6b66, gh #22).  Emacs
+SIGHUPs its subprocesses as it exits, so surviving that signal is the whole
+requirement."
+  (pogo-test--call-with-fake-pogod
+   (lambda (fake)
+     (let* ((pogo-debug-log nil)
+            (proc (pogo-start)))
+       (should proc)
+       (should (pogo-test--wait-until
+                (lambda () (pogo-test--os-pids-matching fake))))
+       (pogo-test--sighup-like-emacs-exit (process-id proc))
+       ;; Give the signal at least as long to land as the control test needs
+       ;; to observe a death, so this cannot pass by being checked too early.
+       (sit-for 1)
+       (should (pogo-test--os-pids-matching fake))))))
+
+(ert-deftest pogo-test-the-spawn-uses-a-pipe-and-leaves-no-nohup-out ()
+  "The spawn must not run over a pty, and must not litter the user's directory.
+
+`process-connection-type' defaults to a pty, and a pty is Emacs's own: it
+becomes pogod's controlling terminal, so Emacs closing the master on exit
+hangs up that session — the mg-6b66 cascade arriving by a route `nohup' does
+not cover.  It is also visible from outside, which is what this test uses:
+`nohup' checks isatty(stdout), and on a pty it creates a `nohup.out' in
+`default-directory'.  A stray file dropped into whichever project the user was
+visiting is the cheap, checkable proxy for the pty being gone.
+
+The buffer assertion is here because the obvious way to silence `nohup.out' —
+handing the spawn a redirect or no output at all — would take pogod's startup
+output with it, and that output is the only account of a daemon that failed to
+bind."
+  (pogo-test--call-with-fake-pogod
+   (lambda (fake)
+     (let* ((default-directory (make-temp-file "pogo-test-cwd" t))
+            (pogo-debug-log nil))
+       (unwind-protect
+           (progn
+             (ignore-errors (kill-buffer "*pogo-server*"))
+             (should (pogo-start))
+             (should (pogo-test--wait-until
+                      (lambda () (pogo-test--os-pids-matching fake))))
+             (should-not (file-exists-p (expand-file-name "nohup.out")))
+             (should (pogo-test--wait-until
+                      (lambda ()
+                        (with-current-buffer "*pogo-server*"
+                          (string-match-p "stand-in pogod is up"
+                                          (buffer-string)))))))
+         (ignore-errors (delete-directory default-directory t)))))))
+
+(ert-deftest pogo-test-an-undetached-spawn-dies-of-that-same-sighup ()
+  "The same stand-in pogod, spawned bare, dies of the signal the other survives.
+
+Control for the test above.  Without it, that test would pass if the stand-in
+happened to ignore SIGHUP by itself — and would then say nothing at all about
+the real pogod, which does not."
+  (pogo-test--call-with-fake-pogod
+   (lambda (fake)
+     (let ((proc (start-process "pogod-undetached" nil fake)))
+       (should (pogo-test--wait-until
+                (lambda () (pogo-test--os-pids-matching fake))))
+       (pogo-test--sighup-like-emacs-exit (process-id proc))
+       (should (pogo-test--wait-until
+                (lambda () (null (pogo-test--os-pids-matching fake)))))))))
+
+(ert-deftest pogo-test-detached-argv-goes-through-nohup ()
+  "`pogo--detached-argv' prefixes nohup, which is what ignores the SIGHUP."
+  (let ((pogo--is-windows nil))
+    (let ((argv (pogo--detached-argv "/opt/bin/pogod")))
+      (should (equal (file-name-nondirectory (car argv)) "nohup"))
+      (should (equal (cadr argv) "/opt/bin/pogod")))))
+
+(ert-deftest pogo-test-detached-argv-is-bare-on-windows ()
+  "Windows has neither nohup nor SIGHUP, so the argv is left alone there."
+  (let ((pogo--is-windows t))
+    (should (equal (pogo--detached-argv "C:/pogo/pogod.exe")
+                   '("C:/pogo/pogod.exe")))))
+
+(ert-deftest pogo-test-daemon-reachable-p-reads-the-socket ()
+  "`pogo--daemon-reachable-p' answers from the wire, both ways."
+  (pogo-test--call-with-fake-daemon
+   (lambda () (should (pogo--daemon-reachable-p))))
+  (let ((pogo-server-url "http://127.0.0.1:1"))
+    (should-not (pogo--daemon-reachable-p))))
 
 (provide 'pogo-test)
 
