@@ -791,7 +791,16 @@ SINK_SUBJ="[deploy-stalled]"
 # is precisely what mail_alert uses to tell a real delivery from a phantom. This
 # seeding send is also the control on the sandbox itself: if mg cannot write here,
 # every assertion below is measuring the wrong thing and we want to know now.
-if "$MG" mail send "$COORDINATOR" --from=live-control --subject="seed" --body="seed" >/dev/null 2>&1; then
+#
+# --create IS THE POINT OF THE SEED, not a workaround for it (mg-d639). This
+# sandbox has an empty MG_ROOT, so "sink-coordinator" is a name mg has never
+# seen, and mg now refuses an unseen recipient instead of minting a box and
+# reporting Delivered. Without the flag the seed fails, the coordinator box never
+# exists, and every sink assertion below reads 0 mails — which is precisely the
+# cascade this line's own comment predicted. It stays a SEND rather than becoming
+# `mg mail register` so it still exercises the write path the sink itself uses;
+# the subject is "seed", not "$SINK_SUBJ", so sink_mail_count does not count it.
+if "$MG" mail send "$COORDINATOR" --create --from=live-control --subject="seed" --body="seed" >/dev/null 2>&1; then
     pass "sink sandbox: MG_ROOT=$MG_ROOT is writable and the coordinator mailbox exists (the real fleet's mail store is untouched)"
 else
     fail "sink sandbox: could not seed a mailbox under MG_ROOT=$MG_ROOT — the sink controls below cannot mean anything"
