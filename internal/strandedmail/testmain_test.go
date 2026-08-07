@@ -15,8 +15,12 @@ import (
 //
 // MG_ROOT is the one that matters here. This package shells out to the REAL `mg`
 // binary — that is deliberate, since the failure it guards against is mg's JSON
-// contract drifting under us — and `mg mail send` CREATES the mailbox it is
-// given. A suite running against the live root would deliver fixture mail into
+// contract drifting under us — and `mg mail send --create`, which is what the
+// fixture builder must now pass (mg-d639 made an unknown recipient a refusal),
+// CREATES the mailbox it is given. Note the isolation argument is UNCHANGED by
+// that refusal: it never rested on sends being harmless, and --create puts the
+// old creating behaviour back for exactly these fixtures.
+// A suite running against the live root would deliver fixture mail into
 // the fleet's actual maildir, inventing mailboxes named after this file's
 // fixtures and, worse, marking real messages read: `mg mail read` on a live
 // message is not reversible, and this package's whole subject is messages that

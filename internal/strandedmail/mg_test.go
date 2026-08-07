@@ -19,7 +19,15 @@ func sandboxMgRoot(t *testing.T) {
 
 func mgSend(t *testing.T, to, from, subject string) {
 	t.Helper()
-	out, err := exec.Command("mg", "mail", "send", to, "--from="+from, "--subject="+subject, "--body=fixture").CombinedOutput()
+	// --create because this is a FIXTURE BUILDER, not a caller. mg-d639 made an
+	// unknown recipient a refusal (no_such_mailbox, exit 3), and every name this
+	// helper is given is unknown by construction: the sandbox's MG_ROOT is a
+	// fresh empty tree, which is the whole point of the envelope in
+	// testmain_test.go. The flag is the one mg documents for "the recipient
+	// really is new"; it is not a way around the refusal, it is the case the
+	// refusal was written to leave room for. Nothing in the package's PRODUCTION
+	// path gains it — a typo'd recipient there must still be caught.
+	out, err := exec.Command("mg", "mail", "send", to, "--create", "--from="+from, "--subject="+subject, "--body=fixture").CombinedOutput()
 	if err != nil {
 		t.Fatalf("mg mail send %s: %v\n%s", to, err, out)
 	}

@@ -140,6 +140,31 @@ fresh_sandbox() {
     # `command`. Unset here so each control decides for itself.
     unset POGO_AGENT_AUTOSTART
     mkdir -p "$POGO_HOME"
+    # REGISTER THE COORDINATOR'S MAILBOX IN THE SANDBOX (mg-d639). Every control
+    # below asserts that pogod's annunciator DELIVERED a notice to `mayor`, and
+    # the sandbox's MG_ROOT is a fresh empty store, so `mayor` is a name mg has
+    # never seen there. mg used to file mail for an unknown name; it now refuses
+    # (no_such_mailbox, exit 3), and six controls went red reporting "pogod did
+    # not report mailing mayor" — true, and for a reason that says nothing about
+    # pogod.
+    #
+    # `mg mail register`, NOT `--create` on pogod's own send: the annunciator is
+    # production code and must keep refusing a coordinator name that names no
+    # box, because that refusal is a real misconfiguration on a real install
+    # (mg-7dc1 is the systemic repair, and pm-pogo's ruling there is explicitly
+    # that --create must not spread to callsites). What was missing is the
+    # sandbox's own setup, so the fixture is what gains the registration.
+    # Idempotent by contract, and it creates the Maildir without sending, so
+    # mail_count starts at 0 exactly as the controls assume.
+    #
+    # Reported as an INSTRUMENT failure, not swallowed, and not as a plain FAIL.
+    # A seed that fails quietly is how this cost an evening: six controls read
+    # "pogod did not report mailing mayor" — a confident statement about pogod,
+    # produced by the harness never having given it a mailbox to mail. That is
+    # precisely the category instrument_fail exists to keep separate.
+    if ! mg mail register mayor >/dev/null 2>&1; then
+        instrument_fail "could not register the coordinator mailbox 'mayor' under MG_ROOT=${MG_ROOT:-<unset>} — every 'notice delivered' assertion below would report on the seeding, not on pogod"
+    fi
 }
 
 # boot [LOGFILE] — start the sandbox pogod and wait for it to finish its startup
