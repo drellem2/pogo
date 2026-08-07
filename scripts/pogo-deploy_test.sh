@@ -628,6 +628,11 @@ sync_src() {
     return 1
 }
 SYNC_BACKOFF="0"; SYNC_RETRY_BUDGET=300; SYNC_ATTEMPTS=4
+# The BLIP tier is what this block asserts, so the mg-5515 vigil is off for it.
+# Not incidental setup: with the vigil on, "patience is bounded" below is no
+# longer the blip tier's property — the bound moves to the window, which the
+# vigil block further down asserts separately. Two tiers, two sets of assertions.
+SYNC_VIGIL=0; SYNC_VIGIL_INTERVAL=300
 # Retries are charged against the deploy window (the ruling's condition 2), so
 # these run as if it were 03:00. Without this they would be refused for lack of
 # window — which is itself asserted, below.
@@ -646,7 +651,7 @@ STUB_CLASS=network; STUB_SUCCEED_ON=999; SYNC_CALLS=0
 if sync_with_retry >/dev/null 2>&1; then
     fail "sync_with_retry succeeded against a permanently failing sync"
 elif [ "$SYNC_CALLS" -eq 4 ]; then
-    pass "sync_with_retry: a sustained outage stops at POGO_DEPLOY_SYNC_ATTEMPTS (4) — patience is bounded, not unlimited"
+    pass "sync_with_retry: with the vigil off, a sustained outage stops at POGO_DEPLOY_SYNC_ATTEMPTS (4) — the blip tier's patience is bounded by its attempt count"
 else
     fail "sync_with_retry made $SYNC_CALLS attempts, expected 4"
 fi
@@ -735,7 +740,7 @@ SYNC_BACKOFF="1"; SYNC_RETRY_BUDGET=1; SYNC_ATTEMPTS=9
 STUB_CLASS=network; STUB_SUCCEED_ON=999; SYNC_CALLS=0
 sync_with_retry >/dev/null 2>&1
 [ "$SYNC_CALLS" -eq 2 ] \
-    && pass "sync_with_retry: POGO_DEPLOY_SYNC_RETRY_BUDGET caps the total backoff even when attempts remain" \
+    && pass "sync_with_retry: POGO_DEPLOY_SYNC_RETRY_BUDGET caps the total blip-tier backoff even when attempts remain" \
     || fail "retry budget did not cap the backoff (calls=$SYNC_CALLS, expected 2)"
 SYNC_BACKOFF="15 45 120"; SYNC_RETRY_BUDGET=300; SYNC_ATTEMPTS=4
 
@@ -752,6 +757,147 @@ SYNC_BACKOFF="15 45 120"; SYNC_RETRY_BUDGET=300; SYNC_ATTEMPTS=4
 [ "$(sync_backoff 3 "15 45 120")" = "120" ] && pass "sync_backoff: the third waits 120s" || fail "sync_backoff 3"
 [ "$(sync_backoff 9 "15 45 120")" = "120" ] \
     && pass "sync_backoff: past the end of the list the last delay repeats (never 0)" || fail "sync_backoff overrun"
+
+# ---------------------------------------------------------------------------
+# The vigil tier — patience sized for an OUTAGE, not a blip (mg-5515)
+# ---------------------------------------------------------------------------
+# The blip tier asserted above spends three minutes; the three fires at 03/04/05
+# span two hours between them. The one outage measured on this box ran 2h50m
+# (2026-08-07, 13:24:30Z -> 16:14:52Z), so an outage of that length beginning at
+# or before the first fire fails every one of them on arrival. No agent can cover
+# it — an outage of that shape takes every agent on the box out at once — and
+# re-spacing three instants cannot cover 170 minutes either.
+#
+# So the vigil keeps probing at a flat interval for as long as the WINDOW could
+# still afford a drain. The window is the only bound; the vigil adds patience and
+# never window, which is mg-0d70's condition 2 doing double duty.
+SYNC_VIGIL=1; SYNC_VIGIL_INTERVAL=0; SYNC_BACKOFF="0"; SYNC_RETRY_BUDGET=300; SYNC_ATTEMPTS=4
+POGO_DEPLOY_NOW=3; MIN_DRAIN=600
+
+# The handover, as arithmetic. Exhausting four fast attempts is exactly what
+# tells you this is an outage rather than a blip — which is the moment the vigil
+# is for, and the moment that used to end the run.
+SYNC_BLIP_SPENT=0
+[ "$(sync_next_delay 1)" = "blip 0" ] \
+    && pass "sync_next_delay: inside the attempt count the BLIP tier owns the wait" || fail "sync_next_delay 1: $(sync_next_delay 1)"
+[ "$(sync_next_delay 4)" = "vigil 0" ] \
+    && pass "sync_next_delay: at the attempt cap the blip tier HANDS OVER to the vigil (it does not end the run)" || fail "sync_next_delay 4: $(sync_next_delay 4)"
+SYNC_BLIP_SPENT=99999
+[ "$(sync_next_delay 1)" = "vigil 0" ] \
+    && pass "sync_next_delay: a spent blip BUDGET hands over too, not just a spent attempt count" || fail "sync_next_delay with a spent budget: $(sync_next_delay 1)"
+SYNC_BLIP_SPENT=0
+SYNC_VIGIL=0
+sync_next_delay 4 >/dev/null 2>&1 \
+    && fail "sync_next_delay offered a vigil while POGO_DEPLOY_SYNC_VIGIL=0" \
+    || pass "sync_next_delay: POGO_DEPLOY_SYNC_VIGIL=0 restores the pre-mg-5515 bound exactly (one escape hatch, one variable)"
+SYNC_VIGIL=1
+
+# THE FIX, as an assertion. A sync that recovers on attempt 8 is one NO number of
+# fires reaches: the blip tier gave up at 4, and the 04:00 fire would have found
+# the same outage still running. The vigil is what deploys the night.
+STUB_CLASS=network; STUB_SUCCEED_ON=8; SYNC_CALLS=0
+sync_with_retry >/dev/null 2>&1 \
+    && [ "$SYNC_CALLS" -eq 8 ] \
+    && pass "the vigil probes PAST the blip tier's attempt cap and recovers a night the fires could not (attempt 8 of a 4-attempt blip tier)" \
+    || fail "the vigil did not carry the sync past attempt 4 (calls=$SYNC_CALLS)"
+[ "$SYNC_TRIES" -eq 8 ] \
+    && pass "SYNC_TRIES counts vigil probes too, so the alert can say how long it actually waited" || fail "SYNC_TRIES=$SYNC_TRIES after a vigil recovery"
+
+# A TICKING stub for the sustained-outage cases below. The vigil's bound is the
+# window, so it can only be shown to terminate against a clock that MOVES —
+# POGO_DEPLOY_NOW is a fixed hour, and a permanently-failing stub under a frozen
+# clock is an infinite loop rather than a failing assertion. Three probes per
+# fake hour, which is enough to walk 03:00 out to the end of the window.
+BLIP_STUB="$(declare -f sync_src)"
+sync_src() {
+    SYNC_CALLS=$(( SYNC_CALLS + 1 ))
+    [ $(( SYNC_CALLS % 3 )) -eq 0 ] && POGO_DEPLOY_NOW=$(( POGO_DEPLOY_NOW + 1 ))
+    SYNC_CLASS="$STUB_CLASS"; SYNC_DETAIL="stub failure"
+    [ "$SYNC_CALLS" -ge "$STUB_SUCCEED_ON" ] && { SYNC_CLASS=""; return 0; }
+    return 1
+}
+
+# The vigil's bound is the WINDOW and nothing else: it keeps probing well past
+# the blip tier's cap, and it TERMINATES — because the clock walked drain_budget
+# to zero, not because a counter ran out.
+STUB_CLASS=network; STUB_SUCCEED_ON=999; SYNC_CALLS=0; POGO_DEPLOY_NOW=3
+if sync_with_retry >/dev/null 2>&1; then
+    fail "sync_with_retry succeeded against a permanently unreachable transport"
+elif [ "$SYNC_CALLS" -gt 4 ]; then
+    pass "a sustained outage is waited out to the edge of the window rather than abandoned after $SYNC_ATTEMPTS attempts ($SYNC_CALLS probes) — and it terminates"
+else
+    fail "the vigil did not run: only $SYNC_CALLS attempts against a sustained outage"
+fi
+
+# ...and it stops the moment the window can no longer afford a drain. This is the
+# assertion that keeps "adds patience, never window" true: without it the vigil
+# would spend the fleet's window to arrive at the same skip, later.
+POGO_DEPLOY_NOW=5; MIN_DRAIN=99999
+STUB_CLASS=network; STUB_SUCCEED_ON=999; SYNC_CALLS=0
+sync_with_retry >/dev/null 2>&1
+[ "$SYNC_CALLS" -eq 1 ] \
+    && pass "the vigil is REFUSED when the window could not still afford a drain — it adds patience, never window" \
+    || fail "the vigil probed past the usable window ($SYNC_CALLS probes)"
+MIN_DRAIN=600
+
+# The duration is REPORTED, not just spent. mg-5515's honest bound was n=1: one
+# outage, measured once, with no distribution behind it. A vigil that waits
+# silently would leave the next ticket with n=1 as well.
+STUB_CLASS=network; STUB_SUCCEED_ON=999; SYNC_CALLS=0; POGO_DEPLOY_NOW=3
+SYNC_VIGIL_INTERVAL=1; SYNC_BACKOFF="0"
+VIGIL_LOG="$WORK/vigil.log"
+sync_with_retry > "$VIGIL_LOG" 2>&1
+grep -q 'VIGIL probe' "$VIGIL_LOG" \
+    && pass "each vigil probe is logged as a vigil probe, so the log doubles as a duration measurement" \
+    || fail "vigil probes not logged: $(cat "$VIGIL_LOG")"
+[ "${SYNC_VIGIL_SPENT:-0}" -gt 0 ] \
+    && pass "SYNC_VIGIL_SPENT is a probed LOWER BOUND on the outage — the distribution mg-5515 asked for starts here" \
+    || fail "SYNC_VIGIL_SPENT stayed 0 across a vigil"
+[ "$SYNC_RETRY_SPENT" -ge "$SYNC_VIGIL_SPENT" ] \
+    && pass "SYNC_RETRY_SPENT remains the TOTAL wait (the drain's recomputed budget must not lose the vigil)" \
+    || fail "SYNC_RETRY_SPENT ($SYNC_RETRY_SPENT) is less than SYNC_VIGIL_SPENT ($SYNC_VIGIL_SPENT)"
+grep -q 'the vigil ends' "$VIGIL_LOG" \
+    && pass "the vigil says WHY it ended — the outage outlasted the window, not the runner's patience" \
+    || fail "the vigil's ending is not explained: $(cat "$VIGIL_LOG")"
+eval "$BLIP_STUB"
+POGO_DEPLOY_NOW=3
+
+# touch_lock: the hazard this fix introduces, and its guard. acquire_lock
+# reclaims a lock whose mtime is older than STALE_LOCK_MIN (180 min). Before the
+# vigil no run could hold one that long; a vigil from a 02:00 wake-fire runs to
+# ~05:30, which is 210 minutes. Unrefreshed, the 05:00 fire would reclaim a lock
+# a LIVE run holds and start a competing deploy.
+REAL_LOCK_DIR="$LOCK_DIR"
+LOCK_DIR="$WORK/vigil.lock.d"; mkdir -p "$LOCK_DIR"
+touch -t 202001010000 "$LOCK_DIR"
+find "$LOCK_DIR" -maxdepth 0 -type d -mmin +180 | grep -q . \
+    && pass "the stale-lock reclaim would fire on an unrefreshed vigil (the hazard is real, not hypothetical)" \
+    || fail "could not stage a stale lock"
+touch_lock
+find "$LOCK_DIR" -maxdepth 0 -type d -mmin +180 | grep -q . \
+    && fail "touch_lock did not refresh the lock mtime — a vigil past STALE_LOCK_MIN would be reclaimed under a live run" \
+    || pass "touch_lock refreshes the lock, so STALE_LOCK_MIN means 'no run has made progress in 180min' rather than 'a run started 180min ago'"
+rmdir "$LOCK_DIR"
+touch_lock && pass "touch_lock is a no-op when there is no lock (it never fails a run)" || fail "touch_lock failed with no lock dir"
+LOCK_DIR="$REAL_LOCK_DIR"
+
+# The reach, as arithmetic against the shipped constants — and the RESIDUAL,
+# pinned so it cannot quietly be read as solved. drain_budget hits zero when the
+# remaining window is under RESERVE + MIN_DRAIN, so a vigil reaches 05:30 under
+# the production window. A 03:00 fire therefore covers 2h30m, which is SHORTER
+# than the 2h50m outage that prompted mg-5515: an outage of exactly that length
+# starting at exactly 03:00 still costs the night, and no amount of patience
+# fixes it (it ends at 05:50, and RESERVE alone is 20 minutes). Saving that
+# specific night needs a wider window, which mg-5515 has no distribution to size.
+[ "$(drain_budget 6 1200 7200 600 5 29 0)" -gt 0 ] \
+    && pass "the vigil can still probe at 05:29 under the production window" || fail "vigil reach: 05:29"
+[ "$(drain_budget 6 1200 7200 600 5 31 0)" -eq 0 ] \
+    && pass "the vigil stops by 05:30 — its reach is 2h30m from the 03:00 fire and 3h30m from a 02:00 wake-fire" || fail "vigil reach: 05:31"
+[ $(( (5 * 60 + 30) - (3 * 60) )) -lt $(( 2 * 60 + 50 )) ] \
+    && pass "RESIDUAL, pinned: 2h30m of reach is less than the 2h50m outage measured on 2026-08-07 — the vigil changes the SHAPE of the loss (past 05:30, not merely covering three instants), it does not abolish it" \
+    || fail "the residual arithmetic no longer holds — re-derive it before trusting the header"
+
+SYNC_VIGIL=1; SYNC_VIGIL_INTERVAL=300; SYNC_BACKOFF="15 45 120"; SYNC_RETRY_BUDGET=300; SYNC_ATTEMPTS=4
 
 eval "$REAL_SYNC_SRC"
 unset POGO_DEPLOY_NOW   # do not leak a fake clock into the assertions below
