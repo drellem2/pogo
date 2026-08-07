@@ -38,6 +38,12 @@ type SubmitRequest struct {
 	// (open a PR from its branch, mail its report); use this for work that
 	// just needs the merged commit.
 	PostMergeTag string `json:"post_merge_tag,omitempty"`
+	// Verdict is the submitter's own result for its work item, carried through
+	// the merge and written into the item's result sidecar (mg-dfea). Must be a
+	// non-empty JSON object; Submit rejects anything else while the submitter
+	// is still alive to hear about it. See MergeRequest.Verdict for why submit
+	// time is the only moment an auto-done author can record one.
+	Verdict json.RawMessage `json:"verdict,omitempty"`
 }
 
 // RegisterHandlers registers refinery API endpoints on the given mux,
@@ -138,6 +144,7 @@ func (r *Refinery) handleSubmit(w http.ResponseWriter, req *http.Request) {
 		AutoCreateTargetRef: submitReq.AutoCreateTargetRef,
 		DeferDone:           submitReq.DeferDone,
 		PostMergeTag:        submitReq.PostMergeTag,
+		Verdict:             submitReq.Verdict,
 	}
 
 	id, err := r.Submit(mr)

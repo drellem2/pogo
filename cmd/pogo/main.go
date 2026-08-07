@@ -3755,6 +3755,8 @@ report; it is safe from anywhere and never acts.`,
 	var submitAutoCreateTarget bool
 	var submitDeferDone bool
 	var submitPostMergeTag string
+	var submitVerdict string
+	var submitVerdictFile string
 	var cmdRefinerySubmit = &cobra.Command{
 		Use:   "submit <branch>",
 		Short: "Submit a branch to the merge queue",
@@ -3812,6 +3814,33 @@ both sees the merged SHA and outlives the worker. If the tag cannot be pushed,
 the merge still stands but the work item is NOT marked done and the mayor is
 mailed, so a half-finished release can never read as complete.
 
+--verdict / --verdict-file carry YOUR OWN result for the work item through the
+merge, so it survives being auto-done'd. On the auto-done path this is the only
+moment you can record one: pogod closes the work item the instant your branch
+merges and stops you about half a second later, and mg refuses a second
+'mg done' rather than overwriting the first — so your own 'mg done --result'
+arrives to a closed item and is turned away. Nothing overwrites your verdict;
+you are simply beaten to the item, and the protocol calls that refusal success.
+
+  pogo refinery submit polecat-a3f --repo=/path/to/repo \
+      --verdict='{"verdict":"pass","summary":"what you concluded","evidence":["file:line"]}'
+
+  ... --verdict-file=verdict.json      # same, read from a file
+  ... --verdict-file=-                 # same, read from stdin
+
+It must be a non-empty JSON object and it is rejected here, while you are still
+running, if it is not. The refinery does not read the contents: no key is
+required, no value is enumerated, and a merge queue is not the right actor to
+rule on what you concluded. It is written into the work item's result sidecar
+under a "verdict" key, nested rather than flattened so your claims can never
+collide with the refinery's measurements of what actually merged.
+
+You do not need this on the deferred paths (--defer-done, a --target that is an
+integration branch, or an item tagged post-merge-work): there you call
+'mg done --result' yourself and nothing preempts you. Passing it anyway is
+harmless — it is recorded on the merge request and readable via
+'pogo refinery show <id> --json'.
+
 Example:
   pogo refinery submit polecat-a3f --repo=/path/to/repo`,
 		Args: cobra.ExactArgs(1),
@@ -3819,6 +3848,10 @@ Example:
 			branch := args[0]
 			if submitRepo == "" {
 				cli.ExitWithError(jsonOutput, "--repo is required", cli.ExitError)
+			}
+			verdict, err := readSubmitVerdict(submitVerdict, submitVerdictFile)
+			if err != nil {
+				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
 			}
 			id, err := client.SubmitMerge(refinery.SubmitRequest{
 				RepoPath:            submitRepo,
@@ -3828,6 +3861,7 @@ Example:
 				AutoCreateTargetRef: submitAutoCreateTarget,
 				DeferDone:           submitDeferDone,
 				PostMergeTag:        submitPostMergeTag,
+				Verdict:             verdict,
 			})
 			if err != nil {
 				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
@@ -3844,6 +3878,8 @@ Example:
 	cmdRefinerySubmit.Flags().StringVar(&submitAuthor, "author", "", "Author agent name")
 	cmdRefinerySubmit.Flags().BoolVar(&submitAutoCreateTarget, "auto-create-target", false, "Create the target ref from the repo's default branch if it doesn't exist (off by default; safer to fail loudly on typos)")
 	cmdRefinerySubmit.Flags().BoolVar(&submitDeferDone, "defer-done", false, "Skip pogod's auto-done/auto-stop at merge so the polecat owns its post-merge lifecycle and calls 'mg done' itself (already implied when --target is not the repo's default branch; a bounded backstop reaps a deferred polecat that never completes)")
+	cmdRefinerySubmit.Flags().StringVar(&submitVerdict, "verdict", "", "YOUR OWN result for the work item, as a non-empty JSON object, carried through the merge and written into the item's result sidecar under \"verdict\" (mg-dfea). On the auto-done path this is the only moment you can record one — pogod closes the item at merge and mg refuses your later 'mg done --result' as already-done")
+	cmdRefinerySubmit.Flags().StringVar(&submitVerdictFile, "verdict-file", "", "Read --verdict from this file, or from stdin when it is \"-\" (avoids shell-quoting a JSON object)")
 	cmdRefinerySubmit.Flags().StringVar(&submitPostMergeTag, "post-merge-tag", "", "Have the REFINERY create this git tag on the commit the merge lands as and push it, before the author is reaped (use for release cuts — the refinery is the only actor that both sees the merged SHA and outlives the author; a failure here blocks auto-done and mails the mayor)")
 
 	var cmdRefineryStatus = &cobra.Command{

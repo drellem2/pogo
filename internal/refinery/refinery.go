@@ -10,6 +10,7 @@ package refinery
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -212,6 +213,25 @@ type MergeRequest struct {
 	// deliverable did not exist — so a post-merge step that fails must not be
 	// able to resolve as completion.
 	PostMergeError string `json:"post_merge_error,omitempty"`
+	// Verdict is the AUTHOR'S OWN result for its work item, handed over at
+	// submit time so that it survives the merge (mg-dfea). It is a JSON object
+	// and it is carried verbatim: the refinery does not read it, validate its
+	// contents, or act on it.
+	//
+	// It exists because the author has no other reachable moment to record one.
+	// pogod closes the work item the instant the branch merges and stops the
+	// polecat ~0.5s later, so the polecat's own `mg done --result` arrives after
+	// the item is already `done` — and mg REFUSES a second done rather than
+	// clobbering the first. Nothing is overwritten; the author is simply
+	// preempted, and its verdict has nowhere to land. Measured over the live
+	// store on 2026-08-06: 139 of 149 landed items carried a refinery-authored
+	// sidecar and 10 carried any field beyond branch/mr/target.
+	//
+	// Submit time is the only moment that works. Before the merge the author
+	// cannot call `mg done` (that would close the item early); after the merge
+	// it is already closed and usually already stopped. Its verdict is about
+	// the work it did, not about the merge, so it is knowable at submit.
+	Verdict json.RawMessage `json:"verdict,omitempty"`
 	// FailureCount is the AUTHOR's consecutive-failure streak, not this merge's
 	// attempt count. The two were confused during the 2026-08-05 incident, where
 	// every one of thirty-one failures read `failure_count=1` and that was taken
@@ -616,6 +636,15 @@ func (r *Refinery) Submit(req MergeRequest) (string, error) {
 	if req.PostMergeTag != "" {
 		if ok, why := validTagName(req.PostMergeTag); !ok {
 			return "", fmt.Errorf("post_merge_tag %q is not a valid git tag name: %s", req.PostMergeTag, why)
+		}
+	}
+	// Same reasoning for the verdict, and more sharply: it is checked here
+	// because here is the last moment the AUTHOR is still running and can be
+	// told. A verdict rejected after the merge would be a verdict destroyed by
+	// the machinery meant to record it, which is the defect this field closes.
+	if len(req.Verdict) > 0 {
+		if err := ValidateVerdict(req.Verdict); err != nil {
+			return "", fmt.Errorf("verdict: %w", err)
 		}
 	}
 

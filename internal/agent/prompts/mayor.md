@@ -795,8 +795,19 @@ While the loop runs, **you mediate verdict transitions only**. Findings flow bui
 
 - **Pass** (the reviewer mails you a pass verdict, including pass-with-nits) → set the build ticket's stage to `merge` and submit the builder's branch yourself — the builder never self-submits on this track:
   ```bash
-  pogo refinery submit polecat-<build ticket id> --repo=<local repo path> --author=<build ticket id> --target=main
+  # The reviewer's own verdict, from the pass mail it sent you (or the review
+  # ticket's sidecar if it closed the ticket first). Quoted heredoc, so nothing
+  # in the summary is expanded by the shell.
+  cat > /tmp/<build ticket id>-verdict.json <<'EOF'
+  {"verdict": "pass", "reviewed_by": "<review ticket id>", "rounds": <R>,
+   "advisory": ["<nits the reviewer passed over>"], "summary": "<the reviewer's one line>"}
+  EOF
+  jq -e . /tmp/<build ticket id>-verdict.json >/dev/null || echo 'NOT VALID JSON — fix it; submit rejects it'
+  pogo refinery submit polecat-<build ticket id> --repo=<local repo path> --author=<build ticket id> --target=main \
+      --verdict-file=/tmp/<build ticket id>-verdict.json
   ```
+  **The build {{.Worker}} cannot record its own verdict on this track and you are the only actor who can.** It never observes the merge — you submit, pogod closes its item the moment the branch lands, and `mg` refuses a later `mg done` rather than overwriting the first. Without `--verdict-file` the build ticket closes recording only which branch merged, and the reviewer's pass exists nowhere the ticket can be asked for it (mg-dfea). If the extraction comes back empty, submit anyway and say so — a missing verdict is news, and it is not a reason to hold a passed review.
+
   Quality gates still run; the refinery still does the merge. Normal merge handling follows (MERGED mail, step-3 cleanup) — but stop **both** {{.Worker}}s and remove **both** mail-check schedules, and close out the review ticket (`mg done` it with the verdict if the reviewer hasn't). Then verify the GH issue actually closed; if the refinery-side merge didn't auto-close it, close it with a comment linking the landed change.
 - **Round cap: 3 modify↔review rounds without a pass** → the reviewer stops re-reviewing and mails you the open findings. Escalate to Daniel: mail `human` a compressed summary (same ≤10-line, explicit-ask format; subject `[gh-review] <repo>#<n>: 3 rounds, no pass`). Hold both {{.Worker}}s and the tickets in `review` until Daniel decides. Silence = HOLD here too.
 - **Abort** (Daniel no-go mid-flight, superseded issue) → stop both {{.Worker}}s, remove their schedules, shelve the tickets, and post the honest close on the issue. gitgc reaps the branch and worktrees as usual.

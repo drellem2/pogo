@@ -198,8 +198,11 @@ Even ephemeral, your context is where your *judgment* lives. Don't fill it with 
      ```bash
      git commit -m "docs: <description> ({{.Id}})"
      git push origin "$BRANCH"
-     pogo refinery submit "$BRANCH" --repo={{.Repo}} --author={{.Id}} --target={{if .Branch}}{{.Branch}}{{else}}main{{end}}
+     pogo refinery submit "$BRANCH" --repo={{.Repo}} --author={{.Id}} --target={{if .Branch}}{{.Branch}}{{else}}main{{end}} \
+         --verdict-file=/tmp/{{.Id}}-verdict.json
      ```
+     Write `/tmp/{{.Id}}-verdict.json` **before** submitting — it is the same object step 5 hands to `mg done --result`, and on a default-branch merge it is your **only** chance to record one: pogod closes your item the instant the branch merges, and `mg` refuses your later `mg done` as already-done rather than overwriting it (mg-dfea). The refinery carries it verbatim into the item's result sidecar under `verdict`.
+
      Poll the refinery (`pogo refinery show <id> --json | jq -r .status`) with a bash loop as the base {{.Worker}} does. Do NOT self-merge; the refinery merges.
 {{if .Branch}}
      **Your target `{{.Branch}}` is not the repo's default branch, so the merge is a step, not completion.** The refinery classifies it as PR flow: pogod will not mark your item done and will not stop you (mg-7746), because the deliverable is the pull request from `{{.Branch}}` to the default branch and nobody else opens it. Open it yourself, reusing an open one if another {{.Worker}} already landed on this branch:
@@ -232,7 +235,7 @@ Even ephemeral, your context is where your *judgment* lives. Don't fill it with 
      The `unchecked` field is not optional decoration — if it is empty, you are claiming you verified every load-bearing thing you said. Make sure that is true.
 
      The `measured` field is where "Count the population before you rule on it" lands. If your verdict proposes reusing or scoping by any predicate, rule, gate, or bar, it needs an entry here carrying **both** the count and the stationarity — or an entry saying you could not get the count, with the recommendation marked provisional. An empty `measured` on a verdict that reuses a predicate is the failure this rule exists to catch.
-   - **Shape D (artifact):** On merge, {{if .Branch}}open the PR first (step 4), then `mg done {{.Id}} --result="{\"branch\": \"$BRANCH\", \"target\": \"{{.Branch}}\", \"pr\": \"$PR\"}"`{{else}}`mg done {{.Id}} --result="{\"branch\": \"$BRANCH\"}"`{{end}} — the branch you read in step 4, not one you composed. On refinery failure, mail the {{.Coordinator}} and do NOT `mg done`.
+   - **Shape D (artifact):** On merge, {{if .Branch}}open the PR first (step 4), then `mg done {{.Id}} --result="{\"branch\": \"$BRANCH\", \"target\": \"{{.Branch}}\", \"pr\": \"$PR\", \"verdict\": $(cat /tmp/{{.Id}}-verdict.json)}"`{{else}}`mg done {{.Id}} --result="{\"branch\": \"$BRANCH\", \"verdict\": $(cat /tmp/{{.Id}}-verdict.json)}"`{{end}} — the branch you read in step 4, not one you composed. On refinery failure, mail the {{.Coordinator}} and do NOT `mg done`.{{if not .Branch}} An `already done` refusal here means pogod closed the item first; that is the expected outcome and **not** confirmation that your verdict was recorded — what was recorded is whatever you passed to `--verdict-file` at step 4.{{end}}
 
 6. **Stay alive.** Do NOT exit — not after the verdict. You are waiting for the {{.Coordinator}} to stop you, or for a follow-up (clarify a finding, re-check after a change) — your loaded design context is exactly why you stay running. If the {{.Coordinator}} sends an abort, acknowledge and stand by; cleanup is the {{.Coordinator}}'s job.
 
