@@ -291,6 +291,15 @@ This is the **only** sanctioned way to restart pogod from a shell. Why this and 
 
 If `kickstart -k` itself returns an error (launchd not finding the label, the service not loaded), fix the install with `pogo service install` before escalating to tier 3 — tier 3 calls the same `launchctl kickstart` under the hood, so a broken plist will not heal itself there either.
 
+**A zero from `kickstart` is not a verified restart.** It says launchd accepted the request — not that a daemon exists afterwards, and not that it is running the binary you meant. `kickstart -k` re-execs whatever is on disk, so a stale binary comes straight back, healthy. Follow a bare shell kickstart with the check (mg-ed4a):
+
+```bash
+launchctl kickstart -k gui/$(id -u)/com.pogo.daemon
+pogo service verify-revision      # 0 AGREES / 1 DIFFERS / 3 UNKNOWN
+```
+
+See [Did the restart put the right code back?](#did-the-restart-put-the-right-code-back-pogo-service-verify-revision).
+
 ### Tier 3 — External recovery agent
 
 For the case where tier 2 isn't reachable: pogod is wedged so badly the calling shell can't get a response, **or** the caller is itself a child of pogod (a polecat, a crew agent, a refinery worker) and cannot safely SIGTERM its own parent.
@@ -322,6 +331,8 @@ That reports the running / installed / `main` revisions separately, because a re
 - **The plist bakes absolute paths at install time.** `WatchPaths` and `POGO_RECOVERY_DIR` are rendered from `POGO_HOME` when you run `install-recovery`. Move `POGO_HOME` afterwards and the installed job keeps watching the old directory — silently, because `pogo service status` only checks that the plist *file exists*, not that its paths still resolve. **Re-run `pogo service install-recovery` after any `POGO_HOME` change**; `scripts/migrate-pogo-home.sh` does this for you.
 
 When tier 3 itself fails — recovery agent not installed, queue dir unwritable, kickstart returning non-zero — the failed `.req` files land in `~/.pogo/recovery/failed/`. Inspect that directory and `~/Library/Logs/pogo/recovery.log` before filing the mg; the log line `kickstart failed (rc=...)` is the most actionable signal.
+
+**Read past `kickstart succeeded` in `recovery.log`.** Since mg-ed4a the drain does not end there: it asks `pogo service verify-revision` whether the daemon that came back is the revision launchd was configured to exec, logs `revision check AGREES` / `DIFFERS` / `UNKNOWN`, and **exits with that verdict** (1 for DIFFERS, 3 for UNKNOWN). A `DIFFERS` means the restart worked and put the wrong code back — redeploy, because another recovery request will reinstate the same binary. Requests are still archived on the kickstart's result, so a `DIFFERS` drain leaves its `.req` in `processed/`, not `failed/`: the restart was performed, and re-queueing against an artifact a restart cannot fix is how a recovery loop starts.
 
 **Verifying tier 3 is actually armed.** An installed plist is not a working one, and `pogo service status` cannot tell the difference. Check two things with `launchctl print gui/$(id -u)/com.pogo.recovery`:
 
@@ -397,6 +408,91 @@ Note this is a different question from `pogo service check-drift`, which
 compares `[reconcile]` **host artifacts** (plists, scripts) against their repo
 sources. Same word, different axis: that one is about files pogo generates, this
 one is about the binaries pogo *is*.
+
+### Did the restart put the right code back? (`pogo service verify-revision`)
+
+`pogo service status` is the standing question, asked when you think to ask it.
+This is the same question asked **at restart time**, by the paths that restart
+pogod — and until mg-ed4a only one of the four asked it at all:
+
+| path | what it verified |
+|---|---|
+| `scripts/pogo-self-deploy` `verify_running()` | polls `/version` against `main` — the only real check |
+| `pogo service install` (`verifyLaunchdRunning`) | `launchctl list` + `/health` — **never `/version`** |
+| `pogo service restart` (`restartLaunchd`) | **nothing** |
+| `scripts/launchd/pogo-recovery.sh` | the kickstart's own **exit code** |
+
+`launchctl list` says a job is registered. `/health` says something is
+listening. `launchctl kickstart` exiting 0 says launchd accepted the request.
+**None of them says the right thing is listening** — and a kickstart re-execs
+whatever is on disk, so silently reinstating a stale binary is what a restart
+*does* when the disk is stale. On 2026-08-07 this box had been alive, healthy
+and 92 commits behind for eight days, passing every one of those three checks
+every time they ran.
+
+All four paths now share one implementation (`internal/revcheck`) and one
+vocabulary. Three of them **report** the verdict; this command is the one that
+**gates** on it:
+
+```bash
+pogo service verify-revision                # exit 0 AGREES / 1 DIFFERS / 3 UNKNOWN
+pogo service verify-revision --expect <rev> # a deploy expects main's HEAD
+pogo --json service verify-revision | jq -r .verdict
+```
+
+**Three exit codes, not two.** `UNKNOWN` is its own code because "the daemon is
+running the wrong thing" and "I could not tell what the daemon is running" owe
+different actions, and because a check that goes green on an absent reading is
+the exact defect this closes. An absent or unreadable side is **never**
+rendered as agreement.
+
+**The expectation is the plist's binary, not `$PATH`'s.** By default the check
+compares the live `/version` against the vcs stamp of the pogod binary named in
+`~/Library/LaunchAgents/com.pogo.daemon.plist` — because that is the one launchd
+actually execs, and because that expectation needs no repo, no network and no
+config. A second `pogod` earlier on `$PATH` does not change what launchd runs,
+so it must not change what the check expects.
+
+**`AGREES` does not mean *current*** — read this before quoting a green from it.
+Against the default expectation `AGREES` means the **restart took**: the process
+is running the binary launchd execs. If that binary is itself eight days old,
+this says `AGREES` and is right to. Measured on this box on 2026-08-07:
+
+```
+$ pogo service verify-revision
+revision check AGREES: running=d31297f493cd expected=d31297f493cd     # restart fine
+$ pogo service verify-revision --expect "$(git rev-parse main)"
+revision check DIFFERS: running=d31297f493cd expected=22e0541f7fd2    # disk stale
+```
+
+"Did the restart take?" and "is the disk current?" are two questions, and they
+get two instruments on purpose — treating one as the other is the same
+green-on-an-adjacent-property mistake this check was built to remove. The second
+question belongs to [`pogo service status`](#am-i-running-what-i-think-i-am-running-pogo-service-status)
+and to pogod's standing revision-staleness alarm (mg-5bd2). Ask *this* command
+that question deliberately with `--expect`, or do not read its green as an
+answer to it.
+
+**`install` and `restart` report; they do not fail.** Deliberate, and called
+out here so nobody discovers it by surprise: `pogo service install` still exits
+0 against a stale daemon, and `pogo service restart` still exits 0 when the
+restart re-launches the same binary. Installs currently succeed in that state
+and something may depend on it, so the observation shipped first and the
+decision to gate is a separate change. What has changed is that both now
+**print** the verdict, so the state can no longer pass unremarked.
+
+**Tier 3 does gate on it.** `pogo-recovery.sh` runs this after its kickstart and
+its exit code carries the verdict, so `recovery.log` no longer ends at
+`kickstart succeeded`. The requests are still archived on the *kickstart's*
+result — a kickstart that happened has been serviced, and re-queueing on a bad
+revision would loop against something a restart cannot fix. Set
+`POGO_RECOVERY_VERIFY_REVISION=0` to drain without asking; the log then says
+`revision check SKIPPED` rather than going quiet.
+
+**This is defence in depth, not a fix for an observed failure.** Measured under
+mg-2def: 0 of the 4 deploy failures in the 2026-08-01..08-04 window reached a
+restart path at all — every one died at or before the drain. This hardens a
+path none of those nights got to.
 
 ## Did the nightly redeploy actually happen? (`pogo check-staleness`)
 

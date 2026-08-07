@@ -5,6 +5,35 @@
 # any *.req files by issuing `launchctl kickstart -k gui/$UID/com.pogo.daemon`,
 # subject to a 60s rate limit. Stays independent of pogod's process tree:
 # uses only kernel primitives (flock, mv, launchctl).
+#
+# WHAT IT VERIFIES AFTER THE RESTART (mg-ed4a). It used to verify the kickstart's
+# own exit code and nothing else. That code says launchd ACCEPTED the request —
+# not that a daemon exists afterwards, and certainly not that it is running the
+# binary you meant. A kickstart re-execs whatever is on disk, so silently
+# reinstating a stale binary is its normal behaviour when the disk is stale, and
+# this box spent eight days healthy, alive and 92 commits behind while every
+# check but the deploy script's passed.
+#
+# So the drain now ends by asking `pogo service verify-revision` whether the
+# daemon that came back is the revision launchd was configured to exec. That
+# command shares one implementation (internal/revcheck) with the two
+# internal/service restart paths, so all four paths answer the same question the
+# same way.
+#
+# THE VERIFY IS ADVISORY TO THE ARCHIVE AND DECISIVE TO THE EXIT CODE. Requests
+# are archived on the kickstart's result, unchanged: a kickstart that happened
+# has been serviced, and re-queueing on a bad revision would loop against a
+# broken artifact — the unbounded-reaper shape. But the script's exit code now
+# carries the verdict, because "kickstart succeeded" was allowed to be the whole
+# story for too long. No restart loop can come of that: the requests are already
+# out of the queue, last_restart is already written, and com.pogo.recovery is
+# KeepAlive=false so launchd does not respawn on a nonzero exit.
+#
+# INDEPENDENCE IS PRESERVED. `pogo service verify-revision` reads a plist and
+# makes one loopback HTTP GET; it does not ask pogod to do anything and does not
+# join its process tree. If `pogo` is not on PATH — or is too old to have the
+# subcommand — the verdict is UNKNOWN and says so, which is the one thing it
+# must never quietly render as agreement.
 
 set -u
 
@@ -18,6 +47,21 @@ MIN_INTERVAL="${POGO_RECOVERY_MIN_INTERVAL:-60}"
 DAEMON_LABEL="${POGO_RECOVERY_LABEL:-com.pogo.daemon}"
 LAUNCHCTL="${LAUNCHCTL:-launchctl}"
 STALE_LOCK_MIN=5
+
+# The revision verifier and how long it may poll. Overridable so the harness can
+# substitute a stub, and so an operator can shorten the wait on a slow box.
+POGO_CLI="${POGO_CLI:-pogo}"
+VERIFY_TIMEOUT="${POGO_RECOVERY_VERIFY_TIMEOUT:-45s}"
+# Set to 0 to drain without verifying — for a box whose `pogo` predates the
+# subcommand and where the UNKNOWN line is pure noise. It is opt-OUT, not
+# opt-in: a verification you have to remember to enable is one that is off on
+# the box that needed it.
+VERIFY_REVISION="${POGO_RECOVERY_VERIFY_REVISION:-1}"
+
+# Exit codes, mirroring `pogo service verify-revision` so a reader of one is a
+# reader of the other.
+EXIT_REVISION_DIFFERS=1
+EXIT_REVISION_UNKNOWN=3
 
 mkdir -p "$QUEUE_DIR" "$PROCESSED_DIR" "$FAILED_DIR"
 
@@ -102,4 +146,57 @@ log "kickstart succeeded; ${#REQS[@]} request(s) moved to processed/"
 # Prune archives older than 7 days. Best-effort.
 find "$PROCESSED_DIR" "$FAILED_DIR" -type f -mtime +7 -delete 2>/dev/null || true
 
-exit 0
+# --- did the daemon that came back carry the right code? (mg-ed4a) -----------
+#
+# Everything above this line is about the KICKSTART. This is the only part that
+# is about the DAEMON, and it is the question the previous version of this
+# script never asked.
+verify_revision() {
+    if [ "$VERIFY_REVISION" = "0" ]; then
+        log "revision check SKIPPED (POGO_RECOVERY_VERIFY_REVISION=0) — this drain did NOT establish which revision came back"
+        return 0
+    fi
+
+    if ! command -v "$POGO_CLI" >/dev/null 2>&1; then
+        # UNKNOWN, stated. Not silence, and emphatically not a pass: the whole
+        # point is that a check which cannot measure must say so rather than
+        # letting the kickstart's exit code stand in for an answer.
+        log "revision check UNKNOWN: '$POGO_CLI' is not on PATH ($PATH) — cannot establish which revision pogod came back on"
+        return "$EXIT_REVISION_UNKNOWN"
+    fi
+
+    # A `pogo` predating mg-ed4a exits 1 on an unknown subcommand, which is the
+    # SAME code this script reads as DIFFERS. That would turn "your CLI is old"
+    # into "your daemon is running the wrong code" — a confidently wrong alarm
+    # from a check whose entire purpose is not producing those. So establish
+    # that the subcommand exists before trusting any code it returns.
+    if ! "$POGO_CLI" service verify-revision --help >/dev/null 2>&1; then
+        log "revision check UNKNOWN: '$POGO_CLI' has no 'service verify-revision' (predates mg-ed4a)"
+        log "  Upgrade the CLI, or set POGO_RECOVERY_VERIFY_REVISION=0 to stop asking."
+        return "$EXIT_REVISION_UNKNOWN"
+    fi
+
+    local out rc
+    out="$("$POGO_CLI" service verify-revision --timeout "$VERIFY_TIMEOUT" 2>&1)"
+    rc=$?
+    [ -n "$out" ] && log "  $out"
+
+    case "$rc" in
+        0)  log "revision check AGREES — the daemon came back on the binary launchd execs"
+            return 0 ;;
+        "$EXIT_REVISION_DIFFERS")
+            log "revision check DIFFERS — THE RESTART PUT THE WRONG CODE BACK."
+            log "  The kickstart succeeded and the requests were serviced; the daemon is NOT"
+            log "  running the binary launchd is configured to exec. A kickstart re-execs"
+            log "  whatever is on disk, so this usually means the binary on disk is not what"
+            log "  you think it is, or a second pogod holds the port. Redeploy — another"
+            log "  restart alone will reinstate the same code."
+            return "$EXIT_REVISION_DIFFERS" ;;
+        *)  log "revision check UNKNOWN (rc=$rc) — this drain did NOT establish which revision came back"
+            return "$EXIT_REVISION_UNKNOWN" ;;
+    esac
+}
+
+verify_revision
+VERIFY_RC=$?
+exit "$VERIFY_RC"

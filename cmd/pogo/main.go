@@ -38,6 +38,7 @@ import (
 	"github.com/drellem2/pogo/internal/providers"
 	"github.com/drellem2/pogo/internal/reconcile"
 	"github.com/drellem2/pogo/internal/refinery"
+	"github.com/drellem2/pogo/internal/revcheck"
 	"github.com/drellem2/pogo/internal/scheduler"
 	"github.com/drellem2/pogo/internal/selfdrift"
 	"github.com/drellem2/pogo/internal/service"
@@ -1634,6 +1635,93 @@ callers keep working; read the "status" field of --json to gate on it.`,
 	cmdServiceStatus.Flags().StringVar(&statusRepo, "repo", "", "pogo source checkout to compare against (default $POGO_REPO, else the checkout you are standing in)")
 	cmdServiceStatus.Flags().StringVar(&statusRef, "ref", selfdrift.DefaultRef, "git ref in the source checkout whose HEAD the install should match")
 	cmdServiceStatus.Flags().BoolVar(&statusNoDrift, "no-drift", false, "skip the revision-drift check and report only whether the service is installed")
+
+	var verifyRevisionExpect string
+	var verifyRevisionTimeout time.Duration
+	var cmdServiceVerifyRevision = &cobra.Command{
+		Use:   "verify-revision",
+		Short: "Is the running pogod the revision it is supposed to be? — the check as a GATE, with an exit code",
+		Long: `Poll GET /version until the running pogod reports the revision it is supposed to
+be running, and exit with a code that says which of three things happened.
+
+WHAT THIS IS FOR. Four code paths restart or verify pogod, and until mg-ed4a
+only scripts/pogo-self-deploy asked which revision came back. ` + "`launchctl list`" + `
+says a job is registered; ` + "`/health`" + ` says something is listening; ` + "`launchctl\nkickstart`" + ` exiting 0 says launchd accepted the request. None of them says the
+RIGHT thing is listening, and a kickstart re-execs whatever is on disk — so
+silently reinstating a stale binary is what a restart does when the disk is
+stale. This box spent eight days in exactly that state: alive, healthy, 92
+commits behind, on a 2026-07-30 build.
+
+The restart paths themselves now PRINT this verdict but do not fail on it —
+` + "`pogo service install`" + ` still succeeds against a stale daemon, deliberately and
+under mg-ed4a's explicit instruction, because something may depend on that. This
+command is the same check for a caller that wants the gate: scripts/launchd/pogo-recovery.sh
+runs it after its kickstart, and anything else that must not proceed against the
+wrong daemon can too.
+
+EXIT CODES — three, not two, because "could not tell" is a real answer:
+
+  0  AGREES    both revisions were read and they match.
+  1  DIFFERS   both were read and the daemon is running something else.
+  3  UNKNOWN   at least one side could not be read. NOT a pass. A check that
+               goes green because it measured nothing is the failure this
+               command exists to remove.
+
+By default the expectation is the vcs revision stamped into the pogod binary
+launchd is configured to exec — read from the installed plist, because that is
+what launchd actually runs, and it needs no repo, no network and no config.
+Pass --expect <rev> for a different expectation (a deploy expects main's HEAD).
+
+AGREES DOES NOT MEAN CURRENT. Against the default expectation it means the
+RESTART took: the process is running the binary launchd execs. If that binary is
+itself eight days old, this command says AGREES and is right to. Measured on
+this box 2026-08-07:
+
+  pogo service verify-revision                       AGREES  (d31297f493cd)
+  pogo service verify-revision --expect $(git rev-parse main)
+                                                     DIFFERS (main 22e0541f7fd2)
+
+"Is the DISK current?" is a different question with a different instrument —
+` + "`pogo service status`" + `, and pogod's standing revision-staleness alarm. Ask this
+one that question deliberately with --expect, or do not read its green as an
+answer to it.`,
+		Args: cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			res := service.VerifyRevision(verifyRevisionExpect, verifyRevisionTimeout)
+
+			if jsonOutput {
+				cli.PrintJSON(map[string]interface{}{
+					"verdict":  string(res.Verdict),
+					"running":  res.Running,
+					"expected": res.Expected,
+					"reason":   res.Reason,
+					"binary":   service.LaunchdProgramPath(),
+					"waited":   res.Waited.Round(time.Second).String(),
+				})
+			} else {
+				fmt.Println(res)
+				if !res.OK() {
+					fmt.Printf("  binary launchd is configured to exec: %s\n", service.LaunchdProgramPath())
+				}
+			}
+
+			switch res.Verdict {
+			case revcheck.Agrees:
+				os.Exit(cli.ExitSuccess)
+			case revcheck.Differs:
+				os.Exit(cli.ExitError)
+			default:
+				// A distinct code, so a caller can tell "wrong daemon" from
+				// "no reading" — they owe different actions and collapsing
+				// them is the defect this whole line of work is about.
+				os.Exit(cli.ExitUnknown)
+			}
+		},
+	}
+	cmdServiceVerifyRevision.Flags().StringVar(&verifyRevisionExpect, "expect", "",
+		"revision the daemon should be running (default: the vcs stamp of the pogod binary launchd execs)")
+	cmdServiceVerifyRevision.Flags().DurationVar(&verifyRevisionTimeout, "timeout", revcheck.DefaultTimeout,
+		"how long to poll before settling on a verdict; a restarting daemon is unreachable for part of it")
 
 	// Agent commands
 	var cmdAgent = &cobra.Command{
@@ -3712,6 +3800,7 @@ branches; work items and mail live in mg/macguffin (the task-store CLI).`,
 	cmdService.AddCommand(cmdServiceUninstallDeploy)
 	cmdService.AddCommand(cmdServiceReconcile)
 	cmdService.AddCommand(cmdServiceCheckDrift)
+	cmdService.AddCommand(cmdServiceVerifyRevision)
 	rootCmd.AddCommand(cmdService)
 
 	// Recovery commands (mg-f5fc tier-3). The agent itself is installed via
