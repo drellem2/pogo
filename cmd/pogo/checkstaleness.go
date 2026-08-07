@@ -206,9 +206,19 @@ its subject healthy.`,
 			hours, minute := service.DeploySchedule()
 			sched := staleness.DeploySchedule{Hours: hours, Minute: minute, Grace: staleness.DefaultGrace}
 
+			// An explicit --deploy-log is the caller ASSERTING which record to
+			// judge, so it arms the did-not-run witness on its own. Without it
+			// the witness is armed only where the nightly LaunchAgent is
+			// installed, matching pogod's own gate (internal/driftwatch): on a
+			// host with no nightly there is nothing to be silent, and reporting
+			// "no deploy log" there would make every dev box and every sandbox
+			// fail a check that has nothing to check.
+			logExplicit := logPath != ""
 			if logPath == "" {
 				logPath = service.DeployLogPath()
 			}
+			deployInstalled, deployPlist := service.DeployStatus()
+			noFireArmed := logExplicit || deployInstalled
 
 			var (
 				deployRep  staleness.DeployReport
@@ -232,10 +242,12 @@ its subject healthy.`,
 				// recent night; the log holds every night it covers, which is
 				// what it takes to name a RUN of silent ones — and the four
 				// nights of 2026-08-01..08-04 are exactly that shape.
-				text, err := os.ReadFile(logPath)
-				noFireRep = staleness.CheckNoFire(logPath, string(text), err == nil, now, sched)
-				if !noFireRep.Clean() {
-					findings++
+				if noFireArmed {
+					text, err := os.ReadFile(logPath)
+					noFireRep = staleness.CheckNoFire(logPath, string(text), err == nil, now, sched)
+					if !noFireRep.Clean() {
+						findings++
+					}
 				}
 			}
 			if !skipPrompt {
@@ -250,7 +262,10 @@ its subject healthy.`,
 				out := map[string]any{"findings": findings, "now": now.Format(time.RFC3339)}
 				if deployRan {
 					out["redeploy"] = deployRep
-					out["nofire"] = noFireRep
+					out["nofire_armed"] = noFireArmed
+					if noFireArmed {
+						out["nofire"] = noFireRep
+					}
 					out["schedule"] = map[string]any{
 						"hours": hours, "minute": minute, "grace_seconds": int(staleness.DefaultGrace.Seconds()),
 					}
@@ -263,7 +278,11 @@ its subject healthy.`,
 				if deployRan {
 					printDeployWitness(deployRep, sched)
 					fmt.Println()
-					printNoFireWitness(noFireRep)
+					if noFireArmed {
+						printNoFireWitness(noFireRep)
+					} else {
+						printNoFireDisarmed(deployPlist)
+					}
 				}
 				if promptsRan {
 					if deployRan {
@@ -327,6 +346,24 @@ func printDeployWitness(r staleness.DeployReport, sched staleness.DeploySchedule
 		fmt.Println("  earlier nights are judged on the absence of a record, which is the signature")
 		fmt.Println("  of a fire that never happened.")
 	}
+}
+
+// printNoFireDisarmed says, out loud, that the did-not-run witness did not run.
+//
+// It is printed rather than skipped for the same reason pogod logs its own
+// disarm: this witness's finding is an ABSENCE, so a witness that produced no
+// output and a host whose deploy fired every night look identical. Declaring the
+// silence is what keeps "nothing reported" from being read as "nothing wrong".
+func printNoFireDisarmed(plistPath string) {
+	fmt.Println("did-not-run — NOT ARMED on this host, so nothing was checked. This is not an all-clear.")
+	if plistPath == "" {
+		fmt.Println("  The nightly deploy LaunchAgent is not installed (non-macOS host), so there is no")
+		fmt.Println("  nightly whose silence could be a finding.")
+	} else {
+		fmt.Printf("  No nightly deploy LaunchAgent at %s, so there is no\n", plistPath)
+		fmt.Println("  nightly whose silence could be a finding.")
+	}
+	fmt.Println("  To judge a log anyway — another host's, or one you have copied here — pass --deploy-log.")
 }
 
 // printNoFireWitness renders the DID-NOT-RUN half (mg-2416).
