@@ -1135,8 +1135,30 @@ resolve_mg() {
 mail_alert() {
     local to="$1" subject="$2" body_file="$3"
     local out id created
+    # NO --create, deliberately. mg-d639 made an unknown recipient a refusal
+    # (no_such_mailbox, exit 3); --create would opt back out of it and re-mint
+    # the phantom box this function exists to refuse.
     if ! out="$("$MG" mail send "$to" --from=pogo-self-deploy \
                     --subject="$subject" --body-file "$body_file" --json 2>&1)"; then
+        # THE WRONG-RECIPIENT REFUSAL, WHICHEVER SIDE MAKES IT. mg-d639 moved
+        # this check from us to mg: before it, a typo'd name minted a dead drop
+        # and reported "Delivered", which is why the mailbox_created branch
+        # below was written. Now mg refuses first — better, but the refusal
+        # arrives as a generic send failure carrying a JSON blob, and "the
+        # coordinator name in your config is wrong" is not a thing an operator
+        # reads out of {"code":"no_such_mailbox",...} at 03:00.
+        #
+        # So the diagnosis is attached HERE rather than moved: both mechanisms
+        # say the same sentence, because the operator's situation is identical
+        # either way and it is the sentence, not the mechanism, that has to
+        # survive. The mailbox_created branch stays for an older mg that still
+        # auto-creates — this script runs against whatever mg is installed on
+        # the box, not against the one in this checkout.
+        if printf '%s' "$out" | grep -q 'no_such_mailbox'; then
+            err "sink: '$to' had NO mailbox — mg REFUSED the send rather than minting a phantom box nobody reads (no_such_mailbox)"
+            err "sink: the recipient name is wrong (POGO_COORDINATOR / [agents] coordinator), not the message"
+            return 1
+        fi
         err "sink: mg mail send to '$to' failed: $out"
         return 1
     fi
@@ -1147,7 +1169,7 @@ mail_alert() {
         return 1
     fi
     if [ "$created" = "true" ]; then
-        err "sink: '$to' had NO mailbox — this send CREATED one, so the alert is sitting in a phantom box nobody reads"
+        err "sink: '$to' had NO mailbox — this send CREATED one, so the alert is sitting in a phantom box nobody reads (this mg auto-creates; a post-mg-d639 mg refuses the send instead)"
         err "sink: the recipient name is wrong (POGO_COORDINATOR / [agents] coordinator), not the message"
         return 1
     fi

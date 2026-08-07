@@ -1225,6 +1225,95 @@ else
 fi
 rm -rf "$MG_T"
 
+# --- mail_alert: the wrong-recipient refusal, across BOTH mg generations -----
+# The property this function owns: a recipient name that names no mailbox is a
+# CONFIG defect, and the operator must be told that in words. It is not "the
+# send failed" — every send failure says that, and the one thing an operator
+# needs at 03:00 is which of the two things is wrong, the name or the mail.
+#
+# There are now two mechanisms for the same situation and mail_alert must give
+# the same diagnosis on both, because the operator's situation is identical:
+#
+#   pre-mg-d639  — mg auto-creates the box and reports Delivered. The send
+#                  succeeds; `mailbox_created:true` is the only tell.
+#   post-mg-d639 — mg REFUSES (no_such_mailbox, exit 3) and returns a JSON
+#                  error blob. The send fails; the tell is in the blob.
+#
+# Both arms are exercised because this script runs against whatever mg is
+# installed on the box it deploys, which is not the mg in this checkout. An
+# assertion written against only the current one would go quiet on the other,
+# which is how the live control stopped measuring its property in the first
+# place: it asserted the MECHANISM's words rather than the DIAGNOSIS.
+MA_T="$(mktemp -d)"
+MA_BODY="$MA_T/body.txt"; echo "alert body" > "$MA_BODY"
+
+# A stub mg whose behaviour is selected by $MA_MODE, so both generations are
+# reachable from one fixture. `mail list` echoes the msg_id back, so the
+# readback succeeds on the happy path and does not confound the refusals.
+cat > "$MA_T/mg" <<'EOF'
+#!/bin/bash
+case "$2" in
+  send)
+    case "$MA_MODE" in
+      refuses)  echo '{"error":{"code":"no_such_mailbox","category":"not_found","exit":3,"message":"no mailbox named \"ghost\""}}'; exit 3 ;;
+      creates)  echo '{"msg_id":"1.2.3","mailbox_created":true}'; exit 0 ;;
+      other)    echo '{"error":{"code":"io_error","exit":1,"message":"disk on fire"}}'; exit 1 ;;
+      ok)       echo '{"msg_id":"1.2.3","mailbox_created":false}'; exit 0 ;;
+    esac ;;
+  list) echo '{"messages":[{"msg_id":"1.2.3"}]}'; exit 0 ;;
+esac
+EOF
+chmod +x "$MA_T/mg"
+MG="$MA_T/mg"
+
+ma_run() { MA_MODE="$1" mail_alert ghost "subj" "$MA_BODY" 2>&1; }
+
+# (A) post-mg-d639: the refusal. Necessary but NOT sufficient that it returns
+#     non-zero — mail_alert returns 1 from four paths, and a control that
+#     accepted any of them would pass against "disk on fire" too (arm C).
+MA_OUT_A="$(ma_run refuses)"; MA_RC_A=$?
+if [ "$MA_RC_A" -ne 0 ] \
+   && printf '%s' "$MA_OUT_A" | grep -q "had NO mailbox" \
+   && printf '%s' "$MA_OUT_A" | grep -q "the recipient name is wrong"; then
+    pass "mail_alert (mg-d639): mg's no_such_mailbox REFUSAL is reported as a wrong recipient NAME, not as a generic send failure — the diagnosis survived the mechanism moving into mg"
+else
+    fail "mail_alert did not name the recipient on mg's no_such_mailbox refusal (rc=$MA_RC_A): $MA_OUT_A"
+fi
+
+# (B) pre-mg-d639: the auto-create. Same diagnosis, and still a REFUSAL —
+#     an alert sitting in a box nobody reads is not a delivery.
+MA_OUT_B="$(ma_run creates)"; MA_RC_B=$?
+if [ "$MA_RC_B" -ne 0 ] \
+   && printf '%s' "$MA_OUT_B" | grep -q "had NO mailbox" \
+   && printf '%s' "$MA_OUT_B" | grep -q "the recipient name is wrong"; then
+    pass "mail_alert: an older mg that auto-creates the box is STILL undelivered, with the same diagnosis — the mailbox_created check is retained, not replaced"
+else
+    fail "mail_alert accepted a send into a mailbox it had just created, or dropped the diagnosis (rc=$MA_RC_B): $MA_OUT_B"
+fi
+
+# (C) THE DISCRIMINATOR — the arm that stops A and B being satisfied by any
+#     failure at all. A send that failed for an unrelated reason must NOT be
+#     reported as a wrong recipient name: sending the operator to check the
+#     coordinator name over a disk error is the same misdirection this ticket
+#     exists to remove, one layer down.
+MA_OUT_C="$(ma_run other)"; MA_RC_C=$?
+if [ "$MA_RC_C" -ne 0 ] \
+   && ! printf '%s' "$MA_OUT_C" | grep -q "the recipient name is wrong" \
+   && printf '%s' "$MA_OUT_C" | grep -q "disk on fire"; then
+    pass "mail_alert: a send that failed for an UNRELATED reason is not blamed on the recipient name, and the real error is echoed — the name diagnosis is scoped, not a catch-all"
+else
+    fail "mail_alert blamed the recipient name for an unrelated send failure, or swallowed it (rc=$MA_RC_C): $MA_OUT_C"
+fi
+
+# (D) The happy path still returns 0, so none of the above turned the function
+#     into one that can only refuse.
+ma_run ok >/dev/null 2>&1 \
+    && pass "mail_alert: a send into an EXISTING mailbox that reads back still succeeds" \
+    || fail "mail_alert now refuses a good delivery — the refusals above are unfalsifiable"
+
+unset MG
+rm -rf "$MA_T"
+
 # ---------------------------------------------------------------------------
 # Out-of-band guard: pogod_ancestor / assert_out_of_band (mg-1bbf)
 # ---------------------------------------------------------------------------
