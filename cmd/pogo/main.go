@@ -174,85 +174,92 @@ Child commands include start, stop, and status.`,
 	}
 	var cmdServerStart = &cobra.Command{
 		Use:   "start",
-		Short: "Start the pogo server",
-		Long: `Start the pogo server.
+		Short: "Start the pogo server and the crew it declares",
+		Long: `Start the pogo server, and leave the declared crew running.
 
-If the server is already running in index-only mode (after 'pogo server
-stop-orchestration'), this restarts orchestration instead: the refinery comes
-back, crash-respawn is re-armed, and the crew auto-start sweep is re-run.
+Whatever state the daemon is found in, this command ends by running the crew
+auto-start sweep — every agent whose prompt frontmatter declares auto_start =
+true, the mayor included — and reporting what it found, by name.
 
-It then reports what actually came back, by name — which crew agents started,
-which were already running, which are parked, and which failed. Polecats are
-ephemeral and are never restored; they are re-dispatched per work item.
+That is the point of the command rather than a side effect. "Running" and
+"crewed" are different facts: a daemon whose mayor crashed still binds its port,
+still answers /health, and still fires schedules, while nothing is dispatched
+and work piles up silently. Before this, a start against such a daemon printed
+"the server is already running" and did nothing, so the obvious recovery action
+was a no-op.
 
-Crew agents are not restarted when the daemon runs with [agents] autostart =
-false; the output says so rather than reporting an empty success. Exits
-non-zero if any crew agent errored while starting.`,
+The three states it handles:
+
+  not running    spawn pogod, then confirm the crew came up with it
+  index-only     restart orchestration (refinery, crash-respawn) and the crew
+  full mode      leave the mode alone and sweep the crew
+
+The sweep is idempotent: an agent that is already up is reported as such, not
+restarted. Polecats are ephemeral and are never restored; they are re-dispatched
+per work item.
+
+No crew is started on a daemon with no config file, or one running with
+[agents] autostart = false; the output says which, rather than reporting an
+empty success. Exits non-zero if any crew agent errored while starting.`,
 		Args: cobra.MinimumNArgs(0),
 		Run: func(cmd *cobra.Command, args []string) {
-			err := client.HealthCheck()
-			if err != nil {
-				if jsonOutput {
-					// Not yet running, start it
-				} else {
+			// "status" is what the daemon was doing before this command, and it
+			// is kept distinct from what the command then did about the crew:
+			// a caller parsing --json needs to tell a cold start from a start
+			// against a healthy daemon, and both now sweep.
+			status := "running"
+			if err := client.HealthCheck(); err != nil {
+				if !jsonOutput {
 					fmt.Println("Starting pogo server...")
 				}
-				err = client.StartServer()
-				if err != nil {
+				if err := client.StartServer(); err != nil {
 					cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
 				}
-				if jsonOutput {
-					cli.PrintJSON(map[string]interface{}{
-						"status":  "started",
-						"message": "pogo server started",
-					})
-				} else {
+				status = "started"
+				if !jsonOutput {
 					fmt.Println("pogo server started")
 				}
-				return
 			}
 
-			// Server is running — check if orchestration is stopped
-			mode, err := client.GetServerMode()
-			if err == nil && mode == "index-only" {
-				if !jsonOutput {
+			// The mode read is advisory — it only decides the wording. The
+			// start-orchestration call below is correct in either mode: it
+			// transitions from index-only, and sweeps the crew without touching
+			// the mode when already full.
+			mode, modeErr := client.GetServerMode()
+			if !jsonOutput {
+				switch {
+				case modeErr == nil && mode == "index-only":
 					fmt.Println("Restarting orchestration...")
+				case status == "started":
+					fmt.Println("Confirming the crew came up...")
+				default:
+					fmt.Println("The server is already running; checking the crew...")
 				}
-				report, err := client.StartOrchestration()
-				if err != nil {
-					cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
-				}
-				if jsonOutput {
-					cli.PrintJSON(map[string]interface{}{
-						"status":  "started",
-						"message": orchestrationRestartSummary(report),
-						"report":  report,
-					})
-				} else {
-					fmt.Println("Orchestration restarted")
-					for _, line := range orchestrationRestartLines(report) {
-						fmt.Println("  " + line)
-					}
-				}
-				// A crew agent that ERRORED on spawn is a failure of the
-				// restart, not a detail of it, so the exit code says so —
-				// after the report has been printed, so the operator gets the
-				// names either way. Restoring zero agents because none are
-				// eligible (or because [agents] autostart = false) is not an
-				// error and stays exit 0; that case is reported in words.
-				if len(report.AgentsFailed) > 0 {
-					os.Exit(cli.ExitError)
-				}
-				return
 			}
 
+			report, err := client.StartOrchestration()
+			if err != nil {
+				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+			}
 			if jsonOutput {
 				cli.PrintJSON(map[string]interface{}{
-					"status":  "running",
-					"message": "the server is already running",
+					"status":  status,
+					"message": orchestrationRestartSummary(report),
+					"report":  report,
 				})
 			} else {
-				fmt.Println("The server is already running")
+				for _, line := range orchestrationRestartLines(report) {
+					fmt.Println("  " + line)
+				}
+			}
+			// A crew agent that ERRORED on spawn is a failure of the start, not
+			// a detail of it, so the exit code says so — after the report has
+			// been printed, so the operator gets the names either way. Starting
+			// zero agents because none are eligible (or because the daemon is
+			// unconfigured / [agents] autostart = false) is not an error and
+			// stays exit 0; that case is reported in words.
+			if len(report.AgentsFailed) > 0 {
+				os.Exit(cli.ExitError)
 			}
 		},
 	}

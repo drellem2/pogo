@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"sync"
 	"testing"
 	"time"
 
@@ -237,5 +238,70 @@ func TestAutoStartAgents_NoFrontmatterDoesNotStart(t *testing.T) {
 	}
 	if reg.Get("ringmaster") != nil {
 		t.Error("coordinator should not be running without auto_start = true")
+	}
+}
+
+// TestAutoStartAgents_ConcurrentSweepsReportSkippedNotFailed covers the race the
+// sweep's own comment claimed to handle and did not.
+//
+// The guard in AutoStartAgents is a check-then-act — r.Get(name), then
+// StartCrewAgent — and it was never atomic. That was harmless while the only
+// caller was pogod's boot, which runs the sweep exactly once. It stopped being
+// harmless in mg-060c: `pogo server start` now sweeps too, and a start issued
+// against a daemon that is still booting runs the two sweeps concurrently. The
+// loser used to report the agent it found already up as FAILED, and
+// AgentsFailed is what decides the CLI's exit code — so recovering the fleet
+// would have exited non-zero and named a healthy mayor as a casualty.
+func TestAutoStartAgents_ConcurrentSweepsReportSkippedNotFailed(t *testing.T) {
+	testsandbox.Isolate(t)
+	setCoordinator(t, "ringmaster")
+
+	if err := InitPromptDirs(); err != nil {
+		t.Fatalf("InitPromptDirs: %v", err)
+	}
+	writePrompt(t, PromptDir(), "mayor", "+++\nauto_start = true\n+++\n# mayor\n")
+	writePrompt(t, CrewPromptDir(), "scout", "+++\nauto_start = true\n+++\n# scout\n")
+
+	reg, err := NewRegistry(shortSocketDir(t))
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	defer reg.StopAll(5 * time.Second)
+	reg.SetCommandConfig(catCommandConfig{})
+
+	const sweeps = 4
+	var wg sync.WaitGroup
+	all := make([][]AutoStartResult, sweeps)
+	for i := range sweeps {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			all[i] = reg.AutoStartAgents()
+		}(i)
+	}
+	wg.Wait()
+
+	started := map[string]int{}
+	for _, results := range all {
+		for _, r := range results {
+			if r.Status == AutoStartStatusFailed {
+				t.Errorf("concurrent sweep reported %s as FAILED (%s); losing the check-then-act "+
+					"race means someone else started it, which is the outcome the sweep wanted",
+					r.Name, r.Error)
+			}
+			if r.Status == AutoStartStatusStarted {
+				started[r.Name]++
+			}
+		}
+	}
+
+	// Exactly one sweep may claim each agent: the rest must see skipped_running.
+	for _, name := range []string{"ringmaster", "scout"} {
+		if started[name] != 1 {
+			t.Errorf("%s reported started by %d sweeps, want exactly 1", name, started[name])
+		}
+		if reg.Get(name) == nil {
+			t.Errorf("%s is not registered after %d concurrent sweeps", name, sweeps)
+		}
 	}
 }

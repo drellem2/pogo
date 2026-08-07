@@ -50,7 +50,12 @@ func TestRestartLinesSayWhyNothingStarted(t *testing.T) {
 		{
 			name:   "already full",
 			report: server.StartReport{Mode: "full", AlreadyFull: true},
-			want:   "nothing was restarted",
+			want:   "no crew prompt declares auto_start = true",
+		},
+		{
+			name:   "already full and unconfigured",
+			report: server.StartReport{Mode: "full", AlreadyFull: true, AgentStartSkipped: "no config file; this daemon is not configured for orchestration"},
+			want:   "no config file",
 		},
 	}
 	for _, tc := range cases {
@@ -106,6 +111,53 @@ func TestRestartSummaryCarriesTheCounts(t *testing.T) {
 		AgentsFailed:  []server.AgentStartFailure{{Name: "gc", Error: "boom"}},
 	})
 	for _, want := range []string{"2 crew agents started", "1 failed", "polecats not restored"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("summary %q does not contain %q", got, want)
+		}
+	}
+}
+
+// TestRestartLinesNameTheCrewWhenAlreadyFull is the rendering half of mg-060c.
+//
+// The AlreadyFull branch used to return exactly one line — "nothing was
+// stopped, so nothing was restarted" — and stop. That sentence is a true
+// statement about the MODE and says nothing whatever about the crew, so the
+// operator whose mayor had died read it as confirmation that all was well. The
+// state it was printed in is the one the command exists to fix.
+func TestRestartLinesNameTheCrewWhenAlreadyFull(t *testing.T) {
+	out := joined(orchestrationRestartLines(server.StartReport{
+		Mode:                 "full",
+		AlreadyFull:          true,
+		AgentsStarted:        []string{"mayor"},
+		AgentsAlreadyRunning: []string{"pm-pogo"},
+	}))
+
+	if !strings.Contains(out, "mayor") {
+		t.Errorf("an already-full start that recovered the mayor does not name it:\n%s", out)
+	}
+	if !strings.Contains(out, "pm-pogo") {
+		t.Errorf("output does not name the crew that was already up:\n%s", out)
+	}
+	// The refinery was not restarted, and must not be reported as though the
+	// daemon had no refinery starter — that reads as a misconfiguration.
+	if strings.Contains(out, "NOT restarted (the daemon has no refinery starter") {
+		t.Errorf("an already-full start blames a missing refinery starter:\n%s", out)
+	}
+	if !strings.Contains(out, "already full") {
+		t.Errorf("output does not say the mode was left alone:\n%s", out)
+	}
+}
+
+// The summary is the --json `message`, and it must carry the crew count in both
+// branches. "already in full mode; nothing restarted" withheld the one number a
+// caller needs to tell a recovered fleet from an untouched one.
+func TestRestartSummaryCountsTheCrewWhenAlreadyFull(t *testing.T) {
+	got := orchestrationRestartSummary(server.StartReport{
+		Mode:          "full",
+		AlreadyFull:   true,
+		AgentsStarted: []string{"mayor"},
+	})
+	for _, want := range []string{"already in full mode", "1 crew agents started"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("summary %q does not contain %q", got, want)
 		}

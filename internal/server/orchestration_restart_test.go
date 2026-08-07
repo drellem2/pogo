@@ -216,9 +216,8 @@ func TestStartOrchestrationWithoutStarterSaysSo(t *testing.T) {
 	}
 }
 
-// TestStartOrchestrationAlreadyFullReportsNoRestart: the CLI only calls this
-// after reading index-only, but the read and the call are not atomic. A server
-// already in full mode restarted nothing and must not imply otherwise.
+// TestStartOrchestrationAlreadyFull: a server already in full mode stopped
+// nothing and restarted no refinery, and must not imply otherwise.
 func TestStartOrchestrationAlreadyFull(t *testing.T) {
 	s := New(nil, nil)
 	report, err := s.StartOrchestration()
@@ -227,6 +226,123 @@ func TestStartOrchestrationAlreadyFull(t *testing.T) {
 	}
 	if !report.AlreadyFull {
 		t.Error("report.AlreadyFull = false for a server that was already in full mode")
+	}
+	if report.RefineryRestarted {
+		t.Error("report.RefineryRestarted = true; an already-full start must leave the refinery alone")
+	}
+}
+
+// TestStartOrchestrationInFullModeStartsAMissingCrewAgent is the regression test
+// for mg-060c, reported three times and twice closed against the wrong artifact
+// (mg-e463 rewrote the README).
+//
+// The state under test is the one the reporter keeps hitting and the one the
+// 2026-08-07 outage sat in for 10h39m: pogod up, full mode, port answering,
+// schedules firing — and no mayor, so nothing is dispatched. Nothing else in the
+// daemon notices, because the mayor is the only agent that spawns agents.
+//
+// The positive control is therefore not the report, and not the mode: it is
+// reg.Get(name) being non-nil AFTER a start that never changed the mode. On the
+// unfixed server StartOrchestration returns AlreadyFull without touching
+// s.agents, so this assertion is the one that fails.
+func TestStartOrchestrationInFullModeStartsAMissingCrewAgent(t *testing.T) {
+	reg, name := crewFixture(t)
+
+	s := New(reg, nil)
+	s.SetAgentStarter(sweepStarter(reg))
+
+	// The daemon is in full mode and the crew agent is NOT running — a mayor
+	// that crashed, was stopped by hand, or lost its boot spawn.
+	if s.Mode() != config.ModeFull {
+		t.Fatalf("fixture server mode = %v, want full", s.Mode())
+	}
+	if a := reg.Get(name); a != nil {
+		t.Fatalf("fixture agent %q is already running: %+v", name, a)
+	}
+
+	report, err := s.StartOrchestration()
+	if err != nil {
+		t.Fatalf("StartOrchestration: %v", err)
+	}
+
+	if reg.Get(name) == nil {
+		t.Errorf("agent %q was NOT started by a start against a full-mode daemon — "+
+			"this is mg-060c: `pogo server start` reports success and leaves the fleet with no mayor", name)
+	}
+	if !contains(report.AgentsStarted, name) {
+		t.Errorf("report.AgentsStarted = %v, want it to name %q — a start that recovers the "+
+			"coordinator and does not say so is indistinguishable from the no-op it replaced",
+			report.AgentsStarted, name)
+	}
+	if !report.AlreadyFull {
+		t.Error("report.AlreadyFull = false; the mode was full throughout and the report must say so")
+	}
+	if len(report.AgentsFailed) != 0 {
+		t.Errorf("report.AgentsFailed = %+v, want none", report.AgentsFailed)
+	}
+}
+
+// TestStartOrchestrationInFullModeIsIdempotent: the sweep now runs on the common
+// path, including against an entirely healthy fleet. Doing so must be a no-op
+// that REPORTS the fleet — not a restart of it, and not a failure. An agent
+// reported as failed sets the CLI's exit code, so getting this wrong would make
+// a routine start exit non-zero on a healthy daemon.
+func TestStartOrchestrationInFullModeIsIdempotent(t *testing.T) {
+	reg, name := crewFixture(t)
+	reg.AutoStartAgents()
+
+	before := reg.Get(name)
+	if before == nil {
+		t.Fatalf("fixture agent %q did not start", name)
+	}
+
+	s := New(reg, nil)
+	s.SetAgentStarter(sweepStarter(reg))
+
+	report, err := s.StartOrchestration()
+	if err != nil {
+		t.Fatalf("StartOrchestration: %v", err)
+	}
+
+	after := reg.Get(name)
+	if after == nil {
+		t.Fatalf("agent %q disappeared across an already-full start", name)
+	}
+	if after.PID != before.PID {
+		t.Errorf("agent %q was restarted (pid %d -> %d); a start against a healthy fleet must not bounce it",
+			name, before.PID, after.PID)
+	}
+	if !contains(report.AgentsAlreadyRunning, name) {
+		t.Errorf("report.AgentsAlreadyRunning = %v, want it to name %q", report.AgentsAlreadyRunning, name)
+	}
+	if len(report.AgentsStarted) != 0 {
+		t.Errorf("report.AgentsStarted = %v, want none", report.AgentsStarted)
+	}
+	if len(report.AgentsFailed) != 0 {
+		t.Errorf("report.AgentsFailed = %+v, want none — a healthy fleet must not make `pogo server start` exit non-zero",
+			report.AgentsFailed)
+	}
+}
+
+// TestStartOrchestrationInFullModeHonoursTheSkipGate: the sweep on the
+// already-full path goes through the same AgentStarter as the transition, so a
+// daemon configured never to spawn a fleet still says so rather than reporting
+// an empty success.
+func TestStartOrchestrationInFullModeHonoursTheSkipGate(t *testing.T) {
+	s := New(nil, nil)
+	s.SetAgentStarter(func() AgentStartOutcome {
+		return AgentStartOutcome{Skipped: "[agents] autostart = false"}
+	})
+
+	report, err := s.StartOrchestration()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.AgentStartSkipped != "[agents] autostart = false" {
+		t.Errorf("report.AgentStartSkipped = %q, want the gate's reason", report.AgentStartSkipped)
+	}
+	if len(report.AgentsStarted) != 0 {
+		t.Errorf("report.AgentsStarted = %v, want none", report.AgentsStarted)
 	}
 }
 

@@ -890,6 +890,18 @@ type SpawnRequest struct {
 	Provider *Provider
 }
 
+// ErrAgentAlreadyRunning is returned by Spawn when a live agent is already
+// registered under the requested name.
+//
+// It is a sentinel rather than a bare formatted string because the crew
+// auto-start sweep has to tell "someone else started it first" (benign, and
+// the idempotent outcome the sweep wants) apart from a real spawn failure.
+// `pogo server start` now runs that sweep against a daemon whose own boot
+// sweep may still be in flight, so losing the race is an expected outcome on
+// the common path, not an exceptional one — and reporting it as a failure
+// would make the command exit non-zero on a fleet it correctly left alone.
+var ErrAgentAlreadyRunning = errors.New("already running")
+
 // Spawn starts a new agent process with a PTY.
 func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 	// Validate before taking the lock or touching the filesystem: a name pogod
@@ -906,7 +918,10 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 
 	if existing, exists := r.agents[req.Name]; exists {
 		if existing.alive() {
-			return nil, fmt.Errorf("agent %q already running", req.Name)
+			// Wrapped, not replaced: the message still reads "agent %q already
+			// running" for the string-matching callers that predate the
+			// sentinel (api.go's spawn-error classifier).
+			return nil, fmt.Errorf("agent %q %w", req.Name, ErrAgentAlreadyRunning)
 		}
 		// Dead-process registry semantics (gh #19): the existing registration's
 		// process has died (clean exit without re-arm, crash whose respawn

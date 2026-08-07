@@ -304,6 +304,12 @@ template("polecat",
 **Phase 2: Auto-start roster (small, follows Phase 1)**
 - On `pogo server start`, pogod scans prompt files for `auto_start = true` and starts those agents
 - Replaces the need for manual `pogo agent start mayor` after daemon start
+
+  *Shipped, in two parts.* The boot scan landed with this phase. The `pogo server
+  start` half took until mg-060c: for a long while the command only reached the
+  scan when it spawned a new pogod, so against a daemon that was already running
+  it printed "already running" and the manual `pogo agent start mayor` was still
+  needed after all — which is what this bullet promised it would not be.
 - The crew roster file (`~/.pogo/crew-roster`) mentioned in ARCHITECTURE.md's open questions becomes unnecessary — the prompt files with `auto_start = true` ARE the roster
 
 **Phase 3: Extended config.toml (optional, if needed)**

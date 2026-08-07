@@ -167,12 +167,31 @@ func (s *Server) SetMode(mode config.RunMode) error {
 
 // StartOrchestration transitions to full mode and reports what came back —
 // the refinery, and each crew agent by name and outcome.
+//
+// When the daemon is ALREADY in full mode it still runs the crew auto-start
+// sweep, and this is the point of mg-060c rather than a detail of it. Full mode
+// is a statement about which subsystems are permitted to run, not about which
+// agents are actually up: a mayor that crashed, was stopped by hand, or failed
+// its boot spawn leaves a daemon that is in full mode with no coordinator. That
+// daemon looks entirely healthy from outside — the port answers, schedules
+// fire, /health is green — because the only thing missing is the one agent that
+// dispatches work, and nothing else notices its absence. `pogo server start`
+// against that daemon returned "already running" and touched nothing, so the
+// operator's own recovery action was a no-op, three times reported and twice
+// closed as a docs problem. The sweep is idempotent, so re-running it on a
+// healthy fleet costs a registry lookup per crew prompt and reports them all as
+// already running.
 func (s *Server) StartOrchestration() (StartReport, error) {
 	s.transitionMu.Lock()
 	defer s.transitionMu.Unlock()
 
 	if s.Mode() == config.ModeFull {
-		return StartReport{Mode: config.ModeFull.String(), AlreadyFull: true}, nil
+		report := StartReport{Mode: config.ModeFull.String(), AlreadyFull: true}
+		s.sweepCrew(&report)
+		log.Printf("server: already in full mode — crew sweep started=%v already_running=%v parked=%v failed=%d%s",
+			report.AgentsStarted, report.AgentsAlreadyRunning, report.AgentsParked,
+			len(report.AgentsFailed), skippedSuffix(report.AgentStartSkipped))
+		return report, nil
 	}
 	return s.transitionToFull()
 }
@@ -210,7 +229,6 @@ func (s *Server) transitionToFull() (StartReport, error) {
 
 	s.mu.RLock()
 	start := s.startRefinery
-	startAgents := s.startAgents
 	agents := s.agents
 	s.mu.RUnlock()
 
@@ -266,33 +284,48 @@ func (s *Server) transitionToFull() (StartReport, error) {
 	// Re-run the auto-start sweep. Missing this is the defect gh #108
 	// reported: mode flipped to full, refinery came back, and s.agents was
 	// never touched, so the daemon ran on with no crew and reported success.
-	switch {
-	case startAgents == nil:
-		report.AgentStartSkipped = "no agent starter configured for this server"
-	default:
-		outcome := startAgents()
-		if outcome.Skipped != "" {
-			report.AgentStartSkipped = outcome.Skipped
-		}
-		for _, res := range outcome.Results {
-			switch res.Status {
-			case agent.AutoStartStatusStarted:
-				report.AgentsStarted = append(report.AgentsStarted, res.Name)
-			case agent.AutoStartStatusSkippedRunning:
-				report.AgentsAlreadyRunning = append(report.AgentsAlreadyRunning, res.Name)
-			case agent.AutoStartStatusSkippedParked:
-				report.AgentsParked = append(report.AgentsParked, res.Name)
-			case agent.AutoStartStatusFailed:
-				report.AgentsFailed = append(report.AgentsFailed,
-					AgentStartFailure{Name: res.Name, Error: res.Error})
-			}
-		}
-	}
+	s.sweepCrew(&report)
 
 	log.Printf("server: full mode restored — crew started=%v already_running=%v parked=%v failed=%d%s",
 		report.AgentsStarted, report.AgentsAlreadyRunning, report.AgentsParked,
 		len(report.AgentsFailed), skippedSuffix(report.AgentStartSkipped))
 	return report, nil
+}
+
+// sweepCrew runs the configured AgentStarter and folds its per-prompt results
+// into report. It is shared by the two paths that must end with the declared
+// crew running: the transition back to full mode, and a start against a daemon
+// that was already in full mode.
+//
+// It never changes the mode and never touches the refinery, so it is safe on a
+// healthy daemon — the sweep itself is idempotent, and an agent that is already
+// up is reported as such rather than restarted.
+func (s *Server) sweepCrew(report *StartReport) {
+	s.mu.RLock()
+	startAgents := s.startAgents
+	s.mu.RUnlock()
+
+	if startAgents == nil {
+		report.AgentStartSkipped = "no agent starter configured for this server"
+		return
+	}
+	outcome := startAgents()
+	if outcome.Skipped != "" {
+		report.AgentStartSkipped = outcome.Skipped
+	}
+	for _, res := range outcome.Results {
+		switch res.Status {
+		case agent.AutoStartStatusStarted:
+			report.AgentsStarted = append(report.AgentsStarted, res.Name)
+		case agent.AutoStartStatusSkippedRunning:
+			report.AgentsAlreadyRunning = append(report.AgentsAlreadyRunning, res.Name)
+		case agent.AutoStartStatusSkippedParked:
+			report.AgentsParked = append(report.AgentsParked, res.Name)
+		case agent.AutoStartStatusFailed:
+			report.AgentsFailed = append(report.AgentsFailed,
+				AgentStartFailure{Name: res.Name, Error: res.Error})
+		}
+	}
 }
 
 func skippedSuffix(reason string) string {

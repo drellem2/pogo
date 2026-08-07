@@ -7,8 +7,7 @@ import (
 	"github.com/drellem2/pogo/internal/server"
 )
 
-// This file renders pogod's StartReport for `pogo server start` when that
-// command finds the daemon in index-only mode and restarts orchestration.
+// This file renders pogod's StartReport for `pogo server start`.
 //
 // It exists because the old output was one unconditional line — "Orchestration
 // restarted" — printed with a zero exit whether or not a single agent came
@@ -16,20 +15,26 @@ import (
 // could not tell the operator, because it was never told either. A green
 // return is what the defect already produces, so naming the fleet is not
 // cosmetic; it is the part of the fix an operator can actually see.
+//
+// mg-060c is the same lesson one state further along. The AlreadyFull branch
+// used to return a single line — "nothing was stopped, so nothing was
+// restarted" — which is a true statement about the MODE and says nothing about
+// the crew. A daemon in full mode with a dead mayor is exactly the state the
+// operator ran the command to fix, and that line told them it was fine. Both
+// branches now name the fleet.
 
 // orchestrationRestartLines renders the human-readable detail lines for a
-// restart, one per fact. Every line names something: which agents came back,
+// start, one per fact. Every line names something: which agents came back,
 // which were already up, which are parked, which failed, and what is
 // deliberately not restored.
 func orchestrationRestartLines(r server.StartReport) []string {
-	if r.AlreadyFull {
-		return []string{"Already in full mode — nothing was stopped, so nothing was restarted."}
-	}
-
 	var lines []string
-	if r.RefineryRestarted {
+	switch {
+	case r.AlreadyFull:
+		lines = append(lines, "Mode: already full — nothing was stopped, so the refinery was left alone.")
+	case r.RefineryRestarted:
 		lines = append(lines, "Refinery: restarted.")
-	} else {
+	default:
 		lines = append(lines, "Refinery: NOT restarted (the daemon has no refinery starter configured).")
 	}
 
@@ -72,10 +77,13 @@ func orchestrationRestartLines(r server.StartReport) []string {
 // orchestrationRestartSummary is the one-line form used as the `message` field
 // in --json output, where the structured report sits beside it.
 func orchestrationRestartSummary(r server.StartReport) string {
+	lead := "orchestration restarted"
 	if r.AlreadyFull {
-		return "already in full mode; nothing restarted"
+		// The count still leads, because it is the fact the caller needs and
+		// the one the old "nothing restarted" summary withheld.
+		lead = "already in full mode"
 	}
-	parts := []string{fmt.Sprintf("orchestration restarted; %d crew agents started", len(r.AgentsStarted))}
+	parts := []string{fmt.Sprintf("%s; %d crew agents started", lead, len(r.AgentsStarted))}
 	if len(r.AgentsFailed) > 0 {
 		parts = append(parts, fmt.Sprintf("%d failed to start", len(r.AgentsFailed)))
 	}
