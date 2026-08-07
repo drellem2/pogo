@@ -54,8 +54,9 @@
 #   --yes                 proceed without the interactive confirmation prompt
 #   --force               permit a HARD BOUNCE the drain would otherwise refuse.
 #                         Two refusals, both overridden by this flag:
-#                           - polecats still active after the drain timeout
-#                             (kills them, then cleans up claims + worktrees)
+#                           - polecats still owing the refinery a merge after the
+#                             drain timeout (kills them, then cleans up claims +
+#                             worktrees)
 #                           - the drain could not establish whether the fleet is
 #                             idle: pogod went silent or unreadable mid-drain and
 #                             the on-disk witness could not settle it (mg-65b2)
@@ -67,12 +68,26 @@
 #                         that predates the /agents/drain endpoint (mg-cae1) —
 #                         the one-time bootstrap chicken-and-egg (mg-065e). Also
 #                         usable when the operator knows the fleet is idle.
-#   --drain-timeout SECS  how long to wait for polecats to finish (default 1800)
+#   --drain-timeout SECS  how long to wait for the refinery's outstanding merges
+#                         to land (default 1800). NOT how long to wait for
+#                         polecats to finish — see WHAT THE DRAIN WAITS FOR below.
 #   --repo PATH           pogo source repo to build from (see repo resolution)
 #   --port N              pogod HTTP port (default $POGO_PORT or 10000)
 #
 # ENV overrides: POGO_PORT, POGO_REPO, POGO_DAEMON_LABEL (default
-# com.pogo.daemon), POGO_DEPLOY_REF (default main), LAUNCHCTL, POGO_GOBIN.
+# com.pogo.daemon), POGO_DEPLOY_REF (default main), LAUNCHCTL, POGO_GOBIN,
+# POGO_DEPLOY_MERGE_TARGETS (the refs a branch must be contained in to count as
+# merged; default "refs/remotes/origin/main refs/remotes/origin/master").
+#
+# WHAT THE DRAIN WAITS FOR (mg-853a)
+# ----------------------------------
+# The drain does NOT wait for polecats to exit. It waits for every polecat that
+# OWES THE REFINERY A MERGE — one whose worktree branch is pushed to origin and
+# not yet contained in the integration branch — and for nothing else. A polecat
+# running a four-hour analysis holds no unmerged commits and does not hold the
+# deploy; a polecat that pushed and is waiting on the merge queue does. The full
+# argument, including why this script rather than pogod is the site, is at THE
+# DRAIN PREDICATE, beside the code.
 
 set -u
 
@@ -1086,24 +1101,31 @@ not clear itself. Look now:
     double absence that produced this alert — fix the witness first."
             ;;
         *)
-            subject="[deploy-stalled] nightly pogod redeploy did NOT deploy — $leftover polecat(s) still active"
+            subject="[deploy-stalled] nightly pogod redeploy did NOT deploy — $leftover polecat(s) owe the refinery a merge"
             preamble="Fleet is HEALTHY and dispatching. Nothing is broken. That is the problem:
 this run failed CLOSED and produced no other signal, so the fleet is simply
 NOT TRACKING main and every light stays green while it doesn't."
             verdict="This is NOT an emergency and NOT a bug. It is the safe outcome, reported —
 the deploy simply did not happen and you would otherwise never learn that."
-            what="the drain waited ${DRAIN_TIMEOUT}s for the fleet to quiesce and
-                $leftover polecat(s) were still active at the deadline. Deploying
-                past that means hard-bouncing live work, which needs --force, and
-                --force is deliberately not armed on the nightly."
-            todo="WHAT TO DO. Nothing, if this is a one-off: the fleet was busy at 03:00 and the
-next run will deploy. It matters when it REPEATS — a nightly that stalls every
-night has silently stopped tracking main, which looks identical to one that
-succeeds every night. So:
+            what="the drain waited ${DRAIN_TIMEOUT}s and $leftover polecat(s) still had
+                commits PUSHED TO ORIGIN THAT THE REFINERY HAS NOT MERGED. That is
+                the whole predicate — it is NOT 'polecats are running'. Polecats
+                busy on their own work do not hold this deploy and are not counted
+                here; only unmerged pushed commits are (mg-853a). The run log names
+                each one and the branch it is waiting on. Deploying past that means
+                hard-bouncing work the refinery still owes a merge, which needs
+                --force, and --force is deliberately not armed on the nightly."
+            todo="WHAT TO DO. Nothing, if this is a one-off: a merge queue was backed up at
+03:00 and the next run will deploy. It matters when it REPEATS — a nightly that
+stalls every night has silently stopped tracking main, which looks identical to
+one that succeeds every night. So:
   - Once:      ignore it.
-  - Repeatedly: the fleet is never idle at 03:00, or a polecat is wedged and
-               never finishing. Check for a stuck polecat, then either resolve it
-               or move the window. Consider --drain-timeout.
+  - Repeatedly: this is a REFINERY question now, not a fleet-busy one. Something
+               is pushed and not landing. Check 'pogo refinery queue' and
+               'pogo refinery history' for a stuck or failing merge, and read the
+               branch names in the run log above — they are the ones being waited
+               on. Raising --drain-timeout is unlikely to help: a merge that is
+               not landing does not land because the window got longer.
   - Do NOT 'fix' this by adding --force. It re-gates mg-0b77 and mg-13a3 (read
     them first), and 46a4 measured that --force neither waits nor reliably kills:
     kickstart -k kills the job's process group and polecats setsid out of it."
@@ -1224,12 +1246,196 @@ witness_alive_count() {
     esac
 }
 
-# Poll the drain readout down to zero polecats. Echoes the final polecat count,
-# or the "?" sentinel when the fleet's state could not be established.
+# ---------------------------------------------------------------------------
+# THE DRAIN PREDICATE: "OWES THE REFINERY A MERGE", NOT "IS RUNNING" (mg-853a)
+# ---------------------------------------------------------------------------
+# WHAT THIS REPLACED AND WHY IT HAD TO. The drain used to poll pogod's polecat
+# COUNT to zero. That predicate is not satisfiable on this box: the nightly
+# redeploy failed eight consecutive nights, and nights 7-8 were this exact stall
+# — polecats outliving the 7200s budget, exit 7, fleet untouched. The population
+# doing the outliving is compute-bound research work (measured: 392% Python under
+# one polecat dir, five more at 38-44%), and a multi-hour combinatorics search
+# does not finish because a deploy window opened. There is no drain budget it
+# fits inside and the window is 4h wide by construction, so raising
+# --drain-timeout cannot work and neither can adding retry fires: a maximal
+# attempt consumes every hourly slot.
 #
-#   rc 0 — quiesced. The fleet is idle and it is safe to bounce.
-#   rc 1 — the deadline passed with polecats still active (echoes the count).
+# WHAT THE DRAIN IS ACTUALLY FOR. It exists so that bouncing pogod does not
+# destroy work that has not yet reached the refinery. A polecat mid-analysis
+# holds nothing the refinery owes: its branch is either unpushed (the bounce
+# costs it nothing that is not already local and re-derivable) or already merged.
+# The one state where a bounce loses something recoverable is PUSHED BUT NOT YET
+# MERGED — commits that exist on origin and that the refinery still has to land.
+# So that is what this waits on, per polecat, and nothing else.
+#
+# WHY THIS SCRIPT IS THE SITE, AND THE ONLY ONE. The bootstrap constraint is the
+# whole reason the narrowing lives in shell rather than in pogod. The runner
+# re-syncs deploy-src from origin immediately before invoking this file:
+#
+#     02:00:10Z  sync: deploy-src at main <sha>
+#     02:00:11Z  redeploy: deploy-src/scripts/pogo-self-deploy ... --drain-timeout 7200
+#
+# so a change here is live on the NEXT nightly with no redeploy required. Every
+# alternative ships inside pogod, and the only thing that installs pogod is the
+# redeploy it would unblock (mg-b468 is exactly that trap: verified by
+# `git merge-base --is-ancestor e354eba d31297f` -> NO). This is the one step
+# that can act BEFORE a successful redeploy.
+#
+# NOTHING NEW HAD TO SHIP FOR IT. The seam already exists on the 7-day-old daemon
+# we are stuck on (d31297f): GET /agents/drain already returns
+# polecats[].{name,pid,work_item_id,worktree_dir,source_repo}, and worktree_dir is
+# the handle — git can be asked directly, per polecat, whether that worktree holds
+# pushed-but-unmerged commits. No new endpoint, no new field.
+#
+# THE OMISSIONS ARE RULED, NOT OVERLOOKED. Detached compute still falls outside
+# this — an orphan has no registry entry AND owes no merge, so it fails both
+# terms. That is pm-pogo's ruling on mg-797d; see "DETACHED COMPUTE IS
+# DELIBERATELY NOT WAITED FOR" below before adding a term for it.
+DRAIN_MERGE_TARGETS="${POGO_DEPLOY_MERGE_TARGETS:-refs/remotes/origin/main refs/remotes/origin/master}"
+
+# integration_ref WORKTREE -> the ref a landed branch must be contained in.
+# Echoes the first of DRAIN_MERGE_TARGETS that resolves; returns 1 (echoing
+# nothing) if none does, which the caller turns into `unknown` rather than into
+# a verdict. "I could not find the branch to compare against" is not "merged".
+integration_ref() {
+    local wt="$1" ref
+    for ref in $DRAIN_MERGE_TARGETS; do
+        if git -C "$wt" rev-parse --verify --quiet "$ref" >/dev/null 2>&1; then
+            printf '%s' "$ref"; return 0
+        fi
+    done
+    return 1
+}
+
+# merge_debt_of WORKTREE -> "<verdict> <detail>". Exactly one verdict word:
+#
+#   owes    — the worktree's branch is pushed to origin and its tip is NOT
+#             contained in the integration branch. The refinery still owes this
+#             polecat a merge; bouncing now strands commits that exist on origin
+#             and that nothing else is going to land. HOLDS THE DRAIN.
+#   clear   — nothing pushed, or everything pushed is already contained. The
+#             polecat may be busy for hours; it is not busy on the refinery's
+#             behalf. DOES NOT HOLD THE DRAIN.
+#   unknown — git could not answer. Held like `owes` and reported as ITSELF: a
+#             question we failed to ask is not an answer of "clear", and this
+#             file's whole history is the cost of rendering one as the other
+#             (mg-65b2, mg-0b77, mg-76e5).
+#
+# ONLY THE WORKTREE IS CONSULTED, not source_repo. A polecat worktree shares its
+# `.git` infrastructure with the source repo, so origin/<branch> and origin/main
+# are both readable from inside it — and asking the worktree is what makes the
+# answer about THIS polecat rather than about the repo it came from.
+#
+# TWO BOUNDS, STATED RATHER THAN GLOSSED:
+#
+#   1. A work item can target a branch other than main (`mg new --branch`). Its
+#      polecat's branch will not be contained in origin/main and reads as `owes`.
+#      That is the CONSERVATIVE error — it holds a deploy that could have gone —
+#      and it is the one worth making, because the opposite error strands pushed
+#      commits. DRAIN_MERGE_TARGETS is the knob if that ever stops being rare.
+#   2. `origin/<branch>` is a local remote-tracking ref, so it reflects what THIS
+#      clone last pushed or fetched. That is precisely right for the question
+#      asked: the polecat pushes from this worktree, so its own push is what
+#      writes the ref. A branch pushed from somewhere else entirely is invisible
+#      here — and so is its polecat, which is not in this registry either.
+merge_debt_of() {
+    local wt="$1" branch tip target
+    [ -n "$wt" ]  || { echo "unknown no worktree_dir in the drain snapshot"; return 0; }
+    [ -d "$wt" ]  || { echo "unknown worktree $wt does not exist"; return 0; }
+    git -C "$wt" rev-parse --git-dir >/dev/null 2>&1 \
+        || { echo "unknown $wt is not a git worktree"; return 0; }
+    branch="$(git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null)"
+    { [ -n "$branch" ] && [ "$branch" != "HEAD" ]; } \
+        || { echo "unknown cannot name the branch checked out in $wt"; return 0; }
+    # NOT PUSHED is the commonest clear, and it is a real measurement rather than
+    # a fallback: with no origin/<branch> there is nothing on the remote for the
+    # refinery to merge, so there is nothing a bounce can strand from the
+    # refinery's side.
+    tip="$(git -C "$wt" rev-parse --verify --quiet "refs/remotes/origin/$branch" 2>/dev/null)"
+    [ -n "$tip" ] || { echo "clear nothing pushed to origin/$branch"; return 0; }
+    target="$(integration_ref "$wt")" || {
+        echo "unknown origin/$branch is pushed, but none of [$DRAIN_MERGE_TARGETS] resolves in $wt — cannot tell whether it landed"
+        return 0
+    }
+    if git -C "$wt" merge-base --is-ancestor "$tip" "$target" 2>/dev/null; then
+        echo "clear origin/$branch is fully contained in ${target##refs/remotes/}"
+    else
+        echo "owes origin/$branch has commits not in ${target##refs/remotes/}"
+    fi
+}
+
+# polecat_objects — one JSON object per line for every entry of the `polecats`
+# array in an /agents/drain body on stdin.
+#
+# THE `unreachable` TAIL IS CUT FIRST, AND THAT IS LOAD-BEARING. The capture
+# below is greedy, so with survivors present `\[\(.*\)\]` runs straight past the
+# polecats array's own `]` and swallows the unreachable array too — and an
+# OrphanedPolecat carries a "name" and a "work_item_id" exactly like a polecat
+# does, so the result would look entirely plausible while asking git about
+# processes this drain cannot drain and does not count (mg-0b77). Field order is
+# fixed by the struct: draining, count, polecats, unreachable, unreachable_err.
+polecat_objects() {
+    sed 's/,"unreachable.*$//' \
+        | sed -n 's/.*"polecats":\[\(.*\)\].*/\1/p' \
+        | sed 's/},{/}\n{/g'
+}
+
+# drain_debt BODY -> one line per polecat, "<verdict> <name> (<work item>): <detail>".
+# The verdict word is FIRST so the line is countable with an anchored grep, and
+# the name and detail travel with it so every count this script prints can be
+# expanded into the per-polecat evidence behind it.
+#
+# `|| [ -n "$line" ]` is load-bearing — the fourth encounter with the trap that
+# extract_mail_check_ids_for_agents, unreachable_list and cleanup_orphans each
+# document. The body arrives via command substitution, which strips trailing
+# newlines, so the LAST object has none and a bare `read` sets $line and then
+# returns non-zero at EOF. Here that would silently drop one polecat from the
+# predicate — and with a single polecat, all of them: the drain would proceed
+# past the exact case it exists to catch.
+drain_debt() {
+    local line name item wt out
+    printf '%s' "$1" | polecat_objects | while IFS= read -r line || [ -n "$line" ]; do
+        name="$(printf '%s' "$line" | json_str name)"
+        [ -n "$name" ] || continue
+        item="$(printf '%s' "$line" | json_str work_item_id)"
+        wt="$(printf '%s'   "$line" | json_str worktree_dir)"
+        out="$(merge_debt_of "$wt")"
+        echo "${out%% *} $name (${item:-no work item}): ${out#* }"
+    done
+}
+
+# drain_debt_holders DEBT -> how many of those lines HOLD the drain.
+# `unknown` is counted with `owes` on purpose: the two differ in what we know,
+# not in what is safe to do about it.
+#
+# The `|| true` is required, not defensive noise — `grep -c` exits 1 when it
+# matches nothing, and a legitimate zero is the whole happy path. The count is
+# already on stdout by then.
+drain_debt_holders() {
+    printf '%s\n' "$1" | grep -cE '^(owes|unknown) ' || true
+}
+
+# Print a debt report through a given emitter (log for good news, err for bad),
+# one polecat per line. Nothing is summarised away: a count that cannot be
+# expanded into the polecats behind it is how "0 polecats active" came to be
+# printed over live work in the first place.
+print_drain_debt() {
+    local emit="$1" debt="$2"
+    printf '%s\n' "$debt" | sed '/^$/d' | while IFS= read -r line; do "$emit" "  $line"; done
+}
+
+# Poll until NO POLECAT OWES THE REFINERY A MERGE. Echoes the number still owing
+# one, or the "?" sentinel when the fleet's state could not be established.
+#
+#   rc 0 — clear. Nothing pushed-but-unmerged is in flight; safe to bounce.
+#   rc 1 — the deadline passed with polecats still owing a merge (echoes how many).
 #   rc 2 — CANNOT TELL (echoes "?"). Refuse; --force overrides.
+#
+# rc 0 DOES NOT MEAN "DRAINED" and this function must never be quoted as if it
+# did. Polecats may still be running; what has been established is that none of
+# them holds commits on origin that the refinery has yet to land (mg-853a, and
+# see THE DRAIN PREDICATE above). Every caller's wording is built on that
+# distinction — see report_drain_complete and alert_drain_stalled.
 #
 # WHY THIS IS NOT `count="${count:-0}"` ANY MORE (mg-65b2)
 # --------------------------------------------------------
@@ -1275,12 +1481,13 @@ witness_alive_count() {
 #
 # DETACHED COMPUTE IS DELIBERATELY NOT WAITED FOR (ruled 2026-08-07, mg-797d)
 # --------------------------------------------------------------------------
-# What this polls to zero is POLECATS. Compute can OUTLIVE the polecat that
-# started it: architect measured python launched from a polecat's own script
-# still burning ~308% CPU for 30+ minutes at ppid=1, under no polecat at all. So
-# a zero here does not mean "no work in flight" — and once the predicate narrows
-# to polecats that owe the refinery a merge, an orphan holds neither a polecat
-# record nor a merge obligation and falls through BOTH tests.
+# What this waits on is POLECATS THAT OWE THE REFINERY A MERGE. Compute can
+# OUTLIVE the polecat that started it: architect measured python launched from a
+# polecat's own script still burning ~308% CPU for 30+ minutes at ppid=1, under
+# no polecat at all. So a clear here does not mean "no work in flight" — an
+# orphan holds neither a polecat record nor a merge obligation, and falls through
+# BOTH tests. The narrowing landed in mg-853a; the gap it leaves is the one ruled
+# on below, unchanged and still deliberate.
 #
 # THAT GAP IS REAL AND IT IS NOT AN OVERSIGHT. It was raised deliberately and
 # pm-pogo ruled: the deploy must EXPLICITLY NOT wait for detached compute. Do
@@ -1312,7 +1519,7 @@ DRAIN_UNREADABLE_SLEEP=2   # a blip is re-probed in seconds, not the 15s drain t
 
 drain_wait() {
     local deadline=$(( $(date +%s) + DRAIN_TIMEOUT ))
-    local raw code body count disp live misses=0
+    local raw code body count disp live misses=0 debt held shown=false
     while :; do
         raw="$(drain_probe)"
         code="${raw##*$'\n'}"
@@ -1333,8 +1540,36 @@ drain_wait() {
                 # of this test on purpose (mg-797d); see "DETACHED COMPUTE IS
                 # DELIBERATELY NOT WAITED FOR" above before adding a term here.
                 if [ "$count" -eq 0 ]; then echo 0; return 0; fi
-                if [ "$(date +%s)" -ge "$deadline" ]; then echo "$count"; return 1; fi
-                log "draining: $count polecat(s) still active — waiting..." >&2
+
+                # NARROWED (mg-853a): running is not the question. Ask git, per
+                # polecat, whether its worktree holds commits pushed to origin
+                # that the refinery has not landed. Only those hold the deploy.
+                debt="$(drain_debt "$body")"
+                held="$(drain_debt_holders "$debt")"
+
+                if [ "$held" -eq 0 ]; then
+                    log "no polecat owes the refinery a merge — $count running, 0 holding pushed-unmerged commits" >&2
+                    print_drain_debt log "$debt" >&2
+                    echo 0; return 0
+                fi
+
+                # The per-polecat evidence goes out ONCE per drain rather than
+                # every 15s: a 7200s window would otherwise emit it ~480 times
+                # and bury the tick that mattered. The terminal paths below and
+                # above print it again, because those are the lines a reader
+                # actually acts on.
+                if ! $shown; then
+                    log "$held of $count polecat(s) owe the refinery a merge:" >&2
+                    print_drain_debt log "$debt" >&2
+                    shown=true
+                fi
+
+                if [ "$(date +%s)" -ge "$deadline" ]; then
+                    err "deadline reached; still owing a merge:"
+                    print_drain_debt err "$debt"
+                    echo "$held"; return 1
+                fi
+                log "waiting: $held of $count polecat(s) still owe the refinery a merge..." >&2
                 sleep 15
                 continue ;;
         esac
@@ -1418,13 +1653,24 @@ unreachable_list() {
         done
 }
 
-# Report the end of a successful drain HONESTLY. `count` reaching zero is a fact
-# about pogod's in-memory REGISTRY, not about the machine, and the old message
-# ("drain complete — 0 polecats active") asserted the second on the strength of
-# the first — declaring completion over any polecat that outlived an earlier
-# restart and is invisible to this registry forever (mg-0b77 / mg-46a4 §5a).
+# Report the end of a successful drain HONESTLY — which now means saying WHAT WAS
+# CHECKED, in the words of the predicate, rather than the word "drained".
+#
+# The old message said "drain complete — 0 polecats active". Two separate
+# over-claims lived in that line, and each was paid for once already:
+#
+#   - `count` reaching zero is a fact about pogod's in-memory REGISTRY, not about
+#     the machine. It says nothing about a polecat that outlived an earlier
+#     restart and is invisible to this registry forever (mg-0b77 / mg-46a4 §5a).
+#   - Since mg-853a the drain no longer polls `count` to zero AT ALL. It clears
+#     when nothing is pushed-but-unmerged, with polecats very much still running.
+#     "0 polecats active" would now be flatly false rather than merely narrow.
+#
+# So the headline names the predicate and the numbers behind it. An alert naming a
+# cause it has not established is the defect that started this whole line of work;
+# it must not be reinstalled at the moment of success.
 report_drain_complete() {
-    local body errmsg leftovers n
+    local body errmsg leftovers n count debt held
     body="$(curl -sf --max-time 5 "$(base_url)/agents/drain" 2>/dev/null)"
 
     # This is a SECOND, independent fetch — drain_wait's success proves the
@@ -1433,17 +1679,36 @@ report_drain_complete() {
     # unreachable": that is this ticket's own defect (absence of evidence
     # rendered as a positive claim about the world) reproduced inside its fix.
     if [ -z "$body" ]; then
-        log "drain complete — 0 polecats in pogod's registry"
+        log "drain check cleared — no polecat owed the refinery a merge (see the drain's own report above)"
         err "could not re-read /agents/drain to check for unreachable survivors"
         err "this is NOT a report that there are none — it is a report that we could not look"
         return 0
+    fi
+
+    # Re-state the predicate against THIS body, so the completion line reports a
+    # measurement rather than a memory. It can legitimately disagree with
+    # drain_wait's: a polecat can push in the seconds between the two fetches.
+    # drain_wait owns the decision — this is the report — so a disagreement is
+    # NAMED and the deploy continues, which is the only combination that neither
+    # hides the race nor invents authority to act on it.
+    count="$(printf '%s' "$body" | json_num count)"
+    debt="$(drain_debt "$body")"
+    held="$(drain_debt_holders "$debt")"
+    log "drain check cleared — checked ${count:-?} polecat(s) for commits pushed to origin and not yet merged"
+    if [ "$held" -gt 0 ]; then
+        err "re-read AFTER the drain cleared: $held polecat(s) now owe the refinery a merge"
+        print_drain_debt err "$debt"
+        err "a polecat pushed between the drain's last poll and this re-read. The bounce"
+        err "does NOT destroy those commits — they are on origin — but the refinery will"
+        err "have to land them without their author, which is what mg-b468 is for."
+    else
+        print_drain_debt log "$debt"
     fi
 
     # A witness we could not read means we do not know whether survivors exist.
     # That is NOT "none" and must not be printed as a clean drain (mg-76e5).
     errmsg="$(printf '%s' "$body" | json_str unreachable_err)"
     if [ -n "$errmsg" ]; then
-        log "drain complete — 0 polecats in pogod's registry"
         err "cannot tell whether any polecat survived an earlier restart: $errmsg"
         err "proceeding, but this redeploy may bounce live work it cannot see"
         return 0
@@ -1451,12 +1716,11 @@ report_drain_complete() {
 
     leftovers="$(unreachable_list "$body")"
     if [ -z "$leftovers" ]; then
-        log "drain complete — 0 polecats in the registry, none unreachable"
+        log "none unreachable"
         return 0
     fi
 
     n="$(printf '%s\n' "$leftovers" | wc -l | tr -d ' ')"
-    log "drain complete — 0 polecats in pogod's registry"
     err "$n polecat(s) are ALIVE but unreachable and were NOT drained:"
     printf '%s\n' "$leftovers" | while IFS= read -r line; do err "  $line"; done
     err "these survived an earlier pogod restart, so this registry cannot see them"
@@ -1787,8 +2051,8 @@ cmd_redeploy() {
                             err "the drain could not establish whether the fleet is idle (see above)"
                             err "refusing to bounce a fleet whose state is unknown; restoring dispatch"
                         else
-                            err "$leftover polecat(s) still active after ${DRAIN_TIMEOUT}s drain timeout"
-                            err "refusing to hard-bounce the fleet without --force; restoring dispatch"
+                            err "$leftover polecat(s) still owe the refinery a merge after ${DRAIN_TIMEOUT}s (named above)"
+                            err "refusing to hard-bounce work that is pushed but unmerged without --force; restoring dispatch"
                         fi
                         # The two err lines above are the ATTENDED report: they
                         # work because a human ran this and is reading them. The
@@ -1828,7 +2092,7 @@ cmd_redeploy() {
                         log "--force: if any are, they will survive the bounce and keep their claims + worktrees;"
                         log "--force: no snapshot is readable from a silent pogod, so nothing will be cleaned up"
                     else
-                        log "--force: hard-bouncing with $leftover polecat(s) active; will clean up after"
+                        log "--force: hard-bouncing with $leftover polecat(s) still owing the refinery a merge; will clean up after"
                     fi
                 fi
                 # Capture the pre-kickstart polecat snapshot for post-bounce cleanup.

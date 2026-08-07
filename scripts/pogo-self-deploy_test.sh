@@ -302,11 +302,19 @@ drain_probe() { printf '%s\n200' '{"draining":true,"count":0,"polecats":[]}'; }
     && pass "drain_wait: a healthy readout of 0 still quiesces (the refusal is CONDITIONAL, not hard-wired)" \
     || fail "drain_wait: healthy zero did not quiesce ($(dw)) — the gate never opens"
 
-# A healthy readout of N, past the deadline: the pre-existing timeout path, which
-# must survive this change untouched. It is what exit 7 has always hung off.
-drain_probe() { printf '%s\n200' '{"draining":true,"count":3,"polecats":[]}'; }
+# A healthy readout of N HOLDERS, past the deadline: the timeout path, which must
+# survive mg-853a's narrowing. It is what exit 7 has always hung off.
+#
+# The body now has to carry real polecat records, because since mg-853a `count`
+# alone no longer decides anything — three polecats with no worktree_dir at all
+# would clear. These three name worktrees that do not exist, so each is `unknown`
+# and each HOLDS: the rc-1 shape is reached through the new predicate rather than
+# around it. (The equivalent through `owes` needs real git and is asserted in the
+# mg-853a section further down, against a branch really pushed to a real origin.)
+DW_HOLD_BODY='{"draining":true,"count":3,"polecats":[{"name":"a","pid":1,"work_item_id":"mg-a","worktree_dir":"/nonexistent/dw/a"},{"name":"b","pid":2,"work_item_id":"mg-b","worktree_dir":"/nonexistent/dw/b"},{"name":"c","pid":3,"work_item_id":"mg-c","worktree_dir":"/nonexistent/dw/c"}]}'
+drain_probe() { printf '%s\n200' "$DW_HOLD_BODY"; }
 [ "$(DW_TIMEOUT=0 dw)" = "3|1" ] \
-    && pass "drain_wait: N active at the deadline -> rc 1 and the COUNT (the exit-7 timeout path is unchanged)" \
+    && pass "drain_wait: N holding the drain at the deadline -> rc 1 and the COUNT (the exit-7 timeout path survives the narrowing)" \
     || fail "drain_wait: timeout path regressed ($(DW_TIMEOUT=0 dw))"
 
 # (1) A MISSING SAMPLE IS NOT A MEASUREMENT. The cheapest part of the fix and
@@ -656,6 +664,222 @@ ERRBODY='{"draining":true,"count":0,"polecats":[],"unreachable_err":"witness: ca
         *"none unreachable"*)
             fail "mg-0b77: a FAILED fetch printed 'none unreachable' — absence of evidence rendered as a claim about the world" ;;
         *)  fail "mg-0b77: report_drain_complete said nothing useful on a failed fetch ($OUT)" ;;
+    esac
+) 2>/dev/null
+
+# ===========================================================================
+# THE NARROWED DRAIN PREDICATE: "OWES THE REFINERY A MERGE" (mg-853a)
+# ===========================================================================
+# WHY THESE USE REAL GIT AND NOT STUBS. The predicate IS a git question. A stub
+# returns whatever its author already believed about `merge-base --is-ancestor`,
+# `rev-parse --abbrev-ref` in a worktree, and when a push writes
+# refs/remotes/origin/<branch> — and those beliefs are exactly what could be
+# wrong. The same lesson mg-c02d and mg-65b2 each paid for once: the failure mode
+# a control exists to catch lives in the WIRING. So this builds a real bare
+# origin, a real clone, and real worktrees in a temp dir, and asks the shipping
+# function about them.
+#
+# BOTH DIRECTIONS ARE OBSERVED, and that is the acceptance condition rather than
+# a nicety. A predicate that has only ever returned "clear" has not been shown to
+# work — it is indistinguishable from `return clear`. The `owes` case below is a
+# branch really pushed to a real origin and really not merged, and it is asserted
+# to HOLD the drain.
+MD_TMP="$(mktemp -d)"
+trap 'rm -f "$RESULTS_FILE" "$DW_STATE"; rm -rf "$MD_TMP"' EXIT
+# -c on every call: this must not depend on the running user's git identity, and
+# a repo-local `git config` would be one more thing to get wrong per worktree.
+mdgit() { git -c user.email=t@example.invalid -c user.name=t -c commit.gpgsign=false "$@"; }
+
+mdgit init -q --bare "$MD_TMP/origin.git"
+mdgit clone -q "$MD_TMP/origin.git" "$MD_TMP/repo" 2>/dev/null
+printf 'base\n' > "$MD_TMP/repo/f"
+mdgit -C "$MD_TMP/repo" add f
+mdgit -C "$MD_TMP/repo" commit -qm base
+mdgit -C "$MD_TMP/repo" branch -M main
+mdgit -C "$MD_TMP/repo" push -q origin main
+
+# (a) A polecat mid-work with NOTHING pushed. This is the population that has
+#     stalled the nightly for two nights: busy, and holding nothing the refinery
+#     owes. Commits locally, so "clear" cannot be an artifact of an empty branch.
+mdgit -C "$MD_TMP/repo" worktree add -q -b wt-local "$MD_TMP/wt-local" main
+printf 'local\n' > "$MD_TMP/wt-local/g"
+mdgit -C "$MD_TMP/wt-local" add g
+mdgit -C "$MD_TMP/wt-local" commit -qm local
+
+# (b) A polecat that PUSHED and is waiting on the merge queue. `git push` writes
+#     refs/remotes/origin/wt-owes, which is the evidence the predicate reads.
+mdgit -C "$MD_TMP/repo" worktree add -q -b wt-owes "$MD_TMP/wt-owes" main
+printf 'owed\n' > "$MD_TMP/wt-owes/h"
+mdgit -C "$MD_TMP/wt-owes" add h
+mdgit -C "$MD_TMP/wt-owes" commit -qm owed
+mdgit -C "$MD_TMP/wt-owes" push -q origin wt-owes
+
+# (c) A polecat whose branch already LANDED. Still running, still has a worktree,
+#     still has a pushed branch — and owes nothing, because origin/main contains
+#     it. Without this case, "pushed" alone would be the predicate and every
+#     merged-but-not-yet-reaped polecat would hold the deploy forever.
+mdgit -C "$MD_TMP/repo" worktree add -q -b wt-merged "$MD_TMP/wt-merged" main
+printf 'landed\n' > "$MD_TMP/wt-merged/i"
+mdgit -C "$MD_TMP/wt-merged" add i
+mdgit -C "$MD_TMP/wt-merged" commit -qm landed
+mdgit -C "$MD_TMP/wt-merged" push -q origin wt-merged
+mdgit -C "$MD_TMP/repo" merge -q --no-edit wt-merged
+mdgit -C "$MD_TMP/repo" push -q origin main
+
+md() { merge_debt_of "$1"; }
+mdw() { merge_debt_of "$1" | cut -d' ' -f1; }
+
+[ "$(mdw "$MD_TMP/wt-local")" = "clear" ] \
+    && pass "mg-853a: a polecat with LOCAL-ONLY commits does not hold the drain ($(md "$MD_TMP/wt-local"))" \
+    || fail "mg-853a: an unpushed branch read as '$(md "$MD_TMP/wt-local")' — the compute-bound polecats that stalled 8 nightlies would still hold the deploy"
+
+[ "$(mdw "$MD_TMP/wt-owes")" = "owes" ] \
+    && pass "mg-853a: THE POSITIVE CONTROL — a branch really pushed to a real origin and really unmerged HOLDS the drain ($(md "$MD_TMP/wt-owes"))" \
+    || fail "mg-853a: pushed-and-unmerged read as '$(md "$MD_TMP/wt-owes")' — the predicate never returns 'owes', so it protects nothing and every deploy bounces work the refinery still owes"
+
+[ "$(mdw "$MD_TMP/wt-merged")" = "clear" ] \
+    && pass "mg-853a: a branch pushed AND already contained in origin/main does not hold the drain ($(md "$MD_TMP/wt-merged"))" \
+    || fail "mg-853a: a merged branch read as '$(md "$MD_TMP/wt-merged")' — 'pushed' is not the predicate, 'pushed and unmerged' is"
+
+# The two `clear`s above must be clear for DIFFERENT reasons. Identical detail
+# would mean one branch of merge_debt_of is dead and the assertions are agreeing
+# by accident.
+[ "$(md "$MD_TMP/wt-local")" != "$(md "$MD_TMP/wt-merged")" ] \
+    && pass "mg-853a: unpushed and already-merged are distinct measurements, not one fallback wearing two hats" \
+    || fail "mg-853a: unpushed and merged produced the same line ($(md "$MD_TMP/wt-local")) — one path is dead"
+
+# --- the unknowns: a question we failed to ask is not an answer of 'clear' ---
+[ "$(mdw "")" = "unknown" ] \
+    && pass "mg-853a: an absent worktree_dir is 'unknown', never 'clear'" \
+    || fail "mg-853a: empty worktree_dir read as '$(md "")'"
+[ "$(mdw "$MD_TMP/does-not-exist")" = "unknown" ] \
+    && pass "mg-853a: a worktree_dir that does not exist is 'unknown'" \
+    || fail "mg-853a: missing dir read as '$(md "$MD_TMP/does-not-exist")'"
+mkdir -p "$MD_TMP/not-git"
+[ "$(mdw "$MD_TMP/not-git")" = "unknown" ] \
+    && pass "mg-853a: a non-git directory is 'unknown'" \
+    || fail "mg-853a: a non-git dir read as '$(md "$MD_TMP/not-git")'"
+mdgit -C "$MD_TMP/wt-local" checkout -q --detach
+[ "$(mdw "$MD_TMP/wt-local")" = "unknown" ] \
+    && pass "mg-853a: a DETACHED HEAD is 'unknown' — 'HEAD' is not a branch name to look up on origin" \
+    || fail "mg-853a: detached HEAD read as '$(md "$MD_TMP/wt-local")' — a bogus origin/HEAD lookup would decide this"
+mdgit -C "$MD_TMP/wt-local" checkout -q wt-local
+(
+    DRAIN_MERGE_TARGETS="refs/remotes/origin/no-such-integration-branch"
+    [ "$(merge_debt_of "$MD_TMP/wt-owes" | cut -d' ' -f1)" = "unknown" ] \
+        && pass "mg-853a: pushed, but no integration ref resolves -> 'unknown' (cannot tell whether it landed), never 'clear'" \
+        || fail "mg-853a: an unresolvable integration target read as '$(merge_debt_of "$MD_TMP/wt-owes")' — 'I could not find main' printed as 'merged'"
+)
+
+# --- polecat_objects: the unreachable tail must not leak into the predicate ---
+# An OrphanedPolecat carries "name" and "work_item_id" just like a polecat, so a
+# greedy capture that ran past the polecats array would look entirely plausible
+# while asking git about processes this drain does not count (mg-0b77).
+MIXED='{"draining":true,"count":1,"polecats":[{"name":"cat-live","pid":1,"work_item_id":"mg-live","worktree_dir":"/wt/live","source_repo":"/repo"}],"unreachable":[{"name":"cat-ghost","pid":2,"start_time":"2026-07-17T02:14:00Z","work_item_id":"mg-ghost"}]}'
+MIXED_OUT="$(printf '%s' "$MIXED" | polecat_objects)"
+{ printf '%s' "$MIXED_OUT" | grep -q 'cat-live' && ! printf '%s' "$MIXED_OUT" | grep -q 'cat-ghost'; } \
+    && pass "mg-853a: polecat_objects reads the polecats array only — an unreachable survivor does not leak into the merge predicate" \
+    || fail "mg-853a: polecat_objects swallowed the unreachable array ($MIXED_OUT) — the greedy capture ran past the polecats ']'"
+# Counted with an anchored grep, NOT `wc -l`. The body arrives via command
+# substitution with no trailing newline and BSD sed preserves that, so the last
+# object has no terminator and `wc -l` reports one fewer than there are — which
+# is the same off-by-one the `|| [ -n "$line" ]` guards in drain_debt exist for,
+# and it would make this assertion agree with a splitter that had really dropped
+# a polecat.
+[ "$(printf '%s' "$DRAIN" | polecat_objects | grep -c '^{')" = "2" ] \
+    && pass "mg-853a: polecat_objects splits a two-polecat body into two objects" \
+    || fail "mg-853a: polecat_objects split ($(printf '%s' "$DRAIN" | polecat_objects | grep -c '^{') objects)"
+
+# --- drain_debt / drain_debt_holders over a real snapshot -------------------
+# The bodies below name the REAL worktrees built above, so this is the whole
+# path: JSON -> worktree_dir -> git -> verdict -> count.
+md_body() {
+    local out="" wt name
+    for wt in "$@"; do
+        name="$(basename "$wt")"
+        [ -n "$out" ] && out="$out,"
+        out="$out{\"name\":\"$name\",\"pid\":1,\"work_item_id\":\"mg-$name\",\"worktree_dir\":\"$wt\",\"source_repo\":\"$MD_TMP/repo\"}"
+    done
+    printf '{"draining":true,"count":%d,"polecats":[%s]}' "$#" "$out"
+}
+
+CLEAR_BODY="$(md_body "$MD_TMP/wt-local" "$MD_TMP/wt-merged")"
+CLEAR_DEBT="$(drain_debt "$CLEAR_BODY")"
+[ "$(drain_debt_holders "$CLEAR_DEBT")" = "0" ] \
+    && pass "mg-853a: two RUNNING polecats, neither owing a merge -> 0 hold the drain" \
+    || fail "mg-853a: running-but-clear polecats held the drain ($CLEAR_DEBT)"
+
+OWED_BODY="$(md_body "$MD_TMP/wt-local" "$MD_TMP/wt-owes" "$MD_TMP/wt-merged")"
+OWED_DEBT="$(drain_debt "$OWED_BODY")"
+[ "$(drain_debt_holders "$OWED_DEBT")" = "1" ] \
+    && pass "mg-853a: the SAME three polecats with one pushed-unmerged branch -> exactly 1 holds the drain" \
+    || fail "mg-853a: expected exactly 1 holder, got $(drain_debt_holders "$OWED_DEBT") ($OWED_DEBT)"
+printf '%s\n' "$OWED_DEBT" | grep -q '^owes wt-owes (mg-wt-owes):' \
+    && pass "mg-853a: the debt line NAMES the polecat and its work item, so a count can always be expanded into the evidence behind it" \
+    || fail "mg-853a: debt line does not name the holder ($OWED_DEBT)"
+
+# A ONE-polecat body is where the missing-trailing-newline trap bites hardest:
+# dropping the last record drops all of them, and the drain sails past the exact
+# case it exists to catch. Same trap as mg-a558, one function over.
+SOLO_DEBT="$(drain_debt "$(md_body "$MD_TMP/wt-owes")")"
+[ "$(drain_debt_holders "$SOLO_DEBT")" = "1" ] \
+    && pass "mg-853a: a ONE-polecat snapshot is not silently dropped — the sole holder is still counted" \
+    || fail "mg-853a: a single owing polecat counted $(drain_debt_holders "$SOLO_DEBT") ($SOLO_DEBT) — the last-record read trap is live and the drain would proceed over it"
+
+# An unreadable worktree is counted WITH the owers: they differ in what we know,
+# not in what is safe to do about it.
+GHOST_DEBT="$(drain_debt "$(md_body "$MD_TMP/does-not-exist")")"
+[ "$(drain_debt_holders "$GHOST_DEBT")" = "1" ] \
+    && pass "mg-853a: an 'unknown' verdict HOLDS the drain — a question we failed to ask is not an answer of 'clear'" \
+    || fail "mg-853a: an unreadable worktree did not hold the drain ($GHOST_DEBT)"
+
+# --- drain_wait, wired to the narrowed predicate ----------------------------
+# In a subshell so the drain_probe stub cannot leak into the sections below.
+(
+    dwn() (
+        DRAIN_TIMEOUT="${DWN_TIMEOUT:-5}"
+        DRAIN_UNREADABLE_SLEEP=0
+        local out rc=0
+        out="$(drain_wait 2>/dev/null)" || rc=$?
+        echo "$out|$rc"
+    )
+
+    # THE WHOLE POINT: a NON-ZERO polecat count that still quiesces. Under the old
+    # predicate this returned "2|1" after burning the entire window; the eight
+    # failed nightlies are that line.
+    drain_probe() { printf '%s\n200' "$CLEAR_BODY"; }
+    [ "$(dwn)" = "0|0" ] \
+        && pass "mg-853a: drain_wait CLEARS with 2 polecats still running, because neither owes the refinery a merge — the exit-7 stall that failed 8 nightlies" \
+        || fail "mg-853a: drain_wait did not clear over running-but-clear polecats ($(dwn)) — the narrowing is not wired into the gate"
+
+    # And the discrimination: one owing polecat and it holds, to the deadline.
+    drain_probe() { printf '%s\n200' "$OWED_BODY"; }
+    [ "$(DWN_TIMEOUT=0 dwn)" = "1|1" ] \
+        && pass "mg-853a: drain_wait HOLDS for the one polecat that owes a merge, and reports that count (not the polecat count) at the deadline" \
+        || fail "mg-853a: drain_wait did not hold for pushed-unmerged work ($(DWN_TIMEOUT=0 dwn)) — a bounce here strands commits on origin with no author left to resubmit"
+
+    # The report must state WHAT IT CHECKED. An alert naming a cause it has not
+    # established is the defect that started this line of work; "drained" over a
+    # fleet of five running polecats would be a fresh instance of it.
+    drain_probe() { printf '%s\n200' "$CLEAR_BODY"; }
+    DWN_OUT="$(DRAIN_TIMEOUT=5 DRAIN_UNREADABLE_SLEEP=0 drain_wait 2>&1 >/dev/null)"
+    case "$DWN_OUT" in
+        *"owes the refinery a merge"*)
+            pass "mg-853a: the drain's clearing report names the predicate it checked, not 'drained'" ;;
+        *)  fail "mg-853a: the clearing report does not say what was checked ($DWN_OUT)" ;;
+    esac
+    case "$DWN_OUT" in
+        *"clear wt-local"*|*"clear wt-merged"*)
+            pass "mg-853a: the clearing report lists the per-polecat evidence, so the claim can be checked rather than taken" ;;
+        *)  fail "mg-853a: the clearing report gives no per-polecat evidence ($DWN_OUT)" ;;
+    esac
+    # The word it must NOT print: a count of zero here would be about merges, and
+    # the old "0 polecats active" phrasing over a live fleet is exactly the
+    # over-claim mg-0b77 removed one layer up.
+    case "$DWN_OUT" in
+        *"polecats active"*)
+            fail "mg-853a: the drain still reports 'polecats active' while clearing over running polecats — the report claims more than it checked" ;;
+        *)  pass "mg-853a: the drain does not describe a merge-debt clearance as an idle fleet" ;;
     esac
 ) 2>/dev/null
 
