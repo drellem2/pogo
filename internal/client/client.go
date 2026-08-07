@@ -23,6 +23,7 @@ import (
 	"github.com/drellem2/pogo/internal/config"
 	"github.com/drellem2/pogo/internal/health"
 	"github.com/drellem2/pogo/internal/project"
+	"github.com/drellem2/pogo/internal/server"
 	pogoPlugin "github.com/drellem2/pogo/pkg/plugin"
 )
 
@@ -267,19 +268,28 @@ func GetServerMode() (string, error) {
 	return result["mode"], nil
 }
 
-// StartOrchestration tells pogod to transition to full mode,
-// restarting agents and refinery without re-indexing.
-func StartOrchestration() error {
+// StartOrchestration tells pogod to transition to full mode, restarting agents
+// and refinery without re-indexing.
+//
+// It returns the daemon's report of what actually came back. A caller that
+// prints only "restarted" is reproducing gh #108: the transition can succeed
+// while restoring no agents at all, and the report is the only thing that
+// distinguishes the two.
+func StartOrchestration() (server.StartReport, error) {
+	var report server.StartReport
 	resp, err := http.Post(serverURL+"/server/start-orchestration", "application/json", nil)
 	if err != nil {
-		return fmt.Errorf("failed to contact server: %w", err)
+		return report, fmt.Errorf("failed to contact server: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("server returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return report, fmt.Errorf("server returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
-	return nil
+	if err := json.NewDecoder(resp.Body).Decode(&report); err != nil {
+		return report, fmt.Errorf("failed to decode response: %w", err)
+	}
+	return report, nil
 }
 
 // StopOrchestration tells pogod to transition to index-only mode,
