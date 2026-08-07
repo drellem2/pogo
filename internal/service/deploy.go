@@ -30,6 +30,17 @@ import (
 
 const deployLabel = "com.pogo.deploy"
 
+// deployLogName is the file the nightly's stdout AND stderr are redirected to.
+//
+// Named once and used both by the plist template below and by DeployLogPath,
+// because the two must agree: the log is the only record that a night's fire
+// HAPPENED, so a detector reading a different path than the plist writes gets
+// an empty file — and an empty deploy log is indistinguishable from a deploy
+// that never fired, which is the exact reading this name exists to make
+// trustworthy. One file shipped under two paths has already caused that class
+// of false silence here (mg-f766).
+const deployLogName = "pogo-deploy.log"
+
 // deployPlistTemplate mirrors the in-repo scripts/launchd/com.pogo.deploy.plist
 // with host-specific paths bound in.
 //
@@ -76,9 +87,9 @@ const deployPlistTemplate = `<?xml version="1.0" encoding="UTF-8"?>
     <key>ProcessType</key>
     <string>Background</string>
     <key>StandardOutPath</key>
-    <string>{{.LogDir}}/pogo-deploy.log</string>
+    <string>{{.LogDir}}/{{.LogName}}</string>
     <key>StandardErrorPath</key>
-    <string>{{.LogDir}}/pogo-deploy.log</string>
+    <string>{{.LogDir}}/{{.LogName}}</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
@@ -137,11 +148,29 @@ type deployData struct {
 	ScriptPath string
 	DeploySrc  string
 	LogDir     string
+	LogName    string
 	Path       string
 	Home       string
 	PogoHome   string
 	Hours      []int
 	Minute     int
+}
+
+// DeployLogPath is the file the installed nightly writes every line to —
+// including the `pogo-deploy: start` line that is the ONLY evidence a night's
+// fire happened at all.
+//
+// Exported for the no-fire detector (internal/driftwatch, mg-2416), which reads
+// this log rather than the job's exit code. A fire that never happens has no
+// exit code and no stamp, so every alarm indexed to the run's outcome is blind
+// to it by construction; the absence of a start line for a night that was due
+// is the only positive evidence of that absence, and it lives here.
+//
+// It reports where the SHIPPED plist template points, which is the same
+// derivation InstallDeploy binds in, so the detector and the installer cannot
+// disagree about which file to read.
+func DeployLogPath() string {
+	return filepath.Join(logDir(), deployLogName)
 }
 
 // retryFireList renders the fires after the first one, for the installer's
@@ -220,6 +249,7 @@ func renderDeployPlist() (string, deployData, error) {
 		ScriptPath: deployScriptInstallPath(),
 		DeploySrc:  deploySrcDir(),
 		LogDir:     logDir(),
+		LogName:    deployLogName,
 		Path:       launchdPath(),
 		Home:       home,
 		PogoHome:   pogoHome(),
