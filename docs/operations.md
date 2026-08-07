@@ -635,6 +635,108 @@ the code declares, which catches an inert retry *before* a night needs it; this
 command would only see the consequence the next morning. mg-0d70 is about a sync
 failure's alert naming the wrong cause; this command emits no such alert.
 
+## The external witness that the redeploy landed (`scripts/revision-probe.sh`)
+
+**The rule this file implements:** *a detector for "X did not happen" must not be
+activated by X.*
+
+pogod carries `driftwatch`, which reports how old the code it is running is
+(mg-5bd2). That is the right home for the daemon's own reporting, and it stays.
+But every line of it lives inside `pogod` — and `pogod` is installed by the
+redeploy. So the alarm for *"the redeploy did not work"* is armed only by a
+redeploy that **worked**. On a night the deploy fails, the new alarm is dark for
+exactly the reason the old exit-code proxy was dark on 2026-08-01..08-04: the
+detector lived inside the thing whose absence it was supposed to report.
+
+This is the second instance of that shape — mg-853a hit it and routed around it
+deliberately (*"it ships in pogod, and the only thing that installs pogod is the
+redeploy it would unblock"*), which is why pm-pogo ruled it a rule rather than a
+bug (mg-ce10).
+
+**Why script-side fixes it — the activation paths differ.** The three artifact
+classes on this box go live by different routes:
+
+| artifact | activates on |
+|---|---|
+| tracked files in `deploy-src` | `git fetch` + `--ff-only` merge (`sync_src` runs before every deploy) |
+| `pogod` / `pogo` binaries | build + install — i.e. only a **successful** deploy |
+| launchd plists | install + load |
+
+A guard against deploy failure must live on the **merge**-activated path, never
+the build-activated one. `scripts/revision-probe.sh` is a tracked file, so a
+`git pull` arms it: no `go install`, no build, no redeploy.
+
+```bash
+scripts/revision-probe.sh
+scripts/revision-probe.sh --stale-after 12h --mail
+scripts/revision-probe.sh --repo ~/.pogo/deploy-src --url http://127.0.0.1:10000
+```
+
+Two reads and no build:
+
+```
+running   = curl -s localhost:10000/version | jq -r .revision
+reference = the tip of origin/main
+if running != reference for longer than N -> alert, naming the gap in commits
+```
+
+Exit status: `0` clean (current, or diverged for less than N), `1` **ALERT**, `2`
+the probe could not run — no `curl`/`git`, an unreadable checkout, or a daemon
+that did not answer. A check that could not run has **not** found its subject
+healthy, so `2` is a finding and not a shrug; an unreachable daemon and a daemon
+that answers without naming a revision are reported as different states, because
+the first owes a restart and the second owes an investigation.
+
+**It never touches `go`, `pogo`, `pogod` or `jq`** — all of which the redeploy
+installs (or, for `jq`, may simply be absent). That is not tidiness: a probe that
+reached for any of them would be armed only by a deploy that worked, which is the
+defect it exists to remove. `scripts/revision-probe_test.sh` poisons all four
+first on `PATH` and asserts both that no marker was written and that the probe
+still reached its own verdict — either assertion alone passes against a fallback
+that happens to agree.
+
+**The reference is read from the remote, not from `origin/main` locally.** A
+remote-tracking ref is only refreshed by a fetch, and in `deploy-src` the thing
+that fetches is the deploy runner. On a night the deploy never fires, that ref
+does not advance either — so a probe keyed to it compares two stale numbers,
+finds them equal, and reports health. That is the same defect one layer down. The
+probe uses `git ls-remote` (read-only, nothing fetched, nothing mutated) and
+falls back to the local ref only when the network read fails, **saying so in the
+report**. Measured on 2026-08-07 against the live box, this is not hypothetical:
+`~/.pogo/deploy-src` did not contain `origin/main`'s tip at all, and the probe
+said so.
+
+**The clock is keyed on the running revision.** The first divergence is recorded
+in a stamp (`~/.pogo/revision-probe.stamp`, `--stamp` to move it). A **changed
+running revision resets it** — a new binary is live, so a deploy did happen,
+which is the event being watched for. A **moved reference does not** — `main`
+advances all day, and a clock it could reset would leave the alarm permanently
+disarmed on a busy repo. Without the stamp the probe would fire on the normal gap
+between a merge and the 03:00 deploy, and an alarm that is always on is an alarm
+nobody reads.
+
+**Arming it.** Like every other `check-*` surface it is report-only and nothing
+runs it until somebody says so. Point a schedule at the script *in a checkout*,
+never at an installed binary:
+
+```bash
+pogo schedule doctor --cron "0 * * * *" --id revision-probe --replay once \
+    --message "Run '~/.pogo/deploy-src/scripts/revision-probe.sh --mail'. It mails human itself if it alerts."
+```
+
+`--mail` exists so the alert does not depend on an agent turn running: *"and then
+mail human"* left as an instruction in a scheduler message only happens if a turn
+happens, and turns that never run are half of this ticket's lineage. It resolves
+`mg` by self-identification (`/usr/bin/mg` is the Micro-Emacs editor and
+satisfies both `-x` and `command -v`), and refuses a bare `mg` rather than mailing
+through the wrong binary.
+
+**Siblings.** `driftwatch` inside pogod answers "what am I running?" once live and
+is not replaced by this — the two exist together, because a component cannot be
+the sole reporter of its own absence. `pogo check-staleness` (above) reads the
+deploy's own *record* of its runs; `pogo service status` compares running vs
+installed vs `main` and is itself deploy-installed.
+
 ## Is something versioning `$POGO_HOME`? (`pogo doctor --check`)
 
 `$POGO_HOME` can be a git working tree, and on this fleet's host it is: `~/.pogo`
