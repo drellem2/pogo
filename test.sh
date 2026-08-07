@@ -128,6 +128,21 @@ bash scripts/check-staleness_test.sh
 echo "Testing the Go per-package test budget and overrun report"
 bash scripts/go-test-budget_test.sh
 
+# The EXTERNAL redeploy witness (mg-ce10), implementing the rule that a detector
+# for "X did not happen" must not be ACTIVATED BY X. driftwatch reports the
+# running daemon's revision age correctly and ships entirely inside pogod, which
+# the redeploy installs — so on a night the redeploy fails, the alarm for the
+# failed redeploy is dark. The probe is a tracked file and goes live at MERGE.
+#
+# The load-bearing case is section 5: `go`, `pogo`, `pogod` and `jq` POISONED
+# first on PATH, asserted both by their marker files and by the exit status,
+# because the probe is only independent for as long as it touches nothing the
+# deploy provides. Section 6 is the second-order version — a stale
+# remote-tracking ref in a checkout the deploy is what fetches — and asserts the
+# local-ref reading reports health on a state the default reading alerts on.
+echo "Testing the external redeploy revision probe"
+bash scripts/revision-probe_test.sh
+
 echo "Testing build.sh"
 bash build_test.sh
 
