@@ -134,6 +134,75 @@
 #     handing the drain a budget calculated before those two minutes is how a
 #     window-derived number quietly stops being derived from the window.
 #
+# THE OUTAGE IS LONGER THAN THE FIRES — SO PATIENCE, NOT SCHEDULE (mg-5515)
+# -------------------------------------------------------------------------
+# Both retry layers above are sized for a BLIP. The in-run tier waits three
+# minutes; the cross-fire tier spaces three attempts across two hours (03/04/05
+# local, installed by mg-b201). The one outage this box has actually been
+# measured through ran 2026-08-07 13:24:30Z -> 16:14:52Z — 2h50m — so an outage
+# of that length starting at or before the first fire swallows all three, and
+# every fire fails on arrival. n=1: this is not "two hours is the wrong span",
+# it is "the span was chosen without reference to any observed duration and the
+# only observation exceeds it".
+#
+# NO AGENT COVERS THIS. An outage of that shape takes every agent on this box out
+# at once — a watcher shares the failure mode it is meant to watch for — so more
+# watchers buy nothing and the fix has to be in this file.
+#
+# AND THE FIRES ARE NOT THE LEVER EITHER. Three instants spend three attempts and
+# about nine minutes of a four-hour window between them. Re-spacing three instants
+# cannot cover a 170-minute outage; adding more only shortens the gaps between
+# attempts that all fail identically; and widening the window to make room for
+# them lengthens every drain (the window's width IS the drain's patience, above)
+# and pushes a fleet-wide bounce toward the working day. What the window can
+# afford and does not currently spend is the other 231 minutes.
+#
+# So the third tier is patience, spent inside the window that already exists:
+#
+#       VIGIL     once the blip tier is spent and the class still established
+#                 NOTHING, keep probing every POGO_DEPLOY_SYNC_VIGIL_INTERVAL
+#                 (300s) for as long as the window could still afford a drain on
+#                 the far side of the sleep. That per-sleep test is mg-0d70's
+#                 condition 2 and it is the vigil's ONLY bound: the vigil adds
+#                 patience, never window. A 03:00 run therefore probes until
+#                 ~05:30 and deploys the MOMENT connectivity returns, rather than
+#                 giving up at 03:03 and waiting for the top of the next hour.
+#
+# Two consequences worth stating because they are the costs:
+#
+#   - THE ALERT ARRIVES LATER. A network night now mails at ~05:30 instead of
+#     ~03:03. Accepted: the reader of this alert is asleep for both, and the
+#     later one carries strictly more information.
+#   - A RUN NOW HOLDS THE LOCK FOR HOURS. The 04:00 and 05:00 fires find it held
+#     and exit 0, which is correct — they would have failed identically. But
+#     acquire_lock reclaims a lock whose mtime is older than STALE_LOCK_MIN, and
+#     a vigil from a 02:00 wake-fire outlives that, so the vigil refreshes the
+#     mtime (touch_lock). Without it the fix would introduce a concurrent deploy.
+#
+# The vigil also pays for itself in evidence: SYNC_VIGIL_SPENT is a probed LOWER
+# BOUND on how long the transport was unreachable, and the alert, the log and the
+# recovery notice all report it. mg-5515's own honest bound was that it had one
+# duration and no distribution. Every vigil night from here adds a point to one.
+#
+# WHAT THE VIGIL DOES NOT REACH — stated because it would otherwise read as
+# solved. The vigil's reach is (vigil start) -> the moment drain_budget hits
+# zero, which under the production window is 05:30: 21600s of window, less
+# RESERVE (1200) and MIN_DRAIN (600). So a 03:00 fire reaches 2h30m and a 02:00
+# wake-fire reaches 3h30m — and 2h30m is SHORTER than the 2h50m outage that
+# prompted this. An outage of exactly that length starting at exactly 03:00
+# still costs the night.
+#
+# That residual is not fixable here, and it is not a shortage of patience: an
+# outage ending at 05:50 leaves ten minutes before the window closes, and RESERVE
+# alone is twenty. There is no deploy that could complete. Saving that specific
+# night needs a WIDER WINDOW, which costs longer drains and a fleet bounce nearer
+# the working day, and mg-5515 is explicit that it does not have the distribution
+# to justify picking a new width. It is deliberately not picked here. What the
+# vigil changes is the shape of the loss: the night is lost only when the outage
+# runs past 05:30, instead of whenever it merely covers three instants — and the
+# alert now reports a measured duration, which is the input that would let
+# somebody choose a window width on evidence rather than on this single figure.
+#
 # HOW THIS FIX COULD EXHIBIT THE DEFECT IT REMEDIES
 # --------------------------------------------------
 # The defect was naming a cause that had not been established. Three ways the
@@ -238,7 +307,9 @@
 #   POGO_DEPLOY_STAMP        the night's attempt record ($POGO_HOME/deploy-attempt.stamp)
 #   POGO_DEPLOY_SYNC_ATTEMPTS  total sync tries on a RETRYABLE class (4)
 #   POGO_DEPLOY_SYNC_BACKOFF   seconds between them, last value repeats ("15 45 120")
-#   POGO_DEPLOY_SYNC_RETRY_BUDGET  ceiling on total backoff sleep, seconds (300)
+#   POGO_DEPLOY_SYNC_RETRY_BUDGET  ceiling on total blip-tier backoff, seconds (300)
+#   POGO_DEPLOY_SYNC_VIGIL     1 to wait a transport outage out inside the window (1)
+#   POGO_DEPLOY_SYNC_VIGIL_INTERVAL  seconds between vigil probes (300)
 #   POGO_DEPLOY_PROBE_TIMEOUT  seconds to wait for the reachability probe (5)
 #   POGO_DEPLOY_NC           pin an nc for the probe (still checked by execution)
 #   GIT                      pin a specific git (still checked by execution)
@@ -305,14 +376,47 @@ MIN_DRAIN="${POGO_DEPLOY_MIN_DRAIN:-600}"
 # to work when everything else is broken.
 FIRE_HOURS="${POGO_DEPLOY_FIRE_HOURS:-3 4 5}"
 
-# The in-run sync retry (mg-0d70). Four attempts at 15s / 45s / 120s is three
-# minutes of patience against a four-hour window — the 08-05 fault lasted one
-# second, and this is sized to cross a blip rather than to wait out an outage.
-# RETRY_BUDGET is the hard ceiling on the sleeping, so the numbers above can be
-# tuned without anyone having to re-derive what the worst case costs the drain.
+# The in-run sync retry, BLIP TIER (mg-0d70). Four attempts at 15s / 45s / 120s
+# is three minutes of patience against a four-hour window — the 08-05 fault
+# lasted one second, and this is sized to cross a blip rather than to wait out
+# an outage. RETRY_BUDGET is the hard ceiling on the sleeping, so the numbers
+# above can be tuned without anyone having to re-derive what the worst case
+# costs the drain.
 SYNC_ATTEMPTS="${POGO_DEPLOY_SYNC_ATTEMPTS:-4}"
 SYNC_BACKOFF="${POGO_DEPLOY_SYNC_BACKOFF:-15 45 120}"
 SYNC_RETRY_BUDGET="${POGO_DEPLOY_SYNC_RETRY_BUDGET:-300}"
+
+# The in-run sync retry, VIGIL TIER (mg-5515). The blip tier's own comment says
+# what it does not do, and mg-5515 is the ticket for that gap: it is sized to
+# cross a blip, not to wait out an outage. The outage measured on this box on
+# 2026-08-07 ran 13:24:30Z -> 16:14:52Z — 2h50m — and the three fires at 03/04/05
+# local span two hours, so an outage of that length beginning at or before the
+# first fire swallows all three and costs the night.
+#
+# THE FIRES ARE NOT THE LEVER. Three instants spend, between them, three attempts
+# and about nine minutes of the four-hour window; re-spacing three instants
+# cannot cover a 170-minute outage, and widening the window to make room for more
+# of them lengthens every drain (the window's width IS the drain's patience,
+# mg-8f7e) and pushes a fleet-wide bounce toward the working day. What the window
+# can afford and does not currently spend is the other 231 minutes.
+#
+# So: once the blip tier is spent and the class still established NOTHING, keep
+# probing at a flat interval for as long as the window could still afford a drain
+# on the far side of the sleep. That last clause is the only bound, and it is the
+# one mg-0d70's condition 2 already enforces per-sleep — the vigil adds patience,
+# never window. A run that starts at 03:00 therefore probes until ~05:30 and
+# deploys the moment connectivity returns, instead of giving up at 03:03 and
+# waiting for the top of the next hour.
+#
+# The interval is FLAT, not geometric. The blip tier's 15/45/120 ramp is right
+# for crossing a one-second fault fast; a ramp here would keep doubling until the
+# run was asleep through the recovery it exists to catch. Five minutes is cheap
+# against a 150-minute vigil (about 30 probes, each a TCP connect) and fine-
+# grained enough that the log doubles as a duration measurement of the outage —
+# which is the n>1 evidence mg-5515 says is the input actually worth having.
+SYNC_VIGIL="${POGO_DEPLOY_SYNC_VIGIL:-1}"
+SYNC_VIGIL_INTERVAL="${POGO_DEPLOY_SYNC_VIGIL_INTERVAL:-300}"
+
 PROBE_TIMEOUT="${POGO_DEPLOY_PROBE_TIMEOUT:-5}"
 
 # Set by sync_src on every exit path. SYNC_CLASS is which STEP failed — the fact
@@ -1050,44 +1154,95 @@ sync_class_retryable() {
 #      came to be the dominant failure mode without anybody having the evidence.
 #
 # SYNC_RETRY_SPENT is left behind for the caller, which owes the drain a budget
-# recomputed against the time this actually took.
+# recomputed against the time this actually took. SYNC_VIGIL_SPENT is the part of
+# it the vigil tier accounts for, kept apart so the alert can report the observed
+# outage duration rather than one undifferentiated sleep total (mg-5515).
 SYNC_RETRY_SPENT=0
+SYNC_BLIP_SPENT=0
+SYNC_VIGIL_SPENT=0
 SYNC_TRIES=0
+
+# sync_next_delay ATTEMPT — prints "<tier> <seconds>" for the wait before attempt
+# N+1, or returns 1 when both tiers are out of patience.
+#
+# The tiers are tried in order and the blip tier's two stop conditions HAND OVER
+# to the vigil rather than ending the run: exhausting four fast attempts is what
+# tells you this is an outage and not a blip, which is precisely the moment the
+# vigil is for. Before mg-5515 that same moment ended the run.
+sync_next_delay() {
+    local attempt="$1" delay
+    if [ "$attempt" -lt "$SYNC_ATTEMPTS" ]; then
+        delay="$(sync_backoff "$attempt")"
+        if [ $(( SYNC_BLIP_SPENT + delay )) -le "$SYNC_RETRY_BUDGET" ]; then
+            printf 'blip %s' "$delay"; return 0
+        fi
+    fi
+    [ "$SYNC_VIGIL" = "1" ] || return 1
+    printf 'vigil %s' "$SYNC_VIGIL_INTERVAL"
+}
+
+# touch_lock — keep the deploy lock's mtime fresh while the vigil sleeps.
+#
+# acquire_lock reclaims a lock whose DIRECTORY MTIME is older than
+# STALE_LOCK_MIN (180 min), and before the vigil no run could hold one that long.
+# A vigil started by a 02:00 wake-fire runs to ~05:30, which is 210 minutes — so
+# without this the 05:00 fire would reclaim a lock that is being held by a live
+# run and start a competing deploy. Refreshing it is also what makes the
+# threshold mean what it says: "no run has made progress in 180 minutes", not
+# "some run started 180 minutes ago".
+touch_lock() {
+    [ -d "$LOCK_DIR" ] && touch "$LOCK_DIR" 2>/dev/null
+    return 0
+}
+
 sync_with_retry() {
-    local attempt=1 delay left
+    local attempt=1 tier delay left next
     SYNC_RETRY_SPENT=0
+    SYNC_BLIP_SPENT=0
+    SYNC_VIGIL_SPENT=0
     while :; do
         SYNC_TRIES="$attempt"
         if sync_src; then
-            [ "$attempt" -gt 1 ] && log "sync: RECOVERED — attempt $attempt of $SYNC_ATTEMPTS succeeded after ${SYNC_RETRY_SPENT}s of backoff. Attempt 1 failed on a transient cause and under the pre-mg-0d70 policy would have ended the night here."
+            [ "$attempt" -gt 1 ] && log "sync: RECOVERED — attempt $attempt succeeded after ${SYNC_RETRY_SPENT}s of waiting$([ "$SYNC_VIGIL_SPENT" -gt 0 ] && printf ', %ss of it a vigil that sat the outage out' "$SYNC_VIGIL_SPENT"). Attempt 1 failed on a transient cause and under the pre-mg-0d70 policy would have ended the night here."
             return 0
         fi
-        err "sync: attempt $attempt of $SYNC_ATTEMPTS failed — class=${SYNC_CLASS:-unclassified}"
+        err "sync: attempt $attempt failed — class=${SYNC_CLASS:-unclassified}"
         if ! sync_class_retryable "$SYNC_CLASS"; then
             log "sync: class=${SYNC_CLASS:-unclassified} ESTABLISHED a fact about the tree or this box's setup — re-running would only re-establish it. Not retrying."
             return 1
         fi
-        if [ "$attempt" -ge "$SYNC_ATTEMPTS" ]; then
-            err "sync: all $attempt attempts failed over ${SYNC_RETRY_SPENT}s of backoff — this outlasted the runner's patience, so it is an outage rather than a blip"
+        if ! next="$(sync_next_delay "$attempt")"; then
+            err "sync: $attempt attempts over ${SYNC_RETRY_SPENT}s exhausted both the blip tier and the vigil — stopping"
             return 1
         fi
-        delay="$(sync_backoff "$attempt")"
-        if [ $(( SYNC_RETRY_SPENT + delay )) -gt "$SYNC_RETRY_BUDGET" ]; then
-            err "sync: the next backoff (${delay}s) would take the total past the ${SYNC_RETRY_BUDGET}s retry budget — stopping after $attempt attempts"
-            return 1
-        fi
-        # Condition 2, enforced rather than asserted: the sleep is only taken if
-        # the window would still afford a drain once it is over. Retrying past
-        # the point where a deploy could still happen spends the fleet's window
-        # to arrive at the same skip, later and with less of it left.
+        read -r tier delay <<<"$next"
+        # Condition 2 of mg-0d70's ruling, enforced rather than asserted, and now
+        # the vigil's ONLY bound: the sleep is only taken if the window would
+        # still afford a drain once it is over. Retrying past the point where a
+        # deploy could still happen spends the fleet's window to arrive at the
+        # same skip, later and with less of it left.
         left="$(drain_budget "$WINDOW_END" "$RESERVE" "$MAX_DRAIN" "$MIN_DRAIN")"
         if [ "$left" -le "$delay" ]; then
-            err "sync: a ${delay}s backoff would leave under ${MIN_DRAIN}s of usable window — retries consume the deploy budget, they do not extend it. Stopping after $attempt attempts."
+            if [ "$tier" = vigil ]; then
+                err "sync: the vigil ends — after ${SYNC_RETRY_SPENT}s (${SYNC_VIGIL_SPENT}s of it vigil) across $attempt probes the transport was still unreachable, and a further ${delay}s would leave under ${MIN_DRAIN}s of usable window. The outage outlasted tonight's window; it was NOT a shortage of fires."
+            else
+                err "sync: a ${delay}s backoff would leave under ${MIN_DRAIN}s of usable window — retries consume the deploy budget, they do not extend it. Stopping after $attempt attempts."
+            fi
             return 1
         fi
-        log "sync: attempt $attempt failed on a class that established nothing (${SYNC_CLASS}) — retrying in ${delay}s (attempt $(( attempt + 1 )) of $SYNC_ATTEMPTS; ${left}s of window still usable)"
+        if [ "$tier" = vigil ]; then
+            log "sync: VIGIL probe — attempt $attempt failed on ${SYNC_CLASS}, which established nothing, and the blip tier is spent. This is an outage, not a blip: re-probing every ${delay}s for as long as the window can still afford a drain (${left}s usable; ${SYNC_VIGIL_SPENT}s of vigil so far)."
+            touch_lock
+        else
+            log "sync: attempt $attempt failed on a class that established nothing (${SYNC_CLASS}) — retrying in ${delay}s (attempt $(( attempt + 1 )) of $SYNC_ATTEMPTS; ${left}s of window still usable)"
+        fi
         sleep "$delay"
         SYNC_RETRY_SPENT=$(( SYNC_RETRY_SPENT + delay ))
+        if [ "$tier" = vigil ]; then
+            SYNC_VIGIL_SPENT=$(( SYNC_VIGIL_SPENT + delay ))
+        else
+            SYNC_BLIP_SPENT=$(( SYNC_BLIP_SPENT + delay ))
+        fi
         attempt=$(( attempt + 1 ))
     done
 }
@@ -1100,19 +1255,31 @@ sync_with_retry() {
 # point about the host's dominant failure mode, and the log alone is what nobody
 # reads.
 sync_recovery_notice() {
-    local n="$1" spent="$2" bf
+    local n="$1" spent="$2" bf vigil="${SYNC_VIGIL_SPENT:-0}" measured=""
     [ "$n" -gt 1 ] || return 0
+    # Built before the heredoc rather than substituted inside it: a nested
+    # heredoc in a command substitution inside a heredoc parses, and nobody
+    # editing this file at 03:00 should have to be sure of that.
+    if [ "$vigil" -gt 0 ]; then
+        measured="
+The vigil figure above is also a MEASUREMENT: the transport was unreachable from
+this box for at least ${vigil}s, observed by probing rather than inferred.
+mg-5515 was filed against a sample of one such duration (2h50m on 2026-08-07)
+and said the input worth having is a distribution. This is one point in it."
+    fi
     if [ -n "$POGO_CLI" ]; then
         "$POGO_CLI" events emit --type=deploy_sync_recovered --agent=pogo-deploy \
-            --details="{\"attempts\":$n,\"backoff_s\":$spent}" >/dev/null 2>&1 || true
+            --details="{\"attempts\":$n,\"backoff_s\":$spent,\"vigil_s\":$vigil}" >/dev/null 2>&1 || true
     fi
     [ -n "$MG" ] || return 0
     bf="$(mktemp)" || return 0
     cat > "$bf" <<EOF
 Tonight's nightly redeploy synced successfully, but NOT on the first try.
 
-  attempt that won: $n of $SYNC_ATTEMPTS
-  backoff spent:    ${spent}s (charged against the drain budget, not added to it)
+  attempt that won: $n (blip tier is $SYNC_ATTEMPTS attempts; anything past that
+                    is the mg-5515 vigil)
+  waiting spent:    ${spent}s, ${vigil}s of it vigil (charged against the drain
+                    budget, not added to it)
   log:              $HOME/Library/Logs/pogo/pogo-deploy.log
 
 This is not a failure and needs no action. It is recorded because a retry that
@@ -1120,6 +1287,7 @@ succeeds silently turns a flaky night into an invisible one, and the count of
 these is the evidence for how often this box's network is the thing that breaks
 (mg-0d70, mg-0ffc, mg-dd22). If these become routine, the network is the ticket
 — not the deploy.
+$measured
 EOF
     "$MG" mail send "$ALERT_TO" --from=pogo-deploy \
         --subject="[pogo-deploy] NOTICE: tonight's sync needed $n attempts" --body-file "$bf" >/dev/null 2>&1 \
@@ -1154,15 +1322,25 @@ This box could NOT open a TCP connection to the remote, measured directly at the
 time of the failure — so the deploy tree is not the place to look. It is neither
 dirty nor diverged; the sync never got far enough to have an opinion about it.
 
-The runner already retried this — $SYNC_TRIES attempts over ${SYNC_RETRY_SPENT}s of backoff — so the
-outage outlasted its patience rather than being a blip it failed to wait out.
+The runner already retried this — $SYNC_TRIES attempts over ${SYNC_RETRY_SPENT}s, ${SYNC_VIGIL_SPENT}s of it
+a vigil (mg-5515) that re-probed every ${SYNC_VIGIL_INTERVAL}s for as long as the window could
+still afford a drain. So the outage outlasted the whole usable window, not just a
+few minutes of backoff, and it was NOT a shortage of retry fires: a fire that
+lands inside an outage this long fails on arrival exactly as this one did.
 This host's network is independently known to be intermittent (mg-0ffc, mg-dd22).
+
+READ ${SYNC_VIGIL_SPENT}s AS A MEASUREMENT. It is a LOWER BOUND on how long the transport was
+unreachable from this box, observed by probing rather than inferred, and it is
+the evidence mg-5515 asked for: that ticket had a sample of exactly one duration
+(2h50m, 2026-08-07) and could not say whether it was typical.
 
   ping -c 3 github.com
   ssh -T git@github.com          # 'successfully authenticated' is the good answer
   curl -sS -o /dev/null -w '%{http_code}\\n' https://api.github.com
 
-If connectivity is back, nothing needs fixing here — the next fire will carry it.
+If connectivity is back, nothing needs fixing here — but do NOT assume a later
+fire tonight will carry it. The vigil ran to the edge of the usable window, so
+by the time you read this the night is over; the next attempt is tomorrow.
 EOF
             ;;
         remote)
@@ -1801,7 +1979,7 @@ deployed and the running pogod is untouched.
             log "sync: exit $sync_rc after $SYNC_TRIES attempts — class ${SYNC_CLASS:-unclassified} established nothing, so the $(printf '%02d' "$snxt"):00 fire will retry. Not alerting yet."
             if [ -n "$POGO_CLI" ]; then
                 "$POGO_CLI" events emit --type=deploy_nightly_retry_pending --agent=pogo-deploy \
-                    --details="{\"exit\":$sync_rc,\"sync_class\":\"${SYNC_CLASS:-unclassified}\",\"sync_attempts\":$SYNC_TRIES,\"retry_hour\":$snxt}" >/dev/null 2>&1 || true
+                    --details="{\"exit\":$sync_rc,\"sync_class\":\"${SYNC_CLASS:-unclassified}\",\"sync_attempts\":$SYNC_TRIES,\"sync_vigil_s\":$SYNC_VIGIL_SPENT,\"retry_hour\":$snxt}" >/dev/null 2>&1 || true
             fi
             exit "$sync_rc"
         fi
@@ -1811,7 +1989,8 @@ deployed and the running pogod is untouched. Daniel's dev tree was NOT touched.
 
   cause:    $(describe_sync_class "$SYNC_CLASS")
   checkout: $SRC
-  attempts: $SYNC_TRIES in this run$([ "$SYNC_RETRY_SPENT" -gt 0 ] && printf ', over %ss of backoff' "$SYNC_RETRY_SPENT")
+  attempts: $SYNC_TRIES in this run$([ "$SYNC_RETRY_SPENT" -gt 0 ] && printf ', over %ss of waiting' "$SYNC_RETRY_SPENT")
+  vigil:    $([ "$SYNC_VIGIL_SPENT" -gt 0 ] && printf '%ss — a LOWER BOUND on how long the transport was unreachable' "$SYNC_VIGIL_SPENT" || printf 'none (the failure was not one the vigil covers, or the vigil is off)')
   exit:     $sync_rc$([ "$sync_rc" -eq 10 ] && printf ' (retryable class — but no fire is left tonight)')
   log:      $HOME/Library/Logs/pogo/pogo-deploy.log
 
