@@ -47,6 +47,12 @@
 (defvar pogo-search-plugin nil)
 (defvar pogo-search-plugin-name "pogo-plugin-search")
 (defvar pogo-process nil)
+(defvar pogo--is-windows
+  (or
+   (eq system-type 'ms-dos)
+   (eq system-type 'windows-nt)
+   (eq system-type 'cygwin))
+  "Non-nil if running on a Windows-like system.")
 (defvar pogo-visit-cache (pcache-repository :file "pogo-visit-cache"))
 (defvar pogo-visit-cache-seconds (* 60 10))
 (defvar pogo-failure-count 0) ;; Number of failures starting pogo server
@@ -270,6 +276,17 @@ thing shown in the mode line otherwise."
   :type 'integer
   :package-version '(pogo . "0.0.1"))
 
+(defcustom pogo-daemon-probe-seconds 1
+  "Seconds to wait for the pre-spawn daemon probe in `pogo-try-start'.
+
+This bounds a synchronous request, so it is also the worst case Emacs can
+block while enabling `pogo-mode'.  Keep it small: the probe only has to
+distinguish \"a pogod is already there\" from \"nothing is listening\", and
+the second case answers immediately with connection refused."
+  :group 'pogo
+  :type 'number
+  :package-version '(pogo . "0.0.1"))
+
 (defcustom pogo-track-known-projects-automatically t
   "Controls whether Pogo will automatically register known projects.
 
@@ -382,18 +399,90 @@ FORMATS are passed through."
 ;;; Internal functions
 
 ;; Start server
+;;
+;; Emacs is not pogod's supervisor.  Whoever installed pogod owns its
+;; lifecycle — launchd on macOS, systemd or a shell elsewhere.  Everything in
+;; this section is arranged around two rules that follow from that:
+;;
+;;   1. Never spawn without probing first (`pogo-try-start').
+;;   2. When a spawn does happen, detach it, so it outlives this Emacs
+;;      (`pogo--detached-argv').
+
+(defun pogo--pogod-program ()
+  "Return the pogod program to spawn, or nil when none can be found.
+
+Resolves to an absolute path for a local `default-directory'.  That matters
+because the spawn goes through `nohup', which looks a bare name up in the
+PATH of `process-environment' rather than in `exec-path' — and on a GUI Emacs
+those two routinely disagree."
+  (cond
+   ((and (not (file-remote-p default-directory))
+         (executable-find "pogod")))
+   ((and (version<= "27.0" emacs-version)
+         (with-no-warnings
+           (executable-find "pogod" (file-remote-p default-directory))))
+    "pogod")))
+
+(defun pogo--detached-argv (program)
+  "Return the argv that spawns PROGRAM detached from this Emacs.
+
+The `nohup' prefix is the detach.  As Emacs exits it SIGHUPs every subprocess
+it still owns (`kill-emacs' reaches `kill_buffer_processes', which signals the
+child's process group).  pogod installs no SIGHUP handler, so the default
+disposition terminates it — and pogod's death force-closes the PTY masters it
+owns, hanging up the controlling terminal of every agent it started (mg-6b66,
+gh #22).  On 2026-08-07 that is exactly what happened: an Emacs exit took its
+child pogod with it and the agent fleet went down.  Under `nohup' pogod
+inherits SIG_IGN for SIGHUP, the exit-time signal is a no-op, and the daemon
+is reparented to init/launchd.
+
+This is Emacs's equivalent of the SysProcAttr{Setsid: true} that
+internal/client/client.go sets on the same spawn.  It is deliberately not the
+same mechanism: `setsid' does not exist as a program on macOS (see the note
+in internal/service/detach.go), and Emacs already puts each subprocess in its
+own process group, so the part still left to fix here is the signal
+disposition, not the group.
+
+Windows has neither `nohup' nor SIGHUP, so PROGRAM is returned bare there."
+  (if pogo--is-windows
+      (list program)
+    (let ((nohup (executable-find "nohup")))
+      (if nohup
+          (list nohup program)
+        (pogo-log "nohup not found: a spawned pogod will die when Emacs exits")
+        (list program)))))
+
 (defun pogo-start ()
-  "Start the pogod server process."
-  (progn
-    (pogo-log "Starting server")
-    (when (or (and (not (file-remote-p default-directory))
-                   (executable-find "pogod"))
-              (and (version<= "27.0" emacs-version)
-                   (with-no-warnings
-                     (executable-find "pogod"
-                                      (file-remote-p
-                                       default-directory)))))
-      (with-temp-buffer (start-process "pogod" "*pogo-server*" "pogod")))))
+  "Spawn a detached pogod and return its process object, or nil.
+
+Do not call this to \"make sure\" a server is running: it spawns
+unconditionally, which is the defect `pogo-try-start' exists to keep out of
+the enable path.  Call `pogo-try-start' instead."
+  (pogo-log "Starting server")
+  (let ((program (pogo--pogod-program)))
+    (if (not program)
+        (pogo-log "pogod is not on exec-path; not starting a server")
+      ;; A pipe, not the pty `process-connection-type' defaults to.  Two
+      ;; reasons, and both of them are the point of this function:
+      ;;
+      ;; A pty would be Emacs's pty, and it would be pogod's controlling
+      ;; terminal.  Emacs closing the master on exit hangs up everything in
+      ;; that session — which is the mg-6b66 cascade one level up, arriving by
+      ;; a route `nohup' does not cover.
+      ;;
+      ;; And `nohup' checks isatty(stdout): on a pty it decides it must
+      ;; preserve output and creates a `nohup.out' in `default-directory',
+      ;; dropping a stray file into whichever project the user happened to be
+      ;; visiting.  Over a pipe it leaves stdio alone, so pogod's startup
+      ;; output still lands in *pogo-server* where it can be read.
+      (let* ((process-connection-type nil)
+             (proc (apply #'start-process "pogod" "*pogo-server*"
+                          (pogo--detached-argv program))))
+        ;; The daemon is not ours to kill, so do not stop and ask about it on
+        ;; exit.  This suppresses the prompt only; the SIGHUP that follows is
+        ;; already a no-op thanks to `pogo--detached-argv'.
+        (set-process-query-on-exit-flag proc nil)
+        proc))))
 
 ;;; Find next/previous project buffer
 (defun pogo--repeat-until-project-buffer (orig-fun &rest args)
@@ -768,28 +857,66 @@ would be `find-file-other-window' or `find-file-other-frame'"
       (pogo-log "Using json.el: Upgrade to emacs with libjansson for better performance.")
       'json-read)))
 
-(defvar pogo--is-windows
-  (or
-   (eq system-type 'ms-dos)
-   (eq system-type 'windows-nt)
-   (eq system-type 'cygwin))
-  "Non-nil if running on a Windows-like system.")
+(defun pogo--daemon-reachable-p ()
+  "Return non-nil when a pogod already answers /health on `pogo-server-url'.
+
+Synchronous on purpose.  The caller has to know the answer *before* it
+decides whether to spawn, and an answer delivered to a callback arrives too
+late to prevent a spawn.  The wait is bounded by
+`pogo-daemon-probe-seconds', and the case that matters for startup latency —
+nothing listening — returns at once with connection refused."
+  (let* ((resp (ignore-errors
+                 (request (concat pogo-server-url "/health")
+                   :sync t
+                   :silent t
+                   :timeout pogo-daemon-probe-seconds)))
+         (code (and resp (request-response-status-code resp))))
+    (and (integerp code) (< code 400))))
 
 (defun pogo-try-start ()
-  "Attempt to start the pogo server and run health check."
+  "Ensure a pogod is reachable, connecting to a running one before spawning.
+
+Probes /health first and spawns only when the probe fails — the same order
+`ensure_server' uses in nvim/lua/pogo/client.lua and `StartServer' uses in
+internal/client/client.go, and a weaker form of vscode/src/extension.ts,
+which refuses to spawn at all.
+
+Spawning unconditionally, which is what this function used to do, produces a
+rival pogod.  A rival either loses the singleton lockfile (cmd/pogod/main.go
+takes it and exits 1) and dies, or — inside the window while the owning
+daemon is restarting — wins the port and displaces the launchd-managed
+daemon, hanging up every agent's PTY (gh #22).  Between 2026-08-04 and
+2026-08-07 an Emacs holding that port produced 24879 failed launchd spawns on
+this machine.
+
+What the probe buys is narrower than it looks, and it is worth being precise
+about: it makes the rival spawn *unlikely*, not impossible.  Two clients can
+both see an unreachable daemon and both spawn; a probe that succeeds can go
+stale before the spawn it suppressed would have run.  The only guarantee
+against a second daemon is still pogod's own lockfile.  This is the cheap,
+early check that stops Emacs from leaning on that last line of defence."
   (interactive)
   (setenv "POGO_HOME" (expand-file-name "~"))
-  (setenv "POGO_PLUGIN_PATH" (concat
-                              (string-remove-suffix (if pogo--is-windows "pogod.exe" "pogod")
-                                                    (executable-find "pogod"))
-                              "plugin"))
+  ;; Guarded because a missing pogod used to make this signal, which aborted
+  ;; the function before it could connect to a perfectly healthy daemon —
+  ;; the plugin path is only ever needed by a pogod we spawn ourselves.
+  (when-let ((pogod (executable-find "pogod")))
+    (setenv "POGO_PLUGIN_PATH"
+            (concat (string-remove-suffix (if pogo--is-windows "pogod.exe" "pogod")
+                                          pogod)
+                    "plugin")))
   (when (not pogo-server-started)
-    (if (>= pogo-failure-count pogo-max-failure-count)
-        (message
-         "Error starting pogo server. Try again with M-x pogo-try-start")
-      (progn
-        (setq pogo-process (pogo-start))
-        (run-with-timer pogo-health-check-seconds nil 'pogo-health-check)))))
+    (cond
+     ((>= pogo-failure-count pogo-max-failure-count)
+      (message
+       "Error starting pogo server. Try again with M-x pogo-try-start"))
+     ((pogo--daemon-reachable-p)
+      (pogo-log "pogod is already running; connecting to it instead of spawning")
+      (setq pogo-failure-count 0)
+      (setq pogo-server-started t))
+     (t
+      (setq pogo-process (pogo-start))
+      (run-with-timer pogo-health-check-seconds nil 'pogo-health-check)))))
 
 (cl-defun pogo-health-check (&optional (retry-count 0) (retry-max 3))
   "Check pogo server health, retrying up to RETRY-MAX times.
