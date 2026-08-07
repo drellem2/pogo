@@ -1084,12 +1084,75 @@ Three properties are deliberate and tested (`internal/driftwatch`):
 
 ```toml
 [drift_watch]
-enabled = true       # default true; a no-op when no [reconcile] mirrors exist
+enabled = true       # default true; the mirror half is a no-op with no [reconcile] mirrors
 interval = "15m"     # coarse sample/mail cadence (default 15m)
 ```
 
 Source of truth: `internal/driftwatch/` (runner) and `internal/reconcile/`
 (detector).
+
+#### …and the revision-staleness check it also carries
+
+The same runner answers a second question on the same coarse slot, and this one
+is asked **positively**: *is the daemon running current code?* (mg-5bd2)
+
+Every previous alarm on that question was indexed to the nightly deploy job's own
+exit code, which answers a proxy — *did last night's job exit zero?* — and that
+proxy goes dark exactly when the job stops running. On 2026-08-01..08-04 the job
+never fired, so there was no exit code, so there was no alarm, and four silent
+nights were indistinguishable from four healthy ones because health is also "no
+alarm". By 2026-08-07 pogod was 85 commits behind `main`.
+
+So the check does not consult the job at all. It reads the running process's own
+`vcs.revision`/`vcs.time` build stamp and mails `human` when that **commit** is
+older than `self_stale_after`. That fires under all three deploy failure modes —
+the job failing loudly, the job never firing, and the job exiting 0 without the
+new binary reaching the daemon — because all three produce the same observable:
+the running revision stops advancing.
+
+- **Armed with no configuration.** No repo, no network, no config key is needed
+  for the verdict, because a detector that stays inert until somebody remembers
+  to configure it is the failure this whole lineage keeps repeating. `enabled`
+  is the off switch; a binary with no vcs stamp (any `go test` build) disarms
+  itself and *says so once* rather than going quietly silent.
+- **`vcs.time` is the COMMIT's time, not the build's** — and neither uptime nor a
+  recent restart substitutes for it. On 2026-08-04 pogod restarted onto the same
+  2026-07-30 binary; only the revision said which code was running.
+- **The commits-behind number is context and never a gate.** `origin/main` is a
+  remote-tracking ref that only a fetch refreshes, so suppressing on "0 behind"
+  would go dark on an unfetched repo — the same proxy failure, one layer down.
+  The cost is a false positive if `main` goes quiet longer than N while the
+  daemon is genuinely current; that trade is deliberate and the right way round.
+- **Bounded, because the condition lasts days.** At a 15-minute cadence an
+  uncapped alarm would mail ~96 times a day. Notices double instead — at
+  detection, +1d, +3d, +7d — and then stop for that revision. The `revision_stale`
+  **event** is still emitted on every sample, so a spent mail budget never makes
+  the condition invisible; see [event-log.md](event-log.md).
+
+```toml
+[drift_watch]
+self_stale_after = "168h"          # N; default 7 days (see below)
+self_repo = "~/dev/pogo"           # OPTIONAL; only adds the commits-behind number
+```
+
+**Why N = 7 days.** The deploy is nightly, so a healthy daemon sits on last
+night's commit; seven days is seven consecutive missed deploys, well past any
+single bad night or weekend. Against the incident that prompted it — a binary
+built from a 2026-07-30 commit — it would have fired on 2026-08-06, a day before
+a human noticed the gap by hand. It is not a threshold picked to be safely
+un-fireable.
+
+**Who is expected to act, and the honest caveat.** The notice goes to `human`,
+the same maildir the five `pogo-deploy` REDs of this arc reached — all five
+delivered, all five notified, and nothing acted on for a week. A sixth alarm on
+that channel is only an improvement because of what differs: it fires on the
+nights that produced *no* deploy mail at all, its subject states the consequence
+with a number that **grows** (`pogod is running 8-day-old code — revision
+d31297f4 (2026-07-30), 85 commits behind main`) rather than repeating a constant
+string a filter can match, and it is capped so it cannot become background noise.
+If it is nonetheless filtered the same way, that is a finding about the channel,
+not about the detector — and the `revision_stale` event stream is the pull-side
+answer that does not depend on anyone reading mail.
 
 ## The credential-expiry warner
 

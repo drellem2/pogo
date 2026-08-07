@@ -715,6 +715,46 @@ pogod's drift-check runner (mg-345b) sampled the `[reconcile]` mirrors on its co
 {"schema_version":1,"timestamp":"2026-07-17T16:45:00.000000000Z","event_type":"drift_watch_fired","agent":"pogod","details":{"drift_count":1,"mirror_names":["pogod"],"interval":"15m0s"}}
 ```
 
+#### `revision_stale`
+
+pogod's revision-staleness check (mg-5bd2) sampled its own build stamp and found the commit it was built from is older than `self_stale_after` (default 7 days). It is the POSITIVE answer to "is the daemon current?", and it deliberately does not route through the nightly deploy job: every prior alarm on that question was indexed to the job's own exit code, so a night the job never fired produced no exit code and therefore no alarm. Four such nights passed in a row (2026-08-01..08-04) and pogod ended up 85 commits behind main with nothing raised. **Report-only** — it never redeploys and has no seam through which it could.
+
+**Emitted on EVERY stale sample, mailed or not.** The mail is capped at four notices per revision (detection, +1d, +3d, +7d — see `notice`/`mailed` below); this record is not, so a spent mail budget never turns the condition invisible. To ask whether the condition is live right now, read the newest event rather than the newest mail:
+
+```bash
+jq -r 'select(.event_type=="revision_stale") | "\(.timestamp) \(.details.revision[0:8]) age=\(.details.age_days)d mailed=\(.details.mailed)"' \
+  ~/.pogo/events.log | tail -5
+```
+
+- **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent` (always `"pogod"`), `details`
+- **`details` fields:**
+  - `revision` (string, required): the full `vcs.revision` of the running binary — the same value `GET /version` reports. Read in-process from the build stamp rather than over the loopback, because a loopback probe can be answered by a process that is not pogod (mg-e314)
+  - `commit_time` (string, required): `vcs.time`, the time of the **commit** the binary was built from. Not the build time, and emphatically not the process start time — on 2026-08-04 pogod restarted onto the *same* 2026-07-30 binary, so neither uptime nor a recent restart says anything about which code is running
+  - `age_days` / `age_hours` (int, required): how old that commit is at sample time
+  - `threshold` (string, required): N, the age at which the daemon is reported stale
+  - `notice` (int, required) and `max_notices` (int, required): position in the mail budget for this revision
+  - `mailed` (bool, required): whether THIS sample sent mail. False means the sample was suppressed by the backoff or the cap, **not** that the condition eased
+  - `behind_main` (int, optional): commits `origin/main` is ahead, when a `[drift_watch] self_repo` is configured and the lookup succeeded. **Context only — it never gates the alarm.** `origin/main` is a remote-tracking ref that only a fetch refreshes, so a suppressor keyed on it would go dark on an unfetched repo, which is the same proxy-goes-dark failure this detector exists to remove
+  - `revision_foreign` (bool, optional): the running revision is not in the configured repo **at all**, so the age is measured against some other project's history. A real cause on this host: `~/.pogo` is itself a git repo (mg-3610), so `go build` run inside a polecat worktree walks up and stamps `~/.pogo`'s HEAD
+  - `build_modified` (bool, optional): `vcs.modified` — the tree was dirty at build time, so the running code is not exactly `revision`
+  - `mail_error` (string, optional): present only when the notice could not be delivered; the event is still emitted so the condition is never lost to a down mail channel
+
+```json
+{"schema_version":1,"timestamp":"2026-08-07T12:39:00.000000000Z","event_type":"revision_stale","agent":"pogod","details":{"revision":"d31297f493cdd757fc46654351e0a2c93e66f49b","commit_time":"2026-07-30T00:34:07Z","age_days":8,"age_hours":204,"threshold":"7d","notice":1,"max_notices":4,"mailed":true,"behind_main":85}}
+```
+
+#### `revision_stale_disarmed`
+
+The running binary carries no `vcs.revision`/`vcs.time` stamp, so its age cannot be established and the staleness check above is **blind**. Emitted at most once per process, alongside a log line. Every `go test` binary and every `go run` hits this, which is why it does not mail.
+
+It exists so the silence is *declared*. A blind detector and a healthy daemon both produce no `revision_stale` events, and treating that ambiguity as health is the exact mistake mg-5bd2 was filed about.
+
+- **`details` fields:** `reason` (string, required)
+
+```json
+{"schema_version":1,"timestamp":"2026-08-07T12:39:00.000000000Z","event_type":"revision_stale_disarmed","agent":"pogod","details":{"reason":"binary carries no vcs.revision/vcs.time stamp"}}
+```
+
 #### `gh_teardown_watch_fired`
 
 pogod's gh-issue teardown detector (mg-6e57) sampled the `status=done` gh-issue carriers on its coarse interval and found at least one whose GitHub issue is still open, or whose state could not be established, so it mailed `notify_to` (`pm-pogo` by default — a teardown miss is a fleet workflow failure, not a human decision; mg-b586). It exists because the workflow's last step can silently not run: mg-07ba reached `done, stage: merge` while drellem2/pogo#89 stayed OPEN for four days, and a carrier that completed its teardown is outwardly identical to one that skipped it. **Report-only** — it never closes an issue and never comments. Emitted once per sample that mailed; unchanged findings are re-raised only after `renotify_after`, so this event is not one-per-interval. See [CONFIGURATION.md](CONFIGURATION.md) §"The gh-issue teardown detector" and `internal/ghteardown`.

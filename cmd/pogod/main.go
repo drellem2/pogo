@@ -1718,24 +1718,63 @@ Flags:
 	// launchd timer, because the nondemand-spawn wedge (mg-50e0) would leave a
 	// launchd timer silently never firing. See internal/driftwatch and mg-75f9.
 	//
-	// Armed only when it has something to check: no [reconcile] mirrors means no
-	// artifacts to watch, so an unconfigured/sandbox daemon is a silent no-op and
-	// never mails `human`. The Enabled flag (default true) is the off switch.
+	// The same runner also carries the REVISION-STALENESS check (mg-5bd2): a
+	// POSITIVE answer to "is the daemon current?" that does not route through the
+	// nightly deploy job. Every previous alarm on that question was indexed to
+	// the job's own exit code, so a night the job never fired produced no exit
+	// code and therefore no alarm — four such nights passed in a row and pogod
+	// ended up 85 commits behind main. This check reads the running process's own
+	// vcs stamp instead, so it fires whether the job failed loudly, never fired,
+	// or exited 0 without installing. See internal/driftwatch/revision.go.
+	//
+	// The mirror check is armed only when there are [reconcile] mirrors — no
+	// mirrors means no artifacts to watch, so an unconfigured/sandbox daemon is a
+	// silent no-op on that half. The staleness check is armed UNCONDITIONALLY: it
+	// needs no repo, no network and no config, and gating it on configuration
+	// somebody has to remember to write is precisely how the mg-5701 lineage
+	// keeps shipping detectors that never run. An unstamped binary (any test
+	// build) disarms itself and says so once. The Enabled flag is the off switch
+	// for both.
 	var driftWatcher *driftwatch.Watcher
-	if cfg.DriftWatch.Enabled && len(cfg.Reconcile.Mirrors) > 0 {
+	if cfg.DriftWatch.Enabled {
 		mirrors := make([]reconcile.Mirror, 0, len(cfg.Reconcile.Mirrors))
 		for _, m := range cfg.Reconcile.Mirrors {
 			mirrors = append(mirrors, reconcile.Mirror{Name: m.Name, Source: m.Source, Target: m.Target, Label: m.Label})
 		}
-		driftWatcher = driftwatch.New(cfg.DriftWatch, driftwatch.Options{
+		opts := driftwatch.Options{
 			Mirrors: mirrors,
 			// The FACTORY, not a pre-built Deps: HostDeps carries a per-sample
 			// launchctl cache, so each sample must get a fresh one or drift would
 			// freeze after the first check (see driftwatch.Options.NewDeps).
-			NewDeps: reconcile.HostDeps,
-			Mail:    client.SendMGMail,
-		})
-		log.Printf("pogod: drift-check runner enabled (mirrors=%d interval=%s, report-only)", len(mirrors), cfg.DriftWatch.Interval)
+			NewDeps:    reconcile.HostDeps,
+			Mail:       client.SendMGMail,
+			Revision:   driftwatch.BuildRevision,
+			StaleAfter: cfg.DriftWatch.SelfStaleAfter,
+		}
+		// Optional and context-only: the commits-behind number in the notice. It
+		// never gates the alarm, so an unset or unfetched repo costs one line of
+		// context and never the verdict.
+		if repo := cfg.DriftWatch.SelfRepo; repo != "" {
+			opts.Behind = driftwatch.GitBehind(repo)
+			opts.BehindRepo = repo
+		}
+		driftWatcher = driftwatch.New(cfg.DriftWatch, opts)
+
+		staleAfter := cfg.DriftWatch.SelfStaleAfter
+		if staleAfter <= 0 {
+			staleAfter = driftwatch.DefaultStaleAfter
+		}
+		// Print the running revision and its COMMIT date at startup. An operator
+		// reading this line can answer "is this daemon current?" without waiting
+		// for an alarm — and if the stamp is missing, the line says the check is
+		// blind rather than leaving that to be inferred from its silence.
+		rev := driftwatch.BuildRevision()
+		revDesc := "UNSTAMPED (staleness check blind)"
+		if rev.Stamped() {
+			revDesc = fmt.Sprintf("%s committed %s", rev.Short(), rev.CommitTime.Format(time.RFC3339))
+		}
+		log.Printf("pogod: drift-check runner enabled (mirrors=%d interval=%s, report-only); revision-staleness: running %s, stale_after=%s",
+			len(mirrors), cfg.DriftWatch.Interval, revDesc, staleAfter)
 	}
 
 	// Build the credential-expiry warner (mg-7024): the standing check that
