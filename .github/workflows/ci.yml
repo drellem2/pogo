@@ -45,8 +45,14 @@ jobs:
           mkdir -p _testdata/a-service/.git
           mkdir -p _testdata/b-service/.git
 
+      # Bounded and classified by the same script test.sh uses (mg-a465,
+      # gh#107) — one definition of the budget and one definition of the
+      # report. CI is the MORE exposed of the two: these runners are slower
+      # than the dev host, and nobody watches this one interactively, so an
+      # unlabelled goroutine dump here is read by whoever opens the failed run
+      # days later.
       - name: Test
-        run: go test ./...
+        run: bash scripts/go-test-budget.sh ./...
 
   pi-e2e:
     # Live pi-provider integration tests (mg-3e7c): drive a real pi binary
