@@ -264,6 +264,126 @@ esac
     && pass "drain-precond: 500 -> error:500" || fail "drain-precond 500 ($(classify_drain_precondition 500))"
 [ "$(classify_drain_precondition 401)" = "error:401" ] \
     && pass "drain-precond: 401 -> error:401" || fail "drain-precond 401"
+# 503 -> stopped. RequireOrchestration is the only thing on this endpoint that
+# emits 503, so this is the fleet-is-stopped hypothesis (mg-6d2f). It must NOT
+# fall through to error:503 — that is what made the 2026-08-07 refusal
+# anonymous, sharing a message and an exit code with two unrelated causes.
+[ "$(classify_drain_precondition 503)" = "stopped" ] \
+    && pass "drain-precond: 503 -> stopped (the 2026-08-07 reading, no longer an anonymous error:503)" \
+    || fail "drain-precond 503 ($(classify_drain_precondition 503))"
+# ...and it stays a NARROW claim. The neighbours must not be swept in: a 502 or a
+# 504 says nothing about the run mode, and widening this to 5xx would put a
+# confident outage story on top of a transport failure.
+[ "$(classify_drain_precondition 502)" = "error:502" ] && [ "$(classify_drain_precondition 504)" = "error:504" ] \
+    && pass "drain-precond: 502/504 stay error:<code> — only 503 carries the orchestration meaning" \
+    || fail "drain-precond 5xx neighbours leaked into 'stopped'"
+
+# --- server_mode: the reading verify_running cannot make (mg-6d2f) --------
+# THE DEFECT, for the reader who finds this in a year. verify_running polled
+# /version and nothing else. /version is deliberately NOT behind
+# RequireOrchestration, so a pogod that restarted into index-only mode answers
+# it, reports main's revision, and passes verification — while every /agents,
+# /refinery and /scheduler call returns 503 and the fleet dispatches nothing.
+# That is Daniel's report of the 08-07 night in one sentence: the deploy said it
+# was done and the server was not running.
+#
+# These are the PURE half — base_url is pointed at a stub so the parse and the
+# sentinels can be driven without a daemon. They prove server_mode DISTINGUISHES
+# correctly. They deliberately do NOT prove the wiring; the live control owns
+# that direction, against a real pogod whose mode it really changes.
+# The stub's variable is deliberately NOT named `body`. bash scopes dynamically,
+# so server_mode's own `local body` shadows the caller's for the whole call —
+# including inside a stub the caller defined. A `body` here reads back empty (and
+# under `set -u`, errors), which the driver then classifies as UNREACHABLE: the
+# control would report the sentinel it was written to disprove, for a reason that
+# has nothing to do with the code under test.
+mode_stub() {  # $1: body to serve, or "" to simulate a curl failure
+    local MODE_STUB_BODY="$1"
+    if [ -z "$MODE_STUB_BODY" ]; then
+        curl() { return 22; }
+    else
+        curl() { printf '%s' "$MODE_STUB_BODY"; }
+    fi
+    server_mode
+}
+
+[ "$(mode_stub '{"mode":"full"}')" = "full" ] \
+    && pass "server_mode: full mode parses to 'full'" || fail "server_mode full ($(mode_stub '{"mode":"full"}'))"
+[ "$(mode_stub '{"mode":"index-only"}')" = "index-only" ] \
+    && pass "server_mode: index-only parses to 'index-only' — the state the fleet was in on 08-07" \
+    || fail "server_mode index-only ($(mode_stub '{"mode":"index-only"}'))"
+# THE DISTINCTION THAT MATTERS, and the one this file's whole vocabulary exists
+# for: a daemon that will not talk and a daemon that talks but names no mode are
+# different facts, and neither may render as a mode. If either collapsed to ""
+# the caller's `[ "$mode" = "full" ]` would be false for all three and the
+# operator would be told "index-only" about a box that never answered.
+[ "$(mode_stub '')" = "$MODE_UNREACHABLE" ] \
+    && pass "server_mode: an unreachable daemon yields the UNREACHABLE sentinel, never a mode" \
+    || fail "server_mode unreachable ($(mode_stub ''))"
+[ "$(mode_stub '{"revision":"abc"}')" = "$MODE_UNSTAMPED" ] \
+    && pass "server_mode: a body with no mode field yields UNREPORTED, not an empty string" \
+    || fail "server_mode unstamped ($(mode_stub '{"revision":"abc"}'))"
+# The sentinels can never collide with a real mode — same rule REV_* obey.
+case "$MODE_UNREACHABLE$MODE_UNSTAMPED" in
+    *full*|*index-only*) fail "a MODE_* sentinel contains a real mode name — it could be mistaken for one" ;;
+    *) pass "MODE_* sentinels cannot collide with a real mode string" ;;
+esac
+
+# --- verify_orchestration: RED on index-only, GREEN on full ---------------
+# Both directions, because a check that only ever refuses is a brick and one that
+# only ever passes is decoration. Driven through the real function with
+# server_mode stubbed; ORCHESTRATION_VERIFY_TIMEOUT=0 so the RED does not pay the
+# 60s a real deploy allows for startup.
+vo_run() {  # $1: mode server_mode should report -> echoes "<rc>|<stderr>"
+    (
+        # Captured into a named variable, not read as $1 inside the stub: a `$1`
+        # there is server_mode's own first argument, which is unset.
+        VO_STUB_MODE="$1"
+        server_mode() { echo "$VO_STUB_MODE"; }
+        ORCHESTRATION_VERIFY_TIMEOUT=0
+        local out rc=0
+        out="$(verify_orchestration 2>&1)" || rc=$?
+        printf '%s|%s' "$rc" "$out"
+    )
+}
+
+VO_FULL="$(vo_run full)"
+[ "${VO_FULL%%|*}" = "0" ] \
+    && pass "verify_orchestration: mode=full passes — the check is conditional, not a brick" \
+    || fail "verify_orchestration refused a full-mode daemon ($VO_FULL)"
+
+VO_IDX="$(vo_run index-only)"
+case "$VO_IDX" in
+    1\|*THE\ FLEET\ IS\ DOWN*)
+        pass "verify_orchestration: mode=index-only FAILS and says THE FLEET IS DOWN — the 08-07 state now stops the deploy" ;;
+    0\|*)
+        fail "FAIL-OPEN: verify_orchestration passed an index-only daemon — a deploy would report success over a dead fleet" ;;
+    *)
+        fail "verify_orchestration on index-only returned '$VO_IDX'" ;;
+esac
+# An unreachable daemon must also fail. It is a DIFFERENT fact from index-only
+# and the message names it, but the verdict is the same: not proven up.
+VO_UNK="$(vo_run "$MODE_UNREACHABLE")"
+[ "${VO_UNK%%|*}" = "1" ] \
+    && pass "verify_orchestration: an unreachable daemon fails too — 'could not read it' is not 'it is up'" \
+    || fail "verify_orchestration passed an unreachable daemon ($VO_UNK)"
+
+# --- cmd_redeploy WIRES verify_orchestration in, after verify_running -----
+# The assertions above prove the function can refuse. This one proves the
+# refusal is reachable from the real deploy path — the seam mg-c02d's lesson is
+# about, checked here by source because the live control cannot run a real
+# launchctl kickstart. Order matters and is asserted: verify_running first, so
+# "no pogod at all" and "a pogod that is not serving the fleet" keep their own
+# exit codes instead of collapsing into one.
+SELF_DEPLOY_SRC="$HERE/pogo-self-deploy"
+if grep -q 'verify_running || exit 8' "$SELF_DEPLOY_SRC" \
+   && grep -q 'verify_orchestration || exit 11' "$SELF_DEPLOY_SRC" \
+   && [ "$(grep -n 'verify_running || exit 8' "$SELF_DEPLOY_SRC" | cut -d: -f1)" \
+        -lt "$(grep -n 'verify_orchestration || exit 11' "$SELF_DEPLOY_SRC" | cut -d: -f1)" ]; then
+    pass "cmd_redeploy runs verify_orchestration (exit 11) AFTER verify_running (exit 8) — both checks, in order"
+else
+    fail "cmd_redeploy does not wire verify_running -> verify_orchestration; the post-restart check is back to reading /version alone"
+fi
 
 # --- drain_wait: the gate that used to fail OPEN (mg-65b2) -----------------
 # THE DEFECT, for the reader who finds this in a year. drain_wait used to end

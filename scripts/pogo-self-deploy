@@ -506,6 +506,39 @@ running_rev() {
     if [ -n "$rev" ]; then echo "$rev"; else echo "$REV_UNSTAMPED"; fi
 }
 
+# --- the RUN MODE, which is a different fact from "a process answered" -------
+#
+# A REVISION IS NOT AN ANSWER TO "DID THE SERVER START" (mg-6d2f). /version is
+# deliberately NOT behind RequireOrchestration — it has to answer for a daemon in
+# any mode, or the drift check could never read an index-only one. That is right,
+# and it is exactly why running_rev cannot close this deploy: a pogod that came
+# back in index-only mode serves /version, reports main's revision, and refuses
+# every /agents, /refinery and /scheduler call with HTTP 503. To verify_running
+# that is a completed deploy. To the fleet it is an outage — no dispatch, no
+# refinery, no scheduler — and it is Daniel's sentence about the 08-07 night
+# verbatim: "didnt actually start the server and i had to manually start it."
+#
+# /server/mode is the reading that separates them, and it is registered on the
+# UNGUARDED mux for the same reason /version is: it must be answerable precisely
+# when the guarded surface is not. So an unreachable daemon and a stopped one
+# stay different answers here, as they must.
+MODE_UNREACHABLE='<unreachable>' # pogod is not answering /server/mode at all
+MODE_UNSTAMPED='<unreported>'    # it answered, but named no mode
+
+# NAME THE LAYER. `full` means the orchestration HTTP surface is up: /agents,
+# /refinery and /scheduler are past RequireOrchestration and dispatch can happen.
+# It does NOT claim every crew agent is running — that is a different layer with
+# its own defect (mg-060c) and its own ticket. This deploy verifies the layer it
+# turned off and back on, and says which one that is rather than letting a green
+# line be read as a statement about the whole fleet.
+server_mode() {
+    local body
+    body="$(curl -sf --max-time 5 "$(base_url)/server/mode" 2>/dev/null)" \
+        || { echo "$MODE_UNREACHABLE"; return 0; }
+    local mode; mode="$(printf '%s' "$body" | json_str mode)"
+    if [ -n "$mode" ]; then echo "$mode"; else echo "$MODE_UNSTAMPED"; fi
+}
+
 # DEPLOYED_CMDS: every binary this deploy owns, as `go install` package paths.
 # The CLI is here because it is not optional cargo: `pogo` is the operator's only
 # interface to the daemon, and a `pogo` older than the `pogod` it talks to is a
@@ -776,11 +809,17 @@ drain_post() {
 # while the fleet quietly stops doing work. Unattended at 03:00 that is a worse
 # outcome than a missed deploy (mg-46a4 §5b).
 #
-# exit 5 (kickstart) and exit 8 (verify) LOOK like they are in the window and are
-# not: by then the old process is gone, and a landed kickstart resets draining to
-# its zero value (internal/agent/agent.go). That is luck of zero-value
-# initialisation, not a restore path — do not lean on it, and do not mistake it
-# for coverage of the exits above.
+# exit 5 (kickstart), exit 8 (verify) and exit 11 (orchestration) LOOK like they
+# are in the window and are not: by then the old process is gone, and a landed
+# kickstart resets draining to its zero value (internal/agent/agent.go). That is
+# luck of zero-value initialisation, not a restore path — do not lean on it, and
+# do not mistake it for coverage of the exits above.
+#
+# exit 12 (orchestration already stopped) is squarely INSIDE it, and is the one
+# exit in the window where the restore cannot possibly work: the restore POST
+# goes to the same guarded endpoint that just returned 503, so it returns 503
+# too. restore_drain says so in those terms rather than reporting a drain that
+# was never enabled — see its 503 branch.
 #
 # RESTORE THE PRIOR VALUE, NEVER A HARD false. If drain was already on for an
 # unrelated reason, forcing false asserts a state instead of restoring one, and
@@ -822,6 +861,21 @@ restore_drain() {
     st="$(drain_post "$want")"
     case "$st" in
         2??) log "dispatch restored: draining=$want" ;;
+        503) # The restore POST goes to the SAME guarded endpoint the drain just
+             # failed on, so on the mg-6d2f path it cannot succeed and its
+             # failure means something quite specific. The generic branch below
+             # would end the run with "pogod may STILL be draining" — a claim
+             # about a flag that was never set, aimed at the wrong problem, and
+             # printed LAST so it is the reader's final word. The fleet is not
+             # draining; the fleet is stopped, and the drain flag is irrelevant
+             # until orchestration is back.
+             err "drain restore could not run: /agents/drain is behind RequireOrchestration and returned 503."
+             err "  Nothing was left draining — the drain was never enabled, because the same"
+             err "  guard refused the request that would have enabled it. Do not chase the drain"
+             err "  flag; it is not the problem and it will be at its zero value the moment"
+             err "  orchestration is back. Fix the mode, and the flag follows:"
+             err "    pogo server start"
+             ;;
         *)   err "drain restore FAILED (HTTP ${st:-000}) — pogod may STILL be draining and dispatching NO polecats."
              err "  The fleet will look healthy and do nothing. Restore by hand:"
              err "    curl -X POST $(base_url)/agents/drain -H 'Content-Type: application/json' -d '{\"draining\":$want}'"
@@ -1161,11 +1215,21 @@ Redeploy by hand when the fleet is idle:
 #   bootstrap  — 404: server answers but predates the drain endpoint (mg-cae1);
 #                the one-time self-deploy chicken-and-egg (mg-065e)
 #   down       — 000/empty: pogod not answering (connection refused / timeout)
+#   stopped    — 503: the only thing that returns 503 here is RequireOrchestration,
+#                so the daemon is up and orchestration is off (mg-6d2f)
 #   error:<c>  — any other status; refuse rather than guess
+#
+# `stopped` is a HYPOTHESIS, not a verdict, and the caller confirms it against
+# /server/mode before saying so out loud. A status code is the wrong evidence to
+# announce an outage from: this function sees three digits and nothing else, and
+# "503 therefore the fleet is stopped" is precisely the shape of confident
+# inference the drain gate had to unlearn (mg-65b2). The confirmation costs one
+# unguarded GET and turns a plausible reading into a measured one.
 classify_drain_precondition() {
     case "$1" in
         2??)     echo "drain" ;;
         404)     echo "bootstrap" ;;
+        503)     echo "stopped" ;;
         000|"")  echo "down" ;;
         *)       echo "error:$1" ;;
     esac
@@ -1969,6 +2033,47 @@ verify_running() {
     done
 }
 
+# How long verify_orchestration polls for the new pogod to report full mode.
+# Overridable so the controls do not pay a real deploy's wall clock.
+ORCHESTRATION_VERIFY_TIMEOUT="${ORCHESTRATION_VERIFY_TIMEOUT:-60}"
+
+# verify_orchestration — the second half of "the server came back", and the half
+# that was missing (mg-6d2f).
+#
+# A restarted pogod ALWAYS starts in full mode: server.New hard-codes ModeFull
+# and no config key selects index-only, so the only way to reach index-only is a
+# POST to /server/stop-orchestration on a running daemon. That makes this a safe
+# assertion rather than a policy: after a kickstart, anything other than `full`
+# means the restart did not produce a working fleet, and there is no legitimate
+# configuration in which it should.
+#
+# It polls rather than reads once because /version answering does not imply the
+# mode endpoint is registered in the same instant, and a single read would turn a
+# startup race into a nightly false RED — the surest way to get a check deleted.
+verify_orchestration() {
+    local deadline=$(( $(date +%s) + ORCHESTRATION_VERIFY_TIMEOUT )) mode
+    while :; do
+        mode="$(server_mode)"
+        if [ "$mode" = "full" ]; then
+            log "verified: orchestration is up (mode=full) — /agents, /refinery and /scheduler are past RequireOrchestration"
+            return 0
+        fi
+        if [ "$(date +%s)" -ge "$deadline" ]; then
+            err "THE FLEET IS DOWN: pogod restarted but orchestration did not start (mode=$mode)"
+            err "  The process is up and /version answers at main's revision, so every"
+            err "  ordinary liveness check on this box reads GREEN. It is not: /agents,"
+            err "  /refinery and /scheduler are all returning HTTP 503, which means NO"
+            err "  polecat will be dispatched and NO merge will run until this is fixed."
+            err "  This is the state that went unnoticed for 10h39m on 2026-08-07."
+            err "  Start it by hand and confirm:"
+            err "    pogo server start"
+            err "    curl -s $(base_url)/server/mode"
+            return 1
+        fi
+        sleep 3
+    done
+}
+
 cmd_redeploy() {
     # FIRST, ahead of every other precondition (mg-1bbf). Not because it is the
     # most likely refusal but because it is the only one whose failure mode is
@@ -2105,6 +2210,46 @@ cmd_redeploy() {
                 err "re-run with --skip-drain to rebuild+restart without draining (safe when the fleet is idle)."
                 exit 6
                 ;;
+            stopped)
+                # THE 2026-08-07 NIGHT, EXACTLY (mg-6d2f). The 503 came from
+                # RequireOrchestration: pogod was up and had been up since 08-04,
+                # but orchestration was off, so this deploy's very first live
+                # action failed and it exited at 0s — before do_build, before
+                # do_prove, before do_restart. The restart step never ran.
+                #
+                # What made that cost 10h39m was not the refusal, which is
+                # correct: a deploy must not kickstart -k a fleet it could not
+                # drain. It was that the refusal exited anonymously, sharing
+                # exit 6 with two unrelated causes, while the ONE fact worth
+                # waking somebody for — the fleet is stopped RIGHT NOW and this
+                # run did not restart it — appeared nowhere. Confirm the reading
+                # against the mode endpoint, then say it in those words.
+                local mode; mode="$(server_mode)"
+                if [ "$mode" = "index-only" ]; then
+                    err "THE FLEET IS DOWN, AND THIS DEPLOY DID NOT RESTART IT."
+                    err "  pogod is UP and answering, but orchestration is stopped (mode=index-only):"
+                    err "  /agents, /refinery and /scheduler all return HTTP 503, so NO polecat is"
+                    err "  being dispatched and NO merge is running. The fleet will look healthy"
+                    err "  — the port answers, the process is old and stable — and do nothing."
+                    err "  This deploy REFUSED to continue, and that refusal is correct: it cannot"
+                    err "  drain a fleet it cannot reach, and kickstart -k without a drain mints"
+                    err "  permanent polecat survivors. So nothing was built, nothing was bounced,"
+                    err "  and the fleet is exactly as stopped as it was a moment ago."
+                    err "  Restore orchestration by hand, THEN re-run the redeploy:"
+                    err "    pogo server start"
+                    err "    curl -s $(base_url)/server/mode      # expect {\"mode\":\"full\"}"
+                    exit 12
+                fi
+                # It answered 503 but does not report index-only — the code and
+                # the mode endpoint disagree. Do not narrate an outage we just
+                # failed to confirm; report both readings and refuse.
+                err "unexpected HTTP 503 from POST /agents/drain, but /server/mode reports '$mode' — refusing to proceed"
+                err "503 on this endpoint comes from RequireOrchestration, so these two readings should agree."
+                err "Establish what is actually running before deploying anything:"
+                err "  curl -s $(base_url)/server/mode"
+                err "  curl -s $(base_url)/version"
+                exit 6
+                ;;
             down)
                 err "pogod is not answering POST $(base_url)/agents/drain (connection refused / timeout)"
                 err "this is NOT the bootstrap case — the server did not respond at all. Start pogod, then retry."
@@ -2166,6 +2311,11 @@ cmd_redeploy() {
     trap - EXIT INT TERM
     do_restart
     verify_running || exit 8
+    # BOTH, and in this order. verify_running answers "is a pogod at main's
+    # revision answering?"; verify_orchestration answers "did the fleet come
+    # back?". Only the second is the question this deploy exists to close, and
+    # for its whole life the script asked only the first (mg-6d2f).
+    verify_orchestration || exit 11
 
     # 4. If a forced bounce killed active polecats, clean up the wreckage.
     if [ "$leftover" != "0" ] && [ "$leftover" != "?" ]; then
