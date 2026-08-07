@@ -98,6 +98,16 @@ func TestRespawnFromGenerationLosesToARoundTrip(t *testing.T) {
 // generation and fires on a delay, exactly as cmd/pogod/main.go does — rather
 // than calling the guarded method directly. The assertion is on the registry:
 // the agent must not be back.
+//
+// Note what this test does and does not isolate. It asserts the end-to-end
+// property, and that property is defended twice: StopAll also drops each
+// stopped agent from the map, so a stale respawn of an agent present at drain
+// time hits "not found" even with the generation check removed (measured).
+// TestRespawnFromGenerationLosesToARoundTrip above is the test that isolates
+// the barrier itself. The barrier is kept because it makes the invariant local
+// and explicit — one check, at the point of respawn — instead of emergent from
+// StopAll's cleanup loop and Respawn's still-running check agreeing across two
+// functions.
 func TestLateRespawnGoroutineDoesNotResurrectAcrossARoundTrip(t *testing.T) {
 	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {

@@ -389,6 +389,14 @@ type Registry struct {
 	// both edges closes it by construction rather than by timing: every
 	// goroutine scheduled at or before the clear holds a stale generation and
 	// loses forever, however late it fires.
+	//
+	// It is not the only thing standing in that window — StopAll also drops
+	// each stopped agent from the map, so a stale respawn of an agent present
+	// at drain time already hits "not found". The generation is here because
+	// that is emergent, spread across StopAll's cleanup loop and Respawn's
+	// still-running check, and it protects an invariant that is easy to
+	// re-break from either end. This makes it one local check at the point of
+	// respawn.
 	generation uint64
 
 	// stallSchedules, when set, supplies the recurring cron schedules targeting
