@@ -707,22 +707,45 @@ func TestGitBehindCountsAgainstARealRepo(t *testing.T) {
 	}
 }
 
-// TestLiveDaemonStaleness is the reproducible form of acceptance requirement 3:
-// point the real predicate at the real running daemon and print the notice it
-// would send. It is OFF by default (it needs a live pogod on the loopback and
-// would be a network dependency in CI) and is enabled with:
+// TestLiveDaemonStaleness is the reproducible form of acceptance requirement 3,
+// run as a CONTROLLED PAIR: point the real predicate at the real running daemon,
+// point the SAME predicate at the real build stamp of a binary built from
+// origin/main, and require the two to disagree.
 //
-//	POGO_LIVE_STALENESS_CHECK=1 go test ./internal/driftwatch/ -run LiveDaemon -v
+// WHY BOTH ARMS, AND WHY THE NEGATIVE ONE IS NOT OPTIONAL (mg-6da3). The first
+// version of this harness ran one arm and asserted nothing about it: it read GET
+// /version, evaluated the predicate and logged the verdict. That establishes only
+// that the check EMITS something. A detector hard-wired to "STALE" — the one
+// failure a positive control exists to rule out — passes a one-armed run
+// unchanged. So the negative arm is load-bearing: this test requires that on a
+// stale box the two arms differ, and it refuses to run at all if it cannot
+// construct the negative arm, rather than degrading to the one-armed shape it
+// replaced.
 //
-// It asserts nothing about staleness — the state of the box is not a property of
-// this code — but it does assert the reading is well-formed, and it logs the
-// verdict so the check can be re-run against the box on any future day rather
-// than surviving only as a transcript in a commit message.
+// WHERE THE NEGATIVE ARM'S STAMP COMES FROM. Not an invented SHA. Either
+// POGO_LIVE_STALENESS_CURRENT_BIN — the path to a binary built from origin/main,
+// whose vcs.revision/vcs.time are read back out of it with `go version -m`, so
+// the arm is a real artifact's real stamp — or, failing that, origin/main's tip
+// and its commit date read from the repo with git. The first is stronger and is
+// what mg-6da3 used: it is the exact pair a freshly deployed pogod would report.
 //
-// It reads GET /version rather than this binary's own stamp because the target
-// is another process. Note the caveat that keeps the production path in-process:
-// a loopback probe can be answered by something that is not pogod (mg-e314), so
-// this is a diagnostic, not the detector's own input.
+// Both arms run the full production path (Watcher.Check -> sampleRevision), not
+// just evaluate(), so the mail, the subject, the body and the revision_stale
+// event are all exercised — not merely the predicate.
+//
+// OFF by default; it needs a live pogod on the loopback and would be a network
+// dependency in CI. Run it with:
+//
+//	POGO_LIVE_STALENESS_CHECK=1 \
+//	POGO_LIVE_STALENESS_REPO=/Users/daniel/dev/pogo \
+//	POGO_LIVE_STALENESS_CURRENT_BIN=/tmp/pogod-main \
+//	  go test ./internal/driftwatch/ -run LiveDaemon -v
+//
+// The live arm reads GET /version rather than this binary's own stamp because
+// the target is another process, and because a test binary carries no vcs stamp
+// at all. Note the caveat that keeps the PRODUCTION path in-process: a loopback
+// probe can be answered by something that is not pogod (mg-e314), so this is a
+// diagnostic harness, not the detector's own input.
 func TestLiveDaemonStaleness(t *testing.T) {
 	if os.Getenv("POGO_LIVE_STALENESS_CHECK") == "" {
 		t.Skip("set POGO_LIVE_STALENESS_CHECK=1 to run against the live daemon")
@@ -731,7 +754,93 @@ func TestLiveDaemonStaleness(t *testing.T) {
 	if addr == "" {
 		addr = "http://127.0.0.1:10000"
 	}
+	repo := os.Getenv("POGO_LIVE_STALENESS_REPO")
+	currentBin := os.Getenv("POGO_LIVE_STALENESS_CURRENT_BIN")
+	if repo == "" && currentBin == "" {
+		t.Fatalf("the negative arm needs POGO_LIVE_STALENESS_REPO (to resolve origin/main) or " +
+			"POGO_LIVE_STALENESS_CURRENT_BIN (a binary built from main). A one-armed live run cannot " +
+			"tell a working detector from one hard-wired to STALE, and this harness will not pretend otherwise.")
+	}
 
+	live, start := liveDaemonRevision(t, addr)
+	current := currentMainRevision(t, repo, currentBin)
+
+	var behind BehindFunc
+	if repo != "" {
+		behind = GitBehind(repo)
+	}
+	now := time.Now().UTC()
+
+	liveRec, liveS := runLiveStalenessArm(t, "POSITIVE (running daemon)", live, behind, repo, now)
+	t.Logf("  start_time=%s — uptime answers nothing here: a daemon can be freshly started on week-old code", start)
+	currRec, currS := runLiveStalenessArm(t, "NEGATIVE (binary built from origin/main)", current, behind, repo, now)
+
+	// The negative arm. Asserted only when origin/main's own tip is inside the
+	// threshold, because a repo whose main has genuinely gone quiet for longer
+	// than N is the documented, deliberately-accepted false positive (see the
+	// package comment) — failing here would be this harness disagreeing with a
+	// decision revision.go already made on purpose.
+	if currS.Age <= DefaultStaleAfter {
+		if currRec.mailCount() != 0 {
+			t.Errorf("NEGATIVE arm must be silent for a daemon running origin/main (%s, %s old), got %d mail(s): %+v",
+				currS.Short(), formatAge(currS.Age), currRec.mailCount(), currRec.mails)
+		}
+		if len(currRec.events) != 0 {
+			t.Errorf("NEGATIVE arm must emit nothing, got %+v", currRec.events)
+		}
+	} else {
+		t.Logf("NEGATIVE arm not asserted: origin/main's own tip is %s old, past the %s threshold. "+
+			"That is the accepted false-positive shape (a quiet main), not a detector fault.",
+			formatAge(currS.Age), formatAge(DefaultStaleAfter))
+	}
+
+	if !liveS.Stale {
+		t.Logf("POSITIVE arm not available: the running daemon is CURRENT (%s, %s old). "+
+			"The box no longer supplies a naturally-occurring stale state; the firing half is pinned "+
+			"as a replay in TestPositiveControlAgainstTheMeasuredStaleDaemon.", liveS.Short(), formatAge(liveS.Age))
+		return
+	}
+
+	// The positive arm, and with the negative one above it the pair is a control:
+	// same code, same clock, same repo, same threshold — only the stamp differs.
+	if liveRec.mailCount() != 1 {
+		t.Fatalf("POSITIVE arm: a %s-old running revision must raise exactly one notice, got %d",
+			formatAge(liveS.Age), liveRec.mailCount())
+	}
+	m := liveRec.mails[0]
+	if m.to != mailTo {
+		t.Errorf("staleness notice must go to %q, went to %q", mailTo, m.to)
+	}
+	for _, want := range []string{liveS.Short(), liveS.CommitTime.Format("2006-01-02")} {
+		if !strings.Contains(m.subject, want) {
+			t.Errorf("subject must carry %q, got %q", want, m.subject)
+		}
+	}
+	if liveS.Behind >= 0 && !strings.Contains(m.subject, "commits behind main") {
+		t.Errorf("a known commits-behind count must reach the subject, got %q", m.subject)
+	}
+	if !strings.Contains(m.body, liveS.Revision) {
+		t.Errorf("body must carry the full revision so the reader can verify independently, got:\n%s", m.body)
+	}
+	if len(liveRec.events) != 1 || liveRec.events[0].EventType != "revision_stale" {
+		t.Fatalf("POSITIVE arm: expected one revision_stale event, got %+v", liveRec.events)
+	}
+
+	// The discrimination claim itself, stated as an assertion rather than left
+	// for a reader to infer from two logged verdicts.
+	if currRec.mailCount() != 0 {
+		t.Fatalf("the two arms did not discriminate: both the running daemon (%s) and a binary "+
+			"built from origin/main (%s) raised a notice", liveS.Short(), currS.Short())
+	}
+	t.Logf("DISCRIMINATED: %s -> STALE (%s old, %d behind), %s -> clean (%s old). Same code, same clock, same repo.",
+		liveS.Short(), formatAge(liveS.Age), liveS.Behind, currS.Short(), formatAge(currS.Age))
+}
+
+// liveDaemonRevision reads the running daemon's build stamp off GET /version and
+// returns it with the process start time, which is logged beside the verdict
+// precisely because it is the reading people reach for instead.
+func liveDaemonRevision(t *testing.T, addr string) (SelfRevision, string) {
+	t.Helper()
 	resp, err := http.Get(addr + "/version")
 	if err != nil {
 		t.Fatalf("GET %s/version: %v", addr, err)
@@ -744,35 +853,103 @@ func TestLiveDaemonStaleness(t *testing.T) {
 		StartTime string `json:"start_time"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&v); err != nil {
-		t.Fatalf("decode /version: %v", err)
+		t.Fatalf("decode %s/version: %v", addr, err)
 	}
-
 	rev := SelfRevision{Revision: v.Revision, Modified: v.Modified}
 	if ts, err := time.Parse(time.RFC3339, v.Time); err == nil {
 		rev.CommitTime = ts.UTC()
 	}
 	if !rev.Stamped() {
-		t.Fatalf("live daemon reports an undateable build: %+v", v)
+		t.Fatalf("live daemon at %s reports an undateable build: %+v", addr, v)
+	}
+	return rev, v.StartTime
+}
+
+// currentMainRevision produces the negative arm's stamp: what a daemon running
+// origin/main would report. It prefers reading a real binary's real stamp back
+// out of the binary, and falls back to the repo's tip.
+func currentMainRevision(t *testing.T, repo, bin string) SelfRevision {
+	t.Helper()
+	if bin != "" {
+		out, err := exec.Command("go", "version", "-m", bin).Output()
+		if err != nil {
+			t.Fatalf("go version -m %s: %v", bin, err)
+		}
+		var rev SelfRevision
+		for _, line := range strings.Split(string(out), "\n") {
+			f := strings.Fields(line)
+			if len(f) < 2 || f[0] != "build" {
+				continue
+			}
+			k, v, ok := strings.Cut(f[1], "=")
+			if !ok {
+				continue
+			}
+			switch k {
+			case "vcs.revision":
+				rev.Revision = v
+			case "vcs.time":
+				if ts, err := time.Parse(time.RFC3339, v); err == nil {
+					rev.CommitTime = ts.UTC()
+				}
+			case "vcs.modified":
+				rev.Modified = v == "true"
+			}
+		}
+		if !rev.Stamped() {
+			t.Fatalf("%s carries no vcs stamp, so it cannot stand in for a deployed daemon. "+
+				"Note a `go test` binary never carries one — build a main package with `go build`.", bin)
+		}
+		return rev
 	}
 
-	var behind BehindFunc
-	repo := os.Getenv("POGO_LIVE_STALENESS_REPO")
-	if repo != "" {
-		behind = GitBehind(repo)
+	sha, err := exec.Command("git", "-C", repo, "rev-parse", "origin/main").Output()
+	if err != nil {
+		t.Fatalf("git -C %s rev-parse origin/main: %v", repo, err)
 	}
+	when, err := exec.Command("git", "-C", repo, "log", "-1", "--format=%cI", "origin/main").Output()
+	if err != nil {
+		t.Fatalf("git -C %s log origin/main: %v", repo, err)
+	}
+	ts, err := time.Parse(time.RFC3339, strings.TrimSpace(string(when)))
+	if err != nil {
+		t.Fatalf("origin/main commit time %q: %v", strings.TrimSpace(string(when)), err)
+	}
+	return SelfRevision{Revision: strings.TrimSpace(string(sha)), CommitTime: ts.UTC()}
+}
 
-	now := time.Now().UTC()
+// runLiveStalenessArm runs one arm through the FULL production path — a fresh
+// Watcher (so each arm gets its own untouched notice ratchet) and Watcher.Check,
+// not evaluate() alone — and logs the whole reading, including the notice text
+// when one is raised. The transcript is the point: this is the artifact that
+// outlives the state being measured.
+func runLiveStalenessArm(t *testing.T, name string, rev SelfRevision, behind BehindFunc, repo string, now time.Time) (*recorder, Staleness) {
+	t.Helper()
+	rec := &recorder{}
+	w := New(revCfg(), Options{
+		Revision:   func() SelfRevision { return rev },
+		Behind:     behind,
+		BehindRepo: repo,
+		Mail:       rec.mail,
+		Emit:       rec.emit,
+	})
+	w.Check(now)
+
 	s := evaluate(rev, behind, now, DefaultStaleAfter)
-
-	t.Logf("live daemon at %s: revision=%s commit=%s start_time=%s",
-		addr, s.Short(), s.CommitTime.Format(time.RFC3339), v.StartTime)
-	t.Logf("age=%s threshold=%s behind_main=%d foreign=%v STALE=%v",
-		formatAge(s.Age), formatAge(s.Threshold), s.Behind, s.Foreign, s.Stale)
-	if s.Stale {
-		t.Logf("notice it would send:\nSubject: %s\n\n%s", staleSubject(s), staleBody(s, 1, DefaultStaleMaxNotices, repo))
+	t.Logf("%s: revision=%s commit=%s age=%s threshold=%s behind_main=%d foreign=%v modified=%v STALE=%v",
+		name, s.Revision, s.CommitTime.Format(time.RFC3339), formatAge(s.Age), formatAge(s.Threshold),
+		s.Behind, s.Foreign, s.Modified, s.Stale)
+	if n := rec.mailCount(); n == 0 {
+		t.Logf("  -> no notice, no event")
 	} else {
-		t.Logf("no notice: the daemon is current (uptime says nothing about this — start_time is %s)", v.StartTime)
+		for _, m := range rec.mails {
+			t.Logf("  -> mail to %q from %q\nSubject: %s\n\n%s", m.to, m.from, m.subject, m.body)
+		}
+		for _, e := range rec.events {
+			t.Logf("  -> event %s details=%v", e.EventType, e.Details)
+		}
 	}
+	return rec, s
 }
 
 // TestFormatAge keeps the notice's units readable: Go's default duration string
