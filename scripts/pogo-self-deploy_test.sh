@@ -1466,6 +1466,252 @@ sed -n '/^cmd_check() {/,/^}/p' "$HERE/pogo-self-deploy" | grep -q 'assert_out_o
 
 unset -f ps_parent
 
+# ---------------------------------------------------------------------------
+# What the daemon ANSWERED (mg-08e9) — the fact the 08-07 deploy threw away
+# ---------------------------------------------------------------------------
+# THE DEFECT. drain_post ran `curl -s -o /dev/null -w '%{http_code}'`. On
+# 2026-08-07 the POST answered 503, the run exited 6 after 0 seconds, and the
+# reason pogod gave went to /dev/null. Eight nights, no new information.
+#
+# WHAT THIS ADDS ON TOP OF mg-0155, WHICH IS NOT THE SAME THING. That ticket
+# classified 503 as `stopped` and wrote the operator's sentence at the refusal
+# site. Those sentences are an INFERENCE FROM THE SOURCE TREE — what a status
+# must have meant, given how pogod is wired today. These assertions are about
+# the daemon's own account of the same moment travelling beside it. Agreement
+# confirms the diagnosis; disagreement is the only way a stale inference ever
+# surfaces instead of being confidently mis-narrated.
+#
+# THE PROPERTY THAT MATTERS MOST IS THE ONE ABOUT THE STATUS. This is an
+# observability change on an error path, so the failure to guard is the fix
+# breaking the thing it annotates: the status is the PRIMARY fact and must
+# survive a body that is empty, multi-line, enormous, or full of control bytes.
+
+# --- http_status / http_body: the split, against real curl output shapes ----
+R_503="$(printf '%s\n503' 'orchestration is stopped')"
+[ "$(http_status "$R_503")" = "503" ] \
+    && pass "http_status: reads the code off a body+status response" || fail "http_status 503 ($(http_status "$R_503"))"
+[ "$(http_body "$R_503")" = "orchestration is stopped" ] \
+    && pass "http_body: recovers the 08-07 body that used to go to /dev/null" || fail "http_body 503 ($(http_body "$R_503"))"
+
+# AN EMPTY BODY MUST NOT EAT THE STATUS. This is the `down` case (curl writes
+# "000" and no body). If the split got it wrong the status would read as empty
+# and classify_drain_precondition would call a real answer `down` — turning an
+# observability fix into a misdiagnosis.
+R_EMPTY="$(printf '\n000')"
+[ "$(http_status "$R_EMPTY")" = "000" ] \
+    && pass "http_status: an EMPTY body still yields the status (the primary fact survives)" || fail "http_status empty-body ($(http_status "$R_EMPTY"))"
+[ -z "$(http_body "$R_EMPTY")" ] \
+    && pass "http_body: an empty body reads as empty, not as the status code" || fail "http_body empty-body ($(http_body "$R_EMPTY"))"
+
+# A MULTI-LINE BODY — an HTML error page, a pretty-printed JSON blob. The status
+# is the LAST line, so only a greedy match gets this right.
+R_MULTI="$(printf '%s\n503' $'{\n  "error": "orchestration is stopped"\n}')"
+[ "$(http_status "$R_MULTI")" = "503" ] \
+    && pass "http_status: survives a multi-line body (matches the LAST newline, not the first)" || fail "http_status multi-line ($(http_status "$R_MULTI"))"
+[ "$(http_body "$R_MULTI")" = "$(printf '{\n  "error": "orchestration is stopped"\n}')" ] \
+    && pass "http_body: keeps every line of a multi-line body" || fail "http_body multi-line"
+
+[ "$(http_status "999")" = "999" ] && [ -z "$(http_body "999")" ] \
+    && pass "http_status/http_body: a newline-less response is all status, no invented body" || fail "http_status/body newline-less"
+
+# --- fmt_http_body: bounded, one line, never silently truncated -------------
+[ "$(fmt_http_body 400 'orchestration is stopped')" = "orchestration is stopped" ] \
+    && pass "fmt_http_body: a short body passes through verbatim" || fail "fmt_http_body verbatim"
+case "$(fmt_http_body 400 '')" in
+    *"empty body"*) pass "fmt_http_body: an empty body is STATED, not rendered as blank" ;;
+    *) fail "fmt_http_body empty ($(fmt_http_body 400 ''))" ;;
+esac
+
+# ONE LINE, ALWAYS. Every err line is copied verbatim into the reason record,
+# whose format is line-oriented — a body carrying "\nreason=..." would forge a
+# field in the record the RED alert is built from.
+MB="$(fmt_http_body 400 "$(printf 'line one\nline two\ttabbed')")"
+[ "$(printf '%s' "$MB" | wc -l | tr -d ' ')" = "0" ] \
+    && pass "fmt_http_body: newlines and tabs collapse — a body cannot forge a field in the reason record" || fail "fmt_http_body one-line ($MB)"
+[ "$MB" = "line one line two tabbed" ] \
+    && pass "fmt_http_body: control bytes become spaces (tokens stay separate) and runs are squeezed" || fail "fmt_http_body squeeze ($MB)"
+
+# TRUNCATION IS ANNOUNCED. A body cut to 400 chars and presented as the whole
+# answer is a smaller copy of the defect being fixed.
+LONG="$(printf 'x%.0s' $(seq 1 900))"
+TB="$(fmt_http_body 400 "$LONG")"
+case "$TB" in
+    *"truncated; 900 chars in full"*) pass "fmt_http_body: truncation is ANNOUNCED with the full length" ;;
+    *) fail "fmt_http_body truncation notice ($TB)" ;;
+esac
+[ "${#TB}" -lt 500 ] \
+    && pass "fmt_http_body: the rendering is actually BOUNDED (a 900-char body does not reach the alert whole)" || fail "fmt_http_body bound (${#TB})"
+
+# --- END TO END: the body reaches the reason record, and so the RED alert ---
+# The whole point. mg-0155 built the channel (every err line is copied into the
+# record's verbatim block, which the runner renders into the mail); this ticket
+# puts the daemon's answer into it. Driven through the REAL refusal path, with
+# the real reason-record writer, exactly as cmd_redeploy calls it.
+BODY_TMP="$(mktemp -d)"
+precond_run_body() (
+    export POGO_DEPLOY_REASON_FILE="$2"
+    REASON_FILE="$2"
+    ERR_LOG="$(mktemp)"
+    DEPLOY_STAGE="drain"
+    DEPLOY_INSTALLED="no"
+    DRAIN_PRIOR="?"
+    DRAIN_ARMED=true
+    drain_post() { printf '\n000'; }
+    trap on_deploy_exit EXIT
+    refuse_drain_precondition "$1" "$3"
+)
+REAL_503='{"error":"orchestration is stopped","mode":"index-only"}'
+precond_run_body stopped "$BODY_TMP/rec.stopped" "$REAL_503" >/dev/null 2>&1
+grep -q 'orchestration is stopped' "$BODY_TMP/rec.stopped" \
+    && pass "END TO END: the 503 body reaches the reason record — and therefore the RED alert, not just the log" \
+    || fail "END TO END: the reason record lost the body ($(cat "$BODY_TMP/rec.stopped"))"
+# The MODE is in that body too, and it is the field that would settle which
+# index-only path was taken — the question mg-293c could not answer from
+# pogod.log, whose mode-transition lines were absent across the whole window.
+grep -q 'index-only' "$BODY_TMP/rec.stopped" \
+    && pass "END TO END: the body's MODE field survives too — the fact pogod.log did not record on 08-07" \
+    || fail "END TO END: the mode field was dropped"
+# The headline must still be the deploy's own sentence, NOT the body. mg-0155's
+# channel takes the FIRST err line as `reason`; inserting the answer above it
+# would have quietly replaced the operator's headline with a JSON blob.
+case "$(rec_field "$BODY_TMP/rec.stopped" reason)" in
+    *"orchestration is STOPPED"*) pass "END TO END: the headline is still the deploy's own sentence — the body did not displace it" ;;
+    *) fail "the body displaced the reason headline: $(rec_field "$BODY_TMP/rec.stopped" reason)" ;;
+esac
+
+# `down` must NOT claim an answer. 000 is curl reporting that nothing responded;
+# rendering the absent body as "(empty body — the server answered...)" would
+# assert exactly what this disposition denies.
+precond_run_body down "$BODY_TMP/rec.down" "" >/dev/null 2>&1
+grep -q 'it answered' "$BODY_TMP/rec.down" \
+    && fail "precond down: claims the server 'answered' when 000 means nothing responded" \
+    || pass "precond down: does NOT claim an answer — unreachable and silent stay different facts"
+
+# THAT ASSERTION EARNED ITS KEEP IMMEDIATELY, and the story is worth keeping.
+# restore_drain also POSTs /agents/drain and also now prints what came back. The
+# `down` refusal reaches the restore trap with a dead port, so the first version
+# of that line put "it answered: (empty body — the server answered, but said
+# nothing)" into the record of a run whose entire finding was that nothing
+# answered. The guard below is the positive half: when something DOES answer
+# non-2xx, the restore must still quote it, or this would be a fix by deletion.
+restore_said() (
+    ERR_LOG=""; DRAIN_ARMED=true; DRAIN_PRIOR="false"
+    drain_post() { printf '%s\n503' "$1"; }   # $1 is the want; body is arbitrary
+    restore_drain 6 2>&1
+)
+case "$(restore_said)" in
+    *"it answered"*"false"*) pass "restore_drain: a failing restore that WAS answered quotes the answer (the guard is conditional, not a deletion)" ;;
+    *) fail "restore_drain dropped the body on an answered non-2xx: $(restore_said)" ;;
+esac
+restore_silent() (
+    ERR_LOG=""; DRAIN_ARMED=true; DRAIN_PRIOR="false"
+    drain_post() { printf '\n000'; }
+    restore_drain 6 2>&1
+)
+case "$(restore_silent)" in
+    *"it answered"*) fail "restore_drain claims an answer on 000: $(restore_silent)" ;;
+    *"nothing answered the restore POST"*) pass "restore_drain: a restore nothing answered says so, instead of quoting an empty body as an answer" ;;
+    *) fail "restore_drain said neither: $(restore_silent)" ;;
+esac
+
+# ...and the other two answering dispositions do carry it, so the line above is
+# a property of `down`, not of a function that never prints the body.
+precond_run_body bootstrap "$BODY_TMP/rec.bootstrap" 'no route for POST /agents/drain' >/dev/null 2>&1
+grep -q 'no route for POST' "$BODY_TMP/rec.bootstrap" \
+    && pass "precond bootstrap: carries what the 404 said (the answer is printed whenever there IS one)" \
+    || fail "precond bootstrap dropped the body"
+precond_run_body error:500 "$BODY_TMP/rec.e500" 'panic: nil map read' >/dev/null 2>&1
+grep -q 'panic: nil map read' "$BODY_TMP/rec.e500" \
+    && pass "precond error:500: carries the body — the branch that refuses to GUESS still reports what it was told" \
+    || fail "precond error:500 dropped the body"
+# That branch's own sentence had to change with it: it used to say the status
+# was "the whole of what is known", which stops being true the moment the body
+# is printed beside it.
+grep -q 'the status above is the whole of what is known' "$BODY_TMP/rec.e500" \
+    && fail "precond error:500 still claims the status is all that is known, while printing the body above it" \
+    || pass "precond error:500: no longer claims the status is all that is known — the sentence tracks the new fact"
+
+# A no-body call must still produce every sentence (older harnesses, and any
+# caller that has no body to give).
+precond_run_body stopped "$BODY_TMP/rec.nobody" "" >/dev/null 2>&1
+grep -q 'orchestration is STOPPED' "$BODY_TMP/rec.nobody" \
+    && pass "precond: a call with no body still emits the full refusal (the argument is additive, not required)" \
+    || fail "precond: an empty body suppressed the refusal text"
+
+# --- A REAL CURL AGAINST A REAL 503 ----------------------------------------
+# A STUBBED CURL IS NOT A CURL, and this file carries the scar: mg-65b2 exists
+# because `curl -sf`'s empty-body-on-any-failure was something nobody had run.
+# Everything above would pass against a drain_post whose curl invocation is
+# subtly wrong — a missing `-w`, an `-o` left behind, a `-f` that suppresses the
+# 5xx body — because none of it runs curl. This does, against a socket
+# answering exactly what pogod answers.
+if command -v python3 >/dev/null 2>&1; then
+    STUB_PY="$(mktemp)"; STUB_PORT_F="$(mktemp)"
+    cat > "$STUB_PY" <<'PY'
+import http.server, socketserver, sys
+BODY = b'{"error":"orchestration is stopped","mode":"index-only"}'
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get('Content-Length') or 0))
+        self.send_response(503)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(BODY)))
+        self.end_headers()
+        self.wfile.write(BODY)
+    def log_message(self, *a): pass
+srv = socketserver.TCPServer(('127.0.0.1', 0), H)
+open(sys.argv[1], 'w').write(str(srv.server_address[1]))
+srv.serve_forever()
+PY
+    python3 "$STUB_PY" "$STUB_PORT_F" & STUB_PID=$!
+    for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$STUB_PORT_F" ] && break; sleep 0.2; done
+    STUB_PORT="$(cat "$STUB_PORT_F" 2>/dev/null)"
+    if [ -n "$STUB_PORT" ]; then
+        # A subshell so PORT points at the stub for these cases only. pass/fail
+        # append to $RESULTS_FILE, a FILE, so the verdicts survive the subshell
+        # even though a variable would not.
+        ( PORT="$STUB_PORT"
+          RAW="$(drain_post true)"
+          [ "$(http_status "$RAW")" = "503" ] \
+              && pass "drain_post over a REAL socket: the 503 status arrives (curl's -w wiring is right, not just the split)" \
+              || fail "drain_post real socket: status was '$(http_status "$RAW")', not 503"
+          case "$(http_body "$RAW")" in
+            *"orchestration is stopped"*)
+              pass "drain_post over a REAL socket: the 503 BODY arrives — the exact fact 2026-08-07 discarded" ;;
+            *) fail "drain_post real socket: the body was lost ('$(http_body "$RAW")')" ;;
+          esac
+          # And that classify still rules `stopped` off the real status, so the
+          # body is an addition to mg-0155's diagnosis and not a change to it.
+          [ "$(classify_drain_precondition "$(http_status "$RAW")")" = "stopped" ] \
+              && pass "a REAL 503 still classifies as 'stopped' — mg-0155's ruling is unchanged, it is now checkable" \
+              || fail "the real 503 no longer classifies as stopped"
+        )
+    else
+        fail "real-curl control: the stub server never reported a port"
+    fi
+    kill "$STUB_PID" 2>/dev/null || true
+    wait "$STUB_PID" 2>/dev/null || true
+    rm -f "$STUB_PY" "$STUB_PORT_F"
+else
+    echo "SKIP: real-curl control needs python3 (the pure assertions above still ran)"
+fi
+
+# --- the wiring, asserted against the source -------------------------------
+# Everything above could pass while drain_post still wrote the body to
+# /dev/null. This is the assertion that would have failed on 2026-08-06 — the
+# one that names the actual defect.
+sed -n '/^drain_post() {/,/^}/p' "$HERE/pogo-self-deploy" | grep -q -- '-o /dev/null' \
+    && fail "drain_post still discards the response body to /dev/null — this is the mg-08e9 defect, restored" \
+    || pass "drain_post does NOT discard its response body (the mg-08e9 defect cannot come back unnoticed)"
+sed -n '/^drain_post() {/,/^}/p' "$HERE/pogo-self-deploy" | grep -q "w '..%{http_code}'" \
+    && pass "drain_post asks curl for the status on its own final line — body and status from ONE hop" \
+    || fail "drain_post no longer emits a trailing status line; every caller's split is broken"
+# And the caller must actually PASS it on. A drain_post that captures the body
+# into a variable nobody forwards is the same silence with more code.
+grep -q 'refuse_drain_precondition "\$disp" "\$dp_body"' "$HERE/pogo-self-deploy" \
+    && pass "cmd_redeploy forwards the captured body to the refusal — it is not captured and dropped" \
+    || fail "cmd_redeploy captures the body but does not hand it to refuse_drain_precondition"
+
 echo ""
 PASS_COUNT=$(grep -c '^PASS:' "$RESULTS_FILE" 2>/dev/null || true)
 FAIL_COUNT=$(grep -c '^FAIL:' "$RESULTS_FILE" 2>/dev/null || true)

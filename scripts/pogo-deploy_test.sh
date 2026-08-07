@@ -1158,6 +1158,13 @@ REC_DIR="$WORK/reasons"; mkdir -p "$REC_DIR"
 # Run one real drain-precondition refusal in a fresh bash (a separate PROCESS,
 # like the nightly, so the record is the only thing that crosses) and leave its
 # record behind.
+#
+# The optional third argument is the RESPONSE BODY (mg-08e9) — what the daemon
+# actually said. It is passed for a reason beyond coverage: the sample alerts
+# printed by this file are read by humans deciding whether the alert is good
+# enough, and an alert rendered from a body the harness never supplied shows
+# "(empty body)" where production shows the diagnosis. A sample that
+# under-represents the real mail is a bad instrument for that judgement.
 make_record() {
     bash -c '
         set -u
@@ -1169,15 +1176,17 @@ make_record() {
         ERR_LOG="$(mktemp)"
         DEPLOY_STAGE="drain"; DEPLOY_INSTALLED="no"
         DRAIN_PRIOR="?"; DRAIN_ARMED=true
-        drain_post() { echo 000; }
+        drain_post() { printf "\n000"; }
         trap on_deploy_exit EXIT
-        refuse_drain_precondition "$3"
-    ' _ "$SELF_DEPLOY" "$2" "$1" >/dev/null 2>&1
+        refuse_drain_precondition "$3" "$4"
+    ' _ "$SELF_DEPLOY" "$2" "$1" "${3:-}" >/dev/null 2>&1
     return $?
 }
 
-# The 2026-08-07 failure itself, first.
-make_record stopped "$REC_DIR/stopped"; RC_STOPPED=$?
+# The 2026-08-07 failure itself, first — with the body RequireOrchestration
+# really answers (internal/server/server.go), so the sample alert below is the
+# mail that a repeat of that night would actually produce.
+make_record stopped "$REC_DIR/stopped" '{"error":"orchestration is stopped","mode":"index-only"}'; RC_STOPPED=$?
 [ "$RC_STOPPED" -eq 6 ] \
     && pass "reason channel: the real 503 refusal exits 6 and leaves a record" \
     || fail "503 refusal exited $RC_STOPPED"
@@ -1215,7 +1224,14 @@ done
 # The other three dispositions: same code, same runner, different mail.
 for d in bootstrap down error:500; do
     key="${d//:/_}"
-    make_record "$d" "$REC_DIR/$key"
+    # `down` gets no body on purpose: 000 means nothing answered, and there is
+    # no body for the harness to invent either.
+    case "$d" in
+        bootstrap) dbody='404 page not found' ;;
+        error:500) dbody='{"error":"internal error"}' ;;
+        *)         dbody='' ;;
+    esac
+    make_record "$d" "$REC_DIR/$key" "$dbody"
     eval "BODY_$key=\"\$(SRC=\"\$WORK\" GIT=/usr/bin/git ATTEMPT_N=0 red_alert_body 6 0 2026-08-07 5400 \"\$REC_DIR/\$key\")\""
     echo "--- ALERT TEXT: exit 6, disposition $d ---"
     eval "echo \"\$BODY_$key\""

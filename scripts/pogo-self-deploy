@@ -877,16 +877,93 @@ confirm() {
     case "$ans" in y|Y|yes|YES) return 0 ;; *) log "aborted by user"; exit 0 ;; esac
 }
 
-# POST a drain state ({"draining":<bool>}) and echo the HTTP status code so the
-# caller can tell an ANSWERED-but-missing endpoint (404, bootstrap) apart from a
-# genuinely-unreachable pogod. curl (no -f) writes "000" for connection
-# refused / DNS / timeout, so a numeric-but-non-2xx code always means the server
-# answered. Kept curl-only on purpose — no jq, no extra hop (see file header).
+# POST a drain state ({"draining":<bool>}) and echo the response BODY, then a
+# final line carrying the HTTP status, so the caller can tell an ANSWERED-but-
+# missing endpoint (404, bootstrap) apart from a genuinely-unreachable pogod.
+# curl (no -f) writes "000" for connection refused / DNS / timeout, so a
+# numeric-but-non-2xx code always means the server answered. Kept curl-only on
+# purpose — no jq, no extra hop (see file header).
+#
+# THE BODY USED TO GO TO /dev/null, AND THAT COST A NIGHT (mg-08e9). On
+# 2026-08-07 this POST answered 503 and the run exited 6 after 0 seconds. The
+# reason pogod gave was in hand and was written to /dev/null at the moment it
+# arrived, so the question worth asking the next morning had no answer anywhere
+# on the box. Not ambiguous evidence: NO evidence.
+#
+# WHAT THIS ADDS ON TOP OF mg-0155, WHICH IS NOT THE SAME THING. That ticket
+# classified 503 as `stopped` and wrote the operator's sentence at the refusal
+# site, and it is right: RequireOrchestration is the only non-test 503 on this
+# route today. But that sentence is an INFERENCE FROM THE SOURCE TREE — it says
+# what a 503 must have meant, given how the daemon is currently wired. This
+# prints what the daemon ACTUALLY SAID. The two agreeing is the confirmation;
+# the two disagreeing is the only way we would ever find out that the inference
+# had gone stale — a middleware added above the mux, a proxy in front of the
+# port, a 503 from something that is not this build at all. mg-293c found the
+# matching hazard from the other side on 2026-08-07: the mode-transition lines
+# that have logged since March were ABSENT from pogod.log across the whole
+# window, so the daemon's own account of how it got into that mode is missing.
+# When the log is silent, the answer to the request is the only thing left.
+#
+# THE CLASS, NOT THE INSTANCE. This is not a curl flag that happened to be
+# wrong; it is an error path that stopped explaining itself while continuing to
+# report correctly. mail_alert acquired the same defect from a different
+# direction and was fixed the same night (mg-0155): its `mailbox_created` branch
+# went unreachable against a current mg, so the refusal still fired and still
+# returned 1 — the control was intact — while the sentence naming the wrong
+# recipient became a raw no_such_mailbox blob. Both stay green under every test
+# that asks "did it refuse?" and both fail the only question asked at 08:00,
+# which is "why?".
+#
+# THE STATUS IS THE PRIMARY FACT AND MUST SURVIVE AN UNREADABLE BODY. That is
+# why the body is not fetched separately and is not written to a file that could
+# fail to open: `-w '\n%{http_code}'` puts both on one stream from one hop, so
+# the status is always the last line no matter what the body is (empty, binary,
+# multi-line, huge). There is no read that can fail and take the status with it.
+# Same shape as drain_probe, and split with the same two expansions.
 drain_post() {
     local state="$1"
-    curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
+    curl -s -w '\n%{http_code}' --max-time 5 \
         -X POST "$(base_url)/agents/drain" \
         -H 'Content-Type: application/json' -d "{\"draining\":${state}}" 2>/dev/null
+}
+
+# http_status / http_body — split a `\n%{http_code}` response into its two
+# facts. Named because drain_wait, drain_post's callers and restore_drain all do
+# it, and a fourth open-coding of `${raw##*$'\n'}` is one more place for the two
+# expansions to drift apart.
+http_status() { printf '%s' "${1##*$'\n'}"; }
+http_body()   { local r="$1"; case "$r" in *$'\n'*) printf '%s' "${r%$'\n'*}" ;; *) printf '' ;; esac; }
+
+# DRAIN_BODY_MAX — how much of a failing drain's body reaches a log line and the
+# RED alert. A bound, not a preference: this text travels into mail via the
+# reason record's verbatim section, and pogod is free to answer with a stack
+# trace or an HTML error page. Truncation is ANNOUNCED (see fmt_http_body) so a
+# reader never mistakes a cut string for the whole answer — which would be a
+# smaller copy of the defect being fixed.
+DRAIN_BODY_MAX="${POGO_DEPLOY_BODY_MAX:-400}"
+
+# fmt_http_body MAX BODY — render a response body as ONE bounded line, for an
+# `err` line (and therefore for the alert). Pure; unit-tested.
+#
+# Three things it must never do. It must never render an empty body as an empty
+# string — "the server answered and said nothing" is a fact the reader needs
+# stated, not a blank where text should be. It must never emit raw newlines or
+# control bytes: every err line is copied verbatim into the reason record, whose
+# format is line-oriented, so a body containing "\nreason=..." would forge a
+# field. And it must never truncate silently.
+fmt_http_body() {
+    local max="$1" body="$2" one n
+    # Control bytes -> spaces (not deleted: deleting them would silently join
+    # tokens that were separate), then squeeze and trim.
+    one="$(printf '%s' "$body" | tr '\000-\037\177' '[ *]' | tr -s ' ')"
+    one="${one# }"; one="${one% }"
+    [ -n "$one" ] || { printf '(empty body — the server answered, but said nothing)'; return 0; }
+    n=${#one}
+    if [ "$n" -gt "$max" ]; then
+        printf '%s… (truncated; %d chars in full — see the pogod log for the rest)' "${one:0:$max}" "$n"
+    else
+        printf '%s' "$one"
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -951,10 +1028,29 @@ restore_drain() {
         want=false
     fi
     log "restoring dispatch to its pre-deploy state (draining=$want) — deploy exited $code before the kickstart"
-    st="$(drain_post "$want")"
+    local raw; raw="$(drain_post "$want")"
+    st="$(http_status "$raw")"
     case "$st" in
         2??) log "dispatch restored: draining=$want" ;;
         *)   err "drain restore FAILED (HTTP ${st:-000}) — pogod may STILL be draining and dispatching NO polecats."
+             # The same discard that cost mg-08e9 a night lived here too, on the
+             # one path whose failure IS a fleet-wide dispatch outage. Whatever
+             # pogod said about refusing is the operator's first clue, and this
+             # err line rides the reason record into the alert like the rest.
+             #
+             # ONLY WHEN SOMETHING ANSWERED. 000/empty is curl reporting that
+             # nothing responded, and there is no body to quote — printing the
+             # absent one as "(empty body — the server answered...)" would
+             # assert the opposite of what the status says. That is not a
+             # hypothetical: the `down` refusal reaches this trap with a dead
+             # port, so the unguarded version of this line put "it answered"
+             # into the record of a run whose whole finding was that nothing
+             # did. Caught by the mg-08e9 test that asserts `down` never makes
+             # that claim.
+             case "$st" in
+                 000|"") err "  (nothing answered the restore POST either — no body to quote)" ;;
+                 *)      err "  it answered: $(fmt_http_body "$DRAIN_BODY_MAX" "$(http_body "$raw")")" ;;
+             esac
              err "  The fleet will look healthy and do nothing. Restore by hand:"
              err "    curl -X POST $(base_url)/agents/drain -H 'Content-Type: application/json' -d '{\"draining\":$want}'"
              ;;
@@ -1425,12 +1521,28 @@ drain_probe() {
 # restarted and there is nothing to roll back. The record says so in a field
 # (`installed=no`) AND each branch says so in words, because the field is what
 # the runner reasons about and the words are what a human reads.
+#
+# THE SECOND ARGUMENT IS WHAT THE DAEMON SAID (mg-08e9), and it is optional so
+# that a caller which has no body — or an older test harness — still gets every
+# sentence below. Each branch prints it as its own `err` line, which is copied
+# verbatim into the reason record and therefore into the RED alert.
+#
+# It is not a decoration on the prose above it. The sentences below are an
+# INFERENCE: they say what a status must have meant given how pogod is currently
+# wired. The body is the daemon's own account of the same moment. Printing both
+# means the alert can be checked instead of believed, and it is the only way a
+# stale inference — a middleware added above the mux, a proxy in front of the
+# port — ever surfaces rather than being confidently mis-narrated.
 refuse_drain_precondition() {
-    local disp="$1"
+    local disp="$1" body="${2:-}"
+    # Rendered once: four branches would otherwise each carry the expansion, and
+    # three of them would eventually disagree about the bound.
+    local said; said="$(fmt_http_body "$DRAIN_BODY_MAX" "$body")"
     case "$disp" in
         bootstrap)
             disarm_drain_restore "HTTP 404 means the mux found no /agents/drain route to run"
             err "bootstrap: this pogod predates the /agents/drain endpoint (HTTP 404 from mg-cae1's feature)"
+            err "it answered: $said"
             err "the pogod you are replacing does not yet have the drain feature you are deploying —"
             err "the one-time self-deploy chicken-and-egg. Nothing to drain via the API."
             err "re-run with --skip-drain to rebuild+restart without draining (safe when the fleet is idle)."
@@ -1438,6 +1550,12 @@ refuse_drain_precondition() {
             exit 6
             ;;
         down)
+            # DELIBERATELY NO "it answered" LINE. `down` is 000/empty, which is
+            # curl reporting that nothing answered — so there is no body, and
+            # rendering the absent one as "(empty body — the server answered,
+            # but said nothing)" would assert the very thing this disposition
+            # denies. An unreachable daemon and a silent one are different
+            # facts; that distinction is what the whole file is built around.
             err "pogod is not answering POST $(base_url)/agents/drain (connection refused / timeout)"
             err "this is NOT the bootstrap case — the server did not respond at all. Start pogod, then retry."
             err "this run built nothing, installed nothing and restarted nothing — it changed NOTHING."
@@ -1446,6 +1564,11 @@ refuse_drain_precondition() {
         stopped)
             disarm_drain_restore "HTTP 503 is RequireOrchestration answering before the drain handler runs"
             err "orchestration is STOPPED: POST $(base_url)/agents/drain answered HTTP 503"
+            # The daemon's own words, beside the inference drawn from them. Agree
+            # and the diagnosis is confirmed; disagree and the reader has just
+            # learned that a 503 on this route no longer means what the sentence
+            # below says it means — which is the only way that ever surfaces.
+            err "it answered: $said"
             err "pogod is UP and healthy — it is in index-only mode, so it refuses everything under"
             err "  /agents/, /refinery/ and /scheduler/ with 503. That is designed behaviour"
             err "  (RequireOrchestration, internal/server/server.go), not a fault and not a corrupt install."
@@ -1459,9 +1582,15 @@ refuse_drain_precondition() {
             ;;
         error:*)
             err "unexpected HTTP ${disp#error:} from POST /agents/drain; refusing to proceed"
+            err "it answered: $said"
             err "the server ANSWERED, so this is neither the bootstrap 404 nor a down pogod, and it is not"
             err "  the 503 that means orchestration is stopped. This branch is deliberately the one that"
-            err "  does not guess: the status above is the whole of what is known."
+            # This sentence used to read "the status above is the whole of what
+            # is known", and it was true — the body went to /dev/null. It is not
+            # true any more, and leaving it would have this branch refuse to
+            # guess while telling the reader there was nothing else to look at.
+            err "  does not guess: the status and the answer above are the whole of what is known, and no"
+            err "  story is invented to join them."
             err "this run built nothing, installed nothing and restarted nothing — it changed NOTHING."
             exit 6
             ;;
@@ -2363,7 +2492,13 @@ cmd_redeploy() {
         # trap that also writes the reason record with one that only restores.
         trap 'err "interrupted (SIGINT) during the drain window"; exit 130' INT
         trap 'err "terminated (SIGTERM) during the drain window"; exit 143' TERM
-        local disp; disp="$(classify_drain_precondition "$(drain_post true)")"
+        # One hop, both facts (mg-08e9). The status decides which refusal this
+        # is; the body is what lets the next morning check that ruling instead
+        # of taking it on faith.
+        local dp_raw dp_body
+        dp_raw="$(drain_post true)"
+        dp_body="$(http_body "$dp_raw")"
+        local disp; disp="$(classify_drain_precondition "$(http_status "$dp_raw")")"
         case "$disp" in
             drain)
                 # Take drain_wait's OWN verdict and its OWN number, rather than
@@ -2443,7 +2578,7 @@ cmd_redeploy() {
                 # function is the only place that knows which one this is, and
                 # what it writes is what the operator reads: the runner carries
                 # the sentence across rather than re-deriving one from the code.
-                refuse_drain_precondition "$disp"   # never returns
+                refuse_drain_precondition "$disp" "$dp_body"   # never returns
                 ;;
         esac
     fi
