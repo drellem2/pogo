@@ -200,6 +200,10 @@ pogo agent spawn "fix the auth bug"
    pogod claims the work item (mg claim, mg-7254)
    - before the process starts, so the item never
      sits in available/ under a working polecat
+   - a claim a DEAD dispatch left under pogod's own
+     pid, with nothing in flight and no live agent,
+     is adopted in place rather than refused
+     forever (mg-790f)
         │
         ▼
    Agent runs
@@ -235,6 +239,25 @@ Work flows through macguffin:
 3. **pogod** claims the item at spawn, before the polecat's process starts: `mg claim gt-a3f` (mg-7254). A second dispatch onto an already-claimed item is refused — the claim is an atomic rename, so the store enforces single ownership rather than the dispatcher remembering to check.
 4. **Agent** re-stamps the claim to its own pid as its first act: `mg reclaim gt-a3f` (mg-7d6d). Ownership does not change hands — the re-stamp is a rename *within* `claimed/`, so the item is never back in `available/` — but the pid does, and that is pogod's only hard evidence that the agent executed a turn rather than being wedged with an unsubmitted kickoff. It engages only where `mg` supports it; pogod probes at startup and falls back to a weaker screen-based signal otherwise.
 5. **Agent** completes work: `mg done gt-a3f`
+
+**When a dispatch dies holding the claim.** The claim is taken at step 3 and the
+polecat's re-stamp is step 4, so between them the claim names pogod's pid and no
+agent answers for it. A dispatch that dies in that window — killed, wedged inside
+`Spawn`, or failing before any cleanup runs — leaves the item in `claimed/` with
+nothing working it, where dispatch skips it and stall-watch does not look. A
+failed spawn does hand the claim back, but only if it lives long enough to
+(mg-6f5e produced no output at all), so the durable guard is in the **claim
+check**: a claim under **pogod's own pid**, with **no dispatch in flight** and
+**no live agent** on the item, is owned by nothing and the next dispatch adopts
+it (mg-790f). Adoption writes nothing — the claim file is already what step 3
+produces — so the item never passes back through `available/` and the guarantee
+above is preserved. Holder liveness is *not* consulted: a re-stamp names the
+short-lived `mg reclaim` subprocess, so a dead claim pid is the normal state of a
+properly owned item. A claim under any *other* pid, including an earlier pogod's,
+is refused rather than adopted — it is indistinguishable from a human's — and the
+refusal names the holder, the in-flight dispatch, or the live polecat, because
+the half-hour cost of this class of failure was never the state itself but the
+absence of any command that could see it.
 
 There is no "sling" command. Spawning a polecat with a work item is the assignment. Mailing a crew member is the assignment. The mechanisms are macguffin primitives, not orchestration abstractions.
 

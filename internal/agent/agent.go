@@ -518,6 +518,15 @@ type Registry struct {
 	// wiring. See spawnclaim.go.
 	workItemClaimer WorkItemClaimer
 
+	// spawnClaimsInFlight names the work items whose spawn-time claim pogod holds
+	// right now for a dispatch that has not finished — the window between
+	// claimForSpawn and the agent being registered, in which the claim is pogod's
+	// and no agent yet answers for it. The stranded-claim check reads it to tell
+	// "no agent YET" from "no agent EVER" (mg-790f); without it, a second dispatch
+	// would adopt the claim of a first that is merely slow inside Spawn. Nil is
+	// the empty ledger; beginSpawnClaim fills it in. See spawnclaimadopt.go.
+	spawnClaimsInFlight map[string]inFlightSpawnClaim
+
 	// workItemTyper reads a work item's `type` marker so handleSpawnPolecat can
 	// route it through the closed type→template map when no --template was
 	// given (mg-9a04). Nil means the default MGWorkItemTyper — like the gate
