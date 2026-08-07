@@ -231,9 +231,37 @@ func reapMergedPolecat(reg polecatReaper, mr *refinery.MergeRequest, complete fu
 	if mr.PostMergeTag != "" {
 		sidecar["post_merge_tag"] = mr.PostMergeTag
 	}
+	// The AUTHOR'S OWN verdict, carried in from submit time and merged in here
+	// rather than replaced by this writer (mg-dfea).
+	//
+	// This writer used to be the sole author of the sidecar, and that is what
+	// destroyed the worker's verdict. Not by clobbering it — `mg done` refuses
+	// a second done rather than overwriting the first, which was measured, not
+	// assumed — but by PREEMPTION: pogod closes the item the instant the merge
+	// lands and stops the polecat ~0.5s later, so the polecat's own
+	// `mg done --result` is refused as "already done", the protocol tells it
+	// that refusal is success, and the verdict is gone with nothing complaining.
+	// Over the live store on 2026-08-06 that left 139 of 149 sidecars
+	// refinery-authored and 10 of 149 carrying any field beyond branch/mr/target.
+	//
+	// It is NESTED rather than flattened so the two records cannot collide.
+	// Flattening would put the author's claims and the refinery's measurements
+	// in one namespace, where a worker writing `branch` would either overwrite
+	// the branch that actually merged or be silently dropped in favour of it —
+	// a smaller instance of this same defect. Under `verdict` the author's
+	// object is preserved verbatim and is identifiable as the author's.
+	if len(mr.Verdict) > 0 {
+		sidecar["verdict"] = mr.Verdict
+	}
 	result, _ := json.Marshal(sidecar)
 	if err := complete(mr.Author, string(result)); err != nil {
-		log.Printf("refinery: mg done %s on merged polecat's behalf failed (may already be done): %v", mr.Author, err)
+		// An "already done" here means the POLECAT won the race and its own
+		// result stands — the item is closed with the worker's verdict, not
+		// ours, and that is the better outcome, not a degraded one. mg enforces
+		// it: a second `mg done` is refused, so there is no path by which this
+		// call replaces a result the worker already wrote. Any other error is a
+		// real failure and reads as one.
+		log.Printf("refinery: mg done %s on merged polecat's behalf did not apply — if this is 'already done' the polecat wrote its own result first and that result stands: %v", mr.Author, err)
 	}
 
 	// Stop keys on the registry name, which is the bare id — not mr.Author.

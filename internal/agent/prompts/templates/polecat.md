@@ -137,10 +137,21 @@ Follow these steps exactly, in order. Skipping any step is a failure.
    git push origin "$BRANCH"
    ```
 
-5. **Submit to the merge queue** (capture the MR ID from output):
+5. **Write your verdict, then submit to the merge queue** (capture the MR ID from output). Your verdict goes in **at submit time**, not after the merge:
    ```bash
-   pogo refinery submit "$BRANCH" --repo={{.Repo}} --author={{.Id}} --target={{if .Branch}}{{.Branch}}{{else}}main{{end}}
+   cat > /tmp/{{.Id}}-verdict.json <<'EOF'
+   {"verdict": "pass",
+    "summary": "<one line: what you changed and what it now does>",
+    "evidence": ["<file:line, or the command you ran and what it printed>"],
+    "unverified": ["<anything you are asserting without having measured it — [] if nothing>"]}
+   EOF
+   jq -e . /tmp/{{.Id}}-verdict.json >/dev/null || echo 'NOT VALID JSON — fix it before submitting; submit rejects it while you can still hear about it'
+   pogo refinery submit "$BRANCH" --repo={{.Repo}} --author={{.Id}} --target={{if .Branch}}{{.Branch}}{{else}}main{{end}} \
+       --verdict-file=/tmp/{{.Id}}-verdict.json
    ```
+   `"verdict"` is your own word for how the work came out — `pass`, `partial`, `blocked`, whatever is true. Nothing enumerates the legal values and nothing reads the contents: this is the record of what **you** concluded, and the only reader who benefits is the one who later asks what this branch was supposed to have done. A verdict of `partial` with an honest `unverified` list is worth more than a `pass` nobody can check.
+
+   {{if .Branch}}On this track you call `mg done --result` yourself in step 7 and nothing preempts you, so `--verdict-file` is not strictly required. Pass it anyway — it is recorded on the merge request and readable from `pogo refinery show <id> --json` even if your process does not survive to step 7.{{else}}**This is the only moment you can record a verdict.** pogod closes your work item the instant your branch merges and stops you about half a second later; `mg` refuses a second `mg done` rather than overwriting the first, so the `mg done --result` in step 7 arrives at an already-closed item and is turned away. Nothing overwrites your verdict — you are simply beaten to the item, and until mg-dfea the protocol called that refusal success. Skip `--verdict-file` and your work item closes recording only which branch merged (mg-dfea).{{end}}
 
 6. **Wait for merge result** — poll refinery using a bash while-loop.
 
@@ -198,11 +209,13 @@ Follow these steps exactly, in order. Skipping any step is a failure.
    Mail the {{.Coordinator}} the PR URL as well — it is what the coordination cycle is waiting for.
 
    **If you cannot open the PR** — no GitHub remote, `gh` unauthenticated, `gh pr create` refuses — do **not** call `mg done` and do **not** go quiet. Mail the {{.Coordinator}} saying the merge landed, quoting the exact error, and hold per step 8. Your item staying claimed with a report attached is recoverable; a silent deferral is the failure this step exists to prevent.
-{{else}} mark the work item done:
+{{else}} mark the work item done, repeating the verdict you submitted in step 5 in case you won the race:
    ```bash
-   mg done {{.Id}} --result="{\"branch\": \"$BRANCH\"}"
+   mg done {{.Id}} --result="{\"branch\": \"$BRANCH\", \"verdict\": $(cat /tmp/{{.Id}}-verdict.json)}"
    ```
-   pogod usually beats you to this (see step 6 note). If `mg done` fails because the item is already done, that is success — do not retry or escalate.
+   pogod usually beats you to this (see step 6 note), and then `mg done` fails with `already done`.
+
+   **`already done` means the close succeeded, and it is not a verdict.** Do not retry or escalate it — but do not read it as "everything I concluded was recorded" either. What was recorded is the sidecar pogod wrote at merge, and your verdict is in it **only because you passed `--verdict-file` at step 5**. If you skipped that step, the refusal you are looking at is the moment your verdict was lost, and the correct response is to mail the {{.Coordinator}} your verdict rather than to move on (mg-dfea).
 {{end}}
    **If failed:** mail the {{.Coordinator}} with failure details. Do NOT call `mg done`.
    ```bash
