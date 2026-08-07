@@ -386,6 +386,20 @@ func (m mailCheckRegistrar) addAndVerify(entry scheduler.Entry, agentName, sched
 	return nil
 }
 
+// mgMailboxRegistrar implements agent.MailboxRegistrar against the `mg` CLI so
+// spawn-polecat provisions a polecat's mailboxes at spawn time (mg-7dc1).
+//
+// It is wired unconditionally, NOT inside the scheduler-loaded branch that gates
+// mailCheckRegistrar. The two are independent: the mail-check loop needs a
+// scheduler, whereas addressability needs only macguffin. A daemon whose
+// scheduler failed to load still spawns polecats that people mail by hand, and
+// on that daemon a mailbox is the only reachability they have left.
+type mgMailboxRegistrar struct{}
+
+func (mgMailboxRegistrar) RegisterMailbox(name string) error {
+	return client.RegisterMGMailbox(name)
+}
+
 // scheduleRegisterFailureReporter implements agent.ScheduleRegisterFailureReporter
 // by writing schedule_register_failed telemetry to the scheduler's own-root
 // events.log (logPath). It is wired EVEN WHEN scheduler.New fails — its whole
@@ -1583,6 +1597,12 @@ Flags:
 	// scheduler below installs it and the auto-start sweep further down opens
 	// it; it stays closed until then.
 	gcGate := newStartupGCGate(startupGCSettle)
+
+	// Provision every spawned polecat's mailboxes (mg-7dc1). Wired OUTSIDE the
+	// scheduler block below on purpose — see mgMailboxRegistrar: addressability
+	// does not depend on a scheduler, and a daemon whose scheduler failed to
+	// load is the one where hand-sent mail is the only channel left.
+	agentRegistry.SetMailboxRegistrar(mgMailboxRegistrar{})
 
 	// Start the scheduler. Schedules in ~/.pogo/schedules.json drive a
 	// Tick() call from the heartbeat loop — wall-clock jumps are absorbed

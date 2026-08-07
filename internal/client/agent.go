@@ -343,6 +343,44 @@ func SendMGMail(to, from, subject, body string) error {
 	return nil
 }
 
+// RegisterMGMailbox creates an agent's macguffin mailbox so mail can be
+// ADDRESSED to it (`mg mail register <name>`).
+//
+// It exists because `mg mail send` stopped inventing recipients. Until mg-d639
+// a mailbox came into being on first delivery, so "register" was not a concept
+// anyone had to hold: every send succeeded, and a typo'd recipient minted a dead
+// drop that reported Delivered. mg-d639 replaced that with a refusal
+// (no_such_mailbox, exit 3) — the right fix, and the reason this function is
+// needed. A name nothing has registered is now unreachable rather than
+// silently-reachable-by-nobody.
+//
+// The alternative spelling is `mg mail send --create`, and it is the wrong one
+// for provisioning. --create at a SEND callsite says "deliver to this name
+// whether or not anyone meant it", which is precisely the phantom-mailbox
+// behaviour mg-d639 removed, re-entered under a new name: a typo in a recipient
+// goes back to being invisible. Registering the recipient ahead of any message
+// keeps the refusal meaningful — after this, a no_such_mailbox means you typed
+// the name wrong, not that the recipient was never provisioned.
+//
+// IDEMPOTENT: registering an existing mailbox is exit 0 and changes nothing (it
+// creates an empty Maildir and never touches mail), so callers may register
+// unconditionally and re-register freely.
+//
+// mg canonicalizes the `mg-` prefix itself — `mg mail register mg-7dc1` creates
+// the mailbox `7dc1`, the same box `mg mail list mg-7dc1` and `mg mail list
+// 7dc1` both read (verified against mg v0.3.1-dev.19, 2026-08-07). Callers
+// therefore need not strip the prefix, and two callers that disagree about it
+// cannot end up provisioning two different boxes.
+func RegisterMGMailbox(name string) error {
+	cmd := execCommand("mg", "mail", "register", name)
+	cmd.Stderr = nil
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("mg mail register failed: %s (%w)", string(out), err)
+	}
+	return nil
+}
+
 // ArchiveMGDoneItems triggers macguffin to archive all done work items
 // immediately (--days=0). Called by the refinery after a successful merge
 // so the merged item moves from done/ to archive/ at its natural lifecycle

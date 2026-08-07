@@ -1346,6 +1346,161 @@ if [ -f "$EXITDOC" ]; then
         && pass "the enumeration answers BOTH questions per path: was anything installed, and was pogod bounced" \
         || fail "the enumeration is missing the installed/bounced columns"
 fi
+# ---------------------------------------------------------------------------
+# register_alert_recipients — the alert path can be DELIVERED, not just run
+# ---------------------------------------------------------------------------
+# THE DEFECT (mg-7dc1). Until mg-d639, `mg mail send` filed mail for any name at
+# all, so this job never had to provision the two names it mails — an ALERT_TO
+# nobody had ever written to still reported Delivered. The ALERT_TO comment in
+# the runner said exactly that, as a fact it was relying on. mg-d639 made an
+# unknown recipient a refusal, so on a fresh install that copy of the alert now
+# fails where it used to "succeed".
+#
+# resolve_mg answers "can the alert RUN". These answer "can it be DELIVERED",
+# which since mg-d639 is a different question.
+MG_LOG="$WORK/mg-register.log"
+MG="$WORK/fake-mg"
+cat > "$MG" <<'FAKEMG'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$MG_LOG_TARGET"
+exit 0
+FAKEMG
+chmod +x "$MG"
+
+: > "$MG_LOG"
+ALERT_TO=mayor MG_LOG_TARGET="$MG_LOG" register_alert_recipients
+grep -q '^mail register mayor$' "$MG_LOG" \
+    && pass "register_alert_recipients registers ALERT_TO before it is needed" || fail "ALERT_TO not registered: $(cat "$MG_LOG")"
+grep -q '^mail register human$' "$MG_LOG" \
+    && pass "register_alert_recipients registers 'human' too — alert() mails it independently, so it needs its own box" || fail "'human' not registered: $(cat "$MG_LOG")"
+
+# A NON-DEFAULT ALERT_TO is the case this is actually for: `mayor` and `human`
+# already exist on the machine that has been running the fleet. An install that
+# sets POGO_DEPLOY_ALERT_TO to its own PM is the one where the box has never
+# been written to and the alert is refused.
+: > "$MG_LOG"
+ALERT_TO=pm-elsewhere MG_LOG_TARGET="$MG_LOG" register_alert_recipients
+grep -q '^mail register pm-elsewhere$' "$MG_LOG" \
+    && pass "register_alert_recipients follows POGO_DEPLOY_ALERT_TO (the install where the box does NOT already exist)" || fail "non-default ALERT_TO not registered: $(cat "$MG_LOG")"
+
+# THE POSITIVE CONTROL, and the point of the whole ticket. `mg mail register` and
+# `mg mail send --create` both make the mailbox exist, and the difference between
+# them is the entire value of mg-d639: --create on a send delivers to a name
+# whether or not anyone meant it, so POGO_DEPLOY_ALERT_TO=mayro would quietly
+# mint `mayro` and report success at 03:00 on the one night it mattered. That is
+# the phantom-mailbox behaviour mg-d639 removed, restored under a new name.
+#
+# This asserts the runner never reaches for it. Without this line the two fixes
+# are indistinguishable — the tests above pass just as happily on the wrong one.
+grep -v '^[[:space:]]*#' "$RUNNER" | grep -q -- '--create' \
+    && fail "the runner passes --create on a mail send — a typo'd POGO_DEPLOY_ALERT_TO would mint a phantom mailbox and report Delivered, which is what mg-d639 exists to stop" \
+    || pass "the runner provisions with 'mail register', never 'mail send --create' (a typo'd recipient still refuses loudly)"
+
+# NEVER FATAL. This runs before any deploy work, and its failure says nothing
+# about whether the deploy can proceed — the sends are attempted regardless and
+# alert() reports each one that fails. An old mg with no `mail register` verb
+# exits non-zero here, and that build still files mail for an unknown name, so
+# aborting on it would stop a nightly that was never at risk.
+MG="$WORK/failing-mg"
+printf '#!/usr/bin/env bash\nexit 1\n' > "$MG"
+chmod +x "$MG"
+ALERT_TO=mayor register_alert_recipients >/dev/null 2>&1 \
+    && pass "register_alert_recipients returns 0 when mg cannot register — a provisioning hiccup must not stop the nightly" || fail "a failed registration aborted the run"
+ALERT_TO=mayor register_alert_recipients 2>&1 | grep -q "could not register mailbox 'mayor'" \
+    && pass "a failed registration is REPORTED (it is a degraded alert path, not a silent one)" || fail "a failed registration said nothing"
+
+# Ordering: registration must come after resolve_mg (it invokes "$MG") and
+# before the first thing that can abort with an alert. resolve_git is that first
+# thing — its failure path calls alert() — so a registration placed after it
+# would be too late for exactly the alert it exists to deliver.
+awk '/^    resolve_mg/{mg=NR} /^    register_alert_recipients/{reg=NR} /^    resolve_git/{git=NR} END{exit !(mg && reg && git && mg < reg && reg < git)}' "$RUNNER" \
+    && pass "register_alert_recipients runs after resolve_mg and before the first alerting abort" \
+    || fail "registration is not ordered between resolve_mg and resolve_git"
+
+# ---------------------------------------------------------------------------
+# alert()'s return value — the question mg-7dc1 recorded as UNEXAMINED
+# ---------------------------------------------------------------------------
+# mg-7dc1 left open "whether a nonzero return from the alert path cascades into
+# the deploy's own exit handling". It does not, and this pins the answer so it
+# stays pinned:
+#
+#   - the runner sets `set -u` and NOT `set -e`, so a non-zero return never
+#     aborts anything by itself;
+#   - every alert() callsite is followed by an explicit `exit`, and none of them
+#     reads alert's status.
+#
+# That makes a refused alert cost the operator nothing in exit code — which is
+# the good news and the bad news, since it also means a run whose alert was
+# never delivered still exits with the code it would have had. The delivery
+# guarantee therefore has to come from the recipients existing, which is what
+# register_alert_recipients is for.
+grep -qE '^set -e|^set -eu|^set -ue' "$RUNNER" \
+    && fail "the runner enables set -e; alert()'s rc=1 would now abort its caller mid-path" \
+    || pass "the runner does not use set -e — a failed alert send cannot abort the path that called it"
+# The callsites are MULTI-LINE — subject, a backslash, then a heredoc-shaped
+# body running to a dozen lines — so a grep of the lines matching `alert "` reads
+# only the first line of each and cannot see a `|| rc=1` on the last. That grep
+# passes on this file and passes just as happily on a file where the cascade is
+# real, which is the kind of control this ticket is about. So walk each callsite
+# to the END of its command, tracking double-quote parity across the
+# continuations, and check the terminating line — plus the opening line for the
+# `if alert`/`! alert` spellings, where the status is read at the front instead.
+ALERT_STATUS_PROBE='
+function quotes(s,   n,i,c) { n=0; for(i=1;i<=length(s);i++){c=substr(s,i,1); if(c=="\"") n++} return n }
+{ lines[NR]=$0 } END {
+  bad=0
+  for (i=1;i<=NR;i++) {
+    L=lines[i]
+    if (L !~ /(^|[^_[:alnum:]])alert "/) continue
+    if (L ~ /^[[:space:]]*#/) continue
+    if (L ~ /(if|while|until|!)[[:space:]]+alert "/) { print "line " i ": " L; bad++; continue }
+    open = quotes(L) % 2
+    j = i
+    while ((open || lines[j] ~ /\\$/) && j < NR) { j++; open = (open + quotes(lines[j])) % 2 }
+    if (lines[j] ~ /\|\||&&|\$\?/) { print "line " j ": " lines[j]; bad++ }
+  }
+  exit (bad>0)
+}'
+awk "$ALERT_STATUS_PROBE" "$RUNNER" \
+    && pass "no alert() callsite reads its return value — a refused send cannot cascade into the deploy's exit handling (mg-7dc1's open question, answered)" \
+    || fail "an alert() callsite branches on its return value; a refused mail would change control flow"
+
+# The probe's own positive control. It is a hand-rolled parse of a multi-line
+# shell command, and a parse that silently stopped matching would report this
+# property as held on every future edit. Feed it a copy of the runner with the
+# cascade INSERTED and require it to object.
+# The injection lands on the TERMINATING line of the first alert callsite's
+# multi-line command, which is the whole point: that is precisely the position a
+# first-line grep cannot see.
+#
+# It is located STRUCTURALLY, by the same parity walk, rather than by matching a
+# line of the alert's prose. An earlier version anchored on a specific body line
+# and stopped applying the first time that alert was reworded — the fixture went
+# on "passing" against an unmodified file, which is the exact failure mode this
+# control exists to catch, reproduced inside the control itself. The guard below
+# is what caught it; it stays.
+CASCADE_COPY="$WORK/runner-with-cascade.sh"
+awk '
+function quotes(s,   n,i,c) { n=0; for(i=1;i<=length(s);i++){c=substr(s,i,1); if(c=="\"") n++} return n }
+{ lines[NR]=$0 } END {
+  hit=0
+  for (i=1;i<=NR && !hit;i++) {
+    L=lines[i]
+    if (L !~ /(^|[^_[:alnum:]])alert "/ || L ~ /^[[:space:]]*#/) continue
+    open = quotes(L) % 2
+    j = i
+    while ((open || lines[j] ~ /\\$/) && j < NR) { j++; open = (open + quotes(lines[j])) % 2 }
+    lines[j] = lines[j] " || rc=99"
+    hit=1
+  }
+  for (i=1;i<=NR;i++) print lines[i]
+}' "$RUNNER" > "$CASCADE_COPY"
+grep -q 'rc=99' "$CASCADE_COPY" \
+    && pass "the cascade fixture applies (the positive control is testing a genuinely modified file)" \
+    || fail "the cascade fixture did not apply — the probe's positive control is testing an unmodified file"
+awk "$ALERT_STATUS_PROBE" "$CASCADE_COPY" >/dev/null \
+    && fail "the alert-status probe reported a runner WITH a cascade as clean — it is not measuring anything" \
+    || pass "the alert-status probe objects to an injected cascade (it measures the property, not the file)"
 
 # ---------------------------------------------------------------------------
 echo

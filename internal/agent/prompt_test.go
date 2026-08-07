@@ -2244,19 +2244,26 @@ func TestPolecatTemplatesIncludeMailCheckCron(t *testing.T) {
 //     polled a box nobody wrote to; one sat on an unread mayor correction
 //     retracting a false premise in its own brief.
 //   - mg-aa96 then FORBADE `mg mail list {{.Id}}`, on the theory that the
-//     mailbox is the agent name. That over-corrected. mg has NO mailbox
-//     registration: a box is created on FIRST DELIVERY, so an inbox is whichever
-//     name its SENDERS used and is not a property of the agent at all. Agent
-//     ba465's mail was in the work-item box because that is what its
+//     mailbox is the agent name. That over-corrected. At the time mg had NO
+//     mailbox registration — a box was created on FIRST DELIVERY — so an inbox
+//     was whichever name its SENDERS used and was not a property of the agent at
+//     all. Agent ba465's mail was in the work-item box because that is what its
 //     correspondents typed, and forbidding that box did not stop the mail
 //     arriving there — it only stopped anyone opening it.
+//
+// mg-d639 and mg-7dc1 changed the MECHANISM without changing this contract, and
+// the distinction matters to anyone tempted to invert it a third time.
+// Registration now exists, and pogod registers both boxes at spawn — so neither
+// is a phantom any more. But which box a given message is in is still decided by
+// the sender, so reading only one is still silent. BOTH remains the answer; only
+// the reason it is not a property of the agent has changed.
 //
 // So the contract is BOTH, and the test asserts both halves. Neither name can be
 // dropped: an agent that reads only $POGO_AGENT_NAME misses what work-item
 // senders addressed, and one that reads only {{.Id}} is the original 2026-08-05
-// failure. Neither is detectable from inside the agent — `mg mail list` reports a
-// never-used box and a genuinely-empty one with the same exit code, and with
-// identical (empty) `--json` output.
+// failure. Nor is the miss detectable from inside the agent: `mg mail list`
+// exits 0 for an empty box and for a box that never existed alike, so anything
+// checking only the status still cannot tell "no mail" from "wrong box".
 func TestPolecatTemplatesReadBothMailboxes(t *testing.T) {
 	for _, path := range polecatMailCheckTemplates {
 		data, err := defaultPrompts.ReadFile(path)
@@ -2270,8 +2277,8 @@ func TestPolecatTemplatesReadBothMailboxes(t *testing.T) {
 		}
 		if !strings.Contains(s, "mg mail list {{.Id}}") {
 			t.Errorf("%s: expected the mail-check prompt to ALSO read `mg mail list {{.Id}}` — "+
-				"mailboxes are created on first delivery, so mail from anyone who addressed the work "+
-				"item is sitting in that box and nothing else will ever open it (mg-4f8c)", path)
+				"which box holds a message is decided by the sender, so mail from anyone who addressed "+
+				"the work item is sitting in that box and nothing else will ever open it (mg-4f8c)", path)
 		}
 		// The schedule id stays keyed on the work item: it names the unit of
 		// work and is what the coordinator removes on stop. It is a THIRD
@@ -2292,8 +2299,65 @@ func TestPolecatTemplatesReadBothMailboxes(t *testing.T) {
 		}
 		if !strings.Contains(s, "pogo agent list") {
 			t.Errorf("%s: the mail-check section must tell the polecat to take a recipient name from the mail's "+
-				"From: or `pogo agent list` — `mg mail send` to an unused name creates a phantom box and "+
-				"reports success, so an inferred name fails silently (mg-4f8c)", path)
+				"From: or `pogo agent list` — an inferred name is now REFUSED rather than silently "+
+				"delivered, and the fix is the right name (mg-4f8c, mg-d639)", path)
+		}
+	}
+}
+
+// TestPolecatTemplatesDoNotTeachThePhantomMailbox guards the templates against
+// the claim mg-d639 made false, and against the workaround that would undo it.
+//
+// Six templates told every polecat that `mg mail send` to an unused name
+// "creates a brand-new empty box and reports success — there is no such thing as
+// a bad address", and that mailboxes have no registration. Both were true when
+// written and neither is true now: an unregistered recipient is refused
+// (no_such_mailbox, exit 3), and mg-7dc1 registers a polecat's boxes at spawn.
+// A prompt is not documentation a reader can discount — it is the operating
+// instructions the agent acts on — so a prompt that describes removed behaviour
+// as live is a live defect. This is the same class as the stale comment mg-7dc1
+// found in the deploy runner, which stated the dependency outright.
+//
+// The `--create` half is the one that matters most. A polecat that meets a
+// refusal and reaches for --create makes its own send succeed and restores the
+// phantom mailbox for everyone — the refusal stops catching typos the moment it
+// becomes something you routinely wave past. The templates must say so.
+func TestPolecatTemplatesDoNotTeachThePhantomMailbox(t *testing.T) {
+	// Claims that were true before mg-d639 and are false after it. Substrings,
+	// not whole sentences, so a light reword does not slip past.
+	stale := []string{
+		"there is no such thing as a bad address",
+		"creates a brand-new empty box and reports success",
+		"created on FIRST DELIVERY",
+		"no mailbox registration",
+		// mg-d639 also gave `--json` an `exists` field, so the two states are
+		// no longer indistinguishable to tooling.
+		"both emit nothing at all",
+	}
+	for _, path := range polecatMailCheckTemplates {
+		data, err := defaultPrompts.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		s := string(data)
+		for _, claim := range stale {
+			if strings.Contains(s, claim) {
+				t.Errorf("%s: still teaches %q, which mg-d639 made false — a polecat acting on it will "+
+					"expect a misaddressed send to succeed (mg-7dc1)", path, claim)
+			}
+		}
+		// And the positive half: having removed the old warning, the templates
+		// must carry the new one. Deleting the stale text without replacing it
+		// would pass the loop above while leaving polecats with no guidance at
+		// the exact moment they hit a refusal — which is when they reach for
+		// --create.
+		if !strings.Contains(s, "--create") {
+			t.Errorf("%s: says nothing about `--create`; a polecat meeting a no_such_mailbox refusal will "+
+				"reach for it, and --create used to wave past a refusal restores the phantom mailbox "+
+				"under a new name (mg-7dc1)", path)
+		}
+		if !strings.Contains(s, "no_such_mailbox") {
+			t.Errorf("%s: never names the `no_such_mailbox` refusal a polecat will actually meet (mg-d639)", path)
 		}
 	}
 }

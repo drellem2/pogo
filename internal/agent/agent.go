@@ -429,6 +429,14 @@ type Registry struct {
 	// scheduler disabled) makes spawn skip registration.
 	mailCheckRegistrar MailCheckRegistrar
 
+	// mailboxRegistrar, when set, provisions a polecat's mg mailboxes at spawn
+	// so it is addressable before anyone has mailed it (mg-7dc1). Since mg-d639
+	// a send to an unregistered name is refused rather than filed, so without
+	// this a freshly spawned polecat is unreachable by mail from the moment it
+	// starts. pogod wires it to `mg mail register`; nil (bare registry, no
+	// macguffin) makes spawn skip provisioning.
+	mailboxRegistrar MailboxRegistrar
+
 	// scheduleRegisterFailureReporter, when set, emits schedule_register_failed
 	// telemetry when a polecat's mail-check loop could not be registered —
 	// including when mailCheckRegistrar itself is nil (scheduler failed to load
