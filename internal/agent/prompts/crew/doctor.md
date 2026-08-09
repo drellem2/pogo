@@ -112,6 +112,18 @@ pogo check-strandedmail          # Mail sitting in a mailbox NO live mail-check 
                                  # Reading is only half the recovery: if the intended
                                  # recipient is still running, tell the SENDER to
                                  # re-send to the agent name (mg-aa96).
+pogo check-verdicts --quiet      # Work that reached done/archived while the party who
+                                 # FILED it was never told how it came out. Ordered
+                                 # oldest landing first, so a backlog can be RECOVERED
+                                 # rather than merely alarmed about. Exit 3 means the
+                                 # run MEASURED NOTHING (lost events.jsonl, unreadable
+                                 # mail tree) — that is not a clean fleet. Scope it
+                                 # with --filer/--since; report only, it never files
+                                 # the missing verdict (mg-f5dd).
+pogo check-verdicts --probe      # Ask whether that detector can still FIRE: builds a
+                                 # throwaway store, drops one verdict on purpose and
+                                 # delivers its control, and reports RED/GREEN. Run it
+                                 # when a green census is the thing you are doubting.
 mg mail read <msg-id>            # Read a message
 mg mail send <agent> --from=doctor --subject="<subj>" --body-file - <<'EOF'
 <body>

@@ -96,6 +96,10 @@ const (
 	MailSendRefusesAnUnknownRecipient       = "mail/send-refuses-an-unknown-recipient"
 	MailSendCreateRegistersANewMailbox      = "mail/send-create-registers-a-new-mailbox"
 	MailListJSONReportsUnreadCounts         = "mail/list-json-reports-unread-counts"
+	NewRecordsTheCreatorInFrontmatter       = "new/records-the-creator-in-frontmatter"
+	DoneResultSidecarRecordsTheBranch       = "done/result-sidecar-records-the-branch"
+	EventsJSONLRecordsLandings              = "events/jsonl-records-work-done-and-archive"
+	MailIsAMaildirUnderTheStore             = "mail/is-a-maildir-under-the-store"
 )
 
 // A Clause is one behaviour of the `mg` CLI that pogo's tests rest on.
@@ -455,6 +459,185 @@ var clauses = []Clause{
 			return fmt.Errorf("`mg mail list --json` never mentioned the mailbox just written to:\n%s", out)
 		},
 	},
+	// ---- the four clauses `pogo check-verdicts` rests on (mg-f5dd) ----
+	//
+	// Its predicate reads BOTH halves out of macguffin's own store — the landing
+	// from events.jsonl, the delivery from the maildir — and the identities that
+	// join them from frontmatter and the result sidecar. Every one of these
+	// clauses fails QUIETLY if it goes: the detector finds nothing to judge,
+	// reports zero dropped verdicts, and exits 0. That is exactly the shape the
+	// detector exists to catch, reproduced inside the detector, which is why the
+	// dependencies are declared here rather than left implicit.
+	{
+		Name: NewRecordsTheCreatorInFrontmatter,
+		Why:  "check-verdicts identifies the FILER — the party owed the verdict — from `creator:`; without it every landed item is skipped and the scan is cheerfully empty",
+		Dependents: []string{
+			"internal/verdictwatch (loadItems, Scan)",
+			"cmd/pogo/checkverdicts.go",
+		},
+		probe: func(s *store) error {
+			id, err := s.newItem("contract probe", "a body")
+			if err != nil {
+				return err
+			}
+			hits, gerr := filepath.Glob(filepath.Join(s.root, "work", "*", id+".md*"))
+			if gerr != nil || len(hits) == 0 {
+				return fmt.Errorf("the item just filed is not on disk at work/*/%s.md*: %v %v", id, hits, gerr)
+			}
+			data, rerr := os.ReadFile(hits[0])
+			if rerr != nil {
+				return rerr
+			}
+			if !regexp.MustCompile(`(?m)^creator:\s*\S`).Match(data) {
+				return fmt.Errorf("a filed item carries no `creator:` frontmatter line:\n%s", data)
+			}
+			return nil
+		},
+	},
+	{
+		Name: DoneResultSidecarRecordsTheBranch,
+		Why:  "the branch in the result sidecar is the ONLY worker identity macguffin records; lose it and every landed item goes UNDECIDABLE, which check-verdicts reports as neither delivered nor dropped",
+		Dependents: []string{
+			"internal/verdictwatch (sidecarWorker, resolveWorker)",
+			"internal/verdictwatch (the constructive probe's `land` fixture)",
+		},
+		probe: func(s *store) error {
+			id, err := s.newItem("contract probe", "a body")
+			if err != nil {
+				return err
+			}
+			if out, code, err := s.run("claim", id); err != nil {
+				return err
+			} else if code != 0 {
+				return fmt.Errorf("`mg claim` exited %d:\n%s", code, out)
+			}
+			if out, code, err := s.run("done", id, `--result={"branch":"polecat-probe1"}`); err != nil {
+				return err
+			} else if code != 0 {
+				return fmt.Errorf("`mg done --result` exited %d:\n%s", code, out)
+			}
+			want := filepath.Join(s.root, "work", "done", id+".result.json")
+			data, rerr := os.ReadFile(want)
+			if rerr != nil {
+				return fmt.Errorf("after `mg done --result` there is no sidecar at %s: %v", want, rerr)
+			}
+			var side struct {
+				Branch string `json:"branch"`
+			}
+			if jerr := json.Unmarshal(data, &side); jerr != nil {
+				return fmt.Errorf("the result sidecar is not JSON: %v\n%s", jerr, data)
+			}
+			if side.Branch != "polecat-probe1" {
+				return fmt.Errorf("the result sidecar records branch %q, want the caller's own %q", side.Branch, "polecat-probe1")
+			}
+			return nil
+		},
+	},
+	{
+		Name: EventsJSONLRecordsLandings,
+		Why:  "events.jsonl is the LANDING half of check-verdicts' predicate; rename the type or the item_id field and every item reads as never landed, so the detector reports a clean fleet while every verdict in it goes missing",
+		Dependents: []string{
+			"internal/verdictwatch (loadLandings)",
+		},
+		probe: func(s *store) error {
+			id, err := s.newItem("contract probe", "a body")
+			if err != nil {
+				return err
+			}
+			if out, code, err := s.run("claim", id); err != nil {
+				return err
+			} else if code != 0 {
+				return fmt.Errorf("`mg claim` exited %d:\n%s", code, out)
+			}
+			if out, code, err := s.run("done", id, `--result={"branch":"polecat-probe1"}`); err != nil {
+				return err
+			} else if code != 0 {
+				return fmt.Errorf("`mg done --result` exited %d:\n%s", code, out)
+			}
+			data, rerr := os.ReadFile(filepath.Join(s.root, "events.jsonl"))
+			if rerr != nil {
+				return fmt.Errorf("the store has no events.jsonl after a completed item: %v", rerr)
+			}
+			for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+				var e struct {
+					Type   string `json:"type"`
+					ItemID string `json:"item_id"`
+					TS     string `json:"ts"`
+				}
+				if json.Unmarshal([]byte(line), &e) != nil {
+					continue
+				}
+				if e.Type != "work.done" || e.ItemID != id {
+					continue
+				}
+				if e.TS == "" {
+					return fmt.Errorf("the work.done event for %s carries no `ts`, so a landing cannot be ordered or bounded by --since: %s", id, line)
+				}
+				return nil
+			}
+			return fmt.Errorf("no {\"type\":\"work.done\",\"item_id\":%q} line in events.jsonl after completing it:\n%s", id, data)
+		},
+	},
+	{
+		Name: MailIsAMaildirUnderTheStore,
+		Why:  "check-verdicts reads the maildir DIRECTLY because `mg mail list --all` excludes archived mail and a filed-away verdict must still count as delivered; a layout or header change makes every landed item read as dropped",
+		Dependents: []string{
+			"internal/verdictwatch (loadMailbox)",
+		},
+		probe: func(s *store) error {
+			const box, sender, subject = "maildirprobe", "contract-probe", "probe subject"
+			if out, code, err := s.run("mail", "send", box, "--create", "--from="+sender, "--subject="+subject, "--body=probe"); err != nil {
+				return err
+			} else if code != 0 {
+				return fmt.Errorf("`mg mail send --create` exited %d:\n%s", code, out)
+			}
+			// Delivered under <root>/mail/<box>/{new,cur,archive}, with the
+			// From/Subject/Date headers the detector matches a worker on.
+			var found string
+			for _, sub := range []string{"new", "cur", "archive"} {
+				entries, err := os.ReadDir(filepath.Join(s.root, "mail", box, sub))
+				if err != nil {
+					continue
+				}
+				for _, e := range entries {
+					if !e.IsDir() {
+						found = filepath.Join(s.root, "mail", box, sub, e.Name())
+					}
+				}
+			}
+			if found == "" {
+				return fmt.Errorf("nothing under %s/{new,cur,archive} after a delivered message", filepath.Join(s.root, "mail", box))
+			}
+			data, rerr := os.ReadFile(found)
+			if rerr != nil {
+				return rerr
+			}
+			head, _, _ := strings.Cut(string(data), "\n\n")
+			for _, want := range []string{"From: " + sender, "Subject: " + subject, "Date: "} {
+				if !strings.Contains(head, want) {
+					return fmt.Errorf("the delivered message's headers do not carry %q:\n%s", want, head)
+				}
+			}
+			// And an ARCHIVED message stays readable in the same tree. This is
+			// the half `mg mail list --all` cannot answer, and the reason the
+			// detector reads the maildir instead of the CLI.
+			id, ierr := s.messageID(box, sender, subject)
+			if ierr != nil {
+				return ierr
+			}
+			if out, code, err := s.run("mail", "archive", box+"/"+id); err != nil {
+				return err
+			} else if code != 0 {
+				return fmt.Errorf("`mg mail archive` exited %d:\n%s", code, out)
+			}
+			entries, aerr := os.ReadDir(filepath.Join(s.root, "mail", box, "archive"))
+			if aerr != nil || len(entries) == 0 {
+				return fmt.Errorf("after `mg mail archive` there is nothing under %s: %v",
+					filepath.Join(s.root, "mail", box, "archive"), aerr)
+			}
+			return nil
+		},
+	},
 }
 
 // Clauses returns the declared contract, in declaration order.
@@ -653,6 +836,36 @@ func (s *store) claimedTriage() (string, error) {
 		return "", fmt.Errorf("`mg claim` exited %d:\n%s", code, out)
 	}
 	return id, nil
+}
+
+// messageID recovers the MSG-ID of a delivered message from the documented
+// `mg mail list --json` contract.
+//
+// Read from --json rather than scraped out of `mg mail send`'s output, which
+// prints a PATH: the original verdictwatch suite scraped it, matched nothing,
+// and silently asserted on a setup that had never happened.
+func (s *store) messageID(box, from, subject string) (string, error) {
+	out, code, err := s.run("mail", "list", box, "--all", "--json")
+	if err != nil {
+		return "", err
+	}
+	if code != 0 {
+		return "", fmt.Errorf("`mg mail list %s --all --json` exited %d:\n%s", box, code, out)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		var rec struct {
+			ID      string `json:"id"`
+			From    string `json:"from"`
+			Subject string `json:"subject"`
+		}
+		if json.Unmarshal([]byte(line), &rec) != nil {
+			continue
+		}
+		if rec.From == from && rec.Subject == subject {
+			return rec.ID, nil
+		}
+	}
+	return "", fmt.Errorf("`mg mail list %s --all --json` does not list the message just sent:\n%s", box, out)
 }
 
 // field reads one jq-ish path out of `mg show --json`. Implemented in Go rather

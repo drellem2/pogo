@@ -1872,6 +1872,82 @@ anything is, so it can gate a schedule or CI step.
 
 Source of truth: `internal/strandedmail/`, `cmd/pogo/checkstrandedmail.go`.
 
+### `pogo check-verdicts` — work that landed while its filer was never told
+
+A fourth disjoint question, at the other end of the loop. The three above ask
+whether an agent can be reached; this one asks whether the party who FILED a
+piece of work ever heard how it came out.
+
+The predicate is one line, and both halves come from macguffin's own store:
+**an item reaching `done` (or `archived`) with no verdict mail received by its
+filer is a dropped verdict.** The landing comes from `work.done` / `work.archive`
+in `events.jsonl`, the filer from the item's `creator:` frontmatter, the worker
+from `polecat-<name>` in its result sidecar, and the delivery from a message in
+the filer's mailbox whose `From:` is that worker. Findings are ordered **oldest
+landing first**, because the report exists so a backlog can be *recovered* and
+not merely alarmed about.
+
+Three kinds, not two. `DROPPED` is the finding. `DELIVERED` counts archived mail
+— filing a verdict away is not losing it, which is why this reads the maildir
+directly instead of `mg mail list --all`, whose output excludes archived
+messages. `UNDECIDABLE` is the detector's own reach: an item whose worker cannot
+be resolved is counted and listed on its own rather than folded into either
+verdict, and it does **not** make the run actionable.
+
+What it cannot see is stated rather than footnoted: a verdict delivered by any
+channel other than macguffin mail — a commit subject, a docs file, a spoken
+handover — is invisible and is reported as dropped. That is the intended
+polarity; the complaint it was built for is precisely that a commit subject is
+not delivery.
+
+It **reports only**, and that is a boundary rather than a stage. It never files
+the missing verdict, never mails on anyone's behalf, and never edits an item;
+re-sending would have to forge a sender. If a future version should *file* the
+missing verdict, that is a different command and it does not join this family.
+
+**Exit status** is 0 for no dropped verdicts, 1 for at least one, 2 for a usage
+error, and 3 when the run **measured nothing**. That third answer is the whole
+reason this was ported rather than scheduled where it lay: lose `events.jsonl`
+and every item reads as never landed, so a careless detector reports "0 dropped"
+over a fleet losing every verdict it has. An unreadable mail tree, an
+unresolvable store, and an *unscoped* scan that judged zero items are all exit 3.
+A scan **scoped** by `--filer` or `--since` that matches nothing is a different
+thing — an answer to the question asked — and exits 0 while saying, in words,
+that it judged nothing.
+
+**`--probe` asks whether the detector can still fire.** It builds a throwaway
+macguffin store, drives the real `mg` binary through new/claim/done, drops one
+verdict on purpose and delivers its matched control, and reports whether the
+detector went RED on the first and GREEN on the second:
+
+```
+$ pogo check-verdicts --probe
+  [PASS] known-bad input: work landed, worker never mailed the filer
+         want DROPPED, got DROPPED
+  [PASS] known-good input: the same work, verdict mailed to the filer
+         want DELIVERED, got DELIVERED
+```
+
+The same probe runs in `go test ./...`, so the refinery gate exercises it on
+every merge. That is deliberate and it is the lesson this port carries: the
+original's two constructive probes were killed ~22 hours after landing by
+mg-d639 — a **correct** change, making an unknown mail recipient a refusal rather
+than a silent create — and nobody noticed for two days, because the read-only
+census kept working and stayed green. A probe that runs only when somebody
+remembers to look is in the position that one was in. The mg behaviours the
+fixture rests on are declared as clauses in `internal/mgcontract`, so when mg
+moves again the red arrives once, by name, instead of as an unexplained failure
+inside a detector's probe.
+
+Ported from macguffin's `verdictwatch.py` (mg-bf3f, audited by mg-f911), which
+was confirmed correct and then sat unrun in a research working directory — where
+code has no runner by construction. Verified against the live store at the port:
+identical scanned/delivered counts to the original, with two rows correctly moved
+from `UNDECIDABLE` to `DROPPED` because this version prefers the copy of a
+duplicated item that names a worker rather than whichever the glob yielded last.
+
+Source of truth: `internal/verdictwatch/`, `cmd/pogo/checkverdicts.go`.
+
 ## The wedged-agent detector (wedge-watch)
 
 On 2026-08-04 twelve polecats and the doctor crew agent sat at a Claude Code
