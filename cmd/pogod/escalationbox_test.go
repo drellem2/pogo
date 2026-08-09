@@ -88,3 +88,40 @@ func TestEscalationBoxResolvesForWatcherWiring(t *testing.T) {
 		})
 	}
 }
+
+// TestAckWatchBlackoutRoutingDefaultsAgree pins the ONE routing decision mg-e2a4
+// turned on, across the two packages that each declare a piece of it.
+//
+// It lives beside the escalation-box assertion because it is the same class of
+// bug — two artifacts declaring one policy and nothing asserting they agree
+// (mg-b201) — and because cmd/pogod is again the only package that imports both
+// sides.
+//
+// The failure it guards against is specific and silent. If config's blackout
+// renotify drifts above ackwatch's, or above the sampling interval, a dead fleet
+// stops re-announcing and the incident fits back inside one quiet period; and
+// pogod would still log a value that looked configured.
+func TestAckWatchBlackoutRoutingDefaultsAgree(t *testing.T) {
+	if config.DefaultAckWatchBlackoutRenotify != ackwatch.DefaultBlackoutRenotifyAfter {
+		t.Errorf("config says %s, ackwatch says %s — pogod passes the config value, so a "+
+			"direct caller of ackwatch.New would renotify on a different clock",
+			config.DefaultAckWatchBlackoutRenotify, ackwatch.DefaultBlackoutRenotifyAfter)
+	}
+	if config.DefaultAckWatchBlackoutRenotify >= config.DefaultAckWatchRenotify {
+		t.Errorf("blackout renotify %s is not shorter than the ordinary %s: the fleet-outage "+
+			"arm would inherit the 6-hour shadow that swallowed the 4.5-hour outage",
+			config.DefaultAckWatchBlackoutRenotify, config.DefaultAckWatchRenotify)
+	}
+	if config.DefaultAckWatchBlackoutRenotify > config.DefaultAckWatchInterval {
+		t.Errorf("blackout renotify %s exceeds the sampling interval %s: samples during a "+
+			"dead fleet would be silently dropped",
+			config.DefaultAckWatchBlackoutRenotify, config.DefaultAckWatchInterval)
+	}
+	// A blackout escalates on its first sample regardless of this, which is the
+	// point — but the constant is still what gates the AGE-based escalation, and
+	// a reader comparing the two needs them to be visibly different scales.
+	if config.DefaultAckWatchEscalateAfter <= config.DefaultAckWatchBlackoutRenotify {
+		t.Error("escalate_after has collapsed to the blackout cadence; the two conditions " +
+			"are supposed to be on different clocks")
+	}
+}

@@ -1405,7 +1405,28 @@ a quiet fleet is verified in the conditions where the metric was never wrong.
 			now := time.Now()
 			snap := ackwatch.Snapshot{Now: now, Samples: ackwatch.SampleEntries(entries, now)}
 			if p, perr := scheduler.DefaultPath(); perr == nil {
-				snap.LastDisruption, snap.DisruptionReason = ackwatch.LastDisruption(scheduler.EventLogPath(p), now)
+				logPath := scheduler.EventLogPath(p)
+				snap.LastDisruption, snap.DisruptionReason = ackwatch.LastDisruption(logPath, now)
+				// The absolute (blackout) arm needs the windowed fire traffic, or
+				// it reports itself blind. Without this, `pogo check-acks` would
+				// answer the fleet-outage question with the peer-relative arm
+				// alone — which is the arm that reads 0 findings during an outage
+				// (mg-e2a4).
+				recent := ackwatch.RecentFires(logPath, now, ackwatch.DefaultBlackoutWindow)
+				snap.Recent = &recent
+			}
+			// The blackout arm's liveness gate. An empty fleet and a dead one
+			// produce identical completion counters, so the arm judges RUNNING
+			// agents only — and reports itself blind, rather than guessing, when
+			// the daemon cannot say who is running.
+			if infos, aerr := client.ListAgents(); aerr == nil {
+				runningSince := make(map[string]time.Time, len(infos))
+				for _, a := range infos {
+					if a.Status == agent.StatusRunning {
+						runningSince[a.Name] = a.StartTime
+					}
+				}
+				snap.RunningSince = runningSince
 			}
 			rep := ackwatch.Detect(snap, ackwatch.DefaultParams())
 

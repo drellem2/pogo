@@ -26,6 +26,23 @@ func TestAckWatchDefaults(t *testing.T) {
 	if cfg.AckWatch.RenotifyAfter != 6*time.Hour {
 		t.Errorf("renotify_after = %s, want 6h", cfg.AckWatch.RenotifyAfter)
 	}
+	// The blackout window is a SEPARATE number, and it has to be shorter. A
+	// 4.5-hour total outage on 2026-08-09 began and ended inside one 6-hour
+	// renotify shadow, so it produced a single notice for an arbitrarily severe
+	// event — and a second identical outage 30 minutes later would have been
+	// suppressed entirely (mg-e2a4).
+	if cfg.AckWatch.BlackoutRenotify != 30*time.Minute {
+		t.Errorf("blackout_renotify = %s, want 30m", cfg.AckWatch.BlackoutRenotify)
+	}
+	if cfg.AckWatch.BlackoutRenotify >= cfg.AckWatch.RenotifyAfter {
+		t.Errorf("blackout_renotify (%s) must be shorter than renotify_after (%s), or the "+
+			"fleet-outage arm inherits the quiet period that swallowed the incident",
+			cfg.AckWatch.BlackoutRenotify, cfg.AckWatch.RenotifyAfter)
+	}
+	if cfg.AckWatch.BlackoutRenotify > cfg.AckWatch.Interval {
+		t.Errorf("blackout_renotify (%s) exceeds the sampling interval (%s): a dead fleet "+
+			"would skip samples silently", cfg.AckWatch.BlackoutRenotify, cfg.AckWatch.Interval)
+	}
 	if cfg.AckWatch.NotifyTo != "mayor" {
 		t.Errorf("notify_to = %q, want %q — the remedy (nudge --immediate, doctor restart) is coordination work",
 			cfg.AckWatch.NotifyTo, "mayor")
@@ -40,7 +57,7 @@ func TestAckWatchDefaults(t *testing.T) {
 
 func TestAckWatchOverrides(t *testing.T) {
 	_, home := layeredSandbox(t)
-	write(t, home, "[ack_watch]\ninterval = \"5m\"\nrenotify_after = \"1h\"\nnotify_to = \"pm-pogo\"\nescalate_after = \"12h\"\n")
+	write(t, home, "[ack_watch]\ninterval = \"5m\"\nrenotify_after = \"1h\"\nblackout_renotify = \"2m\"\nnotify_to = \"pm-pogo\"\nescalate_after = \"12h\"\n")
 
 	cfg := Load()
 
@@ -49,6 +66,9 @@ func TestAckWatchOverrides(t *testing.T) {
 	}
 	if cfg.AckWatch.RenotifyAfter != time.Hour {
 		t.Errorf("renotify_after = %s, want 1h", cfg.AckWatch.RenotifyAfter)
+	}
+	if cfg.AckWatch.BlackoutRenotify != 2*time.Minute {
+		t.Errorf("blackout_renotify = %s, want 2m", cfg.AckWatch.BlackoutRenotify)
 	}
 	if cfg.AckWatch.NotifyTo != "pm-pogo" {
 		t.Errorf("notify_to = %q, want %q", cfg.AckWatch.NotifyTo, "pm-pogo")

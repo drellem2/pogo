@@ -135,6 +135,120 @@
 // be far below its peers AND below an absolute floor. That keeps the detector
 // quiet in exactly the regime where a human reader would shrug.
 //
+// # The blind spot of every outlier detector, and the second arm that covers it
+//
+// A peer-relative test keys on DISPERSION. The worse an outage is the more
+// UNIFORM it is, so the detector is weakest exactly where the failure is worst:
+// when every schedule degrades in lockstep the median falls with the members and
+// the gap stays near zero. That is not an arithmetic bug, it is the defining
+// property of comparing agents to each other.
+//
+// Measured, on 2026-08-09 (mg-e2a4). Every crew agent and polecat stopped
+// completing turns at ~12:50Z and resumed at ~17:20Z — an `ENOTFOUND` on the
+// model API, classified by pogod's own wedge-watch as `cause=network_down`.
+// `pogo schedule list` at 17:21Z showed the signature plainly: every mail-check
+// schedule carrying the SAME deficit, `⚠ 27 unacked`, 27 fires x 10 minutes =
+// 4.5 hours, identical on all six. Over 13:20-17:20 the events log holds 251
+// `scheduler_fire_delivered` against 3 `scheduler_fire_completed`. And every
+// `ack_watch_fired` that day reported `deficit_count: 0`, including the one that
+// fired mid-outage at 16:12:59. A 100%-dead fleet produced zero per-schedule
+// findings, and the reason is above: there was no outlier to find.
+//
+// So the per-schedule rule needs a PARTNER that keys on something other than
+// dispersion. Report.Blackout is it: a single fleet-wide finding built from the
+// ABSOLUTE completion rate over a trailing window — fires are being delivered to
+// agents that are RUNNING and nothing is completing them — with no median, no
+// peer set, and no comparison of any agent to any other. It gets MORE confident as the failure
+// gets more uniform, which is the exact inverse of the peer test's failure mode,
+// and that is the point of having both.
+//
+// The peer-relative test is NOT deleted or weakened. It catches the single deaf
+// agent, which is a real and common shape (mg-1935 is the whole reason this
+// package exists), and an absolute rule alone would be noisy across schedules
+// with legitimately different cadences and turn lengths. Two arms, two failure
+// modes, neither one sufficient.
+//
+// # Why the blackout arm reads EVENTS rather than the counters
+//
+// Report.Fleet already reported a whole cohort below the floor, and it FIRED
+// during this outage (`fleet_count: 1` in every firing that day). It was still
+// useless, for two reasons this arm has to fix rather than repeat:
+//
+//  1. The counters are LIFETIME totals, so a cohort median below the floor
+//     cannot distinguish "dead right now" from "carried a bad ratio for days".
+//     A blackout is a statement about the last few hours, and only a windowed
+//     measurement can make it.
+//  2. The counters are ZEROED by re-registration, which the nightly redeploy
+//     guarantees (mg-42ac), and MinFires then holds every schedule ineligible
+//     for over three hours afterwards. An outage inside that window is
+//     invisible to anything reading counters. The events log is where a fire
+//     delivery and a fire completion both survive a restart — the same reason
+//     populations.go reads events.
+//
+// Hence Snapshot.Recent, supplied by the caller (see source.RecentFires) so
+// Detect stays pure. When the caller cannot measure it, that is recorded and
+// rendered rather than read as calm — a blind arm and a quiet arm must never be
+// the same observation.
+//
+// # The two false-positive paths this arm has, both measured and both closed
+//
+// An absolute rule is easy to write and easy to write BADLY, because "fires
+// delivered and nothing completing them" describes three different situations
+// and only one of them is a fault. Both wrong ones were found by sweeping the
+// real events log rather than by reasoning, and each has a gate:
+//
+//  1. THE FLEET IS NOT THERE. Between 00:00 and 09:30 on 2026-08-09 the
+//     scheduler delivered ~30 mail-check fires an hour and completed zero of
+//     them, every hour, all night — because no crew agent was running. Ungated,
+//     this arm mails a person at 4am nightly, and an alarm that cries wolf every
+//     night is strictly worse than the silence it replaced. Gate:
+//     Snapshot.RunningSince, and only agents up for the WHOLE window are judged
+//     (a spawn 40 minutes ago cannot speak for the last three hours — that
+//     produced a measured false positive at 10:00Z, right after the crew came
+//     up).
+//
+//  2. THE FLEET IS WORKING IN LONG TURNS. A fire is only ackable at the end of
+//     an agent turn, so completions arrive in bursts. On the same day, with all
+//     six crew agents up and demonstrably working, there was a TWO-HOUR stretch
+//     with 84 fires delivered and none completed. Gate: DefaultBlackoutWindow,
+//     set to 3 hours because that is the shortest window with no false positive
+//     in the sweep recorded there. The cost is stated in that comment and it is
+//     real: detection lands about three hours into an outage.
+//
+// After both gates, across the whole of 2026-08-09 at 30-minute steps, the arm
+// fired on 4 samples — all inside the outage — and on no others.
+//
+// # Who a blackout is addressed to, and why that is not a timeout
+//
+// The routing is the other half of mg-e2a4, and it was the more expensive half.
+// At 16:12:59, mid-outage, the fleet arm fired and mailed exactly one recipient:
+// `mayor` — an agent whose own mail-check carried the same 27 unacked fires.
+// Escalation to a person requires DefaultEscalateAfter (24h) of persistence, so
+// a 4.5-hour total outage generated one notice, addressed to the outage.
+//
+//	The only recipient of a fleet-outage alarm was a member of the fleet.
+//	A detector inside the job cannot report the job not running.
+//
+// A blackout therefore escalates on its FIRST sample, structurally, and NOT on
+// an age gate — see Watcher.sample and deafwatch.escalateNow, which is the same
+// rule for the same reason. Patience cannot help a recipient that is inside the
+// failure. "One agent is lagging its peers" and "nothing in the fleet has
+// completed a turn in an hour" do not share an escalation clock, and a negative
+// EscalateAfter disables only the AGE-based escalation.
+//
+// The asymmetry that makes this work is that POGOD SURVIVED: it kept sampling
+// and kept writing throughout, while every agent it hosts was inert. So the
+// notice is written by the one live component and consumed by an out-of-process
+// reader of the escalation box (see `[agents] escalation_box`), with no fleet
+// agent, no agent turn, and no schedule anybody has to ack anywhere on that
+// path.
+//
+// Two honesty requirements follow, and both are wired rather than described.
+// Blackout.StalledAgents names the population, so a recipient that is ITSELF in
+// it can be reported as such instead of being quietly mailed. And a blackout
+// notice that fails to send is emitted as ack_watch_blackout_unreported: an
+// alarm that reached nobody is this ticket's bug, one level up.
+//
 // # Counters reset on re-registration — and that is load-bearing here
 //
 // Registering a schedule with an `--id` that already exists REPLACES the entry
@@ -230,6 +344,115 @@ type Snapshot struct {
 	// DisruptionReason names it for the suppression message ("system_wake",
 	// "pogod restart"). Cosmetic; the suppression turns on LastDisruption alone.
 	DisruptionReason string
+	// Recent is the fleet-wide trailing-window count of fire deliveries and
+	// completions, read from the events log by the caller (source.RecentFires).
+	// It is what the blackout arm judges, and the counters cannot supply it: see
+	// the package header, "Why the blackout arm reads EVENTS".
+	//
+	// A nil Recent means the caller did not offer the measurement, which is
+	// reported as BlackoutBlind rather than as a clean blackout arm. A non-nil
+	// Recent carrying Err means the caller tried and could not — same treatment,
+	// different reason string.
+	Recent *Recent
+	// RunningSince maps every agent the caller considers RUNNING to the moment it
+	// started. It is the blackout arm's liveness gate, and it is not optional: nil
+	// means the caller did not supply it and the arm reports itself blind.
+	//
+	// The START TIME is load-bearing, not decoration. An agent is only judged once
+	// it has been up for the WHOLE window being measured, because the window
+	// otherwise reaches back into a period when that agent did not exist — and the
+	// scheduler was delivering to its schedule the entire time it was gone. That
+	// produced a measured false positive at 10:00Z on 2026-08-09: the crew came up
+	// at 09:35Z, the 3-hour window still contained 07:00-09:35Z of deliveries to a
+	// fleet that was not there, and the arm read 6/90 = 6.7%.
+	//
+	// It is required because "fires delivered, nothing completed" is ALSO what an
+	// absent fleet looks like. Measured on this box: between 00:00 and 09:30 on
+	// 2026-08-09 the scheduler delivered ~30 mail-check fires an hour and
+	// completed ZERO of them, every hour, all night — because no crew agent was
+	// running (all six were spawned at 09:35Z, `agent_spawned` x14 in that
+	// bucket). Without this gate the arm would mail a person at 4am every night,
+	// and an alarm that cries wolf nightly is worse than the silence it replaced.
+	//
+	// The gate is also the honest statement of what the finding MEANS: the fleet
+	// is up and is not completing work. During the 2026-08-09 outage every agent
+	// read `status=running` with `last-activity=just now`, so the running set was
+	// full while nothing was being done — which is exactly the asymmetry pogod
+	// can see and the fleet cannot report.
+	RunningSince map[string]time.Time
+}
+
+// Recent is one windowed measurement of the fleet's fire traffic. Counted from
+// events rather than the persisted counters, so it survives the nightly
+// re-registration that zeroes them, and so it describes NOW rather than a
+// lifetime.
+//
+// Like Sample, it is a plain struct with no events dependency: tests in this
+// package build it by hand instead of reading the developer's live ~/.pogo (see
+// the note at the top of source.go).
+type Recent struct {
+	// Window is the trailing span measured, ending at Snapshot.Now.
+	Window time.Duration `json:"-"`
+	// Delivered and Completed are scheduler_fire_delivered and
+	// scheduler_fire_completed counts inside the window, over every schedule.
+	Delivered int `json:"delivered"`
+	Completed int `json:"completed"`
+	// Schedules is how many distinct (agent, id) schedules were delivered to,
+	// and Agents names the distinct agents. A blackout is a claim about a
+	// population, so the population is carried with it.
+	Schedules int      `json:"schedules"`
+	Agents    []string `json:"agents"`
+	// ByAgent breaks the same window down per recipient, so the arm can be
+	// restricted to agents that are actually RUNNING (see
+	// Snapshot.RunningAgents). The totals above are the whole window and are for
+	// reporting; the judgement is made on the running subset.
+	ByAgent map[string]AgentFires `json:"by_agent,omitempty"`
+	// LastCompletedAt is the newest completion seen in the window, zero when
+	// there was none. It answers "how long since anything at all worked", which
+	// is the number a person reading the alarm wants first.
+	LastCompletedAt time.Time `json:"last_completed_at,omitempty"`
+	// Err, when non-empty, says why this window could not be measured. A
+	// measurement that failed must not arrive looking like a measurement of
+	// zero.
+	Err string `json:"err,omitempty"`
+}
+
+// AgentFires is one agent's share of a window.
+type AgentFires struct {
+	Delivered int `json:"delivered"`
+	Completed int `json:"completed"`
+	Schedules int `json:"schedules"`
+}
+
+// Rate is the windowed completed:delivered ratio, or 0 when nothing was
+// delivered. Absolute: no median, no peers, nothing compared to anything.
+func (r Recent) Rate() float64 {
+	if r.Delivered <= 0 {
+		return 0
+	}
+	return float64(r.Completed) / float64(r.Delivered)
+}
+
+// restrictTo sums the window over the named agents only, returning the subset's
+// delivered, completed and schedule counts plus the agents that completed
+// NOTHING. Used to apply the liveness gate: an agent that is not running is not
+// evidence of anything.
+func (r Recent) restrictTo(want map[string]bool) (delivered, completed, schedules int, judged, silent []string) {
+	for name, f := range r.ByAgent {
+		if !want[name] || f.Delivered == 0 {
+			continue
+		}
+		delivered += f.Delivered
+		completed += f.Completed
+		schedules += f.Schedules
+		judged = append(judged, name)
+		if f.Completed == 0 {
+			silent = append(silent, name)
+		}
+	}
+	sort.Strings(judged)
+	sort.Strings(silent)
+	return delivered, completed, schedules, judged, silent
 }
 
 // Params tunes the detector. The zero value is not usable; call
@@ -269,6 +492,30 @@ type Params struct {
 	// SettleAfter is how long after a disruption (or a counter reset) the
 	// numbers are treated as unrepresentative.
 	SettleAfter time.Duration
+
+	// BlackoutWindow is the trailing span the ABSOLUTE fleet completion rate is
+	// measured over. Only used to describe and validate Snapshot.Recent — the
+	// caller does the measuring.
+	BlackoutWindow time.Duration
+	// BlackoutRate is the absolute windowed completion rate at or below which
+	// the fleet is declared blacked out. Severity keys on THIS rather than on
+	// dispersion, which is the whole point of the second arm.
+	BlackoutRate float64
+	// BlackoutMinDeliveries is how many fires must have been delivered inside
+	// the window before its rate means anything. It is the blackout arm's whole
+	// defence against a sleeping laptop: nothing fires while the host is
+	// suspended, so a quiet window is a SMALL window, and a small window is
+	// ineligible rather than alarming.
+	BlackoutMinDeliveries int
+	// BlackoutMinSchedules is how many distinct schedules must have been
+	// delivered to inside the window. Mirrors MinPeers+1: below a cohort's worth
+	// of schedules, "the fleet" is a claim the sample cannot support.
+	BlackoutMinSchedules int
+	// BlackoutMinAgents is how many RUNNING agents must have been delivered to
+	// inside the window. Schedules can pile up on one agent; agents cannot, so
+	// this is the count that makes "the fleet" true rather than "one wedged
+	// agent with three schedules".
+	BlackoutMinAgents int
 }
 
 // Detector defaults. Tuned against the 2026-07-29 observation: peers at ~99%,
@@ -297,17 +544,80 @@ const (
 	// day. Restart freshness is mostly enforced by MinFires, which is far
 	// stricter in wall-clock terms.
 	DefaultSettleAfter = 30 * time.Minute
+
+	// DefaultBlackoutWindow is 3 hours, and the number was MEASURED rather than
+	// chosen. It is the one parameter here with a real cost attached, so the
+	// measurement is written down.
+	//
+	// A healthy fleet does not ack smoothly. Completions arrive in bursts,
+	// because a fire is only ackable at the end of an agent turn and turns run
+	// long: on 2026-08-09, with all six crew agents up and demonstrably working,
+	// there was a TWO-HOUR stretch (10:30-12:30Z) with 84 fires delivered and
+	// zero completed. That is not a fault, it is what a fleet doing long pieces of
+	// work looks like from the ack counters.
+	//
+	// So this window was swept against that day's real events log, gated on the
+	// crew being up, with the outage running 12:50-17:20Z:
+	//
+	//	window   fires during outage   first fired   FALSE POSITIVES
+	//	1h              21               13:55            9
+	//	2h              17               14:45            4
+	//	2h30m           14               15:15            1
+	//	3h              12               15:45            0
+	//	4h               8               16:25            0
+	//
+	// 3h is the shortest window with no false positive, and the cost is stated
+	// plainly: detection lands about three hours into an outage, not thirty
+	// minutes. THE RESIDUAL IS REAL — an outage shorter than roughly three hours
+	// will not be caught by this arm at all, because this fleet produces
+	// two-hour zero-completion stretches while perfectly healthy and no
+	// completion-based measurement can separate the two sooner.
+	//
+	// Three hours is nonetheless the difference between a notice and none: on the
+	// day this was filed, nothing reached a person for 4.5 hours and the human
+	// found out because it was his own wifi. Do not shorten this without
+	// re-running the sweep on data containing a real outage; a shorter window
+	// buys latency with false alarms, and a false alarm on this channel costs the
+	// channel.
+	DefaultBlackoutWindow = 3 * time.Hour
+	// DefaultBlackoutRate is 0.10. The 2026-08-09 outage read 3/251 = 1.2% over
+	// four hours. The margin above it is deliberately enormous, because the
+	// number this threshold has to stay clear of is not a healthy fleet's 100%
+	// but a BUSY one's: an agent whose turns run longer than its cadence cannot
+	// score high however perfectly it behaves (see the header), and `pa` read 83%
+	// on a storm night having acked every token it was handed. 10% is below
+	// anything a working-but-slow fleet produces and far above a dead one.
+	DefaultBlackoutRate = 0.10
+	// DefaultBlackoutMinDeliveries is 24 — three schedules' worth of a 3-hour
+	// window at a 10-minute cadence, well under the ~90 a six-agent fleet
+	// actually produces. Below it the denominator is too small for a rate to mean
+	// anything, which is also what makes a slept-through window ineligible
+	// instead of alarming: nothing fires while the host is suspended, so a quiet
+	// window is a SMALL window.
+	DefaultBlackoutMinDeliveries = 24
+	// DefaultBlackoutMinSchedules is 3, the same population floor as
+	// DefaultMinPeers+1.
+	DefaultBlackoutMinSchedules = 3
+	// DefaultBlackoutMinAgents is 3. Three RUNNING agents delivered to and not
+	// completing is a fleet; one agent holding three schedules is a wedged agent,
+	// which is the peer arm's job and reaches a different recipient.
+	DefaultBlackoutMinAgents = 3
 )
 
 // DefaultParams returns the tuned defaults.
 func DefaultParams() Params {
 	return Params{
-		MinFires:    DefaultMinFires,
-		MinPeers:    DefaultMinPeers,
-		ScaleBand:   DefaultScaleBand,
-		MinGap:      DefaultMinGap,
-		Floor:       DefaultFloor,
-		SettleAfter: DefaultSettleAfter,
+		MinFires:              DefaultMinFires,
+		MinPeers:              DefaultMinPeers,
+		ScaleBand:             DefaultScaleBand,
+		MinGap:                DefaultMinGap,
+		Floor:                 DefaultFloor,
+		SettleAfter:           DefaultSettleAfter,
+		BlackoutWindow:        DefaultBlackoutWindow,
+		BlackoutRate:          DefaultBlackoutRate,
+		BlackoutMinDeliveries: DefaultBlackoutMinDeliveries,
+		BlackoutMinSchedules:  DefaultBlackoutMinSchedules,
+		BlackoutMinAgents:     DefaultBlackoutMinAgents,
 	}
 }
 
@@ -332,6 +642,21 @@ func (p Params) withDefaults() Params {
 	}
 	if p.SettleAfter <= 0 {
 		p.SettleAfter = d.SettleAfter
+	}
+	if p.BlackoutWindow <= 0 {
+		p.BlackoutWindow = d.BlackoutWindow
+	}
+	if p.BlackoutRate <= 0 {
+		p.BlackoutRate = d.BlackoutRate
+	}
+	if p.BlackoutMinDeliveries <= 0 {
+		p.BlackoutMinDeliveries = d.BlackoutMinDeliveries
+	}
+	if p.BlackoutMinSchedules <= 0 {
+		p.BlackoutMinSchedules = d.BlackoutMinSchedules
+	}
+	if p.BlackoutMinAgents <= 0 {
+		p.BlackoutMinAgents = d.BlackoutMinAgents
 	}
 	return p
 }
@@ -396,6 +721,61 @@ type FleetFinding struct {
 // Key identifies a fleet finding for fingerprinting.
 func (f FleetFinding) Key() string { return "fleet|" + f.Kind + "|" + f.Cadence }
 
+// Blackout is the ABSOLUTE arm: fires are being delivered across the fleet and
+// nothing is completing them. It is one finding for the whole fleet, not one per
+// schedule, because that is what it is a statement about.
+//
+// It exists because the peer-relative arm cannot see a uniform failure, and the
+// cohort arm can only see one through lifetime counters that a re-registration
+// zeroes. See the package header for the 2026-08-09 measurement that separates
+// the three.
+//
+// Nothing here is a comparison. Rate is completions over deliveries in a window,
+// and the thresholds it is read against are constants — so the finding gets
+// STRONGER as the failure becomes more uniform.
+type Blackout struct {
+	// Window is the measured span, as a string for the same reason
+	// FleetFinding.Cadence is (a time.Duration marshals as a nanosecond int, and
+	// a MarshalJSON on Recent would be promoted through embedding).
+	Window string `json:"window"`
+	// Delivered, Completed and Rate are the measurement. Rate is absolute.
+	Delivered int     `json:"delivered"`
+	Completed int     `json:"completed"`
+	Rate      float64 `json:"rate"`
+	// Threshold is the rate this was judged against, carried so a reader never
+	// has to guess which build's constant applied.
+	Threshold float64 `json:"threshold"`
+	// Schedules is how many distinct schedules were delivered to in the window.
+	Schedules int `json:"schedules"`
+	// RunningJudged names every RUNNING agent the window was measured over — the
+	// population the rate above is a rate OF.
+	RunningJudged []string `json:"running_judged"`
+	// StalledAgents is the subset of those that completed NOTHING in the window.
+	// During a total outage that is all of them, and it is carried so the notifier
+	// can report a recipient that is itself in the list rather than quietly
+	// mailing it — the defect this arm was filed for (mg-e2a4).
+	StalledAgents []string `json:"stalled_agents"`
+	// LastCompletedAt is the newest completion inside the window; zero means not
+	// one fire completed in the whole window.
+	LastCompletedAt time.Time `json:"last_completed_at,omitempty"`
+}
+
+// Key identifies the blackout for fingerprinting. Constant: there is at most one
+// blackout, and its numbers drift continuously while the outage lasts. A
+// changing key would re-mail on every sample through the ordinary
+// changed-fingerprint path, which is not how this arm gets its repetition — see
+// Options.BlackoutRenotifyAfter.
+func (b Blackout) Key() string { return "blackout" }
+
+// Quiet is how long it has been since anything completed a fire, or the whole
+// window when nothing did.
+func (b Blackout) Quiet(now time.Time, window time.Duration) time.Duration {
+	if b.LastCompletedAt.IsZero() {
+		return window
+	}
+	return now.Sub(b.LastCompletedAt)
+}
+
 // Report is one evaluation of a Snapshot.
 type Report struct {
 	// Suppressed is true when the whole report was declined because the fleet
@@ -421,10 +801,25 @@ type Report struct {
 
 	Deficits []Finding      `json:"deficits"`
 	Fleet    []FleetFinding `json:"fleet"`
+	// Blackout is the absolute arm's finding, nil when the fleet is completing
+	// work (or when the arm could not look — see BlackoutBlind).
+	Blackout *Blackout `json:"blackout,omitempty"`
+	// BlackoutBlind says why the absolute arm produced no judgement at all: the
+	// window was not offered, could not be read, or was too small to mean
+	// anything. Empty means the arm ran.
+	//
+	// It is a string rather than a bool because "not measured" has to be
+	// distinguishable from "measured and calm" BY A READER, not just by the
+	// code. A control that cannot look and a control that looked and found
+	// nothing are the same silence otherwise, which is the failure mode this
+	// whole package exists to end.
+	BlackoutBlind string `json:"blackout_blind,omitempty"`
 }
 
 // Actionable reports whether anything in this report warrants a notice.
-func (r Report) Actionable() bool { return len(r.Deficits) > 0 || len(r.Fleet) > 0 }
+func (r Report) Actionable() bool {
+	return len(r.Deficits) > 0 || len(r.Fleet) > 0 || r.Blackout != nil
+}
 
 // Detect evaluates a snapshot. It is pure: same snapshot in, same report out,
 // no clock and no filesystem.
@@ -538,7 +933,102 @@ func Detect(snap Snapshot, p Params) Report {
 		}
 	}
 
+	rep.Blackout, rep.BlackoutBlind = detectBlackout(snap, p)
+
 	return rep
+}
+
+// detectBlackout applies the ABSOLUTE arm. It reads Snapshot.Recent and nothing
+// else — not the cohorts, not the eligible set, not any median — because every
+// one of those is a comparison and a comparison is what cannot see a uniform
+// failure.
+//
+// It deliberately does NOT consult MinFires or the eligibility gates above. A
+// blackout is a claim about the last few hours of traffic, and the per-schedule gates
+// exist to make a LIFETIME RATIO representative; applying them here would
+// reintroduce the exact blind spot the events-log window was chosen to escape
+// (three-plus hours of blindness after every nightly redeploy).
+//
+// It DOES sit behind the disruption suppression, because Detect returns before
+// reaching here on that path. That is deliberate and it is the one gate the arm
+// keeps: a system_wake replays a fire per schedule and a restart re-registers
+// every mail-check, so for one settle window the traffic describes a regime that
+// has just ended. The cost is bounded at SettleAfter (30 minutes) of delay on an
+// outage that begins inside one, against a false alarm on every wake — and
+// unlike MinFires, it does not scale with the cadence.
+//
+// Returns (finding, "") when the arm judged, (nil, reason) when it could not.
+func detectBlackout(snap Snapshot, p Params) (*Blackout, string) {
+	if snap.Recent == nil {
+		return nil, "no window measurement was supplied"
+	}
+	r := *snap.Recent
+	if r.Err != "" {
+		return nil, "window could not be measured: " + r.Err
+	}
+	window := r.Window
+	if window <= 0 {
+		window = p.BlackoutWindow
+	}
+	if snap.RunningSince == nil {
+		return nil, "the running-agent set was not supplied, and without it an absent " +
+			"fleet is indistinguishable from a dead one"
+	}
+	if r.ByAgent == nil {
+		return nil, "the window carried no per-agent breakdown, so the liveness gate " +
+			"cannot be applied"
+	}
+
+	// The liveness gate. Everything below is measured over agents that are RUNNING
+	// and have been up for the WHOLE window, because "fires delivered, nothing
+	// completed" is also what an empty fleet looks like — and on this box that is
+	// every night between midnight and 09:30, plus the first window after every
+	// spawn. See Snapshot.RunningSince.
+	eligible := map[string]bool{}
+	young := 0
+	for name, since := range snap.RunningSince {
+		if since.IsZero() || snap.Now.Sub(since) < window {
+			young++
+			continue
+		}
+		eligible[name] = true
+	}
+	delivered, completed, schedules, judged, silent := r.restrictTo(eligible)
+
+	if len(judged) < p.BlackoutMinAgents {
+		return nil, fmt.Sprintf(
+			"only %d agent(s) were both delivered to and up for the whole %s (%d running "+
+				"agent(s) too young to judge) — under the %d needed to speak for a fleet; "+
+				"a fleet that is not RUNNING is not a blackout",
+			len(judged), window, young, p.BlackoutMinAgents)
+	}
+	if delivered < p.BlackoutMinDeliveries {
+		return nil, fmt.Sprintf(
+			"only %d fire(s) delivered to running agents in the last %s — under the %d needed "+
+				"for a rate to mean anything",
+			delivered, window, p.BlackoutMinDeliveries)
+	}
+	if schedules < p.BlackoutMinSchedules {
+		return nil, fmt.Sprintf(
+			"only %d schedule(s) of running agents fired in the last %s — under the %d needed "+
+				"to speak for a fleet",
+			schedules, window, p.BlackoutMinSchedules)
+	}
+	rate := float64(completed) / float64(delivered)
+	if rate > p.BlackoutRate {
+		return nil, ""
+	}
+	return &Blackout{
+		Window:          window.String(),
+		Delivered:       delivered,
+		Completed:       completed,
+		Rate:            rate,
+		Threshold:       p.BlackoutRate,
+		Schedules:       schedules,
+		RunningJudged:   judged,
+		StalledAgents:   silent,
+		LastCompletedAt: r.LastCompletedAt,
+	}, ""
 }
 
 // comparable returns the members of cohort, other than c, whose fire count is
@@ -617,8 +1107,32 @@ func (r Report) Render() string {
 
 	if !r.Actionable() {
 		fmt.Fprintf(&b, "ack-watch: no completion deficit. %d schedule(s) scanned, %d eligible.\n", r.Scanned, r.Eligible)
+		r.renderBlackoutCoverage(&b)
 		r.renderCoverage(&b)
 		return b.String()
+	}
+
+	if bo := r.Blackout; bo != nil {
+		fmt.Fprintf(&b, "FLEET BLACKOUT: %d fire(s) delivered to RUNNING agents in the last %s "+
+			"and %d completed (%s, floor %s).\n",
+			bo.Delivered, bo.Window, bo.Completed, pct(bo.Rate), pct(bo.Threshold))
+		fmt.Fprintf(&b, "  %d schedule(s) across %d running agent(s): %s\n",
+			bo.Schedules, len(bo.RunningJudged), strings.Join(bo.RunningJudged, ", "))
+		if len(bo.StalledAgents) > 0 {
+			fmt.Fprintf(&b, "  completed NOTHING at all: %s\n", strings.Join(bo.StalledAgents, ", "))
+		}
+		if bo.LastCompletedAt.IsZero() {
+			fmt.Fprintf(&b, "  NOT ONE fire completed in the whole %s window.\n", bo.Window)
+		} else {
+			fmt.Fprintf(&b, "  last completion anywhere in the fleet: %s\n",
+				bo.LastCompletedAt.UTC().Format(time.RFC3339))
+		}
+		b.WriteString("  This is measured ABSOLUTELY — no peer comparison, no median. A uniform\n")
+		b.WriteString("  failure has no outlier, so the per-schedule rule below reads 0 findings\n")
+		b.WriteString("  during exactly this event and the deficit table looks calm (mg-e2a4).\n")
+		b.WriteString("  Suspect the model API, the network, credentials, or pogod's agent hosting\n")
+		b.WriteString("  before suspecting any agent. Every agent will report status=running with\n")
+		b.WriteString("  last-activity 'just now', because PTY animation is output.\n\n")
 	}
 
 	for _, f := range r.Fleet {
@@ -654,8 +1168,20 @@ func (r Report) Render() string {
 	b.WriteString("anything, and no output-based check can see through it (mg-1935).\n\n")
 	b.WriteString("A default `pogo nudge` cannot reach a spinning agent either — it waits for 2s of\n")
 	b.WriteString("PTY silence that never arrives. Use `pogo nudge <agent> --immediate`.\n\n")
+	r.renderBlackoutCoverage(&b)
 	r.renderCoverage(&b)
 	return b.String()
+}
+
+// renderBlackoutCoverage states when the ABSOLUTE arm did not judge. Reported on
+// both the findings and the no-findings path, because "the peer arm found
+// nothing and the absolute arm never ran" is the state that produced a calm
+// report during a dead fleet, and it must be readable as such.
+func (r Report) renderBlackoutCoverage(b *strings.Builder) {
+	if r.BlackoutBlind == "" {
+		return
+	}
+	fmt.Fprintf(b, "Fleet-blackout arm did not judge: %s.\n", r.BlackoutBlind)
 }
 
 // renderCoverage states what was NOT evaluated. A detector that reports only
@@ -671,7 +1197,21 @@ func (r Report) renderCoverage(b *strings.Builder) {
 }
 
 // MailSubject summarises the report for a notification subject line.
+//
+// A blackout wins the subject line unconditionally, and it says the fleet-level
+// fact rather than a count. The subject is the part that travels — into a
+// notifier, into a phone banner, into a skim — so burying "nothing has completed
+// a fire in an hour" behind "3 schedules below their peers" would put the
+// severity in the part nobody reads.
 func (r Report) MailSubject() string {
+	if bo := r.Blackout; bo != nil {
+		if bo.Completed == 0 {
+			return fmt.Sprintf("FLEET BLACKOUT — %d fires delivered in the last %s, NONE completed",
+				bo.Delivered, bo.Window)
+		}
+		return fmt.Sprintf("FLEET BLACKOUT — %d of %d fires completed in the last %s (%s)",
+			bo.Completed, bo.Delivered, bo.Window, pct(bo.Rate))
+	}
 	switch {
 	case len(r.Fleet) > 0 && len(r.Deficits) > 0:
 		return fmt.Sprintf("%d cohort(s) and %d schedule(s) below the completion floor", len(r.Fleet), len(r.Deficits))
@@ -695,6 +1235,9 @@ func (r Report) Fingerprint() string {
 	}
 	for _, f := range r.Fleet {
 		keys = append(keys, f.Key())
+	}
+	if r.Blackout != nil {
+		keys = append(keys, r.Blackout.Key())
 	}
 	sort.Strings(keys)
 	return strings.Join(keys, ",")

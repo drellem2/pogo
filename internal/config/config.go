@@ -306,6 +306,17 @@ const (
 	// DefaultAckWatchRenotify is how long an UNCHANGED set of completion
 	// findings stays quiet before being raised again.
 	DefaultAckWatchRenotify = 6 * time.Hour
+	// DefaultAckWatchBlackoutRenotify is the renotify window that applies while
+	// the FLEET BLACKOUT arm is firing — fires delivered fleet-wide and
+	// (almost) nothing completing them — in place of DefaultAckWatchRenotify.
+	//
+	// 6 hours is right for "one schedule lags its peers" and wrong for "nothing
+	// in the fleet has completed a fire". mg-e2a4 measured how wrong: a 4.5-hour
+	// total outage began and ended inside ONE renotify shadow, so an arbitrarily
+	// severe event produced a single notice, and a second identical outage 30
+	// minutes later would have been suppressed entirely. Set to the sampling
+	// interval, so a dead fleet re-announces every sample.
+	DefaultAckWatchBlackoutRenotify = 30 * time.Minute
 	// DefaultAckWatchNotifyTo is the mailbox completion findings go to. The
 	// mayor: the remedy is `pogo nudge <agent> --immediate` or a doctor restart,
 	// which is coordination work rather than a human-only decision.
@@ -314,6 +325,12 @@ const (
 	// `human` is copied as well. Shorter than the gh-teardown equivalent because
 	// the coordinator is itself a crew agent and can have the exact defect being
 	// reported (mg-d385) — an alert routed only to the patient reaches nobody.
+	//
+	// It does NOT gate a FLEET BLACKOUT, which escalates on its first sample by
+	// construction. A 24-hour persistence bar is sensible for "one agent is
+	// lagging its peers" and wrong for "nothing has completed a turn in hours";
+	// those two do not share an escalation clock (mg-e2a4). A negative value
+	// therefore disables the AGE-based escalation only.
 	DefaultAckWatchEscalateAfter = 24 * time.Hour
 
 	// DefaultDeafWatchInterval is how often pogod's missing-mail-loop announcer
@@ -989,12 +1006,18 @@ type AckWatchConfig struct {
 	// RenotifyAfter is how long an unchanged finding set stays quiet before
 	// being mailed again. Zero falls back to DefaultAckWatchRenotify.
 	RenotifyAfter time.Duration
+	// BlackoutRenotify replaces RenotifyAfter while the FLEET BLACKOUT arm is
+	// firing. Zero falls back to DefaultAckWatchBlackoutRenotify. Separate
+	// because the two conditions have different half-lives — see there.
+	BlackoutRenotify time.Duration
 	// NotifyTo is the mailbox findings are reported to. Empty falls back to
 	// DefaultAckWatchNotifyTo (`mayor`).
 	NotifyTo string
 	// EscalateAfter is how long ONE finding may persist unbroken before the
-	// notice also goes to `human`. Zero falls back to
-	// DefaultAckWatchEscalateAfter; a NEGATIVE value disables escalation.
+	// notice also goes to the escalation box. Zero falls back to
+	// DefaultAckWatchEscalateAfter; a NEGATIVE value disables the AGE-based
+	// escalation. It never gates a FLEET BLACKOUT, which escalates on its first
+	// sample by construction (mg-e2a4).
 	EscalateAfter time.Duration
 }
 
@@ -1432,11 +1455,12 @@ func Load() *Config {
 			EscalateAfter: DefaultGHIntakeEscalateAfter,
 		},
 		AckWatch: AckWatchConfig{
-			Enabled:       true,
-			Interval:      DefaultAckWatchInterval,
-			RenotifyAfter: DefaultAckWatchRenotify,
-			NotifyTo:      DefaultAckWatchNotifyTo,
-			EscalateAfter: DefaultAckWatchEscalateAfter,
+			Enabled:          true,
+			Interval:         DefaultAckWatchInterval,
+			RenotifyAfter:    DefaultAckWatchRenotify,
+			BlackoutRenotify: DefaultAckWatchBlackoutRenotify,
+			NotifyTo:         DefaultAckWatchNotifyTo,
+			EscalateAfter:    DefaultAckWatchEscalateAfter,
 		},
 		DeafWatch: DeafWatchConfig{
 			Enabled:       true,
@@ -1597,6 +1621,9 @@ func Load() *Config {
 		}
 		if fileCfg.AckWatch.RenotifyAfter > 0 {
 			cfg.AckWatch.RenotifyAfter = fileCfg.AckWatch.RenotifyAfter
+		}
+		if fileCfg.AckWatch.BlackoutRenotify > 0 {
+			cfg.AckWatch.BlackoutRenotify = fileCfg.AckWatch.BlackoutRenotify
 		}
 		if fileCfg.AckWatch.NotifyTo != "" {
 			cfg.AckWatch.NotifyTo = fileCfg.AckWatch.NotifyTo
@@ -2363,6 +2390,10 @@ func parseConfigFileInto(cfg *parsedConfig, path string) error {
 			case "renotify_after":
 				if d, err := time.ParseDuration(unquotedVal); err == nil {
 					cfg.AckWatch.RenotifyAfter = d
+				}
+			case "blackout_renotify":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.AckWatch.BlackoutRenotify = d
 				}
 			case "notify_to":
 				cfg.AckWatch.NotifyTo = unquotedVal
