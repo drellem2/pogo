@@ -3837,6 +3837,11 @@ branches; work items and mail live in mg/macguffin (the task-store CLI).`,
 	// check-strandedmail (mg-aa96): the residue a repointed mail-check leaves —
 	// mail already delivered to the mailbox nobody polls any more.
 	rootCmd.AddCommand(newCheckStrandedMailCmd(&jsonOutput))
+	// check-verdicts (mg-f5dd): the ninth sibling — work that landed while the
+	// party who filed it was never told how it came out. Ported from macguffin's
+	// verdictwatch.py, which was confirmed correct and then sat unrun in a
+	// research directory, where nothing has a runner by construction.
+	rootCmd.AddCommand(newCheckVerdictsCmd(&jsonOutput))
 	rootCmd.AddCommand(cmdCheckCommitBody)
 	rootCmd.AddCommand(newCheckPromptsCmd(&jsonOutput))
 	rootCmd.AddCommand(newCheckStalenessCmd(&jsonOutput))
