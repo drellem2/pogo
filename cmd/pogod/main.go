@@ -1641,6 +1641,10 @@ Flags:
 		deliverer := &scheduler.PogodDeliverer{
 			Registry: agentRegistry,
 			Mail:     client.SendMGMail,
+			// Same own-root events.log the scheduler's own fire events go to
+			// (mg-e06d), so a coalesced mailbox copy is readable next to the
+			// scheduler_fire_* record of the fire that produced it (mg-af83).
+			LogPath: scheduler.EventLogPath(schedPath),
 		}
 		s, err := scheduler.New(schedPath, deliverer)
 		if err != nil {
