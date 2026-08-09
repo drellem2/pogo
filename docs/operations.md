@@ -768,6 +768,58 @@ the reconciliation sequence (which never runs `git pull` or `git checkout` in th
 live tree) are in
 [docs/pogo-home-version-control.md](pogo-home-version-control.md).
 
+## Is a consumer reading a source nothing writes to? (`pogo doctor --check`)
+
+A launchd job can be loaded, healthy, polling on schedule, reporting no error,
+and reading a directory nothing writes to. Every instrument that watches the
+*job* reports green — `launchctl list`, its own log, its heartbeat — because
+every one of them is true. Nothing on this machine reported the state at all
+until mg-c2f5.
+
+That is what `com.pogo.notify` did for at least 40 hours from 2026-08-07.
+mg-65d2 re-pointed it from `~/.macguffin/mail/human/new` to
+`~/.macguffin/mail/daniel/new` as step 4 of a staged cutover behind a relay that
+is not activated yet; the fleet still writes `human`, so 100% of Daniel's
+notifications were carried by the fail-open `com.pogo.deadman` behind it. **That
+intermediate state is designed, not a misconfiguration** — completing or
+reverting the cutover is tracked as mg-8158 and is Daniel's decision. The
+missing alarm was the defect.
+
+The `consumer source liveness` row compares each consumer's **configured
+source** against **where data is actually arriving**:
+
+```
+✓ consumer source liveness  every consumer's configured source has received data in the
+                            window — each one was compared against where data is actually
+                            arriving, not against its own poll loop. 2 consumer(s) examined
+                            over a 6h0m0s window: 2 reading live sources, 0 starved, …
+! consumer source liveness  1 consumer(s) are reading a source NOTHING IS WRITING TO while
+                            comparable sources receive: com.pogo.notify reads
+                            MAIL_DIR=…/mail/daniel/new and NOTHING HAS ARRIVED THERE in the
+                            last 6h0m0s, while 18 of 1364 comparable sources are receiving,
+                            most recently …/mail/mayor/new … (and 15 more). …
+```
+
+Three things about it are deliberate and worth keeping if it is ever edited:
+
+- **It names no box.** "Alarm if notify watches `daniel/` while agents write
+  `human/`" would decay the moment the cutover completes — and completing it is
+  the expected outcome. Consumers and their sources are discovered from the
+  installed plists (`internal/sourcewatch`, admission rules in `discover.go`), so
+  the next re-point is caught without anyone editing the check.
+- **Quiet everywhere is NOT a pass.** If nothing is written anywhere, no
+  consumer can be convicted by comparison, and the row says `NOT CHECKED`
+  instead of green. A check that reported health when the fleet died would be
+  measuring its own execution — the defect it exists to catch, one level down.
+- **It warns and never fails.** Whether to finish a cutover, re-point a consumer
+  or retire it belongs to whoever owns the routing; on 2026-08-09 three separate
+  agents proposed the *wrong* one of those three for this very consumer.
+  Doctor's exit code is not the place to force that decision.
+
+An **absent** `consumer source liveness` row means an old `pogo` binary, not a
+clean machine — the detector ships inside the binary and is therefore subject to
+the same class of defect it reports.
+
 ## GitHub branch protection on main (rulesets)
 
 Since 2026-07-05 (mg-f7a3), `main` in **drellem2/pogo** (ruleset `main-require-pr`, id 18534732) and **drellem2/macguffin** (id 18534735) is protected by a GitHub ruleset per the gh-issue workflow design (`docs/design/gh-issue-workflow-design.md` §3):

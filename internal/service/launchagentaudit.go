@@ -361,6 +361,16 @@ func fireFromDict(d map[string]any) CalendarFire {
 	return f
 }
 
+// DecodePlistDict decodes an XML plist into a generic Go value tree.
+//
+// Exported for internal/sourcewatch, which reads plists this package does NOT
+// manage — com.pogo.notify and com.pogo.deadman are installed by pogo-reminders,
+// not by any installer here — and so cannot go through AuditLaunchAgents. It is
+// the same decoder rather than a second one on purpose: a plist reader that
+// disagreed with this one about what a key holds would make two detectors report
+// different facts about the same file.
+func DecodePlistDict(data []byte) (map[string]any, error) { return decodePlistDict(data) }
+
 // decodePlistDict decodes an XML plist into a generic Go value tree.
 //
 // Written here rather than shelled out to PlistBuddy or plutil on purpose. Those
