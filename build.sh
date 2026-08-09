@@ -53,18 +53,31 @@ done
 
 build_dir="${POGO_BUILD_DIR:-./bin}"
 
+# Per-step timing (mg-eed9). build.sh is the refinery's gate, so the three
+# phases it owns — fmt, test, compile — are gate cost and were unattributed:
+# every discussion of "the build is slow" reasoned about test.sh alone because
+# that was the only part anyone had a name for. This outer profile is coarse —
+# three rows — and test.sh prints its own per-suite profile nested inside row 2.
+BUILD_SH_DIR="$(cd "$(dirname "$0")" && pwd)"
+. "$BUILD_SH_DIR/scripts/lib/gate-profile.sh"
+gate_profile_begin "build.sh"
+trap 'gate_profile_report' EXIT
+
+# The step labels below are the profile's row names, and fmt.sh/test.sh print
+# their own "Step N:" banners — so these are named for what the row IS rather
+# than restating a banner the reader is about to see anyway.
 echo "Starting build"
-./fmt.sh || exit 1
+gate_step "fmt.sh (go fmt ./...)" ./fmt.sh || exit 1
 
 if [ "$skip_tests" = false ]; then
-  ./test.sh || exit 1
+  gate_step "test.sh (its own per-step profile is nested inside this row)" ./test.sh || exit 1
 fi
 
 echo "Step 3: Building binaries into ${build_dir}..."
 mkdir -p "$build_dir"
-go build -o "${build_dir%/}/" ./cmd/... || exit 1
+gate_step "go build ./cmd/..." go build -o "${build_dir%/}/" ./cmd/... || exit 1
 
 if [ "$do_install" = true ]; then
   echo "Step 4: Installing binaries into GOBIN..."
-  go install ./cmd/... || exit 1
+  gate_step "go install ./cmd/..." go install ./cmd/... || exit 1
 fi

@@ -27,6 +27,26 @@ gate, where a `go install` would overwrite the machine's installed `pogod` with
 an unreviewed branch build. Pass `--install` when you actually want the binaries
 on your `PATH`, or set `POGO_BUILD_DIR` to redirect the output directory.
 
+### Adding a suite to `test.sh`: wrap it in `gate_step` (`mg-eed9`)
+
+Every suite `test.sh` runs is merge-gate cost, and the gate is what sets the
+fleet's per-repo concurrency cap — so each step is timed and the run ends with a
+ranked table (see [Where the build time goes](docs/development.md#where-the-build-time-goes)).
+Add a suite the same way the ones above it are added:
+
+```bash
+gate_step "Testing the thing" bash scripts/thing_test.sh
+```
+
+not a bare `echo` + `bash`. `gate_step` prints the label exactly as the `echo`
+did and returns the suite's status unchanged, so `set -e` still aborts the gate
+on a failure — the only difference is that the step appears in the profile.
+
+This is enforced, not suggested: `scripts/gate-profile_test.sh` fails if any
+top-level `bash <suite>` in `test.sh` sits outside a `gate_step`. A suite added
+without it joins the gate's cost silently and is invisible in the table that
+exists to rank it — which is the state the profile was built to end.
+
 ### Writing a test that touches pogo state: use `scripts/pogo-sandbox`
 
 A test must never read or write the developer's live `~/.pogo`, the live daemon,

@@ -42,6 +42,15 @@ printf '#!/bin/bash\ntouch ran-fmt\n' > "${fixture}/fmt.sh"
 printf '#!/bin/bash\ntouch ran-tests\n' > "${fixture}/test.sh"
 chmod +x "${fixture}/build.sh" "${fixture}/fmt.sh" "${fixture}/test.sh"
 
+# build.sh sources scripts/lib/gate-profile.sh for its per-step profile
+# (mg-eed9) and does NOT degrade to a no-op if the file is missing — an
+# unprofiled gate that says nothing about being unprofiled is the state this
+# ticket exists to leave. So the fixture carries the real library rather than a
+# stub: the alternative is testing build.sh against a profiler that isn't the
+# one it ships with.
+mkdir -p "${fixture}/scripts/lib"
+cp "${SCRIPT_DIR}/scripts/lib/gate-profile.sh" "${fixture}/scripts/lib/gate-profile.sh"
+
 printf 'module example.com/hello\n\ngo 1.25.0\n' > "${fixture}/go.mod"
 good_main='package main
 
@@ -152,6 +161,63 @@ if (cd "$fixture" && ./build.sh --no-such-flag >/dev/null 2>&1); then
   fail "build.sh accepted an unknown flag"
 else
   pass "build.sh rejected an unknown flag"
+fi
+
+# --- Test 8: the gate emits a per-step profile, including when it FAILS ---
+# The failing half is the load-bearing one (mg-eed9). A profile that only
+# prints on success is absent from every run anyone would want it for: a gate
+# that failed at step 12 of 19 is precisely where "which step was the time in"
+# gets asked, and `set -e` means that run never reaches the bottom of the
+# script. The report is armed on EXIT for that reason, and this asserts it.
+echo ""
+echo "Test 8: build.sh emits a per-step profile on success and on failure"
+rm -rf "${fixture}/bin"
+PROFILE_OK="$(cd "$fixture" && ./build.sh --skip-tests 2>&1)"
+if printf '%s\n' "$PROFILE_OK" | grep -q 'GATE STEP PROFILE'; then
+  pass "a successful build printed the profile table"
+else
+  fail "a successful build printed no profile table"
+fi
+if printf '%s\n' "$PROFILE_OK" | grep -q 'go build \./cmd/\.\.\.'; then
+  pass "the profile names the compile step"
+else
+  fail "the profile does not name the compile step"
+fi
+
+rm -rf "${fixture}/bin"
+printf '%s' "$bad_main" > "${fixture}/cmd/hello/main.go"
+PROFILE_FAIL="$(cd "$fixture" && ./build.sh --skip-tests 2>&1)" && FAILED_RC=0 || FAILED_RC=$?
+printf '%s' "$good_main" > "${fixture}/cmd/hello/main.go"
+if [ "$FAILED_RC" -ne 0 ]; then
+  pass "the failing build still exited non-zero with profiling armed"
+else
+  fail "profiling swallowed the compile failure (exit 0)"
+fi
+if printf '%s\n' "$PROFILE_FAIL" | grep -q 'GATE STEP PROFILE'; then
+  pass "the FAILING build printed the profile table"
+else
+  fail "the failing build printed no profile table — the run that needs it most"
+fi
+if printf '%s\n' "$PROFILE_FAIL" | grep -q '\[FAILED\]'; then
+  pass "the failing step is marked [FAILED] in the table"
+else
+  fail "the failing step is not marked in the table"
+fi
+
+# --- Test 9: POGO_GATE_PROFILE=0 disables the table without disabling the gate
+echo ""
+echo "Test 9: POGO_GATE_PROFILE=0 suppresses the table and still builds"
+rm -rf "${fixture}/bin"
+PROFILE_OFF="$(cd "$fixture" && POGO_GATE_PROFILE=0 ./build.sh --skip-tests 2>&1)"
+if printf '%s\n' "$PROFILE_OFF" | grep -q 'GATE STEP PROFILE'; then
+  fail "POGO_GATE_PROFILE=0 still printed the table"
+else
+  pass "POGO_GATE_PROFILE=0 suppressed the table"
+fi
+if [ -x "${fixture}/bin/hello" ]; then
+  pass "POGO_GATE_PROFILE=0 still ran the steps and built the binary"
+else
+  fail "POGO_GATE_PROFILE=0 stopped the build from running"
 fi
 
 echo ""

@@ -208,6 +208,73 @@ go test -timeout "$budget" "$@" 2>&1 | tee "$log"
 status=${PIPESTATUS[0]}
 set -e
 
+# -----------------------------------------------------------------------------
+# PER-PACKAGE BREAKDOWN (mg-eed9)
+# -----------------------------------------------------------------------------
+# The gate's step profile can only ever report this whole invocation as ONE row,
+# and it is the largest row — so without this, the biggest single item in the
+# gate's cost is an undifferentiated blob of ~70 packages. The two questions
+# anyone asks next are answered here and nowhere else:
+#
+#   which packages cost the time    the input to "select by what changed",
+#                                   which is worth attempting only if the cost
+#                                   is concentrated. If it is spread evenly
+#                                   across 70 packages, selection buys little
+#                                   and the dependency map is a large risk for
+#                                   a small win.
+#   how much was CACHED             the claim that non-hermetic tests make the
+#                                   suite uncacheable is testable, and this is
+#                                   the measurement: Go prints `(cached)` for a
+#                                   package it did not re-run. A gate that
+#                                   re-runs everything every time says so here,
+#                                   in a number, instead of being asserted.
+#
+# It prints BEFORE the timeout classification deliberately. That report has to
+# stay the tail — it is what a truncating CI log keeps, and go-test-budget_test
+# pins it there.
+awk '
+    BEGIN { FS = "\t"; ran = 0; cached = 0; notests = 0; failed = 0; total = 0 }
+    NF >= 3 && $1 ~ /^(ok|FAIL)/ {
+        pkg = $2
+        elapsed = $3
+        if (elapsed ~ /cached/) { cached++; next }
+        if (elapsed !~ /^[0-9]/) { next }
+        secs = elapsed + 0
+        if ($1 ~ /^FAIL/) { failed++ }
+        ran++
+        total += secs
+        time[pkg] = secs
+        next
+    }
+    NF >= 2 && $1 ~ /^\?/ { notests++ }
+    END {
+        if (ran == 0 && cached == 0) { exit 0 }
+        printf "\n"
+        printf "Go packages: %d ran (%.1fs of package time), %d cached, %d with no test files",
+            ran, total, cached, notests
+        if (failed > 0) { printf ", %d FAILED", failed }
+        printf "\n"
+        if (ran == 0) { exit 0 }
+        n = 0
+        for (pkg in time) { n++; names[n] = pkg }
+        # Insertion sort by elapsed, descending. n is ~70; the cost is noise
+        # against the minutes just spent, and it avoids piping to sort(1) in a
+        # block that must not be able to fail the gate.
+        for (i = 2; i <= n; i++) {
+            key = names[i]
+            j = i - 1
+            while (j > 0 && time[names[j]] < time[key]) { names[j + 1] = names[j]; j-- }
+            names[j + 1] = key
+        }
+        top = (n < 10) ? n : 10
+        printf "  slowest %d of %d that ran:\n", top, ran
+        for (i = 1; i <= top; i++) {
+            printf "    %8.2fs  %5.1f%%  %s\n", time[names[i]], (total > 0 ? time[names[i]] * 100 / total : 0), names[i]
+        }
+        printf "\n"
+    }
+' "$log" || true
+
 # Spelled as an `if`, not `[ ... ] && exit 0`: this script's whole job is to run
 # a command that is EXPECTED to fail and then say something afterwards, so a
 # `set -e` interaction that aborts before the report is the one bug it cannot
