@@ -342,6 +342,20 @@ var conflictSignals = []string{
 	"needs merge",
 }
 
+// outputReportsConflict answers "did this git output say the tree disagreed?"
+// It is the single reading of conflictSignals, shared by the classifier and by
+// the gate-dirt detector, so those two cannot end up holding different
+// definitions of a conflict and contradicting each other inside one report.
+func outputReportsConflict(gitOutput string) bool {
+	hay := strings.ToLower(gitOutput)
+	for _, pat := range conflictSignals {
+		if strings.Contains(hay, pat) {
+			return true
+		}
+	}
+	return false
+}
+
 // verdictStages are the stages at which something RAN against the tree and
 // returned an answer about it. A failure here is a fact, per the ruling.
 //
@@ -398,8 +412,17 @@ func classifyFailure(stage string, raw string, err error) disposition {
 
 	// The refinery's own checkout was left modified by a gate. Not the branch's
 	// doing, and a retry replays the same writes.
+	//
+	// Guarded by the conflict table, and the guard is the point of mg-eac0:
+	// this branch used to be taken on the strength of the error TYPE alone,
+	// without reading the git output the same error carried. One report
+	// therefore said "CONFLICT (content)" and "failed(infrastructure) —
+	// establishes nothing about the branch, resubmit" at once. classifyGateDirt
+	// no longer builds a gateDirtError for a conflicted step, so this is a
+	// second lock on the same door: whatever reaches here, a conflict in the
+	// output means the tree answered, and the answer belongs to the branch.
 	var dirtErr *gateDirtError
-	if errors.As(err, &dirtErr) {
+	if errors.As(err, &dirtErr) && !outputReportsConflict(dirtErr.GitOutput) {
 		return disposition{
 			Class:     ClassInfrastructure,
 			Retryable: false,
@@ -442,7 +465,9 @@ func classifyFailure(stage string, raw string, err error) disposition {
 				Class:     ClassDefect,
 				Retryable: false,
 				Signal:    pat,
-				Reason:    "the rebase reached the tree and the tree disagreed — exactly as true on the next attempt",
+				Reason: "the rebase reached the tree and the tree disagreed — exactly as true on the next attempt. " +
+					"Resubmitting unchanged re-runs the same conflict forever; the branch has to be rebased and the " +
+					"conflict resolved by hand before it can land",
 			}
 		}
 	}
