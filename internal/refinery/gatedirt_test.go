@@ -267,10 +267,15 @@ func TestClassifyGateDirtIgnoresCleanTree(t *testing.T) {
 // git output, which is where the bad advice originally came from.
 func TestGateDirtErrorMessage(t *testing.T) {
 	e := &gateDirtError{
-		Stage:       "rebase onto main",
-		DirtyPaths:  []string{"records/probe.json", "records/mutation.json"},
-		Gates:       []string{"./scripts/refinery_gate.sh"},
-		WorktreeDir: "/Users/daniel/.pogo/refinery/worktrees/pogo",
+		Stage:      "rebase onto main",
+		DirtyPaths: []string{"records/probe.json", "records/mutation.json"},
+		Gates:      []string{"./scripts/refinery_gate.sh"},
+		// The probe ANSWERED, and its answer was that the branch touches none
+		// of these. Since mg-eac0 that is what licenses the "NOT your change"
+		// sentence below — an unset flag now means the probe could not answer,
+		// and the message declines to make the claim.
+		BranchPathsKnown: true,
+		WorktreeDir:      "/Users/daniel/.pogo/refinery/worktrees/pogo",
 		GitOutput: "error: cannot rebase: You have unstaged changes.\n" +
 			"error: Please commit or stash them.\n" +
 			"hint: run `git stash` first",
