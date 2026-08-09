@@ -1282,7 +1282,18 @@ harden_git_transport() {
 # the run never got as far as the drain.
 git_step() {
     local f rc
-    f="$(mktemp)" || { SYNC_DETAIL=""; run_bounded "$GIT_TIMEOUT" "$@"; return $?; }
+    # Cleared on ENTRY, not only on the paths that set it. The mktemp fallback
+    # below returns early, and a stale `true` left by a previous step would make
+    # classify_transport report the NEXT failure as a timeout it did not observe
+    # — a detector asserting something it did not measure, which is the defect
+    # this whole file is about.
+    GIT_STEP_TIMED_OUT=false
+    f="$(mktemp)" || {
+        SYNC_DETAIL=""
+        run_bounded "$GIT_TIMEOUT" "$@"; rc=$?
+        $BOUNDED_TIMED_OUT && GIT_STEP_TIMED_OUT=true
+        return "$rc"
+    }
     run_bounded "$GIT_TIMEOUT" "$@" 2>"$f"; rc=$?
     SYNC_DETAIL="$(cat "$f" 2>/dev/null)"
     [ -s "$f" ] && cat "$f" >&2

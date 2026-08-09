@@ -1931,6 +1931,18 @@ describe_sync_class timeout | grep -q 'TIMEOUT' \
     && pass "describe_sync_class names the timeout class" || fail "describe_sync_class has no timeout row"
 remedy_for_sync_class timeout | grep -q '2026-08-08' \
     && pass "the timeout remedy names the incident it was measured from" || fail "the timeout remedy is generic"
+# A step that RETURNS must clear the flag a previous step set. Left stale, the
+# classifier would report the next failure as a timeout it never observed —
+# which is a detector asserting something it did not measure, the defect this
+# whole change is about, rebuilt inside its own fix.
+GIT_TIMEOUT=2
+git_step "$FAKEBIN/hanggit" fetch --quiet origin >/dev/null 2>&1   # sets the flag
+git_step "$FAKEBIN/workinggit" fetch --quiet origin >/dev/null 2>&1 # must clear it
+$GIT_STEP_TIMED_OUT \
+    && fail "a returning git step left GIT_STEP_TIMED_OUT set by the previous one" \
+    || pass "a git step that RETURNS clears the timeout flag a previous step set"
+GIT_TIMEOUT="$SAVED_GIT_TIMEOUT"
+
 # The negative control for the classifier: with no kill, the probe still decides.
 GIT_STEP_TIMED_OUT=false
 SYNC_CLASS=""
