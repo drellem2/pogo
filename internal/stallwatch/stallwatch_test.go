@@ -11,6 +11,7 @@ import (
 
 	"github.com/drellem2/pogo/internal/config"
 	"github.com/drellem2/pogo/internal/events"
+	"github.com/drellem2/pogo/internal/workitem"
 )
 
 // recorder captures nudges and emitted events for assertions.
@@ -840,8 +841,15 @@ func TestDefaultsAppliedFromZeroConfig(t *testing.T) {
 				gate, w.cfg.NonDispatchableAssignees, config.DefaultNonDispatchableAssignees)
 		}
 	}
-	if !w.watchedForDispatch("pm-pogo") {
+	if !w.watchedForDispatch(workitem.WorkItem{Assignee: "pm-pogo"}) {
 		t.Error("zero config must watch pm-assigned items")
+	}
+	// The stage gate rides the same predicate and takes no configuration at all
+	// (mg-69b1), so a zero-value config must silence a carrier parked at the
+	// human decision gate — including the case that was live: no assignee, so
+	// nothing else about the item says "hold".
+	if w.watchedForDispatch(workitem.WorkItem{Stage: config.GatedStage}) {
+		t.Error("zero config must not watch an item at `stage: gated` for dispatch")
 	}
 }
 

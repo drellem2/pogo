@@ -303,9 +303,10 @@ func TestDispatchGateWarnsOnBlockIntentMismatch(t *testing.T) {
 	logged := captureLog(t)
 
 	g := MGDispatchGate{Root: gateStoreTagged(t, "mg-a96c", "pm-pogo", "pogo, blocked-on-daniel-confirm")}
-	assignee, gated := g.DispatchGated("mg-a96c")
+	gating, gated := g.DispatchGated("mg-a96c")
 	if gated {
-		t.Fatalf("a tag must not gate; got gated=true (assignee %q)", assignee)
+		t.Fatalf("a tag must not gate; got gated=true (assignee %q, stage %q)",
+			gating.Assignee, gating.Stage)
 	}
 
 	out := logged()

@@ -654,6 +654,12 @@ gh: <owner>/<repo>#<n>
 ```
 
 - `stage:` is the state-machine position, and it lives on whichever ticket is currently active: the triage ticket carries `triage → gated`; after the gate, the build ticket carries `build → review → merge`. Update it with `mg edit <id> --body="..."` at each transition — body edits are coordination; preserve the rest of the body when rewriting.
+
+  **`stage: gated` is a dispatch gate, and pogod enforces it (mg-69b1).** `spawn-polecat` reads the carrier block and refuses a ticket at `stage: gated` with 409, the same way it refuses `--assignee=human` (step 4) — and the stall watch and priority wake stop offering it to you at all. So the one line you already set at the gate is the whole gate: there is no second field to remember here, and no assignee to clear on the way out. It is `gated` alone: `triage`, `build`, `review` and `merge` all dispatch normally, because each of those states is one a {{.Worker}} is supposed to be working in.
+
+  This is why the stage line has to be **accurate**, not merely present. If you want a fresh triage round on a ticket sitting at the gate, set the stage back to `triage` first — that is what re-triage *is*, and until you do, the spawn is refused. The refusal message says so.
+
+  It was not always enforced. Until mg-69b1 `stage:` was read only by the coordinator that wrote it: three carriers sat at `stage: gated` awaiting a GO/NO-GO with `assignee=[]`, fully dispatchable, and the priority wake offered two of them up as "ready and unclaimed". A re-dispatch there posts a **second acknowledgement comment on a stranger's open issue** — which is why this gate is enforced rather than described.
 - `gh:` ties a ticket to its issue. **Match every incoming `[gh]` mail against existing tickets by this ref before filing anything** — comments bump `updatedAt`, so most `[gh]` mail is activity on an in-flight issue, not a new one.
 - `depends=` chains the tickets (build depends on triage, review depends on build), mirroring how `qa: required` pairs items.
 - Tag every ticket in the chain `gh-issue` so `mg list --tag=gh-issue` shows the whole board.
@@ -701,7 +707,7 @@ If a ticket for the ref already exists, the mail is new issue activity:
 - `stage: gated` → likely Daniel's gate reply on the issue itself (see the reply-channel note in transition 2). Read the new comments (`gh issue view <n> --repo=<owner>/<repo> --comments`) and process them as a gate decision (transition 3).
 - Any other stage → read the new comments; if material to the in-flight work, mail them to the {{.Worker}} working the current stage; otherwise no-op with a stated reason.
 
-**2. Triage done → the Daniel gate (`stage: gated`).** When the triage packet arrives, set `stage: gated` and send Daniel the triage + recommendation summary. Summary content standards are owned by the product SME where a deployment has one (they mail you updates; the standard below is theirs — if their latest mail differs, their mail wins):
+**2. Triage done → the Daniel gate (`stage: gated`).** When the triage packet arrives, set `stage: gated` and send Daniel the triage + recommendation summary. Setting the stage is what takes the ticket off the dispatch path — pogod refuses a spawn against it from that moment (see the state-carrier section) — so make that edit *before* you stop the triage {{.Worker}}: while the {{.Worker}} lives its claim is what holds the ticket, and the exposure this closes opens the instant that claim is released. Summary content standards are owned by the product SME where a deployment has one (they mail you updates; the standard below is theirs — if their latest mail differs, their mail wins):
 
 - One issue per mail; subject `[gh-triage] <repo>#<n>: <title>`.
 - Body: the triage packet compressed to **at most 10 lines**, ending with the explicit ask on its own line: `ASK: GO / NO-GO / OTHER`.
@@ -746,10 +752,20 @@ If a ticket for the ref already exists, the mail is new issue activity:
    # No --depends on the build ticket: on this track the build ticket stays claimed
    # through review (you submit its branch to the refinery yourself on pass, transition 5),
    # so a hard dependency would never clear — the review ticket would sit in pending/ and
-   # the review {{.Worker}} could not claim it. Dispatch ordering is gated by hand instead
-   # (step 3 holds the review ticket; transition 4 dispatches it only once the PR exists).
-   # The gh: ref and the body cross-link below are the soft build<->review link.
+   # the review {{.Worker}} could not claim it. Dispatch ordering is held by an ASSIGNEE
+   # instead: --assignee=blocked:{{.Coordinator}} gates it away from dispatch (it is
+   # `config.BlockedOn`, the same gate as `human`) and names you as the one who releases
+   # it. Transition 4 clears it when the PR exists. The gh: ref and the body cross-link
+   # below are the soft build<->review link.
+   #
+   # Why a field and not your memory: this ticket is filed high-priority, unassigned and
+   # available, and it must NOT be worked until a PR exists — which is exactly the shape
+   # mg-69b1 found at the human gate. `stage: review` cannot hold it, because `review` is
+   # the stage it must be DISPATCHED in. A self-gate is the honest instrument here: you
+   # are holding your own ticket, so it cannot hold work hostage from anyone else, and
+   # pogod reminding you about it is the recovery if you forget to clear it.
    mg new --type=task --priority=high --tags=gh-issue --repo=<local repo path> \
+       --assignee=blocked:{{.Coordinator}} \
        --title="review: <issue title> (<owner>/<repo>#<n>)" \
        --body-file - <<'EOF'
    workflow: gh-issue
@@ -785,9 +801,16 @@ gh issue close <n> --repo=<owner>/<repo>
 ```
 Shelve the workflow tickets (`mg shelve <triage ticket id>` shelves dependents too) and mail `human` a one-line confirmation. An honest close is a product feature — never ghost the reporter, and never dress a no-go up as "later."
 
-*On OTHER (questions, reshape):* stay `gated`. Answer or route the question (the product SME, the triage {{.Worker}} if still alive, or a fresh triage round), then re-send the summary with the explicit ask.
+*On OTHER (questions, reshape):* stay `gated`. Answer or route the question (the product SME, the triage {{.Worker}} if still alive, or a fresh triage round), then re-send the summary with the explicit ask. **A fresh triage round needs the stage moved back to `triage` first** — the gate is enforced, so a spawn against a ticket reading `stage: gated` is refused with 409, and the ticket is genuinely back in triage the moment you dispatch one. Set it to `gated` again when the new packet arrives.
 
-**4. Build → review loop (`stage: build` → `stage: review`).** The build {{.Worker}} pushes `polecat-<build ticket id>`, opens the PR, and mails you "PR open". On that mail: set the build ticket's stage to `review` and dispatch the review {{.Worker}} (`--template=polecat-review`) on the review ticket.
+**4. Build → review loop (`stage: build` → `stage: review`).** The build {{.Worker}} pushes `polecat-<build ticket id>`, opens the PR, and mails you "PR open". On that mail: set the build ticket's stage to `review`, **release the review ticket's hold**, and dispatch the review {{.Worker}} (`--template=polecat-review`) on it:
+
+```bash
+mg edit <review ticket id> --assignee=""   # clears the blocked:{{.Coordinator}} self-gate from step 3
+pogo agent spawn-polecat <short-id> --template=polecat-review --id=<review ticket id> ...
+```
+
+The PR existing is the release condition, and this is the moment it becomes true. Do the clear in the same turn as the dispatch — if you forget it, the spawn is refused with 409 naming the block, which is the failure working.
 
 While the loop runs, **you mediate verdict transitions only**. Findings flow builder ↔ reviewer directly by mail — the reviewer mails the builder its findings, the builder fixes, pushes, and mails back; the reviewer sends you a one-line status per round. Don't relay findings, don't re-review the code, and don't intervene unless the loop stalls (proactivity principle: if no round status arrives for a long stretch, ask the reviewer for one).
 
