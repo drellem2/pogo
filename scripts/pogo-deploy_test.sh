@@ -1802,6 +1802,351 @@ awk "$ALERT_STATUS_PROBE" "$CASCADE_COPY" >/dev/null \
     || pass "the alert-status probe objects to an injected cascade (it measures the property, not the file)"
 
 # ---------------------------------------------------------------------------
+# THE BOUNDS ON A CALL THAT NEVER RETURNS (mg-56ac)
+# ---------------------------------------------------------------------------
+# Every test below drives a HANG, not a failure. That distinction is the ticket:
+# on 2026-08-08 this runner fired on time, blocked in a git fetch for 31h39m,
+# and produced no exit code, no alert and no stamp — while the same call failing
+# three nights earlier produced four log lines and two mails within a second. A
+# suite that only ever exercises the failing path has never tested the shape
+# that actually cost the fleet 33 hours.
+#
+# So the fixtures here BLOCK. `hanggit` sleeps forever on any command but
+# --version, which is exactly what the 08-08 fetch did as far as this runner
+# could tell.
+
+cat > "$FAKEBIN/hanggit" <<'EOF'
+#!/bin/sh
+[ "$1" = "--version" ] && { echo "git version 9.9.9 (hangs on everything else)"; exit 0; }
+sleep 600
+EOF
+# A hang with a CHILD, for the kill_tree case: `git fetch` execs an ssh or
+# git-remote-https child and it is the child that holds the half-open socket, so
+# a killer that signals only the named process can leave the hang in place.
+cat > "$FAKEBIN/hanggit-with-child" <<'EOF'
+#!/bin/sh
+[ "$1" = "--version" ] && { echo "git version 9.9.9"; exit 0; }
+sleep 600 &
+echo "$!" > "$HANG_CHILD_PIDFILE"
+wait
+EOF
+chmod +x "$FAKEBIN/hanggit" "$FAKEBIN/hanggit-with-child"
+
+# --- run_bounded: it must end a call that never returns ---------------------
+BOUNDED_T0=$(date +%s)
+run_bounded 2 sleep 60
+BOUNDED_RC_SEEN=$?
+BOUNDED_ELAPSED=$(( $(date +%s) - BOUNDED_T0 ))
+[ "$BOUNDED_ELAPSED" -lt 15 ] \
+    && pass "run_bounded ENDS a call that never returns (${BOUNDED_ELAPSED}s, not 60)" \
+    || fail "run_bounded waited ${BOUNDED_ELAPSED}s on a 2s bound — the bound is not bounding"
+$BOUNDED_TIMED_OUT \
+    && pass "run_bounded reports the timeout as a timeout, not as an ordinary non-zero status" \
+    || fail "BOUNDED_TIMED_OUT is false after a bound expired"
+[ "$BOUNDED_RC_SEEN" -eq 124 ] \
+    && pass "run_bounded returns 124 on expiry (timeout's convention, recognisable without this file)" \
+    || fail "run_bounded returned $BOUNDED_RC_SEEN on expiry, want 124"
+
+# The negative control, and it is the one that decides whether the two arms are
+# distinguishable at all: a command that returns must not be reported as a
+# timeout, and must keep its OWN status.
+run_bounded 30 sh -c 'exit 3'
+BOUNDED_RC_SEEN=$?
+[ "$BOUNDED_RC_SEEN" -eq 3 ] && ! $BOUNDED_TIMED_OUT \
+    && pass "run_bounded passes a returning command's own status through untouched (rc=3, not timed out)" \
+    || fail "run_bounded mangled a returning command (rc=$BOUNDED_RC_SEEN timed_out=$BOUNDED_TIMED_OUT)"
+
+run_bounded 0 sh -c 'exit 5'
+[ "$?" -eq 5 ] && ! $BOUNDED_TIMED_OUT \
+    && pass "run_bounded with a zero bound runs unbounded (the controlled-observation escape hatch)" \
+    || fail "run_bounded did not honour a zero bound"
+
+# --- kill_tree: leaves first ------------------------------------------------
+# The property under test is NOT that the named process dies; it is that its
+# grandchild does. A `git fetch` whose ssh child survives the kill holds the
+# socket, and the hang continues under a killer that reported success.
+HANG_CHILD_PIDFILE="$WORK/hangchild.pid"
+export HANG_CHILD_PIDFILE
+rm -f "$HANG_CHILD_PIDFILE"
+"$FAKEBIN/hanggit-with-child" fetch >/dev/null 2>&1 &
+TREE_PARENT=$!
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [ -s "$HANG_CHILD_PIDFILE" ] && break
+    sleep 0.2
+done
+TREE_CHILD="$(cat "$HANG_CHILD_PIDFILE" 2>/dev/null)"
+if [ -n "$TREE_CHILD" ] && kill -0 "$TREE_CHILD" 2>/dev/null; then
+    pass "kill_tree premise: the fixture really does hold a grandchild (pid $TREE_CHILD)"
+    kill_tree "$TREE_PARENT" TERM
+    wait "$TREE_PARENT" 2>/dev/null
+    sleep 0.5
+    kill -0 "$TREE_CHILD" 2>/dev/null \
+        && fail "kill_tree left the grandchild alive — the process holding the socket survives the kill" \
+        || pass "kill_tree reaps the GRANDCHILD, not just the named process"
+else
+    fail "kill_tree fixture did not produce a live grandchild — the test is not measuring anything"
+fi
+
+# --- self_pid: the watchdog must be able to exclude itself ------------------
+# If this idiom breaks, the deadline watchdog kills itself partway through its
+# own kill and never reaches the SIGKILL — a watchdog that half-works, which is
+# worse than none because it looks armed.
+SELF_OUTER=$$
+SELF_INNER="$( ( self_pid ) )"
+[ -n "$SELF_INNER" ] && [ "$SELF_INNER" != "$SELF_OUTER" ] \
+    && pass "self_pid returns the SUBSHELL's own pid, not the parent's (bash 3.2 has no BASHPID)" \
+    || fail "self_pid returned '$SELF_INNER' in a subshell of $SELF_OUTER — the watchdog cannot exclude itself"
+
+# --- git_step: a hung step is a TIMEOUT, and timeouts are retryable ---------
+SAVED_GIT_TIMEOUT="$GIT_TIMEOUT"
+GIT_TIMEOUT=2
+GIT_STEP_T0=$(date +%s)
+git_step "$FAKEBIN/hanggit" fetch --quiet origin >/dev/null 2>&1
+GIT_STEP_RC=$?
+GIT_STEP_ELAPSED=$(( $(date +%s) - GIT_STEP_T0 ))
+[ "$GIT_STEP_ELAPSED" -lt 15 ] \
+    && pass "git_step BOUNDS a fetch that never returns (${GIT_STEP_ELAPSED}s) — this is the 2026-08-08 call, bounded" \
+    || fail "git_step waited ${GIT_STEP_ELAPSED}s on a hung fetch"
+$GIT_STEP_TIMED_OUT \
+    && pass "git_step records that the step was KILLED rather than that it failed" \
+    || fail "GIT_STEP_TIMED_OUT is false after a killed step"
+case "$SYNC_DETAIL" in
+    *"did not return within"*) pass "the killed step's SYNC_DETAIL says it did not return — the alert prints a fact, not a guess" ;;
+    *) fail "SYNC_DETAIL after a killed step does not describe the kill: $SYNC_DETAIL" ;;
+esac
+: "$GIT_STEP_RC"
+
+# classify_transport must take the kill as the classification and NOT consult a
+# probe. The probe measures a later instant — the link may well be up by then —
+# and calling a hang `remote` sends the reader to ssh keys.
+SYNC_CLASS=""
+classify_transport "https://github.com/drellem2/pogo.git" >/dev/null 2>&1
+[ "$SYNC_CLASS" = "timeout" ] \
+    && pass "a KILLED step classifies as timeout, from this run's own observation rather than a later probe" \
+    || fail "a killed step classified as '$SYNC_CLASS'"
+sync_class_retryable timeout \
+    && pass "timeout is RETRYABLE — a call that never returned established nothing at all, not even reachability" \
+    || fail "timeout was treated as settling the night"
+describe_sync_class timeout | grep -q 'TIMEOUT' \
+    && pass "describe_sync_class names the timeout class" || fail "describe_sync_class has no timeout row"
+remedy_for_sync_class timeout | grep -q '2026-08-08' \
+    && pass "the timeout remedy names the incident it was measured from" || fail "the timeout remedy is generic"
+# The negative control for the classifier: with no kill, the probe still decides.
+GIT_STEP_TIMED_OUT=false
+SYNC_CLASS=""
+classify_transport "" >/dev/null 2>&1
+[ "$SYNC_CLASS" = "unclassified" ] \
+    && pass "with no kill, classify_transport still reaches its ordinary path (a probe-less URL is unclassified)" \
+    || fail "classify_transport '$SYNC_CLASS' — the timeout short-circuit swallowed the ordinary path"
+GIT_TIMEOUT="$SAVED_GIT_TIMEOUT"
+
+# --- EVERY git call is bounded, not just the ones that look like steps ------
+# THIS TEST EXISTS BECAUSE THE FIX FAILED IT. The first version bounded the four
+# calls that go through git_step — clone, fetch, checkout, ff-merge — and left
+# the queries bare: `remote get-url origin`, `status --porcelain`, `rev-parse
+# --short HEAD`. Two of those run on the failure path IMMEDIATELY AFTER a fetch
+# that has just been killed for hanging, against the same remote. The suite
+# caught it by hanging, with the runner sitting in `remote get-url origin` having
+# already been killed once for hanging.
+#
+# The reasoning that left them bare — "it only reads .git/config, it is local" —
+# is the same reasoning that leaves any call unbounded, so the guard is
+# structural rather than a list of the calls we happened to think of.
+GIT_BARE="$(grep -n '"\$GIT"' "$RUNNER" \
+    | grep -v 'git_step "\$GIT"' \
+    | grep -v 'git_q "\$GIT"' \
+    | grep -v 'cands+=("\$GIT")' || true)"
+[ -z "$GIT_BARE" ] \
+    && pass "every git invocation goes through a BOUNDED helper — no bare \"\$GIT\" call survives" \
+    || fail "unbounded git call(s): $GIT_BARE"
+# The probe's positive control: it must object to a bare call, or it is a grep
+# that passes on every file.
+printf 'x="$("$GIT" -C /tmp status)"\n' > "$WORK/bare-git-fixture.sh"
+grep -n '"\$GIT"' "$WORK/bare-git-fixture.sh" | grep -v 'git_step "\$GIT"' | grep -v 'git_q "\$GIT"' | grep -q . \
+    && pass "the bare-git probe objects to a bare call (it measures the property, not the file)" \
+    || fail "the bare-git probe cannot see a bare call — it is not measuring anything"
+
+# And the query helper really is bounded: a hanging `remote get-url` must not
+# outlive the bound, because that is the exact call the failure path makes.
+SAVED_GIT_TIMEOUT2="$GIT_TIMEOUT"
+GIT_TIMEOUT=2
+GITQ_T0=$(date +%s)
+GITQ_OUT="$(git_q "$FAKEBIN/hanggit" -C /tmp remote get-url origin 2>/dev/null)"
+GITQ_ELAPSED=$(( $(date +%s) - GITQ_T0 ))
+[ "$GITQ_ELAPSED" -lt 15 ] \
+    && pass "git_q bounds a hanging query (${GITQ_ELAPSED}s) — the classifier's own git call cannot re-hang the run it is classifying" \
+    || fail "git_q waited ${GITQ_ELAPSED}s"
+[ -z "$GITQ_OUT" ] \
+    && pass "a timed-out query yields the empty string, which every callsite already treats as absent" \
+    || fail "git_q returned '$GITQ_OUT' after a timeout"
+GIT_TIMEOUT="$SAVED_GIT_TIMEOUT2"
+
+# --- run_deadline: derived from the window, floored ------------------------
+# 03:00, production window: 3h to the window's end plus 1800s of slack.
+[ "$(run_deadline 6 1800 7200 1200 3 0 0)" = "12600" ] \
+    && pass "run_deadline: a 03:00 fire is bounded at 3h30m — window end plus slack, not a constant" \
+    || fail "run_deadline at 03:00 = $(run_deadline 6 1800 7200 1200 3 0 0)"
+# 05:30 — the derived figure is below the floor, so the floor wins. A run may
+# always have a full drain plus the reserve, wherever in the window it starts.
+[ "$(run_deadline 6 1800 7200 1200 5 30 0)" = "10200" ] \
+    && pass "run_deadline floors at MAX_DRAIN+RESERVE+slack — a late fire is not killed mid-drain" \
+    || fail "run_deadline at 05:30 = $(run_deadline 6 1800 7200 1200 5 30 0)"
+# The out-of-window controlled run, where the derivation is deeply negative.
+[ "$(run_deadline 6 1800 7200 1200 14 0 0)" = "10200" ] \
+    && pass "run_deadline: a 14:00 out-of-window run gets the floor, not an immediate kill" \
+    || fail "run_deadline at 14:00 = $(run_deadline 6 1800 7200 1200 14 0 0)"
+# And it is always long enough to cover a full drain — the invariant that keeps
+# this from becoming a bound that kills healthy deploys.
+DEADLINE_COVERS=true
+for H in 2 3 4 5; do
+    [ "$(run_deadline 6 1800 7200 1200 "$H" 0 0)" -gt $(( 7200 + 1200 )) ] || DEADLINE_COVERS=false
+done
+$DEADLINE_COVERS \
+    && pass "at every hour of the window the deadline exceeds a full drain plus the reserve" \
+    || fail "some fire hour gets a deadline shorter than a legitimate run"
+
+# ---------------------------------------------------------------------------
+# THE ACCEPTANCE: the whole-run deadline goes RED against a constructed hang
+# ---------------------------------------------------------------------------
+# "A check that has never produced a red is a check of unknown polarity." So
+# this drives a real `pogo-deploy.sh` process against the 2026-08-08 condition
+# reproduced exactly — an unbounded git call that never returns
+# (POGO_DEPLOY_GIT_TIMEOUT=0 switches the per-step bound OFF on purpose, so what
+# is being tested is the whole-run deadline and nothing else) — and requires
+# four things the 08-08 run did not produce: a loud log line, a mail, a dead
+# process, and a TERMINAL LINE naming an exit code.
+#
+# Everything the run touches is redirected into $WORK: HOME, GOBIN/GOPATH (which
+# is how resolve_mg finds a fake macguffin instead of the real one), the lock,
+# the stamp and the log. Nothing here mails a real mailbox or reads the real
+# deploy log.
+E2E="$WORK/e2e"
+mkdir -p "$E2E/go/bin" "$E2E/src/.git" "$E2E/Library/Logs/pogo"
+cat > "$E2E/go/bin/mg" <<EOF
+#!/bin/sh
+[ "\$1" = "--help" ] && { echo "macguffin — fake"; exit 0; }
+[ "\$1" = "mail" ] && { echo "\$*" >> "$E2E/mail.log"; exit 0; }
+exit 0
+EOF
+cat > "$E2E/go/bin/pogo" <<EOF
+#!/bin/sh
+echo "\$*" >> "$E2E/pogo.log"
+exit 0
+EOF
+chmod +x "$E2E/go/bin/mg" "$E2E/go/bin/pogo"
+printf 'export GH_TOKEN=fake-token-value-not-a-secret\n' > "$E2E/zshenv"
+# Pre-warm `go env` against the redirected HOME. resolve_mg shells out to it
+# twice, and its FIRST call under a never-before-used HOME takes ~20s while it
+# builds its caches — which is a property of this fixture, not of the runner, and
+# it is long enough to trip the short deadlines below. Left un-warmed, the
+# negative control fails for a reason that has nothing to do with what it is
+# testing. (On the real box HOME is warm and the 2026-08-08 log shows mg
+# resolving in the same second as the start line.)
+#
+# GOMODCACHE is pinned to the real one because a module cache created under
+# $WORK is written read-only, and the suite's `rm -rf "$WORK"` then cannot
+# remove it — noise on exit that looks like a failing teardown.
+E2E_GOMODCACHE="$(go env GOMODCACHE 2>/dev/null)"
+export E2E_GOMODCACHE
+HOME="$E2E" GOBIN="$E2E/go/bin" GOPATH="$E2E/go" GOMODCACHE="$E2E_GOMODCACHE" \
+    go env GOBIN >/dev/null 2>&1 || true
+
+run_e2e() {   # run_e2e LABEL GIT_BIN GIT_TIMEOUT RUN_DEADLINE -> log on stdout
+    rm -rf "$E2E/lock" "$E2E/mail.log" "$E2E/stamp"
+    HOME="$E2E" \
+    GOBIN="$E2E/go/bin" GOPATH="$E2E/go" GOMODCACHE="$E2E_GOMODCACHE" \
+    POGO_BIN="$E2E/go/bin/pogo" \
+    GIT="$2" \
+    POGO_DEPLOY_SRC="$E2E/src" \
+    POGO_DEPLOY_ZSHENV="$E2E/zshenv" \
+    POGO_DEPLOY_LOCK_DIR="$E2E/lock" \
+    POGO_DEPLOY_STAMP="$E2E/stamp" \
+    POGO_DEPLOY_SKIP_WINDOW=1 \
+    POGO_DEPLOY_NOW=05 \
+    POGO_DEPLOY_FIRE_HOURS="3" \
+    POGO_DEPLOY_GIT_TIMEOUT="$3" \
+    POGO_DEPLOY_RUN_DEADLINE="$4" \
+    POGO_DEPLOY_DEADLINE_GRACE=2 \
+    POGO_DEPLOY_SYNC_ATTEMPTS=1 \
+    POGO_DEPLOY_SYNC_VIGIL=0 \
+    POGO_DEPLOY_ALERT_TO=mayor \
+        bash "$RUNNER" > "$E2E/$1.log" 2>&1
+    echo "$?" > "$E2E/$1.rc"
+}
+
+# RED — the hang. Unbounded git, a 5s whole-run deadline.
+E2E_T0=$(date +%s)
+run_e2e hang "$FAKEBIN/hanggit" 0 5
+E2E_ELAPSED=$(( $(date +%s) - E2E_T0 ))
+E2E_RC="$(cat "$E2E/hang.rc")"
+
+[ "$E2E_ELAPSED" -lt 60 ] \
+    && pass "ACCEPTANCE: a run wedged in an unbounded git call is ENDED (${E2E_ELAPSED}s) — on 2026-08-08 the same condition ran 113598s" \
+    || fail "the wedged run was not ended: ${E2E_ELAPSED}s elapsed"
+grep -q 'DEADLINE EXCEEDED' "$E2E/hang.log" \
+    && pass "ACCEPTANCE: the deadline says so LOUDLY in the log" \
+    || fail "no DEADLINE line in the log of a killed run"
+grep -q 'KILLED: the nightly run exceeded' "$E2E/mail.log" 2>/dev/null \
+    && pass "ACCEPTANCE: the deadline MAILS — the 08-08 hang sent nothing, ever" \
+    || fail "the killed run sent no mail (mail.log: $(cat "$E2E/mail.log" 2>/dev/null))"
+grep -q 'pogo-deploy: end (rc=' "$E2E/hang.log" \
+    && pass "ACCEPTANCE: the killed run writes a TERMINAL LINE with an exit code — 'no exit code' was the whole defect" \
+    || fail "the killed run wrote no terminal line: $(tail -3 "$E2E/hang.log")"
+[ "$E2E_RC" -ne 0 ] \
+    && pass "ACCEPTANCE: a killed run exits non-zero ($E2E_RC), so the night is not recorded as a success" \
+    || fail "the killed run exited 0"
+grep -q 'pogo-deploy: start' "$E2E/hang.log" \
+    && pass "the killed run did start — this fixture reproduces a HANG, not a job that never fired" \
+    || fail "the hang fixture never started"
+
+# GREEN — the same runner, the same deadline, a git that RETURNS. Nothing is
+# killed, nothing is mailed about a deadline, and the terminal line is still
+# there. Without this arm the RED above would be satisfied by a runner that
+# kills every run it starts.
+run_e2e ok "$FAKEBIN/workinggit" 5 20
+grep -q 'DEADLINE EXCEEDED' "$E2E/ok.log" \
+    && fail "the deadline fired on a run that finished in seconds — it would kill every healthy night" \
+    || pass "NEGATIVE CONTROL: a run whose git returns is NOT killed by the deadline"
+grep -q 'KILLED: the nightly run exceeded' "$E2E/mail.log" 2>/dev/null \
+    && fail "a healthy run mailed a deadline alert" \
+    || pass "NEGATIVE CONTROL: a healthy run mails no deadline alert"
+grep -q 'pogo-deploy: end (rc=' "$E2E/ok.log" \
+    && pass "NEGATIVE CONTROL: the healthy run writes the same terminal line — the marker is on EVERY path, not just the killed one" \
+    || fail "a healthy run wrote no terminal line: $(tail -3 "$E2E/ok.log")"
+
+# The per-step bound, end to end: with GIT_TIMEOUT set the fetch is killed long
+# before the whole-run deadline, and the night is classified rather than
+# guillotined. This is the outcome the deadline exists to make unnecessary.
+run_e2e step "$FAKEBIN/hanggit" 2 600
+grep -q 'step exceeded 2s and was killed' "$E2E/step.log" \
+    && pass "the per-step bound kills the fetch itself, well inside the whole-run deadline" \
+    || fail "the per-step bound did not fire: $(tail -5 "$E2E/step.log")"
+grep -q 'TIMEOUT' "$E2E/step.log" \
+    && pass "and the night is CLASSIFIED (timeout), which is what makes it retryable rather than lost" \
+    || fail "a killed step produced no timeout classification"
+grep -q 'pogo-deploy: end (rc=' "$E2E/step.log" \
+    && pass "the step-bounded run writes a terminal line too" \
+    || fail "the step-bounded run wrote no terminal line"
+
+# The skip paths get one as well. A fire that is locked out exits in
+# milliseconds and is perfectly healthy — and without a terminal line of its own
+# it is indistinguishable, to a witness reading the log, from a run that started
+# and never came back.
+mkdir -p "$E2E/lock"
+HOME="$E2E" GOBIN="$E2E/go/bin" GOPATH="$E2E/go" GOMODCACHE="$E2E_GOMODCACHE" POGO_BIN="$E2E/go/bin/pogo" \
+    GIT="$FAKEBIN/workinggit" POGO_DEPLOY_SRC="$E2E/src" POGO_DEPLOY_ZSHENV="$E2E/zshenv" \
+    POGO_DEPLOY_LOCK_DIR="$E2E/lock" POGO_DEPLOY_STAMP="$E2E/stamp" \
+    POGO_DEPLOY_SKIP_WINDOW=1 POGO_DEPLOY_NOW=05 POGO_DEPLOY_STALE_LOCK_MIN=99999 \
+    bash "$RUNNER" > "$E2E/locked.log" 2>&1
+grep -q 'pogo-deploy: end (rc=0' "$E2E/locked.log" \
+    && pass "a fire that skips on the LOCK still writes a terminal line — a healthy skip must not read as a hang" \
+    || fail "the locked-out fire wrote no terminal line: $(cat "$E2E/locked.log")"
+[ -d "$E2E/lock" ] \
+    && pass "and it did NOT remove the lock the running deploy holds (LOCK_HELD gates the cleanup)" \
+    || fail "a locked-out fire removed another run's lock — the earlier trap arming broke mutual exclusion"
+rmdir "$E2E/lock" 2>/dev/null || true
+
+# ---------------------------------------------------------------------------
 echo
 echo "--- Results ---"
 grep -c '^PASS' "$RESULTS_FILE" | sed 's/^/passed: /'

@@ -374,9 +374,41 @@ func printNoFireDisarmed(plistPath string) {
 // night ENDED; the log says which nights STARTED. Only the second can name a
 // run of nights on which nothing happened at all.
 func printNoFireWitness(r staleness.NoFireReport) {
-	fmt.Printf("did-not-run — expectation: the job STARTS every night; read from the deploy log, never from an exit code\n")
+	fmt.Printf("did-not-run — expectation: the job STARTS and FINISHES every night; read from the deploy log, never from an exit code\n")
 	fmt.Printf("  record:       %s\n", r.LogPath)
 	fmt.Printf("  last due:     %s\n", r.LastDueNight)
+
+	// The hang half FIRST when there is one (mg-56ac). A reader who stops after
+	// the first finding must not stop on the weaker one, and a run that started
+	// and never came back is the one with a fleet possibly stopped under it.
+	if r.HungTotal > 0 {
+		fmt.Printf("  HUNG: %d run(s) STARTED and did not finish inside %s. A hung night is not a missed one —\n",
+			r.HungTotal, staleness.HumanDuration(r.HungAfterSeconds))
+		fmt.Println("        it has a start line, which is why it used to be counted as a night that ran.")
+		for _, h := range r.Hung {
+			if h.Terminated {
+				fmt.Printf("    %s  hung   %s -> %s (%s end to end)\n",
+					h.Night, h.Start, h.End, staleness.HumanDuration(h.ElapsedSeconds))
+			} else {
+				fmt.Printf("    %s  hung   %s -> NO terminal line (%s and counting)\n",
+					h.Night, h.Start, staleness.HumanDuration(h.ElapsedSeconds))
+			}
+			if h.SilentSeconds > 0 {
+				fmt.Printf("             silent %s after: %s\n", staleness.HumanDuration(h.SilentSeconds), h.StalledAfter)
+			}
+		}
+		if r.HungTruncated {
+			fmt.Printf("    ... %d more (enumeration clipped; the count above is exact)\n", r.HungTotal-len(r.Hung))
+		}
+		fmt.Println("  A hung run holds the deploy lock for its whole length, and if it hung after quiescing")
+		fmt.Println("  the fleet then the fleet is still quiesced. Check what is running, not only the deploy:")
+		fmt.Println("    curl -s http://127.0.0.1:10000/version && pogo agent list")
+	}
+	if r.HangUnjudged > 0 {
+		fmt.Printf("  NOT JUDGED FOR HANGING: %d run(s) wrote no terminal line, and this log does not establish\n", r.HangUnjudged)
+		fmt.Println("             that the runner of their day ever wrote one. Excluded from the count and from the")
+		fmt.Println("             all-clear — before the first `pogo-deploy: end` line the absence is about the runner.")
+	}
 
 	switch {
 	case !r.LogFound:
@@ -389,6 +421,9 @@ func printNoFireWitness(r staleness.NoFireReport) {
 			fmt.Printf(" (+%d dry run(s), which do not count)", r.DryRuns)
 		}
 		fmt.Println("; every night this log covers had a start line.")
+		if r.HungTotal == 0 && r.HangArmed {
+			fmt.Println("      and every run in it wrote a terminal line, so none of them hung.")
+		}
 	default:
 		fmt.Printf("  DID NOT RUN: %d night(s) due through %s have no `pogo-deploy: start` line at all.\n",
 			r.MissedTotal, r.LastDueNight)
