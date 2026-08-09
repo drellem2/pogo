@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/drellem2/pogo/internal/agent"
+	"github.com/drellem2/pogo/internal/events"
 )
 
 // AgentLookup is the subset of *agent.Registry the scheduler needs. Defining
@@ -29,10 +31,104 @@ type MailSender func(to, from, subject, body string) error
 //     daemon — matches client.NudgeOrMail's existing semantics so a sleeping
 //     polecat picks the message up next time it lists mail.
 //   - DeliveryMail:  always send via macguffin mail.
+//
+// The mail fallback is COALESCED — see the fallback-run block below. That is
+// the whole of mg-af83's change: which fires are delivered, and by which
+// channel, is untouched.
 type PogodDeliverer struct {
 	Registry AgentLookup
 	Mail     MailSender
+
+	// LogPath is the scheduler's own-root events.log, the same path
+	// Scheduler.emitSchedulerEvent writes to (see EventLogPath and mg-e06d).
+	// Empty means "resolve globally", which is what a bare test deliverer
+	// wants; pogod sets it explicitly.
+	LogPath string
+
+	runMu sync.Mutex
+	runs  map[fallbackKey]*fallbackRun
 }
+
+// # The coalesced mail fallback (mg-af83)
+//
+// A fire that reaches the agent's PTY has never written a mailbox copy — the
+// success path returns before sendMail and always has, since mg-bcfa. What
+// filled the fleet's mailboxes is the OTHER path repeating: a schedule whose
+// fires cannot be delivered as a nudge writes one copy every cron tick, for as
+// long as that lasts. Measured 2026-08-09 across ~/.macguffin/mail: 12,295
+// messages from `scheduler`, of which architect's 264 unread were a single
+// unbroken run spanning the 2026-08-07..09 outage. In architect's box that was
+// 264 rows against 1 real message, and the copies are self-defeating — the body
+// says "check your mail", into the listing it is burying.
+//
+// The fallback exists so a schedule is durable across an agent being
+// unreachable. ONE copy discharges that: the message is a recurring reminder,
+// so copies 2..N of a run repeat an instruction the recipient has not yet acted
+// on rather than adding anything to it. The 2026-08-08 outage is the natural
+// experiment — 198 copies for pm-pogo, and on return the agent learned from
+// them exactly what its own startup mail-check already told it, at the cost of
+// burying a real 32-hour-old message at row ~108 of 265.
+//
+// So: while a schedule's fires cannot be delivered as a nudge, at most one
+// mailbox copy is written per unbroken run of undelivered fires. A fire that
+// does reach the PTY closes the run, and the next undelivered one opens a new
+// one. The run is refreshed every fallbackRefreshInterval so the single copy in
+// the box cannot go arbitrarily stale, and so the map cannot accumulate an
+// entry per polecat schedule for the life of the process.
+//
+// The run state is in memory, so a pogod restart during an outage permits one
+// extra copy. That is the right direction to fail in: the cost is a message,
+// the alternative is persisting a claim about someone else's mailbox across a
+// restart that may have been a `mg archive` sweep.
+//
+// A coalesced fire still returns nil, so the scheduler records it as delivered
+// and fires_delivered / unacked_streak read exactly as they did before. That is
+// deliberate: the fire's information IS in the recipient's mailbox, unread,
+// from the copy that opened the run — and re-scoring delivery is the change
+// mg-af83 explicitly defers until the ack is coupled to the work.
+//
+// What this deliberately does NOT do: gate the write on unacked_streak. That
+// counter cannot presently distinguish an agent that did not do the work from
+// one that did it and did not ack (measured fleet ack rate ~18-22%), nor a dead
+// agent from a live one batching its fires — mg-af83 records both confounds and
+// the sequencing that has to come first. Run length is a property of THIS
+// deliverer's own delivery attempts, needs no detector, and cannot be confused
+// by either.
+type fallbackKey struct{ agent, id string }
+
+// fallbackRun is an open run: a mailbox copy for this schedule is sitting in
+// the recipient's box, and no fire has reached their PTY since it was written.
+type fallbackRun struct {
+	writtenAt  time.Time
+	reason     string
+	suppressed int
+}
+
+// fallbackRefreshInterval is how long a single mailbox copy stands for its run
+// before the next undelivered fire is allowed to write a fresh one.
+//
+// It is a bound on staleness, not on volume: an agent unreachable for the 44
+// hours of the 2026-08-07 outage gets two copies rather than 264, and the
+// newest is never more than a day old. It also bounds the run map, whose keys
+// would otherwise include every polecat schedule pogod has ever delivered to.
+const fallbackRefreshInterval = 24 * time.Hour
+
+// EventFallbackCoalesced records a mailbox copy that was NOT written because an
+// earlier copy from the same run is already unread in the recipient's box.
+//
+// Emitted for the same reason nudge_suppressed is: a suppression whose reason
+// is not observable is indistinguishable from the delivery bug it exists to
+// prevent. Between this and the mail that opened the run, every undelivered
+// fire leaves exactly one record.
+const EventFallbackCoalesced = "scheduler_fallback_coalesced"
+
+// Reasons a fire fell back to mail. They name the branch in the coalescing
+// event so a reader can tell "nobody was home" from "the terminal refused it".
+const (
+	fallbackReasonNotRunning = "agent_not_running"
+	fallbackReasonNudgeFail  = "nudge_failed"
+	fallbackReasonSuppressed = "wake_suppressed"
+)
 
 // Deliver implements Deliverer.
 func (p *PogodDeliverer) Deliver(ctx context.Context, entry Entry, fireTime time.Time) error {
@@ -61,6 +157,10 @@ func (p *PogodDeliverer) Deliver(ctx context.Context, entry Entry, fireTime time
 				// precondition is the negation of that state (mg-ebee).
 				err := a.NudgeWake(body, agent.NudgeConfirm, agent.DefaultNudgeTimeout, entry.PendingToken)
 				if !mailAfterNudge(err) {
+					// The fire reached the agent. Any mailbox copy standing in
+					// for an earlier undelivered run has been superseded by a
+					// live delivery, so the next failure starts a fresh run.
+					p.closeFallbackRun(entry)
 					return nil
 				}
 				// Log and fall through to mail — better to deliver late via
@@ -69,15 +169,17 @@ func (p *PogodDeliverer) Deliver(ctx context.Context, entry Entry, fireTime time
 				// failed, the wake was declined, and a recipient reading its own
 				// fire deserves the difference.
 				note := "[scheduler] nudge failed: " + err.Error()
+				reason := fallbackReasonNudgeFail
 				if errors.Is(err, agent.ErrWakeSuppressed) {
 					note = "[scheduler] terminal wake suppressed: " + err.Error()
+					reason = fallbackReasonSuppressed
 				}
-				return p.sendMail(entry.Agent, subject, body+"\n\n"+note)
+				return p.fallbackMail(entry, subject, body+"\n\n"+note, reason, fireTime)
 			}
 		}
 		// Agent not running — fall back to mail so the schedule is durable
 		// even when the recipient is offline.
-		return p.sendMail(entry.Agent, subject, body)
+		return p.fallbackMail(entry, subject, body, fallbackReasonNotRunning, fireTime)
 	default:
 		return fmt.Errorf("scheduler: unsupported delivery %q", entry.Delivery)
 	}
@@ -109,6 +211,100 @@ func mailAfterNudge(err error) bool {
 		return false
 	}
 	return !errors.Is(err, agent.ErrNudgeQueued)
+}
+
+// fallbackMail is the single door to the mail fallback. It writes a mailbox
+// copy only when this schedule has no copy already standing unread for the
+// current run of undelivered fires.
+//
+// The run opens only after the send SUCCEEDS. A failed send left nothing in the
+// box, so treating it as an open run would suppress every later copy against a
+// message that does not exist — trading a mailbox full of duplicates for a
+// schedule that is silently undeliverable, which is the strictly worse fault.
+func (p *PogodDeliverer) fallbackMail(entry Entry, subject, body, reason string, fireTime time.Time) error {
+	if run, open := p.rideOpenRun(entry, fireTime); open {
+		p.emitFallbackCoalesced(entry, reason, run, fireTime)
+		return nil
+	}
+	if err := p.sendMail(entry.Agent, subject, body+coalesceNotice(entry)); err != nil {
+		return err
+	}
+	p.openFallbackRun(entry, reason, fireTime)
+	return nil
+}
+
+// rideOpenRun reports whether a mailbox copy for this schedule is already
+// unread from the current run, counting this fire against it if so. Runs older
+// than fallbackRefreshInterval are dropped first, which both refreshes a stale
+// copy and keeps the map to the schedules actually delivered to recently.
+func (p *PogodDeliverer) rideOpenRun(entry Entry, now time.Time) (fallbackRun, bool) {
+	p.runMu.Lock()
+	defer p.runMu.Unlock()
+	for k, r := range p.runs {
+		if now.Sub(r.writtenAt) >= fallbackRefreshInterval {
+			delete(p.runs, k)
+		}
+	}
+	r, ok := p.runs[fallbackKey{entry.Agent, entry.ID}]
+	if !ok {
+		return fallbackRun{}, false
+	}
+	r.suppressed++
+	return *r, true
+}
+
+// openFallbackRun records that a mailbox copy was just written for this
+// schedule, so the fires behind it can ride on it.
+func (p *PogodDeliverer) openFallbackRun(entry Entry, reason string, now time.Time) {
+	p.runMu.Lock()
+	defer p.runMu.Unlock()
+	if p.runs == nil {
+		p.runs = make(map[fallbackKey]*fallbackRun)
+	}
+	p.runs[fallbackKey{entry.Agent, entry.ID}] = &fallbackRun{writtenAt: now, reason: reason}
+}
+
+// closeFallbackRun ends the run for this schedule: a fire has reached the agent
+// directly, so the next one that cannot will write its own copy.
+func (p *PogodDeliverer) closeFallbackRun(entry Entry) {
+	p.runMu.Lock()
+	defer p.runMu.Unlock()
+	delete(p.runs, fallbackKey{entry.Agent, entry.ID})
+}
+
+// coalesceNotice tells the recipient that the copy they are reading stands for
+// every undelivered fire behind it. Without it the single copy would read as
+// though the schedule fired once, which is a different and wrong claim.
+func coalesceNotice(entry Entry) string {
+	return fmt.Sprintf(
+		"\n\n[scheduler] This is the only mailbox copy of %s until a fire reaches your terminal: "+
+			"further fires that cannot be delivered are coalesced into this one, and a fresh copy "+
+			"is written at most once every %s (mg-af83).",
+		entry.ID, fallbackRefreshInterval)
+}
+
+// emitFallbackCoalesced records the copy that was not written, with the length
+// of the run so far and the age of the copy that stands for it.
+func (p *PogodDeliverer) emitFallbackCoalesced(entry Entry, reason string, run fallbackRun, fireTime time.Time) {
+	ev := events.Event{
+		EventType: EventFallbackCoalesced,
+		Agent:     "pogod",
+		Details: map[string]any{
+			"schedule_id":       entry.ID,
+			"to":                entry.Agent,
+			"delivery":          string(entry.Delivery),
+			"reason":            reason,
+			"run_reason":        run.reason,
+			"copies_suppressed": run.suppressed,
+			"mailbox_copy_at":   run.writtenAt.Format(time.RFC3339),
+			"fired_at":          fireTime.Format(time.RFC3339),
+		},
+	}
+	if p.LogPath == "" {
+		events.Emit(context.Background(), ev)
+		return
+	}
+	events.EmitTo(context.Background(), p.LogPath, ev)
 }
 
 func (p *PogodDeliverer) sendMail(to, subject, body string) error {
