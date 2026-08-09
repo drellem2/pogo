@@ -42,6 +42,7 @@ import (
 	"github.com/drellem2/pogo/internal/scheduler"
 	"github.com/drellem2/pogo/internal/selfdrift"
 	"github.com/drellem2/pogo/internal/service"
+	"github.com/drellem2/pogo/internal/sourcewatch"
 	"github.com/drellem2/pogo/internal/synthfail"
 	"github.com/drellem2/pogo/internal/version"
 	"github.com/drellem2/pogo/internal/xref"
@@ -3160,6 +3161,26 @@ Exits with code 1 if any critical check fails (--check mode only).`,
 					warn(launchAgentCheckName, laDetail)
 				} else {
 					pass(launchAgentCheckName, laDetail)
+				}
+			}
+
+			// 2b-ii. Is any consumer reading a source nothing writes to
+			// (mg-c2f5)? Check 2b above compares an installed plist against
+			// the code that ships it, which says nothing about a plist that is
+			// exactly as intended and points at a box that has gone quiet.
+			// com.pogo.notify was in that state for at least 40 hours —
+			// loaded, healthy, polling, reporting no error, watching a
+			// directory the fleet does not write to — and every instrument
+			// that watches the JOB stayed green throughout. This row compares
+			// the configured source against where data is actually arriving.
+			// See sourceliveness.go.
+			{
+				slReport := sourcewatch.Audit(sourcewatch.DefaultLaunchAgentsDir(), time.Now(), sourcewatch.DefaultWindow)
+				slStatus, slDetail := sourceLivenessLine(slReport, service.LaunchAgentsSupported())
+				if slStatus == "warn" {
+					warn(sourceLivenessCheckName, slDetail)
+				} else {
+					pass(sourceLivenessCheckName, slDetail)
 				}
 			}
 
