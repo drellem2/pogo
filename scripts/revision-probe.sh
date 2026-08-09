@@ -58,11 +58,29 @@
 # report, because a silent fallback to a stale ref is precisely the failure this
 # file exists to remove.
 #
+# IT REPORTS EITHER WAY — THE LEDGER (mg-a03d)
+#
+# `--log FILE` appends ONE line per run, whatever the verdict, from an EXIT
+# trap rather than from each terminal branch. That is not tidiness either:
+#
+#   - a witness that writes only when it is unhappy cannot be distinguished
+#     from a witness that is not running. Silence has two causes and the
+#     operator needs to tell them apart — which is this ticket's whole lineage.
+#   - the trap is what makes "either way" structural. A `log_verdict` call
+#     added to each `exit` is one an exit path can be added without, and the
+#     paths that get forgotten are the rare ones, which are the interesting
+#     ones.
+#
+# The ledger is therefore also a HEARTBEAT for the probe itself: its newest
+# line's age answers "is the witness still firing?", which no amount of alert
+# mail can.
+#
 # USAGE
 #
 #   scripts/revision-probe.sh
 #   scripts/revision-probe.sh --stale-after 12h --mail
 #   scripts/revision-probe.sh --url http://127.0.0.1:10000 --repo ~/.pogo/deploy-src
+#   scripts/revision-probe.sh --log ~/Library/Logs/pogo/revision-probe.log --mail
 #
 # EXIT STATUS
 #
@@ -88,9 +106,19 @@ REMOTE="origin"
 REF_SOURCE="auto"          # auto | remote | local
 STALE_AFTER_RAW="${POGO_REVISION_PROBE_STALE_AFTER:-24h}"
 STAMP="${POGO_REVISION_PROBE_STAMP:-$HOME/.pogo/revision-probe.stamp}"
+LOG="${POGO_REVISION_PROBE_LOG:-}"
 NOW_RAW=""
 DO_MAIL=0
 MAIL_TO="human"
+# How long before the SAME unresolved alert is mailed again. The arming schedule
+# is hourly (see scripts/launchd/com.pogo.revisionprobe.plist) because the
+# divergence clock can only mature at the sampling rate — a daily probe first
+# SEES a divergence a day after it starts, so a 24h threshold would need three
+# nights of failure to fire. Hourly sampling with unthrottled mail is 24
+# identical notifications a day, which is the "alarm nobody reads" this file's
+# own threshold exists to prevent. So the two are set together: sample often,
+# notify rarely. `--renotify 0` mails on every alerting run.
+RENOTIFY_RAW="${POGO_REVISION_PROBE_RENOTIFY:-12h}"
 QUIET=0
 # Retries for the loopback read. pogod is restarted BY the deploy, so a single
 # refused connection during the restart window is not evidence of anything; a
@@ -99,10 +127,16 @@ PROBE_TRIES=3
 PROBE_GAP=2
 
 usage() {
-    sed -n '2,70p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    # The header comment IS the help text. The range ends at the last line of
+    # EXIT STATUS; scripts/revision-probe_test.sh asserts that `--help` still
+    # reaches it, because a hard-coded line range silently truncates the moment
+    # the header grows and nothing else would notice.
+    sed -n '2,91p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 die_setup() {
+    VERDICT="SETUP-FAILED"
+    VERDICT_NOTE="$*"
     echo "revision-probe: $*" >&2
     exit 2
 }
@@ -118,6 +152,8 @@ while [ $# -gt 0 ]; do
         --ref-source) REF_SOURCE="${2:-}"; shift 2 ;;
         --stale-after) STALE_AFTER_RAW="${2:-}"; shift 2 ;;
         --stamp) STAMP="${2:-}"; shift 2 ;;
+        --log) LOG="${2:-}"; shift 2 ;;
+        --renotify) RENOTIFY_RAW="${2:-}"; shift 2 ;;
         --now) NOW_RAW="${2:-}"; shift 2 ;;
         --mail) DO_MAIL=1; shift ;;
         --mail-to) MAIL_TO="${2:-}"; DO_MAIL=1; shift 2 ;;
@@ -128,6 +164,46 @@ while [ $# -gt 0 ]; do
         *) die_setup "unknown option '$1' (try --help)" ;;
     esac
 done
+
+# ---------------------------------------------------------------------------
+# The ledger — ONE line per run, whatever happened (mg-a03d)
+# ---------------------------------------------------------------------------
+# Installed as an EXIT trap, and installed HERE — before the first thing that
+# can call die_setup — so that a probe which dies on its own setup still leaves
+# a line saying it tried. The only uncovered path is an unparseable command
+# line above, which cannot be logged because the log's own path comes from it.
+#
+# The trap must not disturb the exit status: it calls no `exit`, so bash
+# preserves the status the script was leaving with.
+#
+# The timestamp is real wall-clock even when `--now` injects a synthetic clock
+# for the age arithmetic. The two answer different questions — "when did this
+# run" versus "how long has the divergence stood" — and a ledger whose
+# timestamps could be back-dated by a flag is no longer a heartbeat.
+
+VERDICT="INCOMPLETE"        # every terminal path below overwrites this
+VERDICT_NOTE=""
+AGE_LABEL="-"
+
+log_verdict() {
+    local rc="$1" dir
+    [ -n "$LOG" ] || return 0
+    dir="$(dirname "$LOG")"
+    [ -d "$dir" ] || mkdir -p "$dir" 2>/dev/null
+    {
+        printf '%s exit=%s %-12s running=%.8s reference=%.8s age=%s threshold=%s' \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$rc" "$VERDICT" \
+            "${RUNNING:-<unread>}" "${REFERENCE:-<unread>}" \
+            "$AGE_LABEL" "$STALE_AFTER_RAW"
+        [ -z "$VERDICT_NOTE" ] || printf ' -- %s' "$VERDICT_NOTE"
+        printf '\n'
+    } >> "$LOG" 2>/dev/null || {
+        echo "revision-probe: WARNING — could not append to the ledger $LOG. The run below still happened; nothing recorded that it did, so a reader cannot tell this probe from one that never fired." >&2
+        return 0
+    }
+}
+
+trap 'log_verdict "$?"' EXIT
 
 case "$REF_SOURCE" in
     auto|remote|local) ;;
@@ -196,6 +272,9 @@ format_age() {
 
 STALE_AFTER="$(parse_duration "$STALE_AFTER_RAW")" \
     || die_setup "--stale-after '$STALE_AFTER_RAW' is not a duration (e.g. 90m, 24h, 2d)"
+
+RENOTIFY="$(parse_duration "$RENOTIFY_RAW")" \
+    || die_setup "--renotify '$RENOTIFY_RAW' is not a duration (e.g. 90m, 12h, 0)"
 
 if [ -n "$NOW_RAW" ]; then
     NOW="$(to_epoch "$NOW_RAW")" || die_setup "--now '$NOW_RAW' is not an epoch or RFC3339 timestamp"
@@ -271,6 +350,12 @@ while :; do
 done
 
 if [ "$CURL_RC" -ne 0 ]; then
+    # The ledger keeps these two exit-2 states apart for the same reason the
+    # prose below does: one owes a restart, the other owes an investigation.
+    # Collapsing them into a single "could not run" would put the distinction
+    # this file argues for in the narrative and not in the record.
+    VERDICT="UNREACHABLE"
+    VERDICT_NOTE="pogod did not answer $VERSION_URL after $PROBE_TRIES tries (curl exit $CURL_RC)"
     cat >&2 <<EOF
 revision-probe: pogod did not answer $VERSION_URL after $PROBE_TRIES tries (curl exit $CURL_RC).
 
@@ -289,6 +374,8 @@ RUNNING="$(printf '%s' "$VERSION_BODY" \
     | sed -n 's/.*"revision"[[:space:]]*:[[:space:]]*"\([0-9a-fA-F]*\)".*/\1/p')"
 
 if [ -z "$RUNNING" ]; then
+    VERDICT="NO-REVISION"
+    VERDICT_NOTE="$VERSION_URL answered but named no revision"
     cat >&2 <<EOF
 revision-probe: $VERSION_URL answered but named no revision.
 
@@ -383,23 +470,32 @@ fi
 #     behind a main that moved since, and that is not the failure being watched.
 
 SINCE="$NOW"
+# MAILED_AT carries the fourth stamp field: when this same unresolved alert was
+# last put in front of a human. It is keyed on the running revision for exactly
+# the reasons SINCE is — a new binary is a new situation and deserves a fresh
+# notification, a moving reference is not.
+MAILED_AT=""
 stamp_dir="$(dirname "$STAMP")"
 if [ -r "$STAMP" ]; then
-    read -r st_since st_rev _ < "$STAMP" 2>/dev/null
+    read -r st_since st_rev st_ref st_mailed _ < "$STAMP" 2>/dev/null
     if [ -n "${st_rev:-}" ] && [ "$st_rev" = "$RUNNING" ] \
         && [ -n "${st_since:-}" ] && [ -z "${st_since//[0-9]/}" ]; then
         SINCE="$st_since"
+        if [ -n "${st_mailed:-}" ] && [ -z "${st_mailed//[0-9]/}" ]; then
+            MAILED_AT="$st_mailed"
+        fi
     fi
 fi
 
 write_stamp() {
     [ -d "$stamp_dir" ] || mkdir -p "$stamp_dir" 2>/dev/null
-    printf '%s %s %s\n' "$SINCE" "$RUNNING" "$REFERENCE" > "$STAMP" 2>/dev/null \
+    printf '%s %s %s %s\n' "$SINCE" "$RUNNING" "$REFERENCE" "${MAILED_AT:--}" > "$STAMP" 2>/dev/null \
         || echo "revision-probe: WARNING — could not write the stamp $STAMP, so the divergence clock restarts every run and the alarm can never mature" >&2
 }
 
 AGE=$(( NOW - SINCE ))
 [ "$AGE" -ge 0 ] || AGE=0
+AGE_LABEL="$(format_age "$AGE")"
 
 # ---------------------------------------------------------------------------
 # Verdict
@@ -407,8 +503,12 @@ AGE=$(( NOW - SINCE ))
 
 if [ "$RUNNING" = "$REFERENCE" ]; then
     # Clear the stamp: the next divergence must be timed from ITS own start, not
-    # from a stale record of a divergence that has since closed.
+    # from a stale record of a divergence that has since closed. Clearing it also
+    # resets the re-notify throttle, which is right — a convergence that later
+    # breaks is a new alert, not a continuation of the old one.
     rm -f "$STAMP" 2>/dev/null
+    VERDICT="OK"
+    AGE_LABEL="-"
     say "revision-probe: OK — pogod is running $REFERENCE, which is $REMOTE/$REF."
     say "  running   $RUNNING   ($VERSION_URL)"
     say "  reference $REFERENCE   ($REF_ORIGIN)"
@@ -449,12 +549,14 @@ EOF
 }
 
 if [ "$AGE" -le "$STALE_AFTER" ]; then
+    VERDICT="DIVERGED"
     say "revision-probe: DIVERGED, within threshold — pogod is not on $REMOTE/$REF, first seen $(format_age "$AGE") ago (threshold $(format_age "$STALE_AFTER"))."
     say ""
     [ "$QUIET" -eq 1 ] || build_report
     exit 0
 fi
 
+VERDICT="ALERT"
 SUBJECT="pogod has not been redeployed for $(format_age "$AGE") — running $(printf '%.8s' "$RUNNING"), $REMOTE/$REF is $(printf '%.8s' "$REFERENCE")"
 BODY="$(printf 'revision-probe: ALERT — the running pogod revision has differed from %s/%s for %s, which is longer than the %s threshold.\n\nThis probe is a tracked file in the checkout, so it is armed by a MERGE and not by a deploy. It reports on the deploy without depending on the deploy having worked.\n\n%s\n' \
     "$REMOTE" "$REF" "$(format_age "$AGE")" "$(format_age "$STALE_AFTER")" "$(build_report)")"
@@ -471,6 +573,25 @@ say "$BODY"
 # directly rather than leaving "and then mail human" as an instruction in a
 # scheduler message, because that instruction only runs if an agent turn runs,
 # and turns that never run are half of this ticket's lineage.
+#
+# THROTTLED, and the throttle is in the probe rather than in the schedule
+# (mg-a03d). The sampling rate and the notification rate answer different
+# questions and must be settable apart: the clock can only mature as fast as the
+# probe samples, so the schedule wants to be frequent, while the same unchanged
+# fact put in front of a human 24 times a day is an alarm that gets filtered.
+# Putting the throttle in the scheduler would have forced one rate to serve both.
+#
+# A FAILED send does not count as a notification. The alert did not reach anyone,
+# so the next run must try again rather than record the attempt and go quiet.
+
+MAIL_SUPPRESSED=""
+if [ "$DO_MAIL" -eq 1 ] && [ -n "$MAILED_AT" ] && [ "$RENOTIFY" -gt 0 ] \
+    && [ $(( NOW - MAILED_AT )) -lt "$RENOTIFY" ]; then
+    MAIL_SUPPRESSED="already mailed $(format_age $(( NOW - MAILED_AT ))) ago; next notification after $(format_age "$RENOTIFY") (--renotify)"
+    VERDICT_NOTE="mail suppressed: $MAIL_SUPPRESSED"
+    echo "revision-probe: mail SUPPRESSED — $MAIL_SUPPRESSED. The alert above and the exit status stand." >&2
+    DO_MAIL=0
+fi
 
 if [ "$DO_MAIL" -eq 1 ]; then
     # /usr/bin/mg satisfies -x and `command -v mg`; it is the Micro-Emacs
@@ -493,6 +614,9 @@ if [ "$DO_MAIL" -eq 1 ]; then
         if ! "$MG" mail send "$MAIL_TO" --from=revision-probe \
             --subject="$SUBJECT" --body-file "$bf" >/dev/null 2>&1; then
             echo "revision-probe: could not mail $MAIL_TO — the alert stands, it just did not reach anyone" >&2
+        else
+            MAILED_AT="$NOW"
+            write_stamp
         fi
         rm -f "$bf"
     fi

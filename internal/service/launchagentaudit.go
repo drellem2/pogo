@@ -207,6 +207,21 @@ type LaunchAgentAudit struct {
 // Adding a fourth launchd job to this package means adding a row here. That is
 // the point: the next two-artifact ticket gets audited because its job is in the
 // registry, not because somebody remembered to write a check for it.
+//
+// A FOURTH JOB EXISTS AND IS DELIBERATELY NOT IN THIS REGISTRY (mg-a03d).
+// com.pogo.revisionprobe arms scripts/revision-probe.sh, and it is rendered by
+// scripts/install-revision-probe.sh from the tracked plist rather than by this
+// package, for the reason the probe itself is a shell script: everything in here
+// ships in the `pogo` BINARY, which the redeploy installs, and the probe's whole
+// job is to be armed on a box where the deploy has been failing for a week. A
+// row here would need a Go copy of the plist to render — which is the mirror
+// mg-b201 was filed for — and would make the auditor for the deploy witness
+// arrive by the deploy.
+//
+// This comment is the registry's promise kept rather than broken: the omission
+// is a decision with a reason, not a job somebody forgot. Auditing the probe's
+// job on the merge-activated path is filed as its own item, because a deferred
+// half announced in a comment and never filed is a half that gets dropped.
 type managedLaunchAgent struct {
 	Label  string
 	Path   func() string

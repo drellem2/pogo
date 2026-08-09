@@ -480,3 +480,78 @@ rejected or only partly parsed is still a perfectly good-looking file.
 Install outside the 02:00–06:00 window, or check `~/.pogo/deploy.lock.d` and
 `pgrep -f pogo-deploy` first. `install-deploy` does `launchctl bootout` before
 `bootstrap`, and booting out a job mid-fire would kill a deploy in progress.
+
+## Revision Probe Agent (`com.pogo.revisionprobe`)
+
+A **fourth** launchd job, and the smallest of them: it runs
+`~/.pogo/deploy-src/scripts/revision-probe.sh` hourly at :20, which does two
+reads and no build — the running revision from `GET /version`, the reference
+from the tip of `origin/main` — and alerts when they have differed for longer
+than 24h. It never builds, installs, restarts or writes anything but its own
+stamp and ledger.
+
+```bash
+scripts/install-revision-probe.sh              # install / re-install, then verify
+scripts/install-revision-probe.sh --dry-run    # render and print, touch nothing
+scripts/install-revision-probe.sh --uninstall  # bootout and remove
+```
+
+### Why it has to be a launchd job
+
+mg-ce10 landed the probe and armed it with nothing: 501 lines, zero schedules,
+zero plists, zero callers. That is the limiting case of the rule the probe
+implements — *a detector for "X did not happen" must not be activated by X* —
+because a detector activated by **nothing** is present by existence and absent
+by effect.
+
+The two alternatives were considered and refused:
+
+| candidate | why not |
+|---|---|
+| `pogo schedule` | its scheduler lives inside `pogod`, and it delivers a **nudge or mail to an agent** — it cannot run a command. Arming this way needs a live `pogod` *and* an agent turn. A stopped `pogod` is the state the probe most needs to report (mg-6d2f), and turns that never run are half of this lineage. |
+| a call from the deploy runner | refused by the rule. A probe invoked by the deploy cannot witness the deploy that never fired — four of eight failing nights (mg-2def). That is driftwatch's shape (mg-5bd2), not a fix for it. |
+
+launchd is triggered by the OS clock: independent of `pogod`, the deploy, the
+refinery and any agent turn.
+
+### Why it is NOT `com.pogo.deploy`
+
+The deploy job is the thing being watched. Folding the witness into it would
+make the alarm for "the deploy did not run" fire only when the deploy ran.
+
+### Plist keys that differ from the other three
+
+| key | value | why |
+|---|---|---|
+| `StartCalendarInterval` | `Minute 20` only, i.e. hourly | the divergence clock matures only as fast as the probe samples. A daily probe first *sees* a divergence a day late, so a 24h threshold would need three failed nights to fire. |
+| `RunAtLoad` | `true` | the opposite of `com.pogo.deploy`, and for the stated reason: a fire of that job bounces the fleet, a fire of this one is two reads and no mutation. The first thing anyone wants after arming a witness is evidence that it fires. |
+| `EnvironmentVariables.PATH` | **no** `~/.pogo/bin`, and `go`/`pogo`/`pogod` are not required | the probe must run on a box where the deploy has been failing for a week. `~/go/bin` is present for `mg` alone, and `revision-probe.sh` makes every candidate self-identify as macguffin first, because `/usr/bin/mg` is the Micro-Emacs editor. |
+| `GIT_TERMINAL_PROMPT` | `0` | an unattended probe that stops to ask for a password does not fail, it **hangs**, and a hung probe is a silent one. |
+| two log paths | `revision-probe.log` and `revision-probe.report.log` | the first is the **ledger** — one line per run, green or red — and it is the heartbeat. Mixing the narrative into it would bury the newest line. |
+
+### Replay policy, declared
+
+launchd has no field for it, so the behaviour is the OS's and this is where it
+is chosen. `StartCalendarInterval` is **deferred-once** across sleep: one run on
+wake for any number of fires missed while asleep. Right here, because the report
+is not a per-interval sample — the age comes from a persisted stamp read against
+wall clock, so a late report is still true and still names the correct age. A
+skip policy would discard the first report after a wake, which is the one most
+likely to carry news.
+
+**A host that is powered OFF misses the fire outright.** launchd defers across
+sleep, not across shutdown. The 2026-08-07 no-fire nights were a power-off, so
+this witness would have been dark for them too.
+
+### The read-back is the part that proves it
+
+As with `com.pogo.deploy`, the install command's own output does not:
+
+```bash
+scripts/install-revision-probe.sh
+launchctl print gui/$(id -u)/com.pogo.revisionprobe | head -20
+tail -5 ~/Library/Logs/pogo/revision-probe.log     # RunAtLoad means there is already a line
+```
+
+A ledger whose newest line is hours old means the witness stopped — which looks
+exactly like health if you only watch for alerts.

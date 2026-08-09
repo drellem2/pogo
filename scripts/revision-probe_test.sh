@@ -363,6 +363,200 @@ else
     fail "no stamp was written — the divergence clock would restart every run and the alarm could never fire"
 fi
 
+# --- 11. IT REPORTS EITHER WAY — the ledger (mg-a03d) -------------------------
+# The arming half of this lineage. A witness that writes only when it is unhappy
+# cannot be told apart from a witness that is not running, and "no alert" then
+# means both "healthy" and "dark". Every case below asserts a line was written
+# AND that it names the verdict, because a ledger that records only that
+# something happened is the same shrug one layer along.
+#
+# The GREEN arm is the one that is easy to skip and the one that matters: the
+# red arm is exercised by every other section here, and a check that has only
+# ever produced a red is a check of unknown polarity.
+
+LEDGER="$SANDBOX/ledger.log"
+
+ledger_lines() { [ -f "$LEDGER" ] && wc -l < "$LEDGER" | tr -d ' ' || echo 0; }
+
+rm -f "$LEDGER"
+serve_revision "$C3"
+rm -f "$STAMP"
+run_probe --repo "$FRESH" --now "$NOW_OLD" --stale-after 24h --log "$LEDGER" >/dev/null 2>&1
+if [ "$(ledger_lines)" = "1" ] && grep -q ' OK ' "$LEDGER" && grep -q 'exit=0' "$LEDGER"; then
+    pass "a GREEN run writes a ledger line — silence and health stop being the same observation"
+else
+    fail "no OK ledger line after a clean run — got: $(cat "$LEDGER" 2>&1)"
+fi
+
+serve_revision "$C1"
+printf '%s %s %s\n' "$T0" "$C1" "$C3" > "$STAMP"
+run_probe --repo "$FRESH" --now "$NOW_OLD" --stale-after 24h --log "$LEDGER" >/dev/null 2>&1
+if [ "$(ledger_lines)" = "2" ] && grep -q ' ALERT ' "$LEDGER" && grep -q 'exit=1' "$LEDGER"; then
+    pass "a RED run appends its own ledger line, naming the ALERT verdict"
+else
+    fail "no ALERT ledger line after an alerting run — got: $(cat "$LEDGER" 2>&1)"
+fi
+
+printf '%s %s %s\n' "$T0" "$C1" "$C3" > "$STAMP"
+run_probe --repo "$FRESH" --now "$NOW_YOUNG" --stale-after 24h --log "$LEDGER" >/dev/null 2>&1
+if grep -q ' DIVERGED ' "$LEDGER"; then
+    pass "a within-threshold divergence is DIVERGED in the ledger, not folded into OK"
+else
+    fail "the within-threshold run did not record a distinct verdict — got: $(cat "$LEDGER" 2>&1)"
+fi
+
+# A probe that dies on its own setup must still leave a line saying it tried.
+# This is the case the EXIT trap exists for: it is the rarest path and the one a
+# per-branch log call gets added without.
+before="$(ledger_lines)"
+bash "$PROBE" --url http://127.0.0.1:1 --stamp "$STAMP" --tries 1 \
+    --repo "$FRESH" --now "$NOW_OLD" --stale-after 24h --log "$LEDGER" >/dev/null 2>&1
+if [ "$(ledger_lines)" -gt "$before" ] && grep -q 'UNREACHABLE' "$LEDGER"; then
+    pass "a probe that could not reach the daemon records that it could not — an exit-2 run is not a missing run"
+else
+    fail "the unreachable-daemon path wrote no ledger line, so a probe that cannot reach the daemon is indistinguishable from one that never fired — got: $(cat "$LEDGER" 2>&1)"
+fi
+
+# The ledger keeps apart the two states the prose keeps apart. If it did not,
+# the distinction this file argues for would live only in a narrative nobody
+# reads at 08:00 and not in the record they do.
+before="$(ledger_lines)"
+printf '{"go_version":"go1.25.0"}\n' > "$VERSION_FILE"
+run_probe --repo "$FRESH" --now "$NOW_OLD" --stale-after 24h --log "$LEDGER" >/dev/null 2>&1
+if [ "$(ledger_lines)" -gt "$before" ] && grep -q 'NO-REVISION' "$LEDGER"; then
+    pass "an unstamped daemon and an unreachable one are DIFFERENT verdicts in the ledger"
+else
+    fail "the unstamped-daemon run did not record its own verdict — one owes a restart and the other an investigation — got: $(cat "$LEDGER" 2>&1)"
+fi
+
+# A refused command line is the one path the trap cannot cover, because the
+# ledger's own path arrives on that command line. Asserted so the gap is a
+# recorded decision and not a surprise.
+before="$(ledger_lines)"
+bash "$PROBE" --log "$LEDGER" --no-such-flag >/dev/null 2>&1
+if [ "$(ledger_lines)" -eq "$before" ]; then
+    pass "an unparseable command line writes no ledger line — the one uncovered path, and it is uncovered on purpose"
+else
+    fail "an unparseable command line wrote a ledger line; harmless, but the header says it does not"
+fi
+
+if grep -q 'running=' "$LEDGER" && grep -q 'reference=' "$LEDGER" && grep -q 'threshold=' "$LEDGER"; then
+    pass "the ledger names the two revisions it compared and the threshold it used"
+else
+    fail "the ledger lines carry no evidence, only a verdict — got: $(cat "$LEDGER" 2>&1)"
+fi
+
+# The ledger is a HEARTBEAT, so its timestamp must be the real instant the run
+# happened. --now injects a synthetic clock for the age arithmetic; if it also
+# moved the ledger timestamp, a back-dated run would look like a missed one.
+today="$(date -u +%Y-%m-%d)"
+if grep -q "^$today" "$LEDGER"; then
+    pass "the ledger timestamps runs in real wall-clock time, not the injected --now"
+else
+    fail "the ledger timestamp followed --now — a heartbeat a flag can back-date is not a heartbeat — got: $(head -1 "$LEDGER" 2>&1)"
+fi
+
+# --- 12. The alert is THROTTLED, and a failed send is not a notification ------
+# Hourly sampling is what makes a 24h threshold mean 24 hours (a daily probe
+# first SEES a divergence a day late). The cost is 24 identical notifications a
+# day for one unchanged fact, which is the "alarm nobody reads" the threshold
+# itself exists to prevent. The throttle lives in the probe rather than the
+# schedule because sample rate and notify rate answer different questions.
+MAILBIN="$SANDBOX/mailbin"
+mkdir -p "$MAILBIN"
+cat > "$MAILBIN/mg" <<EOF
+#!/usr/bin/env bash
+# Self-identifies as macguffin, which the probe requires before trusting an mg.
+case "\$1" in --help) echo "macguffin — the mg CLI"; exit 0 ;; esac
+echo "\$*" >> "$SANDBOX/mail.sent"
+exit 0
+EOF
+chmod +x "$MAILBIN/mg"
+
+mails() { [ -f "$SANDBOX/mail.sent" ] && wc -l < "$SANDBOX/mail.sent" | tr -d ' ' || echo 0; }
+
+rm -f "$SANDBOX/mail.sent"
+serve_revision "$C1"
+printf '%s %s %s\n' "$T0" "$C1" "$C3" > "$STAMP"
+PATH="$MAILBIN:$PATH" run_probe --repo "$FRESH" --now "$NOW_OLD" --stale-after 24h --mail >/dev/null 2>&1
+if [ "$(mails)" = "1" ]; then
+    pass "the first alerting run mails"
+else
+    fail "the first alerting run sent $(mails) mail(s), want 1"
+fi
+if awk '{print $4}' "$STAMP" | grep -q "^$NOW_OLD$"; then
+    pass "a delivered notification is recorded in the stamp, keyed to this running revision"
+else
+    fail "the stamp did not record the notification — the throttle has nothing to read — stamp: $(cat "$STAMP")"
+fi
+
+PATH="$MAILBIN:$PATH" run_probe --repo "$FRESH" --now $(( NOW_OLD + 3600 )) --stale-after 24h --mail >/dev/null 2>&1
+if [ "$(mails)" = "1" ]; then
+    pass "the same unresolved alert an hour later does NOT mail again"
+else
+    fail "the throttle did not hold: $(mails) mails after a second run one hour on"
+fi
+
+out="$(PATH="$MAILBIN:$PATH" run_probe --repo "$FRESH" --now $(( NOW_OLD + 3600 )) --stale-after 24h --mail)"; rc=$?
+if [ "$rc" -eq 1 ]; then
+    pass "a suppressed notification does not suppress the ALERT or its exit status"
+else
+    fail "a throttled run exited $rc, want 1 — the throttle changed the verdict, not just the delivery"
+fi
+if printf '%s' "$out" | grep -qi 'suppressed'; then
+    pass "the run says out loud that it suppressed a notification"
+else
+    fail "the suppression is silent, so a reader cannot tell it from a probe that decided not to alert — output: $out"
+fi
+
+PATH="$MAILBIN:$PATH" run_probe --repo "$FRESH" --now $(( NOW_OLD + 13 * 3600 )) --stale-after 24h --mail >/dev/null 2>&1
+if [ "$(mails)" = "2" ]; then
+    pass "the alert is repeated once the re-notify interval has passed — throttled is not silenced"
+else
+    fail "$(mails) mails after 13h with a 12h re-notify, want 2 — a throttle that never re-fires is a mute button"
+fi
+
+# A CHANGED RUNNING REVISION IS A NEW SITUATION. The throttle is keyed on the
+# running revision for the same reason the clock is: a deploy landed, so the
+# next divergence deserves its own notification rather than inheriting the
+# silence of the last one.
+serve_revision "$C2"
+printf '%s %s %s %s\n' "$T0" "$C1" "$C3" "$NOW_OLD" > "$STAMP"
+# Two runs, because a new running revision restarts the clock by design: the
+# first records C2's own divergence start, the second lets it mature. Anything
+# that alerted on the first run would be alerting on a deploy that just landed.
+PATH="$MAILBIN:$PATH" run_probe --repo "$FRESH" --now "$NOW_OLD" --stale-after 24h --mail >/dev/null 2>&1
+if [ "$(mails)" = "2" ]; then
+    pass "the run right after a new revision lands does not mail — the clock restarted, which is the point of restarting it"
+else
+    fail "$(mails) mails on the first run after a deploy landed, want 2 — the probe alerted on a deploy that worked"
+fi
+PATH="$MAILBIN:$PATH" run_probe --repo "$FRESH" --now $(( NOW_OLD + 25 * 3600 )) --stale-after 24h --mail >/dev/null 2>&1
+if [ "$(mails)" = "3" ]; then
+    pass "a new running revision resets the notification throttle — a deploy happened, so this is news"
+else
+    fail "$(mails) mails after the running revision changed, want 3 — the throttle outlived the situation it was throttling"
+fi
+
+# A SEND THAT FAILED IS NOT A NOTIFICATION. Recording the attempt would buy
+# twelve hours of silence for an alert that reached nobody.
+FAILBIN="$SANDBOX/failbin"
+mkdir -p "$FAILBIN"
+cat > "$FAILBIN/mg" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in --help) echo "macguffin — the mg CLI"; exit 0 ;; esac
+exit 4
+EOF
+chmod +x "$FAILBIN/mg"
+serve_revision "$C1"
+printf '%s %s %s\n' "$T0" "$C1" "$C3" > "$STAMP"
+PATH="$FAILBIN:$PATH" run_probe --repo "$FRESH" --now "$NOW_OLD" --stale-after 24h --mail >/dev/null 2>&1
+if awk '{print $4}' "$STAMP" | grep -q '^-$'; then
+    pass "a FAILED send is not recorded as a notification — the next run tries again"
+else
+    fail "a failed send was stamped as delivered, buying silence for an alert nobody received — stamp: $(cat "$STAMP")"
+fi
+
 # --- tally -------------------------------------------------------------------
 echo
 echo "=== scripts/revision-probe.sh controls ==="

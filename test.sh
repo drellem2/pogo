@@ -143,6 +143,22 @@ bash scripts/go-test-budget_test.sh
 echo "Testing the external redeploy revision probe"
 bash scripts/revision-probe_test.sh
 
+# The ARMING of that probe (mg-a03d). mg-ce10 landed the witness and wired it to
+# nothing — 501 lines, zero schedules, zero plists, zero callers — which is the
+# limiting case of the rule it implements: a detector activated by NOTHING is
+# present by existence and absent by effect.
+#
+# The load-bearing case is section 4, and it is deliberately not "the plist
+# parses". A plist can parse, install and appear in `launchctl list` while
+# naming a command line nobody has ever run. Section 4 reads ProgramArguments
+# back out of the plist the installer wrote and EXECUTES that exact vector,
+# green (stub daemon answering) and red (daemon gone), asserting a distinct
+# ledger line from each. Section 5 poisons go/pogo/pogod: an arming step that
+# needs a current `pogo` cannot arm the box whose `pogo` is ten days stale,
+# which is the box that needs arming.
+echo "Testing the revision probe's launchd arming"
+bash scripts/install-revision-probe_test.sh
+
 echo "Testing build.sh"
 bash build_test.sh
 
