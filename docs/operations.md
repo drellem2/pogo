@@ -912,6 +912,103 @@ An **absent** `consumer source liveness` row means an old `pogo` binary, not a
 clean machine — the detector ships inside the binary and is therefore subject to
 the same class of defect it reports.
 
+## Is compute still running for a polecat that is gone? (`pogo check-orphans`)
+
+A polecat starts background work — `nohup … &` from a tool-call shell that then
+exits — the work reparents to launchd, the polecat finishes its ticket, merges
+its branch, and is reaped. **The compute keeps running.** Measured instances
+(mg-4518): 38% CPU out of an audit instrument's directory; 94% for 44 minutes
+after the owner's branch had already merged, writing into a scratchpad with no
+reader left; three simultaneous survivors aged 44 minutes to 2h21m.
+
+This is not a tidiness problem. The box has ten cores and the fleet has driven it
+to load 137. At that contention `TestGateWatchMeasuresARealSubtreesCPU` — a test
+that measures a real subtree's CPU, and so measures the contention — **failed in
+the refinery gate**, costing two unrelated branches a merge attempt each and
+sending a reader hunting a second code defect that did not exist. An orphan does
+not only waste CPU; **it manufactures deterministic-looking failures in branches
+that have nothing to do with it** (mg-6c90 is the same contention class).
+
+```
+$ pogo check-orphans
+orphaned compute — polecats root /Users/daniel/.pogo/polecats
+  source darwin-ps (10ms CPU-time resolution, usable from a 50ms window)
+  window 2s, floor 0.20 cores
+  772 processes sampled, 2 above the floor
+  2 spared (owner still running), 0 unattributable, 0 cwd unreadable
+
+No orphaned compute.
+```
+
+Exit 0 clean, 1 at least one orphan, 2 usage, 3 this run measured nothing.
+
+### The predicate, and the two things it must NOT key on
+
+    cwd    → the owning polecat → registry liveness.   Orphan iff the owner is dead.
+
+**Not `ppid`.** `ppid=1` is not the signature of a leak; it is the signature of
+*any* polecat starting background work, because `nohup … &` from a tool-call
+shell that exits reparents every worker it launches. On 2026-08-07 four workers
+belonging to **one running polecat** all showed `ppid=1` at 60–68% CPU. A sweep
+keyed on that would have destroyed all four mid-computation. Reparenting destroys
+`ppid`; it does not touch `cwd`, which is a property of the process itself and
+carries the owner's id in the path.
+
+**Not `ps %cpu`.** That column is a lifetime average and understated a live
+instance of this defect by about 3×; two reads of the same population disagreed
+by a factor of three within minutes. The rate here is cumulative CPU time
+differenced across a window — work actually performed in it. Use `top -l 2`
+(second sample), not `ps`, if you are reading load by hand.
+
+The **rate floor separates two defects** and is not a severity filter. A
+`pogo-deploy.sh` blocked forever in an unbounded `git fetch` ran 31h39m —
+correctly parented, reported by nothing, at ~0% CPU. That is a stuck process and
+routes elsewhere; this reports detached *compute*.
+
+### It reports. You kill, by PID.
+
+The command never signals a process. On a finding it prints the pids and the
+`kill` line. **Never `pkill -f`** — an unanchored pattern has taken this box out
+before by matching the fleet's own pollers. Re-read the owner's status before
+killing: the registry answer is the whole safety margin.
+
+Two states are counted and never convicted, both failing closed:
+**unattributable** (a busy process whose cwd carries no polecat marker — a worker
+that `chdir`'d out of its tree looks exactly like every unrelated program on the
+machine) and **cwd unreadable** (the kernel would not disclose it). An
+unreachable agent registry is an *instrument failure*, exit 3, not a clean run:
+without it every attributable process has a dead-looking owner.
+
+### Believing a clean report
+
+```
+$ pogo check-orphans --probe
+constructed orphan pid=8254 (ppid=1, owner zzdead dead, 1.00 cores): detector REPORTED it
+live-owner control pid=8257 (ppid=1, owner zzlive alive, 0.00 cores): detector spared it
+
+PASS — the detector fires on a constructed orphan and spares an identical-looking
+process whose owner is alive. Both arms, on real processes.
+```
+
+The probe builds a throwaway polecats tree, starts two real CPU burners, detaches
+them so they genuinely reparent, and checks **both arms**. The second is not
+decoration: it is the exact case that killed the `ppid` heuristic. The same probe
+runs in `go test ./...`, so the refinery gate exercises the failing arm on every
+merge — a detector whose RED path nobody runs is indistinguishable from one that
+cannot fire.
+
+### What this does not fix
+
+Teardown. A long-running compute job should die with its runner or be detached on
+purpose, and neither is true today. Note that **killing the polecat's process
+group at reap would not reach these**: measured on this host, the agent leads its
+own group (`pgid == pid`, from `pty.StartWithSize`'s `Setsid`), but each harness
+tool call runs in a *separate* group, so a child spawned from one inherits the
+tool shell's pgid and `kill(-agentPid)` misses it entirely. Whatever teardown
+lands has to reach a group the agent does not lead. This detector is the safety
+net for the population that already exists and for runners that escape teardown
+later.
+
 ## GitHub branch protection on main (rulesets)
 
 Since 2026-07-05 (mg-f7a3), `main` in **drellem2/pogo** (ruleset `main-require-pr`, id 18534732) and **drellem2/macguffin** (id 18534735) is protected by a GitHub ruleset per the gh-issue workflow design (`docs/design/gh-issue-workflow-design.md` §3):

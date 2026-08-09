@@ -3845,6 +3845,7 @@ branches; work items and mail live in mg/macguffin (the task-store CLI).`,
 	rootCmd.AddCommand(cmdCheckCommitBody)
 	rootCmd.AddCommand(newCheckPromptsCmd(&jsonOutput))
 	rootCmd.AddCommand(newCheckStalenessCmd(&jsonOutput))
+	rootCmd.AddCommand(newCheckOrphansCmd(&jsonOutput))
 	rootCmd.AddCommand(newHostCmd(&jsonOutput))
 	cmdServer.AddCommand(cmdServerStart)
 	cmdServer.AddCommand(cmdServerStop)
