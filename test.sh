@@ -5,6 +5,17 @@
 # merged a branch whose tests panicked (mg-59d5).
 set -e
 
+# Per-step timing for the merge gate (mg-eed9). `gate_step` echoes the same
+# label the bare `echo` used to, runs the command in this shell, and returns its
+# status unchanged — so `set -e` still aborts on a failing step. The report is
+# armed on EXIT rather than appended at the bottom, because the run whose
+# profile is most worth having is the one that FAILED, and that run never
+# reaches the bottom of this file.
+TEST_SH_DIR="$(cd "$(dirname "$0")" && pwd)"
+. "$TEST_SH_DIR/scripts/lib/gate-profile.sh"
+gate_profile_begin "test.sh"
+trap 'gate_profile_report' EXIT
+
 echo "Step 2: Testing..."
 echo "Making test directories"
 mkdir -p _testdata/a-service/.git
@@ -27,16 +38,13 @@ mkdir -p _testdata/b-service/.git
 # go-test-budget.sh sets the budget AND classifies the overrun, so a package
 # that ran long is reported as a package that ran long. See that file's header
 # for why 20m and not the 40m the issue suggests.
-bash scripts/go-test-budget.sh ./...
+gate_step "Testing Go packages" bash scripts/go-test-budget.sh ./...
 
-echo "Testing neovim plugin"
-bash nvim/test_nvim.sh
+gate_step "Testing neovim plugin" bash nvim/test_nvim.sh
 
-echo "Testing bash shell integration"
-bash shell/bashrc_test.sh
+gate_step "Testing bash shell integration" bash shell/bashrc_test.sh
 
-echo "Testing pogo-self-deploy driver"
-bash scripts/pogo-self-deploy_test.sh
+gate_step "Testing pogo-self-deploy driver" bash scripts/pogo-self-deploy_test.sh
 
 # The packaged test isolation itself (mg-78a5). FOUR tickets were filed for one
 # defect — a test reading the developer's live ~/.pogo, live daemon or live fleet
@@ -47,8 +55,7 @@ bash scripts/pogo-self-deploy_test.sh
 # live suite because the live suite now depends on it: an isolation that is
 # broken should be reported here, by name, rather than as a live-control
 # cascade.
-echo "Testing the packaged test isolation (scripts/pogo-sandbox)"
-bash scripts/pogo-sandbox_test.sh
+gate_step "Testing the packaged test isolation (scripts/pogo-sandbox)" bash scripts/pogo-sandbox_test.sh
 
 # The live control for the mg-de08 mail-check post-check (mg-c02d). Stands up a
 # sandboxed pogod and drives the ASSEMBLED verify path — the unit test above
@@ -56,8 +63,7 @@ bash scripts/pogo-sandbox_test.sh
 # mail-check reap for 30s after boot); that is the price of the only assertion
 # that shows the redeploy post-check can go RED at all, and mg-f206's unattended
 # nightly redeploy rests on it.
-echo "Testing pogo-self-deploy live mail-check control"
-bash scripts/pogo-self-deploy_live_test.sh
+gate_step "Testing pogo-self-deploy live mail-check control" bash scripts/pogo-self-deploy_live_test.sh
 
 # The control on the control's SANDBOX (mg-3412). The live suite above is only
 # worth its isolation, and under four concurrent polecats that isolation failed:
@@ -68,8 +74,7 @@ bash scripts/pogo-self-deploy_live_test.sh
 # never again be read as a regression (or hand do_prove a deploy gate). It runs
 # AFTER the live suite deliberately: that run passing is the positive direction
 # this file therefore does not have to pay 60s to restate.
-echo "Testing the live control's sandbox isolation and setup-failure reporting"
-bash scripts/pogo-self-deploy_live_setup_test.sh
+gate_step "Testing the live control's sandbox isolation and setup-failure reporting" bash scripts/pogo-self-deploy_live_setup_test.sh
 
 # The pogod condition annunciator's live controls (mg-342d). The MERGE-TIME
 # SUBSET — the negative control plus A2, the enumeration's own highest severity —
@@ -88,23 +93,20 @@ bash scripts/pogo-self-deploy_live_setup_test.sh
 # nobody reads, and a control nobody runs is the same defect wearing a test's
 # clothes. The remaining rows (A4/A7/A11, A5, A9, A10, A14) are run with
 # `scripts/pogo-condition-controls.sh` — ~3 minutes, not every merge.
-echo "Testing the pogod condition annunciator (live controls: negative + A2)"
-bash scripts/pogo-condition-controls.sh NEG A2
+gate_step "Testing the pogod condition annunciator (live controls: negative + A2)" bash scripts/pogo-condition-controls.sh NEG A2
 
 # The deploy script's SIGINT interrupt-safety control (mg-e201). Relocated OUT of
 # the live_test.sh artifact gate (do_prove's comsub) because it tests the DEPLOY
 # SCRIPT's INT trap, not the pogod detector, and its own-process-group Ctrl-C model
 # only holds in this DIRECT context, not inside do_prove's `out="$(bash ...)"`.
-echo "Testing pogo-self-deploy SIGINT interrupt-safety control"
-bash scripts/pogo-self-deploy_sigint_test.sh
+gate_step "Testing pogo-self-deploy SIGINT interrupt-safety control" bash scripts/pogo-self-deploy_sigint_test.sh
 
 # The nightly redeploy TRIGGER (mg-42ac). Pure-helper tests only — sourcing the
 # runner cannot fire a deploy, and every case here is a refusal: the two skips
 # (outside-window, no-drift) and the aborts (dirty tree, diverged tree, no
 # token). All of them fail the same visible way — a nightly that deploys
 # nothing — so the suite exists to tell them apart.
-echo "Testing pogo-deploy nightly trigger"
-bash scripts/pogo-deploy_test.sh
+gate_step "Testing pogo-deploy nightly trigger" bash scripts/pogo-deploy_test.sh
 
 # The FROM-SOURCE runner for the staleness witness (mg-dd49). The judgement is
 # tested in internal/staleness; what this suite holds is the property that makes
@@ -115,8 +117,7 @@ bash scripts/pogo-deploy_test.sh
 # section 2: a POISONED `pogo` first on PATH, asserted both by its marker file
 # and by the exit status, because either alone passes against a fallback that
 # happens to agree.
-echo "Testing the from-source staleness runner"
-bash scripts/check-staleness_test.sh
+gate_step "Testing the from-source staleness runner" bash scripts/check-staleness_test.sh
 
 # The per-package test budget and its overrun report (mg-a465). The
 # load-bearing case is the POSITIVE CONTROL: a package is made to exceed the
@@ -125,8 +126,7 @@ bash scripts/check-staleness_test.sh
 # give that — it panics — so without this file the fix looks applied and isn't.
 # Costs 12.1s measured (5s of it deliberate sleeping); the budget is overridable
 # so that control runs in seconds rather than 20 minutes.
-echo "Testing the Go per-package test budget and overrun report"
-bash scripts/go-test-budget_test.sh
+gate_step "Testing the Go per-package test budget and overrun report" bash scripts/go-test-budget_test.sh
 
 # The EXTERNAL redeploy witness (mg-ce10), implementing the rule that a detector
 # for "X did not happen" must not be ACTIVATED BY X. driftwatch reports the
@@ -140,8 +140,7 @@ bash scripts/go-test-budget_test.sh
 # deploy provides. Section 6 is the second-order version — a stale
 # remote-tracking ref in a checkout the deploy is what fetches — and asserts the
 # local-ref reading reports health on a state the default reading alerts on.
-echo "Testing the external redeploy revision probe"
-bash scripts/revision-probe_test.sh
+gate_step "Testing the external redeploy revision probe" bash scripts/revision-probe_test.sh
 
 # The ARMING of that probe (mg-a03d). mg-ce10 landed the witness and wired it to
 # nothing — 501 lines, zero schedules, zero plists, zero callers — which is the
@@ -156,22 +155,28 @@ bash scripts/revision-probe_test.sh
 # ledger line from each. Section 5 poisons go/pogo/pogod: an arming step that
 # needs a current `pogo` cannot arm the box whose `pogo` is ten days stale,
 # which is the box that needs arming.
-echo "Testing the revision probe's launchd arming"
-bash scripts/install-revision-probe_test.sh
+gate_step "Testing the revision probe's launchd arming" bash scripts/install-revision-probe_test.sh
 
-echo "Testing build.sh"
-bash build_test.sh
+# The gate's own per-step profile (mg-eed9). The load-bearing case is Test 4,
+# and it is a positive control rather than a smoke test: the profile's `cores`
+# column is the only thing separating a step that is COMPUTING from a step that
+# is WAITING, and it fails silently — `t=$(times)` forks, and a forked child's
+# children-times start at zero, so every step reads 0.00s of CPU and the gate
+# looks like a thing in which nothing computes. Reintroducing that one
+# substitution turns the CPU-burning step's reading from 0.26s to 0.00s and
+# takes three assertions RED with it (measured).
+gate_step "Testing the gate's per-step profile" bash scripts/gate-profile_test.sh
 
-echo "Testing changelog fragment assembler"
-bash scripts/assemble-changelog_test.sh
+gate_step "Testing build.sh" bash build_test.sh
+
+gate_step "Testing changelog fragment assembler" bash scripts/assemble-changelog_test.sh
 
 # Changelog coverage (mg-7904). The assembler's LOUD-EMPTY guard checks a weaker
 # property (non-empty) than CONTRIBUTING's rule (a fragment per change), so it
 # passes while a release ships describing only part of itself. The load-bearing
 # case here is the POSITIVE CONTROL: the check is shown to FAIL on a range with
 # a known-missing fragment before any passing case is trusted.
-echo "Testing changelog coverage check"
-bash scripts/changelog-coverage_test.sh
+gate_step "Testing changelog coverage check" bash scripts/changelog-coverage_test.sh
 
 # Release-roll + link references (mg-cef7). Two silent, recurring release-path
 # defects: update_changelog() emitted the `## [X.Y.Z]` heading with NO
@@ -183,12 +188,10 @@ bash scripts/changelog-coverage_test.sh
 # set-based check must report DUPLICATE HEADINGS and must NOT report missing link
 # references — the count check's misdiagnosis, whose obvious remedy would have
 # entrenched the corruption by giving the spurious headings link targets.
-echo "Testing changelog release-roll and link references"
-bash scripts/roll-changelog_test.sh
+gate_step "Testing changelog release-roll and link references" bash scripts/roll-changelog_test.sh
 
 # The work-item scope guard (mg-f1d5). Every case runs against a stub `mg` and a
 # fixture worktree in a temp dir, so the suite never reads the developer's live
 # ~/.macguffin. The load-bearing case is the opt-in one: a guard that blocked an
 # agent nobody opted in for would be ripped out of every fleet within the hour.
-echo "Testing work-item scope guard"
-bash scripts/mg-scope-guard_test.sh
+gate_step "Testing work-item scope guard" bash scripts/mg-scope-guard_test.sh
