@@ -715,14 +715,106 @@ disarmed on a busy repo. Without the stamp the probe would fire on the normal ga
 between a merge and the 03:00 deploy, and an alarm that is always on is an alarm
 nobody reads.
 
-**Arming it.** Like every other `check-*` surface it is report-only and nothing
-runs it until somebody says so. Point a schedule at the script *in a checkout*,
-never at an installed binary:
+**Arming it: `com.pogo.revisionprobe` (mg-a03d).** mg-ce10 landed the probe and
+wired it to nothing — 501 lines, referenced by a changelog fragment, this docs
+section and `test.sh`, and by zero schedules, zero plists and zero callers. That
+is the **limiting case of the rule the probe implements**: a detector for "X did
+not happen" must not be activated by X, and one activated by *nothing* is present
+by existence and absent by effect. It is armed now, by a LaunchAgent of its own:
 
 ```bash
-pogo schedule doctor --cron "0 * * * *" --id revision-probe --replay once \
-    --message "Run '~/.pogo/deploy-src/scripts/revision-probe.sh --mail'. It mails human itself if it alerts."
+scripts/install-revision-probe.sh              # install / re-install, then verify
+scripts/install-revision-probe.sh --dry-run    # render and print, touch nothing
+scripts/install-revision-probe.sh --uninstall  # bootout and remove
 ```
+
+**Why launchd and not the two obvious alternatives.** `pogo schedule` looks like
+the right answer and is not: its scheduler lives inside `pogod`, and its only
+delivery mechanisms are a nudge or a mail **to an agent** — it cannot run a
+command. Arming the probe that way needs a live `pogod` *and* an agent turn to
+execute the instruction, and both are failure modes in this exact lineage (a
+stopped `pogod` is the state the probe most needs to report, mg-6d2f). Calling it
+from the deploy runner is refused by the rule itself: a probe invoked by the
+deploy cannot witness the deploy that never fired, which is four of the eight
+failing nights (mg-2def) — driftwatch's shape (mg-5bd2), not a fix for it.
+launchd is triggered by the OS clock and is independent of `pogod`, the deploy,
+the refinery and any agent turn.
+
+**Hourly, at :20, with a 24h threshold and a 12h re-notify.** The three numbers
+are chosen together. The divergence clock can only mature as fast as the probe
+samples — a once-a-day probe first *sees* a divergence up to a day after it
+starts, so a 24h threshold would need three consecutive failed nights to fire.
+Hourly sampling makes 24h mean 24 hours. The cost is 24 identical notifications a
+day for one unchanged fact, which the threshold itself exists to prevent, so the
+notify rate is throttled separately (`--renotify`, default 12h) rather than by
+slowing the schedule. A **failed** send is not recorded as a notification: the
+alert reached nobody, so the next run tries again.
+
+**Replay policy — declared, because launchd has no field for it.**
+`StartCalendarInterval` is **deferred-once** across sleep: a fire missed while the
+host slept is delivered once on wake, and ten missed hourly fires coalesce into
+one run. That is the right policy here because the report is not a per-interval
+sample — the age is read from a persisted stamp against wall clock, so a late
+report is still true and still names the correct age. A skip policy would discard
+the first report after a wake, which is the one most likely to carry news.
+**A host that is POWERED OFF misses the fire outright** — launchd defers across
+sleep, not across shutdown — so this witness would have been dark on the
+2026-08-07 no-fire nights, which were a power-off.
+
+**It reports EITHER WAY, and that is what makes the witness itself checkable.**
+
+```bash
+tail -5 ~/Library/Logs/pogo/revision-probe.log      # the LEDGER: one line per run
+tail -40 ~/Library/Logs/pogo/revision-probe.report.log
+launchctl print gui/$(id -u)/com.pogo.revisionprobe | head -20
+```
+
+```
+2026-08-09T19:20:03Z exit=0 OK           running=e8dd75f1 reference=e8dd75f1 age=-     threshold=24h
+2026-08-09T20:20:04Z exit=0 DIVERGED     running=738e322a reference=e8dd75f1 age=3h12m threshold=24h
+2026-08-10T08:20:02Z exit=1 ALERT        running=738e322a reference=e8dd75f1 age=1d0h  threshold=24h
+```
+
+The ledger is written from an EXIT trap rather than from each terminal branch, so
+"either way" is structural instead of remembered — including the exit-2 paths,
+which record `UNREACHABLE` and `NO-REVISION` as the distinct states they are. The
+point is not tidiness: **a witness that writes only when it is unhappy cannot be
+told apart from a witness that is not running.** The newest line's age is the only
+thing on this box that answers *"is the probe still firing?"*, and nothing alerts
+on it — a reader has to look.
+
+**What it witnesses, and what it does not.** Named here because an instrument's
+silence only means something if its blind spots are written down.
+
+| witnesses | |
+|---|---|
+| the nightly deploy never fired | running revision never changes while `main` advances |
+| the deploy fired and failed | same |
+| the deploy fired, **exited 0**, and left the fleet on the old binary | doctor's 2026-08-09 case: the 09:39 run reported success with the daemon eight hours older than the merge it was meant to carry. Nothing else on this box asserts the *running* revision after a deploy |
+| `pogod` not running, or not answering | exit 2 |
+| `pogod` answering but unable to name its revision | exit 2, kept distinct |
+
+| does NOT witness | |
+|---|---|
+| a host powered off at every fire time | above |
+| this job being booted out, or its plist deleted | nothing re-arms it; the ledger going quiet is the only sign |
+| `pogod` on the right revision in the wrong **run mode** | index-only serves `/version` happily — that is `/server/mode` and mg-6d2f's subject |
+| any long-lived process that is not `pogod` | the bridget reader ran two days older than the merge that changed its behaviour and nothing reported it (mg-c2f5 / mg-8158). Scoped narrow deliberately; filed, not implied |
+
+**The circularity, so it is not rediscovered as a bug.** This job reaches a box
+through a merge and an install, and the install is part of the deploy it watches.
+It can never witness the deploy that *installed* it — only the first deploy after
+that, and every one thereafter. "It confirmed tonight's deploy" is not available
+as an acceptance criterion for the install itself.
+
+**The installer is a tracked shell script for the same reason the probe is.**
+`pogo service install-recovery` and `install-deploy` are the house pattern and
+both live in the `pogo` **binary**, which the redeploy installs — an arming step
+that needs a current `pogo` cannot arm the box whose `pogo` is ten days stale,
+which is the box that needs arming. It renders the tracked plist rather than
+keeping a second copy of it (the drift class mg-b201 paid for), refuses rather
+than half-installing a job that cannot run, and verifies with `launchctl print`
+instead of trusting `bootstrap`'s exit code.
 
 `--mail` exists so the alert does not depend on an agent turn running: *"and then
 mail human"* left as an instruction in a scheduler message only happens if a turn

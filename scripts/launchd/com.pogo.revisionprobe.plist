@@ -1,0 +1,174 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- THE ARMING OF scripts/revision-probe.sh (mg-a03d).
+         mg-ce10 landed the external redeploy witness and wired it to nothing:
+         501 lines, referenced by a changelog fragment, a docs section and
+         test.sh, and by no schedule, no plist and no runner. That is the
+         limiting case of the rule the probe itself implements — a detector for
+         "X did not happen" must not be ACTIVATED BY X — because a detector
+         activated by NOTHING is present by existence and absent by effect.
+
+         WHY LAUNCHD AND NOT THE OTHER TWO CANDIDATES.
+
+         `pogo schedule` was the obvious answer and is the wrong one. Its
+         scheduler lives inside pogod and its only delivery mechanisms are a
+         nudge or a mail to an AGENT — it cannot run a command. So arming the
+         probe that way needs (a) pogod alive and (b) an agent turn to actually
+         execute the instruction. Both are failure modes in this exact lineage:
+         a stopped pogod is the state the probe most needs to report (mg-6d2f),
+         and "turns that never run" is why revision-probe.sh mails itself
+         instead of leaving "then mail human" in a scheduler message.
+
+         The deploy runner was the other candidate and is forbidden by the rule:
+         a probe invoked by the deploy cannot witness the deploy that never
+         fired, which is four of the eight failing nights (mg-2def). That is
+         driftwatch's shape (mg-5bd2), and reproducing it here would ship the
+         anti-pattern as the fix for itself.
+
+         launchd is triggered by the OS clock. It is independent of pogod, of
+         the deploy, of the refinery and of any agent turn. -->
+    <key>Label</key>
+    <string>com.pogo.revisionprobe</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <!-- Update YOUR_USERNAME, or use scripts/install-revision-probe.sh.
+
+             The program is the TRACKED script in a checkout, never a copy taken
+             at install time. A copy would freeze at the revision that was
+             current when somebody last remembered to re-install, which is the
+             arming gap one layer down.
+
+             deploy-src rather than ~/dev/pogo: the latter is a working tree a
+             human edits and can be mid-rebase, on a feature branch, or dirty at
+             any hour. deploy-src is advanced by the deploy runner's sync_src.
+             Note what that does and does not mean — a deploy that stops firing
+             freezes this script's BODY at the last sync, but it does not stop
+             this job FIRING. The witness stays armed; only its text ages. -->
+        <string>/Users/YOUR_USERNAME/.pogo/deploy-src/scripts/revision-probe.sh</string>
+        <string>--repo</string>
+        <string>/Users/YOUR_USERNAME/.pogo/deploy-src</string>
+        <string>--url</string>
+        <string>http://127.0.0.1:10000</string>
+        <string>--stale-after</string>
+        <string>24h</string>
+        <!-- The stamp is the divergence clock and the re-notify record. Named
+             explicitly rather than left to $HOME resolution: an unattended job
+             that silently picks a different stamp path than the hand-run does
+             has a clock that resets every time an operator checks on it. -->
+        <string>--stamp</string>
+        <string>/Users/YOUR_USERNAME/.pogo/revision-probe.stamp</string>
+        <!-- IT REPORTS EITHER WAY. One ledger line per run, green or red, so
+             that "no alert" and "no probe" stop being the same observation.
+             The newest line's age is the only thing on this box that can
+             answer "is the witness itself still firing?" -->
+        <string>--log</string>
+        <string>/Users/YOUR_USERNAME/Library/Logs/pogo/revision-probe.log</string>
+        <!-- The quiet flag below trims the NARRATIVE, never the ledger and
+             never an alert. Without it, the within-threshold report prints
+             thirty lines every hour on every day main is ahead of the daemon —
+             which is most days — and the alert drowns in the reassurance. The
+             ALERT headline is a bare echo and survives it; setup failures go to
+             stderr and survive it too.
+             (XML comments may not contain a double hyphen, which is why the
+             flags are named in prose here rather than quoted literally.) -->
+        <string>--quiet</string>
+        <!-- The probe mails `human` itself. An alert routed through "and then
+             mail someone" in a scheduler message only arrives if a turn runs. -->
+        <string>--mail</string>
+    </array>
+
+    <!-- HOURLY, at :20, and the two numbers below are chosen together.
+
+         The divergence clock can only mature as fast as the probe samples: a
+         once-a-day probe first SEES a divergence up to a day after it starts,
+         so a 24h threshold would need three consecutive failed nights to fire.
+         Hourly sampling makes a 24h threshold mean 24 hours.
+
+         The cost of sampling hourly is notification volume, and that is paid in
+         revision-probe.sh's renotify flag (default 12h) rather than here, because
+         the sampling rate and the notification rate answer different questions
+         and one schedule field cannot serve both.
+
+         :20 keeps it clear of the 03:00/04:00/05:00 deploy fires and of the
+         restart window they open. The probe tolerates that window anyway (three
+         tries, two seconds apart) — this is belt and braces, not the guard.
+
+         REPLAY POLICY — DECLARED, because launchd has no field for it and an
+         inherited policy is one nobody chose (mg-a03d's own requirement).
+         StartCalendarInterval is DEFERRED-ONCE across sleep: a fire missed
+         because the host was asleep is delivered once on wake, and ten missed
+         hourly fires coalesce into one run, not ten. That is the right policy
+         here and the choice is not arbitrary — this probe's report is not a
+         per-interval sample. The age it reports is read from a persisted stamp
+         against wall clock, so a report delivered late is still TRUE and still
+         names the correct age. A skip policy would discard the first report
+         after a wake, which is the report most likely to carry news; a count
+         policy would replay ten identical reports of one fact.
+
+         WHAT THIS POLICY STILL CANNOT COVER, stated so nobody has to rediscover
+         it: a host that is POWERED OFF misses the fire outright — launchd
+         defers across sleep, not across shutdown. The 2026-08-07 no-fire nights
+         were a power-off, so this witness would have been silent on them too.
+         The ledger is how that silence is visible after the fact. -->
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict>
+            <key>Minute</key>
+            <integer>20</integer>
+        </dict>
+    </array>
+
+    <!-- RunAtLoad=true, and it differs from com.pogo.deploy on purpose. That
+         job sets false because a fire bounces the entire fleet, so installing
+         it must not be an event. A fire of THIS job is two reads and no
+         mutation: it never builds, installs, restarts or writes anything but
+         its own stamp and ledger. And the first thing anyone wants after arming
+         a witness is evidence that it fires, which this provides at install
+         time instead of up to an hour later. -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- One-shot per fire. KeepAlive=true would relaunch it in a loop, since it
+         exits on every run by design. -->
+    <key>KeepAlive</key>
+    <false/>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <!-- Two files, deliberately. revision-probe.log is the LEDGER — one line
+         per run, written by the probe from an EXIT trap, and it is the
+         heartbeat. This one catches whatever the run said out loud, which
+         under the quiet flag is alerts and setup failures only. Mixing them would
+         leave the heartbeat's newest line buried under narrative. -->
+    <key>StandardOutPath</key>
+    <string>/Users/YOUR_USERNAME/Library/Logs/pogo/revision-probe.report.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/YOUR_USERNAME/Library/Logs/pogo/revision-probe.report.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- Must resolve git, curl and mg. It deliberately does NOT need to
+             resolve `go`, `pogo` or `pogod`: the probe must run on a box where
+             the deploy has been failing for a week, and reaching for anything
+             the deploy installs would arm it only by a deploy that worked.
+             ~/go/bin is on the path for `mg` alone — scripts/revision-probe.sh
+             makes every candidate self-identify as macguffin before trusting
+             it, because /usr/bin/mg is the Micro-Emacs editor. -->
+        <key>PATH</key>
+        <string>/Users/YOUR_USERNAME/go/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>/Users/YOUR_USERNAME</string>
+        <!-- NO GH_TOKEN HERE, EVER. ~/Library/LaunchAgents is world-readable.
+             The probe reads a public ref over https and needs no credential;
+             GIT_TERMINAL_PROMPT=0 keeps a repo that suddenly wants one from
+             HANGING, which is how an unattended probe goes silent without
+             failing. -->
+        <key>GIT_TERMINAL_PROMPT</key>
+        <string>0</string>
+    </dict>
+</dict>
+</plist>
