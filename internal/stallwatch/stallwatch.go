@@ -283,7 +283,7 @@ func (w *Watcher) checkUnclaimedItems(now time.Time) {
 	// never silences a high-priority item.
 	var stale []workitem.WorkItem
 	for _, it := range items {
-		if !w.watchedForDispatch(it.Assignee) {
+		if !w.watchedForDispatch(it) {
 			continue
 		}
 		if w.cfg.PriorityWakeEnabled && w.isFastPriority(it.Priority) {
@@ -361,7 +361,7 @@ func (w *Watcher) checkPriorityWake(now time.Time, items []workitem.WorkItem) {
 
 	var ready []workitem.WorkItem
 	for _, it := range items {
-		if !w.watchedForDispatch(it.Assignee) {
+		if !w.watchedForDispatch(it) {
 			continue
 		}
 		if !w.isFastPriority(it.Priority) {
@@ -540,8 +540,24 @@ func (w *Watcher) checkUnreadMail(now time.Time) {
 // guessing wrong is a nudge about an item the coordinator cannot dispatch, which
 // is loud and self-correcting. The old default guessed the other way and paid in
 // silence, which is indistinguishable from a healthy queue.
-func (w *Watcher) watchedForDispatch(assignee string) bool {
-	return !w.isDispatchGated(assignee)
+// The item is passed whole rather than as its assignee because the assignee is
+// no longer the only field that gates it. Since mg-69b1 an item whose body
+// carrier declares `stage: gated` is gated too (config.IsStageGated), and this
+// watcher is where that defect was OBSERVED: the priority wake read three
+// gh-issue carriers parked at a human GO/NO-GO, saw `assignee=[]`, and told the
+// coordinator they were "ready and unclaimed — claim or dispatch now". The spawn
+// point refusing them (agent.dispatchGateRefusal) makes that nudge wrong as well
+// as loud, and a channel that recommends actions the daemon then refuses is one
+// readers learn to discount.
+//
+// Silence is the correct treatment here, matching `human`: mayor.md holds an
+// item at the gate precisely so it stops generating traffic, and "silence =
+// HOLD, however long that takes" is the gate's stated semantics. Aging the gated
+// queue belongs to the PM sweep, which reads it anyway — see
+// config.DefaultNonDispatchableAssignees for why that split, not this watcher,
+// owns it.
+func (w *Watcher) watchedForDispatch(it workitem.WorkItem) bool {
+	return !w.isDispatchGated(it.Assignee) && !config.IsStageGated(it.Stage)
 }
 
 // isDispatchGated reports whether an assignee names a non-dispatchable executor

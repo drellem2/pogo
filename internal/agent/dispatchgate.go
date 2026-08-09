@@ -33,13 +33,34 @@ import (
 // An interface so the handler is testable without a macguffin store, mirroring
 // ClaimReleaser.
 type DispatchGate interface {
-	// DispatchGated reports whether workItemID is gated. It returns the gating
-	// assignee alongside the verdict so the refusal can name what gated it —
-	// "refused: assigned to human" is actionable, a bare refusal is a bug report.
+	// DispatchGated reports whether workItemID is gated, and what gated it, so
+	// the refusal can name it — "refused: assigned to human" is actionable, a
+	// bare refusal is a bug report.
 	//
 	// It deliberately has no error return. See MGDispatchGate.DispatchGated for
 	// why an unreadable store must not be an error here.
-	DispatchGated(workItemID string) (assignee string, gated bool)
+	DispatchGated(workItemID string) (Gating, bool)
+}
+
+// Gating names WHICH gate refused an item. Exactly one field is set on a
+// refusal; both are empty when nothing gated.
+//
+// Two fields rather than one string because the two gates have different ways
+// out and a refusal that cannot say which one fired sends the reader to the
+// wrong field. They are answered by one gate object and one read of the item,
+// though — the mg-4798 ruling is that a dispatch rule belongs in the executable
+// path at the dispatch point, and a SECOND gate object reading the same file to
+// answer the same question ("may this be executed at all") is how two rules
+// begin to drift apart.
+type Gating struct {
+	// Assignee is the gating `assignee:` value — a sentinel from the configured
+	// vocabulary, or the `blocked:<agent>` shape (config.IsDispatchGated).
+	Assignee string
+	// Stage is the gating state-carrier `stage:` value from the item's body
+	// (config.IsStageGated). mg-69b1: the gh-issue playbook parks a carrier at
+	// `stage: gated` for a human GO/NO-GO and sets no assignee, so before this
+	// field the workflow's own gate stopped nothing.
+	Stage string
 }
 
 // MGDispatchGate is the production DispatchGate: it reads the work item out of
@@ -81,13 +102,13 @@ type MGDispatchGate struct {
 // there in its frontmatter. It does NOT stop a caller who supplies no id, or a
 // wrong one. It is a guard on the dispatch decision, not proof that no worker can
 // ever reach gated work.
-func (m MGDispatchGate) DispatchGated(workItemID string) (string, bool) {
+func (m MGDispatchGate) DispatchGated(workItemID string) (Gating, bool) {
 	if workItemID == "" {
-		return "", false
+		return Gating{}, false
 	}
 	root := macguffinStoreRoot(m.Root)
 	if root == "" {
-		return "", false
+		return Gating{}, false
 	}
 	item, found, err := workitem.FindFrom(filepath.Join(root, "work"), workItemID)
 	if err != nil {
@@ -98,13 +119,22 @@ func (m MGDispatchGate) DispatchGated(workItemID string) (string, bool) {
 			"dispatching WITHOUT the assignee gate; if this item is assigned to a "+
 			"non-dispatchable executive (%v) the spawn was not refused",
 			workItemID, root, err, m.gates())
-		return "", false
+		return Gating{}, false
 	}
 	if !found {
-		return "", false
+		return Gating{}, false
 	}
 	if config.IsDispatchGated(item.Assignee, m.Gates) {
-		return item.Assignee, true
+		return Gating{Assignee: item.Assignee}, true
+	}
+	// The workflow's own gate (mg-69b1). An item whose body carrier declares
+	// `stage: gated` is parked at a human decision, and it gates whatever its
+	// assignee says — including the ordinary empty one, which is exactly the case
+	// that was dispatchable. Checked AFTER the assignee so a gated item that also
+	// carries a sentinel still refuses with the assignee's message: that value was
+	// set by hand and states an intent the stage cannot, and its way out differs.
+	if config.IsStageGated(item.Stage) {
+		return Gating{Stage: item.Stage}, true
 	}
 	// Not gated — the spawn proceeds. But if the item DECLARES a block in the
 	// only channel that existed before the `blocked:<agent>` shape (mg-6fb0), say
@@ -123,7 +153,7 @@ func (m MGDispatchGate) DispatchGated(workItemID string) (string, bool) {
 			"dispatch — DISPATCHING ANYWAY (a tag is not a gate); if it is genuinely blocked, %s",
 			workItemID, tag, item.Assignee, suggest)
 	}
-	return "", false
+	return Gating{}, false
 }
 
 // gates returns the effective gate vocabulary, for messages.
@@ -160,10 +190,26 @@ func (r *Registry) getDispatchGate() DispatchGate {
 // it, and the two ways out, because the reader is usually an agent that must
 // decide what to do next without a human in the loop.
 func (r *Registry) dispatchGateRefusal(workItemID string) string {
-	assignee, gated := r.getDispatchGate().DispatchGated(workItemID)
+	g, gated := r.getDispatchGate().DispatchGated(workItemID)
 	if !gated {
 		return ""
 	}
+	// The workflow gate (mg-69b1). Its way out is neither "reassign" nor "ask
+	// the blocker" — the item is waiting on a DECISION, and the decision's own
+	// procedure files whatever gets dispatched next. So the message points at
+	// the stage line rather than at the assignee field, and names the one case
+	// where moving the stage BACK is the right move: re-triage, which is
+	// `stage: triage` by definition.
+	if g.Stage != "" {
+		return fmt.Sprintf("work item %s carries `stage: %s` in the state carrier block leading "+
+			"its body: it is parked at a HUMAN DECISION GATE and is gated away from automatic "+
+			"dispatch whatever its assignee says. No worker advances it — the gate decision does, "+
+			"and that decision files what gets dispatched next. If you are re-running triage, set "+
+			"the stage back to `triage` first (that is what re-triage means); if the decision has "+
+			"been made, move the stage on",
+			workItemID, g.Stage)
+	}
+	assignee := g.Assignee
 	// The `blocked:<agent>` shape gets its own sentence (mg-6fb0). It gates for a
 	// reason the sentinel vocabulary cannot state — the item is waiting on a NAMED
 	// agent — and a refusal that flattened it to "non_dispatchable_assignees" would

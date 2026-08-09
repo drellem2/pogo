@@ -26,6 +26,23 @@ type WorkItem struct {
 	// Tags is. mg writes it as an inline YAML sequence — `depends: [mg-1234]`.
 	// Use DependsList for the split form.
 	Depends string `json:"depends,omitempty"`
+	// Workflow and Stage are the `workflow:` and `stage:` lines of the STATE
+	// CARRIER BLOCK — the run of `key: value` lines that leads a work item's
+	// BODY, immediately under its `# title` heading. They are not frontmatter:
+	// mg has no such fields, and the convention is the coordinator's (see the
+	// "State carrier" section of internal/agent/prompts/mayor.md).
+	//
+	// They are parsed here anyway, because `stage: gated` is a DISPATCH GATE
+	// (config.IsStageGated) and a gate has to be readable by the code that
+	// enforces it. Until mg-69b1 the stage line was read only by the coordinator
+	// that wrote it, so an item the workflow considered gated was fully
+	// dispatchable — observed live on three gh-issue carriers, which the priority
+	// wake then offered up as "ready and unclaimed".
+	//
+	// Empty is the ordinary case: most items carry no carrier block at all, and
+	// an absent line reads as "this item declares no stage", never as a stage.
+	Workflow string `json:"workflow,omitempty"`
+	Stage    string `json:"stage,omitempty"`
 	// ModTime is the work item file's last-modified time. It is the best
 	// available proxy for how long an item has sat in its current status
 	// directory (mg rewrites/moves the file on status transitions), which the
@@ -371,15 +388,108 @@ func parseWorkItem(path, status string) (WorkItem, error) {
 	}
 
 	// Read first markdown heading as title
+	found := false
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if strings.HasPrefix(line, "# ") {
 			item.Title = strings.TrimPrefix(line, "# ")
+			found = true
 			break
 		}
 	}
+	if found {
+		item.Workflow, item.Stage = scanCarrierBlock(scanner)
+	}
 
 	return item, nil
+}
+
+// carrierBlockScanLimit bounds how many body lines scanCarrierBlock will read.
+// The scan normally stops at the first line that is not `key: value` shaped —
+// for the overwhelming majority of items that is the FIRST body line, so this
+// limit only binds on a body that is nothing but such lines. It exists so that
+// listFrom, which parses every item in done/, cannot be made to read a large
+// file line by line by an unusual body.
+const carrierBlockScanLimit = 16
+
+// scanCarrierBlock reads the state carrier block from the body lines following
+// the title heading and returns its `workflow:` and `stage:` values. Both are
+// empty when the body has no carrier block, which is the ordinary case.
+//
+// THE PARSE IS DELIBERATELY STRICT, AND THE STRICTNESS IS THE POINT. The block
+// is the run of unindented `key: value` lines that STARTS the body; the scan
+// stops at the first line that is not one. It does not search the body for a
+// `stage:` line, because bodies discuss stages: mg-69b1 — the ticket that made
+// the stage line load-bearing — quotes «set `stage: gated`» inside a prose
+// paragraph, and a body-wide search would have gated the bug report about the
+// gate. A prose line is not a declaration, and only a declaration may gate.
+//
+// Leading blank lines are skipped so a body that puts a blank line under its
+// heading still parses; anything else ends the block before it starts.
+func scanCarrierBlock(scanner *bufio.Scanner) (workflow, stage string) {
+	seen := 0
+	started := false
+	for scanner.Scan() && seen < carrierBlockScanLimit {
+		seen++
+		line := scanner.Text()
+		if !started && strings.TrimSpace(line) == "" {
+			continue
+		}
+		key, val, ok := parseCarrierLine(line)
+		if !ok {
+			return workflow, stage
+		}
+		started = true
+		switch key {
+		case "workflow":
+			workflow = val
+		case "stage":
+			stage = val
+		}
+	}
+	return workflow, stage
+}
+
+// parseCarrierLine splits one carrier-block line into its key and value. It is
+// stricter than parseFrontmatterLine, which it deliberately does not reuse:
+// that one accepts any line containing a colon, which in a BODY means most
+// English sentences.
+//
+// Three requirements, each ruling out a shape of prose that would otherwise
+// read as a declaration:
+//
+//   - the key starts at column 0 and is one identifier-shaped word, so an
+//     indented quotation of a carrier line is not one;
+//   - the colon is followed by a space or ends the line;
+//   - the value is a single whitespace-free token. Every field the convention
+//     defines is one — `gh-issue`, `gated`, `drellem2/pogo#104`, `required` —
+//     and this is what separates a declaration from a sentence that happens to
+//     start `Reported: the daemon wedged overnight`.
+func parseCarrierLine(line string) (key, val string, ok bool) {
+	idx := strings.Index(line, ":")
+	if idx <= 0 {
+		return "", "", false
+	}
+	key = line[:idx]
+	for i := 0; i < len(key); i++ {
+		c := key[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z':
+		case c == '_' || c == '-':
+		case c >= '0' && c <= '9' && i > 0:
+		default:
+			return "", "", false
+		}
+	}
+	rest := line[idx+1:]
+	if rest != "" && rest[0] != ' ' && rest[0] != '\t' {
+		return "", "", false
+	}
+	val = strings.TrimSpace(rest)
+	if strings.ContainsAny(val, " \t") {
+		return "", "", false
+	}
+	return strings.ToLower(key), val, true
 }
 
 // parseFrontmatterLine splits "key: value" from YAML-like frontmatter.
