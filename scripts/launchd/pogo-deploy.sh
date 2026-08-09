@@ -246,6 +246,75 @@
 # nothing. A build failure or a control-suite RED will fail identically on the
 # retry and mail a duplicate alert, so the night is settled on the first attempt.
 #
+# A STEP THAT NEVER RETURNS IS SCORED AS A NIGHT THAT RAN (mg-56ac)
+# ------------------------------------------------------------------
+# On 2026-08-08 this job fired on time, wrote nine lines in one second, and then
+# said nothing for 31 hours 39 minutes:
+#
+#     [2026-08-08T02:00:05Z] GH_TOKEN: sourced from ~/.zshenv (present, 40 chars)
+#       ... 31h39m ...
+#     [2026-08-09T09:39:43Z] sync: ~/.pogo/deploy-src at main 738e322
+#     [2026-08-09T09:43:23Z] pogo-deploy: done — pogod redeployed to 738e322
+#
+# ONE run. It blocked inside sync_src's fetch and then completed the next
+# morning. No exit code, no ALERT, no RED mail, and no drain-timeout line either
+# — the 7200s drain cap could not bound it because the run never reached the
+# drain. The crew had been stopped at 00:44Z and stayed stopped for 33 hours,
+# because the run that would have brought it back was still sitting in that gap.
+#
+# THE CONTRAST IS THE PROOF, and it is the same step three nights earlier:
+#
+#     08-05  fetch FAILED      -> rc=1, four lines, two mails, night settled loudly
+#     08-08  fetch NEVER RETURNED -> silence, and every instrument read GREEN
+#
+# Same call. The entire difference between a loud recoverable night and a silent
+# 33-hour outage is whether the call returned an error or did not return. So
+# "no exit code" is not a missing detail in the record — it is the defect.
+#
+# THREE BOUNDS, AT THREE DIFFERENT LAYERS, because a bound that shares a failure
+# mode with the thing it bounds is not a bound:
+#
+#   1. THE CALL. Every git step runs under run_bounded (POGO_DEPLOY_GIT_TIMEOUT,
+#      300s). A step that exceeds it is killed, classified `timeout`, and — like
+#      every other class that established NOTHING about the tree — retried by the
+#      blip tier and then the vigil. This converts an 08-08 into an 08-05.
+#   2. GIT'S OWN TRANSPORT. GIT_HTTP_LOW_SPEED_LIMIT/_TIME and an ssh
+#      ConnectTimeout/ServerAliveInterval are exported before the sync, so a
+#      half-open connection usually produces a real git ERROR — loud, classified,
+#      and verbatim in the alert — before the kill above is needed. Preferring a
+#      returned error to a kill is the whole point: a kill loses git's stderr.
+#   3. THE RUN. arm_run_deadline bounds the WHOLE run regardless of which stage
+#      is stuck, because the next unbounded call will not be a git one. It is a
+#      watchdog in a separate process, it alerts by itself rather than asking the
+#      wedged run to report its own wedging, and it kills the tree from the
+#      leaves so the run's own EXIT trap can still record the night.
+#
+# AND A TERMINAL LINE ON EVERY PATH. The EXIT trap now writes
+# `pogo-deploy: end (rc=N after Ns)` before it does anything else, and it is
+# armed at the TOP of main rather than after the lock, so a skipped fire has one
+# too. That line is what lets a detector outside this process tell "still going"
+# from "stopped forever" — see internal/staleness/nofire.go, which reads it and
+# reports a run that started and did not finish as a finding rather than as the
+# good branch. The bound above and that witness are deliberately separate: a
+# bound whose only evidence that it worked is the bounded thing reporting so has
+# no evidence at all.
+#
+# HOW THESE COULD EXHIBIT THE DEFECT THEY REMEDY — a bound that itself hangs:
+#
+#   - run_bounded's killer is a `sleep` in a subshell, which cannot block on the
+#     network. It kills DESCENDANTS FIRST (git fetch's ssh child holds the
+#     socket; killing git alone can leave it), then the child, then SIGKILLs.
+#   - arm_run_deadline's watchdog resolves its own `mg` when it fires rather than
+#     inheriting one resolved earlier, because the hang may be IN that
+#     resolution — and it runs the alert under run_bounded, so an alert path that
+#     is itself wedged cannot stop the kill.
+#   - the watchdog checks that its target is still THIS script (by command name)
+#     before killing anything, so a run that ends between the check and the kill
+#     cannot cost an unrelated process that inherited the pid.
+#   - and if the watchdog is defeated anyway, the run writes no terminal line,
+#     which is exactly the case the witness reports. Nothing here is trusted to
+#     report its own silence.
+#
 # HYGIENE: ABSOLUTE PATHS, NEVER BARE NAMES (mg-dd5f / mg-015f)
 # -------------------------------------------------------------
 # launchd hands a job a minimal PATH, and on macOS /usr/bin/mg is the Micro-Emacs
@@ -311,6 +380,12 @@
 #   POGO_DEPLOY_SYNC_VIGIL     1 to wait a transport outage out inside the window (1)
 #   POGO_DEPLOY_SYNC_VIGIL_INTERVAL  seconds between vigil probes (300)
 #   POGO_DEPLOY_PROBE_TIMEOUT  seconds to wait for the reachability probe (5)
+#   POGO_DEPLOY_GIT_TIMEOUT    seconds any ONE git step may take before it is
+#                              killed and classified `timeout` (300; 0 disables)
+#   POGO_DEPLOY_RUN_DEADLINE   seconds the WHOLE run may take before the watchdog
+#                              alerts and kills it (0 = derive from the window)
+#   POGO_DEPLOY_DEADLINE_SLACK seconds past WINDOW_END the derived deadline
+#                              allows (1800)
 #   POGO_DEPLOY_NC           pin an nc for the probe (still checked by execution)
 #   GIT                      pin a specific git (still checked by execution)
 #
@@ -418,6 +493,45 @@ SYNC_VIGIL="${POGO_DEPLOY_SYNC_VIGIL:-1}"
 SYNC_VIGIL_INTERVAL="${POGO_DEPLOY_SYNC_VIGIL_INTERVAL:-300}"
 
 PROBE_TIMEOUT="${POGO_DEPLOY_PROBE_TIMEOUT:-5}"
+
+# How long a TOOL identity check may take. These are local execs that print a
+# line, so 30s is enormous; the point is that no exec in this file is unbounded,
+# because "it is a local call" is exactly the reasoning that left the git queries
+# bare (see git_q).
+TOOL_PROBE_TIMEOUT="${POGO_DEPLOY_TOOL_PROBE_TIMEOUT:-30}"
+
+# The per-step git bound (mg-56ac). 300s against a fetch that normally takes two
+# — the number is not calibrated to how long a fetch takes, it is calibrated to
+# being unmistakably longer than one. What it has to separate is "slow" from
+# "never", and 08-08 was on the far side of that by four hundred times.
+#
+# Four attempts of it is 20 minutes of a four-hour window in the worst case, and
+# the vigil's per-sleep window test already refuses to start one it cannot
+# finish. 0 disables the bound, for a controlled run where a kill would obscure
+# what is being measured.
+GIT_TIMEOUT="${POGO_DEPLOY_GIT_TIMEOUT:-300}"
+
+# The whole-run deadline (mg-56ac). Zero means DERIVE it: the distance to the
+# window's end plus DEADLINE_SLACK, floored at the longest a legitimate run can
+# take (MAX_DRAIN + RESERVE + slack).
+#
+# Derived rather than constant, for mg-8f7e's reason one layer up: the number
+# that actually constrains this run is when the window closes, and a constant
+# calibrated against today's drain expires the moment the window moves. A 03:00
+# fire under the production window is therefore killed at ~06:30 rather than at
+# 09:39 the next morning.
+#
+# The floor matters for the out-of-window controlled run (POGO_DEPLOY_SKIP_WINDOW
+# =1 at 14:00), where the distance to the window's end is negative and a naive
+# derivation would arm a deadline that fires immediately.
+RUN_DEADLINE="${POGO_DEPLOY_RUN_DEADLINE:-0}"
+DEADLINE_SLACK="${POGO_DEPLOY_DEADLINE_SLACK:-1800}"
+
+# Set by the EXIT trap's own bookkeeping. RUN_T0 is when main() began, so the
+# terminal line can say how long the run took — which is the number that
+# separates a deploy from a hang, and the one the 08-08 record could not supply.
+RUN_T0=0
+WATCHDOG_PID=""
 
 # Set by sync_src on every exit path. SYNC_CLASS is which STEP failed — the fact
 # the runner actually has — and SYNC_DETAIL is that step's stderr, kept verbatim
@@ -654,7 +768,10 @@ resolve_mg() {
 
     for cand in "${cands[@]}"; do
         [ -x "$cand" ] || continue
-        "$cand" --help 2>/dev/null | grep -q 'macguffin' || continue
+        # Bounded like every other exec here: a candidate that is present and
+        # does not RETURN is the same outage as one that is present and broken,
+        # and the identity check is the first exec this job performs.
+        run_bounded "$TOOL_PROBE_TIMEOUT" "$cand" --help 2>/dev/null | grep -q 'macguffin' || continue
         MG="$cand"
         log "mg: resolved macguffin at $MG"
         return 0
@@ -738,7 +855,7 @@ resolve_git() {
 
     for cand in "${cands[@]}"; do
         [ -x "$cand" ] || continue
-        "$cand" --version 2>/dev/null | grep -q '^git version' || continue
+        run_bounded "$TOOL_PROBE_TIMEOUT" "$cand" --version 2>/dev/null | grep -q '^git version' || continue
         GIT="$cand"
         log "git: resolved working git at $GIT ($("$cand" --version 2>/dev/null))"
         return 0
@@ -1008,6 +1125,16 @@ probe_tcp() {
 # likely cause, which is precisely the guess that produced the 08-05 alert.
 classify_transport() {
     local url="${1:-}" host port rc
+    # A step this run KILLED is classified from that observation and not from a
+    # probe (mg-56ac). The probe measures a later instant — the transport may
+    # well be up by the time it runs — and the direct fact that the call did not
+    # return in GIT_TIMEOUT is both stronger and about the right moment. Calling
+    # a killed step `remote` would send the reader to ssh keys for a hang.
+    if ${GIT_STEP_TIMED_OUT:-false}; then
+        SYNC_CLASS=timeout
+        log "sync: the git step did not return within ${GIT_TIMEOUT}s and was killed — classified TIMEOUT from that observation, not from a probe taken afterwards"
+        return 0
+    fi
     read -r host port <<<"$(remote_endpoint "$url")"
     if [ -z "${host:-}" ] || [ -z "${port:-}" ]; then
         SYNC_CLASS=unclassified
@@ -1028,17 +1155,175 @@ classify_transport() {
     esac
 }
 
+# ---------------------------------------------------------------------------
+# 5a-bis. Bounding a call that may never return (mg-56ac)
+# ---------------------------------------------------------------------------
+# kill_tree PID [SIG] — signal a process and its descendants, LEAVES FIRST.
+#
+# Leaves first is the whole content of this function. `git fetch` execs an ssh
+# or git-remote-https child and it is the CHILD that holds the half-open socket;
+# killing git alone can leave that child running and the socket held, which on
+# this box is indistinguishable from the hang we were trying to end. pgrep is
+# used when present and its absence degrades to killing the named process only,
+# which is still strictly better than the unbounded wait it replaces.
+# KILL_TREE_SKIP is a pid the walk must not signal or descend into. The run
+# deadline's watchdog is itself a descendant of the run it is killing, so without
+# this it kills itself partway through and never reaches the SIGKILL.
+KILL_TREE_SKIP=""
+
+kill_tree() {
+    local pid="${1:-}" sig="${2:-TERM}" child
+    [ -n "$pid" ] || return 0
+    [ "$pid" = "${KILL_TREE_SKIP:-}" ] && return 0
+    for child in $(pgrep -P "$pid" 2>/dev/null); do
+        kill_tree "$child" "$sig"
+    done
+    kill -"$sig" "$pid" 2>/dev/null || true
+}
+
+# self_pid — this process's OWN pid, which `$$` does not give inside a subshell:
+# bash 3.2 (what macOS ships) has no BASHPID, and `$$` stays the parent's. The
+# watchdog needs it to exclude itself from the kill.
+self_pid() { sh -c 'echo $PPID'; }
+
+# run_bounded SECONDS CMD... — run CMD with a wall-clock bound.
+#
+# Returns CMD's own status, or BOUNDED_RC (124, `timeout`'s convention) when the
+# bound expired; BOUNDED_TIMED_OUT says which, because 124 is also a status a
+# command may legitimately return.
+#
+# This is a subshell and a `sleep`, not a `timeout` binary: coreutils is not on a
+# stock macOS, and adding a binary that must be resolved at 03:00 to the path
+# that has to work when everything else is broken is the mg-015f mistake. A
+# `sleep` cannot block on the network, which is the property being bought.
+#
+# SECONDS <= 0 runs the command unbounded, deliberately — a controlled run that
+# wants to observe a hang rather than end it says POGO_DEPLOY_GIT_TIMEOUT=0.
+BOUNDED_RC=124
+BOUNDED_TIMED_OUT=false
+run_bounded() {
+    local secs="${1:-0}"; shift
+    BOUNDED_TIMED_OUT=false
+    if [ "$(( 10#$secs ))" -le 0 ]; then "$@"; return $?; fi
+
+    local mark p k rc
+    mark="$(mktemp)" || { "$@"; return $?; }
+    rm -f "$mark"
+
+    "$@" &
+    p=$!
+    (
+        sleep "$secs"
+        kill -0 "$p" 2>/dev/null || exit 0
+        # The mark is written BEFORE the kill, so a race between the command
+        # finishing and the killer firing resolves as "timed out" rather than as
+        # a mystery exit status. Over-reporting a timeout costs a retry; under-
+        # reporting one costs the night.
+        : > "$mark"
+        kill_tree "$p" TERM
+        sleep 5
+        kill_tree "$p" KILL
+    ) &
+    k=$!
+
+    wait "$p" 2>/dev/null; rc=$?
+    # kill_tree, not `kill`: the killer is a subshell blocked in `sleep`, and a
+    # plain TERM to it leaves that sleep ORPHANED — still running, and still
+    # holding every file descriptor it inherited. Measured while writing this:
+    # the test suite's own stdout pipe was held open by leaked `sleep 300`
+    # processes long after the suite had finished, so the run looked hung. In
+    # production it would leave one such process per bounded call for up to
+    # GIT_TIMEOUT seconds. A bound that leaks the process implementing it is not
+    # tidy enough to be trusted with the rest of this.
+    kill_tree "$k" TERM
+    wait "$k" 2>/dev/null
+
+    if [ -f "$mark" ]; then
+        BOUNDED_TIMED_OUT=true
+        rc="$BOUNDED_RC"
+    fi
+    rm -f "$mark"
+    return "$rc"
+}
+
+# harden_git_transport — make git bound its OWN transport (mg-56ac).
+#
+# Preferred over run_bounded's kill, and layered under it rather than instead of
+# it. A git that gives up by itself returns a status and an error message, which
+# classify_transport can read and the alert can print verbatim; a killed git
+# leaves nothing but the kill. So the killer is the backstop and this is the
+# first line — the 08-05 night, which was loud and recoverable, is what a
+# transport that times out ITSELF looks like.
+#
+# Not exported to the whole run: pogo-self-deploy does its own git work and
+# these values are chosen for a fetch of one small repo at 03:00, not for
+# whatever it does.
+harden_git_transport() {
+    # Below 1000 bytes/s for 60s is a dead transfer, not a slow one. This is the
+    # only knob git offers for the HTTP transport and it covers the shape that
+    # hung here — bytes stop arriving and the socket is never closed.
+    export GIT_HTTP_LOW_SPEED_LIMIT="${GIT_HTTP_LOW_SPEED_LIMIT:-1000}"
+    export GIT_HTTP_LOW_SPEED_TIME="${GIT_HTTP_LOW_SPEED_TIME:-60}"
+    # ssh has no equivalent knob for a stalled session, so it gets a connect
+    # bound plus keepalives: three unanswered 15s probes end the session with an
+    # error instead of holding it open forever.
+    export GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o BatchMode=yes}"
+    log "git: transport bounded — http low-speed ${GIT_HTTP_LOW_SPEED_LIMIT}B/s over ${GIT_HTTP_LOW_SPEED_TIME}s, ssh ConnectTimeout=15 + keepalives, and every step capped at ${GIT_TIMEOUT}s"
+}
+
 # git_step CMD... — run a git step, keep its stderr in SYNC_DETAIL, and still
 # print it. The log is the operator's primary artifact and losing the ssh line
 # from it to gain it in the mail would be a straight trade, not an improvement.
+#
+# BOUNDED since mg-56ac. A step that exceeds GIT_TIMEOUT is killed and reported
+# as class `timeout`, which is retryable for the same reason `network` is: a call
+# that never returned established NOTHING about the tree. Without this the fetch
+# on 2026-08-08 ran for 31h39m and the run's own drain cap never applied, because
+# the run never got as far as the drain.
 git_step() {
     local f rc
-    f="$(mktemp)" || { SYNC_DETAIL=""; "$@"; return $?; }
-    "$@" 2>"$f"; rc=$?
+    f="$(mktemp)" || { SYNC_DETAIL=""; run_bounded "$GIT_TIMEOUT" "$@"; return $?; }
+    run_bounded "$GIT_TIMEOUT" "$@" 2>"$f"; rc=$?
     SYNC_DETAIL="$(cat "$f" 2>/dev/null)"
     [ -s "$f" ] && cat "$f" >&2
     rm -f "$f"
+    if $BOUNDED_TIMED_OUT; then
+        GIT_STEP_TIMED_OUT=true
+        SYNC_DETAIL="the step did not return within ${GIT_TIMEOUT}s and was killed: $*${SYNC_DETAIL:+
+$SYNC_DETAIL}"
+        err "git: step exceeded ${GIT_TIMEOUT}s and was killed — $*"
+    else
+        GIT_STEP_TIMED_OUT=false
+    fi
     return "$rc"
+}
+
+# Set by git_step on every call. Read by the classifier: a killed step must be
+# reported as a timeout and not as whatever the reachability probe happens to
+# say a moment later, because the probe measures a LATER instant and the run has
+# a direct observation of its own.
+GIT_STEP_TIMED_OUT=false
+
+# git_q CMD... — a bounded git call whose OUTPUT is what is wanted.
+#
+# THIS EXISTS BECAUSE THE FIRST VERSION OF THIS FIX HAD THE DEFECT IT WAS
+# FIXING. git_step bounds the four steps that go through it — clone, fetch,
+# checkout, ff-merge — and every OTHER git call in this file was left bare:
+# `remote get-url origin`, `status --porcelain`, `rev-parse --short HEAD`. Two of
+# those run on the failure path immediately after a fetch that has just been
+# killed for hanging, against the same unreachable remote. The suite caught it by
+# hanging: the runner was killed for a hung fetch and then blocked forever in the
+# `remote get-url` that classifies the failure.
+#
+# `remote get-url` reads .git/config and is local — which is exactly the reasoning
+# that leaves a call unbounded, and it was wrong here: the process was measured
+# sitting in it. Whether the block was the call or the shell around it, an
+# unbounded call in the failure path of a timeout is not defensible, so every git
+# call in this file now goes through one of these two helpers and a test enforces
+# it. A timed-out query yields the empty string, which every caller already
+# handles because they all pass `2>/dev/null` and treat a blank as absent.
+git_q() {
+    run_bounded "$GIT_TIMEOUT" "$@"
 }
 
 sync_src() {
@@ -1047,7 +1332,7 @@ sync_src() {
     if [ ! -d "$SRC/.git" ]; then
         remote="$DEPLOY_REMOTE"
         if [ -z "$remote" ]; then
-            remote="$("$GIT" -C "$BOOTSTRAP_REPO" remote get-url origin 2>/dev/null)"
+            remote="$(git_q "$GIT" -C "$BOOTSTRAP_REPO" remote get-url origin 2>/dev/null)"
         fi
         if [ -z "$remote" ]; then
             SYNC_CLASS=config
@@ -1065,15 +1350,15 @@ sync_src() {
 
     if ! git_step "$GIT" -C "$SRC" fetch --quiet origin; then
         err "sync: git fetch origin failed in $SRC"
-        remote="$("$GIT" -C "$SRC" remote get-url origin 2>/dev/null)"
+        remote="$(git_q "$GIT" -C "$SRC" remote get-url origin 2>/dev/null)"
         [ -n "$remote" ] || remote="$DEPLOY_REMOTE"
         classify_transport "$remote"
         return 1
     fi
 
-    if [ -n "$("$GIT" -C "$SRC" status --porcelain 2>/dev/null)" ]; then
+    if [ -n "$(git_q "$GIT" -C "$SRC" status --porcelain 2>/dev/null)" ]; then
         SYNC_CLASS=dirty
-        SYNC_DETAIL="$("$GIT" -C "$SRC" status --short 2>&1)"
+        SYNC_DETAIL="$(git_q "$GIT" -C "$SRC" status --short 2>&1)"
         err "sync: $SRC is DIRTY — refusing to touch it"
         printf '%s\n' "$SYNC_DETAIL" >&2
         return 1
@@ -1092,7 +1377,7 @@ sync_src() {
         err "sync: $SRC has DIVERGED from origin/$DEPLOY_REF — refusing a non-fast-forward"
         return 1
     fi
-    log "sync: $SRC at $DEPLOY_REF $("$GIT" -C "$SRC" rev-parse --short HEAD)"
+    log "sync: $SRC at $DEPLOY_REF $(git_q "$GIT" -C "$SRC" rev-parse --short HEAD)"
     return 0
 }
 
@@ -1138,9 +1423,16 @@ sync_backoff() {
 # Note what is NOT in scope here: `do_prove` RED, a build failure and a test
 # failure are pogo-self-deploy's exits, they establish facts, and gate 3's
 # attempt_disposition already settles the night on every one of them.
+#
+#   `timeout` (mg-56ac) joins the retryable side, and it is the clearest case in
+#     the list: a call that never returned established nothing at all, not even
+#     that the far end is reachable. It is what the 2026-08-08 fetch would have
+#     been classified as had anything been bounding it, and treating it as
+#     settled would keep the night lost for the one class where re-asking is
+#     most obviously worth it.
 sync_class_retryable() {
     case "${1:-}" in
-        network|remote|unclassified) return 0 ;;
+        network|remote|unclassified|timeout) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -1309,6 +1601,7 @@ EOF
 describe_sync_class() {
     case "${1:-}" in
         network)      echo "NETWORK — the remote host could not be reached from this box" ;;
+        timeout)      echo "TIMEOUT — a git step did not return within ${GIT_TIMEOUT}s and was killed" ;;
         remote)       echo "REMOTE — the host answered but the transfer was refused (auth, permission, or the repository)" ;;
         dirty)        echo "DIRTY CHECKOUT — the deploy tree has uncommitted changes" ;;
         diverged)     echo "DIVERGED — the deploy tree has commits that are not on the remote" ;;
@@ -1324,6 +1617,31 @@ describe_sync_class() {
 # somewhere the evidence actually points.
 remedy_for_sync_class() {
     case "${1:-}" in
+        timeout)
+            cat <<EOF
+A git step DID NOT RETURN within ${GIT_TIMEOUT}s and this runner killed it. That is a
+direct observation of this run, not an inference from a probe taken afterwards,
+so do not go looking for a dirty or diverged tree: the sync never got far enough
+to have an opinion about the repository.
+
+THIS IS THE 2026-08-08 SHAPE, BOUNDED. That night the same step never returned
+and nothing killed it: the run wrote nine lines, went silent for 31h39m, held the
+deploy lock and the quiesced fleet for all of it, and produced no exit code and
+no alert. You are reading this mail because that no longer happens quietly.
+
+The runner retried — $SYNC_TRIES attempts over ${SYNC_RETRY_SPENT}s, ${SYNC_VIGIL_SPENT}s of it vigil — so the
+condition outlasted all of it rather than being a single unlucky socket.
+
+  ssh -T git@github.com          # 'successfully authenticated' is the good answer
+  curl -sS -o /dev/null -w '%{http_code}\\n' https://api.github.com
+  git -C ~/.pogo/deploy-src fetch origin      # by hand, and time it
+
+A half-open connection on a flaky link presents exactly this way and this box's
+network is independently known to be intermittent (mg-0ffc, mg-dd22). If the
+manual fetch is fast, nothing needs fixing here; the bound did its job and the
+next fire will carry the deploy.
+EOF
+            ;;
         network)
             cat <<EOF
 This box could NOT open a TCP connection to the remote, measured directly at the
@@ -1874,7 +2192,7 @@ again. The remedy is below; everything between here and it is context.'
   attempt:   $(( ATTEMPT_N + 1 )) tonight ($today)
   drain:     up to ${budget}s were allowed
   elapsed:   ${elapsed}s
-  checkout:  $SRC ($("$GIT" -C "$SRC" rev-parse --short HEAD 2>/dev/null))
+  checkout:  $SRC ($(git_q "$GIT" -C "$SRC" rev-parse --short HEAD 2>/dev/null))
   log:       $HOME/Library/Logs/pogo/pogo-deploy.log"
     if [ -n "$changed" ]; then
         printf '\nWHAT THIS ATTEMPT CHANGED: %s\n' "$changed"
@@ -1930,6 +2248,196 @@ acquire_lock() {
     return 1
 }
 
+# ---------------------------------------------------------------------------
+# 9b. The whole-run deadline (mg-56ac)
+# ---------------------------------------------------------------------------
+# WHY THE DRAIN CAP WAS NOT ENOUGH, said plainly because it is the thing most
+# likely to be re-derived wrongly: on 2026-08-08 the run was allowed 7200s of
+# drain and ran for 113 598s, and there is no contradiction there. The cap bounds
+# ONE stage. The run hung before reaching it. Any bound that names a stage can be
+# defeated by hanging in a different one, so this one names none: it is wall
+# clock against the whole run, from the first line to the last.
+#
+# DEADLINE_RC is `timeout`'s conventional 124, so an operator reading an exit
+# status has a fighting chance of recognising it without this file.
+DEADLINE_RC=124
+DEADLINE_GRACE="${POGO_DEPLOY_DEADLINE_GRACE:-30}"
+# How long the watchdog's own alert may take before the kill proceeds without
+# it. Two minutes is generous for two `mg mail send` calls and short enough that
+# a wedged mail path cannot turn the bound back into an unbounded run.
+DEADLINE_ALERT_BOUND="${POGO_DEPLOY_DEADLINE_ALERT_BOUND:-120}"
+
+# run_deadline END SLACK MAX_DRAIN RESERVE [H M S] — how long this run may take.
+#
+# Derived from the window for mg-8f7e's reason: the number that constrains this
+# run is when the window closes, and a constant calibrated against today's drain
+# stops being derived from anything the first time the window moves. SLACK is
+# what the run is allowed to overrun the window by before it is a hang rather
+# than a slow night — generous, because killing a live deploy mid-kickstart is
+# worse than one that finishes at 06:20.
+#
+# The FLOOR is the longest a legitimate run can take at all (a full drain, plus
+# the reserve the build and bounce need, plus slack). It is what makes the
+# out-of-window controlled run — POGO_DEPLOY_SKIP_WINDOW=1 at 14:00, where the
+# distance to the window's end is deeply negative — get a usable deadline
+# instead of an immediate kill.
+run_deadline() {
+    local end=$(( 10#$1 )) slack=$(( 10#$2 )) max=$(( 10#$3 )) reserve=$(( 10#$4 ))
+    local h m s left floor
+    if [ $# -ge 7 ]; then h="$5"; m="$6"; s="$7"; else read -r h m s <<<"$(now_hms)"; fi
+    left=$(( end * 3600 - (10#$h * 3600 + 10#$m * 60 + 10#$s) + slack ))
+    floor=$(( max + reserve + slack ))
+    [ "$left" -lt "$floor" ] && left="$floor"
+    printf '%s' "$left"
+}
+
+# still_this_script PID — is that pid still THIS runner?
+#
+# A guard against the one way a watchdog can do real damage: the run ends, its
+# pid is recycled, and hours later the watchdog kills whatever inherited it.
+# on_exit disarms the watchdog synchronously, so the window is tiny — but "tiny"
+# is not "closed", and the cost of being wrong is killing an unrelated process
+# on Daniel's machine at 06:30.
+still_this_script() {
+    local pid="${1:-}" cmd
+    [ -n "$pid" ] || return 1
+    cmd="$(ps -o command= -p "$pid" 2>/dev/null)" || return 1
+    case "$cmd" in
+        *pogo-deploy.sh*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# on_deadline SECS TARGET — what the watchdog does when the bound expires.
+#
+# ORDER IS THE ARGUMENT HERE TOO. The log lines come first because they are the
+# one channel that cannot fail; the alert is attempted next but bounded, so an
+# alert path that is itself wedged delays the kill by at most two minutes; and
+# the kill happens whether or not either worked. A watchdog that can be stopped
+# by the same fault it is watching for is not a watchdog.
+#
+# It kills the tree from the LEAVES so the run's own EXIT trap gets a chance to
+# run: bash defers a trapped signal until the foreground command returns, so
+# TERMing only the shell would leave a run blocked in `git fetch` exactly as
+# wedged as before. Killing the fetch first unblocks the shell, the TERM trap
+# fires, and the run records its own night and drops its own lock. The SIGKILL
+# after DEADLINE_GRACE is for when that does not happen — and then the run writes
+# no terminal line, which is precisely the case the did-not-run witness reports.
+on_deadline() {
+    local secs="$1" target="$2" backstop
+    KILL_TREE_SKIP="$(self_pid)"
+
+    err "DEADLINE EXCEEDED: this run has been alive for ${secs}s without finishing, and is being KILLED."
+    err "A run that STOPS is not a run that FAILS: it has no exit code, sends no alert and sets no stamp, so on 2026-08-08 a run of this shape was scored as a night that ran (mg-56ac). This line is that night, bounded."
+    log "deadline: killing pid $target and its descendants (grace ${DEADLINE_GRACE}s, then SIGKILL)"
+
+    # THE KILL IS ARMED BEFORE THE ALERT, in a process of its own, so that
+    # nothing below — a wedged mg, a hung `go env`, a mail server that accepts
+    # and stalls — can prevent the run from ending. This is the same argument
+    # one level down that the watchdog itself is: the thing that guarantees the
+    # bound must not be reachable from the fault.
+    (
+        sleep "$DEADLINE_ALERT_BOUND"
+        kill -0 "$target" 2>/dev/null || exit 0
+        kill_tree "$target" TERM
+        sleep "$DEADLINE_GRACE"
+        kill_tree "$target" KILL
+    ) &
+    backstop=$!
+
+    if [ -n "$POGO_CLI" ]; then
+        run_bounded 30 "$POGO_CLI" events emit --type=deploy_nightly_deadline --agent=pogo-deploy \
+            --details="{\"deadline_seconds\":$secs,\"pid\":$target}" >/dev/null 2>&1 || true
+    fi
+
+    # The watchdog resolves its OWN macguffin. It forked before the run reached
+    # resolve_mg, so it did not inherit one — and that is the right way round
+    # anyway: the run may have hung IN that resolution, and a watchdog holding a
+    # value copied from the run it is killing is trusting the wedged process.
+    if [ -z "$MG" ]; then
+        resolve_mg >/dev/null 2>&1 || true
+    fi
+
+    if [ -n "$MG" ]; then
+        # Bounded, and its status deliberately unread — the runner's standing
+        # rule is that no alert callsite branches on delivery (mg-7dc1), and it
+        # is doubly right here: whether the mail went out changes nothing about
+        # whether this run must be killed. The two log lines bracket it, so a
+        # bound that expired mid-send is visible in the record without any
+        # control flow depending on it.
+        log "deadline: mailing the RED before the kill (bounded at ${DEADLINE_ALERT_BOUND}s, with the kill already armed behind it)"
+        run_bounded "$DEADLINE_ALERT_BOUND" alert "[pogo-deploy] KILLED: the nightly run exceeded its ${secs}s deadline" \
+"$(deadline_alert_body "$secs" "$target")" "\"exit\":$DEADLINE_RC,\"deadline_seconds\":$secs"
+        log "deadline: alert path returned — proceeding to the kill"
+    else
+        err "deadline: NO macguffin could be resolved, so NOTHING HAS BEEN MAILED. The kill still happens and the log line above is the only record — treat a log with a DEADLINE line and no mail as an alert path that is itself broken."
+    fi
+
+    kill_tree "$backstop" TERM
+    kill_tree "$target" TERM
+    sleep "$DEADLINE_GRACE"
+    if kill -0 "$target" 2>/dev/null; then
+        err "deadline: pid $target survived SIGTERM for ${DEADLINE_GRACE}s — SIGKILL. The run will write no terminal line, so this night reads as a hang to the did-not-run witness, which is what it was."
+        kill_tree "$target" KILL
+    fi
+}
+
+# deadline_alert_body SECS TARGET — the mail. It leads with what is TRUE RIGHT
+# NOW about the fleet, not with the deploy, because a run killed mid-drain
+# leaves dispatch frozen and that is the fact worth waking up to.
+deadline_alert_body() {
+    local secs="$1" target="$2"
+    cat <<EOF
+The unattended nightly redeploy was KILLED after ${secs}s. It did not fail — it
+STOPPED, which until mg-56ac produced no exit code, no alert and no stamp at all.
+
+  deadline: ${secs}s (window ends ${WINDOW_END:-?}:00, slack ${DEADLINE_SLACK}s)
+  pid:      $target
+  log:      $HOME/Library/Logs/pogo/pogo-deploy.log
+
+CHECK THE FLEET BEFORE THE DEPLOY. A run killed after it quiesced the fleet
+leaves it quiesced, and every ordinary liveness signal on this box still reads
+green while it is: the agents exited cleanly and on request, so restart_on_crash
+is correct not to fire. On 2026-08-08 that was 33 hours of no crew.
+
+  curl -s http://127.0.0.1:10000/version
+  curl -s http://127.0.0.1:10000/server/mode      # expect {"mode":"full"}
+  pogo agent list                                 # expect a crew, not an empty list
+  curl -s -X POST http://127.0.0.1:10000/agents/drain -d '{"draining":false}'
+
+THEN READ WHERE IT STOPPED. The last timestamped line before the silence bounds
+the stage; the gap in the timestamps is the stall:
+
+  grep -n 'pogo-deploy:' $HOME/Library/Logs/pogo/pogo-deploy.log | tail -20
+
+Nothing here diagnoses WHY, and the kill destroys some of the evidence for it —
+that is the trade this deadline makes deliberately. An unbounded run keeps its
+evidence and costs a day; a bounded one costs a night and tells you the same
+morning.
+EOF
+}
+
+# arm_run_deadline SECS TARGET — start the watchdog.
+#
+# A separate PROCESS, not a trap or an alarm inside the run: the thing being
+# bounded may be unable to run anything at all, and the whole lesson of this
+# lineage is that a component asked to report its own silence never does.
+arm_run_deadline() {
+    local secs="${1:-0}" target="${2:-}"
+    if [ "$(( 10#$secs ))" -le 0 ] || [ -z "$target" ]; then
+        log "deadline: NOT ARMED — this run is unbounded (POGO_DEPLOY_RUN_DEADLINE=$secs). A run that hangs will be silent until the did-not-run witness reports it."
+        return 0
+    fi
+    (
+        sleep "$secs"
+        kill -0 "$target" 2>/dev/null || exit 0
+        still_this_script "$target" || exit 0
+        on_deadline "$secs" "$target"
+    ) &
+    WATCHDOG_PID=$!
+    log "deadline: armed — the WHOLE run is bounded at ${secs}s regardless of which stage is stuck (watchdog pid $WATCHDOG_PID, run pid $target)"
+}
+
 # on_exit RC — the single EXIT trap: record the night's outcome, then drop the
 # lock. One trap rather than a record call at each of the seven exit points,
 # because the exit point that gets forgotten is exactly the one that leaves the
@@ -1939,8 +2447,35 @@ acquire_lock() {
 # skip gate has passed. A fire that was late, locked out or already settled must
 # leave the record untouched: it did not attempt anything, and writing "attempt
 # 2, rc 0" for it would settle a night whose real attempt is still running.
+# It now also writes the run's TERMINAL LINE and disarms the deadline watchdog,
+# and it is armed at the TOP of main rather than after the lock (mg-56ac).
+#
+# THE TERMINAL LINE IS THE POINT. Before it, a run that stopped forever and a run
+# that finished normally produced the same thing in the log — nothing further —
+# and no reader inside or outside this process could tell them apart. `end` is
+# written LAST, after the stamp and the lock, so it means what it says: every
+# other thing this run had to do is already done.
+#
+# It covers the SKIP paths too, which is why the trap moved up. A fire that was
+# late, locked out or already settled exits in milliseconds and is perfectly
+# healthy; without a terminal line of its own it would be indistinguishable from
+# a fire that started and never came back. LOCK_HELD is what makes the earlier
+# arming safe: an unlocked fire must not rmdir the lock the RUNNING deploy holds.
+LOCK_HELD=false
+
 on_exit() {
-    local rc="$1"
+    local rc="$1" elapsed=0
+    if [ "$RUN_T0" -gt 0 ]; then
+        elapsed=$(( $(date +%s) - RUN_T0 ))
+    fi
+
+    # First, because everything below is bookkeeping and the watchdog must not
+    # fire against a pid this run is about to stop owning.
+    if [ -n "$WATCHDOG_PID" ]; then
+        kill_tree "$WATCHDOG_PID" TERM
+        WATCHDOG_PID=""
+    fi
+
     if $ATTEMPT_ARMED; then
         ATTEMPT_N=$(( ATTEMPT_N + 1 ))
         if stamp_write "$STAMP" "$(deploy_date)" "$ATTEMPT_N" "$rc"; then
@@ -1949,7 +2484,10 @@ on_exit() {
             err "could not write the attempt record at $STAMP — a later fire tonight may repeat this attempt"
         fi
     fi
-    rmdir "$LOCK_DIR" 2>/dev/null || true
+    if $LOCK_HELD; then
+        rmdir "$LOCK_DIR" 2>/dev/null || true
+    fi
+    log "pogo-deploy: end (rc=$rc after ${elapsed}s)"
 }
 
 # ---------------------------------------------------------------------------
@@ -1971,7 +2509,19 @@ main() {
         shift
     done
 
+    RUN_T0="$(date +%s)"
     log "pogo-deploy: start (src=$SRC window=$WINDOW dry_run=$DRY_RUN)"
+
+    # Armed HERE, before any gate, so every path out of this run writes a
+    # terminal line — including the skips, which exit in milliseconds and are
+    # healthy, and which without one look exactly like a run that never came
+    # back (mg-56ac). It does not touch the lock until LOCK_HELD says this run
+    # owns it.
+    trap 'on_exit $?' EXIT
+    # So a TERM — from the deadline watchdog, or from an operator — leaves
+    # through the trap above with a status of its own, instead of killing the
+    # shell outright and leaving the night unrecorded and the lock held.
+    trap 'err "terminated (SIGTERM) — the run deadline or an operator ended this run"; exit '"$DEADLINE_RC" TERM
 
     # --- gate 1: the window -------------------------------------------------
     parse_window "$WINDOW" || { err "bad POGO_DEPLOY_WINDOW '$WINDOW' (want START-END)"; exit 2; }
@@ -1985,12 +2535,24 @@ main() {
         log "window: local hour $hour is inside [${WINDOW_START},${WINDOW_END})"
     fi
 
+    # The deadline is armed as soon as the window is known, because everything
+    # after this point can hang: the lock probe, the stamp read, the tool
+    # resolution and the sync all touch the filesystem or the network. Arming it
+    # later would leave the earliest stages — the ones the 08-08 run died in —
+    # outside the only bound that does not name a stage.
+    if [ "$(( 10#$RUN_DEADLINE ))" -gt 0 ]; then
+        DEADLINE_S="$RUN_DEADLINE"
+    else
+        DEADLINE_S="$(run_deadline "$WINDOW_END" "$DEADLINE_SLACK" "$MAX_DRAIN" "$RESERVE")"
+    fi
+    arm_run_deadline "$DEADLINE_S" "$$"
+
     # --- gate 2: one at a time ----------------------------------------------
     if ! acquire_lock; then
         log "lock: another pogo-deploy run holds $LOCK_DIR — exiting 0"
         exit 0
     fi
-    trap 'on_exit $?' EXIT
+    LOCK_HELD=true
 
     # --- gate 3: has tonight already been settled? (mg-8f7e, mg-0d70) -------
     # The 04:00 and 05:00 fires are retries for the failures that established
@@ -2056,6 +2618,11 @@ exit 71. Existence checks pass; the binary just cannot work.
        GIT=/path/to/git if several are installed."
         exit 1
     }
+    # Before the first network call, and after the git that will make it is
+    # known (mg-56ac). A transport that gives up by itself returns an error the
+    # classifier can read; the per-step kill below it is the backstop for when
+    # it does not.
+    harden_git_transport
     load_gh_token || {
         alert "[pogo-deploy] ABORTED: no GH_TOKEN" \
 "The nightly redeploy could not obtain GH_TOKEN from $ZSHENV, so any gh call in
@@ -2235,7 +2802,7 @@ Restore by nudging the affected agents to re-register."
         log "mail-check re-check: OK — every pre-bounce schedule is back ($(printf '%s' "$post" | grep -c . ) present)"
     fi
 
-    log "pogo-deploy: done — pogod redeployed to $("$GIT" -C "$SRC" rev-parse --short HEAD 2>/dev/null)"
+    log "pogo-deploy: done — pogod redeployed to $(git_q "$GIT" -C "$SRC" rev-parse --short HEAD 2>/dev/null)"
     exit 0
 }
 

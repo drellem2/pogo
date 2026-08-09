@@ -67,6 +67,70 @@ package staleness
 // WHAT SURVIVES. Nothing here consults the running binary, the network, the
 // stamp, or launchd. It reads a text file and a schedule constant, which a
 // daemon 85 commits behind main has exactly as right as a current one.
+//
+// ---------------------------------------------------------------------------
+// A RUN THAT STARTS AND NEVER FINISHES (mg-56ac)
+// ---------------------------------------------------------------------------
+// Everything above partitions the world into `ran` and `did-not-run`, and on
+// 2026-08-08 that partition put the worst night of the window on the GOOD side.
+// The measurement, from the log this witness reads:
+//
+//	[2026-08-08T02:00:05Z] pogo-deploy: start (...)
+//	[2026-08-08T02:00:05Z] GH_TOKEN: sourced from /Users/daniel/.zshenv
+//	  ... 31 hours 39 minutes of nothing ...
+//	[2026-08-09T09:39:43Z] sync: /Users/daniel/.pogo/deploy-src at main 738e322
+//	[2026-08-09T09:43:23Z] pogo-deploy: done — pogod redeployed to 738e322
+//
+// ONE run. It started on time, blocked inside the sync for 31h39m, and then
+// completed. The crew had been stopped at 00:44Z and stayed stopped for 33
+// hours, because the run that would have brought it back was still in that gap.
+//
+// `deploy_nofire` fired the next morning and reported five missed nights —
+// 08-09, 08-04, 08-03, 08-02, 08-01 — and 2026-08-08 WAS NOT AMONG THEM. It had
+// a start line, so the check called it a night that ran, which is the one thing
+// it was designed never to get wrong about a night that produced no deploy. The
+// same run also stamped its attempt with the date it FINISHED, so 08-09 was
+// reported missed on a morning when a deploy had in fact just landed. The
+// instrument was wrong about both nights, in both directions.
+//
+// So the question this file asks is no longer "did a run start?" but "did a run
+// START AND FINISH, inside a length a night can afford?". A run is HUNG when the
+// distance from its start line to its terminal line — or to now, if it has not
+// written one — exceeds HungAfter. That covers both shapes: the run that comes
+// back far too late (08-08) and the run that never comes back at all.
+//
+// TWO ARMS, BECAUSE THEY REST ON DIFFERENT EVIDENCE, AND ONLY ONE NEEDS A NEW
+// RUNNER:
+//
+//	TERMINATED-LATE   the run DID write a terminal line, more than HungAfter
+//	                  after its start. Positive evidence, present in logs this
+//	                  box already holds, so this arm judges every run in the
+//	                  record and needed no deploy to become true. It is the arm
+//	                  that fires on 2026-08-08.
+//	NEVER-TERMINATED  the run wrote no terminal line at all. The absence of a
+//	                  line is only evidence about the RUN once the runner is
+//	                  known to write one — before that it is evidence about the
+//	                  runner's version. Judging it unconditionally would have
+//	                  reported 2026-07-31 (which exited 9 at 02:30 under a runner
+//	                  that had no terminal line yet) as a five-day hang. So this
+//	                  arm is armed by the log itself: it judges only runs at or
+//	                  after the first `pogo-deploy: end` line, the marker the
+//	                  runner's EXIT trap now writes on every path, and reports
+//	                  the runs it did NOT judge rather than folding them into
+//	                  either verdict.
+//
+// The horizon argument is the same one this file already makes about rotation,
+// applied to a marker instead of a date: a witness must not manufacture an
+// outage out of its own newness, and must not report an all-clear it did not
+// earn either.
+//
+// WHY NOT JUST BOUND THE RUN AND BE DONE. The runner grew a wall-clock deadline
+// in the same ticket, and it is the repair — this is the witness for it. They
+// are not redundant: the deadline lives inside the run and can be defeated by
+// the same wedge that stopped the run (a SIGKILLed shell writes nothing, an
+// unarmed watchdog watches nothing), while this reads a file afterwards from
+// another process. A bound whose only evidence that it worked is the bounded
+// thing reporting so is the shape this whole lineage keeps failing on.
 
 import (
 	"fmt"
@@ -87,6 +151,43 @@ const startMarker = "pogo-deploy: start"
 
 // dryRunTrue is the field the runner writes for a --dry-run invocation.
 const dryRunTrue = "dry_run=true"
+
+// endMarker is the terminal line the runner's EXIT trap writes on EVERY path
+// (mg-56ac): `pogo-deploy: end (rc=N ...)`. It is the one marker whose absence
+// is evidence about the RUN rather than about the runner's version, so it — and
+// only it — arms the never-terminated arm.
+const endMarker = "pogo-deploy: end"
+
+// terminalMarkers are the substrings that date a run's LAST breath. endMarker
+// is the one the current runner guarantees; the rest are the terminal lines
+// older runners wrote, kept because the terminated-late arm judges the record
+// this box already holds and that record spans four runner versions.
+//
+// Matching is deliberately generous in the direction that costs a MISS rather
+// than a false alarm: an extra match makes a run look SHORTER than it was, so a
+// marker that fires early can only hide a hang, never invent one. All of them
+// are matched on timestamped lines only, which excludes the alert bodies the
+// runner echoes verbatim to the log — those carry remedy prose that mentions
+// exits, and reading prose as a terminal line is exactly the class of mistake
+// (gh#113) this repo has already refused once.
+var terminalMarkers = []string{
+	endMarker,
+	"pogo-deploy: done", // the success path, since the runner's first version
+	"attempt recorded:", // the EXIT trap's stamp line (mg-8f7e)
+	"Exit 0.",           // the skip gates: window, budget, no-drift, settled
+	"exiting 0",         // the lock gate, which skips before the stamp exists
+}
+
+// DefaultHungAfter is how long a run may take before it is a hang rather than a
+// deploy.
+//
+// Six hours. The production window is four ([2,6) local) and the runner's own
+// deadline bounds a run at the window's end plus slack, so a legitimate run
+// cannot approach this; the 2026-08-08 run exceeded it by a factor of five. The
+// number is chosen to sit ABOVE anything the runner can legitimately do and
+// BELOW a working day, so the morning's sample names the night that hung while
+// the reader can still act on it.
+const DefaultHungAfter = 6 * time.Hour
 
 // Fire is one parsed `pogo-deploy: start` line.
 type Fire struct {
@@ -136,6 +237,31 @@ type NoFireReport struct {
 	// oldest night whose first scheduled fire the log was already open for. ""
 	// means the log dated nothing at all.
 	EarliestJudged string `json:"earliest_judged,omitempty"`
+	// Hung is the enumeration of runs that STARTED and did not finish inside
+	// HungAfter, newest first. A hung run is not a missed night — it has a start
+	// line — and it is not a healthy one either, which is the distinction the
+	// 2026-08-08 outage was scored on the wrong side of.
+	Hung []HungRun `json:"hung,omitempty"`
+	// HungTotal is exact even when Hung is clipped.
+	HungTotal int `json:"hung_total"`
+	// HungTruncated records that Hung is shorter than HungTotal.
+	HungTruncated bool `json:"hung_truncated,omitempty"`
+	// HungAfterSeconds is the threshold that was applied, printed so a reader
+	// judges the judgement rather than taking it.
+	HungAfterSeconds int `json:"hung_after_seconds"`
+	// HangArmed reports whether the NEVER-TERMINATED arm could judge anything:
+	// true once the log holds a `pogo-deploy: end` line, which is what proves
+	// the runner writes one. The terminated-late arm needs no arming and runs
+	// regardless.
+	HangArmed bool `json:"hang_armed"`
+	// HangHorizon is the timestamp of that first end line, RFC3339, or "".
+	HangHorizon string `json:"hang_horizon,omitempty"`
+	// HangUnjudged counts runs whose termination could NOT be judged because
+	// they predate HangHorizon and left no terminal line of any vintage. They
+	// are reported rather than counted as either healthy or hung: an unjudgeable
+	// run is a hole in the record, and this witness exists because holes were
+	// being read as all-clears.
+	HangUnjudged int `json:"hang_unjudged,omitempty"`
 	// HorizonLimited records that at least one due night fell before the
 	// horizon and was therefore NOT judged.
 	//
@@ -148,10 +274,41 @@ type NoFireReport struct {
 	HorizonLimited bool `json:"horizon_limited,omitempty"`
 }
 
-// Clean reports whether every night the log can speak for got a fire. A missing
-// log is not clean: a witness whose input is absent must not answer "fine".
+// HungRun is one run that started and did not finish in time.
+type HungRun struct {
+	// Night is the LOCAL calendar date of the START line. A run that finishes
+	// the next day belongs to the night it began on — the 2026-08-08 run
+	// stamped its attempt record with 08-09, the date it woke up on, which is
+	// how the missed-night list came to name a night that had just deployed.
+	Night string `json:"night"`
+	// Start is the start line's timestamp, local, RFC3339.
+	Start string `json:"start"`
+	// Terminated says which arm judged this run: true for a run that wrote a
+	// terminal line far too late (evidence), false for one that wrote none at
+	// all (absence, judged only past HangHorizon).
+	Terminated bool `json:"terminated"`
+	// End is the terminal line's timestamp when Terminated; "" otherwise.
+	End string `json:"end,omitempty"`
+	// ElapsedSeconds is start -> end, or start -> the bound (the next fire, or
+	// now) for a run that never terminated. For the second case it is a LOWER
+	// bound and Terminated says so.
+	ElapsedSeconds int `json:"elapsed_seconds"`
+	// SilentSeconds is the longest gap between consecutive lines of this run —
+	// the actual stall inside it, as opposed to its total length.
+	SilentSeconds int `json:"silent_seconds"`
+	// StalledAfter is the last line the run emitted before that gap, verbatim
+	// and untrimmed of its timestamp. It is the single most useful field here:
+	// on 2026-08-08 it is the GH_TOKEN line, which places the stall inside the
+	// sync and nowhere else.
+	StalledAfter string `json:"stalled_after,omitempty"`
+}
+
+// Clean reports whether every night the log can speak for got a fire that also
+// FINISHED. A missing log is not clean: a witness whose input is absent must not
+// answer "fine". Neither is a log full of runs that started and hung — that
+// reading is the defect mg-56ac exists to remove.
 func (r NoFireReport) Clean() bool {
-	return r.LogFound && r.MissedTotal == 0
+	return r.LogFound && r.MissedTotal == 0 && r.HungTotal == 0
 }
 
 // FirstFire is the instant of the FIRST scheduled fire on `day`. It is the
@@ -215,7 +372,17 @@ func parseLogStamp(line string) (time.Time, bool) {
 // are converted into that location before being dated, because the schedule and
 // the stamp both name nights by LOCAL calendar date.
 func CheckNoFire(logPath, logText string, found bool, now time.Time, sched DeploySchedule) NoFireReport {
-	rep := NoFireReport{LogPath: logPath, LogFound: found}
+	return CheckNoFireWithin(logPath, logText, found, now, sched, DefaultHungAfter)
+}
+
+// CheckNoFireWithin is CheckNoFire with the hang threshold supplied.
+//
+// It exists so the threshold is a parameter of the judgement rather than a
+// constant buried in it: a test can drive both sides of it without waiting six
+// hours, and a caller on a host with a different window can say so. Every
+// production caller goes through CheckNoFire.
+func CheckNoFireWithin(logPath, logText string, found bool, now time.Time, sched DeploySchedule, hungAfter time.Duration) NoFireReport {
+	rep := NoFireReport{LogPath: logPath, LogFound: found, HungAfterSeconds: int(hungAfter.Seconds())}
 	due := sched.LastDueNight(now)
 	rep.LastDueNight = due.Format(stampDateLayout)
 
@@ -226,15 +393,22 @@ func CheckNoFire(logPath, logText string, found bool, now time.Time, sched Deplo
 	loc := now.Location()
 	fired := map[string]bool{}
 	var horizon time.Time
+	var stamped []stampedLine
 
 	for _, line := range strings.Split(logText, "\n") {
-		if stamp, ok := parseLogStamp(line); ok {
+		stamp, ok := parseLogStamp(line)
+		if ok {
 			// The horizon comes from ANY timestamped line, not just start lines:
 			// the log's coverage begins with whatever it wrote first, and a log
 			// whose first line is mid-run still proves it was open then.
 			if horizon.IsZero() || stamp.Before(horizon) {
 				horizon = stamp
 			}
+			// Kept for the hang arms below. Only timestamped lines are kept:
+			// the runner echoes whole alert bodies and drift-check output to the
+			// log unprefixed, and a line that cannot be dated cannot bound
+			// anything.
+			stamped = append(stamped, stampedLine{at: stamp, text: strings.TrimSpace(line)})
 		}
 		if !strings.Contains(line, startMarker) {
 			continue
@@ -251,6 +425,8 @@ func CheckNoFire(logPath, logText string, found bool, now time.Time, sched Deplo
 		rep.Fires++
 		fired[f.At.In(loc).Format(stampDateLayout)] = true
 	}
+
+	checkHangs(&rep, stamped, now, hungAfter)
 
 	if horizon.IsZero() {
 		// A log with no readable timestamp anywhere cannot date anything, so no
@@ -306,9 +482,199 @@ func CheckNoFire(logPath, logText string, found bool, now time.Time, sched Deplo
 // 400-day bound.
 const maxWalkNights = 400
 
+// stampedLine is one log line that could be dated. Undated lines are dropped
+// before this: the runner writes whole alert bodies and drift-check output to
+// the same stream without a prefix, and those must not be read as the acts of a
+// run.
+type stampedLine struct {
+	at   time.Time
+	text string
+}
+
+// isTerminal reports whether a line is a run's last breath.
+func isTerminal(text string) bool {
+	for _, m := range terminalMarkers {
+		if strings.Contains(text, m) {
+			return true
+		}
+	}
+	return false
+}
+
+// checkHangs fills in the hang half of the report: which runs STARTED and did
+// not finish inside hungAfter.
+//
+// A run is the half-open span from its start line to the NEXT start line, or to
+// `now` for the last one. That boundary is what makes the arithmetic honest for
+// a run that never terminated: whatever it was doing, it was not doing it past
+// the point another fire began, so the next start is a bound on its length
+// rather than a guess at it.
+func checkHangs(rep *NoFireReport, lines []stampedLine, now time.Time, hungAfter time.Duration) {
+	loc := now.Location()
+
+	// The NEVER-TERMINATED arm's horizon: the first `pogo-deploy: end` line
+	// anywhere in the log. Before it, a run with no terminal line tells us about
+	// the runner that wrote the log, not about the run — see the header.
+	var hangHorizon time.Time
+	for _, l := range lines {
+		if strings.Contains(l.text, endMarker) {
+			hangHorizon = l.at
+			rep.HangArmed = true
+			rep.HangHorizon = l.at.In(loc).Format(time.RFC3339)
+			break
+		}
+	}
+
+	// Start-line indices, dry runs included: a dry run bounds the run before it
+	// even though it is never itself judged.
+	var starts []int
+	for i, l := range lines {
+		if strings.Contains(l.text, startMarker) {
+			if _, ok := parseLogStamp(l.text); ok {
+				starts = append(starts, i)
+			}
+		}
+	}
+
+	for n, si := range starts {
+		f, ok := ParseFire(lines[si].text)
+		if !ok || f.DryRun {
+			continue
+		}
+		start := lines[si].at
+		end := len(lines)
+		bound := now
+		if n+1 < len(starts) {
+			end = starts[n+1]
+			bound = lines[end].at
+		}
+
+		// The run's own lines, and the first terminal one among them.
+		term := -1
+		for i := si + 1; i < end; i++ {
+			if isTerminal(lines[i].text) {
+				term = i
+				break
+			}
+		}
+
+		var elapsed time.Duration
+		var terminated bool
+		last := end - 1
+		switch {
+		case term >= 0:
+			terminated = true
+			elapsed = lines[term].at.Sub(start)
+			last = term
+		case !rep.HangArmed || start.Before(hangHorizon):
+			// Not judgeable by either arm: it wrote no terminal line, and this
+			// log does not establish that its runner ever would have. Counted
+			// and reported, never folded into the clear.
+			rep.HangUnjudged++
+			continue
+		default:
+			elapsed = bound.Sub(start)
+		}
+		if elapsed < hungAfter {
+			continue
+		}
+
+		// The stall inside the run, as opposed to its total length: the longest
+		// gap between consecutive lines it emitted. For a run that never
+		// terminated the trailing silence up to the bound is part of that.
+		var gap time.Duration
+		stalledAfter := lines[si].text
+		prev := si
+		for i := si + 1; i <= last && i < end; i++ {
+			if d := lines[i].at.Sub(lines[prev].at); d > gap {
+				gap, stalledAfter = d, lines[prev].text
+			}
+			prev = i
+		}
+		if !terminated {
+			if d := bound.Sub(lines[prev].at); d > gap {
+				gap, stalledAfter = d, lines[prev].text
+			}
+		}
+
+		run := HungRun{
+			Night:          start.In(loc).Format(stampDateLayout),
+			Start:          start.In(loc).Format(time.RFC3339),
+			Terminated:     terminated,
+			ElapsedSeconds: int(elapsed.Seconds()),
+			SilentSeconds:  int(gap.Seconds()),
+			StalledAfter:   stalledAfter,
+		}
+		if terminated {
+			run.End = lines[term].at.In(loc).Format(time.RFC3339)
+		}
+		rep.HungTotal++
+		rep.Hung = append(rep.Hung, run)
+	}
+
+	// Newest first, matching Missed, so the subject and the enumeration lead
+	// with the night a reader can still act on.
+	for i, j := 0, len(rep.Hung)-1; i < j; i, j = i+1, j-1 {
+		rep.Hung[i], rep.Hung[j] = rep.Hung[j], rep.Hung[i]
+	}
+	if len(rep.Hung) > maxEnumeratedNights {
+		rep.Hung = rep.Hung[:maxEnumeratedNights]
+		rep.HungTruncated = true
+	}
+}
+
+// HumanDuration renders a span the way the notices and the CLI want it: hours
+// and minutes, because "31h39m" is the fact a reader acts on and "114 000
+// seconds" is one they have to convert first.
+func HumanDuration(seconds int) string {
+	if seconds < 0 {
+		seconds = 0
+	}
+	h := seconds / 3600
+	m := (seconds % 3600) / 60
+	switch {
+	case h > 0:
+		return fmt.Sprintf("%dh%02dm", h, m)
+	case m > 0:
+		return fmt.Sprintf("%dm%02ds", m, seconds%60)
+	default:
+		return fmt.Sprintf("%ds", seconds)
+	}
+}
+
+// HungSummary is the one-line form of the hang half, or "" when nothing hung.
+//
+// It leads with the DURATION rather than the count, because one run of 31h39m
+// and one of 6h01m are the same count and not the same event, and the duration
+// is what tells a reader whether the fleet was down while it happened.
+func (r NoFireReport) HungSummary() string {
+	if r.HungTotal == 0 {
+		return ""
+	}
+	h := r.Hung[0]
+	tail := fmt.Sprintf("started %s and took %s to finish", h.Night, HumanDuration(h.ElapsedSeconds))
+	if !h.Terminated {
+		tail = fmt.Sprintf("started %s and has STILL not finished %s later", h.Night, HumanDuration(h.ElapsedSeconds))
+	}
+	if r.HungTotal == 1 {
+		return fmt.Sprintf("a nightly deploy HUNG — the run that %s", tail)
+	}
+	return fmt.Sprintf("%d nightly deploys HUNG — the most recent %s", r.HungTotal, tail)
+}
+
 // Summary is the one-line form used in subjects and CLI headers — the part that
 // travels. The count leads because it is the number a reader acts on.
+//
+// A hang is reported ahead of a silent night when both are present. Both are
+// real, but the hang is the one that has a fleet stopped underneath it right
+// now, and the subject is the part a skim-reader gets.
 func (r NoFireReport) Summary() string {
+	if s := r.HungSummary(); s != "" {
+		if r.MissedTotal > 0 {
+			return fmt.Sprintf("%s; and it DID NOT RUN at all on %d night(s)", s, r.MissedTotal)
+		}
+		return s
+	}
 	switch {
 	case !r.LogFound:
 		return "the nightly deploy has NEVER written a log line"

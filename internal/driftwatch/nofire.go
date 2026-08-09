@@ -183,14 +183,23 @@ func FileDeployLog(path string) DeployLogFunc {
 // consecutive silent night is new information and must not be swallowed by a
 // budget spent on the first four. A deploy that starts firing again clears the
 // condition entirely and nothing is sent.
+// A hang is part of the signature for the same reason: the night a run hung on
+// and how many have hung are both new information, and a hang appearing under a
+// budget already spent on silent nights must still mail. The hung run's LENGTH
+// is deliberately not in the key — an unterminated run gets longer on every
+// sample, and keying on it would mail a notice per sample forever.
 func noFireSignature(r staleness.NoFireReport) string {
 	if !r.LogFound {
 		return "log-missing"
 	}
-	if len(r.Missed) == 0 {
-		return ""
+	hung := ""
+	if r.HungTotal > 0 {
+		hung = fmt.Sprintf("hung:%s/%d", r.Hung[0].Night, r.HungTotal)
 	}
-	return fmt.Sprintf("%s/%d", r.Missed[0], r.MissedTotal)
+	if len(r.Missed) == 0 {
+		return hung
+	}
+	return fmt.Sprintf("%s%s/%d", hung, r.Missed[0], r.MissedTotal)
 }
 
 // sampleNoFire runs one did-not-run sample. Report-only: the only side effects
@@ -255,6 +264,19 @@ func (w *Watcher) sampleNoFire(now time.Time) {
 		"notice":         notice,
 		"max_notices":    w.noFireMaxNotices,
 		"mailed":         mail,
+		// Always emitted, including as 0. A consumer distinguishing "no hang"
+		// from "this pogod predates hang detection" needs the field present on
+		// every sample, and the absent-key form of that question is the one
+		// this lineage keeps getting wrong.
+		"hung_total": rep.HungTotal,
+		"hang_armed": rep.HangArmed,
+	}
+	if rep.HungTotal > 0 {
+		details["hung"] = rep.Hung
+		details["hung_after_seconds"] = rep.HungAfterSeconds
+	}
+	if rep.HangUnjudged > 0 {
+		details["hang_unjudged"] = rep.HangUnjudged
 	}
 	if rep.Horizon != "" {
 		details["horizon"] = rep.Horizon
@@ -289,6 +311,19 @@ func noFireSubject(r staleness.NoFireReport) string {
 	if !r.LogFound {
 		return fmt.Sprintf("nightly deploy has NEVER run — no log at %s", r.LogPath)
 	}
+	// The hang leads when there is one. mg-56ac's whole finding is that a run
+	// which starts and does not finish was scored on the good side, and a
+	// subject that opens with a missed-night count would put it back there — a
+	// hedge in paragraph three does not exist to a reader who skims the line.
+	if r.HungTotal > 0 {
+		h := r.Hung[0]
+		if !h.Terminated {
+			return fmt.Sprintf("nightly deploy HUNG on %s — started, and %s later has still not finished",
+				h.Night, staleness.HumanDuration(h.ElapsedSeconds))
+		}
+		return fmt.Sprintf("nightly deploy HUNG on %s — one run took %s to finish (a night is %s)",
+			h.Night, staleness.HumanDuration(h.ElapsedSeconds), staleness.HumanDuration(r.HungAfterSeconds))
+	}
 	if r.MissedTotal == 1 {
 		return fmt.Sprintf("nightly deploy DID NOT RUN on %s — the job never started", r.Missed[0])
 	}
@@ -306,10 +341,51 @@ func noFireBody(r staleness.NoFireReport, notice, maxNotices int, sched stalenes
 		fmt.Fprintf(&b,
 			"There is NO deploy log at %s. The nightly deploy has not written a single line on this host — not a failure, an absence.\n\n",
 			r.LogPath)
+	} else if r.HungTotal > 0 {
+		fmt.Fprintf(&b,
+			"A nightly deploy STARTED and did not finish inside %s. This is not a failed deploy and not a missing one: there is no exit code because the run never produced one, and until mg-56ac a night of this shape was counted as a night that ran.\n\n",
+			staleness.HumanDuration(r.HungAfterSeconds))
 	} else {
 		fmt.Fprintf(&b,
 			"The nightly deploy DID NOT START on %d night(s) that were due. This is not a failed deploy: there is no exit code, because there was no run.\n\n",
 			r.MissedTotal)
+	}
+
+	if r.HungTotal > 0 {
+		b.WriteString("HUNG RUNS\n")
+		for _, h := range r.Hung {
+			if h.Terminated {
+				fmt.Fprintf(&b, "  %s  started %s, finished %s — %s end to end\n",
+					h.Night, h.Start, h.End, staleness.HumanDuration(h.ElapsedSeconds))
+			} else {
+				fmt.Fprintf(&b, "  %s  started %s, NO terminal line — %s and counting\n",
+					h.Night, h.Start, staleness.HumanDuration(h.ElapsedSeconds))
+			}
+			if h.SilentSeconds > 0 {
+				fmt.Fprintf(&b, "        longest silence %s, immediately after this line:\n          %s\n",
+					staleness.HumanDuration(h.SilentSeconds), h.StalledAfter)
+			}
+		}
+		if r.HungTruncated {
+			fmt.Fprintf(&b, "  ... %d more (enumeration clipped; the count above is exact)\n", r.HungTotal-len(r.Hung))
+		}
+		b.WriteString(
+			"\nThe line printed above each silence is the LAST thing the run said before it\n" +
+				"stopped saying anything. It bounds where the run blocked; it does not name a\n" +
+				"cause, and nothing here has read the process state.\n\n" +
+				"WHAT A HUNG RUN COSTS, which a missed one does not: the run holds the deploy\n" +
+				"lock for its whole length, and if it hung after quiescing the fleet then the\n" +
+				"fleet is still quiesced. On 2026-08-08 that was 33 hours of no crew, and every\n" +
+				"exit was clean and `requested`, so restart_on_crash correctly did not fire.\n" +
+				"Check what is actually running before assuming only the deploy is affected:\n" +
+				"  curl -s http://127.0.0.1:10000/version\n" +
+				"  pogo agent list\n\n")
+	}
+
+	if r.HangUnjudged > 0 {
+		fmt.Fprintf(&b,
+			"NOT JUDGED FOR HANGING: %d run(s). They wrote no terminal line, and this log does not establish that the runner of their day ever wrote one — before the first `pogo-deploy: end` line, a missing terminal line is a fact about the runner's version, not about the run. They are excluded from the count above and from the all-clear.\n\n",
+			r.HangUnjudged)
 	}
 
 	b.WriteString("SILENT NIGHTS\n")
@@ -320,7 +396,11 @@ func noFireBody(r staleness.NoFireReport, notice, maxNotices int, sched stalenes
 		fmt.Fprintf(&b, "  ... %d more (enumeration clipped; the count above is exact)\n", r.MissedTotal-len(r.Missed))
 	}
 	if len(r.Missed) == 0 {
-		b.WriteString("  (none enumerated — see the log-absence above)\n")
+		if r.LogFound {
+			b.WriteString("  (none — every night this log covers has a start line; the finding above is a run that started and did not finish)\n")
+		} else {
+			b.WriteString("  (none enumerated — see the log-absence above)\n")
+		}
 	}
 	b.WriteString("\n")
 
@@ -354,7 +434,8 @@ func noFireBody(r staleness.NoFireReport, notice, maxNotices int, sched stalenes
 
 	b.WriteString(
 		"WHY NOTHING ELSE TOLD YOU\n" +
-			"Every other deploy alarm is downstream of the job RUNNING: the RED fires on a nonzero rc, and a job that never starts has no rc. It writes no log line, sets no stamp, and sends no mail, so a silent night is indistinguishable from a healthy one — health is also silence. On 2026-08-01..08-04 that happened four nights in a row and nothing noticed. This check reads the absence directly, against the schedule, so it needs no run to have happened.\n\n")
+			"Every other deploy alarm is downstream of the job RUNNING: the RED fires on a nonzero rc, and a job that never starts has no rc. It writes no log line, sets no stamp, and sends no mail, so a silent night is indistinguishable from a healthy one — health is also silence. On 2026-08-01..08-04 that happened four nights in a row and nothing noticed. This check reads the absence directly, against the schedule, so it needs no run to have happened.\n\n" +
+			"A HUNG run has no rc either, and until mg-56ac this check counted it as a night that RAN. On 2026-08-08 the job started on time, blocked for 31h39m, and finished the next morning; the next sample reported five missed nights and 08-08 was not one of them. A run is now judged on whether it STARTED AND FINISHED, so silence after a start is a finding rather than the good branch.\n\n")
 
 	b.WriteString(
 		"WHY, IS NOT DIAGNOSED HERE\n" +
