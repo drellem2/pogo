@@ -9,6 +9,18 @@
   check-staleness` prints it. New `deploy_nightly_deadline` event and `hung*`
   fields on `deploy_nofire`.
 
+  **MERGING THIS DOES NOT MAKE THE RUNNER FIX LIVE, and a reader who sees this
+  commit on main must not conclude the bound is in effect.** launchd invokes
+  `/Users/daniel/.pogo/bin/pogo-deploy.sh` (`ProgramArguments` in
+  `com.pogo.deploy.plist`), which is a STATIC COPY written by `pogo service
+  install-deploy` — on this box last written 2026-08-07. **The nightly redeploy
+  does not refresh it**, so the git bounds, the whole-run deadline and the
+  terminal line are inert until somebody runs `pogo service install-deploy`
+  explicitly and confirms the file's mtime moved. Only the pogod-side witness
+  (`internal/staleness`, `internal/driftwatch`) goes live with an ordinary
+  rebuild. This is the worst-shaped case of merged-but-not-live, because the
+  artifact that needs refreshing is the one that performs refreshes.
+
   **The record, from `~/Library/Logs/pogo/pogo-deploy.log`.** The 2026-08-08 fire
   landed on time, wrote nine lines in one second, and then wrote nothing for
   31 hours 39 minutes:
