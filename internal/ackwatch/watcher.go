@@ -22,6 +22,25 @@ const (
 	// DefaultEscalateAfter is how long a single finding may persist, unbroken,
 	// before the notice ALSO goes to EscalateTo.
 	DefaultEscalateAfter = 24 * time.Hour
+	// DefaultBlackoutRenotifyAfter is the renotify window that applies while a
+	// FLEET BLACKOUT is outstanding, in place of DefaultRenotifyAfter.
+	//
+	// 6 hours is a defensible quiet period for "one schedule is lagging its
+	// peers": the fleet has been told, and telling it again every half hour
+	// achieves nothing but training the recipient to filter the sender. It is the
+	// wrong number for "nothing in the fleet has completed a fire", and mg-e2a4
+	// is the measurement of how wrong: the 2026-08-09 outage ran 4.5 hours,
+	// began and ended inside ONE renotify shadow, and would have produced a
+	// single notice for an arbitrarily severe event — with a second identical
+	// outage 30 minutes later suppressed entirely.
+	//
+	// So it is set to the sampling interval: while the fleet is dead, every
+	// sample mails. Repetition is not noise here, it IS the signal — the notice
+	// leaves pogod for an out-of-process reader with no acknowledgement path
+	// back, so "was the last one seen?" is a question nothing on this side can
+	// answer, and the honest answer to an unanswerable question is to say it
+	// again while it is still true. The all-clear is the notice stopping.
+	DefaultBlackoutRenotifyAfter = 30 * time.Minute
 )
 
 const (
@@ -77,12 +96,19 @@ type Options struct {
 	// RenotifyAfter is how long an unchanged finding set stays quiet. Zero means
 	// DefaultRenotifyAfter.
 	RenotifyAfter time.Duration
+	// BlackoutRenotifyAfter replaces RenotifyAfter while a FLEET BLACKOUT is
+	// outstanding. Zero means DefaultBlackoutRenotifyAfter; see there for why the
+	// two windows cannot be one number.
+	BlackoutRenotifyAfter time.Duration
 	// NotifyTo is the mailbox findings go to. Empty means DefaultNotifyTo.
 	NotifyTo string
 	// EscalateAfter is how long one finding may persist before the notice ALSO
-	// goes to EscalateTo. Zero means DefaultEscalateAfter; NEGATIVE disables
-	// escalation. Zero and negative must differ, or a config that omits the key
-	// would silently turn escalation off.
+	// goes to EscalateTo. Zero means DefaultEscalateAfter; NEGATIVE disables the
+	// AGE-based escalation only — a FLEET BLACKOUT still escalates on its first
+	// sample, because that one is not a matter of patience (see
+	// Watcher.sample, and deafwatch.escalateNow for the same rule). Zero and
+	// negative must differ, or a config that omits the key would silently turn
+	// escalation off.
 	EscalateAfter time.Duration
 	// EscalateTo receives escalated notices. Empty means DefaultEscalateTo.
 	EscalateTo string
@@ -114,6 +140,20 @@ type Options struct {
 // fingerprinting the numbers would mail every single interval and get the
 // sender filtered — which is how a detector becomes an alert nobody consumes.
 //
+// # Notification policy, second exception: the blackout
+//
+// A FLEET BLACKOUT is routed differently on both axes, and neither difference is
+// a tuning preference:
+//
+//   - It goes to EscalateTo on its FIRST sample, structurally, never waiting on
+//     EscalateAfter. NotifyTo is an agent, and the subject of the finding is
+//     that no agent is completing work — so the ordinary recipient is inside the
+//     failure being reported. On 2026-08-09 that produced exactly one mail about
+//     a dead fleet, addressed to a coordinator whose own mail-check carried the
+//     same 27 unacked fires (mg-e2a4).
+//   - It renotifies on BlackoutRenotifyAfter rather than RenotifyAfter, which is
+//     shorter than any outage worth knowing about rather than longer.
+//
 // # Report-only
 //
 // The watcher mails and emits. It never nudges, restarts, or unregisters
@@ -121,17 +161,18 @@ type Options struct {
 // followed by human judgement about a doctor restart; automating that off a
 // statistical signal would be acting on a suspicion with a blunt instrument.
 type Watcher struct {
-	enabled       bool
-	interval      time.Duration
-	renotifyAfter time.Duration
-	escalateAfter time.Duration
-	notifyTo      string
-	escalateTo    string
-	startedAt     time.Time
-	params        Params
-	source        SourceFunc
-	mail          MailFunc
-	emit          Emitter
+	enabled          bool
+	interval         time.Duration
+	renotifyAfter    time.Duration
+	blackoutRenotify time.Duration
+	escalateAfter    time.Duration
+	notifyTo         string
+	escalateTo       string
+	startedAt        time.Time
+	params           Params
+	source           SourceFunc
+	mail             MailFunc
+	emit             Emitter
 
 	mu         sync.Mutex
 	lastRun    time.Time
@@ -155,6 +196,10 @@ func New(opts Options) *Watcher {
 	if renotify <= 0 {
 		renotify = DefaultRenotifyAfter
 	}
+	blackoutRenotify := opts.BlackoutRenotifyAfter
+	if blackoutRenotify <= 0 {
+		blackoutRenotify = DefaultBlackoutRenotifyAfter
+	}
 	escalate := opts.EscalateAfter
 	if escalate == 0 {
 		escalate = DefaultEscalateAfter
@@ -169,7 +214,8 @@ func New(opts Options) *Watcher {
 	}
 	return &Watcher{
 		enabled: opts.Enabled, interval: interval, renotifyAfter: renotify,
-		escalateAfter: escalate, notifyTo: notifyTo, escalateTo: escalateTo,
+		blackoutRenotify: blackoutRenotify,
+		escalateAfter:    escalate, notifyTo: notifyTo, escalateTo: escalateTo,
 		startedAt: opts.StartedAt, params: opts.Params.withDefaults(),
 		source: opts.Source, mail: opts.Mail, emit: emit,
 	}
@@ -260,24 +306,33 @@ func (w *Watcher) sample(now time.Time) {
 		// emit would go quiet during exactly the long calm stretch in which a
 		// reader most needs to know the control is still alive — reproducing the
 		// bug one level up.
-		w.emit(events.Event{
-			EventType: "ack_watch_clear",
-			Agent:     "pogod",
-			Details: map[string]any{
-				"scanned":               rep.Scanned,
-				"eligible":              rep.Eligible,
-				"skipped_fresh":         rep.SkippedFresh,
-				"skipped_few_fires":     rep.SkippedFewFires,
-				"skipped_not_recurring": rep.SkippedNotRecurring,
-				"skipped_no_peers":      rep.SkippedNoPeers,
-			},
-		})
+		clear := map[string]any{
+			"scanned":               rep.Scanned,
+			"eligible":              rep.Eligible,
+			"skipped_fresh":         rep.SkippedFresh,
+			"skipped_few_fires":     rep.SkippedFewFires,
+			"skipped_not_recurring": rep.SkippedNotRecurring,
+			"skipped_no_peers":      rep.SkippedNoPeers,
+		}
+		// Which ARMS ran, not just how many samples were judged. A clear from the
+		// peer arm alone is the reading a dead fleet produces, so a clear that does
+		// not say whether the absolute arm looked is the same ambiguity one level
+		// in (mg-e2a4).
+		clear["blackout_judged"] = rep.BlackoutBlind == ""
+		if rep.BlackoutBlind != "" {
+			clear["blackout_blind"] = rep.BlackoutBlind
+		}
+		w.emit(events.Event{EventType: "ack_watch_clear", Agent: "pogod", Details: clear})
 		return
 	}
 
 	oldest := w.trackAges(rep, now)
+	blackout := rep.Blackout != nil
 
-	if !w.shouldMail(rep.Fingerprint(), now) {
+	// A blackout uses its own renotify window, and it must be consulted BEFORE
+	// the throttle rather than after: reusing the 6-hour window here is the
+	// defect, not an implementation detail of it.
+	if !w.shouldMail(rep.Fingerprint(), now, blackout) {
 		return
 	}
 
@@ -286,16 +341,12 @@ func (w *Watcher) sample(now time.Time) {
 		"Re-check on demand with:\n  pogo check-acks\n" +
 		"Compare rows yourself with:\n  pogo schedule list\n"
 
-	stalled := w.escalateAfter > 0 && !oldest.IsZero() && now.Sub(oldest) >= w.escalateAfter
+	aged := w.escalateAfter > 0 && !oldest.IsZero() && now.Sub(oldest) >= w.escalateAfter
+	escalate := aged || blackout
 	recipients := []string{w.notifyTo}
-	if stalled && w.escalateTo != w.notifyTo {
+	if escalate && w.escalateTo != w.notifyTo {
 		recipients = append(recipients, w.escalateTo)
-		body = fmt.Sprintf(
-			"ESCALATED: a finding below has been reported to %s for %s without clearing.\n"+
-				"A crew agent completing a fraction of its fires is the fleet's to fix, but a\n"+
-				"fleet that has not fixed one in %s is not — and the coordinator is itself a\n"+
-				"crew agent that can have this exact defect (mg-d385).\n\n",
-			w.notifyTo, now.Sub(oldest).Round(time.Hour), now.Sub(oldest).Round(time.Hour)) + body
+		body = w.escalationPreamble(rep, oldest, now, aged, blackout) + body
 	}
 
 	subject := "ack-watch: " + rep.MailSubject()
@@ -305,17 +356,114 @@ func (w *Watcher) sample(now time.Time) {
 		"scanned":       rep.Scanned,
 		"eligible":      rep.Eligible,
 		"notified":      strings.Join(recipients, ","),
-		"escalated":     stalled,
+		"escalated":     escalate,
+		"escalate_to":   w.escalateTo,
+		"blackout":      blackout,
 		"schedules":     findingIDs(rep),
 	}
+	if rep.BlackoutBlind != "" {
+		details["blackout_blind"] = rep.BlackoutBlind
+	}
+	if blackout {
+		bo := rep.Blackout
+		details["blackout_delivered"] = bo.Delivered
+		details["blackout_completed"] = bo.Completed
+		details["blackout_rate"] = bo.Rate
+		details["blackout_window"] = bo.Window
+		details["blackout_agents"] = bo.StalledAgents
+		// The remedy is an artifact of the same kind as the defect: an alarm
+		// about the fleet being dead, addressed to a member of the fleet. Both
+		// recipients are checked against the stalled population and the answer is
+		// recorded either way — a bare `notified` field is what let 16:12:59 read
+		// as a delivered alarm.
+		details["notify_to_stalled"] = inPopulation(w.notifyTo, bo.StalledAgents)
+		details["escalate_to_stalled"] = inPopulation(w.escalateTo, bo.StalledAgents)
+	}
+	failures := 0
 	for _, to := range recipients {
 		if err := w.mail(to, mailFrom, subject, body); err != nil {
 			// The deficit was detected but could not be reported. Record it: a
 			// notice that reaches nobody is this ticket's bug, one level up.
 			details["mail_error_"+to] = err.Error()
+			failures++
 		}
 	}
 	w.emit(events.Event{EventType: "ack_watch_fired", Agent: "pogod", Details: details})
+
+	// A blackout notice that reached nobody gets its own event type, because
+	// `ack_watch_fired` with a mail_error_* key buried in details is not
+	// greppable as "the fleet was dead and the alarm did not leave the box".
+	if blackout && failures == len(recipients) {
+		w.emit(events.Event{
+			EventType: EventBlackoutUnreported,
+			Agent:     "pogod",
+			Details: map[string]any{
+				"recipients": strings.Join(recipients, ","),
+				"delivered":  rep.Blackout.Delivered,
+				"completed":  rep.Blackout.Completed,
+				"window":     rep.Blackout.Window,
+			},
+		})
+	}
+}
+
+// EventBlackoutUnreported is emitted when every recipient of a FLEET BLACKOUT
+// notice refused it. It is the one state worse than the bug this arm fixes: the
+// fleet is dead, pogod noticed, and the notice did not leave the machine.
+const EventBlackoutUnreported = "ack_watch_blackout_unreported"
+
+// escalationPreamble explains why EscalateTo is on this mail. Two reasons, and
+// they are not interchangeable: age means the fleet had time and did not fix it,
+// a blackout means the fleet cannot be the one to fix it.
+func (w *Watcher) escalationPreamble(rep Report, oldest, now time.Time, aged, blackout bool) string {
+	if blackout {
+		bo := rep.Blackout
+		var b strings.Builder
+		fmt.Fprintf(&b,
+			"ESCALATED IMMEDIATELY, NOT ON A TIMER: the fleet is not completing work, and\n"+
+				"%s — the mailbox this alert normally goes to — is an agent inside that fleet.\n"+
+				"A detector inside the job cannot report the job not running, so this notice is\n"+
+				"also addressed to %s, which is read out of process (mg-e2a4).\n\n",
+			w.notifyTo, w.escalateTo)
+		if inPopulation(w.notifyTo, bo.StalledAgents) {
+			fmt.Fprintf(&b,
+				"CONFIRMED: %s is one of the stalled agents listed below. Do not wait for it to\n"+
+					"act on this.\n\n", w.notifyTo)
+		}
+		if inPopulation(w.escalateTo, bo.StalledAgents) {
+			fmt.Fprintf(&b,
+				"WARNING: %s is ALSO one of the stalled agents below, so this escalation has no\n"+
+					"recipient outside the outage. Set `[agents] escalation_box` to a mailbox that\n"+
+					"no agent owns — see docs/CONFIGURATION.md.\n\n", w.escalateTo)
+		}
+		if aged && !oldest.IsZero() {
+			fmt.Fprintf(&b, "A finding here has also been outstanding for %s.\n\n",
+				now.Sub(oldest).Round(time.Hour))
+		}
+		return b.String()
+	}
+	if aged && !oldest.IsZero() {
+		age := now.Sub(oldest).Round(time.Hour)
+		return fmt.Sprintf(
+			"ESCALATED: a finding below has been reported to %s for %s without clearing.\n"+
+				"A crew agent completing a fraction of its fires is the fleet's to fix, but a\n"+
+				"fleet that has not fixed one in %s is not — and the coordinator is itself a\n"+
+				"crew agent that can have this exact defect (mg-d385).\n\n",
+			w.notifyTo, age, age)
+	}
+	return ""
+}
+
+// inPopulation reports whether a mailbox name is one of the stalled agents. The
+// comparison is on the agent name because that is what a mail-check schedule is
+// registered under, and it is what `notified` was silently indifferent to.
+func inPopulation(box string, agents []string) bool {
+	for _, a := range agents {
+		if a == box {
+			return true
+		}
+	}
+	return false
 }
 
 // applyStartDisruption raises the snapshot's disruption time to the hosting
@@ -365,11 +513,18 @@ func (w *Watcher) trackAges(rep Report, now time.Time) time.Time {
 	return oldest
 }
 
-// shouldMail applies the change-or-periodic policy described on Watcher.
-func (w *Watcher) shouldMail(print string, now time.Time) bool {
+// shouldMail applies the change-or-periodic policy described on Watcher. The
+// periodic half uses the BLACKOUT window while a blackout is outstanding: the
+// two conditions have different half-lives, and collapsing them is what let a
+// 4.5-hour dead fleet fit inside one 6-hour silence (mg-e2a4).
+func (w *Watcher) shouldMail(print string, now time.Time, blackout bool) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if print != w.lastPrint || now.Sub(w.lastMailed) >= w.renotifyAfter {
+	renotify := w.renotifyAfter
+	if blackout && w.blackoutRenotify < renotify {
+		renotify = w.blackoutRenotify
+	}
+	if print != w.lastPrint || now.Sub(w.lastMailed) >= renotify {
 		w.lastPrint = print
 		w.lastMailed = now
 		return true
@@ -387,6 +542,9 @@ func findingIDs(rep Report) []string {
 	}
 	for _, f := range rep.Fleet {
 		out = append(out, "cohort:"+f.Kind+"/"+f.Cadence)
+	}
+	if rep.Blackout != nil {
+		out = append(out, "fleet-blackout")
 	}
 	return out
 }

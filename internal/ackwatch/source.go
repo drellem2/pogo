@@ -1,6 +1,7 @@
 package ackwatch
 
 import (
+	"os"
 	"sort"
 	"time"
 
@@ -90,6 +91,78 @@ func detailString(details map[string]any, key string) string {
 	}
 	s, _ := details[key].(string)
 	return s
+}
+
+// RecentFires measures the fleet's fire traffic over the trailing window ending
+// at now, for the ABSOLUTE (blackout) arm. It never returns an error: a window
+// it could not read comes back as a Recent carrying Err, because a failed
+// measurement that looked like a measurement of zero would be a false blackout,
+// and one that looked like a clean scan would be the silence this package
+// exists to end. Detect renders either as Report.BlackoutBlind.
+//
+// Why events rather than the persisted counters, given the counters are already
+// in hand: they are lifetime totals and they are zeroed by re-registration,
+// which the nightly redeploy guarantees. See the package header, "Why the
+// blackout arm reads EVENTS rather than the counters".
+func RecentFires(logPath string, now time.Time, window time.Duration) Recent {
+	if window <= 0 {
+		window = DefaultBlackoutWindow
+	}
+	out := Recent{Window: window}
+	// A log that is not there has to be named as blindness HERE, because the
+	// events layer deliberately treats a nonexistent path as "no events yet"
+	// rather than as an error (see events.ScanFile). Left to the deliveries
+	// floor, an absent log would report itself as "only 0 fires delivered",
+	// which reads as a quiet fleet rather than as an arm that cannot look.
+	if _, statErr := os.Stat(logPath); statErr != nil {
+		out.Err = "scheduler event log unreadable: " + statErr.Error()
+		return out
+	}
+	evs, err := ReadFireTimeline(logPath, now.Add(-window), now)
+	if err != nil {
+		out.Err = err.Error()
+		return out
+	}
+	schedules := map[string]bool{}
+	agents := map[string]bool{}
+	perAgentSchedules := map[string]map[string]bool{}
+	byAgent := map[string]AgentFires{}
+	for _, ev := range evs {
+		f := byAgent[ev.Agent]
+		switch ev.Kind {
+		case FireDelivered:
+			out.Delivered++
+			schedules[ev.Agent+"\x00"+ev.ID] = true
+			if ev.Agent != "" {
+				agents[ev.Agent] = true
+			}
+			f.Delivered++
+			if perAgentSchedules[ev.Agent] == nil {
+				perAgentSchedules[ev.Agent] = map[string]bool{}
+			}
+			perAgentSchedules[ev.Agent][ev.ID] = true
+		case FireCompleted:
+			out.Completed++
+			f.Completed++
+			if ev.At.After(out.LastCompletedAt) {
+				out.LastCompletedAt = ev.At
+			}
+		}
+		byAgent[ev.Agent] = f
+	}
+	for a, ids := range perAgentSchedules {
+		f := byAgent[a]
+		f.Schedules = len(ids)
+		byAgent[a] = f
+	}
+	out.ByAgent = byAgent
+	out.Schedules = len(schedules)
+	out.Agents = make([]string, 0, len(agents))
+	for a := range agents {
+		out.Agents = append(out.Agents, a)
+	}
+	sort.Strings(out.Agents)
+	return out
 }
 
 // DisruptionWindow is how far back LastDisruption looks for a suppressing

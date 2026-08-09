@@ -1620,22 +1620,115 @@ nudges, restarts, nor unregisters anything.
   tracked count for that case.
 - **Routing.** Findings go to `notify_to` (`mayor`): the remedy is
   `pogo nudge <agent> --immediate` or a doctor restart, which is coordination
-  work. A **standing** finding also copies `human` after `escalate_after` (24h,
-  shorter than gh-teardown's 72h) — the coordinator is itself a crew agent and
-  can have the exact defect being reported (mg-d385, the same night), so an
-  alert routed only to the patient reaches nobody.
+  work. A **standing** finding also copies the escalation box after
+  `escalate_after` (24h, shorter than gh-teardown's 72h) — the coordinator is
+  itself a crew agent and can have the exact defect being reported (mg-d385, the
+  same night), so an alert routed only to the patient reaches nobody.
 - **Notification policy.** Findings are fingerprinted by **identity**, not by
   rate: a ratio drifting from 36% to 34% is the same finding and must not
   re-mail. A changed set mails at once; an unchanged set waits `renotify_after`.
+
+### The second arm: FLEET BLACKOUT (mg-e2a4)
+
+Everything above is **peer-relative**, and a peer-relative test keys on
+**dispersion**. The worse an outage is the more *uniform* it is, so that arm is
+weakest exactly where the failure is worst: when every schedule degrades in
+lockstep the median falls with the members and no gap clears `min_gap`.
+
+Measured, 2026-08-09. Every agent stopped completing turns at ~12:50Z and
+resumed at ~17:20Z (`ENOTFOUND` on the model API). `pogo schedule list` showed
+every mail-check carrying the **same** `⚠ 27 unacked` — 27 × 10 min = 4.5 hours.
+Over 13:20–17:20 the events log holds 251 `scheduler_fire_delivered` against
+**3** `scheduler_fire_completed`. And every `ack_watch_fired` that day, including
+the one at 16:12:59 in the middle of it, reported `deficit_count: 0`. A
+100%-dead fleet produced zero per-schedule findings, because there was no
+outlier to find.
+
+So there is a second arm that keys on the **absolute** completion rate:
+
+- **What it measures.** Fires delivered vs. fires completed across the fleet over
+  a trailing **3 hours**, read from **events**, not the counters. No median, no
+  peer set, nothing compared to anything — it gets *more* confident as the failure
+  becomes more uniform, the exact inverse of the peer arm. Fires when the windowed
+  rate is ≤ 10% with ≥ 24 deliveries across ≥ 3 schedules and ≥ 3 agents.
+- **Two false-positive paths, both measured and both gated.** "Fires delivered,
+  nothing completed" describes three situations and only one is a fault.
+  1. *The fleet is not there.* Between 00:00 and 09:30Z on 2026-08-09 the
+     scheduler delivered ~30 fires an hour and completed **zero**, every hour, all
+     night — no crew agent was running. Ungated, this mails a person at 4am
+     nightly, which is strictly worse than the silence it replaced. So the arm
+     judges **running** agents only, and only those up for the *whole* window: a
+     spawn 40 minutes ago cannot speak for the last three hours, and that produced
+     a measured false positive at 10:00Z right after the crew came up.
+  2. *The fleet is working in long turns.* A fire is only ackable at the end of an
+     agent turn, so completions arrive in bursts — the same day had a **two-hour**
+     stretch, all six agents up and working, with 84 fires delivered and none
+     completed.
+
+  The window was swept against that day's real log to pick the shortest value
+  with no false positive: 1h → 9 FPs, 2h → 4, 2h30m → 1, **3h → 0**, 4h → 0. With
+  both gates the arm fired on 4 samples across the whole day, all inside the
+  outage.
+- **The cost is stated, not hidden.** Detection lands about **three hours** into
+  an outage, not thirty minutes, and an outage shorter than roughly three hours
+  is not caught by this arm at all — no completion-based measurement can separate
+  it from healthy bursty acking any sooner. Three hours is still the difference
+  between a notice and none: on the day this was filed nothing reached a person
+  for 4.5 hours and the human found out because it was his own wifi. Do not
+  shorten the window without re-running the sweep on data containing a real
+  outage.
+- **Why events.** The counters are lifetime totals, so a low cohort median cannot
+  tell "dead right now" from "carried a bad ratio for days"; and they are zeroed
+  by re-registration, after which `min_fires` blinds the counter arms for over
+  three hours. An outage starting just after the nightly redeploy is invisible to
+  anything reading the table.
+- **Routing is structural, not a timer.** A blackout copies the escalation box on
+  its **first** sample, ignoring `escalate_after` entirely — including a negative
+  value, which disables the *age*-based escalation only. `notify_to` is an agent,
+  and the subject of the finding is that no agent is completing work: on
+  2026-08-09 the one notice a dead fleet produced was addressed to a coordinator
+  whose own mail-check carried the same 27 unacked fires. The asymmetry that makes
+  the out-of-band path work is that **pogod survived** — it kept sampling and
+  writing while every agent it hosts was inert, and the escalation box is polled
+  out of process, so no fleet agent, agent turn, or ack sits on that path. Set
+  `[agents] escalation_box` if a relay agent owns `human`.
+- **The recipient is checked against the population.** `ack_watch_fired` carries
+  `notify_to_stalled` and `escalate_to_stalled`. If the escalation box is itself
+  one of the stalled agents the mail says so in as many words, because that state
+  — an alarm with no recipient outside the outage — is this defect one level in.
+  A blackout notice every recipient refused emits
+  `ack_watch_blackout_unreported`.
+- **It renotifies on its own clock.** `blackout_renotify` (30m, the sampling
+  interval) replaces `renotify_after` while a blackout stands. 6h is right for
+  "one schedule lags its peers" and wrong for "nothing has completed a fire": the
+  4.5-hour outage began and ended inside one 6-hour shadow, and a second identical
+  outage 30 minutes later would have been suppressed entirely. Repetition is the
+  signal here — the notice leaves for an out-of-process reader with no
+  acknowledgement path back, and the all-clear is the notice stopping.
+- **Blind is not calm.** A window that could not be measured — no measurement
+  supplied, no running-agent set supplied, unreadable events log, too few
+  deliveries, too few agents old enough to judge — is reported as
+  `blackout_blind` with a reason, on both the fired and the `ack_watch_clear`
+  paths (`blackout_judged`), and rendered in `pogo check-acks`. Zero completions
+  is what a blackout *looks* like, so a failed read must never arrive looking
+  like a measurement of zero.
+- **The one gate it keeps** is the disruption suppression: after a `system_wake`
+  or a restart the traffic describes a regime that has just ended. The cost is
+  bounded at 30 minutes, and unlike `min_fires` it does not scale with the
+  cadence.
 
 ```toml
 [ack_watch]
 enabled = true             # default true; inert when no cohort can be formed
 interval = "30m"           # coarse sample cadence (default 30m)
 renotify_after = "6h"      # unchanged findings re-mail after this (default 6h)
+blackout_renotify = "30m"  # renotify window while a FLEET BLACKOUT stands
+                           # (default 30m — must be shorter than renotify_after)
 notify_to = "mayor"        # mailbox findings go to (default mayor)
-escalate_after = "24h"     # one standing finding also copies `human` after this
-                           # (default 24h; negative disables, zero means default)
+escalate_after = "24h"     # one standing finding also copies the escalation box
+                           # after this (default 24h; negative disables the AGE
+                           # escalation, zero means default). A FLEET BLACKOUT
+                           # escalates on its first sample regardless.
 ```
 
 Exit status of `pogo check-acks` is 0 when nothing is actionable and 1 when any
@@ -1646,10 +1739,15 @@ A default `pogo nudge` cannot reach the agent this typically finds: it waits for
 `pogo nudge <agent> --immediate`.
 
 The detector's statistical knobs (`min_fires`, `min_peers`, `scale_band`,
-`min_gap`, `floor`, `settle_after`) are compiled-in defaults in
-`ackwatch.Params` rather than config keys — they are tuned against a specific
-observation and a wrong value produces either a false-positive storm or silence,
-neither of which should be one line of TOML away.
+`min_gap`, `floor`, `settle_after`, and the blackout arm's `blackout_window`,
+`blackout_rate`, `blackout_min_deliveries`, `blackout_min_schedules`,
+`blackout_min_agents`) are
+compiled-in defaults in `ackwatch.Params` rather than config keys — they are
+tuned against a specific observation and a wrong value produces either a
+false-positive storm or silence, neither of which should be one line of TOML
+away. Only the two routing/cadence knobs above are configurable, because "which
+box does a person actually read" and "how often may this shout" are facts about
+the deployment.
 
 Source of truth: `internal/ackwatch/`.
 

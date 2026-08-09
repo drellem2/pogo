@@ -2033,24 +2033,51 @@ Flags:
 			Enabled: true,
 			Source: func(now time.Time) (ackwatch.Snapshot, error) {
 				at, reason := ackwatch.LastDisruption(schedulerLog, now)
+				// The windowed fire traffic is what the ABSOLUTE (blackout) arm
+				// judges, and it comes from events rather than the counters
+				// because a re-registration zeroes those and the nightly redeploy
+				// guarantees one (mg-e2a4). RecentFires never errors — an
+				// unreadable window arrives as Recent.Err and is reported as a
+				// blind arm, so it cannot be mistaken for a calm one.
+				recent := ackwatch.RecentFires(schedulerLog, now, ackwatch.DefaultBlackoutWindow)
+				// The liveness gate. "Fires delivered, nothing completed" is also
+				// what an EMPTY fleet looks like — every night on this box between
+				// midnight and 09:30 — so the blackout arm judges running agents
+				// only, and reports itself blind rather than guessing when this
+				// set is unavailable.
+				// Start times matter as much as status: an agent is judged only
+				// once it has been up for the whole window, or the window reaches
+				// back into a period when it did not exist while the scheduler was
+				// delivering to its schedule the whole time.
+				runningSince := map[string]time.Time{}
+				if agentRegistry != nil {
+					for _, a := range agentRegistry.List() {
+						if a.Status == agent.StatusRunning {
+							runningSince[a.Name] = a.StartTime
+						}
+					}
+				}
 				return ackwatch.Snapshot{
 					Now:              now,
 					Samples:          ackwatch.SampleEntries(sched.List(""), now),
 					LastDisruption:   at,
 					DisruptionReason: reason,
+					Recent:           &recent,
+					RunningSince:     runningSince,
 				}, nil
 			},
-			Mail:          client.SendMGMail,
-			Interval:      cfg.AckWatch.Interval,
-			RenotifyAfter: cfg.AckWatch.RenotifyAfter,
-			NotifyTo:      cfg.AckWatch.NotifyTo,
-			EscalateAfter: cfg.AckWatch.EscalateAfter,
-			EscalateTo:    escalationBox,
-			StartedAt:     time.Now(),
+			Mail:                  client.SendMGMail,
+			Interval:              cfg.AckWatch.Interval,
+			RenotifyAfter:         cfg.AckWatch.RenotifyAfter,
+			BlackoutRenotifyAfter: cfg.AckWatch.BlackoutRenotify,
+			NotifyTo:              cfg.AckWatch.NotifyTo,
+			EscalateAfter:         cfg.AckWatch.EscalateAfter,
+			EscalateTo:            escalationBox,
+			StartedAt:             time.Now(),
 		})
-		log.Printf("pogod: ack-watch enabled (interval=%s renotify=%s notify_to=%s escalate_after=%s, report-only)",
-			cfg.AckWatch.Interval, cfg.AckWatch.RenotifyAfter,
-			cfg.AckWatch.NotifyTo, cfg.AckWatch.EscalateAfter)
+		log.Printf("pogod: ack-watch enabled (interval=%s renotify=%s blackout_renotify=%s notify_to=%s escalate_to=%s escalate_after=%s, report-only)",
+			cfg.AckWatch.Interval, cfg.AckWatch.RenotifyAfter, cfg.AckWatch.BlackoutRenotify,
+			cfg.AckWatch.NotifyTo, escalationBox, cfg.AckWatch.EscalateAfter)
 		conditions.Clear(rowA3AckWatchNotArmed, time.Now())
 	} else if cfg.AckWatch.Enabled {
 		log.Printf("pogod: ack-watch NOT armed — the scheduler did not load, so there are no completion counters to read")

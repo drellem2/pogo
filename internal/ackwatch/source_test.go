@@ -143,3 +143,112 @@ func TestLastDisruptionOnEmptyLog(t *testing.T) {
 		t.Errorf("empty log produced a suppression at %s", at)
 	}
 }
+
+// fireEvent builds one scheduler fire event as the scheduler writes it: the
+// recipient under `to`, the schedule under `schedule_id`.
+func fireEvent(typ, agent, id string, at time.Time) events.Event {
+	return events.Event{
+		EventType: typ, Agent: "pogod",
+		Timestamp: at.Format(time.RFC3339Nano),
+		Details:   map[string]any{"to": agent, "schedule_id": "mail-check-" + id},
+	}
+}
+
+// RecentFires is the ABSOLUTE arm's only input, and it reads events rather than
+// the counters for the reason in the package header: a re-registration zeroes the
+// counters and the nightly redeploy guarantees one.
+func TestRecentFiresCountsTheWindowedTraffic(t *testing.T) {
+	var evs []events.Event
+	// Six schedules delivered to over the last half hour, nothing completed —
+	// the 2026-08-09 shape, in miniature.
+	// Offset off `base` because the window is half-open — [now-window, now) — so a
+	// fire stamped exactly at `now` belongs to the next sample, not this one.
+	for i := 0; i < 5; i++ {
+		at := base.Add(-time.Duration(i*10+1) * time.Minute)
+		for _, a := range []string{"architect", "pa", "mayor", "doctor", "pm-pogo", "pm-onethird"} {
+			evs = append(evs, fireEvent("scheduler_fire_delivered", a, a, at))
+		}
+	}
+	// One completion, and one that is OUTSIDE the window and must not be counted.
+	evs = append(evs,
+		fireEvent("scheduler_fire_completed", "pa", "pa", base.Add(-25*time.Minute)),
+		fireEvent("scheduler_fire_completed", "pa", "pa", base.Add(-3*time.Hour)),
+		fireEvent("scheduler_fire_delivered", "pa", "pa", base.Add(-3*time.Hour)),
+	)
+	path := writeEvents(t, evs)
+
+	got := RecentFires(path, base, time.Hour)
+	if got.Err != "" {
+		t.Fatalf("unexpected error: %s", got.Err)
+	}
+	if got.Delivered != 30 || got.Completed != 1 {
+		t.Errorf("got %d/%d, want 1/30 — events outside the window must not count",
+			got.Completed, got.Delivered)
+	}
+	if got.Schedules != 6 {
+		t.Errorf("Schedules = %d, want 6 distinct", got.Schedules)
+	}
+	if len(got.Agents) != 6 || got.Agents[0] != "architect" {
+		t.Errorf("Agents = %v, want the 6 delivered-to agents, sorted", got.Agents)
+	}
+	if want := base.Add(-25 * time.Minute); !got.LastCompletedAt.Equal(want) {
+		t.Errorf("LastCompletedAt = %s, want the newest IN-window completion %s",
+			got.LastCompletedAt, want)
+	}
+	if got.Window != time.Hour {
+		t.Errorf("Window = %s, want the requested hour", got.Window)
+	}
+
+	// It has to be judgeable end to end, or the wiring is decorative.
+	rep := Detect(Snapshot{
+		Now: base, Samples: deadFleet(), Recent: &got,
+		RunningSince: upSince(got.Agents),
+	}, DefaultParams())
+	if rep.Blackout == nil {
+		t.Fatalf("30 delivered / 1 completed across 6 running agents is a blackout; blind=%q",
+			rep.BlackoutBlind)
+	}
+	// And the per-agent breakdown is what the liveness gate reads, so it has to
+	// be populated by the reader rather than left for the detector to guess.
+	if len(got.ByAgent) != 6 {
+		t.Errorf("ByAgent has %d entries, want one per delivered-to agent", len(got.ByAgent))
+	}
+	if f := got.ByAgent["pa"]; f.Completed != 1 || f.Schedules != 1 {
+		t.Errorf("pa = %+v, want 1 completion on 1 schedule", f)
+	}
+}
+
+// A log it cannot read must come back as a FAILED MEASUREMENT, never as a
+// measurement of zero. Zero completions is what a blackout looks like, so an
+// unreadable log that returned a bare zero would mail a person about a healthy
+// fleet — the same detector-credibility failure in the opposite direction.
+func TestRecentFiresOnMissingLogIsBlindNotZero(t *testing.T) {
+	got := RecentFires(filepath.Join(t.TempDir(), "nope.log"), base, time.Hour)
+	// It has to be RecentFires that names this, because the events layer treats a
+	// nonexistent path as "no events yet" and returns nil (events.ScanFile) — so
+	// an absent log arrives at the detector looking like a calm one.
+	if got.Err == "" {
+		t.Fatalf("missing log returned a clean measurement: %+v", got)
+	}
+	if got.Delivered != 0 || got.Completed != 0 {
+		t.Errorf("a failed measurement must carry no counts: %+v", got)
+	}
+	rep := Detect(Snapshot{
+		Now: base, Samples: deadFleet(), Recent: &got, RunningSince: upSince(deadFleetAgents),
+	}, DefaultParams())
+	if rep.Blackout != nil {
+		t.Error("an unreadable log must not produce a blackout finding")
+	}
+	if rep.BlackoutBlind == "" {
+		t.Error("...and it must not produce silence either")
+	}
+}
+
+// A window of zero takes the package default, so a caller that forgets the
+// argument gets an hour rather than a measurement of nothing.
+func TestRecentFiresDefaultsTheWindow(t *testing.T) {
+	got := RecentFires(writeEvents(t, nil), base, 0)
+	if got.Window != DefaultBlackoutWindow {
+		t.Errorf("Window = %s, want %s", got.Window, DefaultBlackoutWindow)
+	}
+}
