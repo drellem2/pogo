@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -162,13 +164,27 @@ func TestDequeueStampsStartTime(t *testing.T) {
 }
 
 // TestGateWatchMeasuresARealSubtreesCPU is the end-to-end positive control for
-// the signal the CLI now prints. It runs two real gates through the real
-// runner — one that computes, one that sleeps — and asserts the records
-// separate them.
+// the signal the CLI now prints. It runs three real gates through the real
+// runner — one that sleeps, one holding a single spinner, one holding four —
+// and asserts the records separate them.
 //
-// Both arms are required. A measurement that only ever reports "busy" is the
-// defect described in mg-1b8c's lineage: a view that always reads healthy
-// cannot report the state it exists to report.
+// All three arms are required. A measurement that only ever reports "busy" is
+// the defect described in mg-1b8c's lineage: a view that always reads healthy
+// cannot report the state it exists to report. And a measurement that merely
+// separates "something is running" from "nothing is" would satisfy both of the
+// first two arms while being a constant; the third arm is what proves the rate
+// is a function of the work injected.
+//
+// # Every assertion here is RELATIVE, and that is the point (mg-6c90)
+//
+// This test used to require the spinning arm to peak above 0.5 cores. Cores are
+// a SHARED resource, so that assertion was about the box: byte-identical
+// binaries passed 4/4 at load 4.6-5.3 and failed 13/13 at load 52-106, and it
+// went on to fail four innocent branches in a single evening. The rules now
+// live in gatecpuarms_test.go as comparisons between the arms — see the header
+// there for why no threshold value would have been correct, and
+// TestGateWatchRulesGoRedWhenTheWalkMissesTheSubtree for the demonstration
+// that a red still means the instrument is broken.
 //
 // # It reads the record WHILE the gate runs, and that is not incidental
 //
@@ -202,82 +218,33 @@ func TestGateWatchMeasuresARealSubtreesCPU(t *testing.T) {
 	t.Logf("process-table source: %s; gate heartbeat %s", procSource, heartbeat)
 	supported := procSource.CanResolve(heartbeat)
 
-	// run executes a gate and returns every progress record the refinery
-	// published while it was still running.
-	run := func(gate string) []StepProgress {
-		t.Helper()
-		r := newProgressTestRefinery(t, heartbeat)
-		wtDir := t.TempDir()
-		writeGateConfig(t, wtDir, "quality_gate = "+quoteTOML(gate))
-		mr := &MergeRequest{ID: "mr-cpu", Status: StatusProcessing}
-		r.byID[mr.ID] = mr
-
-		done := make(chan error, 1)
-		go func() {
-			_, _, err := r.runQualityGates(context.Background(), wtDir, wtDir, mr)
-			done <- err
-		}()
-
-		var seen []StepProgress
-		poll := time.NewTicker(heartbeat / 4)
-		defer poll.Stop()
-		for {
-			select {
-			case err := <-done:
-				if err != nil {
-					t.Fatalf("gate %q should have passed: %v", gate, err)
-				}
-				if len(seen) == 0 {
-					t.Fatalf("gate %q published no record while it ran", gate)
-				}
-				return seen
-			case <-poll.C:
-				r.mu.Lock()
-				if mr.Progress != nil && mr.Progress.EndTime.IsZero() {
-					seen = append(seen, *mr.Progress)
-				}
-				r.mu.Unlock()
-			}
-		}
+	// All three arms run AT THE SAME TIME, which is what makes the comparisons
+	// between them hold on a box whose load is moving — see runGateArms. The
+	// injected-work arm is capped at the host's core count, because N spinners
+	// cannot exceed N cores' worth of work; a single-core host cannot inject
+	// parallel work at all, and the tracking rule is then dropped rather than
+	// weakened.
+	//
+	// The busy arms' work happens in DESCENDANTS: `sh -c` forks for a compound
+	// command, so only a subtree walk finds the CPU. See spinGate.
+	spinners := cpuArmSpinners
+	if n := runtime.NumCPU(); n < spinners {
+		spinners = n
 	}
-
-	// settled keeps the readings taken over a window in which the subtree
-	// neither gained nor lost a process. Churn counts as work by design — a
-	// gate forking short-lived workers IS working — so the startup and
-	// teardown windows say "busy" for both arms and can discriminate nothing.
-	// Excluding them is what forces each arm to prove itself on the CPU path,
-	// which is the path that was blind.
-	settled := func(rs []StepProgress) []StepProgress {
-		var out []StepProgress
-		for _, p := range rs {
-			if !p.CPUSampledAt.IsZero() && p.CPUProcs > 0 && p.CPUChurn == 0 {
-				out = append(out, p)
-			}
-		}
-		return out
+	gates := []string{spinGate(1), `sleep 2`}
+	if spinners > 1 {
+		gates = append(gates, spinGate(spinners))
+	} else {
+		t.Logf("host has %d cpu; skipping the injected-work arm — it cannot inject parallel work",
+			runtime.NumCPU())
+		spinners = 0
 	}
-	peak := func(rs []StepProgress) float64 {
-		hi := 0.0
-		for _, p := range rs {
-			if p.CPUCores > hi {
-				hi = p.CPUCores
-			}
-		}
-		return hi
-	}
+	records := runGateArms(t, heartbeat, gates...)
+	busyRecords, idleRecords := records[0], records[1]
 
-	// A gate whose real work happens in a DESCENDANT: `sh -c` forks for a
-	// compound command, so only a subtree walk finds the CPU. The spin loop
-	// uses shell builtins only, so the work shows up as CPU time rather than
-	// as process churn — this arm has to prove the CPU path, not the churn
-	// fallback.
-	busyRecords := run(`(while :; do :; done) & spinner=$!; sleep 2; kill $spinner; exit 0`)
 	last := busyRecords[len(busyRecords)-1]
 	t.Logf("busy gate: pid=%d source=%s readings=%d", last.GatePID, last.CPUSource, len(busyRecords))
-	for _, p := range busyRecords {
-		t.Logf("  busy: cores=%.2f procs=%d churn=%d window=%s unavailable=%q",
-			p.CPUCores, p.CPUProcs, p.CPUChurn, p.CPUWindow, p.CPUUnavailable)
-	}
+	logArm(t, "one", busyRecords)
 	if last.GatePID == 0 {
 		t.Error("the gate's pid must be recorded — without it there is no subtree to measure")
 	}
@@ -300,62 +267,64 @@ func TestGateWatchMeasuresARealSubtreesCPU(t *testing.T) {
 		t.Skipf("subtree CPU is not measurable here: %s", last.CPUUnavailable)
 	}
 
-	busy := settled(busyRecords)
+	busy := settledCPU(busyRecords)
 	if len(busy) == 0 {
 		t.Fatalf("a 2s gate at a %s heartbeat produced no settled measurement on %s (last unavailable=%q)",
 			heartbeat, procSource, last.CPUUnavailable)
-	}
-	busyPeak := peak(busy)
-	if busyPeak < 0.5 {
-		t.Errorf("a spinning gate peaked at %.2f cores across %d settled readings; "+
-			"the subtree walk is not finding the work", busyPeak, len(busy))
-	}
-	// And an upper bound, because the rate has to be RIGHT and not merely
-	// non-zero. This gate holds exactly one spinner, so ~1.0 cores is the
-	// physical answer and anything near twice that is the instrument, not the
-	// work — a CPU column too coarse for the window reports nothing for
-	// several windows and then a whole tick at once, which reads as a
-	// multi-core burst. Without this bound the test is blind to precision loss
-	// in the direction that inflates, and precision loss is what put it in CI
-	// (mg-79e3).
-	const oneSpinnerCeiling = 2.0
-	if busyPeak > oneSpinnerCeiling {
-		t.Errorf("a gate holding ONE spinner peaked at %.2f cores over %s windows; "+
-			"%s is over-reporting, most likely quantising work into bursts",
-			busyPeak, heartbeat, procSource)
-	}
-	sawBusy := false
-	for _, p := range busy {
-		if p.Subtree() == SubtreeBusy {
-			sawBusy = true
-		}
-	}
-	if !sawBusy {
-		t.Errorf("a spinning gate must classify as busy in at least one of its %d settled readings", len(busy))
 	}
 
 	// The negative arm. A sleeping gate consumes nothing, and the record must
 	// be willing to say so — on EVERY settled reading, not merely one, because
 	// a measurement that reports busy unconditionally would still satisfy an
-	// "at least one" test.
-	idleRecords := run(`sleep 2`)
-	for _, p := range idleRecords {
-		t.Logf("  idle: cores=%.2f procs=%d churn=%d window=%s unavailable=%q",
-			p.CPUCores, p.CPUProcs, p.CPUChurn, p.CPUWindow, p.CPUUnavailable)
-	}
-	idle := settled(idleRecords)
+	// "at least one" test. It ran alongside the spinning arms, so it is a
+	// sleeping subtree measured on a box that demonstrably had work on it.
+	logArm(t, "idle", idleRecords)
+	idle := settledCPU(idleRecords)
 	if len(idle) == 0 {
 		t.Fatalf("a 2s sleeping gate at a %s heartbeat produced no settled measurement on %s", heartbeat, procSource)
 	}
-	for _, p := range idle {
-		if p.Subtree() != SubtreeIdle {
-			t.Errorf("a sleeping gate must classify as idle (cores=%.2f churn=%d procs=%d) — the "+
-				"measurement is reporting busy unconditionally", p.CPUCores, p.CPUChurn, p.CPUProcs)
+
+	// The injected-work arm: the same template with four spinners instead of
+	// one, so parallelism is the only thing that differs, and the measurement
+	// has to move with it.
+	var many []StepProgress
+	if spinners > 1 {
+		manyRecords := records[2]
+		logArm(t, fmt.Sprintf("many(%d)", spinners), manyRecords)
+		many = settledCPU(manyRecords)
+		if len(many) == 0 {
+			t.Fatalf("a 2s %d-spinner gate at a %s heartbeat produced no settled measurement on %s",
+				spinners, heartbeat, procSource)
 		}
 	}
-	if idlePeak := peak(idle); busyPeak <= idlePeak {
-		t.Errorf("a computing gate (%.2f cores) must measure higher than a sleeping one (%.2f cores)",
-			busyPeak, idlePeak)
+
+	arms := subtreeCPUArms{
+		IdlePeak: peakCores(idle), IdleReadings: len(idle),
+		OnePeak: peakCores(busy), OneMean: meanCores(busy), OneReadings: len(busy),
+		ManySpinners: spinners, ManyPeak: peakCores(many), ManyMean: meanCores(many),
+		ManyReadings: len(many),
+	}
+	for _, p := range idle {
+		if p.Subtree() != SubtreeIdle {
+			arms.IdleBusyReadings++
+		}
+	}
+	for _, p := range busy {
+		if p.Subtree() == SubtreeBusy {
+			arms.OneSawBusy = true
+		}
+	}
+	for _, p := range many {
+		if p.Subtree() == SubtreeBusy {
+			arms.ManySawBusy = true
+		}
+	}
+	t.Logf("arms peak: idle=%.2f one=%.2f many(%d)=%.2f cores", arms.IdlePeak, arms.OnePeak, spinners, arms.ManyPeak)
+	t.Logf("arms mean: one=%.3f many(%d)=%.3f cores (%.2fx, rule needs %.1fx) — the verdict is the ratios "+
+		"between these, so a loaded host scales both and changes neither",
+		arms.OneMean, spinners, arms.ManyMean, arms.ManyMean/max(arms.OneMean, 1e-9), trackingMargin)
+	for _, c := range arms.complaints() {
+		t.Error(c)
 	}
 }
 

@@ -45,6 +45,81 @@ see it because it is in no commit. Cite the issue as `Refs owner/repo#N` in PR
 bodies too, and fix a flagged one with `gh pr edit <number> --body-file -` —
 amending and re-pushing does nothing to a PR body.
 
+## Tests that measure a shared resource
+
+**An assertion over a shared resource must be RELATIVE. Never require a minimum
+share of one inside a fixed window.**
+
+CPU cores, scheduler timeslices, and wall-clock throughput are shared with
+everything else running on the box. A test that requires a minimum of one —
+"at least 0.5 cores", "at least 2 frames in 400ms", "at least N samples in
+T seconds" — is asserting what the scheduler happened to grant, not what the
+code did. It is **unmeetable by construction under contention**, so there is no
+correct threshold value and widening the number only buys silence: a control
+tuned until it stops firing has stopped measuring anything.
+
+**It is the fixed WINDOW that breaks it, not the counting.** A count is fine
+when the window it is counted over stretches with the load. `sleep 400ms and
+require 2 frames` is broken; `require 5 heartbeats over however long the gate
+actually took` is not, and survived 90 competing spinners on a 10-core box —
+its window stretched from 1s to 8-12s and the count came with it. Before
+rewriting an assertion, check which kind you have.
+
+This is not hypothetical. Two such assertions cost this repo five innocent
+branches in one evening (mg-6c90), each a full gate run plus the work of
+proving the branch was clean, and the coordinator ended it reading
+`FAIL internal/refinery` as noise before checking — which is how a real
+regression merges unnoticed. Byte-identical binaries measured 4/4 PASS at load
+5 and 13/13 FAIL at load 52-106.
+
+Write one of these instead:
+
+- **Compare two arms.** Measure the thing busy and measure it idle; assert the
+  ordering.
+- **Track injected work.** Quadruple the work, require the measurement to rise
+  with it. Ratios survive contention because schedulers allocate per runnable
+  thread: N spinners get about N times one spinner's share whatever else the
+  box is doing. This is the strongest form — it proves the number is a
+  *function of* the work, so a constant, a wrong-subtree reading, and a lost
+  descendant all fail it.
+- **Wait for the event instead of budgeting for it.** Poll to a generous
+  deadline rather than sleeping a fixed window and counting what arrived. On a
+  quiet box it costs nothing; on a loaded one it takes longer instead of going
+  red. It still fails when the event genuinely never comes, which is the defect
+  worth catching.
+
+**Run the arms CONCURRENTLY.** A relative assertion is only relative if both
+arms met the same contention, and arms run one after another do not on a box
+whose load is moving. Measured while this host's load ramped from 6 to 62, the
+same rules that produced 3.68x–4.05x over six steady runs collapsed to 2.06x
+against a 1.5x threshold — one arm sampled quiet, the next sampled saturated.
+Started together they are squeezed by the same competitors over the same
+windows, and the ratio holds by construction. This is the part that is easy to
+skip, because a sequential version passes on a quiet machine.
+
+Upper bounds — "this returned in under 2s", "one spinner did not exceed 2
+cores" — are safe to state absolutely, because contention can only push a
+measurement down.
+
+**Do not reason from load average.** It counts threads that are runnable *or*
+blocked, so it does not predict the share a process gets: on this 10-core host
+a spinner held ~1.0 cores at a load average of 18–23, and 0.09 cores against 90
+deliberately-runnable competitors. This is why the CPU test could pass at load
+154 in isolation and fail at load 52–106 during a gate — the variable was never
+the average, it was how many threads were actually runnable inside the
+measurement window, which nothing in a test can see. Measure against a known
+number of competitors instead.
+
+Whatever you write, **show it can still fail**: construct the broken instrument
+and watch the test go red. `internal/refinery/gatecpuarms_test.go` does this
+three ways — a table of broken instruments against the rules, a live gate with
+its subtree walk deliberately blinded, and
+`TestTheReplacedFloorWasBothWEAKERAndFlakier`, which runs the retired assertion
+and the replacement over the same measured arms to show the replacement is
+strictly stronger rather than merely different. That last one is worth copying:
+when you replace a control, the claim "this is better" is checkable, and a
+replacement that is only *quieter* is a regression.
+
 ## End-to-end smoke test
 
 `scripts/test-e2e.sh` exercises the full loop — `pogo init`, `pogod`, mayor
