@@ -2119,8 +2119,9 @@ Flags:
 	var wedgeWatcher *wedgewatch.Watcher
 	if cfg.WedgeWatch.Enabled && agentRegistry != nil {
 		wedgeWatcher = wedgewatch.New(wedgewatch.Options{
-			Enabled:       true,
-			Source:        wedgewatch.RegistrySource(agentRegistry, wedgewatch.SystemCredential, wedgewatch.SystemHost),
+			Enabled: true,
+			Source: wedgewatch.RegistrySource(agentRegistry, wedgewatch.SystemCredential,
+				wedgewatch.SystemHost, wedgewatch.SystemEvents),
 			Interval:      cfg.WedgeWatch.Interval,
 			RenotifyAfter: cfg.WedgeWatch.RenotifyAfter,
 			Thresholds: wedgewatch.Thresholds{

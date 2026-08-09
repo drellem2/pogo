@@ -142,7 +142,7 @@ func TestHostViewFromMeasuresUsedCoresNotTheLoadAverage(t *testing.T) {
 // TestRegistrySourceWithNoRegistryIsAnError keeps the nil case from rendering
 // as a clean fleet.
 func TestRegistrySourceWithNoRegistryIsAnError(t *testing.T) {
-	_, err := RegistrySource(nil, nil, nil)(convNow)
+	_, err := RegistrySource(nil, nil, nil, nil)(convNow)
 	if !errors.Is(err, ErrNoRegistry) {
 		t.Fatalf("err = %v, want ErrNoRegistry — a detector that cannot look has not found a clean fleet", err)
 	}

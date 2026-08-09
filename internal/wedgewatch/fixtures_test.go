@@ -114,3 +114,58 @@ func quotingPTY(declared string) []byte {
 func noCounterPTY() []byte {
 	return []byte(clr + "● Bash(go test ./...)\r\n  ⎿  ok  github.com/drellem2/pogo/internal/wedgewatch\r\n")
 }
+
+// --- the 2026-08-09 harness (mg-20eb) ---------------------------------------
+//
+// The three fixtures below are reconstructed from live PTY tails pulled off
+// five running agents on 2026-08-09 via GET /agents/<name>/output — doctor,
+// mayor, architect, pm-pogo and the polecat that wrote them. Every original
+// stem missed on every one of them. The literal strings here are what those
+// buffers actually contained.
+
+// hintBar is the permanently-rendered footer on the current harness, and the
+// reason "esc to interrupt" stopped being a usable anchor: it is on screen for
+// every agent at every moment, attached to no counter at all.
+const hintBar = "⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt · ← for agents"
+
+// currentSpinnerPTY is a turn IN FLIGHT on the 2026-08-09 harness.
+//
+// The spinner verb is randomized per render — "cerebrating…" here, but
+// "crystallizing…", "slithering…" and "Baking…" were all observed on the same
+// afternoon — so the verb cannot anchor the counter and the token arrow does.
+func currentSpinnerPTY(declared, verb string) []byte {
+	var b strings.Builder
+	b.WriteString(clr)
+	b.WriteString("● Bash(git rev-parse --abbrev-ref HEAD)\r\n")
+	b.WriteString(dim + hintBar + reset + "\r\n")
+	b.WriteString("✶" + col(1) + verb + "…" + col(1) + "(" + declared + col(1) + "· ↓ 29.6k tokens)\r\n")
+	return []byte(b.String())
+}
+
+// currentWorkedForPTY is a COMPLETED turn on the 2026-08-09 harness: the line
+// that used to read "Baked for 3m 2s" now reads "worked for 55s".
+func currentWorkedForPTY(declared string) []byte {
+	var b strings.Builder
+	b.WriteString(clr)
+	b.WriteString("● Read(internal/wedgewatch/counter.go)\r\n")
+	b.WriteString(dim + hintBar + reset + "\r\n")
+	b.WriteString("✻" + col(1) + "worked for " + declared + "\r\n")
+	return []byte(b.String())
+}
+
+// hintBarOnlyPTY is the false anchor by itself: "esc to interrupt" on screen
+// with no counter anywhere. It must read UNREADABLE, never pick a number out of
+// the spinner's repaint traffic.
+//
+// The trailing digits are real. The current harness repaints the spinner by
+// cursor-addressing single glyphs and digits, so an agent's PTY tail ends in
+// runs like "69✻✶✳✢80·71✢✳✶✻✽8" — bare numbers, drifting past the hint bar,
+// with no unit attached. That was measured on architect at 2026-08-09 12:5xZ.
+func hintBarOnlyPTY() []byte {
+	var b strings.Builder
+	b.WriteString(clr)
+	b.WriteString("● Bash(go test ./...)\r\n")
+	b.WriteString(dim + hintBar + reset)
+	b.WriteString("69✻✶✳✢80·71✢✳✶✻✽8✻✶✳✢·9✢✳✶✻✽\r\n")
+	return []byte(b.String())
+}

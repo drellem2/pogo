@@ -175,3 +175,116 @@ func TestDiscrepancyGuards(t *testing.T) {
 		}
 	})
 }
+
+// --- the 2026-08-09 harness (mg-20eb) ---------------------------------------
+
+// TestParseDeclaredWorkReadsTheCurrentHarness is the positive control for the
+// renderings that made this detector blind on 100% of agents from its first
+// pass. Each case is a stem that did not exist when all four originals missed
+// at once.
+func TestParseDeclaredWorkReadsTheCurrentHarness(t *testing.T) {
+	cases := []struct {
+		name string
+		pty  []byte
+		want time.Duration
+	}{
+		{"in-flight, token parenthetical", currentSpinnerPTY("11m53s", "cerebrating"), 11*time.Minute + 53*time.Second},
+		{"in-flight, verb is randomized", currentSpinnerPTY("2m 56s", "crystallizing"), 2*time.Minute + 56*time.Second},
+		{"in-flight, another verb", currentSpinnerPTY("45s", "slithering"), 45 * time.Second},
+		{"completed turn, worked for", currentWorkedForPTY("55s"), 55 * time.Second},
+		{"completed turn, hours", currentWorkedForPTY("13h 44m 2s"), 13*time.Hour + 44*time.Minute + 2*time.Second},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := ParseDeclaredWork(tc.pty)
+			if !ok {
+				t.Fatalf("could not parse a counter out of the %s fixture — this is mg-20eb: "+
+					"every stem missing at once takes the cross-check, the load-bearing half of "+
+					"this detector, off the air entirely", tc.name)
+			}
+			if got != tc.want {
+				t.Errorf("declared = %s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestTheHintBarIsNotAnAnchor is the negative control for the change that
+// caused mg-20eb, and the one to read before adding a stem.
+//
+// "esc to interrupt" is now rendered permanently, on every agent, attached to
+// no counter. A stem on a permanently-rendered string cannot go quiet the way
+// markers.go's can — it matches forever and reports whatever number drifts into
+// its window. Here the window holds the spinner's repaint digits, measured off
+// a live agent: bare numbers with no unit. They must not become a verdict.
+func TestTheHintBarIsNotAnAnchor(t *testing.T) {
+	if d, ok := ParseDeclaredWork(hintBarOnlyPTY()); ok {
+		t.Errorf("parsed %s from a screen whose only anchor is the permanent hint bar — the number "+
+			"came from the spinner's repaint traffic, and a fabricated counter drives a "+
+			"fabricated verdict", d)
+	}
+}
+
+// TestTheLiveCounterOutranksThePreviousTurnsTotal pins the stem ORDER, which is
+// load-bearing rather than cosmetic.
+//
+// On the current harness a mid-turn screen carries both: "(30m · ↓ tokens)" for
+// the turn in flight, and "worked for 55s" left over from the turn before. The
+// second is frozen for the whole of the current turn, so reading it beside a
+// large uptime is indistinguishable from a wedge — a 30-minute honest turn on a
+// 9-hour-old agent would report. The live counter must win.
+func TestTheLiveCounterOutranksThePreviousTurnsTotal(t *testing.T) {
+	pty := append(currentWorkedForPTY("55s"), currentSpinnerPTY("30m", "cerebrating")...)
+	got, ok := ParseDeclaredWork(pty)
+	if !ok {
+		t.Fatal("could not parse a counter from a mid-turn screen")
+	}
+	if got != 30*time.Minute {
+		t.Errorf("declared = %s, want 30m — the PREVIOUS turn's frozen total was preferred over the "+
+			"live counter, which reads a long honest turn as a wedge", got)
+	}
+}
+
+// TestTheLegacyStemsStillRead keeps the older renderings working. The daemon on
+// this box ran ten days behind main; a stem table that only knows today's
+// harness is one deploy lag away from the same blindness in the other
+// direction.
+func TestTheLegacyStemsStillRead(t *testing.T) {
+	if d, ok := ParseDeclaredWork(wedgedLoginPTY("3m 2s")); !ok || d != 3*time.Minute+2*time.Second {
+		t.Errorf("the 2026-08-04 incident string no longer parses: %s ok=%v", d, ok)
+	}
+	if d, ok := ParseDeclaredWork(workingPTY("2m 56s")); !ok || d != 2*time.Minute+56*time.Second {
+		t.Errorf("the older esc-to-interrupt parenthetical no longer parses: %s ok=%v", d, ok)
+	}
+}
+
+// TestAQuotedLegacyCounterCannotOutrankTheLiveOne is this fix checked against
+// the fault it repairs.
+//
+// The remedy for mg-20eb is more stems, and the failure mode of a stem is that
+// it anchors on something that is not a counter. lastDurationNear's
+// last-occurrence rule guards that WITHIN a stem — the live status line
+// repaints at the tail and beats an earlier quotation of the same phrase — but
+// not ACROSS stems, where priority decides and position does not.
+//
+// The fixture is this branch's own author: a polecat editing counter.go, with
+// "Baked for 3m 2s" in its scrollback from reading the file and a live turn
+// counter at the tail. Reading the quotation would report a counter frozen at
+// 3m2s for as long as the file stayed on screen.
+func TestAQuotedLegacyCounterCannotOutrankTheLiveOne(t *testing.T) {
+	var b []byte
+	b = append(b, []byte("● Read(internal/wedgewatch/counter.go)\r\n"+
+		"  ⎿  // \"Baked for 3m 2s\" — the completed-turn form\r\n"+
+		"     {text: \"bakedfor\", after: 24},\r\n")...)
+	b = append(b, currentSpinnerPTY("22m 8s", "cerebrating")...)
+
+	got, ok := ParseDeclaredWork(b)
+	if !ok {
+		t.Fatal("could not parse a counter from a screen quoting one")
+	}
+	if got != 22*time.Minute+8*time.Second {
+		t.Errorf("declared = %s, want 22m8s — a legacy counter QUOTED in the transcript outranked the "+
+			"live one at the tail. Stem priority beats buffer position, so a higher-priority stem "+
+			"mentioned once anywhere wins; that is why the current harness's stems must come first.", got)
+	}
+}

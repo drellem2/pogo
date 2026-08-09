@@ -1877,6 +1877,29 @@ parsed falls back to event-log staleness, and if that is unavailable too the
 agent is reported as *unjudgeable*, not healthy — a harness that renames its
 status line must make this detector coarser, never silent.
 
+That fallback **had no production writer until mg-20eb**, and the whole of this
+detector's first 25 minutes on this box was 40 `wedge_watch_error` events and
+zero verdicts. `Observation.EventsLastSeen` was set only by a unit test, so the
+degradation path above was unreachable and an unparseable counter did not
+coarsen the detector — it disabled it. The event-log index is now built by
+`wedgewatch.SystemEvents`, **lazily**: it is read at most once per sample and
+only when some agent's counter could not be parsed, so a fleet whose counters
+all read never opens the log. Only the live `events.log` is scanned, not the
+rotated files, so an identity whose last line has rotated out reports as
+unjudgeable rather than as stale. Recency is keyed on the event's own `agent`
+field, which is why pogod's `scheduler_fire_delivered` traffic — 64k lines,
+logged against `pogod` — cannot keep a wedged agent's clock warm; a delivery
+record proves the sender ran, never the receiver.
+
+The same ticket found all four counter stems missing on all agents at once. The
+current harness renders the completed-turn line as `✻ worked for 55s` (not
+`Baked for`), moved the live counter into a spinner parenthetical whose verb is
+randomized (`cerebrating…`, `crystallizing…`, `slithering…`) so only its shape
+`(11m53s · ↓ 29.6k tokens)` is stable, and turned `esc to interrupt` into a
+permanently-rendered hint bar. That last one is the trap worth remembering: a
+stem on a permanently-rendered string is a **false anchor** — it never goes
+quiet, it just reports whatever number drifts into its window.
+
 **It is not routed, and that is deliberate.** mg-fc8d's item (3) — escalating a
 fleet-level wedge **outside** the wedged party, to Daniel rather than to an inbox
 inside the failure — is an alerting-policy decision reserved to Daniel and not

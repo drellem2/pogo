@@ -8,6 +8,7 @@ import (
 
 	"github.com/drellem2/pogo/internal/agent"
 	"github.com/drellem2/pogo/internal/credexpiry"
+	"github.com/drellem2/pogo/internal/events"
 	"github.com/drellem2/pogo/internal/hostload"
 )
 
@@ -42,6 +43,10 @@ type CredFunc func(ctx context.Context) CredentialView
 // inject a fixture.
 type HostFunc func(ctx context.Context) HostView
 
+// EventsFunc yields the event-log recency index. Production binds SystemEvents;
+// tests inject a fixture.
+type EventsFunc func() EventsIndex
+
 // RegistrySource adapts an agent registry into a SourceFunc.
 //
 // The credential read is LAZY: cred is called only when some agent in the
@@ -58,40 +63,101 @@ type HostFunc func(ctx context.Context) HostView
 // including the ones where it rules starvation OUT. It costs one sampling
 // window of wall clock (hostload.DefaultWindow, 1s) on a goroutine that is
 // already off the heartbeat's critical path, and it prompts for nothing.
-func RegistrySource(reg *agent.Registry, cred CredFunc, host HostFunc) SourceFunc {
+// The EVENT-LOG read is lazy on the same terms as the credential read, and for
+// a different reason: it is the fallback stall signal, consulted only for an
+// agent whose declared-work counter could not be parsed. On a fleet where every
+// counter reads, nothing needs it and the log is never opened. See
+// attachEventFallback.
+func RegistrySource(reg *agent.Registry, cred CredFunc, host HostFunc, ev EventsFunc) SourceFunc {
 	return func(now time.Time) (Snapshot, error) {
 		if reg == nil {
 			return Snapshot{}, ErrNoRegistry
 		}
 		all := reg.List()
-		snap := Snapshot{Now: now, Scanned: len(all)}
-		needCred := false
+		var obs []Observation
 		for _, a := range all {
 			o, ok := observe(a, now)
 			if !ok {
 				continue
 			}
-			snap.Agents = append(snap.Agents, o)
-			if !needCred {
-				sigs := Signatures(ScanMarkers(o.Output, nil))
-				needCred = hasSig(sigs, SigLoginPrompt) || hasSig(sigs, SigAPI401)
-			}
+			obs = append(obs, o)
 		}
-		if len(snap.Agents) == 0 {
-			return snap, nil
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		if needCred && cred != nil {
-			snap.Cred = cred(ctx)
-		}
-		if host != nil {
-			snap.Host = host(ctx)
-		} else {
-			snap.Host = HostView{Readable: false, Reason: ReasonNoHostSampler}
-		}
-		return snap, nil
+		return buildSnapshot(now, len(all), obs, cred, host, ev), nil
 	}
+}
+
+// buildSnapshot assembles the reading from already-observed agents.
+//
+// It is split out from RegistrySource because it is the WHOLE production
+// snapshot pipeline minus the one step that needs a live registry, and mg-20eb
+// is what happens when that pipeline has a step nothing exercises: Observation
+// carried an EventsLastSeen field, stallOf's documented fallback keyed on it,
+// and no production code path ever assigned it — so the fallback was reachable
+// only from a test, and the detector's first 40 judgements on this box were all
+// "could not judge". Everything that fills in an Observation beyond what one
+// agent can tell you about itself happens HERE, where a test can drive it with
+// hand-built observations and no registry.
+func buildSnapshot(now time.Time, scanned int, obs []Observation, cred CredFunc, host HostFunc, ev EventsFunc) Snapshot {
+	snap := Snapshot{Now: now, Scanned: scanned, Agents: attachEventFallback(obs, ev)}
+	if len(snap.Agents) == 0 {
+		return snap
+	}
+	needCred := false
+	for _, o := range snap.Agents {
+		sigs := Signatures(ScanMarkers(o.Output, nil))
+		if hasSig(sigs, SigLoginPrompt) || hasSig(sigs, SigAPI401) {
+			needCred = true
+			break
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if needCred && cred != nil {
+		snap.Cred = cred(ctx)
+	}
+	if host != nil {
+		snap.Host = host(ctx)
+	} else {
+		snap.Host = HostView{Readable: false, Reason: ReasonNoHostSampler}
+	}
+	return snap
+}
+
+// attachEventFallback fills in each observation's event-log fallback fields.
+//
+// It reads the index AT MOST ONCE per sample, and only when some agent's
+// declared-work counter could not be parsed — the sole condition under which
+// stallOf consults it. That laziness is why re-parsing the counter here is
+// acceptable: on a healthy fleet the parse is the only cost and the log is never
+// opened, and on a blind fleet the parse is negligible beside the scan it gates.
+//
+// EventsRead is set on every observation once the index has been consulted,
+// including the ones with no entry in it. The distinction it carries — "looked
+// and found nothing" versus "could not look" — is what stops the blind message
+// from asserting a fact about the event log it never checked.
+func attachEventFallback(obs []Observation, ev EventsFunc) []Observation {
+	if len(obs) == 0 || ev == nil {
+		return obs
+	}
+	need := false
+	for _, o := range obs {
+		if _, ok := ParseDeclaredWork(o.Output); !ok {
+			need = true
+			break
+		}
+	}
+	if !need {
+		return obs
+	}
+	idx := ev()
+	if !idx.Readable {
+		return obs
+	}
+	for i := range obs {
+		obs[i].EventsRead = true
+		obs[i].EventsLastSeen = idx.LastSeen[obs[i].identity()]
+	}
+	return obs
 }
 
 // observe converts one live agent into an Observation, or reports that it is
@@ -193,6 +259,86 @@ const (
 // as starved.
 func SystemHost(ctx context.Context) HostView {
 	return hostViewFrom((&hostload.Reader{Roots: []int{os.Getpid()}}).Read(ctx))
+}
+
+// Fixed reason vocabulary for an event-log index that could not be built.
+const (
+	// ReasonNoEventLogPath means the log's location could not be resolved.
+	ReasonNoEventLogPath = "the event log's path could not be resolved"
+	// ReasonEventLogAbsent means there is no event log on this box yet.
+	ReasonEventLogAbsent = "there is no event log on this host yet"
+	// ReasonEventLogUnreadable means the log exists but could not be scanned.
+	ReasonEventLogUnreadable = "the event log could not be read"
+)
+
+// SystemEvents builds the fallback stall index from the live event log.
+//
+// # What this measures, and what it does NOT
+//
+// The last event-log line carrying an agent's identity. That is a COARSER
+// signal than the declared-work counter and is only ever used in its place: on
+// this box most identities' newest line is their own `agent_spawned`, so for a
+// live agent "events stale" usually reduces to "nothing has been recorded about
+// this agent since it started". Which is exactly the intended degradation — a
+// harness that renames its status line leaves this detector with the marker
+// check plus a crude age, rather than with nothing.
+//
+// Note what is deliberately NOT counted as recency: pogod's scheduler traffic.
+// `scheduler_fire_delivered` and its siblings are attributed to `pogod`, not to
+// the agent they were delivered to, so they cannot keep a wedged agent's clock
+// warm. That is the mg-fc8d failure mode one level down — a delivery record
+// proves the sender is alive, never the receiver — and it is why this index
+// keys on the event's own agent field rather than on anything addressed AT an
+// identity.
+//
+// Only the LIVE log is scanned, not the rotated files. An identity whose last
+// line has rotated out therefore reads as absent, which reports the agent as
+// unjudgeable rather than as stale. That understates a very stale agent, and it
+// is the safe direction: the alternative is scanning up to 600MB (six retained
+// files at maxLogBytes) on every sample to sharpen a signal that is already the
+// fallback.
+func SystemEvents() EventsIndex {
+	path, err := events.LogPath()
+	if err != nil {
+		return EventsIndex{Reason: ReasonNoEventLogPath}
+	}
+	return eventsIndexFrom(path)
+}
+
+// eventsIndexFrom is the scan, split out so tests can drive it against a
+// fixture log rather than the fleet's.
+//
+// A missing file is UNREADABLE, not an empty index. The difference decides
+// whether a blind agent's error says the log has no entry for it — a claim
+// about the log — or that no fallback was available, and mg-20eb is a ticket
+// about the first sentence being printed 40 times by a detector that had never
+// opened the log at all.
+func eventsIndexFrom(path string) EventsIndex {
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return EventsIndex{Reason: ReasonEventLogAbsent}
+		}
+		return EventsIndex{Reason: ReasonEventLogUnreadable}
+	}
+	last := map[string]time.Time{}
+	if err := events.ScanFile(path, func(ev events.Event) {
+		if ev.Agent == "" {
+			return
+		}
+		ts, perr := time.Parse(time.RFC3339Nano, ev.Timestamp)
+		if perr != nil {
+			return
+		}
+		if prev, ok := last[ev.Agent]; !ok || ts.After(prev) {
+			last[ev.Agent] = ts
+		}
+	}); err != nil {
+		// A partial index is worse than none: an identity missing because the
+		// scan aborted is indistinguishable from one the log never mentioned,
+		// and the second reads as staleness.
+		return EventsIndex{Reason: ReasonEventLogUnreadable}
+	}
+	return EventsIndex{Readable: true, LastSeen: last}
 }
 
 // hostViewFrom is the pure conversion, split out so tests can drive every

@@ -56,15 +56,69 @@ type counterStem struct {
 // counter UNREADABLE — which is reported loudly as an error, not silently as
 // health. A marker that stops matching, by contrast, just goes quiet; that
 // asymmetry is why mg-f36b could hide for two months and this cannot.
+//
+// # What mg-20eb found when all four original stems missed at once
+//
+// The package doc predicted stem drift. What it did not predict was every stem
+// failing on every agent simultaneously, which is what the harness on this box
+// did by 2026-08-09 — 40 judgements, 0 verdicts. Sampling the live PTYs of five
+// agents (doctor, mayor, architect, pm-pogo, and the polecat that wrote this)
+// found three separate changes, and only one of them is ordinary drift:
+//
+//  1. The completed-turn line now reads "✻ worked for 55s". Not "Baked for".
+//  2. The in-flight counter moved into a spinner parenthetical whose VERB is
+//     randomized — "cerebrating…", "crystallizing…", "slithering…", "Baking…"
+//     are all live renderings of the same line — so no verb can anchor it. What
+//     is stable is the shape: "(11m53s · ↓ 29.6k tokens)".
+//  3. "esc to interrupt" left that parenthetical and became part of a
+//     PERMANENT hint bar: "⏵⏵ bypass permissions on (shift+tab to cycle) · esc
+//     to interrupt · ← for agents".
+//
+// (3) is the one worth understanding, because that stem did not stop matching —
+// it matches on every agent on every pass, and carries no number. A stem that
+// matches a permanently-rendered string is a FALSE ANCHOR: it will keep
+// reporting "found the status line, no counter in it" long after the status
+// line has moved, and whatever number happens to drift within its window
+// becomes the agent's declared work. It is kept for older harness versions and
+// demoted to last, so any anchor that is still attached to a real counter wins
+// first. Only firstDuration/lastDuration's onlySeparators rule kept it from
+// reading the spinner's repaint digits as a counter.
+// # Why the order is current-harness first, and legacy after
+//
+// lastDurationNear takes the LAST occurrence of a stem, so a status line that
+// repaints at the tail of the buffer normally beats an earlier mention of the
+// same phrase in a transcript. That protection does NOT hold across stems: a
+// higher-priority stem quoted once, anywhere, beats a lower-priority stem
+// rendered live at the tail. An agent reading this very file has "Baked for 3m
+// 2s" in its own PTY.
+//
+// So the stems the CURRENT harness actually renders go first. Nothing is lost
+// on an older harness — the current stems are strings it never emits, so they
+// fail and fall through — and on this one a quoted legacy counter can no longer
+// outrank a live one.
 var defaultStems = []counterStem{
-	// "Baked for 3m 2s" — the completed-turn form, and the exact string read
-	// off both wedged terminals.
+	// "(11m53s · ↓ 29.6k tokens)" — the 2026-08-09 in-flight parenthetical.
+	// Anchored on the token arrow rather than on the spinner verb, because the
+	// verb is randomized per render and the arrow is not.
+	//
+	// It outranks "workedfor" below deliberately. Both are current, but this
+	// one is the LIVE counter and that one is the previous turn's total, which
+	// is frozen for the whole of the current turn — so preferring it would read
+	// a legitimately long turn as a frozen counter beside a large uptime, which
+	// is the exact shape of a wedge.
+	{text: "·↓", before: 24},
+	// "✻ worked for 55s" — the 2026-08-09 completed-turn line, replacing
+	// "Baked for". Read when no turn is in flight.
+	{text: "workedfor", after: 24},
+	// "Baked for 3m 2s" — the completed-turn form on the harness of 2026-08-04,
+	// and the exact string read off both wedged terminals.
 	{text: "bakedfor", after: 24},
 	// "Baking for 3m 2s" — the in-flight variant of the same line.
 	{text: "bakingfor", after: 24},
-	// "(2m 56s · esc to interrupt)" — the spinner parenthetical. The number can
-	// sit on either side of the phrase depending on harness version, so both
-	// directions are searched.
+	// "(2m 56s · esc to interrupt)" — the older spinner parenthetical. The
+	// number can sit on either side of the phrase depending on harness version,
+	// so both directions are searched. LAST because this phrase is also the
+	// permanent hint bar on the current harness; see the false-anchor note.
 	{text: "esctointerrupt", after: 24, before: 24},
 	// "tokens · 2m 56s" style status lines put the elapsed time immediately
 	// before the interrupt hint; this catches the variant that omits it.

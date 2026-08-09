@@ -152,6 +152,43 @@
 // mg-da30) — which is an argument for measuring it rather than assuming it
 // away.
 //
+// # The graceful degradation was itself a silent instrument (mg-20eb)
+//
+// Everything above is about detectors that read healthy because they could not
+// see. This package's own fallback was one, from the day it shipped.
+//
+// stallOf documents an event-log-silence fallback for the case where the
+// declared counter cannot be parsed at all, "so that a harness that renames its
+// status line degrades this detector to a coarser one rather than to a silent
+// one". It keyed on Observation.EventsLastSeen. Nothing in production ever
+// assigned that field — observe() built every live Observation and did not set
+// it, and the only writer in the tree was a unit test — so the branch was
+// UNREACHABLE outside the suite, and an unparseable counter did not coarsen
+// this detector but disabled it.
+//
+// It went unnoticed for four days because the code shipped on 2026-08-05 and
+// the daemon on this box ran ten days behind main; the revision carrying it did
+// not start until 09:41 on 08-09. Its entire production lifetime before the
+// ticket was 25 minutes, and its hit rate over that lifetime was 0 of 40: every
+// pass, every agent, `wedge_watch_error`. Both halves failed at once —
+// simultaneously every counter stem stopped matching (see counter.go) and the
+// fallback that exists precisely for that turned out to be inert.
+//
+// Two rules come out of it, and they generalise past this package:
+//
+//   - A field a fallback keys on is part of the fallback. `IsZero()` on a field
+//     nothing writes is not a condition, it is the constant `true`, and a test
+//     that sets the field by hand proves only that the branch compiles.
+//     buildSnapshot in source.go now assembles everything an Observation
+//     carries beyond one agent's self-report, so the fallback is exercised by
+//     the production path a test can actually reach.
+//   - An error message must say what was established, not what would have been
+//     true had the code run. The old blind message asserted the event log had
+//     no entry for the identity; nothing had opened the log, and most of those
+//     identities plainly had entries. A reader who checks a detector's claim
+//     and finds it false stops reading the detector, which costs more than the
+//     blindness did.
+//
 // # Report-only, and deliberately unrouted
 //
 // mg-fc8d lists a third item — escalate a fleet-level wedge OUTSIDE the wedged
@@ -445,6 +482,32 @@ type Observation struct {
 	// Used ONLY as a fallback stall signal when the declared counter cannot be
 	// parsed. Zero means unknown.
 	EventsLastSeen time.Time
+	// EventsRead records whether the event log was actually CONSULTED for this
+	// identity, which a zero EventsLastSeen cannot tell you on its own: "looked
+	// and found nothing" and "never looked" are the same zero.
+	//
+	// It exists because they were the same zero for the whole of mg-20eb, and
+	// the blind error said "the event log has no entry for this identity" on
+	// every one of 40 judgements while the log plainly held entries for most of
+	// them. An operator who checks a claim like that and finds it false stops
+	// reading the detector, which is a worse outcome than the blindness.
+	EventsRead bool
+}
+
+// EventsIndex is the fleet's event-log recency, read once per sample.
+//
+// Readable=false is "could not look", on the same footing as CredentialView and
+// HostView: it never renders as "this identity has no entries".
+type EventsIndex struct {
+	// Readable is whether the log was scanned successfully.
+	Readable bool
+	// Reason says why not, drawn from a fixed vocabulary so it cannot carry
+	// file contents. Empty when Readable.
+	Reason string
+	// LastSeen maps event-log identity ("crew-mayor", "cat-e6cc") to the
+	// timestamp of its most recent line. An identity absent from the map was
+	// not mentioned anywhere in the scanned log.
+	LastSeen map[string]time.Time
 }
 
 // Snapshot is one reading of the fleet.

@@ -325,6 +325,14 @@ func (w *Watcher) inspect(o Observation, cred CredentialView, host HostView, now
 // that renames its status line degrades this detector to a coarser one rather
 // than to a silent one. If neither is available the agent is BLIND, never
 // healthy.
+//
+// The three blind messages are three DIFFERENT facts and are worded apart on
+// purpose. Until mg-20eb there was one, asserting that the event log held no
+// entry for the identity — and nothing in production ever wrote EventsLastSeen,
+// so that sentence was a constant printed by a detector that had never opened
+// the log. Most of the identities it said that about had entries. A message
+// that can be checked and found false is how a detector's output stops being
+// read, so each branch now says only what was actually established.
 func stallOf(o Observation, declaredRead bool, frozenFor time.Duration, now time.Time) (time.Duration, string, bool) {
 	if declaredRead {
 		return frozenFor, "counter_frozen", true
@@ -332,7 +340,11 @@ func stallOf(o Observation, declaredRead bool, frozenFor time.Duration, now time
 	if !o.EventsLastSeen.IsZero() {
 		return now.Sub(o.EventsLastSeen), "events_stale", true
 	}
-	return 0, "no declared-work counter could be parsed and the event log has no entry for this identity — " +
+	if o.EventsRead {
+		return 0, "no declared-work counter could be parsed and the event log, which WAS read, has no " +
+			"entry for this identity — the agent could NOT be judged, which is not the same as healthy", false
+	}
+	return 0, "no declared-work counter could be parsed and no event-log fallback is available — " +
 		"the agent could NOT be judged, which is not the same as healthy", false
 }
 
