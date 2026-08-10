@@ -993,6 +993,325 @@ grep -qE '\$\{SYNC_DETAIL:-' "$RUNNER" \
     && pass "missing_ids: an unreadable AFTER is '?', not 'nothing lost'" || fail "missing_ids ? post"
 
 # ---------------------------------------------------------------------------
+# The lost-schedule REMEDY must branch on liveness (mg-6d7b)
+# ---------------------------------------------------------------------------
+# On 2026-08-10 this alert fired on the nightly bounce to b802170 and told mayor
+# and human to "restore by nudging the affected agents to re-register". The
+# affected agent was doctor, and doctor was absent from `pogo agent list`
+# entirely: there was no process to nudge. The alert derived its finding from ONE
+# observation — present before the bounce, absent after — and that observation
+# has two causes with OPPOSITE remedies. A nudge into the void returns no error
+# worth noticing, so following the printed remedy literally ends with a fleet
+# reported as restored and a mail loop still dead.
+#
+# These tests are written against the two POLARITIES, not against one of them:
+# an implementation that hardcodes "start the agent" is exactly as broken as the
+# one that hardcoded "nudge it", and only a test that can fail in both
+# directions can tell the fix from the swap.
+
+OWNERS_FIX="$(printf '%s\n' \
+    'mail-check-doctor doctor crew' \
+    'mail-check-pa pa crew' \
+    'mail-check-mg-6d7b c6d7b polecat' \
+    'mail-check-pm-dealdesk pm-dealdesk crew' \
+    'mail-check-architect architect crew')"
+
+# The registry as `pogo agent list` reports it: NAME plus STATUS. Presence alone
+# is not liveness — that command's own help says so, and a parked agent is
+# listed with pid 0 and status "parked". doctor is absent (the 08-10 case), pa is
+# running, pm-dealdesk is parked, architect is mid-restart.
+STATES_FIX="$(printf '%s\n' \
+    'mayor running' \
+    'pa running' \
+    'pm-dealdesk parked' \
+    'architect restarting')"
+
+# --- the case it actually fired on: agent gone -------------------------------
+V="$(lost_schedule_verdict mail-check-doctor "$OWNERS_FIX" "$STATES_FIX")"
+[ "$V" = "gone doctor absent" ] \
+    && pass "verdict: a schedule whose agent is NOT in the registry is 'gone'" \
+    || fail "lost_schedule_verdict said '$V' for an agent absent from the registry"
+
+B="$(lost_schedule_body mail-check-doctor "$OWNERS_FIX" "$STATES_FIX" 120)"
+case "$B" in
+    *"pogo agent start doctor"*) pass "gone: the mail prescribes 'pogo agent start doctor' — the remedy that CAN work" ;;
+    *) fail "gone: the mail does not tell anyone to start the agent: $B" ;;
+esac
+case "$B" in
+    *"pogo nudge doctor"*) fail "gone: the mail STILL prescribes a nudge for an agent that is not there — this is the whole defect: $B" ;;
+    *) pass "gone: the mail does NOT prescribe a nudge — there is nothing to nudge" ;;
+esac
+case "$B" in
+    *"is NOT RUNNING"*) pass "gone: the mail says the agent is not running, so the reader can tell this case from the other" ;;
+    *) fail "gone: the mail never states the fact the remedy turns on: $B" ;;
+esac
+# The second-order finding: an agent that cannot auto-start regenerates this
+# alert every single night. Naming the class is what stops it reading as a new
+# incident twelve nights running.
+case "$B" in
+    *auto_start*) pass "gone: the mail names auto_start, the reason a crew agent does not come back on its own" ;;
+    *) fail "gone: nothing in the mail explains why the agent will be missing again tomorrow: $B" ;;
+esac
+
+# --- the OTHER polarity: agent alive, schedule lost --------------------------
+# Without this the fix is a swap, not a branch.
+V="$(lost_schedule_verdict mail-check-pa "$OWNERS_FIX" "$STATES_FIX")"
+[ "$V" = "alive pa running" ] \
+    && pass "verdict: a schedule whose agent IS in the registry is 'alive'" \
+    || fail "lost_schedule_verdict said '$V' for an agent that is running"
+
+B="$(lost_schedule_body mail-check-pa "$OWNERS_FIX" "$STATES_FIX" 120)"
+case "$B" in
+    *"pogo nudge pa"*) pass "alive: the nudge remedy SURVIVES for the case it was always right for" ;;
+    *) fail "alive: the original remedy was lost rather than branched: $B" ;;
+esac
+case "$B" in
+    *"pogo agent start pa"*) fail "alive: the mail tells someone to start an agent that is already running: $B" ;;
+    *) pass "alive: the mail does not prescribe a start for a running agent" ;;
+esac
+
+# --- both at once: one mail, two different remedies --------------------------
+# The real bounce loses several schedules at a time, and they are not all in the
+# same class. A body that picks one remedy for the whole list is the same defect
+# one layer up.
+B="$(lost_schedule_body "$(printf 'mail-check-doctor\nmail-check-pa')" "$OWNERS_FIX" "$STATES_FIX" 120)"
+case "$B" in
+    *"pogo agent start doctor"*) pass "mixed: the gone agent still gets 'start' when a live one shares the mail" ;;
+    *) fail "mixed: the gone agent's remedy was lost: $B" ;;
+esac
+case "$B" in
+    *"pogo nudge pa"*) pass "mixed: the live agent still gets 'nudge' when a gone one shares the mail" ;;
+    *) fail "mixed: the live agent's remedy was lost: $B" ;;
+esac
+
+# --- liveness UNKNOWN: no confident remedy at all ----------------------------
+# "The registry could not be read" must not collapse into either branch. It
+# collapsing into (a) is the bug being fixed; collapsing into (b) would tell
+# someone to start a fleet that is fine.
+V="$(lost_schedule_verdict mail-check-doctor "$OWNERS_FIX" "?")"
+[ "$V" = "unknown doctor ?" ] \
+    && pass "verdict: an unreadable registry is 'unknown' — a third answer, not a default" \
+    || fail "lost_schedule_verdict said '$V' when liveness was unreadable"
+
+B="$(lost_schedule_body mail-check-doctor "$OWNERS_FIX" "?" 120)"
+case "$B" in
+    *"could NOT determine"*) pass "unknown: the mail says it does not know" ;;
+    *) fail "unknown: the mail hides its own ignorance: $B" ;;
+esac
+case "$B" in
+    *"ONLY if it is"*) pass "unknown: both commands are printed, each gated on a check the reader must run" ;;
+    *) fail "unknown: the mail prescribes without gating: $B" ;;
+esac
+
+# --- an EMPTY registry is not an unreadable one ------------------------------
+# A fleet with nothing running is a real, reportable state, and every agent in it
+# is genuinely gone. Only the read FAILING is unknown.
+V="$(lost_schedule_verdict mail-check-doctor "$OWNERS_FIX" "")"
+[ "$V" = "gone doctor absent" ] \
+    && pass "verdict: an EMPTY registry means gone, not unknown" \
+    || fail "lost_schedule_verdict said '$V' for an empty (but readable) registry"
+
+# --- PRESENCE IS NOT LIVENESS: the parked agent (mg-6d7b, found in review) ---
+# `pogo agent list` says so in its own one-line help, and it means it: a parked
+# agent is LISTED, with pid 0 and status "parked". A fix that reads presence
+# alone calls it alive and prescribes a nudge for a process that is not there —
+# the identical defect, reintroduced by the repair for it. Parked is a THIRD
+# class with a third remedy, and neither of the other two is even close: there
+# is nothing to nudge, and starting it would undo a deliberate parking.
+V="$(lost_schedule_verdict mail-check-pm-dealdesk "$OWNERS_FIX" "$STATES_FIX")"
+[ "$V" = "parked pm-dealdesk parked" ] \
+    && pass "verdict: a PARKED agent is its own class — present in the registry, not running" \
+    || fail "lost_schedule_verdict said '$V' for a parked agent (presence read as liveness?)"
+
+B="$(lost_schedule_body mail-check-pm-dealdesk "$OWNERS_FIX" "$STATES_FIX" 120)"
+case "$B" in
+    *"pogo nudge pm-dealdesk"*) fail "parked: the mail prescribes a nudge for an agent with no process: $B" ;;
+    *) pass "parked: no nudge — a parked agent has nothing to nudge" ;;
+esac
+case "$B" in
+    *"pogo agent start pm-dealdesk"*) fail "parked: the mail prescribes a start, which would undo the parking: $B" ;;
+    *) pass "parked: no start — parking is deliberate and survives restarts" ;;
+esac
+case "$B" in
+    *"pogo agent wake pm-dealdesk"*) pass "parked: the mail names 'wake', the only command that applies" ;;
+    *) fail "parked: no applicable remedy is offered at all: $B" ;;
+esac
+
+# --- a status that is neither: no confident remedy --------------------------
+# StatusRestarting exists. Guessing between nudge and start for it is guessing.
+V="$(lost_schedule_verdict mail-check-architect "$OWNERS_FIX" "$STATES_FIX")"
+[ "$V" = "odd architect restarting" ] \
+    && pass "verdict: a status that is neither running nor parked is reported as itself" \
+    || fail "lost_schedule_verdict said '$V' for a restarting agent"
+B="$(lost_schedule_body mail-check-architect "$OWNERS_FIX" "$STATES_FIX" 120)"
+case "$B" in
+    *"status 'restarting'"*) pass "odd status: the mail quotes the status it actually read" ;;
+    *) fail "odd status: the observed status is not in the mail: $B" ;;
+esac
+case "$B" in
+    *"pogo nudge architect"*|*"pogo agent start architect"*) fail "odd status: a remedy was guessed anyway: $B" ;;
+    *) pass "odd status: neither remedy is prescribed — the alert does not guess" ;;
+esac
+
+# --- a polecat is a third class, and 'pogo agent start' does not apply --------
+# The fix must not exhibit the defect it removes. `pogo agent start` reads
+# ~/.pogo/agents/crew/<name>.md; a polecat has no such file, so prescribing it
+# for a polecat is another remedy that cannot work.
+B="$(lost_schedule_body mail-check-mg-6d7b "$OWNERS_FIX" "$STATES_FIX" 120)"
+case "$B" in
+    *"pogo agent start c6d7b"*) fail "polecat: the mail prescribes a crew-only command for a polecat: $B" ;;
+    *) pass "polecat: the mail does not prescribe 'pogo agent start' for a polecat" ;;
+esac
+case "$B" in
+    *"mg show mg-6d7b"*) pass "polecat: the mail points at the WORK ITEM, which is what decides whether it is owed" ;;
+    *) fail "polecat: the mail gives no way to tell a finished polecat from a lost one: $B" ;;
+esac
+
+# --- the owner is never guessed from the schedule id -------------------------
+# mail-check-mg-6d7b belongs to agent c6d7b. Stripping the prefix names "mg-6d7b",
+# an agent that has never existed — a remedy addressed to a nonexistent agent is
+# the same unusable output in a new costume.
+case "$(lost_schedule_body mail-check-mg-6d7b "$OWNERS_FIX" "$STATES_FIX" 120)" in
+    *"nudge mg-6d7b"*|*"start mg-6d7b"*) fail "the remedy addressed the schedule id as if it were an agent name" ;;
+    *) pass "the remedy addresses the OWNER (c6d7b), never the id stem (mg-6d7b)" ;;
+esac
+
+# An id with no owner in the map cannot be acted on, and the mail must say so
+# rather than invent a name.
+B="$(lost_schedule_body mail-check-orphan "$OWNERS_FIX" "$STATES_FIX" 120)"
+case "$B" in
+    *"did not name an owner"*) pass "unmapped id: the mail refuses to guess an agent name" ;;
+    *) fail "unmapped id: the mail acted on an owner it does not have: $B" ;;
+esac
+case "$B" in
+    *"nudge orphan"*|*"start orphan"*) fail "unmapped id: a name was invented from the id anyway: $B" ;;
+    *) pass "unmapped id: no invented agent name reaches the remedy" ;;
+esac
+
+# --- what the body must KEEP ------------------------------------------------
+# The one thing the old alert got right: this degradation looks healthy. Losing
+# that sentence while fixing the remedy would trade one defect for another.
+B="$(lost_schedule_body mail-check-doctor "$OWNERS_FIX" "$STATES_FIX" 120)"
+case "$B" in
+    *"WILL LOOK HEALTHY"*) pass "the body keeps the sentence the old alert got right" ;;
+    *) fail "the 'looks healthy' warning was dropped: $B" ;;
+esac
+case "$B" in
+    *"120s later"*) pass "the body still reports the grace it waited" ;;
+    *) fail "the grace period is no longer in the mail: $B" ;;
+esac
+case "$B" in
+    *mail-check-doctor*) pass "the body still names the schedule id that went missing" ;;
+    *) fail "the missing id is no longer in the mail: $B" ;;
+esac
+
+# --- mail_check_owners parses the two documents it is given ------------------
+# Fixture-driven, because the failure this guards is silent: an owner map that
+# comes back empty degrades every remedy to "unknown" and the alert still sends.
+OWNDIR="$WORK/owners"; mkdir -p "$OWNDIR"
+cat > "$OWNDIR/pogo" <<'STUB'
+#!/usr/bin/env bash
+case "$1 $2" in
+  "agent list") cat "$POGO_STUB_AGENTS" ;;
+  "schedule list") cat "$POGO_STUB_SCHED" ;;
+  *) exit 1 ;;
+esac
+STUB
+chmod +x "$OWNDIR/pogo"
+cat > "$OWNDIR/agents.json" <<'STUB'
+[
+  {
+    "name": "doctor",
+    "pid": 5959,
+    "type": "crew",
+    "status": "running",
+    "process_name": "pogo-crew-doctor"
+  },
+  {
+    "name": "pm-dealdesk",
+    "pid": 0,
+    "type": "crew",
+    "status": "parked",
+    "process_name": "pogo-crew-pm-dealdesk"
+  },
+  {
+    "name": "c6d7b",
+    "pid": 3029,
+    "type": "polecat",
+    "status": "running",
+    "process_name": "pogo-cat-c6d7b"
+  }
+]
+STUB
+cat > "$OWNDIR/sched.json" <<'STUB'
+[
+  {
+    "id": "mail-check-doctor",
+    "agent": "doctor",
+    "kind": "mail-check"
+  },
+  {
+    "id": "mail-check-mg-6d7b",
+    "agent": "c6d7b",
+    "kind": "mail-check"
+  },
+  {
+    "id": "gc-sweep",
+    "agent": "mayor",
+    "kind": "other"
+  }
+]
+STUB
+OWN="$(POGO_CLI="$OWNDIR/pogo" POGO_STUB_AGENTS="$OWNDIR/agents.json" POGO_STUB_SCHED="$OWNDIR/sched.json" mail_check_owners)"
+case "$OWN" in
+    *"mail-check-doctor doctor crew"*) pass "mail_check_owners maps a crew schedule to its agent AND its type" ;;
+    *) fail "mail_check_owners crew row: $OWN" ;;
+esac
+# The LAST agent object shares an awk record with the document separator. If the
+# separator is honoured before that record is read as an agent, the last agent
+# silently loses its type — and its remedy silently loses the polecat branch.
+case "$OWN" in
+    *"mail-check-mg-6d7b c6d7b polecat"*) pass "mail_check_owners keeps the type of the LAST agent in the list" ;;
+    *) fail "mail_check_owners dropped the last agent's type: $OWN" ;;
+esac
+case "$OWN" in
+    *gc-sweep*) fail "mail_check_owners included a schedule that is not a mail-check: $OWN" ;;
+    *) pass "mail_check_owners ignores schedules that are not mail-checks" ;;
+esac
+
+# agent_states must carry the STATUS, and must distinguish "read it, it is
+# empty" from "could not read".
+R="$(POGO_CLI="$OWNDIR/pogo" POGO_STUB_AGENTS="$OWNDIR/agents.json" agent_states)"; RRC=$?
+{ [ "$RRC" -eq 0 ] && [ "$R" = "$(printf 'c6d7b running\ndoctor running\npm-dealdesk parked')" ]; } \
+    && pass "agent_states names only real agents (not process_name) and carries each one's status" \
+    || fail "agent_states returned rc=$RRC states='$R'"
+printf '[]' > "$OWNDIR/empty.json"
+R="$(POGO_CLI="$OWNDIR/pogo" POGO_STUB_AGENTS="$OWNDIR/empty.json" agent_states)"; RRC=$?
+{ [ "$RRC" -eq 0 ] && [ -z "$R" ]; } \
+    && pass "agent_states: an empty fleet reads as empty, exit 0 — a real answer" \
+    || fail "agent_states on an empty registry: rc=$RRC states='$R'"
+R="$(POGO_CLI="" agent_states)"; RRC=$?
+{ [ "$RRC" -ne 0 ] && [ -z "$R" ]; } \
+    && pass "agent_states: no CLI to ask exits NON-ZERO, so the caller reaches the '?' sentinel" \
+    || fail "agent_states with no CLI: rc=$RRC states='$R'"
+
+# --- the callsite is wired to all of it -------------------------------------
+# The helpers can be perfect and unreached. These read the runner itself, because
+# the alternative is running a whole nightly bounce to find out.
+grep -q 'lost_schedule_body "\$lost" "\$pre_owners" "\$states"' "$RUNNER" \
+    && pass "the alert body is COMPUTED from the lost ids, the owner map and the registry" \
+    || fail "the lost-schedule alert does not call lost_schedule_body with all three inputs"
+grep -q 'states="\$(agent_states)" || states="?"' "$RUNNER" \
+    && pass "the callsite turns an unreadable registry into '?' instead of into 'nothing is running'" \
+    || fail "the callsite does not guard agent_states' failure"
+grep -q 'pre_owners="\$(mail_check_owners)"' "$RUNNER" \
+    && pass "the owner map is captured BEFORE the bounce, while the agents that own the schedules still exist" \
+    || fail "the owner map is not captured pre-bounce"
+[ "$(grep -c 'Restore by nudging the affected agents to re-register' "$RUNNER")" -eq 0 ] \
+    && pass "the unconditional nudge remedy is GONE from the runner" \
+    || fail "the runner still contains the unconditional 'nudge to re-register' remedy"
+
+# ---------------------------------------------------------------------------
 # drain_budget — the window-derived drain (mg-8f7e)
 # ---------------------------------------------------------------------------
 # The 2026-07-31 nightly exited 7 with three polecats still working at 1h33m,
