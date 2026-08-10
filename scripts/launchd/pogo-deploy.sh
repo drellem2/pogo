@@ -2243,6 +2243,240 @@ missing_ids() {
 }
 
 # ---------------------------------------------------------------------------
+# 8b. Whose schedule was it, and is that agent still there? (mg-6d7b)
+# ---------------------------------------------------------------------------
+# A missing mail-check has (at least) two causes with OPPOSITE remedies:
+#
+#   (a) the agent is alive and lost its schedule  -> nudge it to re-register
+#   (b) the agent is GONE and the schedule was reaped with it -> START the agent
+#
+# One observation — "present before, absent after" — cannot tell them apart, and
+# for eight months this check printed (a)'s remedy unconditionally. On 2026-08-10
+# it fired on case (b): doctor was absent from `pogo agent list` entirely, and
+# `pogo nudge doctor` had nothing to nudge. A nudge into the void returns no
+# error worth noticing, so an agent following the printed remedy literally would
+# have concluded the fleet was restored.
+#
+# So: read the registry before composing the mail, and branch. And where the
+# registry cannot be read at all, say THAT — an alert that does not know must not
+# print a confident remedy, because a confident wrong remedy is what this fixes.
+
+# mail_check_owners — "<schedule-id> <agent> <type>" per line, for the same
+# schedules mail_check_ids lists, read at the same moment.
+#
+# The owner is NOT derivable from the id and must never be guessed from it. A
+# polecat's schedule is keyed on its WORK ITEM (mail-check-mg-6d7b) while the
+# agent is named after something else entirely (c6d7b); a remedy that strips the
+# "mail-check-" prefix names an agent that does not exist, which is the same
+# class of unusable remedy this section exists to remove. The type is captured
+# here, pre-bounce, for the same reason: a gone agent is gone from the registry,
+# so afterwards there is nothing left to ask what kind it was.
+mail_check_owners() {
+    [ -n "$POGO_CLI" ] || { echo "?"; return 1; }
+    local sched agents
+    sched="$("$POGO_CLI" schedule list --json 2>/dev/null)" || { echo "?"; return 1; }
+    # An unreadable agent list is not fatal here: the id->agent mapping is still
+    # worth having, and an empty type just costs the remedy its polecat branch.
+    agents="$("$POGO_CLI" agent list --json 2>/dev/null)" || agents=""
+    # One awk over both documents, separated by a sentinel that cannot occur in
+    # either: the agents pass builds name->type, the schedules pass consumes it.
+    # RS="{" makes each record one JSON object, so a field is read from the
+    # object it belongs to rather than from whatever line happens to be nearby.
+    { printf '%s' "$agents"; printf '\nPOGODEPLOYSPLIT\n'; printf '%s' "$sched"; } | awk '
+        function field(name,   s) {
+            if (!match($0, "\"" name "\"[ \t]*:[ \t]*\"[^\"]*\"")) return ""
+            s = substr($0, RSTART, RLENGTH)
+            sub("^\"" name "\"[ \t]*:[ \t]*\"", "", s)
+            sub(/"$/, "", s)
+            return s
+        }
+        BEGIN { RS = "{"; phase = 0 }
+        # The sentinel shares a record with the LAST agent object (records break
+        # at "{", so an object body runs up to the next one). Read that record
+        # as an agent FIRST, then switch — flipping on sight would drop it.
+        phase == 0 {
+            n = field("name"); if (n != "") type[n] = field("type")
+            if ($0 ~ /POGODEPLOYSPLIT/) phase = 1
+            next
+        }
+        {
+            id = field("id"); agent = field("agent")
+            if (id !~ /^mail-check-/ || agent == "") next
+            print id, agent, (agent in type ? type[agent] : "")
+        }
+    ' | sort -u
+}
+
+# schedule_owner ID OWNERS — the agent a schedule belonged to, "" if unmapped.
+schedule_owner() {
+    printf '%s\n' "$2" | awk -v id="$1" '$1 == id { print $2; exit }'
+}
+
+# schedule_owner_type ID OWNERS — that agent's pre-bounce type, "" if unknown.
+schedule_owner_type() {
+    printf '%s\n' "$2" | awk -v id="$1" '$1 == id { print $3; exit }'
+}
+
+# agent_states — "<name> <status>" per line, from the same registry
+# `pogo agent list` reads. That command's own help says presence here is NOT
+# liveness, and it means it: a PARKED agent is listed, with pid 0 and
+# status "parked". Reading presence alone would call it alive and prescribe a
+# nudge for a process that is not there — the very defect this section removes,
+# reintroduced by the fix for it. So carry the status, and let the caller decide.
+#
+# Exits 1 with NO output when the registry cannot be read at all. That is a
+# distinct answer from "the registry is empty": collapsing them would make an
+# unreachable pogod report every agent as gone and prescribe a start for a fleet
+# that is fine.
+agent_states() {
+    [ -n "$POGO_CLI" ] || return 1
+    local out
+    out="$("$POGO_CLI" agent list --json 2>/dev/null)" || return 1
+    [ -n "$out" ] || return 1
+    printf '%s' "$out" | awk '
+        function field(name,   s) {
+            if (!match($0, "\"" name "\"[ \t]*:[ \t]*\"[^\"]*\"")) return ""
+            s = substr($0, RSTART, RLENGTH)
+            sub("^\"" name "\"[ \t]*:[ \t]*\"", "", s)
+            sub(/"$/, "", s)
+            return s
+        }
+        BEGIN { RS = "{" }
+        { n = field("name"); if (n != "") print n, field("status") }' | sort -u
+    return 0
+}
+
+# agent_state NAME STATES — one agent's registry status, "" if not listed.
+agent_state() {
+    printf '%s\n' "$2" | awk -v n="$1" '$1 == n { print $2; exit }'
+}
+
+# lost_schedule_verdict ID OWNERS STATES — "<verdict> <agent> <status>", where
+# verdict is alive | gone | parked | odd | unknown. STATES is the newline-
+# separated "<name> <status>" registry, or the single token "?" when it could
+# not be read.
+lost_schedule_verdict() {
+    local id="$1" owners="$2" states="$3" agent state
+    agent="$(schedule_owner "$id" "$owners")"
+    if [ -z "$agent" ]; then echo "unknown ? ?"; return 0; fi
+    if [ "$states" = "?" ]; then echo "unknown $agent ?"; return 0; fi
+    state="$(agent_state "$agent" "$states")"
+    case "$state" in
+        # Not in the registry at all: the agent went and took the schedule.
+        "")        echo "gone $agent absent" ;;
+        running)   echo "alive $agent running" ;;
+        # Listed, deliberately dormant. Losing its mail-check is the reap
+        # working, and BOTH other remedies are wrong for it.
+        parked)    echo "parked $agent parked" ;;
+        # Listed in some other state (exited, restarting, ...). Not running, and
+        # not obviously startable either — report the state rather than pick.
+        *)         echo "odd $agent $state" ;;
+    esac
+}
+
+# lost_schedule_remedy ID VERDICT AGENT TYPE STATE — the paragraph for one id.
+lost_schedule_remedy() {
+    local id="$1" verdict="$2" agent="$3" type="$4" state="${5:-}"
+    case "$verdict" in
+        alive)
+            printf '%s\n' "  $id — $agent IS RUNNING. The agent survived the bounce and its
+    schedule did not, so it can put the schedule back itself:
+
+        pogo nudge $agent
+
+    'pogo agent list' reports presence, not liveness — but the nudge checks: it
+    confirms delivery from the agent's own submission receipts and FAILS if none
+    arrives, so a nudge that reports success really did land."
+            ;;
+        parked)
+            printf '%s\n' "  $id — $agent is PARKED. A parked agent is dormant on purpose and stays
+    dormant across restarts, so its mail-check being reaped is the reap working.
+    Neither other remedy applies: there is no process to nudge, and starting it
+    would undo the parking. Act only if it should NOT be parked:
+
+        pogo agent wake $agent"
+            ;;
+        odd)
+            printf '%s\n' "  $id — $agent is in the registry with status '$state', which is neither
+    running nor parked, so this alert will not choose a remedy for it. If that
+    says 'restarting', pogod is already bringing it back and the schedule should
+    return on its own — re-read before acting:
+
+        pogo agent list
+        pogo agent diagnose $agent"
+            ;;
+        gone)
+            if [ "$type" = "polecat" ]; then
+                printf '%s\n' "  $id — $agent is NOT RUNNING, and it was a POLECAT before the bounce.
+    Its schedule was reaped with it. A polecat that finished during the bounce
+    taking its mail-check with it is the reap working, not a fault — and
+    'pogo agent start' does not apply to polecats. Check whether the work is
+    still owed before doing anything:
+
+        mg show ${id#mail-check-}"
+            else
+                printf '%s\n' "  $id — $agent is NOT RUNNING; its schedule was reaped with it. Nudging
+    it CANNOT work — there is no process to nudge, and a nudge into the void
+    reports nothing worth noticing. Start the agent instead:
+
+        pogo agent start $agent
+
+    If $agent goes missing on every nightly bounce, it is not declared with
+    auto_start = true in a prompt file pogod discovers ('pogo agent prompt
+    list' shows what it discovers, and 'pogo agent start' reads
+    ~/.pogo/agents/crew/$agent.md). That is local config, not a pogo fault —
+    but until it is fixed this alert will fire every night."
+            fi
+            ;;
+        *)
+            if [ "$agent" = "?" ]; then
+                printf '%s\n' "  $id — the schedule list did not name an owner for this id, so this
+    alert CANNOT say which agent to act on. Do not guess it from the id: a
+    polecat's schedule is keyed on its work item, not on its agent name.
+
+        pogo schedule list --json | grep -A2 $id"
+            else
+                printf '%s\n' "  $id — could NOT determine whether $agent is running (the agent registry
+    was unreadable). The two remedies are opposites and this alert does not
+    know which applies. Look first, then act:
+
+        pogo agent list          # is $agent there?
+        pogo nudge $agent        # ONLY if it is
+        pogo agent start $agent  # ONLY if it is not"
+            fi
+            ;;
+    esac
+}
+
+# lost_schedule_body LOST OWNERS STATES [GRACE] — the whole mail body.
+lost_schedule_body() {
+    local lost="$1" owners="$2" states="$3" grace="${4:-$GRACE}"
+    printf '%s\n' "The redeploy succeeded, but ${grace}s later these mail-check schedules that
+existed before the bounce are gone:
+"
+    local id v verdict agent state type
+    while IFS= read -r id; do
+        [ -n "$id" ] || continue
+        # "<verdict> <agent> <state>", split positionally rather than re-derived,
+        # so the paragraph is written about the classification that was made.
+        v="$(lost_schedule_verdict "$id" "$owners" "$states")"
+        verdict="${v%% *}"; v="${v#* }"
+        agent="${v%% *}"; state="${v#* }"
+        type="$(schedule_owner_type "$id" "$owners")"
+        lost_schedule_remedy "$id" "$verdict" "$agent" "$type" "$state"
+        printf '\n'
+    done <<EOF
+$lost
+EOF
+    printf '%s\n' "The fleet's mail loop is degraded and WILL LOOK HEALTHY — pogod is up, the port
+answers, the agents that are still there are alive. Diagnose:
+
+  pogo schedule list | grep mail-check
+  pogo agent list
+  pogo agent diagnose <name>"
+}
+
+# ---------------------------------------------------------------------------
 # 9. Lock
 # ---------------------------------------------------------------------------
 # A redeploy can legitimately take an hour (the drain waits for polecats). If a
@@ -2727,6 +2961,9 @@ $check_out"
     # --- snapshot before the bounce ----------------------------------------
     local pre; pre="$(mail_check_ids)"
     log "pre-bounce mail-check schedules: $(printf '%s' "$pre" | tr '\n' ' ')"
+    # Who owns each of them, captured NOW because a schedule that is reaped with
+    # its agent leaves nothing behind to ask afterwards (mg-6d7b).
+    local pre_owners; pre_owners="$(mail_check_owners)"
 
     # --- the redeploy -------------------------------------------------------
     # --yes because confirm() exits 3 without a tty. NEVER --force: the two
@@ -2796,19 +3033,19 @@ $check_out"
     if [ "$lost" = "?" ]; then
         log "mail-check re-check: UNKNOWN (could not read schedules before or after)"
     elif [ -n "$lost" ]; then
+        # Hoisted, not inlined: `states="$(agent_states)" || states="?"` on one
+        # line reads as an error cascade, and the sentinel matters too much to
+        # hide. An unreadable registry becomes "?" — the third answer — and never
+        # silently becomes "nothing is running" (mg-6d7b).
+        local states
+        states="$(agent_states)" || states="?"
+        if [ "$states" = "?" ]; then
+            log "post-bounce liveness: UNKNOWN — the agent registry could not be read, so the mail will not prescribe a remedy"
+        else
+            log "post-bounce liveness: $(printf '%s' "$states" | grep -c .) agents in the registry ($(printf '%s\n' "$states" | awk '$2 == "running"' | grep -c .) running)"
+        fi
         alert "[pogo-deploy] mail-check schedules LOST across the nightly bounce" \
-"The redeploy succeeded, but ${GRACE}s later these mail-check schedules that
-existed before the bounce are gone:
-
-$lost
-
-The fleet's mail loop is degraded and WILL LOOK HEALTHY — pogod is up, the port
-answers, agents are alive. Diagnose:
-
-  pogo schedule list | grep mail-check
-  pogo agent diagnose <name>
-
-Restore by nudging the affected agents to re-register."
+            "$(lost_schedule_body "$lost" "$pre_owners" "$states" "$GRACE")"
     else
         log "mail-check re-check: OK — every pre-bounce schedule is back ($(printf '%s' "$post" | grep -c . ) present)"
     fi

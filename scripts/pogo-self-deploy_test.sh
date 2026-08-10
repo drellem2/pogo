@@ -863,6 +863,59 @@ SLACK1=$'mail-check-mg-aaaa'          # only mg-aaaa had a schedule to lose
     && pass "an empty set is a fact (0 -> 0 = ok), a '?' is an absence of one (-> unknown)" \
     || fail "empty set did not read as a real, reachable, empty fleet"
 
+# --- what the FAILED branch tells the reader to DO (mg-6d7b) ----------------
+# This check reads schedules and never the agent registry, so it can establish
+# that a mail-check is gone and cannot establish WHY. Those are two causes with
+# opposite remedies: an agent that survived can re-register on a nudge, and an
+# agent that is GONE took its schedule with it and has nothing to nudge. For
+# eight months this branch printed the first one unconditionally, and on
+# 2026-08-10 it fired on the second — doctor was absent from `pogo agent list`
+# entirely. A nudge into the void reports nothing worth noticing, so following
+# it ends with the fleet recorded as restored and the mail loop still dead.
+#
+# Exercised, not grepped: the remedy has to be in the OUTPUT of the branch that
+# fires, and a string that moved to a comment is not in the output.
+MC_OUT="$(
+    MAIL_CHECK_TIMEOUT=0
+    mail_check_ids() { printf 'mail-check-mayor'; }   # the doctor loop is gone
+    verify_mail_checks_restored "$(printf 'mail-check-mayor\nmail-check-doctor')" "" 2>&1
+)"
+case "$MC_OUT" in
+    *"mail-check-doctor"*) pass "self-deploy: the FAILED branch still names the lost schedule" ;;
+    *) fail "self-deploy: the lost schedule is not named: $MC_OUT" ;;
+esac
+case "$MC_OUT" in
+    *"pogo agent start <agent>"*) pass "self-deploy: the branch offers the remedy for an agent that is GONE" ;;
+    *) fail "self-deploy: the only remedy offered is still the one that cannot work when the agent is gone: $MC_OUT" ;;
+esac
+case "$MC_OUT" in
+    *"pogo nudge <agent>"*) pass "self-deploy: it KEEPS the nudge for the case that one is right for" ;;
+    *) fail "self-deploy: the nudge remedy was dropped rather than conditioned: $MC_OUT" ;;
+esac
+case "$MC_OUT" in
+    *"depends on"*|*"DEPENDS ON"*) pass "self-deploy: the two remedies are printed as CONDITIONAL, not as a list to try" ;;
+    *) fail "self-deploy: two opposite remedies are printed with nothing saying which applies: $MC_OUT" ;;
+esac
+case "$MC_OUT" in
+    *"pogo agent list"*) pass "self-deploy: it names the command that resolves the condition" ;;
+    *) fail "self-deploy: the reader is given a condition and no way to evaluate it: $MC_OUT" ;;
+esac
+# The exact sentence the 2026-08-10 alert was wrong with, in its unconditional form.
+case "$MC_OUT" in
+    *"restore by nudging the affected agents"*) fail "self-deploy: the unconditional nudge remedy is still printed: $MC_OUT" ;;
+    *) pass "self-deploy: the unconditional 'restore by nudging' sentence is gone" ;;
+esac
+# And the healthy path must not have picked any of this up.
+MC_OK="$(
+    MAIL_CHECK_TIMEOUT=0
+    mail_check_ids() { printf 'mail-check-mayor'; }
+    verify_mail_checks_restored "mail-check-mayor" "" 2>&1
+)"
+case "$MC_OK" in
+    *"pogo agent start"*|*"pogo nudge"*) fail "self-deploy: a healthy post-check prints a remedy: $MC_OK" ;;
+    *) pass "self-deploy: a healthy post-check prescribes nothing" ;;
+esac
+
 # --- extract_mail_check_ids against a representative /scheduler/schedules body ---
 SCHEDS='[{"id":"mail-check-mayor","agent":"mayor","cron":"*/10 * * * *"},{"id":"sweep-morning","agent":"crew-pm-pogo","cron":"0 9 * * *"},{"id":"mail-check-pm-pogo","agent":"pm-pogo","cron":"*/10 * * * *"},{"id":"mail-check-mg-de08","agent":"de08","cron":"*/10 * * * *"}]'
 [ "$(printf '%s' "$SCHEDS" | extract_mail_check_ids)" = $'mail-check-mayor\nmail-check-mg-de08\nmail-check-pm-pogo' ] \

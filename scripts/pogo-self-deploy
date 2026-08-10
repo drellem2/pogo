@@ -582,9 +582,18 @@ verify_mail_checks_restored() {
             err "  LOST: $lost"
             err "  pre-bounce $(set_size "$pre"), now $(set_size "$post"), expected loss $(set_size "$slack") (mg-de08)"
             err "  the fleet's mail loop is degraded and WILL LOOK HEALTHY. Diagnose:"
+            err "    pogo agent list               # FIRST: is the owning agent still there at all?"
             err "    pogo schedule list | grep mail-check"
             err "    pogo agent diagnose <name>    # reports no_mail_loop for an agent with no loop"
-            err "  restore by nudging the affected agents to re-register their mail-check."
+            # This check reads schedules, never the agent registry, so it cannot
+            # tell the two causes apart — and on 2026-08-10 the one it always
+            # printed was the impossible one (mg-6d7b). It prints both, gated on
+            # the answer it does not have, rather than a confident guess:
+            err "  the REMEDY depends on that first answer, and the two are opposites:"
+            err "    agent present -> pogo nudge <agent>        # it survived; it can re-register"
+            err "    agent GONE    -> pogo agent start <agent>  # the schedule was reaped WITH it;"
+            err "                                               # a nudge has nothing to nudge"
+            err "  pogo-deploy's later re-check reads the registry and mails the resolved answer."
             ;;
     esac
 }
