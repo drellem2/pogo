@@ -344,8 +344,38 @@ expect_absent   "C14 no \`spawn-pogocat\` subcommand"                   "$HELP_C
 # covers all of them.
 
 say "Phase D — frozen worker identifiers (BranchPrefix, polecats dir, TypePolecat, cat- actor, POGO_ROLE)"
-info "\$ go test ./internal/agent -run TestWorkerRenameFreezesIdentifiers -count=1 -v"
-if OUT_D="$(cd "$REPO_ROOT" && go test ./internal/agent -run TestWorkerRenameFreezesIdentifiers -count=1 -v 2>&1)"; then
+
+# BUDGETED, and routed through go-test-budget.sh rather than carrying a bare
+# -timeout (mg-37d4). This invocation had no bound at all, so it inherited Go's
+# default 10 minutes — and Go implements a timeout by PANICKING, so a slow run
+# here ended in a ten-minute wait followed by an unlabelled goroutine dump. That
+# is the same defect as gh#107's `test.sh` case, in a worse place to read it:
+# this script runs as an UPGRADE check, where a long hang ending in a dump is
+# most likely to be read as "the upgrade broke something" rather than "a test
+# was slow". A panic dump and a timeout demand opposite responses; before this
+# they were the same token. go-test-budget.sh is what makes them different — it
+# names the package and the budget in words at the tail of the output.
+#
+# WHY 2m, AND WHY NOT THE GATE'S 20m. The gate budget bounds `./...` — every
+# package, with internal/agent the slowest at 268.7s isolated. THIS site runs
+# ONE test under -run, which is a different workload by three orders of
+# magnitude: measured 0.206s / 0.216s / 0.222s / 0.226s / 0.250s / 0.336s over
+# 7 runs at host load 10-18 (2026-08-10, this branch). Copying 20m here would
+# have bounded a fifth of a second with twenty minutes.
+#
+# Note what -timeout does and does not cover: it bounds the TEST BINARY, not the
+# compile. Cold-cache cost here is ~8.1s wall of which 0.216s is execution
+# (measured with an isolated GOCACHE), so the budget is sized against ~0.3s of
+# work and the compile is outside it either way.
+#
+# 2m is ~360x the slowest sample. Applying the load^0.46 response mg-a465 fitted
+# to internal/refinery, from load 18 to the load 174 this host has recorded,
+# gives ~0.9s — still ~130x under budget. So this cannot fire on contention, it
+# fires only on a genuine wedge, and it surfaces one 5x sooner than Go's silent
+# default. It also sits well clear of go-test-budget.sh's 60s floor rather than
+# resting on it.
+info "\$ POGO_GO_TEST_TIMEOUT=2m scripts/go-test-budget.sh ./internal/agent -run TestWorkerRenameFreezesIdentifiers -count=1 -v"
+if OUT_D="$(cd "$REPO_ROOT" && POGO_GO_TEST_TIMEOUT=2m bash scripts/go-test-budget.sh ./internal/agent -run TestWorkerRenameFreezesIdentifiers -count=1 -v 2>&1)"; then
     printf '%s\n' "$OUT_D" | grep -E '^(=== RUN|--- PASS|--- FAIL|ok|FAIL|PASS)' | sed 's/^/    | /'
     pass "D1 all five frozen worker identifiers unchanged under a display rename"
 else
