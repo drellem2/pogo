@@ -1177,6 +1177,9 @@ no apparent reason.
 
 - **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent` (the addressee that did
   **not** hear — the open question is what the coordinator was never told), `details`
+- **Optional envelope:** `work_item_id`, `repo` — present whenever the exited agent had them
+  (mg-32e3). A lost notice is exactly when this event is the only surviving trace, so it has to
+  answer the same question the notice would have: which item just became unsafe to dispatch at
 - **`details` fields:**
   - `row` (string, required): always `"A15"`
   - `exited_agent` (string, required): whose worktree it was
@@ -1188,7 +1191,53 @@ no apparent reason.
     without saying why is a record nobody can act on
 
 ```json
-{"schema_version":1,"timestamp":"2026-07-30T04:06:00.000000000Z","event_type":"worktree_notice_undelivered","agent":"mayor","details":{"row":"A15","exited_agent":"cat-mg-8c66","worktree":"/Users/daniel/.pogo/polecats/8c66","outcome":"preserved","mail_error":"mg mail send failed: no such mailbox"}}
+{"schema_version":1,"timestamp":"2026-07-30T04:06:00.000000000Z","event_type":"worktree_notice_undelivered","agent":"mayor","work_item_id":"mg-8c66","repo":"/Users/daniel/dev/pogo","details":{"row":"A15","exited_agent":"cat-mg-8c66","worktree":"/Users/daniel/.pogo/polecats/8c66","outcome":"preserved","mail_error":"mg mail send failed: no such mailbox"}}
+```
+
+#### `worktree_preserved`
+
+An exited agent's worktree was RETAINED rather than reaped, and **the work item it belongs to now has
+work that no branch and no push can see** (mg-32e3).
+
+**This is the one form of stranded work every other guard is blind to, by construction.** The
+spawn-time stranded-work refusal, `git cherry`, `strandedwork.Inspect`, `pogo check-stranded` and both
+`work_item_stranded_push` reporters are all defined over PUSHED commits. `~/.pogo/polecats/qbe37` was
+preserved on 2026-08-10 with 16 uncommitted paths, including a 1450-line package that existed in no
+other location on the machine; `pogo gc` would eventually have reclaimed the tree.
+
+**It is the record half of a path that only ever had a mail half** — the exact mirror of
+`work_item_stranded_push`, whose event half worked and whose mail half was missing until mg-be37. The
+preservation notice worked (22 delivered notices over three days) but emitted nothing structured, so
+three days of preservations had to be reconstructed by grepping `PRESERVED worktree` out of
+`pogod.log` — which pogod writes to inherited stderr and which is therefore not durable at all.
+
+**One event type covers both retention outcomes**, discriminated by `outcome` and using
+`worktree_notice_undelivered`'s vocabulary so the two join on that field. A consumer asking "does this
+item have work nobody pushed?" wants both: `preserved` is a positive finding and `undetermined` is a
+tree that could not be ruled out.
+
+**It reports; it blocks nothing.** No dispatch is refused and no tree is reclaimed on the strength of
+it. Additive — no `schema_version` bump.
+
+- **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent` (the exited agent whose
+  tree it is — the opposite attribution from `worktree_notice_undelivered` above, and for the same
+  reason: there the open question is what the addressee was never told, here it is what this agent
+  left behind), `details`
+- **Optional envelope:** `work_item_id` (absent for a crew agent or a polecat spawned without `--id`),
+  `repo`
+- **`details` fields:**
+  - `worktree` (string, required): the retained tree
+  - `outcome` (string, required): `"preserved"` or `"undetermined"`, as above
+  - `pushed` (bool, required): always `false`, stated rather than implied — this is the population
+    every pushed-commit guard misses, and a consumer should not have to infer that from a type name
+  - `detail` (string, required): the underlying refusal, including the dirty paths or the `git status`
+    failure
+  - `dirty_paths` (int) and `files` ([]string): present only when `outcome` is `"preserved"`, because a
+    count is meaningful only when the tree was actually read. `files` is capped at 10 entries;
+    `dirty_paths` is the full count
+
+```json
+{"schema_version":1,"timestamp":"2026-08-10T01:51:59.000000000Z","event_type":"worktree_preserved","agent":"cat-qbe37","work_item_id":"mg-be37","repo":"/Users/daniel/dev/pogo","details":{"worktree":"/Users/daniel/.pogo/polecats/qbe37","outcome":"preserved","pushed":false,"dirty_paths":16,"files":["?? internal/strandwatch/"],"detail":"worktree /Users/daniel/.pogo/polecats/qbe37 has 16 uncommitted change(s), refusing to remove: ..."}}
 ```
 
 ### Server run mode

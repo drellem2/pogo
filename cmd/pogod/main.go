@@ -1578,7 +1578,18 @@ Flags:
 			// (mg-ee02). See cleanupAgentWorktree for why preservation and
 			// not refusal, and for the notification that keeps a preserved
 			// tree from accumulating unnoticed.
-			cleanupAgentWorktree(a.Name, a.SourceRepo, a.WorktreeDir, coordinator, client.SendMGMail)
+			//
+			// WorkItemID is passed because a preserved tree is the one form of
+			// stranded work no pushed-commit guard can see, and without the id
+			// the notice cannot name the item that is now unsafe to dispatch at
+			// (mg-32e3). It was available here all along.
+			cleanupAgentWorktree(exitedAgent{
+				Name:        a.Name,
+				EventAgent:  a.EventAgent(),
+				WorkItemID:  a.WorkItemID,
+				SourceRepo:  a.SourceRepo,
+				WorktreeDir: a.WorktreeDir,
+			}, coordinator, client.SendMGMail)
 			a.Cleanup()
 			agentRegistry.Remove(a.Name)
 			// Eagerly reap this agent's mail-check loop so it stops firing the

@@ -1127,6 +1127,9 @@ neither reporter can see), and rely on the mail for the rest.
 
 There are **two** automatic reporters, and between them they cover every polecat
 this daemon has ever supervised. Both mail the coordinator; both are report-only.
+Both are also defined over **pushed** commits — for the work a polecat never
+committed at all, see [the third reporter](#the-third-reporter-uncommitted-work-in-a-preserved-worktree)
+below.
 
 **1. At release — `reportStrandedWorkOnRelease` (internal/agent/strandedgate.go).**
 pogod checks a polecat's branch as it releases the claim, and mails if the branch
@@ -1179,15 +1182,57 @@ A **failed send** emits `work_item_stranded_push_undelivered`. Without it, "no
 stranding was found" and "a stranding was found and the mail bounced" are the same
 silence — which is the defect this whole surface exists to close, one layer down.
 
-### What none of this covers
+### The third reporter: uncommitted work in a preserved worktree
 
-Every guard here — the spawn refusal, `git cherry`, both reporters — is defined
-over **pushed** commits. Uncommitted work in a preserved worktree is invisible to
-all of them by construction. The only artifact that knows is the
-preserved-worktree notice, and that is addressed to worktree hygiene: it says a
-tree is pinned and how to reclaim it, and nothing about whether the work item is
-unsafe to dispatch. The two facts live in different messages aimed at different
-concerns, and combining them is an open problem.
+Every guard above — the spawn refusal, `git cherry`, both reporters — is defined
+over **pushed** commits, and is blind by construction to work that was never
+committed. That is not hypothetical. `~/.pogo/polecats/qbe37` was preserved on
+2026-08-10 with **16 uncommitted paths**, including an entire `internal/strandwatch/`
+package (1450 lines) that existed in no other location on the machine. Had nobody
+looked, `pogo gc` would eventually have reclaimed the tree.
+
+**Something already knew, and it was addressed to the wrong question.**
+`cleanupAgentWorktree` (cmd/pogod/worktreecleanup.go) preserves a dirty tree at
+every exit route and mails the coordinator, and that has worked all along — 22
+delivered notices over three days, two of them for qbe37. But the notice was
+composed from the agent name, the repo and the tree, so it could say *a tree is
+pinned, rescue it, reclaim it with `pogo gc`* and could not say **do not dispatch a
+worker at this work item** — it did not know what a work item was. The message that
+says exactly that sentence, `work_item_stranded_push`, is defined over pushed
+commits and so never fired here. The fleet held both halves and combined neither:
+on 2026-08-10 the coordinator received two preservation notices for qbe37 and
+dispatched at its work item anyway. The work was rescued because a chain of mail
+reached the new polecat in time, not because any mechanism connected the tree to
+the item.
+
+Since mg-32e3 the preservation path is handed `a.WorkItemID` — available at the
+call site all along — and the two halves combine:
+
+- **The notice carries the prohibition, in the subject.** `preserved uncommitted
+  work in qbe37's worktree — do NOT dispatch at mg-be37`. The body says why nothing
+  else will tell you, and that the board will advertise the item as ready anyway.
+  A do-not-dispatch sentence buried in paragraph four of a message filed under
+  worktree hygiene is a sentence that does not travel.
+- **The fact is on the event spine** as `worktree_preserved`, carrying
+  `work_item_id` and `repo` — the record half this path never had. Its mail half
+  was validated end to end and its record half was `log.Printf` to inherited
+  stderr, the exact mirror of `work_item_stranded_push` before mg-be37. Query it
+  with `pogo events --type worktree_preserved`.
+- **An unreadable tree keeps its own answer.** `outcome: undetermined` means
+  `git status` failed, so the prohibition is the conditional one — *do not dispatch
+  until this tree has been read* — and never a claim that there is work in it.
+- **A missing work item is reported, not omitted.** A crew agent legitimately has
+  none; a polecat with none has a broken agent record, and only a reader can tell
+  which, so the notice says `work item: NONE RECORDED` rather than going quiet.
+  An absent field and a field nobody passed looking identical is what this defect
+  *was*.
+
+It reports, like the other two. No dispatch is refused and no tree is reclaimed on
+the strength of it: the detection was never what failed here.
+
+**No third detector was built, and that was the point.** The signal existed and was
+correct both times it fired; what it lacked was one field, and therefore the
+ability to say the thing that stops the destructive action.
 
 ## GitHub branch protection on main (rulesets)
 

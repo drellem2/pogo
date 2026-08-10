@@ -52,6 +52,18 @@ func wtRepo(t *testing.T) (repo string, worktree string) {
 	return dir, wt
 }
 
+// catAgent is the exitedAgent a polecat's exit hands cleanupAgentWorktree —
+// the same five fields main.go copies out of the registry record.
+func catAgent(name, workItem, repo, wt string) exitedAgent {
+	return exitedAgent{
+		Name:        name,
+		EventAgent:  "cat-" + name,
+		WorkItemID:  workItem,
+		SourceRepo:  repo,
+		WorktreeDir: wt,
+	}
+}
+
 // worktreeAdminState renders git's linked-worktree bookkeeping for repo, so a
 // failed setup command carries the evidence about it instead of only its exit
 // status.
@@ -201,7 +213,7 @@ func TestCleanupAgentWorktreePreservesDirty(t *testing.T) {
 		return nil
 	}
 
-	outcome := cleanupAgentWorktree("cat1", repo, wt, "mayor", mail)
+	outcome := cleanupAgentWorktree(catAgent("cat1", "mg-ee02", repo, wt), "mayor", mail)
 	if outcome != worktreePreserved {
 		t.Fatalf("outcome = %v, want worktreePreserved", outcome)
 	}
@@ -239,7 +251,7 @@ func TestCleanupAgentWorktreeReapsClean(t *testing.T) {
 	mailed := false
 	mail := func(to, from, subject, body string) error { mailed = true; return nil }
 
-	outcome := cleanupAgentWorktree("cat1", repo, wt, "mayor", mail)
+	outcome := cleanupAgentWorktree(catAgent("cat1", "mg-ee02", repo, wt), "mayor", mail)
 	if outcome != worktreeReaped {
 		t.Fatalf("outcome = %v, want worktreeReaped", outcome)
 	}
@@ -260,7 +272,7 @@ func TestCleanupAgentWorktreeReapsClean(t *testing.T) {
 // TestCleanupAgentWorktreeNoWorktree: a --no-worktree polecat has nothing to
 // clean up and must not be treated as an error.
 func TestCleanupAgentWorktreeNoWorktree(t *testing.T) {
-	if got := cleanupAgentWorktree("cat1", "/nonexistent", "", "mayor", nil); got != worktreeNone {
+	if got := cleanupAgentWorktree(catAgent("cat1", "mg-ee02", "/nonexistent", ""), "mayor", nil); got != worktreeNone {
 		t.Errorf("outcome = %v, want worktreeNone", got)
 	}
 }
@@ -276,7 +288,7 @@ func TestCleanupAgentWorktreeSurvivesMailFailure(t *testing.T) {
 	}
 	mail := func(to, from, subject, body string) error { return os.ErrDeadlineExceeded }
 
-	if got := cleanupAgentWorktree("cat1", repo, wt, "mayor", mail); got != worktreePreserved {
+	if got := cleanupAgentWorktree(catAgent("cat1", "mg-ee02", repo, wt), "mayor", mail); got != worktreePreserved {
 		t.Fatalf("outcome = %v, want worktreePreserved even when mail fails", got)
 	}
 	if _, err := os.Stat(keep); err != nil {
@@ -308,7 +320,7 @@ func TestCleanupAgentWorktreeKeepsUndeterminable(t *testing.T) {
 		return nil
 	}
 
-	outcome := cleanupAgentWorktree("cat1", repo, wt, "mayor", mail)
+	outcome := cleanupAgentWorktree(catAgent("cat1", "mg-ee02", repo, wt), "mayor", mail)
 	if outcome != worktreeUndetermined {
 		t.Fatalf("outcome = %v, want worktreeUndetermined", outcome)
 	}
@@ -388,7 +400,7 @@ func TestCleanupAgentWorktreeRecordsAnUndeliveredNotice(t *testing.T) {
 			mail := func(to, from, subject, body string) error {
 				return errors.New("mg mail send failed: no such mailbox")
 			}
-			if got := cleanupAgentWorktree("cat-a15", repo, wt, "mayor", mail); got != tc.want {
+			if got := cleanupAgentWorktree(catAgent("cat-a15", "mg-342d", repo, wt), "mayor", mail); got != tc.want {
 				t.Fatalf("outcome = %v, want %v", got, tc.want)
 			}
 
@@ -427,5 +439,322 @@ func TestCleanupAgentWorktreeRecordsAnUndeliveredNotice(t *testing.T) {
 					"being preserved unannounced", ev.Details["worktree"], wt)
 			}
 		})
+	}
+}
+
+// TestPreservedWorktreeNoticeRefusesDispatchAtItsWorkItem is mg-32e3's control.
+//
+// THE MECHANISM DID NOT FAIL; IT WAS ADDRESSED TO THE WRONG QUESTION. The
+// preserved-worktree notice worked — 22 delivered notices over three days, two
+// of them for `qbe37`, whose tree held 16 uncommitted paths including a
+// 1450-line package that existed in no other location on the machine. What it
+// could not say is "do not dispatch a worker at this work item", because it was
+// composed from the agent name, the repo and the tree, and no work-item id
+// reached it. The message that says exactly that sentence,
+// `work_item_stranded_push`, is defined over PUSHED commits and never fires for
+// a tree whose work was never committed. The fleet held both halves and
+// combined neither, and on 2026-08-10 the coordinator received two notices for
+// qbe37 and dispatched at its work item anyway.
+//
+// So this asserts the sentence, and asserts it in the SUBJECT: a prohibition
+// that arrives in paragraph four of a message filed under worktree hygiene is a
+// prohibition that does not travel.
+func TestPreservedWorktreeNoticeRefusesDispatchAtItsWorkItem(t *testing.T) {
+	repo, wt := wtRepo(t)
+	if err := os.WriteFile(filepath.Join(wt, "strandwatch.go"), []byte("package strandwatch\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var gotSubject, gotBody string
+	mail := func(to, from, subject, body string) error {
+		gotSubject, gotBody = subject, body
+		return nil
+	}
+
+	if got := cleanupAgentWorktree(catAgent("qbe37", "mg-be37", repo, wt), "mayor", mail); got != worktreePreserved {
+		t.Fatalf("outcome = %v, want worktreePreserved", got)
+	}
+
+	if !strings.Contains(gotSubject, "mg-be37") {
+		t.Errorf("the SUBJECT must name the work item — it is the part that gets skimmed and "+
+			"forwarded, and a notice that names only the tree is what let a dispatch go out on "+
+			"top of preserved work. Got %q", gotSubject)
+	}
+	if !strings.Contains(gotSubject, "do NOT dispatch") {
+		t.Errorf("the SUBJECT must carry the prohibition, matching the stranded-push alert. Got %q", gotSubject)
+	}
+	if !strings.Contains(gotBody, "DO NOT DISPATCH A WORKER AT mg-be37") {
+		t.Errorf("the body must say the sentence in full, got:\n%s", gotBody)
+	}
+	if !strings.Contains(gotBody, "work item: mg-be37") {
+		t.Errorf("the body must state the work item as a field a reader can act on, got:\n%s", gotBody)
+	}
+	// The reason the prohibition is needed at all: nothing else can produce it.
+	// A reader told only "there is a pinned tree" reaches for the guards that
+	// exist, and every one of them is blind here.
+	for _, want := range []string{"PUSHED commits", "check-stranded", "priority-wake"} {
+		if !strings.Contains(gotBody, want) {
+			t.Errorf("the body must explain that no pushed-commit guard can see this (missing %q), got:\n%s",
+				want, gotBody)
+		}
+	}
+	// The hygiene half must survive the addition — this is still the message
+	// that says a tree is pinned and how to reclaim it.
+	if !strings.Contains(gotBody, wt) || !strings.Contains(gotBody, "pogo gc") {
+		t.Errorf("the worktree-hygiene half must not be displaced, got:\n%s", gotBody)
+	}
+}
+
+// TestPreservedWorktreeNoticeWithoutAWorkItemSaysSo is the negative arm, and it
+// is the one that keeps this fix from re-committing the defect it repairs.
+//
+// The obvious shape — print the work-item row only when there is an id — makes
+// "this agent has no item" and "nobody passed the id" the same artifact, which
+// is precisely how `a.WorkItemID` sat unpassed five arguments from the call
+// site with nothing anywhere to notice. A crew agent legitimately has no item;
+// a polecat with none has a broken record. Only a reader can tell which, so the
+// notice must say which case it is rather than going quiet.
+//
+// It must also NOT invent a prohibition it cannot address: "do NOT dispatch at
+// """ is worse than silence.
+func TestPreservedWorktreeNoticeWithoutAWorkItemSaysSo(t *testing.T) {
+	repo, wt := wtRepo(t)
+	if err := os.WriteFile(filepath.Join(wt, "wip.go"), []byte("package wip\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var gotSubject, gotBody string
+	mail := func(to, from, subject, body string) error {
+		gotSubject, gotBody = subject, body
+		return nil
+	}
+
+	if got := cleanupAgentWorktree(catAgent("crew1", "", repo, wt), "mayor", mail); got != worktreePreserved {
+		t.Fatalf("outcome = %v, want worktreePreserved", got)
+	}
+	if strings.Contains(gotSubject, "do NOT dispatch") {
+		t.Errorf("with no work item there is no item to refuse dispatch at; the subject must not "+
+			"claim one. Got %q", gotSubject)
+	}
+	if !strings.Contains(gotBody, "NONE RECORDED") {
+		t.Errorf("a missing work item must be REPORTED, not omitted — an absent field and a field "+
+			"nobody passed look identical, and that identity is this ticket. Got:\n%s", gotBody)
+	}
+	if strings.Contains(gotBody, "DO NOT DISPATCH A WORKER AT \n") ||
+		strings.Contains(gotBody, "dispatch at .") {
+		t.Errorf("the prohibition must not be rendered with an empty item, got:\n%s", gotBody)
+	}
+}
+
+// TestUndeterminedWorktreeNoticeDoesNotClaimWorkExists keeps the mg-4d45
+// distinction intact through the mg-32e3 change.
+//
+// Cannot-tell is its own answer. The prohibition still belongs here — an item
+// whose tree could not be read cannot be certified safe to dispatch at — but it
+// must be stated as "until this tree has been read", never as "this tree holds
+// work", which is a claim nobody established.
+func TestUndeterminedWorktreeNoticeDoesNotClaimWorkExists(t *testing.T) {
+	repo, wt := wtRepo(t)
+	if err := os.WriteFile(filepath.Join(wt, ".git"), []byte("gitdir: /nonexistent\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var gotSubject, gotBody string
+	mail := func(to, from, subject, body string) error {
+		gotSubject, gotBody = subject, body
+		return nil
+	}
+
+	if got := cleanupAgentWorktree(catAgent("cat1", "mg-4d45", repo, wt), "mayor", mail); got != worktreeUndetermined {
+		t.Fatalf("outcome = %v, want worktreeUndetermined", got)
+	}
+	if !strings.Contains(gotSubject, "mg-4d45") || !strings.Contains(gotSubject, "do NOT dispatch") {
+		t.Errorf("an unreadable tree still makes its item unsafe to dispatch at; say so in the "+
+			"subject. Got %q", gotSubject)
+	}
+	if !strings.Contains(gotBody, "UNTIL THIS TREE HAS BEEN READ") {
+		t.Errorf("the prohibition must be the conditional one, got:\n%s", gotBody)
+	}
+	if strings.Contains(gotBody, "This tree holds work that was never committed") {
+		t.Errorf("we did not establish that there IS work here — asserting it sends a reader "+
+			"hunting files that may not exist (mg-4d45). Got:\n%s", gotBody)
+	}
+}
+
+// TestPreservedWorktreeIsOnTheEventSpine covers the record half.
+//
+// The preservation path's mail half works and its record half did not exist:
+// three days of it had to be reconstructed by grepping `PRESERVED worktree` out
+// of pogod.log, which pogod writes to inherited stderr and which therefore is
+// not durable at all. That is the exact mirror of `work_item_stranded_push`,
+// whose event half worked and whose mail half was missing until mg-be37 — so
+// both halves are asserted here, keyed on the field that makes the event
+// joinable to anything: the work item.
+//
+// Both outcomes are asserted because a consumer asking "does this item have
+// work nobody pushed?" needs both: `preserved` is a positive finding and
+// `undetermined` is a tree that could not be ruled out.
+func TestPreservedWorktreeIsOnTheEventSpine(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		outcome     string
+		setup       func(t *testing.T, wt string)
+		want        worktreeCleanupOutcome
+		wantDirty   bool
+		wantDetails string
+	}{
+		{
+			name:    "preserved",
+			outcome: "preserved",
+			setup: func(t *testing.T, wt string) {
+				if err := os.WriteFile(filepath.Join(wt, "strandwatch.go"), []byte("package x\n"), 0644); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want:        worktreePreserved,
+			wantDirty:   true,
+			wantDetails: "uncommitted change",
+		},
+		{
+			name:    "undetermined",
+			outcome: "undetermined",
+			setup: func(t *testing.T, wt string) {
+				if err := os.WriteFile(filepath.Join(wt, ".git"), []byte("gitdir: /nonexistent\n"), 0644); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want:        worktreeUndetermined,
+			wantDirty:   false,
+			wantDetails: "cannot determine",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			spine := filepath.Join(t.TempDir(), "events.log")
+			events.SetLogPathForTesting(spine)
+			t.Cleanup(func() { events.SetLogPathForTesting("") })
+
+			repo, wt := wtRepo(t)
+			tc.setup(t, wt)
+			mail := func(to, from, subject, body string) error { return nil }
+
+			if got := cleanupAgentWorktree(catAgent("qbe37", "mg-be37", repo, wt), "mayor", mail); got != tc.want {
+				t.Fatalf("outcome = %v, want %v", got, tc.want)
+			}
+
+			found, err := events.ReadFiltered(spine, events.Filter{Type: "worktree_preserved"})
+			if err != nil {
+				t.Fatalf("reading the spine: %v", err)
+			}
+			if len(found) != 1 {
+				t.Fatalf("want exactly one worktree_preserved event, got %d: %+v\n"+
+					"A retained worktree left NOTHING structured behind before mg-32e3 — three days "+
+					"of this path had to be reconstructed from log.Printf lines pogod writes to "+
+					"inherited stderr.", len(found), found)
+			}
+			ev := found[0]
+			if ev.WorkItemID != "mg-be37" {
+				t.Errorf("work_item_id = %q, want mg-be37 — without it the event cannot be joined "+
+					"to the item that is now unsafe to dispatch at, which is the whole ticket",
+					ev.WorkItemID)
+			}
+			if ev.Repo != repo {
+				t.Errorf("repo = %q, want %q", ev.Repo, repo)
+			}
+			if ev.Agent != "cat-qbe37" {
+				t.Errorf("agent = %q, want the event identity cat-qbe37 (docs/event-log.md convention)", ev.Agent)
+			}
+			if ev.Details["outcome"] != tc.outcome {
+				t.Errorf("outcome = %v, want %q — a tree known dirty and a tree we could not read "+
+					"are different facts", ev.Details["outcome"], tc.outcome)
+			}
+			if pushed, ok := ev.Details["pushed"].(bool); !ok || pushed {
+				t.Errorf("pushed = %v, want false stated explicitly: this is the population every "+
+					"pushed-commit guard misses, and a consumer must not have to infer it",
+					ev.Details["pushed"])
+			}
+			if s, _ := ev.Details["detail"].(string); !strings.Contains(s, tc.wantDetails) {
+				t.Errorf("detail = %q, want it to carry the underlying finding (%q)", s, tc.wantDetails)
+			}
+			_, hasDirty := ev.Details["dirty_paths"]
+			if hasDirty != tc.wantDirty {
+				t.Errorf("dirty_paths present = %t, want %t — a count is only meaningful when the "+
+					"tree was actually read", hasDirty, tc.wantDirty)
+			}
+		})
+	}
+}
+
+// TestPreservedWorktreeEventSurvivesAFailedNotice is the ordering proof.
+//
+// The event is emitted BEFORE the mail is attempted and does not depend on it,
+// so the record is durable whatever happens to mg. Get this backwards and the
+// improvement becomes a new dependency of the thing it was meant to back up —
+// which is the shape of every notifier in this daemon that degrades to
+// log.Printf when its send fails.
+func TestPreservedWorktreeEventSurvivesAFailedNotice(t *testing.T) {
+	spine := filepath.Join(t.TempDir(), "events.log")
+	events.SetLogPathForTesting(spine)
+	t.Cleanup(func() { events.SetLogPathForTesting("") })
+
+	repo, wt := wtRepo(t)
+	if err := os.WriteFile(filepath.Join(wt, "wip.go"), []byte("package wip\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	mail := func(to, from, subject, body string) error {
+		return errors.New("mg mail send failed: no such mailbox")
+	}
+	if got := cleanupAgentWorktree(catAgent("qbe37", "mg-be37", repo, wt), "mayor", mail); got != worktreePreserved {
+		t.Fatalf("outcome = %v, want worktreePreserved", got)
+	}
+
+	preserved, err := events.ReadFiltered(spine, events.Filter{Type: "worktree_preserved"})
+	if err != nil {
+		t.Fatalf("reading the spine: %v", err)
+	}
+	if len(preserved) != 1 || preserved[0].WorkItemID != "mg-be37" {
+		t.Fatalf("the preservation record must not depend on the mail succeeding, got %+v", preserved)
+	}
+
+	// And the A15 record of the LOST notice must carry the item too: when the
+	// notice is gone, this event is the only surviving trace, so it has to
+	// answer the same question the notice would have.
+	lost, err := events.ReadFiltered(spine, events.Filter{Type: "worktree_notice_undelivered"})
+	if err != nil {
+		t.Fatalf("reading the spine: %v", err)
+	}
+	if len(lost) != 1 {
+		t.Fatalf("want one worktree_notice_undelivered, got %+v", lost)
+	}
+	if lost[0].WorkItemID != "mg-be37" {
+		t.Errorf("work_item_id = %q, want mg-be37 — a lost notice is exactly when the event is "+
+			"the only trace of which item became unsafe to dispatch at", lost[0].WorkItemID)
+	}
+	if lost[0].Repo != repo {
+		t.Errorf("repo = %q, want %q", lost[0].Repo, repo)
+	}
+}
+
+// TestReapedWorktreeEmitsNothing is the noise control.
+//
+// The common path — a polecat that committed, pushed and merged — reaps its
+// tree, and must leave neither a mail nor an event. An event on every clean exit
+// makes `pogo events --type worktree_preserved` a stream instead of an alarm,
+// and the point of the alarm is that a non-empty result means something.
+func TestReapedWorktreeEmitsNothing(t *testing.T) {
+	spine := filepath.Join(t.TempDir(), "events.log")
+	events.SetLogPathForTesting(spine)
+	t.Cleanup(func() { events.SetLogPathForTesting("") })
+
+	repo, wt := wtRepo(t)
+	if got := cleanupAgentWorktree(catAgent("cat1", "mg-clean", repo, wt), "mayor",
+		func(to, from, subject, body string) error { return nil }); got != worktreeReaped {
+		t.Fatalf("outcome = %v, want worktreeReaped", got)
+	}
+	found, err := events.ReadFiltered(spine, events.Filter{Type: "worktree_preserved"})
+	if err != nil {
+		t.Fatalf("reading the spine: %v", err)
+	}
+	if len(found) != 0 {
+		t.Errorf("a reaped clean worktree must emit nothing; got %+v", found)
 	}
 }
