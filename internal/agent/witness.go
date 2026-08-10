@@ -666,6 +666,39 @@ func WitnessedPolecatRepos() (repos map[string]string, unattributed []string, er
 	return repos, unattributed, nil
 }
 
+// WitnessedPolecatWorkItems maps each polecat this store cannot rule out as
+// live to the work item it is on, skipping the ones whose record names no item.
+//
+// It is WitnessedPolecatRepos' sibling and applies the identical verdict filter
+// (Alive OR Unreadable), for the identical reason: "I could not establish that
+// this process is ours" is not "it is dead", and a reader that dropped the
+// unmeasurable ones would report an item as unworked exactly when measurement is
+// failing. Its caller is Registry.WorkItemsInFlight, which stall-watch consults
+// before calling an available item neglected (mg-1a8a) — and the survivors of an
+// earlier pogod are the population most likely to hold a claim nobody restamped.
+//
+// A read error yields (nil, err). An unreadable store is not an empty fleet.
+func WitnessedPolecatWorkItems() (map[string]string, error) {
+	witnessMu.Lock()
+	recs, err := loadWitness()
+	witnessMu.Unlock()
+	if err != nil {
+		return nil, fmt.Errorf("witness: cannot read %s: %w", WitnessPath(), err)
+	}
+	out := make(map[string]string, len(recs))
+	for _, r := range recs {
+		switch witnessVerdict(r) {
+		case WitnessAlive, WitnessUnreadable:
+		default:
+			continue
+		}
+		if id := strings.TrimSpace(r.WorkItemID); id != "" {
+			out[r.Name] = id
+		}
+	}
+	return out, nil
+}
+
 // WitnessStoreExists reports whether the witness file is on disk at all.
 //
 // WHY THIS IS NOT THE SAME QUESTION AS "are any polecats alive?" (mg-65b2).

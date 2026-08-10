@@ -1747,6 +1747,12 @@ Flags:
 			// on arrival, on the same channel that carries genuinely
 			// actionable dispatch news.
 			Capacity: newStallCapacity(agentRegistry),
+			// Let every available/ check ask whether a live worker is already
+			// on an item before calling it neglected (mg-1a8a). Without it a
+			// claim that failed open at spawn leaves the item in available/,
+			// where the priority wake urges a coordinator to dispatch work a
+			// polecat is already doing.
+			Workers: newStallWorkers(agentRegistry),
 		})
 		log.Printf("pogod: stall watcher enabled (agent=%s item_age=%s mail_age=%s max_mail=%d cooldown=%s priority_wake=%t wake_delay=%s wake_cooldown=%s fast_priorities=%s non_dispatchable=%s)",
 			cfg.StallWatch.Agent, cfg.StallWatch.UnclaimedItemAgeThreshold,
