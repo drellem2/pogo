@@ -26,7 +26,13 @@ import (
 //
 // A controlled sampler with a positive control measured the outage that was
 // still running at that moment: onset 03:37:23Z, recovery 03:52:49Z, DURATION
-// 15m26s. That is the number the budget is sized against here.
+// 15m26s. That is the wave this incident happened in — it is NOT the size of the
+// event. The same fault recurs (mg-964e), its duration is a distribution, and
+// that distribution has widened twice: "15 min ±41s" was withdrawn, a 17m52s
+// maximum superseded it, and wave L then ran ~35m03s (n=12) with a ~28m floor
+// corroborated independently of the lease. The shipped 21m45s campaign covers
+// 17m52s but NOT the current maximum — that shortfall is mg-682d. See
+// TestNetworkBudgetIsNotTrimmedBelowWhatItWasSizedFor below.
 //
 // The fault induced below is a REAL post-gate transport failure against a real
 // git: a pre-receive hook on the origin rejects the first push with the exact
@@ -282,20 +288,48 @@ func TestGatedTreeTracksContentNotCommits(t *testing.T) {
 	}
 }
 
-// TestNetworkBudgetOutlastsTheMeasuredOutage is the ticket's other half, and the
-// comparison it turns on.
+// TestNetworkBudgetIsNotTrimmedBelowWhatItWasSizedFor is a RATCHET, and it is
+// deliberately not named for a property the budget no longer has.
 //
-// The budget is not asked to be "long". It is asked to be longer than the event
-// it exists to survive, and that event has been measured with a positive
-// control: 15m26s (onset 03:37:23Z, recovery 03:52:49Z, 2026-08-10). The old
-// budget was 52 seconds — short by ~17.8x, so no rearrangement of backoff inside
-// it could have worked.
+// This guard used to assert that the budget outlasted "the measured outage",
+// against 15m26s — the single wave measured on 2026-08-10 at 03:37Z. Two things
+// have since happened to that number, and they pull in opposite directions:
 //
-// This test is deliberately written against the DURATION and not against any
-// prediction of when the next window opens: onset came 1.6 minutes early against
-// the predicted call, and the period is not established. Duration is.
-func TestNetworkBudgetOutlastsTheMeasuredOutage(t *testing.T) {
-	const measuredOutage = 15*time.Minute + 26*time.Second
+//   - It was too WEAK as a guard. 15m26s was one wave; continued sampling of the
+//     same DHCP fault (mg-964e) put the maximum at 17m52s. A guard at 15m26s
+//     passes at 12 attempts (17m45s, seven seconds short of that) and at 11
+//     (15m45s, short by 2m07s) — it would have admitted the exact tune-down
+//     mg-7110 was filed about.
+//   - The event then outgrew the budget entirely. Wave L ran ~35m03s, with a
+//     ~28m floor established independently of the lease. The shipped 21m45s
+//     campaign does not cover that and is KNOWN-INSUFFICIENT (mg-682d).
+//
+// So this test CANNOT assert "the budget outlasts the longest observed outage".
+// That statement is false, and a test asserting it would fail on a budget nobody
+// is allowed to change from here. What it asserts instead is the ratchet: the
+// campaign must not shrink below 17m52s, the largest wave it ever did cover.
+// Trimming a known-insufficient budget makes it worse, and the 3m53s that
+// separates 21m45s from 17m52s is the thing most likely to be mistaken for
+// spare room.
+//
+// A PASS HERE IS NOT A CERTIFICATE OF ADEQUACY. It means only that nobody has
+// trimmed the campaign. Adequacy is mg-682d's question, and the answer today is
+// no.
+//
+// Do not "fix" this by raising the constant to 35m03s. That would fail, and the
+// failure would report a defect in a budget this ticket is explicitly forbidden
+// to change. The distribution has widened twice with no established upper bound,
+// so the remedy is likely a mechanism that distinguishes "the network is down"
+// from "attempts exhausted" and requeues — not a larger sleep.
+//
+// This test is deliberately written against DURATION and not against any
+// prediction of when the next window opens: onset is predictable on this host
+// (LeaseExpirationTime + 54s), but a budget that leans on that fails the first
+// time the lease pattern changes. Duration is what has to be survived.
+func TestNetworkBudgetIsNotTrimmedBelowWhatItWasSizedFor(t *testing.T) {
+	// Wave G, both ends measured: onset 07:37:48Z, recovery 07:55:40Z. This is
+	// the largest outage the shipped campaign covers — NOT the largest observed.
+	const largestOutageThisBudgetCovers = 17*time.Minute + 52*time.Second
 
 	// What the shipped schedule will actually sleep, walked exactly as
 	// processMerge walks it: one backoff before each retry, netMaxAttempts
@@ -309,9 +343,9 @@ func TestNetworkBudgetOutlastsTheMeasuredOutage(t *testing.T) {
 		total += next
 	}
 
-	if total <= measuredOutage {
-		t.Errorf("the network retry budget sleeps %s in total, which does not outlast the measured %s outage — a budget shorter than the event cannot succeed under any backoff arrangement, it can only fail faster (mg-c3b7)",
-			total.Round(time.Second), measuredOutage)
+	if total <= largestOutageThisBudgetCovers {
+		t.Errorf("the network retry budget sleeps %s in total, below the %s it was sized for — this budget is ALREADY known-insufficient against the observed maximum (~35m03s, mg-682d), so trimming it further only makes it fail faster (mg-c3b7, mg-7110)",
+			total.Round(time.Second), largestOutageThisBudgetCovers)
 	}
 
 	// The probe interval bounds how long after recovery the merge stays asleep.

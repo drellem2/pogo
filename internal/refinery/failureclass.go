@@ -557,7 +557,9 @@ func transportFromError(raw string) string {
 // must not consume the budget that exists to absorb races, and a long race must
 // not consume the budget that exists to wait out a blip.
 //
-// THE BUDGET IS SIZED BY MEASURED OUTAGE DURATION, NOT BY GUESS (mg-c3b7).
+// THE OUTAGE THIS SIZES AGAINST IS A DISTRIBUTION THAT KEEPS WIDENING, AND THE
+// BUDGET NO LONGER COVERS ITS MAXIMUM (mg-c3b7, corrected by mg-7110, shortfall
+// owned by mg-682d). Read the whole of this before changing any number below.
 //
 // The previous schedule was 5 attempts over 52s of backoff. It was written
 // against a blip and said so honestly — "this schedule does not cover all of
@@ -576,13 +578,49 @@ func transportFromError(raw string) string {
 // that followed did not — then burned all 5 network attempts by 03:41:00Z with
 // 11m49s of outage still to run.
 //
-// 52 seconds against 15m26s is not marginally short; it is short by a factor of
+// 52 seconds against that is not marginally short; it is short by a factor of
 // ~17.8, so no rearrangement of backoff INSIDE 52 seconds can succeed. It can
-// only fail faster. The schedule below is therefore sized against the measured
-// DURATION — the one number that is measured and stable across four waves
-// ("15 min ±41s") — and deliberately NOT against any prediction of when the
-// next window starts, which is not established tightly enough to schedule
-// against.
+// only fail faster.
+//
+// BUT THAT ONE WAVE IS NOT THE SIZE OF THE EVENT, AND NO SINGLE WAVE IS. The
+// 15m26s above is one cycle of a recurring fault — a 25-minute DHCP lease whose
+// T1 renewal fails, so the host loses its address every cycle (mg-964e). Its
+// duration is a distribution, and THAT DISTRIBUTION HAS WIDENED TWICE:
+//
+//	stated as   "15 min ±41s, stable across four waves"   <- WITHDRAWN
+//	then        maximum 17m52s   (wave G, n=9)            <- SUPERSEDED
+//	now         maximum ~35m03s  (wave L, n=12)           <- current, and open
+//
+// Each of the first two was believed to be the size of the event when it was
+// written. Both were retracted by the agent that measured them — the "±41s"
+// figure came from the first three waves, which happened to cluster, and the
+// sizing advice built on it ("~15m30s", later "at least 20 minutes") was
+// withdrawn by name each time. THERE IS NO ESTABLISHED UPPER BOUND. Treat any
+// maximum quoted here, including 35m03s, as the largest seen so far and not as
+// the size of the event.
+//
+// Wave L is ~35m03s: onset predicted, recovery from LeaseStartTime 11:38:19Z.
+// Its onset carries the offset uncertainty, so the duration does — but a HARD
+// FLOOR of ~28 minutes is established without the lease at all, by an
+// independent instrument: three consecutive */10 mail-check fires (11:10Z,
+// 11:20Z, 11:30Z) all failed to complete and arrived batched. Three consecutive
+// misses require ~28+ minutes of outage wherever onset fell.
+//
+// SO THE SHIPPED BUDGET BELOW IS KNOWN-INSUFFICIENT, NOT MERELY OPTIMISTIC. It
+// sleeps 21m45s, which is under the ~28m floor and well under 35m03s. It would
+// have survived all eleven earlier waves and remains a large improvement on the
+// 52 seconds it replaced; it does not cover the current worst case. That gap is
+// mg-682d's, not this comment's.
+//
+// AND THE FIX FOR IT IS PROBABLY NOT A BIGGER NUMBER. A campaign sized against a
+// tail that has already moved twice will be wrong again; doctor's own framing is
+// that the shape to consider distinguishes "the network is down" from "attempts
+// exhausted" and requeues, rather than sleeping longer. Sizing is also
+// deliberately NOT done against any prediction of when the next window starts.
+// (Onset is in fact predictable on this host — LeaseExpirationTime + 54s, n=3
+// spanning 2 seconds — but a budget that assumes it fails the first time the
+// lease pattern changes. Duration is what the budget has to survive; onset only
+// says when.)
 //
 // What this costs: a merge's lane (one repo — see lanes.go, merges in different
 // lanes run concurrently) can now sit waiting for up to ~22 minutes. That is
@@ -604,7 +642,29 @@ var (
 	networkRetryBackoff = []time.Duration{15 * time.Second, 30 * time.Second, 60 * time.Second, 2 * time.Minute}
 	// networkMaxAttempts bounds network-class attempts, retries included. 14
 	// attempts is 13 retries, which under the schedule above sleeps
-	// 15s+30s+60s+10x120s = 21m45s — the measured 15m26s with a 6m19s margin.
+	// 15s+30s+60s+10x120s = 21m45s.
+	//
+	// THERE IS NO MARGIN. Against the observed maximum the balance is:
+	//
+	//	vs ~35m03s (wave L)        -13m18s
+	//	vs ~28m    (hard floor)     -6m15s
+	//	vs  17m52s (wave G)         +3m53s   <- the last wave this covered
+	//
+	// An earlier version of this comment advertised "the measured 15m26s with a
+	// 6m19s margin". That was a 60% overstatement even at the time — it compared
+	// against a single wave rather than the distribution's maximum, and the real
+	// figure against 17m52s was 3m53s. It is now negative outright. The pattern
+	// worth noticing is not the arithmetic slip: it is that EVERY number this
+	// comment has ever quoted as "the" outage was superseded within days.
+	//
+	// So do not read any of the above as headroom, and do not trim toward it.
+	// Dropping to 12 attempts sleeps 17m45s, 7 seconds short of even wave G; 11
+	// attempts sleeps 15m45s. Both would have satisfied a guard written against
+	// 15m26s, which is why that guard moved too (gatehold_test).
+	//
+	// Widening this is mg-682d's call and probably wants a different mechanism
+	// rather than a larger constant — see the long comment above. Do not raise it
+	// here as a drive-by.
 	networkMaxAttempts = 14
 	// networkRetryBudget bounds the TOTAL time spent sleeping between network
 	// retries for one merge request, whatever the schedule says. It is the
