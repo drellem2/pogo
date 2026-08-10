@@ -698,10 +698,15 @@ var (
 	// that no single quoted number can be mistaken for the size of the event.
 	//
 	// DO NOT TRIM. A reader who sees a 14m42s gap and trims toward 35m03s
-	// reintroduces the defect this fixed: 21 attempts sleeps 35m45s, which clears
-	// wave L by 42 seconds and would not have survived wave L had it run 1%
-	// longer; 19 attempts sleeps 31m45s, inside the observed range outright. The
-	// ratchet in gatehold_test refuses both.
+	// reintroduces the defect this fixed. 19 attempts sleeps 31m45s, inside the
+	// observed range outright, and the ratchet in gatehold_test refuses it. 21
+	// attempts sleeps 35m45s and THE RATCHET DOES NOT REFUSE IT — it clears wave
+	// L by 42 seconds, which is what "outlasts the observed maximum" is worth as
+	// a guarantee. What catches that trim is the backstop-drift check in
+	// failureclass_test: the two bounds move together or neither moves. Between
+	// them the tests refuse both trims, but only one of them is asserting that
+	// the campaign is long ENOUGH, and no test can assert that against a
+	// distribution with no upper bound.
 	networkMaxAttempts = 28
 	// networkRetryBudget bounds the TOTAL time spent sleeping between network
 	// retries for one merge request, whatever the schedule says. It is the
