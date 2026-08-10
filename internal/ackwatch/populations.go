@@ -10,9 +10,10 @@ package ackwatch
 // distrusted. mg-ddf7 required the populations to be counted SEPARATELY, and
 // reported, BEFORE any fix was chosen:
 //
-//	1. batched      several fires delivered inside one agent turn; each new
-//	                fire's token supersedes the last, so only one of them is
-//	                redeemable however diligent the agent is.
+//	1. batched      a fire's token superseded by the next before anything
+//	                redeemed it, so only one of the run is redeemable however
+//	                diligent the agent is. NOTE what this name does and does not
+//	                claim — see "What 'batched' does not explain" below.
 //	2. token-less   a fire delivered carrying no token at all. Nothing to ack,
 //	                so the deficit is unclosable BY THE AGENT.
 //	3. boundary     a fire outstanding at the moment of measurement. Not a
@@ -53,6 +54,57 @@ package ackwatch
 // measured rather than argued. See docs/investigations/ack-deficit-populations-2026-07-30.md
 // for the full record, including the storm-vs-calm comparison and the two
 // repairs it rules out.
+//
+// # What "batched" does not explain (mg-772f)
+//
+// Population 1 is defined by TOKEN SUPERSESSION — a fire's token replaced
+// before anything redeemed it. That is a fact about the token, and it was the
+// only thing the original split measured. The NAME "batched" additionally
+// suggests a cause: several fires arriving inside one long agent turn. That
+// cause was never measured, and when it was, it turned out to be half the
+// story at best.
+//
+// mg-772f measured the fleet's whole token era, 16,081 token-carrying
+// deliveries and 7,106 superseded ones, and split them two ways:
+//
+//   - By DELIVERY PUNCTUALITY. 99.8% of superseded fires were delivered within
+//     60s of their due time — 100.0% on 14 of the 16 measured days. pogod does
+//     not hold fires and flush them together. Whatever bunches them is
+//     downstream of delivery, on every day measured. This is the discriminator
+//     the events log always carried and nothing read: `original_due` and
+//     `fired_at` were written by the scheduler from the start and had no
+//     consumer until LateDelivery below.
+//
+//   - By whether a synthetic-failure EPISODE was open for that agent at the
+//     time (internal/synthwatch). 51.5% of superseded fires landed while
+//     synthwatch had already detected that the agent's turns were dying —
+//     API errors, expired credentials, DNS failures. Those fires were not
+//     batched by a busy agent. They were delivered on time into turns that
+//     never ran, so nothing acked them and the next fire duly superseded them.
+//
+// The worked example is the one that prompted the ticket. On 2026-08-09,
+// architect and pm-pogo each received 27 fires between 13:01Z and 17:20Z and
+// acked none, and both reported the 27 as having "arrived in a batch". They had
+// not. Each was delivered on its own 10-minute mark, `fired_at` within 30s of
+// `original_due` every time, and each was accepted by the harness on time —
+// the session transcripts timestamp all 27 individually. 26 of the 27 turns
+// then died on `API Error: Unable to connect to API (ENOTFOUND)` about three
+// minutes in. synthwatch detected it at 13:04:48Z and cleared it at 17:22:29Z,
+// bracketing the window in the same events.log. The 27th fire was the first
+// turn to reach the API, and it saw all 27 prompts sitting unanswered in its
+// own context — which is what "arrived in a batch" actually described. The
+// batching was in the READING, not in the delivery and not in the scheduler.
+//
+// So BatchedInFailureEpisode exists to stop that reading being available. A deficit
+// that coincides with a known-dead consuming turn is not evidence about the
+// agent's attention, and must not be spent arguing about token lifetimes. See
+// docs/investigations/scheduler-fire-batching-2026-08-10.md.
+//
+// Neither new counter changes the deficit arithmetic or the Identity above.
+// They are strictly additive annotations on population 1: the ratio, the mean
+// gap and the residual all read exactly as they did before. Re-scoring the
+// deficit is mg-a14c's question and this ticket deliberately does not answer
+// it — it only makes the cause visible enough to be argued about with numbers.
 
 import (
 	"fmt"
@@ -83,6 +135,85 @@ type FireEvent struct {
 	// Token is the fire's nonce. Empty on a delivery means the fire carried no
 	// token — population 2. On a completion it is the token being redeemed.
 	Token string `json:"token"`
+
+	// Due and Fired are the scheduler's own `original_due` and `fired_at`,
+	// carried on every scheduler_fire_delivered since the scheduler first
+	// emitted one and read by nothing until mg-772f. Their DIFFERENCE is the
+	// only direct evidence of which side a bunching came from: a fire pogod
+	// held and flushed late has Fired well after Due, and one it delivered
+	// punctually cannot have been bunched by the scheduler at all.
+	//
+	// Both are zero on a completion, and on a delivery whose event predates the
+	// fields or whose timestamps did not parse. LateDelivery therefore counts
+	// only what it positively measured — a missing pair is not a late fire.
+	Due   time.Time `json:"due,omitempty"`
+	Fired time.Time `json:"fired,omitempty"`
+}
+
+// LateDeliveryThreshold is how far Fired may trail Due before the fire counts
+// as held on the delivery side.
+//
+// 60s is chosen to be unambiguous rather than tight. Measured over 65,717
+// deliveries on this fleet the lag is p50 14s, p90 27s — the scheduler's tick
+// granularity plus the confirm handshake — while the shortest cadence any
+// schedule runs is 5 minutes. So 60s sits an order of magnitude above the
+// normal jitter and an order of magnitude below one cadence period, and no
+// plausible re-tuning of either moves a fire across it.
+const LateDeliveryThreshold = 60 * time.Second
+
+// Late reports whether this delivery was held past LateDeliveryThreshold. False
+// when either timestamp is absent: see Due/Fired.
+func (e FireEvent) Late() bool {
+	if e.Due.IsZero() || e.Fired.IsZero() {
+		return false
+	}
+	return e.Fired.Sub(e.Due) > LateDeliveryThreshold
+}
+
+// FailureEpisode is one agent's synthetic-failure episode: the interval over which
+// synthwatch had detected that this agent's turns were failing without the
+// agent exiting, crashing or wedging (see internal/synthwatch).
+//
+// Until is zero for an episode still open at the end of the window, which reads
+// as "open-ended" — the right direction to fail in, because an episode whose
+// close was never logged is far more likely to have continued than to have
+// silently ended at the last event we happened to read.
+type FailureEpisode struct {
+	Agent string    `json:"agent"`
+	From  time.Time `json:"from"`
+	Until time.Time `json:"until,omitempty"`
+}
+
+// Covers reports whether at lies inside the episode.
+func (b FailureEpisode) Covers(at time.Time) bool {
+	if at.Before(b.From) {
+		return false
+	}
+	return b.Until.IsZero() || !at.After(b.Until)
+}
+
+// episodeIndex answers "was agent A dark at time T" without rescanning a slice
+// per fire.
+type episodeIndex map[string][]FailureEpisode
+
+func newEpisodeIndex(bs []FailureEpisode) episodeIndex {
+	if len(bs) == 0 {
+		return nil
+	}
+	idx := episodeIndex{}
+	for _, b := range bs {
+		idx[b.Agent] = append(idx[b.Agent], b)
+	}
+	return idx
+}
+
+func (i episodeIndex) dark(agent string, at time.Time) bool {
+	for _, b := range i[agent] {
+		if b.Covers(at) {
+			return true
+		}
+	}
+	return false
 }
 
 // SchedulePopulation is one schedule's deficit, split by mechanism.
@@ -99,6 +230,32 @@ type SchedulePopulation struct {
 	// Batched is population 1: deliveries whose token was replaced by a later
 	// fire's before anything redeemed it.
 	Batched int `json:"batched"`
+	// BatchedInFailureEpisode is the subset of Batched delivered while synthwatch had
+	// an open synthetic-failure episode for this agent — a fire that landed on
+	// a turn already known to be dying. It is a SUBSET, not a fourth
+	// population: it does not enter the deficit arithmetic, and subtracting it
+	// from Batched would double-count.
+	//
+	// Zero when the caller passed no episodes, which is indistinguishable from
+	// "no episodes in the window". That ambiguity is why Render only mentions
+	// the counter when it is non-zero: a silent 0 must not read as an acquittal.
+	BatchedInFailureEpisode int `json:"batched_in_failure_episode"`
+	// LateDelivery counts token-carrying deliveries the scheduler itself held
+	// past LateDeliveryThreshold. This is the delivery-side arm: a non-zero
+	// count here is the only thing in this report that would implicate pogod
+	// rather than what happens to a fire after it lands.
+	LateDelivery int `json:"late_delivery"`
+	// DeliveryMeasured counts token-carrying deliveries that carried BOTH
+	// stamps, i.e. the denominator LateDelivery is a count out of.
+	//
+	// It exists because LateDelivery == 0 has two readings — "every fire was
+	// punctual" and "no fire was measured" — and this ticket is about a
+	// measurement whose zero was read as health. A log predating the stamps, or
+	// one whose stamps did not parse, produces a delivery-side count of zero
+	// that would otherwise render as an exoneration nothing looked hard enough
+	// to earn. Whoever reads the acquittal is entitled to see the denominator
+	// under it.
+	DeliveryMeasured int `json:"delivery_measured"`
 	// TokenLess is population 2: deliveries carrying no token.
 	TokenLess int `json:"token_less"`
 	// Boundary is population 3: 1 if a token was still outstanding when the
@@ -168,6 +325,13 @@ type PopulationReport struct {
 	TokenLess int `json:"token_less"`
 	Boundary  int `json:"boundary"`
 
+	// BatchedInFailureEpisode and LateDelivery are the mg-772f arms — a subset of
+	// Batched, and a delivery-side count, respectively. Neither is a
+	// population: see the fields of the same name on SchedulePopulation.
+	BatchedInFailureEpisode int `json:"batched_in_failure_episode"`
+	LateDelivery            int `json:"late_delivery"`
+	DeliveryMeasured        int `json:"delivery_measured"`
+
 	// FirstTokenCarrying and LastTokenLess let a reader tell a pre-feature ERA
 	// from an ongoing MECHANISM without knowing when mg-a754 shipped. If every
 	// token-less fire predates every token-carrying one, population 2 is
@@ -206,7 +370,25 @@ func (r PopulationReport) TokenLessIsHistorical() bool {
 // It is pure: same events in, same report out, no clock and no filesystem. The
 // window is taken from the events themselves rather than passed in, so a caller
 // cannot accidentally claim a wider window than it actually read.
+//
+// Equivalent to SplitWithEpisodes with none: BatchedInFailureEpisode comes back 0,
+// which is why Render will not print an acquittal off it.
 func SplitPopulations(evs []FireEvent) PopulationReport {
+	return SplitWithEpisodes(evs, nil)
+}
+
+// SplitWithEpisodes is SplitPopulations with synthwatch's episodes joined in,
+// so population 1 can be split into fires that superseded each other while the
+// agent was WORKING and fires that superseded each other while its turns were
+// already known to be DYING (mg-772f).
+//
+// The join is on agent name and time only. Both event families name the agent
+// the same way — scheduler_fire_delivered's `to` and synthwatch's
+// details.target are both the bare name — so no normalisation is needed; a
+// mismatch would show up as BatchedInFailureEpisode stuck at 0, which is the safe
+// direction because it under-claims rather than manufacturing an excuse.
+func SplitWithEpisodes(evs []FireEvent, episodes []FailureEpisode) PopulationReport {
+	dark := newEpisodeIndex(episodes)
 	byKey := map[string][]FireEvent{}
 	keys := []string{}
 	rep := PopulationReport{}
@@ -240,7 +422,7 @@ func SplitPopulations(evs []FireEvent) PopulationReport {
 	sort.Strings(keys)
 
 	for _, k := range keys {
-		sp := classifyTimeline(byKey[k])
+		sp := classifyTimeline(byKey[k], dark)
 		if sp.Delivered == 0 && sp.Completed == 0 {
 			continue
 		}
@@ -250,12 +432,16 @@ func SplitPopulations(evs []FireEvent) PopulationReport {
 		rep.Batched += sp.Batched
 		rep.TokenLess += sp.TokenLess
 		rep.Boundary += sp.Boundary
+		rep.BatchedInFailureEpisode += sp.BatchedInFailureEpisode
+		rep.LateDelivery += sp.LateDelivery
+		rep.DeliveryMeasured += sp.DeliveryMeasured
 	}
 	return rep
 }
 
 // classifyTimeline walks one schedule's events in order. evs must be sorted.
-func classifyTimeline(evs []FireEvent) SchedulePopulation {
+// dark may be nil, meaning no episodes were supplied.
+func classifyTimeline(evs []FireEvent, dark episodeIndex) SchedulePopulation {
 	sp := SchedulePopulation{}
 	if len(evs) > 0 {
 		sp.Agent, sp.ID = evs[0].Agent, evs[0].ID
@@ -277,9 +463,23 @@ func classifyTimeline(evs []FireEvent) SchedulePopulation {
 				sp.TokenLess++
 				continue
 			}
+			if !ev.Due.IsZero() && !ev.Fired.IsZero() {
+				sp.DeliveryMeasured++
+			}
+			if ev.Late() {
+				// The scheduler itself held this one. Counted whether or not it
+				// went on to be superseded: a late fire is a delivery-side fact
+				// and does not need an ack outcome to be true.
+				sp.LateDelivery++
+			}
 			if outstanding {
 				// This token replaces one nothing redeemed. Population 1.
 				sp.Batched++
+				if dark.dark(ev.Agent, ev.At) {
+					// ...but the agent's turns were already failing when it
+					// landed, so this supersession says nothing about attention.
+					sp.BatchedInFailureEpisode++
+				}
 			}
 			outstanding = true
 			run++
@@ -343,7 +543,13 @@ func (r PopulationReport) Render() string {
 	if r.Deficit() > 0 {
 		d := float64(r.Deficit())
 		b.WriteString("MECHANISM, not diligence:\n")
-		fmt.Fprintf(&b, "  1. batched     %6d  %5.1f%%  several fires inside one turn; one redeemable token\n",
+		// Deliberately says what was MEASURED (a token replaced before anything
+		// redeemed it) and not why. The old wording here — "several fires
+		// inside one turn" — named a cause nothing in this report had checked,
+		// and it was wrong for 51.5% of the fleet's fires. The "WHICH SIDE"
+		// block below is where cause is allowed to be claimed, because that is
+		// the only part that measures one.
+		fmt.Fprintf(&b, "  1. batched     %6d  %5.1f%%  superseded before redemption; one redeemable token\n",
 			r.Batched, float64(r.Batched)/d*100)
 		fmt.Fprintf(&b, "  2. token-less  %6d  %5.1f%%  no token delivered — unclosable BY THE AGENT\n",
 			r.TokenLess, float64(r.TokenLess)/d*100)
@@ -351,6 +557,39 @@ func (r PopulationReport) Render() string {
 			r.Boundary, float64(r.Boundary)/d*100)
 		if resid := r.Deficit() - r.Batched - r.TokenLess - r.Boundary; resid != 0 {
 			fmt.Fprintf(&b, "     unattributed %5d          <-- INVESTIGATE: the split should be exhaustive\n", resid)
+		}
+		b.WriteString("\n")
+	}
+
+	if r.Batched > 0 {
+		b.WriteString("WHICH SIDE population 1 came from (mg-772f):\n")
+		fmt.Fprintf(&b, "  delivery-side  %6d  %5.1f%%  fires pogod held >%s past due\n",
+			r.LateDelivery, float64(r.LateDelivery)/float64(r.Batched)*100, LateDeliveryThreshold)
+		// Reported only when non-zero. A blank line here means either no
+		// episodes overlapped the fires or the caller supplied none, and those
+		// two are not distinguishable from inside this function — printing
+		// "0 in blackout" would read as an acquittal the data cannot support.
+		if r.BatchedInFailureEpisode > 0 {
+			fmt.Fprintf(&b, "  dead turns     %6d  %5.1f%%  landed while synthwatch had this agent FAILING\n",
+				r.BatchedInFailureEpisode, float64(r.BatchedInFailureEpisode)/float64(r.Batched)*100)
+			b.WriteString("     Those fires were delivered on time into turns that never ran. They are\n")
+			b.WriteString("     not evidence about the agent's attention, and a token-lifetime change\n")
+			b.WriteString("     would not recover one of them.\n")
+		}
+		switch {
+		case r.DeliveryMeasured == 0:
+			// The acquittal-from-absence this ticket exists to name. A window
+			// whose fires carry no due/fired stamps produces LateDelivery == 0
+			// for the same reason a dead fleet produced a clean nudge_sent
+			// count: nothing looked.
+			b.WriteString("     Delivery is UNMEASURED for this window, NOT exonerated: no fire\n")
+			b.WriteString("     carried both original_due and fired_at, so the 0 above is an\n")
+			b.WriteString("     absence of evidence and must not be read as evidence of absence.\n")
+		case r.LateDelivery == 0:
+			fmt.Fprintf(&b, "     Delivery is EXONERATED for this window: all %d fires whose punctuality\n",
+				r.DeliveryMeasured)
+			b.WriteString("     could be measured were on time, so whatever bunched them is\n")
+			b.WriteString("     downstream of pogod.\n")
 		}
 		b.WriteString("\n")
 	}

@@ -58,7 +58,24 @@ func runAckPopulations(sinceRaw, untilRaw string, asJSON bool) {
 			fmt.Sprintf("cannot read %s: %v", logPath, err), cli.ExitError)
 	}
 
-	rep := ackwatch.SplitPopulations(evs)
+	// synthwatch's episodes, joined in so population 1 can be split by CAUSE
+	// (mg-772f). A fire that superseded another while the agent's turns were
+	// already known to be dying is not evidence about that agent's attention,
+	// and without this join it is indistinguishable from one that arrived
+	// during a long, healthy turn.
+	//
+	// An unreadable episode stream is NOT fatal here, unlike the timeline
+	// above: the split is complete and correct without it, and refusing to
+	// print a measurement we do have because an annotation is missing would
+	// trade the finding for the footnote. It is reported instead, so a zero
+	// dead-turn count is never mistaken for an acquittal.
+	episodes, epErr := ackwatch.ReadFailureEpisodes(logPath, since, until)
+	if epErr != nil && !asJSON {
+		fmt.Printf("note: synthetic-failure episodes unreadable (%v);\n"+
+			"      population 1 cannot be split by cause below.\n\n", epErr)
+	}
+
+	rep := ackwatch.SplitWithEpisodes(evs, episodes)
 	if asJSON {
 		cli.PrintJSON(rep)
 		return

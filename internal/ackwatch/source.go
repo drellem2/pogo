@@ -76,6 +76,8 @@ func ReadFireTimeline(logPath string, since, until time.Time) ([]FireEvent, erro
 				Agent: detailString(ev.Details, "to"),
 				ID:    detailString(ev.Details, "schedule_id"),
 				Token: detailString(ev.Details, "fire_token"),
+				Due:   detailTime(ev.Details, "original_due"),
+				Fired: detailTime(ev.Details, "fired_at"),
 			})
 		}
 	}
@@ -91,6 +93,101 @@ func detailString(details map[string]any, key string) string {
 	}
 	s, _ := details[key].(string)
 	return s
+}
+
+// detailTime reads an RFC3339 timestamp detail, returning the zero time for
+// absence or garbage. The scheduler writes original_due/fired_at with an offset
+// rather than a Z (time.RFC3339 on a local clock), so this must not assume UTC.
+//
+// Zero is the correct failure value here and not merely a convenient one: every
+// consumer of Due/Fired treats a missing pair as "not measured" rather than as
+// "on time", so an unparseable stamp cannot manufacture either a late fire or
+// an acquittal.
+func detailTime(details map[string]any, key string) time.Time {
+	s := detailString(details, key)
+	if s == "" {
+		return time.Time{}
+	}
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return time.Time{}
+	}
+	return t
+}
+
+// ReadFailureEpisodes reconstructs synthwatch's synthetic-failure episodes from
+// logPath over [since, until), for SplitWithEpisodes to join against.
+//
+// An episode is a detected..cleared pair per agent. Repeated detections while
+// one is already open do not open a second — synthwatch re-emits on every scan
+// that still sees the agent failing, and treating each as a fresh episode would
+// shatter one 4-hour outage into fifty overlapping slivers.
+//
+// An episode with no clear in the window comes back with a zero Until, which
+// FailureEpisode.Covers reads as open-ended. That is deliberate: the alternative is to
+// close it at the last event read, which would quietly acquit every fire after
+// that point on the strength of having stopped looking.
+func ReadFailureEpisodes(logPath string, since, until time.Time) ([]FailureEpisode, error) {
+	// One flat, time-ordered stream of transitions. The two reads below are
+	// separate scans (events.Filter carries a single Type), so they arrive
+	// interleaved-by-type and must be re-sorted before they can be paired.
+	type transition struct {
+		at      time.Time
+		agent   string
+		cleared bool
+	}
+	var stream []transition
+
+	for _, evType := range []string{"synthetic_failure_detected", "synthetic_failure_cleared"} {
+		evs, err := events.ReadFiltered(logPath, events.Filter{SinceMin: since, Type: evType})
+		if err != nil {
+			return nil, err
+		}
+		for _, ev := range evs {
+			at, perr := time.Parse(time.RFC3339Nano, ev.Timestamp)
+			if perr != nil {
+				continue
+			}
+			if !until.IsZero() && !at.Before(until) {
+				continue
+			}
+			agent := detailString(ev.Details, "target")
+			if agent == "" {
+				continue
+			}
+			stream = append(stream, transition{
+				at: at, agent: agent, cleared: evType == "synthetic_failure_cleared",
+			})
+		}
+	}
+	sort.SliceStable(stream, func(i, j int) bool { return stream[i].at.Before(stream[j].at) })
+
+	open := map[string]time.Time{}
+	var episodes []FailureEpisode
+	for _, tr := range stream {
+		from, isOpen := open[tr.agent]
+		switch {
+		case tr.cleared && isOpen:
+			episodes = append(episodes, FailureEpisode{Agent: tr.agent, From: from, Until: tr.at})
+			delete(open, tr.agent)
+		case tr.cleared:
+			// A clear with nothing open: the detection fell before `since`.
+			// Dropped rather than back-dated — inventing a start would extend
+			// an episode over fires we have no evidence were dark.
+		case !isOpen:
+			open[tr.agent] = tr.at
+		}
+	}
+	for agent, from := range open {
+		episodes = append(episodes, FailureEpisode{Agent: agent, From: from})
+	}
+	sort.SliceStable(episodes, func(i, j int) bool {
+		if !episodes[i].From.Equal(episodes[j].From) {
+			return episodes[i].From.Before(episodes[j].From)
+		}
+		return episodes[i].Agent < episodes[j].Agent
+	})
+	return episodes, nil
 }
 
 // RecentFires measures the fleet's fire traffic over the trailing window ending
