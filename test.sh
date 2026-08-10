@@ -128,6 +128,35 @@ gate_step "Testing the from-source staleness runner" bash scripts/check-stalenes
 # so that control runs in seconds rather than 20 minutes.
 gate_step "Testing the Go per-package test budget and overrun report" bash scripts/go-test-budget_test.sh
 
+# The TREE-WIDE sweep for unbounded `go test` (mg-37d4). The budget check above
+# is per-site and mg-a465's wiring assertions name TWO files; this walks every
+# tracked file, so a new script or CI job is covered the day it is added rather
+# than the day somebody remembers to extend a list. That distinction is not
+# theoretical: three unbounded sites have been found here one at a time by three
+# different people, and the third (scripts/upgrade-smoke.sh) was already in the
+# tree, already unbounded, on the day the two-filename check was written green.
+#
+# Runs the checker itself first — a walk of ~1000 tracked files, well under a
+# second — then the suite whose load-bearing case is the positive control: an
+# unbounded invocation is PLANTED in a fixture checkout and the checker must
+# fire on it, naming file and line. That control is what caught the checker's
+# own version of this bug, an anti-rot guard so broad it exited 2 against any
+# tree but this one.
+#
+# The two step labels below deliberately avoid spelling the lowercase two-word
+# command. mg-a465's wiring assertion greps this file for that string and
+# subtracts the lines carrying -timeout, which is a PRESENCE test: it cannot
+# tell a command from prose, so a label naming the thing being checked reads to
+# it as an unbounded invocation and fails the gate. That false positive is the
+# same one that made a presence rule unusable for the tree-wide sweep — it
+# flagged 9 prose lines against 1 real invocation — and it is why the checker
+# added here matches on command POSITION instead. The older assertion is left
+# alone rather than rewritten: it pins a stronger per-file property (that these
+# two files route through go-test-budget.sh at all), and widening another
+# ticket's test is not this one's business.
+gate_step "Checking every Go test invocation in the tree is bounded" bash scripts/unbounded-go-test.sh
+gate_step "Testing the unbounded-invocation sweep" bash scripts/unbounded-go-test_test.sh
+
 # The EXTERNAL redeploy witness (mg-ce10), implementing the rule that a detector
 # for "X did not happen" must not be ACTIVATED BY X. driftwatch reports the
 # running daemon's revision age correctly and ships entirely inside pogod, which
