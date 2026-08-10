@@ -37,6 +37,18 @@ import (
 // leave behind the very thing it exists to detect.
 const probeBurnSeconds = 90
 
+// probeScanAttempts bounds how many times one probe re-runs the SCAN against the
+// same two burners before giving up and reporting itself blind.
+//
+// Re-scanning is cheap and re-constructing is not: the burners are already
+// running for probeBurnSeconds, so another attempt costs one sampling window
+// plus one cwd read and starts no new processes. It is worth having because both
+// ways this probe goes blind are TRANSIENT properties of the host — an lsof that
+// refused a pid this second, a burner the scheduler starved through one 2s
+// window — and neither says anything about the detector. On 2026-08-10 the first
+// of those failed a merge gate on a branch that had never touched this package.
+const probeScanAttempts = 3
+
 // ProbeResult is what one probe run observed. Every field is a measurement; the
 // verdict is derived from them in Passed so a reader can check the derivation.
 type ProbeResult struct {
@@ -59,20 +71,65 @@ type ProbeResult struct {
 	// Spared is true when the scan did NOT name ControlPID. This is the
 	// positive control.
 	Spared bool `json:"spared"`
+	// OrphanDisposition and ControlDisposition are the buckets the scan put each
+	// constructed process in. Empty means the process never met the rate floor,
+	// which is the other way an arm can measure nothing.
+	OrphanDisposition  Disposition `json:"orphan_disposition,omitempty"`
+	ControlDisposition Disposition `json:"control_disposition,omitempty"`
+	// Attempts is how many scans it took, out of probeScanAttempts.
+	Attempts int `json:"attempts"`
 	// Report is the scan itself, so a failing probe can be read without a rerun.
 	Report Report `json:"report"`
+	// Blind is set when the probe was CONSTRUCTED but one of its arms was not
+	// conducted — the scan could say nothing about a process the probe made. It
+	// is neither a pass nor a fail of the detector; it is the probe reporting
+	// that it measured nothing, and it is a fact about the HOST.
+	//
+	// The two ways in (mg-db12), both load-driven and both observed:
+	//
+	//	the pid never met the rate floor   a shell burner sharing 10 cores with
+	//	                                   a load of 33 can miss 0.20 cores for
+	//	                                   a whole 2s window.
+	//	cwd_unreadable                     lsof refused or timed out on the pid.
+	//	                                   Measured live: the constructed orphan
+	//	                                   was binned here, the test read only
+	//	                                   `Reported == false`, and the gate
+	//	                                   classed it as a DEFECT of an unrelated
+	//	                                   branch.
+	//
+	// Err, by contrast, means the probe could not be BUILT at all.
+	Blind string `json:"blind,omitempty"`
 	// Err is set when the probe could not be conducted at all — which is
 	// neither a pass nor a fail, and must be rendered as "measured nothing".
 	Err error `json:"-"`
 }
 
-// Passed reports whether both arms behaved.
-func (p ProbeResult) Passed() bool { return p.Err == nil && p.Reported && p.Spared }
+// InstrumentFailure reports whether the probe proved nothing either way, whether
+// because it could not be built (Err) or because an arm was not conducted
+// (Blind). Neither is a verdict on the detector.
+func (p ProbeResult) InstrumentFailure() bool { return p.Err != nil || p.Blind != "" }
+
+// Passed reports whether both arms were CONDUCTED and both behaved. A blind run
+// has not passed — that is the same rule verdictwatch.ProbeResult.Passed
+// applies, and for the same reason: a green light earned by a fixture that did
+// not fire is the failure this family keeps rediscovering.
+func (p ProbeResult) Passed() bool {
+	return !p.InstrumentFailure() && p.Reported && p.Spared
+}
 
 // Summary renders the probe as the two sentences a reader needs.
 func (p ProbeResult) Summary() string {
 	if p.Err != nil {
 		return fmt.Sprintf("probe could not run: %v", p.Err)
+	}
+	if p.Blind != "" {
+		return fmt.Sprintf(
+			"probe measured NOTHING about the detector after %d scan(s): %s\n"+
+				"constructed orphan pid=%d disposition=%q, live-owner control pid=%d disposition=%q\n"+
+				"(an empty disposition means the process never met the %.2f-core floor)",
+			p.Attempts, p.Blind,
+			p.OrphanPID, p.OrphanDisposition, p.ControlPID, p.ControlDisposition,
+			p.Report.Floor)
 	}
 	red := "did NOT report"
 	if p.Reported {
@@ -118,34 +175,81 @@ func Probe(root string) ProbeResult {
 	res.DetachedPPID = parentOf(orphan)
 	res.ControlPPID = parentOf(control)
 
-	rep, err := Scan(Options{
-		PolecatsRoot: root,
-		LiveOwners: func() (map[string]bool, error) {
-			// The registry's answer, stood in: one owner running, one gone.
-			return map[string]bool{res.LiveOwner: true}, nil
-		},
-	})
-	if err != nil {
-		res.Err = err
-		return res
-	}
-	res.Report = rep
-	for _, o := range rep.Orphans {
-		switch o.PID {
-		case orphan:
-			res.Reported = true
-			res.OrphanCores = o.Cores
-		case control:
-			res.ControlCores = o.Cores
+	// Scan, and re-scan while the result says nothing about the detector. The
+	// burners outlive every attempt by construction, so a retry re-measures the
+	// SAME population rather than building a new one — which is what makes it
+	// legitimate to retry at all: nothing about the constructed input changes
+	// between attempts, only the host's willingness to let it be observed.
+	for attempt := 1; attempt <= probeScanAttempts; attempt++ {
+		res.Attempts = attempt
+		rep, err := Scan(Options{
+			PolecatsRoot: root,
+			LiveOwners: func() (map[string]bool, error) {
+				// The registry's answer, stood in: one owner running, one gone.
+				return map[string]bool{res.LiveOwner: true}, nil
+			},
+		})
+		if err != nil {
+			res.Err = err
+			return res
 		}
-	}
-	res.Spared = true
-	for _, o := range rep.Orphans {
-		if o.PID == control {
-			res.Spared = false
+		res.Report = rep
+		res.readArms(orphan, control)
+		if res.Blind == "" {
+			break
 		}
 	}
 	return res
+}
+
+// readArms reads both arms out of the scan just recorded, and decides whether
+// what came back is a verdict on the detector or a fact about the host.
+//
+// Every field it sets is overwritten from scratch, because it runs once per
+// attempt and a stale reading from a blind attempt would be indistinguishable
+// from a fresh one.
+func (p *ProbeResult) readArms(orphan, control int) {
+	p.Reported, p.Spared = false, true
+	p.OrphanCores, p.ControlCores = 0, 0
+	for _, o := range p.Report.Orphans {
+		switch o.PID {
+		case orphan:
+			p.Reported = true
+			p.OrphanCores = o.Cores
+		case control:
+			p.Spared = false
+			p.ControlCores = o.Cores
+		}
+	}
+	p.OrphanDisposition, _ = p.Report.DispositionOf(orphan)
+	p.ControlDisposition, _ = p.Report.DispositionOf(control)
+
+	var blind []string
+	if why := armBlindness("the constructed orphan", orphan, p.OrphanDisposition); why != "" {
+		blind = append(blind, why)
+	}
+	if why := armBlindness("the live-owner control", control, p.ControlDisposition); why != "" {
+		blind = append(blind, why)
+	}
+	p.Blind = strings.Join(blind, "; ")
+}
+
+// armBlindness names why one arm was not conducted, or returns "" when it was.
+//
+// The two verdict buckets and the blind-spot bucket all count as CONDUCTED: an
+// orphan that came back `unattributable` or `live_owner` is the detector getting
+// a constructed input wrong, and must fail rather than be excused. Only the
+// absent disposition (never met the rate floor) and cwd_unreadable (the cwd
+// reader refused) are properties of the host rather than of the rule.
+func armBlindness(what string, pid int, d Disposition) string {
+	switch d {
+	case "":
+		return fmt.Sprintf("%s pid=%d never met the CPU rate floor, so the scan never examined it", what, pid)
+	case DispositionCwdUnreadable:
+		return fmt.Sprintf("%s pid=%d was examined but its cwd could not be read, so it could not be attributed", what, pid)
+	default:
+		return ""
+	}
 }
 
 // startDetachedBurner creates dir, writes a shell burner into it, and starts it

@@ -26,6 +26,22 @@
 #   asserted here are therefore load-INDEPENDENT: a CPU burner accumulates its
 #   CPU seconds no matter how long it is made to wait for them, and a `sleep`
 #   accumulates none however busy the box is.
+#
+# THE RULE THAT FOLLOWS FROM THAT, WHICH TEST 3 BROKE (mg-db12):
+#   Never compare a WALL-CLOCK quantity against a CPU quantity, in either
+#   direction. Test 3 asserted that a 1s `sleep` outranks a fixed CPU burn, and
+#   that is exactly such a comparison: load stretches one and leaves the other
+#   alone, so the ordering held on an idle box and reversed at load 53. It failed
+#   a real merge gate on an unrelated branch, and the gate classed it DEFECT — "a
+#   fact about the branch" — rather than infrastructure, so the retry that would
+#   have passed never ran, and the author was told to fix something that was not
+#   theirs. The rewritten Test 3 compares wall against wall, and against the
+#   profiler's own record of the same run, so both sides move together.
+#
+#   Wall against wall is fine; CPU against CPU is fine; a LOWER bound on wall
+#   (Test 4's last check) is fine, because contention can only add to it. An
+#   upper bound on wall, or any cross-unit ordering, is the thing that must not
+#   be written in this file.
 # =============================================================================
 set -e
 
@@ -75,15 +91,23 @@ fi
 # CPU-burning step and a trivially fast one, and is armed exactly as test.sh
 # arms it. `awk` is the burner rather than python/perl so the control depends on
 # nothing the gate does not already require.
+#
+# THE STEP ORDER IS LOAD-BEARING (mg-db12). QUICK STEP runs FIRST, and it is the
+# only step whose wall-clock is bounded above — `true` cannot take 0.9s on any
+# host, and SLEEPING STEP cannot take less. So insertion order is guaranteed NOT
+# to be ranked order, on a quiet box and on a contended one alike, and Test 3's
+# monotonicity check therefore has something to catch. Ordered the other way
+# round, as it was until mg-db12, a library that had stopped sorting entirely
+# would have emitted rows already in descending order and passed.
 cat > "$tmpdir/driver.sh" <<DRIVER
 #!/bin/bash
 set -e
 . "$LIB"
 gate_profile_begin "driver"
 trap 'gate_profile_report' EXIT
+gate_step "QUICK STEP" true
 gate_step "SLEEPING STEP" sleep 1
 gate_step "BURNING STEP" awk 'BEGIN { for (i = 0; i < 6000000; i++) x += i }'
-gate_step "QUICK STEP" true
 DRIVER
 
 JSON="$tmpdir/profile.jsonl"
@@ -119,13 +143,117 @@ fi
 # --- Test 3: rows are ranked by wall-clock, slowest first -------------------
 # The ranking IS the deliverable — a per-step breakdown that does not order
 # itself hands the reader the same undifferentiated list they started with.
+#
+# THIS ASSERTION USED TO NAME A STEP, AND THAT WAS THE BUG (mg-db12). It read
+# "rank 1 is SLEEPING STEP", which is an assertion that a fixed 1s SLEEP outlasts
+# a fixed amount of CPU WORK. Those two are only ordered on an idle host: load
+# stretches wall-clock and leaves CPU-seconds alone, so at load 129 the burner
+# took 2.43s and took rank 1, and at load 53.84 it took 1.81s and did it again.
+# The profiler was right both times; what broke was the test's belief about which
+# step is slowest. The second of those failed a real merge and was classed
+# DEFECT — "establishes a fact about the branch" — against a branch that had
+# never touched this file, blaming its author and suppressing the retry that
+# would have passed. Same shape as mg-6c90.
+#
+# So the check no longer names a step. It reads the table's OWN wall column and
+# asserts the property the ranking claims — non-increasing down the ranks — and
+# cross-checks every number against the JSON record of the same run. That holds
+# at any load, because both sides of the comparison move together.
+#
+# It is also STRICTLY STRONGER, in two ways that are checked rather than
+# asserted: it constrains all N rows instead of row 1 (a table sorted correctly
+# except for its tail used to pass), and with the driver's steps reordered above
+# it fails on a table that was never sorted at all — which the old form passed.
+# Test 3b runs the checker against a hand-written mis-ordered table to prove it
+# can return non-zero; a monotonicity check that cannot fail would be the same
+# inert control this suite exists to prevent.
 echo ""
 echo "Test 3: Rows are ranked slowest-first"
-FIRST_ROW="$(grep -E '^ +1 ' "$OUT" | head -1)"
-if printf '%s' "$FIRST_ROW" | grep -q 'SLEEPING STEP'; then
-    pass "rank 1 is the 1s sleep, the slowest step"
+
+# Emit "wall<TAB>step" for each ranked row, in the order the table prints them.
+# The row format is `  %5d  %8.2fs  %6.1f%%  %8.2fs  %7.2f  %6s  %s%s` — the
+# pattern is anchored on rank/wall/share/cpu so the header, the legend and the
+# banner cannot match, and the step name is everything from field 7 on because
+# names contain spaces.
+gate_profile_rank_rows() {
+    awk '
+        /^ +[0-9]+ +[0-9.]+s +[0-9.]+% +[0-9.]+s / {
+            wall = $2; sub(/s$/, "", wall)
+            name = ""
+            for (i = 7; i <= NF; i++) name = name (i > 7 ? " " : "") $i
+            sub(/ *\[FAILED\]$/, "", name)
+            printf "%s\t%s\n", wall, name
+        }' "$1"
+}
+
+# Non-increasing wall down the ranks, over at least one row. Exit status IS the
+# verdict, so this can be pointed at a table known to be wrong.
+gate_profile_ranking_ok() {
+    gate_profile_rank_rows "$1" | awk -F "\t" '
+        { cur = $1 + 0
+          if (NR > 1 && cur > prev) { bad = 1; exit 1 }
+          prev = cur; n++ }
+        END { if (n == 0 || bad) exit 1 }'
+}
+
+ROWS="$(gate_profile_rank_rows "$OUT")"
+ROW_COUNT="$(printf '%s\n' "$ROWS" | grep -c . || true)"
+if [ "$ROW_COUNT" -eq 3 ]; then
+    pass "all 3 steps are ranked rows in the table"
 else
-    fail "rank 1 is not the slowest step; row was: $FIRST_ROW"
+    fail "parsed $ROW_COUNT ranked rows, want 3; the table format changed and this test is reading nothing: $(cat "$OUT")"
+fi
+
+if gate_profile_ranking_ok "$OUT"; then
+    pass "wall-clock is non-increasing down the ranks (rows: $(printf '%s' "$ROWS" | tr '\n' '|'))"
+else
+    fail "the rows are not ordered by wall-clock; rows were: $(printf '%s' "$ROWS" | tr '\n' '|')"
+fi
+
+# The ordering is only meaningful if the numbers being ordered are the ones that
+# were measured. A table that sorted a wall column it had mangled would satisfy
+# monotonicity and mislead every reader of it.
+MISMATCH=""
+while IFS="$(printf '\t')" read -r wall name; do
+    [ -n "$name" ] || continue
+    want="$(jq -r --arg s "$name" '.steps[] | select(.step == $s) | .wall_seconds' "$JSON")"
+    # Compared numerically, not as strings: jq canonicalises number literals
+    # differently across versions (1.6 prints 1.00 as 1, 1.7 preserves it), and
+    # a test that failed on the reader's jq build would be its own flake.
+    if [ -z "$want" ]; then
+        MISMATCH="$MISMATCH [$name: absent from the JSON record]"
+    elif ! awk -v a="$wall" -v b="$want" 'BEGIN { d = a - b; if (d < 0) d = -d; exit !(d < 0.005) }'; then
+        MISMATCH="$MISMATCH [$name: table ${wall}s, record ${want}s]"
+    fi
+done <<ROWS_EOF
+$ROWS
+ROWS_EOF
+if [ -z "$MISMATCH" ]; then
+    pass "every ranked row's wall matches the JSON record of the same run"
+else
+    fail "the table's wall column disagrees with the measurement:$MISMATCH"
+fi
+
+# --- Test 3b: the ranking check can FAIL ------------------------------------
+# The negative control for Test 3. Rows in ascending wall order, formatted
+# exactly as the library formats them, must be rejected.
+echo ""
+echo "Test 3b: NEGATIVE CONTROL — the ranking check rejects an unordered table"
+cat > "$tmpdir/unsorted.out" <<'UNSORTED'
+  rank       wall    share        cpu    cores    load  step
+      1      0.00s     0.0%      0.00s     0.00    1.00  QUICK STEP
+      2      1.00s    45.0%      0.00s     0.00    1.00  SLEEPING STEP
+      3      1.21s    55.0%      1.19s     0.98    1.00  BURNING STEP
+UNSORTED
+if [ "$(gate_profile_rank_rows "$tmpdir/unsorted.out" | grep -c .)" -eq 3 ]; then
+    pass "the parser reads all 3 rows of the control table"
+else
+    fail "the parser did not read the control table, so Test 3 may be asserting over nothing"
+fi
+if gate_profile_ranking_ok "$tmpdir/unsorted.out"; then
+    fail "the ranking check PASSED a table ordered fastest-first — it cannot detect an unsorted table"
+else
+    pass "the ranking check rejects rows that ascend"
 fi
 
 # --- Test 4: POSITIVE CONTROL — CPU is measured, and it discriminates --------
