@@ -216,6 +216,42 @@ func TestNetworkBackoffIsBoundedAndAscending(t *testing.T) {
 	}
 }
 
+// TestTheAttemptCountIsWhatBindsTheNetworkCampaign guards the silent no-op that
+// makes a widening LOOK done: networkRetryBudget is a clock backstop sitting
+// above the schedule, so raising it alone changes nothing a merge experiences.
+// mg-682d had to move both, and a later widening will have to move both too.
+//
+// The failure this produces is deliberately readable in both directions. If the
+// backstop is left behind, the campaign silently truncates at the clock and the
+// attempt count stops meaning what it says — and the ratchet in gatehold_test
+// then reports "the campaign is too short", which points at the wrong constant
+// unless something says which bound stopped the walk. This is that something.
+func TestTheAttemptCountIsWhatBindsTheNetworkCampaign(t *testing.T) {
+	var total time.Duration
+	stoppedByClock := false
+	for n := 1; n <= networkMaxAttempts-1; n++ {
+		next := networkBackoffFor(n)
+		if total+next > networkRetryBudget {
+			stoppedByClock = true
+			break
+		}
+		total += next
+	}
+	if stoppedByClock {
+		t.Errorf("the schedule hit the %s clock backstop after %s, before spending its %d attempts — the two bounds have drifted apart, so networkMaxAttempts no longer describes the campaign. Raise networkRetryBudget in the same commit that raises the attempt count",
+			networkRetryBudget, total.Round(time.Second), networkMaxAttempts)
+	}
+
+	// And the backstop must not be so far above the schedule that it stops being
+	// a backstop: one probe interval of slack keeps "attempts spent" the only
+	// reason a campaign ends, without inviting a schedule edit that doubles the
+	// wait unnoticed.
+	if slack := networkRetryBudget - total; slack > 2*networkBackoffFor(networkMaxAttempts) {
+		t.Errorf("the clock backstop (%s) sits %s above the %s the schedule actually sleeps — that is room for a schedule edit to lengthen the campaign without any bound noticing",
+			networkRetryBudget, slack.Round(time.Second), total.Round(time.Second))
+	}
+}
+
 func TestStatusLabelDistinguishesInfrastructureFromDefect(t *testing.T) {
 	infra := &MergeRequest{Status: StatusFailed, FailureClass: ClassInfrastructure}
 	defect := &MergeRequest{Status: StatusFailed, FailureClass: ClassDefect}
