@@ -195,3 +195,13 @@ gate_step "Testing changelog release-roll and link references" bash scripts/roll
 # ~/.macguffin. The load-bearing case is the opt-in one: a guard that blocked an
 # agent nobody opted in for would be ripped out of every fleet within the hour.
 gate_step "Testing work-item scope guard" bash scripts/mg-scope-guard_test.sh
+
+# The expired-premise instrument (mg-027b). It reads an mg store and prices the
+# candidate triggers architect proposed; the suite builds its own fixture stores
+# in a temp dir and passes --root explicitly, so it never reads the developer's
+# live ~/.macguffin. The load-bearing case is the phase split: the mg-0466 /
+# mg-24dc timeline is replayed to the second and must classify as PRE-DISPATCH,
+# because the finding is that architect's trigger as stated would have missed the
+# case that motivated it. A genuinely-simultaneous pair sits beside it as the
+# positive control, so the negative cannot pass by the population being empty.
+gate_step "Testing the expired-premise rate instrument" bash scripts/premise-expiry-rate_test.sh
