@@ -110,18 +110,124 @@ func TestReapMergedPolecat_IgnoresEmptyAuthor(t *testing.T) {
 	}
 }
 
-func TestReapMergedPolecat_IgnoresUnknownAuthor(t *testing.T) {
-	// The polecat already exited (or the author was never an agent) — the
-	// mayor's backstop owns any leftover work-item state; pogod must not
-	// mg done items it can't tie to a live polecat.
+// TestReapMergedPolecat_ClosesItemWithNoLivePolecat is mg-be37, and it REPLACES
+// a test that asserted the opposite.
+//
+// The old TestReapMergedPolecat_IgnoresUnknownAuthor pinned "pogod must not
+// mg done items it can't tie to a live polecat" on the reasoning that the
+// mayor's backstop owns leftover work-item state. That reasoning was measured
+// and found false on 2026-08-09: no such backstop closes the item, and four
+// merges (mg-51f4, mg-00b3, mg-6c90, mg-56ac) landed with their items left in
+// available/. priority-wake then advertised mg-6c90 as unclaimed high-priority
+// work four minutes after its branch merged as b9e1d1b with 1116 insertions on
+// main — and the recommended action, dispatch, re-derives it.
+//
+// The window is worse than the unmerged one it grew out of: while the branch is
+// unmerged the spawn-time stranded-work guard refuses the dispatch, and the
+// moment it merges that guard correctly stops refusing. Nothing else was
+// looking.
+//
+// A hand-submitted branch has no polecat by construction — that is what makes it
+// hand-submitted — so requiring one was requiring the exact condition the case
+// cannot satisfy.
+func TestReapMergedPolecat_ClosesItemWithNoLivePolecat(t *testing.T) {
 	reg := &fakeReaper{agents: map[string]*agent.Agent{}}
-	called := false
-	reapMergedPolecat(reg, &refinery.MergeRequest{ID: "mr-1", Branch: "b", Author: "mg-gone"}, func(string, string) error {
-		called = true
+	var completedID, completedResult string
+	complete := func(id, resultJSON string) error {
+		completedID, completedResult = id, resultJSON
 		return nil
-	}, postMergeVerdict{}, nil)
-	if called || len(reg.stopped) != 0 {
-		t.Errorf("expected no action for unknown author (complete=%v, stopped=%v)", called, reg.stopped)
+	}
+
+	mr := &refinery.MergeRequest{
+		ID: "mr-1", Branch: "polecat-q6c90", Author: "mg-6c90",
+		TargetRef: "main", MergedSHA: "b9e1d1b",
+	}
+	reapMergedPolecat(reg, mr, complete, postMergeVerdict{}, nil)
+
+	if completedID != "mg-6c90" {
+		t.Fatalf("completed %q, want mg-6c90: the branch merged and nothing else will ever close "+
+			"this item, so it sits in available/ where priority-wake advertises it", completedID)
+	}
+	var result map[string]any
+	if err := json.Unmarshal([]byte(completedResult), &result); err != nil {
+		t.Fatalf("result sidecar is not valid JSON: %v (%q)", err, completedResult)
+	}
+	if result["branch"] != "polecat-q6c90" || result["merged_sha"] != "b9e1d1b" {
+		t.Errorf("sidecar does not record what landed: %q", completedResult)
+	}
+	// There is nothing to stop, and reaching for the registry would panic on the
+	// nil agent this path no longer has.
+	if len(reg.stopped) != 0 {
+		t.Errorf("Stop called with no polecat running: %v", reg.stopped)
+	}
+}
+
+// TestReapMergedPolecat_IgnoresAuthorThatIsNotAWorkItemID is the other polarity
+// of the same change, and without it the fix above is a `mg done mayor` on every
+// crew merge. The completion is now gated on the author's SHAPE rather than on a
+// registry hit, so the shape test has to actually exclude something.
+func TestReapMergedPolecat_IgnoresAuthorThatIsNotAWorkItemID(t *testing.T) {
+	for _, author := range []string{"mayor", "pm-pogo", "daniel", "architect"} {
+		reg := &fakeReaper{agents: map[string]*agent.Agent{}}
+		called := false
+		reapMergedPolecat(reg, &refinery.MergeRequest{ID: "mr-1", Branch: "b", Author: author},
+			func(string, string) error { called = true; return nil }, postMergeVerdict{}, nil)
+		if called {
+			t.Errorf("author %q produced an `mg done %s`, which is not a completion but an error "+
+				"logged on every crew merge forever", author, author)
+		}
+	}
+}
+
+// TestReapMergedPolecat_AuthorlessDeferredMergeDoesNotClose. The declared-work
+// guards outrank the mg-be37 close: an item that says merging is a STEP must not
+// be completed just because nobody is running to say so. This is the direction
+// where being wrong truncates a ticket silently.
+func TestReapMergedPolecat_AuthorlessDeferredMergeDoesNotClose(t *testing.T) {
+	for name, mr := range map[string]*refinery.MergeRequest{
+		"pr flow":    {ID: "mr-1", Branch: "b", Author: "mg-7746", PRFlow: true, TargetRef: "integration"},
+		"defer done": {ID: "mr-2", Branch: "b", Author: "mg-0081", DeferDone: true},
+		"post-merge step failed": {ID: "mr-3", Branch: "b", Author: "mg-6879",
+			PostMergeError: "tag push rejected"},
+	} {
+		reg := &fakeReaper{agents: map[string]*agent.Agent{}}
+		called := false
+		verdict := postMergeVerdict{}
+		if mr.PostMergeError != "" {
+			verdict = resolvePostMergeWork(reg, mr, nil)
+		}
+		reapMergedPolecat(reg, mr, func(string, string) error { called = true; return nil }, verdict, nil)
+		if called {
+			t.Errorf("%s: the item was closed although this merge is not completion", name)
+		}
+	}
+}
+
+// TestResolvePostMergeWork_ProbesAuthorlessMerges. The probe used to return the
+// zero verdict whenever the registry had nobody, which was harmless while
+// completion also required a live polecat. It stopped being harmless the moment
+// completion did not: an authorless merge would have skipped the declaration
+// check entirely and closed an item that declares its own remainder.
+func TestResolvePostMergeWork_ProbesAuthorlessMerges(t *testing.T) {
+	reg := &fakeReaper{agents: map[string]*agent.Agent{}}
+	probed := ""
+	v := resolvePostMergeWork(reg, &refinery.MergeRequest{ID: "mr-1", Author: "mg-ca3c"},
+		func(id string) (bool, error) { probed = id; return true, nil })
+	if probed != "mg-ca3c" {
+		t.Fatalf("the work item was not probed (probed=%q); an authorless merge would close an "+
+			"item tagged post-merge-work", probed)
+	}
+	if !v.Declared {
+		t.Errorf("Declared = false although the item declares post-merge work")
+	}
+
+	// And a crew author is still not probed: its name is not an id, and the
+	// probe's failure direction (a failed lookup DECLARES work) would turn every
+	// crew merge into a false declaration.
+	probed = ""
+	if v := resolvePostMergeWork(reg, &refinery.MergeRequest{ID: "mr-2", Author: "mayor"},
+		func(id string) (bool, error) { probed = id; return false, nil }); v.Declared || probed != "" {
+		t.Errorf("crew author was probed (probed=%q, declared=%v)", probed, v.Declared)
 	}
 }
 

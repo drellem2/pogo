@@ -664,6 +664,43 @@ gh: <owner>/<repo>#<n>
 - `depends=` chains the tickets (build depends on triage, review depends on build), mirroring how `qa: required` pairs items.
 - Tag every ticket in the chain `gh-issue` so `mg list --tag=gh-issue` shows the whole board.
 
+### Work that already exists — `pogo check-stranded`
+
+**Before you dispatch at anything, and at the top of any cycle where you are
+working the priority-wake list.** It is one command and it answers the question
+the board cannot: does this open item's work already exist?
+
+```bash
+pogo check-stranded          # every OPEN item whose work is already on a branch
+```
+
+Two row kinds, and their remedies are **opposite** — never act on one as though
+it were the other:
+
+- `stranded` — the branch has commits `main` does not. **`pogo refinery submit`**,
+  and do *not* dispatch. A dispatch here re-derives work that already exists;
+  mg-9a19 lost 1026 lines that way.
+- `landed_not_closed` — the branch is **merged** and the item is still asking for
+  the work. **`mg done`**. This is the one that used to be invisible: on
+  2026-08-09, priority-wake told you to "claim or dispatch now: mg-6c90" *four
+  minutes after* that branch merged as b9e1d1b with 1116 insertions already on
+  main. pogod now closes an item at merge whatever submitted the branch, so this
+  row should stay near-empty — a row appearing here means something got past that.
+- `conflict_suspect` and `unjudged` **recommend neither command.** The first is
+  two instruments disagreeing; the second is a branch nobody could read. Both mean
+  *you* look.
+
+The spawn-time refusal (`work item … already has PUSHED, UNMERGED work`) is the
+other half of this and it is not a substitute: it fires only when somebody tries
+to dispatch, and once a branch **merges** it correctly stops firing while the item
+is still open. That window opens at merge and never closes. Of the four instances
+that produced this detector, one was caught by that guard, one by a person
+reconciling something unrelated, and two by the accident of looking next door.
+
+Do **not** read the branch count out of a manual sweep: 57 of this repo's 634
+polecat branches have unmerged patches and 48 of those belong to archived items.
+The command already ranks on item status for that reason.
+
 ### Intake reconciliation — `pogo check-intake`
 
 A `[gh]` mail you read but did not act on is gone. `mg mail read` marks a message read immediately, so a read-but-unhandled message is invisible to every later unread check, and the issue behind it appears on no board at all — not `mg list`, not `--tag=gh-issue`, not the stall watch. drellem2/pogo#99 generated **two** delivered `[gh]` mails on 2026-07-29 and went ~10 hours with no carrier; its paired issue #100, filed 19 minutes later, was carried normally. A pair Daniel filed to be considered together got split and the untracked half went dark. It was found by a PM running an open-issue sweep by hand, early, on a hunch.

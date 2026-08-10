@@ -3846,6 +3846,11 @@ branches; work items and mail live in mg/macguffin (the task-store CLI).`,
 	rootCmd.AddCommand(newCheckPromptsCmd(&jsonOutput))
 	rootCmd.AddCommand(newCheckStalenessCmd(&jsonOutput))
 	rootCmd.AddCommand(newCheckOrphansCmd(&jsonOutput))
+	// check-stranded (mg-be37): the PERIODIC half of the spawn-time stranded-work
+	// guard. That guard only fires when somebody dispatches; this one asks the
+	// question of every open item on a clock, and reports the merged-but-open row
+	// the guard cannot see at all.
+	rootCmd.AddCommand(newCheckStrandedCmd(&jsonOutput))
 	rootCmd.AddCommand(newHostCmd(&jsonOutput))
 	cmdServer.AddCommand(cmdServerStart)
 	cmdServer.AddCommand(cmdServerStop)

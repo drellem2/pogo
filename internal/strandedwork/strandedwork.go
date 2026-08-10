@@ -373,6 +373,45 @@ func polecatBranches(repo string) ([]string, error) {
 	return names, nil
 }
 
+// BranchMatchesItem reports whether a polecat branch name plausibly belongs to
+// workItemID, by the BRANCH-NAME route.
+//
+// A polecat branch is polecat-<agent name>, and an agent's name is derived from
+// its work item's id — usually the bare suffix ("mg-9a19" → "9a19"), sometimes
+// with a letter in front ("mg-b468" → "wb468", "mg-56ac" → "q56ac"), sometimes
+// with the whole id ("polecat-mg-0fa6"). So the test is CONTAINMENT of the
+// suffix, not equality.
+//
+// The suffix must be at least three characters. A shorter or malformed id would
+// match every branch in the repo, and a detector that names all 634 of them is
+// disarmed the first time somebody reads it.
+//
+// It lives here, next to the branch-listing code, because two callers depend on
+// exactly this rule — the dispatch gate matching a branch to the item it is
+// about to re-derive, and the sweep matching an item to the branch it may
+// already have — and a second copy is a second rule the day one of them is
+// widened.
+func BranchMatchesItem(branch, workItemID string) bool {
+	if workItemID == "" || branch == "" {
+		return false
+	}
+	suffix := workItemID
+	if _, after, ok := strings.Cut(workItemID, "-"); ok {
+		suffix = after
+	}
+	if len(suffix) < 3 {
+		return false
+	}
+	name := strings.TrimPrefix(branch, BranchPrefix)
+	return strings.Contains(strings.ToLower(name), strings.ToLower(suffix))
+}
+
+// PolecatBranches lists every polecat branch name in repo, from local heads and
+// origin's remote-tracking refs alike, sorted and deduplicated. Exported for the
+// item-driven sweep, which needs the branch NAMES up front so it can join them
+// against work items before paying for an Inspect on any of them.
+func PolecatBranches(repo string) ([]string, error) { return polecatBranches(repo) }
+
 // resolveBranchRef picks the ref to read a branch's commits from, preferring the
 // pushed copy.
 //
