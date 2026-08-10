@@ -38,6 +38,13 @@ read as *the high end*, not the typical case. A repeat at load ~40 was started
 and **truncated by the scheduled predeploy stop before it produced a table**; it
 is not in this document.
 
+> **Editor's note (mg-db58, polecat cdb58).** That last sentence was true when it
+> was written and is false now. The load-~40 run *did* produce its table — the
+> instrument prints on EXIT, including on the SIGTERM that stopped it, so the
+> table landed at 01:52Z, forty seconds after this document's final save. Its
+> author never saw it. It is **r4** below, and it carries the single most
+> important qualification in this document: see the addendum.
+
 ## The ranked list — quiet, loaded, ratio
 
 `test.sh` totals: **252.11s quiet → 468.87s loaded = 1.86×** — and that
@@ -156,6 +163,10 @@ load 129 this gate went red on a green tree, which under the refinery buys a
 full re-run. **Not fixed here** — this ticket measures, and the fix belongs with
 whoever rules on C. Filed for a successor.
 
+> **Editor's note (cdb58).** It had not in fact been filed — qdb58 was stopped
+> before it could. It is filed now, as **mg-db12**, together with a second
+> assertion of the same family found in Finding 7.
+
 ## Finding 4 — cold cache costs more than heavy load does
 
 The cache effect and the load effect are separable in these runs and they are
@@ -191,6 +202,8 @@ concrete next measurements fall out, both small:
    load, 15× spread across four runs. Bounded, and it is the largest loaded row.
 2. **Repeat the pair at load ~40.** r3 landed at a mean of 138 — real for this
    host, but the high end. The ~40 run was truncated by the predeploy stop.
+   — **DONE, and it was not truncated after all: see the addendum.** It is the
+   run that turns this document's own caveat into a number.
 
 ## Reproducing
 
@@ -200,3 +213,206 @@ POGO_GATE_PROFILE_JSON=/tmp/gate.json ./build.sh    # any run, any host
 The table prints on EXIT, including on a failed run, and carries the host load
 average sampled at each step's start. That is mg-eed9's instrument; this
 document is two readings from it and one comparison.
+
+---
+
+# Addendum — the third point on the curve, and it is a knee
+
+**Added by:** mg-db58, polecat `cdb58`, 2026-08-10 · **Branch:** `polecat-cdb58`
+
+Everything above this line is qdb58's, rescued verbatim and committed unedited
+before it was read (the only changes to its text are the two dated editor's
+notes, both of which say so). Everything below is mine. The measurement below is
+**not a new run** — it is r4, which qdb58 started and believed lost, recovered
+from the artifacts and analysed for the first time here.
+
+## Why there was a table qdb58 never saw
+
+The load-~40 repeat was SIGTERM'd by the 00:52Z `predeploy-stop-noncritical`
+procedure at step 18 of 20. qdb58 recorded it as producing nothing. But the
+instrument's table is printed from an EXIT trap — that is mg-eed9's design and
+the document above states it in the *Reproducing* section — so the run printed
+a complete 17-step profile **as it died**, at 01:52:0xZ. The document's last
+save was 01:51. The gap is forty seconds, and it is the whole difference between
+this ticket shipping one loaded data point and shipping two.
+
+## r4, alongside the runs above
+
+| run | cache | load (min/mean/max, sampled) | test.sh wall | test.sh cpu | steps | outcome |
+|---|---|---|---|---|---|---|
+| **r2** quiet | 56/62 | 1.68 / **2.51** / 3.28 | 252.11s | 99.13s | 20 | exit 0 |
+| **r4** moderate | **60/62** | 18.17 / **46.88** / 78.10 | 245.43s | 71.35s | 17 | **all 17 passed**, SIGTERM at 18 |
+| **r3** heavy | 58/62 | 78.38 / **137.82** / 205.18 | 468.87s | 66.46s | 15 | **FAILED** at 15 |
+
+r4's contention was the same recipe as r3's from `loadgen.sh`, run smaller: **10
+generator processes against r3's 24**. Its mean of 46.88 is close to the ~40
+qdb58 was calibrating for — r4 is the run that overshot least.
+
+**Every one of r4's 17 steps passed.** That is the first thing to notice, because
+r3 at load 138 went red.
+
+## Finding 5 — between load 2.5 and load 47 the gate does not measurably slow down. The cost is a knee, not a slope.
+
+Comparing whole-run totals across runs that reached different numbers of steps is
+meaningless, so the comparison below is restricted to the **15 steps all three
+runs reached**, and then repeated with `Testing Go packages` removed — because
+r4 had 60/62 packages cached against r2's 56/62, which makes that one row
+(25.51s → 4.93s) a measurement of cache and not of load. The second line is the
+honest one.
+
+| | quiet (load 2.5) | moderate (load 47) | heavy (load 138) |
+|---|---|---|---|
+| 15 common steps | 245.52s | 240.28s — **0.98×** | 468.22s — **1.91×** |
+| …minus the Go-packages row | 220.01s | 235.35s — **1.07×** | 435.58s — **1.98×** |
+
+**A 19-fold increase in load bought a 7% slowdown. The next 3-fold increase
+bought 98%.** Whatever the gate's load sensitivity is, it is not proportional to
+load, and it is close to absent across the entire band an ordinary busy evening
+occupies.
+
+qdb58 wrote its own caveat — *"read every ratio as the high end, not the typical
+case"* — as a hedge it could not quantify. This is the quantity, and it is
+stronger than a hedge: at load 47, with five polecats resident and ten synthetic
+contenders running, **the gate was not slower in any way this instrument can
+see.** The 1.86× headline is not a typical evening scaled up. It is a different
+regime.
+
+Per-step, the same shape. The four rows qdb58 identified as pathological under
+load 138 are flat at load 47:
+
+```
+step                                             quiet      l47     l138    r47    r138
+Testing the from-source staleness runner         1.60s    1.63s    9.73s  1.02x   6.08x
+Testing pogo-deploy nightly trigger             33.89s   33.97s  172.33s  1.00x   5.08x
+Testing pogo-self-deploy SIGINT interrupt-safety 1.80s    1.84s    8.89s  1.02x   4.94x
+Testing the packaged test isolation              4.24s    6.55s   22.67s  1.54x   5.35x
+Testing the gate's per-step profile              4.17s    4.16s   12.17s  1.00x   2.92x
+```
+
+Three of those five are within 2% of their quiet time at load 47 and then go 3–6×
+at load 138. Only one step exceeded 1.6× at load 47 (`pogo-self-deploy driver`,
+2.34×, 4.48s → 10.49s — small in absolute terms).
+
+This **sharpens Finding 2 rather than softening it.** `pogo-deploy nightly
+trigger` at 1.00× / 5.08× is the cleanest possible signature of the thing qdb58
+suspected: a step that does not care about load at all until something it waits
+on gives up, and then costs 172s. A computation that was merely being starved
+would have degraded gradually across the band. This one did not degrade at all
+and then fell off a cliff.
+
+## Finding 6 — the load-sensitive assertion in Finding 3 has a threshold, and it is above an ordinary busy host
+
+Finding 3 records `scripts/gate-profile_test.sh` Test 3 failing at load 129 — a
+fixed-CPU "burning step" overtaking a fixed 1s sleep. At r4's load the same
+assertion **passed**, with the sleep correctly ranked first:
+
+```
+r4, load 41.07 at that step:   PASS: rank 1 is the 1s sleep, the slowest step
+r3, load 129 at that step:     FAIL: rank 1 is not the slowest step
+                                     1   2.43s  68.3%  0.27s  0.11  129.21  BURNING STEP
+```
+
+So the failure threshold sits **somewhere between load 47 and load 129**, not at
+the top of the fleet's ordinary range. That is a genuine bound and it is worth
+having before anyone prices the fix: this is a real defect that will really fire
+— this host has recorded load 174 in a night — but it is not firing on every
+contended gate, and the flake rate it contributes is a function of how often the
+fleet crosses that band rather than of how busy it usually is. Measuring where in
+that 47–129 window it actually breaks is one more bisection run.
+
+**Still not fixed here**, for the same reason qdb58 did not fix it. It is
+recorded, with a bound it did not have.
+
+## What r4 does and does not change
+
+**Does not change:** the ranking. r4 reorders nothing in the quiet column, and
+Findings 1, 2 and 4 stand exactly as written — the live-daemon suites are still
+~60% of quiet gate time and still the most load-*stable* rows; the cold cache is
+still worth ~40× more on the Go step than heavy load is.
+
+**Does change:** how the 1.86× headline should be quoted. qdb58 asked that its
+synthetic-load caveat survive into any summary. r4 is the reason that request
+was right, and it upgrades the caveat from a qualifier to a finding: the honest
+one-line summary of this profile is now
+
+> the merge gate is **flat to ~1.07× across the ordinary load band, and ~1.9–2×
+> beyond it, with an outright gate failure at the top** — measured under
+> synthetic contention at three points (load 2.5 / 47 / 138), one run each.
+
+**Limitations, plainly.** n=1 per condition; three points do not locate a knee,
+they only prove the curve is not a line. All contention is synthetic — natural
+fleet load never exceeded 8.75 all night, which is itself worth noticing. r4 and
+r3 differ in cache state as well as load (60/62 vs 58/62), which is why the Go
+row is excluded above rather than explained. r4 and r3 are both truncated runs
+and the like-for-like comparison is what carries the argument, not the totals.
+
+**And this still rules on nothing.** A–E remain unranked. The knee is an input to
+that ruling — it bears directly on how much of the flakiness problem strategy C
+is being asked to solve, and on whether the answer changes if the fleet's
+concurrency cap keeps it under load 47 — but which strategy follows from it is
+not a call this document makes, and finding a knee is not a licence to make it.
+
+## Reproducing r4's analysis
+
+The raw artifacts for all four runs are preserved at
+`~/.pogo/shared/mg-db58-gate-profile-2026-08-10/` (`.log`, `.profile.json`,
+`.host.txt`, `.load.txt` per run). Every number in this addendum comes from the
+`test.sh`-labelled record in each `.profile.json` — the files hold one JSON
+record per profiled driver invocation, including the self-test's own nested
+runs, so take the **last** record whose `label` is `test.sh`:
+
+```bash
+jq -c 'select(.label=="test.sh") | {steps:(.steps|length), wall:.wall_seconds}' r4-warm-load40.profile.json
+```
+
+## Finding 7 — two more runs, unplanned: the first at *natural* load, and a second gate failure
+
+Verifying this addendum meant running the gate twice in this worktree. Both runs
+are data, and one of them failed, so both are recorded rather than discarded.
+
+| run | cache | load at run | test.sh wall | steps | outcome |
+|---|---|---|---|---|---|
+| **r5** cold | 0/63 | ~33 (natural) | 361.26s | 1 | **FAILED** on the first step |
+| **r6** warm | 63/63 | ~8–15 (natural) | 211.55s | 20 | exit 0 |
+
+**r6 is the first measurement in this whole document taken under load the fleet
+actually produced.** r1–r4's contention was synthetic; qdb58 flagged that as the
+central caveat because natural load never exceeded 8.75 during its window. Mine
+ran at a 1-minute average of 8–15 with the fleet genuinely working, and the
+result is the same as r4's: **211.55s at load ~8–15 against 252.11s at load 2.5.
+Excluding the Go-packages row for the cache reason given above, 198.49s against
+226.60s — 0.88×.** The gate was *faster* on the busy host, because cache state
+dominates load at this end of the band. Finding 5's knee survives contact with
+real load, from the other side.
+
+**r5 failed, and it is a fifth member of Finding 3's family.** The failure was
+`TestProbeGoesRedAgainstAConstructedOrphan` (`internal/orphanwatch`, landed
+2026-08-09 as 78dcb8b for mg-4518). It constructs a real orphan process and
+asserts the detector reports it:
+
+```
+probe_live_test.go:35: FAILING ARM: constructed orphan pid=65023 (owner zzdead, dead)
+    was NOT reported. report: busy=2 live_owner=0 unattributable=1 cwd_unreadable=1 orphans=[]
+```
+
+The orphan was seen and then binned as `cwd_unreadable` instead of `orphans` — a
+classification that depends on host state at probe time, not on the branch. It
+passed on immediate re-run (`go test ./internal/orphanwatch/ -count=1`, 5.848s)
+and the full gate passed clean the second time, on an unchanged tree. So: a
+green tree, a red gate, a full re-run bought — **exactly the retry mechanism
+mg-eed9 costs the fleet on, caught a second time in three gate runs.**
+
+That is the number worth carrying out of this addendum alongside the knee. In
+this document's six runs, **two failed on an unchanged tree, from two different
+load-sensitive assertions** (`gate-profile_test.sh` Test 3 at load 129;
+`orphanwatch` probe at load 33). The second one fired at load 33 — well inside
+the band where Finding 5 shows the gate is not measurably slower. **Slowness and
+flakiness have different thresholds, and the flakiness threshold is the lower
+one.** A ruling that treats gate cost as a wall-clock problem is pricing the
+half that turns out to be better behaved.
+
+**Not fixed. Both are now filed as `mg-db12`** — no existing mg item covered
+either (mg-5551, mg-6092 and mg-6c90 are the three known members; the
+orphanwatch probe is a fourth and `gate-profile_test.sh` Test 3 a fifth). That
+ticket records the two defects and their measured thresholds and explicitly
+declines to rule on A–E. Filing is not fixing, and it is not a vote for C.
