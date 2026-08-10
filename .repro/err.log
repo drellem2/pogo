@@ -1,0 +1,47 @@
+2026/08/04 21:12:19 pogod: starting (pid=97772)
+2026/08/04 21:12:19 pogod: GH_TOKEN: already present in the environment
+{"@level":"info","@message":"Max files per tree set to 25000","@timestamp":"2026-08-04T21:12:19.382008+01:00","max_files_per_tree":25000}
+2026/08/04 21:12:19 pogod: mg supports `mg reclaim`, so start-verification uses the HARD claim-pid re-stamp signal (mg-7d6d): a polecat has started when the claim pid is no longer pogod's. Polecat prompts carry the re-stamp step as `mg reclaim`
+2026/08/04 21:12:19 pogod: synthetic-failure-turn detector enabled (interval=5m0s, page-only — restarts are SUPPRESSED, never issued)
+2026/08/04 21:12:19 pogod: scheduler loaded from /Users/daniel/.pogo/polecats/t83c5/.repro/pogohome/schedules.json
+2026/08/04 21:12:19 pogod: stall watcher enabled (agent=mayor item_age=10m0s mail_age=10m0s max_mail=5 cooldown=5m0s priority_wake=true wake_delay=30s wake_cooldown=3m0s fast_priorities=high non_dispatchable=human,parked,blocked:<agent>)
+2026/08/04 21:12:19 pogod: credential-expiry warner enabled (interval=15m0s, warns at 7d/72h/24h/2h, report-only)
+2026/08/04 21:12:19 pogod: gh-issue teardown detector enabled (interval=1h0m0s renotify=24h0m0s notify_to=pm-pogo escalate_after=72h0m0s, report-only)
+2026/08/04 21:12:19 pogod: gh-issue intake detector enabled (interval=15m0s grace=30m0s renotify=24h0m0s notify_to=mayor escalate_after=4h0m0s repos=[drellem2/pogo drellem2/macguffin] from built-in default, report-only)
+2026/08/04 21:12:19 pogod: ack-watch enabled (interval=30m0s renotify=6h0m0s notify_to=mayor escalate_after=24h0m0s, report-only)
+2026/08/04 21:12:19 pogod: deaf-watch enabled (interval=5m0s hold_down=15m0s renotify=6h0m0s notify_to=mayor escalate_after=24h0m0s, report-only)
+2026/08/04 21:12:19 pogod: done-item polecat reaper enabled (idle_grace=2m0s) — a polecat whose item reaches done is stopped once it goes quiet, merge or no merge (mg-56d1)
+2026/08/04 21:12:19 pogod: git GC enabled (interval 1h0m0s)
+2026/08/04 21:12:19 reaper: enabled but no jobs configured — idle
+2026/08/04 21:12:19 platform/sleep darwin: reaped 1 orphaned `log stream` watcher(s) stranded by an earlier pogod
+2026/08/04 21:12:19 refinery: started (poll_interval=30s)
+{"@level":"info","@message":"Processing project %s","@timestamp":"2026-08-04T21:12:19.424875+01:00","EXTRA_VALUE_AT_END":"/Users/daniel/.pogo/polecats/t83c5/.repro/repo/"}
+{"@level":"info","@message":"project: periodic indexer started","@timestamp":"2026-08-04T21:12:19.424844+01:00","interval":"5s","max_backoff":"1m20s"}
+2026/08/04 21:12:19 pogod: crew auto-start disabled ([agents] autostart = false); not starting any agents
+2026/08/04 21:12:19 pogod: auto-start sweep complete; mail-check reap opens at 2026-08-04T20:12:49Z (30s settle, mg-de08)
+2026/08/04 21:12:19 pogod: condition annunciator: no live conditions
+2026/08/04 21:12:19 pogod: credential-expiry warner is NOT armed — no `Claude Code-credentials` keychain item on this machine. No advance warning of an auth expiry will be sent on this host.
+{"@level":"info","@message":"Index is stale for /Users/daniel/.pogo/polecats/t83c5/.repro/repo/ (tree hash changed), will re-index incrementally","@timestamp":"2026-08-04T21:12:19.452388+01:00"}
+{"@level":"info","@message":"Processing project for diagnostics","@timestamp":"2026-08-04T21:12:19.452444+01:00","path":"/Users/daniel/.pogo/polecats/t83c5/.repro/repo/"}
+2026/08/04 21:12:19 pogod: background project indexing complete
+{"@level":"info","@message":"Collected diagnostics","@timestamp":"2026-08-04T21:12:19.452487+01:00","count":0,"project":"/Users/daniel/.pogo/polecats/t83c5/.repro/repo/"}
+{"1":" cached hashes for ","@level":"info","@message":"Incremental index: reusing ","@timestamp":"2026-08-04T21:12:19.452463+01:00","EXTRA_VALUE_AT_END":"/Users/daniel/.pogo/polecats/t83c5/.repro/repo/"}
+{"@level":"info","@message":"Indexed 1 files for /Users/daniel/.pogo/polecats/t83c5/.repro/repo/","@timestamp":"2026-08-04T21:12:19.466621+01:00"}
+{"@level":"info","@message":"Reindexing ","@timestamp":"2026-08-04T21:12:29.426066+01:00","EXTRA_VALUE_AT_END":"/Users/daniel/.pogo/polecats/t83c5/.repro/repo/"}
+{"@level":"info","@message":"Indexed 1 files for /Users/daniel/.pogo/polecats/t83c5/.repro/repo/","@timestamp":"2026-08-04T21:12:29.439939+01:00"}
+{"@level":"info","@message":"No content changes detected, skipping zoekt rebuild for /Users/daniel/.pogo/polecats/t83c5/.repro/repo/","@timestamp":"2026-08-04T21:12:29.439992+01:00"}
+{"@level":"info","@message":"Reindexing ","@timestamp":"2026-08-04T21:12:44.427126+01:00","EXTRA_VALUE_AT_END":"/Users/daniel/.pogo/polecats/t83c5/.repro/repo/"}
+{"@level":"info","@message":"Indexed 1 files for /Users/daniel/.pogo/polecats/t83c5/.repro/repo/","@timestamp":"2026-08-04T21:12:44.441825+01:00"}
+{"@level":"info","@message":"No content changes detected, skipping zoekt rebuild for /Users/daniel/.pogo/polecats/t83c5/.repro/repo/","@timestamp":"2026-08-04T21:12:44.441884+01:00"}
+{"@level":"info","@message":"Reindexing ","@timestamp":"2026-08-04T21:13:09.427093+01:00","EXTRA_VALUE_AT_END":"/Users/daniel/.pogo/polecats/t83c5/.repro/repo/"}
+{"@level":"info","@message":"Indexed 1 files for /Users/daniel/.pogo/polecats/t83c5/.repro/repo/","@timestamp":"2026-08-04T21:13:09.442332+01:00"}
+{"@level":"info","@message":"No content changes detected, skipping zoekt rebuild for /Users/daniel/.pogo/polecats/t83c5/.repro/repo/","@timestamp":"2026-08-04T21:13:09.442380+01:00"}
+{"@level":"info","@message":"Reindexing ","@timestamp":"2026-08-04T21:13:54.427013+01:00","EXTRA_VALUE_AT_END":"/Users/daniel/.pogo/polecats/t83c5/.repro/repo/"}
+{"@level":"info","@message":"Indexed 1 files for /Users/daniel/.pogo/polecats/t83c5/.repro/repo/","@timestamp":"2026-08-04T21:13:54.439769+01:00"}
+{"@level":"info","@message":"No content changes detected, skipping zoekt rebuild for /Users/daniel/.pogo/polecats/t83c5/.repro/repo/","@timestamp":"2026-08-04T21:13:54.439829+01:00"}
+{"@level":"info","@message":"Reindexing ","@timestamp":"2026-08-04T21:14:04.426975+01:00","EXTRA_VALUE_AT_END":"/Users/daniel/.pogo/polecats/t83c5/.repro/repo/"}
+{"@level":"info","@message":"Indexed 1 files for /Users/daniel/.pogo/polecats/t83c5/.repro/repo/","@timestamp":"2026-08-04T21:14:04.440666+01:00"}
+{"@level":"info","@message":"No content changes detected, skipping zoekt rebuild for /Users/daniel/.pogo/polecats/t83c5/.repro/repo/","@timestamp":"2026-08-04T21:14:04.440713+01:00"}
+{"@level":"info","@message":"Reindexing ","@timestamp":"2026-08-04T21:14:19.436227+01:00","EXTRA_VALUE_AT_END":"/Users/daniel/.pogo/polecats/t83c5/.repro/repo/"}
+{"@level":"info","@message":"Indexed 1 files for /Users/daniel/.pogo/polecats/t83c5/.repro/repo/","@timestamp":"2026-08-04T21:14:19.514768+01:00"}
+{"@level":"info","@message":"No content changes detected, skipping zoekt rebuild for /Users/daniel/.pogo/polecats/t83c5/.repro/repo/","@timestamp":"2026-08-04T21:14:19.514826+01:00"}

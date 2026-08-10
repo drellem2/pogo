@@ -1,0 +1,9 @@
+[search]
+index_interval = "5s"
+
+[agents]
+# pinned by pogo default-migration guard (mg-7d95) — keeps this existing install
+# on its current role names if a future pogo release changes the shipped defaults.
+coordinator = "mayor"
+worker = "polecat"
+autostart = false
