@@ -12,6 +12,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os/exec"
 	"strings"
 	"sync"
@@ -294,17 +295,43 @@ func StartOrchestration() (server.StartReport, error) {
 
 // StopOrchestration tells pogod to transition to index-only mode,
 // stopping agents and refinery while keeping the server alive.
+//
+// Kept as the error-only form because every in-tree caller of it is a step in a
+// sequence that intends to restart the fleet shortly (quiesceCrew, `pogo server
+// stop`) and has nothing to do with the report. Callers that want to SEE the
+// resume deadline the stop just armed use StopOrchestrationHold.
 func StopOrchestration() error {
-	resp, err := postAttributed(serverURL + "/server/stop-orchestration")
+	_, err := StopOrchestrationHold(0)
+	return err
+}
+
+// StopOrchestrationHold stops orchestration, declaring how long the fleet may
+// legitimately stay down, and returns what the daemon recorded.
+//
+// hold of zero means "no declaration": pogod applies its default resume grace
+// and will restore the fleet itself if the caller never comes back (mg-5af1).
+// Pass a positive duration only when a longer dark window is INTENDED — the
+// declaration is what distinguishes a maintenance stop from the start of an
+// outage, and nothing else can.
+func StopOrchestrationHold(hold time.Duration) (server.StopReport, error) {
+	var report server.StopReport
+	u := serverURL + "/server/stop-orchestration"
+	if hold > 0 {
+		u += "?hold=" + url.QueryEscape(hold.String())
+	}
+	resp, err := postAttributed(u)
 	if err != nil {
-		return fmt.Errorf("failed to contact server: %w", err)
+		return report, fmt.Errorf("failed to contact server: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("server returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return report, fmt.Errorf("server returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
-	return nil
+	if err := json.NewDecoder(resp.Body).Decode(&report); err != nil {
+		return report, fmt.Errorf("failed to decode response: %w", err)
+	}
+	return report, nil
 }
 
 func StopServer() error {

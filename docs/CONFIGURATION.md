@@ -2208,6 +2208,77 @@ idle_grace = "2m"          # a done polecat must be quiet on its PTY this long
 
 Source of truth: `cmd/pogod/donereap.go`, `internal/agent/polecatactivity.go`.
 
+## Orchestration resume deadline
+
+**A procedure that stops the fleet must not also be the only thing that can start
+it.** Stopping orchestration is step 1 of a two-step sequence — `pogo service
+install` quiesces the crew and restores it seven steps later, an operator's `pogo
+server stop` is undone by their later `pogo server start`, a redeploy stops a
+fleet it intends to bring back. Until mg-5af1 the only thing that could perform
+step 2 was the process that performed step 1, so the fleet being up was
+contingent on that process surviving.
+
+On 2026-08-08 it did not. The crew was stopped cleanly at 00:44:20Z, the run that
+stopped it hung at 02:00:05Z and did not return for 31h39m, and the fleet stayed
+dark for **33 hours**. Every supervisor behaved correctly: a requested stop is
+not a crash, so `restart_on_crash` did not fire, and nothing is entitled to undo
+a deliberate shutdown it cannot distinguish from an intended one. The scheduler
+delivered 198 consecutive fires to an absent pm-pogo and logged every one as a
+success.
+
+pogod now **arms a deadline at the moment of the stop** and, if nothing has
+brought the fleet back by then, restores full mode itself and mails the
+coordinator naming who stopped it and when.
+
+- **The holder is pogod, not the stopper.** A shell `trap` dies with the shell, a
+  background child dies with its process group, and a deferred restore inside the
+  procedure is precisely the thing that did not run. pogod is a separate process
+  from every stopper and stays up for the whole index-only window — that is what
+  index-only *means*.
+- **It is not the crew.** A watcher held by the fleet cannot fire when the fleet
+  is what is down (the same constraint as mg-a14c).
+- **It cannot fight an ordinary deploy.** The deadline is sized well above any
+  legitimate stop/restart cycle, it cannot act while the mode is full, and a
+  return to full mode by any route discharges the obligation — so a correct
+  deploy produces no second restart and no alarm. That positive control is a
+  test, not an aspiration (`cmd/pogod/orchresume_test.go`).
+- **A second stop does not push the deadline out.** The obligation runs from the
+  *original* stop, so a retry loop cannot defer it forever.
+- **It does not survive pogod's own death, and does not need to.** A restarted
+  pogod boots into full mode by construction, which is the state the obligation
+  would have restored. A pogod that is killed and *never* restarted is a
+  dead-daemon problem, handled by the tier-1 heartbeat reaper.
+
+**Declaring a longer stop.** When a long dark window is intended, say so:
+
+```bash
+pogo server stop --hold 4h        # or POST /server/stop-orchestration?hold=4h
+```
+
+There is deliberately no indefinite hold. An undeclared indefinite dark fleet is
+indistinguishable from an outage, and it was one. A malformed hold is refused
+rather than silently defaulted.
+
+`pogo server stop` prints when the fleet comes back, and says so loudly when NO
+deadline is armed. `GET /server/mode` gains `stopped_since` and `resume_due`.
+
+```toml
+[orchestration_resume]
+enabled = true             # default true. `false` restores the pre-mg-5af1
+                           # behaviour — the fleet coming back is once again
+                           # contingent on whatever stopped it surviving. pogod
+                           # logs that at boot in those words.
+grace = "15m"              # how long orchestration may stay stopped by a caller
+                           # that declared no hold (default 15m; negative disarms
+                           # the deadline while still recording the stop)
+retry = "1m"               # floor on re-attempting a restore that FAILED. Not
+                           # the detection interval — detection rides the
+                           # heartbeat.
+```
+
+Source of truth: `internal/server/orchestrationresume.go` (arming),
+`cmd/pogod/orchresume.go` (firing).
+
 ## Agent registry
 
 Each agent has a directory under `~/.pogo/agents/<name>/` holding its prompt,
