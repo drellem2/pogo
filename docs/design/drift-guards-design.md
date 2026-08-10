@@ -1,7 +1,8 @@
 # Guards for state whose drift leaves no artifact
 
 **Status:** Design of record. Branches 1–3 are each shipped at one site (see the
-instance table); the open remainder is §7 and §8.
+instance table); the open remainder is §7 and the tail of §8 (`doctor`'s
+own check registry — §8's launchd half shipped as mg-7a20).
 
 **Provenance.** Written by architect inside incident mg-0d70, re-homed to design
 ticket mg-57c0, and landed here (mg-57c0) because a general finding filed inside
@@ -205,9 +206,37 @@ correct measurements of two different worlds, presenting as an instrument
 disagreement. Stamp the artifact's mtime alongside the reading, or the race reads
 as a tool quirk.
 
-## 8. OPEN: the guard's own coverage is subject to the property
+## 8. The guard's own coverage is subject to the property
 
-**This is the finding this doc adds, and it is unresolved.**
+**Direction 1 below shipped as mg-7a20** (`internal/service/launchagentscope.go`,
+rendered by `cmd/pogo/launchagentdrift.go`). The row now reads, on the box this
+section was measured on:
+
+> `3 managed job(s) examined: 1 match this build, 2 drifted, … SCOPE: 3 of 13
+> pogo launchd job(s) LOADED on this box are in this audit's registry; 10 outside
+> it — 10 with a recorded reason, 0 with NONE.`
+
+Each of the seven previously-unrecorded exclusions now carries the reason that
+makes it a decision rather than an omission — another repo installs the plist, so
+this build has no expected copy to compare against — and **a loaded `com.pogo.*`
+job with no recorded reason WARNS**, naming the job. That is the part that
+survives the population moving: coverage cannot be kept correct by a list, but
+"something arrived and nobody ruled on it" can be said on every run. Direction 2
+(extending coverage) is untouched and still open.
+
+**Direction 1's own scope, stated in its own output** — it compares against jobs
+LOADED in the current user's launchd domain under the `com.pogo.` prefix, so an
+installed-but-never-bootstrapped plist, another domain, or a pogo job under a
+different label is outside even that denominator; and a failed `launchctl list`
+renders as SCOPE NOT OBSERVED, never as zero-outside.
+
+**What remains open is the last paragraph of this section: `doctor` itself.**
+There is still no check registry, and the `Long:` help text is still a separately
+hand-maintained enumeration.
+
+The original finding, unedited, follows.
+
+**This is the finding this doc adds.**
 
 Branch 2's shipped implementation audits the launchd jobs in a registry —
 `managedLaunchAgents()` in `internal/service/launchagentaudit.go`. Counted
@@ -260,6 +289,8 @@ Two candidate directions, neither ruled on here:
 
 Direction 1 is the one that matches this document's own rule — a guard's job is
 first to make the state *sayable*. It is not a substitute for direction 2.
+**Direction 1 shipped (mg-7a20); direction 2 did not.** See the head of this
+section.
 
 **The same defect recurs one level up again, in `doctor` itself.** There is no
 check registry: `pogo doctor --check` is a straight-line block of `pass`/`warn`/
@@ -273,7 +304,8 @@ documented scope of the checklist gets a wrong answer, and nothing emits a
 discrepancy. Any declared-vs-actual pair that is maintained by hand is a branch-2
 site; this one has no guard.
 
-**This is filed as open work, not decided here.** Related open items: mg-b9e7
+**The launchd half is decided and shipped (mg-7a20); `doctor`'s own check
+registry is not.** Related open items: mg-b9e7
 (nothing re-asserts an installed plist against the shipped one; the detector for
 that is itself subject to it), mg-8dcb, mg-3bb3, mg-08af.
 

@@ -24,6 +24,14 @@ func cleanAudit(label string) service.LaunchAgentAudit {
 	return service.LaunchAgentAudit{Label: label, Status: service.LaunchAgentOK, Detail: "matches this build (03:00)"}
 }
 
+// coveredScope is a box where every loaded pogo job is in the registry. It is the
+// scope the pre-mg-7a20 row implicitly assumed on every box, which is the whole
+// reason it read as a pass over launchd activation; tests that are about drift
+// rather than about scope use it so the two subjects do not confound.
+func coveredScope(labels ...string) service.LaunchAgentScope {
+	return service.LaunchAgentScope{Observed: true, Loaded: labels, Audited: labels}
+}
+
 // TestActivationLineWarnsOnScheduleDrift is the ticket, at the surface an
 // operator reads. The row has to lead with the FIRES: a plist whose log path
 // moved and a plist missing two of its three fires are both "stale", and only
@@ -32,7 +40,7 @@ func TestActivationLineWarnsOnScheduleDrift(t *testing.T) {
 	status, detail := launchAgentActivationLine([]service.LaunchAgentAudit{
 		cleanAudit("com.pogo.daemon"),
 		staleDeployAudit(),
-	}, true)
+	}, true, coveredScope("com.pogo.daemon", "com.pogo.deploy"))
 
 	if status != "warn" {
 		t.Fatalf("status = %q, want warn; detail = %q", status, detail)
@@ -62,7 +70,7 @@ func TestActivationLineNeverFails(t *testing.T) {
 		{cleanAudit("com.pogo.daemon")},
 		nil,
 	} {
-		status, detail := launchAgentActivationLine(audits, true)
+		status, detail := launchAgentActivationLine(audits, true, coveredScope("com.pogo.daemon", "com.pogo.deploy"))
 		if status != "warn" && status != "pass" {
 			t.Errorf("status = %q for %+v (detail = %q); this row must only ever pass or warn", status, audits, detail)
 		}
@@ -74,12 +82,12 @@ func TestActivationLineNeverFails(t *testing.T) {
 // matched. Rendering them identically would reproduce, one level up, the exact
 // defect the row exists to catch.
 func TestActivationLineSaysWhenItCheckedNothing(t *testing.T) {
-	_, notApplicable := launchAgentActivationLine(nil, false)
+	_, notApplicable := launchAgentActivationLine(nil, false, service.LaunchAgentScope{})
 	if !strings.Contains(notApplicable, "not applicable") || !strings.Contains(notApplicable, "This is not a report") {
 		t.Errorf("unsupported-platform detail = %q, want it to disclaim rather than read as a pass", notApplicable)
 	}
 
-	status, empty := launchAgentActivationLine(nil, true)
+	status, empty := launchAgentActivationLine(nil, true, coveredScope())
 	if status != "warn" || !strings.Contains(empty, "NOT CHECKED") {
 		t.Errorf("empty audit on a supported platform = %q/%q, want warn + NOT CHECKED", status, empty)
 	}
@@ -87,14 +95,128 @@ func TestActivationLineSaysWhenItCheckedNothing(t *testing.T) {
 	_, absent := launchAgentActivationLine([]service.LaunchAgentAudit{
 		cleanAudit("com.pogo.daemon"),
 		{Label: "com.pogo.deploy", Status: service.LaunchAgentAbsent, Remedy: "pogo service install-deploy", Detail: "not installed"},
-	}, true)
+	}, true, coveredScope("com.pogo.daemon", "com.pogo.deploy"))
 	if !strings.Contains(absent, "com.pogo.deploy") || !strings.Contains(absent, "never installed") {
 		t.Errorf("absent-job detail = %q, want it to name the uninstalled job and say the audit has no opinion on it", absent)
 	}
 
-	_, clean := launchAgentActivationLine([]service.LaunchAgentAudit{cleanAudit("com.pogo.daemon")}, true)
+	_, clean := launchAgentActivationLine([]service.LaunchAgentAudit{cleanAudit("com.pogo.daemon")}, true, coveredScope("com.pogo.daemon"))
 	if strings.Contains(clean, "NOT CHECKED") || !strings.Contains(clean, "matches the plist this build renders") {
 		t.Errorf("clean detail = %q, want a positive statement about what was compared", clean)
+	}
+}
+
+// TestActivationLineStatesBothNumbers is mg-7a20, at the surface an operator
+// reads. The pre-fix row said "3 managed job(s) examined: 3 match this build" on
+// a box with thirteen pogo jobs loaded — a complete-looking census of a third of
+// the subject. The gap has to be IN the output, not derivable by a reader who
+// thinks to run `launchctl list` and subtract.
+func TestActivationLineStatesBothNumbers(t *testing.T) {
+	audits := []service.LaunchAgentAudit{
+		cleanAudit("com.pogo.daemon"), cleanAudit("com.pogo.recovery"), cleanAudit("com.pogo.deploy"),
+	}
+	scope := service.LaunchAgentScope{
+		Observed: true,
+		Loaded:   []string{"com.pogo.daemon", "com.pogo.recovery", "com.pogo.deploy", "com.pogo.notify", "com.pogo.zzz-new"},
+		Audited:  []string{"com.pogo.daemon", "com.pogo.recovery", "com.pogo.deploy"},
+		Excluded: []service.LaunchAgentExclusion{
+			{Label: "com.pogo.notify", Reason: "installed by pogo-reminders"},
+			{Label: "com.pogo.zzz-new"},
+		},
+	}
+
+	status, detail := launchAgentActivationLine(audits, true, scope)
+
+	if !strings.Contains(detail, "3 of 5 pogo launchd job(s) LOADED") {
+		t.Errorf("detail = %q, want examined-of-loaded stated as one number pair", detail)
+	}
+	if !strings.Contains(detail, "2 outside it — 1 with a recorded reason, 1 with NONE") {
+		t.Errorf("detail = %q, want the explained/unexplained split", detail)
+	}
+	if !strings.Contains(detail, "com.pogo.zzz-new") {
+		t.Errorf("detail = %q, want the unexplained job NAMED; a count nobody can act on is not the actionable half", detail)
+	}
+	if strings.Contains(detail, "com.pogo.notify") {
+		t.Errorf("detail = %q, want explained exclusions counted but not listed — naming ten settled decisions on every clean run is how the unexplained one gets skimmed past", detail)
+	}
+	if status != "warn" {
+		t.Errorf("status = %q, want warn: every plist compared matched, but a loaded pogo job nobody has ruled on is not a pass over launchd activation", status)
+	}
+}
+
+// TestActivationLinePassesWhenEveryExclusionIsExplained. The warn above must be
+// silenceable by recording the reason, or the row degrades into a permanent
+// warning that operators learn to ignore — and a detector nobody reads is the
+// state this whole file exists to prevent.
+func TestActivationLinePassesWhenEveryExclusionIsExplained(t *testing.T) {
+	status, detail := launchAgentActivationLine([]service.LaunchAgentAudit{cleanAudit("com.pogo.daemon")}, true,
+		service.LaunchAgentScope{
+			Observed: true,
+			Loaded:   []string{"com.pogo.daemon", "com.pogo.notify"},
+			Audited:  []string{"com.pogo.daemon"},
+			Excluded: []service.LaunchAgentExclusion{{Label: "com.pogo.notify", Reason: "installed by pogo-reminders"}},
+		})
+
+	if status != "pass" {
+		t.Errorf("status = %q, want pass once every exclusion carries a reason; detail = %q", status, detail)
+	}
+	if !strings.Contains(detail, "1 of 2 pogo launchd job(s) LOADED") {
+		t.Errorf("detail = %q, want the denominator stated on the CLEAN row too — a scope sentence that appears only when the scope is bad is invisible in exactly the way a drifted scope is", detail)
+	}
+	if !strings.Contains(detail, "1 with a recorded reason, 0 with NONE") {
+		t.Errorf("detail = %q, want the split stated even when nothing is unexplained", detail)
+	}
+}
+
+// TestActivationLineDisclaimsAnUnobservedScope. The remedy is an artifact of the
+// same kind as the defect: if the observation fails and the row silently prints
+// the registry size as though it were a share of the box, mg-7a20 is back with an
+// extra step in front of it.
+func TestActivationLineDisclaimsAnUnobservedScope(t *testing.T) {
+	status, detail := launchAgentActivationLine([]service.LaunchAgentAudit{cleanAudit("com.pogo.daemon")}, true,
+		service.LaunchAgentScope{ObserveNote: "`launchctl list` could not be run (exec: not found)"})
+
+	if !strings.Contains(detail, "SCOPE NOT OBSERVED") {
+		t.Errorf("detail = %q, want the failed observation said out loud", detail)
+	}
+	if !strings.Contains(detail, "REGISTRY size") {
+		t.Errorf("detail = %q, want the surviving count named as a registry size rather than a share of the box", detail)
+	}
+	if status != "warn" {
+		t.Errorf("status = %q, want warn: an unavailable signal must not render as a clean one", status)
+	}
+}
+
+// TestActivationLineNamesAnExaminedButUnloadedJob. Examined and loaded are two
+// different sets, not one measured twice: a registry job that is not loaded makes
+// the two counts disagree, and a reader who subtracts them without being told why
+// concludes the row is broken and stops reading it.
+func TestActivationLineNamesAnExaminedButUnloadedJob(t *testing.T) {
+	_, detail := launchAgentActivationLine([]service.LaunchAgentAudit{
+		cleanAudit("com.pogo.daemon"),
+		{Label: "com.pogo.deploy", Status: service.LaunchAgentAbsent, Remedy: "pogo service install-deploy", Detail: "not installed"},
+	}, true, service.LaunchAgentScope{
+		Observed: true,
+		Loaded:   []string{"com.pogo.daemon"},
+		Audited:  []string{"com.pogo.daemon"},
+	})
+
+	if !strings.Contains(detail, "1 more examined but not loaded") {
+		t.Errorf("detail = %q, want the registry job that is not loaded accounted for", detail)
+	}
+}
+
+// TestActivationLineStatesItsOwnBlindSpots. The observed half has a scope too —
+// it reads LOADED jobs in ONE domain under ONE label prefix. Leaving that unsaid
+// would be the same trade this ticket was filed to undo, one level further down.
+func TestActivationLineStatesItsOwnBlindSpots(t *testing.T) {
+	_, detail := launchAgentActivationLine([]service.LaunchAgentAudit{cleanAudit("com.pogo.daemon")}, true,
+		coveredScope("com.pogo.daemon"))
+
+	for _, want := range []string{"never bootstrapped", "another domain", "different label"} {
+		if !strings.Contains(detail, want) {
+			t.Errorf("detail = %q, want it to disclaim %q — what this comparison cannot see", detail, want)
+		}
 	}
 }
 
