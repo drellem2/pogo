@@ -193,16 +193,54 @@ func IsExpectedAgent(identity string) bool {
 //
 // A polecat identity ("cat-de08") is never configured: polecats have no prompt.
 // They own their own registration path (mg-e633) and are not judged here.
-// An unreadable prompt tree collapses to false — diagnose must not guess, and a
-// wrong "no" here only costs silence, never a false RED.
+//
+// It collapses ConfiguredStateFor's unknown case to false, which is safe only
+// where a wrong "no" is harmless. Callers that must tell an unreadable prompt
+// tree from a genuinely unconfigured agent — anything that REPORTS the reason —
+// must use ConfiguredStateFor instead (mg-7b3f).
 func IsConfiguredAgent(identity string) bool {
-	if identity == "" {
+	configured, err := ConfiguredStateFor(identity)
+	if err != nil {
+		log.Printf("configured-agent: %v", err)
 		return false
+	}
+	return configured
+}
+
+// ConfiguredStateFor answers IsConfiguredAgent's question WITHOUT collapsing
+// the error, in exactly the three-answer shape DesiredStateFor uses:
+//
+//   - (true, nil)  — a crew or mayor prompt exists for this identity.
+//   - (false, nil) — definitively NOT ours: no prompt by that name. A polecat,
+//     a template, or config that was removed. Callers may act on this.
+//   - (false, err) — the prompt tree could not be READ, so no identity can be
+//     classified. This is UNKNOWN, not "no".
+//
+// # Why the third answer had to exist
+//
+// Before mg-7b3f the only predicate was IsConfiguredAgent, and its false meant
+// both of the first two OR the third. The two have opposite operational
+// meanings: "not configured" is a fact about intent and needs no action, while
+// "I could not read the prompt tree" is a fault in the instrument and means the
+// answer is unknown. mailLoopExclusionFor consumed that false and could
+// therefore only report the coarse "not_configured" — while the help text for
+// `pogo check-mailloops` and BOTH shipped disclosures named "unreadable prompt
+// tree" as a category. A reader was promised a distinction the code could not
+// compute (drellem2/pogo#127, one level in).
+//
+// Note that the error path here was not merely unused, it was UNREACHABLE:
+// ListPrompts swallowed a failed directory read and returned a shorter list
+// with a nil error, so threading this error out only became honest once that
+// was fixed too. A taxonomy value that can never be emitted is the same
+// unbacked disclosure in the opposite direction.
+func ConfiguredStateFor(identity string) (bool, error) {
+	if identity == "" {
+		return false, nil
 	}
 	cands, err := autoStartCandidates()
 	if err != nil {
-		log.Printf("configured-agent: list prompts failed: %v", err)
-		return false
+		// The prompt tree itself is unreadable — we cannot classify ANY agent.
+		return false, err
 	}
 	// Only the crew- form is unwrapped, for the same reason DesiredStateFor
 	// unwraps only that one: a cat- identity is a polecat and can never name a
@@ -210,10 +248,10 @@ func IsConfiguredAgent(identity string) bool {
 	bare := strings.TrimPrefix(identity, "crew-")
 	for _, c := range cands {
 		if c.name == identity || c.name == bare {
-			return true
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }
 
 // AutoStartAgents scans crew prompt files under ~/.pogo/agents/ and starts

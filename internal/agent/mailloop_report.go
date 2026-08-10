@@ -40,12 +40,19 @@ type MailLoopFinding struct {
 
 // MailLoopExclusionReason names WHY an agent was not judged.
 //
-// The set is deliberately COARSER than the three categories
-// `pogo check-mailloops --help` lists, because IsConfiguredAgent cannot today
-// separate an unreadable prompt tree from a genuinely unconfigured agent — see
-// mailLoopExclusionFor, which is the one place the reason is computed. Emitting
-// a reason the code cannot back would be this command's own defect one level
-// in: a disclosure that sounds precise and is not.
+// The set MATCHES the categories `pogo check-mailloops --help` lists. It did
+// not until mg-7b3f: IsConfiguredAgent returned false both for an unreadable
+// prompt tree and for a genuinely unconfigured agent, so the set was
+// deliberately kept coarser than the disclosure rather than emit a reason the
+// code could not back. ConfiguredStateFor now keeps the error, so the fourth
+// value is computable — see mailLoopExclusionFor, still the one place a reason
+// is decided.
+//
+// Three of the four are decisions and one is a fault. ExclusionPolecat,
+// ExclusionNotRunning and ExclusionNotConfigured all say "nothing is owed
+// here"; ExclusionUnreadablePrompts says "I could not look", which is not a
+// verdict about the agent at all. Keeping them in one set is fine — keeping
+// them in one VALUE was the defect.
 type MailLoopExclusionReason string
 
 const (
@@ -55,10 +62,15 @@ const (
 	// ExclusionNotRunning: a configured agent that is not running is owed
 	// nothing — "not there" is not a fault.
 	ExclusionNotRunning MailLoopExclusionReason = "not_running"
-	// ExclusionNotConfigured: no readable prompt-tree configuration. This
-	// COLLAPSES "unreadable prompt tree" with "not configured"; the collapse is
-	// a separate defect in IsConfiguredAgent, filed on its own.
+	// ExclusionNotConfigured: no prompt on this machine's prompt tree, which
+	// WAS read. This agent is not one of ours — a fact about intent, needing no
+	// action.
 	ExclusionNotConfigured MailLoopExclusionReason = "not_configured"
+	// ExclusionUnreadablePrompts: the prompt tree could not be read, so this
+	// agent could not be classified at all. UNKNOWN, not a clean exclusion —
+	// the instrument is broken, and an operator should act on that even though
+	// Actionable deliberately does not (see its doc comment).
+	ExclusionUnreadablePrompts MailLoopExclusionReason = "unreadable_prompts"
 )
 
 // Describe renders the reason as the phrase an operator reads. An unrecognised
@@ -71,7 +83,9 @@ func (r MailLoopExclusionReason) Describe() string {
 	case ExclusionNotRunning:
 		return "not running"
 	case ExclusionNotConfigured:
-		return "not configured, or its prompt tree could not be read"
+		return "not configured — no prompt on this machine"
+	case ExclusionUnreadablePrompts:
+		return "UNREADABLE prompt tree — could not be classified at all"
 	case "":
 		return "reason not reported"
 	}

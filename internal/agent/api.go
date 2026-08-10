@@ -853,13 +853,15 @@ func mailLoopJudgeable(a *Agent) bool { return mailLoopExclusionFor(a) == "" }
 // be free to disagree with the one computing "whether" — the same drift
 // mailLoopFor exists to prevent one level down (mg-0db1).
 //
-// The reason set is deliberately COARSER than the three categories the doc
-// comment above and `pogo check-mailloops --help` name. IsConfiguredAgent
-// (autostart.go:198-217) returns false BOTH for an unreadable prompt tree and
-// for a genuinely unconfigured agent, so "unreadable prompt tree" is not
-// computable here today; emitting it anyway would be this reader's own failure
-// mode — a disclosure the code cannot back — one level in. That collapse is a
-// real defect and is filed separately; it is not fixed here.
+// The reason set now MATCHES the three categories the doc comment above and
+// `pogo check-mailloops --help` name, plus the instrument fault they implied.
+// It did not until mg-7b3f: IsConfiguredAgent returned false BOTH for an
+// unreadable prompt tree and for a genuinely unconfigured agent, so
+// "unreadable prompt tree" was not computable here and the coarse
+// "not_configured" was the only honest thing to say — while two shipped
+// disclosures went on naming a distinction the code could not make.
+// ConfiguredStateFor keeps the error, and this is the one place it becomes a
+// reason.
 func mailLoopExclusionFor(a *Agent) MailLoopExclusionReason {
 	if a == nil {
 		return ExclusionNotConfigured
@@ -876,7 +878,15 @@ func mailLoopExclusionFor(a *Agent) MailLoopExclusionReason {
 	if !a.Alive() {
 		return ExclusionNotRunning
 	}
-	if !IsConfiguredAgent(a.Name) {
+	configured, err := ConfiguredStateFor(a.Name)
+	switch {
+	case err != nil:
+		// UNKNOWN, not "no". The agent is running and we cannot read the tree
+		// that would classify it, so we can say neither that it is ours nor
+		// that it is not — and the reason has to carry that, because a fault in
+		// the instrument is the one exclusion an operator should act on.
+		return ExclusionUnreadablePrompts
+	case !configured:
 		return ExclusionNotConfigured
 	}
 	return ""

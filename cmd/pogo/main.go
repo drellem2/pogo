@@ -1509,8 +1509,12 @@ WHO IS NOT JUDGED, deliberately:
                       their own escalation path (mg-6fe0); coverage is the
                       witness, not this.
   stopped agents      a configured agent that is not running is owed nothing.
-  unreadable prompts  if the prompt tree cannot be read the agent cannot be
-                      classified, and a false RED costs more than silence.
+  not configured      no prompt for it on this machine's prompt tree, which was
+                      read: it is not one of ours.
+  unreadable prompts  the prompt tree could not be READ, so the agent could not
+                      be classified, and a false RED costs more than silence.
+                      This one is not a clean exclusion — it is a fault in the
+                      instrument, and the report says so in those words.
 
 Those exclusions mean a small "judged" count is normal. Every report NAMES the
 agents it did not judge, whatever the verdict — a clean bill of health over 2 of
@@ -1518,15 +1522,21 @@ agents it did not judge, whatever the verdict — a clean bill of health over 2 
 NOTHING says so in as many words rather than printing an all-clear, and a pogod
 with no basis to judge at all is an ERROR here, not an empty list.
 
-The machine-readable reason in --json is coarser than the three categories
-above: it is one of "polecat", "not_running", "not_configured", and the last of
-those covers an unreadable prompt tree as well, because agent.IsConfiguredAgent
-cannot currently tell the two apart. That collapse is tracked separately. The
-reason set is deliberately not more precise than the code can back.
+The machine-readable reason in --json is one of "polecat", "not_running",
+"not_configured", "unreadable_prompts" — one per category above. Until mg-7b3f
+the last two were a single value, because agent.IsConfiguredAgent returned false
+for both and the reason set was deliberately kept no more precise than the code
+could back; this text named a distinction the code could not compute, which was
+this command's own reported defect one level in.
 
 Against a pogod older than this client the unjudged set is absent from the wire
 entirely. That is reported as UNKNOWN — never as zero — because "the daemon did
-not say" and "nobody was excluded" are opposite statements.
+not say" and "nobody was excluded" are opposite statements. Such a pogod also
+still sends "not_configured" for an unreadable prompt tree, and nothing on the
+wire distinguishes that from a real one: the report carries no version, so this
+client cannot detect the skew and does not pretend to. Read a "not_configured"
+from an old daemon as the old collapsed value; "pogo version" says which you
+have.
 
 REPORTS ONLY — it never registers a schedule, nudges, or restarts. Re-registering
 the loop on the agent's behalf would hide WHY it vanished, and that is the part
