@@ -964,14 +964,17 @@ sink_id_matching() {
     "$MG" mail list "$COORDINATOR" --all --json 2>/dev/null | grep -F "$1" | tail -1 \
         | sed -n 's/.*"id":"\([^"]*\)".*/\1/p'
 }
-# Matched on "owe the refinery a merge", which is what the timeout subject says
-# since mg-853a narrowed the predicate. The old selector was "still active", and
-# it is worth recording why swapping it was not cosmetic: with the subject
-# changed and the selector left alone, SINK_ID came back empty and this assertion
-# failed reporting a body that had not survived — a true statement about a mail
-# that was never selected. That is the same class of misdirection the alert
-# rewrite exists to remove, in the control rather than in the product.
-SINK_ID="$(sink_id_matching "owe the refinery a merge")"
+# Matched on "hold unpushed work", which is what the timeout subject says since
+# mg-3a96 re-aimed the predicate. THE SELECTOR HAS NOW BEEN WRONG TWICE, and both
+# times for the same reason, so the note is kept rather than replaced. It was
+# "still active" before mg-853a and "owe the refinery a merge" before mg-3a96;
+# each time the subject moved and the selector did not, SINK_ID came back empty
+# and this assertion failed reporting a body that had not survived — a true
+# statement about a mail that was never selected. That is the same class of
+# misdirection the alert rewrite exists to remove, in the control rather than in
+# the product. If you change alert_drain_stalled's subject, change this line in
+# the same commit; nothing else will tell you.
+SINK_ID="$(sink_id_matching "hold unpushed work")"
 # --force: reading a mailbox we do not own is refused without it, and this
 # control is by construction a third party to the coordinator's inbox — which is
 # the entire point of the assertion.
@@ -988,17 +991,21 @@ else
     fail "the timeout alert arrived but its body did not survive intact — a page with no diagnosis is a louder log line with a mailbox (id=${SINK_ID:-<none>})"
 fi
 
-# mg-853a: the SUBJECT is the part of a mail that travels — it is what gets
+# mg-3a96: the SUBJECT is the part of a mail that travels — it is what gets
 # skimmed, forwarded and triaged, and a hedge that lives only in paragraph three
-# does not exist. So the narrowed predicate has to be in it. Asserted separately
-# from the body check above so a subject regression cannot hide behind an intact
-# body, and stated in the negative too: "still active" is the old claim, and it is
-# now false — the drain clears over active polecats by design.
-if printf '%s' "$SINK_DELIVERED" | grep -q "owe the refinery a merge" \
-   && ! printf '%s' "$SINK_DELIVERED" | grep -q "polecat(s) still active"; then
-    pass "mg-853a: the stall alert names the predicate that actually held the deploy (polecats owing a merge) in the part that travels, and no longer reports it as a busy fleet"
+# does not exist. So the predicate has to be in it. Asserted separately from the
+# body check above so a subject regression cannot hide behind an intact body, and
+# stated in the negative for BOTH superseded claims: "still active" was wrong
+# before mg-853a, and "owe the refinery a merge" is wrong now — a merge the
+# refinery has not landed no longer holds this deploy for one second, so a
+# subject saying it did would send the reader to the merge queue for a stall that
+# is not there.
+if printf '%s' "$SINK_DELIVERED" | grep -q "hold unpushed work" \
+   && ! printf '%s' "$SINK_DELIVERED" | grep -q "polecat(s) still active" \
+   && ! printf '%s' "$SINK_DELIVERED" | grep -q "owe the refinery a merge"; then
+    pass "mg-3a96: the stall alert names the predicate that actually held the deploy (polecats holding unpushed work) in the part that travels, and reports it neither as a busy fleet nor as a refinery backlog"
 else
-    fail "mg-853a: the stall alert still describes the stall as active polecats — since the narrowing that is not what held the deploy, and it sends the reader to look for a busy fleet instead of a stuck merge (id=${SINK_ID:-<none>})"
+    fail "mg-3a96: the stall alert still describes the stall as active polecats or as a refinery debt — neither is what held the deploy since mg-3a96, and both send the reader somewhere the fault is not (id=${SINK_ID:-<none>})"
 fi
 
 # The UNKNOWN alert's body, held to the same bar and asserted SEPARATELY (mg-65b2).
@@ -1338,10 +1345,10 @@ MD_OBJ="$(printf '%s' "$MD_BODY" | polecat_objects)"
     && pass "mg-853a: polecat_objects yields NOTHING from a real empty-registry body — an empty registry produces no polecat to ask git about" \
     || fail "mg-853a: polecat_objects invented $(printf '%s' "$MD_OBJ" | grep -c '^{') object(s) from an empty real body ($MD_OBJ) — the predicate would run git against a phantom worktree"
 
-MD_DEBT="$(drain_debt "$MD_BODY")"
-[ "$(drain_debt_holders "$MD_DEBT")" = "0" ] \
-    && pass "mg-853a: drain_debt_holders reads 0 off a real empty-registry body — grep -c's no-match exit does not eat the count" \
-    || fail "mg-853a: an empty real body produced $(drain_debt_holders "$MD_DEBT") holder(s) ($MD_DEBT) — every nightly would hold forever"
+MD_REPORT="$(drain_durability "$MD_BODY")"
+[ "$(drain_unpushed_holders "$MD_REPORT")" = "0" ] \
+    && pass "mg-3a96: drain_unpushed_holders reads 0 off a real empty-registry body — grep -c's no-match exit does not eat the count" \
+    || fail "mg-3a96: an empty real body produced $(drain_unpushed_holders "$MD_REPORT") holder(s) ($MD_REPORT) — every nightly would hold forever"
 
 # The mirror of the assertion above, and the one that stops it being satisfied by
 # a function that always says 0. Same code path, same real body, one real polecat
@@ -1355,12 +1362,12 @@ MD_RECORD="{\"name\":\"cat-wire\",\"pid\":1,\"work_item_id\":\"mg-wire\",\"workt
 MD_SPLICED="$(printf '%s' "$MD_BODY" \
     | sed "s|\"polecats\":null|\"polecats\":[$MD_RECORD]|" \
     | sed "s|\"polecats\":\[\]|\"polecats\":[$MD_RECORD]|")"
-MD_SPLICED_DEBT="$(drain_debt "$MD_SPLICED")"
-case "$MD_SPLICED_DEBT" in
+MD_SPLICED_REPORT="$(drain_durability "$MD_SPLICED")"
+case "$MD_SPLICED_REPORT" in
     *"cat-wire (mg-wire):"*)
-        pass "mg-853a: a polecat record inside a REAL daemon body is found, classified and NAMED ($MD_SPLICED_DEBT) — the 0 above is a measurement, not a constant" ;;
+        pass "mg-3a96: a polecat record inside a REAL daemon body is found, classified and NAMED ($MD_SPLICED_REPORT) — the 0 above is a measurement, not a constant" ;;
     *)
-        fail "mg-853a: a spliced polecat record was not read out of a real body ($MD_SPLICED_DEBT) — the empty-body 0 above proves nothing" ;;
+        fail "mg-3a96: a spliced polecat record was not read out of a real body ($MD_SPLICED_REPORT) — the empty-body 0 above proves nothing" ;;
 esac
 
 # ===========================================================================
