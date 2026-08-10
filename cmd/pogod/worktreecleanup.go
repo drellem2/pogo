@@ -156,7 +156,7 @@ func cleanupAgentWorktree(
 		// work_item_stranded_push, whose event half worked and whose mail half
 		// was missing until mg-be37. Three days of this path had to be
 		// reconstructed from unstructured `PRESERVED worktree` log lines.
-		emitWorktreePreserved(a, "preserved", dwe.Total, dwe.Files, dwe.Error())
+		emitWorktreePreserved(a, "preserved", dwe, dwe.Error())
 		if mail != nil && coordinator != "" {
 			subject := fmt.Sprintf("preserved uncommitted work in %s's worktree", agentName)
 			if a.WorkItemID != "" {
@@ -194,7 +194,7 @@ func cleanupAgentWorktree(
 		// broke, so the tree was kept.
 		log.Printf("agent %s: KEPT worktree %s (work item %s) — %v",
 			agentName, worktreeDir, workItemOrNone(a.WorkItemID), uwe)
-		emitWorktreePreserved(a, "undetermined", 0, nil, uwe.Error())
+		emitWorktreePreserved(a, "undetermined", nil, uwe.Error())
 		if mail != nil && coordinator != "" {
 			subject := fmt.Sprintf("could not check %s's worktree for uncommitted work — kept it", agentName)
 			if a.WorkItemID != "" {
@@ -315,12 +315,24 @@ func dispatchWarning(workItemID, outcome string) string {
 // could not rule out, and folding the second into the first would state a fact
 // about the tree that nobody established.
 //
+// IT CARRIES THE BRANCH AND THE MODIFIED/UNTRACKED SPLIT (mg-d45b). mg-32e3 put
+// the record on the spine; those two fields were named in the same requirement
+// and were still missing, and each is load-bearing rather than decorative. The
+// branch is where a rescuer starts and is the thing the retained tree is pinning.
+// The split is what makes the count actionable: `dirty_paths: 16` cannot
+// distinguish sixteen edits to tracked files, all of which have a committed
+// version in the object store, from sixteen untracked paths that exist on no
+// branch, in no stash and on no remote — and the second is why qbe37's tree was
+// the only copy of a 1450-line package. Without the split a consumer had to open
+// the tree to learn which it was, which is the by-hand reconstruction this event
+// exists to replace.
+//
 // Observable as: `pogo events --type worktree_preserved`. It is a REPORT — it
 // blocks no dispatch and reclaims no tree. Making it refuse a spawn would be a
 // separate decision with its own failure mode (a stale event wedging an item
 // forever), and this ticket's finding is that the detection already happened and
 // was correct; what it lacked was the ability to say the sentence.
-func emitWorktreePreserved(a exitedAgent, outcome string, dirtyCount int, dirtyFiles []string, detail string) {
+func emitWorktreePreserved(a exitedAgent, outcome string, dirty *gitgc.DirtyWorktreeError, detail string) {
 	details := map[string]any{
 		"worktree": a.WorktreeDir,
 		"outcome":  outcome,
@@ -330,10 +342,42 @@ func emitWorktreePreserved(a exitedAgent, outcome string, dirtyCount int, dirtyF
 		// event type's name.
 		"pushed": false,
 	}
-	if outcome == "preserved" {
-		details["dirty_paths"] = dirtyCount
-		if len(dirtyFiles) > 0 {
-			details["files"] = dirtyFiles
+
+	// The branch is read here, from the tree, rather than threaded down from
+	// the registry record: the tree is the authority on what it has checked
+	// out, and a name copied from elsewhere is a claim that can rot while
+	// `git rev-parse` is an observation that cannot.
+	//
+	// It matters because retention and the branch are the same fact seen twice:
+	// a preserved worktree keeps its branch checked out, so that branch cannot
+	// be deleted, cannot be re-used, and is where a rescuer has to start.
+	if branch, err := gitgc.WorktreeBranch(a.WorktreeDir); err == nil {
+		details["branch"] = branch
+	} else {
+		// REPORTED, never omitted — the rule workItemLine applies two functions
+		// up, for the same reason. A `branch` key that simply disappears when
+		// the read fails is indistinguishable, to every consumer, from a
+		// `branch` key nobody implemented; and "the field is missing exactly
+		// when something went wrong" is the defect this event exists to end,
+		// reproduced one layer down. An unreadable branch is EXPECTED on the
+		// undetermined path — `git status` already failed there, and rev-parse
+		// usually fails for the same underlying reason.
+		details["branch_error"] = err.Error()
+	}
+
+	// Counts ride on the error rather than as loose ints because a count is
+	// meaningful only when the tree was actually read, and nil says that in a
+	// way a zero cannot.
+	if dirty != nil {
+		details["dirty_paths"] = dirty.Total
+		// The split, not just the total (mg-d45b): an untracked path exists on
+		// no branch, in no stash and on no remote, so it is the one that makes
+		// a preserved tree urgent. Both are computed over the full porcelain
+		// list, so they still sum to dirty_paths when `files` is capped.
+		details["modified_paths"] = dirty.Modified
+		details["untracked_paths"] = dirty.Untracked
+		if len(dirty.Files) > 0 {
+			details["files"] = dirty.Files
 		}
 	}
 	events.Emit(context.Background(), events.Event{

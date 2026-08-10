@@ -1214,10 +1214,22 @@ call site all along — and the two halves combine:
   A do-not-dispatch sentence buried in paragraph four of a message filed under
   worktree hygiene is a sentence that does not travel.
 - **The fact is on the event spine** as `worktree_preserved`, carrying
-  `work_item_id` and `repo` — the record half this path never had. Its mail half
-  was validated end to end and its record half was `log.Printf` to inherited
-  stderr, the exact mirror of `work_item_stranded_push` before mg-be37. Query it
-  with `pogo events --type worktree_preserved`.
+  `work_item_id`, `repo`, the tree, the branch and the dirty-path counts — the
+  record half this path never had. Its mail half was validated end to end and its
+  record half was `log.Printf` to inherited stderr, the exact mirror of
+  `work_item_stranded_push` before mg-be37. Query it with
+  `pogo events --type worktree_preserved`.
+- **The counts separate modified from untracked** (mg-d45b), and the branch is on
+  the event too. A retained tree keeps its branch checked out — that is what pinning
+  means — so the branch is both where a rescuer starts and the thing whose deletion
+  the tree is blocking. And `dirty_paths: 16` fuses two facts with different
+  consequences: a modified tracked path still has its committed version in the
+  object store, while an untracked one is on no branch, in no stash and on no
+  remote. `untracked_paths` is therefore the number that says whether a
+  preservation is urgent — qbe37's tree held the only copy of a 1450-line package
+  that way. When the branch cannot be read the event says so in `branch_error`
+  rather than dropping the key, because a field that vanishes on failure is
+  indistinguishable from one nobody implemented.
 - **An unreadable tree keeps its own answer.** `outcome: undetermined` means
   `git status` failed, so the prohibition is the conditional one — *do not dispatch
   until this tree has been read* — and never a claim that there is work in it.

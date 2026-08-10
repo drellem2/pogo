@@ -1232,12 +1232,32 @@ it. Additive — no `schema_version` bump.
     every pushed-commit guard misses, and a consumer should not have to infer that from a type name
   - `detail` (string, required): the underlying refusal, including the dirty paths or the `git status`
     failure
-  - `dirty_paths` (int) and `files` ([]string): present only when `outcome` is `"preserved"`, because a
-    count is meaningful only when the tree was actually read. `files` is capped at 10 entries;
-    `dirty_paths` is the full count
+  - `dirty_paths` (int), `modified_paths` (int), `untracked_paths` (int) and `files` ([]string):
+    present only when `outcome` is `"preserved"`, because a count is meaningful only when the tree
+    was actually read — a `0` on an unreadable tree would assert it was clean, which is a claim
+    nobody established. `files` is capped at 10 entries; the three counts are computed over the
+    **full** porcelain output, so `modified_paths + untracked_paths == dirty_paths` holds even when
+    `files` is truncated
+  - `branch` (string) **or** `branch_error` (string), never both (mg-d45b): the branch checked out in
+    the retained tree, or why it could not be read. They are alternatives so that a consumer reading
+    `branch` can trust it was actually observed — a key that merely disappears on failure is
+    indistinguishable from one nobody implemented, which is this event's own defect one layer down.
+    A detached HEAD reports the literal `"HEAD"`, git's own answer, because a preserved tree with no
+    branch name to hand a rescuer is a worse situation and must stay distinguishable from a failed
+    read. `branch_error` is the norm on `outcome: "undetermined"`, where `git status` has already
+    failed and `rev-parse` usually fails for the same reason
+
+**Why the modified/untracked split is not cosmetic (mg-d45b).** The two halves have different
+consequences. A modified tracked path still has its committed version in the object store, so the
+exposure is a lost edit. An untracked path is on no branch, in no stash and on no remote, and the
+preserved tree is its **only copy on the machine** — that is how `~/.pogo/polecats/qbe37` came to hold
+the sole copy of a 1450-line `internal/strandwatch/` package. A single `dirty_paths: 16` cannot
+distinguish sixteen tweaks from sixteen irreplaceable files, so a consumer deciding whether a
+preservation is urgent had to open the tree and look, which is exactly the by-hand reconstruction this
+event exists to replace.
 
 ```json
-{"schema_version":1,"timestamp":"2026-08-10T01:51:59.000000000Z","event_type":"worktree_preserved","agent":"cat-qbe37","work_item_id":"mg-be37","repo":"/Users/daniel/dev/pogo","details":{"worktree":"/Users/daniel/.pogo/polecats/qbe37","outcome":"preserved","pushed":false,"dirty_paths":16,"files":["?? internal/strandwatch/"],"detail":"worktree /Users/daniel/.pogo/polecats/qbe37 has 16 uncommitted change(s), refusing to remove: ..."}}
+{"schema_version":1,"timestamp":"2026-08-10T01:51:59.000000000Z","event_type":"worktree_preserved","agent":"cat-qbe37","work_item_id":"mg-be37","repo":"/Users/daniel/dev/pogo","details":{"worktree":"/Users/daniel/.pogo/polecats/qbe37","outcome":"preserved","branch":"polecat-qbe37","pushed":false,"dirty_paths":16,"modified_paths":2,"untracked_paths":14,"files":["?? internal/strandwatch/"],"detail":"worktree /Users/daniel/.pogo/polecats/qbe37 has 16 uncommitted change(s), refusing to remove: ..."}}
 ```
 
 ### Server run mode
