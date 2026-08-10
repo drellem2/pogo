@@ -1052,6 +1052,21 @@ case "$B" in
     *auto_start*) pass "gone: the mail names auto_start, the reason a crew agent does not come back on its own" ;;
     *) fail "gone: nothing in the mail explains why the agent will be missing again tomorrow: $B" ;;
 esac
+# ...and naming it must not read as an invitation to switch it on. architect's
+# constraint on this ticket, 2026-08-10 03:12Z: doctor's auto_start=false is a
+# deliberate mitigation for mg-8677 (the reap lets auto_start override a corpse,
+# mg-d9d1/mg-d6ac). An alert that names the missing flag as the cause is one
+# quick read away from being taken as a request to add it, and adding it buys a
+# quieter mail with a live reap bug. The mail has to close that reading itself —
+# it is read at 02:03 by someone who does not have those ticket numbers.
+case "$B" in
+    *"DO NOT flip auto_start"*) pass "gone: the mail forbids flipping auto_start to silence itself" ;;
+    *) fail "gone: naming auto_start reads as an invitation to enable it: $B" ;;
+esac
+case "$B" in
+    *mg-8677*) pass "gone: it cites the bug the false setting mitigates, so the refusal is checkable rather than asserted" ;;
+    *) fail "gone: the mail forbids a change without saying what it would break: $B" ;;
+esac
 
 # --- the OTHER polarity: agent alive, schedule lost --------------------------
 # Without this the fix is a swap, not a branch.
