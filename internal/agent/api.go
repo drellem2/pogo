@@ -1937,14 +1937,20 @@ func reclaimStalePolecatBranch(repo, branch, baseRef string) error {
 // invisible to commits that had been merged to origin/main but not yet
 // pulled into the source checkout, producing false reports of unmerged work.
 func resolvePolecatBaseRef(sourceRepo, branch string) string {
+	return resolvePolecatBaseRefWithin(sourceRepo, branch, polecatFetchTimeout)
+}
+
+// resolvePolecatBaseRefWithin is resolvePolecatBaseRef with the network bound
+// passed in, so a test can prove the bound is enforced without waiting out the
+// production one.
+func resolvePolecatBaseRefWithin(sourceRepo, branch string, fetchTimeout time.Duration) string {
 	if sourceRepo == "" {
 		return ""
 	}
 	if err := exec.Command("git", "-C", sourceRepo, "remote", "get-url", "origin").Run(); err != nil {
 		return ""
 	}
-	if out, err := exec.Command("git", "-C", sourceRepo, "fetch", "origin").CombinedOutput(); err != nil {
-		log.Printf("polecat: fetch origin failed in %s, falling back to local HEAD: %v\n%s", sourceRepo, err, out)
+	if !fetchPolecatBaseRefs(sourceRepo, branch, fetchTimeout) {
 		return ""
 	}
 	if branch != "" {
@@ -1963,6 +1969,113 @@ func resolvePolecatBaseRef(sourceRepo, branch string) string {
 		return "origin/main"
 	}
 	return ""
+}
+
+// polecatFetchTimeout bounds the ONE networked operation on the polecat spawn
+// path. Every spawn blocks on it, and until mg-538e it had no context, no
+// timeout and no retry bound: a `git fetch origin` that never returned turned
+// a spawn into a permanent hang, 104 lines before the work-item claim, which
+// is why a stalled spawn left the item `available` with a worktree already on
+// disk.
+//
+// 15s is >5x the measured median. Three samples on a healthy network on
+// 2026-08-10 put the full fetch at 1.86-2.01s, against a bare SSH round trip
+// to the origin of 1.59-2.41s — so ~1.9s is the floor every spawn already
+// pays, and this bound only cuts the tail.
+//
+// **What is NOT established:** that this call is the cause of the reported
+// 50s / >=62s / ~5min stalls. ~1.9s is not 5 minutes, and no `ps` capture of a
+// multi-minute `git fetch` parented to pogod has been taken. The bound is
+// justified on its own terms — an unbounded network call on a path every spawn
+// blocks on — not by a proven diagnosis.
+const polecatFetchTimeout = 15 * time.Second
+
+// fetchPolecatBaseRefs updates the remote-tracking refs resolvePolecatBaseRef
+// is about to read, bounded by polecatFetchTimeout. It reports whether origin
+// is usable; false means the caller should fall back to local HEAD.
+//
+// A timeout needs no new failure semantics: resolvePolecatBaseRef ALREADY logs
+// and returns "" when the fetch fails, and "" already means "base the worktree
+// on local HEAD". A bounded failure reuses the path an unbounded one would
+// eventually have taken anyway, minus the wait.
+//
+// # Narrowing, and why it falls back
+//
+// The old call was a bare `git fetch origin`: all 707 refs of this repo, of
+// which 635 are `polecat-*` branches, with `remote.origin.prune` and
+// `fetch.prune` both unset — a cost that grows with every polecat ever spawned.
+// Narrowing it to the refs this function actually reads contributed only ~0.4s
+// of the measured 1.9s, so it is not the win; it is a cap on a slowly
+// degrading one.
+//
+// It is narrow-THEN-WIDE rather than narrow-only because git fails a fetch
+// whole when any refspec matches nothing on the remote. A target branch that
+// does not exist on origin yet is an ordinary case here (the fallback chain
+// below exists for it), and a narrow-only fetch would turn it from "fall back
+// to origin/HEAD" into "fall back to local HEAD" — a silent regression in the
+// thing this function exists to prevent. So a narrow fetch that fails is
+// retried once, wide, inside the SAME deadline: the bound is on the wall clock,
+// not on the number of attempts.
+func fetchPolecatBaseRefs(sourceRepo, branch string, fetchTimeout time.Duration) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), fetchTimeout)
+	defer cancel()
+
+	if specs := polecatFetchRefspecs(ctx, sourceRepo, branch); len(specs) > 0 {
+		args := append([]string{"-C", sourceRepo, "fetch", "--no-tags", "origin"}, specs...)
+		if out, err := exec.CommandContext(ctx, "git", args...).CombinedOutput(); err == nil {
+			return true
+		} else if ctx.Err() == nil {
+			log.Printf("polecat: narrow fetch of %v failed in %s, retrying wide: %v\n%s",
+				specs, sourceRepo, err, out)
+		}
+	}
+
+	out, err := exec.CommandContext(ctx, "git", "-C", sourceRepo, "fetch", "--no-tags", "origin").CombinedOutput()
+	if err == nil {
+		return true
+	}
+	if ctx.Err() != nil {
+		log.Printf("polecat: fetch origin in %s exceeded %s and was killed — basing the worktree on local HEAD. "+
+			"The polecat may not see commits merged to origin since this checkout last pulled",
+			sourceRepo, fetchTimeout)
+		return false
+	}
+	log.Printf("polecat: fetch origin failed in %s, falling back to local HEAD: %v\n%s", sourceRepo, err, out)
+	return false
+}
+
+// polecatFetchRefspecs returns explicit refspecs for the refs
+// resolvePolecatBaseRef reads: the polecat's target branch and the repo's
+// default branch. Both are resolved without touching the network — the default
+// comes from the local refs/remotes/origin/HEAD symref. Returns nil when
+// nothing narrow can be named, which makes the caller fetch wide.
+//
+// It takes the fetch's ctx even though it never goes to the network. The
+// defect this file is repairing is an unbounded subprocess on the pre-claim
+// spawn path; adding a NEW unbounded subprocess there while fixing it would be
+// the repair exhibiting the defect it repairs. Sharing the deadline costs
+// nothing and leaves nothing on that path outside it.
+func polecatFetchRefspecs(ctx context.Context, sourceRepo, branch string) []string {
+	seen := map[string]bool{}
+	var specs []string
+	add := func(b string) {
+		if b == "" || seen[b] {
+			return
+		}
+		seen[b] = true
+		specs = append(specs, fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", b, b))
+	}
+	add(branch)
+	if out, err := exec.CommandContext(ctx, "git", "-C", sourceRepo, "symbolic-ref", "refs/remotes/origin/HEAD").Output(); err == nil {
+		ref := strings.TrimSpace(string(out))
+		// Only when the prefix was actually there. TrimPrefix returns the input
+		// unchanged when it is not, which would name a refspec out of a full
+		// ref path and fail the narrow fetch for no reason.
+		if b := strings.TrimPrefix(ref, "refs/remotes/origin/"); b != ref {
+			add(b)
+		}
+	}
+	return specs
 }
 
 // handleDrain reports and toggles drain mode — the pogod half of the self-deploy

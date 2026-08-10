@@ -137,3 +137,50 @@ result note for the ID). Rough shape: `internal/refinery/store.go`
 `New` (~120 LOC) + 410-Gone path in api.go/client (~40 LOC) + polecat.md
 poll-loop branch + tests (crash-window table tests using the existing
 `nowFunc` seam).
+
+## 2026-08-10 correction — two sizing assumptions above were false (mg-538e)
+
+Decision 1 rests on two measurements, and both were wrong in production.
+They are left in place above as the record of what was assumed; this
+section is what was actually observed.
+
+**"state ≤ ~tens of KB since history is capped at 100 entries" / "a job a
+100KB JSON file does".** The live `refinery-state.json` measured **6.3 MB**.
+5.83 MB of it — 93% — was `history[].gate_output`, largest single entry
+518 KB. The history *count* was capped; nothing capped the size of a
+record, and gate output is unbounded by construction (it is whatever the
+gate printed). `gateOutputCap` already existed but was applied only to the
+event log.
+
+**"Write-through while holding the lock is acceptable at this volume."**
+Not at that volume, and the failure is worse than slow: `saveStateLocked`
+ran marshal + write + **fsync** + rename with `Refinery.mu` held, and
+`QueueWithProcessing` — what `pogo refinery queue` serves — needs the same
+mutex. An fsync is an unbounded hold; its duration is set by disk
+contention. The observable symptom was `pogo refinery queue` hanging while
+`pogo agent list`, a different mutex on a different object, answered in 0s.
+
+What changed:
+
+- Gate output is capped at 8 KB **on the record**, head-and-tail, with the
+  cut announced inline carrying both byte counts. Not the event log's 1 KB
+  bound: that one exists to keep an event line under PIPE_BUF, which the
+  state file has no reason to obey.
+- The flush points are no longer "all already under `mu`". The snapshot is
+  marshalled under `mu` (the consistency boundary) and the disk work runs
+  on a writer goroutine serialized on the store's own mutex. Write-through
+  is preserved by a `flushState` that waits for the snapshot to land and is
+  called **after** the unlock; the gate-heartbeat saves skip the wait.
+- The "belt-and-braces" note about `Stop()` still holds for the save, but
+  the flush there is now load-bearing: pogod builds a replacement Refinery
+  from that file.
+
+Both changes reduce the same cost, but only the second is the repair — the
+cap makes the hold shorter, not bounded.
+
+**Not established:** that either was the cause of the reported 45 s / 50 s /
+~5 min stalls. One save at load 2.74 measured ~34 ms (marshal 27-30 ms,
+write 1 ms, fsync 3-13 ms). Getting from 34 ms to 45 s needs a ~1300x fsync
+blowup under a saturated disk — plausible, unmeasured. The confirming
+observation would be a goroutine dump taken *during* a hang showing
+`semacquire` frames with `refinery` in the stack.

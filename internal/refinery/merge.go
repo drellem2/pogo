@@ -328,6 +328,10 @@ func (r *Refinery) describeAttemptFailure(wtDir string, attempt int, stage strin
 // so the attempt history survives a pogod restart and is readable from
 // `pogo refinery show` and `--json` without going to the log.
 func (r *Refinery) recordAttemptFailure(mr *MergeRequest, fail AttemptFailure) {
+	// After the unlock (defers are LIFO). The doc comment above claims this
+	// record survives a restart, so it is flushed rather than left pending —
+	// but the wait happens with r.mu released (mg-538e).
+	defer r.flushState()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	mr.Attempts = append(mr.Attempts, fail)
