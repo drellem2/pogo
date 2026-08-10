@@ -242,13 +242,15 @@ func TestTheAttemptCountIsWhatBindsTheNetworkCampaign(t *testing.T) {
 			networkRetryBudget, total.Round(time.Second), networkMaxAttempts)
 	}
 
-	// And the backstop must not be so far above the schedule that it stops being
-	// a backstop: one probe interval of slack keeps "attempts spent" the only
-	// reason a campaign ends, without inviting a schedule edit that doubles the
-	// wait unnoticed.
+	// And the backstop must not sit far above the schedule either. The property
+	// is that the two bounds TRACK EACH OTHER, and drift can come from either
+	// side — so the message names both, because assuming which constant moved is
+	// how a reader ends up editing the wrong one. That is not hypothetical: the
+	// only way to trip this on the current schedule is to trim the attempt count,
+	// which reads at first glance as a complaint about the backstop.
 	if slack := networkRetryBudget - total; slack > 2*networkBackoffFor(networkMaxAttempts) {
-		t.Errorf("the clock backstop (%s) sits %s above the %s the schedule actually sleeps — that is room for a schedule edit to lengthen the campaign without any bound noticing",
-			networkRetryBudget, slack.Round(time.Second), total.Round(time.Second))
+		t.Errorf("the clock backstop (%s) and the schedule (%s over %d attempts) have drifted %s apart, more than two probe intervals. Either the attempt count was TRIMMED without lowering the backstop — check the ratchet in gatehold_test, which is the assertion that says whether the campaign is still long enough — or the backstop was RAISED without lengthening the schedule, which leaves room for a later schedule edit to stretch the campaign with no bound noticing. Move them together",
+			networkRetryBudget, total.Round(time.Second), networkMaxAttempts, slack.Round(time.Second))
 	}
 }
 
