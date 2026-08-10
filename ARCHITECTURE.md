@@ -547,8 +547,9 @@ Network-class retries have their **own** budget so a blip cannot consume the
 attempts that exist to absorb a lost race. Only `defect` counts against an
 author's consecutive-failure streak, and only `defect` invites dispatching a fix.
 
-**The network budget is sized by the longest observed outage (mg-c3b7,
-arithmetic corrected by mg-7110).** It was 5 attempts over 52s of backoff, which
+**The network budget is sized past the longest observed outage, with margin
+(mg-c3b7, arithmetic corrected by mg-7110, widened by mg-682d).** It was 5
+attempts over 52s of backoff, which
 was written against a *blip*. Then the outage was measured, by a sampler carrying
 a positive control (`ping 1.1.1.1`: clean before onset, LOSS throughout, clean
 after recovery — so its failures carry information): onset 03:37:23Z, recovery
@@ -566,25 +567,41 @@ widened twice**:
 | maximum 17m52s (n=9) | **superseded** |
 | maximum ~35m03s (wave L, n=12) | current, and **open** — no established upper bound |
 
-The budget is **14 attempts, backoff 15s/30s/60s then 2 minutes, ~21m45s of total
-sleep**, with a 22-minute clock backstop. **That is known-insufficient against the
-current maximum** — wave L exceeds it, and a ~28-minute floor is corroborated
-independently of the lease by three consecutive missed `*/10` mail-check fires.
-It covers every one of the eleven earlier waves and is still a large improvement
-on the 52 seconds it replaced, but it does not cover the worst case. **The
-shortfall is tracked as mg-682d and is not to be closed by a drive-by constant
-bump:** a campaign sized against a tail that has already moved twice will be wrong
-again, so the shape to consider distinguishes "the network is down" from
-"attempts exhausted" and requeues rather than sleeping longer. Sizing is
-deliberately not done against any prediction of *when* the next window opens.
+The budget is **28 attempts, backoff 15s/30s/60s then 2 minutes, ~49m45s of total
+sleep**, with a 50-minute clock backstop (mg-682d). It was 14 attempts / 21m45s,
+which covered every one of the eleven waves before wave L and none of wave L —
+under the ~28-minute floor that three consecutive missed `*/10` mail-check fires
+establish *without* the lease reading, and 13m18s under 35m03s.
 
-Treat every maximum above — including 35m03s — as the largest seen so far rather
-than the size of the event. Each of the first two was believed to be the size of
-the event when it was written.
+**`networkMaxAttempts` is the constant that binds.** The schedule fits inside the
+clock backstop, so raising the backstop alone changes nothing a merge
+experiences; both move together or the widening is a no-op. A test asserts the
+two have not drifted apart, so the failure names the right constant.
 
-A merge waiting that long occupies its repo's lane (lanes are per-repo, so other
-repos still merge). That is close to free during the event it is sized for: the
-next MR in the same lane would fail its own `fetch origin` in the same outage.
+**The margin is deliberately large, and it is still not coverage.** 49m45s is the
+observed maximum ×1.42. The distribution's own widenings were ×1.16 and ×1.96, so
+**a third widening the size of the second one (~68m40s) would outrun this too** —
+that is stated rather than left to be inferred. Two departures do not establish a
+trend, so this is not sized against a projected next maximum; it is sized so that
+being wrong again costs a ticket rather than an incident. Treat every maximum
+above — including 35m03s — as the largest seen so far rather than the size of the
+event; each of the first two was believed to be the size of the event when it was
+written, and **the gap between the campaign and the newest maximum is margin, not
+spare room to trim toward.**
+
+**This is a mitigation; mg-964e (the DHCP fault) is the fix.** If the lease is
+repaired the budget stops mattering. The durable shape remains the one that
+distinguishes "the network is down" from "attempts exhausted" and requeues rather
+than sleeping longer. Sizing is deliberately not done against any prediction of
+*when* the next window opens.
+
+Two costs, which are different things. **During an outage** the wait is the outage
+plus at most one 2-minute probe interval, not 49m45s — the plateau exists so
+recovery is noticed promptly, so widening the ceiling costs nothing on the waves
+already covered. **Against a genuinely dead network** (deleted remote, revoked
+credential) the merge's lane is held ~50 minutes before the failure is reported,
+up from ~22; lanes are per-repo, so other repos still merge, and the branch is
+untouched — the price is slower bad news, not lost work.
 
 **A completed gate verdict is held across the wait, not discarded (mg-c3b7).**
 Every network step except the first `fetch origin` runs *after* the quality
