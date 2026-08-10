@@ -243,6 +243,13 @@ func conditionAutoStartFailed(to, failedAgent, detail string, isCoordinator bool
 
 // conditionRestartFailed — A6. A crashed restart_on_crash agent whose respawn
 // also failed is gone, and the exit hook has already run.
+//
+// Raised only when the respawn was TRIED and FAILED. A respawn DECLINED by the
+// registry's guards — the shutdown latch, or a generation that moved — is a
+// deliberate stop working correctly, and noteRespawnOutcome keeps it off this
+// row: raising it there put five false conditions in front of the coordinator
+// on one fleet stop, which is every auto_start crew member and was the first
+// thing this channel ever emitted (mg-0208).
 func conditionRestartFailed(to, agentName, detail string) pogodCondition {
 	return pogodCondition{
 		ID:     rowA6RestartPrefix + agentName,

@@ -1382,17 +1382,54 @@ func (r *Registry) RespawnFromGeneration(name string, gen uint64) (*Agent, error
 	return r.respawn(name, gen, true)
 }
 
+// The two refusals a deferred respawn gets when the fleet it belonged to is
+// gone. Both are the guards WORKING — the respawn was correctly declined — and
+// neither says anything went wrong with the agent, so a caller that alarms on
+// "respawn returned an error" must be able to tell them from a genuine failure
+// (a missing binary, a name no longer in the registry, a spawn that errored).
+//
+// They are sentinels rather than error strings because the caller doing that
+// telling lives in another package: pogod's OnExit hook, which raised its A6
+// `restart_failed` condition on any non-nil error and so mailed the coordinator
+// one false alarm per auto_start crew member on every deliberate `pogo server
+// stop` (mg-0208). The alarm channel's first five emissions in ~/.pogo/events.log
+// were all of that kind.
+var (
+	// ErrRegistryShutDown is returned when the shutdown latch StopAll sets is
+	// still up. Every exit produced by a fleet stop hits this, necessarily:
+	// StopAll sets the latch under the lock BEFORE it stops the first agent,
+	// so the 2s-deferred respawn always finds it set.
+	ErrRegistryShutDown = errors.New("registry shut down")
+
+	// ErrRespawnSuperseded is returned when the generation check refuses a
+	// respawn scheduled in an earlier orchestration — the stop->start
+	// round-trip that clears the latch out from under a late goroutine.
+	ErrRespawnSuperseded = errors.New("respawn abandoned")
+)
+
+// IsExpectedRespawnRefusal reports whether err is one of the guards above:
+// a respawn declined BY DESIGN because the fleet it was scheduled in no longer
+// exists. It is false for every other respawn error, including the parked
+// backstop and any genuine spawn failure.
+//
+// Callers should use it to suppress alarms, not respawns. The suppression that
+// matters for correctness is already inside respawn(); this only separates
+// "declined on purpose" from "tried and failed" for whoever reports the outcome.
+func IsExpectedRespawnRefusal(err error) bool {
+	return errors.Is(err, ErrRegistryShutDown) || errors.Is(err, ErrRespawnSuperseded)
+}
+
 func (r *Registry) respawn(name string, gen uint64, checkGen bool) (*Agent, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	if r.shutdown {
-		return nil, fmt.Errorf("registry shut down")
+		return nil, ErrRegistryShutDown
 	}
 
 	if checkGen && gen != r.generation {
-		return nil, fmt.Errorf("respawn of %q abandoned: scheduled in registry generation %d, now %d "+
-			"(orchestration was stopped and restarted in between)", name, gen, r.generation)
+		return nil, fmt.Errorf("%w: respawn of %q was scheduled in registry generation %d, now %d "+
+			"(orchestration was stopped and restarted in between)", ErrRespawnSuperseded, name, gen, r.generation)
 	}
 
 	// Backstop for the park race: a respawn goroutine scheduled by a crash
