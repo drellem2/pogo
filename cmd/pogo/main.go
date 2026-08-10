@@ -3211,7 +3211,12 @@ Exits with code 1 if any critical check fails (--check mode only).`,
 			// fire that never happens writes no log line, so the installed
 			// plist is the only witness. See launchagentdrift.go.
 			{
-				laStatus, laDetail := launchAgentActivationLine(service.AuditLaunchAgents(), service.LaunchAgentsSupported())
+				// The audit's own denominator (mg-7a20): the registry is a
+				// declaration and `launchctl list` is an observation, and the
+				// row used to print only the first — "3 managed job(s)
+				// examined: 3 match this build" while 13 pogo jobs were loaded.
+				laAudits := service.AuditLaunchAgents()
+				laStatus, laDetail := launchAgentActivationLine(laAudits, service.LaunchAgentsSupported(), service.ScopeLaunchAgents(laAudits))
 				if laStatus == "warn" {
 					warn(launchAgentCheckName, laDetail)
 				} else {

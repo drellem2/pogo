@@ -38,6 +38,31 @@ package main
 // "the check stopped running" from "the check was never wired in". The four
 // states — checked/clean, drifted, not-installed, NOT CHECKED — are each said out
 // loud, and the last two are never phrased as the first.
+//
+// WHY THE POPULATION IS TWO NUMBERS AND NOT ONE (mg-7a20). This row used to say
+// "3 managed job(s) examined: 3 match this build". True, clean, and on the box
+// it was measured on there were THIRTEEN pogo jobs loaded — so the sentence read
+// as a pass over launchd activation while covering under a quarter of it. The
+// census was complete-looking whether or not the audit's scope had drifted,
+// which is the guard exhibiting the property it guards against. The row now
+// leads with EXAMINED of LOADED, so the gap is in the output rather than
+// available only to a reader who counts both. See internal/service/
+// launchagentscope.go for what the observed half can and cannot see.
+//
+// AND IT INHERITS THE CIRCULARITY ABOVE, one notch further in. This sentence
+// ships in the same binary, so a build predating it emits the row WITHOUT the
+// SCOPE clause — which reads as the pre-fix census it was written to replace. An
+// absent SCOPE clause on a present `launchd activation` row means an old binary,
+// exactly as an absent row does; neither can be disclaimed by the build that
+// lacks it.
+//
+// WHY AN UNEXPLAINED EXCLUSION WARNS. A loaded pogo job nobody has recorded a
+// reason for is the only state here that is genuinely unresolved: a job outside
+// the audit WITH a reason is a decision, and one without is a job that arrived by
+// a path nobody checked against the auditor. Warning is what makes the
+// non-stationary population survivable — coverage cannot be kept correct by a
+// list, but "something appeared and nobody ruled on it" can be said every time.
+// It is still `warn` and not `fail`, for the reason directly above.
 
 import (
 	"fmt"
@@ -56,7 +81,7 @@ const launchAgentCheckName = "launchd activation"
 // branch is reachable in a test on the platform where it is, in fact, applicable
 // — the alternative is a branch that only the CI box can exercise and only by
 // being the wrong OS.
-func launchAgentActivationLine(audits []service.LaunchAgentAudit, supported bool) (status, detail string) {
+func launchAgentActivationLine(audits []service.LaunchAgentAudit, supported bool, scope service.LaunchAgentScope) (status, detail string) {
 	if !supported {
 		return "pass", fmt.Sprintf("not applicable on %s: the managed jobs are launchd LaunchAgents, which exist only on macOS. This is not a report that any scheduled job is active", runtime.GOOS)
 	}
@@ -88,6 +113,7 @@ func launchAgentActivationLine(audits []service.LaunchAgentAudit, supported bool
 	// grepping for it — including this file's own tests.
 	population := fmt.Sprintf("%d managed job(s) examined: %d match this build, %d drifted, %d not installed, %d could not be checked",
 		len(audits), len(ok), len(drifted)+len(stale), len(absent), len(unknown))
+	population += ". " + launchAgentScopeNote(audits, scope)
 
 	// Schedule drift leads, always. A plist that differs in a log path is stale;
 	// a plist that differs in its FIRES is a job doing a fraction of what the
@@ -112,14 +138,61 @@ func launchAgentActivationLine(audits []service.LaunchAgentAudit, supported bool
 		return "warn", fmt.Sprintf("%s: %s. %s", lead, strings.Join(lines, "; "), population)
 	}
 
+	// A clean comparison over a scope nobody has ruled on is not a pass over
+	// launchd activation, and the whole of mg-7a20 is that it used to read as one.
+	clean := "pass"
+	if !scope.Observed || len(scope.Unexplained()) > 0 {
+		clean = "warn"
+	}
+
 	if len(absent) > 0 {
 		names := make([]string, 0, len(absent))
 		for _, a := range absent {
 			names = append(names, fmt.Sprintf("%s (`%s`)", a.Label, a.Remedy))
 		}
-		return "pass", fmt.Sprintf("every installed plist matches this build; %s not installed at all — this audit compares installed plists and says nothing about a job that was never installed. %s",
+		return clean, fmt.Sprintf("every installed plist matches this build; %s not installed at all — this audit compares installed plists and says nothing about a job that was never installed. %s",
 			strings.Join(names, ", "), population)
 	}
 
-	return "pass", fmt.Sprintf("every managed plist on disk matches the plist this build renders. %s", population)
+	return clean, fmt.Sprintf("every managed plist on disk matches the plist this build renders. %s", population)
+}
+
+// launchAgentScopeNote is the audit's denominator, stated.
+//
+// It renders on every row including the clean one, for the same reason the
+// population does: a scope sentence that appears only when the scope is bad is
+// invisible in exactly the way a drifted scope is.
+func launchAgentScopeNote(audits []service.LaunchAgentAudit, scope service.LaunchAgentScope) string {
+	if !scope.Observed {
+		return fmt.Sprintf("SCOPE NOT OBSERVED: %s — so the count above is this build's REGISTRY size, not a share of the pogo jobs on this box, and nothing here says how many are outside the audit", scope.ObserveNote)
+	}
+
+	var unexplained []string
+	explained := 0
+	for _, e := range scope.Excluded {
+		if e.Explained() {
+			explained++
+			continue
+		}
+		unexplained = append(unexplained, e.Label)
+	}
+
+	note := fmt.Sprintf("SCOPE: %d of %d pogo launchd job(s) LOADED on this box are in this audit's registry",
+		len(scope.Audited), len(scope.Loaded))
+	// A registry job that is not loaded is already reported by the audit's own
+	// "not installed" state; naming it here too stops the two numbers looking
+	// like an arithmetic mistake to whoever subtracts them.
+	if notLoaded := len(audits) - len(scope.Audited); notLoaded > 0 {
+		note += fmt.Sprintf(" (%d more examined but not loaded)", notLoaded)
+	}
+	note += fmt.Sprintf("; %d outside it — %d with a recorded reason, %d with NONE",
+		len(scope.Excluded), explained, len(unexplained))
+	if len(unexplained) > 0 {
+		note += fmt.Sprintf(": %s. A loaded pogo job nobody has recorded an exclusion reason for is a job that arrived by an install path nobody checked against this audit — record the reason in launchAgentExclusionReasons() or bring the job into the registry",
+			strings.Join(unexplained, ", "))
+	} else {
+		note += "."
+	}
+	note += " This compares against jobs LOADED in this user's launchd domain and labelled `com.pogo.`; a plist on disk that was never bootstrapped, another domain, or a pogo job under a different label is outside even this denominator"
+	return note
 }
