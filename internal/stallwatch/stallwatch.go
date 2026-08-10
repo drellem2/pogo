@@ -14,6 +14,13 @@
 //     message older than UnreadMailAgeThreshold, or more than
 //     MaxUnreadMailCount messages have accumulated.
 //
+// Neither dispatch threshold trusts `available` on its own since mg-1a8a. A
+// claim taken at spawn can fail open, leaving an item in available/ with a
+// polecat already working it, so both checks first ask the Workers probe whether
+// a live worker holds the item — and the ones that do are re-reported by
+// checkWorkedButUnclaimed with the opposite remedy rather than silenced. See
+// inflight.go.
+//
 // On a threshold cross the watcher fires one nudge per offending batch and
 // appends a `stall_watch_fired` event to ~/.pogo/events.log.
 //
@@ -136,6 +143,11 @@ type Options struct {
 	// its pre-mg-dd77 wording, which is right for a daemon with no cap to read
 	// and wrong to fake: a notice that cannot see the cap must not claim to.
 	Capacity Capacity
+	// Workers, when set, lets every available/ check ask whether a live worker
+	// is already on an item before calling it neglected (mg-1a8a). Left nil the
+	// watcher behaves exactly as it did before that fix — it reports a worked
+	// item as unclaimed, because status is then the only evidence it has.
+	Workers Workers
 }
 
 // Watcher samples macguffin state and nudges the watched agent on stall.
@@ -147,6 +159,7 @@ type Watcher struct {
 	emit     Emitter
 	fastPoll func()
 	capacity Capacity
+	workers  Workers
 
 	mu sync.Mutex
 	// lastNudge records when each cooldown key last fired and how many times it
@@ -238,6 +251,7 @@ func New(cfg config.StallWatchConfig, opts Options) *Watcher {
 		emit:      emit,
 		fastPoll:  opts.FastPoll,
 		capacity:  opts.Capacity,
+		workers:   opts.Workers,
 		lastNudge: make(map[string]fireRecord),
 	}
 }
@@ -266,12 +280,24 @@ func (w *Watcher) checkUnclaimedItems(now time.Time) {
 		return
 	}
 
+	// Which of these items already has a live worker on it (mg-1a8a). Probed
+	// ONCE and shared by all three checks below, so a polecat cannot read as
+	// in-flight to one of them and absent to another within the same sample.
+	flight := w.probeInFlight()
+
 	// Priority-aware fast wake (gh drellem2/pogo #61). A ready, watched,
 	// high-priority available item bypasses the 10-min UnclaimedItemAgeThreshold
 	// and is delivered promptly via the same wait-idle nudge, so urgent work no
 	// longer waits out the idle-coordinator polling gap. This scans the same
 	// listing, so it is nearly free.
-	w.checkPriorityWake(now, items)
+	w.checkPriorityWake(now, items, flight)
+
+	// Worked-but-unclaimed (mg-1a8a). Reads the SAME listing over the population
+	// the two dispatch checks skip because a live worker holds the item, and says
+	// the opposite thing about it: do NOT dispatch. It runs whether or not the
+	// dispatch checks fire, because an item whose claim failed open is a defect
+	// at any age.
+	w.checkWorkedButUnclaimed(now, items, flight)
 
 	// Blocked-reminder (mg-3844). Reads the SAME listing over the DISJOINT
 	// population: every item the two dispatch checks skip because
@@ -291,6 +317,12 @@ func (w *Watcher) checkUnclaimedItems(now time.Time) {
 	var stale []workitem.WorkItem
 	for _, it := range items {
 		if !w.watchedForDispatch(it) {
+			continue
+		}
+		// An item a live worker is on is not neglected, whatever its status says
+		// (mg-1a8a). It is not dropped from the fleet's attention — the
+		// worked-but-unclaimed check above reports it, with the opposite remedy.
+		if _, worked := flight.worker(it.ID); worked {
 			continue
 		}
 		if w.cfg.PriorityWakeEnabled && w.isFastPriority(it.Priority) {
@@ -336,6 +368,7 @@ func (w *Watcher) checkUnclaimedItems(now time.Time) {
 
 	advisory, advisedIDs := w.blockIntentAdvisory(due)
 	msg += advisory
+	msg += flight.uncertaintyNote()
 	msg += sel.repeatNotice()
 
 	details := map[string]any{
@@ -373,7 +406,7 @@ func (w *Watcher) checkUnclaimedItems(now time.Time) {
 //     cooldown later, then one at twice that, out to RepeatBackoffCap — not one
 //     per heartbeat tick, and not one per cooldown forever. This is the
 //     category mg-1693 was measured on; see selectDue.
-func (w *Watcher) checkPriorityWake(now time.Time, items []workitem.WorkItem) {
+func (w *Watcher) checkPriorityWake(now time.Time, items []workitem.WorkItem, flight WorkInFlight) {
 	if !w.cfg.PriorityWakeEnabled {
 		return
 	}
@@ -381,6 +414,14 @@ func (w *Watcher) checkPriorityWake(now time.Time, items []workitem.WorkItem) {
 	var ready []workitem.WorkItem
 	for _, it := range items {
 		if !w.watchedForDispatch(it) {
+			continue
+		}
+		// Same exclusion as the standard check, and this is the surface it
+		// mattered on (mg-1a8a): "claim or dispatch now" is the most imperative
+		// wording the component emits and the shortest-cooldown one, so an item
+		// whose claim failed open drew the fastest, loudest push toward a second
+		// polecat on work already in progress.
+		if _, worked := flight.worker(it.ID); worked {
 			continue
 		}
 		if !w.isFastPriority(it.Priority) {
@@ -427,6 +468,7 @@ func (w *Watcher) checkPriorityWake(now time.Time, items []workitem.WorkItem) {
 
 	advisory, advisedIDs := w.blockIntentAdvisory(due)
 	msg += advisory
+	msg += flight.uncertaintyNote()
 	msg += sel.repeatNotice()
 
 	details := map[string]any{

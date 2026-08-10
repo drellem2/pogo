@@ -112,6 +112,62 @@ several refusals. Gated assignees and `stage: gated` items never reach a notice
 at all, but the host-load gate and the stranded-push gate are not consulted, so
 "free" means *the cap would let this through*, not *this dispatch will succeed*.
 
+#### `available` is not evidence that nobody is working it (mg-1a8a)
+
+Both dispatch checks infer ownership from item status, and since mg-7254 that
+status is set by pogod at spawn — but the claim **fails open**. On a not-found
+or unreadable store the polecat is dispatched anyway and the item stays in
+`available/`. The spawn point logs this and, until this fix, named the
+consequence itself:
+
+    polecat pc-fronted: could not claim work item wi-1 at spawn: … — dispatching
+    ANYWAY … If wi-1 is a real item still in available/, stall-watch will report
+    it as neglected while this polecat works it
+
+Every reader downstream is then wrong in the same direction: the standard notice
+calls the item neglected, priority-wake says "claim or dispatch **now**", and a
+coordinator acting on that nag spawns a **second** polecat onto work already in
+progress — two branches touching the same files, the concurrent-edit shape that
+has cost this fleet repeated rebase conflicts.
+
+The claim field cannot carry the distinction; it is already overloaded with "in
+progress", "finished, awaiting a human" (mg-ed7b) and now "in progress but
+unclaimable". So the repair is a **second source of truth**: pogod knows which
+polecats are alive and which item each was dispatched at, independently of
+whether the claim stuck. A `stallwatch.Workers` probe — wired in `cmd/pogod` to
+`agent.Registry.WorkItemsInFlight`, the union of the in-memory registry and the
+persisted polecat witness, because the registry alone is empty after a restart
+(mg-13a3) — is sampled **once per tick** and shared by every check that reads
+`available/`.
+
+| Situation | What happens |
+|---|---|
+| live worker on the item | dropped from both dispatch checks; re-reported by the **worked-but-unclaimed** notice, which says *do NOT dispatch* and names the worker, its pid and the evidence |
+| no live worker | unchanged — the item is neglected and the notice says so |
+| probe cannot answer at all | unchanged, i.e. reported as neglected: a false "dispatch this" is self-correcting, a false silence looks like a healthy queue |
+| attribution may be incomplete (unreadable witness, live registry) | dispatch notices fire as before **and** carry the caveat, since an incomplete snapshot can only cause a worked item to be missed, never invented |
+
+The worked-but-unclaimed notice has **no age threshold** — a fresh item is not
+yet evidence of anything, but a worked-but-unclaimed one is an anomaly the
+instant it exists, and the cost of missing it is highest in the first minutes,
+before either polecat has pushed. It shares `selectDue`, so a standing anomaly
+still backs off per item, and it stamps `workers` (item → polecat, pid,
+evidence) on `stall_watch_fired` so "aging because nobody dispatched it" and
+"aging because its claim failed open" are countable apart.
+
+**The suppression is paired with a re-report, deliberately.** Dropping worked
+items and saying nothing would fix the double-dispatch and hide the anomaly —
+and the missing claim is what `mg done` needs at the *end* of the work, so the
+polecat discovers it after doing everything. Silence is also the mistake this
+component has already made twice (mg-4bd4, mg-1693).
+
+**What this does not fix.** The item still *reads* `available` to anything
+consulting mg directly — a human at the board, or a coordinator that dispatches
+without asking pogod. Nothing at the spawn point refuses a second polecat on an
+item a live worker already holds; the claim-at-spawn conflict is that guard, and
+it is precisely the guard that failed open here. This fix removes the nag that
+induces the second dispatch, not the ability to make one.
+
 ### Threshold B — unread mail
 
 Scan the watched agent's `new/` maildir. Fire when either the oldest message is

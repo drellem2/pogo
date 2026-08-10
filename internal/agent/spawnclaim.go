@@ -331,9 +331,21 @@ func (r *Registry) claimForSpawn(spawnReq SpawnPolecatAPIRequest) (ClaimVerdict,
 			spawnReq.Id, verdict.Detail, holder.sentence(), spawnReq.Id)
 
 	default: // ClaimUnknown — loud, but the dispatch proceeds.
+		// What this line used to say — "stall-watch will report it as neglected
+		// while this polecat works it" — was true when it was written and is the
+		// defect mg-1a8a fixed. stall-watch now asks the live agent registry
+		// (Registry.WorkItemsInFlight) before calling an available item neglected,
+		// and reports a worked-but-unclaimed one with the opposite remedy. The
+		// prediction is kept as a CONDITIONAL rather than deleted, because it is
+		// still what happens when the attribution cannot be made: a --no-worktree
+		// dispatch whose polecat never reaches the registry, or a witness the
+		// watcher cannot read.
 		log.Printf("polecat %s: could not claim work item %s at spawn: %s — dispatching ANYWAY "+
 			"(claim failures fail open, see MGWorkItemClaimer.ClaimForSpawn). If %s is a real item "+
-			"still in available/, stall-watch will report it as neglected while this polecat works it",
+			"it stays in available/ while this polecat works it; stall-watch consults the live agent "+
+			"registry and will report it as worked-but-unclaimed rather than neglected (mg-1a8a), but "+
+			"anything reading item status alone — including a human reading the board — still sees it "+
+			"as work nobody started",
 			spawnReq.Name, spawnReq.Id, verdict.Detail, spawnReq.Id)
 		events.Emit(context.Background(), events.Event{
 			EventType:  "work_item_claim_at_spawn_failed",
