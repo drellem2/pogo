@@ -42,10 +42,12 @@
 //   - The judgement is not re-derived. The source is
 //     agent.Registry.MailLoopReport, which runs diagnose's OWN mailLoopFor over
 //     the registry. Every exclusion mailLoopJudgeable draws — polecats, a
-//     configured agent that is not running, an agent whose prompt tree cannot be
-//     read (IsConfiguredAgent collapsing to false) — is inherited rather than
-//     reimplemented, so it cannot drift and this package cannot invent a RED
-//     that diagnose would not report.
+//     configured agent that is not running, an agent that is not configured at
+//     all, an agent whose prompt tree cannot be READ (a separate reason since
+//     mg-7b3f, because "I could not look" is not the same exclusion as "nothing
+//     is owed here") — is inherited rather than reimplemented, so it cannot
+//     drift and this package cannot invent a RED that diagnose would not
+//     report.
 //   - A HOLD-DOWN. A missing loop must persist unbroken for HoldDown before it
 //     is a finding. Registration is not instantaneous: pogod spawns an agent and
 //     registers its mail-check moments later, and every restart re-runs that

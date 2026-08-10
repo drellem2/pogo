@@ -760,6 +760,23 @@ type PromptInfo struct {
 }
 
 // ListPrompts discovers all prompt files under ~/.pogo/agents/.
+//
+// # ABSENT and UNREADABLE are different answers
+//
+// A directory that does not exist is a fact about configuration — a machine
+// with no crew prompts has none, and that is the empty list. A directory that
+// exists and cannot be READ is a fault in the instrument, and this function
+// returns it as an error rather than as a shorter list (mg-7b3f).
+//
+// Until mg-7b3f both collapsed into "no prompts here", and the collapse did not
+// stop at classification. DesiredStateFor reads this list, finds no prompt by
+// the agent's name, and answers (false, nil) — a CONFIDENT "not in the desired
+// state", the one answer its own doc comment reserves for evidence. The
+// mail-check reap acts on that: it classifies the whole crew AgentGone and
+// removes their mail-check schedules. So an unreadable ~/.pogo/agents/crew did
+// not merely hide the fleet's mail loops, it DELETED them — manufacturing the
+// exact fault deafwatch exists to announce. Reporting the error puts the reap
+// back on its AgentUnknown branch, which already says "NOT reaping".
 func ListPrompts() ([]PromptInfo, error) {
 	root := PromptDir()
 	var prompts []PromptInfo
@@ -770,47 +787,67 @@ func ListPrompts() ([]PromptInfo, error) {
 	// coordinator by its configured name. Category stays "mayor" as a stable
 	// machine-readable label.
 	mayorPath := filepath.Join(root, "mayor.md")
-	if _, err := os.Stat(mayorPath); err == nil {
+	switch _, err := os.Stat(mayorPath); {
+	case err == nil:
 		prompts = append(prompts, PromptInfo{
 			Name:     CoordinatorName(),
 			Path:     mayorPath,
 			Category: "mayor",
 		})
+	case !os.IsNotExist(err):
+		return nil, fmt.Errorf("prompt tree unreadable: stat %s: %w", mayorPath, err)
 	}
 
 	// Crew prompts
 	crewDir := CrewPromptDir()
-	if entries, err := os.ReadDir(crewDir); err == nil {
-		for _, e := range entries {
-			if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
-				continue
-			}
-			name := strings.TrimSuffix(e.Name(), ".md")
-			prompts = append(prompts, PromptInfo{
-				Name:     name,
-				Path:     filepath.Join(crewDir, e.Name()),
-				Category: "crew",
-			})
-		}
+	entries, err := readPromptDir(crewDir)
+	if err != nil {
+		return nil, err
+	}
+	for _, e := range entries {
+		prompts = append(prompts, PromptInfo{
+			Name:     strings.TrimSuffix(e.Name(), ".md"),
+			Path:     filepath.Join(crewDir, e.Name()),
+			Category: "crew",
+		})
 	}
 
 	// Templates
 	tmplDir := TemplateDir()
-	if entries, err := os.ReadDir(tmplDir); err == nil {
-		for _, e := range entries {
-			if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
-				continue
-			}
-			name := strings.TrimSuffix(e.Name(), ".md")
-			prompts = append(prompts, PromptInfo{
-				Name:     name,
-				Path:     filepath.Join(tmplDir, e.Name()),
-				Category: "templates",
-			})
-		}
+	entries, err = readPromptDir(tmplDir)
+	if err != nil {
+		return nil, err
+	}
+	for _, e := range entries {
+		prompts = append(prompts, PromptInfo{
+			Name:     strings.TrimSuffix(e.Name(), ".md"),
+			Path:     filepath.Join(tmplDir, e.Name()),
+			Category: "templates",
+		})
 	}
 
 	return prompts, nil
+}
+
+// readPromptDir lists the .md files in one prompt directory. A directory that
+// is not there yields no entries and no error; any other read failure is
+// returned. See ListPrompts for why that distinction is load-bearing.
+func readPromptDir(dir string) ([]os.DirEntry, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("prompt tree unreadable: read %s: %w", dir, err)
+	}
+	var out []os.DirEntry
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out, nil
 }
 
 // DefaultCrewPromptTemplate is the default content for new crew agent prompt
