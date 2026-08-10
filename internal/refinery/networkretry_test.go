@@ -37,7 +37,8 @@ import (
 const unresolvableRemote = "https://mg-e5c2-no-such-host.invalid/drellem2/pogo.git"
 
 // fastRetries compresses the shipped backoff schedule so the acceptance tests
-// exercise the real loop without sleeping the real 52 seconds. The COUNT and the
+// exercise the real loop without sleeping the real campaign — 21m45s since
+// mg-c3b7 sized it against the measured 15m26s outage. The COUNT and the
 // bounding are untouched — those are what is under test — only the delays shrink.
 func fastRetries(t *testing.T) {
 	t.Helper()
