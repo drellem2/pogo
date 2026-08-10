@@ -664,11 +664,28 @@ gh: <owner>/<repo>#<n>
 - `depends=` chains the tickets (build depends on triage, review depends on build), mirroring how `qa: required` pairs items.
 - Tag every ticket in the chain `gh-issue` so `mg list --tag=gh-issue` shows the whole board.
 
-### Work that already exists — `pogo check-stranded`
+### Work that already exists — read your mail, then `pogo check-stranded`
 
-**Before you dispatch at anything, and at the top of any cycle where you are
-working the priority-wake list.** It is one command and it answers the question
-the board cannot: does this open item's work already exist?
+**pogod mails you when a polecat leaves pushed work behind.** The subject is
+`[stranded-push] …` and it names the branch, the commit, the exact
+`pogo refinery submit` line, and the one sentence that matters: *do not dispatch a
+worker at this item*. It arrives when the polecat is released, and again at pogod
+startup for any polecat that outlived a previous pogod (those are invisible to the
+release check — the registry has no adopt path, so nothing else will ever report
+them).
+
+**Treat that mail as a dispatch block on the item it names.** The board will show
+that item `available` and priority-wake will advertise it as ready. That advice is
+wrong for as long as the branch is unmerged and nothing on the board says so.
+
+That mail exists because the detector behind it ran unread for three months. It
+fired on all five stranded branches of 2026-08-09 — five events, five branches,
+1:1 — into pogod's log and `events.log`, which nobody reads. The gap between it
+detecting and a person noticing was ~1h, 2.5h and ~3h. **The lesson generalises:
+before you commission a detector, check whether one exists and lacks a reader.**
+
+`pogo check-stranded` is the by-hand version, and it answers something the mail
+cannot — whether an item is still open with its work already **merged**:
 
 ```bash
 pogo check-stranded          # every OPEN item whose work is already on a branch
@@ -690,12 +707,17 @@ it were the other:
   two instruments disagreeing; the second is a branch nobody could read. Both mean
   *you* look.
 
-The spawn-time refusal (`work item … already has PUSHED, UNMERGED work`) is the
-other half of this and it is not a substitute: it fires only when somebody tries
-to dispatch, and once a branch **merges** it correctly stops firing while the item
-is still open. That window opens at merge and never closes. Of the four instances
-that produced this detector, one was caught by that guard, one by a person
-reconciling something unrelated, and two by the accident of looking next door.
+The spawn-time refusal (`work item … already has PUSHED, UNMERGED work`) is a
+third mechanism and it is not a substitute for either. Two limits:
+
+- It fires only when somebody tries to dispatch, and once a branch **merges** it
+  correctly stops firing while the item is still open. That window opens at merge
+  and never closes.
+- **It is keyed on the WORK ITEM ID, so a freshly-split child ticket routes
+  straight around it.** The branch belongs to the parent; the new ticket is a new
+  id and the guard has nothing to match. That is how the duplicate mg-4722 got
+  filed. When you split a ticket whose parent has a branch, carry the branch
+  forward yourself — nothing will stop you.
 
 Do **not** read the branch count out of a manual sweep: 57 of this repo's 634
 polecat branches have unmerged patches and 48 of those belong to archived items.

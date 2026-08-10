@@ -196,6 +196,18 @@ func (r *Registry) strandedWorkRefusal(workItemID, repo, target string) string {
 // Attribution here is EXACT rather than heuristic: pogod knows this agent's name
 // and therefore its branch, which is the one moment in the item's life when the
 // mapping is not a guess.
+//
+// IT NOW MAILS, and that was the defect this whole detector had (mg-be37). For
+// three months its only outputs were the log line and the event below — both
+// written from inside pogod after the agent process is gone, so neither reached
+// an operator terminal or an agent inbox, and `work_item_stranded_push` had no
+// consumer anywhere in the tree. It fired correctly on all five stranded
+// branches of 2026-08-09 and the measured gap to somebody NOTICING was ~1h, 2.5h
+// and ~3h. The addressee closes that gap; see strandedmail.go.
+//
+// The mail is sent LAST and its failure is swallowed by the sink, so the event
+// is already durable whatever happens to mg. That ordering is the point: the
+// improvement is a second output, not a new dependency of the first.
 func (r *Registry) reportStrandedWorkOnRelease(a *Agent, reason string) {
 	if a == nil || a.Type != TypePolecat || a.WorkItemID == "" || a.SourceRepo == "" {
 		return
@@ -237,6 +249,15 @@ func (r *Registry) reportStrandedWorkOnRelease(a *Agent, reason string) {
 			"unmerged":    len(f.Unmerged),
 			"reason":      reason,
 			"summary":     f.Summary(),
+			"route":       RouteRelease,
 		},
+	})
+	strandedAlertMail(StrandedAlert{
+		Polecat:    a.Name,
+		WorkItemID: a.WorkItemID,
+		Repo:       a.SourceRepo,
+		Reason:     reason,
+		Route:      RouteRelease,
+		Finding:    f,
 	})
 }

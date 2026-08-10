@@ -1114,6 +1114,81 @@ A branch-first sweep of this repo finds 57 rows, 48 of them on archived items an
 is on **item status**, `available` first, because that is the status priority-wake
 advertises — not on branch count.
 
+### The command is deliberately NOT on a clock
+
+Nothing schedules `pogo check-stranded`, and that is a decision rather than an
+omission. The condition it re-derives is already answered, correctly and
+automatically, by the two reporters below — so a timer running this would be a
+third opinion on a settled question, paid for on every tick. Run it by hand when
+you want the item-side view (especially the `landed_not_closed` residue, which
+neither reporter can see), and rely on the mail for the rest.
+
+## Who gets told when a polecat leaves pushed work behind
+
+There are **two** automatic reporters, and between them they cover every polecat
+this daemon has ever supervised. Both mail the coordinator; both are report-only.
+
+**1. At release — `reportStrandedWorkOnRelease` (internal/agent/strandedgate.go).**
+pogod checks a polecat's branch as it releases the claim, and mails if the branch
+carries work the target does not. This fires on **every** release route: a
+graceful `pogo agent stop`, a predeploy quiesce, and — through the reaper — a
+crash, an OOM kill or a `kill -9`. It is precise: on 2026-08-09 there were five
+stranded branches and five `work_item_stranded_push` events, 1:1, with nothing
+else in the log.
+
+It went unread for three months. Until mg-be37 its only outputs were pogod's log
+and `~/.pogo/events.log`, and it runs inside pogod after the agent process is
+gone, so it reached no terminal and no inbox. The measured gap between it
+detecting a stranding and a person noticing was ~1h, 2.5h and ~3h. **If you are
+ever tempted to add a detector here, check first whether the detector exists and
+lacks a reader.**
+
+**2. At pogod startup — `ReportStrandedWorkAcrossRestart`
+(internal/agent/strandedsweep.go).** Reporter 1 needs an `*Agent` out of the
+registry. The registry is in-memory with **no adopt path**, so a polecat that was
+running when a pogod restarted has no entry in the successor and never will —
+reporter 1 can never fire for it again, *including at a later graceful stop*. It
+is un-instrumented for the rest of its life, and this fleet restarts pogod
+nightly.
+
+So pogod sweeps that population once per boot. The population is the **witness
+store minus the registry**: `noteWitnessStart` records a polecat at spawn and
+`noteWitnessExit` deletes the record when the daemon sees it exit, so a record
+that survives into a new boot is exactly a polecat whose exit was never witnessed.
+It is *not* "all branches minus the registry" — at boot the registry is empty, so
+that reading would select all 634 polecat branches here.
+
+A swept polecat may still be **running** (that is the orphan case, and the
+orphaned-polecat alert covers the same process from the other side). Its mail says
+so: the work is real and already pushed, but the branch may still grow, so do not
+submit under it until you have established it is finished.
+
+### What both mails carry, and what they will not do
+
+Branch, ref, whether it is on origin, target, unmerged count and oldest commit,
+the paste-ready `pogo refinery submit … --repo=… --author=…` line, and the
+sentence that matters most: **do not dispatch a worker at this item.** The board
+shows the item as `available` and priority-wake will advertise it as ready; that
+advice is wrong for as long as the branch is unmerged and nothing on the board
+says so.
+
+Neither reporter submits and neither closes. A wrong auto-submit lands unreviewed
+work; a wrong auto-close discards a branch.
+
+A **failed send** emits `work_item_stranded_push_undelivered`. Without it, "no
+stranding was found" and "a stranding was found and the mail bounced" are the same
+silence — which is the defect this whole surface exists to close, one layer down.
+
+### What none of this covers
+
+Every guard here — the spawn refusal, `git cherry`, both reporters — is defined
+over **pushed** commits. Uncommitted work in a preserved worktree is invisible to
+all of them by construction. The only artifact that knows is the
+preserved-worktree notice, and that is addressed to worktree hygiene: it says a
+tree is pinned and how to reclaim it, and nothing about whether the work item is
+unsafe to dispatch. The two facts live in different messages aimed at different
+concerns, and combining them is an open problem.
+
 ## GitHub branch protection on main (rulesets)
 
 Since 2026-07-05 (mg-f7a3), `main` in **drellem2/pogo** (ruleset `main-require-pr`, id 18534732) and **drellem2/macguffin** (id 18534735) is protected by a GitHub ruleset per the gh-issue workflow design (`docs/design/gh-issue-workflow-design.md` §3):

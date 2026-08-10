@@ -2687,6 +2687,30 @@ Flags:
 	// to prevent (mg-de08 PART B).
 	gcGate.markAutoStartComplete(time.Now())
 
+	// Sweep for pushed work stranded by a polecat that outlived a PREVIOUS pogod
+	// (mg-be37). This is the one population the release gate cannot reach: it
+	// reports from releasePolecatClaim, which needs a registry entry, and the
+	// registry is in-memory with no adopt path (see the comment above), so a
+	// polecat that was running when this daemon's predecessor died is
+	// un-instrumented for the whole rest of its life — a later graceful stop
+	// included.
+	//
+	// HERE, AND NOT ON THE HEARTBEAT. The trigger is the restart because the
+	// restart is what CREATES the uncovered set; a clock would only be guessing
+	// at when that happened, and re-mailing the same branches every tick. This
+	// call sits outside the auto-start branches for the same reason
+	// markAutoStartComplete does: every startup path must reach it, including
+	// the two that deliberately start nothing. A daemon that supervises polecats
+	// without starting crew still inherits its predecessor's survivors.
+	//
+	// In a goroutine because it fetches and inspects git repositories and then
+	// shells out to `mg mail send` — boot must not wait on the network, and a
+	// mid-outage restart is exactly when this is slowest and when it matters
+	// most.
+	if agentRegistry != nil {
+		go agentRegistry.ReportStrandedWorkAcrossRestart()
+	}
+
 	// Close out the boot's annunciation: persist the transition store and put the
 	// counts on the log and the event spine (mg-342d).
 	//
