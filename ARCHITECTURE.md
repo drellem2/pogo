@@ -547,17 +547,40 @@ Network-class retries have their **own** budget so a blip cannot consume the
 attempts that exist to absorb a lost race. Only `defect` counts against an
 author's consecutive-failure streak, and only `defect` invites dispatching a fix.
 
-**The network budget is sized by measured outage duration (mg-c3b7).** It was
-5 attempts over 52s of backoff, which was written against a *blip*. Then the
-outage was measured, by a sampler carrying a positive control (`ping 1.1.1.1`:
-clean before onset, LOSS throughout, clean after recovery — so its failures
-carry information): onset 03:37:23Z, recovery 03:52:49Z, **duration 15m26s**, on
-2026-08-10. 52 seconds against that is short by ~17.8x, so no rearrangement of
-backoff *inside* 52 seconds could succeed — it could only fail faster. The
-budget is now **14 attempts, backoff 15s/30s/60s then 2 minutes, ~21m45s of
-total sleep**, with a 22-minute clock backstop. It is sized against DURATION,
-which is measured and stable across four waves, and deliberately not against any
-prediction of *when* the next window opens, which is not established.
+**The network budget is sized by the longest observed outage (mg-c3b7,
+arithmetic corrected by mg-7110).** It was 5 attempts over 52s of backoff, which
+was written against a *blip*. Then the outage was measured, by a sampler carrying
+a positive control (`ping 1.1.1.1`: clean before onset, LOSS throughout, clean
+after recovery — so its failures carry information): onset 03:37:23Z, recovery
+03:52:49Z, **duration 15m26s**, on 2026-08-10. 52 seconds against that is short
+by ~17.8x, so no rearrangement of backoff *inside* 52 seconds could succeed — it
+could only fail faster.
+
+That wave is not the size of the event, and no single wave is. It is one cycle of
+a recurring DHCP fault (mg-964e) whose duration is a **distribution that has
+widened twice**:
+
+| stated as | status |
+|---|---|
+| "15 min ±41s, stable across four waves" | **withdrawn** — came from the first three waves, which happened to cluster |
+| maximum 17m52s (n=9) | **superseded** |
+| maximum ~35m03s (wave L, n=12) | current, and **open** — no established upper bound |
+
+The budget is **14 attempts, backoff 15s/30s/60s then 2 minutes, ~21m45s of total
+sleep**, with a 22-minute clock backstop. **That is known-insufficient against the
+current maximum** — wave L exceeds it, and a ~28-minute floor is corroborated
+independently of the lease by three consecutive missed `*/10` mail-check fires.
+It covers every one of the eleven earlier waves and is still a large improvement
+on the 52 seconds it replaced, but it does not cover the worst case. **The
+shortfall is tracked as mg-682d and is not to be closed by a drive-by constant
+bump:** a campaign sized against a tail that has already moved twice will be wrong
+again, so the shape to consider distinguishes "the network is down" from
+"attempts exhausted" and requeues rather than sleeping longer. Sizing is
+deliberately not done against any prediction of *when* the next window opens.
+
+Treat every maximum above — including 35m03s — as the largest seen so far rather
+than the size of the event. Each of the first two was believed to be the size of
+the event when it was written.
 
 A merge waiting that long occupies its repo's lane (lanes are per-repo, so other
 repos still merge). That is close to free during the event it is sized for: the
