@@ -557,23 +557,61 @@ func transportFromError(raw string) string {
 // must not consume the budget that exists to absorb races, and a long race must
 // not consume the budget that exists to wait out a blip.
 //
+// THE BUDGET IS SIZED BY MEASURED OUTAGE DURATION, NOT BY GUESS (mg-c3b7).
+//
+// The previous schedule was 5 attempts over 52s of backoff. It was written
+// against a blip and said so honestly — "this schedule does not cover all of
+// that, and is not meant to". Then the outage was measured. A controlled
+// sampler ran across the window of 2026-08-10 03:37Z at 20s intervals with a
+// positive control (ping 1.1.1.1, clean before onset, LOSS for the whole
+// window, clean after recovery — so its failures carry information):
+//
+//	ONSET      03:37:23Z
+//	RECOVERY   03:52:49Z
+//	DURATION   15m26s
+//
+// The refinery's own timeline sits inside that window and agrees to the second:
+// MR mr-d9sk3matjv1sgaptna70's ./build.sh finished CLEAN after 8m58s at
+// 03:40:07Z — 2m44s INTO the outage, which is why the gate passed and the fetch
+// that followed did not — then burned all 5 network attempts by 03:41:00Z with
+// 11m49s of outage still to run.
+//
+// 52 seconds against 15m26s is not marginally short; it is short by a factor of
+// ~17.8, so no rearrangement of backoff INSIDE 52 seconds can succeed. It can
+// only fail faster. The schedule below is therefore sized against the measured
+// DURATION — the one number that is measured and stable across four waves
+// ("15 min ±41s") — and deliberately NOT against any prediction of when the
+// next window starts, which is not established tightly enough to schedule
+// against.
+//
+// What this costs: a merge's lane (one repo — see lanes.go, merges in different
+// lanes run concurrently) can now sit waiting for up to ~22 minutes. That is
+// close to free during the event it is sized for, because the next MR in that
+// same lane would fail its own `fetch origin` in the same outage; and the merge
+// doing the waiting is holding a completed gate verdict it no longer has to
+// recompute (see gateHold in merge.go), which is the 8m58s this exists to stop
+// throwing away.
+//
 // Package vars rather than consts so tests can compress the schedule; the
 // shipped values are the ones below.
 var (
 	// networkRetryBackoff is the delay BEFORE each successive network-class
-	// retry. A suppressed-DNS window on this box lasted from en1 going INIT at
-	// 20:30:40 to BOUND at 20:34:02; this schedule does not cover all of that,
-	// and is not meant to. It covers a blip, and when it does not, the failure
-	// is at least labelled infrastructure so the queue is triaged correctly
-	// instead of producing N dispatches for N defects that do not exist.
-	networkRetryBackoff = []time.Duration{2 * time.Second, 5 * time.Second, 15 * time.Second, 30 * time.Second}
-	// networkMaxAttempts bounds network-class attempts, retries included.
-	networkMaxAttempts = 5
+	// retry, clamped at the last entry. It plateaus at 2 minutes rather than
+	// doubling forever: past the first minute the question is no longer "was
+	// that a blip?" but "has a minutes-long outage ended yet?", and the answer
+	// wants a steady probe. Two minutes bounds how long after recovery the
+	// merge stays asleep.
+	networkRetryBackoff = []time.Duration{15 * time.Second, 30 * time.Second, 60 * time.Second, 2 * time.Minute}
+	// networkMaxAttempts bounds network-class attempts, retries included. 14
+	// attempts is 13 retries, which under the schedule above sleeps
+	// 15s+30s+60s+10x120s = 21m45s — the measured 15m26s with a 6m19s margin.
+	networkMaxAttempts = 14
 	// networkRetryBudget bounds the TOTAL time spent sleeping between network
-	// retries for one merge request, whatever the schedule says. The refinery is
-	// a single serial slot: time spent waiting here is time every queued MR
-	// waits too, so the bound is on the clock and not only on the count.
-	networkRetryBudget = 90 * time.Second
+	// retries for one merge request, whatever the schedule says. It is the
+	// backstop on the clock for a schedule that is edited later; the shipped
+	// schedule fits inside it, so the ATTEMPT COUNT is what actually stops the
+	// shipped configuration.
+	networkRetryBudget = 22 * time.Minute
 )
 
 // networkBackoffFor returns the delay before the nth network retry (n starting

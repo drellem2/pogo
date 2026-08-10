@@ -532,7 +532,7 @@ func TestProcessMergeFFRetryOnRace(t *testing.T) {
 
 	// build.sh:
 	//   - bumps gate-run counter on every invocation (so we can assert
-	//     the gate ran on each attempt — i.e. skip_on_retry is OFF here)
+	//     how many times the gate actually ran)
 	//   - on the first invocation only, pushes an empty commit to
 	//     origin/main from the sidecar clone (the race injection)
 	buildSh := fmt.Sprintf(`#!/bin/sh
@@ -598,11 +598,26 @@ exit 0
 		t.Error("feature.txt missing on main after race retry")
 	}
 
-	// Gate ran on every attempt (skip_on_retry NOT set in this test).
+	// The gate ran ONCE, across two attempts, and that is the mg-c3b7 payoff
+	// rather than a regression.
+	//
+	// This test's injected race is `git commit --allow-empty` — CI moving the
+	// ref without changing a byte of content. The retry therefore rebases to a
+	// tree identical to the one the gate already passed on, so the verdict is
+	// held and replayed instead of recomputed (see gateHold). Re-running the
+	// gate here would compile and test the same bytes for the same answer; on
+	// the real box that was 8m58s of a contended machine.
+	//
+	// The assertion is now EXACT rather than a lower bound, so this also pins
+	// that the hold fires at most once per attempt. A race that genuinely
+	// changes the target's content must still re-gate — that is
+	// TestProcessMergeMaxAttemptsConfigurable, whose sidecar commits real
+	// content for exactly this reason, and
+	// TestGateVerdictIsNotHeldWhenTheRebasedTreeChanges.
 	runsData, _ := os.ReadFile(gateRuns)
 	runs, _ := strconv.Atoi(strings.TrimSpace(string(runsData)))
-	if runs < 2 {
-		t.Errorf("expected gate to run at least twice (race forces retry), got %d", runs)
+	if runs != 1 {
+		t.Errorf("gate ran %d times, want 1 — the racing commit is empty, so the rebased tree is unchanged and the completed verdict must be held, not recomputed", runs)
 	}
 }
 
@@ -729,12 +744,21 @@ func TestProcessMergeMaxAttemptsConfigurable(t *testing.T) {
 	// build.sh increments the run counter and pushes a bump to
 	// origin/main on every invocation — guarantees the ff-only merge
 	// always fails. Counter tells us exactly how many attempts ran.
+	//
+	// The bump commits real CONTENT (bump.txt), not `--allow-empty`, and that
+	// matters to what this test measures (mg-c3b7). A gate verdict is now held
+	// across a retry when the rebased tree is byte-identical, so an empty-commit
+	// race converges on attempt 2 — the gate does not re-run, so this fixture's
+	// gate never pushes the second bump, and the merge lands. That is correct
+	// behaviour and it is tested elsewhere, but it would leave max_attempts
+	// never exercised here. A content-changing bump is a race the hold must
+	// refuse, which is what keeps the race perpetual and the budget under test.
 	buildSh := fmt.Sprintf(`#!/bin/sh
 set -e
 RUNS=$(cat %s 2>/dev/null || echo 0)
 RUNS=$((RUNS+1))
 echo $RUNS > %s
-(cd %s && git fetch origin main >/dev/null 2>&1 && git reset --hard origin/main >/dev/null 2>&1 && git commit --allow-empty -m "perpetual bump" >/dev/null && git push origin main >/dev/null 2>&1)
+(cd %s && git fetch origin main >/dev/null 2>&1 && git reset --hard origin/main >/dev/null 2>&1 && echo $RUNS > bump.txt && git add bump.txt && git commit -m "perpetual bump" >/dev/null && git push origin main >/dev/null 2>&1)
 exit 0
 `, gateRuns, gateRuns, sidecarDir)
 

@@ -110,6 +110,11 @@ func (r *Refinery) processMerge(mr *MergeRequest) (mergeResult, error) {
 	// gatesReached records whether any attempt has got as far as the quality
 	// gates. It gates skip_on_retry — see the call site below.
 	var gatesReached bool
+	// hold carries a completed gate verdict across a retry so a transport
+	// failure AFTER the gates does not discard the gate run (mg-c3b7). It is
+	// per-merge-request and revalidated against the rebased tree on every
+	// attempt — see gateHold.
+	hold := &gateHold{}
 	hardCap := contentionBudget + netBudget + unclassifiedBudget
 
 	for attempt := 1; attempt <= hardCap; attempt++ {
@@ -135,7 +140,7 @@ func (r *Refinery) processMerge(mr *MergeRequest) (mergeResult, error) {
 		// ran land ungated. The condition is therefore what the premise actually
 		// claims: gates were reached at least once.
 		skipGates := skipGatesOnRetry && gatesReached
-		output, stage, sha, reached, attemptErr := r.attemptMerge(wtDir, mr, attempt, skipGates, cfg.PRMode)
+		output, stage, sha, reached, attemptErr := r.attemptMerge(wtDir, mr, attempt, skipGates, cfg.PRMode, hold)
 		gatesReached = gatesReached || reached
 		gateOutput = output
 		if attemptErr == nil {
@@ -459,6 +464,90 @@ func gitStepFail(step, msg string, args []string, raw string, err error) error {
 // doubt once, not a full network budget.
 const defaultUnclassifiedAttempts = 2
 
+// gateHold carries a COMPLETED gate verdict across a retry, so a transport
+// failure that lands after the gates does not throw the gate run away
+// (mg-c3b7).
+//
+// The cost being removed is asymmetric and larger than it looks. Every network
+// step except the first `fetch origin` runs AFTER `./build.sh`: fetch-target,
+// reset-target, the ff-merge and the push. So a socket that fails there does
+// not cost a retry, it costs the ENTIRE gate run — on 2026-08-10 that was 8m58s
+// of CPU on a contended box, discarded and re-run from scratch on resubmit. The
+// failure lands at the most expensive possible moment.
+//
+// The hold is keyed on the TREE OBJECT of the rebased branch, not on the
+// attempt number, and that is the whole safety argument. `git rev-parse
+// HEAD^{tree}` is content-addressed: an identical value means the re-fetch and
+// re-rebase reproduced byte-identical content, so re-running the gates would
+// compile and test exactly the same bytes. The moment origin/<target> or the
+// branch moves during the outage, the rebase yields a different tree, the hold
+// does not match, and the gates run again. Nothing decides to trust a stale
+// verdict — the verdict is only reused while the thing it was a verdict ABOUT
+// is provably unchanged.
+//
+// This is strictly stronger than the [gates] skip_on_retry option that has
+// shipped for much longer: that one skips on `attempt > 1` whatever the tree
+// says. Where both apply, skip_on_retry is checked first and this changes
+// nothing.
+//
+// Two caveats, stated rather than assumed:
+//
+// One — a gate that reads git HISTORY rather than the tree (commit messages,
+// author dates) could in principle see a difference the tree hash cannot
+// express, since a rebase rewrites committer dates. The refinery's own
+// history-reading check, the closing-ref gate, is therefore deliberately NOT
+// part of the hold and re-runs on every attempt; see its call site above.
+//
+// Two — a held verdict means the gate's COMMANDS do not run again, so a gate
+// with side effects outside the checkout fires once per distinct tree rather
+// than once per attempt. That is the intended saving (the 8m58s of compute is
+// exactly such a side effect), but it is a real behavioural change for anything
+// that was counting gate invocations.
+type gateHold struct {
+	// tree is `git rev-parse HEAD^{tree}` of the rebased branch the gates
+	// passed on. Empty means nothing is held.
+	tree string
+	// output is that run's verbatim gate output, replayed rather than recomputed.
+	output string
+	// attempt is the attempt number the gates actually ran on.
+	attempt int
+}
+
+// held reports whether the hold covers the tree about to be merged.
+func (h *gateHold) held(tree string) bool {
+	return h != nil && h.tree != "" && tree != "" && h.tree == tree
+}
+
+// record captures a gate run that has just passed.
+func (h *gateHold) record(tree, output string, attempt int) {
+	if h == nil || tree == "" {
+		// A tree we could not read is a hold we cannot revalidate, so it is not
+		// taken. Failing closed here costs a re-run; failing open would risk
+		// landing an ungated tree, which is the one outcome this must not buy.
+		return
+	}
+	h.tree, h.output, h.attempt = tree, output, attempt
+}
+
+// gatedTreeOf reads the tree object the gates would test. An unreadable tree
+// returns "", which held() and record() both treat as "no hold".
+func gatedTreeOf(wtDir string) string {
+	out, err := exec.Command("git", "-C", wtDir, "rev-parse", "HEAD^{tree}").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// shortSHA abbreviates an object name for log and mail lines. The full tree is
+// never the thing a reader needs; that two attempts printed the SAME prefix is.
+func shortSHA(sha string) string {
+	if len(sha) > 12 {
+		return sha[:12]
+	}
+	return sha
+}
+
 // attemptMerge runs a single fetch→rebase→gates→merge→push cycle. Returns
 // the captured gate output, the pipeline stage that ran (or failed), the
 // merge commit SHA on success (empty otherwise), and any error.
@@ -477,7 +566,11 @@ const defaultUnclassifiedAttempts = 2
 // either by running the gates and passing, or by legitimately skipping them.
 // processMerge uses it to decide whether skip_on_retry may apply on the NEXT
 // attempt; see the comment at its call site.
-func (r *Refinery) attemptMerge(wtDir string, mr *MergeRequest, attempt int, skipGates, prMode bool) (output string, stage string, sha string, gatesReached bool, err error) {
+//
+// hold is read-write: a passing gate run records its tree and output there, and
+// a later attempt that rebases to the SAME tree replays it instead of spending
+// another gate run. See gateHold.
+func (r *Refinery) attemptMerge(wtDir string, mr *MergeRequest, attempt int, skipGates, prMode bool, hold *gateHold) (output string, stage string, sha string, gatesReached bool, err error) {
 	// Fetch latest from origin
 	log.Printf("refinery: MR %s step=fetch branch=%s attempt=%d", mr.ID, mr.Branch, attempt)
 	if out, gerr := gitCmdOutput(wtDir, "fetch", "origin"); gerr != nil {
@@ -542,15 +635,30 @@ func (r *Refinery) attemptMerge(wtDir string, mr *MergeRequest, attempt int, ski
 		return cerr.Error(), "closing-ref-check", "", false, cerr
 	}
 
+	// The content the gates would test, read AFTER the rebase so it is the tree
+	// that would actually land. This is the key the gate hold is validated on —
+	// see gateHold.
+	gatedTree := gatedTreeOf(wtDir)
+
 	// Run quality gates (on the rebased branch — tests what will actually
 	// land). On retries with skip_on_retry set, bypass: gates already
 	// passed on attempt 1 over near-identical code; the only change is
 	// the version-bump commit fetched from main.
 	var gateOutput string
-	if skipGates {
+	switch {
+	case skipGates:
 		log.Printf("refinery: MR %s step=quality-gates attempt=%d skipped (skip_on_retry=true)", mr.ID, attempt)
 		gateOutput = "(quality gates skipped on retry — skip_on_retry=true)"
-	} else {
+	case hold.held(gatedTree):
+		// A previous attempt on this MR gated this exact tree and passed, then
+		// lost the transport on the way to the push. Re-running the gates would
+		// compile and test byte-identical content for a byte-identical answer.
+		log.Printf("refinery: MR %s step=quality-gates attempt=%d HELD from attempt %d — the rebased tree is unchanged (%s), so the completed verdict still applies and is not recomputed",
+			mr.ID, attempt, hold.attempt, shortSHA(gatedTree))
+		gateOutput = hold.output + fmt.Sprintf(
+			"\n\n(quality gates NOT re-run on attempt %d: they passed on attempt %d and the rebased tree is byte-identical (tree %s), so the verdict above is that run's, replayed verbatim. A transport failure after the gates is a verdict on the network, not on the branch — mg-c3b7.)\n",
+			attempt, hold.attempt, shortSHA(gatedTree))
+	default:
 		log.Printf("refinery: MR %s step=quality-gates attempt=%d heartbeat_every=%s", mr.ID, attempt, r.gateHeartbeat())
 		out, gates, qerr := r.runQualityGates(r.gateContext(mr), wtDir, mr.RepoPath, mr)
 		gateOutput = out
@@ -567,6 +675,9 @@ func (r *Refinery) attemptMerge(wtDir string, mr *MergeRequest, attempt int, ski
 		if discarded := r.discardGateSideEffectsAt(wtDir, mr, attempt, "post-gate"); len(discarded) > 0 {
 			gateOutput += gateWriteNote(discarded)
 		}
+		// Recorded only after the side-effect discard, so a replay carries the
+		// same text a reader would have seen from the original run.
+		hold.record(gatedTree, gateOutput, attempt)
 	}
 
 	// PR-mode push-back (phase 2, mg-b828): the rebase above rewrote the

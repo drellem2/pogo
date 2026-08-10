@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/drellem2/pogo/internal/refinery"
 )
@@ -49,10 +50,40 @@ func refineryAttemptSummary(mr *refinery.MergeRequest) string {
 	default:
 		s = fmt.Sprintf("%d — it failed after %d attempts", n, n)
 	}
+	s += "\n" + refineryWaitSummary(mr)
 	if mr.NotRetriedReason != "" {
 		s += "\nNo further retry: " + mr.NotRetriedReason
 	}
 	return s
+}
+
+// refineryWaitSummary states how long the refinery ACTUALLY slept in retry
+// backoff before giving up (mg-c3b7).
+//
+// The mail previously carried the attempt count and the budget's own wording,
+// and those two cannot separate "the network was down for longer than anyone
+// could wait" from "we did not really wait". On 2026-08-10 a clean 8m58s gate
+// was discarded by a fetch failure, and the mail's reader had to go to the
+// refinery log to learn that the whole retry campaign had lasted 52 seconds
+// against an outage measured at 15m26s. The waited time is the number that
+// makes the budget auditable against the event, so it goes in the mail.
+//
+// Derived by summing the per-attempt records rather than read from a new
+// field, so it is equally correct for merge requests already on disk.
+func refineryWaitSummary(mr *refinery.MergeRequest) string {
+	var secs float64
+	var retried int
+	for _, a := range mr.Attempts {
+		secs += a.BackoffSeconds
+		if a.Retried {
+			retried++
+		}
+	}
+	if secs <= 0 {
+		return "Waited: 0s in retry backoff — nothing here was retried, so this says nothing about how long the condition lasted."
+	}
+	return fmt.Sprintf("Waited: %s in retry backoff across %d retried attempt(s) before giving up. Compare that against how long the condition actually lasted: if it outlasted the wait, this is a budget that ran out, not a branch that is broken.",
+		time.Duration(secs*float64(time.Second)).Round(time.Second), retried)
 }
 
 // refineryAttemptDetail renders one block per failing attempt.

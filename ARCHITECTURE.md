@@ -530,10 +530,37 @@ re-running plausibly give a different answer for a reason unrelated to the code?
 | `defect` | establishes a fact about the branch — gate verdict, rebase conflict, refused commit message | no |
 | `unclassified` | could not be placed | yes, twice |
 
-Network-class retries have their **own** budget (5 attempts, backoff 2s/5s/15s/30s,
-capped at 90s of total sleep) so a blip cannot consume the attempts that exist to
-absorb a lost race. Only `defect` counts against an author's consecutive-failure
-streak, and only `defect` invites dispatching a fix.
+Network-class retries have their **own** budget so a blip cannot consume the
+attempts that exist to absorb a lost race. Only `defect` counts against an
+author's consecutive-failure streak, and only `defect` invites dispatching a fix.
+
+**The network budget is sized by measured outage duration (mg-c3b7).** It was
+5 attempts over 52s of backoff, which was written against a *blip*. Then the
+outage was measured, by a sampler carrying a positive control (`ping 1.1.1.1`:
+clean before onset, LOSS throughout, clean after recovery — so its failures
+carry information): onset 03:37:23Z, recovery 03:52:49Z, **duration 15m26s**, on
+2026-08-10. 52 seconds against that is short by ~17.8x, so no rearrangement of
+backoff *inside* 52 seconds could succeed — it could only fail faster. The
+budget is now **14 attempts, backoff 15s/30s/60s then 2 minutes, ~21m45s of
+total sleep**, with a 22-minute clock backstop. It is sized against DURATION,
+which is measured and stable across four waves, and deliberately not against any
+prediction of *when* the next window opens, which is not established.
+
+A merge waiting that long occupies its repo's lane (lanes are per-repo, so other
+repos still merge). That is close to free during the event it is sized for: the
+next MR in the same lane would fail its own `fetch origin` in the same outage.
+
+**A completed gate verdict is held across the wait, not discarded (mg-c3b7).**
+Every network step except the first `fetch origin` runs *after* the quality
+gates, so a socket that fails there does not cost a retry — it costs the whole
+gate run. On 2026-08-10 a CLEAN 8m58s `./build.sh` was thrown away by a fetch
+failure and re-run from scratch on resubmit. The refinery now records the **tree
+object** of the rebased branch the gates passed on; a retry that rebases to the
+same tree replays that verdict instead of recomputing it. The key is
+content-addressed, so the moment the target or the branch moves, the tree
+differs and the gates run again — a stale verdict is never trusted, and the
+failure mail states how long the refinery *actually* waited so "the network was
+down" is distinguishable from "we did not wait".
 
 `pogo refinery show`, `refinery history` and the failure mail print
 `failed(infrastructure)` rather than a bare `failed`, because the status is what a
