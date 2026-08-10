@@ -243,6 +243,44 @@ type DirtyWorktreeError struct {
 	Files []string
 	// Total is the full count of dirty entries, which may exceed len(Files).
 	Total int
+	// Untracked is how many of Total are untracked paths (`??` in porcelain
+	// v1); Modified is the tracked changes making up the rest.
+	//
+	// THE SPLIT IS THE POINT OF THE COUNT, not a decoration on it (mg-d45b). A
+	// modified tracked file still has its committed version in the object
+	// store, so the worst case is losing an edit. An untracked file is on no
+	// branch, in no stash and on no remote, and the preserved tree is its only
+	// copy anywhere on the machine — `~/.pogo/polecats/qbe37` held an entire
+	// 1450-line `internal/strandwatch/` package that way. A single
+	// `dirty_paths: 16` cannot tell those apart, so a reader deciding whether a
+	// preserved tree is urgent had to open the tree to find out, which is the
+	// same "reconstruct it by hand" cost this ticket exists to remove.
+	//
+	// They are computed over the FULL porcelain list, never over Files, which
+	// is capped at dirtyFileListCap. Deriving them from the capped list would
+	// silently under-report every tree with more than ten changes — a number
+	// reconstructed from a partial record, which is a smaller instance of the
+	// exact defect being fixed here.
+	Modified  int
+	Untracked int
+}
+
+// countPorcelain splits `git status --porcelain` lines into tracked changes and
+// untracked paths.
+//
+// Untracked entries are exactly those whose status code is `??`. Ignored
+// entries (`!!`) cannot appear because WorktreeDirty does not pass --ignored,
+// and anything else — modified, added, deleted, renamed, unmerged — is a change
+// to a path git already tracks, so HEAD still holds a version of it.
+func countPorcelain(files []string) (modified, untracked int) {
+	for _, line := range files {
+		if strings.HasPrefix(line, "??") {
+			untracked++
+			continue
+		}
+		modified++
+	}
+	return modified, untracked
 }
 
 func (e *DirtyWorktreeError) Error() string {
@@ -511,8 +549,13 @@ func checkWorktreeRemoval(worktreeDir string) worktreeRemovalCheck {
 			if len(shown) > dirtyFileListCap {
 				shown = shown[:dirtyFileListCap]
 			}
+			// Counted from `files`, the full list — see DirtyWorktreeError.
+			modified, untracked := countPorcelain(files)
 			return worktreeRemovalCheck{
-				Refusal: &DirtyWorktreeError{Path: worktreeDir, Files: shown, Total: len(files)},
+				Refusal: &DirtyWorktreeError{
+					Path: worktreeDir, Files: shown, Total: len(files),
+					Modified: modified, Untracked: untracked,
+				},
 			}
 		}
 		return worktreeRemovalCheck{}
@@ -619,6 +662,35 @@ func WorktreeDirty(worktreeDir string) (bool, []string, error) {
 		}
 	}
 	return len(files) > 0, files, nil
+}
+
+// WorktreeBranch reports the branch checked out in worktreeDir.
+//
+// It exists for the preservation record (mg-d45b): a retained worktree keeps
+// its branch checked out, so that branch cannot be deleted and nothing else can
+// claim it — which makes the branch name the first thing a rescuer needs and
+// the one field the record could not supply.
+//
+// A detached HEAD comes back as the literal "HEAD", which is git's own answer
+// passed through rather than normalised away. A preserved worktree on a
+// detached head is a real and materially worse situation — there is no branch
+// name to hand anyone — and flattening it to "" would make it indistinguishable
+// from a read that failed.
+func WorktreeBranch(worktreeDir string) (string, error) {
+	if worktreeDir == "" {
+		return "", fmt.Errorf("empty worktree path")
+	}
+	out, err := git(worktreeDir, "rev-parse", "--abbrev-ref", "HEAD")
+	if err != nil {
+		return "", err
+	}
+	branch := strings.TrimSpace(string(out))
+	if branch == "" {
+		// git exited 0 and said nothing. Report it rather than returning an
+		// empty name that a caller would record as though it were read.
+		return "", fmt.Errorf("rev-parse %s: empty branch name", worktreeDir)
+	}
+	return branch, nil
 }
 
 // RemoveWorktree removes a git worktree registration and deletes its
