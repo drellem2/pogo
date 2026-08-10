@@ -315,3 +315,82 @@ func TestScanOrdersByCost(t *testing.T) {
 		t.Errorf("TotalCores() = %.2f, want ~1.30", got)
 	}
 }
+
+// TestDispositionsAreTheCountersPerProcess pins the invariant that makes the map
+// safe to reason from: it is the same information the four counters carry, keyed
+// by pid instead of summed. If the two ever disagree, a caller asking about a
+// process it constructed gets a different answer from a reader of the report,
+// and the whole point of mg-db12's separation is gone.
+//
+// The population deliberately fills all four buckets at once.
+func TestDispositionsAreTheCountersPerProcess(t *testing.T) {
+	rows := []proctable.Row{
+		{PID: 100, PPID: 1, PGID: 100}, // dead owner   -> orphan
+		{PID: 200, PPID: 1, PGID: 200}, // live owner   -> live_owner
+		{PID: 300, PPID: 1, PGID: 300}, // cwd off-root -> unattributable
+		{PID: 400, PPID: 1, PGID: 400}, // no cwd       -> cwd_unreadable
+		{PID: 500, PPID: 1, PGID: 500}, // idle         -> not a candidate at all
+	}
+	opts := baseOpts(t)
+	opts.Table = fakeTable(rows, map[int]time.Duration{
+		100: time.Second, 200: time.Second, 300: time.Second, 400: time.Second,
+	})
+	opts.Cwds = func([]int) map[int]string {
+		return map[int]string{
+			100: testRoot + "/pdead/code",
+			200: testRoot + "/plive/code",
+			300: "/Users/daniel/dev/pogo",
+		}
+	}
+	opts.LiveOwners = func() (map[string]bool, error) { return map[string]bool{"plive": true}, nil }
+
+	rep, err := Scan(opts)
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+
+	want := map[int]Disposition{
+		100: DispositionOrphan,
+		200: DispositionLiveOwner,
+		300: DispositionUnattributable,
+		400: DispositionCwdUnreadable,
+	}
+	for pid, w := range want {
+		got, ok := rep.DispositionOf(pid)
+		if !ok {
+			t.Errorf("pid %d has no disposition; want %q", pid, w)
+			continue
+		}
+		if got != w {
+			t.Errorf("pid %d disposition = %q, want %q", pid, got, w)
+		}
+	}
+	if d, ok := rep.DispositionOf(500); ok {
+		t.Errorf("idle pid 500 got disposition %q; a process below the rate floor was never "+
+			"examined and must be ABSENT, not binned — that is the fifth state the probe reads", d)
+	}
+	if len(rep.Dispositions) != 4 {
+		t.Errorf("dispositions = %v, want exactly the 4 busy pids", rep.Dispositions)
+	}
+
+	// The histogram identity: every counter equals the number of pids in its
+	// bucket, and the buckets exhaust the busy population.
+	counts := map[Disposition]int{}
+	for _, d := range rep.Dispositions {
+		counts[d]++
+	}
+	for d, n := range map[Disposition]int{
+		DispositionOrphan:         len(rep.Orphans),
+		DispositionLiveOwner:      rep.LiveOwner,
+		DispositionUnattributable: rep.Unattributable,
+		DispositionCwdUnreadable:  rep.CwdUnreadable,
+	} {
+		if counts[d] != n {
+			t.Errorf("%q: %d pids in the map but the counter says %d", d, counts[d], n)
+		}
+	}
+	if len(rep.Dispositions) != rep.Busy {
+		t.Errorf("dispositions = %d, busy = %d; every busy process must land in exactly one bucket",
+			len(rep.Dispositions), rep.Busy)
+	}
+}

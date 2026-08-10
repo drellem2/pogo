@@ -147,6 +147,32 @@ Upper bounds — "this returned in under 2s", "one spinner did not exceed 2
 cores" — are safe to state absolutely, because contention can only push a
 measurement down.
 
+**Never order a WALL-CLOCK quantity against a CPU quantity.** Load stretches one
+and leaves the other alone, so any comparison across the two units is an
+assertion that holds on an idle box and reverses on a busy one — a relative
+assertion in form, an absolute one in substance. `scripts/gate-profile_test.sh`
+Test 3 required a fixed 1s `sleep` to outrank a fixed CPU burn; it passed at load
+47, and the burner took rank 1 at load 129 and again at load 53.84, the second
+time failing a real merge (mg-db12). It now compares the table's wall column
+against itself and against the profiler's own record of the same run. Wall
+against wall is fine, CPU against CPU is fine, a lower bound on wall is fine.
+
+**A live probe must be able to say it measured NOTHING.** A detector run against
+a constructed input has three outcomes, not two: it got the input right, it got
+it wrong, or the host would not let the input be observed at all. Collapsing the
+third into the second blames the branch for the box. `internal/orphanwatch`'s
+probe constructs a real orphan and used to read one boolean, `Reported`; at load
+33 the orphan was seen and binned `cwd_unreadable` because `lsof` would not
+answer, and the test declared the detector broken while printing
+`cwd_unreadable=1` in the same message (mg-db12). The report now carries the
+bucket each pid landed in, the probe reads its own pids out of it, and the two
+buckets that are facts about the host set `Blind` — after retrying the
+observation, which is legitimate precisely because nothing about the constructed
+input changes between attempts. The buckets that mean the rule reached a wrong
+verdict still fail. `verdictwatch.ProbeResult.Blind` is the same idiom; a blind
+run is an INSTRUMENT FAILURE and never a pass, because a green light nothing
+exercised is what this whole family keeps rediscovering.
+
 **Do not reason from load average.** It counts threads that are runnable *or*
 blocked, so it does not predict the share a process gets: on this 10-core host
 a spinner held ~1.0 cores at a load average of 18–23, and 0.09 cores against 90

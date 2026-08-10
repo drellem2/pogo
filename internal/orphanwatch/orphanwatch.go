@@ -105,6 +105,33 @@ type Orphan struct {
 	CPU time.Duration `json:"cpu"`
 }
 
+// Disposition is the bucket one busy process landed in. The Report's counts are
+// this value's histogram; the value itself is what lets a caller ask about a
+// process it CONSTRUCTED rather than about the population as a whole.
+//
+// That distinction is why this exists (mg-db12). The constructive probe used to
+// read `Reported == false` and conclude the detector had failed, when the report
+// beside it said `cwd_unreadable=1` — the orphan had been seen and binned as an
+// instrument limit. Aggregate counts cannot say WHICH process that was, so a
+// transient lsof refusal under host load was indistinguishable from a detector
+// that does not fire, and it failed a merge gate on an unrelated branch.
+type Disposition string
+
+const (
+	// DispositionOrphan is a verdict: attributed to an owner the registry says
+	// is gone.
+	DispositionOrphan Disposition = "orphan"
+	// DispositionLiveOwner is a verdict: attributed to an owner still running,
+	// and therefore spared.
+	DispositionLiveOwner Disposition = "live_owner"
+	// DispositionUnattributable is a BLIND SPOT, not a verdict: the cwd was read
+	// and carries no polecat marker.
+	DispositionUnattributable Disposition = "unattributable"
+	// DispositionCwdUnreadable is an INSTRUMENT LIMIT, not a verdict: the
+	// working directory could not be read at all.
+	DispositionCwdUnreadable Disposition = "cwd_unreadable"
+)
+
 // Report is one scan. Every busy process examined lands in exactly one bucket,
 // so a reader can tell "nothing to report" from "nothing looked at".
 type Report struct {
@@ -137,6 +164,26 @@ type Report struct {
 	LiveOwner int `json:"live_owner"`
 	// Orphans are the findings, costliest first.
 	Orphans []Orphan `json:"orphans,omitempty"`
+
+	// Dispositions is the bucket each BUSY pid landed in, keyed by pid. It holds
+	// exactly the same information as the four counters above, per process
+	// rather than in aggregate — the counters are its histogram, and
+	// TestDispositionsAreTheCountersPerProcess pins that they cannot drift.
+	//
+	// A pid ABSENT from this map was never a candidate: it was below the rate
+	// floor, born inside the window, or is this process. That is a fifth state
+	// and deliberately not a fifth bucket — "not busy" is a fact about the
+	// process, whereas every bucket here is a fact about what the attribution
+	// step could do with it.
+	Dispositions map[int]Disposition `json:"dispositions,omitempty"`
+}
+
+// DispositionOf reports which bucket pid landed in. The false return means the
+// pid was never a CANDIDATE at all — see Dispositions — which must not be
+// flattened into any of the buckets.
+func (r Report) DispositionOf(pid int) (Disposition, bool) {
+	d, ok := r.Dispositions[pid]
+	return d, ok
 }
 
 // TotalCores is the compute the reported orphans are consuming right now.
@@ -311,22 +358,27 @@ func Scan(opts Options) (Report, error) {
 		pids = append(pids, c.row.PID)
 	}
 	dirs := cwds(pids)
+	rep.Dispositions = make(map[int]Disposition, len(busy))
 
 	for _, c := range busy {
 		cwd, ok := dirs[c.row.PID]
 		if !ok || cwd == "" {
 			rep.CwdUnreadable++
+			rep.Dispositions[c.row.PID] = DispositionCwdUnreadable
 			continue
 		}
 		owner, ok := OwnerFromAnyRoot(roots, cwd)
 		if !ok {
 			rep.Unattributable++
+			rep.Dispositions[c.row.PID] = DispositionUnattributable
 			continue
 		}
 		if live[owner] {
 			rep.LiveOwner++
+			rep.Dispositions[c.row.PID] = DispositionLiveOwner
 			continue
 		}
+		rep.Dispositions[c.row.PID] = DispositionOrphan
 		rep.Orphans = append(rep.Orphans, Orphan{
 			PID:   c.row.PID,
 			PPID:  c.row.PPID,

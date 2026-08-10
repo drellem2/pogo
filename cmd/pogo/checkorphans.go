@@ -238,6 +238,8 @@ func runOrphanProbe(jsonOutput bool) {
 			"control_ppid": res.ControlPPID,
 			"reported":     res.Reported,
 			"spared":       res.Spared,
+			"blind":        res.Blind,
+			"attempts":     res.Attempts,
 			"passed":       res.Passed(),
 			"report":       res.Report,
 		})
@@ -250,6 +252,15 @@ func runOrphanProbe(jsonOutput bool) {
 	}
 	if res.Err != nil {
 		fmt.Fprintf(os.Stderr, "INSTRUMENT FAILURE — probe could not be conducted: %v\n", res.Err)
+		os.Exit(exitInstrumentFailure)
+	}
+	if res.Blind != "" {
+		// The probe was BUILT and its arms were not conducted. That is the same
+		// class as a probe that would not build — it proved nothing — and must
+		// not be reported as a detector failure, which is how a load-driven
+		// lsof refusal got classed as a branch DEFECT on 2026-08-10 (mg-db12).
+		fmt.Fprintf(os.Stderr, "INSTRUMENT FAILURE — the probe was built but this host would not let it be\n"+
+			"observed, after %d attempt(s): %s\n", res.Attempts, res.Blind)
 		os.Exit(exitInstrumentFailure)
 	}
 	if !res.Passed() {
