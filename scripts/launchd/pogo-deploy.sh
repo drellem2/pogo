@@ -2421,11 +2421,17 @@ lost_schedule_remedy() {
 
         pogo agent start $agent
 
-    If $agent goes missing on every nightly bounce, it is not declared with
+    If $agent goes missing on EVERY nightly bounce, it is not declared with
     auto_start = true in a prompt file pogod discovers ('pogo agent prompt
     list' shows what it discovers, and 'pogo agent start' reads
-    ~/.pogo/agents/crew/$agent.md). That is local config, not a pogo fault —
-    but until it is fixed this alert will fire every night."
+    ~/.pogo/agents/crew/$agent.md), so it will not come back on its own and
+    somebody has to run the line above each time.
+
+    DO NOT flip auto_start on to silence this mail. For some agents the false
+    setting is deliberate and load-bearing — doctor's mitigates mg-8677, where
+    the reap lets auto_start override a corpse (mg-d9d1, mg-d6ac). This alert
+    is the instrument for an agent that cannot restart itself; a quieter mail
+    bought with a live reap bug is a bad trade."
             fi
             ;;
         *)

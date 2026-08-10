@@ -45,11 +45,18 @@
   and an explicit note that a finished polecat taking its mail-check with it is
   the reap working, not a fault.
 
-  **The recurring case is named.** An agent that pogod cannot auto-start
-  regenerates this alert on every nightly bounce, forever. The absent-agent
-  paragraph says that in as many words, and points at `pogo agent prompt list`
-  and the `auto_start` declaration it is looking for, so the twelfth identical
-  night is legible as one cause rather than twelve incidents.
+  **The recurring case is named, and named as a condition rather than a defect.**
+  An agent that pogod cannot auto-start regenerates this alert on every nightly
+  bounce, forever. The absent-agent paragraph says that in as many words and
+  points at `pogo agent prompt list` and the `auto_start` declaration it is
+  looking for, so the twelfth identical night is legible as one cause rather than
+  twelve incidents. It then tells the reader **not** to switch the flag on to
+  silence the mail, and cites why: doctor's `auto_start = false` is a deliberate
+  mitigation for mg-8677, where the reap lets auto_start override a corpse
+  (mg-d9d1, mg-d6ac). Naming a missing flag as the cause is one quick read away
+  from being taken as a request to add it, and that trade buys a quieter mail
+  with a live reap bug. The mail closes that reading itself, because it is read
+  at 02:03 by someone who does not have those ticket numbers to hand.
 
   **The same wrong sentence is gone from `pogo-self-deploy`.** Its post-kickstart
   check reports the same finding ~30s earlier and closed with the same
