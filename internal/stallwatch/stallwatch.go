@@ -85,13 +85,22 @@ const (
 // strings out of a log.
 type Delivery struct {
 	// Channel names the channel that carried the message: DeliveryPTY,
-	// DeliveryMail, or DeliveryMailFallback. Empty when delivery failed
-	// outright.
+	// DeliveryMail, DeliveryMailFallback, or DeliverySuppressed (nothing was
+	// carried, by policy). Empty when delivery failed outright.
 	Channel string
 	// FallbackReason, when non-empty, records why the preferred PTY channel
 	// was not used. Delivery still SUCCEEDED — this is not an error, it is the
-	// reason the message took the durable road instead.
+	// reason the message took the durable road instead. On DeliverySuppressed
+	// it carries the PTY error that WOULD have caused a fallback, so a
+	// suppressed fire still records why the terminal refused it.
 	FallbackReason string
+	// SuppressedConsecutive is the number of consecutive mail fallbacks to this
+	// recipient — including the suppressed ones — since the last time the PTY
+	// carried a message to them. It is zero on every channel except
+	// DeliverySuppressed, where it is the damping term's state: a value that
+	// keeps climbing across fires is a coordinator that has not gone idle once
+	// in that whole span, which is the condition worth escalating on.
+	SuppressedConsecutive int
 }
 
 // Channel values for Delivery.Channel.
@@ -106,6 +115,17 @@ const (
 	// durable mail instead. This is the load-bearing case for mg-79dc — see
 	// newStallNudger in cmd/pogod.
 	DeliveryMailFallback = "mail_fallback"
+	// DeliverySuppressed means the PTY refused the message AND the mail
+	// fallback was withheld on purpose, because this recipient already has a
+	// capful of stall-watch notices that pogod has never had evidence they
+	// could receive. Nothing was delivered — but unlike an empty Channel this
+	// is a decision, not a failure, and it is the damping term mg-61ce added to
+	// a loop that previously had none.
+	//
+	// The distinction matters for reading the log: an empty Channel with a
+	// nudge_error means every road was tried and none worked; DeliverySuppressed
+	// means one road was deliberately not taken. Only the first is a fault.
+	DeliverySuppressed = "suppressed"
 )
 
 // Nudger delivers a short message to an agent. pogod injects an implementation
@@ -926,6 +946,14 @@ func (w *Watcher) fireTo(recipient, category, message string, details map[string
 	}
 	if delivery.FallbackReason != "" {
 		details["nudge_fallback_reason"] = delivery.FallbackReason
+	}
+	// A suppressed fire carries its damping state, so "the notice was withheld"
+	// is countable per fire rather than inferable only from the absence of a
+	// mail. The counter is the interesting half: one suppression is the damping
+	// term working, a counter climbing across many fires is a coordinator that
+	// has not gone idle once in that span.
+	if delivery.SuppressedConsecutive > 0 {
+		details["nudge_suppressed_consecutive"] = delivery.SuppressedConsecutive
 	}
 	w.emit(events.Event{
 		EventType: "stall_watch_fired",

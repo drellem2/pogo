@@ -959,6 +959,7 @@ unread_mail_age_threshold = "4m"
 max_unread_mail_count = 9
 nudge_cooldown = "90s"
 repeat_backoff_cap = "45m"
+mail_fallback_backlog_cap = 7
 priority_wake_enabled = false
 high_priority_wake_delay = "10s"
 high_priority_wake_cooldown = "90s"
@@ -996,6 +997,9 @@ non_dispatchable_assignees = ["human", "legal-review"]
 	if cfg.StallWatch.UnreadMailAgeThreshold != 4*time.Minute {
 		t.Errorf("mail age threshold = %v, want 4m", cfg.StallWatch.UnreadMailAgeThreshold)
 	}
+	if cfg.StallWatch.MailFallbackBacklogCap != 7 {
+		t.Errorf("mail fallback backlog cap = %d, want 7", cfg.StallWatch.MailFallbackBacklogCap)
+	}
 	if cfg.StallWatch.MaxUnreadMailCount != 9 {
 		t.Errorf("max unread = %d, want 9", cfg.StallWatch.MaxUnreadMailCount)
 	}
@@ -1004,6 +1008,45 @@ non_dispatchable_assignees = ["human", "legal-review"]
 	}
 	if cfg.StallWatch.RepeatBackoffCap != 45*time.Minute {
 		t.Errorf("repeat backoff cap = %v, want 45m", cfg.StallWatch.RepeatBackoffCap)
+	}
+}
+
+// TestStallWatchMailFallbackBacklogCapNegativeSurvivesLoad guards the one knob
+// in [stall_watch] whose meaningful values include a negative one (mg-61ce): a
+// negative mail_fallback_backlog_cap disables the fallback damping and restores
+// pre-mg-61ce behaviour.
+//
+// It gets its own test because every neighbouring knob is merged under a
+// `> 0` guard, and copying that idiom here would silently discard the exact
+// value an operator sets deliberately — the config would parse without
+// complaint and the damper would stay armed. A settable escape hatch that
+// cannot actually be set is worse than none, because the startup line would
+// report the operator's intent while the daemon ignored it.
+//
+// The paired assertion is that ZERO is not the off switch: zero means "unset"
+// and resolves to the default, so a config typo cannot disarm the damper.
+func TestStallWatchMailFallbackBacklogCapNegativeSurvivesLoad(t *testing.T) {
+	write := func(t *testing.T, body string) *Config {
+		t.Helper()
+		dir := t.TempDir()
+		os.Setenv("XDG_CONFIG_HOME", dir)
+		t.Cleanup(func() { os.Unsetenv("XDG_CONFIG_HOME") })
+		pogoDir := filepath.Join(dir, "pogo")
+		os.MkdirAll(pogoDir, 0755)
+		os.WriteFile(filepath.Join(pogoDir, "config.toml"), []byte(body), 0644)
+		return Load()
+	}
+
+	cfg := write(t, "[stall_watch]\nmail_fallback_backlog_cap = -1\n")
+	if cfg.StallWatch.MailFallbackBacklogCap != -1 {
+		t.Errorf("negative cap = %d, want -1 — a `> 0` merge guard would drop the damping-off switch",
+			cfg.StallWatch.MailFallbackBacklogCap)
+	}
+
+	cfg = write(t, "[stall_watch]\nmail_fallback_backlog_cap = 0\n")
+	if cfg.StallWatch.MailFallbackBacklogCap != DefaultStallMailFallbackBacklogCap {
+		t.Errorf("cap 0 = %d, want the default %d — zero is unset, not disabled",
+			cfg.StallWatch.MailFallbackBacklogCap, DefaultStallMailFallbackBacklogCap)
 	}
 }
 

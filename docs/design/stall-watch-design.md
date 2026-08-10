@@ -204,12 +204,111 @@ of 2–305ms: the mayor was writing *continuously*, not almost-quiet. No deadlin
 survives that, so lengthening the timeout would only trade a visible failure for
 a slower one. `mg mail` is the right shape because it does not require an idle
 recipient at all. The fallback also lands in a channel stall-watch itself
-watches (`unread_mail`), so an ignored notice escalates rather than vanishing.
+watches (`unread_mail`), so an ignored notice escalates rather than vanishing —
+**but see the next section: that escalation path is also a feedback loop, and it
+was described here as a pure benefit for a year before anyone measured it.**
 
 This does not weaken the never-interrupt-a-busy-agent guarantee (gh #61): the
 PTY is still never written to while busy. The guarantee was "do not interrupt a
 busy agent", not "do not inform it". Nor does it double-deliver — mail is sent
 only when the PTY nudge returned an error, i.e. only when nothing was written.
+
+#### The fallback is damped per recipient (mg-61ce)
+
+mg-79dc got the channel right and left the *rate* unbounded. The direction that
+runs in is perverse rather than merely noisy: the fallback fires **because** the
+recipient is too busy to go idle, and answers by adding work to that recipient's
+inbox. The busier the coordinator, the more often the PTY refuses; the more it
+refuses, the more the watcher mails the agent it has just observed to be
+overloaded. **The remedy load rises with the load it is responding to**, and
+nothing in the loop pushed back.
+
+For the `unread_mail` category it is not merely perverse, it is closed. That
+notice says *"your inbox is too full"* and is delivered **as one more message in
+that inbox**, so the remedy re-arms its own trigger — gain ≥ 1 with no damping
+term. The paragraph above, which offers exactly this as the reason mail is safe
+("an ignored notice escalates rather than vanishing"), is describing the loop
+from inside it.
+
+Measured on one box, over the last 20 000 events and against the live maildir:
+
+| Fires by category and channel | fallback | plain mail | pty |
+|---|---:|---:|---:|
+| `priority_wake`    | 720 | 500 | 308 |
+| `unclaimed_items`  | 559 | 302 | 180 |
+| `unread_mail`      | 530 | 303 |  75 |
+
+1814 fires took a mail road. The coordinator's maildir holds **766 stall-watch
+messages** — 742 of them the "(undelivered to terminal)" fallback, the single
+largest subject line in a 5978-message mailbox by a factor of nine — of which
+**179 are the self-referential unread-mail notice**.
+
+**This is not a wedge report.** Load average was 4.14 on a box that normally
+idles, the coordinator was at 16.8% CPU actively computing, and it had sent a
+substantive mail reply fifteen minutes earlier. *"Still producing output after
+30s" is the instrument seeing a busy agent, not a stuck one* — the same property
+recorded in `a-spinner-defeats-both-liveness-instruments`. This finding argues
+**against** a restart policy, not for one.
+
+**The fix is a damping term, not a better gate.** Three candidates were weighed:
+
+- *Strip spinner glyphs before judging idleness.* Rejected — it addresses a
+  different failure. The evidence here is a coordinator genuinely computing, so
+  the gate was reporting correctly and no amount of cosmetic filtering would
+  have prevented a single one of these fires.
+- *Drop the idle gate for high-priority fires and write regardless.* Rejected —
+  it breaks the gh #61 never-interrupt guarantee and converts a mail flood into
+  a PTY flood at the exact moment the coordinator is most loaded. Same feedback
+  direction, louder channel.
+- *Rate-limit the fallback per recipient.* Adopted. It is the only one of the
+  three that acts on the thing actually measured — the missing damping term —
+  rather than on the gate, which is not wrong.
+
+`mail_fallback_backlog_cap` (default 3) counts, per recipient, consecutive
+fallbacks since the last **successful PTY delivery**. That reset signal is
+direct evidence the agent went idle, which is precisely the condition that means
+it is between turns and able to drain. Past the cap, further fallbacks are
+withheld. Deliberately *not* keyed on inbox depth: the coordinator's is the one
+mailbox on this box where real traffic outweighs noise, so damping on total
+unread would let legitimate mail from other agents silence the watcher.
+
+Withholding is not silence, and the signals that report it are outside the loop
+by construction — a suppression notice sent by mail would be the same defect
+wearing a disguise. The transition is logged loudly **once per run**, and every
+suppressed fire stamps `nudge_suppressed_consecutive` on `stall_watch_fired`; a
+counter climbing across fires means the coordinator has not gone idle once in
+that whole span, which is sharper than the flood it replaces. A suppressed fire
+carries `nudge_delivery = "suppressed"` and **no** `nudge_error` — nothing was
+delivered, but that was a decision, and only a fault should read as an outage.
+
+This is reconciled with mg-79dc's first-attempt doctrine ("the cooldown is a
+rate limiter, not a retry queue") rather than in tension with it. That doctrine
+is about notices reaching *nobody*. Suppression happens only when a capful of
+same-channel notices already sits in front of the recipient undrained, so the
+marginal notice reaches nobody either way. And nothing is lost on the far side:
+the watcher re-derives every condition from scratch each tick and never queues,
+so the moment the recipient is reachable the **current** state fires, not a
+stale replay. Suppression defers a notice until it can be received; it does not
+discard a fact.
+
+Two scope boundaries. The cap bounds the **fallback** road only — the offline
+road has the same flooding shape (303 of the measured fires) but no reset
+signal, since an offline agent never produces a PTY success, so a cap there
+would latch permanently the first time a coordinator went down. And a recipient
+going offline *clears* its run, both because a restarted coordinator is a new
+process that a dead process's run says nothing about, and because that is what
+bounds the damper's own memory as unique polecat names come and go.
+
+**The 30s wait-idle budget was re-checked and stands.** mg-61ce asked whether it
+still fits the current fleet, since it was chosen against a smaller one. Across
+1702 recorded fallbacks the gap since the coordinator's last PTY write *at the
+moment the deadline expired* had a median of **218 ms** and a p99 of **941 ms**,
+against a 2 s idle threshold; only 10 of 1702 (0.6%) had reached even one
+second, and the maximum ever observed was 2.58 s. The coordinator is not
+almost-quiet when the deadline fires — it is writing continuously — so a 60 s or
+300 s budget buys nothing and holds the heartbeat longer for it. Every one of
+those fires was decided in its first two seconds. Same conclusion mg-79dc drew
+from 18 samples, now confirmed at ~100× the n.
 
 ### Cooldown
 
@@ -294,6 +393,7 @@ unread_mail_age_threshold = "10m"
 max_unread_mail_count = 5
 nudge_cooldown = "5m"
 repeat_backoff_cap = "4h"
+mail_fallback_backlog_cap = 3
 ```
 
 ### Deviation from the gh #12 spec shape

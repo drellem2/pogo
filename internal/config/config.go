@@ -186,6 +186,31 @@ const (
 	// escalation and restores a flat per-item cooldown — still a fix for the
 	// per-category keying, just without the backoff.
 	DefaultStallRepeatBackoffCap = 4 * time.Hour
+	// DefaultStallMailFallbackBacklogCap bounds how many consecutive stall-watch
+	// mail fallbacks may go to one recipient without a successful PTY delivery
+	// in between (mg-61ce). Past it, further fallbacks are withheld until that
+	// recipient goes idle once.
+	//
+	// This is the damping term on a loop that had none. The mail fallback fires
+	// precisely BECAUSE the recipient is too busy to go idle, and answers by
+	// adding work to that recipient's inbox — so the remedy load rose with the
+	// load it was responding to. The unread_mail category made the loop closed
+	// rather than merely perverse: a notice reading "your inbox is too full",
+	// delivered as one more message in that inbox, re-arms its own trigger.
+	//
+	// Sized against the measurement rather than by taste. Over the last 20000
+	// events on this box, 1814 stall fires took the mail road and the
+	// coordinator's maildir holds 766 stall-watch messages — 742 of them
+	// fallbacks, the largest subject line in a 5978-message mailbox by 9x, with
+	// 179 of them the self-referential unread_mail notice. Three is chosen to be
+	// large enough that an ordinary busy patch still gets its notice through
+	// more than once, and small enough that a coordinator saturated for hours
+	// accumulates three of these rather than hundreds.
+	//
+	// A NEGATIVE value disables damping entirely (restoring pre-mg-61ce
+	// behaviour). Zero means "unset" and resolves to this default, matching how
+	// every other stall-watch knob treats zero.
+	DefaultStallMailFallbackBacklogCap = 3
 	// DefaultBlockedReminderCooldown is the BASE of the per-item backoff for the
 	// blocked-reminder (mg-3844) — the gap before the SECOND notice to an agent
 	// named by a `blocked:<agent>` assignee. The FIRST notice is never delayed,
@@ -674,6 +699,17 @@ type StallWatchConfig struct {
 	// it at or below the category's base cooldown yields a flat per-item
 	// cooldown with no escalation.
 	RepeatBackoffCap time.Duration
+	// MailFallbackBacklogCap bounds how many consecutive mail fallbacks may go
+	// to one recipient without a successful PTY delivery in between (mg-61ce).
+	// Zero falls back to DefaultStallMailFallbackBacklogCap; a NEGATIVE value
+	// disables the damping entirely.
+	//
+	// Note this bounds the FALLBACK road only — the road taken when the
+	// recipient is running but too busy to go idle. The offline road (recipient
+	// not running) is undamped, because it has no reset signal: an offline agent
+	// never produces the PTY success that clears the counter, so a cap there
+	// would latch permanently the first time a coordinator went down.
+	MailFallbackBacklogCap int
 
 	// PriorityWakeEnabled turns on the priority-aware fast wake (gh
 	// drellem2/pogo #61): a ready, watched, high-priority available item
@@ -1419,6 +1455,7 @@ func Load() *Config {
 			MaxUnreadMailCount:        DefaultMaxUnreadMailCount,
 			NudgeCooldown:             DefaultStallNudgeCooldown,
 			RepeatBackoffCap:          DefaultStallRepeatBackoffCap,
+			MailFallbackBacklogCap:    DefaultStallMailFallbackBacklogCap,
 			// Priority wake is default-on for the watched coordinator (gh #61).
 			PriorityWakeEnabled:      true,
 			HighPriorityWakeDelay:    DefaultHighPriorityWakeDelay,
@@ -1713,6 +1750,13 @@ func Load() *Config {
 		}
 		if fileCfg.StallWatch.RepeatBackoffCap > 0 {
 			cfg.StallWatch.RepeatBackoffCap = fileCfg.StallWatch.RepeatBackoffCap
+		}
+		// `!= 0`, not `> 0`, unlike every other knob here: a NEGATIVE
+		// mail_fallback_backlog_cap is the documented way to disable the damping
+		// (mg-61ce), so a `> 0` guard would silently discard exactly the value
+		// an operator sets deliberately. Zero remains "unset".
+		if fileCfg.StallWatch.MailFallbackBacklogCap != 0 {
+			cfg.StallWatch.MailFallbackBacklogCap = fileCfg.StallWatch.MailFallbackBacklogCap
 		}
 		if fileCfg.priorityWakeEnabledSet {
 			cfg.StallWatch.PriorityWakeEnabled = fileCfg.StallWatch.PriorityWakeEnabled
@@ -2246,6 +2290,12 @@ func parseConfigFileInto(cfg *parsedConfig, path string) error {
 			case "repeat_backoff_cap":
 				if d, err := time.ParseDuration(unquotedVal); err == nil {
 					cfg.StallWatch.RepeatBackoffCap = d
+				}
+			case "mail_fallback_backlog_cap":
+				// No `n > 0` guard: a negative value is the documented
+				// damping-off switch (mg-61ce), not a typo to discard.
+				if n, err := strconv.Atoi(unquotedVal); err == nil {
+					cfg.StallWatch.MailFallbackBacklogCap = n
 				}
 			case "priority_wake_enabled":
 				cfg.StallWatch.PriorityWakeEnabled = val == "true"
