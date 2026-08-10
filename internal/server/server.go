@@ -108,6 +108,13 @@ type Server struct {
 	// can't interleave stop/start work (e.g. stopping a refinery instance
 	// that a concurrent transition just replaced).
 	transitionMu sync.Mutex
+
+	// resume holds the restart obligation created by a stop — the half of a
+	// stop/restart sequence that must not belong to the stopper. It has its
+	// own mutex rather than sharing s.mu because the resumer reads it on every
+	// heartbeat tick and must never contend with a guarded request's Mode()
+	// check. See orchestrationresume.go.
+	resume resumeState
 }
 
 // New creates a Server in ModeFull and records the boot mode unconditionally.
@@ -128,6 +135,7 @@ func newWithEmitter(agents *agent.Registry, ref *refinery.Refinery, emit Emitter
 		refinery: ref,
 		emit:     emit,
 	}
+	s.resume.grace = DefaultResumeGrace
 	s.recordBootMode(s.mode)
 	return s
 }
@@ -177,20 +185,44 @@ func (s *Server) SetModeWithCause(mode config.RunMode, cause Cause) error {
 		_, err := s.StartOrchestrationWithCause(cause)
 		return err
 	}
+	if mode == config.ModeIndexOnly {
+		_, err := s.StopOrchestrationWithCause(cause, 0)
+		return err
+	}
+	return fmt.Errorf("unknown mode: %d", mode)
+}
 
+// StopOrchestrationWithCause transitions to index-only mode and returns the
+// obligation the stop just created: when the fleet went down, and when pogod
+// will put it back if the caller does not.
+//
+// hold is the caller's declaration of how long the fleet may legitimately stay
+// down. Zero — which is what every existing caller passes — means "no
+// declaration", and takes the configured default grace. See
+// orchestrationresume.go for why the default is a finite deadline rather than
+// "until somebody says otherwise".
+func (s *Server) StopOrchestrationWithCause(cause Cause, hold time.Duration) (StopReport, error) {
 	s.transitionMu.Lock()
 	defer s.transitionMu.Unlock()
 
-	if s.Mode() == mode {
-		return nil // already in requested mode
+	if s.Mode() == config.ModeIndexOnly {
+		// Already stopped. Deliberately does NOT re-arm: the obligation runs
+		// from the ORIGINAL stop, so a procedure that stops an already-stopped
+		// fleet — or a retry loop that stops it every thirty seconds — cannot
+		// push the deadline out indefinitely. That is the shape by which a
+		// watchdog gets silently disabled by the thing it watches.
+		ob, armed := s.ResumeObligation()
+		if !armed {
+			return StopReport{Mode: config.ModeIndexOnly.String(), AlreadyStopped: true}, nil
+		}
+		return resumeReport(config.ModeIndexOnly.String(), ob, true), nil
 	}
 
-	switch mode {
-	case config.ModeIndexOnly:
-		return s.transitionToIndexOnly(cause)
-	default:
-		return fmt.Errorf("unknown mode: %d", mode)
+	if err := s.transitionToIndexOnly(cause, hold); err != nil {
+		return StopReport{Mode: s.Mode().String()}, err
 	}
+	ob, _ := s.ResumeObligation()
+	return resumeReport(config.ModeIndexOnly.String(), ob, false), nil
 }
 
 // StartOrchestration transitions to full mode and reports what came back —
@@ -232,7 +264,7 @@ func (s *Server) StartOrchestrationWithCause(cause Cause) (StartReport, error) {
 
 // transitionToIndexOnly stops agents and refinery, keeping indexing alive.
 // Caller must hold s.transitionMu (not s.mu).
-func (s *Server) transitionToIndexOnly(cause Cause) error {
+func (s *Server) transitionToIndexOnly(cause Cause, hold time.Duration) error {
 	// Recorded BEFORE the stop work, not after. This transition disables every
 	// agent, refinery and scheduler endpoint on the daemon, and StopAll can
 	// take its full 5s timeout — a record written afterwards would be missing
@@ -240,6 +272,21 @@ func (s *Server) transitionToIndexOnly(cause Cause) error {
 	// entirely if the process dies mid-drain.
 	s.recordTransition(config.ModeFull, config.ModeIndexOnly, cause)
 	log.Printf("server: transitioning to index-only mode")
+
+	// Arm the restart obligation here, for the same reason and at the same
+	// moment as the record above: the window this covers opens now, not when
+	// StopAll returns. A stopper that dies during its own drain has still
+	// stopped the fleet, and something other than the stopper has to be
+	// holding the way back (mg-5af1).
+	ob := s.armResume(cause, hold)
+	switch {
+	case ob.Due.IsZero():
+		log.Printf("server: NO resume deadline armed — orchestration stays stopped until somebody starts it. " +
+			"The fleet coming back now depends entirely on the caller that stopped it.")
+	default:
+		log.Printf("server: resume deadline armed: if orchestration is not back by %s (%s from now), pogod restores it and alarms (mg-5af1)",
+			ob.Due.UTC().Format(time.RFC3339), ob.Due.Sub(ob.Since).Round(time.Second))
+	}
 
 	// Flip the mode first so guarded endpoints start rejecting with 503
 	// immediately, then snapshot the subsystems and stop them outside the
@@ -296,6 +343,14 @@ func (s *Server) transitionToFull(cause Cause) (StartReport, error) {
 	}
 	s.mode = config.ModeFull
 	s.mu.Unlock()
+
+	// The obligation is discharged the moment full mode is real, and it is
+	// discharged for a return by ANY route — the original stopper coming back,
+	// an operator's `pogo server start`, or the resumer's own restore. Nothing
+	// latches: a fleet that came back is not owed a restart, and a detector
+	// that stayed RED after the thing it watched recovered would fail every
+	// subsequent stop.
+	s.disarmResume()
 
 	// Recorded AFTER the flip, unlike the stop path above, and the asymmetry is
 	// deliberate: the refinery restart above is fallible and returns early
@@ -411,10 +466,19 @@ func (s *Server) handleMode(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "", http.StatusMethodNotAllowed)
 		return
 	}
+	// "mode" stays FIRST and keeps its exact spelling. scripts/pogo-self-deploy
+	// reads this body with a BRE sed (`json_str mode`) whose leading `.*` is
+	// greedy, so any later key spelled `...mode` would shadow it. The keys added
+	// here deliberately do not end in "mode".
+	body := map[string]string{"mode": s.Mode().String()}
+	if ob, armed := s.ResumeObligation(); armed {
+		body["stopped_since"] = ob.Since.UTC().Format(time.RFC3339)
+		if !ob.Due.IsZero() {
+			body["resume_due"] = ob.Due.UTC().Format(time.RFC3339)
+		}
+	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{
-		"mode": s.Mode().String(),
-	})
+	json.NewEncoder(w).Encode(body)
 }
 
 // handleStartOrchestration transitions to full mode, restarting agents and
@@ -437,18 +501,35 @@ func (s *Server) handleStartOrchestration(w http.ResponseWriter, r *http.Request
 }
 
 // handleStopOrchestration transitions to index-only mode.
+//
+// The optional `hold` query parameter is the caller's declaration of how long
+// the fleet may legitimately stay down — `?hold=2h` for a maintenance window.
+// Absent means no declaration, which takes the configured default grace. A
+// malformed hold is REFUSED rather than silently defaulted: a caller that meant
+// to declare a two-hour window and got fifteen minutes because it wrote "2hr"
+// would be surprised by a restart, and the surprise would look like the
+// watchdog misfiring.
 func (s *Server) handleStopOrchestration(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "", http.StatusMethodNotAllowed)
 		return
 	}
-	if err := s.SetModeWithCause(config.ModeIndexOnly,
-		causeFromRequest(r, "POST /server/stop-orchestration")); err != nil {
+	var hold time.Duration
+	if raw := r.URL.Query().Get("hold"); raw != "" {
+		d, err := time.ParseDuration(raw)
+		if err != nil || d < 0 {
+			http.Error(w, fmt.Sprintf("invalid hold %q: want a Go duration such as 2h", raw),
+				http.StatusBadRequest)
+			return
+		}
+		hold = d
+	}
+	report, err := s.StopOrchestrationWithCause(
+		causeFromRequest(r, "POST /server/stop-orchestration"), hold)
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{
-		"mode": s.Mode().String(),
-	})
+	json.NewEncoder(w).Encode(report)
 }

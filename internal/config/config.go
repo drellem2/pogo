@@ -432,6 +432,19 @@ const (
 	// rather than item-done alone, and why the grace is measured from the last
 	// PTY write rather than from the `done` transition.
 	DefaultDoneReapIdleGrace = 2 * time.Minute
+
+	// DefaultOrchestrationResumeGrace is how long orchestration may stay
+	// stopped before pogod restores it itself and alarms (mg-5af1). The
+	// argument for the value is at server.DefaultResumeGrace, which this
+	// mirrors; the two are pinned equal by test so the config default cannot
+	// drift away from the one the server applies when nothing configures it.
+	DefaultOrchestrationResumeGrace = 15 * time.Minute
+
+	// DefaultOrchestrationResumeRetry bounds how often the resumer will
+	// re-attempt a restore that failed. It is NOT the detection interval —
+	// detection rides the heartbeat — only a floor on repeated restore work
+	// against a daemon that cannot come back.
+	DefaultOrchestrationResumeRetry = time.Minute
 )
 
 // DefaultFastPriorities is the set of WorkItem.Priority values that trigger the
@@ -634,6 +647,9 @@ type Config struct {
 	DeafWatch  DeafWatchConfig
 	WedgeWatch WedgeWatchConfig
 	DoneReap   DoneReapConfig
+	// OrchestrationResume holds the deadline on a stopped fleet. See
+	// OrchestrationResumeConfig and cmd/pogod/orchresume.go.
+	OrchestrationResume OrchestrationResumeConfig
 	// DispatchPairing declares repos whose items owe a paired work item before
 	// dispatch. Zero value = no repos = inert. See dispatchpairing.go.
 	DispatchPairing DispatchPairingConfig
@@ -1192,6 +1208,32 @@ type DoneReapConfig struct {
 	IdleGrace time.Duration
 }
 
+// OrchestrationResumeConfig configures the restart obligation on a stopped
+// fleet (mg-5af1): if orchestration is stopped and nothing has resumed it
+// within Grace, pogod resumes it and mails the coordinator.
+//
+// ACTING, not report-only — the second detector here that is, after DoneReap.
+// Its action is bounded to one thing: putting the daemon back into the mode it
+// boots into. It cannot stop anything, and it cannot act at all while the fleet
+// is up.
+//
+// TURNING IT OFF is a real choice and it is spelled out rather than left to a
+// zero value: `enabled = false` means the fleet coming back is once again
+// contingent on whatever stopped it surviving long enough to restart it. That
+// is the 2026-08-08 configuration.
+type OrchestrationResumeConfig struct {
+	// Enabled turns the resumer on. Defaults to true.
+	Enabled bool
+	// Grace is how long orchestration may stay stopped by a caller that
+	// declared no hold of its own. Zero falls back to
+	// DefaultOrchestrationResumeGrace. Negative disarms the deadline while
+	// leaving the stop recorded, which only a test should ask for.
+	Grace time.Duration
+	// Retry bounds re-attempts of a restore that FAILED. Zero falls back to
+	// DefaultOrchestrationResumeRetry.
+	Retry time.Duration
+}
+
 // AgentsConfig holds agent command configuration.
 type AgentsConfig struct {
 	// Provider selects the agent harness ("claude", "codex", "pi", "cursor"). Resolved
@@ -1396,6 +1438,7 @@ type parsedConfig struct {
 	deafWatchEnabledSet       bool
 	wedgeWatchEnabledSet      bool
 	doneReapEnabledSet        bool
+	orchResumeEnabledSet      bool
 	// dispatchCapMaxSet / dispatchCapReserveSet exist because ZERO is a
 	// meaningful value for both keys and not merely an absent one:
 	// max_polecats_per_repo = 0 disarms the cap, refinery_reserve = 0 drops the
@@ -1520,6 +1563,11 @@ func Load() *Config {
 		DoneReap: DoneReapConfig{
 			Enabled:   true,
 			IdleGrace: DefaultDoneReapIdleGrace,
+		},
+		OrchestrationResume: OrchestrationResumeConfig{
+			Enabled: true,
+			Grace:   DefaultOrchestrationResumeGrace,
+			Retry:   DefaultOrchestrationResumeRetry,
 		},
 	}
 
@@ -1724,6 +1772,17 @@ func Load() *Config {
 		}
 		if fileCfg.doneReapEnabledSet {
 			cfg.DoneReap.Enabled = fileCfg.DoneReap.Enabled
+		}
+		if fileCfg.orchResumeEnabledSet {
+			cfg.OrchestrationResume.Enabled = fileCfg.OrchestrationResume.Enabled
+		}
+		// Non-zero, not >0: a negative grace is the documented way to disarm the
+		// deadline while keeping the stop recorded, so it must survive the merge.
+		if fileCfg.OrchestrationResume.Grace != 0 {
+			cfg.OrchestrationResume.Grace = fileCfg.OrchestrationResume.Grace
+		}
+		if fileCfg.OrchestrationResume.Retry > 0 {
+			cfg.OrchestrationResume.Retry = fileCfg.OrchestrationResume.Retry
 		}
 		// Non-zero, not >0: a negative idle_grace is the documented way to remove
 		// the grace window, so it must survive the merge like any other override.
@@ -2518,6 +2577,20 @@ func parseConfigFileInto(cfg *parsedConfig, path string) error {
 			case "idle_grace":
 				if d, err := time.ParseDuration(unquotedVal); err == nil {
 					cfg.DoneReap.IdleGrace = d
+				}
+			}
+		case "orchestration_resume":
+			switch key {
+			case "enabled":
+				cfg.OrchestrationResume.Enabled = val == "true"
+				cfg.orchResumeEnabledSet = true
+			case "grace":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.OrchestrationResume.Grace = d
+				}
+			case "retry":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.OrchestrationResume.Retry = d
 				}
 			}
 		case "gh_teardown":

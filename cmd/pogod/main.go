@@ -2426,6 +2426,28 @@ Flags:
 		log.Printf("pogod: done-item polecat reaper NOT armed — the agent registry did not load, so there is nothing to reap")
 	}
 
+	// The restart obligation on a stopped fleet (mg-5af1). Armed at the stop by
+	// internal/server, fired here — deliberately in pogod rather than in
+	// whatever stopped the fleet, because the whole defect is that the stopper
+	// cannot be trusted to reach its own step 2.
+	//
+	// It resolves `srv` late, through a closure: this OnTick is built several
+	// hundred lines BEFORE server.New runs, so a resumer holding the pointer
+	// would hold nil for the life of the process.
+	var orchResume *orchResumer
+	if cfg.OrchestrationResume.Enabled {
+		orchResume = newOrchResumer(func() orchResumeServer {
+			if srv == nil {
+				return nil
+			}
+			return srv
+		}, conditions, coordinator, cfg.OrchestrationResume)
+		log.Printf("pogod: orchestration resume deadline armed (grace=%s) — a fleet left stopped past its deadline is restarted and the coordinator is mailed (mg-5af1)",
+			cfg.OrchestrationResume.Grace)
+	} else {
+		log.Printf("pogod: orchestration resume deadline DISABLED by config — a fleet stopped by a procedure that dies stays stopped until a human notices (this is the 2026-08-08 configuration)")
+	}
+
 	// Drive both heartbeat-piggybacked subsystems from a single OnTick. The
 	// scheduler runs inline (it stores absolute fire times, so a clock jump is
 	// absorbed in the same goroutine). The stall watcher runs in a goroutine so
@@ -2546,6 +2568,14 @@ Flags:
 		// slot-seconds, and the grace window already bounds how eagerly it acts.
 		if doneReap != nil {
 			go doneReap.Check(now)
+		}
+		// Restore a fleet whose stopper never came back (mg-5af1). In a
+		// goroutine because the restore runs the crew auto-start sweep and the
+		// alarm shells out to `mg mail send` — neither must delay the next
+		// tick. It self-throttles and cannot act while the mode is full, so an
+		// overlapping tick cannot issue a duplicate restart.
+		if orchResume != nil {
+			go orchResume.Check(now)
 		}
 	}
 
@@ -2755,6 +2785,16 @@ Flags:
 
 	// Initialize server coordinator
 	srv = server.New(agentRegistry, mergeQueue)
+	// The deadline every stop is measured against (mg-5af1). Set here rather
+	// than defaulted inside the server so the value an operator reads in
+	// config.toml is the value the daemon applies. A DISABLED resumer also
+	// disarms the deadline, so `/server/mode` does not advertise a resume_due
+	// that nothing will act on.
+	if cfg.OrchestrationResume.Enabled {
+		srv.SetResumeGrace(cfg.OrchestrationResume.Grace)
+	} else {
+		srv.SetResumeGrace(0)
+	}
 	// The agent-side analogue of SetRefineryStarter below: a return to full
 	// mode re-runs the auto-start sweep. Before gh #108 there was no such
 	// hook, so `pogo server start` against an index-only daemon flipped the

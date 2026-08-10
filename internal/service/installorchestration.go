@@ -72,6 +72,15 @@ func (liveOrchestrator) Start() (server.StartReport, error) { return client.Star
 // after a stop that did not take is a no-op (StartOrchestration returns
 // AlreadyFull); skipping the restore after a stop that did take is the
 // ten-hour outage. The asymmetry decides the default.
+//
+// SINCE mg-5af1 THIS IS NO LONGER THE ONLY THING THAT UNDOES THE STOP. The
+// daemon arms a resume deadline at the transition itself, so an install that is
+// KILLED — the case a defer cannot cover, because a dead process runs no
+// defers — has the fleet restored by pogod anyway. That does not make the defer
+// redundant: it returns the fleet in seconds rather than at the deadline, and it
+// is the difference between a slow install and an alarm. Deliberately NO hold is
+// declared on this stop: an install that legitimately outruns the grace has
+// already failed, and a dark fleet is the worse of the two outcomes.
 func quiesceCrew(orch orchestrator) (quiesced bool) {
 	if !orch.Alive() {
 		return false

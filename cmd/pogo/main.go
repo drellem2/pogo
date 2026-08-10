@@ -267,12 +267,28 @@ empty success. Exits non-zero if any crew agent errored while starting.`,
 	}
 
 	var stopAll bool
+	var stopHold time.Duration
 	var cmdServerStop = &cobra.Command{
 		Use:   "stop",
 		Short: "Stop orchestration (agents + refinery); use --all for full teardown",
 		Long: `By default, stops orchestration (agents and refinery) while keeping
 the pogo server running for indexing and search. Use --all to fully
-shut down the server process.`,
+shut down the server process.
+
+A stopped fleet comes back BY ITSELF. pogod arms a resume deadline at the
+moment of the stop and restores full mode if nothing else has, then mails the
+coordinator to say it had to (mg-5af1). This exists because the fleet being up
+used to be contingent on whoever stopped it surviving long enough to restart
+it: on 2026-08-08 a deploy stopped the crew, hung for 31h39m, and the fleet
+stayed dark for 33 hours with every supervisor behaving correctly.
+
+Use --hold to declare a longer window when a long dark period is INTENDED:
+
+    pogo server stop --hold 4h
+
+There is no way to stop the fleet indefinitely without saying so. That is the
+point: an undeclared indefinite dark fleet is indistinguishable from an outage,
+and it was one.`,
 		Args: cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
 			if stopAll {
@@ -295,7 +311,7 @@ shut down the server process.`,
 				if !jsonOutput {
 					fmt.Println("Stopping orchestration (agents + refinery)...")
 				}
-				err := client.StopOrchestration()
+				report, err := client.StopOrchestrationHold(stopHold)
 				if err != nil {
 					cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
 				}
@@ -303,15 +319,33 @@ shut down the server process.`,
 					cli.PrintJSON(map[string]interface{}{
 						"status":  "index-only",
 						"message": "orchestration stopped, server still running",
+						"report":  report,
 					})
 				} else {
 					fmt.Println("Orchestration stopped. Server still running (indexing + search).")
+					// The deadline is printed on the stop, not left to be
+					// discovered later. A caller that just took the fleet down
+					// is the one reader guaranteed to be present, and telling
+					// them when it comes back is what stops the restore from
+					// arriving as a surprise.
+					switch {
+					case report.ResumeDue != "":
+						fmt.Printf("The fleet comes back at %s unless you start it first.\n", report.ResumeDue)
+						fmt.Println("  pogod restores full mode at that deadline and mails the coordinator (mg-5af1).")
+						fmt.Println("  Declare a longer window with --hold if a long dark period is intended.")
+					default:
+						fmt.Println("⚠ NO resume deadline is armed on this daemon.")
+						fmt.Println("  The fleet stays down until something starts it. If this process dies")
+						fmt.Println("  before it does, nothing else is responsible for bringing the crew back.")
+					}
 					fmt.Println("Use --all to fully shut down the server.")
 				}
 			}
 		},
 	}
 	cmdServerStop.Flags().BoolVar(&stopAll, "all", false, "fully shut down the server process")
+	cmdServerStop.Flags().DurationVar(&stopHold, "hold", 0,
+		"how long the fleet may legitimately stay stopped (e.g. 4h); default is pogod's resume grace")
 
 	var cmdServerStatus = &cobra.Command{
 		Use:     "status",

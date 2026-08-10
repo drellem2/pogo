@@ -112,6 +112,11 @@ type pogodCondition struct {
 	// event so the investigation and the running daemon can be reconciled
 	// without grepping code — an enumeration that cannot be checked against the
 	// implementation is how the remainder gets lost a second time.
+	//
+	// A condition that does NOT come from that enumeration carries its
+	// originating work item id here instead (e.g. "mg-5af1"). The field's job is
+	// to answer "why does this exist" from the event alone, and a ticket answers
+	// it as well as a row does; leaving it blank would not.
 	Row string
 
 	// To is the mailbox that can act. NEVER `human`: measured at 988 unread
