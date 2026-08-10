@@ -143,6 +143,11 @@ func (r *Refinery) laneHoldingLocked(id string) *lane {
 // IS the change, and it is bounded: it can only ever be by a merge that could
 // not have contended with the one it passed.
 func (r *Refinery) claimLane(examined map[string]bool) (*lane, *MergeRequest) {
+	// After the unlock (LIFO). The claim is the moment an item stops being
+	// queued and starts being in-flight; the file has to record that before
+	// the merge runs, or a crash mid-gate leaves it in neither place. The wait
+	// is out here so the dispatcher never holds r.mu across an fsync (mg-538e).
+	defer r.flushState()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -251,7 +256,11 @@ func (r *Refinery) runLane(ln *lane, mr *MergeRequest) {
 
 	r.mu.Lock()
 	r.endLaneLocked(ln)
-	mr.GateOutput = outcome.GateOutput
+	// Capped BEFORE it reaches the record, which is what gets persisted. An
+	// uncapped assignment here was 93% of a 6.3 MB state file, re-marshalled
+	// and re-fsynced on every save (mg-538e). The cut is self-describing —
+	// see capGateOutput.
+	mr.GateOutput = capGateOutput(outcome.GateOutput)
 	mr.DeployError = outcome.DeployError
 	mr.PostMergeError = outcome.PostMergeError
 	mr.MergedSHA = outcome.MergedSHA
@@ -314,6 +323,12 @@ func (r *Refinery) runLane(ln *lane, mr *MergeRequest) {
 	onMerged := r.onMerged
 	onFailed := r.onFailed
 	r.mu.Unlock()
+
+	// A terminal resolution is write-through: the callback below marks a work
+	// item done, and a state file that still calls this merge in-flight would
+	// re-run it after a crash. The wait happens here, with r.mu released — the
+	// fsync used to run inside the block above (mg-538e).
+	r.flushState()
 
 	// Fire callbacks outside the lock. A cancelled MR fires neither: it did
 	// not merge, and it did not fail on its merits.

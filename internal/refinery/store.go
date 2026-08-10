@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -79,10 +80,77 @@ type persistedState struct {
 // store handles persistence of refinery state to a single JSON file.
 // Writes are atomic via temp-file + fsync + rename so a crashed pogod (or
 // full disk) never leaves a half-written refinery-state.json behind.
+//
+// # The fsync is deliberately NOT reachable from Refinery.mu (mg-538e)
+//
+// Every persist used to run marshal + write + fsync + rename inside
+// `saveStateLocked`, which its ~12 callers invoke with `Refinery.mu` held. An
+// fsync is an unbounded hold: its duration is set by disk contention, not by
+// the refinery. `pogo refinery queue` needs that same mutex
+// (Refinery.QueueWithProcessing), which is how a busy disk turned into a
+// hanging CLI while `pogo agent list` — a different mutex on a different
+// object — answered instantly.
+//
+// The split is now: the caller marshals under Refinery.mu (that is the
+// consistency boundary — the MergeRequest pointers are shared mutable state),
+// hands the finished bytes to `enqueue`, and returns. A writer goroutine owned
+// by this store does write/Sync/rename, serialized on `mu`. **Nothing on that
+// path touches Refinery.mu**, and `mu` itself is never held across anything a
+// reader of the queue needs.
+//
+// Durability at the API boundary is preserved by `flush`, which waits for the
+// newest enqueued snapshot to reach disk. Callers that promise write-through
+// (Submit, Stop, terminal lane resolution) call it AFTER releasing
+// Refinery.mu; the high-frequency gate-heartbeat saves do not, because losing
+// the last heartbeat of a crashed pogod costs nothing.
 type store struct {
 	path string
 
+	// mu serializes the disk work — write, fsync, rename — and the load that
+	// reads the same file. It is held only by the writer goroutine and by
+	// load/save, never by anything holding Refinery.mu.
 	mu sync.Mutex
+
+	// qmu guards the hand-off queue below. It is held for O(1) bookkeeping
+	// only: never across a write, never across an fsync, and never by a
+	// goroutine that also holds Refinery.mu for anything but the enqueue
+	// itself.
+	qmu sync.Mutex
+	// qcond is broadcast whenever doneSeq advances or the writer goes idle.
+	qcond *sync.Cond
+	// pending is the newest marshalled snapshot not yet written. Older
+	// snapshots are dropped rather than queued: the file holds whole state, so
+	// writing an intermediate version of it is pure cost. This is what makes a
+	// burst of saves collapse into one write.
+	pending []byte
+	// pendSeq is the sequence number of `pending`, monotonically increasing
+	// across every enqueue whether or not that snapshot survived coalescing.
+	pendSeq uint64
+	// doneSeq is the highest sequence number durably on disk.
+	doneSeq uint64
+	// writing reports whether a writer goroutine is draining the queue.
+	writing bool
+	// lastErr is the error from the most recent write attempt, reported by
+	// flush. Persistence errors are logged rather than propagated everywhere
+	// else — a full disk must not wedge the merge queue.
+	lastErr error
+
+	// beforeWrite, when non-nil, runs on the writer goroutine immediately
+	// before the temp-file write. Tests use it to hold a write open and prove
+	// the refinery mutex is free while it is (see
+	// TestStateWriteDoesNotHoldRefineryMutex). Set once, before the first
+	// enqueue.
+	beforeWrite func()
+}
+
+// initQueue prepares the hand-off condition variable. Safe to call more than
+// once; store values are constructed in several places (including tests).
+func (s *store) initQueue() {
+	s.qmu.Lock()
+	if s.qcond == nil {
+		s.qcond = sync.NewCond(&s.qmu)
+	}
+	s.qmu.Unlock()
 }
 
 // DefaultStatePath returns refinery-state.json under the pogo state dir
@@ -128,12 +196,10 @@ func (s *store) load() (*persistedState, error) {
 	return &st, nil
 }
 
-func (s *store) save(st *persistedState) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.path == "" {
-		return errors.New("refinery: store path unset")
-	}
+// marshal renders st as the on-disk bytes. It touches no disk and takes no
+// lock, so it is safe — and intended — to run under Refinery.mu: that is what
+// makes the snapshot consistent with the state it was taken from.
+func (s *store) marshal(st *persistedState) ([]byte, error) {
 	st.Version = StateVersion
 	if st.Queue == nil {
 		st.Queue = []*MergeRequest{}
@@ -143,9 +209,99 @@ func (s *store) save(st *persistedState) error {
 	}
 	data, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {
+		return nil, err
+	}
+	return append(data, '\n'), nil
+}
+
+// enqueue hands a marshalled snapshot to the writer goroutine. It never blocks
+// on disk; `flush` is how a caller waits for what it enqueued.
+//
+// It is the ONLY thing on the persist path a Refinery.mu holder may call.
+func (s *store) enqueue(data []byte) {
+	s.initQueue()
+	s.qmu.Lock()
+	s.pendSeq++
+	s.pending = data
+	start := !s.writing
+	if start {
+		s.writing = true
+	}
+	s.qmu.Unlock()
+	if start {
+		go s.drain()
+	}
+}
+
+// drain writes queued snapshots until the queue is empty, one at a time,
+// coalescing anything that arrived while the previous write was in flight.
+// It runs on its own goroutine and never touches Refinery.mu.
+func (s *store) drain() {
+	for {
+		s.qmu.Lock()
+		data, seq := s.pending, s.pendSeq
+		s.pending = nil
+		if data == nil {
+			s.writing = false
+			s.qcond.Broadcast()
+			s.qmu.Unlock()
+			return
+		}
+		s.qmu.Unlock()
+
+		err := s.writeBytes(data)
+		if err != nil {
+			log.Printf("refinery: failed to persist state: %v", err)
+		}
+
+		s.qmu.Lock()
+		if seq > s.doneSeq {
+			s.doneSeq = seq
+		}
+		s.lastErr = err
+		s.qcond.Broadcast()
+		s.qmu.Unlock()
+	}
+}
+
+// flush blocks until every snapshot enqueued before the call is durable, and
+// returns the last write error (nil when the newest write succeeded).
+//
+// MUST NOT be called with Refinery.mu held — waiting here is waiting on an
+// fsync, and doing that under Refinery.mu is precisely the defect mg-538e
+// repairs. See Refinery.flushState.
+func (s *store) flush() error {
+	s.initQueue()
+	s.qmu.Lock()
+	defer s.qmu.Unlock()
+	want := s.pendSeq
+	for s.doneSeq < want {
+		s.qcond.Wait()
+	}
+	return s.lastErr
+}
+
+// save marshals and writes synchronously. It is the whole-operation form, used
+// where there is no Refinery.mu to get out from under (tests, direct seeding).
+func (s *store) save(st *persistedState) error {
+	data, err := s.marshal(st)
+	if err != nil {
 		return err
 	}
-	data = append(data, '\n')
+	return s.writeBytes(data)
+}
+
+// writeBytes atomically replaces the state file: temp-file, fsync, rename.
+// The fsync lives here, under s.mu and nothing else.
+func (s *store) writeBytes(data []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.path == "" {
+		return errors.New("refinery: store path unset")
+	}
+	if s.beforeWrite != nil {
+		s.beforeWrite()
+	}
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
 		return err
 	}

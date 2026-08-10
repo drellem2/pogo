@@ -49,6 +49,7 @@ func (r *Refinery) resolveRecovered() {
 	r.recovered = nil
 	r.saveStateLocked()
 	r.mu.Unlock()
+	r.flushState()
 }
 
 // resolveRecoveredOne resolves a single recovered in-flight merge request.
@@ -101,6 +102,9 @@ func (r *Refinery) resolveRecoveredOne(mr *MergeRequest) {
 	}
 	r.saveStateLocked()
 	r.mu.Unlock()
+	// Write-through, with r.mu released: recovery's whole job is to make the
+	// state file agree with reality before the callback below fires (mg-538e).
+	r.flushState()
 
 	if probeErr != nil {
 		emitRecoveryLost(mr, probeErr)

@@ -250,6 +250,10 @@ func TestEveryInFlightMergeIsPersisted(t *testing.T) {
 	r.mu.Lock()
 	r.saveStateLocked()
 	r.mu.Unlock()
+	// saveStateLocked snapshots and hands off; flushState is where the bytes
+	// become durable, and it runs with r.mu released on purpose (mg-538e).
+	// A test that reads the file is subject to the same contract as Submit.
+	r.flushState()
 
 	st, err := (&store{path: statePath}).load()
 	if err != nil {
@@ -288,6 +292,7 @@ func TestOlderPogodStillFindsEveryInFlightMerge(t *testing.T) {
 	r.queue = append(r.queue, &MergeRequest{ID: "mr-pending", RepoPath: "/repos/alpha", Status: StatusQueued})
 	r.saveStateLocked()
 	r.mu.Unlock()
+	r.flushState()
 
 	// The pre-lanes wire format, verbatim: no processing_lanes field.
 	var old struct {

@@ -529,9 +529,19 @@ func (r *Refinery) loadState() error {
 	return nil
 }
 
-// saveStateLocked persists the current state to disk. Must be called with mu
-// held. Persistence errors are logged, not propagated — a full disk must not
-// wedge the merge queue.
+// saveStateLocked snapshots the current state and hands it to the store's
+// writer. Must be called with mu held. Persistence errors are logged, not
+// propagated — a full disk must not wedge the merge queue.
+//
+// It MARSHALS here and writes nowhere: the disk work (write, fsync, rename)
+// runs on the store's own goroutine, so mu is released the moment this returns
+// (mg-538e). Marshalling stays under mu because that is the consistency
+// boundary — the MergeRequest pointers in the snapshot are live objects other
+// goroutines mutate.
+//
+// A caller that must not return until the change is durable calls flushState
+// AFTER releasing mu. Waiting for the write while still holding mu would
+// reinstate exactly the hold this split removes.
 func (r *Refinery) saveStateLocked() {
 	if r.store == nil {
 		return
@@ -568,7 +578,33 @@ func (r *Refinery) saveStateLocked() {
 		Lost:            r.lost,
 		PrunedIDs:       r.pruned,
 	}
-	if err := r.store.save(st); err != nil {
+	data, err := r.store.marshal(st)
+	if err != nil {
+		log.Printf("refinery: failed to marshal state: %v", err)
+		return
+	}
+	r.store.enqueue(data)
+}
+
+// flushState blocks until every state change persisted so far is durable on
+// disk. It is the write-through half of saveStateLocked and restores the
+// pre-mg-538e guarantee that an unclean death after a public API call still
+// finds the change in the state file.
+//
+// **MUST NOT be called with r.mu held.** It waits on an fsync; doing that
+// under r.mu is the defect this repair exists to remove, and a fix that
+// reintroduced it one layer up would not be a fix (see
+// TestStateWriteDoesNotHoldRefineryMutex, which asserts the property rather
+// than the implementation).
+//
+// The high-frequency gate-heartbeat saves deliberately do NOT flush: a
+// heartbeat lost to a crash costs nothing, and paying an fsync per beat is
+// what made the state write hot in the first place.
+func (r *Refinery) flushState() {
+	if r.store == nil {
+		return
+	}
+	if err := r.store.flush(); err != nil {
 		log.Printf("refinery: failed to persist state: %v", err)
 	}
 }
@@ -693,6 +729,11 @@ func (r *Refinery) Submit(req MergeRequest) (string, error) {
 		log.Printf("refinery: MR for branch %s targets integration branch %q (default is %q) — PR flow: the merge is an integration step, completion is the PR the author still has to open (mg-7746)", req.Branch, req.TargetRef, defaultBranch)
 	}
 
+	// Registered BEFORE the lock so it runs AFTER the unlock (defers are LIFO).
+	// Submit promises write-through: a pogod that dies right after it returns
+	// must still find the queued MR on restart. That promise is now kept out
+	// here, with r.mu released, instead of by fsyncing under it (mg-538e).
+	defer r.flushState()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -976,6 +1017,9 @@ func (r *Refinery) Stop() {
 	r.mu.Lock()
 	r.saveStateLocked()
 	r.mu.Unlock()
+	// Shutdown is the one place the flush is load-bearing rather than
+	// belt-and-braces: pogod builds a REPLACEMENT Refinery from this file.
+	r.flushState()
 }
 
 // Queue returns a snapshot of PENDING merge requests. It deliberately excludes
@@ -1205,6 +1249,9 @@ func (r *Refinery) AuthorFailureCount(author string) int {
 //
 // Returns an error if the MR is not found or has already finished.
 func (r *Refinery) Cancel(id string) (CancelOutcome, error) {
+	// After the unlock (LIFO): an operator's cancel is write-through, but the
+	// wait for disk happens with r.mu released (mg-538e).
+	defer r.flushState()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -1276,11 +1323,21 @@ func (r *Refinery) dequeue() *MergeRequest {
 
 // pruneHistory acquires the lock and prunes old history entries, persisting
 // the result if anything changed.
+//
+// The persist is flushed — with the lock released — because the pruned-ID ring
+// is the whole reason `refinery show` can answer "pruned from history" instead
+// of "not found", and that distinction has to survive a restart. Only a prune
+// that actually changed something pays for it, so this is not an fsync per
+// loop iteration.
 func (r *Refinery) pruneHistory() {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.pruneHistoryLocked() {
+	changed := r.pruneHistoryLocked()
+	if changed {
 		r.saveStateLocked()
+	}
+	r.mu.Unlock()
+	if changed {
+		r.flushState()
 	}
 }
 

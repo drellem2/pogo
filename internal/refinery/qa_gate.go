@@ -150,6 +150,9 @@ const StatusHeld MergeStatus = "held"
 // holdMergeRequest moves the MR back to the queue with a held status and
 // records why it's being held.
 func (r *Refinery) holdMergeRequest(mr *MergeRequest, qaItemID string) {
+	// Runs after the unlock (defers are LIFO): a hold releases a lane, so the
+	// file must say so before a crash re-runs a merge nobody is driving.
+	defer r.flushState()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	mr.Status = StatusHeld
