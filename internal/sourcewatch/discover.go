@@ -226,6 +226,22 @@ func hasDivergentBinding(r record, key, value string, all []record) bool {
 // A grandparent at the filesystem root is declined. /*/daniel is not a family
 // of boxes, it is every user account on the machine, and admitting HOME as a
 // data source would bury the findings that matter under the ones that do not.
+//
+// ONE READDIR OF THE GRANDPARENT, then a stat per candidate — never an open of
+// a sibling. This used to be a filepath.Glob of <grand>/*/<basename>, which
+// reads as the sentence above but does not behave like it: Go's glob does not
+// shortcut a meta-free final component, so for every entry of <grand> it does
+// os.Open + Readdirnames(-1) and only then matches names. It read ~200
+// directories in full to test for the presence of one name in each.
+//
+// That is not merely wasteful. On macOS ~/Desktop, ~/Documents and ~/Downloads
+// are TCC-gated: stat succeeds, open BLOCKS on a consent prompt, and in a
+// headless agent nobody answers it. STATE_DIR=~/.pogo/reminders-deadman has
+// grandparent ~, so `pogo doctor --check` — the command this repo documents as
+// the first-line health check, and the first thing the doctor crew prompt runs
+// — wedged in open(2) forever and printed zero bytes. os.Stat on the JOINED
+// path resolves a name through a directory without opening it, so a gated
+// sibling returns an error instead of never returning at all.
 func siblingDirs(value string) []string {
 	dir := filepath.Clean(value)
 	parent := filepath.Dir(dir)
@@ -233,13 +249,14 @@ func siblingDirs(value string) []string {
 	if grand == parent || grand == string(filepath.Separator) || grand == "." {
 		return nil
 	}
-	matches, err := filepath.Glob(filepath.Join(grand, "*", filepath.Base(dir)))
+	entries, err := os.ReadDir(grand)
 	if err != nil {
 		return nil
 	}
+	base := filepath.Base(dir)
 	var out []string
-	for _, m := range matches {
-		m = filepath.Clean(m)
+	for _, e := range entries {
+		m := filepath.Join(grand, e.Name(), base)
 		if m == dir {
 			continue
 		}

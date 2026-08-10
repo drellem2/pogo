@@ -192,6 +192,63 @@ func TestSiblingsDeclineTheFilesystemRoot(t *testing.T) {
 	}
 }
 
+// TestSiblingsNeverEnumerateASibling is the regression test for the hang: the
+// rule needs to know whether ONE name exists inside each sibling, and the
+// implementation used to answer that by reading each sibling in full.
+// filepath.Glob does not shortcut a meta-free final component — it opens every
+// entry of the grandparent and Readdirnames(-1)s it before matching names — so
+// STATE_DIR=~/.pogo/reminders-deadman made the audit open ~/Desktop. That
+// directory is TCC-gated on macOS: open(2) blocks on a consent prompt nobody is
+// there to answer, and `pogo doctor --check` wedged forever with zero output.
+//
+// TCC cannot be built in a test, and this must not be a test that only runs on
+// a Mac with a real gated directory. A directory with mode 0111 is the portable
+// stand-in for the same structural demand: it can be TRAVERSED but not
+// ENUMERATED, so os.Stat(<sibling>/<base>) resolves while os.Open+Readdirnames
+// fails. An implementation that opens the sibling loses the peer here exactly
+// as the real one blocked on ~/Desktop; one that stats the joined path does not
+// touch the sibling's contents at all.
+//
+// The 0111 sibling is deliberately the ONLY peer, so this fails rather than
+// passing on the other one's back.
+func TestSiblingsNeverEnumerateASibling(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: permission bits do not gate the superuser, so the unenumerable sibling would be readable")
+	}
+	grand := t.TempDir()
+	self := filepath.Join(grand, "self", "new")
+	peer := filepath.Join(grand, "sealed", "new")
+	mkdirs(t, self, peer)
+
+	// Sealed AFTER the box inside it exists: searchable, not listable.
+	sealed := filepath.Join(grand, "sealed")
+	if err := os.Chmod(sealed, 0o111); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(sealed, 0o755) })
+
+	// The premise, asserted rather than assumed: enumerating the sibling fails,
+	// while resolving the one name inside it succeeds. If this stops holding,
+	// the test below is measuring nothing.
+	if f, err := os.Open(sealed); err == nil {
+		if _, err := f.Readdirnames(-1); err == nil {
+			f.Close()
+			t.Skip("this filesystem let us enumerate a 0111 directory; the stand-in for a TCC-gated sibling does not hold here")
+		}
+		f.Close()
+	}
+	if _, err := os.Stat(peer); err != nil {
+		t.Fatalf("os.Stat(%s) = %v, want success — traversal of a 0111 directory must work for this test to mean anything", peer, err)
+	}
+
+	got := siblingDirs(self)
+	if len(got) != 1 || got[0] != peer {
+		t.Errorf("siblingDirs(%s) = %v, want [%s]\n"+
+			"the sibling family was found by READING the sibling directory; a sibling that cannot be read is invisible, "+
+			"which is how a TCC-gated ~/Desktop wedged `pogo doctor --check` at open(2)", self, got, peer)
+	}
+}
+
 // TestDiscoverUnreadableDirIsAnError, not an empty slice. This package's
 // founding bug is a quiet reading that actually means "I could not look".
 func TestDiscoverUnreadableDirIsAnError(t *testing.T) {
