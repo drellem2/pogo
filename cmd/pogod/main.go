@@ -1741,6 +1741,12 @@ Flags:
 			// storm the loop; the priority cooldown bounds it to one extra tick
 			// per wake.
 			FastPoll: hb.Nudge,
+			// Let both dispatch notices read the per-repo worker cap before
+			// naming a remedy (mg-dd77). Without it a saturated fleet draws a
+			// recurring "claim or dispatch them" that the spawn point refuses
+			// on arrival, on the same channel that carries genuinely
+			// actionable dispatch news.
+			Capacity: newStallCapacity(agentRegistry),
 		})
 		log.Printf("pogod: stall watcher enabled (agent=%s item_age=%s mail_age=%s max_mail=%d cooldown=%s priority_wake=%t wake_delay=%s wake_cooldown=%s fast_priorities=%s non_dispatchable=%s)",
 			cfg.StallWatch.Agent, cfg.StallWatch.UnclaimedItemAgeThreshold,

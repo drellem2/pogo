@@ -102,6 +102,31 @@ the total, not just the rate, which is what "cannot loop-nudge" needed to mean.
 Structural guarantee 1 is unaffected and still holds. See
 [stall-watch-design.md](stall-watch-design.md) §Cooldown.
 
+### Correction (mg-dd77): "ready and unclaimed" is not "dispatchable"
+
+The bound above is about how OFTEN the wake fires. This is about what it says
+when it does. `priority-wake: N high-priority work item(s) are ready and
+unclaimed — claim or dispatch now` named a remedy the daemon refuses whenever
+the item's repo is at its per-repo worker cap, and on 2026-08-10 it fired twice
+for `mg-aab5` (02:46Z, 02:52Z) while `/Users/daniel/dev/pogo` held 3 polecats
+against a cap of 3.
+
+Of the two surfaces with this blind spot, **this is the worse one**: the wording
+is the most imperative the component emits, it lands on the items a coordinator
+is least willing to conclude "ignore this" about, and its cooldown is the
+shortest — so the unactionable alarm on the highest-value work repeated the
+fastest. It also pushed toward a genuinely destructive remedy, because the only
+two ways to satisfy "dispatch now" at cap are to preempt a working polecat
+(stranding its pushed branch — mg-be37) or to snooze the item (hiding ready
+high-priority work to silence a detector). An alarm should never make those the
+available responses, and the at-cap text now rules both out by name.
+
+The fix is the repo-occupancy check shared with the standard stall notice — see
+[stall-watch-design.md](stall-watch-design.md) §"The remedy is checked against
+the per-repo cap". The priority information is kept rather than dropped: a
+coordinator still wants to know a high-priority item is waiting on a slot, and
+naming the occupying workers lets it ask whether one of them is wedged.
+
 ## Tests (W-4)
 
 `internal/stallwatch/stallwatch_test.go`:

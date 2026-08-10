@@ -61,6 +61,57 @@ queue," since mg rewrites/moves the file on status transitions. Any qualifying
 item older than `unclaimed_item_age_threshold` triggers a single batched nudge
 listing the offending IDs.
 
+#### The remedy is checked against the per-repo cap (mg-dd77)
+
+The finding ("N items have aged past the threshold") and the remedy ("claim or
+dispatch them") were composed together and only the finding was ever verified.
+On 2026-08-10 stall-watch mailed the mayor about **57 aging items, every one of
+them undispatchable**: all 65 dispatchable items in the queue lived in two
+repos, and both held 3 polecats against a per-repo cap of 3. A positive control
+confirmed the cap was the binding constraint — a real `spawn-polecat` for one of
+the named items was refused, cleanly and atomically, with the item left
+`available`.
+
+Two components held halves of the same fact and did not consult each other: the
+dispatch cap knew the fleet was saturated and said so with the occupying workers
+named; stall-watch knew items were aging and did not know the cap existed.
+
+So before naming a remedy, the watcher groups the due items **by repo** and asks
+a `stallwatch.Capacity` probe — wired in `cmd/pogod` to the same
+`agent.Registry.RepoOccupancyFor` the spawn point refuses on, so the advice
+cannot drift from the enforcement — and says which of three situations it is:
+
+| Situation | What the notice says |
+|---|---|
+| repo has free slots | unchanged: *claim or dispatch them: …* |
+| repo at cap | *N aging in `<repo>`; it is at its cap of 3 (workers: …). A throughput observation, not a dispatch request.* |
+| occupancy unknown | *occupancy for `<repo>` could not be determined … attempt the dispatch and read the refusal* |
+
+Three properties of that table are load-bearing:
+
+- **Nothing goes silent.** Every aging item is still in the message and in
+  `item_ids`; only the remedy changes. Trading a noisy alarm for a missing one
+  would be a worse bug than the one being fixed.
+- **The occupants are named.** That is what turns an instruction the coordinator
+  must ignore into a question it can act on — *is one of these wedged?*
+- **The two situations become countable.** `stall_watch_fired` now stamps
+  `dispatchable_ids`, `at_cap_ids`, `at_cap_repos` and
+  `occupancy_unknown_ids`. At cap, aging items are the *expected steady state*
+  and say nothing about coordinator diligence; below cap the identical message
+  means work is being neglected. Before this they produced identical mail and
+  identical events.
+
+The notice deliberately does **not** say "no action required — it will dispatch
+when a slot frees." Nothing in pogod auto-dispatches a work item; the
+coordinator does. At cap the honest advice is the cap's own vocabulary — a
+LATER, not a never — and inventing a self-draining queue would repeat this
+ticket's defect in the opposite direction.
+
+What a "free slots" verdict does **not** promise: the per-repo cap is one of
+several refusals. Gated assignees and `stage: gated` items never reach a notice
+at all, but the host-load gate and the stranded-push gate are not consulted, so
+"free" means *the cap would let this through*, not *this dispatch will succeed*.
+
 ### Threshold B — unread mail
 
 Scan the watched agent's `new/` maildir. Fire when either the oldest message is

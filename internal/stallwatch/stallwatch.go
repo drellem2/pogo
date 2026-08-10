@@ -131,6 +131,11 @@ type Options struct {
 	// actual fire, and the priority cooldown suppresses the very next check,
 	// so at most one extra tick follows each wake.
 	FastPoll func()
+	// Capacity, when set, lets the two dispatch notices consult the per-repo
+	// worker cap before naming a remedy (mg-dd77). Left nil the watcher keeps
+	// its pre-mg-dd77 wording, which is right for a daemon with no cap to read
+	// and wrong to fake: a notice that cannot see the cap must not claim to.
+	Capacity Capacity
 }
 
 // Watcher samples macguffin state and nudges the watched agent on stall.
@@ -141,6 +146,7 @@ type Watcher struct {
 	nudge    Nudger
 	emit     Emitter
 	fastPoll func()
+	capacity Capacity
 
 	mu sync.Mutex
 	// lastNudge records when each cooldown key last fired and how many times it
@@ -231,6 +237,7 @@ func New(cfg config.StallWatchConfig, opts Options) *Watcher {
 		nudge:     opts.Nudge,
 		emit:      emit,
 		fastPoll:  opts.FastPoll,
+		capacity:  opts.Capacity,
 		lastNudge: make(map[string]fireRecord),
 	}
 }
@@ -312,9 +319,20 @@ func (w *Watcher) checkUnclaimedItems(now time.Time) {
 		ids[i] = it.ID
 	}
 
-	msg := fmt.Sprintf(
-		"stall-watch: %d available work item(s) have sat unclaimed for over %s — claim or dispatch them: %s",
-		len(due), w.cfg.UnclaimedItemAgeThreshold, strings.Join(ids, ", "))
+	// Name the remedy the cap would actually permit (mg-dd77). The FINDING is
+	// unchanged — every aging item is still reported, in the same order — but
+	// "claim or dispatch them" is a remedy pogod refuses for a repo already at
+	// its worker cap, and a channel that recommends refused actions is one the
+	// reader learns to skim. With no capacity probe wired this renders exactly
+	// the sentence it always did.
+	split := w.splitByCapacity(due)
+	msg := split.message(noticeText{
+		head: fmt.Sprintf("stall-watch: %d available work item(s) have sat unclaimed for over %s",
+			len(due), w.cfg.UnclaimedItemAgeThreshold),
+		capHead: fmt.Sprintf("stall-watch: %d available work item(s) have sat unclaimed for over %s, and every one of them is in a repository at its worker cap",
+			len(due), w.cfg.UnclaimedItemAgeThreshold),
+		verb: "claim or dispatch them",
+	})
 
 	advisory, advisedIDs := w.blockIntentAdvisory(due)
 	msg += advisory
@@ -332,6 +350,7 @@ func (w *Watcher) checkUnclaimedItems(now time.Time) {
 		details["block_intent_mismatch_ids"] = advisedIDs
 	}
 	sel.stampDetails(details)
+	split.stampDetails(details)
 	w.fire(categoryUnclaimedItems, msg, details)
 }
 
@@ -390,9 +409,21 @@ func (w *Watcher) checkPriorityWake(now time.Time, items []workitem.WorkItem) {
 		ids[i] = it.ID
 	}
 
-	msg := fmt.Sprintf(
-		"priority-wake: %d high-priority work item(s) are ready and unclaimed — claim or dispatch now: %s",
-		len(due), strings.Join(ids, ", "))
+	// Same capacity check as the standard stall notice, and this is the surface
+	// that needed it more (mg-dd77): "dispatch NOW" is the most imperative
+	// wording the component emits, it is aimed at the items a coordinator is
+	// least willing to ignore, and its cooldown is the shortest — so at cap it
+	// was the unactionable alarm that repeated fastest, on the highest-value
+	// work. The priority information is kept, not dropped: a coordinator still
+	// wants to know a high-priority item is waiting on a slot.
+	split := w.splitByCapacity(due)
+	msg := split.message(noticeText{
+		head: fmt.Sprintf("priority-wake: %d high-priority work item(s) are ready and unclaimed",
+			len(due)),
+		capHead: fmt.Sprintf("priority-wake: %d high-priority work item(s) are ready but their repository is at capacity",
+			len(due)),
+		verb: "claim or dispatch now",
+	})
 
 	advisory, advisedIDs := w.blockIntentAdvisory(due)
 	msg += advisory
@@ -412,6 +443,7 @@ func (w *Watcher) checkPriorityWake(now time.Time, items []workitem.WorkItem) {
 		details["block_intent_mismatch_ids"] = advisedIDs
 	}
 	sel.stampDetails(details)
+	split.stampDetails(details)
 	w.fire(categoryPriorityWake, msg, details)
 
 	// Collapse the ~30s poll for the follow-up check so pogod re-samples the
