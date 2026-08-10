@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/drellem2/pogo/internal/agent"
+	"github.com/drellem2/pogo/internal/config"
 	"github.com/drellem2/pogo/internal/stallwatch"
 )
 
@@ -81,7 +82,7 @@ func TestStallNudgerNeverInterruptsBusyAgent(t *testing.T) {
 
 	// Mail is allowed here (the PTY nudge will fail, and the fallback is
 	// correct) — this test only asserts the PTY was never written to.
-	nudge := newStallNudger(reg, func(to, from, subject, body string) error { return nil })
+	nudge := newStallNudger(reg, func(to, from, subject, body string) error { return nil }, config.DefaultStallMailFallbackBacklogCap)
 
 	// Deliver in the background — wait-idle blocks up to DefaultNudgeTimeout
 	// against a never-quiet agent. StopAll (deferred) unblocks it at teardown.
@@ -218,7 +219,7 @@ func TestStallNudgerFallsBackToMailWhenOffline(t *testing.T) {
 		mailed = true
 		got.to, got.from, got.subject, got.body = to, from, subject, body
 		return nil
-	})
+	}, config.DefaultStallMailFallbackBacklogCap)
 
 	delivery, err := nudge("ghost-agent", "priority-wake: urgent")
 	if err != nil {

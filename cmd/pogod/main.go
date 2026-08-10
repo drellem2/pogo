@@ -21,6 +21,7 @@ import (
 	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/nightlyone/lockfile"
@@ -866,6 +867,146 @@ func stallWatchArmed(cfg *config.Config) bool {
 	return cfg.StallWatch.Enabled && cfg.Source != ""
 }
 
+// stallFallbackDamper is the damping term on the stall-watch mail fallback
+// (mg-61ce). It counts, per recipient, how many consecutive fallbacks pogod has
+// pushed into that recipient's inbox since the last time it had EVIDENCE the
+// recipient could receive a message in person — a successful PTY delivery.
+// Past a cap, further fallbacks are withheld.
+//
+// Why a damping term was needed at all. The fallback (mg-79dc) is triggered by
+// exactly one condition: the recipient is too busy to go idle. It responds by
+// adding work to that recipient's inbox. So the remedy load rises with the load
+// it is responding to, and nothing anywhere in the loop pushed back. Measured on
+// this box over the last 20000 events: 1814 stall fires took the mail road, and
+// the mayor's maildir holds 766 stall-watch messages — 742 of them the
+// "(undelivered to terminal)" fallback, the single largest subject line in a
+// 5978-message mailbox by a factor of nine.
+//
+// The unread_mail category closes the loop outright. Its notice says "your inbox
+// is too full" and is delivered AS one more message in that inbox: 530 of the
+// fallbacks are that category, and 179 such messages are sitting in the mayor's
+// mailbox right now. That is gain >= 1 with no damping — the remedy re-arms its
+// own trigger, and no amount of draining outruns it.
+//
+// What this counter measures, precisely: consecutive fallbacks since the last
+// PTY success. It is NOT a measure of unread depth, and deliberately so. The
+// mayor's inbox is the one on this box where real traffic outweighs noise, so
+// damping on total unread would let a busy-but-healthy coordinator's legitimate
+// mail silence the watcher. Keying on stall-watch's own undamped contribution
+// makes the term proportional to what stall-watch is responsible for.
+//
+// Why a PTY success is the right reset signal. It is direct evidence the agent
+// went idle — the precise condition that means it is between turns and able to
+// drain. No filesystem probe is needed, which matters: a probe that reads the
+// recipient's maildir would do work proportional to the backlog, at exactly the
+// moment the backlog is largest, and so would reproduce inside the remedy the
+// very defect the remedy exists to remove. This counter is O(1) per fire and
+// allocates nothing.
+//
+// What is deliberately NOT damped: the offline road (DeliveryMail, recipient not
+// running). That road has the same flooding shape and 303 of the measured fires
+// took it, but it has no reset signal — an offline agent never produces a PTY
+// success — so a cap there would latch permanently the first time a coordinator
+// went down. It needs a different mechanism and is out of scope here.
+//
+// Applying the finding to the remedy. A suppressor is exactly the kind of
+// artifact that can carry the defect it removes — "load rises with load" — so
+// each channel it touches was checked for the same shape:
+//
+//   - The loud log line is emitted once per saturation run, not once per fire
+//     (see announce). Per-fire it would be the identical flood in a different
+//     channel, which is the failure mode wearing a disguise.
+//   - No new events are emitted; the suppressed fire reuses the
+//     stall_watch_fired event that would have been written anyway, adding one
+//     field.
+//   - The counter itself is O(1) per fire with no I/O, so its cost does not
+//     track the backlog. That ruled out the otherwise-attractive design of
+//     probing the recipient's maildir for undrained notices — a read whose cost
+//     grows with the backlog, performed at the moment the backlog is largest.
+//   - The map is pruned on the offline road, so it does not grow without bound
+//     across a daemon's lifetime as unique polecat names come and go.
+//
+// And the sharpest version of the question: when the damper IS suppressing, who
+// finds out, given that the channel it suppresses is the one that would say so?
+// Nothing that matters travels by mail here. The transition is a log line, and
+// every subsequent fire stamps nudge_suppressed_consecutive into events.log — a
+// value that keeps climbing is a coordinator that has not gone idle once across
+// that whole run, which is a louder and more specific signal than the flood it
+// replaced. Both roads are outside the loop, which is what makes them usable.
+//
+// Reconciling this with mg-79dc's first-attempt doctrine ("the cooldown is a
+// rate limiter, not a retry queue; delivery must succeed on the FIRST attempt").
+// That doctrine is about notices reaching NOBODY. Suppression here happens only
+// when a capful of identical-channel notices is already sitting in front of the
+// recipient undrained, so the marginal notice reaches nobody either way — it
+// joins a pile that is not being read. And nothing is lost on the far side:
+// stall-watch re-derives every condition from scratch each tick and never
+// queues, so the moment the recipient becomes reachable the CURRENT state fires,
+// not a stale replay. Suppression defers a notice until it can be received; it
+// does not discard a fact.
+type stallFallbackDamper struct {
+	mu sync.Mutex
+	// cap is the number of consecutive fallbacks allowed per recipient before
+	// suppression begins. Negative means no damping at all.
+	cap int
+	// consecutive maps recipient -> fallbacks since that recipient's last PTY
+	// delivery. Entries are deleted on reset rather than zeroed, so the map
+	// tracks only currently-saturated recipients.
+	consecutive map[string]int
+	// announced records the recipients already logged as suppressed, so the
+	// loud line fires once at the transition instead of on every fire — a
+	// per-fire log line would itself be the flood-under-load shape this damper
+	// exists to remove.
+	announced map[string]bool
+}
+
+func newStallFallbackDamper(limit int) *stallFallbackDamper {
+	if limit == 0 {
+		limit = config.DefaultStallMailFallbackBacklogCap
+	}
+	return &stallFallbackDamper{
+		cap:         limit,
+		consecutive: make(map[string]int),
+		announced:   make(map[string]bool),
+	}
+}
+
+// admit records one more fallback for recipient and reports whether the mail may
+// be sent. It returns the post-increment consecutive count either way, so a
+// suppressed fire can record how deep the suppression runs.
+func (d *stallFallbackDamper) admit(recipient string) (n int, allow bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.cap < 0 {
+		return 0, true
+	}
+	d.consecutive[recipient]++
+	n = d.consecutive[recipient]
+	return n, n <= d.cap
+}
+
+// reset clears a recipient's fallback run. Called on a successful PTY delivery:
+// the agent went idle, so it is reachable and able to drain, and the next
+// fallback starts a fresh run.
+func (d *stallFallbackDamper) reset(recipient string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	delete(d.consecutive, recipient)
+	delete(d.announced, recipient)
+}
+
+// announce reports whether this is the first suppressed fire for recipient in
+// the current run, so the caller logs the transition exactly once.
+func (d *stallFallbackDamper) announce(recipient string) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.announced[recipient] {
+		return false
+	}
+	d.announced[recipient] = true
+	return true
+}
+
 // newStallNudger builds the stall watcher's delivery function. It tries the
 // agent's PTY in wait-idle mode when the agent is running, and falls back to
 // durable macguffin mail in BOTH cases where the PTY cannot carry the message:
@@ -912,7 +1053,10 @@ func stallWatchArmed(cfg *config.Config) bool {
 // sleeping out a 30s deadline. The timeout's LENGTH is deliberately not what
 // the fallback depends on — see mg-79dc: no length saves a busy agent, which is
 // exactly why the fallback exists and why lengthening it was ruled out.
-func newStallNudgerWithTimeout(reg *agent.Registry, mail func(to, from, subject, body string) error, ptyTimeout time.Duration) stallwatch.Nudger {
+// The `damper` argument is mg-61ce's damping term on the fallback road; see
+// stallFallbackDamper for what it counts and why. A nil damper means no damping,
+// which is the pre-mg-61ce behaviour.
+func newStallNudgerWithTimeoutAndDamper(reg *agent.Registry, mail func(to, from, subject, body string) error, ptyTimeout time.Duration, damper *stallFallbackDamper) stallwatch.Nudger {
 	return func(agentName, message string) (stallwatch.Delivery, error) {
 		if reg != nil {
 			a := reg.Get(agentName)
@@ -926,11 +1070,40 @@ func newStallNudgerWithTimeout(reg *agent.Registry, mail func(to, from, subject,
 				// the notice.
 				err := a.NudgeWake(message, agent.NudgeWaitIdle, ptyTimeout, "")
 				if err == nil {
+					// The agent went idle: it is reachable in person and able
+					// to drain. That is the damper's reset signal (mg-61ce).
+					if damper != nil {
+						damper.reset(agentName)
+					}
 					return stallwatch.Delivery{Channel: stallwatch.DeliveryPTY}, nil
 				}
-				// The PTY could not take it — busy, or wedged redrawing. The
-				// message was NOT written, so mail is the only delivery, not a
-				// second one. Tell the recipient why it arrived here: a stall
+				// The PTY could not take it — busy, or wedged redrawing. Before
+				// taking the mail road, ask the damping term whether this
+				// recipient can still absorb a fallback (mg-61ce). Past the cap
+				// it cannot: a capful of stall-watch notices is already sitting
+				// in its inbox undrained, and adding another is the move that
+				// makes the remedy load rise with the load it responds to.
+				if damper != nil {
+					n, allow := damper.admit(agentName)
+					if !allow {
+						// Loud once per run, not once per fire — a per-fire log
+						// line under saturation would be the same flood in a
+						// different channel. The per-fire record lives in the
+						// stall_watch_fired event's nudge_suppressed_consecutive.
+						if damper.announce(agentName) {
+							log.Printf("pogod: STALL FALLBACK SUPPRESSED for %s — %d consecutive mail fallbacks "+
+								"with no successful PTY delivery in between (cap %d); further stall notices are "+
+								"WITHHELD until %s goes idle once. The last PTY refusal was: %v",
+								agentName, n, damper.cap, agentName, err)
+						}
+						return stallwatch.Delivery{
+							Channel:               stallwatch.DeliverySuppressed,
+							FallbackReason:        err.Error(),
+							SuppressedConsecutive: n,
+						}, nil
+					}
+				}
+				// Tell the recipient why it arrived here: a stall
 				// notice in the inbox rather than on the terminal means the
 				// terminal was busy, and that context is itself diagnostic.
 				body := fmt.Sprintf(
@@ -955,6 +1128,25 @@ func newStallNudgerWithTimeout(reg *agent.Registry, mail func(to, from, subject,
 				}, nil
 			}
 		}
+		// The offline road: the recipient is not running (or the registry does
+		// not know it). Undamped — see stallFallbackDamper for why a cap with no
+		// reset signal would latch permanently — but the recipient's fallback
+		// run IS cleared here, for two reasons.
+		//
+		// Correctness: a coordinator that died and came back is a new process
+		// with a new PTY, and a run accumulated against the old one says nothing
+		// about the new one. Carrying it over would suppress the first notices
+		// to a freshly restarted, perfectly reachable agent.
+		//
+		// Housekeeping: this is what bounds the damper's map in a daemon that
+		// runs for months. Recipients are not a fixed set — `blocked:<agent>`
+		// notices (mg-3844) address polecats, and polecat names are unique per
+		// spawn — so without a prune the map would grow one entry per polecat
+		// that ever drew a suppressed reminder and never a PTY success. Every
+		// such agent eventually stops running and takes this road.
+		if damper != nil {
+			damper.reset(agentName)
+		}
 		if err := mail(agentName, "stall-watch", "stall-watch: work piling up", message); err != nil {
 			return stallwatch.Delivery{}, err
 		}
@@ -962,10 +1154,31 @@ func newStallNudgerWithTimeout(reg *agent.Registry, mail func(to, from, subject,
 	}
 }
 
-// newStallNudger is the production constructor: newStallNudgerWithTimeout at
-// the standard wait-idle budget.
-func newStallNudger(reg *agent.Registry, mail func(to, from, subject, body string) error) stallwatch.Nudger {
-	return newStallNudgerWithTimeout(reg, mail, agent.DefaultNudgeTimeout)
+// newStallNudgerWithTimeout is the test-facing constructor: an injected PTY
+// budget at the production damping cap. Tests that need to exercise the damper
+// itself build one explicitly and call newStallNudgerWithTimeoutAndDamper.
+func newStallNudgerWithTimeout(reg *agent.Registry, mail func(to, from, subject, body string) error, ptyTimeout time.Duration) stallwatch.Nudger {
+	return newStallNudgerWithTimeoutAndDamper(reg, mail, ptyTimeout,
+		newStallFallbackDamper(config.DefaultStallMailFallbackBacklogCap))
+}
+
+// newStallNudger is the production constructor: the standard wait-idle budget at
+// the configured damping cap.
+//
+// On the budget: mg-61ce asked whether the 30s wait-idle deadline is still the
+// right number for the current fleet size, since it was chosen against a smaller
+// one. It is, and the measurement says lengthening it is not merely unhelpful
+// but pointless. Across 1702 recorded fallbacks on this box, the gap since the
+// coordinator's last PTY write AT THE MOMENT the 30s deadline expired had a
+// median of 218ms and a p99 of 941ms; only 10 of 1702 (0.6%) had reached even
+// one second, against a 2s idle threshold. The coordinator is not almost-quiet
+// at the deadline — it is writing continuously — so a 60s or 300s budget buys
+// nothing and holds the heartbeat longer for it. The outcome of every one of
+// those fires was determined in the first two seconds. That is the same
+// conclusion mg-79dc reached from 18 samples, now confirmed at ~100x the n.
+func newStallNudger(reg *agent.Registry, mail func(to, from, subject, body string) error, fallbackCap int) stallwatch.Nudger {
+	return newStallNudgerWithTimeoutAndDamper(reg, mail, agent.DefaultNudgeTimeout,
+		newStallFallbackDamper(fallbackCap))
 }
 
 // newMailCheckReachabilityEscalator builds the mayor-nudge fired when a
@@ -1728,7 +1941,10 @@ Flags:
 	}
 	if stallWatchArmed(cfg) {
 		stallWatcher = stallwatch.New(cfg.StallWatch, stallwatch.Options{
-			Nudge: newStallNudger(agentRegistry, client.SendMGMail),
+			// The cap is mg-61ce's damping term on the mail fallback: past it,
+			// a coordinator that has not gone idle once stops being sent more
+			// notices about being too busy to be sent notices.
+			Nudge: newStallNudger(agentRegistry, client.SendMGMail, cfg.StallWatch.MailFallbackBacklogCap),
 			// Let a priority wake short-circuit the ~30s heartbeat poll for a
 			// prompt follow-up sweep (gh #61). hb.Nudge coalesces, so this can't
 			// storm the loop; the priority cooldown bounds it to one extra tick
@@ -1747,10 +1963,15 @@ Flags:
 			// polecat is already doing.
 			Workers: newStallWorkers(agentRegistry),
 		})
-		log.Printf("pogod: stall watcher enabled (agent=%s item_age=%s mail_age=%s max_mail=%d cooldown=%s priority_wake=%t wake_delay=%s wake_cooldown=%s fast_priorities=%s non_dispatchable=%s)",
+		log.Printf("pogod: stall watcher enabled (agent=%s item_age=%s mail_age=%s max_mail=%d cooldown=%s fallback_cap=%d priority_wake=%t wake_delay=%s wake_cooldown=%s fast_priorities=%s non_dispatchable=%s)",
 			cfg.StallWatch.Agent, cfg.StallWatch.UnclaimedItemAgeThreshold,
 			cfg.StallWatch.UnreadMailAgeThreshold, cfg.StallWatch.MaxUnreadMailCount,
-			cfg.StallWatch.NudgeCooldown, cfg.StallWatch.PriorityWakeEnabled,
+			cfg.StallWatch.NudgeCooldown,
+			// Printed because a NEGATIVE value here silently disables the
+			// damping (mg-61ce), and a disabled damper is indistinguishable
+			// from a working one until the flood arrives.
+			cfg.StallWatch.MailFallbackBacklogCap,
+			cfg.StallWatch.PriorityWakeEnabled,
 			cfg.StallWatch.HighPriorityWakeDelay, cfg.StallWatch.HighPriorityWakeCooldown,
 			strings.Join(cfg.StallWatch.FastPriorities, ","),
 			// The `blocked:<agent>` shape (mg-6fb0) gates alongside the

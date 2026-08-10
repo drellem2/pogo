@@ -306,6 +306,9 @@ unread_mail_age_threshold = "10m"       # Threshold B (age)
 max_unread_mail_count = 5               # Threshold B (count)
 nudge_cooldown = "5m"                   # gap before the SECOND notice about an item
 repeat_backoff_cap = "4h"               # ceiling on the doubling repeat backoff
+mail_fallback_backlog_cap = 3           # consecutive mail fallbacks per recipient
+                                        # before further ones are withheld
+                                        # (negative disables the damping)
 
 # Assignees that mean "do NOT dispatch this" — see "Ownership vs execution".
 non_dispatchable_assignees = ["human", "parked"]  # everything else is watched
@@ -354,6 +357,55 @@ holding is gone.
 `stall_watch_fired` events carry `repeat_counts` (item → notice number),
 `backoff_suppressed_ids`, and `next_backoff` so the repetition stays countable
 per item without hand-correlating ids across fires.
+
+### The mail fallback is damped per recipient
+
+When the watched agent is running but too busy to go idle, the notice takes the
+durable mail road instead of its terminal (mg-79dc). That fallback had no
+damping term, and the direction it ran in was perverse: it fires *because* the
+recipient is saturated, and it answers by adding work to that recipient's inbox.
+The busier the coordinator, the more often the PTY refuses; the more it refuses,
+the more stall-watch mails the agent it has just observed to be overloaded.
+
+The `unread_mail` category closed the loop outright — its notice reads "your
+inbox is too full" and arrives *as one more message in that inbox*, re-arming
+its own trigger. Measured on one box over 20 000 events: 1814 stall fires took
+the mail road, and the coordinator's maildir held 766 stall-watch messages, 742
+of them fallbacks — the largest subject line in a 5978-message mailbox by nine
+times — of which 179 were the self-referential unread-mail notice.
+
+`mail_fallback_backlog_cap` (default 3) bounds it. It counts, per recipient,
+consecutive fallbacks since the last **successful PTY delivery** — direct
+evidence the agent went idle and can therefore drain. Past the cap further
+fallbacks are withheld until that happens; the counter is not a measure of
+inbox depth, so a coordinator's legitimate mail from other agents never silences
+the watcher.
+
+Withholding is not silence. The transition is logged loudly once per run, and
+every suppressed fire stamps `nudge_suppressed_consecutive` into the
+`stall_watch_fired` event — a value that keeps climbing means the coordinator
+has not gone idle once across that whole run, which is a sharper signal than the
+flood it replaces. A suppressed fire carries `nudge_delivery = "suppressed"` and
+**no** `nudge_error`: nothing was delivered, but that was a decision rather than
+a fault, and only the latter should read as an outage.
+
+Nothing is lost to the deferral. Stall-watch re-derives every condition from
+scratch each tick and never queues, so the moment the recipient becomes
+reachable the *current* state fires, not a stale replay.
+
+Two scope notes. The cap bounds the **fallback** road only — the offline road
+(recipient not running) is undamped, because it has no reset signal and a cap
+there would latch permanently the first time a coordinator went down. And a
+recipient going offline clears its run, so a restarted coordinator is not
+silenced by a run accumulated against the process that died.
+
+On the 30s wait-idle budget this fallback hangs off: it is not worth
+lengthening, and that is measured rather than assumed. Across 1702 recorded
+fallbacks the gap since the coordinator's last PTY write *at the moment the
+deadline expired* had a median of 218 ms and a p99 of 941 ms, against a 2 s idle
+threshold — only 10 of 1702 had reached even one second. The coordinator is not
+almost-quiet when the deadline fires; it is writing continuously. A longer
+budget buys nothing and holds the heartbeat longer for it.
 
 ### Ownership vs execution — which items the work-item detectors watch
 

@@ -861,12 +861,13 @@ func TestDefaultsAppliedFromZeroConfig(t *testing.T) {
 // what makes the PTY channel's failure rate countable instead of grep-able.
 func TestFireStampsDeliveryChannel(t *testing.T) {
 	tests := []struct {
-		name           string
-		delivery       Delivery
-		nudgeErr       error
-		wantChannel    any
-		wantReason     any
-		wantErrPresent bool
+		name            string
+		delivery        Delivery
+		nudgeErr        error
+		wantChannel     any
+		wantReason      any
+		wantSuppressedN any
+		wantErrPresent  bool
 	}{
 		{
 			name:        "pty delivery stamps the channel and no fallback reason",
@@ -881,6 +882,23 @@ func TestFireStampsDeliveryChannel(t *testing.T) {
 			delivery:    Delivery{Channel: DeliveryMailFallback, FallbackReason: "still producing output after 30s"},
 			wantChannel: DeliveryMailFallback,
 			wantReason:  "still producing output after 30s",
+		},
+		{
+			// The mg-61ce case: the fallback was deliberately WITHHELD because
+			// this recipient already has a capful of stall-watch notices it has
+			// given no evidence of being able to receive. Nothing was
+			// delivered — but this is a decision, not a failure, so it must
+			// carry no nudge_error. Confusing the two would make the damping
+			// term read as an outage in every dashboard that counts errors.
+			name: "suppressed fallback stamps the channel, the reason, and the run depth",
+			delivery: Delivery{
+				Channel:               DeliverySuppressed,
+				FallbackReason:        "still producing output after 30s",
+				SuppressedConsecutive: 7,
+			},
+			wantChannel:     DeliverySuppressed,
+			wantReason:      "still producing output after 30s",
+			wantSuppressedN: 7,
 		},
 		{
 			// Both channels down. Now — and only now — does nudge_error mean
@@ -913,6 +931,13 @@ func TestFireStampsDeliveryChannel(t *testing.T) {
 			}
 			if got := d["nudge_fallback_reason"]; got != tc.wantReason {
 				t.Errorf("nudge_fallback_reason = %v, want %v", got, tc.wantReason)
+			}
+			// The run depth is the field that separates "the damping term is
+			// working" from "this coordinator has been unreachable for hours".
+			// One suppression is health; a counter climbing across fires is the
+			// escalation signal, and it only exists if it is stamped per fire.
+			if got := d["nudge_suppressed_consecutive"]; got != tc.wantSuppressedN {
+				t.Errorf("nudge_suppressed_consecutive = %v, want %v", got, tc.wantSuppressedN)
 			}
 			if _, ok := d["nudge_error"]; ok != tc.wantErrPresent {
 				t.Errorf("nudge_error present = %v, want %v", ok, tc.wantErrPresent)
