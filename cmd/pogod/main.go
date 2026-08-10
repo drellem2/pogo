@@ -1537,19 +1537,12 @@ Flags:
 			gen := agentRegistry.Generation()
 			go func() {
 				time.Sleep(2 * time.Second)
-				if _, rerr := agentRegistry.RespawnFromGeneration(a.Name, gen); rerr != nil {
-					log.Printf("agent %s: restart failed: %v", a.Name, rerr)
-					// A6 (mg-342d). The respawn is ONE-SHOT: nothing tries
-					// again, so a crew agent whose restart failed is simply
-					// gone, and until now the only trace was this line. There
-					// is no stall to detect and no missed ack to count for an
-					// agent that is not running at all.
-					conditions.Raise(conditionRestartFailed(coordinator, a.Name, rerr.Error()), time.Now())
-					conditions.flush()
-				} else {
-					conditions.Clear(rowA6RestartPrefix+a.Name, time.Now())
-					conditions.flush()
-				}
+				_, rerr := agentRegistry.RespawnFromGeneration(a.Name, gen)
+				// A refusal from the shutdown latch or the generation check is
+				// the guard working, not a restart failure — see
+				// noteRespawnOutcome for why alarming on it made A6 unreadable
+				// (mg-0208).
+				noteRespawnOutcome(conditions, coordinator, a.Name, rerr, time.Now())
 			}()
 		} else {
 			if a.RestartOnCrash && !a.ShouldRespawn() {
