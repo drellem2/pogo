@@ -348,6 +348,146 @@ func TestShippedBuildPRTemplateProtocol(t *testing.T) {
 	}
 }
 
+// TestShippedBuildPRTemplateDoesNotContradictItselfOnMGDone guards the defect
+// behind drellem2/pogo#131 (mg-e7cb): the template's closing FAILURE MODE
+// paragraph used to say BOTH "if you ... skip `mg done`, the work is lost ...
+// only you can close the item" AND, three sentences later in the same
+// paragraph, "Calling `mg done` before the {{.Coordinator}} confirms the merge
+// is also a failure."
+//
+// A builder could cite that paragraph whichever way it went, and the half that
+// is false on this track was the LAST thing it read. The consequence is not
+// bookkeeping: a self-closed item makes the builder reapable
+// (cmd/pogod/donereap.go stops any polecat whose item is terminal after 2m of
+// PTY quiet), so the reviewer loses its counterparty mid-loop.
+//
+// Both arms below fail against the pre-change text — the false claim was
+// present, and the PR-open step said nothing about `mg done` — so this is not a
+// test that could only ever pass.
+func TestShippedBuildPRTemplateDoesNotContradictItselfOnMGDone(t *testing.T) {
+	out := expandShippedTemplate(t, "prompts/templates/polecat-build-pr.md")
+
+	// Arm 1: the inherited non-PR-track claim must be gone. These are the
+	// sentence fragments that told the builder to self-close.
+	for _, banned := range []string{
+		"skip `mg done`, the work is lost",
+		"only you can close the item",
+	} {
+		if strings.Contains(out, banned) {
+			t.Errorf("expanded polecat-build-pr.md: still contains %q — that is false on the PR track, "+
+				"where the item stays claimed through review and is closed at merge (drellem2/pogo#131)", banned)
+		}
+	}
+
+	// Arm 2: the prohibition must be stated where the builder is standing when
+	// it makes the call — the PR-open step, not only the closing paragraph.
+	start := strings.Index(out, "5. **Open a pull request")
+	end := strings.Index(out, "6. **Announce the PR.**")
+	if start < 0 || end < 0 || end <= start {
+		t.Fatal("expanded polecat-build-pr.md: cannot locate the PR-open step (5) — has the protocol been renumbered?")
+	}
+	prOpen := out[start:end]
+	if !strings.Contains(prOpen, "mg done") {
+		t.Error("expanded polecat-build-pr.md: the PR-open step never mentions `mg done`. " +
+			"PR-open is the moment the builder is tempted to close its item, so the invariant has to be " +
+			"readable there and not only in the closing FAILURE MODE paragraph (mg-e7cb)")
+	}
+
+	// Arm 3: the correct prohibition and its one exception both survive. The
+	// rewrite must not swing the other way and delete the escape hatch that
+	// lets a coordinator-confirmed merge be closed out.
+	for _, want := range []string{
+		"stays claimed through review",
+		"The only exception is the " + DefaultCoordinatorName,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("expanded polecat-build-pr.md: expected %q to survive the rewrite", want)
+		}
+	}
+}
+
+// TestShippedReviewTemplateChecksCounterpartyBeforeWaiting guards part 2 of
+// drellem2/pogo#131 (mg-e7cb). The between-rounds wait is untimed: if the
+// builder is gone, nothing ends it and the round stalls in a silence
+// indistinguishable from a builder taking its time. The reporting reviewer ran
+// this check on its own initiative, which is the only reason its round did not
+// stall — an agent inventing the behaviour its prompt lacks is evidence about
+// the prompt.
+//
+// Fails against the pre-change text, whose fail-path said only "Wait for the
+// builder's fixed-and-pushed mail".
+func TestShippedReviewTemplateChecksCounterpartyBeforeWaiting(t *testing.T) {
+	out := expandShippedTemplate(t, "prompts/templates/polecat-review.md")
+
+	start := strings.Index(out, "**If fail, rounds 1 or 2:**")
+	end := strings.Index(out, "**If pass (any round):**")
+	if start < 0 || end < 0 || end <= start {
+		t.Fatal("expanded polecat-review.md: cannot locate the fail-rounds-1-or-2 branch")
+	}
+	failPath := out[start:end]
+
+	// Both probes must be prescribed: the item's status answers "is the work
+	// item terminal", the registry answers "is a process actually running
+	// against it". Neither implies the other — an item can read `claimed` by a
+	// polecat that has already died.
+	for _, want := range []string{
+		"mg show <build-ticket-id> --json",
+		"pogo agent list",
+	} {
+		if !strings.Contains(failPath, want) {
+			t.Errorf("polecat-review.md fail path: expected the counterparty check to run %q (mg-e7cb)", want)
+		}
+	}
+
+	// Ordering is the whole point: a liveness check AFTER the wait begins is
+	// not a liveness check. The probes must precede the instruction to wait.
+	// Case-folded: whether the wait sentence starts a sentence or continues one
+	// is a wording choice, not the property under test.
+	lowered := strings.ToLower(failPath)
+	probe := strings.Index(lowered, "mg show <build-ticket-id> --json")
+	wait := strings.Index(lowered, "wait for the builder's fixed-and-pushed mail")
+	if wait < 0 {
+		t.Fatal("polecat-review.md fail path: lost the instruction to wait for the builder's mail")
+	}
+	if probe > wait {
+		t.Error("polecat-review.md fail path: the counterparty check comes AFTER the instruction to wait. " +
+			"Checking once already blocked is not checking — the probes must precede the wait (mg-e7cb)")
+	}
+
+	// The escalation must name a destination. "Something is wrong" with no
+	// recipient is how the original round stalled.
+	if !strings.Contains(failPath, "Mail the "+DefaultCoordinatorName) {
+		t.Errorf("polecat-review.md fail path: a failed counterparty check must route to the %s, "+
+			"not leave the reviewer to decide (mg-e7cb)", DefaultCoordinatorName)
+	}
+}
+
+// expandShippedTemplate reads an embedded prompt template, strips its
+// frontmatter, and expands it with the default template vars — the same
+// sequence TestShippedBuildPRTemplateProtocol does inline. Assertions run
+// against the EXPANDED text so they read what a polecat is actually handed
+// rather than the `{{.Coordinator}}` placeholders.
+func expandShippedTemplate(t *testing.T, path string) string {
+	t.Helper()
+	data, err := defaultPrompts.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read embedded %s: %v", path, err)
+	}
+	_, body, err := parsePromptFrontmatterBytes(data)
+	if err != nil {
+		t.Fatalf("parse frontmatter of %s: %v", path, err)
+	}
+	tmpl, err := template.New(filepath.Base(path)).Parse(body)
+	if err != nil {
+		t.Fatalf("parse template %s: %v", path, err)
+	}
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, withDefaults(TemplateVars{Id: "mg-test", Provider: "claude"})); err != nil {
+		t.Fatalf("execute template %s: %v", path, err)
+	}
+	return buf.String()
+}
+
 // TestMayorGHIssueTriageRetirement pins the retirement step for the gh-issue
 // triage ticket (mg-7c95). The playbook used to close its GO branch with "The
 // triage ticket is complete — archive it on your normal sweep", which is not a

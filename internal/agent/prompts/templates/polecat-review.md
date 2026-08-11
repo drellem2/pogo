@@ -179,7 +179,23 @@ Follow these steps exactly, in order. Skipping any step is a failure.
    round <R>: <n> blocking, <n> advisory; findings mailed to builder; PR <pr-number>
    EOF
    ```
-   Do **not** call `mg done` — the loop is still open. Wait for the builder's fixed-and-pushed mail (your step-2 schedule surfaces it), then go back to step 4 and re-review as round R+1: sync to the new head, run all three lenses again — the fix itself can introduce new problems.
+   Do **not** call `mg done` — the loop is still open.
+
+   **Then check your counterparty is still there, BEFORE you settle into the wait.** The between-rounds wait has no timeout: if the builder is gone, nothing ends it, and the round stalls in a silence that looks exactly like a builder taking its time.
+
+   ```bash
+   mg show <build-ticket-id> --json | jq -r .status        # expect: claimed
+   pogo agent list | grep 'work-item=<build-ticket-id>'    # expect: one running polecat
+   ```
+
+   Either answer coming back wrong means no fix mail is ever arriving:
+   - **`done` or `archived`** — the build item is terminal. A builder that closed its own item is then reaped by pogod once its PTY has been quiet two minutes (`cmd/pogod/donereap.go`), so it is already gone or about to be. That is drellem2/pogo#131, reported by a reviewer that ran this check on its own initiative — which is the only reason its round did not stall silently.
+   - **empty output** — not a third state to shrug at, and note what it is NOT: `mg show` prints its error JSON to **stderr** and exits 3, so the pipeline above yields an empty string and still exits 0 (that is `jq`'s status, not `mg`'s). Never branch on the pipeline's exit code here. Re-run as plain `mg show <build-ticket-id>` to see whether the id is wrong or the store is unreadable.
+   - **no matching line in `pogo agent list`** — no {{.Worker}} is running against that item, whatever the item says.
+
+   Do not poll through it and do not fix the PR yourself. Mail the {{.Coordinator}} the build ticket id, the round number, the PR, and what both checks actually returned, then stand by for instructions.
+
+   With a live counterparty confirmed, wait for the builder's fixed-and-pushed mail (your step-2 schedule surfaces it), then go back to step 4 and re-review as round R+1: sync to the new head, run all three lenses again — the fix itself can introduce new problems.
 
    **If pass (any round):** mail the verdict transition to the {{.Coordinator}} (who submits the branch to the refinery — you never submit it yourself), then record the verdict:
    ```bash
