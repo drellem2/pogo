@@ -851,6 +851,16 @@ func TestDefaultsAppliedFromZeroConfig(t *testing.T) {
 	if w.watchedForDispatch(workitem.WorkItem{Stage: config.GatedStage}) {
 		t.Error("zero config must not watch an item at `stage: gated` for dispatch")
 	}
+	// The gate we could not READ (mg-27d4). An empty Stage no longer means "this
+	// item declares no stage" — it can also mean "it declares one somewhere the
+	// leading-block scan cannot reach", and this watcher must not offer the
+	// second up as ready. Two items in available/ were in exactly that state
+	// when this landed, with `stage: gated` written above their title heading.
+	if w.watchedForDispatch(workitem.WorkItem{CarrierUnreadable: true}) {
+		t.Error("an item whose carrier block cannot be read must not be watched for " +
+			"dispatch: its unread stage may be `gated`, and offering it as ready " +
+			"recommends a spawn the daemon then refuses")
+	}
 }
 
 // TestFireStampsDeliveryChannel (mg-79dc): the emitted event must record WHICH

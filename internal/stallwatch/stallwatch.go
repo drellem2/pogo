@@ -650,7 +650,18 @@ func (w *Watcher) checkUnreadMail(now time.Time) {
 // queue belongs to the PM sweep, which reads it anyway — see
 // config.DefaultNonDispatchableAssignees for why that split, not this watcher,
 // owns it.
+//
+// An item whose carrier block the parser COULD NOT READ is treated as gated too
+// (mg-27d4). That is the third outcome the parse gained: `Stage` being empty no
+// longer means "declares no stage", it can also mean "declares one somewhere I
+// could not reach", and this watcher must not offer up the second as ready. Two
+// items in available/ were in exactly that state when this landed — `stage:
+// gated` written above their title heading, held only by an `assignee: parked`
+// nobody could have relied on being there.
 func (w *Watcher) watchedForDispatch(it workitem.WorkItem) bool {
+	if it.CarrierUnreadable {
+		return false
+	}
 	return !w.isDispatchGated(it.Assignee) && !config.IsStageGated(it.Stage)
 }
 
