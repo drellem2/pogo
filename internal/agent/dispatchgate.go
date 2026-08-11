@@ -61,6 +61,17 @@ type Gating struct {
 	// `stage: gated` for a human GO/NO-GO and sets no assignee, so before this
 	// field the workflow's own gate stopped nothing.
 	Stage string
+	// CarrierUnreadable gates an item whose carrier block the parser could not
+	// reach (mg-27d4). It is not a third KIND of gate so much as the honest
+	// answer to the stage question: the item declares a stage somewhere the
+	// leading-block scan cannot read, so this gate does not know whether it is
+	// `gated`, and an item whose gate cannot be read is precisely the item not to
+	// dispatch.
+	//
+	// It carries no value, because there is none to carry. Reporting a stage read
+	// out of the middle of a body is the body-wide search workitem's parser
+	// deliberately refuses — a body that DISCUSSES a stage would gate on it.
+	CarrierUnreadable bool
 }
 
 // MGDispatchGate is the production DispatchGate: it reads the work item out of
@@ -136,6 +147,23 @@ func (m MGDispatchGate) DispatchGated(workItemID string) (Gating, bool) {
 	if config.IsStageGated(item.Stage) {
 		return Gating{Stage: item.Stage}, true
 	}
+	// The gate we could not read (mg-27d4). Checked AFTER the readable stage, so
+	// an item that declares a real leading `stage: gated` AND has a stray
+	// declaration further down still refuses with the specific message.
+	//
+	// This is the fail-CLOSED direction, and it is a deliberate exception to the
+	// asymmetry documented on config.IsStageGated. That asymmetry is about the
+	// STORE — no id, no store, an unopenable file — where failing closed would
+	// refuse every legitimate spawn on the day one path goes bad. This is not
+	// that: the item was found, opened and parsed, and what it says is that its
+	// own gate declaration is somewhere this parser will not read. The blast
+	// radius is one item, and it is an item nobody can currently reason about.
+	if item.CarrierUnreadable {
+		log.Printf("dispatch gate: work item %s has carrier-shaped `workflow:`/`stage:` lines "+
+			"the leading-block parser cannot reach — REFUSING the spawn, because an item whose "+
+			"gate cannot be read may be at `stage: gated`", workItemID)
+		return Gating{CarrierUnreadable: true}, true
+	}
 	// Not gated — the spawn proceeds. But if the item DECLARES a block in the
 	// only channel that existed before the `blocked:<agent>` shape (mg-6fb0), say
 	// so on the way past. This is the harm moment: a polecat is about to be put
@@ -208,6 +236,21 @@ func (r *Registry) dispatchGateRefusal(workItemID string) string {
 			"the stage back to `triage` first (that is what re-triage means); if the decision has "+
 			"been made, move the stage on",
 			workItemID, g.Stage)
+	}
+	// The unreadable carrier (mg-27d4). The way out is neither a decision nor a
+	// reassignment — it is an EDIT, and it is a one-line move, so the message
+	// says exactly where the block goes rather than describing the parse rule.
+	// The reader is usually an agent that has to fix this without a human.
+	if g.CarrierUnreadable {
+		return fmt.Sprintf("work item %s declares `workflow:`/`stage:` lines that the carrier-block "+
+			"parser cannot reach: the block must be the FIRST non-blank content under the `# ` title "+
+			"heading, and this item has something else there — a lead-in sentence, a PR link, or the "+
+			"block written above the heading instead of below it. It is gated because the parser "+
+			"cannot tell whether it says `stage: gated`, and an item whose gate cannot be read is not "+
+			"dispatched. Fix it by moving the block directly under the title heading (`mg edit %s "+
+			"--body=...`, preserving the rest of the body); the refusal clears as soon as the block "+
+			"leads the body",
+			workItemID, workItemID)
 	}
 	assignee := g.Assignee
 	// The `blocked:<agent>` shape gets its own sentence (mg-6fb0). It gates for a

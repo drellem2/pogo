@@ -43,6 +43,31 @@ type WorkItem struct {
 	// an absent line reads as "this item declares no stage", never as a stage.
 	Workflow string `json:"workflow,omitempty"`
 	Stage    string `json:"stage,omitempty"`
+	// CarrierUnreadable is the parse's THIRD OUTCOME, and it exists because the
+	// first two were not enough (mg-27d4). Until it did, scanCarrierBlock had
+	// exactly two answers — a carrier, or no carrier — and it resolved "there is
+	// carrier-shaped content in this body that I could not reach" as NO CARRIER.
+	// That is the fail-open direction: an item whose gate declaration the parser
+	// cannot see parses as declaring no gate, and therefore does not gate.
+	//
+	// One line of prose above the block is all it takes, because the block is
+	// only visible when it leads the body. That is not a hypothetical shape:
+	// measured over the live store on 2026-08-12, 14 of 29 build carriers and 4
+	// of 27 review carriers were already in it — the common case on the build
+	// side, not an edge case. `mg show` renders those blocks perfectly to a human
+	// while the parser sees nothing, so the failure is silent in both directions.
+	//
+	// Set means: this body declares a `workflow:`/`stage:` line, unquoted and at
+	// column 0, BELOW where the leading-block scan stopped. It carries no stage
+	// value of its own on purpose — the point is that the value could not be
+	// read, and a consumer must not act as though it had one.
+	//
+	// EVERY DISPATCH GATE MUST TREAT THIS AS GATED (see agent.MGDispatchGate and
+	// stallwatch): an item whose gate cannot be read is precisely the item not to
+	// dispatch. Reading it as ungated is how mg-69b1's failure — a re-dispatch
+	// posting a second acknowledgement comment on a stranger's open GitHub issue
+	// — stayed reachable by a filer putting one line too high.
+	CarrierUnreadable bool `json:"carrier_unreadable,omitempty"`
 	// ModTime is the work item file's last-modified time. It is the best
 	// available proxy for how long an item has sat in its current status
 	// directory (mg rewrites/moves the file on status transitions), which the
@@ -387,18 +412,36 @@ func parseWorkItem(path, status string) (WorkItem, error) {
 		}
 	}
 
-	// Read first markdown heading as title
-	found := false
+	// Read first markdown heading as title.
+	//
+	// Everything before it is DISCARDED, and that discard is the second way a
+	// carrier goes unread (mg-27d4). A block written between the frontmatter's
+	// closing `---` and the title heading is consumed here and never reaches
+	// scanCarrierBlock — measured live on mg-779b and mg-9863, both sitting in
+	// available/ with `stage: gated` three lines above their heading, both
+	// invisible to the gate that reads this parse. (Their `assignee: parked` was
+	// holding them, which is luck, not a mechanism: the stage line was doing
+	// nothing.) So the skipped lines are checked on the way past.
+	found, preTitleCarrier := false, false
 	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
+		raw := scanner.Text()
+		line := strings.TrimSpace(raw)
 		if strings.HasPrefix(line, "# ") {
 			item.Title = strings.TrimPrefix(line, "# ")
 			found = true
 			break
 		}
+		if key, _, ok := parseCarrierLine(raw); ok && isGateBearingCarrierKey(key) {
+			preTitleCarrier = true
+		}
 	}
 	if found {
-		item.Workflow, item.Stage = scanCarrierBlock(scanner)
+		item.Workflow, item.Stage, item.CarrierUnreadable = scanCarrierBlock(scanner)
+	}
+	// A pre-title declaration is unreadable whatever the body below turns out to
+	// hold, and so is a file with no title heading at all to scan from.
+	if preTitleCarrier {
+		item.CarrierUnreadable = true
 	}
 
 	return item, nil
@@ -426,7 +469,22 @@ const carrierBlockScanLimit = 16
 //
 // Leading blank lines are skipped so a body that puts a blank line under its
 // heading still parses; anything else ends the block before it starts.
-func scanCarrierBlock(scanner *bufio.Scanner) (workflow, stage string) {
+//
+// # The third return value, and why two were not enough (mg-27d4)
+//
+// Stopping at the first non-carrier line is right, but "I stopped" and "there
+// was nothing here" were being reported with the same two values. So a body
+// whose block sits one line below a lead-in sentence — a PR link, a "Triage
+// this:" — returned empty workflow and empty stage, indistinguishable from an
+// ordinary item that declares nothing, and its `stage: gated` did not gate.
+//
+// unreadable closes that: after the block ends, the scan keeps looking for a
+// GATE-BEARING declaration line further down, and reports one if it finds it
+// WITHOUT reading its value. The value is deliberately not returned — the whole
+// finding is that this body's declarations are not where a declaration goes,
+// and picking one out of the middle of a body is the body-wide search this
+// parser exists to refuse (see TestCarrierBlockIgnoresProseThatQuotesIt).
+func scanCarrierBlock(scanner *bufio.Scanner) (workflow, stage string, unreadable bool) {
 	seen := 0
 	started := false
 	for scanner.Scan() && seen < carrierBlockScanLimit {
@@ -437,7 +495,7 @@ func scanCarrierBlock(scanner *bufio.Scanner) (workflow, stage string) {
 		}
 		key, val, ok := parseCarrierLine(line)
 		if !ok {
-			return workflow, stage
+			return workflow, stage, scanUnreachableCarrier(scanner, line)
 		}
 		started = true
 		switch key {
@@ -447,7 +505,89 @@ func scanCarrierBlock(scanner *bufio.Scanner) (workflow, stage string) {
 			stage = val
 		}
 	}
-	return workflow, stage
+	// Falling out of the loop means the block ran to carrierBlockScanLimit and
+	// was TRUNCATED, not that it ended. Whatever is on line 17 was never read, so
+	// this is the same "could not reach" state and gets the same answer. No real
+	// carrier block is 16 lines long; the shipped one is three.
+	return workflow, stage, seen >= carrierBlockScanLimit
+}
+
+// unreachableCarrierScanLimit bounds how far past the end of the leading block
+// scanUnreachableCarrier keeps looking. It is not the same kind of number as
+// carrierBlockScanLimit: that one bounds a scan that normally stops on its first
+// line, while this one runs on every item that has any body at all, including
+// every item in done/ — where bodies run to a thousand lines and the store is
+// 25MB. Reading all of it to be sure is affordable exactly once and not on every
+// list.
+//
+// It is also a semantic bound and not only a budget. The convention is that the
+// carrier block LEADS the body; a `stage:` line 60 lines into a narrative is not
+// a misplaced carrier block, it is prose that happens to be shaped like one, and
+// treating it as a gate would be the body-wide search this file refuses.
+//
+// Measured over the live store when this landed: of the 18 items with an
+// unreachable carrier, the deepest sat 3 body lines below the title. The margin
+// is wide because the bound is meant to be uncontroversial, not tight.
+//
+// THE RESIDUAL IS REAL AND IS STATED HERE RATHER THAN LEFT TO BE DISCOVERED: a
+// carrier block pushed past this many lines is still invisible and still reads
+// as ungated. That is the same fail-open this constant exists to shrink, made
+// much harder to reach rather than impossible.
+const unreachableCarrierScanLimit = 40
+
+// scanUnreachableCarrier reports whether a gate-bearing carrier declaration
+// appears below the point where the leading block ended — the state mg-27d4
+// named: "there is carrier-shaped content here that I could not reach".
+//
+// stopLine is the line that ended the block; it is examined too, since a body
+// can open with a single lead-in sentence and put the block directly under it.
+//
+// Two narrowings, each of which is what keeps a fail-closed signal from
+// stranding work that is fine:
+//
+//   - Only `workflow:` and `stage:` count. Those are the lines that carry a
+//     GATE; `gh:` ties a ticket to an issue and changes no dispatch decision, so
+//     flagging a body for one would refuse work over a line that could not have
+//     gated it either way.
+//   - Fenced code blocks are skipped. A body that quotes the carrier convention
+//     inside ``` is documenting it, not declaring it — the mayor prompt's own
+//     example block has exactly this shape, and every ticket that pastes it
+//     would otherwise gate itself. Indented quotations need no special case:
+//     parseCarrierLine already requires column 0.
+func scanUnreachableCarrier(scanner *bufio.Scanner, stopLine string) bool {
+	fenced := false
+	line := stopLine
+	for seen := 0; seen < unreachableCarrierScanLimit; seen++ {
+		if isCodeFence(line) {
+			fenced = !fenced
+		} else if !fenced {
+			if key, _, ok := parseCarrierLine(line); ok && isGateBearingCarrierKey(key) {
+				return true
+			}
+		}
+		if !scanner.Scan() {
+			return false
+		}
+		line = scanner.Text()
+	}
+	return false
+}
+
+// isGateBearingCarrierKey reports whether a carrier key is one whose misplaced
+// declaration is worth refusing dispatch over. `workflow:` and `stage:` are:
+// `stage:` IS the gate (config.IsStageGated) and `workflow:` is what says a body
+// is carrying one. `gh:` is not — it ties a ticket to an issue and changes no
+// dispatch decision, so gating an item over a stray one would refuse work for a
+// line that could not have gated it either way.
+func isGateBearingCarrierKey(key string) bool {
+	return key == "workflow" || key == "stage"
+}
+
+// isCodeFence reports whether a line opens or closes a markdown fenced block.
+// Only column-0 fences matter, because only column-0 lines can parse as carrier
+// declarations in the first place.
+func isCodeFence(line string) bool {
+	return strings.HasPrefix(line, "```") || strings.HasPrefix(line, "~~~")
 }
 
 // parseCarrierLine splits one carrier-block line into its key and value. It is
