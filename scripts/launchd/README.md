@@ -404,6 +404,11 @@ All optional; the defaults are the production values.
 | `POGO_DEPLOY_SYNC_VIGIL` | `1` | `0` disables the vigil tier, restoring the pre-mg-5515 bound exactly. |
 | `POGO_DEPLOY_SYNC_VIGIL_INTERVAL` | `300` | Seconds between vigil probes. Flat, not geometric: a ramp would sleep through the recovery it exists to catch. |
 | `POGO_DEPLOY_PROBE_TIMEOUT` | `5` | Seconds the reachability probe waits before reporting `unclassified`. |
+| `POGO_NET_CONTROL_LIB` | beside the runner, then `../lib/` | Where the positive-control library is loaded from. If nothing is found the runner reports `net_control=unknown` and names the paths it tried; it never falls back to interpreting a one-endpoint probe. |
+| `POGO_NET_CONTROL_TARGETS` | `1.1.1.1:443 8.8.8.8:443 9.9.9.9:443` | The control's reference set, by literal IP. Three operators on three networks: with one target a dead target and a dead box are the same observation. Empty disables the arm. |
+| `POGO_NET_CONTROL_NAME_TARGETS` | `one.one.one.one:443 dns.google:443` | The same operators reached by NAME, so an IP-up/DNS-down box gets its own line instead of being folded into a verdict. |
+| `POGO_NET_CONTROL_TIMEOUT` | `5` | Per-probe seconds for the control. |
+| `POGO_NET_CONTROL_MIN_TARGETS` | `2` | Targets that must be probed before `down` is available at all. |
 | `POGO_DEPLOY_STALE_LOCK_MIN` | `180` | Minutes after which a lock is reclaimed. The vigil refreshes the lock's mtime, so this means "no run has made progress in 180min". |
 | `POGO_DEPLOY_GRACE` | `120` | Seconds before the post-bounce mail-check re-read. |
 | `POGO_DEPLOY_ZSHENV` | `~/.zshenv` | Where `GH_TOKEN` is read from. |

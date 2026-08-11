@@ -241,6 +241,44 @@ func findDeployScriptSource() (string, error) {
 	return "", fmt.Errorf("pogo-deploy.sh not found in any of: %v (set POGO_DEPLOY_SCRIPT to override)", candidates)
 }
 
+// netControlInstallPath — where install-deploy puts scripts/lib/net-control.sh.
+// A SIBLING of the runner, because that is the first place load_net_control
+// looks and it is the only directory the runner can locate without knowing
+// anything about the repo.
+func netControlInstallPath() string {
+	return filepath.Join(filepath.Dir(deployScriptInstallPath()), "net-control.sh")
+}
+
+// findNetControlSource locates the bundled scripts/lib/net-control.sh. Mirrors
+// findDeployScriptSource, and deliberately so: the two files are installed as a
+// pair and a divergence in how they are FOUND is how one of them silently stops
+// being shipped.
+func findNetControlSource() (string, error) {
+	candidates := []string{}
+	if exe, err := os.Executable(); err == nil {
+		dir := filepath.Dir(exe)
+		candidates = append(candidates,
+			filepath.Join(dir, "..", "scripts", "lib", "net-control.sh"),
+			filepath.Join(dir, "scripts", "lib", "net-control.sh"),
+		)
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		candidates = append(candidates, filepath.Join(cwd, "scripts", "lib", "net-control.sh"))
+	}
+	if env := os.Getenv("POGO_NET_CONTROL_SCRIPT"); env != "" {
+		candidates = append([]string{env}, candidates...)
+	}
+	for _, c := range candidates {
+		if _, err := os.Stat(c); err == nil {
+			if abs, err := filepath.Abs(c); err == nil {
+				return abs, nil
+			}
+			return c, nil
+		}
+	}
+	return "", fmt.Errorf("net-control.sh not found in any of: %v (set POGO_NET_CONTROL_SCRIPT to override)", candidates)
+}
+
 // renderDeployPlist materializes the template against the current host.
 func renderDeployPlist() (string, deployData, error) {
 	home, _ := os.UserHomeDir()
@@ -296,6 +334,31 @@ func InstallDeploy() error {
 	dst := deployScriptInstallPath()
 	if err := os.WriteFile(dst, scriptBytes, 0755); err != nil {
 		return fmt.Errorf("failed to write %s: %w", dst, err)
+	}
+
+	// The runner's positive control (mg-db96). It ships as a separate library
+	// because it is not deploy-specific — any runner that reads a probe failure
+	// needs it — but the runner cannot source it out of the repo: the whole
+	// reason the script is copied here is that at 03:00 the checkout may be
+	// mid-fetch or broken. So the library is copied alongside it.
+	//
+	// NOT fatal when the source is missing. Refusing to install the nightly
+	// because its evidence-gathering library is absent would trade a job that
+	// alerts with less information for no job at all, and the runner already
+	// degrades honestly: without the library it reports the control as
+	// `unknown` and says which paths it tried, in the alert itself.
+	if netSrc, nerr := findNetControlSource(); nerr == nil {
+		if libBytes, rerr := os.ReadFile(netSrc); rerr == nil {
+			if werr := os.WriteFile(netControlInstallPath(), libBytes, 0755); werr != nil {
+				fmt.Printf("WARNING: could not install the network positive control to %s: %v\n"+
+					"         The nightly will still run, but a transport failure will report net_control=unknown.\n",
+					netControlInstallPath(), werr)
+			}
+		}
+	} else {
+		fmt.Printf("WARNING: %v\n"+
+			"         The nightly will still run, but a transport failure will report net_control=unknown\n"+
+			"         and cannot tell 'this box is off the network' from 'this one remote is blackholed'.\n", nerr)
 	}
 
 	rendered, data, err := renderDeployPlist()

@@ -1156,6 +1156,157 @@ classify_transport() {
 }
 
 # ---------------------------------------------------------------------------
+# 5a-ter. THE POSITIVE CONTROL (mg-db96)
+# ---------------------------------------------------------------------------
+# Everything above this line probes ONE endpoint — the deploy remote — and then
+# describes the result to a human. So "this box is off the network" and "this
+# one remote is blackholed" have, until now, arrived at the reader as the same
+# sentence, and a couple of them have arrived carrying a number the reader was
+# told to treat as a measurement (remedy_for_sync_class still says READ THE
+# VIGIL DURATION AS A MEASUREMENT, and it is a measurement of the wrong thing:
+# a lower bound on "one host:port did not answer").
+#
+# scripts/lib/net-control.sh is the missing half. It probes a reference set that
+# has nothing to do with the deploy remote and proves its own instrument in both
+# directions on every run, so a failure here finally carries information. Read
+# that file for what the control can and cannot establish before quoting it.
+#
+# THIS DOES NOT CHANGE CLASSIFICATION, deliberately. Making `network` conditional
+# on the control is a real improvement and it belongs with the drellem2/pogo#130
+# fix (mg-0218), which is the change that makes the classification honest in the
+# first place. What lands here is the EVIDENCE: the control runs once per run, on
+# the paths where a human or an event will read the outcome, and its verdict goes
+# into the log, the alert and the event details. A later change can gate on
+# NET_CONTROL_VERDICT; nothing has to be re-derived for it.
+#
+# WHERE IT COMES FROM, and why the failure to find it is loud. The nightly does
+# not run out of the repo — `pogo service install-deploy` copies this script to
+# ~/.pogo/bin/pogo-deploy.sh and the library alongside it, precisely so the job
+# keeps working while the checkout it builds from is mid-fetch or broken. If the
+# library is missing anyway, the runner does NOT fall back to a probe with no
+# control and it does not go quiet: net_control reports `unknown` naming the
+# paths it tried, and that string travels into the alert like any other verdict.
+NET_CONTROL_LIB=""
+NET_CONTROL_RAN=false
+NET_CONTROL_TRIED=""
+
+load_net_control() {
+    local d cand
+    # `:-` is not decoration. Under `set -u`, bash 3.2 leaves BASH_SOURCE unset
+    # in some sourced-from-a-subshell contexts, and an unguarded expansion here
+    # aborts the whole runner while looking for an optional library.
+    d="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)" || d=""
+    local -a cands=()
+    [ -n "${POGO_NET_CONTROL_LIB:-}" ] && cands+=("$POGO_NET_CONTROL_LIB")
+    # Installed layout first (~/.pogo/bin/net-control.sh, a sibling of this
+    # script), then the in-repo layout (scripts/launchd/.. -> scripts/lib).
+    [ -n "$d" ] && cands+=("$d/net-control.sh" "$d/../lib/net-control.sh")
+    for cand in ${cands[@]+"${cands[@]}"}; do
+        if [ -r "$cand" ]; then
+            # shellcheck source=/dev/null
+            if source "$cand" 2>/dev/null; then
+                NET_CONTROL_LIB="$cand"
+                log "net-control: loaded the positive control from $cand"
+                return 0
+            fi
+            err "net-control: $cand exists but could not be sourced"
+        fi
+    done
+    # The stub. It is a function with the same name and the same contract, and
+    # the one thing it must never do is return a verdict it cannot back.
+    #
+    # The path list is a GLOBAL and not a local of this function, because a bash
+    # function body is not a closure: the stub below is parsed here but RUNS
+    # later, by which time a `local` would be long out of scope and the
+    # expansion would abort the runner under `set -u`. Found by running it.
+    NET_CONTROL_TRIED="${cands[*]:-(no candidate paths could be derived)}"
+    net_control() {
+        NET_CONTROL_VERDICT="unknown"
+        NET_CONTROL_REASON="the positive-control library was not found, so NOTHING independent of the deploy remote was probed and this run cannot tell 'this box is off the network' from 'this one remote is blackholed'. Tried: $NET_CONTROL_TRIED. Fix: pogo service install-deploy"
+        NET_CONTROL_SELFTEST="not run (library missing)"
+        NET_CONTROL_EVIDENCE=""
+        NET_CONTROL_DNS="not run"
+        NET_CONTROL_PROBED=0
+        NET_CONTROL_ANSWERED=0
+        return 2
+    }
+    net_control_line() { printf 'net-control: %s — %s\n' "$NET_CONTROL_VERDICT" "$NET_CONTROL_REASON"; }
+    net_control_report() {
+        printf 'NETWORK POSITIVE CONTROL: UNAVAILABLE\n  %s\n' "$NET_CONTROL_REASON"
+    }
+    NET_CONTROL_VERDICT="unknown"
+    NET_CONTROL_REASON="not run"
+    NET_CONTROL_SELFTEST="not run"
+    NET_CONTROL_EVIDENCE=""
+    NET_CONTROL_DNS="not run"
+    NET_CONTROL_PROBED=0
+    NET_CONTROL_ANSWERED=0
+    err "net-control: no positive-control library found (tried: $NET_CONTROL_TRIED) — a per-remote failure tonight will be UNINTERPRETABLE. Run: pogo service install-deploy"
+    return 1
+}
+
+# run_net_control — once per run, memoized. The control costs one bounded sweep
+# of a handful of TCP connects; the reason it is memoized is not cost but
+# meaning. Two verdicts from two instants in the same alert is a thing a reader
+# has to reconcile, and there is no question here that a second sweep answers.
+run_net_control() {
+    $NET_CONTROL_RAN && return 0
+    NET_CONTROL_RAN=true
+    net_control >/dev/null 2>&1 || true
+    log "$(net_control_line)"
+    return 0
+}
+
+# net_control_bridge — the sentence that says what the control CHANGES about the
+# remedy printed under it.
+#
+# Without this the alert would carry two blocks that do not refer to each other,
+# and the reader would have to do the join. The join is the whole point of the
+# ticket, so it is written down.
+#
+# It also qualifies the one claim in remedy_for_sync_class that this control
+# proves too strong. That paragraph tells the reader to READ THE VIGIL DURATION
+# AS A MEASUREMENT and offers it to mg-5515 as a lower bound on how long the
+# transport was unreachable. The vigil re-probes ONE endpoint, so it is a lower
+# bound on how long THAT endpoint did not answer — which becomes a statement
+# about this box only if the box was off the network, and that is exactly the
+# question the control is here to answer. The remedy paragraphs themselves are
+# left alone; the correction is placed where the number is read, and is stated
+# in whichever of the three directions the control actually established.
+net_control_bridge() {
+    case "$NET_CONTROL_VERDICT" in
+        up)
+            cat <<EOF
+WHAT THAT MEANS FOR THE REMEDY BELOW: this box reached other hosts, so the
+failure is specific to the deploy remote and not to your connectivity. The vigil
+duration above is a lower bound on how long THAT ONE ENDPOINT did not answer —
+not on how long this box was off the network, which it demonstrably was not.
+Do not quote it as an outage duration.
+EOF
+            ;;
+        down)
+            cat <<EOF
+WHAT THAT MEANS FOR THE REMEDY BELOW: this box could not reach ANYTHING, so this
+is not about the deploy remote. Start at the link — DHCP lease, Wi-Fi, VPN — and
+not at ssh keys or the repository. This is the mg-964e shape. The vigil duration
+above is a lower bound on the outage for once, because the control establishes
+that the endpoint's silence was the box's silence.
+EOF
+            ;;
+        *)
+            cat <<EOF
+WHAT THAT MEANS FOR THE REMEDY BELOW: the control could not establish either
+state, so the remedy below is the runner's best reading of ONE endpoint's
+behaviour and nothing corroborates it. In particular the vigil duration is a
+lower bound on how long that one endpoint did not answer, and NOT on how long
+this box was off the network — do not quote it as an outage duration without
+checking the link yourself.
+EOF
+            ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
 # 5a-bis. Bounding a call that may never return (mg-56ac)
 # ---------------------------------------------------------------------------
 # kill_tree PID [SIG] — signal a process and its descendants, LEAVES FIRST.
@@ -2851,6 +3002,10 @@ main() {
     # to assert that a host is DOWN; it can still confirm one is up, and it
     # reports `unclassified` rather than guessing (mg-0d70).
     resolve_nc || true
+    # Also never fatal, and loaded HERE rather than lazily at the alert site so
+    # a missing library is on the record from the top of the run instead of
+    # first appearing in the alert that needed it (mg-db96).
+    load_net_control || true
     # After resolve_mg, so a git failure has somewhere to be reported; before
     # sync_src, which is the first thing that needs git.
     resolve_git || {
@@ -2897,12 +3052,19 @@ deployed and the running pogod is untouched.
         # established a fact and re-running it would only re-establish it.
         local sync_rc=1
         sync_class_retryable "$SYNC_CLASS" && sync_rc=10
+        # The control runs on BOTH exits from here, not just the alerting one.
+        # This branch is the quiet one — it writes an event and no mail — and it
+        # is the branch that fires on a night the transport was out for the whole
+        # window. An event stream recording `sync_class` with no independent
+        # reading of the box's connectivity is the same uninterpretable number
+        # this control exists to stop producing, just in a machine-readable form.
+        run_net_control
         if retry_will_follow "$sync_rc"; then
             local snxt; snxt="$(next_fire_hour "$(current_hour)")"
             log "sync: exit $sync_rc after $SYNC_TRIES attempts — class ${SYNC_CLASS:-unclassified} established nothing, so the $(printf '%02d' "$snxt"):00 fire will retry. Not alerting yet."
             if [ -n "$POGO_CLI" ]; then
                 "$POGO_CLI" events emit --type=deploy_nightly_retry_pending --agent=pogo-deploy \
-                    --details="{\"exit\":$sync_rc,\"sync_class\":\"${SYNC_CLASS:-unclassified}\",\"sync_attempts\":$SYNC_TRIES,\"sync_vigil_s\":$SYNC_VIGIL_SPENT,\"retry_hour\":$snxt}" >/dev/null 2>&1 || true
+                    --details="{\"exit\":$sync_rc,\"sync_class\":\"${SYNC_CLASS:-unclassified}\",\"sync_attempts\":$SYNC_TRIES,\"sync_vigil_s\":$SYNC_VIGIL_SPENT,\"retry_hour\":$snxt,\"net_control\":\"$NET_CONTROL_VERDICT\"}" >/dev/null 2>&1 || true
             fi
             exit "$sync_rc"
         fi
@@ -2920,6 +3082,9 @@ deployed and the running pogod is untouched. Daniel's dev tree was NOT touched.
 WHAT THE UNDERLYING TOOL ACTUALLY SAID, verbatim:
 
 ${SYNC_DETAIL:-(the failing step produced no output)}
+
+$(net_control_report)
+$(net_control_bridge)
 
 $(remedy_for_sync_class "$SYNC_CLASS")"
         exit "$sync_rc"

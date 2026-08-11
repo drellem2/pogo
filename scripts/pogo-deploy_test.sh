@@ -2493,6 +2493,122 @@ grep -q 'pogo-deploy: end (rc=0' "$E2E/locked.log" \
 rmdir "$E2E/lock" 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
+# The positive control's WIRING into the runner (mg-db96)
+# ---------------------------------------------------------------------------
+# The control itself is tested in scripts/net-control_test.sh, including the
+# assertion the ticket exists for: that it goes RED on a box with no network.
+# What is tested here is the half that lives in this file — that the runner
+# finds it, that it degrades to `unknown` rather than to silence when it cannot,
+# and that the verdict reaches the reader attached to a sentence about what it
+# changes.
+
+# It loads out of the repo layout. This is not incidental: the runner looks
+# beside itself first (the installed layout, ~/.pogo/bin/) and only then at
+# ../lib, so an in-repo run exercises the second path and the nightly exercises
+# the first. A search that lost the repo path would leave every test below
+# running against the stub and still going green.
+load_net_control >/dev/null 2>&1 \
+    && [ -n "$NET_CONTROL_LIB" ] \
+    && pass "load_net_control finds the library in the repo layout ($NET_CONTROL_LIB)" \
+    || fail "load_net_control could not find scripts/lib/net-control.sh from the repo layout"
+
+# THE DEGRADATION, and it is the one that matters. A runner whose control is
+# missing must not fall back to the pre-mg-db96 behaviour of interpreting a
+# one-endpoint probe as if it meant something — and it must not go quiet about
+# it either. Driven by copying the runner somewhere with no library beside it
+# and no ../lib above it, which is exactly what a half-finished install looks
+# like.
+NCW="$WORK/nolib"
+mkdir -p "$NCW"
+cp "$RUNNER" "$NCW/pogo-deploy.sh"
+NC_STUB_OUT="$(
+    set +u
+    POGO_NET_CONTROL_LIB=""
+    source "$NCW/pogo-deploy.sh" 2>/dev/null
+    load_net_control >/dev/null 2>&1
+    net_control >/dev/null 2>&1
+    printf '%s|%s' "$NET_CONTROL_VERDICT" "$NET_CONTROL_REASON"
+)"
+case "$NC_STUB_OUT" in
+    'unknown|'*) pass "a runner with no control library reports the control as UNKNOWN, never as a verdict it cannot back" ;;
+    *)          fail "a runner with no control library produced: $NC_STUB_OUT" ;;
+esac
+case "$NC_STUB_OUT" in
+    *"pogo service install-deploy"*) pass "and the missing-library reason names the command that fixes it, so the gap is actionable from the alert" ;;
+    *)                               fail "the missing-library reason does not name its own fix: $NC_STUB_OUT" ;;
+esac
+case "$NC_STUB_OUT" in
+    *"off the network"*) pass "and it states what was lost — the distinction between an off-network box and a blackholed remote — rather than just reporting a missing file" ;;
+    *)                   fail "the missing-library reason does not say what the absence costs: $NC_STUB_OUT" ;;
+esac
+
+# The bridge. Three verdicts, three different instructions, and the one rule is
+# that the vigil duration is only offered as an outage duration in the single
+# case where the control established that the endpoint's silence WAS the box's
+# silence. That number is quoted to mg-5515 as a measured lower bound today, and
+# it is a lower bound on one endpoint not answering — which the reader has no
+# way to tell apart without this.
+NET_CONTROL_VERDICT=up
+net_control_bridge | grep -q 'specific to the deploy remote' \
+    && pass "bridge/up: the reader is sent to the remote, not to the link" \
+    || fail "bridge/up did not name the remote as the locus"
+net_control_bridge | grep -q 'Do not quote it as an outage duration' \
+    && pass "bridge/up: the vigil duration is explicitly WITHDRAWN as an outage measurement" \
+    || fail "bridge/up left the vigil duration standing as an outage measurement"
+
+NET_CONTROL_VERDICT=down
+net_control_bridge | grep -q 'could not reach ANYTHING' \
+    && pass "bridge/down: the reader is sent to the link" \
+    || fail "bridge/down did not name the link as the locus"
+net_control_bridge | grep -q 'lower bound on the outage' \
+    && pass "bridge/down: and ONLY here is the vigil duration offered as an outage duration, because only here is it one" \
+    || fail "bridge/down did not license the vigil duration"
+
+NET_CONTROL_VERDICT=unknown
+net_control_bridge | grep -q 'nothing corroborates it' \
+    && pass "bridge/unknown: the remedy below is marked as uncorroborated rather than presented as established" \
+    || fail "bridge/unknown did not qualify the remedy"
+net_control_bridge | grep -q 'do not quote it as an outage duration' \
+    && pass "bridge/unknown: the vigil duration is withdrawn here too — an unknown control licenses nothing" \
+    || fail "bridge/unknown left the vigil duration standing"
+
+# The verdict has to REACH the reader, and the two functions above are only
+# worth anything if they are in the alert. Asserted against the script text, the
+# way the SYNC_DETAIL-is-printed-verbatim check above is: what is being guarded
+# is that a later edit cannot quietly drop the block from the mail while every
+# unit test for its contents keeps passing.
+grep -q '$(net_control_report)' "$RUNNER" \
+    && pass "the sync-abort alert prints the control's own report, table and all" \
+    || fail "the sync-abort alert does not include net_control_report"
+grep -q '$(net_control_bridge)' "$RUNNER" \
+    && pass "and the sentence saying what the verdict CHANGES about the remedy under it" \
+    || fail "the sync-abort alert does not include net_control_bridge"
+grep -q 'net_control.*NET_CONTROL_VERDICT' "$RUNNER" \
+    && pass "and the machine-readable path carries it too — the retry-pending event records the verdict alongside sync_class" \
+    || fail "deploy_nightly_retry_pending does not record net_control"
+
+# ORDER. A control swept after the alert was composed would report a verdict the
+# mail does not contain, and the log would disagree with the mail about the same
+# night.
+NC_RUN_LINE="$(grep -n 'run_net_control$' "$RUNNER" | head -1 | cut -d: -f1)"
+NC_ALERT_LINE="$(grep -n 'ABORTED: could not sync' "$RUNNER" | head -1 | cut -d: -f1)"
+[ -n "$NC_RUN_LINE" ] && [ -n "$NC_ALERT_LINE" ] && [ "$NC_RUN_LINE" -lt "$NC_ALERT_LINE" ] \
+    && pass "the control is swept BEFORE the alert is composed (line $NC_RUN_LINE < $NC_ALERT_LINE), so the mail and the log report the same instant" \
+    || fail "run_net_control does not run before the sync-abort alert (run=$NC_RUN_LINE alert=$NC_ALERT_LINE)"
+
+# The memoization. Two sweeps in one alert would give the reader two verdicts
+# from two instants to reconcile, for a question that does not change.
+NET_CONTROL_RAN=false
+NC_CALLS=0
+net_control() { NC_CALLS=$(( NC_CALLS + 1 )); NET_CONTROL_VERDICT=up; return 0; }
+net_control_line() { echo "stub"; }
+run_net_control >/dev/null 2>&1
+run_net_control >/dev/null 2>&1
+[ "$NC_CALLS" -eq 1 ] \
+    && pass "run_net_control sweeps once per run, so an alert carries one verdict from one instant" \
+    || fail "run_net_control ran the control $NC_CALLS times in one run"
+
+# ---------------------------------------------------------------------------
 echo
 echo "--- Results ---"
 grep -c '^PASS' "$RESULTS_FILE" | sed 's/^/passed: /'

@@ -381,3 +381,67 @@ func TestDeployFireHourParsersSeeDivergence(t *testing.T) {
 		t.Error("parseRunnerFireHours matched a form the runner does not use; the check would drift out of contact with the file it guards")
 	}
 }
+
+// TestNetControlIsInstalledWhereTheRunnerLooksForIt (mg-db96).
+//
+// The runner's positive control ships as a SECOND file on the SAME install
+// path, which is the exact shape mg-fc99 was filed for: two artifacts, one
+// installer, and only one of them witnessed. The runner locates the library by
+// looking next to itself, so the property that has to hold is a relationship
+// between two paths, and nothing but this test asserts it.
+//
+// It is a relationship and not a literal because both sides move with
+// POGO_HOME. Asserting "~/.pogo/bin/net-control.sh" would pass under the
+// default and say nothing under any override the installer honours.
+func TestNetControlIsInstalledWhereTheRunnerLooksForIt(t *testing.T) {
+	runner := deployScriptInstallPath()
+	lib := netControlInstallPath()
+
+	if got, want := filepath.Dir(lib), filepath.Dir(runner); got != want {
+		t.Errorf("the control installs to %s but the runner installs to %s; load_net_control looks for a SIBLING of the runner, so it would never find it", got, want)
+	}
+	if base := filepath.Base(lib); base != "net-control.sh" {
+		t.Errorf("installed control basename = %q; load_net_control looks for %q", base, "net-control.sh")
+	}
+}
+
+// TestRunnerSearchesTheInstalledAndTheRepoLayout (mg-db96).
+//
+// The runner has to find the library in TWO places — installed beside itself,
+// and in-repo at scripts/launchd/../lib — and a search that lost either one
+// would still pass every other test here: the installed path only matters at
+// 03:00, and the repo path only matters when a test or a human runs the script
+// out of a checkout. Both are read out of the script text because the script is
+// where they are written, and a copy of them here would be a second source of
+// truth for the same fact.
+func TestRunnerSearchesTheInstalledAndTheRepoLayout(t *testing.T) {
+	runner := readRepoFile(t, "../../scripts/launchd/pogo-deploy.sh")
+	for _, want := range []string{
+		`"$d/net-control.sh"`,        // installed: a sibling of the runner
+		`"$d/../lib/net-control.sh"`, // in-repo:   scripts/launchd/../lib
+	} {
+		if !strings.Contains(runner, want) {
+			t.Errorf("pogo-deploy.sh's load_net_control does not search %s — the control would be silently unavailable in that layout, and an unavailable control reports `unknown` on every transport failure", want)
+		}
+	}
+}
+
+// TestFindNetControlSourceHonorsOverride mirrors the deploy-script case: a `go
+// install`ed pogo has no scripts/ sibling, and an operator needs a way to point
+// the installer at the file.
+func TestFindNetControlSourceHonorsOverride(t *testing.T) {
+	dir := t.TempDir()
+	lib := filepath.Join(dir, "net-control.sh")
+	if err := os.WriteFile(lib, []byte("#!/usr/bin/env bash\n"), 0755); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	t.Setenv("POGO_NET_CONTROL_SCRIPT", lib)
+
+	got, err := findNetControlSource()
+	if err != nil {
+		t.Fatalf("findNetControlSource: %v", err)
+	}
+	if got != lib {
+		t.Errorf("findNetControlSource() = %q; want the override %q", got, lib)
+	}
+}

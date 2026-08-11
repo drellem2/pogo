@@ -108,6 +108,16 @@ gate_step "Testing pogo-self-deploy SIGINT interrupt-safety control" bash script
 # nothing — so the suite exists to tell them apart.
 gate_step "Testing pogo-deploy nightly trigger" bash scripts/pogo-deploy_test.sh
 
+# The runner-side network positive control (mg-db96). Separate suite because the
+# control is a separate artifact — scripts/lib/net-control.sh is a library any
+# runner can source, not a piece of the deploy path — and because this suite
+# does something none of the others do: it takes this box OFF THE NETWORK
+# (sandbox-exec on Darwin, `unshare -rn` on Linux) and requires the control to
+# report RED. A positive control that has only ever been seen going green is not
+# known to work, so the suite FAILS rather than skipping when it cannot arrange
+# an absence of network to test against.
+gate_step "Testing the network positive control" bash scripts/net-control_test.sh
+
 # The FROM-SOURCE runner for the staleness witness (mg-dd49). The judgement is
 # tested in internal/staleness; what this suite holds is the property that makes
 # the runner worth having — it must never fall back to an installed `pogo`. The
