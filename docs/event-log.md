@@ -912,6 +912,54 @@ Also emitted with `phase: "clear"` when the all-clear mail could not be delivere
 {"schema_version":1,"timestamp":"2026-07-29T06:30:00.000000000Z","event_type":"deaf_watch_error","agent":"pogod","details":{"error":"agent: no mail-check provider installed; diagnose has no basis to judge mail loops"}}
 ```
 
+#### `first_turn_watch_dark`
+
+pogod's first-completed-turn floor ([internal/firstturn](../internal/firstturn/firstturn.go), mg-3cbb) found at least one **crew** agent that it spawned and that has never completed a single scheduled fire since — past the grace, with fires demonstrably delivered to it the whole time. **A spawn is not a success**: on 2026-08-11 this daemon logged `autostart: started X (pid=N)` five times, re-registered every schedule, and passed its own post-check ninety seconds later, over a fleet that then completed zero turns for seventeen hours.
+
+Distinct from `ack_watch_fired` with `blackout: true`, which is the *other* side of a spawn. That arm judges a completion **ratio** over a trailing 3h window and therefore cannot speak about an agent until it has been up that long — on the outage above its first post-bounce firing was 05:03:36Z, one full window after the 02:01:33Z spawn, and it then fired 33 times, correctly. This one is red at 02:46:33Z. `ack_watch` blackout means *was alive, went dark*; this means *was never alive*. **Report-only** — pogod never restarts, nudges, or respawns on this signal. Emitted once per mailed notice; repeats climb a doubling ladder so each carries a strictly larger `dark_for`. Additive — no `schema_version` bump.
+
+- **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent` (always `"pogod"`), `details`
+- **`details` fields:**
+  - `episode_id` (string, required): stable per-episode id, matching the `incident_episode_cleared` event emitted on close
+  - `state` (string, required): always `"dark"` on this event type
+  - `fleet` (bool, required): true when EVERY judged agent is a finding and there are at least two of them. It changes the routing, not the severity: a fleet that has never come up cannot be asked to fix itself, so this escalates on its first sample rather than on an age gate
+  - `agents` (array of string, required): the bare names, sorted
+  - `identities` (array of string, required): the same agents as event-log identities
+  - `dark_for` (string, required): how long the **most recently spawned** dark agent has been dark — the conservative answer to "how long has the fleet been like this", because rounding it up would overstate the alarm's own evidence
+  - `episode_age` (string, required): how long this episode has been open
+  - `judged` (array of string, required): the agents actually judged this sample
+  - `scanned` (int, required): agents in the registry before filtering
+  - `too_fresh` / `beyond_lookback` / `never_addressed` (arrays of string, required): the populations declined and why. `never_addressed` is an agent fewer than 2 fires reached — that is `deaf_watch`'s finding and a different remedy, and blaming this agent for it would point the operator at the wrong component. A report that states its own denominator cannot be misread as coverage it did not have (mg-7a20)
+  - `grace` (string, required): the threshold in force
+  - `notified` (string, required): comma-separated recipients
+  - `escalated` (bool, required): true when the escalation box was copied
+  - `notify_to_dark` / `escalate_to_dark` (bool, required): whether the recipient is ITSELF one of the dark agents. `escalate_to_dark: true` means the notice had no recipient outside the outage at all
+  - `mail_error_<mailbox>` (string, optional): one key per recipient that refused it
+
+```json
+{"schema_version":1,"timestamp":"2026-08-11T02:46:33.000000000Z","event_type":"first_turn_watch_dark","agent":"pogod","details":{"episode_id":"ep-1786502793000000000-architect","state":"dark","fleet":true,"agents":["architect","mayor","pa","pm-onethird","pm-pogo"],"identities":["crew-architect","crew-mayor","crew-pa","crew-pm-onethird","crew-pm-pogo"],"dark_for":"45m0s","episode_age":"0s","judged":["architect","mayor","pa","pm-onethird","pm-pogo"],"scanned":5,"grace":"45m0s","notified":"mayor,human","escalated":true,"notify_to_dark":true,"escalate_to_dark":false}}
+```
+
+#### `first_turn_watch_clear`
+
+One sample of the floor with nothing to report — every judged agent has completed at least one fire since it spawned — carrying the coverage counts. Also emitted with `suppressed: true` while pogod is inside its own settle window after a restart, since a bounce spawns the whole crew at once and none of them can have acked yet.
+
+It exists for the reason this whole ticket exists: a silent correct outcome and a control that is not running are the same observation. The synthetic-failure-turn detector ran ~204 checks across 17h of total fleet silence and emitted nothing at all, and that quiet was read as the fleet's health.
+
+- **`details` fields:** `judged`, `scanned`, `too_fresh`, `beyond_lookback`, `never_addressed`, `grace` — as on `first_turn_watch_dark`; plus `suppressed` (bool, optional), `reason` (string, optional) and `would_have_reported` (array of string, optional) on the settle-window path
+
+#### `first_turn_watch_blind`
+
+The floor could not judge this sample: no agent registry, an unreadable scheduler event log, or a source error. It judged **nothing** — this is not a health claim in either direction, and a detector that reads green because it could not look is the founding bug of this whole lineage one level up.
+
+- **`details` fields:** `reason` (string, required), `scanned` (int, required), `why` (string, required); plus `phase: "clear"` and `to` when the failure was in delivering the all-clear
+
+#### `first_turn_watch_unreported`
+
+Every recipient of a finding refused the mail. The one state worse than the bug this arm fixes: the fleet never came up, pogod noticed, and the notice did not leave the machine. Mirrors `ack_watch_blackout_unreported`.
+
+- **`details` fields:** `recipients` (string, required), `agents` (array of string, required), `dark_for` (string, required)
+
 #### `synthetic_failure_detected`
 
 pogod's synthetic-failure-turn detector ([internal/synthwatch](../internal/synthwatch/synthwatch.go), mg-8cdb) read the agent's harness session transcript and found it answering turns **locally** and failing them: turns attributed to a synthetic model, with zero tokens in and out, flagged as API errors. The agent is alive and consuming every nudge on time; it accomplishes nothing with them. Detection is structural (synthetic model + zero usage + error flag), never a message string.

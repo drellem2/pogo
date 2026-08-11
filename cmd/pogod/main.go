@@ -36,6 +36,8 @@ import (
 	"github.com/drellem2/pogo/internal/deafwatch"
 	"github.com/drellem2/pogo/internal/driftwatch"
 	"github.com/drellem2/pogo/internal/driver"
+	"github.com/drellem2/pogo/internal/events"
+	"github.com/drellem2/pogo/internal/firstturn"
 	"github.com/drellem2/pogo/internal/ghintake"
 	"github.com/drellem2/pogo/internal/ghteardown"
 	"github.com/drellem2/pogo/internal/ghtoken"
@@ -2362,6 +2364,80 @@ Flags:
 		log.Printf("pogod: deaf-watch NOT armed — the agent registry did not load, so there is nothing to judge")
 	}
 
+	// Build the FIRST-COMPLETED-TURN floor (mg-3cbb): the runner that alarms
+	// when pogod has spawned a crew agent and that agent has never finished a
+	// single scheduled fire since.
+	//
+	// A SPAWN IS NOT A SUCCESS. On 2026-08-11 this daemon logged `autostart:
+	// started X (pid=N)` five times at 03:01 local, re-registered every
+	// mail-check schedule, and passed its own post-check ("5 mail-check
+	// schedule(s) present") ninety seconds later — over a fleet that then
+	// completed zero turns for seventeen hours. Everything pogod asserted was
+	// true. None of it was evidence of an agent being alive.
+	//
+	// This does NOT replace ackwatch's blackout arm above, which fired 33
+	// consecutive times through that outage and was right every time. That arm
+	// judges a completion RATIO over a trailing window and so cannot speak about
+	// an agent until it has been up for the whole window — 3h02m after the
+	// bounce, measured. This one speaks at 45 minutes, on the same event log.
+	// was-alive-then-went-dark and was-never-alive are different failures with
+	// different earliest-detectable moments, and each arm owns one.
+	//
+	// Armed on the registry AND the scheduler log: without the first there is no
+	// population, without the second no evidence. Both absences report as BLIND
+	// rather than as a clean fleet. REPORT-ONLY.
+	var firstTurnWatcher *firstturn.Watcher
+	if cfg.FirstTurn.Enabled && agentRegistry != nil && sched != nil {
+		schedulerLog := scheduler.EventLogPath(schedPath)
+		firstTurnWatcher = firstturn.New(firstturn.Options{
+			Enabled: true,
+			Source: func(now time.Time) firstturn.Snapshot {
+				crew, scanned, ok := firstturn.CrewAgents(agentRegistry)
+				if !ok {
+					return firstturn.Snapshot{Now: now, Err: "agent registry unavailable"}
+				}
+				// The evidence read is anchored at the OLDEST spawn in the
+				// population rather than at a fixed window, so it costs a short
+				// scan on a healthy fleet and grows only while an outage does —
+				// which is the one time the extra reach is what makes the claim
+				// provable.
+				since := firstturn.EarliestStart(crew, now, firstturn.DefaultLookback)
+				ev, readErr := firstturn.ReadEvidence(schedulerLog, since, now)
+				return firstturn.Attach(crew, ev, now, scanned, firstturn.DefaultLookback, readErr)
+			},
+			Mail:     client.SendMGMail,
+			Interval: cfg.FirstTurn.Interval,
+			Params:   firstturn.Params{Grace: cfg.FirstTurn.Grace},
+			NotifyTo: cfg.FirstTurn.NotifyTo,
+			// The fleet-wide case goes here, immediately and structurally. The
+			// mayor is inside every fleet outage in this system's history
+			// (mg-e2a4), so a notice that only reaches it is not a weaker alert
+			// — it is no alert.
+			EscalateTo: escalationBox,
+			StartedAt:  time.Now(),
+		})
+		log.Printf("pogod: first-turn floor enabled (interval=%s grace=%s notify_to=%s escalate_to=%s, report-only)",
+			cfg.FirstTurn.Interval, cfg.FirstTurn.Grace, cfg.FirstTurn.NotifyTo, escalationBox)
+	} else if cfg.FirstTurn.Enabled {
+		reason := firstTurnUnarmedReason(agentRegistry != nil, sched != nil)
+		log.Printf("pogod: first-turn floor NOT armed — %s", reason)
+		// And on the EVENT SPINE, not only on stderr. pogod logs to inherited
+		// stderr, which is how four months of pogod.log held zero lines for
+		// events that were in the running binary the whole time (mg-3cbb's own
+		// lineage). A floor that is silently not running is indistinguishable
+		// from a floor that is running and finding nothing — which is the exact
+		// failure this whole package exists to end, one level up.
+		events.Emit(context.Background(), events.Event{
+			EventType: firstturn.EventBlind,
+			Agent:     "pogod",
+			Details: map[string]any{
+				"reason":  reason,
+				"scanned": 0,
+				"why":     "the first-turn floor could not be armed at startup; it will judge nothing until pogod is restarted with both dependencies present",
+			},
+		})
+	}
+
 	// Build the WEDGED-AGENT detector (mg-fc8d). On 2026-08-04 twelve polecats
 	// and the doctor crew agent sat at a Claude Code login prompt for thirteen
 	// hours; on 2026-08-05 it recurred for seven. Roughly twenty agent-hours of
@@ -2525,6 +2601,14 @@ Flags:
 		// register a schedule, nudge, or restart the agent it names.
 		if deafWatcher != nil {
 			go deafWatcher.Check(now)
+		}
+		// The first-completed-turn floor rides the same tick and throttles
+		// itself to a coarse interval. In a goroutine because it scans the
+		// scheduler event log and shells out to `mg mail send` on a finding —
+		// neither must delay a tick. Report-only: it mails, and it has no seam
+		// through which it could restart or respawn the agent it names.
+		if firstTurnWatcher != nil {
+			go firstTurnWatcher.Check(now)
 		}
 		// The wedged-agent detector rides the same tick and throttles itself to
 		// a coarse interval. In a goroutine because it scans every agent's PTY

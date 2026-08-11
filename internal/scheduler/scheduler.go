@@ -555,6 +555,9 @@ func (s *Scheduler) Add(entry Entry, now time.Time) (Entry, error) {
 	key := entryKey{Agent: entry.Agent, ID: entry.ID}
 	prev, hadPrev := s.entries[key]
 	stored := entry
+	if hadPrev {
+		carryOutstandingFireLocked(&stored, prev, now)
+	}
 	s.entries[key] = &stored
 	if err := s.persistLocked(); err != nil {
 		if hadPrev {
@@ -566,6 +569,70 @@ func (s *Scheduler) Add(entry Entry, now time.Time) (Entry, error) {
 		return Entry{}, err
 	}
 	return stored.Clone(), nil
+}
+
+// carryOutstandingFireLocked preserves a still-redeemable fire across a
+// same-(agent, id) re-registration. Caller must hold s.mu.
+//
+// # The defect this closes
+//
+// Re-registering with an existing `--id` REPLACES the entry, and the replacement
+// arrives with an empty PendingToken. That silently retracted a fire the agent
+// had already been handed: it then ran the exact `pogo schedule ack` command the
+// fire told it to run and was refused with "no fire outstanding to acknowledge".
+//
+// Demonstrated live on 2026-08-11 by pm-pogo while closing the 22h outage
+// (mg-3cbb). It booted, re-registered its three schedules with the same ids —
+// the startup procedure says to, and every crew agent does — and then worked the
+// two sweep fires that had been sitting in its mailbox through the outage. Both
+// acks were refused. `scheduler_fire_delivered` had logged both as delivered.
+//
+// Net effect: two fires delivered, zero acked, BOTH ACTUALLY HANDLED — a record
+// byte-identical to an agent that received them and died. That is precisely the
+// discrimination completion tracking was added to provide after 2026-07-22, and
+// the boot path was destroying it in the recovery window, where fires are most
+// likely to be catch-ups carrying real missed work.
+//
+// # What is carried and what is deliberately NOT
+//
+// Carried: the outstanding token, its issue time, and the SINGLE delivery it
+// represents (FiresDelivered/UnackedStreak = 1). Redeeming it then reads 1/1
+// rather than the incoherent 1/0 that crediting a completion against a zeroed
+// denominator would produce.
+//
+// NOT carried: the lifetime counters. internal/ackwatch's header explains why in
+// detail — a preserved ratio mixes fires from before and after a cadence or
+// prompt change and then describes no single regime, and that package treats the
+// reset as a known-benign event handled by its settle window. This carry-over
+// keeps the reset (the ratio still starts fresh) and restores only the property
+// that the reset had no business taking with it: that a fire the agent is
+// holding can still be acknowledged.
+//
+// A token past AckStaleWindow is not carried. It would already be refused by Ack,
+// and carrying it would only move the refusal later.
+func carryOutstandingFireLocked(stored *Entry, prev *Entry, now time.Time) {
+	if prev == nil || prev.PendingToken == "" {
+		return
+	}
+	// A caller that supplied its own pending fire is authoritative; this path
+	// exists for re-registration, which never does.
+	if stored.PendingToken != "" {
+		return
+	}
+	if !prev.PendingSince.IsZero() && now.Sub(prev.PendingSince) > AckStaleWindow {
+		return
+	}
+	stored.PendingToken = prev.PendingToken
+	stored.PendingSince = prev.PendingSince
+	// The fire being carried WAS delivered under this same (agent, id), and it
+	// is still outstanding. Counting it keeps the entry's counters a description
+	// of the fires the entry actually knows about.
+	if stored.FiresDelivered == 0 {
+		stored.FiresDelivered = 1
+	}
+	if stored.UnackedStreak == 0 {
+		stored.UnackedStreak = 1
+	}
 }
 
 // Remove deletes the entry uniquely identified by (agent, id). Returns false

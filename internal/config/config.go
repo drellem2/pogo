@@ -384,6 +384,25 @@ const (
 	// loop is not a weaker alert, it is no alert at all.
 	DefaultDeafWatchEscalateAfter = 24 * time.Hour
 
+	// DefaultFirstTurnInterval is how often pogod's first-completed-turn floor
+	// samples the crew (mg-3cbb). Well under the grace, so a finding is
+	// announced within roughly one interval of becoming true rather than
+	// waiting out a second grace period. Rides the heartbeat, not a launchd
+	// timer (mg-50e0).
+	DefaultFirstTurnInterval = 10 * time.Minute
+	// DefaultFirstTurnGrace is how long after a spawn a crew agent may complete
+	// nothing before it is a finding. 45 minutes, from a bimodal sweep of every
+	// crew spawn on this box since completion tracking existed: the healthy
+	// population tops out at 33.7 min and the outage population starts at 150.8
+	// min, with no observation between them. See internal/firstturn.
+	DefaultFirstTurnGrace = 45 * time.Minute
+	// DefaultFirstTurnNotifyTo is the mailbox the SINGLE-agent case goes to.
+	// The mayor: one crew agent that never came up is the coordinator's to
+	// restart. The fleet-wide case does NOT go here — it escalates immediately
+	// to `[agents] escalation_box`, because the mayor is inside every fleet
+	// outage in this system's history (mg-e2a4).
+	DefaultFirstTurnNotifyTo = "mayor"
+
 	// DefaultWedgeWatchInterval is how often pogod's wedged-agent detector
 	// samples every agent's PTY and uptime (mg-fc8d). Same cadence as
 	// deaf-watch and for the same reason: the hold-downs, not the sampling
@@ -645,6 +664,7 @@ type Config struct {
 	GHIntake   GHIntakeConfig
 	AckWatch   AckWatchConfig
 	DeafWatch  DeafWatchConfig
+	FirstTurn  FirstTurnConfig
 	WedgeWatch WedgeWatchConfig
 	DoneReap   DoneReapConfig
 	// OrchestrationResume holds the deadline on a stopped fleet. See
@@ -1122,6 +1142,48 @@ type DeafWatchConfig struct {
 	EscalateAfter time.Duration
 }
 
+// FirstTurnConfig configures pogod's first-completed-turn FLOOR (mg-3cbb): the
+// heartbeat-driven runner that alarms when a crew agent has been spawned and has
+// never finished a single scheduled fire since.
+//
+// It exists because a spawn is not a success. Across ~78 hours of fleet outage
+// in 20 days, with three DIFFERENT causes (an expired credential, a nightly
+// deploy that hung 31h39m, a spend limit followed by five fresh spawns that were
+// inert for 17h), every one was found by an agent reading its own logs AFTER it
+// came back. `autostart: started X (pid=N)` and a registered mail-check schedule
+// both preceded 17 hours of total inertness, and nothing anywhere observed that
+// the FIRST completed turn never arrived.
+//
+// It does not replace internal/ackwatch's FLEET BLACKOUT arm, which fired 33
+// consecutive times through that same outage and was correct every time. That
+// arm judges a completion RATIO over a trailing window, so it cannot speak about
+// an agent until the agent has been up for the whole window — 3h02m after the
+// bounce on the outage of 2026-08-11. This one speaks at 45 minutes. The two
+// partition the failure: was-alive-and-went-dark against was-never-alive.
+//
+// The detector's mechanics live in internal/firstturn. REPORT-ONLY: it mails and
+// never restarts, nudges or respawns. No member of the synthetic-failure class
+// is fixable by a restart (mg-18d0), and pogod may already be suppressing
+// respawns for exactly that reason when this fires.
+type FirstTurnConfig struct {
+	// Enabled turns the runner on. Defaults to true. It is inert without an
+	// agent registry or a readable scheduler event log — both of which report as
+	// BLIND rather than as a clean fleet — so leaving it on is safe.
+	Enabled bool
+	// Interval is the gap between samples. Zero falls back to
+	// DefaultFirstTurnInterval.
+	Interval time.Duration
+	// Grace is how long after a spawn an agent may complete nothing before it is
+	// a finding. Zero falls back to DefaultFirstTurnGrace. Moving it is a
+	// measurement question, not a taste question — see internal/firstturn for
+	// the sweep, and rerun it before choosing a different number.
+	Grace time.Duration
+	// NotifyTo is the mailbox the SINGLE-agent case is sent to. Empty falls back
+	// to DefaultFirstTurnNotifyTo (`mayor`). It does not affect the fleet-wide
+	// case, which always also goes to `[agents] escalation_box`.
+	NotifyTo string
+}
+
 // WedgeWatchConfig configures pogod's wedged-agent DETECTOR (mg-fc8d): the
 // heartbeat-driven runner that reads every agent's PTY for known dead-end
 // states and cross-checks each agent's own declared work counter against its
@@ -1436,6 +1498,7 @@ type parsedConfig struct {
 	ghIntakeEnabledSet        bool
 	ackWatchEnabledSet        bool
 	deafWatchEnabledSet       bool
+	firstTurnEnabledSet       bool
 	wedgeWatchEnabledSet      bool
 	doneReapEnabledSet        bool
 	orchResumeEnabledSet      bool
@@ -1549,6 +1612,12 @@ func Load() *Config {
 			RenotifyAfter: DefaultDeafWatchRenotify,
 			NotifyTo:      DefaultDeafWatchNotifyTo,
 			EscalateAfter: DefaultDeafWatchEscalateAfter,
+		},
+		FirstTurn: FirstTurnConfig{
+			Enabled:  true,
+			Interval: DefaultFirstTurnInterval,
+			Grace:    DefaultFirstTurnGrace,
+			NotifyTo: DefaultFirstTurnNotifyTo,
 		},
 		WedgeWatch: WedgeWatchConfig{
 			Enabled:           true,
@@ -1741,6 +1810,18 @@ func Load() *Config {
 		// override.
 		if fileCfg.DeafWatch.EscalateAfter != 0 {
 			cfg.DeafWatch.EscalateAfter = fileCfg.DeafWatch.EscalateAfter
+		}
+		if fileCfg.firstTurnEnabledSet {
+			cfg.FirstTurn.Enabled = fileCfg.FirstTurn.Enabled
+		}
+		if fileCfg.FirstTurn.Interval > 0 {
+			cfg.FirstTurn.Interval = fileCfg.FirstTurn.Interval
+		}
+		if fileCfg.FirstTurn.Grace > 0 {
+			cfg.FirstTurn.Grace = fileCfg.FirstTurn.Grace
+		}
+		if fileCfg.FirstTurn.NotifyTo != "" {
+			cfg.FirstTurn.NotifyTo = fileCfg.FirstTurn.NotifyTo
 		}
 		if fileCfg.wedgeWatchEnabledSet {
 			cfg.WedgeWatch.Enabled = fileCfg.WedgeWatch.Enabled
@@ -2534,6 +2615,22 @@ func parseConfigFileInto(cfg *parsedConfig, path string) error {
 				if d, err := time.ParseDuration(unquotedVal); err == nil {
 					cfg.DeafWatch.EscalateAfter = d
 				}
+			}
+		case "first_turn":
+			switch key {
+			case "enabled":
+				cfg.FirstTurn.Enabled = val == "true"
+				cfg.firstTurnEnabledSet = true
+			case "interval":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.FirstTurn.Interval = d
+				}
+			case "grace":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.FirstTurn.Grace = d
+				}
+			case "notify_to":
+				cfg.FirstTurn.NotifyTo = unquotedVal
 			}
 		case "wedge_watch":
 			switch key {

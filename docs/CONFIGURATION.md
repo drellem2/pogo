@@ -1888,6 +1888,113 @@ silently. ack-watch catches "registered and not completing"; deaf-watch catches
 
 Source of truth: `internal/deafwatch/`, `internal/agent/mailloop_report.go`.
 
+## The first-completed-turn floor (first-turn)
+
+**A spawn is not a success.** `autostart: started pm-pogo (pid=41773)` plus a
+registered mail-check schedule is evidence that pogod did its job, and no
+evidence whatever that the agent is alive in the only sense that matters. On
+2026-08-11 this daemon logged that line five times at 03:01, re-registered every
+schedule, and passed its own post-check ("5 mail-check schedule(s) present")
+ninety seconds later — over a fleet that then completed **zero turns for
+seventeen hours**. Everything pogod asserted was true.
+
+first-turn watches for each agent's **first completed fire after each spawn** and
+alarms when it never arrives. Report-only.
+
+### It does not replace the blackout arm — read this before assuming it does
+
+ack-watch's FLEET BLACKOUT arm (above) **fired 33 consecutive times through that
+same 22-hour outage**, correctly, naming all five agents, escalating each one to
+the escalation box, and the out-of-process notifier surfaced them. Detection,
+routing and delivery all worked. The premise "no instrument saw it" is false and
+should not be repeated.
+
+What that arm cannot do is speak about a **fresh** agent, and that is not a
+defect in it. It judges an absolute completion *ratio* over a trailing window, so
+`RunningSince` holds an agent ineligible until it has been up for the whole
+window — a gate that is load-bearing, because "fires delivered, nothing
+completed" is also exactly what an *empty* fleet looks like, every night between
+midnight and 09:30. The cost is arithmetic: after a bounce the earliest it can
+say anything is one full window later. Measured on the outage above, its first
+post-bounce firing was at 05:03:36Z, 3h02m after the 02:01:33Z spawn. first-turn
+is red at 02:46:33Z.
+
+| arm | claim | earliest |
+|---|---|---|
+| ack-watch blackout | the fleet **was** alive and went dark | one 3h window |
+| first-turn | the fleet was **never** alive | 45m grace |
+
+### Why the grace is 45 minutes
+
+It is a measurement, not a preference. Every crew `agent_spawned` on this box
+since completion tracking existed (2026-07-23), paired with the first
+`scheduler_fire_completed` addressed to that agent at or after the spawn — 87
+spawns, bimodal, with nothing at all in the middle:
+
+| population | n | spawn → first ack |
+|---|---|---|
+| healthy | 67 | max **33.7 min** (p50 12.6 min) |
+| outage | 20 | min **150.8 min** (max 1139 min = 19h) |
+
+The 20 in the upper mode *are* the three outages: the 2026-08-10 spend-limit
+episode (150–181 min), the 2026-08-11 nightly-deploy spawn of five inert agents
+(1044–1064 min), and the 2026-08-08 hung-deploy outage (1139 min). 45 minutes
+sits inside the empty band — 1.33× the healthy maximum, 3.35× below the smallest
+real outage. **Rerun the sweep before moving it**; a threshold justified by a
+measurement whose data has moved is justified by nothing.
+`TestGrace_SitsInsideTheMeasuredEmptyBand` pins both edges.
+
+### The rules
+
+- **Crew only.** A polecat's first ack legitimately trails its first real work,
+  which is a task of unbounded length, so the separation above is a property of
+  the crew population and does not transfer. Polecats have stall-watch and
+  wedge-watch.
+- **Evidence is the events log, not the counters.** `scheduler.Entry`'s
+  completion counters are zeroed by re-registration, and every crew agent
+  re-registers on startup — so on precisely the boot this floor exists to judge,
+  the counters read 0/0 for reasons that have nothing to do with the agent.
+- **A completion before the spawn does not count.** The 2026-08-11 events log
+  holds thousands of completions; every one belonged to the incarnation that died
+  the previous evening. A detector matching "has acked at some point" reads green
+  through the whole outage.
+- **An agent nothing was asked of is not blamed.** A finding needs at least 2
+  fires actually *delivered* since spawn. Fewer, and the agent is reported as
+  `never_addressed` — that is deaf-watch's finding and a different remedy.
+- **Routing.** A single dark agent goes to `notify_to` (`mayor`): restarting one
+  crew agent is coordination work. The **fleet-wide** case escalates immediately
+  and structurally to `[agents] escalation_box`, not on any age gate — the mayor
+  is inside every fleet outage in this system's history (mg-e2a4), and a fleet
+  that has never come up cannot be the thing that fixes it.
+- **The subject line carries a duration that grows.** Repeats climb a doubling
+  ladder (+1h, +3h, +7h, +13h, capped at 6h apart), each naming how long this has
+  been going on. This is deliberate contrast with the blackout arm, whose 33
+  notices through the outage carried a byte-identical subject: the 33rd held no
+  more information than the 1st, and none of them ever said how long.
+- **Quiet is recorded.** A clean sample emits `first_turn_watch_clear` with its
+  judged roster and the populations it declined to judge. A silent correct
+  outcome and a control that is not running are otherwise the same observation —
+  which is this whole ticket, one level up.
+- **Blind is never calm.** No registry, an unreadable events log, or a source
+  error emits `first_turn_watch_blind` and judges nothing.
+- **A notice that reached nobody** emits `first_turn_watch_unreported`.
+- **Report-only.** It never restarts, nudges or respawns. No member of the
+  synthetic-failure class is fixable by a restart (mg-18d0), and pogod may
+  already be suppressing respawns for that reason when this fires.
+
+```toml
+[first_turn]
+enabled = true             # default true
+interval = "10m"           # sample cadence (default 10m; well under the grace)
+grace = "45m"              # a spawned agent may complete nothing for this long
+                           # (default 45m — see the sweep above before changing)
+notify_to = "mayor"        # SINGLE-agent findings go here (default mayor); the
+                           # fleet-wide case always also goes to
+                           # [agents] escalation_box
+```
+
+Source of truth: `internal/firstturn/`.
+
 ### `pogo check-strandedmail` — mail in a mailbox nobody reads
 
 A third disjoint question, and the one neither of the above can ask. deaf-watch
