@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/drellem2/pogo/internal/config"
+	"github.com/drellem2/pogo/internal/turnlog"
 )
 
 //go:embed prompts
@@ -395,17 +396,18 @@ func SynthesizeExtendsPrompt(promptPath, outPath string) (string, error) {
 		}
 		body = stripPromptHashStamp(raw)
 	}
-	withDrops := appendDropIns(string(body), drop)
+	withDrops := appendTurnLogClause(appendDropIns(string(body), drop))
 	merged := []byte(substituteRoleNames(withDrops))
 
-	// Bail out early when no layer changed anything — no extends directive,
-	// no drop-ins, and no coordinator/worker placeholder — so the caller falls
-	// back to using promptPath as-is, avoiding a synthesized-file write for the
-	// common no-customization case.
-	if extData == nil && drop == "" && withDrops == string(merged) {
-		return "", nil
-	}
-
+	// There is no longer a no-customization fast path, and its removal is the
+	// mechanism of mg-a270 rather than an oversight. The turn-completion clause
+	// is a fleet invariant every crew agent must carry, so every crew prompt is
+	// now a synthesized prompt — including the two the installer never writes
+	// and cannot reach (crew/architect.md, crew/pa.md), which is precisely why
+	// the clause is injected here instead of being added to the shipped corpus.
+	// The bail-out used to return "" so the caller could spawn against the
+	// on-disk stub verbatim; a stub spawned verbatim is a crew agent with no
+	// turn-completion artifact, which is the defect.
 	if err := os.MkdirAll(filepath.Dir(outPath), 0755); err != nil {
 		return "", fmt.Errorf("create dir for synthesized prompt: %w", err)
 	}
@@ -595,7 +597,32 @@ func synthesizeStaticPrompt(path, basename string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return substituteRoleNames(appendDropIns(body, drop)), nil
+	return substituteRoleNames(appendTurnLogClause(appendDropIns(body, drop))), nil
+}
+
+// appendTurnLogClause appends the fleet-wide turn-completion instruction
+// (mg-a270) to a rendered crew or coordinator prompt.
+//
+// This is the injection point that makes the convention uniform. Crew prompts
+// come from three different places — the embed (crew/doctor.md), the extends
+// synthesis (the PM tier), and the operator's own editor (crew/architect.md,
+// crew/pa.md, which no install path writes or is permitted to touch) — and only
+// the renderer sees all three. Adding the paragraph to the shipped corpus
+// instead would have covered doctor and the PMs and missed mayor's two
+// uninstrumented peers, which are the agents the ticket is about.
+//
+// Polecat templates deliberately do NOT get it: a polecat's liveness is already
+// carried by its claim re-stamp, its branch, and its merge, and it is stopped
+// within minutes of finishing. The clause is scoped to the long-running agents
+// whose silence is what nothing could see.
+func appendTurnLogClause(body string) string {
+	if strings.Contains(body, turnlog.ClauseMarker) {
+		return body
+	}
+	if body != "" && !strings.HasSuffix(body, "\n") {
+		body += "\n"
+	}
+	return body + turnlog.PromptClause
 }
 
 func synthesizePolecatTemplate(path, basename string, vars TemplateVars) (string, error) {

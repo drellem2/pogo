@@ -13,6 +13,7 @@ import (
 
 	"github.com/drellem2/pogo/internal/gitgc"
 	"github.com/drellem2/pogo/internal/testsandbox"
+	"github.com/drellem2/pogo/internal/turnlog"
 )
 
 func TestExpandTemplate(t *testing.T) {
@@ -3105,7 +3106,16 @@ func TestSynthesizeExtendsPrompt(t *testing.T) {
 }
 
 // TestSynthesizeExtendsPromptNoDirective verifies that a crew prompt without
-// the directive returns "" so the caller uses the original file as-is.
+// the directive still synthesizes — because of the turn-completion clause.
+//
+// This test used to pin the opposite: no directive meant "" and the caller
+// spawned against the on-disk file verbatim. mg-a270 removed that fast path
+// deliberately. A verbatim spawn is a crew agent carrying whatever its author
+// wrote and nothing else, and for crew/architect.md and crew/pa.md — which no
+// installer writes and none may touch — "whatever its author wrote" contained
+// no turn-completion artifact at all. Those two agents were unverifiable by any
+// liveness instrument for as long as they have existed, which is why a 22-hour
+// fleet outage read green.
 func TestSynthesizeExtendsPromptNoDirective(t *testing.T) {
 	testsandbox.Isolate(t)
 
@@ -3113,16 +3123,32 @@ func TestSynthesizeExtendsPromptNoDirective(t *testing.T) {
 		t.Fatal(err)
 	}
 	crewPath := filepath.Join(CrewPromptDir(), "plain.md")
-	if err := os.WriteFile(crewPath, []byte("# Plain crew agent\n\nNo directive here.\n"), 0644); err != nil {
+	body := "# Plain crew agent\n\nNo directive here.\n"
+	if err := os.WriteFile(crewPath, []byte(body), 0644); err != nil {
 		t.Fatal(err)
 	}
 
-	got, err := SynthesizeExtendsPrompt(crewPath, filepath.Join(t.TempDir(), "synth.md"))
+	outPath := filepath.Join(t.TempDir(), "synth.md")
+	got, err := SynthesizeExtendsPrompt(crewPath, outPath)
 	if err != nil {
 		t.Fatalf("SynthesizeExtendsPrompt: %v", err)
 	}
-	if got != "" {
-		t.Errorf("expected empty result for prompt without directive, got %q", got)
+	if got != outPath {
+		t.Fatalf("a crew prompt with no directive must still synthesize (it needs the turn-completion clause), got %q", got)
+	}
+	data, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(data)
+	if !strings.Contains(out, "No directive here.") {
+		t.Errorf("author's body missing from synthesized output:\n%s", out)
+	}
+	if !strings.Contains(out, turnlog.ClauseMarker) {
+		t.Errorf("turn-completion clause missing — this prompt's agent would write no liveness artifact:\n%s", out)
+	}
+	if !strings.Contains(out, "pogo turn-done") {
+		t.Errorf("turn-completion clause must name the command that writes the artifact:\n%s", out)
 	}
 }
 
@@ -3685,8 +3711,8 @@ func TestSynthesizeExtendsPromptDropInsLexicalOrder(t *testing.T) {
 }
 
 // TestSynthesizeExtendsPromptEmptyDropInDir confirms a created-but-empty
-// drop-in directory is treated identically to an absent one — no synthesized
-// file, return "" so the caller falls back to the original prompt.
+// drop-in directory is treated identically to an absent one — it contributes
+// no fragment text to the synthesized prompt.
 func TestSynthesizeExtendsPromptEmptyDropInDir(t *testing.T) {
 	testsandbox.Isolate(t)
 	if err := InitPromptDirs(); err != nil {
@@ -3705,11 +3731,25 @@ func TestSynthesizeExtendsPromptEmptyDropInDir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SynthesizeExtendsPrompt: %v", err)
 	}
-	if got != "" {
-		t.Errorf("expected empty result for empty drop-in dir, got %q", got)
+	// An empty drop-in dir contributes nothing, which is still the property
+	// under test; what changed with mg-a270 is that contributing nothing no
+	// longer means synthesizing nothing. Every crew render carries the
+	// turn-completion clause, the coordinator's most of all — it is the agent
+	// every other detector routes through, and it wrote no such artifact.
+	if got != outPath {
+		t.Fatalf("expected synthesized output at %q, got %q", outPath, got)
 	}
-	if _, err := os.Stat(outPath); !os.IsNotExist(err) {
-		t.Errorf("expected no synthesized file written, stat err = %v", err)
+	data, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(data)
+	if strings.Count(out, turnlog.ClauseMarker) != 1 {
+		t.Errorf("want exactly one turn-completion clause, got %d:\n%s",
+			strings.Count(out, turnlog.ClauseMarker), out)
+	}
+	if !strings.Contains(out, "base") {
+		t.Errorf("base body missing from synthesized output:\n%s", out)
 	}
 }
 

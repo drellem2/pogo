@@ -58,6 +58,8 @@ import (
 	"github.com/drellem2/pogo/internal/staleness"
 	"github.com/drellem2/pogo/internal/stallwatch"
 	"github.com/drellem2/pogo/internal/synthwatch"
+	"github.com/drellem2/pogo/internal/turnlog"
+	"github.com/drellem2/pogo/internal/turnwatch"
 	"github.com/drellem2/pogo/internal/wedgewatch"
 	"github.com/drellem2/pogo/internal/workitem"
 
@@ -2460,6 +2462,70 @@ Flags:
 	// alerting-policy decision reserved to Daniel and is deliberately not built.
 	// The findings go to the event log and to this daemon's log; wiring a
 	// recipient is a later, separate change.
+	// The TURN-COMPLETION reader (mg-a270). Every crew agent appends one line
+	// per completed turn to ~/.pogo/agents/turnlog/<name>.log — an artifact
+	// nothing but a finished turn produces — and this reads them against the
+	// registry's population.
+	//
+	// IT LIVES HERE FOR ONE REASON, and it is the whole point of the amendment
+	// that added it: every fleet-wide scheduled check on this machine is
+	// coordinator-owned, so a detector that routes through the coordinator
+	// cannot report the coordinator being down. That circularity, not a
+	// mistuned threshold, is why a 22-hour fleet outage read green on
+	// 2026-08-10/11. pogod is the only participant that is not a crew agent.
+	// A nightly crew reader was offered and refused: its ~24h worst-case
+	// latency is the same order as the outages it would detect.
+	//
+	// The routing rule is in turnwatch.recipients — a finding about the
+	// coordinator goes to the escalation box, never to the coordinator.
+	// REPORT-ONLY: it mails and emits, with no seam to nudge or restart.
+	var turnWatcher *turnwatch.Watcher
+	if agentRegistry != nil {
+		turnWatcher = turnwatch.New(turnwatch.Options{
+			Enabled: true,
+			Scan: func(now time.Time) (turnlog.Report, error) {
+				return turnlog.Scan(turnlog.Options{
+					Now: now,
+					Population: func() ([]turnlog.Present, error) {
+						// Crew only. Polecat prompts carry no turn-completion
+						// clause — their work is evidenced by the claim
+						// re-stamp, the branch and the merge — so including
+						// them would produce a permanent red that means
+						// nothing, which is how a detector becomes ignorable.
+						var out []turnlog.Present
+						for _, a := range agentRegistry.List() {
+							if a.Type != agent.TypeCrew {
+								continue
+							}
+							if a.Status != agent.StatusRunning && a.Status != agent.StatusRestarting {
+								continue
+							}
+							out = append(out, turnlog.Present{
+								Name: a.Name, Type: string(a.Type), StartedAt: a.StartTime,
+							})
+						}
+						return out, nil
+					},
+				})
+			},
+			Mail:        client.SendMGMail,
+			Coordinator: coordinator,
+			HumanBox:    escalationBox,
+			StartedAt:   time.Now(),
+		})
+		log.Printf("pogod: turn-watch enabled (interval=%s max_age=%s grace=%s hold_down=%s; "+
+			"coordinator findings route to %s, never to %s — report-only)",
+			turnwatch.DefaultInterval, turnlog.DefaultMaxAge, turnwatch.DefaultGrace,
+			turnwatch.DefaultHoldDown, escalationBox, coordinator)
+	} else {
+		// Said out loud, because a detector that is silently off is this
+		// package's own subject matter one level up. Without the registry there
+		// is no population, and turnlog.Scan refuses to substitute the file
+		// listing for it — so the honest state is "not armed", not "clean".
+		log.Printf("pogod: turn-watch NOT armed — no agent registry, so there is no population to " +
+			"read turn-completion artifacts against. Nothing is watching whether crew agents complete turns")
+	}
+
 	var wedgeWatcher *wedgewatch.Watcher
 	if cfg.WedgeWatch.Enabled && agentRegistry != nil {
 		wedgeWatcher = wedgewatch.New(wedgewatch.Options{
@@ -2609,6 +2675,22 @@ Flags:
 		// through which it could restart or respawn the agent it names.
 		if firstTurnWatcher != nil {
 			go firstTurnWatcher.Check(now)
+		}
+		// The turn-completion reader rides the same tick and throttles itself
+		// to a coarse interval. In a goroutine because a finding shells out to
+		// `mg mail send`, which must never delay a tick. Report-only.
+		//
+		// It sits BESIDE firstTurnWatcher rather than inside it on purpose
+		// (mg-a270 / mg-3cbb). The two answer different questions on different
+		// evidence: that one asks "has this agent completed a turn since it was
+		// spawned" from scheduler acks with a 45-minute grace, this one asks
+		// "has it completed one in the last N" from the agent-written turnlog
+		// with a 3-hour floor. Neither threshold serves the other question, and
+		// keeping the evidence sources separate means an agent that stops
+		// writing turnlog lines while still acking stays visible, and the
+		// converse.
+		if turnWatcher != nil {
+			go turnWatcher.Check(now)
 		}
 		// The wedged-agent detector rides the same tick and throttles itself to
 		// a coarse interval. In a goroutine because it scans every agent's PTY

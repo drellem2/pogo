@@ -9,6 +9,7 @@ import (
 
 	"github.com/drellem2/pogo/internal/config"
 	"github.com/drellem2/pogo/internal/testsandbox"
+	"github.com/drellem2/pogo/internal/turnlog"
 )
 
 // setCoordinator sets the process-wide coordinator name for the duration of a
@@ -53,11 +54,19 @@ func TestTitleFirst(t *testing.T) {
 	}
 }
 
-// TestSynthesizeExtendsPromptNoPlaceholderStillBailsOut pins the
-// no-customization fast path: a crew prompt with no extends directive, no
-// drop-ins, and no coordinator placeholder must not produce a synthesized
-// file.
-func TestSynthesizeExtendsPromptNoPlaceholderStillBailsOut(t *testing.T) {
+// TestSynthesizeExtendsPromptNoPlaceholderStillSynthesizes pins the invariant
+// that replaced the no-customization fast path (mg-a270).
+//
+// The fast path existed to avoid a file write when no layer changed anything.
+// It was removed because one layer now always changes something: the
+// turn-completion clause, which every crew agent must carry and which is
+// therefore not a customization. The prompt below is the exact shape the fast
+// path was written for — no extends directive, no drop-ins, no placeholder —
+// and it is also the exact shape of the two prompts the ticket was about
+// (crew/architect.md, crew/pa.md). Those two are user-authored: no installer
+// writes them, so adding the clause to the shipped corpus would have missed
+// precisely the agents that had no liveness artifact.
+func TestSynthesizeExtendsPromptNoPlaceholderStillSynthesizes(t *testing.T) {
 	testsandbox.Isolate(t)
 	if err := InitPromptDirs(); err != nil {
 		t.Fatal(err)
@@ -66,12 +75,20 @@ func TestSynthesizeExtendsPromptNoPlaceholderStillBailsOut(t *testing.T) {
 	if err := os.WriteFile(crewPath, []byte("# Plain\nNo placeholder here.\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	got, err := SynthesizeExtendsPrompt(crewPath, filepath.Join(t.TempDir(), "synth.md"))
+	outPath := filepath.Join(t.TempDir(), "synth.md")
+	got, err := SynthesizeExtendsPrompt(crewPath, outPath)
 	if err != nil {
 		t.Fatalf("SynthesizeExtendsPrompt: %v", err)
 	}
-	if got != "" {
-		t.Errorf("expected bail-out (\"\"), got %q", got)
+	if got != outPath {
+		t.Fatalf("expected synthesized output at %q, got %q", outPath, got)
+	}
+	data, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), turnlog.ClauseMarker) {
+		t.Errorf("a user-authored crew prompt rendered without the turn-completion clause:\n%s", data)
 	}
 }
 

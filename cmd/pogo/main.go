@@ -3895,6 +3895,12 @@ branches; work items and mail live in mg/macguffin (the task-store CLI).`,
 	rootCmd.AddCommand(newCheckPromptsCmd(&jsonOutput))
 	rootCmd.AddCommand(newCheckStalenessCmd(&jsonOutput))
 	rootCmd.AddCommand(newCheckOrphansCmd(&jsonOutput))
+	// turn-done / check-turns (mg-a270): the fleet's turn-completion artifact
+	// and its reader. The writer is a command AGENTS run at the end of their own
+	// turns — the first liveness evidence on this machine that pogod does not
+	// produce, and the only kind whose silence means what it appears to mean.
+	rootCmd.AddCommand(newTurnDoneCmd(&jsonOutput))
+	rootCmd.AddCommand(newCheckTurnsCmd(&jsonOutput))
 	// check-stranded (mg-be37): the PERIODIC half of the spawn-time stranded-work
 	// guard. That guard only fires when somebody dispatches; this one asks the
 	// question of every open item on a clock, and reports the merged-but-open row

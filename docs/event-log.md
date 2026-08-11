@@ -959,6 +959,55 @@ The floor could not judge this sample: no agent registry, an unreadable schedule
 Every recipient of a finding refused the mail. The one state worse than the bug this arm fixes: the fleet never came up, pogod noticed, and the notice did not leave the machine. Mirrors `ack_watch_blackout_unreported`.
 
 - **`details` fields:** `recipients` (string, required), `agents` (array of string, required), `dark_for` (string, required)
+#### `turn_watch_finding`
+
+pogod's turn-completion reader ([internal/turnwatch](../internal/turnwatch/turnwatch.go), mg-a270) found at least one agent that is PRESENT and has completed no recent turn, and mailed. The evidence is `~/.pogo/agents/turnlog/<name>.log` — one line per completed turn, appended by the agent itself via `pogo turn-done` — which is the only artifact on this machine that **nothing but a completed turn produces**. Every other liveness-adjacent signal here describes something pogod did, and on 2026-08-10/11 all of those were green and truthful for 22 hours while the fleet did no work.
+
+**The recipient is the interesting field.** A finding about the COORDINATOR goes to the escalation box and never to the coordinator. Every fleet-wide scheduled check on this machine is coordinator-owned, so a detector that routes through the coordinator cannot report the coordinator being down — that circularity, not a mistuned threshold, is why the outage read green. `reader_is_pogod` and `routed_via_mayor` are carried on every event so the property is auditable from the log rather than only from the source.
+
+**Report-only** — no nudge, restart or stop seam. Emitted once per sample that mailed; an unchanged roster is re-raised only after `renotify_after`. Additive — no `schema_version` bump.
+
+- **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent` (always `"pogod"`), `details`
+- **`details` fields:**
+  - `findings` (array of string, required): `<agent>:<verdict>`, coordinator first. Verdicts are `stale` (completed turns before, none recently), `silent` (never wrote one), `unreadable` (artifact could not be parsed)
+  - `coordinator_hit` (bool, required): whether the coordinator is among the findings
+  - `population` (int, required): how many present agents were examined — zero findings over a zero population is not a clean fleet
+  - `notified` (array of string, required): the mailboxes told
+  - `reader_is_pogod` (bool, required): always true; present so a future crew-resident reader is distinguishable in the log
+  - `routed_via_mayor` (bool, required): always false
+
+```json
+{"schema_version":1,"timestamp":"2026-08-11T20:30:00.000000000Z","event_type":"turn_watch_finding","agent":"pogod","details":{"findings":["mayor:stale","architect:silent"],"coordinator_hit":true,"population":5,"notified":["human"],"reader_is_pogod":true,"routed_via_mayor":false}}
+```
+
+#### `turn_watch_skipped`
+
+An agent was red but was NOT judged, because it is still inside its post-start grace window (45 min by default). An agent thirty seconds old with no completed turn has not failed to complete one; it has not had time. Emitted rather than swallowed so "declined to judge" and "judged and found nothing" stay apart — the distinction this whole lineage keeps rediscovering.
+
+- **`details` fields:**
+  - `target` (string, required): the bare agent name
+  - `verdict` (string, required): the reading that was not acted on
+  - `why` (string, required): the grace window and its length
+
+#### `turn_watch_clear`
+
+The last finding cleared: every present agent has completed a turn inside the window. Emitted on the transition only, unlike `ack_watch_clear`, because `turn_watch_finding` already carries the population count on every mailing sample and the coarse interval here is 15m.
+
+- **`details` fields:**
+  - `population` (int, required): present agents examined
+  - `live` (int, required): how many completed a turn inside the window
+
+#### `turn_watch_error`
+
+The reader could not produce a reading, so it evaluated nothing this sample — an unreachable agent registry, most plausibly. It is emitted rather than passed over in silence because without the population the only remaining list would be the turnlog directory, and an agent that has never written a line is absent from that directory: a scan built the other way is structurally blind to exactly the agents this detector exists to find. Also emitted when a notice could not be delivered.
+
+- **`details` fields:**
+  - `error` (string, required): why the fleet could not be judged, or why the mail failed
+  - `to` (string, optional): the mailbox that could not be reached
+
+```json
+{"schema_version":1,"timestamp":"2026-08-11T20:30:00.000000000Z","event_type":"turn_watch_error","agent":"pogod","details":{"error":"turnlog: could not determine which agents are present: connection refused"}}
+```
 
 #### `synthetic_failure_detected`
 

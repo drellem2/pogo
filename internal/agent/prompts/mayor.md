@@ -533,11 +533,59 @@ was caught by Daniel at ~14min, but a 90-min threshold avoids false positives fr
 short network blips, long tool calls, or clock-skew weirdness. Tighten only if a real
 wedge slips through for hours.
 
-**Scope:** PMs are the primary stall-watch target because they're the long-running
-crew agents that publish sweep.log. Architect, doctor, and other crew agents can opt
-in by writing to `~/.pogo/agents/<their-name>/sweep.log` (or `~/.pogo/agents/pm/...`
-for PMs) with the same per-mail-check heartbeat pattern. **Don't watch yourself** —
-pogod / launchd is {{.Coordinator}}'s watchdog (KeepAlive=true on the launchd plist).
+**Scope:** the thresholds above read PM sweep.log mtimes, which only the PM tier
+publishes. For the whole crew — including yourself — read the turn-completion log
+instead (next section). **Don't act on your own row** — pogod / launchd is
+{{.Coordinator}}'s watchdog (KeepAlive=true on the launchd plist) — but do read it,
+because a stale row of your own is the one finding nobody else on this machine can
+surface to you.
+
+### 3a-ii. Read the turn-completion log (whole-crew liveness)
+
+```bash
+pogo check-turns
+```
+
+Every crew agent appends one line per completed turn to
+`~/.pogo/agents/turnlog/<name>.log`, written by the agent itself. This is the only
+artifact on the machine that **nothing but a completed turn can produce**, which
+makes it the only liveness reading whose silence means what it appears to mean.
+
+Everything else you have — including 3a's heartbeat and every green signal pogod
+publishes — describes either a file that a present-but-idle agent keeps touching or
+an action pogod took. On 2026-08-10/11 this fleet did no work for twenty-two hours
+while the processes existed, the schedules were registered, 140 nudges were
+delivered and the running revision was current. All of it was true. None of it was
+about whether an agent finished anything. mg-8cdb's detector ran ~204 checks across
+that window and emitted nothing, because it was pointed at the wrong end.
+
+Reading the output:
+
+- `live` — completed a turn inside the window.
+- `stale` — completed turns before, none recently. Take it to the 3a pre-restart
+  check: `pogo agent diagnose <name> --json`. Failing-turns is not wedged.
+- `silent` — has written no line at all. Check the agent's uptime before concluding:
+  an agent started before this artifact existed carries a prompt that never
+  mentioned it, and reads silent until it is bounced. That is a true reading of a
+  different fact.
+- `unreadable` — the artifact could not be parsed. This is not a pass.
+
+An empty population is **not** a clean fleet, and the report says so out loud. Zero
+agents examined produces zero findings, which is exactly the shape of green that hid
+the outage.
+
+To decide whether to believe a clean run: `pogo check-turns --probe` builds a
+throwaway fixture holding an agent that just completed a turn, one that stopped, and
+one that never started, and requires the check to report the last two. A liveness
+check nobody has watched fail is a presence check until proven otherwise.
+
+**You are not the reader of record, and specifically not for yourself.** pogod runs
+this same reading on its own heartbeat (turn-watch, mg-a270) and mails findings —
+findings about anyone else to you, findings about YOU to the escalation box (`human`
+by default) and never to you. That split is deliberate and it is not redundancy you should optimize
+away: every fleet-wide scheduled check on this machine is yours, so a detector that
+routes through you cannot report you being down. Your own reading above is a
+convenience for acting on a stalled peer, not the fleet's guarantee.
 
 ### 3b. Act on ack-watch mail (completion deficit)
 
