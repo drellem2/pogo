@@ -81,6 +81,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	"github.com/drellem2/pogo/internal/testtmp"
 )
 
 // FailPrefix opens every setup failure this package raises. It names the
@@ -419,7 +421,14 @@ func Main(label string) (*Sandbox, func()) {
 	root := rootFor("")
 	if root == "" {
 		var err error
-		if root, err = os.MkdirTemp("", "pogo-"+label+"-sandbox"); err != nil {
+		// testtmp rather than os.MkdirTemp, because down() below is not a
+		// guarantee: a package whose tests re-exec the test binary as a helper
+		// and then KILL it leaves that child's teardown unrun, and the agent
+		// package does exactly that. Measured before this change, one
+		// `go test ./internal/agent/...` left four pogo-agent-sandbox* roots
+		// behind — teardown working perfectly for the one process that got to
+		// run it. testtmp's sweep is the backstop for the other three (mg-de3c).
+		if root, err = testtmp.Dir("sandbox-" + label); err != nil {
 			mainFail(fmt.Errorf("could not create a private root for the %s package's "+
 				"tests: %w", label, err))
 		}

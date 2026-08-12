@@ -40,6 +40,23 @@ mkdir -p _testdata/b-service/.git
 # for why 20m and not the 40m the issue suggests.
 gate_step "Testing Go packages" bash scripts/go-test-budget.sh ./...
 
+# The $TMPDIR leak guard (mg-de3c). It belongs in the gate rather than on
+# demand because the defect it measures is the one that BROKE the gate: at 255
+# MiB free, ./build.sh failed here with "no space left on device" and the
+# refinery reported a healthy branch as defective, naming specific tests
+# (mg-b41f). The cause was our own suites — 37,083 abandoned fixture directories
+# and 61 GB in one $TMPDIR, growing with every run.
+#
+# The load-bearing case is Test 2, the positive control: the check is a COUNT,
+# and "the count did not grow" means nothing until the same counting code has
+# been shown to report growth. Test 4 is then the ticket's acceptance criterion
+# verbatim — count, run a suite that creates fixtures, count, unchanged.
+#
+# 18.7s measured (rank 7 of 25, 3.4% of the gate): it runs three `go test`
+# invocations over a deliberately small slice that still touches every caller,
+# rather than the ~300s internal/agent costs in full.
+gate_step "Testing the \$TMPDIR leak guard" bash scripts/tmpdir-leak_test.sh
+
 gate_step "Testing neovim plugin" bash nvim/test_nvim.sh
 
 gate_step "Testing bash shell integration" bash shell/bashrc_test.sh

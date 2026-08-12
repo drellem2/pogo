@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/drellem2/pogo/internal/testtmp"
 )
 
 // The exit code IS the interface. A schedule, a doctor row or a CI step reads
@@ -33,7 +35,10 @@ var (
 func checkVerdictsBinary(t *testing.T) string {
 	t.Helper()
 	buildOnce.Do(func() {
-		dir, err := os.MkdirTemp("", "checkverdicts-bin-")
+		// testtmp, not os.MkdirTemp: the binary is built once and shared by
+		// every test in this file, so it must outlive each of them and there is
+		// no t whose Cleanup could own it (mg-de3c).
+		dir, err := testtmp.Dir("checkverdicts")
 		if err != nil {
 			buildErr = err
 			return

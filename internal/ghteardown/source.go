@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/drellem2/pogo/internal/testtmp"
 )
 
 // carrierLinePrefixes are the body lines that make an item a gh-issue carrier.
@@ -155,7 +157,7 @@ func (s MGSource) resolveRoot() string {
 	}
 	if testing.Testing() {
 		testRootOnce.Do(func() {
-			dir, err := os.MkdirTemp("", "ghteardown-test-store-")
+			dir, err := testtmp.Dir("ghteardown")
 			if err != nil {
 				// Deliberately no error return: every fallback path must lead
 				// somewhere that is not the live store. A temp path we failed to

@@ -12,6 +12,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/drellem2/pogo/internal/testtmp"
 )
 
 // This file pins the premise that makes pogod's mail-check reap safe for
@@ -107,7 +109,11 @@ func TestFakePogodHelper(t *testing.T) {
 	if os.Getenv(fakePogodEnv) == "" {
 		t.Skip("helper process for TestPolecatDoesNotOutlivePogod; not a standalone test")
 	}
-	dir, err := os.MkdirTemp("", "pg")
+	// testtmp, not os.MkdirTemp: this helper is DESIGNED to be killed — the
+	// whole point of the test below is a pogod that dies with no teardown — so
+	// t.Cleanup and defer are both unreachable here by construction. testtmp's
+	// sweep removes it once this pid is gone (mg-de3c).
+	dir, err := testtmp.Dir("fakepogod")
 	if err != nil {
 		fmt.Println("HELPER-ERR", err)
 		os.Exit(1)

@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/drellem2/pogo/internal/events"
+	"github.com/drellem2/pogo/internal/testtmp"
 )
 
 // ClaimReleaser releases the macguffin claim a polecat holds on its work item,
@@ -88,7 +89,7 @@ func macguffinStoreRoot(override string) string {
 	}
 	if testing.Testing() {
 		testStoreOnce.Do(func() {
-			dir, err := os.MkdirTemp("", "pogo-claimrelease-test-store-")
+			dir, err := testtmp.Dir("claimrelease")
 			if err != nil {
 				// Every fallback must lead somewhere that is not the live store:
 				// a temp path we failed to create yields "nothing claimed", which
