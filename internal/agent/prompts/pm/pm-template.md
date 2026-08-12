@@ -154,7 +154,13 @@ Only the newest token is redeemable. A rejected ack (`stale token`) means a newe
 1. **Enumerate first.** List ALL unread messages (`mg mail list pm-<your-name>`) before reading any.
 2. **Dispose of each explicitly** before the check ends: act on it, file an `mg` ticket for it, or deliberately no-op with a stated reason. Read must never outrun handled.
 3. **End-of-turn check.** If any message was marked read this turn without a disposition, handle it now — before ending the cycle.
-4. **Reconcile after interruption.** If a mail batch was interrupted, re-list and reconcile on the next cycle; don't trust the unread filter alone after a batch read.
+4. **Reconcile after interruption — and a RESTART is an interruption.** If a mail batch was interrupted, re-list and reconcile on the next cycle; don't trust the unread filter alone after a batch read. A bounce, a crash or a redeploy counts, and it is the worst case: you are a new session that never saw the batch, so nothing in your context tells you an interruption happened, and you inherit the obligation from a predecessor that cannot tell you anything. **After any restart**, reconcile explicitly:
+
+   ```bash
+   mg mail list pm-<your-name> --all
+   ```
+
+   against your last heartbeat line in `~/.pogo/agents/pm/<your-name>/sweep.log` (or your last `pogo turn-done` line in `~/.pogo/agents/turnlog/pm-<your-name>.log`). Anything that landed between that timestamp and the bounce is suspect **regardless of read state**. `--all` is not a convenience: the unread filter cannot surface a read-but-unhandled mail by construction, which is the whole failure mode. On the 2026-08-12 03:01 bounce this is how a mail read in the ~12 minutes between the last heartbeat and the bounce was recovered — "came back" and "came back with its mail reconciled" are different predicates, and only the second one is what bullets 1–3 promise.
 
 ## Cadence
 

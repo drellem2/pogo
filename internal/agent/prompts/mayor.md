@@ -666,7 +666,13 @@ For each message, read it with `mg mail read {{.Coordinator}} <msg-id>` — this
 1. **Enumerate first.** List ALL unread messages before reading any.
 2. **Dispose of each explicitly** before the cycle ends: act on it, file an `mg` ticket for it, or deliberately no-op with a stated reason. Read must never outrun handled.
 3. **End-of-turn check.** If any message was marked read this turn without a disposition, handle it now — before scheduling the next wakeup.
-4. **Reconcile after interruption.** If a mail batch was interrupted, re-list and reconcile on the next cycle; don't trust the unread filter alone after a batch read.
+4. **Reconcile after interruption — and a RESTART is an interruption.** If a mail batch was interrupted, re-list and reconcile on the next cycle; don't trust the unread filter alone after a batch read. A bounce, a crash or a redeploy counts, and it is the worst case: you are a new session that never saw the batch, so nothing in your context tells you an interruption happened, and you inherit the obligation from a predecessor that cannot tell you anything. **After any restart**, reconcile explicitly:
+
+   ```bash
+   mg mail list {{.Coordinator}} --all
+   ```
+
+   against your last recorded activity — your last `pogo turn-done` line in `~/.pogo/agents/turnlog/{{.Coordinator}}.log`, or your last `~/.pogo/agents/{{.Coordinator}}/sweep.log` entry. Anything that landed between that timestamp and the bounce is suspect **regardless of read state**. `--all` is not a convenience: the unread filter cannot surface a read-but-unhandled mail by construction, which is the whole failure mode. On the 2026-08-12 03:01 bounce two agents each recovered a mail this way that the unread filter had already lost permanently — both had bullets 1–3 above in their prompts, which is why the restart case is spelled out here rather than left to follow from "interruption".
 
 Your inbox is for **coordination only**. If you have something for the user, send it to `human` (not to your own thread). Do not summarize or forward mail addressed to other agents into your own inbox — the apple-side notifier polls `human/new/` and delivers user-facing mail directly.
 
