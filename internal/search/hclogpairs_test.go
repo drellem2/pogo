@@ -121,20 +121,18 @@ func TestIndexPassEmitsNoUnpairedTrailingValue(t *testing.T) {
 // source that still pass an unpaired trailing value, keyed by their exact
 // message literal.
 //
-// Both live in serializeProjectIndex's read loop, which mg-f32a is rewriting at
-// the same time as this sweep: that ticket repairs them as part of the socket
-// fix it is already making to those lines, and editing them from here would have
-// put two branches on the same statements.
+// It is EMPTY, and that is the intended end state. The sweep (mg-6698) landed
+// with two entries in it, both in serializeProjectIndex's read loop, held back
+// because mg-f32a was rewriting those same statements for the socket fix and two
+// branches on one statement is the thing worth avoiding. mg-f32a paired them, so
+// the entries went stale and this map emptied — which is the outcome it was
+// recording the wait for.
 //
-// This map must be EMPTY, and the test below fails on an entry that no longer
-// matches anything. If you are here because that failure named your branch: the
-// fix is to delete the entry — the call site it describes is paired now, which is
-// the outcome this map was recording the wait for.
-var hclogPairExemptions = map[string]string{
-	"Error getting absolute path - file may not exist": "mg-f32a rewrites this branch; a unix socket " +
-		"reaches it every rebuild and is the reason that ticket exists",
-	"Error reading file ": "mg-f32a rewrites this branch — same statement, same read loop",
-}
+// The test below fails on an entry that no longer matches anything, so a
+// re-added exemption cannot outlive the call site it excuses. If you are here
+// because that failure named your branch: delete the entry, that is the whole
+// procedure.
+var hclogPairExemptions = map[string]string{}
 
 // hclogLevels are the methods that take (msg, key, value, ...). Log() and the
 // With/Named builders are deliberately absent: Log takes a leading level and

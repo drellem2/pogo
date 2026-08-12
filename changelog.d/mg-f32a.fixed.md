@@ -42,8 +42,16 @@
   can query. After the spurious firings stop, the remaining legitimate ones are
   now readable. This is the same repair `mg-f3ae` made to the `Reindexing` line.
   The **other 23 malformed hclog calls in `internal/search` are deliberately not
-  swept here** — they are filed as `mg-6698`, so a surgical fix does not wait on
+  swept here** — they are `mg-6698`, split out so a surgical fix does not wait on
   a 25-call sweep.
+
+  `mg-6698` landed first, and it shipped a guard —
+  `TestHclogCallsInThisPackageArePaired` — that fails on any unpaired hclog call
+  in this package **and** on any exemption that no longer matches one. It held
+  these two call sites as named exemptions precisely because this branch was
+  rewriting the same statements. Pairing them here made both entries stale, so
+  `hclogPairExemptions` is now empty: the allowlist recorded a wait, and the wait
+  is over.
 
   One sizing correction for anyone reading the originating report: the socket
   error is **1.14%** of that log (5,606 / 489,679 lines), not its bulk. The bulk
