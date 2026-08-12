@@ -123,6 +123,45 @@ func lateDialogScript(delay string) string {
 		"sleep 30\n"
 }
 
+// dialogGate is a leading `read` that holds the script until the test releases
+// it, so the render delay below is measured from the moment the WATCH starts
+// rather than from whenever the shell happened to exec.
+//
+// That distinction is the whole reason this control flaked. The delay used to run
+// from the shell's own start, which happens partway through Registry.Spawn — and
+// Spawn keeps working afterwards (it injects the persona, which shells out to
+// git). On a loaded host that tail can outlast the 0.7s render, so the watch
+// begins with the dialog ALREADY on screen and dismisses it inside its own fresh
+// budget. That is correct hook behaviour meeting a broken premise: the control
+// means to ask what happens when the budget expires BEFORE the dialog appears,
+// and a displaced start never asks it. It cost mg-effc a merge gate —
+// internal/codex, 2026-08-12 22:33:55Z, spawn to auto-accept in one second flat,
+// with the select tie-break already fixed and TestSpentBudgetBeatsAReadyTicker
+// passing in the same run. That failure is why the gate exists, and it is a
+// SEPARATE sensitivity from the tie-break: the fix for one does nothing for the
+// other.
+//
+// Gating moves every source of delay into the safe direction. A slow spawn, a
+// starved shell or a late release now pushes the dialog LATER relative to the
+// budget, which strengthens the premise instead of inverting it.
+const dialogGate = "read -r _gate\n"
+
+// gatedLateDialogScript is lateDialogScript held at dialogGate. Release it with
+// releaseDialogGate immediately before starting the watch.
+func gatedLateDialogScript(delay string) string {
+	return dialogGate + lateDialogScript(delay)
+}
+
+// releaseDialogGate lets the scripted dialog start its render delay. A newline is
+// enough: the gate read is canonical, and the tty queues the byte if the shell
+// has not reached the read yet, so releasing early cannot lose it.
+func releaseDialogGate(t *testing.T, a *agent.Agent) {
+	t.Helper()
+	if err := a.SendRaw("\n"); err != nil {
+		t.Fatalf("could not release the dialog gate: %v", err)
+	}
+}
+
 // TestLateRenderingDialogIsNeverDismissed is the POSITIVE CONTROL for the
 // cursor half of drellem2/pogo#91: it reproduces the defect rather than the fix.
 //
@@ -136,9 +175,19 @@ func lateDialogScript(delay string) string {
 // dialog dismissed — the mechanism is wrong and the rest of this file is resting
 // on a bad premise.
 func TestLateRenderingDialogIsNeverDismissed(t *testing.T) {
-	a := spawnScripted(t, "late-ctl", lateDialogScript("0.7"))
+	a := spawnScripted(t, "late-ctl", gatedLateDialogScript("0.7"))
 
-	// Budget expires well before the dialog renders at ~0.7s.
+	// Premise: nothing is on screen yet, so the budget below genuinely expires
+	// before the dialog exists rather than after a displaced start. See
+	// dialogGate — this is the assertion the merge gate needed and did not have.
+	if matchesTrustDialog(a.RecentOutput(composerScanBytes)) {
+		t.Fatal("premise broken: the dialog rendered before the gate was " +
+			"released, so this run cannot ask what happens when the budget " +
+			"expires FIRST")
+	}
+	releaseDialogGate(t, a)
+
+	// Budget expires well before the dialog renders, ~0.7s after the release.
 	watchForTrustDialog(a, 250*time.Millisecond, 50*time.Millisecond)
 
 	// The dialog does render — the script is not broken, the hook just wasn't
@@ -275,15 +324,17 @@ func TestSpentBudgetPrefersAnExitedAgentOverADriftSample(t *testing.T) {
 // cold-start budget rather than an independent 12s guess. The dialog renders
 // late and is still dismissed.
 //
-// The budget is 15s against a 0.7s render, and the margin is the point rather
-// than the number. Now that a spent budget deterministically declines (mg-effc),
-// this test is the one that inverts if the hook's goroutine is starved past its
-// budget — so the gap between render and budget has to be wider than any
-// plausible starvation. 5s was ~7x the render delay, and this fleet has measured
-// gate wall-clock inflating 1.8x-6.8x under contention; 15s is ~21x. It costs
-// nothing on a healthy run because the watch returns the moment it dismisses.
+// This is the assertion that inverts under starvation now that a spent budget
+// deterministically declines (mg-effc), so it gets both defences. The render
+// delay is gated on the test's own release, which makes it 0.7s measured from the
+// watch's start rather than from the shell's (see dialogGate); and the budget is
+// 15s rather than 5s, so even a shell starved for seconds after the release still
+// renders inside it. 5s was ~7x the render delay against measured 1.8x-6.8x gate
+// inflation, which is thinner than it looks; 15s is ~21x. Neither costs anything
+// on a healthy run, because the watch returns the moment it dismisses.
 func TestLateRenderingDialogIsDismissedWithinTheColdStartBudget(t *testing.T) {
-	a := spawnScripted(t, "late-fix", lateDialogScript("0.7"))
+	a := spawnScripted(t, "late-fix", gatedLateDialogScript("0.7"))
+	releaseDialogGate(t, a)
 
 	watchForTrustDialog(a, 15*time.Second, 50*time.Millisecond)
 
