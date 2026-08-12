@@ -526,12 +526,81 @@ granularity — never auto-tag.
 
 **Additional sources are listed in your config under `sources`.** Apply each one. Examples:
 
-- **{{.WorkerTitle}} / crew transcripts**: grep recent `~/.pogo/polecats/<id>/` and crew transcript dirs for friction signals — `annoying`, `frustrat`, `wish`, `couldn't`, `had to`, `why doesn't`, `missing`. Read the matches; decide whether they cohere into a real gap or are noise.
+- **{{.WorkerTitle}} / crew transcripts**: grep recent harness session transcripts
+  for friction signals, then read the matches and decide whether they cohere into
+  a real gap or are noise.
+
+  **Transcripts are not in the agent's working directory.**
+  `~/.pogo/polecats/<id>/` is a git **worktree** — it holds repo files and never a
+  `transcript.*`. Claude Code writes one JSONL per session to
+  `~/.claude/projects/<slug-of-workdir>/*.jsonl`, where the slug is the workdir
+  with every byte outside `[A-Za-z0-9]` replaced by `-`. That encoding is the
+  harness's, and `projectSlug` in `internal/claude/provider.go` is where pogo
+  declares it; if it ever changes, that function and this command are what break.
+  Both {{.Worker}}s (`…-polecats-<id>`) and crew agents (`…-agents-<name>`) land
+  under the one `$HOME/.pogo` prefix, so a single scan covers both.
+
+  Until mg-75b7 this bullet prescribed grepping a `transcript.*` glob inside the
+  {{.Worker}} worktrees themselves. No such file has ever existed there, so the
+  scan returned zero on every sweep since it was written and every sweep reported
+  no friction signals. Re-run over
+  the same window against the real location, the same patterns went
+  `annoying 0→9`, `confusing 0→6`, `frustrat 0→2`, and one of the hits was a
+  verbatim Daniel complaint that had reached nobody for a day. Friction was never
+  absent; the instrument was blind. That is why the command below prints its own
+  denominator — **a scan that cannot say how many transcripts it read cannot tell
+  you which of the two you are looking at.**
 
   ```bash
-  grep -i -E "(annoying|frustrat|wish|couldn't|had to|why doesn't|missing)" \
-    ~/.pogo/polecats/*/transcript.* | tail -200
+  proj="$HOME/.claude/projects"
+  slug=$(printf '%s' "$HOME/.pogo" | sed 's/[^A-Za-z0-9]/-/g')
+  since=${SINCE:-24 hours ago}
+  pat='annoying|frustrat|confus|I wish|had to manually|why doesn.t|no way to'
+
+  dirs=$(find "$proj" -maxdepth 1 -type d \
+           \( -name "$slug-polecats-*" -o -name "$slug-agents-*" \) 2>/dev/null)
+  [ -n "$dirs" ] || echo "WARNING: no session dirs under $proj match $slug-* — the slug is wrong"
+
+  files=$(printf '%s\n' "$dirs" | grep -v '^$' | tr '\n' '\0' |
+          xargs -0 -r -I{} find {} -name '*.jsonl' -newermt "$since" 2>/dev/null)
+  echo "scanned $(printf '%s\n' "$files" | grep -c .) transcripts since '$since'"
+
+  printf '%s\n' "$files" | grep -v '^$' | tr '\n' '\0' |
+    xargs -0 -r grep -icE "$pat" 2>/dev/null |
+    awk -F: '$2>0 {print $2"\t"$1}' | sort -rn | sed "s|$proj/$slug-||"
   ```
+
+  That prints a hit-count ranking, which is a **candidate list, not a finding**.
+  Read the top sessions in the same shell (`$pat` is still set):
+
+  ```bash
+  grep -ihoE "($pat).{0,200}" "$proj/$slug-polecats-<id>/<session>.jsonl"
+  ```
+
+  Four things that ruin this scan — all measured 2026-08-12 against 63
+  transcripts / 62 MB, where the scan itself runs in ~5s:
+
+  - **No leading context in the regex.** `grep -ihoE ".{0,80}($pat).{0,120}"` is
+    ~96× slower than the same pattern without that prefix (9.6s vs 0.10s on
+    2.3 MB; the full corpus blew a 2-minute timeout). JSONL lines run to 44 kB and
+    a variable-length prefix makes grep backtrack across each one. Anchor the
+    match at the pattern and take trailing context only.
+  - **Keep the mtime bound.** There are ~870 session dirs. `-newermt "$since"` is
+    the only thing keeping a twice-daily sweep off tens of GB. Widen `SINCE`
+    deliberately when you want a longer window; don't drop it.
+  - **Don't glob the session dirs in the shell.** `"$proj"/"$slug"-polecats-*`
+    aborts the entire command under zsh when nothing matches — the exact way the
+    old one-liner died silently. `find -name` matches without that failure mode,
+    and the guard above names *which* slug came up empty instead of printing
+    nothing.
+  - **Expect noise, including your own.** Hits mix real complaints with code
+    comments using the words descriptively and with the fleet's own tickets, mail
+    and digests discussing friction — mg-75b7's own dispatch ranked #1 in the
+    first corrected run. `surprising` was in the candidate pattern set and is
+    deliberately left out: {{.Worker}} worktrees exist for every product, so
+    mathematical prose in a proof repo swamps it. Sample before you conclude, and
+    apply the scope filter below — a hit under `…-polecats-<id>` says nothing
+    about which repo that {{.Worker}} was working in.
 
 - **Formalization / proof-project sources**: when your product is a proof or formalization project, track invariants the toolchain exposes (e.g. axiom dependence on key theorems, audit-report deltas, open-goal / `sorry` / `admit` counts) over time.
 
