@@ -2914,15 +2914,24 @@ One caveat on the attach sockets: a unix domain socket path cannot exceed
 `sun_path` (103 usable bytes on darwin, 107 on linux), and a deep enough
 `POGO_HOME` leaves no room for `agents/sockets/<agent>.sock`. Such a root — a
 scratch dir under `/var/folders` on darwin, say — puts the sockets in
-`$TMPDIR/pogo-agents-<hash of the root>` instead. The hash keeps distinct roots
+`$TMPDIR/pogo-agents/<hash of the root>` instead. The hash keeps distinct roots
 distinct, so the isolation guarantee holds either way; pogod logs a line at
 startup when it takes this path. Everything else still lives under the root. If
 you want your sockets under `POGO_HOME` (nicer to inspect and clean up), pick a
 shallow root: `~/.pogo-sandbox` fits comfortably, a 90-byte path does not.
 
+`pogo-agents` is one directory holding a leaf per root, not a leaf per root
+sitting in `$TMPDIR` — before mg-a997 it was the latter, and since nothing ever
+removed one, 3,883 of a single `$TMPDIR`'s 37,083 entries were abandoned socket
+dirs. Each leaf records the `POGO_HOME` it serves in a `.pogo-home` file, and a
+starting pogod removes the leaves whose recorded root no longer exists on disk.
+In normal use nothing is ever removed: your `POGO_HOME` is `~/.pogo` and it does
+not go away. The leaves that do get reaped are test binaries', whose root was a
+scratch directory the test deleted when it finished.
+
 `$TMPDIR` is itself unbounded, so if it is long enough to squeeze out the
 reserved name budget (roughly 52+ bytes), the sockets degrade one step further to
-`/tmp/pogo-agents-<hash of the root>`, which fits under any root. The hash — and
+`/tmp/pogo-agents/<hash of the root>`, which fits under any root. The hash — and
 with it the per-root isolation — is unchanged. This only matters if you run pogod
 with an unusually deep `TMPDIR`; the guarantee it protects is that **the 24-byte
 agent-name budget below holds under every root and every `TMPDIR`**, so a legal
@@ -2934,7 +2943,11 @@ directory another local user can write to — a hashed leaf pre-created under
 world-writable `/tmp`, or a symlink planted there — would let them read or
 replace the socket. pogod tightens a too-permissive directory of its own,
 refuses one owned by anyone else, and never follows a symlink at the leaf;
-either refusal is a loud exit at startup, not a silent downgrade.
+either refusal is a loud exit at startup, not a silent downgrade. The
+`pogo-agents` directory the leaves sit in gets the same three checks before
+anything is created inside it — nesting the leaves put a second directory under
+`/tmp` in the same threat model, and an attacker who owns the parent owns every
+leaf made in it.
 
 The same limit implies a hard ceiling on **agent names**: pogo reserves 24 bytes
 for `<agent>.sock` when choosing the socket directory (`MaxAgentNameLen`). Real
