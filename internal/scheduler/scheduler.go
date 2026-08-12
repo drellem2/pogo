@@ -130,6 +130,7 @@ func inferKind(id string) ScheduleKind {
 //	  "missed_fires":  0,                      // accumulated missed count for "count" policy
 //	  "fires_delivered": 12,                   // completion tracking — see completion.go
 //	  "fires_completed": 12,
+//	  "ever_acked":      true,                  // survives the re-registration that zeroes the counters
 //	  "unacked_streak":  1,
 //	  "last_completion": "2026-05-03T13:15:22Z",
 //	  "pending_token":   "9f3c1ab2",
@@ -170,6 +171,31 @@ type Entry struct {
 	UnackedStreak  int       `json:"unacked_streak,omitempty"`
 	LastCompletion time.Time `json:"last_completion,omitempty"`
 
+	// EverAcked is the one bit of ack history that SURVIVES re-registration
+	// (mg-00d6). The lifetime counters above are deliberately zeroed by a
+	// same-(agent, id) re-Add — see carryOutstandingFireLocked, and
+	// TestReregistration_StillZeroesTheLifetimeCounters pins it — but zeroing
+	// FiresCompleted also erased the only evidence that this schedule's
+	// recipient is capable of acking at all. That made CompletionTracked
+	// unable to distinguish two opposite states:
+	//
+	//	a schedule that has genuinely never acked  -> UNKNOWN is correct
+	//	a schedule that acked 39 times, was re-registered, and whose agent
+	//	then never came back                       -> UNKNOWN is WRONG
+	//
+	// Zeroing requires a BOOT — an agent that dies without booting never
+	// re-registers — and the window closes on the next successful ack, which
+	// for a healthy agent is one cadence period. So the blind case is bounded:
+	// it needs a schedule to have booted and then never come back. mg-00d6 was
+	// filed on a wider, fleet-wide story that its author subsequently withdrew
+	// for want of a supporting measurement; what survives is this source-read
+	// defect and its narrowed case.
+	//
+	// It is ONE BIT on purpose. Preserving the counters was considered and
+	// rejected: a carried-over ratio spans two regimes and describes neither
+	// (mg-49b1), and internal/ackwatch depends on the reset.
+	EverAcked bool `json:"ever_acked,omitempty"`
+
 	// PendingToken is the nonce issued with the most recent fire. Only an Ack
 	// carrying this exact token is accepted, so a token copied out of an old
 	// transcript cannot inflate FiresCompleted. PendingSince is when it was
@@ -184,7 +210,11 @@ type Entry struct {
 // that has never completed anything is UNKNOWN, not failing. Only once a
 // schedule has proven it can ack does a growing streak mean the turns stopped
 // accomplishing anything.
-func (e Entry) CompletionTracked() bool { return e.FiresCompleted > 0 }
+//
+// "Ever" means EVER, across re-registrations — hence the EverAcked disjunct.
+// Reading FiresCompleted alone made the answer no-again every time the boot
+// path re-registered a schedule, which is once a night for the entire crew.
+func (e Entry) CompletionTracked() bool { return e.FiresCompleted > 0 || e.EverAcked }
 
 // Clone returns a shallow copy. Used to hand entries out of the Scheduler
 // without exposing internal state to mutation.
@@ -279,6 +309,14 @@ func (e *Entry) applyDefaults() {
 	// which is what keeps the migration from silently disabling a live schedule.
 	if e.Kind == "" {
 		e.Kind = inferKind(e.ID)
+	}
+	// Backfill EverAcked for entries persisted before the bit existed (mg-00d6).
+	// A schedules.json written by an older binary carries the completions but
+	// not the bit, and without this every already-tracked schedule on the box
+	// would read as never-acked until its next ack — reintroducing, once, the
+	// exact fleet-wide blind spot the bit closes.
+	if e.FiresCompleted > 0 {
+		e.EverAcked = true
 	}
 }
 
@@ -556,6 +594,7 @@ func (s *Scheduler) Add(entry Entry, now time.Time) (Entry, error) {
 	prev, hadPrev := s.entries[key]
 	stored := entry
 	if hadPrev {
+		carryAckHistoryLocked(&stored, prev)
 		carryOutstandingFireLocked(&stored, prev, now)
 	}
 	s.entries[key] = &stored
@@ -569,6 +608,27 @@ func (s *Scheduler) Add(entry Entry, now time.Time) (Entry, error) {
 		return Entry{}, err
 	}
 	return stored.Clone(), nil
+}
+
+// carryAckHistoryLocked preserves the EverAcked bit across a same-(agent, id)
+// re-registration. Caller must hold s.mu.
+//
+// It is separate from carryOutstandingFireLocked, and called before it, for a
+// reason that is easy to get wrong: that function returns early when there is
+// no outstanding fire to carry, which is the COMMON case at boot (the agent
+// acked its last fire before it was restarted). Folding this bit in there would
+// have preserved it only for the schedules that happened to have a fire in
+// flight — the subset for which the blind spot was already survivable.
+//
+// The bit is monotonic and is never carried DOWN: a caller re-registering a
+// schedule cannot un-prove that its agent once acked.
+func carryAckHistoryLocked(stored *Entry, prev *Entry) {
+	if prev == nil {
+		return
+	}
+	if prev.EverAcked || prev.FiresCompleted > 0 {
+		stored.EverAcked = true
+	}
 }
 
 // carryOutstandingFireLocked preserves a still-redeemable fire across a

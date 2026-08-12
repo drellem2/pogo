@@ -2853,6 +2853,10 @@ This is the query the 2026-07-22 events log could not answer. Schedules that
 have never acked are counted as UNKNOWN, not failing — only a schedule that has
 proven it can ack, and then stopped, is evidence of anything.
 
+"Never acked" spans re-registrations. A schedule re-registered at agent boot
+keeps its tracked status but restarts its counters, and is reported separately
+so a thin denominator is visible rather than inferred.
+
 The shape to watch for is fleet-wide: one agent skipping one ack is noise,
 every tracked schedule going to zero within the same minute is an outage.`,
 		Args: cobra.NoArgs,
@@ -2867,8 +2871,20 @@ every tracked schedule going to zero within the same minute is an outage.`,
 			}
 			fmt.Printf("Schedules:       %d (%d tracked, %d never acked)\n",
 				stats.Schedules, stats.Tracked, stats.Schedules-stats.Tracked)
+			if stats.TrackedReset > 0 {
+				fmt.Printf("                 %d of the tracked were re-registered since their last ack —\n", stats.TrackedReset)
+				fmt.Printf("                 they contribute nothing to the ratio below, only to the streak.\n")
+			}
 			fmt.Printf("Fires delivered: %d\n", stats.FiresDelivered)
-			fmt.Printf("Fires completed: %d (%.1f%%)\n", stats.FiresCompleted, stats.Ratio*100)
+			if stats.FiresDelivered == 0 {
+				// A zero-denominator ratio printed as "0.0%" reads as total
+				// failure when it means "nothing measured yet" — the same
+				// could-not-look/looked-and-saw-nothing collapse this whole
+				// signal exists to end.
+				fmt.Printf("Fires completed: 0 (n/a — no fires delivered against the current counters)\n")
+			} else {
+				fmt.Printf("Fires completed: %d (%.1f%%)\n", stats.FiresCompleted, stats.Ratio*100)
+			}
 			fmt.Printf("Stalled:         %d of %d tracked (streak >= %d)\n",
 				stats.Stalled, stats.Tracked, stats.StallThreshold)
 			if stats.Tracked > 0 && stats.Stalled == stats.Tracked {

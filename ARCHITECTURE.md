@@ -1162,6 +1162,31 @@ schedule that has **never** acked is reported as UNKNOWN, not failing
 (`completion_tracked: false`) — an agent can simply forget, so a missing ack is
 never a per-fire verdict.
 
+"Never" means never, across re-registrations. A same-`(agent, id)` re-Add
+zeroes the counters on purpose (a carried-over ratio would span two regimes and
+describe neither), but a separate one-bit `ever_acked` on the entry survives it.
+Without that bit the UNKNOWN guard could not distinguish a schedule nobody ever
+taught to ack from one whose agent acked for weeks and then stopped coming back.
+The state clears only on the next ack — one cadence period for a healthy agent,
+**never** for one that does not return, which is the case the guard exists to
+report on. That mattered beyond this one command: `internal/ackwatch` requires a
+majority of ack-aware peers before either of its ratio arms will judge, and it
+names `pogo schedule completion` as a compensating control for that requirement.
+Both read the same predicate, so both went blind together — a backstop that
+shares a trigger with the thing it backs up is redundancy in name only (mg-00d6).
+
+Two bounds, both pinned by tests rather than asserted here. Zeroing requires a
+**boot**, and survivors carry the cohort, so the blind case needs a zeroed
+*majority* rather than merely a bounce. And ackwatch's absolute (FLEET BLACKOUT)
+arm is not gated by any of this: it reads a trailing window counted from the
+**events log**, which a re-registration cannot reset, which is why it kept
+emitting through the 2026-08-11 outage while the ratio arms could not. That
+independence is now asserted in a test. mg-00d6 was filed on a fleet-wide
+operational story that its author later withdrew; no outage is known to have
+been missed this way. `pogo schedule completion` additionally reports how many
+tracked schedules were re-registered since their last ack, so a thin ratio
+denominator is stated rather than inferred.
+
 The signal that matters is fleet-wide and ratioed: one agent skipping one ack
 is noise; every tracked schedule going to zero within the same minute is one
 upstream cause and should page a human rather than trigger N restarts.
