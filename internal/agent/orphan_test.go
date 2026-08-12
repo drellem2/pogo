@@ -34,9 +34,9 @@ func shiftRecordedStart(t *testing.T, name string, delta time.Duration) {
 	t.Helper()
 	witnessMu.Lock()
 	defer witnessMu.Unlock()
-	recs, err := loadWitness()
+	recs, err := loadWitnessAllTypes()
 	if err != nil {
-		t.Fatalf("loadWitness: %v", err)
+		t.Fatalf("loadWitnessAllTypes: %v", err)
 	}
 	found := false
 	for i := range recs {

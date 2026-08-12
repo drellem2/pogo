@@ -277,12 +277,33 @@ func parsePsLstart(s string) (time.Time, bool) {
 	return time.Time{}, false
 }
 
-// loadWitness reads the witness file. A missing or empty file is not an error:
-// it means no polecat has been witnessed, which is a legitimate state (a fresh
-// machine, or a fleet with no polecats running).
+// loadWitnessAllTypes reads the witness file and returns EVERY record in it,
+// whatever kind of agent each one witnesses. A missing or empty file is not an
+// error: it means no agent has been witnessed, which is a legitimate state (a
+// fresh machine, or a fleet with nothing running).
+//
+// THE NAME IS THE GUARD, AND IT IS DELIBERATELY AWKWARD (mg-ef7d). This store
+// held only polecats until mg-f9e8 widened the writer to crew, and at that
+// moment six readers that mean "the polecats" literally became correct only by
+// inheritance from a single early return in the writer. Inheritance is not
+// checked by anything. So the loader no longer offers a population you can take
+// without naming which one you meant: a caller either says AllTypes here, or
+// calls loadPolecatWitness. There is no spelling that reads as "just give me the
+// records" any more.
+//
+// WHAT THIS BUYS AND WHAT IT DOES NOT. Go has no encapsulation below the package,
+// so this cannot be a compiler guard — anything in package agent can still call
+// this function, and the ticket's stronger option (a distinct type only a
+// filtered accessor can construct) would be bypassable the same way, one package
+// down. What is bought is that the type question is asked at the call site by the
+// identifier itself, and that a NEW caller of this function is a TEST FAILURE
+// rather than a silence: TestWitnessAllTypesReadersAreDeclared (an AST lint over
+// this package) enumerates the EXCEPTIONS, not the readers, so code written
+// tomorrow is uncovered-and-failing instead of uncovered-and-quiet. That polarity
+// is the whole point; a hand-enumeration of readers is what we already had.
 //
 // Caller must hold witnessMu.
-func loadWitness() ([]witnessRecord, error) {
+func loadWitnessAllTypes() ([]witnessRecord, error) {
 	data, err := os.ReadFile(WitnessPath())
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
@@ -305,6 +326,41 @@ func loadWitness() ([]witnessRecord, error) {
 			WitnessPath(), disk.Version, witnessStateVersion)
 	}
 	return disk.Polecats, nil
+}
+
+// loadPolecatWitness reads the witness file and returns ONLY the records that
+// witness a polecat. It is the accessor every reader that means "the polecats"
+// must use, and it exists so that meaning is expressed once, here, instead of
+// six times as an `if !r.isPolecat() { continue }` each reader had to remember to
+// write (mg-ef7d).
+//
+// The distinction is not cosmetic. Handing a crew record to these readers wedges
+// the redeploy drain (it waits for the alive count to reach zero and crew never
+// exit), makes the orphan alert mail the coordinator an authoritative `kill
+// <pid>` for the entire crew, and puts rows that never clear into gitgc's live
+// set, the per-repo dispatch cap and stall-watch's in-flight set — five
+// subsystems, from one writer changing one early return, with no compile error
+// and no test failure. See noteWitnessStart for the near-miss that established
+// the cost.
+//
+// A read error is passed through untouched: an unreadable store is not an empty
+// fleet, and no caller may render it as one (mg-13a3, the whole subject of this
+// file).
+//
+// Caller must hold witnessMu — same contract as loadWitnessAllTypes, which it
+// wraps.
+func loadPolecatWitness() ([]witnessRecord, error) {
+	recs, err := loadWitnessAllTypes()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]witnessRecord, 0, len(recs))
+	for _, r := range recs {
+		if r.isPolecat() {
+			out = append(out, r)
+		}
+	}
+	return out, nil
 }
 
 // saveWitness atomically replaces the witness file. Mirrors the write sequence
@@ -456,7 +512,9 @@ func RecordAgentWitness(name string, pid int, typ AgentType, workItemID, sourceR
 
 	witnessMu.Lock()
 	defer witnessMu.Unlock()
-	recs, err := loadWitness()
+	// All types: this is the WRITER's read-modify-write cycle, and a replace-by-name
+	// that only saw polecats would leave a second record for a crew name behind.
+	recs, err := loadWitnessAllTypes()
 	if err != nil {
 		return fmt.Errorf("witness: cannot load %s: %w — not recording %s %s", WitnessPath(), err, typ, name)
 	}
@@ -490,6 +548,13 @@ func RecordAgentWitness(name string, pid int, typ AgentType, workItemID, sourceR
 // `r.Type == TypePolecat` at a call site — that reads a pre-mg-f9e8 record as
 // "not a polecat" and drops a redeploy's survivors out of the live set, which
 // is a worktree deleted under a running polecat.
+//
+// Its only caller is loadPolecatWitness (mg-ef7d). It used to be called by each
+// of the six polecat readers in turn, which is how the definition stayed right
+// while the OBLIGATION to invoke it stayed unenforced: a seventh reader simply
+// would not have called it, and nothing would have said so. Keep it that way —
+// a reader that reaches for isPolecat directly is a reader that loaded the wrong
+// population and is patching over it.
 func (r witnessRecord) isPolecat() bool {
 	return r.Type == "" || r.Type == TypePolecat
 }
@@ -513,7 +578,9 @@ func noteWitnessExit(a *Agent) {
 	}
 	witnessMu.Lock()
 	defer witnessMu.Unlock()
-	recs, err := loadWitness()
+	// All types, matching noteWitnessStart: a polecat-only load here would leave a
+	// crew record behind forever, answering from a pid it no longer owns.
+	recs, err := loadWitnessAllTypes()
 	if err != nil {
 		log.Printf("witness: cannot load %s (%v) — leaving %s %s's witness in place", WitnessPath(), err, a.Type, a.Name)
 		return
@@ -616,7 +683,11 @@ func (v WitnessVerdict) String() string {
 // than lstart, not a wider tolerance.
 func AgentWitness(scheduleAgent string) WitnessVerdict {
 	witnessMu.Lock()
-	recs, err := loadWitness()
+	// All types, and this is the ONE reader for which that is the fix rather than
+	// an exception: the mail-check classifier asks about a single named agent of
+	// whatever kind, and an auto_start=false crew agent invisible here is reaped
+	// while alive (mg-f9e8).
+	recs, err := loadWitnessAllTypes()
 	witnessMu.Unlock()
 	if err != nil {
 		// We know a witness file exists but cannot read it. That is not
@@ -703,16 +774,13 @@ func witnessVerdict(r witnessRecord) WitnessVerdict {
 // order for the fleet — including for the coordinator reading the mail.
 func WitnessedAlivePolecats() ([]witnessRecord, error) {
 	witnessMu.Lock()
-	recs, err := loadWitness()
+	recs, err := loadPolecatWitness()
 	witnessMu.Unlock()
 	if err != nil {
 		return nil, fmt.Errorf("witness: cannot read %s: %w", WitnessPath(), err)
 	}
 	var out []witnessRecord
 	for _, r := range recs {
-		if !r.isPolecat() {
-			continue
-		}
 		if witnessVerdict(r) == WitnessAlive {
 			out = append(out, r)
 		}
@@ -751,16 +819,13 @@ func WitnessedAlivePolecats() ([]witnessRecord, error) {
 // live set a claim wider than the thing it is checked against.
 func WitnessedPolecatVerdicts() (map[string]WitnessVerdict, error) {
 	witnessMu.Lock()
-	recs, err := loadWitness()
+	recs, err := loadPolecatWitness()
 	witnessMu.Unlock()
 	if err != nil {
 		return nil, fmt.Errorf("witness: cannot read %s: %w", WitnessPath(), err)
 	}
 	out := make(map[string]WitnessVerdict, len(recs))
 	for _, r := range recs {
-		if !r.isPolecat() {
-			continue
-		}
 		out[r.Name] = witnessVerdict(r)
 	}
 	return out, nil
@@ -791,16 +856,13 @@ func WitnessedPolecatVerdicts() (map[string]WitnessVerdict, error) {
 // the healthier the fleet was.
 func WitnessedPolecatRepos() (repos map[string]string, unattributed []string, err error) {
 	witnessMu.Lock()
-	recs, err := loadWitness()
+	recs, err := loadPolecatWitness()
 	witnessMu.Unlock()
 	if err != nil {
 		return nil, nil, fmt.Errorf("witness: cannot read %s: %w", WitnessPath(), err)
 	}
 	repos = make(map[string]string, len(recs))
 	for _, r := range recs {
-		if !r.isPolecat() {
-			continue
-		}
 		switch witnessVerdict(r) {
 		case WitnessAlive, WitnessUnreadable:
 		default:
@@ -834,16 +896,13 @@ func WitnessedPolecatRepos() (repos map[string]string, unattributed []string, er
 // would make stall-watch call an item worked that nobody is working.
 func WitnessedPolecatWorkItems() (map[string]string, error) {
 	witnessMu.Lock()
-	recs, err := loadWitness()
+	recs, err := loadPolecatWitness()
 	witnessMu.Unlock()
 	if err != nil {
 		return nil, fmt.Errorf("witness: cannot read %s: %w", WitnessPath(), err)
 	}
 	out := make(map[string]string, len(recs))
 	for _, r := range recs {
-		if !r.isPolecat() {
-			continue
-		}
 		switch witnessVerdict(r) {
 		case WitnessAlive, WitnessUnreadable:
 		default:
@@ -859,7 +918,7 @@ func WitnessedPolecatWorkItems() (map[string]string, error) {
 // WitnessStoreExists reports whether the witness file is on disk at all.
 //
 // WHY THIS IS NOT THE SAME QUESTION AS "are any polecats alive?" (mg-65b2).
-// loadWitness maps a missing file to (nil, nil) — "no polecat has been
+// loadWitnessAllTypes maps a missing file to (nil, nil) — "no polecat has been
 // witnessed" — and for the reaper that is right: no record means no evidence to
 // reap on, and it declines. But a caller that must decide whether the fleet is
 // IDLE cannot accept that mapping, because it collapses the two states this
