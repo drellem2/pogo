@@ -23,3 +23,24 @@
   exit, whose exposure this widened: an agent that dies mid-watch is inconclusive,
   not evidence that the sentinel drifted, so the spent-budget path now prefers the
   exit rather than recording a false drift sample about half the time.
+- **And the control for it stops depending on a race of its own (mg-effc).**
+  `TestLateRenderingDialogIsNeverDismissed` — the positive control in all three
+  packages — asked what happens when the hook's budget expires *before* the dialog
+  renders, but staged that by starting a 0.7s shell timer against a 250ms budget
+  measured from a later moment. The shell starts partway through `Registry.Spawn`,
+  and Spawn keeps working afterwards (persona injection shells out to git), so on a
+  loaded host the watch can begin with the dialog **already on screen** and dismiss
+  it inside its own fresh budget: correct hook behaviour meeting a broken premise.
+  That is a **separate** sensitivity from the `select` tie-break, and fixing the
+  tie-break does nothing for it — it failed this ticket's own merge gate
+  (internal/codex, spawn to auto-accept in one second flat) with the tie-break fix
+  already in place and the tie-break's own test passing in the same run. The render
+  delay is now gated on a `read` the test releases immediately before starting the
+  watch, so it is measured from the watch's start: every source of delay — slow
+  spawn, starved shell, late release — pushes the dialog LATER relative to the
+  budget and strengthens the premise instead of inverting it. Measured under an
+  identical 1.2s process stall: 20/20 failures unfixed, 10/10 with the tie-break
+  fix and the old staging, **12/12 passes** with the gate. The control still fails
+  when its subject genuinely breaks — a watcher mutated to ignore its budget is
+  caught — and the premise is now asserted rather than assumed, so a displaced
+  start reports as a broken premise instead of as a dismissal bug.
