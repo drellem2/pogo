@@ -145,7 +145,7 @@ func TestSpawningAgentDoesNotTouchTheLiveStore(t *testing.T) {
 }
 
 // TestWitnessRoundTripsThroughTheDefaultSandbox proves the redirect is a real,
-// working store and not a write-only hole. loadWitness/saveWitness/PolecatWitness
+// working store and not a write-only hole. loadWitness/saveWitness/AgentWitness
 // must all agree on the default path, or the sixteen tests in witness_test.go are
 // the only ones measuring anything and every naive sibling silently no-ops.
 func TestWitnessRoundTripsThroughTheDefaultSandbox(t *testing.T) {
@@ -160,8 +160,8 @@ func TestWitnessRoundTripsThroughTheDefaultSandbox(t *testing.T) {
 	}
 	t.Cleanup(func() { noteWitnessExit(&Agent{Type: TypePolecat, Name: name}) })
 
-	if got := PolecatWitness(name); got != WitnessAlive {
-		t.Errorf("PolecatWitness(%s) = %s, want alive — the default path does not round-trip, so the "+
+	if got := AgentWitness(name); got != WitnessAlive {
+		t.Errorf("AgentWitness(%s) = %s, want alive — the default path does not round-trip, so the "+
 			"store is write-only under test and proves nothing", name, got)
 	}
 }

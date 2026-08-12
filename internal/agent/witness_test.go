@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -71,15 +72,15 @@ func TestWitnessAliveWhenOurProcessRuns(t *testing.T) {
 		t.Fatalf("RecordPolecatWitness: %v", err)
 	}
 
-	if got := PolecatWitness("cat-alive"); got != WitnessAlive {
-		t.Errorf("PolecatWitness(cat-alive) = %v, want %v — a running polecat whose pid AND start time "+
+	if got := AgentWitness("cat-alive"); got != WitnessAlive {
+		t.Errorf("AgentWitness(cat-alive) = %v, want %v — a running polecat whose pid AND start time "+
 			"match the record is our process; the registry having forgotten it is not evidence of death (mg-13a3)", got, WitnessAlive)
 	}
 	// The event-identity form must resolve identically: schedules address
 	// agents as cat-<name>, and a witness that only answers to one spelling
 	// would be silently absent for real schedules.
-	if got := PolecatWitness("cat-cat-alive"); got != WitnessAlive {
-		t.Errorf("PolecatWitness(cat-cat-alive) = %v, want %v — event-identity form must resolve identically", got, WitnessAlive)
+	if got := AgentWitness("cat-cat-alive"); got != WitnessAlive {
+		t.Errorf("AgentWitness(cat-cat-alive) = %v, want %v — event-identity form must resolve identically", got, WitnessAlive)
 	}
 }
 
@@ -155,16 +156,16 @@ func TestWitnessDeadWhenPidRecycled(t *testing.T) {
 	if err := RecordPolecatWitness("cat-recycled", ourPid, "", ""); err != nil {
 		t.Fatalf("RecordPolecatWitness: %v", err)
 	}
-	if got := PolecatWitness("cat-recycled"); got != WitnessAlive {
-		t.Fatalf("control: PolecatWitness(cat-recycled) = %v, want %v — with the true start time recorded "+
+	if got := AgentWitness("cat-recycled"); got != WitnessAlive {
+		t.Fatalf("control: AgentWitness(cat-recycled) = %v, want %v — with the true start time recorded "+
 			"this live pid must read ALIVE, or the recycled-pid assertion below proves nothing", got, WitnessAlive)
 	}
 
 	// Now the recycled case: same live pid, a start time that is not ours.
 	writeWitnessForTest(t, witnessRecord{Name: "cat-recycled", PID: ourPid, StartTime: otherStart})
 
-	if got := PolecatWitness("cat-recycled"); got != WitnessDead {
-		t.Errorf("PolecatWitness(cat-recycled) = %v, want %v — the pid is alive but holds a process that "+
+	if got := AgentWitness("cat-recycled"); got != WitnessDead {
+		t.Errorf("AgentWitness(cat-recycled) = %v, want %v — the pid is alive but holds a process that "+
 			"started at a different time, so it is NOT our polecat. Answering anything but GONE here keeps a "+
 			"dead polecat's mail-check firing at a corpse forever — mg-8677, re-entered through the fix for mg-61a0", got, WitnessDead)
 	}
@@ -185,15 +186,15 @@ func TestWitnessDeadWhenProcessGone(t *testing.T) {
 		t.Fatalf("RecordPolecatWitness: %v", err)
 	}
 	// Control: alive while it is alive.
-	if got := PolecatWitness("cat-dead"); got != WitnessAlive {
-		t.Fatalf("control: PolecatWitness(cat-dead) = %v, want %v before the kill", got, WitnessAlive)
+	if got := AgentWitness("cat-dead"); got != WitnessAlive {
+		t.Fatalf("control: AgentWitness(cat-dead) = %v, want %v before the kill", got, WitnessAlive)
 	}
 
 	_ = cmd.Process.Kill()
 	_, _ = cmd.Process.Wait() // reap, so the pid stops answering signal 0
 
-	if got := PolecatWitness("cat-dead"); got != WitnessDead {
-		t.Errorf("PolecatWitness(cat-dead) = %v, want %v — the pid answers nothing; that is positive "+
+	if got := AgentWitness("cat-dead"); got != WitnessDead {
+		t.Errorf("AgentWitness(cat-dead) = %v, want %v — the pid answers nothing; that is positive "+
 			"evidence of death and the reap is correct (mg-13a3)", got, WitnessDead)
 	}
 }
@@ -204,8 +205,8 @@ func TestWitnessDeadWhenProcessGone(t *testing.T) {
 func TestWitnessNoRecordForUnwitnessedAgent(t *testing.T) {
 	sandboxWitness(t)
 
-	if got := PolecatWitness("crew-pm-pogo"); got != WitnessNoRecord {
-		t.Errorf("PolecatWitness(crew-pm-pogo) = %v, want %v — an agent with no witness must yield no "+
+	if got := AgentWitness("crew-pm-pogo"); got != WitnessNoRecord {
+		t.Errorf("AgentWitness(crew-pm-pogo) = %v, want %v — an agent with no witness must yield no "+
 			"verdict, so the desired state still gets to speak for crew", got, WitnessNoRecord)
 	}
 
@@ -214,8 +215,8 @@ func TestWitnessNoRecordForUnwitnessedAgent(t *testing.T) {
 	if err := RecordPolecatWitness("cat-other", pid, "", ""); err != nil {
 		t.Fatalf("RecordPolecatWitness: %v", err)
 	}
-	if got := PolecatWitness("cat-nobody"); got != WitnessNoRecord {
-		t.Errorf("PolecatWitness(cat-nobody) = %v, want %v", got, WitnessNoRecord)
+	if got := AgentWitness("cat-nobody"); got != WitnessNoRecord {
+		t.Errorf("AgentWitness(cat-nobody) = %v, want %v", got, WitnessNoRecord)
 	}
 }
 
@@ -238,8 +239,8 @@ func TestWitnessUnreadableWhenIdentityUnreadable(t *testing.T) {
 	procStartFn = func(int) (time.Time, bool) { return time.Time{}, false }
 	t.Cleanup(func() { procStartFn = prev })
 
-	if got := PolecatWitness("cat-blind"); got != WitnessUnreadable {
-		t.Errorf("PolecatWitness(cat-blind) = %v, want %v — a live pid whose identity we cannot read is "+
+	if got := AgentWitness("cat-blind"); got != WitnessUnreadable {
+		t.Errorf("AgentWitness(cat-blind) = %v, want %v — a live pid whose identity we cannot read is "+
 			"not evidence of death; calling it dead would reap on an inability to measure (mg-de08)", got, WitnessUnreadable)
 	}
 }
@@ -276,29 +277,233 @@ func TestWitnessDropRemovesRecord(t *testing.T) {
 	if err := RecordPolecatWitness("cat-drop", pid, "", ""); err != nil {
 		t.Fatalf("RecordPolecatWitness: %v", err)
 	}
-	if got := PolecatWitness("cat-drop"); got != WitnessAlive {
-		t.Fatalf("control: PolecatWitness(cat-drop) = %v, want %v", got, WitnessAlive)
+	if got := AgentWitness("cat-drop"); got != WitnessAlive {
+		t.Fatalf("control: AgentWitness(cat-drop) = %v, want %v", got, WitnessAlive)
 	}
 
 	noteWitnessExit(&Agent{Name: "cat-drop", Type: TypePolecat, PID: pid})
 
-	if got := PolecatWitness("cat-drop"); got != WitnessNoRecord {
-		t.Errorf("PolecatWitness(cat-drop) = %v, want %v after exit — a witness for a process we watched "+
+	if got := AgentWitness("cat-drop"); got != WitnessNoRecord {
+		t.Errorf("AgentWitness(cat-drop) = %v, want %v after exit — a witness for a process we watched "+
 			"die must not survive to argue for it", got, WitnessNoRecord)
 	}
 }
 
-// TestWitnessNotRecordedForCrew: crew already have an independent second
-// witness (auto_start). Witnessing them too would put two sources in a
-// position to disagree about the same agent for no gain.
-func TestWitnessNotRecordedForCrew(t *testing.T) {
+// TestWitnessRecordedForCrew REPLACES TestWitnessNotRecordedForCrew, which
+// asserted the opposite and was the defect (mg-f9e8).
+//
+// The old test's rationale — "crew already have an independent second witness
+// (auto_start)" — is true only while auto_start is true. The prompt-side witness
+// IS auto_start. Turn it off and the agent has no process witness (not a
+// polecat) and no desired-state witness (not expected), and the mail-check
+// classifier reaps it on the strength of those two absences while it is running.
+//
+// This asserts on TYPE rather than on the classifier because the classifier's
+// answer for a live crew agent depends on both this record AND a prompt on disk;
+// the pogod-side test pins that. Here the claim is narrower and is the one the
+// old test denied: pogod writes a record when it starts a crew agent.
+func TestWitnessRecordedForCrew(t *testing.T) {
 	sandboxWitness(t)
 	pid := liveProcess(t)
 
 	noteWitnessStart(&Agent{Name: "pm-pogo", Type: TypeCrew, PID: pid})
 
-	if got := PolecatWitness("pm-pogo"); got != WitnessNoRecord {
-		t.Errorf("PolecatWitness(pm-pogo) = %v, want %v — crew must not be witnessed", got, WitnessNoRecord)
+	if got := AgentWitness("pm-pogo"); got != WitnessAlive {
+		t.Errorf("AgentWitness(pm-pogo) = %v, want %v — a crew agent pogod started and can still see must "+
+			"carry evidence of life, or an auto_start=false one is classified from two absences (mg-f9e8)",
+			got, WitnessAlive)
+	}
+
+	// ...and the event-identity spelling resolves identically. This is not a
+	// formality: crew mail-checks are registered under BOTH spellings on this
+	// fleet (mailcheck_gc_restart_test.go has one under "crew-pm-pogo"), and a
+	// probe that only stripped "cat-" would have fixed the agents whose schedule
+	// used one spelling and left the identical agent broken under the other.
+	if got := AgentWitness("crew-pm-pogo"); got != WitnessAlive {
+		t.Errorf("AgentWitness(crew-pm-pogo) = %v, want %v — a crew schedule addressed by event identity "+
+			"must resolve to the same evidence as one addressed by bare name (mg-f9e8)", got, WitnessAlive)
+	}
+}
+
+// TestCrewWitnessDroppedOnExit is the negative half of the one above, and the
+// halves are not interchangeable: a guard observed only KEEPING things alive is
+// not known to work. pogod watched this crew process die, so its record must go
+// — leaving it would let a recycled pid argue for an agent we know is dead,
+// which is mg-8677 re-entered through mg-f9e8's fix.
+func TestCrewWitnessDroppedOnExit(t *testing.T) {
+	sandboxWitness(t)
+	pid := liveProcess(t)
+
+	noteWitnessStart(&Agent{Name: "pm-transient", Type: TypeCrew, PID: pid})
+	if got := AgentWitness("pm-transient"); got != WitnessAlive {
+		t.Fatalf("control: AgentWitness(pm-transient) = %v, want %v", got, WitnessAlive)
+	}
+
+	noteWitnessExit(&Agent{Name: "pm-transient", Type: TypeCrew, PID: pid})
+
+	if got := AgentWitness("pm-transient"); got != WitnessNoRecord {
+		t.Errorf("AgentWitness(pm-transient) = %v, want %v after exit — the drop must cover every type the "+
+			"write covers, or a crew record outlives its process forever", got, WitnessNoRecord)
+	}
+}
+
+// TestCrewWitnessIsInvisibleToThePolecatReaders is the blast-radius guard for
+// mg-f9e8, and it is the assertion that made the "just widen the writer"
+// suggestion the wrong shape.
+//
+// The store is read by five things. ONE of them (AgentWitness) asks about a
+// single named agent and must see crew — that is the fix. The other four
+// enumerate "the polecats" and mean it literally:
+//
+//   - WitnessedAlivePolecats feeds the redeploy drain, which waits for the count
+//     to reach zero. Crew never exit, so the drain would never drain.
+//   - ...and the orphan alert, which mails the coordinator `kill <pid>` for
+//     every row. Crew survive restarts; the mail would be a standing kill order
+//     for the fleet, addressed to a member of it.
+//   - WitnessedPolecatVerdicts feeds gitgc's live set, matched against polecat
+//     branch names.
+//   - WitnessedPolecatRepos feeds the per-repo dispatch cap, which would refuse
+//     correct dispatches.
+//   - WitnessedPolecatWorkItems feeds stall-watch's in-flight set.
+//   - UnadoptablePolecats checks polecat-<name> for unmerged work.
+//
+// A live crew agent must appear in NONE of them.
+func TestCrewWitnessIsInvisibleToThePolecatReaders(t *testing.T) {
+	sandboxWitness(t)
+	crewPID := liveProcess(t)
+	catPID := liveProcess(t)
+
+	noteWitnessStart(&Agent{Name: "pm-doctor", Type: TypeCrew, PID: crewPID, WorkItemID: "mg-crew", SourceRepo: "/repo"})
+	// A polecat in the same store is the positive control: without it, every
+	// assertion below would also pass against a reader that returns nothing.
+	noteWitnessStart(&Agent{Name: "cat-live", Type: TypePolecat, PID: catPID, WorkItemID: "mg-cat", SourceRepo: "/repo"})
+
+	alive, err := WitnessedAlivePolecats()
+	if err != nil {
+		t.Fatalf("WitnessedAlivePolecats: %v", err)
+	}
+	names := map[string]bool{}
+	for _, r := range alive {
+		names[r.Name] = true
+	}
+	if !names["cat-live"] {
+		t.Fatalf("control: WitnessedAlivePolecats did not report the live polecat (%v); every assertion "+
+			"below would pass vacuously", names)
+	}
+	if names["pm-doctor"] {
+		t.Error("WitnessedAlivePolecats reported a CREW agent — the drain would never reach zero and the " +
+			"orphan alert would mail the coordinator a kill order for the fleet (mg-f9e8)")
+	}
+
+	verdicts, err := WitnessedPolecatVerdicts()
+	if err != nil {
+		t.Fatalf("WitnessedPolecatVerdicts: %v", err)
+	}
+	if _, ok := verdicts["cat-live"]; !ok {
+		t.Fatalf("control: WitnessedPolecatVerdicts lost the polecat: %v", verdicts)
+	}
+	if _, ok := verdicts["pm-doctor"]; ok {
+		t.Error("WitnessedPolecatVerdicts reported a CREW agent; gitgc's live set is matched against " +
+			"polecat branch names and would carry a key that protects nothing")
+	}
+
+	repos, unattributed, err := WitnessedPolecatRepos()
+	if err != nil {
+		t.Fatalf("WitnessedPolecatRepos: %v", err)
+	}
+	if repos["cat-live"] != "/repo" {
+		t.Fatalf("control: WitnessedPolecatRepos lost the polecat: %v / %v", repos, unattributed)
+	}
+	if _, ok := repos["pm-doctor"]; ok {
+		t.Error("WitnessedPolecatRepos counted a CREW agent against a repo; the dispatch cap would refuse " +
+			"correct dispatches, and refuse more of them the healthier the fleet was")
+	}
+
+	items, err := WitnessedPolecatWorkItems()
+	if err != nil {
+		t.Fatalf("WitnessedPolecatWorkItems: %v", err)
+	}
+	if items["cat-live"] != "mg-cat" {
+		t.Fatalf("control: WitnessedPolecatWorkItems lost the polecat: %v", items)
+	}
+	if _, ok := items["pm-doctor"]; ok {
+		t.Error("WitnessedPolecatWorkItems reported a CREW agent; stall-watch would call an item worked " +
+			"that no polecat is working")
+	}
+
+	// The gitgc live set is the reader whose mistake is unrecoverable (a worktree
+	// removed under a running polecat), so assert it through its real entry point
+	// rather than only through the function it calls.
+	live, err := LivePolecatSet(nil)
+	if err != nil {
+		t.Fatalf("LivePolecatSet: %v", err)
+	}
+	if !live["cat-live"] {
+		t.Fatalf("control: LivePolecatSet lost the polecat: %v", live)
+	}
+	if live["pm-doctor"] {
+		t.Error("LivePolecatSet included a CREW agent (mg-f9e8)")
+	}
+
+	// UnadoptablePolecats reads the store directly rather than through any of the
+	// above, so it needs its own assertion. An empty registry is the restart
+	// state, which is exactly when this sweep runs.
+	reg, err := NewRegistry(shortSocketDir(t))
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	cands, err := reg.UnadoptablePolecats()
+	if err != nil {
+		t.Fatalf("UnadoptablePolecats: %v", err)
+	}
+	sawCat, sawCrew := false, false
+	for _, c := range cands {
+		switch c.Name {
+		case "cat-live":
+			sawCat = true
+		case "pm-doctor":
+			sawCrew = true
+		}
+	}
+	if !sawCat {
+		t.Fatalf("control: UnadoptablePolecats lost the polecat: %+v", cands)
+	}
+	if sawCrew {
+		t.Error("UnadoptablePolecats reported a CREW agent; the startup sweep would look for a " +
+			"polecat-pm-doctor branch that cannot exist and report on a population it cannot judge")
+	}
+}
+
+// TestWitnessRecordWithoutTypeIsAPolecat pins the compatibility half of the type
+// field. Every record a pre-mg-f9e8 pogod left on disk has no "type" key, and
+// all of them are polecats. Reading a missing type as "not a polecat" would drop
+// exactly the population the store exists for — the survivors of a redeploy —
+// out of gitgc's live set, and worktree removal is gated on that set ALONE.
+//
+// It writes the file by hand because that is the only way to produce the shape
+// the old pogod produced; RecordAgentWitness cannot emit a typeless record.
+func TestWitnessRecordWithoutTypeIsAPolecat(t *testing.T) {
+	sandboxWitness(t)
+	pid := liveProcess(t)
+	start, ok := procStart(pid)
+	if !ok {
+		t.Fatalf("cannot read start time for pid %d", pid)
+	}
+
+	// Exactly the on-disk shape of a pre-mg-f9e8 record: no "type" key at all.
+	legacy := `{"version":1,"polecats":[{"name":"cat-legacy","pid":` + strconv.Itoa(pid) +
+		`,"start_time":"` + start.Format(time.RFC3339Nano) + `","work_item_id":"mg-legacy"}]}`
+	if err := os.WriteFile(WitnessPath(), []byte(legacy), 0o644); err != nil {
+		t.Fatalf("write legacy witness: %v", err)
+	}
+
+	verdicts, err := WitnessedPolecatVerdicts()
+	if err != nil {
+		t.Fatalf("WitnessedPolecatVerdicts: %v", err)
+	}
+	if got := verdicts["cat-legacy"]; got != WitnessAlive {
+		t.Errorf("a typeless (pre-mg-f9e8) record read as %v, want %v — every such record is a POLECAT, and "+
+			"dropping it removes a running polecat's worktree guard", got, WitnessAlive)
 	}
 }
 
@@ -337,8 +542,8 @@ func TestWitnessRefusesFutureVersion(t *testing.T) {
 		t.Fatalf("write witness: %v", err)
 	}
 
-	if got := PolecatWitness("cat-future"); got != WitnessUnreadable {
-		t.Errorf("PolecatWitness against a future-version file = %v, want %v — an unreadable store is not "+
+	if got := AgentWitness("cat-future"); got != WitnessUnreadable {
+		t.Errorf("AgentWitness against a future-version file = %v, want %v — an unreadable store is not "+
 			"evidence of death; a parse error must not reap the fleet", got, WitnessUnreadable)
 	}
 }
@@ -366,8 +571,8 @@ func TestWitnessSurvivesProcessRestart(t *testing.T) {
 	if recs[0].StartTime.IsZero() {
 		t.Error("persisted start_time is zero — a record without an identity is a false witness")
 	}
-	if got := PolecatWitness("cat-survivor"); got != WitnessAlive {
-		t.Errorf("PolecatWitness(cat-survivor) = %v, want %v — a successor pogod reading this file must "+
+	if got := AgentWitness("cat-survivor"); got != WitnessAlive {
+		t.Errorf("AgentWitness(cat-survivor) = %v, want %v — a successor pogod reading this file must "+
 			"find the polecat alive (mg-13a3)", got, WitnessAlive)
 	}
 }

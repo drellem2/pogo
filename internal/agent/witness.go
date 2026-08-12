@@ -92,8 +92,20 @@ const witnessFileName = "polecat-witness.json"
 // spawned this process and has no memory of it. A value we made up ourselves
 // could not be re-derived and so could not be matched against.
 type witnessRecord struct {
-	Name       string    `json:"name"`
-	PID        int       `json:"pid"`
+	Name string `json:"name"`
+	PID  int    `json:"pid"`
+	// Type is the kind of agent this record witnesses. It exists because the
+	// store now holds records for CREW as well as polecats (mg-f9e8), and every
+	// reader that answers a question about "the polecats" must therefore filter
+	// rather than take the whole file — see isPolecat.
+	//
+	// An EMPTY value means polecat, and that is a compatibility fact rather than
+	// a default: before mg-f9e8 only polecats were ever written, so every record
+	// a previous pogod left on disk is a polecat record with no type key. Reading
+	// empty as anything else would silently drop the survivors of a redeploy out
+	// of the live set — a worktree removed from under a running polecat, which is
+	// the exact failure LivePolecatSet exists to prevent.
+	Type       AgentType `json:"type,omitempty"`
 	StartTime  time.Time `json:"start_time"`
 	WorkItemID string    `json:"work_item_id,omitempty"`
 	// SourceRepo is the repository this polecat's worktree was cut from, and it
@@ -343,57 +355,114 @@ func saveWitness(recs []witnessRecord) error {
 	return nil
 }
 
-// noteWitnessStart records a live polecat's (pid, start_time) so a future
-// pogod can probe it. Called from Spawn, mirroring noteCoordinatorStart.
+// noteWitnessStart records a live agent's (pid, start_time) so a future pogod
+// can probe it. Called from Spawn and from the respawn path, mirroring
+// noteCoordinatorStart.
 //
-// Only polecats are witnessed. Crew already have a second witness — auto_start
-// in their prompt — and giving them a redundant one here would put two sources
-// in a position to disagree about the same agent for no gain.
+// EVERY AGENT POGOD STARTS IS WITNESSED, CREW INCLUDED (mg-f9e8). This used to
+// return early for anything but a polecat, on the reasoning that crew "already
+// have a second witness — auto_start in their prompt — and giving them a
+// redundant one here would put two sources in a position to disagree about the
+// same agent for no gain." That reasoning is sound and it silently assumed
+// auto_start = true. The prompt-side witness IS auto_start; turn it off and a
+// crew agent has no process witness (not a polecat) and no desired-state
+// witness (not expected), so the mail-check classifier saw two ABSENCES and
+// concluded death — the precise prohibition mg-de08 exists to enforce, applied
+// to the one population that ticket's fix excluded. auto_start = false is a
+// supported configuration (crew/doctor.md and representative.md are in that
+// class today), so the exclusion is not theoretical.
+//
+// Widening the WRITER is not the same as widening the READERS, and the
+// difference is load-bearing. This store is read by things that mean "the
+// polecats" literally — the redeploy drain (`pogo agent witness`), the orphan
+// alert that mails the coordinator a `kill <pid>`, the stranded-work sweep that
+// looks for a polecat-<name> branch, the per-repo dispatch cap. Handing them
+// crew records would wedge the drain (crew are always alive, so it would never
+// see zero) and mail an authoritative kill order for every crew agent that
+// outlived a restart. So those readers filter on witnessRecord.Type, and only
+// AgentWitness — the mail-check classifier's probe, which asks about ONE named
+// agent — answers on the whole store.
+//
+// The exposure this store answers is REPRODUCED, not inferred:
+// docs/investigations/registry-absent-while-alive-2026-07-17.md took a live
+// agent dark end-to-end on this host (mg-61a0), and its §6 named persisting pids
+// as the unshipped fix. mg-13a3 shipped that for polecats; this is the crew half
+// of the same candidate.
+//
+// This does NOT widen what counts as EXPECTED, and deliberately so — the
+// investigation's §5.4 rules on it directly, "the fix is NOT to loosen the
+// reap": an
+// auto_start = false crew agent that pogod never started is still never
+// witnessed, still falls through to the desired state, and is still reaped
+// (orphan-nudge prevention, pinned by the `lurker` case in
+// mailcheck_gc_restart_test.go). The new evidence only ever speaks about a
+// process pogod actually started and can still see.
 //
 // Best-effort in one direction only. If we cannot read the process's start
 // time we write NOTHING and log loudly, rather than writing a pid-only record.
 // A pid without an identity is exactly the false witness this store exists to
-// avoid: it could not distinguish our polecat from whatever process later
+// avoid: it could not distinguish our agent from whatever process later
 // inherits that pid, and it would answer UNKNOWN forever at a corpse. Refusing
 // to write leaves the classifier's behaviour exactly as it was before this
 // store existed — no better, but no more wrong.
 func noteWitnessStart(a *Agent) {
-	if a == nil || a.Type != TypePolecat {
+	if a == nil {
 		return
 	}
-	if err := RecordPolecatWitness(a.Name, a.PID, a.WorkItemID, a.SourceRepo); err != nil {
-		log.Printf("witness: %v — a future pogod may have no evidence polecat %s was alive (mg-13a3)", err, a.Name)
+	if err := RecordAgentWitness(a.Name, a.PID, a.Type, a.WorkItemID, a.SourceRepo); err != nil {
+		log.Printf("witness: %v — a future pogod may have no evidence %s %s was alive (mg-13a3, mg-f9e8)",
+			err, a.Type, a.Name)
 	}
 }
 
 // RecordPolecatWitness probes pid's start time and persists the pair as the
-// named polecat's witness. Spawn is the production caller (via
-// noteWitnessStart); it is exported because seeding this store is a legitimate
-// operation for anything that comes to own a running polecat it did not spawn
-// — a future adopt/reattach path would use exactly this, and tests use it to
-// build the same state production builds rather than a hand-rolled imitation.
+// named POLECAT's witness. It is exported because seeding this store is a
+// legitimate operation for anything that comes to own a running polecat it did
+// not spawn — a future adopt/reattach path would use exactly this, and tests
+// use it to build the same state production builds rather than a hand-rolled
+// imitation.
+//
+// Production reaches the store through noteWitnessStart, which calls
+// RecordAgentWitness with the agent's real type. This wrapper survives because
+// a caller that means "a polecat" should not have to name the type, and because
+// getting that type wrong is exactly what would put a crew agent into the
+// polecat-only readers.
+func RecordPolecatWitness(name string, pid int, workItemID, sourceRepo string) error {
+	return RecordAgentWitness(name, pid, TypePolecat, workItemID, sourceRepo)
+}
+
+// RecordAgentWitness probes pid's start time and persists the pair as the named
+// agent's witness. Spawn and the respawn path are the production callers (via
+// noteWitnessStart).
+//
+// typ is recorded because the readers are not all asking the same question: the
+// mail-check classifier asks about one named agent of any kind, while the drain,
+// the orphan alert, the stranded-work sweep and the dispatch cap all mean
+// polecats specifically. See noteWitnessStart for why that split is the whole
+// shape of mg-f9e8's fix.
 //
 // Returns an error WITHOUT writing if the start time cannot be read. See
 // noteWitnessStart: a pid-only record is a false witness, and no record at all
 // is strictly better than one we cannot trust.
-// sourceRepo may be empty — a --no-worktree polecat has no repository, and an
-// empty value is stored as "unattributed" rather than as a repo named "". See
-// witnessRecord.SourceRepo.
-func RecordPolecatWitness(name string, pid int, workItemID, sourceRepo string) error {
+// sourceRepo may be empty — a --no-worktree polecat has no repository, and crew
+// have none at all; an empty value is stored as "unattributed" rather than as a
+// repo named "". See witnessRecord.SourceRepo.
+func RecordAgentWitness(name string, pid int, typ AgentType, workItemID, sourceRepo string) error {
 	start, ok := procStartFn(pid)
 	if !ok {
-		return fmt.Errorf("witness: cannot read start time for polecat %s (pid=%d) — not recording; "+
-			"a pid without an identity cannot be distinguished from a recycled pid", name, pid)
+		return fmt.Errorf("witness: cannot read start time for %s %s (pid=%d) — not recording; "+
+			"a pid without an identity cannot be distinguished from a recycled pid", typ, name, pid)
 	}
 
 	witnessMu.Lock()
 	defer witnessMu.Unlock()
 	recs, err := loadWitness()
 	if err != nil {
-		return fmt.Errorf("witness: cannot load %s: %w — not recording polecat %s", WitnessPath(), err, name)
+		return fmt.Errorf("witness: cannot load %s: %w — not recording %s %s", WitnessPath(), err, typ, name)
 	}
 	// Replace any stale record for this name: a name can be reused by a later
-	// polecat, and the newest spawn is the one a probe should find.
+	// polecat and a crew name is reused on every respawn, so the newest spawn is
+	// the one a probe should find.
 	out := make([]witnessRecord, 0, len(recs)+1)
 	for _, r := range recs {
 		if r.Name != name {
@@ -403,33 +472,50 @@ func RecordPolecatWitness(name string, pid int, workItemID, sourceRepo string) e
 	out = append(out, witnessRecord{
 		Name:       name,
 		PID:        pid,
+		Type:       typ,
 		StartTime:  start,
 		WorkItemID: workItemID,
 		SourceRepo: sourceRepo,
 	})
 	if err := saveWitness(out); err != nil {
-		return fmt.Errorf("witness: cannot persist polecat %s (pid=%d): %w", name, pid, err)
+		return fmt.Errorf("witness: cannot persist %s %s (pid=%d): %w", typ, name, pid, err)
 	}
 	return nil
 }
 
-// noteWitnessExit drops a polecat's witness once its process has exited.
+// isPolecat reports whether this record witnesses a polecat.
+//
+// An empty Type is a polecat: the field postdates the store (mg-f9e8) and every
+// record written before it exists was a polecat's. This must never be spelled
+// `r.Type == TypePolecat` at a call site — that reads a pre-mg-f9e8 record as
+// "not a polecat" and drops a redeploy's survivors out of the live set, which
+// is a worktree deleted under a running polecat.
+func (r witnessRecord) isPolecat() bool {
+	return r.Type == "" || r.Type == TypePolecat
+}
+
+// noteWitnessExit drops an agent's witness once its process has exited.
 // Called from waitAndHandle, mirroring noteCoordinatorExit.
 //
 // The removal is itself the positive evidence: this pogod watched the process
 // die (cmd.Wait returned), so the record is not merely stale, it is known
 // false. Leaving it behind would strand a record whose pid is free to be
-// recycled — the witness would then be arguing for a polecat that we know is
+// recycled — the witness would then be arguing for an agent that we know is
 // dead. Dropping it returns the agent to "no record", which classifies GONE.
+//
+// It drops records of EVERY type, matching noteWitnessStart (mg-f9e8). A guard
+// here that still excluded crew would be worse than the one that used to be in
+// the writer: it would leave a crew record behind forever, so a name that pogod
+// later refuses to start would keep answering from a pid it no longer owns.
 func noteWitnessExit(a *Agent) {
-	if a == nil || a.Type != TypePolecat {
+	if a == nil {
 		return
 	}
 	witnessMu.Lock()
 	defer witnessMu.Unlock()
 	recs, err := loadWitness()
 	if err != nil {
-		log.Printf("witness: cannot load %s (%v) — leaving polecat %s's witness in place", WitnessPath(), err, a.Name)
+		log.Printf("witness: cannot load %s (%v) — leaving %s %s's witness in place", WitnessPath(), err, a.Type, a.Name)
 		return
 	}
 	out := make([]witnessRecord, 0, len(recs))
@@ -442,7 +528,7 @@ func noteWitnessExit(a *Agent) {
 		return // nothing to do; don't rewrite the file
 	}
 	if err := saveWitness(out); err != nil {
-		log.Printf("witness: cannot drop polecat %s's witness: %v", a.Name, err)
+		log.Printf("witness: cannot drop %s %s's witness: %v", a.Type, a.Name, err)
 	}
 }
 
@@ -450,10 +536,13 @@ func noteWitnessExit(a *Agent) {
 type WitnessVerdict int
 
 const (
-	// WitnessNoRecord means no polecat witness exists for this agent. NOT
-	// evidence of life or death — the caller learns nothing here and must ask
-	// someone else. Crew always land here (they are never witnessed), as does
-	// any polecat whose witness was dropped at exit or never written.
+	// WitnessNoRecord means no witness exists for this agent. NOT evidence of
+	// life or death — the caller learns nothing here and must ask someone else.
+	// Any agent whose witness was dropped at exit or never written lands here,
+	// which since mg-f9e8 means an agent THIS FLEET NEVER STARTED rather than
+	// "every crew agent". A crew agent pogod started and is still running has a
+	// record, and that is the whole fix: an auto_start = false crew agent used
+	// to arrive here while alive and be reaped on two absences.
 	WitnessNoRecord WitnessVerdict = iota
 
 	// WitnessAlive means a witness exists and OUR process — matched on pid AND
@@ -490,10 +579,29 @@ func (v WitnessVerdict) String() string {
 	}
 }
 
-// PolecatWitness probes the persisted witness for the given schedule agent and
+// AgentWitness probes the persisted witness for the given schedule agent and
 // reports what the process itself says. The agent may be addressed by its bare
 // name or by its event identity (cat-<name>), matching how schedules address
 // agents elsewhere.
+//
+// It answers across the WHOLE store, crew records included, and it is the only
+// reader that does (mg-f9e8). That is not an oversight in the others: this one
+// is asked about a single named agent by the mail-check classifier, which wants
+// evidence about that process whatever kind of agent it is. Every other reader
+// is enumerating "the polecats" for a drain, a kill order, a branch check or a
+// dispatch cap, and would be answering a different question if crew appeared in
+// its result. It was called PolecatWitness while polecats were the only thing
+// witnessed; the name moved when the population did.
+//
+// IT MUST RESOLVE crew-<name> AS WELL AS cat-<name> (mg-f9e8). Crew schedules
+// address their agent by bare name OR by event identity, and both spellings are
+// live on this fleet today — mailcheck_gc_restart_test.go carries a mail-check
+// registered under "crew-pm-pogo". Matching only "cat-" would have left the fix
+// covering an auto_start = false crew agent whose schedule used the bare name
+// and missing the identical agent whose schedule used the other spelling, which
+// is a fix that works on half a population for no reason anyone could see.
+// DesiredStateFor strips the same prefix (autostart.go), so the two steps of the
+// classifier now agree about which strings name the same agent.
 //
 // This is a READ of state that outlives the process that wrote it, which is
 // the only reason it can answer a question the in-memory registry cannot.
@@ -506,7 +614,7 @@ func (v WitnessVerdict) String() string {
 // the limit of the instrument and it belongs on the record. If pids ever
 // became reusable that fast, this probe would need a finer identity source
 // than lstart, not a wider tolerance.
-func PolecatWitness(scheduleAgent string) WitnessVerdict {
+func AgentWitness(scheduleAgent string) WitnessVerdict {
 	witnessMu.Lock()
 	recs, err := loadWitness()
 	witnessMu.Unlock()
@@ -518,7 +626,7 @@ func PolecatWitness(scheduleAgent string) WitnessVerdict {
 		return WitnessUnreadable
 	}
 	for _, r := range recs {
-		if r.Name != scheduleAgent && "cat-"+r.Name != scheduleAgent {
+		if !witnessNames(r, scheduleAgent) {
 			continue
 		}
 		return witnessVerdict(r)
@@ -526,10 +634,26 @@ func PolecatWitness(scheduleAgent string) WitnessVerdict {
 	return WitnessNoRecord
 }
 
+// witnessNames reports whether scheduleAgent addresses the agent this record
+// witnesses.
+//
+// Both event-identity prefixes are accepted for every record rather than only
+// the one matching its Type, and that is deliberate: the prefix is a property of
+// how the SCHEDULE was written, the record's type is a property of how the agent
+// was spawned, and a mismatch between them (a crew agent whose schedule predates
+// a type change, say) must not silently resolve to "no evidence". The names are
+// disjoint in practice — no polecat is called crew-x — so accepting both costs
+// nothing and cannot alias two real agents onto one record.
+func witnessNames(r witnessRecord, scheduleAgent string) bool {
+	return r.Name == scheduleAgent ||
+		"cat-"+r.Name == scheduleAgent ||
+		"crew-"+r.Name == scheduleAgent
+}
+
 // witnessVerdict probes ONE record's process and reports what it says.
 //
 // This is the single place the (pid, start_time) identity match is made.
-// PolecatWitness (one agent, "should I reap its mail-check?") and
+// AgentWitness (one agent, "should I reap its mail-check?") and
 // WitnessedAlivePolecats (every agent, "who is alive that the registry cannot
 // see?") both route through here, and that is deliberate: they are two
 // questions about the same fact, and if they ever disagreed about what "our
@@ -570,6 +694,13 @@ func witnessVerdict(r witnessRecord) WitnessVerdict {
 // the witness file" and "no polecats are alive" are different facts, and this
 // store's entire subject is not conflating them. Callers get the error and must
 // decide; none of them may render an unreadable store as zero.
+//
+// CREW RECORDS ARE EXCLUDED, and here that is not tidiness (mg-f9e8). Its two
+// callers are the redeploy drain, which waits for this count to reach zero, and
+// the orphan alert, which mails the coordinator a `kill <pid>` for whatever it
+// returns. Crew are long-running and always alive, so including them would hang
+// every redeploy at "polecats still running" forever and issue a standing kill
+// order for the fleet — including for the coordinator reading the mail.
 func WitnessedAlivePolecats() ([]witnessRecord, error) {
 	witnessMu.Lock()
 	recs, err := loadWitness()
@@ -579,6 +710,9 @@ func WitnessedAlivePolecats() ([]witnessRecord, error) {
 	}
 	var out []witnessRecord
 	for _, r := range recs {
+		if !r.isPolecat() {
+			continue
+		}
 		if witnessVerdict(r) == WitnessAlive {
 			out = append(out, r)
 		}
@@ -609,7 +743,12 @@ func WitnessedAlivePolecats() ([]witnessRecord, error) {
 // A read error yields (nil, err), never an empty map with a nil error: an
 // unreadable store is not an empty fleet, and no caller may render it as one
 // (the whole subject of this file, mg-13a3). Names are unique in the store
-// (RecordPolecatWitness replaces by name), so the map loses nothing.
+// (RecordAgentWitness replaces by name), so the map loses nothing.
+//
+// Crew records are excluded (mg-f9e8): this feeds LivePolecatSet, whose keys are
+// matched against polecat branch suffixes and worktree basenames by gitgc. A
+// crew name there matches nothing and protects nothing — it would only make the
+// live set a claim wider than the thing it is checked against.
 func WitnessedPolecatVerdicts() (map[string]WitnessVerdict, error) {
 	witnessMu.Lock()
 	recs, err := loadWitness()
@@ -619,6 +758,9 @@ func WitnessedPolecatVerdicts() (map[string]WitnessVerdict, error) {
 	}
 	out := make(map[string]WitnessVerdict, len(recs))
 	for _, r := range recs {
+		if !r.isPolecat() {
+			continue
+		}
 		out[r.Name] = witnessVerdict(r)
 	}
 	return out, nil
@@ -642,6 +784,11 @@ func WitnessedPolecatVerdicts() (map[string]WitnessVerdict, error) {
 //
 // A read error yields (nil, nil, err). An unreadable store is not an empty
 // fleet, and this function must not let a caller render it as one.
+//
+// Crew records are excluded (mg-f9e8). The cap counts POLECATS against a repo's
+// concurrency limit; crew carry no worktree and are not dispatched work, so
+// counting them would refuse correct dispatches — and would refuse more of them
+// the healthier the fleet was.
 func WitnessedPolecatRepos() (repos map[string]string, unattributed []string, err error) {
 	witnessMu.Lock()
 	recs, err := loadWitness()
@@ -651,6 +798,9 @@ func WitnessedPolecatRepos() (repos map[string]string, unattributed []string, er
 	}
 	repos = make(map[string]string, len(recs))
 	for _, r := range recs {
+		if !r.isPolecat() {
+			continue
+		}
 		switch witnessVerdict(r) {
 		case WitnessAlive, WitnessUnreadable:
 		default:
@@ -678,6 +828,10 @@ func WitnessedPolecatRepos() (repos map[string]string, unattributed []string, er
 // earlier pogod are the population most likely to hold a claim nobody restamped.
 //
 // A read error yields (nil, err). An unreadable store is not an empty fleet.
+//
+// Crew records are excluded (mg-f9e8): a work item is in flight because a
+// POLECAT holds it, and a crew agent that happened to carry a work-item id
+// would make stall-watch call an item worked that nobody is working.
 func WitnessedPolecatWorkItems() (map[string]string, error) {
 	witnessMu.Lock()
 	recs, err := loadWitness()
@@ -687,6 +841,9 @@ func WitnessedPolecatWorkItems() (map[string]string, error) {
 	}
 	out := make(map[string]string, len(recs))
 	for _, r := range recs {
+		if !r.isPolecat() {
+			continue
+		}
 		switch witnessVerdict(r) {
 		case WitnessAlive, WitnessUnreadable:
 		default:

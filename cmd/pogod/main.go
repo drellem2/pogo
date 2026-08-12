@@ -104,7 +104,7 @@ const maxHTTPConns = 256
 //  1. the registry — evidence about an actual process. A registered agent that
 //     is running, or one held for an imminent respawn, is ALIVE. A registered
 //     agent that has terminally exited with no respawn coming is GONE.
-//  2. the persisted polecat witness (agent.PolecatWitness) — evidence about an
+//  2. the persisted process witness (agent.AgentWitness) — evidence about an
 //     actual process that OUTLIVES the pogod that observed it. Consulted ONLY
 //     when step 1 yielded no evidence at all, i.e. the registry holds no entry.
 //  3. the desired state on disk (agent.DesiredStateFor) — an auto_start, not
@@ -158,17 +158,47 @@ const maxHTTPConns = 256
 // merely an absence wearing the word "evidence":
 //
 //   - a corpse in the registry (step 1: we watched it exit), or
-//   - a witness whose process is provably not ours — the pid answers nothing,
-//     or it answers but started at a different time, meaning the pid was
-//     recycled and our polecat is long dead (step 2), or
-//   - an agent with no witness AND no desired state: nothing on this machine
-//     has ever claimed this agent should exist or observed that it did. That
-//     is not the polecat case any more; a live polecat now has a witness.
+//   - an agent with no SURVIVING evidence of life and no desired state:
+//     nothing on this machine claims this agent should be running, and nothing
+//     can see a process for it. Either it was never witnessed, or its witness
+//     names a process that is provably not ours — the pid answers nothing, or
+//     it answers but started at a different time, so the pid was recycled and
+//     our process is long dead (step 2).
+//
+// A dead witness is therefore a necessary half of that second disjunct and not
+// a sufficient one on its own (mg-f9e8). It retires a PROCESS's claim to life;
+// it does not answer whether the agent should be running, and for a polecat the
+// distinction is invisible because a polecat is never expected. Step 3 decides,
+// and for everything that existed before crew were witnessed it decides the same
+// way it always did.
 //
 // Across a pogod restart the unregistered population splits on EVIDENCE, not
-// on the shape of its config: crew are auto_start (EXPECTED → keep), live
-// polecats are witnessed (UNKNOWN → keep), and dead polecats' witnesses are
-// dropped at exit or fail the identity match (GONE → reap).
+// on the shape of its config: everything this fleet started and that is still
+// running is witnessed (UNKNOWN → keep), auto_start crew are additionally
+// EXPECTED → keep, and an agent whose witness was dropped at exit or fails the
+// identity match is GONE → reap.
+//
+// That split used to be spelled "crew are auto_start, live polecats are
+// witnessed", which quietly excluded a whole supported population: an
+// auto_start = false crew agent is not a polecat, so it was never witnessed,
+// and not expected, so it was reaped WHILE ALIVE on the strength of two
+// absences — the prohibition above, applied to the one population mg-de08's fix
+// did not reach. The agent then goes deaf with no exit, so neither an auto_start
+// respawn nor the suppression page fires. `diagnose` will name it a DEAF
+// SURVIVOR (internal/agent/api.go) if someone types that agent's name, but
+// nothing announces it: deafwatch iterates the REGISTRY
+// (Registry.MailLoopReport, via deafwatch.RegistrySource), and this population
+// is registry-absent by construction — that absence is the first of the two the
+// classifier reasoned from. A detector's existence is not its coverage; the
+// question is which set it iterates. The absent-while-alive state itself is not
+// a hypothesis — docs/investigations/registry-absent-while-alive-2026-07-17.md
+// reproduced it end-to-end on this host and watched the sweep delete a live
+// agent's mail-check from memory and disk with nothing logged.
+// Since mg-f9e8 every agent pogod starts is witnessed, crew included, so the
+// population that used to arrive here with nothing to show is carrying evidence.
+// What did NOT change is the reap of an agent pogod never started: it is still
+// unwitnessed, still not expected, and still reaped, which is orphan-nudge
+// prevention and is pinned by the `lurker` case in mailcheck_gc_restart_test.go.
 type registryLiveness struct{ reg *agent.Registry }
 
 func (l registryLiveness) AgentState(scheduleAgent string) scheduler.AgentState {
@@ -219,7 +249,7 @@ func (l registryLiveness) AgentState(scheduleAgent string) scheduler.AgentState 
 	// whether we have any surviving evidence about what IS — a polecat's
 	// persisted (pid, start_time) outlives the pogod that recorded it, so a
 	// restarted pogod can still look at the process itself (mg-13a3).
-	switch v := agent.PolecatWitness(scheduleAgent); v {
+	switch v := agent.AgentWitness(scheduleAgent); v {
 	case agent.WitnessAlive:
 		// OUR process — matched on pid AND start time — is running. The
 		// registry has simply forgotten it (in-memory, no adopt path across a
@@ -231,11 +261,32 @@ func (l registryLiveness) AgentState(scheduleAgent string) scheduler.AgentState 
 		// checked.
 		return scheduler.AgentUnknown
 	case agent.WitnessDead:
-		// Positive evidence of death: the pid holds nothing, or it holds a
-		// process that started at a different time and is therefore not ours.
-		// Reap. Refusing to reap here is what would re-enter mg-8677 — a
-		// recycled pid keeping a dead polecat's mail-check firing forever.
-		return scheduler.AgentGone
+		// Positive evidence that the process we recorded is gone: the pid holds
+		// nothing, or it holds a process that started at a different time and is
+		// therefore not ours.
+		//
+		// FALL THROUGH TO THE DESIRED STATE rather than returning GONE here, and
+		// the difference only became visible when crew joined this store
+		// (mg-f9e8). For a polecat nothing changes: a polecat has no prompt, so
+		// the desired state says "not expected" and the answer below is still
+		// GONE — mg-8677's recycled pid is still reaped, by the same two steps in
+		// the same order. But an auto_start = true CREW agent can now hold a dead
+		// witness, and the state it describes is ordinary: this fleet restarts
+		// nightly, pogod's death takes the crew down with it, and the successor's
+		// witness for each of them is a corpse until AutoStartAgents respawns it.
+		// Returning GONE on that would reap the entire crew's mail loop whenever
+		// the auto-start sweep is late or fails for one agent — mg-de08 exactly,
+		// re-entered through the fix for mg-f9e8. The GC gate usually hides it
+		// (it waits for the sweep plus a settle window), but "usually hidden" is
+		// what mg-de08 was too.
+		//
+		// The rule this keeps is the one mg-de08 states, not a weaker one. A dead
+		// witness is evidence about a PROCESS, and it retires that process's
+		// claim to life — it is not evidence that the agent should not be running.
+		// The registry arm above is the one that answers "we watched it exit and
+		// nothing is bringing it back", and it still returns without asking.
+		log.Printf("scheduler: %s's witness names a process that is gone; asking the desired state "+
+			"whether it should be running before reaping its mail-check", scheduleAgent)
 	case agent.WitnessUnreadable:
 		// A witness exists and something is alive on its pid, but we could not
 		// confirm the process is ours. We must not call an unmeasurable thing
@@ -243,9 +294,20 @@ func (l registryLiveness) AgentState(scheduleAgent string) scheduler.AgentState 
 		log.Printf("scheduler: cannot confirm the process behind %s's witness is ours; NOT reaping its mail-check", scheduleAgent)
 		return scheduler.AgentUnknown
 	case agent.WitnessNoRecord:
-		// No witness at all — crew (never witnessed; their auto_start is their
-		// second witness) and agents whose witness was dropped when this or an
-		// earlier pogod watched them exit. Fall through to the desired state.
+		// No witness at all: no pogod on this box has a record of starting this
+		// agent and still having it running. Either its witness was dropped when
+		// this or an earlier pogod watched it exit, or nothing ever started it —
+		// a crew prompt that is only ever run by hand, or an agent that does not
+		// exist. Fall through to the desired state.
+		//
+		// It used to read "crew are never witnessed; their auto_start is their
+		// second witness", and that sentence was load-bearing and only true for
+		// auto_start = true (mg-f9e8). The prompt-side witness IS auto_start, so
+		// an auto_start = false crew agent had no process witness (not a polecat)
+		// and no desired-state witness (not expected), and this arm handed the
+		// pair of absences to the default below, which called them death — while
+		// the agent was running. Crew are witnessed now, so a LIVE one that this
+		// fleet started never reaches here.
 	}
 
 	// Neither the registry nor the witness has anything to say. Only now may

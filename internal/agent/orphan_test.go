@@ -134,8 +134,8 @@ func TestOrphanedPolecats_RegisteredPolecatIsNotOrphaned(t *testing.T) {
 	// Precondition: the witness genuinely says ALIVE, so this test is
 	// exercising the registry check and not a witness that happens to be
 	// silent. Without this the assertion below would pass vacuously.
-	if v := PolecatWitness("cat-healthy"); v != WitnessAlive {
-		t.Fatalf("precondition: PolecatWitness(cat-healthy) = %v, want %v — if the witness does not "+
+	if v := AgentWitness("cat-healthy"); v != WitnessAlive {
+		t.Fatalf("precondition: AgentWitness(cat-healthy) = %v, want %v — if the witness does not "+
 			"say ALIVE, this test is not testing the registry check at all", v, WitnessAlive)
 	}
 
@@ -172,8 +172,8 @@ func TestOrphanedPolecats_RecycledPidIsNotOrphaned(t *testing.T) {
 
 	// Precondition: without the shift this record reads ALIVE, so the
 	// assertion below is not vacuous — it is the shift that does the work.
-	if v := PolecatWitness("cat-recycled"); v != WitnessAlive {
-		t.Fatalf("precondition: PolecatWitness(cat-recycled) = %v, want %v before the start-time shift",
+	if v := AgentWitness("cat-recycled"); v != WitnessAlive {
+		t.Fatalf("precondition: AgentWitness(cat-recycled) = %v, want %v before the start-time shift",
 			v, WitnessAlive)
 	}
 

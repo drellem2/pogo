@@ -1089,12 +1089,13 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 	// be renamed out from under itself, whatever config later says (mg-cf9e).
 	noteCoordinatorStart(a)
 
-	// Persist a polecat's (pid, start_time) so a pogod that outlives this one
-	// has EVIDENCE about this process instead of only the absence of one. The
+	// Persist this agent's (pid, start_time) so a pogod that outlives this one
+	// has EVIDENCE about the process instead of only the absence of one. The
 	// registry is in-memory and does not survive a restart; without this the
-	// mail-check GC classifies every surviving polecat from two absences and
-	// concludes death (mg-13a3). No-op for crew, whose prompt's auto_start is
-	// already an independent second witness.
+	// mail-check GC classifies every survivor from two absences and concludes
+	// death (mg-13a3). Crew are witnessed too: their prompt's auto_start is only
+	// a second witness while it is TRUE, and an auto_start = false crew agent
+	// otherwise has neither (mg-f9e8).
 	noteWitnessStart(a)
 
 	a.emitSpawned()
@@ -1537,6 +1538,14 @@ func (r *Registry) respawn(name string, gen uint64, checkGen bool) (*Agent, erro
 
 	// Re-arm the rename guard on the new pid; the old one's exit cleared it.
 	noteCoordinatorStart(a)
+
+	// Re-witness on the new pid, for the same reason and from the same cleared
+	// state: the old process's exit ran noteWitnessExit, so this agent has NO
+	// record until we write one. Missing this would leave a respawned agent
+	// classified from two absences again — and respawn is the COMMON path for
+	// crew, whose RestartOnCrash defaults true, so the mg-f9e8 fix would cover
+	// only agents that had never crashed.
+	noteWitnessStart(a)
 
 	// Re-arm the lifetime session hook (mg-4421) for the respawned PTY so the
 	// modal-dismissal watcher covers the new process. (postSpawnHook is
