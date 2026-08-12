@@ -31,11 +31,12 @@ const exitOrphanUsage = 2
 // changes nothing about the contract: it never signals a process.
 func newCheckOrphansCmd(jsonOutput *bool) *cobra.Command {
 	var (
-		root    string
-		window  time.Duration
-		floor   float64
-		all     bool
-		asProbe bool
+		root           string
+		window         time.Duration
+		floor          float64
+		candidateFloor float64
+		all            bool
+		asProbe        bool
 	)
 	cmd := &cobra.Command{
 		Use:   "check-orphans",
@@ -50,8 +51,19 @@ THE PREDICATE, and the order of the three terms is the whole design:
   owner      that polecat, looked up in pogod's agent registry
   rate       CPU-seconds per wall second, differenced across a sampling window
 
-An ORPHAN is a process above the rate floor whose cwd names a polecat that the
-registry does not have running. Anything else is left alone.
+An ORPHAN is a process whose cwd names a polecat that the registry does not have
+running, and whose owner's processes TOGETHER clear the rate floor. Anything else
+is left alone.
+
+THE FLOOR IS PER OWNER, NOT PER PROCESS, and that is not a refinement (mg-c675).
+A polecat orphaned 52 busy-loops holding 8.7 of this host's 10 cores for 41
+minutes; fed that population, the per-process form of this detector reported a
+clean host, having examined none of them. 8.7 cores shared by 52 contending
+processes is 0.167 each, under a 0.20 floor calibrated on orphans that came one
+at a time. Processes contending for a fixed number of cores get capacity/N, so a
+per-process floor GOES BLINDER AS THE LEAK GETS WORSE — the leak big enough to
+saturate the host is the one it cannot see. Summing per owner removes that,
+because subdividing the same compute changes no term of the comparison.
 
 IT DOES NOT KEY ON ppid, AND MUST NOT. ` + "`ppid=1`" + ` is not the signature of a leak; it
 is the signature of ANY polecat starting background work, because ` + "`nohup ... &`" + `
@@ -69,7 +81,10 @@ differenced across a window, which measures work actually performed in it.
 THE RATE FLOOR SEPARATES TWO DEFECTS, it is not a severity filter. A
 pogo-deploy.sh blocked forever in an unbounded ` + "`git fetch`" + ` ran 31h39m, correctly
 parented and reported by nothing, at ~0% CPU. That is a stuck process and it
-routes elsewhere. This reports detached COMPUTE.
+routes elsewhere. This reports detached COMPUTE. Keeping those apart is now
+--candidate-floor's job (default ` + fmt.Sprintf("%.2f", orphanwatch.DefaultCandidateFloor) + ` cores): it decides what gets ATTRIBUTED,
+never what gets REPORTED. Setting it at or above --floor is REFUSED rather than
+accepted, because it reinstates the per-process rule above.
 
 WHAT IT CANNOT SEE, stated here rather than in a footnote:
 
@@ -78,8 +93,13 @@ WHAT IT CANNOT SEE, stated here rather than in a footnote:
                   unrelated program on the machine. Counted, never convicted.
   CWD UNREADABLE  a busy process whose working directory the kernel would not
                   disclose. An instrument limit, counted separately.
+  UNDER 0.02      a dead owner's swarm escapes if its total clears --floor while
+                  EVERY member sits under --candidate-floor, which takes more
+                  than ten of them. Spinning processes only get that small when
+                  there are 500+ on a 10-core box; duty-cycled work gets there
+                  at any count, and is the stuck-process class by another name.
 
-Both fail CLOSED. Unattributable is not orphan.
+Both blind spots fail CLOSED. Unattributable is not orphan.
 
 REPORTS ONLY. It never signals a process. The rule above is a strong heuristic
 with the blind spots named, and a killer built on a heuristic destroys live work
@@ -115,10 +135,11 @@ measured nothing.`,
 				return
 			}
 			rep, err := orphanwatch.Scan(orphanwatch.Options{
-				PolecatsRoot: root,
-				Window:       window,
-				Floor:        floor,
-				LiveOwners:   liveOwnersFromRegistry,
+				PolecatsRoot:   root,
+				Window:         window,
+				Floor:          floor,
+				CandidateFloor: candidateFloor,
+				LiveOwners:     liveOwnersFromRegistry,
 			})
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "INSTRUMENT FAILURE — this run measured nothing: %v\n", err)
@@ -136,7 +157,10 @@ measured nothing.`,
 	}
 	cmd.Flags().StringVar(&root, "root", "", "Polecats tree (default: $POGO_HOME/polecats, then ~/.pogo/polecats)")
 	cmd.Flags().DurationVar(&window, "window", orphanwatch.DefaultWindow, "CPU sampling window")
-	cmd.Flags().Float64Var(&floor, "floor", orphanwatch.DefaultFloor, "Rate in cores at or above which a process is a candidate")
+	cmd.Flags().Float64Var(&floor, "floor", orphanwatch.DefaultFloor,
+		"Rate in cores at or above which a dead owner's processes, SUMMED, are reported")
+	cmd.Flags().Float64Var(&candidateFloor, "candidate-floor", orphanwatch.DefaultCandidateFloor,
+		"Per-process rate in cores below which a process is not attributed at all (must be under --floor)")
 	cmd.Flags().BoolVar(&all, "all", false, "Also list the SPARED and unattributable counts in full")
 	cmd.Flags().BoolVar(&asProbe, "probe", false,
 		"Run the constructive probe instead of the census: can this detector still fire?")
@@ -175,16 +199,25 @@ func renderOrphanReport(rep orphanwatch.Report, all bool) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "orphaned compute — polecats root %s\n", rep.PolecatsRoot)
 	fmt.Fprintf(&b, "  source %s\n", rep.Source)
-	fmt.Fprintf(&b, "  window %s, floor %.2f cores\n", rep.Window, rep.Floor)
-	fmt.Fprintf(&b, "  %d processes sampled, %d above the floor\n", rep.Sampled, rep.Busy)
-	fmt.Fprintf(&b, "  %d spared (owner still running), %d unattributable, %d cwd unreadable\n",
-		rep.LiveOwner, rep.Unattributable, rep.CwdUnreadable)
+	fmt.Fprintf(&b, "  window %s, floor %.2f cores per OWNER, candidate floor %.2f per process\n",
+		rep.Window, rep.Floor, rep.CandidateFloor)
+	fmt.Fprintf(&b, "  %d processes sampled, %d above the candidate floor\n", rep.Sampled, rep.Busy)
+	fmt.Fprintf(&b, "  %d spared (owner still running), %d spared (owner under the floor), "+
+		"%d unattributable, %d cwd unreadable\n",
+		rep.LiveOwner, rep.BelowOwnerFloor, rep.Unattributable, rep.CwdUnreadable)
 
 	if len(rep.Orphans) == 0 {
 		b.WriteString("\nNo orphaned compute.\n")
 		if rep.Busy == 0 {
-			b.WriteString("Note: nothing on this host was above the floor, so nothing was attributed.\n" +
-				"That is a clean host OR a floor set too high — the counts above tell you which.\n")
+			b.WriteString("Note: nothing on this host was above the candidate floor, so nothing was\n" +
+				"attributed. That is a clean host OR a candidate floor set too high — the counts\n" +
+				"above tell you which.\n")
+		}
+		if rep.BelowOwnerFloor > 0 {
+			fmt.Fprintf(&b, "Note: %d process(es) belong to polecats that are GONE and were spared only\n"+
+				"because their owner's total is under %.2f cores. Nothing here is worth acting on,\n"+
+				"but this is the count that would grow first if the floor were set too high.\n",
+				rep.BelowOwnerFloor, rep.Floor)
 		}
 		if all {
 			b.WriteString("\nThe spared count is the positive control: those processes carry the same\n" +
@@ -194,7 +227,18 @@ func renderOrphanReport(rep orphanwatch.Report, all bool) string {
 		return b.String()
 	}
 
-	fmt.Fprintf(&b, "\n%d ORPHANED PROCESS(ES), %.2f cores total:\n\n", len(rep.Orphans), rep.TotalCores())
+	// The owner summary comes first and is never elided. The finding is "this
+	// polecat is gone and still holding N cores"; reading that off 52 nearly
+	// identical process lines is how 87% of a host went unnoticed for 41
+	// minutes (mg-c675).
+	fmt.Fprintf(&b, "\n%d DEAD POLECAT(S) STILL HOLDING COMPUTE, %.2f cores total:\n\n",
+		len(rep.Owners), rep.TotalCores())
+	for _, load := range rep.Owners {
+		fmt.Fprintf(&b, "  %-24s %5.2f cores across %d process(es), %s of CPU burnt\n",
+			load.Owner+" (not running)", load.Cores, load.Procs, load.CPU.Round(time.Second))
+	}
+
+	fmt.Fprintf(&b, "\n%d ORPHANED PROCESS(ES):\n\n", len(rep.Orphans))
 	for _, o := range rep.Orphans {
 		fmt.Fprintf(&b, "  pid %-7d %5.2f cores  cpu %-10s owner %s (not running)\n",
 			o.PID, o.Cores, o.CPU.Round(time.Second), o.Owner)

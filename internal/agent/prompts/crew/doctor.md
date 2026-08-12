@@ -98,6 +98,24 @@ pogo service status              # Is the system service installed?
 # Agent state
 pogo agent list                  # Running agents (crew + {{.Worker}}s)
 pogo agent status <name>         # Detailed status for one agent
+pogo check-orphans               # Compute still running out of a polecat's directory
+                                 # whose owner is GONE. `pogo agent stop` does not kill
+                                 # an agent's descendants — they reparent to launchd
+                                 # and keep burning cores — so this is the only thing
+                                 # that looks. Reach for it whenever the host is busy
+                                 # and the fleet does not account for it: an orphan is
+                                 # in no agent's process tree, so it is attributed to
+                                 # no agent and EVERY other instrument you have reads
+                                 # the box as busy-but-not-ours. On 2026-08-12 that
+                                 # cost 87% of the host for 41 minutes, failed an
+                                 # unrelated branch's merge gate, and was found by
+                                 # reading `ps` by hand (mg-c675). It REPORTS ONLY,
+                                 # never kills; act by PID after re-checking the
+                                 # owner's status, never by pattern. Exit 3 means the
+                                 # run measured nothing — not a clean host.
+pogo check-orphans --probe       # Ask whether that detector can still FIRE: starts two
+                                 # real burners, detaches one, checks it goes RED on
+                                 # the dead owner and GREEN on the live one.
 
 # Work items
 mg list                          # All work items
@@ -187,6 +205,7 @@ Don't burn it on bulk research. Large file reads, repo-wide greps, web searches,
 - **Refinery failures**: Check `pogo refinery history` for error details
 - **Missing prompts**: `pogo agent prompt install` reinstalls default prompts
 - **Agent won't start**: Check if the crew prompt exists at `~/.pogo/agents/crew/<name>.md`
+- **Host is saturated but the fleet does not account for the load**: run `pogo check-orphans`. This is the one symptom where believing your instruments is the mistake — compute that outlived its {{.Worker}} sits in no agent's process tree, so `pogo agent list`, the refinery's host reading and every per-agent attribution all correctly report the box as busy-but-not-ours. On 2026-08-12 the refinery measured "fleet held 0.5 of 10 cores, non-fleet 8.7" while 52 orphaned busy-loops from one departed {{.Worker}} held the other 8.7 for 41 minutes (mg-c675). A large gap between host load and attributed load IS the finding; go look for the owner rather than for a second explanation.
 
 ## When you're assigned an mg ticket
 
