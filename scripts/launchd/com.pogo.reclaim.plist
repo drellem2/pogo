@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.pogo.reclaim</string>
+    <key>ProgramArguments</key>
+    <array>
+        <!-- Update YOUR_USERNAME, or use `pogo service install-reclaim`. -->
+        <string>/Users/YOUR_USERNAME/.pogo/bin/pogo-reclaim.sh</string>
+    </array>
+    <!-- StartInterval, not StartCalendarInterval, and this is the ticket's
+         central decision rendered into launchd's vocabulary.
+
+         The trigger is SIZE — the cache grows with build activity, not with
+         time — and launchd has no size trigger. StartInterval is therefore the
+         SAMPLER and the script is the trigger: every 30 minutes it wakes, runs
+         one `df`, and in the overwhelmingly common case logs one line and
+         exits. The expensive `du` of the cache is only paid on a fire that has
+         already established free space is below the floor.
+
+         A nightly StartCalendarInterval was the alternative and is worse for
+         this condition: the volume went from healthy to 571 MiB free inside a
+         working day, and a job that samples once a night can miss the entire
+         window in which every merge on the box is failing. Firing during a
+         build is handled by the script's in-flight check, not by picking an
+         hour. -->
+    <key>StartInterval</key>
+    <integer>1800</integer>
+    <!-- RunAtLoad=false. Installing or reloading this job must not perform a
+         reclaim as a side effect — an operator rerunning the installer should
+         not thereby delete a 7G cache. The first sample arrives 30 min later. -->
+    <key>RunAtLoad</key>
+    <false/>
+    <!-- One-shot per fire. KeepAlive=true would respawn it in a tight loop. -->
+    <key>KeepAlive</key>
+    <false/>
+    <!-- Background: this is App-Nap-friendly housekeeping. A sample deferred by
+         a few minutes under load is harmless; the floors have margin for it. -->
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>StandardOutPath</key>
+    <string>/Users/YOUR_USERNAME/Library/Logs/pogo/pogo-reclaim.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/YOUR_USERNAME/Library/Logs/pogo/pogo-reclaim.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- Must resolve `go` (Homebrew) as well as `pogo`/`mg` (~/go/bin):
+             without `go` the script cannot locate the cache and reports
+             UNKNOWN; without `pogo` it cannot check for an in-flight merge and
+             says so; without `mg` a cannot-help verdict reaches nobody. -->
+        <key>PATH</key>
+        <string>/Users/YOUR_USERNAME/go/bin:/Users/YOUR_USERNAME/.pogo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>/Users/YOUR_USERNAME</string>
+        <key>POGO_HOME</key>
+        <string>/Users/YOUR_USERNAME/.pogo</string>
+    </dict>
+</dict>
+</plist>
