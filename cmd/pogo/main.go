@@ -3928,6 +3928,11 @@ branches; work items and mail live in mg/macguffin (the task-store CLI).`,
 	// question of every open item on a clock, and reports the merged-but-open row
 	// the guard cannot see at all.
 	rootCmd.AddCommand(newCheckStrandedCmd(&jsonOutput))
+	// investigations (mg-22c7): search docs/investigations/ by file CONTENTS.
+	// Not a check-* detector — it answers a question a person or agent asks,
+	// and it is the only pogo subcommand that records its own invocation,
+	// because whether anyone asks is the measurement it exists to take.
+	rootCmd.AddCommand(newInvestigationsCmd(&jsonOutput))
 	rootCmd.AddCommand(newHostCmd(&jsonOutput))
 	cmdServer.AddCommand(cmdServerStart)
 	cmdServer.AddCommand(cmdServerStop)

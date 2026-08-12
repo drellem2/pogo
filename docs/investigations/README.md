@@ -5,6 +5,20 @@ what was found at a specific date for a specific work item; they are records, no
 living documentation. Newer code may have moved on — the report's date and work
 item are the anchor.
 
+**Search the files, not this table:**
+
+```bash
+pogo investigations <terms>     # every report whose CONTENTS match; --files for paths only
+pogo investigations             # list all of them, straight off disk
+```
+
+This index is maintained by hand and it lags. When that command was written it
+listed 36 of the 46 files in this directory, and the omissions skewed toward the
+**newest** reports — the ones most likely to bear on current work. So a question
+this table answers "no" to may still be answered by a file sitting next to it,
+and `pogo investigations` prints its own index-coverage figure on every run so
+that gap stays visible rather than being inherited as completeness (mg-22c7).
+
 | Doc | Covers | Outcome |
 |-----|--------|---------|
 | [ack-deficit-populations-2026-07-30.md](ack-deficit-populations-2026-07-30.md) | What actually produces a scheduler ack deficit. mg-ddf7 required the denominator fixed to count fires **delivered** not **due**, then the three candidate populations (batched / token-less / attention-gap sampling) re-measured, then a design — validated against **storm** data, not calm | **MEASURED, and it reorders the fix twice.** (a) is **already true**: `Tick` collapses missed periods into one fire, so 60 830 due periods produced 54 021 deliveries — landing "count deliveries" changes nothing, and the next editor will believe it fixed something. (b) The split over the token era (4 378 delivered, deficit 903) is **batched 815 / token-less 0 / boundary 88, exhaustive, zero unattributed** — architect's token-less population is **refuted as a live mechanism**: all 15 741 of them predate mg-a754, the last one *ten minutes* before the first token-carrying fire. Populations 1 and 3 turn out to be one quantity: `completed/delivered == 1/mean_attention_gap − outstanding/delivered` **to zero residual across all 114 schedules**, so the ratio *is* the agent's turn length in cadence periods and there is **no residual term for diligence to live in**. 2fcc's correction confirmed (r = **−0.818** vs attention gap, +0.242 vs traffic) and the paraphrase it corrected refuted; the **mayor**, busiest agent, holds the two worst rows *and* is permanently `skipped_no_peers` because it is alone on its cadence. **Storm validation inverts the metric**: in calm pm-pogo sits 50 points below a 100% peer median and the detector correctly fires; in storm the crew compresses to an 11-point band and `pa` — which acked **every** token it was handed, 9 fires into one turn — is indistinguishable from it at 83%/83%. The innocent 0–12% polecats are silenced only by `MinFires`, and `c76a` (67%, below floor) escaped a false positive solely on `ScaleBand`. **The implied repair is REJECTED as circular**: excluding batched fires leaves `completed/(completed+outstanding)`, a function of the ack count alone — it lifts pm-pogo 50%→97% and pins the signal HEALTHY, swapping this bug for mg-7254's. Threshold-raising rejected for the same reason. **Designed, deliberately not landed** (own ticket, own storm budget): judge the ack **interval in time**, which is what un-pins the signal. Shipped: the instrument (`pogo check-acks --populations`), both rejected alternatives recorded *in ackwatch's own notes*, and `ack_watch_clear` — because the storm night's correct silence was recorded nowhere, and the log held **zero** `ack_watch_*` events of any kind (mg-ddf7) |
