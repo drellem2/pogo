@@ -2816,13 +2816,18 @@ func TestReviewTemplateProtocol(t *testing.T) {
 // `pogo schedule`, mirroring the polecat mail-check pattern. See work item
 // mg-8e32.
 //
-// The minutes are `3`, not `0`: the mail-check is `*/10`, so a sweep on a
+// The minutes are `3`, not `0`: against a `*/10` mail-check a sweep on a
 // multiple of 10 collides with it in one wake cycle twice a day on every
 // install, and the sweep is the half that cannot absorb the suppressed fire
-// (mg-956b). The rationale assertion below is deliberate — the number is
-// cheap to "tidy" back, and the sentence explaining it is what stops that.
+// (mg-956b). The mail-check is offset off the round minutes as well
+// (mg-e137), which is what makes the property hold for daily schedules nobody
+// has added yet rather than only for the two this template ships. Both are
+// asserted here because both are cheap to "tidy" back, and the sentences
+// explaining them are what stops that.
 // TestPromptSchedulesDoNotCollide in internal/scheduler enforces the general
-// rule for every prompt.
+// rule for every prompt;
+// TestPMMailCheckCannotCollideWithARoundHourDaily enforces the class-level one
+// for the mail-check.
 func TestPMTemplateIncludesSweepCronEntries(t *testing.T) {
 	data, err := defaultPrompts.ReadFile("prompts/pm/pm-template.md")
 	if err != nil {
@@ -2843,6 +2848,19 @@ func TestPMTemplateIncludesSweepCronEntries(t *testing.T) {
 	}
 	if !strings.Contains(s, "a schedule that must not be dropped should not share a minute with one that can be") {
 		t.Error("pm-template.md: expected the sentence explaining why the sweep minute is not zero — without it the offset reads as arbitrary and gets rounded back (mg-956b)")
+	}
+	// The mail-check is offset too (mg-e137). Moving the sweeps closed the two
+	// collisions the template ships; moving the mail-check off the round
+	// minutes is what stops the next daily job anyone adds at a round hour from
+	// re-creating the defect.
+	if !strings.Contains(s, `"2,12,22,32,42,52 * * * *"`) {
+		t.Error("pm-template.md: expected the mail-check cron `2,12,22,32,42,52 * * * *` — on `*/10` any daily schedule at a round hour collides with it (mg-e137)")
+	}
+	if strings.Contains(s, `--cron "*/10 * * * *"`) {
+		t.Error("pm-template.md: the mail-check is registered on `*/10` again — that re-opens every round hour to a collision (mg-e137)")
+	}
+	if !strings.Contains(s, "Keep both offsets.") {
+		t.Error("pm-template.md: expected the note that BOTH offsets are load-bearing — moving either back reinstates a collision, the sweeps for PMs still on `*/10` and the mail-check for daily jobs added later (mg-e137)")
 	}
 	// Each cron's prompt body must be `sweep` so the PM recognizes the trigger.
 	if !strings.Contains(s, "`sweep`") {
