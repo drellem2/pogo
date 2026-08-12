@@ -1192,6 +1192,21 @@ mdgit -C "$MD_TMP/wt-review" reset -q --hard refs/remotes/origin/wt-pushed
     && pass "gh#134 fixture: the reviewer really is sitting at the builder's pushed head — the commits it holds exist under SOMEBODY's origin ref" \
     || fail "gh#134 fixture: wt-review's HEAD is not origin/wt-pushed — the reset did not happen and the case below is 'genuinely unpushed', the opposite case"
 
+# (h) refs/remotes/origin/HEAD, WHICH THIS FIXTURE OTHERWISE LACKS. A real clone
+#     of a non-empty repository carries it; this one was cloned from a bare repo
+#     that was still EMPTY, so git had no default branch to record and never
+#     wrote the symref. That absence is why gh#134's `grep -v` exclusion was
+#     invisible to the suite — deleting it left the run at 250/0, not because the
+#     exclusion is inert but because nothing here had the ref to exclude
+#     (measured in review of PR 140 round 1, whose advisory reached the right
+#     conclusion from the wrong reason). Setting it makes the fixture MORE like a
+#     real clone, and it is what test (2b)'s exclusion is finally asserted
+#     against, in the no-integration-ref block below.
+mdgit -C "$MD_TMP/repo" remote set-head origin main
+mdgit -C "$MD_TMP/wt-fresh" rev-parse --verify --quiet refs/remotes/origin/HEAD >/dev/null 2>&1 \
+    && pass "gh#134 fixture: refs/remotes/origin/HEAD now resolves, so the exclusion below has something to exclude" \
+    || fail "gh#134 fixture: refs/remotes/origin/HEAD still does not resolve — the origin/HEAD assertions below are vacuous and would pass with the filter deleted"
+
 md() { durability_of "$1"; }
 mdw() { durability_of "$1" | cut -d' ' -f1; }
 
@@ -1260,14 +1275,33 @@ printf '%s' "$(md "$MD_TMP/wt-review")" | grep -q 'origin/wt-pushed' \
 # The five `durable`s above must be durable for DIFFERENT reasons. Identical
 # detail would mean branches of durability_of are dead and the assertions are
 # agreeing by accident — the same check mg-853a's suite made for its two clears.
-# THIS IS ALSO THE GUARD ON WHERE gh#134's TEST (2b) SITS, and that is measured,
-# not asserted on principle: seated ABOVE (1) and (2) it answers for wt-merged
-# (origin/wt-merged holds HEAD) and for wt-fresh (origin/main does), and three
-# of these five lines collapse into one wording. The count below is what fails.
-MD_DETAILS="$(printf '%s\n%s\n%s\n%s\n%s\n' "$(md "$MD_TMP/wt-pushed")" "$(md "$MD_TMP/wt-merged")" "$(md "$MD_TMP/wt-fresh")" "$(md "$MD_TMP/wt-rebased")" "$(md "$MD_TMP/wt-review")" | sort -u | wc -l | tr -d ' ')"
+#
+# COMPARED AS SHAPES, NOT AS LINES, AND THAT IS WHAT MAKES THIS ABLE TO FAIL AT
+# ALL. Every verdict interpolates the branch name and the worktree path, so two
+# lines produced by the SAME branch of durability_of are still textually distinct
+# — and `sort -u` over them is invariant under precisely the collapse this
+# assertion exists to detect. The un-elided version of this check PASSED under
+# the early-seat mutation while being cited, in this file and in the shipping
+# script, as the thing that caught it (found in review of gh#134, PR 140 round 1;
+# the triage packet's measurement had been taken against a candidate wording that
+# did not interpolate the branch). Eliding $MD_TMP and the wt-* names first
+# compares WHICH BRANCH ANSWERED rather than what it said about a given fixture.
+#
+# FILTERED TO `^durable` FOR THE SAME REASON THE NAME SAYS `durable`: without it
+# the count is satisfied by a case that is not durable at all — under the
+# fix-removed mutation wt-review's line is the `unpushed` one, still distinct,
+# still counted — so the assertion would have claimed more than it checked.
+#
+# THIS IS THE GUARD ON WHERE gh#134's TEST (2b) SITS, now measured rather than
+# asserted on principle: seated ABOVE (1) and (2) it answers for wt-pushed,
+# wt-merged, wt-fresh AND wt-review, whose four lines share one shape, and the
+# count below drops to 2. Re-measured after this change; see the mutation note in
+# the commit message.
+md_shape() { md "$1" | sed -e "s#$MD_TMP#<T>#g" -e 's#wt-[a-z]*#<B>#g'; }
+MD_DETAILS="$(printf '%s\n%s\n%s\n%s\n%s\n' "$(md_shape "$MD_TMP/wt-pushed")" "$(md_shape "$MD_TMP/wt-merged")" "$(md_shape "$MD_TMP/wt-fresh")" "$(md_shape "$MD_TMP/wt-rebased")" "$(md_shape "$MD_TMP/wt-review")" | grep '^durable' | sort -u | wc -l | tr -d ' ')"
 [ "$MD_DETAILS" = "5" ] \
     && pass "mg-3a96/gh#134: the five durable paths are five distinct measurements, not one fallback wearing five hats" \
-    || fail "mg-3a96/gh#134: only $MD_DETAILS distinct durable lines across five cases — at least one path is dead (or gh#134's containment test is seated too early and is preempting the specific ones) and its assertion proves nothing"
+    || fail "mg-3a96/gh#134: only $MD_DETAILS distinct durable SHAPES across five cases — a path is dead, or a case is not durable at all, or gh#134's containment test is seated too early and is preempting the specific ones"
 
 # --- the unknowns: a question we failed to ask is not an answer of 'durable' ---
 [ "$(mdw "")" = "unknown" ] \
@@ -1320,6 +1354,23 @@ mdgit -C "$MD_TMP/wt-local" checkout -q wt-local
     [ "$(durability_of "$MD_TMP/wt-review" | cut -d' ' -f1)" = "durable" ] \
         && pass "gh#134: the reviewer is durable even when NO integration ref resolves — the reported repo's base was origin/develop, and 'unknown' holds the drain just as 'unpushed' does" \
         || fail "gh#134: with no integration ref the reviewer read as '$(durability_of "$MD_TMP/wt-review")' — the containment test is seated below (3) and does not answer on the deployment that reported the bug"
+
+    # THE origin/HEAD EXCLUSION, EXERCISED — and this block is the ONLY place it
+    # can be. With an integration ref resolving, a fresh worktree is answered by
+    # test (2) and never reaches (2b) at all; only here does (2b) get to name a
+    # holder for it, and refs/remotes/origin/HEAD sorts before
+    # refs/remotes/origin/main, so without the filter it is the ref that gets
+    # named. THE VERDICT WORD IS `durable` EITHER WAY — asserted immediately
+    # below — so this is naming quality, not correctness: the cost of dropping
+    # the filter is a deploy log that credits the default-branch symref, which
+    # says nothing about who pushed. Asserted so the filter cannot be deleted as
+    # dead code (PR 140 round 1 advisory).
+    [ "$(durability_of "$MD_TMP/wt-fresh" | cut -d' ' -f1)" = "durable" ] \
+        && pass "gh#134: with no integration ref a fresh worktree is still durable — the exclusion below changes the NAME, never the verdict" \
+        || fail "gh#134: a fresh worktree read as '$(durability_of "$MD_TMP/wt-fresh")' with no integration ref — either the containment test (2b) is not answering at all, or the origin/HEAD exclusion changed a verdict, which it must never do"
+    { ! durability_of "$MD_TMP/wt-fresh" | grep -q 'origin/HEAD'; } \
+        && pass "gh#134: the holder named is a real branch ref, not the origin/HEAD symref ($(durability_of "$MD_TMP/wt-fresh"))" \
+        || fail "gh#134: the verdict credits origin/HEAD ($(durability_of "$MD_TMP/wt-fresh")) — the default-branch symref says nothing about who pushed, and the run log would name it instead of the branch that holds the work"
 )
 
 # --- polecat_objects: the unreachable tail must not leak into the predicate ---
