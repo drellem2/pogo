@@ -901,6 +901,15 @@ If a ticket for the ref already exists, the mail is new issue activity:
    ```
 
    **The block must LEAD the body — no lead-in line above it.** A carrier block with even one line of prose above it is out of the parser's reach, and this ticket then reads as `CarrierUnreadable`: pogod refuses to dispatch it and the stall watch stops offering it (mg-27d4). That refusal is deliberate and it is the reason `reviews:` is safe to put here — an unreadable declaration gates the ticket instead of dispatching a review whose exemption silently does not exist. If a spawn is refused naming an unreadable carrier, move the block back to the top of the body rather than working around it.
+
+   **Write the bare id and nothing else — `reviews: mg-1c60`, never `reviews: mg-1c60 (the build ticket)`.** Every carrier value is a single whitespace-free token, so a value with a space in it is not a carrier line at all: it ENDS the block where it sits. Last in the block that is merely useless — the declaration is silently dropped and the exemption never fires. **Above `stage:` it is worse than useless**: the stage line falls below the end of the block, which is the `CarrierUnreadable` shape, and the ticket you just filed refuses to dispatch. Measured against the shipped parser, all four placements:
+
+   ```
+   reviews: mg-1c60                        last in block  -> stage read, dispatches
+   reviews: mg-1c60                        first in block -> stage read, dispatches
+   reviews: mg-1c60 (the build ticket)     last in block  -> stage read, declaration SILENTLY DROPPED
+   reviews: mg-1c60 (the build ticket)     above stage:   -> stage LOST, ticket GATED
+   ```
 3. **Retire the triage ticket, then dispatch the build {{.Worker}}** — in that order, because the second does not work until the first has run. Lift the {{.Worker}}'s packet out of the triage ticket body and hand it straight to `--result`, so the sidecar records the JSON the {{.Worker}} actually wrote rather than a summary you re-typed:
    ````bash
    PACKET=$(mg show <triage ticket id> --json | jq -r .body |

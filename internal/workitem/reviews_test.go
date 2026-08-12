@@ -181,3 +181,68 @@ func TestParseCarrierOnAnMgShowBody(t *testing.T) {
 		t.Error("a leading blank line before the heading is not an unreadable carrier")
 	}
 }
+
+// TestCarrierBlockReviewsValueMustBeBare pins the trap a coordinator is most
+// likely to walk into when writing this line by hand, because it is the one that
+// does NOT look like a mistake: `reviews: mg-aaf6 (the build ticket)`.
+//
+// Every carrier value is a single whitespace-free token, so a value with a space
+// is not a carrier line at all — it ENDS the block where it sits. The two
+// placements then fail in opposite directions, and the second is the dangerous
+// one: above `stage:` the stage line falls below the end of the block, which is
+// exactly the `CarrierUnreadable` shape, and the freshly-filed review ticket
+// refuses to dispatch.
+//
+// This was measured against the shipped parser while answering whether the line
+// was safe to add to a live ticket. The answer was yes for the bare form and no
+// for this one, so both are pinned rather than remembered.
+func TestCarrierBlockReviewsValueMustBeBare(t *testing.T) {
+	t.Run("spaced value LAST in the block: declaration dropped, item still dispatches", func(t *testing.T) {
+		item := parseBody(t, `# review: x
+workflow: gh-issue
+stage: review
+gh: drellem2/pogo#131
+reviews: mg-aaf6 (the build ticket)
+
+Review the PR.
+`)
+		if item.Reviews != "" {
+			t.Errorf("Reviews = %q — a spaced value is not a carrier line, so it declares nothing", item.Reviews)
+		}
+		if item.Stage != "review" || item.CarrierUnreadable {
+			t.Errorf("the gate must survive a malformed trailing line: stage=%q unreadable=%v",
+				item.Stage, item.CarrierUnreadable)
+		}
+	})
+
+	t.Run("spaced value ABOVE stage: takes the gate down with it", func(t *testing.T) {
+		item := parseBody(t, `# review: x
+workflow: gh-issue
+reviews: mg-aaf6 (the build ticket)
+stage: review
+gh: drellem2/pogo#131
+
+Review the PR.
+`)
+		if item.Stage != "" {
+			t.Errorf("stage = %q — the spaced line ends the block, so everything below it is out of reach", item.Stage)
+		}
+		if !item.CarrierUnreadable {
+			t.Fatal("a `stage:` line pushed below the end of the block MUST read as CarrierUnreadable — " +
+				"otherwise a review ticket with a hand-typed parenthetical dispatches with no gate read at all (mg-27d4)")
+		}
+	})
+
+	t.Run("the bare form is unaffected by its position", func(t *testing.T) {
+		for _, body := range []string{
+			"# review: x\nworkflow: gh-issue\nstage: review\nreviews: mg-aaf6\n",
+			"# review: x\nreviews: mg-aaf6\nworkflow: gh-issue\nstage: review\n",
+		} {
+			item := parseBody(t, body)
+			if item.Reviews != "mg-aaf6" || item.Stage != "review" || item.CarrierUnreadable {
+				t.Errorf("bare form should parse anywhere in the block: reviews=%q stage=%q unreadable=%v",
+					item.Reviews, item.Stage, item.CarrierUnreadable)
+			}
+		}
+	})
+}
