@@ -1446,6 +1446,42 @@ absence of a transition, which is the inference this pair exists to retire.
 {"schema_version":1,"timestamp":"2026-08-07T18:37:28.000000000Z","event_type":"server_mode_boot","agent":"pogod","details":{"mode":"full","trigger":"startup","detail":"process start","actor_pid":"32415"}}
 ```
 
+### Command line
+
+Every other event type in this catalog is written by a daemon. This section holds the one exception, and it is deliberately one exception rather than a category.
+
+#### `investigation_search`
+
+Somebody ran `pogo investigations` — the search over `docs/investigations/` file contents (mg-22c7). Emitted **once per invocation, on every path out of the command**, including searches that matched nothing and invocations that failed before searching.
+
+That completeness is the reason the event exists. The command is phase 1 of a gated decision: phase 2 (suggesting matching investigations at `mg new`, or carrying the search in the polecat dispatch template) is justified only by phase 1 being built and going **unused**, since that is what would distinguish a recall problem from a friction problem. Nothing else on this box records a CLI invocation, so without this line the branch that justifies phase 2 would produce no artifact at all, and "nobody ran it" would be indistinguishable from "nobody needed it". A `no_match` is the most informative record the command can leave — someone had a question and the corpus did not answer it — so it is emitted with the same weight as a hit.
+
+**This is not a general `cli_invoked`.** One event, one subcommand. A general CLI-invocation event is a separate decision with its own volume and privacy questions, and nobody has made it.
+
+**Reading it at the gate:** the count alone cannot settle the question, because a zero could mean nobody remembered (recall failure → build phase 2) or that no question arose the corpus could answer (no problem → do nothing). The deciding measurement is how many incidents and investigations in the window had an answer in the corpus that went unfound; this count is the cheap half. `agent` and `corpus_dir` are there so build-time invocations from the polecat worktree that produced the command can be excluded from the count.
+
+- **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent`, `details`
+- **`details` fields:**
+  - `query` (string, required): the search terms as given, space-joined. Empty for the listing mode (`pogo investigations` with no terms), which is still an invocation
+  - `terms` (int, required): number of terms
+  - `outcome` (string, required): `"matched"`, `"no_match"`, or `"error"`
+  - `corpus_dir` (string, required): the directory searched; empty only when the corpus could not be located
+  - `files_searched` (int, optional): the denominator — absent only on the `error` outcome, where no search ran
+  - `matches` (int, optional): documents matched
+  - `unindexed` (int, optional): how many of `files_searched` are absent from that directory's `README.md`. A diagnostic on the index's staleness, never a filter on the search
+  - `skipped` (int, optional): entries in the directory that were **not** searched (binary, hidden, unreadable)
+  - `error` (string, optional): present only on the `error` outcome
+
+```json
+{"schema_version":1,"timestamp":"2026-08-12T07:04:01.909657000Z","event_type":"investigation_search","agent":"cat-p22c7","details":{"query":"drain stall","terms":2,"outcome":"no_match","corpus_dir":"/Users/daniel/dev/pogo/docs/investigations","files_searched":46,"matches":0,"unindexed":10,"skipped":0}}
+```
+
+Read them back with:
+
+```bash
+pogo events list --since=720h --type=investigation_search
+```
+
 ## Worked example: a polecat merge cycle
 
 The lines below show the canonical event sequence for a successful polecat run. Times are illustrative.
