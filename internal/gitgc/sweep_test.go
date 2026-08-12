@@ -1,9 +1,11 @@
 package gitgc
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -527,4 +529,180 @@ func keys(m map[string]bool) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+// TestSweepKeepsArchivedBranchHoldingUnpushedCommits is mg-0a43's scenario, end
+// to end and in order: a polecat stops holding committed-but-unpushed work, the
+// drain reports DEPARTED UNSATISFIED and proceeds (correctly — waiting protects
+// nothing once the holder is dead), someone archives the item as a routine
+// tidy-up, and the sweep runs. Before the fix the branch was deleted with no
+// check of any kind and the commits were gone. It must now be kept, named, and
+// still resolve afterwards.
+func TestSweepKeepsArchivedBranchHoldingUnpushedCommits(t *testing.T) {
+	r := newTestRepo(t)
+	r.commitOn("polecat-stopped", "irreplaceable.go", "the only copy anywhere")
+	r.originRef("main", "main")
+	head := r.rev("polecat-stopped")
+
+	var logged []string
+	res, err := Sweep(Options{
+		Repo: r.dir, TargetBranch: "main",
+		Tickets: TicketIndex{"mg-stopped": TicketArchived},
+		Logf:    func(f string, a ...any) { logged = append(logged, fmt.Sprintf(f, a...)) },
+	})
+	if err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if deleted := branchSet(res.BranchesDeleted); deleted["polecat-stopped"] {
+		t.Fatal("an archived ticket's branch holding the only copy of its commits must NOT be deleted")
+	}
+	// The ref still resolves and still holds the same commit — the assertion
+	// that the work survived, rather than that a report said it would.
+	if got := r.rev("polecat-stopped"); got != head {
+		t.Fatalf("branch head moved: %s != %s", got, head)
+	}
+
+	var kept *BranchAction
+	for i, br := range res.BranchesKept {
+		if br.Branch == "polecat-stopped" {
+			kept = &res.BranchesKept[i]
+		}
+	}
+	if kept == nil {
+		t.Fatal("the kept branch must appear in the report")
+	}
+	if kept.Durability != DurabilityLocalOnly || !kept.AtRisk() {
+		t.Errorf("durability = %s, want local-only and at-risk", kept.Durability)
+	}
+	// A keep nobody can see pins a branch that nothing will ever self-clear, so
+	// it has to name itself in pogod's log and in the CLI summary both.
+	if !containsSubstr(logged, "kept branch polecat-stopped") {
+		t.Errorf("the sweep must log the keep, logged=%v", logged)
+	}
+	summary := res.Summary()
+	if !strings.Contains(summary, "branches kept holding commits that may exist nowhere else") ||
+		!strings.Contains(summary, "polecat-stopped") {
+		t.Errorf("summary must itemise the at-risk keep, got:\n%s", summary)
+	}
+}
+
+// TestSweepDeletesArchivedBranchDurableElsewhere is the other half, and the one
+// that keeps the fix from being "keep everything": an archived branch whose
+// commits are published under ANOTHER origin ref, and one whose patches landed
+// via the refinery's rebase, are both collected — neither is an ancestor of
+// main, so a repair built on BranchMerged would strand both forever.
+func TestSweepDeletesArchivedBranchDurableElsewhere(t *testing.T) {
+	r := newTestRepo(t)
+
+	// (a) held by a foreign origin ref (the gh#134 shape).
+	r.commitOn("polecat-builder", "feat.txt", "feat")
+	r.git("branch", "polecat-reviewer", "polecat-builder")
+	r.originRef("polecat-builder", "polecat-builder")
+
+	// (b) rebase-landed: main advanced, the patch is on main under a new SHA,
+	// and the refinery reaped origin/polecat-rebased after merging.
+	r.commitOn("polecat-rebased", "landed.txt", "landed")
+	r.commit("other.txt", "other")
+	r.git("cherry-pick", r.rev("polecat-rebased"))
+	r.originRef("main", "main")
+
+	for _, br := range []string{"polecat-reviewer", "polecat-rebased"} {
+		if merged, err := BranchMerged(r.dir, br, "main"); err != nil || merged {
+			t.Fatalf("fixture precondition: %s must read as NOT merged (merged=%v err=%v)", br, merged, err)
+		}
+	}
+
+	res, err := Sweep(Options{
+		Repo: r.dir, TargetBranch: "main",
+		Tickets: TicketIndex{
+			"mg-reviewer": TicketArchived,
+			"mg-rebased":  TicketArchived,
+			"mg-builder":  TicketInFlight, // its own branch is not the subject here
+		},
+	})
+	if err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	deleted := branchSet(res.BranchesDeleted)
+	for _, br := range []string{"polecat-reviewer", "polecat-rebased"} {
+		if !deleted[br] {
+			t.Errorf("durable archived branch %s should still be collected; deleted=%v", br, keys(deleted))
+		}
+	}
+	// The deletion reason names WHERE the commits are, so it can be audited
+	// after the fact rather than trusted.
+	for _, a := range res.BranchesDeleted {
+		if a.Branch == "polecat-reviewer" && !strings.Contains(a.Reason, "origin/polecat-builder") {
+			t.Errorf("deletion reason must name the carrying ref, got %q", a.Reason)
+		}
+	}
+}
+
+// TestSweepKeepsArchivedBranchWhenDurabilityCannotBeDetermined pins the third
+// verdict. A question git could not answer is not an answer of "durable", and
+// this is the only step in the chain that destroys commits.
+func TestSweepKeepsArchivedBranchWhenDurabilityCannotBeDetermined(t *testing.T) {
+	r := newTestRepo(t)
+	r.commitOn("polecat-unknowable", "x.txt", "x")
+
+	// No origin refs at all and an integration branch that does not resolve:
+	// nothing left to compare against.
+	res, err := Sweep(Options{
+		Repo: r.dir, TargetBranch: "no-such-integration-branch",
+		Tickets: TicketIndex{"mg-unknowable": TicketArchived},
+	})
+	if err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if branchSet(res.BranchesDeleted)["polecat-unknowable"] {
+		t.Fatal("a branch git could not answer for must not be deleted")
+	}
+	for _, br := range res.BranchesKept {
+		if br.Branch == "polecat-unknowable" {
+			if br.Durability != DurabilityUnknown {
+				t.Errorf("durability = %s, want unknown", br.Durability)
+			}
+			return
+		}
+	}
+	t.Error("polecat-unknowable missing from the kept report")
+}
+
+// TestSweepDoesNotMarkUnaskedKeepsAtRisk guards the zero value. A branch kept
+// because its polecat is live, its ticket is in flight, or its tree still has
+// it checked out was never ASKED about durability, and reporting those as
+// failed measurements would bury the branches that genuinely need rescuing.
+func TestSweepDoesNotMarkUnaskedKeepsAtRisk(t *testing.T) {
+	r := newTestRepo(t)
+	r.commitOn("polecat-live", "a.txt", "a")
+	r.commitOn("polecat-flight", "b.txt", "b")
+	r.commitOn("polecat-nostate", "c.txt", "c")
+
+	res, err := Sweep(Options{
+		Repo: r.dir, TargetBranch: "main",
+		LivePolecats: map[string]bool{"live": true},
+		Tickets:      TicketIndex{"mg-live": TicketArchived, "mg-flight": TicketInFlight},
+	})
+	if err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	for _, br := range res.BranchesKept {
+		if br.AtRisk() {
+			t.Errorf("%s kept for %q must not be reported at-risk (durability=%s)",
+				br.Branch, br.Reason, br.Durability)
+		}
+	}
+	if strings.Contains(res.Summary(), "may exist nowhere else") {
+		t.Errorf("no at-risk section should appear, got:\n%s", res.Summary())
+	}
+}
+
+// containsSubstr reports whether any line contains want.
+func containsSubstr(lines []string, want string) bool {
+	for _, l := range lines {
+		if strings.Contains(l, want) {
+			return true
+		}
+	}
+	return false
 }

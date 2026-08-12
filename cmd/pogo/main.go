@@ -3907,6 +3907,17 @@ merely un-checked-out, not deleted. When a directory name resolves to no work
 item at all (a legacy or hand-made worktree), the checked-out branch decides
 instead and the report says so.
 
+Branch deletion is the only step in the polecat lifecycle that destroys
+commits, so a concluded work item is never the whole reason for one. A done
+item's branch must be merged into the target branch. An ARCHIVED item's branch
+must be durable: some ref under refs/remotes/origin/ holds its head, or every
+commit on it has a patch-equivalent already on the integration branch (which is
+how a rebase-merged branch reads — the refinery rebases before merging, so a
+branch whose work landed perfectly is not an ancestor of main afterwards). A
+branch that passes neither, or that git could not answer for, is KEPT and named
+in the report under "branches kept holding commits that may exist nowhere else"
+— archiving an item concludes the work, it does not publish the commits.
+
 "Currently-running" is read from pogod's registry unioned with the persisted
 polecat witness, so a polecat that outlived the pogod that spawned it is still
 protected — pogod's registry forgets those on restart, and the witness is what
