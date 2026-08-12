@@ -806,6 +806,13 @@ func startEventsTracker(path string) *eventsActivityTracker {
 //     (5m), which is what that constant is for; a re-fire still additionally
 //     requires the marker to have been seen within markerRecency (60s), so it
 //     only happens while the modal is demonstrably still on screen.
+//
+// That last one has a consequence worth stating rather than leaving to be
+// discovered: a re-fire also calls deps.NotifyPM, so a genuinely wedged agent
+// now notifies its PM up to every 5m rather than every 20m. That is louder by
+// design — the agent is, by construction, one the dismissal has already failed
+// to rescue at least once — but it is a rate a reader of the PM's inbox should
+// be able to find explained somewhere, and this is that place.
 func (t *eventsActivityTracker) ingest(line []byte) {
 	ev, err := events.ParseLine(line)
 	if err != nil || ev.Agent == "" || ev.Timestamp == "" {
