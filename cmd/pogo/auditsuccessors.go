@@ -31,6 +31,29 @@ import (
 // auditSuccessorCheckName is the doctor checklist row this renders on.
 const auditSuccessorCheckName = "audit successors"
 
+// auditSuccessorLimits is the two limits this check states about itself, in one
+// string so that EVERY branch which renders a verdict renders the same two.
+//
+// It is a constant rather than two literals because of how the omission was
+// found (mg-7ff8). Both limits were written into the WARN branch and into the
+// package docs, and a reader of the warn branch does see them. But the first
+// deployment to arm this config was clean on its first run, and the clean branch
+// carried neither — so the line an operator actually reads, on almost every day
+// this check runs, said "no merged audit has gone unanswered" and stopped.
+//
+// That is the worse direction for these particular limits to be missing in. A
+// warn is read by someone who has a finding in front of them and is about to
+// act; a pass is read by someone deciding whether to keep reading. "Nothing was
+// left visibly unanswered" and "every audit was acted on" are different claims,
+// and only the first one is measured — the check cannot see an audit answered by
+// a ticket that references the AUDITED item instead of the audit, and it counts
+// a clean verdict nobody verified as an answer.
+//
+// Do not inline this into one branch. TestAuditSuccessorLine_LimitsReachEveryVerdict
+// asserts every verdict-rendering branch carries it, and that test is the only
+// thing standing between this and drifting back apart.
+const auditSuccessorLimits = "This is a DETECTOR, not a gate: it blocks nothing, and it reports after the fact rather than preventing. A recorded clean verdict is an artifact anyone can produce without reading the audit."
+
 // auditSuccessorLine renders one doctor check row from a scan.
 //
 // It returns the status ("pass" or "warn") and the detail. Four states, and the
@@ -60,7 +83,8 @@ func auditSuccessorLine(rep auditwatch.Report, scanErr error, cfg config.AuditSu
 		rep.Merged, rep.Answered, rep.CleanVerdict, rep.Waiting, window, rep.Undated)
 
 	if len(rep.Silent) == 0 {
-		return "pass", "no merged audit has gone unanswered past " + window + " — " + population
+		return "pass", "no merged audit has gone unanswered past " + window + " — " + population +
+			". " + auditSuccessorLimits
 	}
 
 	names := make([]string, 0, len(rep.Silent))
@@ -74,8 +98,8 @@ func auditSuccessorLine(rep auditwatch.Report, scanErr error, cfg config.AuditSu
 			s.ID, formatWindow(s.Silence.Truncate(time.Minute)), s.MergedAt.UTC().Format("2006-01-02 15:04Z")))
 	}
 	return "warn", fmt.Sprintf(
-		"%d merged audit(s) answered by NOTHING after %s: %s. Read each one and file a repair ticket referencing it (`mg new --depends=<audit-id> --tags=<audit-id>-followup ...`), or record a clean verdict by tagging the audit %s. This is a DETECTOR, not a gate: it blocks nothing, and a clean verdict is an artifact you can produce without reading the audit — it silences this line either way. %s",
-		len(rep.Silent), window, strings.Join(names, ", "), cleanVerdictAdvice(cfg), population)
+		"%d merged audit(s) answered by NOTHING after %s: %s. Read each one and file a repair ticket referencing it (`mg new --depends=<audit-id> --tags=<audit-id>-followup ...`), or record a clean verdict by tagging the audit %s. %s It silences this line either way. %s",
+		len(rep.Silent), window, strings.Join(names, ", "), cleanVerdictAdvice(cfg), auditSuccessorLimits, population)
 }
 
 // missingConfigPart names which half of the configuration is absent, because

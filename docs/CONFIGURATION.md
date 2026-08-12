@@ -1059,7 +1059,83 @@ A checklist someone reads on purpose, rather than a maildir already carrying
 hundreds of unread notices. The line renders on **every** run, including when the
 detector is unconfigured or could not read the store — in both cases it says so
 outright, because a detector whose subject is silence must never report its own
-silence as a clean result.
+silence as a clean result. **Both limits above render on the clean line as well
+as the warn line** (`auditSuccessorLimits`, pinned by
+`TestAuditSuccessorLine_LimitsReachEveryVerdict`): the clean line is the one
+nearly every run produces, and it is read by someone deciding whether to keep
+reading.
+
+**`pogo doctor --check` has no scheduled runner.** It is typed by a human or by
+the `doctor` crew agent — which has `auto_start=false` by design. Nothing on this
+host runs it unattended: not launchd, not `pogo schedule`, not the architect's
+`deploy-verify` procedure. Arming this section makes the detector *work*; it does
+not give it a *reader*. Verify who runs the checklist on your deployment before
+counting this as instrumentation.
+
+### Arming it: measure which tag your store actually uses
+
+The same rule `[dispatch_pairing]` states above — measure before arming — with a
+different failure to look for. There the question was whether the marker is
+applied; here it is **whether a successor is recognisable**, which is a question
+about the reference channel and not about the marker at all.
+
+Dry-run the armed config against your own store before writing it, varying only
+this section. `MG_ROOT` selects the store, so a copy under a scratch path is a
+safe place to test a candidate:
+
+```bash
+MG_ROOT=/tmp/store-copy pogo doctor --check | grep 'audit successors'
+```
+
+Worked example, mg-7ff8 on this deployment, 2026-08-12:
+
+| `audit_tags` | examined | answered | reported | false reports |
+|---|---|---|---|---|
+| `["independent-audit"]` | 4 | 4 | 0 | — |
+| `["audit"]` | 9 | 6 | 3 | **2 of 3** |
+| both | 9 | 6 | 3 | **2 of 3** |
+
+`audit` is not a loose marker on this store — all nine `done` items carrying it
+are titled *INDEPENDENT AUDIT of …*. It reports falsely for a different reason:
+**in this program a repair ticket is tagged after the item that was AUDITED, not
+after the audit.** `mg-07fd`'s repairs are carried by `mg-2f44`, tagged
+`mg-3329-followup` — and `mg-3329` is what `mg-07fd` audited. `mg-5cba`'s are
+carried by `mg-8d63` and `mg-b417`, both `mg-789d-followup`. The successors exist
+and do the work; the detector cannot see them, because it looks for a reference
+to the audit. Only the third report (`mg-a0d6`) was real, and its own verdict is
+`pass` — an audit that upheld the landing, whose right answer is a clean-verdict
+tag rather than a successor ticket.
+
+So this deployment armed **narrow**, and the cost of that is recorded rather than
+left to be inferred from a green line: five of the nine merged audits in the
+store carry `audit` without `independent-audit` and **are not examined**. A
+detector whose failure mode is silence should not have an unstated blind spot.
+
+Widening is a convention question with two answers, and it is not settled by
+tuning this key: either audits start carrying the tight tag, or repair tickets
+start referencing the audit as well as the audited item.
+
+### Which config FILE to put it in
+
+Put `[audit_successor]` in the **XDG file** (`~/.config/pogo/config.toml`), not
+in `$POGO_HOME/config.toml`.
+
+`ConfigFilePaths` adds the `$POGO_HOME` layer **only when `POGO_HOME` is set in
+the process environment**. On a host that exports it from shell init, that layer
+is read from every login shell and is invisible to anything else — so a detector
+configured there is armed when you test it by hand and inert under launchd, cron,
+or any process that did not inherit a login environment. Measured on this host:
+
+```
+$ pogo doctor --check | grep 'audit successors'
+✓ audit successors  no merged audit has gone unanswered past 4h — 4 merged audit(s) examined …
+$ env -u POGO_HOME pogo doctor --check | grep 'audit successors'
+✓ audit successors  not configured — [audit_successor] names no repos and no audit_tags …
+```
+
+Both readings are `pass`, and only one of them means the check ran. Any policy
+whose whole value is *being on* belongs in the layer that is read
+unconditionally.
 
 Source of truth: `internal/config/auditsuccessor.go` (policy vocabulary,
 predicates and the calibrated window), `internal/auditwatch/` (the scan) and

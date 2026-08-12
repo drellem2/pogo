@@ -142,6 +142,57 @@ func TestAuditSuccessorLine_NoCleanVerdictTagsAdvisesOnlyWhatWorks(t *testing.T)
 	}
 }
 
+// TestAuditSuccessorLine_LimitsReachEveryVerdict pins the two stated limits to
+// EVERY branch that renders a verdict about the store — the clean one as well as
+// the warn one.
+//
+// It exists because the clean branch did not carry them (mg-7ff8, found by
+// arming the config on a deployment whose first real run was clean). Both limits
+// were in the package docs, in the config type's doc comment, in
+// docs/CONFIGURATION.md and in the warn line, and a reader who saw a green
+// checklist row still saw neither — which is the branch nearly every run takes,
+// and the branch read by someone deciding whether to keep reading at all.
+//
+// The two branches deliberately EXCLUDED are "not configured" and "NOT CHECKED".
+// Those render no verdict about the store; they say the check did not run, and
+// each already carries the disclaimer that matters for that case ("this is not a
+// report that every merged audit was answered"). Adding these limits there would
+// dilute a stronger statement with a weaker one.
+func TestAuditSuccessorLine_LimitsReachEveryVerdict(t *testing.T) {
+	base := auditwatch.Report{Enabled: true, Window: 4 * time.Hour, Merged: 27, Answered: 23, Waiting: 2, Undated: 2}
+	warned := base
+	warned.Silent = []auditwatch.SilentAudit{{ID: "mg-f1b2", MergedAt: time.Now().Add(-12 * time.Hour), Silence: 12 * time.Hour}}
+
+	// Stated as separate phrases rather than as the constant itself: asserting
+	// `strings.Contains(detail, auditSuccessorLimits)` would pass if someone
+	// emptied the constant, which is the one edit this test has to fail on.
+	wants := []string{
+		"DETECTOR, not a gate",                  // limit 2, first half: it refuses nothing
+		"after the fact rather than preventing", // limit 2, second half: and buys nothing at merge time
+		"without reading the audit",             // limit 1: a clean verdict is cheap to produce
+	}
+	for _, tc := range []struct {
+		name string
+		rep  auditwatch.Report
+		want string
+	}{
+		{"clean", base, "pass"},
+		{"warn", warned, "warn"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			status, detail := auditSuccessorLine(tc.rep, nil, lineCfg(), time.Now())
+			if status != tc.want {
+				t.Fatalf("status = %q, want %q", status, tc.want)
+			}
+			for _, want := range wants {
+				if !strings.Contains(detail, want) {
+					t.Errorf("the %s verdict does not state a limit a reader has to see.\ndetail = %q\nmissing = %q", tc.name, detail, want)
+				}
+			}
+		})
+	}
+}
+
 func TestFormatWindow(t *testing.T) {
 	cases := []struct {
 		in   time.Duration
