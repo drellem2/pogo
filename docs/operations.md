@@ -618,9 +618,17 @@ someone arms it — point the schedule at the script in a checkout, not at the
 installed binary:
 
 ```bash
-pogo schedule doctor --cron "0 8 * * *" --id staleness --replay once \
+pogo schedule doctor --cron "8 8 * * *" --id staleness --replay once \
     --message "Run '~/dev/pogo/scripts/check-staleness.sh'. If it exits non-zero, mail human with the output."
 ```
+
+The minute is `8`, not `0`, and that is not cosmetic: doctor's mail-check is
+`*/10`, so a daily check at `0 8` would share a wake cycle with it every
+morning, and pogod suppresses whichever fire arrives second
+(`wake_silence_once`). A mail-check absorbs that — the next one is ten minutes
+behind — and a once-a-day check cannot. **A schedule that must not be dropped
+should not share a minute with one that can be**; keep daily schedules off
+every multiple of 10 (mg-956b).
 
 The arming gap is tracked as a class on mg-75f9 ("nothing runs check-drift;
 mg-5701 shipped a detector you have to remember to ask"), alongside mg-7ff8,

@@ -2810,10 +2810,19 @@ func TestReviewTemplateProtocol(t *testing.T) {
 }
 
 // TestPMTemplateIncludesSweepCronEntries locks in the requirement that the
-// PM template instructs each PM to register two sweep crons (09:00 and 17:00
+// PM template instructs each PM to register two sweep crons (09:03 and 17:03
 // local) on startup. Without these, PMs have no twice-daily cadence — the
 // pogod-internal cron was removed (mg-ddc1), so each PM self-schedules via
-// CronCreate, mirroring the polecat mail-check pattern. See work item mg-8e32.
+// `pogo schedule`, mirroring the polecat mail-check pattern. See work item
+// mg-8e32.
+//
+// The minutes are `3`, not `0`: the mail-check is `*/10`, so a sweep on a
+// multiple of 10 collides with it in one wake cycle twice a day on every
+// install, and the sweep is the half that cannot absorb the suppressed fire
+// (mg-956b). The rationale assertion below is deliberate — the number is
+// cheap to "tidy" back, and the sentence explaining it is what stops that.
+// TestPromptSchedulesDoNotCollide in internal/scheduler enforces the general
+// rule for every prompt.
 func TestPMTemplateIncludesSweepCronEntries(t *testing.T) {
 	data, err := defaultPrompts.ReadFile("prompts/pm/pm-template.md")
 	if err != nil {
@@ -2823,11 +2832,17 @@ func TestPMTemplateIncludesSweepCronEntries(t *testing.T) {
 	if !strings.Contains(s, "CronCreate") {
 		t.Error("pm-template.md: expected CronCreate instruction for sweep crons")
 	}
-	if !strings.Contains(s, "0 9 * * *") {
-		t.Error("pm-template.md: expected morning sweep cron `0 9 * * *` (09:00 local)")
+	if !strings.Contains(s, "3 9 * * *") {
+		t.Error("pm-template.md: expected morning sweep cron `3 9 * * *` (09:03 local)")
 	}
-	if !strings.Contains(s, "0 17 * * *") {
-		t.Error("pm-template.md: expected evening sweep cron `0 17 * * *` (17:00 local)")
+	if !strings.Contains(s, "3 17 * * *") {
+		t.Error("pm-template.md: expected evening sweep cron `3 17 * * *` (17:03 local)")
+	}
+	if strings.Contains(s, "0 9 * * *") || strings.Contains(s, "0 17 * * *") {
+		t.Error("pm-template.md: sweep cron is back on a `*/10` mail-check boundary — it collides with the mail-check every day (mg-956b)")
+	}
+	if !strings.Contains(s, "a schedule that must not be dropped should not share a minute with one that can be") {
+		t.Error("pm-template.md: expected the sentence explaining why the sweep minute is not zero — without it the offset reads as arbitrary and gets rounded back (mg-956b)")
 	}
 	// Each cron's prompt body must be `sweep` so the PM recognizes the trigger.
 	if !strings.Contains(s, "`sweep`") {
