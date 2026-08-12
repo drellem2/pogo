@@ -4,7 +4,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -474,6 +476,180 @@ func TestCrewWitnessIsInvisibleToThePolecatReaders(t *testing.T) {
 	}
 }
 
+// TestAThirdWitnessTypeIsInvisibleToThePolecatReaders is the same assertion as
+// TestCrewWitnessIsInvisibleToThePolecatReaders made against a type that does not
+// exist yet (mg-ef7d).
+//
+// WHY IT IS NOT A DUPLICATE. The crew test proves the readers exclude CREW, and a
+// reader that filtered by spelling `r.Type != TypeCrew` would pass it while
+// admitting every future type — which is the shape of the defect, not a
+// hypothetical: the store's population was widened once already, by one line, and
+// the readers inherited the change silently. This pins the polarity that matters:
+// the readers admit POLECATS, they do not merely reject crew. A third type is
+// excluded on the day it is added, before anyone writes a reader for it.
+//
+// It also re-pins the migration property in the same store, so the two facts are
+// asserted against each other rather than in separate files: a typeless record
+// (written by a pogod predating mg-f9e8) is a POLECAT and stays in the readers,
+// while an unrecognised type is not. "Unknown" and "absent" are different facts —
+// this package's whole subject.
+func TestAThirdWitnessTypeIsInvisibleToThePolecatReaders(t *testing.T) {
+	sandboxWitness(t)
+	futurePID := liveProcess(t)
+	catPID := liveProcess(t)
+	legacyPID := liveProcess(t)
+
+	// An agent type nobody has written a reader for. TypeCrew is deliberately not
+	// used: the point is a value these readers have never been shown.
+	const typeFuture = AgentType("reviewer")
+	if err := RecordAgentWitness("rev-future", futurePID, typeFuture, "mg-future", "/repo"); err != nil {
+		t.Fatalf("RecordAgentWitness(future type): %v", err)
+	}
+	// Positive control, same as the crew test: without a real polecat in the store
+	// every assertion below passes against a reader that returns nothing.
+	if err := RecordPolecatWitness("cat-live", catPID, "mg-cat", "/repo"); err != nil {
+		t.Fatalf("RecordPolecatWitness: %v", err)
+	}
+	// The migration control: a record from before the Type field existed.
+	appendTypelessWitnessRecord(t, "cat-legacy", legacyPID, "mg-legacy", "/repo")
+
+	// Every polecat-only reader, through its own entry point. The list is the same
+	// six mg-f9e8 enumerated; what makes it more than a second hand-enumeration is
+	// TestWitnessAllTypesReadersAreDeclared next door, which fails when a SEVENTH
+	// appears without answering the type question at all.
+	alive, err := WitnessedAlivePolecats()
+	if err != nil {
+		t.Fatalf("WitnessedAlivePolecats: %v", err)
+	}
+	aliveNames := map[string]bool{}
+	for _, r := range alive {
+		aliveNames[r.Name] = true
+	}
+	assertPolecatPopulation(t, "WitnessedAlivePolecats", aliveNames)
+
+	verdicts, err := WitnessedPolecatVerdicts()
+	if err != nil {
+		t.Fatalf("WitnessedPolecatVerdicts: %v", err)
+	}
+	assertPolecatPopulation(t, "WitnessedPolecatVerdicts", keySet(verdicts))
+
+	repos, _, err := WitnessedPolecatRepos()
+	if err != nil {
+		t.Fatalf("WitnessedPolecatRepos: %v", err)
+	}
+	assertPolecatPopulation(t, "WitnessedPolecatRepos", keySet(repos))
+
+	items, err := WitnessedPolecatWorkItems()
+	if err != nil {
+		t.Fatalf("WitnessedPolecatWorkItems: %v", err)
+	}
+	assertPolecatPopulation(t, "WitnessedPolecatWorkItems", keySet(items))
+
+	live, err := LivePolecatSet(nil)
+	if err != nil {
+		t.Fatalf("LivePolecatSet: %v", err)
+	}
+	assertPolecatPopulation(t, "LivePolecatSet", live)
+
+	reg, err := NewRegistry(shortSocketDir(t))
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	cands, err := reg.UnadoptablePolecats()
+	if err != nil {
+		t.Fatalf("UnadoptablePolecats: %v", err)
+	}
+	candNames := map[string]bool{}
+	for _, c := range cands {
+		candNames[c.Name] = true
+	}
+	assertPolecatPopulation(t, "UnadoptablePolecats", candNames)
+
+	// The counterpart, and the reason the store is allowed to hold other types at
+	// all: the mail-check classifier must still see the record, or an agent of the
+	// new type is reaped while alive — mg-f9e8's defect, one type over.
+	if got := AgentWitness("rev-future"); got != WitnessAlive {
+		t.Errorf("AgentWitness(rev-future) = %v, want %v — a record of an unrecognised type must still "+
+			"answer for the ONE-agent probe, or the new type's agents go dark exactly the way "+
+			"auto_start=false crew did (mg-f9e8)", got, WitnessAlive)
+	}
+}
+
+// assertPolecatPopulation checks one reader's answer against the fixture built by
+// TestAThirdWitnessTypeIsInvisibleToThePolecatReaders: both polecats present (the
+// typed one and the typeless legacy one), the unrecognised type absent.
+func assertPolecatPopulation(t *testing.T, reader string, got map[string]bool) {
+	t.Helper()
+	if !got["cat-live"] {
+		t.Fatalf("control: %s dropped the live polecat (%v) — every assertion about it would pass "+
+			"vacuously", reader, sortedNameSet(got))
+	}
+	if !got["cat-legacy"] {
+		t.Errorf("%s dropped the TYPELESS record (%v). Every record written before mg-f9e8 has no type "+
+			"key and all of them are polecats; dropping them removes a redeploy survivor's worktree "+
+			"guard while it is still running", reader, sortedNameSet(got))
+	}
+	if got["rev-future"] {
+		t.Errorf("%s reported an agent of an unrecognised type (%v). These readers must admit POLECATS, "+
+			"not merely reject crew — otherwise the next type added to this store re-enters mg-f9e8's "+
+			"blast radius silently", reader, sortedNameSet(got))
+	}
+}
+
+// appendTypelessWitnessRecord adds a record in the exact on-disk shape a
+// pre-mg-f9e8 pogod wrote: no "type" key at all. RecordAgentWitness cannot emit
+// one, so this goes through the store's own load/save path with the field left
+// unset rather than hand-rolling the whole file — the other records in the
+// fixture have to survive it.
+func appendTypelessWitnessRecord(t *testing.T, name string, pid int, workItem, repo string) {
+	t.Helper()
+	start, ok := procStart(pid)
+	if !ok {
+		t.Fatalf("cannot read start time for pid %d", pid)
+	}
+	witnessMu.Lock()
+	defer witnessMu.Unlock()
+	recs, err := loadWitnessAllTypes()
+	if err != nil {
+		t.Fatalf("loadWitnessAllTypes: %v", err)
+	}
+	recs = append(recs, witnessRecord{
+		Name: name, PID: pid, StartTime: start, WorkItemID: workItem, SourceRepo: repo,
+	})
+	if err := saveWitness(recs); err != nil {
+		t.Fatalf("saveWitness: %v", err)
+	}
+	// The `type` key must genuinely be absent, not present-and-empty: the readers
+	// are being asked about the shape an OLD pogod left behind, and a test that
+	// wrote `"type":""` would be asking about a shape nothing ever produced.
+	data, err := os.ReadFile(WitnessPath())
+	if err != nil {
+		t.Fatalf("read witness: %v", err)
+	}
+	if strings.Contains(string(data), `"type"`) && strings.Contains(string(data), `"type": ""`) {
+		t.Fatalf("fixture emitted an empty type key; wanted the key absent:\n%s", data)
+	}
+}
+
+func keySet[V any](m map[string]V) map[string]bool {
+	out := make(map[string]bool, len(m))
+	for k := range m {
+		out[k] = true
+	}
+	return out
+}
+
+func sortedNameSet(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k, v := range m {
+		if v {
+			out = append(out, k)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 // TestWitnessRecordWithoutTypeIsAPolecat pins the compatibility half of the type
 // field. Every record a pre-mg-f9e8 pogod left on disk has no "type" key, and
 // all of them are polecats. Reading a missing type as "not a polecat" would drop
@@ -632,9 +808,9 @@ func readWitnessForTest(t *testing.T) []witnessRecord {
 	t.Helper()
 	witnessMu.Lock()
 	defer witnessMu.Unlock()
-	recs, err := loadWitness()
+	recs, err := loadWitnessAllTypes()
 	if err != nil {
-		t.Fatalf("loadWitness: %v", err)
+		t.Fatalf("loadWitnessAllTypes: %v", err)
 	}
 	return recs
 }

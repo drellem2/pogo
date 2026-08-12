@@ -356,7 +356,7 @@ func TestZeroValueRegistryIsDisarmed(t *testing.T) {
 // argument loadGateRefusal makes next door.
 func TestCapFailsOpenOnAnUnreadableWitness(t *testing.T) {
 	sandboxWitness(t)
-	// A witness file written by a NEWER pogod: loadWitness refuses it rather
+	// A witness file written by a NEWER pogod: loadWitnessAllTypes refuses it rather
 	// than overwriting, so this is a real read failure rather than a simulated
 	// one.
 	if err := os.WriteFile(WitnessPath(), []byte(`{"version":9999,"polecats":[]}`), 0644); err != nil {

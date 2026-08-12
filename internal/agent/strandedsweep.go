@@ -79,7 +79,12 @@ type UnadoptablePolecat struct {
 // next door, and the same polarity trap that runs through this whole ticket. A
 // caller that renders this error as zero has rebuilt the defect.
 func (r *Registry) UnadoptablePolecats() ([]UnadoptablePolecat, error) {
-	recs, err := loadWitness()
+	// The store witnesses crew as well as polecats since mg-f9e8, and this sweep
+	// means polecats literally: it checks gitgc.BranchPrefix+Name for unmerged
+	// work. A crew agent has no such branch, so every crew survivor of a restart
+	// would arrive here as an UNJUDGED or SKIPPED row — a sweep reporting on a
+	// population it cannot ask a question about.
+	recs, err := loadPolecatWitness()
 	if err != nil {
 		return nil, err
 	}
@@ -100,14 +105,6 @@ func (r *Registry) UnadoptablePolecats() ([]UnadoptablePolecat, error) {
 
 	var out []UnadoptablePolecat
 	for _, w := range recs {
-		// The store witnesses crew as well as polecats since mg-f9e8, and this
-		// sweep means polecats literally: it checks gitgc.BranchPrefix+Name for
-		// unmerged work. A crew agent has no such branch, so every crew survivor
-		// of a restart would arrive here as an UNJUDGED or SKIPPED row — a sweep
-		// reporting on a population it cannot ask a question about.
-		if !w.isPolecat() {
-			continue
-		}
 		if _, ok := known[w.Name]; ok {
 			continue
 		}

@@ -77,7 +77,7 @@ func TestWitnessPathNeverResolvesToTheLiveStoreUnderTest(t *testing.T) {
 }
 
 // TestWitnessPathIsStableAcrossCalls guards the memoisation. A path that
-// differed per call would make the store write-only: loadWitness and saveWitness
+// differed per call would make the store write-only: loadWitnessAllTypes and saveWitness
 // would address different files, and every read would answer "no record" —
 // silently turning the suite green while measuring nothing.
 func TestWitnessPathIsStableAcrossCalls(t *testing.T) {
@@ -145,7 +145,7 @@ func TestSpawningAgentDoesNotTouchTheLiveStore(t *testing.T) {
 }
 
 // TestWitnessRoundTripsThroughTheDefaultSandbox proves the redirect is a real,
-// working store and not a write-only hole. loadWitness/saveWitness/AgentWitness
+// working store and not a write-only hole. loadWitnessAllTypes/saveWitness/AgentWitness
 // must all agree on the default path, or the sixteen tests in witness_test.go are
 // the only ones measuring anything and every naive sibling silently no-ops.
 func TestWitnessRoundTripsThroughTheDefaultSandbox(t *testing.T) {
