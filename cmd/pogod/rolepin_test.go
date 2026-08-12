@@ -35,6 +35,9 @@ func restoreRoleNames(t *testing.T) {
 	t.Cleanup(func() {
 		agent.SetCoordinatorName(agent.DefaultCoordinatorName)
 		agent.SetWorkerName(agent.DefaultWorkerName)
+		// SME's default is the empty string, not a Default* const — empty means
+		// "this deployment has no SME" and is a meaningful value, not a gap.
+		agent.SetSMEName("")
 	})
 }
 
@@ -292,5 +295,104 @@ func TestPinAndResolveRoles_StoppedCoordinatorIsRenamable(t *testing.T) {
 	}
 	if got := agent.CoordinatorName(); got != "boss" {
 		t.Errorf("process-wide coordinator name = %q, want boss", got)
+	}
+}
+
+// `[agents] sme` is a MAIL TARGET, and the only thing that makes it one is the
+// single line in pinAndResolveRoles that copies it into the process-wide name
+// the spawn-time template render reads. That copy had no test (mg-c992): the
+// parse was pinned in internal/config (TestSMEConfigFile) and the render was
+// pinned in internal/agent (TestTriageConsultOmittedWithoutSME, which calls
+// SetSMEName itself) — so deleting `agent.SetSMEName(cfg.Agents.SME)` from this
+// file left the whole suite green while every gh-issue triage packet came back
+// `"sme_consulted": false` on a deployment that has an SME.
+//
+// That is the defect this key was set to fix, wearing a different value: a
+// config key that is set but never read. Two halves that each pass in isolation
+// do not join themselves, so the join is asserted here, in the daemon's own
+// boot ordering.
+//
+// The assertion goes through agent.ExpandString rather than stopping at
+// agent.SMEName(). ExpandString shares withDefaults() with ExpandTemplate — the
+// function pogod's /agents/spawn-polecat handler calls to render polecat-triage
+// — so a gate written `{{if .SME}}`, exactly as the shipped template writes it,
+// is shown taking the configured branch. A getter returning the right string
+// would not show that.
+func TestPinAndResolveRoles_ConfiguredSMEReachesThePromptRender(t *testing.T) {
+	state := sandboxHome(t)
+	restoreRoleNames(t)
+
+	if err := os.WriteFile(filepath.Join(state, "config.toml"),
+		[]byte("[agents]\ncoordinator = \"mayor\"\nworker = \"polecat\"\nsme = \"pm-example\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// The stale resolution a boot holds before roles are resolved: pogod's main
+	// resolves nothing itself, so this is the zero value.
+	agent.SetSMEName("")
+
+	cfg, _ := pinAndResolveRoles(config.Load())
+
+	if cfg.Agents.SME != "pm-example" {
+		t.Errorf("cfg SME = %q, want pm-example", cfg.Agents.SME)
+	}
+	if got := agent.SMEName(); got != "pm-example" {
+		t.Errorf("process-wide SME name = %q, want pm-example — this is the name the spawn-time "+
+			"polecat-triage render addresses the consult to", got)
+	}
+
+	// The gate as the shipped template writes it, through the same withDefaults
+	// seam the real render uses.
+	got, err := agent.ExpandString(
+		`{{if .SME}}consult {{.SME}}{{else}}sme_consulted: false{{end}}`,
+		agent.TemplateVars{Id: "mg-0000"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "consult pm-example" {
+		t.Errorf("rendered SME gate = %q, want %q — a configured SME that renders the else branch "+
+			"is a triage consult that never happens", got, "consult pm-example")
+	}
+}
+
+// The other half, and the one that must not regress into a fallback: with no
+// `sme` key the process-wide name stays empty and the gate takes the else
+// branch. A default name here would be worse than no SME at all — mg files mail
+// for an unknown recipient rather than refusing it, so a triage worker would
+// mail a nonexistent agent, wait out its consult timeout, and report a consult
+// that never happened.
+//
+// It also pins that pinAndResolveRoles CLEARS a stale name rather than leaving
+// whatever the process happened to hold. The copy is unconditional in the
+// source; an `if != ""` guard added later would pass every other test here.
+func TestPinAndResolveRoles_UnconfiguredSMEResolvesEmpty(t *testing.T) {
+	state := sandboxHome(t)
+	restoreRoleNames(t)
+
+	if err := os.WriteFile(filepath.Join(state, "config.toml"),
+		[]byte("[agents]\ncoordinator = \"mayor\"\nworker = \"polecat\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// A stale non-empty name, as a re-resolution would find.
+	agent.SetSMEName("pm-stale")
+
+	cfg, _ := pinAndResolveRoles(config.Load())
+
+	if cfg.Agents.SME != "" {
+		t.Errorf("cfg SME = %q, want \"\" — Load() must not invent one the way it fills coordinator", cfg.Agents.SME)
+	}
+	if got := agent.SMEName(); got != "" {
+		t.Errorf("process-wide SME name = %q, want \"\" — a fallback name here is a mail target nobody reads", got)
+	}
+
+	got, err := agent.ExpandString(
+		`{{if .SME}}consult {{.SME}}{{else}}sme_consulted: false{{end}}`,
+		agent.TemplateVars{Id: "mg-0000"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "sme_consulted: false" {
+		t.Errorf("rendered SME gate with no SME = %q, want %q", got, "sme_consulted: false")
 	}
 }
