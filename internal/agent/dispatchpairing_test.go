@@ -446,6 +446,17 @@ func TestSpawnPolecatPairingFailsClosedAfterCoverage(t *testing.T) {
 	if body := rr.Body.String(); !strings.Contains(body, "REFUSING") {
 		t.Errorf("refusal does not say it is refusing because it could not check: %s", body)
 	}
+	// The advice half, which this test used to stop short of reading. waiverAdvice
+	// supplies its own "one of"; the caller prefixed a second one and shipped
+	// "with one of one of \"...\"" past every test in this file (mg-bd92). Assert
+	// on the rendered sentence, not on the presence of the tag, or the duplicate
+	// comes back.
+	if body := rr.Body.String(); !strings.Contains(body, `with one of "audit-waived"`) {
+		t.Errorf("refusal does not name the waiver opt-out in a readable sentence: %s", body)
+	}
+	if body := rr.Body.String(); strings.Contains(body, "one of one of") {
+		t.Errorf("refusal doubles its \"one of\": %s", body)
+	}
 }
 
 // TestDispatchPairingDefaultShipsNoPolicy — the default must be functional but

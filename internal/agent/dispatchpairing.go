@@ -137,7 +137,7 @@ func (m MGDispatchPairingGate) PairingUnmet(workItemID string) (string, bool) {
 		return fmt.Sprintf("work item %s is in %s, whose items owe a paired item tagged %s before "+
 			"dispatch, and the macguffin store at %s could not be scanned to check: %v. "+
 			"REFUSING rather than assuming the pair exists — fix the store, or waive the "+
-			"requirement visibly by tagging %s with one of %s",
+			"requirement visibly by tagging %s with %s",
 			workItemID, covering, quoteList(m.Cfg.PairTags), workRoot, err,
 			workItemID, waiverAdvice(m.Cfg.WaiverTags)), true
 	}
@@ -180,6 +180,12 @@ var pairCandidateStatuses = []string{"available", "claimed", "done", "pending"}
 // waiverAdvice renders the opt-out half of a refusal. A deployment that
 // configured no waiver tags has no opt-out, and the message says so rather than
 // suggesting a tag that would not work.
+//
+// It supplies its own "one of", so every caller must interpolate it bare — the
+// scan-failure refusal used to prefix its own and shipped "tagging mg-f0b2 with
+// one of one of \"no-pair-required\"" (mg-bd92, seen on the installed binary,
+// not in a test: the fail-closed test asserted only that the message said
+// REFUSING and never read as far as the advice).
 func waiverAdvice(tags []string) string {
 	if len(tags) == 0 {
 		return "(no waiver_tags are configured for this repo, so there is no opt-out — " +

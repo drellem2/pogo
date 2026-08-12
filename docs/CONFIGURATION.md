@@ -872,6 +872,48 @@ program is busiest.
 A pair is recognised by either reference channel the store already uses:
 `depends: [mg-1234]`, or a tag containing the id (`mg-1234-followup`).
 
+### Before you arm it: measure the refusal rate on your own store
+
+Everything above describes a mechanism that works. Whether *your* `pair_tags`
+match *your* store is a separate question, and it is the one that decides whether
+arming this helps. Answer it with a number before you write the config, not
+after — the gate goes live at the next daemon start, unattended, and the first
+thing a mis-set marker produces is a wall of refusals aimed at the people already
+filing pairs.
+
+The measurement is a dry run of the gate's own predicate over two populations:
+
+- **Completed dispatches** (`done/`, covered repo, not themselves pairs) — how
+  many *would have been refused* had the gate been armed. This is the retrospective
+  false-refusal rate.
+- **The dispatchable backlog** (`available/` + `claimed/`) — how many refuse on
+  the next dispatch.
+
+For each item, ask what the gate asks: does any item in `available`, `claimed`,
+`done` or `pending` carry a `pair_tags` tag **and** reference this item by
+`depends:` or by a tag containing its id?
+
+A high number is not automatically a veto — it can equally mean the discipline
+lapsed and the gate would be corrective — but it is never a detail. Distinguish
+the two by checking whether the pairs exist somewhere the gate cannot see
+(`shelved/`, `archive/`) versus not existing at all, and by checking whether the
+pair-tag convention is still in current use rather than historical.
+
+Worked example, mg-bd92 on this deployment's store, `pair_tags =
+["independent-audit"]`, `require_tags = []`:
+
+| Population | n | owed | pair found | would refuse |
+|---|---|---|---|---|
+| Completed onethird dispatches | 47 | 43 | 6 | **37 (86%)** |
+| Dispatchable onethird backlog | 40 | 20 | 3 | **17 (85%)** |
+
+The pairs were not merely invisible — widening the scan to `shelved/` and
+`archive/` recovered **zero** of the 37, so archive-blindness was not the cause.
+The convention had drifted: recent audits carried the loose `audit` tag and often
+no reference to their target at all, and no `require_tags` subset brought the
+rate below 40%. That deployment was left **unarmed** on the strength of the
+number, with the config recorded rather than written.
+
 Source of truth: `internal/config/dispatchpairing.go` (policy vocabulary and
 predicates) and `internal/agent/dispatchpairing.go` (the gate).
 
