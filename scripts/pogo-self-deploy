@@ -2191,6 +2191,202 @@ drain_awaiting_refinery() {
     printf '%s\n' "$1" | grep -c 'awaiting the refinery' || true
 }
 
+# ---------------------------------------------------------------------------
+# THE HOLDER LEDGER (gh#135, mg-ea06)
+# ---------------------------------------------------------------------------
+# THE DEFECT, stated as the reporter found it: everything above is a fact about
+# ONE POLL. drain_wait re-derives its subject set from the live registry every
+# 15s, and Registry.Polecats() filters on alive() — so a polecat that STOPS
+# between polls LEAVES THE DENOMINATOR instead of satisfying it. drain_durability
+# has no line for it, drain_unpushed_holders counts no line for it, and the drain
+# prints `0 holding` over commits that exist in exactly one place on this
+# machine. The check was not satisfied; it was SILENCED. And when the LAST holder
+# stops, the `count -eq 0` early return fires before drain_durability runs at
+# all, so there is not even a per-polecat report to read afterwards — no
+# evidence, rather than misleading evidence.
+#
+# WHY THE HANDLE IS THE BRANCH REF AND NOT THE WORKTREE. The fix shape the issue
+# proposes — snapshot the holders and BLOCK until they come back — cannot work,
+# and this was measured rather than argued. By the time the drain would re-ask,
+# the worktree is GONE: pogod reaps a CLEAN tree on exit, and committed-but-
+# unpushed IS clean (mg-ee02's preservation fires only on UNCOMMITTED work, which
+# this drain deliberately does not wait for). `durability_of <reaped path>`
+# returns `unknown`, and `unknown` HOLDS — so blocking would burn the whole
+# window and exit 7 over a holder that is already dead. That is mg-853a's failure
+# mode rebuilt and gh#134's symptom re-created.
+#
+# What SURVIVES a stop is `refs/heads/polecat-<name>` in the SOURCE repo. The
+# worktree is removed; the branch and its objects are not. So the reconciliation
+# asks the source repo, with the same predicate gh#134/mg-1539 established one
+# function up: DOES ANY origin REF CONTAIN THIS HEAD. Not ancestry of main —
+# mayor measured that trap on mg-0a43 and it is the wrong predicate here for the
+# same reason it is wrong there: the refinery REBASES before merging, so a branch
+# whose work landed perfectly is not an ancestor of main afterwards (146 polecat
+# branches in the live repo, 71 `--no-merged main`, and sampled counterexamples
+# whose work is demonstrably on main). Containment survives a rebase; ancestry
+# does not.
+#
+# AND IT DOES NOT HOLD. A departed-unsatisfied holder is reported LOUDLY — via
+# err, so it reaches ERR_LOG, the reason record and the nightly's RED path — and
+# the deploy PROCEEDS. This is mg-797d's rule 1 applied to a new subject:
+# waiting protects nothing once the holder is dead, because the process that
+# would have pushed those commits is already gone. Holding would convert a false
+# GREEN into an unsatisfiable HOLD, which is strictly worse.
+#
+# THE SAFETY OF NOT-HOLDING HAS A DEADLINE, AND THE ALERT MUST NAME IT (ruled by
+# pm-pogo, 2026-08-12). internal/gitgc/sweep.go keeps a polecat branch while its
+# ticket is unconcluded and requires BranchMerged before deleting a *done*
+# ticket's branch — but :346-348 deletes an ARCHIVED ticket's branch with no
+# merge check and no durability check of any kind. Those commits live only there.
+# So "reported, deploy proceeded" is safe only until archival, and archival is
+# routine coordinator tidying. The deadline goes in the ALERT rather than in a
+# ticket body, because the alert is the half that travels. (The gitgc defect
+# itself is mg-0a43 and is NOT fixed here.)
+
+# BranchPrefix, from internal/gitgc/gitgc.go:36. The agreement between an agent's
+# registry name and its branch holds only while a polecat stays on its own branch
+# (sweep.go:32-35 records the same caveat), which is why a branch that does not
+# resolve reads `unknown` below rather than being called satisfied or lost.
+DRAIN_BRANCH_PREFIX="polecat-"
+
+# drain_ledger_has NAME LEDGER -> is NAME already recorded?
+# `cut -f1` reads the tab-delimited first field and `grep -qxF` compares it
+# whole and literally: a substring or regex match here would silently merge two
+# polecats whose names share a prefix.
+drain_ledger_has() {
+    printf '%s\n' "$2" | cut -f1 | grep -qxF -- "$1"
+}
+
+# drain_ledger_add LEDGER BODY REPORT -> LEDGER with a row appended for every
+# polecat REPORT says is HOLDING that is not already in it. One row per polecat:
+#
+#     <name>\t<work item>\t<source repo>
+#
+# The ledger is a plain string carried in drain_wait's own scope rather than a
+# temp file, for the same reason the rest of this driver avoids state on disk:
+# drain_wait has six exits and none of them would have to remember to clean up.
+#
+# ROWS ARE NEVER REMOVED. A polecat that stops holding is answered by the
+# reconciliation below (it is still present, so it is not a departure); a polecat
+# that vanishes is exactly what this ledger exists to remember. Forgetting a row
+# because a later poll no longer mentions it would rebuild the defect.
+drain_ledger_add() {
+    local ledger="$1" body="$2" report="$3" line name obj item repo
+    # $'\t' and $'\n' are ANSI-C quoting and are NOT expanded inside a
+    # double-quoted string, so the separators are bound to names first and
+    # interpolated as values. Written the other way the ledger acquires literal
+    # `$'\t'` text, every row parses as one field, and every departure reads as
+    # `unknown` — a failure that keeps reporting, so it would survive review.
+    local nl=$'\n' tab=$'\t'
+    while IFS= read -r line || [ -n "$line" ]; do
+        # The same two verdicts drain_unpushed_holders counts, for the same
+        # reason: they differ in what we know, not in what is safe to do.
+        case "$line" in
+            unpushed\ *|unknown\ *) ;;
+            *) continue ;;
+        esac
+        name="${line#* }"; name="${name%% *}"
+        [ -n "$name" ] || continue
+        drain_ledger_has "$name" "$ledger" && continue
+        obj="$(printf '%s' "$body" | polecat_objects | grep -F "\"name\":\"$name\"" | head -n 1)"
+        item="$(printf '%s' "$obj" | json_str work_item_id)"
+        repo="$(printf '%s' "$obj" | json_str source_repo)"
+        ledger="${ledger:+$ledger$nl}${name}${tab}${item}${tab}${repo}"
+    done <<EOF
+$report
+EOF
+    printf '%s' "$ledger"
+}
+
+# drain_departure_verdict SOURCE_REPO NAME -> "<verdict> <detail>", where verdict
+# is one of:
+#
+#   satisfied             — some origin ref holds every commit on its branch. It
+#                           pushed on its way out; the stop satisfied the check.
+#   departed-unsatisfied  — the branch resolves and NO origin ref holds its head.
+#                           The commits exist only in the source repo.
+#   unknown               — we could not ask. Reported as itself, NEVER as
+#                           satisfied: a question we failed to ask is not an
+#                           answer, which is the same rule durability_of follows.
+#
+# refs/remotes/origin/HEAD is excluded for the reason durability_of documents at
+# length: it is a symref at the default branch and would name the integration
+# branch under a name that says nothing about who pushed. It changes the NAME in
+# the verdict, never the verdict.
+drain_departure_verdict() {
+    local repo="$1" branch="$DRAIN_BRANCH_PREFIX$2" head holder
+    [ -n "$repo" ] && [ -d "$repo" ] || {
+        echo "unknown it left the fleet mid-drain and its source repo (${repo:-none recorded}) is not readable here — nothing left to ask about its commits"
+        return 0
+    }
+    head="$(git -C "$repo" rev-parse --verify --quiet "refs/heads/$branch" 2>/dev/null)"
+    [ -n "$head" ] || {
+        echo "unknown it left the fleet mid-drain and refs/heads/$branch does not resolve in $repo — the branch is gone or was never named after the agent"
+        return 0
+    }
+    holder="$(git -C "$repo" for-each-ref --contains "$head" --format='%(refname)' \
+                  refs/remotes/origin/ 2>/dev/null \
+              | grep -v '^refs/remotes/origin/HEAD$' | head -n 1)"
+    if [ -n "$holder" ]; then
+        echo "satisfied it left the fleet mid-drain, and ${holder#refs/remotes/} holds every commit on $branch — it pushed on its way out"
+        return 0
+    fi
+    echo "departed-unsatisfied it left the fleet mid-drain and NO origin ref holds $branch — those commits exist ONLY on refs/heads/$branch in $repo"
+}
+
+# drain_departures LEDGER BODY -> one line per ledger entry that is no longer in
+# BODY's polecats array, in drain_durability's own format so the two reports read
+# as one: "<verdict> <name> (<work item>): <detail>".
+drain_departures() {
+    local ledger="$1" body="$2" present name item repo v
+    [ -n "$ledger" ] || return 0
+    present="$(printf '%s' "$body" | polecat_objects | json_str name)"
+    while IFS=$'\t' read -r name item repo || [ -n "$name" ]; do
+        [ -n "$name" ] || continue
+        printf '%s\n' "$present" | grep -qxF -- "$name" && continue
+        v="$(drain_departure_verdict "$repo" "$name")"
+        printf '%s %s (%s): %s\n' "${v%% *}" "$name" "${item:-no work item}" "${v#* }"
+    done <<EOF
+$ledger
+EOF
+}
+
+# drain_departed_holders DEPARTURES -> how many departures did NOT reach origin.
+# `unknown` is counted with `departed-unsatisfied` for the third time in this
+# file and for the same reason every time. The `|| true` is load-bearing: grep -c
+# exits 1 on no match and a legitimate zero is the happy path.
+drain_departed_holders() {
+    printf '%s\n' "$1" | grep -cE '^(departed-unsatisfied|unknown) ' || true
+}
+
+# Print a departure report, routing each line to the emitter its verdict earns:
+# a departure that pushed on its way out is good news and goes to the log; one
+# that did not is the alert this whole ledger exists to raise, and goes through
+# err so it reaches ERR_LOG, the reason record and the nightly's RED path.
+print_drain_departures() {
+    local departures="$1" line
+    [ -n "$departures" ] || return 0
+    printf '%s\n' "$departures" | sed '/^$/d' | while IFS= read -r line; do
+        case "$line" in
+            departed-unsatisfied\ *|unknown\ *) err "  $line" ;;
+            *) log "  $line" >&2 ;;
+        esac
+    done
+}
+
+# The deadline on not-holding, emitted ONCE per drain and only when there is a
+# departed holder to attach it to. Three lines, in the order a reader needs them:
+# what happened, why the deploy did not wait, and when the safety of not waiting
+# runs out. The third is the one that must not be dropped — a reader who sees
+# "reported, deploy proceeded" and files it for later has no other way to learn
+# that archiving the work item destroys the commits.
+alert_drain_departures() {
+    [ "$1" -gt 0 ] || return 0
+    err "$1 polecat(s) STOPPED DURING THE DRAIN still holding commits that reached no origin ref"
+    err "the deploy did NOT wait for them: the process that would have pushed those commits is already gone, so holding the gate protects nothing (mg-797d rule 1)"
+    err "THAT IS SAFE ONLY UNTIL THE WORK ITEM IS ARCHIVED. internal/gitgc/sweep.go:346-348 deletes an ARCHIVED item's polecat branch with NO merge check and no durability check, and these commits exist nowhere else. Push or land each branch named above BEFORE its item is archived (mg-0a43)."
+}
+
 # Print a durability report through a given emitter (log for good news, err for
 # bad), one polecat per line. Nothing is summarised away: a count that cannot be
 # expanded into the polecats behind it is how "0 polecats active" came to be
@@ -2298,6 +2494,10 @@ DRAIN_UNREADABLE_SLEEP=2   # a blip is re-probed in seconds, not the 15s drain t
 drain_wait() {
     local deadline=$(( $(date +%s) + DRAIN_TIMEOUT ))
     local raw code body count disp live misses=0 report held pending shown=false
+    # THE CROSS-POLL TERM (gh#135). Everything else in this loop is re-derived
+    # from the current tick; this is the only thing that remembers a previous
+    # one, and it is the only thing that can see a holder LEAVE.
+    local ledger="" departures gone
     while :; do
         raw="$(drain_probe)"
         code="${raw##*$'\n'}"
@@ -2317,7 +2517,24 @@ drain_wait() {
                 # Zero POLECATS — not zero work. Detached compute is left out
                 # of this test on purpose (mg-797d); see "DETACHED COMPUTE IS
                 # DELIBERATELY NOT WAITED FOR" above before adding a term here.
-                if [ "$count" -eq 0 ]; then echo 0; return 0; fi
+                #
+                # THE RECONCILIATION IS SEATED ABOVE THIS RETURN AND NOT ONLY AT
+                # THE CLEAR BELOW, AND THAT PLACEMENT IS LOAD-BEARING (gh#135).
+                # This return fires BEFORE drain_durability runs, so the
+                # single-holder fleet — the commonest shape, and one poll from
+                # the reporter's own — would escape a fix seated only at the
+                # `held -eq 0` branch. Until this ticket, the last holder
+                # stopping produced no per-polecat report and not even a
+                # `0 holding` line: no evidence at all, rather than misleading
+                # evidence. The line below is that missing evidence.
+                if [ "$count" -eq 0 ]; then
+                    departures="$(drain_departures "$ledger" "$body")"
+                    gone="$(drain_departed_holders "$departures")"
+                    log "no polecat holds unpushed work — 0 running, $gone that stopped mid-drain without reaching origin" >&2
+                    print_drain_departures "$departures"
+                    alert_drain_departures "$gone"
+                    echo 0; return 0
+                fi
 
                 # NARROWED (mg-853a) AND RE-AIMED (mg-3a96): neither "is it
                 # running?" nor "does the refinery owe it a merge?" is the
@@ -2327,14 +2544,34 @@ drain_wait() {
                 held="$(drain_unpushed_holders "$report")"
                 pending="$(drain_awaiting_refinery "$report")"
 
+                # RECORD BEFORE RECONCILING. Every holder this tick joins the
+                # ledger, so that if it is absent from a LATER tick there is
+                # something left that remembers it was ever here. Nothing else
+                # in this loop does — the registry has already forgotten it
+                # (Registry.Polecats() filters on alive()), and so has the
+                # witness store (noteWitnessExit deletes the witness on a
+                # witnessed exit, internal/agent/agent.go:1898).
+                ledger="$(drain_ledger_add "$ledger" "$body" "$report")"
+                departures="$(drain_departures "$ledger" "$body")"
+                gone="$(drain_departed_holders "$departures")"
+
                 if [ "$held" -eq 0 ]; then
-                    log "no polecat holds unpushed work — $count running, 0 holding commits that exist only locally" >&2
+                    # THE SECOND TERM IS WHY THIS LINE CHANGED. `0 holding` was
+                    # true of the polecats still present and said nothing about
+                    # the ones that had left, which is precisely how a check that
+                    # was SILENCED read identically to one that was SATISFIED
+                    # (gh#135). The count is printed whether or not it is zero:
+                    # a term that appears only when it is non-zero is one a
+                    # reader cannot tell from a term that was never computed.
+                    log "no polecat holds unpushed work — $count running, 0 holding commits that exist only locally, $gone that stopped mid-drain without reaching origin" >&2
                     # Rule 3's decoupling, said out loud at the moment it acts.
                     # The deploy proceeds over these on purpose; a run that
                     # bounced past pending merges without naming them would be
                     # indistinguishable from one that had none to name.
                     [ "$pending" -gt 0 ] && log "proceeding past $pending pushed branch(es) the refinery has not landed — durable on origin, and NOT waited on (mg-3a96 rule 3)" >&2
                     print_drain_durability log "$report" >&2
+                    print_drain_departures "$departures"
+                    alert_drain_departures "$gone"
                     echo 0; return 0
                 fi
 
@@ -2352,6 +2589,13 @@ drain_wait() {
                 if [ "$(date +%s)" -ge "$deadline" ]; then
                     err "deadline reached; still holding unpushed work:"
                     print_drain_durability err "$report"
+                    # Departures are reported here too, and AFTER the headline so
+                    # deploy_reason_record still picks "deadline reached" as the
+                    # reason. A drain that times out with a departure in its
+                    # ledger has both problems, and the one that leaves no
+                    # evidence anywhere else is this one.
+                    print_drain_departures "$departures"
+                    alert_drain_departures "$gone"
                     echo "$held"; return 1
                 fi
                 log "waiting: $held of $count polecat(s) still hold unpushed commits (bounded by their next push, not by the refinery)..." >&2
