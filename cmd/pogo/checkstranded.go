@@ -103,12 +103,19 @@ items instead produced three rows on the same store, one a live instance nothing
 else had found. Rank is on ITEM STATUS — ` + "`available`" + ` first, because that is the
 status priority-wake advertises — not on branch count.
 
-EXCLUSIONS, both counted and both nameable with --all:
+EXCLUSIONS, all counted and all nameable with --all:
 
   running polecat   a live worker's branch has unmerged commits on a claimed item
                     because that is what work in progress looks like.
   refinery queue    the remedy for a stranded branch is to submit it, and it is
                     already submitted.
+  pointer branch    a REVIEWER reviews by checking the branch under review out,
+                    so its own branch points at the builder's head. Every commit
+                    on it is the builder's, and this sweep's remedy would submit
+                    them a second time under the reviewer's authorship. Excluded
+                    only when another branch both CARRIES and OWNS them, because
+                    containment alone is symmetric and would silence the builder
+                    (mg-1af2).
 
 A run that COULD NOT LOOK says so instead of exiting clean. An unreachable agent
 registry is fatal (exit ` + fmt.Sprint(exitInstrumentFailure) + `): without it every running polecat in the fleet

@@ -129,6 +129,11 @@ type StrandedSweepReport struct {
 	Stranded int `json:"stranded"`
 	// Clean is how many were checked and found to need nothing.
 	Clean int `json:"clean"`
+	// Carried is how many had commits the target lacks that ANOTHER branch
+	// already carries and owns — a reviewer's branch pointing at the builder's
+	// head, typically. Not stranded, and counted apart from Clean so the
+	// suppression is measurable rather than invisible (mg-1af2).
+	Carried int `json:"carried"`
 	// Skipped is how many carried no source repo to check, so no question was
 	// asked. A --no-worktree polecat, or a record written before the repo field
 	// existed.
@@ -211,6 +216,16 @@ func (r *Registry) ReportStrandedWorkAcrossRestart() StrandedSweepReport {
 				"which is neither stranded nor clean (mg-be37)", branch, c.SourceRepo, ierr)
 			continue
 		}
+		if f.Disposition == strandedwork.DispositionCarried {
+			// A fifth outcome, for the same reason Unjudged is a third: folding
+			// it into Clean would make the suppression unobservable, and this is
+			// the count that says how often the mg-1af2 pointer case fires.
+			rep.Carried++
+			log.Printf("strandedwork: startup sweep found polecat %s's branch %s pointing at work "+
+				"%s already carries and owns — NOT stranded (mg-1af2). %s",
+				c.Name, f.Branch, f.Carrier, f.Summary())
+			continue
+		}
 		if !f.Stranded() {
 			rep.Clean++
 			continue
@@ -242,7 +257,7 @@ func (r *Registry) ReportStrandedWorkAcrossRestart() StrandedSweepReport {
 				"witnessed_at": c.StartTime.Format(time.RFC3339),
 			},
 		})
-		strandedAlertMail(StrandedAlert{
+		sendStrandedAlert(StrandedAlert{
 			Polecat:    c.Name,
 			WorkItemID: c.WorkItemID,
 			Repo:       c.SourceRepo,
@@ -254,8 +269,8 @@ func (r *Registry) ReportStrandedWorkAcrossRestart() StrandedSweepReport {
 	}
 
 	log.Printf("strandedwork: startup sweep judged %d unadoptable polecat(s): %d stranded, %d clean, "+
-		"%d unjudged, %d with no repo to check",
-		rep.Candidates, rep.Stranded, rep.Clean, rep.Unjudged, rep.Skipped)
+		"%d carried by another branch, %d unjudged, %d with no repo to check",
+		rep.Candidates, rep.Stranded, rep.Clean, rep.Carried, rep.Unjudged, rep.Skipped)
 	rep.emitRan()
 	return rep
 }
@@ -282,6 +297,7 @@ func (s StrandedSweepReport) emitRan() {
 			"candidates": s.Candidates,
 			"stranded":   s.Stranded,
 			"clean":      s.Clean,
+			"carried":    s.Carried,
 			"unjudged":   s.Unjudged,
 			"skipped":    s.Skipped,
 			"judged":     s.Judged(),

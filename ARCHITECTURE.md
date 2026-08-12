@@ -294,7 +294,12 @@ The check (`internal/strandedwork`) answers with **patch identity** (`git
 cherry`), never ancestry: the refinery merges by rebase, so `git log
 main..branch` reports every successfully merged branch as unmerged. It
 distinguishes `resubmit` from `pre_registration` because the two need opposite
-handling, and it consults **no notion of liveness** — a running polecat is the
+handling, and from `carried` — a branch whose commits another branch already
+carries **and owns**, which is what a reviewer's worktree branch is after it
+checks the branch under review out (mg-1af2). The discriminator is *ownership*,
+not containment: containment is symmetric, so "some other branch has these
+commits" would silence the builder's genuine strand as readily as the reviewer's
+false one. It consults **no notion of liveness** — a running polecat is the
 precondition for stranded work, not evidence against it, because the re-dispatch
 *is* the running polecat. Attribution of a branch to an item is heuristic (a
 commit-subject id, or the item's id-suffix in the branch name), so the refusal is

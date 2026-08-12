@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/drellem2/pogo/internal/events"
 	"github.com/drellem2/pogo/internal/strandedwork"
@@ -76,6 +77,12 @@ type StrandedAlert struct {
 	// running. Only the restart sweep can produce this, and it changes the
 	// advice: the work is real but the branch may still grow.
 	StillAlive bool
+	// ItemStatus is the work item's status as mg reports it, or "" when it could
+	// not be read. It governs one paragraph of the body and nothing else — see
+	// Message. Best-effort on purpose: the alert must not depend on mg being
+	// reachable, and an unread status simply falls back to the wording that
+	// shipped before it existed.
+	ItemStatus string
 	// Finding is the branch verdict. Its Summary() is the remedy sentence.
 	Finding strandedwork.Finding
 }
@@ -203,6 +210,79 @@ func mailboxExists(name string) bool {
 	return probe.Exists
 }
 
+// sendStrandedAlert fills in what the alert can only learn by asking, then
+// delivers it. Both detectors go through here so the probe has one call site and
+// the sink still receives a fully-populated alert for tests to inspect.
+func sendStrandedAlert(a StrandedAlert) {
+	if a.ItemStatus == "" {
+		a.ItemStatus = workItemStatusProbe(a.WorkItemID)
+	}
+	strandedAlertMail(a)
+}
+
+// workItemStatusTimeout bounds the status probe. Short: it decides one paragraph
+// of wording, and nothing about the alert depends on getting an answer.
+const workItemStatusTimeout = 5 * time.Second
+
+// workItemStatusProbe reads a work item's status, swappable for tests.
+var workItemStatusProbe = mgWorkItemStatus
+
+// SetWorkItemStatusProbe replaces the status probe used to word stranded-work
+// alerts. Exported for tests; passing nil restores the default.
+func SetWorkItemStatusProbe(f func(string) string) {
+	if f == nil {
+		f = mgWorkItemStatus
+	}
+	workItemStatusProbe = f
+}
+
+// mgWorkItemStatus asks mg for one work item's status, or returns "" when it
+// cannot be read.
+//
+// IT ANSWERS "" ON EVERY FAILURE, and "" means "keep the wording that shipped
+// before this probe existed". That is the safe direction here: a wrong "" costs
+// one paragraph of over-specific advice on a closed item, while treating an
+// unreadable store as evidence of a status would let a transient mg failure
+// rewrite the alert's most emphatic sentence.
+//
+// STDOUT ONLY, via Output(). `mg show --json` writes advisories to stderr — a
+// collision note for an id that also names an archived item, for instance — and
+// merging the two streams makes the store's own answer unparseable for an item
+// it answered perfectly (see internal/client's mgShowJSON, mg-aaf6).
+func mgWorkItemStatus(id string) string {
+	if id == "" {
+		return ""
+	}
+	// Bounded, because this runs on the claim-release path. Everything else that
+	// path shells out to is either bounded already (strandedwork.Fetch) or is the
+	// alert itself; a status probe is the one call here that buys only wording,
+	// so it is the last thing that should be able to hold a release open.
+	ctx, cancel := context.WithTimeout(context.Background(), workItemStatusTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "mg", "show", id, "--json").Output()
+	if err != nil {
+		return ""
+	}
+	var item struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(out, &item); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(item.Status)
+}
+
+// itemIsClosed reports whether the alert's work item is in a status nothing will
+// be dispatched at. "" — the status could not be read — is NOT closed, so an
+// unreadable store leaves the wording exactly as it shipped.
+func (a StrandedAlert) itemIsClosed() bool {
+	switch strings.ToLower(a.ItemStatus) {
+	case "done", "archived", "cancelled", "canceled":
+		return true
+	}
+	return false
+}
+
 // Message renders the alert as (subject, body).
 //
 // THE BODY CARRIES THE REMEDY AND THE PROHIBITION TOGETHER. Naming only the
@@ -219,16 +299,31 @@ func (a StrandedAlert) Message() (subject, body string) {
 	}
 	subject = fmt.Sprintf("[stranded-push] %s left pushed work behind on %s — do NOT dispatch at %s",
 		a.Polecat, a.Finding.Branch, a.WorkItemID)
-	if a.WorkItemID == "" {
+	switch {
+	case a.WorkItemID == "":
 		subject = fmt.Sprintf("[stranded-push] %s left pushed work behind on %s",
 			a.Polecat, a.Finding.Branch)
+	case a.itemIsClosed():
+		// The prohibition has to be true in the half that travels furthest, and
+		// "do NOT dispatch" is not true of an item nothing will be dispatched at.
+		subject = fmt.Sprintf("[stranded-push] %s is %s but %s never merged — %s left pushed work behind",
+			a.WorkItemID, a.ItemStatus, a.Finding.Branch, a.Polecat)
 	}
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "A polecat's branch carries work the target does not have, and the item it belongs to\n"+
-		"is back in the pool describing itself as untouched.\n\n")
+	if a.itemIsClosed() {
+		fmt.Fprintf(&b, "A polecat's branch carries work the target does not have, and the item it belongs to\n"+
+			"was closed anyway.\n\n")
+	} else {
+		fmt.Fprintf(&b, "A polecat's branch carries work the target does not have, and the item it belongs to\n"+
+			"is back in the pool describing itself as untouched.\n\n")
+	}
 	fmt.Fprintf(&b, "Polecat:    %s\n", a.Polecat)
-	fmt.Fprintf(&b, "Work item:  %s\n", item)
+	if a.ItemStatus != "" {
+		fmt.Fprintf(&b, "Work item:  %s (status %s)\n", item, a.ItemStatus)
+	} else {
+		fmt.Fprintf(&b, "Work item:  %s\n", item)
+	}
 	fmt.Fprintf(&b, "Repo:       %s\n", a.Repo)
 	fmt.Fprintf(&b, "Branch:     %s (ref %s, pushed=%t)\n", a.Finding.Branch, a.Finding.Ref, a.Finding.Pushed)
 	fmt.Fprintf(&b, "Target:     %s\n", a.Finding.Target)
@@ -245,7 +340,19 @@ func (a StrandedAlert) Message() (subject, body string) {
 	}
 	b.WriteString("\n\n")
 
-	if a.WorkItemID != "" {
+	if a.WorkItemID != "" && a.itemIsClosed() {
+		// The board paragraph below is FALSE for a closed item, and saying it
+		// anyway is not a harmless overstatement: it tells the reader to expect a
+		// dispatch that cannot happen, which invites them to treat the whole
+		// notice as boilerplate. A done item is not a re-derivation risk; the
+		// thing that is actually wrong is that its branch never landed (mg-1af2).
+		fmt.Fprintf(&b, "THE ITEM IS ALREADY %s, SO THIS IS NOT A RE-DISPATCH RISK. Nothing will be\n"+
+			"dispatched at %s and priority-wake will not advertise it. What IS wrong is that %s\n"+
+			"was closed with work on its branch that never reached %s — either the branch still\n"+
+			"needs submitting, or it was superseded and can be deleted. Establish which; a closed\n"+
+			"item with unmerged commits is exactly the state nobody is looking for.\n\n",
+			strings.ToUpper(a.ItemStatus), a.WorkItemID, a.WorkItemID, a.Finding.Target)
+	} else if a.WorkItemID != "" {
 		fmt.Fprintf(&b, "DO NOT DISPATCH A WORKER AT %s. The work already exists and is already pushed;\n"+
 			"a worker sent at this item re-derives it from scratch and the pushed copy is what gets\n"+
 			"thrown away. mg-9a19 lost 1026 lines exactly that way. The board shows the item as\n"+

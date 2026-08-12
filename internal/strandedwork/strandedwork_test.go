@@ -555,3 +555,206 @@ func TestIsPreRegistrationMatching(t *testing.T) {
 		}
 	}
 }
+
+// --- Case (c): a branch that is only POINTING at another branch's work -------
+//
+// The live false positive of 2026-08-12 (mg-1af2), reconstructed. p1c60 was a
+// REVIEW polecat for mg-1c60; reviewing means checking the branch under review
+// out, so its own worktree branch ended up pointing at builder paaf6's head.
+// `git rev-parse polecat-p1c60 polecat-paaf6` printed the same sha twice. The
+// detector still called it four commits of stranded work, and the remedy it
+// printed — `refinery submit polecat-p1c60 --author=mg-1c60` — would have
+// submitted mg-aaf6's work a second time under the reviewer's authorship,
+// racing the builder's own submission.
+//
+// This is not a rare race. On the gh-issue track a reviewer's branch is a
+// pointer at the builder's head EVERY time, so the resubmit verdict fired on
+// every review polecat that ever ran.
+
+// reviewerAtBuilderHead builds the two-branch shape: a builder branch carrying
+// commits that name the builder's item, and a reviewer branch pointing at the
+// same head. It returns the repo.
+func reviewerAtBuilderHead(t *testing.T) *repo {
+	t.Helper()
+	r := newRepo(t)
+	r.branch("polecat-paaf6", "main")
+	r.commit("workitem.go", "feat(workitem): a review ticket DECLARES the build item it reviews (mg-aaf6)")
+	r.commit("client.go", "fix(client): the mg show --json probes read STDOUT ONLY (mg-aaf6)")
+	r.push("polecat-paaf6")
+	// The reviewer checks the branch under review out. Its own branch is now a
+	// pointer at the builder's head — this is what `git checkout` of a PR branch
+	// leaves behind in a reviewer's worktree.
+	r.branch("polecat-p1c60", "polecat-paaf6")
+	r.checkout("main")
+	return r
+}
+
+func TestReviewerBranchPointingAtBuilderHeadIsCarriedNotStranded(t *testing.T) {
+	r := reviewerAtBuilderHead(t)
+
+	f, err := Inspect(r.dir, "polecat-p1c60", "main")
+	if err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+	if f.Stranded() {
+		t.Fatalf("the reviewer's branch reported as STRANDED (%q): the remedy it prints would submit "+
+			"the builder's work twice, under the reviewer's authorship: %s", f.Disposition, f.Summary())
+	}
+	if f.Disposition != DispositionCarried {
+		t.Fatalf("disposition = %q, want %q", f.Disposition, DispositionCarried)
+	}
+	if f.Carrier != "polecat-paaf6" {
+		t.Errorf("Carrier = %q, want polecat-paaf6 — the branch that owns these commits", f.Carrier)
+	}
+	if len(f.Unmerged) != 2 {
+		t.Errorf("Unmerged = %d, want 2: the commits ARE absent from the target, and saying otherwise "+
+			"would be a different lie", len(f.Unmerged))
+	}
+	s := f.Summary()
+	for _, want := range []string{"polecat-paaf6", "mg-aaf6", "Do NOT submit"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("Summary missing %q — a reader has to be able to see WHY this is not stranding: %q", want, s)
+		}
+	}
+}
+
+// TestBuilderBranchStaysStrandedWhenAReviewerPointsAtIt is the negative control,
+// and it is the one that rules out the obvious implementation.
+//
+// "Is some other branch already carrying these commits?" — the rule mg-1af2's
+// ticket proposed — is SYMMETRIC: the reviewer's branch contains the builder's
+// head just as surely as the builder's contains the reviewer's. A detector built
+// on containment alone would go quiet on the builder too, which is the mg-9a19
+// case: a polecat whose finished work is on a branch nobody is going to merge.
+// That is the failure this whole package exists to prevent, so it must survive a
+// reviewer having glanced at the branch.
+func TestBuilderBranchStaysStrandedWhenAReviewerPointsAtIt(t *testing.T) {
+	r := reviewerAtBuilderHead(t)
+
+	f, err := Inspect(r.dir, "polecat-paaf6", "main")
+	if err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+	if !f.Stranded() {
+		t.Fatalf("the BUILDER's branch went quiet because a reviewer pointed at it (%q). "+
+			"mg-9a19 lost 1026 lines to exactly this branch being unreported: %s", f.Disposition, f.Summary())
+	}
+	if f.Disposition != DispositionResubmit {
+		t.Errorf("disposition = %q, want %q", f.Disposition, DispositionResubmit)
+	}
+	// The carrier was still SEEN — it is only not treated as an owner.
+	if len(f.CarriedBy) == 0 || f.CarriedBy[0] != "polecat-p1c60" {
+		t.Errorf("CarriedBy = %v, want [polecat-p1c60]: the reviewer's branch does contain this head, "+
+			"and the report should be able to say so", f.CarriedBy)
+	}
+	if f.Carrier != "" {
+		t.Errorf("Carrier = %q, want empty: polecat-p1c60 does not own mg-aaf6's work", f.Carrier)
+	}
+}
+
+// TestCarriedNeedsAnOwnerNotJustACarrier. Containment by a branch that does not
+// claim the work is not evidence of anything. A polecat branched from another
+// polecat's head and added its own commits contains that head, but it is not the
+// owner and the original branch is still stranded.
+func TestCarriedNeedsAnOwnerNotJustACarrier(t *testing.T) {
+	r := newRepo(t)
+	r.branch("polecat-9a19", "main")
+	r.commit("audit.md", "feat(audit): drift battery (mg-9a19)")
+	r.push("polecat-9a19")
+	r.branch("polecat-zzz1", "polecat-9a19")
+	r.commit("more.md", "feat(more): built on top (mg-zzz1)")
+	r.push("polecat-zzz1")
+	r.checkout("main")
+
+	f, err := Inspect(r.dir, "polecat-9a19", "main")
+	if err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+	if !f.Stranded() {
+		t.Fatalf("a branch contained by an unrelated descendant went quiet (%q): %s", f.Disposition, f.Summary())
+	}
+}
+
+// TestCarriedRequiresAWorkItemIdInTheSubjects. With no id in the commit
+// subjects there is no ownership question to answer, so the loud verdict stands.
+// A duplicate report costs a reader one comparison; a suppressed one costs what
+// mg-9a19 cost.
+func TestCarriedRequiresAWorkItemIdInTheSubjects(t *testing.T) {
+	r := newRepo(t)
+	r.branch("polecat-paaf6", "main")
+	r.commit("a.md", "feat: work with no item id in the subject")
+	r.push("polecat-paaf6")
+	r.branch("polecat-p1c60", "polecat-paaf6")
+	r.checkout("main")
+
+	f, err := Inspect(r.dir, "polecat-p1c60", "main")
+	if err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+	if f.Disposition != DispositionResubmit {
+		t.Errorf("disposition = %q, want %q: nothing here says who owns these commits, and "+
+			"'cannot tell' must report rather than suppress", f.Disposition, DispositionResubmit)
+	}
+}
+
+// TestPreRegistrationOutranksCarried. The package's stated asymmetry says the
+// pre-registration verdict must not be crowded out, and a suppression rule is
+// exactly what crowds it out. A pointer branch whose commits include an unmerged
+// pre-registration commit keeps the emphatic verdict.
+func TestPreRegistrationOutranksCarried(t *testing.T) {
+	r := newRepo(t)
+	r.branch("polecat-paaf6", "main")
+	r.commit("predictions.md", "predictions: three of five will be caught (mg-aaf6)")
+	r.push("polecat-paaf6")
+	r.branch("polecat-p1c60", "polecat-paaf6")
+	r.checkout("main")
+
+	f, err := Inspect(r.dir, "polecat-p1c60", "main")
+	if err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+	if f.Disposition != DispositionPreRegistration {
+		t.Errorf("disposition = %q, want %q: the carried check must not outrank the one verdict "+
+			"whose absence is silent", f.Disposition, DispositionPreRegistration)
+	}
+}
+
+// TestPushedBranchIsNotCarriedByItsOwnRemoteTwin. refs/remotes/origin/<branch>
+// trivially contains refs/heads/<branch>'s head. Counting that as a carrier
+// would silence every pushed branch in the repo — the detector's whole
+// population.
+func TestPushedBranchIsNotCarriedByItsOwnRemoteTwin(t *testing.T) {
+	r := newRepo(t)
+	r.branch("polecat-9a19", "main")
+	r.commit("audit.md", "feat(audit): finished (mg-9a19)")
+	r.push("polecat-9a19")
+	r.checkout("main")
+
+	f, err := Inspect(r.dir, "polecat-9a19", "main")
+	if err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+	if len(f.CarriedBy) != 0 {
+		t.Errorf("CarriedBy = %v, want empty: a branch's own remote-tracking ref is not another branch", f.CarriedBy)
+	}
+	if !f.Stranded() {
+		t.Fatalf("a pushed branch was silenced by its own origin copy (%q): %s", f.Disposition, f.Summary())
+	}
+}
+
+// TestScanKeepsTheBuilderAndDropsTheReviewer: the two-branch shape as the sweep
+// and the dispatch gate see it. Exactly one row, and it is the builder's.
+func TestScanKeepsTheBuilderAndDropsTheReviewer(t *testing.T) {
+	r := reviewerAtBuilderHead(t)
+
+	findings, errs := Scan(r.dir, "main")
+	if len(errs) > 0 {
+		t.Fatalf("Scan errors: %v", errs)
+	}
+	if len(findings) != 1 {
+		t.Fatalf("Scan returned %d finding(s), want exactly 1 (the builder): %+v", len(findings), findings)
+	}
+	if findings[0].Branch != "polecat-paaf6" {
+		t.Errorf("Scan kept %q, want polecat-paaf6", findings[0].Branch)
+	}
+}

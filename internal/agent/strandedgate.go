@@ -230,6 +230,34 @@ func (r *Registry) reportStrandedWorkOnRelease(a *Agent, reason string) {
 			a.Name, branch, a.WorkItemID, err)
 		return
 	}
+	if f.Disposition == strandedwork.DispositionCarried {
+		// The suppression is LOGGED AND EMITTED rather than silent (mg-1af2). A
+		// check that can only ever remove an alert has to be observable, or
+		// "this branch was correctly identified as a pointer" and "the detector
+		// stopped working" are the same silence — which is the shape of defect
+		// this whole detector has already been fixed for twice.
+		log.Printf("agent %s: branch %s has %d commit(s) %s lacks, but %s already carries and owns them "+
+			"— NOT stranded, no alert sent (mg-1af2). %s",
+			a.Name, f.Branch, len(f.Unmerged), f.Target, f.Carrier, f.Summary())
+		events.Emit(context.Background(), events.Event{
+			EventType:  "work_item_push_carried",
+			Agent:      a.eventAgent(),
+			WorkItemID: a.WorkItemID,
+			Repo:       a.SourceRepo,
+			Details: map[string]any{
+				"branch":     f.Branch,
+				"ref":        f.Ref,
+				"target":     f.Target,
+				"carrier":    f.Carrier,
+				"carried_by": f.CarriedBy,
+				"owner_item": f.WorkItemID,
+				"unmerged":   len(f.Unmerged),
+				"reason":     reason,
+				"route":      RouteRelease,
+			},
+		})
+		return
+	}
 	if !f.Stranded() {
 		return
 	}
@@ -252,7 +280,7 @@ func (r *Registry) reportStrandedWorkOnRelease(a *Agent, reason string) {
 			"route":       RouteRelease,
 		},
 	})
-	strandedAlertMail(StrandedAlert{
+	sendStrandedAlert(StrandedAlert{
 		Polecat:    a.Name,
 		WorkItemID: a.WorkItemID,
 		Repo:       a.SourceRepo,

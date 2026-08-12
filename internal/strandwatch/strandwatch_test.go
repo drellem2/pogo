@@ -744,3 +744,52 @@ func TestPreRegistrationIsCarriedIntoTheRow(t *testing.T) {
 		t.Errorf("the report does not surface the pre-registration commit:\n%s", out)
 	}
 }
+
+// TestReviewerPointerBranchIsExcluded is the mg-1af2 shape as this sweep sees
+// it. A review polecat reviews by checking the branch under review out, so its
+// own worktree branch points at the builder's head — every commit on it is work
+// the target does not have, and every one of them is the builder's. Reported as
+// `stranded`, the remedy this sweep prints (`refinery submit polecat-p1c60`)
+// submits mg-aaf6's work a second time under mg-1c60's authorship.
+//
+// It is EXCLUDED rather than dropped, for the same reason a running polecat is:
+// a suppression nobody can see is indistinguishable from a miss.
+func TestReviewerPointerBranchIsExcluded(t *testing.T) {
+	r := newRepo(t)
+	r.branch("polecat-paaf6", "main")
+	r.commit("workitem.go", "feat(workitem): a review ticket DECLARES the build item it reviews (mg-aaf6)")
+	r.push("polecat-paaf6")
+	r.branch("polecat-p1c60", "polecat-paaf6")
+	r.checkout("main")
+
+	rep, err := Scan(Options{
+		Items: board(
+			Item{ID: "mg-1c60", Status: "available", Repo: r.dir, Title: "review gh#131 part 3"},
+			Item{ID: "mg-aaf6", Status: "available", Repo: r.dir, Title: "build gh#131 part 3"},
+		),
+		LiveAgents: fleet(),
+		Target:     "main",
+	})
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if row, ok := rowFor(rep, "mg-1c60"); ok {
+		t.Errorf("the REVIEWER's pointer branch was reported as %q; its remedy (%s) submits the "+
+			"builder's work a second time under the reviewer's authorship\n%s",
+			row.Kind, row.Remedy(), Render(rep, true))
+	}
+	if len(rep.Excluded) != 1 || !strings.Contains(rep.Excluded[0].Reason, "polecat-paaf6") {
+		t.Fatalf("Excluded = %+v, want one entry naming polecat-paaf6 as the owner", rep.Excluded)
+	}
+
+	// And the half that must not move: the BUILDER's branch is genuinely
+	// stranded, and a reviewer having checked it out is not a reason to go quiet.
+	row, ok := rowFor(rep, "mg-aaf6")
+	if !ok {
+		t.Fatalf("the BUILDER's stranded branch vanished because a reviewer pointed at it — "+
+			"that is the mg-9a19 case, which is why this sweep exists\n%s", Render(rep, true))
+	}
+	if row.Kind != KindStranded {
+		t.Errorf("builder row Kind = %q, want %q", row.Kind, KindStranded)
+	}
+}

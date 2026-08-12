@@ -447,3 +447,34 @@ func TestStrandedFindingsSurfacesScanErrors(t *testing.T) {
 		t.Errorf("error does not say what failed: %v", err)
 	}
 }
+
+// TestSpawnAtAReviewerItemIsNotRefusedForThePointerBranch is the third reader of
+// the same defect (mg-1af2). The dispatch gate attributes a branch to an item by
+// NAME as well as by commit subject, so polecat-p1c60 is attributed to mg-1c60
+// even though every commit on it names mg-aaf6. Before the carried disposition
+// that meant a review item could never be dispatched at a second time: the
+// reviewer's own pointer branch refused it, and the refusal's advice — resubmit
+// that branch — would have double-submitted the builder's work.
+func TestSpawnAtAReviewerItemIsNotRefusedForThePointerBranch(t *testing.T) {
+	repo := strandedRepo(t)
+	pushBranch(t, repo, "polecat-paaf6", "workitem.go",
+		"feat(workitem): a review ticket DECLARES the build item it reviews (mg-aaf6)")
+	gitRun(t, repo, "branch", "polecat-p1c60", "polecat-paaf6")
+
+	reg := newDrainTestRegistry(t)
+	rr := spawnPolecat(t, reg, SpawnPolecatAPIRequest{
+		Name: "r1c60", Id: "mg-1c60", Repo: repo, Branch: "main", Template: BuildWorkerTemplate,
+	})
+	if rr.Code == http.StatusConflict {
+		t.Fatalf("spawn at the REVIEW item was refused because of its own pointer branch: %s", rr.Body.String())
+	}
+
+	// The builder's item is still refused, which is the case the gate exists for.
+	rr = spawnPolecat(t, reg, SpawnPolecatAPIRequest{
+		Name: "raaf6", Id: "mg-aaf6", Repo: repo, Branch: "main", Template: BuildWorkerTemplate,
+	})
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("spawn at the BUILDER's item with pushed unmerged work: status = %d, want 409 — "+
+			"the mg-1af2 fix must not disarm the mg-9a19 refusal", rr.Code)
+	}
+}
