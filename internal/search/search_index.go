@@ -265,7 +265,7 @@ func (g *BasicSearch) indexRec(proj *IndexedProject, path string,
 	}
 	defer file.Close()
 	dirnames, err := file.Readdirnames(0)
-	g.logger.Debug("Found dirs: ", dirnames)
+	g.logger.Debug("Found dirs", "dirs", dirnames)
 	if err != nil {
 		return err
 	}
@@ -363,7 +363,7 @@ func (g *BasicSearch) index(proj *IndexedProject, path string,
 		return
 	}
 	if err != nil {
-		g.logger.Warn("Error indexing project: ", err.Error())
+		g.logger.Warn("Error indexing project", "error", err)
 		g.releaseContents(contents)
 		return
 	}
@@ -373,7 +373,7 @@ func (g *BasicSearch) index(proj *IndexedProject, path string,
 func (g *BasicSearch) ReIndex(path string) {
 	fileInfo, e := os.Lstat(path)
 	if e != nil {
-		g.logger.Error("Error getting path info: ", e)
+		g.logger.Error("Error getting path info", "path", path, "error", e)
 		return
 	}
 	if !fileInfo.IsDir() {
@@ -395,7 +395,7 @@ func (g *BasicSearch) ReIndex(path string) {
 		defer g.inflight.Add(-1)
 		fullPath, err2 := absolute(path)
 		if err2 != nil {
-			g.logger.Error("Error getting absolute path", path)
+			g.logger.Error("Error getting absolute path", "root", path, "error", err2)
 			return
 		}
 
@@ -459,7 +459,7 @@ func (g *BasicSearch) ReIndex(path string) {
 
 		gitIgnore, err := ParseGitIgnore(matchedRoot)
 		if err != nil {
-			g.logger.Error("Error parsing gitignore %v", err)
+			g.logger.Error("Error parsing gitignore", "root", matchedRoot, "error", err)
 		}
 		g.index(&indexed, fullPath, gitIgnore, prevHashes, prevMtimes)
 	}()
@@ -502,7 +502,7 @@ func ParseGitIgnore(path string) (*ignore.GitIgnore, error) {
 func (g *BasicSearch) deleteIndexFile(p *IndexedProject) error {
 	searchDir, err := p.makeSearchDir()
 	if err != nil {
-		g.logger.Error("Error making search dir: ", err)
+		g.logger.Error("Error making search dir", "root", p.Root, "error", err)
 		return err
 	}
 	indexPath := filepath.Join(searchDir, codeSearchIndexFileName)
@@ -522,13 +522,13 @@ func (g *BasicSearch) getSearchFile(p *IndexedProject, filename string) (*os.Fil
 	path := p.Root
 	searchDir, err := p.makeSearchDir()
 	if err != nil {
-		g.logger.Error("Error making search dir: ", err)
+		g.logger.Error("Error making search dir", "root", path, "error", err)
 		return nil, err
 	}
 	indexPath := filepath.Join(searchDir, filename)
 	indexFile, err := os.OpenFile(indexPath, os.O_CREATE|os.O_WRONLY, 0600)
 	if err != nil {
-		g.logger.Error("Error opening index file ", path)
+		g.logger.Error("Error opening index file", "root", path, "index_path", indexPath, "error", err)
 		return nil, err
 	}
 	return indexFile, nil
@@ -548,7 +548,7 @@ func (g *BasicSearch) Index(req *pogoPlugin.IProcessProjectReq) {
 	p, ok := g.projects[path]
 	g.mu.RUnlock()
 	if ok && p.Status == StatusReady && p.Paths != nil && len(p.Paths) > 0 {
-		g.logger.Info("Already indexed ", path)
+		g.logger.Info("Already indexed", "root", path)
 		return
 	}
 
@@ -558,7 +558,7 @@ func (g *BasicSearch) Index(req *pogoPlugin.IProcessProjectReq) {
 	if ok && len(p.FileHashes) > 0 {
 		prevHashes = p.FileHashes
 		prevMtimes = p.FileMtimes
-		g.logger.Info("Incremental index: reusing ", strconv.Itoa(len(prevHashes)), " cached hashes for ", path)
+		g.logger.Info("Incremental index: reusing cached hashes", "hashes", len(prevHashes), "root", path)
 	}
 
 	proj := IndexedProject{
@@ -584,7 +584,7 @@ func (g *BasicSearch) Index(req *pogoPlugin.IProcessProjectReq) {
 	gitIgnore, err := ParseGitIgnore(path)
 	if err != nil {
 		// Non-fatal error
-		g.logger.Error("Error parsing gitignore", err)
+		g.logger.Error("Error parsing gitignore", "root", path, "error", err)
 	}
 	g.index(&proj, path, gitIgnore, prevHashes, prevMtimes)
 }
@@ -607,7 +607,7 @@ func (g *BasicSearch) serializeProjectIndex(proj *IndexedProject, prev *IndexedP
 	defer g.releaseContents(contents)
 	searchDir, err := proj.makeSearchDir()
 	if err != nil {
-		g.logger.Error("Error making search dir: ", err)
+		g.logger.Error("Error making search dir", "root", proj.Root, "error", err)
 		// Conservative: an errored pass reports "changed" so the periodic
 		// indexer retries at base cadence instead of backing off.
 		return true
@@ -710,14 +710,15 @@ func (g *BasicSearch) serializeProjectIndex(proj *IndexedProject, prev *IndexedP
 	}
 	indexFile, err := g.getIndexFile(proj)
 	if err != nil {
-		g.logger.Error("Error getting index file ", proj.Root)
+		g.logger.Error("Error getting index file", "root", proj.Root, "error", err)
 		return contentChanged
 	}
 	defer indexFile.Close()
 	err = indexer.Write(indexFile)
 	if err != nil {
-		g.logger.Error("Error writing index file ", proj.Root)
-		g.logger.Error("Error: ", err.Error())
+		// One line, not two: the root and the error describe the same failure,
+		// and the second call's whole message was "Error: ".
+		g.logger.Error("Error writing index file", "root", proj.Root, "error", err)
 		return contentChanged
 	}
 	return contentChanged
@@ -731,7 +732,7 @@ func (g *BasicSearch) Load(projectRoot string) (*IndexedProject, error) {
 	}
 	searchDir, err := project.makeSearchDir()
 	if err != nil {
-		g.logger.Error("Error making search dir: ", err)
+		g.logger.Error("Error making search dir", "root", projectRoot, "error", err)
 		return nil, err
 	}
 	saveFilePath := filepath.Join(searchDir, saveFileName)
@@ -755,7 +756,7 @@ func (g *BasicSearch) Load(projectRoot string) (*IndexedProject, error) {
 	byteValue, _ := io.ReadAll(file)
 	err = json.Unmarshal(byteValue, project)
 	if err != nil {
-		g.logger.Error("Error deserializing index file: %v", err)
+		g.logger.Error("Error deserializing index file", "save_path", saveFilePath, "error", err)
 		return nil, err
 	}
 	// Initialize maps for backward compatibility with old index files
@@ -823,25 +824,25 @@ func (g *BasicSearch) Search(projectRoot string, data string, duration string) (
 	// Open index file
 	searchDir, err := project.makeSearchDir()
 	if err != nil {
-		g.logger.Error("Error making search dir: ", err)
+		g.logger.Error("Error making search dir", "root", projectRoot, "error", err)
 		return nil, err
 	}
 	indexPath := filepath.Join(searchDir, codeSearchIndexFileName)
 	indexFile, err := os.Open(indexPath)
 	if err != nil {
-		g.logger.Error("Error opening index file ", indexPath)
+		g.logger.Error("Error opening index file", "index_path", indexPath, "error", err)
 		return nil, err
 	}
 	defer indexFile.Close()
 	index, err2 := zoekt.NewIndexFile(indexFile)
 	if err2 != nil {
-		g.logger.Error("Error reading index file ", indexPath)
+		g.logger.Error("Error reading index file", "index_path", indexPath, "error", err2)
 		return nil, err2
 	}
 	// Search
 	searcher, err := zoekt.NewSearcher(index)
 	if err != nil {
-		g.logger.Error("Error creating searcher", err)
+		g.logger.Error("Error creating searcher", "index_path", indexPath, "error", err)
 		return nil, err
 	}
 	defer searcher.Close()

@@ -218,7 +218,7 @@ func (g *BasicSearch) searchResponse(index *IndexedProject, results *SearchResul
 }
 
 func (g *BasicSearch) Info() *pogoPlugin.PluginInfoRes {
-	g.logger.Debug("Returning version %s", version)
+	g.logger.Debug("Returning version", "version", version)
 	return &pogoPlugin.PluginInfoRes{Version: version}
 }
 
@@ -258,7 +258,7 @@ func (g *BasicSearch) Execute(req string) string {
 }
 
 func (g *BasicSearch) ProcessProject(req *pogoPlugin.IProcessProjectReq) error {
-	g.logger.Info("Processing project %s", (*req).Path())
+	g.logger.Info("Processing project", "path", (*req).Path())
 	proj, err := g.Load((*req).Path())
 	if err != nil {
 		g.logger.Error("Error processing project", "error", err)
