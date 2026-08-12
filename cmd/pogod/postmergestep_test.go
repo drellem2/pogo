@@ -59,7 +59,7 @@ func TestPostMergeStepFailure_BlocksAutoDone(t *testing.T) {
 	}
 
 	completeCalled := false
-	reapMergedPolecat(reg, mr, func(string, string) error { completeCalled = true; return nil }, verdict, backstop)
+	reapMergedPolecat(reg, mr, func(string, string) error { completeCalled = true; return nil }, verdict, backstop, nil)
 
 	if completeCalled {
 		t.Error("mg done must NOT be called when the declared post-merge step failed — the deliverable does not exist")
@@ -141,7 +141,7 @@ func TestPostMergeStepSuccess_CompletesAndRecordsWhatLanded(t *testing.T) {
 	}
 
 	var sidecar string
-	reapMergedPolecat(reg, mr, func(_, resultJSON string) error { sidecar = resultJSON; return nil }, verdict, backstop)
+	reapMergedPolecat(reg, mr, func(_, resultJSON string) error { sidecar = resultJSON; return nil }, verdict, backstop, nil)
 
 	if len(reg.stopped) != 1 || reg.stopped[0] != "e084" {
 		t.Errorf("the polecat must be reaped normally once its post-merge step has been performed for it, got %v", reg.stopped)
@@ -175,7 +175,7 @@ func TestPostMergeStepSuccess_SidecarOmitsUndeclaredTag(t *testing.T) {
 	mr := releaseCutMR("", "")
 
 	var sidecar string
-	reapMergedPolecat(reg, mr, func(_, resultJSON string) error { sidecar = resultJSON; return nil }, postMergeVerdict{}, nil)
+	reapMergedPolecat(reg, mr, func(_, resultJSON string) error { sidecar = resultJSON; return nil }, postMergeVerdict{}, nil, nil)
 
 	var result map[string]any
 	if err := json.Unmarshal([]byte(sidecar), &result); err != nil {

@@ -35,7 +35,7 @@ func TestReapMergedPolecat_CarriesTheAuthorsVerdictIntoTheSidecar(t *testing.T) 
 		ID: "mr-42", Branch: "polecat-mg-1234", Author: "mg-1234", TargetRef: "main",
 		Verdict: json.RawMessage(worker),
 	}
-	reapMergedPolecat(reg, mr, complete, postMergeVerdict{}, nil)
+	reapMergedPolecat(reg, mr, complete, postMergeVerdict{}, nil, nil)
 
 	var side map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(completedResult), &side); err != nil {
@@ -94,7 +94,7 @@ func TestReapMergedPolecat_NoVerdictStaysDetectableAsADrop(t *testing.T) {
 	}
 
 	mr := &refinery.MergeRequest{ID: "mr-42", Branch: "polecat-mg-1234", Author: "mg-1234", TargetRef: "main"}
-	reapMergedPolecat(reg, mr, complete, postMergeVerdict{}, nil)
+	reapMergedPolecat(reg, mr, complete, postMergeVerdict{}, nil, nil)
 
 	var side map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(completedResult), &side); err != nil {
@@ -132,7 +132,7 @@ func TestReapMergedPolecat_VerdictDoesNotOverrideADeferral(t *testing.T) {
 		ID: "mr-42", Branch: "polecat-mg-1234", Author: "mg-1234", TargetRef: "feat-x",
 		PRFlow: true, Verdict: json.RawMessage(`{"verdict":"pass"}`),
 	}
-	reapMergedPolecat(reg, mr, complete, postMergeVerdict{}, nil)
+	reapMergedPolecat(reg, mr, complete, postMergeVerdict{}, nil, nil)
 
 	if called {
 		t.Error("a verdict on a PR-flow MR must not trigger the auto-done the deferral exists to skip")

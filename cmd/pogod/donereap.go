@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/drellem2/pogo/internal/agent"
+	"github.com/drellem2/pogo/internal/filernotify"
 )
 
 // The done-item reaper: completion, not merge, is what frees a slot (mg-56d1).
@@ -152,7 +153,7 @@ import (
 // its own clock and is only reaped once it goes quiet again.
 //
 // WHAT IT DELIBERATELY CANNOT DO. It never marks an item done (the item is
-// already done — that is the trigger), never mails, never restarts. The
+// already done — that is the trigger) and never restarts. The
 // restart-suppression rules (mg-18d0/mg-8cdb) are therefore not in tension with
 // it: stopping a finished polecat without replacing it is the correct end of a
 // lifecycle, not remediation. And a polecat whose item is still `claimed` is
@@ -160,6 +161,24 @@ import (
 // only the qualifier that says "not mid-sentence". That is the acceptance
 // control for this ticket: the healthy 42-minute idle polecat mid-work must
 // survive, and it does so structurally rather than by tuning.
+//
+// # THE ONE THING IT DOES MAIL (mg-f120)
+//
+// "Never mails" held until mg-f120, and the exception is narrow enough to state
+// exactly. This reaper is the ONLY place in the daemon that observes the close
+// of a work item the daemon did not perform: `mg done` runs in the polecat's own
+// process (see WHY IT POLLS above), and every other completion notice pogod
+// sends hangs off the refinery's merge. So a triage, audit or investigation
+// item — the ones with no branch — closed with nothing anywhere telling the
+// agent that COMMISSIONED it, and this is the one vantage point from which that
+// could be fixed.
+//
+// It is not an escalation and it is not remediation, which is what the original
+// "never mails" was about: there is no fault here, and the mail goes to the
+// item's own Creator rather than to a coordinator asked to intervene. The
+// decision about who to tell, and whether to tell anyone, belongs entirely to
+// internal/filernotify; this reaper hands over an observation and reads nothing
+// back.
 
 // doneReapIdleGrace is how long a polecat whose work item has reached a
 // terminal state must be quiet on its PTY before it is stopped.
@@ -211,6 +230,10 @@ type doneReaper struct {
 	// doneReapIdleGrace; a negative value would stop a done polecat the instant
 	// it is seen, which only a test should ask for.
 	grace time.Duration
+	// filer is told that the item completed, so the agent that commissioned it
+	// hears (mg-f120). Nil means not wired, which is what every test that is not
+	// about this seam leaves it as.
+	filer filerNotifier
 
 	// mu serialises Check against itself, and guards exempt. The heartbeat fires
 	// every ~30s and dispatches this in a goroutine, while a Check shells out to
@@ -236,6 +259,16 @@ func newDoneReaper(reg doneReapRegistry, done func(id string) (bool, error), rev
 		grace = doneReapIdleGrace
 	}
 	return &doneReaper{reg: reg, itemDone: done, itemReviews: reviews, grace: grace}
+}
+
+// SetFilerNotifier wires the completion notification (mg-f120). Separate from
+// newDoneReaper so that the reaper's constructor keeps saying what the reaper
+// is FOR, and so the one place this is wired is a named line in main.
+func (d *doneReaper) SetFilerNotifier(n filerNotifier) {
+	if d == nil {
+		return
+	}
+	d.filer = n
 }
 
 // Check samples the live polecats and stops every one whose work item has
@@ -295,6 +328,16 @@ func (d *doneReaper) Check(now time.Time) []string {
 		if !done {
 			continue
 		}
+		// The item is closed. Tell whoever commissioned it (mg-f120) — here,
+		// before the exemption and the stop, because the fact being reported is
+		// the CLOSE, not the reap: an exempt builder's item is just as closed as
+		// a reaped one's, and a stop that fails does not un-close it. The
+		// notifier dedups, so repeating this on every tick sends one mail.
+		notifyFiler(d.filer, filernotify.Completion{
+			ItemID: p.WorkItemID,
+			Route:  filernotify.RouteSelfClose,
+			Worker: p.Name,
+		})
 		if reviewer, held := openReviews()[p.WorkItemID]; held {
 			// The gh#131 case, caught. Logged ONCE per grant rather than every
 			// heartbeat — a review runs for a median of 8 minutes and this tick

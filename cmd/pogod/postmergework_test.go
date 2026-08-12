@@ -96,7 +96,7 @@ func TestMergeCompletion_ConsultsTheWorkItem(t *testing.T) {
 			reapMergedPolecat(reg, mr, func(id, _ string) error {
 				completedID = id
 				return nil
-			}, verdict, backstop)
+			}, verdict, backstop, nil)
 
 			if verdict.Declared != tc.declared {
 				t.Errorf("verdict.Declared = %v for %s, want %v (reason=%q)",

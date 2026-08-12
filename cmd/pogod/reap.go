@@ -9,6 +9,7 @@ import (
 
 	"github.com/drellem2/pogo/internal/agent"
 	"github.com/drellem2/pogo/internal/client"
+	"github.com/drellem2/pogo/internal/filernotify"
 	"github.com/drellem2/pogo/internal/refinery"
 )
 
@@ -26,6 +27,26 @@ const mergedPolecatStopTimeout = 5 * time.Second
 // hold its slot forever and re-submit its branch, regressing the gh #34/#35
 // slot-protection guarantees the auto-stop path exists to enforce.
 const deferDoneBackstopTimeout = 15 * time.Minute
+
+// filerNotifier tells the agent that FILED a work item that it has completed
+// (mg-f120). It is the *filernotify.Notifier in production and an interface
+// here so a test can watch what the reap path hands it — and so a nil one is a
+// legal "not wired", which is what every test that is not about this seam
+// passes.
+type filerNotifier interface {
+	Notify(filernotify.Completion) filernotify.Outcome
+}
+
+// notifyFiler is the nil-safe call. The reap path must never be conditional on
+// the notifier existing: a merge whose close happened is a merge whose close
+// happened, and a missing notifier is a wiring fault to be seen in one place
+// rather than guarded at every callsite.
+func notifyFiler(n filerNotifier, c filernotify.Completion) {
+	if n == nil {
+		return
+	}
+	n.Notify(c)
+}
 
 // polecatReaper is the slice of agent.Registry that reapMergedPolecat needs.
 type polecatReaper interface {
@@ -145,7 +166,7 @@ func resolvePostMergeWork(reg polecatReaper, mr *refinery.MergeRequest, declares
 //
 // Only polecats are stopped: crew agents (or a human) can author MRs too, but
 // their lifecycle is not tied to a single work item.
-func reapMergedPolecat(reg polecatReaper, mr *refinery.MergeRequest, complete func(id, resultJSON string) error, postMerge postMergeVerdict, backstop *deferredBackstop) {
+func reapMergedPolecat(reg polecatReaper, mr *refinery.MergeRequest, complete func(id, resultJSON string) error, postMerge postMergeVerdict, backstop *deferredBackstop, filer filerNotifier) {
 	if mr.Author == "" {
 		return
 	}
@@ -300,7 +321,8 @@ func reapMergedPolecat(reg polecatReaper, mr *refinery.MergeRequest, complete fu
 		sidecar["verdict"] = mr.Verdict
 	}
 	result, _ := json.Marshal(sidecar)
-	if err := complete(mr.Author, string(result)); err != nil {
+	completeErr := complete(mr.Author, string(result))
+	if err := completeErr; err != nil {
 		// An "already done" here means the POLECAT won the race and its own
 		// result stands — the item is closed with the worker's verdict, not
 		// ours, and that is the better outcome, not a degraded one. mg enforces
@@ -309,6 +331,33 @@ func reapMergedPolecat(reg polecatReaper, mr *refinery.MergeRequest, complete fu
 		// real failure and reads as one.
 		log.Printf("refinery: mg done %s on merged polecat's behalf did not apply — if this is 'already done' the polecat wrote its own result first and that result stands: %v", mr.Author, err)
 	}
+
+	// TELL THE AGENT THAT COMMISSIONED THIS ITEM (mg-f120). Everything above
+	// this line reports the merge to somebody who did not ask for the work: the
+	// refinery mails the coordinator, this function closes the item, the
+	// coordinator archives it. The FILER was told by nobody, and learned only if
+	// the worker volunteered a mail.
+	//
+	// It runs here, after the close, whether or not the close applied. An
+	// "already done" means the worker won the race and its own result stands —
+	// the item is closed either way, and it is the CLOSE, not this call's
+	// success, that the filer is waiting to hear about.
+	//
+	// The sidecar this writer produced is handed over as a FALLBACK only: the
+	// notifier prefers what is actually in the store, which on the already-done
+	// path is the worker's result rather than ours.
+	worker := ""
+	if a != nil {
+		worker = a.Name
+	}
+	notifyFiler(filer, filernotify.Completion{
+		ItemID:    mr.Author,
+		Route:     filernotify.RouteMerge,
+		Worker:    worker,
+		Branch:    mr.Branch,
+		MergedSHA: mr.MergedSHA,
+		Result:    fallbackSidecar(completeErr, string(result)),
+	})
 
 	// There is nothing to stop. The close was the whole point of this call
 	// (mg-be37) — say so at the same volume as the polecat path, because this
@@ -327,6 +376,20 @@ func reapMergedPolecat(reg polecatReaper, mr *refinery.MergeRequest, complete fu
 		return
 	}
 	log.Printf("refinery: stopped merged polecat %s (event-driven, gh #35)", a.Name)
+}
+
+// fallbackSidecar is the result JSON this writer produced, offered to the filer
+// notification only when the write it came from SUCCEEDED.
+//
+// When `mg done` was refused the store holds somebody else's result — the
+// worker's, which is the better one — and handing over ours would report a
+// verdict that is not the one recorded. Empty is the honest answer there: the
+// notifier reads the store and finds what actually landed.
+func fallbackSidecar(completeErr error, result string) string {
+	if completeErr != nil {
+		return ""
+	}
+	return result
 }
 
 // backstopTimer is the subset of *time.Timer the deferred backstop needs. It
