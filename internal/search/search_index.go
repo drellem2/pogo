@@ -302,6 +302,29 @@ func (g *BasicSearch) indexRec(proj *IndexedProject, path string,
 				g.logger.Warn(err.Error())
 			}
 		} else {
+			// Index only nodes that resolve to a regular file. A socket,
+			// FIFO, device node, dangling symlink or symlink-to-directory is
+			// not readable as a file, so os.ReadFile below fails and logs at
+			// ERROR — and because FileHashes is populated only on read
+			// success, the mtime shortcut can never fire for it. The entry is
+			// therefore re-read and re-logged on every rebuild, in perpetuity
+			// (gh#136). A FIFO is worse than noise: os.ReadFile on one with no
+			// writer BLOCKS, wedging the walk.
+			//
+			// The check must stat THROUGH the link. fileInfo comes from
+			// os.Lstat, for which a symlink to a regular file is not regular —
+			// testing fileInfo's own mode would silently stop indexing every
+			// symlinked source file, which is indexed today
+			// (TestSymlinkToRegularFileIsStillIndexed). Lstat-regular already
+			// settles the common case, so the extra syscall is paid only by
+			// the entries that are not plainly regular files.
+			if !fileInfo.Mode().IsRegular() {
+				target, terr := os.Stat(newPath)
+				if terr != nil || !target.Mode().IsRegular() {
+					continue
+				}
+			}
+
 			files = append(files, relativePath)
 			mtime := fileInfo.ModTime().UnixNano()
 			proj.FileMtimes[relativePath] = mtime
@@ -698,11 +721,17 @@ func (g *BasicSearch) serializeProjectIndex(proj *IndexedProject, prev *IndexedP
 		}
 		absPath, err := absolute(fullPath)
 		if err != nil {
-			g.logger.Error("Error getting absolute path - file may not exist", path)
+			// Named fields, not a bare trailing argument: hclog's Error takes
+			// msg plus key/value pairs, so `Error("Error reading file ",
+			// absPath)` put the one thing a reader wants from the line into a
+			// synthetic EXTRA_VALUE_AT_END, queryable by nothing. Same repair
+			// as the Reindexing line above (mg-f3ae). The remaining malformed
+			// calls in this package are mg-6698, deliberately not swept here.
+			g.logger.Error("Error getting absolute path - file may not exist", "path", path)
 		} else {
 			bytes, err := os.ReadFile(absPath)
 			if err != nil {
-				g.logger.Error("Error reading file ", absPath)
+				g.logger.Error("Error reading file", "path", absPath)
 			} else {
 				indexer.AddFile(absPath, bytes)
 			}
