@@ -284,7 +284,7 @@ func TestRegistryLiveness_RegistryStillBeatsWitness(t *testing.T) {
 	if err := agent.RecordPolecatWitness("cat-corpse", pid, "", ""); err != nil {
 		t.Fatalf("RecordPolecatWitness: %v", err)
 	}
-	if got := agent.PolecatWitness("cat-corpse"); got != agent.WitnessAlive {
+	if got := agent.AgentWitness("cat-corpse"); got != agent.WitnessAlive {
 		t.Fatalf("precondition: witness says %v, want alive — the witness must be arguing for life or "+
 			"this test does not exercise the conflict", got)
 	}
@@ -296,10 +296,15 @@ func TestRegistryLiveness_RegistryStillBeatsWitness(t *testing.T) {
 	}
 }
 
-// TestRegistryLiveness_CrewUnaffectedByWitness: crew are never witnessed —
-// their prompt's auto_start already IS their independent second witness — so
-// every crew classification must be exactly what it was before mg-13a3. This is
-// the regression guard for mg-de08's population.
+// TestRegistryLiveness_CrewUnaffectedByWitness: a crew agent that NOTHING ON
+// THIS BOX STARTED is unwitnessed, so its classification must be exactly what it
+// was before mg-13a3. This is the regression guard for mg-de08's population.
+//
+// Its premise used to be "crew are never witnessed", which was the defect
+// (mg-f9e8): the prompt's auto_start is only a second witness while it is true.
+// Crew are witnessed now, and neither agent here is — pm-live and pm-parked are
+// declared on disk and never spawned, which is what keeps this test measuring
+// the desired-state arm rather than the witness arm.
 func TestRegistryLiveness_CrewUnaffectedByWitness(t *testing.T) {
 	sandboxPogoHome(t)
 	writeCrewPrompt(t, "pm-live", true)
@@ -348,8 +353,8 @@ func TestRegistryLiveness_SpawnRecordsWitness(t *testing.T) {
 	}
 
 	// Spawn recorded it — a successor pogod would find this polecat alive.
-	if got := agent.PolecatWitness("cat-spawned"); got != agent.WitnessAlive {
-		t.Fatalf("PolecatWitness(cat-spawned) = %v, want %v — Spawn must record a polecat's witness, or "+
+	if got := agent.AgentWitness("cat-spawned"); got != agent.WitnessAlive {
+		t.Fatalf("AgentWitness(cat-spawned) = %v, want %v — Spawn must record a polecat's witness, or "+
 			"the classifier has nothing to consult after a restart (mg-13a3)", got, agent.WitnessAlive)
 	}
 
@@ -375,8 +380,8 @@ func TestRegistryLiveness_SpawnRecordsWitness(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("cat-spawned never exited")
 	}
-	if got := agent.PolecatWitness("cat-spawned"); got != agent.WitnessNoRecord {
-		t.Errorf("PolecatWitness(cat-spawned) = %v, want %v after exit — a witness for a process we "+
+	if got := agent.AgentWitness("cat-spawned"); got != agent.WitnessNoRecord {
+		t.Errorf("AgentWitness(cat-spawned) = %v, want %v after exit — a witness for a process we "+
 			"watched die must not survive to argue for it", got, agent.WitnessNoRecord)
 	}
 }
