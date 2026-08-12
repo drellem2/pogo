@@ -1599,6 +1599,28 @@ printf '%s\n' "$DEP_LEDGER" | grep -q "^dep-local	mg-dep-local	$MD_TMP/repo$" \
     && pass "gh#135: re-recording the same holders is a no-op — a ledger keyed on nothing would grow one row per 15s poll" \
     || fail "gh#135: the ledger duplicated rows across polls ($(drain_ledger_add "$DEP_LEDGER" "$DEP_P1" "$DEP_R1"))"
 
+# THE LEDGER KEY IS AN EXACT FIELD MATCH, AND THAT IS NOW EXERCISED. The comment
+# on drain_ledger_has warns that a substring match would silently merge two
+# polecats whose names share a prefix — and until this case, replacing its
+# `grep -qxF` with `grep -qF` failed nothing (round 1 advisory 3). A guard the
+# suite cannot distinguish from its own absence is a comment, not a guard. Two
+# real holders, one of whose names is a prefix of the other's, in ONE snapshot:
+# under a substring key the shorter never enters the ledger at all, so its
+# departure is never reported — the original defect, restored for one polecat.
+mdgit -C "$MD_TMP/repo" worktree add -q -b polecat-dep "$MD_TMP/wt-dep" main
+printf 'prefix\n' > "$MD_TMP/wt-dep/dpfx"
+mdgit -C "$MD_TMP/wt-dep" add dpfx
+mdgit -C "$MD_TMP/wt-dep" commit -qm dep-prefix
+DEP_PFX_BODY="$(dep_body "dep-local=$MD_TMP/wt-dep-local" "dep=$MD_TMP/wt-dep")"
+DEP_PFX_LEDGER="$(drain_ledger_add "" "$DEP_PFX_BODY" "$(drain_durability "$DEP_PFX_BODY")")"
+[ "$(printf '%s\n' "$DEP_PFX_LEDGER" | grep -c .)" = "2" ] \
+    && pass "gh#135: 'dep' and 'dep-local' are TWO ledger rows — the key is an exact field match, so a name that is a prefix of another's does not swallow it" \
+    || fail "gh#135: the prefix-sharing holders collapsed to $(printf '%s\n' "$DEP_PFX_LEDGER" | grep -c .) row(s) ($DEP_PFX_LEDGER) — drain_ledger_has is matching substrings and one holder is now unrecordable"
+DEP_PFX_D="$(drain_departures "$DEP_PFX_LEDGER" '{"draining":true,"count":0,"polecats":[]}')"
+printf '%s\n' "$DEP_PFX_D" | grep -q '^departed-unsatisfied dep (mg-dep):' \
+    && pass "gh#135: and the consequence is asserted, not just the row count — the prefix-named holder's departure is REPORTED ($DEP_PFX_D)" \
+    || fail "gh#135: the prefix-named holder's departure went unreported ($DEP_PFX_D) — for that polecat the original gh#135 defect is intact"
+
 # A polecat still PRESENT is not a departure, however long it holds.
 [ -z "$(drain_departures "$DEP_LEDGER" "$DEP_P1")" ] \
     && pass "gh#135: a holder still in the snapshot is not reported as departed — the ledger reconciles absence, it does not re-report the present" \
@@ -1635,9 +1657,30 @@ DEP_REVIEW="$(drain_departures "$(printf 'dep-review\tmg-dep-review\t%s' "$MD_TM
 printf '%s\n' "$DEP_REVIEW" | grep -q '^satisfied dep-review ' \
     && pass "gh#135: a departed polecat whose commits live under SOMEBODY ELSE's origin ref is satisfied — the predicate is gh#134's containment, reused, not origin/<same name> and not ancestry of main ($DEP_REVIEW)" \
     || fail "gh#135: the reviewer-shaped departure read as '$DEP_REVIEW' — the reconciliation narrowed the predicate back, and every stopped reviewer becomes a false RED on the nightly"
-printf '%s\n' "$DEP_REVIEW" | grep -q 'origin/HEAD' \
-    && fail "gh#135: the departure verdict credits the origin/HEAD symref ($DEP_REVIEW) — the default-branch symref says nothing about who pushed" \
-    || pass "gh#135: the departure verdict names a real branch ref, not the origin/HEAD symref ($DEP_REVIEW)"
+# THE origin/HEAD EXCLUSION IN drain_departure_verdict, EXERCISED — and the
+# fixture above CANNOT do it. `origin/HEAD` does not contain the reviewer's head,
+# so that assertion passes with the filter deleted (found in review of this PR,
+# round 1 advisory 4; the same defect PR 140 round 1 found one function up, where
+# the fixture lacked the symref entirely). The seat needs a departed polecat
+# whose head IS held by the default branch: `refs/remotes/origin/HEAD` sorts
+# first under `refs/remotes/origin/`, so it is precisely the ref `head -n 1`
+# would name.
+mdgit -C "$MD_TMP/repo" branch polecat-dep-atmain refs/remotes/origin/main
+# THE POSITIVE CONTROL, so the assertion below cannot be vacuous: without the
+# filter, origin/HEAD is what the verdict WOULD name.
+[ "$(mdgit -C "$MD_TMP/repo" for-each-ref --contains refs/heads/polecat-dep-atmain --format='%(refname)' refs/remotes/origin/ | head -n 1)" = "refs/remotes/origin/HEAD" ] \
+    && pass "gh#135 fixture: origin/HEAD is the FIRST ref containing the departed head, so the exclusion below has something to exclude and something to change" \
+    || fail "gh#135 fixture: origin/HEAD is not the first containing ref — the exclusion assertion below would pass with the filter deleted, which is exactly the vacuous-control defect this fixture exists to avoid"
+DEP_ATMAIN="$(drain_departures "$(printf 'dep-atmain\tmg-dep-atmain\t%s' "$MD_TMP/repo")" "$DEP_P2")"
+printf '%s\n' "$DEP_ATMAIN" | grep -q 'origin/HEAD' \
+    && fail "gh#135: the departure verdict credits the origin/HEAD symref ($DEP_ATMAIN) — the default-branch symref says nothing about who pushed, and the run log would name it instead of a ref that does" \
+    || pass "gh#135: the departure verdict names a real branch ref, not the origin/HEAD symref ($DEP_ATMAIN)"
+# THE VERDICT IS UNCHANGED BY THE FILTER, asserted for the same reason
+# durability_of's copy asserts it: this is naming quality, never correctness, and
+# an exclusion that moved a verdict would be a bug rather than a nicety.
+printf '%s\n' "$DEP_ATMAIN" | grep -q '^satisfied dep-atmain ' \
+    && pass "gh#135: excluding origin/HEAD changes the NAME in the departure verdict, never the verdict ($DEP_ATMAIN)" \
+    || fail "gh#135: the departed-at-main polecat read as '$DEP_ATMAIN' — the exclusion changed a verdict, which it must never do"
 
 # THE UNKNOWNS. A question we failed to ask is not an answer of 'satisfied' —
 # the same rule durability_of follows, and the reason risk 3 of the packet is
@@ -1665,7 +1708,12 @@ printf '%s\n' "$DEP_NOREPO" | grep -q '^unknown dep-local ' \
     # need at least two polls each. Stubbed rather than parameterised: the
     # interval is not what is under test here, and a 15s literal in the loop is
     # deliberate (it is the drain's tick, not a tunable).
-    sleep() { :; }
+    #
+    # NOT a bare no-op, because case (D) needs the deadline to actually PASS
+    # between two polls, and every poll here happens in the same wall-clock
+    # second otherwise. `command sleep` so this stub cannot recurse into itself.
+    sleep() { command sleep "${DW135_SLEEP:-0}"; }
+    DW135_SLEEP=0
     DW135_STATE="$(mktemp)"
     dw135_probe_seq() {   # $1,$2,... = bodies, one per successive poll
         DW135_BODIES=("$@")
@@ -1680,7 +1728,7 @@ printf '%s\n' "$DEP_NOREPO" | grep -q '^unknown dep-local ' \
     # so the assertions can read what the reason record and the nightly's RED
     # alert would actually receive — not merely what reached the terminal.
     dw135() (
-        DRAIN_TIMEOUT=5
+        DRAIN_TIMEOUT="${DW135_TIMEOUT:-5}"
         DRAIN_UNREADABLE_SLEEP=0
         DEPLOY_STAGE="drain"
         ERR_LOG="$DW135_ERR"
@@ -1752,6 +1800,46 @@ printf '%s\n' "$DEP_NOREPO" | grep -q '^unknown dep-local ' \
     grep -q 'satisfied dep-exit' "$DW135_STDERR" \
         && pass "gh#135: the satisfied departure is still NAMED in the run log — the reconciliation ran, rather than the alert being silent because nothing was checked" \
         || fail "gh#135: a satisfied departure left no trace at all ($(cat "$DW135_STDERR")) — silence here is indistinguishable from a reconciliation that never ran"
+
+    # (D) THE DEADLINE SEAT. drain_wait's third terminal path — the timeout — also
+    #     reports departures, and it was the one new call site with no assertion
+    #     behind it (round 1 advisory 2: measured correct, but untested is the
+    #     state in which a later edit breaks something silently). A drain that
+    #     times out with a departure in its ledger has BOTH problems, and this is
+    #     the one that leaves no evidence anywhere else in the system.
+    #
+    #     The departure is printed AFTER the "deadline reached" headline on
+    #     purpose: deploy_reason_record takes reason= from the FIRST err line of
+    #     the stage the run ended in, and the run ended because of the deadline.
+    #     Both halves are asserted, because getting the order wrong would still
+    #     put every line in the record — it would only rename the alert.
+    DW135_SLEEP=1   # so the 1s deadline can actually pass between poll 1 and 2
+    dw135_probe_seq "$(dep_body "dep-local=$MD_TMP/wt-dep-local" "wt-local=$MD_TMP/wt-local")" \
+                    "$(dep_body "wt-local=$MD_TMP/wt-local")"
+    DW135_RES="$(DW135_TIMEOUT=1 dw135)"
+    DW135_SLEEP=0
+    [ "$DW135_RES" = "1|1" ] \
+        && pass "gh#135: the timeout path still reports the SURVIVING holder count and still exits 1 — adding the departure report did not change what the deadline decides" \
+        || fail "gh#135: drain_wait's deadline path returned '$DW135_RES', expected '1|1' — the departure reporting displaced the timeout's own verdict"
+    grep -q 'departed-unsatisfied dep-local' "$DW135_ERR" \
+        && pass "gh#135: a departure that happened during a drain which then TIMED OUT is still reported — the third terminal path is seated too, not just the two clears" \
+        || fail "gh#135: the deadline path lost the departure ($(cat "$DW135_ERR")) — the run that failed loudly for one reason stayed silent about the one nothing else can see"
+    [ "$(head -n 1 "$DW135_ERR" | cut -f2-)" = "deadline reached; still holding unpushed work:" ] \
+        && pass "gh#135: 'deadline reached' is still the FIRST err line, so deploy_reason_record's reason= names why the run actually ended and not the departure it also carries" \
+        || fail "gh#135: the first err line is '$(head -n 1 "$DW135_ERR" | cut -f2-)' — the departure displaced the headline, and the timeout would be announced under the wrong reason"
+    # Asserted through the real record writer rather than by reading the first
+    # line and reasoning about it: reason= is chosen by awk over the stage tag,
+    # and that selection is the part a reader downstream actually receives.
+    DW135_REC="$(mktemp)"
+    ( DEPLOY_STAGE="drain"; DEPLOY_INSTALLED="no"; REASON_FILE="$DW135_REC"
+      ERR_LOG="$DW135_ERR"; deploy_reason_record 7 )
+    [ "$(rec_field "$DW135_REC" reason)" = "deadline reached; still holding unpushed work:" ] \
+        && pass "gh#135: the reason record's headline survives the new lines — reason=deadline reached, with the departure carried in the verbatim transcript below it" \
+        || fail "gh#135: reason= reads '$(rec_field "$DW135_REC" reason)' — the nightly would page under the wrong headline"
+    grep -q 'departed-unsatisfied dep-local' "$DW135_REC" \
+        && pass "gh#135: and the departure IS in the record's verbatim transcript — headline-first does not mean the rest was dropped" \
+        || fail "gh#135: the departure is absent from the reason record ($(cat "$DW135_REC"))"
+    rm -f "$DW135_REC"
 
     rm -f "$DW135_STATE" "$DW135_ERR" "$DW135_STDERR"
 ) 2>/dev/null
