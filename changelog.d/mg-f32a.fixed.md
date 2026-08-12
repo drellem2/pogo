@@ -53,6 +53,13 @@
   `hclogPairExemptions` is now empty: the allowlist recorded a wait, and the wait
   is over.
 
+  **What this does not fix, found in review:** the identical perpetual-ERROR
+  mechanism survives for a **regular** file whose read fails — a mode-0000 file
+  reproduces the gh#136 signature verbatim, present in `Paths`, absent from
+  `FileHashes`, one fresh ERROR per rebuild. A node-type predicate cannot reach
+  it, because the file *is* regular; the remedy has to be different in kind and
+  is a design choice rather than an oversight. Filed as `mg-9c6b`.
+
   One sizing correction for anyone reading the originating report: the socket
   error is **1.14%** of that log (5,606 / 489,679 lines), not its bulk. The bulk
   was pre-gh#111 indexer narration, fixed by `f0b2f7a` on 2026-08-07 and already

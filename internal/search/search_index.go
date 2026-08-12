@@ -719,14 +719,17 @@ func (g *BasicSearch) serializeProjectIndex(proj *IndexedProject, prev *IndexedP
 			indexer.AddFile(fullPath, data)
 			continue
 		}
+		// Both failure arms below name their path as a field rather than
+		// passing it as a bare trailing argument. hclog's Error takes msg plus
+		// key/value pairs, so `Error("Error getting absolute path - file may
+		// not exist", path)` and `Error("Error reading file ", absPath)` each
+		// put the one thing a reader wants from the line into a synthetic
+		// EXTRA_VALUE_AT_END field, queryable by nothing. Same repair as the
+		// Reindexing line above (mg-f3ae); the rest of the package was swept
+		// by mg-6698, whose TestHclogCallsInThisPackageArePaired now keeps
+		// both arms paired.
 		absPath, err := absolute(fullPath)
 		if err != nil {
-			// Named fields, not a bare trailing argument: hclog's Error takes
-			// msg plus key/value pairs, so `Error("Error reading file ",
-			// absPath)` put the one thing a reader wants from the line into a
-			// synthetic EXTRA_VALUE_AT_END, queryable by nothing. Same repair
-			// as the Reindexing line above (mg-f3ae). The remaining malformed
-			// calls in this package are mg-6698, deliberately not swept here.
 			g.logger.Error("Error getting absolute path - file may not exist", "path", path)
 		} else {
 			bytes, err := os.ReadFile(absPath)
