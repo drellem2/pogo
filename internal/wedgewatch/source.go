@@ -291,6 +291,17 @@ const (
 // keys on the event's own agent field rather than on anything addressed AT an
 // identity.
 //
+// Keying on the agent field is necessary and was not sufficient. pogod records
+// SOME of its interventions under the identity of the agent it intervened on —
+// `modal_dismissed` is emitted under the dismissed agent, not under pogod — so
+// the same failure mode reached this index through the front door.
+// drellem2/pogo#138: the dismissal cooldown is 5m and MarkerHoldDown is 10m, so
+// a modal the dismissal cannot clear regenerates this agent's clock at twice
+// the rate the hold-down needs to survive, and the finding about that modal
+// never ages into a verdict. Those types are filtered by
+// events.CountsAsAgentActivity, which is shared with internal/claude's
+// events-stale gate because both indexes had the identical omission.
+//
 // Only the LIVE log is scanned, not the rotated files. An identity whose last
 // line has rotated out therefore reads as absent, which reports the agent as
 // unjudgeable rather than as stale. That understates a very stale agent, and it
@@ -323,6 +334,14 @@ func eventsIndexFrom(path string) EventsIndex {
 	last := map[string]time.Time{}
 	if err := events.ScanFile(path, func(ev events.Event) {
 		if ev.Agent == "" {
+			return
+		}
+		// pogod records some of its own interventions under the identity of the
+		// agent it intervened ON. Those are not evidence the agent is alive —
+		// they fire BECAUSE it is stuck — and counting them here is
+		// drellem2/pogo#138: the dismissal that proves an agent is wedged
+		// refreshes the clock this detector uses to decide it is not.
+		if !events.CountsAsAgentActivity(ev.EventType) {
 			return
 		}
 		ts, perr := time.Parse(time.RFC3339Nano, ev.Timestamp)
