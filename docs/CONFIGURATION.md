@@ -2006,6 +2006,121 @@ silently. ack-watch catches "registered and not completing"; deaf-watch catches
 
 Source of truth: `internal/deafwatch/`, `internal/agent/mailloop_report.go`.
 
+## The absent-agent announcer (absent-watch)
+
+**Every other standing detector iterates the registry, and the registry holds the
+agents pogod is running.** So an agent that was stopped is not a row with a bad
+value in it — it is *no row at all*, and nothing distinguishes "this agent is
+down" from "this agent was never configured on this machine".
+
+`crew-doctor` was stopped on 2026-08-10T17:14:23Z during an auth-incident cleanup
+and stayed down **2 days 21 hours**, until a person asked for it by hand. It is
+on-demand by design (`auto_start = false`, `restart_on_crash = false`, shipped
+deliberately by mg-b2cc for gh #18 so a stop *stays* stopped), so nothing was
+going to restart it. The defect was that nothing said so:
+
+- the **stall-watch** reads a sweep log's mtime, and a stopped agent writes no
+  sweep log — a file that stops being written is indistinguishable from one
+  nobody was watching;
+- **ack-watch** measures completion against a schedule, and pogod had *removed*
+  the mail-check at stop time (`reason=agent_gone`), so no schedule was left to
+  under-complete;
+- **deaf-watch** judges the registry, which this agent had left;
+- **`pogo agent list`** did not show it at all, not even as `parked`.
+
+Every instrument read GREEN over a fleet with its auditor missing. And the one
+surface that reports on the fleet's checks, `pogo doctor --check`, is read on a
+cadence by doctor and nobody else — so the instrument for doctor's absence *was*
+doctor. That circularity is why this detector is **not** a check inside doctor
+and must never become one (mg-7d20, mg-10e3).
+
+absent-watch's population is the **configured** crew/mayor set
+(`agent.Registry.RosterReport`), with presence as a property of each member
+rather than the precondition for being looked at. Report-only.
+
+- **Class decides how patient it is.** An absence is not automatically a fault,
+  and a detector that mails about an on-demand agent being off is one that gets
+  filtered — which is worse than none, because its presence is the reason nobody
+  builds the one that would work.
+  - `auto_start = true` (**supervised**) — pogod should be running this. Uses
+    `hold_down` (15m), long enough to clear a boot sweep and a respawn's ~2s
+    registry gap.
+  - `auto_start = false` (**on-demand**) — nothing brings it back but somebody
+    asking. Uses `dormant_after` (24h). Against mg-7d20's own timeline that is a
+    notice on 08-11, 21 hours before the hand-restart happened.
+  - **prompt unreadable** — treated as *supervised*. We know the agent was
+    configured and cannot read what was wanted; rounding an unknown toward the
+    quieter answer is this lineage's founding bug.
+- **Parked is never a finding.** Park is the supported way to be down: declared,
+  persistent, and already visible in `pogo agent list` as `status=parked`.
+- **"Could not look" is never an all-clear.** An unreadable prompt tree, a
+  missing registry, or a machine with zero configured prompts each emit
+  `absent_watch_error` and evaluate nothing. `GET /agents/roster` answers **503**
+  rather than `200` with an empty list.
+- **Routing.** Findings go to `notify_to` (`mayor`); a standing finding also
+  copies `human` after `escalate_after` (48h). **A finding that names `notify_to`
+  itself escalates immediately** — and here that rule is stronger than
+  deaf-watch's, because the recipient is not merely unwakeable, it is not
+  running, so the mail has no reader at all.
+- **Episodes.** Same contract as deaf-watch: a changed roster mails at once, an
+  unchanged one waits `renotify_after`, the all-clear reaches everyone who was
+  alarmed, and a generic `incident_episode_cleared{kind:"absent_agent"}` event
+  carries the roster and window (mg-55b2).
+- **It never starts the agent for you.** Doing so would paper over *why* it left
+  — a requested stop, a crash with no respawn, an auto-start sweep that failed —
+  and that is the part worth knowing.
+
+```toml
+[absent_watch]
+enabled = true             # default true
+interval = "5m"            # sample cadence (default 5m)
+hold_down = "15m"          # a SUPERVISED absence must persist this long before
+                           # it is announced (default 15m; negative disables —
+                           # tests only)
+dormant_after = "24h"      # the same threshold for an ON-DEMAND absence
+                           # (default 24h). A separate knob, not a multiple of
+                           # hold_down: they answer different questions, and
+                           # tying them would make tuning one retune the other.
+renotify_after = "12h"     # an unchanged roster re-mails after this (default 12h)
+notify_to = "mayor"        # mailbox announcements go to (default mayor)
+escalate_after = "48h"     # a standing finding also copies `human` after this
+                           # (default 48h; negative disables AGE-based escalation
+                           # only — an absent `notify_to` still escalates at once)
+```
+
+`pogo agent roster` is the pull surface for the same report, and `pogo agent
+list` prints the absences as a footer under its (unchanged) registry listing.
+`--json` on `pogo agent list` is deliberately untouched: eight callers consume
+that array and assume every element has a process behind it, so the new
+information gets its own endpoint rather than changing what an existing contract
+means.
+
+`absent-watch` and `deaf-watch` are **disjoint**, not redundant:
+
+| | population | fault |
+|---|---|---|
+| deaf-watch | the registry | the agent is RUNNING and nothing can wake it |
+| absent-watch | the configured set | the agent is not running at all, and nothing says so |
+
+deaf-watch's source explicitly declines to judge "a configured agent that is not
+running" — correct for it, and precisely the hole here.
+
+### The coupled lifecycle flags
+
+`pogo agent roster` also reports a configuration invariant it is uniquely placed
+to see, because it parses every configured prompt's frontmatter: **`auto_start =
+true` with `restart_on_crash = false`**. That pairing is the only shape that can
+reach pogod's desired-state fall-through with `expected=true` over a durably dead
+agent, leaving a mail-check firing at nobody (mg-8677). Both-true is the safe
+form, and is what every healthy crew agent already has. The same rule is enforced
+over the prompts pogo *ships* by a test in `internal/agent`; the roster is the
+reader for a deployment's own `~/.pogo` tree, which no repo test can reach.
+
+It is reported here and **not** added to `pogo doctor --check`, for the reason at
+the top of this section.
+
+Source of truth: `internal/absentwatch/`, `internal/agent/roster.go`.
+
 ## The first-completed-turn floor (first-turn)
 
 **A spawn is not a success.** `autostart: started pm-pogo (pid=41773)` plus a

@@ -407,6 +407,44 @@ const (
 	// loop is not a weaker alert, it is no alert at all.
 	DefaultDeafWatchEscalateAfter = 24 * time.Hour
 
+	// DefaultAbsentWatchInterval is how often pogod's absent-agent announcer
+	// compares the CONFIGURED crew/mayor set against the registry (mg-7d20).
+	// Matches the deaf-watch cadence for the same reason: the condition is a
+	// BOOLEAN state, so the hold-down rather than the sampling interval is what
+	// keeps it quiet. Rides the heartbeat, not a launchd timer (mg-50e0).
+	DefaultAbsentWatchInterval = 5 * time.Minute
+	// DefaultAbsentWatchHoldDown is how long a SUPERVISED (auto_start = true)
+	// agent must be observed absent, unbroken, before it is announced. It must
+	// comfortably clear the window in which pogod's boot-time auto-start sweep
+	// is still working through the crew, and a restart_on_crash respawn's ~2s
+	// registry gap.
+	DefaultAbsentWatchHoldDown = 15 * time.Minute
+	// DefaultAbsentWatchDormantAfter is the same threshold for an ON-DEMAND
+	// (auto_start = false) agent, whose ordinary state is being off. A separate
+	// knob rather than a multiple of the hold-down: the two answer different
+	// questions — "the boot sweep should have finished" and "nobody has needed
+	// this in a day" — and tying them would make tuning one silently retune the
+	// other. A day is chosen against mg-7d20's own timeline: doctor went down at
+	// 2026-08-10T17:14:23Z and was restored by hand 2d21h later, so 24h
+	// announces it once, with two days still ahead of the fleet.
+	DefaultAbsentWatchDormantAfter = 24 * time.Hour
+	// DefaultAbsentWatchRenotify is how long an UNCHANGED roster of absences
+	// stays quiet before being raised again. Longer than deaf-watch's 6h
+	// because an absence is frequently a decision somebody made and is content
+	// with, and a detector that repeats itself at an unwelcome rate is one that
+	// gets filtered.
+	DefaultAbsentWatchRenotify = 12 * time.Hour
+	// DefaultAbsentWatchNotifyTo is the mailbox announcements go to. The mayor:
+	// deciding whether an absent agent should be started, parked, or left alone
+	// is coordination work.
+	DefaultAbsentWatchNotifyTo = "mayor"
+	// DefaultAbsentWatchEscalateAfter is how long a finding may persist before
+	// `human` is copied as well. As with deaf-watch this detector ALSO escalates
+	// immediately — regardless of this value — when the roster names NotifyTo
+	// itself, and here the reason is stronger: the recipient is not merely
+	// unwakeable, it is not running, so the mail has no reader at all.
+	DefaultAbsentWatchEscalateAfter = 48 * time.Hour
+
 	// DefaultFirstTurnInterval is how often pogod's first-completed-turn floor
 	// samples the crew (mg-3cbb). Well under the grace, so a finding is
 	// announced within roughly one interval of becoming true rather than
@@ -688,9 +726,13 @@ type Config struct {
 	ReviewDecl ReviewDeclConfig
 	AckWatch   AckWatchConfig
 	DeafWatch  DeafWatchConfig
-	FirstTurn  FirstTurnConfig
-	WedgeWatch WedgeWatchConfig
-	DoneReap   DoneReapConfig
+	// AbsentWatch is the configured-agent-is-missing announcer. It is the only
+	// detector whose population is the CONFIGURED set rather than the registry;
+	// see AbsentWatchConfig.
+	AbsentWatch AbsentWatchConfig
+	FirstTurn   FirstTurnConfig
+	WedgeWatch  WedgeWatchConfig
+	DoneReap    DoneReapConfig
 	// OrchestrationResume holds the deadline on a stopped fleet. See
 	// OrchestrationResumeConfig and cmd/pogod/orchresume.go.
 	OrchestrationResume OrchestrationResumeConfig
@@ -1205,6 +1247,58 @@ type DeafWatchConfig struct {
 	EscalateAfter time.Duration
 }
 
+// AbsentWatchConfig configures pogod's ABSENT-AGENT announcer (mg-7d20): the
+// heartbeat-driven runner that compares the CONFIGURED crew/mayor set against
+// the registry and mails when a member has been missing for longer than its
+// class earns.
+//
+// It exists because every other standing detector iterates the registry, so an
+// agent that is not running is not a row with a bad value in it — it is no row
+// at all. `crew-doctor` was stopped on 2026-08-10 during an auth-incident
+// cleanup and stayed down 2 days 21 hours with `pogo agent list`, the stall
+// watch, ackwatch and deaf-watch all reading green, because an absent member
+// cannot appear in a set it has left. The one surface that WOULD have reported
+// it, `pogo doctor --check`, is read on a cadence by doctor and nobody else.
+//
+// The detector's mechanics live in internal/absentwatch; this config carries the
+// runner's cadences and routing, matching how the other heartbeat detectors are
+// configured.
+//
+// REPORT-ONLY: it mails NotifyTo and never starts anything. Starting an absent
+// agent would paper over WHY it left, which is the part worth knowing.
+type AbsentWatchConfig struct {
+	// Enabled turns the runner on. Defaults to true. It is inert on a daemon
+	// with no agent registry, and an unreadable prompt tree reports as an error
+	// rather than as a complete roster, so leaving it on is safe.
+	Enabled bool
+	// Interval is the gap between samples. Zero falls back to
+	// DefaultAbsentWatchInterval.
+	Interval time.Duration
+	// HoldDown is how long a SUPERVISED absence must persist, unbroken, before
+	// it is announced. Zero falls back to DefaultAbsentWatchHoldDown. A NEGATIVE
+	// value disables the hold-down entirely, which only tests should do:
+	// without it, every restart announces the whole crew in the gap between boot
+	// and the auto-start sweep.
+	HoldDown time.Duration
+	// DormantAfter is the same threshold for an ON-DEMAND absence. Zero falls
+	// back to DefaultAbsentWatchDormantAfter. Setting it very low is how a
+	// deployment says "I want to hear about every on-demand agent that is off",
+	// and is the fastest way to make this detector one nobody reads.
+	DormantAfter time.Duration
+	// RenotifyAfter is how long an unchanged roster stays quiet before being
+	// mailed again. Zero falls back to DefaultAbsentWatchRenotify.
+	RenotifyAfter time.Duration
+	// NotifyTo is the mailbox announcements are sent to. Empty falls back to
+	// DefaultAbsentWatchNotifyTo (`mayor`).
+	NotifyTo string
+	// EscalateAfter is how long a finding may persist unbroken before the notice
+	// also goes to `human`. Zero falls back to DefaultAbsentWatchEscalateAfter;
+	// a NEGATIVE value disables the AGE-based escalation. It does NOT disable
+	// the immediate escalation when the roster names NotifyTo itself — that one
+	// is not a matter of patience.
+	EscalateAfter time.Duration
+}
+
 // FirstTurnConfig configures pogod's first-completed-turn FLOOR (mg-3cbb): the
 // heartbeat-driven runner that alarms when a crew agent has been spawned and has
 // never finished a single scheduled fire since.
@@ -1562,6 +1656,7 @@ type parsedConfig struct {
 	reviewDeclEnabledSet      bool
 	ackWatchEnabledSet        bool
 	deafWatchEnabledSet       bool
+	absentWatchEnabledSet     bool
 	firstTurnEnabledSet       bool
 	wedgeWatchEnabledSet      bool
 	doneReapEnabledSet        bool
@@ -1682,6 +1777,15 @@ func Load() *Config {
 			RenotifyAfter: DefaultDeafWatchRenotify,
 			NotifyTo:      DefaultDeafWatchNotifyTo,
 			EscalateAfter: DefaultDeafWatchEscalateAfter,
+		},
+		AbsentWatch: AbsentWatchConfig{
+			Enabled:       true,
+			Interval:      DefaultAbsentWatchInterval,
+			HoldDown:      DefaultAbsentWatchHoldDown,
+			DormantAfter:  DefaultAbsentWatchDormantAfter,
+			RenotifyAfter: DefaultAbsentWatchRenotify,
+			NotifyTo:      DefaultAbsentWatchNotifyTo,
+			EscalateAfter: DefaultAbsentWatchEscalateAfter,
 		},
 		FirstTurn: FirstTurnConfig{
 			Enabled:  true,
@@ -1892,6 +1996,32 @@ func Load() *Config {
 		// override.
 		if fileCfg.DeafWatch.EscalateAfter != 0 {
 			cfg.DeafWatch.EscalateAfter = fileCfg.DeafWatch.EscalateAfter
+		}
+		if fileCfg.absentWatchEnabledSet {
+			cfg.AbsentWatch.Enabled = fileCfg.AbsentWatch.Enabled
+		}
+		if fileCfg.AbsentWatch.Interval > 0 {
+			cfg.AbsentWatch.Interval = fileCfg.AbsentWatch.Interval
+		}
+		// Non-zero, not >0, for the two hold-downs: a negative value is the
+		// documented way to turn the wait off, so it must survive the merge like
+		// any other override.
+		if fileCfg.AbsentWatch.HoldDown != 0 {
+			cfg.AbsentWatch.HoldDown = fileCfg.AbsentWatch.HoldDown
+		}
+		if fileCfg.AbsentWatch.DormantAfter != 0 {
+			cfg.AbsentWatch.DormantAfter = fileCfg.AbsentWatch.DormantAfter
+		}
+		if fileCfg.AbsentWatch.RenotifyAfter > 0 {
+			cfg.AbsentWatch.RenotifyAfter = fileCfg.AbsentWatch.RenotifyAfter
+		}
+		if fileCfg.AbsentWatch.NotifyTo != "" {
+			cfg.AbsentWatch.NotifyTo = fileCfg.AbsentWatch.NotifyTo
+		}
+		// Non-zero, not >0: a negative value is the documented way to turn
+		// age-based escalation off.
+		if fileCfg.AbsentWatch.EscalateAfter != 0 {
+			cfg.AbsentWatch.EscalateAfter = fileCfg.AbsentWatch.EscalateAfter
 		}
 		if fileCfg.firstTurnEnabledSet {
 			cfg.FirstTurn.Enabled = fileCfg.FirstTurn.Enabled
@@ -2696,6 +2826,34 @@ func parseConfigFileInto(cfg *parsedConfig, path string) error {
 			case "escalate_after":
 				if d, err := time.ParseDuration(unquotedVal); err == nil {
 					cfg.DeafWatch.EscalateAfter = d
+				}
+			}
+		case "absent_watch":
+			switch key {
+			case "enabled":
+				cfg.AbsentWatch.Enabled = val == "true"
+				cfg.absentWatchEnabledSet = true
+			case "interval":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.AbsentWatch.Interval = d
+				}
+			case "hold_down":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.AbsentWatch.HoldDown = d
+				}
+			case "dormant_after":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.AbsentWatch.DormantAfter = d
+				}
+			case "renotify_after":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.AbsentWatch.RenotifyAfter = d
+				}
+			case "notify_to":
+				cfg.AbsentWatch.NotifyTo = unquotedVal
+			case "escalate_after":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.AbsentWatch.EscalateAfter = d
 				}
 			}
 		case "first_turn":

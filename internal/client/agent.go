@@ -30,6 +30,36 @@ func ListAgents() ([]agent.AgentInfo, error) {
 	return agents, nil
 }
 
+// AgentRoster returns the CONFIGURED crew/mayor set compared against pogod's
+// registry — the one reading in which an agent that is not running is a row
+// rather than a silence (mg-7d20).
+//
+// It is a separate call from ListAgents rather than more rows in it because
+// eight callers consume that array and every one assumes a listed agent has a
+// process behind it. A non-200 is an error: a roster pogod could not compute is
+// not a complete one, and callers must not render it as though everybody were
+// present.
+func AgentRoster() (*agent.RosterReport, error) {
+	r, err := http.Get(serverURL + "/agents/roster")
+	if err != nil {
+		return nil, err
+	}
+	defer r.Body.Close()
+	if r.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(r.Body, 4096))
+		msg := strings.TrimSpace(string(body))
+		if msg == "" {
+			msg = r.Status
+		}
+		return nil, fmt.Errorf("roster unavailable: %s", msg)
+	}
+	var rep agent.RosterReport
+	if err := json.NewDecoder(r.Body).Decode(&rep); err != nil {
+		return nil, err
+	}
+	return &rep, nil
+}
+
 // GetAgent returns details for a specific agent.
 func GetAgent(name string) (*agent.AgentInfo, error) {
 	r, err := http.Get(serverURL + "/agents/" + name)
