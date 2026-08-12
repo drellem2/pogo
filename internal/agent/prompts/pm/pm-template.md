@@ -362,10 +362,28 @@ for repo in <repos>; do
   gh issue list --repo "$slug" || echo "gh unavailable — $slug issues"
   gh pr    list --repo "$slug" || echo "gh unavailable — $slug PRs"
 
-  # GitHub Actions CI failures — a red run is a strong signal (see mg-6222).
+  # Is CI broken RIGHT NOW? Read the newest runs on the DEFAULT BRANCH (mg-75a5).
+  # Derive the branch — it is not "main" everywhere, and `--branch main` against
+  # a `master` repo prints `[]` and exits 0, which reads exactly like green.
+  # `gh repo view` takes the slug POSITIONALLY; there is no `--repo` on it.
+  def=$(gh repo view "$slug" --json defaultBranchRef -q .defaultBranchRef.name)
+  # An empty repo has NO default branch, and `-q` renders that as the literal
+  # string "null" — which `-z` does not catch and `--branch null` turns into an
+  # empty listing that reads as green. Guard both.
+  if [ -z "$def" ] || [ "$def" = null ]; then
+    echo "gh unavailable — $slug default branch (CI state UNKNOWN, not green)"
+  else
+    gh run list --repo "$slug" --branch "$def" --limit 5 \
+        --json status,conclusion,workflowName,createdAt,headSha \
+      || echo "gh unavailable — $slug CI (state UNKNOWN, not green)"
+  fi
+
+  # SECONDARY, and a DIFFERENT QUESTION: has this repo failed recently at all?
+  # Answers "ever red lately" (flapping, a recurring scheduled workflow) — never
+  # on its own grounds for "main is broken". Read it after the block above.
   gh run list --repo "$slug" --status failure --limit 10 \
-      --json conclusion,headBranch,workflowName \
-    || echo "gh unavailable — $slug CI"
+      --json conclusion,headBranch,workflowName,createdAt,event \
+    || echo "gh unavailable — $slug CI history"
 done
 
 # Recent commits
@@ -384,13 +402,47 @@ an optional "where applicable" extra:
 
 - **Issues / PRs.** New or unresolved issues are candidate gaps; triage them
   the same way as any other signal (dedup, decide, file or comment).
-- **CI failures.** Check recent GitHub Actions runs for failures. A failed run
-  **on the default branch** is a strong signal that main is broken — **file a
-  fix ticket immediately** (mg-6222 is the case that established this), don't wait to be
-  told. The local refinery merge gate (`refinery/history` above) does **not**
-  exercise the GitHub Actions cross-compile matrix, so CI can be red while the
-  refinery is green; this scan is the only baseline source that catches that
-  class of break.
+- **Is CI broken right now?** Read the **newest runs on the default branch**.
+  File a fix ticket immediately when the newest **completed** run there
+  concluded `failure` (mg-6222 is the case that established that a red default
+  branch is worth a ticket unasked), and don't wait to be told. The local
+  refinery merge gate (`refinery/history` above) does **not** exercise the
+  GitHub Actions cross-compile matrix, so CI can be red while the refinery is
+  green; this scan is the only baseline source that catches that class of break.
+
+  Three things decide correctly here, and each has been observed going wrong:
+
+  - **The newest run is often not finished.** Its `status` is `queued` or
+    `in_progress` and its `conclusion` is **empty** — neither green nor broken.
+    That is why the projection carries `status` as well as `conclusion`: judge
+    on the newest run whose `status` is `completed`, and say "CI in flight"
+    about the blank rather than reading it as either answer. At 09:08 on
+    2026-08-12 the newest run on `drellem2/pogo`'s `main` was exactly this.
+  - **An empty list is UNKNOWN, not green.** `gh run list --branch <b>` prints
+    `[]` and exits **0** when the branch name is wrong, so a hardcoded `main`
+    against a `master` repo silently reports the healthiest-looking possible
+    output. Derive the branch (the loop does) and treat `[]` — and any `gh`
+    failure — as a gap to record, not a pass.
+  - **Read a small window, not just position one.** The listing is ordered by
+    the run's own start, and `createdAt` is not that key: a **re-run** of an old
+    run carries its original `createdAt` and its original `conclusion` while
+    sitting at the top. `--limit 5` with timestamps lets you see that the head
+    of the list is six days older than the rows beneath it; `--limit 1` gives
+    you a stale `failure` with nothing to compare it against.
+- **Has CI failed recently — a different question.** The `--status failure`
+  listing answers "has this repo been red lately", which is a **history**
+  question, and it is useful for spotting a flapping branch or a recurring
+  scheduled workflow. It cannot answer "is main broken now" and must never be
+  quoted as though it had: **a filter that removes the disconfirming case
+  cannot be used to confirm.** Because it selects failures, a main that broke
+  once in February and has been green ever since produces output identical to a
+  main that is broken this minute — the success that would refute you is not
+  merely absent from the output, it is structurally excluded from it. This is
+  why the projection carries `createdAt` and `event`: a conclusion with no time
+  attached cannot be aged, and a nightly scheduled run failing is a different
+  ticket from a push to the default branch failing. On 2026-08-12 following the
+  old failure-filtered check literally produced two "main is broken" tickets for
+  two repos whose mains were both green (mg-75a5).
 - **Repo-slug derivation.** `repos` holds local repo names; the `owner/repo`
   slug that `gh` commands need comes from each repo's `git remote get-url
   origin`. The loop above derives it, so the scan works for every repo with no
