@@ -254,6 +254,99 @@ func TestMGWorkItemDeclaresPostMergeWork_ErrorsAreNotFalse(t *testing.T) {
 	}
 }
 
+// fakeMGShowStderr makes `mg show <id> --json` print stdout to STDOUT and noise
+// to STDERR, both on a successful (exit 0) run. That is the real shape of
+// `mg show` for an id that also names an archived item, and it is the shape a
+// CombinedOutput-based probe cannot survive.
+func fakeMGShowStderr(t *testing.T, stdout, stderr string) {
+	t.Helper()
+	old := execCommand
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		return exec.Command("sh", "-c", `printf '%s' "$1" >&2; printf '%s' "$2"`, "sh", stderr, stdout)
+	}
+	t.Cleanup(func() { execCommand = old })
+}
+
+// TestMGShowProbesReadStdoutOnly is the regression control for the round-1
+// blocking finding on PR #133.
+//
+// `mg show <id> --json` exits 0 with valid JSON on stdout while ALSO writing an
+// advisory to stderr whenever a live id happens to name an archived item too:
+//
+//	note: mg-4b2a also names an archived item at work/archive/2026-04/mg-4b2a.md
+//
+// Under `CombinedOutput` that advisory is prepended to the JSON, the unmarshal
+// fails, and every probe here reports "cannot tell" for an item the store
+// answered perfectly. Measured on the live store: 4 of 545 live items collide
+// today, and against 2,176 archived ids in a 4-hex-digit space roughly 3% of
+// newly-filed items will.
+//
+// For MGWorkItemReviews the cost is that the mg-aaf6 exemption never fires on
+// ANY tick for an affected review ticket — the builder is reaped mid-review and
+// the obvious diagnosis ("the coordinator forgot the `reviews:` line") points
+// away from the cause. All three probes are pinned, not just the new one: they
+// share a code path and are consulted by the same reaper on the same tick.
+func TestMGShowProbesReadStdoutOnly(t *testing.T) {
+	const noise = "note: mg-4b2a also names an archived item at work/archive/2026-04/mg-4b2a.md\n"
+	body, err := json.Marshal("\n# review: x\nworkflow: gh-issue\nstage: review\nreviews: mg-aaf6\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := `{"id":"mg-4b2a","status":"done","tags":["post-merge-work"],"body":` + string(body) + `}`
+
+	t.Run("MGWorkItemReviews", func(t *testing.T) {
+		fakeMGShowStderr(t, payload, noise)
+		got, err := MGWorkItemReviews("mg-4b2a")
+		if err != nil {
+			t.Fatalf("stderr noise broke the probe: %v — the store answered with valid JSON on stdout", err)
+		}
+		if got != "mg-aaf6" {
+			t.Errorf("Reviews = %q, want mg-aaf6", got)
+		}
+	})
+
+	t.Run("MGWorkItemDone", func(t *testing.T) {
+		fakeMGShowStderr(t, payload, noise)
+		got, err := MGWorkItemDone("mg-4b2a")
+		if err != nil {
+			t.Fatalf("stderr noise broke the probe: %v", err)
+		}
+		if !got {
+			t.Error("status done was not read through the stderr noise")
+		}
+	})
+
+	t.Run("MGWorkItemDeclaresPostMergeWork", func(t *testing.T) {
+		fakeMGShowStderr(t, payload, noise)
+		got, err := MGWorkItemDeclaresPostMergeWork("mg-4b2a")
+		if err != nil {
+			t.Fatalf("stderr noise broke the probe: %v", err)
+		}
+		if !got {
+			t.Error("the post-merge-work tag was not read through the stderr noise")
+		}
+	})
+}
+
+// TestMGShowProbeErrorStillNamesWhatMgSaid — reading stdout only must not cost
+// the diagnosis on a genuine failure. mg writes its errors to stderr, so an
+// error that dropped stderr would report an empty reason.
+func TestMGShowProbeErrorStillNamesWhatMgSaid(t *testing.T) {
+	old := execCommand
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		return exec.Command("sh", "-c", `printf 'no such work item: mg-zzzz' >&2; exit 3`)
+	}
+	t.Cleanup(func() { execCommand = old })
+
+	_, err := MGWorkItemReviews("mg-zzzz")
+	if err == nil {
+		t.Fatal("a failing `mg show` must be an error")
+	}
+	if !strings.Contains(err.Error(), "no such work item") {
+		t.Errorf("the error dropped what mg actually said: %v", err)
+	}
+}
+
 // TestMGWorkItemReviews reads the `reviews:` carrier line pogod's done-reaper
 // uses to keep a builder alive while its reviewer is running (mg-aaf6, gh#131).
 //

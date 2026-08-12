@@ -498,14 +498,9 @@ func LooksLikeWorkItemID(s string) bool {
 // as "unknown" and fall back to the conservative path rather than assuming
 // completion.
 func MGWorkItemDone(id string) (bool, error) {
-	if id == "" {
-		return false, fmt.Errorf("work item id is required")
-	}
-	cmd := execCommand("mg", "show", id, "--json")
-	cmd.Stderr = nil
-	out, err := cmd.CombinedOutput()
+	out, err := mgShowJSON(id)
 	if err != nil {
-		return false, fmt.Errorf("mg show %s failed: %s (%w)", id, strings.TrimSpace(string(out)), err)
+		return false, err
 	}
 	var item struct {
 		Status string `json:"status"`
@@ -514,6 +509,49 @@ func MGWorkItemDone(id string) (bool, error) {
 		return false, fmt.Errorf("mg show %s: unparseable JSON: %w", id, err)
 	}
 	return item.Status == "done" || item.Status == "archived", nil
+}
+
+// mgShowJSON runs `mg show <id> --json` and returns its STDOUT.
+//
+// STDOUT ONLY, AND THAT IS THE WHOLE POINT OF THE HELPER. These probes used
+// `CombinedOutput`, which merges stderr into the buffer that then goes to
+// `json.Unmarshal`. `mg show --json` writes valid JSON to stdout and exits 0
+// while ALSO writing an advisory line to stderr whenever a live id happens to
+// name an archived item too:
+//
+//	note: mg-4b2a also names an archived item at work/archive/2026-04/mg-4b2a.md
+//	{ "id": "mg-4b2a", ... }
+//
+// Merged, that fails to parse — `invalid character 'o' in literal null` — for an
+// item the store answered perfectly. Every caller here reads a parse failure as
+// "cannot tell" and falls back, so the probe silently stopped working for those
+// items while the store was healthy the whole time.
+//
+// It is not rare and it grows. Swept over the live store on 2026-08-12, 4 of 545
+// live items collide with an archived id (0.7%); against 2,176 archived ids in a
+// 4-hex-digit space, about 3% of newly-filed items will land on one, and the
+// archive only grows. For the mg-aaf6 review exemption the consequence is that
+// the guard never fires on ANY tick for an affected ticket, and the natural
+// diagnosis — "the coordinator must have forgotten the `reviews:` line" — points
+// away from the cause.
+//
+// stderr is still captured, via exec's ExitError, so a genuine failure reports
+// what mg said rather than an empty string. It just never reaches the parser.
+func mgShowJSON(id string) ([]byte, error) {
+	if id == "" {
+		return nil, fmt.Errorf("work item id is required")
+	}
+	cmd := execCommand("mg", "show", id, "--json")
+	out, err := cmd.Output()
+	if err != nil {
+		detail := strings.TrimSpace(string(out))
+		var ee *exec.ExitError
+		if errors.As(err, &ee) && len(ee.Stderr) > 0 {
+			detail = strings.TrimSpace(string(ee.Stderr))
+		}
+		return nil, fmt.Errorf("mg show %s failed: %s (%w)", id, detail, err)
+	}
+	return out, nil
 }
 
 // PostMergeWorkTag is how a work item DECLARES that merging its branch is a
@@ -554,14 +592,9 @@ const PostMergeWorkTag = "post-merge-work"
 // A failing or unparseable lookup returns an error rather than false, and
 // callers must treat that as "cannot tell" — never as "no declaration".
 func MGWorkItemDeclaresPostMergeWork(id string) (bool, error) {
-	if id == "" {
-		return false, fmt.Errorf("work item id is required")
-	}
-	cmd := execCommand("mg", "show", id, "--json")
-	cmd.Stderr = nil
-	out, err := cmd.CombinedOutput()
+	out, err := mgShowJSON(id)
 	if err != nil {
-		return false, fmt.Errorf("mg show %s failed: %s (%w)", id, strings.TrimSpace(string(out)), err)
+		return false, err
 	}
 	var item struct {
 		Tags []string `json:"tags"`
@@ -601,14 +634,9 @@ func MGWorkItemDeclaresPostMergeWork(id string) (bool, error) {
 // "cannot tell" and log it — that log line is the only thing distinguishing a
 // guard correctly not firing from a guard that could not see its input.
 func MGWorkItemReviews(id string) (string, error) {
-	if id == "" {
-		return "", fmt.Errorf("work item id is required")
-	}
-	cmd := execCommand("mg", "show", id, "--json")
-	cmd.Stderr = nil
-	out, err := cmd.CombinedOutput()
+	out, err := mgShowJSON(id)
 	if err != nil {
-		return "", fmt.Errorf("mg show %s failed: %s (%w)", id, strings.TrimSpace(string(out)), err)
+		return "", err
 	}
 	var item struct {
 		Body string `json:"body"`
