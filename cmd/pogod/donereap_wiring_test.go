@@ -18,9 +18,12 @@ func TestDoneReapRegistrySatisfiesInterface(t *testing.T) {
 	if reg == nil {
 		t.Fatal("unreachable: the assignment above is the assertion")
 	}
-	r := newDoneReaper(reg, client.MGWorkItemDone, 0)
+	r := newDoneReaper(reg, client.MGWorkItemDone, client.MGWorkItemReviews, 0)
 	if r.itemDone == nil {
 		t.Fatal("client.MGWorkItemDone did not fit the terminal-state probe signature")
+	}
+	if r.itemReviews == nil {
+		t.Fatal("client.MGWorkItemReviews did not fit the review-declaration probe signature (mg-aaf6)")
 	}
 }
 
@@ -33,6 +36,14 @@ func TestDoneReapIsWiredToTheHeartbeat(t *testing.T) {
 	src := stripGoComments(readSourceFile(t, "main.go"))
 	if !strings.Contains(src, "newDoneReaper(agentRegistry, client.MGWorkItemDone") {
 		t.Error("pogod does not construct the done-item reaper over the real registry and store probe")
+	}
+	// The review exemption is fail-OPEN when its probe is nil (the builder gets
+	// reaped), so a daemon that constructs the reaper without one is a daemon
+	// where the mg-aaf6 guard silently does not exist. That is precisely the
+	// shape this ticket's acceptance refuses, so it is pinned at the wiring.
+	if !strings.Contains(src, "client.MGWorkItemReviews") {
+		t.Error("pogod constructs the done-item reaper with no `reviews:` probe — the review exemption is " +
+			"then absent, not merely unused, and a builder is reaped mid-review exactly as in gh#131 (mg-aaf6)")
 	}
 	if !strings.Contains(src, "doneReap.Check(now)") {
 		t.Error("pogod constructs the done-item reaper but never calls Check — a detector with no " +

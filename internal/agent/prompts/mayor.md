@@ -693,12 +693,13 @@ This track exists because a stranger is watching: the issue reporter sees the ac
 
 ### State carrier
 
-Issue-track tickets carry three fields as the leading lines of the ticket body (the same visible-via-`mg show` convention as the `qa:` field in step 4):
+Issue-track tickets carry these fields as the leading lines of the ticket body (the same visible-via-`mg show` convention as the `qa:` field in step 4):
 
 ```
 workflow: gh-issue
 stage: triage | gated | build | review | merge
 gh: <owner>/<repo>#<n>
+reviews: <build ticket id>        # REVIEW tickets only
 ```
 
 - `stage:` is the state-machine position, and it lives on whichever ticket is currently active: the triage ticket carries `triage → gated`; after the gate, the build ticket carries `build → review → merge`. Update it with `mg edit <id> --body="..."` at each transition — body edits are coordination; preserve the rest of the body when rewriting.
@@ -709,6 +710,11 @@ gh: <owner>/<repo>#<n>
 
   It was not always enforced. Until mg-69b1 `stage:` was read only by the coordinator that wrote it: three carriers sat at `stage: gated` awaiting a GO/NO-GO with `assignee=[]`, fully dispatchable, and the priority wake offered two of them up as "ready and unclaimed". A re-dispatch there posts a **second acknowledgement comment on a stranger's open issue** — which is why this gate is enforced rather than described.
 - `gh:` ties a ticket to its issue. **Match every incoming `[gh]` mail against existing tickets by this ref before filing anything** — comments bump `updatedAt`, so most `[gh]` mail is activity on an in-flight issue, not a new one.
+- `reviews:` goes on the **review ticket only**, names the build ticket it reviews, and is written **once, when you file it** (transition 3). **Never clear it** — not at pass, not at abort, not when you archive. It carries no dispatch semantics; pogod reads it to keep the build {{.Worker}} alive while the review {{.Worker}} is running, and the exemption ends when the reviewer's process does, not when anyone edits a ticket (mg-aaf6).
+
+  Why it is a field and not your memory of the pairing: on this track a build {{.Worker}} that calls `mg done` at PR-open is stopped by the done-reaper two minutes later, and its reviewer is left mailing findings to a dead counterparty — that is drellem2/pogo#131, and it happened twice. Every other way of recovering the pairing was measured over the live store and fails: `depends` carries dispatch semantics and this track deliberately files no such edge, a `gh:` join is ambiguous the moment an issue is split into parts, and a prose `mg-xxxx` scan resolves to the wrong item in 17 of 23 real cases because review bodies name the triage ticket too.
+
+  **A version of this that you had to remove later would be worse than none.** A declaration written at creation cannot rot; one that must be cleared holds a dispatch slot forever the first time anyone forgets, with nothing anywhere saying so. So this line is deliberately permanent and the liveness of the reviewer's process is what bounds it.
 - `depends=` chains the tickets (build depends on triage, review depends on build), mirroring how `qa: required` pairs items.
 - Tag every ticket in the chain `gh-issue` so `mg list --tag=gh-issue` shows the whole board.
 
@@ -871,6 +877,16 @@ If a ticket for the ref already exists, the mail is new issue activity:
    # the stage it must be DISPATCHED in. A self-gate is the honest instrument here: you
    # are holding your own ticket, so it cannot hold work hostage from anyone else, and
    # pogod reminding you about it is the recovery if you forget to clear it.
+   #
+   # `reviews: <build ticket id>` is the fourth carrier line and it is REQUIRED on this
+   # ticket. It is the same fact the sentence below it states in prose — which build item
+   # this review covers — written where a machine can read it. pogod's done-reaper reads
+   # it to exempt the build {{.Worker}} from the reap while this review {{.Worker}} is
+   # running, which is what stops a builder that self-closed at PR-open from vanishing
+   # mid-round and leaving its reviewer with no counterparty (drellem2/pogo#131, mg-aaf6).
+   # Write it now and NEVER clear it: the exemption ends when the review {{.Worker}}'s
+   # process ends, so nothing has to be remembered later. Omitting it is silent — the
+   # review runs normally and the guard simply never fires.
    mg new --type=task --priority=high --tags=gh-issue --repo=<local repo path> \
        --assignee=blocked:{{.Coordinator}} \
        --title="review: <issue title> (<owner>/<repo>#<n>)" \
@@ -878,10 +894,13 @@ If a ticket for the ref already exists, the mail is new issue activity:
    workflow: gh-issue
    stage: review
    gh: <owner>/<repo>#<n>
+   reviews: <build ticket id>
 
    Review the PR from <build ticket id> against the approved triage recommendation (<triage ticket id>).
    EOF
    ```
+
+   **The block must LEAD the body — no lead-in line above it.** A carrier block with even one line of prose above it is out of the parser's reach, and this ticket then reads as `CarrierUnreadable`: pogod refuses to dispatch it and the stall watch stops offering it (mg-27d4). That refusal is deliberate and it is the reason `reviews:` is safe to put here — an unreadable declaration gates the ticket instead of dispatching a review whose exemption silently does not exist. If a spawn is refused naming an unreadable carrier, move the block back to the top of the body rather than working around it.
 3. **Retire the triage ticket, then dispatch the build {{.Worker}}** — in that order, because the second does not work until the first has run. Lift the {{.Worker}}'s packet out of the triage ticket body and hand it straight to `--result`, so the sidecar records the JSON the {{.Worker}} actually wrote rather than a summary you re-typed:
    ````bash
    PACKET=$(mg show <triage ticket id> --json | jq -r .body |

@@ -2561,8 +2561,9 @@ Flags:
 	// polecat whose work is provably concluded.
 	var doneReap *doneReaper
 	if cfg.DoneReap.Enabled && agentRegistry != nil {
-		doneReap = newDoneReaper(agentRegistry, client.MGWorkItemDone, cfg.DoneReap.IdleGrace)
-		log.Printf("pogod: done-item polecat reaper enabled (idle_grace=%s) — a polecat whose item reaches done is stopped once it goes quiet, merge or no merge (mg-56d1)",
+		doneReap = newDoneReaper(agentRegistry, client.MGWorkItemDone, client.MGWorkItemReviews, cfg.DoneReap.IdleGrace)
+		log.Printf("pogod: done-item polecat reaper enabled (idle_grace=%s) — a polecat whose item reaches done is stopped once it goes quiet, merge or no merge (mg-56d1); "+
+			"a builder is exempt while a live polecat's item declares `reviews:` its work item (mg-aaf6)",
 			cfg.DoneReap.IdleGrace)
 	} else if cfg.DoneReap.Enabled {
 		log.Printf("pogod: done-item polecat reaper NOT armed — the agent registry did not load, so there is nothing to reap")

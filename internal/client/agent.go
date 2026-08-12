@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/drellem2/pogo/internal/agent"
+	"github.com/drellem2/pogo/internal/workitem"
 )
 
 // ListAgents returns all running agents from pogod.
@@ -574,6 +575,53 @@ func MGWorkItemDeclaresPostMergeWork(id string) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// MGWorkItemReviews returns the id of the BUILD work item that id's review
+// covers — the `reviews:` line of its state carrier block — or "" when it
+// declares none, which is the ordinary case for every item that is not a
+// gh-issue review ticket.
+//
+// pogod's done-reaper uses it to exempt a builder whose item is already done
+// while a review polecat is still running against it (mg-aaf6, gh#131). The
+// declaration is written once by the coordinator when it files the review ticket
+// and never cleared; see workitem.WorkItem.Reviews for why "never cleared" is
+// the design rather than an omission.
+//
+// It reuses the SAME `mg show --json` shape as MGWorkItemDone and parses the
+// body it already carries with the SAME parser that reads the file on disk
+// (workitem.ParseCarrier), rather than a second regex that could disagree with
+// it about what counts as a declaration.
+//
+// AN UNREACHABLE CARRIER BLOCK IS AN ERROR, NOT AN ABSENT DECLARATION, and the
+// distinction is the point (mg-27d4). "This item declares no review" and "this
+// item's declarations are somewhere I cannot read" have opposite meanings for a
+// guard, and collapsing them is how a declaration that is plainly visible in
+// `mg show` silently fails to protect anything. Callers must treat the error as
+// "cannot tell" and log it — that log line is the only thing distinguishing a
+// guard correctly not firing from a guard that could not see its input.
+func MGWorkItemReviews(id string) (string, error) {
+	if id == "" {
+		return "", fmt.Errorf("work item id is required")
+	}
+	cmd := execCommand("mg", "show", id, "--json")
+	cmd.Stderr = nil
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("mg show %s failed: %s (%w)", id, strings.TrimSpace(string(out)), err)
+	}
+	var item struct {
+		Body string `json:"body"`
+	}
+	if err := json.Unmarshal(out, &item); err != nil {
+		return "", fmt.Errorf("mg show %s: unparseable JSON: %w", id, err)
+	}
+	c := workitem.ParseCarrier(item.Body)
+	if c.Unreadable {
+		return "", fmt.Errorf("mg show %s: carrier block is out of the parser's reach — "+
+			"cannot tell whether it declares a review (mg-27d4)", id)
+	}
+	return c.Reviews, nil
 }
 
 // execCommand is a variable for testability.

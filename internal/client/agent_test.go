@@ -253,3 +253,90 @@ func TestMGWorkItemDeclaresPostMergeWork_ErrorsAreNotFalse(t *testing.T) {
 		t.Error("an empty work-item id must be an error")
 	}
 }
+
+// TestMGWorkItemReviews reads the `reviews:` carrier line pogod's done-reaper
+// uses to keep a builder alive while its reviewer is running (mg-aaf6, gh#131).
+//
+// The fixtures are `mg show --json` payloads: the field this reads is `.body`,
+// and the parse it applies to that body is workitem.ParseCarrier — the same
+// parser the dispatch gate applies to the file on disk.
+func TestMGWorkItemReviews(t *testing.T) {
+	cases := []struct {
+		name    string
+		body    string
+		want    string
+		wantErr bool
+	}{
+		{
+			name: "the shipped review-ticket shape",
+			body: `\n# review: gh#131 part 3\nworkflow: gh-issue\nstage: review\ngh: drellem2/pogo#131\nreviews: mg-aaf6\n\nReview the PR.\n`,
+			want: "mg-aaf6",
+		},
+		{
+			name: "a build ticket declares no review",
+			body: `\n# build: gh#131 part 3\nworkflow: gh-issue\nstage: build\ngh: drellem2/pogo#131\n\nBuild it.\n`,
+			want: "",
+		},
+		{
+			name: "an ordinary item with no carrier at all",
+			body: `\n# fix the thing\n\nIt is broken.\n`,
+			want: "",
+		},
+		{
+			// A body DISCUSSING the convention is not declaring one — and this is
+			// the routine case in this feature's own tree, where the triage and
+			// build tickets both write the line in prose while explaining it.
+			name: "prose that mentions the line is not a declaration",
+			body: `\n# triage: builders strand reviewers\nworkflow: gh-issue\nstage: triage\n\nThe adopted shape is a carrier line:\n\nreviews: mg-aaf6\n\nwritten once at creation.\n`,
+			want: "",
+		},
+		{
+			// An unreachable block is "cannot tell", never "declares nothing".
+			// Collapsing the two is how a declaration that is plainly visible in
+			// `mg show` silently fails to protect anything (mg-27d4).
+			name:    "an out-of-reach carrier block is an error, not an absence",
+			body:    `\n# review: gh#131 part 3\n\nPR: https://github.com/drellem2/pogo/pull/999\n\nworkflow: gh-issue\nstage: review\nreviews: mg-aaf6\n`,
+			wantErr: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body, err := json.Marshal(strings.ReplaceAll(tc.body, `\n`, "\n"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			fakeMGShow(t, `{"id":"mg-1c60","status":"claimed","body":`+string(body)+`}`)
+			got, err := MGWorkItemReviews("mg-1c60")
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("want an error for %s, got %q — an unreadable declaration must not read as an absent one", tc.name, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("MGWorkItemReviews: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("MGWorkItemReviews = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestMGWorkItemReviewsFailureIsAnError — a store that will not answer, or an
+// empty id, must return an error rather than "". The caller treats "" as "this
+// item declares no review" and reaps the builder, so a swallowed failure is a
+// builder reaped mid-review with nothing in the log to say why.
+func TestMGWorkItemReviewsFailureIsAnError(t *testing.T) {
+	if _, err := MGWorkItemReviews(""); err == nil {
+		t.Error("an empty id must be an error, not an empty declaration")
+	}
+	fakeMGShow(t, "") // makes the command fail
+	if _, err := MGWorkItemReviews("mg-1c60"); err == nil {
+		t.Error("a failing `mg show` must be an error, not an empty declaration")
+	}
+	fakeMGShow(t, "not json")
+	if _, err := MGWorkItemReviews("mg-1c60"); err == nil {
+		t.Error("unparseable JSON must be an error, not an empty declaration")
+	}
+}

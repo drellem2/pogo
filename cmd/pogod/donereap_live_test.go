@@ -2,6 +2,7 @@ package main
 
 import (
 	"os/exec"
+	"strings"
 	"testing"
 	"time"
 
@@ -84,7 +85,7 @@ func liveDoneReapFixture(t *testing.T, root, doneID, claimedID string, grace tim
 	// clock — so "idle" here means the same thing it means in production.
 	time.Sleep(grace + 150*time.Millisecond)
 
-	return reg, donecat, workcat, newDoneReaper(reg, client.MGWorkItemDone, grace)
+	return reg, donecat, workcat, newDoneReaper(reg, client.MGWorkItemDone, noReviews, grace)
 }
 
 // TestDoneReapLiveBothArms is the acceptance control.
@@ -209,5 +210,125 @@ func TestDoneReapLiveDoesNotStopBeforeCompletion(t *testing.T) {
 	}
 	if !catB.Alive() {
 		t.Error("the still-claimed polecat was reaped alongside it")
+	}
+}
+
+// mgClaimedItemWithBody is mgClaimedItem with a body, so a fixture item can
+// carry a real carrier block for the store parse to read back.
+func mgClaimedItemWithBody(t *testing.T, root, title, body string) string {
+	t.Helper()
+	cmd := exec.Command("mg", "--root", root, "new", "--no-repo", "--title="+title, "--body-file", "-")
+	cmd.Stdin = strings.NewReader(body)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("mg new: %v: %s", err, out)
+	}
+	m := mgNewID.FindStringSubmatch(string(out))
+	if m == nil {
+		t.Fatalf("could not parse a work item id out of %q", out)
+	}
+	id := m[1]
+	if out, err := exec.Command("mg", "--root", root, "claim", id).CombinedOutput(); err != nil {
+		t.Fatalf("mg claim %s: %v: %s", id, err, out)
+	}
+	return id
+}
+
+// TestDoneReapLiveReviewExemptionFiresAndExpires is mg-aaf6's acceptance control
+// against REAL processes, a REAL macguffin store, and the REAL probe — the same
+// standard mg-56d1's control set for the reap it constrains.
+//
+// The unit tests in donereap_test.go establish that the code takes the right
+// branch. Only this one establishes that the declaration survives the round trip
+// it actually makes in production: written into a ticket body by `mg new`, read
+// back out of `mg show --json`, parsed by workitem.ParseCarrier, and matched
+// against a live registry's polecats. A guard that works against a fake probe
+// and not against `mg` is a guard that does not work.
+//
+// The bar the ticket sets is that it be observed doing BOTH things, so both
+// happen here, in sequence, against one reaper and one registry:
+//
+//	FIRES   — the builder self-closed at PR-open (the gh#131 mistake), its item
+//	          is done, its PTY is quiet past the grace, and it SURVIVES because
+//	          the review polecat is running.
+//	EXPIRES — the reviewer is stopped, nothing else changes, and the very next
+//	          Check reaps the builder for real: process gone, slot free.
+func TestDoneReapLiveReviewExemptionFiresAndExpires(t *testing.T) {
+	root := mgSandboxStore(t)
+	buildID := mgClaimedItem(t, root, "a build polecat that self-closed at PR-open")
+	// The review ticket, filed the way mayor.md transition 3 files it: the
+	// carrier block LEADS the body, and `reviews:` names the build item.
+	reviewID := mgClaimedItemWithBody(t, root, "review: the PR from the build ticket",
+		"workflow: gh-issue\nstage: review\nreviews: "+buildID+"\n\nReview the PR against the approved recommendation.\n")
+
+	// The mistake this whole ticket is about, made for real.
+	if out, err := exec.Command("mg", "--root", root, "done", buildID).CombinedOutput(); err != nil {
+		t.Fatalf("mg done %s: %v: %s", buildID, err, out)
+	}
+	if got := mgItemStatus(t, root, buildID); got != "done" {
+		t.Fatalf("precondition: %s should be done, got %q", buildID, got)
+	}
+
+	const grace = 200 * time.Millisecond
+	reg, buildcat, reviewcat, reaper := liveDoneReapFixture(t, root, buildID, reviewID, grace)
+	// liveDoneReapFixture wires noReviews. Swap in the REAL probe: the round trip
+	// through `mg show --json` and the shipped carrier parser is the thing under
+	// test here, and a fake would skip exactly it.
+	reaper.itemReviews = client.MGWorkItemReviews
+
+	// Sanity: the store really does hand the declaration back. If this fails the
+	// two arms below would both pass for the wrong reason.
+	if got, err := client.MGWorkItemReviews(reviewID); err != nil || got != buildID {
+		t.Fatalf("precondition: MGWorkItemReviews(%s) = %q, %v — want %q. The declaration did not survive "+
+			"the write/read round trip, so nothing below would be testing the guard", reviewID, got, err, buildID)
+	}
+
+	// ── FIRES ──────────────────────────────────────────────────────────────────
+	for i := 0; i < 3; i++ {
+		if stopped := reaper.Check(time.Now()); len(stopped) != 0 {
+			t.Fatalf("pass %d: the builder was reaped while its reviewer was running — this is gh#131 "+
+				"reproduced against a real store, and the reviewer now has no counterparty (stopped=%v)", i+1, stopped)
+		}
+		time.Sleep(grace)
+	}
+	if !buildcat.Alive() {
+		t.Fatal("the build polecat's process is gone despite the exemption")
+	}
+	if reg.PolecatCount() != 2 {
+		t.Fatalf("live polecat count = %d, want 2 — nothing should have been reaped yet", reg.PolecatCount())
+	}
+	if got := reaper.exempt[buildcat.Name]; got != reviewID {
+		t.Fatalf("no positive record of the grant: exempt[%s] = %q, want %q", buildcat.Name, got, reviewID)
+	}
+
+	// ── EXPIRES ────────────────────────────────────────────────────────────────
+	// The verdict lands and the coordinator stops the reviewer. Nothing is
+	// edited, cleared or remembered — the `reviews:` line is still on the ticket
+	// and always will be. The only thing that changed is that a process ended.
+	if err := reg.Stop(reviewcat.Name, 5*time.Second); err != nil {
+		t.Fatalf("stopping the review polecat: %v", err)
+	}
+	select {
+	case <-reviewcat.Done():
+	case <-time.After(10 * time.Second):
+		t.Fatal("the review polecat did not exit, so the expiry condition never became true")
+	}
+
+	stopped := reaper.Check(time.Now())
+	if len(stopped) != 1 || stopped[0] != buildcat.Name {
+		t.Fatalf("the exemption did not expire: want [%s] reaped once its reviewer is gone, got %v. "+
+			"An exemption that outlives its reviewer holds the slot forever, which is mg-56d1's leak "+
+			"returning through the fix for it", buildcat.Name, stopped)
+	}
+	select {
+	case <-buildcat.Done():
+	case <-time.After(10 * time.Second):
+		t.Fatal("the build polecat's process is still running after the exemption lapsed")
+	}
+	if reg.Get(buildcat.Name) != nil {
+		t.Error("the build polecat is still in the registry, so its slot is still counted as held")
+	}
+	if n := reg.PolecatCount(); n != 0 {
+		t.Errorf("live polecat count = %d, want 0 — both slots should be free", n)
 	}
 }
