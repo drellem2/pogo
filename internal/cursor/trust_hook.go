@@ -187,32 +187,127 @@ func TrustDialogHook(a *agent.Agent) {
 	watchForTrustDialog(a, TrustDialogTimeout, TrustDialogPollInterval)
 }
 
+// trustWatchOutcome is what one watch turned out to be. The loop decides it and
+// its caller records it, so there is exactly ONE place that maps an outcome to a
+// drift sample — and a test can assert the decision without having to observe the
+// process-global drift detector. Mirrors claude's split for the same reason.
+type trustWatchOutcome int
+
+const (
+	// trustWatchInconclusive: the agent exited mid-watch. Not a ready-gate
+	// result either way, so nothing is recorded.
+	trustWatchInconclusive trustWatchOutcome = iota
+	// trustWatchDrift: the budget was spent having matched NEITHER sentinel.
+	trustWatchDrift
+	// trustWatchConfirmed: the dialog was matched and accepted, or the composer
+	// was seen (already-trusted worktree). Either way the sentinel is live.
+	trustWatchConfirmed
+)
+
+func (o trustWatchOutcome) String() string {
+	switch o {
+	case trustWatchInconclusive:
+		return "inconclusive"
+	case trustWatchDrift:
+		return "drift"
+	case trustWatchConfirmed:
+		return "confirmed"
+	}
+	return "unknown"
+}
+
 // watchForTrustDialog is TrustDialogHook's body with the timing injected, so
 // tests can drive the real loop against a real PTY on a millisecond budget
 // instead of waiting out the production one. Mirrors claude's split for the
-// same reason.
+// same reason. It runs the watch and records what it concluded.
+//
+// On a drift outcome: the hook watched the whole window and matched NEITHER
+// sentinel — neither the trust-dialog marker nor the composer-ready marker. On a
+// healthy spawn it resolves well inside the window (dialog dismissed ~0.7s, or
+// composer seen on an already-trusted worktree), so a spent budget is the drift
+// signature: a hardcoded UI string has probably changed, leaving trust-dialog
+// dismissal unguarded. Record it so a fleet-wide run of these goes loud
+// (mg-ce4c / mg-ff2c).
 func watchForTrustDialog(a *agent.Agent, budget, poll time.Duration) {
-	deadline := time.After(budget)
+	switch trustDialogWatch(a, budget, poll, time.Now) {
+	case trustWatchConfirmed:
+		agent.RecordTrustDialogReady(a.ProviderID(), promptReadySentinel, true)
+	case trustWatchDrift:
+		agent.RecordTrustDialogReady(a.ProviderID(), promptReadySentinel, false)
+	}
+}
+
+// spentBudgetOutcome decides what a spent budget means. It is the one
+// spent-budget path, reached from trustDialogWatch's wakeup arm and from any tick
+// that finds the deadline already passed.
+//
+// It prefers an exited agent over the drift record for the same reason the
+// deadline check exists: at the instant both are ready select tosses a coin, and
+// routing more wakeups through one path would otherwise turn a mid-watch exit
+// into a false drift sample about half the time. A watch that ends because its
+// agent died says nothing about whether the sentinel is still the right string,
+// so it must not be counted as evidence that it is not.
+//
+// Taking done as a parameter rather than reading a.Done() inline is what makes
+// the preference testable at all: end-to-end, a closed done channel wins
+// trustDialogWatch's outer select before the first tick even fires, so a
+// scenario test never reaches this decision.
+func spentBudgetOutcome(done <-chan struct{}) trustWatchOutcome {
+	select {
+	case <-done:
+		return trustWatchInconclusive
+	default:
+		return trustWatchDrift
+	}
+}
+
+// trustDialogWatch is the poll loop, with the clock injected alongside the
+// timing so a test can put it in the state a starved goroutine wakes into.
+//
+// The budget is held as an INSTANT (deadlineAt) and the real timer below is only
+// a wakeup hint — the same shape internal/claude's dispatchScannerIdle uses for
+// its idle window (mg-872b), and for the same reason. The previous loop selected
+// over the deadline timer and ticker.C as EQUAL candidates, and Go picks
+// uniformly at random among ready cases: a goroutine starved past its budget woke
+// with both channels long ready and took the scan branch about half the time,
+// answering a dialog the budget had already given up on. Because time.After
+// delivers once while the ticker keeps firing, each iteration was a fresh coin
+// flip, so under sustained starvation the wrong branch won nearly always — which
+// is how this package's TestLateRenderingDialogIsNeverDismissed failed a merge
+// gate alongside claude's and codex's, all three sharing this loop shape
+// (mg-effc). Measuring the deadline on a clock reading, in the branch that would
+// otherwise act, makes the outcome independent of which of two ready channels the
+// scheduler happened to pick.
+//
+// The deadline instant is immune to a wall-clock step: time.Now carries a
+// monotonic reading, and Add and Before both use it, so an NTP correction during
+// the watch can neither expire the budget early nor extend it. That matters
+// because this replaces a time.After that had the same property — the fix must
+// not trade a scheduling dependency for a clock-setting one.
+//
+// The narrowing this buys is deliberate: a tick that arrives after the deadline
+// instant no longer accepts a dialog it can see. That is what "the budget is
+// spent" has to mean for the bound to be a bound at all — and in production the
+// budget is the whole cold-start window, past which nothing is waiting for the
+// composer anyway.
+func trustDialogWatch(a *agent.Agent, budget, poll time.Duration, now func() time.Time) trustWatchOutcome {
+	deadlineAt := now().Add(budget)
+	wakeup := time.After(budget)
 	ticker := time.NewTicker(poll)
 	defer ticker.Stop()
 
 	for {
 		select {
-		case <-deadline:
-			// Watched the whole window and matched NEITHER sentinel — neither
-			// the trust-dialog marker nor the composer-ready marker. On a
-			// healthy spawn the hook resolves well inside the window (dialog
-			// dismissed ~0.7s, or composer seen on an already-trusted
-			// worktree), so a deadline hit is the drift signature: a hardcoded
-			// UI string has probably changed, leaving trust-dialog dismissal
-			// unguarded. Record it so a fleet-wide run of these goes loud
-			// (mg-ce4c / mg-ff2c).
-			agent.RecordTrustDialogReady(a.ProviderID(), promptReadySentinel, false)
-			return
+		case <-wakeup:
+			return spentBudgetOutcome(a.Done())
 		case <-a.Done():
 			// Agent exited mid-watch: inconclusive, not a ready-gate result.
-			return
+			return trustWatchInconclusive
 		case <-ticker.C:
+			// The tick is only a wakeup hint; the budget decides.
+			if !now().Before(deadlineAt) {
+				return spentBudgetOutcome(a.Done())
+			}
 			output := a.RecentOutput(composerScanBytes)
 			if len(output) == 0 {
 				continue
@@ -222,8 +317,7 @@ func watchForTrustDialog(a *agent.Agent, budget, poll time.Duration) {
 			// return early on an already-trusted worktree instead of polling
 			// out the full timeout. See composerReady.
 			if composerReady(output) {
-				agent.RecordTrustDialogReady(a.ProviderID(), promptReadySentinel, true)
-				return
+				return trustWatchConfirmed
 			}
 			if matchesTrustDialog(output) {
 				log.Printf("agent %s: detected Cursor workspace-trust dialog, auto-accepting", a.Name)
@@ -233,9 +327,8 @@ func watchForTrustDialog(a *agent.Agent, budget, poll time.Duration) {
 					log.Printf("agent %s: failed to dismiss Cursor trust dialog: %v", a.Name, err)
 				}
 				// The trust-dialog marker matched and we acted on it — the
-				// sentinel is live. Record a confirmed outcome.
-				agent.RecordTrustDialogReady(a.ProviderID(), promptReadySentinel, true)
-				return
+				// sentinel is live.
+				return trustWatchConfirmed
 			}
 		}
 	}
