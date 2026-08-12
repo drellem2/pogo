@@ -204,11 +204,14 @@ type LaunchAgentAudit struct {
 // the installed copy lives, what this build would write there, and what an
 // operator runs to reconcile the two.
 //
-// Adding a fourth launchd job to this package means adding a row here. That is
+// Adding another launchd job to this package means adding a row here. That is
 // the point: the next two-artifact ticket gets audited because its job is in the
-// registry, not because somebody remembered to write a check for it.
+// registry, not because somebody remembered to write a check for it. It has held
+// once already — com.pogo.reclaim (mg-b7c3) ships a plist AND a runner script on
+// two install paths, exactly mg-8f7e's shape, and it is audited below because
+// this comment was read rather than because anyone rederived the argument.
 //
-// A FOURTH JOB EXISTS AND IS DELIBERATELY NOT IN THIS REGISTRY (mg-a03d).
+// A JOB OUTSIDE THIS PACKAGE IS DELIBERATELY NOT IN THIS REGISTRY (mg-a03d).
 // com.pogo.revisionprobe arms scripts/revision-probe.sh, and it is rendered by
 // scripts/install-revision-probe.sh from the tracked plist rather than by this
 // package, for the reason the probe itself is a shell script: everything in here
@@ -248,6 +251,12 @@ func managedLaunchAgents() []managedLaunchAgent {
 			Path:   deployPlistPath,
 			Render: func() (string, error) { s, _, err := renderDeployPlist(); return s, err },
 			Remedy: "pogo service install-deploy",
+		},
+		{
+			Label:  reclaimLabel,
+			Path:   reclaimPlistPath,
+			Render: func() (string, error) { s, _, err := renderReclaimPlist(); return s, err },
+			Remedy: "pogo service install-reclaim",
 		},
 	}
 }

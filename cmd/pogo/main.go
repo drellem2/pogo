@@ -855,6 +855,55 @@ into it would make every emergency restart a deploy.`,
 		},
 	}
 
+	var cmdServiceInstallReclaim = &cobra.Command{
+		Use:   "install-reclaim",
+		Short: "Install the size-triggered Go module cache reclaim LaunchAgent (com.pogo.reclaim)",
+		Long: `Install com.pogo.reclaim — the launchd job that fires ~/.pogo/bin/pogo-reclaim.sh every 30 minutes and runs ` + "`go clean -modcache`" + ` when free space AND cache size have both crossed their floors.
+
+WHY IT EXISTS. On 2026-08-12 this box sat at 100% (571 MiB free of 460G) with a
+7.3G module cache, and ./build.sh — which is the refinery's merge gate — failed
+at the link step with "no space left on device" across ~40 packages. The cost
+was not the outage. It was that the outage presented as a compile error naming
+specific packages, so a full disk read as a broken branch.
+
+WHY THE TRIGGER IS TWO NUMBERS ANDed. Free space is the arm that maps to the
+observed damage; cache size is the arm that maps to what the reclaim can
+actually return. Free-space alone fires on a full disk whose cache is small,
+deletes almost nothing, and writes a log line that reads like the disk was
+handled — the same misattribution, produced by the fix. Cache-size alone throws
+away a cache that costs a network round to rebuild on a box with 300G free.
+
+The schedule is a SAMPLER, not the trigger: launchd has no size trigger, so the
+job wakes on an interval and the size decides. A fire costs one ` + "`df`" + `; the
+` + "`du`" + ` of the cache is only paid once the disk is already known to be low.
+
+WHAT IT DOES NOT DO. It reclaims the Go module cache and nothing else. On the
+box that prompted it that was 7.3G of a 422G fill — headroom, not a fix. When
+free space is low and the cache is not why, the job refuses to fire, exits 4,
+and says so in the log and in a rate-limited mail.
+
+~/.pogo/bin/pogo-reclaim.sh is a STATIC COPY: a merge to main does not refresh
+it. Re-run this command after any change to the runner.`,
+		Args: cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			if err := service.InstallReclaim(); err != nil {
+				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+			}
+		},
+	}
+
+	var cmdServiceUninstallReclaim = &cobra.Command{
+		Use:   "uninstall-reclaim",
+		Short: "Remove the Go module cache reclaim LaunchAgent (com.pogo.reclaim)",
+		Long:  `Stop and remove com.pogo.reclaim. State under ~/.pogo/reclaim (the alert-cooldown stamp) is left in place.`,
+		Args:  cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			if err := service.UninstallReclaim(); err != nil {
+				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+			}
+		},
+	}
+
 	var cmdServiceUninstall = &cobra.Command{
 		Use:   "uninstall",
 		Short: "Remove the pogo system service",
@@ -3945,6 +3994,8 @@ branches; work items and mail live in mg/macguffin (the task-store CLI).`,
 	cmdService.AddCommand(cmdServiceUninstallRecovery)
 	cmdService.AddCommand(cmdServiceInstallDeploy)
 	cmdService.AddCommand(cmdServiceUninstallDeploy)
+	cmdService.AddCommand(cmdServiceInstallReclaim)
+	cmdService.AddCommand(cmdServiceUninstallReclaim)
 	cmdService.AddCommand(cmdServiceReconcile)
 	cmdService.AddCommand(cmdServiceCheckDrift)
 	cmdService.AddCommand(cmdServiceVerifyRevision)

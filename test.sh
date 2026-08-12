@@ -46,6 +46,13 @@ gate_step "Testing bash shell integration" bash shell/bashrc_test.sh
 
 gate_step "Testing pogo-self-deploy driver" bash scripts/pogo-self-deploy_test.sh
 
+# The size-triggered module-cache reclaim (mg-b7c3). Runs here rather than only
+# in the Go suite because the decision this job exists for — fire, refuse, or
+# defer — lives in the shell script, not in the installer. Its stubs are on PATH,
+# so the real script takes real branches and `go clean -modcache` is never
+# reached with a real cache behind it.
+gate_step "Testing the Go module cache reclaim" bash scripts/pogo-reclaim_test.sh
+
 # The packaged test isolation itself (mg-78a5). FOUR tickets were filed for one
 # defect — a test reading the developer's live ~/.pogo, live daemon or live fleet
 # (mg-6092, mg-e8e7, mg-5336, mg-3412) — because every suite re-derived its

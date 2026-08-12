@@ -486,9 +486,224 @@ Install outside the 02:00–06:00 window, or check `~/.pogo/deploy.lock.d` and
 `pgrep -f pogo-deploy` first. `install-deploy` does `launchctl bootout` before
 `bootstrap`, and booting out a job mid-fire would kill a deploy in progress.
 
+## Disk Reclaim Agent (`com.pogo.reclaim`)
+
+Samples free space every 30 minutes and runs `go clean -modcache` when — and
+only when — **both** a free-space floor and a cache-size floor are crossed.
+
+```bash
+pogo service install-reclaim      # install / re-install
+pogo service uninstall-reclaim    # remove; state under ~/.pogo/reclaim is kept
+```
+
+### If this job has never once done anything
+
+**That is very likely correct, not a broken cron.** On this host the volume sits
+at ~99% capacity, so the free-space arm is satisfied continuously, while the
+module cache sits at ~680M — far under the 5G floor. Both arms must hold, so
+every sample exits **4 (CANNOT HELP)**, and it should: deleting 680M off a 415G
+fill returns 680M and costs a full re-download.
+
+The job is answering a question, and on this box the answer is *"not me"*. It
+starts acting the moment either input changes — when the cache accumulates past
+5G, or when someone reclaims part of the ~414G it does not own.
+
+That is measured, not hypothetical. The volume was watched dropping on
+2026-08-12 and the module cache was measured **not** to be the grower:
+
+```
+11:51Z   6.9 GiB free
+12:19Z   5.6 GiB free      -1.3 GiB in 28 min, 6 polecats running
+
+~/go/pkg/mod                680M   UNCHANGED   <- what this job reclaims
+~/Library/Caches/go-build    34G   UNCHANGED   <- see below
+~/.pogo/polecats            4.3G   (2.6G of it one stale worktree)
+~/.pogo/refinery            2.1G
+/var/folders/.../go-build*         accumulating, ~100M per build
+```
+
+### The 34G Go cache this job does not touch
+
+There are **two** Go caches on this box and they differ by a factor of fifty:
+
+| Path | Size | Reclaimed by | This job? |
+|---|---|---|---|
+| `~/go/pkg/mod` | 680M | `go clean -modcache` | **yes** |
+| `~/Library/Caches/go-build` | 34G | `go clean -cache` | **no** |
+
+"The Go cache is large" is therefore ambiguous, and the larger reading is the one
+this job does nothing about. It is named here, in the script header, and in every
+scope note the job prints, so that nobody concludes the 34G is covered because
+something with "reclaim" in its name is installed.
+
+**Not touching it is deliberate.** `go clean -cache` discards every compiled
+package on the box, so the next `./build.sh` — which *is* the refinery's merge
+gate — recompiles the world. That trades a disk problem for a gate-latency
+problem on every merge until the cache refills. If the build cache deserves
+reclaiming, it deserves its own ticket with its own argument about what a cold
+gate costs.
+
+This job also does **not** delete polecat worktrees or refinery state, even
+though they are what actually grew in the window above. That is `gitgc`'s job and
+it has a live-agent witness protecting it; a cron that removes a worktree under a
+running polecat is a worse failure than a full disk.
+
+### Why it exists
+
+On 2026-08-12 this box measured:
+
+```
+/dev/disk3s5   460Gi   422Gi   571Mi   100%   /System/Volumes/Data
+/Users/daniel/go/pkg/mod   7.3G
+```
+
+`./build.sh` in a polecat worktree failed at Step 2 with `link: mapping output
+file failed: no space left on device` across ~40 packages. `./build.sh` is also
+the refinery's merge gate, so at that fill level every merge on the host was one
+build away from failing.
+
+The cost was not the outage. **It was that the outage was misattributed** — a
+full volume presents as a compile/link error naming specific packages, which
+reads like a broken branch.
+
+### The trigger is two numbers, ANDed
+
+| Knob | Default | What it maps to |
+|---|---|---|
+| `POGO_RECLAIM_FREE_FLOOR_GB` | 20 | The **observed damage**. A build fails because the volume is full. |
+| `POGO_RECLAIM_CACHE_FLOOR_GB` | 5 | **What the reclaim can return.** Deleting a 200M cache off a full disk returns 200M and a re-download. |
+| `POGO_RECLAIM_CRITICAL_FREE_GB` | 2 | Below this, an in-flight build no longer wins the tie. |
+
+Either arm alone is worse than useless:
+
+- **Free-space alone** fires on a full disk whose cache is small, deletes almost
+  nothing, exits 0, and writes a log line that reads like the disk was handled.
+  That is this ticket's own defect, reproduced by its own fix.
+- **Cache-size alone** throws away a cache that costs a network round to rebuild
+  on a box with 300G free.
+
+The cache floor is set against a measurement rather than a hunch. After a manual
+`go clean -modcache` on 2026-08-12, the cache came back to **680M after one
+build and was flat across three readings spanning a full gate run** — so the
+plateau holds under load, not only at rest. That is enough to design against,
+not enough to call a measured steady state. It says the pre-clean 7.3G was
+mostly *stale accumulation* (old module versions, superseded toolchains) rather
+than live working set, which makes this a maintenance measure with a long fuse
+rather than a bailing bucket. 5G is ~7.5× that reading: ordinary build traffic
+cannot reach it, and the 7.3G that produced the ticket would have.
+
+### The schedule is a sampler, not the trigger
+
+launchd has no size trigger — `StartInterval`, `StartCalendarInterval` and
+`WatchPaths` are the whole vocabulary, and a directory growing is not a
+WatchPaths event. So the job wakes every 30 minutes and **the size decides**.
+
+That is affordable only because the measurements are ordered cheap-first: one
+`df` per fire, and the `du` of a multi-gigabyte tree only once `df` has already
+established the disk is low. In the steady state a fire is one `df` and one log
+line. A nightly `StartCalendarInterval` was the alternative and is worse here:
+the volume went from healthy to 571 MiB free inside a working day.
+
+### It defers while something is building
+
+`go clean -modcache` deletes module trees a running build is **reading**, so a
+racing build does not get slower — it fails, with a missing-file error that
+reads like a broken branch. The fire therefore defers (exit 5) when `pgrep -x`
+finds a `go`/`compile`/`link` process or `pogo refinery queue --json` shows a
+processing MR.
+
+Two honest limits, both stated in the log rather than assumed away:
+
+- The check cannot see a build that starts one second later. The race is
+  narrowed, not closed.
+- If the check **cannot be made** (no `pogo` on PATH, daemon down) it proceeds
+  and logs `in-flight check PARTIAL`. Deferring forever on an unanswerable
+  question is how the disk fills, and a full disk breaks every build rather than
+  one.
+
+Below `CRITICAL_FREE_GB` the deferral is skipped outright: at 571 MiB free the
+in-flight build fails whether or not this job runs.
+
+### What it does not fix, and why the job says so out loud
+
+**This job reclaims the Go module cache and nothing else.** On the box that
+prompted it, that is 7.3G of a 422G fill. Largest consumers under `/Users/daniel`
+measured 2026-08-12:
+
+```
+Library 73G   tools 15G   chrome 12G   research 9.8G
+go 8.0G       .pogo 6.4G  Virtual Machines 5.0G   dev 4.6G
+```
+
+So every path through the script that could be mistaken for "the disk is
+handled" states the opposite, computed from the run's own numbers rather than
+fixed:
+
+- A **successful reclaim** prints a `WHAT THIS DOES NOT FIX` block with the
+  post-run fill, and — if the volume is still under the floor — logs
+  `STILL BELOW THE FLOOR` and mails `human`.
+- A **low disk with a small cache** does not fire at all. It exits **4**, logs
+  `the Go module cache is NOT what is filling this volume`, and mails `human`
+  (rate-limited to once per 24h).
+
+On this host *today* the free-space arm is satisfied continuously (99% used,
+~6.9 GiB free), so the cache-size arm is the only one deciding and every sample
+exits 4. That is the true answer, not a malfunction. It stops being the answer
+when someone reclaims part of the ~414G this job does not own.
+
+### Exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | Nothing to do (above the floor), or a reclaim that happened |
+| 1 | `go clean -modcache` ran and failed |
+| 3 | UNKNOWN — could not measure (no `go`, unreadable `df`/`du`). Never a pass. |
+| 4 | CANNOT HELP — disk is low and the cache is not what is filling it |
+| 5 | DEFERRED — a build is in flight and free space is not yet critical |
+
+### Merging this does not install it
+
+Three separate things have to happen, and only the first is a merge:
+
+1. the branch merges;
+2. the `pogo` **binary** is rebuilt onto a revision carrying `install-reclaim`
+   (the nightly deploy, or a manual `pogo service install-deploy` run) — until
+   then the subcommand does not exist on the box;
+3. somebody runs `pogo service install-reclaim`.
+
+Until step 3, `~/Library/LaunchAgents/com.pogo.reclaim.plist` does not exist and
+no sample has ever run. `pogo doctor` reports the job as **absent** with the
+remedy attached — which is the point of registering it: "shipped" and "armed"
+are different states and the box can tell you which one it is in.
+
+### The static-copy trap
+
+launchd runs `~/.pogo/bin/pogo-reclaim.sh`, which `install-reclaim` copies out of
+the repo. **A merge to main does not refresh it.** A fix to the runner is not
+live on the box until `pogo service install-reclaim` is re-run — the same
+standing trap the nightly deploy runner has.
+
+Two things make that visible instead of silent:
+
+- Every fire logs `runner: <path> (mtime …)`, so a log answers *which copy ran*
+  without anybody trusting main.
+- `com.pogo.reclaim` is registered in `managedLaunchAgents()`, so `pogo doctor`
+  compares the installed **plist** against what the current build renders. Note
+  the asymmetry: that audit covers the plist, not the script — the script's
+  answer is the `runner:` line.
+
+### Dry run
+
+```bash
+POGO_RECLAIM_DRY_RUN=1 POGO_RECLAIM_FREE_FLOOR_GB=999 ~/.pogo/bin/pogo-reclaim.sh
+```
+
+Takes both measurements, prints the verdict and the scope note, removes nothing.
+
 ## Revision Probe Agent (`com.pogo.revisionprobe`)
 
-A **fourth** launchd job, and the smallest of them: it runs
+The smallest of these jobs, and the one that is not installed by the `pogo`
+binary: it runs
 `~/.pogo/deploy-src/scripts/revision-probe.sh` hourly at :20, which does two
 reads and no build — the running revision from `GET /version`, the reference
 from the tip of `origin/main` — and alerts when they have differed for longer
