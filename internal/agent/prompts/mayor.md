@@ -847,7 +847,7 @@ If a ticket for the ref already exists, the mail is new issue activity:
    EOF
    ```
    Reporter-facing wording follows the house standards (UNIX voice, no AI slop). When in doubt, mail the draft to the product SME (`[agents] sme`) first, if one is configured.
-2. **File the build and review tickets**, chained by `depends`:
+2. **File the build and review tickets** — the build chained to the triage ticket by `depends`, the review held by an assignee self-gate:
    ```bash
    mg new --type=task --priority=high --tags=gh-issue --repo=<local repo path> \
        --depends=<triage ticket id> \
