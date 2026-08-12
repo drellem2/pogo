@@ -119,12 +119,22 @@ Follow these steps exactly, in order. Skipping any step is a failure.
    - Read the approved triage recommendation your work item body points to. This is the review baseline for lens 3.
    - `gh pr view <pr-number>` — the PR title, description, and current state.
 
-4. **Check out the PR branch in your own worktree:**
+4. **Put YOUR OWN branch at the PR head — you cannot check out the PR branch itself.**
    ```bash
    git fetch origin
-   git checkout <pr-branch>    # branch name from: gh pr view <pr-number> --json headRefName -q .headRefName
+   PR_BRANCH="$(gh pr view <pr-number> --json headRefName -q .headRefName)"
+   OWN_BRANCH="$(git rev-parse --abbrev-ref HEAD)"   # read it; never guess it, never take it from a message
+   git checkout -B "$OWN_BRANCH" --no-track "origin/$PR_BRANCH"
    ```
-   On later rounds, re-fetch and hard-sync to the new head before re-reviewing: `git fetch origin && git reset --hard origin/<pr-branch>`.
+   Run the **same four lines** on every later round: `-B` is a reset, so it re-points your branch at the new head. There is no separate later-round command.
+
+   Three things about this that are not style points:
+
+   - **`git checkout <pr-branch>` cannot work here, so do not reach for it.** git refuses a branch that is already checked out in another worktree (`fatal: '<pr-branch>' is already used by worktree at ...`, exit 128), and the builder's worktree is still live while its PR awaits review. The precondition is never satisfied on this track. Earlier revisions of this file instructed exactly that, and every reviewer was forced to improvise around a step that always failed.
+   - **Stay on a NAMED branch — do NOT detach.** `git checkout <sha>` looks like the tidier repair and is the one trap here. The deploy drain's `durability_of` (`scripts/pogo-self-deploy`) names the branch checked out in your worktree before it asks whether anything on origin holds your HEAD; detached, it cannot name one, answers `unknown`, and `unknown` holds the drain exactly as `unpushed` does. A detached reviewer re-creates on every review the unsatisfiable wait that gh#134/mg-fd94 removed — you never push this branch, so nothing you do can discharge it, and the nightly redeploy exits 7 at its deadline. Named, your commits are found on `origin/$PR_BRANCH` and the drain bounces past you (mg-f0bf).
+   - **`--no-track` is load-bearing.** Without it git silently sets your branch's upstream to the *builder's* branch; a bare `git push` then refuses — but the refusal prints `git push origin HEAD:<pr-branch>`, which is a one-paste clobber of the branch under review. With `--no-track` there is no upstream, and the refusal offers your own branch name instead. Note that `--no-track` only prevents the upstream being set; it does not clear one already there, which is why it belongs on round 1 and every round.
+
+   You are not expected to push this branch at all. Your output is PR comments and the mg verdict.
 
 5. **Review through three lenses, in this order.** Each lens produces findings; classify every finding as **blocking** or **advisory** (a nit you explicitly mark non-blocking).
 

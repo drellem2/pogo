@@ -1171,11 +1171,19 @@ mdgit -C "$MD_TMP/wt-rebased" cat-file -e refs/remotes/origin/main:j 2>/dev/null
 #     reviewer is spawned on its own branch and must end up holding the BUILDER's
 #     commits. It cannot `git checkout` the PR branch: git refuses a branch
 #     already checked out in another worktree, and the builder's worktree is
-#     still live while its PR is in review. So polecat-review.md:124-127 puts it
-#     on `reset --hard origin/<pr-branch>` against its OWN branch, which it never
-#     pushes. Result: HEAD is on origin/wt-pushed and on NO ref named wt-review.
-#     Built with the same `reset --hard` the prompt instructs, not by branching
-#     from the head — the shape under test is the one the prompt produces.
+#     still live while its PR is in review. So it puts its OWN branch at the PR
+#     head instead, and never pushes it. Result: HEAD is on origin/wt-pushed and
+#     on NO ref named wt-review.
+#
+#     BUILT WITH `reset --hard` — WHICH IS NO LONGER WHAT THE PROMPT SAYS, AND IS
+#     KEPT DELIBERATELY. This is the shape reviewers reached by improvising around
+#     polecat-review.md's impossible `git checkout <pr-branch>`; it is what every
+#     reviewer ran while gh#134 was live, and it is still what a reviewer working
+#     from a cached or older prompt will run. mg-f0bf repaired the instruction to
+#     `checkout -B <own> --no-track origin/<pr>`; fixture (g2) below builds THAT
+#     shape from the literal new command and asserts the two are answered
+#     identically, so neither the old improvisation nor the new instruction can
+#     drift away from this test without a failure.
 mdgit -C "$MD_TMP/repo" worktree add -q -b wt-review "$MD_TMP/wt-review" main
 mdgit -C "$MD_TMP/wt-review" reset -q --hard refs/remotes/origin/wt-pushed
 
@@ -1191,6 +1199,48 @@ mdgit -C "$MD_TMP/wt-review" reset -q --hard refs/remotes/origin/wt-pushed
 [ "$(mdgit -C "$MD_TMP/wt-review" rev-parse HEAD)" = "$(mdgit -C "$MD_TMP/wt-review" rev-parse refs/remotes/origin/wt-pushed)" ] \
     && pass "gh#134 fixture: the reviewer really is sitting at the builder's pushed head — the commits it holds exist under SOMEBODY's origin ref" \
     || fail "gh#134 fixture: wt-review's HEAD is not origin/wt-pushed — the reset did not happen and the case below is 'genuinely unpushed', the opposite case"
+
+# (g2) THE SAME REVIEWER, BUILT BY THE COMMAND THE PROMPT NOW ACTUALLY INSTRUCTS
+#      (mg-f0bf). polecat-review.md step 4 used to say `git checkout <pr-branch>`,
+#      which git refuses with exit 128 whenever the builder's worktree is live —
+#      i.e. always, on the track the instruction lives on. The repair had ONE
+#      forbidden direction: detaching at the PR head reads `unknown` and holds the
+#      drain exactly as `unpushed` does, so the tidy-looking fix would have put
+#      back, on every reviewer, the unsatisfiable wait gh#134 had just removed.
+#
+#      SO THE CONSTRAINT IS TESTED, NOT TRUSTED TO A COMMENT. The command below is
+#      the literal one from the prompt, and what makes this able to fail is that a
+#      future editor swapping in `checkout --detach` keeps the fixture building
+#      fine and turns the assertions red — HEAD stops naming a branch and
+#      durability_of drops to `unknown`. A prompt line and a drain predicate that
+#      must agree, in two files neither of which imports the other, agree here.
+mdgit -C "$MD_TMP/repo" worktree add -q -b wt-reviewb "$MD_TMP/wt-reviewb" main
+mdgit -C "$MD_TMP/wt-reviewb" checkout -q -B wt-reviewb --no-track refs/remotes/origin/wt-pushed
+
+# Same three staging preconditions as (g): each rules out one OTHER branch of
+# durability_of answering, which would leave (2b) unexercised while going green.
+{ ! mdgit -C "$MD_TMP/wt-reviewb" rev-parse --verify --quiet refs/remotes/origin/wt-reviewb >/dev/null 2>&1; } \
+    && pass "mg-f0bf fixture: the instructed command leaves the reviewer's own branch off origin, so (g2) cannot be answered by branch (1)" \
+    || fail "mg-f0bf fixture: origin/wt-reviewb resolves — 'checkout -B' published the reviewer's branch and (2b) is NOT staged"
+{ ! mdgit -C "$MD_TMP/wt-reviewb" merge-base --is-ancestor HEAD refs/remotes/origin/main 2>/dev/null; } \
+    && pass "mg-f0bf fixture: the reviewed commits are absent from origin/main, so (g2) cannot be answered by branch (2)" \
+    || fail "mg-f0bf fixture: the PR under review is already on origin/main — (g2) is a merged branch and proves nothing"
+[ "$(mdgit -C "$MD_TMP/wt-reviewb" rev-parse HEAD)" = "$(mdgit -C "$MD_TMP/wt-reviewb" rev-parse refs/remotes/origin/wt-pushed)" ] \
+    && pass "mg-f0bf fixture: the instructed command really lands the reviewer on the builder's pushed head" \
+    || fail "mg-f0bf fixture: wt-reviewb's HEAD is not origin/wt-pushed — 'checkout -B <own> --no-track origin/<pr>' did not do what step 4 claims it does"
+
+# THE STEP THE PROMPT CANNOT EXECUTE, EXHIBITED. Asserting the replacement works
+# says nothing about whether the thing it replaced was broken; without this the
+# suite would keep passing if someone "restored" the original line. Exit 128 and
+# the refusal text are both checked, because a command that fails for some other
+# reason would satisfy a bare non-zero check and mean something different.
+MD_XOUT="$(mdgit -C "$MD_TMP/wt-reviewb" checkout wt-pushed 2>&1)"; MD_XRC=$?
+[ "$MD_XRC" -eq 128 ] && printf '%s' "$MD_XOUT" | grep -q 'already used by worktree' \
+    && pass "mg-f0bf: 'git checkout <pr-branch>' — polecat-review.md's old step 4 — really is impossible while the builder's worktree lives (exit $MD_XRC: $MD_XOUT)" \
+    || fail "mg-f0bf: checking out the PR branch exited $MD_XRC ($MD_XOUT) — the premise of the prompt repair does not reproduce, so step 4's replacement may be solving nothing"
+[ "$(mdgit -C "$MD_TMP/wt-reviewb" rev-parse --abbrev-ref HEAD)" = "wt-reviewb" ] \
+    && pass "mg-f0bf: the refused checkout left the reviewer where it was — the failure is inert, not half-applied" \
+    || fail "mg-f0bf: the refused checkout moved HEAD to '$(mdgit -C "$MD_TMP/wt-reviewb" rev-parse --abbrev-ref HEAD)'"
 
 # (h) refs/remotes/origin/HEAD, WHICH THIS FIXTURE OTHERWISE LACKS. A real clone
 #     of a non-empty repository carries it; this one was cloned from a bare repo
@@ -1209,6 +1259,11 @@ mdgit -C "$MD_TMP/wt-fresh" rev-parse --verify --quiet refs/remotes/origin/HEAD 
 
 md() { durability_of "$1"; }
 mdw() { durability_of "$1" | cut -d' ' -f1; }
+# WHICH BRANCH OF durability_of ANSWERED, with the fixture-specific names elided.
+# Defined up here because two separate assertions need it — mg-f0bf's equivalence
+# check just below, and the distinct-durable-SHAPES count further down, which is
+# where the elision is explained at length. Do not re-define it there.
+md_shape() { md "$1" | sed -e "s#$MD_TMP#<T>#g" -e 's#wt-[a-z]*#<B>#g'; }
 
 # --- THE INVERSION: what holds, and what no longer does ---------------------
 [ "$(mdw "$MD_TMP/wt-local")" = "unpushed" ] \
@@ -1262,6 +1317,34 @@ printf '%s' "$(md "$MD_TMP/wt-review")" | grep -q 'origin/wt-pushed' \
     && pass "gh#134: the reviewer's durable line NAMES the ref that carries its commits, so the clearance can be checked rather than trusted" \
     || fail "gh#134: the reviewer cleared without naming a holder ($(md "$MD_TMP/wt-review")) — indistinguishable from a predicate that stopped testing"
 
+# --- mg-f0bf: THE PROMPT REPAIR DID NOT MOVE THIS VERDICT ---------------------
+# The coupling this ticket exists for, stated as a measurement rather than as
+# advice in a comment. (g2) was built by the command polecat-review.md step 4 now
+# instructs; (g) by the `reset --hard` improvisation it replaces. If the two are
+# answered differently, the prompt repair changed what the drain sees.
+[ "$(mdw "$MD_TMP/wt-reviewb")" = "durable" ] \
+    && pass "mg-f0bf: a reviewer built by the NEWLY INSTRUCTED command does not hold the drain ($(md "$MD_TMP/wt-reviewb"))" \
+    || fail "mg-f0bf: the instructed 'checkout -B <own> --no-track origin/<pr>' read as '$(md "$MD_TMP/wt-reviewb")' — polecat-review.md step 4 now tells every reviewer to enter a state that stalls the nightly redeploy"
+[ "$(md_shape "$MD_TMP/wt-reviewb")" = "$(md_shape "$MD_TMP/wt-review")" ] \
+    && pass "mg-f0bf: the instructed command and the improvisation it replaces are answered by the SAME branch of durability_of, with the same detail — the prompt repair is verdict-neutral" \
+    || fail "mg-f0bf: instructed='$(md_shape "$MD_TMP/wt-reviewb")' vs improvised='$(md_shape "$MD_TMP/wt-review")' — the repair moved the drain's answer, which is precisely what it was constrained not to do"
+
+# THE FORBIDDEN DIRECTION, GUARDED AT THE PROMPT'S END. A named branch is what
+# makes (2b) reachable at all: durability_of names the branch BEFORE it asks who
+# holds HEAD, so a detached reviewer never gets here. Asserting the verdict alone
+# would not catch a detach — `unknown` is already asserted below for the detached
+# fixture — so assert the PROPERTY step 4 has to preserve.
+[ "$(mdgit -C "$MD_TMP/wt-reviewb" rev-parse --abbrev-ref HEAD)" != "HEAD" ] \
+    && pass "mg-f0bf: the instructed command leaves the reviewer on a NAMED branch, which is the precondition (2b) is seated below" \
+    || fail "mg-f0bf: the instructed command detached HEAD — durability_of cannot name a branch, answers 'unknown', and every reviewer re-creates the gh#134 deadlock"
+# --no-track, asserted because its absence is silent and its cost is not: git
+# would set the reviewer's upstream to the BUILDER's branch, and the bare-push
+# refusal that follows prints `git push origin HEAD:<pr-branch>` — a one-paste
+# clobber of the branch under review. Nothing else in the suite would notice.
+[ -z "$(mdgit -C "$MD_TMP/wt-reviewb" config --get branch.wt-reviewb.merge 2>/dev/null)" ] \
+    && pass "mg-f0bf: the instructed command sets NO upstream, so a stray push from a reviewer cannot be aimed at the branch it is reviewing" \
+    || fail "mg-f0bf: the reviewer's upstream is '$(mdgit -C "$MD_TMP/wt-reviewb" config --get branch.wt-reviewb.merge)' — --no-track was dropped from step 4 and a bare 'git push' now offers to overwrite the PR under review"
+
 # THE TRUE POSITIVES THAT MATTER, RESTATED AGAINST THE WIDER TEST. Widening the
 # ref set is a step toward permissiveness, and the cost of overshooting is
 # mg-9a19 (1026 lines orphaned). wt-local never pushed at all; wt-ahead pushed
@@ -1301,7 +1384,8 @@ printf '%s' "$(md "$MD_TMP/wt-review")" | grep -q 'origin/wt-pushed' \
 # ref, and `wt-* -> <B>` does not touch the word "main". The count still fails the
 # assertion, which is what the guard needs; it simply does not collapse as far as
 # a first reading suggests. Measured at 9b5f171 (PR 140 round 2 advisory).
-md_shape() { md "$1" | sed -e "s#$MD_TMP#<T>#g" -e 's#wt-[a-z]*#<B>#g'; }
+# md_shape is defined next to md/mdw above — mg-f0bf's equivalence check needs it
+# earlier in the file. Its elision is the subject of the comment you just read.
 MD_DETAILS="$(printf '%s\n%s\n%s\n%s\n%s\n' "$(md_shape "$MD_TMP/wt-pushed")" "$(md_shape "$MD_TMP/wt-merged")" "$(md_shape "$MD_TMP/wt-fresh")" "$(md_shape "$MD_TMP/wt-rebased")" "$(md_shape "$MD_TMP/wt-review")" | grep '^durable' | sort -u | wc -l | tr -d ' ')"
 [ "$MD_DETAILS" = "5" ] \
     && pass "mg-3a96/gh#134: the five durable paths are five distinct measurements, not one fallback wearing five hats" \
