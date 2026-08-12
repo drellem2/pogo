@@ -322,6 +322,29 @@ const (
 	// sufficient.
 	DefaultGHIntakeEscalateAfter = 4 * time.Hour
 
+	// DefaultReviewDeclInterval is how often pogod's review-declaration detector
+	// sweeps the store for review tickets carrying no usable `reviews:` line
+	// (mg-253e). Half an hour, and the number is set by the SHELF LIFE of the
+	// finding rather than by its cost: the scan is a filesystem walk with no
+	// network and no subprocess, while the round it can still affect runs for a
+	// median of 8 minutes.
+	DefaultReviewDeclInterval = 30 * time.Minute
+	// DefaultReviewDeclRenotify is how long an UNCHANGED set of review-declaration
+	// findings stays quiet. A full day: notification is on TRANSITION into the
+	// undeclared state, and this is only the backstop for a finding nobody
+	// cleared.
+	DefaultReviewDeclRenotify = 24 * time.Hour
+	// DefaultReviewDeclNotifyTo is the mailbox review-declaration findings go to:
+	// the COORDINATOR, which is the agent that files review tickets (mayor.md
+	// transition 3) and therefore the only one that can write the missing line.
+	//
+	// There is deliberately NO escalation to `human` at any interval. mg-253e
+	// priced its own residual: a missed declaration costs one recoverable round,
+	// not an indefinite slot. Copying `human` on a defence-in-depth gap spends a
+	// scarce reader and teaches them to filter every sibling detector alongside
+	// it.
+	DefaultReviewDeclNotifyTo = DefaultCoordinator
+
 	// DefaultAckWatchInterval is how often pogod's completion-deficit detector
 	// samples the scheduler's ack counters (mg-1935). Coarse: the condition is a
 	// RATE over hundreds of fires, so it moves by fractions of a point per tick
@@ -662,6 +685,7 @@ type Config struct {
 	CredExpiry CredExpiryConfig
 	GHTeardown GHTeardownConfig
 	GHIntake   GHIntakeConfig
+	ReviewDecl ReviewDeclConfig
 	AckWatch   AckWatchConfig
 	DeafWatch  DeafWatchConfig
 	FirstTurn  FirstTurnConfig
@@ -986,6 +1010,45 @@ type GHTeardownConfig struct {
 	// notice also goes to `human`. Zero falls back to
 	// DefaultGHTeardownEscalateAfter; a NEGATIVE value disables escalation.
 	EscalateAfter time.Duration
+}
+
+// ReviewDeclConfig configures pogod's REVIEW-DECLARATION detector (mg-253e):
+// the heartbeat-driven sweep that reports review tickets whose carrier block
+// declares no usable `reviews:` line, so the done-reaper's exemption cannot
+// fire for the builder they review.
+//
+// It exists because mg-aaf6's guard has exactly one instruction-following
+// dependency left, and mg-aaf6's own author named it rather than claiming the
+// guard was unconditional: the `reviews:` line is written by a coordinator
+// following an instruction, and IF IT IS NOT WRITTEN NOTHING REPORTS THAT. The
+// guard never fires, the builder is reaped mid-review exactly as before, and no
+// artifact anywhere says a declaration was expected and missing.
+//
+// Severity is genuinely low and the configuration reflects it rather than
+// inflating it: a missed write costs ONE recoverable round, so there is no
+// escalation field here and no path to `human`. What it buys is that the
+// omission stops being invisible.
+//
+// REPORT-ONLY, and here that is load-bearing rather than conventional: a
+// detector that repaired the thing it measures could never again be trusted to
+// measure it. There is no seam in internal/reviewdecl through which a work item
+// could be written.
+type ReviewDeclConfig struct {
+	// Enabled turns the runner on. Defaults to true. Unlike its gh-issue
+	// siblings it has no arming precondition — the scan is a local filesystem
+	// walk, so there is no external tool whose absence would turn an environment
+	// gap into a wall of findings.
+	Enabled bool
+	// Interval is the COARSE gap between sweeps. Zero falls back to
+	// DefaultReviewDeclInterval.
+	Interval time.Duration
+	// RenotifyAfter is how long an unchanged set of findings stays quiet before
+	// being mailed again. Zero falls back to DefaultReviewDeclRenotify.
+	RenotifyAfter time.Duration
+	// NotifyTo is the mailbox findings are reported to. Empty falls back to
+	// DefaultReviewDeclNotifyTo (the coordinator) — the only agent that files
+	// review tickets and therefore the only one that can write the missing line.
+	NotifyTo string
 }
 
 // GHIntakeConfig configures pogod's gh-issue INTAKE detector (mg-039b): the
@@ -1496,6 +1559,7 @@ type parsedConfig struct {
 	credExpiryEnabledSet      bool
 	ghTeardownEnabledSet      bool
 	ghIntakeEnabledSet        bool
+	reviewDeclEnabledSet      bool
 	ackWatchEnabledSet        bool
 	deafWatchEnabledSet       bool
 	firstTurnEnabledSet       bool
@@ -1596,6 +1660,12 @@ func Load() *Config {
 			RenotifyAfter: DefaultGHIntakeRenotify,
 			NotifyTo:      DefaultGHIntakeNotifyTo,
 			EscalateAfter: DefaultGHIntakeEscalateAfter,
+		},
+		ReviewDecl: ReviewDeclConfig{
+			Enabled:       true,
+			Interval:      DefaultReviewDeclInterval,
+			RenotifyAfter: DefaultReviewDeclRenotify,
+			NotifyTo:      DefaultReviewDeclNotifyTo,
 		},
 		AckWatch: AckWatchConfig{
 			Enabled:          true,
@@ -1741,6 +1811,18 @@ func Load() *Config {
 		// escalation off, so it must survive the merge like any other override.
 		if fileCfg.GHTeardown.EscalateAfter != 0 {
 			cfg.GHTeardown.EscalateAfter = fileCfg.GHTeardown.EscalateAfter
+		}
+		if fileCfg.reviewDeclEnabledSet {
+			cfg.ReviewDecl.Enabled = fileCfg.ReviewDecl.Enabled
+		}
+		if fileCfg.ReviewDecl.Interval > 0 {
+			cfg.ReviewDecl.Interval = fileCfg.ReviewDecl.Interval
+		}
+		if fileCfg.ReviewDecl.RenotifyAfter > 0 {
+			cfg.ReviewDecl.RenotifyAfter = fileCfg.ReviewDecl.RenotifyAfter
+		}
+		if fileCfg.ReviewDecl.NotifyTo != "" {
+			cfg.ReviewDecl.NotifyTo = fileCfg.ReviewDecl.NotifyTo
 		}
 		if fileCfg.ghIntakeEnabledSet {
 			cfg.GHIntake.Enabled = fileCfg.GHIntake.Enabled
@@ -2735,6 +2817,22 @@ func parseConfigFileInto(cfg *parsedConfig, path string) error {
 				}
 			case "repos":
 				cfg.GHIntake.Repos = parseStringArray(val)
+			}
+		case "review_decl":
+			switch key {
+			case "enabled":
+				cfg.ReviewDecl.Enabled = val == "true"
+				cfg.reviewDeclEnabledSet = true
+			case "interval":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.ReviewDecl.Interval = d
+				}
+			case "renotify_after":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.ReviewDecl.RenotifyAfter = d
+				}
+			case "notify_to":
+				cfg.ReviewDecl.NotifyTo = unquotedVal
 			}
 		case "agents":
 			switch key {

@@ -51,6 +51,7 @@ import (
 	"github.com/drellem2/pogo/internal/reaper"
 	"github.com/drellem2/pogo/internal/reconcile"
 	"github.com/drellem2/pogo/internal/refinery"
+	"github.com/drellem2/pogo/internal/reviewdecl"
 	"github.com/drellem2/pogo/internal/scheduler"
 	"github.com/drellem2/pogo/internal/search"
 	"github.com/drellem2/pogo/internal/server"
@@ -2251,6 +2252,53 @@ Flags:
 		}
 	}
 
+	// Build the REVIEW-DECLARATION detector (mg-253e): the sweep that reports a
+	// review ticket carrying no usable `reviews:` line, and therefore a builder
+	// the mg-aaf6 exemption can never protect.
+	//
+	// It is the residual mg-aaf6 named in its own PR rather than papered over.
+	// That guard removes every piece of state somebody must remember to clear —
+	// but the declaration itself is still written by a coordinator following an
+	// instruction, and an unfollowed instruction emits nothing. The guard does
+	// not fire, the builder is reaped mid-review as it was before, and no
+	// artifact says a declaration was expected and missing.
+	//
+	// It runs here rather than only as a CLI because of what the sibling next
+	// door cost: verdictwatch was a correct, audited detector that NOTHING RAN.
+	// Shipping a check for "the coordinator did not do the thing it was told to
+	// do" and then relying on the coordinator to remember to run it would
+	// reproduce the very defect one level up.
+	//
+	// No arming precondition, unlike its two gh-issue siblings above: the scan is
+	// a local filesystem walk, so there is no external tool whose absence would
+	// turn an environment gap into a wall of findings. REPORT-ONLY, and here that
+	// is load-bearing rather than conventional — a detector that repaired the
+	// thing it measures could never again be trusted to measure it, so there is
+	// no seam in internal/reviewdecl through which a work item could be written.
+	var reviewDeclWatcher *reviewdecl.Watcher
+	if cfg.ReviewDecl.Enabled {
+		src := reviewdecl.Source{}
+		reviewDeclWatcher = reviewdecl.New(reviewdecl.Options{
+			Enabled:       true,
+			Source:        src.Items,
+			Mail:          client.SendMGMail,
+			Interval:      cfg.ReviewDecl.Interval,
+			RenotifyAfter: cfg.ReviewDecl.RenotifyAfter,
+			NotifyTo:      cfg.ReviewDecl.NotifyTo,
+			Statuses:      src.Statuses(),
+		})
+		log.Printf("pogod: review-declaration detector enabled (interval=%s renotify=%s notify_to=%s boundary=%s statuses=%v, report-only)",
+			cfg.ReviewDecl.Interval, cfg.ReviewDecl.RenotifyAfter, cfg.ReviewDecl.NotifyTo,
+			reviewdecl.ConventionLandedAt.Format(time.RFC3339), src.Statuses())
+	} else {
+		// Logged rather than left silent. A detector for a silently-absent guard
+		// that is itself silently switched off would be the same defect one more
+		// level up, and `[review_decl] enabled = false` is otherwise indistinguishable
+		// from a build that never had the detector in it.
+		log.Printf("pogod: review-declaration detector DISABLED by config — review tickets filed " +
+			"without a `reviews:` line will not be reported (mg-253e)")
+	}
+
 	// Build the scheduler-completion deficit detector (mg-1935): the READER the
 	// ack counters never had. mg-a754 gave every fire a completion signal and
 	// `pogo schedule list` even renders `⚠ N unacked`, but nothing consumed it —
@@ -2652,6 +2700,14 @@ Flags:
 		// could file a work item or comment on an issue.
 		if intakeWatcher != nil {
 			go intakeWatcher.Check(now)
+		}
+		// The review-declaration detector rides the same tick on its own coarse
+		// interval. In a goroutine because it walks four status directories and
+		// shells out to `mg mail send` on a finding — neither must delay the next
+		// tick. Report-only: it mails, and it has no seam through which it could
+		// write the `reviews:` line whose absence it reports.
+		if reviewDeclWatcher != nil {
+			go reviewDeclWatcher.Check(now)
 		}
 		// The completion-deficit detector rides the same tick and throttles
 		// itself to a COARSE interval. In a goroutine because a finding shells

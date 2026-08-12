@@ -96,6 +96,23 @@ type WorkItem struct {
 	// posting a second acknowledgement comment on a stranger's open GitHub issue
 	// — stayed reachable by a filer putting one line too high.
 	CarrierUnreadable bool `json:"carrier_unreadable,omitempty"`
+	// Created is the `created:` frontmatter stamp — when mg filed the item. It is
+	// the only FILING time the store records, and it is not derivable from
+	// anything else here: ModTime tracks the file, which a body edit moves, and
+	// CompletedAt is the other end of the item's life.
+	//
+	// It is read because a convention has a START DATE, and an item filed before
+	// one cannot be judged against it. mg-253e's detector scopes `reviews:` to
+	// review tickets filed after the convention landed on main; without this
+	// field it would report every review ticket in the store's history as
+	// missing a line that did not exist when it was written — a detector whose
+	// first run is 31 false findings is a detector that gets muted.
+	//
+	// Zero means the item declares no `created:` line or it did not parse. That
+	// is a THIRD answer and not a very old date: a consumer scoping on a
+	// boundary must count those separately rather than let an unstamped item
+	// fall silently to whichever side of the boundary zero happens to land on.
+	Created time.Time `json:"created,omitempty"`
 	// ModTime is the work item file's last-modified time. It is the best
 	// available proxy for how long an item has sat in its current status
 	// directory (mg rewrites/moves the file on status transitions), which the
@@ -437,6 +454,14 @@ func parseWorkItem(path, status string) (WorkItem, error) {
 			item.Repo = val
 		case "depends":
 			item.Depends = val
+		case "created":
+			// An unparseable stamp leaves Created zero rather than guessing. A
+			// consumer that scopes on it must already handle zero (see Created),
+			// so a malformed line lands in the same "no filing time recorded"
+			// bucket as an absent one instead of inventing a date.
+			if t, err := time.Parse(time.RFC3339, val); err == nil {
+				item.Created = t.UTC()
+			}
 		}
 	}
 
