@@ -220,15 +220,45 @@ func TestInitialPromptViaArgvAppendsToCommand(t *testing.T) {
 	}
 
 	// The process actually received the message as an argument.
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if strings.Contains(string(a.RecentOutput(4096)), task) {
-			return // success
-		}
-		time.Sleep(50 * time.Millisecond)
+	//
+	// WAIT ON THE CONDITION, NOT ON THE CLOCK (mg-ceae). This assertion used to
+	// poll RecentOutput against a 5s wall-clock deadline, which made the verdict
+	// a function of how busy the host was: `echo` is scheduled in milliseconds
+	// on an idle box and can be delayed arbitrarily on a loaded one, so a
+	// contended host was reported as a broken argv path. Raising the constant
+	// only moves the load at which that misreport happens; it is what the
+	// tracked family (mg-6c90, mg-db12, mg-3412) has accumulated from.
+	//
+	// `echo` writes its argv and exits, and Done() closes only after the PTY
+	// reader has drained (see waitAndHandle), so "the process has exited" is
+	// exactly the point at which the output is COMPLETE — no more bytes can
+	// ever arrive. Deciding after that is load-independent: a slow host takes
+	// longer to reach the decision but reaches the same one.
+	select {
+	case <-a.Done():
+	case <-time.After(argvDeliveryDeadlockBackstop):
+		// Not a verdict on argv delivery — a `echo` that has not exited in two
+		// minutes is a genuine hang (or a lost PTY reader), not contention.
+		t.Fatalf("agent process never exited within %v; this is the deadlock backstop, "+
+			"not a timing measurement — output so far: %q",
+			argvDeliveryDeadlockBackstop, string(a.RecentOutput(4096)))
 	}
-	t.Errorf("argv-delivered prompt never appeared in output; output: %q", string(a.RecentOutput(4096)))
+	if got := string(a.RecentOutput(4096)); !strings.Contains(got, task) {
+		t.Errorf("argv-delivered prompt never appeared in output; process exited with %v, complete output: %q",
+			a.ExitErr(), got)
+	}
 }
+
+// argvDeliveryDeadlockBackstop bounds the wait in
+// TestInitialPromptViaArgvAppendsToCommand. It is deliberately NOT a
+// measurement: the command under it is `echo`, which completes in
+// milliseconds, so at two minutes the backstop sits four orders of magnitude
+// above any plausible scheduling delay and can only fire on a real hang. It
+// exists so a wedged PTY reader fails with a named diagnosis instead of
+// hanging the package until go test's global panic timeout. If a change ever
+// makes this constant look tight, the fix is to find the hang — not to raise
+// the number.
+const argvDeliveryDeadlockBackstop = 2 * time.Minute
 
 // TestInitialPromptViaArgvEmptyNudgeNoAppend: with no InitialNudge there is
 // nothing to deliver — the command must run unmodified even for an
