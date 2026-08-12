@@ -1124,7 +1124,8 @@ func (d *stallFallbackDamper) announce(recipient string) bool {
 // stallFallbackDamper for what it counts and why. A nil damper means no damping,
 // which is the pre-mg-61ce behaviour.
 func newStallNudgerWithTimeoutAndDamper(reg *agent.Registry, mail func(to, from, subject, body string) error, ptyTimeout time.Duration, damper *stallFallbackDamper) stallwatch.Nudger {
-	return func(agentName, message string) (stallwatch.Delivery, error) {
+	return func(agentName string, notice stallwatch.Notice) (stallwatch.Delivery, error) {
+		message := notice.Message
 		if reg != nil {
 			a := reg.Get(agentName)
 			if a != nil && a.Status == agent.StatusRunning {
@@ -1178,7 +1179,7 @@ func newStallNudgerWithTimeoutAndDamper(reg *agent.Registry, mail func(to, from,
 						"so it was sent as mail instead. It may therefore be older than it looks — "+
 						"re-check the current state before acting on it.",
 					message, err)
-				if mailErr := mail(agentName, "stall-watch", "stall-watch: work piling up (undelivered to terminal)", body); mailErr != nil {
+				if mailErr := mail(agentName, "stall-watch", stallSubject(notice)+" (undelivered to terminal)", body); mailErr != nil {
 					// Both channels are down. This is the genuine hard failure:
 					// nothing carried the message. Log loudly — a stall notice
 					// that reaches nobody is the failure this watcher exists to
@@ -1214,11 +1215,33 @@ func newStallNudgerWithTimeoutAndDamper(reg *agent.Registry, mail func(to, from,
 		if damper != nil {
 			damper.reset(agentName)
 		}
-		if err := mail(agentName, "stall-watch", "stall-watch: work piling up", message); err != nil {
+		if err := mail(agentName, "stall-watch", stallSubject(notice), message); err != nil {
 			return stallwatch.Delivery{}, err
 		}
 		return stallwatch.Delivery{Channel: stallwatch.DeliveryMail}, nil
 	}
+}
+
+// stallSubjectFallback is the subject a notice gets when it carries none. It is
+// the string EVERY stall-watch mail used to carry, kept for exactly one reason:
+// a caller that composes no subject must still produce mail, and a notice with
+// an empty subject line is worse than an unhelpful one. Seeing it in a maildir
+// means a fire reached the delivery site without going through
+// stallwatch.subject — a bug in the watcher, not in delivery.
+const stallSubjectFallback = "stall-watch: work piling up"
+
+// stallSubject reads the notice's own subject, falling back when it is empty.
+//
+// The fallback is a total function on purpose. mg-b6f8's defect was that this
+// site COULD NOT do better — the facts were not in scope here, so one constant
+// was the only thing it could write. Now the facts arrive with the notice, and
+// the only remaining way to emit the old undistinguishable subject is for the
+// watcher to have composed nothing.
+func stallSubject(n stallwatch.Notice) string {
+	if s := strings.TrimSpace(n.Subject); s != "" {
+		return s
+	}
+	return stallSubjectFallback
 }
 
 // newStallNudgerWithTimeout is the test-facing constructor: an injected PTY

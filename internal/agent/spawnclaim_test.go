@@ -204,8 +204,10 @@ func TestUnclaimedWorkingPolecatIsTheDefect(t *testing.T) {
 	}, stallwatch.Options{
 		WorkRoot: filepath.Join(root, "work"),
 		MailRoot: filepath.Join(root, "mail"),
-		Nudge:    func(string, string) (stallwatch.Delivery, error) { return stallwatch.Delivery{}, nil },
-		Emit:     func(e events.Event) { fired = append(fired, e) },
+		Nudge: func(string, stallwatch.Notice) (stallwatch.Delivery, error) {
+			return stallwatch.Delivery{}, nil
+		},
+		Emit: func(e events.Event) { fired = append(fired, e) },
 	})
 	// An hour on, past the 10-minute threshold — the same distance out mg-86e7
 	// was when it drew its second false wake.

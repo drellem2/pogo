@@ -64,7 +64,7 @@ func TestStallNudgerSuppressedInsideLimitEpisode(t *testing.T) {
 	}, 5*time.Second)
 
 	const sentinel = "STALL_WAKE_SENTINEL"
-	delivery, err := nudge("limited-mayor", sentinel)
+	delivery, err := nudge("limited-mayor", stallwatch.Notice{Message: sentinel})
 	if err != nil {
 		t.Fatalf("a suppressed wake must still be delivered by mail, not fail: %v", err)
 	}
@@ -110,7 +110,7 @@ func TestStallNudgerDeliversWhenNoEpisode(t *testing.T) {
 	}, 5*time.Second)
 
 	const sentinel = "STALL_WAKE_DELIVERED"
-	delivery, err := nudge("quiet-mayor", sentinel)
+	delivery, err := nudge("quiet-mayor", stallwatch.Notice{Message: sentinel})
 	if err != nil {
 		t.Fatalf("nudge: %v", err)
 	}
@@ -151,7 +151,7 @@ func TestStallNudgerWakesEachSilenceOnce(t *testing.T) {
 	}, 5*time.Second)
 
 	// First fire into this silence: the terminal takes it.
-	delivery, err := nudge("silent-mayor", "WAKE_ONE")
+	delivery, err := nudge("silent-mayor", stallwatch.Notice{Message: "WAKE_ONE"})
 	if err != nil {
 		t.Fatalf("first wake: %v", err)
 	}
@@ -161,7 +161,7 @@ func TestStallNudgerWakesEachSilenceOnce(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 
 	// Second fire into the SAME silence — the only output since is the echo.
-	delivery, err = nudge("silent-mayor", "WAKE_TWO")
+	delivery, err = nudge("silent-mayor", stallwatch.Notice{Message: "WAKE_TWO"})
 	if err != nil {
 		t.Fatalf("second wake should fall back to mail, not fail: %v", err)
 	}
@@ -183,7 +183,7 @@ func TestStallNudgerWakesEachSilenceOnce(t *testing.T) {
 	}
 	time.Sleep(2500 * time.Millisecond)
 
-	delivery, err = nudge("silent-mayor", "WAKE_THREE")
+	delivery, err = nudge("silent-mayor", stallwatch.Notice{Message: "WAKE_THREE"})
 	if err != nil {
 		t.Fatalf("third wake: %v", err)
 	}

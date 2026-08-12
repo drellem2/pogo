@@ -128,11 +128,14 @@ const (
 	DeliverySuppressed = "suppressed"
 )
 
-// Nudger delivers a short message to an agent. pogod injects an implementation
+// Nudger delivers a notice to an agent. pogod injects an implementation
 // that nudges the agent's PTY when it is running and falls back to macguffin
 // mail both when the agent is offline AND when the PTY nudge fails, so a busy
 // recipient still hears the notice (mg-79dc).
-type Nudger func(agent, message string) (Delivery, error)
+//
+// It takes a Notice rather than a bare message string because the mail road
+// needs a subject and the delivery site cannot compose one — see Notice.
+type Nudger func(agent string, notice Notice) (Delivery, error)
 
 // Emitter writes an event to the shared log. Defaults to events.Emit; tests
 // substitute a recorder.
@@ -404,7 +407,10 @@ func (w *Watcher) checkUnclaimedItems(now time.Time) {
 	}
 	sel.stampDetails(details)
 	split.stampDetails(details)
-	w.fire(categoryUnclaimedItems, msg, details)
+	w.fire(categoryUnclaimedItems, Notice{
+		Subject: subject(nItems(len(due))+" unclaimed", now.Sub(oldestModTime(due)), ids),
+		Message: msg,
+	}, details)
 }
 
 // checkPriorityWake delivers the priority-aware fast wake (gh drellem2/pogo
@@ -506,7 +512,10 @@ func (w *Watcher) checkPriorityWake(now time.Time, items []workitem.WorkItem, fl
 	}
 	sel.stampDetails(details)
 	split.stampDetails(details)
-	w.fire(categoryPriorityWake, msg, details)
+	w.fire(categoryPriorityWake, Notice{
+		Subject: subject(nItems(len(due))+" high-priority, unclaimed", now.Sub(oldestModTime(due)), ids),
+		Message: msg,
+	}, details)
 
 	// Collapse the ~30s poll for the follow-up check so pogod re-samples the
 	// queue promptly (e.g. to notice the item got claimed, or that more urgent
@@ -588,7 +597,11 @@ func (w *Watcher) checkUnreadMail(now time.Time) {
 
 	msg := fmt.Sprintf("stall-watch: unread mail piling up — %s. Check your mail and process it.", reason)
 
-	w.fire(categoryUnreadMail, msg, map[string]any{
+	// The one category with no item ids to name, so its whole discriminator is
+	// the count and the age. Both move as the backlog does.
+	subj := subject(fmt.Sprintf("%d unread mail", count), oldestAge, nil)
+
+	w.fire(categoryUnreadMail, Notice{Subject: subj, Message: msg}, map[string]any{
 		"category":           categoryUnreadMail,
 		"watched_agent":      w.cfg.Agent,
 		"unread_count":       count,
@@ -934,8 +947,8 @@ func (w *Watcher) tryFire(category string, now time.Time, cooldown time.Duration
 // nudge_error now means: with the mail fallback in place (see newStallNudger),
 // an error here is a HARD failure — every channel was tried and none carried
 // the message. It is no longer the routine busy-agent case.
-func (w *Watcher) fire(category, message string, details map[string]any) {
-	w.fireTo(w.cfg.Agent, category, message, details)
+func (w *Watcher) fire(category string, n Notice, details map[string]any) {
+	w.fireTo(w.cfg.Agent, category, n, details)
 }
 
 // fireTo is fire with an explicit recipient. Every dispatch-shaped notice goes
@@ -944,11 +957,18 @@ func (w *Watcher) fire(category, message string, details map[string]any) {
 // rather than the config, because `blocked:<agent>` is the only gated assignee
 // that names one. The recipient is stamped into the event so a notice sent to
 // somebody other than the watched agent is countable as such.
-func (w *Watcher) fireTo(recipient, category, message string, details map[string]any) {
+func (w *Watcher) fireTo(recipient, category string, n Notice, details map[string]any) {
 	if recipient != w.cfg.Agent {
 		details["nudge_recipient"] = recipient
 	}
-	delivery, err := w.nudge(recipient, message)
+	// Stamped so "which notices were indistinguishable in the recipient's
+	// notification list" is answerable from events.log alone. That question was
+	// only answerable by hand-reading the maildir when mg-b6f8 was filed, which
+	// is why the complaint sat unfiled long enough to be measured twice.
+	if n.Subject != "" {
+		details["nudge_subject"] = n.Subject
+	}
+	delivery, err := w.nudge(recipient, n)
 	if err != nil {
 		details["nudge_error"] = err.Error()
 	}
