@@ -788,9 +788,30 @@ func startEventsTracker(path string) *eventsActivityTracker {
 	return t
 }
 
+// ingest folds one log line into the last-seen index.
+//
+// It drops event types that carry an agent's identity without being evidence
+// the agent is alive — chiefly this file's OWN `modal_dismissed`. Without that
+// filter the tracker was self-refreshing (drellem2/pogo#138): fireDismissal
+// emits under deps.AgentID, the tracker follows the same log, and the write
+// landed back in the index as if the wedged agent had produced it.
+//
+// Two gates in dispatchEventsStale read it, and the filter matters to both:
+//
+//   - The usage-limit CLEAR gate treats "the log advanced past the wedge point"
+//     as the agent producing events again. Our own dismissal advancing it
+//     cleared a suspected usage-limit hit that had not cleared at all.
+//   - The 20m auto-dismissal gate is re-armed by event-log silence. Excluding
+//     the dismissal shortens the effective re-arm from 20m to dismissalCooldown
+//     (5m), which is what that constant is for; a re-fire still additionally
+//     requires the marker to have been seen within markerRecency (60s), so it
+//     only happens while the modal is demonstrably still on screen.
 func (t *eventsActivityTracker) ingest(line []byte) {
 	ev, err := events.ParseLine(line)
 	if err != nil || ev.Agent == "" || ev.Timestamp == "" {
+		return
+	}
+	if !events.CountsAsAgentActivity(ev.EventType) {
 		return
 	}
 	ts, err := time.Parse(time.RFC3339Nano, ev.Timestamp)

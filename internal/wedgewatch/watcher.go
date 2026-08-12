@@ -292,6 +292,11 @@ func (w *Watcher) inspect(o Observation, cred CredentialView, host HostView, now
 					"one of these strings puts it in its own PTY"
 			}
 			return f, inspectState{kind: statePending, why: why}
+		case !declaredRead:
+			// The event fallback established a CLOCK, not a verdict. With no
+			// counter and no marker there is nothing for that clock to time,
+			// and this agent cannot be judged. See blindOnFallbackAlone.
+			return f, inspectState{kind: stateBlind, why: blindOnFallbackAlone(stalledFor)}
 		default:
 			return f, inspectState{kind: stateHealthy}
 		}
@@ -318,6 +323,30 @@ func (w *Watcher) inspect(o Observation, cred CredentialView, host HostView, now
 	return f, inspectState{kind: stateConfirmed}
 }
 
+// blindOnFallbackAlone is the message for an agent whose ONLY signal is the
+// event-log fallback: no parseable counter, no dead-end marker on screen.
+//
+// It is a separate sentence from stallOf's two because it reports a different
+// fact. Those two say the detector had no clock at all. This one says it HAS a
+// clock and still cannot reach a verdict — which is the harder thing to explain
+// and the reason drellem2/pogo#138 sat unnoticed: `established` reads true, so
+// the agent walked past every guard into the healthy default.
+//
+// The age is included because it is genuinely established and because it is
+// what an operator needs in order to decide whether to go and look. What the
+// sentence must NOT do is present the age as a verdict: event-log silence
+// distinguishes a wedged agent from a busy one only when something else says
+// the agent OUGHT to be producing events, and with no counter and no marker
+// nothing here says that. An idle agent between turns and an agent wedged
+// behind a modal produce the same reading.
+func blindOnFallbackAlone(stalledFor time.Duration) string {
+	return "no declared-work counter could be parsed and no dead-end marker is on screen, so the " +
+		"only signal left is the event log's — whose newest entry for this identity is " +
+		stalledFor.Round(time.Second).String() + " old. Event-log age ALONE cannot separate a " +
+		"wedged agent from an idle one: the fallback can time a marker's hold-down, it cannot " +
+		"produce a verdict by itself. The agent could NOT be judged, which is not the same as healthy"
+}
+
 // stallOf establishes how long an agent has shown no evidence of progress.
 //
 // The primary signal is the frozen counter. The fallback — event-log silence —
@@ -326,8 +355,18 @@ func (w *Watcher) inspect(o Observation, cred CredentialView, host HostView, now
 // than to a silent one. If neither is available the agent is BLIND, never
 // healthy.
 //
-// The three blind messages are three DIFFERENT facts and are worded apart on
-// purpose. Until mg-20eb there was one, asserting that the event log held no
+// What this function returns is a CLOCK, and `established` means a clock was
+// found — not that the agent can be judged. Those came apart in mg-20eb and
+// drellem2/pogo#138 is the bill: an agent with an unreadable counter and no
+// marker gets `established=true` from the fallback here, which was enough to
+// carry it past inspect's blind branch and into the healthy default. The answer
+// space went from {healthy, stalled, blind} to {healthy, stalled}, so "I cannot
+// judge this" had nowhere to land and collapsed into "healthy" at ANY
+// staleness. inspect now re-tests declaredRead for that reason; see
+// blindOnFallbackAlone.
+//
+// The three blind messages here are three DIFFERENT facts and are worded apart
+// on purpose. Until mg-20eb there was one, asserting that the event log held no
 // entry for the identity — and nothing in production ever wrote EventsLastSeen,
 // so that sentence was a constant printed by a detector that had never opened
 // the log. Most of the identities it said that about had entries. A message
