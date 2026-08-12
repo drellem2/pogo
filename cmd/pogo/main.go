@@ -4112,6 +4112,18 @@ origin (catches typos like "fam-45" instead of "feat-45"). Pass
 --auto-create-target to opt into having the refinery create the target ref
 from the repo's default branch when it is missing.
 
+The BRANCH is checked the same way and for the same reason (mg-586d). The
+merge worker checks it out as origin/<branch>, so a branch that is not on
+origin cannot merge — and it is refused here, while you are still running and
+a push costs nothing, rather than accepted with an MR id and failed later in a
+component you never ran. Push first, submit second:
+
+  git push origin <branch> && pogo refinery submit <branch> --repo=...
+
+Submit will not push it for you. If the refusal says the head is already held
+by another origin ref, that means the work is safe but the name is not on
+origin — push it under the name you are submitting.
+
 When the merge lands on the repo's default branch, the moment it succeeds pogod
 records the work item done and stops the polecat.
 

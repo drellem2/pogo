@@ -777,6 +777,7 @@ func TestOnSubmitCallback(t *testing.T) {
 	}
 
 	originDir := initBareOrigin(t, "main")
+	seedBranch(t, originDir, "feat-1")
 
 	var submittedMR *MergeRequest
 	r.SetOnSubmit(func(mr *MergeRequest) {
