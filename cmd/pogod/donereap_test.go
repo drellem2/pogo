@@ -621,3 +621,48 @@ func TestDoneReapNilReviewProbeKeepsThePreMgAaf6Behaviour(t *testing.T) {
 		t.Fatalf("a nil review probe must fall back to the pre-mg-aaf6 conjunction, got %v", got)
 	}
 }
+
+// TestDoneReapLapseIsLoggedExactlyOnceWhenStopKeepsFailing pins round-1
+// advisory 3 on PR #133. The expiry line is half of this guard's positive
+// record, and a record that repeats every 30 seconds is one nobody reads.
+//
+// A polecat whose Stop keeps failing stays in the live set, so it is re-decided
+// on every tick. The lapse must be announced on the first of those and not
+// again: the exemption ended when the reviewer did, which is a fact about the
+// reviewer rather than about the stop succeeding.
+func TestDoneReapLapseIsLoggedExactlyOnceWhenStopKeepsFailing(t *testing.T) {
+	logged := captureLog(t)
+
+	builder := agent.PolecatActivity{Name: "paaf6", WorkItemID: "mg-aaf6", IdleFor: 10 * time.Minute, HasOutput: true}
+	reviewer := agent.PolecatActivity{Name: "p1c60", WorkItemID: "mg-1c60", IdleFor: time.Second, HasOutput: true}
+	reg := &fakeDoneReg{
+		live:    []agent.PolecatActivity{builder, reviewer},
+		stopErr: map[string]error{"paaf6": errors.New("stop keeps failing")},
+	}
+	r := newDoneReaper(reg,
+		doneStore(map[string]string{"mg-aaf6": "done", "mg-1c60": "claimed"}),
+		reviewsStore(map[string]string{"mg-1c60": "mg-aaf6"}),
+		time.Minute)
+
+	if got := r.Check(time.Now()); len(got) != 0 {
+		t.Fatalf("precondition: the exemption should hold while the reviewer runs, got %v", got)
+	}
+
+	// Reviewer gone; the builder's Stop will fail on every attempt from here.
+	reg.mu.Lock()
+	reg.live = []agent.PolecatActivity{builder}
+	reg.mu.Unlock()
+
+	for i := 0; i < 4; i++ {
+		r.Check(time.Now())
+	}
+	if n := strings.Count(logged(), "has LAPSED"); n != 1 {
+		t.Errorf("the expiry was announced %d times across 4 ticks with a failing Stop, want exactly 1 — "+
+			"a positive record that repeats is one nobody reads (log=%q)", n, logged())
+	}
+	// And the reaper must keep TRYING; suppressing the log must not suppress the stop.
+	if n := len(reg.stops()); n < 4 {
+		t.Errorf("Stop was attempted %d times across 4 ticks, want one per tick — clearing the exemption "+
+			"record must not stop the reaper retrying", n)
+	}
+}

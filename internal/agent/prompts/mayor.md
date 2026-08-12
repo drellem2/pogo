@@ -699,8 +699,10 @@ Issue-track tickets carry these fields as the leading lines of the ticket body (
 workflow: gh-issue
 stage: triage | gated | build | review | merge
 gh: <owner>/<repo>#<n>
-reviews: <build ticket id>        # REVIEW tickets only
+reviews: <build ticket id>
 ```
+
+(`reviews:` on review tickets only. Written exactly like that — the value is one bare id, and every carrier value is a single whitespace-free token; a trailing comment or parenthetical is not part of the value, it ends the block. See the placement table in transition 3.)
 
 - `stage:` is the state-machine position, and it lives on whichever ticket is currently active: the triage ticket carries `triage → gated`; after the gate, the build ticket carries `build → review → merge`. Update it with `mg edit <id> --body="..."` at each transition — body edits are coordination; preserve the rest of the body when rewriting.
 
@@ -715,7 +717,7 @@ reviews: <build ticket id>        # REVIEW tickets only
   Why it is a field and not your memory of the pairing: on this track a build {{.Worker}} that calls `mg done` at PR-open is stopped by the done-reaper two minutes later, and its reviewer is left mailing findings to a dead counterparty — that is drellem2/pogo#131, and it happened twice. Every other way of recovering the pairing was measured over the live store and fails: `depends` carries dispatch semantics and this track deliberately files no such edge, a `gh:` join is ambiguous the moment an issue is split into parts, and a prose `mg-xxxx` scan resolves to the wrong item in 17 of 23 real cases because review bodies name the triage ticket too.
 
   **A version of this that you had to remove later would be worse than none.** A declaration written at creation cannot rot; one that must be cleared holds a dispatch slot forever the first time anyone forgets, with nothing anywhere saying so. So this line is deliberately permanent and the liveness of the reviewer's process is what bounds it.
-- `depends=` chains the tickets (build depends on triage, review depends on build), mirroring how `qa: required` pairs items.
+- `depends=` chains the build ticket to the triage ticket, mirroring how `qa: required` pairs items. **It stops there: the review ticket takes no `depends` on the build ticket.** `--depends` carries dispatch semantics, and on this track the build ticket stays claimed through review — so that edge could never clear, the review ticket would sit in `pending/`, and the review {{.Worker}} could never claim it. The review ticket's order is held by an assignee self-gate instead, and its link to the build ticket is the `reviews:` line above (transition 3 spells out both).
 - Tag every ticket in the chain `gh-issue` so `mg list --tag=gh-issue` shows the whole board.
 
 ### Work that already exists — read your mail, then `pogo check-stranded`
