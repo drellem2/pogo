@@ -31,6 +31,9 @@ func restoreRoleNames(t *testing.T) {
 	t.Cleanup(func() {
 		agent.SetCoordinatorName(agent.DefaultCoordinatorName)
 		agent.SetWorkerName(agent.DefaultWorkerName)
+		// SME's default is the empty string, not a Default* const — empty means
+		// "this deployment has no SME" and is a meaningful value, not a gap.
+		agent.SetSMEName("")
 	})
 }
 
@@ -242,5 +245,65 @@ func TestPinAndResolveRoles_FreshInstallAdoptsNewDefaults(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(state, "config.toml")); !os.IsNotExist(err) {
 		t.Error("fresh install wrote config.toml; the guard must be a no-op")
+	}
+}
+
+// resolveRoles carries the same `[agents] sme` copy as cmd/pogod's
+// pinAndResolveRoles, and it had the same absence of a test (mg-c992). It
+// matters here for a different reason: `pogo agent prompt show polecat-triage`
+// synthesizes the template CLIENT-SIDE, in this process, from these names. That
+// command is how an operator checks whether the key took effect, so if this copy
+// were dropped the check itself would report the absence it was run to disprove.
+//
+// Rendering through agent.ExpandString rather than asserting on agent.SMEName()
+// exercises the withDefaults() seam the real synthesis uses, with the gate
+// written as the shipped template writes it.
+func TestResolveRoles_SMEReachesThePromptRender(t *testing.T) {
+	state := sandboxHome(t)
+	restoreRoleNames(t)
+
+	const gate = `{{if .SME}}consult {{.SME}}{{else}}sme_consulted: false{{end}}`
+
+	if err := os.WriteFile(filepath.Join(state, "config.toml"),
+		[]byte("[agents]\ncoordinator = \"mayor\"\nsme = \"pm-example\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	agent.SetSMEName("")
+
+	cfg := resolveRoles()
+	if cfg.Agents.SME != "pm-example" {
+		t.Errorf("cfg SME = %q, want pm-example", cfg.Agents.SME)
+	}
+	if got := agent.SMEName(); got != "pm-example" {
+		t.Errorf("process-wide SME name = %q, want pm-example", got)
+	}
+	got, err := agent.ExpandString(gate, agent.TemplateVars{Id: "mg-0000"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "consult pm-example" {
+		t.Errorf("rendered SME gate = %q, want %q — `pogo agent prompt show` would report no SME "+
+			"on a deployment that configures one", got, "consult pm-example")
+	}
+
+	// Unset, with a stale name held: the copy must clear it, not skip.
+	if err := os.WriteFile(filepath.Join(state, "config.toml"),
+		[]byte("[agents]\ncoordinator = \"mayor\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	agent.SetSMEName("pm-stale")
+
+	if cfg := resolveRoles(); cfg.Agents.SME != "" {
+		t.Errorf("cfg SME = %q, want \"\" — Load() must not invent one", cfg.Agents.SME)
+	}
+	if got := agent.SMEName(); got != "" {
+		t.Errorf("process-wide SME name = %q, want \"\" — a fallback name is a mail target nobody reads", got)
+	}
+	got, err = agent.ExpandString(gate, agent.TemplateVars{Id: "mg-0000"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "sme_consulted: false" {
+		t.Errorf("rendered SME gate with no SME = %q, want %q", got, "sme_consulted: false")
 	}
 }
