@@ -87,7 +87,7 @@ func TestStallNudgerNeverInterruptsBusyAgent(t *testing.T) {
 	// Deliver in the background — wait-idle blocks up to DefaultNudgeTimeout
 	// against a never-quiet agent. StopAll (deferred) unblocks it at teardown.
 	const sentinel = "PRIORITY_WAKE_SENTINEL"
-	go func() { _, _ = nudge("busy-coordinator", sentinel) }()
+	go func() { _, _ = nudge("busy-coordinator", stallwatch.Notice{Message: sentinel}) }()
 
 	// Sleep well past the 2s idle threshold: an IDLE agent would have been
 	// delivered to by now, so if the sentinel is still absent the busy agent was
@@ -129,7 +129,7 @@ func TestStallNudgerFallsBackToMailWhenBusy(t *testing.T) {
 	}, 300*time.Millisecond)
 
 	const sentinel = "STALL_NOTICE_SENTINEL"
-	delivery, err := nudge("busy-mayor", sentinel)
+	delivery, err := nudge("busy-mayor", stallwatch.Notice{Message: sentinel})
 
 	// The nudge must NOT report failure — it was delivered, just not by PTY.
 	if err != nil {
@@ -186,7 +186,7 @@ func TestStallNudgerBothChannelsDownReportsHardFailure(t *testing.T) {
 		return fmt.Errorf("macguffin unreachable")
 	}, 300*time.Millisecond)
 
-	delivery, err := nudge("busy-mayor", "STALL")
+	delivery, err := nudge("busy-mayor", stallwatch.Notice{Message: "STALL"})
 	if err == nil {
 		t.Fatal("both channels down must be a hard error, got nil")
 	}
@@ -221,7 +221,7 @@ func TestStallNudgerFallsBackToMailWhenOffline(t *testing.T) {
 		return nil
 	}, config.DefaultStallMailFallbackBacklogCap)
 
-	delivery, err := nudge("ghost-agent", "priority-wake: urgent")
+	delivery, err := nudge("ghost-agent", stallwatch.Notice{Message: "priority-wake: urgent"})
 	if err != nil {
 		t.Fatalf("nudge: %v", err)
 	}

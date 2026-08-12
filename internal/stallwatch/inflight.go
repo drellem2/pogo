@@ -201,7 +201,10 @@ func (w *Watcher) checkWorkedButUnclaimed(now time.Time, items []workitem.WorkIt
 		"oldest_age_seconds": now.Sub(oldestModTime(due)).Seconds(),
 	}
 	sel.stampDetails(details)
-	w.fire(categoryWorkedUnclaimed, msg, details)
+	w.fire(categoryWorkedUnclaimed, Notice{
+		Subject: subject(nItems(len(due))+" unclaimed but WORKED", now.Sub(oldestModTime(due)), ids),
+		Message: msg,
+	}, details)
 }
 
 // workerSentences renders one clause per item naming its worker and the evidence

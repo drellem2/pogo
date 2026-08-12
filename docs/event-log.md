@@ -679,6 +679,14 @@ pogod's stall watcher (gh drellem2/macguffin #12) crossed a work-pile-up thresho
   - `nudge_delivery` (string, optional): the channel that carried the nudge — `"pty"` (written to the agent's live terminal), `"mail"` (agent not running, so straight to durable mail), or `"mail_fallback"` (agent running but the PTY nudge failed, so durable mail carried it instead). Absent only when delivery failed outright.
   - `nudge_fallback_reason` (string, optional): present with `"mail_fallback"`; why the PTY channel was not used. **Not an error** — the nudge was delivered.
   - `nudge_error` (string, optional): present only when **every** channel failed and the notice reached nobody; the event is still emitted. Before mg-79dc this field also covered the routine busy-agent case, so historical records carrying it are not all hard failures — see below.
+  - `nudge_subject` (string, optional, mg-b6f8): the mail subject this notice was delivered under. Present on every fire from mg-b6f8 onward; absent on older records, where there was nothing to record because **every** stall-watch mail carried the one string `stall-watch: work piling up`. It is stamped so "which notices were indistinguishable in the recipient's notification list" is answerable from this log rather than by hand-reading a maildir:
+
+    ```bash
+    jq -r 'select(.event_type=="stall_watch_fired") | .details.nudge_subject // empty' \
+      ~/.pogo/events.log | sort | uniq -c | sort -rn | head
+    ```
+
+    A count above 1 is a repeat the reader could not tell from its predecessor. That is the defect mg-b6f8 fixed, and this is how a regression of it gets counted.
 
 ```json
 {"schema_version":1,"timestamp":"2026-06-10T16:20:00.000000000Z","event_type":"stall_watch_fired","agent":"pogod","details":{"category":"unclaimed_items","watched_agent":"mayor","item_count":2,"item_ids":["mg-2350","mg-9299"],"age_threshold":"10m0s","oldest_age_seconds":1830.4,"nudge_delivery":"pty"}}

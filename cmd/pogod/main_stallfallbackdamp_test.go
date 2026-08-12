@@ -52,7 +52,7 @@ func TestStallFallbackDamperBoundsTheLoopItsRemedyCreates(t *testing.T) {
 	const fires = 10
 	suppressed := 0
 	for i := 0; i < fires; i++ {
-		delivery, err := nudge("busy-mayor", fmt.Sprintf("stall notice %d", i))
+		delivery, err := nudge("busy-mayor", stallwatch.Notice{Message: fmt.Sprintf("stall notice %d", i)})
 		// Suppression is a decision, not a failure: it must never surface as an
 		// error, or `fire` would stamp nudge_error and the log would read as if
 		// every channel had been tried and failed.
@@ -205,7 +205,7 @@ func TestStallFallbackDampingDoesNotTouchTheOfflineRoad(t *testing.T) {
 	const fires = 5
 	for i := 0; i < fires; i++ {
 		// No such agent in the registry: the offline road.
-		delivery, err := nudge("ghost-mayor", "stall notice")
+		delivery, err := nudge("ghost-mayor", stallwatch.Notice{Message: "stall notice"})
 		if err != nil {
 			t.Fatalf("fire %d: %v", i, err)
 		}
@@ -255,7 +255,7 @@ func TestStallFallbackDamperClearsRunWhenRecipientGoesOffline(t *testing.T) {
 	}
 
 	// It is not in the registry, so this fire takes the offline road.
-	if _, err := nudge("gone-mayor", "stall notice"); err != nil {
+	if _, err := nudge("gone-mayor", stallwatch.Notice{Message: "stall notice"}); err != nil {
 		t.Fatalf("offline nudge: %v", err)
 	}
 

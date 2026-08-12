@@ -177,13 +177,68 @@ and silent.
 
 ### Nudge + event
 
-On a cross the watcher calls its injected `Nudger`, which pogod wires to a
+On a cross the watcher calls its injected `Nudger` with a `Notice` — a body and
+a mail subject — which pogod wires to a
 PTY-then-mail fallback: nudge the mayor's PTY in wait-idle mode when it's
 running, and fall back to durable `mg` mail whenever the PTY cannot carry the
 message — **both** when the mayor is offline and when the PTY nudge *fails*. It
 then appends a `stall_watch_fired` event recording the category, counts, ages,
-the delivery channel (`nudge_delivery`), and — only if every channel failed —
-the nudge error.
+the delivery channel (`nudge_delivery`), the subject (`nudge_subject`), and —
+only if every channel failed — the nudge error.
+
+#### The subject carries the facts, because the subject is what travels (mg-b6f8)
+
+The `Nudger` takes a `Notice` rather than a bare string because the delivery
+site cannot compose a subject. Until mg-b6f8 it did not try: every stall-watch
+mail — five categories, any item set, any age — was sent under the one string
+`stall-watch: work piling up`, chosen in `cmd/pogod` where none of the facts are
+in scope.
+
+The cost is measured twice in this document from two directions. The mg-61ce
+table above notes the fallback subject was "the single largest subject line in a
+5978-message mailbox by a factor of nine", which is the same defect counted as a
+mailbox statistic. mg-b6f8 counted it as an experience: between 2026-08-11
+12:00Z and 2026-08-12 09:52Z, `human` received 18 stall-watch mails. All 18 were
+blocked-reminders; their bodies covered **three different item sets**
+(`mg-fbc1`, `mg-8888`, both together, then `mg-0218`) at counts of one and two.
+All 18 subjects were identical. The recipient reads mail through Discord, which
+renders the subject, so eighteen distinguishable facts arrived as one sentence
+printed eighteen times.
+
+**The remedy is not to send fewer.** The rate limiting works — 18 notices in 22
+hours is far from every occurrence — and those notices were correct; several
+genuine stalls were dispatched off them overnight. Lengthening the interval
+would trade a working signal for quiet, which is a regression that looks like a
+fix. The remedy is that the message body has *always* named the category, the
+count and the ids, and the subject threw all of it away.
+
+Subjects now render as `stall-watch: <head>, oldest <age> — <ids>`, and each
+part earns its place by making two notices that differ in any way render
+differently:
+
+- **head** names the category and count, so `1 item blocked on you` never reads
+  like `1 item unclaimed` — which matters most here, because those two mean
+  *opposite* things to the same reader and arrive in the same list.
+- **age** is what distinguishes a **repeat**. Count and ids are identical across
+  the repeats of a persisting stall — that is exactly the six consecutive
+  `mg-0218` notices above — and the oldest item's age is the only one of the
+  three that must have moved. It is strictly increasing for a fixed item set,
+  and minute resolution is finer than the shortest cooldown any category uses
+  (3m, the priority wake), so consecutive fires cannot collide.
+- **ids** name which items, which is the first thing a reader wants and the
+  reason they would otherwise open the mail.
+
+Past five ids the list truncates to `+N more`; two *simultaneous* batches
+sharing a five-id prefix at an equal count would then differ only in age. That
+residue is recorded rather than engineered around — the fix for it (a digest of
+the full id list) would cost the subject the readability it exists to buy.
+
+`ack-watch` is a useful contrast and was checked in the same window: it sent 15
+mails under 2 subjects, and its subject is *computed* (`report.MailSubject()`,
+carrying the fire counts). It repeated because the underlying counts were
+genuinely stable, not because it discarded them — a different and much smaller
+problem, and it stopped on its own at 08-11 19:10 when the blackout condition
+cleared. A fix aimed at "notification noise" in general would have landed there.
 
 #### Why mail backstops a *running* agent (mg-79dc)
 

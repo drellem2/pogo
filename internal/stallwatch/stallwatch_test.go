@@ -27,14 +27,28 @@ type recorder struct {
 
 type nudge struct {
 	agent   string
+	subject string
 	message string
 }
 
-func (r *recorder) nudge(agent, message string) (Delivery, error) {
+func (r *recorder) nudge(agent string, n Notice) (Delivery, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.nudges = append(r.nudges, nudge{agent, message})
+	r.nudges = append(r.nudges, nudge{agent, n.Subject, n.Message})
 	return r.nudgeDelivery, r.nudgeErr
+}
+
+// subjects returns every recorded subject in fire order. The dedup tests read
+// this rather than the messages: the subject is the only part Discord renders,
+// which is the whole of mg-b6f8.
+func (r *recorder) subjects() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]string, len(r.nudges))
+	for i, n := range r.nudges {
+		out[i] = n.subject
+	}
+	return out
 }
 
 func (r *recorder) emit(e events.Event) {

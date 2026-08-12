@@ -177,7 +177,15 @@ func (w *Watcher) checkBlockedReminders(now time.Time, items []workitem.WorkItem
 			details["notice_cap_reached_ids"] = capped
 		}
 		sel.stampDetails(details)
-		w.fireTo(who, categoryBlockedReminder, msg, details)
+		w.fireTo(who, categoryBlockedReminder, Notice{
+			// "blocked on you" is second person because the recipient IS the
+			// blocker — this is the one category whose recipient is read out of
+			// the item rather than the config, and the subject is where that
+			// difference has to land: it arrives in the same notification list
+			// as the dispatch notices, which mean the opposite thing.
+			Subject: subject(nItems(len(group))+" blocked on you", now.Sub(oldestModTime(group)), ids),
+			Message: msg,
+		}, details)
 	}
 
 	// An unreachable blocker is reported to the COORDINATOR, because the
@@ -249,7 +257,14 @@ func (w *Watcher) fireUnreachableBlockers(now time.Time, unreachable map[string]
 		details["notice_cap_reached_ids"] = capped
 	}
 	sel.stampDetails(details)
-	w.fireTo(w.cfg.Agent, categoryBlockedReminder, msg, details)
+	w.fireTo(w.cfg.Agent, categoryBlockedReminder, Notice{
+		// Deliberately NOT the reachable head with a different count. These two
+		// notices share a category and a recipient can receive both, so if their
+		// subjects differed only in a number the reader would be back to opening
+		// each to find out which one this is.
+		Subject: subject(nItems(len(allIDs))+" with an UNREACHABLE blocker", now.Sub(oldestModTime(all)), allIDs),
+		Message: msg,
+	}, details)
 }
 
 // emitBlockedCapEvent records that every due item was held back by the notice
