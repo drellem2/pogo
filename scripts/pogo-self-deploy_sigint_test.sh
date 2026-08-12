@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Standalone interrupt-safety control for the DEPLOY SCRIPT's SIGINT trap
 # (mg-e201; relocated from pogo-self-deploy_live_test.sh section (g), where the
-# assertion originally lived under mg-8b48 and was de-flaked by mg-e91e).
+# assertion originally lived under mg-8b48 and was de-flaked by mg-e91e, and made
+# launch-context-independent by mg-a6c6 — see sigint_own_group_run).
 #
 # WHY THIS FILE EXISTS SEPARATELY FROM THE live_test.sh CONTROL
 # ------------------------------------------------------------
@@ -96,6 +97,87 @@ trap cleanup EXIT
 # cannot tell "zero failures" from "recorded nothing" (mg-c02d rationale).
 pass() { echo "PASS: $1"; echo "PASS: $1" >> "$RESULTS_FILE" || { echo "LEDGER WRITE FAILED: $1"; exit 1; }; }
 fail() { echo "FAIL: $1"; echo "FAIL: $1" >> "$RESULTS_FILE" || { echo "LEDGER WRITE FAILED: $1"; exit 1; }; }
+# A THIRD outcome, because two cannot hold three states (mg-a6c6). PASS and FAIL
+# are both claims about the code under test; "this harness cannot deliver a
+# SIGINT at all" is a claim about the INSTRUMENT, and folding it into FAIL is how
+# a launch-context fault gets reported as a defect in whatever branch is under
+# test. Same argument as pogo-condition-controls.sh's instrument_fail: a control
+# that says "the handler did not abort" when in truth it never managed to signal
+# anything is worse than no control, because it produces a confident wrong
+# diagnosis. INCONCLUSIVE rows are tallied separately and do NOT fail the run.
+inconclusive() { echo "INCONCLUSIVE: $1"; echo "INCONCLUSIVE: $1" >> "$RESULTS_FILE" || { echo "LEDGER WRITE FAILED: $1"; exit 1; }; }
+
+# finish — the verdict, drawn once, from one place. A function rather than a tail
+# block because there are now two ways to reach the end (the control ran, or the
+# instrument could not run it) and a tally that only exists at the bottom of the
+# file is a tally the early exit has to restate.
+finish() {
+    echo ""
+    # The ledger must be readable and non-empty before any verdict is drawn from
+    # it: `grep -c` exits 1 on no-match, so the `|| true` below cannot tell a real
+    # zero from "could not read the file". This makes that distinction first.
+    [ -s "$RESULTS_FILE" ] || { echo "ledger unreadable/empty — verdict cannot be trusted"; exit 1; }
+    local pass_count fail_count skip_count
+    pass_count=$(grep -c '^PASS:' "$RESULTS_FILE" 2>/dev/null || true)
+    fail_count=$(grep -c '^FAIL:' "$RESULTS_FILE" 2>/dev/null || true)
+    skip_count=$(grep -c '^INCONCLUSIVE:' "$RESULTS_FILE" 2>/dev/null || true)
+    pass_count=${pass_count:-0}; fail_count=${fail_count:-0}; skip_count=${skip_count:-0}
+    echo "=== Results: $pass_count passed, $fail_count failed, $skip_count inconclusive ==="
+    if [ "$skip_count" -gt 0 ]; then
+        echo ""; echo "Inconclusive:"; grep '^INCONCLUSIVE:' "$RESULTS_FILE" | sed 's/^/  /'
+    fi
+    if [ "$fail_count" -gt 0 ]; then
+        echo ""; echo "Failures:"; grep '^FAIL:' "$RESULTS_FILE" | sed 's/^/  /'
+        exit 1
+    fi
+    exit 0
+}
+
+# sigint_own_group_run SCRIPT ERRFILE — launch SCRIPT into its OWN process group
+# with SIGINT/SIGQUIT PROVEN resettable, capturing its stderr. Returns the
+# script's exit status.
+#
+# THE RESET IS THE WHOLE POINT (mg-a6c6). A shell without job control sets SIGINT
+# and SIGQUIT to SIG_IGN for its ASYNCHRONOUS children, and SIG_IGN crosses both
+# fork and exec. So every process below `./build.sh &` — build.sh, test.sh, this
+# file, and the sigtest it launches — enters with SIGINT already ignored, and
+# bash will not install a trap for a signal that was ignored on entry ("signals
+# ignored upon entry to the shell cannot be trapped or reset"). The driver's
+# `trap '...exit 130' INT` therefore never existed, `kill -INT 0` did nothing,
+# cmd_redeploy carried on into do_build, and this control reported exit 4 —
+# DETERMINISTICALLY, every time, on a tree with nothing whatsoever wrong with it.
+# Measured both directions on one tree in one minute: foreground exit 0, `&`
+# exit 1. That is an instrument failure wearing the costume of a defect, and the
+# ergonomic invocation — an agent backgrounding a long gate while it works on
+# something else — is the one that trips it.
+#
+# Bash cannot dig itself out (the quoted rule is exactly about that), but the
+# launcher is not bash. perl already sits in front of the exec to do setsid, and
+# perl CAN reset the disposition: `$SIG{INT} = "DEFAULT"` is a sigaction to
+# SIG_DFL, and SIG_DFL is inherited across exec just as SIG_IGN is. So bash comes
+# up with a resettable SIGINT and arms its trap normally. This is the same
+# disposition-inheritance trap mg-9aa1 hit with SIGHUP, in a second guise; the
+# reset is the SIGINT analogue of the `signal.Notify` reset used there.
+#
+# This makes the control MORE faithful, not less. What it models is a human
+# hitting Ctrl-C at a terminal, and a terminal foreground process has SIGINT at
+# SIG_DFL. The old form did not arrange that — it merely inherited it from
+# whoever happened to launch the gate, which is why the verdict depended on the
+# launcher instead of on the code.
+#
+# QUIT is reset alongside INT because SIG_IGN-for-async-children is a two-signal
+# rule; leaving the sibling half armed just leaves the next guise of this trap in
+# place for whoever adds a QUIT case. (TERM is untouched: nothing ignores it on
+# our behalf, and the driver's TERM trap installs fine.)
+sigint_own_group_run() {
+    POGO_PORT="$PORT" perl -e '
+        use POSIX;
+        $SIG{INT}  = "DEFAULT";
+        $SIG{QUIT} = "DEFAULT";
+        POSIX::setsid() or die "setsid: $!";
+        exec("/bin/bash", $ARGV[0]) or die "exec: $!";
+    ' "$1" >/dev/null 2>"$2"
+}
 
 # The daemon under test. Built from $REPO_ROOT — this is a control on the COMMIT
 # in the normal suite, not the artifact gate (that is do_prove's job, and this
@@ -162,6 +244,63 @@ mkdir -p "$SANDBOX/nobin"
 # dr_state — the live draining flag, read the way the code under test writes it.
 dr_state() { curl -sf --max-time 5 "$URL/agents/drain" 2>/dev/null | json_bool draining; }
 
+# --- PREFLIGHT: can this harness deliver a drain-window SIGINT AT ALL? -------
+# The reset above is the fix; this is the check that the fix took, and the guard
+# for the case where some future launch context defeats delivery in a way the
+# reset does not cover (mg-a6c6). Without it, ANY such context produces the same
+# confident wrong diagnosis the reset just removed — and the next guise of a
+# disposition trap will not look like this one.
+#
+# It measures the INSTRUMENT, and only the instrument. It never sources
+# pogo-self-deploy, never calls cmd_redeploy, and installs its own trap — so a
+# genuine returning-handler regression in the code under test CANNOT make this
+# probe fail, and therefore cannot buy itself a skip. That is the property the
+# whole three-outcome scheme rests on: an INCONCLUSIVE verdict must be
+# unreachable by the defect this file exists to catch.
+#
+# The shape mirrors the real control exactly — own process group, an INT trap in
+# the parent, a `$( )` child that resets its own INT and group-signals with
+# `kill -INT 0` and would otherwise return 0 cleanly — so what it proves is the
+# path the control actually uses, not an easier one. Same launcher function, so
+# the two cannot drift into measuring different things.
+cat > "$SANDBOX/sigprobe.sh" <<'PROBEEOF'
+#!/bin/bash
+set -u
+trap 'echo "PROBE: INT DELIVERED" >&2; exit 130' INT
+# Did the trap INSTALL? Bash reports an ignored-on-entry signal as an unset trap,
+# so an empty `trap -p INT` right after arming one is the SIG_IGN inheritance
+# showing itself directly — a distinct, nameable cause rather than "no signal
+# arrived", which is the symptom shared by every delivery fault.
+[ -n "$(trap -p INT)" ] || { echo "PROBE: INT TRAP DID NOT INSTALL — SIGINT was SIG_IGN on entry" >&2; exit 3; }
+probe_wait() { trap - INT; kill -INT 0; sleep 2; echo 0; return 0; }
+PROBE_OUT="$(probe_wait)"
+echo "PROBE: INT NOT DELIVERED — the comsub child returned '$PROBE_OUT' cleanly and the trap never ran" >&2
+exit 4
+PROBEEOF
+sigint_own_group_run "$SANDBOX/sigprobe.sh" "$SANDBOX/sigprobe.err"
+PROBE_RC=$?
+if [ "$PROBE_RC" = 130 ] && grep -q 'PROBE: INT DELIVERED' "$SANDBOX/sigprobe.err"; then
+    pass "preflight: this harness CAN deliver a drain-window SIGINT to an armed trap (own process group, group signal) — so the verdict below is about cmd_redeploy, not about the launch context"
+else
+    inconclusive "this harness CANNOT deliver a SIGINT to a trap it armed itself (preflight rc=$PROBE_RC: $(tr '\n' ' ' < "$SANDBOX/sigprobe.err")). The interrupt-safety control was NOT RUN and this run makes NO claim about cmd_redeploy's INT handler — do not read it as either a pass or a regression."
+    echo ""
+    echo "  The probe never touches the code under test: it sources nothing, calls"
+    echo "  no driver function, and signals only a trap it installed itself. Its"
+    echo "  failure is therefore a fact about how this gate was INVOKED, not about"
+    echo "  the branch under test."
+    echo ""
+    echo "  Most likely cause: SIGINT arrived as SIG_IGN and could not be reset."
+    echo "  A shell without job control sets SIGINT/SIGQUIT to SIG_IGN for its"
+    echo "  asynchronous children, and that disposition crosses fork AND exec — so"
+    echo "  './build.sh &', 'nohup sh -c ... &' and '( ... ) &' all reach here with"
+    echo "  SIGINT already ignored. sigint_own_group_run resets it via perl before"
+    echo "  exec'ing bash, so seeing this message means that reset did not take."
+    echo ""
+    echo "  To get a real verdict, run the gate in the FOREGROUND:  ./build.sh"
+    echo ""
+    finish
+fi
+
 # ===========================================================================
 # A SIGNAL RESTORES AND STOPS — it does not restore and CARRY ON. A bash signal
 # handler that returns resumes the script at the point of interruption, so the
@@ -214,10 +353,13 @@ pogo_sandbox_curl "could not reset the sandbox daemon to draining=false before t
 #     4 = the handler RETURNED, drain_wait completed, and the deploy carried on
 #         into do_build — the returning-handler bug, which restores dispatch and
 #         then rebuilds and kickstarts the fleet anyway.
-# rc ALONE cannot tell a returning handler from a signal that never arrived —
-# both leave the abort unproven — so the parent's own trap message is captured as
-# a POSITIVE sub-assertion below: a lost/coalesced signal fails LOUD as "never
-# delivered", not as a false returning-handler verdict.
+# rc ALONE cannot tell a returning handler from a handler that never ran — both
+# leave the abort unproven — so the parent's own trap message is captured as a
+# POSITIVE sub-assertion below, and a handler that never ran fails LOUD as
+# exactly that rather than as a false returning-handler verdict. The third
+# possibility, "no signal ever arrived", is not distinguished HERE at all: it is
+# ruled out ahead of time by the preflight, which is why it can be. Three states
+# need three tests, not a discriminator asked to carry one more than it has.
 cat > "$SANDBOX/sigtest.sh" <<SIGEOF
 #!/bin/bash
 set -u
@@ -247,19 +389,33 @@ REPO="$DR_REPO" DEPLOY_REF=main-fixture
 ASSUME_YES=true FORCE=false SKIP_DRAIN=false
 cmd_redeploy
 SIGEOF
-# setsid puts sigtest in its own process group so `kill -INT 0` stays contained;
-# macOS has no `setsid` binary and bash 3.2 cannot self-setpgid, so perl does it
-# (it exec's bash, so bash's exit status is what $? captures). stderr is kept, not
-# discarded — the positive sub-assertion reads the parent trap's message from it.
-POGO_PORT="$PORT" perl -e 'use POSIX; POSIX::setsid() or die "setsid: $!"; exec("/bin/bash", $ARGV[0]) or die "exec: $!"' \
-    "$SANDBOX/sigtest.sh" >/dev/null 2>"$SANDBOX/sigtest.err"
+# Launched through the SAME function the preflight just proved, so "the probe
+# passed" is a statement about this launch and not about a similar one: own
+# process group (so `kill -INT 0` stays contained — macOS has no `setsid` binary
+# and bash 3.2 cannot self-setpgid, so perl does it), SIGINT/SIGQUIT reset out of
+# any inherited SIG_IGN, and bash's own exit status preserved through the exec.
+# stderr is kept, not discarded — the positive sub-assertion below reads the
+# parent trap's message from it.
+sigint_own_group_run "$SANDBOX/sigtest.sh" "$SANDBOX/sigtest.err"
 DR_SIG_RC=$?
 # POSITIVE sub-assertion (mg-e91e): the SIGINT actually reached the PARENT's INT
 # trap. The driver's handler (pogo-self-deploy: `trap '...exit 130' INT`) prints
 # this exact line on its way out, and the child was silenced above, so this line
-# can ONLY be the parent. Its ABSENCE means the signal was lost/coalesced before
-# the parent could act — a control-harness delivery fault that must fail LOUD, not
-# be read as a live verdict about the handler.
+# can ONLY be the parent.
+#
+# WHAT ITS ABSENCE MEANS CHANGED WHEN THE PREFLIGHT WENT IN (mg-a6c6). This branch
+# used to read "lost/coalesced signal — a control-harness delivery fault", because
+# the harness was the only explanation anyone had for it, and under `./build.sh &`
+# that reading was even CORRECT — and still misleading, because it named the
+# symptom (no signal arrived) while the cause was the launch context, which the
+# message could not see and did not mention. That cause is now both fixed and
+# independently measured: the run cannot reach this line unless the preflight
+# proved, in this same launch topology and through this same launcher, that a
+# group SIGINT does reach an armed trap. So a missing message is no longer about
+# delivery. It means the driver's INT handler did not run — the trap is gone,
+# armed too late, or no longer prints this line. That is a verdict about the code
+# under test, and it is stated as one. (Mutation-checked: deleting the driver's
+# `trap ... INT` lands here and fails, backgrounded, with 0 inconclusive.)
 if grep -q 'interrupted (SIGINT) during the drain window' "$SANDBOX/sigtest.err"; then
     pass "the drain-window SIGINT was DELIVERED to the parent trap (the driver's INT handler ran) — the rc verdict below is about the handler, not about a lost signal"
     case "$DR_SIG_RC" in
@@ -268,7 +424,7 @@ if grep -q 'interrupted (SIGINT) during the drain window' "$SANDBOX/sigtest.err"
         *)   fail "the INT trap fired but cmd_redeploy exited $DR_SIG_RC, not 130 — the signal was delivered yet the deploy did not abort cleanly" ;;
     esac
 else
-    fail "the drain-window SIGINT NEVER reached cmd_redeploy's INT trap (no 'interrupted (SIGINT)' from the driver; rc=$DR_SIG_RC) — a lost/coalesced signal, i.e. a control-harness delivery fault, NOT a returning-handler bug. Read no handler verdict from this run."
+    fail "cmd_redeploy's INT handler did NOT run (no 'interrupted (SIGINT)' from the driver; rc=$DR_SIG_RC) — the trap is missing, armed after the drain window opens, or no longer prints that line. This is NOT a delivery fault: the preflight above proved this harness delivers a group SIGINT to an armed trap, through this same launcher, in this same launch context."
 fi
 [ "$(dr_state)" = "false" ] \
     && pass "SIGINT in the drain window restores dispatch on the way out (Ctrl-C cannot strand the fleet either)" \
@@ -281,16 +437,4 @@ fi
 curl -sf -X POST "$URL/agents/drain" -H 'Content-Type: application/json' \
     -d '{"draining":false}' >/dev/null 2>&1
 
-echo ""
-# The ledger must be readable and non-empty before any verdict is drawn from it:
-# `grep -c` exits 1 on no-match, so the `|| true` below cannot tell a real zero
-# from "could not read the file". This makes that distinction first.
-[ -s "$RESULTS_FILE" ] || { echo "ledger unreadable/empty — verdict cannot be trusted"; exit 1; }
-PASS_COUNT=$(grep -c '^PASS:' "$RESULTS_FILE" 2>/dev/null || true)
-FAIL_COUNT=$(grep -c '^FAIL:' "$RESULTS_FILE" 2>/dev/null || true)
-PASS_COUNT=${PASS_COUNT:-0}; FAIL_COUNT=${FAIL_COUNT:-0}
-echo "=== Results: $PASS_COUNT passed, $FAIL_COUNT failed ==="
-if [ "$FAIL_COUNT" -gt 0 ]; then
-    echo ""; echo "Failures:"; grep '^FAIL:' "$RESULTS_FILE" | sed 's/^/  /'
-    exit 1
-fi
+finish
