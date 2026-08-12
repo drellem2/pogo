@@ -462,6 +462,64 @@ func TestShippedReviewTemplateChecksCounterpartyBeforeWaiting(t *testing.T) {
 	}
 }
 
+// TestShippedReviewTemplateNamesAvailableAsACounterpartyState guards mg-431b.
+// The counterparty bullets enumerate the states a build item can be in, and the
+// enumeration omitted `available` — which is exactly what the item reads after
+// `pogo agent stop` releases a mid-flight polecat's claim
+// (internal/agent/claimrelease.go, mg-fb13). A reader reasoning from the bullets
+// alone would conclude the state cannot occur.
+//
+// This is a completeness property, not a correctness one: the `pogo agent list`
+// probe already catches a stopped builder whatever its item says, which is why
+// the enumeration naming the state is the fix and the probe stays the authority.
+//
+// Fails against the pre-change text, which named only `done`/`archived`, empty
+// output, and a missing registry line.
+func TestShippedReviewTemplateNamesAvailableAsACounterpartyState(t *testing.T) {
+	out := expandShippedTemplate(t, "prompts/templates/polecat-review.md")
+
+	start := strings.Index(out, "**If fail, rounds 1 or 2:**")
+	end := strings.Index(out, "**If pass (any round):**")
+	if start < 0 || end < 0 || end <= start {
+		t.Fatal("expanded polecat-review.md: cannot locate the fail-rounds-1-or-2 branch")
+	}
+	failPath := out[start:end]
+
+	// The state has to be named as a bullet of the enumeration, not merely
+	// appear somewhere in the branch — the whole defect was a reachable state
+	// the list did not mention.
+	if !strings.Contains(failPath, "- **`available`**") {
+		t.Error("polecat-review.md fail path: the counterparty enumeration does not name `available`, " +
+			"the state a build item reads after `pogo agent stop` releases its claim (mg-431b)")
+	}
+
+	// Naming the state is only half of it: a reviewer that reads `available`
+	// without knowing what produced it cannot tell "builder gone" from
+	// "builder restarting". Stop's teardown path unclaims; the respawn path
+	// deliberately keeps the claim (internal/agent/agent.go).
+	if !strings.Contains(failPath, "claim released") {
+		t.Error("polecat-review.md fail path: `available` is named but not explained — " +
+			"it must say the builder was stopped and its claim released (mg-431b)")
+	}
+
+	// The enumeration is still not exhaustive (the store also has pending/ and
+	// shelved/), so the text must not read as a closed list. `claimed` being
+	// the only status consistent with a live builder is what makes an
+	// unlisted status safe to hit.
+	if !strings.Contains(failPath, "including a status not named below") {
+		t.Error("polecat-review.md fail path: the enumeration reads as exhaustive when it is not — " +
+			"an unnamed status must be covered by the same rule (mg-431b)")
+	}
+
+	// The probe stays the authority. If the item state were promoted to the
+	// signal, a released claim would read as a reason to stop checking the
+	// registry — the one probe that catches a dead builder regardless.
+	if !strings.Contains(failPath, "`pogo agent list` is the authority") {
+		t.Error("polecat-review.md fail path: the item status must corroborate `pogo agent list`, " +
+			"not replace it as the liveness signal (mg-431b)")
+	}
+}
+
 // expandShippedTemplate reads an embedded prompt template, strips its
 // frontmatter, and expands it with the default template vars — the same
 // sequence TestShippedBuildPRTemplateProtocol does inline. Assertions run

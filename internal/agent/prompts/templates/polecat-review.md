@@ -188,10 +188,11 @@ Follow these steps exactly, in order. Skipping any step is a failure.
    pogo agent list | grep 'work-item=<build-ticket-id>'    # expect: one running polecat
    ```
 
-   Either answer coming back wrong means no fix mail is ever arriving:
+   Either answer coming back wrong means no fix mail is ever arriving. `pogo agent list` is the authority — it is the one that answers "is a process running against this item"; the item status only corroborates. `claimed` is the ONLY status consistent with a live builder, so read anything else as a wrong answer, including a status not named below:
    - **`done` or `archived`** — the build item is terminal. A builder that closed its own item is then reaped by pogod once its PTY has been quiet two minutes (`cmd/pogod/donereap.go`), so it is already gone or about to be. That is drellem2/pogo#131, reported by a reviewer that ran this check on its own initiative — which is the only reason its round did not stall silently.
+   - **`available`** — the builder was stopped and its claim released (`internal/agent/claimrelease.go`, mg-fb13), so the item is dispatchable again while your PR sits open. This is a real, reachable state, not an impossible one: `Stop`'s teardown path unclaims deliberately, precisely so a mid-flight stop does not strand the item under a dead pid. Note what it does NOT mean — a crash-respawn keeps the claim, so `available` says the builder is gone, not that it is coming back. Nobody is working the PR until the {{.Coordinator}} dispatches a new {{.Worker}} onto it.
    - **empty output** — not a third state to shrug at, and note what it is NOT: `mg show` prints its error JSON to **stderr** and exits 3, so the pipeline above yields an empty string and still exits 0 (that is `jq`'s status, not `mg`'s). Never branch on the pipeline's exit code here. Re-run as plain `mg show <build-ticket-id>` to see whether the id is wrong or the store is unreadable.
-   - **no matching line in `pogo agent list`** — no {{.Worker}} is running against that item, whatever the item says.
+   - **no matching line in `pogo agent list`** — no {{.Worker}} is running against that item, whatever the item says. A dead builder has no process however its item reads, so this answer overrides the status in both directions: it is the one that catches a builder stopped before its claim was released.
 
    Do not poll through it and do not fix the PR yourself. Mail the {{.Coordinator}} the build ticket id, the round number, the PR, and what both checks actually returned, then stand by for instructions.
 
