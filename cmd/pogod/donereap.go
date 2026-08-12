@@ -114,11 +114,26 @@ import (
 // reviewer that is now gone. A reader can see the guard fire and see it expire
 // without inferring either from an absence.
 //
-// THE RESIDUAL, STATED RATHER THAN LEFT TO BE FOUND: a review polecat that
-// wedges without exiting holds its builder exempt for as long as it lives. That
-// is bounded by the reviewer's own lifetime and is the same exposure the wedged
-// reviewer already represents on its own slot — it is orphanwatch's and
-// stallwatch's question, not this reaper's.
+// TWO RESIDUALS, STATED RATHER THAN LEFT TO BE FOUND.
+//
+// The larger one: A REVIEW TICKET FILED WITHOUT THE LINE IS SILENT. The guard
+// simply never fires, the round runs exactly as it did before, and the builder
+// is reaped mid-review with nothing anywhere saying a declaration was missing.
+// That is an instruction-following dependency, which is the very thing this
+// design removes everywhere else — so it is worth being plain about where it
+// survives. It is narrower than what it replaces, and the narrowing is the whole
+// argument: the coordinator must write one line at the moment it is already
+// writing the same fact in prose one line below, versus having to REMEMBER, at a
+// transition minutes or hours later, to go back and clear something. A missed
+// write costs one round the protection it would have had; a missed clear would
+// have cost a dispatch slot indefinitely. It is also detectable after the fact —
+// a review ticket with no `reviews:` line is a grep — where a stale declaration
+// is indistinguishable from a live one.
+//
+// The smaller one: a review polecat that wedges without exiting holds its
+// builder exempt for as long as it lives. That is bounded by the reviewer's own
+// lifetime and is the same exposure the wedged reviewer already represents on
+// its own slot — orphanwatch's and stallwatch's question, not this reaper's.
 //
 // GRACE PERIOD, NOT AN EXPLICIT "I AM FINISHED" SIGNAL. The alternative was to
 // have polecats declare completion. It was rejected: a signal the polecat must
@@ -299,12 +314,21 @@ func (d *doneReaper) Check(now time.Time) []string {
 		// The healthy, expected end of a non-merge polecat's life. Logged at
 		// info, never mailed: there is no fault here to escalate, and an
 		// escalation per completed triage would be pure noise.
+		//
+		// The lapse is recorded HERE — before the Stop, and dropping the record in
+		// the same breath — because the exemption has already ended by this point:
+		// it is a fact about the reviewer being gone, not about the stop
+		// succeeding. Clearing it now is also what keeps the expiry line to ONE
+		// occurrence. Left until after a successful Stop, a polecat whose Stop
+		// keeps failing would re-announce the same lapse on every tick forever,
+		// and a positive record that repeats is a positive record nobody reads.
 		if reviewer, was := d.exempt[p.Name]; was {
 			// The other half of the positive record: the exemption EXPIRED. This
 			// is what says the guard is bounded by the reviewer's lifetime rather
 			// than holding a slot forever.
 			log.Printf("donereap: review exemption for polecat %s has LAPSED — review item %s no longer has a running polecat; "+
 				"reaping normally (mg-aaf6)", p.Name, reviewer)
+			delete(d.exempt, p.Name)
 		}
 		log.Printf("donereap: stopping polecat %s — work item %s is done and it has been idle %s (>= %s); freeing its slot (mg-56d1)",
 			p.Name, p.WorkItemID, p.IdleFor.Truncate(time.Second), d.grace)
@@ -315,7 +339,6 @@ func (d *doneReaper) Check(now time.Time) []string {
 			log.Printf("donereap: failed to stop polecat %s: %v", p.Name, err)
 			continue
 		}
-		delete(d.exempt, p.Name)
 		stopped = append(stopped, p.Name)
 	}
 	// Forget polecats that are gone, so the map cannot grow across the lifetime
