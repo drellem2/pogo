@@ -23,17 +23,20 @@
 #
 # WHAT IS NOT COVERED, AND WHY IT IS NAMED HERE RATHER THAN LEFT QUIET
 #
-#   config.AgentSocketDir's `$TMPDIR/pogo-agents-<hash>` fallback still leaks
-#   one directory per distinct POGO_HOME (3 per full suite run; 3,883 of the
-#   37,083 entries measured). It is NOT fixed and it is NOT in the slice below.
-#   The reason is a path budget, not an oversight: that leaf must be derived
-#   IDENTICALLY by a test binary and by a non-test pogod sharing one POGO_HOME —
-#   they find each other by computing the same path — so it can carry neither a
-#   pid nor a shared parent directory. On this box the fallback is already 69
-#   bytes of the 73 that AF_UNIX's sun_path leaves it, so there is no room to
-#   nest it under a swept root, and making it differ between test and non-test
-#   binaries would reintroduce mg-8532's split-socket bug. Left alone
-#   deliberately and filed as mg-a997, with the budget arithmetic written out.
+#   config.AgentSocketDir's fallback is FIXED, and not here. It is not in the
+#   slice below because nothing in that slice boots a pogod, which is the only
+#   thing that ever created one: all three per-run entries came from the real
+#   pogod binaries cmd/pogod's boot tests build. Its guard is therefore a Go
+#   test beside them, cmd/pogod/fallbacksocketdir_test.go, which pins the same
+#   count assertion this file makes against a pinned $TMPDIR.
+#
+#   The note this replaces said there was no room to nest that leaf under a
+#   shared parent. That arithmetic was wrong by one character: the leaf was
+#   "pogo-agents-<hash>" and is now "pogo-agents/<hash>", the same length to the
+#   byte, so $TMPDIR gains one entry rather than one per POGO_HOME. Reaping the
+#   leaves inside it needed a different ownership key than this file's — a
+#   fallback socket dir is owned by a POGO_HOME, not a pid — and that is written
+#   out in agent.PrepareFallbackSocketDir (mg-a997).
 #
 #   agent.ExpandTemplateToFile's $TMPDIR/pogo-prompts is likewise untouched: one
 #   entry, but 15,819 files and 74 MB inside it, and a PRODUCTION leak rather

@@ -1273,8 +1273,11 @@ daemon bound the socket last, and expect the two daemons' attach supervisors to
 unlink and rebind each other's live socket every 30s (mg-d216).
 
 A root too deep to fit a unix socket path keeps the isolation but not the
-location: its sockets land in `$TMPDIR/pogo-agents-<hash of the root>`, still one
-directory per root, and pogod logs a line saying so at startup. See
+location: its sockets land in `$TMPDIR/pogo-agents/<hash of the root>`, still one
+directory per root, and pogod logs a line saying so at startup. Those leaves
+share the one `pogo-agents` directory and each records its `POGO_HOME`, so a
+starting pogod can remove the ones whose root has been deleted; before mg-a997
+they sat directly in `$TMPDIR` and nothing removed them at all. See
 [docs/CONFIGURATION.md](CONFIGURATION.md#state-directory-pogo_home-and-running-multiple-instances)
 for the `sun_path` limit and the agent-name ceiling it implies.
 

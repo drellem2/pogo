@@ -1451,6 +1451,17 @@ Flags:
 		log.Printf("pogod: POGO_HOME %s is too deep to hold unix sockets (sun_path limit); "+
 			"agent attach sockets live in %s instead — still unique to this POGO_HOME",
 			config.PogoHome(), socketDir)
+		// The fallback dir sits in a shared temp root, so it needs two things
+		// NewRegistry does not do: the nest parent vetted before we create
+		// anything inside it, and a record of which POGO_HOME owns this leaf so
+		// the leaves of roots that no longer exist can be reaped. Test binaries
+		// are the only thing that reaches this branch in practice, and each one
+		// used to strand a directory here forever — 3,883 of one $TMPDIR's
+		// 37,083 entries (mg-a997).
+		if err := agent.PrepareFallbackSocketDir(socketDir, config.PogoHome()); err != nil {
+			fmt.Printf("Cannot prepare agent socket dir %s: %v\n", socketDir, err)
+			os.Exit(1)
+		}
 	}
 	var initErr error
 	agentRegistry, initErr = agent.NewRegistry(socketDir)

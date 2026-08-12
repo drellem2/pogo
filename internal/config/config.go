@@ -2449,16 +2449,62 @@ const agentSocketLeafBudget = len("/") + MaxAgentNameLen + len(".sock")
 // at 4 bytes it fits under any budget these constants could grow to. If it is
 // not writable, NewRegistry's MkdirAll fails and pogod exits loudly at startup,
 // which is the honest outcome (mg-ef80).
+//
+// The fallback leaf is NESTED under agentSocketFallbackRoot rather than named
+// with a prefix, which is why $TMPDIR gains one entry for every root that ever
+// falls back instead of one per root — see that function for the arithmetic
+// (mg-a997).
 func AgentSocketDir() (dir string, insidePogoHome bool) {
 	if dir := filepath.Join(PogoHome(), "agents", "sockets"); agentSocketDirFits(dir) {
 		return dir, true
 	}
 	sum := sha256.Sum256([]byte(filepath.Clean(PogoHome())))
-	leaf := "pogo-agents-" + hex.EncodeToString(sum[:4])
-	if dir := filepath.Join(os.TempDir(), leaf); agentSocketDirFits(dir) {
-		return dir, false
+	return filepath.Join(agentSocketFallbackRoot(), hex.EncodeToString(sum[:agentSocketHashBytes])), false
+}
+
+// agentSocketNestName is the single directory every hashed fallback socket dir
+// lives inside.
+//
+// It is a PARENT and not a name prefix, and that distinction is the whole of
+// mg-a997. The old leaf was "pogo-agents-<hash>" directly in $TMPDIR, so every
+// distinct POGO_HOME that ever fell back added a top-level entry that nothing
+// removed: 3,883 of one $TMPDIR's 37,083 entries, measured 2026-08-12, three
+// more per full `go test ./...`.
+//
+// mg-de3c priced nesting and rejected it, on the reading that a nest parent
+// would have to be ADDED to a path already 69 bytes into the 73 that sun_path
+// leaves. That reading was wrong by exactly one character: the hyphen the
+// prefix already spends becomes the separator the nest needs, so
+// "pogo-agents/<hash>" is the same 20 bytes as "pogo-agents-<hash>" and the
+// budget is untouched. TestAgentSocketFallbackNestIsFree pins that.
+const agentSocketNestName = "pogo-agents"
+
+// agentSocketHashBytes is how many bytes of the POGO_HOME digest name a
+// fallback leaf. Hex-encoded, so the leaf is twice this many characters — a
+// fixed width, which is what lets AgentSocketFallbackRoot check the budget for
+// a leaf it has not computed yet.
+const agentSocketHashBytes = 4
+
+// agentSocketFallbackRoot returns the one directory that holds every hashed
+// fallback socket dir on this host.
+//
+// The same preference AgentSocketDir applies to the leaf applies here, and for
+// the same reason: os.TempDir() while a leaf under it still leaves room for the
+// reserved agent-name budget, "/tmp" once it does not.
+//
+// It stays unexported deliberately. agent.PrepareFallbackSocketDir needs this
+// directory and takes it as filepath.Dir of the leaf it was handed, rather than
+// deriving it a second time from the environment — two derivations of one path
+// that can disagree is the shape of mg-8532, and there is no reason to build a
+// second one here.
+func agentSocketFallbackRoot() string {
+	// A leaf of the exact width AgentSocketDir will produce. The digits are
+	// arbitrary; only the length is load-bearing.
+	probe := strings.Repeat("0", hex.EncodedLen(agentSocketHashBytes))
+	if root := filepath.Join(os.TempDir(), agentSocketNestName); agentSocketDirFits(filepath.Join(root, probe)) {
+		return root
 	}
-	return filepath.Join("/tmp", leaf), false
+	return filepath.Join("/tmp", agentSocketNestName)
 }
 
 // agentSocketDirFits reports whether dir leaves room to bind an agent socket

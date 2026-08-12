@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/hex"
 	"net"
 	"os"
 	"path/filepath"
@@ -57,8 +58,32 @@ func deepHome(t *testing.T) string {
 
 // legacySharedDir is the pre-mg-8532 path: one $TMPDIR-derived directory shared
 // by every daemon on the host regardless of POGO_HOME.
+//
+// Since mg-a997 that path is also AgentSocketFallbackRoot — the nest the hashed
+// leaves live in. The two uses do not conflict and the assertions below are
+// still the mg-8532 ones: what must never happen is a daemon binding its
+// sockets DIRECTLY here, which is what "dir == legacySharedDir()" catches.
 func legacySharedDir() string {
 	return filepath.Join(os.TempDir(), "pogo-agents")
+}
+
+// cleanupSocketDir removes a socket dir a test created, and then the fallback
+// nest above it if that leaves it empty.
+//
+// The second half is not tidiness. A deep root with a long TMPDIR resolves to
+// /tmp/pogo-agents/<hash>, outside every temp root a test owns, so without this
+// each run would strand an entry in the real /tmp — which is the defect these
+// tests are about, arriving through the tests themselves (mg-7318, mg-a997). The
+// parent removal is os.Remove and not RemoveAll on purpose: it must fail, and be
+// ignored, whenever a live daemon on this box has a leaf in there.
+func cleanupSocketDir(t *testing.T, dir string) {
+	t.Helper()
+	t.Cleanup(func() {
+		os.RemoveAll(dir)
+		if filepath.Base(filepath.Dir(dir)) == agentSocketNestName {
+			os.Remove(filepath.Dir(dir))
+		}
+	})
 }
 
 // bindOK reports whether a unix socket can actually be bound at path.
@@ -190,7 +215,7 @@ func TestAgentSocketDirBindable(t *testing.T) {
 			t.Setenv("POGO_HOME", tc.home(t))
 
 			dir, _ := AgentSocketDir()
-			t.Cleanup(func() { os.RemoveAll(dir) })
+			cleanupSocketDir(t, dir)
 
 			sock := filepath.Join(dir, longestName+".sock")
 			if err := bindOK(t, sock); err != nil {
@@ -359,11 +384,11 @@ func TestAgentSocketDirAlwaysFits(t *testing.T) {
 					return
 				}
 				// bindOK creates dir. For a deep root with a long TMPDIR that is
-				// /tmp/pogo-agents-<hash>, outside every temp root the test owns,
+				// /tmp/pogo-agents/<hash>, outside every temp root the test owns,
 				// so nothing else would ever reap it: each run of this test would
 				// strand another empty directory in /tmp (mg-7318). Registered
 				// after the bindable check because the "/" row never creates it.
-				t.Cleanup(func() { os.RemoveAll(dir) })
+				cleanupSocketDir(t, dir)
 
 				// The budget is only meaningful if the longest promised name
 				// actually binds there.
@@ -373,6 +398,151 @@ func TestAgentSocketDirAlwaysFits(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// legacyFallbackLeaf is the flat name the fallback used before mg-a997:
+// "pogo-agents-<hash>", sitting directly in $TMPDIR. It is spelled out here
+// rather than imported because the point of the tests below is to measure the
+// NEW path against it.
+func legacyFallbackLeaf(hash string) string {
+	return "pogo-agents-" + hash
+}
+
+// TestAgentSocketFallbackNestIsFree is the arithmetic mg-de3c got wrong, and the
+// whole reason mg-a997 could be fixed at all.
+//
+// mg-de3c priced nesting the fallback under a swept parent and rejected it:
+// "$TMPDIR/pogo-agents-abcdef01 is already 69 of the 73 bytes sun_path leaves,
+// a 13-character parent takes it to 83 and the fallback fails". That is true of
+// an ADDED parent and false of this one. The prefix already spends a separator's
+// worth of hyphen, so promoting it to a directory costs nothing: the path is the
+// same length to the byte, the budget is untouched, and $TMPDIR goes from one
+// entry per POGO_HOME to one entry, full stop.
+//
+// If this ever fails, the nest has started costing budget and every row of
+// TestAgentSocketDirAlwaysFits is measuring a different boundary than it says.
+func TestAgentSocketFallbackNestIsFree(t *testing.T) {
+	const hash = "abcdef01"
+	tmp := tmpDirOfLen(t, 20)
+	t.Setenv("TMPDIR", tmp)
+
+	legacy := filepath.Join(tmp, legacyFallbackLeaf(hash))
+	nested := filepath.Join(agentSocketFallbackRoot(), hash)
+
+	if len(nested) != len(legacy) {
+		t.Errorf("the nested fallback %q is %d bytes and the flat one %q was %d; "+
+			"nesting was supposed to cost nothing, so the sun_path budget mg-de3c "+
+			"priced no longer holds", nested, len(nested), legacy, len(legacy))
+	}
+	if !agentSocketDirFits(nested) {
+		t.Errorf("nested fallback %q (%d bytes) leaves no room for the %d-byte leaf",
+			nested, len(nested), agentSocketLeafBudget)
+	}
+}
+
+// TestAgentSocketFallbackSharesOneNest is mg-a997's headline: whatever else is
+// true, $TMPDIR gains ONE entry for every root that ever falls back, not one
+// per root. 3,883 of one $TMPDIR's 37,083 entries were the old shape.
+//
+// Distinctness per root — the mg-8532 invariant — has to survive that, so this
+// asserts both halves against the same set of roots.
+func TestAgentSocketFallbackSharesOneNest(t *testing.T) {
+	// The roots come first, while TMPDIR is still the ambient one: deepHome
+	// builds them with t.TempDir(), and a root created after the pin would land
+	// inside the very directory this test is counting entries in.
+	var roots []string
+	for i := 0; i < 5; i++ {
+		roots = append(roots, deepHome(t))
+	}
+
+	tmp := tmpDirOfLen(t, 20)
+	t.Setenv("TMPDIR", tmp)
+
+	seen := map[string]bool{}
+	for _, root := range roots {
+		t.Setenv("POGO_HOME", root)
+		dir, inside := AgentSocketDir()
+		if inside {
+			t.Fatalf("a deep root must fall back, got %q inside POGO_HOME", dir)
+		}
+		if got, want := filepath.Dir(dir), agentSocketFallbackRoot(); got != want {
+			t.Fatalf("fallback %q sits in %q, want the single nest %q", dir, got, want)
+		}
+		seen[dir] = true
+	}
+	if len(seen) != 5 {
+		t.Errorf("5 distinct roots produced %d distinct socket dirs; the mg-8532 "+
+			"per-root distinctness is lost", len(seen))
+	}
+
+	// The measurement itself: the nest is the only thing $TMPDIR gained.
+	for dir := range seen {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatalf("MkdirAll %s: %v", dir, err)
+		}
+	}
+	entries, err := os.ReadDir(tmp)
+	if err != nil {
+		t.Fatalf("ReadDir %s: %v", tmp, err)
+	}
+	if len(entries) != 1 || entries[0].Name() != agentSocketNestName {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Errorf("TMPDIR holds %v after 5 distinct roots fell back, want exactly [%s]",
+			names, agentSocketNestName)
+	}
+}
+
+// TestAgentSocketFallbackRootDegradesWithTheLeaf pins that the nest root obeys
+// the same budget the leaf does. The root is chosen without knowing the hash,
+// so it checks a fixed-width probe; if that probe ever stopped matching the real
+// leaf width, a TMPDIR near the boundary would be accepted for a leaf that does
+// not fit.
+func TestAgentSocketFallbackRootDegradesWithTheLeaf(t *testing.T) {
+	nested := len(filepath.Join(string(filepath.Separator)+agentSocketNestName, "abcdef01"))
+
+	for _, tc := range []struct {
+		name    string
+		tmpLen  int
+		wantTmp bool // the nest stays under TMPDIR
+	}{
+		{"TMPDIR at the budget limit", maxUnixSocketPathLen - agentSocketLeafBudget - nested, true},
+		{"TMPDIR one byte past it", maxUnixSocketPathLen - agentSocketLeafBudget - nested + 1, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tmp := tmpDirOfLen(t, tc.tmpLen)
+			t.Setenv("TMPDIR", tmp)
+			t.Setenv("POGO_HOME", deepHome(t))
+
+			root := agentSocketFallbackRoot()
+			if got := root == filepath.Join(tmp, agentSocketNestName); got != tc.wantTmp {
+				t.Errorf("agentSocketFallbackRoot() = %q with a %d-byte TMPDIR; under TMPDIR = %t, want %t",
+					root, tc.tmpLen, got, tc.wantTmp)
+			}
+			dir, _ := AgentSocketDir()
+			if !agentSocketDirFits(dir) {
+				t.Errorf("AgentSocketDir() = %q (%d bytes): no room for the %d-byte leaf",
+					dir, len(dir), agentSocketLeafBudget)
+			}
+		})
+	}
+}
+
+// TestAgentSocketHashWidthMatchesTheProbe guards the one assumption
+// AgentSocketFallbackRoot makes about a leaf it has not computed: that the hash
+// is a fixed width. A wider digest would make the root's budget check optimistic
+// by exactly the difference.
+func TestAgentSocketHashWidthMatchesTheProbe(t *testing.T) {
+	t.Setenv("TMPDIR", tmpDirOfLen(t, 20))
+	t.Setenv("POGO_HOME", deepHome(t))
+
+	dir, _ := AgentSocketDir()
+	if got, want := len(filepath.Base(dir)), hex.EncodedLen(agentSocketHashBytes); got != want {
+		t.Errorf("fallback leaf %q is %d characters, but AgentSocketFallbackRoot budgets for %d",
+			filepath.Base(dir), got, want)
 	}
 }
 
@@ -388,8 +558,8 @@ func TestAgentSocketDirPrefersTempDirWhenItFits(t *testing.T) {
 	if inside {
 		t.Fatalf("a deep root must fall back, got %q inside POGO_HOME", dir)
 	}
-	if filepath.Dir(dir) != tmp {
-		t.Errorf("AgentSocketDir() = %q, want it under the fitting TMPDIR %q", dir, tmp)
+	if want := filepath.Join(tmp, agentSocketNestName); filepath.Dir(dir) != want {
+		t.Errorf("AgentSocketDir() = %q, want it in the nest %q under the fitting TMPDIR", dir, want)
 	}
 }
 
@@ -404,8 +574,8 @@ func TestAgentSocketDirFallsBackToTmpWhenTempDirTooLong(t *testing.T) {
 	if inside {
 		t.Fatalf("a deep root must fall back, got %q inside POGO_HOME", first)
 	}
-	if filepath.Dir(first) != "/tmp" {
-		t.Errorf("AgentSocketDir() = %q, want it directly under /tmp", first)
+	if want := filepath.Join("/tmp", agentSocketNestName); filepath.Dir(first) != want {
+		t.Errorf("AgentSocketDir() = %q, want it in the /tmp nest %q", first, want)
 	}
 
 	t.Setenv("POGO_HOME", deepHome(t))
