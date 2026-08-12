@@ -152,14 +152,140 @@ func TestLateRenderingDialogIsNeverDismissed(t *testing.T) {
 	}
 }
 
+// spentClock is a clock in the state a goroutine starved past its budget wakes
+// into, made deterministic. The FIRST reading is the instant trustDialogWatch
+// computes its deadline from; every later reading is past that deadline. So the
+// loop's first tick finds the budget spent while the REAL timer it was handed has
+// not fired — which is precisely the ambiguous moment the old loop resolved with
+// select's uniform tie-break.
+//
+// Unsynchronised on purpose: the closure is read only by the watch loop, on one
+// goroutine, and the channel that hands the outcome back carries the
+// happens-before to the test.
+func spentClock(t0 time.Time, budget time.Duration) func() time.Time {
+	reads := 0
+	return func() time.Time {
+		reads++
+		if reads == 1 {
+			return t0
+		}
+		return t0.Add(budget + time.Second)
+	}
+}
+
+// TestSpentBudgetBeatsAReadyTicker pins the priority between the two arms that
+// used to be equal candidates (mg-effc).
+//
+// The dialog is on screen and matchable, so the scan branch WOULD press the
+// accept key; the budget is spent, so the deadline branch must win. Both were
+// ready at once in production — a goroutine starved past its budget by a host at
+// load — and Go picks uniformly at random among ready select cases, so the scan
+// branch ran about half the time per iteration and, because time.After delivers
+// once while the ticker keeps firing, nearly always within a few iterations. This
+// package's TestLateRenderingDialogIsNeverDismissed failed a merge gate alongside
+// claude's and codex's on exactly that, all three sharing this loop shape.
+//
+// The starvation is not scripted here — it is expressed through the clock, which
+// is the only part of it the loop can observe. The real budget is far longer than
+// this test will wait for, so an implementation that resolves this state by
+// waiting out its timer fails the deadline below rather than passing slowly.
+//
+// Deleting the spent-budget check in trustDialogWatch's ticker arm fails this
+// test on the outcome AND on the keypress.
+func TestSpentBudgetBeatsAReadyTicker(t *testing.T) {
+	a := spawnScripted(t, "spent-budget", lateDialogScript("0"))
+
+	// Wait for the dialog to actually land, so the assertions below are about
+	// the tie-break rather than about an empty buffer.
+	if !sawWithin(a, dialogLine, 10*time.Second) {
+		t.Fatal("script never rendered the dialog: the test proves nothing")
+	}
+	// Premise, side one: the scan branch really would match this and act on it.
+	if !matchesTrustDialog(a.RecentOutput(composerScanBytes)) {
+		t.Fatal("premise broken: the rendered dialog no longer matches " +
+			"trustDialogMarker, so declining to accept it proves nothing")
+	}
+	// Premise, side two: no composer marker, so the hook cannot be resolving on
+	// composerReady instead.
+	if composerReady(a.RecentOutput(composerScanBytes)) {
+		t.Fatal("premise broken: the scripted agent rendered a composer-ready " +
+			"marker, so the outcome below says nothing about the budget")
+	}
+
+	const budget = 60 * time.Second
+	got := make(chan trustWatchOutcome, 1)
+	go func() {
+		got <- trustDialogWatch(a, budget, 20*time.Millisecond, spentClock(time.Now(), budget))
+	}()
+
+	var outcome trustWatchOutcome
+	select {
+	case outcome = <-got:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("watch did not return within 10s of a %v budget it was told was "+
+			"already spent: it is waiting out the real timer instead of measuring "+
+			"the deadline", budget)
+	}
+
+	if outcome != trustWatchDrift {
+		t.Errorf("outcome = %v, want %v: a tick that finds the budget spent must "+
+			"take the deadline path, not the scan path", outcome, trustWatchDrift)
+	}
+	if sawWithin(a, answeredMarker, 3*time.Second) {
+		t.Error("the dialog was accepted after the budget was spent — the scan " +
+			"branch is still winning the tie-break against the deadline, which " +
+			"is the mg-effc race")
+	}
+}
+
+// TestSpentBudgetPrefersAnExitedAgentOverADriftSample covers the OTHER
+// tie-break in the same select, whose exposure the mg-effc fix widened.
+//
+// Every spent-budget wakeup now routes through spentBudgetOutcome, so an agent
+// that exits during a starvation window reaches it with its done channel already
+// closed. A watch that ends because its agent died is inconclusive — it is not
+// evidence that the trust-dialog sentinel has drifted — so the exit has to win
+// there rather than be left to another coin flip.
+//
+// This is asserted on the function and not end-to-end on purpose. A scripted
+// agent that has already exited never reaches this decision: its closed done
+// channel is the only ready arm of trustDialogWatch's outer select when the loop
+// starts, so it wins before the first tick. Mutating spentBudgetOutcome to return
+// drift unconditionally passed a scenario version of this test 4/4 — which is why
+// the decision takes the channel as a parameter.
+func TestSpentBudgetPrefersAnExitedAgentOverADriftSample(t *testing.T) {
+	exited := make(chan struct{})
+	close(exited)
+	if got := spentBudgetOutcome(exited); got != trustWatchInconclusive {
+		t.Errorf("spentBudgetOutcome(closed) = %v, want %v: an agent that has "+
+			"already exited must not become a drift sample", got, trustWatchInconclusive)
+	}
+
+	// And the live-agent side, so the test cannot pass by always answering
+	// inconclusive — which would silence the drift detector entirely.
+	live := make(chan struct{})
+	if got := spentBudgetOutcome(live); got != trustWatchDrift {
+		t.Errorf("spentBudgetOutcome(open) = %v, want %v: a spent budget on a live "+
+			"agent IS the drift signature and has to be recorded", got, trustWatchDrift)
+	}
+}
+
 // TestLateRenderingDialogIsDismissedWithinTheColdStartBudget is the same
 // scenario with the shipped shape: a budget tied to the provider's own
 // cold-start budget rather than an independent 12s guess. The dialog renders
 // late and is still dismissed.
+//
+// The budget is 15s against a 0.7s render, and the margin is the point rather
+// than the number. Now that a spent budget deterministically declines (mg-effc),
+// this test is the one that inverts if the hook's goroutine is starved past its
+// budget — so the gap between render and budget has to be wider than any
+// plausible starvation. 5s was ~7x the render delay, and this fleet has measured
+// gate wall-clock inflating 1.8x-6.8x under contention; 15s is ~21x. It costs
+// nothing on a healthy run because the watch returns the moment it dismisses.
 func TestLateRenderingDialogIsDismissedWithinTheColdStartBudget(t *testing.T) {
 	a := spawnScripted(t, "late-fix", lateDialogScript("0.7"))
 
-	watchForTrustDialog(a, 5*time.Second, 50*time.Millisecond)
+	watchForTrustDialog(a, 15*time.Second, 50*time.Millisecond)
 
 	if !sawWithin(a, answeredMarker, 3*time.Second) {
 		t.Errorf("late-rendering trust dialog was not dismissed; PTY:\n%s",
