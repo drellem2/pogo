@@ -750,22 +750,25 @@ func ExpandTemplate(templatePath string, vars TemplateVars) (string, error) {
 	return buf.String(), nil
 }
 
-// ExpandTemplateToFile expands a template and writes it to a temporary file.
-// The caller is responsible for removing the temp file when done.
-// Returns the path to the generated file.
-func ExpandTemplateToFile(templatePath string, vars TemplateVars) (string, error) {
+// ExpandTemplateToFile expands a template and writes it to a temporary file
+// owned by the agent named owner. Returns the path to the generated file.
+//
+// The file must outlive this call — the path is what gets handed to the harness
+// — so removal is the caller's, and until mg-5197 no caller did it and every
+// spawn leaked a file. Two things now do: pogod's exit callback calls
+// RemoveExpandedPrompt when the owner is gone for good, and the next spawn's
+// SweepExpandedPrompts reclaims whatever an exit callback that never ran left.
+//
+// owner exists as a parameter for the sweep's sake, and it is required rather
+// than optional because that is the whole discriminator: an unowned file can
+// only ever be aged out. See prompttmp.go.
+func ExpandTemplateToFile(templatePath string, owner string, vars TemplateVars) (string, error) {
 	expanded, err := ExpandTemplate(templatePath, vars)
 	if err != nil {
 		return "", err
 	}
 
-	// Write to a temp file in the pogo runtime directory
-	tmpDir := filepath.Join(os.TempDir(), "pogo-prompts")
-	if err := os.MkdirAll(tmpDir, 0700); err != nil {
-		return "", fmt.Errorf("create prompt temp dir: %w", err)
-	}
-
-	f, err := os.CreateTemp(tmpDir, "polecat-*.md")
+	f, err := createExpandedPromptFile(owner)
 	if err != nil {
 		return "", fmt.Errorf("create temp file: %w", err)
 	}

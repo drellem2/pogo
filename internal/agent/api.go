@@ -1502,7 +1502,7 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		RecentFiles:   recentFiles,
 		Provider:      providerID,
 	}
-	promptFile, err := ExpandTemplateToFile(tmplPath, vars)
+	promptFile, err := ExpandTemplateToFile(tmplPath, spawnReq.Name, vars)
 	if err != nil {
 		failPolecatSpawn(w, spawnReq, http.StatusInternalServerError, fmt.Sprintf("template expansion failed: %v", err))
 		return

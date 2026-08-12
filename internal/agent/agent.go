@@ -1190,10 +1190,30 @@ func (r *Registry) List() []*Agent {
 	return agents
 }
 
-// Remove removes an agent from the registry. Does not stop it.
+// Remove removes an agent from the registry, and with it the expanded prompt
+// file that was written for this spawn. Does not stop it.
+//
+// The prompt removal is here, and not at the two callers, because this is where
+// "the agent is gone from the fleet" is expressed exactly once. Stop's two
+// teardown branches and pogod's exit callback all funnel through it, and
+// respawn deliberately does not — RespawnFromGeneration re-launches the agent
+// with old.PromptFile, so a removal on that path would hand the restart an
+// empty prompt.
+//
+// RemoveExpandedPrompt is a no-op for any path that is not a file
+// ExpandTemplateToFile wrote, which is what keeps this line from deleting a CREW
+// agent's real persona at ~/.pogo/agents/crew/<name>.md — crew agents reach here
+// too. See prompttmp.go (mg-5197).
 func (r *Registry) Remove(name string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if a := r.agents[name]; a != nil {
+		if removed, err := RemoveExpandedPrompt(a.PromptFile); err != nil {
+			log.Printf("agent %s: could not remove expanded prompt %s: %v", name, a.PromptFile, err)
+		} else if removed {
+			log.Printf("agent %s: removed expanded prompt %s", name, a.PromptFile)
+		}
+	}
 	delete(r.agents, name)
 }
 
