@@ -27,6 +27,7 @@ import (
 	"github.com/nightlyone/lockfile"
 	"golang.org/x/net/netutil"
 
+	"github.com/drellem2/pogo/internal/absentwatch"
 	"github.com/drellem2/pogo/internal/ackwatch"
 	"github.com/drellem2/pogo/internal/agent"
 	"github.com/drellem2/pogo/internal/claude"
@@ -2502,6 +2503,70 @@ Flags:
 		log.Printf("pogod: deaf-watch NOT armed — the agent registry did not load, so there is nothing to judge")
 	}
 
+	// Build the ABSENT-AGENT announcer (mg-7d20). Every other standing detector
+	// iterates the REGISTRY, so an agent that was stopped is not a row with a bad
+	// value in it — it is no row at all, and no reader can tell "down" from
+	// "never configured here". `crew-doctor` was stopped on 2026-08-10 during an
+	// auth-incident cleanup and stayed down 2 days 21 hours: the stall-watch
+	// reads a sweep log a stopped agent does not write, ackwatch had no schedule
+	// left to under-complete (pogod reaped the mail-check at stop, reason=
+	// agent_gone), deaf-watch's population is the registry it had left, and
+	// `pogo agent list` cannot show a member that is not running. The one surface
+	// that would have reported it — `pogo doctor --check` — is read on a cadence
+	// by doctor and by nobody else, so the instrument for doctor's absence WAS
+	// doctor.
+	//
+	// This runner's population is the CONFIGURED crew/mayor set
+	// (agent.Registry.RosterReport), with presence as a property of each member
+	// rather than the precondition for being looked at. It is deliberately
+	// patient with an on-demand agent — being off is that class's ordinary state
+	// — and impatient with a supervised one, because a detector that cries wolf
+	// is the reason nobody builds the one that would work.
+	//
+	// Armed on the registry alone: the prompt tree is read at sample time, and an
+	// unreadable one reports as absent_watch_error rather than as a complete
+	// roster. REPORT-ONLY.
+	var absentWatcher *absentwatch.Watcher
+	if cfg.AbsentWatch.Enabled && agentRegistry != nil {
+		absentWatcher = absentwatch.New(absentwatch.Options{
+			Enabled:       true,
+			Source:        absentwatch.RegistrySource(agentRegistry),
+			Mail:          client.SendMGMail,
+			Interval:      cfg.AbsentWatch.Interval,
+			HoldDown:      cfg.AbsentWatch.HoldDown,
+			DormantAfter:  cfg.AbsentWatch.DormantAfter,
+			RenotifyAfter: cfg.AbsentWatch.RenotifyAfter,
+			NotifyTo:      cfg.AbsentWatch.NotifyTo,
+			EscalateAfter: cfg.AbsentWatch.EscalateAfter,
+			EscalateTo:    escalationBox,
+		})
+		log.Printf("pogod: absent-watch enabled (interval=%s hold_down=%s dormant_after=%s renotify=%s notify_to=%s escalate_after=%s escalate_to=%s, report-only)",
+			cfg.AbsentWatch.Interval, cfg.AbsentWatch.HoldDown, cfg.AbsentWatch.DormantAfter,
+			cfg.AbsentWatch.RenotifyAfter, cfg.AbsentWatch.NotifyTo, cfg.AbsentWatch.EscalateAfter, escalationBox)
+	} else if cfg.AbsentWatch.Enabled {
+		const reason = "the agent registry did not load, so there is nothing to compare the configured set against"
+		log.Printf("pogod: absent-watch NOT armed — %s", reason)
+		// And on the EVENT SPINE, not only on stderr — the same reasoning as the
+		// first-turn floor below, and here it is the detector's own defect
+		// arriving one level up. This runner exists because an instrument that
+		// reads green over a missing thing is worse than no instrument. A runner
+		// that was never armed emits nothing, finds nothing, and is
+		// indistinguishable from one that is running over a complete roster; and
+		// pogod logs to inherited stderr, which is how four months of pogod.log
+		// held zero lines for events that were in the running binary the whole
+		// time. Silence about the detector is the same failure as silence about
+		// the agent.
+		events.Emit(context.Background(), events.Event{
+			EventType: absentwatch.EventError,
+			Agent:     "pogod",
+			Details: map[string]any{
+				"error": reason,
+				"phase": "arm",
+				"why":   "absent-watch could not be armed at startup; no absence will be reported until pogod is restarted with an agent registry",
+			},
+		})
+	}
+
 	// Build the FIRST-COMPLETED-TURN floor (mg-3cbb): the runner that alarms
 	// when pogod has spawned a crew agent and that agent has never finished a
 	// single scheduled fire since.
@@ -2812,6 +2877,22 @@ Flags:
 		// register a schedule, nudge, or restart the agent it names.
 		if deafWatcher != nil {
 			go deafWatcher.Check(now)
+		}
+		// The absent-agent announcer rides the same tick and throttles itself to
+		// a coarse interval. In a goroutine because an announcement shells out
+		// to `mg mail send`, which must never delay a tick. Report-only: it
+		// mails, and it has no seam through which it could START the agent it
+		// names — the reason an agent left is the part worth knowing.
+		//
+		// It sits BESIDE deafWatcher rather than inside it on purpose (mg-7d20).
+		// The two are disjoint by population as well as by fault: deafwatch
+		// iterates the REGISTRY and asks "can this running agent be woken",
+		// absentwatch iterates the CONFIGURED SET and asks "is this agent here
+		// at all". An agent that has left the registry is outside deafwatch's
+		// population by construction, which is exactly how `crew-doctor` stayed
+		// down for 2d21h with every instrument green.
+		if absentWatcher != nil {
+			go absentWatcher.Check(now)
 		}
 		// The first-completed-turn floor rides the same tick and throttles
 		// itself to a coarse interval. In a goroutine because it scans the

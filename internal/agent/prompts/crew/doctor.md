@@ -1,4 +1,29 @@
 +++
+# THESE TWO FLAGS ARE COUPLED. Read this before changing either.
+#
+# Doctor is ON-DEMAND BY DESIGN: mg-b2cc shipped both flags false for gh #18, so
+# that `pogo agent stop doctor` STAYS stopped instead of being respawned. That is
+# a decision, not an oversight, and mg-7d20 re-confirmed it rather than flipping
+# it. `TestEmbeddedDoctorOnDemand` pins it.
+#
+# If you ever set auto_start = true here, SET restart_on_crash = true WITH IT.
+# auto_start = true + restart_on_crash = false is the one combination no prompt
+# in this fleet carries. Do not take a count on faith — `pogo agent roster`
+# re-derives it against the live tree and names any prompt that carries the
+# pairing; mg-8677's own body recorded a figure that was already stale. It is the
+# only shape that can reach cmd/pogod's desired-state fall-through with
+# expected=true while
+# the agent is durably dead — registry entry gone, witness gone, auto_start
+# saying "should be running" — which keeps a mail-check firing at nobody. With
+# restart_on_crash = true the registry arm returns AgentAlive and never reaches
+# that fall-through at all, so both-true is the safe form and is what every
+# healthy crew agent already does. See registryLiveness.AgentState in
+# cmd/pogod/main.go: "Never let auto_start override a corpse."
+#
+# Doctor being DOWN is not reported by doctor. That half of mg-7d20 is fixed
+# outside this file and stands whatever these flags say: internal/absentwatch
+# announces a configured agent that is missing from the registry, and
+# `pogo agent roster` is the pull surface for the same report.
 auto_start = false
 restart_on_crash = false
 +++

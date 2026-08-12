@@ -1890,7 +1890,14 @@ This is a registry view, not a liveness probe. Do not read it as one:
     ~2s window in which a restart_on_crash agent is being respawned.
 
 To decide whether a process is actually gone, ask for the probe:
-'pogo agent diagnose <name> --json' reports process_alive.`,
+'pogo agent diagnose <name> --json' reports process_alive.
+
+A crew agent that is CONFIGURED on this machine and is not running has no
+registry entry, so it is not one of the rows above — an absent member cannot
+appear in a set it has left. Those agents are named in a footer under the
+listing, and 'pogo agent roster' is the full view. --json is unchanged: it
+emits the registry array exactly as before, because eight callers consume it
+and assume every element has a process behind it (mg-7d20).`,
 		Args: cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
 			agents, err := client.ListAgents()
@@ -1902,6 +1909,7 @@ To decide whether a process is actually gone, ask for the probe:
 			} else {
 				if len(agents) == 0 {
 					fmt.Println("No running agents.")
+					printAbsentFooter()
 					return
 				}
 				for _, a := range agents {
@@ -1921,7 +1929,67 @@ To decide whether a process is actually gone, ask for the probe:
 					fmt.Printf("%-20s  pid=%-6d  type=%-8s  status=%-10s  uptime=%s%s%s\n",
 						a.Name, a.PID, a.Type, a.Status, a.Uptime, activity, workItem)
 				}
+				printAbsentFooter()
 			}
+		},
+	}
+
+	var cmdAgentRoster = &cobra.Command{
+		Use:   "roster",
+		Short: "Show the CONFIGURED crew set against the registry, absences included",
+		Long: `Roster lists every crew/mayor agent this machine is configured to have and
+says where each one stands: running, parked, or absent.
+
+It is the only pogo reading in which an agent that is NOT running is a row
+rather than a silence. 'pogo agent list', the stall-watch, ackwatch and
+deaf-watch all iterate pogod's registry, which holds the agents pogod is
+running — so a stopped agent is not a row with a bad value in it, it is no row
+at all, and nothing distinguishes "this agent is down" from "this agent was
+never configured here". crew-doctor was stopped on 2026-08-10 and stayed down
+2 days 21 hours with every one of those instruments reading green (mg-7d20).
+
+An absence is not automatically a fault, so each one is reported with what its
+own frontmatter asked for:
+
+  auto_start = true   — pogod should have started it at boot and did not.
+  auto_start = false  — on-demand; nothing will bring it back until asked.
+  prompt unreadable   — configured, and we cannot say what was wanted.
+
+PARKED is not an absence. Park is the supported way to be down: it is
+declared, it survives restarts, and it already shows in 'pogo agent list'.
+
+Roster also reports one configuration invariant it is uniquely placed to see,
+because it parses every configured prompt's frontmatter: auto_start = true with
+restart_on_crash = false. That pairing is the only shape that can leave a
+mail-check firing at an agent pogod will never bring back (mg-8677), and it is
+reported for a RUNNING agent too — that is when it is still cheap to fix.
+
+pogod announces the same findings on a clock without anyone running this
+command — see internal/absentwatch. This is the pull surface for the same
+report; neither is inside 'pogo doctor --check', because doctor is the only
+routine reader of that checklist and an instrument that cannot go red for the
+failure it names is worse than none.`,
+		Args: cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			rep, err := client.AgentRoster()
+			if err != nil {
+				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+			}
+			if jsonOutput {
+				cli.PrintJSON(rep)
+				return
+			}
+			for _, m := range rep.Members {
+				extra := ""
+				if m.State == agent.RosterPresent && m.Status != "" {
+					extra = "  status=" + string(m.Status)
+				}
+				fmt.Printf("%-20s  %-8s  class=%-15s%s\n", m.Name, m.State, m.Class, extra)
+			}
+			if len(rep.Members) > 0 {
+				fmt.Println()
+			}
+			fmt.Print(rep.Render())
 		},
 	}
 
@@ -4058,6 +4126,7 @@ report; it is safe from anywhere and never acts.`,
 	// Agent commands
 	cmdAgent.AddCommand(cmdAgentStart)
 	cmdAgent.AddCommand(cmdAgentList)
+	cmdAgent.AddCommand(cmdAgentRoster)
 	cmdAgent.AddCommand(cmdAgentSpawn)
 	cmdAgent.AddCommand(cmdAgentSpawnPolecat)
 	cmdAgent.AddCommand(cmdAgentStop)

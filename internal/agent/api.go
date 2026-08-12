@@ -527,6 +527,7 @@ func (r *Registry) RegisterHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/hostload", r.handleHostLoad)
 	mux.HandleFunc("/agents/prompts", r.handlePrompts)
 	mux.HandleFunc("/agents/mail-loops", r.handleMailLoops)
+	mux.HandleFunc("/agents/roster", r.handleRoster)
 	mux.HandleFunc("/agents/{name}", r.handleAgent)
 	mux.HandleFunc("/agents/{name}/park", r.handlePark)
 	mux.HandleFunc("/agents/{name}/wake", r.handleWake)
