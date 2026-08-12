@@ -242,7 +242,9 @@ it claims to detect, built from the terminals the strings were read off:
 - both incidents' exact numbers through the cross-check
 - the **un-enumerated** case: a prompt not in the table, caught by the
   cross-check alone
-- the event-log fallback when the counter cannot be parsed
+- the event-log fallback **timing a marker's hold-down** when the counter
+  cannot be parsed — which is the whole of what it may do; see below
+- **BLIND**, the state that says "I could not judge this agent"
 - the split-observation case: one agent's ENOTFOUND explaining another's 401
 - the starved agent, reported as `host_oversubscribed` and **not** as a wedge —
   plus the precedence control that a saturated host does not excuse a login
@@ -253,6 +255,39 @@ whose counter advances is never reported across six simulated hours, and neither
 is an agent **merely writing about the wedge** — not hypothetical, since the
 polecat that built this package had every enumerated marker in its own PTY for
 hours. That case is why the marker hold-down is not zero.
+
+### What the fallback may and may not decide (drellem2/pogo#138)
+
+The event-log fallback **times**; it does not **judge**. It supplies an age, and
+an age is only meaningful next to evidence that the agent ought to be producing
+something — which the marker supplies and the fallback cannot. So an agent whose
+counter cannot be parsed and which shows no marker is **BLIND**, not healthy:
+event-log silence alone cannot separate a wedged agent from an idle one.
+
+That distinction was lost once, and the loss is worth recording here because
+this section is where the next person will look. mg-20eb wired the fallback so a
+stall clock could be established without a counter, and the blind branch keyed
+on "is there a clock" rather than on "can this be judged" — so the answer space
+went from {healthy, stalled, blind} to {healthy, stalled}, and *"I cannot judge
+this"* collapsed into *"healthy"* at any staleness. A detector that cannot say
+it is blind reports green from its blind spot.
+
+Two consequences for anyone reading this section as a checklist:
+
+- **A positive control for BLIND is not optional.** It is the one state whose
+  absence looks exactly like a clean fleet, so it is the one most likely to be
+  removed by someone tidying up an error burst.
+- **`wedge_watch_error` going quiet is not evidence of health** unless the blind
+  branch is reachable. Between mg-20eb and drellem2/pogo#138 the count was
+  guaranteed zero by construction. An instrument that cannot go red is not
+  green; check reachability before quoting the count.
+
+Relatedly, the fallback's recency index counts only events the **agent** wrote.
+pogod records some of its interventions under the identity of the agent it acted
+*on* — `modal_dismissed` is emitted under the dismissed agent — and those fire
+*because* the agent is in trouble, so counting them makes the reading freshest
+when the subject is worst off. `events.CountsAsAgentActivity` is the shared
+predicate that excludes them, applied by every last-seen index over the log.
 
 ## 5. Item (3): escalating outside the wedged party — OPEN
 

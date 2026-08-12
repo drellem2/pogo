@@ -93,6 +93,48 @@ func TestTheTrackerStillIngestsTheAgentsOwnEvents(t *testing.T) {
 	}
 }
 
+// TestEveryTypeFireDismissalEmitsIsExcluded closes the loop by DRIVING the
+// emitter rather than by restating its strings.
+//
+// The three tests above name event types as literals, which pins today's set
+// and nothing else — add a fourth alias to fireDismissal and they stay green
+// while the new one refreshes every liveness index on the box. This one runs
+// the real fireDismissal over the real DefaultModalMatchers table, collects
+// whatever it actually emitted, and requires all of it to be excluded. Adding
+// an alias without excluding it fails here.
+func TestEveryTypeFireDismissalEmitsIsExcluded(t *testing.T) {
+	for _, m := range DefaultModalMatchers {
+		var emitted []events.Event
+		deps := ModalHookDeps{
+			AgentName: "alice",
+			AgentID:   "cat-alice",
+			Dismiss:   func([]byte) error { return nil },
+			EmitEvent: func(ev events.Event) { emitted = append(emitted, ev) },
+			Now:       time.Now,
+		}
+		if !fireDismissal(m, deps) {
+			t.Fatalf("%s: fireDismissal reported failure with a Dismiss that cannot fail", m.Name)
+		}
+		if len(emitted) == 0 {
+			t.Fatalf("%s: fireDismissal emitted nothing, so this test proves nothing", m.Name)
+		}
+		for _, ev := range emitted {
+			if ev.Agent != deps.AgentID {
+				// Not a failure of this rule — an event pogod files under its
+				// OWN identity cannot warm an agent's clock and needs no
+				// exclusion. Recorded so the distinction stays visible.
+				continue
+			}
+			if events.CountsAsAgentActivity(ev.EventType) {
+				t.Errorf("%s: fireDismissal emits %q under the dismissed agent's identity (%s), and it "+
+					"counts as agent activity. pogod's dismissal would refresh every last-seen index "+
+					"over the event log — drellem2/pogo#138. Add it to notAgentActivity in "+
+					"internal/events/activity.go", m.Name, ev.EventType, ev.Agent)
+			}
+		}
+	}
+}
+
 // TestTouchIsUnfilteredAndThatIsDeliberate pins the seam the filter does NOT
 // cover, so the next reader does not assume it does.
 //
