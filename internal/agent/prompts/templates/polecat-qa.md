@@ -236,6 +236,16 @@ If your harness has an in-process scheduler{{if eq .Provider "claude"}} (Claude 
 - **Be specific.** When reporting failures, include exact error messages, expected vs actual behavior, and steps to reproduce.
 - **Stay scoped.** Only verify the work described in your assignment. If you find unrelated issues, note them in your report but don't investigate further.
 - **Never run unanchored `pkill -f`.** `pkill -f` matches every process on the machine, including other agents' pollers — a bare `pkill -f "sleep 600"` kills the fleet's watchdog and mail pollers, which idle in exactly that command. Kill by PID (`kill "$PID"`), or anchor the pattern to a path inside your own worktree: `pkill -f "^{{.WorktreeDir}}/bin/pogod"`.
+- **Background work must clean itself up from a `trap`, not from a trailing line — and the obvious trap does not work.** Arm the cleanup **before** you start the work, record the pids yourself, and name the signals:
+
+  ```bash
+  PIDS=(); trap 'kill "${PIDS[@]}" 2>/dev/null; exit' EXIT INT TERM HUP
+  for i in $(seq 1 20); do (while :; do :; done) & PIDS+=($!); done
+  ```
+
+  Both halves of that line were measured on this host, and the obvious version fails twice. `jobs -p` is **empty** in a non-interactive shell — job control is off under `zsh -c`, so `jobs -p | xargs kill` kills nothing and the `2>/dev/null` hides the error. And `EXIT` **alone does not fire on SIGTERM**: with no signal list, every child survived every SIGTERM tested. Two further limits worth knowing: the trap runs only once your foreground command returns, so a long `go test` delays it, and nothing whatsoever survives SIGKILL.
+
+  Why this is a rule and not a tidiness note: `pogo agent stop` does **not** kill your descendants — they reparent to launchd and keep running with nobody left to collect their results. On 2026-08-12 a {{.Worker}}'s 20 busy-loops outlived it by 41 minutes at ~87% of the host, failed an unrelated branch's merge gate, and corrupted the load measurements two open investigations had already recorded; the `jobs -p | xargs kill` was written, at the end of the command, and never ran (mg-c675). Generating load to reproduce a load-sensitive flake was the right technique — the skippable cleanup was the defect.
 - **One mail-check schedule only.** Step 2 registers a single `pogo schedule` entry for mail-checking — that one is required. Do NOT register additional schedules, set up {{if eq .Provider "claude"}}`CronCreate` jobs, `/loop`, `/schedule`, {{else}}in-process scheduler jobs {{end}}or `pogo nudge` commands targeting yourself or other agents.
 - **If you need to surface something to the user, mail `human`** (not the {{.Coordinator}}): `mg mail send human --from=$POGO_AGENT_NAME --subject="<subj>" --body="<body>"`. The {{.Coordinator}}'s inbox is for coordination; user-facing mail goes to `human` so the apple-side notifier picks it up.
 - **Reaching another agent — prefer mail for asks; reserve nudges for system events.** Mail (`mg mail send <to> --from=$POGO_AGENT_NAME --subject="..." --body="..."`) carries an explicit sender so recipients can route, reply, and prioritize correctly. Use nudges only when sender attribution doesn't apply (cron-fired prompts, mail-check loops, system-level signals from pogod).

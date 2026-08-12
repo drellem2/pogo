@@ -50,6 +50,45 @@
 // read from `ps %cpu`. `%cpu` is a lifetime average and understated a live
 // instance of this defect by about 3x; two `ps` reads of the same population
 // disagreed by a factor of three within minutes. See internal/proctable.
+//
+// # The floor is per OWNER, not per process (mg-c675)
+//
+// A polecat generating synthetic load orphaned 52 busy-loops, which held 8.7 of
+// this host's 10 cores for 41 minutes, failed an unrelated branch's merge gate,
+// and corrupted the load thresholds two open investigations had recorded. Fed
+// that exact population, this detector reported a clean host — not one finding
+// suppressed, but zero processes even examined.
+//
+// The arithmetic is the whole point. 8.7 cores shared by 52 contending
+// processes is 0.167 cores each, under a floor of 0.20 that was calibrated on
+// mg-4518's population of one to three orphans at 0.38 to 0.94 cores apiece. And
+// it is not a matter of the constant being a little too high: processes
+// contending for a fixed number of cores get capacity/N each, so a per-process
+// floor goes BLINDER AS THE LEAK GETS WORSE, and the leak large enough to
+// saturate the host is precisely the one it cannot report. A threshold with that
+// sign on its error is not a threshold that can be retuned.
+//
+// So the reported unit is the OWNER. A dead polecat is reported when the
+// processes it left behind TOGETHER meet Floor, which subdividing cannot get
+// under. Floor keeps its name, its flag and its default, because "how much
+// compute is a dead owner holding" is what it always meant to ask; only the
+// population it is summed over changed. mg-4518's single 0.94-core orphan still
+// trips it, unchanged, as its own test asserts.
+//
+// A second, much lower CandidateFloor now decides what gets ATTRIBUTED at all.
+// It still separates this defect from the stuck-process class at ~0.00 cores
+// described above, and it still bounds the cwd batch, but it no longer decides
+// what gets REPORTED — which is the job it was quietly doing and was never the
+// right instrument for.
+//
+// The residual blind spot, stated rather than papered over: a population escapes
+// when its total clears Floor while every member sits under CandidateFloor,
+// which needs more than Floor/CandidateFloor = 10 members ALL below 0.02 cores.
+// Spinning processes only get that small when there are more than ~500 of them
+// on a 10-core box. Duty-cycled work — awake 2% of the time — is that small at
+// any count, and is deliberately not collected: at ~0.00 cores it is
+// indistinguishable from the stuck-process class the floor exists to exclude.
+// That is a trade this package is making knowingly, not a case it has missed.
 package orphanwatch
 
 import (
@@ -70,12 +109,28 @@ const (
 	// supported host, short enough that a detector run is not itself a wait.
 	DefaultWindow = 2 * time.Second
 
-	// DefaultFloor is the rate, in cores, at or above which a process counts as
-	// doing compute. The measured instances of this defect sat between 0.38 and
-	// 0.94 cores; the blocked-fetch class this must not collect sits at ~0.00.
-	// 0.20 is comfortably between them and well clear of proctable's
-	// quantisation.
+	// DefaultFloor is the rate, in cores, at or above which a DEAD OWNER'S
+	// SURVIVING PROCESSES — summed, see the package doc — count as compute worth
+	// reporting. The measured instances of this defect sat between 0.38 and 0.94
+	// cores for a single orphan and at 8.7 cores for a swarm of 52; the
+	// blocked-fetch class this must not collect sits at ~0.00. 0.20 is
+	// comfortably between them and well clear of proctable's quantisation.
 	DefaultFloor = 0.20
+
+	// DefaultCandidateFloor is the rate, in cores, at or above which a single
+	// process is worth attributing to an owner at all. It is not a reporting
+	// threshold and must not be read as one — see the package doc for what
+	// happened when it was.
+	//
+	// It has two jobs, and both are satisfied far below DefaultFloor. It keeps
+	// out the stuck-process class at ~0.00 cores, which is a different defect
+	// and routes elsewhere. And it bounds the cwd batch, which on darwin is one
+	// lsof invocation whose cost grows with the number of pids in it.
+	//
+	// 0.02 is four times proctable's coarsest supported quantum over the default
+	// window (10ms of CPU resolved over 2s is 0.005 cores), so a process at this
+	// rate is measured rather than rounded into existence.
+	DefaultCandidateFloor = 0.02
 )
 
 // ErrNoLiveness is returned when the agent registry could not be reached.
@@ -86,6 +141,22 @@ const (
 // detector that shrugged and carried on would name all of them. Failing closed
 // here is the whole safety margin.
 var ErrNoLiveness = errors.New("orphanwatch: agent registry unreachable; cannot decide owner liveness")
+
+// ErrCandidateFloorAboveFloor is returned when the per-process candidate floor
+// is set at or above the per-owner reporting floor.
+//
+// It is REFUSED rather than clamped, and the first attempt at this clamped. A
+// candidate floor at the reporting floor means no process is attributed unless
+// it individually clears the reporting floor — which is the per-process rule of
+// mg-c675 exactly, restored from the command line, and a clamp to Floor produces
+// it rather than preventing it. There is no safe value to silently substitute:
+// any choice either ignores what the operator asked for or reinstates the
+// defect, so the run says it cannot be conducted instead of conducting a
+// different one.
+var ErrCandidateFloorAboveFloor = errors.New(
+	"orphanwatch: candidate floor is at or above the reporting floor, which reinstates the " +
+		"per-process rule (mg-c675): no process would be attributed unless it alone cleared the " +
+		"floor, so a dead owner's swarm would go unreported however large it got")
 
 // Orphan is one compute process whose owning polecat is gone.
 type Orphan struct {
@@ -102,6 +173,19 @@ type Orphan struct {
 	Cores float64 `json:"cores"`
 	// CPU is the cumulative CPU time the process has consumed since it started,
 	// which is the closest thing available to "how much has this cost so far".
+	CPU time.Duration `json:"cpu"`
+}
+
+// OwnerLoad is one dead polecat's surviving compute, summed. It is the unit the
+// reporting decision is made on — see the package doc.
+type OwnerLoad struct {
+	Owner string `json:"owner"`
+	// Procs is how many of that owner's processes are still running.
+	Procs int `json:"procs"`
+	// Cores is their summed rate over the sampling window: what this owner is
+	// costing the host right now.
+	Cores float64 `json:"cores"`
+	// CPU is their summed cumulative CPU time: what it has cost so far.
 	CPU time.Duration `json:"cpu"`
 }
 
@@ -130,6 +214,16 @@ const (
 	// DispositionCwdUnreadable is an INSTRUMENT LIMIT, not a verdict: the
 	// working directory could not be read at all.
 	DispositionCwdUnreadable Disposition = "cwd_unreadable"
+	// DispositionBelowOwnerFloor is a verdict: attributed to an owner the
+	// registry says is gone, but that owner's surviving processes TOGETHER do
+	// not meet Floor. Spared as trivial rather than missed.
+	//
+	// It is a separate bucket from "not a candidate" on purpose. A process here
+	// was attributed to a dead polecat and the detector decided about it; a
+	// process absent from Dispositions was never looked at. Flattening the two
+	// would put the only evidence that the owner floor is set too high into the
+	// same silence as an idle box.
+	DispositionBelowOwnerFloor Disposition = "below_owner_floor"
 )
 
 // Report is one scan. Every busy process examined lands in exactly one bucket,
@@ -137,16 +231,19 @@ const (
 type Report struct {
 	// Source is the process-table reader and its CPU-time precision.
 	Source string `json:"source"`
-	// Window and Floor are the thresholds this run applied, reported because a
-	// finding count is meaningless without them.
-	Window time.Duration `json:"window"`
-	Floor  float64       `json:"floor_cores"`
+	// Window, Floor and CandidateFloor are the thresholds this run applied,
+	// reported because a finding count is meaningless without them. Floor is
+	// summed over an OWNER's processes; CandidateFloor is the per-process rate
+	// below which a process is not attributed at all.
+	Window         time.Duration `json:"window"`
+	Floor          float64       `json:"floor_cores"`
+	CandidateFloor float64       `json:"candidate_floor_cores"`
 	// PolecatsRoot is the tree whose child directories name polecats.
 	PolecatsRoot string `json:"polecats_root"`
 
 	// Sampled is every process visible in the table at the second sample.
 	Sampled int `json:"sampled"`
-	// Busy is how many met the rate floor and so were candidates at all.
+	// Busy is how many met the CANDIDATE floor and so were attributed at all.
 	Busy int `json:"busy"`
 	// CwdUnreadable is how many busy processes would not yield a working
 	// directory — another user's process, or one that exited during the scan.
@@ -162,8 +259,18 @@ type Report struct {
 	// matters most on a healthy box — it is the count of processes a
 	// ppid-keyed sweep would have killed.
 	LiveOwner int `json:"live_owner"`
+	// BelowOwnerFloor is how many were attributed to a DEAD owner whose
+	// surviving processes together fall under Floor. A verdict, not a blind
+	// spot: these were decided about and spared as trivial. A large count here
+	// beside no findings is the shape of a floor set too high.
+	BelowOwnerFloor int `json:"below_owner_floor"`
 	// Orphans are the findings, costliest first.
 	Orphans []Orphan `json:"orphans,omitempty"`
+	// Owners is the same findings aggregated to the unit the verdict is
+	// actually reached on, costliest first. One dead polecat holding 8.7 cores
+	// across 52 processes is ONE thing that happened, and reading it off 52
+	// nearly identical process lines is how its scale was missed for 41 minutes.
+	Owners []OwnerLoad `json:"owners,omitempty"`
 
 	// Dispositions is the bucket each BUSY pid landed in, keyed by pid. It holds
 	// exactly the same information as the four counters above, per process
@@ -204,9 +311,14 @@ type Options struct {
 	PolecatsRoot string
 	// Window is the CPU sampling window; zero means DefaultWindow.
 	Window time.Duration
-	// Floor is the rate in cores at or above which a process is a candidate;
-	// zero means DefaultFloor.
+	// Floor is the rate in cores at or above which a dead owner's processes,
+	// SUMMED, are reported; zero means DefaultFloor.
 	Floor float64
+	// CandidateFloor is the per-process rate in cores at or above which a
+	// process is attributed to an owner at all; zero means
+	// DefaultCandidateFloor. A value at or above Floor is REFUSED — see
+	// ErrCandidateFloorAboveFloor.
+	CandidateFloor float64
 	// LiveOwners returns the set of polecat names the registry currently
 	// considers running. An error from it aborts the scan with ErrNoLiveness —
 	// see that variable for why this may not degrade.
@@ -231,8 +343,12 @@ type Options struct {
 }
 
 // Scan samples the process table twice, keeps the processes doing real compute,
-// attributes them by working directory, and reports the ones whose owning
-// polecat is no longer running.
+// attributes them by working directory, sums what each dead owner is holding,
+// and reports the processes of every dead owner whose total meets Floor.
+//
+// The sum is the step that matters: see the package doc for the population that
+// a per-process floor could not see, and for why it got harder to see the worse
+// it got.
 //
 // It never signals a process.
 func Scan(opts Options) (Report, error) {
@@ -247,6 +363,10 @@ func Scan(opts Options) (Report, error) {
 	floor := opts.Floor
 	if floor <= 0 {
 		floor = DefaultFloor
+	}
+	candidateFloor := opts.CandidateFloor
+	if candidateFloor <= 0 {
+		candidateFloor = DefaultCandidateFloor
 	}
 	source := opts.Source
 	if source.Name == "" {
@@ -270,10 +390,11 @@ func Scan(opts Options) (Report, error) {
 	}
 
 	rep := Report{
-		Source:       source.String(),
-		Window:       window,
-		Floor:        floor,
-		PolecatsRoot: root,
+		Source:         source.String(),
+		Window:         window,
+		Floor:          floor,
+		CandidateFloor: candidateFloor,
+		PolecatsRoot:   root,
 	}
 	if root == "" {
 		return rep, errors.New("orphanwatch: no polecats root; nothing can be attributed")
@@ -283,6 +404,10 @@ func Scan(opts Options) (Report, error) {
 		// reported as a measurement is how a CPU signal goes silently blind
 		// (mg-79e3). Refuse instead.
 		return rep, fmt.Errorf("orphanwatch: %s", reason)
+	}
+	if candidateFloor >= floor {
+		return rep, fmt.Errorf("%w: candidate floor %.3f, reporting floor %.3f",
+			ErrCandidateFloorAboveFloor, candidateFloor, floor)
 	}
 	if opts.LiveOwners == nil {
 		return rep, ErrNoLiveness
@@ -343,7 +468,7 @@ func Scan(opts Options) (Report, error) {
 			continue
 		}
 		cores := delta.Seconds() / elapsed.Seconds()
-		if cores < floor {
+		if cores < candidateFloor {
 			continue
 		}
 		busy = append(busy, candidate{row: row, cores: cores})
@@ -360,6 +485,11 @@ func Scan(opts Options) (Report, error) {
 	dirs := cwds(pids)
 	rep.Dispositions = make(map[int]Disposition, len(busy))
 
+	// First pass: attribute. No process is convicted here, because the verdict
+	// is reached on the owner's total and the total is not known until every
+	// process has been attributed.
+	var dead []Orphan
+	loads := map[string]*OwnerLoad{}
 	for _, c := range busy {
 		cwd, ok := dirs[c.row.PID]
 		if !ok || cwd == "" {
@@ -378,8 +508,7 @@ func Scan(opts Options) (Report, error) {
 			rep.Dispositions[c.row.PID] = DispositionLiveOwner
 			continue
 		}
-		rep.Dispositions[c.row.PID] = DispositionOrphan
-		rep.Orphans = append(rep.Orphans, Orphan{
+		dead = append(dead, Orphan{
 			PID:   c.row.PID,
 			PPID:  c.row.PPID,
 			PGID:  c.row.PGID,
@@ -388,6 +517,32 @@ func Scan(opts Options) (Report, error) {
 			Cores: c.cores,
 			CPU:   c.row.CPU,
 		})
+		load := loads[owner]
+		if load == nil {
+			load = &OwnerLoad{Owner: owner}
+			loads[owner] = load
+		}
+		load.Procs++
+		load.Cores += c.cores
+		load.CPU += c.row.CPU
+	}
+
+	// Second pass: convict by owner. Subdividing the same compute across more
+	// processes changes no term of this comparison, which is the property the
+	// per-process floor did not have.
+	for _, o := range dead {
+		if loads[o.Owner].Cores < floor {
+			rep.BelowOwnerFloor++
+			rep.Dispositions[o.PID] = DispositionBelowOwnerFloor
+			continue
+		}
+		rep.Dispositions[o.PID] = DispositionOrphan
+		rep.Orphans = append(rep.Orphans, o)
+	}
+	for _, load := range loads {
+		if load.Cores >= floor {
+			rep.Owners = append(rep.Owners, *load)
+		}
 	}
 
 	sort.Slice(rep.Orphans, func(i, j int) bool {
@@ -395,6 +550,12 @@ func Scan(opts Options) (Report, error) {
 			return rep.Orphans[i].Cores > rep.Orphans[j].Cores
 		}
 		return rep.Orphans[i].PID < rep.Orphans[j].PID
+	})
+	sort.Slice(rep.Owners, func(i, j int) bool {
+		if rep.Owners[i].Cores != rep.Owners[j].Cores {
+			return rep.Owners[i].Cores > rep.Owners[j].Cores
+		}
+		return rep.Owners[i].Owner < rep.Owners[j].Owner
 	})
 	return rep, nil
 }

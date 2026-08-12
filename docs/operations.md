@@ -941,14 +941,19 @@ that have nothing to do with it** (mg-6c90 is the same contention class).
 $ pogo check-orphans
 orphaned compute — polecats root /Users/daniel/.pogo/polecats
   source darwin-ps (10ms CPU-time resolution, usable from a 50ms window)
-  window 2s, floor 0.20 cores
-  772 processes sampled, 2 above the floor
-  2 spared (owner still running), 0 unattributable, 0 cwd unreadable
+  window 2s, floor 0.20 cores per OWNER, candidate floor 0.02 per process
+  633 processes sampled, 8 above the candidate floor
+  3 spared (owner still running), 0 spared (owner under the floor), 4 unattributable, 1 cwd unreadable
 
 No orphaned compute.
 ```
 
 Exit 0 clean, 1 at least one orphan, 2 usage, 3 this run measured nothing.
+
+**Nothing runs this for you on a cadence** — it is on doctor's sweep list, and
+otherwise it runs when somebody types it. That is the gap mg-c675 was found
+through: the incident below was caught by reading `ps` by hand, not by any
+detector.
 
 ### The predicate, and the two things it must NOT key on
 
@@ -971,7 +976,34 @@ differenced across a window — work actually performed in it. Use `top -l 2`
 The **rate floor separates two defects** and is not a severity filter. A
 `pogo-deploy.sh` blocked forever in an unbounded `git fetch` ran 31h39m —
 correctly parented, reported by nothing, at ~0% CPU. That is a stuck process and
-routes elsewhere; this reports detached *compute*.
+routes elsewhere; this reports detached *compute*. Since mg-c675 that separation
+is `--candidate-floor`'s job (0.02 cores) and it decides only what gets
+*attributed*; `--floor` decides what gets *reported*.
+
+**Not a per-process rate either (mg-c675).** A polecat generating synthetic load
+orphaned 52 busy-loops that held **8.7 of this host's 10 cores for 41 minutes**.
+Fed that exact population, the per-process form of this detector reported a clean
+host having examined *none* of them: 8.7 cores shared by 52 contending processes
+is 0.167 each, under a 0.20 floor calibrated on mg-4518's orphans, which came one
+at a time at 0.38–0.94 cores. Processes contending for a fixed number of cores
+get capacity/N, so **a per-process floor goes blinder as the leak gets worse** —
+the leak large enough to saturate the host is precisely the one it cannot see.
+That sign on the error is why the constant was not simply retuned.
+
+So **the floor is summed per owner**: a dead polecat is reported when the
+processes it left behind *together* clear it, which subdividing cannot get under.
+mg-4518's single 0.94-core orphan still trips it unchanged. A fifth disposition,
+`below_owner_floor`, holds processes attributed to a dead owner whose total is
+under the floor — spared as trivial, but *decided about*, so a floor set too high
+shows up as a growing count rather than as silence.
+
+The residual blind spot, stated rather than left to be rediscovered: a population
+escapes if its total clears `--floor` while **every** member sits under
+`--candidate-floor`, which needs more than ten of them all under 0.02 cores.
+Spinning processes only get that small when there are 500+ on a ten-core box;
+duty-cycled work gets there at any count and is the stuck-process class by
+another name. Setting `--candidate-floor` at or above `--floor` reinstates the
+per-process rule and is **refused** (exit 3), not clamped.
 
 ### It reports. You kill, by PID.
 
@@ -979,6 +1011,11 @@ The command never signals a process. On a finding it prints the pids and the
 `kill` line. **Never `pkill -f`** — an unanchored pattern has taken this box out
 before by matching the fleet's own pollers. Re-read the owner's status before
 killing: the registry answer is the whole safety margin.
+
+On a finding the report leads with the **owner** — "this polecat is gone and is
+still holding N cores across M processes" — before the per-pid list. Reading a
+52-process swarm off 52 near-identical process lines is how 87% of a host went
+unnoticed for 41 minutes.
 
 Two states are counted and never convicted, both failing closed:
 **unattributable** (a busy process whose cwd carries no polecat marker — a worker

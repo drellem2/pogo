@@ -219,6 +219,68 @@ func TestShippedTemplatesBanUnanchoredPkill(t *testing.T) {
 	}
 }
 
+// TestShippedTemplatesRequireTrappedCleanup guards the rule that background work
+// arms its cleanup from a `trap` rather than leaving it as a trailing statement
+// (mg-c675). A {{.Worker}} generating synthetic load to reproduce a
+// load-sensitive flake wrote `jobs -p | xargs kill` as the last line of the
+// command; it was stopped before reaching it, 20 busy-loops reparented to
+// launchd, and they held ~87% of the host for 41 minutes — failing an unrelated
+// branch's merge gate and corrupting the load thresholds two open investigations
+// had recorded.
+//
+// As with the pkill ban, a bare prohibition is not enough: each prompt must
+// carry the REPLACEMENT (the trap, armed first) and the reason a trailing line
+// is not equivalent (stop does not kill descendants; they reparent and keep
+// running).
+//
+// It must also carry the two measured corrections to the OBVIOUS remedy, which
+// is why they are pinned individually. `trap 'jobs -p | xargs kill' EXIT` — the
+// form the ticket recommended — cleans up nothing on this fleet, twice over:
+// `jobs -p` is empty in a non-interactive shell because job control is off under
+// `zsh -c`, and a bare EXIT trap does not run on SIGTERM (measured: with no
+// signal list every child survived every SIGTERM; with `EXIT INT TERM HUP` none
+// did). A prompt that keeps the rule but loses either correction hands the
+// {{.Worker}} a cleanup that looks armed and is not, which is strictly worse
+// than the trailing line it replaced.
+func TestShippedTemplatesRequireTrappedCleanup(t *testing.T) {
+	names := []string{
+		"prompts/templates/polecat.md",
+		"prompts/templates/polecat-qa.md",
+		"prompts/templates/polecat-build-pr.md",
+		"prompts/templates/polecat-triage.md",
+		"prompts/templates/polecat-review.md",
+		"prompts/templates/polecat-architect.md",
+	}
+	for _, name := range names {
+		data, err := defaultPrompts.ReadFile(name)
+		if err != nil {
+			t.Fatalf("read embedded %s: %v", name, err)
+		}
+		body := string(data)
+		for _, want := range []string{
+			// The replacement, in a form that can be pasted. The signal list is
+			// part of it: EXIT alone was measured NOT firing on SIGTERM.
+			`trap 'kill "${PIDS[@]}" 2>/dev/null; exit' EXIT INT TERM HUP`,
+			// Armed BEFORE the work starts — a trap set afterwards has the same
+			// hole as the trailing line it replaces.
+			"**before** you start the work",
+			// The two ways the obvious version fails, both measured. Without
+			// these the reader writes the version from the ticket, which cleans
+			// up nothing: `jobs -p` is empty under `zsh -c`, and a bare EXIT
+			// trap does not run on SIGTERM.
+			"`jobs -p` is **empty** in a non-interactive shell",
+			"**alone does not fire on SIGTERM**",
+			// What the fleet does NOT do for you, which is the whole reason the
+			// polecat has to.
+			"reparent to launchd",
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("%s: expected %q in template body (mg-c675)", name, want)
+			}
+		}
+	}
+}
+
 // TestShippedTemplatesProviderGating expands the embedded polecat templates
 // under each provider and asserts the Claude-Code-specific guidance
 // (CronCreate naming, the rating-modal dismissal bullet) appears only when
