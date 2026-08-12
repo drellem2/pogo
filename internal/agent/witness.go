@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/drellem2/pogo/internal/config"
+	"github.com/drellem2/pogo/internal/testtmp"
 )
 
 // The polecat witness: a second source of truth about whether a polecat is
@@ -233,7 +234,7 @@ func WitnessPath() string {
 // therefore another unwritable-at-worst temp path, not config.PogoHome().
 func testDefaultWitnessPath() string {
 	testWitnessOnce.Do(func() {
-		dir, err := os.MkdirTemp("", "pogo-test-witness-*")
+		dir, err := testtmp.Dir("witness")
 		if err != nil {
 			// Still not the live store. A bad path here fails the test that
 			// needed it; the live store's phantom records outlive everything.

@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/drellem2/pogo/internal/config"
+	"github.com/drellem2/pogo/internal/testtmp"
 )
 
 // SchemaVersion is the on-disk schema version. See docs/event-log.md.
@@ -199,7 +200,7 @@ func resolvePath() (string, error) {
 // temp path — never config.PogoHome().
 func testDefaultLogPath() string {
 	testPathOnce.Do(func() {
-		dir, err := os.MkdirTemp("", "pogo-test-events-*")
+		dir, err := testtmp.Dir("events")
 		if err != nil {
 			// Still not the live log. A bad path here loses the test's own
 			// events; a live-log record outlives every process that saw it.

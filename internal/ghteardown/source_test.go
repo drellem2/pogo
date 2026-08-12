@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/drellem2/pogo/internal/testtmp"
 )
 
 // bodyOf07ba is the real body of the mg-07ba carrier as it stood on
@@ -121,8 +123,11 @@ func TestResolveRootNeverResolvesToTheLiveStoreUnderTest(t *testing.T) {
 			t.Fatalf("resolveRoot returned the live store %q", root)
 		}
 	}
-	if !strings.Contains(root, "ghteardown-test-store") {
-		t.Errorf("resolveRoot = %q, want a per-binary scratch directory", root)
+	// The scratch directory moved under internal/testtmp's swept root (mg-de3c),
+	// so the name to look for is the purpose, not the old prefix. The property
+	// asserted is unchanged: a per-binary path that is not the live store.
+	if !strings.Contains(root, testtmp.RootName) || !strings.Contains(filepath.Base(root), "ghteardown") {
+		t.Errorf("resolveRoot = %q, want a per-binary scratch directory under %s", root, testtmp.RootName)
 	}
 }
 

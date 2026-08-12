@@ -14,6 +14,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/drellem2/pogo/internal/testtmp"
 )
 
 // keyGH is the body line that makes a work item a carrier for an issue. It lives
@@ -174,7 +176,7 @@ func (s MGSource) resolveRoot() string {
 	}
 	if testing.Testing() {
 		testRootOnce.Do(func() {
-			dir, err := os.MkdirTemp("", "ghintake-test-store-")
+			dir, err := testtmp.Dir("ghintake")
 			if err != nil {
 				// Deliberately no error return: every fallback must lead
 				// somewhere that is not the live store. A temp path we failed to
