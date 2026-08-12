@@ -403,7 +403,7 @@ func Scan(opts Options) (Report, error) {
 					rep.Excluded = append(rep.Excluded, Excluded{ItemID: it.ID, Branch: branch, Reason: reason})
 					continue
 				}
-				row, rerr := classify(repo, branch, it, opts.Target)
+				row, carried, rerr := classify(repo, branch, it, opts.Target)
 				if rerr != nil {
 					// NOT skipped, and not folded into either verdict — see
 					// KindUnjudged. A branch nobody could read is a row.
@@ -413,6 +413,10 @@ func Scan(opts Options) (Report, error) {
 						Item: it, Branch: branch, Kind: KindUnjudged,
 						Target: opts.Target, Error: rerr.Error(),
 					})
+					continue
+				}
+				if carried != "" {
+					rep.Excluded = append(rep.Excluded, Excluded{ItemID: it.ID, Branch: branch, Reason: carried})
 					continue
 				}
 				if row != nil {
@@ -497,13 +501,25 @@ func excludedBecause(branch string, it Item, live, queued map[string]bool, repo 
 // case is narrow (it needs a quiet target at the moment of merge) and the
 // upstream repair in cmd/pogod/reap.go closes the item without consulting git at
 // all, which is the other reason that repair is the primary one.
-func classify(repo, branch string, it Item, target string) (*Row, error) {
+// A THIRD SHAPE IS AN EXCLUSION RATHER THAN A ROW, and it is why this returns a
+// reason string as well (mg-1af2). A reviewer reviews by checking the branch
+// under review out, so its own worktree branch is a POINTER at the builder's
+// head — every commit on it is work the target does not have, all of it owned
+// and carried by the builder's branch. Reported as `stranded`, its remedy
+// (`refinery submit <reviewer branch>`) submits the builder's work a second time
+// under the wrong authorship. It goes in Excluded rather than being dropped,
+// because a suppression nobody can see is indistinguishable from a miss.
+func classify(repo, branch string, it Item, target string) (*Row, string, error) {
 	f, err := strandedwork.Inspect(repo, branch, target)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if !f.Found {
-		return nil, nil
+		return nil, "", nil
+	}
+	if f.Disposition == strandedwork.DispositionCarried {
+		return nil, fmt.Sprintf("branch is a pointer at %s, which owns these commits (%s)",
+			f.Carrier, f.WorkItemID), nil
 	}
 	row := Row{
 		Item: it, Branch: branch, Ref: f.Ref, Pushed: f.Pushed, Target: f.Target,
@@ -516,10 +532,10 @@ func classify(repo, branch string, it Item, target string) (*Row, error) {
 
 	if len(f.Unmerged) == 0 {
 		if f.Equivalent == 0 {
-			return nil, nil
+			return nil, "", nil
 		}
 		row.Kind = KindLandedNotClosed
-		return &row, nil
+		return &row, "", nil
 	}
 
 	// The content-level second opinion, and a failure to take it is NOT a clean
@@ -534,5 +550,5 @@ func classify(repo, branch string, it Item, target string) (*Row, error) {
 	if row.Presence.SuggestsLanded() {
 		row.Kind = KindConflictSuspect
 	}
-	return &row, nil
+	return &row, "", nil
 }

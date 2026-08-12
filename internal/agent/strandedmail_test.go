@@ -210,3 +210,185 @@ func TestStrandedAlertMessageCarriesThePreRegistrationRule(t *testing.T) {
 		t.Errorf("a pre-registration branch's mail did not name the control:\n%s", body)
 	}
 }
+
+// --- The reviewer's pointer branch (mg-1af2) ---------------------------------
+
+// reviewerRepo builds the shape that made this detector fire on every gh-issue
+// reviewer: a builder branch with pushed work, and a reviewer branch pointing at
+// the same head because reviewing means checking that branch out.
+func reviewerRepo(t *testing.T) string {
+	t.Helper()
+	repo := strandedRepo(t)
+	pushBranch(t, repo, "polecat-paaf6", "workitem.go",
+		"feat(workitem): a review ticket DECLARES the build item it reviews (mg-aaf6)")
+	gitRun(t, repo, "branch", "polecat-p1c60", "polecat-paaf6")
+	return repo
+}
+
+// TestReleasingAReviewerMailsNobody is the acceptance test for mg-1af2.
+//
+// On 2026-08-12 releasing review polecat p1c60 mailed the coordinator that it
+// had "left pushed work behind on polecat-p1c60", with a remedy of
+// `pogo refinery submit polecat-p1c60 --author=mg-1c60`. `git rev-parse` printed
+// the same sha for polecat-p1c60 and polecat-paaf6: all four commits were the
+// builder's, already reviewed, and submitted under mg-aaf6 two minutes later.
+// Following the printed remedy would have submitted them a SECOND time under the
+// reviewer's authorship. The only thing that caught it was a human noticing the
+// commit subjects named another item.
+func TestReleasingAReviewerMailsNobody(t *testing.T) {
+	logPath := useTempEventLog(t)
+	logs := captureLog(t)
+	mail := captureStrandedMail(t)
+	repo := reviewerRepo(t)
+
+	reg := newDrainTestRegistry(t)
+	reg.SetClaimReleaser(&stubReleaser{released: true})
+
+	a := livePolecat("p1c60", "mg-1c60")
+	a.SourceRepo = repo
+	if _, err := reg.releasePolecatClaim(a, "agent_stopped"); err != nil {
+		t.Fatalf("releasePolecatClaim: %v", err)
+	}
+
+	if sent := mail(); len(sent) != 0 {
+		subject, _ := sent[0].Message()
+		t.Fatalf("releasing a REVIEW polecat sent %d mail(s); the branch is a pointer at the "+
+			"builder's head and its remedy would double-submit the builder's work under the "+
+			"reviewer's authorship. Subject was: %q", len(sent), subject)
+	}
+	if ev := findEvent(readEventLines(t, logPath), "work_item_stranded_push", "cat-p1c60"); ev != nil {
+		t.Fatalf("a reviewer's pointer branch emitted work_item_stranded_push: %v", ev)
+	}
+
+	// Silent is not the same as suppressed-and-unobservable. A check that can
+	// only ever remove an alert has to leave a trace, or "correctly identified as
+	// a pointer" and "the detector stopped working" are the same absence.
+	ev := findEvent(readEventLines(t, logPath), "work_item_push_carried", "cat-p1c60")
+	if ev == nil {
+		t.Fatal("the suppression left no work_item_push_carried event: nothing downstream can " +
+			"tell this from the detector having silently died")
+	}
+	details, _ := ev["details"].(map[string]any)
+	if got, _ := details["carrier"].(string); got != "polecat-paaf6" {
+		t.Errorf("event details.carrier = %q, want polecat-paaf6", got)
+	}
+	if got, _ := details["owner_item"].(string); got != "mg-aaf6" {
+		t.Errorf("event details.owner_item = %q, want mg-aaf6", got)
+	}
+	if out := logs(); !strings.Contains(out, "NOT stranded") {
+		t.Errorf("the suppression was silent in the log; got: %s", out)
+	}
+}
+
+// TestReleasingTheBuilderStillMailsEvenThoughAReviewerPointsAtIt. The half that
+// must not move: the builder's work IS stranded, and a reviewer having checked
+// its branch out is not a reason to go quiet. mg-9a19 is why this detector
+// exists.
+func TestReleasingTheBuilderStillMailsEvenThoughAReviewerPointsAtIt(t *testing.T) {
+	useTempEventLog(t)
+	mail := captureStrandedMail(t)
+	repo := reviewerRepo(t)
+
+	reg := newDrainTestRegistry(t)
+	reg.SetClaimReleaser(&stubReleaser{released: true})
+
+	a := livePolecat("paaf6", "mg-aaf6")
+	a.SourceRepo = repo
+	if _, err := reg.releasePolecatClaim(a, "agent_stopped"); err != nil {
+		t.Fatalf("releasePolecatClaim: %v", err)
+	}
+
+	sent := mail()
+	if len(sent) != 1 {
+		t.Fatalf("the BUILDER's stranded branch sent %d mails, want 1 — the mg-1af2 fix must not "+
+			"buy quiet on reviewers at the price of the case this detector was built for", len(sent))
+	}
+	subject, body := sent[0].Message()
+	if !strings.Contains(subject, "do NOT dispatch") {
+		t.Errorf("subject lost the prohibition: %q", subject)
+	}
+	if !strings.Contains(body, "pogo refinery submit polecat-paaf6") {
+		t.Errorf("body lost the remedy:\n%s", body)
+	}
+}
+
+// --- A closed item is not a re-dispatch risk (mg-1af2) -----------------------
+
+// TestStrandedAlertDropsTheBoardParagraphForAClosedItem. In the 2026-08-12
+// instance mg-1c60 was already `done`, so the notice's most emphatic paragraph —
+// "the board shows the item as available and priority-wake will advertise it as
+// unclaimed" — was false as well. Stating it anyway invites the reader to treat
+// the whole notice as boilerplate, which is what an emphatic detector cannot
+// afford. The finding itself still stands: a closed item with unmerged commits
+// is a real and rarely-looked-for state.
+func TestStrandedAlertDropsTheBoardParagraphForAClosedItem(t *testing.T) {
+	base := StrandedAlert{
+		Polecat: "9a19", WorkItemID: "mg-9a19", Repo: "/repo", Route: RouteRelease,
+		Finding: strandedwork.Finding{
+			Repo: "/repo", Branch: "polecat-9a19", Ref: "refs/remotes/origin/polecat-9a19",
+			Pushed: true, Found: true, Target: "refs/remotes/origin/main",
+			Disposition: strandedwork.DispositionResubmit,
+			Unmerged:    []strandedwork.Commit{{SHA: "abc123abc123abc", Subject: "feat: x (mg-9a19)"}},
+		},
+	}
+
+	open := base
+	open.ItemStatus = "available"
+	subject, body := open.Message()
+	if !strings.Contains(body, "DO NOT DISPATCH A WORKER AT mg-9a19") {
+		t.Errorf("an open item lost the do-not-dispatch paragraph:\n%s", body)
+	}
+	if !strings.Contains(subject, "do NOT dispatch") {
+		t.Errorf("an open item lost the prohibition in the subject: %q", subject)
+	}
+
+	closed := base
+	closed.ItemStatus = "done"
+	subject, body = closed.Message()
+	if strings.Contains(body, "priority-wake will advertise it as unclaimed") {
+		t.Errorf("a done item was told the board shows it as available:\n%s", body)
+	}
+	if !strings.Contains(body, "NOT A RE-DISPATCH RISK") {
+		t.Errorf("a done item's body does not say what IS wrong with it:\n%s", body)
+	}
+	if !strings.Contains(body, "never reached refs/remotes/origin/main") {
+		t.Errorf("a done item's body does not name the target its branch never reached:\n%s", body)
+	}
+	if strings.Contains(subject, "do NOT dispatch") {
+		t.Errorf("the subject still prohibits a dispatch that cannot happen: %q", subject)
+	}
+	if !strings.Contains(subject, "never merged") {
+		t.Errorf("the subject does not carry what is actually wrong: %q", subject)
+	}
+
+	// The polarity that matters: an UNREADABLE status must leave the wording
+	// exactly as it shipped, never quietly demote the alert.
+	unknown := base
+	if _, body := unknown.Message(); !strings.Contains(body, "DO NOT DISPATCH A WORKER AT mg-9a19") {
+		t.Errorf("an unreadable status silently demoted the alert:\n%s", body)
+	}
+}
+
+// TestWorkItemStatusProbeIsConsultedOnce. The probe is best-effort and its
+// failure must not reach the caller — but when it answers, the answer has to
+// arrive on the alert the sink receives, or the wording above can never fire in
+// production.
+func TestWorkItemStatusProbeIsConsultedOnce(t *testing.T) {
+	mail := captureStrandedMail(t)
+	var asked []string
+	SetWorkItemStatusProbe(func(id string) string {
+		asked = append(asked, id)
+		return "done"
+	})
+	t.Cleanup(func() { SetWorkItemStatusProbe(nil) })
+
+	sendStrandedAlert(StrandedAlert{Polecat: "9a19", WorkItemID: "mg-9a19", Route: RouteRelease})
+
+	if len(asked) != 1 || asked[0] != "mg-9a19" {
+		t.Errorf("probe calls = %v, want exactly [mg-9a19]", asked)
+	}
+	sent := mail()
+	if len(sent) != 1 || sent[0].ItemStatus != "done" {
+		t.Fatalf("the sink received %+v; the probed status did not reach the alert", sent)
+	}
+}

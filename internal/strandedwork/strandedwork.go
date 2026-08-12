@@ -29,6 +29,22 @@
 // from a valid one. The control the pre-registration exists to establish is gone
 // and nothing downstream can tell.
 //
+// AND A THIRD THAT LOOKS EXACTLY LIKE THE FIRST (mg-1af2):
+//
+//	CARRIED            the branch has commits the target lacks, but another
+//	                   branch already carries them AND owns them. Nothing is
+//	                   stranded; this branch is a pointer.
+//
+// A reviewer reviews by checking the branch under review out, so its own
+// worktree branch ends up pointing at the builder's head. Every commit on it is
+// then work the target does not have — true, and not stranding. Left
+// unclassified, that read as RESUBMIT on every review polecat that ever ran, and
+// the remedy it printed (`refinery submit <reviewer branch> --author=<reviewer
+// item>`) would have submitted the builder's work twice under the wrong
+// authorship. See DispositionCarried and ownerAmong; the discriminator is
+// OWNERSHIP, not mere containment, because containment is symmetric and would
+// silence the builder as readily as the reviewer.
+//
 // WHAT THIS PACKAGE DELIBERATELY DOES NOT KNOW. It has no notion of whether a
 // polecat is running. That is not an omission — it is the finding doctor wrote
 // into the ticket after missing three of the six affected items:
@@ -104,6 +120,27 @@ const (
 	// pre-registration advice skipped in favour of resubmit advice loses the
 	// control silently.
 	DispositionPreRegistration Disposition = "pre_registration"
+
+	// DispositionCarried means the branch has commits the target does not, but
+	// they are ALREADY CARRIED by another branch that owns them. Nothing is
+	// stranded: this branch is a pointer at somebody else's work.
+	//
+	// WHY IT EXISTS (mg-1af2). A reviewer polecat reviews by checking the PR
+	// branch out, so its own worktree branch ends up pointing at the builder's
+	// head. `git cherry` then reports the builder's commits as work the target
+	// lacks — which is TRUE and not stranding, because the builder's branch is
+	// carrying them and the builder is submitting them. On the gh-issue track
+	// this is not a rare race; a reviewer's branch is a pointer at the builder's
+	// head every single time, so the resubmit verdict fired on every review
+	// polecat that ever ran.
+	//
+	// The false positive was not merely noisy. DispositionResubmit's remedy is
+	// `pogo refinery submit <branch> --author=<this item>`, and following it on
+	// a reviewer's branch submits the BUILDER's work a second time, under the
+	// reviewer's authorship, racing the builder's own submission. The one thing
+	// that caught it on 2026-08-12 was a human noticing that every "stranded"
+	// commit subject named a different work item.
+	DispositionCarried Disposition = "carried"
 )
 
 // Commit is one commit on a branch, as `git cherry -v` reports it.
@@ -153,6 +190,19 @@ type Finding struct {
 	// DispositionPreRegistration.
 	PreRegistration *Commit `json:"pre_registration,omitempty"`
 
+	// CarriedBy names every OTHER polecat branch whose tip contains this
+	// branch's head — i.e. every branch that already carries all of these
+	// commits. Empty for the ordinary case where a branch's work exists nowhere
+	// else. See Carrier for what it is used for.
+	CarriedBy []string `json:"carried_by,omitempty"`
+	// Carrier is the branch in CarriedBy that OWNS these commits, when one can
+	// be identified. Set only for DispositionCarried.
+	Carrier string `json:"carrier,omitempty"`
+	// CarrierProbeError records that the CarriedBy probe itself failed. The
+	// disposition then stays DispositionResubmit, because a probe that can only
+	// ever SUPPRESS a report must not suppress one it did not actually run.
+	CarrierProbeError string `json:"carrier_probe_error,omitempty"`
+
 	// WorkItemID is the id recovered from the unmerged commit subjects, when one
 	// is present (commit convention: a trailing "(mg-xxxx)"). Best-effort: it is
 	// how a scan attributes an orphaned branch to an item, and it is empty for a
@@ -178,6 +228,13 @@ func (f Finding) Summary() string {
 				"Either resubmit %s to the refinery, or dispatch FROM %s and leave that commit unamended",
 			f.Branch, len(f.Unmerged), f.Target, shortSHA(f.PreRegistration.SHA), f.PreRegistration.Subject,
 			f.Target, f.Branch, shortSHA(f.PreRegistration.SHA))
+	case DispositionCarried:
+		return fmt.Sprintf(
+			"%s has %d commit(s) %s does not have, but ALL of them are already carried by %s, "+
+				"which owns them (they name %s). Nothing is stranded: this branch is a pointer at "+
+				"another item's work, and %s is what merges it. Do NOT submit %s — that would submit "+
+				"%s's work a second time, under the wrong authorship",
+			f.Branch, len(f.Unmerged), f.Target, f.Carrier, f.WorkItemID, f.Carrier, f.Branch, f.WorkItemID)
 	case DispositionResubmit:
 		return fmt.Sprintf(
 			"%s has %d unmerged commit(s) on %s (%s). Resubmit the branch to the refinery "+
@@ -250,6 +307,16 @@ func Inspect(repo, branch, target string) (Finding, error) {
 	f.Disposition = DispositionResubmit
 	f.WorkItemID = workItemID(unmerged)
 
+	// Who else already has these commits? Head containment is the strict form of
+	// the question: every unmerged commit is an ancestor of the head, so a branch
+	// that contains the head contains all of them. A probe failure is recorded
+	// and never fatal — see CarrierProbeError.
+	if carriers, cerr := carriedBy(repo, ref, branch); cerr != nil {
+		f.CarrierProbeError = cerr.Error()
+	} else {
+		f.CarriedBy = carriers
+	}
+
 	// Only an UNMERGED pre-registration commit forces the pre-registration
 	// disposition. One that already landed on the target is safe: a worker
 	// branching from the target inherits it, cannot amend it, and the control
@@ -263,7 +330,98 @@ func Inspect(repo, branch, target string) (Finding, error) {
 			break
 		}
 	}
+
+	// A branch that is only POINTING at work another branch owns is not stranded.
+	// Checked last, and never against DispositionPreRegistration: that verdict is
+	// the one the package's stated asymmetry says must not be crowded out, and a
+	// suppression rule is exactly the kind of thing that crowds it out.
+	if f.Disposition == DispositionResubmit {
+		if owner := ownerAmong(f.CarriedBy, f.Branch, f.WorkItemID); owner != "" {
+			f.Carrier, f.Disposition = owner, DispositionCarried
+		}
+	}
 	return f, nil
+}
+
+// ownerAmong picks the branch in carriers that OWNS the commits attributed to
+// workItemID, or "" when this branch owns them itself or no owner is identifiable.
+//
+// THE TEST IS ASYMMETRIC, AND THAT ASYMMETRY IS THE WHOLE FIX. "Some other
+// branch contains these commits" — the obvious rule, and the one mg-1af2's
+// ticket suggested — is not safe, because it is symmetric: when a reviewer's
+// branch points at a builder's head, the builder's branch is ALSO contained by
+// the reviewer's, so the rule would silence the builder's genuine stranding as
+// readily as the reviewer's false one. mg-9a19 is the reason this detector
+// exists and it must survive a reviewer having glanced at its branch.
+//
+// So the rule is ownership, decided by the repo's two naming conventions:
+//
+//   - the commits say whose work they are, via the trailing "(mg-xxxx)";
+//   - a polecat branch says whose item it serves, via polecat-<agent name>.
+//
+// This branch is a POINTER when its own name does not claim the work its commits
+// name, and some branch carrying those same commits does. The builder's branch
+// claims them (polecat-paaf6 vs mg-aaf6), so it stays stranded; the reviewer's
+// does not (polecat-p1c60 vs mg-aaf6), so it is carried.
+//
+// It answers "" — meaning "report as stranded" — whenever it cannot tell: no
+// carriers, no work item id in the subjects, or no carrier whose name claims the
+// id. A duplicate report costs a reader one comparison; a suppressed one costs
+// what mg-9a19 cost.
+func ownerAmong(carriers []string, branch, workItemID string) string {
+	if workItemID == "" || len(carriers) == 0 {
+		return ""
+	}
+	if BranchMatchesItem(branch, workItemID) {
+		return ""
+	}
+	for _, c := range carriers {
+		if BranchMatchesItem(c, workItemID) {
+			return c
+		}
+	}
+	return ""
+}
+
+// carriedBy lists the OTHER polecat branches whose tip contains head.
+//
+// The polecat namespace only, and both local heads and origin's copies, matching
+// polecatBranches: the mechanism that produces a pointer-at-someone-else's-work
+// branch is a polecat worktree checking a branch out, and widening the search to
+// every ref in the repo would let an unrelated integration branch stand in as an
+// "owner".
+//
+// branch itself is excluded by NAME, which also drops its own remote-tracking
+// twin — refs/remotes/origin/<branch> trivially contains refs/heads/<branch>'s
+// head, and counting that as a carrier would silence every pushed branch in the
+// repo.
+func carriedBy(repo, head, branch string) ([]string, error) {
+	out, err := git(repo, "for-each-ref", "--contains", head, "--format=%(refname)",
+		"refs/heads/"+BranchPrefix+"*", "refs/remotes/origin/"+BranchPrefix+"*")
+	if err != nil {
+		return nil, fmt.Errorf("list branches containing %s in %s: %w", head, repo, err)
+	}
+	seen := map[string]bool{}
+	var names []string
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case line == "":
+			continue
+		case strings.HasPrefix(line, "refs/heads/"):
+			line = strings.TrimPrefix(line, "refs/heads/")
+		case strings.HasPrefix(line, "refs/remotes/origin/"):
+			line = strings.TrimPrefix(line, "refs/remotes/origin/")
+		default:
+			continue
+		}
+		if line == "HEAD" || line == branch || seen[line] {
+			continue
+		}
+		seen[line] = true
+		names = append(names, line)
+	}
+	return names, nil
 }
 
 // FetchTimeout bounds the best-effort refresh in Fetch. It is short because
