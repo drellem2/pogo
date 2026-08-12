@@ -195,3 +195,66 @@ func TestPMSweepMinutesAreOffBoundary(t *testing.T) {
 		}
 	}
 }
+
+// TestPMMailCheckCannotCollideWithARoundHourDaily pins the other half of the
+// rule (mg-e137). TestPromptSchedulesDoNotCollide only sees the schedules the
+// template actually ships, so it goes green the moment the sweeps move off the
+// boundary — it cannot say anything about the *next* daily job somebody adds.
+// This one asks the class-level question instead: could a daily schedule on a
+// round hour, of the kind a reader is most likely to write, collide with the
+// mail-check at all? With the mail-check on `*/10` the answer is yes for every
+// hour of the day, which is the defect this test exists to keep closed. With it
+// phase-shifted off the round minutes the answer is no, whether or not the
+// reader ever reads the rationale beside it.
+func TestPMMailCheckCannotCollideWithARoundHourDaily(t *testing.T) {
+	crons := collectPromptCrons(t)["pm/pm-template.md"]
+	if len(crons) == 0 {
+		t.Fatal("pm/pm-template.md: no cron registrations found")
+	}
+	var mailChecks []promptCron
+	for _, c := range crons {
+		if strings.HasPrefix(c.id, MailCheckIDPrefix) {
+			mailChecks = append(mailChecks, c)
+		}
+	}
+	// Vacuity guard: the whole test is silent if the mail-check registration
+	// stops being found or stops being named `mail-check-…` (the prefix is
+	// load-bearing elsewhere too — see inferKind).
+	if len(mailChecks) != 1 {
+		t.Fatalf("pm/pm-template.md: found %d mail-check registrations, want 1", len(mailChecks))
+	}
+	mc := mailChecks[0]
+
+	start := time.Date(2026, 5, 3, 0, 0, 0, 0, time.Local) // a Sunday
+	end := start.AddDate(0, 0, 1)
+	mcFires := map[time.Time]bool{}
+	for _, f := range fireTimes(mc.cron, start, end) {
+		mcFires[f] = true
+	}
+	if len(mcFires) == 0 {
+		t.Fatalf("pm-template.md: mail-check %s (%s) produced no fires in a day — the parse or the window is wrong, not the prompt", mc.id, mc.expr)
+	}
+
+	// Round minutes, not just `:00`. The property this buys is exactly "no
+	// daily schedule written on a round minute can collide", which is the set a
+	// person reaches for by hand; it is NOT "no daily schedule can ever
+	// collide" — someone who writes `12 9 * * *` still lands on a mail-check,
+	// and the rule stated beside the registrations is what covers that case.
+	for _, minute := range []int{0, 10, 20, 30, 40, 50} {
+		for hour := 0; hour < 24; hour++ {
+			expr := strconv.Itoa(minute) + " " + strconv.Itoa(hour) + " * * *"
+			daily, err := ParseCron(expr)
+			if err != nil {
+				t.Fatalf("parse hypothetical daily %q: %v", expr, err)
+			}
+			for _, f := range fireTimes(daily, start, end) {
+				if mcFires[f] {
+					t.Errorf("pm-template.md: a daily schedule at %q would land in the same wake cycle as the mail-check %s (%s) at %s. "+
+						"pogod suppresses whichever arrives second and the daily one cannot absorb that, so the template would be "+
+						"prescribing the defect again for the next daily job anyone adds. Phase-shift the mail-check off the round "+
+						"minutes (mg-e137).", expr, mc.id, mc.expr, f.Format(time.RFC3339))
+				}
+			}
+		}
+	}
+}
