@@ -20,7 +20,7 @@
   pushed, and one that pushed and then committed again, both still hold. The
   test is seated after the two existing containment tests, so their more specific
   wordings survive — an earlier seat answers for a fresh worktree and a landed
-  branch too, and collapses four distinct durable paths into one — and before the
+  branch too, and collapses five distinct durable paths to three — and before the
   no-integration-ref case, so it also answers on a repo whose base is neither
   `main` nor `master` (the reporter's shows `origin/develop`), where the reviewer
   previously read `unknown` and held identically. Excluding reviewers by

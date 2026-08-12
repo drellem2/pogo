@@ -1294,9 +1294,13 @@ printf '%s' "$(md "$MD_TMP/wt-review")" | grep -q 'origin/wt-pushed' \
 #
 # THIS IS THE GUARD ON WHERE gh#134's TEST (2b) SITS, now measured rather than
 # asserted on principle: seated ABOVE (1) and (2) it answers for wt-pushed,
-# wt-merged, wt-fresh AND wt-review, whose four lines share one shape, and the
-# count below drops to 2. Re-measured after this change; see the mutation note in
-# the commit message.
+# wt-merged, wt-fresh AND wt-review, and the count below drops from 5 to 3.
+# THREE, not two, and the difference is worth stating because it is the elision's
+# own limit: those four cases produce TWO shapes, not one, since wt-merged and
+# wt-fresh are held by origin/main while the other two are held by an origin/wt-*
+# ref, and `wt-* -> <B>` does not touch the word "main". The count still fails the
+# assertion, which is what the guard needs; it simply does not collapse as far as
+# a first reading suggests. Measured at 9b5f171 (PR 140 round 2 advisory).
 md_shape() { md "$1" | sed -e "s#$MD_TMP#<T>#g" -e 's#wt-[a-z]*#<B>#g'; }
 MD_DETAILS="$(printf '%s\n%s\n%s\n%s\n%s\n' "$(md_shape "$MD_TMP/wt-pushed")" "$(md_shape "$MD_TMP/wt-merged")" "$(md_shape "$MD_TMP/wt-fresh")" "$(md_shape "$MD_TMP/wt-rebased")" "$(md_shape "$MD_TMP/wt-review")" | grep '^durable' | sort -u | wc -l | tr -d ' ')"
 [ "$MD_DETAILS" = "5" ] \
