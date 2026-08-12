@@ -554,11 +554,51 @@ re-running plausibly give a different answer for a reason unrelated to the code?
 | `infrastructure` | establishes nothing about the branch — network/DNS/transport, a remote that refused our credentials, or the refinery's own checkout | network yes, credentials/checkout no |
 | `contention` | the target moved between rebase and push | yes, on `max_attempts` |
 | `defect` | establishes a fact about the branch — gate verdict, rebase conflict, refused commit message | no |
+| `host` | the gate ran and reported the **box**: the host ran out of a resource under it | no — free the resource first |
 | `unclassified` | could not be placed | yes, twice |
 
 Network-class retries have their **own** budget so a blip cannot consume the
 attempts that exist to absorb a lost race. Only `defect` counts against an
 author's consecutive-failure streak, and only `defect` invites dispatching a fix.
+
+**`host` is the class the verdict rule could not express (mg-b41f).** The
+no-retry reasoning for a gate — *"the gate ran on this tree and returned a
+verdict, re-running establishes the same fact"* — is correct for a deterministic
+failure and **false for an environmental one**. On 2026-08-12 the boot volume
+reached 255 MiB free, `./build.sh` failed, and the refinery recorded
+`class=defect` with a summary naming 50 packages and two tests by name; the raw
+output underneath said `no space left on device` twenty-five times. Once 7.3G was
+reclaimed the identical branch merged clean — the verdict was not reproducible,
+which is precisely what the no-retry rule assumed it was. The larger cost was the
+second one: **the summary accused the branch**, and the evidence that it was the
+host sat one level down, where the reader that summary exists to serve does not
+go.
+
+The nature of the fix matters as much as the fix. Gate output is arbitrary text
+and `failureclass.go` deliberately refuses to match it against the network table,
+because a red test that happened to print `connection refused` would then be
+retried forever. `host` does not cross that boundary — it is **not retried**, so
+that runaway cannot occur — and its signal table carries only wordings **measured
+to have occurred in this fleet's own gate output**. `exit status 137`, ENOMEM and
+`disk quota exceeded` were each counted against the retained corpus and came back
+zero, so none of them is in it; `too many open files` does occur on this host but
+only in pogod's own scheduler (mg-d205), never in a gate, so it is not in it
+either. Every speculative pattern there would be a fresh chance to take a real
+defect away from its author.
+
+The class does **not** loosen the no-retry rule for defects, which exists so a
+broken branch is not re-run repeatedly and is correct. It is not retried
+automatically either: a full disk is not a DHCP lease and does not come back on
+its own, so an automatic retry spends a whole gate run on the single merge slot
+to re-derive the same fact while the host is still in the state that fails every
+gate on it. The failure mail already carries the class in its **subject** and the
+triage note in its body, to both the author and the coordinator — free the
+resource, then resubmit unchanged. Alongside the classification the refinery
+`statfs`es the gate's own filesystem and reports the reading, **including when it
+disagrees** with the wording (space can be reclaimed between the failure and the
+measurement — a gate's scratch directory is deleted when it exits, and one
+measured run of this repo's gate held 250.5 MiB of it). The text decides the
+class; the reading is a second instrument beside it, never a veto.
 
 **The network budget is sized past the longest observed outage, with margin
 (mg-c3b7, arithmetic corrected by mg-7110, widened by mg-682d).** It was 5

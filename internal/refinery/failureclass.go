@@ -81,6 +81,26 @@ const (
 	// branch: a gate verdict, a rebase conflict, a refused commit message. This
 	// is the only class that invites dispatching a fix.
 	ClassDefect FailureClass = "defect"
+	// ClassHost marks a gate that RAN and reported the BOX rather than the
+	// branch: the host ran out of a resource under it (mg-b41f).
+	//
+	// It is not ClassDefect, and the distinction is the whole ticket. The
+	// no-retry rule for a verdict stage — "the gate ran on this tree and
+	// returned a verdict, re-running establishes the same fact" — is true for a
+	// deterministic failure and FALSE for an environmental one: on 2026-08-12 a
+	// boot volume at 255 MiB free failed a gate, and the identical branch merged
+	// clean once 7.3G was reclaimed. Re-running after the resource is restored
+	// establishes a DIFFERENT fact.
+	//
+	// It is not ClassInfrastructure either. Infrastructure's triage note says
+	// the failure establishes nothing about the branch and invites a straight
+	// resubmit, and a straight resubmit into a still-full disk burns a gate slot
+	// to re-derive the same fact. This class carries the extra instruction that
+	// makes the difference: free the resource FIRST.
+	//
+	// See gatehostresource.go for the incident, the signal table and the
+	// measured reasons the neighbouring conditions are not in it.
+	ClassHost FailureClass = "host"
 	// ClassIndeterminate marks a gate that was KILLED before it returned a
 	// verdict — it timed out. It sits deliberately between the two classes
 	// above and must not be folded into either (mg-e565).
@@ -116,7 +136,7 @@ const (
 // It lives beside the constants so a class added without a triage note fails a
 // test rather than reaching a coordinator as a bare status.
 var allFailureClasses = []FailureClass{
-	ClassInfrastructure, ClassContention, ClassDefect, ClassIndeterminate, ClassUnclassified,
+	ClassInfrastructure, ClassContention, ClassDefect, ClassHost, ClassIndeterminate, ClassUnclassified,
 }
 
 // TriageNote returns the one-line instruction a coordinator needs on seeing
@@ -131,6 +151,11 @@ func (c FailureClass) TriageNote() string {
 		return "CONTENTION — lost a race with another merge. Resubmit; do NOT dispatch a fix."
 	case ClassDefect:
 		return "DEFECT — establishes a fact about the branch. A fix is warranted."
+	case ClassHost:
+		return "HOST — the host ran out of a resource while the gate ran, so the gate reported the BOX and not the branch. " +
+			"The package and test names in the error are NOT findings. Free the resource, then resubmit UNCHANGED. " +
+			"Do NOT dispatch a fix, and do NOT resubmit before the resource is freed — every gate on this host fails " +
+			"the same way until it is."
 	case ClassIndeterminate:
 		return "INDETERMINATE — the gate was KILLED at its timeout before it returned a verdict. " +
 			"It did not clear this branch and it did not condemn it. Read the per-layer signals in " +
@@ -154,7 +179,9 @@ func (c FailureClass) TriageNote() string {
 //
 // ClassIndeterminate is excluded for the reason mg-e565 was filed: three
 // timeout kills on one merge would have put z37ad within one of that threshold
-// for a Go toolchain download.
+// for a Go toolchain download. ClassHost is excluded for the reason mg-b41f was
+// filed: a full boot volume fails every gate on the box, so counting it would
+// accumulate a verdict about whoever was queued while the disk was full.
 func countsAgainstAuthor(c FailureClass) bool {
 	return c == "" || c == ClassDefect
 }
@@ -366,6 +393,14 @@ func outputReportsConflict(gitOutput string) bool {
 // failure that happens to print "connection refused" would be retried forever.
 // The gate's own output is preserved verbatim for the reader who needs to make
 // that call.
+//
+// ClassHost is the one carve-out, and it does not weaken that boundary because
+// it does not cross it: the boundary is about RETRY, and a host-resource failure
+// is not retried, so the runaway it protects against cannot occur. What it
+// changes is who is accused. See gatehostresource.go, and note that its signal
+// table contains only wordings measured to have occurred in this fleet's own
+// gate output — a speculative pattern there WOULD cross the boundary, by taking
+// a real defect away from its author.
 var verdictStages = map[string]string{
 	"build":             "the build gate ran on this tree and returned a verdict",
 	"test":              "the test gate ran on this tree and returned a verdict",
@@ -378,6 +413,35 @@ var verdictStages = map[string]string{
 // stage is the pipeline step that failed; raw is git's combined output verbatim
 // (empty when the failure did not come from git); err is the wrapped error.
 func classifyFailure(stage string, raw string, err error) disposition {
+	// A gate that failed because the HOST ran out of a resource is judged first
+	// — ahead of the timeout check below and of the stage table (mg-b41f).
+	//
+	// Ahead of the STAGE TABLE for the reason the ticket exists: "build" was
+	// enough to make a full boot volume come out as a verdict on the branch,
+	// with the reason "the build gate ran on this tree and returned a verdict —
+	// re-running establishes the same fact". The gate did run; what it reported
+	// was the box, and re-running once the disk was freed established a
+	// different fact — the identical branch merged clean.
+	//
+	// Ahead of the TIMEOUT check because both can be true at once — a gate that
+	// cannot write can also hang until it is killed — and of the two answers,
+	// "the host ran out of disk" names something and "the run was cut short"
+	// does not. Neither blames the branch, so preferring the specific one takes
+	// nothing away from the author.
+	var resErr *hostResourceError
+	if errors.As(err, &resErr) {
+		return disposition{
+			Class:     ClassHost,
+			Retryable: false,
+			Signal:    "host-resource " + resErr.Signal,
+			Reason: "the host ran out of " + resErr.Resource + " while the gate ran, so the gate reported the BOX and not " +
+				"the branch — re-running once the resource is restored establishes a DIFFERENT fact, which is exactly what " +
+				"the verdict-stage rule assumes it would not. It is NOT retried automatically because a full disk is not " +
+				"restored by waiting: another attempt would spend a whole gate run re-deriving the same fact while the host " +
+				"is still in the state that fails every gate on it. Free the resource and resubmit unchanged",
+		}
+	}
+
 	// A gate that was KILLED is judged before the stage table, because it
 	// arrives at the SAME stage as a gate that ran (mg-e565). "test" was
 	// therefore enough to make a timeout come out as a verdict on the branch,
