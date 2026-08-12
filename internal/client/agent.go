@@ -610,6 +610,37 @@ func MGWorkItemDeclaresPostMergeWork(id string) (bool, error) {
 	return false, nil
 }
 
+// MGWorkItemFiling returns the CREATOR and the TITLE of a work item — who
+// commissioned it and what they asked for.
+//
+// pogod's completion notifier uses it to answer the question nothing in the
+// completion path used to ask: who is waiting for this? Until mg-f120 the
+// refinery mailed the coordinator, pogod closed the item, the coordinator
+// archived it, and the agent that FILED it was told by nobody — it learned only
+// if the worker volunteered a mail, which made the omission invisible in exactly
+// the cases where it mattered.
+//
+// Creator is the `creator:` frontmatter field, which mg surfaces in `mg show
+// --json`; it is an AGENT NAME (`pm-onethird`, `mayor`, or a polecat's bare
+// name), never a work-item id. An item filed before mg recorded creators comes
+// back with an empty creator and no error — absent is not a failure, and a
+// caller must be able to tell "nobody is recorded as waiting" from "the store
+// could not be read".
+func MGWorkItemFiling(id string) (creator, title string, err error) {
+	out, err := mgShowJSON(id)
+	if err != nil {
+		return "", "", err
+	}
+	var item struct {
+		Creator string `json:"creator"`
+		Title   string `json:"title"`
+	}
+	if err := json.Unmarshal(out, &item); err != nil {
+		return "", "", fmt.Errorf("mg show %s: unparseable JSON: %w", id, err)
+	}
+	return strings.TrimSpace(item.Creator), strings.TrimSpace(item.Title), nil
+}
+
 // MGWorkItemReviews returns the id of the BUILD work item that id's review
 // covers — the `reviews:` line of its state carrier block — or "" when it
 // declares none, which is the ordinary case for every item that is not a

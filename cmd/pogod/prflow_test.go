@@ -140,7 +140,7 @@ func runMergeThroughReap(t *testing.T, fx prFlowFixture, targetRef string, decla
 	r.SetOnMerged(func(mr *refinery.MergeRequest) {
 		postMerge := resolvePostMergeWork(reg, mr, declares)
 		out.postMerge = postMerge
-		reapMergedPolecat(reg, mr, complete, postMerge, backstop)
+		reapMergedPolecat(reg, mr, complete, postMerge, backstop, nil)
 		resolved <- mr
 	})
 	failed := make(chan *refinery.MergeRequest, 1)

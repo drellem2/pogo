@@ -2695,9 +2695,19 @@ Flags:
 	//
 	// The only ACTING detector on this tick. Its action is bounded to stopping a
 	// polecat whose work is provably concluded.
+	// Tell the agent that COMMISSIONED a work item when it completes (mg-f120).
+	// Built here, once, and shared by the two observers of a close — the merge
+	// reap below and the done-item reaper — so that one completion seen from two
+	// angles produces one mail. See internal/filernotify for the decision rules
+	// and for why the dedup key is the item plus its result sidecar.
+	filerNotify := newFilerNotifier(coordinator, agentRegistry)
+	log.Printf("pogod: work-item completion notifier armed — the item's Creator is mailed at close, so a commissioning agent "+
+		"no longer depends on the worker volunteering a report (mg-f120); coordinator=%s", coordinator)
+
 	var doneReap *doneReaper
 	if cfg.DoneReap.Enabled && agentRegistry != nil {
 		doneReap = newDoneReaper(agentRegistry, client.MGWorkItemDone, client.MGWorkItemReviews, cfg.DoneReap.IdleGrace)
+		doneReap.SetFilerNotifier(filerNotify)
 		log.Printf("pogod: done-item polecat reaper enabled (idle_grace=%s) — a polecat whose item reaches done is stopped once it goes quiet, merge or no merge (mg-56d1); "+
 			"a builder is exempt while a live polecat's item declares `reviews:` its work item (mg-aaf6)",
 			cfg.DoneReap.IdleGrace)
@@ -2963,7 +2973,7 @@ Flags:
 				// for the mayor's next coordination cycle. Run async — the
 				// stop can block up to its SIGTERM timeout and this
 				// callback fires on the refinery loop.
-				go reapMergedPolecat(agentRegistry, mr, client.CompleteMGWorkItem, postMerge, deferBackstop)
+				go reapMergedPolecat(agentRegistry, mr, client.CompleteMGWorkItem, postMerge, deferBackstop, filerNotify)
 
 				// Mail the coordinator so it can archive the work item and
 				// handle QA. The mayor's reap loop stays as a backstop for

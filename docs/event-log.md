@@ -387,6 +387,35 @@ bump.
 {"schema_version":1,"timestamp":"2026-08-05T09:58:11.000000000Z","event_type":"dispatch_stranded_work_overridden","agent":"cat-a9a19","work_item_id":"mg-9a19","repo":"/Users/daniel/dev/pogo","details":{"agent_type":"polecat","agent_name":"a9a19","reason":"branch is a stale duplicate; the real work merged as 9072f34","refusal":"work item mg-9a19 already has PUSHED, UNMERGED work: ..."}}
 ```
 
+#### `work_item_completion_notice`
+
+pogod decided what to tell the agent that FILED a work item, at the moment the
+item closed (mg-f120). Emitted by the daemon, not by `mg`.
+
+**It is emitted for the SKIPS as well as the sends, and that is the point.**
+Until mg-f120 nothing told a commissioning agent that its item had finished —
+the refinery mails the coordinator, pogod closes the item, the coordinator
+archives it — and the failure mode was silence, where the absence erases its own
+evidence. A notifier that recorded only its sends would rebuild that: a decision
+not to mail and a notifier that never ran would look identical. `sent` is the
+field that separates them, and `skipped` says why. Additive — no
+`schema_version` bump.
+
+- **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent`, `work_item_id`, `details`
+- **`details` fields:**
+  - `route` (string, required): `"merge"` when pogod closed the item itself at a merge, `"self-close"` when the worker closed it with `mg done` and the done-item reaper observed it
+  - `creator` (string, required): the item's recorded filer; `""` when the item named none or it could not be read
+  - `to` (string, required): the mailbox actually written; `""` when nothing was sent
+  - `redirected` (bool, required): `true` when `to` is the coordinator standing in for a creator that no longer exists, or relaying a mail the creator's box refused
+  - `sent` (bool, required): whether a mail was written
+  - `skipped` (string, optional): why nothing was sent, in words — e.g. the filer is the worker, or the coordinator already had the refinery's merge mail
+  - `error` (string, optional): the delivery failure, when one occurred
+  - `branch`, `merged_sha` (string, optional): present on the merge route
+
+```json
+{"schema_version":1,"timestamp":"2026-08-12T15:04:11.000000000Z","event_type":"work_item_completion_notice","agent":"pogod","work_item_id":"mg-145f","details":{"route":"merge","creator":"pm-onethird","to":"pm-onethird","redirected":false,"sent":true,"branch":"polecat-p145f","merged_sha":"8eec6d2"}}
+```
+
 ### Inter-agent communication
 
 #### `mail_sent`

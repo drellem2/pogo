@@ -149,7 +149,7 @@ func TestReapMergedPolecatMeasuredByTheDetectorsOwnPredicate(t *testing.T) {
 			ID: "mr-" + item, Branch: "polecat-" + item, Author: item,
 			TargetRef: "main", Verdict: verdict,
 		}
-		reapMergedPolecat(reg, mr, client.CompleteMGWorkItem, postMergeVerdict{}, nil)
+		reapMergedPolecat(reg, mr, client.CompleteMGWorkItem, postMergeVerdict{}, nil, nil)
 		return sidecarOf(item)
 	}
 
