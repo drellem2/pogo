@@ -31,6 +31,8 @@ func newPersistent(t *testing.T, statePath string) *Refinery {
 // and `refinery show <id>` (Get) must still return the MR.
 func TestStateSurvivesRestart(t *testing.T) {
 	originDir := initBareOrigin(t, "main")
+	seedBranch(t, originDir, "feature-1")
+	seedBranch(t, originDir, "feature-2")
 	statePath := filepath.Join(t.TempDir(), "refinery-state.json")
 
 	r1 := newPersistent(t, statePath)
@@ -474,6 +476,7 @@ func TestHeldItemsReplayedInOrder(t *testing.T) {
 // (unit tests, embedded use) never touches disk.
 func TestNoPersistenceWithoutStatePath(t *testing.T) {
 	originDir := initBareOrigin(t, "main")
+	seedBranch(t, originDir, "feature-1")
 	r, err := New(Config{WorktreeDir: t.TempDir(), PollInterval: time.Hour})
 	if err != nil {
 		t.Fatal(err)

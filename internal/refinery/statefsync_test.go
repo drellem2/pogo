@@ -66,6 +66,7 @@ func TestProbeDetectsAHeldRefineryMutex(t *testing.T) {
 // the defect it repairs").
 func TestStateWriteDoesNotHoldRefineryMutex(t *testing.T) {
 	originDir := initBareOrigin(t, "main")
+	seedBranch(t, originDir, "feature-1")
 	r := newPersistent(t, filepath.Join(t.TempDir(), "refinery-state.json"))
 
 	entered := make(chan struct{}, 1)
@@ -118,6 +119,9 @@ func TestStateWriteDoesNotHoldRefineryMutex(t *testing.T) {
 // audit by inspection is what rots; this asserts it.
 func TestNoStateMutationHoldsTheMutexAcrossItsWrite(t *testing.T) {
 	originDir := initBareOrigin(t, "main")
+	for _, b := range []string{"feature-1", "feature-2", "feature-3", "feature-4"} {
+		seedBranch(t, originDir, b)
+	}
 
 	cases := []struct {
 		name string
@@ -229,6 +233,7 @@ func submitOne(repo, branch, author string) func(*testing.T, *Refinery) string {
 // between: when Submit returns, the bytes are on disk.
 func TestSubmitStaysWriteThroughAcrossTheAsyncWrite(t *testing.T) {
 	originDir := initBareOrigin(t, "main")
+	seedBranch(t, originDir, "feature-1")
 	statePath := filepath.Join(t.TempDir(), "refinery-state.json")
 	r := newPersistent(t, statePath)
 

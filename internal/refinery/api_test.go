@@ -15,6 +15,8 @@ import (
 // items from the dead instance because handlers were bound to the original.
 func TestRegisterHandlersFuncReflectsCurrentRefinery(t *testing.T) {
 	originDir := initBareOrigin(t, "main")
+	seedBranch(t, originDir, "old-feature")
+	seedBranch(t, originDir, "new-feature")
 
 	oldRef, err := New(Config{
 		Enabled:      true,

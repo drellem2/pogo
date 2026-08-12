@@ -32,8 +32,22 @@ func initBareOrigin(t *testing.T, branch string) string {
 	return originDir
 }
 
+// seedBranch makes `branch` exist in a bare origin, pointing at its current
+// HEAD, so a fixture can submit it.
+//
+// Before mg-586d, Submit checked Branch for non-emptiness only, so a fixture
+// could submit a name that existed nowhere and still get an MR id — which is
+// precisely the defect. These calls are not ceremony added to satisfy a
+// validator: they make the fixtures describe a state the merge worker could
+// actually act on, since it resolves the branch as origin/<branch>.
+func seedBranch(t *testing.T, bareOrigin, branch string) {
+	t.Helper()
+	run(t, bareOrigin, "git", "branch", "-f", branch, "HEAD")
+}
+
 func TestSubmitAndQueue(t *testing.T) {
 	originDir := initBareOrigin(t, "main")
+	seedBranch(t, originDir, "feature-1")
 	dir := t.TempDir()
 	r, err := New(Config{
 		Enabled:      true,
@@ -97,6 +111,7 @@ func TestSubmitValidation(t *testing.T) {
 
 func TestGetMergeRequest(t *testing.T) {
 	originDir := initBareOrigin(t, "main")
+	seedBranch(t, originDir, "fix-bug")
 	dir := t.TempDir()
 	r, err := New(Config{
 		Enabled:      true,
@@ -844,6 +859,7 @@ func TestRefineryStartStop(t *testing.T) {
 
 func TestSubmitSignalsWake(t *testing.T) {
 	originDir := initBareOrigin(t, "main")
+	seedBranch(t, originDir, "feature-1")
 	r, err := New(Config{
 		Enabled:      true,
 		PollInterval: time.Hour,
@@ -1074,6 +1090,7 @@ func TestHistoryDefaultLimits(t *testing.T) {
 
 func TestSubmitRejectsInvalidTargetRef(t *testing.T) {
 	originDir := initBareOrigin(t, "main")
+	seedBranch(t, originDir, "feature-1")
 
 	wtDir := t.TempDir()
 	r, err := New(Config{
@@ -1494,6 +1511,7 @@ func TestFailureCountDisabledThreshold(t *testing.T) {
 func TestSubmitAutoCreateTargetRef(t *testing.T) {
 	t.Run("default off — missing target still errors", func(t *testing.T) {
 		originDir := initBareOrigin(t, "main")
+		seedBranch(t, originDir, "feature-1")
 		r, err := New(Config{
 			Enabled:      true,
 			PollInterval: time.Hour,
@@ -1518,6 +1536,7 @@ func TestSubmitAutoCreateTargetRef(t *testing.T) {
 
 	t.Run("opt-in on bare repo — creates target from HEAD", func(t *testing.T) {
 		originDir := initBareOrigin(t, "main")
+		seedBranch(t, originDir, "feature-1")
 		r, err := New(Config{
 			Enabled:      true,
 			PollInterval: time.Hour,
@@ -1556,6 +1575,7 @@ func TestSubmitAutoCreateTargetRef(t *testing.T) {
 
 	t.Run("opt-in on working clone — pushes target to origin", func(t *testing.T) {
 		originDir := initBareOrigin(t, "main")
+		seedBranch(t, originDir, "feature-1")
 		workDir := t.TempDir()
 		run(t, workDir, "git", "clone", originDir, ".")
 		run(t, workDir, "git", "config", "user.email", "test@test.com")
@@ -1589,10 +1609,13 @@ func TestSubmitAutoCreateTargetRef(t *testing.T) {
 		}
 	})
 
-	t.Run("opt-in but default branch undetectable — still errors", func(t *testing.T) {
-		// detectDefaultBranch falls back to "main" via HEAD in a bare repo
-		// initialised with -b main, so to exercise the failure path we point
-		// Submit at a path that isn't a git repo at all.
+	t.Run("opt-in on a path that is not a repo — still errors", func(t *testing.T) {
+		// This case points Submit at a path that isn't a git repo at all.
+		// It used to reach auto-create's "cannot detect the default branch"
+		// arm; since mg-586d the branch check runs FIRST and refuses here,
+		// which is the intended ordering — a doomed submit must not get a
+		// target ref auto-created onto origin on its way out. Opting in to
+		// auto-create must still not turn a broken repo into an accepted MR.
 		notARepo := t.TempDir()
 		r, err := New(Config{
 			Enabled:      true,
@@ -1610,7 +1633,14 @@ func TestSubmitAutoCreateTargetRef(t *testing.T) {
 			AutoCreateTargetRef: true,
 		})
 		if err == nil {
-			t.Fatal("expected error when default branch can't be detected")
+			t.Fatal("expected error when the repo path is not a git repo")
+		}
+		if !strings.Contains(err.Error(), notARepo) {
+			t.Errorf("expected the refusal to name the repo path, got: %v", err)
+		}
+		// Nothing may have been created on the way out.
+		if _, statErr := os.Stat(filepath.Join(notARepo, ".git")); statErr == nil {
+			t.Error("a refused submit initialised something in the repo path")
 		}
 	})
 }
@@ -1620,6 +1650,8 @@ func TestSubmitAutoCreateTargetRef(t *testing.T) {
 // persisted state) so pogod's OnMerged reap path can honour it at merge time.
 func TestSubmitDeferDonePreserved(t *testing.T) {
 	originDir := initBareOrigin(t, "main")
+	seedBranch(t, originDir, "feature-1")
+	seedBranch(t, originDir, "feature-2")
 	statePath := filepath.Join(t.TempDir(), "refinery.json")
 	r, err := New(Config{
 		Enabled:      true,
@@ -2206,6 +2238,8 @@ func TestSubmitDerivesPRFlowFromTarget(t *testing.T) {
 	originDir := initBareOrigin(t, "main")
 	// Carve an integration branch off main, as a --branch dispatch does.
 	run(t, originDir, "git", "branch", "daed-101-integration", "main")
+	seedBranch(t, originDir, "polecat-mg-1234")
+	seedBranch(t, originDir, "polecat-mg-5678")
 
 	statePath := filepath.Join(t.TempDir(), "refinery.json")
 	r, err := New(Config{
@@ -2269,6 +2303,8 @@ func TestSubmitDerivesPRFlowFromTarget(t *testing.T) {
 func TestSubmitPRFlowIgnoresSubmitterClaim(t *testing.T) {
 	originDir := initBareOrigin(t, "main")
 	run(t, originDir, "git", "branch", "integ", "main")
+	seedBranch(t, originDir, "b1")
+	seedBranch(t, originDir, "b2")
 	r, err := New(Config{
 		Enabled:      true,
 		PollInterval: time.Hour,
@@ -2303,6 +2339,7 @@ func TestSubmitPRFlowIgnoresSubmitterClaim(t *testing.T) {
 // off the default branch, which by construction makes it an integration branch.
 func TestSubmitAutoCreatedTargetIsPRFlow(t *testing.T) {
 	originDir := initBareOrigin(t, "main")
+	seedBranch(t, originDir, "polecat-mg-1234")
 	r, err := New(Config{
 		Enabled:      true,
 		PollInterval: time.Hour,

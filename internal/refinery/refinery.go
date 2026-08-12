@@ -684,6 +684,15 @@ func (r *Refinery) Submit(req MergeRequest) (string, error) {
 		}
 	}
 
+	// And the branch — the subject of the operation, and until mg-586d the only
+	// argument checked for non-emptiness and nothing else. Validated FIRST of
+	// the git-shelling checks, so a doomed submit does not get a target ref
+	// auto-created for it on the way out. See validateSubmitBranch for why the
+	// predicate is origin/<branch> by name rather than gh#134's durability one.
+	if err := validateSubmitBranch(req.RepoPath, req.Branch); err != nil {
+		return "", err
+	}
+
 	// Resolve the repo's default branch once: it decides both where an
 	// auto-created target ref is carved from and whether this merge is a
 	// PR-flow integration step (see PRFlow).
