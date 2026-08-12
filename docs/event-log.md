@@ -498,8 +498,8 @@ fields below (added by mg-a754) exist so this event can no longer describe a
 - **`details` fields:**
   - `schedule_id`, `to`, `delivery`, `original_due`, `fired_at`, `missed_fires`, `replay_policy`, `one_shot`, `cron`
   - `fire_token` (string): the completion nonce issued with this fire. The agent redeems it with `pogo schedule ack`.
-  - `fires_delivered` / `fires_completed` (int): lifetime counters for this schedule, persisted in `schedules.json` so they survive a pogod restart.
-  - `completion_tracked` (bool): whether this schedule has EVER been acked. When `false`, the recipient is not participating in completion tracking and no conclusion may be drawn from a missing ack — the state is UNKNOWN, not failing.
+  - `fires_delivered` / `fires_completed` (int): lifetime counters for this schedule, persisted in `schedules.json` so they survive a pogod restart. They are deliberately **zeroed by a re-registration** (`pogo schedule` with an existing `--id`, which every crew agent does at boot), so a low pair here right after a bounce means "counting restarted", not "nothing is completing".
+  - `completion_tracked` (bool): whether this schedule has EVER been acked. When `false`, the recipient is not participating in completion tracking and no conclusion may be drawn from a missing ack — the state is UNKNOWN, not failing. "Ever" spans re-registrations: it is backed by the `ever_acked` bit on the entry, which survives the reset above (mg-00d6). Before that bit, this field went `false` for the whole crew after every nightly bounce, and stayed false for any agent that never came back — so the schedules most in need of a verdict were the ones excluded from getting one.
   - `unacked_streak` (int, present only when `completion_tracked` is true): consecutive delivered-but-unacked fires, **including this one**. A promptly-acking agent reads `1`. A climbing value is the signal: the mayor's would have read `202` by the end of 2026-07-22.
 
 ```json

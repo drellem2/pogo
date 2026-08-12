@@ -33,6 +33,7 @@ func SampleEntries(entries []scheduler.Entry, ref time.Time) []Sample {
 			CreatedAt:      e.CreatedAt,
 			FiresDelivered: e.FiresDelivered,
 			FiresCompleted: e.FiresCompleted,
+			EverAcked:      e.EverAcked,
 			UnackedStreak:  e.UnackedStreak,
 			LastCompletion: e.LastCompletion,
 		})

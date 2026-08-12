@@ -63,6 +63,14 @@ import (
 //  1. CompletionTracked gates interpretation. A schedule that has never acked
 //     is UNKNOWN, not failing — only a schedule that has proven it can ack, and
 //     then stopped, is evidence.
+//
+//     "Never acked" means never, not never-since-the-last-re-registration.
+//     Entry.EverAcked carries that one bit across the boot-path re-registration
+//     that zeroes the counters, because without it the gate could not tell a
+//     schedule nobody ever taught to ack from a schedule whose agent acked 39
+//     times and then stopped coming back — and the nightly bounce put the
+//     entire crew into the second state while making it look like the first
+//     (mg-00d6).
 //  2. The signal that matters is FLEET-WIDE and RATIOED. One agent skipping one
 //     ack is noise. Every ack-aware schedule in the fleet going to zero within
 //     the same minute is the 2026-07-22 shape, and nothing else looks like it.
@@ -170,6 +178,7 @@ func (s *Scheduler) Ack(agentName, id, token string, now time.Time) (AckResult, 
 		latency = now.Sub(entry.PendingSince)
 	}
 	entry.FiresCompleted++
+	entry.EverAcked = true
 	entry.UnackedStreak = 0
 	entry.LastCompletion = now
 	entry.PendingToken = ""
@@ -244,7 +253,21 @@ type CompletionStats struct {
 	// Tracked is how many have ever acked, and so carry a meaningful streak.
 	// Untracked schedules are excluded from Stalled and from Ratio: an entry
 	// that never acks is unknown, not failing.
+	//
+	// "Ever" spans re-registrations (Entry.EverAcked, mg-00d6). It did not
+	// used to: this count collapsed to ~0 every time the crew re-registered
+	// its schedules at boot, which is once a night for the whole fleet.
 	Tracked int `json:"tracked"`
+	// TrackedReset is the subset of Tracked whose LIVE counters are zero — a
+	// schedule that has proven it can ack but was re-registered since, so its
+	// contribution to FiresDelivered/FiresCompleted is nil and the ratio below
+	// is computed over a thinner denominator than Tracked suggests.
+	//
+	// It is reported because Tracked is a named compensating control for a
+	// blind spot in internal/ackwatch (see the ack-aware cohort gate there),
+	// and a control whose reading is thin has to say so rather than let the
+	// reader infer breadth it does not have.
+	TrackedReset int `json:"tracked_reset"`
 	// Stalled is how many TRACKED schedules currently have an unacked streak
 	// at or above StallThreshold.
 	Stalled int `json:"stalled"`
@@ -279,6 +302,9 @@ func (s *Scheduler) Completion(agentName string, threshold int) CompletionStats 
 			continue
 		}
 		stats.Tracked++
+		if e.FiresCompleted == 0 {
+			stats.TrackedReset++
+		}
 		stats.FiresDelivered += e.FiresDelivered
 		stats.FiresCompleted += e.FiresCompleted
 		if e.UnackedStreak >= threshold {

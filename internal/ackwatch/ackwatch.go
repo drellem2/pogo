@@ -304,6 +304,12 @@ type Sample struct {
 	FiresCompleted int       `json:"fires_completed"`
 	UnackedStreak  int       `json:"unacked_streak"`
 	LastCompletion time.Time `json:"last_completion,omitempty"`
+
+	// EverAcked mirrors scheduler.Entry.EverAcked: has this (agent, id) EVER
+	// had a fire acknowledged, across re-registrations. The counters above are
+	// zeroed by the boot-path re-registration and this bit is not, which is the
+	// whole reason it exists — see Tracked (mg-00d6).
+	EverAcked bool `json:"ever_acked,omitempty"`
 }
 
 // Rate is the completed:delivered ratio, or 0 when nothing has been delivered.
@@ -315,8 +321,20 @@ func (s Sample) Rate() float64 {
 }
 
 // Tracked reports whether this schedule has ever had a fire acknowledged,
-// mirroring scheduler.Entry.CompletionTracked.
-func (s Sample) Tracked() bool { return s.FiresCompleted > 0 }
+// mirroring scheduler.Entry.CompletionTracked — including the EverAcked
+// disjunct, which is load-bearing here and not merely cosmetic.
+//
+// Reading FiresCompleted alone made this false for a crew schedule for as long
+// as it went without acking after a re-registration, because re-registration
+// zeroes the counters. Since ackAwareCohort requires a MAJORITY of tracked
+// peers, a cohort whose majority had booted and not yet acked suspended both
+// ratio arms — and for a schedule whose agent never comes back, "not yet" is
+// forever, because the only thing that clears the state is an ack (mg-00d6).
+//
+// The bound is worth keeping in view: zeroing requires a boot, survivors carry
+// the cohort, and a healthy agent re-arms itself within one cadence period.
+// See TestBounce_TheBlindCaseNeedsAZEROEDMAJORITY_NotJustABounce.
+func (s Sample) Tracked() bool { return s.FiresCompleted > 0 || s.EverAcked }
 
 // cohortKey groups genuinely comparable schedules. Kind and cadence only —
 // fire-count comparability is a per-candidate test (see comparable), because it
@@ -914,12 +932,54 @@ func Detect(snap Snapshot, p Params) Report {
 		// be ack-aware for the same reason a per-agent finding does.
 		//
 		// The ack-aware requirement leaves a stated gap: a cohort that has never
-		// acked ONCE reads as unknown, so an outage that begins before any member
-		// has acked since re-registration is invisible here. That is the honest
-		// price of not accusing a fleet whose prompts simply never mention `ack`,
-		// and it is not this detector's only cover — `pogo schedule completion`
-		// reports Tracked alongside the ratio, and internal/synthwatch catches the
-		// specific auth-outage shape from the harness side (mg-8cdb).
+		// acked AT ALL reads as unknown, so an outage on a fleet that was never
+		// taught to ack is invisible here. That is the honest price of not
+		// accusing a fleet whose prompts simply never mention `ack`.
+		//
+		// That gap used to be wider than this comment claimed, and the widening
+		// was invisible because it shared a trigger with the failure it hid.
+		// Tracked read FiresCompleted alone, and re-registration zeroes it. A
+		// cohort whose MAJORITY had re-registered without acking since was
+		// therefore not ack-aware, and both arms took SkippedNoPeers — while
+		// `pogo schedule completion`, named right here as a compensating
+		// control, read the same predicate and went blind for the same reason
+		// at the same moment. A backstop that shares a trigger with the thing
+		// it backs up is redundancy in name only.
+		//
+		// scheduler.Entry.EverAcked closes it: the bit survives re-registration
+		// even though the counters (deliberately, see mg-49b1) do not. Pinned by
+		// TestBounceDoesNotBlindBothControlsAtOnce, which asserts the property
+		// across BOTH controls from one shared state, because a unit test on the
+		// bit alone passes while the correlation stays open.
+		//
+		// BOUNDS, so this is not re-filed at the size it was first written at.
+		// Zeroing requires a BOOT — an agent that dies without booting never
+		// re-registers — and survivors carry the cohort, so the blind case needs
+		// a zeroed MAJORITY, not merely a bounce
+		// (TestBounce_TheBlindCaseNeedsAZEROEDMAJORITY_NotJustABounce). mg-00d6
+		// was filed on a fleet-wide operational story that its author withdrew,
+		// and the mechanism has zero observed instances: across the 78
+		// mail-check fires in events.log for 2026-08-11T03:00-05:59Z, the window
+		// holding the nightly bounce, `completion_tracked: false` appears 0
+		// times. This is a latent defect, not a post-mortem finding.
+		//
+		// THE COVER THAT ACTUALLY HELD, and the reason the gap above was priced
+		// correctly even while it was mis-stated: detectBlackout below. It reads
+		// Snapshot.Recent — a window counted from the EVENTS LOG — and never
+		// touches Tracked, the cohorts or the counters, so a re-registration
+		// provably cannot reset its input. That is why it emitted through the
+		// 2026-08-11 outage while these arms could not (config.go's
+		// FirstTurnConfig records 33 consecutive correct alarms), including a
+		// resumption at 05:03Z with every counter at zero and nobody acking,
+		// which no cohort-gated path can produce. Its independence is now
+		// asserted rather than claimed: TestBlackoutArmIsIndependentOfTheBounce.
+		// Do not give it a dependency on the counters.
+		//
+		// The other named cover, internal/synthwatch (mg-8cdb), was read for the
+		// first time under mg-00d6 and also holds: its evidence is the harness
+		// session transcript, which a scheduler re-registration cannot reset. It
+		// stays a PARTIAL cover by design — the auth shape only, and only for
+		// harnesses that expose a transcript.
 		if len(members) >= p.MinPeers+1 && ackAwareCohort(members) {
 			if m := medianRate(members); m < p.Floor {
 				rep.Fleet = append(rep.Fleet, FleetFinding{
