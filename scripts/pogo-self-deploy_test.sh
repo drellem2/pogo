@@ -1167,6 +1167,31 @@ mdgit -C "$MD_TMP/wt-rebased" cat-file -e refs/remotes/origin/main:j 2>/dev/null
     && pass "mg-3a96 fixture: the rebased branch's content really did land on origin/main under a different SHA — the case is 'landed', not 'never pushed'" \
     || fail "mg-3a96 fixture: origin/main does not contain the rebased branch's file — the cherry-pick did not happen and the assertion below is testing the wrong case"
 
+# (g) THE REVIEW POLECAT — gh#134, the case that held the drain forever. A
+#     reviewer is spawned on its own branch and must end up holding the BUILDER's
+#     commits. It cannot `git checkout` the PR branch: git refuses a branch
+#     already checked out in another worktree, and the builder's worktree is
+#     still live while its PR is in review. So polecat-review.md:124-127 puts it
+#     on `reset --hard origin/<pr-branch>` against its OWN branch, which it never
+#     pushes. Result: HEAD is on origin/wt-pushed and on NO ref named wt-review.
+#     Built with the same `reset --hard` the prompt instructs, not by branching
+#     from the head — the shape under test is the one the prompt produces.
+mdgit -C "$MD_TMP/repo" worktree add -q -b wt-review "$MD_TMP/wt-review" main
+mdgit -C "$MD_TMP/wt-review" reset -q --hard refs/remotes/origin/wt-pushed
+
+# THE FIXTURE IS ASSERTED, NOT ASSUMED — same reason as (f) below. Each of these
+# rules out one OTHER branch of durability_of answering (g), which would leave
+# the new containment test unexercised while its assertion still went green.
+{ ! mdgit -C "$MD_TMP/wt-review" rev-parse --verify --quiet refs/remotes/origin/wt-review >/dev/null 2>&1; } \
+    && pass "gh#134 fixture: the reviewer's OWN branch is not on origin, so the reviewer case cannot be answered by branch (1)" \
+    || fail "gh#134 fixture: origin/wt-review resolves — the reviewer fixture pushed its own branch and branch (2b) below is NOT staged"
+{ ! mdgit -C "$MD_TMP/wt-review" merge-base --is-ancestor HEAD refs/remotes/origin/main 2>/dev/null; } \
+    && pass "gh#134 fixture: the reviewed commits are absent from origin/main, so the reviewer case cannot be answered by branch (2)" \
+    || fail "gh#134 fixture: the PR under review is already on origin/main — the reviewer fixture is a merged branch and proves nothing"
+[ "$(mdgit -C "$MD_TMP/wt-review" rev-parse HEAD)" = "$(mdgit -C "$MD_TMP/wt-review" rev-parse refs/remotes/origin/wt-pushed)" ] \
+    && pass "gh#134 fixture: the reviewer really is sitting at the builder's pushed head — the commits it holds exist under SOMEBODY's origin ref" \
+    || fail "gh#134 fixture: wt-review's HEAD is not origin/wt-pushed — the reset did not happen and the case below is 'genuinely unpushed', the opposite case"
+
 md() { durability_of "$1"; }
 mdw() { durability_of "$1" | cut -d' ' -f1; }
 
@@ -1204,13 +1229,45 @@ printf '%s' "$(md "$MD_TMP/wt-merged")" | grep -qv 'awaiting the refinery' \
     && pass "mg-3a96: a REBASE-LANDED branch whose remote ref the refinery reaped is durable — patch ids see what SHAs cannot ($(md "$MD_TMP/wt-rebased"))" \
     || fail "mg-3a96: a rebase-landed branch read as '$(md "$MD_TMP/wt-rebased")' — every merged polecat would hold the deploy on a branch nobody will ever push again"
 
-# The four `durable`s above must be durable for DIFFERENT reasons. Identical
+# --- gh#134: THE REVIEWER, WHOSE COMMITS LIVE UNDER SOMEBODY ELSE'S REF ------
+# The reported stall. Before the fix this read
+#   `unpushed 1 commit(s) on wt-review exist only in <wt> — nothing on origin
+#    holds them`
+# whose trailing clause is provably false: origin/wt-pushed holds them. The
+# wait it produced was unsatisfiable — the reviewer never pushes this branch —
+# so the drain burned its whole budget and the deploy exited 7.
+[ "$(mdw "$MD_TMP/wt-review")" = "durable" ] \
+    && pass "gh#134: a REVIEW POLECAT holding the builder's pushed commits on its own never-pushed branch does NOT hold the drain ($(md "$MD_TMP/wt-review"))" \
+    || fail "gh#134: the reviewer read as '$(md "$MD_TMP/wt-review")' — durability_of still asks only about origin/<this branch>, and every reviewed PR stalls the nightly redeploy until the deadline"
+
+# The verdict word alone would also be produced by a predicate that had gone
+# permissive. NAME THE CARRYING REF: the line has to say which origin ref makes
+# this safe, or the deploy log records a clearance nobody can audit afterwards.
+printf '%s' "$(md "$MD_TMP/wt-review")" | grep -q 'origin/wt-pushed' \
+    && pass "gh#134: the reviewer's durable line NAMES the ref that carries its commits, so the clearance can be checked rather than trusted" \
+    || fail "gh#134: the reviewer cleared without naming a holder ($(md "$MD_TMP/wt-review")) — indistinguishable from a predicate that stopped testing"
+
+# THE TRUE POSITIVES THAT MATTER, RESTATED AGAINST THE WIDER TEST. Widening the
+# ref set is a step toward permissiveness, and the cost of overshooting is
+# mg-9a19 (1026 lines orphaned). wt-local never pushed at all; wt-ahead pushed
+# and then committed again. Neither has any origin ref holding HEAD, so (2b)
+# must not fire on them — asserted here as well as above, because above they
+# were passing before this change existed.
+[ "$(mdw "$MD_TMP/wt-local")" = "unpushed" ] && [ "$(mdw "$MD_TMP/wt-ahead")" = "unpushed" ] \
+    && pass "gh#134: widening the ref set did NOT release the two genuine holders — never-pushed and pushed-then-ahead both still hold" \
+    || fail "gh#134: a genuine holder was released by the wider containment test (local='$(md "$MD_TMP/wt-local")' ahead='$(md "$MD_TMP/wt-ahead")') — this is the mg-9a19 orphan-1026-lines direction"
+
+# The five `durable`s above must be durable for DIFFERENT reasons. Identical
 # detail would mean branches of durability_of are dead and the assertions are
 # agreeing by accident — the same check mg-853a's suite made for its two clears.
-MD_DETAILS="$(printf '%s\n%s\n%s\n%s\n' "$(md "$MD_TMP/wt-pushed")" "$(md "$MD_TMP/wt-merged")" "$(md "$MD_TMP/wt-fresh")" "$(md "$MD_TMP/wt-rebased")" | sort -u | wc -l | tr -d ' ')"
-[ "$MD_DETAILS" = "4" ] \
-    && pass "mg-3a96: the four durable paths are four distinct measurements, not one fallback wearing four hats" \
-    || fail "mg-3a96: only $MD_DETAILS distinct durable lines across four cases — at least one path is dead and its assertion proves nothing"
+# THIS IS ALSO THE GUARD ON WHERE gh#134's TEST (2b) SITS, and that is measured,
+# not asserted on principle: seated ABOVE (1) and (2) it answers for wt-merged
+# (origin/wt-merged holds HEAD) and for wt-fresh (origin/main does), and three
+# of these five lines collapse into one wording. The count below is what fails.
+MD_DETAILS="$(printf '%s\n%s\n%s\n%s\n%s\n' "$(md "$MD_TMP/wt-pushed")" "$(md "$MD_TMP/wt-merged")" "$(md "$MD_TMP/wt-fresh")" "$(md "$MD_TMP/wt-rebased")" "$(md "$MD_TMP/wt-review")" | sort -u | wc -l | tr -d ' ')"
+[ "$MD_DETAILS" = "5" ] \
+    && pass "mg-3a96/gh#134: the five durable paths are five distinct measurements, not one fallback wearing five hats" \
+    || fail "mg-3a96/gh#134: only $MD_DETAILS distinct durable lines across five cases — at least one path is dead (or gh#134's containment test is seated too early and is preempting the specific ones) and its assertion proves nothing"
 
 # --- the unknowns: a question we failed to ask is not an answer of 'durable' ---
 [ "$(mdw "")" = "unknown" ] \
@@ -1227,6 +1284,19 @@ mdgit -C "$MD_TMP/wt-local" checkout -q --detach
 [ "$(mdw "$MD_TMP/wt-local")" = "unknown" ] \
     && pass "mg-3a96: a DETACHED HEAD is 'unknown' — 'HEAD' is not a branch name to look up on origin" \
     || fail "mg-3a96: detached HEAD read as '$(md "$MD_TMP/wt-local")' — a bogus origin/HEAD lookup would decide this"
+# STILL 'unknown' AFTER gh#134, AND ON PURPOSE. A detached reviewer sitting on a
+# pushed head would be answered by (2b) if the test were seated above the branch
+# naming — but that seat also preempts (1) and (2) and collapses the distinctness
+# assertion above, and pm-pogo ruled the detached case out of gh#134's scope
+# because both live measurements are the named-branch shape. So it holds, which
+# is the SAFE direction. mg-f0bf carries the constraint from the other side:
+# polecat-review.md:125 instructs an impossible checkout, and repairing that with
+# a detached HEAD would re-create on every reviewer the exact deadlock gh#134
+# removes. If this assertion ever has to change, mg-f0bf is why.
+mdgit -C "$MD_TMP/repo" worktree add -q --detach "$MD_TMP/wt-detached" refs/remotes/origin/wt-pushed
+[ "$(mdw "$MD_TMP/wt-detached")" = "unknown" ] \
+    && pass "gh#134/mg-f0bf: a DETACHED worktree sitting on a pushed head is still 'unknown' and still HOLDS — deliberately out of scope, and the safe direction ($(md "$MD_TMP/wt-detached"))" \
+    || fail "gh#134/mg-f0bf: a detached HEAD read as '$(md "$MD_TMP/wt-detached")' — the containment test is seated above the branch naming, which is the placement that collapses the distinct durable paths"
 mdgit -C "$MD_TMP/wt-local" checkout -q wt-local
 (
     # NOTE THE WORKTREE CHOSE HERE. Under mg-853a this case used the PUSHED
@@ -1241,6 +1311,15 @@ mdgit -C "$MD_TMP/wt-local" checkout -q wt-local
     [ "$(durability_of "$MD_TMP/wt-pushed" | cut -d' ' -f1)" = "durable" ] \
         && pass "mg-3a96: a PUSHED branch is durable even when no integration ref resolves — mg-853a's bound 1 (non-main targets held the deploy) dissolves rather than being widened" \
         || fail "mg-3a96: a pushed branch needed an integration ref to be called durable ($(durability_of "$MD_TMP/wt-pushed")) — the refinery is still coupled into the predicate"
+    # gh#134's OTHER seat requirement, and the reason (2b) is above (3) rather
+    # than below it. gh#134's own worktree showed upstream origin/develop, i.e. a
+    # repo where neither main nor master resolves — there the reviewer fell
+    # through to (3) and read `unknown`, which holds the drain exactly as
+    # `unpushed` does (drain_unpushed_holders counts them together). A test
+    # seated after (3) would never run on the very deployment that reported this.
+    [ "$(durability_of "$MD_TMP/wt-review" | cut -d' ' -f1)" = "durable" ] \
+        && pass "gh#134: the reviewer is durable even when NO integration ref resolves — the reported repo's base was origin/develop, and 'unknown' holds the drain just as 'unpushed' does" \
+        || fail "gh#134: with no integration ref the reviewer read as '$(durability_of "$MD_TMP/wt-review")' — the containment test is seated below (3) and does not answer on the deployment that reported the bug"
 )
 
 # --- polecat_objects: the unreachable tail must not leak into the predicate ---
@@ -1300,6 +1379,23 @@ SOLO_REPORT="$(drain_durability "$(md_body "$MD_TMP/wt-local")")"
 [ "$(drain_unpushed_holders "$SOLO_REPORT")" = "1" ] \
     && pass "mg-3a96: a ONE-polecat snapshot is not silently dropped — the sole holder is still counted" \
     || fail "mg-3a96: a single holding polecat counted $(drain_unpushed_holders "$SOLO_REPORT") ($SOLO_REPORT) — the last-record read trap is live and the drain would proceed over it"
+
+# gh#134 END TO END, in the shape the issue actually reports: a builder whose PR
+# is open and pushed, and the reviewer reviewing it. This pair is what a nightly
+# redeploy meets whenever any PR is in review, and before the fix the reviewer
+# alone held the drain to the deadline. Asserted through the whole path —
+# JSON -> worktree_dir -> git -> verdict -> count — because the per-worktree
+# assertion above cannot show that the count agrees with it.
+REVIEW_REPORT="$(drain_durability "$(md_body "$MD_TMP/wt-pushed" "$MD_TMP/wt-review")")"
+[ "$(drain_unpushed_holders "$REVIEW_REPORT")" = "0" ] \
+    && pass "gh#134: a builder-with-open-PR plus its REVIEWER -> 0 hold the drain; the nightly redeploy is no longer blocked by any PR being in review ($REVIEW_REPORT)" \
+    || fail "gh#134: the builder/reviewer pair held the drain ($(drain_unpushed_holders "$REVIEW_REPORT") holder(s): $REVIEW_REPORT) — the wait is unsatisfiable and the deploy exits 7 at the deadline"
+# And the discrimination the clear above cannot supply on its own: swap the
+# reviewer for a polecat with genuinely local-only commits and the count moves.
+REVIEW_HELD="$(drain_durability "$(md_body "$MD_TMP/wt-pushed" "$MD_TMP/wt-local")")"
+[ "$(drain_unpushed_holders "$REVIEW_HELD")" = "1" ] \
+    && pass "gh#134: the same snapshot with a genuinely unpushed polecat in the reviewer's place still counts 1 holder — the clear above is a measurement, not 'return 0'" \
+    || fail "gh#134: expected 1 holder with a local-only polecat, got $(drain_unpushed_holders "$REVIEW_HELD") ($REVIEW_HELD)"
 
 # An unreadable worktree is counted WITH the holders: they differ in what we
 # know, not in what is safe to do about it.

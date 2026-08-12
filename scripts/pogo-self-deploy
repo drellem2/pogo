@@ -1941,7 +1941,8 @@ integration_ref() {
 # durability_of WORKTREE -> "<verdict> <detail>". Exactly one verdict word:
 #
 #   durable  — every commit in this worktree exists somewhere a pogod restart
-#              cannot reach past: on origin/<branch>, or already in the
+#              cannot reach past: on SOME ref under refs/remotes/origin/ — not
+#              necessarily this branch's own (see test 2b) — or already in the
 #              integration branch. Stopping this polecat loses nothing. It may be
 #              busy for hours and it may be waiting on the refinery; neither is
 #              this predicate's business. DOES NOT HOLD THE DRAIN.
@@ -1966,11 +1967,18 @@ integration_ref() {
 #
 # FOUR BOUNDS, STATED RATHER THAN GLOSSED:
 #
-#   1. `origin/<branch>` is a local remote-tracking ref, so it reflects what THIS
-#      clone last pushed or fetched. That is precisely right for the question
-#      asked: the polecat pushes from this worktree, so its own push is what
-#      writes the ref. A branch pushed from somewhere else entirely is invisible
-#      here — and so is its polecat, which is not in this registry either.
+#   1. EVERY origin ref read here is a local remote-tracking ref, so it reflects
+#      what THIS clone last pushed or fetched. That is precisely right for the
+#      question asked: the polecat pushes from this worktree, so its own push is
+#      what writes the ref. A branch pushed from somewhere else entirely is
+#      invisible here — and so is its polecat, which is not in this registry
+#      either. Test (2b) widens the SET of refs consulted from origin/<branch> to
+#      all of refs/remotes/origin/, which extends this bound rather than adding a
+#      class: a SHA that origin has since force-pushed away still has a stale
+#      tracking ref pointing at it, and (2b) would call it durable. A force-push
+#      does not unpublish — the commits stay servable by SHA — so the residual is
+#      "harder to find", not "lost", which is the same shape bound 1 has always
+#      accepted for origin/<branch> (gh#134, mg-fd94).
 #   2. THE REFINERY REBASES AND THEN REAPS, so the obvious test is not enough.
 #      internal/refinery/merge.go runs `push origin --delete <branch>` after a
 #      successful merge (step=branch-reap), and the landed commits carry DIFFERENT
@@ -1993,7 +2001,7 @@ integration_ref() {
 #      DRAIN_MERGE_TARGETS is now consulted only to spare the unpushed case a
 #      false hold, so widening it can no longer release a hold that mattered.
 durability_of() {
-    local wt="$1" branch head tip target tname cherry rc ahead
+    local wt="$1" branch head tip target tname cherry rc ahead holder
     [ -n "$wt" ]  || { echo "unknown no worktree_dir in the drain snapshot"; return 0; }
     [ -d "$wt" ]  || { echo "unknown worktree $wt does not exist"; return 0; }
     git -C "$wt" rev-parse --git-dir >/dev/null 2>&1 \
@@ -2032,10 +2040,57 @@ durability_of() {
         return 0
     fi
 
-    # (3) No integration ref resolved AND origin/<branch> does not hold HEAD.
+    # (2b) SOME OTHER origin ref holds HEAD — ask whether ANY of them does, not
+    #     whether this branch's own does. Tests (1) and (2) between them cover
+    #     "this worktree pushed" and "the integration branch already has it", and
+    #     A REVIEW POLECAT IS NEITHER. Reviewing a PR means holding the builder's
+    #     commits, and git refuses to check out a branch already checked out in
+    #     another worktree (the builder's is still live while its PR is in
+    #     review), so the reviewer resets its OWN never-pushed branch to the PR
+    #     head — internal/agent/prompts/templates/polecat-review.md:124-127. Its
+    #     commits are on origin/polecat-<the builder>, a ref test (1) never looks
+    #     at, so the drain read them as unique to this worktree and waited for a
+    #     push that was never going to come from here. The wait was unsatisfiable:
+    #     the reviewer cannot discharge it, and the deploy exits 7 at the deadline
+    #     (gh#134). The drain's question is "would stopping this polecat LOSE
+    #     WORK?" — docs/investigations/drain-stalls-2026-07-31-and-2026-08-06.md
+    #     :215-226 — and any origin ref holding HEAD answers it, without needing
+    #     the base ref. The genuine committed-but-unpushed case is untouched:
+    #     nothing on origin holds those commits, so this test does not fire.
+    #
+    #     THE SEAT IS LOAD-BEARING AND WAS MEASURED, IN BOTH DIRECTIONS. After
+    #     (1) and (2) so their more specific details survive — moved above them, a
+    #     fresh worktree and a landed branch both answer "some origin ref holds
+    #     HEAD" and four distinct durable paths collapse into one, which the
+    #     distinctness assertion in scripts/pogo-self-deploy_test.sh catches.
+    #     Before (3) so it also answers when NO integration ref resolves: a
+    #     reviewer on a repo whose base is neither main nor master read `unknown`,
+    #     and `unknown` holds the drain identically to `unpushed`.
+    #
+    #     refs/remotes/origin/HEAD is excluded because it is a symref at the
+    #     default branch: it would answer for the integration branch under a name
+    #     that says nothing about who pushed, i.e. it would shadow test (2)'s
+    #     wording for every fresh worktree while adding no information.
+    #
+    #     DETACHED HEAD IS DELIBERATELY NOT COVERED. A detached reviewer still
+    #     reads `unknown` and still holds, because the branch is named above and
+    #     this test is seated below that. Ruled out of scope by pm-pogo: both
+    #     measured live shapes are named-branch, and widening a drain predicate
+    #     past its evidence is how this file accumulated its history. mg-f0bf
+    #     carries the coupled constraint — do not repair polecat-review.md:125
+    #     with a detached HEAD without covering the detached case here first.
+    holder="$(git -C "$wt" for-each-ref --contains "$head" --format='%(refname)' \
+                  refs/remotes/origin/ 2>/dev/null \
+              | grep -v '^refs/remotes/origin/HEAD$' | head -n 1)"
+    if [ -n "$holder" ]; then
+        echo "durable ${holder#refs/remotes/} holds every commit on $branch, which was never pushed from $wt (a reviewed PR's commits, carried on the builder's ref)"
+        return 0
+    fi
+
+    # (3) No integration ref resolved AND no origin ref holds HEAD.
     #     Nothing left to compare against, so we say that rather than guess.
     [ -n "$target" ] || {
-        echo "unknown none of [$DRAIN_MERGE_TARGETS] resolves in $wt and origin/$branch does not hold HEAD — cannot tell whether anything here is durable"
+        echo "unknown none of [$DRAIN_MERGE_TARGETS] resolves in $wt and no ref under refs/remotes/origin/ holds HEAD — cannot tell whether anything here is durable"
         return 0
     }
 
