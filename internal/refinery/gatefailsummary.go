@@ -66,6 +66,23 @@ func summarizeGateFailure(output string) string {
 		return truncate("test setup failed, not the branch: "+line, maxSummaryLen)
 	}
 
+	// A HOST that ran out of a resource is reported before anything the gate
+	// named, and INSTEAD of it. mg-b41f is what the alternative costs: fifty
+	// packages and two tests named by this function, on a run where the
+	// toolchain could not write a single file. Those names are not findings, and
+	// naming them points the reader away from the cause.
+	//
+	// This is a second lock on the same door — runQualityGates builds a
+	// hostResourceError and returns before it reaches this function, so the
+	// sentence below does not normally travel. It is here because this
+	// function's contract is "name what failed inside a gate's output", and
+	// answering "internal/agent, +46 more" for output that says `no space left
+	// on device` twenty-five times is wrong for every caller, not only that one.
+	if sig, line, n, ok := outputReportsHostResourceExhaustion(output); ok {
+		return truncate(fmt.Sprintf("the HOST ran out of %s, not the branch (%q x%d): %s",
+			sig.resource, sig.pattern, n, line), maxSummaryLen)
+	}
+
 	failedPkgs := failingGoPackages(output)
 	tests := dedupe(matchGroup(goTestFailRe, output))
 

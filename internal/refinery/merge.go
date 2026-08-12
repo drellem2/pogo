@@ -1088,6 +1088,18 @@ func (r *Refinery) runQualityGates(ctx context.Context, wtDir, repoPath string, 
 		allOutput.WriteString("\n")
 		if err != nil {
 			allOutput.WriteString(fmt.Sprintf("FAILED: %v\n", err))
+			// The HOST ran out of a resource while the gate ran. That is not a
+			// verdict on the branch and the package and test names below are not
+			// findings, so this is judged BEFORE the summary that would print
+			// them (mg-b41f, gatehostresource.go).
+			//
+			// Judged here, on `output`, because this is the last place the FULL
+			// gate output exists: the copy stored on the merge request is capped
+			// to 8 KiB with its middle elided, and an incident whose ENOSPC lines
+			// fell in that middle would read back as a clean build failure.
+			if hre := newHostResourceError(gate, output, wtDir, err); hre != nil {
+				return allOutput.String(), ran, hre
+			}
 			// Name what failed INSIDE the gate. `./build.sh failed: exit status 1`
 			// is the sentence that travels — onto the MR, into `pogo refinery
 			// show`, into what a polecat is told about its branch — and it names
