@@ -1522,6 +1522,240 @@ GHOST_REPORT="$(drain_durability "$(md_body "$MD_TMP/does-not-exist")")"
     esac
 ) 2>/dev/null
 
+# --- gh#135: THE HOLDER LEDGER — a holder that STOPS mid-drain --------------
+# THE DEFECT. Everything above is a fact about ONE POLL. drain_wait re-derives
+# its subject set from the live registry every 15s and Registry.Polecats()
+# filters on alive(), so a polecat that stops between polls leaves the
+# DENOMINATOR instead of satisfying the check: no report line, no holder count,
+# and `0 holding` printed over commits that exist in exactly one place. The check
+# was not satisfied, it was SILENCED — which reads identically in the run log.
+#
+# WHICH DURABILITY PREDICATE THESE FIXTURES WERE MEASURED AGAINST, stated because
+# the two tickets' fixtures interact and a later reader must not have to guess:
+# gh#134/mg-fd94 HAS LANDED, so `durable` here means "some ref under
+# refs/remotes/origin/ contains HEAD", not "origin/<this branch> contains HEAD".
+# The departure verdicts below deliberately reuse that same predicate rather than
+# a second one — see the ancestry assertion, which is the guard on it.
+#
+# THE BRANCH NAMES ARE `polecat-*` ON PURPOSE. The reconciliation derives the
+# branch from the agent name by the BranchPrefix convention
+# (internal/gitgc/gitgc.go:36), so a fixture on `wt-*` branches would exercise
+# only the `unknown` arm and every real verdict below would go untested.
+mdgit -C "$MD_TMP/repo" worktree add -q -b polecat-dep-local "$MD_TMP/wt-dep-local" main
+printf 'departed\n' > "$MD_TMP/wt-dep-local/dl"
+mdgit -C "$MD_TMP/wt-dep-local" add dl
+mdgit -C "$MD_TMP/wt-dep-local" commit -qm departed
+
+mdgit -C "$MD_TMP/repo" worktree add -q -b polecat-dep-pushed "$MD_TMP/wt-dep-pushed" main
+printf 'pushed-on-the-way-out\n' > "$MD_TMP/wt-dep-pushed/dp"
+mdgit -C "$MD_TMP/wt-dep-pushed" add dp
+mdgit -C "$MD_TMP/wt-dep-pushed" commit -qm dep-pushed
+
+# A holder that will push ON ITS WAY OUT, between two polls. It is left unpushed
+# here on purpose: the negative control below needs it to be a genuine holder on
+# poll 1, or it never enters the ledger and the control proves nothing.
+mdgit -C "$MD_TMP/repo" worktree add -q -b polecat-dep-exit "$MD_TMP/wt-dep-exit" main
+printf 'about-to-push\n' > "$MD_TMP/wt-dep-exit/de"
+mdgit -C "$MD_TMP/wt-dep-exit" add de
+mdgit -C "$MD_TMP/wt-dep-exit" commit -qm dep-exit
+
+# The reviewer shape again, one layer down: a departed polecat whose commits live
+# under SOMEBODY ELSE's origin ref. This is the assertion that pins the predicate
+# to CONTAINMENT rather than to origin/<same name>.
+mdgit -C "$MD_TMP/repo" worktree add -q -b polecat-dep-review "$MD_TMP/wt-dep-review" main
+mdgit -C "$MD_TMP/wt-dep-review" reset -q --hard refs/remotes/origin/wt-pushed
+
+# A body naming polecats by AGENT NAME (the ledger's key) rather than by branch.
+dep_body() {
+    local out="" spec name wt
+    for spec in "$@"; do
+        name="${spec%%=*}"; wt="${spec#*=}"
+        [ -n "$out" ] && out="$out,"
+        out="$out{\"name\":\"$name\",\"pid\":1,\"work_item_id\":\"mg-$name\",\"worktree_dir\":\"$wt\",\"source_repo\":\"$MD_TMP/repo\"}"
+    done
+    printf '{"draining":true,"count":%d,"polecats":[%s]}' "$#" "$out"
+}
+
+DEP_P1="$(dep_body "dep-local=$MD_TMP/wt-dep-local" "dep-pushed=$MD_TMP/wt-dep-pushed" "wt-merged=$MD_TMP/wt-merged")"
+DEP_R1="$(drain_durability "$DEP_P1")"
+# THE FIXTURE IS ASSERTED, NOT ASSUMED: if the two departing polecats were not
+# HOLDERS on poll 1 they would never enter the ledger, and every assertion below
+# would go green over an empty ledger.
+[ "$(drain_unpushed_holders "$DEP_R1")" = "2" ] \
+    && pass "gh#135 fixture: both departing polecats are genuine HOLDERS on poll 1 — the ledger below has something real to record" \
+    || fail "gh#135 fixture: expected 2 holders on poll 1, got $(drain_unpushed_holders "$DEP_R1") ($DEP_R1) — the ledger assertions would pass over an empty ledger"
+
+DEP_LEDGER="$(drain_ledger_add "" "$DEP_P1" "$DEP_R1")"
+[ "$(printf '%s\n' "$DEP_LEDGER" | grep -c .)" = "2" ] \
+    && pass "gh#135: the ledger records the HOLDERS and only the holders — the durable polecat in the same snapshot is not recorded" \
+    || fail "gh#135: ledger has $(printf '%s\n' "$DEP_LEDGER" | grep -c .) row(s), expected 2 ($DEP_LEDGER)"
+printf '%s\n' "$DEP_LEDGER" | grep -q "^dep-local	mg-dep-local	$MD_TMP/repo$" \
+    && pass "gh#135: a ledger row carries the name, the WORK ITEM and the SOURCE REPO — the reconciliation needs the repo, and the alert needs the item" \
+    || fail "gh#135: ledger row is not name/item/source_repo ($DEP_LEDGER) — if the tab separators went in as literal \$'\\t' text every departure reads 'unknown' and the alert still fires, so this check is the only thing that catches it"
+
+# Re-adding the SAME poll must not duplicate. drain_wait feeds every tick to
+# this, so a ledger that grew per poll would report one departure per 15s.
+[ "$(drain_ledger_add "$DEP_LEDGER" "$DEP_P1" "$DEP_R1")" = "$DEP_LEDGER" ] \
+    && pass "gh#135: re-recording the same holders is a no-op — a ledger keyed on nothing would grow one row per 15s poll" \
+    || fail "gh#135: the ledger duplicated rows across polls ($(drain_ledger_add "$DEP_LEDGER" "$DEP_P1" "$DEP_R1"))"
+
+# A polecat still PRESENT is not a departure, however long it holds.
+[ -z "$(drain_departures "$DEP_LEDGER" "$DEP_P1")" ] \
+    && pass "gh#135: a holder still in the snapshot is not reported as departed — the ledger reconciles absence, it does not re-report the present" \
+    || fail "gh#135: a present holder was reported as departed ($(drain_departures "$DEP_LEDGER" "$DEP_P1"))"
+
+# THE REPRODUCTION, in the reporter's own shape. Poll 2 differs from poll 1 in
+# ONE respect: the holders are gone from the snapshot. Nothing was pushed, no
+# commit was made, no branch was merged.
+mdgit -C "$MD_TMP/wt-dep-pushed" push -q origin polecat-dep-pushed   # this one pushed on its way out
+DEP_P2="$(dep_body "wt-merged=$MD_TMP/wt-merged")"
+DEP_D2="$(drain_departures "$DEP_LEDGER" "$DEP_P2")"
+printf '%s\n' "$DEP_D2" | grep -q '^departed-unsatisfied dep-local (mg-dep-local):' \
+    && pass "gh#135: THE REPORTED CASE — a holder that STOPS between polls is reported DEPARTED UNSATISFIED, by name and work item, instead of vanishing from the denominator ($DEP_D2)" \
+    || fail "gh#135: the departed holder produced no departed-unsatisfied line ($DEP_D2) — 'held=0' is still being printed over commits that exist in one place"
+printf '%s\n' "$DEP_D2" | grep -q '^satisfied dep-pushed (mg-dep-pushed):' \
+    && pass "gh#135: a holder that PUSHED on its way out is SATISFIED, not alerted — the verdict is a measurement, not 'everyone who left is lost'" \
+    || fail "gh#135: the departing polecat that pushed was not recorded satisfied ($DEP_D2) — the alert would fire on every normal completion and be ignored within a week"
+[ "$(drain_departed_holders "$DEP_D2")" = "1" ] \
+    && pass "gh#135: exactly 1 of the 2 departures counts against the drain — the count discriminates, so the clear line's new term means something" \
+    || fail "gh#135: expected 1 departed holder, got $(drain_departed_holders "$DEP_D2") ($DEP_D2)"
+# The alert names the ref and the repo, because that pair is the only handle
+# left: the worktree was reaped at exit.
+printf '%s\n' "$DEP_D2" | grep -q "refs/heads/polecat-dep-local in $MD_TMP/repo" \
+    && pass "gh#135: the departed-unsatisfied line NAMES refs/heads/<branch> and the source repo — the worktree is gone by then, and this pair is what a human can still act on" \
+    || fail "gh#135: the departure alert does not name the surviving handle ($DEP_D2)"
+
+# CONTAINMENT, NOT ANCESTRY, AND NOT origin/<same name>. mayor measured the trap
+# on mg-0a43: the refinery REBASES before merging, so a branch whose work landed
+# perfectly is not an ancestor of main afterwards (146 polecat branches live, 71
+# `--no-merged main`, with sampled counterexamples demonstrably on main). This
+# fixture is the other half of the same point — a departed polecat sitting on the
+# BUILDER's pushed head, on a branch of its own that was never pushed.
+DEP_REVIEW="$(drain_departures "$(printf 'dep-review\tmg-dep-review\t%s' "$MD_TMP/repo")" "$DEP_P2")"
+printf '%s\n' "$DEP_REVIEW" | grep -q '^satisfied dep-review ' \
+    && pass "gh#135: a departed polecat whose commits live under SOMEBODY ELSE's origin ref is satisfied — the predicate is gh#134's containment, reused, not origin/<same name> and not ancestry of main ($DEP_REVIEW)" \
+    || fail "gh#135: the reviewer-shaped departure read as '$DEP_REVIEW' — the reconciliation narrowed the predicate back, and every stopped reviewer becomes a false RED on the nightly"
+printf '%s\n' "$DEP_REVIEW" | grep -q 'origin/HEAD' \
+    && fail "gh#135: the departure verdict credits the origin/HEAD symref ($DEP_REVIEW) — the default-branch symref says nothing about who pushed" \
+    || pass "gh#135: the departure verdict names a real branch ref, not the origin/HEAD symref ($DEP_REVIEW)"
+
+# THE UNKNOWNS. A question we failed to ask is not an answer of 'satisfied' —
+# the same rule durability_of follows, and the reason risk 3 of the packet is
+# survivable: the name/branch agreement holds only while a polecat stays on its
+# own branch.
+DEP_GHOST="$(drain_departures "$(printf 'no-such-agent\tmg-ghost\t%s' "$MD_TMP/repo")" "$DEP_P2")"
+printf '%s\n' "$DEP_GHOST" | grep -q '^unknown no-such-agent ' \
+    && pass "gh#135: a departed agent whose polecat-<name> branch does not resolve is 'unknown', never 'satisfied' ($DEP_GHOST)" \
+    || fail "gh#135: an unresolvable branch read as '$DEP_GHOST' — 'I could not find the branch' printed as 'it pushed'"
+[ "$(drain_departed_holders "$DEP_GHOST")" = "1" ] \
+    && pass "gh#135: an 'unknown' departure is COUNTED with the unsatisfied ones — they differ in what we know, not in what is at risk" \
+    || fail "gh#135: an unknown departure was not counted ($DEP_GHOST)"
+DEP_NOREPO="$(drain_departures "$(printf 'dep-local\tmg-dep-local\t%s' "$MD_TMP/does-not-exist")" "$DEP_P2")"
+printf '%s\n' "$DEP_NOREPO" | grep -q '^unknown dep-local ' \
+    && pass "gh#135: an unreadable source repo is 'unknown' too — the ledger's repo field is data, and data can be wrong ($DEP_NOREPO)" \
+    || fail "gh#135: an unreadable source_repo read as '$DEP_NOREPO'"
+
+# --- gh#135 end to end through drain_wait, across REAL polls ----------------
+# The per-function assertions above cannot show that drain_wait carries a ledger
+# from one tick to the next, nor that the reconciliation is seated where both
+# exits can reach it. These drive the real loop with a probe stub that returns a
+# DIFFERENT body per call.
+(
+    # The holding branch of drain_wait sleeps 15s between polls, and these cases
+    # need at least two polls each. Stubbed rather than parameterised: the
+    # interval is not what is under test here, and a 15s literal in the loop is
+    # deliberate (it is the drain's tick, not a tunable).
+    sleep() { :; }
+    DW135_STATE="$(mktemp)"
+    dw135_probe_seq() {   # $1,$2,... = bodies, one per successive poll
+        DW135_BODIES=("$@")
+        echo 0 > "$DW135_STATE"
+        drain_probe() {
+            local n; n="$(cat "$DW135_STATE")"
+            echo $(( n + 1 )) > "$DW135_STATE"
+            printf '%s\n200' "${DW135_BODIES[$n]:-${DW135_BODIES[${#DW135_BODIES[@]}-1]}}"
+        }
+    }
+    # Run the REAL drain_wait with ERR_LOG armed, exactly as cmd_redeploy does,
+    # so the assertions can read what the reason record and the nightly's RED
+    # alert would actually receive — not merely what reached the terminal.
+    dw135() (
+        DRAIN_TIMEOUT=5
+        DRAIN_UNREADABLE_SLEEP=0
+        DEPLOY_STAGE="drain"
+        ERR_LOG="$DW135_ERR"
+        : > "$ERR_LOG"
+        local out rc=0
+        out="$(drain_wait 2>"$DW135_STDERR")" || rc=$?
+        echo "$out|$rc"
+    )
+    DW135_ERR="$(mktemp)"; DW135_STDERR="$(mktemp)"
+
+    # (A) THE MULTI-POLL CASE. Poll 1 has a holder and a survivor; poll 2 has the
+    #     survivor alone. Nothing pushed in between. The old code cleared here
+    #     with `0 holding` and no mention of the holder at all.
+    dw135_probe_seq "$DEP_P1" "$(dep_body "wt-merged=$MD_TMP/wt-merged")"
+    DW135_RES="$(dw135)"
+    [ "$DW135_RES" = "0|0" ] \
+        && pass "gh#135: a departed holder does NOT hold the drain — the deploy proceeds, because the process that would have pushed those commits is already gone (mg-797d rule 1)" \
+        || fail "gh#135: drain_wait held or refused after a holder departed ($DW135_RES) — report-and-proceed became an unsatisfiable block, which is mg-853a's failure mode rebuilt"
+    grep -q 'departed-unsatisfied dep-local' "$DW135_ERR" \
+        && pass "gh#135: the departure reaches ERR_LOG, so it lands in the reason record and travels to the nightly's RED alert — a log line alone would not leave the box" \
+        || fail "gh#135: nothing about the departed holder reached ERR_LOG ($(cat "$DW135_ERR")) — the deploy still reports a clean drain to everyone downstream"
+    grep -q 'ARCHIVED' "$DW135_ERR" \
+        && pass "gh#135: the alert NAMES ITS OWN DEADLINE — not-holding is safe only until the work item is archived, and the alert is the half that travels (pm-pogo, mg-0a43)" \
+        || fail "gh#135: the alert does not state the archival deadline ($(cat "$DW135_ERR")) — a reader who files it for later has no way to learn that archiving destroys the commits"
+    grep -q 'sweep.go' "$DW135_ERR" \
+        && pass "gh#135: the deadline cites the code that enforces it, so the claim can be checked rather than taken" \
+        || fail "gh#135: the deadline names no source for itself ($(cat "$DW135_ERR"))"
+    grep -q 'stopped mid-drain without reaching origin' "$DW135_STDERR" \
+        && pass "gh#135: the CLEAR LINE carries the second term — '0 holding' can no longer be printed with a departure unaccounted for" \
+        || fail "gh#135: the clearing line still reports only the running polecats ($(cat "$DW135_STDERR")) — a silenced check and a satisfied one read identically again"
+
+    # (B) THE PLACEMENT GUARD, and the reason it is a separate case. When the
+    #     LAST holder stops, `count -eq 0` returns BEFORE drain_durability runs,
+    #     so a reconciliation seated only at the `held -eq 0` clear would miss
+    #     the single-holder fleet entirely — the commonest shape, and one poll
+    #     from the reporter's own. Under the old code this path printed nothing
+    #     whatsoever: no report, no count, no line.
+    dw135_probe_seq "$(dep_body "dep-local=$MD_TMP/wt-dep-local")" '{"draining":true,"count":0,"polecats":[]}'
+    DW135_RES="$(dw135)"
+    [ "$DW135_RES" = "0|0" ] \
+        && pass "gh#135: the WHOLE FLEET stopping still clears the drain — the fix reports, it does not block" \
+        || fail "gh#135: drain_wait did not clear when the last holder stopped ($DW135_RES)"
+    grep -q 'departed-unsatisfied dep-local' "$DW135_ERR" \
+        && pass "gh#135: THE SINGLE-HOLDER FLEET — the reconciliation is seated ABOVE the 'count -eq 0' early return, so the last holder stopping is still reported" \
+        || fail "gh#135: the last holder stopping produced no alert ($(cat "$DW135_ERR")) — the reconciliation is seated only at the 'held -eq 0' clear and the whole-fleet-stopped case escapes it, which is the commonest shape"
+    grep -q 'stopped mid-drain without reaching origin' "$DW135_STDERR" \
+        && pass "gh#135: the zero-polecat exit now emits evidence at all — it used to echo 0 with no line of any kind, which is zero evidence rather than misleading evidence" \
+        || fail "gh#135: the count-eq-0 exit is still silent ($(cat "$DW135_STDERR"))"
+
+    # (C) THE NEGATIVE CONTROL. A drain whose holder departs HAVING PUSHED must
+    #     stay quiet: an alert that fires on every normal completion is one that
+    #     gets filtered, and this one is on the nightly's RED path. The push
+    #     happens IN THE PROBE, between poll 1 and poll 2 — which is the real
+    #     sequence (a polecat pushes and then exits), and the only way to have it
+    #     be a genuine holder on poll 1 and satisfied on poll 2.
+    DW135_C1="$(dep_body "dep-exit=$MD_TMP/wt-dep-exit")"
+    echo 0 > "$DW135_STATE"
+    drain_probe() {
+        local n; n="$(cat "$DW135_STATE")"
+        echo $(( n + 1 )) > "$DW135_STATE"
+        if [ "$n" -eq 0 ]; then printf '%s\n200' "$DW135_C1"; return 0; fi
+        mdgit -C "$MD_TMP/wt-dep-exit" push -q origin polecat-dep-exit 2>/dev/null
+        printf '%s\n200' '{"draining":true,"count":0,"polecats":[]}'
+    }
+    DW135_RES="$(dw135)"
+    [ "$DW135_RES" = "0|0" ] && [ ! -s "$DW135_ERR" ] \
+        && pass "gh#135: a holder that departs HAVING PUSHED raises NO alert — the new RED line fires on loss, not on every polecat that finishes" \
+        || fail "gh#135: a satisfied departure still wrote to ERR_LOG ($(cat "$DW135_ERR")) — every completed polecat would page the nightly and the alert would be filtered within a week"
+    grep -q 'satisfied dep-exit' "$DW135_STDERR" \
+        && pass "gh#135: the satisfied departure is still NAMED in the run log — the reconciliation ran, rather than the alert being silent because nothing was checked" \
+        || fail "gh#135: a satisfied departure left no trace at all ($(cat "$DW135_STDERR")) — silence here is indistinguishable from a reconciliation that never ran"
+
+    rm -f "$DW135_STATE" "$DW135_ERR" "$DW135_STDERR"
+) 2>/dev/null
+
 # --- do_prove: the deploy-time gate on the detector (mg-bfe5) ---------------
 # do_prove decides whether a redeploy is allowed to proceed. These drive its REAL
 # body against a stub control whose output and exit code the test dictates, so
