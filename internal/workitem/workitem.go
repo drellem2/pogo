@@ -43,6 +43,34 @@ type WorkItem struct {
 	// an absent line reads as "this item declares no stage", never as a stage.
 	Workflow string `json:"workflow,omitempty"`
 	Stage    string `json:"stage,omitempty"`
+	// Reviews is the `reviews:` line of the same carrier block: the id of the
+	// BUILD item this item's review covers. It is written ONCE, by the
+	// coordinator, at the moment it files the review ticket (mayor.md transition
+	// 3), and it is never cleared.
+	//
+	// That "never cleared" is the whole design, not an omission (mg-aaf6). The
+	// done-reaper reads it to exempt a builder whose item is already done while a
+	// review polecat is still running against it — the gh#131 failure, where a
+	// builder that self-closed at PR-open was reaped two minutes later and its
+	// reviewer was left with no counterparty. The alternative shapes all required
+	// somebody to REMOVE a declaration at the pass/abort transition, and a
+	// declaration that must be cleared later is state whose drift leaves no
+	// artifact: forget it once and it holds a dispatch slot forever, which is
+	// mg-56d1's leak returning. A line written at creation cannot rot, because
+	// its lifetime is bounded by the reviewer polecat's rather than by anyone's
+	// memory.
+	//
+	// It carries NO DISPATCH SEMANTICS, and that is why it is a carrier line and
+	// not a `depends` edge. `--depends` would gate the review ticket behind the
+	// build ticket, and the build ticket deliberately stays claimed through
+	// review (mayor.md:859-866) — so that edge could never clear and the review
+	// polecat could never claim its ticket. It is also not `isGateBearingCarrierKey`:
+	// a stray `reviews:` line in prose refuses no work, exactly as a stray `gh:`
+	// does not.
+	//
+	// Empty is the ordinary case — build, triage and every non-gh-issue item
+	// declare no review.
+	Reviews string `json:"reviews,omitempty"`
 	// CarrierUnreadable is the parse's THIRD OUTCOME, and it exists because the
 	// first two were not enough (mg-27d4). Until it did, scanCarrierBlock had
 	// exactly two answers — a carrier, or no carrier — and it resolved "there is
@@ -412,22 +440,69 @@ func parseWorkItem(path, status string) (WorkItem, error) {
 		}
 	}
 
-	// Read first markdown heading as title.
-	//
-	// Everything before it is DISCARDED, and that discard is the second way a
-	// carrier goes unread (mg-27d4). A block written between the frontmatter's
-	// closing `---` and the title heading is consumed here and never reaches
-	// scanCarrierBlock — measured live on mg-779b and mg-9863, both sitting in
-	// available/ with `stage: gated` three lines above their heading, both
-	// invisible to the gate that reads this parse. (Their `assignee: parked` was
-	// holding them, which is luck, not a mechanism: the stage line was doing
-	// nothing.) So the skipped lines are checked on the way past.
+	// Title and carrier block, in one pass over the body — see
+	// scanTitleAndCarrier for why the lines skipped on the way to the heading are
+	// examined rather than discarded.
+	title, c := scanTitleAndCarrier(scanner)
+	item.Title = title
+	item.Workflow, item.Stage, item.Reviews = c.Workflow, c.Stage, c.Reviews
+	item.CarrierUnreadable = c.Unreadable
+
+	return item, nil
+}
+
+// Carrier is a work item's parsed state carrier block — the run of unindented
+// `key: value` lines that leads the body, immediately under its `# title`
+// heading. See WorkItem.Workflow, WorkItem.Reviews and
+// WorkItem.CarrierUnreadable for what each field means and why it is read here
+// rather than by the convention's author.
+type Carrier struct {
+	Workflow string `json:"workflow,omitempty"`
+	Stage    string `json:"stage,omitempty"`
+	Reviews  string `json:"reviews,omitempty"`
+	// Unreadable is the parse's THIRD OUTCOME (mg-27d4): this body declares a
+	// gate-bearing carrier line somewhere the leading-block scan cannot reach.
+	// No value accompanies it on purpose — the finding is that the declaration
+	// could not be READ, and a consumer must not act as though it had one.
+	Unreadable bool `json:"carrier_unreadable,omitempty"`
+}
+
+// ParseCarrier reads the state carrier block out of a work item BODY — the text
+// as `mg show --json` returns it in `.body`, with no frontmatter and starting at
+// or above the `# title` heading.
+//
+// It exists so that a consumer holding a body string (pogod's done-reaper, via
+// client.MGWorkItemReviews) parses it with THE SAME code that parses the file on
+// disk, rather than with a second regex that can disagree with it. The
+// disagreement would not be theoretical: this parser deliberately refuses prose
+// that is merely shaped like a declaration, and a looser reader would find
+// `reviews:` lines in bodies that are discussing the convention rather than
+// using it.
+func ParseCarrier(body string) Carrier {
+	_, c := scanTitleAndCarrier(bufio.NewScanner(strings.NewReader(body)))
+	return c
+}
+
+// scanTitleAndCarrier advances scanner to the first markdown title heading and
+// then reads the carrier block below it. Shared by parseWorkItem, which arrives
+// here having consumed the frontmatter, and by ParseCarrier, which starts at the
+// top of a body.
+//
+// Everything before the heading is DISCARDED, and that discard is the second way
+// a carrier goes unread (mg-27d4). A block written between the frontmatter's
+// closing `---` and the title heading is consumed here and never reaches
+// scanCarrierBlock — measured live on mg-779b and mg-9863, both sitting in
+// available/ with `stage: gated` three lines above their heading, both invisible
+// to the gate that reads this parse. (Their `assignee: parked` was holding them,
+// which is luck, not a mechanism: the stage line was doing nothing.) So the
+// skipped lines are checked on the way past.
+func scanTitleAndCarrier(scanner *bufio.Scanner) (title string, c Carrier) {
 	found, preTitleCarrier := false, false
 	for scanner.Scan() {
 		raw := scanner.Text()
 		line := strings.TrimSpace(raw)
 		if strings.HasPrefix(line, "# ") {
-			item.Title = strings.TrimPrefix(line, "# ")
+			title = strings.TrimPrefix(line, "# ")
 			found = true
 			break
 		}
@@ -436,15 +511,14 @@ func parseWorkItem(path, status string) (WorkItem, error) {
 		}
 	}
 	if found {
-		item.Workflow, item.Stage, item.CarrierUnreadable = scanCarrierBlock(scanner)
+		c = scanCarrierBlock(scanner)
 	}
 	// A pre-title declaration is unreadable whatever the body below turns out to
 	// hold, and so is a file with no title heading at all to scan from.
 	if preTitleCarrier {
-		item.CarrierUnreadable = true
+		c.Unreadable = true
 	}
-
-	return item, nil
+	return title, c
 }
 
 // carrierBlockScanLimit bounds how many body lines scanCarrierBlock will read.
@@ -456,8 +530,8 @@ func parseWorkItem(path, status string) (WorkItem, error) {
 const carrierBlockScanLimit = 16
 
 // scanCarrierBlock reads the state carrier block from the body lines following
-// the title heading and returns its `workflow:` and `stage:` values. Both are
-// empty when the body has no carrier block, which is the ordinary case.
+// the title heading. Every field is empty when the body has no carrier block,
+// which is the ordinary case.
 //
 // THE PARSE IS DELIBERATELY STRICT, AND THE STRICTNESS IS THE POINT. The block
 // is the run of unindented `key: value` lines that STARTS the body; the scan
@@ -470,7 +544,7 @@ const carrierBlockScanLimit = 16
 // Leading blank lines are skipped so a body that puts a blank line under its
 // heading still parses; anything else ends the block before it starts.
 //
-// # The third return value, and why two were not enough (mg-27d4)
+// # The third outcome, and why two were not enough (mg-27d4)
 //
 // Stopping at the first non-carrier line is right, but "I stopped" and "there
 // was nothing here" were being reported with the same two values. So a body
@@ -478,13 +552,23 @@ const carrierBlockScanLimit = 16
 // this:" — returned empty workflow and empty stage, indistinguishable from an
 // ordinary item that declares nothing, and its `stage: gated` did not gate.
 //
-// unreadable closes that: after the block ends, the scan keeps looking for a
-// GATE-BEARING declaration line further down, and reports one if it finds it
-// WITHOUT reading its value. The value is deliberately not returned — the whole
-// finding is that this body's declarations are not where a declaration goes,
-// and picking one out of the middle of a body is the body-wide search this
+// Carrier.Unreadable closes that: after the block ends, the scan keeps looking
+// for a GATE-BEARING declaration line further down, and reports one if it finds
+// it WITHOUT reading its value. The value is deliberately not returned — the
+// whole finding is that this body's declarations are not where a declaration
+// goes, and picking one out of the middle of a body is the body-wide search this
 // parser exists to refuse (see TestCarrierBlockIgnoresProseThatQuotesIt).
-func scanCarrierBlock(scanner *bufio.Scanner) (workflow, stage string, unreadable bool) {
+//
+// That outcome is what makes `reviews:` safe to put here at all (mg-aaf6). A
+// review ticket always declares `workflow:` and `stage:` in the same block, so a
+// block the parser cannot reach makes the item CarrierUnreadable and therefore
+// UNDISPATCHABLE — no review polecat is ever spawned, and the exemption that
+// would have read the `reviews:` line is never needed. Before mg-27d4 the same
+// body would have dispatched normally with its declaration silently unread, and
+// the builder would have been reaped mid-review while `mg show` displayed the
+// declaration perfectly to anyone who checked.
+func scanCarrierBlock(scanner *bufio.Scanner) Carrier {
+	var c Carrier
 	seen := 0
 	started := false
 	for scanner.Scan() && seen < carrierBlockScanLimit {
@@ -495,21 +579,25 @@ func scanCarrierBlock(scanner *bufio.Scanner) (workflow, stage string, unreadabl
 		}
 		key, val, ok := parseCarrierLine(line)
 		if !ok {
-			return workflow, stage, scanUnreachableCarrier(scanner, line)
+			c.Unreadable = scanUnreachableCarrier(scanner, line)
+			return c
 		}
 		started = true
 		switch key {
 		case "workflow":
-			workflow = val
+			c.Workflow = val
 		case "stage":
-			stage = val
+			c.Stage = val
+		case "reviews":
+			c.Reviews = val
 		}
 	}
 	// Falling out of the loop means the block ran to carrierBlockScanLimit and
 	// was TRUNCATED, not that it ended. Whatever is on line 17 was never read, so
 	// this is the same "could not reach" state and gets the same answer. No real
-	// carrier block is 16 lines long; the shipped one is three.
-	return workflow, stage, seen >= carrierBlockScanLimit
+	// carrier block is 16 lines long; the shipped one is four.
+	c.Unreadable = seen >= carrierBlockScanLimit
+	return c
 }
 
 // unreachableCarrierScanLimit bounds how far past the end of the leading block
@@ -579,6 +667,13 @@ func scanUnreachableCarrier(scanner *bufio.Scanner, stopLine string) bool {
 // is carrying one. `gh:` is not — it ties a ticket to an issue and changes no
 // dispatch decision, so gating an item over a stray one would refuse work for a
 // line that could not have gated it either way.
+//
+// `reviews:` is not either, for the same reason and one more (mg-aaf6). It
+// changes no dispatch decision — it is read after the fact, by the done-reaper,
+// about a polecat that is already running. And a body DISCUSSING the convention
+// is exactly the shape this ticket's own tree is full of: mg-89fe, mg-aaf6 and
+// this file all write «`reviews: mg-xxxx`» in prose. Gating on it would refuse
+// work over a sentence about the mechanism.
 func isGateBearingCarrierKey(key string) bool {
 	return key == "workflow" || key == "stage"
 }

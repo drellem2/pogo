@@ -59,6 +59,67 @@ import (
 // So the condition is a CONJUNCTION: the item is terminal AND the polecat has
 // been quiet on its PTY for doneReapIdleGrace.
 //
+// # THE REVIEW EXEMPTION (mg-aaf6, drellem2/pogo#131)
+//
+// The conjunction above is right for a polecat whose deliverable is finished. It
+// is WRONG for a builder on the gh-issue PR track, and the difference cost a
+// review round twice. There, the build item is supposed to stay `claimed`
+// through the whole review — the coordinator submits the branch and pogod closes
+// the item at merge — but a builder that calls `mg done` at PR-open anyway looks
+// from here exactly like a finished triage polecat: terminal item, quiet PTY.
+// Two minutes later it is gone, and the review polecat that was about to mail it
+// findings has no counterparty. The round dies leaving nothing that says why.
+//
+// The waits are not marginal. Measured over 17 real between-round builder waits
+// in this fleet's mail: median 8.3m, max 20.0m, and 15 of the 17 (88%) longer
+// than the two-minute grace. A self-closed builder is reaped in the ORDINARY
+// case here, not an edge one.
+//
+// So a third clause: the item is terminal AND the polecat is quiet AND no live
+// polecat's work item declares `reviews: <this item>`.
+//
+// WHY THAT DECLARATION AND NOT A TAG THE COORDINATOR CLEARS. The rejected shape
+// was a tag on the build item removed at the pass/abort transition. It fails for
+// the reason this whole ticket exists: it is enforcement by instruction-
+// following, and the report is that instruction-following failed twice. A
+// declaration someone must remember to CLEAR is state whose drift leaves no
+// artifact — forget it once and the item holds a dispatch slot forever, against
+// the per-repo cap (gh#128), with nothing anywhere saying so. That is mg-56d1's
+// leak returning through the fix for it. A declaration written ONCE AT CREATION
+// cannot rot, because its lifetime is bounded by something else's.
+//
+// AND IT IS SELF-CLEARING BY CONSTRUCTION: the exemption exists only while a
+// review polecat is ALIVE. When the reviewer exits — stopped by the coordinator
+// at the verdict, or reaped by this very reaper once its own item is done and it
+// goes quiet — the exemption evaporates on the next tick and the builder is
+// reaped normally. Nobody has to remember anything, and no ceiling has to be
+// guessed. That matters: a 15m ceiling (deferDoneBackstopTimeout, the analogous
+// number) was priced against those same 17 waits and 2 of them exceeded it, so a
+// ceiling would have reaped live work about one round in eight.
+//
+// WHY IT KEYS ON A CARRIER LINE AND NOT ON `depends`. `--depends` carries
+// DISPATCH semantics: it would gate the review ticket behind the build ticket,
+// and the build ticket cannot clear because it stays claimed through review. The
+// coordinator therefore files the review ticket with no depends edge on purpose
+// (mayor.md), so there is no edge here to read. The other candidate joins were
+// measured over the live store and both fail: a `gh:` ref join is ambiguous the
+// moment an issue is split into parts — gh#131 itself has two build carriers
+// sharing one ref — and a prose `mg-xxxx` scan is ambiguous in 17 of 23 real
+// cases, because review bodies name the triage ticket too.
+//
+// WHAT ITS OWN SILENCE LOOKS LIKE. An exemption that is never granted because it
+// is misconfigured and an exemption correctly not needed produce the same
+// nothing, so this one keeps a POSITIVE RECORD: the grant is logged once when it
+// starts, and the eventual reap says the polecat had been exempt and names the
+// reviewer that is now gone. A reader can see the guard fire and see it expire
+// without inferring either from an absence.
+//
+// THE RESIDUAL, STATED RATHER THAN LEFT TO BE FOUND: a review polecat that
+// wedges without exiting holds its builder exempt for as long as it lives. That
+// is bounded by the reviewer's own lifetime and is the same exposure the wedged
+// reviewer already represents on its own slot — it is orphanwatch's and
+// stallwatch's question, not this reaper's.
+//
 // GRACE PERIOD, NOT AN EXPLICIT "I AM FINISHED" SIGNAL. The alternative was to
 // have polecats declare completion. It was rejected: a signal the polecat must
 // remember to send fails for exactly the polecats that most need stopping — the
@@ -120,27 +181,46 @@ type doneReaper struct {
 	// reason — the expensive mistake here is asserting a completion we have no
 	// standing to assert.
 	itemDone func(id string) (bool, error)
+	// itemReviews returns the BUILD item id that a work item's `reviews:` carrier
+	// line names, or "" when it declares none (client.MGWorkItemReviews in
+	// production). An ERROR means "cannot tell" — an unreadable store, or a
+	// carrier block out of the parser's reach — and is LOGGED rather than read as
+	// "declares nothing", because those two answers point opposite ways.
+	//
+	// Nil disables the exemption entirely and the reaper behaves exactly as it
+	// did before mg-aaf6. That is the honest degraded mode for a daemon whose
+	// probe did not wire up, but it is fail-OPEN — the builder gets reaped — so
+	// production must always pass one.
+	itemReviews func(id string) (string, error)
 	// grace is the required PTY quiet window. Zero falls back to
 	// doneReapIdleGrace; a negative value would stop a done polecat the instant
 	// it is seen, which only a test should ask for.
 	grace time.Duration
 
-	// mu serialises Check against itself. The heartbeat fires every ~30s and
-	// dispatches this in a goroutine, while a Check shells out to `mg show`
-	// once per live polecat and can block on a slow store — so two Checks can
-	// overlap. Without the guard the second would re-decide against the same
-	// polecat the first is already stopping, and issue a duplicate Stop.
+	// mu serialises Check against itself, and guards exempt. The heartbeat fires
+	// every ~30s and dispatches this in a goroutine, while a Check shells out to
+	// `mg show` once per live polecat and can block on a slow store — so two
+	// Checks can overlap. Without the guard the second would re-decide against
+	// the same polecat the first is already stopping, and issue a duplicate Stop.
 	mu       sync.Mutex
 	checking bool
+	// exempt maps a polecat name to the review item currently holding it back
+	// from the reap, carried across ticks for ONE reason: so the grant is logged
+	// when it starts rather than on every 30-second heartbeat for the twenty
+	// minutes a review can run, and so the eventual reap can say the polecat had
+	// been exempt. It is a log-deduplication record, never an input to the
+	// decision — every tick re-derives the exemption from that tick's live set.
+	exempt map[string]string
 }
 
-// newDoneReaper builds a reaper over reg. done is the terminal-state probe;
+// newDoneReaper builds a reaper over reg. done is the terminal-state probe,
+// reviews the `reviews:` carrier probe (nil disables the review exemption);
 // grace of zero means doneReapIdleGrace.
-func newDoneReaper(reg doneReapRegistry, done func(id string) (bool, error), grace time.Duration) *doneReaper {
+func newDoneReaper(reg doneReapRegistry, done func(id string) (bool, error), reviews func(id string) (string, error), grace time.Duration) *doneReaper {
 	if grace == 0 {
 		grace = doneReapIdleGrace
 	}
-	return &doneReaper{reg: reg, itemDone: done, grace: grace}
+	return &doneReaper{reg: reg, itemDone: done, itemReviews: reviews, grace: grace}
 }
 
 // Check samples the live polecats and stops every one whose work item has
@@ -168,25 +248,64 @@ func (d *doneReaper) Check(now time.Time) []string {
 		d.mu.Unlock()
 	}()
 
+	live := d.reg.PolecatActivityAt(now)
+
+	// The review exemption is resolved LAZILY: it costs one `mg show` per live
+	// polecat, and on the overwhelming majority of ticks nothing is terminal, so
+	// there is nobody it could exempt. Built at most once per Check, and only
+	// once a candidate for the reap actually appears.
+	var reviewedBy map[string]string
+	openReviews := func() map[string]string {
+		if reviewedBy == nil {
+			reviewedBy = d.openReviews(live)
+		}
+		return reviewedBy
+	}
+
 	var stopped []string
-	for _, p := range d.reg.PolecatActivityAt(now) {
+	seen := make(map[string]bool, len(live))
+	for _, p := range live {
+		seen[p.Name] = true
 		if !d.eligible(p) {
 			continue
 		}
 		done, err := d.itemDone(p.WorkItemID)
 		if err != nil {
 			// Cannot read the item: say so and leave the polecat running. This
-			// is the only branch that logs a non-action, because it is the only
-			// one where the reaper wanted to decide and could not.
+			// is one of the two branches that log a non-action, because they are
+			// the ones where the reaper wanted to decide and could not.
 			log.Printf("donereap: could not read work item %s for polecat %s (%v) — leaving it running (mg-56d1)", p.WorkItemID, p.Name, err)
 			continue
 		}
 		if !done {
 			continue
 		}
+		if reviewer, held := openReviews()[p.WorkItemID]; held {
+			// The gh#131 case, caught. Logged ONCE per grant rather than every
+			// heartbeat — a review runs for a median of 8 minutes and this tick
+			// fires every 30 seconds — but logged, because a guard whose only
+			// evidence is an absence cannot be told from a guard that never ran.
+			if d.exempt[p.Name] != reviewer {
+				log.Printf("donereap: EXEMPTING polecat %s — its work item %s is done, but review item %s declares `reviews: %s` "+
+					"and its polecat is still running; not reaping while the review loop has a counterparty (mg-aaf6, gh#131)",
+					p.Name, p.WorkItemID, reviewer, p.WorkItemID)
+			}
+			if d.exempt == nil {
+				d.exempt = map[string]string{}
+			}
+			d.exempt[p.Name] = reviewer
+			continue
+		}
 		// The healthy, expected end of a non-merge polecat's life. Logged at
 		// info, never mailed: there is no fault here to escalate, and an
 		// escalation per completed triage would be pure noise.
+		if reviewer, was := d.exempt[p.Name]; was {
+			// The other half of the positive record: the exemption EXPIRED. This
+			// is what says the guard is bounded by the reviewer's lifetime rather
+			// than holding a slot forever.
+			log.Printf("donereap: review exemption for polecat %s has LAPSED — review item %s no longer has a running polecat; "+
+				"reaping normally (mg-aaf6)", p.Name, reviewer)
+		}
 		log.Printf("donereap: stopping polecat %s — work item %s is done and it has been idle %s (>= %s); freeing its slot (mg-56d1)",
 			p.Name, p.WorkItemID, p.IdleFor.Truncate(time.Second), d.grace)
 		if err := d.reg.Stop(p.Name, mergedPolecatStopTimeout); err != nil {
@@ -196,9 +315,58 @@ func (d *doneReaper) Check(now time.Time) []string {
 			log.Printf("donereap: failed to stop polecat %s: %v", p.Name, err)
 			continue
 		}
+		delete(d.exempt, p.Name)
 		stopped = append(stopped, p.Name)
 	}
+	// Forget polecats that are gone, so the map cannot grow across the lifetime
+	// of the daemon. Dropping an entry only re-arms the grant log; it can never
+	// change a decision.
+	for name := range d.exempt {
+		if !seen[name] {
+			delete(d.exempt, name)
+		}
+	}
 	return stopped
+}
+
+// openReviews maps each BUILD item that a LIVE polecat's work item declares it
+// reviews, to that reviewer's own item id. Membership is the exemption: the
+// builder is held back for exactly as long as a reviewer is running against it.
+//
+// Liveness comes from the same snapshot the reap decision is made against, so
+// there is no window in which the exemption is computed from a different fleet
+// than the one being reaped.
+//
+// A probe error is LOGGED and the reviewer contributes no exemption. That is
+// fail-open — the builder can then be reaped — and it is stated here rather than
+// hidden because the alternative is worse: inventing a target we could not read
+// would hold an arbitrary builder against a declaration nobody has seen. The log
+// line is what makes the difference visible; the store being unreadable is
+// already the loud condition it needs to be.
+func (d *doneReaper) openReviews(live []agent.PolecatActivity) map[string]string {
+	out := make(map[string]string)
+	if d.itemReviews == nil {
+		return out
+	}
+	for _, p := range live {
+		if p.WorkItemID == "" {
+			continue
+		}
+		target, err := d.itemReviews(p.WorkItemID)
+		if err != nil {
+			log.Printf("donereap: could not read the `reviews:` declaration on work item %s (polecat %s): %v — "+
+				"no review exemption from it this tick (mg-aaf6)", p.WorkItemID, p.Name, err)
+			continue
+		}
+		if target == "" || target == p.WorkItemID {
+			// A self-reference declares nothing useful and would exempt a polecat
+			// from its own completion forever. Never written by the coordinator;
+			// refused here so it cannot be.
+			continue
+		}
+		out[target] = p.WorkItemID
+	}
+	return out
 }
 
 // eligible applies the two cheap, local gates before the reaper spends an `mg
