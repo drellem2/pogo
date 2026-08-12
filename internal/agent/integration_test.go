@@ -286,7 +286,7 @@ func TestMayorStartSpawnPolecat(t *testing.T) {
 		Id:   "gt-abc",
 		Repo: "/tmp/fakerepo",
 	}
-	polecatPrompt, err := ExpandTemplateToFile(tmplPath, vars)
+	polecatPrompt, err := ExpandTemplateToFile(tmplPath, "abc", vars)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1887,6 +1887,9 @@ Flags:
 				WorktreeDir: a.WorktreeDir,
 			}, coordinator, client.SendMGMail)
 			a.Cleanup()
+			// Removes the spawn's expanded prompt file along with the registry
+			// entry — this is the branch on which the owner is not coming back,
+			// and the respawn arm above deliberately keeps it (mg-5197).
 			agentRegistry.Remove(a.Name)
 			// Eagerly reap this agent's mail-check loop so it stops firing the
 			// moment the agent is gone, rather than on the next Tick sweep
@@ -2895,6 +2898,11 @@ Flags:
 	// periodic ticker that deletes stale polecat-* branches and reclaims
 	// leaked worktrees once their work items have concluded. mg-30d5.
 	startGitGC(hbCtx, agentRegistry, cfg.GitGC, coordinator)
+
+	// Reclaim the per-spawn prompt files of polecats a previous pogod died
+	// holding. The same gap as the git GC's startup sweep, at the same moment,
+	// and deliberately not on its ticker or behind its flag. mg-5197.
+	sweepExpandedPromptsAtStartup(agentRegistry)
 
 	// Start the tier-1 heartbeat reaper: a goroutine (NOT a LaunchAgent — the
 	// wedge in mg-50e0 means we cannot rely on being spawned) that kickstarts

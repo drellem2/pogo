@@ -135,7 +135,7 @@ func TestExpandTemplateToFile(t *testing.T) {
 	}
 
 	vars := TemplateVars{Task: "Deploy hotfix", Id: "gt-x1"}
-	path, err := ExpandTemplateToFile(tmplPath, vars)
+	path, err := ExpandTemplateToFile(tmplPath, "expandfixture", vars)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -108,7 +108,7 @@ func renderPromptFile(t *testing.T, body string) string {
 	if err := os.WriteFile(tmplPath, []byte("Task: {{.Task}} ({{.Id}})\n\n{{.Body}}\n"), 0o644); err != nil {
 		t.Fatalf("writing template: %v", err)
 	}
-	path, err := agent.ExpandTemplateToFile(tmplPath, agent.TemplateVars{
+	path, err := agent.ExpandTemplateToFile(tmplPath, "bodyfile-fixture", agent.TemplateVars{
 		Task: "prove the body arrives verbatim",
 		Id:   "mg-8380",
 		Body: body,
