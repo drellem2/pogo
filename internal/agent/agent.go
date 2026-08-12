@@ -122,7 +122,12 @@ type Agent struct {
 
 	// master is the PTY master file descriptor. Not exported (held by pogod).
 	master *os.File
-	cmd    *exec.Cmd
+	// slave is the PTY slave, held open by pogod for as long as the child
+	// runs. The child has its own slave fds (stdin/stdout/stderr); this is a
+	// FOURTH one, and its only job is to keep the tty from being torn down at
+	// the instant the child exits. See startPTY (mg-9aa1).
+	slave *os.File
+	cmd   *exec.Cmd
 
 	// nudge is the provider's PTY-input dialect, captured at spawn from this
 	// agent's resolved provider (or DefaultNudgeProfile when none is set).
@@ -192,6 +197,12 @@ type Agent struct {
 
 	// done is closed when the agent process exits and output is drained.
 	done chan struct{}
+	// readerAttached is closed by readOutput immediately before its first
+	// Read. waitAndHandle waits for it before releasing the parent's slave fd,
+	// so the tty is never torn down while the reader is still unattached —
+	// which is the exact window in which output is lost (mg-9aa1, startPTY).
+	readerAttached chan struct{}
+
 	// outputDone is closed when the readOutput goroutine finishes.
 	outputDone chan struct{}
 	// exitErr holds the process exit error (nil on clean exit).
@@ -1024,7 +1035,7 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 	// group with the PTY slave as its controlling terminal. A signal aimed
 	// at one agent's group (or at pogod's) therefore never cascades to
 	// pogod or sibling agents. TestSpawnProcessGroupIsolation guards this.
-	master, err := pty.StartWithSize(cmd, winsize)
+	master, slave, err := startPTY(cmd, winsize)
 	if err != nil {
 		return nil, fmt.Errorf("pty start: %w", err)
 	}
@@ -1044,6 +1055,7 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 		WorkItemID:     req.WorkItemID,
 		ClaimedAtSpawn: req.ClaimedAtSpawn,
 		master:         master,
+		slave:          slave,
 		cmd:            cmd,
 		nudge:          nudge,
 		provider:       provider,
@@ -1053,11 +1065,22 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 		socketPath:     filepath.Join(r.socketDir, req.Name+".sock"),
 		done:           make(chan struct{}),
 		outputDone:     make(chan struct{}),
+		readerAttached: make(chan struct{}),
 	}
 
-	// Bind the attach socket before the PTY plumbing goroutines start and
-	// before the agent enters the registry, so a permanent bind failure can be
-	// undone with a kill instead of a partial teardown.
+	// Start the output reader FIRST — sole reader of master fd, fans out to
+	// ring buffer + any active attach connections.
+	//
+	// Before the attach listener, deliberately (mg-9aa1): until this goroutine
+	// runs, nothing is draining the PTY, and a child that writes and exits into
+	// an undrained tty loses its output to revocation. startPTY makes that
+	// survivable rather than fatal, but there is no reason to spend the socket
+	// bind inside the window as well.
+	go a.readOutput()
+
+	// Bind the attach socket before the agent enters the registry, so a
+	// permanent bind failure can be undone with a kill instead of a partial
+	// teardown.
 	//
 	// A permanent failure means this agent could never be attached to — the
 	// socket path itself is unusable — and returning a live agent (and a 201)
@@ -1074,10 +1097,6 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 		}
 		log.Printf("agent %s: attach listener failed: %v — supervisor will retry", req.Name, err)
 	}
-
-	// Start output reader — sole reader of master fd, fans out to
-	// ring buffer + any active attach connections
-	go a.readOutput()
 
 	// Start process reaper — waits for exit, fires onExit callback
 	go r.waitAndHandle(a)
@@ -1494,7 +1513,7 @@ func (r *Registry) respawn(name string, gen uint64, checkGen bool) (*Agent, erro
 
 	nudge, winsize := spawnDefaults(provider)
 
-	master, err := pty.StartWithSize(cmd, winsize)
+	master, slave, err := startPTY(cmd, winsize)
 	if err != nil {
 		return nil, fmt.Errorf("pty start: %w", err)
 	}
@@ -1515,6 +1534,7 @@ func (r *Registry) respawn(name string, gen uint64, checkGen bool) (*Agent, erro
 		InitialNudge:   old.InitialNudge,
 		WorkItemID:     old.WorkItemID,
 		master:         master,
+		slave:          slave,
 		cmd:            cmd,
 		nudge:          nudge,
 		provider:       provider,
@@ -1524,6 +1544,7 @@ func (r *Registry) respawn(name string, gen uint64, checkGen bool) (*Agent, erro
 		socketPath:     filepath.Join(r.socketDir, old.Name+".sock"),
 		done:           make(chan struct{}),
 		outputDone:     make(chan struct{}),
+		readerAttached: make(chan struct{}),
 	}
 
 	go a.readOutput()
@@ -1688,10 +1709,23 @@ func (a *Agent) ExitErr() error {
 	return a.exitErr
 }
 
+// readOutputStartHook, when non-nil, runs at the top of readOutput before the
+// first Read. It exists so a test can put the reader deterministically on the
+// LOSING side of the spawn/exit race that mg-9aa1 fixed — under load that is
+// what actually happened, and without a seam the regression can only be
+// reproduced by making the host busy and hoping. Nil in production.
+var readOutputStartHook func()
+
 // readOutput is the sole reader of the PTY master fd.
 // It fans out output to the ring buffer AND any active attach connections.
 func (a *Agent) readOutput() {
 	defer close(a.outputDone)
+	if readOutputStartHook != nil {
+		readOutputStartHook()
+	}
+	// Announce attachment BEFORE the first Read: waitAndHandle holds the tty
+	// open until it sees this.
+	close(a.readerAttached)
 	buf := make([]byte, 4096)
 	for {
 		n, err := a.master.Read(buf)
@@ -1716,9 +1750,124 @@ func (a *Agent) readOutput() {
 	}
 }
 
+// startPTY starts cmd on a new PTY and returns the master AND a slave fd that
+// the PARENT keeps open. It replaces pty.StartWithSize, which closes the slave
+// in the parent as soon as the child is started.
+//
+// Why the parent must hold a slave fd (mg-9aa1). On macOS, when the last slave
+// descriptor closes, the tty is torn down and any output still sitting in its
+// buffer is DISCARDED — a reader that has not yet issued its first Read gets
+// nothing at all, not a short read. Measured, not inferred: with the slave
+// closed at start (the old shape), a reader that arrives after the child is
+// reaped sees empty output in 20 of 20 trials at every delay from 0 to 500ms;
+// a reader that arrives before the child exits sees the output in 20 of 20.
+// So the old code was a race in which pogod normally won, and losing it cost
+// the ENTIRE output rather than delaying it. That is exactly the reported
+// failure — a process that exits cleanly having apparently written nothing.
+//
+// Holding a fourth slave fd in the parent keeps the tty alive across the
+// child's exit; waitAndHandle closes it once the child is reaped, which is what
+// finally gives readOutput its EOF. Costs one fd per running agent.
+//
+// What actually goes wrong without it is worth stating precisely, because the
+// obvious reading is wrong. An exiting session leader with undrained tty output
+// does not exit immediately EITHER WAY — it sits in `?Es` and cmd.Wait() blocks
+// while the output is unread. That much is true of the old shape too. The
+// difference is what happens next: with no other slave fd open, that wait ends
+// after roughly 0.6s in a tty revocation that DISCARDS the pending output, and
+// the reader that finally arrives sees a clean EOF with zero bytes. Measured
+// here: output left undrained for 2s was lost in 5 of 5 trials on the old
+// shape and survived 5 of 5 with the parent holding a slave. The reported
+// failure was a 0.61s test — that number is the revocation stall, not a
+// scheduling delay.
+//
+// So the window is not "the reader is a bit late", it is "nothing drained this
+// tty for ~0.6s", which is exactly what a loaded host does to a goroutine that
+// has not been scheduled yet. Holding the slave removes the revocation, so a
+// late reader costs latency instead of the entire output.
+//
+// The cost is that a reader which wedges ENTIRELY now holds the child in `?Es`
+// instead of letting it exit after 0.6s having lost its output. The old code
+// had the same exposure one step later — waitAndHandle blocked on outputDone
+// forever — so this deepens an existing hang rather than introducing a new
+// one, and it trades silent data loss for a visible stall.
+//
+// The isolation guarantee of gh #22 is preserved explicitly here: Setsid gives
+// every agent its own session and Setctty makes the slave its controlling
+// terminal, so a signal aimed at one agent's process group never reaches pogod
+// or a sibling. TestSpawnProcessGroupIsolation guards it.
+func startPTY(cmd *exec.Cmd, winsize *pty.Winsize) (master, slave *os.File, err error) {
+	master, slave, err = pty.Open()
+	if err != nil {
+		return nil, nil, err
+	}
+	if winsize != nil {
+		if err := pty.Setsize(master, winsize); err != nil {
+			master.Close()
+			slave.Close()
+			return nil, nil, err
+		}
+	}
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = slave, slave, slave
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.Setsid = true
+	cmd.SysProcAttr.Setctty = true
+	if err := cmd.Start(); err != nil {
+		master.Close()
+		slave.Close()
+		return nil, nil, err
+	}
+	return master, slave, nil
+}
+
+// readerAttachTimeout bounds how long waitAndHandle will hold the PTY open
+// waiting for readOutput to reach its first Read.
+//
+// This is a belt-and-braces guard, not the load-bearing part: because a child
+// holding output cannot finish exiting until that output is drained (see
+// startPTY), cmd.Wait() has almost always already returned BECAUSE the reader
+// attached and drained. The wait matters only for a child that exits having
+// written nothing, where there is nothing to drain and so nothing to lose
+// either. The bound keeps a wedged reader from stalling the exit path.
+const readerAttachTimeout = 5 * time.Second
+
+// closeSlave releases the parent's slave fd. Idempotent; safe to call from
+// Cleanup and from waitAndHandle in either order.
+func (a *Agent) closeSlave() {
+	a.mu.Lock()
+	s := a.slave
+	a.slave = nil
+	a.mu.Unlock()
+	if s != nil {
+		s.Close()
+	}
+}
+
 // waitAndHandle waits for the agent process to exit and fires the onExit callback.
 func (r *Registry) waitAndHandle(a *Agent) {
 	a.exitErr = a.cmd.Wait()
+
+	// The child is reaped, so nothing more can be written to this tty. Release
+	// the parent's slave fd: it was held so the child's exit could not discard
+	// output the reader had not collected yet (see startPTY), and dropping it
+	// now is what lets readOutput reach EOF and finish draining.
+	//
+	// Wait for the reader to be attached first. Releasing the slave IS the
+	// teardown, and a teardown observed by a reader's first Read is precisely
+	// what destroys the buffered output — so handing that instant to an
+	// unattached reader would reintroduce the bug with pogod, rather than the
+	// child, choosing the moment. The bound keeps a wedged reader from
+	// stalling the exit path forever; blocking on Done() is not worth a
+	// guarantee about output.
+	select {
+	case <-a.readerAttached:
+	case <-time.After(readerAttachTimeout):
+		log.Printf("agent %s: output reader never attached within %v; "+
+			"releasing the PTY anyway — trailing output may be lost", a.Name, readerAttachTimeout)
+	}
+	a.closeSlave()
 
 	// Wait for the output reader to drain all remaining PTY output before
 	// signaling done, so callers of Done() see the complete output.
@@ -1808,6 +1957,13 @@ func (a *Agent) Cleanup() {
 	if a.master != nil {
 		a.master.Close()
 		a.master = nil
+	}
+	// Teardown paths (a stale registration, a fatal listener bind) can run
+	// without waitAndHandle ever reaching its close, so release the parent's
+	// slave here too. Both sites are idempotent (mg-9aa1).
+	if a.slave != nil {
+		a.slave.Close()
+		a.slave = nil
 	}
 	a.retireListenerLocked()
 }
