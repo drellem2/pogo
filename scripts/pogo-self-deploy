@@ -2058,19 +2058,35 @@ durability_of() {
     #     the base ref. The genuine committed-but-unpushed case is untouched:
     #     nothing on origin holds those commits, so this test does not fire.
     #
+    #     THE VERDICT DELIBERATELY DOES NOT SAY "a reviewed PR". The reviewer is
+    #     why this test exists, not what it detects: any worktree whose HEAD is
+    #     held by a ref it did not push itself lands here, and a fresh worktree in
+    #     a repo with no resolvable integration ref does exactly that. Naming the
+    #     motivating case in the verdict would be false for every other caller —
+    #     and mg-0a43 wants this predicate lifted into gitgc, where it would be
+    #     false for all of them.
+    #
     #     THE SEAT IS LOAD-BEARING AND WAS MEASURED, IN BOTH DIRECTIONS. After
     #     (1) and (2) so their more specific details survive — moved above them, a
     #     fresh worktree and a landed branch both answer "some origin ref holds
-    #     HEAD" and four distinct durable paths collapse into one, which the
-    #     distinctness assertion in scripts/pogo-self-deploy_test.sh catches.
+    #     HEAD" and four distinct durable paths collapse into one. TWO assertions
+    #     in scripts/pogo-self-deploy_test.sh fail on that seat: the pre-existing
+    #     `awaiting the refinery` marker and count guards, which fire because (2b)
+    #     preempts test (1)'s wording for the pushed-and-unlanded branch; and the
+    #     distinct-durable-SHAPES count. The second of those only became true when
+    #     it was changed to elide the branch and worktree it interpolates — as
+    #     first written it compared raw lines, could not fail, and was cited here
+    #     as the guard anyway (gh#134, PR 140 round 1).
+    #
     #     Before (3) so it also answers when NO integration ref resolves: a
     #     reviewer on a repo whose base is neither main nor master read `unknown`,
     #     and `unknown` holds the drain identically to `unpushed`.
     #
     #     refs/remotes/origin/HEAD is excluded because it is a symref at the
     #     default branch: it would answer for the integration branch under a name
-    #     that says nothing about who pushed, i.e. it would shadow test (2)'s
-    #     wording for every fresh worktree while adding no information.
+    #     that says nothing about who pushed. THIS CHANGES THE NAME IN THE VERDICT,
+    #     NEVER THE VERDICT — measured, and asserted in the test suite, because an
+    #     exclusion nothing exercises is indistinguishable from a comment.
     #
     #     DETACHED HEAD IS DELIBERATELY NOT COVERED. A detached reviewer still
     #     reads `unknown` and still holds, because the branch is named above and
@@ -2083,7 +2099,7 @@ durability_of() {
                   refs/remotes/origin/ 2>/dev/null \
               | grep -v '^refs/remotes/origin/HEAD$' | head -n 1)"
     if [ -n "$holder" ]; then
-        echo "durable ${holder#refs/remotes/} holds every commit on $branch, which was never pushed from $wt (a reviewed PR's commits, carried on the builder's ref)"
+        echo "durable ${holder#refs/remotes/} holds every commit on $branch, which was never pushed from $wt"
         return 0
     fi
 
