@@ -25,15 +25,22 @@ package events
 //
 // # Why an exclusion list and not an allow list
 //
-// An allow list fails CLOSED on every event type nobody remembered to add,
-// including ones invented after this file was written. For a liveness index
-// that means silently ageing an agent that is fine — a detector inventing a
-// wedge out of its own incompleteness, which is the same class of bug one level
-// up. The exclusion list fails OPEN: a new event type counts as activity, which
-// is exactly the behaviour every one of these indexes had before this file
-// existed. The cost of that default is one more inversion going unnoticed until
-// somebody files it; the cost of the other default is a false wedge report for
-// every event type ever added. This package prices the second higher.
+// The deciding argument is about how membership is DECIDED, not about which
+// types are in the list today. An allow list decides membership by
+// ENUMERATION: an event type is activity because somebody listed it, so the
+// list has nothing to say about a type nobody thought of. An exclusion list
+// decides it by the rule below, which is a statement about who wrote the event
+// and why — and that generalises to types invented after this file.
+//
+// The failure directions follow from that and point the same way. An allow list
+// fails CLOSED on every type nobody remembered to add, which for a liveness
+// index means silently ageing an agent that is fine — a detector inventing a
+// wedge out of its own incompleteness, the same class of bug one level up. The
+// exclusion list fails OPEN: a new type counts as activity, which is exactly
+// the behaviour every one of these indexes had before this file existed. The
+// cost of that default is one more inversion going unnoticed until somebody
+// files it; the cost of the other is a false wedge report for every event type
+// ever added. This package prices the second higher.
 //
 // # Membership rule
 //
