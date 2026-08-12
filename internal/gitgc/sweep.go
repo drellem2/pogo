@@ -91,7 +91,20 @@ type BranchAction struct {
 	ID     string // resolved work-item ID; "" when unknown
 	State  TicketState
 	Reason string
+	// Durability is what was established about WHERE THE COMMITS ARE, as
+	// opposed to what the ticket says about the work (mg-0a43). It stays
+	// DurabilityNotChecked on every path that never asked — a live polecat, an
+	// in-flight ticket, a branch still checked out — because "not asked" and
+	// "asked and could not tell" are different facts and only the second one
+	// belongs in the at-risk report.
+	Durability DurabilityVerdict
 }
+
+// AtRisk reports whether this branch was kept because deleting it might have
+// lost commits. It is what separates the keeps an operator must act on from the
+// routine ones, and it is a method rather than an inlined comparison because
+// two callers ask (Summary here, and the sweep's own log line).
+func (a BranchAction) AtRisk() bool { return a.Durability.AtRisk() }
 
 // WorktreeAction records the GC decision for one polecat worktree.
 type WorktreeAction struct {
@@ -138,9 +151,10 @@ type Result struct {
 //
 //  1. Remove worktrees of concluded, non-live polecats, then `git worktree
 //     prune` any registration whose directory has vanished.
-//  2. Delete `polecat-*` branches whose ticket is concluded — archived
-//     unconditionally, done only once merged into the target branch —
-//     skipping any branch that is live or still checked out.
+//  2. Delete `polecat-*` branches whose ticket is concluded AND whose commits
+//     survive the deletion — done only once merged into the target branch,
+//     archived only once some origin ref holds the head or its patches landed
+//     (mg-0a43) — skipping any branch that is live or still checked out.
 //
 // Worktrees are handled before branches so that removing a worktree frees
 // its branch for deletion in the same pass. Sweep is conservative: an
@@ -330,9 +344,29 @@ func Sweep(opts Options) (Result, error) {
 			res.BranchesKept = append(res.BranchesKept, action)
 			continue
 		}
-		// Done (but not archived) tickets must be merged before deletion;
-		// archived tickets are deleted regardless — the work has concluded.
+		// THIS IS THE ONLY STEP IN THE WHOLE POLECAT LIFECYCLE THAT DESTROYS
+		// COMMITS. The worktree reap above does not — `git worktree remove`
+		// drops the tree, the local branch keeps the objects, and the commits
+		// stay reachable. The deploy drain does not. The refinery's branch-reap
+		// runs only after a successful merge. This does.
+		//
+		// So both arms below have to be facts about the BRANCH. The archived arm
+		// used to be an inference about the TICKET — `action.Reason = "ticket
+		// archived"`, with no check of any kind, on the reasoning that "the work
+		// has concluded" (mg-0a43). Ticket and branch are different objects, and
+		// the case where they diverge is routine rather than exotic: a polecat
+		// stops holding committed-but-unpushed work, the drain reports DEPARTED
+		// UNSATISFIED and proceeds (correctly — waiting protects nothing once the
+		// holder is dead, mg-797d), someone archives the item, and the commits
+		// are gone. Every other guard in this chain is conservative; this one was
+		// not, and it is the last one.
 		if state == TicketDone {
+			// UNCHANGED, and deliberately so. Ancestry is the wrong instrument
+			// for the destructive question — see BranchDurable — but here it
+			// fails CLOSED: it keeps branches that landed via rebase, which is a
+			// leak rather than a loss, and mg-0a43 is scoped to the arm that
+			// loses. Widening this one to BranchDurable would collect that leak
+			// and is a separate, non-urgent change.
 			merged, err := BranchMerged(opts.Repo, br, opts.TargetBranch)
 			if err != nil {
 				res.Errors = append(res.Errors, fmt.Sprintf("merge check %s: %v", br, err))
@@ -347,7 +381,24 @@ func Sweep(opts Options) (Result, error) {
 			}
 			action.Reason = "ticket done, merged"
 		} else {
-			action.Reason = "ticket archived"
+			// An archived ticket licenses a WEAKER durability bar than a done
+			// one — any origin ref holding the head clears it, not just the
+			// integration branch — but it does not license the absence of one.
+			verdict, detail := BranchDurable(opts.Repo, br, opts.TargetBranch)
+			action.Durability = verdict
+			if verdict.AtRisk() {
+				// Kept, and SAID. A branch holding the only copy of some commits
+				// is exactly the shape the dirty-worktree guard preserves one
+				// phase up (mg-ee02), and that guard logs its keeps; a silent
+				// one here would pin a branch nobody can find.
+				action.Reason = fmt.Sprintf("ticket archived, but %s", detail)
+				res.BranchesKept = append(res.BranchesKept, action)
+				opts.logf("kept branch %s (%s)", br, action.Reason)
+				continue
+			}
+			// The holder is named in the reason rather than summarised, so a
+			// deletion can be audited after the fact rather than trusted.
+			action.Reason = "ticket archived; " + detail
 		}
 
 		if opts.DryRun {
@@ -585,6 +636,19 @@ func (r Result) Summary() string {
 			fmt.Fprintf(&b, "    %s — %s\n", br.Branch, br.Reason)
 		}
 	}
+	// Branches kept because deleting them might have lost commits are itemised;
+	// the other keeps — live polecat, in-flight ticket, still checked out — stay
+	// a count, because there are typically a hundred of them and none needs
+	// anyone to do anything. This is the same asymmetry the kept-worktree
+	// listing above settled on: a preserved thing that nothing will ever
+	// self-clear has to name itself, or the operator is told a branch is stuck
+	// without being told which one.
+	if atRisk := atRiskBranches(r.BranchesKept); len(atRisk) > 0 {
+		fmt.Fprintf(&b, "  branches kept holding commits that may exist nowhere else:\n")
+		for _, br := range atRisk {
+			fmt.Fprintf(&b, "    %s — %s\n", br.Branch, br.Reason)
+		}
+	}
 	if r.PruneOutput != "" {
 		fmt.Fprintf(&b, "  worktree prune: %s\n", strings.ReplaceAll(r.PruneOutput, "\n", "; "))
 	}
@@ -608,6 +672,19 @@ func sortedBranches(in []BranchAction) []BranchAction {
 	out := append([]BranchAction(nil), in...)
 	sort.Slice(out, func(i, j int) bool { return out[i].Branch < out[j].Branch })
 	return out
+}
+
+// atRiskBranches returns the kept branches whose commits may exist nowhere
+// else, sorted by name. Both local-only and could-not-tell are included: see
+// DurabilityUnknown for why the second is not quietly dropped.
+func atRiskBranches(in []BranchAction) []BranchAction {
+	var out []BranchAction
+	for _, br := range in {
+		if br.AtRisk() {
+			out = append(out, br)
+		}
+	}
+	return sortedBranches(out)
 }
 
 func sortedWorktrees(in []WorktreeAction) []WorktreeAction {
