@@ -1797,11 +1797,46 @@ printf '%s\n' "$DEP_NOREPO" | grep -q '^unknown dep-local ' \
     # interval is not what is under test here, and a 15s literal in the loop is
     # deliberate (it is the drain's tick, not a tunable).
     #
-    # NOT a bare no-op, because case (D) needs the deadline to actually PASS
-    # between two polls, and every poll here happens in the same wall-clock
-    # second otherwise. `command sleep` so this stub cannot recurse into itself.
-    sleep() { command sleep "${DW135_SLEEP:-0}"; }
-    DW135_SLEEP=0
+    # THE CLOCK IS VIRTUAL, AND THAT IS THE POINT (mg-c026). Case (D) needs the
+    # deadline to PASS BETWEEN two polls, and it used to buy that with a REAL 1s
+    # deadline over a REAL `sleep 1` — i.e. by winning a race against the
+    # scheduler. It lost that race routinely, and when it lost, three assertions
+    # failed naming gh#135's departure reporting, on a suite that is the
+    # refinery's merge gate: the branch under test got implicated by the clock.
+    #
+    # It was worse than "flaky under load", because `date +%s` is SECOND-GRANULAR.
+    # The budget poll 1 actually got was not 1s but the REMAINDER of the wall-clock
+    # second the drain happened to start in — uniform in (0,1] — so the failure
+    # probability was roughly poll 1's own duration in seconds, on ANY box, at ANY
+    # load. Raising the timeout would only have lengthened the odds; it could not
+    # remove the race, because the race is between a real deadline and real work.
+    #
+    # So neither term is real any more. `date +%s` reads a counter, and `sleep N`
+    # advances that counter by N instead of sleeping. drain_wait's own polls
+    # therefore cross the deadline exactly where the case intends — between poll 1
+    # and poll 2 — no matter how long poll 1's git work actually takes. Only +%s
+    # is intercepted: `ts()` (date -u +%Y-...) must keep telling the truth, since
+    # err lines are stamped with it. DW135_CLOCK_READS is the guard: if drain_wait
+    # ever stops consulting this stub the cases below would silently revert to
+    # racing the scheduler, and case (D) asserts it did consult it.
+    DW135_CLOCK="$(mktemp)"; DW135_CLOCK_READS="$(mktemp)"
+    echo 1000000000 > "$DW135_CLOCK"; echo 0 > "$DW135_CLOCK_READS"
+    date() {
+        if [ "${1:-}" = "+%s" ]; then
+            echo $(( $(cat "$DW135_CLOCK_READS") + 1 )) > "$DW135_CLOCK_READS"
+            cat "$DW135_CLOCK"; return 0
+        fi
+        command date "$@"
+    }
+    # No real sleeping remains anywhere in this block, and the knob that used to
+    # arm it is deleted rather than left at 0: it existed solely to buy the race
+    # described above, so keeping it would leave the race one assignment away.
+    sleep() {
+        local secs="${1:-0}"
+        case "$secs" in ''|*[!0-9]*) ;;   # non-integer (e.g. 0.5): no clock move
+            *) echo $(( $(cat "$DW135_CLOCK") + secs )) > "$DW135_CLOCK" ;;
+        esac
+    }
     DW135_STATE="$(mktemp)"
     dw135_probe_seq() {   # $1,$2,... = bodies, one per successive poll
         DW135_BODIES=("$@")
@@ -1809,6 +1844,18 @@ printf '%s\n' "$DEP_NOREPO" | grep -q '^unknown dep-local ' \
         drain_probe() {
             local n; n="$(cat "$DW135_STATE")"
             echo $(( n + 1 )) > "$DW135_STATE"
+            # THE BOUND EXISTS BECAUSE THE CLOCK IS VIRTUAL. Case (D) is the one
+            # case whose exit depends on the deadline, and the deadline now moves
+            # only when the sleep stub moves it. So a future edit that breaks the
+            # advance does not make case (D) fail — it makes drain_wait spin
+            # forever on a clock that never reaches its deadline, and this suite
+            # is the refinery's merge gate. A gate that HANGS is worse than the
+            # flake this block was repaired for. Past the bound the probe forces
+            # the drain to a terminal path, so the breakage lands as the
+            # poll-count assertion failing with a number that names the cause.
+            if [ "$n" -ge 20 ]; then
+                printf '%s\n200' '{"draining":true,"count":0,"polecats":[]}'; return 0
+            fi
             printf '%s\n200' "${DW135_BODIES[$n]:-${DW135_BODIES[${#DW135_BODIES[@]}-1]}}"
         }
     }
@@ -1901,11 +1948,28 @@ printf '%s\n' "$DEP_NOREPO" | grep -q '^unknown dep-local ' \
     #     the stage the run ended in, and the run ended because of the deadline.
     #     Both halves are asserted, because getting the order wrong would still
     #     put every line in the record — it would only rename the alert.
-    DW135_SLEEP=1   # so the 1s deadline can actually pass between poll 1 and 2
+    #
+    #     The deadline passes between poll 1 and poll 2 because the `sleep 15`
+    #     between them advances the virtual clock past a 1s budget — NOT because
+    #     poll 1 finishes inside a real second. See the clock stub at the top of
+    #     this block for what that repair is worth and what it replaced.
     dw135_probe_seq "$(dep_body "dep-local=$MD_TMP/wt-dep-local" "wt-local=$MD_TMP/wt-local")" \
                     "$(dep_body "wt-local=$MD_TMP/wt-local")"
+    echo 0 > "$DW135_CLOCK_READS"
     DW135_RES="$(DW135_TIMEOUT=1 dw135)"
-    DW135_SLEEP=0
+    # THE GUARDS ON THE REPAIR ITSELF, and they come first because everything
+    # below is only load-independent if they hold. A clock stub that drain_wait
+    # bypasses is invisible: the cases would still pass on a quiet box, having
+    # quietly gone back to racing the scheduler. So assert (i) drain_wait DID
+    # read the virtual clock, and (ii) the deadline was crossed BETWEEN the two
+    # polls rather than during poll 1 — the poll count is 2, which is exactly the
+    # discriminator the flake used to fail on ('2|1' is one poll's answer).
+    [ "$(cat "$DW135_CLOCK_READS")" -ge 2 ] \
+        && pass "gh#135: the deadline case reads a VIRTUAL clock ($(cat "$DW135_CLOCK_READS") reads) — the assertions below cannot be decided by host load (mg-c026)" \
+        || fail "gh#135: drain_wait read the virtual clock $(cat "$DW135_CLOCK_READS") time(s) — the stub is being bypassed and the cases below are racing the real scheduler again"
+    [ "$(cat "$DW135_STATE")" = "2" ] \
+        && pass "gh#135: the deadline is crossed BETWEEN poll 1 and poll 2 — 2 polls ran, so the surviving-holder count is the second snapshot's and not the first's" \
+        || fail "gh#135: the deadline case ran $(cat "$DW135_STATE") poll(s), expected 2 — at 1 the count is the pre-departure snapshot's and the departure is not reconciled yet (the original mg-c026 flake); at the probe's bound of 20 the virtual clock stopped advancing and the deadline was never reachable"
     [ "$DW135_RES" = "1|1" ] \
         && pass "gh#135: the timeout path still reports the SURVIVING holder count and still exits 1 — adding the departure report did not change what the deadline decides" \
         || fail "gh#135: drain_wait's deadline path returned '$DW135_RES', expected '1|1' — the departure reporting displaced the timeout's own verdict"
@@ -1929,7 +1993,7 @@ printf '%s\n' "$DEP_NOREPO" | grep -q '^unknown dep-local ' \
         || fail "gh#135: the departure is absent from the reason record ($(cat "$DW135_REC"))"
     rm -f "$DW135_REC"
 
-    rm -f "$DW135_STATE" "$DW135_ERR" "$DW135_STDERR"
+    rm -f "$DW135_STATE" "$DW135_ERR" "$DW135_STDERR" "$DW135_CLOCK" "$DW135_CLOCK_READS"
 ) 2>/dev/null
 
 # --- do_prove: the deploy-time gate on the detector (mg-bfe5) ---------------
