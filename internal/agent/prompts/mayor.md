@@ -658,6 +658,28 @@ pogo schedule list              # the raw table: completed/delivered per schedul
   its counters and every crew agent re-registers on startup. If a finding arrives, it
   has already survived those gates.
 
+### 3c. Check the one-shots you sent were answered
+
+Everything in 3b is about **recurring** schedules: a deficit is a ratio over
+repeated fires, and ack-watch's cohort gate excludes `Cadence <= 0`, which is every
+one-shot. So the schedules you use for the things that happen ONCE — a post-redeploy
+verification, a gate lift, a pre-deploy step — are outside all of it, and they are
+the ones with no next cycle to catch a silent no-op.
+
+```bash
+pogo check-oneshots             # one-shots that fired and nobody ever answered
+```
+
+Each finding names the schedule, the agent it fired into, and what it was carrying,
+so an obligation that evaporated can be re-issued rather than merely counted. Run it
+after any window where an agent was down, wedged, or out of tokens: a one-shot fired
+into a dead agent leaves a `one_shot_unacked` record and nothing else. **You are
+usually both the sender and the recipient of these** (`verify-absentwatch-live-mayor`
+was yours), so nobody else is positioned to notice.
+
+If it reports `NOT MEASURABLE`, the running pogod predates `d71e1e2` and this class
+cannot be observed at all yet — check `/version` before reading a clean result as one.
+
 ### 4. Handle QA for completed work
 
 When a {{.Worker}} completes a work item, check whether the work item has a `qa` field in its frontmatter (visible via `mg show <id>`). The `qa` field determines what happens after the work is done:

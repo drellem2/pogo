@@ -597,6 +597,14 @@ answer "why did this schedule disappear?" from the log alone (mg-8e5d).
   - `removed_at` (string, RFC3339)
   - `reason` (string): one of the values below
   - `error` (string, optional): present when the removal was caused by a failure
+  - `kind`, `message` (string, **one-shots only**, mg-8011): what the one-shot
+    WAS. A one-shot's removal record is the only surviving trace of it — the
+    entry is gone from `schedules.json` by the time anything reads the log — and
+    a `--id`-less `pogo schedule --once` is called `sch-<hex>`, which names
+    nothing, so without the message no reader can say what obligation was
+    missed. `message` is whitespace-collapsed and truncated to 200 runes.
+    Recurring schedules carry neither: their message is boilerplate repeated on
+    every removal, and their id plus cron already identify them.
 
 | `reason` | Meaning |
 |---|---|
@@ -633,6 +641,27 @@ guards the label.
 
 The usual caveat still applies: an agent can forget to ack, so
 `one_shot_unacked` means nobody answered, not that the work failed.
+
+**Who reads it (mg-8011).** `pogo check-oneshots` is the consumer, and the
+`one-shot acks` row in `pogo doctor --check` is its summary. Until that shipped
+the split existed and nothing looked at it, which from a human's seat is the
+original defect unchanged: a one-shot firing into a dead agent produced a
+correctly-labelled record, and no alarm, no row and no digest line. The reader
+lives in `internal/scheduler/oneshotoutcomes.go` — the same package as the
+writer, so both ends share one set of reason constants and a rename cannot leave
+a reader quietly matching nothing.
+
+It joins `scheduler_fire_delivered` onto each removal to say how long the fire
+sat, and that join is deliberately **not** windowed: a one-shot is reaped 24h
+after firing, so in any window shorter than a day the delivery record is outside
+it and a windowed join would report a zero wait.
+
+**A window written by an older pogod is reported as unmeasurable, never as
+clean.** These four labels ship in `d71e1e2` and are inert until pogod is rebuilt
+onto it; before that every one-shot leaves as the retired `one_shot_complete`.
+Finding that label in the window means an unanswered one-shot would be invisible,
+so the reader says so instead of printing a zero it cannot stand behind — see
+mg-afd0 / mg-3141 for the confusion class this avoids joining.
 
 ### Refinery
 

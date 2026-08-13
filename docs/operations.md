@@ -1259,6 +1259,74 @@ but it means a silently-changed encoding would report zero findings forever. Exi
 3 is how a blind run says so instead of printing an all-clear it has not earned,
 and the probe count on the clean line is the positive control for the rest.
 
+## Did a one-shot fire with nobody answering it? (`pogo check-oneshots`)
+
+A recurring schedule that silently stops accomplishing anything shows up as a
+growing unacked streak, and ack-watch escalates on it. **A one-shot has no
+streak to grow.** It fires once, is never retried, and the obligations sent that
+way are precisely the ones with no next cycle: post-redeploy verification,
+`revision-check-post-0300`, pre-deploy steps.
+
+```
+$ pogo check-oneshots
+One-shot obligations in the 2026-08-06 09:00 to 09:00
+  read from: /Users/daniel/.pogo/events.log
+
+UNANSWERED (1) — fired, and no turn ever reported the work done:
+
+  verify-absentwatch-live-mayor → mayor, 2026-08-14 03:21
+    reason:  one_shot_unacked
+    kind:    other
+    fired:   2026-08-13 03:21:00 (unanswered for 24h0m)
+    carried: Verify the absentwatch fix is live on the running pogod, then reply on mg-7d20.
+```
+
+`pogo doctor --check` carries the same finding as its `one-shot acks` row. The
+row warns and never fails: an unanswered one-shot is a missed obligation, not a
+broken host, and putting it in the path of anything scripted against doctor's
+exit status is how a detector grows into a gate.
+
+### Two halves, filed a day apart
+
+mg-64e6 made the outcome **recordable** — a fired one-shot is retained until it
+is acked or its 24h window closes, and the single misleading `one_shot_complete`
+became `one_shot_acked` / `one_shot_unacked` / `one_shot_undelivered` /
+`one_shot_skipped`. It stopped there on purpose. mg-8011 is the consumer, filed
+because a deferred half with no ticket dies with its gate: for a day the
+distinction existed and **nothing read it**, which from a human's seat is the
+original failure unchanged.
+
+`verify-absentwatch-live-mayor` is the specimen. It carried mg-7d20's owed
+post-redeploy verification and fired at 02:21 into a mayor that happened to be
+alive. Had it not been, the record would have been indistinguishable from
+success.
+
+### It reports what the log RECORDS
+
+Printed on every verdict, because both readings are easy to overstate: a
+one-shot acked by an agent that then did nothing counts as **answered** here, and
+a fire still inside its 24h ack window is neither answered nor missed (the row
+counts those separately as in-flight).
+
+### A window an older pogod wrote is reported as unmeasurable
+
+The four labels ship in `d71e1e2`, which is **inert until pogod is rebuilt onto
+it**. Before that every one-shot leaves as the retired `one_shot_complete`, and a
+naive reader would print "no unanswered one-shots" over a fleet where the class
+cannot be observed at all. Finding that label in the window makes this command
+say so and exit 1 instead — the same trap that produced mg-afd0 and mg-3141.
+`curl -s http://127.0.0.1:10000/version | jq -r .revision` answers what is
+actually running.
+
+### Not in ack-watch, and that is a decision
+
+`internal/ackwatch`'s cohort gate excludes `Cadence <= 0`, which is every
+one-shot, so ack-watch has never seen this population. That gate is load-bearing
+there: its model is a delivered:completed **ratio** over repeated fires, which a
+schedule that fires once cannot have. Folding one-shots into that cohort is a
+judgment someone should make on its own evidence, not a wiring detail smuggled in
+by a consumer.
+
 ## Who gets told when a polecat leaves pushed work behind
 
 There are **two** automatic reporters, and between them they cover every polecat
