@@ -323,18 +323,80 @@ func TestAnItemWithNoCreatorSendsNothingAndSaysSo(t *testing.T) {
 	}
 }
 
-// An item closed with no verdict says so in words. That is a real finding — it
-// is the shape a worker leaves when it skips --verdict-file (mg-dfea) — and it
-// must not read the same as a notifier that failed to look.
-func TestAMissingVerdictIsStatedRatherThanOmitted(t *testing.T) {
+// An item closed with no readable verdict says so in words rather than going
+// quiet. What it must NOT do is call the reading a finding: mg makes an item
+// visible in done/ before its sidecar lands, so this read can precede the write
+// (mg-be19). The old wording — "NONE RECORDED — the item closed with no readable
+// result sidecar" — asserted an absence a read at the close cannot establish.
+func TestAMissingVerdictIsReportedAsAReadingNotAnAbsence(t *testing.T) {
 	rec := &recorder{}
 	n := New("mayor", rec.send, filing("pm-riemann", "t"), resultOf(""), knownSet("pm-riemann", "mayor"))
 
 	n.Notify(Completion{Closed: true, ItemID: "mg-1111", Route: RouteSelfClose, Worker: "p1111"})
 
 	body := rec.last().body
-	if !strings.Contains(body, "NONE RECORDED") {
-		t.Errorf("body must state that no verdict was recorded:\n%s", body)
+	if !strings.Contains(body, "Verdict:") {
+		t.Errorf("body must still state that nothing was read — silence is the defect:\n%s", body)
+	}
+	if strings.Contains(body, "NONE RECORDED") {
+		t.Errorf("the notice must not assert an absence its own read cannot establish (mg-be19):\n%s", body)
+	}
+	// The reader has to be able to settle it, and the command has to name THIS
+	// item: a notice that says "go and look" without saying where is the same
+	// glob-it-yourself invitation that produced the other three false absences.
+	if !strings.Contains(body, "mg sidecar mg-1111") {
+		t.Errorf("body must hand the reader the command that settles it, for this item:\n%s", body)
+	}
+	// The true case is still readable. A worker that skipped --verdict-file
+	// leaves exactly this shape (mg-dfea) and that is the commonest cause; the
+	// hedge must not bury it.
+	if !strings.Contains(body, "mg-dfea") {
+		t.Errorf("body must still name the likeliest cause, a skipped --verdict-file:\n%s", body)
+	}
+}
+
+// A STORE THAT COULD NOT BE READ IS NOT A WORKER THAT RECORDED NOTHING
+// (mg-be19). resolveResult used to return "" on a failed read, which reached the
+// filer through the same wording as a genuine absence — a failure of the
+// instrument rendered as a fact about the work.
+func TestAnUnreadableSidecarIsReportedAsUnreadableNotAsAbsent(t *testing.T) {
+	rec := &recorder{}
+	boom := errors.New("read /Users/x/.macguffin/work/done/mg-1212.result.json: permission denied")
+	n := New("mayor", rec.send, filing("pm-riemann", "t"),
+		func(string) (string, error) { return "", boom }, knownSet("pm-riemann", "mayor"))
+
+	n.Notify(Completion{Closed: true, ItemID: "mg-1212", Route: RouteSelfClose, Worker: "p1212"})
+
+	body := rec.last().body
+	if !strings.Contains(body, "UNREADABLE") {
+		t.Errorf("a failed read must be labelled as one:\n%s", body)
+	}
+	if !strings.Contains(body, "permission denied") {
+		t.Errorf("the mail must carry the error itself — the reader is the one who can act on it:\n%s", body)
+	}
+	if strings.Contains(body, "NOT READ — this item closed") {
+		t.Errorf("a failed read must not be rendered as an empty one:\n%s", body)
+	}
+}
+
+// The caller's copy survives a failed store read. The merge route hands in the
+// sidecar it just wrote; discarding it because a separate read failed throws
+// away the one verdict in hand (mg-be19).
+func TestAFailedStoreReadDoesNotDiscardTheCallersSidecar(t *testing.T) {
+	rec := &recorder{}
+	n := New("mayor", rec.send, filing("pm-pogo", "t"),
+		func(string) (string, error) { return "", errors.New("store unreadable") },
+		knownSet("pm-pogo", "mayor"))
+
+	n.Notify(Completion{Closed: true, ItemID: "mg-1313", Route: RouteMerge, Worker: "p1313",
+		Result: `{"verdict":"from the caller"}`})
+
+	body := rec.last().body
+	if !strings.Contains(body, "from the caller") {
+		t.Errorf("the caller's copy must be used when the store read fails:\n%s", body)
+	}
+	if strings.Contains(body, "UNREADABLE") {
+		t.Errorf("a read error with a usable fallback is not a reportable absence:\n%s", body)
 	}
 }
 

@@ -240,7 +240,13 @@ func (n *Notifier) Notify(c Completion) Outcome {
 	}
 	// Resolved once, before any decision: it is both the dedup fingerprint and
 	// the most useful line in the mail, and the two must be the same reading.
-	res := n.resolveResult(c)
+	//
+	// readErr travels with it because a sidecar that could not be READ and one
+	// that does not EXIST are different facts and only one of them is about the
+	// work (mg-be19). It is deliberately NOT part of the dedup key: a read that
+	// failed has established nothing, so the next observation of the same
+	// completion must be free to try again and say something better.
+	res, readErr := n.resolveResult(c)
 	if n.alreadySent(c, res) {
 		return Outcome{Skipped: "already notified for this completion"}
 	}
@@ -255,7 +261,7 @@ func (n *Notifier) Notify(c Completion) Outcome {
 			fmt.Sprintf("Work item %s %s, and pogod could not read its creator to tell them:\n\n  %v\n\n"+
 				"Nothing else in the completion path notifies a filer (mg-f120), so if this item was commissioned, "+
 				"its commissioner has not been told. Check `mg show %s` for the Creator and pass the result on.\n\n%s",
-				c.ItemID, happened(c), err, c.ItemID, detail(c, res)))
+				c.ItemID, happened(c), err, c.ItemID, detail(c, res, readErr)))
 	}
 	if creator == "" {
 		// An item with no recorded creator has nobody waiting on it that we can
@@ -308,25 +314,37 @@ func (n *Notifier) Notify(c Completion) Outcome {
 	if redirected {
 		subject = fmt.Sprintf("%s: %s (filed by %s, who is gone) — %s", headline(c), c.ItemID, creator, oneLine(title))
 	}
-	return n.send(c, res, to, redirected, creator, subject, body(c, res, creator, title, redirected))
+	return n.send(c, res, to, redirected, creator, subject, body(c, res, readErr, creator, title, redirected))
 }
 
 // resolveResult reads the item's result sidecar from the store, falling back to
-// the caller's copy when the store yields nothing. The error is folded into the
-// returned string as a legible statement rather than returned separately: a
-// sidecar that could not be READ and one that does not EXIST are different
-// facts, and both of them belong in the mail.
-func (n *Notifier) resolveResult(c Completion) string {
+// the caller's copy when the store yields nothing.
+//
+// THE READ ERROR IS RETURNED, NOT SWALLOWED (mg-be19). This function used to
+// return "" on a failed read, which handed `verdict` a value it could not tell
+// apart from "the worker recorded nothing" — so a store that could not be read
+// was rendered to the filer as a worker that produced no verdict. That is the
+// false-absence direction, and it is the direction that costs: the reader
+// concludes something about the WORK from a failure of the INSTRUMENT.
+//
+// A failed store read also no longer discards the caller's copy. The merge
+// route hands in the sidecar it just wrote; refusing to use it because a
+// separate read failed throws away the one verdict in hand.
+func (n *Notifier) resolveResult(c Completion) (string, error) {
+	var readErr error
 	if n.result != nil {
 		got, err := n.result(c.ItemID)
-		if err != nil {
-			return ""
-		}
-		if strings.TrimSpace(got) != "" {
-			return strings.TrimSpace(got)
+		switch {
+		case err != nil:
+			readErr = err
+		case strings.TrimSpace(got) != "":
+			return strings.TrimSpace(got), nil
 		}
 	}
-	return strings.TrimSpace(c.Result)
+	if fallback := strings.TrimSpace(c.Result); fallback != "" {
+		return fallback, nil
+	}
+	return "", readErr
 }
 
 // headline is the subject-line verdict: what this mail is ABOUT. A merge that
@@ -349,7 +367,7 @@ func happened(c Completion) string {
 }
 
 // body is the notification a filer reads.
-func body(c Completion, res, creator, title string, redirected bool) string {
+func body(c Completion, res string, readErr error, creator, title string, redirected bool) string {
 	var b strings.Builder
 	if redirected {
 		fmt.Fprintf(&b, "This is %s's mail, redirected to you: %s is not a live agent, so it has no reader.\n"+
@@ -393,37 +411,78 @@ func body(c Completion, res, creator, title string, redirected bool) string {
 		fmt.Fprintf(&b, "Closed: by its worker calling `mg done` — no merge; the deliverable is the record, not a branch\n")
 	}
 	b.WriteString("\n")
-	b.WriteString(verdict(res, c.Closed))
+	b.WriteString(verdict(c, res, readErr))
 	b.WriteString("\n\nYou are getting this because you are the item's Creator. Nothing else in the completion\n" +
 		"path tells a filer: the refinery mails the coordinator, pogod closes the item, and the\n" +
 		"coordinator archives it (mg-f120). Read the full record with `mg show " + c.ItemID + "`.\n")
 	return b.String()
 }
 
-// verdict renders the worker's own result, or states plainly that there is
-// none. "No verdict was recorded" is a fact worth reading — it is the shape a
-// worker leaves when it skips `--verdict-file` at submit (mg-dfea) — and it must
-// not be indistinguishable from a notifier that failed to look.
-func verdict(res string, closed bool) string {
-	if res == "" && !closed {
+// verdict renders the worker's own result, or says exactly what this notice
+// established about its absence — which is less than "there is none".
+//
+// # THE ABSENCE THIS NOTICE CAN ASSERT IS SMALLER THAN THE ONE IT USED TO
+// (mg-be19)
+//
+// The old wording was `NONE RECORDED — the item closed with no readable result
+// sidecar`. It is a real read at a moment that may be too early, and it reported
+// the reading as a property of the work. Two separate mechanisms make that read
+// come back empty on an item that HAS a verdict:
+//
+//   - The close did not happen. Handled below and separately worded (mg-2b71).
+//   - The read preceded the write. `mg done --result` makes the item visible in
+//     `done/` BEFORE its sidecar lands beside it — measured in 14 of 15 closes
+//     with a 400 KB result, median window 0.14 ms, max 0.42 ms. An observer that
+//     decides "this item is done" from the store and then reads the sidecar can
+//     land inside that window. It is narrow, and it is not nothing.
+//
+// So the report names the reading and the moment, and hands the reader the one
+// command that settles it. `mg sidecar <id>` resolves the item and reads the
+// sidecar beside it wherever it now lives — done/ or archive/YYYY-MM/ — which is
+// the lookup that four separate instruments got wrong on 2026-08-13, each of them
+// publishing a false absence.
+//
+// A real absence is still worth reading and still says so: a worker that skips
+// `--verdict-file` at submit leaves exactly this shape (mg-dfea), and that is the
+// commonest cause by far. What is removed is the claim that this notice can tell
+// which one it is looking at.
+func verdict(c Completion, res string, readErr error) string {
+	if res != "" {
+		return "Verdict (the worker's result sidecar, verbatim):\n" + indent(res, "  ")
+	}
+	if readErr != nil {
+		// A FAILURE OF THE INSTRUMENT, LABELLED AS ONE. Until mg-be19 this
+		// returned the same empty string as a sidecar that was absent, so a
+		// store pogod could not read reached the filer as a worker that
+		// recorded nothing.
+		return "Verdict: UNREADABLE — pogod could not read this item's result sidecar:\n" +
+			indent(readErr.Error(), "           ") + "\n" +
+			"         That is a failure of THIS NOTICE'S instrument and says nothing about the\n" +
+			"         work. Read it yourself with `mg sidecar " + c.ItemID + "`."
+	}
+	if !c.Closed {
 		// The missing sidecar is a CONSEQUENCE of the close not happening, not a
 		// defect of a close that did. Reported as the latter — which is what the
-		// unconditional wording below did — it invites the reader to conclude the
-		// close happened sloppily, when it did not happen at all, and that reading
-		// compounds the false report rather than qualifying it (mg-2b71).
+		// single unconditional `NONE RECORDED` these two branches replaced did —
+		// it invites the reader to conclude the close happened sloppily, when it
+		// did not happen at all, and that reading compounds the false report
+		// rather than qualifying it (mg-2b71).
 		return "Verdict: NONE — mg writes the result sidecar at the close, and this item did not close.\n" +
 			"         Its absence here says nothing about the work."
 	}
-	if res == "" {
-		return "Verdict: NONE RECORDED — the item closed with no readable result sidecar, so there is\n" +
-			"         no statement of how the work came out beyond the item's own history (mg-dfea)."
-	}
-	return "Verdict (the worker's result sidecar, verbatim):\n" + indent(res, "  ")
+	return "Verdict: NOT READ — this item closed, and no result sidecar was readable for it at the\n" +
+		"         moment this notice was composed (see the Date: header). That is a READING, and\n" +
+		"         it does not establish that no verdict exists: mg makes an item visible in done/\n" +
+		"         before its sidecar lands, so a read taken at the close can precede the write it\n" +
+		"         is looking for (mg-be19). The likeliest cause is still a worker that skipped\n" +
+		"         `--verdict-file` at submit (mg-dfea) — a real absence — but this notice cannot\n" +
+		"         tell the two apart. One command settles it, and it looks in the archive too:\n\n" +
+		"             mg sidecar " + c.ItemID
 }
 
 // detail is the short context block used by the escalation paths, where there
 // is no creator to address and the coordinator needs the facts anyway.
-func detail(c Completion, res string) string {
+func detail(c Completion, res string, readErr error) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Route:  %s\n", c.Route)
 	if c.Branch != "" {
@@ -432,7 +491,7 @@ func detail(c Completion, res string) string {
 	if c.MergedSHA != "" {
 		fmt.Fprintf(&b, "SHA:    %s\n", c.MergedSHA)
 	}
-	b.WriteString("\n" + verdict(res, c.Closed))
+	b.WriteString("\n" + verdict(c, res, readErr))
 	return b.String()
 }
 
