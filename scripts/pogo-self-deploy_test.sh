@@ -1993,6 +1993,146 @@ printf '%s\n' "$DEP_NOREPO" | grep -q '^unknown dep-local ' \
         || fail "gh#135: the departure is absent from the reason record ($(cat "$DW135_REC"))"
     rm -f "$DW135_REC"
 
+    # === mg-8bb1: pogod WEDGED, witness reports idle =======================
+    # The ledger's FOURTH seat, and the THIRD exit that CLEARS (rc 0) — the two
+    # counts are of different things and both appear in the ticket, so: the
+    # deadline case above is the ledger's third seat but exits 1, and refuses
+    # unless --force.
+    #
+    # THE DEFECT, as p7182 measured it while reviewing gh#135's PR. drain_wait
+    # has one more exit that PROCEEDS, and gh#135 did not seat it: pogod stops
+    # answering, `witness_alive_count` says nothing is alive, and the drain
+    # returned rc=0 with an EMPTY ERR_LOG while printing "bouncing a wedged
+    # pogod strands nothing and IS the repair". Half of that was checked. The
+    # witness answers a question about PROCESSES; the sentence makes a claim
+    # about COMMITS; and a polecat that stopped mid-drain holding local-only
+    # work separates the two — it is invisible to the witness for exactly the
+    # reason it is at risk. So the message told the operator that stranding was
+    # impossible at the moment it was happening.
+    #
+    # This is also the exit where a bounce is MOST likely to be the right move,
+    # which is why every case below asserts rc=0. The fix is that the operator
+    # is told what is at risk while the bounce still happens — not that the
+    # bounce is prevented (mg-853a, and gh#135's own report-and-proceed rule).
+    #
+    # The witness is stubbed rather than reached: `witness_alive_count` shells
+    # out to the `pogo` binary this script DEPLOYS, and what is under test here
+    # is what drain_wait does with the answer, not how the answer is obtained.
+    witness_alive_count() { echo "${DW8BB1_LIVE:-0}"; return "${DW8BB1_WRC:-0}"; }
+    DW8BB1_LIVE=0; DW8BB1_WRC=0
+
+    # Poll 1 is $1 at HTTP 200 (empty $1 = no readable poll ever); every later
+    # poll is HTTP 000 with an EMPTY BODY, which is what curl leaves behind on a
+    # refused connection and therefore what $body actually holds at the wedged
+    # exit. The DRAIN_UNREADABLE_LIMIT=3 samples are all real polls.
+    dw8bb1_probe_seq() {
+        DW8BB1_P1="$1"; DW8BB1_HOOK="${2:-}"
+        echo 0 > "$DW135_STATE"
+        drain_probe() {
+            local n; n="$(cat "$DW135_STATE")"
+            echo $(( n + 1 )) > "$DW135_STATE"
+            if [ "$n" -eq 0 ] && [ -n "$DW8BB1_P1" ]; then printf '%s\n200' "$DW8BB1_P1"; return 0; fi
+            # The hook runs on EVERY unreadable poll, not once: drain_probe is
+            # called inside `$(...)`, so nothing it assigns survives the call —
+            # which is why the poll counter above is a FILE. It must therefore
+            # be idempotent, and `git push` of an already-pushed branch is.
+            [ -n "$DW8BB1_HOOK" ] && eval "$DW8BB1_HOOK"
+            printf '\n000'
+        }
+    }
+    # 100s, not the 5s the other cases use: poll 1's `sleep 15` advances the
+    # virtual clock, and a deadline inside that would exit 1 through the timeout
+    # path before the wedged branch is ever reached — the case would pass its
+    # rc assertion for the wrong reason and assert nothing about this seat.
+    DW8BB1_TIMEOUT=100
+
+    # (E) THE REPORTED CASE. Two genuine holders on poll 1, then silence. The
+    #     old code returned rc=0 with an EMPTY ERR_LOG over both branches.
+    DW8BB1_E1="$(dep_body "dep-local=$MD_TMP/wt-dep-local" "dep=$MD_TMP/wt-dep")"
+    [ "$(drain_unpushed_holders "$(drain_durability "$DW8BB1_E1")")" = "2" ] \
+        && pass "mg-8bb1 fixture: both polecats are genuine HOLDERS on poll 1 — without this the ledger is empty and every assertion below goes green over nothing" \
+        || fail "mg-8bb1 fixture: expected 2 holders on poll 1, got $(drain_unpushed_holders "$(drain_durability "$DW8BB1_E1")")"
+    dw8bb1_probe_seq "$DW8BB1_E1"
+    DW135_RES="$(DW135_TIMEOUT=$DW8BB1_TIMEOUT dw135)"
+    [ "$DW135_RES" = "0|0" ] \
+        && pass "mg-8bb1: a wedged pogod with an idle witness still CLEARS — the bounce is the repair and reporting must not turn it into a refusal (mg-853a)" \
+        || fail "mg-8bb1: drain_wait returned '$DW135_RES' at the wedged exit, expected '0|0' — the report became a block, which is the failure mode this ticket was told not to rebuild"
+    grep -q 'departed-unsatisfied dep-local (mg-dep-local):' "$DW135_ERR" \
+        && pass "mg-8bb1: THE REPORTED CASE — the wedged exit now reconciles the ledger, and the stranded branch reaches ERR_LOG (the reason record and the nightly's RED path)" \
+        || fail "mg-8bb1: nothing about the departed holder reached ERR_LOG ($(cat "$DW135_ERR")) — rc=0 with an empty error log over commits that exist only on this host, which is the whole ticket"
+    grep -q 'departed-unsatisfied dep (mg-dep):' "$DW135_ERR" \
+        && pass "mg-8bb1: BOTH holders are reported, not just the first — the reconciliation walks the ledger rather than sampling it" \
+        || fail "mg-8bb1: only one of the two departed holders was reported ($(cat "$DW135_ERR"))"
+    grep -q 'ARCHIVED' "$DW135_ERR" \
+        && pass "mg-8bb1: the archival deadline travels from this seat too — the same alert body as the other three, because the risk is the same one" \
+        || fail "mg-8bb1: the wedged exit's alert does not state the archival deadline ($(cat "$DW135_ERR"))"
+    grep -q 'strands nothing and IS the repair' "$DW135_STDERR" \
+        && fail "mg-8bb1: the drain STILL prints 'strands nothing and IS the repair' while two branches exist only locally ($(cat "$DW135_STDERR")) — the alert below it does not undo a headline that says stranding is impossible" \
+        || pass "mg-8bb1: the unqualified 'strands nothing' claim is NOT printed when the ledger says otherwise — the sentence the operator reads first is the one that must not be false"
+    grep -q 'held unpushed commits earlier in this drain' "$DW135_STDERR" \
+        && pass "mg-8bb1: and the run log says what IS true instead — idle fleet, bounce proceeds, and named work at risk" \
+        || fail "mg-8bb1: the wedged exit printed no qualified claim at all ($(cat "$DW135_STDERR"))"
+
+    # (F) THE NEGATIVE CONTROL, and it is what proves the reconciliation RAN.
+    #     A holder that pushes on its way out while pogod is wedging must raise
+    #     NO alert — an alert that fires on every wedged bounce is filtered
+    #     within a week, and this one is on the nightly's RED path. Silence
+    #     alone would be indistinguishable from asking nothing, so the satisfied
+    #     verdict is asserted in the run log as well.
+    mdgit -C "$MD_TMP/repo" worktree add -q -b polecat-wedge-pushed "$MD_TMP/wt-wedge-pushed" main
+    printf 'pushed-as-pogod-wedged\n' > "$MD_TMP/wt-wedge-pushed/wp"
+    mdgit -C "$MD_TMP/wt-wedge-pushed" add wp
+    mdgit -C "$MD_TMP/wt-wedge-pushed" commit -qm wedge-pushed
+    DW8BB1_F1="$(dep_body "wedge-pushed=$MD_TMP/wt-wedge-pushed")"
+    [ "$(drain_unpushed_holders "$(drain_durability "$DW8BB1_F1")")" = "1" ] \
+        && pass "mg-8bb1 fixture: the control's polecat is a genuine holder on poll 1 — a durable one would clear at the 'held -eq 0' branch and never reach the wedged exit" \
+        || fail "mg-8bb1 fixture: the control's polecat is not holding on poll 1, so the case below never exercises this seat"
+    dw8bb1_probe_seq "$DW8BB1_F1" "mdgit -C \"$MD_TMP/wt-wedge-pushed\" push -q origin polecat-wedge-pushed 2>/dev/null"
+    DW135_RES="$(DW135_TIMEOUT=$DW8BB1_TIMEOUT dw135)"
+    [ "$DW135_RES" = "0|0" ] && [ ! -s "$DW135_ERR" ] \
+        && pass "mg-8bb1: a holder that PUSHED before pogod went silent raises no alert at the wedged exit — the new RED line fires on loss, not on every wedged bounce" \
+        || fail "mg-8bb1: the satisfied departure wrote to ERR_LOG at the wedged exit ($(cat "$DW135_ERR")) — result '$DW135_RES'"
+    grep -q 'satisfied wedge-pushed' "$DW135_STDERR" \
+        && pass "mg-8bb1: the satisfied departure is NAMED in the run log — so the empty ERR_LOG above is a reconciliation that came back clean, not one that never ran" \
+        || fail "mg-8bb1: the reconciliation left no trace at the wedged exit ($(cat "$DW135_STDERR")) — silence here is exactly the state this ticket exists to make impossible"
+    grep -q 'ledger reconciles clean' "$DW135_STDERR" \
+        && pass "mg-8bb1: and only THEN is 'strands nothing and IS the repair' printed — the claim survives, now as a checked one" \
+        || fail "mg-8bb1: the clean-ledger case printed no repair claim ($(cat "$DW135_STDERR")) — the fix removed a true sentence instead of qualifying a false one"
+
+    # (G) THE REMEDY, SUBJECTED TO THE DEFECT IT REMEDIES. pogod wedged before
+    #     the FIRST readable poll — the ordinary shape of this exit. The ledger
+    #     is empty, but not because anyone was asked: reporting "0 departures"
+    #     over it would rebuild this ticket's own bug one level up, with the
+    #     reconciliation as the new alibi. It must say which of the two it is.
+    dw8bb1_probe_seq ""
+    DW135_RES="$(DW135_TIMEOUT=$DW8BB1_TIMEOUT dw135)"
+    [ "$DW135_RES" = "0|0" ] \
+        && pass "mg-8bb1: a pogod wedged from the first poll still clears — the commonest shape of this exit is not turned into a refusal" \
+        || fail "mg-8bb1: drain_wait returned '$DW135_RES' when no poll ever parsed, expected '0|0'"
+    [ ! -s "$DW135_ERR" ] \
+        && pass "mg-8bb1: and it raises no RED alert — an empty ledger is not a loss, and a nightly that pages on every wedged bounce is a nightly nobody reads" \
+        || fail "mg-8bb1: the never-sampled case wrote to ERR_LOG ($(cat "$DW135_ERR"))"
+    grep -q 'nothing could be asked' "$DW135_STDERR" \
+        && pass "mg-8bb1: an empty ledger nobody could fill reads as ITSELF — 'not a report that nothing is at risk, a report that nothing could be asked'" \
+        || fail "mg-8bb1: the never-sampled case reported a clean reconciliation ($(cat "$DW135_STDERR")) — absence of evidence wearing the clothes of evidence of absence, which is the shape of the bug being fixed"
+    grep -q 'strands nothing and IS the repair' "$DW135_STDERR" \
+        && fail "mg-8bb1: 'strands nothing and IS the repair' is printed over a ledger that was never built ($(cat "$DW135_STDERR")) — the fix would be asserting a clean reconciliation it never performed" \
+        || pass "mg-8bb1: the checked claim is withheld when nothing could be checked"
+
+    # (H) THE REFUSALS ARE UNCHANGED. The two rc=2 paths in the same case
+    #     statement need no reconciliation — they stop the deploy, so nothing is
+    #     bounced past — and editing their neighbour must not have moved them.
+    dw8bb1_probe_seq "$DW8BB1_E1"
+    DW135_RES="$(DW8BB1_LIVE=2 DW135_TIMEOUT=$DW8BB1_TIMEOUT dw135)"
+    [ "$DW135_RES" = "?|2" ] \
+        && pass "mg-8bb1: wedged pogod + a LIVE witness still REFUSES — bouncing there mints permanent survivors, and that verdict is untouched" \
+        || fail "mg-8bb1: the wedged+live path returned '$DW135_RES', expected '?|2' — the reconciliation displaced a refusal"
+    dw8bb1_probe_seq "$DW8BB1_E1"
+    DW135_RES="$(DW8BB1_WRC=1 DW135_TIMEOUT=$DW8BB1_TIMEOUT dw135)"
+    [ "$DW135_RES" = "?|2" ] \
+        && pass "mg-8bb1: the DOUBLE ABSENCE still refuses — a ledger cannot substitute for knowing whether anything is alive" \
+        || fail "mg-8bb1: the double-absence path returned '$DW135_RES', expected '?|2'"
+
     rm -f "$DW135_STATE" "$DW135_ERR" "$DW135_STDERR" "$DW135_CLOCK" "$DW135_CLOCK_READS"
 ) 2>/dev/null
 

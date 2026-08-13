@@ -2251,6 +2251,26 @@ drain_awaiting_refinery() {
 # would have pushed those commits is already gone. Holding would convert a false
 # GREEN into an unsatisfiable HOLD, which is strictly worse.
 #
+# WHERE IT IS SEATED, AND WHY THE LIST IS BY EXIT CODE RATHER THAN BY SITE.
+# What decides whether an exit needs reconciling is not where it sits but what
+# the deploy does next. drain_wait's rc=2 exits all REFUSE — the caller restores
+# dispatch and exits 7 — so nothing is bounced past them and nothing can be
+# stranded by proceeding. Every other exit is seated:
+#
+#   rc 0, `count -eq 0`   — the whole fleet stopped (gh#135)
+#   rc 0, `held -eq 0`    — the survivors are all durable (gh#135)
+#   rc 0, witness idle    — pogod wedged, nothing alive to ask (mg-8bb1)
+#   rc 1, deadline        — refuses unless --force, and reports either way,
+#                           because a run that times out with a departure in its
+#                           ledger has BOTH problems (gh#135)
+#
+# The wedged exit was left for a follow-up when gh#135 landed (its scope named
+# the two clears, and the reviewer declined to widen a passing PR), and its
+# absence had exactly the shape the others were fixed for: rc=0 and an empty
+# ERR_LOG over branches whose commits existed only on this host. A new exit that
+# lets the deploy proceed must be seated here too, or it inherits that shape by
+# default.
+#
 # THE SAFETY OF NOT-HOLDING HAS A DEADLINE, AND THE ALERT MUST NAME IT (ruled by
 # pm-pogo, 2026-08-12). internal/gitgc/sweep.go keeps a polecat branch while its
 # ticket is unconcluded and requires BranchMerged before deleting a *done*
@@ -2467,9 +2487,17 @@ print_drain_durability() {
 # had not noticed the drain was asking it. So `down` consults the witness rather
 # than guessing, and that is what dissolves the objection that refusing on an
 # unreachable pogod blocks the repair at the moment it is needed: wedged+idle
-# PROCEEDS (by right — the bounce IS the repair, and strands nothing that is not
-# already stranded), wedged+live REFUSES. The gate blocks exactly when it should
-# and never when it shouldn't.
+# PROCEEDS (by right — the bounce IS the repair, and cannot destroy a process
+# that is already gone), wedged+live REFUSES. The gate blocks exactly when it
+# should and never when it shouldn't.
+#
+# WHAT WEDGED+IDLE DOES *NOT* ESTABLISH (mg-8bb1). "No live polecat" is an
+# answer about PROCESSES. It is not an answer about COMMITS, and the wedged exit
+# used to print one as if it were the other. A polecat that stopped earlier in
+# this same drain holding local-only commits leaves no process for the witness
+# to see and no registry entry for anything else to read — so the idle fleet is
+# real, the repair is real, and the branch is still stranded. The ledger below
+# is what closes that gap, and it is reconciled at the wedged exit too.
 #
 # DETACHED COMPUTE IS DELIBERATELY NOT WAITED FOR (ruled 2026-08-07, mg-797d)
 # --------------------------------------------------------------------------
@@ -2516,6 +2544,12 @@ drain_wait() {
     # from the current tick; this is the only thing that remembers a previous
     # one, and it is the only thing that can see a holder LEAVE.
     local ledger="" departures gone
+    # DID THIS DRAIN EVER GET A READABLE POLL AT ALL (mg-8bb1)? An empty ledger
+    # has two causes that must not read alike at the wedged-pogod exit: we asked
+    # and nobody was holding, or we never got to ask. The first is a clean
+    # reconciliation; the second is this bug family one level up — the absence of
+    # evidence wearing the clothes of evidence of absence.
+    local sampled=false
     while :; do
         raw="$(drain_probe)"
         code="${raw##*$'\n'}"
@@ -2532,6 +2566,7 @@ drain_wait() {
             ''|*[!0-9]*) ;;   # no sample this tick — handled below
             *)
                 misses=0
+                sampled=true
                 # Zero POLECATS — not zero work. Detached compute is left out
                 # of this test on purpose (mg-797d); see "DETACHED COMPUTE IS
                 # DELIBERATELY NOT WAITED FOR" above before adding a term here.
@@ -2647,8 +2682,64 @@ drain_wait() {
                     echo "?"; return 2
                 }
                 if [ "$live" -eq 0 ]; then
+                    # THE THIRD CLEAR-AND-PROCEED EXIT, RECONCILED (mg-8bb1).
+                    # This exit used to print "bouncing a wedged pogod strands
+                    # nothing and IS the repair" as a flat assertion. Half of
+                    # that sentence was checked and half was not: the witness
+                    # establishes that no polecat is RUNNING, which is what
+                    # makes the bounce the repair, and it says nothing whatever
+                    # about whether commits exist only on this box. Those are
+                    # different questions, and one polecat stopping mid-drain
+                    # separates them — poll 1 with two unpushed holders followed
+                    # by HTTP 000 and a witness count of 0 returned rc=0 with an
+                    # EMPTY ERR_LOG over two branches that existed nowhere else
+                    # (measured, p7182). An empty error log there was not
+                    # evidence that nothing was stranded; it was evidence that
+                    # nothing was asked.
+                    #
+                    # It is asked here for the same reason and in the same way
+                    # as at the two clears above, and the ledger is the only
+                    # thing that CAN answer it: pogod is gone, so the registry
+                    # cannot be re-read, and the witness store has already
+                    # deleted the witness of anything that exited.
+                    #
+                    # THE BODY IS DELIBERATELY EMPTY, and passing "$body" here
+                    # would be a bug. This branch is only reached after
+                    # DRAIN_UNREADABLE_LIMIT unreadable samples, so $body holds
+                    # whatever the failed probe left behind — and a body that
+                    # accidentally parsed would suppress the very departures
+                    # this call exists to surface. The witness has already
+                    # ruled: nothing is alive, so every row in the ledger has
+                    # departed.
+                    departures="$(drain_departures "$ledger" "")"
+                    gone="$(drain_departed_holders "$departures")"
                     log "pogod stopped answering, and the witness reports no live polecat" >&2
-                    log "the fleet is idle: bouncing a wedged pogod strands nothing and IS the repair" >&2
+                    if [ "$gone" -gt 0 ]; then
+                        # The bounce still happens — holding protects nothing
+                        # once the holders are dead (mg-797d rule 1), and
+                        # refusing here would rebuild mg-853a's failure mode at
+                        # the one exit where a bounce is most likely to be the
+                        # right move. What changes is that the operator is told
+                        # what is at risk WHILE it happens, instead of being
+                        # told that stranding is impossible at the moment it is
+                        # occurring.
+                        log "the fleet is idle, so the bounce IS the repair and proceeds — but it does NOT follow that nothing is stranded: $gone polecat(s) held unpushed commits earlier in this drain and are gone" >&2
+                    elif $sampled; then
+                        log "the fleet is idle and the drain's holder ledger reconciles clean: bouncing a wedged pogod strands nothing and IS the repair" >&2
+                    else
+                        # THE REMEDY, SUBJECTED TO THE DEFECT IT REMEDIES. A
+                        # ledger that is empty because no poll ever parsed is
+                        # not a clean reconciliation, and reporting "0
+                        # departures" over it would restore this ticket's own
+                        # bug one level up. Said as a log line and not an err on
+                        # purpose: pogod wedged before the first readable sample
+                        # is the ORDINARY shape of this exit, and an alert that
+                        # fires on every wedged bounce is one that gets filtered
+                        # within a week.
+                        log "the fleet is idle, so the bounce IS the repair and proceeds — but pogod never answered this drain, so no holder ledger was built: this is NOT a report that nothing is at risk, it is a report that nothing could be asked" >&2
+                    fi
+                    print_drain_departures "$departures"
+                    alert_drain_departures "$gone"
                     echo 0; return 0
                 fi
                 err "pogod is not answering, but the witness reports $live live polecat(s)"
