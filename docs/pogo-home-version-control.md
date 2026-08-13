@@ -24,8 +24,10 @@ setup. The error was in the map rather than the territory — that tracked set i
 not world-readable. Note the tense: `isPrivate` is a present-tense measurement,
 and GitHub stops showing a repo's public events once it is private, so nothing
 here establishes what the visibility was between creation (2026-07-07) and now.
-Re-measure rather than trusting this line — a repo's visibility is one `gh repo
-edit` away from changing under a document.
+**As of mg-015c you do not have to re-measure by hand: `pogo doctor --check`
+does it on every run.** See "The publication constraint" below. Until that
+landed, the only evidence this constraint held was that somebody happened to
+look — and a constraint whose sole evidence is that somebody looked is a wish.
 
 Nothing in the pogo repo recorded that dual nature — before mg-3610 the string
 `pogo-config` appeared nowhere in it — and nothing in pogo-config says what it
@@ -36,6 +38,73 @@ closed the pogo-repo half of that gap.
 
 `pogo doctor --check` now carries a `$POGO_HOME version control` row that
 reports this condition on any host (see `internal/homevcs`, `cmd/pogo/homevcsdrift.go`).
+
+## The publication constraint (mg-015c)
+
+**Standing constraint, from Daniel on 2026-08-13: "pogo-config absolutely
+should not be public."**
+
+This is a constraint on the *state*, not a correction to a document. mg-ee70
+fixed a record that said "public"; this says the territory must stay private,
+and it holds whether or not anyone is reading the record.
+
+**The rule is general, and it has more than one member.** It reads *a
+repository this host pushes agent state to must not be public* — not
+"`drellem2/pogo-config` must not be public". That distinction stopped being
+theoretical the day it was written: the second member is
+`https://github.com/drellem2/pogo-agent-memory.git`, whose work tree is the
+shared agent-memory corpus under the harness projects dir, created
+2026-08-12 and holding Daniel's real calendar events in its history (redacted
+at HEAD, retained in history). Both are private as of 2026-08-13, measured.
+
+A separate `pogo doctor --check` row, **`agent-state repo publication`**,
+enforces it (`internal/homevcs/publication.go`,
+`cmd/pogo/agentstatepublication.go`). It enumerates the directories pogo already
+knows it writes agent state into — `$POGO_HOME`, plus every auto-memory store
+`memcheck.Locate` finds — resolves each to a git work tree, de-duplicates by
+work tree, and asks `gh repo view <owner/name> --json visibility` once per
+distinct remote:
+
+| what it found | row | why |
+|---|---|---|
+| no origin remote | `pass` | the repo pushes nowhere; there is nothing published |
+| `PRIVATE` | `pass` | named out loud on the clean row, so "checked and fine" is distinguishable from "never asked" |
+| `PUBLIC` | **`fail`** | sets doctor's exit code |
+| anything else (`INTERNAL`, a state GitHub grows later) | `warn` | named verbatim; not world-readable, not private either |
+| could not ask — `gh` missing, unauthenticated, rate-limited, offline, non-GitHub remote | `warn`, spelled `PUBLICATION STATE NOT ESTABLISHED` | an instrument that reports "fine" when it has stopped being able to see is the failure class this was filed against |
+
+Four properties are load-bearing and worth not undoing:
+
+- **It fails where the sibling row only warns.** `$POGO_HOME version control`
+  deliberately never sets doctor's exit code, because untracking install output
+  is a human ops decision with a debatable remedy. Publication is not that kind
+  of finding: the content is already sensitive, the remedy is one command, and a
+  constraint reported at the same volume as a tidiness note is one nobody can
+  script against.
+- **No repo name is hard-coded anywhere.** Names come from `remote get-url
+  origin`. A literal decays when a remote changes and is simply absent on the
+  next host — the same silence this check removes.
+- **It is not gated behind the tracked-drift finding.** `agents/crew/pa.md` and
+  the memory notes are hand-authored, so they are not paths pogo writes and can
+  never appear in the drift list. A publication check that ran only on drift
+  would be silent on exactly the repo that looks healthiest.
+- **Nested subjects are folded into their enclosing one, and this is not an
+  optimisation.** pogod sets `GIT_CEILING_DIRECTORIES=$POGO_HOME` on itself and
+  everything it spawns (`internal/gitceiling`), so `git -C` in any per-agent
+  memory dir under `~/.pogo` answers "not a git repository" — twelve of this
+  host's seventeen subjects. That ceiling is a deliberate guard and not this
+  check's to defeat, but taking its refusal at face value would print "nothing
+  there is pushed anywhere" about directories that sit inside a repo with a
+  remote. `$POGO_HOME` resolves fine (the ceiling never excludes the working
+  directory itself) and answers for all of them.
+
+**Both subjects are private, so this row will spend its life green.** That is
+why the RED and BLIND paths are exercised deliberately rather than left to
+production: `TestAuditPublicationReportsPublic`,
+`TestAgentStatePublicationLine_PublicFails` and
+`TestAuditPublicationReportsUnestablishedRatherThanPrivate`, plus a live
+end-to-end run against a genuinely public repo (`drellem2/pogo`, `fail`, doctor
+exit 1) and against an unauthenticated `gh` (`warn`, never `PRIVATE`).
 
 ## The decision
 

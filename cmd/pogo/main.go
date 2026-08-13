@@ -3607,6 +3607,47 @@ Exits with code 1 if any critical check fails (--check mode only).`,
 				}
 			}
 
+			// 2d. Is any repository this host pushes agent state to PUBLIC
+			// (mg-015c)? Daniel ruled on 2026-08-13 that pogo-config
+			// "absolutely should not be public"; nothing on this box checked,
+			// so the only evidence the constraint held was that somebody
+			// happened to run `gh repo view` by hand. Two live subjects —
+			// $POGO_HOME's repo and the shared agent-memory corpus — and the
+			// subject list is ENUMERATED from what pogo already knows it
+			// writes, never a repo name, so a third arrives covered. This is
+			// the one row whose finding sets doctor's exit code on a repo's
+			// mere state; "could not ask" warns and is never a pass.
+			{
+				var subjects []homevcs.Subject
+				subjects = append(subjects, homevcs.Subject{Label: "$POGO_HOME", Dir: config.PogoHome()})
+				if home, herr := os.UserHomeDir(); herr == nil {
+					// Same enumeration the memory-index checks walk, so a
+					// harness added to the provider registry is covered here
+					// too rather than needing a second literal.
+					for _, mf := range memcheck.Locate(home, providers.MemoryIndexGlobs()) {
+						dir := filepath.Dir(mf)
+						// The store's owner is the dir ABOVE `memory` — the
+						// agent name under $POGO_HOME, the project slug under a
+						// harness projects dir. The label must not repeat the
+						// path, which the row prints separately.
+						subjects = append(subjects, homevcs.Subject{
+							Label: "agent memory " + filepath.Base(filepath.Dir(dir)),
+							Dir:   dir,
+						})
+					}
+				}
+				apStatus, apDetail := agentStatePublicationLine(
+					homevcs.AuditPublication(context.Background(), subjects, homevcs.GhVisibility))
+				switch apStatus {
+				case "fail":
+					fail(agentStatePublicationCheckName, apDetail)
+				case "warn":
+					warn(agentStatePublicationCheckName, apDetail)
+				default:
+					pass(agentStatePublicationCheckName, apDetail)
+				}
+			}
+
 			// 3. Required tools. git and go are hard requirements. The agent
 			// harness binary is a soft check: the pogo CLI works fine without
 			// it — only spawning agents needs the harness — and which binary
