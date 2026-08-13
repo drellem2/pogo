@@ -62,8 +62,8 @@ Three keys worth knowing:
 | `restart_on_crash` | bool | pogod restarts the agent if it exits unexpectedly | `true` for crew, `false` for polecats |
 | `nudge_on_start` | string | Message sent to the agent's PTY immediately after spawn | empty |
 
-There is one more (`worktree` for polecat templates — see below) but those
-three carry the day.
+There are three more — `worktree` for polecat templates, and `provider` /
+`model`, both covered below — but those three carry the day.
 
 Frontmatter is parsed at spawn time. Edit a file, restart the agent, the new
 settings apply. There's no live reload — pogod won't notice that you flipped
@@ -264,6 +264,70 @@ polecats that write markdown files outside any repo.
 Note: even with `worktree = true` in the template, pogod still skips worktree
 creation if the coordinator spawns the polecat without `--repo`. The frontmatter is
 the *upper bound*; the spawn call decides whether to actually create one.
+
+### Which harness, and which model
+
+Two separate axes, and it is worth being precise about which is which:
+
+- **`provider`** picks the *harness* — which agentic CLI binary runs (`claude`,
+  `codex`, `pi`, `cursor`).
+- **`model`** picks what that harness *talks to* (`fable`, `gpt-5.5`, …).
+
+Each has a frontmatter key and, for polecats, a spawn flag:
+
+```toml
++++
+provider = "claude"   # harness
+model = "fable"       # model that harness runs on
++++
+```
+
+```bash
+pogo agent spawn-polecat <short-id> --provider=claude --model=fable ...
+```
+
+Precedence for the model is exactly two tiers deep, and stops:
+
+| Tier | Source | Wins over |
+|---|---|---|
+| 1 | `--model` on `spawn-polecat` | everything below |
+| 2 | `model = "..."` in the template's (or crew prompt's) frontmatter | nothing below — it is the floor |
+| — | *nothing* | pogo passes **no model argument at all** |
+
+The intended use of tier 2 is a **role default**: `polecat-architect.md` can ask
+for a reasoning model without every dispatch remembering to type it, and a
+dispatch that does type `--model` still wins.
+
+**There is deliberately no tier 3, and no built-in default.** With no `--model`
+and no `model:` key, pogo passes the harness no model flag, so the harness runs
+on whatever the user's own configuration says (for Claude Code, that is
+`~/.claude/settings.json`, steerable at runtime with `/model`). That is not a
+gap waiting to be filled with an `[agents] model` config key.
+
+> **Why pogo pins no model.** On 2026-07-06 a model pinned in pogo's config ran
+> out of credit mid-day. Claude Code does **not** fall back to another model when
+> its pinned one is unavailable — it wedges at a "keep using this model or switch
+> models" prompt, which from outside is indistinguishable from a busy agent.
+> Every crew agent and every polecat on the machine went silent for ~5.5 hours,
+> because every agent spawns through the same override: one bad value has a
+> whole-fleet blast radius, not a per-worker one. Recovery took a human running
+> `/model` by hand. **Verify a value before dispatching on it** — `claude --model
+> <value> -p "ok"` exiting 0 is the only check that proves the model is reachable
+> and has credit. pogo validates only the *syntax* of a model name; it keeps no
+> list of known-good models, because such a list goes stale on the vendor's
+> release schedule and would refuse working models as confidently as broken ones.
+
+A model pogo cannot express **fails the spawn** rather than being ignored: if a
+provider declares no model flag, or the name fails syntax validation, `pogo agent
+spawn-polecat` exits non-zero and no worktree is created. A worker running on a
+model nobody chose, while the dispatch record says otherwise, is the outcome that
+refusal exists to prevent.
+
+Crew agents have `model` frontmatter but no flag (same as `provider`), so a crew
+model change is a prompt edit plus an agent restart.
+
+To check what a running agent actually got, `pogo agent list --json` carries a
+`model` field — absent means pogo pinned nothing, which is the normal case.
 
 ### The `--no-worktree` flag
 

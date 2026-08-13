@@ -98,6 +98,13 @@ type Agent struct {
 	// running-agent token cost to the right item without grepping events.
 	WorkItemID string `json:"work_item_id,omitempty"`
 
+	// Model is the model selection resolved for this agent at spawn (mg-e7f5),
+	// or "" when none was requested and the harness's own configuration decides.
+	// Recorded so "which model is this agent on?" is answerable without parsing
+	// argv — and so the empty case is legible as a positive answer ("pogo pinned
+	// nothing") rather than as missing data. Immutable after construction.
+	Model string `json:"model,omitempty"`
+
 	// ClaimedAtSpawn records that pogod took this agent's work-item claim before
 	// the process started (mg-7254), which makes the claim useless as evidence
 	// that the AGENT has done anything. start-verification reads this to avoid
@@ -907,6 +914,18 @@ type SpawnRequest struct {
 	// Spawn resolves it itself by agent type. It supplies the nudge dialect,
 	// PTY size, prompt-injection strategy, and lifecycle hooks for the agent.
 	Provider *Provider
+
+	// Model is the MODEL this one spawn runs on, already resolved through
+	// ResolveModel by the caller (--model flag > model: frontmatter). Spawn
+	// translates it into argv via the provider's ModelFlag and appends it to
+	// Command; a provider that cannot express a model selection fails the
+	// spawn rather than dropping the request.
+	//
+	// Empty means "no selection" — pogo passes no model argument and the
+	// harness uses the user's own configuration. That is the normal case and
+	// the deliberate default; see internal/agent/model.go for the outage
+	// behind it.
+	Model string
 }
 
 // ErrAgentAlreadyRunning is returned by Spawn when a live agent is already
@@ -971,6 +990,21 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 		provider = p
 	}
 
+	// Apply the resolved model selection, if any, by asking the provider to
+	// translate it into argv. This is the single site where a model reaches a
+	// command line, so every spawn path — spawn-polecat, StartCrewAgent, the
+	// generic POST /agents — gets identical treatment, and a provider that
+	// cannot express the request fails the spawn here rather than starting a
+	// worker on a model nobody chose.
+	//
+	// It runs BEFORE the argv prompt-append below, so the model flag and its
+	// value stay among the flags instead of landing after the harness's
+	// trailing positional message.
+	command, cmdErr := applyModel(req.Command, provider, req.Model)
+	if cmdErr != nil {
+		return nil, cmdErr
+	}
+
 	// Deliver the initial prompt as a trailing positional argv element when the
 	// provider declares InitialPromptViaArgv (pi: `pi [messages...]`). Argv
 	// delivery replaces the PTY initial-nudge path below: a differential-render
@@ -980,10 +1014,13 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 	// there is no idle-window race. The command is copied, not appended in
 	// place, so the caller's slice is never mutated; the stored a.Command
 	// carries the prompt so restart-on-crash re-delivers it via re-exec.
-	command := req.Command
 	promptViaArgv := provider != nil && provider.InitialPromptViaArgv && req.InitialNudge != ""
 	if promptViaArgv {
-		command = append(append([]string(nil), req.Command...), req.InitialNudge)
+		// Extend `command`, NOT req.Command: the model argv applied just above
+		// lives only in `command`, and rebuilding from req.Command here would
+		// drop it — silently, and only for the argv-prompt providers (pi,
+		// cursor), which is the shape of bug that ships.
+		command = append(append([]string(nil), command...), req.InitialNudge)
 		log.Printf("agent %s: delivering initial prompt via argv (provider %q)", req.Name, provider.ID)
 	}
 
@@ -1053,6 +1090,7 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 		SourceRepo:     req.SourceRepo,
 		RestartOnCrash: req.RestartOnCrash,
 		WorkItemID:     req.WorkItemID,
+		Model:          req.Model,
 		ClaimedAtSpawn: req.ClaimedAtSpawn,
 		master:         master,
 		slave:          slave,
@@ -1553,6 +1591,9 @@ func (r *Registry) respawn(name string, gen uint64, checkGen bool) (*Agent, erro
 		SourceRepo:     old.SourceRepo,
 		InitialNudge:   old.InitialNudge,
 		WorkItemID:     old.WorkItemID,
+		// Carried, not re-resolved: old.Command already carries the model argv,
+		// so a respawn must report the same model it re-execs with.
+		Model:          old.Model,
 		master:         master,
 		slave:          slave,
 		cmd:            cmd,

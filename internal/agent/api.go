@@ -38,6 +38,10 @@ type AgentInfo struct {
 	Uptime         string      `json:"uptime"`
 	LastActivity   string      `json:"last_activity,omitempty"`
 	WorkItemID     string      `json:"work_item_id,omitempty"`
+	// Model is the model this agent was spawned on, or "" when pogo pinned none
+	// and the harness's own configuration decides (mg-e7f5). Omitted when empty:
+	// absence here means "not pinned by pogo", which is the normal case.
+	Model string `json:"model,omitempty"`
 	// RateLimited is true when the modal watcher has flagged the agent as
 	// suspected-usage-limited (rate-limit modal visible + event log stale). It
 	// is a distinct condition from idle/stalled: the agent is alive but wedged
@@ -84,6 +88,11 @@ type SpawnPolecatAPIRequest struct {
 	Branch   string   `json:"branch,omitempty"`   // Target branch for refinery submit
 	Env      []string `json:"env,omitempty"`      // Additional env vars
 	Provider string   `json:"provider,omitempty"` // Harness provider override (--provider): tier 1 of resolution
+	// Model is the model override (--model): tier 1 of the model chain, beating
+	// the template's `model:` frontmatter. It is a DIFFERENT axis from Provider
+	// — provider picks the harness binary, model picks what that binary talks
+	// to — and empty means "no selection", not "the default model" (mg-e7f5).
+	Model string `json:"model,omitempty"`
 	// NoWorktree, when true, skips git worktree creation entirely regardless of
 	// Repo or template frontmatter, and the polecat runs in-place from a stable
 	// home/scratch dir at ~/.pogo/agents/<name>/. It implies a refinery:NO
@@ -485,6 +494,7 @@ func agentInfo(a *Agent) AgentInfo {
 		ProcessName:    ProcessName(a.Type, a.Name),
 		Uptime:         agentUptime(a),
 		WorkItemID:     a.WorkItemID,
+		Model:          a.Model,
 		RateLimited:    a.RateLimited,
 	}
 	if a.RateLimited {
@@ -1233,9 +1243,10 @@ func (r *Registry) StartCrewAgent(name string) (*Agent, error) {
 	// (nudge_on_start). A parse error is non-fatal: meta stays a usable zero
 	// value and the type defaults apply.
 	meta, _, _ := ParsePromptFrontmatter(promptFile)
-	var fmProvider string
+	var fmProvider, fmModel string
 	if meta != nil {
 		fmProvider = meta.Provider
+		fmModel = meta.Model
 	}
 
 	// Resolve the harness provider for this crew agent. Precedence: provider:
@@ -1244,6 +1255,25 @@ func (r *Registry) StartCrewAgent(name string) (*Agent, error) {
 	provider, perr := r.resolveProvider(TypeCrew, "", fmProvider)
 	if perr != nil {
 		return nil, fmt.Errorf("resolve provider: %w", perr)
+	}
+
+	// Resolve the model the same way, from the same frontmatter. Crew has no
+	// --model flag either, so `model:` is the only tier that can speak here —
+	// and its absence means no model argument at all, which is how every crew
+	// agent behaves today and must keep behaving by default (mg-e7f5).
+	//
+	// Refuse rather than warn: a mayor that came up on the wrong model would be
+	// a fleet-wide condition discovered hours later, and a crew agent that
+	// fails to start is loud immediately.
+	model, modelTier, merr := ResolveModel("", fmModel)
+	if merr != nil {
+		return nil, fmt.Errorf("resolve model for crew agent %s: %w", name, merr)
+	}
+	if model != "" {
+		if _, err := provider.ModelArgs(model); err != nil {
+			return nil, fmt.Errorf("crew agent %s: %w", name, err)
+		}
+		log.Printf("crew agent %s: model %q (from %s)", name, model, modelTier)
 	}
 
 	// Build command from the configured template. commandTemplate resolves an
@@ -1283,6 +1313,7 @@ func (r *Registry) StartCrewAgent(name string) (*Agent, error) {
 		InitialNudge:   nudgeMsg,
 		RestartOnCrash: ResolveRestartOnCrashWithStub(stubFile, promptFile, TypeCrew),
 		Provider:       provider,
+		Model:          model,
 	})
 }
 
@@ -1581,6 +1612,30 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		return
 	}
 
+	// Resolve the MODEL, in the same place and for the same reason: before any
+	// side effect, so a bad --model costs no worktree and no orphaned branch.
+	// Precedence: --model flag > model: template frontmatter > nothing. There is
+	// no third tier — no per-type config, no built-in default — and that floor
+	// is deliberate; see internal/agent/model.go for the 5.5-hour fleet outage a
+	// pinned model caused on 2026-07-06 (mg-e7f5).
+	//
+	// Both failures here are hard, unlike the provider chain's warn-and-fall-
+	// back for frontmatter: a model pogo cannot express is a model the worker
+	// would silently NOT run on, and a dispatch that quietly ignores the one
+	// thing the dispatcher asked for is worse than one that refuses.
+	model, modelTier, merr := ResolveModel(spawnReq.Model, tmplMeta.Model)
+	if merr != nil {
+		failPolecatSpawn(w, spawnReq, http.StatusBadRequest, merr.Error())
+		return
+	}
+	if model != "" {
+		if _, err := provider.ModelArgs(model); err != nil {
+			failPolecatSpawn(w, spawnReq, http.StatusBadRequest, err.Error())
+			return
+		}
+		log.Printf("polecat %s: model %q (from %s), provider %q", spawnReq.Name, model, modelTier, provider.ID)
+	}
+
 	// Decide whether this polecat gets an isolated git worktree. Default:
 	// create one when a Repo is supplied. A template can opt out by setting
 	// `worktree = false` in its frontmatter. The --no-worktree flag is an
@@ -1830,6 +1885,7 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		// failed one.
 		ClaimedAtSpawn: claimVerdict.Held(),
 		Provider:       provider,
+		Model:          model,
 	})
 	if err != nil {
 		os.Remove(promptFile) // Clean up temp file on spawn failure

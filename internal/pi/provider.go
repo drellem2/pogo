@@ -56,6 +56,14 @@ var Provider = agent.Provider{
 	// worktrees, so the dialog must never block startup.
 	CommandTemplate: "pi --approve --append-system-prompt {{.PromptFile}}",
 
+	// pi selects a model with `--model <name>` (see the package comment above:
+	// its model comes from its own settings or --provider/--model). The
+	// template pins none, so an agent with no explicit selection stays on the
+	// user's pi configuration. Note pi's --provider is a MODEL-VENDOR selector
+	// and is unrelated to pogo's --provider, which picks the harness; pogo
+	// expresses only the model here.
+	ModelFlag: "--model",
+
 	PromptInjection: agent.PromptInjection{
 		Kind: agent.InjectAppendFlag,
 		Flag: "--append-system-prompt",

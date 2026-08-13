@@ -183,3 +183,33 @@ func TestEveryProviderDeclaresMemoryIntent(t *testing.T) {
 		}
 	}
 }
+
+// TestEveryProviderCanExpressAModel pins that all four shipped harnesses declare
+// a model flag, and that none of them declares a model VALUE (mg-e7f5).
+//
+// Two separate properties, and they pull in opposite directions on purpose:
+//
+//   - Every provider must be able to EXPRESS a model selection, because a
+//     provider with no ModelFlag refuses any `--model` on spawn. Adding a fifth
+//     harness without one would make model selection silently unavailable for
+//     the fleet dispatched onto it — a refusal at spawn time, discovered by
+//     whoever tries it, rather than at build time here.
+//   - No provider's CommandTemplate may PIN a model. pogo hardcodes no model:
+//     an exhausted pinned model does not degrade, it wedges the harness at a
+//     switch-models prompt, and on 2026-07-06 that took the whole fleet down for
+//     5.5 hours. A default baked into a command template would reintroduce
+//     exactly that, and would do it below the level any of the resolution tests
+//     look at.
+func TestEveryProviderCanExpressAModel(t *testing.T) {
+	for _, p := range All() {
+		if p.ModelFlag == "" {
+			t.Errorf("provider %q declares no ModelFlag, so `--model` against it will be "+
+				"REFUSED at spawn; declare the harness's model flag (see agent.Provider.ModelFlag)", p.ID)
+		}
+		if strings.Contains(p.CommandTemplate, p.ModelFlag) {
+			t.Errorf("provider %q pins a model in its CommandTemplate (%q); pogo must pin NO model — "+
+				"an exhausted pin wedges the harness fleet-wide rather than degrading",
+				p.ID, p.CommandTemplate)
+		}
+	}
+}
