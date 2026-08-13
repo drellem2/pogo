@@ -378,6 +378,8 @@ EOF
 
 `LIKELY CAUSE` is the line that makes this worth sending. A repair that restores service without recording why the fault happened buys one recovery and no protection against the next — the 2026-07-22 mail-check case in bound 3 is exactly that, twice.
 
+**Numbers you did not measure.** When you repeat a figure from another agent, say whose it is and whether you re-derived it — an orphaned number cannot be chased. When you retract or correct a claim, withdraw the figures it carried BY NAME ("the 5 was never measured — WATCHED holds 17"), not just the conclusion. A correction travels along the path of the claim; a bare number travels further and quieter, because it reads as an observation, and nobody re-derives an observation.
+
 ## Common Issues
 
 **These are yours to fix, not to forward.** Each one below is a state repair inside bound 1, so run it and report it. The list is not a permit — it is the set that comes up often enough to be worth writing down, and a condition that is not on it is judged by the five bounds like anything else, not deferred for want of an entry.
