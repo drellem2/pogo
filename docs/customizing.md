@@ -454,6 +454,12 @@ Two more scope controls need no config:
 - **`.pogoignore`.** Drop a `.pogoignore` file (gitignore-style globs) at a
   repo root to carve generated-data subtrees out of pogo's index without
   touching the repo's `.gitignore`.
+- **Nodes pogo cannot read.** Anything that is not a regular file — a socket,
+  a FIFO, a device node, a dangling symlink — is skipped, and so is a regular
+  file whose read fails, the common case being a mode-`0000` file. An
+  unreadable file is announced once, at `warn`, and left out of the index
+  rather than retried noisily forever; nothing is cached about the failure, so
+  the file is picked up on the next pass once it can be read again.
 
 An environment override exists for the file-count ceiling
 (`POGO_MAX_FILES_PER_TREE`) and takes precedence over the config file.
@@ -538,6 +544,11 @@ pogod's log output (gh #111).
 Failures to read a project's git tree hash — which mean the indexer cannot use
 its fast path for that repo and must hash every file — still warn, but once per
 project per pogod run rather than once per tick.
+
+A file the indexer cannot read warns the same way — `Skipping unreadable file`,
+with the path and the read error as fields — once when it becomes unreadable,
+not once per pass. It warns again if it goes unreadable a second time after
+being repaired, so a recurrence is not swallowed by the first announcement.
 
 ## Polecat git garbage collection
 
