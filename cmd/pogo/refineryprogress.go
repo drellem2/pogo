@@ -143,10 +143,25 @@ func formatHealthRefinery(state string, r health.Refinery, now time.Time) string
 //   - Nothing in flight, but rows queued → said outright, because that is the
 //     genuinely alarming arrangement and it must not read like the first.
 func formatQueue(queue []refinery.MergeRequest, now time.Time) string {
+	return formatQueueFiltered(queue, repoFilter{}, now)
+}
+
+// formatQueueFiltered is formatQueue narrowed to one repo by `--repo`.
+//
+// The narrowing is applied to the ROWS ONLY. Every count — how many are in
+// flight, how many are pending, how many are ahead of a given request in its own
+// lane — is still computed over the WHOLE pipeline, and so is the NOTHING IN
+// FLIGHT alarm. That split is the point rather than an implementation detail: a
+// filter that also narrowed the health statement would print "NOTHING IN FLIGHT,
+// 3 pending" to a reader whose repo happens to be idle while the refinery merges
+// steadily elsewhere — which is, precisely, the false alarm this whole change
+// exists to stop (mg-ff3a, third instance).
+func formatQueueFiltered(queue []refinery.MergeRequest, filter repoFilter, now time.Time) string {
 	var b strings.Builder
 	if len(queue) == 0 {
 		return "No merge requests: nothing in flight, nothing pending.\n"
 	}
+	shown, dropped := filter.apply(queue)
 
 	// Merges run in per-repo lanes, so "N ahead" is counted WITHIN a repo. The
 	// whole-pipeline count would tell an author they are fourth in line when
@@ -165,10 +180,25 @@ func formatQueue(queue []refinery.MergeRequest, now time.Time) string {
 	}
 	pending := len(queue) - inFlight
 
-	for i := range queue {
-		mr := queue[i]
+	// A filter that matched nothing still owes the reader the pipeline's health.
+	// Returning only "nothing for your repo" here would let --repo SUPPRESS the
+	// NOTHING IN FLIGHT alarm for anyone who happened to be looking at an idle
+	// repo — a view hiding an alarming state behind a field the reader chose,
+	// which is this ticket's own defect wearing the fix's clothes.
+	if len(shown) == 0 {
+		fmt.Fprint(&b, noMatchNote(filter, queue, "merge requests in the pipeline"))
+		if inFlight == 0 {
+			fmt.Fprintf(&b, "NOTHING IN FLIGHT anywhere: %s pending across all repos and no merge request is\n",
+				plural(pending, "merge request"))
+			fmt.Fprintf(&b, "being processed — this is NOT specific to --repo=%s. Check 'pogo refinery status'.\n", filter.raw)
+		}
+		return b.String()
+	}
+
+	for i := range shown {
+		mr := shown[i]
 		line := fmt.Sprintf("%-12s  repo=%-16s  branch=%-30s  author=%-15s  status=%-10s  submitted=%s",
-			mr.ID, refinery.RepoLane(mr.RepoPath), mr.Branch, mr.Author, mr.StatusLabel(),
+			mr.ID, repoColumn(mr.RepoPath), mr.Branch, mr.Author, mr.StatusLabel(),
 			refineryTimeMinute(mr.SubmitTime))
 		if mr.Status == refinery.StatusProcessing {
 			fmt.Fprintln(&b, line)
@@ -183,9 +213,14 @@ func formatQueue(queue []refinery.MergeRequest, now time.Time) string {
 		fmt.Fprintln(&b, line)
 	}
 
+	if n := hiddenNote(filter, dropped, queue); n != "" {
+		fmt.Fprint(&b, "\n"+n)
+	}
+
 	if inFlight == 0 && pending > 0 {
 		// The alarming case, stated rather than implied. Before this line
-		// existed, its rendering was identical to the healthy one.
+		// existed, its rendering was identical to the healthy one. Counted over
+		// the unfiltered pipeline — see the note on formatQueueFiltered.
 		fmt.Fprintf(&b, "\nNOTHING IN FLIGHT: %s pending and no merge request is being processed.\n",
 			plural(pending, "merge request"))
 		fmt.Fprintf(&b, "A refinery that is running picks the next one up within its poll interval, so if\n")

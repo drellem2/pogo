@@ -4760,6 +4760,7 @@ Use this for a quick health check of the refinery. For per-MR details use
 		},
 	}
 
+	var queueRepo string
 	var cmdRefineryQueue = &cobra.Command{
 		Use:   "queue",
 		Short: "Show the merge pipeline: the request in flight, then the pending ones",
@@ -4782,22 +4783,45 @@ CPU may simply be blocked on I/O or a lock. Read them together:
 
 If nothing is in flight while requests are pending, that is printed outright:
 it is the arrangement that used to be indistinguishable from a busy refinery,
-because the row that was moving was the one row this command did not list.`,
+because the row that was moving was the one row this command did not list.
+
+The refinery serves SEVERAL repos from one queue, so every row names its repo
+and --repo=<name|path> narrows the view to one. The narrowing is of the rows
+only: the in-flight/pending counts and the NOTHING IN FLIGHT alarm are always
+computed over the whole pipeline, because a filtered alarm would report a stall
+to anyone whose own repo happened to be idle.
+
+Examples:
+  pogo refinery queue --repo=pogo
+  pogo refinery queue --repo=/Users/you/dev/pogo   # a path from --json works too`,
 		Args: cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
 			queue, err := client.GetRefineryQueue()
 			if err != nil {
 				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
 			}
+			filter := parseRepoFilter(queueRepo)
 			if jsonOutput {
-				cli.PrintJSON(queue)
+				// --json is filtered too, so a jq pipeline and the human view
+				// answer the same question. The note goes to stderr so stdout
+				// stays parseable.
+				shown, dropped := filter.apply(queue)
+				cli.PrintJSON(shown)
+				if len(shown) == 0 && filter.active() {
+					fmt.Fprint(os.Stderr, noMatchNote(filter, queue, "merge requests in the pipeline"))
+				} else if n := hiddenNote(filter, dropped, queue); n != "" {
+					fmt.Fprint(os.Stderr, "refinery queue: "+n)
+				}
 				return
 			}
-			fmt.Print(formatQueue(queue, time.Now()))
+			fmt.Print(formatQueueFiltered(queue, filter, time.Now()))
 		},
 	}
+	cmdRefineryQueue.Flags().StringVar(&queueRepo, "repo", "",
+		"show only merge requests for this repo (basename or path; '.' is the checkout you are standing in)")
 
 	var historySince string
+	var historyRepo string
 	var cmdRefineryHistory = &cobra.Command{
 		Use:   "history",
 		Short: "Show completed merge requests with status (retained window; --since reads the durable event log)",
@@ -4825,24 +4849,51 @@ away), the command prints what it has, says TRUNCATED on stderr, and EXITS
 NON-ZERO — so a consumer under 'set -e' fails loudly rather than reading a
 short answer as an empty one.
 
+The refinery serves SEVERAL repos from one queue, so every row names its repo
+and --repo=<name|path> narrows the output to one. Without it, "polecat-pXXXX
+merged" does not say which repo's main moved — and a reader checking that a
+reported merge really landed then checks the wrong main and finds it unchanged.
+
 Examples:
   pogo refinery history                       # retained window, cap stated if it bit
+  pogo refinery history --repo=pogo           # only this repo's merges
   pogo refinery history --since=30d           # from the durable event log
   pogo refinery history --since=2026-07-01    # from a date
   pogo refinery history --since=30d --json | jq -r '.[] | select(.status=="failed") | .branch'`,
 		Args: cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
+			filter := parseRepoFilter(historyRepo)
 			printRows := func(rows []refinery.MergeRequest) {
+				shown, dropped := filter.apply(rows)
 				if jsonOutput {
-					cli.PrintJSON(rows)
+					cli.PrintJSON(shown)
+					if len(shown) == 0 && filter.active() {
+						fmt.Fprint(os.Stderr, noMatchNote(filter, rows, "merge history"))
+					} else if n := hiddenNote(filter, dropped, rows); n != "" {
+						fmt.Fprint(os.Stderr, "refinery history: "+n)
+					}
 					return
 				}
-				if len(rows) == 0 {
+				if len(shown) == 0 {
+					// An empty filtered result must not render as an empty
+					// refinery — that substitution is the defect this filter
+					// would otherwise re-introduce one level up (mg-ff3a).
+					if filter.active() {
+						fmt.Print(noMatchNote(filter, rows, "merge history"))
+						return
+					}
 					fmt.Println("No merge history.")
 					return
 				}
-				for _, mr := range rows {
+				for _, mr := range shown {
 					fmt.Println(formatHistoryRow(mr))
+				}
+				// stderr, like every other note on this command: history's
+				// stdout is one row per merge request and is documented as a
+				// pipeline surface, so a --repo consumer's awk must see exactly
+				// what an unfiltered one sees.
+				if n := hiddenNote(filter, dropped, rows); n != "" {
+					fmt.Fprint(os.Stderr, "refinery history: "+n)
 				}
 			}
 
@@ -4860,7 +4911,15 @@ Examples:
 					cli.ExitWithError(jsonOutput, "read event log: "+err.Error(), cli.ExitError)
 				}
 				printRows(w.Requests)
-				fmt.Fprintf(os.Stderr, "refinery history --since=%s: %s\n", historySince, w.CoverageNote())
+				// The coverage note counts the whole reconstruction, so under a
+				// --repo filter its number is deliberately larger than the rows
+				// printed. Say which is which rather than let the two numbers
+				// disagree silently (mg-ff3a).
+				scope := ""
+				if filter.active() {
+					scope = " (all repos; --repo=" + historyRepo + " narrows the rows above, not this count)"
+				}
+				fmt.Fprintf(os.Stderr, "refinery history --since=%s: %s%s\n", historySince, w.CoverageNote(), scope)
 				if !w.Complete {
 					// The result is short for a reason the caller cannot see in
 					// stdout. Exiting non-zero is what stops it being read as a
@@ -4882,21 +4941,36 @@ Examples:
 			// defect. Retention is read from the running daemon rather than
 			// from a constant here, so the number printed cannot drift from the
 			// number enforced.
+			//
+			// Every count here is of the WHOLE retained window, stated as such,
+			// because the cap is enforced across all repos at once and a
+			// --repo-filtered reader must not read it as their repo's cap
+			// (mg-ff3a).
 			status, serr := client.GetRefineryStatus()
 			switch {
 			case serr != nil:
-				fmt.Fprintf(os.Stderr, "refinery history: showing %d retained merge requests; the retention cap could not be read (%v), so whether this window is TRUNCATED is UNKNOWN — use --since=<duration|date> for the durable event log\n",
+				fmt.Fprintf(os.Stderr, "refinery history: the retained window holds %d merge requests (all repos); the retention cap could not be read (%v), so whether this window is TRUNCATED is UNKNOWN — use --since=<duration|date> for the durable event log\n",
 					len(history), serr)
 			case status.HistoryTruncation() == refinery.HistoryTruncationUnknown:
-				fmt.Fprintf(os.Stderr, "refinery history: showing %d retained merge requests; this pogod does not report its retention cap (it predates mg-e9ee), so whether this window is TRUNCATED is UNKNOWN — use --since=<duration|date> for the durable event log\n",
+				fmt.Fprintf(os.Stderr, "refinery history: the retained window holds %d merge requests (all repos); this pogod does not report its retention cap (it predates mg-e9ee), so whether this window is TRUNCATED is UNKNOWN — use --since=<duration|date> for the durable event log\n",
 					len(history))
 			case status.HistoryTruncation() == refinery.HistoryTruncationAtCap:
-				fmt.Fprintf(os.Stderr, "refinery history: showing %d of an unknown total — retention is %s and prunes DESTRUCTIVELY, so older merge requests are not here and are not recoverable from the refinery. Use --since=<duration|date> to read the durable event log.\n",
+				fmt.Fprintf(os.Stderr, "refinery history: the retained window holds %d of an unknown total (all repos) — retention is %s and prunes DESTRUCTIVELY, so older merge requests are not here and are not recoverable from the refinery. Use --since=<duration|date> to read the durable event log.\n",
 					len(history), status.RetentionSummary())
+				if filter.active() {
+					// The cap is shared, so a busy neighbour shortens YOUR
+					// window. A reader who filters to their own repo, counts the
+					// rows, and reads that count as "how far back my repo goes"
+					// is wrong by however much the other repos merged.
+					fmt.Fprintf(os.Stderr, "refinery history: the cap is shared across repos, so --repo=%s reaches back LESS far than the window does — merges in %s consumed part of it.\n",
+						historyRepo, strings.Join(filter.otherLanes(history), ", "))
+				}
 			}
 		},
 	}
 	cmdRefineryHistory.Flags().StringVar(&historySince, "since", "", "reconstruct from the durable event log instead: duration (720h, 30d) or date (2026-07-01, RFC3339)")
+	cmdRefineryHistory.Flags().StringVar(&historyRepo, "repo", "",
+		"show only merge requests for this repo (basename or path; '.' is the checkout you are standing in)")
 
 	var cmdRefineryShow = &cobra.Command{
 		Use:   "show <mr-id>",

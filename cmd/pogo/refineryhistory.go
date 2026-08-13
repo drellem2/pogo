@@ -16,12 +16,19 @@ import (
 // and the two windows that feed it (the retained state file and the --since
 // event log) deserialize their times into different Locations. See
 // refinerytime.go for why the done time is rendered as labelled UTC.
+//
+// repo= is second, in the same position and the same rendering as the queue
+// view's (mg-ff3a): the refinery serves several repos from one queue, and a row
+// saying only that polecat-pXXXX merged does not say WHICH main moved. A reader
+// checking that a reported merge actually landed — the right habit — checks the
+// wrong repo's main without it, and twice in one evening escalated the result.
 func formatHistoryRow(mr refinery.MergeRequest) string {
 	// StatusLabel, not Status: a bare `failed` is what invited thirty-one
 	// dispatches for defects that did not exist on 2026-08-05 (mg-e5c2).
 	// `failed(infrastructure)` is triageable without reading the error column.
-	line := fmt.Sprintf("%-12s  branch=%-30s  author=%-15s  status=%-24s  done=%s",
-		mr.ID, mr.Branch, mr.Author, mr.StatusLabel(), refineryTimeMinute(mr.DoneTime))
+	line := fmt.Sprintf("%-12s  repo=%-16s  branch=%-30s  author=%-15s  status=%-24s  done=%s",
+		mr.ID, repoColumn(mr.RepoPath), mr.Branch, mr.Author, mr.StatusLabel(),
+		refineryTimeMinute(mr.DoneTime))
 	if mr.AttemptCount > 1 {
 		line += fmt.Sprintf("  attempts=%d", mr.AttemptCount)
 	}
