@@ -96,28 +96,47 @@ The design says comparison is forced when re-assertion is unavailable. It does
 **not** say the comparison runs at the drifting site's moment of use, and the
 distinction is load-bearing.
 
-The deploy runner declines to read the plist, on the record, at
+The deploy runner used to decline to read the plist, on the record, at
 `scripts/launchd/pogo-deploy.sh:446-452`:
 
 > The plist's fire hours. Duplicated from `com.pogo.deploy.plist` rather than
 > read from it […] reading the plist at 03:00 to avoid that would add a parse and
 > a failure mode to the path that has to work when everything else is broken.
 
-**That refusal is correct and is not a violation of branch 2.** A guard on the
-03:00 path buys detection by adding a failure mode to the one path that must
-survive everything else failing. The comparison belongs where a person looks
-*without being prompted by the failure* — which is `pogo doctor --check`, and
-that is where mg-fc99 put it (`cmd/pogo/launchagentdrift.go`, header rationale).
+**That refusal was correct as an argument about GUARDS and wrong as an argument
+about DERIVATION, and mg-8dcb separates the two.** A guard on the 03:00 path
+buys detection by adding a failure mode to the one path that must survive
+everything else failing; that reasoning still stands, and the comparison still
+belongs where a person looks *without being prompted by the failure* — which is
+`pogo doctor --check`, and that is where mg-fc99 put it
+(`cmd/pogo/launchagentdrift.go`, header rationale).
 
 **Rule:** the COMPARE branch names a *comparison*, not a *location*. Site the
 comparison on a checklist that runs unprompted; never on the path whose
 reliability is the thing at stake. A guard that can take down its subject is a
 net loss.
 
-The remaining duplication is still a real defect — the runner derives nothing
-from the plist and drifted exactly as predicted — and is tracked open as
-**mg-8dcb**, together with the fixture below. It is a *derivation* defect, not a
-missing guard.
+But the constant was not a guard, and reading is not comparing. The runner now
+DERIVES its fire hours from the loaded launchd job at run time
+(`resolve_fire_hours`, section 1c), and the failure mode the old comment worried
+about is answered rather than accepted:
+
+- the read is under `run_bounded`, like every other exec in the script, so it
+  cannot hang the path it runs on;
+- it is **never fatal** — a run that cannot read its own schedule still deploys;
+- and its failure degrades to *no claim* rather than to a wrong claim. Empty
+  hours mean `next_fire_hour` finds nothing, `retry_will_follow` is false, and
+  the alert says it could not read the schedule instead of asserting a fact
+  about fires it never saw.
+
+That last point is the whole difference. The old constant could not fail — it
+could only be *wrong*, silently, which is exactly what it was: it drifted from a
+plist carrying one 03:00 fire and made the RED alert promise two retries that did
+not exist. **A value read from the world cannot drift from the world**, and a
+read that fails loudly is strictly better than a constant that is quietly stale.
+
+The fixture below is retained because the world state that would have validated
+this for free was spent on 2026-08-07 (see §6).
 
 ## 5. HARD REQUIREMENT: the COMPARE branch must log even when it PASSES
 
@@ -201,6 +220,17 @@ mails. That is no longer true, and the replacement is the right kind: the dict
 form is reproduced verbatim as a test fixture at
 `internal/service/launchagentaudit_test.go:258`, and `parseLaunchSchedule`
 (`internal/service/launchagentaudit.go`) switches on both shapes.
+
+mg-8dcb built the second arm the spend had made necessary. The runner's own
+reader is exercised against a constructed **bare-dict, single-03:00** plist and
+shown going RED (`retry_will_follow` is false — no retry is promised), and then
+against the three-fire array and shown green, in `scripts/pogo-deploy_test.sh`.
+The trap is demonstrated rather than asserted: the same suite runs
+`PlistBuddy -c 'Print :StartCalendarInterval:0:Hour'` against both fixtures and
+records that it FAILS on the dict and SUCCEEDS on the array — so an
+array-walking reader would have reported GREEN against the very state that
+motivated the check, and the demonstration is in the suite rather than in this
+paragraph.
 
 **A second-order warning for anyone re-measuring a fix on a live box.** The plist
 changed *during* verification: a PlistBuddy read at ~13:59 returned the broken

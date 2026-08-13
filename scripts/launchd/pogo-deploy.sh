@@ -372,7 +372,13 @@
 #   POGO_DEPLOY_RESERVE      seconds of the window kept back for build+bounce (1200)
 #   POGO_DEPLOY_MAX_DRAIN    ceiling on one drain, seconds (7200)
 #   POGO_DEPLOY_MIN_DRAIN    floor below which a fire does not attempt at all (600)
-#   POGO_DEPLOY_FIRE_HOURS   the plist's fire hours, for "will a retry follow?" ("3 4 5")
+#   POGO_DEPLOY_FIRE_HOURS   PIN the fire hours instead of reading them from the
+#                            world (unset in production — the hours are derived
+#                            from the LOADED launchd job; see section 1c)
+#   POGO_DEPLOY_LABEL        the launchd label to read the schedule from (com.pogo.deploy)
+#   POGO_DEPLOY_PLIST        the plist file to cross-check it against
+#   POGO_DEPLOY_LAUNCHCTL    pin a launchctl (controls only)
+#   POGO_DEPLOY_PLISTBUDDY   pin a PlistBuddy (controls only)
 #   POGO_DEPLOY_STAMP        the night's attempt record ($POGO_HOME/deploy-attempt.stamp)
 #   POGO_DEPLOY_SYNC_ATTEMPTS  total sync tries on a RETRYABLE class (4)
 #   POGO_DEPLOY_SYNC_BACKOFF   seconds between them, last value repeats ("15 45 120")
@@ -443,13 +449,37 @@ RESERVE="${POGO_DEPLOY_RESERVE:-1200}"
 MAX_DRAIN="${POGO_DEPLOY_MAX_DRAIN:-7200}"
 MIN_DRAIN="${POGO_DEPLOY_MIN_DRAIN:-600}"
 
-# The plist's fire hours. Duplicated from com.pogo.deploy.plist rather than read
-# from it, and that duplication buys exactly one thing: the RED alert can say
-# whether a retry is coming instead of asserting "did not retry" and being wrong.
-# A drifted list makes one sentence of one alert optimistic; reading the plist at
-# 03:00 to avoid that would add a parse and a failure mode to the path that has
-# to work when everything else is broken.
-FIRE_HOURS="${POGO_DEPLOY_FIRE_HOURS:-3 4 5}"
+# The job's fire hours. DERIVED from the world at run time (section 1c), never
+# written down here.
+#
+# This used to be `FIRE_HOURS="${POGO_DEPLOY_FIRE_HOURS:-3 4 5}"`, with a comment
+# saying the duplication bought "exactly one thing: the RED alert can say whether
+# a retry is coming", and conceding that "a drifted list makes one sentence of
+# one alert optimistic". That concession was not a hypothetical — it was a
+# prediction, and it came true inside a week. The installed plist carried a
+# SINGLE 03:00 fire while this list said 3 4 5, so the runner believed two
+# retries were coming when none existed, and the alert delivered the exact
+# opposite of the one thing the duplication was bought for (mg-fc99, mg-8dcb).
+#
+# A value read from the world cannot drift from the world, so the generator is
+# gone rather than detected. The override survives for tests and for a manual
+# run that wants to pin the list, but it is NOT the source of truth: with it
+# unset — which is how launchd runs this — the hours come from the loaded job.
+#
+# Empty until resolve_fire_hours runs, and empty is a MEANING: "this run does not
+# know". next_fire_hour then finds no later fire, retry_will_follow is false, and
+# the alert says it could not read the schedule instead of asserting a fact about
+# fires it never saw. Failing that way round costs at most one alert that should
+# have waited; the opposite default is what mg-fc99 was filed about.
+FIRE_HOURS="${POGO_DEPLOY_FIRE_HOURS:-}"
+FIRE_HOURS_SOURCE="unresolved"
+
+# The launchd job this script IS, and the two places its schedule can be read
+# from. Both overridable so the controls can point them at a fixture.
+DEPLOY_LABEL="${POGO_DEPLOY_LABEL:-com.pogo.deploy}"
+DEPLOY_PLIST="${POGO_DEPLOY_PLIST:-$HOME/Library/LaunchAgents/$DEPLOY_LABEL.plist}"
+LAUNCHCTL="${POGO_DEPLOY_LAUNCHCTL:-/bin/launchctl}"
+PLISTBUDDY="${POGO_DEPLOY_PLISTBUDDY:-/usr/libexec/PlistBuddy}"
 
 # The in-run sync retry, BLIP TIER (mg-0d70). Four attempts at 15s / 45s / 120s
 # is three minutes of patience against a four-hour window — the 08-05 fault
@@ -648,7 +678,10 @@ drain_budget() {
 }
 
 # next_fire_hour NOW_H [HOURS] — the next scheduled fire strictly after NOW_H;
-# non-zero when tonight has none left. FIRE_HOURS must stay sorted ascending.
+# non-zero when tonight has none left, and non-zero when FIRE_HOURS is EMPTY,
+# which is how an unreadable schedule reaches the caller as "no claim" rather
+# than as a claim. The readers in section 1c sort ascending; a hand-pinned
+# POGO_DEPLOY_FIRE_HOURS must too.
 next_fire_hour() {
     local now=$(( 10#$1 )) hours="${2:-$FIRE_HOURS}" h
     for h in $hours; do
@@ -668,7 +701,164 @@ retry_will_follow() {
 }
 
 # ---------------------------------------------------------------------------
-# 1c. The night's attempt record (mg-8f7e)
+# 1c. The fire hours, READ FROM THE WORLD (mg-8dcb / mg-fc99)
+# ---------------------------------------------------------------------------
+# Two readable sources, and they answer different questions:
+#
+#   the LOADED job   (launchctl print gui/<uid>/com.pogo.deploy) — what will
+#                    actually fire tonight. This is the authority.
+#   the plist FILE   ($HOME/Library/LaunchAgents/com.pogo.deploy.plist) — what
+#                    somebody last wrote down. A file corrected and never
+#                    reloaded reads perfectly and does nothing at 04:00.
+#
+# So the loaded job wins, and a disagreement between the two is reported rather
+# than silently resolved: it is exactly the "installed but not bootstrapped"
+# state that looks healthy to every file-based check.
+#
+# SHAPE-AGNOSTIC ON PURPOSE, and this is the whole trap. The defect that
+# motivated all of this had StartCalendarInterval as a BARE DICT:
+#
+#     Dict { Hour = 3, Minute = 0 }        <- what was actually installed
+#     Array [ Dict { Hour = 3 } ]          <- NOT what was installed
+#
+# Those are different plist shapes, and a reader that walks array elements finds
+# no mismatching element on the dict because it finds no elements at all — it
+# reports GREEN against the very state it exists to catch. Both readers below
+# therefore collect `Hour` values from anywhere under StartCalendarInterval and
+# never index into an array, which makes the two shapes indistinguishable to
+# them. The controls exercise the dict form specifically.
+
+# fire_hours_from_launchctl [FILE] — hours from the LOADED job. FILE is a
+# captured `launchctl print` for the controls; without it, the live job is read.
+#
+# A calendarinterval descriptor with no Hour key fires EVERY hour, which no hour
+# list can express, so that is a refusal to derive rather than a shorter list.
+fire_hours_from_launchctl() {
+    local out hours
+    if [ $# -ge 1 ]; then
+        out="$(cat "$1" 2>/dev/null)" || return 1
+    else
+        [ -x "$LAUNCHCTL" ] || return 1
+        # Bounded like every other exec in this script: launchd is exactly the
+        # subsystem that can be wedged on the night this matters.
+        #
+        # The non-zero status is the whole check, and BOUNDED_TIMED_OUT must NOT
+        # be consulted here — that is the obvious line to add and it would be
+        # worse than nothing. run_bounded sets it in the SUBSHELL the command
+        # substitution creates, so what this scope would read is whatever some
+        # earlier bounded call left behind: a false negative on a stale `true`,
+        # and no signal at all on a real timeout. A timeout already surfaces as
+        # rc=BOUNDED_RC, which the `|| return 1` catches.
+        out="$(run_bounded "$TOOL_PROBE_TIMEOUT" "$LAUNCHCTL" print "gui/$(id -u)/$DEPLOY_LABEL" 2>/dev/null)" || return 1
+    fi
+    # awk is the LAST command in this substitution on purpose. Piping it into
+    # `sort | tr` here would hand the substitution sort's status instead, and the
+    # awk `exit 3` below — the refusal on a descriptor with no Hour — would be
+    # thrown away, leaving exactly the shorter-list-than-the-truth this function
+    # exists not to produce. The tidying runs as a second step.
+    hours="$(printf '%s\n' "$out" | awk '
+        # Reset on EVERY stream line, so a descriptor belonging to some other
+        # trigger stream cannot inherit a previous block'"'"'s calendarinterval.
+        /stream[ \t]*=/ { cal = ($0 ~ /com\.apple\.launchd\.calendarinterval/); next }
+        cal && /descriptor[ \t]*=[ \t]*\{/ { desc = 1; hour = ""; next }
+        desc && /"Hour"[ \t]*=>[ \t]*[0-9]+/ {
+            h = $0; sub(/.*=>[ \t]*/, "", h); sub(/[^0-9].*$/, "", h); hour = h; next
+        }
+        desc && /^[ \t]*\}/ {
+            if (hour == "") { bad = 1 } else { print hour + 0 }
+            desc = 0; cal = 0
+        }
+        END { if (bad) exit 3 }
+    ')" || return 1
+    hours="$(printf '%s\n' "$hours" | sed '/^$/d' | sort -n -u | tr '\n' ' ')"
+    hours="${hours% }"
+    [ -n "$hours" ] || return 1
+    printf '%s' "$hours"
+}
+
+# fire_hours_from_plist [PATH] — hours from the plist FILE, in either shape.
+#
+# PlistBuddy prints a bare dict as `Dict { ... Hour = 3 ... }` and an array as
+# `Array { Dict { ... } ... }`; in BOTH, every `Hour = N` line under the key is
+# one fire. Counting `Dict {` gives the number of entries in either shape too —
+# one for the bare dict, N for the array — so an entry that carries a Minute and
+# no Hour is caught rather than dropped.
+fire_hours_from_plist() {
+    local path="${1:-$DEPLOY_PLIST}" out hours dicts n
+    [ -r "$path" ] || return 1
+    if [ -x "$PLISTBUDDY" ]; then
+        out="$("$PLISTBUDDY" -c 'Print :StartCalendarInterval' "$path" 2>/dev/null)" || return 1
+        hours="$(printf '%s\n' "$out" | sed -n 's/^[[:space:]]*Hour[[:space:]]*=[[:space:]]*\([0-9][0-9]*\)[[:space:]]*$/\1/p')"
+        dicts="$(printf '%s\n' "$out" | grep -c 'Dict[[:space:]]*{')"
+    else
+        # Fallback for a host without PlistBuddy. `plutil -extract` emits the
+        # key's value alone, so <dict> counting is scoped the same way, and the
+        # XML is one tag per line for both shapes.
+        out="$(/usr/bin/plutil -extract StartCalendarInterval xml1 -o - "$path" 2>/dev/null)" || return 1
+        hours="$(printf '%s\n' "$out" | awk '
+            /<key>Hour<\/key>/ { want = 1; next }
+            want && match($0, /<integer>[0-9]+<\/integer>/) {
+                h = substr($0, RSTART + 9, RLENGTH - 19); print h + 0; want = 0
+            }')"
+        dicts="$(printf '%s\n' "$out" | grep -c '<dict>')"
+    fi
+    n="$(printf '%s\n' "$hours" | sed '/^$/d' | wc -l | tr -d ' ')"
+    # Neither more nor fewer: one Hour per entry, whatever the shape.
+    [ "$n" -gt 0 ] && [ "$n" -eq "$dicts" ] || return 1
+    hours="$(printf '%s\n' "$hours" | sed '/^$/d' | sort -n -u | tr '\n' ' ')"
+    printf '%s' "${hours% }"
+}
+
+# resolve_fire_hours — set FIRE_HOURS / FIRE_HOURS_SOURCE from the world.
+#
+# Never fatal. A run that cannot read its own schedule still deploys; what it
+# loses is the right to make a claim about later fires, and section 7 says so in
+# the alert instead of guessing.
+resolve_fire_hours() {
+    local loaded file
+    if [ -n "${POGO_DEPLOY_FIRE_HOURS:-}" ]; then
+        FIRE_HOURS="$POGO_DEPLOY_FIRE_HOURS"
+        FIRE_HOURS_SOURCE="override"
+        log "fire hours: $FIRE_HOURS (POGO_DEPLOY_FIRE_HOURS override — pinned by hand, NOT read from the world)"
+        return 0
+    fi
+    loaded="$(fire_hours_from_launchctl)" || loaded=""
+    file="$(fire_hours_from_plist)" || file=""
+
+    if [ -n "$loaded" ]; then
+        FIRE_HOURS="$loaded"
+        FIRE_HOURS_SOURCE="launchctl"
+        log "fire hours: $FIRE_HOURS — read from the LOADED job ($LAUNCHCTL print gui/$(id -u)/$DEPLOY_LABEL)"
+        if [ -n "$file" ] && [ "$file" != "$loaded" ]; then
+            err "fire hours: $DEPLOY_PLIST says '$file' but the LOADED job fires '$loaded' — the file was edited and never reloaded, so it is describing a schedule that does not exist. Run 'pogo service install-deploy' (it boots the job out and back in) to make the file real. This run uses the loaded list, which is what will actually fire."
+        fi
+        return 0
+    fi
+    if [ -n "$file" ]; then
+        FIRE_HOURS="$file"
+        FIRE_HOURS_SOURCE="plist"
+        log "fire hours: $FIRE_HOURS — read from $DEPLOY_PLIST because the loaded job could not be read. This is what the FILE says; an unreloaded file can differ from what fires."
+        return 0
+    fi
+    FIRE_HOURS=""
+    FIRE_HOURS_SOURCE="unknown"
+    err "fire hours: neither the loaded job nor $DEPLOY_PLIST could be read — this run cannot tell whether a later fire is coming tonight, and will not claim one either way."
+    return 1
+}
+
+# fires_left_phrase — the sentence about later fires, and the only reason the old
+# hardcoded list existed. It now has three cases, not two, because "I could not
+# read the schedule" is not the same claim as "there is no later fire".
+fires_left_phrase() {
+    if [ "$FIRE_HOURS_SOURCE" = "unknown" ] || [ -z "$FIRE_HOURS" ]; then
+        printf '%s' "and this run could not read its own launchd schedule, so it cannot say whether a later fire tonight will retry it — check \`$LAUNCHCTL print gui/$(id -u)/$DEPLOY_LABEL\`"
+    else
+        printf '%s' "and no fire is left tonight to retry it (the job fires at $FIRE_HOURS, read from ${FIRE_HOURS_SOURCE})"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# 1d. The night's attempt record (mg-8f7e)
 # ---------------------------------------------------------------------------
 # One line: "<date> <attempts> <last_rc>". It exists so a 04:00 fire can tell
 # the two nights apart that otherwise look identical from inside it — one where
@@ -2348,7 +2538,7 @@ red_alert_body() {
 no polecat will start and no merge will run until pogod is serving the fleet
 again. The remedy is below; everything between here and it is context.'
     fi
-    printf '%s\n' "The unattended nightly redeploy FAILED, and no fire is left tonight to retry it.
+    printf '%s\n' "The unattended nightly redeploy FAILED, $(fires_left_phrase).
 
   exit $rc:  $(describe_outcome "$rc" "$file")
   attempt:   $(( ATTEMPT_N + 1 )) tonight ($today)
@@ -2949,6 +3139,13 @@ main() {
     fi
     arm_run_deadline "$DEADLINE_S" "$$"
 
+    # Read the schedule from the world, once, now that the run is bounded (the
+    # `launchctl print` is itself under run_bounded, but arming first means a
+    # wedge here is caught by the same watchdog as everything else). Never
+    # fatal: a run that cannot read its own schedule still deploys, it just
+    # stops claiming things about later fires — see section 1c.
+    resolve_fire_hours || true
+
     # --- gate 2: one at a time ----------------------------------------------
     if ! acquire_lock; then
         log "lock: another pogo-deploy run holds $LOCK_DIR — exiting 0"
@@ -3076,7 +3273,7 @@ deployed and the running pogod is untouched. Daniel's dev tree was NOT touched.
   checkout: $SRC
   attempts: $SYNC_TRIES in this run$([ "$SYNC_RETRY_SPENT" -gt 0 ] && printf ', over %ss of waiting' "$SYNC_RETRY_SPENT")
   vigil:    $([ "$SYNC_VIGIL_SPENT" -gt 0 ] && printf '%ss — a LOWER BOUND on how long the transport was unreachable' "$SYNC_VIGIL_SPENT" || printf 'none (the failure was not one the vigil covers, or the vigil is off)')
-  exit:     $sync_rc$([ "$sync_rc" -eq 10 ] && printf ' (retryable class — but no fire is left tonight)')
+  exit:     $sync_rc$([ "$sync_rc" -eq 10 ] && printf ' (retryable class — but %s)' "$(fires_left_phrase | sed 's/^and //')")
   log:      $HOME/Library/Logs/pogo/pogo-deploy.log
 
 WHAT THE UNDERLYING TOOL ACTUALLY SAID, verbatim:

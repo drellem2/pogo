@@ -1423,6 +1423,402 @@ POGO_DEPLOY_NOW=3 retry_will_follow 7 \
 MIN_DRAIN=600
 
 # ---------------------------------------------------------------------------
+# fire_hours_from_plist / fire_hours_from_launchctl — READ, not duplicated
+# ---------------------------------------------------------------------------
+# THE POSITIVE CONTROL FOR THIS SECTION HAD TO BE BUILT, because the free one is
+# gone. Until 2026-08-07 14:03:28 the installed plist carried a single 03:00 fire
+# while the runner's hardcoded list said "3 4 5", so the world itself was the
+# RED arm — mg-fc99 said so and said to take the control while the bug was still
+# there. Nobody did; mg-b201 installed the correct three-fire plist, which was
+# the right thing to do, and the control was spent. A check first run against a
+# world where the defect is already fixed has never been shown to fire, so both
+# arms below are constructed.
+#
+# AND THE BROKEN SHAPE IS THE POINT. What was installed was StartCalendarInterval
+# as a BARE DICT, not an array of one:
+#
+#     Dict { Hour = 3, Minute = 0 }        <- what was actually installed
+#     Array [ Dict { Hour = 3 } ]          <- NOT what was installed
+#
+# A reader that walks array elements passes clean on the dict: it finds no
+# mismatching element because it finds no elements at all. That is the naive
+# implementation of this very check reporting GREEN against the state that
+# motivated it, so the RED arm uses the dict form and there is a test below
+# proving an index-based reader would have missed it.
+PLIST_DIR="$WORK/plists"
+mkdir -p "$PLIST_DIR"
+
+# THE BROKEN STATE, reproduced: one 03:00 fire, as a BARE DICT.
+cat > "$PLIST_DIR/dict-0300.plist" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.pogo.deploy</string>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>3</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+</dict>
+</plist>
+EOF
+
+# The corrected state: three fires, as an ARRAY.
+cat > "$PLIST_DIR/array-345.plist" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.pogo.deploy</string>
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict><key>Hour</key><integer>3</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Hour</key><integer>4</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Hour</key><integer>5</integer><key>Minute</key><integer>0</integer></dict>
+    </array>
+</dict>
+</plist>
+EOF
+
+# An array of one — the shape people ASSUME the broken state had. Kept so the
+# dict test above cannot be satisfied by a reader that only handles arrays.
+cat > "$PLIST_DIR/array-0300.plist" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict><key>Hour</key><integer>3</integer><key>Minute</key><integer>0</integer></dict>
+    </array>
+</dict>
+</plist>
+EOF
+
+# An entry with a Minute and NO Hour: launchd fires that EVERY hour. No hour list
+# can say that, so the reader must refuse rather than return a shorter list.
+cat > "$PLIST_DIR/dict-nohour.plist" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Minute</key>
+        <integer>30</integer>
+    </dict>
+</dict>
+</plist>
+EOF
+
+# --- ARM 1: RED. The bare dict with one 03:00 fire. ------------------------
+DICT_HOURS="$(fire_hours_from_plist "$PLIST_DIR/dict-0300.plist")" || DICT_HOURS="<unreadable>"
+[ "$DICT_HOURS" = "3" ] \
+    && pass "fire_hours_from_plist: the BARE DICT form reads as '3' — the shape a reader that walks arrays skips entirely" \
+    || fail "fire_hours_from_plist bare dict: got '$DICT_HOURS', want '3'"
+
+# The RED itself: with the world in that state, a 03:00 stall has NO retry, and
+# the runner must say so. This is the assertion mg-fc99 ruled for.
+next_fire_hour 3 "$DICT_HOURS" >/dev/null \
+    && fail "RED ARM DID NOT FIRE: with a single 03:00 fire installed, the runner still claimed a later fire — this is the exact defect (a retry promised that does not exist)" \
+    || pass "RED ARM: against the broken world (one 03:00 fire, bare dict) the runner finds NO later fire — the hardcoded '3 4 5' claimed 04:00 here and was wrong"
+
+FIRE_HOURS="$DICT_HOURS"; FIRE_HOURS_SOURCE=plist
+WINDOW_END=6; RESERVE=1200; MAX_DRAIN=7200; MIN_DRAIN=600
+POGO_DEPLOY_NOW=3 retry_will_follow 7 \
+    && fail "RED ARM: retry_will_follow promised a 04:00 retry against a plist with only 03:00" \
+    || pass "RED ARM: retry_will_follow is FALSE against the broken plist — the alert alerts tonight instead of waiting for a fire that never comes"
+
+# --- ARM 2: GREEN. The three-fire array actually installed now. ------------
+ARR_HOURS="$(fire_hours_from_plist "$PLIST_DIR/array-345.plist")" || ARR_HOURS="<unreadable>"
+[ "$ARR_HOURS" = "3 4 5" ] \
+    && pass "fire_hours_from_plist: the ARRAY form reads as '3 4 5'" \
+    || fail "fire_hours_from_plist array: got '$ARR_HOURS', want '3 4 5'"
+
+FIRE_HOURS="$ARR_HOURS"; FIRE_HOURS_SOURCE=plist
+POGO_DEPLOY_NOW=3 retry_will_follow 7 \
+    && pass "GREEN ARM: against the corrected world (3/4/5) a 03:00 stall DOES have a retry — the check is not simply always-red" \
+    || fail "GREEN ARM: retry_will_follow false against a three-fire plist"
+
+# Both arms came from the same reader with no shape flag passed to it.
+[ "$(fire_hours_from_plist "$PLIST_DIR/array-0300.plist")" = "3" ] \
+    && pass "fire_hours_from_plist: an ARRAY OF ONE reads as '3' too — dict and array of the same schedule are indistinguishable to this reader" \
+    || fail "fire_hours_from_plist array-of-one"
+
+# THE TRAP, demonstrated rather than asserted: the obvious index-based read finds
+# nothing on the dict, so a check built that way would have reported GREEN
+# against the very state it existed to catch.
+if [ -x /usr/libexec/PlistBuddy ]; then
+    /usr/libexec/PlistBuddy -c 'Print :StartCalendarInterval:0:Hour' "$PLIST_DIR/dict-0300.plist" >/dev/null 2>&1 \
+        && fail "the index-based read succeeded on a bare dict — the premise of this section is wrong" \
+        || pass "TRAP CONFIRMED: 'Print :StartCalendarInterval:0:Hour' FAILS on the bare dict, so an array-walking check finds no mismatching element because it finds no elements"
+    /usr/libexec/PlistBuddy -c 'Print :StartCalendarInterval:0:Hour' "$PLIST_DIR/array-345.plist" >/dev/null 2>&1 \
+        && pass "...and the same index-based read SUCCEEDS on the array — the failure above is the shape, not a broken command" \
+        || fail "the index-based read failed on the array too; the trap demo proves nothing"
+fi
+
+# An entry launchd fires every hour cannot be reported as an hour list.
+fire_hours_from_plist "$PLIST_DIR/dict-nohour.plist" >/dev/null 2>&1 \
+    && fail "fire_hours_from_plist returned hours for an entry with no Hour key (launchd fires that EVERY hour)" \
+    || pass "fire_hours_from_plist refuses an entry with a Minute and no Hour rather than returning a shorter list"
+
+fire_hours_from_plist "$PLIST_DIR/does-not-exist.plist" >/dev/null 2>&1 \
+    && fail "fire_hours_from_plist invented hours for a plist that is not there" \
+    || pass "fire_hours_from_plist: an absent plist is a refusal, not an empty schedule"
+
+# The plutil FALLBACK, exercised rather than assumed. It is a second parser of a
+# second output format, reached only on a host without PlistBuddy — which is to
+# say never here, so nothing but this would ever run it. It has to be
+# shape-agnostic on its own terms: it counts <dict> tags where the PlistBuddy
+# branch counts `Dict {`, and neither indexes into the array.
+PB_DICT="$(PLISTBUDDY=/nonexistent fire_hours_from_plist "$PLIST_DIR/dict-0300.plist")" || PB_DICT="<refused>"
+PB_ARR="$(PLISTBUDDY=/nonexistent fire_hours_from_plist "$PLIST_DIR/array-345.plist")" || PB_ARR="<refused>"
+[ "$PB_DICT" = "3" ] && [ "$PB_ARR" = "3 4 5" ] \
+    && pass "the plutil fallback reads BOTH shapes too ('$PB_DICT' from the bare dict, '$PB_ARR' from the array) — a host without PlistBuddy is not a host that quietly stops knowing its schedule" \
+    || fail "plutil fallback: dict gave '$PB_DICT' (want 3), array gave '$PB_ARR' (want 3 4 5)"
+PLISTBUDDY=/nonexistent fire_hours_from_plist "$PLIST_DIR/dict-nohour.plist" >/dev/null 2>&1 \
+    && fail "the plutil fallback returned hours for an entry with no Hour key" \
+    || pass "...and it refuses the every-hour entry on the same terms as the PlistBuddy branch"
+
+# ---------------------------------------------------------------------------
+# The LOADED job, not the file — `launchctl print` (requirement 5)
+# ---------------------------------------------------------------------------
+# A corrected plist that was never reloaded is byte-identical to a working one on
+# disk and does nothing at 04:00. mg-b201's own verification turned on exactly
+# this distinction, so the authority is the loaded job.
+LC_DIR="$WORK/launchctl"
+mkdir -p "$LC_DIR"
+
+# The three-fire loaded job, in the format `launchctl print` actually emits —
+# captured from this host on 2026-08-13.
+cat > "$LC_DIR/loaded-345.txt" <<'EOF'
+	event triggers = {
+		com.pogo.deploy.268435481 => {
+			keepalive = 0
+			service = com.pogo.deploy
+			stream = com.apple.launchd.calendarinterval
+			monitor = com.apple.UserEventAgent-Aqua
+			descriptor = {
+				"Minute" => 0
+				"Hour" => 5
+			}
+		}
+		com.pogo.deploy.268435480 => {
+			keepalive = 0
+			service = com.pogo.deploy
+			stream = com.apple.launchd.calendarinterval
+			monitor = com.apple.UserEventAgent-Aqua
+			descriptor = {
+				"Minute" => 0
+				"Hour" => 4
+			}
+		}
+		com.pogo.deploy.268435479 => {
+			keepalive = 0
+			service = com.pogo.deploy
+			stream = com.apple.launchd.calendarinterval
+			monitor = com.apple.UserEventAgent-Aqua
+			descriptor = {
+				"Minute" => 0
+				"Hour" => 3
+			}
+		}
+	}
+EOF
+
+# The pre-mg-b201 loaded job: ONE trigger. This is what `launchctl print` showed
+# on the night the runner believed two retries were coming.
+cat > "$LC_DIR/loaded-0300.txt" <<'EOF'
+	event triggers = {
+		com.pogo.deploy.268435479 => {
+			keepalive = 0
+			service = com.pogo.deploy
+			stream = com.apple.launchd.calendarinterval
+			monitor = com.apple.UserEventAgent-Aqua
+			descriptor = {
+				"Minute" => 0
+				"Hour" => 3
+			}
+		}
+	}
+EOF
+
+# A job whose only trigger is a StartInterval — no calendar hours to read.
+cat > "$LC_DIR/loaded-interval.txt" <<'EOF'
+	event triggers = {
+		com.pogo.deploy.268435479 => {
+			keepalive = 0
+			service = com.pogo.deploy
+			stream = com.apple.launchd.periodic
+			monitor = com.apple.UserEventAgent-Aqua
+			descriptor = {
+				"Interval" => 3600
+			}
+		}
+	}
+EOF
+
+[ "$(fire_hours_from_launchctl "$LC_DIR/loaded-345.txt")" = "3 4 5" ] \
+    && pass "fire_hours_from_launchctl: three calendarinterval descriptors read as '3 4 5', SORTED ascending (launchctl prints them 5/4/3)" \
+    || fail "fire_hours_from_launchctl 345: got '$(fire_hours_from_launchctl "$LC_DIR/loaded-345.txt")'"
+
+[ "$(fire_hours_from_launchctl "$LC_DIR/loaded-0300.txt")" = "3" ] \
+    && pass "fire_hours_from_launchctl: the pre-fix loaded job reads as '3' — one fire, and the runner will not claim a second" \
+    || fail "fire_hours_from_launchctl 0300"
+
+fire_hours_from_launchctl "$LC_DIR/loaded-interval.txt" >/dev/null 2>&1 \
+    && fail "fire_hours_from_launchctl read hours out of a job with no calendar trigger at all" \
+    || pass "fire_hours_from_launchctl: a StartInterval-only job yields no hours (a refusal, not an empty list)"
+
+# A calendar descriptor with a Minute and NO Hour fires EVERY hour, and it sits
+# ALONGSIDE two ordinary ones. This is the case that silently returns a shorter
+# list than the truth if the reader's refusal is thrown away by a pipeline — the
+# hours it CAN read are real, so the result looks perfectly plausible.
+cat > "$LC_DIR/loaded-hourly.txt" <<'EOF'
+	event triggers = {
+		com.pogo.deploy.268435479 => {
+			stream = com.apple.launchd.calendarinterval
+			descriptor = {
+				"Minute" => 0
+				"Hour" => 3
+			}
+		}
+		com.pogo.deploy.268435480 => {
+			stream = com.apple.launchd.calendarinterval
+			descriptor = {
+				"Minute" => 30
+			}
+		}
+		com.pogo.deploy.268435481 => {
+			stream = com.apple.launchd.calendarinterval
+			descriptor = {
+				"Minute" => 0
+				"Hour" => 4
+			}
+		}
+	}
+EOF
+HOURLY_OUT="$(fire_hours_from_launchctl "$LC_DIR/loaded-hourly.txt")" && HOURLY_RC=0 || HOURLY_RC=$?
+[ "$HOURLY_RC" -ne 0 ] \
+    && pass "fire_hours_from_launchctl REFUSES a schedule containing an every-hour descriptor rather than reporting the two hours it could read" \
+    || fail "fire_hours_from_launchctl returned '$HOURLY_OUT' for a schedule that also fires every hour at :30 — a shorter list than the truth, which is the defect this whole ticket is about"
+
+# The reader runs an exec on the 03:00 path, which is the objection the old
+# hardcoded constant was defended with. It is bounded, and it is bounded by the
+# COMMAND'S STATUS rather than by run_bounded's BOUNDED_TIMED_OUT flag — that
+# flag is set inside the subshell a command substitution creates, so this scope
+# would read whatever an earlier bounded call left behind.
+printf '#!/bin/sh\nsleep 300\n' > "$WORK/launchctl-hangs"
+chmod +x "$WORK/launchctl-hangs"
+LC_T0="$(date +%s)"
+(
+    LAUNCHCTL="$WORK/launchctl-hangs"
+    TOOL_PROBE_TIMEOUT=2
+    fire_hours_from_launchctl >/dev/null 2>&1
+) && fail "a launchctl that never returns produced fire hours" \
+  || pass "fire_hours_from_launchctl: a launchctl that NEVER RETURNS is a refusal — the schedule read cannot hang the one path that has to work when everything else is broken"
+LC_ELAPSED=$(( $(date +%s) - LC_T0 ))
+[ "$LC_ELAPSED" -lt 30 ] \
+    && pass "...and it refused in ${LC_ELAPSED}s, not after the stub's 300 — the bound is real, not the stub exiting on its own" \
+    || fail "fire_hours_from_launchctl took ${LC_ELAPSED}s against a 2s bound"
+
+printf '#!/bin/sh\ncat %q\n' "$LC_DIR/loaded-345.txt" > "$WORK/launchctl-stub"
+chmod +x "$WORK/launchctl-stub"
+STALE_HOURS="$(
+    BOUNDED_TIMED_OUT=true
+    LAUNCHCTL="$WORK/launchctl-stub"
+    fire_hours_from_launchctl 2>/dev/null
+)"
+[ "$STALE_HOURS" = "3 4 5" ] \
+    && pass "fire_hours_from_launchctl reads a healthy launchctl even with a STALE BOUNDED_TIMED_OUT=true left over from an earlier bounded call — the read does not depend on a flag that cannot cross the subshell" \
+    || fail "a stale BOUNDED_TIMED_OUT suppressed a successful schedule read (got '$STALE_HOURS')"
+
+# THE RELOAD GAP, which is the reason the loaded job is the authority: the file
+# says 3 4 5 and the job fires only at 03:00. Every file-based check is green.
+RESOLVE_OUT="$WORK/resolve.log"
+(
+    POGO_DEPLOY_FIRE_HOURS=""
+    DEPLOY_PLIST="$PLIST_DIR/array-345.plist"
+    fire_hours_from_launchctl() { printf '3'; }
+    resolve_fire_hours >"$RESOLVE_OUT" 2>&1
+    printf '%s|%s\n' "$FIRE_HOURS" "$FIRE_HOURS_SOURCE" > "$WORK/resolve.vals"
+)
+read -r RESOLVED < "$WORK/resolve.vals"
+[ "$RESOLVED" = "3|launchctl" ] \
+    && pass "resolve_fire_hours: the LOADED job wins over the file — a plist corrected and never reloaded does not get to describe tonight" \
+    || fail "resolve_fire_hours preferred the file over the loaded job (got '$RESOLVED')"
+grep -q 'never reloaded' "$RESOLVE_OUT" \
+    && pass "resolve_fire_hours SAYS SO when file and loaded job disagree, naming both lists and the command that fixes it" \
+    || fail "resolve_fire_hours resolved a file/loaded disagreement silently: $(cat "$RESOLVE_OUT")"
+
+# Neither source readable: the run must make NO claim, which is a third case and
+# not the same sentence as "no fire is left tonight".
+(
+    POGO_DEPLOY_FIRE_HOURS=""
+    DEPLOY_PLIST="$WORK/absent.plist"
+    fire_hours_from_launchctl() { return 1; }
+    resolve_fire_hours >/dev/null 2>&1
+    printf '%s|%s|%s\n' "$FIRE_HOURS" "$FIRE_HOURS_SOURCE" "$(fires_left_phrase)" > "$WORK/resolve.unknown"
+)
+UNKNOWN_LINE="$(cat "$WORK/resolve.unknown")"
+case "$UNKNOWN_LINE" in
+    "|unknown|"*"could not read its own launchd schedule"*)
+        pass "resolve_fire_hours: with neither source readable the run says it CANNOT TELL — it neither promises a retry nor asserts there is none" ;;
+    *) fail "unreadable schedule did not produce the third case: '$UNKNOWN_LINE'" ;;
+esac
+case "$UNKNOWN_LINE" in
+    *"no fire is left tonight"*) fail "the unknown case still asserted 'no fire is left tonight' — that is a claim about fires it never saw" ;;
+    *) pass "the unknown case does NOT assert 'no fire is left tonight'" ;;
+esac
+
+# The override still works — the tests above use it — but it is not the default.
+grep -q 'FIRE_HOURS="${POGO_DEPLOY_FIRE_HOURS:-}"' "$RUNNER" \
+    && pass "the runner ships NO hardcoded fire-hour list: POGO_DEPLOY_FIRE_HOURS defaults to empty and the hours come from the world" \
+    || fail "a hardcoded fire-hour default is back in the runner — that is the generator this ticket removed"
+(
+    POGO_DEPLOY_FIRE_HOURS="1 2"
+    fire_hours_from_launchctl() { printf '3 4 5'; }
+    resolve_fire_hours >/dev/null 2>&1
+    printf '%s|%s\n' "$FIRE_HOURS" "$FIRE_HOURS_SOURCE" > "$WORK/resolve.override"
+)
+[ "$(cat "$WORK/resolve.override")" = "1 2|override" ] \
+    && pass "POGO_DEPLOY_FIRE_HOURS still pins the list for a test or a manual run, and is LABELLED as a pin rather than as the world" \
+    || fail "the override no longer works: $(cat "$WORK/resolve.override")"
+
+# --- and against the machine, not a fixture -------------------------------
+# The two fixtures above are transcriptions. This one is the world: if the job is
+# loaded on this host, the reader must agree with `launchctl print`, and the file
+# must agree with the loaded job (i.e. nobody has left an unreloaded edit here).
+if [ -x /bin/launchctl ] && /bin/launchctl print "gui/$(id -u)/com.pogo.deploy" >/dev/null 2>&1; then
+    LIVE_LOADED="$(DEPLOY_LABEL=com.pogo.deploy fire_hours_from_launchctl)" || LIVE_LOADED=""
+    LIVE_EXPECT="$(/bin/launchctl print "gui/$(id -u)/com.pogo.deploy" 2>/dev/null \
+        | awk '/"Hour"[ \t]*=>/ { h = $0; sub(/.*=>[ \t]*/, "", h); sub(/[^0-9].*$/, "", h); print h + 0 }' \
+        | sort -n -u | tr '\n' ' ')"
+    LIVE_EXPECT="${LIVE_EXPECT% }"
+    [ -n "$LIVE_LOADED" ] && [ "$LIVE_LOADED" = "$LIVE_EXPECT" ] \
+        && pass "LIVE: fire_hours_from_launchctl reads '$LIVE_LOADED' from the job actually loaded on this host, matching an independent scrape of the same output" \
+        || fail "LIVE: reader said '$LIVE_LOADED', independent scrape of launchctl print said '$LIVE_EXPECT'"
+    LIVE_FILE="$(fire_hours_from_plist "$HOME/Library/LaunchAgents/com.pogo.deploy.plist")" || LIVE_FILE=""
+    if [ -n "$LIVE_FILE" ]; then
+        [ "$LIVE_FILE" = "$LIVE_LOADED" ] \
+            && pass "LIVE: the installed plist ('$LIVE_FILE') and the loaded job ('$LIVE_LOADED') agree — the file on this host has been reloaded" \
+            || fail "LIVE: $HOME/Library/LaunchAgents/com.pogo.deploy.plist says '$LIVE_FILE' but the loaded job fires '$LIVE_LOADED' — an unreloaded edit is live on this machine"
+    else
+        echo "note: no readable com.pogo.deploy.plist on this host — the file/loaded cross-check did not run"
+    fi
+else
+    echo "note: com.pogo.deploy is not loaded on this host — the live launchctl checks did not run (the fixture arms above did)"
+fi
+
+FIRE_HOURS="3 4 5"; FIRE_HOURS_SOURCE=plist
+MIN_DRAIN=600
+
+# ---------------------------------------------------------------------------
 # attempt_disposition — telling the two nights apart
 # ---------------------------------------------------------------------------
 # From inside a 04:00 fire, a night where 03:00 stalled on a busy fleet and a
