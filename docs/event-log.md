@@ -408,12 +408,26 @@ field that separates them, and `skipped` says why. Additive — no
   - `to` (string, required): the mailbox actually written; `""` when nothing was sent
   - `redirected` (bool, required): `true` when `to` is the coordinator standing in for a creator that no longer exists, or relaying a mail the creator's box refused
   - `sent` (bool, required): whether a mail was written
+  - `closed` (bool, required): whether the work item actually reached a terminal state. `false` on the merge route means the branch landed and the item is **still open** — the notice sent was "MERGED BUT NOT CLOSED", not a completion (mg-2b71)
+  - `not_closed_reason` (string, optional): why the item is still open, in words — present only when `closed` is `false`
   - `skipped` (string, optional): why nothing was sent, in words — e.g. the filer is the worker, or the coordinator already had the refinery's merge mail
   - `error` (string, optional): the delivery failure, when one occurred
   - `branch`, `merged_sha` (string, optional): present on the merge route
 
 ```json
-{"schema_version":1,"timestamp":"2026-08-12T15:04:11.000000000Z","event_type":"work_item_completion_notice","agent":"pogod","work_item_id":"mg-145f","details":{"route":"merge","creator":"pm-onethird","to":"pm-onethird","redirected":false,"sent":true,"branch":"polecat-p145f","merged_sha":"8eec6d2"}}
+{"schema_version":1,"timestamp":"2026-08-12T15:04:11.000000000Z","event_type":"work_item_completion_notice","agent":"pogod","work_item_id":"mg-145f","details":{"route":"merge","creator":"pm-onethird","to":"pm-onethird","redirected":false,"sent":true,"closed":true,"branch":"polecat-p145f","merged_sha":"8eec6d2"}}
+```
+
+**`closed` is required rather than assumed, and it was added after a notice went
+out that nobody had the standing to send.** On 2026-08-13 mg-479c's branch merged,
+`mg done` was refused (exit 4, the item was unclaimed), and the filer was told
+COMPLETED anyway — 45 seconds after pogod's own log recorded the refusal. The two
+skips above (`the filer is the worker`, `the coordinator already had the merge
+mail`) are also conditional on `closed`: each says the recipient already knows,
+and neither is true of a merge that left the item open.
+
+```json
+{"schema_version":1,"timestamp":"2026-08-13T02:27:07.000000000Z","event_type":"work_item_completion_notice","agent":"pogod","work_item_id":"mg-479c","details":{"route":"merge","creator":"pm-onethird","to":"pm-onethird","redirected":false,"sent":true,"closed":false,"not_closed_reason":"pogod declined to close it: work item is gated and was deliberately not closed: mg-479c is unclaimed and assigned to \"parked\"","branch":"polecat-c479c","merged_sha":"1a0240a"}}
 ```
 
 ### Inter-agent communication

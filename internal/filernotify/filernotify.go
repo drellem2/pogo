@@ -104,6 +104,22 @@ type Completion struct {
 	// notify time — see Notify for why the reading, not the caller's copy, is
 	// what the dedup key is built from.
 	Result string
+	// Closed reports whether the work item actually reached a terminal state.
+	// It is the difference between "your item completed" and "your item's branch
+	// merged and the item is still open", and until mg-2b71 nothing carried it:
+	// the merge close ran `mg done`, logged the refusal verbatim, and mailed
+	// COMPLETED anyway.
+	//
+	// THE ZERO VALUE IS "NOT CLOSED", AND THAT IS THE SAFE DIRECTION. A caller
+	// that has not established closure must not be able to assert it by omission
+	// — this whole package exists because a report went out that nobody had the
+	// standing to make.
+	Closed bool
+	// NotClosedReason is the why, in words, for an item that is still open. It
+	// goes in the mail: "merged, but the work item could not be closed (not
+	// claimed) — it is still open" is actionable, and it is the sentence the
+	// recipient of the false COMPLETED notice needed and did not get.
+	NotClosedReason string
 }
 
 // Outcome is what Notify did, returned so a caller (and a test) can assert on
@@ -229,11 +245,11 @@ func (n *Notifier) Notify(c Completion) Outcome {
 		// difference is the whole reason this package exists. Escalate to the
 		// coordinator, which is the actor that can go and look.
 		return n.send(c, res, n.coordinator, true, "",
-			fmt.Sprintf("COMPLETED: %s — could not read who filed it", c.ItemID),
-			fmt.Sprintf("Work item %s has completed, and pogod could not read its creator to tell them:\n\n  %v\n\n"+
+			fmt.Sprintf("%s: %s — could not read who filed it", headline(c), c.ItemID),
+			fmt.Sprintf("Work item %s %s, and pogod could not read its creator to tell them:\n\n  %v\n\n"+
 				"Nothing else in the completion path notifies a filer (mg-f120), so if this item was commissioned, "+
 				"its commissioner has not been told. Check `mg show %s` for the Creator and pass the result on.\n\n%s",
-				c.ItemID, err, c.ItemID, detail(c, res)))
+				c.ItemID, happened(c), err, c.ItemID, detail(c, res)))
 	}
 	if creator == "" {
 		// An item with no recorded creator has nobody waiting on it that we can
@@ -241,10 +257,16 @@ func (n *Notifier) Notify(c Completion) Outcome {
 		// would otherwise turn this whole package off without a word.
 		return n.finish(c, res, Outcome{Skipped: "work item records no creator"})
 	}
-	if c.Worker != "" && strings.EqualFold(creator, c.Worker) {
+	// BOTH SKIPS BELOW TURN ON THE ITEM HAVING CLOSED (mg-2b71). Each says the
+	// recipient already knows, and each is right about a COMPLETION and wrong
+	// about a merge that left the item open: the worker was stopped before it
+	// could see the refusal, and the refinery's MERGED mail reports the merge
+	// without a word about the item's state. "Already told" is a claim about a
+	// message that was actually sent, and no message says this.
+	if c.Closed && c.Worker != "" && strings.EqualFold(creator, c.Worker) {
 		return n.finish(c, res, Outcome{Creator: creator, Skipped: "the filer is the worker — it already knows"})
 	}
-	if c.Route == RouteMerge && strings.EqualFold(creator, n.coordinator) {
+	if c.Closed && c.Route == RouteMerge && strings.EqualFold(creator, n.coordinator) {
 		// The refinery already mails the coordinator on every merge, with the
 		// branch, the target and the merged SHA. A second mail saying the same
 		// thing about the same event teaches the coordinator to skim both.
@@ -263,9 +285,9 @@ func (n *Notifier) Notify(c Completion) Outcome {
 		to, redirected = n.coordinator, true
 	}
 
-	subject := fmt.Sprintf("COMPLETED: %s — %s", c.ItemID, oneLine(title))
+	subject := fmt.Sprintf("%s: %s — %s", headline(c), c.ItemID, oneLine(title))
 	if redirected {
-		subject = fmt.Sprintf("COMPLETED: %s (filed by %s, who is gone) — %s", c.ItemID, creator, oneLine(title))
+		subject = fmt.Sprintf("%s: %s (filed by %s, who is gone) — %s", headline(c), c.ItemID, creator, oneLine(title))
 	}
 	return n.send(c, res, to, redirected, creator, subject, body(c, res, creator, title, redirected))
 }
@@ -288,22 +310,44 @@ func (n *Notifier) resolveResult(c Completion) string {
 	return strings.TrimSpace(c.Result)
 }
 
+// headline is the subject-line verdict: what this mail is ABOUT. A merge that
+// left its item open is not a completion and must not be filed as one — the
+// subject is the part that gets skimmed, forwarded and searched (mg-2b71).
+func headline(c Completion) string {
+	if c.Closed {
+		return "COMPLETED"
+	}
+	return "MERGED BUT NOT CLOSED"
+}
+
+// happened is the same fact as a verb phrase, for the sentences that state it
+// in prose.
+func happened(c Completion) string {
+	if c.Closed {
+		return "has completed"
+	}
+	return "had its branch merged and is STILL OPEN"
+}
+
 // body is the notification a filer reads.
 func body(c Completion, res, creator, title string, redirected bool) string {
 	var b strings.Builder
 	if redirected {
 		fmt.Fprintf(&b, "This is %s's mail, redirected to you: %s is not a live agent, so it has no reader.\n"+
 			"You are the coordinator; pass it on if the work has a waiting consumer.\n\n", creator, creator)
-	} else {
+	} else if c.Closed {
 		fmt.Fprintf(&b, "The work item you filed has completed.\n\n")
+	} else {
+		fmt.Fprintf(&b, "The work item you filed had its branch MERGED, and the item itself was NOT closed.\n"+
+			"It is still open. Nothing else is going to close it.\n\n")
 	}
 	fmt.Fprintf(&b, "Item:   %s\n", c.ItemID)
 	if title != "" {
 		fmt.Fprintf(&b, "Title:  %s\n", oneLine(title))
 	}
 	fmt.Fprintf(&b, "Filer:  %s\n", creator)
-	switch c.Route {
-	case RouteMerge:
+	switch {
+	case c.Route == RouteMerge && c.Closed:
 		fmt.Fprintf(&b, "Closed: its branch merged")
 		if c.Branch != "" {
 			fmt.Fprintf(&b, " (%s)", c.Branch)
@@ -312,11 +356,25 @@ func body(c Completion, res, creator, title string, redirected bool) string {
 			fmt.Fprintf(&b, " as %s", c.MergedSHA)
 		}
 		b.WriteString("\n")
-	case RouteSelfClose:
+	case c.Route == RouteMerge:
+		fmt.Fprintf(&b, "Merged: its branch")
+		if c.Branch != "" {
+			fmt.Fprintf(&b, " (%s)", c.Branch)
+		}
+		if c.MergedSHA != "" {
+			fmt.Fprintf(&b, " as %s", c.MergedSHA)
+		}
+		b.WriteString("\n")
+		fmt.Fprintf(&b, "NOT CLOSED: the item is still open")
+		if r := strings.TrimSpace(c.NotClosedReason); r != "" {
+			fmt.Fprintf(&b, " — %s", r)
+		}
+		b.WriteString("\n")
+	case c.Route == RouteSelfClose:
 		fmt.Fprintf(&b, "Closed: by its worker calling `mg done` — no merge; the deliverable is the record, not a branch\n")
 	}
 	b.WriteString("\n")
-	b.WriteString(verdict(res))
+	b.WriteString(verdict(res, c.Closed))
 	b.WriteString("\n\nYou are getting this because you are the item's Creator. Nothing else in the completion\n" +
 		"path tells a filer: the refinery mails the coordinator, pogod closes the item, and the\n" +
 		"coordinator archives it (mg-f120). Read the full record with `mg show " + c.ItemID + "`.\n")
@@ -327,7 +385,16 @@ func body(c Completion, res, creator, title string, redirected bool) string {
 // none. "No verdict was recorded" is a fact worth reading — it is the shape a
 // worker leaves when it skips `--verdict-file` at submit (mg-dfea) — and it must
 // not be indistinguishable from a notifier that failed to look.
-func verdict(res string) string {
+func verdict(res string, closed bool) string {
+	if res == "" && !closed {
+		// The missing sidecar is a CONSEQUENCE of the close not happening, not a
+		// defect of a close that did. Reported as the latter — which is what the
+		// unconditional wording below did — it invites the reader to conclude the
+		// close happened sloppily, when it did not happen at all, and that reading
+		// compounds the false report rather than qualifying it (mg-2b71).
+		return "Verdict: NONE — mg writes the result sidecar at the close, and this item did not close.\n" +
+			"         Its absence here says nothing about the work."
+	}
 	if res == "" {
 		return "Verdict: NONE RECORDED — the item closed with no readable result sidecar, so there is\n" +
 			"         no statement of how the work came out beyond the item's own history (mg-dfea)."
@@ -346,7 +413,7 @@ func detail(c Completion, res string) string {
 	if c.MergedSHA != "" {
 		fmt.Fprintf(&b, "SHA:    %s\n", c.MergedSHA)
 	}
-	b.WriteString("\n" + verdict(res))
+	b.WriteString("\n" + verdict(res, c.Closed))
 	return b.String()
 }
 
@@ -360,8 +427,8 @@ func (n *Notifier) send(c Completion, res, to string, redirected bool, creator, 
 	}
 	if err := n.mail(to, mailFrom, subject, body); err != nil {
 		o.Err = fmt.Errorf("mail %s about %s: %w", to, c.ItemID, err)
-		log.Printf("filernotify: FAILED to tell %s that %s completed: %v — the filer has not been told and nothing else "+
-			"will tell it (mg-f120)", to, c.ItemID, o.Err)
+		log.Printf("filernotify: FAILED to tell %s about %s (%s): %v — the filer has not been told and nothing else "+
+			"will tell it (mg-f120)", to, c.ItemID, strings.ToLower(headline(c)), o.Err)
 		// LAST RESORT: hand it to the coordinator rather than let the report
 		// die here. The commonest way this arm is reached is a recipient mg has
 		// no mailbox for — `mg mail send` exits 3 with no_such_mailbox on an
@@ -391,8 +458,16 @@ func (n *Notifier) send(c Completion, res, to string, redirected bool, creator, 
 		}
 		return o
 	}
-	log.Printf("filernotify: told %s that work item %s completed (route=%s, redirected=%t) (mg-f120)",
-		to, c.ItemID, c.Route, redirected)
+	// The log line says which of the two facts was reported. It was
+	// unconditionally "completed", which is how pogod's own log came to assert a
+	// completion 45 seconds after recording the refusal that prevented it
+	// (mg-2b71).
+	what := "completed"
+	if !c.Closed {
+		what = "MERGED BUT IS STILL OPEN"
+	}
+	log.Printf("filernotify: told %s that work item %s %s (route=%s, redirected=%t) (mg-f120)",
+		to, c.ItemID, what, c.Route, redirected)
 	return n.finish(c, res, o)
 }
 
@@ -425,8 +500,18 @@ func (n *Notifier) alreadySent(c Completion, res string) bool {
 // dedupKey identifies one COMPLETION, not one item. See Notify for why the
 // distinction matters and why the fingerprint is the sidecar as read from the
 // store rather than anything either observer holds privately.
+//
+// Closedness is part of the key (mg-2b71). A merge that left its item open and
+// the item's later close are two different facts about it, and a close that
+// records no sidecar would otherwise key identically to the not-closed notice
+// that preceded it — swallowing the completion, which is this package's own
+// defect wearing the fix's clothes.
 func dedupKey(c Completion, res string) string {
-	return c.ItemID + "\x00" + res
+	closed := "open"
+	if c.Closed {
+		closed = "closed"
+	}
+	return c.ItemID + "\x00" + closed + "\x00" + res
 }
 
 // oneLine flattens a title for a subject line. Work item titles in this fleet

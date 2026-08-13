@@ -65,6 +65,16 @@ func recordFilerNotice(c filernotify.Completion, o filernotify.Outcome) {
 		"to":         o.To,
 		"redirected": o.Redirected,
 		"sent":       o.Sent(),
+		// WHAT WAS REPORTED, not merely that something was (mg-2b71). An event
+		// named `work_item_completion_notice` recording a notice about an item
+		// that never closed would be the defect it is emitted alongside: the
+		// event stream is where this instance was verified from, and it must
+		// answer "did the item close" without a second lookup that may by then
+		// return a different answer.
+		"closed": c.Closed,
+	}
+	if !c.Closed && c.NotClosedReason != "" {
+		details["not_closed_reason"] = c.NotClosedReason
 	}
 	if c.Branch != "" {
 		details["branch"] = c.Branch

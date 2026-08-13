@@ -2,12 +2,14 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/drellem2/pogo/internal/agent"
+	"github.com/drellem2/pogo/internal/client"
 	"github.com/drellem2/pogo/internal/filernotify"
 	"github.com/drellem2/pogo/internal/refinery"
 )
@@ -77,12 +79,19 @@ func TestAnAlreadyDoneCloseStillTellsTheFilerAndDropsOurSidecar(t *testing.T) {
 	filer := &capturingFiler{}
 	mr := &refinery.MergeRequest{ID: "mr-1", Branch: "b", Author: "mg-1234", MergedSHA: "beef"}
 
-	reapMergedPolecat(reg, mr, func(string, string) error { return errors.New("already done") },
-		postMergeVerdict{}, nil, filer)
+	reapMergedPolecat(reg, mr, func(string, string) error {
+		return fmt.Errorf("%w: mg show mg-1234 reports status=done", client.ErrMGWorkItemAlreadyDone)
+	}, postMergeVerdict{}, nil, filer)
 
 	got := filer.all()
 	if len(got) != 1 {
 		t.Fatalf("a close that was refused as already-done is still a close; expected one notification, got %d", len(got))
+	}
+	if !got[0].Closed {
+		t.Errorf("an already-done refusal means the item IS closed; the notice must say so: %+v", got[0])
+	}
+	if got[0].NotClosedReason != "" {
+		t.Errorf("a closed item carries no not-closed reason, or the mail reads as a caveat on the completion: %q", got[0].NotClosedReason)
 	}
 	if got[0].Result != "" {
 		t.Errorf("our sidecar was not written, so it must not be offered as the verdict: %q", got[0].Result)

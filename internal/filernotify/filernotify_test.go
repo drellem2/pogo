@@ -67,7 +67,7 @@ func TestTheCommissioningAgentIsMailedWhenItsItemMerges(t *testing.T) {
 		resultOf(`{"verdict":"pass","summary":"14 consumers enumerated"}`),
 		knownSet("pm-onethird", "mayor"))
 
-	o := n.Notify(Completion{ItemID: "mg-145f", Route: RouteMerge, Worker: "p145f",
+	o := n.Notify(Completion{Closed: true, ItemID: "mg-145f", Route: RouteMerge, Worker: "p145f",
 		Branch: "polecat-p145f", MergedSHA: "abc1234"})
 
 	if !o.Sent() {
@@ -102,7 +102,7 @@ func TestAFilerThatNoLongerExistsRedirectsToTheCoordinator(t *testing.T) {
 		resultOf(`{"verdict":"pass"}`),
 		knownSet("mayor", "pm-pogo")) // p2def is gone
 
-	o := n.Notify(Completion{ItemID: "mg-9999", Route: RouteMerge, Worker: "p9999", MergedSHA: "deadbee"})
+	o := n.Notify(Completion{Closed: true, ItemID: "mg-9999", Route: RouteMerge, Worker: "p9999", MergedSHA: "deadbee"})
 
 	if o.To != "mayor" {
 		t.Fatalf("expected the redirect to reach the coordinator, got %q", o.To)
@@ -128,7 +128,7 @@ func TestAFilerThatIsAlsoTheWorkerIsNotMailedAndTheSkipIsReported(t *testing.T) 
 	rec := &recorder{}
 	n := New("mayor", rec.send, filing("p777", "self-filed"), resultOf(""), knownSet("p777", "mayor"))
 
-	o := n.Notify(Completion{ItemID: "mg-777", Route: RouteSelfClose, Worker: "p777"})
+	o := n.Notify(Completion{Closed: true, ItemID: "mg-777", Route: RouteSelfClose, Worker: "p777"})
 
 	if o.Sent() {
 		t.Fatalf("expected no mail to the worker about its own item, got %+v", o)
@@ -148,7 +148,7 @@ func TestTheCoordinatorIsSparedADuplicateOnMergeButNotOnSelfClose(t *testing.T) 
 	rec := &recorder{}
 	n := New("mayor", rec.send, filing("mayor", "a mayor-filed item"), resultOf(""), knownSet("mayor"))
 
-	merge := n.Notify(Completion{ItemID: "mg-aaaa", Route: RouteMerge, Worker: "paaaa", MergedSHA: "1111111"})
+	merge := n.Notify(Completion{Closed: true, ItemID: "mg-aaaa", Route: RouteMerge, Worker: "paaaa", MergedSHA: "1111111"})
 	if merge.Sent() {
 		t.Errorf("the refinery already mailed the coordinator about this merge; a second mail is noise: %+v", merge)
 	}
@@ -156,7 +156,7 @@ func TestTheCoordinatorIsSparedADuplicateOnMergeButNotOnSelfClose(t *testing.T) 
 		t.Errorf("the skip must state its reason: %+v", merge)
 	}
 
-	self := n.Notify(Completion{ItemID: "mg-bbbb", Route: RouteSelfClose, Worker: "pbbbb"})
+	self := n.Notify(Completion{Closed: true, ItemID: "mg-bbbb", Route: RouteSelfClose, Worker: "pbbbb"})
 	if !self.Sent() || self.To != "mayor" {
 		t.Errorf("a coordinator-filed item that closes with no merge is reported by nothing else; expected a mail, got %+v", self)
 	}
@@ -170,8 +170,8 @@ func TestTheSameCompletionSeenByBothObserversSendsOneMail(t *testing.T) {
 	n := New("mayor", rec.send, filing("pm-pogo", "t"), resultOf(sidecar), knownSet("pm-pogo", "mayor"))
 
 	// The merge observer holds the branch and SHA; the reaper holds neither.
-	n.Notify(Completion{ItemID: "mg-cccc", Route: RouteMerge, Worker: "pcccc", Branch: "polecat-pcccc", MergedSHA: "cafe123", Result: sidecar})
-	n.Notify(Completion{ItemID: "mg-cccc", Route: RouteSelfClose, Worker: "pcccc"})
+	n.Notify(Completion{Closed: true, ItemID: "mg-cccc", Route: RouteMerge, Worker: "pcccc", Branch: "polecat-pcccc", MergedSHA: "cafe123", Result: sidecar})
+	n.Notify(Completion{Closed: true, ItemID: "mg-cccc", Route: RouteSelfClose, Worker: "pcccc"})
 
 	if got := rec.count(); got != 1 {
 		t.Fatalf("one completion produced %d mails; the dedup key must not depend on what a given observer happens to know", got)
@@ -187,9 +187,9 @@ func TestASecondCompletionOfTheSameItemIsReported(t *testing.T) {
 	n := New("mayor", rec.send, filing("pm-pogo", "t"), func(string) (string, error) { return sidecar, nil },
 		knownSet("pm-pogo", "mayor"))
 
-	n.Notify(Completion{ItemID: "mg-dddd", Route: RouteMerge, Worker: "pdddd", MergedSHA: "aaa"})
+	n.Notify(Completion{Closed: true, ItemID: "mg-dddd", Route: RouteMerge, Worker: "pdddd", MergedSHA: "aaa"})
 	sidecar = `{"attempt":2}`
-	n.Notify(Completion{ItemID: "mg-dddd", Route: RouteMerge, Worker: "pdddd", MergedSHA: "bbb"})
+	n.Notify(Completion{Closed: true, ItemID: "mg-dddd", Route: RouteMerge, Worker: "pdddd", MergedSHA: "bbb"})
 
 	if got := rec.count(); got != 2 {
 		t.Fatalf("expected the second completion to be reported too, got %d mails", got)
@@ -203,7 +203,7 @@ func TestAFailedSendIsRetriedOnTheNextObservation(t *testing.T) {
 	rec := &recorder{err: errors.New("no_such_mailbox")}
 	n := New("mayor", rec.send, filing("pm-pogo", "t"), resultOf(`{"v":1}`), knownSet("pm-pogo", "mayor"))
 
-	c := Completion{ItemID: "mg-eeee", Route: RouteSelfClose, Worker: "peeee"}
+	c := Completion{Closed: true, ItemID: "mg-eeee", Route: RouteSelfClose, Worker: "peeee"}
 	first := n.Notify(c)
 	if first.Err == nil {
 		t.Fatal("expected the send failure to surface in the outcome")
@@ -232,7 +232,7 @@ func TestARefusedRecipientRelaysToTheCoordinator(t *testing.T) {
 	n := New("mayor", send, filing("pm-onethird", "t"), resultOf(`{"verdict":"pass"}`),
 		knownSet("pm-onethird", "mayor"))
 
-	o := n.Notify(Completion{ItemID: "mg-6666", Route: RouteMerge, Worker: "p6666", MergedSHA: "aaa"})
+	o := n.Notify(Completion{Closed: true, ItemID: "mg-6666", Route: RouteMerge, Worker: "p6666", MergedSHA: "aaa"})
 
 	if o.Err == nil {
 		t.Error("the refusal must still surface as an error — a relay is a worse outcome, not a success")
@@ -257,7 +257,7 @@ func TestAnUnreadableCreatorEscalatesToTheCoordinator(t *testing.T) {
 		func(string) (string, string, error) { return "", "", errors.New("store unreadable") },
 		resultOf(""), knownSet("mayor"))
 
-	o := n.Notify(Completion{ItemID: "mg-ffff", Route: RouteMerge, Worker: "pffff"})
+	o := n.Notify(Completion{Closed: true, ItemID: "mg-ffff", Route: RouteMerge, Worker: "pffff"})
 
 	if o.To != "mayor" || !o.Sent() {
 		t.Fatalf("expected an escalation to the coordinator, got %+v", o)
@@ -273,7 +273,7 @@ func TestAnItemWithNoCreatorSendsNothingAndSaysSo(t *testing.T) {
 	rec := &recorder{}
 	n := New("mayor", rec.send, filing("", ""), resultOf(""), knownSet("mayor"))
 
-	o := n.Notify(Completion{ItemID: "mg-0000", Route: RouteSelfClose})
+	o := n.Notify(Completion{Closed: true, ItemID: "mg-0000", Route: RouteSelfClose})
 
 	if o.Sent() || rec.count() != 0 {
 		t.Fatalf("expected no mail for an item with no creator, got %+v", o)
@@ -290,7 +290,7 @@ func TestAMissingVerdictIsStatedRatherThanOmitted(t *testing.T) {
 	rec := &recorder{}
 	n := New("mayor", rec.send, filing("pm-riemann", "t"), resultOf(""), knownSet("pm-riemann", "mayor"))
 
-	n.Notify(Completion{ItemID: "mg-1111", Route: RouteSelfClose, Worker: "p1111"})
+	n.Notify(Completion{Closed: true, ItemID: "mg-1111", Route: RouteSelfClose, Worker: "p1111"})
 
 	body := rec.last().body
 	if !strings.Contains(body, "NONE RECORDED") {
@@ -306,7 +306,7 @@ func TestEverySkipReachesTheRecorder(t *testing.T) {
 	var seen []Outcome
 	n.SetRecorder(func(_ Completion, o Outcome) { seen = append(seen, o) })
 
-	n.Notify(Completion{ItemID: "mg-2222", Route: RouteSelfClose, Worker: "p2222"}) // skip: filer is worker
+	n.Notify(Completion{Closed: true, ItemID: "mg-2222", Route: RouteSelfClose, Worker: "p2222"}) // skip: filer is worker
 
 	if len(seen) != 1 {
 		t.Fatalf("expected the skip to be recorded, got %d records", len(seen))
@@ -323,7 +323,7 @@ func TestTheStoreOutranksTheCallersCopyOfTheSidecar(t *testing.T) {
 	n := New("mayor", rec.send, filing("pm-pogo", "t"),
 		resultOf(`{"verdict":"the worker's own"}`), knownSet("pm-pogo", "mayor"))
 
-	n.Notify(Completion{ItemID: "mg-3333", Route: RouteMerge, Worker: "p3333",
+	n.Notify(Completion{Closed: true, ItemID: "mg-3333", Route: RouteMerge, Worker: "p3333",
 		Result: `{"verdict":"the refinery's"}`})
 
 	body := rec.last().body
@@ -336,7 +336,7 @@ func TestTheFallbackSidecarIsUsedWhenTheStoreHasNone(t *testing.T) {
 	rec := &recorder{}
 	n := New("mayor", rec.send, filing("pm-pogo", "t"), resultOf(""), knownSet("pm-pogo", "mayor"))
 
-	n.Notify(Completion{ItemID: "mg-4444", Route: RouteMerge, Worker: "p4444",
+	n.Notify(Completion{Closed: true, ItemID: "mg-4444", Route: RouteMerge, Worker: "p4444",
 		Result: `{"verdict":"from the caller"}`})
 
 	if !strings.Contains(rec.last().body, "from the caller") {
@@ -362,5 +362,88 @@ func TestOneLineFlattensAndBoundsATitle(t *testing.T) {
 	long := strings.Repeat("x", 400)
 	if got := oneLine(long); len([]rune(got)) > 120 {
 		t.Errorf("oneLine did not bound a long title: %d runes", len([]rune(got)))
+	}
+}
+
+// A MERGE THAT LEFT ITS ITEM OPEN IS NOT A COMPLETION, AND THE MAIL MUST NOT
+// READ AS ONE (mg-2b71).
+//
+// The observed mail said "COMPLETED: mg-479c / Closed: its branch merged
+// (polecat-c479c) as 1a0240a..." about an item `mg show` reported as
+// `status=available`. Two assertions of closure, both false, and the third line
+// ("NONE RECORDED — the item closed with no readable result sidecar") invited
+// the reader to conclude the close had happened sloppily rather than not at all.
+func TestAMergeThatDidNotCloseItsItemIsNotMailedAsACompletion(t *testing.T) {
+	rec := &recorder{}
+	n := New("mayor", rec.send, filing("pm-onethird", "the cube-foliation energy identity"),
+		resultOf(""), knownSet("pm-onethird", "mayor"))
+
+	o := n.Notify(Completion{ItemID: "mg-479c", Route: RouteMerge, Worker: "c479c",
+		Branch: "polecat-c479c", MergedSHA: "1a0240a",
+		NotClosedReason: "`mg done` did not apply: not claimed, so it cannot be completed"})
+
+	if !o.Sent() {
+		t.Fatalf("the filer is still owed the mail — the item is open and nobody else is watching: %+v", o)
+	}
+	m := rec.last()
+	if strings.Contains(m.subject, "COMPLETED") {
+		t.Errorf("the subject is the part that gets skimmed and forwarded; it must not say COMPLETED: %q", m.subject)
+	}
+	if !strings.Contains(m.subject, "MERGED BUT NOT CLOSED") {
+		t.Errorf("the subject must say what actually happened: %q", m.subject)
+	}
+	if strings.Contains(m.body, "Closed:") {
+		t.Errorf("the body must not assert a close that did not happen:\n%s", m.body)
+	}
+	if !strings.Contains(m.body, "NOT CLOSED: the item is still open") {
+		t.Errorf("the body must state the item's real state:\n%s", m.body)
+	}
+	if !strings.Contains(m.body, "not claimed") {
+		t.Errorf("the body must carry the reason, which is the actionable half:\n%s", m.body)
+	}
+	if !strings.Contains(m.body, "this item did not close") {
+		t.Errorf("a missing sidecar is a CONSEQUENCE of the close not happening, and must not read as a defect "+
+			"of a close that did:\n%s", m.body)
+	}
+}
+
+// The two "they already know" skips are claims about a message that was
+// actually sent, and no message says this. The coordinator's own MERGED mail
+// reports the merge and nothing about the item's state; the worker was stopped
+// before it could see the refusal.
+func TestNeitherSkipSwallowsAMergeThatLeftTheItemOpen(t *testing.T) {
+	t.Run("coordinator filed it", func(t *testing.T) {
+		rec := &recorder{}
+		n := New("mayor", rec.send, filing("mayor", "t"), resultOf(""), knownSet("mayor"))
+		o := n.Notify(Completion{ItemID: "mg-479c", Route: RouteMerge, NotClosedReason: "not claimed"})
+		if !o.Sent() {
+			t.Fatalf("the refinery's MERGED mail says nothing about the item staying open: %+v", o)
+		}
+	})
+	t.Run("the filer is the worker", func(t *testing.T) {
+		rec := &recorder{}
+		n := New("mayor", rec.send, filing("p479c", "t"), resultOf(""), knownSet("p479c", "mayor"))
+		o := n.Notify(Completion{ItemID: "mg-479c", Route: RouteMerge, Worker: "p479c", NotClosedReason: "not claimed"})
+		if !o.Sent() {
+			t.Fatalf("a worker stopped at merge never saw the refusal, so it does not already know: %+v", o)
+		}
+	})
+}
+
+// Closedness is part of the dedup fingerprint: the not-closed notice and the
+// item's later close are two different facts, and a close recording no sidecar
+// would otherwise key identically to the notice that preceded it.
+func TestTheNotClosedNoticeDoesNotSwallowTheLaterCompletion(t *testing.T) {
+	rec := &recorder{}
+	n := New("mayor", rec.send, filing("pm-onethird", "t"), resultOf(""), knownSet("pm-onethird", "mayor"))
+
+	n.Notify(Completion{ItemID: "mg-479c", Route: RouteMerge, NotClosedReason: "not claimed"})
+	n.Notify(Completion{Closed: true, ItemID: "mg-479c", Route: RouteSelfClose})
+
+	if rec.count() != 2 {
+		t.Fatalf("the close that finally happened is a second fact and must be reported: got %d mails", rec.count())
+	}
+	if strings.Contains(rec.last().subject, "NOT CLOSED") {
+		t.Errorf("the second mail is the completion: %q", rec.last().subject)
 	}
 }

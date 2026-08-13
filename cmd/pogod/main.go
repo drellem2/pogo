@@ -3065,7 +3065,7 @@ Flags:
 				// for the mayor's next coordination cycle. Run async — the
 				// stop can block up to its SIGTERM timeout and this
 				// callback fires on the refinery loop.
-				go reapMergedPolecat(agentRegistry, mr, client.CompleteMGWorkItem, postMerge, deferBackstop, filerNotify)
+				go reapMergedPolecat(agentRegistry, mr, client.CloseMGWorkItemAtMerge, postMerge, deferBackstop, filerNotify)
 
 				// Mail the coordinator so it can archive the work item and
 				// handle QA. The mayor's reap loop stays as a backstop for

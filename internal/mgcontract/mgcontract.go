@@ -90,6 +90,7 @@ const (
 	ListClaimedJSONIsEmptyOnAnEmptyStore    = "list/claimed-json-is-empty-on-an-empty-store"
 	ListClaimedRenderedNoticesAnEmptyStore  = "list/claimed-rendered-notices-an-empty-store"
 	UnclaimReturnsTheItemToAvailable        = "unclaim/returns-the-item-to-available"
+	DoneRefusesAnUnclaimedItem              = "done/refuses-an-unclaimed-item"
 	DoneRefusesADeclaredItemWithNoSuccessor = "done/refuses-a-declared-item-with-no-successor"
 	DoneRefusalPreservesTheResultSidecar    = "done/refusal-preserves-the-result-sidecar"
 	DoneRefusesAnUnknownSuccessor           = "done/refuses-an-unknown-successor"
@@ -273,6 +274,34 @@ var clauses = []Clause{
 			}
 			if _, err := os.Stat(filepath.Join(s.root, "work", "available", id+".md")); err != nil {
 				return fmt.Errorf("after `mg unclaim` the item is not at work/available/%s.md: %v", id, err)
+			}
+			return nil
+		},
+	},
+	{
+		Name:  DoneRefusesAnUnclaimedItem,
+		Since: "mg-2b71",
+		Why: "pogod's merge close CLAIMS an unclaimed item before closing it, and declines to close a gated one, " +
+			"purely because this refusal exists; if `mg done` ever accepts an unclaimed item the claim step is " +
+			"dead weight and the decline stops being the only way to leave a parked item alone",
+		Dependents: []string{
+			"internal/client (CloseMGWorkItemAtMerge)",
+			"cmd/pogod/mergeclose_live_test.go",
+		},
+		probe: func(s *store) error {
+			id, err := s.newItem("contract probe", "a body")
+			if err != nil {
+				return err
+			}
+			// Deliberately NOT claimed: available/ is where a hand-submitted
+			// branch's item sits at merge time.
+			out, code, err := s.run("done", id, `--result={"marker":"contract-probe"}`)
+			if err != nil {
+				return err
+			}
+			if code == 0 {
+				return fmt.Errorf("`mg done` SUCCEEDED on an UNCLAIMED item; the merge close's claim step and its "+
+					"gated decline both rest on this refusal:\n%s", out)
 			}
 			return nil
 		},
