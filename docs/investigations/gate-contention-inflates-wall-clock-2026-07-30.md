@@ -155,8 +155,12 @@ window, attributed to the fleet by **process subtree** from pogod. Subtree, not
 agent count — the live instance was one agent and three compute processes, and
 any count of agents reads that as an idle host.
 
-- **`pogo host load`** and `GET /hostload` report fleet cores, non-fleet cores,
-  free cores, and whether a spawn would currently be refused.
+- **`pogo host load`** and `GET /agents/hostload` report fleet cores, non-fleet
+  cores, free cores, and whether a spawn would currently be refused. (The
+  endpoint shipped at `/hostload`, which pogod mounted nowhere and therefore
+  404'd for the two weeks until mg-c26d moved it under `/agents`. The
+  enforcement was never affected — the gate is an in-process call on the spawn
+  path — but the preview this bullet describes was unreadable.)
 - **`pogo agent spawn-polecat` answers 503** when the fleet already holds
   `FleetHeavyAt` — half the host. Retryable — the refusal says so, because
   "hold and re-check" and "abandon this item" are opposite actions and the

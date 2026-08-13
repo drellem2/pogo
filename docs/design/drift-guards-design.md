@@ -71,7 +71,7 @@ fifth was found while landing this doc.
 |------|--------|-------|
 | launchd deploy plist (runner expects 03/04/05, installed plist was a bare DICT with Hour=3; wrong five days) | 2 | **Shipped** as the `launchd activation` row, `cmd/pogo/launchagentdrift.go` |
 | pogod scheduler — `mail-check-*` reaped at restart, `schedule list` still looks populated because differently-named sweeps survive (mg-de08; four PMs, ~6h dark) | 1 | **Shipped** — unconditional re-assert at agent startup |
-| orchestrated HTTP mux — a route *registered* is not a route *reachable*: `/hostload` is registered on the `orchestrated` mux but was never forwarded onto the listener, and has 404'd since 1dd47ad (drellem2/pogo#114) | 2 | **Open** — mg-08af (gated to `human`) |
+| orchestrated HTTP mux — a route *registered* is not a route *reachable*: `/hostload` was registered on the `orchestrated` mux but never forwarded onto the listener, and 404'd from 1dd47ad until mg-c26d (drellem2/pogo#114) | 2 | **Instance fixed** — mg-c26d moved it to `/agents/hostload` and pinned reachability with `TestEveryAgentRouteIsMounted`. The *guard* — comparing registrations against mounts for every sub-mux — is still **open**, mg-08af (gated to `human`) |
 | pogod orchestration mode — transition 503s every dispatch route, unlogged | 3 | **Shipped** — mg-293c, `internal/server/modeaudit.go` |
 | `install-deploy` overwrites `~/.pogo/bin/pogo-deploy.sh` unconditionally *while comparing the plist first* — same command, two artifacts, one guarded | 2 | **Open** — mg-3bb3 (drellem2/pogo#123) |
 
@@ -82,6 +82,9 @@ Two corrections to the source text, made on landing. mg-0d70 and mg-57c0 called
 row 3 the "recording mux"; there is no recording subsystem in this repo, and the
 instance is the **orchestrated HTTP mux** — `/hostload` registered at
 `internal/agent/api.go:499` and never forwarded by `cmd/pogod/main.go:792-805`.
+(mg-c26d has since moved that route under `/agents` and made the mount a single
+shared function, `internal/apimount`; the paragraph is left as written because
+it is the record of what the row was found to be.)
 It is also the cleanest illustration in the set of why a comparison must report
 its whole population: mg-08af establishes that of **25 unique patterns registered
 on `orchestrated`, exactly 1 is an orphan**. A boolean "routes registered: yes"

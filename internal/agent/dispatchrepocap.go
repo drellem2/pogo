@@ -30,7 +30,7 @@ type RefineryActivityFunc func(repo string) (bool, bool)
 func (f RefineryActivityFunc) HasWorkIn(repo string) (bool, bool) { return f(repo) }
 
 // RepoOccupancy is what the per-repo cap saw when it decided. It is served on
-// /hostload as well as used internally, because a coordinator planning a batch
+// /agents/hostload as well as used internally, because a coordinator planning a batch
 // of dispatches needs the same numbers pogod will enforce on — the precedent is
 // HostLoadResponse.WouldRefuseDispatch, and the reason is the same: an advisory
 // count that could drift from the enforced one lets a coordinator plan against

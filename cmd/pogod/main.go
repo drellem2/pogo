@@ -30,6 +30,7 @@ import (
 	"github.com/drellem2/pogo/internal/absentwatch"
 	"github.com/drellem2/pogo/internal/ackwatch"
 	"github.com/drellem2/pogo/internal/agent"
+	"github.com/drellem2/pogo/internal/apimount"
 	"github.com/drellem2/pogo/internal/claude"
 	"github.com/drellem2/pogo/internal/client"
 	"github.com/drellem2/pogo/internal/config"
@@ -904,20 +905,19 @@ func registerHandlers() {
 		// the heartbeat tick.
 		sched.RegisterHandlers(orchestrated)
 	}
+	// apimount.Mount is the single definition of where the orchestrated
+	// sub-mux is reachable, shared with the tests that check a route can
+	// actually be called. These two branches used to open-code the same four
+	// http.Handle lines, and a route that reached neither of them 404'd for
+	// two weeks (mg-c26d).
 	if srv != nil {
-		http.Handle("/agents/", srv.RequireOrchestration(orchestrated))
-		http.Handle("/agents", srv.RequireOrchestration(orchestrated))
-		http.Handle("/refinery/", srv.RequireOrchestration(orchestrated))
-		http.Handle("/scheduler/", srv.RequireOrchestration(orchestrated))
+		apimount.Mount(http.DefaultServeMux, srv.RequireOrchestration(orchestrated))
 
 		// Server mode endpoints (not guarded — always available)
 		srv.RegisterHandlers(http.DefaultServeMux)
 	} else {
 		// No server coordinator — register directly
-		http.Handle("/agents/", orchestrated)
-		http.Handle("/agents", orchestrated)
-		http.Handle("/refinery/", orchestrated)
-		http.Handle("/scheduler/", orchestrated)
+		apimount.Mount(http.DefaultServeMux, orchestrated)
 	}
 }
 
