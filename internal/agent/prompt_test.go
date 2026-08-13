@@ -5380,8 +5380,10 @@ func TestPromptsSayABodyEditAfterDispatchReachesNobody(t *testing.T) {
 			// reader sees an empty line, and "nobody to tell" is the wrong
 			// conclusion from one of the two.
 			"An empty answer from either line is two answers",
-			// Do BOTH: the body is the human record, the mail is the only
-			// thing that reaches the worker.
+			// Do BOTH: the body is the record the next human reader gets,
+			// and the mail is the attempt at reaching the worker itself.
+			// (How strong that attempt is, and what to do when it fails, is
+			// mg-2726's correction — pinned separately below.)
 			"append the change to the body **and** mail it to that name",
 			// The ruled-out direction, stated where the editors will read it.
 			"Do not ask for the {{.Worker}} to re-read its item mid-task",
@@ -5427,6 +5429,175 @@ func TestPromptsSayABodyEditAfterDispatchReachesNobody(t *testing.T) {
 		if strings.Contains(string(data), "true up to the spawn") {
 			t.Errorf("%s: gained the post-dispatch body-edit block, but a worker "+
 				"edits nobody's body — scope was mayor + PM + doctor (mg-9ccc)", path)
+		}
+	}
+}
+
+// The guarantee on that mail, which the same paragraph overstated (mg-2726).
+//
+// mg-9ccc's correction ended by sending the editor to mail, and the sentence it
+// installed promised more than mail can do: "the mail is the only channel that
+// reaches the worker". Mail reaches a {{.Worker}} only if the {{.Worker}}
+// OUTLIVES the send and gets a mail-check fire (agent.PolecatMailCheckCron,
+// `*/10`) before it finishes. A short item finishes first, routinely.
+//
+// doctor followed the prescribed procedure exactly and got a false assurance
+// from it: it resolved pda12 from `pogo agent list` (running, 27m uptime),
+// mailed it at 07:31Z, mailed a superseded-recipe correction at 07:50Z. mg-da12
+// reached done at 07:32 and polecat-pda12 merged at 07:35, at which point pda12
+// was reaped. Its maildir still reads new=2 cur=0 — it never read ANY mail.
+//
+// The reason this is a prompt defect rather than a procedure defect is that the
+// liveness check the paragraph prescribes CANNOT close the gap: `pogo agent
+// list` answers "was a worker alive a moment ago", and the question is "will a
+// worker be alive when it next reads mail". No sequencing of check and send
+// converts one into the other.
+//
+// What made it worth an edit rather than a note is the paragraph's own
+// justification — "the mail is the only channel that reaches the worker" is
+// precisely what makes a careful agent STOP after mailing. So a rewrite that
+// only weakened "only" to "might" would not have fixed it; the reader would
+// still have had nothing to do next. The pins below therefore require the
+// FALLBACK to be named (finish on the old scope and reconcile, or stop the
+// worker), not just the guarantee to be softened.
+//
+// Two more things the ticket's evidence establishes, both pinned because a
+// reader of the source cannot recover them:
+//
+//   - Delivery was never the failure mode; LATENCY against the recipient's next
+//     action was. pa9b3 was mailed a prohibition at 04:22:52Z, published the
+//     migration at 04:24Z, and read the mail at 04:30Z on a healthy `*/10`
+//     fire. So "polecats don't check mail" is the wrong diagnosis — mayor drew
+//     it, and pm-pogo refuted it from pa9b3's own 4/5 schedule fires.
+//   - When the sender will not outlive the window, the message has to go EARLY,
+//     to someone who will. p476b sent the v0.10.0 tag handoff BEFORE submitting
+//     ("after is the moment I no longer exist"), because pogod reaps a merging
+//     worker seconds after merge success (mg-cef7). The shipped guidance's
+//     model — mail the party who needs to know, when they need to know it —
+//     would never have produced that message.
+//
+// And the remedy is an artifact of the same kind as the defect, so it gets the
+// same scrutiny: the after-the-fact check it prescribes (`cur=0` proves the
+// mail was never read) is only a proof once the reader has stopped. Read the
+// counts while the worker still runs and it is another snapshot. The prompt
+// therefore orders the commands liveness-first and says why, and that ordering
+// is pinned — it is this bullet's own defect one level down.
+func TestPromptsSayMailToADispatchedWorkerIsBestEffort(t *testing.T) {
+	// The same three files that carry the paragraph.
+	for _, path := range []string{
+		"prompts/mayor.md",
+		"prompts/pm/pm-template.md",
+		"prompts/crew/doctor.md",
+	} {
+		data, err := defaultPrompts.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		body := string(data)
+
+		// The false guarantee itself, as an assertion. The corrected text
+		// still quotes the clause (`the mail was "the only channel …"`) in
+		// order to name what it is retracting, which is deliberate — a
+		// prompt that silently swaps a claim teaches nothing about why. What
+		// may not come back is the assertion.
+		if strings.Contains(body, "the mail is the only channel that reaches the worker") {
+			t.Errorf("%s: reasserts that mail is the only channel that reaches a "+
+				"dispatched {{.Worker}} — it reaches one only if the {{.Worker}} "+
+				"outlives the send AND reads before finishing; pda12 was mailed "+
+				"twice while running and died with new=2 cur=0 (mg-2726)", path)
+		}
+
+		for _, want := range []string{
+			// The corrected guarantee, and the condition it turns on.
+			"outlives the send",
+			"ATTEMPT, not a handoff",
+			// Why the prescribed liveness check cannot repair it. Without
+			// this the reader concludes "check harder before sending".
+			"the check is itself a snapshot",
+			// The instance and its proof, so this is not folklore.
+			"pda12",
+			"new=2 cur=0",
+			// The fallback, which is the half that keeps the paragraph from
+			// terminating the reader's thinking at the send. Both branches.
+			"what happens if it does not land",
+			"reconcile after the merge",
+			"pogo agent stop <name>",
+			// Alignment with mg-9ccc rather than contradiction of it: the
+			// reliable channel is the pre-dispatch body, and this paragraph
+			// used to promote the post-dispatch mail above it.
+			"the body BEFORE dispatch is the only channel to a {{.Worker}} that is reliable at all",
+			// Window, not channel — with the instance for each end of it.
+			"What varies is the WINDOW, not the channel",
+			"pa9b3",
+			"p476b",
+			// And the wrong diagnosis that this evidence rules out, kept
+			// because it is the one a reader reaches for first.
+			"{{.Worker}}s don't check mail",
+			// Checkable afterwards, and the ordering that makes it a proof
+			// rather than one more snapshot.
+			"~/.macguffin/mail/<worker>/cur",
+			"**Run them in that order.**",
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("%s: missing best-effort-mail guidance %q (mg-2726)", path, want)
+			}
+		}
+	}
+
+	// Scope pin, same boundary as mg-9ccc's: this block lives in the bullet
+	// about editing an item somebody else's {{.Worker}} is holding, and a
+	// {{.Worker}} edits nobody's body.
+	workers, err := defaultPrompts.ReadDir("prompts/templates")
+	if err != nil {
+		t.Fatalf("read prompts/templates: %v", err)
+	}
+	if len(workers) == 0 {
+		t.Fatal("prompts/templates is empty — this pin would pass vacuously")
+	}
+	for _, e := range workers {
+		path := "prompts/templates/" + e.Name()
+		data, err := defaultPrompts.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		if strings.Contains(string(data), "ATTEMPT, not a handoff") {
+			t.Errorf("%s: gained the best-effort-mail block, but a {{.Worker}} edits "+
+				"nobody's body — scope was mayor + PM + doctor (mg-2726)", path)
+		}
+	}
+}
+
+// The cadence the mg-2726 paragraph quotes is the one pogod actually registers.
+//
+// The correction's whole mechanism is "mail lands only if the worker gets a
+// mail-check fire before it finishes", and it names that cadence as `*/10` so
+// the reader can weigh it against how long the item will take. That number is
+// agent.PolecatMailCheckCron, not a constant of the prose — if the auto-
+// registered cadence ever moves, three prompts start teaching a stale interval
+// and the arithmetic a reader does with it comes out wrong in the safe-looking
+// direction.
+func TestPromptsQuoteTheRealPolecatMailCheckCadence(t *testing.T) {
+	// `*/10 * * * *` — the paragraph quotes the minute field alone, which is
+	// how the fleet refers to it everywhere else.
+	minutes, _, _ := strings.Cut(PolecatMailCheckCron, " ")
+	if minutes != "*/10" {
+		t.Fatalf("PolecatMailCheckCron minute field is %q, but mayor.md, "+
+			"pm-template.md and crew/doctor.md all tell the reader a dispatched "+
+			"{{.Worker}} reads mail on a `*/10` fire (mg-2726). Update the three "+
+			"prompts and this test together", minutes)
+	}
+	for _, path := range []string{
+		"prompts/mayor.md",
+		"prompts/pm/pm-template.md",
+		"prompts/crew/doctor.md",
+	} {
+		data, err := defaultPrompts.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		if !strings.Contains(string(data), "mail-check fire (`"+minutes+"`)") {
+			t.Errorf("%s: does not name the mail-check cadence %q as the thing the "+
+				"mail has to beat (mg-2726)", path, minutes)
 		}
 	}
 }
