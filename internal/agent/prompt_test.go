@@ -5707,18 +5707,23 @@ func TestPromptsDoNotAssertADeadLogPath(t *testing.T) {
 		// derivation. doctor.md carried every assertion above while its
 		// command line still read `grep -A1 StandardOutPath "$plist"   #
 		// today: <literal>` — the prose said derive, the command said
-		// hardcode, and they only disagree once someone moves the log. It
-		// stayed that way for four months after e846f2a (mg-7537) fixed
-		// mayor.md alone. Pin the derivation itself, in both prompts
-		// (mg-c18d, drellem2/pogo#145).
+		// hardcode, and they only disagree once someone moves the log.
+		// 7082121 (mg-f766) pinned the literal in BOTH prompts on 2026-07-30;
+		// e846f2a (mg-7537) derived mayor.md's on 2026-08-13 and left
+		// doctor.md behind the same day, with six further doctor.md edits
+		// that day reading past the block. Pin the derivation itself, in both
+		// prompts (mg-c18d, drellem2/pogo#145).
 		const deriveLog = `log=$(grep -A1 StandardOutPath "$plist" | sed -n 's:.*<string>\(.*\)</string>.*:\1:p')`
 		if !strings.Contains(body, deriveLog) {
 			t.Errorf("%s: names StandardOutPath but never binds the result — the log path must be DERIVED (%s) and the grep must read $log, not a literal (mg-c18d)", path, deriveLog)
 		}
-		for _, line := range strings.Split(body, "\n") {
-			cmd := strings.TrimLeft(line, " \t")
-			if strings.HasPrefix(cmd, "grep ") && strings.Contains(cmd, "~/Library/Logs/pogo/pogod.log") {
-				t.Errorf("%s: command line greps the literal log path: %q. The literal may be QUOTED as today's reading; the command must read the derived \"$log\" (mg-c18d)", path, cmd)
+		// Any RUNNABLE line naming the literal, not merely a grep of it: the
+		// defect is "the command says hardcode", and `tail -f <literal>`
+		// says it just as loudly. The literal survives as a trailing `#
+		// today:` comment, which is what stripComment leaves behind.
+		for _, cmd := range runnableLines(body) {
+			if strings.Contains(stripComment(cmd), "~/Library/Logs/pogo/pogod.log") {
+				t.Errorf("%s: runnable line names the literal log path: %q. The literal may be QUOTED as today's reading; the command must read the derived \"$log\" (mg-c18d)", path, cmd)
 			}
 		}
 	}
@@ -5742,6 +5747,41 @@ func TestPromptsDoNotAssertADeadLogPath(t *testing.T) {
 			t.Errorf("mayor.md: missing %q from the refinery-logs section (mg-f766)", want)
 		}
 	}
+}
+
+// runnableLines returns the lines of a prompt that an agent would actually RUN:
+// those inside a ``` fenced block, minus blanks and whole-line `#` comments.
+//
+// The distinction is the whole point of the two assertions that use it. A
+// prompt may QUOTE a wrong path — to name today's reading, or to refuse a
+// snippet — and both of this change's guards were first written against the
+// whole body, where the prose that explains the defect is indistinguishable
+// from the defect. One of them was thereby satisfied by the very line it
+// existed to check (mg-c18d, drellem2/pogo#145 round-1 review).
+func runnableLines(body string) []string {
+	var out []string
+	inFence := false
+	for _, line := range strings.Split(body, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "```") {
+			inFence = !inFence
+			continue
+		}
+		cmd := strings.TrimSpace(line)
+		if !inFence || cmd == "" || strings.HasPrefix(cmd, "#") {
+			continue
+		}
+		out = append(out, cmd)
+	}
+	return out
+}
+
+// stripComment drops a trailing `#` comment from a shell line, so that a path
+// named as a `# today:` reading is not read as a path being used.
+func stripComment(cmd string) string {
+	if i := strings.Index(cmd, "#"); i >= 0 {
+		return cmd[:i]
+	}
+	return cmd
 }
 
 // A prompt that EMITS to the event log must also be routed back to READ it, and
@@ -5773,9 +5813,17 @@ func TestPromptsThatEmitEventsAreRoutedBackToReadThem(t *testing.T) {
 		if !strings.Contains(body, "pogo events list") {
 			t.Errorf("%s: never reads the event log. Route it at `pogo events list --since=... --type=...`, which resolves the path itself — an agent that emits lifecycle events and cannot read them back has no memory across sessions, and pogod's stdout log carries none of them (mg-c18d)", path)
 		}
-		// The shell derivation, quoted only to be refused.
-		if strings.Contains(body, "POGO_HOME") && !strings.Contains(body, "config.PogoHome()") {
-			t.Errorf("%s: mentions POGO_HOME near the event log without saying why re-deriving the path is wrong — `${POGO_HOME:-$HOME/.pogo}/events.log` cannot reproduce config.PogoHome()'s POGO_HOME == $HOME normalization, and the resulting file may exist and be stale (mg-c18d)", path)
+		// The shell re-derivation, refusable only where it would be RUN. An
+		// earlier form of this check asked that any prose mentioning
+		// POGO_HOME also mention config.PogoHome() — which this very fix
+		// permanently satisfies, so it could never fire again while the
+		// snippet it exists to reject could be pasted back in as a live
+		// command. Scope it to runnable lines instead: the defect is a shell
+		// expression, not a word.
+		for _, cmd := range runnableLines(body) {
+			if strings.Contains(cmd, "POGO_HOME") {
+				t.Errorf("%s: runnable line re-derives a pogo path from POGO_HOME: %q. Shell cannot reproduce config.PogoHome(), which normalizes POGO_HOME == $HOME to $HOME/.pogo — the expression then names a DIFFERENT file that may exist and be stale, so the grep returns a well-formed wrong answer. Ask the CLI (mg-c18d, drellem2/pogo#145)", path, cmd)
+			}
 		}
 	}
 
@@ -5784,8 +5832,18 @@ func TestPromptsThatEmitEventsAreRoutedBackToReadThem(t *testing.T) {
 		t.Fatalf("read doctor.md: %v", err)
 	}
 	body := string(doctor)
-	if strings.Contains(body, "pogo events emit") && !strings.Contains(body, "--type=stall_restart") {
-		t.Error("doctor.md: emits stall_restart but is not shown reading it back; a second restart of the same target inside a day is a finding, and it is only visible from the event log (mg-c18d)")
+	// The INVOCATION, not the substring. Checking the body for
+	// "--type=stall_restart" is satisfied by the `pogo events emit` line whose
+	// read-back this is meant to require, so the whole block could be deleted
+	// with the suite still green — which is how it was found.
+	var readsBackRestarts bool
+	for _, cmd := range runnableLines(body) {
+		if strings.HasPrefix(cmd, "pogo events list") && strings.Contains(cmd, "--type=stall_restart") {
+			readsBackRestarts = true
+		}
+	}
+	if strings.Contains(body, "pogo events emit --type=stall_restart") && !readsBackRestarts {
+		t.Error("doctor.md: emits stall_restart but never reads it back — no `pogo events list ... --type=stall_restart` line. A second restart of the same target inside a day is a finding, doctor is a fresh process on every wake, and that reading exists nowhere else (mg-c18d)")
 	}
 	// --type and --agent are exact matches (internal/events/reader.go
 	// Filter.Match), so `--type=wedge_watch_` returns a clean empty that reads
