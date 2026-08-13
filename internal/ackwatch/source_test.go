@@ -216,6 +216,22 @@ func TestRecentFiresCountsTheWindowedTraffic(t *testing.T) {
 	if f := got.ByAgent["pa"]; f.Completed != 1 || f.Schedules != 1 {
 		t.Errorf("pa = %+v, want 1 completion on 1 schedule", f)
 	}
+	// The per-SCHEDULE breakdown is the cohort arm's input (mg-c232). A cohort is
+	// a set of schedules and one agent can hold several, so the per-agent numbers
+	// above cannot answer the cohort question.
+	if len(got.BySchedule) != 6 {
+		t.Errorf("BySchedule has %d entries, want one per delivered-to schedule", len(got.BySchedule))
+	}
+	if f := got.BySchedule[scheduleKey("pa", "mail-check-pa")]; f.Delivered != 5 || f.Completed != 1 {
+		t.Errorf("pa's schedule = %+v, want 5 delivered / 1 completed in the window", f)
+	}
+	if f := got.BySchedule[scheduleKey("mayor", "mail-check-mayor")]; f.Delivered != 5 || f.Completed != 0 {
+		t.Errorf("mayor's schedule = %+v, want 5 delivered / 0 completed", f)
+	}
+	if want := base.Add(-25 * time.Minute); !got.BySchedule[scheduleKey("pa", "mail-check-pa")].LastCompletedAt.Equal(want) {
+		t.Errorf("per-schedule LastCompletedAt = %s, want the newest in-window completion %s",
+			got.BySchedule[scheduleKey("pa", "mail-check-pa")].LastCompletedAt, want)
+	}
 }
 
 // A log it cannot read must come back as a FAILED MEASUREMENT, never as a

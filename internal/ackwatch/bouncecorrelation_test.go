@@ -140,12 +140,22 @@ func TestBounceDoesNotBlindBothControlsAtOnce(t *testing.T) {
 	}
 
 	// CONTROL 2 — ackwatch's own ratio arms, gated by ackAwareCohort.
+	//
+	// The cohort arm judges a WINDOW since mg-c232, so the snapshot has to carry
+	// one or the arm is blind for a reason that has nothing to do with the bounce
+	// and this test would assert nothing. The window below is what the events log
+	// holds for the post-bounce stretch simulated above: 25 fires delivered to
+	// each schedule, none completed. Note that it is built from the FIRES, not
+	// from the counters — which is the property being defended here, one arm
+	// further along than when this test was written.
 	samples := SampleEntries(s.List(""), now)
 	rep := Detect(Snapshot{
 		Now:              now,
 		Samples:          samples,
 		LastDisruption:   bounce,
 		DisruptionReason: "pogod restart",
+		Recent:           bounceWindow(now.Sub(bounce)),
+		RunningSince:     upSince(bounceFleet),
 	}, DefaultParams())
 
 	if rep.Suppressed {
@@ -167,9 +177,32 @@ func TestBounceDoesNotBlindBothControlsAtOnce(t *testing.T) {
 	if got := rep.Fleet[0].Schedules; got != len(bounceFleet) {
 		t.Errorf("fleet finding covers %d schedules, want %d", got, len(bounceFleet))
 	}
-	if got := rep.Fleet[0].Median; got != 0 {
-		t.Errorf("fleet median = %v, want 0", got)
+	if got := rep.Fleet[0].Rate; got != 0 {
+		t.Errorf("fleet windowed rate = %v, want 0", got)
 	}
+	if got := rep.Fleet[0].LifetimeMedian; got != 0 {
+		t.Errorf("fleet lifetime median = %v, want 0", got)
+	}
+}
+
+// bounceWindow is the events-log view of the post-bounce stretch: every schedule
+// in bounceFleet delivered 25 fires and completed none. Built from the fire
+// traffic rather than from the scheduler entries, because that independence from
+// the counters is the whole point of the arm reading it (mg-c232).
+func bounceWindow(window time.Duration) *Recent {
+	r := &Recent{
+		Window:     window,
+		ByAgent:    map[string]AgentFires{},
+		BySchedule: map[string]ScheduleFires{},
+	}
+	for _, a := range bounceFleet {
+		r.Delivered += 25
+		r.Schedules++
+		r.Agents = append(r.Agents, a)
+		r.ByAgent[a] = AgentFires{Delivered: 25, Schedules: 1}
+		r.BySchedule[scheduleKey(a, "mail-check-"+a)] = ScheduleFires{Delivered: 25}
+	}
+	return r
 }
 
 // TestBounceOfANeverAckingFleetStaysUnjudged is the other half, and it is the
@@ -295,13 +328,18 @@ func TestBounce_PreFixPredicateWentSilentOnTheSameState(t *testing.T) {
 	}
 	now, samples := bouncedThenAbandoned(t, s)
 
-	live := Detect(Snapshot{Now: now, Samples: samples}, DefaultParams())
+	// The window the cohort arm judges on since mg-c232, carried on both
+	// snapshots so the ONLY difference between them stays the one bit.
+	window := bounceWindow(4 * time.Hour)
+	running := upSince(bounceFleet)
+
+	live := Detect(Snapshot{Now: now, Samples: samples, Recent: window, RunningSince: running}, DefaultParams())
 	if len(live.Fleet) != 1 || live.SkippedNoPeers != 0 {
-		t.Fatalf("control setup is wrong: with the bit the arm must judge; fleet=%d skippedNoPeers=%d",
-			len(live.Fleet), live.SkippedNoPeers)
+		t.Fatalf("control setup is wrong: with the bit the arm must judge; fleet=%d skippedNoPeers=%d blind=%q",
+			len(live.Fleet), live.SkippedNoPeers, live.FleetBlind)
 	}
 
-	blind := Detect(Snapshot{Now: now, Samples: stripEverAcked(samples)}, DefaultParams())
+	blind := Detect(Snapshot{Now: now, Samples: stripEverAcked(samples), Recent: window, RunningSince: running}, DefaultParams())
 	if blind.SkippedNoPeers != len(bounceFleet) {
 		t.Errorf("SkippedNoPeers = %d, want %d — without the bit every schedule must read as not-ack-aware; if it does not, this test is no longer controlling anything",
 			blind.SkippedNoPeers, len(bounceFleet))

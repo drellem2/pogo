@@ -76,6 +76,7 @@ func deadWindow() *Recent {
 	}
 	// 36 deliveries each, one schedule each; the three completions land on `pa`,
 	// so every other agent completed nothing at all.
+	r.BySchedule = map[string]ScheduleFires{}
 	for i, a := range deadFleetAgents {
 		f := AgentFires{Delivered: 36, Schedules: 1}
 		if i == 4 { // pa
@@ -83,6 +84,14 @@ func deadWindow() *Recent {
 			f.Delivered = 35
 		}
 		r.ByAgent[a] = f
+		// One schedule per agent, so the per-schedule breakdown the COHORT arm
+		// reads is the per-agent one under the mail-check id (mg-c232).
+		r.BySchedule[scheduleKey(a, "mail-check-"+a)] = ScheduleFires{
+			Delivered: f.Delivered, Completed: f.Completed,
+		}
+	}
+	r.BySchedule[scheduleKey("pa", "mail-check-pa")] = ScheduleFires{
+		Delivered: 35, Completed: 3, LastCompletedAt: r.LastCompletedAt,
 	}
 	return r
 }

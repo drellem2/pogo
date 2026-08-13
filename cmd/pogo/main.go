@@ -1431,7 +1431,24 @@ schedule is judged only against peers of the same kind, on the same cadence,
 with a comparable number of fires since registration — and it must be both far
 below that peer median AND below an absolute floor.
 
-Three things are deliberately NOT reported:
+A WHOLE COHORT failing is reported separately, and it is judged on the LAST FEW
+HOURS rather than on the counters. Two outages on 2026-08-10 that had already
+ENDED put ~80 dead fires into every 10-minute schedule; the cohort median fell
+40% -> 36% -> 26% over a day the fleet spent recovering, and the finding stayed
+escalated for 61 hours because a lifetime ratio cannot be pulled back over a
+floor by later health. It now reads the absolute completion rate over the
+trailing blackout window, behind the same liveness gate, so it CLEARS on its own
+once the cohort completes fires again — do not "fix" one of these by
+re-registering the schedules, which zeroes the counters and hides the signal
+rather than correcting it (mg-c232). The since-registration median is still
+printed, labelled as context.
+
+The per-schedule rule keeps its lifetime ratio, because averaging over a long
+run is what cancels turn-length noise. The recent window may only RETIRE one of
+its findings — the schedule is below its peers over its history and is completing
+its fires now — and can never raise one.
+
+Four things are deliberately NOT reported:
 
   fresh counters     registering a schedule with an existing --id replaces the
                      entry and zeroes its counters, and every crew agent
@@ -1440,6 +1457,9 @@ Three things are deliberately NOT reported:
   too few fires      a handful of fires is not a sample.
   no peers           a schedule with nothing comparable to compare against is
                      UNJUDGED, and says so, rather than being reported as clean.
+  unmeasured cohort  a cohort with too little traffic inside the window to judge
+                     — a daily cadence inside a 3-hour window — is named as
+                     unmeasured rather than counted healthy.
 
 A recent ` + "`system_wake`" + ` suppresses the whole report: post-sleep replay makes
 stale acks expected.

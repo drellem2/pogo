@@ -1736,8 +1736,43 @@ nudges, restarts, nor unregisters anything.
   broken; there was no regression for a self-comparison to find. A schedule is
   judged only against **peers**: same kind, same cadence, and a comparable
   number of fires since registration. 36% against ~99% on an identical cadence
-  is a per-agent fault; everyone at 40% is a scheduler or fleet fault, and is
-  reported once as a `FLEET DEFICIT` rather than as N per-agent alerts.
+  is a per-agent fault; everyone dark at once is a scheduler or fleet fault, and
+  is reported once as a `COHORT DARK` rather than as N per-agent alerts.
+- **Every trigger describes NOW, not a lifetime (mg-c232).** The cohort rule used
+  to fire on the median of the cohort's **since-registration** ratios against the
+  75% floor, and a cumulative ratio is monotone in past damage: no amount of later
+  health pulls it back. On 2026-08-10 two outages that had **already ended** — the
+  crew stopped 01:56–12:40Z, a network loss 14:24–17:15Z — put ~80 dead fires into
+  every 10-minute schedule, the cohort median went 40% → 36% → 26% over a day the
+  fleet spent *recovering*, and `1 whole cohort below the completion floor` stayed
+  escalated to the mayor for **61 hours**. Its only exits were being ignored and a
+  counter reset, and resetting the counter hides the signal rather than clearing
+  it. The cohort rule now judges the **absolute completion rate over the trailing
+  `blackout_window`**, behind the blackout arm's liveness gate, restricted to one
+  cohort's schedules — so it clears on its own once the cohort completes fires
+  again. Swept against this fleet's real events log for 2026-08-01…13: 274 judged
+  samples, 77 firing, in **six bounded episodes, every one of which ended**. The
+  instrument it replaced fired on 67 of 67 samples and ended none of them. The
+  lifetime median is still rendered, labelled *context, not the trigger*.
+- **The per-schedule rule keeps its lifetime ratio, plus a one-way veto.** A
+  lifetime average is what makes turn-length noise cancel (see "What the ratio
+  actually measures" below), so windowing that rule would trade one false-alarm
+  source for another. Instead the recent window may **retire** a per-schedule
+  finding — the schedule is below its peers over its history and is completing its
+  fires now — and may never raise one. Because no branch of that check can create
+  a finding, a statistic too noisy to trigger on is safe to acquit on. Retirements
+  are counted as `retired_recovered` rather than dropped silently, so a newly
+  quiet report is readable as "the fleet recovered" rather than "the detector
+  stopped looking". A schedule with fewer than 6 fires in the window is not
+  evidence of recovery and the finding stands.
+- **No outage-suppression list, on purpose.** mg-c232 asked whether a cohort
+  finding should be suppressed on a recent outage marker, the way stall-watch
+  suppresses on a recent `system_wake`. Windowing subsumes it: an outage that
+  ended leaves the trailing window by itself, with no list of causes to keep
+  current. A suppression list would have to name every cause — model API, network,
+  credentials, host sleep — and fail silently on the first one nobody added. The
+  `system_wake` and restart suppressions stay, because those describe a distorted
+  *measurement* (replayed fires, zeroed counters) rather than a fault that ended.
 - **Two gates, not one.** A finding needs a rate **both** far below the peer
   median (`min_gap`, 20 points) **and** below an absolute floor (75%). They are
   tuned together: since a median cannot exceed 1, the floor would be dead weight
@@ -1851,7 +1886,14 @@ So there is a second arm that keys on the **absolute** completion rate:
   tell "dead right now" from "carried a bad ratio for days"; and they are zeroed
   by re-registration, after which `min_fires` blinds the counter arms for over
   three hours. An outage starting just after the nightly redeploy is invisible to
-  anything reading the table.
+  anything reading the table. That diagnosis was written when this arm was added
+  and left the **cohort** rule running on the instrument it diagnosed; mg-c232 is
+  the 61-hour escalation that cost, and the cohort rule now reads the same window
+  (see "Every trigger describes NOW" above).
+- **What the cohort rule still adds over this one.** A blackout aggregates every
+  schedule of every running agent, so a single cohort going dark while the rest of
+  the fleet works is averaged away. "Every sweep is failing while mail-checks are
+  fine" is visible to the cohort rule and invisible here.
 - **Routing is structural, not a timer.** A blackout copies the escalation box on
   its **first** sample, ignoring `escalate_after` entirely — including a negative
   value, which disables the *age*-based escalation only. `notify_to` is an agent,
@@ -1881,7 +1923,10 @@ So there is a second arm that keys on the **absolute** completion rate:
   `blackout_blind` with a reason, on both the fired and the `ack_watch_clear`
   paths (`blackout_judged`), and rendered in `pogo check-acks`. Zero completions
   is what a blackout *looks* like, so a failed read must never arrive looking
-  like a measurement of zero.
+  like a measurement of zero. The cohort rule shares the window and therefore the
+  blindness, and reports it the same way under `cohort_blind` / `cohort_judged`;
+  a cohort with too little traffic to judge (a daily cadence inside a 3-hour
+  window) is listed under `cohort_not_measured` rather than counted as healthy.
 - **The one gate it keeps** is the disruption suppression: after a `system_wake`
   or a restart the traffic describes a regime that has just ended. The cost is
   bounded at 30 minutes, and unlike `min_fires` it does not scale with the
