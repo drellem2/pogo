@@ -31,6 +31,34 @@ import (
 // the reason it stands is stronger than the prediction was — no conflict is
 // required, only a neighbouring change.
 //
+// A SECOND ROUTE TO THE SAME LOSS, MEASURED 2026-08-13 (mg-5ec6): THE REBASE
+// DROPS A HUNK THE TARGET ALREADY HAS. `polecat-a3d4` in onethird_program landed
+// as 2919d28 on main — same author date, same subject, committer date four
+// minutes later — and `git cherry` still calls its tip c2f1854 unmerged. The
+// branch commit touches 20 files and adds 3264 lines; the landed one touches 14
+// and adds 3262. The six missing files are a `.gitignore` and five `.pyc`
+// deletions the target ALREADY HAD by the time the rebase replayed them, so git
+// dropped those hunks as no-ops. The remaining 14 files are byte-identical at
+// `-U0`. Nothing conflicted and nothing drifted: the rebase had less left to
+// apply than the branch had written, and that alone rewrote the patch id.
+//
+// That case was filed as evidence of a conflicted refinery merge. It is not one,
+// and there are none to be had: mergeBranch runs a plain `git rebase
+// origin/<target>` and `rebase --abort`s on any failure (merge.go:605-626), and
+// failureclass.go classifies every conflict signal as ClassDefect/non-retryable
+// (failureclass.go:360), so a conflicted branch FAILS its merge request rather
+// than landing through it. "Should an ordinary conflicted refinery merge be
+// reported as unlanded" has no instances to be about. What does have instances is
+// the weaker and commoner claim: an ordinary CLEAN refinery merge is enough to
+// break patch identity, by drift or by drop.
+//
+// MeasurePresence catches a3d4 — 2008 of 2063 countable added lines are already
+// on main, ratio 0.973, over ContentLandedRatio. That is luck of this instance
+// and not a property: the dropped hunk here was two lines, both under
+// ContentMinLine. A rebase that dropped a SUBSTANTIVE hunk would score low and
+// the branch would stay STRANDED, which is the safe direction and the one this
+// file is built to fail in.
+//
 // THIS IS NOT HYPOTHETICAL AND IT IS NOT RARE. Measured on this repo's origin on
 // 2026-08-10: 57 of 634 polecat branches had at least one commit `git cherry`
 // called unmerged. Five of the top seven by the measure below are on main right
@@ -144,6 +172,50 @@ func (p Presence) Describe() string {
 	}
 	return fmt.Sprintf("%d of %d added line(s) already in the target (%.0f%%)",
 		p.Present, p.Added, 100*p.Ratio())
+}
+
+// Corroborate runs the content second opinion on a finding and renders the one
+// sentence a REPORT about it should carry, alongside the measurement itself.
+//
+// WHY IT EXISTS (mg-5ec6). MeasurePresence shipped with exactly one consumer,
+// `pogo check-stranded`. The three routes inside pogod — the dispatch refusal,
+// the release-time reporter and the restart sweep — acted on `git cherry`'s bare
+// verdict, so the one instrument built for this blind spot was absent from the
+// three places that speak to an operator. The refusal is the sharpest of them: it
+// REFUSES a dispatch, and a refusal a reader can demonstrate is wrong is how a
+// gate gets overridden by habit rather than by judgement.
+//
+// IT NEVER CHANGES A DISPOSITION, and that restriction is not negotiable. A
+// wrong "already present" verdict converts `pogo refinery submit` into `mg done`
+// and throws a branch away — the loss this whole detector exists to prevent,
+// re-created by its own remedy. So this returns TEXT for a human to weigh, and
+// every caller keeps reporting the branch as stranded whatever it says.
+//
+// A FAILED MEASUREMENT RETURNS A LOUD SENTENCE, NOT AN EMPTY ONE. "The second
+// opinion did not run" and "the second opinion found nothing" are different
+// facts, and the whole family of defects around this detector is the first being
+// rendered as the second.
+func Corroborate(repo string, f Finding) (Presence, string) {
+	if len(f.Unmerged) == 0 {
+		return Presence{}, ""
+	}
+	p, err := MeasurePresence(repo, f)
+	if err != nil {
+		return Presence{}, fmt.Sprintf("SECOND OPINION UNAVAILABLE: the content check could not run (%v). "+
+			"That is not a low score and not a clean verdict — this row rests on `git cherry` alone.", err)
+	}
+	if !p.Measured {
+		return p, fmt.Sprintf("Second opinion: %s.", p.Describe())
+	}
+	if p.SuggestsLanded() {
+		return p, fmt.Sprintf("SECOND OPINION SAYS THIS MAY ALREADY HAVE LANDED UNDER A DIFFERENT SHA: %s. "+
+			"`git cherry` compares PATCH IDS, and an ordinary clean refinery rebase can rewrite one — by "+
+			"replaying a hunk into moved context, or by dropping a hunk the target already had — so a branch "+
+			"that DID merge reads as unmerged forever (mg-5ec6). This is NOT a merge verdict and it does not "+
+			"clear the row: check by hand before submitting or deleting the branch, and expect to find the "+
+			"same subject on the target under another sha.", p.Describe())
+	}
+	return p, fmt.Sprintf("Second opinion agrees the work is absent from the target: %s.", p.Describe())
 }
 
 // MeasurePresence answers Presence for a finding's unmerged commits.

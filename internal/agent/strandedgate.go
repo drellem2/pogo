@@ -142,6 +142,28 @@ func (r *Registry) getStrandedWorkGate() StrandedWorkGate {
 // handling, and a refusal that flattened them would be actively harmful: told
 // only "there is a branch", a reader re-dispatches from the target, which is the
 // one thing a pre-registration branch cannot survive.
+//
+// IT DOES NOT KEY ON AN OPEN WORK ITEM (mg-5ec6, answering a question raised for
+// mg-be37 and never delivered). `pogo check-stranded` iterates OPEN items —
+// strandwatch.OpenStatuses is {available, claimed, pending} — so a branch whose
+// item was closed by a SIBLING's merge falls outside its domain by construction.
+// That property is documented there and is NOT shared here: this gate reads
+// nothing but the spawn request's id, the repo and the target, and refuses on a
+// branch positively read from disk. A `done` item gets no refusal only because
+// nothing dispatches at a `done` item — and dispatch is the only harm this gate
+// exists to stop, so there is nothing left for it to be blind to. The residual
+// (a closed item whose branch never landed) belongs to the release-time reporter
+// below, which is equally status-blind. See
+// TestSpawnStillRefusedWhenTheWorkItemIsAlreadyDone.
+//
+// THE SIBLING SHAPE IS COVERED, and it is worth naming because it was reported as
+// an open hole. A polecat's submit failed terminally on a DNS error, its claim was
+// released, and a second polecat was dispatched onto the same item four seconds
+// later while the first one's branch sat pushed and unmerged; it re-derived the
+// ticket for 43 minutes. Today that second dispatch is refused: the first
+// polecat's branch is attributable to the item by BranchMatchesItem (polecat-x8af0
+// against mg-8af0 matches on the suffix), so the gate fires whatever the sibling's
+// agent letter is. See TestSpawnRefusedForASiblingsPushedBranchOnTheSameItem.
 func (r *Registry) strandedWorkRefusal(workItemID, repo, target string) string {
 	findings, err := r.getStrandedWorkGate().StrandedFindings(workItemID, repo, target)
 	if err != nil {
@@ -176,10 +198,21 @@ func (r *Registry) strandedWorkRefusal(workItemID, repo, target string) string {
 		}
 	}
 	f := findings[0]
-	return fmt.Sprintf("work item %s already has PUSHED, UNMERGED work: %s. Dispatching a worker at it "+
+	msg := fmt.Sprintf("work item %s already has PUSHED, UNMERGED work: %s. Dispatching a worker at it "+
 		"re-derives work that already exists — mg-9a19 lost 1026 lines that way. Resubmit the branch "+
 		"instead. Dispatch anyway with --stranded-override=\"<why>\" if this branch is genuinely spent",
 		workItemID, f.Summary())
+	// The second opinion travels WITH the refusal and never instead of it
+	// (mg-5ec6). `git cherry` over-reports on a branch that landed through an
+	// ordinary clean rebase, and this refusal is where that costs the most: told
+	// only "there is unmerged work", an operator who can see the same subject on
+	// main learns that the gate is wrong and reaches for --stranded-override on
+	// reflex. Told the ratio, they can tell THIS refusal from the next one.
+	// Deliberately not a suppression — see strandedwork.Corroborate.
+	if _, note := strandedwork.Corroborate(f.Repo, f); note != "" {
+		msg += ". " + note
+	}
+	return msg
 }
 
 // reportStrandedWorkOnRelease records that a polecat being stopped left pushed
@@ -208,6 +241,17 @@ func (r *Registry) strandedWorkRefusal(workItemID, repo, target string) string {
 // The mail is sent LAST and its failure is swallowed by the sink, so the event
 // is already durable whatever happens to mg. That ordering is the point: the
 // improvement is a second output, not a new dependency of the first.
+//
+// IT IS AGENT-DRIVEN, NOT ITEM-DRIVEN, AND NEVER CONSULTS THE ITEM'S STATUS
+// (mg-5ec6). It is called from releasePolecatClaim BEFORE that function so much
+// as probes claimed/, so a polecat stopped while its item is already `done` —
+// closed by a SIBLING's merge, the shape reported for mg-be37 and never answered
+// — is reported exactly like any other. The status IS read, once, but only by
+// sendStrandedAlert and only to WORD the alert: mg-1af2 made a closed item drop
+// the do-not-dispatch paragraph, which is a different sentence and not a
+// different decision. Nothing here can be silenced by a status, which is the
+// property that makes the sibling shape visible; see
+// TestReleaseReportsStrandedWorkWhenASiblingAlreadyClosedTheItem.
 func (r *Registry) reportStrandedWorkOnRelease(a *Agent, reason string) {
 	if a == nil || a.Type != TypePolecat || a.WorkItemID == "" || a.SourceRepo == "" {
 		return
@@ -261,31 +305,57 @@ func (r *Registry) reportStrandedWorkOnRelease(a *Agent, reason string) {
 	if !f.Stranded() {
 		return
 	}
-	log.Printf("agent %s: work item %s went back to available/ WITH PUSHED WORK BEHIND IT (%s). %s",
-		a.Name, a.WorkItemID, reason, f.Summary())
+	presence, note := strandedwork.Corroborate(a.SourceRepo, f)
+	log.Printf("agent %s: work item %s went back to available/ WITH PUSHED WORK BEHIND IT (%s). %s. %s",
+		a.Name, a.WorkItemID, reason, f.Summary(), note)
+	details := map[string]any{
+		"branch":      f.Branch,
+		"ref":         f.Ref,
+		"pushed":      f.Pushed,
+		"target":      f.Target,
+		"disposition": string(f.Disposition),
+		"unmerged":    len(f.Unmerged),
+		"reason":      reason,
+		"summary":     f.Summary(),
+		"route":       RouteRelease,
+	}
+	addPresenceDetails(details, presence, note)
 	events.Emit(context.Background(), events.Event{
 		EventType:  "work_item_stranded_push",
 		Agent:      a.eventAgent(),
 		WorkItemID: a.WorkItemID,
 		Repo:       a.SourceRepo,
-		Details: map[string]any{
-			"branch":      f.Branch,
-			"ref":         f.Ref,
-			"pushed":      f.Pushed,
-			"target":      f.Target,
-			"disposition": string(f.Disposition),
-			"unmerged":    len(f.Unmerged),
-			"reason":      reason,
-			"summary":     f.Summary(),
-			"route":       RouteRelease,
-		},
+		Details:    details,
 	})
 	sendStrandedAlert(StrandedAlert{
-		Polecat:    a.Name,
-		WorkItemID: a.WorkItemID,
-		Repo:       a.SourceRepo,
-		Reason:     reason,
-		Route:      RouteRelease,
-		Finding:    f,
+		Polecat:       a.Name,
+		WorkItemID:    a.WorkItemID,
+		Repo:          a.SourceRepo,
+		Reason:        reason,
+		Route:         RouteRelease,
+		Finding:       f,
+		Presence:      presence,
+		SecondOpinion: note,
 	})
+}
+
+// addPresenceDetails puts the content second opinion on an event payload.
+//
+// The NOTE and the NUMBERS both go on, and neither substitutes for the other: a
+// consumer counting how often `git cherry` over-reports needs the ratio, and a
+// person reading one event needs the sentence that says what the ratio licenses
+// (nothing, on its own — see strandedwork.Corroborate).
+//
+// `presence_measured` is emitted even when false, because "the branch was too
+// small to measure" is a real answer and an absent key would read as the check
+// not having run.
+func addPresenceDetails(details map[string]any, p strandedwork.Presence, note string) {
+	if note == "" {
+		return
+	}
+	details["second_opinion"] = note
+	details["presence_measured"] = p.Measured
+	details["presence_added"] = p.Added
+	details["presence_present"] = p.Present
+	details["presence_suggests_landed"] = p.SuggestsLanded()
 }

@@ -240,36 +240,45 @@ func (r *Registry) ReportStrandedWorkAcrossRestart() StrandedSweepReport {
 		if c.Alive {
 			reason = "polecat outlived a pogod restart and is STILL RUNNING, unreachable by this daemon"
 		}
+		// The content second opinion rides along, never instead of the row
+		// (mg-5ec6). This route reports on branches that may be days old, which is
+		// exactly where `git cherry`'s patch-id over-report has had the most time
+		// to accumulate.
+		presence, note := strandedwork.Corroborate(c.SourceRepo, f)
 		log.Printf("strandedwork: STARTUP SWEEP found pushed work behind unadoptable polecat %s "+
-			"(work item %s, %s). %s", c.Name, c.WorkItemID, reason, f.Summary())
+			"(work item %s, %s). %s. %s", c.Name, c.WorkItemID, reason, f.Summary(), note)
+		details := map[string]any{
+			"branch":       f.Branch,
+			"ref":          f.Ref,
+			"pushed":       f.Pushed,
+			"target":       f.Target,
+			"disposition":  string(f.Disposition),
+			"unmerged":     len(f.Unmerged),
+			"reason":       reason,
+			"summary":      f.Summary(),
+			"route":        RouteRestartSweep,
+			"polecat_pid":  c.PID,
+			"still_alive":  c.Alive,
+			"witnessed_at": c.StartTime.Format(time.RFC3339),
+		}
+		addPresenceDetails(details, presence, note)
 		events.Emit(context.Background(), events.Event{
 			EventType:  "work_item_stranded_push",
 			Agent:      "cat-" + c.Name,
 			WorkItemID: c.WorkItemID,
 			Repo:       c.SourceRepo,
-			Details: map[string]any{
-				"branch":       f.Branch,
-				"ref":          f.Ref,
-				"pushed":       f.Pushed,
-				"target":       f.Target,
-				"disposition":  string(f.Disposition),
-				"unmerged":     len(f.Unmerged),
-				"reason":       reason,
-				"summary":      f.Summary(),
-				"route":        RouteRestartSweep,
-				"polecat_pid":  c.PID,
-				"still_alive":  c.Alive,
-				"witnessed_at": c.StartTime.Format(time.RFC3339),
-			},
+			Details:    details,
 		})
 		sendStrandedAlert(StrandedAlert{
-			Polecat:    c.Name,
-			WorkItemID: c.WorkItemID,
-			Repo:       c.SourceRepo,
-			Reason:     reason,
-			Route:      RouteRestartSweep,
-			StillAlive: c.Alive,
-			Finding:    f,
+			Polecat:       c.Name,
+			WorkItemID:    c.WorkItemID,
+			Repo:          c.SourceRepo,
+			Reason:        reason,
+			Route:         RouteRestartSweep,
+			StillAlive:    c.Alive,
+			Finding:       f,
+			Presence:      presence,
+			SecondOpinion: note,
 		})
 	}
 
