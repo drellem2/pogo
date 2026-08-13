@@ -247,6 +247,10 @@ func New(cfg config.StallWatchConfig, opts Options) *Watcher {
 	// lazily in blockedReminderCooldown/blockedReminderMaxNotices, because the
 	// max-notices knob has a meaningful negative value ("no cap") that a
 	// `<= 0 -> default` normalisation here would destroy.
+	//
+	// IndefiniteHoldReportEnabled (mg-f398) is not defaulted here for the same
+	// unset-vs-false reason; its two duration knobs resolve lazily in
+	// indefiniteHoldAgeThreshold/indefiniteHoldCooldown.
 
 	workRoot := opts.WorkRoot
 	mailRoot := opts.MailRoot
@@ -329,6 +333,15 @@ func (w *Watcher) checkUnclaimedItems(now time.Time) {
 	// checkBlockedReminders for why that distinction holds and why `parked` and
 	// `human` are deliberately not in its population.
 	w.checkBlockedReminders(now, items)
+
+	// Indefinite-hold report (mg-f398). Reads the SAME listing over the rest of
+	// the gated population — everything config.IsDispatchGated holds by ASSIGNEE
+	// that the blocked-reminder does not already chase, which by default is
+	// `parked` and `human`. It is a READER: it releases nothing, writes nothing,
+	// and infers nothing from any item's text. See checkIndefiniteHolds for why
+	// that boundary is what separates it from the park-sweeper mayor.md forbids,
+	// and why sight of a gated item stopped implying dispatch at mg-4798.
+	w.checkIndefiniteHolds(now, items)
 
 	// Standard unclaimed-item stall: an assigned available item aged past the
 	// 10-min threshold. When the priority wake is active it OWNS fast-priority
