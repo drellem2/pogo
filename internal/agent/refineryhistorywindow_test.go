@@ -80,6 +80,67 @@ func TestMayorRefineryCLIReferenceNamesTheCap(t *testing.T) {
 	}
 }
 
+// doctorPromptBody returns the embedded doctor prompt — the artifact that
+// ships, not the installed copy under ~/.pogo/agents/crew.
+func doctorPromptBody(t *testing.T) string {
+	t.Helper()
+	data, err := defaultPrompts.ReadFile("prompts/crew/doctor.md")
+	if err != nil {
+		t.Fatalf("read embedded prompts/crew/doctor.md: %v", err)
+	}
+	return string(data)
+}
+
+// mg-e9ee widened the coordinator's step-3 check and made it state its bound,
+// and the three tests above pin that. But `refinery history` has a second
+// consumer, and it kept the defect: the doctor's Common Issues entry read
+// "Check `pogo refinery history` for error details", and its CLI reference
+// labelled the command "Completed merges" with no bound at all.
+//
+// That consumer is the worse place for it. The doctor is asked "why did my
+// polecat fail?" — a question about something that ALREADY HAPPENED, which is
+// exactly the case the retained window cannot answer. Measured 2026-08-13 the
+// window was 100 rows spanning 18h28m against 926 MRs over 30 days in the
+// event log, so a failure from yesterday afternoon is already deleted and
+// "nothing in history" reads as "no failures".
+//
+// The distinction that has to survive the copy is the one mg-e9ee exists for:
+// an empty answer is healthy only within a named window, and a TRUNCATED one
+// is not an empty answer at all — it is an unknown.
+func TestDoctorRefineryHistoryStatesItsWindow(t *testing.T) {
+	body := doctorPromptBody(t)
+
+	for _, want := range []string{
+		// The Common Issues entry sends the doctor to the durable log.
+		"Check `pogo refinery history --since=30d` for error details",
+		"name the window when you answer",
+		// Why the default cannot answer the question the doctor is asked.
+		"prunes destructively at 100 entries",
+		"about something that already happened",
+		// Both readings, kept apart. This is the pair a consumer loses.
+		"empty output means healthy within the window you asked for",
+		"is not a healthy empty, it is an unknown",
+		// The CLI reference block carries the bound too, so the unqualified
+		// reading cannot be picked up again from the other paragraph.
+		"RETAINED window only",
+		"pogo refinery history --since=30d # Completed merges from the durable event log",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("prompts/crew/doctor.md: expected %q — the doctor reads `refinery history` to answer questions about the past, so it must state the window it read", want)
+		}
+	}
+
+	// The unqualified forms must not come back, in either place.
+	for _, banned := range []string{
+		"- **Refinery failures**: Check `pogo refinery history` for error details",
+		"pogo refinery history            # Completed merges\n",
+	} {
+		if strings.Contains(body, banned) {
+			t.Errorf("prompts/crew/doctor.md: the unqualified %q is back; `refinery history` unbounded cannot distinguish no-failures from failure-pruned", banned)
+		}
+	}
+}
+
 // TestMayorStep3WarnsTheWiderWindowFindsFalsePositives pins the measurement
 // that came with widening the window. The first real 30-day run produced two
 // hits and both were retries under a different branch name — the classifier

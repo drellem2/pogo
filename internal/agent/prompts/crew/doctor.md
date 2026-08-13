@@ -125,7 +125,15 @@ mg show <id>                     # Full details on a work item
 
 # Refinery
 pogo refinery queue              # In-flight merge + its gate's liveness, then pending merges
-pogo refinery history            # Completed merges
+pogo refinery history            # Completed merges — RETAINED window only, pruned
+                                 # DESTRUCTIVELY at 100 entries / 7d. The count cap
+                                 # bites first: measured 2026-08-13, 100 rows spanning
+                                 # 18h28m. Rows past it are DELETED, not hidden.
+pogo refinery history --since=30d # Completed merges from the durable event log — 926
+                                 # MRs over the same 30d against history's 100. Same
+                                 # stdout shape, so the same jq works either way.
+                                 # Exits NON-ZERO with TRUNCATED on stderr if the log
+                                 # cannot reach back that far (mg-e9ee).
 pogo refinery show <id>          # Single MR details
 
 # Logs — ask the service manager where they land; don't assume a path (mg-f766).
@@ -202,7 +210,7 @@ Don't burn it on bulk research. Large file reads, repo-wide greps, web searches,
 
 - **pogod not running**: `pogo server start` for a foreground/one-off start, or `pogo service install` to install *and* start the launchd/systemd service — the install loads the unit and health-checks the daemon, so there is nothing to start afterwards. Confirm with `pogo service status`. (`pogo service` has no `start` subcommand; this line named one until mg-21b1.)
 - **Stale work items**: `mg unclaim <id>` releases a stale claim, returning the item to available
-- **Refinery failures**: Check `pogo refinery history` for error details
+- **Refinery failures**: Check `pogo refinery history --since=30d` for error details — and **name the window when you answer**. Bare `pogo refinery history` reads the refinery's *retained* window, which prunes destructively at 100 entries; measured 2026-08-13 that was 18h28m, so a failure from yesterday afternoon is already deleted and "nothing in history" reads as "no failures". You are usually asked this question *about something that already happened*, which is exactly the case the retained window cannot answer. `--since` reconstructs from the durable event log instead. Two readings to keep apart: **empty output means healthy within the window you asked for** — a real answer only because you named it — while a **non-zero exit with `TRUNCATED` on stderr is not a healthy empty, it is an unknown**, and reporting it as "no failures" is the one wrong answer here (mg-e9ee).
 - **Missing prompts**: `pogo agent prompt install` reinstalls default prompts
 - **Agent won't start**: Check if the crew prompt exists at `~/.pogo/agents/crew/<name>.md`
 - **Host is saturated but the fleet does not account for the load**: run `pogo check-orphans`. This is the one symptom where believing your instruments is the mistake — compute that outlived its {{.Worker}} sits in no agent's process tree, so `pogo agent list`, the refinery's host reading and every per-agent attribution all correctly report the box as busy-but-not-ours. On 2026-08-12 the refinery measured "fleet held 0.5 of 10 cores, non-fleet 8.7" while 52 orphaned busy-loops from one departed {{.Worker}} held the other 8.7 for 41 minutes (mg-c675). A large gap between host load and attributed load IS the finding; go look for the owner rather than for a second explanation.
