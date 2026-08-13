@@ -432,6 +432,102 @@ The check runs in a goroutine off `OnTick`: a wait-idle nudge can block up to
 `DefaultNudgeTimeout` (30s), and the heartbeat goroutine must not stall the
 scheduler sweep. The cooldown map + mutex make overlapping checks safe.
 
+### Threshold C — a hold with no driver (mg-f398)
+
+The two thresholds above watch the **dispatchable** population. This one watches
+part of what they skip, and it is the only check here that is not a nudge to act.
+
+`snooze` and `depends` are holds with a driver: mg's `*/15` sweep evaluates them
+and promotes what has opened. `parked` and `human` have none. Nothing scheduled
+ever evaluates their release condition, so an indefinite hold persists until a
+person happens to look — and the release condition can be perfectly well-formed
+and change nothing, because nothing reads it.
+
+**The exhibit is one item and it is stronger than the other 21 it arrived with.**
+On 2026-08-10 20:12–20:17Z, 22 items were parked under a token-budget cap. They
+were released 2.5 days later, only because a coordinator happened to trace one
+ticket's park reason while looking at something else. 21 carried a *circular*
+release condition — *"clear `parked` when the constraint is lifted and this item
+is selected for work"*, circular because `parked` is the state that removes an
+item from selection, so nothing selects it and nothing clears it. That is a real
+defect with an obvious fix, and **the fix would have repaired nothing**: the
+22nd, `mg-e7f5`, said *"Reopen/clear assignee when the cap lifts"* — one clause,
+naming a condition entirely outside the item, circular in no way — and it
+stranded for exactly as long. The circularity explained 21 cases and caused none
+of them. A rule against self-referential wording would have shipped, felt like a
+fix, and left the mechanism untouched.
+
+Once a gated item has sat past `indefinite_hold_age_threshold` (24h), the
+coordinator receives a digest naming every held item and its age, repeating every
+`indefinite_hold_report_cooldown` (24h).
+
+**This is deliberately not the park-sweeper `mayor.md` forbids.** That ruling
+rejects giving pogod sight of gated items *in order to release them*, on the
+grounds that the same predicate gates dispatch. It stands. Every clause of this
+check's boundary is load-bearing:
+
+- It **releases nothing** and **writes no field**. Release stays a
+  coordinator/human judgement.
+- It **infers nothing from item text** — no title or body is read, matched, or
+  parsed. In particular there is no "until"/"after" keyword sniff, the second
+  thing `mayor.md` prohibits, because that rots on the next phrasing and fires on
+  rows that are already right. It reports the *fact and age* of a hold, never its
+  meaning.
+- It **acquires no dispatch capability** and routes through nothing that has any.
+
+What changes is one thing: *"somebody happens to look"* becomes *"something looks
+on a cadence."* `parked` keeps its meaning — it still buys silence from both
+dispatch nudges, which is what it was for.
+
+**Why sight became affordable.** The ruling was priced against "sight implies
+dispatch", which stopped being true at mg-4798: the gate now lives in the
+executable path at the spawn point (`agent.MGDispatchGate.DispatchGated` refuses
+on `config.IsDispatchGated` and names what gated it), armed in `cmd/pogod`
+deliberately *outside* `stallWatchArmed` so a daemon that never reaches that line
+still gates the defaults. The honest caveat, because a reader weighing this is
+owed it: that gate **fails open** on an unreadable store — it logs `dispatching
+WITHOUT the assignee gate` and proceeds. Pre-existing, and a read-only reporter
+dispatches nothing under any branch, but the refusal is not unconditional.
+
+The ruling's other premise was that an indefinite hold has no release time, so
+degraded redundancy cannot make it *late*. True, and not the same as no cost:
+nothing was late for those 22 items, because nothing was due, and 2.5 days of
+real work still did not happen.
+
+**Population is a rule, not a list.** Membership is "gated by assignee, and not
+the one gated shape something already chases" — `blocked:<agent>` is excluded
+because mg-3844 gave it a reader. Everything else `IsDispatchGated` holds is in,
+which by default is `parked` and `human`. Stated as a rule so a gate value added
+to `non_dispatchable_assignees` next year gets a reader for free.
+
+Two deliberate divergences from the blocked-reminder:
+
+- **No notice cap.** That cap exists because nagging an agent who has decided to
+  wait is noise. Here the silence *is* the defect, so a cap would restore it. The
+  cost is bounded by shape instead — one digest naming every held item, so a
+  permanent hold is one line per cycle rather than a mail of its own.
+- **A flat cadence.** `repeat_backoff_cap` (4h) is below this base (24h), so
+  `repeatCooldown` returns the base unchanged rather than doubling. That is the
+  intended shape and is implicit enough to be pinned by a test.
+
+**Two self-applications**, since a remedy is an artifact of the same kind as the
+defect it treats:
+
+- A reader that ships **disarmed** is this finding one level up — a hold nothing
+  looks at, plus a looker nothing turns on. So it ships default-on, and pogod's
+  startup line prints `indefinite_hold=` because the report emits events only
+  when something is held; without that line, "no events" and "disarmed" are the
+  same observation.
+- An item whose file cannot be stat'd has a zero `ModTime`. Dropping it would
+  make a real hold invisible for want of one field — the finding itself — and
+  arithmetic on the zero time would report a fresh hold as ~739 000 days old.
+  It is reported with `age UNKNOWN` and listed under `unaged_ids`.
+
+Scope note, recorded rather than fixed: `stage: gated` and an unreadable carrier
+also hold an item indefinitely and are also unwatched. They are a different
+population — a carrier declaration rather than an assignee hold, and the
+unreadable case is a parse defect to repair rather than a hold to age.
+
 ## Configuration
 
 `[stall_watch]` in `~/.config/pogo/config.toml`. Defaults (in
@@ -449,6 +545,11 @@ max_unread_mail_count = 5
 nudge_cooldown = "5m"
 repeat_backoff_cap = "4h"
 mail_fallback_backlog_cap = 3
+
+# Threshold C (mg-f398) — read-only, releases nothing.
+indefinite_hold_report_enabled = true
+indefinite_hold_age_threshold = "24h"
+indefinite_hold_report_cooldown = "24h"
 ```
 
 ### Deviation from the gh #12 spec shape

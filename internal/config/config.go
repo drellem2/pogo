@@ -238,6 +238,42 @@ const (
 	// long past the point where "the agent never knew" is a live explanation, and
 	// everything after it is nagging an agent who has already decided to wait.
 	DefaultBlockedReminderMaxNotices = 4
+	// DefaultIndefiniteHoldAgeThreshold is how long an assignee-gated work item
+	// must have sat untouched before the indefinite-hold report names it
+	// (mg-f398).
+	//
+	// A day, and deliberately far coarser than the 10-minute dispatch gate.
+	// Nothing here is late — an indefinite hold has no release time to miss — so
+	// the threshold is not a deadline, it is the point past which "held on
+	// purpose, recently" stops being the likeliest explanation. The exhibit that
+	// produced this check sat 2.5 days; a hold of a few hours is ordinary
+	// coordination and reporting it would be noise on a channel whose value is
+	// that it fires rarely.
+	//
+	// Measured against ModTime, which is the store's only age signal for a
+	// held item and is a CONSERVATIVE one: an unrelated body edit moves it, so
+	// the reported age can understate how long the hold has been in place. It
+	// never overstates it.
+	DefaultIndefiniteHoldAgeThreshold = 24 * time.Hour
+	// DefaultIndefiniteHoldReportCooldown is the BASE of the per-item backoff for
+	// the indefinite-hold report — the gap before the same held item is named
+	// again. The FIRST notice about an item is never delayed once it crosses the
+	// age threshold, which is the load-bearing half here exactly as it is for the
+	// blocked-reminder: the failure being fixed is that nobody ever learned.
+	//
+	// Note the interaction with DefaultStallRepeatBackoffCap (4h), which is
+	// SMALLER than this base: repeatCooldown's `capDur < base` branch then
+	// returns a flat 24h rather than doubling. That is intended — this is a daily
+	// digest, not an escalating nag.
+	//
+	// There is deliberately NO notice cap, which is the one place this check
+	// diverges from the blocked-reminder. That cap exists because nagging an
+	// agent who has already decided to wait is noise; here the whole finding is
+	// that the SILENCE is the defect, and a cap would restore it after a few
+	// notices. The cost is bounded differently instead: this is one digest naming
+	// every held item, so a permanently-held item contributes one line per day
+	// rather than a mail of its own.
+	DefaultIndefiniteHoldReportCooldown = 24 * time.Hour
 	// DefaultDriftCheckInterval is how often pogod's drift-check runner samples
 	// the [reconcile] mirrors from the heartbeat OnTick loop (mg-345b). It is
 	// deliberately COARSE — far larger than the ~30s heartbeat tick — because the
@@ -862,6 +898,33 @@ type StallWatchConfig struct {
 	// before the reminder goes quiet about it permanently. Zero falls back to
 	// DefaultBlockedReminderMaxNotices; a negative value means no cap.
 	BlockedReminderMaxNotices int
+
+	// IndefiniteHoldReportEnabled turns on the indefinite-hold report (mg-f398):
+	// a read-only digest telling the coordinator which items have been sitting on
+	// a hold nothing scheduled will ever open, and for how long.
+	//
+	// Its population is the rest of the gated set — everything IsDispatchGated
+	// holds by ASSIGNEE that is not the `blocked:<agent>` shape the
+	// blocked-reminder already chases, which by default is `parked` and `human`.
+	//
+	// It is a READER and it must stay one. It releases nothing, writes no field
+	// on any item, and reads no title or body text — it reports the fact and age
+	// of a hold, never its meaning. That is what distinguishes it from the
+	// park-sweeper mayor.md forbids; see stallwatch.checkIndefiniteHolds.
+	//
+	// Because New() cannot distinguish an unset bool from an explicit false, the
+	// production default (true) is applied by Load(), not New(); a hand-built
+	// config must set this field to activate the report.
+	IndefiniteHoldReportEnabled bool
+	// IndefiniteHoldAgeThreshold is how long a hold must have sat untouched
+	// before it is reported. Zero falls back to
+	// DefaultIndefiniteHoldAgeThreshold.
+	IndefiniteHoldAgeThreshold time.Duration
+	// IndefiniteHoldReportCooldown is the base of the report's per-item backoff.
+	// Zero falls back to DefaultIndefiniteHoldReportCooldown. There is no
+	// max-notices knob: see that constant for why a cap would re-create the
+	// defect this report exists to close.
+	IndefiniteHoldReportCooldown time.Duration
 }
 
 // GitGCConfig configures pogod's periodic polecat git garbage collector.
@@ -1647,20 +1710,25 @@ type parsedConfig struct {
 	// explicit `blocked_reminder_enabled = false` is indistinguishable from the
 	// key being absent, and the layer merge would restore the default `true`.
 	blockedReminderEnabledSet bool
-	agentsAutoStartSet        bool
-	reaperEnabledSet          bool
-	driftWatchEnabledSet      bool
-	credExpiryEnabledSet      bool
-	ghTeardownEnabledSet      bool
-	ghIntakeEnabledSet        bool
-	reviewDeclEnabledSet      bool
-	ackWatchEnabledSet        bool
-	deafWatchEnabledSet       bool
-	absentWatchEnabledSet     bool
-	firstTurnEnabledSet       bool
-	wedgeWatchEnabledSet      bool
-	doneReapEnabledSet        bool
-	orchResumeEnabledSet      bool
+	// indefiniteHoldEnabledSet is the same shape for the mg-f398 report: without
+	// it an explicit `indefinite_hold_report_enabled = false` would be merged
+	// away and the default `true` restored, leaving an operator who deliberately
+	// silenced the digest still receiving it.
+	indefiniteHoldEnabledSet bool
+	agentsAutoStartSet       bool
+	reaperEnabledSet         bool
+	driftWatchEnabledSet     bool
+	credExpiryEnabledSet     bool
+	ghTeardownEnabledSet     bool
+	ghIntakeEnabledSet       bool
+	reviewDeclEnabledSet     bool
+	ackWatchEnabledSet       bool
+	deafWatchEnabledSet      bool
+	absentWatchEnabledSet    bool
+	firstTurnEnabledSet      bool
+	wedgeWatchEnabledSet     bool
+	doneReapEnabledSet       bool
+	orchResumeEnabledSet     bool
 	// dispatchCapMaxSet / dispatchCapReserveSet exist because ZERO is a
 	// meaningful value for both keys and not merely an absent one:
 	// max_polecats_per_repo = 0 disarms the cap, refinery_reserve = 0 drops the
@@ -1729,8 +1797,16 @@ func Load() *Config {
 			BlockedReminderEnabled:    true,
 			BlockedReminderCooldown:   DefaultBlockedReminderCooldown,
 			BlockedReminderMaxNotices: DefaultBlockedReminderMaxNotices,
-			FastPriorities:            DefaultFastPriorities,
-			NonDispatchableAssignees:  DefaultNonDispatchableAssignees,
+
+			// Default-on (mg-f398). A reader that ships disarmed is the finding
+			// it closes, re-created one level up: a hold nothing looks at, plus
+			// a looker nothing turns on.
+			IndefiniteHoldReportEnabled:  true,
+			IndefiniteHoldAgeThreshold:   DefaultIndefiniteHoldAgeThreshold,
+			IndefiniteHoldReportCooldown: DefaultIndefiniteHoldReportCooldown,
+
+			FastPriorities:           DefaultFastPriorities,
+			NonDispatchableAssignees: DefaultNonDispatchableAssignees,
 		},
 		DriftWatch: DriftWatchConfig{
 			Enabled:  true,
@@ -2137,6 +2213,15 @@ func Load() *Config {
 		// through to the default, which is what "unset" looks like in flat TOML.
 		if fileCfg.StallWatch.BlockedReminderMaxNotices != 0 {
 			cfg.StallWatch.BlockedReminderMaxNotices = fileCfg.StallWatch.BlockedReminderMaxNotices
+		}
+		if fileCfg.indefiniteHoldEnabledSet {
+			cfg.StallWatch.IndefiniteHoldReportEnabled = fileCfg.StallWatch.IndefiniteHoldReportEnabled
+		}
+		if fileCfg.StallWatch.IndefiniteHoldAgeThreshold > 0 {
+			cfg.StallWatch.IndefiniteHoldAgeThreshold = fileCfg.StallWatch.IndefiniteHoldAgeThreshold
+		}
+		if fileCfg.StallWatch.IndefiniteHoldReportCooldown > 0 {
+			cfg.StallWatch.IndefiniteHoldReportCooldown = fileCfg.StallWatch.IndefiniteHoldReportCooldown
 		}
 
 		// [dispatch_pairing] has no code-side defaults to preserve — the zero
@@ -2722,6 +2807,17 @@ func parseConfigFileInto(cfg *parsedConfig, path string) error {
 				// unparseable value is ignored.
 				if n, err := strconv.Atoi(unquotedVal); err == nil {
 					cfg.StallWatch.BlockedReminderMaxNotices = n
+				}
+			case "indefinite_hold_report_enabled":
+				cfg.StallWatch.IndefiniteHoldReportEnabled = val == "true"
+				cfg.indefiniteHoldEnabledSet = true
+			case "indefinite_hold_age_threshold":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.StallWatch.IndefiniteHoldAgeThreshold = d
+				}
+			case "indefinite_hold_report_cooldown":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.StallWatch.IndefiniteHoldReportCooldown = d
 				}
 			}
 		case "dispatch":

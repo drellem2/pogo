@@ -1076,6 +1076,95 @@ func TestBlockedReminderDefaults(t *testing.T) {
 	}
 }
 
+// TestIndefiniteHoldDefaults: the report is a gap fix, not an opt-in feature, so
+// an existing deployment with no [stall_watch] keys must get it on (mg-f398).
+//
+// This is the assertion that matters operationally, and the reason is the
+// finding itself: an indefinite hold is invisible because nothing reads it, and
+// a reader that ships disarmed is that same shape one level up — a hold nothing
+// looks at, plus a looker nothing turns on.
+func TestIndefiniteHoldDefaults(t *testing.T) {
+	dir := t.TempDir()
+	os.Setenv("XDG_CONFIG_HOME", dir)
+	defer os.Unsetenv("XDG_CONFIG_HOME")
+
+	cfg := Load()
+	if !cfg.StallWatch.IndefiniteHoldReportEnabled {
+		t.Error("indefinite-hold report should default to enabled; a default-off reader closes nothing")
+	}
+	if cfg.StallWatch.IndefiniteHoldAgeThreshold != DefaultIndefiniteHoldAgeThreshold {
+		t.Errorf("age threshold = %v, want default %v",
+			cfg.StallWatch.IndefiniteHoldAgeThreshold, DefaultIndefiniteHoldAgeThreshold)
+	}
+	if cfg.StallWatch.IndefiniteHoldReportCooldown != DefaultIndefiniteHoldReportCooldown {
+		t.Errorf("cooldown = %v, want default %v",
+			cfg.StallWatch.IndefiniteHoldReportCooldown, DefaultIndefiniteHoldReportCooldown)
+	}
+	// The cadence is meant to be flat rather than escalating: repeatCooldown
+	// returns the base unchanged when the cap is below it. If a later edit raises
+	// repeat_backoff_cap above this base, the report starts doubling — defensible
+	// for a weeks-old hold, but it should be a decision rather than a surprise.
+	if DefaultStallRepeatBackoffCap >= DefaultIndefiniteHoldReportCooldown {
+		t.Errorf("repeat_backoff_cap default (%v) is no longer below the indefinite-hold base (%v), "+
+			"so the daily digest now escalates instead of staying flat — intended?",
+			DefaultStallRepeatBackoffCap, DefaultIndefiniteHoldReportCooldown)
+	}
+}
+
+// TestIndefiniteHoldConfigFile pins the three knobs through the flat-TOML
+// parser, including the value a naive merge would eat: an explicit `false`,
+// which without indefiniteHoldEnabledSet would be merged away and the default
+// `true` restored.
+func TestIndefiniteHoldConfigFile(t *testing.T) {
+	dir := t.TempDir()
+	os.Setenv("XDG_CONFIG_HOME", dir)
+	defer os.Unsetenv("XDG_CONFIG_HOME")
+
+	pogoDir := filepath.Join(dir, "pogo")
+	os.MkdirAll(pogoDir, 0755)
+	os.WriteFile(filepath.Join(pogoDir, "config.toml"), []byte(`
+[stall_watch]
+indefinite_hold_report_enabled = false
+indefinite_hold_age_threshold = "6h"
+indefinite_hold_report_cooldown = "12h"
+`), 0644)
+
+	cfg := Load()
+	if cfg.StallWatch.IndefiniteHoldReportEnabled {
+		t.Error("indefinite-hold report should be disabled by config file")
+	}
+	if cfg.StallWatch.IndefiniteHoldAgeThreshold != 6*time.Hour {
+		t.Errorf("age threshold = %v, want 6h", cfg.StallWatch.IndefiniteHoldAgeThreshold)
+	}
+	if cfg.StallWatch.IndefiniteHoldReportCooldown != 12*time.Hour {
+		t.Errorf("cooldown = %v, want 12h", cfg.StallWatch.IndefiniteHoldReportCooldown)
+	}
+}
+
+// TestIndefiniteHoldSurvivesUnrelatedKeys: a [stall_watch] section that names
+// only another key must leave the report on.
+func TestIndefiniteHoldSurvivesUnrelatedKeys(t *testing.T) {
+	dir := t.TempDir()
+	os.Setenv("XDG_CONFIG_HOME", dir)
+	defer os.Unsetenv("XDG_CONFIG_HOME")
+
+	pogoDir := filepath.Join(dir, "pogo")
+	os.MkdirAll(pogoDir, 0755)
+	os.WriteFile(filepath.Join(pogoDir, "config.toml"), []byte(`
+[stall_watch]
+nudge_cooldown = "2m"
+`), 0644)
+
+	cfg := Load()
+	if !cfg.StallWatch.IndefiniteHoldReportEnabled {
+		t.Error("indefinite-hold report should remain enabled when only nudge_cooldown is set")
+	}
+	if cfg.StallWatch.IndefiniteHoldAgeThreshold != DefaultIndefiniteHoldAgeThreshold {
+		t.Errorf("age threshold = %v, want default %v",
+			cfg.StallWatch.IndefiniteHoldAgeThreshold, DefaultIndefiniteHoldAgeThreshold)
+	}
+}
+
 // TestBlockedReminderConfigFile pins the three knobs through the flat-TOML
 // parser, including the two values a naive merge would eat: an explicit
 // `false`, and a NEGATIVE max-notices, which is the documented spelling of "no

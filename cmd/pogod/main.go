@@ -2068,7 +2068,7 @@ Flags:
 			// polecat is already doing.
 			Workers: newStallWorkers(agentRegistry),
 		})
-		log.Printf("pogod: stall watcher enabled (agent=%s item_age=%s mail_age=%s max_mail=%d cooldown=%s fallback_cap=%d priority_wake=%t wake_delay=%s wake_cooldown=%s fast_priorities=%s non_dispatchable=%s)",
+		log.Printf("pogod: stall watcher enabled (agent=%s item_age=%s mail_age=%s max_mail=%d cooldown=%s fallback_cap=%d priority_wake=%t wake_delay=%s wake_cooldown=%s fast_priorities=%s non_dispatchable=%s indefinite_hold=%t hold_age=%s hold_cooldown=%s)",
 			cfg.StallWatch.Agent, cfg.StallWatch.UnclaimedItemAgeThreshold,
 			cfg.StallWatch.UnreadMailAgeThreshold, cfg.StallWatch.MaxUnreadMailCount,
 			cfg.StallWatch.NudgeCooldown,
@@ -2084,7 +2084,16 @@ Flags:
 			// understate what this daemon enforces — an operator reading the
 			// startup line to find out what gates would read a false answer.
 			strings.Join(cfg.StallWatch.NonDispatchableAssignees, ",")+
-				","+config.BlockedAssigneePrefix+"<agent>")
+				","+config.BlockedAssigneePrefix+"<agent>",
+			// Printed because this reader's own finding applies to itself: an
+			// indefinite hold is invisible when nothing reads it, and a reader
+			// that is off is invisible in exactly the same way. Its events fire
+			// only when something is held, so "no indefinite_hold events" and
+			// "the report is disarmed" are otherwise the same observation
+			// (mg-f398). This line separates them at startup.
+			cfg.StallWatch.IndefiniteHoldReportEnabled,
+			cfg.StallWatch.IndefiniteHoldAgeThreshold,
+			cfg.StallWatch.IndefiniteHoldReportCooldown)
 	}
 
 	// Build the drift-check runner (mg-345b): the DETECTION backstop that rides

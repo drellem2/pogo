@@ -5027,7 +5027,6 @@ func TestPromptsTeachHoldInstrumentByReleaseCondition(t *testing.T) {
 		// The sentence that was already shipped and unread — the whole lesson
 		// in one line. It predates the failure it describes.
 		"parking buys silence, not disappearance",
-		"nothing ages a parked item back into the alert channel",
 		// Why pogod's blindness must stay: one predicate, two enforcement
 		// points. This is the reason a park-sweeper is the wrong answer.
 		"`config.IsDispatchGated` is one predicate with two enforcement points",
@@ -5062,10 +5061,38 @@ func TestPromptsTeachHoldInstrumentByReleaseCondition(t *testing.T) {
 		// The exclusion mayor asked for: an intentional silence must not become
 		// noise. Without this a later reader "fixes" the asymmetry.
 		"deliberately excluded from the reminder",
+		// mg-f398. These sit immediately next to "do not file a park-sweeper"
+		// for the same reason the mg-3844 strings above do: that sentence
+		// without them reads as forbidding the reporter too, and the next reader
+		// re-derives the boundary — which is what mg-f398 itself was.
+		"is NOT that sweeper either",
+		// The reporter's whole contract, and the thing a later edit is most
+		// likely to break by "improving" it into something useful.
+		"reads no item text",
+		// The honest caveat on the mg-4798 premise. A reader told sight is safe
+		// is owed the branch where the spawn gate does not refuse.
+		"fails open",
+		// The circular release condition, AND the reason it is not the repair.
+		// The second half is load-bearing: a rule against self-referential
+		// wording would have shipped, felt like a fix, and left the mechanism
+		// untouched.
+		"Do not write a release condition that names this item's own selection",
+		"The circularity explained 21 cases and caused none of them.",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("mayor.md: missing hold doctrine %q", want)
 		}
+	}
+
+	// The claim the park row USED to make: "nothing ages a parked item back into
+	// the alert channel". It was true when it was written and it is the archeology
+	// trap the mg-3844 block below guards against, one row up — since mg-f398 a
+	// daily indefinite-hold digest names every park older than a day. Its POINT
+	// survives and is still in the file ("say why in the body"), because the
+	// digest reports the fact and age of a hold and never its reason.
+	if strings.Contains(body, "nothing ages a parked item back into the alert channel") {
+		t.Error("mayor.md: still claims nothing ages a parked item into the alert channel; " +
+			"mg-f398 shipped the indefinite-hold report")
 	}
 
 	// The reminder's operator-facing facts, which mayor.md owns because the

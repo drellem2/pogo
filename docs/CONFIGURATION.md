@@ -318,7 +318,80 @@ priority_wake_enabled = true            # default true
 high_priority_wake_delay = "30s"        # min age before a high-priority item wakes
 high_priority_wake_cooldown = "3m"      # gap before the 2nd notice about an item
 fast_priorities = ["high"]              # Priority values that trigger the wake
+
+# Indefinite-hold report (mg-f398): a read-only daily digest of holds that
+# nothing scheduled will ever open. See "A hold with no driver" below.
+indefinite_hold_report_enabled = true   # default true
+indefinite_hold_age_threshold = "24h"   # min age before a hold is reported
+indefinite_hold_report_cooldown = "24h" # gap before the same hold is named again
 ```
+
+### A hold with no driver is invisible
+
+`snooze` and `depends` are holds with a driver: mg's `*/15` sweep evaluates them
+and promotes what has opened. `parked` and `human` have none — nothing scheduled
+ever evaluates their release condition, so an indefinite hold persists until a
+person happens to look.
+
+On 2026-08-10, 22 items were parked under a token-budget cap and released 2.5
+days later, only because a coordinator happened to trace one ticket's park reason
+while looking at something else. 21 of them carried a *circular* release
+condition ("clear `parked` when the constraint lifts and this item is selected
+for work" — `parked` is the state that removes an item from selection). The 22nd
+did not: its condition named an event entirely outside itself and was
+well-formed in every way, and it stranded for exactly as long. **The circularity
+explained 21 cases and caused none of them.** There was no reader.
+
+`indefinite_hold_report_enabled` adds one. Once a gated item has sat past
+`indefinite_hold_age_threshold`, the coordinator receives a digest naming every
+such item and how long each has been held, repeating every
+`indefinite_hold_report_cooldown`.
+
+**It is a reader, not a release path**, and every clause of that is deliberate:
+
+- It **releases nothing** and **writes no field** on any item. Clearing a hold
+  stays a coordinator/human judgement.
+- It **reads no item text** — no title, no body, no release condition. It reports
+  the *fact and age* of a hold and never its meaning. In particular there is no
+  keyword sniff for "until"/"after" in a title: that rots on the next phrasing
+  and fires on rows that are already right.
+- It acquires **no dispatch capability**. Since mg-4798 the gate is enforced at
+  the spawn point (`config.IsDispatchGated`, checked by
+  `agent.MGDispatchGate`), so enumerating gated items confers no ability to
+  dispatch one. One caveat worth knowing when weighing that: the spawn gate
+  **fails open** on a store it cannot read — it logs `dispatching WITHOUT the
+  assignee gate` and proceeds. That is pre-existing and a read-only reporter
+  dispatches nothing under any branch, but the refusal is not unconditional.
+
+Membership is a **rule**, not a list: everything `IsDispatchGated` holds by
+assignee, minus the `blocked:<agent>` shape, which already has a reader (the
+blocked-reminder tells the named agent a decision is owed). By default that is
+`parked` and `human`, and a gate value added to `non_dispatchable_assignees`
+later gets a reader for free.
+
+Two deliberate differences from the blocked-reminder:
+
+- **No notice cap.** The blocked-reminder stops after four because nagging an
+  agent who has decided to wait is noise. Here the *silence* is the defect, so a
+  cap would restore it. The cost is bounded by shape instead — one digest naming
+  every held item, so a permanent hold is one line per day rather than a mail of
+  its own.
+- **The cadence is flat, not escalating.** `repeat_backoff_cap` (4h) is below
+  this base (24h), so `repeatCooldown` returns the base unchanged. Raising the
+  cap above 24h makes the digest double its interval instead, which is
+  defensible for a weeks-old hold but should be a decision rather than a
+  surprise.
+
+Age is measured from the work item file's mtime, which is the store's only age
+signal for a held item and a **conservative** one: an unrelated body edit moves
+it, so a reported age can understate how long the hold has been in place. It
+never overstates it. An item whose file cannot be stat'd is reported with
+`age UNKNOWN` rather than dropped or given arithmetic on the zero time.
+
+pogod's startup line prints `indefinite_hold=`, `hold_age=` and `hold_cooldown=`,
+because the report emits events only when something is held — so "no
+`indefinite_hold` events" and "the report is disarmed" are otherwise the same
+observation.
 
 ### Repeat suppression is per item, and it backs off
 
