@@ -1100,6 +1100,18 @@ func (r *Refinery) runQualityGates(ctx context.Context, wtDir, repoPath string, 
 			if hre := newHostResourceError(gate, output, wtDir, err); hre != nil {
 				return allOutput.String(), ran, hre
 			}
+			// A gate KILLED BY A SIGNAL is returned as-is, ahead of the summary
+			// below, for the same reason the host-resource error is (mg-0502).
+			// The summary names the packages and tests the output was in the
+			// middle of when the signal landed, and on a kill those are not
+			// findings — they are whatever the gate happened to be doing. A
+			// headline reading `./build.sh failed [cmd/pogo, +46 more]` in front
+			// of "this is not a verdict" points the reader at the packages,
+			// which is the accusation this ticket exists to remove.
+			var sigErr *gateSignalError
+			if errors.As(err, &sigErr) {
+				return allOutput.String(), ran, sigErr
+			}
 			// Name what failed INSIDE the gate. `./build.sh failed: exit status 1`
 			// is the sentence that travels — onto the MR, into `pogo refinery
 			// show`, into what a polecat is told about its branch — and it names

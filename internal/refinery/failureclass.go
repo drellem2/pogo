@@ -102,8 +102,14 @@ const (
 	// measured reasons the neighbouring conditions are not in it.
 	ClassHost FailureClass = "host"
 	// ClassIndeterminate marks a gate that was KILLED before it returned a
-	// verdict — it timed out. It sits deliberately between the two classes
-	// above and must not be folded into either (mg-e565).
+	// verdict — it timed out (mg-e565), or a signal from outside the refinery
+	// stopped it (mg-0502). It sits deliberately between the two classes above
+	// and must not be folded into either.
+	//
+	// The two kills reach it by different routes and carry different remedies —
+	// one re-run for a signal, check the host before re-running for a timeout —
+	// but the fact they establish about the branch is identically nothing, which
+	// is what a class names.
 	//
 	// It is not ClassDefect: the gate never finished, so it has no opinion about
 	// the tree, and the class that means "a fix is warranted" is a claim the
@@ -157,10 +163,19 @@ func (c FailureClass) TriageNote() string {
 			"Do NOT dispatch a fix, and do NOT resubmit before the resource is freed — every gate on this host fails " +
 			"the same way until it is."
 	case ClassIndeterminate:
-		return "INDETERMINATE — the gate was KILLED at its timeout before it returned a verdict. " +
-			"It did not clear this branch and it did not condemn it. Read the per-layer signals in " +
-			"the error below, which may point different ways, before reacting. Do NOT dispatch a fix " +
-			"on this alone, and do NOT resubmit unchanged without checking the host first."
+		// The note must not name a timeout as THE cause: a gate killed by an
+		// outside signal lands here too, and a note that says "at its timeout"
+		// is as false for that as "returned a verdict" was (mg-0502).
+		return "INDETERMINATE — the gate was KILLED before it returned a verdict, either at its timeout " +
+			"or by a signal from outside the refinery. It did not clear this branch and it did not " +
+			// "the per-layer signals" is deliberately NOT promised here: a timeout
+			// carries them and a signal kill does not (the process is already gone
+			// by the time Wait returns, so sampling it would report an absence as a
+			// measurement). A note that promises evidence one of its two cases
+			// cannot supply is this ticket's own defect, one level up.
+			"condemn it. Read the error below — it names which kill this was, what was observed, and " +
+			"what re-running would and would not establish. Do NOT dispatch a fix on this alone, and do " +
+			"NOT resubmit unchanged without checking the host first."
 	case ClassUnclassified:
 		return "UNCLASSIFIED — the refinery could not establish which class this is. Read the raw error below before reacting."
 	}
@@ -458,6 +473,36 @@ func classifyFailure(stage string, raw string, err error) disposition {
 				"NOT a finding against the branch, and it is not a clearance either. It is not retried " +
 				"automatically because another attempt costs a full timeout of the merge slot and " +
 				"cannot answer the question; the per-layer signals in the error say what was observed",
+		}
+	}
+
+	// A gate STOPPED BY A SIGNAL is judged before the stage table for the same
+	// reason a timeout is, and it is a distinct condition rather than a variant
+	// of one (mg-0502). A timeout kill is the refinery's own deadline; this is a
+	// gate the refinery did NOT kill, that died anyway — measured once as
+	// `signal: terminated` at 18.84s against a 60m bound, classified DEFECT with
+	// "the build gate ran on this tree and returned a verdict". It returned
+	// nothing: a signal is not an exit status.
+	//
+	// It shares ClassIndeterminate with the timeout because the honest reading
+	// is the same one — the run was cut short and the question is open — and
+	// because a gate CAN signal its own process group, so clearing the branch
+	// would be mg-e565's error in the opposite direction. What differs is the
+	// reason and the remedy: a timeout re-run costs another full timeout and
+	// answers nothing, while a signal kill is not reproduced by re-running, so
+	// one deliberate re-run is the instruction here.
+	var sigErr *gateSignalError
+	if errors.As(err, &sigErr) {
+		return disposition{
+			Class:     ClassIndeterminate,
+			Retryable: false,
+			Signal:    "gate-signal " + signalName(sigErr.Signal) + " stage=" + stage,
+			Reason: "the gate was killed by " + signalName(sigErr.Signal) + " and never reached an exit " +
+				"status, so it never returned a verdict — this is NOT a finding against the branch, and it " +
+				"is not a clearance either. It is not retried AUTOMATICALLY because a gate that signals its " +
+				"own process group would be re-killed on every attempt; but unlike a red gate this is not " +
+				"reproduced by re-running, so RE-RUN IT ONCE — the error names which sources the evidence " +
+				"rules out",
 		}
 	}
 

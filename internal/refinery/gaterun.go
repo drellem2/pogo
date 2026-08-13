@@ -242,6 +242,35 @@ func runGate(ctx context.Context, wtDir, command string, timeout time.Duration, 
 		return output, fmt.Errorf("gate %q killed by cancellation after %s: %w",
 			command, roundDur(time.Since(start)), errCancelRequested)
 	}
+	// A gate the refinery did not kill, that died of a signal anyway (mg-0502).
+	//
+	// It comes LAST of the three, after both of the refinery's own kill paths
+	// have had their say, and it is additionally guarded on ctx.Err() == nil —
+	// so whatever reaches here was signalled by something outside this process.
+	// That ordering is what lets the report say the deadline and the
+	// cancellation are ruled out: they are ruled out by construction, not by a
+	// guess about the signal number.
+	//
+	// Without this, os/exec's error is the bare string `signal: terminated`,
+	// which arrives at the classifier looking exactly like any other gate
+	// failure and comes out DEFECT with "the gate ran on this tree and returned
+	// a verdict" — a sentence about an event that did not happen.
+	if err != nil && ctx.Err() == nil {
+		if sig, killed := signalThatKilled(err); killed {
+			silentFor, everSpoke := w.lastOutputAge(time.Now())
+			return output, &gateSignalError{
+				Gate:        command,
+				Signal:      sig,
+				Elapsed:     time.Since(start),
+				Timeout:     timeout,
+				OutputLines: w.outputLines(),
+				SilentFor:   silentFor,
+				EverSpoke:   everSpoke,
+				Contention:  w.contention(),
+				Err:         err,
+			}
+		}
+	}
 	return output, err
 }
 
