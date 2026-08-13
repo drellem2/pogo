@@ -505,6 +505,116 @@ func TestPreservedWorktreeNoticeRefusesDispatchAtItsWorkItem(t *testing.T) {
 	}
 }
 
+// TestPreservationNoticesPointAtTheStandingList is mg-f4c0's control at the
+// notice layer.
+//
+// This mail fires ONCE, into the middle of other traffic, and is never
+// repeated. That is half of why the retained population grew from six trees to
+// twenty-three with nobody reading it; the other half was that no list existed
+// to point at. One does now, and a one-shot notice that does not name it leaves
+// the reader with `ls ~/.pogo/polecats` exactly as before.
+//
+// It must also state the blast radius of the reclaim command it recommends,
+// which is the reason a careful reader does nothing. `pogo gc --repo=<repo>
+// --apply --force` is repo-scoped and forced: it takes every eligible retained
+// tree in the repository, not the one this notice is about. The alternative to
+// saying so is not "they run it" — it is "they correctly decline to run it, and
+// the tree stays forever."
+//
+// Both retention outcomes carry it, because both produce a pinned tree.
+func TestPreservationNoticesPointAtTheStandingList(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		outcome worktreeCleanupOutcome
+		setup   func(t *testing.T, repo, wt string)
+	}{
+		{
+			name:    "preserved",
+			outcome: worktreePreserved,
+			setup: func(t *testing.T, repo, wt string) {
+				if err := os.WriteFile(filepath.Join(wt, "wip.go"), []byte("package x\n"), 0644); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name:    "undetermined",
+			outcome: worktreeUndetermined,
+			setup: func(t *testing.T, repo, wt string) {
+				if err := os.WriteFile(filepath.Join(wt, ".git"), []byte("gitdir: /nonexistent\n"), 0644); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo, wt := wtRepo(t)
+			tc.setup(t, repo, wt)
+
+			var gotBody string
+			mail := func(to, from, subject, body string) error {
+				gotBody = body
+				return nil
+			}
+			if got := cleanupAgentWorktree(catAgent("cat1", "mg-f4c0", repo, wt), "mayor", mail); got != tc.outcome {
+				t.Fatalf("outcome = %v, want %v", got, tc.outcome)
+			}
+
+			if !strings.Contains(gotBody, "pogo gc --list-preserved") {
+				t.Errorf("a notice that fires once must name the standing list, or the population "+
+					"is again only visible via `ls`. Got:\n%s", gotBody)
+			}
+			if !strings.Contains(gotBody, "fires ONCE") {
+				t.Errorf("the notice must say it will not be repeated — a reader who expects a "+
+					"re-raise defers, and nothing re-raises. Got:\n%s", gotBody)
+			}
+			if !strings.Contains(gotBody, "REPO-SCOPED AND FORCED") {
+				t.Errorf("the notice must state that the reclaim command it just gave acts on every "+
+					"eligible tree in the repo, not on this one. Got:\n%s", gotBody)
+			}
+			if !strings.Contains(gotBody, repo) {
+				t.Errorf("the blast-radius sentence must name the repository it covers, got:\n%s", gotBody)
+			}
+		})
+	}
+}
+
+// TestPreservedDispatchWarningDoesNotClaimTheWorkIsIrreplaceable corrects a
+// false sentence in an otherwise correct alarm (mg-f4c0).
+//
+// The warning asserted that "a worker sent at this item re-derives it from
+// scratch". That is true of `qbe37`, whose tree held a 1450-line package that
+// existed nowhere else. It is FALSE of `p687f`, whose seven modified files were
+// regenerated suite output a re-run reproduces in seconds — and that shape is
+// systematic rather than exotic, because one repo's own gate leaves tracked
+// files modified on every merge, so every polecat working it preserves a tree.
+//
+// The fix is not to soften the prohibition, which is the only guard defined
+// over uncommitted trees and caught a real 1450-line loss. It is to stop
+// asserting something the daemon never established. What IS established is that
+// the tree is the only place the answer lives, so the prohibition holds until
+// somebody reads it.
+func TestPreservedDispatchWarningDoesNotClaimTheWorkIsIrreplaceable(t *testing.T) {
+	body := dispatchWarning("mg-f4c0", "preserved")
+
+	if !strings.Contains(body, "DO NOT DISPATCH A WORKER AT mg-f4c0") {
+		t.Fatalf("the prohibition must survive intact — it is the only guard defined over an "+
+			"uncommitted tree. Got:\n%s", body)
+	}
+	if strings.Contains(body, "re-derives it from scratch") {
+		t.Errorf("the notice must not claim the work would be re-derived; that was measured false "+
+			"for a tree of regenerated outputs. Got:\n%s", body)
+	}
+	// Both recorded shapes are named, so the reader knows the population
+	// contains each and that neither is diagnosable from this mail.
+	for _, want := range []string{"qbe37", "p687f", "reading the files"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the notice must name both outcomes and where the answer lives (missing %q), got:\n%s",
+				want, body)
+		}
+	}
+}
+
 // TestPreservedWorktreeNoticeWithoutAWorkItemSaysSo is the negative arm, and it
 // is the one that keeps this fix from re-committing the defect it repairs.
 //

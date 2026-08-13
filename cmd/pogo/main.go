@@ -3941,6 +3941,7 @@ The path is resolved to an absolute path and the git root is discovered automati
 	var gcRepo string
 	var gcApply bool
 	var gcForce bool
+	var gcListPreserved bool
 	var cmdGC = &cobra.Command{
 		Use:   "gc",
 		Short: "Garbage-collect stale polecat branches and leaked worktrees",
@@ -4000,12 +4001,42 @@ The report says how long each kept tree has been untouched so the decision is
 yours to make, and cheap to make. That is the whole use gc makes of a file
 timestamp: it informs you, and it decides nothing.
 
-By default gc only reports what it would do; pass --apply to make changes.`,
+By default gc only reports what it would do; pass --apply to make changes.
+
+--list-preserved does none of that. It LISTS the worktrees currently being
+retained — the population the rules above create and nothing consumes — across
+every repository at once, since preserved trees accumulate wherever the fleet
+works and a repo-scoped listing would report a fraction of it while looking
+complete. Pass --repo explicitly to narrow it to one repository.
+
+The listing reports facts and no verdict: whose tree it is, which branch it
+pins, its work item and that item's state, how long it has gone untouched, and
+every uncommitted path in it split into modified and UNTRACKED — the second
+being the half that exists on no branch, in no stash and on no remote. It says
+nothing about whether a tree may be reclaimed, because that needs someone to
+read the files. It also says, per repository, exactly which trees a single
+"pogo gc --repo=... --apply --force" would take: that command is repo-scoped and
+forced, so it acts on every eligible retained tree at once and not on the one
+you inspected, and it does NOT touch a tree whose work item is still in flight.
+
+--list-preserved never changes anything, so --apply and --force do not apply
+to it.`,
 		Args: cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
 			repo, err := filepath.Abs(gcRepo)
 			if err != nil {
 				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+			}
+			if gcListPreserved {
+				// --repo defaults to "." and would otherwise silently narrow a
+				// listing whose whole value is that it spans repositories.
+				// Only an EXPLICIT --repo filters.
+				filter := ""
+				if cmd.Flags().Changed("repo") {
+					filter = repo
+				}
+				runGCListPreserved(jsonOutput, filter)
+				return
 			}
 			// Exclude live polecats from the sweep.
 			live, notes, lerr := gcLivePolecats()
@@ -4049,6 +4080,8 @@ By default gc only reports what it would do; pass --apply to make changes.`,
 	cmdGC.Flags().BoolVar(&gcApply, "apply", false, "actually delete (default: dry run)")
 	cmdGC.Flags().BoolVar(&gcForce, "force", false,
 		"also reclaim worktrees holding uncommitted work (DISCARDS that work)")
+	cmdGC.Flags().BoolVar(&gcListPreserved, "list-preserved", false,
+		"list the retained worktrees across all repos and what is in them; change nothing")
 
 	var rootCmd = &cobra.Command{
 		Use:     "pogo",

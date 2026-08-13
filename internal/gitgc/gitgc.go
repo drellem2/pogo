@@ -19,6 +19,7 @@
 package gitgc
 
 import (
+	"bytes"
 	"fmt"
 	"io/fs"
 	"os"
@@ -644,6 +645,29 @@ func (o WorktreeOwner) String() string {
 // it, but so is any transient failure — lock contention, an I/O blip, EACCES,
 // an interrupted call. Callers must decide what an unclassifiable tree
 // deserves; RemoveWorktree decides on ownership (see its doc comment).
+//
+// # STDOUT ONLY. stderr is not the porcelain list (mg-f4c0)
+//
+// This used to read git's COMBINED output, and `git status --porcelain` writes
+// warnings to stderr while exiting 0 — an unreadable subdirectory is the common
+// one. Every such warning was then counted as a dirty entry:
+//
+//	$ git -C ~/.pogo/polecats/ca397 status --porcelain 2>&1
+//	warning: could not open directory 'code/species_7d75/noread/': Permission denied
+//	?? code/candidate_adjudication_a397/
+//
+// gc reported that tree as "2 uncommitted changes (1 modified, 1 untracked)"
+// when it holds one untracked path and a warning; the "modified" file it named
+// was the warning text. The failure is worse than a wrong count, because the
+// guard above acts on it: a tree whose ONLY status output is such a warning
+// reads as dirty, is preserved, pins its branch, and is never reclaimed — a
+// silent producer of exactly the retained-worktree population mg-f4c0 exists to
+// consume. It also mis-splits the count that decides urgency, since a warning
+// has no `??` prefix and so lands in the tracked-changes half.
+//
+// stderr is still captured, and still reported when git FAILS — that is where
+// "which way did git break" comes from, and cannot-tell needs it. What it is
+// not is part of the file list.
 func WorktreeDirty(worktreeDir string) (bool, []string, error) {
 	if worktreeDir == "" {
 		return false, nil, fmt.Errorf("empty worktree path")
@@ -651,12 +675,15 @@ func WorktreeDirty(worktreeDir string) (bool, []string, error) {
 	if _, err := os.Stat(worktreeDir); err != nil {
 		return false, nil, fmt.Errorf("stat worktree %s: %w", worktreeDir, err)
 	}
-	out, err := git(worktreeDir, "status", "--porcelain")
-	if err != nil {
-		return false, nil, fmt.Errorf("status %s: %w", worktreeDir, err)
+	cmd := exec.Command("git", "-C", worktreeDir, "status", "--porcelain")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		return false, nil, fmt.Errorf("status %s: %w: %s",
+			worktreeDir, err, strings.TrimSpace(stderr.String()))
 	}
 	var files []string
-	for _, line := range strings.Split(string(out), "\n") {
+	for _, line := range strings.Split(stdout.String(), "\n") {
 		if line = strings.TrimSpace(line); line != "" {
 			files = append(files, line)
 		}

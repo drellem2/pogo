@@ -596,6 +596,19 @@ pogo gc --repo /path/to/repo            # preview (dry run)
 pogo gc --repo /path/to/repo --apply    # delete stale branches + worktrees
 ```
 
+A worktree holding uncommitted work is *kept* rather than reclaimed, and stays
+kept until somebody decides otherwise. To see the standing population of those —
+across every repo at once, with the uncommitted paths in each split into
+modified and untracked — use:
+
+```bash
+pogo gc --list-preserved
+```
+
+It changes nothing. See
+[`docs/polecat-worktrees.md`](polecat-worktrees.md#the-retained-population-pogo-gc---list-preserved-mg-f4c0)
+for what it reports and, more importantly, what it deliberately does not.
+
 ## Putting it all together
 
 The three knobs above compose. A non-coding workflow looks like:

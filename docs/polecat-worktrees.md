@@ -243,6 +243,88 @@ Where the worktree's contents cannot be listed at all, the same keep says
 `age unknown — the tree could not be listed` rather than omitting the age, which
 would otherwise read as though the tree were fresh.
 
+## The retained population: `pogo gc --list-preserved` (mg-f4c0)
+
+Everything above describes how a tree comes to be **retained**. Nothing above
+describes how one stops being retained, and for a long time nothing did.
+
+pogod preserves a polecat's worktree when it exits holding uncommitted work, and
+every half of that mechanism works: the guard refuses, the coordinator is mailed
+naming the tree and the reclaim command, a `worktree_preserved` event lands on
+the spine. What did not exist was anything on the **read** side. The mail fires
+once into the middle of other traffic and is never repeated; the event is a
+stream, not a population. So the trees accumulated — **six** when this was
+filed, **twenty-three** by the time it was fixed, across four repositories —
+each pinning a branch that cannot be deleted, and each posing a question ("is
+this uncommitted work worth rescuing?") that nobody was assigned to ask. The
+only instrument that could see the population was `ls ~/.pogo/polecats`.
+
+```bash
+pogo gc --list-preserved                 # every repo — this is the point
+pogo gc --list-preserved --repo /path    # narrowed, when you already know
+pogo gc --list-preserved --json          # the full record, nothing capped
+```
+
+It changes nothing, reclaims nothing, and refuses nothing.
+
+**It is rooted at the polecats directory, not at a repo.** `pogo gc` takes one
+`--repo` and reports what it would do there; retained trees accumulate wherever
+the fleet works, so a repo-scoped listing reports a fraction of the population
+while looking complete.
+
+**It reports facts and no verdict, and that restraint is the design.** Per tree:
+the owner, the branch it pins, its work item and that item's state, how long it
+has gone untouched, and every uncommitted path split into modified and
+**untracked**. It does not say whether a tree may be reclaimed.
+
+The reason is a measured one. `~/.pogo/polecats/p687f` held seven modified
+files, all of them `code/**/out_*.txt` — regenerated suite output, a pure
+function of repo state, reproducible in seconds. A reader sampled two of the
+seven, saw only timing churn, and concluded "residue, safe to reclaim"; the
+third file held three new registry entries and a count going 20 → 23. Any
+classifier cheap enough to run over the whole population would have made that
+mistake **systematically** rather than once. Reclaiming is one already-existing
+command and was never the hard part; knowing which of twenty-three trees can
+safely take it is, and that is a question about the files.
+
+**Untracked paths are never truncated in the listing; modified entries are
+capped and the cap announces itself.** A modified tracked file has a committed
+version in the object store. An untracked path is on no branch, in no stash and
+on no remote — the tree is its only copy anywhere on the machine, which is how
+`~/.pogo/polecats/qbe37` came to hold an entire 1450-line package.
+
+**It states the blast radius of the reclaim command, per repository.** `pogo gc
+--repo=<repo> --apply --force` is repo-scoped *and* forced: it acts on every
+eligible retained tree in that repository, not on the one you inspected. That is
+the reason a careful reader does nothing, so the listing groups by repo and
+names which trees a single run would take:
+
+```
+/Users/x/dev/pogo
+  reclaiming ANY of these is `pogo gc --repo=/Users/x/dev/pogo --apply --force`,
+  which is repo-scoped and forced — it takes ALL 8 eligible tree(s) here at once,
+  not the one you inspected, and it DISCARDS whatever is still uncommitted.
+    it would reclaim: 622f, p49b1, p6c90, qbe37, qdb58, t83c5, wda30, z48d8
+    it would NOT touch (work item not concluded): b4b01, c1fcc, c8074, p9d4e
+```
+
+That second line is not decoration. **`--force` is not the whole gate**: the
+sweep checks the owner's ticket state *before* it consults the dirty guard, so
+`--force` overrides the guard and never the state check, and a retained tree
+whose work item is still in flight survives the flag entirely. The column is
+pinned against what `Sweep` actually does with the same inputs, not against a
+restatement of the rule.
+
+A dirty tree whose owner is a **running** polecat is not retained — it is in
+use, and is reported separately so the headline count is the population that
+needs an owner rather than the population that has one. Clean trees and
+non-worktree orphan dirs are counted too, so the listing is a partition of the
+directory rather than a selection out of it.
+
+The preservation notice now names this list, says it will not itself be
+repeated, and states that the reclaim command it recommends is repo-scoped and
+forced.
+
 ## What changes
 
 ### internal/agent/api.go — handleSpawnPolecat

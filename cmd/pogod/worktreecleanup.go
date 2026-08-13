@@ -175,12 +175,13 @@ func cleanupAgentWorktree(
 					"%s"+
 					"Rescue what matters (it is still a live git worktree — `git -C %s status`), "+
 					"then reclaim it with:\n\n  pogo gc --repo=%s --apply --force\n\n"+
+					"%s"+
 					"Until it is reclaimed this worktree keeps its branch checked out, so that "+
 					"branch cannot be deleted — and reclaiming it destroys the only copy of "+
 					"anything still uncommitted.",
 				agentName, worktreeDir, sourceRepo, workItemLine(a.WorkItemID), dwe,
 				dispatchWarning(a.WorkItemID, "preserved"),
-				worktreeDir, sourceRepo)
+				worktreeDir, sourceRepo, standingListNote(sourceRepo))
 			if mErr := mail(coordinator, "pogod", subject, body); mErr != nil {
 				log.Printf("agent %s: failed to mail preserved-worktree notice: %v", agentName, mErr)
 				emitWorktreeNoticeUndelivered(a, coordinator, "preserved", mErr)
@@ -212,11 +213,12 @@ func cleanupAgentWorktree(
 					"%s"+
 					"Inspect it (`ls %s`, `git -C %s status`), rescue anything that matters, then "+
 					"reclaim it with:\n\n  pogo gc --repo=%s --apply --force\n\n"+
+					"%s"+
 					"Until it is reclaimed this worktree keeps its branch checked out, so that "+
 					"branch cannot be deleted.",
 				agentName, worktreeDir, sourceRepo, workItemLine(a.WorkItemID), uwe,
 				dispatchWarning(a.WorkItemID, "undetermined"),
-				worktreeDir, worktreeDir, sourceRepo)
+				worktreeDir, worktreeDir, sourceRepo, standingListNote(sourceRepo))
 			if mErr := mail(coordinator, "pogod", subject, body); mErr != nil {
 				log.Printf("agent %s: failed to mail undetermined-worktree notice: %v", agentName, mErr)
 				emitWorktreeNoticeUndelivered(a, coordinator, "undetermined", mErr)
@@ -292,10 +294,40 @@ func dispatchWarning(workItemID, outcome string) string {
 	}
 	return fmt.Sprintf(
 		"DO NOT DISPATCH A WORKER AT %s. This tree holds work that was never committed, so it is "+
-			"on no branch and no push and a worker sent at this item re-derives it from scratch. "+
+			"on no branch and no push, and NOTHING OUTSIDE THIS TREE CAN TELL YOU WHAT IS IN IT. "+
 			"`~/.pogo/polecats/qbe37` was preserved this way holding an entire 1450-line package "+
-			"that existed in no other location on the machine. %s",
+			"that existed in no other location on the machine; `~/.pogo/polecats/p687f` was "+
+			"preserved holding seven regenerated suite outputs a re-run reproduces in seconds. "+
+			"Both are this same notice. Which one you have is visible only by reading the files, "+
+			"so the prohibition holds until somebody has. %s",
 		workItemID, common)
+}
+
+// standingListNote points a one-shot notice at the standing list (mg-f4c0).
+//
+// THIS NOTICE FIRES ONCE AND IS NEVER REPEATED, which is half of why the
+// retained population grew from six trees to twenty-three with nobody reading
+// it: the mail lands in the middle of other traffic, and after that the only
+// way to see the population was `ls ~/.pogo/polecats`. The other half was that
+// no list existed to point at. One does now, so the notice names it.
+//
+// It also states the blast radius of the reclaim command it just recommended,
+// because that command is the reason a careful reader does nothing. `pogo gc
+// --repo=<repo> --apply --force` is repo-scoped and forced: it acts on every
+// eligible retained tree in the repository, not on the one this notice is
+// about. A reader who inspects the named tree, decides it is safe, and runs the
+// command discards the other trees' work too — so the alternative to saying
+// this is not "they run it", it is "they correctly decline to run it and the
+// tree stays forever."
+func standingListNote(sourceRepo string) string {
+	return fmt.Sprintf(
+		"That command is REPO-SCOPED AND FORCED: it reclaims every eligible retained worktree in "+
+			"%s at once, not just the one named above, and it discards their uncommitted work "+
+			"too. Read the whole population before running it.\n\n"+
+			"This notice fires ONCE and is never repeated. The standing list — every retained "+
+			"worktree on this machine, across all repos, with the uncommitted paths in each split "+
+			"into modified and untracked — is:\n\n  pogo gc --list-preserved\n\n",
+		sourceRepo)
 }
 
 // emitWorktreePreserved puts a RETAINED worktree on the event spine, with the
