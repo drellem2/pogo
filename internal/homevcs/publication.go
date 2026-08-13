@@ -49,6 +49,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/drellem2/pogo/internal/gitceiling"
 )
 
 // Subject is one directory this host writes agent state into. Label is how a
@@ -145,6 +147,13 @@ type subjectGroup struct {
 // noise burying the two verdicts that matter. The enclosing subject
 // ($POGO_HOME) resolves fine, since the ceiling never excludes the working
 // directory itself, so it answers for all of them.
+//
+// WHAT IT IS NOT. This is de-duplication that happens to route around the
+// ceiling; it is not the fix for the ceiling, and reading it as one is how the
+// next check re-derives the workaround or fails to notice it needs one
+// (mg-490c). gitceiling.ResolveWorkTree is the fix, and AuditPublication calls
+// it — so a subject that grouping misses is answered honestly rather than
+// reported as versioned by nothing.
 func enclose(subjects []Subject) []subjectGroup {
 	// Cleaned first: a trailing slash on one of two otherwise identical paths
 	// would defeat the containment comparison silently.
@@ -203,20 +212,20 @@ func AuditPublication(ctx context.Context, subjects []Subject, lookup Visibility
 			rep.Undecided = append(rep.Undecided, g.Label+" ("+g.Dir+") could not be read: "+err.Error())
 			continue
 		}
-		out, err := gitOut(ctx, g.Dir, "rev-parse", "--show-toplevel")
+		// Via the shared resolver rather than a bare `rev-parse`, so a subject
+		// that is NOT folded into an enclosing one still gets an honest answer
+		// instead of git's ceiling refusal (mg-490c). enclose covers today's
+		// seventeen; this covers the eighteenth, whoever adds it.
+		w, err := gitceiling.ResolveWorkTree(ctx, g.Dir)
 		if err != nil {
-			if isNotARepo(err) {
-				rep.Unversioned = append(rep.Unversioned, g.Label+" ("+g.Dir+")")
-				continue
-			}
 			rep.Undecided = append(rep.Undecided, g.Label+" ("+g.Dir+"): "+err.Error())
 			continue
 		}
-		top := strings.TrimSpace(out)
-		if top == "" {
-			rep.Undecided = append(rep.Undecided, g.Label+" ("+g.Dir+"): git named no work tree root")
+		if !w.Versioned() {
+			rep.Unversioned = append(rep.Unversioned, g.Label+" ("+g.Dir+")")
 			continue
 		}
+		top := w.Toplevel
 		if r, seen := byTop[top]; seen {
 			r.Holds = append(r.Holds, holds...)
 			continue
