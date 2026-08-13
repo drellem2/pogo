@@ -225,16 +225,20 @@ func RecentFires(logPath string, now time.Time, window time.Duration) Recent {
 	agents := map[string]bool{}
 	perAgentSchedules := map[string]map[string]bool{}
 	byAgent := map[string]AgentFires{}
+	bySchedule := map[string]ScheduleFires{}
 	for _, ev := range evs {
 		f := byAgent[ev.Agent]
+		key := scheduleKey(ev.Agent, ev.ID)
+		s := bySchedule[key]
 		switch ev.Kind {
 		case FireDelivered:
 			out.Delivered++
-			schedules[ev.Agent+"\x00"+ev.ID] = true
+			schedules[key] = true
 			if ev.Agent != "" {
 				agents[ev.Agent] = true
 			}
 			f.Delivered++
+			s.Delivered++
 			if perAgentSchedules[ev.Agent] == nil {
 				perAgentSchedules[ev.Agent] = map[string]bool{}
 			}
@@ -242,12 +246,18 @@ func RecentFires(logPath string, now time.Time, window time.Duration) Recent {
 		case FireCompleted:
 			out.Completed++
 			f.Completed++
+			s.Completed++
+			if ev.At.After(s.LastCompletedAt) {
+				s.LastCompletedAt = ev.At
+			}
 			if ev.At.After(out.LastCompletedAt) {
 				out.LastCompletedAt = ev.At
 			}
 		}
 		byAgent[ev.Agent] = f
+		bySchedule[key] = s
 	}
+	out.BySchedule = bySchedule
 	for a, ids := range perAgentSchedules {
 		f := byAgent[a]
 		f.Schedules = len(ids)

@@ -836,7 +836,11 @@ The comparison is **cross-agent**, never against a schedule's own history: the m
 - **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent` (always `"pogod"`), `details`
 - **`details` fields:**
   - `deficit_count` (int, required): per-schedule findings — one agent far below its peers
-  - `fleet_count` (int, required): whole cohorts below the floor. Everyone at 40% on the same cadence is a **scheduler or fleet** fault (suspect the ack path, an auth outage, or pogod itself), and reporting it as N per-agent alerts would name N innocent agents and bury the one fact that matters
+  - `fleet_count` (int, required): whole cohorts **dark right now** — delivered fires, nothing completing them, over the trailing `cohort_window`. Everyone at 0% on the same cadence is a **scheduler or fleet** fault (suspect the ack path, an auth outage, or pogod itself), and reporting it as N per-agent alerts would name N innocent agents and bury the one fact that matters. This used to be judged on the LIFETIME median and could not clear: two ended outages on 2026-08-10 held one cohort finding escalated for 61 hours while the fleet was healthy, because a cumulative ratio is monotone in past damage (mg-c232). Its only exits were a counter reset — which hides the signal rather than correcting it — and being ignored
+  - `cohort_window`, `cohort_delivered`, `cohort_completed`, `cohort_rate` (optional): the windowed measurement behind `fleet_count`. Present whenever `fleet_count > 0`. `cohort_rate` is absolute: no median, no peers
+  - `cohort_judged` (array of string, optional): the schedules the cohort rate was measured over — those whose agent was RUNNING for the whole window. "Fires delivered, nothing completed" is also what an ABSENT fleet looks like, so a cohort with too few judged schedules is reported as unmeasured rather than dark
+  - `cohort_blind` (string, optional): why the cohort arm could not judge at all. It fails **closed** into this key rather than falling back to the lifetime median, because a fallback would reinstate the removed trigger on exactly the days the events log is unreadable
+  - `retired_recovered` (int, optional): per-schedule findings the LIFETIME rule raised and the recent window retired — the schedule is below its peers over its history and is completing its fires now. The window is a one-way veto here: it can retire a finding and can never raise one
   - `scanned` (int, required): schedules offered to the detector
   - `eligible` (int, required): how many were actually evaluated. The gap between `scanned` and `eligible` is coverage, not health — a schedule with a fresh counter, too few fires, or no comparable peers is **unjudged**
   - `schedules` (array of string, required): the schedule ids named, so the log answers "which one" without opening the mail. Cohort findings appear as `cohort:<kind>/<cadence>`
@@ -879,9 +883,13 @@ Emitted on **every** clear sample rather than only on transitions. `interval` is
   - `skipped_few_fires` (int, required): under `min_fires` — a handful of fires is not a sample. This is the gate that silences a storm of freshly-spawned polecats, and it does so by fire count rather than by understanding the mechanism
   - `skipped_not_recurring` (int, required): one-shot or unparseable cron, so no rate is well-defined
   - `skipped_no_peers` (int, required): nothing comparable to compare against, or a cohort in which nobody acks. **Unjudged, not healthy** — and note that an agent alone on its cadence (the mayor, on 30m) is permanently in this bucket
+  - `blackout_judged` (bool, required) / `blackout_blind` (string, optional): whether the ABSOLUTE fleet arm looked. A clear from the peer arm alone is the reading a dead fleet produces
+  - `cohort_judged` (bool, required) / `cohort_blind` (string, optional): the same pair for the cohort arm, which judges the same window since mg-c232 and therefore goes blind in the same circumstances
+  - `cohort_not_measured` (array of string, optional): cohorts with enough ack-aware members to judge but too little traffic inside the window — a daily-cadence cohort inside a 3-hour window, most obviously. **Unjudged, not healthy**
+  - `retired_recovered` (int, optional): lifetime findings the recent window retired. This is the number that makes a NEWLY quiet report readable as "the fleet recovered" rather than as "the detector stopped looking"
 
 ```json
-{"schema_version":1,"timestamp":"2026-07-29T22:30:00.000000000Z","event_type":"ack_watch_clear","agent":"pogod","details":{"scanned":41,"eligible":3,"skipped_fresh":6,"skipped_few_fires":29,"skipped_not_recurring":1,"skipped_no_peers":2}}
+{"schema_version":1,"timestamp":"2026-07-29T22:30:00.000000000Z","event_type":"ack_watch_clear","agent":"pogod","details":{"scanned":41,"eligible":3,"skipped_fresh":6,"skipped_few_fires":29,"skipped_not_recurring":1,"skipped_no_peers":2,"blackout_judged":true,"cohort_judged":true}}
 ```
 
 #### `ack_watch_error`

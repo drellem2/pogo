@@ -322,6 +322,21 @@ func (w *Watcher) sample(now time.Time) {
 		if rep.BlackoutBlind != "" {
 			clear["blackout_blind"] = rep.BlackoutBlind
 		}
+		// The cohort arm judges on the same window since mg-c232, so it has the
+		// same blind/calm ambiguity and gets the same treatment. retired_recovered
+		// is the count of lifetime findings the window retired — the number that
+		// makes a NEWLY quiet report readable as "the fleet recovered" rather than
+		// as "the detector stopped looking".
+		clear["cohort_judged"] = rep.FleetBlind == ""
+		if rep.FleetBlind != "" {
+			clear["cohort_blind"] = rep.FleetBlind
+		}
+		if len(rep.FleetNotMeasured) > 0 {
+			clear["cohort_not_measured"] = rep.FleetNotMeasured
+		}
+		if rep.RetiredRecovered > 0 {
+			clear["retired_recovered"] = rep.RetiredRecovered
+		}
 		w.emit(events.Event{EventType: "ack_watch_clear", Agent: "pogod", Details: clear})
 		return
 	}
@@ -363,6 +378,24 @@ func (w *Watcher) sample(now time.Time) {
 	}
 	if rep.BlackoutBlind != "" {
 		details["blackout_blind"] = rep.BlackoutBlind
+	}
+	if rep.FleetBlind != "" {
+		details["cohort_blind"] = rep.FleetBlind
+	}
+	if rep.RetiredRecovered > 0 {
+		details["retired_recovered"] = rep.RetiredRecovered
+	}
+	if len(rep.Fleet) > 0 {
+		// The WINDOWED numbers, not the lifetime median. `fleet_count: 1` was in
+		// every one of the 67 firings this arm ever produced and said nothing
+		// about whether the cohort was dark now — which is how a 61-hour
+		// escalation looked identical to a live outage (mg-c232).
+		f := rep.Fleet[0]
+		details["cohort_window"] = f.Window
+		details["cohort_delivered"] = f.Delivered
+		details["cohort_completed"] = f.Completed
+		details["cohort_rate"] = f.Rate
+		details["cohort_judged"] = f.Judged
 	}
 	if blackout {
 		bo := rep.Blackout

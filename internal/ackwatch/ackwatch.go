@@ -168,7 +168,7 @@
 // with legitimately different cadences and turn lengths. Two arms, two failure
 // modes, neither one sufficient.
 //
-// # Why the blackout arm reads EVENTS rather than the counters
+// # Why the windowed arms read EVENTS rather than the counters
 //
 // Report.Fleet already reported a whole cohort below the floor, and it FIRED
 // during this outage (`fleet_count: 1` in every firing that day). It was still
@@ -189,6 +189,45 @@
 // Detect stays pure. When the caller cannot measure it, that is recorded and
 // rendered rather than read as calm — a blind arm and a quiet arm must never be
 // the same observation.
+//
+// # Reason 1 was never fixed for the cohort arm, and cost 61 hours (mg-c232)
+//
+// The paragraph above diagnosed Report.Fleet correctly and then left it running
+// on the diagnosed instrument. It kept triggering on the lifetime median, and a
+// lifetime ratio is monotone in past damage: on 2026-08-10 two outages that had
+// ALREADY ENDED — the crew stopped 01:56-12:40Z, a network loss 14:24-17:15Z —
+// put ~80 dead fires into every 10-minute schedule. The cohort median went
+// 40% -> 36% -> 26% over a day the fleet spent recovering, and "1 whole cohort
+// below the completion floor" stayed escalated to the mayor for 61 hours. Its
+// only exits were a counter reset (which hides the signal rather than clearing
+// it) and being ignored.
+//
+// So detectCohort now judges the same statistic the blackout arm does — absolute
+// completion rate over Params.BlackoutWindow, behind the same liveness gate —
+// restricted to one cohort's schedules. Swept against this fleet's real events
+// log for 2026-08-01..13, with the liveness gate reconstructed from
+// agent_spawned/agent_stopped: 274 judged 30-minute samples, 77 firing, in SIX
+// bounded episodes, every one of which ENDED. The instrument it replaced fired
+// on 67 of 67 samples and ended none of them.
+//
+// The per-schedule peer arm keeps its lifetime ratio, because a lifetime average
+// is what makes turn-length noise cancel (see the arithmetic above: the ratio is
+// an inverted attention gap, and an agent's attention gap moves hourly). It
+// gains a one-way RECENCY VETO instead — see recovered. A window may retire a
+// lifetime finding and may never raise one, so the statistic that is too noisy
+// to trigger on is safe to acquit on.
+//
+// # On suppressing during a known outage
+//
+// mg-c232 asked whether a cohort finding should be suppressed on a recent
+// outage marker, the way stall-watch suppresses on a recent system_wake. It is
+// not wired, and the reason is that windowing subsumes it: an outage that ended
+// leaves the trailing window on its own, within BlackoutWindow, with no list of
+// outage causes to keep current and nothing to go stale. A suppression list
+// would have to name every cause — model API, network, credentials, host sleep —
+// and would fail silently on the first one nobody added. The system_wake and
+// restart suppressions remain, because those describe a distorted MEASUREMENT
+// (replayed fires, zeroed counters) rather than a fault that has ended.
 //
 // # The two false-positive paths this arm has, both measured and both closed
 //
@@ -425,6 +464,15 @@ type Recent struct {
 	// Snapshot.RunningAgents). The totals above are the whole window and are for
 	// reporting; the judgement is made on the running subset.
 	ByAgent map[string]AgentFires `json:"by_agent,omitempty"`
+	// BySchedule breaks the window down per (agent, id), which is the grain the
+	// COHORT arm and the peer arm's recency gate both need: a cohort is a set of
+	// schedules, not a set of agents, and one agent can hold several.
+	//
+	// Keyed by scheduleKey — agent and id joined by a NUL, which no agent name or
+	// schedule id contains. Unexported from JSON for that reason: a NUL inside a
+	// map key is legal Go and hostile output. Every consumer that needs a number
+	// out of here carries it in a finding field instead.
+	BySchedule map[string]ScheduleFires `json:"-"`
 	// LastCompletedAt is the newest completion seen in the window, zero when
 	// there was none. It answers "how long since anything at all worked", which
 	// is the number a person reading the alarm wants first.
@@ -441,6 +489,20 @@ type AgentFires struct {
 	Completed int `json:"completed"`
 	Schedules int `json:"schedules"`
 }
+
+// ScheduleFires is one schedule's share of a window.
+type ScheduleFires struct {
+	Delivered int `json:"delivered"`
+	Completed int `json:"completed"`
+	// LastCompletedAt is the newest completion by this schedule inside the
+	// window, zero when there was none.
+	LastCompletedAt time.Time `json:"last_completed_at,omitempty"`
+}
+
+// scheduleKey is the (agent, id) key used by Recent.BySchedule. NUL-joined
+// because it appears in no agent name and no schedule id, so no pair of
+// distinct schedules can collide onto one key.
+func scheduleKey(agent, id string) string { return agent + "\x00" + id }
 
 // Rate is the windowed completed:delivered ratio, or 0 when nothing was
 // delivered. Absolute: no median, no peers, nothing compared to anything.
@@ -534,6 +596,13 @@ type Params struct {
 	// this is the count that makes "the fleet" true rather than "one wedged
 	// agent with three schedules".
 	BlackoutMinAgents int
+
+	// RecoveryMinFires is how many fires ONE schedule must have been delivered
+	// inside the window before that window is allowed to RETIRE a lifetime peer
+	// finding. See recovered: the window may only quiet a finding, never raise
+	// one, so this floor exists to stop a two-fire window from acquitting a deaf
+	// agent — not to stop a false alarm, which this path cannot produce.
+	RecoveryMinFires int
 }
 
 // Detector defaults. Tuned against the 2026-07-29 observation: peers at ~99%,
@@ -620,6 +689,13 @@ const (
 	// completing is a fleet; one agent holding three schedules is a wedged agent,
 	// which is the peer arm's job and reaches a different recipient.
 	DefaultBlackoutMinAgents = 3
+	// DefaultRecoveryMinFires is 6 — a third of a 3-hour window at the crew's
+	// 10-minute cadence. At the floor it takes 5 completions to retire a finding,
+	// which is well outside what a deaf or spinning agent produces, and it is
+	// deliberately far below MinFires: MinFires guards a LIFETIME ratio against
+	// reading too early, while this guards a decision that can only ever make the
+	// detector quieter.
+	DefaultRecoveryMinFires = 6
 )
 
 // DefaultParams returns the tuned defaults.
@@ -636,6 +712,7 @@ func DefaultParams() Params {
 		BlackoutMinDeliveries: DefaultBlackoutMinDeliveries,
 		BlackoutMinSchedules:  DefaultBlackoutMinSchedules,
 		BlackoutMinAgents:     DefaultBlackoutMinAgents,
+		RecoveryMinFires:      DefaultRecoveryMinFires,
 	}
 }
 
@@ -675,6 +752,9 @@ func (p Params) withDefaults() Params {
 	}
 	if p.BlackoutMinAgents <= 0 {
 		p.BlackoutMinAgents = d.BlackoutMinAgents
+	}
+	if p.RecoveryMinFires <= 0 {
+		p.RecoveryMinFires = d.RecoveryMinFires
 	}
 	return p
 }
@@ -722,18 +802,74 @@ func (f Finding) Key() string {
 	return string(f.Kind) + "|" + f.Agent + "|" + f.ID
 }
 
-// FleetFinding reports a whole cohort sitting below the floor. It is separate
-// from the per-agent findings on purpose: everyone at 40% on the same cadence
-// is a scheduler or fleet fault (an auth outage, a wedged pogod, a broken ack
-// path), and reporting it as N per-agent alerts would name N innocent agents
-// and bury the one fact that matters. The per-agent rule cannot fire in this
-// regime anyway — a low median leaves no gap to clear.
+// FleetFinding reports a whole cohort that is not completing its fires RIGHT
+// NOW. It is separate from the per-agent findings on purpose: everyone at 40%
+// on the same cadence is a scheduler or fleet fault (an auth outage, a wedged
+// pogod, a broken ack path), and reporting it as N per-agent alerts would name
+// N innocent agents and bury the one fact that matters. The per-agent rule
+// cannot fire in this regime anyway — a low median leaves no gap to clear.
+//
+// # It is judged on a WINDOW, and that is the whole of mg-c232
+//
+// This arm used to trigger on the median of the cohort's LIFETIME ratios
+// against Params.Floor, and a lifetime ratio cannot describe now. Two outages
+// on 2026-08-10 — the crew stopped 01:56-12:40Z, then a network loss
+// 14:24-17:15Z — put roughly 80 dead fires into every 10-minute schedule's
+// denominator. The cohort median fell 40% -> 36% -> 26% over a day in which the
+// fault had already ENDED, and the finding escalated to the mayor for 61 hours
+// without clearing. Cumulative arithmetic guarantees that: no quantity of later
+// health can pull a lifetime ratio back over a floor, so the alarm's only exits
+// were a counter reset or being ignored. An alarm that cannot clear after the
+// fault clears trains its reader to ignore it, which is the same defect as
+// mg-0155 (a deploy RED naming the wrong cause) and drellem2/pogo#122 (a false
+// "schedules LOST" RED).
+//
+// So Rate below is the ABSOLUTE completion rate over Params.BlackoutWindow,
+// restricted to cohort members whose agent was RUNNING for the whole window —
+// the same statistic, gates and threshold as Blackout, applied to one cohort
+// instead of the fleet. Reusing those constants rather than inventing a pair is
+// deliberate: they were measured (see DefaultBlackoutWindow) on this fleet's
+// aggregate fire traffic, and a cohort is a subset of that traffic with the
+// same bursty turn-length behaviour. A cohort MEDIAN over the same window was
+// rejected — no sweep supports it, and it can read 0 while the aggregate reads
+// 15% whenever half a healthy cohort happens to be mid-turn.
+//
+// LifetimeMedian is retained and rendered, because "26% since registration" is
+// genuinely useful context for a reader deciding how long this has been true.
+// It is not consulted by the trigger.
+//
+// # What this arm still adds over Blackout
+//
+// Blackout aggregates every schedule of every running agent, so a cohort going
+// dark while the rest of the fleet works is averaged away. A cohort is judged on
+// its own traffic, so "every sweep is failing while mail-checks are fine" is
+// visible here and invisible there.
 type FleetFinding struct {
-	Kind      string   `json:"kind"`
-	Cadence   string   `json:"cadence"`
-	Median    float64  `json:"median"`
-	Schedules int      `json:"schedules"`
-	Names     []string `json:"names"`
+	Kind    string `json:"kind"`
+	Cadence string `json:"cadence"`
+	// Window is the trailing span Rate was measured over, as a string for the
+	// same reason Cadence is one.
+	Window string `json:"window"`
+	// Delivered, Completed and Rate are the WINDOWED measurement over Judged,
+	// and Rate is what Threshold is applied to.
+	Delivered int     `json:"delivered"`
+	Completed int     `json:"completed"`
+	Rate      float64 `json:"rate"`
+	Threshold float64 `json:"threshold"`
+	// Judged names the cohort members the window was measured over — those whose
+	// agent was running for the whole of it. A finding is a claim about these,
+	// not about Names.
+	Judged []string `json:"judged"`
+	// LifetimeMedian is the median of the cohort's since-registration ratios.
+	// CONTEXT ONLY — see the type comment. Kept under its original `median` JSON
+	// name so an existing reader of the event log or `--json` does not silently
+	// start reading a zero.
+	LifetimeMedian float64 `json:"median"`
+	// LastCompletedAt is the newest completion by any judged member inside the
+	// window; zero when there was none.
+	LastCompletedAt time.Time `json:"last_completed_at,omitempty"`
+	Schedules       int       `json:"schedules"`
+	Names           []string  `json:"names"`
 }
 
 // Key identifies a fleet finding for fingerprinting.
@@ -816,9 +952,31 @@ type Report struct {
 	// SkippedNoPeers counts eligible samples that had no comparable cohort to be
 	// judged against. These are UNJUDGED, not healthy.
 	SkippedNoPeers int `json:"skipped_no_peers"`
+	// RetiredRecovered counts per-schedule findings that the LIFETIME rule raised
+	// and the RECENT WINDOW retired: the counters still carry an old outage, the
+	// window says the schedule is completing its fires now. Counted rather than
+	// discarded silently, because "the alarm went quiet" and "the alarm was
+	// talked out of firing" are different facts and only one of them means the
+	// fleet recovered (mg-c232).
+	RetiredRecovered int `json:"retired_recovered"`
 
 	Deficits []Finding      `json:"deficits"`
 	Fleet    []FleetFinding `json:"fleet"`
+	// FleetBlind says why the COHORT arm produced no judgement at all — the
+	// window was not offered, could not be read, or the running set was missing.
+	// Empty means the arm ran.
+	//
+	// The arm fails CLOSED into this field rather than falling back to the
+	// lifetime median, because that median is the trigger mg-c232 removed and a
+	// fallback would reinstate it on exactly the days the events log is
+	// unreadable. Blind and calm must stay distinguishable, which is what this
+	// string is for — same contract as BlackoutBlind.
+	FleetBlind string `json:"fleet_blind,omitempty"`
+	// FleetNotMeasured names cohorts that were structurally eligible (enough
+	// ack-aware members) but carried too little windowed traffic to be judged —
+	// a daily-cadence cohort inside a 3-hour window, most obviously. These are
+	// UNJUDGED, not healthy.
+	FleetNotMeasured []string `json:"fleet_not_measured,omitempty"`
 	// Blackout is the absolute arm's finding, nil when the fleet is completing
 	// work (or when the arm could not look — see BlackoutBlind).
 	Blackout *Blackout `json:"blackout,omitempty"`
@@ -875,6 +1033,13 @@ func Detect(snap Snapshot, p Params) Report {
 	}
 	rep.Eligible = len(eligible)
 
+	// One windowed view, shared by all three arms. Built once because the
+	// liveness gate and the window length must be IDENTICAL across them: a
+	// cohort judged over a different span from the fleet it belongs to would let
+	// the two arms disagree about the same minutes.
+	view := newWindowView(snap, p)
+	rep.FleetBlind = view.blind
+
 	cohorts := map[string][]Sample{}
 	for _, s := range eligible {
 		cohorts[s.cohortKey()] = append(cohorts[s.cohortKey()], s)
@@ -913,6 +1078,29 @@ func Detect(snap Snapshot, p Params) Report {
 			rate := c.Rate()
 			gap := median - rate
 			if gap < p.MinGap || rate >= p.Floor {
+				continue
+			}
+			// The RECENCY gate (mg-c232). The two conditions above are lifetime
+			// arithmetic, so a schedule that was dark for ten hours this morning
+			// stays below its peers long after it recovered — the same
+			// cannot-clear defect the cohort arm was rebuilt for, at a smaller
+			// amplitude because a big denominator damps it.
+			//
+			// The window is used as a VETO and never as evidence: it can retire a
+			// finding the lifetime rule raised, and there is no path by which it
+			// raises one. That asymmetry is what makes it safe to apply a
+			// statistic here that would be too noisy to trigger on — a healthy
+			// agent in a long turn legitimately reads 0/18 over three hours (see
+			// DefaultBlackoutWindow), which would be a false alarm as a trigger
+			// and is merely "not retired" as a veto.
+			//
+			// It FAILS OPEN: an unmeasurable window leaves the lifetime finding
+			// standing, matching LastDisruption's stated direction — fail toward
+			// alerting, because this package exists because a silence hid a fault
+			// for a week. The cost is that the clearing property is only as good
+			// as the events log, which is stated rather than hidden.
+			if recovered(view, c, p) {
+				rep.RetiredRecovered++
 				continue
 			}
 			kind := KindDeficit
@@ -980,22 +1168,185 @@ func Detect(snap Snapshot, p Params) Report {
 		// session transcript, which a scheduler re-registration cannot reset. It
 		// stays a PARTIAL cover by design — the auth shape only, and only for
 		// harnesses that expose a transcript.
+		//
+		// The TRIGGER is now the windowed rate, not the lifetime median — see
+		// FleetFinding for the 61-hour escalation that bought that change. The
+		// structural gates above (cohort size, ack-awareness) survive it: they say
+		// whether this population can be judged at all, which no window changes.
 		if len(members) >= p.MinPeers+1 && ackAwareCohort(members) {
-			if m := medianRate(members); m < p.Floor {
-				rep.Fleet = append(rep.Fleet, FleetFinding{
-					Kind:      members[0].Kind,
-					Cadence:   members[0].Cadence.String(),
-					Median:    m,
-					Schedules: len(members),
-					Names:     names(members),
-				})
+			f, why := detectCohort(members, view, p)
+			switch {
+			case f != nil:
+				rep.Fleet = append(rep.Fleet, *f)
+			case why != "":
+				rep.FleetNotMeasured = append(rep.FleetNotMeasured,
+					members[0].Kind+"/"+members[0].Cadence.String()+": "+why)
 			}
 		}
 	}
 
-	rep.Blackout, rep.BlackoutBlind = detectBlackout(snap, p)
+	rep.Blackout, rep.BlackoutBlind = detectBlackout(view, p)
 
 	return rep
+}
+
+// windowView is the trailing-window measurement plus the liveness gate, built
+// once per Detect and shared by every arm that judges NOW rather than
+// SINCE-REGISTRATION.
+//
+// It exists because three arms need the same two facts — how long the window is,
+// and which agents were up for the whole of it — and computing them separately
+// would let a cohort be judged over a different span from the fleet it belongs
+// to. blind is non-empty when the view could not be built at all; every arm
+// treats that as "could not look", never as "looked and found nothing".
+type windowView struct {
+	recent Recent
+	window time.Duration
+	// running is the set of agents that were up for the WHOLE window, i.e. those
+	// whose numbers describe the window rather than the period before they
+	// existed.
+	running map[string]bool
+	// young counts running agents excluded for being up for less than the window.
+	young int
+	blind string
+}
+
+// newWindowView applies the three availability checks and the liveness gate.
+// The checks are the blackout arm's originals, moved here unchanged: they were
+// always statements about the SNAPSHOT rather than about that one arm.
+func newWindowView(snap Snapshot, p Params) windowView {
+	if snap.Recent == nil {
+		return windowView{blind: "no window measurement was supplied"}
+	}
+	r := *snap.Recent
+	if r.Err != "" {
+		return windowView{blind: "window could not be measured: " + r.Err}
+	}
+	window := r.Window
+	if window <= 0 {
+		window = p.BlackoutWindow
+	}
+	if snap.RunningSince == nil {
+		return windowView{recent: r, window: window,
+			blind: "the running-agent set was not supplied, and without it an absent " +
+				"fleet is indistinguishable from a dead one"}
+	}
+	if r.ByAgent == nil {
+		return windowView{recent: r, window: window,
+			blind: "the window carried no per-agent breakdown, so the liveness gate " +
+				"cannot be applied"}
+	}
+
+	// The liveness gate. Everything measured through this view is restricted to
+	// agents that are RUNNING and have been up for the WHOLE window, because
+	// "fires delivered, nothing completed" is also what an empty fleet looks like
+	// — and on this box that is every night between midnight and 09:30, plus the
+	// first window after every spawn. See Snapshot.RunningSince.
+	v := windowView{recent: r, window: window, running: map[string]bool{}}
+	for name, since := range snap.RunningSince {
+		if since.IsZero() || snap.Now.Sub(since) < window {
+			v.young++
+			continue
+		}
+		v.running[name] = true
+	}
+	return v
+}
+
+// detectCohort applies the COHORT arm to one already-structurally-eligible
+// cohort: the ABSOLUTE completion rate over the window, restricted to members
+// whose agent was up for the whole of it.
+//
+// Same statistic, same gates and same threshold as detectBlackout, over a
+// cohort's traffic instead of the fleet's. See FleetFinding for why the lifetime
+// median it replaced could not clear, and why reusing the blackout constants is
+// the honest choice rather than inventing an unswept pair.
+//
+// Returns (finding, "") when the cohort is dark, (nil, "") when it is judged and
+// healthy, and (nil, reason) when it could not be judged — which is NOT the same
+// as healthy and is reported as Report.FleetNotMeasured.
+func detectCohort(members []Sample, v windowView, p Params) (*FleetFinding, string) {
+	if v.blind != "" {
+		// Reported once, globally, as Report.FleetBlind — repeating it per cohort
+		// would turn one fact about the snapshot into N findings about cohorts.
+		return nil, ""
+	}
+	var delivered, completed int
+	var judged []string
+	var last time.Time
+	for _, m := range members {
+		if !v.running[m.Agent] {
+			continue
+		}
+		f, ok := v.recent.BySchedule[scheduleKey(m.Agent, m.ID)]
+		if !ok || f.Delivered == 0 {
+			continue
+		}
+		delivered += f.Delivered
+		completed += f.Completed
+		judged = append(judged, m.ID)
+		if f.LastCompletedAt.After(last) {
+			last = f.LastCompletedAt
+		}
+	}
+	sort.Strings(judged)
+
+	kind, cadence := members[0].Kind, members[0].Cadence.String()
+	if len(judged) < p.BlackoutMinSchedules {
+		return nil, fmt.Sprintf(
+			"only %d of %d schedule(s) were both delivered to and owned by an agent up for "+
+				"the whole %s (%d running agent(s) too young) — under the %d needed to speak "+
+				"for a cohort",
+			len(judged), len(members), v.window, v.young, p.BlackoutMinSchedules)
+	}
+	if delivered < p.BlackoutMinDeliveries {
+		return nil, fmt.Sprintf(
+			"only %d fire(s) delivered to those schedules in the last %s — under the %d "+
+				"needed for a rate to mean anything",
+			delivered, v.window, p.BlackoutMinDeliveries)
+	}
+	rate := float64(completed) / float64(delivered)
+	if rate > p.BlackoutRate {
+		return nil, ""
+	}
+	return &FleetFinding{
+		Kind:            kind,
+		Cadence:         cadence,
+		Window:          v.window.String(),
+		Delivered:       delivered,
+		Completed:       completed,
+		Rate:            rate,
+		Threshold:       p.BlackoutRate,
+		Judged:          judged,
+		LifetimeMedian:  medianRate(members),
+		LastCompletedAt: last,
+		Schedules:       len(members),
+		Names:           names(members),
+	}, ""
+}
+
+// recovered reports whether the recent window shows this ONE schedule completing
+// its fires at or above the floor — the single condition that retires a lifetime
+// peer finding (mg-c232).
+//
+// Every path out of here that is not a measured recovery returns false, so an
+// absent, unreadable, or too-small window leaves the lifetime finding exactly as
+// it was. That is what makes this a veto rather than a second detector: it has
+// no branch that can create a finding, so the noise this statistic carries as a
+// trigger cannot reach the output.
+//
+// The liveness gate is deliberately NOT applied. A stopped agent's schedule
+// cannot show a window at or above the floor anyway, so consulting it would add
+// a dependency without changing an answer.
+func recovered(v windowView, s Sample, p Params) bool {
+	if v.blind != "" || v.recent.BySchedule == nil {
+		return false
+	}
+	f, ok := v.recent.BySchedule[scheduleKey(s.Agent, s.ID)]
+	if !ok || f.Delivered < p.RecoveryMinFires {
+		return false
+	}
+	return float64(f.Completed)/float64(f.Delivered) >= p.Floor
 }
 
 // detectBlackout applies the ABSOLUTE arm. It reads Snapshot.Recent and nothing
@@ -1018,42 +1369,14 @@ func Detect(snap Snapshot, p Params) Report {
 // unlike MinFires, it does not scale with the cadence.
 //
 // Returns (finding, "") when the arm judged, (nil, reason) when it could not.
-func detectBlackout(snap Snapshot, p Params) (*Blackout, string) {
-	if snap.Recent == nil {
-		return nil, "no window measurement was supplied"
+// The availability checks and the liveness gate live in newWindowView, which
+// every windowed arm shares.
+func detectBlackout(v windowView, p Params) (*Blackout, string) {
+	if v.blind != "" {
+		return nil, v.blind
 	}
-	r := *snap.Recent
-	if r.Err != "" {
-		return nil, "window could not be measured: " + r.Err
-	}
-	window := r.Window
-	if window <= 0 {
-		window = p.BlackoutWindow
-	}
-	if snap.RunningSince == nil {
-		return nil, "the running-agent set was not supplied, and without it an absent " +
-			"fleet is indistinguishable from a dead one"
-	}
-	if r.ByAgent == nil {
-		return nil, "the window carried no per-agent breakdown, so the liveness gate " +
-			"cannot be applied"
-	}
-
-	// The liveness gate. Everything below is measured over agents that are RUNNING
-	// and have been up for the WHOLE window, because "fires delivered, nothing
-	// completed" is also what an empty fleet looks like — and on this box that is
-	// every night between midnight and 09:30, plus the first window after every
-	// spawn. See Snapshot.RunningSince.
-	eligible := map[string]bool{}
-	young := 0
-	for name, since := range snap.RunningSince {
-		if since.IsZero() || snap.Now.Sub(since) < window {
-			young++
-			continue
-		}
-		eligible[name] = true
-	}
-	delivered, completed, schedules, judged, silent := r.restrictTo(eligible)
+	r, window, young := v.recent, v.window, v.young
+	delivered, completed, schedules, judged, silent := r.restrictTo(v.running)
 
 	if len(judged) < p.BlackoutMinAgents {
 		return nil, fmt.Sprintf(
@@ -1196,11 +1519,29 @@ func (r Report) Render() string {
 	}
 
 	for _, f := range r.Fleet {
-		fmt.Fprintf(&b, "FLEET DEFICIT: every %s schedule on a %s cadence is completing a median of %s of its fires.\n",
-			f.Kind, f.Cadence, pct(f.Median))
-		fmt.Fprintf(&b, "  schedules: %s\n", strings.Join(f.Names, ", "))
+		fmt.Fprintf(&b, "COHORT DARK: %d fire(s) delivered to %s schedules on a %s cadence in the last %s "+
+			"and %d completed (%s, floor %s).\n",
+			f.Delivered, f.Kind, f.Cadence, f.Window, f.Completed, pct(f.Rate), pct(f.Threshold))
+		fmt.Fprintf(&b, "  measured over %d schedule(s) whose agent was up for the whole window: %s\n",
+			len(f.Judged), strings.Join(f.Judged, ", "))
+		if len(f.Names) > len(f.Judged) {
+			fmt.Fprintf(&b, "  cohort has %d schedule(s) in total: %s\n", f.Schedules, strings.Join(f.Names, ", "))
+		}
+		if f.LastCompletedAt.IsZero() {
+			fmt.Fprintf(&b, "  NOT ONE fire completed by this cohort in the whole %s window.\n", f.Window)
+		} else {
+			fmt.Fprintf(&b, "  last completion in this cohort: %s\n",
+				f.LastCompletedAt.UTC().Format(time.RFC3339))
+		}
+		// The lifetime figure is CONTEXT and is labelled as such in the body, not
+		// only in the source. It used to be the trigger, and it could not clear:
+		// two ended outages held this finding open for 61 hours (mg-c232).
+		fmt.Fprintf(&b, "  for context only, NOT the trigger: median %s since registration.\n",
+			pct(f.LifetimeMedian))
 		b.WriteString("  A whole cohort at this level is a SCHEDULER or FLEET fault, not N agent faults —\n")
-		b.WriteString("  suspect the ack path, an auth outage, or pogod itself before suspecting the agents.\n\n")
+		b.WriteString("  suspect the ack path, an auth outage, or pogod itself before suspecting the agents.\n")
+		b.WriteString("  This is measured over the window above, so it CLEARS once the cohort completes\n")
+		b.WriteString("  fires again — no counter reset needed, and resetting one would hide it instead.\n\n")
 	}
 
 	for _, f := range r.Deficits {
@@ -1233,15 +1574,28 @@ func (r Report) Render() string {
 	return b.String()
 }
 
-// renderBlackoutCoverage states when the ABSOLUTE arm did not judge. Reported on
-// both the findings and the no-findings path, because "the peer arm found
+// renderBlackoutCoverage states when the WINDOWED arms did not judge. Reported
+// on both the findings and the no-findings path, because "the peer arm found
 // nothing and the absolute arm never ran" is the state that produced a calm
 // report during a dead fleet, and it must be readable as such.
+//
+// The cohort arm is reported here too, and for the same reason: since mg-c232 it
+// judges on the same window, so it goes blind in the same circumstances and a
+// reader who is not told cannot tell that from calm.
 func (r Report) renderBlackoutCoverage(b *strings.Builder) {
-	if r.BlackoutBlind == "" {
-		return
+	if r.BlackoutBlind != "" {
+		fmt.Fprintf(b, "Fleet-blackout arm did not judge: %s.\n", r.BlackoutBlind)
 	}
-	fmt.Fprintf(b, "Fleet-blackout arm did not judge: %s.\n", r.BlackoutBlind)
+	if r.FleetBlind != "" {
+		fmt.Fprintf(b, "Cohort arm did not judge: %s.\n", r.FleetBlind)
+	}
+	for _, why := range r.FleetNotMeasured {
+		fmt.Fprintf(b, "Cohort not measured — %s.\n", why)
+	}
+	if r.RetiredRecovered > 0 {
+		fmt.Fprintf(b, "%d schedule(s) below their peers over their LIFETIME are completing fires "+
+			"again in the recent window, and are not reported.\n", r.RetiredRecovered)
+	}
 }
 
 // renderCoverage states what was NOT evaluated. A detector that reports only
@@ -1274,9 +1628,20 @@ func (r Report) MailSubject() string {
 	}
 	switch {
 	case len(r.Fleet) > 0 && len(r.Deficits) > 0:
-		return fmt.Sprintf("%d cohort(s) and %d schedule(s) below the completion floor", len(r.Fleet), len(r.Deficits))
+		return fmt.Sprintf("%d cohort(s) DARK in the last %s, and %d schedule(s) below their peers",
+			len(r.Fleet), r.Fleet[0].Window, len(r.Deficits))
 	case len(r.Fleet) > 0:
-		return fmt.Sprintf("%d whole cohort(s) below the completion floor", len(r.Fleet))
+		// "below the completion floor" was the old lifetime phrasing and it was
+		// the part that travelled: it says nothing about WHEN, so a reader could
+		// not tell a live outage from one that ended two days ago (mg-c232). The
+		// window goes in the subject for that reason.
+		f := r.Fleet[0]
+		if f.Completed == 0 {
+			return fmt.Sprintf("%s cohort DARK — %d fires delivered in the last %s, NONE completed",
+				f.Kind, f.Delivered, f.Window)
+		}
+		return fmt.Sprintf("%s cohort at %s — %d of %d fires completed in the last %s",
+			f.Kind, pct(f.Rate), f.Completed, f.Delivered, f.Window)
 	case len(r.Deficits) == 1:
 		f := r.Deficits[0]
 		return fmt.Sprintf("%s is completing %s of its fires (peers %s)", f.ID, pct(f.Rate), pct(f.PeerMedian))

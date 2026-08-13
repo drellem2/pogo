@@ -634,9 +634,19 @@ pogo schedule list              # the raw table: completed/delivered per schedul
   class (mg-d385, mg-1935): the harness renders the call as inert text, nothing
   executes, and the agent believes it acted. Nothing crashed, so `restart_on_crash`
   cannot help. A `pogo agent stop` / `start` cycle clears it.
-- **A `FLEET DEFICIT` finding names a whole cohort, not an agent.** Do not restart
+- **A `COHORT DARK` finding names a whole cohort, not an agent.** Do not restart
   four agents. Suspect the ack path, an auth outage, or pogod itself — check
   `pogo agent diagnose` for `health: failing_turns` and the credential first.
+- **A `COHORT DARK` finding is about the last few hours, and it clears itself.**
+  It is the absolute completion rate over the trailing window, not a lifetime
+  ratio, so once the cohort completes fires again the alarm stops on its own —
+  no action of yours retires it. **Never** re-register the schedules to make one
+  go away: registering with the same `--id` zeroes the ack counters, which hides
+  the signal rather than correcting it. If a finding persists, the fault is
+  persisting. This rule exists because the previous version judged a lifetime
+  ratio: two outages that had already ENDED held one finding escalated to the
+  mayor for 61 hours, and an alarm that cannot clear trains its reader to ignore
+  it (mg-c232).
 - **Suppression is already handled for you.** The detector goes quiet after a
   `system_wake` and after a pogod restart, because re-registering a schedule zeroes
   its counters and every crew agent re-registers on startup. If a finding arrives, it

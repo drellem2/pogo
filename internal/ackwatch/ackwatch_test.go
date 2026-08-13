@@ -125,29 +125,94 @@ func TestFloorIsTheBindingGateForAHighPerformingCohort(t *testing.T) {
 // The gap test must suppress per-agent findings when EVERYONE is low — that is
 // a scheduler or fleet fault, and naming four agents would bury the one fact
 // that matters.
+//
+// Since mg-c232 the cohort arm judges the RECENT WINDOW, so the fixture carries
+// one: the same four agents, dark right now. The lifetime numbers alone no
+// longer produce this finding, and TestCohort_LifetimeAloneNoLongerFires is the
+// half of that pair that asserts the absence.
 func TestFleetWideDeficitIsOneFindingNotFour(t *testing.T) {
-	rep := Detect(snap([]Sample{
+	fleet := []string{"architect", "pa", "pm-onethird", "pm-pogo"}
+	rep := Detect(windowedSnap([]Sample{
 		mailCheck("architect", 300, 757),
 		mailCheck("pa", 310, 757),
 		mailCheck("pm-onethird", 295, 757),
 		mailCheck("pm-pogo", 305, 757),
-	}), DefaultParams())
+	}, darkWindow(fleet)), DefaultParams())
 
 	if len(rep.Deficits) != 0 {
 		t.Errorf("a uniformly-low fleet must produce no per-agent findings, got %d", len(rep.Deficits))
 	}
 	if len(rep.Fleet) != 1 {
-		t.Fatalf("want 1 fleet finding, got %d", len(rep.Fleet))
+		t.Fatalf("want 1 fleet finding, got %d (blind=%q notMeasured=%v)",
+			len(rep.Fleet), rep.FleetBlind, rep.FleetNotMeasured)
 	}
 	if rep.Fleet[0].Schedules != 4 {
 		t.Errorf("Schedules = %d, want 4", rep.Fleet[0].Schedules)
 	}
-	if !rep.Actionable() {
-		t.Error("a whole cohort below the floor must be actionable")
+	if got := rep.Fleet[0].Rate; got != 0 {
+		t.Errorf("windowed rate = %v, want 0 — the trigger is the window, not the median", got)
 	}
-	if !strings.Contains(rep.Render(), "SCHEDULER or FLEET fault") {
+	if got := rep.Fleet[0].LifetimeMedian; got < 0.39 || got > 0.41 {
+		t.Errorf("LifetimeMedian = %v, want ~0.40 carried as context", got)
+	}
+	if !rep.Actionable() {
+		t.Error("a whole cohort completing nothing must be actionable")
+	}
+	body := rep.Render()
+	if !strings.Contains(body, "SCHEDULER or FLEET fault") {
 		t.Error("the fleet render must say who to suspect")
 	}
+	if !strings.Contains(body, "NOT the trigger") {
+		t.Errorf("the lifetime median must be labelled as context in the body:\n%s", body)
+	}
+}
+
+// darkWindow is a window in which every named agent's mail-check was delivered
+// to and completed nothing — a live outage.
+func darkWindow(agents []string) *Recent {
+	r := &Recent{
+		Window:     DefaultBlackoutWindow,
+		ByAgent:    map[string]AgentFires{},
+		BySchedule: map[string]ScheduleFires{},
+	}
+	for _, a := range agents {
+		r.Delivered += 18
+		r.Schedules++
+		r.Agents = append(r.Agents, a)
+		r.ByAgent[a] = AgentFires{Delivered: 18, Schedules: 1}
+		r.BySchedule[scheduleKey(a, "mail-check-"+a)] = ScheduleFires{Delivered: 18}
+	}
+	return r
+}
+
+// healthyWindow is the same population completing its fires — the state a fleet
+// is in AFTER an outage ends, while the lifetime counters still carry it.
+func healthyWindow(agents []string, at time.Time) *Recent {
+	r := &Recent{
+		Window:          DefaultBlackoutWindow,
+		ByAgent:         map[string]AgentFires{},
+		BySchedule:      map[string]ScheduleFires{},
+		LastCompletedAt: at,
+	}
+	for _, a := range agents {
+		r.Delivered += 18
+		r.Completed += 17
+		r.Schedules++
+		r.Agents = append(r.Agents, a)
+		r.ByAgent[a] = AgentFires{Delivered: 18, Completed: 17, Schedules: 1}
+		r.BySchedule[scheduleKey(a, "mail-check-"+a)] = ScheduleFires{
+			Delivered: 18, Completed: 17, LastCompletedAt: at,
+		}
+	}
+	return r
+}
+
+func windowedSnap(samples []Sample, recent *Recent) Snapshot {
+	agents := make([]string, 0, len(samples))
+	for _, s := range samples {
+		agents = append(agents, s.Agent)
+	}
+	return Snapshot{Now: base, Samples: samples, Recent: recent, RunningSince: upSince(agents)}
 }
 
 // ---- suppression: the counters are reset by an action every agent performs ----

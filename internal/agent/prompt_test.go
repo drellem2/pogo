@@ -3054,8 +3054,17 @@ func TestMayorPromptHandlesAckWatchMail(t *testing.T) {
 	if !strings.Contains(s, "health=healthy") {
 		t.Error("mayor.md: expected the warning that health=healthy proves nothing for this class")
 	}
-	if !strings.Contains(s, "FLEET DEFICIT") {
-		t.Error("mayor.md: expected the cohort-wide case to be distinguished from a per-agent fault")
+	if !strings.Contains(s, "COHORT DARK") {
+		t.Error("mayor.md: expected the cohort-wide case to be distinguished from a per-agent fault, " +
+			"under the string ack-watch actually renders")
+	}
+	// The remedy the mayor must NOT reach for. Re-registering with the same --id
+	// zeroes the ack counters, so it silences the alarm by destroying its input —
+	// and mg-c232's 61-hour escalation is exactly the pressure that makes that
+	// look like a fix.
+	if !strings.Contains(s, "re-register") {
+		t.Error("mayor.md: expected the warning that re-registering the schedules hides the " +
+			"signal rather than clearing it")
 	}
 }
 
