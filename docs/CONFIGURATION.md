@@ -2098,6 +2098,20 @@ are **report-only**.
 - **It never registers the loop for you.** Doing so would paper over *why* the
   loop vanished — a reap, a failed registration, a manual `pogo schedule rm` —
   and that is the part worth knowing.
+- **The `unjudged` field has two wire states, and a consumer never needs it to
+  get the count.** `pogo check-mailloops --json` emits `"unjudged": null` when
+  the running pogod does not report the set (it is older than the client — WHO
+  and WHY are UNKNOWN), and `"unjudged": []` when the set is genuinely empty.
+  Those are opposite statements and a reader that flattens them reports "0 not
+  judged" over a fleet it never looked at. In **both** states `scanned` minus
+  `judged` is the honest unjudged **count**, because those two fields are sent
+  by every daemon version — the field carries the names and reasons, never the
+  number. There is deliberately **no** field explaining the null: it would move
+  the one documented bit out of the schema and into the payload, and the null
+  branch only exists against a daemon older than the client, which a nightly
+  redeploy retires (mg-4692; reopen only if a *third* wire state appears, such
+  as a daemon that reports the set partially). Full text in `pogo
+  check-mailloops --help`.
 
 ```toml
 [deaf_watch]
