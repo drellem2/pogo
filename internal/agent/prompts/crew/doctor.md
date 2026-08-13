@@ -117,6 +117,22 @@ pogo check-orphans --probe       # Ask whether that detector can still FIRE: sta
                                  # real burners, detaches one, checks it goes RED on
                                  # the dead owner and GREEN on the live one.
 
+# Scheduled obligations
+pogo check-oneshots              # ONE-SHOT schedules that fired and nobody ever
+                                 # answered. A recurring schedule that stops
+                                 # accomplishing anything grows an unacked streak and
+                                 # ack-watch escalates; a one-shot has no streak — it
+                                 # fires once and is never retried, which is exactly
+                                 # why post-redeploy verification and pre-deploy steps
+                                 # go out that way. Each finding names the schedule,
+                                 # the agent, and WHAT IT WAS CARRYING; the same
+                                 # finding is the `one-shot acks` row in
+                                 # `pogo doctor --check`. If it says NOT MEASURABLE it
+                                 # found the retired `one_shot_complete` label, which
+                                 # means the running pogod predates d71e1e2 and this
+                                 # class is invisible until it is rebuilt — check
+                                 # /version before reading anything else here.
+
 # Work items
 mg list                          # All work items
 mg list --status=available       # Unassigned work

@@ -1001,9 +1001,9 @@ func (s *Scheduler) Tick(ctx context.Context, now time.Time) []FireResult {
 			if entry.PendingToken != "" {
 				changed = true
 			} else {
-				reason := "one_shot_undelivered"
+				reason := ReasonOneShotUndelivered
 				if res.Skipped {
-					reason = "one_shot_skipped"
+					reason = ReasonOneShotSkipped
 				}
 				s.emitSchedulerRemovalEvent(reason, *entry, now, nil)
 				delete(s.entries, key)
@@ -1234,7 +1234,7 @@ func (s *Scheduler) GCExpiredOneShots(now time.Time) int {
 	s.mu.Unlock()
 
 	for _, e := range removed {
-		s.emitSchedulerRemovalEvent("one_shot_unacked", e, now, nil)
+		s.emitSchedulerRemovalEvent(ReasonOneShotUnacked, e, now, nil)
 	}
 	return len(removed)
 }
@@ -1330,6 +1330,25 @@ func (s *Scheduler) emitSchedulerRemovalEvent(reason string, e Entry, removedAt 
 	}
 	if err != nil {
 		details["error"] = err.Error()
+	}
+	// Identity, for one-shots only (mg-8011). A one-shot's removal record is
+	// the ONLY surviving trace of the obligation it carried — the entry is gone
+	// from schedules.json by the time anything reads the log — and a consumer
+	// that can only say "1 unacked one-shot" has reported a count, not a missed
+	// obligation. The id alone does not always carry it: `pogo schedule --once`
+	// without `--id` generates `sch-<hex>`, and for those the message is the
+	// only thing that says what was missed.
+	//
+	// Restricted to one-shots because a recurring schedule's message is
+	// boilerplate repeated on every removal (2138 `agent_gone` records on this
+	// box), while a one-shot's is the thing itself. Digested rather than
+	// verbatim so the log stays scannable; `nudge_sent` already records the
+	// full body, so this discloses nothing new.
+	if e.OneShot {
+		details["kind"] = string(e.Kind)
+		if d := digestMessage(e.Message); d != "" {
+			details["message"] = d
+		}
 	}
 	events.EmitTo(context.Background(), s.logPath, events.Event{
 		EventType: "schedule_removed",

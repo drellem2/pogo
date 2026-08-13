@@ -204,7 +204,7 @@ func (s *Scheduler) Ack(agentName, id, token string, now time.Time) (AckResult, 
 
 	s.emitCompletionEvent(done, now, token, latency)
 	if oneShotDone {
-		s.emitSchedulerRemovalEvent("one_shot_acked", done, now, nil)
+		s.emitSchedulerRemovalEvent(ReasonOneShotAcked, done, now, nil)
 	}
 
 	return AckResult{Entry: done, Latency: latency, LatencyMS: latency.Milliseconds()}, nil

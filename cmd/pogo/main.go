@@ -3308,6 +3308,7 @@ The --check mode verifies:
   - Are repos configured?
   - Are agent prompts installed?
   - Are there stale work items?
+  - Did any one-shot schedule fire with nobody ever answering it?
   - Is any MEMORY.md index approaching the harness read cliff?
 
 Exits with code 1 if any critical check fails (--check mode only).`,
@@ -3617,6 +3618,32 @@ Exits with code 1 if any critical check fails (--check mode only).`,
 					warn(auditSuccessorCheckName, asDetail)
 				} else {
 					pass(auditSuccessorCheckName, asDetail)
+				}
+			}
+
+			// 6c. One-shot obligations nobody answered (mg-8011).
+			//
+			// The other rows here ask whether this HOST is well. This one asks
+			// whether a thing that was supposed to happen ONCE actually did —
+			// post-redeploy verification, a pre-deploy step, a gate lift. That
+			// population has no next cycle: a recurring schedule that silently
+			// no-ops shows up as a streak, a one-shot that fires into a dead
+			// agent shows up as nothing at all, which is why mg-64e6 made the
+			// outcome recordable and why this reads it.
+			//
+			// A DETECTOR, not a gate: it warns and never sets hasFail. See
+			// oneshotacks.go for that argument and for the branch that refuses
+			// to render a clean zero from a log whose writer predates the
+			// labels.
+			{
+				osNow := time.Now()
+				osRep, osErr := scheduler.ReadOneShotOutcomes(
+					defaultSchedulerLogPath(), osNow.Add(-defaultOneShotWindow), time.Time{})
+				osStatus, osDetail := oneShotAckLine(osRep, osErr, osNow)
+				if osStatus == "warn" {
+					warn(oneShotCheckName, osDetail)
+				} else {
+					pass(oneShotCheckName, osDetail)
 				}
 			}
 
@@ -4176,6 +4203,12 @@ branches; work items and mail live in mg/macguffin (the task-store CLI).`,
 	// store that has quietly stopped having a reader — the case no session can
 	// report, because every surviving store looks healthy.
 	rootCmd.AddCommand(newCheckMemdirsCmd(&jsonOutput))
+	// check-oneshots (mg-8011): one-shot schedules that fired and nobody
+	// answered. The CONSUMER for the record mg-64e6 made recordable and
+	// deliberately left unread — until this, `one_shot_unacked` was a correctly
+	// labelled record with no detector, no alarm and no row behind it, which
+	// from a human's seat is the original defect unchanged.
+	rootCmd.AddCommand(newCheckOneShotsCmd(&jsonOutput))
 	// investigations (mg-22c7): search docs/investigations/ by file CONTENTS.
 	// Not a check-* detector — it answers a question a person or agent asks,
 	// and it is the only pogo subcommand that records its own invocation,
