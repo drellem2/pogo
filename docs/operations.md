@@ -225,6 +225,34 @@ Most "pogod is misbehaving" situations are better solved by **filing an mg (a wo
   yours, which is a wait for a free lane and not a blockage. Deep queue spanning
   several repos is normal and self-clearing; the cap is
   `[refinery] max_concurrent_merges` (default 2).
+- **Merges are reported but `main` has not moved / the refinery looks stalled.**
+  → Check **which repo's** main. One refinery queue serves several repositories,
+  so `pogo refinery queue` and `pogo refinery history` both name the repo on
+  every row, and `--repo=<name|path>` narrows either to one:
+
+  ```bash
+  pogo refinery history --repo=pogo      # only this repo's merges
+  pogo refinery queue --repo=pogo        # only this repo's pipeline
+  ```
+
+  Read the repo column *before* concluding anything about a queue you are
+  watching. On 2026-08-07 three different agents escalated from a view that did
+  not have it — four merge requests cancelled on the belief that all were
+  `pogo` branches (two were not, and would have passed); "6 MRs report merged
+  but main has not moved" raised as possible lost merges, when every one had
+  landed in `onethird_program`'s main; and "refinery STALLED, nothing merged"
+  raised five seconds after a merge, in a repo the reader was not watching
+  (mg-ff3a). Two of the three escalated as URGENT.
+
+  Two things `--repo` deliberately does **not** narrow, so the filter cannot
+  manufacture the alarm it was added to prevent: the queue's in-flight/pending
+  counts and its `NOTHING IN FLIGHT` line are always computed over the whole
+  pipeline, and history's retention cap is shared across repos — a filtered
+  window reaches back **less** far than the cap suggests, which the command
+  says outright when the cap has bitten.
+
+  Infer the repo from the **merge request**, never from the work item: one work
+  item can legitimately produce branches in three repos.
 - **A merge request has sat in `processing` for a long time.** → Ask the merge
   request, not the process table: `pogo refinery show <mr-id>` prints a
   `Verdict:` line reading the running gate's heartbeat. `ALIVE and working`
