@@ -905,10 +905,16 @@ func mailLoopJudgeable(a *Agent) bool { return mailLoopExclusionFor(a) == "" }
 // disclosures went on naming a distinction the code could not make.
 // ConfiguredStateFor keeps the error, and this is the one place it becomes a
 // reason.
+//
+// a is NOT nil-checked, and that is the honest shape rather than an omission
+// (mg-d52f). Both ways in already answer for nil before they get here:
+// mailLoopFor returns mailLoopUnknown on a == nil, and Registry.MailLoopReport's
+// unjudged arm dereferences a.Name and a.Type in the same composite literal that
+// calls this, so a nil would have panicked there first either way. A guard here
+// protected neither caller and read as protection that was not there — a third
+// caller could believe the nil case was handled. It is not; a third caller has
+// to answer for nil itself.
 func mailLoopExclusionFor(a *Agent) MailLoopExclusionReason {
-	if a == nil {
-		return ExclusionNotConfigured
-	}
 	if IsExpectedAgent(a.Name) {
 		return ""
 	}
