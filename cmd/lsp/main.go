@@ -21,7 +21,7 @@ import (
 func main() {
 	var jsonOutput bool
 
-	var rootCmd = &cobra.Command{Use: "lsp", Version: version.Version}
+	var rootCmd = &cobra.Command{Use: "lsp", Version: version.Get().Describe("lsp")}
 
 	rootCmd.Flags().BoolP("profile", "", false, "Enable CPU profiling")
 	rootCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSON format")
@@ -59,6 +59,10 @@ func main() {
 	}
 
 	completion.AddCommand(rootCmd)
+
+	// Version already carries the program name (mg-3141); cobra's default
+	// template would render "lsp version lsp 0.10.0 (...)".
+	rootCmd.SetVersionTemplate("{{.Version}}\n")
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(cli.ExitError)

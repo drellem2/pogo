@@ -4066,18 +4066,45 @@ Exits with code 1 if any critical check fails (--check mode only).`,
 
 	var cmdVersion = &cobra.Command{
 		Use:   "version",
-		Short: "Print the pogo version",
-		Args:  cobra.NoArgs,
+		Short: "Print the pogo version and the revision this binary was built from",
+		Long: `Print this binary's build identity.
+
+    pogo 0.10.0 (fa02447, branch=main, source=ldflags)
+
+--json adds the full commit, so the liveness question can be answered from the
+binary rather than from its mtime:
+
+    git merge-base --is-ancestor <fix> $(pogo version --json | jq -r .commit)
+
+READ THE source FIELD BEFORE TRUSTING THE COMMIT.
+
+    ldflags    stamped by build.sh, scripts/pogo-self-deploy or goreleaser.
+               The build script chose the repo, so the revision names it.
+    buildinfo  Go's automatic vcs.revision. True about SOME repo: Go walks UP
+               from the build directory, and a build under a directory that is
+               itself inside another git repo is stamped with THAT repo's HEAD
+               — a revision the pogo repo may not contain at all.
+    none       nothing stamped anything; every field reads "unknown".
+
+"unknown" is used rather than the empty string throughout, because an empty
+commit is indistinguishable from a bug in whatever is reading it.
+
+A binary built from a tree with uncommitted changes reports dirty and carries a
+-dirty suffix: without it the revision is a claim about the repo, not about the
+binary. pogod answers the same question — "pogod version --json".`,
+		Args: cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
+			// version.Get(), not the raw vars: the fields were reported
+			// verbatim before mg-3141, so an unstamped local build printed
+			// `commit: ""` — present and empty, which reads as "no revision
+			// info" rather than as a build nothing stamped. Get() resolves the
+			// ldflags stamp, falls back to Go's own vcs stamp, reports
+			// "unknown" instead of "", and names which of the three answered.
+			info := version.Get()
 			if jsonOutput {
-				cli.PrintJSON(map[string]string{
-					"version": version.Version,
-					"build":   version.Build,
-					"commit":  version.Commit,
-					"branch":  version.Branch,
-				})
+				cli.PrintJSON(info)
 			} else {
-				fmt.Printf("pogo %s (build=%s)\n", version.Version, version.Build)
+				fmt.Println(info.Describe("pogo"))
 			}
 		},
 	}
@@ -4310,9 +4337,17 @@ to it.`,
 	cmdGC.Flags().BoolVar(&gcListPreserved, "list-preserved", false,
 		"list the retained worktrees across all repos and what is in them; change nothing")
 
+	// `pogo --version` prints the same line as `pogo version`, not a bare
+	// semver (mg-3141). scripts/launchd/pogo-deploy.sh's partial-install
+	// recovery text tells an operator to "ask each binary its revision before
+	// doing anything else: `pogod --version`, `pogo --version`" — a remedy that
+	// could not do what it said, because this spelling answered "0.10.0" and
+	// the other was not a flag at all. Two spellings of one question must not
+	// give different answers, and the weaker one is the one an operator reaches
+	// for under pressure.
 	var rootCmd = &cobra.Command{
 		Use:     "pogo",
-		Version: version.Version,
+		Version: version.Get().Describe("pogo"),
 		Short:   "Agent-shaped work as UNIX processes",
 		Long: `pogo — a daemon for agent-shaped work.
 
@@ -5315,6 +5350,11 @@ JSONL line so the output is machine-parseable.`,
 	rootCmd.AddCommand(cmdEvents)
 
 	completion.AddCommand(rootCmd)
+
+	// Cobra's default template is "{{.Name}} version {{.Version}}", which would
+	// render "pogo version pogo 0.10.0 (...)". Version already carries the
+	// program name because Describe serves four binaries.
+	rootCmd.SetVersionTemplate("{{.Version}}\n")
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(cli.ExitError)
