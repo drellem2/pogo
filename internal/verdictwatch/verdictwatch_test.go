@@ -3,7 +3,9 @@ package verdictwatch
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -17,6 +19,11 @@ import (
 type fixture struct {
 	t    *testing.T
 	root string
+	// n numbers the messages this fixture delivers. Deriving the filename from
+	// the subject instead — as this helper first did — silently OVERWRITES one
+	// message with another whenever two subjects are the same length, and a test
+	// whose second message vanished would pass for the wrong reason.
+	n int
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -57,6 +64,35 @@ func (f *fixture) sidecar(id, statusDir, branch string) {
 	}
 }
 
+// sidecarWithVerdict writes the same sidecar carrying a recorded verdict — the
+// difference between a ROUTING row (the outcome exists and can be handed over)
+// and a LOST one.
+func (f *fixture) sidecarWithVerdict(id, statusDir, branch, word, summary string) {
+	f.t.Helper()
+	f.sidecarRaw(id, statusDir, fmt.Sprintf(
+		`{"branch":%q,"completed_by":"refinery","verdict":{"verdict":%q,"summary":%q}}`,
+		branch, word, summary))
+}
+
+// sidecarRaw writes an arbitrary sidecar, for the shapes the live store actually
+// holds rather than only the one this package would prefer.
+func (f *fixture) sidecarRaw(id, statusDir, body string) {
+	f.t.Helper()
+	path := filepath.Join(f.root, "work", statusDir, id+".result.json")
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		f.t.Fatalf("write sidecar: %v", err)
+	}
+}
+
+// notify delivers pogod's Creator-notification (mg-f120) for an item, in the
+// subject shape internal/filernotify emits. The coupling to that package's REAL
+// output is pinned separately, in pogodchannel_test.go: a hand-written fixture is
+// free to be wrong about a format in exactly the way this detector was.
+func (f *fixture) notify(box, id, title string) {
+	f.t.Helper()
+	f.mail(box, "new", "pogod", fmt.Sprintf("COMPLETED: %s — %s", id, title), "2026-08-01T12:00:00Z")
+}
+
 // land records a work.done or work.archive event.
 func (f *fixture) land(id, ts, kind string) {
 	f.t.Helper()
@@ -94,7 +130,8 @@ func (f *fixture) mail(box, state, from, subject, date string) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		f.t.Fatalf("make mailbox: %v", err)
 	}
-	name := fmt.Sprintf("%d.%s.msg", len(subject)*7919+len(from), state)
+	f.n++
+	name := fmt.Sprintf("%04d.%s.msg", f.n, state)
 	body := fmt.Sprintf("From: %s\nSubject: %s\nDate: %s\n\nbody\n", from, subject, date)
 	if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
 		f.t.Fatalf("write message: %v", err)
@@ -399,6 +436,560 @@ func TestAScanWithNoFilerCoversEveryFiler(t *testing.T) {
 	if rep.Dropped != 2 {
 		t.Errorf("an unfiltered scan found %d drop(s) across two filers, want 2", rep.Dropped)
 	}
+}
+
+// ---------------------------------------------------------------- the channel set (mg-4e02)
+
+func rowIn(t *testing.T, rep Report, id string) Row {
+	t.Helper()
+	for _, row := range rep.Rows {
+		if row.ID == id {
+			return row
+		}
+	}
+	t.Fatalf("no row for %s in a report of %d row(s)", id, len(rep.Rows))
+	return Row{}
+}
+
+// TestPogodsCreatorNotifyIsADeliveryAndTheChannelIsNamed is the headline defect.
+//
+// mg-f120 added a completion notice sent by POGOD. It is macguffin mail, in the
+// filer's own mailbox, about the right item — and the predicate named the WORKER
+// as the sender, so every item that backstop covered scored DROPPED from
+// 2026-08-13T02:01:35Z onward. Two mechanisms built weeks apart against the same
+// gap: the fix for verdict delivery was measured by an instrument unable to
+// register it working, and its DROPPED count would have CLIMBED as the fix took
+// effect.
+func TestPogodsCreatorNotifyIsADeliveryAndTheChannelIsNamed(t *testing.T) {
+	f := newFixture(t)
+	f.item("mg-f120", "pm-pogo", "the worker mailed nobody and pogod told the filer", "done")
+	f.sidecar("mg-f120", "done", "polecat-wp1")
+	f.land("mg-f120", "2026-08-13T02:44:18Z", "done")
+	f.notify("pm-pogo", "mg-f120", "the worker mailed nobody and pogod told the filer")
+
+	rep := f.scan(Options{Filer: "pm-pogo"})
+	row := rowIn(t, rep, "mg-f120")
+	if row.Status != Delivered {
+		t.Fatalf("an item pogod's Creator-notify covered is %s, want %s — this is the false positive "+
+			"the whole ticket is about", row.Status, Delivered)
+	}
+	if row.DeliveredBy != ChannelPogod {
+		t.Errorf("DeliveredBy = %q, want %q; `a polecat did its job` and `a backstop caught it` are "+
+			"different facts about fleet health and must not collapse", row.DeliveredBy, ChannelPogod)
+	}
+	if rep.Dropped != 0 {
+		t.Errorf("Dropped = %d over one notified item, want 0", rep.Dropped)
+	}
+	// And the per-channel counts, which is what makes DELIVERED an answer rather
+	// than a number.
+	for _, ch := range rep.Channels {
+		want := 0
+		if ch.Channel == ChannelPogod {
+			want = 1
+		}
+		if ch.Delivered != want {
+			t.Errorf("channel %s reports %d delivered, want %d", ch.Channel, ch.Delivered, want)
+		}
+	}
+	if out := rep.Render(true, false); !strings.Contains(out, string(ChannelPogod)) {
+		t.Errorf("the rendered report does not name the channel that carried it:\n%s", out)
+	}
+}
+
+// TestTheWorkerChannelWinsWhenBothCarriedIt — a row both channels covered reports
+// that a POLECAT did its job. Reporting the backstop over the primary would hide
+// a working fleet.
+func TestTheWorkerChannelWinsWhenBothCarriedIt(t *testing.T) {
+	f := newFixture(t)
+	f.item("mg-b0b0", "pm-pogo", "both channels carried it", "done")
+	f.sidecar("mg-b0b0", "done", "polecat-wb0")
+	f.land("mg-b0b0", "2026-08-13T02:44:18Z", "done")
+	f.mail("pm-pogo", "cur", "wb0", "mg-b0b0 VERDICT", "2026-08-13T02:40:00Z")
+	f.notify("pm-pogo", "mg-b0b0", "both channels carried it")
+
+	row := rowIn(t, f.scan(Options{Filer: "pm-pogo"}), "mg-b0b0")
+	if row.DeliveredBy != ChannelWorker {
+		t.Errorf("DeliveredBy = %q for a row both channels covered, want %q", row.DeliveredBy, ChannelWorker)
+	}
+}
+
+// TestARelayIsNotADelivery is the widening this must NOT take, pinned negatively.
+//
+// "Any mail mentioning the item id" would count mg-6ff4's case — its filer was
+// told by a mayor relay at 01:22Z — and a relayed headline is not a verdict. The
+// distinction worth preserving is WHO DISCHARGED THE OBLIGATION, not whether the
+// filer happened to hear something. Each sub-case below is mail in the right
+// mailbox, naming the right item, that is still not a verdict.
+func TestARelayIsNotADelivery(t *testing.T) {
+	for _, tc := range []struct {
+		name, id, from, subject string
+	}{
+		{
+			name: "the coordinator relays a headline",
+			id:   "mg-6ff4", from: "mayor",
+			subject: "FYI: mg-6ff4 is done — passing on what I heard",
+		},
+		{
+			name: "pogod mentions the item in something that is not a completion notice",
+			id:   "mg-6ff5", from: "pogod",
+			subject: "stall-watch: mg-6ff5 has been claimed for 4h with no driver",
+		},
+		{
+			name: "pogod's completion notice is about a DIFFERENT item",
+			id:   "mg-6ff6", from: "pogod",
+			subject: "COMPLETED: mg-9999 — some other item entirely",
+		},
+		{
+			name: "pogod reports its own notification as UNDELIVERABLE",
+			id:   "mg-6ff7", from: "pogod",
+			subject: "UNDELIVERABLE COMPLETED: mg-6ff7 — the notice never landed",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			f.item(tc.id, "filer-a", "relayed, not delivered", "done")
+			f.sidecar(tc.id, "done", "polecat-wr1")
+			f.land(tc.id, "2026-08-13T02:44:18Z", "done")
+			f.mail("filer-a", "new", tc.from, tc.subject, "2026-08-13T02:45:00Z")
+
+			row := rowIn(t, f.scan(Options{Filer: "filer-a"}), tc.id)
+			if row.Status != Dropped {
+				t.Errorf("%q scored %s, want %s — a predicate that cannot tell a verdict from a MENTION "+
+					"of one counts talk about the thing alongside the thing", tc.subject, row.Status, Dropped)
+			}
+		})
+	}
+}
+
+// TestATruePositiveIsNotSilencedByTheNewChannel is the positive control the
+// acceptance criterion names, and it is the whole risk of this change: a fix that
+// stops false positives by stopping the detector is worse than the defect.
+//
+// The store here is the awkward one — pogod IS notifying, in this very mailbox,
+// about other items — so a predicate that had gone slack on the sender or on the
+// item id would pass everything.
+func TestATruePositiveIsNotSilencedByTheNewChannel(t *testing.T) {
+	f := newFixture(t)
+	for _, id := range []string{"mg-c001", "mg-c002"} {
+		f.item(id, "filer-a", "pogod covered this one", "done")
+		f.sidecar(id, "done", "polecat-w"+id[3:])
+		f.land(id, "2026-08-13T02:10:00Z", "done")
+		f.notify("filer-a", id, "pogod covered this one")
+	}
+	// The genuine drop: the worker never reported, and NO notice names this item.
+	f.item("mg-c003", "filer-a", "nobody reported this one at all", "done")
+	f.sidecar("mg-c003", "done", "polecat-wc3")
+	f.land("mg-c003", "2026-08-13T02:20:00Z", "done")
+
+	rep := f.scan(Options{Filer: "filer-a"})
+	if got := statusIn(t, rep, "mg-c003"); got != Dropped {
+		t.Fatalf("the item nobody reported on is %s, want %s — the fix must not silence the true positives",
+			got, Dropped)
+	}
+	if rep.Dropped != 1 || rep.Delivered != 2 {
+		t.Errorf("counts are %d dropped / %d delivered, want 1 / 2", rep.Dropped, rep.Delivered)
+	}
+	if !rep.Actionable() {
+		t.Error("a report holding a genuine drop is not Actionable()")
+	}
+}
+
+// TestTheReportEnumeratesTheChannelsItChecked. A finding that quantifies over
+// channels is only as honest as its list of them: this detector mis-reported for
+// two hours because its claim covered a channel set nobody had told it about, and
+// the fix that makes that impossible again is printing the list with the finding.
+func TestTheReportEnumeratesTheChannelsItChecked(t *testing.T) {
+	f := newFixture(t)
+	f.emptyBox("filer-a")
+	f.item("mg-e0e0", "filer-a", "dropped", "done")
+	f.sidecar("mg-e0e0", "done", "polecat-we0")
+	f.land("mg-e0e0", "2026-08-13T02:44:18Z", "done")
+
+	rep := f.scan(Options{Filer: "filer-a"})
+	if len(rep.Channels) != len(Channels()) {
+		t.Fatalf("the report enumerates %d channel(s), want %d", len(rep.Channels), len(Channels()))
+	}
+	out := rep.Render(false, false)
+	if !strings.Contains(out, "CHANNELS CHECKED") {
+		t.Errorf("the report does not enumerate its channels:\n%s", out)
+	}
+	for _, ch := range Channels() {
+		if !strings.Contains(out, string(ch)) {
+			t.Errorf("the report does not name the %s channel:\n%s", ch, out)
+		}
+		if !strings.Contains(out, ch.Looked()) {
+			t.Errorf("the report names %s without saying what was looked at for it:\n%s", ch, out)
+		}
+	}
+}
+
+// TestNoSentenceClaimsAVerdictReachedNobody is §1 of the ticket, asserted against
+// the rendered output rather than reviewed by eye.
+//
+// The near end is "no channel this run checked carried a verdict". The far end is
+// "the verdict reached nobody", which quantifies over every channel there is. The
+// near end costs nothing to say and is true in both regimes; the far end was false
+// within two hours of being written. THIS TEST IS THE ONLY THING THAT MAKES THE
+// WORDING A CONTRACT rather than a preference.
+func TestNoSentenceClaimsAVerdictReachedNobody(t *testing.T) {
+	f := newFixture(t)
+	f.emptyBox("filer-a")
+	f.item("mg-a0a0", "filer-a", "dropped", "done")
+	f.sidecarWithVerdict("mg-a0a0", "done", "polecat-wa0", "pass", "the outcome exists")
+	f.land("mg-a0a0", "2026-08-13T02:44:18Z", "done")
+	f.item("mg-a0a1", "filer-a", "delivered", "done")
+	f.sidecar("mg-a0a1", "done", "polecat-wa1")
+	f.land("mg-a0a1", "2026-08-13T02:45:18Z", "done")
+	f.mail("filer-a", "cur", "wa1", "mg-a0a1 VERDICT", "2026-08-13T02:44:00Z")
+
+	rep := f.scan(Options{Filer: "filer-a"})
+	out := rep.Render(true, false)
+	for _, forbidden := range []string{
+		"never received",
+		"never told",
+		"was never",
+		"no verdict reached",
+		"did not reach",
+		"reached nobody",
+		"nobody ever heard",
+	} {
+		if strings.Contains(strings.ToLower(out), forbidden) {
+			t.Errorf("the report claims the FAR end (%q). It measures which of its listed channels "+
+				"carried a verdict; anything stronger is a claim about a channel set that grew once "+
+				"already:\n%s", forbidden, out)
+		}
+	}
+	if !strings.Contains(out, "no channel above carried a verdict to the filer") {
+		t.Errorf("the report does not state the near end in words:\n%s", out)
+	}
+}
+
+// TestTheThreeClassesAreSeparateAndNotOneNumber is ADDITION 3: 4/4/2 across nine
+// collapsed into a single DROPPED count, when only the last pair was
+// unrecoverable. A row whose verdict is on disk needs handing over; a row with
+// nothing recorded is the only actual loss.
+func TestTheThreeClassesAreSeparateAndNotOneNumber(t *testing.T) {
+	f := newFixture(t)
+	f.emptyBox("filer-a")
+
+	// verdict on disk, delivered -> fine
+	f.item("mg-1001", "filer-a", "fine", "done")
+	f.sidecarWithVerdict("mg-1001", "done", "polecat-w01", "pass", "delivered and recorded")
+	f.land("mg-1001", "2026-08-13T01:00:00Z", "done")
+	f.mail("filer-a", "cur", "w01", "mg-1001 VERDICT", "2026-08-13T00:59:00Z")
+
+	// verdict on disk, nothing delivered -> ROUTING, recoverable now
+	f.item("mg-1002", "filer-a", "routing failure", "done")
+	f.sidecarWithVerdict("mg-1002", "done", "polecat-w02", "partial", "recorded but nobody was sent it")
+	f.land("mg-1002", "2026-08-13T02:00:00Z", "done")
+
+	// nothing on disk, nothing delivered -> LOST
+	f.item("mg-1003", "filer-a", "the real loss", "done")
+	f.sidecar("mg-1003", "done", "polecat-w03")
+	f.land("mg-1003", "2026-08-13T03:00:00Z", "done")
+
+	rep := f.scan(Options{Filer: "filer-a"})
+	if rep.Delivered != 1 || rep.Routing != 1 || rep.Lost != 1 {
+		t.Fatalf("classes are %d delivered / %d routing / %d lost, want 1 / 1 / 1",
+			rep.Delivered, rep.Routing, rep.Lost)
+	}
+	// The arithmetic has to close, or the two axes have been added together.
+	if rep.Routing+rep.Lost != rep.Dropped {
+		t.Errorf("ROUTING %d + LOST %d != DROPPED %d; the recoverability axis must partition the drops exactly",
+			rep.Routing, rep.Lost, rep.Dropped)
+	}
+	if got := rowIn(t, rep, "mg-1002").Class; got != ClassRouting {
+		t.Errorf("a dropped row whose sidecar holds the verdict is %s, want %s", got, ClassRouting)
+	}
+	if got := rowIn(t, rep, "mg-1003").Class; got != ClassLost {
+		t.Errorf("a dropped row with nothing recorded is %s, want %s", got, ClassLost)
+	}
+	out := rep.Render(false, false)
+	for _, want := range []string{"ROUTING 1", "LOST 1", string(ClassRouting), string(ClassLost)} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the report does not separate the classes (%q missing):\n%s", want, out)
+		}
+	}
+}
+
+// TestADroppedRowPrintsTheVerdictItsSidecarHolds is ADDITION 2, and it is the
+// cheap high-value half: this package resolves the WORKER out of the result
+// sidecar, so on a merge-route row it has the verdict open already. Reading one
+// field out of a verdict and then reporting DROPPED without the rest of it is
+// looking past the answer.
+func TestADroppedRowPrintsTheVerdictItsSidecarHolds(t *testing.T) {
+	f := newFixture(t)
+	f.emptyBox("mayor")
+	f.item("mg-687f", "mayor", "ESTABLISH the disposition of two unmerged branches", "done")
+	f.sidecarWithVerdict("mg-687f", "done", "polecat-p687f", "pass",
+		"Established the disposition of both branches by content, not patch-id.")
+	f.land("mg-687f", "2026-08-13T02:44:30Z", "done")
+
+	rep := f.scan(Options{Filer: "mayor"})
+	row := rowIn(t, rep, "mg-687f")
+	if row.Verdict == nil {
+		t.Fatal("the row carries no verdict, though the sidecar this package already opened holds one")
+	}
+	if row.Verdict.Word != "pass" {
+		t.Errorf("Verdict.Word = %q, want pass", row.Verdict.Word)
+	}
+	if row.Verdict.Sidecar != filepath.Join(f.root, "work", "done", "mg-687f.result.json") {
+		t.Errorf("Verdict.Sidecar = %q; it must be the EXPLICIT path this run read, never a glob "+
+			"across the lifecycle directories", row.Verdict.Sidecar)
+	}
+	out := rep.Render(false, false)
+	for _, want := range []string{
+		"pass",
+		"Established the disposition of both branches",
+		row.Verdict.Sidecar,
+		"the merge route: nothing on it asks the worker to mail anyone",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the dropped row does not print %q — a row that says nobody was told must also say "+
+				"what they should have been told:\n%s", want, out)
+		}
+	}
+}
+
+// TestABareStringVerdictIsStillAVerdict.
+//
+// The live store holds BOTH shapes. Measured 2026-08-13: of the 140 result
+// sidecars under work/done, 121 record a `verdict` key at all — 113 as an object
+// (`"verdict":{"verdict":"pass",…}`) and 8 as a bare string. "A sidecar exists"
+// (140 of 141) and "a sidecar records a verdict" (121 of 140) are different
+// measurements and this test is about the second. This is why
+// `jq -r '.verdict.verdict'` is not the repair for `jq -r .result` — on those 8 it
+// returns `null` at exit 0, which is the SAME failure one level down: a wrong
+// question that reads as a blank answer.
+func TestABareStringVerdictIsStillAVerdict(t *testing.T) {
+	f := newFixture(t)
+	f.emptyBox("filer-a")
+	f.item("mg-1c60", "filer-a", "the sidecar records a bare string verdict", "done")
+	f.sidecarRaw("mg-1c60", "done", `{"branch":"polecat-w16","completed_by":"refinery","verdict":"pass"}`)
+	f.land("mg-1c60", "2026-08-13T02:00:00Z", "done")
+
+	// And a shape neither reading understands, which is still RECORDED: claiming a
+	// loss there would be the report asserting something it did not measure.
+	f.item("mg-1c61", "filer-a", "the sidecar records a verdict in an odd shape", "done")
+	f.sidecarRaw("mg-1c61", "done", `{"branch":"polecat-w17","verdict":{"kind":"review","rationale":"x"}}`)
+	f.land("mg-1c61", "2026-08-13T02:01:00Z", "done")
+
+	rep := f.scan(Options{Filer: "filer-a"})
+	row := rowIn(t, rep, "mg-1c60")
+	if row.Verdict == nil || row.Verdict.Word != "pass" {
+		t.Fatalf("a bare-string verdict read as %+v; the eight sidecars shaped like this in the live "+
+			"store must not read as no verdict at all", row.Verdict)
+	}
+	if row.Class != ClassRouting {
+		t.Errorf("Class = %s for a row whose verdict is on disk, want %s", row.Class, ClassRouting)
+	}
+	if odd := rowIn(t, rep, "mg-1c61"); odd.Verdict == nil || odd.Class != ClassRouting {
+		t.Errorf("a verdict in an unrecognised shape read as class %s with verdict %+v; it is RECORDED, "+
+			"so the row is recoverable from the file", odd.Class, odd.Verdict)
+	}
+}
+
+// TestAnUnreachableFilerIsSeparatedFromAnUntoldOne. "Nobody told them" and "there
+// was nobody to tell" are different findings and they scored identically before:
+// g111 had no mailbox at all, and a filer that is an exited polecat still HAS one
+// (mg never removes a mailbox), so pogod redirects its notice to the coordinator.
+func TestAnUnreachableFilerIsSeparatedFromAnUntoldOne(t *testing.T) {
+	f := newFixture(t)
+	f.emptyBox("pm-pogo")
+
+	// Reachable and not told.
+	f.item("mg-2001", "pm-pogo", "reachable, untold", "done")
+	f.sidecar("mg-2001", "done", "polecat-w21")
+	f.land("mg-2001", "2026-08-13T02:00:00Z", "done")
+
+	// No mailbox at all: no channel could have reached this filer.
+	f.item("mg-2002", "g111", "no mailbox anywhere", "done")
+	f.sidecar("mg-2002", "done", "polecat-w22")
+	f.land("mg-2002", "2026-08-13T02:01:00Z", "done")
+
+	// An exited polecat: pogod sent the notice to the coordinator and said so.
+	f.item("mg-2003", "pf32a", "filer is an exited polecat", "done")
+	f.sidecar("mg-2003", "done", "polecat-w23")
+	f.land("mg-2003", "2026-08-13T02:02:00Z", "done")
+	f.emptyBox("pf32a")
+	f.mail("mayor", "new", "pogod",
+		"COMPLETED: mg-2003 (filed by pf32a, who is gone) — filer is an exited polecat",
+		"2026-08-13T02:03:00Z")
+
+	rep := f.scan(Options{})
+	if got := rowIn(t, rep, "mg-2001").Reach; got != ReachMailbox {
+		t.Errorf("a reachable filer's row has reach %q, want %q", got, ReachMailbox)
+	}
+	if got := rowIn(t, rep, "mg-2002").Reach; got != ReachNoMailbox {
+		t.Errorf("a filer with no mailbox has reach %q, want %q", got, ReachNoMailbox)
+	}
+	redirected := rowIn(t, rep, "mg-2003")
+	if redirected.Reach != ReachRedirected || redirected.RedirectedTo != DefaultCoordinator {
+		t.Errorf("an exited polecat's row has reach %q -> %q, want %q -> %q",
+			redirected.Reach, redirected.RedirectedTo, ReachRedirected, DefaultCoordinator)
+	}
+	// A notice REDIRECTED to the coordinator is not a delivery to the filer: the
+	// obligation was discharged as far as it could be, and the filer still was not
+	// told. Both facts, separately.
+	if redirected.Status != Dropped {
+		t.Errorf("a redirected notice scored %s for the filer it was ABOUT, want %s",
+			redirected.Status, Dropped)
+	}
+	if rep.Dropped != 3 || rep.Unreachable != 2 {
+		t.Errorf("counts are %d dropped / %d unreachable, want 3 / 2", rep.Dropped, rep.Unreachable)
+	}
+}
+
+// TestTheRedirectedNoticeIsADeliveryToTheCOORDINATORsOwnItems — the same message
+// shape must not become a delivery for whoever's mailbox it happens to sit in.
+func TestTheRedirectedNoticeIsNotADeliveryToWhoeverHoldsIt(t *testing.T) {
+	f := newFixture(t)
+	f.item("mg-3001", "mayor", "mayor filed this one", "done")
+	f.sidecar("mg-3001", "done", "polecat-w31")
+	f.land("mg-3001", "2026-08-13T02:00:00Z", "done")
+	// The notice in mayor's box says it was for somebody else.
+	f.mail("mayor", "new", "pogod",
+		"COMPLETED: mg-3001 (filed by pf32a, who is gone) — mayor filed this one",
+		"2026-08-13T02:03:00Z")
+
+	if got := statusIn(t, f.scan(Options{Filer: "mayor"}), "mg-3001"); got != Dropped {
+		t.Errorf("a notice addressed to somebody else scored %s in mayor's box, want %s", got, Dropped)
+	}
+}
+
+// TestAnUndecidableRowPogodCoveredIsADelivery. The worker channel needs the
+// worker's identity; the pogod channel does not, because the notice names the
+// ITEM. An UNDECIDABLE row that pogod actually covered is a delivery, not a blind
+// spot, and reporting the blind spot would be this detector understating what it
+// can see.
+func TestAnUndecidableRowPogodCoveredIsADelivery(t *testing.T) {
+	f := newFixture(t)
+	f.emptyBox("filer-a")
+	f.item("mg-4001", "filer-a", "no sidecar names a worker", "done")
+	f.land("mg-4001", "2026-08-13T02:00:00Z", "done")
+	f.notify("filer-a", "mg-4001", "no sidecar names a worker")
+
+	rep := f.scan(Options{Filer: "filer-a"})
+	row := rowIn(t, rep, "mg-4001")
+	if row.Status != Delivered || row.DeliveredBy != ChannelPogod {
+		t.Errorf("an unresolvable-worker row pogod notified is %s via %q, want %s via %q",
+			row.Status, row.DeliveredBy, Delivered, ChannelPogod)
+	}
+	if rep.Undecidable != 0 {
+		t.Errorf("Undecidable = %d, want 0; the notice names the item, so the worker's identity is "+
+			"not needed to see the delivery", rep.Undecidable)
+	}
+}
+
+// TestAnUndecidableRowIsNotLabelledLOST. The label a row prints must be the class
+// it was PUT IN, not one inferred a second time at render. An UNDECIDABLE row with
+// nothing on disk is a row this detector could not reach; calling it LOST would
+// assert a loss it never measured — the same substitution of one statement for a
+// neighbouring one that this whole change is about.
+func TestAnUndecidableRowIsNotLabelledLost(t *testing.T) {
+	f := newFixture(t)
+	f.emptyBox("filer-a")
+	f.item("mg-6001", "filer-a", "no sidecar names a worker and nothing was recorded", "done")
+	f.land("mg-6001", "2026-08-13T02:00:00Z", "done")
+
+	rep := f.scan(Options{Filer: "filer-a"})
+	if got := rowIn(t, rep, "mg-6001").Class; got != ClassUndecidable {
+		t.Fatalf("Class = %s, want %s", got, ClassUndecidable)
+	}
+	if rep.Lost != 0 {
+		t.Errorf("Lost = %d over a store whose only row is UNDECIDABLE, want 0; the recoverability axis "+
+			"partitions the DROPS", rep.Lost)
+	}
+	out := rep.Render(true, false)
+	if strings.Contains(out, "LOST — no verdict recorded") {
+		t.Errorf("an UNDECIDABLE row is labelled LOST in the output:\n%s", out)
+	}
+}
+
+// TestTheEmittedRetrievalInstructionReturnsTheVerdict.
+//
+// THE ACCEPTANCE CRITERION THIS PINS IS NOT COSMETIC. doctor told three agents to
+// run `mg show <id> --json | jq -r .result`; there is no `result` key on that
+// object at all, so it printed `null` and exited 0 — which reads as "the verdict
+// is blank" rather than "there is nowhere on this object for it to be". That
+// negative then travelled as a colleague's evidence and became a mechanism in a
+// ticket. A retrieval instruction this tool emits is a CLAIM THAT THE ARTIFACT IS
+// THERE, so every instruction the report prints is EXECUTED here against an item
+// known to have a verdict, and a recipe returning `null` at exit 0 fails.
+func TestTheEmittedRetrievalInstructionReturnsTheVerdict(t *testing.T) {
+	f := newFixture(t)
+	f.emptyBox("filer-a")
+	f.item("mg-5001", "filer-a", "an item that definitely HAS a verdict", "done")
+	f.sidecarWithVerdict("mg-5001", "done", "polecat-w51", "partial", "the outcome, recorded in full")
+	f.land("mg-5001", "2026-08-13T02:00:00Z", "done")
+	// A second one in the shape the ticket's own proposed recipe would have failed
+	// on, so the executed check covers both.
+	f.item("mg-5002", "filer-a", "a bare-string verdict", "done")
+	f.sidecarRaw("mg-5002", "done", `{"branch":"polecat-w52","verdict":"pass"}`)
+	f.land("mg-5002", "2026-08-13T02:01:00Z", "done")
+
+	rep := f.scan(Options{Filer: "filer-a"})
+	out := rep.Render(true, false)
+
+	instructions := emittedCommands(out)
+	if len(instructions) != 2 {
+		t.Fatalf("the report emitted %d retrieval instruction(s) for two rows with verdicts, want 2:\n%s",
+			len(instructions), out)
+	}
+	// The forbidden recipe, by name: it is the one that returns null at exit 0.
+	for _, bad := range []string{"jq -r .result", `jq -r '.result'`, "mg show"} {
+		if strings.Contains(out, bad) {
+			t.Errorf("the report emits %q, which cannot satisfy the read it promises:\n%s", bad, out)
+		}
+	}
+
+	jqPath, err := exec.LookPath("jq")
+	for i, cmdline := range instructions {
+		// Executed as a reader would: the printed command, verbatim, through a
+		// shell. Skipped only for want of jq — never asserted around.
+		if err != nil {
+			t.Skipf("jq is not on PATH; the emitted instruction %q cannot be executed here", cmdline)
+		}
+		_ = jqPath
+		got, runErr := exec.Command("sh", "-c", cmdline).CombinedOutput()
+		text := strings.TrimSpace(string(got))
+		if runErr != nil {
+			t.Errorf("instruction %d (%s) failed: %v\n%s", i, cmdline, runErr, text)
+			continue
+		}
+		if text == "" || text == "null" {
+			t.Errorf("instruction %d (%s) returned %q against an item known to have a verdict. "+
+				"A recipe that prints null at exit 0 is the defect this criterion exists for.",
+				i, cmdline, text)
+		}
+	}
+	// And independent of any shell: the path the report printed is a file this
+	// process can read, whose verdict is the one the report claimed.
+	for _, row := range rep.DroppedRows() {
+		if row.Verdict == nil {
+			continue
+		}
+		data, rerr := os.ReadFile(row.Verdict.Sidecar)
+		if rerr != nil {
+			t.Errorf("the report printed a path it cannot read: %s (%v)", row.Verdict.Sidecar, rerr)
+			continue
+		}
+		if !strings.Contains(string(data), row.Verdict.Word) {
+			t.Errorf("the sidecar at %s does not contain the verdict %q the report attributed to it",
+				row.Verdict.Sidecar, row.Verdict.Word)
+		}
+	}
+}
+
+// emittedCommands pulls every shell command the report tells its reader to run.
+var emittedCommand = regexp.MustCompile(`(?m)^\s*read it in full:\s+(jq .*)$`)
+
+func emittedCommands(out string) []string {
+	var cmds []string
+	for _, m := range emittedCommand.FindAllStringSubmatch(out, -1) {
+		cmds = append(cmds, strings.TrimSpace(m[1]))
+	}
+	return cmds
 }
 
 // ---------------------------------------------------------------- blindness

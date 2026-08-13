@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/drellem2/pogo/internal/cli"
+	"github.com/drellem2/pogo/internal/config"
 	"github.com/drellem2/pogo/internal/verdictwatch"
 )
 
@@ -49,34 +50,85 @@ func newCheckVerdictsCmd(jsonOutput *bool) *cobra.Command {
 	)
 	cmd := &cobra.Command{
 		Use:   "check-verdicts",
-		Short: "Report work items that landed without their filer ever receiving a verdict (never files anything)",
-		Long: `Report every work item that reached ` + "`done`" + ` or ` + "`archived`" + ` whose FILER never
-received a verdict mail from the worker, ORDERED BY WHEN IT LANDED — so a
-backlog can be RECOVERED, not merely alarmed about.
+		Short: "Report landed work items no checked channel carried a verdict to the filer for (never files anything)",
+		Long: `Report every work item that reached ` + "`done`" + ` or ` + "`archived`" + ` that NONE OF THE
+CHANNELS BELOW carried a verdict to its filer over, ORDERED BY WHEN IT LANDED —
+so a backlog can be RECOVERED, not merely alarmed about.
 
-THE PREDICATE, and both halves come from macguffin's own store:
+THE PREDICATE, and every half comes from macguffin's own store:
 
   the landing       work.done / work.archive in events.jsonl
   the filer         ` + "`creator:`" + ` in the item's own frontmatter
   the worker        ` + "`polecat-<name>`" + ` in the item's result sidecar
-  the verdict mail  a message in the filer's mailbox whose From: is that worker
+  the channels      every way a verdict can arrive, ENUMERATED:
+                      worker-mail   a message in the filer's mailbox whose
+                                    From: is THAT WORKER
+                      pogod-notify  pogod's own completion notice for THAT
+                                    ITEM (From: pogod), added by mg-f120
 
 Findings come in three kinds, not two:
 
-  DROPPED       landed, and the filer's mailbox holds nothing from the worker.
-                The finding this exists to produce.
-  DELIVERED     the filer holds a message from the worker. Archived mail counts:
-                filing a verdict away is not losing it.
-  UNDECIDABLE   the worker cannot be resolved from mg's own store, so NEITHER
-                verdict can be reached. Counted and listed on its own rather
-                than folded into either — a detector that silently absorbs what
-                it cannot reach is the defect this lineage keeps rediscovering.
+  DROPPED       landed, and none of the channels above carried a verdict to the
+                filer. The finding this exists to produce.
+  DELIVERED     a channel carried it, AND THE REPORT NAMES WHICH. Archived mail
+                counts: filing a verdict away is not losing it. "worker-mail"
+                means a polecat did its job; "pogod-notify" means a backstop
+                caught it. Those are different facts about system health and
+                collapsing them destroys what this was built to watch.
+  UNDECIDABLE   the worker cannot be resolved from mg's own store, so the worker
+                channel cannot be checked at all. Counted and listed on its own
+                rather than folded into either — a detector that silently
+                absorbs what it cannot reach is the defect this lineage keeps
+                rediscovering.
 
-WHAT IT CANNOT SEE, stated here rather than in a footnote. A verdict delivered
-by any channel other than macguffin mail — a commit subject, a docs file, a
-spoken handover — is invisible and is reported as DROPPED. That is the intended
-polarity: the complaint this was built for is precisely that a commit subject is
-not delivery.
+WHAT IT MEASURES IS THE NEAR END, and every sentence it prints says so. A
+DROPPED row means the channels above carried nothing. It does NOT say a verdict
+did not reach the filer: that is a claim about EVERY channel there is, the
+channel set grew by one on 2026-08-12, and it will grow again. Until then this
+command measured "the worker mailed the filer" and reported "no verdict reached
+you" — so mg-f120's pogod notification, which is macguffin mail in the filer's
+own mailbox about the right item and merely has a different SENDER, scored
+DROPPED. The fix for verdict delivery was being measured by an instrument
+structurally unable to register it working. When a channel is added, add it to
+the list above; leaving it out does not narrow the report, it falsifies it.
+
+A RELAY IS NOT A DELIVERY. A coordinator forwarding "your item is done" is not
+counted, however plainly it names the item: the question is WHO DISCHARGED THE
+OBLIGATION, and a predicate that cannot tell a verdict from a mention of one
+counts talk about the thing alongside the thing. Each channel therefore matches
+a SENDER plus that sender's own notice shape.
+
+Two things are deliberately NOT channels, named here so their absence is not read
+as an oversight. The refinery's MERGED mail to the coordinator reports a merge —
+branch, target, SHA — and says nothing about the outcome, so it is a relay by the
+above test; and because pogod SKIPS its own notice for a coordinator-filed item on
+the merge route (the refinery has already written), a coordinator's merge-route
+rows are dropped here by construction. That is mg-da12's finding and it is a
+different repair, in a different file.
+
+THE DROPPED ROWS SPLIT IN TWO, and the split is the difference between work you
+can finish now and work that is gone:
+
+  ROUTING   the verdict IS recorded in the item's result sidecar and no channel
+            carried it. The report PRINTS THAT VERDICT — this command has the
+            sidecar open anyway to resolve the worker, and a row that says
+            "nobody was told" alongside what they should have been told is
+            recoverable in one pass rather than one item at a time.
+  LOST      no channel carried it and nothing is recorded either. The only
+            class that is an actual loss.
+
+A filer that CANNOT be reached is separated from one that was reachable and not
+told (` + "`reach`" + ` on each row): no mailbox at all, or a notice pogod redirected to
+the coordinator because the filer is not a live agent. "Nobody told them" and
+"there was nobody to tell" are different findings.
+
+THE VERDICT IS NOT ON THE WORK ITEM OBJECT. ` + "`mg show <id> --json`" + ` has no ` + "`result`" + `
+key at all — not an empty one — so pulling one out of it yields null at exit 0,
+and a missing key is indistinguishable from a blank verdict that way. That is how
+one such recipe survived being handed to three agents. This command does not emit
+a retrieval instruction it has not executed: it reads the item's OWN result
+sidecar, by explicit path rather than by a glob across the lifecycle directories,
+prints the verdict it found there, and prints the command that reproduces it.
 
 REPORTS ONLY. It never files the missing verdict, never mails on anyone's
 behalf, and never edits an item. Re-sending a verdict would have to forge a
@@ -94,10 +146,12 @@ nothing is a different thing — it is an answer to the question asked — and e
 0 saying, in words, that it judged nothing.
 
 --probe runs the CONSTRUCTIVE probe instead of the census: it builds a throwaway
-macguffin store, drives the real mg binary through new/claim/done, drops one
-verdict on purpose and delivers its matched control, and reports whether this
-detector went RED on the first and GREEN on the second. Use it when you are
-looking at a clean census and want to know whether to believe it. The same probe
+macguffin store, drives the real mg binary through new/claim/done, and reports
+whether this detector went RED on a verdict dropped on purpose and GREEN on each
+of its matched controls — the worker mailing the filer, pogod's notice covering
+an item the worker never mailed about, and a coordinator RELAY, which must stay
+RED because a relayed headline is not a verdict. Use it when you are looking at
+a clean census and want to know whether to believe it. The same probe
 runs in ` + "`go test ./...`" + `, so the gate exercises it on every merge — the original
 verdictwatch's probes were dead for two days while its census stayed green, and
 that is the failure this flag and that test exist to prevent.
@@ -124,7 +178,14 @@ this run measured nothing.`,
 				os.Exit(exitVerdictUsage)
 			}
 
-			rep, err := verdictwatch.Scan(verdictwatch.Options{Root: root, Filer: filer, Since: since})
+			// The coordinator is read from config rather than assumed, because it
+			// is only used to recognise a notice pogod REDIRECTED to it — and a
+			// fleet whose coordinator is not `mayor` would otherwise have every
+			// redirected row read as a filer nobody tried to tell.
+			rep, err := verdictwatch.Scan(verdictwatch.Options{
+				Root: root, Filer: filer, Since: since,
+				Coordinator: config.Load().Agents.CoordinatorName(),
+			})
 			if err != nil {
 				// A store that could not be read is not "no findings". This exits
 				// as an instrument failure rather than an ordinary error for the

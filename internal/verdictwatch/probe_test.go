@@ -39,6 +39,11 @@ var clausesTheProbeRestsOn = []string{
 	mgcontract.NewPrintsTheCreatedID,
 	mgcontract.NewRecordsTheCreatorInFrontmatter,
 	mgcontract.DoneResultSidecarRecordsTheBranch,
+	// The verdict in that same sidecar is what the ROUTING class and the report's
+	// emitted retrieval instruction both rest on (mg-4e02): if `mg done --result`
+	// stopped preserving it, every recoverable row would read as an unrecoverable
+	// one and the path the report prints would return null.
+	mgcontract.DoneResultSidecarPreservesTheVerdict,
 	mgcontract.EventsJSONLRecordsLandings,
 	mgcontract.MailSendCreateRegistersANewMailbox,
 	mgcontract.MailIsAMaildirUnderTheStore,

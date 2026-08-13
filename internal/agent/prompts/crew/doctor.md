@@ -163,18 +163,37 @@ pogo check-strandedmail          # Mail sitting in a mailbox NO live mail-check 
                                  # Reading is only half the recovery: if the intended
                                  # recipient is still running, tell the SENDER to
                                  # re-send to the agent name (mg-aa96).
-pogo check-verdicts --quiet      # Work that reached done/archived while the party who
-                                 # FILED it was never told how it came out. Ordered
-                                 # oldest landing first, so a backlog can be RECOVERED
-                                 # rather than merely alarmed about. Exit 3 means the
-                                 # run MEASURED NOTHING (lost events.jsonl, unreadable
-                                 # mail tree) — that is not a clean fleet. Scope it
-                                 # with --filer/--since; report only, it never files
-                                 # the missing verdict (mg-f5dd).
+pogo check-verdicts              # Work that reached done/archived that NONE of the
+                                 # channels it checks carried a verdict to the filer
+                                 # over — it prints the channel list, and that list is
+                                 # the whole of the claim. It does NOT say the verdict
+                                 # reached nobody (mg-4e02: it measured the worker's
+                                 # mail and reported the far end, so mg-f120's pogod
+                                 # notice — same transport, same mailbox, different
+                                 # SENDER — read as DROPPED for every item it covered).
+                                 # DELIVERED names the channel: worker-mail means a
+                                 # polecat did its job, pogod-notify means a backstop
+                                 # caught it. Read the DROPPED split before chasing
+                                 # anything: a ROUTING row PRINTS the verdict from the
+                                 # item's sidecar and can be handed over as it stands,
+                                 # LOST rows are the only real loss. `reach` separates
+                                 # a filer nobody could reach from one nobody told.
+                                 # Ordered oldest landing first. Default scope is EVERY
+                                 # filer — run it unfiltered first; a filtered census
+                                 # is what made a wrong scope legible last time. Exit 3
+                                 # means the run MEASURED NOTHING (lost events.jsonl,
+                                 # unreadable mail tree) — that is not a clean fleet.
+                                 # Report only; never files the missing verdict (mg-f5dd).
 pogo check-verdicts --probe      # Ask whether that detector can still FIRE: builds a
-                                 # throwaway store, drops one verdict on purpose and
-                                 # delivers its control, and reports RED/GREEN. Run it
-                                 # when a green census is the thing you are doubting.
+                                 # throwaway store, drops one verdict on purpose,
+                                 # delivers its controls by BOTH channels, relays a
+                                 # headline that must stay RED, and reports RED/GREEN.
+                                 # Run it when a green census is the thing you doubt.
+                                 # Do NOT read a verdict with `mg show <id> --json |
+                                 # jq -r .result`: there is no `result` key on that
+                                 # object, so it prints null at exit 0 and reads as a
+                                 # blank verdict. check-verdicts prints the verdict and
+                                 # the command that reproduces it (mg-4e02).
 mg mail read <msg-id>            # Read a message
 mg mail send <agent> --from=doctor --subject="<subj>" --body-file - <<'EOF'
 <body>

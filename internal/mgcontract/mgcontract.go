@@ -99,6 +99,7 @@ const (
 	MailListJSONReportsUnreadCounts         = "mail/list-json-reports-unread-counts"
 	NewRecordsTheCreatorInFrontmatter       = "new/records-the-creator-in-frontmatter"
 	DoneResultSidecarRecordsTheBranch       = "done/result-sidecar-records-the-branch"
+	DoneResultSidecarPreservesTheVerdict    = "done/result-sidecar-preserves-the-verdict"
 	EventsJSONLRecordsLandings              = "events/jsonl-records-work-done-and-archive"
 	MailIsAMaildirUnderTheStore             = "mail/is-a-maildir-under-the-store"
 )
@@ -527,7 +528,7 @@ var clauses = []Clause{
 		Name: DoneResultSidecarRecordsTheBranch,
 		Why:  "the branch in the result sidecar is the ONLY worker identity macguffin records; lose it and every landed item goes UNDECIDABLE, which check-verdicts reports as neither delivered nor dropped",
 		Dependents: []string{
-			"internal/verdictwatch (sidecarWorker, resolveWorker)",
+			"internal/verdictwatch (readSidecar, resolveWorker)",
 			"internal/verdictwatch (the constructive probe's `land` fixture)",
 		},
 		probe: func(s *store) error {
@@ -558,6 +559,56 @@ var clauses = []Clause{
 			}
 			if side.Branch != "polecat-probe1" {
 				return fmt.Errorf("the result sidecar records branch %q, want the caller's own %q", side.Branch, "polecat-probe1")
+			}
+			return nil
+		},
+	},
+	{
+		Name: DoneResultSidecarPreservesTheVerdict,
+		Why: "check-verdicts PRINTS the verdict out of the sidecar and emits the path it read, so a `mg done --result` " +
+			"that dropped or rewrote the verdict key would turn every recoverable ROUTING row into a LOST one and make " +
+			"an emitted retrieval instruction return null — the exact failure mg-4e02 was filed for, one level down",
+		Dependents: []string{
+			"internal/verdictwatch (readSidecar, parseVerdict, the ROUTING/LOST split)",
+			"internal/verdictwatch (the constructive probe's `landRecording` fixture)",
+		},
+		probe: func(s *store) error {
+			id, err := s.newItem("contract probe", "a body")
+			if err != nil {
+				return err
+			}
+			if out, code, err := s.run("claim", id); err != nil {
+				return err
+			} else if code != 0 {
+				return fmt.Errorf("`mg claim` exited %d:\n%s", code, out)
+			}
+			// BOTH SHAPES, because the live store holds both: 113 sidecars under
+			// work/done record an object and 8 record a bare string. A repair that
+			// read only the first returns null at exit 0 on the second, which
+			// reads as a blank verdict rather than as a wrong question.
+			const result = `{"branch":"polecat-probe2","verdict":{"verdict":"partial","summary":"a recorded outcome"}}`
+			if out, code, err := s.run("done", id, "--result="+result); err != nil {
+				return err
+			} else if code != 0 {
+				return fmt.Errorf("`mg done --result` exited %d:\n%s", code, out)
+			}
+			want := filepath.Join(s.root, "work", "done", id+".result.json")
+			data, rerr := os.ReadFile(want)
+			if rerr != nil {
+				return fmt.Errorf("after `mg done --result` there is no sidecar at %s: %v", want, rerr)
+			}
+			var side struct {
+				Verdict struct {
+					Verdict string `json:"verdict"`
+					Summary string `json:"summary"`
+				} `json:"verdict"`
+			}
+			if jerr := json.Unmarshal(data, &side); jerr != nil {
+				return fmt.Errorf("the result sidecar is not JSON: %v\n%s", jerr, data)
+			}
+			if side.Verdict.Verdict != "partial" || side.Verdict.Summary != "a recorded outcome" {
+				return fmt.Errorf("the result sidecar records verdict %+v, want the caller's own partial/a recorded outcome:\n%s",
+					side.Verdict, data)
 			}
 			return nil
 		},

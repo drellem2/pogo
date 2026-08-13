@@ -2382,33 +2382,76 @@ anything is, so it can gate a schedule or CI step.
 
 Source of truth: `internal/strandedmail/`, `cmd/pogo/checkstrandedmail.go`.
 
-### `pogo check-verdicts` — work that landed while its filer was never told
+### `pogo check-verdicts` — landed work no checked channel told the filer about
 
 A fourth disjoint question, at the other end of the loop. The three above ask
 whether an agent can be reached; this one asks whether the party who FILED a
-piece of work ever heard how it came out.
+piece of work was told how it came out.
 
-The predicate is one line, and both halves come from macguffin's own store:
-**an item reaching `done` (or `archived`) with no verdict mail received by its
-filer is a dropped verdict.** The landing comes from `work.done` / `work.archive`
-in `events.jsonl`, the filer from the item's `creator:` frontmatter, the worker
-from `polecat-<name>` in its result sidecar, and the delivery from a message in
-the filer's mailbox whose `From:` is that worker. Findings are ordered **oldest
-landing first**, because the report exists so a backlog can be *recovered* and
-not merely alarmed about.
+The predicate is one line, and every half comes from macguffin's own store:
+**an item reaching `done` (or `archived`) that none of the channels below carried
+a verdict to its filer over is a dropped verdict.** The landing comes from
+`work.done` / `work.archive` in `events.jsonl`, the filer from the item's
+`creator:` frontmatter, the worker from `polecat-<name>` in its result sidecar.
+Findings are ordered **oldest landing first**, because the report exists so a
+backlog can be *recovered* and not merely alarmed about.
 
-Three kinds, not two. `DROPPED` is the finding. `DELIVERED` counts archived mail
-— filing a verdict away is not losing it, which is why this reads the maildir
-directly instead of `mg mail list --all`, whose output excludes archived
-messages. `UNDECIDABLE` is the detector's own reach: an item whose worker cannot
-be resolved is counted and listed on its own rather than folded into either
+**The channels are enumerated, and the report prints the list** (mg-4e02):
+
+| channel | what is looked at |
+|---|---|
+| `worker-mail` | a message in the filer's mailbox — unread, read **or archived** — whose `From:` is the item's worker |
+| `pogod-notify` | pogod's own completion notice for that item (`From: pogod`, subject `COMPLETED: <id> — …`), the Creator-notification mg-f120 added |
+
+Enumerating them is not documentation for its own sake. Until mg-4e02 this
+command measured *"the worker mailed the filer"* and reported *"no verdict
+reached you"* — the same sentence until 2026-08-12, and not afterwards. mg-f120's
+notice is macguffin mail, in the filer's own mailbox, about the right item, with
+a different **sender**, so from its go-live at 02:01:35Z every item that backstop
+covered scored `DROPPED`. Two mechanisms built weeks apart against the same gap,
+neither aware of the other: the fix for verdict delivery was being measured by an
+instrument structurally unable to register it working, and the `DROPPED` count
+would have climbed as the fix took effect. When a channel is added to the fleet,
+add it here and to `verdictwatch.Channels()`; leaving it out does not narrow the
+report, it falsifies it.
+
+**A relay is not a delivery.** A coordinator forwarding "your item is done" is
+not counted, however plainly it names the item — each channel matches a *sender*
+plus that sender's own notice shape. The question is who discharged the
+obligation, and a predicate that cannot tell a verdict from a mention of one
+counts talk about the thing alongside the thing.
+
+Three kinds, not two. `DROPPED` is the finding. `DELIVERED` **names the channel
+that carried it**, because "a polecat did its job" and "a backstop caught it" are
+different facts about fleet health; archived mail counts, which is why this reads
+the maildir directly instead of `mg mail list --all`, whose output excludes
+archived messages. `UNDECIDABLE` is the detector's own reach: an item whose worker
+cannot be resolved is counted and listed on its own rather than folded into either
 verdict, and it does **not** make the run actionable.
 
-What it cannot see is stated rather than footnoted: a verdict delivered by any
-channel other than macguffin mail — a commit subject, a docs file, a spoken
-handover — is invisible and is reported as dropped. That is the intended
-polarity; the complaint it was built for is precisely that a commit subject is
-not delivery.
+**The dropped rows split in two, on a second axis that is never added to the
+first.** `ROUTING` means the verdict IS recorded in the item's result sidecar and
+no channel carried it — the report **prints that verdict**, with the explicit path
+and the command that reproduces it, because this detector opens that file anyway to
+resolve the worker and a row that says "nobody was told" alongside what they should
+have been told is recoverable in one pass. `LOST` means nothing was delivered and
+nothing recorded either, and it is the only class that is an actual loss. Each row
+also carries a `reach`, which separates a filer that could not be reached at all —
+no mailbox, or a notice pogod redirected to the coordinator because the filer is
+not a live agent — from one that was reachable and was not told.
+
+The verdict is **not** on the work item object: `mg show <id> --json` has no
+`result` key at all, so pulling one out of it yields `null` at exit 0, and a
+missing key is indistinguishable from a blank verdict that way. Every retrieval
+instruction this command emits is executed in its own tests against an item known
+to have a verdict; a recipe that returned `null` would fail them.
+
+What it cannot see is stated rather than footnoted: a verdict delivered by a
+channel *not* in the table above — a commit subject, a docs file, a spoken
+handover — is invisible and is reported as dropped. That is the intended polarity;
+the complaint it was built for is precisely that a commit subject is not delivery.
+What the report may therefore not say is that the verdict reached nobody, and it
+does not say it.
 
 It **reports only**, and that is a boundary rather than a stage. It never files
 the missing verdict, never mails on anyone's behalf, and never edits an item;
@@ -2426,16 +2469,30 @@ thing — an answer to the question asked — and exits 0 while saying, in words
 that it judged nothing.
 
 **`--probe` asks whether the detector can still fire.** It builds a throwaway
-macguffin store, drives the real `mg` binary through new/claim/done, drops one
-verdict on purpose and delivers its matched control, and reports whether the
-detector went RED on the first and GREEN on the second:
+macguffin store, drives the real `mg` binary through new/claim/done, and reports
+whether the detector went RED on a verdict dropped on purpose and GREEN on each of
+its matched controls. The pair that matters most is the last two: pogod's notice
+and a coordinator relay look nearly identical on disk — macguffin mail, in the
+filer's own box, naming the item — and the detector must call the first a delivery
+and the second a drop, or it either misses every notified item or counts every
+mention of a verdict as one:
 
 ```
 $ pogo check-verdicts --probe
-  [PASS] known-bad input: work landed, worker never mailed the filer
+  [PASS] known-bad input: work landed, nobody mailed the filer
          want DROPPED, got DROPPED
-  [PASS] known-good input: the same work, verdict mailed to the filer
+  [PASS] known-good input: the same work, verdict mailed to the filer by the WORKER
          want DELIVERED, got DELIVERED
+  [PASS] known-good input: the worker mailed nobody and POGOD's Creator-notify told the filer
+         want DELIVERED, got DELIVERED
+  [PASS] known-bad input: the COORDINATOR relayed a headline — a mention of a verdict is not one
+         want DROPPED, got DROPPED
+  [PASS] POGOD's notice is attributed to the pogod channel, not the worker's
+         want pogod-notify, got pogod-notify
+  [PASS] the dropped rows split into ROUTING (verdict on disk) and LOST (nothing recorded)
+         want 1 routing / 1 lost, got 1 routing / 1 lost
+  [PASS] the dropped row PRINTS the verdict its sidecar holds, with the explicit path
+         want verdict printed, got verdict printed
 ```
 
 The same probe runs in `go test ./...`, so the refinery gate exercises it on
