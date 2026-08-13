@@ -123,6 +123,12 @@ var Provider = agent.Provider{
 	// the TUI renders. Workspace trust is handled by TrustDialogHook instead.
 	CommandTemplate: "agent --force",
 
+	// Cursor selects a model with `--model <name>` (see the package comment
+	// above: otherwise ~/.cursor/cli-config.json decides, defaulting to
+	// "auto"). The template pins none, so an agent with no explicit selection
+	// stays on the user's Cursor configuration.
+	ModelFlag: "--model",
+
 	// ContextFile injection: the persona is written to
 	// .cursor/rules/pogo-persona.mdc (created under the agent's working
 	// directory) behind `alwaysApply: true` frontmatter. Cursor loads it

@@ -129,6 +129,12 @@ var Provider = agent.Provider{
 	// truncates the persona's tail (which carries the polecat protocol steps).
 	CommandTemplate: "codex --dangerously-bypass-approvals-and-sandbox -c project_doc_max_bytes=1048576",
 
+	// Codex selects a model with `--model <name>` (its status box advertises
+	// the same choice as "/model to change" — the string this package already
+	// uses as its prompt-ready sentinel). The template pins none, so an agent
+	// with no explicit selection stays on the user's Codex configuration.
+	ModelFlag: "--model",
+
 	// ContextFile injection: the persona is written to AGENTS.override.md in
 	// the agent's working directory (a fresh worktree for polecats). Codex
 	// loads it automatically and prefers it over any checked-in AGENTS.md, so

@@ -26,6 +26,13 @@ var Provider = agent.Provider{
 	// workspace trust dialog — TrustDialogHook handles that separately.
 	CommandTemplate: "claude --dangerously-skip-permissions --append-system-prompt-file {{.PromptFile}}",
 
+	// Claude Code selects a model with `--model <name>`. The template above
+	// deliberately pins none, so an agent with no explicit selection inherits
+	// ~/.claude/settings.json and stays steerable with /model. That default is
+	// the fix for the 2026-07-06 fleet outage; ModelFlag says only HOW to
+	// express a selection when someone makes one. See internal/agent/model.go.
+	ModelFlag: "--model",
+
 	PromptInjection: agent.PromptInjection{
 		Kind: agent.InjectAppendFlag,
 		Flag: "--append-system-prompt-file",

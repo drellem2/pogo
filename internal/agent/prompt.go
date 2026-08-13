@@ -991,6 +991,7 @@ const (
 	metaFieldNudgeOnStart
 	metaFieldWorktree
 	metaFieldProvider
+	metaFieldModel
 )
 
 // metaFieldByKey maps a TOML key name to its bitmask flag. The second return
@@ -1008,6 +1009,8 @@ func metaFieldByKey(key string) (metaFieldFlag, bool) {
 		return metaFieldWorktree, true
 	case "provider":
 		return metaFieldProvider, true
+	case "model":
+		return metaFieldModel, true
 	}
 	return 0, false
 }
@@ -1025,12 +1028,22 @@ func metaFieldByKey(key string) (metaFieldFlag, bool) {
 //   - provider:         harness provider id ("claude", "codex") for this
 //     agent — tier 2 of the per-spawn provider precedence chain (mg-b31b),
 //     beating per-type/global config but yielding to a --provider flag
+//   - model:            model identifier for this agent — tier 2 of the
+//     per-spawn model chain, yielding to a --model flag (mg-e7f5). It is a
+//     ROLE default: it lets polecat-architect ask for a reasoning model without
+//     every dispatch typing it. Note the chain has no third tier: an absent
+//     model: means pogo passes no model argument at all, which is deliberate.
+//     See internal/agent/model.go.
+//
+// provider and model are orthogonal: provider picks which harness binary runs,
+// model picks what that binary talks to.
 type AgentMeta struct {
 	RestartOnCrash bool   `json:"restart_on_crash,omitempty"`
 	AutoStart      bool   `json:"auto_start,omitempty"`
 	NudgeOnStart   string `json:"nudge_on_start,omitempty"`
 	Worktree       bool   `json:"worktree,omitempty"`
 	Provider       string `json:"provider,omitempty"`
+	Model          string `json:"model,omitempty"`
 
 	// explicit is a bitmask of recognized keys that appeared in the
 	// frontmatter. Unexported so it stays out of JSON output; uint8 so
@@ -1219,6 +1232,20 @@ func assignMetaField(meta *AgentMeta, key, raw string) error {
 			return fmt.Errorf("%s: %w", key, err)
 		}
 		meta.Provider = s
+	case "model":
+		s, err := parseFrontmatterString(raw)
+		if err != nil {
+			return fmt.Errorf("%s: %w", key, err)
+		}
+		// Deliberately NOT ValidateModel'd here, even though the parser is the
+		// earliest reader and could name the offending line. A parse error
+		// invalidates the WHOLE frontmatter block — and StartCrewAgent
+		// discards parse errors by design, so on that path a mistyped model
+		// would silently take auto_start, restart_on_crash and nudge_on_start
+		// down with it. Refusing at resolution instead (ResolveModel, called by
+		// both spawn paths, fatal in both) keeps the blast radius at exactly the
+		// field that is wrong.
+		meta.Model = s
 	}
 	meta.explicit |= flag
 	return nil

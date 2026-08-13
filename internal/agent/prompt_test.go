@@ -1800,6 +1800,97 @@ func TestParsePromptFrontmatterNoProvider(t *testing.T) {
 	}
 }
 
+// TestParsePromptFrontmatterModel verifies the model: frontmatter key parses
+// into AgentMeta.Model and registers in the explicit bitmask — the tier-2 input
+// to per-spawn model resolution (mg-e7f5). It also pins the orthogonality:
+// provider and model are separate keys on separate axes, and setting one must
+// not disturb the other.
+func TestParsePromptFrontmatterModel(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "polecat-architect.md")
+	content := "+++\nprovider = \"claude\"\nmodel = \"fable\"\nworktree = true\n+++\n# Architect\n"
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	meta, body, err := ParsePromptFrontmatter(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta.Model != "fable" {
+		t.Errorf("Model = %q, want fable", meta.Model)
+	}
+	if !meta.HasField("model") {
+		t.Error("expected HasField(model) = true")
+	}
+	if meta.Provider != "claude" {
+		t.Errorf("Provider = %q, want claude — model must not disturb provider", meta.Provider)
+	}
+	if body != "# Architect\n" {
+		t.Errorf("body = %q, want %q", body, "# Architect\n")
+	}
+}
+
+// TestParsePromptFrontmatterNoModel verifies a prompt without a model: key
+// leaves AgentMeta.Model empty and HasField(model) false. That is the state
+// EVERY shipped prompt is in, and it must keep meaning "pass no model argument"
+// rather than "use some default" — see internal/agent/model.go.
+func TestParsePromptFrontmatterNoModel(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "polecat.md")
+	if err := os.WriteFile(path, []byte("+++\nworktree = true\n+++\n# Polecat\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	meta, _, err := ParsePromptFrontmatter(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta.Model != "" {
+		t.Errorf("Model = %q, want empty", meta.Model)
+	}
+	if meta.HasField("model") {
+		t.Error("expected HasField(model) = false when key absent")
+	}
+}
+
+// TestParsePromptFrontmatterKeepsBadModelOutOfTheParse pins a deliberate
+// non-behaviour: a malformed model: value PARSES, and is refused later at
+// resolution instead.
+//
+// The tempting design is to validate at the parse — it is the earliest reader
+// and it could name the line. It is wrong here because a parse error invalidates
+// the whole frontmatter block, and StartCrewAgent discards parse errors by
+// design (a bad line leaves a zero-value AgentMeta and the type defaults apply).
+// So parse-time validation would make one mistyped model silently take
+// auto_start, restart_on_crash and nudge_on_start down with it, on the path
+// where nobody is told. Refusal belongs where the blast radius is one field:
+// ResolveModel, which both spawn paths call and both treat as fatal.
+func TestParsePromptFrontmatterKeepsBadModelOutOfTheParse(t *testing.T) {
+	for _, bad := range []string{`"-p"`, `"claude opus"`, `"$(whoami)"`} {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "polecat.md")
+		content := "+++\nauto_start = true\nmodel = " + bad + "\nnudge_on_start = \"go\"\n+++\n# Polecat\n"
+		if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+		meta, _, err := ParsePromptFrontmatter(path)
+		if err != nil {
+			t.Fatalf("model = %s must not fail the parse (it would take the whole "+
+				"frontmatter block with it): %v", bad, err)
+		}
+		// The neighbouring keys survive — that is the property being defended.
+		if !meta.AutoStart || meta.NudgeOnStart != "go" {
+			t.Errorf("model = %s discarded neighbouring keys: AutoStart=%v NudgeOnStart=%q",
+				bad, meta.AutoStart, meta.NudgeOnStart)
+		}
+		// And the bad value is still refused, one layer down, naming its tier.
+		if _, _, err := ResolveModel("", meta.Model); err == nil {
+			t.Errorf("model = %s parsed but was not refused at resolution", bad)
+		}
+	}
+}
+
 // TestParsePromptFrontmatterAfterHashComment verifies that the parser
 // recognizes frontmatter on installed prompt files, which carry a leading
 // "<!-- pogo-prompt-hash: ... -->" stamp inserted by InstallPrompts.

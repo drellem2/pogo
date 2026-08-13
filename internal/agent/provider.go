@@ -36,6 +36,23 @@ type Provider struct {
 	// env) still overrides it. Template vars are CommandTemplateVars fields.
 	CommandTemplate string
 
+	// ModelFlag is the harness flag that selects a MODEL, with the model name
+	// passed as the following argv element (every harness pogo ships spells
+	// this "--model"). It is the translation point the Provider boundary exists
+	// for: pogo's model-selection request is provider-neutral, and turning it
+	// into the right argv is the harness package's job, not the spawn path's.
+	//
+	// Empty means "this harness cannot express a model selection from argv" —
+	// a positive statement, like nil MemoryIndexGlobs. A spawn that requests a
+	// model from such a provider FAILS rather than silently dropping the
+	// request: a worker running on a model nobody chose, while the dispatch
+	// record says otherwise, is the outcome worth refusing a spawn to avoid.
+	//
+	// pogo pins no model of its own — see internal/agent/model.go for the
+	// outage that rule comes from. This field says how to express a selection,
+	// never which selection to make.
+	ModelFlag string
+
 	// PromptInjection describes how the persona prompt is delivered to the
 	// harness.
 	PromptInjection PromptInjection

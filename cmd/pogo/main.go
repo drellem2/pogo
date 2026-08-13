@@ -2715,6 +2715,7 @@ Example:
 	var spawnPolecatBranch string
 	var spawnPolecatEnv []string
 	var spawnPolecatProvider string
+	var spawnPolecatModel string
 	var spawnPolecatNoWorktree bool
 	var spawnPolecatPairingOverride string
 	var spawnPolecatStrandedOverride string
@@ -2775,6 +2776,7 @@ A --body-file that cannot be read is an error, never an empty body.`,
 				Branch:     spawnPolecatBranch,
 				Env:        spawnPolecatEnv,
 				Provider:   spawnPolecatProvider,
+				Model:      spawnPolecatModel,
 				NoWorktree: spawnPolecatNoWorktree,
 
 				PairingOverride:  spawnPolecatPairingOverride,
@@ -2803,7 +2805,25 @@ A --body-file that cannot be read is an error, never an empty body.`,
 	cmdAgentSpawnPolecat.Flags().StringVar(&spawnPolecatRepo, "repo", "", "Target repository path ({{.Repo}})")
 	cmdAgentSpawnPolecat.Flags().StringVar(&spawnPolecatBranch, "branch", "", "Target branch for refinery submit ({{.Branch}})")
 	cmdAgentSpawnPolecat.Flags().StringSliceVarP(&spawnPolecatEnv, "env", "e", nil, "Additional environment variables (KEY=VALUE)")
+	// NOTE: this enumeration is stale — `cursor` is registered and accepted but
+	// unlisted. Left alone deliberately: TestProviderHelpTextIsNotAuthoritative
+	// (checkprompts_test.go) is a LIVE worked example built on this exact
+	// divergence, and TestSpawnPolecat_ProviderHelpListsPi pins the literal
+	// "(claude, codex, pi)". Correcting the list means retiring both, which that
+	// test's own comment assigns to gh #29 rather than to a passing ticket.
 	cmdAgentSpawnPolecat.Flags().StringVar(&spawnPolecatProvider, "provider", "", "Harness provider for this polecat (claude, codex, pi); overrides config and template frontmatter")
+	// --model is a DIFFERENT axis from --provider: provider picks which harness
+	// binary runs, model picks what that binary talks to. Omitting it is the
+	// normal case and passes no model argument at all — pogo pins no model, and
+	// that is the standing fix for the 2026-07-06 outage where an exhausted
+	// pinned model wedged every crew agent and polecat on the box for 5.5 hours
+	// (mg-e7f5). The help text says so, because the flag is where someone
+	// deciding to pin one will be standing.
+	cmdAgentSpawnPolecat.Flags().StringVar(&spawnPolecatModel, "model", "",
+		"Model for this polecat (e.g. fable), overriding the template's `model:` frontmatter. "+
+			"Omit to pass NO model argument, leaving the harness on the user's own configuration — "+
+			"pogo pins no default, because a pinned model that runs out of credit WEDGES the harness "+
+			"rather than degrading. Verify a value works (claude --model <v> -p ok) before dispatching on it")
 	cmdAgentSpawnPolecat.Flags().BoolVar(&spawnPolecatNoWorktree, "no-worktree", false, "Skip git worktree creation (no --repo required); polecat edits in-place from ~/.pogo/agents/<name>/ with a refinery:NO posture ({{.NoWorktree}})")
 	// A string, not a bool, and the help text says why: the reason is the
 	// deliverable. See SpawnPolecatAPIRequest.PairingOverride.
