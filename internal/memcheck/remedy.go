@@ -10,7 +10,11 @@ import (
 // THE PARITY/SIZE COMPETITION — two individually-correct findings that, near the
 // cap, are jointly unsatisfiable AS PRESENTED (mg-1b2f).
 //
-// Parity is a CORRECTNESS property (every note reachable). Size is a BUDGET
+// Parity is a CORRECTNESS property (every note reachable) — correctness of the
+// ROUTE, and only of the route. It says nothing about whether the note at the
+// end of it is still true, and a reader who takes "correctness property" to mean
+// "indexing the note is the correct action, full stop" manufactures stale hooks
+// while discharging the finding. See verifyBeforeHooking. Size is a BUDGET
 // property. They are in direct competition, because every unit of parity is
 // bought with index lines and index lines are exactly what the budget is short
 // of. Reporting them side by side implies both can be satisfied; near the cap
@@ -175,6 +179,42 @@ func FoldHostNote(fattest string, fattestBytes, indexBytes, overIndex int) strin
 
 const foldStandard = "A fold is judged by REACHABILITY, not by the diff. The test is NOT 'the file is gone and the index did not grow' — it is 'a reader looking for this content arrives at it'. Choose the host by where a future reader would go looking, not by which note is topically nearest, and merge the content into the host's subject rather than appending it as an unrelated tail. A fold into a plausible-but-wrong host converts a LOUD, LOCAL problem (an orphan you can enumerate) into a SILENT one (content buried under a hook that does not advertise it), so a careless fold is worse than no fold. This is cheap in characters and expensive in judgement: schedule it, do not do it in passing."
 
+// verifyBeforeHooking separates REACHABILITY from TRUTH, which every other
+// sentence in this file quietly conflates (mg-5e29).
+//
+// Nothing here used to tell a reader to check that an orphan was still true
+// before pointing the corpus at it. The three remedies are careful about COST,
+// about HEADROOM, and about where a future reader would look; none of them is
+// about the note's content. And the vocabulary actively invites the conflation —
+// the header calls parity a CORRECTNESS property, so a reader discharging a
+// finding labelled that way reasonably concludes that indexing the note IS the
+// correct action, full stop.
+//
+// MEASURED, twice on 2026-08-13, both self-reported by the agent that did it: 11
+// unreferenced notes were indexed in one pass to clear a parity finding, with no
+// check that their content was still true. One of the eleven surfaced hours
+// later as a 'memory index staleness' finding — an index line asserting an OPEN
+// second-line review for two work items that were both already archived. The
+// parity fix at 08:00 produced the staleness finding at 12:10, in the same file,
+// by the same agent, and nothing in either output said so.
+//
+// That last clause is the operational cost and is why the sentence names the
+// consequence rather than only the rule: the two checks live in the same report,
+// the causal link between them is invisible, and each therefore reads as an
+// independent problem.
+//
+// It is stated for hooking, sub-indexing AND folding, not for hooking alone. All
+// three publish the orphan's content under a route the corpus stands behind — a
+// sub-index especially, since one line buys reachability for as many notes as it
+// names (28 on the corpus this ships against), which is precisely the bulk,
+// at-speed case the demonstration above was.
+//
+// n=2, in one corpus, self-reported. That is enough to state an instruction and
+// NOT enough to claim a rate. The argument for saying it here is that it costs
+// one sentence in text that is already being maintained, not that the frequency
+// is known.
+const verifyBeforeHooking = "READ THE NOTE BEFORE YOU POINT THE CORPUS AT IT. Parity asks 'is this note REACHABLE' and is silent on 'is it still TRUE' — an unreferenced note has by definition not been maintained, so check that its claims still hold and its tense still matches before hooking it, listing it in a sub-index, or folding it into a host. A route is a promise that the corpus stands behind the note, so publishing a stale one converts a silent orphan into an ASSERTED FALSEHOOD. This is measured, not hypothetical: 11 orphans indexed in one pass to clear a parity finding produced a 'memory index staleness' finding on the same file four hours later, and neither output linked the two — so discharging THIS finding at speed is how you earn that one."
+
 // neverDropTheHook is the instruction that closes off the cheap-diff escape. The
 // whole failure this guidance exists to prevent is that skipping the hook is the
 // smallest diff that turns a check green.
@@ -193,6 +233,11 @@ const neverDropTheHook = "Do NOT resolve this by leaving a note unindexed to kee
 //
 // The remedy it does NOT name is a re-route to a less-pressured index. See the
 // header: that destination was measured and nothing loaded it.
+//
+// Every branch also carries verifyBeforeHooking, which is the step none of the
+// three remedies used to include: reachability is not truth, and a route added
+// without reading the note is how clearing this finding manufactures a
+// 'memory index staleness' finding hours later.
 func ParityRemedy(unreachable, headroomChars, lineCostChars int) string {
 	if unreachable <= 0 {
 		return ""
@@ -218,6 +263,11 @@ func ParityRemedy(unreachable, headroomChars, lineCostChars int) string {
 			unreachable, cost, headroomChars, lineCostChars, fits, lineCostChars, fits)
 	}
 
+	// Stated after the enumeration and before the per-remedy caveats, because it
+	// qualifies EVERY remedy above: all three publish the orphan's content under
+	// a route the corpus stands behind (mg-5e29).
+	b.WriteString(verifyBeforeHooking)
+	b.WriteString(" ")
 	b.WriteString(foldStandard)
 	b.WriteString(" ")
 	b.WriteString(foldCostsTheHost)
