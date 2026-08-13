@@ -3314,6 +3314,16 @@ Flags:
 		// here means a daemon restart is enough to propagate updates, and the PMs
 		// auto-started below pick up the latest prompts on the same boot. Hash
 		// stamps make this a no-op when nothing changed.
+		//
+		// THIS IS ACT 3 of prompt activation, and it is the only thing that
+		// performs it on this box. It is automatic and its cadence is every
+		// daemon restart — which the nightly deploy guarantees at 03:00 local.
+		// mg-b6bd read `grep -c 'prompt install' scripts/pogo-self-deploy` -> 0
+		// and concluded nothing installs prompts; the grep is right and the
+		// conclusion is wrong, because the deploy kickstarts pogod rather than
+		// shelling out to the CLI. See promptrefreshrecord.go for the full
+		// four-act map and for what mg-b6bd was actually missing: a record.
+		promptRefreshRev := driftwatch.BuildRevision().Revision
 		if installRes, err := agent.InstallPrompts(agent.InstallOpts{}); err != nil {
 			log.Printf("pogod: prompt refresh failed: %v", err)
 			// A4 (mg-342d), and strictly worse than the A1 that started this:
@@ -3321,11 +3331,22 @@ Flags:
 			// overwrite), A4 is every prompt staying stale for no reason at all —
 			// and before this it got less annunciation than A1 did.
 			conditions.Raise(conditionPromptRefreshFailed(coordinator, err.Error()), time.Now())
+			// On the record too. A failed act 3 leaves every prompt at its
+			// previous content with no on-disk trace that anything was even
+			// attempted — the one outcome where a reader most needs the record
+			// to say "no, tonight it did not happen".
+			events.Emit(hbCtx, promptRefreshEvent(nil, promptRefreshRev, err, time.Now()))
 		} else {
 			conditions.Clear(rowA4PromptRefresh, time.Now())
-			for _, line := range promptRefreshLogLines(installRes) {
+			for _, line := range promptRefreshLogLines(installRes, promptRefreshRev) {
 				log.Print(line)
 			}
+			// The durable half, emitted unconditionally — including the
+			// all-skipped boot the log lines above deliberately stay quiet for.
+			// pogod.log is inherited stderr and is on no agent's schedule;
+			// events.log is the file that is still there tomorrow and that
+			// `pogo events list --type=prompt_refresh` can be pointed at.
+			events.Emit(hbCtx, promptRefreshEvent(installRes, promptRefreshRev, nil, time.Now()))
 			// The log lines above are correct and were never read: pogod.log is
 			// on no agent's schedule, so a declined sync fired every boot for
 			// seven days while the mayor ran stale guidance (mg-c3f0). Mail the
@@ -3461,15 +3482,35 @@ Flags:
 //
 // Each conflict gets its own loud line naming the file and the remedy, because
 // the reader's next question is always "which one, and what do I do".
-func promptRefreshLogLines(res *agent.InstallResult) []string {
+//
+// A third failure mode, repaired by mg-b6bd: the summary named a COUNT and no
+// identities. "updated=9" is true, is what this box logged at 03:01 on the
+// night doctor ran all night on a prompt fixed at 03:44, and cannot be used to
+// answer "is doctor's live prompt current" by anyone who is not already sitting
+// in front of the file. The names now go on the line, and so does the revision
+// they came from — see promptrefreshrecord.go for the durable half.
+func promptRefreshLogLines(res *agent.InstallResult, rev string) []string {
 	// Nothing propagated and nothing declined: stay quiet (hash stamps make the
 	// common boot a no-op). Conflicts count here so a conflict-only boot speaks.
+	//
+	// Silence here is NOT silence overall: promptRefreshEvent still records the
+	// no-op boot, because "everything was already current at revision R" is an
+	// answer and the log is the wrong place to repeat it nightly.
 	if res == nil || (len(res.Installed) == 0 && len(res.Updated) == 0 && len(res.Conflicts) == 0) {
 		return nil
 	}
 	lines := []string{
-		fmt.Sprintf("pogod: refreshed prompts (installed=%d updated=%d skipped=%d conflicts=%d)",
-			len(res.Installed), len(res.Updated), len(res.Skipped), len(res.Conflicts)),
+		fmt.Sprintf("pogod: refreshed prompts from %s (installed=%d updated=%d skipped=%d conflicts=%d)",
+			shortRev(rev), len(res.Installed), len(res.Updated), len(res.Skipped), len(res.Conflicts)),
+	}
+	// Named, in full, on their own lines. Whichever of these is non-empty is
+	// the set of agents whose next start reads something different from their
+	// last one, which is the only actionable thing this whole report contains.
+	if len(res.Installed) > 0 {
+		lines = append(lines, "pogod: prompts INSTALLED (new): "+strings.Join(res.Installed, ", "))
+	}
+	if len(res.Updated) > 0 {
+		lines = append(lines, "pogod: prompts UPDATED (restart these agents to pick them up): "+strings.Join(res.Updated, ", "))
 	}
 	for _, c := range res.Conflicts {
 		lines = append(lines, fmt.Sprintf(
