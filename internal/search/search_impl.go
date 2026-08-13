@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -55,7 +57,21 @@ type BasicSearch struct {
 	// Guarded by gitHashWarnedMu, which is never held while g.mu is taken.
 	gitHashWarnedMu sync.Mutex
 	gitHashWarned   map[string]struct{}
+	// unreadableWarned holds the absolute paths of regular files that the most
+	// recent walk to reach them could not read, and that are therefore absent
+	// from the index. Membership is what has already been announced; see
+	// reconcileUnreadable for why the set is reconciled against each walk
+	// rather than only added to. Guarded by unreadableMu, which is never held
+	// while g.mu is taken.
+	unreadableMu     sync.Mutex
+	unreadableWarned map[string]struct{}
 }
+
+// msgUnreadableFile is the announcement a dropped file gets. It is a constant
+// because the drop is the only notice anything downstream receives that a file
+// stopped being searchable — a test that greps for a literal drifts from the
+// call site, and a drifted grep is indistinguishable from "it never happened".
+const msgUnreadableFile = "Skipping unreadable file; it is not in the search index"
 
 // warnGitTreeHashOnce logs a failure to read root's git tree hash at Warn the
 // first time this process sees it for that root, and stays silent for every
@@ -97,6 +113,80 @@ func (g *BasicSearch) forgetGitTreeHashWarning(root string) {
 	g.gitHashWarnedMu.Lock()
 	delete(g.gitHashWarned, root)
 	g.gitHashWarnedMu.Unlock()
+}
+
+// subtreePrefix renders a directory as a path prefix that cannot match a
+// sibling. Without the trailing separator "/a/b" is a prefix of "/a/bc/d.go",
+// and the two directories are unrelated.
+func subtreePrefix(dir string) string {
+	return strings.TrimSuffix(dir, "/") + "/"
+}
+
+// reconcileUnreadable brings the remembered set of unreadable files under
+// scope into line with what the walk just found there, announcing each file
+// once — as it enters the set.
+//
+// WHY THE FILE IS DROPPED AND THE DROP IS ANNOUNCED. A regular file whose read
+// fails (mode 0000 is the common case) used to be carried in Paths with no
+// FileHashes entry, which is what made gh#136 perpetual: the mtime shortcut
+// can never fire for a path with no cached hash, so every rebuild re-read the
+// file and logged `Error reading file` at ERROR, one per file per pass,
+// forever. Leaving it out of the census stops that at the source. Doing so
+// silently would trade a noisy defect for an invisible one — the file simply
+// stops being searchable and nothing says so — so the drop is announced. It is
+// announced ONCE, because a line per pass is the same defect wearing a Warn
+// badge instead of an ERROR one.
+//
+// WHY NOT A PERSISTED FAILURE MARKER. The other candidate remedy was to record
+// a negative result the mtime shortcut could consult, so the retry stops. The
+// retry is worth keeping and costs nothing: the walk re-attempts the read on
+// every pass either way, so a repaired file is picked up on the very next tick
+// with no marker to invalidate. A marker would need an invalidation rule, and
+// the only key this walk holds is mtime — which a chmod does not change. The
+// marker would outlive the repair and keep the file out of the index until its
+// CONTENT changed, which is strictly worse than the state it replaces. See
+// TestRepairingPermissionsDoesNotChangeMtime, which pins that premise.
+//
+// prune says whether found is an exhaustive answer for scope. A walk that ran
+// to completion visited every file under it, so a remembered path missing from
+// found is readable again (or gone) and must be forgotten — otherwise the same
+// file failing next month would be silent. A walk that stopped early
+// (errTreeTooLarge, or a directory it could not open) reached only part of the
+// subtree, and forgetting what it never saw would re-announce it next pass.
+//
+// Forgetting is also what bounds the set. pogod runs for weeks, and here the
+// entries are per FILE rather than per project, so an add-only set is the slow
+// leak forgetGitTreeHashWarning exists to avoid, with a far higher ceiling.
+// Reconciled against the walk, the set holds only files that are unreadable
+// now.
+func (g *BasicSearch) reconcileUnreadable(scope string, found map[string]error, prune bool) {
+	prefix := subtreePrefix(scope)
+
+	var fresh []string
+	g.unreadableMu.Lock()
+	for path := range found {
+		if _, seen := g.unreadableWarned[path]; !seen {
+			g.unreadableWarned[path] = struct{}{}
+			fresh = append(fresh, path)
+		}
+	}
+	if prune {
+		for path := range g.unreadableWarned {
+			if !strings.HasPrefix(path, prefix) {
+				continue
+			}
+			if _, still := found[path]; !still {
+				delete(g.unreadableWarned, path)
+			}
+		}
+	}
+	g.unreadableMu.Unlock()
+
+	// Sorted so a pass that finds several reports them in a stable order.
+	sort.Strings(fresh)
+	for _, path := range fresh {
+		g.logger.Warn(msgUnreadableFile, "path", path, "error", found[path])
+	}
 }
 
 // SetOnIndexed registers a callback invoked after each completed index pass
@@ -345,8 +435,12 @@ func (g *BasicSearch) Evict(projectRoot string) {
 	delete(g.projects, projectRoot)
 	g.mu.Unlock()
 	// Drop the git-hash warning dedupe entry with the project, so the map
-	// cannot accumulate roots the daemon no longer holds.
+	// cannot accumulate roots the daemon no longer holds. The unreadable-file
+	// set goes the same way: nothing will walk this subtree again to prune it,
+	// so an evicted project's entries would be permanent. A nil `found` with
+	// prune set is exactly "everything remembered under here is stale".
 	g.forgetGitTreeHashWarning(projectRoot)
+	g.reconcileUnreadable(projectRoot, nil, true)
 	if existed {
 		g.logger.Info("Evicted project from in-memory index map: " + projectRoot)
 	}
@@ -400,11 +494,12 @@ func createBasicSearch() *BasicSearch {
 	}
 
 	basicSearch := &BasicSearch{
-		logger:          logger,
-		projects:        make(map[string]IndexedProject),
-		updater:         nil,
-		maxFilesPerTree: maxF,
-		gitHashWarned:   make(map[string]struct{}),
+		logger:           logger,
+		projects:         make(map[string]IndexedProject),
+		updater:          nil,
+		maxFilesPerTree:  maxF,
+		gitHashWarned:    make(map[string]struct{}),
+		unreadableWarned: make(map[string]struct{}),
 	}
 	basicSearch.updater = basicSearch.newProjectUpdater()
 

@@ -250,10 +250,14 @@ func (g *BasicSearch) queueUpdate(u *ProjectUpdater, upd *indexUpdate) {
 // If the tree exceeds the configured per-tree file-count ceiling, indexRec
 // stops walking and returns errTreeTooLarge so the caller can mark the project
 // skipped-too-large rather than indexing an unbounded number of files.
+//
+// unreadable collects, by absolute path, the regular files whose read failed —
+// the entries deliberately left out of the census. The caller reconciles it
+// against the set it already announced; see reconcileUnreadable. May be nil.
 func (g *BasicSearch) indexRec(proj *IndexedProject, path string,
 	gitIgnore *ignore.GitIgnore,
 	prevHashes map[string]string, prevMtimes map[string]int64,
-	contents map[string][]byte) error {
+	contents map[string][]byte, unreadable map[string]error) error {
 	// Enforce the per-tree file-count ceiling before descending further.
 	if g.maxFilesPerTree > 0 && int32(len(proj.Paths)) >= g.maxFilesPerTree {
 		return errTreeTooLarge
@@ -293,7 +297,7 @@ func (g *BasicSearch) indexRec(proj *IndexedProject, path string,
 		}
 
 		if fileInfo.IsDir() {
-			err = g.indexRec(proj, newPath, gitIgnore, prevHashes, prevMtimes, contents)
+			err = g.indexRec(proj, newPath, gitIgnore, prevHashes, prevMtimes, contents, unreadable)
 			if errors.Is(err, errTreeTooLarge) {
 				proj.Paths = append(proj.Paths, files...)
 				return err
@@ -325,35 +329,63 @@ func (g *BasicSearch) indexRec(proj *IndexedProject, path string,
 				}
 			}
 
-			files = append(files, relativePath)
 			mtime := fileInfo.ModTime().UnixNano()
-			proj.FileMtimes[relativePath] = mtime
 
 			// Stop once the tree exceeds the ceiling. This in-loop check
 			// guards against a single huge flat directory — mg-d205 saw one
-			// holding 28,760 files in a single readdir.
-			if g.maxFilesPerTree > 0 && int32(len(proj.Paths)+len(files)) >= g.maxFilesPerTree {
+			// holding 28,760 files in a single readdir. The `+1` counts this
+			// entry, which is no longer appended ahead of the check: a path
+			// now enters the census only once its content is accounted for
+			// (see below). Counting it here keeps the ceiling exactly where it
+			// was, and keeps the walk from reading a file it is about to stop
+			// short of.
+			if g.maxFilesPerTree > 0 && int32(len(proj.Paths)+len(files)+1) >= g.maxFilesPerTree {
+				files = append(files, relativePath)
+				proj.FileMtimes[relativePath] = mtime
 				proj.Paths = append(proj.Paths, files...)
 				return errTreeTooLarge
 			}
 
-			// If mtime unchanged and we have a previous hash, reuse it
+			// A path enters the census only after its content is in hand —
+			// either a cached hash the mtime shortcut let us reuse, or a
+			// successful read. Appending first and reading second is the
+			// gh#136 mechanism itself: a file the read fails on ends up in
+			// Paths with no FileHashes entry, so the shortcut can never fire
+			// for it and the zoekt build re-reads and re-logs it at ERROR on
+			// every rebuild, in perpetuity. mg-f32a closed that for nodes that
+			// are not regular files; this closes it for a REGULAR file that
+			// cannot be read, which passes any mode check (mg-9c6b).
+			cached := false
 			if oldMtime, ok := prevMtimes[relativePath]; ok && oldMtime == mtime {
 				if oldHash, hok := prevHashes[relativePath]; hok {
 					proj.FileHashes[relativePath] = oldHash
-					continue
+					cached = true
 				}
 			}
-			// File is new or modified — read it once: hash the bytes and,
-			// budget permitting, carry them to the zoekt build so it does
-			// not have to read the file again (gh #39).
-			if data, herr := os.ReadFile(newPath); herr == nil {
+			if !cached {
+				// File is new or modified — read it once: hash the bytes and,
+				// budget permitting, carry them to the zoekt build so it does
+				// not have to read the file again (gh #39).
+				data, herr := os.ReadFile(newPath)
+				if herr != nil {
+					// Dropped, not carried. The read is re-attempted on every
+					// pass regardless, so a file whose permissions are
+					// repaired is picked up on the next tick; the caller
+					// announces the drop once. See reconcileUnreadable.
+					if unreadable != nil {
+						unreadable[newPath] = herr
+					}
+					continue
+				}
 				h := sha256.Sum256(data)
 				proj.FileHashes[relativePath] = hex.EncodeToString(h[:])
 				if contents != nil && g.reserveContent(len(data)) {
 					contents[relativePath] = data
 				}
 			}
+
+			files = append(files, relativePath)
+			proj.FileMtimes[relativePath] = mtime
 		}
 	}
 	proj.Paths = append(proj.Paths, files...)
@@ -377,7 +409,13 @@ func (g *BasicSearch) index(proj *IndexedProject, path string,
 	}
 
 	contents := make(map[string][]byte)
-	err := g.indexRec(proj, path, gitIgnore, prevHashes, prevMtimes, contents)
+	unreadable := make(map[string]error)
+	err := g.indexRec(proj, path, gitIgnore, prevHashes, prevMtimes, contents, unreadable)
+	// Only a walk that ran to completion saw every file under path, so only it
+	// can prune what it did not find. A truncated or errored walk records what
+	// it did find and leaves the rest of the set alone — forgetting a subtree
+	// it never reached would re-announce it on the next pass.
+	g.reconcileUnreadable(path, unreadable, err == nil)
 	if errors.Is(err, errTreeTooLarge) {
 		g.logger.Warn("Project tree exceeds max_files_per_tree; skipping deep index",
 			"root", proj.Root, "limit", g.maxFilesPerTree, "files_indexed", len(proj.Paths))
@@ -612,6 +650,49 @@ func (g *BasicSearch) Index(req *pogoPlugin.IProcessProjectReq) {
 	g.index(&proj, path, gitIgnore, prevHashes, prevMtimes)
 }
 
+// writeSaveFile persists proj's census to its save file. Both failures are
+// logged rather than returned: the in-memory index is still usable, and the
+// caller's own error handling is about the zoekt build, not this.
+func (g *BasicSearch) writeSaveFile(proj *IndexedProject, saveFilePath string) {
+	outBytes, err := json.Marshal(proj)
+	if err != nil {
+		g.logger.Error("Error serializing index to json", "index", *proj)
+	}
+	if err := os.WriteFile(saveFilePath, outBytes, 0644); err != nil {
+		g.logger.Error("Error saving index", "save_path", saveFilePath)
+	}
+}
+
+// dropPaths removes root-relative paths from proj's census and from both
+// caches keyed on it.
+//
+// Removing the FileHashes entry is the load-bearing half: it is what stops the
+// next walk's mtime shortcut from firing and forces the read to be re-attempted
+// (see the caller). FileMtimes goes with it so the maps stay in step with
+// Paths — a path with an mtime and no hash is the half-state gh#136 lived in.
+//
+// The kept paths go into a FRESH slice rather than being compacted in place.
+// applyUpdate has already stored a struct copy of proj in g.projects, and a
+// struct copy shares the slice's backing array while keeping the old length —
+// so an in-place filter would leave that entry the right length over a
+// compacted array, duplicating its tail for any reader holding g.mu between
+// here and the caller's re-store.
+func dropPaths(proj *IndexedProject, drop []string) {
+	dropped := make(map[string]struct{}, len(drop))
+	for _, p := range drop {
+		dropped[p] = struct{}{}
+		delete(proj.FileHashes, p)
+		delete(proj.FileMtimes, p)
+	}
+	kept := make([]string, 0, len(proj.Paths))
+	for _, p := range proj.Paths {
+		if _, gone := dropped[p]; !gone {
+			kept = append(kept, p)
+		}
+	}
+	proj.Paths = kept
+}
+
 // serializeProjectIndex persists the index save file, rebuilds the zoekt
 // index when content changed (or its file is missing), and reports whether
 // file content actually changed relative to prev — the map entry that was in
@@ -636,14 +717,7 @@ func (g *BasicSearch) serializeProjectIndex(proj *IndexedProject, prev *IndexedP
 		return true
 	}
 	saveFilePath := filepath.Join(searchDir, saveFileName)
-	outBytes, err2 := json.Marshal(proj)
-	if err2 != nil {
-		g.logger.Error("Error serializing index to json", "index", *proj)
-	}
-	err3 := os.WriteFile(saveFilePath, outBytes, 0644)
-	if err3 != nil {
-		g.logger.Error("Error saving index", "save_path", saveFilePath)
-	}
+	g.writeSaveFile(proj, saveFilePath)
 	// Check if file content actually changed by comparing hashes with the
 	// previous index. If nothing changed and the zoekt index file exists,
 	// skip the expensive rebuild.
@@ -700,6 +774,10 @@ func (g *BasicSearch) serializeProjectIndex(proj *IndexedProject, prev *IndexedP
 	// First delete the old index
 	g.deleteIndexFile(proj)
 
+	// Root-relative paths the build could not read after all; see the drop
+	// below the loop.
+	var unbuildable []string
+
 	indexer, err := zoekt.NewIndexBuilder(nil)
 	if err != nil {
 		g.logger.Error("Error creating search index")
@@ -731,14 +809,37 @@ func (g *BasicSearch) serializeProjectIndex(proj *IndexedProject, prev *IndexedP
 		absPath, err := absolute(fullPath)
 		if err != nil {
 			g.logger.Error("Error getting absolute path - file may not exist", "path", path)
+			unbuildable = append(unbuildable, path)
 		} else {
 			bytes, err := os.ReadFile(absPath)
 			if err != nil {
 				g.logger.Error("Error reading file", "path", absPath)
+				unbuildable = append(unbuildable, path)
 			} else {
 				indexer.AddFile(absPath, bytes)
 			}
 		}
+	}
+	// A path that failed above was in the census with a valid cached hash: the
+	// walk read it successfully, and between the walk and here the file
+	// stopped being readable — a chmod, a delete, a mount going away.
+	//
+	// That is the SAME forever-state as gh#136, reached from the other side,
+	// and the walk-side fix alone does not close it: a cached hash is exactly
+	// what makes the mtime shortcut fire, so every later walk skips the read
+	// and never notices, while every rebuild re-reads and re-logs at ERROR.
+	// Dropping the path — from Paths and from both maps — hands the next walk
+	// an entry with no cached hash, which it must therefore read: it either
+	// succeeds, or it fails, is announced once, and stays out (mg-9c6b).
+	if len(unbuildable) > 0 {
+		dropPaths(proj, unbuildable)
+		// The census on disk was written before the build ran, so it still
+		// lists what the build just dropped; a Load from it would restore
+		// them. Rewriting is cheap and happens only on the pass that drops.
+		g.writeSaveFile(proj, saveFilePath)
+		g.mu.Lock()
+		g.projects[proj.Root] = *proj
+		g.mu.Unlock()
 	}
 	indexFile, err := g.getIndexFile(proj)
 	if err != nil {
