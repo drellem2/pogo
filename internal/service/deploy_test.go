@@ -228,21 +228,28 @@ func TestFindDeployScriptSourceHonorsOverride(t *testing.T) {
 // TestDeployFireHoursAgreeAcrossEveryArtifactThatCarriesThem is the check
 // mg-b201 was filed for the absence of.
 //
-// THREE artifacts in this repo independently state when the nightly fires, and
-// until this test none of them was compared to the others:
+// THREE artifacts in this repo used to state when the nightly fires. Now there
+// are two, and that is the fix rather than a gap in this test:
 //
 //	deployHours                          (here — what the installer writes)
 //	scripts/launchd/com.pogo.deploy.plist (the reference copy for a hand-install)
-//	FIRE_HOURS in scripts/launchd/pogo-deploy.sh (what the RUNNER believes)
+//	FIRE_HOURS in scripts/launchd/pogo-deploy.sh — REMOVED (mg-8dcb)
 //
-// The third one is not documentation. `retry_will_follow` consults FIRE_HOURS to
-// decide whether a failed attempt gets a RED alert, and a runner that believes
-// in a fire the schedule does not have takes the WORST branch available: a
-// stalled drain exits 7, logs "the 04:00 fire will retry. Not alerting yet.",
-// suppresses the alert — and then nothing fires at 04:00. The night fails in
-// silence. That is strictly worse than the pre-retry behaviour, which at least
-// mailed somebody. The divergence buys a silent nightly, which is the exact
-// failure this whole family of tickets exists to end.
+// The third one was never documentation. `retry_will_follow` consults FIRE_HOURS
+// to decide whether a failed attempt gets a RED alert, and a runner that
+// believes in a fire the schedule does not have takes the WORST branch
+// available: a stalled drain exits 7, logs "the 04:00 fire will retry. Not
+// alerting yet.", suppresses the alert — and then nothing fires at 04:00. The
+// night fails in silence.
+//
+// That is not hypothetical. The installed plist carried a single 03:00 fire as a
+// BARE DICT while the runner's constant said "3 4 5", and this test could not
+// see it: it compares the runner against the REPO, and the repo was right. So
+// the runner no longer carries a list at all — it reads its hours out of the
+// loaded launchd job at run time (section 1c of pogo-deploy.sh), and a value
+// read from the world cannot drift from the world. What is pinned here is the
+// ABSENCE of the constant, because the only way this drift comes back is if
+// somebody writes the hours down in the runner again.
 //
 // It is deliberately NOT a check against the installed plist on this box. That
 // comparison is auditLaunchAgent's job and it cannot live in a unit test: the
@@ -263,13 +270,22 @@ func TestDeployFireHoursAgreeAcrossEveryArtifactThatCarriesThem(t *testing.T) {
 			"An operator who hand-installs the in-repo copy gets a different schedule from one who runs `pogo service install-deploy`.", plistHours, deployHours)
 	}
 
-	runnerHours, ok := parseRunnerFireHours(runner)
-	if !ok {
-		t.Fatalf("could not find the FIRE_HOURS default in scripts/launchd/pogo-deploy.sh — if it was renamed, this check stopped guarding anything and must be updated, not dropped")
+	if hours, ok := parseRunnerFireHours(runner); ok {
+		t.Errorf("scripts/launchd/pogo-deploy.sh has a hardcoded fire-hour default again (%v).\n"+
+			"That constant is the mg-fc99/mg-8dcb defect: it drifted from a plist carrying a single 03:00 fire, the runner believed two retries were coming, and the RED alert was suppressed on a night nothing else would fire. The hours must be READ from the loaded launchd job (resolve_fire_hours), not written down here — a value read from the world cannot drift from it.", hours)
 	}
-	if !sameInts(runnerHours, deployHours) {
-		t.Errorf("pogo-deploy.sh believes the fires are %v; the schedule this build installs is %v.\n"+
-			"retry_will_follow reads FIRE_HOURS to decide whether to SUPPRESS the RED alert, so a runner that believes in a fire that does not exist turns a failed night into a silent one.", runnerHours, deployHours)
+	// ...and the reader that replaced it must still be there. Deleting the
+	// constant and the derivation together would leave a runner that never knows
+	// its own schedule, which passes the check above for the wrong reason.
+	for _, want := range []string{
+		"FIRE_HOURS=\"${POGO_DEPLOY_FIRE_HOURS:-}\"",
+		"resolve_fire_hours",
+		"fire_hours_from_launchctl",
+		"fire_hours_from_plist",
+	} {
+		if !strings.Contains(runner, want) {
+			t.Errorf("scripts/launchd/pogo-deploy.sh no longer contains %q — the runner has stopped deriving its fire hours from the world, and the check above now passes because there is nothing at all rather than because there is a reader", want)
+		}
 	}
 }
 
@@ -368,12 +384,22 @@ func TestDeployFireHourParsersSeeDivergence(t *testing.T) {
 		t.Error("a two-fire plist compared equal to a three-fire schedule")
 	}
 
+	// parseRunnerFireHours is now a DETECTOR for the constant coming back, so
+	// what it has to prove is that it still recognises the constant. A detector
+	// that matches nothing reports "no hardcoded hours" about a file full of
+	// them, which is the same silent-pass defect one level up.
 	runnerHours, ok := parseRunnerFireHours("set -u\nFIRE_HOURS=\"${POGO_DEPLOY_FIRE_HOURS:-3 4 5}\"\n")
 	if !ok || !sameInts(runnerHours, []int{3, 4, 5}) {
-		t.Fatalf("parseRunnerFireHours = %v, ok=%v; want [3 4 5], true", runnerHours, ok)
+		t.Fatalf("parseRunnerFireHours = %v, ok=%v; want [3 4 5], true — the detector no longer sees the exact line it was written to catch", runnerHours, ok)
 	}
 	if sameInts(runnerHours, got) {
 		t.Error("a runner believing in three fires compared equal to a two-fire plist — this is exactly the drift that suppresses the RED alert")
+	}
+
+	// The shipping form — an EMPTY default, hours derived at run time — must not
+	// register as a hardcoded list.
+	if hours, ok := parseRunnerFireHours("set -u\nFIRE_HOURS=\"${POGO_DEPLOY_FIRE_HOURS:-}\"\n"); ok {
+		t.Errorf("parseRunnerFireHours read %v out of the derive-from-the-world form; the guard would fail on the fix it exists to protect", hours)
 	}
 
 	// A renamed or restructured assignment must be loud, not absent.

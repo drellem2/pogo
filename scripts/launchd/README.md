@@ -396,7 +396,11 @@ All optional; the defaults are the production values.
 | `POGO_DEPLOY_RESERVE` | `1200` | Seconds of the window held back for the build, `do_prove`, the kickstart and verification — everything the run still owes after the drain returns. |
 | `POGO_DEPLOY_MAX_DRAIN` | `7200` | Ceiling on one drain. Nothing dispatches while `draining=true`, so unbounded patience trades a missed deploy for a night of no work. |
 | `POGO_DEPLOY_MIN_DRAIN` | `600` | Floor. Below this a fire skips rather than start a drain it cannot finish. |
-| `POGO_DEPLOY_FIRE_HOURS` | `3 4 5` | The plist's fire hours, ascending. Used only to answer "will a retry follow?" so the RED alert can say so truthfully. |
+| `POGO_DEPLOY_FIRE_HOURS` | unset — **derived** | PINS the fire hours instead of reading them. Production leaves it unset: the runner reads its hours from the LOADED launchd job (`launchctl print`), falling back to the plist file, so the list it answers "will a retry follow?" with cannot drift from the schedule it describes. It used to default to `3 4 5`, drifted from a plist carrying one 03:00 fire, and made the RED alert promise retries that did not exist (mg-fc99 / mg-8dcb). |
+| `POGO_DEPLOY_LABEL` | `com.pogo.deploy` | The launchd label whose schedule is read. |
+| `POGO_DEPLOY_PLIST` | `~/Library/LaunchAgents/com.pogo.deploy.plist` | The plist file cross-checked against the loaded job. A disagreement means the file was edited and never reloaded, and is reported. |
+| `POGO_DEPLOY_LAUNCHCTL` | `/bin/launchctl` | Pin a `launchctl`. Controls only. |
+| `POGO_DEPLOY_PLISTBUDDY` | `/usr/libexec/PlistBuddy` | Pin a `PlistBuddy`. Controls only; without it the reader falls back to `plutil`. |
 | `POGO_DEPLOY_STAMP` | `$POGO_HOME/deploy-attempt.stamp` | Where the night's outcome is recorded for the retry gate. |
 | `POGO_DEPLOY_SYNC_ATTEMPTS` | `4` | Blip-tier sync attempts on a class that established nothing. |
 | `POGO_DEPLOY_SYNC_BACKOFF` | `15 45 120` | Blip-tier delays, seconds. The last value repeats, so a shortened list degrades into a constant rather than a hammer at zero. |
