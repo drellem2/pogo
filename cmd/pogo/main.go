@@ -3472,6 +3472,10 @@ The --check mode verifies:
   - Did any one-shot schedule fire with nobody ever answering it?
   - Is any MEMORY.md index approaching the harness read cliff?
 
+The launchd row here reports and never sets the exit code. For the same
+comparison with a status a script can gate on, run 'pogo check-activation' —
+that is what the nightly redeploy calls, from the binary it just installed.
+
 Exits with code 1 if any critical check fails (--check mode only).`,
 		Args: cobra.ArbitraryArgs,
 		Run: func(cmd *cobra.Command, args []string) {
@@ -4489,6 +4493,13 @@ branches; work items and mail live in mg/macguffin (the task-store CLI).`,
 	// labelled record with no detector, no alarm and no row behind it, which
 	// from a human's seat is the original defect unchanged.
 	rootCmd.AddCommand(newCheckOneShotsCmd(&jsonOutput))
+	// check-activation (mg-b9e7): the schedulable half of the `launchd
+	// activation` doctor row. TOP-LEVEL rather than under `service`, where it
+	// belongs by subject, because `pogo service <unknown>` exits 0 and prints
+	// help — so a scheduled caller holding a binary too old to carry this check
+	// would have scored it as a clean box, which is the very defect (a merged
+	// detector that was never installed) reproduced by its own remedy.
+	rootCmd.AddCommand(newCheckActivationCmd(&jsonOutput))
 	// investigations (mg-22c7): search docs/investigations/ by file CONTENTS.
 	// Not a check-* detector — it answers a question a person or agent asks,
 	// and it is the only pogo subcommand that records its own invocation,

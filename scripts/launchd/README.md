@@ -434,20 +434,33 @@ missing) this job was shaped around.
 
 ### What re-asserts an installed plist against the shipped one
 
-**Nothing does.** This is the general question mg-fc99 left open and mg-b201
-answers; it is recorded here rather than fixed here, because building an
-auto-reconciler is a decision about blast radius that a drift ticket does not
-get to make on its own.
+**Still nothing — but the nightly now NOTICES, and mails.** This is the general
+question mg-fc99 left open, mg-b201 recorded, and mg-b9e7 answers by closing the
+detection half and deliberately leaving the reconciliation half open.
 
 Merging a change under `scripts/launchd/` changes nothing on any machine. The
 only writer of `~/Library/LaunchAgents/com.pogo.deploy.plist` is `pogo service
 install-deploy`, which a human or an agent has to run. Nothing runs it at boot,
-at login, on a `WatchPaths` event, or as part of the nightly redeploy — so a
-merged schedule and an installed schedule can sit apart indefinitely, and did:
-between 2026-07-31 and 2026-08-07 the box ran a one-fire plist against
-three-fire code, which is what mg-b201 was filed to end.
+at login, or on a `WatchPaths` event — so a merged schedule and an installed
+schedule can sit apart indefinitely, and did: between 2026-07-31 and 2026-08-07
+the box ran a one-fire plist against three-fire code, which is what mg-b201 was
+filed to end.
 
-Two traps sit on the install path, and both have bitten:
+**What changed (mg-b9e7).** `pogo check-activation` is the same comparison the
+`launchd activation` doctor row makes, as a top-level command with an exit code
+— `0` activated, `1` drifted, `3` could-not-compare — and
+`scripts/pogo-self-deploy` runs it every night, immediately after the deploy has
+built, installed and verified a binary from `main`. A drift now costs one night
+of silence and arrives as mail, instead of sitting until somebody happens to run
+`doctor`. Nothing reconciles: the deploy reports and stops.
+
+```bash
+pogo check-activation           # 0 / 1 / 3, per-job remedies, and the build it compared FROM
+pogo check-activation --json
+```
+
+Three traps sit on this path. The first two have bitten; the third is why the
+command is shaped the way it is.
 
 1. **The installer writes the schedule *its own build* embeds.** The plist is a
    Go template with `deployHours` bound in, not a copy of the file in this
@@ -456,6 +469,9 @@ Two traps sit on the install path, and both have bitten:
    2026-08-07 the `pogo` on `PATH` was built 07-30 and the retry fires landed
    07-31, so the obvious command would have been a no-op that looked like a fix.
    Build the binary from the checkout you are installing from, and read back.
+   `check-activation` prints the build it compared from for this reason, and the
+   nightly asks the binary it just installed *because that is the one moment the
+   "which build?" question has a right answer.*
 
 2. **The drift detector is inside the same binary, so it is subject to the
    defect it detects.** `pogo doctor --check` grew a `launchd activation` row
@@ -464,12 +480,25 @@ Two traps sit on the install path, and both have bitten:
    `install-deploy` rewrites a schedule and `install` bounces the daemon, and
    neither is something a checklist should do unasked. But the row is absent
    from any `pogo` predating it, which on 2026-08-07 meant the detector for
-   "merged but not installed" was itself merged but not installed. A doctor run
+   "merged but not installed" was itself merged but not installed. **A doctor run
    that shows no `launchd activation` row is not a clean bill of health; it is
-   an old binary.
+   an old binary.**
 
-So the reconciliation is manual, and the read-back is the part that proves it
-happened. The install command's own output does not:
+3. **So is the new command — which is why it is top-level and why it prints a
+   marker.** `pogo service <unknown>` exits **0** and prints help; `pogo
+   <unknown>` exits 1. Filing this check under `service` would have let an old
+   binary answer a scheduled caller with a success, reproducing trap 2 one layer
+   down. Top-level it exits nonzero — but so does a drift, and both are 1, so
+   every verdict line leads with `activation:` and the nightly refuses to read an
+   exit status as a verdict without it. An old binary is reported as **NO
+   VERDICT**, which is its own finding, and mails.
+
+   What is still uncovered: this reading runs *inside* a deploy, so a box whose
+   nightly has been failing for a week gets no report. That is the same argument
+   that keeps `com.pogo.revisionprobe` outside the audit's registry (mg-a03d).
+
+So the reconciliation is still manual, and the read-back is the part that proves
+it happened. The install command's own output does not:
 
 ```bash
 pogo service install-deploy

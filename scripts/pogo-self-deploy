@@ -3531,6 +3531,185 @@ report_supervision() {
     return 0
 }
 
+# ---------------------------------------------------------------------------
+# Launchd activation reporting (mg-b9e7)
+# ---------------------------------------------------------------------------
+#
+# THE GAP. Nothing on this machine re-asserts an installed LaunchAgent plist
+# against the one the code ships. A merge under scripts/launchd/ changes nothing
+# until somebody runs `pogo service install <...>` — no boot hook, no login hook,
+# and until this, no step of the nightly redeploy. `pogo doctor --check` grew a
+# `launchd activation` row (mg-fc99) that does the comparison, but it only exists
+# when a person runs doctor, so between two such runs the drift is silent. It was
+# silent for seven days in the case mg-b201 fixed: the box ran a one-fire deploy
+# plist against three-fire code, and every fire the installed copy lacked was
+# INERT — no log line, no failure, nothing downstream that could observe it.
+#
+# WHY THE READING BELONGS HERE AND NOWHERE ELSE. The audit compares the installed
+# plist against the plist THIS BUILD renders, so its answer is only as good as
+# the binary asked. Ask an old `pogo` and it reports its own older plist as the
+# expectation — on 2026-08-07 that build predated the schedule change, so
+# "reconciling" from it would have reinstalled the drift and printed success.
+# This step runs immediately after the deploy has built, installed and VERIFIED a
+# binary from main, which is the one moment in this machine's day when "which
+# build?" has a right answer. That placement is the whole reason a nightly step
+# can be trusted with this question at all.
+#
+# REPORT-ONLY, on the same reasoning as report_supervision. It never installs,
+# never bootstraps, never kickstarts, and it never sets this script's exit code:
+# the fleet is up and answering by the time it runs, and a stale plist is a thing
+# to say loudly, not a reason to call a completed deploy failed. Auto-reconciling
+# is a blast-radius decision (`pogo service install` bounces the daemon,
+# `install-deploy` rewrites this very job's schedule) that mg-b9e7 deliberately
+# leaves open.
+#
+# IT ESCALATES, THOUGH — because a report that lands only in pogo-deploy.log is
+# the opt-in problem again with a different reader. DRIFTED and NO VERDICT go out
+# through alert_external, at most once per night, and they stop the moment
+# somebody reconciles. UNKNOWN does not mail: a plist deliberately left
+# uninstalled would otherwise alert every night forever with nothing drifted.
+#
+# THE DEFECT THIS STEP IS SUBJECT TO, AND WHAT IS DONE ABOUT IT. The detector
+# ships inside the `pogo` binary, so a build predating it does not have it — the
+# detector for "merged but not installed" being itself merged but not installed
+# is mg-b9e7's second gap, and a remedy in the same shape inherits it. Two things
+# make it survivable here:
+#
+#   - `check-activation` is a TOP-LEVEL command, not `pogo service
+#     check-activation`. Measured on this box: `pogo service <unknown>` exits 0
+#     and prints help, while `pogo <unknown>` exits 1. Under `service` an old
+#     binary would have answered this step with a SUCCESS.
+#   - nonzero is still not enough, because "unknown command" and "drifted" are
+#     both exit 1. So the verdict line carries a marker, and this step refuses to
+#     read an exit status as a verdict without it. An old binary is reported as
+#     NO VERDICT — its own finding — never as clean and never as drift.
+#
+# What remains uncovered, stated rather than implied: this runs inside a deploy,
+# so a box whose nightly has been failing for a week gets no report. That is the
+# same argument that keeps com.pogo.revisionprobe outside internal/service's
+# registry (mg-a03d), and it is not closed here.
+
+# classify_activation RC FIRST_LINE -> ACTIVATED | DRIFTED | UNKNOWN | MISMATCH |
+# NO_VERDICT. Pure, so every branch is reachable in a test on a box whose real
+# answer is whatever it happens to be today.
+#
+# It reads BOTH the marker word and the exit status and requires them to agree.
+# They are two renderings of one value in cmd/pogo/checkactivation.go, so a
+# disagreement means something between here and there is rewriting one of them —
+# a wrapper swallowing exit codes is the ordinary way that happens — and a
+# reader that trusted either alone would report a confident wrong answer.
+classify_activation() {
+    local rc="$1" line="$2" word
+    case "$line" in
+        "activation: "*) word="${line#activation: }"; word="${word%% *}" ;;
+        *)               echo "NO_VERDICT"; return 0 ;;
+    esac
+    case "$word/$rc" in
+        ACTIVATED/0) echo "ACTIVATED" ;;
+        DRIFTED/1)   echo "DRIFTED" ;;
+        UNKNOWN/3)   echo "UNKNOWN" ;;
+        *)           echo "MISMATCH" ;;
+    esac
+}
+
+# alert_activation VERDICT REPORT — the escalation, split out so report_activation
+# stays testable without a mailbox.
+alert_activation() {
+    local verdict="$1" report="$2" subject preamble
+    case "$verdict" in
+        NO_VERDICT|MISMATCH)
+            subject="[activation] the pogo this deploy installed cannot answer the launchd activation check"
+            preamble="The nightly asked the freshly-installed \`pogo\` whether every managed launchd
+plist matches the code it ships, and got no usable verdict back. The likely
+cause is that this build predates \`pogo check-activation\` — which is exactly
+the defect the check exists to report, one layer down: the detector for
+'merged but not installed' merged but not installed.
+
+Until this is resolved the nightly is NOT watching the plists at all." ;;
+        *)
+            subject="[activation] installed launchd plist(s) disagree with the code that ships them"
+            preamble="The nightly compared every managed launchd plist against the plist the binary
+it just installed from main would write, and they differ. A plist that differs
+in its FIRE TIMES is a job doing a fraction of what the code believes it does,
+and every fire it lacks is INERT — it writes no log line and produces no
+failure, so nothing downstream can observe its absence.
+
+Nothing was reconciled. This deploy SUCCEEDED; the drift is a separate defect
+that predates it and outlives it." ;;
+    esac
+    alert_external launchd_activation_drift \
+        "$subject" \
+        "$preamble
+
+$report
+
+Reconcile by hand, from a build that CONTAINS the plist change:
+
+  cd \$POGO_DEPLOY_SRC        # ~/.pogo/deploy-src — the checkout this deploy built
+  ./build.sh --install        # so the installer you run renders the CURRENT plist
+  pogo check-activation       # confirm the remedy each job names
+  <the \`pogo service install*\` the report names, one per drifted job>
+
+Then READ BACK, because the installer's own output does not prove anything:
+
+  /usr/libexec/PlistBuddy -c 'Print :StartCalendarInterval' \\
+      ~/Library/LaunchAgents/<label>.plist
+  launchctl print gui/\$UID/<label>        # what launchd actually registered
+
+Install OUTSIDE the 02:00-06:00 window: \`install-deploy\` does a \`launchctl
+bootout\` first, and booting the deploy job out mid-fire kills a deploy in
+progress. See scripts/launchd/README.md, 'What re-asserts an installed plist
+against the shipped one'." \
+        "{\"verdict\":\"${verdict}\",\"deploy_ref\":\"${DEPLOY_REF:-?}\",\"main\":\"$(short "${MAIN:-?}")\"}" \
+        || err "activation: the drift report could NOT be delivered — pogo-deploy.log is the only trace"
+    return 0
+}
+
+# report_activation — the impure half: ask the binary this deploy just installed
+# whether the box's launchd plists match it, and put the answer in this
+# transcript. Never sets an exit code.
+report_activation() {
+    local cli; cli="$(installed_bin pogo)"
+    if [ ! -x "$cli" ]; then
+        log "activation: SKIPPED — no pogo CLI at $cli to ask. This is NOT a report that the plists are current"
+        return 0
+    fi
+    local out rc first verdict
+    out="$("$cli" check-activation 2>&1)"; rc=$?
+    first="$(printf '%s\n' "$out" | head -1)"
+    verdict="$(classify_activation "$rc" "$first")"
+
+    case "$verdict" in
+        ACTIVATED)
+            log "activation: $first"
+            ;;
+        UNKNOWN)
+            # Loud in the transcript, not in the mail. "Could not compare" is a
+            # real answer and is not a pass — but a job deliberately left
+            # uninstalled sits in it indefinitely, and a nightly alert nothing
+            # can clear is the surest way to get this check filtered.
+            err "activation: $first"
+            printf '%s\n' "$out" | tail -n +2 | while IFS= read -r l; do err "activation:   $l"; done
+            ;;
+        DRIFTED)
+            err "activation: $first"
+            err "activation: THE INSTALLED PLISTS ARE NOT WHAT THIS DEPLOY'S CODE SAYS. Nothing here reconciles them; a fire the installed copy lacks is inert and writes no log line."
+            printf '%s\n' "$out" | tail -n +2 | while IFS= read -r l; do err "activation:   $l"; done
+            alert_activation "$verdict" "$out"
+            ;;
+        MISMATCH)
+            err "activation: the verdict word and the exit status DISAGREE (exit $rc, line '$first') — something between this script and the CLI is rewriting one of them, and neither can be trusted"
+            alert_activation "$verdict" "$out"
+            ;;
+        *)
+            err "activation: NO VERDICT — \`$cli check-activation\` exited $rc with no activation marker. An exit status without the marker is NOT a clean box: this build almost certainly predates the check, which is the defect the check reports."
+            err "activation:   ${first:-<no output>}"
+            alert_activation "$verdict" "$out"
+            ;;
+    esac
+    return 0
+}
+
 # report_prompt_refresh — the impure half: ask the freshly-restarted pogod's
 # event log what act 3 did, and put it in this transcript.
 #
@@ -3880,6 +4059,16 @@ cmd_redeploy() {
     #     lockfile yet and would read UNKNOWN for a reason that is about timing
     #     rather than about ownership.
     report_supervision
+
+    # 3a-ii. Report whether the box's launchd plists match the code this deploy
+    #        just installed (mg-b9e7). AFTER the install and the two verifies,
+    #        because the whole value of asking here is that the binary being
+    #        asked is a VERIFIED build from main — the audit compares against the
+    #        plist the asked binary renders, and an older `pogo` answers with its
+    #        own older plist. This is the only moment in the machine's day when
+    #        "which build?" has a right answer. Reports and escalates; never
+    #        reconciles, and never sets this script's exit code.
+    report_activation
 
     # 3b. Report act 3 (mg-b6bd). AFTER verify_orchestration, because a pogod
     #     that has not finished booting has not finished refreshing prompts

@@ -23,6 +23,14 @@ package main
 // and that is recorded rather than fixed (see scripts/launchd/README.md, "What
 // re-asserts an installed plist against the shipped one").
 //
+// STILL TRUE ABOUT RECONCILING; NO LONGER TRUE ABOUT NOTICING (mg-b9e7). The
+// comparison this file renders now has a second surface with an exit code and a
+// caller: `pogo check-activation` (checkactivation.go) runs the same audit
+// through the same line function, and scripts/pogo-self-deploy runs IT every
+// night, from the binary the deploy just installed and verified. This row is
+// unchanged and remains the thing a person reads; what it no longer has to be is
+// the only thing that ever looks.
+//
 // The circularity is the part worth carrying: this row ships inside the `pogo`
 // binary, so it is absent from every build predating it — which is to say the
 // detector for "merged but not installed" is itself subject to being merged but
