@@ -9,14 +9,30 @@ things:
 1. the live state directory of a running fleet — mail spool, `schedules.json`,
    `events.log`, per-agent runtime dirs, and the prompt files every crew agent
    and every polecat reads *as it runs*; and
-2. the working tree of `https://github.com/drellem2/pogo-config.git`, a public
-   GitHub repo that tracks 16 files in that directory.
+2. the working tree of `https://github.com/drellem2/pogo-config.git`, a
+   **private** GitHub repo that tracks 16 files in that directory.
 
-Nothing in the pogo repo says so — the string `pogo-config` appears nowhere in
-it — and nothing in pogo-config says what it is a config *for*. The dual nature
-is deducible from neither repo alone, which is how several agents spent
-2026-08-05 reasoning about prompt staleness against a baseline they had not
-identified.
+That visibility is measured, not assumed — 2026-08-13, `gh repo view
+drellem2/pogo-config --json isPrivate,visibility` →
+`{"isPrivate":true,"visibility":"PRIVATE"}`, and `git ls-files` in `~/.pogo`
+returns 16 paths. **This document said *public* from its decision (mg-3610,
+2026-08-06) until mg-ee70 corrected it**, which is worth knowing because
+visibility is the single property that governs what may safely be committed
+there, and the tracked set includes `agents/crew/pa.md` — Daniel's email
+address, his calendar ids, and a full description of his personal-assistant
+setup. The error was in the map rather than the territory — that tracked set is
+not world-readable. Note the tense: `isPrivate` is a present-tense measurement,
+and GitHub stops showing a repo's public events once it is private, so nothing
+here establishes what the visibility was between creation (2026-07-07) and now.
+Re-measure rather than trusting this line — a repo's visibility is one `gh repo
+edit` away from changing under a document.
+
+Nothing in the pogo repo recorded that dual nature — before mg-3610 the string
+`pogo-config` appeared nowhere in it — and nothing in pogo-config says what it
+is a config *for*. It was deducible from neither repo alone, which is how
+several agents spent 2026-08-05 reasoning about prompt staleness against a
+baseline they had not identified. This file and `internal/homevcs` are what
+closed the pogo-repo half of that gap.
 
 `pogo doctor --check` now carries a `$POGO_HOME version control` row that
 reports this condition on any host (see `internal/homevcs`, `cmd/pogo/homevcsdrift.go`).
@@ -105,10 +121,13 @@ Until this host is reconciled:
   `~/.pogo`. `git status` being dirty there is the normal state, not a mess to
   clean up.
 - **Do not** dispatch a polecat with `--repo=/Users/daniel/.pogo`.
-- Anything *added* to `~/.pogo` — a script, a config, a note — may be published
-  to a public repo. The allowlist `.gitignore` is what stops that by default;
-  new top-level paths need an explicit un-ignore, and reviewing `git ls-files`
-  before any commit there is the check that keeps a secret out of GitHub.
+- Anything *added* to `~/.pogo` — a script, a config, a note — may be committed
+  and pushed to GitHub. The repo is private, so that is off-host rather than
+  world-readable; it is still off-host, and a later `gh repo edit --visibility
+  public` would expose whatever was committed under today's reading. The
+  allowlist `.gitignore` is what stops an addition by default; new top-level
+  paths need an explicit un-ignore, and reviewing `git ls-files` before any
+  commit there is the check that keeps a secret off GitHub.
 
 ## Fixing this host (ops, for Daniel)
 

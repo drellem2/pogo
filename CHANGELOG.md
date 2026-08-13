@@ -736,7 +736,7 @@ is the curated, human-readable summary kept in sync at each release cut.
 
   `~/.pogo` is simultaneously the live state directory of the running fleet —
   mail spool, `schedules.json`, `events.log`, and the prompt files every agent
-  reads *as it runs* — and the working tree of `drellem2/pogo-config`, a public
+  reads *as it runs* — and the working tree of `drellem2/pogo-config`, a private
   repo tracking 16 files there. **The string `pogo-config` appears nowhere in
   the pogo repo**, and pogo-config does not say what it is a config for, so the
   dual nature is deducible from neither repo alone. That is not a tidiness
