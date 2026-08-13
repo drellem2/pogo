@@ -415,6 +415,7 @@ Use --json for the raw structured response.`,
 	var statusInterval time.Duration
 	var statusTag string
 	var statusAssignee string
+	var statusFull bool
 
 	// renderStatus fetches the current dashboard state and returns it as a
 	// fully-formatted text frame. In JSON mode it prints directly and returns
@@ -468,15 +469,27 @@ Use --json for the raw structured response.`,
 		matched := 0
 		if filtering {
 			workItems, matched = filterWorkItemsByAssignee(workItems, statusAssignee)
+		}
+
+		// The JSON block carries mg's styling stripped and nothing else
+		// changed: it is the whole listing, untruncated, because a machine
+		// consumer asked for the data rather than for a dashboard. The
+		// escapes are the one part that is pure cost there — they style
+		// nothing a parser can see, and they cost tokens to any agent reading
+		// the output (mg-ce23). Stripping happens AFTER the assignee filter,
+		// which recovers the assignee from exactly those escapes.
+		jsonItems := stripANSIText(workItems)
+
+		if filtering {
 			report.Filter = &statusFilter{
 				Assignee:  wantAssignee,
 				AppliesTo: []string{"work_items"},
 				Matched:   matched,
 			}
 			// Always present under a filter, even when it selected nothing.
-			report.WorkItems = &workItems
+			report.WorkItems = &jsonItems
 		} else if workItems != "" {
-			report.WorkItems = &workItems
+			report.WorkItems = &jsonItems
 		}
 
 		// Refinery
@@ -563,7 +576,13 @@ Use --json for the raw structured response.`,
 		} else if workItems == "" {
 			fmt.Fprintln(&b, "  No work items.")
 		} else {
-			for _, line := range strings.Split(workItems, "\n") {
+			// Bounded in width and in length unless --full was asked for; see
+			// cmd/pogo/statusitems.go for why both bounds belong here
+			// (mg-ce23).
+			for _, line := range renderWorkItems(workItems, statusItemOptions{
+				Full:   statusFull,
+				Styled: stdoutIsTerminal(),
+			}) {
 				fmt.Fprintf(&b, "  %s\n", line)
 			}
 		}
@@ -643,6 +662,15 @@ Use --json for the raw structured response.`,
 
 Use --live for a continuously updating view (like watch), refreshed every
 --interval (default 2s; must be positive).
+
+The work-item section is a summary and is bounded as one: each status group
+prints its count and at most its first 10 items, each line cut to 100 columns,
+with a line naming how many were elided. --full prints every item with its
+title in full; 'mg show <id>' is the tool for one item's whole title. Neither
+bound applies to --json, which carries the complete listing.
+
+mg's tag and assignee styling is kept when stdout is a terminal and stripped
+otherwise, so piped or captured output carries no escape sequences.
 
 --assignee narrows the WORK ITEM section and nothing else:
 
@@ -4356,6 +4384,7 @@ branches; work items and mail live in mg/macguffin (the task-store CLI).`,
 	cmdStatus.Flags().DurationVar(&statusInterval, "interval", 2*time.Second, "Refresh interval for --live mode (must be > 0)")
 	cmdStatus.Flags().StringVar(&statusTag, "tag", "", "Filter work items by tag")
 	cmdStatus.Flags().StringVar(&statusAssignee, "assignee", "", "Filter work items by assignee, exact and case-insensitive ('human' for your own queue, 'none' for unassigned). Agents and refinery are never filtered.")
+	cmdStatus.Flags().BoolVar(&statusFull, "full", false, fmt.Sprintf("Print every work item with its title in full, instead of the first %d per status group cut to %d columns", statusGroupCap, statusItemWidth))
 	rootCmd.AddCommand(cmdStatus)
 	cmdDoctor.Flags().BoolVar(&doctorCheck, "check", false, "Run quick health checks without starting the doctor agent")
 	rootCmd.AddCommand(cmdDoctor)

@@ -71,6 +71,12 @@ requests carry no assignee, so they stay in full and the output says so. Use
 `--assignee=none` for items nobody has been given. Matching is exact and
 case-insensitive.
 
+The work-item section is a summary and is bounded as one: per status group, a
+count and the first 10 items, each line cut to 100 columns, with a line naming
+how many were elided. `--full` prints every item with its title in full;
+`--json` is never bounded. mg's styling is kept for a terminal and stripped for
+a pipe, so captured output carries no escape sequences.
+
 ## Default workflow: coding
 
 The **coordinator** (auto-started crew, already running) watches for work and spawns a **polecat** per item; the polecat fixes it on a branch and submits to the **refinery**, which runs your gates and merges to `main`.
