@@ -657,8 +657,30 @@ Confirm and act:
 
 ```bash
 pogo check-acks                 # re-run the detector now
-pogo schedule list              # the raw table: completed/delivered per schedule
+pogo schedule list              # the raw table: acked/delivered per schedule
 ```
+
+- **A low ratio in that table is NOT a finding, and there is no action for you in
+  it.** The `ACKED` column counts token redemptions, not work: only the newest
+  fire's token is redeemable, so a run of fires landing inside one agent turn
+  yields at most one ack however completely the work was done. 100% is not
+  available to anyone whose turns outlast their cadence, and the ratio is exactly
+  the reciprocal of the mean attention gap — a turn length, printed as a
+  percentage. `pogo schedule list` now prints the gap beside the ratio and states
+  the ceiling underneath it; `pogo schedule completion` prints both forms.
+
+  This bullet exists because a `FLEET DEFICIT: median 42% of fires` escalated to
+  the mayor **for 46 hours** and nothing happened — correctly, because the report
+  named no action a coordinator could take (mg-a14c). **Act on the findings
+  below, which name an agent or a cohort and a thing to do. Do not act on the
+  ratio, and do not open an item to explain it.** If you want the deficit split
+  by mechanism rather than argued about, count it — supersession, token-less
+  fires and where-you-happened-to-look are the whole of it, with no residual
+  left for diligence to live in:
+
+  ```bash
+  pogo check-acks --populations --since <RFC3339> --until <RFC3339>
+  ```
 
 - **A default `pogo nudge` will not reach this agent.** It waits for 2s of PTY
   silence, and a spinner guarantees that silence never arrives. Use:
