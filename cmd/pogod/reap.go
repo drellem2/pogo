@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"sync"
@@ -322,14 +323,27 @@ func reapMergedPolecat(reg polecatReaper, mr *refinery.MergeRequest, complete fu
 	}
 	result, _ := json.Marshal(sidecar)
 	completeErr := complete(mr.Author, string(result))
-	if err := completeErr; err != nil {
-		// An "already done" here means the POLECAT won the race and its own
-		// result stands — the item is closed with the worker's verdict, not
-		// ours, and that is the better outcome, not a degraded one. mg enforces
-		// it: a second `mg done` is refused, so there is no path by which this
-		// call replaces a result the worker already wrote. Any other error is a
-		// real failure and reads as one.
-		log.Printf("refinery: mg done %s on merged polecat's behalf did not apply — if this is 'already done' the polecat wrote its own result first and that result stands: %v", mr.Author, err)
+	closed := itemIsClosed(completeErr)
+	switch {
+	case completeErr == nil:
+	case closed:
+		// The POLECAT won the race and its own result stands — the item is
+		// closed with the worker's verdict, not ours, and that is the better
+		// outcome, not a degraded one. mg enforces it: a second `mg done` is
+		// refused, so there is no path by which this call replaces a result the
+		// worker already wrote.
+		log.Printf("refinery: mg done %s on merged polecat's behalf did not apply because the item is ALREADY DONE — "+
+			"the polecat wrote its own result first and that result stands: %v", mr.Author, completeErr)
+	default:
+		// THE ITEM IS STILL OPEN, AND EVERY REPORT BELOW IS CONDITIONAL ON THAT
+		// (mg-2b71). This line used to be followed, unconditionally, by a filer
+		// mail saying COMPLETED and a summary line saying CLOSED — the failure
+		// captured, formatted, printed, and then read by no control flow at all,
+		// which reads as diligent error handling right up to the next line
+		// contradicting it. Both of those now say what actually happened.
+		log.Printf("refinery: MERGED BUT NOT CLOSED — work item %s is STILL OPEN after branch %s merged as %s: %v. "+
+			"No completion is being reported for it; close it by hand once you know why, or leave it open if that is "+
+			"correct (mg-2b71)", mr.Author, mr.Branch, mr.MergedSHA, completeErr)
 	}
 
 	// TELL THE AGENT THAT COMMISSIONED THIS ITEM (mg-f120). Everything above
@@ -338,10 +352,13 @@ func reapMergedPolecat(reg polecatReaper, mr *refinery.MergeRequest, complete fu
 	// coordinator archives it. The FILER was told by nobody, and learned only if
 	// the worker volunteered a mail.
 	//
-	// It runs here, after the close, whether or not the close applied. An
+	// It runs whether or not the close applied, and it says WHICH (mg-2b71). An
 	// "already done" means the worker won the race and its own result stands —
 	// the item is closed either way, and it is the CLOSE, not this call's
-	// success, that the filer is waiting to hear about.
+	// success, that the filer is waiting to hear about. A close that did NOT
+	// happen is the opposite: the filer still needs the mail, because a merged
+	// branch against an open item is exactly the state nobody else is watching,
+	// but the mail must not call it a completion.
 	//
 	// The sidecar this writer produced is handed over as a FALLBACK only: the
 	// notifier prefers what is actually in the store, which on the already-done
@@ -351,22 +368,32 @@ func reapMergedPolecat(reg polecatReaper, mr *refinery.MergeRequest, complete fu
 		worker = a.Name
 	}
 	notifyFiler(filer, filernotify.Completion{
-		ItemID:    mr.Author,
-		Route:     filernotify.RouteMerge,
-		Worker:    worker,
-		Branch:    mr.Branch,
-		MergedSHA: mr.MergedSHA,
-		Result:    fallbackSidecar(completeErr, string(result)),
+		ItemID:          mr.Author,
+		Route:           filernotify.RouteMerge,
+		Worker:          worker,
+		Branch:          mr.Branch,
+		MergedSHA:       mr.MergedSHA,
+		Result:          fallbackSidecar(completeErr, string(result)),
+		Closed:          closed,
+		NotClosedReason: notClosedReason(completeErr, closed),
 	})
 
 	// There is nothing to stop. The close was the whole point of this call
 	// (mg-be37) — say so at the same volume as the polecat path, because this
 	// line is the only record that the merged-but-open window was shut, and its
 	// absence over a night is how the four instances of 2026-08-09 went unnoticed.
+	//
+	// Conditional on the close having APPLIED (mg-2b71). The unconditional
+	// version of this line is what told a reader the window was shut on the one
+	// night it was not: mg-479c merged at 03:27:07, this line said CLOSED, and
+	// `mg show` said `status=available` for the rest of the night. A failure
+	// already announced itself above, so there is nothing more to say here.
 	if !polecat {
-		log.Printf("refinery: closed work item %s at merge with NO polecat running (branch=%s, merged=%s) — "+
-			"a hand-submitted branch used to leave its item in available/, where priority-wake advertises "+
-			"work that is already on the target (mg-be37)", mr.Author, mr.Branch, mr.MergedSHA)
+		if closed {
+			log.Printf("refinery: closed work item %s at merge with NO polecat running (branch=%s, merged=%s) — "+
+				"a hand-submitted branch used to leave its item in available/, where priority-wake advertises "+
+				"work that is already on the target (mg-be37)", mr.Author, mr.Branch, mr.MergedSHA)
+		}
 		return
 	}
 
@@ -376,6 +403,41 @@ func reapMergedPolecat(reg polecatReaper, mr *refinery.MergeRequest, complete fu
 		return
 	}
 	log.Printf("refinery: stopped merged polecat %s (event-driven, gh #35)", a.Name)
+}
+
+// itemIsClosed reports whether the work item is CLOSED, given what the close
+// attempt returned (mg-2b71).
+//
+// Two answers count as closed and there is no third: the close applied, or it
+// was refused because the item is already terminal — which is a close somebody
+// else performed, not a failure. client.CloseMGWorkItemAtMerge establishes that
+// second case by ASKING THE STORE rather than by reading mg's prose, because
+// "already done" and "not claimed" are both exit 4 and neither the exit status
+// nor a message match can separate them.
+//
+// Everything else — a refusal, an unreadable store, a gated item this daemon
+// declined to close — means the item is still open. That direction is the whole
+// point: a completion asserted without the standing to assert it is the defect,
+// so anything short of positive evidence of closure reads as not closed.
+func itemIsClosed(completeErr error) bool {
+	return completeErr == nil || errors.Is(completeErr, client.ErrMGWorkItemAlreadyDone)
+}
+
+// notClosedReason is the one-line why, in words, for a merge whose item stayed
+// open. Empty when the item is closed — the notification says COMPLETED then,
+// and a reason attached to a completion would be read as a caveat on it.
+func notClosedReason(completeErr error, closed bool) string {
+	if closed || completeErr == nil {
+		return ""
+	}
+	if errors.Is(completeErr, client.ErrMGWorkItemGated) {
+		// Not a failure. pogod could have closed this item — it is unclaimed and
+		// one `mg claim` away — and declined, because a `parked`/`human`/
+		// `blocked:` item is work somebody stopped on purpose and a merged
+		// branch is not a decision to restart it (mg-2b71 fix direction 4).
+		return "pogod declined to close it: " + completeErr.Error()
+	}
+	return "`mg done` did not apply: " + completeErr.Error()
 }
 
 // fallbackSidecar is the result JSON this writer produced, offered to the filer

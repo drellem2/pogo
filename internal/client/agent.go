@@ -8,12 +8,14 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
 
 	"github.com/drellem2/pogo/internal/agent"
+	"github.com/drellem2/pogo/internal/config"
 	"github.com/drellem2/pogo/internal/workitem"
 )
 
@@ -487,6 +489,139 @@ func CompleteMGWorkItem(id, resultJSON string) error {
 		return fmt.Errorf("mg done failed: %s (%w)", strings.TrimSpace(string(out)), err)
 	}
 	return nil
+}
+
+// ErrMGWorkItemAlreadyDone reports that `mg done` did not apply BECAUSE the item
+// is already terminal — the worker wrote its own result first, and that result
+// stands. The close the caller wanted happened; somebody else performed it.
+//
+// It is the only refusal a caller may read as "the item is closed". Everything
+// else CloseMGWorkItemAtMerge returns means the item is still open.
+var ErrMGWorkItemAlreadyDone = errors.New("work item is already done")
+
+// ErrMGWorkItemGated reports that the close was DECLINED rather than attempted:
+// the item is unclaimed and assigned to a non-dispatchable executive (`human`,
+// `parked`, `blocked:<agent>`), so nobody is working it and a merged branch is
+// not evidence that it is finished. See CloseMGWorkItemAtMerge.
+var ErrMGWorkItemGated = errors.New("work item is gated and was deliberately not closed")
+
+// mgWorkItemStatus reads an item's status and assignee — the two fields that
+// decide whether the merge close may proceed, and how.
+func mgWorkItemStatus(id string) (status, assignee string, err error) {
+	out, err := mgShowJSON(id)
+	if err != nil {
+		return "", "", err
+	}
+	var item struct {
+		Status   string `json:"status"`
+		Assignee string `json:"assignee"`
+	}
+	if err := json.Unmarshal(out, &item); err != nil {
+		return "", "", fmt.Errorf("mg show %s: unparseable JSON: %w", id, err)
+	}
+	return item.Status, item.Assignee, nil
+}
+
+// CloseMGWorkItemAtMerge closes a work item whose branch has just merged, and
+// REPORTS WHETHER IT IS CLOSED. It is what pogod's OnMerged reap calls instead of
+// CompleteMGWorkItem (mg-2b71).
+//
+// # THE DEFECT
+//
+// `mg done` refuses an item that is not in claimed/ (exit 4, "not claimed, so it
+// cannot be completed"). mg-be37 added the close-at-merge path for exactly the
+// case where no polecat is running — a branch submitted by hand, whose item is
+// therefore usually NOT claimed — so that path failed by construction in the case
+// it was built for. It ran `mg done`, captured the refusal, logged it verbatim,
+// and then mailed the filer that the item had COMPLETED. Reproduced live on
+// 2026-08-13 against mg-479c: `mg show` said `status=available, assignee=parked`
+// while pm-onethird held a mail asserting the item was closed.
+//
+// # WHAT THIS DOES ABOUT IT
+//
+// Three decisions, in the order they are made, each keyed on a fact READ FROM THE
+// STORE rather than on the wording of mg's refusal:
+//
+//   - ALREADY TERMINAL -> ErrMGWorkItemAlreadyDone, without running `mg done`.
+//     The worker won the race; its result stands and must not be replaced.
+//   - UNCLAIMED AND GATED -> ErrMGWorkItemGated, without claiming or closing.
+//     A `parked`/`human`/`blocked:` item that nobody holds is work somebody
+//     deliberately stopped; merging a hand-submitted branch is not a decision
+//     that it is finished, and it is not this daemon's decision to make. This is
+//     the mg-479c case, and leaving the item alone is what actually happened
+//     there — the defect was the report, not the outcome.
+//   - UNCLAIMED AND DISPATCHABLE -> claim it, then close it. This is what makes
+//     mg-be37 work as intended rather than merely reporting that it did: the
+//     stranded branch of a dead polecat leaves its item in available/, where
+//     priority-wake advertises work that is already on the target.
+//
+// The gate is read off `assignee` only. `mg show --json` carries no stage/carrier
+// field — that state is pogod's own parse of the body — so config.IsStageGated
+// has nothing to read here and is deliberately not consulted.
+//
+// A store that cannot be READ is not a licence to skip the close: the probe's
+// failure falls through to the plain `mg done`, whose own outcome is then
+// classified below. The one thing that never happens is a close reported as
+// having applied when it did not.
+func CloseMGWorkItemAtMerge(id, resultJSON string) error {
+	claimNote, tookClaim := "", false
+	status, assignee, probeErr := mgWorkItemStatus(id)
+	if probeErr == nil {
+		switch {
+		case status == "done" || status == "archived":
+			return fmt.Errorf("%w: mg show %s reports status=%s, so there is nothing left to close", ErrMGWorkItemAlreadyDone, id, status)
+		case status == "available" && config.IsDispatchGated(assignee, nil):
+			return fmt.Errorf("%w: %s is unclaimed and assigned to %q — no worker holds it, so its branch merging is not evidence that it is finished",
+				ErrMGWorkItemGated, id, strings.TrimSpace(assignee))
+		case status == "available":
+			// The claim `mg done` requires. pogod's pid is the honest owner of
+			// record for the same reason it is at spawn (mg-7254): pogod is the
+			// process taking the claim and there is no worker whose pid to name.
+			if out, err := execCommand("mg", "claim", id, "--pid", strconv.Itoa(os.Getpid())).CombinedOutput(); err != nil {
+				// Not fatal on its own — the item may have been claimed by
+				// somebody else between the probe and here, in which case the
+				// close below still applies. Carried forward so that if the
+				// close DOES fail, the report says why it could not be taken.
+				claimNote = fmt.Sprintf(" (claiming it first also failed: %s)", strings.TrimSpace(string(out)))
+			} else {
+				tookClaim = true
+			}
+		}
+	}
+
+	err := CompleteMGWorkItem(id, resultJSON)
+	if err == nil {
+		return nil
+	}
+	// ASK THE STORE, DO NOT READ THE MESSAGE. "already done" and "not claimed"
+	// are both exit 4 (macguffin's frozen conflict code covers every wrong-state
+	// refusal), so the exit status cannot separate them and prose matching breaks
+	// the first time a sentence is reworded. The question that matters is not
+	// which error mg printed but whether the item is closed, and only the store
+	// answers that.
+	if done, perr := MGWorkItemDone(id); perr == nil && done {
+		return fmt.Errorf("%w: %v", ErrMGWorkItemAlreadyDone, err)
+	}
+	// ROLL THE CLAIM BACK. This function's own remedy is subject to the defect
+	// it remedies: the claim above was taken for one purpose, that purpose has
+	// just failed, and an item left in claimed/ under pogod's pid with no worker
+	// is STRICTLY WORSE than the open item this started with. available/ is
+	// where stall-watch looks and where dispatch reads; claimed/ under a pid
+	// that will never work it is the mg-fb13 shape, invisible to both.
+	//
+	// Only when this call took the claim. A claim somebody else holds is not
+	// ours to release, and releasing it is how a live worker loses its item.
+	if tookClaim {
+		if out, uerr := execCommand("mg", "unclaim", id).CombinedOutput(); uerr != nil {
+			claimNote += fmt.Sprintf(" (and the claim pogod took in order to close it could NOT be released: %s — "+
+				"%s is now STRANDED in claimed/ under pid %d, where dispatch will not see it and stall-watch does not "+
+				"look; release it by hand with `mg unclaim %s`)", strings.TrimSpace(string(out)), id, os.Getpid(), id)
+		} else {
+			claimNote += fmt.Sprintf(" (the claim pogod took in order to close it has been released; %s is back in available/ "+
+				"exactly as it was before this attempt)", id)
+		}
+	}
+	return fmt.Errorf("%w%s", err, claimNote)
 }
 
 // workItemIDRe is the SHAPE of a macguffin work-item id: an `mg-` or `gh-`

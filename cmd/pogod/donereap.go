@@ -337,6 +337,11 @@ func (d *doneReaper) Check(now time.Time) []string {
 			ItemID: p.WorkItemID,
 			Route:  filernotify.RouteSelfClose,
 			Worker: p.Name,
+			// Earned, not assumed: this reaper reaches here only for an item
+			// this tick READ as terminal (LivePolecatSet's Done), which is the
+			// evidence the merge route lacked when it asserted the same thing
+			// (mg-2b71).
+			Closed: true,
 		})
 		if reviewer, held := openReviews()[p.WorkItemID]; held {
 			// The gh#131 case, caught. Logged ONCE per grant rather than every

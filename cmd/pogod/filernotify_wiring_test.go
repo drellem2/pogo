@@ -18,9 +18,17 @@ func TestTheCompletionNotifierIsWiredToBothClosePaths(t *testing.T) {
 		t.Error("pogod does not construct the completion notifier over the real coordinator and registry (mg-f120)")
 	}
 	// The merge close — the path the observed instance (mg-145f) took.
-	if !strings.Contains(src, "reapMergedPolecat(agentRegistry, mr, client.CompleteMGWorkItem, postMerge, deferBackstop, filerNotify)") {
-		t.Error("the merge-close path does not reach the completion notifier, so a merged item's filer is " +
-			"still told by nobody (mg-f120)")
+	//
+	// The closer is CloseMGWorkItemAtMerge and not CompleteMGWorkItem, and the
+	// difference is load-bearing rather than cosmetic (mg-2b71): the plain
+	// wrapper runs `mg done` and reports only that it failed, which on an
+	// unclaimed item is every hand-submitted branch. The merge closer claims
+	// first where that is the right move, declines where it is not, and tells
+	// the caller which of those happened — the fact the notification below is
+	// now conditional on.
+	if !strings.Contains(src, "reapMergedPolecat(agentRegistry, mr, client.CloseMGWorkItemAtMerge, postMerge, deferBackstop, filerNotify)") {
+		t.Error("the merge-close path does not reach the completion notifier through the merge closer, so a merged " +
+			"item's filer is either told by nobody (mg-f120) or told COMPLETED about an item that never closed (mg-2b71)")
 	}
 	// The non-merge close — triage, audit and investigation items, which the
 	// refinery never hears about at all.
