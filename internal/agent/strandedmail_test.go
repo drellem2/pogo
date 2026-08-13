@@ -392,3 +392,68 @@ func TestWorkItemStatusProbeIsConsultedOnce(t *testing.T) {
 		t.Fatalf("the sink received %+v; the probed status did not reach the alert", sent)
 	}
 }
+
+// TestStrandedAlertCarriesTheSecondOpinionAboveTheRemedy (mg-5ec6). The content
+// second opinion exists because `git cherry` over-reports: an ordinary clean
+// refinery rebase can rewrite a commit's patch id — by replaying a hunk into
+// moved context, or by dropping one the target already had — and the branch then
+// reads as unmerged for the rest of its life. Until mg-5ec6 that instrument had
+// one consumer, `pogo check-stranded`, and none of the three routes inside pogod
+// carried it.
+//
+// It goes ABOVE the paste-ready submit line, because it is the one paragraph that
+// changes how that line should be read. The SUBJECT is deliberately untouched:
+// "do NOT dispatch" is true in both worlds — if the branch really did land, the
+// work is on the target and a worker sent at the item re-derives it anyway.
+func TestStrandedAlertCarriesTheSecondOpinionAboveTheRemedy(t *testing.T) {
+	a := StrandedAlert{
+		Polecat: "a3d4", WorkItemID: "mg-a3d4", Repo: "/repo", Route: RouteRelease,
+		ItemStatus: "available",
+		Finding: strandedwork.Finding{
+			Repo: "/repo", Branch: "polecat-a3d4", Ref: "refs/remotes/origin/polecat-a3d4",
+			Pushed: true, Found: true, Target: "refs/remotes/origin/main",
+			Disposition: strandedwork.DispositionResubmit,
+			Unmerged:    []strandedwork.Commit{{SHA: "c2f1854cea4f", Subject: "probe: price the bet (mg-a3d4)"}},
+		},
+		Presence:      strandedwork.Presence{Added: 2063, Present: 2008, Measured: true},
+		SecondOpinion: "SECOND OPINION SAYS THIS MAY ALREADY HAVE LANDED UNDER A DIFFERENT SHA: 2008 of 2063 added line(s) already in the target (97%). It does not clear the row.",
+	}
+
+	subject, body := a.Message()
+	if !strings.Contains(body, "MAY ALREADY HAVE LANDED") {
+		t.Fatalf("the second opinion did not reach the mail body; the reader is told the branch is "+
+			"unmerged with no way to see the 97%%:\n%s", body)
+	}
+	remedy := strings.Index(body, "WHAT TO DO")
+	note := strings.Index(body, "SECOND OPINION")
+	if note < 0 || remedy < 0 || note > remedy {
+		t.Errorf("the second opinion (at %d) is below the remedy (at %d); the caveat has to be read "+
+			"before the submit line, not after it", note, remedy)
+	}
+	if !strings.Contains(subject, "do NOT dispatch") {
+		t.Errorf("the subject lost the prohibition because the second opinion hedged it: %q. "+
+			"A branch that landed is a reason NOT to dispatch, not a reason to", subject)
+	}
+	// An alert with nothing to say adds no paragraph at all.
+	bare := a
+	bare.SecondOpinion = ""
+	if _, body := bare.Message(); strings.Contains(body, "SECOND OPINION") {
+		t.Errorf("an empty second opinion rendered a heading anyway:\n%s", body)
+	}
+}
+
+// TestWrapAtKeepsLongTokensIntact. The second opinion arrives as one long line
+// and is wrapped for the mail; a wrap that broke a sha or a branch name across
+// two lines would make the one thing the reader has to copy uncopyable.
+func TestWrapAtKeepsLongTokensIntact(t *testing.T) {
+	long := "polecat-a3d4-with-an-unreasonably-long-name-nobody-would-ever-actually-use-but-still"
+	got := wrapAt("the branch "+long+" is the one to look at", 40)
+	if !strings.Contains(got, long) {
+		t.Errorf("wrapAt broke a token longer than the width:\n%s", got)
+	}
+	for _, line := range strings.Split(wrapAt(strings.Repeat("word ", 40), 40), "\n") {
+		if len(line) > 40 {
+			t.Errorf("wrapAt produced a %d-column line: %q", len(line), line)
+		}
+	}
+}

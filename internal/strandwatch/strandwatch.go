@@ -80,6 +80,15 @@ type Item struct {
 // including them is what turns a three-row report into a fifty-seven-row one. The
 // ticket's own bound says so: "the number I will defend is 2 actionable", out of
 // 59 branches. `shelved` is out for the same reason.
+//
+// THE SCOPING IS THIS SWEEP'S ALONE (mg-5ec6). A branch whose item was closed by
+// a SIBLING's merge is outside this list by construction, and that was raised as
+// a possible hole in the whole detector family. It is not: the spawn-time refusal
+// and the release-time reporter in internal/agent/strandedgate.go read no item
+// status at all — the first is keyed on the dispatch, the second on the agent
+// being stopped — so the sibling-closed shape is visible to both. The
+// open-item bound here is a NOISE bound on a periodic report, not a definition of
+// what counts as stranded.
 var OpenStatuses = []string{"available", "claimed", "pending"}
 
 // Kind is what a row IS, and therefore what to do about it.
@@ -96,9 +105,16 @@ const (
 
 	// KindConflictSuspect is an open item whose branch `git cherry` calls
 	// unmerged while the target already holds essentially every line it adds —
-	// the signature of a rebase that resolved a conflict and lost its patch
-	// identity doing it. See internal/strandedwork/content.go for the measured
-	// controls.
+	// the signature of a rebase that lost the commit's patch identity while
+	// landing it. See internal/strandedwork/content.go for the measured controls.
+	//
+	// THE NAME IS NARROWER THAN THE ROW, and is kept only because it is on the
+	// wire (mg-5ec6). A CONFLICT is the one mechanism that cannot produce this:
+	// the refinery aborts its rebase and fails the merge request on conflict, so
+	// no conflicted branch ever lands. The two measured mechanisms are both
+	// ordinary CLEAN rebases — one that replayed a hunk into moved context, and
+	// one that dropped a hunk the target had already made. Read it as
+	// "landed-under-another-sha suspect".
 	//
 	// IT RECOMMENDS NEITHER ACTION, and that is the point. Both instruments are
 	// heuristics, they disagree here, and each of the two remedies is destructive

@@ -85,6 +85,12 @@ type StrandedAlert struct {
 	ItemStatus string
 	// Finding is the branch verdict. Its Summary() is the remedy sentence.
 	Finding strandedwork.Finding
+	// Presence is the content second opinion's measurement, and SecondOpinion is
+	// its rendered sentence — empty when there was nothing to measure. Neither
+	// may change what this alert SAYS TO DO: see strandedwork.Corroborate for why
+	// a high presence downgrades a row to check-by-hand and never to clean.
+	Presence      strandedwork.Presence
+	SecondOpinion string
 }
 
 // The two routes a stranded-work alert can arrive by.
@@ -333,6 +339,16 @@ func (a StrandedAlert) Message() (subject, body string) {
 	}
 	fmt.Fprintf(&b, "\nReason:     %s\n\n", a.Reason)
 
+	// The second opinion goes ABOVE the remedy, because it is the one paragraph
+	// that changes how the remedy should be read (mg-5ec6). The SUBJECT is left
+	// alone on purpose: "do NOT dispatch" stays true in both worlds — if the
+	// branch really did land, the item's work exists on the target and a worker
+	// sent at it re-derives that instead — so hedging the half that travels
+	// furthest would buy nothing and cost the prohibition.
+	if a.SecondOpinion != "" {
+		fmt.Fprintf(&b, "%s\n\n", wrapAt(a.SecondOpinion, 88))
+	}
+
 	fmt.Fprintf(&b, "WHAT TO DO — resubmit, do not dispatch:\n\n")
 	fmt.Fprintf(&b, "    pogo refinery submit %s --repo=%s", a.Finding.Branch, a.Repo)
 	if a.WorkItemID != "" {
@@ -398,6 +414,33 @@ func (a StrandedAlert) Message() (subject, body string) {
 	b.WriteString("The same fact is on the event spine as work_item_stranded_push; this mail is the\n" +
 		"half that is observable from outside the daemon that found it (mg-be37).\n")
 	return subject, b.String()
+}
+
+// wrapAt greedily wraps s to at most width columns, on spaces.
+//
+// Every other paragraph in this body is hand-wrapped in its format string; the
+// second opinion is assembled in another package and arrives as one long line,
+// and a mail whose paragraphs are 400 columns wide is a mail that gets skimmed
+// past. A word longer than width is left over-long rather than broken: the long
+// tokens here are branch names and shas, and a broken sha is worse than a ragged
+// line.
+func wrapAt(s string, width int) string {
+	var b strings.Builder
+	col := 0
+	for i, word := range strings.Fields(s) {
+		switch {
+		case i == 0:
+			col = len(word)
+		case col+1+len(word) > width:
+			b.WriteString("\n")
+			col = len(word)
+		default:
+			b.WriteString(" ")
+			col += 1 + len(word)
+		}
+		b.WriteString(word)
+	}
+	return b.String()
 }
 
 // shortSHA mirrors strandedwork's rendering so a sha in this mail and a sha in
