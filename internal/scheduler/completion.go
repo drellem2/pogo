@@ -111,6 +111,53 @@ var (
 	ErrStaleToken = errors.New("scheduler: token does not match the outstanding fire")
 )
 
+// Outstanding reports whether this schedule is currently holding a redeemable
+// token — a fire delivered, not yet acked, and not yet superseded. It is the
+// "boundary" term of the identity below: one per schedule at most, and a
+// property of WHEN YOU LOOKED rather than of the agent.
+func (e Entry) Outstanding() bool { return e.PendingToken != "" }
+
+// AttentionGap returns deliveries per ack cycle — 1.0 for a schedule whose
+// agent acks every fire before the next one arrives, 2.9 for one that acks once
+// per 2.9 fires. It returns 0 when no cycle has closed, which is not a gap of
+// zero but an absence of measurement, and callers must render it as such.
+//
+// This is the SAME QUANTITY as FiresCompleted/FiresDelivered, inverted. The
+// identity
+//
+//	FiresCompleted/FiresDelivered  ==  1/AttentionGap  -  boundary/FiresDelivered
+//
+// is algebra, not an empirical fit: FiresDelivered is by construction the number
+// of fires in all the runs, and FiresCompleted plus the boundary term is the
+// number of runs. mg-ddf7 confirmed it to zero residual across all 114 schedules
+// in this fleet's event log, and populations.go exposes the same identity
+// computed from events instead of counters.
+//
+// It exists because the two renderings are not equally honest. "103/302, 34%"
+// invites the reading that 100% was available and 66% of the work was skipped;
+// neither half is true. Only the newest fire's token is redeemable
+// (issueFireTokenLocked), so a schedule whose agent's turns outlast its cadence
+// CANNOT reach 100% however promptly and completely it works — its ceiling is
+// 1/gap, set by the delivery interleaving rather than by the agent. Stated as a
+// gap, the number says what it measures: how many fires land per turn. Stated
+// as a percentage of an unreachable 100%, it reads as an accusation, and one
+// such reading cost 46 hours of a coordinator's attention on an alarm naming no
+// action it could take (mg-a14c).
+//
+// Read UnackedStreak, not this, for the failure the counters exist to catch: a
+// busy-but-healthy agent's streak is bounded by its own turn length while a
+// wedged one's climbs without bound (202, for the mayor, on 2026-07-22).
+func (e Entry) AttentionGap() float64 {
+	cycles := e.FiresCompleted
+	if e.Outstanding() {
+		cycles++
+	}
+	if cycles <= 0 || e.FiresDelivered <= 0 {
+		return 0
+	}
+	return float64(e.FiresDelivered) / float64(cycles)
+}
+
 // AckResult describes an accepted completion.
 type AckResult struct {
 	Entry   Entry         `json:"entry"`
@@ -221,6 +268,38 @@ func (s *Scheduler) Ack(agentName, id, token string, now time.Time) (AckResult, 
 // semantics — an unacked fire superseded by the next fire is exactly the event
 // UnackedStreak is counting, and letting the old token stay redeemable would
 // let a late ack for fire N-1 mask the fact that fire N also went unanswered.
+//
+// # The two repairs this rules out, and the measurement that rules them out
+//
+// Because only the newest token is redeemable, a run of N fires that lands
+// inside one agent turn can yield AT MOST ONE ack, so FiresCompleted counts
+// TOKEN REDEMPTIONS and its per-schedule ceiling sits below FiresDelivered for
+// any schedule whose turns outlast its cadence. mg-a14c asked, correctly,
+// whether the honest response is to make an ack retire the earlier fires too.
+// It is not, and the reason is measured rather than argued:
+//
+//   - "let a superseded token stay redeemable" is the paragraph above, and its
+//     objection stands: a late ack for fire N-1 would mask that fire N also
+//     went unanswered.
+//
+//   - "one ack retires the ENTIRE outstanding set, reporting how many it
+//     covered" survives that objection and dies on a different one. It assumes
+//     the run of fires was superseded by an agent BUSY doing their work, so one
+//     catch-up genuinely discharged all N. mg-772f measured whether that
+//     assumption holds and it does not: across this fleet's token era 51.5% of
+//     superseded fires landed while synthwatch had already detected that the
+//     agent's turns were DYING. In the worked 27-fire episode of 2026-08-09, 26
+//     of the 27 turns died on `API Error: ... (ENOTFOUND)` and never ran at
+//     all. Retiring the set would have booked 27 completions for one surviving
+//     turn — converting a 4.5-hour fleet outage into a clean reading, in the
+//     one instrument built to see it. A repair that scores a dead fleet at 100%
+//     is worse than the deficit it tidies.
+//
+// So the supersession rule stays and the NAME changes instead: the counter is
+// rendered as acks-per-fire with its ceiling stated (see Entry.AttentionGap and
+// `pogo schedule list`), and the number to alarm on is UnackedStreak, which is
+// the one that does not saturate. Anyone reopening this needs a measurement
+// that separates a busy agent from a dead one BEFORE the ack, not after.
 func issueFireTokenLocked(entry *Entry, now time.Time) string {
 	tok := newCompletionToken(now)
 	entry.PendingToken = tok
@@ -294,7 +373,33 @@ type CompletionStats struct {
 	FiresCompleted int `json:"fires_completed"`
 	// Ratio is FiresCompleted/FiresDelivered over tracked entries, or 0 when
 	// nothing has been delivered.
+	//
+	// Its ceiling is NOT 1. See Entry.AttentionGap: only the newest fire's token
+	// is redeemable, so a cohort whose turns outlast its cadence cannot reach it,
+	// and a Ratio read as "the fraction of scheduled work that got done" is
+	// reading a quantity that does not exist. MeanGap below is the same number in
+	// units that do not invite that reading.
 	Ratio float64 `json:"ratio"`
+	// Outstanding is how many tracked schedules were holding a redeemable token
+	// at the instant of measurement — the boundary term, one per schedule at
+	// most. It is reported because it is the part of the deficit that is a
+	// property of when you looked rather than of any agent, and because Ratio,
+	// MeanGap and it are only reconcilable together:
+	//
+	//	Ratio  ==  1/MeanGap  -  Outstanding/FiresDelivered
+	Outstanding int `json:"outstanding"`
+	// MeanGap is fires delivered per ack cycle across tracked entries — the
+	// reciprocal reading of Ratio, corrected for Outstanding. 0 when no cycle
+	// closed, which means UNMEASURED rather than instantaneous.
+	//
+	// That zero has the same two readings this whole signal exists to separate,
+	// so its denominator travels with it rather than being inferable only by
+	// someone who already knows: a JSON consumer reconstructs the cycle count as
+	// FiresCompleted+Outstanding, and cycles == 0 is the unmeasured case. The
+	// human rendering omits the line entirely instead of printing a zero. The
+	// same discipline as ackwatch's DeliveryMeasured, for the same reason — an
+	// unmeasured window and a measured-and-clean one must never render alike.
+	MeanGap float64 `json:"mean_gap"`
 	// StallThreshold is the streak length at which a tracked schedule counts as
 	// stalled, echoed back so the numbers are self-describing.
 	StallThreshold int `json:"stall_threshold"`
@@ -325,12 +430,18 @@ func (s *Scheduler) Completion(agentName string, threshold int) CompletionStats 
 		}
 		stats.FiresDelivered += e.FiresDelivered
 		stats.FiresCompleted += e.FiresCompleted
+		if e.Outstanding() {
+			stats.Outstanding++
+		}
 		if e.UnackedStreak >= threshold {
 			stats.Stalled++
 		}
 	}
 	if stats.FiresDelivered > 0 {
 		stats.Ratio = float64(stats.FiresCompleted) / float64(stats.FiresDelivered)
+		if cycles := stats.FiresCompleted + stats.Outstanding; cycles > 0 {
+			stats.MeanGap = float64(stats.FiresDelivered) / float64(cycles)
+		}
 	}
 	return stats
 }

@@ -6595,3 +6595,59 @@ func TestBuildTemplateCarriesTheRemedyIsTheSameKindRule(t *testing.T) {
 		}
 	}
 }
+
+// TestMayorAckWatchRatioIsNotActionable pins the answer to mg-a14c's fourth
+// question — who receives this signal and what they are supposed to DO on
+// receipt.
+//
+// A `FLEET DEFICIT: median 42% of fires` sat escalated to the mayor for 46
+// hours and produced no action, correctly, because the report named none the
+// coordinator could take. An alarm whose only recipient cannot act on it is
+// decorative. The playbook's answer is not a new action but an explicit
+// non-action: the ratio is a turn length, its ceiling is below 100%, and the
+// findings that DO name an agent and a remedy are listed separately below it.
+//
+// This is pinned by test because the old wording pointed at
+// `pogo schedule list` as "completed/delivered per schedule" with no ceiling —
+// which is exactly the reading that cost the 46 hours — and a caveat that lives
+// only in a Go package comment is a caveat this file's reader never sees.
+func TestMayorAckWatchRatioIsNotActionable(t *testing.T) {
+	data, err := defaultPrompts.ReadFile("prompts/mayor.md")
+	if err != nil {
+		t.Fatalf("read embedded mayor.md: %v", err)
+	}
+	body := string(data)
+	// Matched against whitespace-collapsed prose. Every phrase below is a
+	// sentence fragment in a wrapped markdown paragraph, and a raw substring
+	// match would break — or worse, silently pass — the next time someone
+	// rewraps the block. Same defect class as the closing-keyword gate that a
+	// line wrap walked straight through.
+	flat := strings.Join(strings.Fields(body), " ")
+
+	for _, want := range []string{
+		// The non-action, stated as such.
+		"A low ratio in that table is NOT a finding",
+		// What the column actually counts.
+		"token redemptions, not work",
+		// The ceiling, so nobody reads the gap as a shortfall again.
+		"100% is not available",
+		// The cost, so the rule is not filed away as pedantry.
+		"for 46 hours",
+		// Where the action IS, so this reads as a redirect rather than a shrug.
+		"Do not act on the ratio",
+		// The tool that splits the deficit by mechanism, with its real flag.
+		"pogo check-acks --populations",
+	} {
+		if !strings.Contains(flat, want) {
+			t.Errorf("mayor.md: expected %q", want)
+		}
+	}
+
+	// The old pointer asserted the column measured completed work. It is the
+	// sentence the 46-hour escalation was read through.
+	if strings.Contains(flat, "the raw table: completed/delivered per schedule") {
+		t.Errorf("mayor.md: the ack table is described as completed/delivered again — " +
+			"only the newest fire's token is redeemable, so the column counts acks, " +
+			"and 100%% is not reachable by an agent whose turns outlast its cadence")
+	}
+}

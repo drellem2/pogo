@@ -1505,9 +1505,15 @@ Exit status is 0 when nothing is actionable, 1 when any deficit is found.
 --populations answers a different question: not WHICH schedule is deficient but
 WHAT MECHANISM produced the deficit. Three can, and they have opposite remedies:
 
-  batched      several fires delivered inside one agent turn. Each new fire's
-               token supersedes the last, so only one is redeemable however
-               diligent the agent is.
+  batched      a fire's token replaced by the next fire's before anything
+               redeemed it, so only one of the run is redeemable however
+               diligent the agent is. That is the MEASURED fact and all this
+               column claims. It does NOT claim the cause: "several fires
+               inside one long turn" was the old wording here and mg-772f
+               measured it wrong for 51.5% of this fleet's superseded fires,
+               which landed on time into turns that were already DYING. The
+               report's own "WHICH SIDE" block is where a cause is allowed to
+               be named, because it is the only part that measures one.
   token-less   a fire delivered carrying no token. Nothing to ack, so the
                deficit is unclosable BY THE AGENT — a token-lifetime change
                would not touch it.
@@ -3006,7 +3012,7 @@ the schedule fires exactly once and reschedules to the next future occurrence.`,
 				}
 				return
 			}
-			fmt.Printf("%-20s  %-20s  %-25s  %-16s  %s\n", "ID", "AGENT", "NEXT FIRE", "CRON / ONCE", "COMPLETED")
+			fmt.Printf("%-20s  %-20s  %-25s  %-16s  %s\n", "ID", "AGENT", "NEXT FIRE", "CRON / ONCE", ackColumnHeader)
 			for _, e := range entries {
 				kind := e.Cron
 				if e.OneShot {
@@ -3019,18 +3025,13 @@ the schedule fires exactly once and reschedules to the next future occurrence.`,
 				if e.OneShot && !e.LastFire.IsZero() {
 					nextFire = "— (fired, awaiting ack)"
 				}
-				// A schedule that has never acked reads "—", not "0/N": absent
-				// evidence is not evidence of failure (mg-a754).
-				completed := "—"
-				if e.CompletionTracked() {
-					completed = fmt.Sprintf("%d/%d", e.FiresCompleted, e.FiresDelivered)
-					if e.UnackedStreak >= scheduler.DefaultStallThreshold {
-						completed += fmt.Sprintf("  ⚠ %d unacked", e.UnackedStreak)
-					}
-				}
 				fmt.Printf("%-20s  %-20s  %-25s  %-16s  %s\n",
-					e.ID, e.Agent, nextFire, kind, completed)
+					e.ID, e.Agent, nextFire, kind, renderAckCell(e))
 			}
+			// The ceiling belongs UNDER THE NUMBERS, not in a package comment
+			// three repositories deep. mg-a14c's 46-hour escalation was read off
+			// this table by a reader who had no way to know 100% was unreachable.
+			fmt.Print(ackColumnLegend(entries))
 		},
 	}
 	cmdScheduleList.Flags().StringVar(&schedListAgent, "agent", "", "Filter by agent name")
@@ -3127,7 +3128,16 @@ keeps its tracked status but restarts its counters, and is reported separately
 so a thin denominator is visible rather than inferred.
 
 The shape to watch for is fleet-wide: one agent skipping one ack is noise,
-every tracked schedule going to zero within the same minute is an outage.`,
+every tracked schedule going to zero within the same minute is an outage.
+
+WHAT THE RATIO IS NOT (mg-a14c). It is not the fraction of scheduled work that
+got done, and 100% is not available. Only the newest fire's token is redeemable,
+so a run of fires landing inside one agent turn yields at most one ack however
+completely the work was done. The ratio is exactly the reciprocal of the mean
+attention gap — a TURN LENGTH in cadence periods — which is why this command
+prints it both ways. An alarm built on the percentage measures how long turns
+are; the number that separates a busy agent from a dead one is the unacked
+streak, because it is the one that does not saturate.`,
 		Args: cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
 			stats, err := client.SchedulerCompletion(schedComplAgent, schedComplThreshold)
@@ -3150,12 +3160,27 @@ every tracked schedule going to zero within the same minute is an outage.`,
 				// failure when it means "nothing measured yet" — the same
 				// could-not-look/looked-and-saw-nothing collapse this whole
 				// signal exists to end.
-				fmt.Printf("Fires completed: 0 (n/a — no fires delivered against the current counters)\n")
+				fmt.Printf("Fires acked:     0 (n/a — no fires delivered against the current counters)\n")
 			} else {
-				fmt.Printf("Fires completed: %d (%.1f%%)\n", stats.FiresCompleted, stats.Ratio*100)
+				fmt.Printf("Fires acked:     %d (%.1f%%)\n", stats.FiresCompleted, stats.Ratio*100)
+				if stats.MeanGap > 0 {
+					// Same number, honest units. See scheduler.Entry.AttentionGap:
+					// only the newest token is redeemable, so the percentage above
+					// is measured against a 100% that was never on offer, and a
+					// reader who does not know that reads a turn length as a
+					// shortfall (mg-a14c).
+					fmt.Printf("                 i.e. 1 ack per %.1f fires delivered — this is a TURN LENGTH,\n", stats.MeanGap)
+					fmt.Printf("                 not a work shortfall. A schedule whose agent's turns outlast its\n")
+					fmt.Printf("                 cadence cannot reach 100%%, so do not alarm on the percentage.\n")
+				}
+				if stats.Outstanding > 0 {
+					fmt.Printf("Outstanding:     %d schedule(s) holding a redeemable token right now —\n", stats.Outstanding)
+					fmt.Printf("                 part of the deficit above is a property of WHEN YOU LOOKED.\n")
+				}
 			}
 			fmt.Printf("Stalled:         %d of %d tracked (streak >= %d)\n",
 				stats.Stalled, stats.Tracked, stats.StallThreshold)
+			fmt.Printf("                 ^ the number to act on: it does not saturate.\n")
 			if stats.Tracked > 0 && stats.Stalled == stats.Tracked {
 				fmt.Printf("\n⚠ EVERY tracked schedule is stalled. That is the fleet-wide shape:\n")
 				fmt.Printf("  one upstream cause (expired credential, rate limit, spend cap), not N\n")
