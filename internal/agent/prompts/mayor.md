@@ -781,7 +781,15 @@ reviews: <build ticket id>
 
 (`reviews:` on review tickets only. Written exactly like that — the value is one bare id, and every carrier value is a single whitespace-free token; a trailing comment or parenthetical is not part of the value, it ends the block. See the placement table in transition 3.)
 
-- `stage:` is the state-machine position, and it lives on whichever ticket is currently active: the triage ticket carries `triage → gated`; after the gate, the build ticket carries `build → review → merge`. Update it with `mg edit <id> --body="..."` at each transition — body edits are coordination; preserve the rest of the body when rewriting.
+- `stage:` is the state-machine position, and it lives on whichever ticket is currently active: the triage ticket carries `triage → gated`; after the gate, the build ticket carries `build → review → merge`. Update it at each transition — body edits are coordination. This is the one case that genuinely wants a full rewrite rather than an append (you are changing a line *inside* the leading carrier block, and an append cannot reach it), so use the guarded form from "Update fields without claiming" above:
+
+  ```bash
+  HASH=$(mg show <id> --body-hash)
+  mg show <id> --json | jq -r .body > /tmp/<id>-body.md   # edit the stage: line in place
+  mg edit <id> --if-unchanged="$HASH" --body-file /tmp/<id>-body.md
+  ```
+
+  **This bullet read `mg edit <id> --body="..."` followed by "preserve the rest of the body when rewriting" until mg-7537.** The prose named an obligation the command cannot discharge: `--body` replaces the whole body, so "preserve the rest" is work the reader has to do by hand, and getting it wrong is silent and exits 0 — that is the mg-f326 shape, three agents overwriting each other in two hours. `--if-unchanged` is what turns the obligation into a refusal.
 
   **`stage: gated` is a dispatch gate, and pogod enforces it (mg-69b1).** `spawn-polecat` reads the carrier block and refuses a ticket at `stage: gated` with 409, the same way it refuses `--assignee=human` (step 4) — and the stall watch and priority wake stop offering it to you at all. So the one line you already set at the gate is the whole gate: there is no second field to remember here, and no assignee to clear on the way out. It is `gated` alone: `triage`, `build`, `review` and `merge` all dispatch normally, because each of those states is one a {{.Worker}} is supposed to be working in.
 
@@ -1110,9 +1118,17 @@ When diagnosing merge failures, the refinery logs every pipeline step with struc
 - **Service mode, macOS/launchd** — the installed plist is the authority. Both stdout and stderr point at the *same* file:
   ```bash
   plist=$(pogo service status | sed -n 's/^Service installed: //p')
-  grep -A1 StandardOutPath "$plist"      # today: ~/Library/Logs/pogo/pogod.log
-  grep refinery: ~/Library/Logs/pogo/pogod.log | grep <mr-id>
+  log=$(grep -A1 StandardOutPath "$plist" | sed -n 's:.*<string>\(.*\)</string>.*:\1:p')
+  echo "$log"                            # today: ~/Library/Logs/pogo/pogod.log
+  grep refinery: "$log" | grep <mr-id>
   ```
+  **The last line reads `$log`, not a path spelled out here, and that is the
+  whole point of the two lines above it (mg-7537).** It used to grep the literal
+  `~/Library/Logs/pogo/pogod.log` — one line under prose telling you a literal
+  path is the claim that rots. Both halves were correct on the day, so nothing in
+  a line-by-line read of either catches it; whoever followed the prose derived
+  the path and whoever followed the command hardcoded it, and they only disagree
+  once someone moves the log.
 - **Service mode, Linux/systemd** — the generated unit sets no `StandardOutput`, so there is **no log file**; output goes to the journal:
   ```bash
   journalctl --user -u pogo.service | grep refinery: | grep <mr-id>
