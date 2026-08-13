@@ -41,8 +41,15 @@ const mgFixture = "available:\n" +
 // concern" property is enforced rather than assumed.
 func stubMGEnv(t *testing.T) []string {
 	t.Helper()
+	return stubMGEnvWith(t, mgFixture)
+}
+
+// stubMGEnvWith is stubMGEnv over a caller-supplied listing, for tests that
+// need a backlog of their own shape (mg-ce23 needs one big enough to be cut).
+func stubMGEnvWith(t *testing.T, listing string) []string {
+	t.Helper()
 	dir := t.TempDir()
-	script := "#!/bin/sh\nprintf '%s' " + shellQuote(mgFixture) + "\n"
+	script := "#!/bin/sh\nprintf '%s' " + shellQuote(listing) + "\n"
 	path := filepath.Join(dir, "mg")
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatalf("writing stub mg: %v", err)
@@ -184,8 +191,14 @@ func TestStatusAssignee_DeclaresItsScope(t *testing.T) {
 	}
 }
 
-// Without the flag, the frame is byte-identical to what it was before the flag
-// existed — no banner, no "(unfiltered)" suffixes, nothing.
+// Without the flag, the frame carries no filter chrome of any kind — no
+// banner, no "(unfiltered)" suffixes, nothing.
+//
+// The work-item block is written out in full below, plain, rather than built
+// from mgFixture's lines: since mg-ce23 it is rendered rather than passed
+// through (counts line, styling stripped for a non-terminal stdout), and an
+// expectation assembled with the same helpers the renderer uses would be
+// satisfied by a renderer that had stopped working.
 func TestStatus_UnfilteredOutputUnchanged(t *testing.T) {
 	stdout, stderr, code := runPogoEnv(t, stubPogod(t), stubMGEnv(t), "status")
 	if code != 0 {
@@ -197,12 +210,13 @@ func TestStatus_UnfilteredOutputUnchanged(t *testing.T) {
 		"  589d                  polecat   running     pid=222     uptime=5m\n" +
 		"\n" +
 		"=== Work Items ===\n" +
+		"  4 items: 2 available, 2 claimed\n" +
 		"  available:\n" +
-		"  " + strings.Split(mgFixture, "\n")[1] + "\n" +
-		"  " + strings.Split(mgFixture, "\n")[2] + "\n" +
+		"    mg-2a50    task     RED LINE BREACHED [pogo, red-line] human\n" +
+		"    mg-0ffc    task     FOLLOW-UP from mg-4938 [pogo, ops] parked\n" +
 		"  claimed:\n" +
-		"  " + strings.Split(mgFixture, "\n")[4] + "\n" +
-		"  " + strings.Split(mgFixture, "\n")[5] + "\n" +
+		"    mg-589d    task     pogo status takes an optional --assignee filter [pogo, cli]\n" +
+		"    mg-7d62    task     DANIEL DECISION about GH_TOKEN [pogo, ops] human\n" +
 		"\n" +
 		"=== Refinery ===\n"
 	if !strings.HasPrefix(stdout, want) {
