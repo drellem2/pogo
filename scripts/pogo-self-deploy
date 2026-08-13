@@ -3053,6 +3053,197 @@ do_restart() {
     $LAUNCHCTL kickstart -k "$target" || { err "launchctl kickstart failed"; exit 5; }
 }
 
+# ---------------------------------------------------------------------------
+# Spawn accounting (mg-9cc0): how many times did launchd have to start pogod
+# before one of them stayed up?
+# ---------------------------------------------------------------------------
+#
+# WHAT WENT UNRECORDED. On 2026-08-13 at 02:01:19Z — inside the `verify` stage
+# of the run 17 lines of this same log describe as a success — launchd's first
+# post-kickstart spawn of com.pogo.daemon died 29ms in:
+#
+#   'xpcproxy exited due to OS_REASON_CODESIGNING | Launch Constraint Violation
+#    ... ran for 29ms' / 'removing service since it exited with consistent
+#    failure'
+#
+# launchd respawned 10s later, that instance came up, verify_running saw main's
+# revision, and the deploy reported success. Everything after the first spawn is
+# true. The burned spawn appears in NOTHING this project writes: pogo-deploy.log
+# for that window holds `stage: restart`, `stage: verify`, `verified:` and not
+# one word about a restart that took two attempts.
+#
+# The one place it did appear was the unified log, and that is a tier which ages
+# out in hours: it was readable at ~07:30 and gone by ~08:50 the same morning.
+# So the failure was, by mid-morning, not merely unrecorded but unobservable —
+# which is the actual defect. A retry that succeeds is fine. A retry nobody can
+# ever learn about is not.
+#
+# WHY A DELTA AND NOT A READING. launchd does keep durable state: this box still
+# read `last exit reason = OS_REASON_CODESIGNING` on a healthy daemon seven
+# hours later, long after the log line had aged out. But `runs` and
+# `last exit …` are LIFETIME values — they carry no timestamp and no attribution.
+# Printed on their own every night they would say OS_REASON_CODESIGNING forever,
+# about an event nobody could place, which is the mg-fa79 reading of them
+# ("counters are not evidence") and it is correct for a single-sample check.
+#
+# Two samples change what the same fields can answer. `runs` sampled either side
+# of THIS kickstart bounds the spawns to THIS restart, and once the delta says
+# an attempt was burned, `last exit …` is no longer a floating lifetime value:
+# the only instance that has exited since the pre-reading is the burned one, so
+# the record describes it. Measured, not assumed — on this host a job armed to
+# fail its first spawn moved runs 3 -> 5 across one `kickstart -k`, with
+# `last exit code = 1` from the spawn that died and the survivor arriving on
+# launchd's 10s respawn throttle. Same delta, same shape, same 10s as the night
+# this is about.
+#
+# WHY PURE SHELL AND launchctl, WITH NO `pogo` CALL. This recorder must not
+# depend on the artifact under suspicion. report_supervision and
+# report_prompt_refresh both ask the freshly-installed `pogo` binary — sound for
+# what they report, and exactly wrong here: the failure being recorded is a
+# LAUNCH CONSTRAINT VIOLATION against the newly installed binary, so a reader
+# that has to launch that binary can fail for the same reason as the thing it
+# was sent to observe. It would go quiet in precisely the case it exists for.
+# launchctl is the kernel-side bookkeeper and is not the artifact being deployed.
+
+# launchd_runs — parse launchd's lifetime spawn counter from `launchctl print`
+# output on stdin. Echoes the integer, or nothing when the field is absent or
+# unparseable. Pure: no launchctl, no clock. Nothing is echoed as 0 on failure —
+# 0 is a legal counter value and must not double as "could not read".
+launchd_runs() {
+    sed -n 's/^[[:space:]]*runs = \([0-9][0-9]*\)[[:space:]]*$/\1/p' | head -1
+}
+
+# launchd_exit_record — parse launchd's account of why the PREVIOUS instance of
+# the job exited, from `launchctl print` output on stdin. Pure.
+#
+# launchd prints this two different ways and the interesting one is the rarer:
+#
+#   last exit reason = OS_REASON_CODESIGNING   a kernel-side kill (the 08-13 case)
+#   last exit code = 1                         an ordinary nonzero exit
+#
+# Both are reported. `last exit code = (never exited)` is launchd's way of
+# saying there is no record, so it yields empty rather than being passed through
+# as though it named a reason.
+#
+# A `kickstart -k` of a healthy job leaves NO such line at all (measured): the
+# SIGKILL launchd itself issues is not recorded as an exit. So the presence of
+# one of these lines after a restart is already a signal, and its absence
+# alongside a burned spawn is worth printing as an absence rather than skipping.
+launchd_exit_record() {
+    local out reason code
+    out="$(cat)"
+    reason="$(printf '%s' "$out" | sed -n 's/^[[:space:]]*last exit reason = \(.*[^[:space:]]\)[[:space:]]*$/\1/p' | head -1)"
+    code="$(printf '%s' "$out" | sed -n 's/^[[:space:]]*last exit code = \(.*[^[:space:]]\)[[:space:]]*$/\1/p' | head -1)"
+    case "$code" in "(never exited)"|"") code="" ;; esac
+    if [ -n "$reason" ] && [ -n "$code" ]; then
+        printf 'last exit reason = %s (code %s)' "$reason" "$code"
+    elif [ -n "$reason" ]; then
+        printf 'last exit reason = %s' "$reason"
+    elif [ -n "$code" ]; then
+        printf 'last exit code = %s' "$code"
+    fi
+}
+
+# spawn_snapshot — the impure half: one `launchctl print` of the daemon job,
+# rendered as a single tab-separated "RUNS<TAB>EXIT_RECORD" line.
+#
+# RUNS is "?" when the counter could not be read for ANY reason, and the reason
+# travels in the second field so the report can say which kind of blindness it
+# hit. Never fails: an unreadable sample is a thing to report, not a thing to
+# abort a deploy over.
+spawn_snapshot() {
+    local target="gui/$(id -u)/$DAEMON_LABEL" out runs rec
+    if ! out="$($LAUNCHCTL print "$target" 2>&1)"; then
+        printf '?\tlaunchctl print %s failed: %s\n' "$target" "$(printf '%s' "$out" | head -1)"
+        return 0
+    fi
+    runs="$(printf '%s' "$out" | launchd_runs)"
+    rec="$(printf '%s' "$out" | launchd_exit_record)"
+    if [ -z "$runs" ]; then
+        printf '?\tno `runs` field in launchctl print %s\n' "$target"
+        return 0
+    fi
+    printf '%s\t%s\n' "$runs" "$rec"
+}
+
+# format_spawn_report BEFORE AFTER EXIT_RECORD NOTE — render the spawn
+# accounting for one restart. Pure: no launchctl, no daemon, no clock, so the
+# controls can drive every branch without a host. Prefixes each line with
+# "ok: " or "loud: " and lets the caller pick log vs err, on the same split
+# format_prompt_refresh uses.
+#
+# It ALWAYS emits a line. A restart that took exactly one spawn says so — the
+# positive record is what makes its absence mean something, and "no news"
+# is what this defect looked like for the whole of 2026-08-13.
+format_spawn_report() {
+    local before="$1" after="$2" rec="$3" note="$4" delta
+    if [ "$before" = "?" ] || [ "$after" = "?" ]; then
+        echo "loud: restart: SPAWN COUNT UNREADABLE (before=${before} after=${after}) — this deploy cannot say whether the kickstart took one attempt or several. ${note}"
+        return 0
+    fi
+    if [ "$after" -lt "$before" ]; then
+        # launchd resets the counter when a job is unloaded and re-registered,
+        # which is what it does after "removing service since it exited with
+        # consistent failure" — the exact phrase from the 08-13 episode. So a
+        # counter that went BACKWARDS is not a bad reading, it is the loudest
+        # reading this function has.
+        echo "loud: restart: launchd's spawn counter went BACKWARDS (before=${before} after=${after}) — the ${DAEMON_LABEL} job was UNLOADED and re-registered during this restart. That is what launchd does when it removes a service after consistent failure, so treat this as at least one burned spawn and probably several."
+        [ -n "$rec" ] && echo "loud: restart:   launchd's exit record for the job: ${rec}"
+        return 0
+    fi
+    delta=$(( after - before ))
+    case "$delta" in
+        0)
+            # A kickstart always spawns. Zero means the two samples are not of
+            # the same job instance, or the restart did not happen.
+            echo "loud: restart: launchd's spawn counter did NOT move across the kickstart (runs=${before} both sides) — a kickstart always spawns, so either the restart did not reach launchd or these two samples are of different job instances. The revision check below is the one to believe over this."
+            ;;
+        1)
+            echo "ok: restart: 1 spawn, no attempts burned (launchd runs ${before} -> ${after})"
+            ;;
+        *)
+            echo "loud: restart: took ${delta} SPAWNS — $(( delta - 1 )) burned before one stayed up (launchd runs ${before} -> ${after}). The daemon is up and the verifies below still mean what they say; what this line adds is that getting here was not clean."
+            if [ -n "$rec" ]; then
+                echo "loud: restart:   why the burned spawn died — ${rec}. The only instance to have exited since the pre-kickstart reading is that one, so this record is about THIS restart, not a lifetime leftover."
+            else
+                echo "loud: restart:   launchd has NO exit record for the burned spawn, so this deploy can say that an attempt was burned but not why. Check now, before it ages out: log show --last 1h --predicate 'process == \"launchd\"' --info --debug | grep ${DAEMON_LABEL}"
+            fi
+            echo "loud: restart:   IF that reason is OS_REASON_CODESIGNING, this is the mg-9cc0 shape: a Launch Constraint Violation refused the just-installed binary on its first launch and accepted it on the retry. Any other reason is a different failure and worth its own ticket."
+            ;;
+    esac
+}
+
+# report_spawns — the caller. Reads the post-restart sample, formats against the
+# pre-kickstart one captured in cmd_redeploy, and routes each line to log/err.
+#
+# Report-only, and deliberately so: a deploy whose daemon is up, current and
+# serving is a successful deploy even if launchd needed two goes to get there.
+# The defect this closes is silence, not the retry.
+#
+# MUST BE CALLED AFTER verify_running, AND THE REASON IS NOT TIDINESS. The post
+# sample has to be taken once a spawn has STAYED up, or it undercounts. launchd
+# reports a dying spawn as `state = running` for the milliseconds it lives, so
+# anything that waits on launchd's own state field can sample between the burned
+# spawn and its replacement and read a delta of 1 — a burned spawn rendered as a
+# clean restart. The control for this ticket did exactly that on its first run.
+# verify_running is immune because it polls GET /version until a pogod ANSWERS,
+# which a spawn that dies in 29ms never does.
+report_spawns() {
+    local before="$1" snap after rec line
+    snap="$(spawn_snapshot)"
+    after="${snap%%	*}"
+    rec="${snap#*	}"
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        case "$line" in
+            "loud: "*) err "${line#loud: }" ;;
+            *)         log "${line#ok: }" ;;
+        esac
+    done <<EOF
+$(format_spawn_report "$before" "$after" "$rec" "$rec")
+EOF
+}
+
 # format_prompt_refresh — render ONE prompt_refresh event (raw JSONL on stdin)
 # into the lines this deploy should log. Pure: no daemon, no CLI, no clock.
 #
@@ -3453,9 +3644,24 @@ cmd_redeploy() {
     DRAIN_ARMED=false
     trap - INT TERM
     deploy_stage "restart"
+    # The pre-kickstart half of the spawn accounting (mg-9cc0). Taken as late as
+    # possible and unconditionally: `runs` is a lifetime counter, so the delta is
+    # only about this restart if nothing else bounced the job in between.
+    local spawns_pre; spawns_pre="$(spawn_snapshot)"; spawns_pre="${spawns_pre%%	*}"
     do_restart
     deploy_stage "verify"
-    verify_running || exit 8
+    # Report the spawn accounting BEFORE acting on the verify result, not after.
+    # A deploy that burned spawns AND failed to come up is the worst case this
+    # recorder exists for, and `verify_running || exit 8` would have exited
+    # through it without a word — reproducing, in the remedy, the silence the
+    # remedy is for.
+    # `|| verify_rc=$?` rather than a bare call: this script is `set -u` only
+    # today, but under a future `set -e` a bare failing call would abort here —
+    # before the report — which is the same silence by a different route.
+    local verify_rc=0
+    verify_running || verify_rc=$?
+    report_spawns "$spawns_pre"
+    [ "$verify_rc" -eq 0 ] || exit 8
     # BOTH, and in this order. verify_running answers "is a pogod at main's
     # revision answering?"; verify_orchestration answers "did the fleet come
     # back?". Only the second is the question this deploy exists to close, and

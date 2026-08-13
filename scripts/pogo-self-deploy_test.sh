@@ -2813,6 +2813,125 @@ OUT="$(POGO_GOBIN="$SUP_STUB" report_supervision 2>&1)"; RC=$?
     || fail "UNSUPERVISED under-reported: rc=$RC out=$OUT"
 rm -rf "$SUP_STUB"
 
+# --- spawn accounting: launchd_runs / launchd_exit_record / format_spawn_report
+# (mg-9cc0) ------------------------------------------------------------------
+# The night of 2026-08-13 the first post-kickstart spawn of com.pogo.daemon died
+# 29ms in on a Launch Constraint Violation, launchd respawned 10s later, and the
+# deploy reported success. pogo-deploy.log recorded `stage: restart`,
+# `stage: verify`, `verified:` — and nothing about two spawns. These are the
+# controls for the lines that would have said so.
+
+# Verbatim `launchctl print gui/501/com.pogo.daemon` fields as this host emits
+# them. The indentation is a TAB, which is what the parsers have to cope with.
+PRINT_HEALTHY=$'gui/501/com.pogo.daemon = {\n\tstate = running\n\truns = 24991\n\tpid = 77880\n\tlast exit reason = OS_REASON_CODESIGNING\n}'
+PRINT_CODE=$'gui/501/com.pogo.p9cc0probe = {\n\tstate = running\n\truns = 5\n\tpid = 28258\n\tlast exit code = 1\n}'
+PRINT_NEVER=$'gui/501/x = {\n\tstate = running\n\truns = 1\n\tlast exit code = (never exited)\n}'
+
+[ "$(printf '%s' "$PRINT_HEALTHY" | launchd_runs)" = "24991" ] \
+    && pass "launchd_runs reads the lifetime spawn counter off real launchctl output" \
+    || fail "launchd_runs: got '$(printf '%s' "$PRINT_HEALTHY" | launchd_runs)'"
+# Empty, NOT 0. Zero is a legal counter value; conflating it with "unreadable"
+# would let a blind reading render as a clean 1-spawn restart.
+[ -z "$(printf '%s' 'gui/501/x = {\n\tstate = running\n}' | launchd_runs)" ] \
+    && pass "launchd_runs yields EMPTY (never 0) when the field is absent" \
+    || fail "launchd_runs invented a value for absent field"
+
+[ "$(printf '%s' "$PRINT_HEALTHY" | launchd_exit_record)" = "last exit reason = OS_REASON_CODESIGNING" ] \
+    && pass "launchd_exit_record reads the kernel-side kill reason (the 08-13 shape)" \
+    || fail "launchd_exit_record reason: got '$(printf '%s' "$PRINT_HEALTHY" | launchd_exit_record)'"
+[ "$(printf '%s' "$PRINT_CODE" | launchd_exit_record)" = "last exit code = 1" ] \
+    && pass "launchd_exit_record reads an ordinary nonzero exit too" \
+    || fail "launchd_exit_record code: got '$(printf '%s' "$PRINT_CODE" | launchd_exit_record)'"
+# "(never exited)" is launchd saying there is NO record. Passing it through
+# would dress an absence up as a named reason.
+[ -z "$(printf '%s' "$PRINT_NEVER" | launchd_exit_record)" ] \
+    && pass "launchd_exit_record treats '(never exited)' as no record, not as a reason" \
+    || fail "launchd_exit_record passed through '(never exited)'"
+
+# THE ACCEPTANCE CASE: a kickstart that took two spawns says so, with the reason.
+OUT="$(format_spawn_report 24990 24992 "last exit reason = OS_REASON_CODESIGNING" "")"
+{ grep -q '^loud: ' <<<"$OUT" \
+  && grep -q '2 SPAWNS' <<<"$OUT" \
+  && grep -q '1 burned' <<<"$OUT" \
+  && grep -q 'OS_REASON_CODESIGNING' <<<"$OUT"; } \
+    && pass "a 2-spawn kickstart is reported LOUDLY, with the burned count and launchd's exit reason" \
+    || fail "burned-spawn report is missing something: $OUT"
+# The delta is what makes the lifetime exit record attributable to THIS restart.
+# If the report does not say that, a reader is entitled to dismiss the reason as
+# a leftover — which is exactly how mg-fa79 (correctly) treats a single sample.
+grep -q 'not a lifetime leftover' <<<"$OUT" \
+    && pass "the report says WHY the exit record belongs to this restart" \
+    || fail "report does not justify attributing the exit record to this restart: $OUT"
+
+# A burned spawn with no exit record must still be loud, and must hand over a
+# command that can still find the evidence — before the log tier ages out.
+OUT="$(format_spawn_report 10 13 "" "")"
+{ grep -q '3 SPAWNS' <<<"$OUT" && grep -q '2 burned' <<<"$OUT" && grep -q 'NO exit record' <<<"$OUT" && grep -q 'log show' <<<"$OUT"; } \
+    && pass "burned spawns with no exit record: still loud, and names the query that can still see it" \
+    || fail "no-exit-record branch under-reports: $OUT"
+
+# The clean case must produce a POSITIVE record. Silence here is what made the
+# 08-13 failure indistinguishable from a clean night.
+OUT="$(format_spawn_report 100 101 "" "")"
+{ [ "$(grep -c . <<<"$OUT")" = 1 ] && grep -q '^ok: ' <<<"$OUT" && grep -q '1 spawn, no attempts burned' <<<"$OUT"; } \
+    && pass "a clean restart still writes a line — 'no news' is the state this defect looked like" \
+    || fail "clean case should be exactly one quiet positive line, got: $OUT"
+# ... and it must NOT parrot the lifetime exit reason, which on this box would
+# read OS_REASON_CODESIGNING every night forever about an unplaceable event.
+OUT="$(format_spawn_report 100 101 "last exit reason = OS_REASON_CODESIGNING" "")"
+grep -qv 'OS_REASON' <<<"$(grep '^ok: ' <<<"$OUT")" && ! grep -q 'OS_REASON' <<<"$OUT" \
+    && pass "a clean restart does NOT print the lifetime exit reason (it would be unattributable noise)" \
+    || fail "clean case leaked the lifetime exit reason: $OUT"
+
+# Counter going BACKWARDS = the job was unloaded and re-registered, which is
+# what launchd does after "removing service since it exited with consistent
+# failure" — the other half of the 08-13 log quote.
+OUT="$(format_spawn_report 500 3 "last exit reason = OS_REASON_CODESIGNING" "")"
+{ grep -q '^loud: ' <<<"$OUT" && grep -qi 'backwards' <<<"$OUT" && grep -qi 'unloaded' <<<"$OUT"; } \
+    && pass "a counter that went backwards is read as an unload/re-register, not as a bad sample" \
+    || fail "backwards-counter branch: $OUT"
+
+# Unreadable must be LOUD and must say it established nothing. A recorder that
+# goes quiet when it cannot see is the defect one layer up.
+for pair in "? 5" "5 ?" "? ?"; do
+    set -- $pair
+    OUT="$(format_spawn_report "$1" "$2" "" "launchctl print failed")"
+    { grep -q '^loud: ' <<<"$OUT" && grep -q 'UNREADABLE' <<<"$OUT"; } \
+        || { fail "unreadable pair ($1,$2) was not loud: $OUT"; continue; }
+done
+pass "an unreadable spawn count is reported LOUDLY as unreadable, never as a clean restart"
+
+# A kickstart always spawns; a zero delta means the samples are not comparable.
+OUT="$(format_spawn_report 7 7 "" "")"
+{ grep -q '^loud: ' <<<"$OUT" && grep -qi 'did NOT move' <<<"$OUT"; } \
+    && pass "a zero delta across a kickstart is flagged rather than passed off as clean" \
+    || fail "zero-delta branch: $OUT"
+
+# PLACEMENT. report_spawns must run BEFORE cmd_redeploy acts on verify_running's
+# result. `verify_running || exit 8` would have exited straight through the
+# worst case — spawns burned AND the daemon never came up — without a word,
+# which is the very silence this ticket is about.
+SPAWN_LINE="$(grep -n '^    report_spawns "\$spawns_pre"$' "$HERE/pogo-self-deploy" | cut -d: -f1)"
+EXIT8_LINE="$(grep -n '^    \[ "\$verify_rc" -eq 0 \] || exit 8$' "$HERE/pogo-self-deploy" | cut -d: -f1)"
+PRE_LINE="$(grep -n 'spawns_pre="\$(spawn_snapshot)"' "$HERE/pogo-self-deploy" | cut -d: -f1)"
+RESTART_LINE="$(grep -n '^    do_restart$' "$HERE/pogo-self-deploy" | cut -d: -f1)"
+{ [ -n "$SPAWN_LINE" ] && [ -n "$EXIT8_LINE" ] && [ "$SPAWN_LINE" -lt "$EXIT8_LINE" ]; } \
+    && pass "report_spawns runs before the exit-8 path — a failed verify still records its spawn count" \
+    || fail "report_spawns (${SPAWN_LINE:-?}) does not precede exit 8 (${EXIT8_LINE:-?})"
+{ [ -n "$PRE_LINE" ] && [ -n "$RESTART_LINE" ] && [ "$PRE_LINE" -lt "$RESTART_LINE" ]; } \
+    && pass "the pre-kickstart sample is taken before do_restart — otherwise there is no delta" \
+    || fail "pre-sample (${PRE_LINE:-?}) does not precede do_restart (${RESTART_LINE:-?})"
+
+# THE REMEDY MUST NOT BE SUBJECT TO ITS OWN DEFECT. The failure being recorded
+# is the newly-installed binary being REFUSED AT LAUNCH. A recorder that has to
+# launch that binary can fail for the same reason as the thing it observes, and
+# would go quiet exactly when it is needed. report_supervision and
+# report_prompt_refresh legitimately call the CLI; this path must not.
+SPAWN_BODY="$(sed -n '/^spawn_snapshot() {/,/^}/p;/^report_spawns() {/,/^}/p;/^format_spawn_report() {/,/^}/p;/^launchd_runs() {/,/^}/p;/^launchd_exit_record() {/,/^}/p' "$HERE/pogo-self-deploy")"
+{ [ -n "$SPAWN_BODY" ] && ! grep -q 'installed_bin\|\$cli\|pogo events\|pogo service' <<<"$SPAWN_BODY"; } \
+    && pass "the spawn recorder never invokes the just-installed pogo binary — the artifact under suspicion" \
+    || fail "spawn recorder depends on the deployed binary it is meant to observe"
+
 echo ""
 PASS_COUNT=$(grep -c '^PASS:' "$RESULTS_FILE" 2>/dev/null || true)
 FAIL_COUNT=$(grep -c '^FAIL:' "$RESULTS_FILE" 2>/dev/null || true)

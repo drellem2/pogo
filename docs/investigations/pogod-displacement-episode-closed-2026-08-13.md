@@ -133,6 +133,44 @@ in-memory buffer. **One occurrence is a floor, not a rate.** Whether this
 happens on every deploy, occasionally, or happened once is not established here.
 It needs a persistent record, which is a separate piece of work.
 
+### That separate piece of work: mg-9cc0 (closed)
+
+The bound above was the whole of it — the record aged out while the ticket was
+still open. A re-query at 5.7h returned zero, and so did its positive control,
+so that zero established nothing in either direction.
+
+Two things are now settled that were not when the paragraph above was written.
+
+**The event is corroborated by durable state, independently of the unified log.**
+At 08:47Z — 6.75h after the event, and after the log tier had gone blind —
+`launchctl print gui/501/com.pogo.daemon` still read `pid = 77880`,
+`runs = 24991` and `last exit reason = OS_REASON_CODESIGNING`. pid 77880 is the
+second spawn named above. launchd does *not* record an exit for the SIGKILL it
+issues itself during `kickstart -k` (measured on a sandbox job), so that field
+describes an instance that died on its own — and the only candidate is pid
+77764.
+
+**`runs` is a per-spawn counter, which is what makes a persistent record
+possible.** Measured on a sandbox LaunchAgent armed to fail its first spawn:
+`runs` moved 2 -> 4 across a single `launchctl kickstart -k`, with
+`last exit code = 1` from the spawn that died and the survivor arriving on
+launchd's **10s** respawn throttle — the same 10s gap as pid 77764 -> 77880.
+
+So `scripts/pogo-self-deploy` now samples `runs` either side of its kickstart
+and writes the count to `pogo-deploy.log`: a clean night says `restart: 1 spawn,
+no attempts burned`, a night like this one says `restart: took 2 SPAWNS — 1
+burned before one stayed up`, with launchd's reason. The delta is what the
+single-sample reading could not supply — it bounds the spawns to *this* restart
+and, in doing so, makes the otherwise-floating `last exit …` field attributable.
+The reading is taken in pure shell over `launchctl`, never through the
+just-installed `pogo` binary, because the failure being recorded is that binary
+being refused at launch.
+
+**Still not established, and now recordable rather than guessed:** the rate.
+This is the instrument that will answer it, one deploy at a time. The mechanism —
+why AMFI refused the first spawn and accepted the second, 54 seconds after
+`go install` replaced the binary at that path — also remains open.
+
 ## What was shipped
 
 `pogo service supervision` (and the same reading inside `pogo service status`,
