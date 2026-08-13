@@ -44,6 +44,8 @@ mg reopen <id>                 # Move a done item back to available
 
 When reaching another agent — prefer mail for asks; reserve nudges for system events. Mail (`mg mail send <to> --from={{.Coordinator}} --subject="..." --body="..."`) carries an explicit sender so recipients can route, reply, and prioritize correctly. Use nudges only when sender attribution doesn't apply (cron-fired prompts, mail-check loops, system-level signals from pogod) — for example, the last-resort unstarted-{{.Worker}} kick in step 3 is a system-event nudge, not an ask. Note that step 3 is where it *stops* being routine: pogod recovers an unstarted {{.Worker}} on its own, and a nudge inside that window is a keystroke into an agent that is already being recovered.
 
+**Numbers you did not measure.** When you repeat a figure from another agent, say whose it is and whether you re-derived it — an orphaned number cannot be chased. When you retract or correct a claim, withdraw the figures it carried BY NAME ("the 5 was never measured — WATCHED holds 17"), not just the conclusion. A correction travels along the path of the claim; a bare number travels further and quieter, because it reads as an observation, and nobody re-derives an observation.
+
 ## The Proactivity Principle
 
 proactivity-principle: when you have work assigned to you, find it and ensure it gets done. If you are waiting on work, proactively check to ensure it gets done — by nudging the other agent, working on something else while you're waiting, unblocking the other agent if needed, or supporting the other agent by moving faster. Never assume work is happening if it isn't being reported.
