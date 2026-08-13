@@ -22,13 +22,22 @@ import (
 	"testing"
 
 	"github.com/drellem2/pogo/internal/agent"
+	"github.com/drellem2/pogo/internal/testtmp"
 )
 
 // pogoBin is the CLI binary compiled once in TestMain and shared by all tests.
 var pogoBin string
 
 func TestMain(m *testing.M) {
-	dir, err := os.MkdirTemp("", "pogo-cli-test")
+	// testtmp, not os.MkdirTemp: the RemoveAll calls below are the SUCCESS and
+	// build-failure paths, and neither runs when this process does not reach
+	// them — a panicking test, a -timeout expiry (Go implements it by
+	// panicking), or a test binary killed by the gate or by `pogo agent stop`.
+	// That is precisely when a suite leaks, and it is when suites are run most
+	// (mg-60eb). testtmp nests the directory under one swept root and reaps it
+	// by pid ownership, so the failure path is covered by construction rather
+	// than by this function being reached.
+	dir, err := testtmp.Dir("pogocli")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "temp dir: %v\n", err)
 		os.Exit(1)

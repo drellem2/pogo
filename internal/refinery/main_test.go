@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/drellem2/pogo/internal/events"
+	"github.com/drellem2/pogo/internal/testtmp"
 )
 
 // testEventLogPath is the package-wide default events.log path used by every
@@ -42,7 +43,15 @@ func TestMain(m *testing.M) {
 	// semantics set it explicitly via t.Setenv.
 	os.Unsetenv("POGO_HOME")
 
-	dir, err := os.MkdirTemp("", "refinery-events-*")
+	// testtmp, not os.MkdirTemp: the RemoveAll after m.Run() below is the
+	// path where this process gets to the bottom of TestMain, and a suite that
+	// panics, overruns its -timeout (Go implements that by panicking) or is
+	// killed never does. That is the failure path, and it is the one that
+	// matters — a helper that cleans up only when the run went well leaks
+	// exactly when tests are failing (mg-60eb). testtmp nests the directory
+	// under one swept root and reaps it by pid ownership, so removal no longer
+	// depends on this function being reached.
+	dir, err := testtmp.Dir("refineryevents")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "refinery TestMain: mkdir temp: %v\n", err)
 		os.Exit(1)

@@ -38,7 +38,20 @@ mkdir -p _testdata/b-service/.git
 # go-test-budget.sh sets the budget AND classifies the overrun, so a package
 # that ran long is reported as a package that ran long. See that file's header
 # for why 20m and not the 40m the issue suggests.
-gate_step "Testing Go packages" bash scripts/go-test-budget.sh ./...
+# Wrapped in the $TMPDIR leak guard (mg-60eb). The wrapper pins $TMPDIR to a
+# private directory for the duration, reports anything the run abandoned there
+# by name, and removes it. Two things that were separate are now the same thing:
+# the leak measurement no longer runs against a hand-picked slice of packages —
+# it rides on the whole-tree run the gate already pays for, so a leak in a
+# package nobody thought to list fails here on the day it is written.
+#
+# mg-de3c's slice was "every internal/testtmp caller", i.e. the packages its own
+# fix had touched, so its coverage was a property of the fix rather than of the
+# tree. Two TestMains outside it went on leaking one directory per run until
+# $TMPDIR reached ~5,000 fixture directories, the volume hit 100%, and this file
+# died with Errno 28 in the refinery gate — failing every merge on the host and
+# presenting as a defect in whichever branch happened to be running.
+gate_step "Testing Go packages" bash scripts/tmpdir-leak-guard.sh bash scripts/go-test-budget.sh ./...
 
 # The $TMPDIR leak guard (mg-de3c). It belongs in the gate rather than on
 # demand because the defect it measures is the one that BROKE the gate: at 255

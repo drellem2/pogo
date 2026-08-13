@@ -59,6 +59,7 @@ package testtmp
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -164,7 +165,7 @@ func Dir(purpose string) (string, error) {
 		if !os.IsExist(err) {
 			return "", fmt.Errorf("testtmp: create %s: %w", dir, err)
 		}
-		if err := os.RemoveAll(dir); err != nil {
+		if err := RemoveAll(dir); err != nil {
 			return "", fmt.Errorf("testtmp: clear a recycled pid's stale %s: %w", dir, err)
 		}
 		if err := os.Mkdir(dir, 0o700); err != nil {
@@ -212,6 +213,45 @@ func pidAlive(pid int) bool {
 	return err == nil || err == syscall.EPERM
 }
 
+// RemoveAll is os.RemoveAll with the one retry that makes it true of the
+// trees this package holds.
+//
+// A sandbox root here is a fake $HOME, and any test in it that shells out to
+// `go build` populates $HOME/go/pkg/mod. **Go writes its module cache
+// read-only** — 0444 files inside 0555 directories — so os.RemoveAll returns
+// EACCES and stops. Reap swallowed that error, which is correct for a sweep that
+// must never fail a test and completely wrong as a reclaim: measured on this box
+// on 2026-08-13, $TMPDIR/pogo-test-tmp held **148 sandbox-agent.* roots and 120
+// MB**, every one of them owned by a long-dead pid, every one of them selected
+// for removal on every sweep since mg-de3c, and none of them removable. The nest
+// was growing without bound while the guard for it reported steady, because the
+// packages in that guard's slice do not build anything and so never write a
+// module cache (mg-60eb).
+//
+// So: try the cheap removal, and only on failure walk the tree restoring owner
+// write permission before trying once more. The chmod is confined to a path this
+// package created and has already decided to delete, and a directory is given
+// 0700 rather than 0600 because the walk still has to descend through it.
+func RemoveAll(path string) error {
+	err := os.RemoveAll(path)
+	if err == nil {
+		return nil
+	}
+	filepath.WalkDir(path, func(p string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			// Unreadable is not a reason to abandon the rest of the tree.
+			return nil
+		}
+		if d.IsDir() {
+			os.Chmod(p, 0o700)
+		} else {
+			os.Chmod(p, 0o600)
+		}
+		return nil
+	})
+	return os.RemoveAll(path)
+}
+
 // Reap removes entries in root that no live process owns — see the package doc
 // for the rule and why it is ownership rather than age. Errors are swallowed: a
 // sweep that cannot delete something has lost nothing a caller can act on, and
@@ -229,7 +269,7 @@ func Reap(root string) {
 	for _, e := range entries {
 		if pid, ok := ownerPID(e.Name()); ok {
 			if !pidAlive(pid) {
-				os.RemoveAll(filepath.Join(root, e.Name()))
+				RemoveAll(filepath.Join(root, e.Name()))
 			}
 			continue
 		}

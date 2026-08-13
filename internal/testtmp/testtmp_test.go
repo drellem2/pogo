@@ -261,3 +261,83 @@ func deadPID(t *testing.T) int {
 	}
 	return pid
 }
+
+// TestReapRemovesAReadOnlyModuleCache is the case the sweep was silently losing
+// (mg-60eb).
+//
+// A sandbox root under this package is a fake $HOME, and a test in it that
+// shells out to `go build` populates $HOME/go/pkg/mod. Go writes that cache
+// READ-ONLY — 0444 files inside 0555 directories — so os.RemoveAll stops at the
+// first one with EACCES. Reap swallows errors, which it must (a sweep may never
+// be the reason a test fails), and the two together made an unremovable entry
+// indistinguishable from a reclaimed one: 148 such roots and 120 MB were sitting
+// in $TMPDIR/pogo-test-tmp on this box, every one of them selected for removal
+// on every sweep since mg-de3c and removed by none of them.
+//
+// The shape is reproduced exactly rather than approximated — 0444 file, 0555
+// parent — because the parent's missing write bit is what actually blocks the
+// unlink, and a fixture with only the file made read-only passes against the
+// unfixed code.
+func TestReapRemovesAReadOnlyModuleCache(t *testing.T) {
+	root := t.TempDir()
+	dead := filepath.Join(root, entryName("sandbox-agent", deadPID(t), 1))
+	modcache := filepath.Join(dead, "home", "go", "pkg", "mod", "example.com", "dep@v1.0.0")
+	if err := os.MkdirAll(modcache, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(modcache, "dep.go")
+	if err := os.WriteFile(file, []byte("package dep\n"), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(modcache, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	// t.TempDir's own cleanup hits the same wall, so put the bits back whatever
+	// this test concludes.
+	t.Cleanup(func() {
+		os.Chmod(modcache, 0o700)
+		os.Chmod(file, 0o600)
+	})
+
+	// The premise, asserted rather than assumed: if a plain RemoveAll could
+	// clear this fixture, the test would pass against the unfixed sweep and
+	// prove nothing.
+	if err := os.RemoveAll(dead); err == nil {
+		t.Skip("this runner's os.RemoveAll clears a read-only tree; the case cannot be constructed here")
+	}
+
+	Reap(root)
+
+	if _, err := os.Stat(dead); !os.IsNotExist(err) {
+		t.Fatalf("Reap kept a dead owner's read-only module cache (%s): stat err = %v\n"+
+			"An entry the sweep cannot remove is one it reports as reclaimed forever.", dead, err)
+	}
+}
+
+// TestRemoveAllLeavesPermissionsAloneWhenItDoesNotHaveTo. The chmod is a
+// last-resort widening of permissions inside a tree already condemned, and it
+// must not be the ordinary path — a helper that chmods first and asks later is
+// one nobody can reason about at a call site.
+func TestRemoveAllLeavesPermissionsAloneWhenItDoesNotHaveTo(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "plain")
+	if err := os.MkdirAll(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sibling := filepath.Join(root, "sibling")
+	if err := os.MkdirAll(sibling, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(sibling, 0o700) })
+
+	if err := RemoveAll(target); err != nil {
+		t.Fatalf("RemoveAll(%s) = %v, want nil", target, err)
+	}
+	fi, err := os.Stat(sibling)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o500 {
+		t.Errorf("RemoveAll widened permissions outside its argument: sibling is %v, want 0500", fi.Mode().Perm())
+	}
+}
