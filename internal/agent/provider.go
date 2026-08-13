@@ -119,6 +119,37 @@ type Provider struct {
 	// behaviour; absence is never read as "no failures".
 	SessionTranscriptGlob func(workdir string) string
 
+	// AgentMemoryStoreIndex returns the home-relative path of the auto-memory
+	// index this harness would use for an agent running in workdir (e.g. Claude
+	// Code's ".claude/projects/<slug-of-workdir>/memory/MEMORY.md"), or "" when
+	// workdir is unknown or the harness has no such store.
+	//
+	// It answers a DIFFERENT question from MemoryIndexGlobs, and the difference
+	// is the whole reason it exists. MemoryIndexGlobs enumerates every store on
+	// the machine, so it can say "this index is over the cap" but never "this
+	// index belongs to nobody". This one goes the other way — from an agent's
+	// working directory to the store that agent's sessions land in — which is
+	// what makes it possible to ask whether a store still has a reader.
+	//
+	// Why that question is worth a field. The store is keyed on the session's
+	// PROJECT, and for a directory inside a git repo the project is the repo,
+	// not the directory. So making a parent directory a git repo silently
+	// re-keys every agent underneath it onto one shared store, and the notes in
+	// the old per-agent stores stop being anybody's. That happened here on
+	// 2026-07-07 when ~/.pogo became a repo: 153 notes across five stores went
+	// unreachable and it took five weeks and a duplicated investigation to
+	// notice (mg-a9b3). Nothing was misconfigured and no write ever failed.
+	//
+	// nil means "this harness has no per-agent memory store", a positive
+	// statement rather than an omission. The encoding is harness-internal and
+	// pogo does not own it, so it is declared per-provider precisely so that
+	// when the harness changes it the blast radius is one function — and the
+	// failure mode is a constructed path that matches nothing. `pogo
+	// check-memdirs` treats that case as "measured nothing" (exit 3) rather
+	// than as a clean bill of health, because a check whose path model has
+	// stopped matching must not report all-clear.
+	AgentMemoryStoreIndex func(workdir string) string
+
 	// SubmitReceiptHook installs this harness's prompt-submission hook into an
 	// agent's working directory. dir is that directory; hookCommand is the
 	// command line the harness should run on every submitted prompt (pogod
